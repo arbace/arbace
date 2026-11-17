@@ -12,7 +12,8 @@
 
   `print-inst` gives the line llvm-mc's asm streamer writes for the instruction (without the encoding's comment), e.g.
   \"\\tlock\\t\\taddl\\t$1, (%rax)\"; an operand it cannot print yet throws {:print/unsupported CLASS}."
-  (:require [arbace.string :as str]))
+  (:require [arbace.asm.amd64.asm :as x]
+            [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
 
@@ -525,3 +526,269 @@
   (EmitAnyX86InstComments, the families of shuffle-comment), else an immediate's bits (printOperand)."
   [^String inst mi]
   (or (shuffle-comment inst mi) (when-not *intel* (imm-comment inst mi))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the asm streamer's lines for the statements that are no instruction (MCAsmStreamer.cpp: emitLabel, emitAssignment,
+;; emitSymbolAttribute, emitELFSize, emitValueImpl, emitIntValue, emitBytes, PrintQuotedString, emitFill,
+;; emitAlignmentDirective, emitCodeAlignment, switchSection, the emitCFI* family and EmitRegisterName, emitRelocDirective;
+;; X86WinCOFFTargetStreamer.cpp's emitCode16/32/64; MCAsmInfo.h's, MCAsmInfoELF.cpp's, MCAsmInfoCOFF.cpp's and
+;; MCAsmInfoDarwin.cpp's directives; MCContext.cpp's temporary symbols (createTempSymbol, createNamedTempSymbol, the
+;; directional local labels of getDirectionalLocalSymbol and createDirectionalLocalSymbol); AsmParser.cpp's parse of the
+;; directives (parseDirectiveValue, parseDirectiveAscii, parseDirectiveAlign, parseExpression's folding, `.` a temporary
+;; label), X86AsmParser.cpp's ParseDirectiveCode), as llvm-mc writes them. `stream-statement` threads the streamer's
+;; state through a file: a directive it has not ported gives no lines but `:unported`.
+
+;; the object format of the run's triple (MCAsmInfo's kind): :elf, :macho or :coff, and whether it is x86-64's
+(def ^:dynamic *obj* :elf)
+(def ^:dynamic *x86-64* true)
+;; the run's -x86-asm-syntax=intel (X86MCAsmInfo's AssemblerDialect, the register expression's `%`)
+(def ^:dynamic *mai-intel* false)
+
+(defn obj-of
+  "The object format of a triple (Triple's default object format for x86): MachO for Apple's, COFF for Windows' and UEFI's,
+  else ELF."
+  [^String triple]
+  (cond (nil? triple) :elf
+        (re-find #"apple|darwin|macos|ios" triple) :macho
+        (re-find #"win32|windows|mingw|cygwin|msvc|uefi" triple) (if (re-find #"-elf$" triple) :elf :coff)
+        :else :elf))
+
+(defn- temp-prefix
+  "MCAsmInfo's InternalSymbolPrefix: `.L` for ELF and x86-64's COFF, else `L`."
+  ^String [] (if (or (= *obj* :elf) (and (= *obj* :coff) *x86-64*)) ".L" "L"))
+
+(defn streamer-init
+  "The streamer's state at the file's start: the text section (initSections), the mode, no temporary symbol made yet."
+  [^long mode] {:sec ".text" :mode mode :tmp 0 :inst {} :names {}})
+
+(defn- new-temp [st] [(update st :tmp inc) (symbol (str (temp-prefix) "tmp" (:tmp st)))])
+
+(defn- directional
+  "A directional local label's temporary symbol: `Nf` the next instance's, `Nb` the current one's, a definition `N:` a new
+  instance (getOrCreateDirectionalLocalSymbol names it when first asked)."
+  [st n dir]
+  (let [n (long n) cur (long (get-in st [:inst n] 0))
+        [st i] (case dir :f [st (inc cur)] :b [st cur] :def [(assoc-in st [:inst n] (inc cur)) (inc cur)])]
+    (if-let [s (get-in st [:names [n i]])]
+      [st s]
+      (let [[st s] (new-temp st)] [(assoc-in st [:names [n i]] s) s]))))
+
+(defn resolve-temps
+  "The statement `f` with its directional labels and `.` as the temporary symbols the parser makes for them, in parse order:
+  [STATE FORM LABELS], LABELS the temporaries `.` emitted before the statement. With `dots?` false a `.` keeps its form
+  (only its symbol counted)."
+  [st f dots?]
+  (let [labels (volatile! []) stv (volatile! st)
+        walk (fn walk [x]
+               (cond
+                 (and (seq? x) (= 'local (first x)) (#{:f :b} (nth x 2 nil)))
+                 (let [[s n] (directional @stv (second x) (nth x 2))] (vreset! stv s) n)
+                 (and (seq? x) (= 'asm/dot (first x)))
+                 (let [[s n] (new-temp @stv)] (vreset! stv s) (vswap! labels conj n) (if dots? n x))
+                 (seq? x) (apply list (map walk x))
+                 (vector? x) (mapv walk x)
+                 (map? x) (into (empty x) (map (fn [[k v]] [k (walk v)]) x))
+                 :else x))
+        f' (walk f)]
+    [@stv f' @labels]))
+
+(defn- label-line ^String [s] (str (expr-text s) ":"))
+
+;; X86RegisterInfo.td's DwarfRegNum, the 64-bit flavour (EH and debug alike), for the registers MRI's getLLVMRegNum maps
+;; back to one register (YMM and ZMM are DwarfRegAlias of XMM; 49 is EFLAGS' and RFLAGS': left out)
+(def ^:private dwarf64
+  (merge (zipmap (range 0 17) ["rax" "rdx" "rcx" "rbx" "rsi" "rdi" "rbp" "rsp" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15" "rip"])
+         (zipmap (range 17 33) (map #(str "xmm" %) (range 16)))
+         (zipmap (range 33 41) (cons "st" (map #(str "st(" % ")") (range 1 8))))
+         (zipmap (range 41 49) (map #(str "mm" %) (range 8)))
+         {50 "es" 51 "cs" 52 "ss" 53 "ds" 54 "fs" 55 "gs" 58 "fs.base" 59 "gs.base"}
+         (zipmap (range 67 83) (map #(str "xmm" %) (range 16 32)))
+         (zipmap (range 118 126) (map #(str "k" %) (range 8)))
+         (zipmap (range 130 146) (map #(str "r" %) (range 16 32)))))
+
+(def ^:private dwarf64-of
+  (merge (into {} (map (fn [[k v]] [v k]) dwarf64))
+         (into {} (for [i (range 32) p ["ymm" "zmm"]] [(str p i) (if (< i 16) (+ 17 i) (+ 51 i))]))))
+
+(defn- cfi-reg
+  "EmitRegisterName: the DWARF number's register (getLLVMRegNum, printRegName), else the number; a register operand is
+  first its DWARF number (parseRegisterOrRegisterNumber's getDwarfRegNum). nil when not ported (another mode's numbering)."
+  [st r]
+  (when (= 64 (long (:mode st)))
+    (let [n (cond (integer? r) (long r)
+                  (and (seq? r) (= 'pct (first r))) (get dwarf64-of (str/lower-case (str (second r))))
+                  :else nil)]
+      (when n
+        (if-let [nm (get dwarf64 n)] (if *intel* nm (str "%" nm)) (str n))))))
+
+(defn- value-text
+  "A value as the parser leaves it and MCExpr::print writes it: folded to its integer when absolute (parseExpression), a
+  register expression `%reg` (X86MCExpr), else the expression."
+  [e syms]
+  (let [v (x/const-value e syms)]
+    (cond v (str v)
+          (and (seq? e) (= 'pct (first e))) (str (when-not *mai-intel* "%") (second e))
+          :else (expr-text e))))
+
+(defn- quoted
+  "PrintQuotedString."
+  ^String [^String s]
+  (let [b (StringBuilder. "\"")]
+    (doseq [c s :let [c (bit-and (int c) 0xff)]]
+      (cond (or (= c 34) (= c 92)) (.append b (str "\\" (char c)))
+            (<= 0x20 c 0x7e) (.append b (char c))
+            :else (.append b (case c 8 "\\b" 12 "\\f" 10 "\\n" 13 "\\r" 9 "\\t"
+                                   (str "\\" (bit-and (bit-shift-right c 6) 7) (bit-and (bit-shift-right c 3) 7) (bit-and c 7))))))
+    (.append b "\"")
+    (str b)))
+
+(defn- bytes-lines
+  "emitBytes: a string of more than one byte as `.asciz` (a last NUL) or `.ascii`, a single byte as `.byte` (the target
+  streamer's emitRawBytes)."
+  [^String s]
+  (cond (empty? s) []
+        (= 1 (count s)) [(str "\t.byte\t" (bit-and (int (.charAt s 0)) 0xff))]
+        (= \u0000 (.charAt s (dec (count s)))) [(str "\t.asciz\t" (quoted (subs s 0 (dec (count s)))))]
+        :else [(str "\t.ascii\t" (quoted s))]))
+
+(def ^:private data-sizes
+  {"byte" 1 "1byte" 1 "dc.b" 1 "short" 2 "word" 2 "value" 2 "2byte" 2 "hword" 2 "dc.w" 2 "dc" 2
+   "long" 4 "int" 4 "4byte" 4 "dc.l" 4 "quad" 8 "8byte" 8 "dc.a" nil})
+
+(defn- data-line
+  "emitIntValue (a constant, checked in range by parseDirectiveValue) or emitValueImpl: the size's directive and the value;
+  32-bit Darwin's 8 bytes broken into two `.long` (no 64-bit directive)."
+  [^long size e syms]
+  (let [v (x/const-value e syms)
+        dir (case size 1 "\t.byte\t" 2 "\t.short\t" 4 "\t.long\t" 8 (when-not (and (= *obj* :macho) (not *x86-64*)) "\t.quad\t"))]
+    (cond
+      (and v (not (or (<= (- (bit-shift-left 1 (dec (* 8 size)))) (long v) (dec (bit-shift-left 1 (* 8 size)))) (= size 8))))
+      nil
+      (and (nil? dir) v) [(str "\t.long\t" (bit-and (long v) 0xffffffff)) (str "\t.long\t" (bit-and (unsigned-bit-shift-right (long v) 32) 0xffffffff))]
+      (nil? dir) nil
+      v [(str dir (long v))]
+      :else [(str dir (value-text e syms))])))
+
+(defn- section-kind [^String s] (cond (= s ".text") :text (#{".data" ".bss"} s) :data :else nil))
+
+(defn- switch-lines
+  "switchSection: a section other than the current one written (printSwitchToSection: ELF's and COFF's .text, .data and
+  .bss without `.section`); nil for another (not ported)."
+  [st ^String s]
+  (cond (= s (:sec st)) [st []]
+        (and (#{:elf :coff} *obj*) (#{".text" ".data" ".bss"} s)) [(assoc st :sec s) [(str "\t" s)]]
+        :else nil))
+
+(defn- align-lines
+  "parseDirectiveAlign then emitCodeAlignment (a code section without a fill) or emitValueToAlignment, written by
+  emitAlignmentDirective: `.p2align` (`.p2alignw`, `.p2alignl`) of a power of two, with the fill in hex and the maximum."
+  [st pow2? ^long vsize args syms]
+  (let [cv (fn [e] (when e (x/const-value e syms)))
+        [a fill mx] args
+        a (cv a) fill' (cv fill) mx (cv mx)
+        kind (section-kind (:sec st))]
+    (when (and a kind (or (nil? fill) fill') (or (nil? (nth args 2 nil)) mx))
+      (let [al (if pow2? (when (< (long a) 32) (bit-shift-left 1 (long a))) (if (zero? (long a)) 1 a))
+            al (when (and al (pos? (long al)) (zero? (bit-and (long al) (dec (long al))))) (long al))
+            mx (when (and mx (>= (long mx) 1) (< (long mx) (long (or al 0)))) mx)
+            code? (and (= kind :text) (nil? fill))
+            value (when-not code? (if (and fill' (= (:sec st) ".bss")) 0 (or fill' 0)))
+            hexv (fn [v] (Long/toHexString (bit-and (long v) (if (= vsize 8) -1 (dec (bit-shift-left 1 (* 8 vsize)))))))]
+        (when al
+          [(str (case vsize 1 "\t.p2align\t" 2 ".p2alignw " 4 ".p2alignl ")
+                (Long/numberOfTrailingZeros al)
+                (when (or value mx) (if value (str ", 0x" (hexv value)) ", "))
+                (when mx (str ", " mx)))])))))
+
+(def ^:private attr-dirs
+  {"globl" "\t.globl\t" "global" "\t.globl\t" "weak" "\t.weak\t" "hidden" "\t.hidden\t" "local" "\t.local\t"
+   "protected" "\t.protected\t" "internal" "\t.internal\t" "private_extern" "\t.private_extern\t"
+   "weak_definition" "\t.weak_definition\t" "no_dead_strip" nil "lglobl" "\t.lglobl\t" "extern" nil})
+
+(def ^:private type-names
+  {"function" "function" "stt_func" "function" "gnu_indirect_function" "gnu_indirect_function" "stt_gnu_ifunc" "gnu_indirect_function"
+   "object" "object" "stt_object" "object" "tls_object" "tls_object" "stt_tls" "tls_object" "common" "common" "stt_common" "common"
+   "notype" "notype" "stt_notype" "notype" "gnu_unique_object" "gnu_unique_object"})
+
+(defn- word [x] (cond (symbol? x) (name x) (string? x) x (and (seq? x) (#{'sym 'at} (first x))) (word (last x)) :else nil))
+
+(defn- cfi-lines
+  "The .cfi_* directives the emitCFI* family writes."
+  [st h args syms]
+  (let [cv (fn [e] (x/const-value e syms))
+        [a b] args]
+    (case h
+      "cfi_startproc" (cond (empty? args) ["\t.cfi_startproc"] (= "simple" (word a)) ["\t.cfi_startproc simple"] :else nil)
+      "cfi_endproc" (when (empty? args) ["\t.cfi_endproc"])
+      ("cfi_def_cfa" "cfi_offset" "cfi_rel_offset")
+      (let [r (cfi-reg st a) o (cv b)] (when (and r o (= 2 (count args))) [(str "\t." h " " r ", " o)]))
+      ("cfi_def_cfa_register" "cfi_restore" "cfi_same_value" "cfi_undefined")
+      (let [r (cfi-reg st a)] (when (and r (= 1 (count args))) [(str "\t." h " " r)]))
+      "cfi_register" (let [r (cfi-reg st a) s (cfi-reg st b)] (when (and r s (= 2 (count args))) [(str "\t.cfi_register " r ", " s)]))
+      ("cfi_def_cfa_offset" "cfi_adjust_cfa_offset")
+      (let [o (cv a)] (when (and o (= 1 (count args))) [(str "\t." h " " o)]))
+      ("cfi_remember_state" "cfi_restore_state" "cfi_signal_frame") (when (empty? args) [(str "\t." h)])
+      nil)))
+
+(defn stream-statement
+  "The lines the asm streamer writes for the directive or label `f` (an assembly form `(asm/NAME ...)`), with the constant
+  symbols `syms`: [STATE LINES], LINES nil when this directive is not ported (`:unported`). The temporaries of `.` are
+  written first, as the parser emits their labels."
+  [st f syms]
+  (let [[st f labels] (resolve-temps st f true)
+        pre (mapv label-line labels)
+        h (name (first f)) args (vec (rest f))
+        cv (fn [e] (x/const-value e syms))
+        done (fn [st ls] (if ls [st (into pre ls)] [st nil]))]
+    (case h
+      "label" (let [l (first args)]
+                (if (integer? l)
+                  (let [[st s] (directional st l :def)] (done st [(label-line s)]))
+                  (done st [(label-line l)])))
+      ("=" "set" "equ") (let [[a b] args] (done st [(str (expr-text a) " = " (value-text b syms))]))
+      ("text" "data" "bss") (if-let [[st ls] (switch-lines st (str "." h))] (done st ls) [st nil])
+      ("code16" "code16gcc" "code32" "code64")
+      (let [m (case h ("code16" "code16gcc") 16 "code32" 32 "code64" 64)]
+        (done (assoc st :mode m) (if (= m (long (:mode st))) [] [(str "\t.code" m)])))
+      ("intel_syntax" "att_syntax") (done st [])
+      ("byte" "1byte" "short" "word" "value" "2byte" "hword" "long" "int" "4byte" "quad" "8byte")
+      (let [n (data-sizes h) ls (map #(data-line n % syms) args)]
+        (done st (when (and (seq args) (every? some? ls)) (vec (apply concat ls)))))
+      ("ascii" "asciz" "string")
+      (when (every? string? args)
+        (done st (vec (mapcat (fn [s] (concat (bytes-lines s) (when-not (= h "ascii") ["\t.byte\t0"]))) args))))
+      "zero" (let [n (cv (first args)) v (if (second args) (cv (second args)) 0)]
+               (done st (when (and n v (<= 1 (count args) 2))
+                          (if (zero? (long n)) []
+                              [(str (if (= *obj* :macho) "\t.space\t" "\t.zero\t") n (when-not (zero? (long v)) (str "," (unchecked-int (long v)))))]))))
+      ("p2align" "p2alignw" "p2alignl" "balign" "balignw" "balignl" "align" "align32")
+      (let [pow2? (case h ("p2align" "p2alignw" "p2alignl") true ("balign" "balignw" "balignl") false (= *obj* :macho))
+            vs (case h ("p2alignw" "balignw") 2 ("p2alignl" "balignl" "align32") 4 1)]
+        (done st (when (seq args) (align-lines st pow2? vs args syms))))
+      ("globl" "global" "weak" "hidden" "local" "protected" "internal" "private_extern" "weak_definition" "lglobl")
+      (let [d (attr-dirs h)] (done st (when (and d (seq args)) (mapv #(str d (expr-text %)) args))))
+      "type" (let [[s k] args t (some-> (word k) str/lower-case (str/replace #"^[@%]" "") type-names)]
+               (done st (when (and (= *obj* :elf) t (= 2 (count args))) [(str "\t.type\t" (expr-text s) ",@" t)])))
+      "size" (let [[s e] args] (done st (when (and (= *obj* :elf) (= 2 (count args))) [(str "\t.size\t" (expr-text s) ", " (value-text e syms))])))
+      "reloc" (let [[o n e] args]
+                (done st (when (and (<= 2 (count args) 3) (word n))
+                           [(str "\t.reloc " (expr-text o) ", " (word n) (when e (str ", " (expr-text e))))])))
+      (if (.startsWith h "cfi_") (done st (cfi-lines st h args syms)) [st nil]))))
+
+(defn fixup-lines
+  "-show-encoding's fixup comments after the encoding (MCAsmStreamer's AddEncodingComment): `fixup A - offset: O, value: V,
+  kind: K`, the value the fixup's expression with its ImmOffset added (MCBinaryExpr::print: `-4` after the expression), the
+  kind FK_Data_N, FK_PCRel_N for a PC-relative one; nil when a fixup has a target kind (reloc_*, not ported)."
+  [fixups]
+  (let [ls (map-indexed
+             (fn [i [off size e kind pcrel adj]]
+               (when (nil? kind)
+                 (let [adj (long (or adj 0))
+                       v (if (zero? adj)
+                           (expr-text e)
+                           (str (if (or (integer? e) (symbol? e) (and (seq? e) (#{'sym 'at} (first e)))) (expr-text e) (str "(" (expr-text e) ")"))
+                                (if (neg? adj) adj (str "+" adj))))]
+                   (str "#  fixup " (char (+ 65 (long i))) " - offset: " off ", value: " v
+                        ", kind: " (if pcrel "FK_PCRel_" "FK_Data_") size))))
+             fixups)]
+    (when (every? some? ls) (vec ls))))

@@ -1,0 +1,29 @@
+(ns rust.front.rind-test
+  "RIND5's unit cases (doc/rust/FRONTEND-SURVEY.md, \"As built: RIND5's swizzle\"): collect's constant evaluation of `[..].len()`
+  (lower-const-arg), then the pipeline over test/rust/front/swizzle1.rs (simd_swizzle!: a macro 2.0 block's items and `use
+  $crate::..` in scope of main's body, the impl's trait argument evaluated, `Impl::concat_swizzle` resolved, main built), and
+  a negative case (the same expression with a call that is not `len`, unevaluated). `bin/rust-front rind-test`."
+  (:require [arbace.rust.front.build-check :as bc] [arbace.rust.front.collect :as c] [arbace.string :as str]))
+
+(defn -main [front-dir]
+  (let [bad (atom 0)
+        check (fn [what ok] (println (if ok "ok  " "FAIL") what) (when-not ok (swap! bad inc)))
+        arr (fn [n] {:kind :array :exprs (vec (repeat n {:kind :lit :lit {:symbol "1"}}))})]
+    (check "[a, b, c, d].len() is 4" (= [:cval "4"] (c/lower-const-arg {:kind :method :seg {:ident "len"} :receiver (arr 4) :args []})))
+    (check "[x; 3].len() is 3" (= [:cval "3"] (c/lower-const-arg {:kind :method :seg {:ident "len"} :args []
+                                                                   :receiver {:kind :repeat :expr {:kind :lit :lit {:symbol "0"}} :count {:kind :lit :lit {:symbol "3"}}}})))
+    (check "negative: [..].first() stays unevaluated" (= :cexpr (first (c/lower-const-arg {:kind :method :seg {:ident "first"} :receiver (arr 4) :args []}))))
+    (bc/build-program front-dir "swizzle1"
+      (fn [bodies]
+        (let [by (into {} (for [[nm b err] bodies] [nm [b err]]))
+              impl (some #(when (str/starts-with? (str (:kind %)) "Impl") (:id %)) (c/defs))
+              [_ tref] (c/impl-header impl)]
+          (check "the impl's trait: Swizzle<4> through the block's use $crate::simd::Swizzle"
+                 (= ["core::core_simd::swizzle::Swizzle" [:cval "4"]] [(first tref) (second (second tref))]))
+          (check (str "main built (Impl::concat_swizzle resolved) " (second (get by "main"))) (some? (first (get by "main"))))
+          (check "the associated constant named as rustc does" (contains? by "<main::Impl as std::simd::Swizzle<4>>::INDEX"))
+          (let [tys (map #(second (:ty %)) (:locals (first (get by "main"))))]
+            (check "the GAT normalized with its own argument: a Simd<i32, 4> from f.cast::<i32>(), no local of a parameter's"
+                   (and (some #(= "std::simd::Simd<i32, 4>" %) tys) (not-any? #(re-find #"Simd<T," (str %)) tys)))))))
+    (println (str "rind-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
+    (System/exit (if (zero? @bad) 0 1))))

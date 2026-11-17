@@ -1,0 +1,276 @@
+(in-ns 'go.arbace.hs) ^{:go/comments [[9 1 "// The threaded way (HES84 (a), doc/haskell/HASKELL-EVAL-SURVEY.md \"As built: HES84 (a), the threaded way\"): a program GHC"] [10 1 "// links -threaded (hsi run --threaded) runs with the threaded RTS's semantics where a program can observe them, staged:"] [11 1 "//   - capabilities: enabled_capabilities is +RTS -N's (default 1), setNumCapabilities changes it (clamped to the larger of -N"] [12 1 "//     and the host's processors, as Capability.c's max_n_capabilities), forkOn's capability is its number modulo it; the"] [13 1 "//     Haskell threads are still evaluated by one goroutine, the capability every thread runs on in turn (stage 1: no two"] [14 1 "//     Haskell threads in parallel, which no judged output depends on);"] [15 1 "//   - safe foreign calls release the capability (Schedule.c's suspendThread and resumeThread): a safe call to a host function"] [16 1 "//     that only blocks (sleep, usleep, nanosleep) runs on a goroutine of its own while the other threads run, its thread"] [17 1 "//     BlockedOnCCall until it returns; an asynchronous exception thrown to it waits for the return, as GHC's (a non-interruptible"] [18 1 "//     call). Unsafe calls, and safe calls into the program's own C (ci's interpreter is the machine's), keep the capability;"] [19 1 "//   - bound threads: the main thread, forkOS's (forkOS_createThread) and the in-calls' threads are bound"] [20 1 "//     (isCurrentThreadBound#); rtsSupportsBoundThreads answers 1 to GHC.Internal.Conc.Bound and the program's own modules, and"] [21 1 "//     0 to the I/O manager's modules (GHC.Internal.Conc.IO's threadDelay and threadWaitRead, IO.FD, System.Timeout, the"] [22 1 "//     signals): the I/O manager stays hsi's own, the non-threaded RTS's awaitEvent over delay#, waitRead# and waitWrite# (the"] [23 1 "//     threaded RTS's Haskell event manager over epoll is not ported: the same waits, by another mechanism);"] [24 1 "//   - sparks: a pool of at most 4096 (GHC's maxLocalSparks) unevaluated closures, numSparks# its size; an idle scheduler runs"] [25 1 "//     them one at a time, as an idle capability's spark thread;"] [26 1 "//   - hs_exit (and the end of main): the standard handles flushed, then exitScheduler's shutdown: the other threads deleted,"] [27 1 "//     those in foreign calls left to return into a stopped RTS (their goroutines' results dropped)."] [29 1 "// fcall is a safe foreign call in flight on a goroutine of its own: its thread blocked on it until done is sent."] [32 13 "// the result's representation"] [33 13 "// the result, set by the goroutine before it is sent"] [34 2 "// after runs on the machine's goroutine when the call has returned (a result written to memory)"] [38 1 "// blockingCall is a host function a safe call may run off the machine: its arguments read on the machine's goroutine"] [39 1 "// (prepare), the blocking part on another (run), what it writes back on the machine's again (after, may be nil)."] [66 1 "// offload starts a safe foreign call of a blocking host function on a goroutine and blocks the current thread on it; ok"] [67 1 "// false when the call is not one (the caller makes it on the machine)."] [87 1 "// callReturned resumes a thread whose foreign call returned (resumeThread): its result in its return registers, an"] [88 1 "// exception thrown to it meanwhile raised now that it accepts one."] [96 10 "// deleted at shutdown (exitScheduler): the call returned into a stopped RTS"] [113 1 "// drainCalls resumes the threads whose calls have returned, without waiting."] [125 1 "// waitCall waits for a foreign call to return, at most d (d < 0: no limit); whether one did."] [142 1 "// ---- capabilities ----"] [144 1 "// maxCaps is max_n_capabilities: the larger of -N and the host's processors."] [149 1 "// setNumCapabilities is the RTS's (Schedule.c): the non-threaded RTS refuses any count but 1."] [174 1 "// caps is enabled_capabilities."] [182 1 "// SetCapabilities is +RTS -N's count (the threaded way's; 0: the default, 1)."] [190 1 "// capOf is the capability a thread is on: a locked thread's (forkOn's number modulo the count), else 0 (hsi's one"] [191 1 "// evaluator runs every thread on the first capability)."] [199 1 "// ---- sparks ----"] [203 1 "// spark adds a closure to the pool (newSpark): only an unevaluated one (an evaluated one fizzles, a dud), dropped when"] [204 1 "// the pool is full (an overflow); the non-threaded RTS has no pool."] [219 1 "// nextSpark is the oldest spark still unevaluated, taken from the pool (findSpark: the fizzled ones dropped), or nil."] [233 1 "// runSpark starts a thread evaluating the next spark when the scheduler is idle (an idle capability's spark thread);"] [234 1 "// whether it did."] [244 1 "// ---- bound threads ----"] [246 1 "// forkOSCreate is forkOS_createThread(entry): a bound thread running the IO action the stable pointer entry names"] [247 1 "// (OSThreads.c's forkOS_createThreadWrapper, rts_evalStableIO), 0 (success)."] [260 1 "// ---- shutdown ----"] [262 1 "// exitScheduler is the threaded RTS's shutdown after the handles are flushed: every other thread deleted (no handler"] [263 1 "// runs), those in foreign calls left to return into a stopped RTS."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[45 38] [49 38] [57 38] [105 26] [164 22]] :go/trails [[63 3]]} (go/file "threaded.go" :imports [
+
+
+    ^{:go/apos {1 [4 2]} :go/pos {:lparen [3 8] :rparen [7 1] :tok-pos [3 1]}} [fmt "fmt"]
+    ^{:go/apos {1 [5 2]}} [runtime "runtime"]
+    ^{:go/apos {1 [6 2]}} [time "time"]])
+
+
+;; The threaded way (HES84 (a), doc/haskell/HASKELL-EVAL-SURVEY.md "As built: HES84 (a), the threaded way"): a program GHC
+;; links -threaded (hsi run --threaded) runs with the threaded RTS's semantics where a program can observe them, staged:
+;;   - capabilities: enabled_capabilities is +RTS -N's (default 1), setNumCapabilities changes it (clamped to the larger of -N
+;;     and the host's processors, as Capability.c's max_n_capabilities), forkOn's capability is its number modulo it; the
+;;     Haskell threads are still evaluated by one goroutine, the capability every thread runs on in turn (stage 1: no two
+;;     Haskell threads in parallel, which no judged output depends on);
+;;   - safe foreign calls release the capability (Schedule.c's suspendThread and resumeThread): a safe call to a host function
+;;     that only blocks (sleep, usleep, nanosleep) runs on a goroutine of its own while the other threads run, its thread
+;;     BlockedOnCCall until it returns; an asynchronous exception thrown to it waits for the return, as GHC's (a non-interruptible
+;;     call). Unsafe calls, and safe calls into the program's own C (ci's interpreter is the machine's), keep the capability;
+;;   - bound threads: the main thread, forkOS's (forkOS_createThread) and the in-calls' threads are bound
+;;     (isCurrentThreadBound#); rtsSupportsBoundThreads answers 1 to GHC.Internal.Conc.Bound and the program's own modules, and
+;;     0 to the I/O manager's modules (GHC.Internal.Conc.IO's threadDelay and threadWaitRead, IO.FD, System.Timeout, the
+;;     signals): the I/O manager stays hsi's own, the non-threaded RTS's awaitEvent over delay#, waitRead# and waitWrite# (the
+;;     threaded RTS's Haskell event manager over epoll is not ported: the same waits, by another mechanism);
+;;   - sparks: a pool of at most 4096 (GHC's maxLocalSparks) unevaluated closures, numSparks# its size; an idle scheduler runs
+;;     them one at a time, as an idle capability's spark thread;
+;;   - hs_exit (and the end of main): the standard handles flushed, then exitScheduler's shutdown: the other threads deleted,
+;;     those in foreign calls left to return into a stopped RTS (their goroutines' results dropped).
+
+
+^{:go/pos {:doc [29 1] :tok-pos [30 1]}} (go/type ^{:go/pos {:name-pos [30 6]}} fcall "fcall is a safe foreign call in flight on a goroutine of its own: its thread blocked on it until done is sent.\n" ^{:go/pos {:lbrace [30 19] :rbrace [36 1] :struct [30 12]}} (struct
+    ^{:tag ^{:go/pos {:star [31 6]}} (* ^{:go/pos {:name-pos [31 7]}} Thread) :go/pos {:name-pos [31 2]}} t
+    ^{:tag ^{:go/pos {:name-pos [32 6]}} string :go/pos {:name-pos [32 2]}} res ; the result's representation
+    ^{:tag ^{:go/pos {:name-pos [33 6]}} Value :go/pos {:name-pos [33 2]}} r ; the result, set by the goroutine before it is sent
+
+    ^{:tag ^{:go/pos {:func [35 8]}} (func ^{:go/pos {:closing [35 23] :opening [35 12]}} [^{:tag ^{:go/pos {:star [35 15]}} (* ^{:go/pos {:name-pos [35 16]}} Machine) :go/pos {:name-pos [35 13]}} m]) :doc "after runs on the machine's goroutine when the call has returned (a result written to memory)\n" :go/pos {:name-pos [35 2]}} after))
+
+
+
+
+^{:go/pos {:doc [38 1] :tok-pos [40 1]}} (go/type ^{:go/pos {:name-pos [40 6]}} blockingCall "blockingCall is a host function a safe call may run off the machine: its arguments read on the machine's goroutine\n(prepare), the blocking part on another (run), what it writes back on the machine's again (after, may be nil).\n" ^{:go/pos {:func [40 19]}} (func ^{:go/pos {:closing [40 45] :opening [40 23]}} [^{:tag ^{:go/pos {:star [40 26]}} (* ^{:go/pos {:name-pos [40 27]}} Machine) :go/pos {:name-pos [40 24]}} m ^{:tag ^{:go/pos {:lbrack [40 38]}} (slice ^{:go/pos {:name-pos [40 40]}} Value) :go/pos {:name-pos [40 36]}} a] ^{:go/pos {:closing [40 88] :opening [40 47]}} [^{:tag ^{:go/pos {:func [40 52]}} (func ^{:go/pos {:closing [40 57] :opening [40 56]}} [] [^{:go/pos {:name-pos [40 59]}} Value]) :go/pos {:name-pos [40 48]}} run ^{:tag ^{:go/pos {:func [40 72]}} (func ^{:go/pos {:closing [40 87] :opening [40 76]}} [^{:tag ^{:go/pos {:star [40 79]}} (* ^{:go/pos {:name-pos [40 80]}} Machine) :go/pos {:name-pos [40 77]}} m]) :go/pos {:name-pos [40 66]}} after]))
+
+^{:go/pos {:tok-pos [42 1]}} (go/var ^{:go/pos {:name-pos [42 5]}} blockingCalls ^{:go/pos {:lbrace [42 44] :rbrace [64 1]}} (lit ^{:go/pos {:map [42 21]}} (map ^{:go/pos {:name-pos [42 25]}} string ^{:go/pos {:name-pos [42 32]}} blockingCall)
+    ^{:go/apos {0 [43 2]} :go/pos {:colon [43 9]}} ["sleep" ^{:go/pos {:func [43 11] :lbrace [43 70] :rbrace [46 2]}} (fn ^{:go/pos {:closing [43 37] :opening [43 15]}} [^{:tag ^{:go/pos {:star [43 18]}} (* ^{:go/pos {:name-pos [43 19]}} Machine) :go/pos {:name-pos [43 16]}} m ^{:tag ^{:go/pos {:lbrack [43 30]}} (slice ^{:go/pos {:name-pos [43 32]}} Value) :go/pos {:name-pos [43 28]}} a] :results ^{:go/pos {:closing [43 68] :opening [43 39]}} [^{:go/pos {:func [43 40]}} (func ^{:go/pos {:closing [43 45] :opening [43 44]}} [] [^{:go/pos {:name-pos [43 47]}} Value]) ^{:go/pos {:func [43 54]}} (func ^{:go/pos {:closing [43 67] :opening [43 58]}} [^{:go/pos {:star [43 59]}} (* ^{:go/pos {:name-pos [43 60]}} Machine)])]
+        (let [^{:go/pos {:name-pos [44 3] :tok-pos [44 5]}} d ^{:go/pos {:op-pos [44 33]}} (* ^{:go/pos {:lparen [44 21] :rparen [44 31]}} (conv ^{:go/pos {:dot [44 12] :name-pos [44 13] :x-pos [44 8]}} time/Duration ^{:go/pos {:lparen [44 25] :rparen [44 30]}} (^{:go/pos {:name-pos [44 22]}} toI ^{:go/apos {2 [44 28]} :go/pos {:lbrack [44 27] :rbrack [44 29]}} (aget ^{:go/pos {:name-pos [44 26]}} a 0))) ^{:go/pos {:dot [44 39] :name-pos [44 40] :x-pos [44 35]}} time/Second)]
+          ^{:go/apos {2 [45 59]} :go/pos {:return [45 3]}} (return ^{:go/pos {:func [45 10] :lbrace [45 23] :rbrace [45 56] :return [45 40]}} (fn ^{:tag ^{:go/pos {:name-pos [45 17]}} Value :go/pos {:closing [45 15] :opening [45 14]}} [] ^{:go/pos {:lparen [45 35] :rparen [45 37]}} (^{:go/pos {:dot [45 29] :name-pos [45 30] :x-pos [45 25]}} time/Sleep ^{:go/pos {:name-pos [45 36]}} d) ^{:go/apos {2 [45 53]} :go/pos {:lparen [45 52] :rparen [45 54]}} (conv ^{:go/pos {:name-pos [45 47]}} int64 0)) nil)))]
+
+    ^{:go/apos {0 [47 2]} :go/pos {:colon [47 10]}} ["usleep" ^{:go/pos {:func [47 12] :lbrace [47 71] :rbrace [50 2]}} (fn ^{:go/pos {:closing [47 38] :opening [47 16]}} [^{:tag ^{:go/pos {:star [47 19]}} (* ^{:go/pos {:name-pos [47 20]}} Machine) :go/pos {:name-pos [47 17]}} m ^{:tag ^{:go/pos {:lbrack [47 31]}} (slice ^{:go/pos {:name-pos [47 33]}} Value) :go/pos {:name-pos [47 29]}} a] :results ^{:go/pos {:closing [47 69] :opening [47 40]}} [^{:go/pos {:func [47 41]}} (func ^{:go/pos {:closing [47 46] :opening [47 45]}} [] [^{:go/pos {:name-pos [47 48]}} Value]) ^{:go/pos {:func [47 55]}} (func ^{:go/pos {:closing [47 68] :opening [47 59]}} [^{:go/pos {:star [47 60]}} (* ^{:go/pos {:name-pos [47 61]}} Machine)])]
+        (let [^{:go/pos {:name-pos [48 3] :tok-pos [48 5]}} d ^{:go/pos {:op-pos [48 33]}} (* ^{:go/pos {:lparen [48 21] :rparen [48 31]}} (conv ^{:go/pos {:dot [48 12] :name-pos [48 13] :x-pos [48 8]}} time/Duration ^{:go/pos {:lparen [48 25] :rparen [48 30]}} (^{:go/pos {:name-pos [48 22]}} toI ^{:go/apos {2 [48 28]} :go/pos {:lbrack [48 27] :rbrack [48 29]}} (aget ^{:go/pos {:name-pos [48 26]}} a 0))) ^{:go/pos {:dot [48 39] :name-pos [48 40] :x-pos [48 35]}} time/Microsecond)]
+          ^{:go/apos {2 [49 59]} :go/pos {:return [49 3]}} (return ^{:go/pos {:func [49 10] :lbrace [49 23] :rbrace [49 56] :return [49 40]}} (fn ^{:tag ^{:go/pos {:name-pos [49 17]}} Value :go/pos {:closing [49 15] :opening [49 14]}} [] ^{:go/pos {:lparen [49 35] :rparen [49 37]}} (^{:go/pos {:dot [49 29] :name-pos [49 30] :x-pos [49 25]}} time/Sleep ^{:go/pos {:name-pos [49 36]}} d) ^{:go/apos {2 [49 53]} :go/pos {:lparen [49 52] :rparen [49 54]}} (conv ^{:go/pos {:name-pos [49 47]}} int64 0)) nil)))]
+
+    ^{:go/apos {0 [51 2]} :go/pos {:colon [51 13]}} ["nanosleep" ^{:go/pos {:func [51 15] :lbrace [51 74] :rbrace [63 2]}} (fn ^{:go/pos {:closing [51 41] :opening [51 19]}} [^{:tag ^{:go/pos {:star [51 22]}} (* ^{:go/pos {:name-pos [51 23]}} Machine) :go/pos {:name-pos [51 20]}} m ^{:tag ^{:go/pos {:lbrack [51 34]}} (slice ^{:go/pos {:name-pos [51 36]}} Value) :go/pos {:name-pos [51 32]}} a] :results ^{:go/pos {:closing [51 72] :opening [51 43]}} [^{:go/pos {:func [51 44]}} (func ^{:go/pos {:closing [51 49] :opening [51 48]}} [] [^{:go/pos {:name-pos [51 51]}} Value]) ^{:go/pos {:func [51 58]}} (func ^{:go/pos {:closing [51 71] :opening [51 62]}} [^{:go/pos {:star [51 63]}} (* ^{:go/pos {:name-pos [51 64]}} Machine)])]
+        (let [^{:go/pos {:tok-pos [52 11]}} (values ^{:go/pos {:name-pos [52 3]}} ts ^{:go/pos {:name-pos [52 7]}} rem) (values ^{:go/pos {:lparen [52 17] :rparen [52 22]}} (^{:go/pos {:name-pos [52 14]}} toW ^{:go/apos {2 [52 20]} :go/pos {:lbrack [52 19] :rbrack [52 21]}} (aget ^{:go/pos {:name-pos [52 18]}} a 0)) ^{:go/apos {2 [52 32]} :go/pos {:lparen [52 31] :rparen [52 33]}} (conv ^{:go/pos {:name-pos [52 25]}} uint64 0))]
+          ^{:go/pos {:if [53 3] :lbrace [53 17] :rbrace [55 3]}} (when ^{:go/apos {2 [53 15]} :go/pos {:op-pos [53 13]}} (> ^{:go/pos {:lparen [53 9] :rparen [53 11]}} (^{:go/pos {:name-pos [53 6]}} len ^{:go/pos {:name-pos [53 10]}} a) 1)
+            ^{:go/pos {:tok-pos [54 8]}} (set! ^{:go/pos {:name-pos [54 4]}} rem ^{:go/pos {:lparen [54 13] :rparen [54 18]}} (^{:go/pos {:name-pos [54 10]}} toW ^{:go/apos {2 [54 16]} :go/pos {:lbrack [54 15] :rbrack [54 17]}} (aget ^{:go/pos {:name-pos [54 14]}} a 1))))
+
+          (let [^{:go/pos {:name-pos [56 3] :tok-pos [56 5]}} d ^{:go/pos {:op-pos [56 59]}} (+ ^{:go/pos {:op-pos [56 46]}} (* ^{:go/pos {:lparen [56 21] :rparen [56 45]}} (conv ^{:go/pos {:dot [56 12] :name-pos [56 13] :x-pos [56 8]}} time/Duration ^{:go/pos {:lparen [56 27] :rparen [56 44]}} (conv ^{:go/pos {:name-pos [56 22]}} int64 ^{:go/pos {:dot [56 33] :lparen [56 40] :name-pos [56 34] :rparen [56 43]}} (.Load64 ^{:go/pos {:dot [56 29] :name-pos [56 30]}} (.-Mem ^{:go/pos {:name-pos [56 28]}} m) ^{:go/pos {:name-pos [56 41]}} ts))) ^{:go/pos {:dot [56 51] :name-pos [56 52] :x-pos [56 47]}} time/Second) ^{:go/pos {:lparen [56 74] :rparen [56 100]}} (conv ^{:go/pos {:dot [56 65] :name-pos [56 66] :x-pos [56 61]}} time/Duration ^{:go/pos {:lparen [56 80] :rparen [56 99]}} (conv ^{:go/pos {:name-pos [56 75]}} int64 ^{:go/pos {:dot [56 86] :lparen [56 93] :name-pos [56 87] :rparen [56 98]}} (.Load64 ^{:go/pos {:dot [56 82] :name-pos [56 83]}} (.-Mem ^{:go/pos {:name-pos [56 81]}} m) ^{:go/apos {2 [56 97]} :go/pos {:op-pos [56 96]}} (+ ^{:go/pos {:name-pos [56 94]}} ts 8)))))]
+            ^{:go/pos {:return [57 3]}} (return ^{:go/pos {:func [57 10] :lbrace [57 23] :rbrace [57 56] :return [57 40]}} (fn ^{:tag ^{:go/pos {:name-pos [57 17]}} Value :go/pos {:closing [57 15] :opening [57 14]}} [] ^{:go/pos {:lparen [57 35] :rparen [57 37]}} (^{:go/pos {:dot [57 29] :name-pos [57 30] :x-pos [57 25]}} time/Sleep ^{:go/pos {:name-pos [57 36]}} d) ^{:go/apos {2 [57 53]} :go/pos {:lparen [57 52] :rparen [57 54]}} (conv ^{:go/pos {:name-pos [57 47]}} int64 0)) ^{:go/pos {:func [57 59] :lbrace [57 76] :rbrace [62 3]}} (fn ^{:go/pos {:closing [57 74] :opening [57 63]}} [^{:tag ^{:go/pos {:star [57 66]}} (* ^{:go/pos {:name-pos [57 67]}} Machine) :go/pos {:name-pos [57 64]}} m]
+                ^{:go/pos {:if [58 4] :lbrace [58 16] :rbrace [61 4]}} (when ^{:go/apos {2 [58 14]} :go/pos {:op-pos [58 11]}} (!= ^{:go/pos {:name-pos [58 7]}} rem 0)
+                  ^{:go/apos {3 [59 24]} :go/pos {:dot [59 10] :lparen [59 18] :name-pos [59 11] :rparen [59 25]}} (.Store64 ^{:go/pos {:dot [59 6] :name-pos [59 7]}} (.-Mem ^{:go/pos {:name-pos [59 5]}} m) ^{:go/pos {:name-pos [59 19]}} rem 0)
+                  ^{:go/apos {3 [60 26]} :go/pos {:dot [60 10] :lparen [60 18] :name-pos [60 11] :rparen [60 27]}} (.Store64 ^{:go/pos {:dot [60 6] :name-pos [60 7]}} (.-Mem ^{:go/pos {:name-pos [60 5]}} m) ^{:go/apos {2 [60 23]} :go/pos {:op-pos [60 22]}} (+ ^{:go/pos {:name-pos [60 19]}} rem 8) 0)))))))]))
+
+
+
+
+
+
+
+^{:go/pos {:doc [66 1] :func [68 1] :lbrace [68 85] :rbrace [85 1]}} (go/method ^{:go/pos {:name-pos [68 19]}} offload "offload starts a safe foreign call of a blocking host function on a goroutine and blocks the current thread on it; ok\nfalse when the call is not one (the caller makes it on the machine).\n" ^{:go/pos {:closing [68 61] :opening [68 26] :recv-closing [68 17] :recv-opening [68 6]}} [^{:tag ^{:go/pos {:star [68 9]}} (* ^{:go/pos {:name-pos [68 10]}} Machine) :go/pos {:name-pos [68 7]}} m ^{:tag ^{:go/pos {:name-pos [68 31]}} string :go/pos {:name-pos [68 27]}} sym ^{:tag ^{:go/pos {:lbrack [68 42]}} (slice ^{:go/pos {:name-pos [68 44]}} Value) :go/pos {:name-pos [68 39]}} cs ^{:tag ^{:go/pos {:name-pos [68 55]}} string :go/pos {:name-pos [68 51]}} res] :results ^{:go/pos {:closing [68 83] :opening [68 63]}} [^{:go/pos {:name-pos [68 64]}} Expr ^{:go/pos {:lbrack [68 70]}} (slice ^{:go/pos {:name-pos [68 72]}} Value) ^{:go/pos {:name-pos [68 79]}} bool]
+  (let [^{:go/pos {:name-pos [69 2] :tok-pos [69 5]}} bc ^{:go/pos {:lbrack [69 21] :rbrack [69 25]}} (aget ^{:go/pos {:name-pos [69 8]}} blockingCalls ^{:go/pos {:name-pos [69 22]}} sym)]
+    ^{:go/pos {:if [70 2] :lbrace [70 15] :rbrace [72 2]}} (when ^{:go/apos {2 [70 11]} :go/pos {:op-pos [70 8]}} (== ^{:go/pos {:name-pos [70 5]}} bc nil)
+      ^{:go/apos {1 [71 10] 2 [71 15] 3 [71 20]} :go/pos {:return [71 3]}} (return nil nil false))
+
+    (let [^{:go/pos {:tok-pos [73 13]}} (values ^{:go/pos {:name-pos [73 2]}} run ^{:go/pos {:name-pos [73 7]}} after) ^{:go/pos {:lparen [73 18] :rparen [73 24]}} (^{:go/pos {:name-pos [73 16]}} bc ^{:go/pos {:name-pos [73 19]}} m ^{:go/pos {:name-pos [73 22]}} cs)
+        ^{:go/pos {:name-pos [74 2] :tok-pos [74 5]}} fc ^{:go/pos {:op-pos [74 8]}} (addr ^{:go/acolon {2 [74 16] 4 [74 28] 6 [74 40]} :go/apos {2 [74 15] 4 [74 25] 6 [74 35]} :go/pos {:lbrace [74 14] :rbrace [74 47]}} (lit ^{:go/pos {:name-pos [74 9]}} fcall :t ^{:go/pos {:dot [74 19] :name-pos [74 20]}} (.-cur ^{:go/pos {:name-pos [74 18]}} m) :res ^{:go/pos {:name-pos [74 30]}} res :after ^{:go/pos {:name-pos [74 42]}} after))]
+      ^{:go/pos {:if [75 2] :lbrace [75 20] :rbrace [77 2]}} (when ^{:go/apos {2 [75 16]} :go/pos {:op-pos [75 13]}} (== ^{:go/pos {:dot [75 6] :name-pos [75 7]}} (.-fdone ^{:go/pos {:name-pos [75 5]}} m) nil)
+        ^{:go/pos {:tok-pos [76 11]}} (set! ^{:go/pos {:dot [76 4] :name-pos [76 5]}} (.-fdone ^{:go/pos {:name-pos [76 3]}} m) ^{:go/apos {2 [76 31]} :go/pos {:lparen [76 17] :rparen [76 33]}} (^{:go/pos {:name-pos [76 13]}} make ^{:go/pos {:begin [76 18]}} (chan ^{:go/pos {:star [76 23]}} (* ^{:go/pos {:name-pos [76 24]}} fcall)) 64)))
+
+      ^{:go/pos {:tok-pos [78 12]}} (inc! ^{:go/pos {:dot [78 3] :name-pos [78 4]}} (.-inflight ^{:go/pos {:name-pos [78 2]}} m))
+      ^{:go/pos {:go [79 2]}} (go ^{:go/pos {:lparen [82 3] :rparen [82 4]}} (^{:go/pos {:func [79 5] :lbrace [79 12] :rbrace [82 2]}} (fn ^{:go/pos {:closing [79 10] :opening [79 9]}} []
+            ^{:go/pos {:tok-pos [80 8]}} (set! ^{:go/pos {:dot [80 5] :name-pos [80 6]}} (.-r ^{:go/pos {:name-pos [80 3]}} fc) ^{:go/pos {:lparen [80 13] :rparen [80 14]}} (^{:go/pos {:name-pos [80 10]}} run))
+            ^{:go/pos {:arrow [81 11]}} (>! ^{:go/pos {:dot [81 4] :name-pos [81 5]}} (.-fdone ^{:go/pos {:name-pos [81 3]}} m) ^{:go/pos {:name-pos [81 14]}} fc))))
+
+      (let [^{:go/pos {:tok-pos [83 9]}} (values ^{:go/pos {:name-pos [83 2]}} e ^{:go/pos {:name-pos [83 5]}} env) ^{:go/apos {3 [83 24]} :go/pos {:dot [83 13] :lparen [83 19] :name-pos [83 14] :rparen [83 29]}} (.block ^{:go/pos {:name-pos [83 12]}} m ^{:go/pos {:name-pos [83 20]}} fc false)]
+        ^{:go/apos {3 [84 17]} :go/pos {:return [84 2]}} (return ^{:go/pos {:name-pos [84 9]}} e ^{:go/pos {:name-pos [84 12]}} env true)))))
+
+
+
+
+^{:go/pos {:doc [87 1] :func [89 1] :lbrace [89 43] :rbrace [111 1]}} (go/method ^{:go/pos {:name-pos [89 19]}} callReturned "callReturned resumes a thread whose foreign call returned (resumeThread): its result in its return registers, an\nexception thrown to it meanwhile raised now that it accepts one.\n" ^{:go/pos {:closing [89 41] :opening [89 31] :recv-closing [89 17] :recv-opening [89 6]}} [^{:tag ^{:go/pos {:star [89 9]}} (* ^{:go/pos {:name-pos [89 10]}} Machine) :go/pos {:name-pos [89 7]}} m ^{:tag ^{:go/pos {:star [89 35]}} (* ^{:go/pos {:name-pos [89 36]}} fcall) :go/pos {:name-pos [89 32]}} fc]
+  ^{:go/pos {:tok-pos [90 12]}} (dec! ^{:go/pos {:dot [90 3] :name-pos [90 4]}} (.-inflight ^{:go/pos {:name-pos [90 2]}} m))
+  ^{:go/pos {:if [91 2] :lbrace [91 21] :rbrace [93 2]}} (when ^{:go/apos {2 [91 17]} :go/pos {:op-pos [91 14]}} (!= ^{:go/pos {:dot [91 7] :name-pos [91 8]}} (.-after ^{:go/pos {:name-pos [91 5]}} fc) nil)
+    ^{:go/pos {:lparen [92 11] :rparen [92 13]}} (^{:go/pos {:dot [92 5] :name-pos [92 6]}} (.-after ^{:go/pos {:name-pos [92 3]}} fc) ^{:go/pos {:name-pos [92 12]}} m))
+
+  (let [^{:go/pos {:name-pos [94 2] :tok-pos [94 4]}} t ^{:go/pos {:dot [94 9] :name-pos [94 10]}} (.-t ^{:go/pos {:name-pos [94 7]}} fc)]
+    ^{:go/pos {:if [95 2] :lbrace [95 36] :rbrace [97 2]}} (when ^{:go/pos {:op-pos [95 12]}} (or ^{:go/pos {:dot [95 6] :name-pos [95 7]}} (.-done ^{:go/pos {:name-pos [95 5]}} t) ^{:go/pos {:op-pos [95 25]}} (!= ^{:go/pos {:dot [95 16] :name-pos [95 17]}} (.-blocked ^{:go/pos {:name-pos [95 15]}} t) ^{:go/pos {:lparen [95 31] :rparen [95 34]}} (conv ^{:go/pos {:name-pos [95 28]}} any ^{:go/pos {:name-pos [95 32]}} fc)))
+      ^{:go/pos {:return [96 3]}} (return)) ; deleted at shutdown (exitScheduler): the call returned into a stopped RTS
+
+    ^{:go/pos {:else-lbrace [100 9] :else-rbrace [102 2] :if [98 2] :lbrace [98 19] :rbrace [100 2]}} (if ^{:go/apos {2 [98 15]} :go/pos {:op-pos [98 12]}} (== ^{:go/pos {:dot [98 7] :name-pos [98 8]}} (.-res ^{:go/pos {:name-pos [98 5]}} fc) "v")
+      ^{:go/pos {:tok-pos [99 13]}} (set! (values ^{:go/pos {:dot [99 4] :name-pos [99 5]}} (.-r ^{:go/pos {:name-pos [99 3]}} t) ^{:go/pos {:dot [99 9] :name-pos [99 10]}} (.-rs ^{:go/pos {:name-pos [99 8]}} t)) ^{:go/apos {1 [99 15]}} (values nil ^{:go/pos {:lbrace [99 27] :rbrace [99 28]}} (lit ^{:go/pos {:lbrack [99 20]}} (slice ^{:go/pos {:name-pos [99 22]}} Value))))
+
+      ^{:go/pos {:tok-pos [101 13]}} (set! (values ^{:go/pos {:dot [101 4] :name-pos [101 5]}} (.-r ^{:go/pos {:name-pos [101 3]}} t) ^{:go/pos {:dot [101 9] :name-pos [101 10]}} (.-rs ^{:go/pos {:name-pos [101 8]}} t)) ^{:go/apos {2 [101 38]}} (values ^{:go/pos {:lparen [101 22] :rparen [101 35]}} (^{:go/pos {:name-pos [101 15]}} convRes ^{:go/pos {:dot [101 25] :name-pos [101 26]}} (.-r ^{:go/pos {:name-pos [101 23]}} fc) ^{:go/pos {:dot [101 31] :name-pos [101 32]}} (.-res ^{:go/pos {:name-pos [101 29]}} fc)) nil)))
+
+    ^{:go/pos {:dot [103 3] :lparen [103 8] :name-pos [103 4] :rparen [103 10]}} (.wake ^{:go/pos {:name-pos [103 2]}} m ^{:go/pos {:name-pos [103 9]}} t)
+    ^{:go/pos {:if [104 2] :lbrace [104 17] :rbrace [110 2]}} (when ^{:go/apos {2 [104 15]} :go/pos {:op-pos [104 12]}} (== ^{:go/pos {:dot [104 6] :name-pos [104 7]}} (.-mask ^{:go/pos {:name-pos [104 5]}} t) 0)
+      ^{:go/pos {:if [105 3] :lbrace [105 39] :rbrace [109 3]}} (when [^{:go/pos {:name-pos [105 6] :tok-pos [105 10]}} msg ^{:go/pos {:lparen [105 23] :rparen [105 25]}} (^{:go/pos {:name-pos [105 13]}} pendingFor ^{:go/pos {:name-pos [105 24]}} t)] ^{:go/apos {2 [105 35]} :go/pos {:op-pos [105 32]}} (!= ^{:go/pos {:name-pos [105 28]}} msg nil)
+        ^{:go/apos {2 [106 15]} :go/pos {:tok-pos [106 13]}} (set! ^{:go/pos {:dot [106 7] :name-pos [106 8]}} (.-done ^{:go/pos {:name-pos [106 4]}} msg) true)
+        ^{:go/pos {:dot [107 5] :lparen [107 15] :name-pos [107 6] :rparen [107 19]}} (.throwDone ^{:go/pos {:name-pos [107 4]}} m ^{:go/pos {:name-pos [107 16]}} msg)
+        ^{:go/pos {:dot [108 5] :lparen [108 13] :name-pos [108 6] :rparen [108 22]}} (.raiseIn ^{:go/pos {:name-pos [108 4]}} m ^{:go/pos {:name-pos [108 14]}} t ^{:go/pos {:dot [108 20] :name-pos [108 21]}} (.-x ^{:go/pos {:name-pos [108 17]}} msg))))))
+
+
+
+
+
+^{:go/pos {:doc [113 1] :func [114 1] :lbrace [114 32] :rbrace [123 1]}} (go/method ^{:go/pos {:name-pos [114 19]}} drainCalls "drainCalls resumes the threads whose calls have returned, without waiting.\n" ^{:go/pos {:closing [114 30] :opening [114 29] :recv-closing [114 17] :recv-opening [114 6]}} [^{:tag ^{:go/pos {:star [114 9]}} (* ^{:go/pos {:name-pos [114 10]}} Machine) :go/pos {:name-pos [114 7]}} m]
+  ^{:go/pos {:for [115 2] :lbrace [115 21] :rbrace [122 2]}} (while ^{:go/apos {2 [115 19]} :go/pos {:op-pos [115 17]}} (> ^{:go/pos {:dot [115 7] :name-pos [115 8]}} (.-inflight ^{:go/pos {:name-pos [115 6]}} m) 0)
+    ^{:go/pos {:lbrace [116 10] :rbrace [121 3] :select [116 3]}} (select
+      ^{:go/pos {:case [117 3] :colon [117 23]}} (case [^{:go/pos {:name-pos [117 8] :tok-pos [117 11]}} fc ^{:go/pos {:op-pos [117 14]}} (<! ^{:go/pos {:dot [117 17] :name-pos [117 18]}} (.-fdone ^{:go/pos {:name-pos [117 16]}} m))]
+        ^{:go/pos {:dot [118 5] :lparen [118 18] :name-pos [118 6] :rparen [118 21]}} (.callReturned ^{:go/pos {:name-pos [118 4]}} m ^{:go/pos {:name-pos [118 19]}} fc))
+      ^{:go/pos {:case [119 3] :colon [119 10]}} (default
+        ^{:go/pos {:return [120 4]}} (return)))))
+
+
+
+
+
+^{:go/pos {:doc [125 1] :func [126 1] :lbrace [126 50] :rbrace [140 1]}} (go/method ^{:go/pos {:name-pos [126 19]}} waitCall "waitCall waits for a foreign call to return, at most d (d < 0: no limit); whether one did.\n" ^{:tag ^{:go/pos {:name-pos [126 45]}} bool :go/pos {:closing [126 43] :opening [126 27] :recv-closing [126 17] :recv-opening [126 6]}} [^{:tag ^{:go/pos {:star [126 9]}} (* ^{:go/pos {:name-pos [126 10]}} Machine) :go/pos {:name-pos [126 7]}} m ^{:tag ^{:go/pos {:dot [126 34] :name-pos [126 35] :x-pos [126 30]}} time/Duration :go/pos {:name-pos [126 28]}} d]
+  ^{:go/pos {:if [127 2] :lbrace [127 11] :rbrace [130 2]}} (when ^{:go/apos {2 [127 9]} :go/pos {:op-pos [127 7]}} (< ^{:go/pos {:name-pos [127 5]}} d 0)
+    ^{:go/pos {:dot [128 4] :lparen [128 17] :name-pos [128 5] :rparen [128 27]}} (.callReturned ^{:go/pos {:name-pos [128 3]}} m ^{:go/pos {:op-pos [128 18]}} (<! ^{:go/pos {:dot [128 21] :name-pos [128 22]}} (.-fdone ^{:go/pos {:name-pos [128 20]}} m)))
+    ^{:go/apos {1 [129 10]} :go/pos {:return [129 3]}} (return true))
+
+  (let [^{:go/pos {:name-pos [131 2] :tok-pos [131 5]}} tm ^{:go/pos {:lparen [131 21] :rparen [131 23]}} (^{:go/pos {:dot [131 12] :name-pos [131 13] :x-pos [131 8]}} time/NewTimer ^{:go/pos {:name-pos [131 22]}} d)]
+    ^{:go/pos {:defer [132 2]}} (defer ^{:go/pos {:dot [132 10] :lparen [132 15] :name-pos [132 11] :rparen [132 16]}} (.Stop ^{:go/pos {:name-pos [132 8]}} tm))
+    ^{:go/pos {:lbrace [133 9] :rbrace [139 2] :select [133 2]}} (select
+      ^{:go/pos {:case [134 2] :colon [134 22]}} (case [^{:go/pos {:name-pos [134 7] :tok-pos [134 10]}} fc ^{:go/pos {:op-pos [134 13]}} (<! ^{:go/pos {:dot [134 16] :name-pos [134 17]}} (.-fdone ^{:go/pos {:name-pos [134 15]}} m))]
+        ^{:go/pos {:dot [135 4] :lparen [135 17] :name-pos [135 5] :rparen [135 20]}} (.callReturned ^{:go/pos {:name-pos [135 3]}} m ^{:go/pos {:name-pos [135 18]}} fc)
+        ^{:go/apos {1 [136 10]} :go/pos {:return [136 3]}} (return true))
+      ^{:go/pos {:case [137 2] :colon [137 13]}} (case ^{:go/pos {:op-pos [137 7]}} (<! ^{:go/pos {:dot [137 11] :name-pos [137 12]}} (.-C ^{:go/pos {:name-pos [137 9]}} tm))
+        ^{:go/apos {1 [138 10]} :go/pos {:return [138 3]}} (return false)))))
+
+
+
+;; ---- capabilities ----
+
+
+^{:go/pos {:doc [144 1] :func [145 1] :lbrace [145 33] :rbrace [147 1] :return [146 2]}} (go/method ^{:go/pos {:name-pos [145 19]}} maxCaps "maxCaps is max_n_capabilities: the larger of -N and the host's processors.\n" ^{:tag ^{:go/pos {:name-pos [145 29]}} int :go/pos {:closing [145 27] :opening [145 26] :recv-closing [145 17] :recv-opening [145 6]}} [^{:tag ^{:go/pos {:star [145 9]}} (* ^{:go/pos {:name-pos [145 10]}} Machine) :go/pos {:name-pos [145 7]}} m]
+  ^{:go/pos {:lparen [146 12] :rparen [146 39]}} (^{:go/pos {:name-pos [146 9]}} max ^{:go/pos {:dot [146 14] :name-pos [146 15]}} (.-nCaps0 ^{:go/pos {:name-pos [146 13]}} m) ^{:go/pos {:lparen [146 37] :rparen [146 38]}} (^{:go/pos {:dot [146 30] :name-pos [146 31] :x-pos [146 23]}} runtime/NumCPU)))
+
+
+
+^{:go/pos {:doc [149 1] :func [150 1] :lbrace [150 47] :rbrace [172 1]}} (go/method ^{:go/pos {:name-pos [150 19]}} setNumCapabilities "setNumCapabilities is the RTS's (Schedule.c): the non-threaded RTS refuses any count but 1.\n" ^{:go/pos {:closing [150 45] :opening [150 37] :recv-closing [150 17] :recv-opening [150 6]}} [^{:tag ^{:go/pos {:star [150 9]}} (* ^{:go/pos {:name-pos [150 10]}} Machine) :go/pos {:name-pos [150 7]}} m ^{:tag ^{:go/pos {:name-pos [150 40]}} int64 :go/pos {:name-pos [150 38]}} n]
+  ^{:go/pos {:if [151 2] :lbrace [151 17] :rbrace [156 2]}} (when ^{:go/pos {:op-pos [151 5]}} (not ^{:go/pos {:dot [151 7] :name-pos [151 8]}} (.-Threaded ^{:go/pos {:name-pos [151 6]}} m))
+    ^{:go/pos {:if [152 3] :lbrace [152 13] :rbrace [154 3]}} (when ^{:go/apos {2 [152 11]} :go/pos {:op-pos [152 8]}} (!= ^{:go/pos {:name-pos [152 6]}} n 1)
+      ^{:go/apos {2 [153 26]} :go/pos {:lparen [153 15] :rparen [153 103]}} (^{:go/pos {:dot [153 7] :name-pos [153 8] :x-pos [153 4]}} fmt/Fprintf ^{:go/pos {:dot [153 17] :name-pos [153 18]}} (.-Stderr ^{:go/pos {:name-pos [153 16]}} m) "%s: setNumCapabilities: not supported in the non-threaded RTS\n" ^{:go/pos {:dot [153 94] :name-pos [153 95]}} (.-ProgName ^{:go/pos {:name-pos [153 93]}} m)))
+
+    ^{:go/pos {:return [155 3]}} (return))
+
+  ^{:go/pos {:if [157 2] :lbrace [157 26] :rbrace [159 2]}} (when ^{:go/pos {:op-pos [157 7]}} (== ^{:go/pos {:name-pos [157 5]}} n ^{:go/pos {:lparen [157 15] :rparen [157 24]}} (conv ^{:go/pos {:name-pos [157 10]}} int64 ^{:go/pos {:dot [157 17] :lparen [157 22] :name-pos [157 18] :rparen [157 23]}} (.caps ^{:go/pos {:name-pos [157 16]}} m)))
+    ^{:go/pos {:return [158 3]}} (return))
+
+  ^{:go/pos {:if [160 2] :lbrace [160 12] :rbrace [163 2]}} (when ^{:go/apos {2 [160 10]} :go/pos {:op-pos [160 7]}} (<= ^{:go/pos {:name-pos [160 5]}} n 0)
+    ^{:go/apos {2 [161 25]} :go/pos {:lparen [161 14] :rparen [161 98]}} (^{:go/pos {:dot [161 6] :name-pos [161 7] :x-pos [161 3]}} fmt/Fprintf ^{:go/pos {:dot [161 16] :name-pos [161 17]}} (.-Stderr ^{:go/pos {:name-pos [161 15]}} m) "%s: setNumCapabilities: Capability count must be positive\n" ^{:go/pos {:dot [161 89] :name-pos [161 90]}} (.-ProgName ^{:go/pos {:name-pos [161 88]}} m))
+    ^{:go/pos {:return [162 3]}} (return))
+
+  ^{:go/pos {:if [164 2] :lbrace [164 38] :rbrace [167 2]}} (when [^{:go/pos {:name-pos [164 5] :tok-pos [164 8]}} mx ^{:go/pos {:dot [164 12] :lparen [164 20] :name-pos [164 13] :rparen [164 21]}} (.maxCaps ^{:go/pos {:name-pos [164 11]}} m)] ^{:go/pos {:op-pos [164 26]}} (> ^{:go/pos {:name-pos [164 24]}} n ^{:go/pos {:lparen [164 33] :rparen [164 36]}} (conv ^{:go/pos {:name-pos [164 28]}} int64 ^{:go/pos {:name-pos [164 34]}} mx))
+    ^{:go/apos {2 [165 25]} :go/pos {:lparen [165 14] :rparen [165 155]}} (^{:go/pos {:dot [165 6] :name-pos [165 7] :x-pos [165 3]}} fmt/Fprintf ^{:go/pos {:dot [165 16] :name-pos [165 17]}} (.-Stderr ^{:go/pos {:name-pos [165 15]}} m) "%s: setNumCapabilities: Attempt to increase capability count beyond maximum capability count %d; clamping...\n\n" ^{:go/pos {:dot [165 142] :name-pos [165 143]}} (.-ProgName ^{:go/pos {:name-pos [165 141]}} m) ^{:go/pos {:name-pos [165 153]}} mx)
+    ^{:go/pos {:tok-pos [166 5]}} (set! ^{:go/pos {:name-pos [166 3]}} n ^{:go/pos {:lparen [166 12] :rparen [166 15]}} (conv ^{:go/pos {:name-pos [166 7]}} int64 ^{:go/pos {:name-pos [166 13]}} mx)))
+
+  ^{:go/pos {:tok-pos [168 10]}} (set! ^{:go/pos {:dot [168 3] :name-pos [168 4]}} (.-nCaps ^{:go/pos {:name-pos [168 2]}} m) ^{:go/pos {:lparen [168 15] :rparen [168 17]}} (conv ^{:go/pos {:name-pos [168 12]}} int ^{:go/pos {:name-pos [168 16]}} n))
+  ^{:go/pos {:if [169 2] :lbrace [169 21] :rbrace [171 2]}} (when ^{:go/apos {2 [169 19]} :go/pos {:op-pos [169 16]}} (!= ^{:go/pos {:dot [169 6] :name-pos [169 7]}} (.-capsAddr ^{:go/pos {:name-pos [169 5]}} m) 0)
+    ^{:go/pos {:dot [170 8] :lparen [170 16] :name-pos [170 9] :rparen [170 38]}} (.Store32 ^{:go/pos {:dot [170 4] :name-pos [170 5]}} (.-Mem ^{:go/pos {:name-pos [170 3]}} m) ^{:go/pos {:dot [170 18] :name-pos [170 19]}} (.-capsAddr ^{:go/pos {:name-pos [170 17]}} m) ^{:go/pos {:lparen [170 35] :rparen [170 37]}} (conv ^{:go/pos {:name-pos [170 29]}} uint32 ^{:go/pos {:name-pos [170 36]}} n))))
+
+
+
+
+^{:go/pos {:doc [174 1] :func [175 1] :lbrace [175 30] :rbrace [180 1] :return [179 2]}} (go/method ^{:go/pos {:name-pos [175 19]}} caps "caps is enabled_capabilities.\n" ^{:tag ^{:go/pos {:name-pos [175 26]}} int :go/pos {:closing [175 24] :opening [175 23] :recv-closing [175 17] :recv-opening [175 6]}} [^{:tag ^{:go/pos {:star [175 9]}} (* ^{:go/pos {:name-pos [175 10]}} Machine) :go/pos {:name-pos [175 7]}} m]
+  ^{:go/pos {:if [176 2] :lbrace [176 17] :rbrace [178 2]}} (when ^{:go/apos {2 [176 15]} :go/pos {:op-pos [176 13]}} (< ^{:go/pos {:dot [176 6] :name-pos [176 7]}} (.-nCaps ^{:go/pos {:name-pos [176 5]}} m) 1)
+    ^{:go/apos {1 [177 10]} :go/pos {:return [177 3]}} (return 1))
+
+  ^{:go/pos {:dot [179 10] :name-pos [179 11]}} (.-nCaps ^{:go/pos {:name-pos [179 9]}} m))
+
+
+
+^{:go/pos {:doc [182 1] :func [183 1] :lbrace [183 42] :rbrace [188 1]}} (go/method ^{:go/pos {:name-pos [183 19]}} SetCapabilities "SetCapabilities is +RTS -N's count (the threaded way's; 0: the default, 1).\n" ^{:go/pos {:closing [183 40] :opening [183 34] :recv-closing [183 17] :recv-opening [183 6]}} [^{:tag ^{:go/pos {:star [183 9]}} (* ^{:go/pos {:name-pos [183 10]}} Machine) :go/pos {:name-pos [183 7]}} m ^{:tag ^{:go/pos {:name-pos [183 37]}} int :go/pos {:name-pos [183 35]}} n]
+  ^{:go/pos {:if [184 2] :lbrace [184 11] :rbrace [186 2]}} (when ^{:go/apos {2 [184 9]} :go/pos {:op-pos [184 7]}} (< ^{:go/pos {:name-pos [184 5]}} n 1)
+    ^{:go/apos {2 [185 7]} :go/pos {:tok-pos [185 5]}} (set! ^{:go/pos {:name-pos [185 3]}} n 1))
+
+  ^{:go/pos {:tok-pos [187 20]}} (set! (values ^{:go/pos {:dot [187 3] :name-pos [187 4]}} (.-nCaps ^{:go/pos {:name-pos [187 2]}} m) ^{:go/pos {:dot [187 12] :name-pos [187 13]}} (.-nCaps0 ^{:go/pos {:name-pos [187 11]}} m)) (values ^{:go/pos {:name-pos [187 22]}} n ^{:go/pos {:name-pos [187 25]}} n)))
+
+
+
+
+^{:go/apos {5 [196 9]} :go/pos {:doc [190 1] :func [192 1] :lbrace [192 42] :rbrace [197 1] :return [196 2]}} (go/method ^{:go/pos {:name-pos [192 19]}} capOf "capOf is the capability a thread is on: a locked thread's (forkOn's number modulo the count), else 0 (hsi's one\nevaluator runs every thread on the first capability).\n" ^{:tag ^{:go/pos {:name-pos [192 36]}} int64 :go/pos {:closing [192 34] :opening [192 24] :recv-closing [192 17] :recv-opening [192 6]}} [^{:tag ^{:go/pos {:star [192 9]}} (* ^{:go/pos {:name-pos [192 10]}} Machine) :go/pos {:name-pos [192 7]}} m ^{:tag ^{:go/pos {:star [192 27]}} (* ^{:go/pos {:name-pos [192 28]}} Thread) :go/pos {:name-pos [192 25]}} t]
+  ^{:go/pos {:if [193 2] :lbrace [193 14] :rbrace [195 2]}} (when ^{:go/pos {:dot [193 6] :name-pos [193 7]}} (.-locked ^{:go/pos {:name-pos [193 5]}} t)
+    ^{:go/pos {:return [194 3]}} (return ^{:go/pos {:lparen [194 15] :rparen [194 32]}} (conv ^{:go/pos {:name-pos [194 10]}} int64 ^{:go/pos {:op-pos [194 22]}} (% ^{:go/pos {:dot [194 17] :name-pos [194 18]}} (.-cap ^{:go/pos {:name-pos [194 16]}} t) ^{:go/pos {:dot [194 25] :lparen [194 30] :name-pos [194 26] :rparen [194 31]}} (.caps ^{:go/pos {:name-pos [194 24]}} m)))))
+
+  0)
+
+
+;; ---- sparks ----
+
+^{:go/apos {2 [201 19]} :go/pos {:tok-pos [201 1]}} (go/const ^{:val 4096 :go/pos {:name-pos [201 7]}} maxSparks 4096)
+
+
+
+^{:go/pos {:doc [203 1] :func [205 1] :lbrace [205 34] :rbrace [217 1]}} (go/method ^{:go/pos {:name-pos [205 19]}} spark "spark adds a closure to the pool (newSpark): only an unevaluated one (an evaluated one fizzles, a dud), dropped when\nthe pool is full (an overflow); the non-threaded RTS has no pool.\n" ^{:go/pos {:closing [205 32] :opening [205 24] :recv-closing [205 17] :recv-opening [205 6]}} [^{:tag ^{:go/pos {:star [205 9]}} (* ^{:go/pos {:name-pos [205 10]}} Machine) :go/pos {:name-pos [205 7]}} m ^{:tag ^{:go/pos {:name-pos [205 27]}} Value :go/pos {:name-pos [205 25]}} v]
+  ^{:go/pos {:if [206 2] :lbrace [206 17] :rbrace [208 2]}} (when ^{:go/pos {:op-pos [206 5]}} (not ^{:go/pos {:dot [206 7] :name-pos [206 8]}} (.-Threaded ^{:go/pos {:name-pos [206 6]}} m))
+    ^{:go/pos {:return [207 3]}} (return))
+
+  (let [^{:go/pos {:tok-pos [209 9]}} (values ^{:go/pos {:name-pos [209 2]}} th ^{:go/pos {:name-pos [209 6]}} ok) ^{:go/pos {:dot [209 13] :lparen [209 14] :rparen [209 21]}} (assert ^{:go/pos {:star [209 15]}} (* ^{:go/pos {:name-pos [209 16]}} Thunk) ^{:go/pos {:name-pos [209 12]}} v)]
+    ^{:go/pos {:if [210 2] :lbrace [210 24] :rbrace [212 2]}} (when ^{:go/pos {:op-pos [210 9]}} (or ^{:go/pos {:op-pos [210 5]}} (not ^{:go/pos {:name-pos [210 6]}} ok) ^{:go/apos {2 [210 20]} :go/pos {:op-pos [210 17]}} (== ^{:go/pos {:dot [210 14] :name-pos [210 15]}} (.-L ^{:go/pos {:name-pos [210 12]}} th) nil))
+      ^{:go/pos {:return [211 3]}} (return))
+
+    ^{:go/pos {:if [213 2] :lbrace [213 32] :rbrace [215 2]}} (when ^{:go/pos {:op-pos [213 19]}} (>= ^{:go/pos {:lparen [213 8] :rparen [213 17]}} (^{:go/pos {:name-pos [213 5]}} len ^{:go/pos {:dot [213 10] :name-pos [213 11]}} (.-sparks ^{:go/pos {:name-pos [213 9]}} m)) ^{:go/pos {:name-pos [213 22]}} maxSparks)
+      ^{:go/pos {:return [214 3]}} (return))
+
+    ^{:go/pos {:tok-pos [216 11]}} (set! ^{:go/pos {:dot [216 3] :name-pos [216 4]}} (.-sparks ^{:go/pos {:name-pos [216 2]}} m) ^{:go/pos {:lparen [216 19] :rparen [216 32]}} (^{:go/pos {:name-pos [216 13]}} append ^{:go/pos {:dot [216 21] :name-pos [216 22]}} (.-sparks ^{:go/pos {:name-pos [216 20]}} m) ^{:go/pos {:name-pos [216 30]}} th))))
+
+
+
+^{:go/apos {6 [230 9]} :go/pos {:doc [219 1] :func [220 1] :lbrace [220 38] :rbrace [231 1] :return [230 2]}} (go/method ^{:go/pos {:name-pos [220 19]}} nextSpark "nextSpark is the oldest spark still unevaluated, taken from the pool (findSpark: the fizzled ones dropped), or nil.\n" ^{:tag ^{:go/pos {:star [220 31]}} (* ^{:go/pos {:name-pos [220 32]}} Thunk) :go/pos {:closing [220 29] :opening [220 28] :recv-closing [220 17] :recv-opening [220 6]}} [^{:tag ^{:go/pos {:star [220 9]}} (* ^{:go/pos {:name-pos [220 10]}} Machine) :go/pos {:name-pos [220 7]}} m]
+  ^{:go/pos {:for [221 2] :lbrace [221 24] :rbrace [228 2]}} (while ^{:go/apos {2 [221 22]} :go/pos {:op-pos [221 20]}} (> ^{:go/pos {:lparen [221 9] :rparen [221 18]}} (^{:go/pos {:name-pos [221 6]}} len ^{:go/pos {:dot [221 11] :name-pos [221 12]}} (.-sparks ^{:go/pos {:name-pos [221 10]}} m)) 0)
+    (let [^{:go/pos {:name-pos [222 3] :tok-pos [222 6]}} th ^{:go/apos {2 [222 18]} :go/pos {:lbrack [222 17] :rbrack [222 19]}} (aget ^{:go/pos {:dot [222 10] :name-pos [222 11]}} (.-sparks ^{:go/pos {:name-pos [222 9]}} m) 0)]
+      ^{:go/apos {2 [223 12] 3 [223 17]} :go/pos {:lbrack [223 11] :rbrack [223 13] :tok-pos [223 15]}} (aset ^{:go/pos {:dot [223 4] :name-pos [223 5]}} (.-sparks ^{:go/pos {:name-pos [223 3]}} m) 0 nil)
+      ^{:go/pos {:tok-pos [224 12]}} (set! ^{:go/pos {:dot [224 4] :name-pos [224 5]}} (.-sparks ^{:go/pos {:name-pos [224 3]}} m) ^{:go/apos {2 [224 23]} :go/pos {:lbrack [224 22] :rbrack [224 25]}} (subslice ^{:go/pos {:dot [224 15] :name-pos [224 16]}} (.-sparks ^{:go/pos {:name-pos [224 14]}} m) 1))
+      ^{:go/pos {:if [225 3] :lbrace [225 18] :rbrace [227 3]}} (when ^{:go/apos {2 [225 14]} :go/pos {:op-pos [225 11]}} (!= ^{:go/pos {:dot [225 8] :name-pos [225 9]}} (.-L ^{:go/pos {:name-pos [225 6]}} th) nil)
+        ^{:go/pos {:return [226 4]}} (return ^{:go/pos {:name-pos [226 11]}} th))))
+
+
+  ^{:go/apos {2 [229 13]} :go/pos {:tok-pos [229 11]}} (set! ^{:go/pos {:dot [229 3] :name-pos [229 4]}} (.-sparks ^{:go/pos {:name-pos [229 2]}} m) nil)
+  nil)
+
+
+
+
+^{:go/pos {:doc [233 1] :func [235 1] :lbrace [235 35] :rbrace [242 1] :return [241 2]}} (go/method ^{:go/pos {:name-pos [235 19]}} runSpark "runSpark starts a thread evaluating the next spark when the scheduler is idle (an idle capability's spark thread);\nwhether it did.\n" ^{:tag ^{:go/pos {:name-pos [235 30]}} bool :go/pos {:closing [235 28] :opening [235 27] :recv-closing [235 17] :recv-opening [235 6]}} [^{:tag ^{:go/pos {:star [235 9]}} (* ^{:go/pos {:name-pos [235 10]}} Machine) :go/pos {:name-pos [235 7]}} m]
+  ^{:go/apos {4 [241 9]}} (let [^{:go/pos {:name-pos [236 2] :tok-pos [236 5]}} th ^{:go/pos {:dot [236 9] :lparen [236 19] :name-pos [236 10] :rparen [236 20]}} (.nextSpark ^{:go/pos {:name-pos [236 8]}} m)]
+    ^{:go/pos {:if [237 2] :lbrace [237 15] :rbrace [239 2]}} (when ^{:go/apos {2 [237 11]} :go/pos {:op-pos [237 8]}} (== ^{:go/pos {:name-pos [237 5]}} th nil)
+      ^{:go/apos {1 [238 10]} :go/pos {:return [238 3]}} (return false))
+
+    ^{:go/pos {:dot [240 3] :lparen [240 13] :name-pos [240 4] :rparen [240 25]}} (.newThread ^{:go/pos {:name-pos [240 2]}} m ^{:go/pos {:op-pos [240 14]}} (addr ^{:go/pos {:lbrace [240 21] :rbrace [240 24]}} (lit ^{:go/pos {:name-pos [240 15]}} forceE ^{:go/pos {:name-pos [240 22]}} th)))
+    true))
+
+
+;; ---- bound threads ----
+
+
+
+^{:go/pos {:doc [246 1] :func [248 1] :lbrace [248 49] :rbrace [258 1] :return [257 2]}} (go/method ^{:go/pos {:name-pos [248 19]}} forkOSCreate "forkOSCreate is forkOS_createThread(entry): a bound thread running the IO action the stable pointer entry names\n(OSThreads.c's forkOS_createThreadWrapper, rts_evalStableIO), 0 (success).\n" ^{:tag ^{:go/pos {:name-pos [248 43]}} int64 :go/pos {:closing [248 41] :opening [248 31] :recv-closing [248 17] :recv-opening [248 6]}} [^{:tag ^{:go/pos {:star [248 9]}} (* ^{:go/pos {:name-pos [248 10]}} Machine) :go/pos {:name-pos [248 7]}} m ^{:tag ^{:go/pos {:name-pos [248 35]}} uint64 :go/pos {:name-pos [248 32]}} sp]
+  ^{:go/pos {:if [249 2] :lbrace [249 17] :rbrace [251 2]}} (when ^{:go/pos {:op-pos [249 5]}} (not ^{:go/pos {:dot [249 7] :name-pos [249 8]}} (.-Threaded ^{:go/pos {:name-pos [249 6]}} m))
+    ^{:go/apos {1 [250 10]} :go/pos {:return [250 3]}} (return -1))
+
+  ^{:go/pos {:if [252 2] :lbrace [252 44] :rbrace [254 2]}} (when ^{:go/pos {:op-pos [252 13]}} (or ^{:go/apos {2 [252 11]} :go/pos {:op-pos [252 8]}} (== ^{:go/pos {:name-pos [252 5]}} sp 0) ^{:go/pos {:op-pos [252 19]}} (> ^{:go/pos {:name-pos [252 16]}} sp ^{:go/pos {:lparen [252 27] :rparen [252 42]}} (conv ^{:go/pos {:name-pos [252 21]}} uint64 ^{:go/pos {:lparen [252 31] :rparen [252 41]}} (^{:go/pos {:name-pos [252 28]}} len ^{:go/pos {:dot [252 33] :name-pos [252 34]}} (.-stables ^{:go/pos {:name-pos [252 32]}} m)))))
+    ^{:go/apos {2 [253 11]} :go/pos {:dot [253 4] :lparen [253 10] :name-pos [253 5] :rparen [253 56]}} (.fatal ^{:go/pos {:name-pos [253 3]}} m "forkOS_createThread of a bad stable pointer"))
+
+  ^{:go/apos {3 [257 9]}} (let [^{:go/pos {:name-pos [255 2] :tok-pos [255 4]}} t ^{:go/pos {:dot [255 8] :lparen [255 18] :name-pos [255 9] :rparen [255 66]}} (.newThread ^{:go/pos {:name-pos [255 7]}} m ^{:go/pos {:op-pos [255 19]}} (addr ^{:go/acolon {2 [255 28] 4 [255 51]} :go/apos {2 [255 27] 4 [255 47]} :go/pos {:lbrace [255 26] :rbrace [255 65]}} (lit ^{:go/pos {:name-pos [255 20]}} ApplyV :f ^{:go/pos {:lbrack [255 39] :rbrack [255 44]}} (aget ^{:go/pos {:dot [255 31] :name-pos [255 32]}} (.-stables ^{:go/pos {:name-pos [255 30]}} m) ^{:go/apos {2 [255 43]} :go/pos {:op-pos [255 42]}} (- ^{:go/pos {:name-pos [255 40]}} sp 1)) :args ^{:go/apos {2 [255 61]} :go/pos {:lbrace [255 60] :rbrace [255 64]}} (lit ^{:go/pos {:lbrack [255 53]}} (slice ^{:go/pos {:name-pos [255 55]}} Value) nil))))]
+    ^{:go/apos {2 [256 12]} :go/pos {:tok-pos [256 10]}} (set! ^{:go/pos {:dot [256 3] :name-pos [256 4]}} (.-bound ^{:go/pos {:name-pos [256 2]}} t) true)
+    0))
+
+
+;; ---- shutdown ----
+
+
+
+^{:go/pos {:doc [262 1] :func [264 1] :lbrace [264 47] :rbrace [277 1]}} (go/method ^{:go/pos {:name-pos [264 19]}} exitScheduler "exitScheduler is the threaded RTS's shutdown after the handles are flushed: every other thread deleted (no handler\nruns), those in foreign calls left to return into a stopped RTS.\n" ^{:go/pos {:closing [264 45] :opening [264 32] :recv-closing [264 17] :recv-opening [264 6]}} [^{:tag ^{:go/pos {:star [264 9]}} (* ^{:go/pos {:name-pos [264 10]}} Machine) :go/pos {:name-pos [264 7]}} m ^{:tag ^{:go/pos {:star [264 38]}} (* ^{:go/pos {:name-pos [264 39]}} Thread) :go/pos {:name-pos [264 33]}} keep]
+  ^{:go/pos {:for [265 2] :lbrace [265 26] :range [265 14] :rbrace [272 2] :tok-pos [265 11]}} (range [^{:go/pos {:name-pos [265 6]}} _ ^{:go/pos {:name-pos [265 9]}} t ^{:go/pos {:dot [265 21] :name-pos [265 22]}} (.-all ^{:go/pos {:name-pos [265 20]}} m)]
+    ^{:go/pos {:if [266 3] :lbrace [266 26] :rbrace [268 3]}} (when ^{:go/pos {:op-pos [266 16]}} (or ^{:go/pos {:op-pos [266 8]}} (== ^{:go/pos {:name-pos [266 6]}} t ^{:go/pos {:name-pos [266 11]}} keep) ^{:go/pos {:dot [266 20] :name-pos [266 21]}} (.-done ^{:go/pos {:name-pos [266 19]}} t))
+      ^{:go/pos {:tok-pos [267 4]}} (continue))
+
+    ^{:go/apos {2 [269 12]} :go/pos {:tok-pos [269 10]}} (set! ^{:go/pos {:dot [269 4] :name-pos [269 5]}} (.-done ^{:go/pos {:name-pos [269 3]}} t) true)
+    ^{:go/apos {2 [270 15]} :go/pos {:tok-pos [270 13]}} (set! ^{:go/pos {:dot [270 4] :name-pos [270 5]}} (.-blocked ^{:go/pos {:name-pos [270 3]}} t) nil)
+    ^{:go/pos {:tok-pos [271 14]}} (set! (values ^{:go/pos {:dot [271 4] :name-pos [271 5]}} (.-e ^{:go/pos {:name-pos [271 3]}} t) ^{:go/pos {:dot [271 9] :name-pos [271 10]}} (.-env ^{:go/pos {:name-pos [271 8]}} t)) ^{:go/apos {1 [271 16] 2 [271 21]}} (values nil nil)))
+
+  ^{:go/pos {:tok-pos [273 9]}} (set! ^{:go/pos {:dot [273 3] :name-pos [273 4]}} (.-runq ^{:go/pos {:name-pos [273 2]}} m) ^{:go/apos {3 [273 19]} :go/pos {:lbrack [273 17] :rbrack [273 20]}} (subslice ^{:go/pos {:dot [273 12] :name-pos [273 13]}} (.-runq ^{:go/pos {:name-pos [273 11]}} m) _ 0))
+  ^{:go/apos {2 [274 12]} :go/pos {:tok-pos [274 10]}} (set! ^{:go/pos {:dot [274 3] :name-pos [274 4]}} (.-sleep ^{:go/pos {:name-pos [274 2]}} m) nil)
+  ^{:go/apos {2 [275 10]} :go/pos {:tok-pos [275 8]}} (set! ^{:go/pos {:dot [275 3] :name-pos [275 4]}} (.-fdw ^{:go/pos {:name-pos [275 2]}} m) nil)
+  ^{:go/apos {2 [276 13]} :go/pos {:tok-pos [276 11]}} (set! ^{:go/pos {:dot [276 3] :name-pos [276 4]}} (.-sparks ^{:go/pos {:name-pos [276 2]}} m) nil))

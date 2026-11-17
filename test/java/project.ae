@@ -18,9 +18,11 @@
     closure-report OUT MODULE ROUNDS LEFT KEPT ROOTS
         the closure's report as data (LEFT: the left-out rows, round, file, cause, name, message;
         KEPT: the files kept; ROOTS: the roots): OUT, an EDN map
-    merge-forms OUT DIR...
+    merge-forms OUT [--shadowed FILE] DIR...
         the modules' forms trees merged into OUT (a package split over modules: its namespace
-        file's loads united)"
+        file's loads united); a class in two trees an error, or with --shadowed (A16) the first
+        tree's, as a class path loads it, a later tree's differing copy listed in FILE (`REL
+        MODULE` a line, MODULE the tree's directory name) and an equal one silent"
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
   (:import (java.io File PushbackReader)))
@@ -43,7 +45,7 @@
 (def ^:private module-keys
   #{:name :src :resources :deps :artifacts :javac :release :artifact :closure :patches})
 
-(def ^:private java-keys #{:release :javac :repository :modules :outside})
+(def ^:private java-keys #{:release :javac :repository :modules :outside :shadow})
 
 (defn- coord-parts [c]
   (let [ps (str/split (str c) #":")]
@@ -106,6 +108,8 @@
           (when-not (some #{d} names) (fail file ": module " (:name md) ": no module " d " (:deps)"))))
       (when-let [dup (seq (for [[n c] (frequencies names) :when (> c 1)] n))]
         (fail file ": modules named twice: " (vec dup)))
+      (when-not (contains? #{nil true false} (:shadow j))
+        (fail file ": :shadow is true (the default: a class in two modules the first's) or false (an error)"))
       j)))
 
 (defn- topo
@@ -181,6 +185,7 @@
       (println (tsv-line "roots" (:roots closure)))
       (println (tsv-line "optional" (:optional closure)))
       (println (tsv-line "patches" (map rp patches)))
+      (println (tsv-line "shadow" [(if (false? (:shadow j)) "no" "yes")]))
       (println "end"))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -258,12 +263,23 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; the forms merged
 
+(defn- class-text
+  "A class's forms without the header line that names its file (MODULE/PATH, --origins): two
+  modules' copies of one class compared."
+  [text]
+  (str/replace-first text #"\A;; Converted from [^\n]*\n" ""))
+
 (defn merge-forms
-  "Merge the forms trees `dirs` into `out`: each class's file copied (a class in two trees is an
-  error), each package's namespace file written once with the loads of every tree."
+  "Merge the forms trees `dirs` into `out`: each class's file copied, each package's namespace
+  file written once with the loads of every tree. A class in two trees is an error; with
+  `--shadowed FILE` first (A16, a class path's order: the plan's) the first tree's, a later
+  differing copy listed in FILE as `REL MODULE` (MODULE the tree's directory name), an equal
+  one (but for its header's file name) silent."
   [out & dirs]
-  (let [out (io/file out)
-        nsfiles (atom {})]
+  (let [[shadowed dirs] (if (= "--shadowed" (first dirs)) [(second dirs) (nnext dirs)] [nil dirs])
+        out (io/file out)
+        nsfiles (atom {})
+        shadows (atom [])]
     (doseq [d dirs
             :let [d (io/file d)
                   dp (.getCanonicalPath d)]
@@ -274,9 +290,13 @@
       (if (re-find #"(?m)^\(ns " text)
         (swap! nsfiles update rel (fnil conj []) text)
         (let [o (io/file out rel)]
-          (when (.exists o) (fail "merge-forms: " rel " in two modules"))
-          (io/make-parents o)
-          (io/copy f o))))
+          (cond
+            (not (.exists o)) (do (io/make-parents o) (io/copy f o))
+            (not shadowed) (fail "merge-forms: " rel " in two modules")
+            (= (class-text text) (class-text (slurp o))) nil
+            :else (swap! shadows conj (str rel " " (.getName d)))))))
+    (when shadowed
+      (spit shadowed (apply str (map #(str % "\n") @shadows))))
     (doseq [[rel texts] @nsfiles
             :let [o (io/file out rel)
                   t (first texts)

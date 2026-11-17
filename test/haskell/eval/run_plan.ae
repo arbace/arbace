@@ -4,7 +4,7 @@
 ;; ID testsuite/DIR/NAME; DIR under the testsuite's tests/; KIND the test's function; MAIN the file GHC is given (NAME.hs
 ;; or NAME.lhs for compile_and_run, NAME.cmm for a cmm_src test, the top module's file for the multi-module ones, also when
 ;; all.T's pre_cmd `{compiler} --run ./GEN.hs` writes it (HES92 (a)); "-" when none is found); FLAGS
-;; the call's flags and extra_hc_opts (one string); RUN-OPTS extra_run_opts; EXIT the expected status (exit_code,
+;; the call's flags and extra_hc_opts (one string; -threaded added for a test all.T runs only in threaded ways, HES84 (a)); RUN-OPTS extra_run_opts; EXIT the expected status (exit_code,
 ;; default 0); an empty field is "-". A test whose name is not a string literal (a loop's) is left out with a note on standard error.
 ;; usage: arbace test/haskell/eval/run_plan.ae TESTSUITE-RUN.edn TESTS-DIR DIRS
 (require '[arbace.string :as s])
@@ -17,6 +17,27 @@
   (some (fn [o] (when (and (seq? o) (= 'pre_cmd (first o)) (string? (second o)))
                   (second (re-matches #"\{compiler\} --run \./(\S+\.l?hs)" (second o)))))
         (if (sequential? opts) opts [opts])))
+
+(defn- threaded-only?
+  "A test whose all.T `only_ways` names threaded ways alone (threaded1, threaded2, nonmoving_thr, profthreaded: every way's name
+  holds \"thr\", bin/lib/hsi/own-verdicts' rule): GHC's testsuite builds it -threaded, so its reference and hsi's run are the
+  threaded RTS's (HES84 (a))"
+  [opts]
+  (some (fn [o] (when (and (seq? o) (= 'only_ways (first o)) (sequential? (second o)) (seq (second o)))
+                  (every? #(and (string? %) (s/includes? % "thr")) (second o))))
+        ;; (one option is the call itself, a list: `(only_ways [...])`)
+        (if (and (seq? opts) (symbol? (first opts))) [opts] (if (sequential? opts) opts [opts]))))
+
+(defn- linux-run-opts
+  "A test's extra_run_opts under a condition on the platform that holds here (x86_64 Linux): `(unless (opsys \"darwin\") ...)`,
+  `(when (opsys \"linux\") ...)` (allt.ae keeps only the unconditional ones as :run-opts; T21651's are conditional, HES84 (a)), or nil"
+  [opts]
+  (let [os? (fn [c] (when (and (seq? c) (= 'opsys (first c)) (string? (second c))) (= "linux" (second c))))]
+    (some (fn [o] (when (and (seq? o) (#{'when 'unless} (first o)))
+                    (let [c (os? (second o)) x (nth o 2 nil)]
+                      (when (and (some? c) (= c (= 'when (first o))) (seq? x) (= 'extra_run_opts (first x)) (string? (second x)))
+                        (second x)))))
+          (if (and (seq? opts) (symbol? (first opts))) [opts] (if (sequential? opts) opts [opts])))))
 
 (let [[runs tests-dir dirs] *command-line-args*
       dirs (when (not= dirs "-") (s/split dirs #","))
@@ -52,7 +73,11 @@
                                                   [(let [o (nth args 2 "")] (if (string? o) o ""))]))
                               (second args))]
                            [nil nil])
-            flags (s/trim (str (if (string? flags) flags "") " " (if (string? hc-opts) hc-opts "")))]
+            flags (s/trim (str (if (string? flags) flags "") " " (if (string? hc-opts) hc-opts "")
+                               ;; HES84 (a): a test all.T runs only in threaded ways is built and run -threaded (its first way's RTS)
+                               (when (and (threaded-only? opts)
+                                          (not (re-find #"(^|\s)-threaded(\s|$)" (str flags " " hc-opts))))
+                                 " -threaded")))]
         (println (s/join "\t" (map #(if (= "" (str %)) "-" %)
                                     [(str "testsuite/" dir "/" name) dir (str func) (or main "-") (clean flags)
-                                     (clean (if (string? run-opts) run-opts "")) (if (integer? exit-code) exit-code 0) name])))))))
+                                     (clean (cond (string? run-opts) run-opts (linux-run-opts opts) (linux-run-opts opts) :else "")) (if (integer? exit-code) exit-code 0) name])))))))

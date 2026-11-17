@@ -2478,3 +2478,62 @@ The design classes (eval 63, print 14):
   the records amended into that commit (expected eval 813 / 61 / 35). With it, rts_clearMemory's row (HES83's night command).
 - **Found beside.** `bin/hsi pins --check` reports testsuite-core's run-tests 743 against the recorded 722 (eval-corpora.edn, last
   changed at 829eb1d4e): not this branch's (the old run_plan.ae gives 743 too).
+
+## As built: HES84 (a), the threaded way (2026-11-17, branch `h-haskell-threaded`)
+
+HES84 (a) (decided 2026-11-08: "then (a)" once the threaded semantics are taken up): the tests all.T runs only in threaded
+ways are built and run `-threaded`, their references the threaded RTS's, and hsi runs them `--threaded` with the threaded RTS's
+semantics, staged (`go/arbace/hs/threaded.ae`, new; made on the printed Go as HE9's port, `bin/hsi runtime print|read`).
+
+- **The plan** (`test/haskell/eval/run_plan.ae`): a test whose `only_ways` are all threaded ways (every name holds "thr", own-verdicts'
+  rule) gets `-threaded` in FLAGS (once): record-ref builds it so, `bin/hsi check` passes `--threaded` (its `-threaded` case), the
+  helper's dump takes the flag (the STG is the same; the key moves). A platform-conditional `extra_run_opts` that holds on x86_64
+  Linux (`unless(opsys('darwin'), ...)`: T21651's `8 12 2000 200`, the only one of the testsuite) is the run's (allt.ae keeps only
+  unconditional options). 37 plan rows change; 13 of the core's recorded tests (T14346 had `-threaded` already).
+- **The references** (GHC 9.14.1 by hand, `bin/hsi record-ref --only` the 13): T10414, T21969, conc037 unchanged in verdict;
+  T21651, conc038, conc059, hs_try_putmvar001, numsparks001, ffi014 now give their shipped outputs (own verdicts: 588 to 594);
+  hs_try_putmvar003 and IncallAffinity status 0; setnumcapabilities001 status 0, "14200" (its .stdout lacks the newline), no
+  stderr; T4262 (skipped) 11. T21969's threaded run takes about 10 s of CPU on a loaded host (the threaded I/O manager's system
+  time): recorded with `HSI_REF_TIMEOUT=30` (twice killed at the default 10). Their STG re-dumped into haskell-stg-progs
+  (`check --live --dump-only --record-progs --only`, 1,127 members: T4262's entry left, skipped before its dump).
+  `test/haskell/threaded-way.tsv` (HES87 (a)) is empty: own-verdicts no longer lists a test the plan builds `-threaded`.
+- **hsi's threaded way** (`--threaded`; nothing changes without it but two answers of the non-threaded RTS, below):
+  - capabilities: `enabled_capabilities` is `+RTS -N`'s (default 1, `-N` alone the processors), `setNumCapabilities` sets it
+    (clamped to the larger of -N and the host's processors, Capability.c's `max_n_capabilities`, with its messages), forkOn's
+    capability its number modulo the count (`threadStatus#`'s second field). Stage 1: the Haskell threads are evaluated by one
+    goroutine, every thread on the capability in turn; no two Haskell threads run in parallel (no judged output depends on it).
+  - safe foreign calls release the capability (Schedule.c's suspendThread/resumeThread): the STG's SAFETY is kept on the call
+    (`FFIE.safe`, in the images: `imgMagic` `hsimg\x09`), and a safe call to a host function that only blocks (`sleep`, `usleep`,
+    `nanosleep`) runs on a goroutine of its own, its thread BlockedOnCCall (`threadStatus#` 10) while the others run; the scheduler
+    takes the returns between slices and waits on them when idle (with the delays' and descriptors' deadlines); an asynchronous
+    exception thrown to the thread waits for the return (a non-interruptible call), then is raised; such a thread is a root of the
+    collector. Unsafe calls, and safe calls into the program's own C (ci's interpreter is the machine's), keep the capability.
+  - bound threads: the main thread, forkOS's (`forkOS_createThread`: a thread running the stable pointer's IO action) and the in-calls'
+    threads are bound (`isCurrentThreadBound#`). `rtsSupportsBoundThreads` answers 1 to GHC.Internal.Conc.Bound and the program's own
+    modules, and 0 to the I/O manager's (GHC.Internal.Conc.IO's threadDelay and threadWaitRead, IO.FD, System.Timeout, the signals;
+    the call compiled to the pseudo-symbol `rtsSupportsBoundThreads/io-manager` by the binding's module): hsi's I/O manager stays
+    the non-threaded RTS's awaitEvent over `delay#`, `waitRead#`, `waitWrite#` in both ways (the threaded RTS's Haskell event manager
+    over epoll is not ported: the same waits by another mechanism; a design point for a later stage).
+  - sparks: `par#`/`spark#` put an unevaluated closure in a pool of at most 4096 (`maxLocalSparks`; an evaluated one fizzles),
+    `numSparks#` its size, `getSpark#` takes the oldest; an idle scheduler runs one on a thread of its own (an idle capability's
+    spark thread); the pool is a root.
+  - shutdown: hs_exit and the end of main delete every other thread before the handles are flushed (exitScheduler; GHC flushes
+    first, with the others possibly running on other capabilities: an order no output of the corpora depends on), the threads in
+    foreign calls left to return into a stopped RTS (their returns dropped).
+  - the non-threaded RTS (no `--threaded`): `setNumCapabilities` n ≠ 1 now prints its errorBelch ("setNumCapabilities: not supported
+    in the non-threaded RTS"), as Schedule.c does; the rest as before (sparks dropped, `isCurrentThreadBound#` 0).
+- **Results** (`bin/hsi check --only` the 13 and the controls' subjects, `ARBACE_MEM_GIB=2`, T21969 at 16 by `HSI_MEM_CAPS`, ffi014
+  at 3: its 2 GiB run lost the memory race on a loaded host, 0.7 GB resident at 3; recorded): conc037, conc038, conc059, numsparks001,
+  ffi014 pass (own verdicts); T10414, T21969 still pass; T21651 and setnumcapabilities001 pass with no CPU limit (273 and 271 s of
+  wall at load 64, `HSI_TIMEOUT=500`) and stop at the 60 s limit: `:speed`; hs_try_putmvar003 moves to `:test-c` (its C threads never
+  call back: NonTermination, as hs_try_putmvar001); IncallAffinity stays `:test-c`; T3279 stays alone in `:rts` (HES56). The
+  classes `:threaded-only` and `:threaded-way` (eval and AOT) are empty and removed. AOT: ffi014 passes (`check --aot --only`).
+  `bin/hsi divergences`: 909 programs, **817 pass**, 92 in a class (eval 812 / 62 / 35 to 817 / 62 / 30); AOT 137 / 1 / 1 to
+  138 / 1 / 0. A new negative control, conc038 against conc037's reference, fails as it must.
+- **Where it may meet the Mac's tasks 332 (Cmm) and 333 (hsi speed)**: `machine.ae`'s `schedule` and `Run`/`shutdown` (the returns'
+  polling, the threaded shutdown), `nodes.ae`'s `FFIE.eval` (one test of `safe` before the call), `compile.ae`'s `ffi` (SAFETY,
+  the I/O manager's symbol), `image.ae` (the FFIE's safe byte and the magic `\x09`: a speed branch that bumps the magic too must
+  take the next number), `prim_ctl.ae` (`threadStatus#` now a `pc` primop, the sparks), `rts.ae` (`accepts`, the collector's roots).
+- **Left** (stages 2 onward): Haskell threads in parallel on capabilities (the machine's state is one goroutine's); safe calls into
+  the program's own C off the machine (ci's state); the threaded event manager; interruptible calls (`interruptible` FFI's
+  pthread_kill); C threads calling back (`:test-c`, HES68).

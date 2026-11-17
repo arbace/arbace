@@ -10219,6 +10219,98 @@ bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no 
   corpus tests; the rest of JAVA-DEFERRED-TRIAGE.md's 154 ids (a sample of 12 of them, `bin/java-check --levels interp --list`
   on the gate build: 11 now passing against `check-interp.edn`, t04706, StackTraceSerialization, still failing in the serialization
   class (JCS167); none regress).
+## 2026-11-17: the Ghidra demo's G2, light: A16 (classes shadowed in class-path order) and A18 (forName without initialization) (branch `h-g2-arbace`, from next `55e8c0ae7`)
+
+- The user's decisions GH13-GH20 all (a) (the demo's `plan/G2.md` §8, branch `g2-plan`). `bin/java-project`'s resource
+  shadowing (`7fcffa2b4`, on `f26-ghidra`) cherry-picked first, its journal entry left there.
+- **A16** (GH14 (a)): a class in two modules' forms is the first module's in the plan's order, as a class path loads it
+  (`java.project`'s `merge-forms --shadowed`: a later differing copy listed in `WORK/classes.shadowed`, `REL MODULE` a line; an
+  equal copy, but for its header's file name, silent); `:shadow false` in `:java` keeps the error. javac's class path and source
+  path already took the modules in that order. Fixture `test/java/project/controls/shadow.edn` (Version differs, Same equal,
+  OldOnly the old module's) and the controls (the later copy absent from `forms.all`; `shadow-off.edn` fails naming the class):
+  `bin/java-project test` 35 of 35 (31 before, plus the case, two controls and the message). For the demo: hamcrest 2.2 before hamcrest-core 1.3 (Generic's
+  tests: one class, `util.CollectionUtilsTest`, uses 2.2's API, the demo's census `census/g2.edn`). Alternative: hamcrest 2.2 alone
+  with JUnit patched (GH14 (b)), or the class classed (c).
+- **A18**: verified, nothing to build. jrt's `Class_ForName_String_Z_ClassLoader__Class` runs `Init` only under its initialize
+  argument, the registry lookup `ForName` none; `arbace.j2g.start`'s classes initialized at start are the runtime's alone.
+  `bin/j2g-unit`'s `test-forname` over the fixture `test/j2g/unit/forname/f/Lazy.java` (its forms; stand-ins of Class's
+  interfaces beside it): the analysis keeps the argument, the call is that function, the initializer is code, the control
+  (`Class.forName(String)` runs Init unguarded) seen; 9 of 9. The run: `test/programs/reflect-meta`'s `rm.Lazy` (two lines
+  added to `runs/main.out`, the JDK's semantics: not initialized after `forName(..., false, ...)`, initialized after the
+  constructor), the night's `--build-program --check reflect-meta`. `bin/j2g-unit`'s 7 failing checks (type annotations' known
+  rows, F15's invokers fixture) fail as on next without this branch.
+- Found by the demo's read of G2's test sets: javac on Arbace rejects hamcrest 2.2's sources at eight calls (the varargs
+  factories' `Arrays.asList(matchers)` to their Iterable overload; `new CombinableMatcher<>(first).and(other)`), the same
+  rejection G1's `hamcrest-core-1.3-javac.patch` works around. Two small probes (the demo's `bin/ref-g2.d/probes/`) reproduce it
+  on javac on Arbace; whether the JDK's javac accepts them is the oracle tier's (`bin/ref-g2 probes`, by hand). If it does, this
+  is javac on Arbace's inference (an inference variable seen as a capture in a nested poly call), to fix with the probes as
+  fixtures; until then the demo carries a variant (`patches/hamcrest-2.2-javac.patch`), a decision for the user.
+
+## 2026-11-17: next merged into `h-g2-arbace` (f26-ghidra in), and A14, the run-path ranking (branch `h-g2-arbace`)
+
+- `git merge next` (`498d7296f`): `bin/java-project` keeps both A16's `classes.shadowed` and A8's `outside.args`,
+  `java.project`'s `:java` keys `:outside` and `:shadow`, `test.bash` both sides' cases (A16's controls renumbered c12, c13),
+  `test/j2g/unit.ae` `test-forname` beside `test-outside` and `test-outside-completion`; the resources fix once (the cherry-picked
+  `7fcffa2b4` and f26-ghidra's own resolved to one text). `bin/java-project test` 38 of 38; `bin/j2g-unit`
+  (`J2G_UNIT_SOURCES=arbace.classes.analyze`): forname, outside and completion pass, the same 7 failures as on next.
+- **A14** (GH1 (b) made a tool, J2G-SPEC §4.1 "The run-path ranking"): `bin/j2g-rank` (`test/j2g/rank.ae`) over an
+  `--analyze-only` report with `J2G_MISSING` and the runs' class-load lists: each run's stubs on its path by cause, the causes
+  ranked by the runs they alone block. Unit test `bin/j2g-unit`'s `rank:` (7 of 7) over `test/j2g/unit/rank` (the reasons of
+  test/programs/outside's classes as code/missing-reason writes them, three runs files of the three shapes), with its controls.
+  Its first real input is the demo's M3 (`bin/run-g2 analyze`) against R2's `ref/junit-closure-g2-jdk26.edn`. Alternative: keep
+  the demo's script (Ghidra-specific paths, one closure format).
+
+
+## 2026-11-17: x86-64's print cell, the asm streamer's lines (branch `h-asm-directive`, from `next` `498d7296f`)
+
+The print level's `:directive` (47 texts), `:local-label` (1 text + 1 cross) and `:fixup` (1) rows: llvm-project 23.1.5's
+`llvm/lib/MC/MCAsmStreamer.cpp` (with MCAsmInfo.h, MCAsmInfoELF/COFF/Darwin.cpp, MCContext.cpp's temporary symbols, MCParser/AsmParser.cpp's
+directive parsers, X86AsmParser.cpp's ParseDirectiveCode, X86WinCOFFTargetStreamer.cpp, X86RegisterInfo.td's DwarfRegNum; read from the
+pinned `llvm-project-23.1.5.src.tar.xz`, llvm-mc not run) ported into `arbace/asm/amd64/print.ae` (`stream-statement`, `resolve-temps`,
+`fixup-lines`); `arbace/asm/amd64/check.ae`'s print level writes the streamer's lines beside the instructions (`*streamer*`), follows
+`.if`/`.elseif` of a known value, names directional labels and `.` as llvm-mc's temporaries, and holds a non-instruction text to every
+printed line (unmet beside a written line `:mismatch`). Considered: keeping the streamer's lines in one stream with the instructions
+for every text (FileCheck's exact way) — not taken, an instruction's text stays held to the instructions alone so no recorded row of
+another file moves (proven on 140 files). arm64's printer is its own, untouched. See doc/asm/AMD64-SURVEY.md, "As built: the asm
+streamer's lines".
+Proof: encode-check `--only` over the 140 files with directive-like texts, directional labels or `.if` (only the 12 target rows move)
+and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones in test/asm/controls-print.txt, failing as it must);
+4 mutants `:mismatch` by hand. The 12 rows re-recorded alone (`--record --only`); x86-64 print 194,746 / 1,187 / 581 to
+194,796 / 1,187 / 531 (completeness 99.41 to 99.42); test/reap/matrix.edn and test/crops/scores.edn re-recorded.
+
+
+## 2026-11-17: Haskell's threaded way, HES84 (a) (branch `h-haskell-threaded`, from next `498d7296f`)
+
+- **What.** HES84 (a), the user's decision of 2026-11-08 ("then (a)" once the threaded semantics are taken up), built:
+  `test/haskell/eval/run_plan.ae` builds a test whose all.T `only_ways` are all threaded ways `-threaded` (and takes T21651's
+  Linux-conditional `extra_run_opts`); GHC 9.14.1's references of the 13 recorded such tests of the core recorded again by hand
+  (`bin/hsi record-ref --only`, the oracle tier, light; T21969 with `HSI_REF_TIMEOUT=30`), their STG re-dumped into haskell-stg-progs;
+  hsi's threaded way (`go/arbace/hs/threaded.ae`, new, and machine, nodes, compile, image, prim_ctl, rts, rtsapi, cprog, ffi, mem,
+  the driver's -N): capabilities' count and setNumCapabilities, safe foreign calls to blocking host functions on goroutines of their
+  own releasing the capability, bound threads and forkOS, a spark pool, hs_exit's exitScheduler; the I/O manager kept the
+  non-threaded RTS's (rtsSupportsBoundThreads answered 0 to its modules). doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES84 (a),
+  the threaded way".
+- **Why this design.** The machine's state is one goroutine's (thunks, stacks, ci's memory), so capabilities as goroutines are
+  staged: stage 1 runs the Haskell threads on one evaluator and puts only what a program observes of the threaded RTS off it (a safe
+  call that blocks); true parallel capabilities need the machine made concurrent (left). Considered: porting GHC's event manager
+  (epoll, the timer manager: a large port for waits hsi already makes), and HES88's tried model of a safe sleep for every program
+  (reverted then: the normal way's references differ; now it is the threaded way's alone).
+- **Results.** eval 812 / 62 / 35 to 817 / 62 / 30 (conc037, conc038, conc059, numsparks001, ffi014 pass; T21651 and
+  setnumcapabilities001 correct with no limit, 270 s, so `:speed`; hs_try_putmvar003 `:test-c`); AOT 137 / 1 / 1 to 138 / 1 / 0
+  (ffi014). The classes `:threaded-only` and `:threaded-way` removed; a negative control added (conc038 against conc037).
+
+## 2026-11-17: RIND5's swizzle: simd_swizzle!'s block resolved, `[..].len()` evaluated (branch `h-rust-indep`)
+
+- vectors' `main` was refused at `Impl::concat_swizzle`. Probed with the pipeline over a seven-line program: collect's res-def
+  looked the expansion's names up in the enclosing module, not main's block (`collect/*body*` now, bound by typeck's check-body and
+  with-solver); a macro's `use $crate::simd::Swizzle` resolved `$crate` as a name (now the macro's crate, in lookup-name and in
+  typeck's traits in scope); the impl's trait argument `{$index.len()}` stayed unevaluated (lower-const-arg evaluates `[..].len()` of
+  an array literal: constant evaluation's first step). Unit cases `bin/rust-front rind-test` (test/rust/front/rind_test.ae,
+  swizzle1.rs) with a negative case; `bin/rust-front essential` equal. Alternative: a general CTFE of the const argument (the
+  interpreter over the anonymous constant's MIR), larger; the literal's length covers simd_swizzle!, whose index is always one.
+- Then vectors' `f.cast::<i32>()`: a generic associated type's own arguments in normalize* (the impl's then the projection's own),
+  and MIR forms' constant arguments `(cst V)`. vectors is own (`bin/rust-front rsi-build vectors`, 2.04 GB): 5 of the eval cell's 5
+  cases at C1. Independence 80 (C2, C3, C4, C6 rustc's).
 
 ## 2026-11-17: Java's AOT cell triaged by root cause (branch `h-java-aot-triage`, from `next` `498d7296f`)
 

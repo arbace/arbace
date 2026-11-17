@@ -1,0 +1,107 @@
+(ns j2g.rank
+  "A14 of the Ghidra case study's G2 plan (doc/go/J2G-SPEC.md §4.1, \"The run-path ranking\"): which of j2g's stubs a run
+  meets, and which causes to remove first. bin/j2g-rank's data side, on the tools' host.
+
+    -main OUT REPORT RUNS...
+        REPORT: j2g --analyze-only's report.edn, with J2G_MISSING's :missing ([class why] pairs: an operation the
+        translation stubs) and :analysis-failures ([class message]: a class refused, every use of it a stub); RUNS:
+        the classes runs loaded, each file one of: an EDN map with :runs [{:class NAME :loaded [binary names]} ...]
+        (one run a map, as the demo's ref/junit-closure-g2-jdk26.edn), an EDN map with :loaded {binary-name origin}
+        (one run, named by the file, as ref/sleigh-closure-jdk26.edn), or text, a binary name a line (the JDK's
+        -Xlog:class+load lines too: the name after `] `), one run named by the file. OUT: an EDN map, each run's stubs on
+        its path by cause (a class the run loaded with a stub in it, or refused), and the causes ranked: by the runs
+        that meet that cause alone (fixing it unblocks them), then by the runs that meet it.
+
+  A run's path is the classes it loaded, so a stub in a loaded class counts though the run may not execute it: an
+  over-approximation of what the run would meet, the JDK's class loading the bound."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io PushbackReader)))
+
+(defn cause
+  "The cause of a stub's reason (code/missing-reason's text, or an analysis failure's message): [kind detail], kind
+  :outside (detail: the declarations' source), :jrt-lacks (the class jrt's hand-written code lacks a member of), :world
+  (a method not in the closed world), :refused (the name the analysis could not resolve, its first two parts), :other."
+  [why]
+  (let [why (str why)]
+    (or (when-let [[_ src] (re-find #"is outside the closed world: (?:.*; )?declarations only, from (.+?)\)?$" why)]
+          [:outside (str/replace src #" \(the platform$" " (the platform)")])
+        (when-let [[_ _ c] (re-find #"^jrt lacks (constructor )?([\w.$]+?)(?:\.[\w$<>]+)?\(" why)]
+          [:jrt-lacks c])
+        (when (re-find #" is not in the closed world$" why) [:world "a method not in the closed world"])
+        (when-let [[_ n] (or (re-find #"\(the import ([\w.$]+)\)" why) (re-find #"Unknown (?:class|type): ([\w.$]+)" why)
+                             (re-find #"Unable to resolve class: ([\w.$]+)" why))]
+          [:refused (let [ps (str/split n #"\.")] (if (> (count ps) 2) (str/join "." (take 2 ps)) n))])
+        [:other (subs why 0 (min 80 (count why)))])))
+
+(defn stubs
+  "{internal-class-name #{[kind detail] ...}} of a report map: its :missing and :analysis-failures."
+  [report]
+  (reduce (fn [acc [n why]] (update acc n (fnil conj #{}) (cause why)))
+          {}
+          (concat (:missing report) (:analysis-failures report))))
+
+(defn- internal [n] (str/replace (str n) "." "/"))
+
+(defn rank
+  "The ranking of stubs ({class #{cause}}) over runs ([[run-name loaded-names] ...]): {:runs :blocked :per-run :ranking}."
+  [stubs runs]
+  (let [per-run (vec (for [[r loaded] runs
+                           :let [hits (into (sorted-map)
+                                            (for [n (distinct (map internal loaded))
+                                                  :let [cs (get stubs n)] :when cs]
+                                              [n cs]))
+                                 by (reduce (fn [m [n cs]] (reduce #(update %1 %2 (fnil conj (sorted-set)) n) m cs))
+                                            (sorted-map) hits)]]
+                       {:run r :loaded (count loaded) :causes by}))
+        causes (distinct (mapcat (comp keys :causes) per-run))
+        rows (for [c causes
+                   :let [rs (filter #(contains? (:causes %) c) per-run)
+                         sole (filter #(= [c] (keys (:causes %))) rs)]]
+               {:cause c :runs (count rs) :sole (count sole)
+                :classes (vec (sort (distinct (mapcat #(get (:causes %) c) rs))))})]
+    {:runs (count per-run)
+     :blocked (count (filter #(seq (:causes %)) per-run))
+     :per-run per-run
+     :ranking (vec (sort-by (juxt (comp - :sole) (comp - :runs) (comp str :cause)) rows))}))
+
+(defn- read-edn [f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (binding [*read-eval* false] (read r))))
+
+(defn read-runs
+  "[[run-name loaded-names] ...] of a runs file (see the namespace's doc)."
+  [f]
+  (let [text (slurp f)
+        name (.getName (io/file f))]
+    (if (str/starts-with? (str/triml (str/replace text #"(?m)^;[^\n]*\n" "")) "{")
+      (let [m (read-edn f)]
+        (cond
+          (:runs m) (vec (for [r (:runs m)] [(str (:class r)) (:loaded r)]))
+          (map? (:loaded m)) [[name (keys (:loaded m))]]
+          :else (throw (ex-info (str f ": neither :runs nor :loaded") {}))))
+      [[name (vec (for [l (str/split-lines text)
+                        :let [l (str/trim l)
+                              n (or (second (re-find #"\] (\S+) source: " l)) (when (re-matches #"[\w.$/]+" l) l))]
+                        :when n]
+                    n))]])))
+
+(defn- write [out {:keys [runs blocked per-run ranking]}]
+  (spit out
+        (str ";; A14's ranking (bin/j2g-rank): each run's stubs on its path by cause, and the causes ranked by the runs that meet\n"
+             ";; them alone (:sole), then by the runs that meet them (:runs). Written by bin/j2g-rank.\n"
+             "{:runs " runs " :blocked " blocked "\n"
+             " :ranking\n ["
+             (str/join "\n  " (map pr-str ranking))
+             "]\n :per-run\n ["
+             (str/join "\n  " (for [r per-run] (pr-str (update r :causes #(into (sorted-map) (for [[c ns] %] [c (vec ns)]))))))
+             "]}\n")))
+
+(defn -main [out report & run-files]
+  (let [r (rank (stubs (read-edn report)) (vec (mapcat read-runs run-files)))]
+    (write out r)
+    (println (str "j2g-rank: " (:runs r) " runs, " (:blocked r) " meet a stub; " (count (:ranking r)) " causes"
+                  (when-let [t (first (:ranking r))] (str ", first " (pr-str (:cause t)) " (" (:sole t) " alone, " (:runs t) " in all)"))
+                  "; " out))
+    (shutdown-agents)
+    (System/exit 0)))

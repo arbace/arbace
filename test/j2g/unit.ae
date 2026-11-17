@@ -17,10 +17,13 @@
             [arbace.j2g.main :as jm]
             [arbace.j2g.meta :as meta]
             [arbace.j2g.model :as m]
+            [arbace.j2g.names :as nm]
             [arbace.j2g.out :as out]
+            [arbace.j2g.start :as start]
             [arbace.j2g.outside :as outside]
             [arbace.j2g.world :as w]
-            [j2g.typeann :as ta]))
+            [j2g.typeann :as ta]
+            [j2g.rank :as rank]))
 
 (def ^:private failures (atom 0))
 
@@ -465,6 +468,63 @@
            (and (= "a/Base" (:owner direct)) (= "shown" (:name direct)))
            (pr-str (select-keys direct [:owner :name])))))
 
+;; A18 of the Ghidra case study's G2 plan (ghidra.util.classfinder.ClassSearcherTest's forNameSafe): Class.forName(name,
+;; false, loader) finds a class without running its initializer, which runs on the first active use. The fixture
+;; test/j2g/unit/forname/f/Lazy.java (its committed forms; the stand-ins of Class's interfaces beside it): the analysis
+;; keeps the call's initialize argument; the call is jrt's Class_ForName_String_Z_ClassLoader__Class, which runs the
+;; class's Init only under that argument, its registry lookup ForName none; a program's class is never one initialized at
+;; start; the control, Class.forName(String), runs Init unguarded. The run is test/programs/reflect-meta's rm.Lazy (the night's).
+
+(defn- go-func-form
+  "The (go/func NAME ...) form of the Go forms file at path."
+  [path name]
+  (some #(when (and (seq? %) (= 'go/func (first %)) (= name (second %))) %) (source-forms path)))
+
+(defn- init-guards
+  "For each call of a class's Init ((.-Init x) in call position) in form: the conditions of the whens around it,
+  innermost first."
+  [form]
+  (let [out (atom [])
+        walk (fn walk [x conds]
+               (when (seq? x)
+                 (when (and (seq? (first x)) (= '.-Init (ffirst (seq [(first x)]))))
+                   (swap! out conj conds))
+                 (let [conds (if (= 'when (first x)) (cons (second x) conds) conds)]
+                   (doseq [y x] (walk y conds)))))]
+    (walk form ())
+    @out))
+
+(defn test-forname []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/forname" :tree true}] :variant-files []))
+        body (fn [cls nm] (w/with-world world (some (fn [[[n _] b]] (when (= n nm) b)) (:bodies @(:state (a/decl cls))))))
+        fn3 (fn [nm] (first (filter #(and (= :invoke (:op %)) (= "java/lang/Class" (:owner %)) (= "forName" (:name %)))
+                                    (nodes-of (body "f/Lazy" nm)))))
+        desc "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"
+        lazy (fn3 "probe")
+        eager (fn3 "eager")
+        uses-flag? (fn [conds] (some #(some #{'initialize} (tree-seq coll? seq %)) conds))
+        three (go-func-form "go/arbace/jrt/reflect.ae" 'Class_ForName_String_Z_ClassLoader__Class)
+        one (go-func-form "go/arbace/jrt/class.ae" 'Class_ForName_String__Class)
+        lookup (go-func-form "go/arbace/jrt/class.ae" 'ForName)]
+    (check "forname: the fixture analyzes" (and (seq (body "f/Lazy" "probe")) (empty? (:failed world))) (pr-str (:failed world)))
+    (check "forname: Class.forName(name, false, loader) is the three-argument call, its initialize argument false"
+           (and (= desc (:desc lazy)) (= :static (:kind lazy)) (false? (:val (second (:args lazy)))))
+           (pr-str (select-keys lazy [:desc :kind :args])))
+    (check "forname: control: Class.forName(name, true, loader) keeps true"
+           (and (= desc (:desc eager)) (true? (:val (second (:args eager))))) (pr-str (:args eager)))
+    (check "forname: its Go function is jrt's Class_ForName_String_Z_ClassLoader__Class"
+           (and (= "ForName_String_Z_ClassLoader__Class" (nm/method-base "forName" desc)) (some? three)))
+    (check "forname: jrt's function runs the class's Init only under its initialize argument"
+           (and (seq (init-guards three)) (every? uses-flag? (init-guards three))) (pr-str (init-guards three)))
+    (check "forname: the registry's lookup ForName runs no Init" (and (some? lookup) (empty? (init-guards lookup))))
+    (check "forname: the class's initializer is code (Side's static block), so it has an Init to defer"
+           (seq (w/with-world world (:clinit @(:state (a/decl "f/Lazy$Side"))))))
+    (check "forname: a program's class is never one initialized at start (the runtime's alone)"
+           (every? #(re-find #"^arbace/(jrt|lang)[.]" %) start/classes) (pr-str (remove #(re-find #"^arbace/(jrt|lang)[.]" %) start/classes)))
+    (check "forname: control: Class.forName(String) runs Init with no initialize argument (the check sees a guard's absence)"
+           (and (seq (init-guards one)) (not-any? uses-flag? (init-guards one))) (pr-str (init-guards one)))))
 ;; A8 and A8b (the Ghidra case study's G1 plan; J2G-SPEC §4.1, "Declarations outside the world"): a class naming
 ;; a class of a platform module outside the world (java.desktop, java.sql) or of a binary-only jar analyzes, its
 ;; operations on that class J2g_Missing naming the declaration's source; a class no source declares is refused
@@ -687,6 +747,39 @@
          (= '(.Ref x) (code/up-sym 'x "Ljava/lang/String;" "Ljava/lang/Object;"))
          (pr-str (code/up-sym 'x "Ljava/lang/String;" "Ljava/lang/Object;"))))
 
+;; A14 of the Ghidra case study's G2 plan (J2G-SPEC §4.1, "The run-path ranking"; bin/j2g-rank): each run's stubs on its
+;; path by cause, the causes ranked by the runs they block alone. The fixture test/j2g/unit/rank: a report of
+;; test/programs/outside's classes' reasons and three runs files of the three shapes; the controls: an empty list ranks
+;; nothing, a list naming no stubbed class blocks no run
+
+(defn test-rank []
+  (let [d "test/j2g/unit/rank/"
+        st (rank/stubs (read-string (slurp (str d "report.edn"))))
+        runs (vec (mapcat rank/read-runs [(str d "main.txt") (str d "reach.log") (str d "runs.edn")]))
+        r (rank/rank st runs)
+        row (fn [c] (some #(when (= c (:cause %)) %) (:ranking r)))
+        jar [:outside "org.example:toyext:1.0"]]
+    (check "rank: the causes of the reasons (outside by source, jrt's member by class, a refusal by its name)"
+           (and (= [:outside "java.desktop (the platform)"] (first (get st "demo/outside/Events")))
+                (= #{jar [:jrt-lacks "java.util.prefs.Preferences"]} (get st "demo/outside/Store"))
+                (= #{[:refused "java.awt"]} (get st "demo/outside/Gui")))
+           (pr-str st))
+    (check "rank: the three runs files read (text, -Xlog lines, :runs)"
+           (= [["main.txt" ["demo.outside.Main" "demo.outside.Recorder"]] ["reach.log" ["demo.outside.Main" "demo.outside.Events"]]]
+              (subvec runs 0 2))
+           (pr-str (subvec runs 0 2)))
+    (check "rank: four runs, three meet a stub (main's run none)" (and (= 4 (:runs r)) (= 3 (:blocked r))) (pr-str (dissoc r :per-run)))
+    (check "rank: toyext's jar first: one run blocked by it alone (JarTest), two in all"
+           (and (= jar (:cause (first (:ranking r)))) (= 1 (:sole (row jar))) (= 2 (:runs (row jar)))
+                (= ["demo/outside/Store" "demo/outside/Texts"] (:classes (row jar))))
+           (pr-str (:ranking r)))
+    (check "rank: java.desktop blocks reach's run alone; StoreTest's three causes none alone"
+           (and (= 1 (:sole (row [:outside "java.desktop (the platform)"]))) (= 0 (:sole (row [:refused "java.awt"])))
+                (= 3 (count (:causes (nth (:per-run r) 3))))))
+    (check "rank: control: an empty list ranks nothing" (= {:runs 1 :blocked 0 :ranking []} (dissoc (rank/rank st [["e" []]]) :per-run)))
+    (check "rank: control: a list naming no stubbed class blocks no run"
+           (zero? (:blocked (rank/rank st [["x" ["demo.outside.Main" "java.lang.String"]]]))))))
+
 (defn -main [& _]
   (test-null-up)
   (test-support-tables)
@@ -704,6 +797,8 @@
   (test-properties)
   (test-arch-collisions)
   (test-inherited-static-accessor)
+  (test-forname)
+  (test-rank)
   (test-outside)
   (test-outside-completion)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))

@@ -623,7 +623,8 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
     `allPublicMethods`/`allDeclaredMethods`; resource-config's `bundles` their classes' constructors; an entry
     with `condition.typeReachable` (or `typeReached`) once that class is reached, the others at once;
   - **reflective sites of constant names**, in the program's own classes (`nm/own-class?`): `Class.forName("p.C")`
-    and `ClassLoader.loadClass` root C's initializer; `C.class.getMethod("m", ...)`, `getDeclaredMethod` C's
+    and `ClassLoader.loadClass` root C's initializer (rooted, not run: the run initializes as the JVM does, A18);
+    `C.class.getMethod("m", ...)`, `getDeclaredMethod` C's
     members named m; `getConstructor`, `getDeclaredConstructor` C's constructors; `getField` the class;
     `MethodHandles.Lookup`'s `findVirtual`/`findStatic(C.class, "m", ...)` C#m, `findConstructor` C's
     constructors. The sites whose names are not constants are listed for review (`:reflective-sites :dynamic`).
@@ -702,6 +703,17 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   the completion Paints is refused, with the edge alone Guarded, Watcher and Handler, a world class's member never
   names a java.base outside class, jdk.internal is not declared, without the file's imports Supplier is the
   namespace's).
+- **The run-path ranking** (A14, 2026-11-17, branch `h-g2-arbace`: the Ghidra case study's G2 plan, GH1 (b) made a
+  tool; it replaces the demo's `bin/analyze-g1-reach.py`): `bin/j2g-rank OUT REPORT RUNS...` (`test/j2g/rank.ae`, on
+  the tools' host) reads an `--analyze-only` report made with `J2G_MISSING` (`:missing`, an operation the translation
+  stubs; `:analysis-failures`, a class refused) and lists of the classes runs loaded (the JDK's `-Xlog:class+load` lines,
+  plain names, or EDN of one run or of `:runs`), and writes each run's stubs on its path, by cause, and the causes
+  ranked by the runs they alone block (`:sole`: fixing that cause unblocks them), then by the runs they block. A
+  cause: `[:outside SOURCE]` (the declarations' source: a platform module, a jar's coordinate), `[:jrt-lacks CLASS]`,
+  `[:world ...]`, `[:refused NAME]` (the unresolved name's first two parts), `[:other ...]`. A run's path is the
+  classes it loaded, so a stub is counted though the run may not execute it. Unit test: `bin/j2g-unit`'s `rank:`
+  over `test/j2g/unit/rank` (test/programs/outside's reasons), with its controls (an empty list ranks nothing; a list
+  naming no stubbed class blocks no run).
 
 ### 4.2 Go packages
 
@@ -1409,7 +1421,7 @@ the same for its own classes and its stand-ins (§4.3).
 | `Methods` | per method (`jrt.MethodInfo`): name, parameter classes, return class, modifiers (varargs, bridge, synthetic among them), `Invoke func(this any, args []any) any` | `getMethods`, `Method.invoke` |
 | `Ctors` | per constructor (`jrt.CtorInfo`): parameter classes, modifiers, `New func(args []any) any` | `getConstructors`, `newInstance` |
 | `IsInstance` | `C_InstanceOf` | `isInstance`, `cast`, `instance?` |
-| `Init` | `C_Init` | `Class.forName(name, true, ...)`, static field access and `newInstance` through reflection |
+| `Init` | `C_Init` | `Class.forName(name, true, ...)`, static field access and `newInstance` through reflection; `Class.forName(name, false, loader)` and `ClassLoader.loadClass` find the class without it, its initializer then running at the first active use (A18 of the Ghidra case study's G2 plan, checked: `bin/j2g-unit`'s `forname:`, the run `test/programs/reflect-meta`'s `rm.Lazy`); a program's class is never one initialized at start (§6.2, `arbace.j2g.start`: the runtime's alone) |
 | `Enum` | the constants in order | `getEnumConstants`, `Enum.valueOf` |
 | `FromFn` | for a functional interface: wraps an `IFn` into its adapter (§7.11); set on every interface `Compiler.FISupport` may adapt, the `@FunctionalInterface` ones (amendment R13), by `arbace/lang`'s `j2g_fromfn.go` (§7.11, amendment E5) | `jrt.AdaptFn`, `Reflector`'s functional interface adaptation, `isAnnotationPresent(FunctionalInterface)` |
 

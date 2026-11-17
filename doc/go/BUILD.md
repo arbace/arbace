@@ -448,7 +448,12 @@ data, `:java`:
   `META-INF/services` file in two modules concatenated; another `META-INF` file in two modules that
   differ, as artifacts' `LICENSE`, `NOTICE` and `DEPENDENCIES` do, the first module's, as a class path's
   `getResource` answers, the later ones listed in `WORK/resources.shadowed` and kept in their modules'
-  `resources.jars`; any other file in two modules an error unless equal).
+  `resources.jars`; any other file in two modules an error unless equal). A class in two modules (A16,
+  the Ghidra case study's GH14 (a): a library's old and new releases on one class path, hamcrest 2.2
+  before hamcrest-core 1.3) is the first module's in the plan's order, as a class path loads it: the
+  later modules' differing copies are listed in `WORK/classes.shadowed` (`REL MODULE` a line), an equal
+  copy (but for its header's file name) is silent, and javac's class path and source path already take
+  the modules in that order; `:shadow false` in the `:java` map keeps a class in two modules an error.
 - **An artifact sources-first** (A2): its sources jar unpacked with the release's multi-release layer
   laid over the base (`META-INF/versions/9..R`, in order, as javac's file manager reads a multi-release
   jar for a release). A binary jar's versioned classes whose source the sources jar lacks (log4j's

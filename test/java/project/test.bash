@@ -19,7 +19,9 @@
 #     annotations jar's type without the jar (and with it, compiled); release 10 reads Platform's base
 #     layer; a forms file changed in a copy of the native trees is found by the comparison; a resource outside
 #     META-INF in two modules, differing (META-INF's: the first module's kept, the later listed in WORK/resources.shadowed);
-#     an :outside value neither :platform nor :class-path;
+#     an :outside value neither :platform nor :class-path; a class in two modules (A16: controls/shadow.edn, the first
+#     module's in forms.all, the later listed in WORK/classes.shadowed): the later copy in forms.all, and with :shadow false
+#     (controls/shadow-off.edn) the read itself;
 #   - :outside (A8, A8b; test/programs/outside): the read's WORK/outside.args, j2g's --outside-platform (the platform's
 #     directory) and --outside-classes (the binary-only jar unpacked, named by its coordinate).
 set -uo pipefail
@@ -79,6 +81,14 @@ expect "META-INF in two modules, differing: the first module's in resources.all,
     && [ "$(cat "$3/md/resources.jars/002-b/META-INF/NOTICE")" = "module b'"'"'s notice" ]' \
   _ "$jp" "$ctl/meta-dup.edn" "$w" "$fx" "$ctl"
 
+expect "A16: a class in two modules the first module's in forms.all (the plan's order), the later listed, an equal one silent" \
+  bash -c '"$1" read "$2" "$3/sh" --base "$4" --root "controls=$5" --no-classes > "$3/shadow.log" 2>&1 \
+    && grep -q "\"new\"" "$3/sh/forms.all/shadow/dup/Version.ae" \
+    && [ "$(cat "$3/sh/classes.shadowed")" = "shadow/dup/Version.ae old" ] \
+    && [ -f "$3/sh/forms.all/shadow/dup/Same.ae" ] && [ -f "$3/sh/forms.all/shadow/dup/OldOnly.ae" ] \
+    && grep -q "(load \"dup/OldOnly\")" "$3/sh/forms.all/shadow/dup.ae"' \
+  _ "$jp" "$ctl/shadow.edn" "$w" "$fx" "$ctl"
+
 ofx=$root/test/programs/outside
 expect ":outside: outside.args names the platform's modules and the class path's binary jar by its coordinate (A8, A8b)" \
   bash -c '"$1" read "$2" "$3/out" --no-classes > "$3/outside.log" 2>&1 \
@@ -93,6 +103,11 @@ must_fail ":outside with a value neither :platform nor :class-path" "$w/c10.log"
 must_fail "a resource outside META-INF in two modules, differing" "$w/c9.log" \
   "$jp" read "$ctl/res-dup.edn" "$w/c9" --base "$fx" --root "controls=$ctl" --no-classes
 expect "  (its message names the resource)" has "$w/c9.log" "the resource shared.txt in two modules (b's differs)"
+must_fail "A16: the second module's copy of a shadowed class in forms.all" "$w/c12.log" \
+  grep -q '"old"' "$w/sh/forms.all/shadow/dup/Version.ae"
+must_fail "A16: :shadow false, a class in two modules" "$w/c13.log" \
+  "$jp" read "$ctl/shadow-off.edn" "$w/c13" --base "$fx" --root "controls=$ctl" --no-classes
+expect "  (its message names the class)" grep -Eq "merge-forms: shadow/dup/(Version|Same).ae in two modules" "$w/c13.log"
 must_fail "an unknown module key" "$w/c1.log" "$jp" plan "$ctl/unknown-key.edn" --base "$fx"
 must_fail "a cycle of :deps" "$w/c2.log" "$jp" plan "$ctl/cycle.edn" --base "$fx"
 must_fail ":closure on a module of sources" "$w/c3.log" "$jp" plan "$ctl/closure-on-src.edn" --base "$fx"
