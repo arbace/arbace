@@ -7393,3 +7393,75 @@ controls failing as they must. So the eval fact is 1 (`:steps [pyi-check]`) and 
 DECISION 3 (a)): judge 0.196 to 0.910, Python's independence 64 to 98. Queue 319's port is moot (its remainder: a wider stub run).
 The review (`.tmp/goal/review-mac-python.md` on the main host) also found that 317's splice of test/gate/crops/python.edn fails the
 planner until the main host's records (the big corpora's packs, the four results files, the eval and AOT records) are committed.
+
+## As built: 321, the eval and AOT cells' records night as one command, and its dry run (2026-11-17, the Mac VM, queue 321)
+
+The eval and AOT cells wait for two amd64 records, `test/python/check-lib-test-linux-amd64.edn` (`bin/pyi check --record`,
+reap's `:results`, `:py-ref-modules`) and `check-aot-linux-amd64.edn` (`bin/pyi check --aot --record`, reap's `:pyi-aot`, read
+for the AOT cell and for the eval cell's loop and goi columns). 321 makes that night one command and ran it over a slice on
+the VM. Base 201 cb8457fc0, then 317's merge (80a6f9eaa, 201 onto next): reap's readers and cells.edn are next's after it
+(the Python cells and the readers `:results`, `:pyi-aot` unchanged by next).
+
+- **`bin/pyi records`** (`make pyi-records`): the host first, then `check --aot --record` (the 151 programs with pyi's runs)
+  and `check --fresh --record` (every module of the universe, afresh: a resumed run would record an older tree's modules),
+  each under busybox time with a 5 s sampler of its processes' summed resident memory (`WORK/records/STEP.{time,mem,log}`),
+  then the `:until "PY7 ..."`/`"PY8 ..."` of each source whose record is written dropped from `test/reap/cells.edn` (a
+  recorded `:until` is a reap problem), `bin/reap --record` and `bin/crops-score --record`. linux/amd64 only.
+  `--slice N` is its dry run: every Nth program of the AOT list and every Nth module of the check's universe (whole
+  modules: reap reads Lib/test's record per module, `:py-ref-modules`, and the judge refuses `--record` of an `--only`
+  selection), the records under `--dir` (default `WORK/records-slice`, named as the cells name them, never to commit), read
+  through an overlay of the checkout (`DIR/overlay`: links, but `test/python`'s two records, a reference of the slice's
+  programs alone, `ref-cpython314-slice.edn`, and cells.edn without the `:until` and on that reference) by `bin/reap
+  --record` and, when reap writes its matrix, `bin/crops-score --crop python`. `--only aot|lib-test` one step.
+- **The host** (found by the dry run: on next's stage 0 `import _bisect` fails, on 201's it works). Since W2 (seed 3c48859d)
+  stage 0 lists `arbace/py`, `arbace/libm`, `arbace/ci` and `arbace/crt` in goi's table, and RT.load makes a listed package's
+  namespace from the table before any source: `bin/pyi run` on that executable runs the runtime of its build's commit
+  (`*arbace-version*`'s `:commit`, 53da41d93 for next's seed), never the checkout's `go/arbace/py`, silently. On 201's tree 46
+  of the four packages' files differ. `runtime_state` asks the executable (`GoInterp/paths`, `*arbace-version*`, 0.1 s) and
+  compares that commit's packages with the checkout's (`git diff`, untracked files too): `interpreted` (not listed: goi
+  interprets the checkout's), `compiled COMMIT` (listed, the same files) or `stale COMMIT N`. `runtime_guard` refuses a
+  `--record` of `check`, `check --aot` (its pyi runs), `lib-test` and `lib-test-all` on a stale host
+  (`PYI_RUNTIME_STALE=1`: a dry run's override) and warns on every other run of them; check --aot's cached pyi runs
+  (`pyi_key`) name the state, so a stale host's runs are not reused. `bin/pyi records` takes the gate's build at the
+  checkout's key (`arbace_gate_cache`/amd64/arbace: built from the checkout, its runtime compiled in) for a stale stage 0,
+  else stops with `bin/arbace-go --gate-build`. The compiled columns (`check --aot`'s compiled and loop runs, `check --aot
+  --lib-test`) were never affected: their runtime is the checkout's forms printed and built by `aot_module`.
+- **The runner's memory cap** (found by the dry run): test_capi's driver reached 29.6 GB resident on the VM (GOMEMLIMIT is
+  soft; killed by hand, then by a watchdog at 6 GB: test_modulefinder's test_extended_opargs too; test_adjustindices, the
+  test it was in, passes alone, so it is the module's growth). `tools/pyi/libtest_all.py run --mem-max MB` samples the
+  summed resident memory of a driver's processes every 5 s, as `--idle-timeout` their CPU, and kills a test past it,
+  written `crash the test's processes past MB MB resident (killed by the runner's memory cap; the driver started again)`;
+  bin/pyi passes `PYI_LIB_TEST_MEM_MAX` (default 8192). `:host-memory` (divergences.edn and divergences-315.edn) matches the
+  line. Proved by a fake driver (400 MB against a 200 MB cap: the test written so, the driver started again, the next test
+  run, under python3 and under the compiled runner) and by `bin/pyi divergences --results` of such a row (`:host-memory`).
+- **The dry run** (`bin/pyi records --slice 20`: 8 of the 151 programs, 27 of the 529 modules, among them test_subprocess,
+  test_capi and test.test_multiprocessing_spawn.test_manager; 2 jobs, GOGC=50, the VM loaded by 7 other agents):
+  - on 201 with next's stage 0 (`PYI_RUNTIME_STALE=1`: next's runtime compiled, so the night's speed): AOT 8 pass, 10 min 49 s
+    (the runtime printed), 3.0 GB; Lib/test 3,713 methods: 2,532 pass, 1,163 classed, 18 in no class (left out of the record:
+    reap's "18 cases ... not in" the record, its one problem), **31 min wall, 5,467 s CPU**, the modules' runs summed 3,708 s
+    (test_multiprocessing_spawn.test_manager 1,792 s, test_capi 690 s, test_subprocess 660 s), peak 32.9 GB summed (the
+    test_capi driver above). 8 of the 18 were next's runtime's (test_set's 37219 and unhashable message: 304's, passing on the
+    checkout's runtime).
+  - on 317's merge with 201's stage 0 (`interpreted`: the checkout's runtime, on goi): AOT 8 pass, 9 min 32 s, 617 s CPU,
+    3.0 GB; Lib/test 3,713 methods: 2,100 pass, 1,518 classed, 95 in no class, **1 h 54 min wall, 14,422 s CPU**, peak 14.9
+    GB summed (goi's drivers past 6 GB killed nine times by the VM's watchdog, written `crash Terminated`: with the runner's
+    cap they are `:host-memory`'s). Of the 95: three on both runtimes, now classed (test_capi's test_long_fromstring in
+    `:testcapi-behaviour`, test_functools' two test_update_type_wrapper in `:functools-core`); goi's alone (passing compiled):
+    test_manager's 82 (the driver killed with no output, status 137, in 256 s; 1,792 s and results compiled), test_functools'
+    two TestPartialPy test_weakref (a weak reference not cleared on goi), test_subprocess' test_leak_fast_process_del_killed;
+    the watchdog's eight. reap through the overlay: every Python cell checked, eval 2,108 / 419 / 1,099, AOT 8 / 0 / 0; its one
+    problem the 13 left-out methods (test_manager's 82 not among them: below). With the overlay's matrix written whatever the
+    problem (a scratch script), `bin/crops-score --crop python`: completeness 40 (eval 58, AOT 100), maturity 92 (the four
+    cells recorded), independence 60.
+- **The night's time and memory** (from the compiled slice, the night's host): the modules' runs about 20 x 3,708 s =
+  74,000 s, so about 5 h at 4 jobs on the VM's cores and about 3-4 h on the main host; check --aot about 20-30 min with
+  pyi's runs compiled in (70 min on goi, 287). Peak: 4 drivers of 1-3 GB with their children, each capped at 8 GB by the
+  runner: under 35 GB.
+- **Left for the night** (findings): a method in no class is left out of the record (libtest_judge's rule: no placeholder
+  class), so the first whole record will lack the methods the slice could not see (about 20 x 13 on its evidence); the night
+  keeps its run (`WORK/check/run`), and after classing them `bin/pyi check --judge .tmp/repr-python/pyi/check/run --record`
+  writes the record again with no run (the guard does not apply to a judge), then `bin/reap --record`. reap reads Lib/test's
+  record per module (`:py-ref-modules`: the modules the record holds), so a module whose every method is left out (the slice's
+  test_manager on goi) leaves the record without a problem: the judge's "N failing" line and exit 3 are the night's signal.
+  Pre-existing: `bin/pyi divergences` reports two shadowed names (test_capi's test_no_FatalError_infinite_loop under
+  `:testcapi`, test_pyexpat's test_error_path_no_crash under `:cpython-only`).
