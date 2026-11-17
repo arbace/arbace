@@ -8761,3 +8761,57 @@ default-initialized does not (its constructor's triviality not known to the chec
   (clang's); CP401 (a) the conservative vacuousness above (no class triviality); CP402 (a) a file of a class named by `:tests` that now
   passes leaves the class's list.
 - Keys: `gate_key` moves (repr/cpp embedded since W2), as `arbace_javac_key`; the runtime key does not.
+
+## As built: n-cpp-eval, the eval and AOT cells' deferred rows (2026-11-17/18; branch `n-cpp-eval` from mac/n-review-b aaa6d7786; round 52, the night's 1 GiB a process)
+
+The brief: C++ eval 76 pass / 1 by design / 5 deferred, AOT 75 / 1 / 6 (test/reap/matrix.edn); find each deferred row's cause and
+fix what code can move and light checks can prove.
+
+| Row | Level | Class | Cause | Done here |
+|---|---|---|---|---|
+| runtime/thread-throw.cpp | eval, AOT | `:threads` | terminate's abort on a started thread (ci's abort off the main thread) | left to n-ci-thread (tonight's) |
+| runtime/threads.cpp | AOT | `:thread-exceptions` (CP367) | the AOT record is older than `cppi_ci` (cppi-tls, "As built": stage 0's embedded ci gave `_Thread_local` objects one block); cf2g's build goes through `cppi_ci` since, so its fault should be gone | nothing; the AOT runtime part's run decides CP396 (b) |
+| gxx-dg-run/abi/vbase8-10.C | eval, AOT (sampling) | `:ours-refused` | the record (2026-11-11) predates the native parser's implicit-int `main()`; our route generates it now (gen-batch: forms, gen.ll, gen.c) | proven by gen; the lowered C (gcc -O0 with the runtime's rt.c) exits 0 as g++'s |
+| gxx-dg-run/cpp/embed-26.C | eval, AOT (sampling) | `:ours-refused` | its `PackExpansionExpr` refusal no longer reproduces on a reduction (the delegating constructor template's `b(x...)`, `#embed` with `suffix`): our route generates both; the whole file (two `#embed __FILE__` and 1,024 items, about 5,000 constructor calls in one list) takes gen-batch over 1 GiB | not proven tonight: the day's run decides |
+| gxx-dg-run/init/vector1.C | eval, AOT (sampling) | `:ours-refused` | GNU vector types refused by `resolve-type` (cpp-90) | **fixed** (below) |
+| gxx-dg-run/torture/vshuf-v16hi.C | eval, AOT (sampling) | `:ours-refused` | GNU vector types; then GCC's `__builtin_shuffle`; `main` in a quoted include (vshuf-main.inc) never emitted; `constexpr V in1[] = {...}`'s bound | **fixed** (below) |
+
+### The fix (arbace/cpp: abi, sema, codegen; the code generator only)
+
+| Part | Built |
+|---|---|
+| `{:k :vec :n LANES :of T}` (abi) | GNU's `vector_size(BYTES) T`: size BYTES, aligned to its size, held in memory as its bytes (`[BYTES x i8]` loads and stores, as `:complex` is), mangled `Dv<lanes>_<T>`; a vector member of a class passed by value refused (the psABI's vector classes not modelled) |
+| `resolve-type` (sema) | clang's spelling `__attribute__((__vector_size__(N))) T`, N a literal, T an arithmetic type, N/size(T) a power of two: the vector type; otherwise refused as before; **the checker still refuses it** (`checking?`: its traits and conversions are not modelled, the dg records untouched) |
+| initialization | a braced list of lanes (`:vec`, each converted to T, the rest zero; constant ones as a global's constant leaves); copy and assignment as a whole; an array of unknown bound of vectors completed by its braced elements' count (all braced, else refused) |
+| `__builtin_shuffle(a, m)`, `(a, b, m)` | GCC's (its manual, "Using Vector Instructions through Built-in Functions"): lane i the operand lane `m[i] mod N` (or `mod 2N` over a and b side by side), the mask an integer vector of as many lanes of the lanes' width; one load and store a lane |
+| `main` in a header's file | `main-fn-node?`: a FunctionDecl `main` is never a lazy header definition nor a dropped header declaration for the code generator (vshuf-main.inc's main had been left out: an empty module, the refusal hidden); the checker's reading unchanged |
+| refused as before | lane operators (`a + b`), subscripts (`v[i]`), vector conversions, non-literal sizes (is_aggregate.C's `4 * sizeof (int)`) |
+
+### Proofs (each process under 1 GiB, watched; no ci run)
+
+| Check | Result |
+|---|---|
+| gen-batch, one file a process (peaks 0.91-0.98 GB) | vector1.C, vshuf-v16hi.C, tmplattr5.C (a passing row by clang until now, its vector typedefs in a template), vbase8-10.C generated; attribute-test-1.C and is_aggregate.C (passing rows by clang) still refused, so still clang's: unchanged |
+| their gen.ll by clang++ natively, and their lowered gen.c by gcc -O0 with the runtime's rt.c (by hand) | all exit 0, as g++'s runs |
+| own samples against g++ 15.2 | vec2.cpp (layout: `sizeof`, `alignof`, offsets, lanes' bytes, narrowing lanes) and shuf2.cpp (one and two operands, masks past N and 2N, char lanes): outputs equal, natively and lowered |
+| negative controls | vshuf with one expected lane changed and vector1 with `foo (2)`: both abort (134), natively and lowered; before the bound fix vshuf's control passed (sizeof 0: no iteration), which found that fix |
+| refusals | `a + b` and `a[1]` on vectors refused (`type`, `conversion`), not miscompiled |
+| `bin/cppi codegen-gen --only-list` (6 of test/cpp/codegen's samples, two processes of 3) | 6 pass, the forms' digests the recorded ones (8 samples a process went over 1 GiB) |
+
+### What could not run tonight
+
+`bin/cppi check --only` on vbase8-10.C, with `CPPI_THREADS=1 CPPI_CI_MEMLIMIT=900MiB CPPI_JOBS=1 GOMEMLIMIT=900MiB` and the lowered
+runtime copied from next's (its key the checkout's: `bin/cppi runtime-key` current): `arbace.cpp.run nodes-list` (ci's builder,
+evaluated from the checkout under `cppi_ci`) passes 1 GiB within about 10 s each time, after it made ci's runtime fragments over four
+runs (65 kept); so no row was run and none re-recorded. The records, the classes and the matrix are unchanged.
+
+### Decided (taken overnight, round 52)
+
+- **CP405 GNU vector types in the code generator.** (a) the code generator models them as above and the checker keeps refusing;
+  (b) both. **Taken: (a)**: the checker's traits and conversions for vectors are not modelled, and the dg records (read cell) cannot
+  be rerun at night.
+- **CP406 `main` in an included file.** (a) never lazy, never dropped (code generator); (b) a quoted include beside the main file as
+  the main file's own (every definition emitted, refusals not dropped). **Taken: (a)**: (b) changes the runtime's units under
+  `CPPI_RUNTIME_ROUTE=ours`, whose `-I` headers are named as relative files too; a test's other unused definitions in a local
+  include stay lazy, behaviour-neutral but for an unused global's dynamic initialization (none in the sampling).
+- Left for the day (no DECISION): the sampling's rows by the run check (eval and AOT), whose builder needs about 2-3 GiB.
