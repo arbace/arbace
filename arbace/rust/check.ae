@@ -216,6 +216,17 @@
 
 (def corpus-prefix {"samples" "test/rust/eval" "synthetic" "test/rust/synthetic" "ui" "tests/ui"})
 
+;; queue 322: the records are the host's (the gate's are linux/amd64's, the ones test/reap/cells.edn reads): a run on another
+;; host (the Mac VM's arm64) records test/rust/check{,-aot}{,-times}-linux-arm64.edn, never over amd64's; RSI_RECORD_ARCH overrides
+(defn record-arch []
+  (or (System/getenv "RSI_RECORD_ARCH")
+      (let [a (str (System/getProperty "os.arch"))] (case a ("x86_64" "amd64") "amd64" ("aarch64" "arm64") "arm64" a))))
+
+(defn record-file
+  "The level's record (KIND nil) or its times (KIND \"times-\") for ARCH: test/rust/check[-aot]-[KIND]linux-ARCH.edn"
+  [aot kind arch]
+  (str "test/rust/check" (if aot "-aot" "") "-" kind "linux-" arch ".edn"))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; The tests' own verdicts (rust-90; the user's decision of 2026-11-07: a test's own verdict is a judge no toolchain made).
 ;; Ported from compiletest, rustc 1.99.1's src/tools/compiletest/src/runtest/ui.rs (run_ui_test's run of the compiled test):
@@ -283,8 +294,9 @@
         corpora (remove #{"--record" ""} more)
         prefixes (map #(get corpus-prefix % %) corpora)
         aot (= level "aot")
-        recf (if aot "test/rust/check-aot-linux-amd64.edn" "test/rust/check-linux-amd64.edn")
-        timesf (if aot "test/rust/check-aot-times-linux-amd64.edn" "test/rust/check-times-linux-amd64.edn")
+        arch (record-arch)
+        recf (record-file aot "" arch)
+        timesf (record-file aot "times-" arch)
         _ (when-let [m (and record ((resolve 'arbace.c.run/subset-record-refusal) work corpora))]
             (println "rsi judge:" m) (System/exit 2))
         refs (into {} (map (juxt :id identity) (read-all-forms ref-path)))
@@ -293,7 +305,9 @@
         klass (fn [[_ r reason]]
                 (let [s (str (name r) " " reason)]
                   (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
-        interp (when aot (let [f (File. "test/rust/check-linux-amd64.edn")] (if (.exists f) (into {} (map (juxt first identity) (read-string (slurp f)))) {})))
+        ;; the interpreted record beside: the host's, else amd64's (the gate's)
+        interp (when aot (let [f (first (filter #(.exists ^File %) [(File. ^String (record-file false "" arch)) (File. ^String (record-file false "" "amd64"))]))]
+                           (if f (into {} (map (juxt first identity) (read-string (slurp f)))) {})))
         by-corpus (into {} (for [c corpora]
                              [c {:nodes (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv"))))
                                  :runs (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv"))))
@@ -411,11 +425,13 @@
     (empty? bad)))
 
 (defn divergences
-  "divergences LEVEL: the recorded check's non-passes (test/rust/check-linux-amd64.edn; aot: check-aot-linux-amd64.edn), each in a
+  "divergences LEVEL: the recorded check's non-passes (test/rust/check-linux-ARCH.edn; aot: check-aot-linux-ARCH.edn; ARCH record-arch's), each in a
   class or listed UNCLASSED."
   [level]
   (let [aot (= level "aot")
-        rows (read-string (slurp (if aot "test/rust/check-aot-linux-amd64.edn" "test/rust/check-linux-amd64.edn")))
+        recf (record-file aot "" (record-arch))
+        _ (when-not (.exists (File. ^String recf)) (println "rsi divergences: no" recf "(bin/rsi check" (if aot "--aot " "") "--record)") (System/exit 2))
+        rows (read-string (slurp recf))
         classes (into (if aot (vec (read-string (slurp "test/rust/divergences-aot.edn"))) []) (read-string (slurp "test/rust/divergences.edn")))
         klass (fn [[_ r reason]] (let [s (str (name r) " " reason)] (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
         non (remove #(#{:pass :nondet} (second %)) rows)
