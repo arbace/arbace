@@ -7416,3 +7416,75 @@ super-outer parameter published and set (`implicit` gains a third group: the sup
 JCS357 (b) and JCS358 (b), as recommended: as built until a test reads a local or anonymous class's constructor parameter
 annotations, or constructs an anonymous class with an inner superclass reflectively. Nothing built (branch `java-indep`;
 doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS340-JCS343, JCS357, JCS358").
+
+## As built: h-java-deferred (write-ahead), 2026-11-17
+
+Branch `h-java-deferred` (from next `e4a7a30f3`), by day under the host burst's light rules: the eval cell's 611 deferred rows
+(test/java/check-interp.edn as gate 13c recorded them, 2026-11-14) triaged by a light run of those tests (581 of them; the 30
+`:speed-hang` left out) at interp on next's gate executable `f60652fb7fb9568e76b1` (javac's tool `javac-f70d1a9d900eb07a9afc`,
+`REPR_JAVA_STALE_OK=1`, 6 jobs, 25 minutes; nothing built, nothing converted).
+
+**The records were stale.** B2's world (the night conversion of 2026-11-15 and F26's removal of 2026-11-16) is in next's
+executable but not yet in the interp record: **168 of the 581 pass** (reflection 51, security 33, nio 18, net 16, serialization
+12, references 9, threads 8, invoke 7, stack 4, interp-extends 3, the rest 1 or 2). Those 168 rows alone re-recorded (`bin/java-check
+--judge --partial --record` of their rows only); the others keep their rows (the night records them whole). Java's eval cell 2,549 /
+165 / 611 → **2,717 / 165 / 443**; completeness 87 → **89** (meant 90 → 91).
+
+**74 of the 413 still failing were in no class** under their new reasons, which would fail the night's judgment: classed in
+test/java/divergences.edn (`:invoke` takes `sun.invoke.util` and `jdk.dynalink`, `:serialization` "Recursive update", the
+rest by id under `:references`, `:reflection`, `:stack`, `:rmi`, `:net`, `:nio`, `:security`, `:util-classes`); the AOT cell's
+classes unchanged (2,588 / 201 / 536: two compiled rows moved between world classes).
+
+### The 413 by root cause (interp, next's executable)
+
+| group | tests | cause | cost |
+|---|---|---|---|
+| ObjectInputFilter's System.Logger | 87 (+8 tests using System.Logger themselves) | every ObjectInputStream's filter factory calls `Config.traceFilter`, `configLog.log(TRACE, ...)`: System.Logger is not in the world (jrt's System is Go) | a derivation (F24's rule) |
+| sun.invoke.util.Wrapper | 33 | MethodType's and MethodTypeForm's; F26 brought it and took it away (2026-11-16) | a derivation without its ClassDescs |
+| cannot extend (ObjectOutputStream/InputStream 6, TextCallbackHandler 7, ConcurrentHashMap, CyclicBarrier, FileOutputStream, ...) | 29 | the DynSub list (`arbace.j2g.model/class-supers`, JCS120) | j2g's model, a build per class |
+| DefaultLoggerFinder | 18 | java.util.logging's Logger.setupResourceInfo and LogManager ask `DefaultLoggerFinder.isSystem` (jdk.internal.logger is outside) | a derivation |
+| protected or missing members (No accessible / No matching) | 48 | jrt's member tables, interpreted subclasses' protected world members (JCS120) | many small |
+| ClassNotFoundException of a world class | 37 | SimpleFileVisitor 11, the asynchronous channels 11, sasl/kerberos, prefs, dynalink, ... | per area |
+| RMI stubs (RemoteStub, UnicastRemoteObject, RegistryImpl_Stub) | 11 | F27's what-is-left | RMI's slice |
+| ClassCache's "Recursive update" | 8 | jrt's ClassCache (overlay) called computeIfAbsent inside its own computation (ObjectStreamClass's superclass lookup) | a few lines |
+| the rest | ~140 | behaviour after loading (dates, references under Go's GC, annotations' reflection, datagrams, ...) | per test |
+
+### Built (unproven here: each needs the night's conversion and a build)
+
+- **test/jrt/derive.ae**, `hjd-derivations`, four derived overlays: `java/io/ObjectInputFilter.java` (System.Logger and its Level as
+  `jdk.internal.jrt.SystemLoggers.Logger`, System.getLogger as SystemLoggers.getLogger: F24's and JCS155 (b)'s rule),
+  `java/util/logging/Logger.java` and `LogManager.java` (`DefaultLoggerFinder.isSystem` as `SystemLoggers.isSystem`),
+  `sun/invoke/util/Wrapper.java` (its nominal descriptors left out: java.lang.constant stays outside since F26 left).
+- **overlay/jdk/java.base/jdk/internal/jrt/SystemLoggers.java**: `isSystem(Module)`, DefaultLoggerFinder's answer
+  (`VM.isSystemDomainLoader(m.getClassLoader())`).
+- **overlay/jdk/java.base/java/io/ClassCache.java**: get computes outside the map, the first value put kept (ClassValue's
+  semantics), so a computation may ask for another class.
+- **arbace/lang/Compiler.ae**, `Compiler$CF$Try.eval` (the interpreter's try): a finally that jumps (return, break, continue) now
+  discards the pending exception, JLS 14.20.2 (t03210, the jls corpus's Exceptions: `:interp-jls`; compiled passes already).
+- Light checks: the four derived files made by a scratch replica of the ops (each replacement's count asserted) compile with
+  SystemLoggers under the JDK's javac as java.base's patch (java.logging's sources beside, 34 classes, no error); the four
+  overlays committed as that replica wrote them, header and all (bin/jrt-convert was not run by day): **`bin/jrt-convert derive
+  --check` confirms them byte for byte** (the essential `jrt-derive`; `derive` rewrites them should a byte differ).
+  The joint javac check (`/root/arbace/.tmp/night7/all9-run.sh`, the closure with the four overlays and the new SystemLoggers):
+  3,091 files, 0 errors, 6,318 classes (34 s, 1.0 GB). The negative controls c00001, c00003, c00004 still fail as controls must; bin/reap 0 problems; crops-score --judge --strict
+  and records-check pass.
+
+### The night's commands
+
+```sh
+bin/jrt-convert derive --check && /root/arbace/.tmp/night7/all9-run.sh $PWD   # the four overlays as derived; the joint javac check
+bin/heavy-lock bin/jrt-convert update && bin/jrt modules --check
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge    # Wrapper and the logging classes leave the edge
+bin/arbace-go --gate-build                                                   # Compiler.ae and jrt moved gate_key
+# the groups' tests at interp, then compiled (the same causes: their compiled rows fail on the same classes)
+bin/java-check --levels interp,compiled --list IDS --save .tmp/hjd-night   # IDS: the ids below, one a line
+```
+
+The groups' ids. ObjectInputFilter: t04245 t04264 t04307 t04375 t04380 t04384 t04390 t04392 t04393 t04395 t04396 t04397 t04399 t04401 t04403 t04404 t04406 t04407 t04408 t04413 t04414 t04415 t04416 t04417 t04429 t04431 t04434 t04438 t04441 t04442 t04445 t04446 t04451 t04453 t04706 t04725 t04763 t04769 t04920 t04959 t05018 t05037 t05038 t05267 t05268 t05277 t05287 t05288 t05297 t05308 t05313 t05324 t05325 t05327 t05338 t05401 t05405 t05435 t05449 t05457 t05494 t05495 t05499 t05512 t05514 t05518 t05521 t05543 t05556 t05560 t05565 t05567 t05595 t05652 t05666 t05672 t05751 t05752 t05753 t05779 t06159 t06200 t06256 t06257 t06258 t07754 t07887 t07919 t07939 t07959 t07965 t07966 t07989 t08037 t08306. Wrapper: t03287 t03306 t03574 t03593 t03630 t03631 t03632 t03635 t03862 t03895 t03899 t04745 t04746 t04747 t04748 t04751 t04758 t04766 t04767 t04768 t04770 t04771 t04772 t04773 t04774 t04776 t04777 t04778 t07677 t07679 t07685 t07689 t07693.
+DefaultLoggerFinder: t04313 t04792 t05061 t07855 t07856 t07857 t07859 t07860 t07861 t07862 t07978 t08121 t08122 t08123 t08134 t08136 t08137 t08139. ClassCache: t04381 t04398 t05315 t05520 t05717 t05964 t08036 t08234. Try: t03210.
+
+**Expected yield**: the first failure of 146 of these 154 tests removed (the 8 that use System.Logger themselves stay); of them, those that pass beyond it (F15's estimate for the invoke tests:
+23 of 33; the serialization tests stop next at their own pieces). AOT: the same derivations are the compiled level's world (its
+rows of these tests fail on the same classes, or on the old ObjectOutputStream reason gate 13c recorded); print is unaffected (its
+rows of these tests pass). Interp's other large groups (cannot extend, JCS120's members) need j2g's model and a build per class:
+no light fix.

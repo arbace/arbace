@@ -117,6 +117,15 @@ public final class SystemLoggers {
     }
 
     /**
+     * jdk.internal.logger.DefaultLoggerFinder.isSystem(m), as jdk26u answers it: whether the module's loader is a
+     * system domain loader (the bootstrap or the platform loader). java.util.logging's Logger and LogManager, derived
+     * from jdk26u's (test/jrt/derive.ae, h-java-deferred), ask it here: jdk.internal.logger is not in the Go build.
+     */
+    public static boolean isSystem(Module m) {
+        return jdk.internal.misc.VM.isSystemDomainLoader(m.getClassLoader());
+    }
+
+    /**
      * LoggingProviderImpl.JULWrapper's System.Logger half, over the java.util.logging logger demanded
      * lazily (LazyLoggers' JdkLazyLogger wraps the JULWrapper so in the JDK).
      */

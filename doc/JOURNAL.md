@@ -9552,3 +9552,19 @@ Alternatives considered: moving the subsets to `:phase :full` (simplest, but a c
 crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: Java's deferred interp rows triaged (branch `h-java-deferred`, from `next` `e4a7a30f3`)
+
+The eval cell's 611 deferred rows (gate 13c's record, 2026-11-14) run again at interp, light, on next's gate executable
+`f60652fb7fb9568e76b1` (581 tests, the `:speed-hang` ones left out; javac's tool `javac-f70d1a9d900eb07a9afc` stale-ok): 168 pass,
+B2's world being in the executable and not yet in the record; their rows alone re-recorded (Java eval 2,549 / 165 / 611 → 2,717 /
+165 / 443, completeness 87 → 89). The 74 of the remaining 413 whose new reasons no class took classed in test/java/divergences.edn.
+The 413 grouped by root cause (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-deferred"): ObjectInputFilter's System.Logger
+87, sun.invoke.util.Wrapper 33 (F26's removal of 2026-11-16 took it from MethodType), DefaultLoggerFinder 18, jrt's ClassCache's
+recursive computeIfAbsent 8, and the costlier ones (the DynSub list 29, members 48, missing classes 37). Fixed in code for the night
+(not provable by day: each needs `bin/jrt-convert derive`, `update` and a build): four derivations in test/jrt/derive.ae
+(ObjectInputFilter, java.util.logging's Logger and LogManager over `jdk.internal.jrt.SystemLoggers`, Wrapper without its
+ClassDescs), `SystemLoggers.isSystem`, ClassCache computing outside the map, and the interpreter's try (`Compiler$CF$Try.eval`):
+a finally that jumps discards the pending exception (JLS 14.20.2; t03210). Alternatives considered: System.Logger in jrt itself
+(JCS155 (a), a Go port of the interface and LoggerFinder: larger, and the derivations follow the rule F24 and JMX-1 already use);
+bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no ConstantDesc).
