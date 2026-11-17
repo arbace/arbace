@@ -4079,3 +4079,13 @@ pack rust-front-std's names and interface, seconds a run. Three causes, each aft
 Unit cases: `bin/rust-front rind-test` (`test/rust/front/rind_test.ae`, the program `test/rust/front/swizzle1.rs`): `[a, b, c,
 d].len()` is 4, `[x; 3].len()` is 3, the negative case `[..].first()` stays unevaluated, the impl's trait `Swizzle<4>` through the
 block's use, main built, INDEX's name; all ok.
+
+Then vectors' next cause, found by the sample's build: `f.cast::<i32>()`'s type `Simd<T, 4>` (no layout): normalize* substituted
+an impl's associated type with the impl's arguments alone, so a generic associated type's own parameter (`type Cast<T> = Simd<T,
+N>` of SimdFloat's impl) was left. The projection's own arguments (those after the trait's) now follow the impl's (a unit case in
+rind-test: `f.cast::<i32>()` a `Simd<i32, 4>`, no local of a parameter's type). MIR's forms write a constant generic argument as
+`(cst V)` (build's `arg-form`; before, `(other ":cval")`, which mono's form->ty does not read).
+
+**`bin/rust-front rsi-build vectors`: own** (2.04 GB; mono's facts: callees 92/112 and fn-symbols 62/82 native, the rest the
+record's, as for the other own cases). **The cell: 5 of its 5 cases own at C1** (intrinsics, panics, std, unwind, vectors), C5 and
+C7 own; C2, C3, C4, C6 still rustc's (independence 80). `bin/rust-front essential` equal; `core-essential` 566 equal, its known summary, the control differing (2.19 GB).

@@ -9962,3 +9962,6 @@ the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of
   an array literal: constant evaluation's first step). Unit cases `bin/rust-front rind-test` (test/rust/front/rind_test.ae,
   swizzle1.rs) with a negative case; `bin/rust-front essential` equal. Alternative: a general CTFE of the const argument (the
   interpreter over the anonymous constant's MIR), larger; the literal's length covers simd_swizzle!, whose index is always one.
+- Then vectors' `f.cast::<i32>()`: a generic associated type's own arguments in normalize* (the impl's then the projection's own),
+  and MIR forms' constant arguments `(cst V)`. vectors is own (`bin/rust-front rsi-build vectors`, 2.04 GB): 5 of the eval cell's 5
+  cases at C1. Independence 80 (C2, C3, C4, C6 rustc's).
