@@ -274,6 +274,11 @@ def first_cause(err, status=None):
         m = re.match(r"Execution error \((\w+)\) at (\S+) \(([^)]*)\)\.?$", l)
         if m and i + 1 < len(ls):  # Arbace's report of a Go panic in the runtime: its class, place and message
             return ("%s at %s: %s" % (m.group(1), m.group(3), ls[i + 1].strip()))[:200]
+        # queue 319: a driver killed by a signal, as bin/pyi's shell reports it ("FILE: line N: PID Killed   COMMAND"):
+        # the signal's description and the status, not the line, whose PID and checkout path differ from run to run
+        m = re.match(r"\S+: line \d+: +\d+ ([A-Z][A-Za-z]*(?: [a-z]+)*(?: \(core dumped\))?)(?= |$)", l)
+        if m:
+            return "the driver died, %s (status %s)" % (m.group(1), status)
     return last_line(err)[:200] or ("the driver died, status %s" % status if status is not None else "the driver died")
 
 

@@ -7200,3 +7200,41 @@ modules: test_weakref, test_gc, test_finalization, test_module, test_atexit, tes
 test_coroutines, test_queue, test_generators, test_threading): 985 methods, every outcome the same (806 pass, 178 classed,
 test_threading's test_can_interrupt_tight_loops failing at both; base's first run had 20 more child-process failures in
 test_threading and test_gc, a rerun of the two modules alone at base gave head's outcomes).
+
+## As built: 319, bin/pyi check with no CPython on the machine, both drivers compared (2026-11-17, the Mac VM, queue 319)
+
+The brief (from next's facts, `test/crops/independence.edn`'s `:python :eval` 0 at `bin/pyi:183 pyall() { python3`) asked for
+the check's driver and universe without python3. That held at the base already: since queue 234 the restartable runner
+(`tools/pyi/libtest_all.py`: `owned`, `run`, `controls`, `table`) runs compiled by pyi's AOT (`pyrun`, `runner_exe`), since 240
+the universe's modules are regrtest's findtests run on it (`find`), since 256 the methods' inventory is a record of its own
+(`universe-cpython314.edn`, written on stage 0); each module's driver (`test/python/libtest_run.py`) runs by `bin/pyi run`, its
+children (`sys.executable`, `tools/pyi/python3`) by `bin/pyi python`. python3 stays only where CPython is the subject: `--oracle`
+(the driver's control: CPython's own runs), `record-ref` (`list`, `refs`: the references), and `bin/pyi cover run` (the coverage
+subset's maintenance, outside the check, its runner python3 because the cover build's module is its own `WORK/aot-cover`).
+
+- **Proved with no CPython on the machine** (stronger than 234's and 256's PATH stubs, which an absolute `/usr/bin/python3` or a
+  test's own lookup would pass by): each run in a mount namespace of its own (`unshare -m`) with `/usr/bin/python3.14` (and so
+  `python3` and `python`, its links) bind-mounted over by a stub that logs its call and exits 99. `bin/pyi check --fresh --only
+  LIST` over 11 modules (test_bool, test_getopt, test_colorsys, test_augassign whole; test_with, test_complex, test_fstring,
+  test_subprocess, test_cmd_line_script by test; two scratch modules, below), `PYI_LIB_TEST_TEST_TIMEOUT=60
+  PYI_LIB_TEST_IDLE_TIMEOUT=20`: 92 methods, 75 pass, 10 classed, 7 failing (the scratch modules' own failures), the three
+  controls failing as they must; the stub's log empty. The universe (`find`, then `owned`) was written in the same namespace. The
+  stub's own control: `PYI_RUNNER=python3 bin/pyi runner owned ...` in the namespace exits 99 and logs its call.
+- **Both drivers, the same rows**: the same selection run by the python3 runner (`PYI_RUNNER=python3`) and by the compiled one:
+  `results.tsv` 92 rows, 91 equal byte for byte; the 92nd is test_cmd_line_script's test_basic_script, whose failure message
+  names its `tempfile.mkdtemp` directory (`.tmp/t6i/jN/tmpXXXXXXXX/`): it differs between two runs of the same driver too, and
+  with those names masked the rows and every module's `.out` are equal. The modules' driver-run counts are the same; `find`'s
+  540 modules and `owned --invert`'s 427 equal byte for byte. CPU seconds of the whole check: 99 compiled, 78 by python3 (one
+  run each; the compiled runner's own start and pyi's speed).
+- **The scratch modules** (put into the worktree's extracted `Lib/test` for the runs and removed; never committed, in no
+  universe: judged by their own verdict, as pyi-only tests): `test_q319synth`, a test for each outcome the runner writes (ok,
+  failure, error, skipped, expected failure, unexpected success, a subtest's failure, output without a newline; children by
+  `sys.executable` and the shell; a driver that exits (`os._exit(7)`) and one killed (SIGKILL) in a test, each followed by a test
+  that runs on the restarted driver; an idle hang killed by the idle timeout, a busy test by the test timeout), and
+  `test_q319import`, a module that does not import (the `IMPORT` row). 5 driver runs for the first, as the four deaths make.
+- **A dead driver's cause without the run's PID** (`first_cause`): a driver killed by a signal had bin/pyi's shell's job line as
+  its cause, `<checkout>/bin/pyi: line 520:  3473 Killed   ARBACE_PATH=...`: the process's PID (another each run, so a record's
+  row changed every night), the checkout's path and the command's text. It is now `the driver died, Killed (status 137)` (the
+  signal's description as bash gives it, `Segmentation fault (core dumped)`, `Aborted` and the rest alike); a Go panic's and
+  Arbace's report keep their precedence. test_fstring's test_many_expressions (`:host-memory`, classed by name) is the one
+  recorded method whose reason this changes.
