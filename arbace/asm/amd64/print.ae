@@ -6,7 +6,8 @@
   (printInstFlags, printCondCode, printCondFlags, printSSEAVXCC, printCMPMnemonic, printVPCOMMnemonic, printVPCMPMnemonic,
   printRoundingControl, printPCRelImm, printOptionalSegReg, printVKPair), MCInstPrinter.cpp (formatImm, formatHex,
   matchAliasPatterns), MCExpr.cpp's MCExpr::print and MCSymbol::print, and the generated printInstruction and
-  printAliasInstr (AsmWriterEmitter.cpp) read from the table's :print and :print-aliases (arbace.asm.amd64.gen), Apache-2.0
+  printAliasInstr (AsmWriterEmitter.cpp) read from the table's :print and :print-aliases (arbace.asm.amd64.gen), and the comments of
+  X86InstComments.cpp (EmitAnyX86InstComments' shuffles) and X86ShuffleDecode.cpp (`inst-comment`), Apache-2.0
   WITH LLVM-exception, written again in Arbace.
 
   `print-inst` gives the line llvm-mc's asm streamer writes for the instruction (without the encoding's comment), e.g.
@@ -20,6 +21,11 @@
 (def ^:dynamic *imm-hex* false)
 ;; the output variant: X86IntelInstPrinter (-output-asm-variant=1) when true (AX3)
 (def ^:dynamic *intel* false)
+;; llvm-mc's --mdis (MCInstPrinter's UseMarkup, AXS66 (a)): registers, immediates and memory references marked up as
+;; `<reg:%rcx>`, `<imm:$1>`, `<mem:...>` (MCInstPrinter::markup, WithMarkup)
+(def ^:dynamic *markup* false)
+
+(defn- markup ^String [^String kind ^String s] (if *markup* (str "<" kind ":" s ">") s))
 
 (defn unsupported [cls msg] (throw (ex-info msg {:print/unsupported cls})))
 
@@ -150,7 +156,7 @@
 (defn- reg-name ^String [r]
   (or (first (get (:regs *t*) r)) (unsupported :register (str "a register without an AsmName: " r))))
 
-(defn- reg-text ^String [r] (if *intel* (reg-name r) (str "%" (reg-name r))))
+(defn- reg-text ^String [r] (markup "reg" (if *intel* (reg-name r) (str "%" (reg-name r)))))
 
 (defn- expr-operand
   "X86ATTInstPrinter::printExprOperand: an expression in parentheses when it starts with `$` (Intel's, X86InstPrinterCommon's:
@@ -163,9 +169,9 @@
   ^String [mi ^long i]
   (let [o (nth mi i)]
     (cond (contains? o :reg) (if (:reg o) (reg-text (:reg o)) (unsupported :no-register "printOperand of no register"))
-          *intel* (if (contains? o :imm) (fmt-imm (:imm o)) (str "offset " (expr-text (:expr o))))
-          (contains? o :imm) (str "$" (fmt-imm (:imm o)))
-          :else (str "$" (expr-text (:expr o))))))
+          *intel* (if (contains? o :imm) (markup "imm" (fmt-imm (:imm o))) (str "offset " (expr-text (:expr o))))
+          (contains? o :imm) (markup "imm" (str "$" (fmt-imm (:imm o))))
+          :else (markup "imm" (str "$" (expr-text (:expr o)))))))
 
 (defn- seg-text [mi ^long i] (when-let [r (:reg (nth mi i))] (str (reg-text r) ":")))
 
@@ -190,7 +196,7 @@
 (defn- mem-text
   "printMemReference: segment, displacement, (base,index,scale)."
   ^String [mi ^long op]
-  (if *intel* (intel-mem-text mi op) (mem-text* mi op)))
+  (markup "mem" (if *intel* (intel-mem-text mi op) (mem-text* mi op))))
 
 (defn- mem-text*
   ^String [mi ^long op]
@@ -201,7 +207,7 @@
            (expr-operand (:expr d)))
          (when (or index base)
            (str "(" (when base (reg-text base))
-                (when index (str "," (reg-text index) (when (not= 1 (long scale)) (str "," scale))))
+                (when index (str "," (reg-text index) (when (not= 1 (long scale)) (str "," (markup "imm" (str scale))))))
                 ")")))))
 
 (def ^:private cond-codes ["o" "no" "b" "ae" "e" "ne" "be" "a" "s" "ns" "p" "np" "l" "ge" "le" "g"])
@@ -214,7 +220,7 @@
   "printPCRelImm (no symbolizing, no address): an immediate as formatImm, an expression as printExprOperand."
   ^String [mi ^long i]
   (let [o (nth mi i)]
-    (if (contains? o :imm) (fmt-imm (:imm o)) (expr-operand (:expr o)))))
+    (if (contains? o :imm) (markup "imm" (fmt-imm (:imm o))) (expr-operand (:expr o)))))
 
 (def ^:private intel-size-words
   {"printbytemem" "byte" "printwordmem" "word" "printdwordmem" "dword" "printqwordmem" "qword" "printxmmwordmem" "xmmword"
@@ -415,3 +421,107 @@
            *intel* (or (alias-text inst mi) (intel-vec-cmp-text inst mi) (str "\t" (frag-text inst mi (:print-intel i))))
            (and (= inst "CALLpcrel32") (= mode 64)) (str "\tcallq\t" (pcrel-text mi 0))
            :else (or (alias-text inst mi) (vec-cmp-text inst mi) (str "\t" (frag-text inst mi (:print i))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the comment after the instruction (X86InstComments.cpp's EmitAnyX86InstComments and the shuffle decoders of
+;; X86ShuffleDecode.cpp, for the families below without a mask; else X86ATTInstPrinter::printOperand's `imm = 0x...`)
+
+(defn- reg-elts
+  "getRegOperandNumElts: the elements of `bits` in the vector register `r`."
+  ^long [r ^long bits]
+  (let [n (str/lower-case (str r))]
+    (quot (long (cond (.startsWith n "zmm") 512 (.startsWith n "ymm") 256 :else 128)) bits)))
+
+(defn- unpck-mask [^long n ^long bits hi?]
+  (let [lane (quot 128 bits)]
+    (vec (for [l (range 0 n lane) i (range (+ l (if hi? (quot lane 2) 0)) (+ l (if hi? lane (quot lane 2)))) x [i (+ i n)]] x))))
+
+(defn- pshuf-mask [^long n ^long bits ^long imm]
+  (let [lane (quot 128 bits)]
+    (vec (for [l (range 0 n lane) i (range lane)] (+ l (rem (bit-shift-right imm (* 2 i)) lane))))))
+
+(defn- shufp-mask [^long n ^long bits ^long imm]
+  (let [lane (quot 128 bits)
+        out (java.util.ArrayList.)]
+    (loop [l 0 nimm imm]
+      (when (< l n)
+        (let [nimm (long (reduce (fn [^long m [s _]] (.add out (+ (rem m lane) (long s) l)) (quot m lane))
+                                 nimm (for [s [0 n] i (range (quot lane 2))] [s i])))]
+          (recur (+ l lane) (if (= lane 4) imm nimm)))))
+    (vec out)))
+
+(defn- palignr-mask [^long n ^long imm]
+  (vec (for [l (range 0 n 16) i (range 16)] (let [b (+ i imm)] (+ l (if (>= b 16) (+ b (- n 16)) b))))))
+
+(defn- insertps-mask [^long imm mem?]
+  (let [d (bit-and (bit-shift-right imm 4) 3) s (if mem? 0 (bit-and (bit-shift-right imm 6) 3))
+        m (assoc [0 1 2 3] d (+ 4 s))]
+    (vec (map-indexed (fn [i x] (if (bit-test imm i) :zero x)) m))))
+
+(defn- masks-text
+  "printMasks: DEST = the spans of each source's elements (mem for no register)."
+  ^String [dest src1 src2 mask]
+  (let [e (count mask)
+        mask (if (= src1 src2) (mapv #(if (and (integer? %) (>= (long %) e)) (- (long %) e) %) mask) mask)
+        sb (StringBuilder. (str dest " = "))]
+    (loop [i 0]
+      (when (< i e)
+        (when (pos? i) (.append sb ","))
+        (let [m (nth mask i)]
+          (if (= m :zero)
+            (do (.append sb "zero") (recur (inc i)))
+            (let [s1? (< (long m) e)
+                  j (loop [j i]
+                      (if (and (< j e) (not= :zero (nth mask j)) (= s1? (< (long (nth mask j)) e))) (recur (inc j)) j))]
+              (.append sb (str (or (if s1? src1 src2) "mem") "["
+                               (str/join "," (map #(rem (long %) e) (subvec mask i j))) "]"))
+              (recur (long j)))))))
+    (str sb)))
+
+(defn- shuffle-comment
+  "EmitAnyX86InstComments for PALIGNR, PSHUFD, PUNPCK*, SHUFP*, UNPCK*P* and INSERTPS without a mask, else nil."
+  [^String inst mi]
+  (let [n (count mi)
+        rn (fn [k] (when-let [r (:reg (nth mi k))] (reg-name r)))
+        imm (fn [] (:imm (nth mi (dec n))))
+        elts (fn [bits] (reg-elts (:reg (nth mi 0)) bits))]
+    (when-let [[_ fam _ form] (re-matches #"V?(PALIGNR|PSHUFD|PUNPCK[LH](?:BW|WD|DQ|QDQ)|SHUFP[SD]|UNPCK[LH]P[SD]|INSERTPS)(Y|Z128|Z256|Z)?(r[rm]i|[rm]i|r[rm])" inst)]
+      (let [reg? (#{"rri" "ri" "rr"} form)
+            dest (rn 0)]
+        (cond
+          (= fam "PALIGNR") (when-let [v (imm)]
+                              (masks-text dest (when reg? (rn (- n 2))) (rn (- n (if reg? 3 7))) (palignr-mask (elts 8) v)))
+          (= fam "PSHUFD") (when-let [v (imm)] (masks-text dest (when reg? (rn (- n 2))) nil (pshuf-mask (elts 32) 32 v)))
+          (.startsWith ^String fam "PUNPCK")
+          (let [bits ({"BW" 8 "WD" 16 "DQ" 32 "QDQ" 64} (subs fam 7))]
+            (masks-text dest (rn (- n (if reg? 2 6))) (when reg? (rn (dec n))) (unpck-mask (elts bits) bits (= \H (.charAt ^String fam 6)))))
+          (.startsWith ^String fam "SHUFP")
+          (when-let [v (imm)]
+            (let [bits (if (.endsWith ^String fam "D") 64 32)]
+              (masks-text dest (rn (- n (if reg? 3 7))) (when reg? (rn (- n 2))) (shufp-mask (elts bits) bits v))))
+          (.startsWith ^String fam "UNPCK")
+          (let [bits (if (.endsWith ^String fam "D") 64 32)]
+            (masks-text dest (rn (- n (if reg? 2 6))) (when reg? (rn (dec n))) (unpck-mask (elts bits) bits (= \H (.charAt ^String fam 5)))))
+          (= fam "INSERTPS")
+          (when-let [v (imm)] (let [s2 (when reg? (rn 2))] (masks-text dest (rn 1) s2 (insertps-mask v (nil? s2)))))
+          :else nil)))))
+
+(defn- imm-comment
+  "printOperand's comment for an immediate outside [-256, 255]: its bits at the narrowest of 16, 32 and 64 that holds it."
+  [^String inst mi]
+  (let [pm (set (keep (fn [x] (when (vector? x) [(first x) (or (second x) "printOperand")]))
+                      (:print (get (:insns *t*) inst))))]
+    (first (for [[i o] (map-indexed vector mi)
+                 :when (and (contains? o :imm) (contains? pm [i "printOperand"]))
+                 :let [v (long (:imm o))]
+                 :when (or (> v 255) (< v -256))]
+             (str "imm = 0x" (str/upper-case
+                               (cond (= v (long (unchecked-short v))) (Integer/toHexString (bit-and v 0xffff))
+                                     (= v (long (unchecked-int v))) (Long/toHexString (bit-and v 0xffffffff))
+                                     :else (Long/toHexString v))))))))
+
+(defn inst-comment
+  "The comment llvm-mc's asm streamer writes after the instruction's AT&T text (without its `# `), or nil: a shuffle's mask
+  (EmitAnyX86InstComments, the families of shuffle-comment), else an immediate's bits (printOperand)."
+  [^String inst mi]
+  (or (shuffle-comment inst mi) (when-not *intel* (imm-comment inst mi))))
