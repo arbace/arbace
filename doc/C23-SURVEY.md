@@ -5837,3 +5837,74 @@ The judge's rows still on gcc's recorded runs, counted over `test/c/check-linux-
   either file: MIR's runner is not in the corpus, so its default is not established here; the exceptions keep their reasons.
 - **The fact** (`test/crops/independence.edn`, C's judge): the cells' cases as `test/reap/matrix.edn` counts them today, 14,855,
   315 by a record (72 read, 104 eval, 104 AOT, 35 print): 0.985 to 0.989; C's independence 99.7 to 99.8.
+
+## As built: h-c-run, the run cells' by-design classes audited (2026-11-17, branch `h-c-run`)
+
+From `next` 3c55fb7bc, on next's stage 0 (linked), light runs only (`bin/ci check --only`, `check --aot --only` on the affected
+programs, one shard at a time under 2 GiB). The eval cell's 123 non-passes by design (AOT 115), each class read against its
+programs (`test/c/check-linux-amd64.edn`, `test/c/divergences.edn`, `test/c/check-known.edn`):
+
+| class (eval / AOT programs before) | verdict |
+|---|---|
+| by-design: inline assembly (9 / 9), known asm "empty asm moving its input" (2 / 2), "empty asm's operand with a side effect" (1 / 1) | **gap, built**: 11 of the 12 are empty templates (`asm ("" : "=r" (p) : "0" (&s))`), no instruction, their meaning their operands' alone; the 12th (20061220-1) now meets its nested function |
+| by-design: `__real__` and `__imag__` (5 / 5) | **gap, built** (SPEC §14's row amended) |
+| abi: `-funsigned-bitfields` (bitint-34) | **gap, built**: not the option (the test checks that it does not apply to `_BitInt`): an `unsigned _BitInt(22)` bit-field read back sign-extended |
+| abi: `-mms-bitfields` (95_bitfields_ms) | **stale**: it passes since CS296's `ms_struct` (its `M` is the attribute; the option is tcc's `#pragma comment`); its known entry removed |
+| by-design: GNU vector types (41 / 41) | **gap, not cheap**: proposed deferred (CS320 below) |
+| by-design: GNU nested functions (31 / 31) | **gap, not cheap**: proposed deferred (CS321 below) |
+| by-design: `_Float128` (6, the `_BitInt` conversion tests, also long double), `_Float16` and `_Complex _Float16` (2), `_Complex _Float128` (1), `_Decimal32/64/64x` (4) | by design: SPEC §14, CS3 (a), CS35 (no software floating point) |
+| by-design: inline assembly 990413-2 (x87 `fpatan`, `fsqrt`); known asm 85_asm-outside-function (a function defined by a file-scope asm), pr47237 (`__builtin_apply_args`: the machine's argument registers) | by design: the target's instructions |
+| speed (9, eval only), long-double (4 / 5), ub (2), fenv (2), gcc-builtin (1: a program defining `llabs`, which 7.1.3 reserves) | by design, as decided (CS107 (a), CS35, CS10 (a), C7, CS264 (a)) |
+
+Built (`arbace/c/build.ae`, `arbace/c/check.ae`, `arbace/c/run.ae`):
+- **Empty asm templates with operands.** `arbace.c.build/lower-asms`, called by `arbace.c.run/check-read` on the read's forms and
+  its units' (the program's and musl's) before the checker: a statement `(c/asm TEXT)` whose template is empty and which has an
+  output becomes `(do (c/asm TEXT) STMT...)`, the c/asm marked `:ci/lowered` (the checker still sees it, CS160's operand check; the
+  builder's barrier and `asm-body?` take it as empty). The operands are parsed from the text (CS76 (a): the forms keep it as text),
+  a small grammar (names, integer constants with their suffixes, calls, members, subscripts, unary `& * - ! ~ +`, binary `+ - * / %`,
+  parentheses, `[name]` operands, `::`); an output tied to an input by a digit or `[name]` becomes `(set! OUT (conv (typeof OUT) IN))`
+  (gcc's register made explicit: 20030222-1's low part of a `long long`), an input or an untied or read-write output with a call in
+  it is evaluated once as an effect (990130-1's `"+r"(*bar())`), the rest left as they are (gcc -O0 writes no memory for `"=m"`; an
+  untied `"=r"`'s value is no one's). Outside the grammar (a cast, `asm goto`, two tied outputs, a template) the refusal stays.
+  musl's three empty asms are barriers with no output: untouched (`"+r"(stage2)` gives no statement, so its fragment is the same).
+- **`__real__`, `__imag__`.** As values: a complex operand's part (`cparts`), of a real operand the operand and 0; as places: the
+  complex object's parts (the real first, C23 6.2.5), so `&__real__ z`, `__imag__ z = ...`, `__real__ d += 1` work.
+  `__builtin_conj`, `cproj`, `creal`, `cimag`, `cabs`, `carg` and their f and l spellings get their prototypes in the checker's
+  `math-builtin-fns` (queue 178's table: cc's Builtin declares none, so the call was an `int ()` one and 20020411-1's
+  `__builtin_conjf` faulted) and the builder calls musl's functions of the names.
+- **Unsigned `_BitInt` bit-fields.** `unsigned-ty?` takes an unsigned `_BitInt(N)`'s `uN` (it knew `u8`...`u64` only): its bit-field
+  loads and stores, a switch on it and complex integer division by its parts were signed.
+
+| command | result |
+|---|---|
+| `bin/ci check --only` the 25 programs (the 17 fixed, 20061220-1, the known entries) | 17 pass; 20061220-1 by-design (nested functions); the others in their classes |
+| `bin/ci check --aot --only` the 17 and 95_bitfields_ms, 20020411-1 | pass all but 20061220-1 (by design) |
+| `bin/ci check --only` 188 programs (every program with an asm, `__real__` or `__imag__` in its text, and gcc-bitint-run's 90) | the 17 move to pass, no other row moves |
+| `bin/ci check --only test/c/essential-check.txt`, `check --aot --only test/c/essential-aot.txt`, `bin/ci dg --essential` | see the journal's entry (the controls differ) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | C eval 2,156 / 123 to 2,173 / 106, AOT 2,164 / 115 to 2,181 / 98; completeness 96 to 96 (0.9599 to 0.9636); 0 problems |
+
+The records' 18 rows (17 to pass, 20061220-1's reason) edited in place from the runs (`--record` takes whole corpora); the known
+entries of 990130-1, 20030222-1, bitint-34 and 95_bitfields_ms removed; the class `abi` a guard class.
+
+### Rekeys
+
+`arbace/c/build.ae`, `check.ae`, `run.ae` are embedded (gate_key: the whole `--full` reruns) and in ci's prebuilt runtime's key
+(`bin/ci runtime build`: the fragments again) and cf2g's libraries'; musl's forms key does not move (repr/c unchanged).
+
+### The night's commands
+
+`bin/ci check --record` and `check --aot --record` whole (expected: the hand-edited rows as recorded, nothing else moves).
+
+### Proposed (h-c-run)
+
+- **CS320 GNU vector types (41 eval, 41 AOT).** A GNU extension ci could carry, not a decided divergence of the target: SPEC §14
+  keeps it out for its "SIMD semantics of its own". (a) Reclassify as deferred (a class `:vector`, kind `:deferred`, out of
+  `by-design`), then build it: vectors as memory aggregates of lanes in the builder, element-wise operators, comparisons to 0 / -1,
+  subscripts, scalar broadcast, `__builtin_shuffle` / `shufflevector` / `convertvector`, and for benchmarksgame's SSE2 programs the
+  `__builtin_ia32_*` builtins its intrinsic headers call; a few days. (b) Keep it by design. *Recommended: (a).*
+- **CS321 GNU nested functions (31 eval, 31 AOT; c-torture's own tests of them and gnu23-varmod-2).** Not the target's either:
+  SPEC §14's reason is the trampoline on an executable stack, which an interpreter does not need. (a) Reclassify as deferred and
+  build them: a static chain (the parent's frame as a hidden argument, the captured locals in frame memory), a nested function's
+  address as a closure in go/arbace/ci and cf2g, a non-local goto to the parent's `__label__`s; a few days. (b) Keep them by design.
+  *Recommended: (a).*
+- Either (a) moves no pass: completeness stays, "meant" (without by design) falls from 100 to about 97 at eval and AOT until built.

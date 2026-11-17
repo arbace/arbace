@@ -9657,3 +9657,21 @@ One change: diffcheck's `:mem-gib` 43 to 50 (its pass of 11:46 on seed 3c48859d 
 memdecl-fix's measures; `bin/gate --mem-check` listed it UNDER). The admission already took 1.1 x that peak, so no decision of
 tonight's run moves, and `:mem-gib` is in no key. java-compiled's 52.0 GiB (memdecl-fix's one-off, not followed on purpose)
 still fails `--mem-check`: left to the main session.
+
+## 2026-11-17: C's run cells, the by-design classes audited (branch `h-c-run`)
+
+The eval cell's 123 by-design non-passes (AOT 115) read class by class against their programs (doc/C23-SURVEY.md, "As built:
+h-c-run"). Gaps built in ci (`arbace/c/build.ae`, `check.ae`, `run.ae`): empty asm templates with operands lowered to C forms
+before the checker (`arbace.c.build/lower-asms`: the operands parsed from the c/asm's text, a tied output given its input
+converted, the operands' calls evaluated once; 11 programs: 20030222-1 twice, 990130-1, pr38533, pr40657, pr43560, pr45695, pr49279,
+pr52286, stkalign, ...); GNU's `__real__` and `__imag__` as values and places, with the complex builtins' prototypes (5 programs);
+an unsigned `_BitInt(N)` bit-field read back signed (`unsigned-ty?` missed `uN`: bitint-34, whose class said `-funsigned-bitfields`).
+95_bitfields_ms's `-mms-bitfields` entry was stale (it passes since CS296's `ms_struct`). Proven by `bin/ci check --only` and
+`check --aot --only` on the 25 programs touched and 188 with an asm, `__real__`/`__imag__` or a `_BitInt` (gcc-bitint-run), the
+essential lists with their controls and `bin/ci dg --essential`; the 18 record rows edited in place from those runs. C eval 2,156 /
+123 to 2,173 / 106, AOT 2,164 / 115 to 2,181 / 98; completeness 96 (0.9599 to 0.9636). Genuinely by design and left: no software
+floating point (`_Float16`, `_Float128`, decimal), the target's instructions (x87 asm, a file-scope asm function,
+`__builtin_apply`), speed, long double, the reference's undefined behaviour, signaling NaNs, a redefined `llabs`. Alternatives: the
+asm operands structured by repr/c's converter (CS76 (b)), left (another branch owns repr/c's read; the text holds them); giving
+`-funsigned-bitfields` a model, not needed (the test checks it does not apply). Proposed CS320 (GNU vector types, 41 programs) and
+CS321 (GNU nested functions, 31): gaps ci could build, not cheap; reclassifying them as deferred waits for the user.

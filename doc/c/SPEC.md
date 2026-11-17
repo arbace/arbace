@@ -1304,8 +1304,8 @@ CS3 (a): what the reader reads and the printer prints, but ci and cf2g refuse by
 | construct | why out |
 |---|---|
 | GNU nested functions (`c/defn` in a block) | trampolines on an executable stack; no corpus needs them beyond c-torture's tests of them |
-| `__real__`, `__imag__` (`real`, `imag`) | the survey's CS3 (a) lists them; `creal`, `cimag` (musl's functions) serve the same need |
-| inline assembly (`c/asm` in a function, extended `asm`) | the target's instructions; musl's are natives in `crt` |
+| ~~`__real__`, `__imag__` (`real`, `imag`)~~ | in since 2026-11-17 (h-c-run, doc/C23-SURVEY.md, "As built: h-c-run"): a complex operand's part, an lvalue of a complex object's |
+| inline assembly (`c/asm` in a function, extended `asm`) with a template | the target's instructions; musl's are natives in `crt`. An empty template is in (h-c-run, 2026-11-17): its operands parsed from the text, a tied output given its input's value converted, the operands' side effects evaluated |
 | GNU vector types (`vector_size`, `__builtin_shufflevector`, `__builtin_convertvector`) | SIMD semantics of their own (24 c-torture/execute files) |
 | `__int128` beyond `+ - * / % << >> & \| ^ ~`, comparisons and conversions | the survey's CS3 (a): `__int128` arithmetic is in, its library (`printf` has none) and atomics out |
 | `_Decimal32/64/128` arithmetic and conversions | BID arithmetic is libgcc's; musl's `printf` cannot print them; clang 23 rejects them on the target (measured) |
