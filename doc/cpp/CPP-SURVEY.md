@@ -8274,3 +8274,103 @@ gate-key-crops-test, audited-test, costs-test, claude-md-test, `make check-makef
 Rule slips: the waits on the checks' logs used `grep -q ... 2>/dev/null` (read-only) and one `git stash list` (a listing, nothing stashed);
 `ps -eo rss,...` (no grep) to see that a stopped check's process was gone. Scratch (the worktree's `.tmp/`): `oi-list/` (logs, the oi-only
 lists), `oi/table/`, `si/interp/`, `goi-table/8a66635705fc1650` (a link to the main checkout's cached linux std forms, same key), removable.
+
+## As built: h-judges, the judge's and the read's bounds (2026-11-17, branch `h-judges`)
+
+No C++ row moves to its own verdict: the token check's 1,931 files state no preprocessed stream of their own (g++ -E's and
+clang's digests are the only reference), the samples' and runtime's 15 programs are Arbace's own and print what they compute
+with no expected output, and the sampling's 2 (`ubsan/null-8.C`, `ubsan/vptr-1.C`) state their verdict by dg-output, the
+sanitizer's message under `-fsanitize`, which the check's harness does not pass (`cppi_opts`), so g++'s recorded run stays their
+reference. The facts (`test/crops/independence.edn`) now leave the read cell's 36 n/a cases out (CP260 (a): 33
+`:dg-unsupported`, 3 `:not-cxx` and `:target-option`), as `test/reap/matrix.edn` does: read 0.711 to 0.712 ((1931 + 823 + 0.5 x
+3741) / 6495), judge 0.907 unchanged. The read stays near 0.71 because 3,741 dg files fail the own front end's record
+(`test/cpp/check-dg-own-linux-amd64.edn`): 3,386 `missed` (3,071 accepted where a dg-error expects a Sema diagnostic: overload
+resolution, incomplete types, deleted functions, narrowing, access, constant evaluation, the most frequent message 32 files),
+212 `both`, 92 `extra`, 29 crashes, 20 timeouts, 2 stopped. CX12's next slices move it; no light change does.
+
+## As built: h-cpp-read (2026-11-17; branch `h-cpp-read` from next e4a7a30f3; the host burst's light tier)
+
+The read cell (test/crops/scores.edn: 5,276 pass, 1,083 by design, 136 deferred, 36 n/a; completeness 91, without by design 96) audited
+class by class, and the deferred rows' cheap groups closed in the native parser (arbace/repr/cpp/parse.ae, native.ae) and one Sema
+recursion (arbace/cpp/sema.ae). No class changed: the reclassifications are CP398 and CP399 below, for the user.
+
+### The 1,083 by design
+
+| class | rows | decided | the audit |
+|---|---:|---|---|
+| musl-libc | 4 | cpp-compl (2026-11-08) | by design: the target's C library (NULL as nullptr, musl's iconv), g++ 15.2 itself errs so here |
+| gxx-only-rules | 2 | CP328 (a) | by design: GCC's pre-P0136 and alias-equivalence rules, no error by the standard |
+| clang-fewer-errors, -other-lines, -extra, -accepts, -pedantic, -elsewhere | 342, 254, 239, 209, 29, 4 = 1,077 | CP2 (a), CX9: "repr/cpp has no Sema of its own, the errors are clang's" | stale premise: since CX12 the own front end (the native parser and arbace.cpp.sema's checks) judges every file, and since CP344 (a) a file passes when either judge meets its lines. Each of these 1,077 is a file **neither** clang nor Arbace's own front end meets: the own record says accepted (no own error) 793, both 116, missed 103, extra 49, crash 8, timeout 7, stopped 1 |
+
+The 1,077 split by what the file asks:
+
+- 150 ask a dialect that neither clang (the check drops the options it does not know) nor Arbace's front end takes: OpenMP and OpenACC
+  102 (gomp.exp and goacc.exp add -fopenmp, -fopenacc), GNU TM 17 (tm/, -fgnu-tm), GCC's pre-standard contracts 19 (contracts/,
+  -fcontracts: GCC's P1323-era design, not P2900), -fpermissive 10, -fms-extensions 2.
+- 927 are standard C++ (or GNU++ without those options): the own front end's diagnostics not ported (Sema's checks: lookup, conversions,
+  overloads, constant evaluation, templates, access; the parser's recovery giving errors on other lines), with a GCC-only part not yet
+  named file by file (clang-accepts' 177 hold GCC's own pedantic rules and builtin redeclarations; clang-pedantic's 29 are clang's
+  -pedantic-errors extension errors g++ gives as pedwarns; concepts/ with -fconcepts, 40, are C++20 concepts at C++17, GCC's extension).
+
+### The 136 deferred, and what was fixed
+
+syntax-own 128 (the CP262 (b) files judged by the own front end alone), oracle-crash 5 (clang's segfaults; the own front end misses them
+too, ellipsis3.C a Sema stack overflow), gxx-disagrees 2, named-ucn 1 (a table of Unicode's names: not cheap). Closed in syntax-own,
+each a GCC parser or lexer check written where the grammar decides it (a `soft-diag!`: the error at its token, the tree unchanged):
+
+- the lexical pass `lexical-diags!` over the main file's own tokens: digit separators out of place (C++14 on: after a base prefix, beside
+  `.` or an exponent, outside a digit sequence; cpp_classify_number's words) and identifiers' and ud-suffixes' UCNs that name no
+  identifier character (surrogates; controls and basic characters below U+00A0, `$` GCC's before C++26; the bidi controls);
+- literal operators: `operator "x"_s` (the string not empty), `operator ""5X` (no suffix identifier); a linkage spec's string with a
+  ud-suffix (`extern "c"void`, also when the lexer ends the literal before a glued keyword);
+- `= delete (...)`'s reason (P2573R2: a string-literal, no encoding prefix, then `)`), asm's template and GNU asm labels (a string-literal,
+  C++26's parenthesized constant allowed), attribute arguments holding a `;`, `[[nodiscard(...)]]` and `[[deprecated(...)]]`'s string,
+  an empty `alignas()`;
+- declarations: a stray `,` before `;` or `,` in a declarator list, `template<...> enum`, a template template parameter's key (`struct`),
+  a friend destructor unqualified, a class template's name as a base without its arguments, a lambda's empty template parameter list
+  and its specifiers after its attributes, `noexcept ()`, `decltype()` and `decltype(decltype)`, a cast to a type with `auto`, `new ()`
+  and `new T[][]`, a dependent qualified type without `typename` before C++20;
+- `-fno-gnu-keywords` takes `typeof` out of the keywords (native.ae).
+
+Sema (arbace/cpp/sema.ae): a function called in a constant expression from inside its own body before that body is analyzed is not a
+constant (`*ce-analyzing*`, GCC's "called in a constant expression before its definition is complete"), and arbace.repr.cpp.diag's Sema
+binds `*analyze-depth*`: past 4,000 nested `analyze` calls a StackOverflowError, as the evaluating host's interpreter throws one at its
+own depth. **Found:** since W2 (seed 3c48859d) stage 0 embeds arbace.cpp.sema compiled, and a compiled recursion grows Go's stack to its
+1 GB limit, a fatal error: `bin/repr-cpp dg --front native` on stage 0 died whole on cpp1y/constexpr-recursion1.C (this branch's first
+run; the night's `cpp-dg` part dg-error-own would have too, and on the other ten recorded StackOverflowError files). Evaluated (any
+changed namespace is loaded from the checkout) the interpreter's own depth fires first, so the records' rows are unchanged; compiled, the
+guard needs the gate's executable at the branch's key (the main host).
+
+### Checked (one process at a time beside the others' light runs, peaks by busybox `time -v`)
+
+- `bin/repr-cpp dg --corpus dg-error --front native --only LIST` (REPR_CPP_THREADS=2, GOMEMLIMIT=1400MiB): the 232 syntax-only files
+  (constexpr-recursion1/2.C out until the guard, the first run having died on them) 106 to 139 own passes; then the 960 files of the
+  recorded own passes, the syntax list and the eleven StackOverflowError rows: 823 to 857 passes, no recorded pass failing, the eleven
+  `crash: ... StackOverflowError` rows as recorded (evaluated) and the two recursions `missed` (f3's line met, f1<0>'s template not), peak
+  1.7 GB; the 2,048 of those and every by-design and deferred dg file with the control's two: no file of the 1,077 clang-* nor of the 7
+  others gains a pass, the control `_control/dg/dr2082-vs-dr1423` failing as it must, 35 min, peak 1.96 GB.
+- Recorded (`--only --record`, those rows alone): the 33 files now passing and the two recursions' rows, in
+  test/cpp/check-dg-own-linux-amd64.edn; cpp1z/constexpr-asm-3.C passes when the host is idle and times out at 300 s under load, left as
+  recorded (timeout). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,276 /
+  1,083 / 136 to 5,309 / 1,083 / 103 (syntax-own 128 to 95), the crop's completeness 91 (0.9124 to 0.9137), without by design 96 (0.9588
+  to 0.9603).
+- The native parser's other users: `roundtrip-corpus samples --judge own` (9 of 9, its control failing) and `gxx-dg-essential` (33 of 33,
+  no regression), `native-check samples` (9 same, both controls failing) and `gxx-a --tree` (as before); `native-check native --tree` fails
+  on native/subset.cpp's unclassed ConceptSpecializationExpr, the same at e4a7a30f3 (a worktree of the base): not this branch's.
+- Keys: `gate_key` (from f60652fb) and `arbace_javac_key` move (repr/cpp and arbace/cpp embedded since W2);
+  the runtime key does not.
+
+### Proposed (CP398, CP399)
+
+- **CP398: the read cell's clang-* classes (1,077 by design).** Their reason, "repr/cpp has no Sema, the errors are clang's" (CP2 (a)),
+  no longer holds: the own front end judges every file and CP344 (a) passes either judge's success. (a) Reclassify the 927 standard files
+  as one deferred class, `:own-diag` ("neither judge meets the file's lines: Arbace's front end's diagnostics not ported", CX12's gap),
+  matched before the clang-* ones by the own record's row, the clang-* texts kept as the oracle tier's comparison; completeness unchanged
+  (by design and deferred are both in its denominator), without by design read from about 98 to about 84 (crop 96 to about 92).
+  (b) As now until CX12 is whole. (c) (a), then name per file as CP328 (a) did the files whose expected error is GCC's own rule
+  (clang-accepts' 177 and clang-pedantic's 29 first), by design. **Recommended: (a) then (c)**: the class should say whose gap it is.
+- **CP399: the 150 files of the dialects Arbace's C++ does not take** (-fopenmp/-fopenacc, -fgnu-tm, -fcontracts, -fpermissive,
+  -fms-extensions). (a) By design, a class of their own (`:gcc-dialect`, named by option and directory), this decision its record.
+  (b) `:na`, as dg-unsupported (CP260 (a)): out of both denominators, read completeness about +2 (crop about +0.5). (c) Deferred (OpenMP's
+  directives and clauses, TM and GCC's contracts ported: weeks). **Recommended: (a)**: DejaGnu runs them on gcc, so they have verdicts;
+  Arbace not taking the dialect is a choice, which by design records (also the 27 syntax-own files of gomp/ and goacc/ once decided).

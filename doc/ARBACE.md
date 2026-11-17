@@ -382,6 +382,10 @@ code. Three kinds of things live here:
   intrinsic.rs`' `generic_simd_intrinsic` (splat, comparisons, bitwise and arithmetic operators, bitmask), `rustc_target/src/callconv/
   mod.rs`' indirect vectors and `rustc_codegen_ssa/src/mir/rvalue.rs`' ThreadLocalRef, rustc 1.99.1, the same revision and sources;
   LICENSE.md names them (MIT OR Apache-2.0); the private ADTs' source reader (with stdarch's `types!` as its macro writes) is Arbace's own.
+  RIND2 (a) (2026-11-17, doc/rust/FRONTEND-SURVEY.md, "As built: RIND (stage 1)") adds `arbace/rust/back/shim.ae`, the allocator
+  shim after `rustc_codegen_llvm/src/allocator.rs` and the allocator CGU's name after `rustc_middle/src/mir/mono.rs` and
+  `rustc_data_structures/src/base_n.rs`, rustc 1.99.1, the same revision, held to rustc's 73 recorded shims (the compiler's
+  sources not on the host that day); LICENSE.md names it (MIT OR Apache-2.0).
   `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,

@@ -1881,3 +1881,80 @@ lockstep, amd64's ptrace, stubbed), over every program of x86i-check, assembled 
 
 x86i-check's wall time on amd64 is mostly the CPU's runs, the eval's builds and the lockstep's ptrace, as a64i check's: x86i's own runs
 are a part of it (the main host's measurement).
+
+## As built: the deferred rows' cheap groups (2026-11-17; branch `h-asm-deferred`, from `next` `e4a7a30f3`)
+
+The x86-64 cells' deferred rows grouped by cause (read 32, print 400 at `e4a7a30f3`), the cheap groups fixed, each proven on its
+own files (no whole-corpus run), the rows re-recorded alone:
+
+- **The printer's markup (AXS66 (a)).** `arbace.asm.amd64.print/*markup*` (MCInstPrinter's UseMarkup): registers `<reg:%rcx>`,
+  immediates and pcrel immediates `<imm:...>`, a scale `<imm:4>`, a memory reference `<mem:...>` (printOperand, printPCRelImm,
+  printMemReference, printOptionalSegReg); decode-check binds it for `--mdis` runs. `dis/marked-up` and `marked-up-32`: 4 of 4
+  (read: `:markup` 4 to 0).
+- **llvm-mc's lexer options (AXS35 (a), its alternative to (b)).** The header's map takes `:masm-integers` and
+  `:motorola-integers`, set from the first llvm-mc's RUN options (`bin/repr-asm`'s list flags; `check.ae`'s runs, `:lexer`);
+  `arbace.repr.asm.lex` ports LexDigit's LexMasmIntegers branch (radix suffixes h, t, o/q, y, a last d or b; `0x..h`) and the
+  Motorola `$hex` / `%binary` integers. `motorola_integers`, `pr27884`, `intel-syntax-hex` read and printed back byte for byte
+  (read and print: `:lexer-option` 3 to 0), intel-syntax-hex's 11 CHECK texts met (print: `:unread` 74 to 63).
+- **llvm-mc's comments (narrowing `:comment`).** `inst-comment`: X86InstComments' EmitAnyX86InstComments for PALIGNR, PSHUFD,
+  PUNPCK*, SHUFP*, UNPCK*P* and INSERTPS without a mask (X86ShuffleDecode's PALIGNR, PSHUF, UNPCKL/H, SHUFP and INSERTPS masks,
+  printMasks), else printOperand's `imm = 0x...` (AT&T). The judge holds a comment-kind CHECK text to the printed lines with their
+  comments, FileCheck's way; a miss beside an instruction the printer comments is `:mismatch`, else still `:comment`. shuffle-comments,
+  imm-comments, vinsertps_decode: 119 of 119 (`:comment` 119 to 0). A mutant of shuffle-comments (`palignr $4`, `shufps $28`) fails
+  the judge by hand; the new control `_control-print/vinsertps-vs-shuffle-comments` fails as it must.
+- **--defsym (AXS32 (a)'s part).** A run's --defsym is no `:options` any more: the print level assembles the statements
+  `.ifdef`/`.ifndef`/`.else`/`.endif` select for its names (assemble-file's `defs`; without --defsym nothing changes).
+  intel-syntax-branch: 7 texts met, 2 labels left `:directive`; displacement-overflow's and intel-syntax-displacement-overflow's
+  2 + 2 texts are warnings, now judged by the existing by-design `:diagnostic` rule (deferred 4 to design 4).
+- `bin/repr-asm encode-check --record --only LIST` records the listed files' rows alone (encode_judge's partial record).
+
+Proof: encode-check `--only` over 29 files (the touched ones and every control's subject and reference): 25,681 of 25,681 encodings,
+26,179 of 26,199 texts, 14,589 of 14,713 cross, every control failing as it must, the judge ok against the record (13 minutes,
+1.9 GB); the round trip of the three lexer files and of 25 musl x86_64 files, 31 arm64 files (a dialect without options unchanged).
+After: read 25,229 pass / 1 design / 25 deferred; print 194,722 / 1,536 / 256.
+
+Left deferred (not cheap): the error tests (24 read and print rows, one input; AX2's judge: the reader stops at the first error,
+LLVM's messages and places per statement), the streamer's lines (`:directive` 104: x86_64-asm-match's 57 lines of
+`-debug-only=asm-matcher`, `.cfi_*` with APX registers, labels, `.reloc`, assignments, data), the LFI rewriter (61, X86MCLFIRewriter:
+no source in the corpora to port), the local label (1 + 1), a fixup (1).
+
+### Proposed (the deferred rows)
+
+- **AXS95 The objects behind `:other-tool`.** 655 of the print level's 772 by-design `:other-tool` texts are the llvm-objdump,
+  llvm-readobj and -filetype=obj CHECK lines of files whose objects no Arbace check judges (mc-x86-obj leaves out the relaxation,
+  padding and branch-alignment runs, -mcpu, CREL, other triples: x86_long_nop 40, align-via-relaxation 37, apx-*-reloc 228,
+  align-branch-* 170, prefix-padding 32, ...); the other 117 are files object-check holds to llvm-mc's recorded objects. (a) those 655
+  `:deferred` under a class of their own (`:object-unjudged`) until AXS67 (b)'s objdump text or object-check's corpus takes their runs;
+  (b) keep all 772 by design (another tool's output is no printer's text). *Recommended: (a)*: the texts are the tests' own verdicts
+  on objects nothing of Arbace's checks; by design hides a gap of the AOT level.
+- **AXS96 The error tests' read rows.** (a) AX2's judge for the round trip: the reader recovers per statement as AsmParser does and
+  each refusal is held to the test's error CHECK lines (place, then message); (b) a refused error test passes the read when the
+  refusal's line is one the test states an error at (12 of 24 today); (c) keep `:error-test` deferred. *Recommended: (a)*, (b) being
+  a judge looser than the test.
+- **AXS97 `-debug-only=asm-matcher`.** x86_64-asm-match's 57 texts are LLVM's matcher's debug trace (REQUIRES: asserts), no
+  streamer's line: (a) a by-design class `:debug-trace` (no printer writes it; the matcher's choice is judged by the encodings);
+  (b) keep `:directive`. *Recommended: (a)*.
+
+## As built: AXS95 (a), AXS96 (a), AXS97 (a) (2026-11-17; branch `h-asm-deferred`, from `next` `af41f0944`; the user's round 51)
+
+- **AXS95 (a).** The print level's other-tool texts are `:other-tool` (by design) only for a file whose object object-check holds
+  to llvm-mc's recorded one (its `mc-x86-obj/NAME` row passing in `test/asm/object-results-amd64.edn`, read by check.ae beside the
+  table), else `:object-unjudged` (deferred). **Correction to the proposal's numbers:** 406 of the 772 texts are unjudged, not 655
+  (the proposal's count missed that `apx/*-reloc.s` are object-check's `add-reloc` and the like, by base name); 366 stay by design.
+- **AXS97 (a).** A run with `-debug-only` prints LLVM's debug trace: `:debug-trace`, by design (x86_64-asm-match's 57).
+- **AXS96 (a).** An error test's read (the list's `reject` flag) goes on after a refused statement (`gnu/*recover*`: the
+  statement kept as `(asm/unread TEXT MESSAGE)`, as inside a conditional block, ARS49), so the file reads, round-trips and prints
+  back byte for byte; each refusal outside a conditional block is then held to the lines the test states errors at
+  (`arbace.repr.asm/error-lines`): a `[[#@LINE+N]]` place, a `NAME.s:N:C:` place, else the statement just before and just after the
+  CHECK line (labels between kept); a CHECK line counts when it holds `error:`, its prefix names ERR, or every llvm-mc run of the
+  test is `not llvm-mc`; a split-file part is named by its test (`split=`, `part=` in the list's flags) and its lines counted
+  from its `#---` line. A refusal elsewhere is `:error-misplaced`, deferred: a test need not state every error llvm-mc reports,
+  so llvm-mc may refuse it too (the oracle tier's, by hand). The message is not judged (the reader's words are not LLVM's).
+  amd64: the 24 error tests pass (66 refusals at their tests' errors); arm64, the same judge: 6 of its 8 pass, 2 `:error-misplaced`
+  (basic-a64-diagnostics' `;; Exponent too large`, a statement in AArch64's ELF syntax; neon-diagnostics' `ld1 v0.8b, v1.8b}`).
+  Controls `test/asm/controls-error.txt` (an error test's refusals against another's error lines; `bin/repr-asm roundtrip`, amd64):
+  4, each fails as it must by hand, and a test against itself passes. The one `:error-input` (an Inputs/ file with no RUN line) stays.
+- Proof: encode-check `--record --only` over the 64 files with other-tool or debug texts (the judge ok, every listed control left);
+  the round trip of the 24 + 8 error tests; the earlier musl, arm64 and lexer samples unchanged.
+
+After: x86-64 read 25,253 pass / 1 design / 1 deferred, print 194,746 / 1,187 / 581; arm64 read 6,654 / 0 / 2, print 12,664 / 5 / 2.

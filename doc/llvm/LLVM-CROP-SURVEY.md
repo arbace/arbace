@@ -2533,3 +2533,73 @@ and the steps' table (see the report's key check).
 
 One phase stays (a class where a program shows it); the links above 2.5 GiB run in the night lanes only when no gate runs and the main
 session schedules them (the night's commands above); llvmi's full steps keep needing cpp-runtime.
+
+## As built: h-judges, the judge's recorded rows audited (2026-11-17, branch `h-judges`)
+
+Every row still judged by opt's or lli's record, and why (`test/crops/independence.edn`, LLVM's judge, the list):
+- verify-llvmtest, measured by its run's `verify.tsv`: 756 by their own verdict and 50 by opt's record (the fact said 758 and 48).
+  One more moved: Transforms/LowerTypeTests/cfi-icall-alias.ll's section `test` (split-file into `%t.dir`, CRLF lines, `cd
+  %t.dir`, `opt test.ll`); `section_verdict` (bin/repr-llvm) takes split-file's directory as the RUN line names it and strips the
+  CR. 757 and 49 now. The 49 have no own verdict for the module as the check reads it: whole split-file tests (the concatenation
+  no RUN line feeds a tool), sections reached only through `cat`, target options, passes other than verify, XFAIL, llvm-diff.
+  `bin/repr-llvm check verify-llvmtest`: 806 modules, 800 pass, 0 failing against the record; the new control
+  `_control/dir-section-vs-reject` fails as it must; `test/repr/llvm/controls-test.bash` all ok.
+- The probes' 478: LLS30 (opt's record kept).
+- lli's 177 at each level: c-O0's and c-O2's 74 synth-c23 programs and 7 ci-run programs, the 14 C++ samples, all Arbace's own
+  programs that print what they compute with no expected output; ee.MCJIT.2003-05-07-ArgumentTest (an argument after the file).
+- verify-rt's 268: the pack's 252 modules (clang's IR of the torture programs) and 16 hw modules, no RUN line.
+- verify-rt-heldout's 32: mutants of unknown kinds (a typed access's attachment 7, an intrinsic's bundle checks 5, musttail 4,
+  personality 3, the DI kinds 6 of which 4 are the expectation's own IllegalArgumentException, others 1 each). Their verdict is the
+  pack's first line: a rule fixed in `arbace.repr.llvm.expect` reaches them only with a re-made pack (night work).
+Judge 0.8933 to 0.8932 (the count corrected by 2, one row moved): (4345 + 0.5 x 1181) / 5526.
+
+## As built: the read and eval cells' cheap deferred groups (2026-11-17, branch `h-haskell-deferred` from next e4a7a30f3)
+
+Light, one process at a time, no gate. The REAP cells' deferred rows taken by cause (read 17, eval 15, AOT 15):
+
+- **Read: constant expression types** (`arbace/repr/llvm/verify.ae`'s `check-constexpr-type`). A `getelementptr` constant's own type
+  is its base's pointer type (the address space kept, when neither the base nor an index is a vector), and a `blockaddress` of a
+  function already defined is a pointer in that function's address space: both are held to the expected type as LLParser's
+  ValID::t_Constant does ("constant expression type mismatch: got type ... but expected ..."). `parse-global` checks the initializer
+  before the name's redefinition and forward reference, as LLParser::parseGlobal does (opt's first message on
+  Bitcode/blockaddress-addrspace.ll is the initializer's), and `run-phases-parser` (the module the reader stopped in) binds the data
+  layout's address spaces as `run-phases` does (its functions were in address space 0). layouts.g0.type.1122 (`:constant-type-rules`)
+  and Bitcode-blockaddress-addrspace (`:llvmtest-messages`) pass: read 3,828 / 1 / 17 to 3,830 / 1 / 15.
+- **Eval: the modules that unwind** (`:personality`, 13). llvm-eh (2026-11-13) runs them; the record still held the refusals.
+  Recorded by `bin/llvmi check --only` the 13 with `--record`, which now rewrites a subset's own rows and keeps the others
+  (`arbace/llvm/check.ae`, as `bin/hsi check --record --only`): 10 pass, ctor-throw and uncaught in `:abort-report`, thread-throw in
+  `:cpp-threads`. runtime/threads.cpp timed out at llvmi's flat 10 s on the loaded host (17 s of CPU, 21 s of wall): `run_budget`
+  gives a C++ program check-budget.edn does not list bin/cppi check's default, 30 s of CPU (CPPI_BUDGET). The C++ runtime was the
+  next worktree's `bin/cppi runtime-ci` library (`LLVMI_CPP_RTLIB`, by hand; its key differs from this checkout's by the tools' host
+  alone, the re-seed). Eval 537 / 10 / 15 to 547 / 12 / 3.
+- **Left.** AOT's 13 `:personality` rows: the `:eh` modules' AOT build (cf2g with C++'s runtime) is above the light tier, the night's
+  `bin/llvmi check --aot --only` them `--record`. `:dg-options` (2): the pack tx made again with each torture test's dg-options (clang,
+  the oracle tier; LLS54 below). Read's 15: the Verifier's AMDGPU and debug-info rules, intrinsic tables, the probes' reader and metadata
+  numbering (the classes' own :why).
+
+### Proposed
+
+- **LLS54 The torture pack's dg-options.** (a) `bin/llvmi ir-make tx` passes each test's `dg-options`/`dg-additional-options` (by hand,
+  clang 23.1.5, the pack's pin moves; the other modules' IR byte for byte the same), tx-O0.restrict-1 and tx-O2.20040409-3w judged on
+  their own program; (b) keep the class. **Recommended: (a)** at the next oracle-tier recording.
+
+## Decided (the user, 2026-11-17, round 51): LLS54 (a)
+
+## As built: LLS54 (a), the torture pack's dg-options (2026-11-17, branch `h-hes-lls`)
+
+`bin/llvmi ir-make tx` compiles each torture test with its own `dg-options` and `dg-additional-options` after the level's (gcc's order:
+an `-O2` of them wins over tx-O0's `-O0`): `tx_dg_options FILE` takes a directive without a target selector, or whose selector names
+`x86_64-*-*` (not with `ia32`), or `fpic`, and of its options `-f*`, `-std=*`, `-O*`, `-D*`, `-m*` that clang accepts (`-mpc64` is
+not), never `-W*` (the build is `-w`) nor `-Wl,*`; 39 of the 52 tests with a directive get options (`-fgnu89-inline` 14, `-fwrapv` 9,
+...), listed per module in `test/llvm/ir/tx.cmd`. The pack made again by hand with the host's clang 23.1.5 (the oracle tier's), 3,040
+modules as before: 61 modules' IR differs (all of them modules with options; 17 others, `-fno-common`, `-std=c99`, `-fno-ipa-cp` and the
+like at one level or both, give the same IR), the other 2,979 differ from the old pack (clang 23.1.4) by `!llvm.ident`'s version alone,
+compared with that line normalized. The pin moves (`tx.tar.xz.sha256`), every module's IR digest with it (lli's recorded runs in
+ref-lli23.edn name the old digests: every torture module is judged by its own verdict, exit 0, so none reads them). Also fixed:
+`tx.cmd`'s `corpora:` line named the first corpus alone. The records' rows of the five changed modules in the sample (tx-O0.20040409-3w,
+tx-O0.pr68532, tx-O0.restrict-1, tx-O2.20040409-3w, tx-O2.restrict-1) re-run by `bin/llvmi check [--aot] --only ... --record`: all five
+pass at both levels, so tx-O0.restrict-1 and tx-O2.20040409-3w left `:dg-options`, which is gone (no member); a run with
+c-O0.run.ptr-sub-unsigned and tx-O0.20000121-1 judged the negative control, which fails as it must. `bin/repr-llvm heldout-check`
+(its 21 tx bases from the pack, none of the 61) on the new pack: 900 mutants, 886 own verdicts, all met, 2 negative controls failing. Eval 547 / 12 / 3 to 549 / 12 / 1, AOT 537 / 10 / 15 to 539 / 10
+/ 13. For the main host's whole night run: `LLVMI_TX_ALL=1 bin/llvmi check` and `--aot` judge the whole 3,040 on the new pack (not
+recorded: the records are the sample's).

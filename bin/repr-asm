@@ -44,9 +44,9 @@
 #   bin/repr-asm print-oracle [CORPUS]              the oracle tier's, by hand: the printer's lines of each AT&T file against the host's
 #                                                    llvm-mc 23.1.5 (REPR_ASM_MC), file by file; table oracle also compares the printer's
 #                                                    aliases with llvm-tblgen -gen-asm-writer's printAliasInstr
-#   bin/repr-asm encode-check [--record|--only LIST] [CORPUS...] amd64's encoder (AX2): the stated encodings of each file (default mc-x86) judged
+#   bin/repr-asm encode-check [--record] [--only LIST] [CORPUS...] amd64's encoder (AX2): the stated encodings of each file (default mc-x86) judged
 #                                                    by the test's own CHECK lines (arbace.asm.amd64.check; no llvm-mc), against
-#                                                    test/asm/encode-results-amd64.edn (--record rewrites the corpora's rows), every
+#                                                    test/asm/encode-results-amd64.edn (--record rewrites the corpora's rows; with --only LIST the listed files' rows alone), every
 #                                                    non-pass in a class of test/asm/divergences-encode.edn, and the negative controls of
 #                                                    test/asm/controls-encode.txt fail; WORK .tmp/repr-asm/enc/CORPUS. Its print level (AX2's
 #                                                    third slice): each matched instruction printed in AT&T syntax as llvm-mc prints it
@@ -558,6 +558,9 @@ make_list() {
                    if (pc[k] ~ /llvm-mc/ && pc[k] ~ /%s/ && first == "") first = pc[k] }
                  if (first == "") first = any
                  if (first ~ /-x86-asm-syntax[= ]intel/) f = f " intel"
+                 # the lexer options of llvm-mc the reader takes: the dialect keys :masm-integers, :motorola-integers
+                 if (first ~ /-masm-integers/ && first !~ /-masm-integers=(0|false)/) f = f " masm-integers"
+                 if (first ~ /-motorola-integers/) f = f " motorola-integers"
                  if (r != "" && r !~ /llvm-mc[^|]*%s/ && r !~ /split-file/) f = f " not-input"; print f }' "$p")
     else
     # arm64: apple when every triple the RUN lines name is Darwin's (`;` comments), other-arch when none is AArch64's
@@ -575,7 +578,9 @@ make_list() {
       mkdir -p "$sn/$n"
       awk -v o="$sn/$n" '/^(#|\/\/)--- / { f = o "/" $2; printf "" > f; next } f { print > f }' "$p"
       for q in $(cd "$sn/$n" && ls | grep -E '\.[sS]$' | LC_ALL=C sort); do
-        printf '%s\t%s\t%s\n' "$n.${q%.[sS]}" "$sd/$n/$q" "${flags# }" >> "$asm_tmp/$id.list"
+        # an error test's part names its test and itself (AXS96 (a): the test's CHECK lines state the places of its errors)
+        pf=; case " $flags " in *" reject "*) pf=" split=$p part=$q" ;; esac
+        printf '%s\t%s\t%s\n' "$n.${q%.[sS]}" "$sd/$n/$q" "${flags# }$pf" >> "$asm_tmp/$id.list"
       done
     else
       printf '%s\t%s\t%s\n' "$n" "$p" "${flags# }" >> "$asm_tmp/$id.list"
@@ -650,10 +655,11 @@ rows() {
     FILENAME == ARGV[1] { fl[$1] = $3; next }
     { why = $2 ($6 != "" ? " " $6 : "")
       # a refusal of a test whose RUN lines say it is rejected, or that runs on another target, says so first
-      if ($2 == "refused" && fl[$1] ~ /reject/) why = "error-test " why
-      else if ($2 == "refused" && fl[$1] ~ /intel/) why = "intel-run " why
-      else if ($2 != "ok" && fl[$1] ~ /other-arch/) why = "other-arch " why
-      else if ($2 != "ok" && fl[$1] ~ /not-input/) why = "not-input " why
+      f = " " fl[$1] " "
+      if (($2 == "refused" || $2 == "misplaced") && f ~ / reject /) why = "error-test " why
+      else if ($2 == "refused" && f ~ / intel /) why = "intel-run " why
+      else if ($2 != "ok" && f ~ / other-arch /) why = "other-arch " why
+      else if ($2 != "ok" && f ~ / not-input /) why = "not-input " why
       r = ($2 == "ok") ? ":pass \"\"" : ":fail " q(why)
       print "[" q(c "/" $1) " " r "]" }' "$3" "$1/check.tsv"
 }
@@ -696,6 +702,17 @@ case ${1:-} in
       v=$(arbace_tool -m arbace.repr.asm control "$sa" "$rp" | tail -1)
       if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
     done < "$controls"
+    # AXS96 (a)'s: an error test's refusals held to another error test's error lines must not all be at them
+    [ "$arch" = amd64 ] && while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      sc=${subj%%/*} sn=${subj#*/} rc=${ref%%/*} rn=${ref#*/}
+      sl=$(awk -F'\t' -v n="$sn" '$1 == n { print $2 "\t" $3 }' "$lists/$sc.list" 2>"$asm_tmp/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="$rn" '$1 == n { print $2 }' "$lists/$rc.list" 2>"$asm_tmp/asm-ctl.err" || true)
+      if [ -z "$sl" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      syn=; case " ${sl#*$'\t'} " in *" intel "*) syn=intel ;; esac
+      v=$(arbace_tool -m arbace.repr.asm error-control --arch amd64 "${sl%%$'\t'*}" "$rp" $syn | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-error.txt"
     judge=(-e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"$all\" \"$classes\" \"${record:-}\" \"${ids[*]}\")")
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
@@ -795,7 +812,6 @@ case ${1:-} in
       --record) record=1 ;;
       --only) [ $# -ge 2 ] && [ -f "$2" ] || { echo "repr-asm encode-check --only LIST: LIST is a file of file names" >&2; exit 2; }; only=$2; shift ;;
       *) ids+=("$1") ;; esac; shift; done
-    [ -z "$only" ] || [ -z "$record" ] || { echo "repr-asm encode-check: --record records the whole set: no --only" >&2; exit 2; }
     [ -z "$only" ] || [ "$arch" = amd64 ] || { echo "repr-asm encode-check: --only is amd64's" >&2; exit 2; }
     if [ "$arch" = arm64 ]; then
       [ ${#ids[@]} -gt 0 ] || ids=(mc-aarch64 mc-asmparser-aarch64)

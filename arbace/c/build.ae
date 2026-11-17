@@ -102,7 +102,11 @@
 (defn- fty [t] (if (f32? t) "f32" "f64"))
 
 (defn- ptr? [t] (#{:ptr :nullptr} (:k (under t))))
-(defn- unsigned-ty? [^String s] (#{"u8" "u16" "u32" "u64" "b" "p"} s))
+(defn- unsigned-ty?
+  "Whether a machine name (ity's) is unsigned: an unsigned _BitInt(N)'s uN too (a bit-field of one read back sign-extended
+  before, bitint-34.c)."
+  [^String s]
+  (boolean (or (#{"u8" "u16" "u32" "u64" "b" "p"} s) (re-matches #"u\d+" s))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The program being built
@@ -904,7 +908,13 @@
                 mm (if (:voff mm) (dyn-member mm (rtt-of base)) mm)]
             (member-place bp mm t))
           (= h 'compound-lit) (compound-lit-place f)
-          (#{'real 'imag} h) (refuse :by-design "__real__ and __imag__ (SPEC §14)")
+          ;; GNU's __real__ and __imag__ as lvalues (h-c-run): a complex object's parts, the real part first (C23 6.2.5)
+          (#{'real 'imag} h)
+          (let [bt (:t (res-of (first args)))
+                bp (when (complex? bt) (place (first args)))]
+            (if (= :mem (:mode bp))
+              {:mode :mem :t t :a (if (= h 'real) (:a bp) (list 'adds (:a bp) '(i 1) (size-of (under (:of (under bt))))))}
+              (refuse :builder "__real__ or __imag__ of a non-complex place")))
           (string-form? f) {:mode :mem :t t :a (:n (ex f))}
           (= h 'c/expr) (place (first args))
           (= h '?) {:mode :mem :t t :a (:n (ex f))} ; GNU's lvalue conditional of aggregates
@@ -1386,7 +1396,12 @@
             c/call (call-node f (first args) (rest args) r)
             c/expr (ex (first args))
             c/effect {:k :v :t chk/t-void :n (first args)}
-            (real imag) (refuse :by-design "__real__ and __imag__ (SPEC §14)")
+            ;; GNU's __real__ and __imag__ (h-c-run): a complex operand's part; of a real operand, the operand itself and 0
+            (real imag) (let [x (ex (first args))]
+                          (cond
+                            (complex? (:t x)) (let [[pre re im] (cparts x)] (seq-node pre (if (= h 'real) re im)))
+                            (= h 'real) x
+                            :else (seq-node [(effect x)] (conv {:k :i :t chk/t-int :n '(i 0)} t))))
             imaginary (let [v (first args)
                             ;; (imaginary 2.0), (imaginary (lit float 2.0)): 2.0i, 2.0fi
                             [v ft] (if (and (seq? v) (= 'lit (first v)))
@@ -1437,7 +1452,9 @@
     "log2f" "log2l" "exp2f" "exp2l" "truncl" "roundl" "rintf" "rintl" "nearbyintf" "nearbyintl" "cbrtf" "cbrtl" "expm1f"
     "expm1l" "log1pf" "log1pl" "logbf" "logbl" "fminl" "fmaxl" "hypotf" "hypotl" "fdimf" "fdiml" "remainderf" "remainderl"
     "fmaf" "fmal" "ilogbf" "ilogbl" "lroundf" "lroundl" "lrintf" "lrintl" "llroundf" "llroundl" "llrintf" "llrintl"
-    "scalbnf" "scalbnl"})
+    "scalbnf" "scalbnl"
+    ;; h-c-run: the complex functions' float and long double spellings (20020411-1's __builtin_conjf)
+    "conjf" "conjl" "crealf" "creall" "cimagf" "cimagl" "cabsf" "cabsl" "cproj" "cprojf" "cprojl" "carg" "cargf" "cargl"})
 
 (def ^:private builtin-natives
   ;; builtins whose meaning is the machine's: natives of tools' natives table (go/arbace/ci/builtins.ae)
@@ -2190,12 +2207,190 @@
     []))
 
 (defn- empty-asm?
-  "An asm statement whose template is empty (a compiler barrier: __asm__(\"\" : \"+r\"(x) : : \"memory\"))."
+  "An asm statement whose template is empty (a compiler barrier: __asm__(\"\" : \"+r\"(x) : : \"memory\")), or one
+  lower-asms made into C forms (:ci/lowered)."
   [f]
   (let [t (str (second f))]
     ;; an empty template with an output (\"=r\") may move a value: not a barrier
-    (boolean (and (re-find #"^\s*(__asm__|__asm|asm)\s*(__volatile__|volatile|__volatile)?\s*\(\s*\"\"" t)
-                  (not (re-find #"\"=" t))))))
+    (boolean (or (:ci/lowered (meta f))
+                 (and (re-find #"^\s*(__asm__|__asm|asm)\s*(__volatile__|volatile|__volatile)?\s*\(\s*\"\"" t)
+                      (not (re-find #"\"=" t)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Empty asm templates with operands as C forms (h-c-run, 2026-11-17; doc/C23-SURVEY.md, "As built: empty asm
+;; operands"): an asm statement whose template is empty runs no instruction, so its meaning is its operands' alone,
+;; gcc's register allocation made explicit: each input and each output's place evaluated once, an output tied to an
+;; input (\"=r\"(i) : \"0\"(x)) given that input's value converted to the output's type (the low part of a wider
+;; register, 20030222-1), a read-write (\"+r\") or untied output left as it is (gcc's -O0 leaves the memory, the
+;; register's value is no one's). The operands are the c/asm's text (CS76 (a): the forms keep the statement as text),
+;; so their expressions are parsed here, a small grammar (names, integer constants, calls, members, subscripts,
+;; unary & * - ! ~, binary + - * / %, parentheses); a statement outside it (a cast, asm goto, two outputs tied, a
+;; non-empty template) stays the refusal it was. The c/asm itself is kept, marked :ci/lowered, for the checker's
+;; operand checks (CS160).
+
+(def ^:private asm-tok-re
+  #"\s+|\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[A-Za-z_]\w*|\.?\d(?:[eEpP][+-]|[\w.])*|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||::|[-+*/%&|^!~<>=?:;,.()\[\]{}]")
+
+(defn- asm-tokens
+  "The text's tokens (`::` split into two colons, the operands' separator), or nil on a character outside them."
+  [^String t]
+  (let [m (re-matcher asm-tok-re t)]
+    (loop [pos 0 out []]
+      (if (= pos (count t))
+        out
+        (when (and (.find m pos) (= pos (.start m)))
+          (let [x (.group m)]
+            (recur (.end m) (cond (str/blank? x) out (= x "::") (conj out ":" ":") :else (conj out x)))))))))
+
+(defn- asm-int
+  "An integer constant token's form: a number when it has no suffix and int holds it, else (lit TYPE v); nil otherwise."
+  [^String x]
+  (when-let [[_ body suf] (re-matches #"(?i)(0x[0-9a-f]+|0[0-7]*|[1-9]\d*)(u|l|ul|lu|ll|ull|llu)?" x)]
+    (let [v (cond (re-find #"^(?i)0x" body) (Long/parseLong (subs body 2) 16)
+                  (and (> (count body) 1) (= \0 (first body))) (Long/parseLong (subs body 1) 8)
+                  :else (Long/parseLong body))
+          suf (some-> suf str/lower-case)
+          ty (case suf nil nil "u" 'unsigned ("l") 'long ("ul" "lu") 'unsigned-long "ll" 'long-long ("ull" "llu") 'unsigned-long-long)]
+      (cond ty (list 'lit ty v)
+            (<= v Integer/MAX_VALUE) v
+            :else nil))))
+
+(defn- asm-expr
+  "The operand expression of tokens ts: [form effect?] (effect? when it calls a function), or nil outside the grammar."
+  [ts]
+  (let [ts (vec ts) n (count ts) pos (volatile! 0) calls (volatile! false)
+        peek* (fn [] (when (< @pos n) (nth ts @pos)))
+        next* (fn [] (let [x (peek*)] (vswap! pos inc) x))
+        ident? (fn [x] (and x (re-matches #"[A-Za-z_]\w*" x) (not (#{"sizeof" "_Alignof" "alignof" "__alignof__" "typeof"} x))))]
+    (letfn [(fail [] (throw (ex-info "asm operand" {::asm true})))
+            (expect [x] (when-not (= x (next*)) (fail)))
+            (primary []
+              (let [x (next*)]
+                (cond
+                  (= x "(") (let [e (expr)] (expect ")") e)
+                  (ident? x) (symbol x)
+                  (and x (re-matches #"\.?\d.*" x)) (or (asm-int x) (fail))
+                  :else (fail))))
+            (postfix []
+              (loop [e (primary)]
+                (case (peek*)
+                  "(" (do (next*)
+                          (when-not (symbol? e) (fail))
+                          (let [args (if (= ")" (peek*)) [] (loop [as [(expr)]] (if (= "," (peek*)) (do (next*) (recur (conj as (expr)))) as)))]
+                            (expect ")")
+                            (vreset! calls true)
+                            (recur (apply list e args))))
+                  "[" (do (next*) (let [i (expr)] (expect "]") (recur (list 'aget e i))))
+                  "." (do (next*) (let [m (next*)] (when-not (ident? m) (fail)) (recur (list (symbol (str ".-" m)) e))))
+                  "->" (do (next*) (let [m (next*)] (when-not (ident? m) (fail)) (recur (list '-> e (symbol m)))))
+                  e)))
+            (unary []
+              (case (peek*)
+                "&" (do (next*) (list 'addr (unary)))
+                "*" (do (next*) (list 'arbace.core/deref (unary)))
+                "-" (do (next*) (let [e (unary)] (if (and (number? e) (pos? e)) (- e) (list '- e))))
+                "+" (do (next*) (unary))
+                "!" (do (next*) (list 'not (unary)))
+                "~" (do (next*) (list 'bit-not (unary)))
+                (postfix)))
+            (binary [ops sub]
+              (loop [e (sub)]
+                (if-let [op (ops (peek*))]
+                  (do (next*) (recur (list op e (sub))))
+                  e)))
+            (mult [] (binary {"*" '* "/" '/ "%" 'rem} unary))
+            (expr [] (binary {"+" '+ "-" '-} mult))]
+      (try
+        (let [e (expr)]
+          (when (= @pos n) [e @calls]))
+        (catch arbace.lang.ExceptionInfo x
+          (if (::asm (ex-data x)) nil (throw x)))))))
+
+(defn- asm-operands
+  "An asm statement's text parsed: {:outputs [{:c constraint :name n :ts tokens}] :inputs [...]} when its template is
+  empty and it is no asm goto, else nil."
+  [^String text]
+  (when-let [[_ quals rest*] (re-find #"^\s*(?:__asm__|__asm|asm)\s*((?:(?:__volatile__|volatile|__volatile|__inline__|__inline|inline|goto)\s*)*)\((.*)$" text)]
+    (when-not (re-find #"goto" quals)
+      (when-let [ts (asm-tokens rest*)]
+        (let [;; the sections at depth 0 up to the statement's closing parenthesis
+              secs (loop [ts ts depth 0 cur [] out []]
+                     (if-let [x (first ts)]
+                       (cond
+                         (and (= x ")") (zero? depth)) (when (empty? (rest ts)) (conj out cur))
+                         (and (= x ":") (zero? depth)) (recur (rest ts) depth [] (conj out cur))
+                         (#{"(" "["} x) (recur (rest ts) (inc depth) (conj cur x) out)
+                         (#{")" "]"} x) (recur (rest ts) (dec depth) (conj cur x) out)
+                         :else (recur (rest ts) depth (conj cur x) out))
+                       nil))
+              [tmpl outs ins & more] secs
+              ;; one operand: [name] "constraint" ( expr )
+              operand (fn [ts]
+                        (let [[nm ts] (if (= "[" (first ts)) [(second ts) (drop 3 ts)] [nil ts])
+                              [cs ts] (split-with #(str/starts-with? % "\"") ts)]
+                          (when (and (seq cs) (= "(" (first ts)) (= ")" (last ts)))
+                            {:name nm :c (apply str (map #(subs % 1 (dec (count %))) cs)) :ts (butlast (rest ts))})))
+              ;; a section's operands split at depth-0 commas
+              split (fn [sec] (if (empty? sec) []
+                                  (loop [ts sec depth 0 cur [] out []]
+                                    (if-let [x (first ts)]
+                                      (cond (and (= x ",") (zero? depth)) (recur (rest ts) depth [] (conj out cur))
+                                            (#{"(" "["} x) (recur (rest ts) (inc depth) (conj cur x) out)
+                                            (#{")" "]"} x) (recur (rest ts) (dec depth) (conj cur x) out)
+                                            :else (recur (rest ts) depth (conj cur x) out))
+                                      (conj out cur)))))
+              ops (fn [sec] (let [xs (mapv operand (split sec))] (when (every? some? xs) xs)))]
+          (when (and secs (seq tmpl) (every? #(= "\"\"" %) tmpl) (<= (count more) 1))
+            (let [o (ops (or outs [])) i (ops (or ins []))]
+              (when (and o i) {:outputs o :inputs i}))))))))
+
+(defn lower-asm
+  "The statement an empty-template asm statement f (c/asm TEXT) is (see above): (do (c/asm TEXT) STMT...), the c/asm
+  marked :ci/lowered, or nil when f is outside what is lowered (its refusal or barrier stays)."
+  [f]
+  (let [text (second f)]
+    (when (and (string? text) (re-find #"\"=|\"\+" text))
+      (when-let [{:keys [outputs inputs]} (asm-operands text)]
+        (let [parse (fn [op] (asm-expr (:ts op)))
+              tie (fn [{:keys [c]}]
+                    (cond (re-matches #"\d+" c) (Long/parseLong c)
+                          (re-matches #"\[(\w+)\]" c) (let [nm (second (re-matches #"\[(\w+)\]" c))]
+                                                          (first (keep-indexed (fn [k o] (when (= nm (:name o)) k)) outputs)))
+                          :else nil))
+              ties (into {} (keep-indexed (fn [k in] (when-let [j (tie in)] [j k])) inputs))
+              parsed-in (mapv parse inputs)
+              parsed-out (mapv parse outputs)]
+          (when (and (every? some? parsed-in) (every? some? parsed-out)
+                     (<= (count ties) 1)
+                     (every? #(< % (count outputs)) (keys ties))
+                     ;; a tied output is a write-only one
+                     (every? (fn [j] (str/starts-with? (:c (nth outputs j)) "=")) (keys ties)))
+            (let [stmts (vec (concat
+                              ;; the untied inputs' effects, then the outputs' places'
+                              (keep-indexed (fn [k [e eff]] (when (and eff (not (some #{k} (vals ties)))) e)) parsed-in)
+                              (keep-indexed (fn [j [e eff]] (when (and eff (not (contains? ties j))) e)) parsed-out)
+                              (for [[j k] ties]
+                                (let [[out] (parse (nth outputs j))
+                                      [out2] (parse (nth outputs j))
+                                      [in] (parse (nth inputs k))]
+                                  (list 'set! out (list 'conv (list 'typeof out2) in))))))]
+              ;; a read-write operand's barrier with nothing to evaluate stays the barrier it was (musl's __libc_start_main)
+              (when (or (seq stmts) (re-find #"\"=" text))
+                (with-meta (apply list 'do (vary-meta f assoc :ci/lowered true) stmts) (meta f))))))))))
+
+(defn lower-asms
+  "The forms with each statement-level empty-template asm lowered (lower-asm); a file-scope c/asm is left. Forms that
+  hold no lowered asm are kept identical."
+  [forms]
+  (letfn [(walk [x]
+            (cond
+              (and (seq? x) (= 'c/asm (first x))) (or (lower-asm x) x)
+              (seq? x) (let [ys (map walk x)]
+                         (if (every? true? (map identical? x ys)) x (with-meta (apply list ys) (meta x))))
+              (vector? x) (let [ys (mapv walk x)]
+                            (if (every? true? (map identical? x ys)) x (with-meta ys (meta x))))
+              :else x))]
+    (mapv (fn [f] (if (and (seq? f) (= 'c/asm (first f))) f (walk f))) forms)))
 
 (defn- asm-body?
   "A function body that is inline assembly (musl's arch/x86_64 inline functions): natives of ci's."

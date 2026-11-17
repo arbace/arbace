@@ -394,6 +394,18 @@ call throws IllegalArgumentException; `superFindSystemClass`, the `:exposes-meth
 at both levels. Night, after the build: run `clojure.test-clojure.genclass` as above, then record genclass
 `{:test 7, :pass 53}` in `test/arbace-go-results.edn` and drop `:gen-class`'s class (eval) once it passes.
 
+### As built: CDR2, CDR4 (b), CDR11 recorded (2026-11-17)
+
+On next's test build (e4a7a30f, `.tmp/gate-exe/f60652fb7fb9568e76b1`), the namespaces alone (`bin/clojure-tests` with a
+selection): compilation 124 of 124 (CDR2's typing), java-interop 43 tests with test-dot and test-bean unskipped (CDR4 (b)'s
+Point and Color), java.javadoc 5 of 5 (java.sql): recorded in `test/arbace-go-results.edn`, the classes `:q1-typing`,
+`:desktop` and `:javadoc-url` left the eval level (eval 21,060 / 24 / 50 to 21,065 / 24 / 45). genclass's
+`protected-final-access` still errs after CDR11: the class is made, but `:exposes-methods` found no `findSystemClass` (jrt's
+reflection lists ClassLoader's public members only); `arbace/genclass.ae` takes the world's protected methods too
+(doc/VENDOR-NOTES.md, hand change 33), proven by loading the file over the embedded copy; the row waits for a build. Still
+deferred and not cheap: the locales (CDR1: a conversion and a build), SAX and StAX (CDR5's measurement), and the AOT level's
+rows (the essential AOT program is a 32 GiB j2g build).
+
 ### As built: CDR10, begun (2026-11-06)
 
 The port is staged in `test/jrt/serialization/` and recorded in doc/go/JRT-NOTES.md, "Serialization": jrt's `ClassCache`

@@ -34,12 +34,17 @@
 
 (defn header-of [d] (list 'asm/unit d))
 
-(defn- lex-dialect [d]
-  (case (:syntax d)
-    (:att :intel) nil
-    :gnu {:hash :start}
-    :apple {:hash :start :semi :comment :sep "%%"}
-    :plan9 {:hash :start :high true :p9 true}))
+(defn- lex-dialect
+  "The lexer's dialect (arbace.repr.asm.lex/*dialect*) of the header's map: its syntax's rules, with llvm-mc's lexer options
+  the map names (:masm-integers, :motorola-integers: a RUN line's -masm-integers, -motorola-integers)."
+  [d]
+  (let [base (case (:syntax d)
+               (:att :intel) nil
+               :gnu {:hash :start}
+               :apple {:hash :start :semi :comment :sep "%%"}
+               :plan9 {:hash :start :high true :p9 true})
+        opts (cond-> {} (:masm-integers d) (assoc :masm-int true) (:motorola-integers d) (assoc :motorola true))]
+    (if (seq opts) (merge base opts) base)))
 
 ;; amd64's two syntaxes: an instruction printed in the syntax in force where it stands (gnu/*syntax*, moved by `.intel_syntax` and
 ;; `.att_syntax` as the items are printed in order)
@@ -118,14 +123,78 @@
   (str (if-let [c (:asm/refused (ex-data e))] (str (name c) ": ") "crash: ")
        (-> (str (.getMessage e)) (str/replace #"[\t\n\r]" " ") (str/replace "\"" "'") (str/replace "\\" "(backslash)") (str/replace #"[^ -~]" "?"))))
 
+(defn- check-prefix
+  "The FileCheck prefix of a CHECK line (`CHECK-ERROR` of `# CHECK-ERROR: ...`, its -NEXT, -SAME, -DAG or -LABEL dropped), else nil."
+  [^String l]
+  (when-not (re-find #"RUN:" l)
+    (second (re-find #"(?:^|[^A-Za-z0-9_-])([A-Z][A-Za-z0-9_]*(?:-[A-Z0-9_]+)*?)(?:-NEXT|-SAME|-DAG|-LABEL|-NOT|-EMPTY)?:" l))))
+
+(defn- check-line? [^String l] (boolean (check-prefix l)))
+
+(defn error-lines
+  "AXS96 (a): the lines of the file (a split-file part when `part`, its name) where the test's CHECK lines state an error, from
+  the test's text `main`: a `[[#@LINE+N]]` place, a `NAME.s:N:C:` place, else the statements just before and just after the
+  CHECK line (a CHECK written beside its statement)."
+  [^String main part]
+  (let [ls (vec (str/split-lines main))
+        hdr (if part
+              (or (first (keep-indexed (fn [i l] (when (re-matches (re-pattern (str "^(?:#|//)--- " (java.util.regex.Pattern/quote (str part)) "\\s*")) l) (inc i))) ls)) 0)
+              0)
+        part-end (if part
+                   (or (first (keep-indexed (fn [i l] (when (and (> (inc i) hdr) (re-find #"^(?:#|//)--- " l)) (inc i))) ls)) (inc (count ls)))
+                   (inc (count ls)))
+        runs (filter #(and (re-find #"RUN:" %) (re-find #"llvm-mc\b" %)) ls)
+        all-err? (and (seq runs) (every? #(re-find #"not\s+llvm-mc" %) runs))
+        ;; a statement's line: not blank, no comment, no CHECK line; a label alone (:label) does not end the walk
+        stmt (fn [^long i] (let [t (str/trim (nth ls (dec i)))]
+                             (when (and (seq t) (not (re-find #"^(#|//|;)" t)) (not (check-line? t)))
+                               (if (re-matches #"[\w.$\"]+:" t) :label :stmt))))
+        ;; the lines from the CHECK line in the direction `step` up to the first statement's, the labels before it
+        near (fn [^long i ^long step]
+               (loop [j (+ i step) out []]
+                 (if (<= 1 j (count ls))
+                   (case (stmt j) :stmt (conj out j) :label (recur (+ j step) (conj out j)) (recur (+ j step) out))
+                   out)))]
+    (set (for [[i l] (map-indexed (fn [i l] [(inc i) l]) ls)
+               :let [pre (check-prefix l)]
+               ;; an error's line: `error:` in it, a prefix of the errors' (ERR...), or any CHECK line of a test whose every
+               ;; llvm-mc run is rejected (`not llvm-mc`); never a -NOT
+               :when (and pre (not (re-find #"-NOT:" l))
+                          (or (re-find #"error:" l) (re-find #"ERR" pre) all-err?))
+               :let [at (re-find #"\[\[#?@LINE([+-]\d+)?\]\]" l)
+                     abs (re-find #"(?:\.[sS]|<stdin>)?:(\d+):\d+: error" l)]
+               x (cond at [(+ (long i) (long (if (second at) (Long/parseLong (str/replace (second at) "+" "")) 0)) (- hdr))]
+                       abs [(Long/parseLong (second abs))]
+                       :else (map #(- (long %) hdr) (concat (near i -1) (near i 1))))
+               :when (and (pos? (long x)) (< (+ (long x) hdr) part-end))]
+           (long x)))))
+
+(defn- refusals
+  "The (asm/unread ...) items outside a conditional block of the items [FORM START END]: [[LINE MESSAGE] ...]."
+  [^String src items]
+  (loop [items items depth 0 out []]
+    (if (empty? items)
+      out
+      (let [[f st] (first items)
+            h (when (seq? f) (first f))
+            n (when (and (symbol? h) (= "asm" (namespace h))) (name h))]
+        (cond
+          (and n (.startsWith ^String n "if")) (recur (rest items) (inc depth) out)
+          (= n "endif") (recur (rest items) (max 0 (dec depth)) out)
+          (and (= n "unread") (zero? depth))
+          (recur (rest items) depth (conj out [(inc (count (filter #(= \newline %) (subs src 0 (int st))))) (nth f 2 nil)]))
+          :else (recur (rest items) depth out))))))
+
 (defn check-one
   "One file's round trip: read in :full; the `.ae` text read back (forms and layer equal); printed back with the layer
   (the original byte for byte); the canonical print read again (the same forms, no layer). Writes the `.ae` text at
   `ae-path`; [status detail items gaps texts], status ok, refused, crash, ae-differs, layer-differs, text-differs,
   forms-differ or canon-layer."
   ([^String path ^String ae-path] (check-one path ae-path amd64))
-  ([^String path ^String ae-path d]
+  ([^String path ^String ae-path d] (check-one path ae-path d nil))
+  ([^String path ^String ae-path d opts]
   (try
+   (binding [gnu/*recover* (boolean (:error-test opts))]
     (let [src (latin1 path)
           {:keys [forms layer]} (read-full src d)
           ae (ae-text forms layer d)
@@ -141,8 +210,15 @@
                    (not= (print-full forms layer d) src) "text-differs"
                    (not= (:forms again) forms) "forms-differ"
                    (or (seq (:at (:layer again))) (:end (:layer again))) "canon-layer"
-                   :else "ok")]
-      [status "" (count forms) (:gaps st) (:texts st)])
+                   :else "ok")
+          ;; AXS96 (a): an error test's refusals, each held to a line the test states an error at
+          rs (when (and (:error-test opts) (= status "ok")) (refusals src (read-items src d)))
+          stated (when (seq rs) (error-lines (latin1 (or (:main opts) path)) (:part opts)))
+          off (first (remove (fn [[l]] (contains? stated l)) rs))]
+      (if off
+        ["misplaced" (str "a refusal where the test states no error (line " (first off) "): "
+                           (-> (str (second off)) (str/replace #"[\t\n\r]" " ") (str/replace "\"" "'") (str/replace "\\" "(backslash)") (str/replace #"[^ -~]" "?"))) (count forms) (:gaps st) (:texts st)]
+        [status (if (seq rs) (str (count rs) " refusals at the test's errors") "") (count forms) (:gaps st) (:texts st)])))
     (catch Throwable e
       [(if (:asm/refused (ex-data e)) "refused" "crash") (reason e) 0 0 0]))))
 
@@ -152,6 +228,15 @@
   [^String subject-ae ^String ref-path]
   (let [ae (latin1 subject-ae)]
     (if (= (print-full (read-ae ae) (full/layer-of-ae ae) (read-ae-dialect ae)) (latin1 ref-path)) "same" "differs")))
+
+(defn error-control
+  "A negative control of AXS96 (a)'s judge: the SUBJECT error test's refusals (read as an error test is) held to the
+  REFERENCE test's error lines: `differs` when one is at a line the reference states no error at (as it must), else `same`."
+  [^String subject ^String reference d]
+  (let [src (latin1 subject)
+        rs (binding [gnu/*recover* true] (refusals src (read-items src d)))
+        stated (error-lines (latin1 reference) nil)]
+    (if (and (seq rs) (every? #(contains? stated (first %)) rs)) "same" "differs")))
 
 (defn- pool-map [f rows]
   (let [threads (Integer/parseInt (or (System/getenv "REPR_ASM_THREADS") "4"))
@@ -193,13 +278,19 @@
                     rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
                     res (pool-map (fn [[n p fl]]
                                     (let [fl (set (str/split (or fl "") #" "))
-                                          d (dialect arch (cond (fl "plan9") "plan9" (fl "apple") "apple" (fl "intel") "intel") p)]
-                                      (into [n] (check-one p (str work "/ae/" n ".ae") d))))
+                                          d (cond-> (dialect arch (cond (fl "plan9") "plan9" (fl "apple") "apple" (fl "intel") "intel") p)
+                                              (fl "masm-integers") (assoc :masm-integers true)
+                                              (fl "motorola-integers") (assoc :motorola-integers true))]
+                                      (into [n] (check-one p (str work "/ae/" n ".ae") d
+                                                           {:error-test (contains? fl "reject")
+                                                            :main (some #(when (.startsWith ^String % "split=") (subs % 6)) fl)
+                                                            :part (some #(when (.startsWith ^String % "part=") (subs % 5)) fl)}))))
                                   rows)]
                 (spit-latin1 (str work "/check.tsv")
                              (apply str (map (fn [[n s d i g t]] (str n "\t" s "\t" i "\t" g "\t" t "\t" d "\n")) res)))
                 (let [ok (count (filter #(= "ok" (second %)) res))]
                   (println (str "repr-asm check: " ok " of " (count res) " ok"))))
       "control" (println (control (first r) (second r)))
+      "error-control" (println (error-control (first r) (second r) (dialect arch (nth r 2 nil) (first r))))
       (do (binding [*out* *err*] (println "repr-asm: read|print|check|control")) (System/exit 2)))
     (shutdown-agents)))

@@ -1094,6 +1094,14 @@ step 4 (2026-10-07); the others came with later work, as each says:
     does not fit, `^int` on a long, throws Clojure's "Cannot coerce long to int, use a cast instead" when the
     call is analyzed: the evaluator emits nothing). So a `recur` of another type to a loop local bound to such
     a call warns, and compilation's `primitive-return-decl` and `incorrect-primitive-type-hint-throws` pass.
+33. **CDR11's exposer: the world's protected methods** (2026-11-17). `arbace/genclass.ae`: `:exposes-methods`
+    also takes the protected instance methods of the superclass chain that jrt's reflection does not list (a
+    hand-written jrt class's member table holds its public members: `ClassLoader`'s `findSystemClass`), from
+    the world's signatures' `:protected` as the Java forms' analysis reads them (`arbace.classes.go/protected-members`,
+    JC4b), after reflection's (`gc-world-protected-methods`, with `gc-desc-types` and `gc-desc-class` over their
+    descriptors); upstream's `protected-final-methods` finds them by `getDeclaredMethods`. So genclass's
+    `ProtectedFinalTester` (CDR11: `ClassLoader` extendable) gets `superFindSystemClass`, and
+    `protected-final-access` passes (checked on next's test build with the file loaded over the embedded copy).
 
 ## Dialect divergences
 

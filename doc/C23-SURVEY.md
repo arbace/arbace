@@ -5819,3 +5819,171 @@ musl reread, no evaluated checker at the first ci commit after W, which `fresh.b
 trio. R applies only at W2's step 11 (after `bin/seed --verify`): before the seed, stage 0 (`d5548e72`) has no `arbace/c/` in
 `toolSource`, and without `fresh.bash` a checkout's changed ci would run the seed's checker and builder again (night 7's and
 8's failures). The `:c` inputs hold `bin/lib/ci/`, so the C steps rerun at step 14's gate, which reruns everything anyway.
+
+## As built: h-judges, andrewchambers_c by its own verdict (2026-11-17, branch `h-judges`)
+
+The judge's rows still on gcc's recorded runs, counted over `test/c/check-linux-amd64.edn` and `check-aot-linux-amd64.edn`
+(2,279 rows each; `bin/ci selfref ref`): 171 a level, of which mir's 103 (andrewchambers_c 67, lacc 13, new 23), benchmarksgame
+29, ci-run 19, tcc-tests2 9, cxgo 2, gcc-gnu23-run 4, torture 3, compcert 1, gcc-c23-sub-run 1.
+- **Moved: mir/andrewchambers_c, 67 a level.** Their README.md says they are the execute tests of Andrew Chambers' C compiler
+  (its test/execute): each main returns non-zero on a failed check and 0 at its end, none prints, and the directory carries no
+  `.expectrc` or `.expect` (lacc's beside it carry 204 `.expectrc`, 32 of them `0`). `test/c/selfref.ae`: exit 0, `:verdict
+  :execute`, the output not compared. `bin/ci selfref agree`: 2,172 cases with a verdict of their own, gcc's run meets each
+  (execute 67 of 67). `bin/ci check --only` and `check --aot --only` of the 67: 67 of 67 pass each; the new control
+  `_control/ptr-sub-unsigned-vs-execute` (ptr-sub-unsigned's status 3 against 0001-sanity's own exit 0) differs at both levels.
+  `bin/ci judge-test`: 108 tests, 0 failures.
+- **Left, with the reason.** benchmarksgame and ci-run's 19 print what they compute, with no expected output in the corpus or the
+  checkout; lacc's 13 without `.expectrc` follow lacc's own harness (the output against the host compiler's); MIR's new 23 without
+  either file: MIR's runner is not in the corpus, so its default is not established here; the exceptions keep their reasons.
+- **The fact** (`test/crops/independence.edn`, C's judge): the cells' cases as `test/reap/matrix.edn` counts them today, 14,855,
+  315 by a record (72 read, 104 eval, 104 AOT, 35 print): 0.985 to 0.989; C's independence 99.7 to 99.8.
+
+## As built: h-c-run, the run cells' by-design classes audited (2026-11-17, branch `h-c-run`)
+
+From `next` 3c55fb7bc, on next's stage 0 (linked), light runs only (`bin/ci check --only`, `check --aot --only` on the affected
+programs, one shard at a time under 2 GiB). The eval cell's 123 non-passes by design (AOT 115), each class read against its
+programs (`test/c/check-linux-amd64.edn`, `test/c/divergences.edn`, `test/c/check-known.edn`):
+
+| class (eval / AOT programs before) | verdict |
+|---|---|
+| by-design: inline assembly (9 / 9), known asm "empty asm moving its input" (2 / 2), "empty asm's operand with a side effect" (1 / 1) | **gap, built**: 11 of the 12 are empty templates (`asm ("" : "=r" (p) : "0" (&s))`), no instruction, their meaning their operands' alone; the 12th (20061220-1) now meets its nested function |
+| by-design: `__real__` and `__imag__` (5 / 5) | **gap, built** (SPEC §14's row amended) |
+| abi: `-funsigned-bitfields` (bitint-34) | **gap, built**: not the option (the test checks that it does not apply to `_BitInt`): an `unsigned _BitInt(22)` bit-field read back sign-extended |
+| abi: `-mms-bitfields` (95_bitfields_ms) | **stale**: it passes since CS296's `ms_struct` (its `M` is the attribute; the option is tcc's `#pragma comment`); its known entry removed |
+| by-design: GNU vector types (41 / 41) | **gap, not cheap**: proposed deferred (CS320 below) |
+| by-design: GNU nested functions (31 / 31) | **gap, not cheap**: proposed deferred (CS321 below) |
+| by-design: `_Float128` (6, the `_BitInt` conversion tests, also long double), `_Float16` and `_Complex _Float16` (2), `_Complex _Float128` (1), `_Decimal32/64/64x` (4) | by design: SPEC §14, CS3 (a), CS35 (no software floating point) |
+| by-design: inline assembly 990413-2 (x87 `fpatan`, `fsqrt`); known asm 85_asm-outside-function (a function defined by a file-scope asm), pr47237 (`__builtin_apply_args`: the machine's argument registers) | by design: the target's instructions |
+| speed (9, eval only), long-double (4 / 5), ub (2), fenv (2), gcc-builtin (1: a program defining `llabs`, which 7.1.3 reserves) | by design, as decided (CS107 (a), CS35, CS10 (a), C7, CS264 (a)) |
+
+Built (`arbace/c/build.ae`, `arbace/c/check.ae`, `arbace/c/run.ae`):
+- **Empty asm templates with operands.** `arbace.c.build/lower-asms`, called by `arbace.c.run/check-read` on the read's forms and
+  its units' (the program's and musl's) before the checker: a statement `(c/asm TEXT)` whose template is empty and which has an
+  output becomes `(do (c/asm TEXT) STMT...)`, the c/asm marked `:ci/lowered` (the checker still sees it, CS160's operand check; the
+  builder's barrier and `asm-body?` take it as empty). The operands are parsed from the text (CS76 (a): the forms keep it as text),
+  a small grammar (names, integer constants with their suffixes, calls, members, subscripts, unary `& * - ! ~ +`, binary `+ - * / %`,
+  parentheses, `[name]` operands, `::`); an output tied to an input by a digit or `[name]` becomes `(set! OUT (conv (typeof OUT) IN))`
+  (gcc's register made explicit: 20030222-1's low part of a `long long`), an input or an untied or read-write output with a call in
+  it is evaluated once as an effect (990130-1's `"+r"(*bar())`), the rest left as they are (gcc -O0 writes no memory for `"=m"`; an
+  untied `"=r"`'s value is no one's). Outside the grammar (a cast, `asm goto`, two tied outputs, a template) the refusal stays.
+  musl's three empty asms are barriers with no output: untouched (`"+r"(stage2)` gives no statement, so its fragment is the same).
+- **`__real__`, `__imag__`.** As values: a complex operand's part (`cparts`), of a real operand the operand and 0; as places: the
+  complex object's parts (the real first, C23 6.2.5), so `&__real__ z`, `__imag__ z = ...`, `__real__ d += 1` work.
+  `__builtin_conj`, `cproj`, `creal`, `cimag`, `cabs`, `carg` and their f and l spellings get their prototypes in the checker's
+  `math-builtin-fns` (queue 178's table: cc's Builtin declares none, so the call was an `int ()` one and 20020411-1's
+  `__builtin_conjf` faulted) and the builder calls musl's functions of the names.
+- **Unsigned `_BitInt` bit-fields.** `unsigned-ty?` takes an unsigned `_BitInt(N)`'s `uN` (it knew `u8`...`u64` only): its bit-field
+  loads and stores, a switch on it and complex integer division by its parts were signed.
+
+| command | result |
+|---|---|
+| `bin/ci check --only` the 25 programs (the 17 fixed, 20061220-1, the known entries) | 17 pass; 20061220-1 by-design (nested functions); the others in their classes |
+| `bin/ci check --aot --only` the 17 and 95_bitfields_ms, 20020411-1 | pass all but 20061220-1 (by design) |
+| `bin/ci check --only` 188 programs (every program with an asm, `__real__` or `__imag__` in its text, and gcc-bitint-run's 90) | the 17 move to pass, no other row moves |
+| `bin/ci check --only test/c/essential-check.txt`, `check --aot --only test/c/essential-aot.txt`, `bin/ci dg --essential` | see the journal's entry (the controls differ) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | C eval 2,156 / 123 to 2,173 / 106, AOT 2,164 / 115 to 2,181 / 98; completeness 96 to 96 (0.9599 to 0.9636); 0 problems |
+
+The records' 18 rows (17 to pass, 20061220-1's reason) edited in place from the runs (`--record` takes whole corpora); the known
+entries of 990130-1, 20030222-1, bitint-34 and 95_bitfields_ms removed; the class `abi` a guard class.
+
+### Rekeys
+
+`arbace/c/build.ae`, `check.ae`, `run.ae` are embedded (gate_key: the whole `--full` reruns) and in ci's prebuilt runtime's key
+(`bin/ci runtime build`: the fragments again) and cf2g's libraries'; musl's forms key does not move (repr/c unchanged).
+
+### The night's commands
+
+`bin/ci check --record` and `check --aot --record` whole (expected: the hand-edited rows as recorded, nothing else moves).
+
+### Proposed (h-c-run)
+
+- **CS320 GNU vector types (41 eval, 41 AOT).** A GNU extension ci could carry, not a decided divergence of the target: SPEC §14
+  keeps it out for its "SIMD semantics of its own". (a) Reclassify as deferred (a class `:vector`, kind `:deferred`, out of
+  `by-design`), then build it: vectors as memory aggregates of lanes in the builder, element-wise operators, comparisons to 0 / -1,
+  subscripts, scalar broadcast, `__builtin_shuffle` / `shufflevector` / `convertvector`, and for benchmarksgame's SSE2 programs the
+  `__builtin_ia32_*` builtins its intrinsic headers call; a few days. (b) Keep it by design. *Recommended: (a).*
+- **CS321 GNU nested functions (31 eval, 31 AOT; c-torture's own tests of them and gnu23-varmod-2).** Not the target's either:
+  SPEC §14's reason is the trampoline on an executable stack, which an interpreter does not need. (a) Reclassify as deferred and
+  build them: a static chain (the parent's frame as a hidden argument, the captured locals in frame memory), a nested function's
+  address as a closure in go/arbace/ci and cf2g, a non-local goto to the parent's `__label__`s; a few days. (b) Keep them by design.
+  *Recommended: (a).*
+- Either (a) moves no pass: completeness stays, "meant" (without by design) falls from 100 to about 97 at eval and AOT until built.
+
+### Decided (the user, 2026-11-17, round 51): CS320 (a), CS321 (a)
+
+GNU vector types and GNU nested functions are deferred, not by design: `test/c/divergences.edn`'s classes `vector` (41 eval, 41
+AOT) and `nested-fn` (31, 31), kind `:deferred`, judged before `by-design` on the refusals' text; SPEC §14's two rows struck. C eval
+2,173 / 34 / 72, AOT 2,181 / 26 / 72; completeness 96, meant 100 to 98. Then both built in ci and cf2g (below, as they land).
+
+## As built: the read and print levels' deferred rows (2026-11-17, branch `h-c-deferred`, from `next` `e4a7a30f3`)
+
+The host burst's task: C's 33 read and 44 print rows of kind deferred, grouped by cause, fixed where light, proved on lists
+(`--only`), each fixed row re-recorded from its run (the results files merged by id, CS240 (a); no whole corpus). Before:
+read 5221 / 221 / 33, print 4775 / 3 / 44 (completeness 96, 100 without by design). After: read 5225 / 223 / 27, print
+4798 / 3 / 22 (completeness 96, 100 without by design: 0.9599 to 0.9612, 0.9961 to 0.9976).
+
+Fixed (arbace/repr/c/, each checked under the default judge and under gcc's, `ARBACE_C_JUDGE=gcc`, levels 3-4 fresh):
+- The converter (`convert.ae`):
+  - a function definition whose declarator is not a function's (`auto g { }`, `constexpr int v { }`, a function defined
+    through a typedef) is the read's error in gcc's words (`'auto' requires an initialized data declaration`, else
+    `expected '=', ',', ';', 'asm' or '__attribute__' before '{' token`), not a refusal: c23-auto-3.c, c23-constexpr-3.c;
+  - `__declspec(...)` is a declaration's attribute `(__declspec "TEXT")`, printed back where the declaration's attributes
+    stand (SPEC §5.1): torture-compile's dll.c;
+  - GNU attributes before a declarator after a comma join that declarator's `:c/decl-attrs` (its form is printed alone): the
+    old `:c/list-attrs` was printed at the head and read back as the declaration's: 20010714-1.c;
+  - an attribute declaration of empty specifiers, `[[]];`, keeps `:c/decl-attrs []`: c23-attr-syntax-1.c, -4.c;
+  - at C23 and later GNU's `__typeof__` is marked `:c/gnu` and C's `typeof` printed as `typeof` (gcc's `__typeof__` keeps a
+    function's `_Noreturn`): c23-typeof-1.c;
+  - an `#embed` whose output begins the next item (its `if_empty`'s or `prefix`'s tokens) is not placed as a directive too:
+    embed-17.c;
+  - a directive between a statement's labels and the statement (`g: h: #pragma GCC unroll 2 while`) is placed before the
+    statement's form: c23-named-loops-1.c;
+  - the macro groups: an invocation's text runs over the source's closing parentheses or one parenthesized list that the
+    expansion's own invocation took (`bcat (0'À'))`, `CAT(A,B)(x)`); an invocation on a directive's line (an `#embed`'s
+    `if_empty`) is printed expanded: c23-digit-separators-1.c, 64_macro_nesting.c, embed-1.c;
+  - gcc's digit separator errors (`bad-digit-separators`: after a base indicator, adjacent, outside a digit sequence) as
+    `c/bad-lit`.
+- The printer (`print.ae`): `(atomic T)` of a qualified T is the qualifier `_Atomic` (c23-nullptr-1.c, c23-typeof-1.c); a
+  range `case` whose end is `nullptr` (c23-nullptr-6.c); a C2y selection statement's declaration block printed as the
+  statement, `if (int i = 42; i)` (c23-if-decls-1.c); a label ending its block with GNU attributes, `e: __attribute__((unused))`
+  (c23-labels-3.c); `__declspec`.
+- The preprocessor (`pp.ae`, `host.ae`): C23's `$` in an identifier is gcc's error (c23-ucnid-2.c, the token check's
+  `:undiagnosed`); `-fpreprocessed` is modelled (an `#embed` without `gnu::base64` is gcc's error; gcc.dg/cpp/embed-6.c, -7.c),
+  in the file's `:args`; the pedantic `#embed` note is off inside `__extension__` (gcc.dg/cpp/embed-2.c, dg).
+- The token check's digest (`ppcheck.ae`, `tokens-digest`): the corpus's directory written `${srcdir}`, so a checkout's path
+  is not in it; embed-11.c's digest recorded so (`test/repr/c/pp-gcc.sha256`), its class `:embed` (by design, cc lacks
+  #embed), the class `:absolute-name` removed.
+- The round trip's judge (`rtcheck.ae`, `bin/lib/repr-c/roundtrip`):
+  - `own-rejects?`: a file the reader rejects passes the acceptance by its own verdict when its first error is on a dg-error
+    line of the main file and one of the line's regexps finds the message (the user's decision of 2026-11-07); another line
+    or other words do not (c23-attr-syntax-5.c's parser gap stays known); the controls' rows never;
+  - `link-resources!`: the original's resources a print's string literal names are linked beside the print (a quoted
+    `#embed` searches the current file's directory first), not the original's directory as an `--embed-dir`, which answered
+    embed-1.c's `__has_embed (<embed-1.c>)` too; a file the print `#include`s is not linked; gcc compiles an absolute
+    original's print by its absolute name (`__has_embed (__FILE__ ...)`): embed-2.c, embed-19.c, gcc.dg/cpp/embed-1.c, and
+    embed-15.c, gcc.dg/cpp/embed-2.c, -3.c, -17.c at level 3 (they failed in a worktree's path under gcc's judge before).
+- The dg judge (`arbace/c/dg.ae`): "preprocessed source" is a syntax expectation a read error stands for.
+- `bin/records-check` (`test/records/check.ae`): a `:time-dependent` entry whose row passes is not stale (GTS-B, as `bin/reap`).
+- Time-dependent entries now passing (compiled reader): limits-blockid.c, limits-externalid.c, limits-fndefn.c (entries kept).
+- Also: dg c23-attr-syntax-6.c passes; the accepted known-unlisted rows pr34093.c (round trip) and pr54559.c (annotations)
+  pass (removed from `test/records/accepted.edn`).
+
+Left deferred: read: dg 22 rows (the checker's diagnostics: decl-diag 11 with c23-auto-3 and c23-constexpr-3, whose read error
+now stops the checker, pp-diag 6, wrong-reason 3, pedantic-diag 1 (c23-digit-separators-2.c: its unterminated character
+constants stop the read), parse-gap 1), eval-depth 5 (MAX-NEST 4000, the
+converter's Go stack); print: eval-limits 11 (limits-externdecl.c parses in 2m47 at 4 GB, pr46534.c's 200 MB string; quickjs.c,
+sqlite3.c, libunicode.c, binary-constants-1.c not rerun), macro-context 4 (macro-skip-expand.c's painted name, stringify.c,
+shell.c, 921227-1.c's concatenated invocations), split-declaration 2, objects-macro-body 2, cc-grammar 3 (c23-attr-syntax-5.c's
+balanced tokens outside `*recover*`; tcc-pp's 12.S and 13.S, assembler sources: a DECISION in the report).
+
+Checks: `bin/ci c2j-check` (27 sources), `bin/ci dg --essential` (92 of 92), `bin/repr-c check --c23` (59 pass, 3 expected),
+`bin/ci judge-test` (with `roundtrip-own-rejects`, `converter-deferred-rows`), the round trip of 239 listed files under gcc's
+judge (gcc-c23's attr/typeof/nullptr/labels/auto/constexpr/digit/qual/bool/generic files, all of gcc-embed, samples of
+torture-compile, tcc-tests2, mir, zlib), the token and tree checks of gcc-embed and gcc-cpp-c23, the annotations and dg of the
+lists, the negative controls of the round trip and the token check; `bin/reap`, `bin/crops-score --judge --strict`,
+`bin/records-check`.
+
+Keys: arbace/repr/c/ and arbace/c/ are embedded (in `gate_key`): the key moves, the C steps and `--full` rerun, and stage 0
+evaluates the changed namespaces from the checkout until the next re-seed. The main host's night: the C full runs record
+whole (`bin/repr-c roundtrip --record`, `check --tokens --record`, `parse-check --record`, `bin/ci annotations --record`,
+`dg --record`), so the rows of files these changes touch outside the lists are recorded too.
