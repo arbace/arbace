@@ -50,12 +50,17 @@
 ;; stack (fully_expand_fragment); each Item form gets :rf-order, which collection's impl disambiguators follow
 (def ^:dynamic *def-order* nil)
 
+(declare tool-attr-item?)
+
 (defn- number-items [items]
   (if-not *def-order*
     items
     (mapv (fn [it]
             (if (and (seq? it) (= 'Item (first it)) (not (some #{:rf-order} it))
-                     (not (let [k (second (drop-while #(not= :kind %) it))] (and (seq? k) (= 'MacCall (first k))))))
+                     (not (let [k (second (drop-while #(not= :kind %) it))] (and (seq? k) (= 'MacCall (first k)))))
+                     ;; round 52: an item with a tool attribute (`#[rustfmt::skip]`) is an attribute invocation: its DefId
+                     ;; when the invocation is expanded, after the fragment's (expand-item numbers it)
+                     (not (tool-attr-item? it)))
               (apply list (concat it [:rf-order (swap! *def-order* inc)]))
               it))
           items)))   ; RF12: the crate the injected prelude names (core's own modules: "core")
@@ -1103,6 +1108,9 @@
                     ;; a macro_rules! a macro's expansion defines is in scope from there on (textual scoping)
                     (let [[_ idf md] k]
                       (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))
+                it (if (and *def-order* (tool-attr-item? it) (not (some #{:rf-order} it)))
+                     (apply list (concat it [:rf-order (swap! *def-order* inc)]))
+                     it)
                 [it' derived] (expand-derives it)]
             (into [(expand-form it')] (mapcat expand-item (number-items derived))))))
 
@@ -1202,6 +1210,17 @@
     (when (and (seq? k) (= 'Normal (first k)))
       (let [item (fget (second k) :item) segs (:segments (apply hash-map (rest (fget item :path))))]
         (when (= 1 (count segs)) (second (fget (first segs) :ident)))))))
+
+(defn- tool-attr-item?
+  "round 52: an item carrying a tool attribute (a path of two segments or more: `#[rustfmt::skip]`, `#[diagnostic::..]`), which
+  rustc's InvocationCollector takes as an attribute invocation (not a builtin attribute), so the item's definitions come
+  after its fragment's: option.rs' `FromResidual<Yeet<()>>` impl `{impl#66}`, vec/mod.rs' `const impl` of Vec"
+  [it]
+  (boolean (some (fn [a] (let [k (fget a :kind)]
+                           (when (and (seq? k) (= 'Normal (first k)))
+                             (let [item (fget (second k) :item)]
+                               (> (count (:segments (apply hash-map (rest (fget item :path))))) 1)))))
+                 (let [as (fget it :attrs)] (when (sequential? as) as)))))
 
 (load "expand_format")
 (load "expand_derive")

@@ -147,6 +147,16 @@
 (def ^:dynamic *def-sites* {})   ; RF12: a macro 2.0 expansion's mark -> its definition's module (core's path): def-site hygiene
 (def ^:dynamic *crate-path* nil)   ; RF12: the root file's module in core ("core::num"), the rest of core std's names
 
+(defn crate-root
+  "RIND9 (a): the crate whose module *crate-path* is (\"core\" for core's own modules, \"alloc\" for alloc's): `crate::` names it"
+  []
+  (when-let [^String cp *crate-path*] (let [i (.indexOf cp "::")] (if (neg? i) cp (subs cp 0 i)))))
+
+(def ^:dynamic *mark-crates*
+  "RIND9 (a): an expansion's mark -> the crate its macro's `$crate` stands for (the expansion's *mark-crates*): building alloc,
+  a core macro's `$crate` names core, not the crate being built; unbound (core's own modules) every `$crate` is the crate's"
+  {})
+
 (defn- new-module [parent kind & [std-path]]
   {:items (atom {}) :globs (atom []) :imports (atom []) :parent parent :kind kind :uid (Object.) :std-path std-path})
 
@@ -173,6 +183,22 @@
 
 (def ^:dynamic *std* {})
 (def ^:dynamic *root* nil)
+
+(declare std-module-res)
+
+(def crate-deps
+  "RIND9 (a): the library's crates a crate being built depends on, whose macros' `$crate` names them (core's own build none:
+  every macro it expands is core's, whatever crate std-names lists it under)"
+  {"alloc" #{"core"} "std" #{"core" "alloc"}})
+
+(defn- dollar-crate
+  "RIND9 (a): `$crate` in a module of the crate being built: another crate's macro's (*mark-crates*) names that crate, the
+  rest the crate's own root"
+  [ctxt]
+  (let [k (get *mark-crates* ctxt) r (crate-root)]
+    (if (contains? (get crate-deps r) k)
+      (std-module-res k)
+      (localize (std-module-res r)))))
 (def ^:dynamic *prelude* (atom nil))   ; the prelude module's res
 (def ^:dynamic *extern* (atom {}))     ; the extern prelude: name -> res
 
@@ -332,8 +358,8 @@
 (defn- first-seg [s ns n-segs]
   (let [nm (seg-name s) ctxt (id-ctxt (fv s :ident))]
     (case nm
-      "crate" (if *crate-path* (localize (std-module-res "core")) {:t :local-def :kind "Mod" :mod *root*})
-      "$crate" (if *crate-path* (localize (std-module-res "core")) (lexical ns nm ctxt))
+      "crate" (if *crate-path* (localize (std-module-res (crate-root))) {:t :local-def :kind "Mod" :mod *root*})
+      "$crate" (if *crate-path* (dollar-crate ctxt) (lexical ns nm ctxt))
       "self" (if (and (= 1 n-segs) (= ns :value)) (lexical :value "self" ctxt) {:t :local-def :kind "Mod" :mod (normal-module (module-scope))})
       "super" (let [n (normal-module (module-scope))]
                 (if (and *crate-path* (nil? (:parent n)))
@@ -728,7 +754,8 @@
           (let [s (nth path i) nm (seg-name s)
                 r (if (zero? i)
                     (case nm
-                      ("crate" "$crate") (if *crate-path* (localize (std-module-res "core")) {:t :local-def :kind "Mod" :mod *root*})
+                      "crate" (if *crate-path* (localize (std-module-res (crate-root))) {:t :local-def :kind "Mod" :mod *root*})
+                      "$crate" (if *crate-path* (dollar-crate (id-ctxt (fv s :ident))) {:t :local-def :kind "Mod" :mod *root*})
                       "self" {:t :local-def :kind "Mod" :mod (normal-module m)}
                       "super" (if (and *crate-path* (nil? (:parent (normal-module m))))
                                 (localize (std-module-res (subs *crate-path* 0 (max 0 (.lastIndexOf ^String *crate-path* "::")))))

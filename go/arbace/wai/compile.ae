@@ -60,20 +60,41 @@
 
 
 (go/const "The structured and internal ops, after the table's.\n"
-  ^{:line 63} [^{:val 494} OpBlock (+ opTableEnd iota)]
-  ^{:line 64} [^{:val 495} OpLoop]
-  ^{:line 65} [^{:val 496} OpIf]
-  ^{:line 66} [^{:val 497} OpElse]
-  ^{:line 67} [^{:val 498} OpEnd]
-  ^{:line 68} [^{:val 499} OpTryTable]
-  ^{:line 69} [^{:val 500} OpJump])
+  ^{:line 63} [^{:val 565} OpBlock (+ opTableEnd iota)]
+  ^{:line 64} [^{:val 566} OpLoop]
+  ^{:line 65} [^{:val 567} OpIf]
+  ^{:line 66} [^{:val 568} OpElse]
+  ^{:line 67} [^{:val 569} OpEnd]
+  ^{:line 68} [^{:val 570} OpTryTable]
+  ^{:line 69} [^{:val 571} OpJump])
 
 
 (go/var
   ^{:line 73} [^{:tag (array 256 uint16)} oneByte]
   ^{:line 74} [prefixed (lit (map uint32 uint16))]
   ^{:line 75} [^{:tag (array opTableEnd int8)} effPop]
-  ^{:line 76} [^{:tag (array opTableEnd int8)} effPush])
+  ^{:line 76} [^{:tag (array opTableEnd int8)} effPush]
+  [^{:tag (array opTableEnd uint8) :doc "an atomic access's size in bytes (threads, queue 326), 0 else\n"} atomicSize])
+
+
+(go/func atomicSizeOf "atomicSizeOf is an atomic instruction's access size by its name (threads), or 0.\n" ^uint8 [^string n]
+  (switch
+    (case [(or (== n "memory.atomic.notify") (== n "memory.atomic.wait32"))]
+      (return 4))
+    (case [(== n "memory.atomic.wait64")]
+      (return 8))
+    (case [(not (or (strings/HasPrefix n "i32.atomic.") (strings/HasPrefix n "i64.atomic.")))]
+      (return 0)))
+
+  (let [s (subslice n 11)]
+    (range [_ k (lit (slice string) "8" "16" "32")]
+      (when (or (strings/HasPrefix s (+ "load" k)) (strings/HasPrefix s (+ "store" k)) (strings/HasPrefix s (+ "rmw" k ".")))
+        (return (conv uint8 (/ (aget (lit (map string int) ["8" 8] ["16" 16] ["32" 32]) k) 8)))))
+
+    (if (== (aget n 1) \6)
+      (return 8)
+
+      (return 4))))
 
 
 (go/type opInfo (struct
@@ -110,7 +131,28 @@
               (case [(aget binaryNames s)]
                 (set! (values (aget effPop op) (aget effPush op)) (values 2 1)))
               (default
-                (set! (values (aget effPop op) (aget effPush op)) (values 1 1)))))))))
+                (set! (values (aget effPop op) (aget effPush op)) (values 1 1))))))
+
+        ;; the atomic accesses (threads, queue 326): their size, their stack effect
+        (let [sz (atomicSizeOf n)]
+          (when (> sz 0)
+            (aset atomicSize op sz)
+            (switch
+              (case [(strings/HasPrefix n "memory.atomic.wait")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 3 1)))
+              (case [(== n "memory.atomic.notify")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 2 1)))
+              (case [(strings/Contains n ".atomic.load")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 1 1)))
+              (case [(strings/Contains n ".atomic.store")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 2 0)))
+              (case [(strings/Contains n "cmpxchg")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 3 1)))
+              (default
+                (set! (values (aget effPop op) (aget effPush op)) (values 2 1))))))
+
+        (when (== n "atomic.fence")
+          (set! (values (aget effPop op) (aget effPush op)) (values 0 0))))))
 
 
 
@@ -129,7 +171,9 @@
         (lit _ OpArrayGet 2 1) (lit _ OpArrayGetS 2 1) (lit _ OpArrayGetU 2 1) (lit _ OpArraySet 3 0) (lit _ OpArrayLen 1 1)
         (lit _ OpArrayFill 4 0) (lit _ OpArrayCopy 5 0) (lit _ OpArrayInitData 4 0) (lit _ OpArrayInitElem 4 0)
         (lit _ OpRefI31 1 1) (lit _ OpI31GetS 1 1) (lit _ OpI31GetU 1 1) (lit _ OpRefTest 1 1) (lit _ OpRefTestNull 1 1)
-        (lit _ OpRefCast 1 1) (lit _ OpRefCastNull 1 1) (lit _ OpAnyConvertExtern 1 1) (lit _ OpExternConvertAny 1 1))]
+        (lit _ OpRefCast 1 1) (lit _ OpRefCastNull 1 1) (lit _ OpAnyConvertExtern 1 1) (lit _ OpExternConvertAny 1 1)
+        (lit _ OpI64Add128 4 2) (lit _ OpI64Sub128 4 2) (lit _ OpI64MulWideS 2 2) (lit _ OpI64MulWideU 2 2)
+        (lit _ OpStructNewDefaultDesc 1 1) (lit _ OpRefGetDesc 1 1) (lit _ OpRefCastDescEq 2 1) (lit _ OpRefCastDescEqNull 2 1))]
 
     (set! (values (aget effPop (.-op e)) (aget effPush (.-op e))) (values (.-pop e) (.-push e)))))
 
@@ -239,11 +283,17 @@
 
 
 ^{:go/end 247} (go/method heap ^int32 [^{:tag (* compiler)} c]
-  (let [h (.sleb (.-r c) 33)]
-    (when (>= h 0)
-      (return (conv int32 (aget (.-Types (.-m c)) h))))
+  ;; an exact heap type (0x62 and a type index; custom descriptors, queue 327): the canonical id with hExactBit
+  (let [x (conv int32 0)]
+    (when (== (aget (.-b (.-r c)) (.-p (.-r c))) 0x62)
+      (inc! (.-p (.-r c)))
+      (set! x hExactBit))
 
-    (conv int32 h)))
+    (let [h (.sleb (.-r c) 33)]
+      (when (>= h 0)
+        (return (bit-or (conv int32 (aget (.-Types (.-m c)) h)) x)))
+
+      (conv int32 h))))
 
 
 ^{:go/end 249} (go/method funcType ^{:tag (* CType)} [^{:tag (* compiler)} c ^uint32 x] (aget ctypes (aget (.-FuncTypes (.-m c)) x)))
@@ -452,8 +502,7 @@
 
               (return (addr (lit Unimplemented "simd" n)))))
 
-          (when (== b 0xfe)
-            (return (addr (lit Unimplemented "threads" (fmt/Sprintf "atomic 0x%x" x)))))))
+))
 
       (default
         (set! op (aget oneByte b))))
@@ -481,6 +530,8 @@
         (set! (.-B ins) (conv uint32 (.u8 r))))
       (case [kLane]
         (set! (.-A ins) (conv uint32 (.u8 r))))
+      (case [kZero]
+        (.u8 r))
       (case [kShuffle]
         (let [^{:tag (array 16 byte)} v (zero (array 16 byte))]
           (copy (subslice v) (.bytes r 16))
@@ -535,9 +586,18 @@
       (case [kBrOnCast]
         (let [f (.u8 r)
             ^{:line 537} d (.u32 r)]
-          (.sleb r 33)
+          (.heap c)
           (let [h2 (.heap c)]
             (when (.-dead c)
+              (return nil))
+
+            ;; the descriptor casts (custom descriptors, queue 327): a test of the value under the descriptor, which leaves
+            ;; the value and a flag, then br_if
+            (when (or (== op OpBrOnCastDescEq) (== op OpBrOnCastDescEqFail))
+              (.emit c (lit Ins :Op op :D (conv uint32 (bit-and (>> f 1) 1)) :E h2))
+              (.adj c 1 0)
+              (.brIns c OpBrIf d)
+              (.popped c (- (len (.-Ins (.-code c))) 1))
               (return nil))
 
             ;; D: the target type's nullability, E its heap type
@@ -616,18 +676,22 @@
           (.emit c ins)
           (set! (.-dead c) true)
           (return nil))
-        (case [OpStructNew]
-          (let [tid (aget (.-Types m) (.-A ins))]
+        (case [OpStructNew OpStructNewDesc]
+          (let [tid (aget (.-Types m) (.-A ins))
+              nd 0]
+            (when (== op OpStructNewDesc)
+              (set! nd 1))
+
             (set! (.-A ins) (conv uint32 tid))
             (.emit c ins)
-            (.adj c (len (.-Fields (aget ctypes tid))) 1)
+            (.adj c (+ (len (.-Fields (aget ctypes tid))) nd) 1)
             (return nil)))
         (case [OpArrayNewFixed]
           (set! (.-A ins) (conv uint32 (aget (.-Types m) (.-A ins))))
           (.emit c ins)
           (.adj c (conv int (.-B ins)) 1)
           (return nil))
-        (case [OpStructNewDefault OpStructGet OpStructGetS OpStructGetU OpStructSet OpArrayNew OpArrayNewDefault OpArrayNewData
+        (case [OpStructNewDefault OpStructNewDefaultDesc OpRefGetDesc OpStructGet OpStructGetS OpStructGetU OpStructSet OpArrayNew OpArrayNewDefault OpArrayNewData
             ^{:line 631} OpArrayNewElem OpArrayGet OpArrayGetS OpArrayGetU OpArraySet OpArrayFill OpArrayInitData OpArrayInitElem]
           (set! (.-A ins) (conv uint32 (aget (.-Types m) (.-A ins)))))
         (case [OpArrayCopy]

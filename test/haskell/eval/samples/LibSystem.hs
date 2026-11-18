@@ -7,6 +7,7 @@ import System.IO
 import System.Environment
 import Control.Exception
 import Control.Monad
+import Data.List (sort)
 import System.IO.Error (isDoesNotExistError)
 import Data.Time.Clock
 import Data.Time.Calendar
@@ -26,7 +27,7 @@ main = do
   createDirectoryIfMissing True (d </> "a" </> "b")
   writeFile (d </> "a" </> "f.txt") "hello\n"
   appendFile (d </> "a" </> "f.txt") "world\n"
-  listDirectory (d </> "a") >>= print
+  sort <$> listDirectory (d </> "a") >>= print
   doesFileExist (d </> "a" </> "f.txt") >>= print
   getFileSize (d </> "a" </> "f.txt") >>= print
   renameFile (d </> "a" </> "f.txt") (d </> "g.txt")

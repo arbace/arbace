@@ -27,7 +27,10 @@ the binary numbers them).
 | `(wasm/import "MOD" "NAME" DESC)` | DESC `(func I {:type T})`, `(table I {:type R :min N :max N :i64 true})`, `(memory I {:min N :max N :i64 true})`, `(global I {:type V :mut B})`, `(tag I {:type T})` |
 | `(wasm/func I {:type T :locals [V...]} INSTR...)` | a function: its type index, its locals (flat, the binary's grouping in the layer) and its body |
 | `(wasm/table I {:type R :min N :max N :i64 true :init EXPR})` | a table (`:init`: Wasm 3.0's initializer) |
-| `(wasm/memory I {:min N :max N :i64 true})` | a memory |
+| `(wasm/memory I {:min N :max N :i64 true :page P})` | a memory (`:page`: the custom page sizes proposal's page size, its log2, when the text or the binary states one; queue 326) |
+| `(exact X)` | an exact heap type (custom descriptors, queue 327): in `(ref (exact X))`, `(ref null (exact X))`, the casts' and `ref.null`'s heap types; an exact function import `(func I {:type T :exact true})` (binary kind 0x20) |
+| `(sub {:final B :supers [I...] :describes X :descriptor Y} COMP)` | the descriptor clauses (custom descriptors, queue 327): text `(type $t (describes X)? (descriptor Y)? COMP)` or in a `sub`, binary 0x4c X and 0x4d Y before the composite type (a final type of no supertype written with its clauses alone) |
+| `(struct.new_desc X)`, `(struct.new_default_desc X)`, `(ref.get_desc X)`, `(ref.cast_desc_eq RT)`, `(br_on_cast_desc_eq L RT1 RT2)`, `(br_on_cast_desc_eq_fail L RT1 RT2)` | custom descriptors' instructions, 0xfb 0x20-0x26 (0x22 confirmed by the pin's binary module, the rest in its order) |
 | `(wasm/tag I {:type T})` | an exception tag |
 | `(wasm/global I {:type V :mut B} EXPR)` | a global and its initializer |
 | `(wasm/export "NAME" (KIND I))` | KIND `func`, `table`, `memory`, `global`, `tag` |
@@ -109,7 +112,7 @@ What the forms do not say and the binary does, so that the original prints back 
   and function body sizes to 5 bytes and its relocated `call` and `i32.const` operands to 5 (P2).
 - `:name-widths`: the same for the name section's own LEB128s (its ordinals its own).
 - `:empty [S...]`: sections present with no entries.
-- `:flags {[:elem I] F, [:data I] F, [:locals FUNC] [[N V]...]}`: an element or data segment's flags when not the canonical encoding
+- `:flags {[:elem I] F, [:data I] F, [:locals FUNC] [[N V]...], [:imports] [[ENC N]...]}`: an element or data segment's flags when not the canonical encoding; `[:imports]` the compact import section's groups (queue 326: ENC 0 one import, 0x7f or 0x7e N of them; a group of none also its module's name, 0x7e's its description), when one is compact
   of its form, a function's local declarations when not grouped canonically (runs of one type).
 
 Canonical encoding: minimal LEB128s, the sections in the specification's order (type, import, function, table, memory, tag, global,
@@ -157,6 +160,15 @@ The annotations `(@custom "NAME" (before|after SECTION)? "BYTES"*)` and `(@name 
 handlers): a custom section, `(after S)` kept as `{:after S}`, `(before S)` and the default after the last present section before S
 (or of all); the module's name (an annotation before every field) and a defined function's (before its type use) into `wasm/names`
 and the function's `:name`. The canonical printer writes them back as such annotations.
+
+Since queue 326 the extended name section's: a `@name` is read at every binding's place (after its keyword and identifier: an import,
+a function, a parameter or local, a label (`block`, `loop`, `if`, `try_table`, flat or folded), a type, a field, a table, a memory, a
+global, an element or data segment, a tag and its parameters; one at most, a parameter, local or field naming one declaration; in a
+block type or `call_indirect`, "param names not allowed here"; elsewhere "misplaced @name annotation"), the names but the module's
+and the functions' checked and not kept in the forms. A `@custom "name"` is the reference's name section: its subsections 0-13
+decoded (`arbace.repr.wasm.binary/check-names`: malformed when they do not, their indices a custom check, "custom @name: ..."),
+its forms the binary decoder's of its bytes (the names after the last section). The branch hints `(@metadata.code.branch_hint
+"BYTES")` are checked (one an instruction, on an `if` or a `br_if`, inside a function) and not kept.
 
 ## 9. Validation (WA3)
 

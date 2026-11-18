@@ -4728,3 +4728,89 @@ SCS27 (a) and SCS28 (a) as built above (`R7RSExpSign` in a program of R7RS's lib
 recorded. SCS32 (b): ecraven compiled in the weekly tier alone, the step `si-ecraven-aot` (`:phase :weekly`, chain scheme-full,
 `env SI_TIMEOUT=300 bin/si ecraven --aot`; test/gate/crops/scheme.edn and steps.edn), in `bin/gate --weekly`'s plan and not in the
 nightly's or `--full`'s; its record stays the main host's first whole run (`--record`), then the `:until` of test/reap/cells.edn goes.
+
+## As built: si's speed for `ecraven-too-slow` (queue 334, 2026-11-17, branch `334-scheme-speed`, from next `d23b2215c`)
+
+The class's three: takl interpreted did not finish in 900 s (Chez 3.9 s), and compiled takl, ntakl and earley each timed out at 300 s.
+A profile of si on takl (the light driver, `SI_CPUPROFILE`) showed allocation and Go's collector first (a closure, an argument slice
+and an environment for each call of `shorterp`'s `or`, two trips through the machine's loop a call), then the node interpreter's
+dispatch. The change is to the calls, in both paths; no result changes but one edge case (below).
+
+**The interpreter** (`go/arbace/scm/eval.ae`):
+- `enter`: a call's transfer (Apply, App) runs the callee's body directly on Go's stack while fewer than 32 entries nest (the loop
+  resets the count before each node it runs), else through the loop as before; the value reaches the same frames either way.
+- A closure of one clause taking the operands gets its frame and values in one allocation (`newEnv`: `env1`..`env4`), in `App` and at
+  `appFrom`'s end (the frame copied from the operands' `vals`, which the `kArg` frames share).
+- `((lambda (x ...) body) arg ...)` makes no closure: `Let`, `LetS` (simple operands), `LetK` (a frame `kLet` for each operand that is
+  not simple). or's expansion `((lambda (t) (if t t y)) x)` with `t` not in `y` (psyntax's temporaries are fresh) is `Or`/`OrS`: no
+  frame, `y` compiled once in the application's scope (`orRest`, on the source form, before the operator is compiled); `((lambda ()
+  body ...))` is its body (`thunkBody`); constants, lexical references and lambdas before a sequence's last form are dropped.
+- `(if (not x) c a)` is `(if x a c)`; plain primitives of one or two operands are `PrimApp1`/`PrimApp2`, with fast paths for car, cdr,
+  null?, pair?, not, eq?, cons and the fixnum `+ - < <= > >= =` (`aot.ae`'s `FxAdd`..., the primitive's own function otherwise).
+- A self tail call takes over its frame: a lambda of one clause (1 to 4 required parameters) whose body is `frameSafe` (no lambda, no
+  letrec, no frame pushed: every call in tail position with simple operands, every test, operand and init simple) has its tail calls
+  in its own frame marked (`markSelf`); `App.Run` then writes the operands' values (all evaluated first) into the frame when the
+  operator is a closure of that lambda over the frame's parent. No closure or frame can hold the frame, so nothing sees the change.
+- `K` is 80 bytes (Go's size class; was 112): the node in `X`, `I` an `int32`.
+- `GCTune` (both drivers, `GOGC` unset): `GOGC` 400 as before and a 64 MiB pointer-free ballast, never written (not resident), which the
+  pacing counts: a small heap (takl's 7 MB) was collected every 25 MB allocated, about 7 times a second; now every few hundred.
+
+**The AOT** (`arbace/scheme/aot.ae`, the dumper in `go/arbace/scm/aot.ae`): `Apply0`..`Apply4` enter directly; the dumper writes
+or's expansion as `(or X Y)` and a thunk's application as its body (as `comp` compiles them); `((lambda (x ...) body) arg ...)` is
+compiled inline (`scm/Frame1`..`Frame3`, `Frame`: the frame, no closure); a self tail call from a `frame-safe?` body is `m.SelfN`
+(the frame taken over when the operator is a closure of the lambda over the frame's parent, else `ApplyN`). psyntax's unit compiles
+through the same paths.
+
+**One edge case changes.** A continuation re-entered into an operand of a call whose callee then `set!`s its parameter: si before
+gave the callee's `set!` to the re-entered call (the frame shared the operands' slice), si now gives the operand's value, as Chez does
+for a callee it does not inline (`.tmp/q334/bench/reenter2.sps`: Chez `((1 3) (1 2))`, si before `((99 3) (1 2))`, si now `((1 3) (1
+2))`; when Chez inlines the callee it gives 99, as for a let). A let's init is unchanged (`LetK` shares, as Chez's let and si before),
+and the compiled path always gave the operand's value. `TestEvalFastPaths` holds both.
+
+**Measured** (this VM, arm64, load 15 to 37 on 8 cores: CPU seconds, user, as `bin/si ecraven` runs them, `GOMAXPROCS=2`,
+`GOMEMLIMIT=1500MiB`; Chez 10.3.0 here: takl 1.96, ntakl 1.96, earley 2.75, fib 0.59, tak 1.39; si before on fib 62.2 here against
+66.7 s recorded on the main host, so the main host's wall seconds are about these CPU seconds):
+| run | before | after |
+|---|---|---|
+| takl interpreted | did not finish in 900 s (main host) | **107.8** (wall 443 at load 38); 199.6 with the first nodes alone, 128.6 with the self tail calls |
+| ntakl interpreted | (the same class) | **101.0**; 131.4 before `GCTune` |
+| takl compiled | over 300 s (main host) | **78.3**; 93.4 before `GCTune` |
+| ntakl compiled | over 300 s (main host) | **76.7**; 91.7 before `GCTune` |
+| earley interpreted, `GOMEMLIMIT` 1500MiB | over 300 s (main host) | 285 s of CPU, not done in 900 s wall: the collector, the heap at the limit |
+| earley interpreted, 3000MiB | | **100.8**, 2.9 GB resident |
+| earley compiled, 3000MiB | over 300 s (main host) | **74.7**, 2.9 GB resident |
+| earley compiled, 1500MiB | | 286.6 (624 s wall), 2.4 GB resident: past the soft limit, collecting |
+| fib interpreted (not in the class) | 62.2 | **32.1** |
+| takl.sps (`.tmp/q334/bench`, lists 28/14/7) interpreted, 4 interleaved pairs | 8.72, 9.46, 10.08, 8.17 | 2.59, 2.68, 2.64, 2.55 (3.5x) |
+| the same compiled | 5.70, 5.29, 5.64, 5.94 | 1.09, 1.17, 1.09, 0.99 (5.2x) |
+
+earley needs memory more than speed: it keeps its whole parse forest (2,674,440 trees; si's pair is 32 bytes against Chez's 16; about 2.5 GB
+live at the end, Chez 1.2 GB resident), so under 1500MiB Go only collects. `bin/si ecraven` now runs earley alone under `GOMEMLIMIT` 3GiB
+(`SI_GOMEMLIMIT_EARLEY`), interpreted and compiled; the rest as before.
+
+**Checks** (the light driver and the AOT of this branch; the corpora fetched by pin): `bin/si unit` (TestEvalFastPaths new; TestNumberCases' 4 cases fail as at the base on arm64, the same 4 lines), `bin/si test --si`
+61 of 64 (3 known, 0 failing), `bin/si check --only test/scheme/essential-check.txt` 45 of 50 (no regression, the five controls
+differ as they must), `check --aot --only test/scheme/essential-aot.txt` 13 of 14 (the known 5 items; 14 of 14 the same compiled as
+interpreted), `bin/si r7rs` and `r7rs --aot` 1,234 of 1,234, `bin/si srfi` and `srfi --aot` (`SI_AOT_SAME=1`) 1,231 checks of 11
+programs, each compiled output the same as si's, `bin/si corpora controls` (every family's controls found), ecraven's nightly subset
+(test/scheme/subsets.edn, 40 benchmarks) 39 of 40 (read0 in its class), the mats' subset (14 files): no regression against the record.
+**The real path**: `env SI_TIMEOUT=900 bin/si ecraven takl ntakl earley` (900 for the VM's load; the record's limit is 300): **3 of 3
+pass**, wall takl 229 s, ntakl 208, earley 174 (3 GiB); `--aot` the same: **3 of 3 pass**, takl 164 s (compile 3), ntakl 149, earley
+135. On the main host's lighter load both are expected well inside 300 s.
+
+**Not done.** The records (`check-ecraven-linux-amd64.edn`, `check-ecraven-aot-linux-amd64.edn`) are the main host's; `bin/gate --plan`
+refuses in a linked worktree without a stage 0 of its own (`bin/gate` unsets `ARBACE_HOST_EXE`). The shipped path (`arbace.lang.SchemeInterp`
+over `go/arbace/scm` in Arbace's executable) takes the runtime at its next build.
+
+**Proposals (queue 334, none decided)**
+- **SCS33 earley's memory.** (a) as built: `bin/si ecraven` runs earley under `GOMEMLIMIT` 3GiB (`SI_GOMEMLIMIT_EARLEY`), the rest
+  under 1500MiB; (b) keep 1500MiB and earley in `ecraven-too-slow` (it is the heap, not the speed: reword the class); (c) a smaller pair
+  (16 bytes: an arena or unsafe words), the representation's change. *Recommended: (a)*: 2.9 GB on a 62 GB host, one benchmark.
+- **SCS34 the collector's ballast.** (a) as built: `GCTune`'s 64 MiB (a small program's resident set up to about 350 MB, was about 60);
+  (b) 32 MiB; (c) none, `GOGC` 400 alone (takl.sps 18% more CPU interpreted, 28% compiled). *Recommended: (a)*.
+- **SCS35 a continuation re-entered into a call's operand.** (a) as built: the callee's frame is its own (the operand's value on
+  re-entry: Chez for a callee it does not inline, si's compiled path); (b) the frame shares the operands' slice as before (Chez when it
+  inlines), and no self tail call takes over a frame made from it. *Recommended: (a)*.
+- **SCS36 the next step for speed** (SC95). After this, si is about 55 times Chez interpreted and 40 compiled on takl (fib 54 times
+  interpreted); what remains is the node interpreter's dispatch and the heap frames of calls not in tail position (SC95 (c), the
+  user's call). *Recommended*: no further step until a benchmark needs one.

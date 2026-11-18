@@ -12,7 +12,7 @@
 (in-ns 'go.arbace.scm)
 
 (go/file "eval.go"
-  :imports [[strconv "strconv"]])
+  :imports [[os "os"] [debug "runtime/debug"] [strconv "strconv"]])
 
 (go/type Env "Env is a lexical frame: the values of a lambda's parameters or of a letrec's variables.\n"
   (struct ^{:tag (slice any)} V ^{:tag (* Env)} Up))
@@ -45,12 +45,13 @@ tail transfer), having pushed the frames that wait for it.\n"
   (struct ^{:tag (* K)} K ^{:tag (* Wind)} W ^{:tag (* Hs)} H))
 
 (go/type K
-  "K is a continuation frame: what to do with a value. Kind says which; N, E, I, V, X its data. A frame
+  "K is a continuation frame: what to do with a value. Kind says which; X (the node, or the Go code), E, I, V, A its data
+(80 bytes, Go's size class). A frame
 is never changed once pushed, but for Used, which tells a frame resumed a second time (a re-entered
 continuation) to copy what it shares.\n"
-  (struct ^{:tag (* K)} Next ^uint8 Kind ^bool Used ^int I ^Node N ^{:tag (* Env)} E ^{:tag (slice any)} V ^any X ^any A))
+  (struct ^{:tag (* K)} Next ^int32 I ^uint8 Kind ^bool Used ^any X ^{:tag (* Env)} E ^{:tag (slice any)} V ^any A))
 
-(go/const [^{:tag uint8} kSeq iota] [kIf] [kArg] [kSetL] [kSetG] [kLetrec] [kGo] [kRestoreH] [kBarrier] [kCode])
+(go/const [^{:tag uint8} kSeq iota] [kIf] [kArg] [kSetL] [kSetG] [kLetrec] [kGo] [kRestoreH] [kBarrier] [kCode] [kLet])
 
 (go/type KFn "KFn is a compiled continuation's code (SM7's AOT): it receives the value and its frame, whose E, A and V hold the values live in it.\n"
   (func [(* M) any (* K)] [any bool]))
@@ -66,7 +67,8 @@ of locations, psyntax's primitive locations, and the barriers of nested runs (in
           ^{:tag (map (* Symbol) (* Loc))} Store
           ^any primLocs ^{:tag (map (* Symbol) any)} primLocCache
           ^{:tag (slice (* K))} barriers
-          ^int pendKind ^any pendObj ^bool pendCont ^{:tag (* Cont)} pendC ^{:tag (slice any)} pendArgs))
+          ^int pendKind ^any pendObj ^bool pendCont ^{:tag (* Cont)} pendC ^{:tag (slice any)} pendArgs
+          ^int depth))
 
 (go/var ^{:tag (* M) :doc "Cur is the machine Go primitives call back into (CallProc).\n"} Cur)
 
@@ -83,7 +85,7 @@ of locations, psyntax's primitive locations, and the barriers of nested runs (in
 ;; Frames
 
 (go/method push [^{:tag (* M)} m ^uint8 kind ^Node n ^{:tag (* Env)} e ^int i]
-  (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kind :N n :E e :I i))))
+  (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kind :X n :E e :I (conv int32 i)))))
 
 (go/method PushGo "PushGo pushes a frame whose Go continuation f receives the next value delivered.\n"
   [^{:tag (* M)} m ^GoK f]
@@ -108,9 +110,9 @@ of locations, psyntax's primitive locations, and the barriers of nested runs (in
         (when (!= (.-Kind k) kCode)
           (single v)))))
   (switch (.-Kind k)
-    (case [kSeq] (return (seqFrom m (assert (* Seq) (.-N k)) (.-E k) (.-I k))))
+    (case [kSeq] (return (seqFrom m (assert (* Seq) (.-X k)) (.-E k) (conv int (.-I k)))))
     (case [kIf]
-      (let [n (assert (* If) (.-N k))]
+      (let [n (assert (* If) (.-X k))]
         (if (Truthy v)
           (return (.Run (.-C n) m (.-E k)))
           (return (.Run (.-A n) m (.-E k))))))
@@ -122,17 +124,26 @@ of locations, psyntax's primitive locations, and the barriers of nested runs (in
             (set! vals c))
           (set! (.-Used k) true))
         (aset vals (.-I k) v)
-        (return (appFrom m (assert (* App) (.-N k)) (.-E k) vals (+ (.-I k) 1)))))
+        (return (appFrom m (assert (* App) (.-X k)) (.-E k) vals (+ (conv int (.-I k)) 1)))))
     (case [kSetL]
-      (let [n (assert (* SetLocal) (.-N k))]
+      (let [n (assert (* SetLocal) (.-X k))]
         (aset (.-V (up (.-E k) (.-D n))) (.-I n) v)
         (return Unspec true)))
     (case [kSetG]
-      (set! (.-V (.-L (assert (* SetGlobal) (.-N k)))) v)
+      (set! (.-V (.-L (assert (* SetGlobal) (.-X k)))) v)
       (return Unspec true))
+    (case [kLet]
+      (let [vals (.-V k)]
+        (if (.-Used k)
+          (let [c (make (slice any) (len vals))]
+            (copy c (subslice vals 0 (.-I k)))
+            (set! vals c))
+          (set! (.-Used k) true))
+        (aset vals (.-I k) v)
+        (return (letFrom m (assert (* LetK) (.-X k)) (.-E k) vals (+ (conv int (.-I k)) 1)))))
     (case [kLetrec]
       (aset (.-V (.-E k)) (.-I k) v)
-      (return (letrecFrom m (assert (* Letrec) (.-N k)) (.-E k) (+ (.-I k) 1))))
+      (return (letrecFrom m (assert (* Letrec) (.-X k)) (.-E k) (+ (conv int (.-I k)) 1))))
     (case [kGo] (return ((assert GoK (.-X k)) m v)))
     (case [kCode] (return ((assert KFn (.-X k)) m v k)))
     (case [kRestoreH]
@@ -179,6 +190,7 @@ owns, is pending (not done). start begins the run.\n"
   (let [(values v ok) (start)]
     (while true
       (while (not ok)
+        (set! (.-depth m) 0)
         (set! (values v ok) (.Run (.-n m) m (.-e m)))
         (watchdogTick))
       (let [k (.-k m)]
@@ -254,16 +266,12 @@ a continuation is reinstated. Apply owns args.\n"
         (range [_ c (.-Clauses (.-L p))]
           (cond
             (and (not (.-Rest c)) (== n (.-Req c)))
-            (do (set! (.-n m) (.-Body c))
-                (set! (.-e m) (addr (lit Env :V args :Up (.-E p))))
-                (return nil false))
+            (return (.enter m (.-Body c) (addr (lit Env :V args :Up (.-E p)))))
             (and (.-Rest c) (>= n (.-Req c)))
             (let [v (make (slice any) (+ (.-Req c) 1))]
               (copy v (subslice args 0 (.-Req c)))
               (aset v (.-Req c) (ListTail (subslice args (.-Req c)) Null))
-              (set! (.-n m) (.-Body c))
-              (set! (.-e m) (addr (lit Env :V v :Up (.-E p))))
-              (return nil false))))
+              (return (.enter m (.-Body c) (addr (lit Env :V v :Up (.-E p))))))))
         (Violation CondAssertion "" "incorrect number of arguments ~s to ~s" (conv int64 n) p)))
     (case [(* Prim)]
       (when (not (.arityOK p (len args)))
@@ -274,6 +282,57 @@ a continuation is reinstated. Apply owns args.\n"
     (case [(* Cont)] (return (.reinstate m p args))))
   (Violation CondAssertion "" "attempt to apply non-procedure ~s" f)
   (return nil true))
+
+(go/var ^{:tag (slice byte) :doc "gcBallast is GCTune's ballast: counted by the collector's pacing, never touched.\n"} gcBallast)
+
+(go/func GCTune
+  "GCTune sets the collector for si's drivers when GOGC is unset: GOGC 400 (si allocates a frame and an environment a
+call over a small live heap: Go's 100 spends half the time collecting; fib 2.0 s against 1.45 s at 400) and a 64 MiB
+pointer-free ballast, never written so never resident, which the pacing counts: a small heap is then collected every
+few hundred MB allocated, not every 20 (takl: 18% less CPU interpreted, 28% compiled). A large heap is paced by GOGC,
+and GOMEMLIMIT still bounds it.\n"
+  []
+  (when (== (os/Getenv "GOGC") "")
+    (debug/SetGCPercent 400)
+    (set! gcBallast (make (slice byte) (<< 64 20)))))
+
+(go/const [^int enterDepth 32])
+
+(go/method enter
+  "enter runs body in e as the machine's next node (a call's transfer, in tail position): directly, on Go's
+stack, while fewer than enterDepth entries nest (the loop resets the count before each node it runs), else by
+the machine's loop. Either way the value goes to the same frames.\n"
+  [^{:tag (* M)} m ^Node body ^{:tag (* Env)} e] :results [any bool]
+  (let [d (.-depth m)]
+    (when (< d enterDepth)
+      (set! (.-depth m) (+ d 1))
+      (let [(values v ok) (.Run body m e)]
+        (set! (.-depth m) d)
+        (return v ok)))
+    (set! (.-n m) body)
+    (set! (.-e m) e)
+    (return nil false)))
+
+(go/func newEnv "newEnv is a frame of n values (nil until set) below up, in one allocation for up to four.\n"
+  ^{:tag (* Env)} [^int n ^{:tag (* Env)} up]
+  (switch n
+    (case [1] (let [ev (addr (lit env1))]
+                (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+                (set! (.-Up (.-Env ev)) up)
+                (return (addr (.-Env ev)))))
+    (case [2] (let [ev (addr (lit env2))]
+                (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+                (set! (.-Up (.-Env ev)) up)
+                (return (addr (.-Env ev)))))
+    (case [3] (let [ev (addr (lit env3))]
+                (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+                (set! (.-Up (.-Env ev)) up)
+                (return (addr (.-Env ev)))))
+    (case [4] (let [ev (addr (lit env4))]
+                (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+                (set! (.-Up (.-Env ev)) up)
+                (return (addr (.-Env ev))))))
+  (addr (lit Env :V (make (slice any) n) :Up up)))
 
 (go/func valuesOf "valuesOf is args delivered as one value: the one, or a *Values.\n" ^any [^{:tag (slice any)} args]
   (when (== (len args) 1)
@@ -506,15 +565,39 @@ continuable one, its value is the raise's.\n"
             (return (.Run (aget (.-Inits n) i) m ne))))))
   (return (.Run (.-Body n) m ne)))
 
-(go/type App "App is an application: the operator and the operands, simple or not (as when all are).\n"
-  (struct ^Node F ^{:tag (slice Node)} Args ^Simple fs ^{:tag (slice Simple)} as))
+(go/type App "App is an application: the operator and the operands, simple or not (as when all are); self, when
+not nil, the lambda whose frame a tail call of it from its own body takes over (markSelf).\n"
+  (struct ^Node F ^{:tag (slice Node)} Args ^Simple fs ^{:tag (slice Simple)} as ^{:tag (* Lambda)} self))
 (go/method Run [^{:tag (* App)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
   (when (!= (.-as n) nil)
-    (let [f (.Ev (.-fs n) e)
-          args (make (slice any) (len (.-as n)))]
-      (range [i a (.-as n)]
-        (aset args i (.Ev a e)))
-      (return (.Apply m f args))))
+    (let [f (.Ev (.-fs n) e)]
+      ;; a self tail call from a body that leaves no reference to its frame: the frame reused, its values replaced
+      (when (!= (.-self n) nil)
+        (let [(values p isClo) (assert (* Closure) f)]
+          (when (and isClo (== (.-L p) (.-self n)) (== (.-E p) (.-Up e)))
+            (let [as (.-as n) v (.-V e)]
+              (switch (len as)
+                (case [1] (aset v 0 (.Ev (aget as 0) e)))
+                (case [2] (let [a0 (.Ev (aget as 0) e) a1 (.Ev (aget as 1) e)]
+                            (aset v 0 a0) (aset v 1 a1)))
+                (case [3] (let [a0 (.Ev (aget as 0) e) a1 (.Ev (aget as 1) e) a2 (.Ev (aget as 2) e)]
+                            (aset v 0 a0) (aset v 1 a1) (aset v 2 a2)))
+                (case [4] (let [a0 (.Ev (aget as 0) e) a1 (.Ev (aget as 1) e) a2 (.Ev (aget as 2) e) a3 (.Ev (aget as 3) e)]
+                            (aset v 0 a0) (aset v 1 a1) (aset v 2 a2) (aset v 3 a3))))
+              (return (.enter m (.-Body (aget (.-Clauses (.-L p)) 0)) e))))))
+      ;; a closure whose one clause takes the operands: its frame made at once, the values in it
+      (let [(values p isClo) (assert (* Closure) f)]
+        (when (and isClo (== (len (.-Clauses (.-L p))) 1))
+          (let [c (aget (.-Clauses (.-L p)) 0)]
+            (when (and (not (.-Rest c)) (== (.-Req c) (len (.-as n))))
+              (let [ne (newEnv (len (.-as n)) (.-E p))]
+                (range [i a (.-as n)]
+                  (aset (.-V ne) i (.Ev a e)))
+                (return (.enter m (.-Body c) ne)))))))
+      (let [args (make (slice any) (len (.-as n)))]
+        (range [i a (.-as n)]
+          (aset args i (.Ev a e)))
+        (return (.Apply m f args)))))
   (return (appFrom m n e (make (slice any) (+ 1 (len (.-Args n)))) 0)))
 
 (go/func appFrom
@@ -527,9 +610,77 @@ continuable one, its value is the raise's.\n"
       (let [(values s ok) (assert Simple x)]
         (if ok
           (aset vals i (.Ev s e))
-          (do (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kArg :N n :E e :I i :V vals)))
+          (do (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kArg :X n :E e :I (conv int32 i) :V vals)))
               (return (.Run x m e)))))))
+  ;; a closure's frame is its own (the frames of kArg share vals), copied into one allocation: a self tail call may take
+  ;; it over (markSelf), and a continuation re-entered into an operand then sees the operands' values, not the callee's
+  ;; set! (as Chez does for a callee it does not inline)
+  (let [(values p isClo) (assert (* Closure) (aget vals 0))]
+    (when (and isClo (== (len (.-Clauses (.-L p))) 1))
+      (let [c (aget (.-Clauses (.-L p)) 0)]
+        (when (and (not (.-Rest c)) (== (.-Req c) (- (len vals) 1)))
+          (let [ne (newEnv (.-Req c) (.-E p))]
+            (copy (.-V ne) (subslice vals 1))
+            (return (.enter m (.-Body c) ne)))))))
   (return (.Apply m (aget vals 0) (subslice vals 1))))
+
+(go/type Let "Let is ((lambda (x ...) body) arg ...) with simple operands: the lambda's frame made, no closure.\n"
+  (struct ^Node Body ^{:tag (slice Simple)} as))
+(go/method Run [^{:tag (* Let)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (let [ne (newEnv (len (.-as n)) e)]
+    (range [i a (.-as n)]
+      (aset (.-V ne) i (.Ev a e)))
+    (return (.Run (.-Body n) m ne))))
+
+(go/type LetS "LetS is a Let whose body is simple.\n"
+  (struct ^Simple Body ^{:tag (slice Simple)} as))
+(go/method Run [^{:tag (* LetS)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (return (.Run (.-Body n) m (.frame n e))))
+(go/method Ev ^any [^{:tag (* LetS)} n ^{:tag (* Env)} e] (.Ev (.-Body n) (.frame n e)))
+(go/method frame ^{:tag (* Env)} [^{:tag (* LetS)} n ^{:tag (* Env)} e]
+  (let [ne (newEnv (len (.-as n)) e)]
+    (range [i a (.-as n)]
+      (aset (.-V ne) i (.Ev a e)))
+    ne))
+
+(go/type LetK "LetK is ((lambda (x ...) body) arg ...) with an operand that is not simple: the operands evaluated in
+order (a frame kLet waits for each that is not), then the lambda's frame made, no closure.\n"
+  (struct ^Node Body ^{:tag (slice Node)} Args ^{:tag (slice Simple)} ss))
+(go/method Run [^{:tag (* LetK)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (return (letFrom m n e (make (slice any) (len (.-Args n))) 0)))
+
+(go/func letFrom "letFrom evaluates n's operands from position i into vals, then runs its body in their frame.\n"
+  [^{:tag (* M)} m ^{:tag (* LetK)} n ^{:tag (* Env)} e ^{:tag (slice any)} vals ^int i] :results [any bool]
+  (for [] (< i (len vals)) (inc! i)
+    (let [s (aget (.-ss n) i)]
+      (if (!= s nil)
+        (aset vals i (.Ev s e))
+        (do (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kLet :X n :E e :I (conv int32 i) :V vals)))
+            (return (.Run (aget (.-Args n) i) m e))))))
+  ;; the frame shares vals with the frames of kLet, as an application's did before (a continuation re-entered into an
+  ;; operand sees the body's set! of an earlier variable, as Chez's let does: no closure's frame, so no self tail call
+  ;; takes it over)
+  (return (.Run (.-Body n) m (addr (lit Env :V vals :Up e)))))
+
+(go/type Or "Or is ((lambda (t) (if t t y)) x), or's expansion, with x simple: x's value when true, else y's.\n"
+  (struct ^Simple X ^Node Y))
+(go/method Run [^{:tag (* Or)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (let [v (.Ev (.-X n) e)]
+    (when (Truthy v)
+      (return v true))
+    (return (.Run (.-Y n) m e))))
+
+(go/type OrS "OrS is an Or whose y is simple.\n" (struct ^Simple X ^Simple Y))
+(go/method Run [^{:tag (* OrS)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (let [v (.Ev (.-X n) e)]
+    (when (Truthy v)
+      (return v true))
+    (return (.Run (.-Y n) m e))))
+(go/method Ev ^any [^{:tag (* OrS)} n ^{:tag (* Env)} e]
+  (let [v (.Ev (.-X n) e)]
+    (when (Truthy v)
+      (return v))
+    (.Ev (.-Y n) e)))
 
 (go/type PrimApp "PrimApp is a plain primitive applied to simple operands.\n"
   (struct ^{:tag (* Prim)} P ^{:tag (slice Simple)} Args))
@@ -548,6 +699,67 @@ continuable one, its value is the raise's.\n"
       (range [i x a]
         (aset args i (.Ev x e)))
       (.call p args))))
+
+(go/const [^{:tag uint8} opF iota] [opCar] [opCdr] [opNull] [opPair] [opNot] [opEq] [opCons]
+  [opAdd] [opSub] [opLt] [opLe] [opGt] [opGe] [opNumEq])
+
+(go/var ^{:tag (map string uint8) :doc "primOps is the primitives with a fast path in PrimApp1 and PrimApp2, by name.\n"} primOps
+  (lit (map string uint8) ["car" opCar] ["cdr" opCdr] ["null?" opNull] ["pair?" opPair] ["not" opNot] ["eq?" opEq] ["cons" opCons]
+       ["+" opAdd] ["-" opSub] ["<" opLt] ["<=" opLe] [">" opGt] [">=" opGe] ["=" opNumEq]))
+
+(go/func primNode "primNode is plain primitive p applied to simple operands as: a PrimApp1 or PrimApp2 when p has the
+function of their count (its fast path by Op), else a PrimApp.\n"
+  ^Node [^{:tag (* Prim)} p ^{:tag (slice Simple)} as]
+  (let [op (aget primOps (.-Name p))]
+    (when (!= (aget prims (.-Name p)) p)
+      (set! op opF))
+    (when (and (== (len as) 1) (!= (.-F1 p) nil))
+      (return (addr (lit PrimApp1 :Op op :P p :A (aget as 0)))))
+    (when (and (== (len as) 2) (!= (.-F2 p) nil))
+      (return (addr (lit PrimApp2 :Op op :P p :A (aget as 0) :B (aget as 1))))))
+  (addr (lit PrimApp :P p :Args as)))
+
+(go/type PrimApp1 "PrimApp1 is plain primitive P applied to one simple operand by its F1 (Op: its fast path, opF none).\n"
+  (struct ^uint8 Op ^{:tag (* Prim)} P ^Simple A))
+(go/method Run [^{:tag (* PrimApp1)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.evU n e) true))
+(go/method Ev ^any [^{:tag (* PrimApp1)} n ^{:tag (* Env)} e]
+  (let [v (.evU n e)]
+    (when (== (.-Op n) opF)
+      (single v))
+    v))
+(go/method evU ^any [^{:tag (* PrimApp1)} n ^{:tag (* Env)} e]
+  (let [a (.Ev (.-A n) e)]
+    (switch (.-Op n)
+      (case [opCar] (let [(values x ok) (assert (* Pair) a)] (when ok (return (.-Car x)))))
+      (case [opCdr] (let [(values x ok) (assert (* Pair) a)] (when ok (return (.-Cdr x)))))
+      (case [opNull] (return (== a (conv any Null))))
+      (case [opPair] (let [(values _ ok) (assert (* Pair) a)] (return ok)))
+      (case [opNot] (return (== a (conv any false)))))
+    ((.-F1 (.-P n)) a)))
+
+(go/type PrimApp2 "PrimApp2 is plain primitive P applied to two simple operands by its F2 (Op: its fast path, opF none).\n"
+  (struct ^uint8 Op ^{:tag (* Prim)} P ^Simple A ^Simple B))
+(go/method Run [^{:tag (* PrimApp2)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.evU n e) true))
+(go/method Ev ^any [^{:tag (* PrimApp2)} n ^{:tag (* Env)} e]
+  (let [v (.evU n e)]
+    (when (== (.-Op n) opF)
+      (single v))
+    v))
+(go/method evU ^any [^{:tag (* PrimApp2)} n ^{:tag (* Env)} e]
+  (let [a (.Ev (.-A n) e)
+        b (.Ev (.-B n) e)
+        p (.-P n)]
+    (switch (.-Op n)
+      (case [opEq] (return (Eq a b)))
+      (case [opCons] (return (addr (lit Pair :Car a :Cdr b))))
+      (case [opAdd] (return (FxAdd a b p)))
+      (case [opSub] (return (FxSub a b p)))
+      (case [opLt] (return (FxLt a b p)))
+      (case [opLe] (return (FxLe a b p)))
+      (case [opGt] (return (FxGt a b p)))
+      (case [opGe] (return (FxGe a b p)))
+      (case [opNumEq] (return (FxEq a b p))))
+    ((.-F2 p) a b)))
 
 (go/type Missing "Missing is a reference to a primitive si does not have: an error when evaluated.\n"
   (struct ^{:tag (* Symbol)} Name))
@@ -663,10 +875,110 @@ continuable one, its value is the raise's.\n"
         ^Node a (addr (lit Const :V Unspec))]
     (when (!= (nth (.-Cdr v) 2) nil)
       (set! a (.comp m (nth v 3) sc)))
+    ;; (if (not x) c a) as (if x a c): not's value is only the test's
+    (let [x (notOperand t)]
+      (when (!= x nil)
+        (set! t x)
+        (let [c0 c]
+          (set! c a)
+          (set! a c0))))
     (let [ts (asSimple t) cs (asSimple c) as (asSimple a)]
       (when (and (!= ts nil) (!= cs nil) (!= as nil))
         (return (addr (lit IfS :T ts :C cs :A as))))
       (addr (lit If :T t :C c :A a :ts ts)))))
+
+(go/func oneClause
+  "oneClause is the formals and the body (its list of forms) of lambda form f, (lambda formals body ...) or
+(case-lambda (formals body ...)) as psyntax writes lambda, true, when its keyword is not bound in sc, else false.\n"
+  [^any f ^{:tag (* scope)} sc] :results [any any bool]
+  (let [(values p ok) (assert (* Pair) f)]
+    (when (not ok)
+      (return nil nil false))
+    (let [(values h isSym) (assert (* Symbol) (.-Car p))
+          (values rest isPair) (assert (* Pair) (.-Cdr p))]
+      (when (or (not isSym) (not isPair) (and (!= h symLambda) (!= h symCaseLambda)))
+        (return nil nil false))
+      (let [(values _ _ _ bound) (lookup sc h)]
+        (when bound
+          (return nil nil false)))
+      (when (== h symLambda)
+        (return (.-Car rest) (.-Cdr rest) true))
+      (let [(values c isClause) (assert (* Pair) (.-Car rest))]
+        (when (or (not isClause) (!= (.-Cdr rest) (conv any Null)))
+          (return nil nil false))
+        (return (.-Car c) (.-Cdr c) true))))
+  (return nil nil false))
+
+(go/func thunkBody
+  "thunkBody is the body of lambda form f, true, when f takes no arguments: ((lambda () body ...)) is (begin body ...),
+compiled in the scope sc of the application (no frame, no closure).\n"
+  [^any f ^{:tag (* scope)} sc] :results [any bool]
+  (let [(values ps body ok) (oneClause f sc)]
+    (when (and ok (== ps (conv any Null)))
+      (return body true)))
+  (return nil false))
+
+(go/func orRest
+  "orRest is y, true when lambda form f is (lambda (t) (if t t y)), or's expansion, with t not in y (psyntax's
+temporaries are fresh), else false: ((lambda (t) (if t t y)) x) is then (or x y), y compiled in the scope sc of the
+application.\n"
+  [^any f ^{:tag (* scope)} sc] :results [any bool]
+  (let [(values psx bodyx ok) (oneClause f sc)
+        ps (List5 psx)
+        body (List5 bodyx)]
+    (when (or (not ok) (!= (len ps) 1) (!= (len body) 1))
+      (return nil false))
+    (let [(values t isSym) (assert (* Symbol) (aget ps 0))
+          b (List5 (aget body 0))]
+      (when (or (not isSym) (!= (len b) 4) (!= (aget b 0) (conv any symIf)) (!= (aget b 1) (conv any t)) (!= (aget b 2) (conv any t))
+                (occurs t (aget b 3)))
+        (return nil false))
+      (let [(values _ _ _ ifBound) (lookup sc symIf)]
+        (when ifBound
+          (return nil false)))
+      (return (aget b 3) true)))
+  (return nil false))
+
+(go/func List5 "List5 is the elements of proper list x when it has at most five, else nil.\n" ^{:tag (slice any)} [^any x]
+  (let [^{:tag (slice any)} out (lit (slice any))]
+    (while true
+      (when (== x (conv any Null))
+        (return out))
+      (let [(values p ok) (assert (* Pair) x)]
+        (when (or (not ok) (== (len out) 5))
+          (return nil))
+        (set! out (append out (.-Car p)))
+        (set! x (.-Cdr p)))))
+  nil)
+
+(go/func occurs "occurs is whether symbol s occurs in datum x (its pairs and vectors).\n" ^bool [^{:tag (* Symbol)} s ^any x]
+  (while true
+    (type-switch [v x]
+      (case [(* Symbol)] (return (== v s)))
+      (case [(* Pair)]
+        (when (occurs s (.-Car v))
+          (return true))
+        (set! x (.-Cdr v)))
+      (case [(* Vector)]
+        (range [_ y (.-V v)]
+          (when (occurs s y)
+            (return true)))
+        (return false))
+      (default (return false))))
+  false)
+
+(go/func notOperand "notOperand is x when node t is (not x), the primitive not applied to one operand, else nil.\n"
+  ^Node [^Node t]
+  (let [notP (aget prims "not")]
+    (type-switch [p t]
+      (case [(* PrimApp1)]
+        (when (== (.-P p) notP)
+          (return (.-A p))))
+      (case [(* App)]
+        (let [(values c isConst) (assert (* Const) (.-F p))]
+          (when (and isConst (== (len (.-Args p)) 1) (== (.-V c) (conv any notP)))
+            (return (aget (.-Args p) 0)))))))
+  nil)
 
 (go/method compBody ^Node [^{:tag (* M)} m ^any body ^{:tag (* scope)} sc]
   (let [xs (ArgList "compile" body)]
@@ -674,12 +986,24 @@ continuable one, its value is the raise's.\n"
       (return (addr (lit Const :V Unspec))))
     (when (== (len xs) 1)
       (return (.comp m (aget xs 0) sc)))
-    (let [es (make (slice Node) (len xs))
-          ss (make (slice Simple) (len xs))]
+    (let [^{:tag (slice Node)} es nil
+          ^{:tag (slice Simple)} ss nil
+          last (- (len xs) 1)]
       (range [i x xs]
-        (aset es i (.comp m x sc))
-        (aset ss i (asSimple (aget es i))))
+        (let [c (.comp m x sc)]
+          ;; a constant, a lexical reference or a lambda before the last form has no effect: dropped
+          (when (or (== i last) (not (pure c)))
+            (set! es (append es c))
+            (set! ss (append ss (asSimple c))))))
+      (when (== (len es) 1)
+        (return (aget es 0)))
       (addr (lit Seq :Es es :ss ss)))))
+
+(go/func pure "pure is whether node n's evaluation has no effect and cannot fail (a constant, a lexical reference, a lambda).\n"
+  ^bool [^Node n]
+  (type-switch [x n]
+    (case [(* Const) (* Ref0) (* Ref1) (* RefN) (* Lam)] (return (!= x nil))))
+  false)
 
 (go/method compSet ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
   (let [(values s ok) (assert (* Symbol) (nth v 1))]
@@ -716,7 +1040,68 @@ continuable one, its value is the raise's.\n"
           (set! vars (append vars rest)))
         (let [inner (addr (lit scope :vars vars :up sc))]
           (set! (.-Clauses l) (append (.-Clauses l) (addr (lit Clause :Req (len req) :Rest (!= rest nil) :Body (.compBody m (.-Cdr p) inner))))))))
+    (when (== (len (.-Clauses l)) 1)
+      (let [c (aget (.-Clauses l) 0)]
+        (when (and (not (.-Rest c)) (>= (.-Req c) 1) (<= (.-Req c) 4) (frameSafe (.-Body c) true))
+          (markSelf (.-Body c) l))))
     l))
+
+(go/func frameSafe
+  "frameSafe is whether running node n (in tail position when tail) leaves no reference to its frame: no lambda, no
+frame pushed (a call not in tail position, an operand, a test or an init that is not simple), no letrec; then a tail
+call of the lambda itself may take over the frame (markSelf).\n"
+  ^bool [^Node n ^bool tail]
+  (type-switch [x n]
+    (case [(* Const) (* Ref0) (* Ref1) (* RefN) (* RefChk) (* Global) (* Missing)] (return (!= x nil)))
+    (case [(* If)] (return (and (!= (.-ts x) nil) (frameSafe (.-T x) false) (frameSafe (.-C x) tail) (frameSafe (.-A x) tail))))
+    (case [(* IfS)] (return (and (frameSafe (.-T x) false) (frameSafe (.-C x) tail) (frameSafe (.-A x) tail))))
+    (case [(* Seq)]
+      (range [i y (.-Es x)]
+        (let [last (== i (- (len (.-Es x)) 1))]
+          (when (or (and (not last) (== (aget (.-ss x) i) nil)) (not (frameSafe y (and last tail))))
+            (return false))))
+      (return true))
+    (case [(* SetLocal)] (return (and (!= (.-xs x) nil) (frameSafe (.-X x) false))))
+    (case [(* SetGlobal)] (return (and (!= (.-xs x) nil) (frameSafe (.-X x) false))))
+    (case [(* App)]
+      (when (or (not tail) (== (.-as x) nil) (not (frameSafe (.-F x) false)))
+        (return false))
+      (range [_ a (.-as x)]
+        (when (not (frameSafe a false))
+          (return false)))
+      (return true))
+    (case [(* PrimApp)]
+      (range [_ a (.-Args x)]
+        (when (not (frameSafe a false))
+          (return false)))
+      (return true))
+    (case [(* PrimApp1)] (return (frameSafe (.-A x) false)))
+    (case [(* PrimApp2)] (return (and (frameSafe (.-A x) false) (frameSafe (.-B x) false))))
+    (case [(* Or)] (return (and (frameSafe (.-X x) false) (frameSafe (.-Y x) tail))))
+    (case [(* OrS)] (return (and (frameSafe (.-X x) false) (frameSafe (.-Y x) tail))))
+    (case [(* Let)]
+      (range [_ a (.-as x)]
+        (when (not (frameSafe a false))
+          (return false)))
+      (return (frameSafe (.-Body x) tail)))
+    (case [(* LetS)]
+      (range [_ a (.-as x)]
+        (when (not (frameSafe a false))
+          (return false)))
+      (return (frameSafe (.-Body x) tail))))
+  false)
+
+(go/func markSelf
+  "markSelf marks the tail calls of node n, a frameSafe body of lambda l run in l's own frame, with l (App's self):
+not through a Let, whose body runs in a frame of its own.\n"
+  [^Node n ^{:tag (* Lambda)} l]
+  (type-switch [x n]
+    (case [(* If)] (markSelf (.-C x) l) (markSelf (.-A x) l))
+    (case [(* Seq)] (markSelf (aget (.-Es x) (- (len (.-Es x)) 1)) l))
+    (case [(* Or)] (markSelf (.-Y x) l))
+    (case [(* App)]
+      (when (and (!= (.-as x) nil) (== (len (.-as x)) (.-Req (aget (.-Clauses l) 0))))
+        (set! (.-self x) l)))))
 
 (go/method compLetrec ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
   (let [bs (ArgList "compile" (nth v 1))
@@ -734,21 +1119,56 @@ continuable one, its value is the raise's.\n"
         (addr (lit Letrec :N (len vars) :Inits inits :ss ss :Body body))))))
 
 (go/method compApp ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
+  (let [xs (ArgList "compile" (.-Cdr v))
+        ^Node x0 nil]
+    ;; ((lambda () body ...)): (begin body ...), no frame
+    (when (== (len xs) 0)
+      (let [(values body isThunk) (thunkBody (.-Car v) sc)]
+        (when isThunk
+          (return (.compBody m body sc)))))
+    ;; ((lambda (t) (if t t y)) x), x simple: an Or, no frame (y compiled once, in sc)
+    (when (== (len xs) 1)
+      (let [(values y isOr) (orRest (.-Car v) sc)]
+        (when isOr
+          (set! x0 (.comp m (aget xs 0) sc))
+          (let [s0 (asSimple x0)]
+            (when (!= s0 nil)
+              (let [yn (.comp m y sc)
+                    ys (asSimple yn)]
+                (when (!= ys nil)
+                  (return (addr (lit OrS :X s0 :Y ys))))
+                (return (addr (lit Or :X s0 :Y yn)))))))))
+    (return (.compApp2 m v sc xs x0))))
+
+(go/method compApp2 "compApp2 compiles application v of operands xs, the first already compiled when x0 is not nil.\n"
+  ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc ^{:tag (slice any)} xs ^Node x0]
   (let [f (.comp m (.-Car v) sc)
-        xs (ArgList "compile" (.-Cdr v))
         args (make (slice Node) (len xs))
         as (make (slice Simple) (len xs))
         all true]
     (range [i x xs]
-      (aset args i (.comp m x sc))
+      (if (and (== i 0) (!= x0 nil))
+        (aset args i x0)
+        (aset args i (.comp m x sc)))
       (aset as i (asSimple (aget args i)))
       (when (== (aget as i) nil)
         (set! all false)))
+    ;; ((lambda (x ...) body) arg ...): a Let, the lambda's frame made with no closure
+    (let [(values lam isLam) (assert (* Lam) f)]
+      (when (and isLam (== (len (.-Clauses (.-L lam))) 1))
+        (let [c (aget (.-Clauses (.-L lam)) 0)]
+          (when (and (not (.-Rest c)) (== (.-Req c) (len xs)))
+            (when (not all)
+              (return (addr (lit LetK :Body (.-Body c) :Args args :ss as))))
+            (let [bs (asSimple (.-Body c))]
+              (when (!= bs nil)
+                (return (addr (lit LetS :Body bs :as as)))))
+            (return (addr (lit Let :Body (.-Body c) :as as)))))))
     (let [(values c isConst) (assert (* Const) f)]
       (when (and all isConst)
         (let [(values p isPrim) (assert (* Prim) (.-V c))]
           (when (and isPrim (== (.-Ctl p) nil) (.arityOK p (len xs)))
-            (return (addr (lit PrimApp :P p :Args as)))))))
+            (return (primNode p as))))))
     (let [fs (asSimple f)]
       (when (or (not all) (== fs nil))
         (set! as nil))

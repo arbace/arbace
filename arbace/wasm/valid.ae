@@ -39,7 +39,11 @@
 (defn- vec? [t] (or (= t 'v128) (= t :bot)))
 (defn- reft? [t] (or (vector? t) (= t :bot)))
 
-(defn- ht-str [h] (cond (= h :bot) "something" (integer? h) (str h) :else (str h)))
+(defn exact?
+  "An exact heap type `(exact X)` (custom descriptors, queue 327): only the defined type X, not its subtypes."
+  [h] (and (seq? h) (= 'exact (first h))))
+
+(defn- ht-str [h] (cond (= h :bot) "something" (integer? h) (str h) (exact? h) (str "(exact " (second h) ")") :else (str h)))
 (defn- rt-str [[_ n h]] (str "(ref " (when n "null ") (ht-str h) ")"))
 (defn- t-str [t] (cond (= t :bot) "bot" (vector? t) (rt-str t) :else (str t)))
 (defn- ts-str [ts] (str "[" (apply str (interpose " " (map t-str ts))) "]"))
@@ -71,7 +75,9 @@
 
 (defn- sub-of [t]
   (if (and (seq? t) (= 'sub (first t)))
-    (let [{:keys [final supers]} (second t)] {:final (boolean final) :supers (vec supers) :comp (comp-of (nth t 2))})
+    (let [{:keys [final supers describes descriptor]} (second t)]
+      (cond-> {:final (boolean final) :supers (vec supers) :comp (comp-of (nth t 2))}
+        describes (assoc :describes describes) descriptor (assoc :descriptor descriptor)))
     {:final true :supers [] :comp (comp-of t)}))
 
 (defn- map-heaps
@@ -92,11 +98,13 @@
         (let [d (type-def c x)
               [s n] (:group d)
               s (long s) n (long n)
-              ref (fn [y] (if (integer? y)
-                            (let [y (long y)] (if (and (>= y s) (< y (+ s n))) [:rec (- y s)] (canon c y)))
-                            y))
+              ref (fn ref [y] (cond
+                                (integer? y) (let [y (long y)] (if (and (>= y s) (< y (+ s n))) [:rec (- y s)] (canon c y)))
+                                (exact? y) [:exact (ref (second y))]
+                                :else y))
               g (vec (for [i (range s (+ s n)) :let [di (type-def c i)]]
-                       [(:final di) (mapv ref (:supers di)) (map-heaps ref (:comp di))]))
+                       ;; the descriptor clauses are the type's identity too (custom descriptors, queue 327)
+                       [(:final di) (mapv ref (:supers di)) (map-heaps ref (:comp di)) (some-> (:describes di) ref) (some-> (:descriptor di) ref)]))
               v [:def g (- x s)]]
           (.put memo x v)
           v))))
@@ -117,7 +125,8 @@
 (def ^:private any-family '#{any none eq struct array i31})
 
 (defn- top-of-heap [c h]
-  (cond (integer? h) (if (= :func (first (expand c h))) 'func 'any)
+  (cond (exact? h) (top-of-heap c (second h))
+        (integer? h) (if (= :func (first (expand c h))) 'func 'any)
         (any-family h) 'any
         ('#{func nofunc} h) 'func
         ('#{exn noexn} h) 'exn
@@ -140,6 +149,10 @@
     (= h1 'nofunc) (match-heap c h2 'func)
     (= h1 'noexn) (match-heap c h2 'exn)
     (= h1 'noextern) (match-heap c h2 'extern)
+    ;; exactness (custom descriptors, queue 327): (exact x) matches (exact y) when x and y are the same type, and what x matches
+    (and (exact? h1) (exact? h2)) (= (canon c (second h1)) (canon c (second h2)))
+    (exact? h1) (match-heap c (second h1) h2)
+    (exact? h2) false
     (and (integer? h1) (integer? h2)) (match-def c h1 h2)
     (integer? h1) (case (first (expand c h1))
                     :struct (contains? '#{any eq struct} h2)
@@ -177,7 +190,7 @@
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; type checks
 
-(defn- check-heap [c h] (when (integer? h) (type-def c h)) nil)
+(defn- check-heap [c h] (cond (integer? h) (type-def c h) (exact? h) (type-def c (second h))) nil)
 (defn- check-val [c t] (when (vector? t) (check-heap c (nth t 2))) nil)
 (defn- check-comp [c cm]
   (case (first cm)
@@ -197,9 +210,16 @@
 (defn- addr [m] (if (:i64 m) 'i64 'i32))
 
 (defn- check-memtype [m]
-  (if (:i64 m)
+  ;; a shared memory (threads, queue 326) has a maximum
+  (when (:shared m) (require! (some? (:max m)) "shared memory must have maximum"))
+  ;; a custom page size (queue 326, beyond Wasm 3.0): 1 or 64 KiB, the bounds in its pages
+  (when-let [p (:page m)] (require! (#{0 16} (long p)) "invalid custom page size"))
+  (cond
+    (and (= 0 (:page m)) (:i64 m)) nil
+    (= 0 (:page m)) (check-limits m 0xffffffff "memory size must be at most 2^32-1 pages (4 GiB) for i32 with a page size of 1")
+    (:i64 m)
     (check-limits m 0x1000000000000 "memory size must be at most 2^48 pages (256 TiB) for i64")
-    (check-limits m 0x10000 "memory size must be at most 2^16 pages (4 GiB) for i32")))
+    :else (check-limits m 0x10000 "memory size must be at most 2^16 pages (4 GiB) for i32")))
 
 (defn- check-tabletype [c m]
   (check-val c (vt (:type m)))
@@ -285,6 +305,9 @@
                 (num-cmp op) [[t t] '[i32]]
                 (num-un op) [[t] [t]]
                 (num-bin op) [[t t] [t]]
+                ;; wide arithmetic (queue 326, beyond Wasm 3.0): i64's 128-bit sums and differences, its full products
+                (#{"add128" "sub128"} op) ['[i64 i64 i64 i64] '[i64 i64]]
+                (#{"mul_wide_s" "mul_wide_u"} op) ['[i64 i64] '[i64 i64]]
                 :else (when-let [[_ y] (re-matches #"[a-z_]+_(i32|i64|f32|f64)(?:_[su])?" op)] [[(symbol y)] [t]]))
           (or (= shape "v128") (lanes shape))
           (cond (= op "splat") [[(lane-type shape)] '[v128]]
@@ -317,6 +340,22 @@
           (vector? t) (let [v (vt (first t))] (check-val c v) [[] [v]])
           :else (func-type c t))))
 
+(defn- atomic-sig
+  "An atomic instruction's [SIZE INS OUTS] over a memory of address type at (threads, queue 326), or nil."
+  [^String nm at]
+  (let [t (when (re-find #"^i(32|64)\.atomic\." nm) (symbol (subs nm 0 3)))]
+    (cond
+      (= nm "memory.atomic.notify") [4 [at 'i32] '[i32]]
+      (= nm "memory.atomic.wait32") [4 [at 'i32 'i64] '[i32]]
+      (= nm "memory.atomic.wait64") [8 [at 'i64 'i64] '[i32]]
+      t (let [size (if-let [[_ k] (re-find #"^i(?:32|64)\.atomic\.(?:load|store|rmw)(\d+)" nm)]
+                     (quot (Long/parseLong k) 8)
+                     (quot (Long/parseLong (subs nm 1 3)) 8))]
+          (cond (re-find #"\.atomic\.load" nm) [size [at] [t]]
+                (re-find #"\.atomic\.store" nm) [size [at t] []]
+                (re-find #"cmpxchg" nm) [size [at t t] [t]]
+                :else [size [at t] [t]])))))
+
 (defn- check-memop
   "valid.ml's check_memop, with the testsuite's rule for the offset: its bound is the accessed memory's address type (wg-3.0's
   interpreter reads memory 0's there; load64.wast's assertion names the accessed one)."
@@ -327,6 +366,19 @@
       (require! (< (Long/compareUnsigned (long (:offset m)) 0x100000000) 0) "offset out of range"))))
 
 (defn- diff-ref [[_ n1 h1] [_ n2 _]] [:ref (if n2 false n1) h1])
+
+(defn- desc-of
+  "The descriptor type of heap type h's defined type (custom descriptors, queue 327), or the invalid `type H does not have a
+  descriptor`."
+  [c h]
+  (let [x (if (exact? h) (second h) h)]
+    (or (when (integer? x) (:descriptor (type-def c x)))
+        (invalid (str "type " (ht-str x) " does not have a descriptor")))))
+
+(defn- desc-ref
+  "The reference type a descriptor operand of a cast to rt takes: (ref null (exact D)) when rt is exact, else (ref null D)."
+  [c [_ _ h]]
+  (let [d (desc-of c h)] [:ref true (if (exact? h) (list 'exact d) d)]))
 
 (declare check-block check-instrs)
 
@@ -406,16 +458,23 @@
                        (let [t1 (peek l) ts0 (pop l)]
                          (require! (reft? t1) #(str "type mismatch: instruction requires reference type but label has " (t-str t1)))
                          (sig (conj ts0 [:ref true (nth t1 2)]) ts0)))
-      (br_on_cast br_on_cast_fail)
-      (let [x a1 rt1 (vt (nth e 2)) rt2 (vt (nth e 3))]
+      (br_on_cast br_on_cast_fail br_on_cast_desc_eq br_on_cast_desc_eq_fail)
+      (let [x a1 rt1 (vt (nth e 2)) rt2 (vt (nth e 3))
+            desc? ('#{br_on_cast_desc_eq br_on_cast_desc_eq_fail} nm)
+            nm (case nm br_on_cast_desc_eq 'br_on_cast br_on_cast_desc_eq_fail 'br_on_cast_fail nm)]
         (check-val c rt1) (check-val c rt2)
-        (require! (match-ref c rt2 rt1) #(str "type mismatch on cast: type " (rt-str rt2) " does not match " (rt-str rt1)))
+        ;; the descriptor casts' rule (custom descriptors, queue 327): the target in the source's hierarchy
+        (require! (if desc?
+                    (match-heap c (nth rt2 2) (top-of-heap c (nth rt1 2)))
+                    (match-ref c rt2 rt1))
+                  #(str "type mismatch on cast: type " (rt-str rt2) " does not match " (rt-str rt1)))
         (let [want (if (= nm 'br_on_cast) rt2 (diff-ref rt1 rt2))
               l (lbl c x)]
           (require! (seq l) #(str "type mismatch: instruction requires type " (rt-str want) " but label has " (ts-str l)))
           (let [t1 (peek l) ts0 (pop l)]
             (require! (match-val c want t1) #(str "type mismatch: instruction requires type " (rt-str want) " but label has " (ts-str l)))
-            (sig (conj ts0 rt1) (conj ts0 (if (= nm 'br_on_cast) (diff-ref rt1 rt2) rt2))))))
+            ;; the descriptor operand (custom descriptors, queue 327): after the value
+            (sig (cond-> (conj ts0 rt1) desc? (conj (desc-ref c rt2))) (conj ts0 (if (= nm 'br_on_cast) (diff-ref rt1 rt2) rt2))))))
       return (sig* (:results c) [])
       call (let [[ts1 ts2] (func-type c (func c a1))] (sig ts1 ts2))
       call_ref (let [[ts1 ts2] (func-type c a1)] (sig (conj ts1 [:ref true a1]) ts2))
@@ -450,6 +509,8 @@
                    (sig [(:at t1) 'i32 'i32] []))
       elem.drop (do (elem c a1) (sig [] []))
       memory.size (let [m (memory c a1)] (sig [] [(addr m)]))
+      ;; threads (queue 326): a fence, the atomic accesses (natural alignment exactly)
+      atomic.fence (sig [] [])
       memory.grow (let [m (memory c a1)] (sig [(addr m)] [(addr m)]))
       memory.fill (let [m (memory c a1)] (sig [(addr m) 'i32 (addr m)] []))
       memory.copy (let [m1 (memory c a1) m2 (memory c (nth e 2))
@@ -460,18 +521,33 @@
       ref.null (do (check-heap c a1) (sig [] [[:ref true a1]]))
       ref.func (let [_ (func c a1)]
                  (require! (contains? (:refs c) a1) #(str "undeclared function reference " (u-str a1)))
-                 (sig [] [[:ref false (func c a1)]]))
+                 ;; a defined function's reference is exact, an imported one's when imported exactly (custom descriptors, queue 327)
+                 (sig [] [[:ref false (if (contains? (:inexact c) a1) (func c a1) (list 'exact (func c a1)))]]))
       ref.is_null (let [[_ _ h] (peek-ref 0 s)] (sig [[:ref true h]] '[i32]))
       ref.as_non_null (let [[_ _ h] (peek-ref 0 s)] (sig [[:ref true h]] [[:ref false h]]))
       ref.test (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))]] '[i32]))
       ref.cast (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))]] [rt]))
+      ;; custom descriptors (queue 327): a cast by the descriptor's identity, a descriptor's read
+      ref.cast_desc_eq (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))] (desc-ref c rt)] [rt]))
+      ref.get_desc (let [d (or (:descriptor (type-def c a1)) (invalid "type without descriptor"))
+                         [_ _ h] (peek-ref 0 s)
+                         exact (or (#{:bot 'none} h) (and (exact? h) (= (canon c (second h)) (canon c a1))))]
+                     (sig [[:ref true a1]] [[:ref false (if exact (list 'exact d) d)]]))
       ref.eq (sig [[:ref true 'eq] [:ref true 'eq]] '[i32])
       ref.i31 (sig '[i32] [[:ref false 'i31]])
       (i31.get_s i31.get_u) (sig [[:ref true 'i31]] '[i32])
-      (struct.new struct.new_default)
-      (let [fts (struct-type c a1)]
-        (require! (or (= nm 'struct.new) (every? (fn [[s]] (defaultable? (unpacked s))) fts)) "field type is not defaultable")
-        (sig (if (= nm 'struct.new) (mapv (fn [[s]] (unpacked s)) fts) []) [[:ref false a1]]))
+      (struct.new struct.new_default struct.new_desc struct.new_default_desc)
+      (let [fts (struct-type c a1)
+            desc? ('#{struct.new_desc struct.new_default_desc} nm)
+            d (:descriptor (type-def c a1))]
+        ;; a type with a descriptor is allocated with one, a type without one without (custom descriptors, queue 327)
+        (when (and d (not desc?)) (invalid "type with descriptor requires descriptor allocation"))
+        (when (and desc? (not d)) (invalid "type without descriptor requires non-descriptor allocation"))
+        (require! (or ('#{struct.new struct.new_desc} nm) (every? (fn [[s]] (defaultable? (unpacked s))) fts)) "field type is not defaultable")
+        ;; an allocation's reference is exact
+        (sig (cond-> (if ('#{struct.new struct.new_desc} nm) (mapv (fn [[s]] (unpacked s)) fts) [])
+               desc? (conj [:ref true (list 'exact d)]))
+             [[:ref false (list 'exact a1)]]))
       (struct.get struct.get_s struct.get_u)
       (let [fts (struct-type c a1) i (long (nth e 2))]
         (require! (< i (count fts)) #(str "unknown field " (u-str i)))
@@ -486,16 +562,16 @@
       (array.new array.new_default)
       (let [[s] (array-type c a1)]
         (require! (or (= nm 'array.new) (defaultable? (unpacked s))) "array type is not defaultable")
-        (sig (conj (if (= nm 'array.new) [(unpacked s)] []) 'i32) [[:ref false a1]]))
-      array.new_fixed (let [[s] (array-type c a1)] (sig (vec (repeat (nth e 2) (unpacked s))) [[:ref false a1]]))
+        (sig (conj (if (= nm 'array.new) [(unpacked s)] []) 'i32) [[:ref false (list 'exact a1)]]))
+      array.new_fixed (let [[s] (array-type c a1)] (sig (vec (repeat (nth e 2) (unpacked s))) [[:ref false (list 'exact a1)]]))
       array.new_elem (let [[s :as ft] (array-type c a1) rt (elem c (nth e 2))]
                        (require! (match-val c rt (unpacked s))
                                  #(str "type mismatch: element segment's type " (rt-str rt) " does not match array's field type " (ft-str ft)))
-                       (sig '[i32 i32] [[:ref false a1]]))
+                       (sig '[i32 i32] [[:ref false (list 'exact a1)]]))
       array.new_data (let [[s] (array-type c a1)]
                        (data c (nth e 2))
                        (let [t (unpacked s)] (require! (or (num? t) (vec? t)) "array type is not numeric or vector"))
-                       (sig '[i32 i32] [[:ref false a1]]))
+                       (sig '[i32 i32] [[:ref false (list 'exact a1)]]))
       (array.get array.get_s array.get_u)
       (let [[s] (array-type c a1)]
         (require! (= (not= nm 'array.get) (boolean (#{'i8 'i16} s))) (str "array is " (if (= nm 'array.get) "packed" "unpacked")))
@@ -528,6 +604,12 @@
       i8x16.shuffle (do (require! (every? #(< (long %) 32) a1) "invalid lane index") (sig '[v128 v128] '[v128]))
       ;; the rest: numeric and vector instructions, memory accesses, lanes
       (let [s-nm (str nm) k (.indexOf s-nm ".") shape (subs s-nm 0 (max k 0)) op (subs s-nm (inc k))]
+        (if (atomic-sig s-nm 'i32)
+          (let [mm (memory c (long (:memory a1 0)))
+                [size ins outs] (atomic-sig s-nm (addr mm))]
+            (check-memop mm a1 size)
+            (require! (= (long (:align a1)) (Long/numberOfTrailingZeros (long size))) "atomic alignment must be natural")
+            (sig ins outs))
         (if-let [[size store? lane?] (when (pos? k) (mem-size shape op))]
           (let [m (if lane? a1 a1)
                 mi (long (:memory m 0))
@@ -547,7 +629,7 @@
             :else
             (if-let [[ins outs] (sigs nm)]
               (sig ins outs)
-              (invalid (str "unknown instruction " s-nm)))))))))
+              (invalid (str "unknown instruction " s-nm))))))))))
 
 (defn- init-locals [c xs]
   (if (seq xs)
@@ -573,7 +655,7 @@
 (defn- const-instr? [c e]
   (case (first e)
     (i32.const i64.const f32.const f64.const v128.const i32.add i32.sub i32.mul i64.add i64.sub i64.mul
-     ref.null ref.func ref.i31 struct.new struct.new_default array.new array.new_default array.new_fixed
+     ref.null ref.func ref.i31 struct.new struct.new_default struct.new_desc struct.new_default_desc array.new array.new_default array.new_fixed
      any.convert_extern extern.convert_any) true
     global.get (not (:mut (global c (second e))))
     false))
@@ -616,13 +698,34 @@
             (require! (<= (count (:supers d)) 1) "multiple supertypes")
             (run! #(type-def c' %) (:supers d))
             (check-comp c' (:comp d)))
+          ;; the descriptor clauses (custom descriptors, queue 327): a describes clause names an earlier type of the group whose
+          ;; descriptor this is, a descriptor clause a type of the group that describes this one, both structs of one finality
+          (doseq [i (range n) :let [x (+ s i) d (type-def c' x) in? (fn [y] (and (>= (long y) s) (< (long y) (+ s n))))]]
+            (when-let [y (:describes d)]
+              (require! (in? y) "described type is outside rec group")
+              (require! (< (long y) x) "forward use of described type")
+              (require! (= :struct (first (:comp d))) "described type must be a struct")
+              (require! (= x (:descriptor (type-def c' y))) "described type is not described by descriptor"))
+            (when-let [y (:descriptor d)]
+              (require! (in? y) "descriptor type is outside rec group")
+              (require! (= :struct (first (:comp d))) "descriptor type must be a struct")
+              (require! (= x (:describes (type-def c' y))) "type is not described by its descriptor")
+              (require! (= (:final d) (:final (type-def c' y))) "descriptor and described types have mismatched finality")))
           ;; check_subtype_sub
           (doseq [i (range n) :let [x (+ s i) d (type-def c' x)]]
             (doseq [xi (:supers d)]
               (let [di (type-def c' xi)]
                 (require! (< (long xi) x) #(str "forward use of type " (u-str xi) " in sub type definition"))
                 (require! (not (:final di)) #(str "sub type " (u-str x) " has final super type " (u-str xi)))
-                (require! (match-comp c' (:comp d) (:comp di)) #(str "sub type " (u-str x) " does not match super type " (u-str xi))))))
+                (require! (and (match-comp c' (:comp d) (:comp di))
+                               (= (some? (:describes d)) (some? (:describes di)))
+                               (= (some? (:descriptor d)) (some? (:descriptor di))))
+                          #(str "sub type " (u-str x) " does not match super type " (u-str xi)))
+                ;; a subtype's described type and descriptor are the supertype's subtypes
+                (when-let [y (:describes d)]
+                  (require! (match-def c' y (:describes di)) #(str "described type " (u-str y) " does not match")))
+                (when-let [y (:descriptor d)]
+                  (require! (match-def c' y (:descriptor di)) #(str "descriptor type " (u-str y) " does not match"))))))
           c'))
       c groups)))
 
@@ -647,7 +750,9 @@
         ;; imports, in order
         c (reduce (fn [c [_ _ _ [k _ d]]]
                     (case k
-                      func (do (func-type c (:type d)) (update c :funcs conj (:type d)))
+                      func (do (func-type c (:type d))
+                               (cond-> (update c :funcs conj (:type d))
+                                 (not (:exact d)) (update :inexact (fnil conj #{}) (count (:funcs c)))))
                       table (do (check-tabletype c d) (update c :tables conj (table-of d)))
                       memory (do (check-memtype d) (update c :mems conj d))
                       global (let [t (vt (:type d))] (check-val c t) (update c :globals conj {:mut (boolean (:mut d)) :t t}))

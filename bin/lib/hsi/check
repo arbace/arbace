@@ -31,8 +31,9 @@
 #   --verify-progs [--sample N]   N programs of the plan (default all, evenly spread) dumped again by the helper and compared with the
 #                       pack file for file (ORS6 (a)'s verdict) and the crossed pair
 # HFS-I1 (a) (doc/haskell/FRONTEND-SURVEY.md, "As built: HFS-I1 (a)"): the program's STG from Arbace's native front end.
-#   --front native|ghc  (HSI_FRONT; default ghc, default_front below) native: each program the front end can take (a single module:
-#                       every module its main file imports is a library's, in the interfaces pack; no C of its own, no foreign export,
+#   --front native|ghc  (HSI_FRONT; default ghc, default_front below) native: each program the front end can take (every module its
+#                       main file imports a library's, in the interfaces pack, or since HF10-P24 (a) one of the program's own, its
+#                       source in the program's directory, M.hs or M.lhs, compiled first in dependency order, no hs-boot file; no C of its own, no foreign export,
 #                       wrapper or capi import) compiled by arbace.repr.haskell.front (native read, rename, elaborate, desugar, the
 #                       simple optimiser, CorePrep, CoreToStg, Unarise) over the pack haskell-ifaces-ghc-9.14.1 and the libraries' STG,
 #                       with its all.T -X flags (none: GHC2021, as GHC compiled the pack's STG), in HSI_FRONT_SHARDS processes (default 4,
@@ -53,8 +54,10 @@
 #                       and run over the own libraries' STG alone (HSI_OWN_STG: DIR:DIR..., default lib-stg --ifaces own's STG of
 #                       ghc-internal and base; no other package, no GHC-made module: a run that needs one stops): :libs :own, its
 #                       case Arbace's own (1); every other program as --front ghc runs it (haskell-stg-progs over haskell-stg-libs):
-#                       :libs :pack with :front the reason (:ineligible: an import not own, a C file, a foreign stub, a CPP module;
-#                       :fallback: the list; else the stage that stopped the front end). Work .tmp/hsi/check-own (check-aot-own);
+#                       :libs :pack with :front the reason (:ineligible: an import not own, a C file, a foreign stub;
+#                       :fallback: the list; else the stage that stopped the front end; queue 325: an :ineligible line's :why "CATEGORY
+#                       DETAIL" names its refusal: kind, no-main, c, defer, main-is, pragma, local-boot (an hs-boot file of its own), import (a
+#                       module no interface here has), summed at the end). Work .tmp/hsi/check-own (check-aot-own);
 #                       --record writes test/haskell/check-hsi-own.edn (-aot-own). own-fallback.txt (P23 (a)): the eligible programs
 #                       that did not pass on the own libraries, each with its class, run on the pack; it may only shrink: review
 #                       1111b (finding 4), HSI_OWN_FALLBACK=try runs them on the own libraries too (no --record) and fails on one
@@ -149,7 +152,8 @@ if [ "$images" != none ] && [ -z "$dump_only" ] && [ -z "$verify_progs" ] && [ -
   for l in "${dirs[@]}"; do [ -d "$l" ] && ia+=(--lib "$l"); done
   "$hsi" image --out "$images" "${ia[@]}" >&2 || { echo "hsi check: hsi image failed" >&2; exit 1; }
 fi
-# HF10-P19 (a): the own libraries and interfaces, composed into WORK/own: if/ the own interfaces (and the pack's reexports.edn's
+# HF10-P19 (a): the own libraries and interfaces, composed into WORK/own: if/ the own interfaces (and, since queue 325's
+# DECISION 4 (a), the .cabal files' reexports whose module is own; HSI_OWN_REEXPORTS=pack: the pack's reexports.edn's
 # entries whose module is own), stg/PKG/ the own STG (links), image/ their image
 own_libs="" own_images="" own_if=""
 if [ "$libs_set" = own ]; then
@@ -187,8 +191,19 @@ if [ "$libs_set" = own ]; then
     [ -n "$(ls "$l"/*.iface.edn 2>"$TMPDIR/hsi-own.err")" ] || { echo "hsi check --libs own: no own interfaces in $l (bin/repr-haskell lib-check --ifaces own; --package base --ifaces own)" >&2; exit 1; }
     cp "$l"/*.iface.edn "$own_if"/
   done
-  pif=$(hsi_ifaces_dir) || exit 1
-  { echo "{"; grep '^ *"' "$pif/reexports.edn" | while read -r a b; do if [ -f "$own_if/${b//\"/}.iface.edn" ]; then echo " $a $b"; fi; done; echo "}"; } > "$own_if/reexports.edn"
+  # DECISION 4 (a) of queue 325 (the user, 2026-11-17): the reexported modules from the packages' .cabal files (ghc-prim's,
+  # ghc-bignum's: libcheck's cabal-reexports, test/haskell/eval/own_reexports.ae) whose module the own interfaces hold, not
+  # ghc-pkg's answers in the pack haskell-ifaces-ghc-9.14.1 (HSI_OWN_REEXPORTS=pack: the pack's, as before, for a comparison)
+  if [ "${HSI_OWN_REEXPORTS:-cabal}" = pack ]; then
+    pif=$(hsi_ifaces_dir) || exit 1
+    { echo "{"; grep '^ *"' "$pif/reexports.edn" | while read -r a b; do if [ -f "$own_if/${b//\"/}.iface.edn" ]; then echo " $a $b"; fi; done; echo "}"; } > "$own_if/reexports.edn"
+  else
+    osrc=$("$root/bin/repr-haskell" corpus fetch | tail -1) || { echo "hsi check --libs own: no source tree for the .cabal files (bin/repr-haskell corpus fetch)" >&2; exit 1; }
+    ARBACE_PATH=$root "$("$root/bin/hsi" exe)" "$root/test/haskell/eval/own_reexports.ae" "$root/test/haskell/corpus-ghc-9.14.1.edn" "$osrc" "$own_if" > "$own_if/reexports.edn.new" 2> "$work/own-reexports.err" &&
+      grep -q '"GHC.Prim" "GHC.Internal.Prim"' "$own_if/reexports.edn.new" ||
+      { cat "$work/own-reexports.err" >&2; echo "hsi check --libs own: the .cabal files' reexports (test/haskell/eval/own_reexports.ae) failed or lack ghc-prim's GHC.Prim" >&2; exit 1; }
+    mv "$own_if/reexports.edn.new" "$own_if/reexports.edn"
+  fi
   IFS=: read -r -a dirs <<< "$os"
   for l in "${dirs[@]}"; do
     [ -n "$(ls "$l"/*.stg.ae 2>"$TMPDIR/hsi-own.err")" ] || { echo "hsi check --libs own: no own STG in $l (bin/repr-haskell lib-stg --ifaces own; --package base --ifaces own)" >&2; exit 1; }
@@ -201,7 +216,12 @@ fi
 # the RTS's headers (HsFFI.h, Rts.h) for a program's own C, as ghc gives its C compiler: the installation's (live), else
 # the pack haskell-native-inputs-ghc-9.14.1's copy of them (its sysroot, as repr/haskell's native reads take it)
 if [ -n "$live" ]; then rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
-else rtsinc=$(ls -d "$("$root/bin/repr-haskell" native-libdir)"/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1); fi
+else nlibdir=$("$root/bin/repr-haskell" native-libdir); rtsinc=$(ls -d "$nlibdir"/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1); fi
+# HF10-P63 (a): the installation the native front end preprocesses a CPP module with (arbace.repr.haskell.driver, GHC's doCpp's
+# arguments, __GLASGOW_HASKELL__ from its ghcversion.h): the derived tree's sysroot and libdir (as repr/haskell's native reads),
+# else the host's (live)
+if [ -n "$live" ]; then front_inst=(--libdir "$libdir")
+else front_sysroot=${nlibdir%%/sysroot/*}/sysroot; front_inst=(--sysroot "$front_sysroot" --libdir "${nlibdir#"$front_sysroot"}"); fi
 export libs_set own_libs own_images own_if own_fallback
 export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc opt sfx divs divs1 front
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
@@ -224,7 +244,7 @@ for c in ${corpora//,/ }; do
       done ;;
     testsuite-core)
       tests=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests
-      "$root/bin/hsi" pins --fetch > "$work/fetch.log" 2>&1 || { cat "$work/fetch.log" >&2; exit 1; }
+      "$root/bin/hsi" pins --fetch testsuite > "$work/fetch.log" 2>&1 || { cat "$work/fetch.log" >&2; exit 1; }
       ae() { ARBACE_PATH=$root "$("$root/bin/hsi" exe)" "$@"; }
       dirs=$(ae -e "(println (apply str (interpose \",\" (get-in (some #(when (= :testsuite-core (:id %)) %) (:corpora (read-string (slurp \"$root/test/haskell/eval-corpora.edn\")))) [:where :dirs]))))")
       ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.edn" "$tests" "$dirs" 2> "$work/plan.notes" |
@@ -263,22 +283,66 @@ fi
 echo "== hsi check: $(wc -l < "$plan") programs, $jobs at a time" >&2
 
 # HFS-I1 (a): the native front end's STG of the programs it can take (--front native), before the runs
-front_eligible() { # SRC MAIN FLAGS KIND IFACES: a single module of the library's imports alone, no C, no foreign stubs
-  local src=$1 main=$2 flags=$3 kind=$4 ifs=$5 m f
-  case $kind in plain|compile_and_run|nofib) ;; *) return 1 ;; esac
-  [ "$main" != - ] && [ -f "$src/$main" ] || return 1
+front_why=""
+front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own modules (HF10-P24 (a)) on the libraries' imports alone, no C, no foreign stubs
+  # queue 325: a refusal names its reason in front_why (CATEGORY DETAIL: kind, no-main, c, defer, pragma, local, import),
+  # which the run's line of the program carries as :why (the rest named: what keeps it on GHC's STG)
+  local src=$1 main=$2 flags=$3 kind=$4 ifs=$5 m f hit
+  front_why=""
+  # (HF10-P24 (a): multimod_compile_and_run, a main file and the modules it imports, as GHC's --make compiles them)
+  case $kind in plain|compile_and_run|multimod_compile_and_run|nofib) ;; *) front_why="kind $kind"; return 1 ;; esac
+  [ "$main" != - ] && [ -f "$src/$main" ] || { front_why="no-main $main"; return 1; }
   # (HF10-P32: an OPTIONS or OPTIONS_GHC pragma's -cpp or -XCPP is CPP too: cgrun044, conc036, conc037 read as empty modules;
   # -fdefer-type-errors: a program GHC compiles with a type error raised at run time, in GHC's words; RULES: rewrite rules,
   # which the front end does not apply, as GHC's -O0 does for a rule of the module's own, tcrun022)
-  if [ "$flags" != - ]; then for f in $flags; do case $f in *.c|*.o|*.cmm|*.s|*.S|-optc*|-cpp|-XCPP|-fdefer-type-errors|-fdefer-typed-holes) return 1 ;; esac; done; fi
-  # a literate module's code (gate B1): its bird-tracked lines without the track (a \begin{code} block's lines are plain), so
-  # that its imports and pragmas are scanned as the front end reads them after unlit
-  local txt=$src/$main
-  case $main in *.lhs) txt=$TMPDIR/hsi-front-unbird.$BASHPID; sed 's/^>[ \t]*//' "$src/$main" > "$txt" ;; esac
-  ! grep -qE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP|\{-# *OPTIONS(_GHC)?[^#]*(-cpp|-XCPP)|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$txt" || return 1
-  for m in $(sed -n 's/^import *\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\3/p' "$txt" | sort -u); do
-    # a library's module: its interface, or a package's reexport of one (GHC.Prim is ghc-internal's GHC.Internal.Prim)
-    [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn" || return 1
+  if [ "$flags" != - ]; then for f in $flags; do case $f in
+    *.c|*.o|*.cmm|*.s|*.S|-optc*) front_why="c $f"; return 1 ;;
+    -fdefer-type-errors|-fdefer-typed-holes) front_why="defer $f"; return 1 ;;
+    # (HF10-P59 (a): GHC's -main-is FN names Main's entry, an unqualified FN resolved in Main's scope by the front end:
+    # T16453M6, T19397M2-M4; a module's name, M or M.fn, another main module, is refused)
+    -main-is) case $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//') in [a-z_]*) ;;
+      *) front_why="main-is $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//')"; return 1 ;; esac ;; esac; done; fi
+  # HF10-P24 (a): the program's own modules (an import whose source is in the program's directory, M.hs or M.lhs, as GHC's
+  # finder finds it on ".") are scanned as the main file is, to their imports' closure; an hs-boot file of one refuses
+  # (local-boot: the front end compiles no boot file of a program yet)
+  local todo=("$main") seen=" " cur txt sp d
+  # the search path after "." (HF10-P59's round): all.T's -iDIR (T5462Yes2's -iGFunctor), and for nofib its mk's EXTRA_SRCS
+  # (../../nofib-common, whose NofibUtils mk/boilerplate.mk compiles with every program); front_search, the plan's flags
+  front_search=""
+  sp=(); if [ "$flags" != - ]; then for f in $flags; do case $f in -i?*) sp+=("${f#-i}") ;; esac; done; fi
+  [ "$kind" != nofib ] || [ ! -d "$src/../../nofib-common" ] || sp+=(../../nofib-common)
+  for d in ${sp[@]+"${sp[@]}"}; do front_search="$front_search -i$d"; done
+  while [ ${#todo[@]} -gt 0 ]; do
+    cur=${todo[0]}; todo=("${todo[@]:1}")
+    case $seen in *" $cur "*) continue ;; esac
+    seen="$seen$cur "
+    # a literate module's code (gate B1): its bird-tracked lines without the track (a \begin{code} block's lines are plain), so
+    # that its imports and pragmas are scanned as the front end reads them after unlit
+    txt=$src/$cur
+    case $cur in *.lhs) txt=$TMPDIR/hsi-front-unbird.$BASHPID; sed 's/^>[ \t]*//' "$src/$cur" > "$txt" ;; esac
+    # (HF10-P63 (a), round 52: a CPP module, its LANGUAGE CPP or OPTIONS' -cpp/-XCPP, is taken: the front end preprocesses it)
+    hit=$(grep -oE 'foreign +export|"wrapper"|foreign +import +capi|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$txt" | head -1) || true
+    if [ -n "$hit" ]; then
+      case $hit in
+        foreign*export) front_why="pragma foreign export" ;; *wrapper*) front_why="pragma foreign import wrapper" ;;
+        foreign*capi) front_why="pragma foreign import capi" ;;
+        *defer*) front_why="defer pragma" ;; *RULES*) front_why="pragma RULES" ;; *) front_why="pragma ${hit//\"/}" ;;
+      esac
+      [ "$cur" = "$main" ] || front_why="$front_why (in $cur)"
+      return 1
+    fi
+    for m in $(sed -n 's/^import *\({-# *SOURCE *#-} *\)\?\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\4/p' "$txt" | sort -u); do
+      # a module of the program's own first (GHC's home modules shadow the packages'), then a library's: its interface, or a
+      # package's reexport of one (GHC.Prim is ghc-internal's GHC.Internal.Prim)
+      if [ -f "$src/${m//.//}.hs-boot" ] || [ -f "$src/${m//.//}.lhs-boot" ]; then front_why="local-boot $m"; return 1
+      elif [ -f "$src/${m//.//}.hs" ]; then todo+=("${m//.//}.hs")
+      elif [ -f "$src/${m//.//}.lhs" ]; then todo+=("${m//.//}.lhs")
+      elif d=$(for d in ${sp[@]+"${sp[@]}"}; do for e in hs lhs hs-boot lhs-boot; do [ -f "$src/$d/${m//.//}.$e" ] && { echo "$d/${m//.//}.$e"; break 2; }; done; done) && [ -n "$d" ]; then
+        case $d in *-boot) front_why="local-boot $m"; return 1 ;; esac
+        todo+=("$d")
+      elif [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn"; then :
+      else front_why="import $m"; [ "$cur" = "$main" ] || front_why="$front_why (in $cur)"; return 1; fi
+    done
   done
 }
 if [ "$front" = native ]; then
@@ -308,7 +372,7 @@ if [ "$front" = native ]; then
   # --libs own: the own interfaces and the own libraries' constructors; the fallback list's programs not tried (P23 (a))
   if [ "$libs_set" = own ]; then ifaces=$own_if; flibs=$own_libs; fi
   fb=$own_fallback_list
-  : > "$fw/plan.tsv"
+  : > "$fw/plan.tsv"; : > "$fw/ineligible.tsv"
   while IFS=$'\037' read -r id src main flags ropts name sin kind; do
     # review 1111b (finding 4): HSI_OWN_FALLBACK=try runs the listed programs on the own libraries too (a pass fails the check:
     # the list may only shrink)
@@ -317,7 +381,13 @@ if [ "$front" = native ]; then
     fi
     if front_eligible "$src" "$main" "$flags" "$kind" "$ifaces"; then
       xf=""; if [ "$flags" != - ]; then for f in $flags; do case $f in -X*) xf="$xf $f" ;; esac; done; fi
+      # (HF10-P59 (a): -main-is FN to the front end, which takes it out of the reader's flags)
+      case " $flags " in *" -main-is "*) xf="$xf -main-is $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//')" ;; esac
+      # (HF10-P63 (a): CPP's flags of all.T, -cpp, -D, -U, -I (relative to the program's directory), -optP)
+      if [ "$flags" != - ]; then for f in $flags; do case $f in -cpp|-D?*|-U?*|-I?*|-optP?*) xf="$xf $f" ;; esac; done; fi
+      xf="$xf$front_search"
       printf '%s@%s\t%s\n' "$src/$main" "${id//\//_}" "${xf# }" >> "$fw/plan.tsv"
+    else printf '%s\t%s\n' "${id//\//_}" "${front_why:-unknown}" >> "$fw/ineligible.tsv"
     fi
   done < "$plan"
   # HSI_FRONT_REUSE=DIR: an earlier run's front directory (its out/ and front.*.log), the front end run only on the programs it
@@ -340,7 +410,7 @@ if [ "$front" = native ]; then
     : > "$log"
     while [ -s "$pl" ]; do
       (export GOMEMLIMIT=${HSI_FRONT_MEM:-1536MiB}; cd "$root" && exec env ARBACE_PATH=$root "$("$root/bin/hsi" exe)" -m arbace.repr.haskell.front build \
-         --ifaces "$ifaces" --libs "${flibs//:/,}" -o "$fw/out" --plan "$pl") >> "$log" 2>&1 &
+         --ifaces "$ifaces" --libs "${flibs//:/,}" ${front_inst[@]+"${front_inst[@]}"} -o "$fw/out" --plan "$pl") >> "$log" 2>&1 &
       pid=$!; last=$(date +%s); n0=$(grep -cE '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' "$log" || true)
       while kill -0 "$pid" 2>"$TMPDIR/hsi-front-kill.err"; do
         sleep 5; now=$(date +%s)
@@ -403,6 +473,10 @@ own_ref() {
   case $id in
     testsuite/*) d=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests/$(dirname "${id#testsuite/}") ;;
     nofib/*) d=$root/.tmp/hsi/nofib/${id#nofib/} ;;
+    # queue 325g, DECISION 2 (a): Arbace's samples and the synthetic corpus by their reviewed golden files (NAME.stdout,
+    # NAME.stderr, NAME.exit beside the program; the synthetic corpus's written by gen.ae), at -O0: at -O1 GHC's optimiser's
+    # choices are -O1's record's (five synthetic programs print otherwise at -O1, ref-ghc914-O1.edn)
+    samples/*|synthetic/*) [ -z "${sfx:-}" ] || return 0; d=$root/test/haskell/eval/${id%%/*} ;;
     *) return 0 ;;
   esac
   e=$(printf '' | sha256sum | cut -c1-64)
@@ -414,6 +488,18 @@ own_ref() {
   fi
 }
 export -f own_ref
+# queue 325g, DECISION 5 (a) (the user, 2026-11-17): on an arm64 host (uname -m; HSI_REF_ARCH=arm64|amd64 says it), at -O0,
+# a program test/haskell/ref-ghc914-arm64.edn records (GHC 9.14.1's run on linux/arm64, bin/hsi record-ref on such a host:
+# the programs whose result is the machine's, test/haskell/arm64-ref.txt) is judged by that run, before its own verdict and
+# the amd64 record; its result says :ref :arm64. The amd64 records and the golden files are amd64's and stay so.
+arch_ref=""
+case ${HSI_REF_ARCH:-$(uname -m)} in
+  aarch64|arm64) [ -n "${sfx:-}" ] || [ "${HSI_JUDGE:-}" = ref ] || arch_ref=$root/test/haskell/ref-ghc914-arm64.edn ;;
+esac
+[ -z "$arch_ref" ] || [ -f "$arch_ref" ] || arch_ref=""
+export arch_ref
+arch_ref_line() { grep -F "{:id \"$1\" " "$arch_ref" || true; }
+export -f arch_ref_line
 # oracle_pending ID: success when the program waits for GHC's records at the oracle window (own-verdicts-pending.tsv)
 oracle_pending() { awk -F'\t' -v i="$1" '$1 == i {f = 1} END {exit !f}' "$root/test/haskell/own-verdicts-pending.tsv"; }
 export -f oracle_pending
@@ -464,7 +550,14 @@ one() {
     fst=$(awk -v b="$ob" '$1 == b {print $2; exit}' "$work/front/front.txt")
     if [ "$fst" = ok ] && [ -d "$work/front/out/stg/$ob" ]; then
       prog=$work/front/prog/$ob; rm -rf "$prog"; mkdir -p "$prog"; stg=$work/front/out/stg/$ob; srcs=":stg :native"; touch "$prog/ok"
-    else srcs=":stg :ghc :front :${fst:-ineligible}"; fi
+    else
+      srcs=":stg :ghc :front :${fst:-ineligible}"
+      # queue 325: an ineligible program's reason (front_eligible's front_why)
+      if [ -z "$fst" ]; then
+        local why; why=$(awk -F'\t' -v b="$ob" '$1 == b {print $2; exit}' "$work/front/ineligible.tsv" 2>"$TMPDIR/hsi-why.err" | tr -d '"\\')
+        [ -z "$why" ] || srcs="$srcs :why \"$why\""
+      fi
+    fi
   fi
   # HF10-P19 (a): the native STG of the own interfaces runs on the own libraries alone (:libs :own), the rest on the pack
   local plibs=$libs pimages=$images
@@ -621,7 +714,14 @@ one() {
   fi
   echo "$st" > "$o.status"
   local own; own=$(own_ref "$id")
-  if [ -n "$own" ]; then
+  # queue 325g, DECISION 5 (a): on an arm64 host a program the arm64 reference records is judged by GHC's arm64 run
+  local al=""; [ -z "$arch_ref" ] || al=$(arch_ref_line "$id")
+  if [ -n "$al" ]; then
+    rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$al")
+    rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$al")
+    rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$al")
+    tm="$tm :ref :arm64"
+  elif [ -n "$own" ]; then
     # the program's own verdict: its expected status and shipped outputs, the record not read
     local opend; read -r rst rso rse opend <<< "$own"; tm="$tm :judge :own"
     # HF10-P35 (a): a pending test's outputs compared as the driver compares (the last newline not compared)
@@ -762,6 +862,11 @@ done
 echo "hsi check: $total programs ($out)"
 [ "$libs_set" != own ] || echo "hsi check: libs own $(grep '^{' "$out" | grep -c ':libs :own' || true) (pass $(grep '^{' "$out" | grep ':libs :own' | grep -c ':result :pass' || true)), pack $(grep '^{' "$out" | grep -c ':libs :pack' || true) (pass $(grep '^{' "$out" | grep ':libs :pack' | grep -c ':result :pass' || true))"
 [ "$front" != native ] || echo "hsi check: STG native $(grep '^{' "$out" | grep -c ':stg :native' || true), ghc $(grep '^{' "$out" | grep -c ':stg :ghc' || true); passes from native STG $(grep '^{' "$out" | grep ':result :pass' | grep -c ':stg :native' || true)"
+# queue 325: what keeps the rest on GHC's STG, by front_eligible's reason (its category; an import's module named)
+[ "$front" != native ] || [ ! -s "$work/front/ineligible.tsv" ] || {
+  echo "hsi check: ineligible by reason: $(cut -f2 "$work/front/ineligible.tsv" | cut -d' ' -f1 | sort | uniq -c | sort -rn | awk '{printf "%s%s %s", (NR > 1 ? ", " : ""), $2, $1}')"
+  echo "hsi check: imports without an interface: $(awk -F'\t' '$2 ~ /^import /' "$work/front/ineligible.tsv" | cut -f2 | cut -d' ' -f2 | sort | uniq -c | sort -rn | head -15 | awk '{printf "%s%s %s", (NR > 1 ? ", " : ""), $2, $1}')"
+}
 # every program that does not pass in a class of test/haskell/divergences.edn (by its :ids), with the result the class
 # records (its :results, and for :hsi its :message's text in hsi's message; review 189, F6): a classed program whose
 # result changed kind is in no class
@@ -880,6 +985,12 @@ while read -r subj refid over; do
   rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   # a reference with its own verdict is judged by it, as its program is (the own judge's control)
   ownr=$(own_ref "$refid"); [ -z "$ownr" ] || { read -r rst rso rse _ <<< "$ownr"; refid="$refid (its own verdict)"; }
+  # (queue 325g: a reference the arm64 reference records is judged by it on an arm64 host, as its program is)
+  al=""; [ -z "$arch_ref" ] || al=$(arch_ref_line "${refid%% (*}")
+  if [ -n "$al" ]; then
+    rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$al"); rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$al")
+    rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$al"); refid="${refid%% (*} (arm64's run)"
+  fi
   # status=N: the reference with another status (a control of the status's comparison alone)
   case $over in status=*) rst=${over#status=}; refid="$refid ($over)" ;; esac
   so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)

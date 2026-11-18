@@ -182,3 +182,65 @@ core_attrs() {
   [ -s "$out" ] || { echo "core-attrs: no $out"; return 1; }
   echo "$key" > "$out.key"
 }
+
+# RIND9 (a) (doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass"): bin/rust-front alloc-iface: alloc's interface built
+# natively crate by crate, on core-check's interface pass (arbace.rust.front.alloc-check): rust-src's library/alloc in place (no
+# copy: nothing patched), std's names and std's interface from the pack rust-front-std with every alloc fact taken out, the pass
+# writing alloc's facts in the helper's --std-iface shape into .tmp/rust-front/alloc/alloc-iface.edn and comparing them fact by
+# fact with the helper's (alloc-iface.edn.report; the summary printed, a negative control beside)
+#   bin/rust-front alloc-iface [FILE...]   the pass over every module file of alloc (or FILEs) then the compare: about 25 minutes
+#                                         and 2.3 GB for the whole crate (the day's proof; ALLOC_IFACE_ROUNDS=2 a second round)
+#   bin/rust-front alloc-iface --list      alloc's module files
+#   bin/rust-front alloc-iface --units [--record]
+#                                         the unit cases (test/rust/front/alloc_iface_test.ae), light: the pure cases (GOMEMLIMIT
+#                                         500MiB), then each module of test/rust/front/alloc-iface-units.txt passed alone and compared
+#                                         (GOMEMLIMIT 600MiB, one process a module), the summary lines held to
+#                                         test/rust/front/alloc-iface-units-known.txt (--record rewrites it, by hand)
+alloc_modules() {
+  local m=$work/alloc/modules.txt
+  mkdir -p "$work/alloc"
+  if [ ! -s "$m" ]; then
+    (cd "$root" && GOMEMLIMIT=600MiB arbace_tool -m arbace.rust.front.alloc-check --list "$libsrc" > "$m.tmp" 2> "$m.err") || { cat "$m.err" >&2; return 1; }
+    grep -E '^alloc(::| )' "$m.tmp" > "$m"; rm -f "$m.tmp"
+  fi
+  echo "$m"
+}
+
+alloc_iface() {
+  local m fd rec=0 u=$work/alloc-units st=0 f known=$root/test/rust/front/alloc-iface-units-known.txt filt='^Reflection warning|recur arg|^Auto-boxing'
+  rf_libsrc_take || { echo "alloc-iface: no $libsrc (bin/repr-rust src-take)" >&2; return 1; }
+  case ${1:-} in
+    --list) m=$(alloc_modules) || return 1; cat "$m" ;;
+    --units)
+      [ "${2:-}" = --record ] && rec=1
+      fd=$(records_front) || return 1
+      # alloc's index (macros and names from the sources, about 5 minutes) kept in $work/alloc beside the whole pass's (remove it
+      # after a change to the reader or the expansion: core-check's index.edn likewise)
+      rm -rf "$u"; mkdir -p "$u" "$work/alloc"
+      (cd "$root" && GOMEMLIMIT=${ALLOC_UNITS_GOMEMLIMIT:-500MiB} arbace_tool -p "$root/test" -m rust.front.alloc-iface-test "$libsrc" 2>&1 | grep -v -E "$filt") | tee "$u/pure.log"
+      grep -q '^alloc-iface units: passed' "$u/pure.log" || st=1
+      : > "$u/summary.txt"
+      while read -r f; do
+        case $f in ''|'#'*) continue ;; esac
+        (cd "$root" && GOMEMLIMIT=${ALLOC_UNITS_MODULE_GOMEMLIMIT:-600MiB} arbace_tool -p "$root/test" -m rust.front.alloc-iface-test "$libsrc" "$fd" "$work/alloc" "$libsrc/alloc/src/$f" 2>&1 |
+           grep -v -E "$filt") > "$u/module.log"
+        cat "$u/module.log"
+        grep -q '^alloc-iface units: passed' "$u/module.log" || st=1
+        cp "$TMPDIR/alloc-iface-alloc-$(printf '%s' "${f%.rs}" | sed 's|/mod$||; s|/|-|g').report" "$u/" 2>/dev/null || true
+        { echo "# $f"; grep -E '^alloc-iface: (round|fns|adts|traits|impls|consts|total)' "$u/module.log" | sed 's/ ([0-9]* s)$//'; } >> "$u/summary.txt"
+      done < "$root/test/rust/front/alloc-iface-units.txt"
+      if [ $rec = 1 ]; then
+        [ $st = 0 ] || { echo "alloc-iface units: not recorded: a case failed"; return 1; }
+        cp "$u/summary.txt" "$known"; echo "alloc-iface units: recorded $known"
+      elif ! diff "$known" "$u/summary.txt" > "$u/known.diff"; then
+        echo "alloc-iface units: FAIL: the modules' summary differs from $known:"; head -20 "$u/known.diff"; st=1
+      else echo "alloc-iface units: the modules' summary is test/rust/front/alloc-iface-units-known.txt's"; fi
+      return $st ;;
+    *)
+      m=$(alloc_modules) || return 1
+      fd=$(records_front) || return 1
+      # shellcheck disable=SC2046
+      cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1800MiB} arbace_tool -m arbace.rust.front.alloc-check --pass "$libsrc" "$fd" "$work/alloc" "$m" "$work/alloc/alloc-iface.edn" "$@" 2>&1 |
+        grep --line-buffered -v -E "$filt" ;;
+  esac
+}

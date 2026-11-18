@@ -39,6 +39,44 @@
     (subslice (.-Data mem) ea (+ ea n))))
 
 
+(go/method atomicAt "atomicAt is at for an atomic access (threads, queue 326): its effective address aligned to n, else the trap.\n" ^{:tag (slice byte)} [^{:tag (* Memory)} mem ^uint64 base ^uint64 off ^uint64 n]
+  (when (!= (% (+ base off) n) 0)
+    (trap "unaligned atomic"))
+
+  (.at mem base off n))
+
+
+(go/func getN "getN is the little-endian value of b's 1, 2, 4 or 8 bytes.\n" ^uint64 [^{:tag (slice byte)} b]
+  (switch (len b)
+    (case [1]
+      (return (conv uint64 (aget b 0))))
+    (case [2]
+      (return (conv uint64 (.Uint16 binary/LittleEndian b))))
+    (case [4]
+      (return (conv uint64 (.Uint32 binary/LittleEndian b)))))
+
+  (.Uint64 binary/LittleEndian b))
+
+
+(go/func putN "putN writes v's low bytes into b's 1, 2, 4 or 8 bytes, little-endian.\n" [^{:tag (slice byte)} b ^uint64 v]
+  (switch (len b)
+    (case [1]
+      (aset b 0 (conv byte v)))
+    (case [2]
+      (.PutUint16 binary/LittleEndian b (conv uint16 v)))
+    (case [4]
+      (.PutUint32 binary/LittleEndian b (conv uint32 v)))
+    (default
+      (.PutUint64 binary/LittleEndian b v))))
+
+
+(go/func sizeMask "sizeMask is the mask of an n-byte value.\n" ^uint64 [^uint64 n]
+  (if (== n 8)
+    (return math/MaxUint64))
+
+  (- (<< (conv uint64 1) (* 8 n)) 1))
+
+
 ^{:go/end 80} (go/method run ^{:tag (* Exn)} [^{:tag (* Machine)} m ^{:tag (* Func)} f ^int fp]
   (inc! (.-depth m))
   (when (> (.-depth m) MaxDepth)
@@ -199,9 +237,26 @@
   ^{:line 199} hAny)
 
 
+(go/method descTest "descTest is a cast by descriptor (custom descriptors, queue 327): v's descriptor is d (a null d traps), a null v passes\nwhen null.\n" ^bool [^{:tag (* Machine)} m ^V v ^V d ^bool null]
+  (when (== (.-H d) 0)
+    (trap "null descriptor reference"))
+
+  (when (== (.-H v) 0)
+    (return null))
+
+  (when (!= (.-H v) rStruct)
+    (return false))
+
+  (== (.-Desc (assert (* Struct) (aget (.-Objs (.-St m)) (.-L v)))) d))
+
+
 ^{:go/end 207} (go/method refTest ^bool [^{:tag (* Machine)} m ^V v ^bool null ^int32 h]
   (when (== (.-H v) 0)
     (return null))
+
+  ;; an exact target (custom descriptors, queue 327): the dynamic type itself
+  (when (and (>= h 0) (!= (bit-and h hExactBit) 0))
+    (return (== (.refHeap m v) (bit-and-not h hExactBit))))
 
   (heapSub (.refHeap m v) h))
 
@@ -599,21 +654,28 @@
                 (aset (.-Elems inst) (.-A in) nil))
 
               (case [OpMemorySize]
-                (aset st sp (lit V :L (conv uint64 (/ (len (.-Data (aget (.-Mems inst) (.-A in)))) 65536))))
+                (aset st sp (lit V :L (/ (conv uint64 (len (.-Data (aget (.-Mems inst) (.-A in))))) (PageSize (.-T (aget (.-Mems inst) (.-A in)))))))
                 (inc! sp))
               (case [OpMemoryGrow]
                 (do
                   (let [mem (aget (.-Mems inst) (.-A in))
                       ^{:line 607} n (.-L (aget st (- sp 1)))
-                      ^{:line 608} old (conv uint64 (/ (len (.-Data mem)) 65536))
+                      ^{:line 608} ps (PageSize (.-T mem))
+                      old (/ (conv uint64 (len (.-Data mem))) ps)
                       ^{:line 609} max (conv uint64 65536)]
                     (when (.-Addr64 (.-T mem))
                       (set! max (<< 1 48)))
 
+                    ;; a page size of 1 (queue 326): the address space's bytes
+                    (when (== ps 1)
+                      (set! max (<< 1 32))
+                      (when (.-Addr64 (.-T mem))
+                        (set! max math/MaxUint64)))
+
                     (when (.-HasMax (.-T mem))
                       (set! max (.-Max (.-T mem))))
 
-                    (if (or (> n max) (< (+ old n) old) (> (+ old n) max) (> (+ old n) maxPages))
+                    (if (or (> n max) (< (+ old n) old) (> (+ old n) max) (> (+ old n) (/ (* maxPages 65536) ps)))
                       (if (!= (.-D in) 0)
                         (aset st (- sp 1) (lit V :L math/MaxUint64))
 
@@ -621,7 +683,7 @@
 
                       (do
                         (when (> n 0)
-                          (let [nd (make (slice byte) (* (+ old n) 65536))]
+                          (let [nd (make (slice byte) (* (+ old n) ps))]
                             (copy nd (.-Data mem))
                             (set! (.-Data mem) nd)))
 
@@ -651,6 +713,82 @@
                 (memInit (aget (.-Mems inst) (.-A in)) (aget (.-Datas inst) (.-B in)) (.-L (aget st sp)) (.-L (aget st (+ sp 1))) (.-L (aget st (+ sp 2)))))
               (case [OpDataDrop]
                 (aset (.-Datas inst) (.-A in) nil))
+
+              ;; the atomic accesses (threads, queue 326): one thread, so plain accesses at an aligned address
+              (case [OpI32AtomicLoad OpI64AtomicLoad OpI32AtomicLoad8U OpI32AtomicLoad16U OpI64AtomicLoad8U OpI64AtomicLoad16U OpI64AtomicLoad32U]
+                (aset st (- sp 1) (lit V :L (getN (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 (aget atomicSize (.-Op in))))))))
+              (case [OpI32AtomicStore OpI64AtomicStore OpI32AtomicStore8 OpI32AtomicStore16 OpI64AtomicStore8 OpI64AtomicStore16 OpI64AtomicStore32]
+                (set! sp - 2)
+                (putN (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st sp)) (.-C in) (conv uint64 (aget atomicSize (.-Op in)))) (.-L (aget st (+ sp 1)))))
+              (case [OpI32AtomicRmwAdd OpI64AtomicRmwAdd OpI32AtomicRmw8AddU OpI32AtomicRmw16AddU OpI64AtomicRmw8AddU OpI64AtomicRmw16AddU OpI64AtomicRmw32AddU]
+                (dec! sp)
+                (let [b (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 (aget atomicSize (.-Op in))))
+                    old (getN b)
+                    v (.-L (aget st sp))]
+                  (putN b (+ old v))
+                  (aset st (- sp 1) (lit V :L old))))
+              (case [OpI32AtomicRmwSub OpI64AtomicRmwSub OpI32AtomicRmw8SubU OpI32AtomicRmw16SubU OpI64AtomicRmw8SubU OpI64AtomicRmw16SubU OpI64AtomicRmw32SubU]
+                (dec! sp)
+                (let [b (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 (aget atomicSize (.-Op in))))
+                    old (getN b)
+                    v (.-L (aget st sp))]
+                  (putN b (- old v))
+                  (aset st (- sp 1) (lit V :L old))))
+              (case [OpI32AtomicRmwAnd OpI64AtomicRmwAnd OpI32AtomicRmw8AndU OpI32AtomicRmw16AndU OpI64AtomicRmw8AndU OpI64AtomicRmw16AndU OpI64AtomicRmw32AndU]
+                (dec! sp)
+                (let [b (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 (aget atomicSize (.-Op in))))
+                    old (getN b)
+                    v (.-L (aget st sp))]
+                  (putN b (bit-and old v))
+                  (aset st (- sp 1) (lit V :L old))))
+              (case [OpI32AtomicRmwOr OpI64AtomicRmwOr OpI32AtomicRmw8OrU OpI32AtomicRmw16OrU OpI64AtomicRmw8OrU OpI64AtomicRmw16OrU OpI64AtomicRmw32OrU]
+                (dec! sp)
+                (let [b (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 (aget atomicSize (.-Op in))))
+                    old (getN b)
+                    v (.-L (aget st sp))]
+                  (putN b (bit-or old v))
+                  (aset st (- sp 1) (lit V :L old))))
+              (case [OpI32AtomicRmwXor OpI64AtomicRmwXor OpI32AtomicRmw8XorU OpI32AtomicRmw16XorU OpI64AtomicRmw8XorU OpI64AtomicRmw16XorU OpI64AtomicRmw32XorU]
+                (dec! sp)
+                (let [b (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 (aget atomicSize (.-Op in))))
+                    old (getN b)
+                    v (.-L (aget st sp))]
+                  (putN b (bit-xor old v))
+                  (aset st (- sp 1) (lit V :L old))))
+              (case [OpI32AtomicRmwXchg OpI64AtomicRmwXchg OpI32AtomicRmw8XchgU OpI32AtomicRmw16XchgU OpI64AtomicRmw8XchgU OpI64AtomicRmw16XchgU OpI64AtomicRmw32XchgU]
+                (dec! sp)
+                (let [b (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 (aget atomicSize (.-Op in))))
+                    old (getN b)
+                    v (.-L (aget st sp))]
+                  (putN b v)
+                  (aset st (- sp 1) (lit V :L old))))
+              (case [OpI32AtomicRmwCmpxchg OpI64AtomicRmwCmpxchg OpI32AtomicRmw8CmpxchgU OpI32AtomicRmw16CmpxchgU OpI64AtomicRmw8CmpxchgU OpI64AtomicRmw16CmpxchgU OpI64AtomicRmw32CmpxchgU]
+                (set! sp - 2)
+                (let [n (conv uint64 (aget atomicSize (.-Op in)))
+                    b (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) n)
+                    old (getN b)]
+                  (when (== old (bit-and (.-L (aget st sp)) (sizeMask n)))
+                    (putN b (.-L (aget st (+ sp 1)))))
+
+                  (aset st (- sp 1) (lit V :L old))))
+              (case [OpMemoryAtomicNotify]
+                ;; no other thread waits: none woken
+                (dec! sp)
+                (.atomicAt (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 4)
+                (aset st (- sp 1) (lit V :L 0)))
+              (case [OpMemoryAtomicWait32 OpMemoryAtomicWait64]
+                ;; one thread: 1 not-equal, 2 timed-out (no other thread can wake it)
+                (set! sp - 2)
+                (let [mem (aget (.-Mems inst) (.-A in))
+                    n (conv uint64 (aget atomicSize (.-Op in)))]
+                  (when (not (.-Shared (.-T mem)))
+                    (trap "expected shared memory"))
+
+                  (if (!= (getN (.atomicAt mem (.-L (aget st (- sp 1))) (.-C in) n)) (bit-and (.-L (aget st sp)) (sizeMask n)))
+                    (aset st (- sp 1) (lit V :L 1))
+
+                    (aset st (- sp 1) (lit V :L 2)))))
+              (case [OpAtomicFence])
 
               ;; loads and stores
               (case [OpI32Load]
@@ -1085,6 +1223,31 @@
               (case [OpI64TruncSatF64U]
                 (aset st (- sp 1) (vi64 (satU64 (f64of (aget st (- sp 1)))))))
 
+              ;; wide arithmetic (queue 326, beyond Wasm 3.0): a 128-bit operand is two i64s, its low half first
+              (case [OpI64Add128]
+                (let [(values lo carry) (bits/Add64 (.-L (aget st (- sp 4))) (.-L (aget st (- sp 2))) 0)]
+                  (aset st (- sp 3) (vi64 (+ (+ (.-L (aget st (- sp 3))) (.-L (aget st (- sp 1)))) carry)))
+                  (aset st (- sp 4) (vi64 lo))
+                  (set! sp (- sp 2))))
+              (case [OpI64Sub128]
+                (let [(values lo borrow) (bits/Sub64 (.-L (aget st (- sp 4))) (.-L (aget st (- sp 2))) 0)]
+                  (aset st (- sp 3) (vi64 (- (- (.-L (aget st (- sp 3))) (.-L (aget st (- sp 1)))) borrow)))
+                  (aset st (- sp 4) (vi64 lo))
+                  (set! sp (- sp 2))))
+              (case [OpI64MulWideS]
+                (let [(values x y) (values (.-L (aget st (- sp 2))) (.-L (aget st (- sp 1))))
+                    (values hi lo) (bits/Mul64 x y)]
+                  (when (< (conv int64 x) 0)
+                    (set! hi (- hi y)))
+                  (when (< (conv int64 y) 0)
+                    (set! hi (- hi x)))
+                  (aset st (- sp 2) (vi64 lo))
+                  (aset st (- sp 1) (vi64 hi))))
+              (case [OpI64MulWideU]
+                (let [(values hi lo) (bits/Mul64 (.-L (aget st (- sp 2))) (.-L (aget st (- sp 1))))]
+                  (aset st (- sp 2) (vi64 lo))
+                  (aset st (- sp 1) (vi64 hi))))
+
               ;; references
               (case [OpRefNull]
                 (aset st sp (lit V))
@@ -1143,6 +1306,42 @@
               (case [OpStructNewDefault]
                 (aset st sp (lit V :L (.addObj (.-St m) (addr (lit Struct :Type (conv int (.-A in)) :Fields (make (slice V) (len (.-Fields (aget ctypes (.-A in)))))))) :H rStruct))
                 (inc! sp))
+
+              ;; custom descriptors (queue 327): an allocation with its descriptor, a descriptor's read, the casts by it
+              (case [OpStructNewDesc]
+                (do
+                  (dec! sp)
+                  (let [d (aget st sp)
+                      t (aget ctypes (.-A in))
+                      n (len (.-Fields t))
+                      fs (make (slice V) n)]
+                    (when (== (.-H d) 0)
+                      (trap "null descriptor reference"))
+
+                    (for [k 0] (< k n) (inc! k)
+                      (aset fs k (pack (.-K (.-T (aget (.-Fields t) k))) (aget st (+ (- sp n) k)))))
+
+                    (set! sp - n)
+                    (aset st sp (lit V :L (.addObj (.-St m) (addr (lit Struct :Type (conv int (.-A in)) :Fields fs :Desc d))) :H rStruct))
+                    (inc! sp))))
+              (case [OpStructNewDefaultDesc]
+                (let [d (aget st (- sp 1))]
+                  (when (== (.-H d) 0)
+                    (trap "null descriptor reference"))
+
+                  (aset st (- sp 1) (lit V :L (.addObj (.-St m) (addr (lit Struct :Type (conv int (.-A in)) :Fields (make (slice V) (len (.-Fields (aget ctypes (.-A in))))) :Desc d))) :H rStruct))))
+              (case [OpRefGetDesc]
+                (when (== (.-H (aget st (- sp 1))) 0)
+                  (trap "null reference"))
+
+                (aset st (- sp 1) (.-Desc (.structOf m (aget st (- sp 1))))))
+              (case [OpRefCastDescEq OpRefCastDescEqNull]
+                (dec! sp)
+                (when (not (.descTest m (aget st (- sp 1)) (aget st sp) (== (.-Op in) OpRefCastDescEqNull)))
+                  (trap "descriptor cast failure")))
+              (case [OpBrOnCastDescEq OpBrOnCastDescEqFail]
+                ;; the value and a flag for the br_if that follows
+                (aset st (- sp 1) (b2v (!= (.descTest m (aget st (- sp 2)) (aget st (- sp 1)) (!= (.-D in) 0)) (== (.-Op in) OpBrOnCastDescEqFail)))))
               (case [OpStructGet OpStructGetU]
                 (aset st (- sp 1) (aget (.-Fields (.structOf m (aget st (- sp 1)))) (.-B in))))
               (case [OpStructGetS]

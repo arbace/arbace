@@ -11096,3 +11096,349 @@ notified, the sender handed over by the derivation (alternatives in the survey).
 ## 2026-11-18: n-java-thresh, a correction
 
 The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-thresh").
+
+## 2026-11-17: n-review-d: the Mac VM's held crop branches stacked on next (branch `n-review-d`)
+
+- Merged on next 42bf8614b, reading and sub-1-GiB judging only (the night's full gate on the host): mac/323-ocaml-deferred
+  (65109ab43: OT30-OT32, the light level's Gc canary in jdk/ocaml/ocaml/rt/ExtGc.ae), mac/325-haskell-own-stg (5376b5ea7: own
+  interfaces, golden files, the arm64 reference, the .cabal reexports, LibSystem sorted), mac/327-wasm-custom-descriptors (e18c2576f,
+  with 326's b800bb2ad), mac/334-scheme-speed (95595fe6e). None of them was on next, so tonight's gate judged none of their records.
+- Conflicts: test/crops/scores.edn and test/reap/matrix.edn taken from next and re-recorded once at the end (`bin/reap --record`,
+  `bin/crops-score --record`); bin/lib/hsi/record-ref's exports both sides' (`hsi_pre_gen`, `root`, `keep`); hsi-controls.txt both
+  controls; HASKELL-EVAL-SURVEY.md both sections; own-verdicts.tsv first the union, then `bin/hsi own-verdicts --record` over the
+  trees, which adds two rows neither side had (hs_try_putmvar003, IncallAffinity: next's threaded way meeting 325's empty-stdout
+  rule), `--check` current: eval 756 of 909, AOT 132 of 139 by their own verdict; independence.edn's Haskell judge cases restated
+  (self 6035, recorded 1758; the judge stays 0.887).
+- Checks: `bin/reap` 53 of 56 cells, 0 problems; `bin/crops-score --judge --strict` 0 problems; `bin/records-check` 0; `bin/oi
+  divergences` (eval, --aot, --compiled, suite, suite --aot) 0 failing; `bin/hsi divergences` 0 not in a class; `bin/wai
+  divergences [--aot]` ok; `bin/si corpora divergences` reads; `bin/repr-wasm ops check` 571 rows; the gate's crop-tier, crops,
+  chain-needs, gate-key-crops, caches and stale-comments tests pass; `bin/gate --plan` plans. Only 334 moves gate_key (go/arbace/scm
+  and arbace/scheme are embedded since W2): next's e8e0d017 to fa199ec1, so the next gate builds the executables afresh.
+- Every arm64-made or interim record waits for the main host's amd64 runs (the branches' reports, queue 323, 325, 326, 327, 334).
+
+## 2026-11-17: OCaml's print cell, mode :full keeps a file's bytes that are not UTF-8 (round 52, branch `n-ocaml-defer`)
+
+- On `next` 42bf8614b with queue 323's stack merged (`mac/n-review-d` b60d7ffb2). The OCaml cells' deferred rows read from
+  `test/reap/matrix.edn` and the classes: eval 71 (`:gc-and-memory` 25, `:runtime-parameters` 19, `:c-runtime-decided` 11,
+  `:dynlink-decided` 5, `:backtraces` 4, `:speed` 3, `:backtrace-references` 2, `:header-flags` 1, `:obj-representation` 1), AOT 138
+  (`:light-speed` 39, `:c-api` 25, `:gc-and-memory` 24, `:runtime-parameters` 19, `:c-runtime-decided` 12, `:light-depth` 5,
+  `:dynlink-decided` 5 and 9 more), print 1 (`:full-not-utf8`), read none (19 by design). Every eval and AOT class is the work of a
+  decision of days (OC217's backtraces, OC218's heap model, OC221's C runtime on ci, OC220's Dynlink) or the compiled level's whole
+  record (the AOT's `:light-*` and `:c-api`, OT8 (a)): none is a light fix proven under 1 GiB. Two probed: `embedded/cmcaml` (C's
+  main calling `caml_main`: OC221's `caml_startup` embedding, not a header) and `c-api/alloc_async` (`caml_stat_major_collections`
+  advanced by C's allocations: OC218's model).
+- Fixed the print row: mode :full's native layout keeps a byte that is not UTF-8 as OC214 (a)'s byte mark, written `\uDCxx` in
+  the dumps and forms and back as the byte (doc/ocaml/OCAML-SURVEY.md, "As built: mode :full's layout of a file that is not UTF-8").
+  Taken overnight (round 52): the native layout goes beyond ocdump's refusal (the alternative, keeping the refusal and the class
+  by design, leaves a byte-for-byte round trip undone for one byte); the old refusal stays behind an option.
+- Recorded only opam-re's rows (`bin/repr-ocaml roundtrip --record-results --corpus opam-re`); `bin/reap --record`,
+  `bin/crops-score --record`; `--judge --strict` and `bin/records-check` pass. OCaml print 3,082 / 0 / 0; completeness 86, 91
+  without by design (0.8589, 0.9078).
+
+## 2026-11-17 (round 52, night): OC217's first stage, the debugging events and oi's backtrace stack (branch `n-oc217`)
+
+- Built OC217 (a)'s first stage (the user's decision of 2026-11-10, byte-exact backtraces) on `mac/n-ocaml-defer` (b63c350f6) over next
+  42bf8614b: the typer's `--debug` (a header's -g) puts Lambda's after-events (Translcore's and Translprim's event_after: applications,
+  the primitives primitive_needs_event_after names, method calls, let-operators, a raise's argument), written `(event L [:after DEF FILE
+  L1 C1 EOFF L2 C2])`; Simplif, Tmc and Value_rec_compiler take Levent; oi keeps a thread's stack of the slots of calls in flight
+  (bytegen's rules: an event in tail position dropped, the nearest kept, the slot entered at APPLY1-3 or PUSH_RETADDR), stashes at the
+  handler as caml_stash_backtrace does, reads OCAMLRUNPARAM b, and Printexc's raw backtraces, slots, call stacks and the runtime's
+  uncaught report print ocamlc's lines. Sources: OCaml 5.5.0's tarball (SHA-256 fcc6ae66...), lambda/translcore.ml, translprim.ml,
+  simplif.ml, tmc.ml, value_rec_compiler.ml, bytecomp/bytegen.ml, runtime/interp.c, backtrace_byt.c, backtrace.c, printexc.c,
+  stdlib/printexc.ml (doc/ocaml/OCAML-SURVEY.md, "As built: OC217's first stage").
+- header.awk keeps -g and takes `ocamlrunparam b=` at oi's level (OC224 (b)), and skips `compiler_directory_suffix` (a native variant's
+  block). Taken overnight (round 52), as recommended: OC224 (b); OC225 (a) only the after-events (the before, function and pseudo
+  events wait for a consumer); OC226 (a) the native library stays without -g in this stage (with it every program's library Lambda
+  changes, a whole record's proof); OC227 (a) the AOT levels keep the class. Alternatives: the library with -g now (rejected: no whole
+  run tonight), pinning the 19 as `known backtrace` first (OC224 (a), rejected as the survey recommended).
+- Ran `bin/oi check --record --only-list test/ocaml/oc217.txt` (24 programs): 14 pass by their own verdict, 10 in `:backtraces` (6
+  newly pinned in test/ocaml/oi-known.edn: the native library's frames, a domain's join, a fiber's frames). Only those 24 rows were
+  recorded. New negative control `_control/why-at-vs-why-swallow` differs. `bin/reap --record`, `bin/crops-score --record`; `--judge
+  --strict`, `bin/records-check`, `bin/oi test`, `repl-check --native` pass. OCaml eval 495 / 75 / 71 to 509 / 75 / 57; completeness 86,
+  91 without by design (0.8589 to 0.8643, 0.9078 to 0.9140). Peaks: the typer's runs on stage 0 1.18-1.22 GB (over the night's 1 GiB).
+- Left of OC217 (4-6 days): the library with -g, backtraces per domain and across fibers, the finer placements of four programs, the
+  AOT levels.
+
+
+## 2026-11-17 (round 52, overnight): OC217's third stage, the four programs of the finer placement (branch `n-oc217b`)
+
+- On `n-oc217b` from `mac/n-oc217` (d11577d4c). The four `:backtraces` programs left for the finer placement (testsuite/tests/backtrace/
+  callstack, event_after_prim, methods, names, OCaml 5.5.0's tarball) compared with their `.reference`: oi's lines equal it for
+  event_after_prim, methods and names (events after primitives, method frames, nested modules', functors' and classes' names), so no
+  Translcore event and no oi stack change was needed. They failed against ocamlc's recorded runs in test/ocaml/ref-ocaml55.edn, made
+  without -g; the host's `ocamlc -g` and `ocamlopt -g` print the `.reference` byte for byte (checked in `.tmp/host`).
+- Taken overnight (round 52), as recommended: OC228 (a), the four rows re-recorded (`bin/oi record-ref --only-list`) and their
+  own-verdict exceptions dropped at both levels (their premise, per-backend references, false: one `.reference` each). Alternatives:
+  re-record alone (rejected: the exceptions stale, `own-verdicts --check` fails); leave both (rejected: judged against a run without
+  debug information).
+- callstack differs by `Called from Thread.create.(fun)` alone (thread.ml without -g, OC226): its pin reworded. methods pinned at the AOT
+  levels (aot-known.edn, aot-compiled-known.edn), as names already was, for the AOT level's next run.
+- `bin/oi check --record --only-list` on the four, then test/ocaml/oc217.txt: 17 of 24 pass (14 before), only the four rows moved.
+  OCaml eval 509 / 75 / 57 → 512 / 75 / 54; completeness 86 → 87 (0.8643 to 0.8655), without by design 91 → 92
+  (0.9140 to 0.9153). `own-verdicts --check`, `divergences`, the negative control, `bin/reap --record`, `bin/crops-score --record`,
+  `--judge --strict`, `bin/records-check` pass. One typer process (compiler-libs' parser.ml in the native library's rebuild, 1.09 GB)
+  stopped by PID under the night's 1 GiB rule: only this worktree's scratch library lacks Parser.
+
+## 2026-11-17 (round 52, overnight): queue 331 (OC218 (a)'s first part) merged onto OC217's stages (branch `n-ocaml-stack`)
+
+- On `n-ocaml-stack` from `mac/n-oc217b` (759dd34df: n-review-d, i.e. the Mac's 323, then n-ocaml-defer, then OC217's stages 1 and 3),
+  merged `mac/331-ocaml-decided-rows` (4f4b5a6eb, from 323's 65109ab43; its report `.tmp/mac-queue/reports/331-ocaml-decided-rows.md`):
+  Gc's word counters, Gc.Memprof's sampling, oi's let slots cleared at their scope's end, `Main/reset` of the profile.
+- Conflicts: `go/arbace/oi/thread.ae` alone in the code (OC217's `bt`, `btBuf`, `btExn` and 331's `mpQ`, `mpInCb`: both kept);
+  `test/crops/scores.edn` and `test/reap/matrix.edn` (generated: recorded again). The records merged row by row (a three-way
+  comparison per id of check-oi-native, check-aot*, check-suite-*, oi-known, aot-known, own-verdict and every divergences file): no
+  row changed by both sides, so no row needed the run to decide.
+- The runtime: OC217's events push and pop the thread's `bt` slots around calls and primitives (`applyEvNode`, `primEv`), 331 counts
+  words inside the primitives' ops and wraps the allocating externals; `primEv` calls the same ops, so the counts hold under -g.
+  Memprof's callbacks run at `tick`, balanced on `bt`. No collision. Memprof's callstack stays empty: it could now take the thread's
+  `bt` slots as `caml_get_current_callstack` does (a follow-up, not built).
+- Checks on the merge: `bin/oi test`; `repl-check --native` (24 phrases); `bin/oi check --record --only-list` over the 36 ids either
+  side moved at eval: 25 pass, 0 failing, every row as merged (no record change), the negative control why-at-vs-why-swallow differs;
+  the essential list's first 20 programs pass; `own-verdicts --check` 0 differ at the four corpora and levels; `bin/reap --record`
+  0 problems; `bin/crops-score --record`, `--judge --strict` and `bin/records-check` pass. OCaml eval 512 / 75 / 54 → 521 / 75 / 45,
+  AOT 429 / 74 / 138 → 434 / 74 / 133, completeness 87 (0.8655 to 0.8710), without by design 92 (0.9153 to 0.9215).
+- Not done under the night's 1 GiB rule: the AOT list (`check --aot --only-list` of 331's ids and three backtrace programs): o2j's
+  batch on stage 0 grew past 1 GiB three times, stopped by PID, nothing recorded. The native library's rebuild stopped at
+  compiler-libs' parser.ml (1.05 GB) as on n-oc217b: only this worktree's scratch library lacks Parser.
+- `bin/oi pins` exits 1, "not attested" (331's finding 1: its re-pinned and dropped pins), until the main host's whole runs and
+  `bin/oi pins --attest`; the gate's oi-essential step fails until then.
+
+## 2026-11-17: n-wasm-defer: WebAssembly's i64 limit message (branch `n-wasm-defer`, round 52)
+
+- On next 42bf8614b with mac/n-review-d (b60d7ffb2) merged: 326 and 327 already took the crop's deferred rows to none (completeness
+  0.9790 -> 0.9996, meant 1.0000). The rows left are by design or budget; one class rested on a misreading: wg-3.0's
+  `interpreter/text/parser.mly` (spec tag wg-3.0, `nat64`) says "i64 constant out of range" for a limit past 2^64, as
+  `proposals/custom-page-sizes/memory_max_i64.wast` expects. `arbace/repr/wasm/text.ae`'s `nat64` says so; the class
+  `custom-page-sizes-i64-message` removed, its one messages row passes (5,338 of 5,346; a beside source, the score unchanged).
+  Taken overnight (round 52); doc/wasm/WASM-SURVEY.md "As built: n-wasm-defer".
+- Checks under 1 GiB: `bin/repr-wasm wast --only` (custom-page-sizes, twelve root scripts, the essential list with its controls),
+  the row re-recorded from the run's rows by hand, `bin/reap --record`, `bin/crops-score --record`, both judged after, 0 problems.
+  No key moves (arbace/repr/wasm is in `arbace_crop_paths`).
+
+## 2026-11-18: Haskell's independence, HF10-P24 (a): programs of several modules through the native front end (round 52, branch `n-hs-indep`)
+
+- Base: next `42bf8614b` with `mac/n-review-d` `b60d7ffb2` merged (queue 325 and its stack: Haskell 78 independent, eval and AOT
+  0.5 each, read and print 1, judge 0.887). Eval and AOT lose the most: their cases count 1 only from `bin/hsi check --libs own`'s
+  records, and `test/haskell/check-hsi-own.edn` is INTERIM (counts none), `check-hsi-aot-own.edn` absent, so both stand at the stated
+  0.5. The open item that moves how many programs those records can call own is HF10-P24 (a) (decided 2026-11-10, not built): of the
+  950 planned programs 269 were ineligible, `local` (a module of the program's own) the largest refusal, 65.
+- Built: `arbace/repr/haskell/front.ae` compiles a program's own modules (found as GHC's finder finds them on ".", `./M.hs`) in
+  dependency order, each module's own interface (`ownface/own-iface-text`, unit main) in the program's pool for the modules above,
+  their STG beside Main's; `tostg.ae` runs the `main` Main exports when it is imported (GHC's checkMain); `bin/lib/hsi/check`'s
+  eligibility scans the program's modules too, refuses `-main-is` (HF10-P59 (b), taken overnight), an hs-boot file of the program's
+  own, a LANGUAGE pragma over several lines naming CPP (T1735). Tried on the own libraries 635 to 672 of 950. tcrun025 on
+  `own-fallback.txt` (`:own-lib`, as tcrun024). doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P24 (a)"; HF10-P59 (b), P60 (b),
+  P61 (a) taken overnight (round 52).
+- Checked light (one process at a time, `HSI_JOBS=1`, own libraries from the gate's tars of 2026-11-16): the front end 25 of 25 new
+  programs compiled; 20 of the 23 new ones tried pass on the own libraries (T16453M0-M5, T19397M0-M1, T12622, T8103, T9577, cgrun067, T22282,
+  tcrun038, the four T23146 tests, nofib spectral pretty and scc), 3 nofib programs over the light 1 GiB cap; a final `--only` run exit 0 with its controls
+  failing as they must. Alternatives considered: refusing an imported main (as before) instead of checkMain's rule; porting
+  `-main-is` tonight (left for a round of its own).
+
+## 2026-11-18: Haskell, HF10-P59 (a) `-main-is` and the front end's search path; the 85 `import` refusals grouped (round 52, branch `n-hs-p59`)
+
+- Base: `mac/n-hs-indep` `b5d04b12a` (HF10-P24 (a)). Its dry plan (`.tmp/keep/wt-n-hs-indep/p24/plan-all.txt`, 950 programs) refused
+  85 as `import`. Grouped by module: NofibUtils 29 (nofib's `nofib-common/NofibUtils.hs`, compiled with every program by
+  `mk/boilerplate.mk`'s `EXTRA_SRCS`), the test's `-i` helpers 2 (T5462Yes1/2), boot packages 33 (containers 10, bytestring 9, time 6,
+  transformers and mtl 4, directory 3, unix, binary, template-haskell, ghc-experimental 1 each, ghc 3), packages outside the pinned
+  tarball 14 (parallel, random, old-time, ...; GHC's reference `:no-build`), T17920's Cmm 1.
+- Built: `-main-is FN` resolved in Main's scope (rename's `*main-fn*`, implicit header `module Main (FN)`, `:main-name`; tostg's
+  `:Main.main` runs it); GHC's `-iDIR` and nofib's `-i../../nofib-common` as the front end's search path (`front_eligible`,
+  `front.ae`'s `local-source`). The dry plan: tried own 672 to 677, `import` 85 to 54, `main-is` 4 to 0, `cpp` 47 to 77 (NofibUtils
+  and Enum use CPP). `bin/hsi check --libs own --only`: T5462Yes2, T16453M6, T19397M0, M2-M4 pass own, with T16453M1, M5, nofib pretty
+  and scc and samples/Hello unchanged; the control fails as it must.
+- Found: GHC's reference builds none of the 29 NofibUtils programs (record-ref gives GHC no `EXTRA_SRCS`): HF10-P64, a DECISION for
+  the oracle window. No package was added: none is small enough to prove light (P17's slices 2-5 stand). HF10-P59 (a), P62 (a) taken
+  overnight (round 52); P63 (CPP in the front end) proposed. doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P59 (a) and the search
+  path". Alternatives considered: refusing `-main-is` until a round of its own (P59 (b)); a hard-coded NofibUtils source instead of
+  the search path.
+
+## 2026-11-18: Haskell, HF10-P63 (a) CPP in the front end (round 52, branch `n-hs-cpp`)
+
+- Base: `mac/n-hs-p59` `1c4c29575`. Its dry plan refused 77 programs as `cpp` (NofibUtils' 29, T5462Yes1's GEnum/Enum.hs, 47 others).
+- Which preprocessor: the survey's `driver/preprocess` is the driver around repr/haskell's own clean-room traditional cpp
+  (`arbace/repr/haskell/cpp.ae`; GHC's doCpp's arguments from the installation read as data). The native reads use it
+  (`native/preprocess`), so the front end takes the same path. There is one preprocessor.
+- Built: `arbace/repr/haskell/front.ae` preprocesses a module of a program (main file and own modules) when its flags or header
+  pragmas turn CPP on, `build --libdir DIR --sysroot DIR` naming the installation (read once). The macros are GHC's: ghcversion.h's
+  `__GLASGOW_HASKELL__` 914, the platform's, MIN_VERSION_pkg, all.T's -D/-U/-I/-optP and OPTIONS_GHC's. `bin/lib/hsi/check` refuses
+  `cpp` no more, passes all.T's CPP flags in the plan and gives the front end the derived tree (`bin/repr-haskell native-libdir`, which
+  it already ran). The dry plan over 950: tried own 677 to 739, `cpp` 77 to 0, `import` 54 to 67, `pragma` 19 to 21.
+- Checked light (`HSI_JOBS=1`, `ARBACE_MEM_GIB=1`, `HSI_FRONT_MEM=900MiB`, a 1.15 GB watcher): samples/Hello, CheckBoundsOK, cgrun072,
+  T12136 pass own from native STG; T1735 stops at the elaborator (a `Data` context; runs on the pack, passes); T5462Yes1's front
+  process went over the light cap (oracle-pending anyway); NofibUtils.hs takes its `__GLASGOW_HASKELL__` branch; bernouilli
+  compiles and runs own against GHC's `:no-build` reference (status 0 once, then Go's out of memory at the light 1 GiB cap on a rerun). The 29 NofibUtils programs are classed in divergences-own.edn's
+  `:no-reference-own` until HF10-P64 (HF10-P65 (a)). HF10-P63 (a), P65 (a) taken overnight (round 52). doc/haskell/FRONTEND-SURVEY.md,
+  "As built: HF10-P63 (a)". Alternatives considered: a second preprocessor (none needed); own-fallback.txt for the 29, or refusing
+  programs whose reference is `:no-build` (P65 (b), (c)).
+
+## 2026-11-18: LLVM IR's deferred rows and judge, the pack's stale own verdicts (branch `n-llvm-defer`, from next `42bf8614b`; round 52)
+
+- Audit (test/reap/matrix.edn, test/llvm/divergences-*.edn, test/crops/independence.edn): deferred read 1 (pr79354.g2.di-retarget.500483),
+  eval 1 (thread-throw, ci's abort off the main thread: C's runtime), AOT 13 (the modules that unwind, recorded as refusals before
+  llvm-eh; their AOT build 1.5-3 GB, the day's); independence below 1 by the judge stage alone (1,181 recorded cases).
+- The mutants' own verdicts are the pack's first lines, written before LLS46 changed arbace.repr.llvm.expect. Every mutant regenerated
+  from its base, kind and index by the mutator's own loop (1,697 of 1,750; rs.g0's 53 above the night's 1 GiB): the texts all the
+  pack's, the lines of the current expectation differ in the deferred row only.
+- arbace/repr/llvm/expect.ae: `body-md` (a GEP's `inbounds nuw` before its type broke StripDebugInfo's walk: 4 debug mutants threw);
+  ex-type's Verifier-level unknowns (a load's or store's attachment, atomics) yield to the function's LLParser error; `const-error`
+  (null and a global's name read as a scalar: LLParser 23.1.5's P:6908, P:1874/P:1904). With them 21 lines change, all equal to opt's
+  record. Unit cases in test/repr/llvm/expect_test.ae: 50 cases, 15 controls, 0 failing.
+- No record re-recorded: the rows read the pack's lines, so they move with `bin/llvmi ir-make rt --mutants` (LLS55 (a)) and the
+  hand-written modules' RUN lines (LLS56 (a)), both taken overnight (round 52) and left to the day (the mutator above 1 GiB; a hw edit
+  makes the pack stale until the re-make). Alternatives: the judge re-deriving each line at check time (rejected: the pack's line is the
+  LLS33 (b) contract), keeping the pack to the next clang re-make (the rows stay on opt's record).
+- Projected after the day's commands (doc/llvm/LLVM-CROP-SURVEY.md, "As built: round 52"): completeness 98 to 99, meant 99 to 100
+  (read 3,845 / 1 / 0; AOT 549 / 12 / 1 when the 13 behave as at eval), independence 98 (judge 0.893 to 0.895: 23 cases to own verdicts).
+
+## 2026-11-17: RCD1, Rust's deep files: rustc's ensure_sufficient_stack in repr/rust (branch `n-rust-comp`, from next `42bf8614b`)
+
+- **What.** Rust's completeness, round 52. The matrix's Rust row: read 33,342 / design 1 / deferred 3, eval 5 of 5, AOT not
+  recorded (queue 322's record, tomorrow), print as read; the only deferred class of the read and print cells is `:converter-depth`,
+  three UI-suite files nested past the evaluator's 10,000 nested calls. Probed with a synthetic file of 964 nested `S<...>`: since
+  rust-90 the first stop is the native parser. Built `arbace.repr.rust.stack/ensure-sufficient-stack` (a new thread, depth 0, the
+  bindings conveyed, past a red zone of 7,000), wrapped at the parser's, the native dump's, the converter's and the printer's
+  recursion hubs, and the round trip's tree texts written with depths in decimal (`native tree --depths`; rsdump's indentation is
+  quadratic in the nesting: about 1 GB for 5,204 else-ifs). doc/rust/RUST-NOTES.md, "RCD1".
+- **Checks.** Nine synthetic shapes (types, else-ifs, parentheses and unary minus, blocks, tuple patterns, token-tree brackets,
+  modules, `+` chains, the issue's alias) read, printed in both layouts, trees and lines equal; the type and else-if files in mode
+  `:full` byte for byte; std's option, hint, cell and rc round trip (`--text --pretty`) equal, the edit controls 7 of 7. Each process
+  0.8-1.3 GB (the else-if file's `:full` read 1.29 GB, over the night's 1 GiB: one run). `bin/crops-score --judge --strict` holds.
+- **Not run.** The three files themselves (the UI tarball is not on this host); the known files keep them until the day's run.
+- **Decided (taken overnight, round 52).** RCD1 (a): the stack grown at the hubs (rustc's own remedy, light, the crop's paths
+  alone); not (b) a larger `MAX_DEPTH` (the runtime's key, every build) or (c) repr/rust embedded and compiled (every key).
+- **Found.** `roundtrip --pretty --only REGEX`'s print step matches the regex against the forms' paths (`rs/core/hint.ae`), so it
+  prints nothing for a regex of source paths (pre-existing; the pretty trees checked by hand instead).
+
+## 2026-11-17: Rust's scores read; C5's judge stated among the facts; rustc 1.100.0's breakage (branch `n-rust-mat`, round 52)
+
+- `bin/crops-score --judge --strict` on `next` `42bf8614b`: Rust's maturity 96 is the `:cells` item alone (the AOT cell has no
+  record); independence 80 is eval and AOT at 0.5 (RFP53 (a): 0 of 5 cases own in C1-C7; C5, C7 own, C1 buildable own since RIND5's
+  swizzle, C2, C3, C4, C6 rustc's). Nothing light moves a score: the AOT record (task 322) moves completeness (75 to (3 + p) / 4,
+  100 if its five pass) and maturity (to 100); independence waits for RIND stage 5.
+- `test/crops/independence.edn`: `rsi-shim-essential` among eval's and AOT's `:steps`, C5's, C7's and C1's code in eval's
+  `:evidence`, C1's state in `:why` (no score moves; the record unchanged). Alternatives not taken: RIND10 (a)'s core-attrs lines
+  (an unproven 35-minute, 2.3 GB rebuild in `rust-front-essential`), RIND8 (a) (an accounting choice, the user's).
+- The host's rustc is 1.100.0 since 2026-11-15 (pin 1.99.1): `bin/repr-rust pins check` refuses, so `bin/gate --pins` and the clean
+  run's first step fail, and the oracle tier's five `:rustc` steps run on a new identity and refuse; no essential or `--full` step
+  needs rustc. RIND11 proposed (doc/rust/FRONTEND-SURVEY.md, "As built: Rust's scores read ..."): (a) the pinned rustc the oracle's,
+  another the `:rustc` host absent, then a pinned 1.99.1 outside apk for the oracle tier (a fetch); (b) re-pin to 1.100.0 (weeks).
+- Checks (each under 1 GiB): `bin/crops-score --self-test` ok, `--judge --strict` exit 0 (972 MB), `bin/reap` 0 problems,
+  `bin/records-check` 0 problems.
+
+## 2026-11-17: RIND9 (a): alloc's interface pass, written and proven light (branch `n-rust-alloc`, from next `42bf8614b`)
+
+- The user approved RIND9 (a). `arbace.rust.front.alloc-check` (`bin/rust-front alloc-iface`) runs core-check's interface pass
+  (collect only) over alloc's 84 module files of rust-src 1.99.1's library/alloc, reading std's interface with every alloc fact
+  taken out, and writes alloc's facts in the helper's `--std-iface` shape, compared fact by fact with the helper's
+  `std-iface.edn` (equal, differing by keys, missing; native extras apart; a negative control). core-check, resolve and collect
+  generalized from core to the crate being built (`cc/*crate*`, `resolve/crate-root`, a dependency's macro's `$crate` by
+  `resolve/crate-deps`; core's own build unchanged by construction); lower keeps an impl's constness, native-iface writes a const
+  impl's functions `:const`.
+- Proven light (under 1 GiB, 0.93 GB peak): 22 pure unit cases, and borrow.rs alone 43 of 47 facts equal, alloc.rs 31 of 36 (18
+  before the constness fix), held to `test/rust/front/alloc-iface-units-known.txt`. The causes named: associated types' bounds,
+  associated-type bounds in where clauses, `derive_const`/`derive` impls on `Global` not written.
+- Not run: the whole pass (about 25 minutes, 2.3 GB), the day's `bin/rust-front alloc-iface`; core's `core-essential` and
+  `rind-test` to confirm core unchanged. Decisions RIND9a-1 to RIND9a-5 taken overnight (round 52), doc/rust/FRONTEND-SURVEY.md,
+  "As built: RIND9 (a), alloc's pass". Alternatives: keeping alloc's facts in the interface the pass reads (no proof: the answers
+  read back) and comparing only the facts the pass writes (a missing fact unseen), both set aside.
+
+## 2026-11-17: RIND9 (a): alloc's pass, its three causes fixed (branch `n-rust-alloc2`, from `n-rust-alloc` `0ad256435`)
+
+- Fixed in the code core's build shares (arbace/rust/front/): native-iface writes a trait's associated types' bounds
+  (`collect/item-bounds`, not `[]`); lower keeps an associated-type bound's bounds and collect's `lower-trait-ref` lowers them as
+  clauses on the projection (`:clauses` metadata, lower_assoc_item_constraint's order), so `B: ToOwned<Owned: Debug>` gives
+  `<B as ToOwned>::Owned: Debug`; expand_derive reads `#[derive_const]` beside `#[derive]` in order, its impls `const impl`.
+- Proven light (one process a module, 0.91 GB peak), against the helper's std-iface: borrow.rs 43 to 47 of 47 equal, alloc.rs 31
+  to 36 of 36, slice.rs 30 to 32 of 37 (left: Fn sugar's late-bound regions in where clauses, a nested impl in a body),
+  collections/mod.rs 29 of 29 and btree/set_val.rs 18 of 18 unchanged; unit cases 22 to 25 pure, and per module the causes'
+  facts by value with negatives; `test/rust/front/alloc-iface-units-known.txt` re-recorded over five modules.
+- core may move (derive_const in 12 core files, 6 of them among core-modules.txt; associated-type bounds in option,
+  convert/mod, ops/try_trait), none in core-essential's modules: the day runs core-essential, rind-test and core's check.
+  Decisions RIND9a-6, RIND9a-7 taken overnight (round 52), doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass:
+  its three causes fixed". Alternatives there.
+
+## 2026-11-18: RIND9 (a): alloc's pass, the compare module by module (branch `n-rust-alloc3`, from `n-rust-alloc2` `1a6ec44bf`)
+
+- slice.rs' two causes fixed (Fn sugar's late-bound regions in where clauses written in their binder, `'^#0`; an impl in a
+  body inside an impl's function written at its def path), then boxed/convert, string, boxed, rc, sync, fmt, vec_deque, raw_vec
+  and vec passed alone or in pairs (one process each, under 0.91 GB) against the helper's std-iface (rust-src 1.99.1), and their
+  causes fixed in arbace/rust/front/ (core_check's writer, collect, expand, expand_derive): trait objects, outlives and
+  ConstArgHasType clauses, cfg_attr's derive (string.rs did not expand), a std GAT's own parameters, by-value self's elision,
+  type parameter defaults, the `rust-call` ABI, negative impls, and tool-attributed items' DefId order (`#[rustfmt::skip]`:
+  rustc's attribute invocation), which renumbered vec's and raw_vec's impls.
+- Results: slice 32 to 37 of 37, boxed/convert 26 to 54 of 54, string 0 to 284 of 284, boxed 166 of 166, rc 274 of 274, sync
+  287 of 287, vec with raw_vec 168 of 168 (vec alone 12 of 164 before); unit cases 8 more pure and five more modules
+  (`alloc-iface-units.txt` ten), the known file re-recorded. Decisions RIND9a-8 to RIND9a-10 taken overnight (round 52),
+  doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the compare module by module", alternatives there.
+- core's native facts may move (const generics' clauses, trait objects, impl numbering in option.rs and result.rs): the day runs
+  core-essential, rind-test, core's check and the whole alloc pass.
+
+## 2026-11-18: n-crops-night: tonight's crop branches stacked on n-ocaml-stack (branch `n-crops-night`, round 52)
+
+- On mac/n-ocaml-stack a57613840 (n-review-d + n-ocaml-defer + OC217's stages 1 and 3 + the Mac's 331) merged in order:
+  mac/n-wasm-defer 65677ad89, mac/n-hs-cpp 5ea3d6aae (n-hs-indep b5d04b12a, n-hs-p59 1c4c29575), mac/n-llvm-defer ca310e4fd,
+  mac/n-rust-comp 40b0bc958, mac/n-rust-mat e31ff8045, mac/n-rust-alloc3 f4bb84552 (n-rust-alloc 0ad256435, n-rust-alloc2
+  1a6ec44bf). Reading and sub-1-GiB checks only (the full gate on the host).
+- Conflicts: doc/JOURNAL.md at every merge (both sides' entries kept, in merge order) and doc/rust/FRONTEND-SURVEY.md at
+  n-rust-alloc3 (n-rust-mat's "Rust's scores read" section with RIND11, then alloc's three RIND9 (a) sections). Auto-merged:
+  test/crops/independence.edn (n-rust-mat's Rust eval/AOT facts beside n-rust-comp's), test/reap/matrix.edn. No Haskell record or
+  class file (own-fallback.txt, divergences-own.edn, own-verdicts.tsv) was changed by two of the merged branches.
+- Checks: `bin/hsi own-verdicts --check` current (756 of 909); `bin/oi divergences` fails at the pins (331's re-pinned and dropped
+  pins "not attested", expected until the main host's whole runs and `bin/oi pins --attest`); `bin/wai divergences` ok;
+  `bin/repr-wasm ops check` 571 rows; `bin/rust-front alloc-iface --units` passed (GOMEMLIMIT=500MiB, the alloc index copied from
+  n-rust-alloc3's scratch); `test/repr/llvm/expect-test.bash` 50 cases, 15 controls, 0 failing; `bin/reap --record` and
+  `bin/crops-score --record` unchanged (53 of 56 cells, 0 problems), `--judge --strict` 0 problems; `bin/records-check` 0;
+  `bin/gate --plan` plans (go-build: 334's go/arbace/scm moves gate_key).
+- On top tomorrow: n-rust-alloc4 and n-hs-elab (still running tonight).
+
+## 2026-11-18: OCaml, OC220's first part: Dynlink's init info at oi's level (round 52, branch `n-oc220`)
+
+- Built Dynlink at oi's level from OCaml 5.5.0's tarball (`ocaml-5.5.0.tar.xz`, pinned by `bin/repr-ocaml corpus fetch`):
+  otherlibs/dynlink's dynlink_types, dynlink_platform_intf, dynlink_common and dynlink.mli, with Arbace's own platform
+  test/ocaml/dynlink/dynlink.ml in byte/dynlink.ml's place (LGPL-2.1 with the linking exception, read for its shape). The main
+  program's units are oi's unit table (Program.Units, the external caml_oi_dynlink_units). header.awk takes `include dynlink` at oi's
+  level only when the rest of the header runs; the AOT levels keep the class.
+- lib-dynlink-init-info/test passes (`bin/oi check --record --only-list`, its row alone); OCaml eval 521 to 522.
+- Decisions taken overnight (round 52), as recommended: OC229 (a) the tarball's dynlink_common over our platform (not a two-function
+  stub, not a generated list); OC230 (a) the plugin tests keep their class, the AOT levels wait for the runtime's unit table.
+- The other four rows (pr4229, domains, bytecode, backtrace_dynlink) need a loader of the plugins the test builds; their costs are in
+  doc/ocaml/OCAML-SURVEY.md, "As built: OC220's first part".
+- bin/oi's change moves oi's keys (stdlib_key, native_key, the driver's forms_key): the main host's whole runs re-record.
+
+
+## 2026-11-18: OCaml, OC220's loader: plugins built and loaded at oi's level (round 52, branch `n-oc220b`)
+
+- On n-oc220's first part (dbbe0686e): header.awk's dynlink mode reads a test's bytecode alternative (its ocamlc steps, cwd, the
+  main program's link); bin/oi's oi_dynlink types each unit natively and writes its .cmo as a text plugin (header `OI-CMO 1`, the
+  interface imports, the Lambda); the typer's new `--imports-out` writes the imports with their files' digests; test/ocaml/dynlink/
+  dynlink.ml's platform reads the plugin and drives four new externals of go/arbace/oi (caml_oi_dynlink_parse, _link, _init, _hide)
+  under the tarball's dynlink_common (OCaml 5.5.0's otherlibs/dynlink, its byte/dynlink.ml read for the shape of load and run).
+- lib-dynlink-pr4229/main and lib-dynlink-domains/main pass by their own verdicts (`bin/oi check --record --only-list`, the two rows
+  alone); OCaml eval 522 to 524.
+- Decisions taken overnight (round 52), as recommended: OC231 (a) the text plugin of Lambda (not ocamlc's .cmo, not a link-time
+  pretence); OC232 (a) the interfaces' digests from their files (not names alone, not ocamlc's CRC).
+- Moves oi's keys (forms_key, stdlib_key, native_key: the typer and dynlink.ml): the main host's whole runs re-record.
+
+
+## 2026-11-18: OCaml, OC218's heap model: the simulated minor heap and Memprof's promote and dealloc at oi's level (round 52, branch `n-oc218`)
+
+- On n-oc220b (e56270a78), with 331's first part (Gc's word counters, Memprof's sampling): go/arbace/oi/ext_sys.ae models a minor
+  heap of Gc.control's minor_heap_size words, filled by the counted allocations and emptied by the overflowing one and by the asked
+  collections; a tracked value (an allocation callback's Some) is promoted or dead by Go's collection, judged through a weak pointer
+  (OC216 (a)'s weakOf); promote, dealloc_minor and dealloc_major run as the collections find them, never nested (Thread.mpQ). The
+  allocation callbacks run at the allocation (allocV), as the bytecode runtime's; profiles are per domain (Domain.mp, inherited by
+  spawned domains), a second start replaces the first, discard fails as memprof.c does. makearray, duparray and duprecord are
+  counted (the bytecode's MAKEBLOCK and caml_obj_dup). Read for the semantics: OCaml 5.5.0's runtime/memprof.c (caml_memprof_start,
+  stop, discard), stdlib/gc.mli (Memprof's contract) and testsuite/tests/statmemprof/*.ml, from the pinned tarball.
+- `bin/oi check --record --only-list` (18 rows and the control pair norm3/norm2) and `bin/oi suite check --record --only-list` (5
+  rows): statmemprof/arrays_in_minor, arrays_in_major, minor_heap_edge, restart, start_stop and, in the suite, discard_in_callback,
+  stop_start_in_callback, exception_comballoc pass; 331's passes still pass; intern now fails at its Marshal distribution checks
+  (re-pinned); OCaml eval 524 to 532, completeness 87 to 88, meant 92 to 93. own-verdicts --check 0 differing; reap, crops-score
+  (--judge --strict) and records-check 0 problems; `bin/oi test` passes; the control differs.
+- Decisions taken overnight (round 52), as recommended: OC233 (a) the simulated minor heap with Go's reachability (not every value
+  promoted, not an age on every block); OC234 (a) callbacks at the allocation (not 331's poll point); OC235 (a) profiles per domain,
+  start replacing (not one global profile).
+- The native stdlib was rebuilt here (OI_TYPER_GOMEMLIMIT=550MiB): compiler-libs' Parser unit was stopped at 1.05 GB by the night's
+  1 GiB watchdog (its unit refused in this worktree's library only); no other process passed 1 GiB.
+- Moves oi's driver key (go/arbace/oi's forms): the main host's whole runs re-record.

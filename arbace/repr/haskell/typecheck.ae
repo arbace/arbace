@@ -4754,6 +4754,29 @@
           (recur left)
           (doseq [w left] (error! "unsolved: " (pr-str (zonk-pred (:pred w)))))))))))
 
+;; queue 325: an Integer literal outside Int#'s range (GHC.Core.Make's mkIntegerExpr: IS of an Int# literal only when
+;; platformInIntRange, else IP / IN of a LitNumBigNat, which CorePrep's cvtLitBigNat builds from the literal's bytes). An IS
+;; of a wider literal read back as a machine Int (cgrun034's fromRational of 1.82...e-300, its 10^300 denominator, gave a zero
+;; denominator). Here the value is built from 60-bit chunks by ghc-internal's integerShiftL# and integerAdd (integerNegate for a
+;; negative one): the same Integer at run time, the STG not GHC's bytes (CorePrep's ByteArray# construction not ported)
+(defn integer-lit-core
+  "The Core of the Integer literal X (an integer or its decimal text): IS x# in Int#'s range, else built from 60-bit chunks"
+  [x]
+  (let [n (bigint (if (string? x) (java.math.BigInteger. ^String x) x))
+        is (fn [v] (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" "IS")) [(list 'lit (str v "#"))]))
+        mn (bigint Long/MIN_VALUE) mx (bigint Long/MAX_VALUE)]
+    (if (and (<= mn n) (<= n mx))
+      (is n)
+      (let [neg (neg? n)
+            a (biginteger (if neg (- n) n))
+            m (.subtract (.shiftLeft java.math.BigInteger/ONE 60) java.math.BigInteger/ONE)
+            chunks (loop [a a acc ()] (if (zero? (.signum a)) acc (recur (.shiftRight a 60) (conj acc (.and a m)))))
+            iv (fn [nm] (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" nm)))
+            pos (reduce (fn [acc c]
+                          (list 'app (iv "integerAdd") [(list 'app (iv "integerShiftL#") [acc (list 'lit "60##")]) (is c)]))
+                        (is (first chunks)) (rest chunks))]
+        (if neg (list 'app (iv "integerNegate") [pos]) pos)))))
+
 (defn- fl-ratio
   "A FractionalLit (FL (src S) NEG (:% N D) EXP BASE) as the Core of its Rational: (:%) of two Integers, reduced"
   [fl]
@@ -4763,7 +4786,7 @@
         [n d] (if (neg? e) [n (* d (bigint p))] [(* n (bigint p)) d])
         g (.gcd (biginteger n) (biginteger d))
         n (/ n (bigint g)) d (/ d (bigint g))
-        int-core (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" "IS")) [(list 'lit (str x "#"))]))]
+        int-core integer-lit-core]
     (list 'app (list 'v (ext-name "var" "GHC.Internal.Real" ":%")) [(int-core n) (int-core d)])))
 
 (defn- lit-core
@@ -4779,8 +4802,8 @@
       :int (cond (= tn tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str val "#"))])
                  (= tn tc-double) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str val ".0##"))])
                  (= tn tc-float) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "F#")) [(list 'lit (str val ".0#"))])
-                 (= tn tc-integer) (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" "IS")) [(list 'lit (str val "#"))])
-                 :else (list 'app (list 'v f) [ev (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Integer" "IS")) [(list 'lit (str val "#"))])]))
+                 (= tn tc-integer) (integer-lit-core val)
+                 :else (list 'app (list 'v f) [ev (integer-lit-core val)]))
       :frac (let [txt (let [s (nth val 1)] (if (seq? s) (second s) (str s)))]
               (case (when tn (occ tn))
                 "Double" (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str txt "##"))])
