@@ -11796,3 +11796,38 @@ javac's keys; test/j2g moves no build key.
 `t03939 pass`, `t04307 pass`, `t04821 pass`, `t04823 pass`, `t04824 pass`, `t05287 pass`, `t05288 pass`, `t05330 pass`,
 `t05425 pass`, `t05562 pass`, `t05719 pass` (t04307 t05287 t05288 if their later lines hold), beside the first pass's; the ids go
 into the first pass's `.tmp/njd54.txt` for its commands.
+
+## 2026-11-18: n-java-defer (round 54), the third pass: Thread.ofPlatform, java.lang.Package, Executable's generic types in jrt
+
+The 15 eval (interp) rows of the round's "jrt's hand-written members" left after getStealCount (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-defer (round 54), the third pass"), each process under 5 GiB, no j2g whole-program run, no gate. All in
+go/arbace/jrt, the shipped world: none shows at interp before the day's build; each proven light.
+
+Built: (1) thread.ae: Thread.ofPlatform() and java.lang.Thread$Builder$OfPlatform (all 9 members), the builder and its factory after
+jdk26u's java/lang/ThreadBuilders.java (openjdk/jdk26u `baf63fbe4`, GPL 2 with the Classpath Exception, in LICENSE.md); `TestOfPlatform`,
+its control (the counter off by one) failing. (2) classloader.ae: java.lang.Package (19 of 24 members, no annotations: no package-info
+in the closed world), Package.getPackage/getPackages, Class.getPackage, ClassLoader.definePackage (protected, 8 arguments; the URL as
+a value), getDefinedPackage, getDefinedPackages, after jdk26u's java/lang/Package.java and ClassLoader.java; `TestPackages`, its control
+(another loader's packages seen) failing. (3) reflect.ae: Executable.getGenericParameterTypes and getGenericExceptionTypes on
+Executable_I and Executable (TypeAnnotationSupport calls them on an Executable); `TestExecutableGenericTypes`. test/jrt/manifest.ae lists
+OfPlatform and Package; `bin/jrt manifest` (frozen JVM, 0.5 GB) regenerated manifest.edn, manifest_test.ae and reflect_tables.ae,
+`bin/jrt testdata` the test data (TestReflectAgainstJVM's Class and ClassLoader member lists). `bin/jrt build --arch amd64 --package jrt`
+clean (2.1 GB); `bin/jrt test --arch amd64 --package jrt` passes but TestAnnotationHandlerNew (`é` in an annotation's toString),
+which fails identically on the base 115bbe333 (a detached worktree of it, removed): pre-existing, not this pass's.
+
+Decisions taken (round 54), the recommended ones: Package hand-written in jrt with Object as its superclass (not translated: Package.java
+needs NamedPackage, BootLoader and the module system); packages made on demand per name, a loader's definePackage kept per loader; the
+URL seal base typed `any` (jrt imports no translated package); left t03295 t03296 (class files loaded from bytes or a URLClassLoader: by
+design), t04873 (a translated ProtectionDomain: a j2g support slice), t04730 (package-info annotations), t04809/t05722 (the real
+AQS$ConditionObject never translated, jrt's ReentrantLock condition holds its name: a j2g and jrt slice), t05691 (ForkJoinPool.schedule's
+translated ScheduledFuture and the DelayScheduler); listed for `bin/jrt-convert update` (heavy, not done): t04952 FilteredNormalizer2,
+t05370 JavaAWTFontAccess, t05655 ThreadDeath (a subclass of the translated Error), each a closure line.
+
+Keys: go/arbace/jrt moves `gate_key`, `arbace_runtime_key` and javac's keys; test/jrt/manifest.ae moves jrt-convert verify's key
+(`:corpus-jdk`) but not its output. java.lang.Package leaves the edge's `:cut` (now jrt's): `bin/j2g-edge verify` will differ by that
+entry until the night's `bin/j2g-edge update` (8 GiB; then `bin/javac-vendor edge`).
+
+**Expected rows at the night's --record** (interp, test/java/check-interp.edn, after the day's build and the edge's update; not
+re-recorded here): `t04539 pass`, `t04689 pass`, `t04690 pass`, `t04869 pass`, `t05166 pass`, `t07858 pass` (t04689 t04690 t05166
+t07858 if their later lines hold); the ids join the first pass's `.tmp/njd54.txt`. The other nine keep their rows (t04730's reason
+moves to its package annotations).
