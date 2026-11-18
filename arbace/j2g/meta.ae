@@ -11,6 +11,10 @@
   - the resource roots (A5): a resource the program's resource directories hold more than once is
     embedded at its path from the first and at META-INF/arbace/roots/K/PATH from directory K, listed in
     META-INF/arbace/roots, so that ClassLoader.getResources enumerates one URL a directory;
+  - the entries' listings (GH15 (a), A17 of its G2 plan): each class-path entry's names, its resources,
+    its translated classes' class files (p/C.class, names only) and the directories above them, as
+    META-INF/arbace/entries, so that ClassLoader.getResources of a package and a JarFile over an entry
+    list them;
   - reflection roots (GH4 (iv), A6): GraalVM native-image's reachability metadata under
     META-INF/native-image/ (reflect-config.json, jni-config.json, resource-config.json's bundles,
     reachability-metadata.json), and the reflective call sites whose names are constant strings;
@@ -22,7 +26,8 @@
             [arbace.java.io :as io]
             [arbace.classes.analyze :as a]
             [arbace.j2g.access :as acc]
-            [arbace.j2g.names :as nm]))
+            [arbace.j2g.names :as nm]
+            [arbace.j2g.world :as w]))
 
 (def services-resource
   "The generated service registry's resource path: one provider a line, KIND SERVICE PROVIDER (KIND
@@ -84,6 +89,70 @@
   (into (sorted-map)
         (for [[q xs] (group-by #(second (unroot %)) ps)]
           [q (vec (sort-by #(first (unroot %)) xs))])))
+
+;; ---------------------------------------------------------------------------------------
+;; the entries' listings (A17 of the Ghidra case study's G2 plan, GH15 (a))
+
+(def entries-resource
+  "The class path's entries' listings: one line K NAME a name entry K lists (its resources' plain paths, the
+  class files p/C.class of its translated classes, the directories p/ above them), by K then name
+  (jdk.internal.jrt.ClassPathResources: getResources of a package, an entry's JarFile)."
+  "META-INF/arbace/entries")
+
+(defn- class-form? [f] (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f)))))
+
+(defn- member-class-names
+  "The internal names of class form cf's member classes, recursively, under outer's name (Outer$Inner)."
+  [outer cf]
+  (for [m (rest cf)
+        :when (class-form? m)
+        :let [n (str outer "$" (second m))]
+        x (cons n (member-class-names n m))]
+    x))
+
+(defn forms-class-names
+  "The internal names of the classes a Java forms file declares (its forms, its namespace ns): each top-level
+  class (arbace.j2g.world's naming) and its member classes, recursively; not local or anonymous classes."
+  [ns forms]
+  (let [cfs (for [f forms
+                  f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                  :when (class-form? f)]
+              f)]
+    (vec (mapcat (fn [cf] (let [top (first (#'w/top-names ns [cf]))]
+                            (cons top (member-class-names top cf))))
+                 cfs))))
+
+(defn tree-class-names
+  "The internal names of the classes the Java forms tree dir declares (forms-class-names of each file but
+  the package files), sorted."
+  [dir]
+  (vec (sort (distinct (for [f (w/source-files {:root dir :tree true})
+                             :let [forms (w/read-forms f)
+                                   ns (#'w/ns-of-forms forms)]
+                             :when ns
+                             n (forms-class-names ns forms)]
+                         n)))))
+
+(defn- parents
+  "The directories above path p (a/b/c.txt: a/ and a/b/)."
+  [^String p]
+  (let [parts (str/split p #"/")]
+    (for [i (range 1 (count parts))] (str (str/join "/" (take i parts)) "/"))))
+
+(defn entries-listing
+  "Each entry's names, [[k name] ...] sorted by k then name: entry k's resources (the plain paths it owns,
+  owners [[k path] ...], and the plain paths of its root copies among paths, the embedded data's), the class
+  files of its classes (classes {k [internal-name ...]}: p/C.class), and every directory above them (p/)."
+  [owners paths classes]
+  (let [files (concat owners
+                      (keep #(let [[k q] (unroot %)] (when (>= k 0) [k q])) paths)
+                      (for [[k ns] classes n ns] [k (str n ".class")]))]
+    (vec (sort (distinct (concat files (for [[k p] files d (parents p)] [k d])))))))
+
+(defn entries-text
+  "The listings' text (entries-resource): K NAME a line."
+  [listing]
+  (str/join (for [[k n] listing] (str k " " n "\n"))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; services (GH4 (ii))
