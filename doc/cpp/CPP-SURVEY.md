@@ -8953,3 +8953,15 @@ bin/reap --record && bin/crops-score --record && bin/crops-score --judge --stric
 Projected (n-cpp-indep's): independence 74 after the samples+runtime records on c/target, about 81 with the samplings', about 85
 with CP403 (P21 (b)'s flip). A recorded pass lost under c/target, or an own dg pass lost by the merged front end, is a regression
 the judge names.
+
+## As built: n-review-cc, a type-constraint's default arguments (2026-11-18, round 52; branch `n-review-cc` from mac/n-cpp-night 684d75393 with mac/n-goc-night and mac/n-c-print merged)
+
+- Queue 336's "wrong number of template arguments" check of a type-constraint ([temp.param]/4) counted the concept's parameters
+  alone, so a valid `template<D T>` over `template<class T, class U = int> concept D` was an error (GCC accepts it; in g++.dg:
+  cpp2a/concepts-pr86269.C, concepts-pr67147.C, concepts-pr82794.C, all accepted tests, none in a record; libstdc++'s
+  `three_way_comparable<T, Cat = partial_ordering>` alike). `parse-template-params` now gives its list the count of the parameters
+  before the first with a default (`:nreq` in the list's metadata: an `=` among a parameter's tokens, skimmed or not), the concept's
+  entity holds it, and the check takes `nreq <= n <= nparams`, in GCC's words ("should be at least N" when the concept has defaults,
+  for too few and too many alike). Proved: test/cpp/selftest/concepts/r17-default-arguments.C (`bin/cppi selftest concepts-diag`,
+  18 cases, 0 not behaving, the control failing), the three g++.dg files with no error, the queue-336 messages unchanged on the
+  others (two-parameter concept without defaults: "(1, should be 2)"). No record changes.

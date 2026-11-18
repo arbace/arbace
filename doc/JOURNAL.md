@@ -10609,3 +10609,18 @@ operands' invocations in the :lines print alone. Proved on listed round trips un
 159-file regression list 157 pass, 2 known as recorded), rows merged by id (33 changed), print 4798 / 3 / 22 to 4830 / 3 / 17.
 shell.c not run (memory rule); the 159-file run peaked at 1.46 GB, over the night's 1 GiB. Taken overnight (round 52): CS82 (b).
 Proposed: CS329 (an #include inside an initializer or enum). Alternatives: keep the classes (CS82 (a)).
+
+## 2026-11-18: n-review-cc, tonight's embedded heads reviewed for tomorrow's builds (round 52; branch `n-review-cc` from mac/n-cpp-night 684d75393)
+
+Merged mac/n-goc-night 9b8bcb98b and mac/n-c-print 722bbae14 (n-c-split had no commit yet: its worktree's work uncommitted) into
+mac/n-cpp-night: the conflicts were the journal's appends (both kept, in order) and test/reap/matrix.edn's C print and C++ read rows
+(n-c-print's C print, n-cpp-night's C++ read; `bin/reap --record` then wrote it unchanged). Checked, each process under 1 GiB: every
+changed namespace (repr/c, c, go, j2g, repr/go, cpp, repr/cpp, crops.score) required on stage 0 and the embedded ones load-filed from
+the checkout (no unresolved symbol, one new auto-boxing warning in repr/c's parse); crt, the package arbace (std.go) and gcsyntax printed
+by repr/go and built with TamaGo's go for linux/amd64 (crt also arm64), `go vet` clean but crt's spawn.go's old unreachable code;
+`bin/ci dg --essential` 92 of 92, `bin/repr-c check --c23` 59 pass / 3 expected / 0 failing, `bin/cppi selftest concepts-diag`,
+`bin/crops-score --judge --strict`, `bin/records-check` 9 pairs 0 problems; n-c-lex's gnu::base64 and #embed parameters in C++ mode
+compared on g++.dg/cpp's 26 embed files (only embed-24.C's tokens change, its gnu::offset now read; no C++ record lists it) and the
+own dg check's 5 recorded embed rows' diagnostics unchanged. Fixed: queue 336's type-constraint argument count ignored a concept's
+default template arguments (doc/cpp/CPP-SURVEY.md, "As built: n-review-cc"); taken overnight (round 52): count the parameters before the
+first default (alternative: drop the check when a concept has defaults, rejected: it loses GCC's "at least" errors).

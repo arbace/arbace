@@ -3626,7 +3626,7 @@
   [^P p]
   (if (is? p ">")
     [[] []]
-    (loop [ns [] names []]
+    (loop [ns [] names [] nreq nil]
       (let [b (ix p)
             [n nm]
             (cond
@@ -3690,9 +3690,9 @@
                     (when (and (pos? (long (or (:nparams ce) 0))) (not (:vpack ce)) (or (nil? as) (vector? as))
                                ;; (an argument's pack expansion: its count unknown here)
                                (not (and as (:ab lp) (:ae lp) (some #(t= (tok-at p %) "...") (range (long (:ab lp)) (inc (long (:ae lp))))))))
-                      (let [n (inc (count as))]
-                        (when (not= n (long (:nparams ce)))
-                          (soft-diag! p b (str "wrong number of template arguments (" n ", should be " (:nparams ce) ")")))))))
+                      (let [n (inc (count as)) np (long (:nparams ce)) nr (long (or (:nreq ce) np))]
+                        (when (or (> n np) (< n nr))
+                          (soft-diag! p b (str "wrong number of template arguments (" n ", should be " (if (< nr np) (str "at least " nr) np) ")")))))))
                 [(node p "TemplateTypeParmDecl" b (last-ix p)
                        (cond-> {:tagUsed "typename" :loc (loc p ni)
                                 :inner (into [{:kind "ConceptSpecializationExpr"}] (when dflt [{:kind "TemplateArgument" :type {:qualType (qt dflt)}}]))}
@@ -3729,15 +3729,19 @@
                                 :inner (if dflt [{:kind "TemplateArgument" :inner [dflt]}] [])}
                          nm (assoc :name nm) pack (assoc :isParameterPack true)))
                  (when nm (str nm (when pack "...")))]))]
-        (let [ns (conj ns n) names (conj names nm)]
-          (if (accept! p ",") (recur ns names)
+        (let [;; (n-review-cc: the parameters before the first with a default argument, [temp.param]/14, which a
+              ;; concept's type-constraint may leave out: std::three_way_comparable<T, Cat = partial_ordering>; an `=` among the
+              ;; parameter's tokens, skimmed or not)
+              nreq (or nreq (when (some #(t= (tok-at p %) "=") (range (long b) (inc (long (last-ix p))))) (count ns)))
+              ns (conj ns n) names (conj names nm)]
+          (if (accept! p ",") (recur ns names nreq)
               (do
                 ;; (a list of unnamed parameters, `template <class...>`, is a template's all the same: in-template? asks
                 ;; the scope for names, so it holds one no lookup can spell; CP290 (a): such a template's deduced return
                 ;; type stays `auto`, as clang's pattern has it)
                 (when (zero? (.size ^java.util.HashMap (sc/names-of (scope p))))
                   (.put ^java.util.HashMap (sc/names-of (scope p)) " unnamed" {:k :type :name " unnamed" :tparam true}))
-                [ns names])))))))
+                [(with-meta ns {:nreq (or nreq (count ns))}) names])))))))
 
 (defn- fold-const
   "An integral constant expression's value (a specialization's template argument), or nil."
@@ -3899,6 +3903,7 @@
                     (expect! p ";")
                     ;; (queue 336: its parameters' count and whether the last is a pack, for a type-constraint's arguments)
                     (sc/declare! (sc/decl-scope (scope p)) {:k :concept :name nm :nparams (count ps)
+                                                            :nreq (or (:nreq (meta ps)) (count ps))
                                                             :vpack (boolean (:isParameterPack (peek ps)))
                                                             ;; (n-cpp-concepts: whether it is a type concept, [temp.concept]/7: its
                                                             ;; first template parameter a type parameter)
