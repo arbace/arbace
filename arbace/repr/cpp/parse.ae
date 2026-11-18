@@ -158,6 +158,7 @@
 (defn- is-at? [^P p ^long k ^String s] (t= (nxt p k) s))
 (defn- id? [^P p] (identical? :id (.-k (cur p))))
 (defn- id-is? [^P p ^String s] (let [t (cur p)] (and (identical? :id (.-k t)) (.equals s (.-s t)))))
+(defn- id-is-at? [^P p ^long k ^String s] (let [^T t (nxt p k)] (and (identical? :id (.-k t)) (.equals s (.-s t)))))
 (defn- eof? [^P p] (identical? :eof (.-k (cur p))))
 (defn- main-tok? [^P p ^long i] (let [^T t (tok-at p i)] (= (.-f t) (.-main p))))
 
@@ -1267,21 +1268,29 @@
                          (every? (fn [d] (or (nil? d) (head-ok (first d)))) ds)
                          (not (some (fn [[d e]] (and (> (count d) 1) (nil? e))) (partition 2 1 ds))))
           slots (when placeable
-                  (loop [i 0 at 0 m (sorted-map)]
+                  (loop [i 0 at 0 m (sorted-map) prev nil]
                     (if (>= i (count kids))
                       m
                       (let [d (get ds i)
                             [k v] (first d)
                             at (long (if d (if (= k :i) v (.indexOf ^java.util.List fields v)) at))
                             x (kids i)]
+                        ;; (round 54: [dcl.init.aggr]/3.1, a class's designators in the order of its members, each once: GCC's
+                        ;; "designator order ... does not match declaration order", "designator used multiple times")
+                        (when (and d (= k :f) (not arr) prev (nth (first d) 2 nil))
+                          (let [[pat psingle] prev]
+                            (cond (< at (long pat))
+                                  (soft-diag! p (long (nth (first d) 2)) (str "designator order for field '" v "' does not match declaration order"))
+                                  (and (= at (long pat)) psingle (= 1 (count d)))
+                                  (soft-diag! p (long (nth (first d) 2)) "designator used multiple times in the same initializer list"))))
                         (if (> (count d) 1)
                           ;; a nested designator: its rest and its value into the member's list without braces
                           (let [sub (let [o (get m at)]
                                       (if (:_nested o) o {:kind "InitListExpr" :_nested true :inner [] :_desigs []
                                                           :range {:begin (loc p (long (nth (second d) 2))) :end (:end (:range x))}}))
                                 sub (-> sub (update :inner conj x) (update :_desigs conj (vec (rest d))) (assoc-in [:range :end] (:end (:range x))))]
-                            (recur (inc i) (inc at) (assoc m at sub)))
-                          (recur (inc i) (inc at) (assoc m at x)))))))
+                            (recur (inc i) (inc at) (assoc m at sub) (if d [at false] prev)))
+                          (recur (inc i) (inc at) (assoc m at x) (if d [at (= 1 (count d))] prev)))))))
           inner (if placeable
                   (let [n (if (seq slots) (inc (long (key (last slots)))) 0)]
                     (mapv (fn [^long j] (let [k (get slots j)]
@@ -1457,7 +1466,12 @@
     (if-let [[v ty] (lit/int-literal s)]
       (node p "IntegerLiteral" i i {:value v :type {:qualType ty} :valueCategory "prvalue"})
       (if-let [[v ty] (lit/float-literal s)]
-        (node p "FloatingLiteral" i i {:value v :type {:qualType ty} :valueCategory "prvalue"})
+        (do ;; (round 54: GNU's q, Q, w and W floating suffixes, GCC's extension in its GNU modes alone; in a strict mode the suffix
+            ;; from C++11 is a ud-suffix, [lex.ext]/1 (C++98 has none: the suffix GCC's extension again), whose literal operator lookup finds none: GCC's "unable to find numeric literal operator")
+            (when-let [[_ sfx] (and (not (.-gnu p)) (>= (.-year p) 2011) (re-find #"[0-9.]([qQwW])$" s))]
+              (when-not (sc/lookup (scope p) (str "operator\"\"" sfx))
+                (soft-diag! p i (str "unable to find numeric literal operator 'operator\"\"" sfx "'"))))
+            (node p "FloatingLiteral" i i {:value v :type {:qualType ty} :valueCategory "prvalue"}))
         (if (and (re-matches #"(?i)[0-9.][0-9a-z.'+-]*?(i|j)(f|l|u|ul|ll|ull)?|(?i)[0-9.][0-9a-z.'+-]*?(f|l)(i|j)" s)
                  (not (sc/lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
           (node p "ImaginaryLiteral" i i {})
@@ -1922,7 +1936,11 @@
           (cond
             (is? p "...") (do (adv! p) (expect! p "(") (let [nm (ts (cur p))] (adv! p) (expect! p ")") (node p "SizeOfPackExpr" b (last-ix p) {:name nm})))
             (and (is? p "(") (let [save (ix p)] (adv! p) (let [r (is-type-id? p :paren)] (seek! p save) r)))
-            (do (adv! p) (let [ty (parse-type-id p :paren)] (expect! p ")") (node p "UnaryExprOrTypeTraitExpr" b (last-ix p) {:name "sizeof" :argType {:qualType (qt ty)}})))
+            (do (adv! p)
+                ;; (round 54: [temp.variadic]/5, sizeof of a type template parameter pack, not sizeof...)
+                (when (and (id? p) (is-at? p 1 ")") (:pack (sc/lookup (scope p) (ts (cur p)))) (:tparam (sc/lookup (scope p) (ts (cur p)))))
+                  (soft-diag! p (ix p) "parameter packs not expanded with '...'"))
+                (let [ty (parse-type-id p :paren)] (expect! p ")") (node p "UnaryExprOrTypeTraitExpr" b (last-ix p) {:name "sizeof" :argType {:qualType (qt ty)}})))
             :else (let [x (parse-cast-expr p)] (node p "UnaryExprOrTypeTraitExpr" b (ne x) {:name "sizeof" :inner [x]}))))
       (or (t= t "alignof") (t= t "_Alignof") (t= t "__alignof") (t= t "__alignof__"))
       (let [nm (if (#{"alignof" "_Alignof"} s) "alignof" "__alignof")]
@@ -2387,6 +2405,15 @@
                                        (not (and (identical? :str (tk (nxt p 1)))
                                                  (loop [k 2] (if (identical? :str (tk (nxt p k))) (recur (inc k)) (is-at? p k ")"))))))
                               (soft-diag! p (inc (ix p)) (str "expected string-literal before '" (ts (nxt p 1)) "'")))
+                            ;; (round 54: [dcl.attr.noreturn]/1, [dcl.attr.unused]/1, [dcl.attr.likelihood]/1, [dcl.attr.fallthrough]/1,
+                            ;; [dcl.attr.nouniqueaddr]/1, [dcl.attr.depend]/1: these attribute-tokens take no attribute-argument-clause;
+                            ;; GNU's attributes of no argument likewise, as GCC's attribute tables give them)
+                            (when (and args? (if (nil? nsname)
+                                               (contains? #{"noreturn" "carries_dependency" "likely" "unlikely" "maybe_unused" "fallthrough" "no_unique_address"} (ts (tok-at p b)))
+                                               (and (#{"gnu" "__gnu__"} nsname)
+                                                    (contains? #{"noinline" "always_inline" "noreturn" "cold" "hot" "flatten" "leaf" "noclone" "returns_twice" "artificial" "noipa"}
+                                                               (str/replace (ts (tok-at p (+ b 2))) #"^__|__$" "")))))
+                              (soft-diag! p b (str "'" (str/replace (ts (tok-at p (if nsname (+ b 2) b))) #"^__|__$" "") "' attribute does not take any arguments")))
                             (when args? (attr-args-semicolon! p) (skip-balanced! p))
                             (when (is? p "...")
                               ;; ([dcl.attr.grammar]/4: an attribute followed by an ellipsis is a pack expansion; the
@@ -2514,7 +2541,13 @@
           (identical? k :kw)
           (cond
             (and (= s "extern") (#{:str :udls} (tk (nxt p 1)))) (if (seq words) (assoc ds :type {:t :b :w words} :e (last-ix p)) (assoc ds :e (last-ix p)))
-            (#{"static" "extern" "register"} s) (do (adv! p) (recur (assoc ds :storage s) words))
+            ;; (round 54: [dcl.spec.general]/2, each of these decl-specifiers at most once, [dcl.stc]/1 one storage-class-specifier:
+            ;; GCC's "duplicate 'friend'", "'extern' specifier conflicts with 'static'")
+            (#{"static" "extern" "register"} s) (do (when-let [o (:storage ds)]
+                                                      (soft-diag! p (ix p) (if (= o s) (str "duplicate '" s "'") (str "'" s "' specifier conflicts with '" o "'"))))
+                                                    (adv! p) (recur (assoc ds :storage s) words))
+            (and (#{"mutable" "typedef" "friend" "virtual" "constexpr" "consteval" "constinit"} s) (get ds (keyword s)))
+            (do (soft-diag! p (ix p) (str "duplicate '" s "'")) (adv! p) (recur ds words))
             (= s "mutable") (do (adv! p) (recur (assoc ds :mutable true) words))
             (= s "typedef") (do (adv! p) (recur (assoc ds :typedef true) words))
             (= s "friend") (do (adv! p) (recur (assoc ds :friend true) words))
@@ -2526,7 +2559,7 @@
             (= s "constinit") (do (adv! p) (recur (assoc ds :constinit true) words))
             ;; (cpp-s5b: the TLS kind as clang's VarDecl::getTLSKind gives it: thread_local's is dynamic, __thread's and
             ;; _Thread_local's static)
-            (#{"thread_local" "_Thread_local" "__thread"} s) (do (adv! p) (recur (assoc ds :tls (if (= s "thread_local") "dynamic" "static")) words))
+            (#{"thread_local" "_Thread_local" "__thread"} s) (do (when (:tls ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :tls (if (= s "thread_local") "dynamic" "static")) words))
             (#{"_Noreturn" "__extension__" "export"} s) (if (and (= s "export") (not= ctx :top)) (assoc ds :e (last-ix p)) (do (adv! p) (recur ds words)))
             (#{"const" "__const"} s) (do (adv! p) (recur (assoc ds :c true) words))
             (#{"volatile" "__volatile" "__volatile__"} s) (do (adv! p) (recur (assoc ds :v true) words))
@@ -2881,7 +2914,12 @@
         base (or (ds-type ds) (perr p "a type"))
         ;; CP352: a class or enumeration defined in a trailing return type (`auto f() -> struct C {} {}`, ill-formed) has no place in the
         ;; function's forms (its declaration would stand beside it): a decline, the declaration's text
-        _ (when (and (= ctx :trailing) (:tag-node ds) (not (skim? p))) (perr p "a type defined in a trailing return type"))]
+        _ (when (and (= ctx :trailing) (:tag-node ds) (not (skim? p))) (perr p "a type defined in a trailing return type"))
+        ;; (round 54: [dcl.type.general]/3 (C++23 [dcl.type.general]/2), a type-specifier-seq defines no class or enumeration outside
+        ;; a declaration's: a cast's, sizeof's, offsetof's or a template argument's type-id; GCC's "types may not be defined in ...")
+        _ (when-let [tn (:tag-node ds)]
+            (when (and (not= ctx :trailing) (or (:completeDefinition tn) (and (= "EnumDecl" (:kind tn)) (seq (:inner tn)))))
+              (soft-diag! p (long (:b ds)) "types may not be defined in a type-id")))]
     (if (= ctx :conv)
       (reduce (fn [t op] (assoc op :of t)) base (ptr-ops p))
       (build-type base (parse-declarator p :abstract)))))
@@ -2919,6 +2957,10 @@
                          (not (and (#{:n :tn} (:t base)) (:s base)
                                    (some (fn [w] (:pack (sc/lookup (scope p) w))) (re-seq #"[A-Za-z_]\w*" (:s base))))))
                 d (if cva (dissoc d :pack) d)
+                ;; (round 54: [temp.variadic]/5, a template parameter pack named by a parameter's type outside a pack expansion: GCC's
+                ;; "parameter packs not expanded with '...'")
+                _ (when (and (:pack (:ent base)) (not (:pack d)) (not cva))
+                    (soft-diag! p (long (:b ds)) "parameter packs not expanded with '...'"))
                 ty (build-type base d)
                 qn (:name (last (name-chain d)))
                 nm (name-plain qn)
@@ -3002,7 +3044,12 @@
     (adv! p)
     (let [attrs (attr-nodes p)
           qn (when (name-start? p) (parse-name p :parse))
-          fin (when (and qn (or (id-is? p "final") (id-is? p "__final")) (or (is-at? p 1 "{") (is-at? p 1 ":"))) (let [i (ix p)] (adv! p) i))
+          fin (when (and qn (or (id-is? p "final") (id-is? p "__final")) (or (is-at? p 1 "{") (is-at? p 1 ":")
+                                                                             ;; (round 54: `final final`, the class-virt-specifier twice)
+                                                                             (and (or (id-is-at? p 1 "final") (id-is-at? p 1 "__final")) (or (is-at? p 2 "{") (is-at? p 2 ":")))))
+                (let [i (ix p)] (adv! p)
+                  (when (or (id-is? p "final") (id-is? p "__final")) (soft-diag! p (ix p) "duplicate virt-specifier") (adv! p))
+                  i))
           attrs (into attrs (attr-nodes p))
           defn? (or (is? p "{") (and (is? p ":") (not (is-at? p 1 ":")) (or (nil? qn) (not (#{:member} ctx)) true)))]
       (if-not defn?
@@ -3247,9 +3294,12 @@
   "override, final (and GNU's __final) after a member function's declarator: their attribute nodes."
   [^P p]
   (loop [out []]
-    (cond (id-is? p "override") (let [i (ix p)] (adv! p) (recur (conj out (node p "OverrideAttr" i i {}))))
-          (or (id-is? p "final") (id-is? p "__final")) (let [i (ix p)] (adv! p) (recur (conj out (node p "FinalAttr" i i {}))))
-          :else out)))
+    ;; (round 54: [class.mem.general]/1's virt-specifier-seq, each virt-specifier at most once, [class.mem.general]/14: GCC's
+    ;; "duplicate virt-specifier")
+    (let [dup! (fn [k] (when (some #(= k (:kind %)) out) (soft-diag! p (ix p) "duplicate virt-specifier")))]
+      (cond (id-is? p "override") (let [i (ix p)] (dup! "OverrideAttr") (adv! p) (recur (conj out (node p "OverrideAttr" i i {}))))
+            (or (id-is? p "final") (id-is? p "__final")) (let [i (ix p)] (dup! "FinalAttr") (adv! p) (recur (conj out (node p "FinalAttr" i i {}))))
+            :else out))))
 
 (defn- skip-asm-label! [^P p]
   (when (and (or (is? p "asm") (is? p "__asm__") (is? p "__asm")) (is-at? p 1 "("))
@@ -3385,7 +3435,22 @@
               ni (if qn (long (:i lp)) (ix p))
               nm (when qn (name-plain qn))
               nn (:s lp)
-              e0 (long (:e d))]
+              e0 (long (:e d))
+              ;; (round 54: DR2237, C++20's [class.ctor.general]/1 and [class.dtor]/1: a constructor's or destructor's declarator-id
+              ;; is no simple-template-id; GCC's pedwarn, -Wtemplate-id-cdtor)
+              _ (when (and fs (>= (.-year p) 2020) (:args lp) (or (and ctor (= ctx :member)) (:dtor lp)))
+                  (pedantic-diag! p (long (:i lp)) (str "template-id not allowed for " (if (:dtor lp) "destructor" "constructor") " in C++20")))
+              ;; (round 54: [temp.variadic]/5, a declaration's type naming a template parameter pack, the declarator no pack)
+              _ (when (and (:pack (:ent base)) (not (:pack d)))
+                  (soft-diag! p (long (:b ds)) "parameter packs not expanded with '...'"))
+              ;; (round 54: [dcl.stc]/2 (C++14), the register specifier applies to variables alone; GCC's error at every standard)
+              _ (when (and fs (not (:a fs)) (= "register" (:storage ds)))
+                  (soft-diag! p (long (:b ds)) "storage class 'register' invalid for function"))
+              ;; (round 54: [class.qual]/2, `X<T>::X<T>()`: the name after a nested-name-specifier nominating X is X's constructor,
+              ;; which takes no template arguments; GCC's "names the constructor, not the type")
+              _ (when (and fs qn (:args lp) (:s lp) (>= (count (:parts qn)) 2)
+                           (= (:s lp) (:s (nth (:parts qn) (- (count (:parts qn)) 2)))))
+                  (soft-diag! p (long (:i lp)) (str "'" (:s lp) "::" (:s lp) "' names the constructor, not the type")))]
           (cond
             ;; a typedef
             (:typedef ds)
@@ -3921,8 +3986,13 @@
                     [(node p "ConceptDecl" hb e (cond-> {:name nm :loc (loc p ni) :inner ps} cx (assoc :constraintExpr cx)))])))
             :else
             (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
-                (let [ns (try (parse-external-decl p (if (= ctx :member) :member :top)) (finally (st! p THDR nil)))]
-                  (mapv #(cond-> (wrap-template p % hb ob ps names depth) rc (assoc :requiresClause rc)) ns)))))))))
+                (let [ns (try (parse-external-decl p (if (= ctx :member) :member :top)) (finally (st! p THDR nil)))
+                      ws (mapv #(cond-> (wrap-template p % hb ob ps names depth) rc (assoc :requiresClause rc)) ns)]
+                  ;; (round 54: [temp.param]/14, a primary class, variable or alias template's parameter pack is its last parameter)
+                  (when (and (some #(#{"ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind %)) ws)
+                             (some :isParameterPack (butlast ps)))
+                    (soft-diag! p hb "parameter pack must be at the end of the template parameter list"))
+                  ws))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Namespaces, linkage, using, static_assert, export
@@ -4046,6 +4116,11 @@
               ad (parse-declarator p :abstract)
               ty (vectorized (build-type (or (ds-type ds) (perr p "an alias's type")) ad) (concat (:attrs ds) (:attrs ad)))
               e (last-ix p)]
+          ;; (round 54: [dcl.typedef]/2, an alias template's defining-type-id defines no class or enumeration: GCC's "types may not
+          ;; be defined in alias template declarations")
+          (when-let [tn (:tag-node ds)]
+            (when (and tmpl (pos? (long (:n tmpl))) (or (:completeDefinition tn) (and (= "EnumDecl" (:kind tn)) (seq (:inner tn)))))
+              (soft-diag! p (long (:b ds)) "types may not be defined in alias template declarations")))
           (expect! p ";")
           (declare! p (cond-> {:k :type :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :target (:ent ty) :scope (ent-scope (:ent ty))}
                         (not (and tmpl (pos? (long (:n tmpl))))) (assoc :ty ty)
@@ -4420,8 +4495,13 @@
             ;; (h-cpp-read: the lambda-specifier-seq precedes the attributes of the call operator's type, [expr.prim.lambda.general]/1:
             ;; a specifier after them is GCC's "expected '{' before" it)
             latt (volatile! false)
+            seen (java.util.HashSet.)
             _ (loop [] (cond (or (is? p "mutable") (is? p "constexpr") (is? p "consteval") (is? p "static"))
                              (do (when @latt (soft-diag! p (ix p) (str "expected '{' before '" (ts (cur p)) "'")))
+                                 ;; (round 54: [expr.prim.lambda.general]/4, each lambda-specifier at most once; a static lambda C++23's,
+                                 ;; GCC's pedwarn before it)
+                                 (when-not (.add seen (ts (cur p))) (soft-diag! p (ix p) (str "duplicate '" (ts (cur p)) "' specifier")))
+                                 (when (and (is? p "static") (< (.-year p) 2023)) (pedantic-diag! p (ix p) "'static' only valid in lambda with -std=c++23"))
                                  (when (or (is? p "constexpr") (is? p "consteval")) (vreset! cexpr true)) (adv! p) (recur))
                              (is? p "noexcept") (do (adv! p)
                                                     (when (and (is? p "(") (is-at? p 1 ")")) (soft-diag! p (inc (ix p)) "expected primary-expression before ')' token"))

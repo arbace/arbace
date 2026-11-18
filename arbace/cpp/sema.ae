@@ -1330,6 +1330,15 @@
         ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
         f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
                                        :access (when cid *member-access*)))
+        ;; (round 54, the checker: [dcl.fct.def.general]/2, a function definition's return type a class incomplete at its body -- declared,
+        ;; not defined there, not one being defined (a member's body is a complete-class context) nor a template's instance; clang's
+        ;; err_func_def_incomplete_result)
+        _ (when (and (checking?) body (not (:explicitlyDeleted n)))
+            (let [r (:ret (:ty f))]
+              (when (abi/class? r)
+                (let [c (abi/cls (:id r))]
+                  (when (and c (not (:tmpl c)) (not (:lambda c)) (not (:defining c)) (not (:complete c)))
+                    (*on-refusal* (ex-info (str "codegen: incomplete result type '" (:name c) "' in function definition") {:codegen/refused :incomplete}) n))))))
         old (find-redecl home f)
         id (or old (next-id))
         pinfo {:param-names (mapv :name pn)
@@ -1368,6 +1377,16 @@
 
 (declare ctad-var)
 
+(defn- incomplete-var!
+  "Round 54, the checker: [basic.def]/5, [dcl.init.general]/7: a variable's definition `n` of a class type `ty` incomplete at that
+  point (declared and not yet or never defined, or still being defined; not an extern declaration nor a class template's instance):
+  clang's err_typecheck_decl_incomplete_type, reported at the declaration, the analysis going on, as a field's is."
+  [n ty]
+  (when (and (checking?) (not= "extern" (:storageClass n)) (not (:extern n)) (abi/class? ty))
+    (let [c (abi/cls (:id ty))]
+      (when (and c (not (:tmpl c)) (not (:lambda c)) (or (:defining c) (not (:complete c))))
+        (*on-refusal* (ex-info (str "codegen: variable has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))))
+
 (defn- declare-var!
   [scope n storage]
   (let [qt (get-in n [:type :qualType])
@@ -1384,7 +1403,11 @@
         ty (let [i (init-kid n)]
              (cond
                (and (abi/arr? ty) (nil? (:n ty)) (abi/scalar? (abi/unq (:of ty))) (= "InitListExpr" (:kind i)))
-               (assoc ty :n (count (kids i)))
+               (do ;; (round 54, the checker: [dcl.init.aggr]/9: an array of unknown bound initialized by an empty list has no element,
+                   ;; [dcl.array]/1's bound greater than zero: GCC's "zero-size array")
+                   (when (and (checking?) (empty? (kids i)))
+                     (*on-refusal* (ex-info "codegen: zero-size array" {:codegen/refused :array}) n))
+                   (assoc ty :n (count (kids i))))
                ;; (n-cpp-eval: of GNU vectors, each element its own braced list: g++.dg's torture/vshuf-*.inc `constexpr V in1[] =
                ;; { {...}, ... }`, whose sizeof had been 0; a vector's lanes with their braces elided refused)
                (and (abi/arr? ty) (nil? (:n ty)) (= :vec (:k (abi/unq (:of ty)))) (= "InitListExpr" (:kind i)))
@@ -1399,7 +1422,11 @@
         ^java.util.HashMap m (:names home)
         old (some #(when (= :var (:e %)) (:id %)) (.get m (:name n)))
         init (init-kid n)
-        st (if (:cls home) :member-static storage)]
+        st (if (:cls home) :member-static storage)
+        ;; (round 54, the checker: [basic.def]/5, [dcl.init.general]/7: a variable's definition of a class type incomplete at that point,
+        ;; one declared and not yet or never defined or still being defined -- not a static data member's declaration in its class, nor
+        ;; an extern declaration, nor a class template's instance; clang's err_typecheck_decl_incomplete_type)
+        _ (when (and (not= st :member-static) (empty? q)) (incomplete-var! n ty))]
     (if (and old (seq q))
       ;; a qualified definition of a namespace member declared `extern` (libsupc++'s `const nothrow_t std::nothrow = ...`,
       ;; `terminate_handler __cxxabiv1::__terminate_handler = ...`): the definition, no longer extern ([basic.def]/2)
@@ -1488,7 +1515,9 @@
             (enter! bs (:name c) (assoc e :ty under))
             (enter! es (:name c) e)
             (when-not scoped (enter! scope (:name c) e))
-            (recur more (inc (long v)) bs))))
+            ;; (round 54: the next enumerator's implicit value past the last one; LONG_MAX's successor, underlying_type7.C's
+            ;; `enum class E6 : long { c = __LONG_MAX__ }`, is never read: unchecked, not an overflow's crash)
+            (recur more (unchecked-inc (long v)) bs))))
       ;; (cpp-s13: an enumeration without a fixed underlying type and no negative enumerator has clang's unsigned int as its
       ;; integer type ([dcl.enum]/7; Sema's ActOnEnumBody), which a bit-field of it reads zero-extended: <format>'s _Spec's
       ;; `_Align _M_align : 2` held _Align_right, 2, read back as -2, and "{:>6}" padded on the left's other side)
@@ -1541,6 +1570,14 @@
                                                                                                          (if (= "class" (:tagUsed n)) "private" "public")))}
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true)))))
+      ;; (round 54, the checker: [class.mi]/3, a class named twice as a direct base: reported at the class, the later one dropped)
+      (when (checking?)
+        (let [bs (:bases (abi/cls id))
+              dup (some (fn [[i b]] (when (and (:cls b) (not (:dependent b)) (some #(= (:cls b) (:cls %)) (take i bs))) b))
+                        (map-indexed vector bs))]
+          (when dup
+            (*on-refusal* (ex-info (str "codegen: duplicate base type '" (:name (abi/cls (:cls dup))) "' is invalid") {:codegen/refused :base}) n)
+            (abi/update-cls! id assoc :bases (reduce (fn [o b] (if (and (:cls b) (not (:dependent b)) (some #(= (:cls b) (:cls %)) o)) o (conj o b))) [] bs)))))
       ;; alignas on the class ([dcl.align]): its alignment at least the strictest one written (a type's or a constant's)
       ;; (and GNU's aligned, G5c: unwind.h's `struct _Unwind_Exception { ... } __attribute__((__aligned__))`, without an
       ;; argument the target's largest alignment, 16 on x86-64, as GCC documents it and clang's TargetInfo's
@@ -1617,6 +1654,10 @@
                                            (assoc :friend-unknown true)))))
                 (binding [*member-access* @access] (declare-node! cs k))))))
         (finally (abi/update-cls! id dissoc :defining))))
+      ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
+      ;; [class.mem.general]/11: GCC's "initializations for multiple members of 'A'", at the union)
+      (when (and (checking?) (:union (abi/cls id)) (< 1 (count (filter :init (:fields (abi/cls id))))))
+        (*on-refusal* (ex-info (str "codegen: initializations for multiple members of '" nm "'") {:codegen/refused :union}) n))
       (finish-class! id)
       ;; (CP365 (a): finished, and the provisional instances that waited for it made again)
       (abi/update-cls! id assoc :finished true)
@@ -2459,6 +2500,11 @@
 ;; CX12 (the checker): true while a constexpr function's body is evaluated (the sure rules below judge the initializer's own
 ;; operations only, where gcc and clang put the error on the variable's line)
 (def ^:dynamic *ce-in-call* false)
+;; round 54: the nesting of the evaluated calls, bounded by [implimits]'s recursive constexpr function invocations (512, clang's and
+;; GCC's default; -fconstexpr-depth=N sets it, arbace.repr.cpp.diag binds it from the file's options): past it the evaluation is not
+;; a constant, at the call (constexpr-recursion.C's `return f (i-1);` had overflowed the analysis' stack)
+(def ^:dynamic *ce-depth* 0)
+(def ^:dynamic *constexpr-depth* 512)
 
 ;; clang's EvaluateAsInitializer (VarDecl::evaluateValue, the constant initialization CodeGen tries for every variable's initializer):
 ;; a constant fold, not a core constant expression, so a const variable of floating type with a constant initializer reads as its value
@@ -2675,7 +2721,11 @@
                    (let [env2 (cond-> (assoc (ce-args-env f (:args e) env) ::ret rt) this (assoc ::this this))
                          p0 (some-> *ce-pos* deref)
                          pce-bad (and (checking?) (cx-pce-bad? (:id f)))
-                         r (try (binding [*ce-in-call* true] (ce-exec (:tbody f) env2))
+                         _ (when (>= (long *ce-depth*) (long *constexpr-depth*))
+                             (if (checking?)
+                               (ub! e "constexpr evaluation depth exceeds maximum of " *constexpr-depth*)
+                               (not-constant "constexpr evaluation depth exceeds maximum of " *constexpr-depth*)))
+                         r (try (binding [*ce-in-call* true *ce-depth* (inc (long *ce-depth*))] (ce-exec (:tbody f) env2))
                                 (catch arbace.lang.ExceptionInfo x
                                   (if (and pce-bad (:cx/sure (ex-data x)) (not (:cx/pce (ex-data x))))
                                     (throw (ex-info (.getMessage x) (assoc (ex-data x) :cx/pce true)))
@@ -6209,6 +6259,7 @@
                   (if (and (checking?) (nil? (init-kid n)) (re-matches #"[A-Za-z_]\w*" (str qt)))
                     (try (resolve-type (:scope ctx) (str qt "<>")) (catch arbace.lang.ExceptionInfo _ (throw x)))
                     (throw x)))))
+        _ (incomplete-var! n ty)
         id (next-id)
         ;; (thread_local at block scope implies static, [dcl.stc]/4)
         st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
@@ -6810,7 +6861,11 @@
                     (= "PackExpansionExpr" (:kind x)) (let [as (analyze-args ctx [x])]
                                                         (init-for t as ctx (if (empty? as) :value :direct)))
                     :else (init-for t [(analyze ctx x)] ctx :direct)))
-        deleg (get given [:base cid])]
+        deleg (get given [:base cid])
+        ;; (round 54, the checker: [class.base.init]/5, a mem-initializer-list initializes at most one member of a union)
+        _ (when (and (checking?) (:union c))
+            (when-let [i2 (second (filter #(and (not (:baseInit %)) (not (:delegatingInit %)) (get-in % [:anyInit :name])) (:inits f)))]
+              (throw (ex-info (str "codegen: initializations for multiple members of '" (:name c) "'") {:codegen/refused :union :cx/node i2}))))]
     (if deleg
       {:delegate (init-of {:k :class :id cid} deleg)}
       {:bases (vec (for [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
