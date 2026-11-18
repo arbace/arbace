@@ -8765,3 +8765,75 @@ bin/java-check --levels compiled --list .tmp/njd54-c.txt --save .tmp/njd54-c   #
 
 Expected at the night's interp record: the 159 passing now, t05485, t04647 t04648 (if their later lines hold), t04277 t05100 t05469
 t05767 and whichever of the 18 other "cannot extend" rows pass beyond, plus n-all's 84 as their sections say; at compiled t04647 t04648.
+
+## As built: n-java-defer (round 54), the second pass, 2026-11-18 (write-ahead)
+
+The next five groups of the round's table at eval (interp), under the same rules (each process under 4 GiB; no j2g
+whole-program run, no javac tool build, no gate), on the same executables (gate `e8e0d017243dca8a9f9f`, javac's tool
+`javac-8526ceb9d1ea3ff0bd68`, `REPR_JAVA_STALE_OK=1`). Every fix below is in the shipped world (j2g, jrt, the variants): **none
+shows at interp before the day's build**; each is proven light, as the first pass's locale.ae was.
+
+### Built
+
+- **Object.clone of an interpreted subclass of a world class** (rank 12, 4 rows: t04823 t05330 t05425 t05562). A DynSub_C's
+  `Clone__O` and `CloneShallow` both threw CloneNotSupportedException (arbace/j2g/dyn.ae), so `LinkedList2.clone()` (LinkedList's
+  clone, whose `super.clone()` is `J2g_ObjectClone(this)`, the DynSub's `CloneShallow`), X509CertSelector's in t05330 and
+  `super.clone()` reaching Object (the interpreter's ObjectCall, cloneOf nil when the world superclass is not Object: dyncf's
+  superCall had no clone for Object) all failed. Now `arbace.j2g.dyn/clone-call`: DynSub_C's `Clone__O` is C's clone with the proxy
+  as `this` (`Impl_Clone__O t t`), a jrt class's own (`:promoted`, the struct's `Clone__O`: Reference's CloneNotSupportedException,
+  t04823's first half), else `CloneShallow`; `CloneShallow` copies the struct and the dynCore (F copied, Self the copy, the header
+  cleared and marked dynamic) when the class is Cloneable (C's supertypes statically, else the core's interfaces at run time:
+  AbstractMapClone implements Cloneable itself); dyncf's `dynCfSupers_G` take `clone()Ljava/lang/Object;` (the same call), and
+  `superCall` of Object's clone on a DynSub object calls its `Clone__O`. **Proven** by j2g's unit test `test-dynsub-clone`
+  (test/j2g/unit.ae, fixture test/j2g/unit/clone: Copied, Cloneable with its own clone; Bare, neither): the emitted forms, with a
+  negative control (the old panic fails the judge); `bin/j2g-unit` on the gate executable: its six pass, the other tests as on
+  the base (7 failures there too, test-invokers and test-type-annotations: their fixtures on this executable). Needs the build to show.
+- **References: a plain `new Object()` never collected** (rank 13, 3 of its 4 rows: t03939 t04821 t04824). jrt's
+  `objectInstance` (go/arbace/jrt/object.ae) was the 8-byte header alone, no pointers: Go's tiny allocator packs such objects
+  under 16 bytes into one block that is freed (and whose weak pointers are cleared, whose cleanups run) only when every object
+  in it is dead, so a WeakReference to a new Object() beside any live tiny allocation stayed set and was never enqueued
+  (UncommonTrapLeak, NullQueue, ReferenceEnqueue all use `new Object()`; the Clojure probe on e8e0d: 1 of 20 plain objects never
+  cleared, every int[10] and StringBuilder cleared). Now the struct has 8 bytes of padding, 16 bytes, out of the tiny
+  allocator. **Proven**: a stand-alone Go test on TamaGo's go (the two layouts, weak.Make and AddCleanup beside live 4-byte
+  objects: 1 of 50 old, 50 of 50 new) and jrt's own `TestWeakPlainObject` (go/arbace/jrt/system_test.ae, `bin/jrt test --arch
+  amd64 --package jrt -run TestWeak`: 50 of 50; its control, the old layout, 0 of 50). Other noscan objects under 16 bytes keep
+  the risk (none of these tests'). t04816 (Basic) fails on finalization ("Test object not finalized"): jrt runs no finalizers
+  (System.runFinalization's JEP 421 stance, F17), left.
+- **System.Logger in ObjectInputStream** (rank 10, 3 of its 10 rows: t04307 t05287 t05288). The three fail in
+  ObjectInputStream.filterCheck, whose filter logging reads `Logging.filterLogger` (a System.Logger, outside the Go build): j2g's
+  missing-class stub threw on every object read through a stream with a filter. The variant overlay/jdk/variants/ObjectInputStream.ae
+  replaces filterCheck by the method without its logging (jdk26u's default: the logger not loggable at DEBUG or TRACE).
+  **Proven** by `bin/jrt-convert vet overlay/jdk/variants/ObjectInputStream.ae` (ok, 1 member replaced; 3.2 GB). Needs the build.
+- **jrt's hand-written members: ForkJoinPool.getStealCount** (rank 6, 1 of its 16 rows: t05719 NQueensCS, judged by its
+  status). go/arbace/jrt/forkjoin.ae: a `steals` counter of the forked tasks a new worker ran, `GetStealCount__J`; the manifest,
+  its test file and the member tables regenerated (`bin/jrt manifest` on the frozen JVM, 3.8 GB peak; one line each). **Proven**
+  by `bin/jrt build --arch amd64 --package jrt` (go build and go vet, 2.4 GB). Needs the build.
+
+### Not built (the round's decisions, taken (round 54))
+
+- StackWalker (t04612-t04615, t04618): the interpreter's frames are not Go frames a walker can name (the stack traces show
+  Compiler$CF's nodes), so StackWalker's options and walk need the interpreter's own frame stack first; left to a slice.
+  System.Logger's own tests (t04680 LoggerInterfaceTest), t04675 and t07882 (AbstractSaslImpl's `logger` field absent from the
+  member table) stay per test.
+- The asynchronous channels (11 rows): AsynchronousChannel, its group, server socket, file channel and CompletionHandler are
+  outside the world; their Linux provider (sun.nio.ch's EPoll port and its dispatcher) is a slice of its own, with
+  `bin/jrt-convert update` (heavy), not a day's light fix.
+- jrt's other hand-written members (15): Thread.ofPlatform needs Thread.Builder (an interface outside the world), Package and
+  getPackage/getDefinedPackage a jrt Package, getProtectionDomain a CodeSource location the Go build does not have, ThreadDeath is a
+  cut class (its constructor the closure's), ForkJoinPool.schedule the DelayScheduler, AQS's ConditionObject a jrt class, the two
+  closed-world classes (FilteredNormalizer2, JavaAWTFontAccess) closure lines: one each, not light.
+- Finalization (t04816): kept out, as F17 decided.
+
+Alternatives considered: an Object struct of 16 bytes for every object (the header itself padded: all objects' memory, rejected
+for objectInstance alone); a finalizer for the interpreted classes with finalize() (runtime.SetFinalizer: against F17's stance);
+the logging kept through java.util.logging (System.Logger's bridge, jdk.internal.logger, is the missing part: rejected for the
+variant's cut).
+
+Keys: arbace/j2g (dyn.ae, dyncf.ae) moves `gate_key` and javac's keys; go/arbace/jrt (object.ae, forkjoin.ae, manifest.edn,
+manifest_test.ae, reflect_tables.ae, system_test.ae) moves `gate_key`, `arbace_runtime_key` and javac's keys; overlay/jdk/variants
+moves `gate_key`, `arbace_runtime_key` and javac's keys. test/j2g (the unit test and its fixture) moves none of the build keys.
+
+Expected at the night's interp record, after the day's build: t04823 t05330 t05425 t05562 (the clone; t04823 also needs
+PhantomReference, which the record's world has), t03939 t04821 t04824 (the references), t04307 t05287 t05288 (if their later
+lines hold), t05719; 11 rows, beside the first pass's. Not re-recorded here: the night's commands of the first pass with these
+ids added to `.tmp/njd54.txt`.
