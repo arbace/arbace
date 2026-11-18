@@ -1040,9 +1040,18 @@
   (and (= (:name f) (:name g)) (= (:kind f) (:kind g)) (= (boolean (:cq f)) (boolean (:cq g))) (= (:refq f) (:refq g))
        (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps (:ty g))))))
 
+;; queue 367-2 (a): the function template specialization being declared ({:tid :args}, template.ae's instantiate-fn): another
+;; specialization of the same template with other arguments is no redeclaration of it though their types are equal
+;; ([temp.over.link]: the template arguments are part of a specialization's identity; string-inst.cc's S::_M_construct<false>
+;; and <true>, both (const C*, size_t), had been one function, its arguments the last's)
+(def ^:dynamic *instantiating* nil)
+
 (defn- find-redecl [scope f]
-  (let [^java.util.HashMap m (:names scope)]
-    (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f)) (:id e))) (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
+  (let [^java.util.HashMap m (:names scope)
+        other-spec? (fn [g] (when-let [{:keys [tid args]} *instantiating*]
+                              (let [ti (:tinst g)] (and ti (= tid (:tid ti)) (not= args (:args ti))))))]
+    (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f) (not (other-spec? (fnd (:id e))))) (:id e)))
+          (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
 
 (declare analyze rv ce-try)
 
@@ -1370,7 +1379,15 @@
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
                                       (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
                                       (when (and (or body (:explicitlyDefaulted n)) (lazy-header-node? n) (not (:used f))) {:lazy true})))
-          (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
+          ;; (queue 367-2 (a): a specialization whose type another specialization of its template already has is reached
+          ;; through its template alone, not entered by name: two entries of one type would make every call naming it
+          ;; ambiguous, basic_string's _M_construct<true>(__s, __n) once _M_construct<false> is its own function)
+          (when-not (and *instantiating*
+                         (some (fn [e] (when (= :fn (:e e))
+                                         (let [g (fnd (:id e))]
+                                           (and (same-sig? g f) (= (:tid *instantiating*) (:tid (:tinst g)))))))
+                               (.get ^java.util.HashMap (:names home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)))))
+            (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)}))
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
           (when (and cid (:virtual f)) (abi/update-cls! cid update :virtuals (fnil conj []) id))
@@ -5035,7 +5052,12 @@
                  any-method (some #(and (:cls %) (not (:static %))) ms)
                  obj (or obj (when (and (:implicit-this callee) any-method (:this-type ctx)) (cx-via (deref-node (this-expr ctx)) (:cx-qcls callee))))
                  ;; (cpp-s8: a hidden friend only by ADL, friend-visible?)
-                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) (:fns callee))) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
+                 ;; (queue 367-2 (a), the code generator: a specialization of one of the call's templates is its candidate through
+                 ;; that template's deduction alone ([temp.over]/1), not again as the function its name lookup found: two of one
+                 ;; type made `_M_construct<true>(...)` ambiguous with `_M_construct<false>`)
+                 tset (set (:tmpls callee))
+                 own-fns (if (checking?) (:fns callee) (remove #(contains? tset (:tid (:tinst (fnd %)))) (:fns callee)))
+                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
                  _ (when (and (empty? cands) (empty? (:tmpls callee))) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args) (fail :name "unknown name " (:name callee)))
