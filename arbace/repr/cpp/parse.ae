@@ -615,6 +615,21 @@
 
 (defn- type-transform? [^P p] (and (id? p) (contains? type-transforms (ts (cur p))) (is-at? p 1 "(")))
 
+(defn- def-brace
+  "Queue 377: the index of the opening brace of a class or enumeration definition whose head starts at token `i` (a class-key or
+  enum; the head's names, class-keys, `::`, `final` and a base clause's names and commas skipped), or nil when another token
+  ends the head first (an elaborated-type-specifier)."
+  [^P p ^long i]
+  (when (contains? #{"struct" "class" "union" "enum"} (ts (tok-at p i)))
+    (loop [k (inc i)]
+      (let [^T t (tok-at p k)]
+        (cond (> k (+ i 32)) nil
+              (identical? :eof (.-k t)) nil
+              (t= t "{") k
+              (or (identical? :id (.-k t)) (t= t "::") (t= t ",") (t= t ":")
+                  (contains? #{"struct" "class" "union" "enum" "public" "protected" "private" "virtual" "final"} (.-s t))) (recur (inc k))
+              :else nil)))))
+
 (defn- skip-balanced!
   "The cursor on an opener ( [ { or <: after its closer. False when the stream ends first."
   [^P p]
@@ -1707,6 +1722,11 @@
           (do (seek! p b) (adv! p) (skip-balanced! p) (text-node p "BuiltinExpr" b)))
       ;; G5c: __builtin_offsetof(T, designator) for the code generator (clang's OffsetOfExpr, Parser::ParseBuiltinPrimaryExpression:
       ;; an identifier, then .identifier and [expression]s; libsupc++'s dyncast.cc and eh_ptr.cc), the type and the components kept
+      ;; (queue 377: __builtin_classify_type's type argument defining a class or enumeration: GCC's "types may not be defined in
+      ;; '__builtin_classify_type' calls", at the brace; the call is then read as before, its argument an expression)
+      (and (= s "__builtin_classify_type") (is-at? p 1 "(") (not (skim? p))
+           (do (when-let [bi (def-brace p (+ (long (ix p)) 2))] (soft-diag! p bi "types may not be defined in '__builtin_classify_type' calls")) false))
+      nil
       (and (= s "__builtin_offsetof") (is-at? p 1 "("))
       (let [r (tentatively p (fn [p]
                                (adv! p) (adv! p)
@@ -1892,7 +1912,11 @@
         ;; the allocated type: (type-id) or a new-type-id with its array bounds
         [ty dims] (if (paren-type?)
                     (do (adv! p) (let [t (binding [*tdef-ctx* "in a new-expression"] (parse-type-id p :paren))] (expect! p ")") [t []]))
-                    (let [base (parse-type-specs p :new)
+                    (let [_ (when-let [bi (and (not (skim? p)) (def-brace p (ix p)))]
+                              ;; (queue 377: [expr.new]/2 with [dcl.type.general]/3, a new-type-id defines no class or enumeration:
+                              ;; GCC's "types may not be defined in a new-type-id", at the definition's brace)
+                              (soft-diag! p bi "types may not be defined in a new-type-id"))
+                          base (parse-type-specs p :new)
                           ptrs (loop [t base] (cond (or (is? p "*") (is? p "&") (is? p "&&"))
                                                     (let [o (ts (cur p))] (adv! p)
                                                       (let [c (accept! p "const") v (accept! p "volatile")]
@@ -2844,7 +2868,13 @@
                 (recur (str q " noexcept(" txt ")") (assoc m :noexcept true))))
             (recur (str q " noexcept") (assoc m :noexcept true))))
       (and (is? p "throw") (is-at? p 1 "("))
-      (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (str q " throw(" (tok-text p (inc ob) (- (ix p) 2)) ")") (assoc m :throw true))))
+      (do (adv! p) (let [ob (ix p)] (skip-balanced! p)
+                     ;; (queue 377: [except.spec] with [dcl.type.general]/3, a dynamic exception specification's type-ids define no class
+                     ;; or enumeration: GCC's "types may not be defined in an exception-specification", at the definition's brace)
+                     (when-not (skim? p)
+                       (when-let [bi (some #(def-brace p %) (range (inc (long ob)) (dec (long (ix p)))))]
+                         (soft-diag! p bi "types may not be defined in an exception-specification")))
+                     (recur (str q " throw(" (tok-text p (inc ob) (- (ix p) 2)) ")") (assoc m :throw true))))
       (or (and (is? p "[") (is-at? p 1 "[")) (is? p "__attribute__"))
       (let [as (attr-nodes p)] (recur q (update m :attrs (fnil into []) as)))
       :else [q m])))
@@ -3209,7 +3239,12 @@
           qn (when (name-start? p) (parse-name p :parse))
           nm (when qn (:s (peek (:parts qn))))
           fixed (when (and (is? p ":") (not (is-at? p 1 ":")) (let [save (ix p)] (adv! p) (let [r (decl-spec-start? p)] (seek! p save) r)))
-                  (adv! p) (parse-type-specs p :type-id))
+                  (adv! p)
+                  ;; (queue 377: [dcl.enum]/1's enum-base, a type-specifier-seq, defines no class or enumeration: GCC's "types may not be
+                  ;; defined in enum-base", at the definition's brace; enum_base4.C's `: union enum struct c { ... }`)
+                  (when-let [bi (and (not (skim? p)) (def-brace p (ix p)))]
+                    (soft-diag! p bi "types may not be defined in enum-base"))
+                  (parse-type-specs p :type-id))
           body? (is? p "{")]
       (if (and (not body?) (not fixed) (not (and scoped (is? p ";"))))
         (let [e (or (:ent qn) (when nm (sc/lookup (scope p) nm true)))]
@@ -3525,6 +3560,12 @@
               ;; (round 54: [dcl.stc]/2 (C++14), the register specifier applies to variables alone; GCC's error at every standard)
               _ (when (and fs (not (:a fs)) (= "register" (:storage ds)))
                   (soft-diag! p (long (:b ds)) (str "storage class 'register' invalid for function" (when nm (str " '" nm "'")))))
+              ;; (queue 377: [dcl.fct]/17 (C++23 /16), a function's return type defines no class or enumeration: GCC's "new types may not
+              ;; be defined in a return type", at the decl-specifiers; a typedef's function type too, and a pointer to function's
+              ;; (`struct W {} (*p) ();`), as GCC: any function suffix in the declarator)
+              _ (when-let [tn (and (some (fn [x] (some :f (:sufs x))) (name-chain d)) (not (skim? p)) (:tag-node ds))]
+                  (when (or (:completeDefinition tn) (and (= "EnumDecl" (:kind tn)) (seq (:inner tn))))
+                    (soft-diag! p (long (:b ds)) "new types may not be defined in a return type")))
               ;; (round 54: [class.qual]/2, `X<T>::X<T>()`: the name after a nested-name-specifier nominating X is X's constructor,
               ;; which takes no template arguments; GCC's "names the constructor, not the type")
               ;; (queue 365: not when the qualifier is a namespace, `template<> int f::f<int>(int)` of namespace f's function f)
