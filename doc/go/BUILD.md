@@ -553,6 +553,31 @@ data, `:java`:
   `outside.args`, `bin/j2g-unit`'s `test-outside` the declarations and the stubs. Since A8c (2026-11-17, J2G-SPEC
   §4.1) `:platform` also declares java.base's API the world and the edge lack and completes the world's variants
   of platform classes (java.awt.Color's Paint and ColorSpace members), with no change to `outside.args`.
+- **A JDK module as the program's world extension** (`:jdk-extra`, 2026-11-17, write-ahead: A15 of the Ghidra demo's G2 plan,
+  the user's GH13 (a), and round 53: java.xml stays out of the shipped world, per program only): `:java`'s `:jdk-extra`, a
+  vector of `{:module NAME :closure {:roots [...] :optional [...]} :variants [PATH ...]}` or with `:classes` (class
+  names and patterns, a vector or a file of them, one a line) in place of `:closure`. Each is a module of kind `jdk` in
+  the plan, first (its resources before the class path's, as the platform's loaders find them): its sources jdk26u's
+  (`$jdk26u`, `--root jdk26u=DIR`, default `$JDK` or /root/jdk26u) at `jdk/javac/provenance.edn`'s commit (the
+  platform's; a tree at another commit, or whose `src/MODULE` differs, refused), the module's `share`, `unix` and
+  `linux` layers laid over in that order (module-info.java and snippet files aside); `:closure` cut by A3 as an
+  artifact's, javac's `--patch-module MODULE=TREE -Xprefer:source` in place of the source path (the module's classes
+  from its sources, the other modules' from the platform), `:classes` the set itself, no cut; read by `bin/repr-java
+  read-jdk` (`--patch-module` against the platform, as `bin/jrt-convert` and `bin/javac-vendor` read the JDK; the
+  headers name `jdk26u src/MODULE/LAYER/classes/PATH`; `JAVA_PROJECT_JDK_THREADS`, default 1), both fronts and nread
+  as a module's; no `classes` step (the platform has them). Its forms join `WORK/forms.all` (j2g's `pkg-of` puts the
+  JDK's packages into jrt, `tool-module-prefixes` names java.xml's classes by their binary names; a class with forms
+  wins over the edge's declaration, `env/known?`), its resources (the module's other files but HTML: Xerces'
+  messages, the JDK catalog) are `WORK/resources.jars/001-MODULE`, and its `:variants` (files, or directories of
+  `.ae` files) are copied into `WORK/variants/DIGEST` and named by `--variants` in `outside.args`, which
+  `--build-program` appends to j2g's arguments and keys: `bin/arbace-go`, j2g, the shipped runtime and `gate_key`
+  are unchanged. The rest of the module stays declared outside with `:outside [:platform]` (A8). The fixture of the
+  light proof is `bin/java-project test`'s (`test/java/project/controls/jdk-extra.edn`: java.xml cut from
+  SAXParseException to three files, their forms byte for byte jdk/javac's; `:classes`; seven controls); the program
+  `test/programs-pending/xml` (DOM and SAX by JAXP's default factories) waits for the day's build before it joins
+  `test/programs/`. Measured: the cut from `javax.xml.namespace.QName` alone keeps 1,493 of java.xml's 1,855 files
+  (JAXP's FactoryFinder, jdk.xml.internal's security and catalog code reach most of Xerces and Xalan), where the
+  JDK's runs load 171 java.xml classes for SAX and 97 for StAX: hence `:classes` for a measured set.
 - **The commands.** `bin/java-project plan|sources|classes|read MODEL WORK` (MODEL a program's
   directory or a plan file holding the same map; `--root`, `--repository`, `--only M,...`, `--check
   front|nread`: each module also read from the native trees, the forms equal to javac's trees' as

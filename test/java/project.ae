@@ -10,7 +10,10 @@
         values separated by tabs (bin/java-project reads it with read -a), the paths absolute
         (relative to BASE; $NAME/... under --root NAME=DIR; a coordinate g:a:v in the Maven
         repository); before them the line `outside` with :outside's values (platform,
-        class-path: the declarations outside the world j2g takes, A8 and A8b)
+        class-path: the declarations outside the world j2g takes, A8 and A8b); first among
+        them :jdk-extra's modules (A15, the program's world extension: kind jdk, the JDK
+        module's source directories in jdk26u's tree, $jdk26u/src/MODULE/{share,unix,linux}/classes,
+        its closure and its j2g variants)
     closure-scan LOG ROOT
         a javac log of the closure's compilation (A3): the files of ROOT javac parsed, one
         `parsed FILE` line each, and each file with an error, `error FILE CAUSE NAME MESSAGE`
@@ -45,7 +48,53 @@
 (def ^:private module-keys
   #{:name :src :resources :deps :artifacts :javac :release :artifact :closure :patches})
 
-(def ^:private java-keys #{:release :javac :repository :modules :outside :shadow})
+(def ^:private java-keys #{:release :javac :repository :modules :outside :shadow :jdk-extra})
+
+(def ^:private jdk-extra-keys #{:module :closure :classes :variants})
+
+(defn- check-closure [file what c]
+  (when-not (map? c) (fail file ": " what ": :closure is a map of :roots and :optional"))
+  (when-let [bad (seq (remove #{:roots :optional} (keys c)))]
+    (fail file ": " what ": unknown :closure keys " (vec bad)))
+  (when-not (seq (concat (:roots c) (:optional c)))
+    (fail file ": " what ": :closure needs :roots or :optional")))
+
+(defn- check-jdk-extra
+  "The :jdk-extra entries (A15, GH13 (a)): the JDK modules a program's world extends the shipped one
+  with, each {:module NAME :closure {:roots [...] :optional [...]} :variants [PATH ...]}: read from
+  jdk26u's sources at the platform's pin, cut by A3 from the roots (a JDK module whole is the
+  shipped world's business, A21), read by repr/java with --patch-module, its forms and resources the
+  program's. In place of :closure, :classes names the set itself (the round 53 note: a measured
+  class-load list, as overlay/jdk/javac/closure.txt is for javac's tool world): class names or
+  patterns (p.C, p.*, p.**), a vector or a file of them (a string, one a line, # comments), their
+  files read as they are, no cut; what they name outside the set is the platform's (declared outside
+  the world with :outside [:platform], A8). Not java.base (the shipped world's own module) and not a name a module
+  of :modules has."
+  [file j]
+  (let [xs (:jdk-extra j)
+        names (set (map :name (:modules j)))]
+    (when-not (or (nil? xs) (vector? xs))
+      (fail file ": :jdk-extra is a vector of {:module NAME :closure {...} :variants [...]} (A15)"))
+    (doseq [x xs]
+      (when-not (and (map? x) (string? (:module x)) (re-matches #"[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+" (:module x)))
+        (fail file ": a :jdk-extra entry needs a :module, a JDK module's name (java.xml): " (pr-str x)))
+      (let [what (str ":jdk-extra " (:module x))]
+        (when-let [bad (seq (remove jdk-extra-keys (keys x)))]
+          (fail file ": " what ": unknown keys " (vec bad)))
+        (when (= "java.base" (:module x))
+          (fail file ": " what ": java.base is the shipped world's (its additions go to test/jrt/jrt_sources.ae, A21)"))
+        (when (names (:module x))
+          (fail file ": " what ": a module of :modules has that name"))
+        (when (= (boolean (:closure x)) (boolean (:classes x)))
+          (fail file ": " what ": one of :closure (A3's cut from its roots) and :classes (the set itself) is required (a JDK module whole is the shipped world's, A21)"))
+        (when (:closure x) (check-closure file what (:closure x)))
+        (when-let [c (:classes x)]
+          (when-not (or (string? c) (and (vector? c) (seq c) (every? string? c)))
+            (fail file ": " what ": :classes is a vector of class names or patterns, or a file of them")))
+        (when-not (or (nil? (:variants x)) (and (vector? (:variants x)) (every? string? (:variants x))))
+          (fail file ": " what ": :variants is a vector of j2g variant files or directories of them"))))
+    (when-let [dup (seq (for [[n c] (frequencies (map :module xs)) :when (> c 1)] n))]
+      (fail file ": :jdk-extra names a module twice: " (vec dup)))))
 
 (defn- coord-parts [c]
   (let [ps (str/split (str c) #":")]
@@ -94,10 +143,7 @@
         (when (and (:closure md) (not (:artifact md)))
           (fail file ": module " (:name md) ": :closure is an artifact's (a library cut to what its roots reach)"))
         (when-let [c (:closure md)]
-          (when-let [bad (seq (remove #{:roots :optional} (keys c)))]
-            (fail file ": module " (:name md) ": unknown :closure keys " (vec bad)))
-          (when-not (seq (concat (:roots c) (:optional c)))
-            (fail file ": module " (:name md) ": :closure needs :roots or :optional")))
+          (check-closure file (str "module " (:name md)) c))
         (when (and (:patches md) (not (and (:artifact md) (vector? (:patches md)) (every? string? (:patches md)))))
           (fail file ": module " (:name md) ": :patches is an artifact's vector of patch files (a dependency's variants)"))
         (when-not (or (nil? (:resources md)) (= :jar (:resources md)) (vector? (:resources md)))
@@ -110,6 +156,7 @@
         (fail file ": modules named twice: " (vec dup)))
       (when-not (contains? #{nil true false} (:shadow j))
         (fail file ": :shadow is true (the default: a class in two modules the first's) or false (an error)"))
+      (check-jdk-extra file j)
       j)))
 
 (defn- topo
@@ -165,6 +212,33 @@
               (coord-path repo c kind))]
     ;; the declarations outside the world j2g takes (A8, A8b): the program's line, before the modules'
     (println (tsv-line "outside" (map name (:outside j))))
+    ;; :jdk-extra (A15): the JDK modules of the program's world extension, first (a JDK module's resources
+    ;; before the class path's, as the platform's loaders find them), each a module of kind jdk whose
+    ;; sources are jdk26u's ($jdk26u, bin/java-project's --root jdk26u=DIR) source directories of the
+    ;; module, share's then the unix and linux layers' (bin/java-project lays them over in that order,
+    ;; those that exist)
+    (doseq [{:keys [module closure classes variants]} (:jdk-extra j)
+            :let [classes (if (string? classes)
+                            (let [f (rp classes)]
+                              (when-not (.isFile (io/file f)) (fail file ": :jdk-extra " module ": no :classes file " f))
+                              (remove #(or (str/blank? %) (str/starts-with? % "#")) (map str/trim (str/split-lines (slurp f)))))
+                            classes)]]
+      (println (tsv-line "module" [module]))
+      (println (tsv-line "kind" ["jdk"]))
+      (println (tsv-line "release" [""]))
+      (println (tsv-line "src" (for [l ["share" "unix" "linux"]] (rp (str "$jdk26u/src/" module "/" l "/classes")))))
+      (println (tsv-line "jdk-root" [(rp "$jdk26u")]))
+      (doseq [k ["resources" "deps" "artifacts" "jars" "javac" "patches"]] (println (tsv-line k [])))
+      (println (tsv-line "resources-jar" [""]))
+      (println (tsv-line "coord" [""]))
+      (println (tsv-line "sources-jar" [""]))
+      (println (tsv-line "binary-jar" [""]))
+      (println (tsv-line "roots" (:roots closure)))
+      (println (tsv-line "optional" (:optional closure)))
+      (println (tsv-line "classes" classes))
+      (println (tsv-line "variants" (map rp variants)))
+      (println (tsv-line "shadow" [(if (false? (:shadow j)) "no" "yes")]))
+      (println "end"))
     (doseq [{:keys [name src resources artifacts javac release artifact closure patches]} mods
             :let [ds (deps* by order name)
                   ;; the binary jars on the class path: its own :artifacts and its dependencies'
