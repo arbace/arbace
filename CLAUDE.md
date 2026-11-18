@@ -511,7 +511,8 @@ Prior art:
   (javac on Arbace's class files against the JDK javac's; since JCV1 javac's acceptance, the digest the oracle tier's), results
   against `test/java/check-LEVEL.edn` (`--record`; the JDK's record's judgment, rows `LEVEL.jdk`, is the oracle tier's, by hand at a tag:
   `bin/java-check --judge --oracle [--latest-saved]` against `test/java/oracle/`),
-  every test not passing in a class of `test/java/divergences.edn`; the namespace `java.check`
+  every test not passing in a class of `test/java/divergences.edn` (`--stale-reasons LEVEL`, D356-2 (a): a record's rows whose
+  reason cites a class or member the world now holds, no run, with its controls); the namespace `java.check`
   (`test/java/check.ae`) on the tools' host; the essential subset's forms committed in `test/java/forms/`
   (`--forms verify|update`); `diagnostics` (JC3, "As built: JC3"): langtools' golden-diagnostics tests
   (compile-fail-ref, the corpus `langtools-diagnostics`), run in place by javac on Arbace as jtreg runs
