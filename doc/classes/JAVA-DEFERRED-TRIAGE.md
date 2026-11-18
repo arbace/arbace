@@ -8673,3 +8673,32 @@ The day's commands: `bin/arbace-go --gate-build` (gate_key moves: arbace/j2g), t
 
 Decisions taken overnight (round 52): (1) choose the check by the receiver's Go type (NN on a pointer, J2g_NotNull[T] otherwise) rather
 than J2g_NotNull always (NN keeps the pointer case's code as before) or a new jrt function taking any.
+
+## As built: D340-1 (a) and D340-3 (a), 2026-11-18 (queue 340, branch 340-java-fixes)
+
+- **D340-1 (a).** AT10's translation of a call resolving to Object.finalize() did not reach a subclass's override: Java's
+  `this.finalize()` in a non-leaf class Base whose subclass Sub overrides finalize calls Sub's when this is a Sub. `invoke-val`
+  (arbace/j2g/code.ae) now writes, for a virtual or interface call on a receiver whose Go type is an interface (a non-leaf or
+  abstract class's C_I, an interface's, Object's any), `jrt.J2g_Finalize(x)`, j2g's helper (arbace/j2g/out.ae, j2g_support): x
+  null-checked (NPE), then `x.(interface{ Finalize__V() })` called when its type has it, else Object's empty body. A leaf's pointer
+  keeps jrt.NN (no subclass can override), and a super call (`super.finalize()`, `Outer.super.finalize()`) keeps the null check
+  alone (Object's body itself; dispatching would call the caller's own override). The Object table's reflective `finalize` entry
+  (out.ae, h-java-members) is unchanged: an interpreted override calls it as super. Fixture: z/Sub overrides finalize calling
+  super.finalize(), z/Mid (non-leaf, z/Low extends it) calls super.finalize(). Unit checks: Abs's, Base's and a Shape parameter's
+  calls are J2g_Finalize; Sub's and Mid's super calls are NN and J2g_NotNull[Mid_I]; three of them fail with the old code.
+  The printed helper (repr/go, gofmt layout) run in a small module: a Sub through Base's this calls Sub.finalize, a Mid and a Base
+  nothing, a nil interface NullPointerException.
+- **D340-3 (a).** (1) test-object-finalize's Own control now judges a translation: a translation that threw is a string,
+  which also has no checks, so the old control passed on a throw. It now requires `(.Finalize__V t)`, and a second check holds
+  that a "threw:" string fails it. This landed in D340-1's commit, which rewrote the same block. (2) memory.ae's tests are
+  committed as go/arbace/jrt/memory_test.ae (in jrt.ae's `:test-files` and loads). TestMemory covers the pools' usages and
+  bounds, the peak, the latest cycle after a forced one and the watcher seeing it. TestEvents covers notify0 running the
+  notifier, which survives a throw; the sampler's runs while on and none once off; nothing queued while off; forced cycles
+  queued in order within LastGc0's rules, marked forced; the cap of gcPendingMax with the oldest dropped; and off emptying the
+  queue. `bin/jrt test --arch arm64 --package jrt -run 'TestMemory|TestEvents'` passes, and 20 of 20 at `-count 20`. Two
+  mutations of the printed memory.go each fail TestEvents: off not emptying the queue, and the sampler never stopping. On an
+  arm64 host bin/jrt test now runs arm64 natively, with no qemu. (3) `bin/jrt files-check [--control]` (`make jrt-files-check`;
+  run first by `bin/jrt build` and `test`) compares jrt.ae's `:files`, `:test-files` and loads with go/arbace/jrt's files.
+  The exclusions are named in bin/jrt's `jrt_alone_excluded`: checksum, resources, resources_linux and rmi (natives of
+  translated classes, compiled with a program) and rmi_test. The control, a jrt.ae without memory.go, fails it as 6f8801d0f's
+  base did.

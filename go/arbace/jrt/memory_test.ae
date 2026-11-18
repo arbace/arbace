@@ -1,0 +1,134 @@
+;; jrt's tests: the memory pools, the collector and the classes (memory.ae, n-java-f13), and the events of the low memory
+;; detector and the collector's notifications (n-java-thresh): the notifier, the usage sampler and the watcher's queue of
+;; cycles. D340-3 (a) (queue 340, 2026-11-18): n-java-thresh's TestEvents and n-java-f13's TestMemory were proven in a
+;; module of their own on the night's host; these are their committed counterparts, run by bin/jrt test.
+(in-ns 'go.arbace.jrt)
+
+(go/file "memory_test.go"
+  :imports [[runtime "runtime"] [atomic "sync/atomic"] [testing "testing"] [time "time"]])
+
+(go/func memWait "memWait polls f every millisecond until it holds or d passes; whether it held.\n"
+  ^bool [^{:tag (func [] [bool])} f ^{:tag time/Duration} d]
+  (let [deadline (.Add (time/Now) d)]
+    (while (.Before (time/Now) deadline)
+      (when (f) (return true))
+      (time/Sleep time/Millisecond))
+    (f)))
+
+(go/func memSeen "memSeen is the latest cycle the watcher saw (gcMu).\n" ^int64 []
+  (.Lock gcMu)
+  (defer (.Unlock gcMu))
+  (.-id gcLast))
+
+(go/func TestMemory
+  "The pools' usages are in MemoryUsage's order and bounds, the peak at least the usage it noted, the collector's count
+and latest cycle follow a forced cycle, the watcher sees it, and the classes' counts are consistent.\n"
+  [^{:tag (* testing/T)} t]
+  (range [_ p (lit (slice int32) poolHeap poolRuntime)]
+    (let [u (.-A (HostManagement_Memory0_I__J1_native p))]
+      (when (!= (len u) 4) (.Fatalf t "pool %d: %d values" p (len u)))
+      (when (or (!= (aget u 0) 0) (<= (aget u 1) 0) (< (aget u 2) (aget u 1)))
+        (.Errorf t "pool %d: init %d used %d committed %d" p (aget u 0) (aget u 1) (aget u 2)))
+      (when (and (!= (aget u 3) -1) (< (aget u 3) (aget u 2)))
+        (.Errorf t "pool %d: max %d below committed %d" p (aget u 3) (aget u 2)))
+      (let [pk (.-A (HostManagement_Peak0_I__J1_native p))]
+        (when (< (aget pk 1) (aget u 1))
+          (.Errorf t "pool %d: peak %d below the noted usage %d" p (aget pk 1) (aget u 1))))
+      (HostManagement_ResetPeak0_I__V_native p)
+      (when (<= (aget (.-A (HostManagement_Peak0_I__J1_native p)) 2) 0)
+        (.Errorf t "pool %d: the reset peak has no committed bytes" p))))
+  (HostManagement_WatchGc0__V_native)
+  (let [n0 (HostManagement_GcCount0__J_native)]
+    (runtime/GC)
+    (let [n1 (HostManagement_GcCount0__J_native)
+          g (HostManagement_LastGc0__J1_native)]
+      (when (<= n1 n0) (.Errorf t "count %d after a forced cycle, %d before" n1 n0))
+      (when (== g nil) (.Fatalf t "no latest cycle after a forced one"))
+      (let [a (.-A g)]
+        (when (< (aget a 0) n1) (.Errorf t "latest cycle %d, count %d" (aget a 0) n1))
+        (when (or (< (aget a 1) 0) (< (aget a 2) (aget a 1)))
+          (.Errorf t "cycle times %d to %d" (aget a 1) (aget a 2)))
+        (when (< (aget a 3) (aget a 4))
+          (.Errorf t "before %d below after %d" (aget a 3) (aget a 4))))
+      (when (not (memWait (fn ^bool [] (>= (memSeen) n1)) (* 2 time/Second)))
+        (.Errorf t "the watcher saw cycle %d, not %d" (memSeen) n1))))
+  (when (< (HostManagement_GcTime0__J_native) 0) (.Errorf t "negative collection time"))
+  (when (< (HostManagement_ClassCount0__J_native) (HostManagement_UnloadedClassCount0__J_native))
+    (.Errorf t "classes %d below unloaded %d" (HostManagement_ClassCount0__J_native) (HostManagement_UnloadedClassCount0__J_native))))
+
+(go/var ^{:tag atomic/Int64} memRuns)
+(go/var ^{:tag atomic/Bool} memPanicked)
+
+(go/func TestEvents
+  "The notifier runs at each wake-up and survives a throw; the sampler wakes it while on and stops when off; the watcher
+queues the cycles only while the events are on, forced ones marked, the queue capped at gcPendingMax (the oldest
+dropped) and emptied when off.\n"
+  [^{:tag (* testing/T)} t]
+  (HostManagement_SetNotifier0_O__V_native
+    (RunnableOf (fn []
+                  (.Add memRuns 1)
+                  (when (not (.Swap memPanicked true))
+                    (panic (NPE))))))
+  ;; notify0 runs it, the first run's throw dropped, the loop kept
+  (HostManagement_Notify0__V_native)
+  (when (not (memWait (fn ^bool [] (>= (.Load memRuns) 1)) time/Second))
+    (.Fatalf t "notify0 ran no notifier"))
+  (let [r1 (.Load memRuns)]
+    (HostManagement_Notify0__V_native)
+    (when (not (memWait (fn ^bool [] (> (.Load memRuns) r1)) time/Second))
+      (.Errorf t "the notifier stopped after a throw")))
+  ;; the sampler: some runs in 200 ms while on, none once off
+  (let [r0 (.Load memRuns)]
+    (HostManagement_SampleUsage0_Z__V_native true)
+    (time/Sleep (* 200 time/Millisecond))
+    (HostManagement_SampleUsage0_Z__V_native false)
+    (let [n (- (.Load memRuns) r0)]
+      (when (or (< n 3) (> n 20)) (.Errorf t "the sampler: %d runs in 200 ms (period %v)" n samplePeriod))))
+  (time/Sleep (* 3 samplePeriod))
+  (let [r0 (.Load memRuns)]
+    (time/Sleep (* 5 samplePeriod))
+    (when (!= (.Load memRuns) r0) (.Errorf t "the sampler ran %d times once off" (- (.Load memRuns) r0))))
+  ;; the watcher's queue: nothing while off
+  (HostManagement_WatchGc0__V_native)
+  (HostManagement_GcEvents0_Z__V_native false)
+  (runtime/GC)
+  (let [n (HostManagement_GcCount0__J_native)]
+    (memWait (fn ^bool [] (>= (memSeen) n)) (* 2 time/Second)))
+  (when (!= (HostManagement_NextGc0__J1_native) nil) (.Errorf t "a cycle queued while the events are off"))
+  ;; on: forced cycles queued in order, each within LastGc0's rules
+  (HostManagement_GcEvents0_Z__V_native true)
+  (for [i 0] (< i 3) (inc! i)
+    (runtime/GC)
+    (let [n (HostManagement_GcCount0__J_native)]
+      (when (not (memWait (fn ^bool [] (>= (memSeen) n)) (* 2 time/Second)))
+        (.Fatalf t "the watcher did not see cycle %d" n))))
+  (let [^int64 last 0
+        ^int got 0
+        ^int forced 0]
+    (while true
+      (let [g (HostManagement_NextGc0__J1_native)]
+        (when (== g nil) (break))
+        (let [a (.-A g)]
+          (inc! got)
+          (when (!= (len a) 7) (.Fatalf t "a queued cycle of %d values" (len a)))
+          (when (<= (aget a 0) last) (.Errorf t "cycle %d after %d" (aget a 0) last))
+          (set! last (aget a 0))
+          (when (or (< (aget a 1) 0) (< (aget a 2) (aget a 1)) (< (aget a 3) (aget a 4)) (<= (aget a 5) 0))
+            (.Errorf t "cycle %d: start %d end %d before %d after %d seen %d" (aget a 0) (aget a 1) (aget a 2) (aget a 3)
+                     (aget a 4) (aget a 5)))
+          (when (== (aget a 6) 1) (inc! forced)))))
+    (when (< got 1) (.Errorf t "no cycle queued for 3 forced ones"))
+    (when (< forced 1) (.Errorf t "no queued cycle marked forced (%d queued)" got)))
+  ;; the cap: gcPendingMax kept, the oldest dropped; off empties the queue
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (.Lock gcMu)
+    (for [i 1] (<= i (+ gcPendingMax 6)) (inc! i)
+      (gcQueue (addr m) (lit gcCycle :id (conv int64 i) :live 1) false))
+    (let [n (len gcPending)
+          firstID (aget (.-A (aget gcPending 0)) 0)]
+      (.Unlock gcMu)
+      (when (or (!= n gcPendingMax) (!= firstID 7))
+        (.Errorf t "the queue holds %d from cycle %d, want %d from 7" n firstID gcPendingMax))))
+  (HostManagement_GcEvents0_Z__V_native false)
+  (when (!= (HostManagement_NextGc0__J1_native) nil) (.Errorf t "the queue not emptied when off")))

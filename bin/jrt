@@ -59,6 +59,12 @@
 #            KIND share:MODULE) in jdk26u ($JDK, default /root/jdk26u), the providers whose source
 #            jdk/sources.txt lists; j2g puts them first in the program's service registry; --check
 #            requires the committed file to be what it makes
+#        bin/jrt files-check [--control]
+#            go/arbace/jrt.ae's lists against go/arbace/jrt's files (D340-3 (a); also run first by build
+#            and test): every go/file of go/arbace/jrt/*.ae in :files (a _test.go in :test-files) and its
+#            .ae loaded, every listed name a go/file and every load an .ae, but the files named in
+#            jrt_alone_excluded below, which must exist and be neither listed nor loaded; --control:
+#            the same check of a copy of jrt.ae without memory.go's line and load must fail
 #        bin/jrt print OUTDIR
 #            print the module (with tests) into OUTDIR/mod only
 #        bin/jrt overlay [--check]
@@ -231,6 +237,47 @@ targets() {
 }
 add_pkgs() { local IFS=, p; for p in $1; do pkgs+=("$p"); done; }
 
+# The files jrt printed alone leaves out (D340-3 (a)): natives of translated classes (java.util.zip's checksums,
+# ClassPathResources, sun.rmi.transport.GC) and rmi's test; j2g's program writes its own jrt.ae from every file, so
+# they are compiled with a program, not with jrt alone. Listing a file here that jrt.ae names, or that does not
+# exist, fails the check.
+jrt_alone_excluded="checksum.go resources.go resources_linux.go rmi.go rmi_test.go"
+
+# files_check [AE]: jrt.ae's (or AE's) :files, :test-files and loads against go/arbace/jrt's files; 1 on a mismatch
+files_check() {
+  local ae=${1:-$root/go/arbace/jrt.ae} dir=$root/go/arbace/jrt bad=0 f g base x
+  local files tests loads
+  files=" $(awk '/:files \[/{on=1} on{print} on&&/\]/{exit}' "$ae" | grep -o '"[^"]*\.go"' | tr -d '"' | tr '\n' ' ') "
+  tests=" $(awk '/:test-files \[/{on=1} on{print} on&&/\]/{exit}' "$ae" | grep -o '"[^"]*\.go"' | tr -d '"' | tr '\n' ' ') "
+  loads=" $(grep -o '(load "jrt/[^"]*")' "$ae" | sed 's/(load "jrt\///; s/")//' | tr '\n' ' ') "
+  for f in "$dir"/*.ae; do
+    base=$(basename "$f" .ae)
+    g=$(grep -o '(go/file "[^"]*"' "$f" | head -1 | sed 's/(go\/file "//; s/"//')
+    if [ -z "$g" ]; then echo "files-check: $f: no go/file" >&2; bad=1; continue; fi
+    case " $jrt_alone_excluded " in
+      *" $g "*)
+        case "$files$tests" in *" $g "*) echo "files-check: $g is excluded (jrt_alone_excluded) and listed" >&2; bad=1 ;; esac
+        case "$loads" in *" $base "*) echo "files-check: $base is excluded (jrt_alone_excluded) and loaded" >&2; bad=1 ;; esac
+        continue ;;
+    esac
+    case $g in
+      *_test.go) case "$tests" in *" $g "*) ;; *) echo "files-check: $g (go/arbace/jrt/$base.ae) not in :test-files" >&2; bad=1 ;; esac ;;
+      *) case "$files" in *" $g "*) ;; *) echo "files-check: $g (go/arbace/jrt/$base.ae) not in :files" >&2; bad=1 ;; esac ;;
+    esac
+    case "$loads" in *" $base "*) ;; *) echo "files-check: go/arbace/jrt/$base.ae not loaded" >&2; bad=1 ;; esac
+  done
+  for x in $files $tests; do
+    grep -qs "(go/file \"$x\"" "$dir"/*.ae || { echo "files-check: $x is listed but no go/file" >&2; bad=1; }
+  done
+  for x in $loads; do
+    [ -f "$dir/$x.ae" ] || { echo "files-check: jrt/$x is loaded but has no .ae" >&2; bad=1; }
+  done
+  for x in $jrt_alone_excluded; do
+    grep -qs "(go/file \"$x\"" "$dir"/*.ae || { echo "files-check: $x (jrt_alone_excluded) has no go/file" >&2; bad=1; }
+  done
+  return $bad
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -239,6 +286,7 @@ case $cmd in
     while [ $# -gt 0 ]; do
       case $1 in --arch) arch=$2; shift 2 ;; --prog) prog=$2; shift 2 ;; --package) add_pkgs "$2"; shift 2 ;; *) usage ;; esac
     done
+    files_check || exit 1
     tg=$(targets) || exit 2
     mod=$work
     if [ -n "$prog" ]; then mod=$work/prog; print_module "$mod" "$(cd "$prog" && pwd)"; else print_module "$mod"; fi
@@ -263,6 +311,7 @@ case $cmd in
         *) flags+=("$1"); shift ;;
       esac
     done
+    files_check || exit 1
     tg=$(targets) || exit 2
     mod=$work
     if [ -n "$prog" ]; then mod=$work/prog; print_module "$mod" "$(cd "$prog" && pwd)"; else print_module "$mod"; fi
@@ -270,7 +319,8 @@ case $cmd in
     status=0
     for a in $(arches "$arch"); do
       extra=(-overlay "$ovl")
-      if [ "$a" = arm64 ]; then
+      # (natively on an arm64 host, D340-3 (a))
+      if [ "$a" = arm64 ] && [ "$(uname -m)" != aarch64 ]; then
         extra+=(-exec "$qemu")
       fi
       echo "== linux/$a: go test ${extra[*]} ${flags[*]} "$tg >&2
@@ -359,6 +409,13 @@ case $cmd in
   overlay)
     make_overlay
     if [ "${1:-}" = --check ]; then check_overlay; fi ;;
+  files-check)
+    if [ "${1:-}" = --control ]; then
+      c=$(mktemp); sed 's/ "memory.go"//; /(load "jrt\/memory")/d' go/arbace/jrt.ae > "$c"
+      if files_check "$c" 2>"$c.err"; then rm -f "$c" "$c.err"; echo "files-check: control: a jrt.ae without memory.go passed" >&2; exit 1; fi
+      sed 's/^/   /' "$c.err" >&2; rm -f "$c" "$c.err"; echo "files-check: control ok (a jrt.ae without memory.go fails)" >&2
+    fi
+    files_check && echo "files-check: go/arbace/jrt.ae lists go/arbace/jrt's files (excluded: $jrt_alone_excluded)" >&2 ;;
   print)
     [ $# -eq 1 ] || usage
     print_module "$1" ;;
