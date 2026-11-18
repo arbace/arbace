@@ -2,7 +2,7 @@
    (<stdatomic.h>): sizes 1, 2, 4 and 8, with a null pointer (the size's typical alignment) and with objects; the
    sizes whose answer is the target's (16 and up) are left out of the printed lines. Queue 126
    (gcc.dg/atomic/c23-stdatomic-lockfree-char8_t.c, gnu23-stdatomic-lockfree-char8_t.c). Checks itself: an answer other than the x86-64
-   psABI's (sizes 1 to 8 lock-free, the macros 2, size 3 not always lock-free) returns 1. */
+   psABI's (sizes 1 to 8 lock-free, at a constant size and at one known only at run time, the macros 2, size 3 not always lock-free) returns 1. */
 #include <stdio.h>
 #include <stdatomic.h>
 int main(void) {
@@ -20,6 +20,8 @@ int main(void) {
         && __atomic_always_lock_free(8, 0))) return 1;
   if (!(atomic_is_lock_free(&c) && atomic_is_lock_free(&s) && atomic_is_lock_free(&i) && atomic_is_lock_free(&ll)
         && atomic_is_lock_free(&c8) && atomic_is_lock_free(&p) && __atomic_is_lock_free(sizeof i, &i))) return 1;
+  /* a size known only at run time: the call is libatomic's (gcc's), the same answers */
+  for (volatile unsigned long n = 1; n <= 8; n *= 2) if (!__atomic_is_lock_free(n, 0) || !__atomic_is_lock_free(n, &ll)) return 1;
   return ATOMIC_CHAR8_T_LOCK_FREE == 2 && ATOMIC_LLONG_LOCK_FREE == 2 && sizeof(__atomic_is_lock_free(1, 0)) == 1
          && E1 == 1 && E2 == 0 ? 0 : 1;
 }

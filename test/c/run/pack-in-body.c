@@ -1,6 +1,7 @@
-/* #pragma pack(push, n) and pop inside a function body (the Mac VM's report 244, item 4; CS290 (a)): gcc's pragmas are
-   tokens, so a pragma in a body lays out the records after it, nested pushes too, and pop restores; sizes and offsets as gcc
-   15.2 gives them on x86-64 (measured by hand). The program checks itself (abort on a difference). */
+/* ci-run verdict: exit 0. #pragma pack(push, n) and pop inside a function body (the Mac VM's report 244, item 4; CS290 (a)): gcc's pragmas are
+   tokens, so a pragma in a body lays out the records after it, nested pushes too, and pop restores; sizes and offsets on
+   x86-64 by the pragma's rule (a member aligned to the lesser of its alignment and n), as gcc 15.2 gives them (measured
+   by hand). The program checks itself (abort on a difference). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>

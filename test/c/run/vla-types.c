@@ -1,7 +1,11 @@
-/* Variably modified types at run time (queue 165): sizeof of a VLA type name and of an expression through a pointer
+/* ci-run verdict: exit 0. Variably modified types at run time (queue 165): sizeof of a VLA type name and of an expression through a pointer
    to a VLA, pointer arithmetic over VLA rows, a parameter's array size evaluated at entry with its effects, a
    parameter of pointer-to-VLA type, an unnamed parameter's size, typeof and auto of a variably modified type, and a
-   VLA's empty initializer. Arbace's own, under the EPL-1.0 (LICENSE.md). */
+   VLA's empty initializer. Checks itself: each value worked out by hand (typedef 4 (3 + 2), 4 (20 + 2); rows 48 + 12 + 12
+   + 24 + 2 + 21 + 12 + 1; sides 2 * 10 + 5; unnamed 2 * 10 + 3; rowparam 5, 7; types (n 3) 3 + 12, + 12 + 1 call, + 16 + 2
+   calls, + 8 + 3, the operands of + taken left to right and the pointer type's size expression not evaluated, the two
+   choices C leaves unspecified that this program states; zeroed 0); a difference returns 1. Arbace's own, under the
+   EPL-1.0 (LICENSE.md). */
 int printf (const char *, ...);
 
 static int calls;
@@ -72,13 +76,19 @@ int main (void)
 {
   int e[10];
   char buf[64];
-  printf ("typedef %ld %ld\n", typedef_size (3), typedef_size (20));
-  printf ("rows %ld\n", rows (4, 3));
-  printf ("sides %d\n", sides (1, e, 4, e));
-  printf ("unnamed %d\n", unnamed (1, e, 3));
+  long t1 = typedef_size (3), t2 = typedef_size (20);
+  printf ("typedef %ld %ld\n", t1, t2);
+  long rw = rows (4, 3);
+  printf ("rows %ld\n", rw);
+  int sd = sides (1, e, 4, e);
+  printf ("sides %d\n", sd);
+  int un = unnamed (1, e, 3);
+  printf ("unnamed %d\n", un);
   int r = rowparam (5, (char (*)[5]) buf);
   printf ("rowparam %d %d\n", r, buf[5]);
-  printf ("types %ld\n", types (2));
-  printf ("zeroed %d %d\n", zeroed (50), zeroed (50));
-  return 0;
+  long ty = types (2);
+  printf ("types %ld\n", ty);
+  int z1 = zeroed (50), z2 = zeroed (50);
+  printf ("zeroed %d %d\n", z1, z2);
+  return t1 == 20 && t2 == 88 && rw == 132 && sd == 25 && un == 23 && r == 5 && buf[5] == 7 && ty == 57 && z1 == 0 && z2 == 0 ? 0 : 1;
 }

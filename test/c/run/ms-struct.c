@@ -1,6 +1,9 @@
-/* GNU's ms_struct attribute (the Mac VM's report 244, item 4): the Microsoft layout gcc documents (x86 type attributes,
-   -mms-bitfields), each case's size, alignment, offsets and bit positions as gcc 15.2 gives them on x86-64 (measured by
-   hand); the program checks itself (abort on a difference) and prints what it measured. */
+/* ci-run verdict: exit 0. GNU's ms_struct attribute (the Mac VM's report 244, item 4): the Microsoft layout gcc documents (x86 type attributes,
+   -mms-bitfields), each case's size, alignment, offsets and bit positions on x86-64 (t1 to t5 the manual's own examples
+   with int for Windows' long, the others by its rules: a bit-field starts a new unit when its type's size differs from
+   the previous one's or it does not fit, a zero-width bit-field after a bit-field closes its unit and aligns the next member to its own type,
+   otherwise it is ignored; the values agree with gcc 15.2's, measured by hand); the program checks itself (abort on a
+   difference) and prints what it measured. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
