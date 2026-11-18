@@ -6434,3 +6434,12 @@ Queue 342's review (the VM's report `342-review-nall-c-cpp-go.md`, findings 1 an
   `'OP_Z' undeclared`; `bin/repr-c roundtrip --corpus gcc-c23,gcc-embed,gcc-bitint --only` (cs329-regression.txt's 12 gcc
   files, bitint-5.c, torture/bitint-12.c, `ARBACE_C_JUDGE=gcc`): 14 of 14 pass; `bin/ci dg --essential` 92 of 92 and the whole
   `bin/ci dg` 612 of 619 supported, 8 unsupported, the record's counts (5 min, 1.57 GB peak), the control differing; the list's 8 ccorpus2 files (quickjs, zlib, tcc, torture) are the main host's.
+- Keys (queue 366, checked 2026-11-18): `arbace/repr/c/convert.ae`, `arbace/repr/c/annot.ae` and `arbace/c/dg.ae` are embedded
+  sources (C's since C9; out of bin/lib/version.bash's `arbace_crop_paths`, in `arbace_embedded_sources`), as is D342-3's
+  `arbace/repr/cpp/parse.ae` (C++'s since W2): the change moves `gate_key` (`bin/arbace-go --gate-key`: 9cd2e4a96 `50d2859b4d8d`
+  to 13f3d1a97 `98c58bc8e145`, without `ARBACE_HOST_EXE`; `ea2b3a7eab10` to `68e499f448b9` with nx's stage 0 as it) and the
+  embedded sources, so the gate's executables are built again, stage 0 evaluates the changed namespaces from the checkout until
+  the next re-seed, and every step on the `:gate` and `:prog` hosts reruns. C's files are also in test/gate/steps.edn's `:tools`
+  (repr/c and arbace/c are not among its exclusions), which nearly every step on stage 0 declares: C's change reruns the whole
+  `--full` (a count from steps.edn's inputs and hosts: 178 of its 192 steps, the 14 left the seed's, stage 0's, javac's and a few
+  of no input), while C++'s parse.ae, out of `:tools`, reruns the `:cpp` steps and the executables' (49).
