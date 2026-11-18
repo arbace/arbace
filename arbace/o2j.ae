@@ -102,8 +102,22 @@
 ;; the compiled level's files: each unit's file starts (in-ns 'PKG) and its imports, a package's namespace file
 ;; (ocaml/u.ae, ocaml/p<N>.ae) apart, as j2g's trees take them (a file whose first form is ns is a package file)
 (def ^:dynamic *in-ns* false)
+;; the compiled level's plugins (OC220 (a)'s compiled half, queue 373-1): the units a program's Dynlink may load, translated ahead
+;; into its package (classes D_<unit>) behind its main class's registry; *plugin* the one being translated
+(def ^:dynamic *plugins* #{})
+(def ^:dynamic *plugin* nil)
 
-(defn pkg-of "The package of unit m's class." [m] (if (contains? *own* m) *pkg* "ocaml.u"))
+(defn pkg-of "The package of unit m's class." [m] (if (or (contains? *own* m) (contains? *plugins* m)) *pkg* "ocaml.u"))
+
+(defn class-of
+  "The qualified name of unit m's class: a program's own unit's M_m in *pkg*, a plugin's D_m there (the compiled level's Dynlink,
+  queue 373-1: a plugin may share its name with a unit of the program, pr4229's sub/abstract), the plugin being translated its own,
+  else the library's ocaml.u.M_m."
+  [m]
+  (cond (= m *plugin*) (str *pkg* ".D_" m)
+        (contains? *own* m) (str *pkg* "." (class-name m))
+        (contains? *plugins* m) (str *pkg* ".D_" m)
+        :else (str "ocaml.u." (class-name m))))
 
 (defn- header-forms [pkg imports]
   (if *in-ns*
@@ -508,7 +522,7 @@
     (str/starts-with? n "global ")
     (let [g (global-name (subs n 7))]
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
-            :else (symbol (str (pkg-of g) "." (class-name g)) "G")))
+            :else (symbol (class-of g) "G")))
     (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
     :else (with-args ctx args (fn [as] (prim-value n as)))))
 
@@ -644,8 +658,8 @@
   "The Java forms of a unit's dump: [forms missing], missing the externals and primitives the
   runtime lacks with their counts."
   [{:keys [name code]}]
-  (let [cls (symbol (class-name name))]
-    (binding [*unit* {:class (symbol (str (pkg-of name) "." cls)) :name name :n (atom 0)
+  (let [cls (symbol (last (str/split (class-of name) #"\.")))]
+    (binding [*unit* {:class (symbol (class-of name)) :name name :n (atom 0)
                       :classes (atom []) :consts (atom []) :missing (atom {})}]
       (let [[_ [body]] (node-body code)
             init (realize (expr {:env {} :exits {}} body false))
@@ -661,18 +675,62 @@
                (realize klass))
          @(:missing *unit*)]))))
 
+(defn- program-class [u] (str (if (contains? *own* u) *pkg* "ocaml.u") "." (class-name u)))
+
+(defn- jstrs [xs] (list 'new 'String/1 (mapv #(list 'java-str %) xs)))
+
+(defn- registry-methods
+  "The compiled level's Dynlink (OC220 (a)'s compiled half, queue 373-1): the program's loader, its main class's static methods. load
+  answers jdk/ocaml's Main/loader: \"parse\" a plugin's Lambda text, looked up by its key (plugin-key) among PLUGINS ({:name :key
+  :deps :refs}, translated ahead into the package), its entry [NAME DEPS REFS INIT nil] (INIT its class's init as a Runnable), a text
+  of no plugin a Failure; \"define\" the entry's INIT; \"global\" a unit's module block (UNITS', then the plugins'), nil for another name."
+  [units plugins]
+  (let [x (symbol "x$") t (symbol "t$") k (symbol "k$") n (symbol "n$") main (str *pkg* ".M__main")]
+    [(list 'method (with-meta 'load {:public true :static true}) [(with-meta x {:tag 'Object/1})]
+           (list 'let [(with-meta t {:tag 'String}) (list 'cast 'String (list 'aget x 0))]
+                 (list 'cond
+                       (list '.equals t (list 'java-str "parse")) (list (symbol main "plugin") (list 'cast 'String (list 'aget x 1)))
+                       (list '.equals t (list 'java-str "define")) (list 'aget (list 'cast 'Object/1 (list 'aget x 1)) 3)
+                       (list '.equals t (list 'java-str "global")) (list (symbol main "global") (list 'cast 'String (list 'aget x 1)))
+                       :else nil)))
+     (list 'method (with-meta 'plugin {:public true :static true}) [(with-meta t {:tag 'String})]
+           (list 'let [(with-meta k {:tag 'String}) (list 'java-str (list 'String/valueOf (list '.hashCode t)) (list 'java-str "#")
+                                                          (list 'String/valueOf (list '.length t)))]
+                 (concat (list 'cond)
+                         (mapcat (fn [{:keys [name key deps refs]}]
+                                   [(list '.equals k (list 'java-str key))
+                                    (list 'new 'Object/1 [(list 'java-str name) (jstrs deps) (jstrs refs)
+                                                          (list 'lambda 'Runnable [] (list (symbol (str *pkg* ".D_" name) "init")) nil)
+                                                          nil])])
+                                 plugins)
+                         [:else (list 'throw (list 'ocaml.rt.Rt/failwith (list 'java-str "o2j: dynlink: no plugin of this text in the program's registry")))])))
+     (list 'method (with-meta 'global {:public true :static true}) [(with-meta n {:tag 'String})]
+           (concat (list 'cond)
+                   (mapcat (fn [u] [(list '.equals n (list 'java-str u)) (symbol (program-class u) "G")]) (distinct units))
+                   (mapcat (fn [{:keys [name]}] [(list '.equals n (list 'java-str name)) (symbol (str *pkg* ".D_" name) "G")])
+                           (remove #(some #{(:name %)} units) plugins))
+                   [:else nil]))]))
+
 (defn main-forms
   "The program's main class: inits, the units' initialisation in link order as one Runnable, and
-  main, Main/run's ending and the status."
-  [units]
+  main, Main/run's ending and the status. At the compiled level (*in-ns*), for a program that links Dynlink, main first gives the runtime the program's units
+  (Main/setUnits, Dynlink's main program units) and its loader (Main/setLoader, registry-methods' load over PLUGINS: queue 373-1)."
+  [units & [plugins]]
   (conj (header-forms *pkg* nil)
-        (list 'defclass (with-meta 'M__main {:public true})
-              (list 'method (with-meta 'inits {:public true :static true}) (with-meta [] {:tag 'Runnable})
-                    (concat (list 'lambda 'Runnable [])
-                            (for [u units] (list (symbol (str (pkg-of u) "." (class-name u)) "init")))
-                            [nil]))
-              (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
-                    (list 'System/exit (list 'ocaml.rt.Main/run 'args (list (symbol (str *pkg* ".M__main") "inits"))))))))
+        (concat
+         (list 'defclass (with-meta 'M__main {:public true})
+               (list 'method (with-meta 'inits {:public true :static true}) (with-meta [] {:tag 'Runnable})
+                     (concat (list 'lambda 'Runnable [])
+                             (for [u units] (list (symbol (program-class u) "init")))
+                             [nil]))
+               (concat
+                (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void}))
+                (when (and *in-ns* (some #{"Dynlink"} units))
+                  [(list 'ocaml.rt.Main/setUnits (jstrs units))
+                   (list 'ocaml.rt.Main/setLoader (list 'lambda 'java.util.function.Function [(symbol "x$")]
+                                                        (list (symbol (str *pkg* ".M__main") "load") (list 'cast 'Object/1 (symbol "x$")))))])
+                [(list 'System/exit (list 'ocaml.rt.Main/run 'args (list (symbol (str *pkg* ".M__main") "inits"))))]))
+         (when (and *in-ns* (some #{"Dynlink"} units)) (registry-methods units plugins)))))
 
 (defn shard-forms
   "The compiled level's dispatcher (OC93 (a)): the class ocaml.u.Shard, whose main runs the program the environment
@@ -719,14 +777,17 @@
       (walk (:code u)))
     (vec (sort (disj (into @acc (:required u)) (:name u))))))
 
-(defn plugin-unit
-  "A plugin's unit (Dynlink's loader at the light level, queue 373: jdk/ocaml's caml_oi_dynlink_parse through test/ocaml/o2j/run.ae)
-  from its Lambda dump's TEXT: {:name :deps :refs :forms}, deps the units it requires and then the globals its code names (the
-  implementation imports, as oi's caml_oi_dynlink_parse gives them), refs those globals in the order the code names them (oi's
-  ParseUnit, its link's checks), forms its class's Java forms (translate-unit's, the package ocaml.u)."
+(defn plugin-key
+  "A plugin's key in the compiled level's registry (queue 373-1): its Lambda text's String hashCode and length, as the runtime's
+  caml_oi_dynlink_parse has the text (the file after its header) and registry-methods' plugin computes them."
   [^String text]
-  (let [u (dump-of (read-string text) "a plugin")
-        refs (volatile! [])
+  (str (.hashCode text) "#" (.length text)))
+
+(defn- plugin-deps
+  "A plugin's dependencies, {:deps :refs}: the units it requires and then the globals its code names, and those globals in the order
+  the code names them (oi's caml_oi_dynlink_parse and ParseUnit)."
+  [u]
+  (let [refs (volatile! [])
         seen (volatile! #{(:name u)})]
     (letfn [(walk [x]
               (cond (seq? x) (do (when (and (= 'prim (first x)) (string? (second x)) (str/starts-with? (second x) "global "))
@@ -735,10 +796,19 @@
                                  (run! walk x))
                     (vector? x) (run! walk x)))]
       (walk (:code u)))
-    (let [deps (distinct (remove #{(:name u)} (concat (:required u) @refs)))
-          ;; (an external the runtime lacks throws Rt/missing when it is called, as a program's unit's does)
-          [forms _] (translate-unit u)]
-      {:name (:name u) :deps (vec deps) :refs @refs :forms forms})))
+    {:deps (vec (distinct (remove #{(:name u)} (concat (:required u) @refs)))) :refs @refs}))
+
+(defn plugin-unit
+  "A plugin's unit (Dynlink's loader at the light level, queue 373: jdk/ocaml's caml_oi_dynlink_parse through test/ocaml/o2j/run.ae)
+  from its Lambda dump's TEXT: {:name :deps :refs :forms}, deps the units it requires and then the globals its code names (the
+  implementation imports, as oi's caml_oi_dynlink_parse gives them), refs those globals in the order the code names them (oi's
+  ParseUnit, its link's checks), forms its class's Java forms (translate-unit's, the package ocaml.u)."
+  [^String text]
+  (let [u (dump-of (read-string text) "a plugin")
+        {:keys [deps refs]} (plugin-deps u)
+        ;; (an external the runtime lacks throws Rt/missing when it is called, as a program's unit's does)
+        [forms _] (translate-unit u)]
+    {:name (:name u) :deps deps :refs refs :forms forms}))
 
 (defn link
   "The library units programs' units need, in lib-order; deps: unit -> the units it needs. FORCED: library units the program
@@ -756,18 +826,29 @@
       (doseq [u prog-units] (run! visit (unit-refs u))))
     (filterv @need lib-order)))
 
-(defn- translate-units [lo od us libs]
+(defn- translate-units [lo od us libs & [ps plibs]]
   (do
     (doseq [u us]
       (let [[forms missing] (translate-unit u)]
         (write-forms (io/file od (str (:name u) ".ae")) forms
                      (str "Translated by arbace.o2j from the Lambda of " (:name u) "."))
         (doseq [[m c] (sort missing)] (println (str "missing\t" od "\t" (:name u) "\t" m "\t" c)))))
-    (write-forms (io/file od "M__main.ae") (main-forms (concat libs (map :name us))) "The program's main class, by arbace.o2j.")
+    ;; the plugins (queue 373-1): each its class D_<unit>, its registry entry in the main class
+    (doseq [u ps]
+      (let [[forms missing] (binding [*plugin* (:name u)] (translate-unit u))]
+        (write-forms (io/file od (str "D_" (:name u) ".ae")) forms
+                     (str "Translated by arbace.o2j from the Lambda of the plugin " (:name u) "."))
+        (doseq [[m c] (sort missing)] (println (str "missing\t" od "\t" (:name u) "\t" m "\t" c)))))
+    (write-forms (io/file od "M__main.ae")
+                 (main-forms (concat libs (map :name us)) (for [u ps] (merge {:name (:name u) :key (:key u)} (plugin-deps u))))
+                 "The program's main class, by arbace.o2j.")
+    ;; (the library units only the plugins name after the main class: in the program's tree, not in its link)
     (spit (io/file od "files.txt")
           (str (str/join "\n" (concat (for [n libs] (.getPath (io/file lo (str n ".ae"))))
                                        (for [u us] (.getPath (io/file od (str (:name u) ".ae"))))
-                                       [(.getPath (io/file od "M__main.ae"))]))
+                                       [(.getPath (io/file od "M__main.ae"))]
+                                       (for [u ps] (.getPath (io/file od (str "D_" (:name u) ".ae"))))
+                                       (for [n plibs] (.getPath (io/file lo (str n ".ae"))))))
                "\n"))))
 
 (defn translate-program
@@ -778,10 +859,19 @@
   (let [{:keys [order deps]} (read-string (slurp (io/file lo "deps.edn")))
         ;; an entry @UNIT names a library unit the program links (OT26 (a)), the others its own units' dumps
         forced (for [d dumps :when (str/starts-with? d "@")] (subs d 1))
-        us (mapv #(read-dump (io/file %)) (remove #(str/starts-with? % "@") dumps))
-        libs (link order deps us forced)]
-    (binding [*pkg* (or pkg "ocaml.u") *own* (if pkg (set (map :name us)) #{})]
-      (translate-units lo od us libs))))
+        us (mapv #(read-dump (io/file %)) (remove #(or (str/starts-with? % "@") (str/starts-with? % "+")) dumps))
+        ;; an entry +DUMP a plugin the program's Dynlink may load (the compiled level, queue 373-1): translated ahead into its package,
+        ;; keyed by its text (plugin-key); the library units only plugins name are in its tree, not its link (ocamlc's link takes those
+        ;; the program's units name: a plugin naming another fails at its load, Undefined_global)
+        ps (vec (for [d dumps :when (str/starts-with? d "+")
+                      :let [f (io/file (subs d 1)) text (slurp f)]]
+                  (assoc (dump-of (read-string text) f) :key (plugin-key text))))
+        _ (when-let [dup (first (for [[n c] (frequencies (map :name ps)) :when (> c 1)] n))]
+            (throw (ex-info (str "two plugins define the unit " dup) {:unit dup})))
+        libs (link order deps us forced)
+        plibs (if (seq ps) (let [l (set libs)] (remove l (link order deps (concat us ps) forced))) [])]
+    (binding [*pkg* (or pkg "ocaml.u") *own* (if pkg (set (map :name us)) #{}) *plugins* (set (map :name ps))]
+      (translate-units lo od us libs ps plibs))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the command line: o2j unit DUMP OUT, o2j main OUT UNIT...
