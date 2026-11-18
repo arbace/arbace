@@ -13,10 +13,12 @@
 #                          files above: the tool's output, which names the key; the suite's
 #                          fixtures, the test build's input) and the check scripts of
 #                          bin/lib/repr-* and bin/lib/frozen.bash (they run the tool, they do not
-#                          build it), and the crops' Go forms (go/arbace/{oi,scm,scminterp,py,libm}{.ae,/},
-#                          the user, 2026-11-03: a crop's Go change rebuilds no javac tool; javac's world
-#                          calls none of them); since PYS30 (a) every path of bin/lib/version.bash's
-#                          arbace_crop_paths (the crops' namespaces too: the tool embeds repr/java alone)
+#                          build it), and since PYS30 (a) every path of bin/lib/version.bash's
+#                          arbace_crop_paths (the crops' namespaces too: the tool embeds repr/java alone).
+#                          From the user's 2026-11-03 decision until W2 the crops' Go forms
+#                          go/arbace/{oi,scm,scminterp,py,libm}{.ae,/} were left out too; since W2 (doc/W-WINDOW.md)
+#                          j2g --program copies them into every program, javac's tool included
+#                          (arbace/j2g/main.ae), so the key hashes them (review 341, I1)
 #   arbace_javac_fresh WHO EXE
 #                          prints EXE's key, recorded beside it by the tool build (EXE.key), when
 #                          it is the checkout's; else stops (status 1) with a message naming the

@@ -15,7 +15,7 @@
 # W2 (doc/W-WINDOW.md, the keys at W2): repr/scheme, arbace/scheme, repr/cpp, repr/llvm, arbace/cpp, repr/python and arbace/python
 # embedded, and the Go forms oi, scm, scminterp, py and libm copied into the program and javac's tool: all of them hashed by gate_key
 # and the javac key (the audit's :gate and :javac name none of them), the Go forms left out of arbace_runtime_key alone
-# (arbace_runtime_not, W-P3 (a)); C++'s oracle check tools (ncheck, tcheck, mutate; W-P4 (a)), rsi's and llvmi's tools (W-P5 (a),
+# (arbace_runtime_not, W-P3 (a)); C++'s oracle check tools (ncheck, tcheck, mutate and its expect, D341-1 (a); W-P4 (a)), rsi's and llvmi's tools (W-P5 (a),
 # W-D4 (a)), repr/ocaml (W-D5 (a)) and oicapi, hs, expat, pyexpat and pyi's lazy modules (W-P6 (a)) stay out of every key.
 # By hand: test/gate/gate-key-crops-test.bash [ARBACE_GO [VERSION_BASH [AUDIT_AE [JAVAC_KEY_BASH]]]]   (older copies to test)
 set -uo pipefail
@@ -39,7 +39,7 @@ grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources(
 excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/crops/c2j-check bin/lib/hsi/check bin/lib/si/x bin/lib/pyi/x
 go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae go/arbace/pyctypes.ae go/arbace/pyctypes/x.ae
 jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
-arbace/repr/cpp/ncheck.ae arbace/repr/cpp/tcheck.ae arbace/repr/llvm/mutate.ae arbace/rust.ae arbace/rust/x.ae arbace/llvm/run.ae
+arbace/repr/cpp/ncheck.ae arbace/repr/cpp/tcheck.ae arbace/repr/llvm/mutate.ae arbace/repr/llvm/expect.ae arbace/rust.ae arbace/rust/x.ae arbace/llvm/run.ae
 arbace/repr/ocaml.ae arbace/repr/ocaml/print.ae arbace/repr/haskell.ae arbace/repr/rust/x.ae
 go/arbace/x86i.ae go/arbace/x86i/cpu.ae go/arbace/emu.ae go/arbace/emu/as.ae go/arbace/a64i.ae go/arbace/a64i/exec.ae
 arbace/repr/wasm.ae arbace/repr/wasm/x.ae arbace/wasm/x.ae go/arbace/wai.ae go/arbace/wai/x.ae bin/lib/repr-wasm/x bin/lib/wai/x"
