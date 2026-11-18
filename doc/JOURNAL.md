@@ -11827,3 +11827,47 @@ review.edn's :own of the 40 changed files. Own passes 995 to 1029; reap's own-di
 --strict` (0 problems), `bin/records-check` (9 pairs, 0). Every process under 2 GB; no gate. Alternatives not taken: the P2552R3 attribute files (still a dozen lines each), GCC's
 own rules among the single lines (parse/ivdep.C's pragma, lookup/pr79766.C's and parse/qualified2.C's extra qualification, which the
 standard allows since CWG 482, parse/explicit1.C's class-scope explicit specialization, allowed since CWG 727).
+
+## 2026-11-18: n-cpp-bd, C++'s own-diag rows, third pass: 15 more files pass on the own front end (round 54)
+
+Same branch (`n-cpp-bd`, on 8b92a54f0). Method as the first two passes: the 644 own-diag files that fail both records (reap counts
+626) taken from the second pass's last reads (the lines each misses or adds), the single-line and two-line misses grouped by the
+standard's rule they need, the rules ranked by whole files moved. The Mac's task 368 (review 365's lows: the enum-overflow
+acceptance, the coroutine detection, alias-decl-16.C's and gen-attrs-67.C's passes, the wordings) left alone, so that the two merge
+cleanly. Taken (round 54), each the standard's rule as the own front end's error with GCC's message (clean-room: GCC's messages, no
+GCC code); the "parameter packs not expanded" checks not added (D365-1 (a)):
+- checks (arbace.repr.cpp.diag): GCC's suppression of a repeated "not declared" (its declaration of the undeclared name in the
+  innermost block scope): a name reported once in a block and the blocks it encloses (a compound statement, a selection or iteration
+  statement, a handler, a function, a lambda), a braced list's element still reported (its auto deduction fails there, auto44.C):
+  conversion/const3.C, template/crash130.C, lookup/crash5.C, cpp1z/pr92536.C; `template-heads`, a class template's redeclarations
+  at namespace scope, a friend's among them, with equivalent template-heads ([temp.over.link]/6): "redeclared with N template
+  parameters" at the later one, "template parameter 'int i'" at the earlier one's parameter of another kind (a non-type parameter's
+  type compared only when fundamental, a constrained one not at all): template/redecl2.C, template/pr92440.C; `exception-specs`,
+  [except.spec]/5's compatible exception specifications of a function's declarations, a dependent noexcept-specifier's expression
+  equivalent by its tokens up to the template parameters' names ([temp.over.link]/5): a namespace's functions and function
+  templates, its classes' friends, a class's member functions with their out-of-class definitions (`X<T>::f`, the arguments the
+  class template's parameters), both in the main file, no destructor, allocation function or defaulted one; at the later
+  declaration, or at a friend of a class template when the file names the template with arguments after it (its instantiation
+  redeclares it): cpp0x/noexcept29/38/41.C;
+- parser (arbace.repr.cpp.parse): a member class defined out of its class template ([temp.mem]/1, [temp.class.general]/3) with
+  the class template's template-head or the member template's own, as many parameters ("redeclared with 2 template parameters";
+  not judged when the file specializes the class, or with a pack): template/nested6.C, crash120.C, spec42.C; and no default
+  template argument there ([temp.param]/12): template/defarg19.C; [temp.param]/14, a parameter after one with a default has one
+  or is a pack in a primary class, variable or alias template ("no default argument for 'U'" at the declaration): cpp1y/var-templ67.C;
+  the designator rule of the first pass also when the designators are not placed (a member of an anonymous member designated
+  twice): cpp0x/desig5.C.
+Probed on valid code: six new probes in .tmp/r2/probes/ (v20-v25: equivalent heads with typedefs, spellings and friends, compatible
+exception specifications, out-of-class member classes of primaries, partial and explicit specializations, defaults before packs,
+anonymous-member designators, a name in two blocks), each accepted by g++ 15.2 -std=c++20 -pedantic-errors -fsyntax-only (two
+first drafts were not: a template's destructor defined noexcept against its implicit declaration, anonymous structs: changed); all
+25 probes give no own error. The probes found a crash first, fixed before the proof: a header's class template's offset read in the
+main file's text (v19, <coroutine>). Proved: the 14 target files (14 of 14), the record's 1029 own passes in five lists of 188-238
+(1029 of 1029 after one fix: auto44.C's braced list, above) and the 644 (15 pass: the 14 and cpp1z/pr92536.C; 18 rows changed, three
+of them lines fewer: cpp0x/noexcept02.C, noexcept46.C, vt-34314.C). Re-recorded rows only (`--only LIST --record`): the 18;
+own-diag-review.edn's :own of the 18. Own passes 1029 to 1044; reap's own-diag 626 to 611; C++ read 5,467 / 323 / 705 to 5,482 / 323 /
+690; completeness 0.9198 to 0.9204 (meant 0.9365 to 0.9371); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge
+--strict` (0 problems), `bin/records-check` (9 pairs, 0). Every process under 2 GB (peaks 1.1-1.8 GB); no gate. Alternatives not
+taken: the P2552R3 attribute files (a dozen lines each); the constant evaluator's union and dynamic-cast groups (pr94066*.C,
+constexpr-dynamic*.C: larger work per file); partial8.C's partial specialization after instantiation (needs matching A<int*> to
+A<T*>); redecl5.C and pr90138.C (their declarations do not parse, GCC's recovery); `__has_cpp_attribute(carries_dependency)`'s
+answer (the target's data, not a diagnostic rule).

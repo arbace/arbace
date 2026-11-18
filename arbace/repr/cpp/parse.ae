@@ -1299,6 +1299,17 @@
                                 sub (-> sub (update :inner conj x) (update :_desigs conj (vec (rest d))) (assoc-in [:range :end] (:end (:range x))))]
                             (recur (inc i) (inc at) (assoc m at sub) (if d [at false] prev)))
                           (recur (inc i) (inc at) (assoc m at x) (if d [at (= 1 (count d))] prev)))))))
+          ;; (round 54, third pass: the same rule when the designators are not placed, a member of an anonymous member among
+          ;; them: one field's name designated twice, each a designator alone)
+          _ (when (and ds (not placeable) (not arr))
+              (loop [xs (seq ds) seen #{}]
+                (when (seq xs)
+                  (let [d (first xs) [k v i] (first d)]
+                    (if (and d (= 1 (count d)) (= k :f) i)
+                      (if (contains? seen v)
+                        (soft-diag! p (long i) "designator used multiple times in the same initializer list")
+                        (recur (next xs) (conj seen v)))
+                      (recur (next xs) seen))))))
           inner (if placeable
                   (let [n (if (seq slots) (inc (long (key (last slots)))) 0)]
                     (mapv (fn [^long j] (let [k (get slots j)]
@@ -2009,6 +2020,27 @@
            i (if (main-tok? p i) i (long (or b i)))
            ^T t (tok-at p i)]
        (.add d [(.-o t) why (.-s t)])))))
+
+;; (round 54, third pass) Whether the file declares an explicit or partial specialization of the class template `nm`: a
+;; class-key, the name and a template argument list not followed by ::
+(defn- class-specialized? [^P p ^String nm]
+  (let [n (.-cnt p)]
+    (boolean
+      (some (fn [i]
+              (when (and (#{"class" "struct" "union"} (ts (tok-at p i))) (= nm (ts (tok-at p (inc i)))) (= "<" (ts (tok-at p (+ i 2)))))
+                (let [j (loop [j (+ i 3) d 1]
+                          (cond (>= j n) nil
+                                (= "<" (ts (tok-at p j))) (recur (inc j) (inc d))
+                                (= ">" (ts (tok-at p j))) (if (= d 1) j (recur (inc j) (dec d)))
+                                (= ">>" (ts (tok-at p j))) (if (<= d 2) j (recur (inc j) (- d 2)))
+                                :else (recur (inc j) d)))]
+                  (and j (not= "::" (ts (tok-at p (inc j))))))))
+            (range (max 0 (- n 3)))))))
+
+(defn- qualified-at?
+  "Whether the declaration's name at source offset `o` is written qualified: a :: token before it after token `b`."
+  [^P p ^long b ^long o]
+  (boolean (some #(and (= "::" (ts (tok-at p %))) (let [^T t (tok-at p (inc %))] (= o (.-o t)))) (range b (+ b 64)))))
 
 (defn- soft-diag!
   "CX12, CP282 (a): a main-file error the grammar diagnoses without declining the construct (the parse goes on, the tree
@@ -3122,6 +3154,29 @@
                      (let [ps (butlast (:parts qn))]
                        (reduce (fn [e part] (when (:scope e) (sc/find-in (:scope e) (:s part))))
                                (sc/lookup (scope p) (:s (first ps))) (rest ps))))
+              ;; (round 54, third pass: a member class defined out of its class template, [temp.mem]/1 and [temp.class.general]/3:
+              ;; its template-head the class template's, or the member template's own after it, and as many parameters, GCC's
+              ;; "redeclared with N template parameters" ([temp.over.link]/6); and no default template argument there,
+              ;; [temp.param]/12. Not judged when the class has an explicit or partial specialization in the file, whose own
+              ;; members these may be, or with a pack)
+              _ (when (and hdr qent (nil? (:args lp)) (not (skim? p)) (> (count (:parts qn)) 1))
+                  (let [mem (when (:scope qent) (sc/find-in (:scope qent) nm))
+                        n (long (:n hdr))
+                        qargs (:args (nth (:parts qn) (- (count (:parts qn)) 2)))
+                        pk? (or (some :isParameterPack (:params hdr)) (some :isParameterPack (:tps mem)) (some :isParameterPack (:tps qent)))
+                        msg (str "redeclared with " n " template parameter" (when (not= n 1) "s"))]
+                    (when-not (or pk? (class-specialized? p (:s (nth (:parts qn) (- (count (:parts qn)) 2)))))
+                      (cond
+                        (and (:tmpl mem) (:tps mem) (not= n (count (:tps mem))))
+                        (soft-diag! p (long (:i lp)) msg)
+                        (and mem (:class mem) (not (:tmpl mem)) (:tmpl qent) (:tps qent) (pos? n)
+                             (= (count (:names hdr)) n) (= (count qargs) (count (:tps qent)))
+                             (= (map #(tok-text p (long (:b %)) (long (:e %))) qargs) (take (count qargs) (:names hdr)))
+                             (not= n (count (:tps qent))))
+                        (soft-diag! p (long (:i lp)) msg)
+                        :else nil)
+                      (when (and (:tmpl qent) (some (fn [x] (some #(= "TemplateArgument" (:kind %)) (:inner x))) (:params hdr)))
+                        (soft-diag! p (long (:i lp)) (str "default argument for template parameter for class enclosing '" (name-str p qn) "'"))))))
               cs (sc/new-scope :class (if (:scope qent) (sc/new-scope :lookup (scope p) qent) (scope p)) nil)
               tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args lp))))
               ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)
@@ -4071,6 +4126,18 @@
                   (when (and (some #(#{"ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind %)) ws)
                              (some :isParameterPack (butlast ps)))
                     (soft-diag! p hb "parameter pack must be at the end of the template parameter list"))
+                  ;; (round 54, third pass: [temp.param]/14, a parameter after one with a default template argument has one too or
+                  ;; is a pack, in a primary class, variable or alias template: GCC's "no default argument for 'U'" at the
+                  ;; declaration; a template template parameter's default not recorded, so none judged after one)
+                  (when-let [d (first ns)]
+                    (when (and (#{"CXXRecordDecl" "VarDecl" "TypeAliasDecl"} (:kind d)) (nil? (:_args d)) (nil? (:_qn d)) (not (skim? p))
+                               (not (and (= "CXXRecordDecl" (:kind d)) (when-let [o (get-in d [:loc :offset])] (qualified-at? p (long (:_b d)) (long o)))))
+                               (some #(#{"ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind %)) ws))
+                      (let [dflt? (fn [x] (some #(= "TemplateArgument" (:kind %)) (:inner x)))
+                            after (drop-while (complement dflt?) ps)]
+                        (when (not-any? #(= "TemplateTemplateParmDecl" (:kind %)) after)
+                          (when-let [x (first (filter #(not (or (dflt? %) (:isParameterPack %))) after))]
+                            (soft-diag! p (long (:_b d)) (str "no default argument for '" (or (:name x) "") "'")))))))
                   ;; (round 54, second pass: [over.literal]/5, a literal operator template's one template parameter is a non-type
                   ;; parameter of class type or (GNU's) a char pack: a pack of another type is GCC's "literal operator template ...
                   ;; has invalid parameter list")
