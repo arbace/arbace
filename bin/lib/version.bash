@@ -46,6 +46,8 @@ arbace_crop_paths=(
   # arbace/python embedded (CP180 (a), SC230 (a), PYS28 (a), W-D1 (a)), so they leave the list; not C++'s check tools that
   # compare with an oracle's dump (W-P4 (a))
   arbace/repr/cpp/ncheck.ae arbace/repr/cpp/tcheck.ae arbace/repr/llvm/mutate.ae
+  # and the mutants' own verdicts, which only mutate.ae requires (review 341, D341-1 (a), the user 2026-11-18)
+  arbace/repr/llvm/expect.ae
   # their Go forms: OCaml's C API (oicapi), pyi's lazy XML parser (expat, pyexpat), hsi's (hs). W2: oi (W-D5 (a), oi alone), si's
   # scm and scminterp, pyi's py and the libm port it imports are copied into the program and listed in goi's table, so they
   # leave the list (gate_key's and the javac key's; out of the runtime key by arbace_runtime_not, W-P3 (a))
