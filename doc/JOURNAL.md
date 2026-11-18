@@ -12667,3 +12667,38 @@ or counted once by their round trip), LLS49 (c) again with C's and C++'s decisio
 programs), LLS58 (a fixed environment for llvmi's runs, C's runtime). Alternatives considered: porting the 9 remaining heldout kinds
 and verify-rt's 4 mutants (attribute, intrinsic-declaration and debug-info rules, a case or two each: left); doc/llvm/LLVM-CROP-SURVEY.md,
 "As built: n-llvm-indep".
+
+## 2026-11-18: the four elaborator stops of queue 363 (round 54; branch `n-hs-elab2` from `mac/363-haskell-containers` `c13eeaa64`)
+
+Queue 363 (report `mac/queue:reports/363-haskell-containers.md`) left four library modules stopped in the own front end's
+elaborator. All four now elaborate and compile to STG on the own libraries; doc/haskell/FRONTEND-SURVEY.md, "As built: the four
+elaborator stops of queue 363", has the details. In `arbace/repr/haskell/rename.ae`:
+- `head-class` now looks under an instance head's context or forall.
+- An associated instance's family is looked up among the class's children (GHC's lookupInstDeclBndr).
+- An instance signature (a ClassOpSig in the parsed tree) scopes its explicit forall over its method.
+
+In `typecheck.ae`, which follows GHC's behaviour and ports none of its code:
+- Data.Set.Internal: `Item (Set a)` now reduces. A wanted Coercible is improved before solving: newtypes unwrapped, arguments
+  decomposed, and an argument at a nominal role unified (the module's `type role`). This fixes
+  `sconcat = coerce intersections`.
+- Data.Sequence.Internal: an instance signature's variables are the method type's skolems.
+- Control.Monad.Cont.Class: quantified constraints are kept as `[:qc polytype]`. They are solved as givens (matchLocalInst,
+  superclasses too) and as wanteds (solveForAll; a Coercible head is erased), and written in the own interfaces (ownface.ae).
+- Language.Haskell.TH.Syntax: name quotes are GHC.HsToCore.Quote's globalVar (`mkNameG_d`/`_v`/`_tc`). Expression quotes cover
+  variables, constructors, applications and cross-stage lifting, the typed one `unsafeCodeCoerce`, for Sequence's
+  `[|| coerceFT z ||]`.
+
+Checks were run one process at a time, each under 1.5 GiB. `bin/repr-haskell lib-check --ifaces own --judge` over all eleven
+packages in dependency order gave 0 worse everywhere, with 3 better in ghc-internal, 2 in base, 1 in template-haskell, 2 in
+containers and 1 in mtl, and every control differs. `lib-stg --ifaces own` gave template-haskell 11 of 11, containers 35 of 35
+and mtl 24 of 24. The five records with better rows were re-recorded. Not run: the programs (`bin/hsi check --libs own`), the
+GHC-interface lib-check of ghc-internal, the round trip's own interface level and the night's whole records.
+
+The Mac VM's WIP of the same gaps (queue 379, `mac/379-haskell-elaborator-gaps` `596c26758`, report
+`mac/queue:reports/379-haskell-elaborator-gaps-wip.md`) is the same design. It is merged as history with this branch's tree
+(`-s ours`), which also finishes Set and Cont.Class. Decisions, each taken (round 54):
+- 54-1: that merge, rather than combining the two trees hunk by hunk.
+- 54-2: the small expression-quote subset ported, rather than leaving Sequence stopped at its bracket.
+- 54-3: roles from the module's annotations only. Role inference and the interfaces' roles wait for a module that needs them.
+
+Queue 381's gaps (os-string, bytestring, filepath, Control.Monad.Catch) were left alone.

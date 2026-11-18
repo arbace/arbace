@@ -5036,3 +5036,78 @@ the pack's, call for call. No package here needs a foreign stub, so 364's branch
   CPP `#include` of Haskell source). Its originals are still compiled, as unix's dependency.
 - The units grow from 666 to 824, and the judge's stated cases move 316: judge 0.901 → 0.922, Haskell independence 78.02 → 78.44.
 - With the night's two whole own records, the projection is 96 (0.9624).
+
+## As built: the four elaborator stops of queue 363 (2026-11-18, round 54, branch `n-hs-elab2`, from `mac/363-haskell-containers` `c13eeaa64`)
+
+The four library modules that queue 363 left stopped in the elaborator now elaborate on the own libraries. The Mac VM's WIP
+of the same gaps (queue 379, `mac/379-haskell-elaborator-gaps` `596c26758`: Sequence's and TH.Syntax's gaps done, Cont.Class
+unproven, Set partial) is merged as history, its tree superseded by this one (`-s ours`; decision 54-1 below). Each part is
+after GHC's behaviour, named at it; no GHC code is ported.
+
+**Data.Set.Internal** (`instance Ord a => GHCExts.IsList (Set a)`: `type Item (Set a) = a`, `fromList = fromList`). Two causes:
+- The renamer's `head-class` did not look under an instance head's context (`HsQualTy`, `HsForAllTy`), so the class's children
+  were not known in an instance with a context. An associated instance's family is now looked up among them first
+  (`rn-fameqn`, GHC.Rename.Env's lookupInstDeclBndr). `Item` is in scope only qualified there, and its equation went to an
+  unnamed family: `Item (Set a)` never reduced, and `Ord (Item (Set a))` was unsolved.
+- The second unsolved `Ord ?a` was `sconcat = coerce intersections` in `instance Ord a => Semigroup (Intersection a)`. Coercible is
+  erased, so nothing fixed `intersections`' element type. A wanted `Coercible a b` is now kept, and before a group's or a
+  method's wanteds are solved it is improved as GHC canonicalises a representational equality: newtypes unwrapped
+  (`newtype-rep`), the same constructor's arguments decomposed, an argument at a nominal role unified (`coercible-improve!`;
+  the roles are the module's `type role` annotations, `type role Set nominal`). Its evidence stays erased.
+
+**Data.Sequence.Internal** (`foldMap :: forall m a. Monoid m => ...` in `instance Foldable Seq`, its body's annotation naming `m`).
+An instance's signatures are `ClassOpSig`s in the parsed tree (GHC.Parser.PostProcess's cvBindsAndSigs). The renamer now scopes
+an instance signature's explicit forall over its method's binding, as a top-level signature's (rnMethodBinds). The elaborator
+matches the signature's body against the method type's skolemised body and puts each of its variables in scope as the skolem
+it meets (`check-method`'s `isig`; tcMethodBody with InstanceSigs). The module then stopped at `liftTyped t = [|| coerceFT z ||]`
+(`instance Lift a => Lift (Seq a)`): see the quotes below.
+
+**Control.Monad.Cont.Class** (`liftCallCC :: forall t m a b. (MonadTrans t, Monad m, forall m'. Monad m' => Monad (t m')) => ...`).
+A quantified constraint was dropped from every context (`ctx-preds`, `conv-type`). It is now the predicate `[:qc [polytype]]`:
+- given, its dictionary function is applied to its context's dictionaries solved at a match of its head (match-ty with an
+  application against an application, `match-ty*`; GHC.Tc.Solver.Dict's matchLocalInst), and its superclasses are quantified
+  givens too (`super-closure`: `forall m'. Monad m' => Applicative (t m')`, the selector over the application);
+- wanted, its variables are skolems, its context given, its head solved under it (solveForAll); a Coercible or equality head is
+  erased (GHC.Internal.TypeNats' `unsafeWithSNatCo`, whose `forall n. Coercible (SNat n) Natural` was dropped before);
+- written in an interface as its polytype (`type-form`, ownface's `pred-form`) and read back as the predicate.
+The classes' quantified superclasses (MonadTrans's) stay out of `:supers`, as before.
+
+**Language.Haskell.TH.Syntax** (`trueName = 'True` and six more). The name quotes `'f`, `''T` of an external name are GHC.HsToCore.Quote's
+globalVar: `mkNameG_d`, `mkNameG_v` or `mkNameG_tc` of the name's unit, module and occurrence as strings, of type `Name`
+(`th-name-core`). Expression quotes of variables, constructors, applications and parentheses too (`th-quote`): `varE`/`conE` of the
+name, `appE` of the parts over the `Quote m` dictionary, a variable bound outside the quote lifted (GHC.Rename.Splice's cross-stage
+lifting: `lift x`, in a typed quote `unTypeCode (liftTyped x)`); a typed quote `[|| e ||] :: Code m t` is `unsafeCodeCoerce` of it.
+Their types are TH.Lift's `lift`'s and `liftTyped`'s. Anything else in a quote stays "not handled" (queue 381 takes the other
+packages' brackets). GHC's compiler sources are not in the pinned corpus: this desugaring follows GHC's documented behaviour, and
+no program run here executes a quote.
+
+**Results** (lib-check `--ifaces own --judge` of the eleven packages in dependency order, one process at a time, each under
+1.5 GiB; lib-stg `--ifaces own` of the three changed packages):
+
+| package | lib-check judge | changed rows | lib-stg `:ok` |
+|---|---|---|---|
+| ghc-internal | 265 of 265, 0 worse, 3 better (Typeable.Internal 30 → 16 errors, Exception.Context, Generics) | TypeNats, TypeLits, Functor.Const, Functor.Identity, Data.Monoid, Semigroup.Internal: their interfaces now every fact equal (quantified constraints kept; the class's children in instances with a context) | not rerun |
+| base | 241, 0 worse, 2 better (Data.Fixed, Data.Functor.Classes) | Control.Applicative: 31 → 35 of 35 facts | not rerun |
+| deepseq, array, stm, pretty, ghc-boot-th, transformers | 0 worse, 0 better | none | not rerun |
+| template-haskell | 11, 0 worse, 1 better: **Language.Haskell.TH.Syntax** errors → ok | | 11 of 11 (was 10) |
+| containers | 35, 0 worse, 2 better: **Data.Set.Internal**, **Data.Sequence.Internal** errors → ok, their 78 and 93 binders equal to GHC's | | 35 of 35 (was 33) |
+| mtl | 24, 0 worse, 1 better: **Control.Monad.Cont.Class** errors → ok | | 24 of 24 (was 23) |
+
+Every control differs, as it must. The records of ghc-internal, base, template-haskell, containers and mtl are re-recorded from
+this run (`libcheck record`, the same headers). ghc-internal's own pass took 19 minutes, the baseline's 16 on a host loaded 33 to 43.
+
+**Not run**: `bin/hsi check --libs own` (the programs), lib-check of ghc-internal on GHC's interfaces
+(`test/haskell/lib-check-ghc-internal.edn`), the round trip's own interface level, the night's whole own records.
+
+### Decisions (taken (round 54))
+
+- **54-1 the Mac's WIP** (379). (a) Merge it as history with this branch's tree (`-s ours`): the two implementations are the same
+  design (`[:qc ...]`, the head-class fix, the instance signatures' scope, globalVar's name quotes), and this one also finishes Set
+  and Cont.Class and proves all four; (b) combine the two trees hunk by hunk (two copies of each function). *Recommended and
+  taken (round 54): (a).*
+- **54-2 typed and untyped expression quotes**. (a) Port the small subset Data.Sequence.Internal needs (variables, constructors,
+  applications, cross-stage lifting); (b) leave Sequence stopped at its bracket. *Recommended and taken (round 54): (a)*: it is the
+  only quote of the eleven packages after CPP, and its semantics are GHC's documented ones.
+- **54-3 roles**. (a) Only the module's `type role` annotations for Coercible's improvement; (b) infer roles as GHC does and read
+  them from the interfaces (the own interfaces write `representational` everywhere). *Recommended and taken (round 54): (a)* for
+  now; (b) when a module needs an imported nominal role.
