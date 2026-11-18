@@ -10470,3 +10470,7 @@ typeparam/issue54497.go and devirtualization.go on the gate's executable `e8e0d0
 peak 0.80 GB at `GOMEMLIMIT=600MiB`); `bin/ci dg --essential` (92 of 92, the control differs, 0.73 GB); `bin/reap --record` (Go
 eval 1762 / 70 / 2, C read 5237 / 226 / 12, C eval 2246 / 34 / 0, AOT 2254 / 26 / 0), `bin/crops-score --record`, `--judge
 --strict`, `bin/records-check` (9 pairs, 0 problems), `bin/gate --plan`.
+Then `bin/ci check --only` of ci-run's thread-abort, atomic-gcc and ptr-sub-unsigned (cirun copied from `n-ci-thread`'s
+`.tmp/ci`, its key differing only by `arbace/repr/go/syntax.ae`, which the printer does not use; musl's forms reread first, their
+key moved by `n-c-lex`'s repr/c, at one thread under `GOMEMLIMIT=550MiB`, about two hours): 3 of 3 pass, the four ci-run controls
+differ (thread-abort's two among them), peak 0.90 GB.
