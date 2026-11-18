@@ -11981,3 +11981,60 @@ no gate. Alternatives not taken: the braces-around-scalar files init/brace1.C an
 nesting depth and standard), other/operator1.C's namespace operator= (its use's "not defined" needs the declaration dropped),
 parse/bitfield1.C (its second line needs the member dropped), the friend-of-namespace files parse/pr81247-a/b.C (an instantiated
 template-head in the message), the constant evaluator's groups.
+
+## 2026-11-18: n-cpp-bd, C++'s own-diag rows, sixth pass: 21 more files pass on the own front end (round 54)
+
+Same branch (`n-cpp-bd`, on d1023000c). Method as the first five passes: the 594 own-diag files that fail both records (reap
+counts 576) taken from the fifth pass's last reads, the one- and two-line misses grouped by the standard's rule they need, the
+rules ranked by whole files moved, with the two rows the fifth pass left with fewer missed lines (cpp26/literals1.C,
+lookup/using29.C) finished. Taken (round 54), each the standard's rule as the own front end's error with GCC's message
+(clean-room: GCC's messages, no GCC code); the pack checks not added (D365-1 (a)):
+- parser (arbace.repr.cpp.parse): [dcl.type.cv]/1, a cv-qualifier in a declaration with no declarator ("'const' can only be
+  specified for objects and functions"): parse/semicolon4.C; [class.bit]/3, a bit-field of a non-integral type (an unnamed one
+  after a class-specifier "expected ';' after struct definition", a function or floating type "bit-field 'f' with non-integral
+  type"): diagnostic/bitfld2.C, parse/bitfield3.C; [dcl.pre]/5 with [class.union.anon]/1, an unnamed struct with no declarator
+  outside a class ("abstract declarator '<unnamed struct>' used as declaration"), one within anonymous classes alone, the outermost
+  declaring no object ("anonymous struct not inside named type"), one in a named class GCC's -Wpedantic pedwarn ("ISO C++ prohibits
+  anonymous structs"; a new reason prefix `pedantic-w: ` that arbace.repr.cpp.diag drops under -Wno-pedantic after
+  -pedantic-errors), an anonymous union with no members: cpp0x/pr85014.C, template/crash107.C, ext/anon-struct6.C, cpp0x/friend3.C;
+  [class.friend]/6, a friend function defined in a local class: friend3.C; [dcl.init.general]/16.9, a scalar's parenthesized
+  expression-list of more than one expression ("expression list treated as compound expression in initializer"):
+  template/static31.C; [class.dtor], `&X::~X` ("taking address of destructor"): pr85008.C; [temp.pre]/1, `inline template <...>`
+  ("expected unqualified-id before '<' token", clang's recovery kept): template/error11.C, parse/wrong-inline1.C; [temp.expl.spec]/1,
+  `template<> struct X {}` of a class template X ("template specifiers not specified in declaration of"): template/crash32.C; a
+  member function of a class template only declared, defined with the primary's arguments ("invalid use of incomplete type"; not
+  judged when the file specializes it): template/crash35.C; [class.mfct]/2, a qualified definition of another class's member in a
+  member-specification ("cannot define member function 'A::B::foo' within 'A'"): cpp2a/concepts-pr60573.C; [class.mem.general], a
+  non-static data member of its own class's type ("field 's' has incomplete type"): cpp1z/class-deduction117.C (and
+  template/pr71710.C with it); [expr.new]/2, `new auto` with an initializer of other than one element ("initialization of
+  new-expression for type 'auto' requires exactly one element"): cpp0x/new-auto1.C; [over.literal]/5 extended, a literal operator
+  template's list of two parameters, a type or template parameter, or one non-type parameter of a fundamental, pointer or reference
+  type: cpp0x/udlit-tmpl-parms-neg.C; [dcl.fct], an operator-function-id as a parameter's or exception-declaration's name
+  ("declaration of 'operator+' as parameter"): parse/error39.C; [namespace.udecl]/10 and [dcl.typedef], a class's using-declarator
+  naming a member a using-declarator of the class named before ("redeclaration of 'using M::type'"), two types of other entities in
+  a class scope, a typedef-name among them, a typedef or a class definition of a name a using-declarator declared ("conflicts with
+  a previous declaration", "redefinition of"; the class's using-declared entity marked :udecl, the mark left out of the fifth pass's
+  entity comparison): lookup/using29.C; P2071R2, a named-universal-character escape before C++23 (GCC's pedwarn "named universal
+  character escapes are only valid in C++23"), and a hexadecimal escape past its code unit's 8, 16 or 32 bits (GCC's pedwarn "hex
+  escape sequence out of range"): cpp26/literals1.C.
+Not reached: cpp0x/udlit-tmpl-arg-neg2.C (its undeclared `T` declines the template, so the operator is never read).
+Probed on valid code: sixteen new probes in .tmp/r2/probes/ (v50-v65, one a rule or two: declarators after cv-qualified classes,
+integral bit-fields, anonymous unions and named structs, friend definitions in non-local classes, members of defined and
+partially specialized class templates, out-of-class member definitions, single-expression and class initializers, members of the
+class's own pointer and static types, `new auto` of one element, destructor calls and member addresses, explicit specializations
+with arguments, char-pack and class literal operator templates, function-pointer parameters, inline function templates, class
+using-declarations of distinct names, escapes in range and raw strings), each accepted by g++ 15.2 -std=c++20 -pedantic-errors
+-fsyntax-only; all 65 probes give no own error. The first proof found three false errors, fixed before the second: the
+anonymous-struct rule on cpp0x/desig5.C's and init/union2.C's anonymous structs of a declared object (`struct { ... } d{...}`,
+`typedef union { ... } A;`; now the outermost class's `}` must be followed by `;`), the pedwarn under lookup/pr84962.C's
+-Wno-pedantic, and cpp2a/using-enum-1.C's namespace-scope `using Q::e;` (the :udecl mark made Q's entity unequal to B's).
+Proved on the final code: the record's 1097 own passes in six lists of 182-183 (1097 of 1097) and the 594 in three of 184-214
+(21 pass, 6 more rows lines fewer, no new extra line: cpp0x/using-enum-3.C, decl-loc1.C, parse/bitfield1.C, lookup/using53.C,
+cpp2a/using-enum-5.C, ext/anon-struct5.C; cpp0x/initlist92.C timed out under the three-thread load twice, its row as recorded when
+alone, not re-recorded). Re-recorded rows only (`--only LIST --record`): the 27; own-diag-review.edn's :own of 26. Own passes 1097 to
+1118; reap's own-diag 576 to 555; C++ read 5,517 / 323 / 655 to 5,538 / 323 / 634; completeness 0.9218 to 0.9226 (meant 0.9386 to
+0.9394); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (9 pairs,
+0). Every process under 2 GB (peaks 1.1-1.8 GB, at most 214 files a process); no gate. Alternatives not taken: delete1.C's operand
+types and lambda-anon1.C's anonymous-union captures (Sema's types and captures), template/void4.C and void14.C (their second line
+needs the invalid template's uses), parse/template28.C's `>=` (its second line needs the declaration dropped), alias-decl-equiv1.C
+(alias template equivalence), the constant evaluator's groups.
