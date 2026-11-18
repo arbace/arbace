@@ -220,6 +220,16 @@
     ;; (G5c: the ones that do not return, Builtins' NoThrow and NoReturn)
     "abort" "exit" "_Exit" "quick_exit"})
 
+;; queue 351: the C library functions clang 23.1.5 declares NoThrow (clang/include/clang/Basic/Builtins.td's LibBuiltin defs
+;; with NoThrow among their Attributes, as Sema::AddKnownFunctionAttributes adds it to their extern "C" declarations): calls
+;; of them are nounwind, never an invoke (assert_fail.cc's fprintf in a noexcept function: no terminate pad)
+(def ^:private clang-nothrow-libc
+  #{"abort" "fprintf" "isalnum" "isalpha" "isblank" "iscntrl" "isdigit" "isgraph" "islower" "isprint" "ispunct" "isspace"
+    "isupper" "isxdigit" "memchr" "memcpy" "memmove" "memset" "snprintf" "sprintf" "strcat" "strchr" "strcmp" "strcpy"
+    "strlen" "strncat" "strncmp" "strncpy" "strpbrk" "strrchr" "strspn" "strstr" "tolower" "toupper" "umask" "va_copy"
+    "va_end" "va_start" "vfprintf" "vprintf" "vsnprintf" "vsprintf" "wcschr" "wcscmp" "wcslen" "wcsncmp" "wmemchr" "wmemcmp"
+    "wmemcpy" "wmemmove"})
+
 (defn header-entities
   "Our entities for the header declaration the parts name ([\"printf\"], [\"std\" \"printf\"]), or nil."
   [parts]
@@ -245,7 +255,7 @@
                                  f {:id id :name (:name pe) :kind :fn :ty (resolve-type *root* (:qt pe)) :linkage :c :path []
                                     :scope *root* :param-names [] :defaults [] :pos -1 :header true
                                     ;; the C library functions clang knows as nothrow builtins (nounwind at their calls)
-                                    :noexcept (boolean (nothrow-libc (:name pe)))
+                                    :noexcept (boolean (or (nothrow-libc (:name pe)) (clang-nothrow-libc (:name pe))))
                                     ;; (and as not returning: Builtins.def's abort, exit, _Exit, quick_exit; G5c)
                                     :noreturn (contains? #{"abort" "exit" "_Exit" "quick_exit"} (:name pe))}]
                              (swap! *fns* assoc id f)
@@ -803,7 +813,11 @@
   "Whether a node is a header's (G4: its location's file a header's path, not the main file's)."
   [n]
   (let [f (:file (loc-of (get-in n [:range :begin])))]
-    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))))))
+    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))
+                  ;; (queue 351: for the code generator a source file the unit includes, `#include <hashtable-aux.cc>` in
+                  ;; hashtable_tr1.cc, a shim's `#include <assert_fail.cc>`, is the unit's own text, its definitions emitted as
+                  ;; clang emits every definition of the translation unit; the checker's reading unchanged)
+                  (not (and (not (checking?)) (re-find #"\.(cc|cpp|cxx)$" f)))))))
 
 (defn main-fn-node?
   "Whether a node is the program's `main` (a FunctionDecl named main, not a member): n-cpp-eval, g++.dg's torture/vshuf-*.C define
@@ -1310,7 +1324,8 @@
            :ctor-attr (when-let [x (gnu-attr-arg n "constructor")] (if (number? x) x 65535))
            ;; (the C library's functions that do not return, nothrow builtins for clang, G5c: musl's abort; not free, which
            ;; clang invokes in del_op.cc's noexcept operator delete)
-           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)))
+           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (or (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)
+                                                                                       (contains? clang-nothrow-libc nm))))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            ;; queue 351: `throw()`, clang's EST_DynamicNone: before C++17 an exception filter, not noexcept's terminate scope
            :dynamic-none (boolean (and (not (re-find #"\bnoexcept\b" (or qt ""))) (re-find #"\bthrow\s*\(\s*\)" (or qt ""))))
@@ -1423,8 +1438,10 @@
       (let [id (next-id)
             v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
                :linkage (if (linkage-c? home) :c :cpp)
-               :defined (not (or (= st :member-static) (= "extern" (:storageClass n))))
-               :extern (= "extern" (:storageClass n))
+               ;; (queue 351: `extern` with an initializer is a definition, [basic.def]/2: hashtable-aux.cc's `extern const
+               ;; unsigned long __prime_list[] = {...}`, external though const, [basic.link]/3)
+               :defined (not (or (= st :member-static) (and (= "extern" (:storageClass n)) (not init))))
+               :extern (and (= "extern" (:storageClass n)) (not init))
                :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
                ;; (CP369 (a): `static` on a static data member is not its linkage, [basic.link]/4: internal only by an unnamed
                ;; namespace on its class's path, its home's; clang's dso_local external global for `int A::y = f();`)
