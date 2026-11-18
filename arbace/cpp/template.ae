@@ -63,8 +63,8 @@
 (def ^:dynamic *provisional* nil)
 ;; queue 367: a type trait whose operands are only named (__is_same): a class template's specialization not defined is an
 ;; incomplete class there ([temp.inst]/2), not a refusal (<bits/locale_classes.tcc>'s __try_use_facet's
-;; __is_same(const _Facet, const codecvt<char, char, mbstate_t>) in a unit that defines no codecvt)
-(def ^:dynamic *name-only* false)
+;; __is_same(const _Facet, const codecvt<char, char, mbstate_t>) in a unit that defines no codecvt); sema/*name-only*, which
+;; queue 383 binds for a header's typedef too
 
 (defn- same-arg? [a b] (if (and (map? a) (contains? a :val)) (= (:val a) (:val b)) (= a b)))
 (def ^:dynamic *scanned* nil)
@@ -1961,7 +1961,7 @@
           (when (= nm (:name t))
             (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
         (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args))
-                 (or (and *provisional* (or sema/*main-retry* sema/*incomplete-ok*)) *name-only*))
+                 (or (and *provisional* (or sema/*main-retry* sema/*incomplete-ok*)) sema/*name-only*))
           (incomplete-instance! t args)
           (select-instance! t args nil)))))))
 
@@ -2006,6 +2006,10 @@
                                     :tmpl tid :targs args})
     (upd-tmpl! tid assoc-in [:insts args] cid)
     (when *provisional* (swap! *provisional* update-in [:templates tid] (fnil conj #{}) cid))
+    ;; (queue 383: one only named, sema/*name-only*: marked, so that an explicit specialization declared after the primary's
+    ;; definition completed it takes it again, clang never having instantiated the primary for it: std::char_traits<char>,
+    ;; named by stringfwd.h's `typedef basic_string<char> string;` before char_traits.h defines the primary, then specializes it)
+    (when (and sema/*name-only* *provisional*) (swap! *provisional* update :name-only (fnil conj #{}) cid))
     (when (System/getenv "CPP_TMPL_TRACE")
       (binding [*out* *err*] (println "incomplete instance" (:name t) cid "waiting for its template's definition")))
     {:k :class :id cid}))
@@ -3152,7 +3156,12 @@
           (extern-member! scope (str (:_text n))))
         (when-let [[_ t] (and (:_extern n) (re-matches #"(?s)\s*(?:class|struct)\s+(.*?)\s*" (str (:_text n))))]
           (when-let [ty (sema/resolve-type scope t)]
-            (when (abi/class? ty) (abi/update-cls! (:id ty) assoc :extern-inst true))))
+            ;; (queue 383: not an explicit specialization's, which no explicit instantiation reaches, [temp.explicit]/4 with
+            ;; [temp.expl.spec]: <locale_facets.tcc>'s extern template class ctype_byname<char> before locale-inst.cc defines its
+            ;; specialization's ctype_byname(const string&, size_t), which had been declared only)
+            (when (and (abi/class? ty)
+                       (let [c (abi/cls (:id ty))] (not (and (:tmpl c) (contains? (:specs (tmpl (:tmpl c))) (:targs c))))))
+              (abi/update-cls! (:id ty) assoc :extern-inst true))))
         ;; (CP321 (a), the checker: an explicit instantiation definition of a class, its static members' in-class
         ;; initializers then analyzed, [temp.explicit]/10)
         ;; (queue 367, the code generator: and its members defined there emitted weak_odr, [temp.explicit]/10-12, clang's
@@ -3275,7 +3284,14 @@
             (let [ic (get-in @*tmpls* [tid :insts args])]
               (cond (nil? ic) (declare-instance! (tmpl tid) args n [] [] true)
                     ;; (CP372 (a): an incomplete instance named before its explicit specialization: completed by it)
-                    (incomplete-waiting? tid ic) (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic)))))
+                    (incomplete-waiting? tid ic) (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic))
+                    ;; (queue 383: one only named, completed from the primary before this specialization: made again from it, in
+                    ;; place, its earlier members dropped, as if the primary had never been instantiated for it)
+                    (and *provisional* (contains? (:name-only @*provisional*) ic))
+                    (let [c (abi/cls ic)
+                          cs (new-scope :class (:outer c) :cls ic :path (conj (vec (:path c)) [:cls ic]))]
+                      (swap! abi/*classes* assoc ic (assoc (select-keys c [:id :name :path :outer :tmpl :targs]) :scope cs :fields [] :bases []))
+                      (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic))))))
         nil)
       :template)
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "VarDecl")
@@ -4133,7 +4149,7 @@
                              (when (and e (#{:tparam :tdep :tspec} (:k (:ty e))))
                                [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
          :trait-type (fn [scope nm forms] (if (contains? type-traits nm) (trait-type scope nm forms) (fail :type "unknown type " nm)))
-         :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE *name-only* (boolean (re-find #"^\s*__is_same\b" (str t)))] (eval-text scope t)))
+         :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE sema/*name-only* (boolean (re-find #"^\s*__is_same\b" (str t)))] (eval-text scope t)))
          ;; (CX12, CP281 (a): a type-constraint `C<A...>` (or `C`) applied to the type `T`, C<T, A...>: true, false, or
          ;; nil when the slice cannot tell)
          :type-constraint (fn [scope ^String text T]
