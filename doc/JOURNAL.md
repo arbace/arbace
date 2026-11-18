@@ -10596,3 +10596,21 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the compare module by module", alternatives there.
 - core's native facts may move (const generics' clauses, trait objects, impl numbering in option.rs and result.rs): the day runs
   core-essential, rind-test, core's check and the whole alloc pass.
+
+## 2026-11-18: n-crops-night: tonight's crop branches stacked on n-ocaml-stack (branch `n-crops-night`, round 52)
+
+- On mac/n-ocaml-stack a57613840 (n-review-d + n-ocaml-defer + OC217's stages 1 and 3 + the Mac's 331) merged in order:
+  mac/n-wasm-defer 65677ad89, mac/n-hs-cpp 5ea3d6aae (n-hs-indep b5d04b12a, n-hs-p59 1c4c29575), mac/n-llvm-defer ca310e4fd,
+  mac/n-rust-comp 40b0bc958, mac/n-rust-mat e31ff8045, mac/n-rust-alloc3 f4bb84552 (n-rust-alloc 0ad256435, n-rust-alloc2
+  1a6ec44bf). Reading and sub-1-GiB checks only (the full gate on the host).
+- Conflicts: doc/JOURNAL.md at every merge (both sides' entries kept, in merge order) and doc/rust/FRONTEND-SURVEY.md at
+  n-rust-alloc3 (n-rust-mat's "Rust's scores read" section with RIND11, then alloc's three RIND9 (a) sections). Auto-merged:
+  test/crops/independence.edn (n-rust-mat's Rust eval/AOT facts beside n-rust-comp's), test/reap/matrix.edn. No Haskell record or
+  class file (own-fallback.txt, divergences-own.edn, own-verdicts.tsv) was changed by two of the merged branches.
+- Checks: `bin/hsi own-verdicts --check` current (756 of 909); `bin/oi divergences` fails at the pins (331's re-pinned and dropped
+  pins "not attested", expected until the main host's whole runs and `bin/oi pins --attest`); `bin/wai divergences` ok;
+  `bin/repr-wasm ops check` 571 rows; `bin/rust-front alloc-iface --units` passed (GOMEMLIMIT=500MiB, the alloc index copied from
+  n-rust-alloc3's scratch); `test/repr/llvm/expect-test.bash` 50 cases, 15 controls, 0 failing; `bin/reap --record` and
+  `bin/crops-score --record` unchanged (53 of 56 cells, 0 problems), `--judge --strict` 0 problems; `bin/records-check` 0;
+  `bin/gate --plan` plans (go-build: 334's go/arbace/scm moves gate_key).
+- On top tomorrow: n-rust-alloc4 and n-hs-elab (still running tonight).
