@@ -2,7 +2,7 @@
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: n-java-f13"): jdk26u's
  * com.sun.management.internal.GarbageCollectorExtImpl (src/jdk.management/share/classes/com/sun/management/internal/GarbageCollectorExtImpl.java
  * at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):
- * the natives HotSpot's management interface (jmm) answers have bodies over jrt's sun.management.JrtManagement and jdk.internal.jrt.HostManagement (go/arbace/jrt/memory.ae); no garbage collection notification is sent yet (F13's later slice: the collector's watcher sending them), so enabling them does nothing; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General
+ * the natives HotSpot's management interface (jmm) answers have bodies over jrt's sun.management.JrtManagement and jdk.internal.jrt.HostManagement (go/arbace/jrt/memory.ae); enabling the notifications hands JrtManagement a sender of them, GCNotifier's call of createGCNotification with a GcInfo of the cycle (n-java-thresh); nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General
  * Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace
  * authors; Eclipse Public License 1.0.
  */
@@ -170,6 +170,17 @@ public class GarbageCollectorExtImpl extends GarbageCollectorImpl
 
     private void setNotificationEnabled(GarbageCollectorMXBean gc,
                                                  boolean enabled) {
+        // jrt (n-java-thresh): JrtManagement's notifier sends the cycles' notifications through it
+        sun.management.JrtManagement.setGcNotifier(!enabled ? null : new sun.management.JrtManagement.GcNotifier() {
+            @Override
+            public void notifyGc(long timestamp, String gcAction, String gcCause, long index, long startTime,
+                                 long endTime, java.lang.management.MemoryUsage[] before,
+                                 java.lang.management.MemoryUsage[] after) {
+                GcInfo info = (GcInfo) jdk.internal.jrt.HostManagement.gcInfoFactory().newGcInfo(
+                    getGcInfoBuilder(), index, startTime, endTime, before, after, new Object[0]);
+                createGCNotification(timestamp, getName(), gcAction, gcCause, info);
+            }
+        });
     }
 
     // Invoked by the VM

@@ -2,7 +2,7 @@
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: n-java-f13"): jdk26u's
  * sun.management.MemoryPoolImpl (src/java.management/share/classes/sun/management/MemoryPoolImpl.java
  * at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):
- * the natives HotSpot's management interface (jmm) answers have bodies over jrt's sun.management.JrtManagement and jdk.internal.jrt.HostManagement (go/arbace/jrt/memory.ae); the pools support no usage threshold yet (JrtManagement makes them with -1), so the VM's sensors are never registered or triggered and the threshold setters are never reached; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General
+ * the natives HotSpot's management interface (jmm) answers have bodies over jrt's sun.management.JrtManagement and jdk.internal.jrt.HostManagement (go/arbace/jrt/memory.ae); the thresholds and the sensors are JrtManagement's low memory detector's (n-java-thresh); nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General
  * Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace
  * authors; Eclipse Public License 1.0.
  */
@@ -280,8 +280,10 @@ class MemoryPoolImpl implements MemoryPoolMXBean {
         return JrtManagement.collectionUsage(isHeap);
     }
     private void setUsageThreshold0(long current, long newThreshold) {
+        JrtManagement.setThreshold(this, JrtManagement.USAGE, newThreshold);
     }
     private void setCollectionThreshold0(long current, long newThreshold) {
+        JrtManagement.setThreshold(this, JrtManagement.COLLECTION, newThreshold);
     }
     private void resetPeakUsage0() {
         JrtManagement.resetPeak(isHeap);
@@ -290,8 +292,10 @@ class MemoryPoolImpl implements MemoryPoolMXBean {
         return JrtManagement.managersOf(this);
     }
     private void setPoolUsageSensor(Sensor s) {
+        JrtManagement.setSensor(this, JrtManagement.USAGE, s);
     }
     private void setPoolCollectionSensor(Sensor s) {
+        JrtManagement.setSensor(this, JrtManagement.COLLECTION, s);
     }
 
     // package private

@@ -10663,3 +10663,19 @@ unchanged files byte for byte the committed forms), `bin/java-check --essential`
 names, the pauses as the collection time, the watcher, no thresholds or GC notifications yet, derived overlays, the CompositeDataView
 rule (alternatives in the survey). Left: the usage thresholds (a sampler triggering the sensors), GC notifications, the buffer pools
 (jrt counting its direct and mapped buffers). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-f13".
+
+## 2026-11-18: n-java-thresh, the memory pools' thresholds and the collector's notifications (round 52, overnight)
+
+Branch `n-java-thresh` from mac/n-java-f13 `d71873b63`, under the night's rules (each process under 1 GiB). n-java-f13's left-over:
+HotSpot's LowMemoryDetector, SensorInfo and GCNotifier (https://github.com/openjdk/jdk26u at baf63fb,
+src/hotspot/share/services/lowMemoryDetector.cpp, gcNotifier.cpp, management.cpp; src/java.management/share/native/libmanagement/
+MemoryPoolImpl.c) ported into jrt's sun.management.JrtManagement; go/arbace/jrt/memory.ae gives the events (a 20 ms usage sampler
+while a usage threshold is set, the watcher's queue of cycles, a notifier goroutine as the hidden Notification Thread). The pools are
+made with thresholds 0 (the runtime's pool without a collection threshold); MemoryPoolImpl's derivation hands the thresholds and
+sensors to JrtManagement, GarbageCollectorExtImpl's hands it a sender of the GC notifications (createGCNotification with the cycle's
+GcInfo; "end of major GC", "System.gc()" or "Go heap goal"). Proved on jdk26u's JDK with --patch-module (t04791 status 0, a 26-check
+probe of the sensors and notifications, agreeing with HotSpot's own on the unpatched JDK; the 22 neighbouring tests' statuses
+unchanged), the Go by `go test` in a small module, forms by read-jdk --check --no-javac --origins, java-check --essential 428/428.
+Taken overnight: the logic in Java with Go's events, the 20 ms period, the notifier hidden, the action and causes, a missed cycle not
+notified, the sender handed over by the derivation (alternatives in the survey). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-thresh".

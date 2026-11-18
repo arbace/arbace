@@ -8,7 +8,8 @@
  * (contention monitoring, CPU time, allocated memory) are kept here. Since slice 2 what a thread waits for: the
  * object, its owner, the blocked and waited counts and times (go/arbace/jrt/management.ae's waitBegin).
  * Since n-java-f13 the classes, the memory pools and the collector (go/arbace/jrt/memory.ae), under
- * sun.management.JrtManagement, and the factory of com.sun.management.GcInfo's private constructor.
+ * sun.management.JrtManagement, and the factory of com.sun.management.GcInfo's private constructor. Since
+ * n-java-thresh the events of JrtManagement's low memory detector and the collector's notifications.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -179,6 +180,31 @@ public final class HostManagement {
         }
         return f;
     }
+
+    // n-java-thresh (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-thresh"): the events of
+    // sun.management.JrtManagement's low memory detector and the collector's notifications
+
+    /**
+     * Starts the notifier, once: a goroutine (not a live thread, as HotSpot's hidden Notification Thread) running r,
+     * a java.lang.Runnable, at each event: a cycle queued, a tick of the usage sampler, notify0.
+     */
+    public static native void setNotifier0(Object r);
+
+    /** Wakes the notifier. */
+    public static native void notify0();
+
+    /** Turns the usage sampler on or off: while on, it wakes the notifier every 20 ms. */
+    public static native void sampleUsage0(boolean on);
+
+    /** Turns the watcher's queue of the cycles on or off (off: emptied); a queued cycle wakes the notifier. */
+    public static native void gcEvents0(boolean on);
+
+    /**
+     * The oldest queued cycle, taken from the queue, or null: its number, its start and end in milliseconds since
+     * the start, the heap's used bytes before and after it, the wall clock's milliseconds when it was seen, 1 when
+     * it was forced (else 0).
+     */
+    public static native long[] nextGc0();
 
     /** The times t blocked to enter a monitor or a lock. */
     public static native long blockedCount0(Thread t);

@@ -8573,3 +8573,75 @@ bin/java-check --levels interp --list .tmp/nf13-all.txt --save .tmp/nf13-all && 
 bin/java-check --levels compiled --list .tmp/nf13-all.txt --save .tmp/nf13-c && bin/java-check --judge --partial .tmp/nf13-c/results.tsv
 bin/reap --record && bin/crops-score --record
 ```
+
+## As built: n-java-thresh (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-java-thresh` (from mac/n-java-f13 `d71873b63`), under the night's rules (each process under 1 GiB): n-java-f13's left-over,
+the memory pools' usage thresholds with their notifications (t04791 ThresholdTest; MemoryTest's, ProxyTypeMapping's and
+ValidateOpenTypes' choice of a pool that supports them) and the collector's notifications.
+
+- **Where HotSpot's logic lives.** jdk26u's HotSpot (src/hotspot/share/services/lowMemoryDetector.cpp, gcNotifier.cpp, management.cpp's
+  jmm_SetPoolThreshold; jdk26u's MemoryPoolImpl.c for the natives setting high and low to the same value) as Java in
+  sun.management.JrtManagement: SensorInfo with the pool's ThresholdSupport (`set_gauge_sensor_level` for a usage threshold: triggered
+  at the first crossing, cleared below; `set_counter_sensor_level` for a collection threshold: triggered at every cycle left above),
+  `process_pending_requests` (Sensor.trigger(count, usage) or clear(count), the counts updated as HotSpot's), detect_low_memory(pool)
+  at once when a usage threshold changes, the collection threshold effective from the next cycle. Go gives the events alone
+  (go/arbace/jrt/memory.ae): a sampler goroutine waking the notifier every 20 ms while a usage threshold is set (HotSpot checks at its
+  allocations' slow paths), the watcher queuing each cycle it sees while a collection threshold is set or the notifications are
+  enabled (number, start, end, heap before and after, the wall clock, forced or not; at most 64 queued), and a notifier goroutine
+  running JrtManagement's Notifier at each event: HotSpot's Notification Thread, hidden as it (an adopted goroutine, not a live thread:
+  ThreadMXBean's counts unchanged). An exception of a sensor or a listener is dropped, as the Notification Thread clears it.
+- **The pools** are made with thresholds 0 (supported, disabled): the heap both, the runtime's pool the usage threshold only (not
+  collected: its collection threshold -1, unsupported), as HotSpot's collected and code-cache pools.
+- **The collector's notifications.** GarbageCollectorExtImpl's derivation: setNotificationEnabled hands JrtManagement a sender
+  (JrtManagement.GcNotifier, an anonymous class) that builds the cycle's GcInfo through HostManagement's GcInfo factory (before and
+  after for every pool, in the pools' order) and calls createGCNotification, as GCNotifier does; null when the last listener goes.
+  The action "end of major GC" (Go marks the whole heap every cycle), the cause "System.gc()" for a forced cycle (MemStats'
+  NumForcedGC moved), else "Go heap goal".
+- **Limits.** A cycle that ends before the watcher's finalizer re-armed is not seen (no collection check, no notification for it; its
+  number is in the next one's); the usage checks are 20 ms apart, not at every allocation.
+- **Proof of the Java** on jdk26u's JDK with `--patch-module` (`.tmp/nf/jdk/`, n-java-f13's harness, its stub HostManagement given
+  the new natives: the notifier and the sampler as daemon threads, the queue fed by gcStub): t04791 ThresholdTest "Test passed.",
+  status 0, now exercising both thresholds; a probe (`t3/Thresh.java`, 25 checks: defaults 0, a usage crossing notified once with
+  count 1, no second notification while above, cleared when raised, count 2 at the second crossing, the heap's threshold found by the
+  sampler while allocating, the collection threshold notified at each cycle with counts 1 and 2, disabled, the collector's
+  notification with its GcInfo for every pool, its source, cause and action, none after the listener's removal, through the platform
+  MBean server) PASSED; on the unpatched JDK (`PLAIN=1`, G1) the same probe agrees on every sensor check up to the heap's (G1's old
+  generation does not grow from young allocations), so the counts and hysteresis are HotSpot's. n-java-f13's 38-check probe PASSED
+  (its threshold checks turned to the supported ones). The 22 neighbouring tests: the same statuses as at n-java-f13 (11 of 22 status
+  0); ProxyTypeMapping and ValidateOpenTypes now pass their pool choice and stop at checkList's empty input arguments (the stub's
+  VMManagementImpl, jtreg's arguments), MemoryTest needs jtreg's arguments, the rest as before (a real collector, the compilation
+  bean, the JVM's thread dumps, jdk.internal.misc).
+- **Proof of the Go**: memory.ae printed by `bin/repr-go print --layout gofmt`, `go test` in the small module (`.tmp/nf/gomod`,
+  stubs of Runnable, runCatching and CurrentHost added): TestEvents (notify0 runs the notifier, once started; a panic dropped and the
+  loop kept; the sampler's 5 to 14 runs in 200 ms and none once off; nothing queued while off; every queued cycle's facts within
+  LastGc0's rules, in order, the 3 forced ones marked; the queue capped at 64, its oldest dropped; emptied when off) passes in 20 of 20
+  fresh runs; n-java-f13's TestMemory unchanged, its heap-peak check flaky on the loaded host before and after (1 or 2 in 40).
+- **Forms** by `bin/repr-java read-jdk --check --no-javac --origins` over n-java-f13's work tree with the four changed overlays
+  (`.tmp/nf/cv3.sh`, `REPR_JAVA_PATCH_ALL=1`, one thread, 0.91 GB): 230 files, 227 converted, the same 3 context failures as
+  n-java-f13's read; the four targets' forms (JrtManagement with its nested classes, MemoryPoolImpl, GarbageCollectorExtImpl with the
+  sender, HostManagement) taken, every other file of the read byte for byte the committed forms (the package files differing only by
+  the partial read's load order, left). No new class, so jdk/sources.txt and the provenance unchanged. `bin/jrt-convert derive
+  --check` 95 overlays as derived; `bin/java-check --essential` on the gate executable `f60652fb7fb9568e76b1` with jdk/forms on
+  ARBACE_PATH 428 of 428, the controls failing as they must (0.76 GB). The harness kept in `.tmp/keep/wt-n-java-thresh/nf/`.
+
+The day's commands (after `bin/arbace-go --gate-build`, which compiles the new natives; t04791 needs them at interp too):
+
+```sh
+bin/jrt-convert derive --check
+GOMEMLIMIT=1500MiB bin/jrt-convert vet --classes '^(sun/management/(JrtManagement|MemoryPoolImpl)|com/sun/management/internal/GarbageCollectorExtImpl|jdk/internal/jrt/HostManagement)'
+printf 't04786\nt07840\nt04791\nt04792\n' > .tmp/nthresh.txt
+bin/java-check --levels interp --list .tmp/nthresh.txt --save .tmp/nthresh
+bin/java-check --judge --partial --record .tmp/nthresh/results.tsv   # expected: t04791 pass
+bin/java-check --levels compiled --list .tmp/nthresh.txt --save .tmp/nthresh-c && bin/java-check --judge --partial .tmp/nthresh-c/results.tsv
+bin/reap --record && bin/crops-score --record
+```
+
+Decisions taken overnight (round 52): (1) HotSpot's detector and sensor state in Java (JrtManagement), Go the events alone (rather
+than the state machine in Go: the logic then provable on the JDK); (2) a 20 ms sampler while a usage threshold is set (rather than a
+check at allocations, which Go does not offer, or a longer period); (3) the notifier an adopted goroutine, not a live thread (as
+HotSpot's hidden Notification Thread); (4) the GC notification's action "end of major GC" and causes "System.gc()" / "Go heap goal";
+(5) a cycle the watcher missed not notified (rather than a notification without its facts); (6) the collector's sender handed over by
+GarbageCollectorExtImpl's derivation (rather than JrtManagement calling its protected createGCNotification).
+
+Keys: overlay/jdk, jdk/forms, go/arbace/jrt move `gate_key` and the runtime key; test/jrt the jrt-derive step's.
