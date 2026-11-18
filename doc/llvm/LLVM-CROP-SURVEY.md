@@ -2774,3 +2774,11 @@ What is left, each a row with its cause: read `:probe-pointer` (cc-s39: an addre
 tier, the night's `LLVMI_AOT_HEAVY=1`); by design at eval and AOT: `:long-double` 3 (ci's binary64 long double, CS35), `:ub-refinement`
 2, `:abort-report` 2 (+1 at AOT), `:envp` (ci's empty environment), `:lli-reference` (a module for lli's interpreter's va_list),
 `:datalayout`, `:target-type`.
+
+**Round 2 (D358-5 (a), the user, 2026-11-18).** A cpp corpus module whose lli record and g++ 15's (test/cpp/ref-gxx15.edn) agree on
+status 134 and stdout is judged against g++'s status, stdout and stderr (`arbace.llvm.check/gxx-reference`): lli's signal handler's
+stack dump is not the module's meaning. ctor-throw, uncaught and thread-throw pass at eval and AOT (thread-throw exits 134 at eval
+now, three runs on this tree's lowered runtime: ci's abort off the main thread no longer faults); the control (ctor-throw's run
+against thread-throw's g++ run: same status and stdout, another stderr) fails as it must; `:abort-report`, `:thread-abort-report` and
+`:cpp-threads` removed. Eval 550 / 11 / 1 to 553 / 9 / 0, AOT 549 / 12 / 1 to 552 / 9 / 1; completeness 0.9888 to 0.9915 (99), meant
+0.9991 to 0.9995 (100); the judge stays a recorded one (0.5): independence 0.9790.
