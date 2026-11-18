@@ -160,6 +160,10 @@
 #                                  line, # and blank lines ignored); classes test/python/divergences-aot.edn and the
 #                                  rule :as-pyi; a negative control; --record: test/python/check-aot-linux-ARCH.edn
 #                                  (PYI_CHECK_AOT_RECORD another: a dry run's scratch record, queue 279)
+#   bin/pyi check --aot --judge [DIR] [--record]
+#                                  queue 353: a kept run (DIR/runs.tsv, default the last check --aot's) judged again, nothing
+#                                  compiled or run (as check --judge RUN for Lib/test): the morning after a class changed;
+#                                  --record of a run lacking programs refused into the committed record
 #   bin/pyi check --aot --lib-test [check's options] [MODULE...]
 #                                  queue 279: Lib/test by pyi's AOT, the check's run and judge (bin/pyi check) with each
 #                                  module's driver (libtest_run.py) compiled with the module and its imports ahead
@@ -1182,12 +1186,17 @@ pyi_key() {
 cmd_check_aot() {
   # --lib-test (queue 279): Lib/test's modules, each compiled ahead with its driver (cmd_check_lib --aot)
   if [ "${1:-}" = --lib-test ]; then shift; cmd_check_lib --aot "$@"; return; fi
-  local record="" pyi=1 ids=() id
+  local record="" pyi=1 ids=() id judge=""
   while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --no-pyi) pyi=""; shift ;; --only) ids+=("$2"); shift 2 ;;
+    --judge) judge=$AOT/check; if [ $# -gt 1 ] && [ "${2#--}" = "$2" ]; then judge=$(cd "$caller_pwd" && cd "$2" && pwd) || die "check --aot --judge: no directory $2"; shift; fi; shift ;;
     --only-list) local lst n0=${#ids[@]}; lst=$(cd "$caller_pwd" && realpath -e "$2" 2>/dev/null) || die "check --aot: no list $2"
                  mapfile -t -O "${#ids[@]}" ids < <(grep -v '^[[:space:]]*\(#\|$\)' "$lst" | sed 's/[[:space:]]*$//')
                  [ ${#ids[@]} -gt "$n0" ] || die "check --aot: no id in $2"; shift 2 ;;
     *) die "check --aot: unknown $1" ;; esac; done
+  if [ -n "$judge" ]; then
+    [ ${#ids[@]} = 0 ] && [ -n "$pyi" ] || die "check --aot --judge: the run's own programs, no --only, --only-list or --no-pyi"
+    aot_judge "$judge" "$record"; return
+  fi
   [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(aot_list)
   local rstate=""; if [ -n "$pyi" ]; then runtime_guard "check --aot (pyi's runs)" "$record"; rstate=$(runtime_state); fi
   aot_module
@@ -1222,9 +1231,24 @@ cmd_check_aot() {
     echo "  $id: compiled $(cat "$d/$nm.aot.rc"), loop $(cat "$d/$nm.loop.rc")${pk:+, pyi $(cat "$pc/$pk.rc")}"
   done
   aot_cache_trim
-  local arch; case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  aot_judge "$d" "$record"
+}
+# aot_judge DIR [RECORD] (queue 353, 347's DECISION 2 (a), the user 2026-11-18): DIR/runs.tsv judged (arbace.python.aot judge:
+# CPython's references, the golden texts, test/python/divergences-aot.edn) into DIR/results.edn, and with RECORD into
+# test/python/check-aot-linux-ARCH.edn (PYI_CHECK_AOT_RECORD another). check --aot's last step, and check --aot --judge
+# [DIR] alone: a kept run judged again after a class changed, nothing compiled or run (as check --judge RUN for Lib/test).
+# A re-judge's record of a run that lacks programs of aot_list (an --only run's) is refused into the committed record
+aot_judge() {
+  local d=$1 record=${2:-} arch rec
+  [ -s "$d/runs.tsv" ] || die "check --aot --judge: no runs in $d (runs.tsv: bin/pyi check --aot first)"
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  rec="${PYI_CHECK_AOT_RECORD:-$root/test/python/check-aot-linux-$arch.edn}"
+  if [ -n "$record" ] && [ -z "${PYI_CHECK_AOT_RECORD:-}" ]; then
+    local miss; miss=$(aot_list | grep -vxF -f <(cut -f1 "$d/runs.tsv") | wc -l)
+    [ "$miss" = 0 ] || die "check --aot: $d's runs lack $miss of the $(aot_list | wc -l) programs: --record into ${rec#$root/} refused (PYI_CHECK_AOT_RECORD: a scratch record)"
+  fi
   pa_arbace_aot judge --runs "$d/runs.tsv" --ref "$REF" --classes "$root/test/python/divergences-aot$RECS.edn" --golden "$GOLDEN" \
-    --results "$d/results.edn" ${record:+--record "${PYI_CHECK_AOT_RECORD:-$root/test/python/check-aot-linux-$arch.edn}"}
+    --results "$d/results.edn" ${record:+--record "$rec"}
 }
 # golden: the programs' own verdict (queue 247): test/python/golden's reviews against their texts (every line in one entry, the digest of the
 # reviewed text) and against CPython's recorded runs (ref-cpython314.edn), with a negative control; seconds, no CPython, no build
@@ -2587,6 +2611,11 @@ cmd_wheels() {
 # reap's :results); then the :until of each source whose record is written dropped from test/reap/cells.edn, bin/reap
 # --record and bin/crops-score --record (where it is). Night mode is linux/amd64's and writes the checkout's files; its
 # outcome is to commit (the records, cells.edn, matrix.edn, scores.edn).
+# The two records are committed together, never the AOT record alone (queue 347's DECISION 1 (a), the user 2026-11-18):
+# with check-aot-linux-amd64.edn there the eval cell's loop sources lose their :until, so without the Lib/test record bin/reap
+# counts the eval cell checked by the loop's 151 programs alone (eval about 99, not Lib/test's about 68). When Lib/test's
+# methods need classes first (the judge's exit 3), hold both: class them, bin/pyi check --judge RUN --record (and, for the
+# AOT record, bin/pyi check --aot --judge --record), then bin/reap --record and bin/crops-score --record, one commit.
 # --slice N: the dry run. Every Nth program of aot_list and every Nth module of the check's universe, the records under
 # DIR (default WORK/records-slice; named as the cells name them, never to commit), then read through an overlay of the
 # checkout (DIR/overlay: links to the checkout but test/python's two records, a reference of the slice's programs alone

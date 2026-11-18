@@ -7762,3 +7762,23 @@ base's; on goi (nf's stage 0, the checkout's runtime interpreted) test_generator
 pass, 84 classed, 0 failing, each the same as at 330's head. The generator programs of the synthetic corpus (13, `check
 --aot --no-pyi`): 13 pass compiled and on the loop by their golden text; `make python-essential`: 20 pass, 1 classed, 0
 failing.
+
+## As built: 353, the AOT record judged again (2026-11-18, the Mac VM, queue 353; queue 347's DECISIONs 1 (a) and 2 (a), the user's)
+
+- **`bin/pyi check --aot --judge [DIR] [--record]`** (347's DECISION 2 (a)): a kept run's `DIR/runs.tsv` (default the last
+  `check --aot`'s, `.tmp/repr-python/pyi/aot/check`) judged again by `arbace.python.aot judge`, nothing compiled or run, as
+  `bin/pyi check --judge RUN` does for Lib/test: the morning after a class of `divergences-aot.edn` changed. `check --aot`'s
+  own last step is the same function (`aot_judge`). Refused: `--only`, `--only-list` and `--no-pyi` with `--judge` (the run's
+  own programs are judged), a DIR without runs, and `--record` of a run that lacks programs of `aot_list` into the committed
+  record (`PYI_CHECK_AOT_RECORD` names a scratch record).
+- **The two records together** (347's DECISION 1 (a), procedure): `bin/pyi records`' header and PY11-PREP.md §6 say it: the
+  AOT record is never committed without the Lib/test record (alone, it drops the eval cell's loop sources' `:until` and reap
+  counts the eval cell checked by the loop's 151 programs, about 99 against Lib/test's about 68).
+- **The unit check**: `test/python/aot_judge_test.ae` (21 checks) writes fabricated runs and references as files and runs the
+  judge's command over them (`cmd-judge`, as bin/pyi calls it): its results and record hold the judge's rows, exit 1 while a
+  row fails, a differing program classed by its id exits 0, a missing reference stays `:failed` whatever class names it.
+- **Found**: `control`'s pair rule counts a golden reference's `:stderr-last :any` as another reference than a program's of the
+  same stdout with stderr "", so such a pair's crossing passes and the judge exits 1 (the unit check leaves that program out of
+  its re-judge). The corpus has no such pair: the duplicate stdouts are cmp-eq/cmp-is, cmp-ne/cmp-is-not and matmul/aug-matmul,
+  and the first passing program (synth/builtins/bool.py) has a stdout of its own. Not changed: aot.ae is the AOT generator's
+  digest (`aot_gen`), so any edit reprints every compiled package and the runner.

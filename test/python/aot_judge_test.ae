@@ -7,9 +7,28 @@
 ;; (:failed :differs unclassed), no reference (:failed :no-reference), an excluded reference (:classed :reference-excluded),
 ;; a golden reference's stderr :any; and control's three outcomes (two passing programs of other references crossed fail as
 ;; they must; one passing program is :left; two whose references are one and the same are not a pair).
+;; Queue 353 (bin/pyi check --aot --judge, 347's DECISION 2 (a)): the re-judge's path, the judge's command over those runs
+;; written as a runs.tsv and the references as a file (cmd-judge, as bin/pyi calls it), its results and its record's rows the
+;; judge's own rows, its exit 1 for the failing rows; the differing program classed by its id, exit 0, its row :classed by
+;; that id; a missing reference :failed whatever class names it.
 ;; Run: ARBACE_PATH=.:test $ARBACE_HOST_EXE -m python.aot-judge-test
 (ns python.aot-judge-test
-  (:require [arbace.python.aot :as aot]))
+  (:require [arbace.python.aot :as aot]
+            [arbace.string :as str]))
+
+(defn- lines-edn [f] (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "{")] (read-string l)))
+
+(defn- rejudge
+  "cmd-judge over RUNS and REFS written as files in DIR (the class ids CLASSES): [rc results-rows record-rows record-text]"
+  [dir runs refs classes]
+  (let [f #(str dir "/" %)]
+    (spit (f "runs.tsv") (apply str (for [r runs] (str (str/join "\t" r) "\n"))))
+    (spit (f "ref.edn") (apply str (for [[id m] (sort refs)] (str (pr-str (assoc m :id id)) "\n"))))
+    (spit (f "classes.edn") (pr-str {:classes classes}))
+    (let [rc (atom nil)]
+      (with-out-str (reset! rc (#'aot/cmd-judge ["--runs" (f "runs.tsv") "--ref" (f "ref.edn") "--classes" (f "classes.edn")
+                                                 "--results" (f "results.edn") "--record" (f "record.edn")])))
+      [@rc (vec (lines-edn (f "results.edn"))) (vec (lines-edn (f "record.edn"))) (slurp (f "record.edn"))])))
 
 (defn -main [& _]
   (let [sha (apply str (repeat 64 "a")) other (apply str (repeat 64 "b")) third (apply str (repeat 64 "c"))
@@ -45,6 +64,17 @@
         crun {"t/a.py" (run "t/a.py" ok ok ok) "t/b.py" (run "t/b.py" ["0" third ""] ["0" third ""] ["0" third ""])
               "t/c.py" (run "t/c.py" ok ok ok)}
         control (fn [ids] (:result (aot/control (mapv crun ids) cref)))
+        dir (let [d (java.io.File. (str (or (System/getenv "TMPDIR") ".tmp/tmp") "/aot-judge-test-" (System/currentTimeMillis)))]
+              (.mkdirs d) (.getPath d))
+        ;; (t/gold.py left out: its reference, stdout t/pass.py's with stderr :any, makes control's pair t/pass.py and
+        ;; t/gold.py, whose crossing passes: queue 353's finding, the control's pair rule)
+        jruns (remove #(= "t/gold.py" (first %)) rruns)
+        want (vec (sort-by :id (aot/judge jruns rrefs [])))
+        [rc1 res1 rec1 text1] (rejudge dir jruns rrefs [])
+        failing (for [x want :when (= :failed (:result x))] (:id x))
+        ;; a class takes a differing run, never a missing reference (judge: no reference is :failed whatever the classes)
+        [rc2 res2] (rejudge dir (remove #(= "t/noref.py" (first %)) jruns) rrefs [{:id :fab-loop :ids ["t/loop.py"]}])
+        [rc3 res3] (rejudge dir jruns rrefs [{:id :fab-noref :ids ["t/noref.py"]} {:id :fab-loop :ids ["t/loop.py"]}])
         checks [["refused row classed" (= [:classed :fabricated-refused] ((juxt :result :class) (get got "t/ref.py")))]
                 ["differing row classed" (= [:classed :fabricated-differs] ((juxt :result :class) (get got "t/diff.py")))]
                 ["control: unclassed refused row is :failed :refused" (= [:failed :refused] ((juxt :result :class) (get ctl "t/ref.py")))]
@@ -59,7 +89,14 @@
                 ["a golden reference's stderr :any: a pass" (= :pass (:result (get r "t/gold.py")))]
                 ["control: two passing programs of other references fail as they must" (= :failed-as-it-must (control ["t/a.py" "t/b.py"]))]
                 ["control: one passing program is :left" (= :left (control ["t/a.py"]))]
-                ["control: two programs of one reference are no pair (:left)" (= :left (control ["t/a.py" "t/c.py"]))]]
+                ["control: two programs of one reference are no pair (:left)" (= :left (control ["t/a.py" "t/c.py"]))]
+                ["re-judge: the results file holds the judge's rows" (= want res1)]
+                ["re-judge: the record holds the same rows, its header first" (and (= want rec1) (str/starts-with? text1 ";; pyi's AOT"))]
+                ["re-judge: exit 1 while rows fail" (and (= 1 rc1) (= 2 (count failing)))]
+                ["re-judge: the differing program classed by id, exit 0, its row :classed :fab-loop"
+                 (and (= 0 rc2) (= [:classed :fab-loop] ((juxt :result :class) (first (filter #(= "t/loop.py" (:id %)) res2)))))]
+                ["re-judge: a missing reference stays :failed whatever its class, exit 1"
+                 (and (= 1 rc3) (= [:failed :no-reference] ((juxt :result :class) (first (filter #(= "t/noref.py" (:id %)) res3)))))]]
         bad (remove second checks)]
     (doseq [[n p] checks] (println (if p "ok  " "FAIL") n))
     (System/exit (if (seq bad) 1 0))))
