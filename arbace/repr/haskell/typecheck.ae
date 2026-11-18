@@ -2392,11 +2392,83 @@
 (defn- app-spine [v]
   (loop [x v args ()] (if (= 'HsApp (con x)) (recur (lval (arg x 2)) (cons (arg x 3) args)) [x (vec args)])))
 
+(declare infer pat-args)
+
+;; Queue 381: TemplateHaskell's quotes as GHC.HsToCore.Quote desugars the ones the libraries hold (os-string's and filepath's
+;; QuasiQuoters, bytestring's Lift ByteString): a name quote 'f, ''T (VarBr: globalVar's mkNameG_d, mkNameG_v, mkNameG_tc of
+;; the unit's, the module's and the occurrence's strings); an expression quote [| e |] and a pattern quote [p| p |] of type
+;; Quote m => m Exp, m Pat, their nodes the TH library's combinators applied to the quote's Quote dictionary: a global
+;; variable or constructor varE, conE of its name, an application appE, a parenthesis its body, a local variable bound
+;; outside the quote lift of it (the renamer's pending splice: GHC.Rename.Splice's checkCrossStageLifting), a view pattern
+;; viewP, a constructor pattern of no argument conP NAME [] []. Another node is not ported (the quote stops the elaborator)
+(defn- th-name-quote
+  "An external name as a TH Name's core (globalVarExternal): [type core], or nil (a local name, a field: not ported)"
+  [n]
+  (when (and (ext? n) (contains? #{"data" "var" "tc"} (nth n 1)))
+    (when-let [unit (if (= (nmod n) *module*) *unit* (get-in @*iface-meta* [:units (nmod n)]))]
+      (let [s (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
+                            [(list 'lit (str (pr-str x) "#"))]))]
+        [(con-ty (ext-name "tc" "GHC.Internal.TH.Syntax" "Name"))
+         (list 'app (list 'v (ext-name "var" "GHC.Internal.TH.Syntax" (case (nth n 1) "data" "mkNameG_d" "var" "mkNameG_v" "tc" "mkNameG_tc")))
+               [(s unit) (s (nmod n)) (s (occ n))])]))))
+
+(defn- th-lib [f dq args] (list 'app (list 'v (ext-name "var" "GHC.Internal.TH.Lib" f)) (into [dq] args)))
+
+(defn- th-rep-e
+  "An expression inside a quote as its m Exp core, or nil when not ported"
+  [env e dq]
+  (let [v (lval e)]
+    (case (con v)
+      HsPar (th-rep-e env (arg v 2) dq)
+      HsApp (let [a (th-rep-e env (arg v 2) dq) b (when a (th-rep-e env (arg v 3) dq))] (when b (th-lib "appE" dq [a b])))
+      HsVar (when-let [n (nm (arg v 2))]
+              (if (ext? n)
+                (when-let [[_ nc] (th-name-quote n)] (th-lib (if (= "data" (nth n 1)) "conE" "varE") dq [nc]))
+                (let [[t c] (infer env e)
+                      dl (want! [(ext-name "tc" "GHC.Internal.TH.Lift" "Lift") [t]])]
+                  (list 'app (list 'v (ext-name "var" "GHC.Internal.TH.Lift" "lift")) [dl dq c]))))
+      nil)))
+
+(defn- th-rep-p
+  "A pattern inside a quote as its m Pat core, or nil when not ported"
+  [env p dq]
+  (let [v (lval p)]
+    (case (con v)
+      ParPat (th-rep-p env (arg v 2) dq)
+      ViewPat (let [a (th-rep-e env (arg v 2) dq) b (when a (th-rep-p env (arg v 3) dq))] (when b (th-lib "viewP" dq [a b])))
+      ConPat (let [n (nm (arg v 2)) d (arg v 3)]
+               (when (and n (= 'PrefixCon (con d)) (empty? (pat-args d)))
+                 (when-let [[_ nc] (th-name-quote n)]
+                   (let [nil-c (list 'v (ext-name "data" "GHC.Internal.Types" "[]"))] (th-lib "conP" dq [nc nil-c nil-c])))))
+      nil)))
+
+(defn- th-quote
+  "A quote (HsUntypedBracket's VarBr, ExpBr, PatBr): [type core], or nil when not ported"
+  [env q]
+  (case (con q)
+    VarBr (some-> (nm (arg q 3)) th-name-quote)
+    (ExpBr PatBr)
+    ;; (its wanteds, Quote m and the lifted variables' Lift, kept only when the whole quote is ported: a quote that stops
+    ;; leaves none unsolved beside its error)
+    (let [m (fresh-meta)
+          ws (atom [])
+          [res c] (binding [*wanteds* ws]
+                    (let [dq (want! [(ext-name "tc" "GHC.Internal.TH.Syntax" "Quote") [m]])]
+                      (if (= 'ExpBr (con q))
+                        ["Exp" (th-rep-e env (arg q 2) dq)]
+                        ["Pat" (th-rep-p env (arg q 2) dq)])))]
+      (when c
+        (swap! *wanteds* into @ws)
+        [(mk-app m (con-ty (ext-name "tc" "GHC.Internal.TH.Syntax" res))) c]))
+    nil))
+
 (defn infer
   "An expression's type and core"
   [env e]
   (let [v (lval e)]
     (case (con v)
+      HsUntypedBracket (or (th-quote env (lval (arg v 2)))
+                           (do (error! "expression not handled: HsUntypedBracket") [(fresh-meta) (list 'lit "?")]))
       HsVar (if-let [n (nm (arg v 2))]
               ;; HF10-P54 (a): [] is an ExplicitList (GHC.Rename.Expr's rnExpr of nilDataConName, Note [Empty lists])
               (if (and (= n (ext-name "data" "GHC.Internal.Types" "[]")) (ovl-lists?))
