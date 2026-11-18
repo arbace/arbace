@@ -91,27 +91,86 @@
 
 (declare full-forms? full-lines)
 
+(def ^:private small-kinds
+  "The basic types a leaf function's operations take without a call of the runtime (gc's amd64 and arm64 code: no string,
+  interface or complex operation), with their sizes."
+  {:bool 1 :int8 1 :uint8 1 :int16 2 :uint16 2 :int32 4 :uint32 4 :float32 4 :int 8 :uint 8 :int64 8 :uint64 8 :uintptr 8
+   :float64 8 :untyped-int 8 :untyped-float 8 :untyped-rune 4 :untyped-bool 1})
+
+(defn- small-type? [t] (contains? small-kinds t))
+
+(defn- type-size
+  "A local's size in bytes for the frame's estimate: a small basic type's, an array of one; nil (unknown: not a leaf) else."
+  [t]
+  (cond
+    (small-type? t) (small-kinds t)
+    (and (vector? t) (= :array (first t)) (number? (second t))) (when-let [e (type-size (nth t 2 nil))] (* (long (second t)) (long e)))
+    :else nil))
+
+(defn- tree-nodes
+  "The typed nodes (maps with :op) of a checker's tree, not through objects, types or scopes."
+  [x]
+  (cond
+    (map? x) (cons x (mapcat (fn [[k v]] (when-not (#{:refs :type :obj :scope :form :env :sig :callee} k) (tree-nodes v))) (when (:op x) x)))
+    (vector? x) (mapcat tree-nodes x)
+    (seq? x) (mapcat tree-nodes x)
+    :else nil))
+
+(defn- auto-nosplit?
+  "Whether gc makes the function of checker tree t NOSPLIT by itself (cmd/internal/obj/x86/obj6.go's preprocess, arm64's obj7.go
+  likewise: a leaf, no CALL but the zero-argument panics', with a frame under abi.StackSmall, 128 bytes, the frame pointer's 8
+  included), so its prologue has no stack check and no maymorestack call. Modelled from the typed tree, conservatively: every
+  node an operation on small basic types (a call, a string's, an interface's or a composite's operation, a map, a channel, an
+  allocation, a pointer's store (gc's write barrier) is a call of the runtime: not a leaf), and the locals' sizes summed under 120.
+  Not modelled: gc's spill slots and the calls its inliner removes (a function that calls only inlined ones is a leaf there)."
+  [t]
+  (let [ns (rest (tree-nodes (:body t)))
+        ok? (fn [n]
+              (case (:op n)
+                (:block :expr :if :for :return :label :const :const-decl :local-type :var-init :nil :local :place-local :place-read
+                 :field :place-field :index :place-index :deref :place-deref :target :result :directive) true
+                (:binary :unary) (and (small-type? (:type (:x n))) (or (nil? (:y n)) (small-type? (:type (:y n)))))
+                (:assign :op-assign :incdec :decl) true
+                :conv (and (small-type? (:type n)) (small-type? (:type (:x n))))
+                :place-global (small-type? (:type n))
+                false))
+        stores (for [n ns :when (#{:assign :op-assign :incdec} (:op n))
+                     p (concat (:lhs n) (when (:place n) [(:place n)]))
+                     :when (map? p)]
+                 (:type p))
+        val (fn [o] (if (instance? arbace.lang.IDeref o) @o o))
+        locals (for [n ns :when (= :decl (:op n)) o (:objs n)] (:type (val o)))
+        frame (reduce (fn [a t] (if-let [z (type-size t)] (+ a (long z)) 1000)) 0 (concat locals (map (comp :type val) (:params t))))]
+    (boolean (and (every? ok? ns) (every? small-type? (remove nil? stores)) (< (+ 8 frame) 128)))))
+
 (defn- maymorestack
   "Package source src with gc's -d=maymorestack=PKG.FN applied (GOI_GCFLAGS, the run action's go
   build flags, which bin/goi's check passes): gc's prologue of every function it compiles that
   checks the stack (cmd/compile/internal/ssagen's maymorestack hook, obj's stack-split prologue)
   calls FN first; goi's equivalent is a call of FN at the start of each declared function and method
   body of the package gc compiles with the flag, the program's main package (the action's -gcflags
-  without a pattern), but FN itself and those marked //go:nosplit (gc's prologue has no stack check
-  there). FN must be the package's own (a hook of another package is left: the run is unchanged).
-  Not modelled: the calls gc inlines (no prologue of their own), function literals, and the package's
-  generated init."
-  [src]
+  without a pattern), but FN itself, those marked //go:nosplit and those gc makes NOSPLIT itself, leaf
+  functions with a small frame (auto-nosplit?, from the package's check: queue 378's item 4), whose
+  prologue has no stack check. FN must be the package's own (a hook of another package is left: the
+  run is unchanged). Not modelled: the calls gc inlines (no prologue of their own), function literals,
+  and the package's generated init."
+  [src extra]
   (let [flags (System/getenv "GOI_GCFLAGS")
         [_ pkg hook] (when flags (re-find #"-d=(?:[^ ]*,)?maymorestack=([^ ,]+)\.([^ ,.]+)" flags))]
     (if (and hook (or (= pkg (:path src)) (and (= pkg "main") (= "main" (:name src)))))
       (let [hook-sym (symbol hook)
+            ;; the leaves gc makes NOSPLIT: by file, name and line (the trees and decl-infos run in the forms' order)
+            r (repl/check-source src extra false)
+            leaves (set (for [[t di] (map vector (:trees r) (:decl-infos r))
+                              :when (and (map? t) (= :func (:op t)) (#{:func :method} (:kind di)) (auto-nosplit? t))]
+                          [(:name (:file di)) (str (:form di)) (:line t)]))
             instrument
-            (fn [d]
+            (fn [fname d]
               (if (and (seq? d) (#{'go/func 'go/method} (first d)))
                 (let [[head nm & more] d
                       m (meta nm)]
-                  (if (or (= (name nm) hook) (:go/nosplit m) (:extern m))
+                  (if (or (= (name nm) hook) (:go/nosplit m) (:extern m)
+                          (contains? leaves [fname (name nm) (:line (meta d))]))
                     d
                     ;; doc?, :type-params X, the signature (the parameters vector, :results V), then the body
                     (let [[pre more] (loop [pre [] xs more]
@@ -125,7 +184,9 @@
                           call (with-meta (list hook-sym) {:line (or (:line (meta d)) (:line m) 1)})]
                       (with-meta (apply list head nm (concat pre [sig] res [call] body)) (meta d)))))
                 d))]
-        (update src :files (fn [fs] (mapv (fn [fi] (update fi :decls #(mapv instrument %))) fs))))
+        (when (System/getenv "GOI_MAYMORESTACK_TRACE")
+          (binding [*out* *err*] (println "goi: maymorestack: leaves (NOSPLIT, no hook):" (sort (map second leaves)))))
+        (update src :files (fn [fs] (mapv (fn [fi] (update fi :decls (fn [ds] (mapv #(instrument (:name fi) %) ds)))) fs))))
       src)))
 
 (defn- convert-hash!
@@ -147,8 +208,7 @@
   ;; os.Args, and goi's program mode from now on (its warnings at the REPL only)
   (b/op "SetOSArgs" (object-array (cons (str (.getName pf)) args)))
   (let [src (cond-> (load/package-source {:dir root} nil @repl/config pf)
-              (full-forms? root pf) (full-lines true)
-              true maymorestack)
+              (full-forms? root pf) (full-lines true))
         _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
         index (delay (dir-test-index pf))
         srcs (atom {})
@@ -187,7 +247,8 @@
                         (swap! srcs assoc path s)
                         (define s r)))))))]
       (doseq [p (imports-of src)] (load! p #{(:path src)})))
-    (let [r (check! src extra)
+    (let [src (maymorestack src extra)
+          r (check! src extra)
           _ (swap! srcs assoc (:path src) src)
           {:keys [main]} (define src r)]
       (when-not main
