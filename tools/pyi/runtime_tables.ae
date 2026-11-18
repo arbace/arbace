@@ -436,22 +436,31 @@
           :when (not (#{"_MINIX" "_POSIX_SOURCE" "_POSIX_1_SOURCE" "_XOPEN_SOURCE"} nm))]
       nm)))
 
+(def ^:private lp64-musl-sizes
+  "The sizes AC_CHECK_SIZEOF asks beyond scalar-sizes' on LP64 with musl (the SysV AMD64 ABI's and AAPCS64's, musl's alltypes.h
+  typedefs: off_t and time_t 64-bit, pid_t int, fpos_t 16 bytes, pthread_t a pointer, pthread_key_t unsigned)"
+  {"void *" 8 "float" 4 "double" 8 "long double" 16 "_Bool" 1 "off_t" 8 "time_t" 8 "pid_t" 4 "uintptr_t" 8 "fpos_t" 16
+   "pthread_t" 8 "pthread_key_t" 4 "wchar_t" 4})
+
 (defn- sizeofs
   "AC_CHECK_SIZEOF's answers on LP64 (amd64 and arm64 alike) for the scalar types `scalar-sizes` knows (autoconf's name: upper
   case, * as P, every other character _)"
   [^String ac]
   (str/join (for [[_ ty] (re-seq #"AC_CHECK_SIZEOF\(\[([^\]]+)\]" ac)
-                  :let [n (scalar-sizes ty)] :when n]
+                  :let [n (or (scalar-sizes ty) (lp64-musl-sizes ty))] :when n]
               (str "#define SIZEOF_" (-> ty str/upper-case (str/replace "*" "P") (str/replace #"[^A-Z0-9]+" "_")) " " n "\n"))))
 
 (defn- configure-funcs
-  "The functions configure.ac checks by name: AC_CHECK_FUNCS of a literal list and PY_CHECK_FUNC([NAME], ...)"
+  "The functions configure.ac checks by name, [NAME DEFINE]: AC_CHECK_FUNCS of a literal list (HAVE_NAME), PY_CHECK_FUNC([NAME], ...,
+  [DEFINE]) and its NETDB and SOCKET forms (DEFINE, else HAVE_NAME), PY_CHECK_FUNC_PRIVATE (_Py_HAVE_NAME)"
   [^String ac]
-  (distinct (concat (for [[_ lst] (re-seq #"AC_CHECK_FUNCS\(\[([^\]]*)\]" ac)
+  ;; a check under `if test "$MACHDEP" != linux` is not made on Linux (lchmod's)
+  (distinct (concat (for [[_ lst] (re-seq #"AC_CHECK_FUNCS\(\[([^\]]*)\]" (str/replace ac #"(?s)if test \"\$MACHDEP\" != linux; then.*?\nfi\n" ""))
                           f (str/split (str/trim (str/replace lst #"\\\n" " ")) #"\s+")
                           :when (re-matches #"[a-z_][a-z0-9_]*" f)]
-                      f)
-                    (for [[_ f] (re-seq #"PY_CHECK_(?:NETDB_|SOCKET_)?FUNC\(\[([a-z_][a-z0-9_]*)\]" ac)] f))))
+                      [f (str "HAVE_" (str/upper-case f))])
+                    (for [[_ priv f d] (re-seq #"PY_CHECK_(?:NETDB_|SOCKET_)?FUNC(_PRIVATE)?\(\[([a-z_][a-z0-9_]*)\](?:,\s*\[[^\]]*\](?:,\s*\[([A-Z_0-9]+)\])?)?" ac)]
+                      [f (or d (str (if priv "_Py_HAVE_" "HAVE_") (str/upper-case f)))]))))
 
 (def ^:private musl-symbols-cache (atom {}))
 
@@ -473,7 +482,7 @@
   "#define HAVE_NAME 1 for each function configure checks that musl defines"
   [opts ^String ac]
   (let [syms (musl-symbols opts)]
-    (str/join (for [f (configure-funcs ac) :when (syms f)] (str "#define HAVE_" (str/upper-case f) " 1\n")))))
+    (str/join (distinct (for [[f d] (configure-funcs ac) :when (syms f)] (str "#define " d " 1\n"))))))
 
 (defn- macro-probe
   "Which of the names are macros after the prologue `pre` (C text: the feature macros and includes), preprocessed for goarch over
@@ -511,25 +520,60 @@
    {:define "HAVE_SOCKADDR_ALG" :cache "ac_cv_struct_sockaddr_alg" :includes ["sys/types.h" "sys/socket.h" "linux/if_alg.h"] :need [[:struct "sockaddr_alg"]]}
    {:define "HAVE_LINUX_CAN_RAW_FD_FRAMES" :cache "ac_cv_can_raw_fd_frames" :includes ["linux/can/raw.h"] :need [[:ident "CAN_RAW_FD_FRAMES"]]}
    {:define "HAVE_LINUX_CAN_RAW_JOIN_FILTERS" :cache "ac_cv_can_raw_join_filters" :includes ["linux/can/raw.h"] :need [[:ident "CAN_RAW_JOIN_FILTERS"]]}
+   {:define "HAVE_DYNAMIC_LOADING" :cache "DYNLOADFILE" :includes [] :need [[:func "dlopen"]]}
+   {:define "HAVE_WORKING_TZSET" :cache "ac_cv_working_tzset" :includes ["time.h"] :need [[:func "tzset"]]}
+   {:define "HAVE_MAKEDEV" :cache "ac_cv_func_makedev" :includes ["sys/types.h" "sys/sysmacros.h"] :need [[:macro "makedev"]]}
+   {:define "HAVE_DEVICE_MACROS" :cache "ac_cv_device_macros" :includes ["sys/types.h" "sys/sysmacros.h"] :need [[:macro "major"] [:macro "minor"] [:macro "makedev"]]}
+   ;; the libraries' (queue 357: their headers the pinned -dev apks'): zlib >= 1.2.0 by pkg-config (inflateCopy's zlib), readline's
+   ;; declarations (readline_includes), curses' wide API (_CURSES_INCLUDES; PY_CHECK_CURSES_FUNC's and _VAR's are library-probes')
+   {:define "HAVE_ZLIB_COPY" :cache "inflateCopy" :includes ["zlib.h"] :need [[:declared "inflateCopy"]]}
+   {:define "HAVE_NCURSESW" :cache "ac_cv_curses_wide" :pre :curses :need [[:declared "setcchar"] [:declared "add_wch"]]}
+   {:define "HAVE_CURSES_GETMOUSE" :cache "ac_cv_lib_curses_getmouse" :pre :curses :need [[:declared "getmouse"] [:declared "MEVENT"]]}
+   {:define "HAVE_RL_COMPLETION_APPEND_CHARACTER" :cache "rl_completion_append_character" :pre :readline :need [[:declared "rl_completion_append_character"]]}
+   {:define "HAVE_RL_COMPLETION_SUPPRESS_APPEND" :cache "rl_completion_suppress_append" :pre :readline :need [[:declared "rl_completion_suppress_append"]]}
+   {:define "HAVE_RL_PRE_INPUT_HOOK" :cache "ac_cv_readline_rl_pre_input_hook" :pre :readline :need [[:declared "rl_pre_input_hook"]]}
+   {:define "HAVE_RL_COMPLETION_DISPLAY_MATCHES_HOOK" :cache "ac_cv_readline_rl_completion_display_matches_hook" :pre :readline :need [[:declared "rl_completion_display_matches_hook"]]}
+   {:define "HAVE_RL_RESIZE_TERMINAL" :cache "ac_cv_readline_rl_resize_terminal" :pre :readline :need [[:declared "rl_resize_terminal"]]}
+   {:define "HAVE_RL_COMPLETION_MATCHES" :cache "ac_cv_readline_rl_completion_matches" :pre :readline :need [[:declared "rl_completion_matches"]]}
+   {:define "HAVE_RL_CATCH_SIGNAL" :cache "rl_catch_signals" :pre :readline :need [[:declared "rl_catch_signals"]]}
+   {:define "HAVE_RL_APPEND_HISTORY" :cache "ac_cv_readline_append_history" :pre :readline :need [[:declared "append_history"]]}
+   {:define "HAVE_RL_COMPDISP_FUNC_T" :cache "AC_CHECK_TYPES([rl_compdisp_func_t]" :implicit true :pre :readline :need [[:declared "rl_compdisp_func_t"]]}
    {:define "HAVE_GETRANDOM_SYSCALL" :cache "ac_cv_getrandom_syscall" :includes ["stddef.h" "unistd.h" "sys/syscall.h" "linux/random.h"]
     :need [[:macro "SYS_getrandom"] [:macro "GRND_NONBLOCK"] [:func "syscall"]]}])
+
+(defn- ac-block
+  "configure.ac's m4 text of _CURSES_INCLUDES or readline_includes (WITH_EDITLINE not defined: readline's)"
+  [^String ac k]
+  (case k
+    :curses (let [i (+ (str/index-of ac "AC_DEFUN([_CURSES_INCLUDES],dnl\n[") (count "AC_DEFUN([_CURSES_INCLUDES],dnl\n["))]
+              (subs ac i (str/index-of ac "\n])" i)))
+    :readline (let [i (+ (str/index-of ac "m4_define([readline_includes], [") (count "m4_define([readline_includes], ["))]
+                (subs ac i (str/index-of ac "\n    ])" i)))
+    nil ""))
+
+(defn- curses-probes
+  "PY_CHECK_CURSES_FUNC([F]) and PY_CHECK_CURSES_VAR([V]): HAVE_CURSES_F where _CURSES_INCLUDES declare F (a macro or a declaration)"
+  [^String ac]
+  (for [[_ nm] (re-seq #"(?m)^PY_CHECK_CURSES_(?:FUNC|VAR)\(\[([A-Za-z_0-9]+)\]\)" ac)]
+    {:define (str "HAVE_CURSES_" (str/upper-case nm)) :pre :curses :need [[:declared nm]] :generated true}))
 
 (defn- probe-defines
   "configure-probes' answers for goarch over `sys` after the prologue `pre`"
   [opts goarch sys ^String ac pre]
   (str/join
-   (for [{:keys [define cache includes need]} configure-probes
-         :let [_ (when-not (and (str/includes? ac cache) (str/includes? ac (str "AC_DEFINE([" define "]")))
+   (for [{:keys [define cache includes need generated implicit] pk :pre} (concat configure-probes (curses-probes ac))
+         :let [_ (when-not (or generated (and (str/includes? ac cache) (or implicit (str/includes? ac (str "AC_DEFINE([" define "]")))))
                    (fail! "configure.ac: no check " cache " defining " define))
-               incs (str/join (for [h includes] (str "#include <" h ">\n")))
+               incs (str (ac-block ac pk) "\n" (str/join (for [h includes] (str "#include <" h ">\n"))))
                t (preprocess opts goarch sys (str "probe-" (name goarch) "-" define ".c") (str pre incs))
                ts (vec (tokens t)) tset (set ts)
-               macros (macro-probe opts goarch sys (str pre incs) (for [[k n] need :when (= k :macro)] n))
+               macros (macro-probe opts goarch sys (str pre incs) (for [[k n] need :when (#{:macro :declared} k)] n))
                ok? (every? (fn [[k n]]
                              (case k
                                :struct (some (fn [i] (and (= (ts i) "struct") (= (get ts (inc i)) n) (= (get ts (+ i 2)) "{"))) (range (count ts)))
                                :ident (contains? tset n)
                                :macro (macros n)
+                               :declared (or (macros n) (contains? tset n))
                                :func (contains? (musl-symbols opts) n)))
                            need)]
          :when ok?]
@@ -548,7 +592,7 @@
          (sizeofs ac)
          (have-funcs opts ac)
          (have-decls opts goarch sys ac features)
-         (probe-defines opts goarch sys ac features)))))
+         (probe-defines opts goarch sys ac (str features (have-headers opts sys)))))))
 
 (defn- module-unit
   "The module's C source `file` (under Modules/) preprocessed for `goarch` over musl's composed headers, then the extracted apks'
@@ -1170,6 +1214,340 @@
 (defn- table-unicodedata [opts] (ucd-text (:cpython opts) ""))
 (defn- table-unicodedata315 [opts] (ucd-text (or (:cpython315 opts) (fail! "unicodedata315: no --cpython315")) "315"))
 
+;; ---- textsig (queue 357, D350-1 (a)): the built-ins' __text_signature__, builtins_textsig_table.go's textSigs (textsig_table.py's,
+;; recorded from CPython's live built-ins), from the tarball's C sources: the reference configuration's modules (Modules/config.c.in's
+;; core, Setup.bootstrap.in's and Setup.stdlib.in's, less textsig-excluded) and Objects/, Python/; each file preprocessed by repr/c's
+;; preprocessor over musl's and Linux's headers with own-pyconfig's answers (its local headers and clinic's read in place, the others
+;; dropped, Include/'s few macros the tables use taken from the tarball's headers), then its PyMethodDef arrays, static PyTypeObjects,
+;; PyType_Specs with their slots, and PyModuleDefs read; a callable's signature _PyType_GetTextSignatureFromInternalDoc's over its doc and
+;; flags (find_signature, skip_signature, signature_from_flags), a type's over tp_name and tp_doc, a type with its own tp_new also its
+;; __new__ (tp_new_wrapper's doc), the slot wrappers' slotdefs' (the last entry per name with a wrapper, as slotdocs)
+
+(def ^:private textsig-excluded
+  "Setup.stdlib.in's modules the reference configuration does not build: the tests' (textsig_table.py leaves out _test* and xx*), Tk's
+  (textsig_table.py's own exclusion), the libraries the oracle's build had not (zstd, dbm, gdbm, uuid) and macOS's"
+  #"^(_test.*|xx.*|_xxtestfuzz|_tkinter|_scproxy|_zstd|_dbm|_gdbm|_uuid)$")
+
+(defn- setup-modules
+  "Setup.bootstrap.in's and Setup.stdlib.in's modules: [[NAME [SOURCE.c ...]] ...] (Modules/-relative sources)"
+  [py]
+  (for [f ["Modules/Setup.bootstrap.in" "Modules/Setup.stdlib.in"]
+        l (str/split-lines (slurp (str py "/" f)))
+        :let [l (str/trim (str/replace l #"#.*$" ""))]
+        :when (and (seq l) (not (str/starts-with? l "*")))
+        :let [ws (str/split (str/replace l #"^@[A-Z0-9_]+@" "") #"\s+")
+              nm (first ws) srcs (filter #(str/ends-with? % ".c") (rest ws))]
+        :when (and (re-matches #"[A-Za-z_][A-Za-z0-9_]*" nm) (seq srcs) (not (re-matches textsig-excluded nm)))]
+    [nm srcs (vec (for [w (rest ws) :let [[_ d] (re-matches #"-I\$\(srcdir\)/(.*)" w)] :when d] d))]))
+
+(defn- textsig-modules
+  "The reference configuration's module names: Modules/config.c.in's (the core, builtins and sys among them) and Setup's"
+  [py]
+  (set (concat (map second (re-seq #"\{\"([A-Za-z_][A-Za-z0-9_]*)\"," (slurp (str py "/Modules/config.c.in"))))
+               (map first (setup-modules py)))))
+
+(def ^:private configure-cflags
+  "configure.ac's defaults of the bundled libraries' include flags (no --with-system-expat, no --with-system-libmpdec): the modules
+  whose PY_STDLIB_MOD takes them, and the configure.ac line that states each"
+  {"pyexpat" ["LIBEXPAT_CFLAGS=\"-I\\$(srcdir)/Modules/expat\"" "Modules/expat"]
+   "_elementtree" ["LIBEXPAT_CFLAGS=\"-I\\$(srcdir)/Modules/expat\"" "Modules/expat"]
+   "_decimal" ["[LIBMPDEC_CFLAGS=\"-I\\$(srcdir)/Modules/_decimal/libmpdec\"" "Modules/_decimal/libmpdec"]})
+
+(defn- configure-include-dirs [py nm]
+  (when-let [[line dir] (configure-cflags nm)]
+    (when-not (str/includes? (slurp (str py "/configure.ac")) line) (fail! "configure.ac: no " line))
+    [dir]))
+
+(defn- internal-macros
+  "An internal header's preprocessor lines alone (its feature macros under their conditions; its includes and declarations left
+  out): pycore_faulthandler.h's FAULTHANDLER_USER and FAULTHANDLER_USE_ALT_STACK for faulthandler.c"
+  [^String f]
+  (str/join "\n" (for [l (str/split-lines (slurp f)) :when (re-find #"^\s*#\s*(if|ifdef|ifndef|elif|else|endif|define|undef)\b" l)
+                       :when (not (re-find #"^\s*#\s*define\s+Py_INTERNAL_" l))] l)))
+
+(defn- textsig-files [py]
+  (let [core (concat (for [d ["Objects" "Python"]
+                           ^File f (sort-by #(.getName ^File %) (.listFiles (File. (str py "/" d))))
+                           :when (and (.isFile f) (str/ends-with? (.getName f) ".c"))]
+                       (str d "/" (.getName f)))
+                     ["Modules/gcmodule.c"])]
+    (distinct (concat core (for [[_ srcs] (setup-modules py) s srcs] (str "Modules/" s))))))
+
+(def ^:private textsig-public-headers
+  "Include/'s headers read in place where a module includes them (their macros decide its tables): py_curses.h, the curses modules'
+  header (its NCURSES_OPAQUE and its choice of the curses header), the path relative to the tarball's top"
+  {"py_curses.h" "Include/py_curses.h"})
+
+(def ^:private textsig-top (atom nil))
+
+(defn- inline-local
+  "File f's text with its quoted includes that name a file beside it (or below its directory, or in one of the Setup line's -I
+  directories `dirs`) read in place, recursively; the other quoted includes dropped"
+  ([^String f seen] (inline-local f seen []))
+  ([^String f seen dirs]
+   (let [dir (.getParent (File. f))]
+     (str/replace (slurp f) #"(?m)^\s*#\s*include\s+\"([^\"]+)\".*$"
+                  (fn [[l h]]
+                    (let [g (first (filter #(.isFile ^File %) (map #(File. (str % "/" h)) (cons dir dirs))))
+                          g (or g (when-let [x (and @textsig-top (textsig-public-headers h))] (let [x (File. (str @textsig-top "/" x))] (when (.isFile x) x))))]
+                      (if (and g (not (contains? seen (.getCanonicalPath ^File g))))
+                        (inline-local (.getPath ^File g) (conj seen (.getCanonicalPath ^File g)) dirs)
+                        "")))))))
+
+(defn- drop-unfound
+  "Text's #include <H> lines whose H is on no directory of `sys` dropped (Python's own headers, <Python.h>, and the libraries' headers
+  the VM has not: the reference configuration's libffi, ncurses, readline, OpenSSL, sqlite, bzip2, xz, zlib)"
+  [text sys]
+  (str/replace text #"(?m)^\s*#\s*include\s+<([^>]+)>.*$"
+               (fn [[l h]] (if (some #(.isFile (File. (str % "/" h))) sys) l ""))))
+
+(defn- textsig-prelude [py]
+  (str (defines (str py "/Include/pymacro.h") #"^(PyDoc_(VAR|STRVAR)|_?Py_X?STRINGIFY)$") "\n#define PyDoc_STR(str) str\n"
+       (defines (str py "/Include/methodobject.h") #"^METH_(VARARGS|KEYWORDS|NOARGS|O|CLASS|STATIC|COEXIST|METHOD)$") "\n"
+       "#define METH_FASTCALL 0x0080\n#define METH_STACKLESS 0x0000\n"
+       ;; Include/object.h's and moduleobject.h's head initializers, one item each (their contents are not read)
+       "#define PyVarObject_HEAD_INIT(type, size) { 0 },\n#define PyObject_HEAD_INIT(type) { 0 },\n#define PyModuleDef_HEAD_INIT { 0 }\n"
+       "#define _PyCFunction_CAST(func) func\n#define _PyCFunctionWithKeywords_CAST(func) func\n#define Py_UNUSED(name) name\n"
+       "#define WITH_DOC_STRINGS 1\n#define Py_BUILD_CORE 1\n"
+       (defines (str py "/Include/pyport.h") #"^LONG_BIT$") "\n"
+       ;; Include/pythread.h's PY_HAVE_THREAD_NATIVE_ID, its platform condition
+       (str/replace (region (str py "/Include/pythread.h") #"^#if \(defined\(__APPLE__\) \|\| defined\(__linux__\)" #"^#endif") #"(?m)^PyAPI_FUNC.*$" "")
+       "\n#endif\n"))
+
+(defn- tolerant-preprocess
+  "preprocess, its errors kept rather than failed on: [text errors]"
+  [opts goarch sys name text]
+  (let [f (str (:work opts) "/" name)]
+    (.mkdirs (.getParentFile (File. f)))
+    (spit f text)
+    (let [r (pp/preprocess {:predefined (predefined goarch) :include [] :iquote [] :sys sys :std :gnu17 :has {} :base "."} f)]
+      [(pp/text r) (:errors r)])))
+
+(defn- brace-items
+  "The items of the initializer at ts[i] = \"{\": [[item-tokens ...] index-after-}], split at its top-level commas"
+  [ts i]
+  (loop [j (inc i) depth 0 cur [] items []]
+    (let [t (get ts j)]
+      (cond
+        (nil? t) [items j]
+        (and (= t "}") (zero? depth)) [(if (seq cur) (conj items cur) items) (inc j)]
+        (and (= t ",") (zero? depth)) (recur (inc j) depth [] (conj items cur))
+        (#{"(" "[" "{"} t) (recur (inc j) (inc depth) (conj cur t) items)
+        (#{")" "]" "}"} t) (recur (inc j) (dec depth) (conj cur t) items)
+        :else (recur (inc j) depth (conj cur t) items)))))
+
+(defn- fields-of
+  "An initializer's items mapped to `field-names` by C's rule (positional after the last designator): {field item-tokens}"
+  [items field-names]
+  (loop [items items pos 0 out {}]
+    (if-let [it (first items)]
+      (if (and (= "." (first it)) (= "=" (nth it 2 nil)))
+        (let [f (second it) p (.indexOf ^java.util.List field-names f)]
+          (recur (rest items) (if (neg? p) pos (inc p)) (assoc out f (vec (drop 3 it)))))
+        (recur (rest items) (inc pos) (if (< pos (count field-names)) (assoc out (nth field-names pos) it) out)))
+      out)))
+
+(defn- strip-casts
+  "The tokens less their casts' parentheses: (void *)x, (PyCFunction)(void(*)(void))f -> x, f"
+  [it]
+  (let [it (vec it)]
+    (loop [it it]
+      (if (and (= "(" (first it)) (some #{")"} it) (< (inc (.indexOf ^java.util.List it ")")) (count it)))
+        (recur (subvec it (inc (loop [j 1 d 1] (cond (= d 0) (dec j) (= (it j) "(") (recur (inc j) (inc d)) (= (it j) ")") (recur (inc j) (dec d)) :else (recur (inc j) d))))))
+        it))))
+
+(defn- typeobject-fields [py]
+  (let [t (slurp (str py "/Include/cpython/object.h"))
+        body (subs t (str/index-of t "struct _typeobject {") (str/index-of t "};" (str/index-of t "struct _typeobject {")))
+        body (-> body (str/replace #"/\*(?s:.*?)\*/" "") (str/replace #"//[^\n]*" ""))]
+    (vec (cons "ob_base" (for [[_ decl] (re-seq #"(?m)^\s+[A-Za-z_][A-Za-z0-9_ ]*?[\s*]+((?:\*?[A-Za-z_][A-Za-z0-9_]*\s*,\s*)*\*?[A-Za-z_][A-Za-z0-9_]*)\s*;" body)
+                               n (str/split decl #"\s*,\s*")]
+                           (str/replace n "*" ""))))))
+
+(defn- unit-facts
+  "One file's tables, preprocessed: {:docs {var text} :methods {array [[name flags doc] ...]} :types [{:name :doc :methods :new?}]
+  :slots {array {slot value}} :specs [{:name :slots}] :modules [{:name :methods}]}"
+  [ts type-fields]
+  (let [ts (vec ts) n (count ts)
+        str? (fn [t] (and t (str/starts-with? t "\"")))
+        c-string (fn [it] (when (and (seq it) (every? str? it)) (c-string it)))
+        doc-of (fn [it docs] (let [it (strip-casts it)]
+                               (cond (every? str? it) (when (seq it) (c-string it))
+                                     (= 1 (count it)) (docs (first it))
+                                     :else nil)))]
+    (loop [i 0 out {:docs {} :methods {} :types [] :slots {} :specs [] :modules [] :structseqs [] :inits [] :no-new #{}}]
+      (if (>= i n)
+        out
+        (let [t (ts i)]
+          (cond
+            ;; static const char NAME[] = "..." ...;
+            (and (= t "char") (= (get ts (+ i 2)) "[") (= (get ts (+ i 3)) "]") (= (get ts (+ i 4)) "=") (str? (get ts (+ i 5))))
+            (let [j (loop [j (+ i 5)] (if (str? (get ts j)) (recur (inc j)) j))]
+              (recur j (assoc-in out [:docs (ts (inc i))] (c-string (subvec ts (+ i 5) j)))))
+            (and (= t "PyMethodDef") (= (get ts (+ i 2)) "[") (some #(= "{" %) (take 6 (drop (+ i 3) ts))))
+            (let [k (loop [k (+ i 3)] (if (= (ts k) "{") k (recur (inc k))))
+                  [items j] (brace-items ts k)
+                  ents (vec (for [it items :when (= "{" (first it))
+                                  :let [[parts] (brace-items (vec it) 0)
+                                        f (fields-of parts ["ml_name" "ml_meth" "ml_flags" "ml_doc"])
+                                        nm (f "ml_name")]
+                                  :when (and nm (str? (first nm)))]
+                              [(c-string nm) (or (c-eval (f "ml_flags") {}) 0) (f "ml_doc")]))]
+              (recur j (assoc-in out [:methods (ts (inc i))] ents)))
+            (and (= t "PyTypeObject") (= (get ts (+ i 2)) "=") (= (get ts (+ i 3)) "{"))
+            (let [[items j] (brace-items ts (+ i 3))
+                  f (fields-of items type-fields)]
+              (recur j (update out :types conj {:var (ts (inc i)) :name (some-> (f "tp_name") strip-casts seq c-string)
+                                                :doc (f "tp_doc") :methods (some-> (f "tp_methods") strip-casts last)
+                                                :new? (let [x (some-> (f "tp_new") strip-casts)] (boolean (and (seq x) (not (#{["0"] ["NULL"]} x)))))})))
+            (and (= t "PyType_Slot") (= (get ts (+ i 2)) "[") )
+            (let [k (loop [k (+ i 3)] (if (= (ts k) "{") k (recur (inc k))))
+                  [items j] (brace-items ts k)]
+              (recur j (assoc-in out [:slots (ts (inc i))]
+                                 (into {} (for [it items :when (= "{" (first it))
+                                                :let [[[a b]] [(first (brace-items (vec it) 0))]]
+                                                :when (and a (= 1 (count a)))]
+                                            [(first a) b])))))
+            (and (= t "PyType_Spec") (= (get ts (+ i 2)) "=") (= (get ts (+ i 3)) "{"))
+            (let [[items j] (brace-items ts (+ i 3))
+                  f (fields-of items ["name" "basicsize" "itemsize" "flags" "slots"])]
+              (recur j (update out :specs conj {:name (some-> (f "name") seq c-string) :slots (some-> (f "slots") strip-casts last)})))
+            (and (= t "PyStructSequence_Desc") (= (get ts (+ i 2)) "=") (= (get ts (+ i 3)) "{"))
+            (let [[items j] (brace-items ts (+ i 3))
+                  f (fields-of items ["name" "doc" "fields" "n_in_sequence"])]
+              (recur j (update out :structseqs conj {:var (ts (inc i)) :name (some-> (f "name") seq c-string) :doc (f "doc")})))
+            ;; a struct sequence's name set at run time before PyStructSequence_NewType (posixmodule.c's VAR.name = MODNAME ".x";)
+            (and (= (get ts (inc i)) ".") (= (get ts (+ i 2)) "name") (= (get ts (+ i 3)) "=") (str? (get ts (+ i 4)))
+                 (some #(= t (:var %)) (:structseqs out)))
+            (let [j (loop [j (+ i 4)] (if (str? (get ts j)) (recur (inc j)) j))
+                  nm (c-string (subvec ts (+ i 4) j))]
+              (recur j (update out :structseqs (fn [ds] (mapv #(if (= t (:var %)) (assoc % :name nm) %) ds)))))
+            ;; an init function's module definition: PyInit_NAME's (or config.c.in's init function's) body naming &DEF
+            (and (re-matches #"(PyInit_[A-Za-z0-9_]+|_?Py[A-Za-z]+_Init)" t) (= (get ts (inc i)) "(") (some #{"{"} (take 6 (drop (+ i 2) ts)))
+                 (not= (get ts (dec i)) "="))
+            (let [k (loop [k (+ i 2)] (if (= (ts k) "{") k (recur (inc k))))
+                  end (loop [k (inc k) d 1] (cond (zero? d) k (>= k n) k (= (ts k) "{") (recur (inc k) (inc d)) (= (ts k) "}") (recur (inc k) (dec d)) :else (recur (inc k) d)))
+                  refs (for [m (range k (min end n)) :when (= (ts m) "&")] (get ts (inc m)))]
+              (recur end (update out :inits conj [t (vec refs)])))
+            (and (= t "_PyStructSequence_InitBuiltinWithFlags") (= (get ts (inc i)) "("))
+            (let [args (first (markers (subvec ts i (min n (+ i 64))) "_PyStructSequence_InitBuiltinWithFlags"))]
+              (recur (inc i) (if (some #(some #{"Py_TPFLAGS_DISALLOW_INSTANTIATION"} %) args)
+                               (update out :no-new into (for [a args :when (= "&" (first a))] (second a)))
+                               out)))
+            (and (= t "PyModuleDef") (= (get ts (+ i 2)) "=") (= (get ts (+ i 3)) "{"))
+            (let [[items j] (brace-items ts (+ i 3))
+                  f (fields-of items ["m_base" "m_name" "m_doc" "m_size" "m_methods" "m_slots"])]
+              (recur j (update out :modules conj {:var (ts (inc i)) :name (some-> (f "m_name") seq c-string) :methods (some-> (f "m_methods") strip-casts last)})))
+            :else (recur (inc i) out)))))))
+
+(defn- text-signature
+  "_PyType_GetTextSignatureFromInternalDoc(name, doc, flags): the signature after the name up to the end marker's ), else the flags'"
+  [^String nm ^String doc flags]
+  (let [nm (last (str/split nm #"\."))
+        from-doc (when (and doc (str/starts-with? doc nm) (= \( (get doc (count nm))))
+                   (loop [i (count nm)]
+                     (cond (>= i (count doc)) nil
+                           (.startsWith doc ")\n--\n\n" (int i)) (subs doc (count nm) (inc i))
+                           (.startsWith doc "\n\n" (int i)) nil
+                           :else (recur (inc i)))))]
+    (or from-doc
+        (case (long (bit-and (long (or flags 0)) (bit-not 0x40)))
+          4 "($self, /)" 20 "($type, /)" 36 "()" 8 "($self, object, /)" 24 "($type, object, /)" 40 "(object, /)" nil))))
+
+(defn- go-str [s] (str "\"" (-> s (str/replace "\\" "\\\\") (str/replace "\"" "\\\"") (str/replace "\n" "\\n")) "\""))
+
+(defn- slot-signatures
+  "slotdefs' wrapper entries' signatures by name, the last entry per name (table-slotdocs' reading)"
+  [opts]
+  (let [f (str (:cpython opts) "/Objects/typeobject.c")
+        unit (str (region f #"^#define TPSLOT\(" #"^static pytype_slotdef slotdefs\[\] = \{")
+                  "\n#undef TPSLOT\n#undef FLSLOT\n#undef ETSLOT\n"
+                  "#define TPSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) __pys__(#NAME, WRAPPER, DOC)\n"
+                  "#define FLSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC, FLAGS) __pys__(#NAME, WRAPPER, DOC)\n"
+                  "#define ETSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) __pys__(#NAME, WRAPPER, DOC)\n"
+                  (region f #"^static pytype_slotdef slotdefs\[\] = \{" #"^\};") "\n};\n")]
+    (reduce (fn [m [nm wrapper doc]]
+              (let [nm (c-string nm)]
+                (if (or (= wrapper ["NULL"]) (= doc ["NULL"])) m
+                    (if-let [sig (text-signature nm (c-string doc) 0)] (assoc m nm sig) (dissoc m nm)))))
+            (sorted-map) (markers (tokens (preprocess opts :amd64 [] "slotdefs-sig.c" unit)) "__pys__"))))
+
+(defn- textsig-rows [opts]
+  (let [py (:cpython opts) goarch :amd64
+        _ (reset! textsig-top py)
+        root (or (:root-amd64 opts) (fail! "textsig: --root-amd64"))
+        sys (conj (sysroot opts goarch) (str root "/usr/include"))
+        pre (str (own-pyconfig opts goarch sys) (textsig-prelude py))
+        tf (typeobject-fields py)
+        mods (textsig-modules py)
+        ;; a file's names resolve in the file, then in its Setup module's other sources, then in every file
+        group-of (into {} (for [[nm srcs] (setup-modules py) s srcs] [(str "Modules/" s) nm]))
+        incs-of (into {} (for [[nm srcs ds] (setup-modules py) s srcs]
+                           [(str "Modules/" s) (mapv #(str py "/" %) (concat ds (configure-include-dirs py nm)))]))
+        facts (vec (for [f (textsig-files py)
+                         :let [[t errs] (tolerant-preprocess opts goarch sys (str "textsig/" (str/replace f "/" "__"))
+                                                             (str pre (when (= f "Modules/faulthandler.c") (internal-macros (str py "/Include/internal/pycore_faulthandler.h")))
+                                                                  "\n" (drop-unfound (inline-local (str py "/" f) #{} (incs-of f [])) sys)))]]
+                     (assoc (unit-facts (tokens t) tf) :file f :group (group-of f f) :errors errs)))
+        merged (fn [k fs] (apply merge (map k fs)))
+        everywhere {:docs (merged :docs facts) :methods (merged :methods facts) :slots (merged :slots facts)}
+        by-group (into {} (for [[g fs] (group-by :group facts)] [g {:docs (merged :docs fs) :methods (merged :methods fs) :slots (merged :slots fs)}]))
+        look (fn [ft k nm] (when nm (or (get-in ft [k nm]) (get-in by-group [(:group ft) k nm]) (get-in everywhere [k nm]))))
+        doc-text (fn [ft it] (when it (let [it (strip-casts it)]
+                                        (cond (and (seq it) (every? #(str/starts-with? % "\"") it)) (c-string it)
+                                              (= 1 (count it)) (look ft :docs (first it))))))
+        typeobj (first (filter #(= "Objects/typeobject.c" (:file %)) facts))
+        newdoc (some (fn [[nm _ d]] (when (= nm "__new__") (doc-text typeobj d))) (look typeobj :methods "tp_new_methoddef"))
+        key-of (fn [^String tp] (let [i (str/last-index-of tp ".")] (if i [(subs tp 0 i) (subs tp (inc i))] ["builtins" tp])))
+        ;; static types every one (textsig_table.py's walk: every non-heap type); heap types (PyType_Spec) of a module of the set
+        types (concat (for [ft facts t (:types ft) :when (:name t)] (assoc t :doc (doc-text ft (:doc t)) :ft ft))
+                      (for [ft facts s (:specs ft) :when (:name s) :let [sl (look ft :slots (:slots s))]
+                            :when (mods (first (key-of (:name s))))]
+                        {:name (:name s) :doc (doc-text ft (get sl "Py_tp_doc")) :methods (some-> (get sl "Py_tp_methods") strip-casts last)
+                         :new? (contains? sl "Py_tp_new") :ft ft})
+                      ;; the struct sequences (PyStructSequence_Desc): Objects/structseq.c's tp_methods and tp_new
+                      (let [sq (first (filter #(= "Objects/structseq.c" (:file %)) facts))]
+                        (for [ft facts d (:structseqs ft) :when (:name d)
+                              :when (or (not (str/includes? (:name d) ".")) (mods (first (key-of (:name d)))))]
+                          {:name (:name d) :doc (doc-text ft (:doc d)) :methods "structseq_methods" :new? (not (contains? (:no-new ft) (:var d))) :ft sq})))
+        rows (atom (sorted-map))
+        put (fn [k v] (when (and k (string? v) (seq v)) (swap! rows #(if (contains? % k) % (assoc % k v)))))]
+    (doseq [{:keys [name doc ft] ms :methods new? :new?} types
+            :let [[m q] (key-of name) k (str m "." q)]]
+      (put (str "type:" k) (text-signature name doc 0))
+      (doseq [[nm flags d] (look ft :methods ms)]
+        (put (str "meth:" k "." nm) (text-signature nm (doc-text ft d) flags)))
+      (when new? (put (str "meth:" k ".__new__") (text-signature "__new__" newdoc 3))))
+    ;; the slot wrappers' (slotdefs, as table-slotdocs reads them: the last entry with a wrapper per name)
+    (doseq [[nm sig] (slot-signatures opts)] (put (str "slot:" nm) sig))
+    ;; a module's functions by its import name: config.c.in's name of its init function, PyInit_NAME's NAME, else m_name
+    (let [cfg-init (into {} (for [[_ nm f] (re-seq #"\{\"([A-Za-z_0-9]+)\", ([A-Za-z_0-9]+)\}" (slurp (str py "/Modules/config.c.in")))] [f nm]))
+          sysattrs (re-seq #"COPY_SYS_ATTR\(\"([^\"]+)\", \"([^\"]+)\"\)" (slurp (str py "/Python/sysmodule.c")))]
+      (doseq [ft facts {:keys [name var] ms :methods} (:modules ft)
+              :let [import (or (some (fn [[f refs]] (when (some #{var} refs) (or (cfg-init f) (when (str/starts-with? f "PyInit_") (subs f 7)))))
+                                     (:inits ft))
+                               name)]
+              :when (and import (mods import))
+              [nm flags d] (look ft :methods ms)
+              :when (zero? (bit-and (long flags) 0x30))]
+        (let [sig (text-signature nm (doc-text ft d) flags)]
+          (put (str "func:" import "." nm) sig)
+          ;; sys's copies of its hooks (COPY_SYS_ATTR("__displayhook__", "displayhook")): the same function under another name
+          (when (= import "sys")
+            (doseq [[_ copy orig] sysattrs :when (= orig nm)] (put (str "func:sys." copy) sig))))))
+    {:rows @rows :errors (for [ft facts :when (seq (:errors ft))] [(:file ft) (count (:errors ft)) (first (:errors ft))])}))
+
+(defn- table-textsig [opts]
+  (let [{:keys [rows errors]} (textsig-rows opts)]
+    (spit (str (:work opts) "/textsig-errors.txt") (str/join "\n" (map pr-str errors)))
+    (str "// Code generated by tools/pyi/textsig_table.py from CPython 3.14.10's built-ins; DO NOT EDIT.\n\n"
+         "package py\n\n"
+         "// textSigs are CPython's __text_signature__ of its built-in types (type:), the callables in their dicts (meth:),\n"
+         "// the modules' functions (func:) and the slot wrappers (slot:), by the type's or module's qualified name\n"
+         "var textSigs = map[string]string{\n"
+         (str/join (for [[k v] rows] (str "\t" (go-str k) ": " (go-str v) ",\n")))
+         "}\n")))
+
 ;; ---- the command
 
 (let [[opts tables] (loop [as *command-line-args* opts {}]
@@ -1185,7 +1563,8 @@
               "bytecode" ["bytecode_table.go" table-bytecode] "bytecode315" ["bytecode_table315.go" table-bytecode315]
               "opcode315" ["builtins_opcode_table315.go" table-opcode315]
               "stat" ["builtins_stat_table.go" table-stat] "cjk" ["builtins_cjk_table.go" table-cjk]
-              "unicodedata" ["builtins_unicodedata_table.go" table-unicodedata] "unicodedata315" ["builtins_unicodedata_table315.go" table-unicodedata315]}]
+              "unicodedata" ["builtins_unicodedata_table.go" table-unicodedata] "unicodedata315" ["builtins_unicodedata_table315.go" table-unicodedata315]
+              "textsig" ["builtins_textsig_table.go" table-textsig]}]
   (.mkdirs (File. ^String (:work opts)))
   (doseq [t tables]
     (let [[f mk] (or (makers t) (fail! "no table " t ": " (str/join ", " (keys makers))))]
