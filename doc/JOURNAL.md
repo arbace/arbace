@@ -10663,3 +10663,20 @@ unchanged files byte for byte the committed forms), `bin/java-check --essential`
 names, the pauses as the collection time, the watcher, no thresholds or GC notifications yet, derived overlays, the CompositeDataView
 rule (alternatives in the survey). Left: the usage thresholds (a sampler triggering the sensors), GC notifications, the buffer pools
 (jrt counting its direct and mapped buffers). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-f13".
+
+## 2026-11-18: n-review-java2, the night's Java line reviewed before its build (round 52, overnight)
+
+`git diff 42bf8614b..d71873b63` (n-java-f13: n-review-c's stack and the night's fourteen branches) read for what would break
+tomorrow's builds or the gate, with light checks only (each process under 1 GiB). Two breaks fixed: (1) go/arbace/jrt.ae's
+`go/package` did not list n-java-f13's new `memory.go` (nor load `jrt/memory`), so jrt printed alone (`bin/jrt build|test`)
+lacked memory.ae while dyn.ae now adds to its `classesUnloaded`: Go's "undefined"; j2g's program writes its own jrt.ae from
+every file, so the program build was not affected. With the line, jrt's hand-written package (printed alone, its tests too)
+builds for linux/amd64 and linux/arm64 and vets clean (gc of TamaGo's go1.27.1, -p 1, 0.78 GB). (2) jdk/sources.txt kept
+`sun/rmi/server/MarshalInputStream.java` as `share:java.rmi` though n-java-serial made it a derived overlay (its forms are the
+overlay's): the sources step (jrt.jrt-sources/print-sources, run alone) lists it as `overlay`, so `bin/jrt-convert verify`
+would have differed; moved, the counts unchanged (the step's output now equal to the file but the generate step's jrtgen line).
+Known and left to the day: the essential `provenance` step fails (repr/java's reader hash moved with RP3, n-java-conv and
+n-java-hoist; the reconversion rewrites the four provenance files). Checked passing: `bin/jrt-convert derive --check` (95),
+`bin/j2g-unit` (the same 7 failures as on the base, the new mxsig and finalize tests pass), `bin/java-check --essential` 428 of
+428 (the gate's executable at next's key), `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`, claude-md,
+caches-table, `bin/gate --plan`, javac-platform-test and seven planner tests.
