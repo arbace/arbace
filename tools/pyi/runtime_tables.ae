@@ -911,6 +911,105 @@
          (str/join (for [[k v] a] (str "\t\"" k "\": " v ",\n")))
          "}\n")))
 
+;; ---- cjk (queue 357, D350-1 (a)): the CJK codecs' mapping tables, builtins_cjk_table.go (cjkcodecs_table.py's, python3 over the same
+;; headers), from Modules/cjkcodecs/mappings_*.h: each header's arrays as it spells them (data arrays, the 256-entry indexes as
+;; OFFSET+1 bottom top, struct arrays field by field), packed as cjkcodecs_table.py's records, zlib level 9 by jrt's Deflater (zlib's
+;; deflate ported), base64; the rules cjkcodecs_table.py's, regular expression for regular expression
+
+(def ^:private cjk-headers [["CN" "mappings_cn.h"] ["HK" "mappings_hk.h"] ["JP" "mappings_jp.h"] ["JP2" "mappings_jisx0213_pair.h"]
+                            ["KR" "mappings_kr.h"] ["TW" "mappings_tw.h"]])
+(def ^:private cjk-macros {"U" 0xFFFE "N" 0xFFFF "M" 0xFFFE "D" 0xFFFD})
+(def ^:private cjk-width {"ucs2_t" 2 "DBCHAR" 2 "Py_UCS4" 4 "unsigned char" 1})
+(def ^:private cjk-index #{"struct dbcs_index" "struct widedbcs_index" "struct unim_index"})
+
+(defn- cjk-body
+  "The initializer's text from `start` (just after its {) to its closing brace, whitespace removed"
+  [^String text start]
+  (let [j (loop [depth 1 j (long start)]
+            (if (zero? depth) j
+                (let [c (.charAt text j)] (recur (case c \{ (inc depth) \} (dec depth) depth) (inc j)))))]
+    (str/replace (subs text start (dec j)) #"\s+" "")))
+
+(defn- cjk-num [^String t]
+  (or (cjk-macros t)
+      (cond (re-matches #"0[xX][0-9a-fA-F]+" t) (Long/parseLong (subs t 2) 16)
+            (re-matches #"[0-9]+" t) (Long/parseLong t)
+            :else (fail! "cjk: no number " t))))
+
+(defn- cjk-records [^String text hname]
+  (let [text (if (str/includes? text "#ifdef EXTERN_JISX0213_PAIR")
+               (subs text (str/index-of text "#else") (str/index-of text "#endif")) text)
+        m (re-matcher #"(?ms)^static const (ucs2_t|DBCHAR|Py_UCS4|unsigned char|struct \w+(?: \{[^}]*\})?) (\w+)\[(\w*)\] = \{" text)]
+    (loop [out []]
+      (if-not (.find m)
+        out
+        (let [ctype (.group m 1) nm (.group m 2) size (.group m 3) b (cjk-body text (.end m))]
+          (recur
+           (conj out
+                 (cond
+                   (cjk-width ctype)
+                   (let [vals (mapv cjk-num (str/split (str/replace b #",$" "") #","))]
+                     (when (and (seq size) (re-matches #"\d+" size) (not= (count vals) (Long/parseLong size)))
+                       (fail! hname " " nm ": " (count vals) " values, declared " size))
+                     ["d" nm "" (cjk-width ctype) vals])
+                   (cjk-index ctype)
+                   (let [ents (map second (re-seq #"\{([^{}]*)\}" b))
+                         _ (when-not (and (= 256 (count ents)) (= size "256")) (fail! hname " " nm ": not 256 entries"))
+                         [base vals] (reduce (fn [[base vals] e]
+                                               (let [[p lo hi] (str/split e #",")]
+                                                 (if (= p "0")
+                                                   (do (when-not (and (= lo "0") (= hi "0")) (fail! nm " " e)) [base (conj vals 0 0 0)])
+                                                   (let [[_ bn off] (or (re-matches #"(\w+)\+(\d+)" p) (fail! nm " " e))]
+                                                     (when (and base (not= base bn)) (fail! nm ": two bases"))
+                                                     [bn (conj vals (inc (Long/parseLong off)) (Long/parseLong lo) (Long/parseLong hi))]))))
+                                             [nil []] ents)]
+                     ["i" nm (or base "") 4 vals])
+                   :else ["s" nm "" 4 (vec (for [e (map second (re-seq #"\{([^{}]*)\}" b)) t (str/split e #",")] (cjk-num t)))]))))))))
+
+(defn- cjk-pack ^bytes [recs]
+  (let [o (java.io.ByteArrayOutputStream.)
+        le (fn [^long v ^long w] (dotimes [i w] (.write o (int (bit-and (bit-shift-right v (* 8 i)) 0xff)))))]
+    (doseq [[kind nm base width vals] recs]
+      (.write o (int (first (.getBytes ^String kind "UTF-8"))))
+      (.write o (int (count nm))) (doseq [b (.getBytes ^String nm "UTF-8")] (.write o (int b)))
+      (.write o (int (count base))) (doseq [b (.getBytes ^String base "UTF-8")] (.write o (int b)))
+      (.write o (int width)) (le (count vals) 4)
+      (doseq [v vals] (le v width)))
+    (.toByteArray o)))
+
+(defn- zlib9 ^bytes [^bytes in]
+  (let [d (java.util.zip.Deflater. 9) o (java.io.ByteArrayOutputStream.) buf (byte-array 65536)]
+    (.setInput d in) (.finish d)
+    (loop [] (when-not (.finished d) (let [n (.deflate d buf)] (.write o buf 0 n)) (recur)))
+    (.end d)
+    (.toByteArray o)))
+
+(defn- table-cjk [opts]
+  (let [dir (str (:cpython opts) "/Modules/cjkcodecs/")
+        done (for [[loc h] cjk-headers
+                   :let [text (slurp (str dir h)) recs (cjk-records text h)
+                         names (set (map second recs))]]
+               (do (doseq [[k nm base] recs] (when (and (= k "i") (not (names base))) (fail! h " " nm ": no base " base)))
+                   {:loc loc :h h :recs recs :text text}))
+        pairs (let [jp2 (first (filter #(= "JP2" (:loc %)) done))
+                    n (Long/parseLong (or (second (re-find #"#define JISX0213_ENCPAIRS (\d+)" (:text jp2))) (fail! "no JISX0213_ENCPAIRS")))]
+                (when-not (= (* 2 n) (count (nth (first (filter #(= "jisx0213_pair_encmap" (second %)) (:recs jp2))) 4)))
+                  (fail! "cjk: jisx0213_pair_encmap is not 2 x JISX0213_ENCPAIRS"))
+                n)
+        summary (for [{:keys [loc h recs]} done]
+                  (str loc " " h " " (str/join " " (for [[k nm _ _ vals] recs] (str k ":" nm ":" (count vals))))))]
+    (str "// Code generated by tools/pyi/cjkcodecs_table.py from CPython 3.14.10's Modules/cjkcodecs/mappings_*.h;\n"
+         "// DO NOT EDIT.\n\n"
+         "package py\n\n"
+         "// The CJK codecs' mapping tables (PY6c2): see tools/pyi/cjkcodecs_table.py for the format.\n\n"
+         "// cjkPairCount is mappings_jisx0213_pair.h's JISX0213_ENCPAIRS.\n"
+         "const cjkPairCount = " pairs "\n\n"
+         "// cjkTableArrays: each blob's header and its arrays (KIND:NAME:ELEMENTS).\n"
+         "const cjkTableArrays = `" (str/join "\n" summary) "\n`\n"
+         (str/join (for [{:keys [loc h recs]} done]
+                     (str "\n// cjkBlob" loc " is " h "'s arrays.\n"
+                          "const cjkBlob" loc " = \"" (.encodeToString (java.util.Base64/getEncoder) (zlib9 (cjk-pack recs))) "\"\n"))))))
+
 ;; ---- the command
 
 (let [[opts tables] (loop [as *command-line-args* opts {}]
@@ -925,7 +1024,7 @@
               "ast" ["builtins_ast_table.go" table-ast]
               "bytecode" ["bytecode_table.go" table-bytecode] "bytecode315" ["bytecode_table315.go" table-bytecode315]
               "opcode315" ["builtins_opcode_table315.go" table-opcode315]
-              "stat" ["builtins_stat_table.go" table-stat]}]
+              "stat" ["builtins_stat_table.go" table-stat] "cjk" ["builtins_cjk_table.go" table-cjk]}]
   (.mkdirs (File. ^String (:work opts)))
   (doseq [t tables]
     (let [[f mk] (or (makers t) (fail! "no table " t ": " (str/join ", " (keys makers))))]
