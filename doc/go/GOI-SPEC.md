@@ -5294,6 +5294,16 @@ forms (`bin/repr-go read`, linux/amd64) run by `bin/goi run` with the flag, stat
 the flag (TamaGo's go); without it the old panic `mayMoreStack not called` (status 2). The row `:pass`; Go eval
 1762 / 70 / 2 to 1763 / 69 / 2.
 
+**Leaves (queue 378's item 4, the main host's review).** gc makes a leaf function with a small frame NOSPLIT by itself
+(cmd/internal/obj/x86/obj6.go's preprocess: no CALL but the zero-argument panics', the frame with its frame pointer under
+`abi.StackSmall`, 128 bytes; arm64's obj7.go likewise), so its prologue calls no hook. `arbace.go.run`'s `auto-nosplit?` models
+it from the package's check (`repl/check-source`, the typed trees beside `:decl-infos`): every node an operation on small basic
+types (a call, a string's, interface's or composite's operation, a map, channel, allocation or a pointer's store, gc's write
+barrier, is a call of the runtime: no leaf), the locals' and parameters' sizes summed under 120; conservatively, so a doubt keeps
+the hook (gc's inliner, which can make a caller a leaf, and its spill slots are not modelled). `GOI_MAYMORESTACK_TRACE=1` lists the
+leaves. Probe (a small `//go:noinline` leaf called 15 times, a non-leaf 5, a leaf with a 512-byte array 3): gc 9 calls (its amd64
+assembly marks only `leaf` nosplit; the arm64 run prints 9), goi 9 (24 before: every function hooked); maymorestack.go passes as before.
+
 ## Since v1: gc's converthash (2026-11-18, queue 358, D358-2 (a))
 
 `convert5.go`'s action is `run -gcflags=-d=converthash=qy`: gc's hash for its new float-to-integer conversions matches every
@@ -5311,6 +5321,16 @@ checkout's builder takes the new path (`goi: no factory SatFtoI32`: stage 0's ba
 `convert5.go` of test/goi/check-linux-amd64.edn, waits for an executable built with them (the main host: `bin/goi check --only
 '^convert5\.go$'` passes, then its known line goes and the row is recorded `:pass`). go/arbace/goi and arbace/go/build.ae are
 embedded: gate_key moves.
+
+**By architecture (queue 378's item 5, the main host's review).** The rules above are amd64's. goi's GOARCH (the run's
+`:config`, its table's) chooses: amd64, every conversion `SatFto*`; arm64, whose signed and 64-bit conversions are native either way
+(FCVTZS, FCVTZU: saturating, a NaN 0), only a uint32's, which ssagen reverts to the old conversion (through int64, truncated) on
+every architecture when the hash does not match: `SatA64FtoU32` (FCVTZU's: 0 for a NaN or a negative operand, the maximum past the
+range); another architecture, nothing. Checked on the VM (arm64): convert5.go with native conversions but its uint32 ones through
+`satA64FtoU32` (printed by repr/go, built by TamaGo's go) prints `convert5.out`, as gc arm64's build with the flag does; without
+the flag gc's arm64 build prints 3 FAIL lines (the uint32 of a negative operand), as goi's run does today: the control. goi on stage
+0 (linux/arm64's table) with the flag now stops at `goi: no factory SatA64FtoU32`; `convert-hash!` gives :amd64, :arm64 and false for
+amd64, arm64 and 386 programs.
 
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
