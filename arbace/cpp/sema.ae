@@ -1958,6 +1958,59 @@
          (every? #(let [f (fnd %)] (or (not (copy-ctor? f id)) (and (or (:implicit f) (:defaulted f)) (:trivial f)))) (:ctors c))
          (every? trivial-copy? (class-like-members id)))))
 
+;; queue 378 (the main host's review of 351, item 1): the Itanium C++ ABI's "non-trivial for the purposes of calls" (§3.1.2.1, the
+;; psABI's MEMORY class for such a type: passed by address), as clang's Sema::canPassInRegisters decides it: every copy constructor,
+;; move constructor and the destructor that is not deleted is trivial, and one copy or move constructor is not deleted. A move
+;; constructor is trivial when implicit or defaulted and the moves of the bases and members are ([class.copy.ctor]/11); the implicit
+;; one is declared when the class declares no copy or move member and no destructor ([class.copy.ctor]/8), which codegen's analysis
+;; does not make an entity of, so it is judged here; a member's move is its move constructor's, or its copy constructor's when it
+;; has none.
+
+(declare move-trivial?)
+
+(defn- implicit-move?
+  "Whether the class `id` has an implicitly declared move constructor ([class.copy.ctor]/8)."
+  [id]
+  (let [c (abi/cls id)]
+    (and (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (or (copy-ctor? g id) (move-ctor? g id)))) (:ctors c))
+         (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (or (copy-assign? g id) (move-assign? g id)))) (:methods c))
+         (let [d (:dtor c)] (or (nil? d) (:implicit (fnd d)))))))
+
+(defn- members-move-trivial? [id] (and (not (abi/dynamic? id)) (every? move-trivial? (class-like-members id))))
+
+(defn move-trivial?
+  "Whether the constructor that moves an object of the class `id` is trivial: its declared move constructors defaulted (and the
+  bases' and members' moves trivial), else its implicit one's, else (no move constructor) its copy constructor's."
+  [id]
+  (let [c (abi/cls id)
+        mv (filter #(let [g (fnd %)] (and (move-ctor? g id) (not (:implicit g)))) (:ctors c))]
+    (cond (seq mv) (every? #(let [g (fnd %)] (and (:defaulted g) (not (:deleted g)) (members-move-trivial? id))) mv)
+          (implicit-move? id) (members-move-trivial? id)
+          :else (trivial-copy? id))))
+
+(defn trivial-for-call?
+  "Queue 378: the class `id` trivial for the purposes of calls (Itanium C++ ABI §3.1.2.1, clang's canPassInRegisters): passed in
+  registers when the psABI classifies it so, else by address."
+  [id]
+  (let [c (abi/cls id)
+        cs (map fnd (:ctors c))
+        live? (fn [g] (not (:deleted g)))
+        copies (filter #(copy-ctor? % id) cs)
+        moves (filter #(and (move-ctor? % id) (not (:implicit %))) cs)
+        imove (implicit-move? id)]
+    (and (not (abi/dynamic? id))
+         (every? #(or (not (live? %)) (and (or (:implicit %) (:defaulted %)) (:trivial %))) copies)
+         (every? #(or (not (live? %)) (and (:defaulted %) (members-move-trivial? id))) moves)
+         (or (not imove) (members-move-trivial? id))
+         (trivial-dtor? id)
+         (boolean (or (some live? copies) (some live? moves) imove)))))
+
+(defn call-memory?
+  "Queue 378: a class trivial for calls that holds a base or a member (an array's element) that is not, at any depth: the psABI's
+  MEMORY class (clang's X86_64ABIInfo::classify gives such a member's eightbytes MEMORY), passed on the stack (byval)."
+  [id]
+  (boolean (some #(or (not (trivial-for-call? %)) (call-memory? %)) (class-like-members id))))
+
 (defn- trivial-assign?
   "cpp-s3: the class's copy and move assignments trivial ([class.copy.assign]/9) as far as trivial-copy? does not tell:
   no user-provided one, its bases' and members' trivial too. (An implicit or defaulted assignment over a member whose
