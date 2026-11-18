@@ -29,20 +29,17 @@
  * src/jdk.management/unix/classes/com/sun/management/internal/OperatingSystemImpl.java) with its natives,
  * libmanagement_ext's in the JDK, written over jrt's (jdk.internal.jrt.HostManagement: go/arbace/jrt's
  * management_linux.ae reads what the JDK's C reads on Linux), no cgroup metrics (jdk.internal.platform's
- * Container is not in the Go build: containerMetrics null, the host's facts, as the JDK's without container
- * limits); jrt's JrtPlatformBeans makes it for ManagementFactory's table (jdk.management's provider is not in
+ * Container is not in the Go build: the host's facts, as the JDK's without container limits, where
+ * Container.metrics() is null; since n-java-mx, 2026-11-18, the container branches and their ContainerCpuTicks cut
+ * rather than kept behind a null field, since j2g refuses every method that names Metrics: getTotalMemorySize,
+ * getFreeMemorySize, the swap sizes and the CPU loads threw "jdk.internal.platform.Metrics is not in the closed
+ * world"); jrt's JrtPlatformBeans makes it for ManagementFactory's table (jdk.management's provider is not in
  * the Go build). Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
  * Classpath Exception, as the notice above says (LICENSE.md).
  */
 
 package com.sun.management.internal;
 
-import java.util.concurrent.TimeUnit;
-import java.util.function.DoubleSupplier;
-import java.util.function.LongSupplier;
-import java.util.function.ToDoubleFunction;
-
-import jdk.internal.platform.Metrics;
 import jdk.internal.jrt.HostManagement;
 import sun.management.BaseOperatingSystemImpl;
 import sun.management.VMManagement;
@@ -56,138 +53,10 @@ import sun.management.VMManagement;
 class OperatingSystemImpl extends BaseOperatingSystemImpl
     implements com.sun.management.UnixOperatingSystemMXBean {
 
-    private static final int MAX_ATTEMPTS_NUMBER = 10;
-    private final Metrics containerMetrics;
-    private ContainerCpuTicks systemLoadTicks = new SystemCpuTicks();
-    private ContainerCpuTicks processLoadTicks = new ProcessCpuTicks();
-
-    private abstract class ContainerCpuTicks {
-        private volatile long usageTicks;
-        private volatile long totalTicks;
-
-        private double getUsageDividesTotal(long usageTicks, long totalTicks) {
-            // If cpu quota or cpu shares are in effect. Calculate the cpu load
-            // based on the following formula (similar to how
-            // getCpuLoad0() is being calculated):
-            //
-            //   | usageTicks - usageTicks' |
-            //  ------------------------------
-            //   | totalTicks - totalTicks' |
-            //
-            // where usageTicks' and totalTicks' are historical values
-            // retrieved via an earlier call of this method.
-            if (usageTicks < 0 || totalTicks <= 0) {
-                return -1;
-            }
-            long distance = usageTicks - this.usageTicks;
-            this.usageTicks = usageTicks;
-            long totalDistance = totalTicks - this.totalTicks;
-            this.totalTicks = totalTicks;
-            double systemLoad = 0.0;
-            if (distance > 0 && totalDistance > 0) {
-                systemLoad = ((double)distance) / totalDistance;
-            }
-            // Ensure the return value is in the range 0.0 -> 1.0
-            systemLoad = Math.max(0.0, systemLoad);
-            systemLoad = Math.min(1.0, systemLoad);
-            return systemLoad;
-        }
-
-        public double getContainerCpuLoad() {
-            assert(containerMetrics != null);
-            long quota = containerMetrics.getCpuQuota();
-            long share = containerMetrics.getCpuShares();
-            if (quota > 0) {
-                long numPeriods = containerMetrics.getCpuNumPeriods();
-                long quotaNanos = TimeUnit.MICROSECONDS.toNanos(quota * numPeriods);
-                return getUsageDividesTotal(cpuUsageSupplier().getAsLong(), quotaNanos);
-            } else {
-                // If CPU quotas are not active then find the average load for
-                // all online CPUs that are allowed to run this container.
-
-                // If the cpuset is the same as the host's one there is no need to iterate over each CPU
-                if (isCpuSetSameAsHostCpuSet()) {
-                    return defaultCpuLoadSupplier().getAsDouble();
-                } else {
-                    int[] cpuSet = containerMetrics.getEffectiveCpuSetCpus();
-                    // in case the effectiveCPUSetCpus are not available, attempt to use just cpusets.cpus
-                    if (cpuSet == null || cpuSet.length <= 0) {
-                        cpuSet = containerMetrics.getCpuSetCpus();
-                    }
-                    if (cpuSet == null) {
-                        // cgroups is mounted, but CPU resource is not limited.
-                        // We can assume the VM is run on the host CPUs.
-                        return defaultCpuLoadSupplier().getAsDouble();
-                    } else if (cpuSet.length > 0) {
-                        return cpuSetCalc().applyAsDouble(cpuSet);
-                    }
-                    return -1;
-                }
-            }
-        }
-
-        protected abstract DoubleSupplier defaultCpuLoadSupplier();
-        protected abstract ToDoubleFunction<int[]> cpuSetCalc();
-        protected abstract LongSupplier cpuUsageSupplier();
-    }
-
-    private class ProcessCpuTicks extends ContainerCpuTicks {
-
-        @Override
-        protected DoubleSupplier defaultCpuLoadSupplier() {
-            return () -> getProcessCpuLoad0();
-        }
-
-        @Override
-        protected ToDoubleFunction<int[]> cpuSetCalc() {
-            return (int[] cpuSet) -> {
-                int totalCPUs = getHostOnlineCpuCount0();
-                int containerCPUs = getAvailableProcessors();
-                return Math.min(1.0, getProcessCpuLoad0() * totalCPUs / containerCPUs);
-            };
-        }
-
-        @Override
-        protected LongSupplier cpuUsageSupplier() {
-            return () ->  getProcessCpuTime();
-        }
-
-    }
-
-    private class SystemCpuTicks extends ContainerCpuTicks {
-
-        @Override
-        protected DoubleSupplier defaultCpuLoadSupplier() {
-            return () -> getCpuLoad0();
-        }
-
-        @Override
-        protected ToDoubleFunction<int[]> cpuSetCalc() {
-            return (int[] cpuSet) -> {
-                double systemLoad = 0.0;
-                for (int cpu : cpuSet) {
-                    double cpuLoad = getSingleCpuLoad0(cpu);
-                    if (cpuLoad < 0) {
-                        return -1;
-                    }
-                    systemLoad += cpuLoad;
-                }
-                return systemLoad / cpuSet.length;
-            };
-        }
-
-        @Override
-        protected LongSupplier cpuUsageSupplier() {
-            return () -> containerMetrics.getCpuUsage();
-        }
-
-    }
-
     OperatingSystemImpl(VMManagement vm) {
         super(vm);
         // jrt: no cgroup metrics (jdk.internal.platform is not in the Go build): the host's facts, as the JDK's
-        // without container limits
-        this.containerMetrics = null;
+        // without container limits (containerMetrics null)
     }
 
     public long getCommittedVirtualMemorySize() {
@@ -195,49 +64,10 @@ class OperatingSystemImpl extends BaseOperatingSystemImpl
     }
 
     public long getTotalSwapSpaceSize() {
-        if (containerMetrics != null) {
-            long limit = containerMetrics.getMemoryAndSwapLimit();
-            // The memory limit metrics is not available if JVM runs on Linux host (not in a docker container)
-            // or if a docker container was started without specifying a memory limit (without '--memory='
-            // Docker option). In latter case there is no limit on how much memory the container can use and
-            // it can use as much memory as the host's OS allows.
-            long memLimit = containerMetrics.getMemoryLimit();
-            if (limit >= 0 && memLimit >= 0) {
-                return limit - memLimit; // might potentially be 0 for limit == memLimit
-            }
-        }
         return getTotalSwapSpaceSize0();
     }
 
     public long getFreeSwapSpaceSize() {
-        if (containerMetrics != null) {
-            long memSwapLimit = containerMetrics.getMemoryAndSwapLimit();
-            long memLimit = containerMetrics.getMemoryLimit();
-            if (memSwapLimit >= 0 && memLimit >= 0) {
-                long deltaLimit = memSwapLimit - memLimit;
-                // Return 0 when memSwapLimit == memLimit, which means no swap space is allowed.
-                // And the same for memSwapLimit < memLimit.
-                if (deltaLimit <= 0) {
-                    return 0;
-                }
-                for (int attempt = 0; attempt < MAX_ATTEMPTS_NUMBER; attempt++) {
-                    long memSwapUsage = containerMetrics.getMemoryAndSwapUsage();
-                    long memUsage = containerMetrics.getMemoryUsage();
-                    if (memSwapUsage > 0 && memUsage > 0) {
-                        // We read "memory usage" and "memory and swap usage" not atomically,
-                        // and it's possible to get the negative value when subtracting these two.
-                        // If this happens just retry the loop for a few iterations.
-                        long deltaUsage = memSwapUsage - memUsage;
-                        if (deltaUsage >= 0) {
-                            long freeSwap = deltaLimit - deltaUsage;
-                            if (freeSwap >= 0) {
-                                return freeSwap;
-                            }
-                        }
-                    }
-                }
-            }
-        }
         return getFreeSwapSpaceSize0();
     }
 
@@ -246,23 +76,10 @@ class OperatingSystemImpl extends BaseOperatingSystemImpl
     }
 
     public long getFreeMemorySize() {
-        if (containerMetrics != null) {
-            long usage = containerMetrics.getMemoryUsage();
-            long limit = containerMetrics.getMemoryLimit();
-            if (usage > 0 && limit >= 0) {
-                return limit - usage;
-            }
-        }
         return getFreeMemorySize0();
     }
 
     public long getTotalMemorySize() {
-        if (containerMetrics != null) {
-            long limit = containerMetrics.getMemoryLimit();
-            if (limit >= 0) {
-                return limit;
-            }
-        }
         return getTotalMemorySize0();
     }
 
@@ -275,29 +92,11 @@ class OperatingSystemImpl extends BaseOperatingSystemImpl
     }
 
     public double getCpuLoad() {
-        if (containerMetrics != null) {
-            return systemLoadTicks.getContainerCpuLoad();
-        }
         return getCpuLoad0();
     }
 
     public double getProcessCpuLoad() {
-        if (containerMetrics != null) {
-            return processLoadTicks.getContainerCpuLoad();
-        }
         return getProcessCpuLoad0();
-    }
-
-    private boolean isCpuSetSameAsHostCpuSet() {
-        if (containerMetrics != null) {
-            // The return value may change (including from non-null to null) and
-            // the call may involve I/O, so keep the result in a local variable.
-            int[] cpuSetCpus = containerMetrics.getCpuSetCpus();
-            if (cpuSetCpus != null) {
-                return cpuSetCpus.length == getHostOnlineCpuCount0();
-            }
-        }
-        return false;
     }
 
     /* native methods */

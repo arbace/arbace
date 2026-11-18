@@ -281,6 +281,58 @@ Arbace's JVM: about 2-3 s).
 | multi | amd64 | 2,433,452 | yes | yes | 3 of 3 |
 | multi | arm64 | 2,372,712 | yes | yes | 3 of 3, under qemu-aarch64 |
 
+## A mutant (2026-11-17: the Ghidra demo's A20, GH20 (a); round 52)
+
+A program's sensitivity control (the Ghidra case study's §3.5 seeded mutant): one function's body
+rewritten by a named, recorded rewrite, Go rebuilt alone, no j2g run; the mutant must fail at least one
+of the tests that pass on the original. `bin/build-go --mutant FILE` (also with `--print-only`) applies
+it; `bin/arbace-go --build-program DIR --mutant FILE` (`make program-mutant`) applies it to a kept
+program, its forms as j2g printed them (`ARBACE_PROGRAM_KEEP=1`'s `programs/NAME/j2g/prog`, with the
+same flags as the program's build: the lines layout, the overlay, x509roots, the program's `go/` root,
+the link flags), into `programs/NAME/mutant-ARCH/NAME`; a Go program (no `:main`, no `:main-class`) from
+DIR itself.
+
+- **The hook: the forms.** `arbace.build.go/apply-mutant` rewrites the collected package's declaration
+  before `print-module` prints it, so the rewrite is a Go form, names a declaration as the forms do
+  (package path, name, receiver type), keeps the head (doc, type parameters, parameters, results and
+  their metadata) and is printed by repr/go like every other form. The printed text (an edit of
+  `work-ARCH/mod/...go` and `go build` by hand) was the other hook considered: no reprint, but a
+  rewrite by line or by text, which positions and `--line-file`'s layout make fragile and which no
+  printer checks. The mutated package is printed past the print cache, read and written (its forms
+  files are the original's, so the cache's key would be theirs): the original's next build prints the
+  original.
+- **The record** (one map, the Clojure reader's; `read-mutant`): `:name` (in the panic's message and
+  the applied record), `:package` (the import path), `:func` (as the forms spell it, j2g's mangled
+  names included), `:receiver` (a `go/method`'s receiver type without `*` and type arguments; absent: a
+  `go/func`), `:file` (the `go/file`, when needed), `:rewrite`, `:forms` (`:prepend`'s and
+  `:replace-body`'s Go forms, in the file's context: its imports and the parameters' names),
+  `:sha256` (the original declaration's digest, its form printed with its metadata: another is an error,
+  the kept program changed since the rewrite was recorded) and `:why` (what it breaks, which tests reach
+  it). Exactly one declaration must match; an `^:extern` one is refused.
+- **The named rewrites**: `:panic` (`(panic "arbace mutant: NAME")` before the body, the body kept,
+  unreachable, so its imports and variables stay used: any test that reaches it fails), `:prepend`
+  (`:forms` before the body, such as an early `return` on a condition) and `:replace-body` (`:forms` in
+  place of the body: a value off by a field, the subtle mutant a sensitivity control wants).
+- **The applied record**, `OUT.mutant.edn` beside the executable (`--print-only`: `WORK/mutant.edn`):
+  the record, its path, the package, the Go file, the forms file, the declaration, the digests before
+  and after, and both forms; one line `build-go: mutant ...` on standard error.
+- **Tests.** `bin/build-go mutant-test` (`test/build/mutant_test.ae` on the tools' host, no Go build, 29
+  checks, about 350 MB): the record's refusals, the declaration found by name, receiver and file (and
+  every miss refused), each rewrite's form, the digest pin, a package from the collect index, the printed
+  `main.go` of `test/build/go/hello` with each mutant of `test/build/mutants/`; `--build` (`make
+  build-go-mutant-test`) also builds hello and its two mutants (Go alone, about 350 MB, 12 s) and runs
+  them on hello's runs: the original passes both, `hello-greeting` (`:replace-body`) and `hello-panic`
+  fail both.
+- **On a test program** (2026-11-17): `bin/arbace-go --build-program test/programs/hello-go --mutant
+  test/programs-mutants/hello-go-wc-string.edn` (the method `(Counts).String` of
+  `example.com/hellogo/wc`, the lines' count printed for the words', 4 s, 450 MB): the run `noargs`,
+  which prints no counts that differ, passes; `args` fails (`lines 2 words 2` for `lines 2 words 7`).
+- **A large program's** (the Ghidra demo's G2, by day: the mutant built from G2's kept program, about
+  5-10 GiB and 10-20 minutes, Go alone, then run over the classes that reach the rewritten method):
+  `ARBACE_PROGRAM_KEEP=1 bin/arbace-go --build-program DIR` once (the program kept), then
+  `bin/heavy-lock bin/arbace-go --build-program DIR --mutant RECORD`, the record's `:sha256` taken from a
+  first run's refusal or applied record.
+
 ## A user's program (REAP7, 2026-10-25; REAP7b)
 
 `bin/arbace-go --build-program DIR` builds a user's program into one static executable: its
@@ -469,7 +521,12 @@ data, `:java`:
   path (javac's own closure: every file a reached type is declared in), `-verbose` naming the files it
   parsed; a file with an error (a type or a package javac cannot find, or any other error) is removed
   and the compilation run again, so a file naming a removed file fails next (the cascade) until a run
-  has no error; a root that fails is the step's failure. The report is data,
+  has no error; a root that fails is the step's failure. A root names a class's file; a nested class by
+  dots (`p.Outer.Inner`, the file `p/Outer.java`; `p.Outer$Inner` does not resolve). Classes a library
+  loads by computed names (bouncycastle's provider: its `$Mappings` and service classes) are roots twice:
+  to the cut here, and to j2g as native-image metadata, a `reflect-config.json` under
+  `META-INF/native-image/` of a `:resources` directory of the module (A6; the Ghidra case study's G2,
+  its `plan/BC.md`). The report is data,
   `WORK/closure/M/report.edn`: the roots, the rounds, the files kept, each file left out with its round,
   its cause (`:absent` and the name javac could not find, `:left-out` when that name is a file left out
   before, `:other` with javac's message) and the absent names counted. javac's default diagnostics are
@@ -501,6 +558,37 @@ data, `:java`:
   `outside.args`, `bin/j2g-unit`'s `test-outside` the declarations and the stubs. Since A8c (2026-11-17, J2G-SPEC
   §4.1) `:platform` also declares java.base's API the world and the edge lack and completes the world's variants
   of platform classes (java.awt.Color's Paint and ColorSpace members), with no change to `outside.args`.
+- **A JDK module as the program's world extension** (`:jdk-extra`, 2026-11-17, write-ahead: A15 of the Ghidra demo's G2 plan,
+  the user's GH13 (a), and round 53: java.xml stays out of the shipped world, per program only): `:java`'s `:jdk-extra`, a
+  vector of `{:module NAME :closure {:roots [...] :optional [...]} :variants [PATH ...]}` or with `:classes` (class
+  names and patterns, a vector or a file of them, one a line) in place of `:closure`. Each is a module of kind `jdk` in
+  the plan, first (its resources before the class path's, as the platform's loaders find them): its sources jdk26u's
+  (`$jdk26u`, `--root jdk26u=DIR`, default `$JDK` or /root/jdk26u) at `jdk/javac/provenance.edn`'s commit (the
+  platform's; a tree at another commit, or whose `src/MODULE` differs, refused), the module's `share`, `unix` and
+  `linux` layers laid over in that order (module-info.java and snippet files aside); `:closure` cut by A3 as an
+  artifact's, javac's `--patch-module MODULE=TREE -Xprefer:source` in place of the source path (the module's classes
+  from its sources, the other modules' from the platform), `:classes` the set itself, no cut; read by `bin/repr-java
+  read-jdk` (`--patch-module` against the platform, as `bin/jrt-convert` and `bin/javac-vendor` read the JDK; the
+  headers name `jdk26u src/MODULE/LAYER/classes/PATH`; `JAVA_PROJECT_JDK_THREADS`, default 1), both fronts and nread
+  as a module's; no `classes` step (the platform has them). Its forms join `WORK/forms.all` (j2g's `pkg-of` puts the
+  JDK's packages into jrt, `tool-module-prefixes` names java.xml's classes by their binary names; a class with forms
+  wins over the edge's declaration, `env/known?`), its resources (the module's other files but HTML: Xerces'
+  messages, the JDK catalog) are `WORK/resources.jars/001-MODULE`, and its `:variants` (files, or directories of
+  `.ae` files) are copied into `WORK/variants/DIGEST` and named by `--variants` in `outside.args`, which
+  `--build-program` appends to j2g's arguments and keys: `bin/arbace-go`, j2g, the shipped runtime and `gate_key`
+  are unchanged. The rest of the module stays declared outside with `:outside [:platform]` (A8). The fixture of the
+  light proof is `bin/java-project test`'s (`test/java/project/controls/jdk-extra.edn`: java.xml cut from
+  SAXParseException to three files, their forms byte for byte jdk/javac's; `:classes`; seven controls); the program
+  `test/programs-pending/xml` (DOM and SAX by JAXP's default factories) waits for the day's build before it joins
+  `test/programs/`. Measured: the cut from `javax.xml.namespace.QName` alone keeps 1,493 of java.xml's 1,855 files
+  (JAXP's FactoryFinder, jdk.xml.internal's security and catalog code reach most of Xerces and Xalan), where the
+  JDK's runs load 171 java.xml classes for SAX and 97 for StAX: hence `:classes` for a measured set.
+  Clojure's suite takes java.xml this way (round 53 (1), 2026-11-17, write-ahead): `test/clojure/jdk-extra/java-xml.edn`,
+  a plan of `:jdk-extra` alone (no `:modules`: the suite's Java is its committed fixtures' forms), `:classes`
+  `java-xml-classes.txt` (javac's tool world's 221 java.xml files, `overlay/jdk/javac/closure.txt`, and StAX's stream reader's 25:
+  246), the tool world's two variants, no `:outside`; `bin/clojure-tests` reads it for `--aot`'s program when it compiles a
+  namespace of `test/clojure/jdk-extra/namespaces.txt` (clojure-xml, reflect) and for the eval level's extended test executable
+  (`--jdk-extra-build`, `CLOJURE_TESTS_GO_EXTRA`); the test build, `bin/arbace-go` and `bin/lib` unchanged, so `gate_key` too.
 - **The commands.** `bin/java-project plan|sources|classes|read MODEL WORK` (MODEL a program's
   directory or a plan file holding the same map; `--root`, `--repository`, `--only M,...`, `--check
   front|nread`: each module also read from the native trees, the forms equal to javac's trees' as
@@ -515,6 +603,9 @@ data, `:java`:
   the modules' resources merged, stays for reading).
   `java.class.path` is then the modules' directories' names in that order (`001-util:002-app`; names only, GH4 (iii),
   ghidra-gh4iii, J2G-SPEC §10.3 "The class path's entries by name"), also for `resources/`'s directories.
+  Since A17 (2026-11-17, the Ghidra case study's G2 plan) each module's entry also lists its classes: `--entry-classes
+  NNN-MODULE=WORK/forms/MODULE` for each `resources.jars` directory, so that `getResources` of a package and an entry's
+  `JarFile` list them names only (J2G-SPEC §10.3, "Package listings"; fixture `test/programs/scan`).
 - **A dependency's variants** (`:patches`, 2026-11-11, ghidra-g1b; GH8 (iii) for third-party sources): an
   artifact module's `:patches`, unified diffs applied in order (`patch -p1`) over its unpacked sources jar
   before the closure, each in the module's sources key and listed with its digest and the files it changes

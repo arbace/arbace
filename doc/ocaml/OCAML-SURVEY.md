@@ -3398,6 +3398,52 @@ all (a), as recommended there:
 - **OC222 (a)** (scoring) the tests ocamltest itself skips on the reference's configuration (tsan, frame pointers, flambda, Windows,
   macOS, POWER, other arches' debugger tests: 33 programs a level) `:na`, out of both denominators; the tool tests and compiler-output
   stay by design.
+- **OC224 (b)** (taken overnight, round 52, as recommended) `b=1` taken by header.awk with OC217's backtraces, one change (OC217's
+  first stage, below).
+- **OC225 (a)** (taken overnight, round 52) OC217's first stage puts only the after-events a backtrace reads (applications, the
+  primitives Translprim's primitive_needs_event_after names, method calls, let-operators, a raise's argument); the before-events,
+  the function events and Translmod's pseudo-events (the debugger's) wait for a consumer.
+- **OC226 (a)** (taken overnight, round 52) the native library stays compiled without -g in the first stage: with -g every program's
+  library Lambda changes (an event at each call site of the stdlib), which a whole record must prove; it is the second stage.
+- **OC227 (a)** (taken overnight, round 52) the AOT levels keep -g dropped and `b=` classed (`:runtime-parameters`) until o2j has a
+  backtrace of its own (OC217's (b) part).
+- **OC228 (a)** (taken overnight, round 52, as recommended) callstack, event_after_prim, methods and names judged by their own verdict
+  at both levels: their own-verdict exceptions (whose premise, per-backend references, the tarball does not bear out: one `.reference`
+  each, which the host's `ocamlc -g` and `ocamlopt -g` print byte for byte) dropped and their four rows of ref-ocaml55.edn recorded
+  again (`bin/oi record-ref --only-list`; the old ocamlc rows were runs without -g). (b) keep the exceptions and re-record the rows
+  alone: rejected, the exceptions would be stale (`bin/oi own-verdicts --check` fails). (c) keep both as they were: rejected, oi's
+  lines, equal to ocamlc -g's, would stay judged against a run without debug information.
+- **OC229 (a)** (taken overnight, round 52, as recommended) OC220's first part, Dynlink's init info at oi's level: the library is the
+  tarball's dynlink_types, dynlink_platform_intf and dynlink_common with Arbace's own platform (test/ocaml/dynlink/dynlink.ml) in
+  byte/dynlink.ml's place, the main program's units oi's unit table (the external caml_oi_dynlink_units). (b) a stub Dynlink unit
+  answering the two lists alone: rejected, the state, the allowed units and error_message would be written twice and the loader's
+  part would start over. (c) a per-program generated unit list: rejected, a typer run a program.
+- **OC230 (a)** (taken overnight, round 52) a header that includes dynlink runs only when the rest of it runs (header.awk keeps the
+  include's class otherwise), so the plugin tests and the debugger's stay in their classes; the AOT levels keep the class until the
+  runtime has the unit table (OC220's next part).
+- **OC231 (a)** (taken overnight, round 52, as recommended) OC220's loader: a plugin is the file bin/oi writes where ocamlc writes the
+  unit's .cmo, a text header (`OI-CMO 1`, the interface imports, `lambda`) then the unit's Lambda as the native typer translated it, and
+  test/ocaml/dynlink/dynlink.ml's platform reads it, gives the Lambda to oi (parse, link, init, hide: four externals) and lets the
+  tarball's dynlink_common check it. (b) ocamlc's own .cmo format (a bytecode object with a reloc table): rejected, oi runs Lambda, not
+  bytecode, and the format would be written only to be read back. (c) the plugins linked into the main program at its start and
+  `loadfile` a lookup: rejected, the order, the domains' concurrent loads and Module_already_loaded would be pretended.
+- **OC232 (a)** (taken overnight, round 52, as recommended) an interface's digest is its file's (the .mli, or the signature as data a
+  unit without one leaves, NAME.cmi.ae) SHA-256 cut to 128 bits, written by the typer's `--imports-out` with every unit the
+  compilation read (Env.imports); the main program's table their union (OI_DYNLINK_IMPORTS). (b) every interface by its name (None):
+  rejected, check_interface_imports would never compare. (c) ocamlc's CRC of the .cmi's signature: rejected for now, the native .cmi
+  is not ocamlc's; two equal source interfaces have equal digests, as ocamlc's do.
+- **OC233 (a)** (taken overnight, round 52, as recommended) OC218's heap model: a simulated minor heap of minor_heap_size words
+  filled by the counted allocations, emptied by the overflowing one and by the asked collections; a tracked value's promotion or
+  death judged by Go's collection through a weak pointer (live: referenced from oi's roots). (b) every tracked value promoted at a
+  minor collection (no reachability): rejected, custom's and arrays_in_minor's ratios and dealloc_minor would be pretended. (c) a
+  heap of OCaml blocks in oi (an age and a remembered set on every block): rejected for now, every allocation would pay it, against
+  OC218's 3% rule.
+- **OC234 (a)** (taken overnight, round 52, as recommended) a sampled allocation's callback runs at the allocation, as the bytecode
+  runtime's, its consequences queued and run after it, never nested. (b) 331's poll point: rejected, a callback that stops or
+  restarts a profile would see the allocations made before the next poll under the old state.
+- **OC235 (a)** (taken overnight, round 52, as recommended) a profile is its domain's, inherited by the domains it spawns, and a
+  second start replaces it (memprof.c's); stopped profiles keep their tracked values' callbacks until discard. (b) one global
+  profile: rejected, restart's two domains and start_stop's double start fail.
 Order (the plan's): OC213, OC214 (S1) with OC209 and OC210 first (branch `ocaml-s1`), then OC215, OC216, OC217, OC218 then OC219,
 OC220 and OC221; OC222 with the scoring's next change.
 
@@ -3904,3 +3950,232 @@ taken as (a): oi listed now, built in the same re-seed window as the rest of the
   `arbace/go/table.ae`, the checker; 3.5 to 18 minutes by the host's load and up to 4 GB, most of it the table's classification of std) once the re-seed carries oi; (b)
   by hand only, the go-build step tells a broken listing anyway (after 8 minutes). *Recommended: (a)*, the checker's errors in a tamago
   configuration show nowhere else while the box is parked.
+
+## As built: mode :full's layout of a file that is not UTF-8 (2026-11-17, round 52, branch `n-ocaml-defer`)
+
+The print cell's last deferred row, `:full-not-utf8` (OC214 (a)'s residue): re's `lib_test/expect/test_pcre.ml` holds the byte 0xFF in
+an `[%expect {| ... |}]` string, so the native layout (`native/layout-text`, ocdump's tokens_form) refused the file and mode `:full`
+could not print it back. The layout now decodes such a file with byte marks (`lex/marked-text`: each valid UTF-8 sequence its
+character, each other byte U+DC00+BYTE, OC214 (a)'s mark), the dump writer (`ast.ae`'s `escape`) and the forms writer (`convert.ae`'s
+`atom-text`) write a lone mark as `\uDCxx` (the pair halves of a character above U+FFFF are not marks, as in `text-bytes`), and
+`roundtrip --text`'s judge and `print --full` write and compare `print.ae`'s `text-bytes` of the text, byte for byte. A file that is
+valid UTF-8 is laid out as before. `layout-text` keeps the old refusal behind `{:encoding :reject}`. ocdump's tokens_form still
+refuses the file: the oracle tier's `native-check --layout` would differ on it, but its default corpora (samples, stdlib) hold no
+such file. Proof: `bin/repr-ocaml roundtrip --text --corpus opam-re`, 97 of 97 text equal (it was 96 plus the rejection; 61 s, peak RSS
+839 MB); `--corpus samples` 8 of 8; `--only-list` of `tool-toplevel/strings.ml` (the cuneiform surrogates) and `parsing/docstrings.ml`
+2 of 2; `--record-results --corpus opam-re` moved the row to pass; `test/ocaml/full-known.edn` is `{}` and the class was retired
+(`divergences-print.edn` `[]`). Print cell 3,081 / 0 / 1 to 3,082 / 0 / 0; completeness 0.8588 to 0.8589, meant 0.9077 to 0.9078. No key
+moves (`arbace/repr/ocaml` is a crop path).
+
+## As built: OC217's first stage, the debugging events and oi's backtrace stack (2026-11-17, round 52, branch `n-oc217`)
+
+OC217 (a) (the user, 2026-11-10: byte-exact backtraces) in its first stage: under -g the typer puts Lambda's after-events, oi keeps a
+backtrace stack over them, and Printexc's raw backtraces, slots and the runtime's uncaught-exception report print ocamlc's bytecode
+lines. Sources: OCaml 5.5.0's tarball, lambda/translcore.ml (event_after on Texp_apply, Texp_send, Texp_letop, assert_failed),
+lambda/translprim.ml (event_after, primitive_needs_event_after, lambda_primitive_needs_event_after, the Raise and Raise_with_backtrace
+cases of lambda_of_prim), lambda/simplif.ml, tmc.ml and value_rec_compiler.ml (their Levent cases), bytecomp/bytegen.ml (Lev_after:
+dropped in tail position, the nearest event kept; APPLY1-3 and PUSH_RETADDR), runtime/interp.c (RAISE, RERAISE, RAISE_NOTRACE, the C
+raise path), runtime/backtrace_byt.c (caml_stash_backtrace, get_callstack, caml_add_debug_info's ev_info, caml_debuginfo_location),
+runtime/backtrace.c (caml_print_exception_backtrace, print_location, caml_convert_debuginfo, caml_restore_raw_backtrace),
+runtime/printexc.c (default_fatal_uncaught_exception), stdlib/printexc.ml (backtrace_slot, format_backtrace_slot).
+
+**The typer** (`arbace/repr/ocaml/typer/translcore.ae`, `--debug`, from a header's `-g`: `bin/oi`'s oi_dump and o2j_dump_file,
+`suite.bash`'s native dump). `*debug*` puts `[:Levent lam ev]`, ev the location as caml_add_debug_info reads it (start line and
+character, the end's offset from the start's line, end line and character), the file, and the scopes' name
+(Scoped_location.string_of_scopes, the `%loc_FUNCTION` scopes the port already had). The dump's form is `(event L [:after DEF FILE
+L1 C1 EOFF L2 C2])` (SPEC §11.2's `(event L)` with its information vector; ocdump's events carry none and oi runs them as before).
+Simplif's traversals, Tmc's choice, Value_rec_compiler's size and split, and transl_apply's `Levent(Lsend ...)` take the node. Without
+-g nothing changes (typer-check's samples have no -g).
+
+**oi** (`go/arbace/oi/exn.ae`, `compile.ae`, `run.ae`, `ext_sys.ae`). An event's slot (`btSlot`, registered in `btSlots`: its index is
+the raw backtrace's entry) is entered on the thread's stack when its application is called (after its arguments and function, before
+them for four arguments or more), around its primitive's operation, or around its expression; in tail position, or nested in another
+event, it is dropped as bytegen drops it. A raise's slot is the innermost event of its argument (the one at the RAISE's pc, marked a
+raise: so a call in a raise's argument prints "Re-raised" if its callee raises, as the bytecode's), none for a compiler-inserted raise
+(skipped when printed); a primitive's raise starts with the primitive's slot ("Raised by primitive operation"). The handler (`runTry`)
+stashes the raise's slot and the slots above its own depth (a reraise of the last exception appends, at most 1024), then cuts the stack
+back; the uncaught exception stashes all of it. OCAMLRUNPARAM's b (`btInit`, header.awk at oi's level) starts the recording.
+`caml_get_exception_raw_backtrace`, `caml_get_exception_backtrace`, `caml_get_current_callstack`, `caml_restore_raw_backtrace`,
+`caml_convert_raw_backtrace(_slot)` read the slots; the runtime's own report without Printexc (default_fatal_uncaught_exception) runs
+at_exit with the recording off and prints the lines as caml_print_exception_backtrace does. A program with no event (no -g) has no
+debug information and behaves as before.
+
+**Results (light).** `bin/oi check --record --only-list test/ocaml/oc217.txt` (the 24 programs of `:runtime-parameters` and
+`:backtraces`, native path, two jobs, 3 min 21 s): 14 pass by their own verdict (backtrace, backtrace3, backtrace_bounds_exn,
+backtrace_c_exn, backtrace_deprecated, backtrace_or_exception, backtrace_slots, backtraces_and_finalizers, inline_test,
+inline_traversal_test, pr6920_why_at, pr6920_why_swallow, print_location, raw_backtrace), 10 in `:backtraces`: the four known before
+(callstack, event_after_prim, methods, names) and six pinned in `oi-known.edn` (backtrace2, backtrace_systhreads,
+lib-threads/uncaught_exception_handler: the native library's frames, its units without -g; backtrace_domain_join: a domain's
+backtrace through Domain.join; backtrace_effects, effects/backtrace: a fiber's frames). header.awk also skips
+`compiler_directory_suffix` (inline_test's native -O3 block, not the bytecode run). The record's 24 rows alone were rewritten. The
+negative control `_control/why-at-vs-why-swallow` (pr6920_why_at's run against pr6920_why_swallow's reference) differs, as it must.
+Eval 495 / 75 / 71 to 509 / 75 / 57 (`:runtime-parameters` 19 to 0 at oi's level, `:backtraces` 4 to 10, `:c-runtime-decided` 11 to
+10); completeness 0.8589 to 0.8643, meant 0.9078 to 0.9140. Checks: `bin/oi test` (go vet, go test), `repl-check --native`, the first
+nine programs of the essential list, `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`.
+Memory: oi's build 0.46 GB, the native library's rebuild (the typer's key moved) 1.22 GB peak, each check run 1.18 GB peak (the
+typer on stage 0 under GOMEMLIMIT=900MiB, a program about 0.94 GB): over the night's 1 GiB by a fifth, single processes.
+
+**What remains of OC217** (about 4-6 days): (2) the native library with -g (OC226: `stdlib-build --debug`, a whole record), which
+gives backtrace2's, the threads' and Stdlib.failwith's frames; with it the frames of calls without an event as "unknown location"
+where a bytecode stack has them; (3) the backtrace per domain and across fibers (Domain.join's, effects' continuations,
+get_continuation_callstack); (4) the before-events (no backtrace program reads them: OC228's stage found no placement left to fix);
+(5) the AOT levels (o2j's shadow stack for -g programs, the plain references of the two flambda-referenced tests).
+
+## As built: OC217's third stage, the four programs of the finer placement (2026-11-17, round 52, branch `n-oc217b`)
+
+The four `:backtraces` programs left by the first stage for "the finer placement" (callstack, event_after_prim, methods, names) were
+compared line by line with their `.reference` (OCaml 5.5.0's tarball, testsuite/tests/backtrace/). oi's lines already equal it for
+event_after_prim (the event after `Array.make`'s C call, Translprim's primitive_needs_event_after), methods (`bar#bang`, `foo#go`,
+`object#meth`: Translclass's enter_method_definition scopes) and names (the 28 frames: nested modules `Mod1.Nested.apply`, a local
+module `local_module.N.foo`, the functor `Functor.fn`, the recursive modules `Rec1.fn` and `Rec2.fn`, the operator `(+@+)`,
+`nested.(fun)` against `flat`, classes and immediate objects), byte for byte: nothing in the typer's Translcore events nor oi's stack
+places them differently. They failed against ocamlc's recorded runs, which test/ocaml/ref-ocaml55.edn kept from a run without -g (79,
+116, 783 and 452 bytes of "Called from unknown location"); the host's `ocamlc -g` and `ocamlopt -g` print the `.reference` for all
+four. OC228 (a): their rows recorded again (`bin/oi record-ref --only-list`, ocamlc and ocamlopt now equal the `.reference`) and their
+exceptions of test/ocaml/own-verdict.edn dropped (both levels), so they are judged by their own verdict. callstack differs by its last
+line alone, `Called from Thread.create.(fun) in file "thread.ml", line 48`: the new thread's frame in the threads library, compiled
+without -g (OC226, the second stage); its pin's reason says so.
+
+**Results (light).** `bin/oi check --record --only-list` on the four (1 min 21 s), then on test/ocaml/oc217.txt's 24 (3 min 2 s, two
+jobs, the typer under GOMEMLIMIT=700MiB: peak 0.96 GB): 17 pass by their own verdict (event_after_prim, methods, names newly), 7 in
+`:backtraces`; check-oi-native.edn's four rows moved and no other. oi-known.edn: three pins gone, callstack's reworded;
+aot-known.edn and aot-compiled-known.edn pin methods (the AOT light level prints no backtrace, OC227; its record's row still says
+pass, judged against the old 0-byte ocamlopt row, until the AOT level runs again). `:backtraces` 10 to 7; eval 509 / 75 / 57 to 512 /
+75 / 54; completeness 0.8643 to 0.8655, meant 0.9140 to 0.9153. Checks: `bin/oi own-verdicts --check` (no disagreement, no stale
+exception), `bin/oi divergences` (pins attested), the negative control `_control/why-at-vs-why-swallow` differs, `bin/reap --record`,
+`bin/crops-score --record` and `--judge --strict`, `bin/records-check`. The oracle path's check-oi.edn (ocdump, whose events carry no
+information) and the rollup were not run again. No code changed.
+
+## As built: OC220's first part, Dynlink's init info at oi's level (2026-11-18, round 52, branch `n-oc220`)
+
+OC229 (a), OC230 (a). `lib-dynlink-init-info/test` (#9338: `Dynlink.main_program_units` and `all_units` hold "Dynlink" before any
+load) passes at oi by its own verdict.
+
+- **The library.** `bin/oi stdlib`'s libs_native builds `DYNLIB` (`.tmp/oi/dynlib`) from the pinned tarball's otherlibs/dynlink:
+  dynlink_types, dynlink_platform_intf (its `.mli` its `.ml`, as the Makefile makes it), dynlink_common, and dynlink.ml from
+  test/ocaml/dynlink/ against the tarball's dynlink.mli. The platform `Oi` follows byte/dynlink.ml's shape: `fold_initial_units` gives
+  each unit of the program an implementation `Loaded` (no interface CRC), `unsafe_get_global_value` a unit's module block
+  (caml_oi_dynlink_global), `load` opens the file as the bytecode one does and then raises `Cannot_open_dynamic_library (Failure ...)`.
+  The sources are in stdlib_key and native_key.
+- **oi.** `Program.Units`: the units `Link` took, in link order (as the bytecode executable's global map holds them); the externals
+  `caml_oi_dynlink_units` and `caml_oi_dynlink_global` (go/arbace/oi/ext.ae).
+- **header.awk.** `include dynlink` at oi's level adds the library; `cls` keeps "include dynlink" as the class of a header that
+  includes it, so the other rows keep `:dynlink-decided` (and tool-debugger/dynlink `:dynlink`); the AOT levels keep the class.
+
+**Results (light).** `bin/oi check --record --only-list` on the row (the typer under GOMEMLIMIT=700MiB, peak 0.94 GB): pass;
+check-oi-native.edn's one row moved. OCaml eval 521 / 75 / 45 to 522 / 75 / 44; completeness 87, meant 92. `bin/reap --record`,
+`bin/crops-score --record` and `--judge --strict` 0 problems; `bin/oi own-verdicts --check` 0 differing; the negative control
+`_control/norm3-vs-norm2` differs (a run of the row with norm3 and norm2, not recorded). `bin/oi divergences` fails only on 331's pins, not
+attested (expected).
+The stdlib was rebuilt here under 700 MiB: compiler-libs' parser timed out at that limit (OI_LIB_TIMEOUT), which no row of this change
+reads; the main host's rebuild at the default limits builds it.
+
+**The other four rows** (OC220's rest; each needs the loader: a plugin the test's ocamlc steps build typed into Lambda units by
+header.awk's helper mode, `load` handing oi those units' headers and `run` compiling and initialising them, as Translmod's units are):
+
+| row | what it needs beyond the loader | cost |
+|---|---|---|
+| lib-dynlink-pr4229/main | the bytecode branch only: client.cmo, sub/abstract.cmo; `Module_already_loaded "Abstract"`, exit 2: dynlink_common's checks, with the units' interface imports in `Unit_header` | the loader, about a day; then the cheapest |
+| lib-dynlink-domains/main | 20 plugin .cmo loaded from domains at once (Domain.spawn, dynlink's lock), the native branch .cmxs | +hours after the loader |
+| lib-dynlink-bytecode/main | ocamlmklib, the plugins' C stubs on ci (oicapi), `.cma` loading, `loadfile_private`, Marshal's Closures of plugin code, the `-linkall` and `-custom` variants | about a day more |
+| backtrace/backtrace_dynlink | native only (ocamlopt, .cmxs): the compiled level's registry, and its reference prints `Dynlink.Native.run` frames: OC217 (b)'s backtraces at the AOT level | several days, last |
+
+At the AOT levels the five rows need the runtime's unit table first (jdk/ocaml's runtime: the program's units, the two externals, the
+library in `o2j clib`), about two hours and a runtime build, then lib-dynlink-init-info passes there too.
+
+
+## As built: OC220's loader, plugins on oi (2026-11-18, round 52, branch `n-oc220b`)
+
+OC231 (a), OC232 (a). `lib-dynlink-pr4229/main` (client.cmo prints `Abstract 10`, sub/abstract.cmo raises
+`Module_already_loaded "Abstract"`, exit 2) and `lib-dynlink-domains/main` (20 plugins loaded from 12 domains, each other's
+implementations imported, the stored set printed) pass at oi by their own verdicts.
+
+- **header.awk's dynlink mode.** A header at oi's level that includes dynlink and whose bytecode alternative builds
+  (setup-ocamlc.byte-build-env): `cwd = DIR; cd` move the current directory, `module = FILE; ocamlc.byte` a unit compiled there, one
+  link (`module = ""`, `all_modules = "A.cmo ... MAIN.cmo"`, its last unit the test's own, libraries "" or "dynlink") the main program,
+  then one run; `native-dynlink` or the ocamlopt build environment ends the alternative. The run's environment `@dyn=` (the units in
+  order), `@dynmain=`, `@dyncopy=` (readonly files, subdirectories). Anything else keeps the class `include dynlink`; the AOT levels
+  keep it.
+- **bin/oi's oi_dynlink.** The files copied, each .ml typed in its directory (`--include` it and the libraries; `--intf` when its .mli
+  is there, else `--cmi-out`; `--imports-out`), its .cmo written (`OI-CMO 1`, `import NAME DIGEST` lines, `lambda`, the Lambda); the
+  main program's units' imports into `dynlink.imports` (`OI_DYNLINK_IMPORTS`), their Lambda before the test's own on oi's command line.
+  The native path alone (the oracle's path refuses the row).
+- **The typer.** `lambda --imports-out FILE`: the unit's own interface first, then each unit find-unit read
+  (`arbace.repr.ocaml.typer.env/imported-units`), with its file's digest (OC232 (a)).
+- **The platform** (test/ocaml/dynlink/dynlink.ml). `fold_initial_units` the program's units and the imports table's interfaces;
+  `load` reads the header (anything else `Not_a_bytecode_file`), `caml_oi_dynlink_parse` the Lambda (the unit's name, its required
+  units and the globals its code names: the implementation imports); `run` links under dynlink's lock (`caml_oi_dynlink_link`: a
+  global no unit defines `Undefined_global "compilation unit `X'"`, one not initialised `Uninitialized_global`; then
+  Program.Compile) and initialises outside it on the calling thread (`caml_oi_dynlink_init`), an exception
+  `Library's_module_initializers_failed`; `finish` hides a private load's units (`caml_oi_dynlink_hide`). A plugin is never
+  `Unsafe_file`: the unit's own externals (cu_primitives) are not known from its Lambda.
+
+**Results (light).** `bin/oi check --record --only-list` on the two rows (the typer under OI_TYPER_GOMEMLIMIT=700MiB, the check's
+peak 0.97 GB): pass; check-oi-native.edn's two rows moved; lib-dynlink-init-info/test still passes. OCaml eval 522 / 75 / 44 to 524 / 75 / 42; completeness 87, meant 92. `bin/reap --record`,
+`bin/crops-score --record` and `--judge --strict` 0 problems; `bin/records-check` 0; `bin/oi own-verdicts --check` 0 differing; the
+negative control `_control/norm3-vs-norm2` differs (a run of norm3 and norm2, not recorded); `bin/oi divergences` fails only on 331's
+pins, not attested (expected). The native library rebuilt here
+under 700 MiB (its key holds dynlink.ml and the typer's forms): the stdlib-build process peaked at 1.19 GB, over the night's 1 GiB.
+
+**The rest of OC220**: lib-dynlink-bytecode/main (ocamlmklib, the plugins' C stubs, `.cma` loading, `loadfile_private`, Marshal's
+closures of plugin code, `-linkall`, `-custom`) and backtrace/backtrace_dynlink (native only), as "As built: OC220's first part"
+costs them; the AOT levels after the runtime's unit table.
+
+## As built: OC218's heap model, the simulated minor heap at oi's level (2026-11-18, round 52, branch `n-oc218`)
+
+OC233 (a), OC234 (a), OC235 (a). On 331's first part (Gc's word counters, Memprof's sampling): the smallest model that makes Memprof's
+promote and dealloc callbacks OCaml's, at oi's level (go/arbace/oi/ext_sys.ae, "OC218 (a)'s heap model").
+
+**The design.**
+
+- **A simulated minor heap of `minor_heap_size` words** (Gc.control's first field, 256k by default; `Gc.set` with another size
+  empties it, as caml_set_minor_heap_wsz collects). Every counted minor allocation (331's: wosize plus header, at most
+  Max_young_wosize, 256) fills it (`minorUsed`); the one that would overflow it empties it first: a minor collection, before the
+  block is made, as caml_alloc_small_dispatch collects before it allocates. The asked collections (Gc.minor, major, full_major,
+  compact) are minor collections too. Nothing else is simulated: no block knows its heap, no remembered set, no promoted words.
+- **Reachability is Go's.** oi's values are Go's, so a tracked value lives after a collection when a weak pointer of Go's to it
+  (weakOf, OC216 (a)'s weak keys) survives Go's collection (`runtime.GC`). 331's counters assumed nothing about liveness; the model
+  uses the real one, not "all objects": a promotion is a value still referenced from oi's roots (its stacks, globals and the
+  values they reach), which is OCaml's up to the slots oi keeps longer than the bytecode's stack (331's let-slot clearing narrows
+  that). Go's collection runs only when a minor collection has tracked minor values (or the asked collections, which ran it
+  already): a program without a profile pays the counters alone.
+- **Tracked values** (`memprofEntry`): an allocation callback's `Some d` tracks the value with d, in the minor table (alloc_minor)
+  or the major one (alloc_major). A minor collection takes the minor table whole: a value alive is promoted (its `promote`
+  callback; `Some d'` keeps it in the major table with d', None or an exception stops tracking it), a dead one gets
+  `dealloc_minor`. A major collection (Gc.major, full_major, compact; minor first) gives each dead major value `dealloc_major`.
+  OCaml's own major slices are not simulated: a major value's death is seen at the next asked major collection (the tests ask).
+  A value without an identity (a boxed float of arithmetic, nil to allocV) is taken as dead at the next minor collection.
+- **Callbacks at the allocation** (OC234 (a)): a sampled allocation's callback runs as the allocation returns (allocV), as the
+  bytecode runtime runs it, not at the next poll point (331's queue): a callback that stops, discards or restarts a profile then
+  sees each following allocation under the new state (start_stop, discard_in_callback, stop_start_in_callback's bytecode counts).
+  Callbacks never nest: those a callback causes (an asked collection inside it, a minor collection its allocations make) are
+  queued on the thread (Thread.mpQ) and run in order after it; an exception drops the queued allocation callbacks (their
+  allocations are never made in OCaml) and keeps the promotions and deallocations for the next poll point (tick).
+- **Profiles** (OC235 (a)): `start` returns a profile (memprofProfile in the Custom's V: tracker, rate, status sampling, stopped,
+  discarded), its domain's (Domain.mp), shared by the domain's threads and by the domains spawned while it is the spawner's
+  (spawnProf, as spawnMask). A start where one samples replaces it in this domain (it samples on elsewhere): memprof.c's, no
+  failure; `stop` stops the domain's; a stopped profile's values keep their promote and dealloc callbacks until `discard`, which
+  fails on a sampling profile ("profile not stopped") and on a discarded one ("already discarded"), memprof.c's messages, and
+  forgets its values.
+- **The words counted** grow by the array literals (makearray), duparray and duprecord, which the bytecode allocates with
+  MAKEBLOCK and caml_obj_dup: minor_heap_edge's 50-word arrays were not counted, so never sampled.
+
+**Results (light).** `bin/oi check --record --only-list` on 18 rows (the class's statmemprof rows, 331's passes as the
+regression set, misc/gcwords, lib-sys/opaque, lib-obj/with_tag, regression/pr7798) and the control pair norm3/norm2: 15 pass, 0
+failing; new passes statmemprof/arrays_in_minor, arrays_in_major, minor_heap_edge, restart and start_stop (+5 at eval, check-oi-native.edn's
+rows moved); 331's passes (alloc_counts, exception_callback, exception_callback_minor, lists_in_minor, gcwords, opaque, with_tag,
+pr7798) still pass. statmemprof/intern now reaches its distribution checks and fails there: Marshal's intern allocations are not
+counted (source Marshal), re-pinned to that failure. custom (bigarrays' custom blocks, source Custom) stays in the class. The suite's
+rows by `bin/oi suite check --record --only-list` (discard_in_callback, stop_start_in_callback, exception_comballoc,
+blocking_in_callback, thread_exit_in_callback): the first three pass (+3 in the suite, check-suite-oi-native.edn), blocking_in_callback
+still passes, thread_exit_in_callback stays in the class; the stale pins of the eight (oi-known.edn) dropped. The control differs. Peak
+RSS: the typer 0.97 GB, an oi run 0.98 GB (arrays_in_minor's million-slot root array), under the night's 1 GiB with
+`OI_TYPER_GOMEMLIMIT=700MiB`; minor_heap_edge runs in about 120 s at oi (its callbacks' 5 million interpreted loop turns, not the
+model: about 5,000 Go collections of a small heap).
+
+**Left in the class, and their costs.** Marshal's and custom blocks' sources (intern, custom, comballoc's: intern.c's and
+custom.c's allocations through allocV with their source, about half a day); the callstack (OC217's backtraces);
+thread_exit_in_callback and moved_while_blocking (a thread's queue at its exit, a callback across a blocking section: a day);
+`Obj.is_shared` and lazy/minor_major_force (`:obj-representation`: a block's age, which the model gives only to tracked values;
+an epoch field on every Block, its cost to measure first under OC218's 3% rule); Gc.stat's promoted_words (the promoted values'
+words, exact only for tracked values: left at 0); the AOT levels (the runtime's ThreadLocal queue, the same model in Java: a day).

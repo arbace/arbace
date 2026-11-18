@@ -75,6 +75,10 @@
       (fmt/Fprintf stderr "oi: link: %v\n" err)
       (return StatusInternal))
 
+    ;; oi's unit table (OC220 (a)): the main program's units, as the bytecode executable's global map holds them
+    (range [_ u units]
+      (set! (.-Units p) (append (.-Units p) (.-Name u))))
+
     (let [codes (make (slice (* Code)) (len units))]
       (range [i u units]
         (let [(values c err) (.Compile p u)]
@@ -89,6 +93,8 @@
         ;; Runtime_events (OC219 (a)): the environment read at the start, the ring's file removed at the end
         (reInit)
         (defer (reDestroy))
+        ;; OCAMLRUNPARAM's b (OC217 (a))
+        (btInit)
         (.runInits p th units codes stderr)))))
 
 
@@ -125,6 +131,9 @@
               (set! @status (.-Code x))
               (fmt/Fprintf stderr "%s\n" (.-Msg x)))
             (case [(* Exn)]
+              ;; caml_fatal_uncaught_exception after the raise's stash: every slot in flight (OC217 (a))
+              (.stash th x 0)
+              (.unwind th 0)
               (set! @status (fatalUncaught th (.-V x) stderr)))
             (case [(* InternalError)]
               (set! @status StatusInternal)
@@ -186,15 +195,26 @@
     (.Apply th h exn 0)
     (return 2))
 
-  ^{:go/breaks [5]} (let [msg (FormatException exn)]
+  ^{:go/breaks [5]} (let [msg (FormatException exn)
+      active backtraceActive]
+    ;; printexc.c's default_fatal_uncaught_exception: at_exit with the backtraces off, the backtrace kept
+    (set! backtraceActive false)
     (when [(values f ok) (NamedValue "Pervasives.do_at_exit")] ok
-      (^{:go/end 191} (fn []
-          (defer (^{:go/end 189} (fn [] (recover))))
-          (.Apply th f Unit))))
+      (let [buf (append (conv (slice int) nil) (spread (.-btBuf th)))]
+        (^{:go/end 191} (fn []
+            (defer (^{:go/end 189} (fn [] (recover))))
+            (.Apply th f Unit)))
+        (set! (.-btBuf th) buf)))
+    (set! backtraceActive active)
 
 
     (when (== stderr nil)
       (set! stderr os/Stderr))
 
     (fmt/Fprintf stderr "Fatal error: exception %s\n" msg)
+    ;; caml_print_exception_backtrace (OC217 (a))
+    (when (and backtraceActive debugInfo)
+      (range [i e (.-btBuf th)]
+        (when [(values line ok) (btLine e i)] ok
+          (fmt/Fprintf stderr "%s\n" line))))
     2))

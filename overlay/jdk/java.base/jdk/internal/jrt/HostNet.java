@@ -128,6 +128,12 @@ public final class HostNet {
     /** Shuts down connection h for reading (SHUT_RD) or writing (SHUT_WR): 0 or an error kind. */
     public static native int shutdown0(int h, int how, String[] error);
 
+    /**
+     * Sends data's low byte as TCP urgent data on connection h (Socket.sendUrgentData: send(2) with MSG_OOB, as
+     * NioSocketImpl's Net.sendOOB): 0 or an error kind (UNSUPPORTED on a host that sends none, and under TLS).
+     */
+    public static native int sendUrgent0(int h, int data, String[] error);
+
     /** The local (or the remote) address of handle h, 4 or 16 bytes. */
     public static native byte[] address0(int h, boolean local);
 

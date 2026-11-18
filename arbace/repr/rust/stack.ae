@@ -1,0 +1,40 @@
+;; Arbace's own code (no code taken): the idea of rustc 1.99.1's compiler/rustc_data_structures/src/stack.rs
+;; (ensure_sufficient_stack over the stacker crate's maybe_grow), the mechanism a thread of the tools' host.
+
+(ns arbace.repr.rust.stack
+  "rustc's ensure_sufficient_stack for repr/rust's evaluated code (doc/rust/RUST-NOTES.md, \"RCD1\"):
+  rustc wraps its deep recursions (the parser's else-if chains and types, the AST's walks) in
+  ensure_sufficient_stack, which runs the closure on a fresh stack segment when less than a red zone
+  is left. The tools' host evaluates repr/rust, and its evaluator stops at about 10,000 nested
+  evaluated calls on a thread (Compiler's Evaluator/MAX_DEPTH, J2G-SPEC §10.5: Go's stack overflow
+  is fatal, so the evaluator counts). A thread starts at depth 0 with a goroutine stack of its own:
+  ensure-sufficient-stack runs its body on a new thread, the caller's dynamic bindings conveyed,
+  when the caller's depth is past red-zone, and gives back its value or throws its throwable (the
+  same object: the parser's identical? checks hold). Below the red zone it is one field read.")
+
+(set! *warn-on-reflection* true)
+
+;; the evaluated depth past which the body runs on a new thread: each wrapped recursion must not go
+;; more than MAX_DEPTH - red-zone (3,000) evaluated calls deeper before its next wrapped call
+(def ^:const red-zone 7000)
+
+(defn grow
+  "f's value, f called on a new thread with this thread's bindings (stacker::grow)"
+  [f]
+  (let [f (bound-fn* f)
+        res (object-array 2)
+        t (Thread. ^Runnable (fn []
+                               (try (aset res 0 (f))
+                                    (catch Throwable e (aset res 1 e)))))]
+    (.start t)
+    (.join t)
+    (if-let [e (aget res 1)]
+      (throw ^Throwable e)
+      (aget res 0))))
+
+(defmacro ensure-sufficient-stack
+  "body's value, evaluated here, or on a new thread when this thread's evaluated depth is past red-zone"
+  [& body]
+  `(if (< (.-depth (arbace.lang.Compiler$Evaluator/state)) red-zone)
+     (do ~@body)
+     (grow (fn [] ~@body))))

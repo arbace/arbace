@@ -4,7 +4,11 @@
 
 
 
-(go/type Exn "Exn is an OCaml exception in flight: a Go panic with *Exn (survey §6.2.5: raise is a panic,\ntry a recover; the depth of the raising thread is restored by the handler).\n" (struct ^Value V))
+(go/type Exn "Exn is an OCaml exception in flight: a Go panic with *Exn (survey §6.2.5: raise is a panic,\ntry a recover; the depth of the raising thread is restored by the handler). At is the raise's debugging event (the\nslot of its RAISE, OC217 (a)), nil when the runtime raised it (a primitive); Re a reraise, NoTrace raise_notrace.\n" (struct
+    ^Value V
+    ^{:tag (* btSlot)} At
+    ^bool Re
+    ^bool NoTrace))
 
 ^{:go/end 9} (go/method Error ^string [^{:tag (* Exn)} e] (+ "OCaml exception " (FormatException (.-V e))))
 
@@ -164,3 +168,140 @@
 
 ^{:go/end 167} (go/func isTupleSpread "isTupleSpread: printexc.c spreads the tuple argument of Match_failure and Assert_failure\n(caml_is_special_exception: those two and Undefined_recursive_module).\n" ^bool [^Value ctor]
   (or (== ctor (conv Value ExnMatchFailure)) (== ctor (conv Value ExnAssertFailure)) (== ctor (conv Value ExnUndefinedRecursiveModule))))
+
+
+;; Backtraces (OC217 (a); OCaml 5.5.0's runtime/backtrace_byt.c, backtrace.c and interp.c's RAISE, RERAISE and the C raise path,
+;; LGPL-2.1 with the linking exception, read for their behaviour, written anew). A bytecode backtrace is the pc of the raise, then the
+;; return addresses on the stack between the raise and its handler's trap frame (caml_stash_backtrace), each read through the debugging
+;; event at that pc (Lambda's after-events with -g: the typer's Translcore, `(event L [KIND DEF FILE L1 C1 EOFF L2 C2])`). oi keeps a
+;; thread's stack of the slots of the calls in flight that have an after-event (a call's slot pushed once its arguments are evaluated,
+;; before them for four arguments or more as bytegen's PUSH_RETADDR; a primitive's around its operation; a call in tail position has
+;; none, as bytegen drops the event to keep the tail call), popped on return and cut back by the handler (runTry), which stashes the
+;; backtrace from the exception's raise slot (At) and the slots above its own depth. A primitive's raise (At nil) starts with the slot
+;; of the primitive in flight ("Raised by primitive operation"), else with no location. The raw backtrace is the slots' indexes in
+;; btSlots; Printexc's conversion reads them. Divergences: calls without an event (the native library is compiled without -g so far)
+;; leave no frame, where a bytecode stack has an unknown location for them; a fiber's backtrace is its own thread's.
+
+(go/type btSlot "btSlot is one debugging event as a backtrace reads it (backtrace_byt.c's ev_info): its location and the scopes'
+name, raise when the instruction after it is a RAISE (the innermost event of a raise's argument), prim when it is a primitive's,
+valid unless it stands for a pc with no event.
+" (struct
+    ^int id
+    ^bool valid
+    ^bool raise
+    ^bool prim
+    ^string def
+    ^string file
+    ^int l1
+    ^int c1
+    ^int eoff
+    ^int l2
+    ^int c2))
+
+(go/var
+  [^{:tag (slice (* btSlot))} btSlots]
+  [^bool debugInfo]
+  [^{:tag (* btSlot)} btUnknownRaise]
+  [^{:tag (* btSlot)} btUnknownPrim])
+
+(go/func newBtSlot "newBtSlot registers a slot: its index is its raw backtrace entry.\n" ^{:tag (* btSlot)} [^{:tag (* btSlot)} sl]
+  (when (== btSlots nil)
+    (set! btSlots (lit (slice (* btSlot))
+                    (addr (lit btSlot :id 0 :raise true))
+                    (addr (lit btSlot :id 1))))
+    (set! btUnknownRaise (aget btSlots 0))
+    (set! btUnknownPrim (aget btSlots 1)))
+  (when (== sl nil)
+    (return nil))
+  (set! (.-id sl) (len btSlots))
+  (set! btSlots (append btSlots sl))
+  sl)
+
+(go/func btSlotOf "btSlotOf is the slot of an event's information vector [KIND DEF FILE L1 C1 EOFF L2 C2] (the native typer's),
+nil without one (an oracle's dump).
+" ^{:tag (* btSlot)} [^{:tag (slice any)} a]
+  (when (< (len a) 2)
+    (return nil))
+  (let [(values v ok) (assert SVec (aget a 1))]
+    (when (or (not ok) (< (len v) 8))
+      (return nil))
+    (set! debugInfo true)
+    (newBtSlot nil)
+    (newBtSlot (addr (lit btSlot :valid true :def (assert string (aget v 1)) :file (assert string (aget v 2))
+                     :l1 (assert int (aget v 3)) :c1 (assert int (aget v 4)) :eoff (assert int (aget v 5))
+                     :l2 (assert int (aget v 6)) :c2 (assert int (aget v 7)))))))
+
+(go/func btInit "btInit reads OCAMLRUNPARAM's b (startup_aux.c's init_backtrace): the backtraces recorded from the start.\n" []
+  (newBtSlot nil)
+  (when (> (runParam 98) 0)
+    (set! backtraceActive true)))
+
+(go/method btPush "btPush enters a call's or a primitive's slot.\n" [^{:tag (* Thread)} th ^{:tag (* btSlot)} sl]
+  (set! (.-bt th) (append (.-bt th) sl)))
+
+(go/method btPop "btPop leaves the slot entered last.\n" [^{:tag (* Thread)} th]
+  (set! (.-bt th) (subslice (.-bt th) _ (- (len (.-bt th)) 1))))
+
+(go/func sameExn "sameExn is caml_stash_backtrace's exn == backtrace_last_exn: the same block.\n" ^bool [^Value a ^Value b]
+  (let [(values x ok1) (assert (* Block) a)
+        (values y ok2) (assert (* Block) b)]
+    (and ok1 ok2 (== x y))))
+
+(go/method stash "stash is caml_stash_backtrace for the exception e caught by a handler whose stack of slots was base deep: the
+raise's slot, then the slots above base, the innermost first (a reraise of the last exception appends, at most 1024 entries).
+" [^{:tag (* Thread)} th ^{:tag (* Exn)} e ^int base]
+  (when (or (.-NoTrace e) (not backtraceActive) (not debugInfo))
+    (return))
+  (when (or (not (.-Re e)) (not (sameExn (.-V e) (.-btExn th))))
+    (set! (.-btBuf th) (subslice (.-btBuf th) _ 0))
+    (set! (.-btExn th) (.-V e)))
+  (let [st (.-bt th)
+        top (- (len st) 1)]
+    (when (> base (len st))
+      (set! base (len st)))
+    (let [add (fn [^{:tag (* btSlot)} sl]
+                (when (< (len (.-btBuf th)) 1024)
+                  (set! (.-btBuf th) (append (.-btBuf th) (.-id sl)))))]
+      (if (!= (.-At e) nil)
+        (add (.-At e))
+        (if (and (>= top base) (.-prim (aget st top)))
+          (do (add (aget st top))
+              (dec! top))
+          (add btUnknownPrim)))
+      (for [i top] (>= i base) (dec! i)
+        (add (aget st i))))))
+
+(go/method unwind "unwind cuts the stack of slots back to a handler's depth.\n" [^{:tag (* Thread)} th ^int base]
+  (when (< base (len (.-bt th)))
+    (set! (.-bt th) (subslice (.-bt th) _ base))))
+
+(go/func btConvert "btConvert is caml_convert_debuginfo: Printexc's Known_location {is_raise; filename; start_lnum; start_char;
+end_offset; end_lnum; end_char; is_inline; defname}, or Unknown_location {is_raise}.
+" ^Value [^Value entry]
+  (newBtSlot nil)
+  (let [i (AsInt entry)]
+    (when (or (< i 0) (>= i (len btSlots)))
+      (return (addr (lit Block :Tag 1 :F (lit (slice Value) (Bool false))))))
+    (let [sl (aget btSlots i)]
+      (when (not (.-valid sl))
+        (return (addr (lit Block :Tag 1 :F (lit (slice Value) (Bool (.-raise sl)))))))
+      (addr (lit Block :Tag 0 :F (lit (slice Value) (Bool (.-raise sl)) (Str (.-file sl)) (.-l1 sl) (.-c1 sl) (.-eoff sl)
+                                      (.-l2 sl) (.-c2 sl) (Bool false) (Str (.-def sl))))))))
+
+(go/func btLine "btLine is backtrace.c's print_location: the line of the entry at index i, false for a compiler-inserted raise.\n" [^int entry ^int i] :results [^string line ^bool ok]
+  (newBtSlot nil)
+  (let [^{:tag (* btSlot)} sl btUnknownPrim]
+    (when (and (>= entry 0) (< entry (len btSlots)))
+      (set! sl (aget btSlots entry)))
+    (when (and (not (.-valid sl)) (.-raise sl))
+      (return "" false))
+    (let [info "Called from"]
+      (if (.-raise sl)
+        (if (== i 0) (set! info "Raised at") (set! info "Re-raised at"))
+        (when (== i 0) (set! info "Raised by primitive operation at")))
+      (when (not (.-valid sl))
+        (return (+ info " unknown location") true))
+      (let [lines (fmt/Sprintf "line %d" (.-l1 sl))]
+        (when (!= (.-l1 sl) (.-l2 sl))
+          (set! lines (fmt/Sprintf "lines %d-%d" (.-l1 sl) (.-l2 sl))))
+        (return (fmt/Sprintf "%s %s in file \"%s\", %s, characters %d-%d" info (.-def sl) (.-file sl) lines (.-c1 sl) (.-c2 sl)) true)))))

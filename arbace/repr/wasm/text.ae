@@ -11,6 +11,7 @@
   label\", \"import after function\", ...)."
   (:require [arbace.repr.wasm.lex :as lex]
             [arbace.repr.wasm.ops :as ops]
+            [arbace.repr.wasm.binary :as bin]
             [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
@@ -44,7 +45,7 @@
   (when-not (= :num (:t x)) (malformed "unexpected token" x))
   (let [s (:s x) v (when-not (re-find #"^[+-]" s) (big-int s))]
     (when-not v (malformed "unexpected token" x))
-    (when (> (.bitLength ^BigInteger v) 64) (malformed "constant out of range" x))
+    (when (> (.bitLength ^BigInteger v) 64) (malformed "i64 constant out of range" x))
     (.longValue ^BigInteger v)))
 
 (defn- int-lit
@@ -100,7 +101,7 @@
    "local.get" :local "local.set" :local "local.tee" :local "global.get" :global "global.set" :global
    "table.get" :table "table.set" :table "table.grow" :table "table.size" :table "table.fill" :table
    "memory.size" :memory "memory.grow" :memory "memory.fill" :memory "ref.func" :func "br_on_null" :label "br_on_non_null" :label
-   "struct.new" :type "struct.new_default" :type "array.new" :type "array.new_default" :type "array.get" :type
+   "struct.new" :type "struct.new_default" :type "struct.new_desc" :type "struct.new_default_desc" :type "ref.get_desc" :type "array.new" :type "array.new_default" :type "array.get" :type
    "array.get_s" :type "array.get_u" :type "array.set" :type "array.fill" :type "data.drop" :data "elem.drop" :elem})
 
 (def ^:private idx2-space
@@ -109,15 +110,30 @@
    "array.new_data" [:type :data false] "array.new_elem" [:type :elem false] "array.init_data" [:type :data false]
    "array.init_elem" [:type :elem false] "memory.init" [:memory :data true] "table.init" [:table :elem true]})
 
+(defn atomic-size
+  "An atomic instruction's access size in bytes (threads, queue 326), or nil: memory.atomic.notify and wait32 4, wait64 8,
+  iN.atomic.loadK, storeK, rmwK K/8, else N/8."
+  [^String nm]
+  (cond
+    (= nm "memory.atomic.notify") 4
+    (= nm "memory.atomic.wait32") 4
+    (= nm "memory.atomic.wait64") 8
+    (re-find #"^i(32|64)\.atomic\." nm)
+    (if-let [[_ k] (re-find #"^i(?:32|64)\.atomic\.(?:load|store|rmw)(\d+)" nm)]
+      (quot (Long/parseLong k) 8)
+      (quot (Long/parseLong (subs nm 1 3)) 8))))
+
 (defn- natural-align
   "The natural alignment exponent of a load or store."
   ^long [^String nm]
+  (if-let [n (atomic-size nm)]
+    (Long/numberOfTrailingZeros (long n))
   (let [[_ a _ b] (re-find #"(?:load|store)(\d+)(x(\d+))?" nm)
         bits (cond b (* (Long/parseLong a) (Long/parseLong b))
                    a (Long/parseLong a)
                    (.startsWith nm "v128") 128
                    :else (Long/parseLong (subs nm 1 3)))]
-    (Long/numberOfTrailingZeros (quot bits 8))))
+    (Long/numberOfTrailingZeros (quot bits 8)))))
 
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; the context: index spaces and their identifiers
@@ -155,6 +171,11 @@
   (cond
     (and (= :kw (:t x)) (heaptypes (:s x))) (symbol (:s x))
     (idx? x) (resolve-idx ctx :type x)
+    ;; an exact heap type (custom descriptors, queue 327): a defined type's index alone
+    (lex/list-of? x "exact")
+    (let [[_ y & more] (:xs x)]
+      (when (or (nil? y) more (not (idx? y))) (malformed "unexpected token" x))
+      (list 'exact (resolve-idx ctx :type y)))
     :else (malformed "unexpected token" x)))
 
 (defn- valtype [ctx x]
@@ -229,16 +250,40 @@
       (when-not (= (count ps) (count (distinct (map first ps)))) (malformed "duplicate field" x))
       (into {} ps))))
 
+(defn- desc-clauses
+  "A type's `(describes X)?` `(descriptor Y)?` at the head of ys, in that order (custom descriptors, queue 327): [{:describes X
+  :descriptor Y} rest]."
+  [ctx ys]
+  (let [one (fn [ys k] (if (lex/list-of? (first ys) k)
+                         (let [[_ y & more] (:xs (first ys))]
+                           (when (or (nil? y) more (not (idx? y))) (malformed "unexpected token" (first ys)))
+                           [(resolve-idx ctx :type y) (rest ys)])
+                         [nil ys]))
+        [a ys] (one ys "describes")
+        [b ys] (one ys "descriptor")]
+    [(cond-> {} a (assoc :describes a) b (assoc :descriptor b)) ys]))
+
 (defn- subtype [ctx x]
   (if (lex/list-of? x "sub")
     (let [ys (rest (:xs x))
           final? (lex/kw? (first ys) "final")
           ys (if final? (rest ys) ys)
           supers (vec (take-while idx? ys))
-          ct (drop (count supers) ys)]
+          [m ct] (desc-clauses ctx (drop (count supers) ys))]
       (when-not (= 1 (count ct)) (malformed "unexpected token" x))
-      (list 'sub {:final final? :supers (mapv #(resolve-idx ctx :type %) supers)} (comptype ctx (first ct))))
+      (list 'sub (merge {:final final? :supers (mapv #(resolve-idx ctx :type %) supers)} m) (comptype ctx (first ct))))
     (comptype ctx x)))
+
+(defn- type-body
+  "A type definition's body (its xs after the identifier): a subtype, or the descriptor clauses and a composite type (a final
+  type of no supertype; custom descriptors, queue 327)."
+  [ctx t]
+  (let [xs (let [ys (rest (:xs t))] (if (= :id (:t (first ys))) (rest ys) ys))]
+    (if (= 1 (count xs))
+      (subtype ctx (first xs))
+      (let [[m ct] (desc-clauses ctx xs)]
+        (when-not (and (seq m) (= 1 (count ct))) (malformed "unexpected token" t))
+        (list 'sub (merge {:final true :supers []} m) (comptype ctx (first ct)))))))
 
 (defn- typeuse
   "A type use at the head of `xs`: [type-index param-ids rest]; an inline function type not defined appended (implicit)."
@@ -261,6 +306,23 @@
               [(or known
                    (let [i (count @(:types ctx))] (swap! (:types ctx) conj ft) (swap! (:implicit ctx) conj ft) i))
                ids more])))))
+
+(defn- shared
+  "A memory's `shared` at the head of xs (threads, queue 326): [shared? rest]."
+  [xs]
+  (if (lex/kw? (first xs) "shared") [true (rest xs)] [false xs]))
+
+(defn- pagesize
+  "A memory's `(pagesize N)` at the head of xs (the custom page sizes proposal, queue 326, beyond Wasm 3.0): [LOG2 rest],
+  LOG2 nil when there is none; N a power of two, else malformed."
+  [xs]
+  (if (lex/list-of? (first xs) "pagesize")
+    (let [[_ n & more] (:xs (first xs))]
+      (when (or (nil? n) more (not= :num (:t n))) (malformed "unexpected token" (first xs)))
+      (let [v (long (nat64 n))]
+        (when (or (zero? v) (not (zero? (bit-and v (dec v))))) (malformed "invalid custom page size" (first xs)))
+        [(Long/numberOfTrailingZeros v) (rest xs)]))
+    [nil xs]))
 
 (defn- limits [ctx xs x]
   (let [i64? (lex/kw? (first xs) "i64")
@@ -366,6 +428,7 @@
                   [(list nmsym) xs]))
               [(list nmsym) xs])
       :select-t [(list nmsym []) xs]
+      :zero [(list nmsym) xs]
       :idx (let [sp (idx-space nm)]
              (if (and (#{:table :memory} sp) (not (idx? (first xs))))
                [(list nmsym 0) xs]
@@ -610,6 +673,23 @@
 
 (def ^:private space-of {"func" :func "table" :table "memory" :memory "global" :global "tag" :tag})
 
+(defn- compact-import
+  "A field of the compact import section's text (queue 326, beyond Wasm 3.0) as [MODULE [[NAME DESC] ...] SHARED]:
+  (import \"m\" (item \"n\" DESC)*) the first encoding (SHARED nil), (import \"m\" (item \"n\")* DESC) the second (SHARED the
+  one DESC, which takes no identifier); nil for an import of one name."
+  [f]
+  (let [[_ m x :as xs] (:xs f)]
+    (when (and m (or (nil? x) (= :list (:t x))))
+      (let [body (drop 2 xs) md (name-str m)]
+        (if (or (empty? body) (lex/list-of? (last body) "item"))
+          (do (doseq [it body] (when-not (and (lex/list-of? it "item") (= 3 (count (:xs it)))) (malformed "unexpected token" it)))
+              [md (mapv (fn [it] [(name-str (nth (:xs it) 1)) (nth (:xs it) 2)]) body) nil])
+          (let [d (last body) its (butlast body)]
+            (doseq [it its] (when-not (and (lex/list-of? it "item") (= 2 (count (:xs it)))) (malformed "unexpected token" it)))
+            (when-not (= :list (:t d)) (malformed "unexpected token" d))
+            (when (= :id (:t (second (:xs d)))) (malformed "identifier not allowed" d))
+            [md (mapv (fn [it] [(name-str (nth (:xs it) 1)) d]) its) d]))))))
+
 (defn- field-space
   "The index space a field defines and whether it imports: [space import?]."
   [f]
@@ -619,6 +699,8 @@
       ("func" "table" "memory" "global" "tag")
       (let [[_ imp] (exports+import xs)] [(space-of h) (boolean imp)])
       [nil false])))
+
+(declare ^:private index-field!)
 
 (defn- index-pass!
   "The first pass: every field's identifier bound to its index (types, the definitions with their imports, element and
@@ -637,7 +719,25 @@
                 (let [i (bind! ctx :type (id-of (rest (:xs t))) t)
                       ct (last (:xs t)) ct (if (lex/list-of? ct "sub") (last (:xs ct)) ct)]
                   (when-let [fs (field-ids ct)] (swap! (:fields ctx) assoc i fs))))
-        ("func" "table" "memory" "global" "tag" "import")
+        "import" (if-let [[_ its shared] (compact-import f)]
+                   (do (when (seq @(:defined ctx))
+                         (malformed (str "import after " (let [k (name (peek @(:defined ctx)))] (if (= k "func") "function" k)) " definition") f))
+                       (when shared (when-not (space-of (lex/head shared)) (malformed "unexpected token" shared)))
+                       (doseq [[_ d] its]
+                         (let [sp (space-of (lex/head d))]
+                           (when-not sp (malformed "unexpected token" d))
+                           (bind! ctx sp (when-not shared (id-of (rest (:xs d)))) f))))
+                   (index-field! ctx f h))
+        ("func" "table" "memory" "global" "tag")
+        (index-field! ctx f h)
+        "elem" (bind! ctx :elem (id-of (rest (:xs f))) f)
+        "data" (bind! ctx :data (id-of (rest (:xs f))) f)
+        ("export" "start") nil
+        (malformed "unexpected token" f)))))
+
+(defn- index-field!
+  "index-pass!'s binding of a definition's or an import's index (its identifier, the imports-first rule, its inline segments)."
+  [ctx f h]
         (let [[sp imp?] (field-space f)
               id (if (= h "import")
                    (let [d (nth (:xs f) 3 nil)] (when-not (= :list (:t d)) (malformed "unexpected token" f)) (id-of (rest (:xs d))))
@@ -651,11 +751,7 @@
           (bind! ctx sp id f)
           ;; a table's inline elements and a memory's inline data are segments of their own, numbered in field order
           (when (and (not imp?) (= h "table") (some #(lex/list-of? % "elem") (rest (:xs f)))) (bind! ctx :elem nil f))
-          (when (and (not imp?) (= h "memory") (some #(lex/list-of? % "data") (rest (:xs f)))) (bind! ctx :data nil f)))
-        "elem" (bind! ctx :elem (id-of (rest (:xs f))) f)
-        "data" (bind! ctx :data (id-of (rest (:xs f))) f)
-        ("export" "start") nil
-        (malformed "unexpected token" f)))))
+          (when (and (not imp?) (= h "memory") (some #(lex/list-of? % "data") (rest (:xs f)))) (bind! ctx :data nil f))))
 
 (defn- elem-list
   "An element list at xs: [type init] (init {:funcs [...]} or {:exprs [...]})."
@@ -671,7 +767,33 @@
   (if (lex/list-of? x "offset") (expr ctx (rest (:xs x))) (expr ctx [x])))
 
 (defn- type-item [ctx i t]
-  (list 'wasm/type i (subtype ctx (last (:xs t)))))
+  (list 'wasm/type i (type-body ctx t)))
+
+(defn- import-desc
+  "An import's description read once: [SPACE (fn [i] the item's description at index i)] (a type use's implicit type added
+  by the read, not by the calls)."
+  [ctx d]
+  (let [sp (space-of (lex/head d))
+        _ (when-not sp (malformed "unexpected token" d))
+        ds (after-id (rest (:xs d)))
+        [k v] (case sp
+                ;; an exact import's type use (exact TYPEUSE) (custom descriptors, queue 327)
+                :func (let [ex? (and (lex/list-of? (first ds) "exact") (empty? (rest ds)))
+                            ds (if ex? (rest (:xs (first ds))) ds)
+                            [ti _ more] (typeuse ctx ds)]
+                        (when (seq more) (malformed "unexpected token" (first more)))
+                        ['func (cond-> {:type ti} ex? (assoc :exact true))])
+                :tag (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) ['tag {:type ti}])
+                :global (let [[g more] [(first ds) (rest ds)]]
+                          (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
+                          ['global (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})])
+                :memory (let [[l more] (limits ctx ds d) [sh more] (shared more) [p more] (pagesize more)]
+                          (when (seq more) (malformed "unexpected token" (first more)))
+                          ['memory (cond-> l sh (assoc :shared true) p (assoc :page p))])
+                :table (let [[l more] (limits ctx ds d)]
+                         (when-not (= 1 (count more)) (malformed "unexpected token" d))
+                         ['table (assoc l :type (valtype ctx (first more)))]))]
+    [sp (fn [i] (list k i v))]))
 
 (defn- parse-fields
   "The second pass: the fields in order into items (by section, as the binary decoder orders them)."
@@ -690,33 +812,28 @@
           "type" (let [i @tindex] (swap! tindex inc) (add! :type (type-item ctx i f)))
           "rec" (let [i @tindex ts (rest (:xs f))]
                   (swap! tindex + (count ts))
-                  (add! :type (list 'wasm/rec i (mapv #(subtype ctx (last (:xs %))) ts))))
-          "import" (let [[_ m nm d & more] (:xs f)
-                         _ (when (or (nil? d) more) (malformed "unexpected token" f))
-                         sp (space-of (lex/head d))
-                         _ (when-not sp (malformed "unexpected token" d))
-                         i (next! sp)
-                         ds (after-id (rest (:xs d)))]
-                     (add! :import
-                           (list 'wasm/import (name-str m) (name-str nm)
-                                 (case sp
-                                   :func (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) (list 'func i {:type ti}))
-                                   :tag (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) (list 'tag i {:type ti}))
-                                   :global (let [[g more] [(first ds) (rest ds)]]
-                                             (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
-                                             (list 'global i (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})))
-                                   :memory (let [[l more] (limits ctx ds d)] (when (seq more) (malformed "unexpected token" (first more))) (list 'memory i l))
-                                   :table (let [[l more] (limits ctx ds d)]
-                                            (when-not (= 1 (count more)) (malformed "unexpected token" d))
-                                            (list 'table i (assoc l :type (valtype ctx (first more)))))))))
+                  (add! :type (list 'wasm/rec i (mapv #(type-body ctx %) ts))))
+          "import" (if-let [[m its shared] (compact-import f)]
+                     ;; the second encoding's description read once (one implicit type use), even for no name
+                     (let [one (when shared (import-desc ctx shared))]
+                       (doseq [[nm d] its]
+                         (let [[sp desc] (or one (import-desc ctx d))]
+                           (add! :import (list 'wasm/import m nm (desc (next! sp)))))))
+                     (let [[_ m nm d & more] (:xs f)
+                           _ (when (or (nil? d) more) (malformed "unexpected token" f))
+                           [sp desc] (import-desc ctx d)]
+                       (add! :import (list 'wasm/import (name-str m) (name-str nm) (desc (next! sp))))))
           "func" (let [i (next! :func)
                        [names imp ys] (exports+import (after-id xs))
+                       ;; an inline import's exact type use (custom descriptors, queue 327)
+                       ex? (and imp (lex/list-of? (first ys) "exact") (empty? (rest ys)))
+                       ys (if ex? (rest (:xs (first ys))) ys)
                        [ti pids ys] (typeuse ctx ys)
                        t (get @(:types ctx) ti)]
                    (export! names 'func i)
                    (if imp
                      (do (when (seq ys) (malformed "unexpected token" (first ys)))
-                         (add! :import (list 'wasm/import (first imp) (second imp) (list 'func i {:type ti}))))
+                         (add! :import (list 'wasm/import (first imp) (second imp) (list 'func i (cond-> {:type ti} ex? (assoc :exact true))))))
                      (let [ls (take-while #(lex/list-of? % "local") ys)
                            body (drop (count ls) ys)
                            pids (if (and (seq? t) (= 'func (first t))) (vec (take (count (second t)) (concat pids (repeat nil)))) pids)
@@ -764,13 +881,15 @@
                      (export! names 'memory i)
                      (if (and (not imp) (some #(lex/list-of? % "data") ys))
                        (let [i64? (lex/kw? (first ys) "i64") ys (if i64? (rest ys) ys)
+                             [p ys] (pagesize ys)
                              bs (strings->hex (rest (:xs (first ys))))
                              len (quot (count (second bs)) 2)
-                             pages (quot (+ len 65535) 65536)
+                             ps (if p (bit-shift-left 1 (long p)) 65536)
+                             pages (quot (+ len (dec ps)) ps)
                              di (next! :data)]
-                         (add! :memory (list 'wasm/memory i (cond-> {:min pages :max pages} i64? (assoc :i64 true))))
+                         (add! :memory (list 'wasm/memory i (cond-> {:min pages :max pages} i64? (assoc :i64 true) p (assoc :page p))))
                          (add! :data (list 'wasm/data di {:active {:memory i :offset [(list (if i64? 'i64.const 'i32.const) 0)]}} bs)))
-                       (let [[l more] (limits ctx ys f)]
+                       (let [[l more] (limits ctx ys f) [sh more] (shared more) [p more] (pagesize more) l (cond-> l sh (assoc :shared true) p (assoc :page p))]
                          (when (seq more) (malformed "unexpected token" (first more)))
                          (if imp
                            (add! :import (list 'wasm/import (first imp) (second imp) (list 'memory i l)))
@@ -885,43 +1004,113 @@
         (annot-error "malformed UTF-8 encoding" a))
       s)))
 
-(defn- strip-deep
-  "x without annotations; one inside it is misplaced (`msg` names the error for a @name, a @custom is always misplaced)."
-  [x name-msg]
-  (if (= :list (:t x))
-    (assoc x :xs (vec (for [y (:xs x)]
-                        (if (annot? y)
-                          (annot-error (if (= "custom" (:name y)) "misplaced @custom annotation" name-msg) y)
-                          (strip-deep y name-msg)))))
-    x))
+(def ^:dynamic *custom-invalid*
+  "When bound to an atom: the first custom section check that fails (the branch hints' invalid target), for
+  assert_invalid_custom (the module reads; handler_branch_hint.ml's check rejects it)."
+  nil)
+
+(def ^:private hint-name "metadata.code.branch_hint")
+
+(defn- hint? [x] (and (annot? x) (= hint-name (:name x))))
+
+(defn- check-hints
+  "The branch hints of a function's instruction sequence xs (the branch hinting proposal's annotations, queue 326; its
+  handler_branch_hint.ml): one hint an instruction (another before the same one: malformed), on an `if` or a `br_if` (else
+  an invalid target, a custom check). The hints themselves are not kept in the forms."
+  [xs]
+  (doseq [[y z] (partition 2 1 (concat xs [nil])) :when (hint? y)]
+    (let [[s & more] (:xs y)]
+      (when (or (not= :str (:t s)) (seq more)) (annot-error "@metadata.code.branch_hint annotation: unexpected token" y)))
+    (cond
+      (hint? z) (annot-error "@metadata.code.branch_hint annotation: duplicate annotation" z)
+      (or (lex/kw? z "if") (lex/kw? z "br_if") (lex/list-of? z "if") (lex/list-of? z "br_if")) nil
+      :else (when *custom-invalid* (swap! *custom-invalid* #(or % "@metadata.code.branch_hint annotation: invalid target"))))))
+
+(def ^:private field-kinds
+  {"func" "function" "table" "table" "memory" "memory" "global" "global" "tag" "tag" "elem" "elem" "data" "data" "type" "type"})
+
+(def ^:private desc-kinds {"func" "function" "table" "table" "memory" "memory" "global" "global" "tag" "tag"})
+
+(def ^:private label-kws #{"block" "loop" "if" "try_table"})
+
+(defn- name-start
+  "The index of xs where a binding's @name goes: after its keyword at k and its identifier, when it has one."
+  [xs ^long k]
+  (let [j (first (keep-indexed (fn [i y] (when (and (> (long i) k) (not (annot? y))) i)) xs))]
+    (if (and j (= :id (:t (nth xs j)))) (inc (long j)) (inc k))))
+
+(defn- binding-kind
+  "The kind of binding a list headed h is in its context ctx (its @name's subsection, the extended name section's), or nil."
+  [ctx h]
+  (case ctx
+    :field (field-kinds h)
+    :rec (when (= h "type") "type")
+    :desc (desc-kinds h)
+    :func-decl (when (#{"param" "local"} h) "local")
+    :type-decl (when (= h "param") "param")
+    :tag-decl (when (= h "param") "tag param")
+    :struct (when (= h "field") "field")
+    :instr (when (label-kws h) "label")
+    nil))
+
+(defn- child-ctx
+  "The context of a list's children (its head h, in its own context ctx)."
+  [ctx h ch]
+  (cond
+    (= ctx :plain) :plain
+    (and (#{:field :desc} ctx) (= h "func")) (case ch ("param" "local") :func-decl ("type" "export" "import" "result") :plain :instr)
+    (and (#{:field :desc} ctx) (= h "tag")) (if (= ch "param") :tag-decl :plain)
+    (and (= ctx :field) (= h "import")) :desc
+    (and (= ctx :field) (= h "rec")) :rec
+    (or (and (= ctx :field) (= h "type")) (= ctx :rec)) :comptype
+    (= ctx :comptype) (case h "func" (if (= ch "param") :type-decl :plain) "struct" (if (= ch "field") :struct :plain) "sub" :comptype :plain)
+    (#{:func-decl :type-decl :tag-decl :struct} ctx) :plain
+    (#{:field :desc} ctx) (if (#{"export" "import" "mut" "ref" "type" "result" "param"} ch) :plain :instr)
+    :else :instr))
+
+(defn- walk-names
+  "x (a list in its context ctx) without its annotations, each checked (the extended name section's @name annotations,
+  queue 326: one at a binding's place, after its keyword and identifier; elsewhere misplaced; a branch hint a function's):
+  [x' NAME-or-nil], NAME x's own binding's name. The names but the module's and the functions' are not kept in the forms."
+  [x ctx func?]
+  (let [xs (:xs x)
+        h (lex/head x)
+        kind (binding-kind ctx h)
+        func? (or func? (and (= ctx :field) (= h "func")))
+        starts (cond-> {}
+                 kind (assoc (name-start xs 0) kind)
+                 ;; a flat block, loop, if or try_table's label
+                 func? (into (keep-indexed (fn [i y] (when (and (= :kw (:t y)) (label-kws (:s y))) [(name-start xs i) "label"])) xs)))
+        _ (when func? (check-hints xs))
+        out (java.util.ArrayList.)
+        own (atom nil)]
+    (loop [i 0 group nil]
+      (when (< i (count xs))
+        (let [y (nth xs i)]
+          (cond
+            (and (annot? y) (= "name" (:name y)))
+            (let [g (or group (when-let [k (starts i)] [k i 0]))
+                  nm (name-of-annot y)]
+              (when (and (= ctx :instr) (= h "param")) (annot-error "@name annotation: param names not allowed here" y))
+              (when-not g (annot-error "misplaced @name annotation" y))
+              (when (pos? (long (nth g 2))) (annot-error (str "@name annotation: multiple " (nth g 0) " names") y))
+              (when (and kind (= (nth g 1) (name-start xs 0))) (reset! own nm))
+              (recur (inc i) (update g 2 inc)))
+            (hint? y) (do (when-not func? (annot-error "@metadata.code.branch_hint annotation: not in a function" y)) (recur (inc i) nil))
+            (annot? y) (annot-error "misplaced @custom annotation" y)
+            (= :list (:t y)) (do (.add out (first (walk-names y (child-ctx ctx h (lex/head y)) func?))) (recur (inc i) nil))
+            :else (do (.add out y) (recur (inc i) nil))))))
+    ;; a named parameter, local or field declares one
+    (when (and @own (#{"local" "param" "tag param" "field"} kind))
+      (when (> (count (remove #(= :id (:t %)) (rest out))) 1)
+        (annot-error (str "@name annotation: multiple " kind "s declared") (first xs))))
+    [(assoc x :xs (vec out)) @own]))
 
 (defn- strip-field
-  "A module field without its annotations: [field name-or-nil] (a func's or a tag's @name, handler_name.ml's locate_func and
-  locate_tag; a @custom inside a field is misplaced)."
+  "A module field without its annotations: [field name-or-nil] (a func's @name, handler_name.ml's locate_func)."
   [f]
-  (let [kind (lex/head f)
-        xs (:xs f)
-        out (java.util.ArrayList.)
-        nm (atom nil)]
-    (doseq [[i y] (map-indexed vector xs)]
-      (if (annot? y)
-        (if (= "custom" (:name y))
-          (annot-error "misplaced @custom annotation" y)
-          (let [s (name-of-annot y)
-                before (subvec xs (min 1 i) i)]
-            (case kind
-              "func" (cond
-                       ;; before the function's type use: its name
-                       (every? #(or (#{:id :kw} (:t %)) (lex/list-of? % "export")) before)
-                       (do (when @nm (annot-error "@name annotation: multiple function names" y)) (reset! nm s))
-                       (every? #(some (fn [k] (lex/list-of? % k)) ["type" "param" "result" "local" "export"]) before)
-                       (annot-error "@name annotation: local names not yet supported" y)
-                       :else (annot-error "@name annotation: misplaced annotation" y))
-              "tag" (do (when @nm (annot-error "@name annotation: multiple tag names" y)) (reset! nm s))
-              ("type" "rec") (annot-error "@name annotation: type and field names not yet supported" y)
-              (annot-error "misplaced @name annotation" y))))
-        (.add out (strip-deep y (if (= kind "func") "@name annotation: misplaced annotation" "misplaced @name annotation")))))
-    [(assoc f :xs (vec out)) @nm]))
+  (let [[g nm] (walk-names f :field false)]
+    [g (when (= "func" (lex/head f)) nm)]))
 
 (defn- annotations
   "The module's fields without their annotations, and what they say: {:fields :customs [[name place bytes]...] :module NAME
@@ -931,6 +1120,7 @@
     (if-let [f (first fs)]
       (cond
         (and (annot? f) (= "custom" (:name f))) (recur (next fs) seen? out (conj customs (parse-custom f)) module funcs)
+        (hint? f) (annot-error "@metadata.code.branch_hint annotation: not in a function" f)
         (annot? f) (let [s (name-of-annot f)]
                      (when seen? (annot-error "misplaced @name annotation" f))
                      (when module (annot-error "@name annotation: multiple module names" f))
@@ -984,8 +1174,19 @@
   "The items of a `(module $id? field*)` S-expression's fields (their @custom and @name annotations included)."
   [fields]
   (let [an (annotations fields)
-        items (module-items* (:fields an))]
-    (with-annotations items an)))
+        items (with-annotations (module-items* (:fields an)) an)]
+    (if-let [cs (seq (filter #(= "name" (first %)) (:customs an)))]
+      ;; a @custom "name" (queue 326, the extended name section's checks): decoded by the reference's name handler, so
+      ;; malformed when it does not decode, its indices a custom check; the forms the binary decoder's of its bytes
+      (do (doseq [[_ _ bs] cs]
+            (when-let [m (bin/check-names bs items)]
+              (when *custom-invalid* (swap! *custom-invalid* #(or % m)))))
+          ;; the names where the text's @name annotations put them (after the last section), so that they print and read back
+          (let [d (:items (bin/decode (bin/encode items nil)))
+                present (set (concat (keep item-section d) (when (some #(= 'wasm/func (first %)) d) [:func])))
+                at (last (filter present section-order))]
+            (mapv #(if (= 'wasm/names (first %)) (list 'wasm/names (assoc (second %) :after at)) %) d)))
+      items)))
 
 (defn- module-items*
   "The items of a module's fields (no annotation among them)."
@@ -1001,8 +1202,8 @@
             ;; implicit type is the rec group of one, (rec (type (func ...))))
             (doseq [t ts]
               (when (> (count ts) 1) (swap! (:multi ctx) conj (count @(:types ctx))))
-              (swap! (:types ctx) conj (subtype ctx (last (:xs t))))))
-          (swap! (:types ctx) conj (subtype ctx (last (:xs f)))))))
+              (swap! (:types ctx) conj (type-body ctx t))))
+          (swap! (:types ctx) conj (type-body ctx f)))))
     (parse-fields ctx fields)))
 
 (defn- read-module*

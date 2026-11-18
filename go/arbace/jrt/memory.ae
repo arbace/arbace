@@ -1,0 +1,346 @@
+;; jrt: the memory, the collector and the classes as java.lang.management asks them (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; F13, "As built: n-java-f13"): the natives of jdk.internal.jrt.HostManagement under sun.management's ClassLoadingImpl,
+;; MemoryImpl, MemoryPoolImpl and GarbageCollectorImpl and jdk.management's GcInfoBuilder (their derivations,
+;; test/jrt/derive.ae, over sun.management.JrtManagement). A Go program has two pools: the heap (Go's heap objects:
+;; runtime.MemStats' HeapAlloc used of HeapSys, the memory limit its max when one is set, as Runtime.maxMemory) and the
+;; runtime's own memory (goroutine stacks, spans, caches, the collector's metadata and the rest Go keeps: non-heap), one
+;; collector (Go's concurrent mark and sweep, its cycles and stop-the-world pauses: MemStats' NumGC and PauseTotalNs) and
+;; the classes of the registry (class.ae: the closed world's and those made at run time, dyn.ae's replaced ones unloaded).
+;; The cycles' usage before and after: a watcher (a finalizer re-armed each cycle, started by the first memory bean)
+;; records each cycle the live heap it left (runtime/metrics' /gc/heap/live:bytes) and the bytes allocated since the
+;; previous one (/gc/heap/allocs:bytes), whose sum is the heap the cycle found; it also keeps the pools' peaks.
+;; Since n-java-thresh ("As built: n-java-thresh") the events of HotSpot's LowMemoryDetector and GCNotifier, whose
+;; logic is sun.management.JrtManagement's: the watcher queues each cycle it sees while the collection thresholds or the
+;; collector's notifications want them, a sampling goroutine ticks while a usage threshold is set, and a notifier
+;; goroutine (HotSpot's Notification Thread, hidden as it: an adopted goroutine, not a live thread) runs JrtManagement's
+;; notifier at each event, which reads the queue and the pools' usages and triggers or clears the pools' sensors.
+(in-ns 'go.arbace.jrt)
+
+(go/file "memory.go"
+  :imports [[math "math"] [runtime "runtime"] [debug "runtime/debug"] [metrics "runtime/metrics"] [sync "sync"]
+            [atomic "sync/atomic"] [time "time"]])
+
+;; ---------------------------------------------------------------------------------------
+;; the classes
+
+(go/var ^{:tag atomic/Int64 :doc "classesUnloaded counts the classes a class made at run time replaced (dyn.ae's
+DefineDynamic): no longer reachable by name, as a class whose loader the JVM unloaded.\n"} classesUnloaded)
+
+(go/func HostManagement_ClassCount0__J_native
+  "HostManagement_ClassCount0__J_native is the classes ever defined: the registry's (the closed world's, defined at
+the program's initialization, and those made at run time) and the ones a class made at run time replaced.\n"
+  ^int64 []
+  (.RLock registryMu)
+  (let [n (conv int64 (len registry))]
+    (.RUnlock registryMu)
+    (+ n (.Load classesUnloaded))))
+
+(go/func HostManagement_UnloadedClassCount0__J_native
+  "HostManagement_UnloadedClassCount0__J_native is the classes a class made at run time replaced.\n"
+  ^int64 []
+  (.Load classesUnloaded))
+
+;; ---------------------------------------------------------------------------------------
+;; the pools
+
+(go/const
+  [^{:tag int32 :val 0} poolHeap 0]
+  [^{:tag int32 :val 1} poolRuntime 1])
+
+(go/func poolUsage
+  "poolUsage is pool p's usage in m: init (0: Go reserves nothing up front), used, committed, max (-1: none; the
+heap's the memory limit when one is set, at least its committed), MemoryUsage's order.\n"
+  ^{:tag (array 4 int64)} [^{:tag (* runtime/MemStats)} m ^int32 p]
+  (let [^{:tag (array 4 int64)} u (zero (array 4 int64))]
+    (if (== p poolHeap)
+      (do
+        (aset u 1 (conv int64 (.-HeapAlloc m)))
+        (aset u 2 (conv int64 (.-HeapSys m)))
+        (aset u 3 -1)
+        (let [limit (debug/SetMemoryLimit -1)]
+          (when (!= limit math/MaxInt64)
+            (aset u 3 limit)
+            (when (< (aget u 3) (aget u 2))
+              (aset u 3 (aget u 2))))))
+      (do
+        (aset u 1 (conv int64 (+ (.-StackInuse m) (.-MSpanInuse m) (.-MCacheInuse m) (.-BuckHashSys m) (.-GCSys m)
+                                 (.-OtherSys m))))
+        (aset u 2 (conv int64 (+ (.-StackSys m) (.-MSpanSys m) (.-MCacheSys m) (.-BuckHashSys m) (.-GCSys m)
+                                 (.-OtherSys m))))
+        (aset u 3 -1)))
+    u))
+
+(go/var ^{:tag sync/Mutex} peakMu)
+(go/var ^{:doc "peaks are the pools' peak usages since the start or their reset (peakMu), init 0 when none yet.\n"
+          :tag (array 2 (array 4 int64))} peaks)
+
+(go/func notePeak
+  "notePeak makes u pool p's peak when it uses more (peakMu held).\n"
+  [^int32 p ^{:tag (array 4 int64)} u]
+  (when (or (> (aget u 1) (aget (aget peaks p) 1)) (== (aget (aget peaks p) 2) 0))
+    (aset peaks p u)))
+
+(go/func usageArray ^{:tag (* LongArray)} [^{:tag (array 4 int64)} u]
+  (LongArrayOf (aget u 0) (aget u 1) (aget u 2) (aget u 3)))
+
+(go/func HostManagement_Memory0_I__J1_native
+  "HostManagement_Memory0_I__J1_native is pool p's usage (poolHeap, poolRuntime): init, used, committed, max.\n"
+  ^{:tag (* LongArray)} [^int32 p]
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (let [u (poolUsage (addr m) p)]
+      (.Lock peakMu)
+      (notePeak p u)
+      (.Unlock peakMu)
+      (usageArray u))))
+
+(go/func HostManagement_Peak0_I__J1_native
+  "HostManagement_Peak0_I__J1_native is pool p's peak usage since the start or its reset: the most it used when
+asked, at the collector's cycles (the watcher) or now.\n"
+  ^{:tag (* LongArray)} [^int32 p]
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (let [u (poolUsage (addr m) p)]
+      (.Lock peakMu)
+      (defer (.Unlock peakMu))
+      (notePeak p u)
+      (usageArray (aget peaks p)))))
+
+(go/func HostManagement_ResetPeak0_I__V_native
+  "HostManagement_ResetPeak0_I__V_native makes pool p's peak its usage now.\n"
+  [^int32 p]
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (.Lock peakMu)
+    (aset peaks p (poolUsage (addr m) p))
+    (.Unlock peakMu)))
+
+;; ---------------------------------------------------------------------------------------
+;; the collector
+
+(go/func HostManagement_GcCount0__J_native
+  "HostManagement_GcCount0__J_native is the collector's completed cycles, forced ones (System.gc) too.\n"
+  ^int64 []
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (conv int64 (.-NumGC m))))
+
+(go/func HostManagement_GcTime0__J_native
+  "HostManagement_GcTime0__J_native is the collector's accumulated time in milliseconds: its cycles' stop-the-world
+pauses (the program's goroutines stopped; its concurrent marking runs beside them).\n"
+  ^int64 []
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (conv int64 (/ (.-PauseTotalNs m) 1000000))))
+
+(go/func HostManagement_GcCpuTime0__J_native
+  "HostManagement_GcCpuTime0__J_native is the collector's estimated CPU time in nanoseconds, its concurrent marking
+and its pauses (runtime/metrics' /cpu/classes/gc/total:cpu-seconds).\n"
+  ^int64 []
+  (let [s (lit (slice metrics/Sample) (lit metrics/Sample :Name "/cpu/classes/gc/total:cpu-seconds"))]
+    (metrics/Read s)
+    (when (!= (.Kind (.-Value (aget s 0))) metrics/KindFloat64)
+      (return -1))
+    (conv int64 (* (.Float64 (.-Value (aget s 0))) 1e9))))
+
+(go/type gcCycle "gcCycle is what the watcher saw of a cycle: its number, the live heap it left, the bytes allocated
+until then (cumulative) and the heap it found (the previous cycle's live heap and the bytes allocated since; 0: not
+known).\n"
+  (struct ^int64 id ^int64 live ^int64 allocs ^int64 before ^uint32 forced))
+
+(go/var ^{:tag sync/Mutex} gcMu)
+(go/var ^{:doc "gcLast is the latest cycle the watcher saw (gcMu).\n" :tag gcCycle} gcLast)
+(go/var ^{:tag sync/Once} gcWatchOnce)
+
+(go/type gcSentinel "gcSentinel is the watcher's finalized object: a pointer and padding keep it out of the tiny
+allocator, whose blocks are finalized together.\n"
+  (struct ^{:tag (* gcSentinel)} self ^{:tag (array 2 int64)} pad))
+
+(go/func gcSamples "gcSamples is the live heap and the bytes allocated so far (runtime/metrics).\n"
+  [] :results [^int64 live ^int64 allocs]
+  (let [s (lit (slice metrics/Sample) (lit metrics/Sample :Name "/gc/heap/live:bytes")
+               (lit metrics/Sample :Name "/gc/heap/allocs:bytes"))]
+    (metrics/Read s)
+    (when (== (.Kind (.-Value (aget s 0))) metrics/KindUint64)
+      (set! live (conv int64 (.Uint64 (.-Value (aget s 0))))))
+    (when (== (.Kind (.-Value (aget s 1))) metrics/KindUint64)
+      (set! allocs (conv int64 (.Uint64 (.-Value (aget s 1))))))
+    (return)))
+
+(go/func gcObserve
+  "gcObserve records the latest cycle (the watcher's finalizer, after the cycle that found its sentinel): its live
+heap, the heap it found, and the heap pool's peak.\n"
+  []
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (let [id (conv int64 (.-NumGC m))
+          (values live allocs) (gcSamples)]
+      (.Lock gcMu)
+      (when (!= id (.-id gcLast))
+        (let [c (lit gcCycle :id id :live live :allocs allocs :forced (.-NumForcedGC m))]
+          (when (and (!= (.-id gcLast) 0) (== (.-id gcLast) (- id 1)))
+            (set! (.-before c) (+ (.-live gcLast) (- allocs (.-allocs gcLast)))))
+          (when (.Load gcEvents)
+            (gcQueue (addr m) c (> (.-forced c) (.-forced gcLast))))
+          (set! gcLast c)))
+      (let [before (.-before gcLast)]
+        (.Unlock gcMu)
+        (when (> before 0)
+          (let [u (poolUsage (addr m) poolHeap)]
+            (aset u 1 before)
+            (when (< (aget u 2) before) (aset u 2 before))
+            (when (and (!= (aget u 3) -1) (< (aget u 3) (aget u 2))) (aset u 3 (aget u 2)))
+            (.Lock peakMu)
+            (notePeak poolHeap u)
+            (.Unlock peakMu)))))))
+
+(go/func gcArm "gcArm makes a sentinel the next cycle finalizes, which observes it and arms the next.\n" []
+  (let [s (addr (lit gcSentinel))]
+    (set! (.-self s) s)
+    (runtime/SetFinalizer s (fn [^{:tag (* gcSentinel)} x] (set! (.-self x) nil) (gcObserve) (gcArm)))))
+
+(go/func HostManagement_WatchGc0__V_native
+  "HostManagement_WatchGc0__V_native starts the watcher (once): the cycles before it are known by their count and
+times alone.\n"
+  []
+  (.Do gcWatchOnce (fn [] (gcObserve) (gcArm))))
+
+(go/func gcTimes
+  "gcTimes is the latest cycle's start and end in m, in milliseconds since the program's start: its end the
+collector's last, its start that less its pauses.\n"
+  [^{:tag (* runtime/MemStats)} m] :results [^int64 start ^int64 end]
+  (let [pause (conv int64 (aget (.-PauseNs m) (% (+ (.-NumGC m) 255) 256)))]
+    (set! end (.Milliseconds (.Sub (time/Unix 0 (conv int64 (.-LastGC m))) vmStart)))
+    (set! start (- end (/ (+ pause 999999) 1000000)))
+    (when (< start 0) (set! start 0))
+    (when (< end start) (set! end start))
+    (return)))
+
+(go/func HostManagement_LastGc0__J1_native
+  "HostManagement_LastGc0__J1_native is the latest cycle, null before the first: its number, its start and end in
+milliseconds since the program's start (its end the collector's last, its start that less its pauses), and the heap's
+used bytes before and after it (the watcher's when it saw the cycle, else the live heap both; after the live heap).\n"
+  ^{:tag (* LongArray)} []
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (when (== (.-NumGC m) 0)
+      (return nil))
+    (let [id (conv int64 (.-NumGC m))
+          (values start end) (gcTimes (addr m))
+          (values live allocs) (gcSamples)
+          before live]
+      (.Lock gcMu)
+      (cond
+        (and (== (.-id gcLast) id) (> (.-before gcLast) 0))
+        (set! before (.-before gcLast))
+        ;; the cycle the watcher has not seen yet (its finalizer still to run): the heap it found from the last seen
+        (and (!= (.-id gcLast) 0) (== (.-id gcLast) (- id 1)))
+        (set! before (+ (.-live gcLast) (- allocs (.-allocs gcLast)))))
+      (.Unlock gcMu)
+      (when (< before live) (set! before live))
+      (LongArrayOf id start end before live))))
+
+;; ---------------------------------------------------------------------------------------
+;; n-java-thresh: the low memory detector's and the collector's notifications' events (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; "As built: n-java-thresh"); their logic, HotSpot's LowMemoryDetector, SensorInfo and GCNotifier, is
+;; sun.management.JrtManagement's
+
+(go/var ^{:doc "gcEvents is on while JrtManagement wants the cycles: a collection usage threshold set or the collector's
+notifications enabled (HostManagement.gcEvents0).\n" :tag atomic/Bool} gcEvents)
+
+(go/var ^{:doc "gcPending holds the cycles the watcher saw while gcEvents was on, not yet read (gcMu), at most
+gcPendingMax: when the notifier falls behind, the oldest are dropped.\n" :tag (slice (* LongArray))} gcPending)
+
+(go/const ^{:tag int :val 64} gcPendingMax 64)
+
+(go/func gcQueue
+  "gcQueue queues cycle c for JrtManagement (gcMu held) and wakes the notifier: its number, start and end (gcTimes), the
+heap's used bytes before and after it (before the live heap when not known), the wall clock's milliseconds when the
+watcher saw it (GCNotifier's timestamp) and 1 when it was forced (System.gc, runtime.GC), else 0.\n"
+  [^{:tag (* runtime/MemStats)} m ^gcCycle c ^bool forced]
+  (let [(values start end) (gcTimes m)
+        before (.-before c)
+        ^int64 f 0]
+    (when (< before (.-live c)) (set! before (.-live c)))
+    (when forced (set! f 1))
+    (when (>= (len gcPending) gcPendingMax)
+      (set! gcPending (subslice gcPending 1)))
+    (set! gcPending (append gcPending (LongArrayOf (.-id c) start end before (.-live c) (.UnixMilli (.Now (CurrentHost))) f)))
+    (notifyLmd)))
+
+(go/func HostManagement_GcEvents0_Z__V_native
+  "HostManagement_GcEvents0_Z__V_native turns the watcher's queue of cycles on or off (off: the queue emptied).\n"
+  [^bool on]
+  (.Lock gcMu)
+  (.Store gcEvents on)
+  (when (not on) (set! gcPending nil))
+  (.Unlock gcMu))
+
+(go/func HostManagement_NextGc0__J1_native
+  "HostManagement_NextGc0__J1_native is the oldest queued cycle (gcQueue's facts), taken from the queue, or null.\n"
+  ^{:tag (* LongArray)} []
+  (.Lock gcMu)
+  (defer (.Unlock gcMu))
+  (when (== (len gcPending) 0)
+    (return nil))
+  (let [g (aget gcPending 0)]
+    (set! gcPending (subslice gcPending 1))
+    g))
+
+(go/var ^{:doc "notifyCh wakes the notifier: one pending wake-up is enough, as it reads everything each time.\n"
+          :tag (chan (struct))} notifyCh (make (chan (struct)) 1))
+(go/var ^{:tag sync/Once} notifierOnce)
+
+(go/func notifyLmd "notifyLmd wakes the notifier, unless a wake-up is pending.\n" []
+  (select
+    (case (>! notifyCh (lit (struct))) (return))
+    (default (return))))
+
+(go/func notifierLoop
+  "notifierLoop runs n at each wake-up, an exception it throws dropped (HotSpot's Notification Thread clears it).\n"
+  [^Runnable n]
+  (while true
+    (<! notifyCh)
+    (runCatching (fn [] (.Run__V n)))))
+
+(go/func HostManagement_SetNotifier0_O__V_native
+  "HostManagement_SetNotifier0_O__V_native starts the notifier (once), a goroutine running r (a java.lang.Runnable) at
+each event: a cycle queued, a tick of the sampler, HostManagement.notify0.\n"
+  [^any r]
+  (let [n (Runnable_Cast r)]
+    (.Do notifierOnce (fn [] (go (notifierLoop n))))))
+
+(go/func HostManagement_Notify0__V_native "HostManagement_Notify0__V_native wakes the notifier.\n" []
+  (notifyLmd))
+
+(go/const ^{:tag time/Duration :val 20000000} samplePeriod (* 20 time/Millisecond))
+
+(go/var ^{:doc "sampling is on while a usage threshold is set (HostManagement.sampleUsage0).\n" :tag atomic/Bool} sampling)
+(go/var ^{:tag sync/Mutex} samplerMu)
+(go/var ^{:doc "samplerRunning is whether the sampler's goroutine runs (samplerMu).\n" :tag bool} samplerRunning)
+
+(go/func sampler
+  "sampler wakes the notifier every samplePeriod while sampling is on (HotSpot's detection at its allocations' slow
+paths), then ends.\n"
+  []
+  (let [tk (time/NewTicker samplePeriod)]
+    (defer (.Stop tk))
+    (while true
+      (<! (.-C tk))
+      (.Lock samplerMu)
+      (when (not (.Load sampling))
+        (set! samplerRunning false)
+        (.Unlock samplerMu)
+        (return))
+      (.Unlock samplerMu)
+      (notifyLmd))))
+
+(go/func HostManagement_SampleUsage0_Z__V_native
+  "HostManagement_SampleUsage0_Z__V_native turns the usage sampler on or off.\n"
+  [^bool on]
+  (.Lock samplerMu)
+  (.Store sampling on)
+  (when (and on (not samplerRunning))
+    (set! samplerRunning true)
+    (go (sampler)))
+  (.Unlock samplerMu))

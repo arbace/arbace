@@ -300,6 +300,53 @@
 
 (defn- string-of-scopes [scopes] (if scopes (:str scopes) "<unknown>"))
 
+;; ---------------------------------------------------------------------------------------------
+;; Debugging events (OC217 (a); Translprim.event_after, Translcore.event_after): with -g (Clflags.debug) an application,
+;; a primitive that may raise or call back, a method call, a let-operator and a raise's argument are wrapped in an
+;; after-event [:Levent lam ev], ev {:kind :after :def DEFNAME :file F :l1 :c1 :eoff :l2 :c2}: the location as
+;; backtrace_byt.c's caml_add_debug_info reads it from the event (start line and character, the end's offset from the
+;; start's line, the end line and character) and the scopes' name (Scoped_location.string_of_scopes), what a bytecode
+;; backtrace prints. The before-events, the function events and the structures' pseudo-events (the debugger's, not a
+;; backtrace's) are not put (a divergence of the -g Lambda from ocamlc's, the backtraces' alone read: OC217's first stage).
+
+(def ^:dynamic *debug* "Clflags.debug: ocamlc -g, the typer's --debug" false)
+
+(defn event-info
+  "The event of an after-event at loc in the current scopes"
+  [loc]
+  (let [[s e] loc]
+    {:kind :after :def (string-of-scopes *scopes*) :file (lex/pos-fname s)
+     :l1 (lex/pos-lnum s) :c1 (- (lex/pos-cnum s) (lex/pos-bol s)) :eoff (- (lex/pos-cnum e) (lex/pos-bol s))
+     :l2 (lex/pos-lnum e) :c2 (- (lex/pos-cnum e) (lex/pos-bol e))}))
+
+(defn event-after
+  "Translprim.event_after: lam after-evented at loc under -g"
+  [loc lam]
+  (if *debug* [:Levent lam (event-info loc)] lam))
+
+(defn- needs-event-after?
+  "Translprim.primitive_needs_event_after over the specialised primitive: the C calls, the primitives that may raise or
+  allocate in the runtime (lambda_primitive_needs_event_after) and those that may call OCaml code"
+  [prim]
+  (case (:t prim)
+    (:external :sys-argv :lazy-force :send :apply :revapply :bigarray) true
+    (:raise :raise-bt :loc :frame-pointers :identity :atomic :field :setfield :makeblock) false
+    :cmp (not (#{:ints :floats} (or (:kind prim) :generic)))
+    :array (case (:op prim)
+             "array.length" false
+             ("array.get" "array.set") true
+             (contains? #{"gen" "float"} (:kind prim)))
+    :p (let [n (:name prim)]
+         (boolean
+          (or (#{"float_of_int" "~." "abs." "+." "-." "*." "/." "string.get" "bytes.get" "bytes.set" "array.get[float]"
+                 "array.set[float]" "array.unsafe_get[float]" "array.unsafe_set[float]" "runstack" "reperform" "perform"
+                 "resume" "poll" "nativeint_of_int32" "int64_of_int32" "int64_of_nativeint" "int32_of_nativeint"
+                 "int32_of_int64" "nativeint_of_int64" "Int32.bswap" "Int64.bswap" "Nativeint.bswap"} n)
+              (str/starts-with? n "Bigarray.")
+              (re-matches #"(string|bytes|bigarray\.array1)\.(unsafe_)?(get|set)(16|32|64)" n)
+              (and (re-matches #"(Int32|Int64|Nativeint)\..*" n) (not (str/ends-with? n ".to_int"))))))
+    false))
+
 (defn- lambda-of-loc
   "Translprim.lambda_of_loc"
   [k]
@@ -314,19 +361,20 @@
       :function [:Lconst [:string (string-of-scopes *scopes*)]]
       :line (l/lconst-int lnum))))
 
-(defn- lambda-of-prim [prim args]
+(defn- lambda-of-prim [prim args & [applied]]
   (case (:t prim)
     :loc (let [lam (lambda-of-loc (:k prim))]
            (if (empty? args) lam [:Lprim (l/pmakeblock 0 false nil) [lam (first args)]]))
     :sys-argv [:Lprim (l/pccall "caml_sys_argv") [(l/lconst-int 0)]]
     :raise (let [a (first args)
                  k (if (and (= :regular (:k prim)) (= :Lvar (a 0)) (@try-ids (a 1))) :reraise (:k prim))]
-             [:Lprim (l/praise k) [a]])
+             ;; Translprim: an applied raise's argument after-evented at the raise's location (-g)
+             [:Lprim (l/praise k) [(if applied (event-after *prim-loc* a) a)]])
     :identity (first args)
     :raise-bt (let [vexn (ty/ident-create "exn")]
                 [:Llet :strict "" vexn (first args)
                  [:Lsequence [:Lprim (l/pccall "caml_restore_raw_backtrace") [[:Lvar vexn] (second args)]]
-                  [:Lprim (l/praise :reraise) [[:Lvar vexn]]]]])
+                  [:Lprim (l/praise :reraise) [(if applied (event-after *prim-loc* [:Lvar vexn]) [:Lvar vexn])]]]])
     :frame-pointers (l/lconst-int 0)
     :lazy-force (inline-lazy-force (first args))
     :atomic (let [p (if (= "load" (:op prim)) (l/prim "atomic_load") (l/pccall (str "caml_atomic_" (:op prim) "_field")))
@@ -376,11 +424,13 @@
 (defn pos-info [loc]
   (let [p (first loc)] [(lex/pos-fname p) (lex/pos-lnum p) (- (lex/pos-cnum p) (lex/pos-bol p))]))
 
-(defn failure-block [path loc]
-  (let [[f line ch] (pos-info loc)]
-    [:Lprim (l/praise :regular)
-     [[:Lprim (l/pmakeblock 0 false nil)
-       [(transl-extension-path path) [:Lconst [:block 0 [[:string f] [:int line] [:int ch]]]]]]]]))
+(defn failure-block
+  "Match_failure's or Assert_failure's raise; ev-loc (Translcore.assert_failed's exp) after-events its argument under -g"
+  [path loc & [ev-loc]]
+  (let [[f line ch] (pos-info loc)
+        arg [:Lprim (l/pmakeblock 0 false nil)
+             [(transl-extension-path path) [:Lconst [:block 0 [[:string f] [:int line] [:int ch]]]]]]]
+    [:Lprim (l/praise :regular) [(if ev-loc (event-after ev-loc arg) arg)]]))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
@@ -512,10 +562,11 @@
   (let [d (:desc e)]
     (case (d 0)
       :Texp_send (let [obj (transl-exp (d 1)) meth (d 2)]
-                   (case (meth 0)
-                     :Tmeth_val [:Lsend :self [:Lvar (meth 1)] obj []]
-                     :Tmeth_name [:Lsend :public (l/lconst-int (ty/hash-variant (meth 1))) obj []]
-                     :Tmeth_ancestor [:Lapply [:Lvar (meth 1)] [(transl-address (meth 2) nil)]]))
+                   (event-after (:loc e)
+                                (case (meth 0)
+                                  :Tmeth_val [:Lsend :self [:Lvar (meth 1)] obj []]
+                                  :Tmeth_name [:Lsend :public (l/lconst-int (ty/hash-variant (meth 1))) obj []]
+                                  :Tmeth_ancestor [:Lapply [:Lvar (meth 1)] [(transl-address (meth 2) nil)]])))
       :Texp_new [:Lapply [:Lprim (l/pfield 0 :pointer true) [(*transl-class-path* (d 1))]] [l/lambda-unit]]
       :Texp_instvar [:Lprim (l/prim "field_computed") [(transl-address (d 1) nil) [:Lvar (d 2)]]]
       :Texp_setinstvar (transl-setinstvar (transl-address (d 1) nil) [:Lvar (d 2)] (d 3))
@@ -546,9 +597,11 @@
                                                                   (and (= :Texp_variant (ad 0)) (nil? (ad 2))))))
                                    (when (= 2 (count arg-exps)) arg-exps)))
                 prim (specialize (:type f) hcc p)
-                lam (binding [*prim-loc* (:loc e)] (lambda-of-prim prim largs))]
-            (if (empty? extra) lam (transl-apply lam extra)))
-          (transl-apply (transl-exp f) args (tailcall-attribute f))))
+                lam (binding [*prim-loc* (:loc e)] (lambda-of-prim prim largs true))]
+            (if (empty? extra)
+              (if (needs-event-after? prim) (event-after (:loc e) lam) lam)
+              (event-after (:loc e) (transl-apply lam extra))))
+          (event-after (:loc e) (transl-apply (transl-exp f) args (tailcall-attribute f)))))
       ;; Translcore.transl_letop: each and-operator applied to the bindings so far and its expression, the
       ;; let-operator to their result and the body's function (no arity fusion)
       :Texp_letop (let [[_ lop lexp ands param case partial] d
@@ -562,7 +615,7 @@
                              (transl-exp lexp) ands)
                         func (transl-function {:loc (:loc (:rhs case))} []
                                               [:cases [case] partial param (:loc (:rhs case))])]
-                    [:Lapply (transl-exp lop) [exp func]])
+                    (event-after (:loc e) [:Lapply (transl-exp lop) [exp func]]))
       :Texp_match (if (seq (get d 4))
                     ;; Translcore's Texp_match with effect cases: the values' and the exceptions' cases split, transl_handler
                     (let [[vc ec] (reduce (fn [[vc ec] c]
@@ -631,8 +684,8 @@
       :Texp_for [:Lfor (d 1) (transl-exp (d 2)) (transl-exp (d 3)) (if (= :Upto (d 4)) :to :downto) (transl-exp (d 5))]
       :Texp_assert (let [c (d 1) cd (:desc c)]
                      (if (and (= :Texp_construct (cd 0)) (= "false" (:name (cd 1))))
-                       (failure-block ty/path-assert-failure (d 2))
-                       [:Lifthenelse (transl-exp c) l/lambda-unit (failure-block ty/path-assert-failure (d 2))]))
+                       (failure-block ty/path-assert-failure (d 2) (:loc e))
+                       [:Lifthenelse (transl-exp c) l/lambda-unit (failure-block ty/path-assert-failure (d 2) (:loc e))]))
       :Texp_unreachable (throw (ex-info "Unreachable_reached: an unreachable expression was translated" {}))
       :Texp_struct_item (*transl-struct-item* (d 1) (fn [] (transl-exp (d 2))))
       :Texp_pack (*transl-module* nil nil (d 1))
@@ -690,6 +743,10 @@
                  (case (f 0)
                    :Lapply (assoc f 2 (vec (concat (f 2) args)))
                    :Lsend [:Lsend (f 1) (f 2) (f 3) (vec (concat (f 4) args))]
+                   ;; an after-evented method call (-g) takes the arguments, its event dropped (the application's own wraps it)
+                   :Levent (if (= :Lsend ((f 1) 0))
+                             (let [m (f 1)] [:Lsend (m 1) (m 2) (m 3) (vec (concat (m 4) args))])
+                             (cond-> [:Lapply f (vec args)] tailcall (conj {:tailcall tailcall})))
                    (cond-> [:Lapply f (vec args)] tailcall (conj {:tailcall tailcall}))))]
     (letfn [(build [lam args l]
               (if (empty? l)

@@ -41,6 +41,7 @@
     ^{:line 41 :tag int} ntypes
     ^{:line 42 :tag (slice int)} funcs
     ^{:line 43 :tag int} nimpf
+    ^{:tag (slice bool) :doc "each imported function's exactness (custom descriptors, queue 327)\n"} impExact
     ^{:line 44 :tag (slice TableType)} tables
     ^{:line 45 :tag (slice Limits)} mems
     ^{:line 46 :tag (slice GlobalType)} globals
@@ -107,21 +108,27 @@
                 (let [n (conv int (.u32 sub))]
                   (for [i 0] (< i n) (inc! i)
                     (.name sub)
-                    (.name sub)
-                    (switch [k (.u8 sub)] k
-                      (case [xFunc]
-                        (set! (.-funcs v) (append (.-funcs v) (.funcType v (.u32 sub))))
-                        (inc! (.-nimpf v)))
-                      (case [xTable]
-                        (set! (.-tables v) (append (.-tables v) (.tableType v))))
-                      (case [xMemory]
-                        (set! (.-mems v) (append (.-mems v) (.memType v))))
-                      (case [xGlobal]
-                        (set! (.-globals v) (append (.-globals v) (.globalType v))))
-                      (case [xTag]
-                        (set! (.-tags v) (append (.-tags v) (.tagType v))))
-                      (default
-                        (panic (addr (lit Malformed (fmt/Sprintf "malformed import kind %d" k)))))))))
+                    ;; the compact import section (queue 326, beyond Wasm 3.0): as the decoder reads it
+                    (if (and (== (.name sub) "") (< (.-p sub) (len (.-b sub))) ^:go/paren (or (== (aget (.-b sub) (.-p sub)) 0x7f) (== (aget (.-b sub) (.-p sub)) 0x7e)))
+                      (if (== (.u8 sub) 0x7f)
+                        (let [k (conv int (.u32 sub))]
+                          (for [j 0] (< j k) (inc! j)
+                            (.name sub)
+                            (.importDesc v 1)))
+
+                        (let [st (.-p sub)]
+                          ;; one description for every name: read once to find the names, then once a name
+                          (.importDesc v 0)
+                          (let [k (conv int (.u32 sub))]
+                            (for [j 0] (< j k) (inc! j)
+                              (.name sub))
+
+                            (let [p (.-p sub)]
+                              (set! (.-p sub) st)
+                              (.importDesc v k)
+                              (set! (.-p sub) p)))))
+
+                      (.importDesc v 1)))))
 
 
               (case [3]
@@ -275,6 +282,23 @@
 
 
 ^{:go/end 286} (go/method heap "heap reads a heap type (a type index checked and made canonical).\n" ^int32 [^{:tag (* validator)} v]
+  (let [(values h _) (.heapE v)]
+    ^{:line 1} h))
+
+
+(go/method heapE "heapE reads a heap type and its exactness (custom descriptors, queue 327: 0x62 and a type index).\n" [^{:tag (* validator)} v] :results [int32 bool]
+  (when (and (< (.-p (.-r v)) (len (.-b (.-r v)))) (== (aget (.-b (.-r v)) (.-p (.-r v))) 0x62))
+    (inc! (.-p (.-r v)))
+    (let [h (.sleb (.-r v) 33)]
+      (when (< h 0)
+        (panic (addr (lit Malformed "malformed heap type"))))
+
+      (return (conv int32 (.typeIdx v (conv uint64 h))) true)))
+
+  (return (.heapAt v) false))
+
+
+(go/method heapAt ^int32 [^{:tag (* validator)} v]
   (let [h (.sleb (.-r v) 33)]
     (when (>= h 0)
       (return (conv int32 (.typeIdx v (conv uint64 h)))))
@@ -290,10 +314,9 @@
     (switch
       (case [(and (>= c 0x7b) (<= c 0x7f))]
         (return (lit ValType :K c)))
-      (case [(== c 0x63)]
-        (return (lit ValType :K tRef :Null true :H (.heap v))))
-      (case [(== c 0x64)]
-        (return (lit ValType :K tRef :H (.heap v))))
+      (case [(or (== c 0x63) (== c 0x64))]
+        (let [(values h e) (.heapE v)]
+          (return (lit ValType :K tRef :Null (== c 0x63) :H h :Exact e))))
       (case [(and (>= c 0x69) (<= c 0x74))]
         (return (lit ValType :K tRef :Null true :H (- (conv int32 c) 0x80)))))
 
@@ -313,6 +336,36 @@
     ^{:line 313} l))
 
 
+(go/method importDesc "importDesc reads an import's description at the reader and adds it n times to its index space.\n" [^{:tag (* validator)} v ^int n]
+  (let [r (.-r v)]
+    (switch [k (.u8 r)] k
+      (case [xFunc 0x20]
+        ;; 0x20: an exact function import (custom descriptors, queue 327)
+        (let [t (.funcType v (.u32 r))]
+          (for [j 0] (< j n) (inc! j)
+            (set! (.-funcs v) (append (.-funcs v) t))
+            (set! (.-impExact v) (append (.-impExact v) (== k 0x20)))
+            (inc! (.-nimpf v)))))
+      (case [xTable]
+        (let [t (.tableType v)]
+          (for [j 0] (< j n) (inc! j)
+            (set! (.-tables v) (append (.-tables v) t)))))
+      (case [xMemory]
+        (let [t (.memType v)]
+          (for [j 0] (< j n) (inc! j)
+            (set! (.-mems v) (append (.-mems v) t)))))
+      (case [xGlobal]
+        (let [t (.globalType v)]
+          (for [j 0] (< j n) (inc! j)
+            (set! (.-globals v) (append (.-globals v) t)))))
+      (case [xTag]
+        (let [t (.tagType v)]
+          (for [j 0] (< j n) (inc! j)
+            (set! (.-tags v) (append (.-tags v) t)))))
+      (default
+        (panic (addr (lit Malformed (fmt/Sprintf "malformed import kind %d" k))))))))
+
+
 ^{:go/end 323} (go/func checkLimits [^Limits l ^uint64 rng ^string msg]
   (when (or (> (.-Min l) rng) ^:go/paren (and (.-HasMax l) (> (.-Max l) rng)))
     (invalid "%s" msg))
@@ -324,10 +377,22 @@
 
 ^{:go/end 333} (go/method memType ^Limits [^{:tag (* validator)} v]
   (let [l (.limits v)]
-    (if (.-Addr64 l)
-      (checkLimits l (<< 1 48) "memory size must be at most 2^48 pages (256 TiB) for i64")
+    ;; a shared memory has a maximum (threads, queue 326)
+    (when (and (.-Shared l) (not (.-HasMax l)))
+      (invalid "shared memory must have maximum"))
 
-      (checkLimits l (<< 1 16) "memory size must be at most 2^16 pages (4 GiB) for i32"))
+    ;; a custom page size (queue 326, beyond Wasm 3.0): 1 or 64 KiB, the bounds in its pages
+    (when (and (.-CustomPage l) (!= (.-PageExp l) 0) (!= (.-PageExp l) 16))
+      (invalid "invalid custom page size"))
+
+    (switch
+      (case [(and (.-CustomPage l) (== (.-PageExp l) 0) (.-Addr64 l))])
+      (case [(and (.-CustomPage l) (== (.-PageExp l) 0))]
+        (checkLimits l 0xffffffff "memory size must be at most 2^32-1 pages (4 GiB) for i32 with a page size of 1"))
+      (case [(.-Addr64 l)]
+        (checkLimits l (<< 1 48) "memory size must be at most 2^48 pages (256 TiB) for i64"))
+      (default
+        (checkLimits l (<< 1 16) "memory size must be at most 2^16 pages (4 GiB) for i32")))
 
     ^{:line 332} l))
 
@@ -392,6 +457,8 @@
 
                     (set! c (.u8 r))))
 
+                (set! c (.readClauses s r c))
+
                 (set! (.-kind s) c)
                 (switch c
                   (case [cFunc]
@@ -441,6 +508,40 @@
                   (checkRef (.-T f))))))
 
 
+          ;; the descriptor clauses (custom descriptors, queue 327), as arbace.wasm.valid checks them
+          (range [j s subs]
+            (let [x (+ base j)
+                in (fn ^bool [^int32 y] (and (>= (conv int y) base) (< (conv int y) (+ base cnt))))]
+              (when (.-hasDescribes s)
+                (let [y (.-describes s)]
+                  (when (not (go/call in y))
+                    (invalid "described type is outside rec group"))
+
+                  (when (>= (conv int y) x)
+                    (invalid "forward use of described type"))
+
+                  (when (!= (.-kind s) cStruct)
+                    (invalid "described type must be a struct"))
+
+                  (let [t (aget subs (- (conv int y) base))]
+                    (when (or (not (.-hasDescriptor t)) (!= (conv int (.-descriptor t)) x))
+                      (invalid "described type is not described by descriptor")))))
+
+              (when (.-hasDescriptor s)
+                (let [y (.-descriptor s)]
+                  (when (not (go/call in y))
+                    (invalid "descriptor type is outside rec group"))
+
+                  (when (!= (.-kind s) cStruct)
+                    (invalid "descriptor type must be a struct"))
+
+                  (let [t (aget subs (- (conv int y) base))]
+                    (when (or (not (.-hasDescribes t)) (!= (conv int (.-describes t)) x))
+                      (invalid "type is not described by its descriptor"))
+
+                    (when (!= (.-final t) (.-final s))
+                      (invalid "descriptor and described types have mismatched finality")))))))
+
           (range [j subs]
             (range [_ x (.-supers (aget subs j))]
               (when (>= (conv int x) (+ base j))
@@ -463,8 +564,15 @@
                   (when (.-Final sp)
                     (invalid "sub type %d has final super type %d" (+ base j) (aget (.-supers (aget subs j)) 0)))
 
-                  (when (not (matchComp c sp))
-                    (invalid "sub type %d does not match super type %d" (+ base j) (aget (.-supers (aget subs j)) 0))))))))))
+                  (when (or (not (matchComp c sp)) (!= (>= (.-Describes c) 0) (>= (.-Describes sp) 0)) (!= (>= (.-Descriptor c) 0) (>= (.-Descriptor sp) 0)))
+                    (invalid "sub type %d does not match super type %d" (+ base j) (aget (.-supers (aget subs j)) 0)))
+
+                  ;; a subtype's described type and descriptor are the supertype's subtypes (custom descriptors, queue 327)
+                  (when (and (>= (.-Describes c) 0) (not (subCanon (.-Describes c) (.-Describes sp))))
+                    (invalid "described type %d does not match" (.-describes (aget subs j))))
+
+                  (when (and (>= (.-Descriptor c) 0) (not (subCanon (.-Descriptor c) (.-Descriptor sp))))
+                    (invalid "descriptor type %d does not match" (.-descriptor (aget subs j)))))))))))
 
 
 
@@ -500,6 +608,13 @@
 
   (when (and (.-Null a) (not (.-Null b)))
     (return false))
+
+  ;; an exact type (custom descriptors, queue 327): matched by the same type exactly, or a bottom
+  (when (.-Exact b)
+    (when (or (== (.-H a) hBot) (== (.-H a) hNone) (== (.-H a) hNoFunc) (== (.-H a) hNoExtern) (== (.-H a) hNoExn))
+      (return (matchHeap (.-H a) (.-H b))))
+
+    (return (and (.-Exact a) (== (.-H a) (.-H b)))))
 
   (matchHeap (.-H a) (.-H b)))
 
@@ -874,7 +989,7 @@
       (.code v))))
 
 
-(go/var constOps (lit (map uint16 bool) [OpI32Const true] [OpI64Const true] [OpF32Const true] [OpF64Const true] [OpV128Const true]
+(go/var constOps (lit (map uint16 bool) [OpStructNewDesc true] [OpStructNewDefaultDesc true] [OpI32Const true] [OpI64Const true] [OpF32Const true] [OpF64Const true] [OpV128Const true]
     ^{:line 878} [OpI32Add true] [OpI32Sub true] [OpI32Mul true] [OpI64Add true] [OpI64Sub true] [OpI64Mul true] [OpRefNull true]
     ^{:line 879} [OpRefFunc true] [OpRefI31 true] [OpStructNew true] [OpStructNewDefault true] [OpArrayNew true] [OpArrayNewDefault true]
     ^{:line 880} [OpArrayNewFixed true] [OpAnyConvertExtern true] [OpExternConvertAny true] [OpGlobalGet true]))
@@ -968,9 +1083,6 @@
       (switch b
         (case [0xfb 0xfc 0xfd 0xfe]
           (let [x (.u32 r)]
-            (when (== b 0xfe)
-              (panic (addr (lit Unimplemented "threads" (fmt/Sprintf "atomic 0x%x" x)))))
-
             (set! op (aget prefixed (bit-or (<< (conv uint32 b) 24) x)))))
         (default
           (set! op (aget oneByte b))))
@@ -1103,6 +1215,31 @@
   (let [s (addr (lit opSig))
       ^{:line 1104} nm (.-name (aget opInfos op))
       ^{:line 1105} k (strings/IndexByte nm \.)]
+    ;; the atomic accesses (threads, queue 326): their size, the address type the caller pops
+    (when [n (aget atomicSize op)] (> n 0)
+      (let [t i32T]
+        (when (strings/HasPrefix nm "i64.")
+          (set! t i64T))
+
+        (switch
+          (case [(== nm "memory.atomic.notify")]
+            (set! @s (lit opSig :in (lit (slice ValType) i32T) :out (lit (slice ValType) i32T) :mem 4 :ok true)))
+          (case [(== nm "memory.atomic.wait32")]
+            (set! @s (lit opSig :in (lit (slice ValType) i32T i64T) :out (lit (slice ValType) i32T) :mem 4 :ok true)))
+          (case [(== nm "memory.atomic.wait64")]
+            (set! @s (lit opSig :in (lit (slice ValType) i64T i64T) :out (lit (slice ValType) i32T) :mem 8 :ok true)))
+          (case [(strings/Contains nm ".atomic.load")]
+            (set! @s (lit opSig :out (lit (slice ValType) t) :mem (conv uint64 n) :ok true)))
+          (case [(strings/Contains nm ".atomic.store")]
+            (set! @s (lit opSig :in (lit (slice ValType) t) :mem (conv uint64 n) :store true :ok true)))
+          (case [(strings/Contains nm "cmpxchg")]
+            (set! @s (lit opSig :in (lit (slice ValType) t t) :out (lit (slice ValType) t) :mem (conv uint64 n) :ok true)))
+          (default
+            (set! @s (lit opSig :in (lit (slice ValType) t) :out (lit (slice ValType) t) :mem (conv uint64 n) :ok true))))
+
+        (aset sigCache op s)
+        (return s)))
+
     (when (> k 0)
       (let [(values shape o) (values (subslice nm _ k) (subslice nm (+ k 1)))
           (values t isNum) (shapeType shape)
@@ -1126,6 +1263,11 @@
             (set! @s (lit opSig :in (lit (slice ValType) t) :out (lit (slice ValType) t) :ok true)))
           (case [(and isNum (aget numBin o))]
             (set! @s (lit opSig :in (lit (slice ValType) t t) :out (lit (slice ValType) t) :ok true)))
+          (case [(and (== shape "i64") ^:go/paren (or (== o "add128") (== o "sub128")))]
+            ;; wide arithmetic (queue 326, beyond Wasm 3.0): i64's 128-bit sums and differences, its full products
+            (set! @s (lit opSig :in (lit (slice ValType) t t t t) :out (lit (slice ValType) t t) :ok true)))
+          (case [(and (== shape "i64") ^:go/paren (or (== o "mul_wide_s") (== o "mul_wide_u")))]
+            (set! @s (lit opSig :in (lit (slice ValType) t t) :out (lit (slice ValType) t t) :ok true)))
           (case [isNum]
             ;; conversions: OP_TYPE[_s|_u]
             (let [x (strings/TrimSuffix (strings/TrimSuffix o "_s") "_u")]
@@ -1214,6 +1356,13 @@
 
 ^{:go/end 1215} (go/func refT ^ValType [^bool null ^int32 h] (lit ValType :K tRef :Null null :H h))
 
+
+(go/method descRef "descRef is the descriptor operand's type of a cast to rt (custom descriptors, queue 327): (ref null (exact D)) when rt is\nexact, else (ref null D), D rt's type's descriptor.\n" ^ValType [^{:tag (* validator)} v ^ValType rt]
+  (when (or (< (.-H rt) 0) (< (.-Descriptor (aget ctypes (.-H rt))) 0))
+    (invalid "type %s does not have a descriptor" (heapName (.-H rt))))
+
+  (lit ValType :K tRef :Null true :H (conv int32 (.-Descriptor (aget ctypes (.-H rt)))) :Exact (.-Exact rt)))
+
 ^{:go/end 1721} (go/method op [^{:tag (* validator)} v ^uint16 op]
   (let [r (.-r v)
       ^{:line 1219} in (aget opInfos op)]
@@ -1254,7 +1403,7 @@
             ^{:line 1254} t (.popRef v)]
           (.pops v lt)
           (.pushs v lt)
-          (.push v (refT false (.-H t)))))
+          (.push v (lit ValType :K tRef :H (.-H t) :Exact (.-Exact t)))))
       (case [OpBrOnNonNull]
         (let [lt (.labelTypes v (.label v (.u32 r)))]
           (when (or (== (len lt) 0) (!= (.-K (aget lt (- (len lt) 1))) tRef))
@@ -1264,20 +1413,31 @@
             (.popT v (refT true (.-H t1)))
             (.pops v ts0)
             (.pushs v ts0))))
-      (case [OpBrOnCast OpBrOnCastFail]
-        (let [f (.u8 r)]
+      (case [OpBrOnCast OpBrOnCastFail OpBrOnCastDescEq OpBrOnCastDescEqFail]
+        (let [f (.u8 r)
+            desc (or (== op OpBrOnCastDescEq) (== op OpBrOnCastDescEqFail))]
           (when (> f 3)
             (panic (addr (lit Malformed "malformed br_on_cast flags"))))
 
           (let [l (.u32 r)
-              ^{:line 1273} rt1 (refT (!= (bit-and f 1) 0) (.heap v))
-              ^{:line 1274} rt2 (refT (!= (bit-and f 2) 0) (.heap v))]
-            (when (not (match rt2 rt1))
-              (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1))
+              ^{:line 1273} (values h1 e1) (.heapE v)
+              ^{:line 1274} (values h2 e2) (.heapE v)
+              rt1 (lit ValType :K tRef :Null (!= (bit-and f 1) 0) :H h1 :Exact e1)
+              rt2 (lit ValType :K tRef :Null (!= (bit-and f 2) 0) :H h2 :Exact e2)]
+            ;; the descriptor casts (custom descriptors, queue 327): the target in the source's hierarchy, a descriptor operand
+            (if desc
+              (when (!= (topOf (.-H rt2)) (topOf (.-H rt1)))
+                (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1))
 
-            (let [diff (refT (and (.-Null rt1) (not (.-Null rt2))) (.-H rt1))
+              (when (not (match rt2 rt1))
+                (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1)))
+
+            (when desc
+              (.popT v (.descRef v rt2)))
+
+            (let [diff (lit ValType :K tRef :Null (and (.-Null rt1) (not (.-Null rt2))) :H (.-H rt1) :Exact (.-Exact rt1))
                 (values want rest) (values rt2 diff)]
-              (when (== op OpBrOnCastFail)
+              (when (or (== op OpBrOnCastFail) (== op OpBrOnCastDescEqFail))
                 (set! (values want rest) (values diff rt2)))
 
               (let [lt (.labelTypes v (.label v l))]
@@ -1473,7 +1633,8 @@
       (case [OpDataDrop]
         (.data v (.u32 r)))
       (case [OpRefNull]
-        (.push v (refT true (.heap v))))
+        (let [(values h e) (.heapE v)]
+          (.push v (lit ValType :K tRef :Null true :H h :Exact e))))
       (case [OpRefFunc]
         (let [x (.u32 r)
             ^{:line 1479} id (.fn v x)]
@@ -1482,24 +1643,43 @@
             (not (aget (.-refs v) x))
             (invalid "undeclared function reference %d" x))
 
-          (.push v (refT false (conv int32 id)))))
+          ;; a defined function's reference is exact, an imported one's when imported exactly (custom descriptors, queue 327)
+          (.push v (lit ValType :K tRef :H (conv int32 id) :Exact (or (>= (conv int x) (.-nimpf v)) (aget (.-impExact v) x))))))
       (case [OpRefIsNull]
         (.popRef v)
         (.push v i32T))
       (case [OpRefAsNonNull]
         (let [t (.popRef v)]
-          (.push v (refT false (.-H t)))))
+          (.push v (lit ValType :K tRef :H (.-H t) :Exact (.-Exact t)))))
       (case [OpRefEq]
         (.popT v (refT true hEq))
         (.popT v (refT true hEq))
         (.push v i32T))
+      (case [OpRefCastDescEq OpRefCastDescEqNull]
+        ;; a cast by descriptor (custom descriptors, queue 327)
+        (let [(values h e) (.heapE v)
+            rt (lit ValType :K tRef :Null (== op OpRefCastDescEqNull) :H h :Exact e)]
+          (.popT v (.descRef v rt))
+          (.popT v (refT true (topOf h)))
+          (.push v rt)))
+      (case [OpRefGetDesc]
+        (let [x (.u32 r)
+            id (.typeIdx v (conv uint64 x))
+            d (.-Descriptor (aget ctypes id))]
+          (when (< d 0)
+            (invalid "type without descriptor"))
+
+          (let [t (.peek v 0)
+              exact (or (== (.-K t) 0) (== (.-H t) hBot) (== (.-H t) hNone) (and (.-Exact t) (== (conv int (.-H t)) id)))]
+            (.popT v (refT true (conv int32 id)))
+            (.push v (lit ValType :K tRef :H (conv int32 d) :Exact exact)))))
       (case [OpRefTest OpRefTestNull OpRefCast OpRefCastNull]
-        (let [h (.heap v)]
+        (let [(values h e) (.heapE v)]
           (.popT v (refT true (topOf h)))
           (if (or (== op OpRefTest) (== op OpRefTestNull))
             (.push v i32T)
 
-            (.push v (refT (== op OpRefCastNull) h)))))
+            (.push v (lit ValType :K tRef :Null (== op OpRefCastNull) :H h :Exact e)))))
 
       (case [OpRefI31]
         (.popT v i32T)
@@ -1507,10 +1687,21 @@
       (case [OpI31GetS OpI31GetU]
         (.popT v (refT true hI31))
         (.push v i32T))
-      (case [OpStructNew OpStructNewDefault]
+      (case [OpStructNew OpStructNewDefault OpStructNewDesc OpStructNewDefaultDesc]
         (let [x (.u32 r)
-            ^{:line 1512} st (.structType v x)]
-          (if (== op OpStructNew)
+            ^{:line 1512} st (.structType v x)
+            desc (or (== op OpStructNewDesc) (== op OpStructNewDefaultDesc))]
+          ;; a type with a descriptor is allocated with one (custom descriptors, queue 327)
+          (when (and (>= (.-Descriptor st) 0) (not desc))
+            (invalid "type with descriptor requires descriptor allocation"))
+
+          (when (and (< (.-Descriptor st) 0) desc)
+            (invalid "type without descriptor requires non-descriptor allocation"))
+
+          (when desc
+            (.popT v (lit ValType :K tRef :Null true :H (conv int32 (.-Descriptor st)) :Exact true)))
+
+          (if (or (== op OpStructNew) (== op OpStructNewDesc))
             (for [i (- (len (.-Fields st)) 1)] (>= i 0) (dec! i)
               (.popT v (unpack (.-T (aget (.-Fields st) i)))))
 
@@ -1521,7 +1712,8 @@
 
 
 
-          (.push v (refT false (conv int32 (aget (.-canon (.-d v)) x))))))
+          ;; an allocation's reference is exact (custom descriptors, queue 327)
+          (.push v (lit ValType :K tRef :H (conv int32 (aget (.-canon (.-d v)) x)) :Exact true))))
       (case [OpStructGet OpStructGetS OpStructGetU OpStructSet]
         (let [x (.u32 r)
             ^{:line 1527} i (.u32 r)
@@ -1579,7 +1771,7 @@
                 (.popT v i32T)
                 (.popT v i32T))))
 
-          (.push v (refT false (conv int32 (aget (.-canon (.-d v)) x))))))
+          (.push v (lit ValType :K tRef :H (conv int32 (aget (.-canon (.-d v)) x)) :Exact true))))
       (case [OpArrayGet OpArrayGetS OpArrayGetU]
         (let [x (.u32 r)
             ^{:line 1585} f (aget (.-Fields (.arrayType v x)) 0)]
@@ -1698,9 +1890,23 @@
 
               (return)))
 
+          (when (== op OpAtomicFence)
+            (when (!= (.u8 r) 0)
+              (panic (addr (lit Malformed "zero byte expected"))))
+
+            (return))
+
           (let [s (sigOf op)]
             (when (not (.-ok s))
               (panic (addr (lit Unimplemented "validation" nm))))
+
+            ;; an atomic access (threads, queue 326): its alignment exactly natural
+            (when (> (aget atomicSize op) 0)
+              (let [p (.-p r)
+                  f (.u32 r)]
+                (set! (.-p r) p)
+                (when (!= (<< (conv uint64 1) (bit-and-not f 0x40)) (.-mem s))
+                  (invalid "atomic alignment must be natural"))))
 
             (when (> (.-mem s) 0)
               (let [l (.memarg v (.-mem s))]

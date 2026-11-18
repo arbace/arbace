@@ -810,7 +810,9 @@ gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and exec
   done
   rotation_prune "$now" "$days" "$dry"
   echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes), $norphan left without a record ${dry:+would be }removed in $store"
-  for pat in gate javac cover; do
+  # platform: the own platform by its pin, ARBACE_GATE_EXES/platform-PIN20 (doc/classes/JAVA-FRONTEND-SURVEY.md, "Own
+  # platform", JOP3 (a)), its own kind: the newest 3 kept, as javac's tools
+  for pat in gate javac cover platform; do
     i=0
     while IFS= read -r f; do
       [ -n "$f" ] || continue
@@ -823,7 +825,7 @@ gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and exec
         [ $(( now - $(stat -c %Y "$f") )) -ge 3600 ] || continue
         echo "gate --prune: ${dry:+would remove }executables $f (a miss's leftover)"
         [ -n "$dry" ] || rm -rf "${f:?}"; continue ;; esac
-      case $pat in javac|cover) case $b in "$pat"-*) ;; *) continue ;; esac ;; gate) case $b in javac-*|cover-*) continue ;; esac ;; esac
+      case $pat in javac|cover|platform) case $b in "$pat"-*) ;; *) continue ;; esac ;; gate) case $b in javac-*|cover-*|platform-*) continue ;; esac ;; esac
       i=$((i + 1)); [ $i -gt 3 ] || continue
       [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
       echo "gate --prune: ${dry:+would remove }executables $f"

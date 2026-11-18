@@ -4139,6 +4139,62 @@ Not built tonight: from 19:00 UTC only code and unit tests under 1 GiB, and each
 pass (2.3 GB). The main host's commands for RIND10 (a) once decided: add the five lines, then `RF11_BATCH=1 bin/rust-front
 rsi-build vectors` (core-attrs is rebuilt first: about 35 minutes, 2.3 GB), its `mono-check` line's callees against 62/82.
 
+## As built: Rust's scores read, the facts stated, the host's rustc 1.100.0 (2026-11-17, night, round 52)
+
+Branch `n-rust-mat` (from `next` `42bf8614b`), memory-free lane. Rust's record in `test/crops/scores.edn`: completeness 75,
+maturity 96, independence 80. What holds each, from `bin/crops-score --judge --strict`:
+
+- **Maturity**: one item short, `:cells` 0.75 (3 of 4 cells checked: the AOT cell has no record, `test/rust/check-aot-linux-amd64.edn`
+  absent, the cell's `:until`). Classed, controls (3 of 3 families), gate (4 essential, 4 full, 5 oracle), REAP row and pins (5
+  records, no absolute path) are 1. The same record (task 322's) moves completeness and maturity; nothing light moves either.
+- **Independence**: eval 0.5 and AOT 0.5, read, print and judge 1. Eval is RFP53 (a)'s case count from
+  `test/rust/eval-inputs-linux-amd64.edn`: 0 of 5 cases own in all seven inputs (C5 and C7 own; C1 buildable own for all five since
+  RIND5's swizzle but not in the record until the night's `--record`; C2, C3, C4, C6 rustc's). AOT: the stated 0.5 (no record). No
+  stage moves before C2, C3, C4 and C6 are own (RIND stage 5).
+- **Stated tonight** (`test/crops/independence.edn`, the checkout's facts; no score moves): C5's judge `rsi-shim-essential` among the
+  eval and AOT stages' `:steps` (the cross-check finds it on no toolchain host), C5's, C7's and C1's code in eval's `:evidence` (the
+  shim, `RSI_SHIM=own`, `c_target_host`, a `--record`'s `--front own` default at `bin/lib/rsi/check:63`), and C1's state in `:why`.
+  The AOT leg takes the own shim too: the shim block runs on the pack path before the level splits. Note: `--aot --record` keeps
+  `--front pack` (line 63), so the AOT inputs record C1 from the packs unless `--front own` is passed.
+- **Taken overnight (round 52): two steps not taken**: RIND10 (a)'s five core-attrs lines (core-attrs' key hashes its list: the next
+  `rust-front-essential` would rebuild core's attributes, 35 minutes at 2.3 GB, unproven tonight); RIND8 (a)'s reading of the crate
+  identities as own (a change of what counts as own: the user's, and it moves no score: C4 also needs the interface, RIND9).
+
+### The host's rustc 1.100.0 (Alpine's apk upgrade, 2026-11-15)
+
+`tools/rsdump/RUSTC_VERSION` pins 1.99.1 (`58cf8f9c3`, driver `61690d3e4c729118`); the host has rustc and rustdoc 1.100.0
+(`0ef1bc386`, `librustc_driver-16ebf4feec204511.so`). What it breaks, measured (`bin/repr-rust pins check`, 56 MB):
+
+- **`bin/gate --pins` fails** (its `:rust` crop pin, `bin/repr-rust pins check`: `rustc_check` and the rustdoc pin refuse; `rust pins:
+  NOT held`), and with it **the clean run's first step** (`pre_step pins`, exit 1 before the plan): no `--clean` record, so no tag,
+  until it is resolved. The ordinary gates (essential, `--nightly`, `--weekly`, `--full`) do not run `--pins`.
+- **The oracle tier's five `:rustc` steps** (`rust-iface`, `rust-behaviour`, `rust-front-records-verify`, `rust-native-essential`,
+  `rust-native`): the `:rustc` identity (`rustc --version -v`, the executable's and the driver library's digests) is a new one, so
+  their keys move and they run, and each refuses at `rustc_check` (the helper cannot be built against 1.100's driver): failures in
+  `bin/gate --oracle`, not absences.
+- **By hand**: every helper-based tool (`bin/repr-rust --reader helper`, `native-check`, `--iface`, `--run`, `--code`; `bin/rust-front`'s
+  oracles and `records make|verify`; `bin/rsi ir-pack`, `std-build`, `record-ref`): no new pack or reference can be made.
+- **Not broken**: every essential and `--full` Rust step (no rustc at check time: the native reader, the packs, the pinned rust-src
+  1.99.1 apk in `.tmp/repr-rust/apks`, ci, rustc stubs exiting 99), the scores (the `:rustc` host is on oracle steps alone).
+
+### Proposed (RIND11)
+
+- **RIND11 The pinned rustc and the host's.** (a) **Now: the pinned rustc is the oracle's host; another rustc on the host is the
+  `:rustc` host absent, not a failure: the `:rustc` recipe `:require`s the pinned build (its version and driver library), so the five
+  oracle steps are `absent` (no key, no run), and `bin/repr-rust pins check` says "the host's rustc is not the pinned 1.99.1: the
+  oracle tier's Rust steps are absent" while still holding the file pins (as `--pins` treats an absent gcc); then, when the oracle
+  tier is next needed for Rust (a tag), the pinned toolchain outside apk: Alpine's `rust-1.99.1-r0`, `rustc-dev-1.99.1-r0`,
+  `rustdoc` and the LLVM library they link, fetched by SHA-256 (the user's go-ahead: no 1.99.1 apk but rust-src is cached here) and
+  extracted into `.tmp/rust-1.99.1/` (nothing installed), named by `REPR_RUST_RUSTC` for the helper and the `:rustc` recipe**;
+  (b) re-pin to 1.100.0: the helper rebuilt against 1.100's `rustc_private`, rust-src, rustc-dev and the UI tarball re-pinned, the
+  five corpora's round trips and known files re-recorded, the native reader's lexer and parser and the front end's ports (MIR
+  building, the passes, mono, codegen: written after 1.99.1's code) revised for 1.100's changes, and every pack (IR, std's IR,
+  rust-front-*, rust-core-built, the reference runs) remade: weeks, and RIND's measures start over; (c) pin the toolchain outside
+  apk at once, the gate failing at `--pins` until fetched; (d) hold Alpine's `rust` at 1.99.1 (`apk add rust=1.99.1-r0`: edge
+  keeps no old versions, so a local repository from the archive's apks). *Recommended: (a)*: the gate's pins and clean run pass
+  again at once, honestly (no gate step needs rustc), and the records stay valid; (b) only when the front end moves to a new
+  rustc on purpose.
+
 ## As built: RIND9 (a), alloc's pass (2026-11-17, night, branch `n-rust-alloc`)
 
 The user approved RIND9 (a). alloc's interface pass is written on core-check's (RF12-P2 (b)) and proven light on two modules; the

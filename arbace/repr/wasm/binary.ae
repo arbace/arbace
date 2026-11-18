@@ -139,10 +139,18 @@
 
 (defn- heaptype [r]
   (let [b (peek8 r)]
-    (if (and (>= b 0) (= 0x40 (bit-and b 0xc0)))
+    (cond
+      ;; an exact heap type (custom descriptors, queue 327): 0x62 and a type index
+      (= b 0x62)
+      (let [at (do (u8 r) (pos r))
+            x (try (sleb r 33) (catch arbace.lang.ExceptionInfo _ -1))]
+        (when (neg? x) (malformed "malformed heap type" at))
+        (list 'exact x))
+      (and (>= b 0) (= 0x40 (bit-and b 0xc0)))
       (do (u8 r) (or (heap-bytes b) (malformed "malformed heap type" (dec (pos r)))))
       ;; decode.ml's heaptype: `either` a type index (s33, not negative) or an abstract heap type (s7); when the index fails,
       ;; the s7 read of a byte with its continuation bit set is `integer representation too long`
+      :else
       (let [at (pos r)
             x (try (sleb r 33) (catch arbace.lang.ExceptionInfo _ -1))]
         (if (neg? x)
@@ -168,7 +176,14 @@
 (defn- mutability [r] (case (u8 r) 0 false 1 true (malformed "malformed mutability" (dec (pos r)))))
 
 (defn- storagetype [r]
-  (case (peek8 r) 0x78 (do (u8 r) 'i8) 0x77 (do (u8 r) 'i16) (valtype r)))
+  (case (peek8 r) 0x78 (do (u8 r) 'i8) 0x77 (do (u8 r) 'i16)
+    ;; a field's malformed type is a malformed storage type (the custom descriptors scripts' message, queue 327)
+    (let [at (pos r)]
+      (try (valtype r)
+           (catch arbace.lang.ExceptionInfo e
+             (if (#{"malformed value type" "malformed heap type" "malformed number type"} (:wasm/malformed (ex-data e)))
+               (malformed "malformed storage type" at)
+               (throw e)))))))
 
 (defn- fieldtype [r] (let [t (storagetype r) m (mutability r)] (list 'field t m)))
 
@@ -180,19 +195,31 @@
       0x5e (list 'array (fieldtype r))
       (malformed (if (>= (bit-and 0xff (aget ^bytes (:b r) (int at))) 0x80) "integer representation too long" "malformed definition type") at))))
 
+(defn- desc-clauses
+  "A type's describes (0x4c X) and descriptor (0x4d Y) clauses, in that order (custom descriptors, queue 327)."
+  [r]
+  (let [a (when (= 0x4c (peek8 r)) (u8 r) (u32 r))
+        b (when (= 0x4d (peek8 r)) (u8 r) (u32 r))]
+    (cond-> {} a (assoc :describes a) b (assoc :descriptor b))))
+
 (defn- subtype [r]
   (case (peek8 r)
-    0x50 (do (u8 r) (let [s (vec-of r u32)] (list 'sub {:final false :supers s} (comptype r))))
-    0x4f (do (u8 r) (let [s (vec-of r u32)] (list 'sub {:final true :supers s} (comptype r))))
+    0x50 (do (u8 r) (let [s (vec-of r u32) m (desc-clauses r)] (list 'sub (merge {:final false :supers s} m) (comptype r))))
+    0x4f (do (u8 r) (let [s (vec-of r u32) m (desc-clauses r)] (list 'sub (merge {:final true :supers s} m) (comptype r))))
+    (0x4c 0x4d) (let [m (desc-clauses r)] (list 'sub (merge {:final true :supers []} m) (comptype r)))
     (comptype r)))
 
-(defn- limits [r]
-  (let [at (pos r) flags (u8 r)]
-    (when-not (zero? (bit-and flags 0xfa)) (malformed "malformed limits flags" at))
-    (let [i64? (= 4 (bit-and flags 4))
-          mn (if i64? (u64 r) (u64 r))
-          mx (when (= 1 (bit-and flags 1)) (u64 r))]
-      (cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true)))))
+(defn- limits
+  ([r] (limits r false))
+  ([r mem?]
+   (let [at (pos r) flags (u8 r)]
+     ;; a memory's flag 0x08: a custom page size's log2 after the limits, 0x02: shared (queue 326, beyond Wasm 3.0)
+     (when-not (zero? (bit-and flags (if mem? 0xf0 0xfa))) (malformed "malformed limits flags" at))
+     (let [i64? (= 4 (bit-and flags 4))
+           mn (if i64? (u64 r) (u64 r))
+           mx (when (= 1 (bit-and flags 1)) (u64 r))
+           p (when (= 8 (bit-and flags 8)) (let [at (pos r) p (u32 r)] (when (>= p 64) (malformed "invalid custom page size" at)) p))]
+       (cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true) (= 2 (bit-and flags 2)) (assoc :shared true) p (assoc :page p))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; instructions
@@ -238,6 +265,8 @@
 (defn- imm [r nm kind]
   (case kind
     :none (nullary nm)
+    ;; a reserved zero byte (threads' atomic.fence, queue 326)
+    :zero (let [at (pos r)] (when-not (zero? (u8 r)) (malformed "zero byte expected" at)) (list nm))
     :idx (list nm (u32 r))
     :idx2 (let [x (u32 r) y (u32 r)] (list nm x y))
     :idx2-rev (let [y (u32 r) x (u32 r)] (list nm x y))
@@ -321,8 +350,10 @@
   (let [at (pos r)]
     (case (u8 r)
       0x00 [:func (u32 r)]
+      ;; an exact function import (custom descriptors, queue 327)
+      0x20 [:efunc (u32 r)]
       0x01 [:table (let [t (reftype r) l (limits r)] (assoc l :type t))]
-      0x02 [:memory (limits r)]
+      0x02 [:memory (limits r true)]
       0x03 [:global (let [t (valtype r) m (mutability r)] {:type t :mut m})]
       0x04 [:tag (do (when-not (zero? (u8 r)) (malformed "zero byte expected" (dec (pos r)))) (u32 r))]
       (malformed "malformed import kind" at))))
@@ -420,17 +451,33 @@
                   (do (u8 r) (let [ts (vec-of r subtype)] (recur (inc i) (+ idx (count ts)) (conj out (list 'wasm/rec idx ts)))))
                   (recur (inc i) (inc idx) (conj out (list 'wasm/type idx (subtype r)))))
                 out)))
-    :import (let [counts (:imports state)]
-              (vec-of r (fn [r]
-                          (let [m (wname r) nm (wname r) [k d] (import-desc r)
-                                i (get @counts k 0)]
-                            (swap! counts assoc k (inc i))
-                            (list 'wasm/import m nm (case k
-                                                      :func (list 'func i {:type d})
-                                                      :table (list 'table i d)
-                                                      :memory (list 'memory i d)
-                                                      :global (list 'global i d)
-                                                      :tag (list 'tag i {:type d})))))))
+    :import (let [counts (:imports state)
+                  item (fn [m nm [k d]]
+                         (let [ex? (= k :efunc) k (if ex? :func k)
+                               i (get @counts k 0)]
+                           (swap! counts assoc k (inc i))
+                           (list 'wasm/import m nm (case k
+                                                     :func (list 'func i (cond-> {:type d} ex? (assoc :exact true)))
+                                                     :table (list 'table i d)
+                                                     :memory (list 'memory i d)
+                                                     :global (list 'global i d)
+                                                     :tag (list 'tag i {:type d})))))]
+              ;; the compact import section (queue 326, beyond Wasm 3.0): after an empty name, 0x7f a vector of names and
+              ;; descriptions, 0x7e one description and a vector of names; read as the imports they stand for (the canonical
+              ;; encoding writes them one by one)
+              ;; the grouping kept in the layer (its flags' [:imports]: [ENC N] a group, ENC 0 one import, 0x7f or 0x7e N of them;
+              ;; a group of none also its module's name, 0x7e's its description), so that mode :full writes the original's bytes
+              (let [groups (vec-of r (fn [r]
+                                       (let [m (wname r) nm (wname r)]
+                                         (if (and (= nm "") (#{0x7f 0x7e} (peek8 r)))
+                                           (if (= 0x7f (u8 r))
+                                             (let [its (vec-of r (fn [r] (let [n (wname r)] (item m n (import-desc r)))))]
+                                               [(if (seq its) [0x7f (count its)] [0x7f 0 m]) its])
+                                             (let [d (import-desc r) its (mapv #(item m % d) (vec-of r wname))]
+                                               [(if (seq its) [0x7e (count its)] [0x7e 0 m d]) its]))
+                                           [[0 1] [(item m nm (import-desc r))]]))))]
+                (when (some #(pos? (long (ffirst %))) groups) (swap! (:flags state) assoc [:imports] (mapv first groups)))
+                (vec (mapcat second groups))))
     :func (do (reset! (:func-types state) (vec-of r u32)) [])
     :table (let [base (get @(:imports state) :table 0)]
              (vec (map-indexed
@@ -441,7 +488,7 @@
                                       (let [t (reftype r) l (limits r)] [t l (const-expr r)]))
                                   (let [t (reftype r) l (limits r)] [t l nil])))))))
     :memory (let [base (get @(:imports state) :memory 0)]
-              (vec (map-indexed (fn [i l] (list 'wasm/memory (+ base i) l)) (vec-of r limits))))
+              (vec (map-indexed (fn [i l] (list 'wasm/memory (+ base i) l)) (vec-of r #(limits % true)))))
     :tag (let [base (get @(:imports state) :tag 0)]
            (vec (map-indexed (fn [i t] (list 'wasm/tag (+ base i) {:type t}))
                              (vec-of r (fn [r] (when-not (zero? (u8 r)) (malformed "zero byte expected" (dec (pos r)))) (u32 r))))))
@@ -609,7 +656,9 @@
 (defn- bad [msg x] (throw (ex-info (str msg ": " (pr-str x)) {:wasm/form x})))
 
 (defn- wheap [w h]
-  (if (integer? h) (wsleb w h) (w8 w (or (heap-codes h) (bad "an unknown heap type" h)))))
+  (cond (integer? h) (wsleb w h)
+        (and (seq? h) (= 'exact (first h))) (do (w8 w 0x62) (wsleb w (second h)))
+        :else (w8 w (or (heap-codes h) (bad "an unknown heap type" h)))))
 
 (defn- wvaltype [w t]
   (cond
@@ -631,14 +680,20 @@
 
 (defn- wsub [w t]
   (if (= 'sub (first t))
-    (let [{:keys [final supers]} (second t)]
-      (w8 w (if final 0x4f 0x50)) (wvec w supers wuleb) (wcomp w (nth t 2)))
+    (let [{:keys [final supers describes descriptor]} (second t)
+          clauses (fn [] (when describes (w8 w 0x4c) (wuleb w describes)) (when descriptor (w8 w 0x4d) (wuleb w descriptor)))]
+      ;; a final type of no supertype with descriptor clauses: the clauses alone (custom descriptors, queue 327)
+      (if (and final (empty? supers) (or describes descriptor))
+        (clauses)
+        (do (w8 w (if final 0x4f 0x50)) (wvec w supers wuleb) (clauses)))
+      (wcomp w (nth t 2)))
     (wcomp w t)))
 
 (defn- wlimits [w l]
-  (w8 w (+ (if (:max l) 1 0) (if (:i64 l) 4 0)))
+  (w8 w (+ (if (:max l) 1 0) (if (:shared l) 2 0) (if (:i64 l) 4 0) (if (:page l) 8 0)))
   (wuleb w (:min l))
-  (when (:max l) (wuleb w (:max l))))
+  (when (:max l) (wuleb w (:max l)))
+  (when (:page l) (wuleb w (:page l))))
 
 (declare winstrs)
 
@@ -700,6 +755,7 @@
         (wop w p c)
         (case kind
           :none nil
+          :zero (w8 w 0)
           :idx (wuleb w (nth x 1))
           :idx2 (do (wuleb w (nth x 1)) (wuleb w (nth x 2)))
           :idx2-rev (do (wuleb w (nth x 2)) (wuleb w (nth x 1)))
@@ -782,14 +838,28 @@
                         (if (= 'wasm/rec (first it))
                           (do (w8 w 0x4e) (wvec w (nth it 2) wsub))
                           (wsub w (nth it 2)))))
-    :import (wvec w its (fn [w [_ m nm [k i d]]]
-                          (wname! w m) (wname! w nm)
-                          (case k
-                            func (do (w8 w 0) (wuleb w (:type d)))
-                            table (do (w8 w 1) (wvaltype w (:type d)) (wlimits w d))
-                            memory (do (w8 w 2) (wlimits w d))
-                            global (do (w8 w 3) (wvaltype w (:type d)) (w8 w (if (:mut d) 1 0)))
-                            tag (do (w8 w 4) (w8 w 0) (wuleb w (:type d))))))
+    :import (let [desc (fn [w k d]
+                         (case k
+                           func (do (w8 w (if (:exact d) 0x20 0)) (wuleb w (:type d)))
+                           table (do (w8 w 1) (wvaltype w (:type d)) (wlimits w d))
+                           memory (do (w8 w 2) (wlimits w d))
+                           global (do (w8 w 3) (wvaltype w (:type d)) (w8 w (if (:mut d) 1 0)))
+                           tag (do (w8 w 4) (w8 w 0) (wuleb w (:type d)))))]
+              (if-let [groups (get flags [:imports])]
+                ;; the layer's grouping (the compact import section, queue 326): the original's groups
+                (do (wuleb w (count groups))
+                    (loop [gs (seq groups) its (seq its)]
+                      (when-let [[enc n m0 kd] (first gs)]
+                        (let [g (take n its) m (if (seq g) (second (first g)) m0)]
+                          (case (long enc)
+                            0 (let [[_ m nm [k _ d]] (first g)] (wname! w m) (wname! w nm) (desc w k d))
+                            0x7f (do (wname! w m) (wname! w "") (w8 w 0x7f) (wuleb w n)
+                                     (doseq [[_ _ nm [k _ d]] g] (wname! w nm) (desc w k d)))
+                            0x7e (let [[k d] (if (seq g) (let [[_ _ _ [k _ d]] (first g)] [k d]) (let [k0 (first kd) k (symbol (name (if (= k0 :efunc) :func k0)))] [k (if (#{'func 'tag} k) (cond-> {:type (second kd)} (= k0 :efunc) (assoc :exact true)) (second kd))]))]
+                                   (wname! w m) (wname! w "") (w8 w 0x7e) (desc w k d) (wuleb w n)
+                                   (doseq [[_ _ nm] g] (wname! w nm))))
+                          (recur (next gs) (drop n its))))))
+                (wvec w its (fn [w [_ m nm [k i d]]] (wname! w m) (wname! w nm) (desc w k d)))))
     :func (wvec w its (fn [w it] (wuleb w (:type (nth it 2)))))
     :table (wvec w its (fn [w [_ _ d]]
                          (if (:init d)
@@ -892,3 +962,108 @@
           (write-section w (section-id k) (fn [s] (section-content s k its flags))))
         (doseq [c (after k)] (write-custom c))))
     (.toByteArray (out w))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the extended name section's own checks (queue 326; the proposal's handler_name.ml): its subsections 0-13 decoded
+;; (malformed: their order and sizes, the name maps' indices strictly increasing) and their indices checked against the
+;; module (invalid, a custom check). The forms keep the section as the decoder does (decode-names): this only judges it.
+
+(def ^:private name-subsections
+  ;; id -> [kind of map, the outer index's kind, the inner's (an indirect map)]
+  {0 [:module] 1 [:map "function"] 2 [:indirect "function" "local" "local name map"] 3 [:indirect "function" "label" "label name map"]
+   4 [:map "type"] 5 [:map "table"] 6 [:map "memory"] 7 [:map "global"] 8 [:map "elem"] 9 [:map "data"]
+   10 [:indirect "type" "field" "field name map"] 11 [:map "tag"] 12 [:indirect "type" "param" "param name map"]
+   13 [:indirect "tag" "param" "tag param name map"]})
+
+(defn- name-malformed [msg] (throw (ex-info msg {:wasm/malformed msg})))
+
+(defn- name-map
+  "A name map at r: [[INDEX NAME] ...], its indices strictly increasing ('duplicate KIND name', 'KIND names out of order')."
+  [r ^String what]
+  (let [m (vec-of r (fn [r] [(u32 r) (wname r)]))]
+    (doseq [[[a] [b]] (partition 2 1 m)]
+      (cond (= a b) (name-malformed (str "custom @name: duplicate " what " name"))
+            (> (long a) (long b)) (name-malformed (str "custom @name: " what " names out of order"))))
+    m))
+
+(defn- name-subsections-of
+  "The subsections of a name section's payload: [[ID VALUE] ...], or throws {:wasm/malformed MSG}."
+  [^bytes payload]
+  (let [r (reader payload)]
+    (loop [out [] last -1]
+      (if (neg? (peek8 r))
+        out
+        (let [id (u8 r)]
+          (when (or (<= id last) (not (name-subsections id))) (name-malformed "invalid name subsection id"))
+          (let [n (try (u32 r) (catch arbace.lang.ExceptionInfo _ (name-malformed "unexpected end of name section")))
+                e (+ (pos r) n) saved (end r)]
+            (when (> e saved) (name-malformed "unexpected end of name section"))
+            (set-end! r e)
+            (let [[k outer inner inner-what] (name-subsections id)
+                  v (try
+                      (case k
+                        :module (wname r)
+                        :map (name-map r outer)
+                        :indirect (let [m (vec-of r (fn [r] [(u32 r) (name-map r inner)]))]
+                                    (doseq [[[a] [b]] (partition 2 1 m)]
+                                      (cond (= a b) (name-malformed (str "custom @name: duplicate " inner-what))
+                                            (> (long a) (long b)) (name-malformed (str "custom @name: " inner-what "s out of order"))))
+                                    m))
+                      (catch arbace.lang.ExceptionInfo x
+                        (let [m (:wasm/malformed (ex-data x))]
+                          (throw (if (and m (or (.startsWith ^String m "unexpected end") (= m "length out of bounds"))) (ex-info "unexpected end of name subsection" {:wasm/malformed "unexpected end of name subsection"}) x)))))]
+              (when-not (= (pos r) e) (name-malformed "name subsection size mismatch"))
+              (set-end! r saved)
+              (recur (conj out [id v]) id))))))))
+
+(defn- labels-of
+  "The labels of a function's body (its structured instructions, in order)."
+  ^long [body]
+  (let [n (atom 0)]
+    (letfn [(walk [x] (cond (seq? x) (do (when ('#{block loop if try_table try} (first x)) (swap! n inc)) (doseq [y (rest x)] (walk y)))
+                            (vector? x) (doseq [y x] (walk y))))]
+      (doseq [i body] (walk i)))
+    @n))
+
+(defn check-names
+  "A name section's payload against its module's items (the extended name section's checks, queue 326): throws
+  {:wasm/malformed MSG} when it does not decode; else nil, or the first index that names nothing (the custom check's
+  'custom @name: ...' message)."
+  [^bytes payload items]
+  (let [subs (name-subsections-of payload)
+        imports (filter #(= 'wasm/import (kind-of %)) items)
+        imp (fn [k] (filter #(= k (first (nth % 3))) imports))
+        defs (fn [k] (filter #(= k (kind-of %)) items))
+        types (vec (mapcat (fn [t] (if (= 'wasm/rec (kind-of t)) (nth t 2) [(nth t 2)])) (defs 'wasm/type)))
+        comp (fn [t] (if (and (seq? t) (= 'sub (first t))) (last t) t))
+        ftype (fn [x] (let [t (comp (get types x))] (when (and (seq? t) (= 'func (first t))) t)))
+        funcs (vec (concat (map (fn [i] {:type (:type (nth (nth i 3) 2)) :locals 0 :labels 0}) (imp 'func))
+                           (map (fn [f] {:type (:type (nth f 2)) :locals (count (:locals (nth f 2))) :labels (labels-of (drop 3 f))}) (defs 'wasm/func))))
+        tags (vec (concat (map #(:type (nth (nth % 3) 2)) (imp 'tag)) (map #(:type (nth % 2)) (defs 'wasm/tag))))
+        counts {"function" (count funcs) "type" (count types) "table" (+ (count (imp 'table)) (count (defs 'wasm/table)))
+                "memory" (+ (count (imp 'memory)) (count (defs 'wasm/memory))) "global" (+ (count (imp 'global)) (count (defs 'wasm/global)))
+                "elem" (count (defs 'wasm/elem)) "data" (count (defs 'wasm/data)) "tag" (count tags)}
+        inner-count (fn [outer inner x]
+                      (case [outer inner]
+                        ["function" "local"] (let [f (funcs x)] (+ (count (second (ftype (:type f)))) (long (:locals f))))
+                        ["function" "label"] (:labels (funcs x))
+                        ["type" "field"] (let [t (comp (types x))] (when (and (seq? t) (= 'struct (first t))) (count (second t))))
+                        ["type" "param"] (when-let [t (ftype x)] (count (second t)))
+                        ["tag" "param"] (count (second (ftype (tags x))))))
+        bad (fn [msg] (reduced msg))]
+    (reduce (fn [_ [id v]]
+              (let [[k outer inner] (name-subsections id)]
+                (case k
+                  :module nil
+                  :map (when-let [m (some (fn [[x]] (when (>= (long x) (long (counts outer))) (str "custom @name: invalid " outer " index " x))) v)]
+                         (bad m))
+                  :indirect (when-let [m (some (fn [[x m]]
+                                                 (if (>= (long x) (long (counts outer)))
+                                                   (str "custom @name: invalid " outer " index " x)
+                                                   (let [n (inner-count outer inner x)]
+                                                     (if (nil? n)
+                                                       (str "custom @name: " (if (= inner "field") "non-struct" "non-function") " type " x)
+                                                       (some (fn [[y]] (when (>= (long y) (long n)) (str "custom @name: invalid " inner " index " y " for " outer " " x))) m)))))
+                                               v)]
+                              (bad m)))))
+            nil subs)))

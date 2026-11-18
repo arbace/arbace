@@ -1152,6 +1152,14 @@ import jdk.internal.util.OperatingSystem;
                    (str direct-ctor "    DirectByteBuffer(int cap, int lim, MemorySegment segment)") (c 1 0)]]))))
 
 (def ^:private gensrc "build/linux-x86_64-server-release/support/gensrc/java.base/")
+;; JOP5 (a) (doc/classes/JAVA-FRONTEND-SURVEY.md, "Own platform"): where a :from under gensrc is read, the generated
+;; sources' root (MODULE/... below it) bin/jrt-convert derive hands it (JRT_GENSRC: the build tree's support/gensrc, or with
+;; the own pin the own pack's), else the build tree's; the label :from keeps its spelling (the overlays' text names it)
+(def ^:private gensrc-root (or (System/getenv "JRT_GENSRC") (str jdk "/build/linux-x86_64-server-release/support/gensrc")))
+(defn- jdk-file [^String rel]
+  (if (.startsWith rel gensrc)
+    (str gensrc-root "/java.base/" (subs rel (count gensrc)))
+    (str jdk "/" rel)))
 
 ;; F10a: Net's natives, each declaration given its body (gennet.py's repl)
 (defn- net-natives [^String s]
@@ -1198,7 +1206,7 @@ import jdk.internal.util.OperatingSystem;
 
 (defn- options-as-built [out]
   ;; genopts.py's check: the (option, family, level, name) tuples are the JDK build's gensrc's
-  (let [a (option-tuples out) b (option-tuples (slurp (str jdk "/" gensrc "sun/nio/ch/SocketOptionRegistry.java")))]
+  (let [a (option-tuples out) b (option-tuples (slurp (jdk-file (str gensrc "sun/nio/ch/SocketOptionRegistry.java"))))]
     (when-not (and (seq a) (= a b)) [(str "sun/nio/ch/SocketOptionRegistry.java: " (count a) " options, not the build's " (count b))])))
 
 ;; ---------------------------------------------------------------------------------------
@@ -1517,6 +1525,14 @@ import java.lang.module.ModuleDescriptor;
     }
 " "    // jrt: maxObjectInspectionAge is jrt's native (no librmi to load)
 " 1]])
+   ;; n-java-serial (2026-11-17, round 52): MarshalInputStream's initializer names the registry's stub by a string,
+   ;; which roots nothing in j2g's closed world (RegistryImpl_Stub was not in the build: every MarshalInputStream's
+   ;; initialization threw NoClassDefFoundError, java.rmi.MarshalledObject's get among them)
+   (rmi "sun/rmi/server/MarshalInputStream.java"
+        (str "the registry's stub is named by its class literal (Class.forName of a name that is not a constant roots"
+             " nothing in j2g's closed world, J2G-SPEC §4.1), so that the build holds it and Class.forName finds it")
+        [["            String registry = \"sun.rmi.registry.RegistryImpl_Stub\";\n"
+          "            // jrt: the class literal keeps the stub in j2g's closed world\n            String registry = sun.rmi.registry.RegistryImpl_Stub.class.getName();\n" 1]])
    ;; DGCClient: jdk26u's since P1 (JCS321 (a): jrt's PhantomReference; its derivation to weak references dropped,
    ;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)")
    (rmi "sun/rmi/runtime/Log.java"
@@ -1904,6 +1920,121 @@ import java.lang.module.ModuleDescriptor;
      "DefaultLoggerFinder.isSystem (jdk.internal.logger is outside the Go build's world) as jdk.internal.jrt.SystemLoggers.isSystem, the same answer"
      (conj logger-is-system ["isSystem(" "jdk.internal.jrt.SystemLoggers.isSystem(" 1]))])
 
+;; ---------------------------------------------------------------------------------------
+;; n-java-f13 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-f13"): F13's memory, class loading and collector
+;; beans, jdk26u's sun.management and jdk.management classes with their natives given bodies over jrt's
+;; sun.management.JrtManagement (the platform's pools and managers, as jdk26u's VM makes them) and
+;; jdk.internal.jrt.HostManagement (go/arbace/jrt/memory.ae)
+
+(def ^:private mx-why
+  ["Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, \"As built: n-java-f13\"): jdk26u's"
+   "%s (src/%s/share/classes/%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):"
+   "%s; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General"
+   "Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace"
+   "authors; Eclipse Public License 1.0."])
+
+(defn- mx [module rel why reps]
+  {:path rel
+   :from (str "src/" module "/share/classes/" rel)
+   :header (fn [] (header (-> mx-why
+                              (update 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) module rel))
+                              (update 3 #(format % why)))))
+   :ops reps
+   :verify (no-native #"\bnative\s+[\w\[\]]+\s+\w+\(" rel)})
+
+(def ^:private mx-natives
+  (str "the natives HotSpot's management interface (jmm) answers have bodies over jrt's sun.management.JrtManagement"
+       " and jdk.internal.jrt.HostManagement (go/arbace/jrt/memory.ae)"))
+
+(def ^:private mx-derivations
+  [(mx "java.management" "sun/management/ClassLoadingImpl.java" mx-natives
+       [["static native void setVerboseClass(boolean value);"
+         "static void setVerboseClass(boolean value) {\n        JrtManagement.setVerboseClass(value);\n    }" 1]])
+   (mx "java.management" "sun/management/MemoryImpl.java" mx-natives
+       [["private static native MemoryPoolMXBean[] getMemoryPools0();"
+         "private static MemoryPoolMXBean[] getMemoryPools0() {\n        return JrtManagement.pools();\n    }" 1]
+        ["private static native MemoryManagerMXBean[] getMemoryManagers0();"
+         "private static MemoryManagerMXBean[] getMemoryManagers0() {\n        return JrtManagement.managers();\n    }" 1]
+        ["private native MemoryUsage getMemoryUsage0(boolean heap);"
+         "private MemoryUsage getMemoryUsage0(boolean heap) {\n        return JrtManagement.usage(heap);\n    }" 1]
+        ["private native void setVerboseGC(boolean value);"
+         "private void setVerboseGC(boolean value) {\n        JrtManagement.setVerboseGC(value);\n    }" 1]])
+   (mx "java.management" "sun/management/MemoryPoolImpl.java"
+       (str mx-natives "; the thresholds and the sensors are JrtManagement's low memory detector's (n-java-thresh)")
+       [["private native MemoryUsage getUsage0();"
+         "private MemoryUsage getUsage0() {\n        return JrtManagement.usage(isHeap);\n    }" 1]
+        ["private native MemoryUsage getPeakUsage0();"
+         "private MemoryUsage getPeakUsage0() {\n        return JrtManagement.peak(isHeap);\n    }" 1]
+        ["private native MemoryUsage getCollectionUsage0();"
+         "private MemoryUsage getCollectionUsage0() {\n        return JrtManagement.collectionUsage(isHeap);\n    }" 1]
+        ["private native void setUsageThreshold0(long current, long newThreshold);"
+         (str "private void setUsageThreshold0(long current, long newThreshold) {\n"
+              "        JrtManagement.setThreshold(this, JrtManagement.USAGE, newThreshold);\n    }") 1]
+        ["private native void setCollectionThreshold0(long current, long newThreshold);"
+         (str "private void setCollectionThreshold0(long current, long newThreshold) {\n"
+              "        JrtManagement.setThreshold(this, JrtManagement.COLLECTION, newThreshold);\n    }") 1]
+        ["private native void resetPeakUsage0();"
+         "private void resetPeakUsage0() {\n        JrtManagement.resetPeak(isHeap);\n    }" 1]
+        ["private native MemoryManagerMXBean[] getMemoryManagers0();"
+         "private MemoryManagerMXBean[] getMemoryManagers0() {\n        return JrtManagement.managersOf(this);\n    }" 1]
+        ["private native void setPoolUsageSensor(Sensor s);"
+         "private void setPoolUsageSensor(Sensor s) {\n        JrtManagement.setSensor(this, JrtManagement.USAGE, s);\n    }" 1]
+        ["private native void setPoolCollectionSensor(Sensor s);"
+         (str "private void setPoolCollectionSensor(Sensor s) {\n"
+              "        JrtManagement.setSensor(this, JrtManagement.COLLECTION, s);\n    }") 1]])
+   (mx "java.management" "sun/management/MemoryManagerImpl.java" mx-natives
+       [["private native MemoryPoolMXBean[] getMemoryPools0();"
+         "private MemoryPoolMXBean[] getMemoryPools0() {\n        return JrtManagement.poolsOf(this);\n    }" 1]])
+   (mx "java.management" "sun/management/GarbageCollectorImpl.java" mx-natives
+       [["public native long getCollectionCount();"
+         "public long getCollectionCount() {\n        return jdk.internal.jrt.HostManagement.gcCount0();\n    }" 1]
+        ["public native long getCollectionTime();"
+         "public long getCollectionTime() {\n        return jdk.internal.jrt.HostManagement.gcTime0();\n    }" 1]])
+   (mx "jdk.management" "com/sun/management/GcInfo.java"
+       (str "since the JVM makes GcInfo objects through their private constructor (JNI), a static initializer hands"
+            " jdk.internal.jrt.HostManagement a factory over it for jrt's GcInfoBuilder, as ThreadInfo's")
+       [["public class GcInfo implements CompositeData, CompositeDataView {\n"
+         (str "public class GcInfo implements CompositeData, CompositeDataView {\n"
+              "    // jrt (n-java-f13): the VM's way to the private constructor, handed to HostManagement\n"
+              "    static {\n"
+              "        jdk.internal.jrt.HostManagement.setGcInfoFactory(new jdk.internal.jrt.HostManagement.GcInfoFactory() {\n"
+              "            @Override\n"
+              "            public Object newGcInfo(Object builder, long index, long startTime, long endTime,\n"
+              "                                    Object[] muBeforeGc, Object[] muAfterGc, Object[] extAttributes) {\n"
+              "                return new GcInfo((GcInfoBuilder) builder, index, startTime, endTime,\n"
+              "                                  (MemoryUsage[]) muBeforeGc, (MemoryUsage[]) muAfterGc, extAttributes);\n"
+              "            }\n"
+              "        });\n"
+              "    }\n"
+              "\n") 1]])
+   (mx "jdk.management" "com/sun/management/internal/GcInfoBuilder.java"
+       (str mx-natives "; Go's collector has no extension attribute (HotSpot's GcThreadCount)")
+       [["private native int getNumGcExtAttributes(GarbageCollectorMXBean gc);"
+         "private int getNumGcExtAttributes(GarbageCollectorMXBean gc) {\n        return 0;\n    }" 1]
+        [#"private native void fillGcAttributeInfo\(([^;]*)\);" "private void fillGcAttributeInfo($1) {\n    }" 1]
+        [#"private native GcInfo getLastGcInfo0\(([^;]*)\);"
+         (str "private GcInfo getLastGcInfo0($1) {\n"
+              "        return (GcInfo) sun.management.JrtManagement.lastGcInfo(this, poolNames, before, after, extAttValues);\n"
+              "    }") 1]])
+   (mx "jdk.management" "com/sun/management/internal/GarbageCollectorExtImpl.java"
+       (str mx-natives "; enabling the notifications hands JrtManagement a sender of them, GCNotifier's call of"
+            " createGCNotification with a GcInfo of the cycle (n-java-thresh)")
+       [[#"private native void setNotificationEnabled\(([^;]*)\);"
+         (str "private void setNotificationEnabled($1) {\n"
+              "        // jrt (n-java-thresh): JrtManagement's notifier sends the cycles' notifications through it\n"
+              "        sun.management.JrtManagement.setGcNotifier(!enabled ? null : new sun.management.JrtManagement.GcNotifier() {\n"
+              "            @Override\n"
+              "            public void notifyGc(long timestamp, String gcAction, String gcCause, long index, long startTime,\n"
+              "                                 long endTime, java.lang.management.MemoryUsage[] before,\n"
+              "                                 java.lang.management.MemoryUsage[] after) {\n"
+              "                GcInfo info = (GcInfo) jdk.internal.jrt.HostManagement.gcInfoFactory().newGcInfo(\n"
+              "                    getGcInfoBuilder(), index, startTime, endTime, before, after, new Object[0]);\n"
+              "                createGCNotification(timestamp, getName(), gcAction, gcCause, info);\n"
+              "            }\n"
+              "        });\n"
+              "    }") 1]])])
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -1962,7 +2093,8 @@ import java.lang.module.ModuleDescriptor;
   jmx2-derivations
   http-derivations
   invoke-derivations
-  hjd-derivations))
+  hjd-derivations
+  mx-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 
@@ -1975,7 +2107,7 @@ import java.lang.module.ModuleDescriptor;
   "The overlay's text: jdk26u's file with the ops applied in order, the header first. Throws when a replacement
   does not match as often as the table says."
   [{:keys [path from header ops]}]
-  (let [src (slurp (str jdk "/" from))
+  (let [src (slurp (jdk-file from))
         out (reduce (fn [^String s op]
                       (if (fn? op)
                         (op s)

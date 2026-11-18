@@ -22,11 +22,16 @@
 # :none) and :exit (all.T's expected status when not 0); for nofib :expected against NAME.faststdout or NAME.stdout.
 # --opt O1 (HES74 (c)): the builds at -O1 instead, recorded by default into test/haskell/ref-ghc914-O1.edn, the compiled
 # level's reference at -O1 (bin/hsi check --aot --opt O1).
+# --arm64 (queue 325g, DECISION 5 (a)): on a linux/arm64 host, the programs test/haskell/arm64-ref.txt lists (those whose run
+# is the machine's: arm64's default NaN, its conversions) recorded into test/haskell/ref-ghc914-arm64.edn, the arm64 hosts'
+# reference (bin/lib/hsi/check reads it there before the golden files and the amd64 record); every other line of it kept.
+# --keep DIR (queue 325g): each run's outputs kept as DIR/ID.stdout, DIR/ID.stderr and DIR/ID.status (the ID's slashes as
+# directories): the text the golden files of the samples and the synthetic corpus are reviewed against (bin/hsi golden).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/hsi/records.bash"
-corpora=samples,synthetic,testsuite-core,nofib only="" jobs=${HSI_JOBS:-8} out="" opt=O0
+corpora=samples,synthetic,testsuite-core,nofib only="" jobs=${HSI_JOBS:-8} out="" opt=O0 keep="" arm64=""
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
@@ -34,7 +39,12 @@ while [ $# -gt 0 ]; do
     --jobs) jobs=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
     --opt) opt=$2; shift 2 ;;
-    *) echo "usage: bin/hsi record-ref [--corpus C,...] [--only ID,...] [--jobs N] [--out FILE] [--opt O0|O1]" >&2; exit 2 ;;
+    --keep) keep=$(mkdir -p "$2" && cd "$2" && pwd); shift 2 ;;
+    --arm64)
+      case $(uname -m) in aarch64|arm64) ;; *) echo "hsi record-ref: --arm64 records GHC's runs on an arm64 host" >&2; exit 2 ;; esac
+      corpora=samples,synthetic,testsuite-core out=$root/test/haskell/ref-ghc914-arm64.edn arm64=1
+      only=,$(grep -v '^#' "$root/test/haskell/arm64-ref.txt" | awk 'NF {print $1}' | paste -sd, -),; shift ;;
+    *) echo "usage: bin/hsi record-ref [--corpus C,...] [--only ID,...] [--jobs N] [--out FILE] [--opt O0|O1] [--keep DIR] [--arm64]" >&2; exit 2 ;;
   esac
 done
 case $opt in O0) sfx="" ;; O1) sfx=-O1 ;; *) echo "hsi record-ref: --opt O0 or O1" >&2; exit 2 ;; esac
@@ -175,11 +185,14 @@ one() {
     if cmp -s "$w.stdout" "$src/$exp"; then expv=" :expected :same"; else expv=" :expected :differs"; fi
   elif [ "$kind" != plain ]; then expv=" :expected :none"; fi
   local ex=""; [ "$exit" != 0 ] && ex=" :exit $exit"
+  if [ -n "$keep" ]; then
+    mkdir -p "$keep/$(dirname "$id")"; cp "$w.stdout" "$keep/$id.stdout"; cp "$w.stderr" "$keep/$id.stderr"; echo "$status" > "$keep/$id.status"
+  fi
   echo "{:id \"$id\" :status $status :stdout \"$so\" :bytes $(stat -c %s "$w.stdout") :first \"$(esc "$fo")\" :stderr \"$se\" :err-bytes $(stat -c %s "$w.stderr") :err-first \"$(esc "$fe")\"$expv$ex :build $(printf '%.2f' "$(echo "$t1 - $t0" | bc)") :run $(printf '%.2f' "$(echo "$t2 - $t1" | bc)")}" > "$r"
   rm -rf "$w" "$w.build.log" "$w.pre.log" "$w.cp.log" "$w.stdout" "$w.stderr"
 }
 export -f one hsi_pre_gen
-export work plan opt root
+export work plan opt root keep
 # each program under a cap of its own (the build's 300 s, the run's, the copies)
 seq 1 "$(wc -l < "$plan")" | xargs -P "$jobs" -I{} timeout -s KILL 600 bash -c 'one {}'
 
@@ -197,7 +210,12 @@ fi
   echo ";; :expected the testsuite's or nofib's expected stdout file against the run's; :exit all.T's expected status; :build and :run"
   echo ";; seconds (GT8). Each program built by ghc -$opt -rtsopts in a fresh copy of its directory and run under env -i, LANG=C.UTF-8,"
   echo ";; TZ=UTC, 10 s of CPU and 30 s of wall time (bin/lib/hsi/record-ref)."
+  if [ -n "$arm64" ]; then
+    echo ";; The arm64 hosts' reference (queue 325g, DECISION 5 (a)): GHC 9.14.1 on linux/$(uname -m), the programs of test/haskell/arm64-ref.txt"
+    echo ";; Made by: bin/hsi record-ref --arm64"
+  else
   echo ";; Made by: bin/hsi record-ref --corpus $corpora${only:+ --only ${only:1:${#only}-2}}${sfx:+ --opt $opt}"
+  fi
   echo ";; ghc: $(ghc --version)"
   echo ";; date: $(date -u +%Y-%m-%d)"
   cat "$new"

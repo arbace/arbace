@@ -69,6 +69,8 @@
   :loc-of HashMap obj -> location (gc's Name.Opt), :owner HashMap obj -> fn}."
   nil)
 
+(declare method-inst)
+
 ;;; Types (types.Type's predicates gc's escape analysis asks)
 
 (defn- under [ty] (t/under ty))
@@ -143,12 +145,24 @@
                                            (type-str p)))
                                        ps)) ")"))
 
+(declare type-str)
+
+(def ^:private ^:dynamic *targ* false)
+
+(defn- targ-str
+  "A type argument in an instance's name: types2's, byte and rune as uint8 and int32 (the
+  instance's symbol is named by its type arguments' link strings)."
+  [ty]
+  (binding [*targ* true] (type-str ty)))
+
 (defn type-str
   "A type as gc's %v of a types.Type prints it (types/fmt.go, fmtGo): the local package's names
   unqualified, others' qualified by their package's name."
   [ty]
   (cond
     (keyword? ty) (case ty
+                    :byte (if *targ* "uint8" "byte")
+                    :rune (if *targ* "int32" "rune")
                     :unsafe-pointer "unsafe.Pointer"
                     :untyped-nil "nil"
                     :untyped-bool "untyped bool" :untyped-int "untyped int" :untyped-rune "untyped rune"
@@ -156,7 +170,7 @@
                     (name ty))
     (t/named? ty) (let [i (t/info ty)
                         n (str (:name i)
-                               (when-let [as (seq (:targs i))] (str "[" (str/join "," (map type-str as)) "]")))]
+                               (when-let [as (seq (:targs i))] (str "[" (str/join "," (map targ-str as)) "]")))]
                     (cond
                       (and (= "error" (:name i)) (nil? (:pkg i))) "error"
                       (or (nil? (:pkg i)) (= (:pkg i) (:local-pkg *ctx*))) n
@@ -485,7 +499,7 @@
         :method-expr (str (type-str (:recv-type n)) "." (e/o (:method n) :name))
         :assert (str (fmt-node (:x n) np) ".("
                      (let [f (:form n)]
-                       (if (and (seq? f) (= 'any (last f)) (iface? (:to n))) "any" (type-str (:to n))))
+                       (if (and (seq? f) (= 'assert (first f)) (= 'any (second f)) (iface? (:to n))) "any" (type-str (:to n))))
                      ")")
         (:index :place-index) (str (fmt-node (:x n) np) "[" (fmt-node (:index n) 0) "]")
         (:map-index :place-map) (str (fmt-node (:x n) np) "[" (fmt-node (or (:key n) (:index n)) 0) "]")
@@ -1925,7 +1939,7 @@
               selstr (str (fmt-node x 8) "." mname)]
           (case (:kind r)
             :method
-            (let [m (:obj r)
+            (let [m (or (method-inst (:obj r) typ) (:obj r))
                   ptr (boolean (e/o m :ptr-recv))
                   [_ isptr] (t/deref-type typ)
                   adj (cond (and ptr (not (:indirect r))) :addr
@@ -2976,7 +2990,7 @@
 
 (def ^:private tag-version
   "The version of the tags' analysis, in the cache's keys: changed with the analysis."
-  "escape-8")
+  "escape-9")
 
 (def ^:private pkg-tags
   "The other packages' tags analyzed in this process: path -> {function name -> its record}."
@@ -3254,6 +3268,312 @@
         (doseq [f fns :when (not (fn-get f :extern))] (closure-vars! f))
         fns))))
 
+;;; Generic functions' instances (noder's stenciling, unified IR: reader.go's objIdx, Shapify,
+;;; shapeSig, callShaped; GOI-SPEC.md, "Since v1: gc's -m of generic instances")
+
+(defn- isubst
+  "Type ty with each type parameter replaced by targs' entry at its index (the instance's types:
+  a generic function's body has only its own type parameters)."
+  [ty targs]
+  (cond
+    (keyword? ty) ty
+    (t/tparam? ty) (nth targs (long (:index (t/info ty))) ty)
+    (t/named? ty) ty
+    (vector? ty)
+    (case (nth ty 0)
+      :pointer [:pointer (isubst (nth ty 1) targs)]
+      :slice [:slice (isubst (nth ty 1) targs)]
+      :array [:array (nth ty 1) (isubst (nth ty 2) targs)]
+      :map [:map (isubst (nth ty 1) targs) (isubst (nth ty 2) targs)]
+      :chan [:chan (nth ty 1) (isubst (nth ty 2) targs)]
+      :func [:func (mapv #(isubst % targs) (nth ty 1)) (mapv #(isubst % targs) (nth ty 2)) (nth ty 3)]
+      :struct [:struct (mapv #(update % :type isubst targs) (nth ty 1))]
+      :interface (if (or (seq (nth ty 1)) (some? (nth ty 2 nil)))
+                   [:interface (mapv #(update % :type isubst targs) (nth ty 1)) (nth ty 2 nil)]
+                   ty)
+      :tuple (into [:tuple] (map #(isubst % targs) (rest ty)))
+      ty)
+    :else ty))
+
+(defn- type-any?
+  "Whether type ty holds a type for which pred is true (named types not entered)."
+  [pred ty]
+  (cond
+    (pred ty) true
+    (keyword? ty) false
+    (t/tparam? ty) false
+    (t/named? ty) (boolean (some #(type-any? pred %) (:targs (t/info ty))))
+    (vector? ty)
+    (case (nth ty 0)
+      (:pointer :slice) (type-any? pred (nth ty 1))
+      (:array :chan) (type-any? pred (nth ty 2))
+      :map (or (type-any? pred (nth ty 1)) (type-any? pred (nth ty 2)))
+      :func (boolean (or (some #(type-any? pred %) (nth ty 1)) (some #(type-any? pred %) (nth ty 2))))
+      :struct (boolean (some #(type-any? pred (:type %)) (nth ty 1)))
+      :interface (boolean (or (some #(type-any? pred (:type %)) (nth ty 1)) (map? (nth ty 2 nil))))
+      :tuple (boolean (some #(type-any? pred %) (rest ty)))
+      false)
+    :else false))
+
+(defn- has-inst? [ty] (type-any? #(and (t/named? %) (boolean (seq (:targs (t/info %))))) ty))
+(defn- has-tparam? [ty] (type-any? t/tparam? ty))
+
+(def ^:private type-keys #{:type :to :sig :recv-type :iface :gtype})
+(def ^:private skip-keys #{:form :refs :field :method :tparams :targs :inst-form :spec :gtype :rmap})
+
+(defn- tree-ok?
+  "Whether the stenciling below covers tree x: no type of it (nor of its local objects) an
+  instance of a generic type; a type parameter only in a generic body (generic?), and there not
+  the operand of a selection, a method call or a type assertion (gc's dictionary calls); every
+  instantiated function one of gfns."
+  ([x gfns generic?] (tree-ok? x gfns generic? (constantly false)))
+  ([x gfns generic? inst-ok?]
+  (let [seen (java.util.IdentityHashMap.)
+        ty-ok (fn [ty] (and (not (type-any? #(and (t/named? %) (seq (:targs (t/info %))) (not (inst-ok? %))) ty))
+                            (or generic? (not (has-tparam? ty)))))
+        tp-operand? (fn [n] (some #(when-let [v (get n %)] (and (map? v) (has-tparam? (:type v)))) [:x :recv :callee]))]
+    (letfn [(ok [x]
+              (cond
+                (e/obj? x) (or (.containsKey seen x)
+                               (do (.put seen x true)
+                                   (if (e/o x :local?) (ty-ok (e/o x :type)) true)))
+                (map? x) (and (or (not (and (= :func (:op x)) (seq (:targs x)))) (contains? gfns (:obj x)))
+                              (not (and generic? (or (#{:sel :method :assert} (:op x))
+                                                     (and (= :call (:op x)) (= :method (:kind x))))
+                                        (tp-operand? x)))
+                              (every? (fn [[k v]]
+                                        (cond (skip-keys k) true
+                                              (type-keys k) (or (not (or (keyword? v) (vector? v))) (ty-ok v))
+                                              :else (ok v)))
+                                      x))
+                (or (vector? x) (seq? x)) (every? ok x)
+                :else true))]
+      (ok x)))))
+
+(defn- shapify
+  "noder's Shapify: a type argument's shape, its underlying type (a pointer's *uint8 when its
+  type parameter's constraint is a basic interface)."
+  [targ tp]
+  (let [b (:bound (t/info tp))
+        basic (or (nil? b) (let [u (under b)] (and (vector? u) (= :interface (nth u 0)) (not (map? (nth u 2 nil))))))]
+    (if (and basic (= :pointer (kind targ)))
+      [:pointer :uint8]
+      (under targ))))
+
+(defn- inst-name [base tys shape?]
+  (str base "[" (str/join "," (map #(str (when shape? "go.shape.") (targ-str %)) tys)) "]"))
+
+(defn- copy-inst
+  "Generic body x copied for an instance: its local objects fresh, of the instance's types, every
+  type substituted (isubst)."
+  [x targs ^java.util.HashMap om]
+  (letfn [(fresh [o] (if (and (e/obj? o) (e/o o :local?))
+                       (or (.get om o)
+                           (let [c (e/obj (update @o :type isubst targs))]
+                             (.put om o c)
+                             c))
+                       o))
+          (cp [x]
+            (cond
+              (e/obj? x) (if (.containsKey om x) (.get om x) (fresh x))
+              (map? x) (into {} (map (fn [[k v]]
+                                           [k (cond
+                                                (type-keys k) (if (or (keyword? v) (vector? v)) (isubst v targs) v)
+                                                (= k :targs) (mapv #(isubst % targs) v)
+                                                (#{:form :refs :field :method :tparams :inst-form :spec} k) v
+                                                :else (cp v))])
+                                         x))
+              (vector? x) (mapv cp x)
+              (seq? x) (doall (map cp x))
+              :else x))]
+    (cp x)))
+
+(defn- mark-insts
+  "A tree's references to local generic functions' instances (gfns) marked with the instance
+  ([obj targs], the targs the instance's): a call's callee becomes the shaped instance (callShaped:
+  gc calls it with the instance's dictionary), made by (inst! obj targs wrapper?) with its wrapper
+  when wrapper? (an instantiation of non-generic code: noder reads the instantiated object, its
+  wrapper with it)."
+  [gfns inst! wrapper?]
+  (fn [n]
+    (cond
+      (and (= :call (:op n)) (= :func (:op (:callee n))) (:inst-of (:callee n)))
+      (let [c (:callee n) [o ts] (:inst-of c) i (inst! o ts wrapper?)]
+        (assoc n :callee (-> c (assoc :obj (:shaped i)) (dissoc :inst-of :targs))))
+      (and (= :func (:op n)) (seq (:targs n)) (contains? gfns (:obj n)))
+      (assoc n :inst-of [(:obj n) (:targs n)])
+      :else n)))
+
+(defn- value-insts
+  "The marked references left (function values): the instances' wrappers."
+  [inst!]
+  (fn [n]
+    (if (and (= :func (:op n)) (:inst-of n))
+      (let [[o ts] (:inst-of n)] (-> n (assoc :obj (:wrapper (inst! o ts true))) (dissoc :inst-of :targs)))
+      n)))
+
+(defn- postwalk-tree
+  "f over tree x bottom-up (maps, vectors and seqs; objects and forms left as they are)."
+  [f x]
+  (cond
+    (map? x) (f (into {} (map (fn [[k v]] [k (if (#{:form :refs :spec} k) v (postwalk-tree f v))]) x)))
+    (vector? x) (mapv #(postwalk-tree f %) x)
+    (seq? x) (doall (map #(postwalk-tree f %) x))
+    :else x))
+
+(defn- local-inst?
+  "Whether named type ty is an instance of one of the package's generic types."
+  [ty]
+  (and (t/named? ty) (seq (:targs (t/info ty))) (:origin (t/info ty))
+       (= (:pkg (t/info ty)) (:local-pkg *ctx*))))
+
+(defn- method-inst
+  "The wrapper of generic method m (an object, or method data with its :obj) of the instance a
+  receiver of type recv-ty is of (the stenciling's, *ctx*'s :minst), else nil."
+  [m recv-ty]
+  (let [mo (if (e/obj? m) m (:obj m))
+        [b] (when recv-ty (t/deref-type recv-ty))]
+    (when (and mo (e/obj? mo) (e/o mo :generic) (local-inst? b))
+      (.get ^java.util.HashMap (:minst *ctx*) [mo (:targs (t/info b))]))))
+
+(defn- stencil
+  "The package's generic functions' and generic types' methods' instances as gc's noder makes
+  them: for each instantiation the non-generic code (and the instances, transitively) references,
+  the shaped function f[go.shape.T] (its body the generic body at the shapes; Dupok: no parameter
+  diagnostics) and the wrapper f[T] (a tail call of the shaped function; a Wrapper), both with
+  the generic function's pragmas; for each instance of a generic type the code's types name, each
+  method's shaped T[go.shape.U].M and wrapper T[U].M likewise; the references rewritten (a
+  devirtualized call's, method-inst). decls: the package's function declarations. Returns the
+  declarations to analyze: the non-generic ones whose generics it covers and the instances; the
+  others are left out as before (instances of other packages' generic functions and types:
+  GOI-SPEC.md, gc-m)."
+  [decls]
+  (let [gen? (fn [d] (boolean (e/o (:obj d) :generic)))
+        cands (filterv #(and (gen? %) (:tree %)) decls)
+        fn-cands (filterv #(not (:method %)) cands)
+        m-cands (filterv :method cands)
+        gfns (loop [s (into #{} (map :obj) fn-cands)]
+               (let [s2 (into #{} (comp (filter #(contains? s (:obj %))) (filter #(tree-ok? (:tree %) s true)) (map :obj)) fn-cands)]
+                 (if (= s2 s) s (recur s2))))
+        ;; a generic type's methods: all covered, or the type is not (its instances left out)
+        gtypes (let [by-base (group-by #(method-base (:obj %)) m-cands)]
+                 (into #{} (keep (fn [[b ds]] (when (every? #(tree-ok? (:tree %) gfns true) ds) b))) by-base))
+        mdecls (group-by #(method-base (:obj %)) (filter #(contains? gtypes (method-base (:obj %))) m-cands))
+        inst-ok? (fn [ty] (and (local-inst? ty) (contains? gtypes (:name (t/info ty)))
+                               (every? #(not (has-tparam? %)) (:targs (t/info ty)))))
+        by-obj (into {} (comp (filter #(contains? gfns (:obj %))) (map (fn [d] [(:obj d) d]))) fn-cands)
+        shaped (java.util.HashMap.)
+        wrappers (java.util.HashMap.)
+        minst ^java.util.HashMap (:minst *ctx*)
+        tinsts (java.util.LinkedHashMap.)
+        todo (java.util.ArrayDeque.)
+        out (volatile! [])
+        inst-obj (fn [o nm ty] (e/obj (assoc (dissoc @o :generic :tparams :tparams-count :decl) :name nm :type ty)))
+        inst! (fn [o targs wrapper?]
+                (let [d (get by-obj o)
+                      tps (vec (e/o o :tparams))
+                      shapes (mapv shapify targs tps)
+                      sk [o shapes] wk [o targs]
+                      so (or (.get shaped sk)
+                             (let [so (inst-obj o (inst-name (e/o o :name) shapes true) (isubst (e/o o :type) shapes))]
+                               (.put shaped sk so)
+                               (.add todo [:shaped d so shapes nil nil])
+                               so))
+                      wo (when wrapper?
+                           (or (.get wrappers wk)
+                               (let [wo (inst-obj o (inst-name (e/o o :name) targs false) (isubst (e/o o :type) targs))]
+                                 (.put wrappers wk wo)
+                                 (.add todo [:wrapper d wo targs so nil])
+                                 wo)))]
+                  {:shaped so :wrapper wo}))
+        ;; an instance of a generic type: its methods' shaped functions and wrappers
+        tinst! (fn [ty]
+                 (let [i (t/info ty)
+                       targs (:targs i)
+                       k [(:name i) targs]]
+                   (when-not (.containsKey tinsts k)
+                     (.put tinsts k ty)
+                     (doseq [d (get mdecls (:name i))]
+                       (let [o (:obj d)
+                             tps (vec (e/o o :rtparams))
+                             shapes (mapv shapify targs (if (= (count tps) (count targs)) tps (repeat nil)))
+                             ptr (boolean (e/o o :ptr-recv))
+                             mname (fn [tn] (if ptr (str "(*" tn ")." (e/o o :name)) (str tn "." (e/o o :name))))
+                             sk [o shapes]
+                             so (or (.get shaped sk)
+                                    (let [so (inst-obj o (mname (inst-name (:name i) shapes true)) (isubst (e/o o :type) shapes))]
+                                      (.put shaped sk so)
+                                      (.add todo [:shaped d so shapes nil nil])
+                                      so))
+                             wo (inst-obj o (mname (type-str ty)) (isubst (e/o o :type) targs))]
+                         (.put minst [o targs] wo)
+                         (.add todo [:wrapper d wo targs so ty]))))))
+        rewrite (fn [tree wrapper?]
+                  (->> tree
+                       (postwalk-tree (mark-insts gfns inst! wrapper?))
+                       (postwalk-tree (value-insts inst!))
+                       (postwalk-tree (fn [n]
+                                        (if (and (#{:method :method-expr} (:op n)) (:method n))
+                                          (if-let [w (method-inst (:method n) (or (:recv-type n) (:type (:recv n))))]
+                                            (assoc n :method w)
+                                            n)
+                                          n)))))
+        types-of (fn [tree]
+                   (let [acc (java.util.ArrayList.) seen (java.util.IdentityHashMap.)]
+                     (letfn [(ty! [ty] (type-any? (fn [x] (when (local-inst? x) (.add acc x)) false) ty))
+                             (w [x] (cond
+                                      (e/obj? x) (when-not (.containsKey seen x) (.put seen x true) (when (e/o x :local?) (ty! (e/o x :type))))
+                                      (map? x) (doseq [[k v] x]
+                                                 (cond (skip-keys k) nil
+                                                       (type-keys k) (when (or (keyword? v) (vector? v)) (ty! v))
+                                                       :else (w v)))
+                                      (or (vector? x) (seq? x)) (doseq [y x] (w y))
+                                      :else nil))]
+                       (w tree))
+                     (vec acc)))
+        user-ok? (fn [tree] (and (tree-ok? tree gfns false inst-ok?) true))
+        keep (vec (for [d decls
+                        :when (not (gen? d))
+                        :when (or (not (:generic d)) (and (:tree d) (user-ok? (:tree d))))]
+                    d))
+        _ (doseq [d keep :when (:generic d)] (doseq [ty (types-of (:tree d))] (tinst! ty)))
+        keep (mapv #(if (:generic %) (assoc % :generic false :tree (rewrite (:tree %) true)) %) keep)]
+    (loop []
+      (when-let [[k d o targs so ity] (.poll todo)]
+        (let [tree (:tree d)
+              line (or (:line tree) (e/o (:obj d) :line))
+              ename (when (:method d) (e/o o :name))]
+          (case k
+            :shaped
+            (let [t2 (rewrite (copy-inst tree targs (java.util.HashMap.)) false)]
+              (vswap! out conj (cond-> (assoc d :obj o :generic false :esc-dupok true :tree (assoc t2 :obj o))
+                                 ename (assoc :esc-name ename))))
+            :wrapper
+            (let [t2 (copy-inst (select-keys tree [:op :recv :params :results :sig :mode :type :line]) targs (java.util.HashMap.))
+                  recv (:recv t2)
+                  ptr (boolean (e/o o :ptr-recv))
+                  _ (when (and recv ity) (e/oset! recv :type (if ptr [:pointer ity] ity)))
+                  sig (under (:sig t2))
+                  res (nth sig 2)
+                  args (vec (for [p (:params t2)] {:op :local :obj p :mode :variable :type (e/o p :type) :line line}))
+                  call (if recv
+                         {:op :call :kind :method :line line :mode :value
+                          :callee {:op :method :method so :recv {:op :local :obj recv :mode :variable :type (e/o recv :type) :line line}
+                                   :path [0] :recv-type (e/o recv :type) :type (e/o so :type) :mode :value :line line}
+                          :args args}
+                         {:op :call :kind :static :line line :mode :value
+                          :callee {:op :func :obj so :mode :value :type (e/o so :type) :line line}
+                          :args args})
+                  call (assoc call :type (case (count res) 0 :invalid 1 (first res) (into [:tuple] res)))
+                  call (if (and (nth sig 3 nil) (seq args)) (assoc call :spread true) call)
+                  body {:op :block :stmts [(if (seq res)
+                                             {:op :return :line line :values [call]}
+                                             {:op :expr :line line :x (assoc call :mode :novalue)})]}]
+              (vswap! out conj (cond-> (assoc d :obj o :generic false :esc-wrapper true :tree (assoc t2 :body body :obj o))
+                                 ename (assoc :esc-name ename)))))
+          (recur))))
+    (into keep @out)))
+
 (defn analyze-package
   "The escape analysis of checked package r: its functions' records, their tags; the messages
   in *msgs*."
@@ -3267,9 +3587,11 @@
                    :func-assigns (java.util.HashMap.)
                    :temps (java.util.IdentityHashMap.)
                    :extra-fns (volatile! [])
-                   :kept-lits (volatile! #{})}]
+                   :kept-lits (volatile! #{})
+                   :minst (java.util.HashMap.)}]
 
     (let [decls (filter #(and (= :func (:kind %)) (:obj %)) (:decl-infos r))
+          decls (stencil decls)
           decls (mapv (fn [d] (if (:tree d) (binding [*wfile* (file-of d)] (update d :tree (comp bloop-walk normalize-go-defer prune-switches))) d)) decls)
           fns (vec (for [d decls
                          :let [tree (:tree d)
@@ -3282,7 +3604,7 @@
                          :when (and sig (not (:generic d)))]
                      (let [recv (:recv tree)
                            rtys (nth (under sig) 2)
-                           f (volatile! {:node tree :obj o :name (fn-name d o) :parent nil :closure? false :file (file-of d)
+                           f (volatile! {:node tree :obj o :name (or (:esc-name d) (fn-name d o)) :parent nil :closure? false :file (file-of d)
                                          :recv recv :recv-type (or (when recv (e/o recv :type))
                                                          (when (:method d)
                                                            (let [rn (base-type r (:base d))]
@@ -3298,6 +3620,7 @@
                                          :norace (boolean (:go/norace mt))
                                          :uintptrescapes (boolean (:go/uintptrescapes mt))
                                          :uintptr-pragmas (cond-> #{} (:go/uintptrescapes mt) (conj :escapes) (:go/uintptrkeepalive mt) (conj :keepalive))
+                                         :wrapper (boolean (or (:esc-dupok d) (:esc-wrapper d)))
                                          :body (:body tree)})]
                        (when recv (e/oset! recv :esc-class :param))
                        (doseq [p (:params tree)] (when p (e/oset! p :esc-class :param)))

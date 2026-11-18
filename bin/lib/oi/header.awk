@@ -4,7 +4,9 @@
 # "class<TAB>REASON", REASON the first statement outside that set.
 function trim(s) { gsub(/^[ \t\n]+|[ \t\n]+$/, "", s); return s }
 # a class: REASON, or in helper mode (below) past its readonly_files statement the reason the test had before that mode, that statement
-function cls(r) { if (helper && roseen) r = roclass; print "class\theader: " r; exit }
+# a header that includes dynlink (OC220 (a)'s first part: Dynlink's unit at oi's level, no plugin loaded yet) runs only when the rest of its
+# header runs too; a later class keeps the include's, the class of the plugins the test builds (:dynlink-decided) and of the debugger's
+function cls(r) { if (helper && roseen) r = roclass; if (dlseen) r = "include dynlink"; print "class\theader: " r; exit }
 # OC210 (a) (the user, 2026-11-10): ocamltest's expansion of a variable's value (environments.ml's expand, Buffer.add_substitute):
 # $NAME, ${NAME} or $(NAME) replaced by the variable's value, itself expanded, an unset one by nothing; \$ a literal $. The
 # variables are the header's `set NAME = "VALUE"` (setv); ${ocamlsrcdir} and the other builtins were replaced before (@OCAMLSRCDIR@,
@@ -84,9 +86,61 @@ END {
   }
   if (aot == 0 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
   if (aot >= 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.ml( +[A-Za-z0-9_]+\.ml)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  # dynlink mode (OC220 (a)'s loader, doc/ocaml/OCAML-SURVEY.md "As built: OC220's loader"): a test at oi's level that includes dynlink and
+  # whose bytecode alternative builds plugins: in its build environment (setup-ocamlc.byte-build-env) each `module = FILE; ocamlc.byte` a
+  # unit compiled in the current directory (cwd = DIR; cd), one link `all_modules = "A.cmo ... MAIN.cmo"; ocamlc.byte` (module = "") the
+  # main program, its last unit the test's own, libraries "" or "dynlink", then one run (exit_status the own verdict's), the native
+  # alternative (native-dynlink, setup-ocamlopt.*) ending it. The run's environment: @dyn=DIR/FILE,... the units in order (bin/oi's
+  # oi_dynlink types each .ml into Lambda and writes its .cmo, a plugin oi's Dynlink loads), @dynmain=DIR/UNIT,... the main program's,
+  # @dyncopy=FILE,... the readonly files and subdirectories. Anything else: the class (include dynlink)
+  dlmode = 0
+  if (aot == 0 && hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
+  # (a plugin test's readonly .ml files are its units, not helper programs)
+  if (dlmode) helper = 0
+  dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
+    if (dlmode) {
+      if (s ~ /^(readonly_files|subdirectories) *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] !~ /^[A-Za-z0-9_.]+$/) cls(""); dcopy = dcopy (dcopy == "" ? "" : ",") hm[q] }
+        continue
+      }
+      if (s == "shared-libraries" || s == "check-program-output") continue
+      if (s == "setup-ocamlc.byte-build-env") { if (dsetup) break; dsetup = 1; dcwd = ""; continue }
+      if (s == "native-dynlink" || s ~ /^setup-ocamlopt\.(byte|opt)-build-env$/) { if (dsetup && drun) break; cls(s) }
+      if (s ~ /^(cwd|module|program|all_modules|libraries) *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v)
+        if (s ~ /^cwd/) dnext = v
+        else if (s ~ /^module/) dmod = v
+        else if (s ~ /^all_modules/) dmods = v
+        else if (s ~ /^libraries/) { if (v != "" && v != "dynlink") cls("libraries = " v); dlibs = v }
+        continue
+      }
+      if (s == "cd") {
+        if (dnext == "..") { if (dcwd == "") cls(""); sub(/\/?[^\/]*$/, "", dcwd) }
+        else if (dnext != "." && dnext != "") { if (dnext !~ /^[A-Za-z0-9_]+$/) cls(""); dcwd = dcwd (dcwd == "" ? "" : "/") dnext }
+        continue
+      }
+      if (s == "ocamlc.byte") {
+        if (!dsetup || dlinked) cls("")
+        if (dmod != "") {
+          if (dmod !~ /^[A-Za-z0-9_]+\.mli?$/) cls("")
+          dsteps = dsteps (dsteps == "" ? "" : ",") (dcwd == "" ? "" : dcwd "/") dmod
+        } else {
+          c = split(dmods, hm, " "); if (c == 0) cls("")
+          for (q = 1; q <= c; q++) {
+            if (hm[q] !~ /^[A-Za-z0-9_]+\.cmo$/) cls("")
+            x = hm[q]; sub(/\.cmo$/, "", x); dmain = dmain (dmain == "" ? "" : ",") (dcwd == "" ? "" : dcwd "/") x
+          }
+          if (dcwd != "" || x != hbase) cls("")
+          dlinked = 1
+        }
+        continue
+      }
+      if (s == "run") { if (!dlinked || drun) cls(""); drun = 1; continue }
+    }
     if (helper) {
       if (s ~ /^readonly_files *= *"/) { roseen = 1; continue }
       if (s == "check-ocamlc.byte-output" || s == "check-program-output") continue
@@ -131,7 +185,10 @@ END {
         for (q = 1; q <= c; q++) {
           f = fl[q]
           if (f == "-w" || f == "-warn-error") { q++; continue }
-          if (f ~ /^-w[+-]/ || f == "-g" || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
+          # -g (OC217 (a)): oi's level keeps it, the typer's debugging events its backtraces read; the AOT levels have no
+          # backtraces yet (their class)
+          if (f == "-g") { if (aot == "" || aot == 0) flags = flags " -g"; continue }
+          if (f ~ /^-w[+-]/ || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
@@ -155,6 +212,8 @@ END {
       if (key == "stderr" && val == "/dev/null") { env = env " @stderr=null"; continue }
       # a main .mll's ocamllex action (OC197 (a)): bin/oi's mll_gen runs the native ocamllex with -q, the flags every such test sets
       if (key == "ocamllex_flags" && FILENAME ~ /\.mll$/ && trim(val) == "-q") continue
+      # compiler_directory_suffix (OC217 (a)): a native variant's build directory (inline_test's -O3 block), not the bytecode run's
+      if (key == "compiler_directory_suffix") continue
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       # the program's own C stubs (the C API on ci, doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci"): modules that are all C
@@ -166,6 +225,8 @@ END {
       # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT
       # runtime's call depth); the other parameters (b=, ...) keep the class
       if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
+      # b, the backtraces' recording (OC217 (a)): oi's level records them (its backtrace stack over the typer's debugging events)
+      if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && (aot == "" || aot == 0)) { env = env " OCAMLRUNPARAM=" val; continue }
       if (key == "ocamlrunparam") { cls("ocamlrunparam " val) }
       cls(key " = " val)
     }
@@ -182,6 +243,9 @@ END {
       if (lib == "str") { incs = incs " str"; continue }
       # the Runtime_events library (OC219 (a)): runtime_events.ml loaded with the program, its externals oi's ext_runtime_events
       if (lib == "runtime_events") { incs = incs " runtime_events"; continue }
+      # the Dynlink library (OC220 (a)'s first part): its units loaded with the program at oi's level (the platform test/ocaml/dynlink's,
+      # the main program's units oi's unit table); the AOT levels keep the class until the runtime has the unit table
+      if (lib == "dynlink" && (aot == "" || aot == 0)) { incs = incs " dynlink"; dlseen = 1; continue }
       if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       cls("include " lib)
     }
@@ -200,6 +264,10 @@ END {
     if (s == "native") sawnative = 1
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
     cls(s)
+  }
+  if (dlmode) {
+    if (!drun) cls("")
+    env = env " @dyn=" dsteps " @dynmain=" dmain (dcopy == "" ? "" : " @dyncopy=" dcopy)
   }
   if (helper) {
     if (!hmain || nruns == 0) cls("")

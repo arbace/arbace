@@ -76,6 +76,8 @@
     (when (not (== ExtSignal/pending 0)) (ExtSignal/process))
     ;; the finalisers of the values a collection cleared (ExtGc, OC192 (a)), as a pending action
     (when (not (== ExtGc/finCount 0)) (ExtGc/finPoll))
+    ;; Gc.Memprof's queued callbacks (ExtGc/memprofRun)
+    (when (not (== ExtGc/memprofPending 0)) (ExtGc/memprofRun))
     (when (> ticks 128)
       (set! ticks 0)
       (when (or (> Effects/domainsRunning 0) ExtSignal/watching) (Gil/yield))))
@@ -227,9 +229,31 @@
   (method ^:public ^:static compareBints [a b]
     (let [x (Rt/bv a) y (Rt/bv b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0)))))
 
+  ;; ---- Gc's words (OC218 (a), queue 331; oi's ext_sys.go countWords): an allocation of OCaml's bytecode counted at its making by
+  ;; its wosize plus its header in the minor heap (above Max_young_wosize, 256, in the major heap): the Lambda's blocks and the
+  ;; allocating externals' results (Rt/counted). The AOT levels count as ocamlopt allocates (Sys.backend_type is Native): a float's
+  ;; box is not counted (ocamlopt unboxes the arithmetic and Gc.minor_words' result), where oi counts the bytecode's boxes; not
+  ;; yet closures or the runtime's own blocks
+
+  (field ^:public ^:static ^long minorWords 0)
+  (field ^:public ^:static ^long majorWords 0)
+  (method ^:public ^:static words ^void [^long wosize]
+    (when (> wosize 0)
+      (if (> wosize 256)
+        (set! majorWords (unchecked-add majorWords (unchecked-inc wosize)))
+        (set! minorWords (unchecked-add minorWords (unchecked-inc wosize))))
+      (when ExtGc/memprofSampling (ExtGc/memprofSample wosize))))
+  (method ^:public ^:static counted [v]
+    (cond (instance? Block v) (Rt/words (alength (.-f (cast Block v))))
+          (instance? double/1 v) (Rt/words (alength (cast double/1 v)))
+          (instance? byte/1 v) (Rt/words (unchecked-inc (unchecked-divide (long (alength (cast byte/1 v))) 8)))
+          :else nil)
+    v)
+
   ;; ---- blocks
 
   (method ^:public ^:static block [^int tag ^Object/1 fields]
+    (Rt/words (alength fields))
     (if (== tag 254)
       (let [n (alength fields) a (new double/1 n)]
         (loop [^int i 0] (when (< i n) (aset a i (Rt/d (aget fields i))) (recur (unchecked-inc-int i))))

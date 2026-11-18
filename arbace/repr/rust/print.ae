@@ -10,6 +10,7 @@
   node (SPEC §5.2, S12). The printer can return its tokens [text line joint?] for the
   converter's checks of macro arguments and attribute meta items (SPEC §7.1, §8.1, S16)."
   (:require [arbace.repr.rust.syntax :as sx]
+            [arbace.repr.rust.stack :as stk]
             [arbace.string :as str])
   (:import [java.lang StringBuilder]))
 
@@ -34,26 +35,27 @@
   "Read forms as the printer takes them: each literal or keyword that a parent's :rs/breaks gives
   a line as a Lit with that line"
   [x]
-  (cond
-    (seq? x)
-    (let [m (meta x)
-          br (into {} (:rs/breaks m))
-          ys (map-indexed (fn [i y] (let [y (internalize y)]
-                                      (if-let [l (get br i)]
-                                        (if (instance? arbace.lang.IObj y) (vary-meta y assoc :line l) (sx/->Lit y l))
-                                        y)))
-                          x)]
-      (with-meta (apply list ys) m))
-    (vector? x)
-    (let [m (meta x)
-          br (into {} (:rs/breaks m))]
-      (with-meta (vec (map-indexed (fn [i y] (let [y (internalize y)]
-                                               (if-let [l (get br i)]
-                                                 (if (instance? arbace.lang.IObj y) (vary-meta y assoc :line l) (sx/->Lit y l))
-                                                 y)))
-                                   x))
-        m))
-    :else x))
+  (stk/ensure-sufficient-stack
+    (cond
+      (seq? x)
+      (let [m (meta x)
+            br (into {} (:rs/breaks m))
+            ys (map-indexed (fn [i y] (let [y (internalize y)]
+                                        (if-let [l (get br i)]
+                                          (if (instance? arbace.lang.IObj y) (vary-meta y assoc :line l) (sx/->Lit y l))
+                                          y)))
+                            x)]
+        (with-meta (apply list ys) m))
+      (vector? x)
+      (let [m (meta x)
+            br (into {} (:rs/breaks m))]
+        (with-meta (vec (map-indexed (fn [i y] (let [y (internalize y)]
+                                                 (if-let [l (get br i)]
+                                                   (if (instance? arbace.lang.IObj y) (vary-meta y assoc :line l) (sx/->Lit y l))
+                                                   y)))
+                                     x))
+          m))
+      :else x)))
 
 (defn- kw? [x k] (= k (lv x)))
 (defn- head [x] (when (seq? x) (lv (first x))))
@@ -1099,235 +1101,236 @@
 (defn- print-expr-raw*
   "print-expr-raw's expression form without attribute forms at fixed places"
   [p x fx]
-  (let [v (lv x) l (line-of x) k (expr-kind v)
-        me (if (seq? v) v nil)]
-    (goto! p l)
-    (case k
-      :path (if (symbol? v) (emit-sym! p x false false) (print-path p x :expr))
-      :underscore (emit! p "_" l)
-      :lit (emit-lit! p x false)
-      :range-no-start (if (symbol? v)
-                        (emit! p ".." l)
-                        (do (emit! p (name (lv (first v))) (or l (line-of (first v))) false true)
-                            (print-expr p (nth v 2) (fx-rightmost fx) false [v 2] (fn [s fx] (< (fx-prec fx s) P-LOR)))))
-      :array (do (emit! p "[" l false true) (print-args p v v 0) (emit! p "]" nil true false))
-      :tuple (if (empty? v)
-               (do (emit! p "(" l false true) (emit! p ")" nil true false))
-               (do (emit! p "(" l false true)
-                   (print-args p v (rest v) 1)
-                   (when (= 1 (count (remove attr-form? (rest v)))) (emit! p "," nil true false))
-                   (emit! p ")" nil true false)))
-      :repeat (do (emit! p "[" l false true)
-                  (print-expr p (nth v 1) fx-default false [v 1])
-                  (emit! p ";" nil true false)
-                  (print-expr p (nth v 2) fx-default false [v 2])
-                  (emit! p "]" nil true false))
-      :paren (do (emit! p "(" l false true) (print-expr p (second v) fx-default false [v 1]) (emit! p ")" nil true false))
-      :noparen (print-expr-raw p (second v) fx)
-      :binary
-      (let [op (lv (first v))
-            prec (get binops op)
-            cmp? (contains? comparison op)
-            can-begin (contains? #{'- '* '&& '|| '& '| '<< '<} op)
-            operands (vec (rest v))
-            n (count operands)
-            lfx (fx-leftmost-op fx can-begin)
-            lhs-rule (fn [s fx2]
-                       (let [lp (fx-prec fx2 s)]
-                         (or (if cmp? (<= lp prec) (< lp prec))
-                             (and (= :cast (:kind s)) (contains? #{'< '<<} op))
-                             (and (= :let (:kind s)) (not (needs-par-as-let-scrutinee? prec))))))
-            rhs-rule (fn [s fx2] (<= (fx-prec fx2 s) prec))]
-        (goto! p l)
-        ;; (op a b c) is ((a op b) op c): the first operand is the leftmost of n-1 nested
-        ;; operations; each later operand is a right operand
-        (let [grouped (group-attrs-idx operands)]
-          (doseq [[i [as e j]] (map-indexed vector grouped)]
-            (when (pos? i)
-              (let [hl (when (= i (dec (count grouped))) (line-of (first v)))
-                    el (or (first (keep line-of as)) (mget e :rs/paren) (line-of e))]
-                (if hl
-                  (emit! p (binop-text op) hl)
-                  (do (when (and el (> el (cur p))) (goto! p el))
-                      (emit! p (binop-text op))))))
-            (doseq [a as] (print-attr p a))
-            (let [idx (inc j)]
-              (if (zero? i)
-                ;; the leftmost operand: in n-1 left positions; the innermost's fixup
-                (print-expr p e (reduce (fn [f _] (fx-leftmost-op f can-begin)) fx (range (dec (count grouped)))) (seq as) [v idx] lhs-rule)
-                (print-expr p e (if (= i (dec (count grouped))) (fx-rightmost fx) (fx-rightmost (reduce (fn [f _] (fx-leftmost-op f can-begin)) fx (range (- (count grouped) i 1))))) (seq as) [v idx] rhs-rule))))))
-      :unary
-      (if (number? v)
-        (emit-lit! p x false)
-        (let [op (lv (first v))]
-          (if (= '&mut op)
-            (do (emit! p "&" l false true) (emit! p "mut" nil true false))
-            (emit! p (name op) l false true))
-          (print-expr p (second v) (fx-rightmost fx) false [v 1] (fn [s fx2] (< (fx-prec fx2 s) P-PREFIX)))))
-      :addr (let [[op m e] v]
-              (emit! p "&" l false true)
-              (emit! p (if (= '&raw (lv op)) "raw" "pin") nil true false)
-              (emit! p (name (lv m)))
-              (print-expr p e (fx-rightmost fx) false [v 2] (fn [s fx2] (< (fx-prec fx2 s) P-PREFIX))))
-      :assign
-      (let [[op a b] v]
-        (goto! p l)
-        (print-expr p a (fx-leftmost fx) false [v 1] (fn [s _] (<= (:prec s) P-RANGE)))
-        (emit! p (get assignops (lv op)) (line-of op))
-        (print-expr p b (fx-rightmost fx) false [v 2] (fn [s fx2] (< (fx-prec fx2 s) P-ASSIGN))))
-      :cast
-      (let [[_ e t] v]
-        (goto! p l)
-        (print-expr p e (fx-leftmost fx) false [v 1] (fn [s _] (< (:prec s) P-CAST)))
-        (emit! p "as")
-        (print-ty p t :cast))
-      :let
-      (let [[_ pt e] v]
-        (emit! p "let" l)
-        (print-pat p pt :top)
-        (emit! p "=")
-        (print-expr p e fx-default false [v 2]
-                    (fn [s _] (or (and (has? fx F-STRUCT) (:ext-struct s))
-                                  (needs-par-as-let-scrutinee? (fx-prec fx s))))))
-      :if (print-if p x)
-      :while (let [xs (vec v) lb? (lifetime? (nth xs 1))]
+  (stk/ensure-sufficient-stack
+    (let [v (lv x) l (line-of x) k (expr-kind v)
+          me (if (seq? v) v nil)]
+      (goto! p l)
+      (case k
+        :path (if (symbol? v) (emit-sym! p x false false) (print-path p x :expr))
+        :underscore (emit! p "_" l)
+        :lit (emit-lit! p x false)
+        :range-no-start (if (symbol? v)
+                          (emit! p ".." l)
+                          (do (emit! p (name (lv (first v))) (or l (line-of (first v))) false true)
+                              (print-expr p (nth v 2) (fx-rightmost fx) false [v 2] (fn [s fx] (< (fx-prec fx s) P-LOR)))))
+        :array (do (emit! p "[" l false true) (print-args p v v 0) (emit! p "]" nil true false))
+        :tuple (if (empty? v)
+                 (do (emit! p "(" l false true) (emit! p ")" nil true false))
+                 (do (emit! p "(" l false true)
+                     (print-args p v (rest v) 1)
+                     (when (= 1 (count (remove attr-form? (rest v)))) (emit! p "," nil true false))
+                     (emit! p ")" nil true false)))
+        :repeat (do (emit! p "[" l false true)
+                    (print-expr p (nth v 1) fx-default false [v 1])
+                    (emit! p ";" nil true false)
+                    (print-expr p (nth v 2) fx-default false [v 2])
+                    (emit! p "]" nil true false))
+        :paren (do (emit! p "(" l false true) (print-expr p (second v) fx-default false [v 1]) (emit! p ")" nil true false))
+        :noparen (print-expr-raw p (second v) fx)
+        :binary
+        (let [op (lv (first v))
+              prec (get binops op)
+              cmp? (contains? comparison op)
+              can-begin (contains? #{'- '* '&& '|| '& '| '<< '<} op)
+              operands (vec (rest v))
+              n (count operands)
+              lfx (fx-leftmost-op fx can-begin)
+              lhs-rule (fn [s fx2]
+                         (let [lp (fx-prec fx2 s)]
+                           (or (if cmp? (<= lp prec) (< lp prec))
+                               (and (= :cast (:kind s)) (contains? #{'< '<<} op))
+                               (and (= :let (:kind s)) (not (needs-par-as-let-scrutinee? prec))))))
+              rhs-rule (fn [s fx2] (<= (fx-prec fx2 s) prec))]
+          (goto! p l)
+          ;; (op a b c) is ((a op b) op c): the first operand is the leftmost of n-1 nested
+          ;; operations; each later operand is a right operand
+          (let [grouped (group-attrs-idx operands)]
+            (doseq [[i [as e j]] (map-indexed vector grouped)]
+              (when (pos? i)
+                (let [hl (when (= i (dec (count grouped))) (line-of (first v)))
+                      el (or (first (keep line-of as)) (mget e :rs/paren) (line-of e))]
+                  (if hl
+                    (emit! p (binop-text op) hl)
+                    (do (when (and el (> el (cur p))) (goto! p el))
+                        (emit! p (binop-text op))))))
+              (doseq [a as] (print-attr p a))
+              (let [idx (inc j)]
+                (if (zero? i)
+                  ;; the leftmost operand: in n-1 left positions; the innermost's fixup
+                  (print-expr p e (reduce (fn [f _] (fx-leftmost-op f can-begin)) fx (range (dec (count grouped)))) (seq as) [v idx] lhs-rule)
+                  (print-expr p e (if (= i (dec (count grouped))) (fx-rightmost fx) (fx-rightmost (reduce (fn [f _] (fx-leftmost-op f can-begin)) fx (range (- (count grouped) i 1))))) (seq as) [v idx] rhs-rule))))))
+        :unary
+        (if (number? v)
+          (emit-lit! p x false)
+          (let [op (lv (first v))]
+            (if (= '&mut op)
+              (do (emit! p "&" l false true) (emit! p "mut" nil true false))
+              (emit! p (name op) l false true))
+            (print-expr p (second v) (fx-rightmost fx) false [v 1] (fn [s fx2] (< (fx-prec fx2 s) P-PREFIX)))))
+        :addr (let [[op m e] v]
+                (emit! p "&" l false true)
+                (emit! p (if (= '&raw (lv op)) "raw" "pin") nil true false)
+                (emit! p (name (lv m)))
+                (print-expr p e (fx-rightmost fx) false [v 2] (fn [s fx2] (< (fx-prec fx2 s) P-PREFIX))))
+        :assign
+        (let [[op a b] v]
+          (goto! p l)
+          (print-expr p a (fx-leftmost fx) false [v 1] (fn [s _] (<= (:prec s) P-RANGE)))
+          (emit! p (get assignops (lv op)) (line-of op))
+          (print-expr p b (fx-rightmost fx) false [v 2] (fn [s fx2] (< (fx-prec fx2 s) P-ASSIGN))))
+        :cast
+        (let [[_ e t] v]
+          (goto! p l)
+          (print-expr p e (fx-leftmost fx) false [v 1] (fn [s _] (< (:prec s) P-CAST)))
+          (emit! p "as")
+          (print-ty p t :cast))
+        :let
+        (let [[_ pt e] v]
+          (emit! p "let" l)
+          (print-pat p pt :top)
+          (emit! p "=")
+          (print-expr p e fx-default false [v 2]
+                      (fn [s _] (or (and (has? fx F-STRUCT) (:ext-struct s))
+                                    (needs-par-as-let-scrutinee? (fx-prec fx s))))))
+        :if (print-if p x)
+        :while (let [xs (vec v) lb? (lifetime? (nth xs 1))]
+                 (goto! p l)
+                 (when lb? (print-label p (nth xs 1)))
+                 (emit! p "while")
+                 (let [ci (if lb? 2 1)]
+                   (print-expr p (nth xs ci) fx-cond false [v ci] cond-needs-par?)
+                   (print-block p v (subvec xs (inc ci)) (mget x :rs/brace))))
+        :for (let [xs (vec v) lb? (lifetime? (nth xs 1))
+                   i (if lb? 2 1)
+                   aw? (= 'await (lv (nth xs i)))
+                   i (if aw? (inc i) i)]
                (goto! p l)
                (when lb? (print-label p (nth xs 1)))
-               (emit! p "while")
-               (let [ci (if lb? 2 1)]
-                 (print-expr p (nth xs ci) fx-cond false [v ci] cond-needs-par?)
-                 (print-block p v (subvec xs (inc ci)) (mget x :rs/brace))))
-      :for (let [xs (vec v) lb? (lifetime? (nth xs 1))
-                 i (if lb? 2 1)
-                 aw? (= 'await (lv (nth xs i)))
-                 i (if aw? (inc i) i)]
-             (goto! p l)
-             (when lb? (print-label p (nth xs 1)))
-             (emit! p "for")
-             (when aw? (emit! p "await"))
-             (print-pat p (nth xs i) :top)
-             (emit! p "in")
-             (print-expr p (nth xs (inc i)) fx-cond false [v (inc i)] cond-needs-par?)
-             (print-block p v (subvec xs (+ i 2)) (mget x :rs/brace)))
-      :loop (let [xs (vec v) lb? (lifetime? (nth xs 1 nil))]
-              (goto! p l)
-              (when lb? (print-label p (nth xs 1)))
-              (emit! p "loop" (line-of (first xs)))
-              (print-block p v (subvec xs (if lb? 2 1)) (mget x :rs/brace)))
-      :match (let [xs (vec v)
-                   postfix? (= '.match (lv (first xs)))]
-               (goto! p l)
-               (if postfix?
-                 (do (print-expr p (nth xs 1) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
-                     (emit! p "." nil true true) (emit! p "match" nil true false))
-                 (do (emit! p "match")
-                     (print-expr p (nth xs 1) fx-cond false [v 1] cond-needs-par?)))
-               (emit! p "{" (mget x :rs/brace))
-               (indented p
-                 (doseq [[as a] (group-attrs (subvec xs 2))]
-                   (doseq [at as] (print-attr p at))
-                   (when a
-                     (if (str/ends-with? (name (head (lv a))) "!")
-                       nil
-                       (print-arm p a (seq as))))))
-               (when (> (count xs) 2) (brk! p))
-               (emit! p "}"))
-      :block (let [xs (vec v)
-                   unsafe? (= 'unsafe (lv (first xs)))
-                   lb? (and (not unsafe?) (lifetime? (nth xs 1 nil)))]
-               (goto! p l)
-               (when lb? (print-label p (nth xs 1)))
-               (when unsafe? (emit! p "unsafe"))
-               (print-block p v (subvec xs (if lb? 2 1)) (mget x :rs/brace)))
-      :const-block (do (emit! p "const" l)
-                       (let [b (second v)]
-                         (print-block p (lv b) (rest (lv b)) (line-of b))))
-      :try-block (let [xs (vec v)
-                       [t from] (if (kw? (nth xs 1 nil) :bikeshed) [(nth xs 2) 3] [nil 1])]
-                   (emit! p "try" l)
-                   (when (some? t) (emit! p "bikeshed") (print-ty p t :plain))
-                   (print-block p v (subvec xs from) (mget x :rs/brace)))
-      :gen (let [xs (vec v)
-                 ws (take-while #(contains? #{'async 'gen 'move 'use} (lv %)) xs)]
-             (goto! p l)
-             (doseq [w ws] (emit! p (name (lv w)) (line-of w)))
-             (print-block p v (drop (count ws) xs) (mget x :rs/brace)))
-      :closure (do (goto! p l) (print-closure p x))
-      :try (do (goto! p l)
-               (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
-               (emit! p "?" nil true false))
-      :await (do (goto! p l)
-                 (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
-                 (emit! p "." (line-of (first v)) true true)
-                 (emit! p (subs (name (lv (first v))) 1) nil true false))
-      :yield-postfix (do (goto! p l)
-                         (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
-                         (emit! p "." nil true true)
-                         (emit! p "yield" (line-of (first v)) true false))
-      :field (let [xs (vec v)]
-               (goto! p l)
-               (print-expr p (nth xs 1) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
-               (doseq [f (subvec xs 2)]
-                 (emit! p "." nil true true)
-                 (emit! p (name-text f) (line-of f) true false)))
-      :method (let [xs (vec v)
-                    h (first xs)
-                    hv (lv h)
-                    [nm targs] (if (seq? hv) [(lv (second hv)) (drop 2 hv)] [hv nil])]
+               (emit! p "for")
+               (when aw? (emit! p "await"))
+               (print-pat p (nth xs i) :top)
+               (emit! p "in")
+               (print-expr p (nth xs (inc i)) fx-cond false [v (inc i)] cond-needs-par?)
+               (print-block p v (subvec xs (+ i 2)) (mget x :rs/brace)))
+        :loop (let [xs (vec v) lb? (lifetime? (nth xs 1 nil))]
                 (goto! p l)
-                (print-expr p (nth xs 1) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
-                (emit! p "." (line-of h) true true)
-                (emit! p (subs (name nm) 1) nil true false)
-                (when (seq? hv)
-                  (emit! p "::" nil true true)
-                  (print-generic-args p targs true))
+                (when lb? (print-label p (nth xs 1)))
+                (emit! p "loop" (line-of (first xs)))
+                (print-block p v (subvec xs (if lb? 2 1)) (mget x :rs/brace)))
+        :match (let [xs (vec v)
+                     postfix? (= '.match (lv (first xs)))]
+                 (goto! p l)
+                 (if postfix?
+                   (do (print-expr p (nth xs 1) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
+                       (emit! p "." nil true true) (emit! p "match" nil true false))
+                   (do (emit! p "match")
+                       (print-expr p (nth xs 1) fx-cond false [v 1] cond-needs-par?)))
+                 (emit! p "{" (mget x :rs/brace))
+                 (indented p
+                   (doseq [[as a] (group-attrs (subvec xs 2))]
+                     (doseq [at as] (print-attr p at))
+                     (when a
+                       (if (str/ends-with? (name (head (lv a))) "!")
+                         nil
+                         (print-arm p a (seq as))))))
+                 (when (> (count xs) 2) (brk! p))
+                 (emit! p "}"))
+        :block (let [xs (vec v)
+                     unsafe? (= 'unsafe (lv (first xs)))
+                     lb? (and (not unsafe?) (lifetime? (nth xs 1 nil)))]
+                 (goto! p l)
+                 (when lb? (print-label p (nth xs 1)))
+                 (when unsafe? (emit! p "unsafe"))
+                 (print-block p v (subvec xs (if lb? 2 1)) (mget x :rs/brace)))
+        :const-block (do (emit! p "const" l)
+                         (let [b (second v)]
+                           (print-block p (lv b) (rest (lv b)) (line-of b))))
+        :try-block (let [xs (vec v)
+                         [t from] (if (kw? (nth xs 1 nil) :bikeshed) [(nth xs 2) 3] [nil 1])]
+                     (emit! p "try" l)
+                     (when (some? t) (emit! p "bikeshed") (print-ty p t :plain))
+                     (print-block p v (subvec xs from) (mget x :rs/brace)))
+        :gen (let [xs (vec v)
+                   ws (take-while #(contains? #{'async 'gen 'move 'use} (lv %)) xs)]
+               (goto! p l)
+               (doseq [w ws] (emit! p (name (lv w)) (line-of w)))
+               (print-block p v (drop (count ws) xs) (mget x :rs/brace)))
+        :closure (do (goto! p l) (print-closure p x))
+        :try (do (goto! p l)
+                 (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
+                 (emit! p "?" nil true false))
+        :await (do (goto! p l)
+                   (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
+                   (emit! p "." (line-of (first v)) true true)
+                   (emit! p (subs (name (lv (first v))) 1) nil true false))
+        :yield-postfix (do (goto! p l)
+                           (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
+                           (emit! p "." nil true true)
+                           (emit! p "yield" (line-of (first v)) true false))
+        :field (let [xs (vec v)]
+                 (goto! p l)
+                 (print-expr p (nth xs 1) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
+                 (doseq [f (subvec xs 2)]
+                   (emit! p "." nil true true)
+                   (emit! p (name-text f) (line-of f) true false)))
+        :method (let [xs (vec v)
+                      h (first xs)
+                      hv (lv h)
+                      [nm targs] (if (seq? hv) [(lv (second hv)) (drop 2 hv)] [hv nil])]
+                  (goto! p l)
+                  (print-expr p (nth xs 1) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
+                  (emit! p "." (line-of h) true true)
+                  (emit! p (subs (name nm) 1) nil true false)
+                  (when (seq? hv)
+                    (emit! p "::" nil true true)
+                    (print-generic-args p targs true))
+                  (emit! p "(" nil true true)
+                  (print-args p v (subvec xs 2) 2)
+                  (emit! p ")" nil true false))
+        :call (let [xs (vec v)
+                    callee (first xs)
+                    cv (lv callee)
+                    callee (if (list-head? cv :path) (if (= 2 (count cv)) (second cv) callee) callee)]
+                (goto! p l)
+                (if (and (seq? (lv callee)) (= :path (head (lv callee))) (= 2 (count (lv callee))))
+                  (print-expr-raw p (second (lv callee)) fx)
+                  (print-expr p callee (fx-leftmost-op fx true) false [v 0]
+                              (fn [s fx2] (or (= :named-field (:kind s)) (< (fx-prec fx2 s) P-UNAMBIGUOUS) (:complete s)))))
                 (emit! p "(" nil true true)
-                (print-args p v (subvec xs 2) 2)
+                (print-args p v (subvec xs 1) 1)
                 (emit! p ")" nil true false))
-      :call (let [xs (vec v)
-                  callee (first xs)
-                  cv (lv callee)
-                  callee (if (list-head? cv :path) (if (= 2 (count cv)) (second cv) callee) callee)]
-              (goto! p l)
-              (if (and (seq? (lv callee)) (= :path (head (lv callee))) (= 2 (count (lv callee))))
-                (print-expr-raw p (second (lv callee)) fx)
-                (print-expr p callee (fx-leftmost-op fx true) false [v 0]
-                            (fn [s fx2] (or (= :named-field (:kind s)) (< (fx-prec fx2 s) P-UNAMBIGUOUS) (:complete s)))))
-              (emit! p "(" nil true true)
-              (print-args p v (subvec xs 1) 1)
-              (emit! p ")" nil true false))
-      :struct (do (goto! p l)
-                  (print-path p (first v) :expr)
-                  (print-struct-lit-fields p (second v)))
-      :index (let [[h a i] v]
-               (goto! p l)
-               (print-expr p a (fx-leftmost-op fx true) false [v 1]
-                           (fn [s fx2] (or (< (fx-prec fx2 s) P-UNAMBIGUOUS) (:complete s))))
-               (emit! p "[" (line-of h) true true)
-               (print-expr p i fx-default false [v 2])
-               (emit! p "]" nil true false))
-      :range (let [[op a b] v]
-               (goto! p l)
-               (print-expr p a (fx-leftmost-op fx true) false [v 1] (fn [s fx2] (< (fx-prec fx2 s) P-LOR)))
-               (emit! p (name (lv op)) (line-of op))
-               (when-not (kw? b :_)
-                 (print-expr p b (fx-rightmost fx) false [v 2] (fn [s fx2] (< (fx-prec fx2 s) P-LOR)))))
-      :jump (let [xs (vec v) w (name (lv (first xs)))
-                  lb? (lifetime? (nth xs 1 nil))
-                  val (nth xs (if lb? 2 1) nil)]
-              (emit! p w l)
-              (when lb? (print-lifetime p (nth xs 1)))
-              (when (some? val)
-                (print-expr p val (fx-rightmost fx-default) false [v (if lb? 2 1)]
-                            (when (and (= "break" w) (not lb?)) (fn [s _] (:labeled s))))))
-      :continue (do (emit! p "continue" l) (when-let [lb (second v)] (print-lifetime p lb)))
-      :become (do (emit! p "become" l) (print-expr p (second v) (fx-rightmost fx-default) false [v 1]))
-      :yeet (do (emit! p "do" l) (emit! p "yeet")
-                (when-let [e (nth v 2 nil)] (print-expr p e (fx-rightmost fx-default) false [v 2])))
-      :mac (print-mac-call p x)
-      :move (do (emit! p "move" l) (emit! p "(" nil true true) (print-expr p (second v) fx-default false [v 1]) (emit! p ")" nil true false))
-      :builtin (do (emit! p "builtin" l) (emit! p "#") (emit! p (name (lv (nth v 1)))) (print-tt p (nth v 2) true))
-      (fail! "an expression" v))))
+        :struct (do (goto! p l)
+                    (print-path p (first v) :expr)
+                    (print-struct-lit-fields p (second v)))
+        :index (let [[h a i] v]
+                 (goto! p l)
+                 (print-expr p a (fx-leftmost-op fx true) false [v 1]
+                             (fn [s fx2] (or (< (fx-prec fx2 s) P-UNAMBIGUOUS) (:complete s))))
+                 (emit! p "[" (line-of h) true true)
+                 (print-expr p i fx-default false [v 2])
+                 (emit! p "]" nil true false))
+        :range (let [[op a b] v]
+                 (goto! p l)
+                 (print-expr p a (fx-leftmost-op fx true) false [v 1] (fn [s fx2] (< (fx-prec fx2 s) P-LOR)))
+                 (emit! p (name (lv op)) (line-of op))
+                 (when-not (kw? b :_)
+                   (print-expr p b (fx-rightmost fx) false [v 2] (fn [s fx2] (< (fx-prec fx2 s) P-LOR)))))
+        :jump (let [xs (vec v) w (name (lv (first xs)))
+                    lb? (lifetime? (nth xs 1 nil))
+                    val (nth xs (if lb? 2 1) nil)]
+                (emit! p w l)
+                (when lb? (print-lifetime p (nth xs 1)))
+                (when (some? val)
+                  (print-expr p val (fx-rightmost fx-default) false [v (if lb? 2 1)]
+                              (when (and (= "break" w) (not lb?)) (fn [s _] (:labeled s))))))
+        :continue (do (emit! p "continue" l) (when-let [lb (second v)] (print-lifetime p lb)))
+        :become (do (emit! p "become" l) (print-expr p (second v) (fx-rightmost fx-default) false [v 1]))
+        :yeet (do (emit! p "do" l) (emit! p "yeet")
+                  (when-let [e (nth v 2 nil)] (print-expr p e (fx-rightmost fx-default) false [v 2])))
+        :mac (print-mac-call p x)
+        :move (do (emit! p "move" l) (emit! p "(" nil true true) (print-expr p (second v) fx-default false [v 1]) (emit! p ")" nil true false))
+        :builtin (do (emit! p "builtin" l) (emit! p "#") (emit! p (name (lv (nth v 1)))) (print-tt p (nth v 2) true))
+        (fail! "an expression" v)))))
 
 ;;; Patterns (SPEC §5.7)
 
@@ -1370,104 +1373,105 @@
 (def ^:private binding-words #{'mut 'ref 'pin 'const})
 
 (defn print-pat-raw [p x]
-  (let [v (lv x) l (line-of x)]
-    (goto! p (line-of x))
-    (cond
-      (kw? v :_) nil
-      (= '_ v) (emit! p "_" l)
-      (= '.. v) (emit! p ".." l)
-      (= '! v) (emit! p "!" l)
-      (symbol? v) (emit-sym! p x false false)
-      (sx/lit-form? v) (emit-lit! p x false)
-      (vector? v) (do (emit! p "[" l false true) (print-pat-seq p v v 0 :nested) (emit! p "]" nil true false))
-      (and (seq? v) (empty? v)) (do (emit! p "(" l false true) (emit! p ")" nil true false))
-      (seq? v)
-      (let [h (lv (first v)) xs (vec v)]
-        (cond
-          (contains? #{:name :global :path :qself :turbofish} h) (print-path p x :pat)
-          (and (contains? binding-words h) (symbol? h))
-          (do (goto! p l)
-              (doseq [w (butlast xs)] (emit! p (name (lv w)) (line-of w)))
-              (emit-name! p (last xs)))
-          (= :at h) (do (goto! p l) (print-pat p (nth xs 1) :top [v 1]) (emit! p "@") (print-pat p (nth xs 2) :at [v 2]))
-          (= '| h) (do (goto! p l)
-                       (if (= 2 (count xs))
-                         (do (emit! p "|") (print-pat p (nth xs 1) :or [v 1]))
-                         (doseq [[i a] (map-indexed vector (rest xs))]
-                           (when (pos? i) (emit! p "|"))
-                           (print-pat p a :or [v (inc i)]))))
-          (contains? #{'& '&mut} h) (do (emit! p "&" l false true)
-                                        (when (= '&mut h) (emit! p "mut" nil true false))
-                                        (print-pat p (nth xs 1) :ref [v 1]))
-          (= '&pin h) (do (emit! p "&" l false true) (emit! p "pin" nil true false) (emit! p (name (lv (nth xs 1))))
-                          (print-pat p (nth xs 2) :ref [v 2]))
-          (= 'box h) (do (emit! p "box" l) (print-pat p (nth xs 1) :ref [v 1]))
-          (= :deref h) (do (emit! p "deref" l) (emit! p "!" nil true true) (emit! p "(" nil true true)
-                           (print-pat p (nth xs 1) :top [v 1]) (emit! p ")" nil true false))
-          (contains? #{'.. '..= '...} h)
-          (let [[_ a b] xs]
-            (goto! p l)
-            (when-not (kw? a :_) (print-expr p a fx-default false nil))
-            (emit! p (name h) (line-of (first xs)))
-            (when-not (kw? b :_) (print-expr p b fx-default false nil)))
-          (= :tuple h) (do (emit! p "(" l false true)
-                           (print-pat-seq p v (rest xs) 1 :nested)
-                           (when (= 1 (count (remove attr-form? (rest xs)))) (emit! p "," nil true false))
-                           (emit! p ")" nil true false))
-          (= :guard h) (do (goto! p l) (print-pat p (nth xs 1) :top [v 1]) (emit! p "if") (print-expr p (nth xs 2) fx-default false [v 2]))
-          (= :paren h) (do (emit! p "(" l false true) (print-pat p (nth xs 1) :top [v 1]) (emit! p ")" nil true false))
-          (= :noparen h) (print-pat-raw p (nth xs 1))
-          (= 'const h) (print-expr p x fx-default false nil)
-          (contains? sx/lit-heads h) (emit-lit! p x false)
-          (= '- h) (print-expr p x fx-default false nil)
-          (macro-head? (first xs)) (print-mac-call p x)
-          (and (= 2 (count xs)) (list-head? (lv (second xs)) :braces))
-          (do (goto! p l)
-              (print-path p (first xs) :pat)
-              (emit! p "{")
-              (let [items (vec (rest (lv (second xs))))
-                    n (count items)]
-                (loop [i 0 first? true]
-                  (when (< i n)
-                    (let [y (nth items i) yv (lv y)]
-                      (cond
-                        (attr-form? y) (do (when-not first? (emit! p "," nil true false)) (print-attr p y) (recur (inc i) true))
-                        (= '.. yv) (do (when-not first? (emit! p "," nil true false)) (emit! p ".." (line-of y)) (recur (inc i) false))
-                        (keyword? yv)
-                        (let [nxt (nth items (inc i) nil)
-                              shorthand? (or (nil? nxt) (keyword? (lv nxt)) (= '.. (lv nxt)) (attr-form? nxt)
-                                             (and (symbol? (lv nxt)) (contains? #{'box 'mut 'ref} (lv nxt))
-                                                  ;; a modifier begins the next field
-                                                  (let [after (drop-while #(contains? #{'box 'mut 'ref 'pin 'const} (lv %)) (subvec items (inc i)))]
-                                                    (keyword? (lv (first after))))))]
-                          (when-not first? (emit! p "," nil true false))
-                          (emit! p (name yv) (line-of y))
-                          (if shorthand?
-                            (recur (inc i) false)
-                            (do (emit! p ":" nil true false)
-                                (print-pat p nxt :nested [(lv (second xs)) (+ 2 i)])
-                                (recur (+ i 2) false))))
-                        (contains? #{'box 'mut 'ref 'pin 'const} yv)
-                        ;; modifiers of a shorthand field: box, mut, ref, ref mut ...
-                        (let [mods (take-while #(contains? #{'box 'mut 'ref 'pin 'const} (lv %)) (subvec items i))
-                              k (nth items (+ i (count mods)))]
-                          (when-not first? (emit! p "," nil true false))
-                          (doseq [m mods] (emit! p (name (lv m)) (line-of m)))
-                          (emit! p (name (lv k)) (line-of k))
-                          (recur (+ i (count mods) 1) false))
-                        :else (fail! "a struct pattern's fields" v))))))
-              (emit! p "}"))
-          :else
-          ;; a tuple-struct pattern (path pats...)
-          (do (goto! p l)
-              (let [h0 (first xs) hv (lv h0)]
-                (if (list-head? hv :path)
-                  (if (= 2 (count hv)) (print-path p (second hv) :pat) (print-path p h0 :pat))
-                  (print-path p h0 :pat)))
-              (emit! p "(" nil true true)
-              (print-pat-seq p v (rest xs) 1 :nested)
-              (emit! p ")" nil true false))))
-      :else (fail! "a pattern" v))))
+  (stk/ensure-sufficient-stack
+    (let [v (lv x) l (line-of x)]
+      (goto! p (line-of x))
+      (cond
+        (kw? v :_) nil
+        (= '_ v) (emit! p "_" l)
+        (= '.. v) (emit! p ".." l)
+        (= '! v) (emit! p "!" l)
+        (symbol? v) (emit-sym! p x false false)
+        (sx/lit-form? v) (emit-lit! p x false)
+        (vector? v) (do (emit! p "[" l false true) (print-pat-seq p v v 0 :nested) (emit! p "]" nil true false))
+        (and (seq? v) (empty? v)) (do (emit! p "(" l false true) (emit! p ")" nil true false))
+        (seq? v)
+        (let [h (lv (first v)) xs (vec v)]
+          (cond
+            (contains? #{:name :global :path :qself :turbofish} h) (print-path p x :pat)
+            (and (contains? binding-words h) (symbol? h))
+            (do (goto! p l)
+                (doseq [w (butlast xs)] (emit! p (name (lv w)) (line-of w)))
+                (emit-name! p (last xs)))
+            (= :at h) (do (goto! p l) (print-pat p (nth xs 1) :top [v 1]) (emit! p "@") (print-pat p (nth xs 2) :at [v 2]))
+            (= '| h) (do (goto! p l)
+                         (if (= 2 (count xs))
+                           (do (emit! p "|") (print-pat p (nth xs 1) :or [v 1]))
+                           (doseq [[i a] (map-indexed vector (rest xs))]
+                             (when (pos? i) (emit! p "|"))
+                             (print-pat p a :or [v (inc i)]))))
+            (contains? #{'& '&mut} h) (do (emit! p "&" l false true)
+                                          (when (= '&mut h) (emit! p "mut" nil true false))
+                                          (print-pat p (nth xs 1) :ref [v 1]))
+            (= '&pin h) (do (emit! p "&" l false true) (emit! p "pin" nil true false) (emit! p (name (lv (nth xs 1))))
+                            (print-pat p (nth xs 2) :ref [v 2]))
+            (= 'box h) (do (emit! p "box" l) (print-pat p (nth xs 1) :ref [v 1]))
+            (= :deref h) (do (emit! p "deref" l) (emit! p "!" nil true true) (emit! p "(" nil true true)
+                             (print-pat p (nth xs 1) :top [v 1]) (emit! p ")" nil true false))
+            (contains? #{'.. '..= '...} h)
+            (let [[_ a b] xs]
+              (goto! p l)
+              (when-not (kw? a :_) (print-expr p a fx-default false nil))
+              (emit! p (name h) (line-of (first xs)))
+              (when-not (kw? b :_) (print-expr p b fx-default false nil)))
+            (= :tuple h) (do (emit! p "(" l false true)
+                             (print-pat-seq p v (rest xs) 1 :nested)
+                             (when (= 1 (count (remove attr-form? (rest xs)))) (emit! p "," nil true false))
+                             (emit! p ")" nil true false))
+            (= :guard h) (do (goto! p l) (print-pat p (nth xs 1) :top [v 1]) (emit! p "if") (print-expr p (nth xs 2) fx-default false [v 2]))
+            (= :paren h) (do (emit! p "(" l false true) (print-pat p (nth xs 1) :top [v 1]) (emit! p ")" nil true false))
+            (= :noparen h) (print-pat-raw p (nth xs 1))
+            (= 'const h) (print-expr p x fx-default false nil)
+            (contains? sx/lit-heads h) (emit-lit! p x false)
+            (= '- h) (print-expr p x fx-default false nil)
+            (macro-head? (first xs)) (print-mac-call p x)
+            (and (= 2 (count xs)) (list-head? (lv (second xs)) :braces))
+            (do (goto! p l)
+                (print-path p (first xs) :pat)
+                (emit! p "{")
+                (let [items (vec (rest (lv (second xs))))
+                      n (count items)]
+                  (loop [i 0 first? true]
+                    (when (< i n)
+                      (let [y (nth items i) yv (lv y)]
+                        (cond
+                          (attr-form? y) (do (when-not first? (emit! p "," nil true false)) (print-attr p y) (recur (inc i) true))
+                          (= '.. yv) (do (when-not first? (emit! p "," nil true false)) (emit! p ".." (line-of y)) (recur (inc i) false))
+                          (keyword? yv)
+                          (let [nxt (nth items (inc i) nil)
+                                shorthand? (or (nil? nxt) (keyword? (lv nxt)) (= '.. (lv nxt)) (attr-form? nxt)
+                                               (and (symbol? (lv nxt)) (contains? #{'box 'mut 'ref} (lv nxt))
+                                                    ;; a modifier begins the next field
+                                                    (let [after (drop-while #(contains? #{'box 'mut 'ref 'pin 'const} (lv %)) (subvec items (inc i)))]
+                                                      (keyword? (lv (first after))))))]
+                            (when-not first? (emit! p "," nil true false))
+                            (emit! p (name yv) (line-of y))
+                            (if shorthand?
+                              (recur (inc i) false)
+                              (do (emit! p ":" nil true false)
+                                  (print-pat p nxt :nested [(lv (second xs)) (+ 2 i)])
+                                  (recur (+ i 2) false))))
+                          (contains? #{'box 'mut 'ref 'pin 'const} yv)
+                          ;; modifiers of a shorthand field: box, mut, ref, ref mut ...
+                          (let [mods (take-while #(contains? #{'box 'mut 'ref 'pin 'const} (lv %)) (subvec items i))
+                                k (nth items (+ i (count mods)))]
+                            (when-not first? (emit! p "," nil true false))
+                            (doseq [m mods] (emit! p (name (lv m)) (line-of m)))
+                            (emit! p (name (lv k)) (line-of k))
+                            (recur (+ i (count mods) 1) false))
+                          :else (fail! "a struct pattern's fields" v))))))
+                (emit! p "}"))
+            :else
+            ;; a tuple-struct pattern (path pats...)
+            (do (goto! p l)
+                (let [h0 (first xs) hv (lv h0)]
+                  (if (list-head? hv :path)
+                    (if (= 2 (count hv)) (print-path p (second hv) :pat) (print-path p h0 :pat))
+                    (print-path p h0 :pat)))
+                (emit! p "(" nil true true)
+                (print-pat-seq p v (rest xs) 1 :nested)
+                (emit! p ")" nil true false))))
+        :else (fail! "a pattern" v)))))
 
 ;;; Types (SPEC §6)
 
@@ -1550,78 +1554,79 @@
         :else nil))))
 
 (defn print-ty-raw [p x]
-  (let [v (lv x) l (line-of x)]
-    (goto! p (line-of x))
-    (cond
-      (= '! v) (emit! p "!" l)
-      (= '_ v) (emit! p "_" l)
-      (= '... v) (emit! p "..." l)
-      (symbol? v) (emit-sym! p x false false)
-      (vector? v) (do (emit! p "[" l false true)
-                      (print-ty p (first v) :plain [v 0])
-                      (when (>= (count v) 2)
-                        ;; the length's attributes before it (RR5)
-                        (let [as (butlast (rest v))]
-                          (emit! p ";" nil true false)
-                          (doseq [a as] (print-attr p a))
-                          (print-expr p (last v) fx-default (seq as) [v (dec (count v))])))
-                      (emit! p "]" (mget x :rs/close) true false))
-      (and (seq? v) (empty? v)) (do (emit! p "(" l false true) (emit! p ")" nil true false))
-      (seq? v)
-      (let [h (lv (first v)) xs (vec v)]
-        (cond
-          (contains? #{'& '&mut} h) (do (emit! p "&" l false true)
-                                        (let [r (subvec xs 1)
-                                              [lt r] (if (lifetime? (first r)) [(first r) (subvec r 1)] [nil r])]
-                                          (when lt (print-lifetime p lt))
-                                          (when (= '&mut h) (emit! p "mut" nil (nil? lt) false))
-                                          (print-ty p (first r) :ref [v (- (count xs) 1)])))
-          (= '&pin h) (do (emit! p "&" l false true)
-                          (let [r (subvec xs 1)
-                                [lt r] (if (lifetime? (first r)) [(first r) (subvec r 1)] [nil r])]
-                            (when lt (print-lifetime p lt))
-                            (emit! p "pin" nil (nil? lt) false)
-                            (emit! p (name (lv (first r))))
-                            (print-ty p (second r) :ref [v (- (count xs) 1)])))
-          (contains? #{'*const '*mut} h) (do (emit! p "*" l false true) (emit! p (subs (name h) 1) nil true false)
-                                             (print-ty p (nth xs 1) :ref [v 1]))
-          (= :tuple h) (do (emit! p "(" l false true)
-                           (doseq [[i [as t j]] (map-indexed vector (group-attrs-idx (rest xs)))]
-                             (when (pos? i) (emit! p "," nil true false))
-                             (doseq [a as] (print-attr p a))
-                             (when (some? t) (print-ty p t :plain [v (inc j)])))
-                           (when (= 1 (count (rest xs))) (emit! p "," nil true false))
-                           (emit! p ")" (mget x :rs/close) true false))
-          (contains? #{'dyn 'impl :bare} h) (do (when (not= :bare h) (emit! p (name h) l)) (goto! p l)
-                                                (print-bounds p (rest xs)))
-          (= :paren h) (do (emit! p "(" l false true) (print-ty p (nth xs 1) :plain [v 1]) (emit! p ")" nil true false))
-          (= :noparen h) (print-ty-raw p (nth xs 1))
-          (= :builtin h) (do (emit! p "builtin" l) (emit! p "#") (emit! p (name (lv (nth xs 1)))) (print-tt p (nth xs 2) true))
-          (and (= 'unsafe h) (vector? (lv (nth xs 1 nil))) (= 3 (count xs)))
-          (do (emit! p "unsafe" l)
-              (print-generic-params p (lv (nth xs 1)))
-              (print-ty p (nth xs 2) :plain [v 2]))
-          (fn-ptr-index xs)
-          ;; a function pointer: (for [params]? unsafe? extern "abi"? fn [params] -> R)
-          (let [i (fn-ptr-index xs)]
-            (goto! p l)
-            (loop [j 0]
-              (when (< j i)
-                (let [q (nth xs j)]
-                  (cond
-                    (= 'for (lv q)) (do (emit! p "for" (line-of q))
-                                        (print-generic-params p (lv (nth xs (inc j))))
-                                        (recur (+ j 2)))
-                    (sx/lit-form? (lv q)) (do (emit-lit! p q false) (recur (inc j)))
-                    :else (do (emit! p (name (lv q)) (line-of q)) (recur (inc j)))))))
-            (emit! p "fn" (line-of (nth xs i)))
-            (print-fn-ptr-params p (nth xs (inc i)))
-            (when (= '-> (lv (nth xs (+ i 2) nil)))
-              (emit! p "->")
-              (print-ty p (nth xs (+ i 3)) :fnret [v (+ i 3)])))
-          (macro-head? (first xs)) (print-mac-call p x)
-          :else (print-path p x :type)))
-      :else (fail! "a type" v))))
+  (stk/ensure-sufficient-stack
+    (let [v (lv x) l (line-of x)]
+      (goto! p (line-of x))
+      (cond
+        (= '! v) (emit! p "!" l)
+        (= '_ v) (emit! p "_" l)
+        (= '... v) (emit! p "..." l)
+        (symbol? v) (emit-sym! p x false false)
+        (vector? v) (do (emit! p "[" l false true)
+                        (print-ty p (first v) :plain [v 0])
+                        (when (>= (count v) 2)
+                          ;; the length's attributes before it (RR5)
+                          (let [as (butlast (rest v))]
+                            (emit! p ";" nil true false)
+                            (doseq [a as] (print-attr p a))
+                            (print-expr p (last v) fx-default (seq as) [v (dec (count v))])))
+                        (emit! p "]" (mget x :rs/close) true false))
+        (and (seq? v) (empty? v)) (do (emit! p "(" l false true) (emit! p ")" nil true false))
+        (seq? v)
+        (let [h (lv (first v)) xs (vec v)]
+          (cond
+            (contains? #{'& '&mut} h) (do (emit! p "&" l false true)
+                                          (let [r (subvec xs 1)
+                                                [lt r] (if (lifetime? (first r)) [(first r) (subvec r 1)] [nil r])]
+                                            (when lt (print-lifetime p lt))
+                                            (when (= '&mut h) (emit! p "mut" nil (nil? lt) false))
+                                            (print-ty p (first r) :ref [v (- (count xs) 1)])))
+            (= '&pin h) (do (emit! p "&" l false true)
+                            (let [r (subvec xs 1)
+                                  [lt r] (if (lifetime? (first r)) [(first r) (subvec r 1)] [nil r])]
+                              (when lt (print-lifetime p lt))
+                              (emit! p "pin" nil (nil? lt) false)
+                              (emit! p (name (lv (first r))))
+                              (print-ty p (second r) :ref [v (- (count xs) 1)])))
+            (contains? #{'*const '*mut} h) (do (emit! p "*" l false true) (emit! p (subs (name h) 1) nil true false)
+                                               (print-ty p (nth xs 1) :ref [v 1]))
+            (= :tuple h) (do (emit! p "(" l false true)
+                             (doseq [[i [as t j]] (map-indexed vector (group-attrs-idx (rest xs)))]
+                               (when (pos? i) (emit! p "," nil true false))
+                               (doseq [a as] (print-attr p a))
+                               (when (some? t) (print-ty p t :plain [v (inc j)])))
+                             (when (= 1 (count (rest xs))) (emit! p "," nil true false))
+                             (emit! p ")" (mget x :rs/close) true false))
+            (contains? #{'dyn 'impl :bare} h) (do (when (not= :bare h) (emit! p (name h) l)) (goto! p l)
+                                                  (print-bounds p (rest xs)))
+            (= :paren h) (do (emit! p "(" l false true) (print-ty p (nth xs 1) :plain [v 1]) (emit! p ")" nil true false))
+            (= :noparen h) (print-ty-raw p (nth xs 1))
+            (= :builtin h) (do (emit! p "builtin" l) (emit! p "#") (emit! p (name (lv (nth xs 1)))) (print-tt p (nth xs 2) true))
+            (and (= 'unsafe h) (vector? (lv (nth xs 1 nil))) (= 3 (count xs)))
+            (do (emit! p "unsafe" l)
+                (print-generic-params p (lv (nth xs 1)))
+                (print-ty p (nth xs 2) :plain [v 2]))
+            (fn-ptr-index xs)
+            ;; a function pointer: (for [params]? unsafe? extern "abi"? fn [params] -> R)
+            (let [i (fn-ptr-index xs)]
+              (goto! p l)
+              (loop [j 0]
+                (when (< j i)
+                  (let [q (nth xs j)]
+                    (cond
+                      (= 'for (lv q)) (do (emit! p "for" (line-of q))
+                                          (print-generic-params p (lv (nth xs (inc j))))
+                                          (recur (+ j 2)))
+                      (sx/lit-form? (lv q)) (do (emit-lit! p q false) (recur (inc j)))
+                      :else (do (emit! p (name (lv q)) (line-of q)) (recur (inc j)))))))
+              (emit! p "fn" (line-of (nth xs i)))
+              (print-fn-ptr-params p (nth xs (inc i)))
+              (when (= '-> (lv (nth xs (+ i 2) nil)))
+                (emit! p "->")
+                (print-ty p (nth xs (+ i 3)) :fnret [v (+ i 3)])))
+            (macro-head? (first xs)) (print-mac-call p x)
+            :else (print-path p x :type)))
+        :else (fail! "a type" v)))))
 
 ;;; Generics (SPEC §4.4)
 
@@ -1998,176 +2003,177 @@
   "An item form (unqualified); ctx :top, :body, :assoc, :foreign, or :probe (returns whether x is
   an item, printing nothing)"
   [p x ctx]
-  (when (and p (not= ctx :probe)) (brk! p))
-  (let [v (lv x)
-        xs (vec v)]
-    (cond
-      (list-head? v :rust) (if (= ctx :probe) true (emit! p (lv (second v)) (line-of x)))
-      (and (macro-call? v) (not (= 'macro_rules! (lv (first xs)))))
-      (if (= ctx :probe)
-        nil
-        (do (print-mac-call p x)
-            (when (not= :brace (mac-delim v)) (emit! p ";" nil true false))))
-      :else
-      (let [s (scan-item xs)]
-        (cond
-          (or (nil? s) (and (contains? #{:probe :body} ctx) (not (item-shape-ok? xs s))))
-          (if (= ctx :probe) nil (fail! "an item" v))
-          (= ctx :probe) true
-          :else
-          (let [k (:kw s) w (lv (nth xs k)) more (subvec xs (inc k))]
-            (goto! p (line-of x))
-            (print-vis p xs s)
-            (print-quals p xs s)
-            (case w
-              fn (print-fn-rest p x xs k ctx)
-              struct (let [[nm & more] more
-                           more (vec more)]
-                       (emit! p "struct" (line-of (nth xs k)))
+  (stk/ensure-sufficient-stack
+    (when (and p (not= ctx :probe)) (brk! p))
+    (let [v (lv x)
+          xs (vec v)]
+      (cond
+        (list-head? v :rust) (if (= ctx :probe) true (emit! p (lv (second v)) (line-of x)))
+        (and (macro-call? v) (not (= 'macro_rules! (lv (first xs)))))
+        (if (= ctx :probe)
+          nil
+          (do (print-mac-call p x)
+              (when (not= :brace (mac-delim v)) (emit! p ";" nil true false))))
+        :else
+        (let [s (scan-item xs)]
+          (cond
+            (or (nil? s) (and (contains? #{:probe :body} ctx) (not (item-shape-ok? xs s))))
+            (if (= ctx :probe) nil (fail! "an item" v))
+            (= ctx :probe) true
+            :else
+            (let [k (:kw s) w (lv (nth xs k)) more (subvec xs (inc k))]
+              (goto! p (line-of x))
+              (print-vis p xs s)
+              (print-quals p xs s)
+              (case w
+                fn (print-fn-rest p x xs k ctx)
+                struct (let [[nm & more] more
+                             more (vec more)]
+                         (emit! p "struct" (line-of (nth xs k)))
+                         (print-generic-name p nm)
+                         (let [w1 (when (list-head? (lv (first more)) 'where) (first more))
+                               more (if w1 (subvec more 1) more)
+                               body (first more)
+                               w2 (second more)]
+                           (when w1 (print-where p w1))
+                           (cond
+                             (nil? body) (emit! p ";" nil true false)
+                             (vector? (lv body)) (do (print-tuple-fields p body) (when w2 (print-where p w2)) (emit! p ";" nil true false))
+                             :else (print-named-fields p body))))
+                union (let [[nm & more] more more (vec more)]
+                        (emit! p "union" (line-of (nth xs k)))
+                        (print-generic-name p nm)
+                        (when (list-head? (lv (first more)) 'where) (print-where p (first more)))
+                        (print-named-fields p (last more)))
+                enum (let [[nm & more] more more (vec more)
+                           [w1 vs] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])]
+                       (emit! p "enum" (line-of (nth xs k)))
                        (print-generic-name p nm)
-                       (let [w1 (when (list-head? (lv (first more)) 'where) (first more))
-                             more (if w1 (subvec more 1) more)
-                             body (first more)
-                             w2 (second more)]
-                         (when w1 (print-where p w1))
-                         (cond
-                           (nil? body) (emit! p ";" nil true false)
-                           (vector? (lv body)) (do (print-tuple-fields p body) (when w2 (print-where p w2)) (emit! p ";" nil true false))
-                           :else (print-named-fields p body))))
-              union (let [[nm & more] more more (vec more)]
-                      (emit! p "union" (line-of (nth xs k)))
-                      (print-generic-name p nm)
-                      (when (list-head? (lv (first more)) 'where) (print-where p (first more)))
-                      (print-named-fields p (last more)))
-              enum (let [[nm & more] more more (vec more)
-                         [w1 vs] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])]
-                     (emit! p "enum" (line-of (nth xs k)))
-                     (print-generic-name p nm)
-                     (when w1 (print-where p w1))
-                     (emit! p "{" (mget x :rs/brace))
-                     (indented p
-                       (doseq [[as vr] (group-attrs vs)]
-                         (doseq [a as] (print-attr p a))
-                         (when (some? vr) (print-variant p vr) (emit! p "," nil true false))))
-                     (when (seq vs) (brk! p))
-                     (emit! p "}"))
-              trait (let [[nm & more] more more (vec more)]
-                      (emit! p "trait" (line-of (nth xs k)))
-                      (if (and (list-head? (lv nm) :has))
-                        (let [[c g & bs] (lv nm)]
-                          (print-generic-name p g)
-                          (emit! p ":" (line-of c) true false)
-                          (print-bounds p bs))
-                        (print-generic-name p nm))
-                      (if (= '= (lv (first more)))
-                        ;; a trait alias
-                        (let [rest-m (subvec more 1)
-                              [bs w1] (if (list-head? (lv (peek rest-m)) 'where) [(pop rest-m) (peek rest-m)] [rest-m nil])]
-                          (emit! p "=")
-                          (print-bounds p bs)
-                          (when w1 (print-where p w1))
-                          (emit! p ";" nil true false))
-                        (let [[w1 items] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])]
-                          (when w1 (print-where p w1))
-                          (print-assoc-items p x items))))
-              impl (let [more (vec more)
-                         [gs more] (if (list-head? (lv (first more)) :generics) [(first more) (subvec more 1)] [nil more])
-                         _ (emit! p "impl" (line-of (nth xs k)))
-                         _ (when gs (print-generic-params p (rest (lv gs)) (mget gs :rs/close)))
-                         [tr more] (if (= 'for (lv (nth more 1 nil))) [(first more) (subvec more 2)] [nil more])
-                         _ (when tr
-                             (if (list-head? (lv tr) '!)
-                               (do (emit! p "!" (line-of tr) false true) (print-ty p (second (lv tr)) :plain))
-                               (print-ty p tr :plain))
-                             (emit! p "for"))
-                         self-ty (first more)
-                         more (subvec more 1)
-                         [w1 items] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])]
-                     (print-ty p self-ty :plain)
-                     (when w1 (print-where p w1))
-                     (print-assoc-items p x items))
-              type (let [[nm & more] more more (vec more)]
-                     (emit! p "type" (line-of (nth xs k)))
-                     (if (list-head? (lv nm) :has)
-                       (let [[c g & bs] (lv nm)] (print-generic-name p g) (emit! p ":" (line-of c) true false) (print-bounds p bs))
-                       (print-generic-name p nm))
-                     (let [[w1 more] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])
-                           _ (when w1 (print-where p w1))
-                           [t more] (if (seq more) [(first more) (subvec more 1)] [nil more])
-                           _ (when (some? t) (emit! p "=") (print-ty p t :plain))
-                           w2 (first more)]
-                       (when w2 (print-where p w2))
-                       (emit! p ";" nil true false)))
-              const (let [more (vec more)]
-                      (emit! p "const" (line-of (nth xs k)))
-                      (if (and (= 1 (count more)) (list-head? (lv (first more)) 'do))
-                        (print-block p (lv (first more)) (rest (lv (first more))) (line-of (first more)))
-                        (let [[nm t & more] more more (vec more)
-                              ;; the value's attributes before it (RR5)
-                              as (vec (take-while attr-form? more))
-                              more (subvec more (count as))
-                              [e more] (if (and (seq more) (not (list-head? (lv (first more)) 'where))) [(first more) (subvec more 1)] [nil more])]
-                          (print-generic-name p nm)
-                          (emit! p ":" nil true false)
-                          (print-ty p t :plain)
-                          (when (some? e) (emit! p "=") (doseq [a as] (print-attr p a))
-                            (print-expr p e fx-default (seq as) [(lv x) (+ k 3 (count as))]))
-                          (when-let [w1 (first more)] (print-where p w1))
-                          (emit! p ";" nil true false))))
-              static (let [more (vec more)
-                           [m more] (if (= 'mut (lv (first more))) [(first more) (subvec more 1)] [nil more])
-                           [nm t & es] more
-                           ;; the value's attributes before it (RR5)
-                           as (filter attr-form? es)
-                           e (first (remove attr-form? es))]
-                       (emit! p "static" (line-of (nth xs k)))
-                       (when m (emit! p "mut"))
-                       (emit-name! p nm)
-                       (emit! p ":" nil true false)
-                       (print-ty p t :plain)
-                       (when (some? e) (emit! p "=") (doseq [a as] (print-attr p a))
-                         (print-expr p e fx-default (seq as) [(lv x) (- (count xs) 1)]))
-                       (emit! p ";" nil true false))
-              use (do (emit! p "use" (line-of (nth xs k)))
-                      (print-use-tree p (first more))
-                      (emit! p ";" nil true false))
-              mod (let [[nm & items] more]
-                    (emit! p "mod" (line-of (nth xs k)))
-                    (emit-name! p nm)
-                    (cond
-                      (empty? items) (emit! p ";" nil true false)
-                      (and (= 1 (count items)) (list-head? (lv (first items)) :braces) (= 1 (count (lv (first items)))))
-                      (do (emit! p "{" (line-of (first items))) (emit! p "}" (mget (first items) :rs/close)))
-                      :else (do (emit! p "{" (mget x :rs/brace))
-                                (indented p (print-items-seq p items :top))
-                                (brk! p)
-                                (emit! p "}" (mget x :rs/close)))))
-              extern (if (= 'crate (lv (first more)))
-                       (let [[_ a as b] more]
-                         (emit! p "extern" (line-of (nth xs k)))
-                         (emit! p "crate")
-                         (emit-name! p a)
-                         (when as (emit! p "as") (emit-name! p b))
+                       (when w1 (print-where p w1))
+                       (emit! p "{" (mget x :rs/brace))
+                       (indented p
+                         (doseq [[as vr] (group-attrs vs)]
+                           (doseq [a as] (print-attr p a))
+                           (when (some? vr) (print-variant p vr) (emit! p "," nil true false))))
+                       (when (seq vs) (brk! p))
+                       (emit! p "}"))
+                trait (let [[nm & more] more more (vec more)]
+                        (emit! p "trait" (line-of (nth xs k)))
+                        (if (and (list-head? (lv nm) :has))
+                          (let [[c g & bs] (lv nm)]
+                            (print-generic-name p g)
+                            (emit! p ":" (line-of c) true false)
+                            (print-bounds p bs))
+                          (print-generic-name p nm))
+                        (if (= '= (lv (first more)))
+                          ;; a trait alias
+                          (let [rest-m (subvec more 1)
+                                [bs w1] (if (list-head? (lv (peek rest-m)) 'where) [(pop rest-m) (peek rest-m)] [rest-m nil])]
+                            (emit! p "=")
+                            (print-bounds p bs)
+                            (when w1 (print-where p w1))
+                            (emit! p ";" nil true false))
+                          (let [[w1 items] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])]
+                            (when w1 (print-where p w1))
+                            (print-assoc-items p x items))))
+                impl (let [more (vec more)
+                           [gs more] (if (list-head? (lv (first more)) :generics) [(first more) (subvec more 1)] [nil more])
+                           _ (emit! p "impl" (line-of (nth xs k)))
+                           _ (when gs (print-generic-params p (rest (lv gs)) (mget gs :rs/close)))
+                           [tr more] (if (= 'for (lv (nth more 1 nil))) [(first more) (subvec more 2)] [nil more])
+                           _ (when tr
+                               (if (list-head? (lv tr) '!)
+                                 (do (emit! p "!" (line-of tr) false true) (print-ty p (second (lv tr)) :plain))
+                                 (print-ty p tr :plain))
+                               (emit! p "for"))
+                           self-ty (first more)
+                           more (subvec more 1)
+                           [w1 items] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])]
+                       (print-ty p self-ty :plain)
+                       (when w1 (print-where p w1))
+                       (print-assoc-items p x items))
+                type (let [[nm & more] more more (vec more)]
+                       (emit! p "type" (line-of (nth xs k)))
+                       (if (list-head? (lv nm) :has)
+                         (let [[c g & bs] (lv nm)] (print-generic-name p g) (emit! p ":" (line-of c) true false) (print-bounds p bs))
+                         (print-generic-name p nm))
+                       (let [[w1 more] (if (list-head? (lv (first more)) 'where) [(first more) (subvec more 1)] [nil more])
+                             _ (when w1 (print-where p w1))
+                             [t more] (if (seq more) [(first more) (subvec more 1)] [nil more])
+                             _ (when (some? t) (emit! p "=") (print-ty p t :plain))
+                             w2 (first more)]
+                         (when w2 (print-where p w2))
+                         (emit! p ";" nil true false)))
+                const (let [more (vec more)]
+                        (emit! p "const" (line-of (nth xs k)))
+                        (if (and (= 1 (count more)) (list-head? (lv (first more)) 'do))
+                          (print-block p (lv (first more)) (rest (lv (first more))) (line-of (first more)))
+                          (let [[nm t & more] more more (vec more)
+                                ;; the value's attributes before it (RR5)
+                                as (vec (take-while attr-form? more))
+                                more (subvec more (count as))
+                                [e more] (if (and (seq more) (not (list-head? (lv (first more)) 'where))) [(first more) (subvec more 1)] [nil more])]
+                            (print-generic-name p nm)
+                            (emit! p ":" nil true false)
+                            (print-ty p t :plain)
+                            (when (some? e) (emit! p "=") (doseq [a as] (print-attr p a))
+                              (print-expr p e fx-default (seq as) [(lv x) (+ k 3 (count as))]))
+                            (when-let [w1 (first more)] (print-where p w1))
+                            (emit! p ";" nil true false))))
+                static (let [more (vec more)
+                             [m more] (if (= 'mut (lv (first more))) [(first more) (subvec more 1)] [nil more])
+                             [nm t & es] more
+                             ;; the value's attributes before it (RR5)
+                             as (filter attr-form? es)
+                             e (first (remove attr-form? es))]
+                         (emit! p "static" (line-of (nth xs k)))
+                         (when m (emit! p "mut"))
+                         (emit-name! p nm)
+                         (emit! p ":" nil true false)
+                         (print-ty p t :plain)
+                         (when (some? e) (emit! p "=") (doseq [a as] (print-attr p a))
+                           (print-expr p e fx-default (seq as) [(lv x) (- (count xs) 1)]))
                          (emit! p ";" nil true false))
-                       (let [more (vec more)
-                             [abi items] (if (and (seq more) (sx/lit-form? (lv (first more)))) [(first more) (subvec more 1)] [nil more])]
-                         (emit! p "extern" (line-of (nth xs k)))
-                         (when abi (emit-lit! p abi false))
-                         (emit! p "{" (mget x :rs/brace))
-                         (indented p (print-items-seq p items :foreign))
-                         (when (seq items) (brk! p))
-                         (emit! p "}")))
-              macro_rules! (let [[nm body] more]
-                             (emit! p "macro_rules" (line-of (nth xs k)) false true)
-                             (emit! p "!" nil true false)
-                             (emit-name! p nm)
-                             (print-tt p body false)
-                             (when (not= \{ (first (lv (second (lv body))))) (emit! p ";" nil true false)))
-              macro (let [[nm & bodies] more]
-                      (emit! p "macro" (line-of (nth xs k)))
+                use (do (emit! p "use" (line-of (nth xs k)))
+                        (print-use-tree p (first more))
+                        (emit! p ";" nil true false))
+                mod (let [[nm & items] more]
+                      (emit! p "mod" (line-of (nth xs k)))
                       (emit-name! p nm)
-                      (doseq [[i b] (map-indexed vector bodies)] (print-tt p b (zero? i))))
-              (fail! "an item" v))))))))
+                      (cond
+                        (empty? items) (emit! p ";" nil true false)
+                        (and (= 1 (count items)) (list-head? (lv (first items)) :braces) (= 1 (count (lv (first items)))))
+                        (do (emit! p "{" (line-of (first items))) (emit! p "}" (mget (first items) :rs/close)))
+                        :else (do (emit! p "{" (mget x :rs/brace))
+                                  (indented p (print-items-seq p items :top))
+                                  (brk! p)
+                                  (emit! p "}" (mget x :rs/close)))))
+                extern (if (= 'crate (lv (first more)))
+                         (let [[_ a as b] more]
+                           (emit! p "extern" (line-of (nth xs k)))
+                           (emit! p "crate")
+                           (emit-name! p a)
+                           (when as (emit! p "as") (emit-name! p b))
+                           (emit! p ";" nil true false))
+                         (let [more (vec more)
+                               [abi items] (if (and (seq more) (sx/lit-form? (lv (first more)))) [(first more) (subvec more 1)] [nil more])]
+                           (emit! p "extern" (line-of (nth xs k)))
+                           (when abi (emit-lit! p abi false))
+                           (emit! p "{" (mget x :rs/brace))
+                           (indented p (print-items-seq p items :foreign))
+                           (when (seq items) (brk! p))
+                           (emit! p "}")))
+                macro_rules! (let [[nm body] more]
+                               (emit! p "macro_rules" (line-of (nth xs k)) false true)
+                               (emit! p "!" nil true false)
+                               (emit-name! p nm)
+                               (print-tt p body false)
+                               (when (not= \{ (first (lv (second (lv body))))) (emit! p ";" nil true false)))
+                macro (let [[nm & bodies] more]
+                        (emit! p "macro" (line-of (nth xs k)))
+                        (emit-name! p nm)
+                        (doseq [[i b] (map-indexed vector bodies)] (print-tt p b (zero? i))))
+                (fail! "an item" v)))))))))
 
 (defn print-items-seq
   "Items with their attributes (a module's body, an extern block's)"
@@ -2240,12 +2246,13 @@
   "Forms without positions: every list's, vector's and symbol's metadata removed (lines, the
   layout's keys :rs/brace, :rs/close..., mode :full's :rs/pos...)"
   [x]
-  (cond
-    (seq? x) (apply list (map strip-positions x))
-    (vector? x) (mapv strip-positions x)
-    (map? x) (into {} (map (fn [[k v]] [(strip-positions k) (strip-positions v)]) x))
-    (symbol? x) (with-meta x nil)
-    :else x))
+  (stk/ensure-sufficient-stack
+    (cond
+      (seq? x) (apply list (map strip-positions x))
+      (vector? x) (mapv strip-positions x)
+      (map? x) (into {} (map (fn [[k v]] [(strip-positions k) (strip-positions v)]) x))
+      (symbol? x) (with-meta x nil)
+      :else x)))
 
 (def ^:private max-width 100)
 

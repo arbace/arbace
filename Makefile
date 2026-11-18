@@ -33,7 +33,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-ucd-fetch repr-scheme-ucd-check repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-interp-check si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-table-check oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
-  repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
+  repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-records pyi-records-slice pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
@@ -70,6 +70,10 @@ fixpoint: ## G1 by stage 0, G2 by G1, G3 by G2; G2 = G3 required (bin/arbace-go 
 	bin/arbace-go --fixpoint
 program: ## a user's program of DIR=...: its namespaces (.ae, and .clj, .cljc translated by repr/clojure), Java forms and Go forms (compiled through its own goi table) built into one executable (bin/arbace-go --build-program DIR)
 	bin/arbace-go --build-program $(DIR)
+program-mutant: ## a kept program's mutant (doc/go/BUILD.md, "A mutant"): DIR=...'s forms kept by ARBACE_PROGRAM_KEEP=1 built again with one function rewritten by the record MUTANT=..., no j2g run (bin/arbace-go --build-program DIR --mutant MUTANT)
+	bin/arbace-go --build-program $(DIR) --mutant $(MUTANT)
+build-go-mutant-test: ## the mutant's unit tests (no Go build), then test/build/go/hello and its mutants built and run: the original passes, each mutant fails a run (bin/build-go mutant-test --build)
+	bin/build-go mutant-test --build
 programs-check: ## the samples of test/programs (Clojure, Java forms, Go forms, mixed) built and run against their runs, as bin/gate --full (bin/arbace-go --build-program --check)
 	bin/arbace-go --build-program --check
 java-project-test: ## the Java project model's fixtures: test/programs/java-project's modules compiled by javac on Arbace and read by repr/java from both trees and without javac, its closure and multi-release reports, the controls (bin/java-project test; after `make build-java`)
@@ -1041,6 +1045,12 @@ pyi-check: ## PY7: Lib/test under pyi, every method by its own verdict (the inve
 pyi-check-record: ## PY7: the same over the whole universe, test/python/check-lib-test-linux-amd64.edn written (the main host's; bin/pyi check --record)
 	bin/pyi check --record
 
+pyi-records: ## queue 321: the eval and AOT cells' records night in one command (the main host's, linux/amd64): check --aot --record, check --fresh --record on the checkout's runtime, the :until dropped, bin/reap --record, bin/crops-score --record (bin/pyi records)
+	bin/pyi records
+
+pyi-records-slice: ## queue 321: its dry run over every Nth program and module (SLICE=20), the records under .tmp, read by bin/reap and bin/crops-score through an overlay (bin/pyi records --slice N)
+	bin/pyi records --slice $(or $(SLICE),20)
+
 pyi-universe: ## queue 256: Lib/test's universe as data, test/python/universe-cpython314.edn, from CPython's recorded runs (bin/pyi universe; record-ref writes it)
 	bin/pyi universe
 
@@ -1092,6 +1102,7 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
 .PHONY: j2g-unit
+.PHONY: program-mutant build-go-mutant-test
 .PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)
 	bin/repr-ocaml roundtrip --cmi --record-results all

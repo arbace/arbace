@@ -2438,7 +2438,12 @@
       (when (and (#{"++" "--"} op) (local? env v)
                  (= [1 1] (uses-of v s))
                  ;; not the assigned variable itself
-                 (not (and (is? s 'set!) (= v (second s)))))
+                 (not (and (is? s 'set!) (= v (second s))))
+                 ;; a local a catch or finally sees moves after the statement only when nothing after
+                 ;; the increment can throw, x = v++ into a local or a field (the converter's
+                 ;; hoist-mode): else it reads as v++ hoisted before or in place
+                 (or (not (contains? (:guarded env) (name v)))
+                     (and (is? s 'set!) (= v (nth s 2)) (symbol? (second s)) (nil? (namespace (second s))))))
         (subst {v [:postfix-of v nxt]} s)))))
 
 (defn- escaping-binding
@@ -2795,6 +2800,15 @@
       kw [(str "continue " (java-label kw) ";")]
       :else ["continue;"])))
 
+(defn- guard-locals
+  "Env `env` for a try's body: the locals of `outer` (default `env`) that its catches or finally see,
+  :guarded (fold-increment)."
+  ([env catches fin] (guard-locals env catches fin env))
+  ([env catches fin outer]
+   (if (or (seq catches) fin)
+     (update env :guarded (fnil into #{}) (keys (:locals outer)))
+     env)))
+
 (defn- try-lines [env [_ & forms] ctx]
   (let [[body clauses] (split-with #(not (or (is? % 'catch) (is? % 'finally))) forms)
         catches (filter #(is? % 'catch) clauses)
@@ -2804,8 +2818,8 @@
         [head-t body-l] (if twr
                           (let [[_ bv & tb] twr
                                 [rs env'] (resources-text env bv tb)]
-                            [(str "try (" rs ")") (body-lines env' tb ctx)])
-                          ["try" (body-lines env body ctx)])
+                            [(str "try (" rs ")") (body-lines (guard-locals env' catches fin env) tb ctx)])
+                          ["try" (body-lines (guard-locals env catches fin) body ctx)])
         lines (block head-t body-l)
         lines (reduce (fn [lines [_ t s & hb]]
                         (let [types (if (vector? t) t [t])
@@ -3480,14 +3494,31 @@
                              [[] env] (range n))]
     [(str "(" (str/join ", " texts) ")") env']))
 
+(defn- tag-simple-name
+  "The simple name of the class that declared type form `t` names (the last of Outer<T>.Inner)."
+  [t]
+  (cond
+    (and (seq? t) (= '.. (first t))) (tag-simple-name (last t))
+    (seq? t) (tag-simple-name (first t))
+    :else (last (str/split (str t) #"[.$]"))))
+
 (defn- receiver-param-text
-  "Java's explicit receiver parameter, when the receiver symbol carries annotations."
-  [env r]
-  (when (seq (annotation-items (meta r)))
-    (str (annotations-text (:scope env) (meta r))
-         (:class-name env)
-         (when (seq (:class-tparams env)) (str "<" (str/join ", " (:class-tparams env)) ">"))
-         " this")))
+  "Java's explicit receiver parameter, when the receiver symbol carries annotations or its
+  declared type (^{:tag (C ^{A 0} T)} this, round 52): a method's `T this`, an inner class
+  constructor's `Outer Outer.this` (`ctor?`)."
+  ([env r] (receiver-param-text env r false))
+  ([env r ctor?]
+   (let [t (tag-of r)]
+     (cond
+       t (str (annotations-text (:scope env) (meta r))
+              (decl-type-text (:scope env) t)
+              (if ctor? (str " " (tag-simple-name t) ".this") " this"))
+       ctor? nil
+       (seq (annotation-items (meta r)))
+       (str (annotations-text (:scope env) (meta r))
+            (:class-name env)
+            (when (seq (:class-tparams env)) (str "<" (str/join ", " (:class-tparams env)) ">"))
+            " this")))))
 
 (defn- split-opts
   "[opts rest] of a method or constructor form's items after the name."
@@ -3566,6 +3597,8 @@
         env1 (assoc env :scope sc)
         [recv & ps] pv
         [ptext env'] (params-text env1 ps)
+        rp (receiver-param-text env1 recv true)
+        ptext (if rp (str "(" rp (when (seq ps) ", ") (subs ptext 1)) ptext)
         env' (assoc env' :recv (name recv))
         ;; a compact canonical constructor: the components are its locals
         env' (if (:compact m) (reduce (fn [e c] (add-local e c)) env' (remove #{'&} (:record-comps env))) env')

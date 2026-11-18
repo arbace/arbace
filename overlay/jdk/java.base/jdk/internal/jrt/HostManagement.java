@@ -7,6 +7,9 @@
  * ThreadService's: live, daemon, peak (reset to the live count), ever started. The settings the beans enable
  * (contention monitoring, CPU time, allocated memory) are kept here. Since slice 2 what a thread waits for: the
  * object, its owner, the blocked and waited counts and times (go/arbace/jrt/management.ae's waitBegin).
+ * Since n-java-f13 the classes, the memory pools and the collector (go/arbace/jrt/memory.ae), under
+ * sun.management.JrtManagement, and the factory of com.sun.management.GcInfo's private constructor. Since
+ * n-java-thresh the events of JrtManagement's low memory detector and the collector's notifications.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -112,6 +115,96 @@ public final class HostManagement {
 
     /** The one-minute load average; -1 when unknown. */
     public static native double loadAverage0();
+
+    // n-java-f13 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-f13"): the classes, the pools, the collector
+
+    /** The classes ever defined (the loaded and the unloaded). */
+    public static native long classCount0();
+
+    /** The classes unloaded (a class made at run time replaced by another of its name). */
+    public static native long unloadedClassCount0();
+
+    /** Pool p's usage (0 Go's heap, 1 the runtime's own memory): init, used, committed, max (-1 none). */
+    public static native long[] memory0(int p);
+
+    /** Pool p's peak usage since the start or its reset, as memory0. */
+    public static native long[] peak0(int p);
+
+    /** Makes pool p's peak its usage now. */
+    public static native void resetPeak0(int p);
+
+    /** The collector's completed cycles. */
+    public static native long gcCount0();
+
+    /** The collector's accumulated pauses, in milliseconds. */
+    public static native long gcTime0();
+
+    /** The collector's estimated CPU time, in nanoseconds; -1 when unknown. */
+    public static native long gcCpuTime0();
+
+    /** Starts watching the collector's cycles (their usage before and after, the pools' peaks), once. */
+    public static native void watchGc0();
+
+    /**
+     * The latest cycle, null before the first: its number, its start and end in milliseconds since the start,
+     * the heap's used bytes before and after it.
+     */
+    public static native long[] lastGc0();
+
+    /**
+     * GcInfo's private constructor, as the JVM reaches it (GcInfo's static initializer sets it): the builder a
+     * com.sun.management.internal.GcInfoBuilder, the usages java.lang.management.MemoryUsage[] (named as Object here:
+     * java.base reads neither module).
+     */
+    public interface GcInfoFactory {
+        Object newGcInfo(Object builder, long index, long startTime, long endTime,
+                         Object[] muBeforeGc, Object[] muAfterGc, Object[] extAttributes);
+    }
+
+    private static GcInfoFactory gcInfoFactory;
+
+    public static void setGcInfoFactory(GcInfoFactory f) {
+        gcInfoFactory = f;
+    }
+
+    /** The factory, GcInfo initialized first. */
+    public static GcInfoFactory gcInfoFactory() {
+        GcInfoFactory f = gcInfoFactory;
+        if (f == null) {
+            try {
+                Class.forName("com.sun.management.GcInfo");
+            } catch (ClassNotFoundException e) {
+                throw new InternalError(e);
+            }
+            f = gcInfoFactory;
+        }
+        return f;
+    }
+
+    // n-java-thresh (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-thresh"): the events of
+    // sun.management.JrtManagement's low memory detector and the collector's notifications
+
+    /**
+     * Starts the notifier, once: a goroutine (not a live thread, as HotSpot's hidden Notification Thread) running r,
+     * a java.lang.Runnable, at each event: a cycle queued, a tick of the usage sampler, notify0.
+     */
+    public static native void setNotifier0(Object r);
+
+    /** Wakes the notifier. */
+    public static native void notify0();
+
+    /** Turns the usage sampler on or off: while on, it wakes the notifier every 20 ms. */
+    public static native void sampleUsage0(boolean on);
+
+    /** Turns the watcher's queue of the cycles on or off (off: emptied); a queued cycle wakes the notifier. */
+    public static native void gcEvents0(boolean on);
+
+    /**
+     * The oldest queued cycle, taken from the queue, or null: its number, its start and end in milliseconds since
+     * the start, the heap's used bytes before and after it, the wall clock's milliseconds when it was seen, 1 when
+     * it was forced (else 0).
+     */
+    public static native long[] nextGc0();
 
     /** The times t blocked to enter a monitor or a lock. */
     public static native long blockedCount0(Thread t);

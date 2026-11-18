@@ -146,6 +146,58 @@
              (= 2 (count (filter #(str/starts-with? % "E ") ls))))
            (pr-str (data "q/Impl" :members true :throws true)))))
 
+(defn test-mxbean-signatures
+  "n-j2g-mxsig (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: n-j2g-mxsig\"): an MXBean interface of the world (its
+  name ends in MXBean, or @MXBean) has its members' Signatures (G records) with :signatures alone, j2g's class-data call
+  for a JDK class, so that JMX's introspection sees getArgs's List<String>; an interface that is not one (Plain, or
+  @MXBean(false)) and a class named ...MXBean are not MXBean interfaces, and without :signatures or :members no G record."
+  []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        ;; load-fixture's binding without its advance-ids! (as test-throws)
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/mxsig" :tree true}] :variant-files []))
+        mx? (fn [n] (w/with-world world (annot/mxbean-interface? n (a/decl n))))
+        data (fn [n & opts] (w/with-world world (some-> (apply annot/class-data n opts) str/split-lines set)))
+        gs (fn [ls] (set (filter #(str/starts-with? % "G ") ls)))
+        ;; j2g's call: the G records when the class is an MXBean interface
+        j2g (fn [n] (gs (data n :throws true :signatures (mx? n))))
+        ;; n-java-f13: j2g's call since, the MXBean interfaces and the CompositeDataViews
+        mapped? (fn [n] (w/with-world world (annot/mxbean-mapped? n (a/decl n))))
+        j2g-mapped (fn [n] (gs (data n :throws true :signatures (mapped? n))))]
+    (check "mxsig: the fixture analyzes" (empty? (filter (comp #{"q/FooMXBean" "q/Tagged" "q/Plain" "q/Info"} first) (:failed world)))
+           (pr-str (:failed world)))
+    (check "mxsig: FooMXBean's generic getters, not its plain one"
+           (= #{"G M getArgs ()Lq.Box; ()Lq/Box<Ljava/lang/String;>;"
+                "G M getProps ()Lq.Box; ()Lq/Box<Lq/Box<Ljava/lang/String;>;>;"}
+              (j2g "q/FooMXBean"))
+           (pr-str (j2g "q/FooMXBean")))
+    (check "mxsig: @MXBean's Tagged, its name not ending in MXBean"
+           (= #{"G M getNames ()Lq.Box; ()Lq/Box<Ljava/lang/String;>;"} (j2g "q/Tagged")) (pr-str (j2g "q/Tagged")))
+    (check "mxsig: rule: a name ending in MXBean, @MXBean, not Plain, not @MXBean(false), not a class"
+           (and (mx? "q/FooMXBean") (mx? "q/Tagged") (not (mx? "q/Plain")) (not (mx? "q/OptedOutMXBean"))
+                (not (mx? "q/ImplMXBean")))
+           (pr-str (map (juxt identity mx?) ["q/FooMXBean" "q/Tagged" "q/Plain" "q/OptedOutMXBean" "q/ImplMXBean"])))
+    (check "mxsig: negative: Plain, OptedOutMXBean and the class ImplMXBean get no G record from j2g's call"
+           (every? empty? (map j2g ["q/Plain" "q/OptedOutMXBean" "q/ImplMXBean"]))
+           (pr-str (map j2g ["q/Plain" "q/OptedOutMXBean" "q/ImplMXBean"])))
+    (check "mxsig: control: Plain's Signature exists, :signatures forced writes it (the rule leaves it out)"
+           (= #{"G M getArgs ()Lq.Box; ()Lq/Box<Ljava/lang/String;>;"} (gs (data "q/Plain" :signatures true)))
+           (pr-str (data "q/Plain" :signatures true)))
+    (check "mxsig: none without :signatures or :members"
+           (empty? (gs (data "q/FooMXBean" :throws true))) (pr-str (data "q/FooMXBean" :throws true)))
+    (check "mxsig: with :members and :signatures, each record once"
+           (let [ls (w/with-world world (str/split-lines (annot/class-data "q/FooMXBean" :members true :signatures true)))]
+             (= 2 (count (filter #(str/starts-with? % "G ") ls))))
+           (pr-str (data "q/FooMXBean" :members true :signatures true)))
+    (check "mxsig: a CompositeDataView (Info, GcInfo's kind) is mapped, its generic getter's record, not its plain one"
+           (and (mapped? "q/Info") (not (mx? "q/Info"))
+                (= #{"G M getUsages ()Lq.Box; ()Lq/Box<Ljava/lang/String;>;"} (j2g-mapped "q/Info")))
+           (pr-str [(mapped? "q/Info") (j2g-mapped "q/Info")]))
+    (check "mxsig: mapped keeps the MXBean interfaces' rule: FooMXBean and Tagged mapped, Plain, OptedOutMXBean and ImplMXBean not"
+           (and (mapped? "q/FooMXBean") (mapped? "q/Tagged") (not-any? mapped? ["q/Plain" "q/OptedOutMXBean" "q/ImplMXBean"])
+                (= (j2g "q/FooMXBean") (j2g-mapped "q/FooMXBean")))
+           (pr-str (map (juxt identity mapped?) ["q/FooMXBean" "q/Tagged" "q/Plain" "q/OptedOutMXBean" "q/ImplMXBean"])))))
+
 (def ^:private typeann-known
   "JCS282 (b): javac's rows the encoder writes otherwise, each with why (the check holds both sides to these)."
   {["p/TA" ["T"] ["0x10" [65535] [[3 0]] ["Lp/B;" [["e" ["e" "Ljava/lang/annotation/ElementType;" "METHOD"]]]]]]
@@ -736,6 +788,17 @@
                       (= "q/other/Supplier" (binding [a/*unit* (dissoc a/*unit* :file-imports)]
                                               (a/resolve-class-sym {:class "q/Imports" :ns (the-ns 'q)} 'Supplier))))))))))
 
+;; h-java-aot-triage (2026-11-17): a null constant cast to a class, (cast String nil), coerced to Object (a varargs
+;; element: OneCaseSwitches' method.invoke(null, (String) null, ...), t05934) was (.Ref nil), Go's "nil.Ref undefined"
+
+(defn test-null-up []
+  (check "null-up: a null constant to Object is any's nil, not (.Ref nil)"
+         (= '(conv any nil) (code/up-sym nil "Ljava/lang/String;" "Ljava/lang/Object;"))
+         (pr-str (code/up-sym nil "Ljava/lang/String;" "Ljava/lang/Object;")))
+  (check "null-up: control: a String value to Object is its .Ref"
+         (= '(.Ref x) (code/up-sym 'x "Ljava/lang/String;" "Ljava/lang/Object;"))
+         (pr-str (code/up-sym 'x "Ljava/lang/String;" "Ljava/lang/Object;"))))
+
 ;; A14 of the Ghidra case study's G2 plan (J2G-SPEC §4.1, "The run-path ranking"; bin/j2g-rank): each run's stubs on its
 ;; path by cause, the causes ranked by the runs they block alone. The fixture test/j2g/unit/rank: a report of
 ;; test/programs/outside's classes' reasons and three runs files of the three shapes; the controls: an empty list ranks
@@ -769,12 +832,133 @@
     (check "rank: control: a list naming no stubbed class blocks no run"
            (zero? (:blocked (rank/rank st [["x" ["demo.outside.Main" "java.lang.String"]]]))))))
 
+;; AT9 (h-java-aot-triage, the user 2026-11-17): the edge's recorder gives every class it records with an info its
+;; generics too (a test's Thread.UncaughtExceptionHandler, CountDownLatch, Semaphore: "Undeclared generics"); the
+;; reflection stubbed (generics-of), as the Go build's Class has no generic signatures; the controls: a facet the run
+;; asked is kept as asked, an array (no class loaded, no info) gains none
+
+(defn test-edge-generics []
+  (let [g {:tparams [] :supers [] :methods [] :stub true}
+        asked {:tparams ['T] :supers [] :methods []}
+        r (binding [env/*declared* nil]
+            (:classes (edge/recorded-edge {"java/lang/Runnable" {:exists true}
+                                           "java/lang/Comparable" {:exists true :generics asked}
+                                           "[I" {:exists true}}
+                                          {} (constantly g))))]
+    (check "edge-generics: a recorded class with an info gains its generics"
+           (and (contains? (get r "java/lang/Runnable") :info) (:stub (:generics (get r "java/lang/Runnable"))))
+           (pr-str (get r "java/lang/Runnable")))
+    (check "edge-generics: control: generics the run asked are kept as asked"
+           (= ['T] (:tparams (:generics (get r "java/lang/Comparable")))) (pr-str (:generics (get r "java/lang/Comparable"))))
+    (check "edge-generics: control: an array gains no generics" (not (contains? (get r "[I") :generics)) (pr-str (get r "[I")))))
+
+;; AT10 (h-java-aot-triage, the user 2026-11-17): an instance call of Object.finalize() itself, its class declaring
+;; none (ProtectedAccess_3's C.this.finalize(), t06387: Go's "Finalize__V undefined"), is Object's empty body in
+;; invoke-val (jrt.NN of the receiver); the controls: a class declaring finalize calls its own, hashCode is not it
+
+(defn test-object-finalize []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/finalize" :tree true}] :variant-files []))
+        call (fn [cls mn] (w/with-world world
+                            (first (filter #(= :invoke (:op %))
+                                           (nodes-of (some (fn [[[n _] b]] (when (= n mn) b)) (:bodies @(:state (a/decl cls)))))))))
+        plain (call "z/Plain" "fin") own (call "z/Own" "fin") hash (call "z/Plain" "hash")]
+    (check "object-finalize: the fixture analyzes" (and plain own hash (empty? (:failed world))) (pr-str (:failed world)))
+    (check "object-finalize: Plain's this.finalize() is Object's own, the no-op" (code/object-finalize? plain)
+           (pr-str (select-keys plain [:owner :name :desc :kind]) (:owner (:method plain))))
+    (check "object-finalize: control: Own's this.finalize() is Own's" (not (code/object-finalize? own))
+           (pr-str (select-keys own [:owner :name :desc :kind]) (:owner (:method own))))
+    (check "object-finalize: control: hashCode is not finalize" (not (code/object-finalize? hash)))
+    ;; the review's risk (round 52, 2026-11-18): jrt.NN takes a *T, so the emitted check is chosen by the receiver's
+    ;; Go type: NN on a pointer (a leaf class), J2g_NotNull[T] on an interface (an abstract or non-leaf class's this,
+    ;; an interface-typed receiver); each method translated whole by decls/method-forms, as the translation does
+    (let [mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {}}
+          mw (assoc mw :subclass-index (m/make-subclass-index mw))
+          go-of (fn [cls mn]
+                  (w/with-world world
+                    (binding [m/*w* mw env/*declared* (:classes e) decls/*reached* #{}
+                              code/*pkgstate* {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts (atom #{})}]
+                      (let [mm (some #(when (= mn (:name %)) %) (:methods (a/decl cls)))]
+                        (binding [decls/*reached* #{[cls (:name mm) (:desc mm)]}]
+                          (try (decls/method-forms (m/pkg cls) cls mm) (catch Throwable t (str "threw: " t))))))))
+          checks (fn [f] (filter #(and (seq? %) (let [h (first %)]
+                                                  (or (= "NN" (name (if (symbol? h) h '_)))
+                                                      (and (seq? h) (= 'inst (first h)) (= "J2g_NotNull" (name (second h)))))))
+                                 (tree-seq coll? seq f)))
+          shape-of (fn [f] (let [cs (checks f)]
+                             (when (= 1 (count cs))
+                               (let [[h x] (first cs)]
+                                 (if (symbol? h) [:nn x] [:not-null (str (nth h 2)) x])))))
+          shape (fn [cls mn] (shape-of (go-of cls mn)))
+          ;; the judge of an interface-typed this: J2g_NotNull of this, instantiated at the class's interface C_I
+          iface-this? (fn [sh simple] (and (= :not-null (first sh)) (= 'this (nth sh 2))
+                                           (str/ends-with? (second sh) (str simple "_J_I"))))
+          show (fn [cls mn] (pr-str (go-of cls mn)))]
+      (check "object-finalize: emitted: a leaf's this (Plain) is jrt.NN of t, the pointer"
+             (= [:nn 't] (shape "z/Plain" "fin")) (show "z/Plain" "fin"))
+      (check "object-finalize: emitted: an abstract class's this (Abs) is J2g_NotNull[Abs_I], not NN"
+             (iface-this? (shape "z/Abs" "fin") "Abs") (show "z/Abs" "fin"))
+      (check "object-finalize: emitted: a non-leaf class's this (Base, Sub extends it) is J2g_NotNull[Base_I]"
+             (iface-this? (shape "z/Base" "fin") "Base") (show "z/Base" "fin"))
+      (check "object-finalize: emitted: an interface-typed receiver (Shape) is J2g_NotNull[Shape] of the parameter"
+             (let [sh (shape "z/Base" "onShape")] (and (= :not-null (first sh)) (str/ends-with? (second sh) "Shape_J") (= (quote s) (nth sh 2))))
+             (show "z/Base" "onShape"))
+      (check "object-finalize: emitted: a leaf-class-typed parameter (Plain) is jrt.NN"
+             (= :nn (first (shape "z/Base" "onPlain"))) (show "z/Base" "onPlain"))
+      (check "object-finalize: control: Own's own finalize is called, no Object check emitted"
+             (empty? (checks (go-of "z/Own" "fin"))) (show "z/Own" "fin"))
+      (check "object-finalize: negative control: the old shape, jrt.NN of Abs's interface-typed this, fails the judge"
+             (let [old '((go/method Impl_Fin__V [t this] (jrt/NN this)))]
+               (and (= [:nn 'this] (shape-of old)) (not (iface-this? (shape-of old) "Abs"))))))))
+
+;; A17 of the Ghidra case study's G2 plan (GH15 (a)): the entries' listings, META-INF/arbace/entries, that
+;; jdk.internal.jrt.ClassPathResources answers getResources of a package and an entry's JarFile from
+(defn test-entries []
+  (let [names (meta/tree-class-names "test/j2g/unit/scan")
+        owners [[0 "s/plug/a.txt"] [0 "README"] [1 "t/only-b.txt"]]
+        paths ["s/plug/a.txt" "README" "t/only-b.txt" "META-INF/arbace/roots/1/s/plug/a.txt" "java/lang/uniName.dat"]
+        listing (meta/entries-listing owners paths {0 ["s/Main" "s/Main$Inner"] 1 ["s/plug/Alpha"]})
+        of (fn [k] (vec (for [[j n] listing :when (= j k)] n)))]
+    (check "entries: a forms tree's classes, top-level and member classes, recursively, package files not"
+           (= names ["s/Main" "s/Main$Inner" "s/Main$Inner$Deeper" "s/plug/Alpha"]) (pr-str names))
+    (check "entries: entry 0 lists its resources, its classes' class files and the directories above them"
+           (= (of 0) ["README" "s/" "s/Main$Inner.class" "s/Main.class" "s/plug/" "s/plug/a.txt"]) (pr-str (of 0)))
+    (check "entries: entry 1 lists its root copy by its plain path, its own resource and its class"
+           (= (of 1) ["s/" "s/plug/" "s/plug/Alpha.class" "s/plug/a.txt" "t/" "t/only-b.txt"]) (pr-str (of 1)))
+    (check "entries: package s/plug/ in both entries, in the class path's order"
+           (= [0 1] (vec (for [[k n] listing :when (= n "s/plug/")] k))))
+    (check "entries: control: an absent package is no entry's, the JDK's data no entry's"
+           (and (not-any? #(= "q/" (second %)) listing) (not-any? #(= "java/lang/uniName.dat" (second %)) listing)
+                (not-any? #(neg? (first %)) listing)))
+    (check "entries: the listing's text, K NAME a line"
+           (= "0 a/\n0 a/b.txt\n" (meta/entries-text (meta/entries-listing [[0 "a/b.txt"]] [] {}))))
+    (check "entries: --entry-classes names a --resources directory"
+           (= {0 ["s/plug/Alpha"]}
+              (#'jm/entry-classes {:resources ["test/programs/resources/resources/a"]
+                                   :entry-classes ["a=test/j2g/unit/scan/s/plug"]}))
+           (pr-str (#'jm/entry-classes {:resources ["test/programs/resources/resources/a"]
+                                        :entry-classes ["a=test/j2g/unit/scan/s/plug"]})))
+    (check "entries: control: --entry-classes of no --resources directory is an error"
+           (try (#'jm/entry-classes {:resources ["test/programs/resources/resources/a"] :entry-classes ["zz=test/j2g/unit/scan"]}) false
+                (catch Exception e (str/includes? (.getMessage e) "no --resources directory zz"))))
+    ;; the runtime's side, in the committed forms once bin/jrt-convert has read ClassPathResources afresh
+    (let [f (slurp "jdk/forms/jdk/internal/jrt/ClassPathResources.ae")]
+      (if (str/includes? f "EmbeddedJarFile")
+        (check "entries: jrt's ClassPathResources reads META-INF/arbace/entries, its connection a JarURLConnection"
+               (and (str/includes? f "META-INF/arbace/entries") (str/includes? f "JarURLConnection")))
+        (println "skip  entries: jdk/forms' ClassPathResources predates A17 (bin/jrt-convert predict, then the night's update)")))))
+
 (defn -main [& _]
+  (test-edge-generics)
+  (test-object-finalize)
+  (test-null-up)
   (test-support-tables)
   (test-unresolved-cause)
   (test-unresolved-world)
   (test-analyze-only)
   (test-throws)
+  (test-mxbean-signatures)
   (test-type-annotations)
   (test-lookup-call)
   (test-invokers)
@@ -786,6 +970,7 @@
   (test-arch-collisions)
   (test-inherited-static-accessor)
   (test-forname)
+  (test-entries)
   (test-rank)
   (test-outside)
   (test-outside-completion)

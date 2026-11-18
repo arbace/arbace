@@ -2663,3 +2663,81 @@ Verifier/AMDGPU/intrinsic-immarg.ll's stderr; CodeGen/AMDGPU's wmma gfx1250 test
 as `intrinsic has incorrect number of args. Expected 8, but got 7` where opt upgrades the old form (AutoUpgrade); Verifier/callbr.ll's
 callbr.landingpad rules; a lifetime intrinsic's failure ending the call's visit before the convergence verifier's message (a
 module of the VM's, opt prints both).
+
+## As built: round 52, the pack's own verdicts made current (2026-11-17/18, branch `n-llvm-defer` from next 42bf8614b)
+
+The night's rule: no build, no corpus run, each process under 1 GiB (the full gate on the host). What keeps LLVM IR's scores below
+100 (test/crops/scores.edn at 42bf8614b: completeness 98, meant 99, independence 98):
+- **Deferred rows**: read 1 (pr79354.g2.di-retarget.500483, `:debug-info-rules`), eval 1 (cpp.runtime.thread-throw, `:cpp-threads`: ci's
+  abort off the main thread, C's crop's runtime, the same row as bin/cppi check's runtime/thread-throw.cpp), AOT 13 (`:personality`: the
+  modules that unwind, recorded as refusals before llvm-eh; their AOT build, cf2g with C++'s lowered runtime, is 1.5-3 GB). No pending row.
+- **Independence**: the judge stage alone (0.893; read, eval, AOT and print 1): 1,181 cases on a recorded reference, the probes' 478
+  (LLS30), lli's 177 at each level (Arbace's own programs with no expected output), verify-rt's 268 (the pack's 252 clang modules and
+  the hand-written ones with no RUN line), verify-rt-heldout's 32 mutants of unknown kinds, verify-llvmtest's 49.
+
+**What was found.** Each mutant's own verdict is the first line the mutator wrote into the pack (`; MUTANT: ...`), and the pack
+(55f819e2e, 2026-11-11 07:19) predates LLS46 (b2a5988b2, StripDebugInfo and the loop ids in `arbace.repr.llvm.expect`): the read
+cell's deferred row is such a stale line (the pack says `invalid`, the current expectation `debug`, as opt's record). Measured by
+regenerating every mutant of the pack from its base, kind and index (arbace.repr.llvm.mutate's own loop, `java.util.Random` of 1000
+x K + J, the printed text compared with the pack's) and comparing the current expectation's line with the pack's: of the pack's 1,750
+mutants, 1,697 regenerated (rs.g0's 53 left: its 2.2 MB base above the night's 1 GiB), every one's text the pack's; before this
+round's fixes one line differs (the deferred row), after them 21: the deferred row (`invalid` to `debug`) and 20 `unknown` to an own
+verdict, 9 of verify-rt (sets a, b) and 11 of verify-rt-heldout (h1, h2). Each of the 21 equals opt's recorded verdict and first
+message (test/llvm/ref-opt23.edn); every other line is unchanged. Peaks 0.88-0.94 GB (GOMEMLIMIT 650MiB).
+
+**Built** (arbace/repr/llvm/expect.ae):
+- `body-md`: an instruction's attachments read after its `:md`. `stripped-reachable` and `strip-modifies?` paired `opts-of (drop 2 b)`,
+  which takes the getelementptr's flags written before its type (`inbounds nuw`) as keys: IllegalArgumentException on such a GEP,
+  so four debug mutants (coroutine.g0.di-retarget.500278, 20020418-1.g0.di-retarget.500524, io.g0.di-retarget.600072,
+  io.g0.di-drop.600358) were `unknown: the expectation failed`; now debug, each with opt's first message.
+- `ex-type`: a load's or store's unknown (an atomic access, an attachment) is the Verifier's, so an LLParser error the function's
+  simulation finds comes first (`::verifier`): 15 mutants `unknown: an attachment on the access` are LLParser's `'%N' defined with
+  type ...` or `instruction forward referenced with type ...`, as opt's record.
+- `const-error`: LLParser's conversion of a constant to a scalar type (P:6908 convertValIDToValue's `null must be a pointer type`,
+  P:1874/P:1904 getGlobalVal's `global variable reference must have pointer type`) before ret's and a call argument's other checks:
+  20011113-1.lto.type.255, 20011113-1.win.type.1309, p1-first.g2.type.500487.
+- Unit cases (test/repr/llvm/expect_test.ae): a GEP with `inbounds nuw` under StripDebugInfo's walk, the attachment case with and
+  without a use, ret of null and of 0, a call with a global as i64; two new negative controls. `test/repr/llvm/expect-test.bash`:
+  50 cases, 15 controls, 0 failing.
+
+Every changed line was checked against opt's recorded verdict and first message (test/llvm/ref-opt23.edn): all equal.
+
+**Not committed: the hand-written modules' RUN lines.** test/llvm/hw/{dbg,implicit,unnamed}.ll have no RUN line, so verify-rt
+judges them on opt's record (hw-notes has one). `; RUN: opt -passes=verify -disable-output %s` after each first line gives them an
+own verdict (`bin/repr-llvm verify-check` on the four: 4 by their own verdict, all valid as Arbace's verifier says), but a hw file
+is a mutant's base in the pack's manifest, so the edit makes the pack stale (`rt_pack`) until `ir-make rt --mutants`: it goes in with
+the re-make (LLS56 below).
+
+### Decided (taken overnight, round 52)
+
+- **LLS55 The pack's stale own verdicts.** (a) `bin/llvmi ir-make rt --mutants` (no compiler: the pack's modules kept, the mutants
+  and their lines made again by the current mutator and expectation; the pin moves), then verify-rt and verify-rt-heldout recorded
+  whole; (b) keep the pack until the next clang re-make. **Recommended (a); taken overnight (round 52)**, its run by day (the mutator
+  in one process is above the night's 1 GiB).
+- **LLS56 The hand-written modules' own verdict.** (a) a plain `opt -passes=verify` RUN line in hw/dbg.ll, implicit.ll and unnamed.ll,
+  committed with LLS55's re-make; (b) keep opt's record for them. **Recommended (a); taken overnight (round 52).**
+
+### The day's commands (main host, in this order; none run here)
+
+```
+# 1. LLS56's lines, then LLS55's re-make (the mutator, about 1.5-2 GB) and the two families recorded whole (light, about 0.3 GB)
+for f in dbg implicit unnamed; do sed -i '1a ; RUN: opt -passes=verify -disable-output %s' test/llvm/hw/$f.ll; done
+bin/llvmi ir-make rt --mutants
+bin/repr-llvm check verify-rt --record && bin/repr-llvm check verify-rt-heldout --record
+bin/repr-llvm check roundtrip-rt && bin/repr-llvm check text-rt && bin/repr-llvm heldout-check
+# 2. AOT's 13 modules that unwind (1.5-3 GB each build; eval recorded them on 2026-11-17)
+printf '%s\n' ee.MCJIT.eh ee.MCJIT.eh-lg-pic cpp.samples.classes cpp.samples.coroutine cpp.samples.io cpp.samples.p1-first \
+  cpp.runtime.atomics cpp.runtime.ctor-throw cpp.runtime.hello cpp.runtime.library cpp.runtime.thread-throw cpp.runtime.threads \
+  cpp.runtime.uncaught > .tmp/aot-eh.txt
+bin/llvmi check --aot --only .tmp/aot-eh.txt --record
+# 3. the row's records
+bin/reap --record && bin/crops-score --record && bin/crops-score --judge --strict
+```
+
+**Projected** (after the day's commands; no record changed here): read 3,844 / 1 / 1 to 3,845 / 1 / 0; AOT 539 / 10 / 13 to 549 / 12 / 1
+when the 13 run as at eval (10 pass, ctor-throw and uncaught `:abort-report`, thread-throw `:cpp-threads`); completeness 0.9839 to
+0.9884 (98 to 99), meant 0.9936 to 0.9991 (99 to 100); the judge's cases 4,345 own and 1,181 recorded to 4,368 and 1,158 (the 20
+mutants and three hw modules), (4368 + 0.5 x 1158) / 5526 = 0.8952, independence 0.9786 to 0.9790 (98). What is left of the judge:
+the probes (LLS30), lli's 177 a level, the pack's 252 clang modules, verify-llvmtest's 49, 21 unknown mutants of verify-rt-heldout
+(an intrinsic's bundle checks 5, musttail 4, personality 3, others 1 each) and 4 of verify-rt; independence 99 needs about
+350 more cases on an own verdict (lli's 354, Arbace's synth-c23 and C++ samples with expected outputs, would be the one group that size).

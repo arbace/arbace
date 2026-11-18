@@ -34,10 +34,15 @@
  * ServiceLoader. The platform components are a table of jrt's own, in jdk26u's precedence (jdk.management's
  * provider before java.management's): the threads' bean (jdk.management's HotSpotThreadImpl, which is also a
  * com.sun.management.ThreadMXBean), the runtime's (sun.management.RuntimeImpl) and the operating system's
- * (jdk.management's OperatingSystemImpl, also the com.sun.management and Unix interfaces); the other interfaces
- * of the platform (memory, class loading, compilation, the collectors, the pools and managers, logging, buffer
- * pools) are F13's later slices: asking for one throws UnsupportedOperationException, naming the
- * slice. The constants and the getters' contracts are jdk26u's. Copyright (c) Oracle and/or its affiliates, under
+ * (jdk.management's OperatingSystemImpl, also the com.sun.management and Unix interfaces); since n-java-f13
+ * ("As built: n-java-f13") the class loading and memory beans (sun.management's ClassLoadingImpl, MemoryImpl) and the
+ * memory pools, managers and collectors (MemoryPoolImpl, MemoryManagerImpl, jdk.management's GarbageCollectorExtImpl,
+ * also the com.sun.management interface: jdk26u's VM's beans, made by jrt's sun.management.JrtManagement), each
+ * registered in the platform MBean server under its name; buffer pools and the HotSpot diagnostic bean are F13's
+ * later slices: asking for one throws UnsupportedOperationException, naming the slice. The compilation bean is
+ * absent (n-java-mx, 2026-11-18): the Go build has no JIT compiler, so getCompilationMXBean answers null and
+ * getPlatformMXBeans an empty list, as jdk26u's do on a VM without a compilation system (-Xint: no
+ * sun.management.compiler, ManagementFactoryHelper's getCompilationMXBean null). The constants and the getters' contracts are jdk26u's. Copyright (c) Oracle and/or its affiliates, under
  * the GNU General Public License version 2 with the Classpath Exception, as the notice above says (LICENSE.md).
  */
 package java.lang.management;
@@ -152,6 +157,14 @@ public class ManagementFactory {
         return false;
     }
 
+    /**
+     * Whether the platform interface's component has no bean in the Go build, as jdk26u's compilation component on a
+     * VM without a JIT compiler (n-java-mx): getPlatformMXBean answers null and getPlatformMXBeans an empty list.
+     */
+    private static boolean absent(Class<?> intf) {
+        return intf.getName().equals("java.lang.management.CompilationMXBean");
+    }
+
     /** The singleton bean of a platform interface the Go build makes, else null. */
     private static PlatformManagedObject singleton(Class<?> intf) {
         String n = intf.getName();
@@ -169,6 +182,39 @@ public class ManagementFactory {
                 || n.equals("com.sun.management.OperatingSystemMXBean")
                 || n.equals("com.sun.management.UnixOperatingSystemMXBean")) {
             return osBean();
+        }
+        // n-java-f13
+        if (n.equals("java.lang.management.ClassLoadingMXBean")) {
+            return sun.management.ManagementFactoryHelper.getClassLoadingMXBean();
+        }
+        if (n.equals("java.lang.management.MemoryMXBean")) {
+            return sun.management.ManagementFactoryHelper.getMemoryMXBean();
+        }
+        return null;
+    }
+
+    /**
+     * n-java-f13: the beans of a platform interface that may have more than one (jdk26u's components that are not
+     * singletons: the pools, the managers, the collectors, java.lang.management's and com.sun.management's alike, as
+     * jdk.management's provider gives the same GarbageCollectorExtImpl beans for both), else null.
+     */
+    private static List<? extends PlatformManagedObject> multiple(Class<?> intf) {
+        String n = intf.getName();
+        if (n.equals("java.lang.management.MemoryPoolMXBean")) {
+            return sun.management.ManagementFactoryHelper.getMemoryPoolMXBeans();
+        }
+        if (n.equals("java.lang.management.MemoryManagerMXBean")) {
+            return sun.management.ManagementFactoryHelper.getMemoryManagerMXBeans();
+        }
+        if (n.equals("java.lang.management.GarbageCollectorMXBean")
+                || n.equals("com.sun.management.GarbageCollectorMXBean")) {
+            List<PlatformManagedObject> l = new ArrayList<>();
+            for (GarbageCollectorMXBean gc : sun.management.ManagementFactoryHelper.getGarbageCollectorMXBeans()) {
+                if (intf.isInstance(gc)) {
+                    l.add(gc);
+                }
+            }
+            return l;
         }
         return null;
     }
@@ -202,10 +248,14 @@ public class ManagementFactory {
     public static synchronized MBeanServer getPlatformMBeanServer() {
         if (platformMBeanServer == null) {
             platformMBeanServer = MBeanServerFactory.createMBeanServer();
-            PlatformManagedObject[] beans = {
+            List<PlatformManagedObject> beans = new ArrayList<>(List.of(
+                sun.management.ManagementFactoryHelper.getClassLoadingMXBean(),
+                sun.management.ManagementFactoryHelper.getMemoryMXBean(),
                 threadBean(), sun.management.ManagementFactoryHelper.getRuntimeMXBean(), osBean(),
-                sun.management.ManagementFactoryHelper.getPlatformLoggingMXBean()
-            };
+                sun.management.ManagementFactoryHelper.getPlatformLoggingMXBean()));
+            // n-java-f13: the pools and the managers (the collectors among them), each under its own name
+            beans.addAll(sun.management.ManagementFactoryHelper.getMemoryPoolMXBeans());
+            beans.addAll(sun.management.ManagementFactoryHelper.getMemoryManagerMXBeans());
             for (PlatformManagedObject pmo : beans) {
                 addMXBean(platformMBeanServer, pmo.getObjectName().getCanonicalName(), pmo);
             }
@@ -300,6 +350,14 @@ public class ManagementFactory {
             throw new IllegalArgumentException(mxbeanInterface.getName() +
                     " is not a platform management interface");
         }
+        if (absent(mxbeanInterface)) {
+            return null;
+        }
+        if (multiple(mxbeanInterface) != null) {
+            // jdk26u's: a component that is not a singleton
+            throw new IllegalArgumentException(mxbeanInterface.getName() +
+                    " can have more than one instance");
+        }
         PlatformManagedObject o = singleton(mxbeanInterface);
         if (o == null) {
             throw notYet(mxbeanInterface);
@@ -313,11 +371,21 @@ public class ManagementFactory {
             throw new IllegalArgumentException(mxbeanInterface.getName()
                     + " is not a platform management interface");
         }
+        List<T> l = new ArrayList<>();
+        if (absent(mxbeanInterface)) {
+            return l;
+        }
+        List<? extends PlatformManagedObject> ms = multiple(mxbeanInterface);
+        if (ms != null) {
+            for (PlatformManagedObject m : ms) {
+                l.add(mxbeanInterface.cast(m));
+            }
+            return l;
+        }
         PlatformManagedObject o = singleton(mxbeanInterface);
         if (o == null) {
             throw notYet(mxbeanInterface);
         }
-        List<T> l = new ArrayList<>();
         l.add(mxbeanInterface.cast(o));
         return l;
     }
@@ -333,6 +401,14 @@ public class ManagementFactory {
         if (!isPlatformInterface(mxbeanInterface)) {
             throw new IllegalArgumentException(mxbeanInterface.getName() +
                     " is not a platform management interface");
+        }
+        if (absent(mxbeanInterface)) {
+            // jdk26u's: a proxy of the component's name, which no bean is registered under (IllegalArgumentException)
+            return newPlatformMXBeanProxy(connection, COMPILATION_MXBEAN_NAME, mxbeanInterface);
+        }
+        if (multiple(mxbeanInterface) != null) {
+            throw new IllegalArgumentException(mxbeanInterface.getName() +
+                    " can have more than one instance");
         }
         PlatformManagedObject o = singleton(mxbeanInterface);
         if (o == null) {
@@ -350,11 +426,23 @@ public class ManagementFactory {
             throw new IllegalArgumentException(mxbeanInterface.getName()
                     + " is not a platform management interface");
         }
+        List<T> l = new ArrayList<>();
+        if (absent(mxbeanInterface)) {
+            // jdk26u's: the component's names queried, none registered
+            return l;
+        }
+        List<? extends PlatformManagedObject> ms = multiple(mxbeanInterface);
+        if (ms != null) {
+            // jdk26u's queries the component's pattern on the connection; here the platform's beans' names
+            for (PlatformManagedObject m : ms) {
+                l.add(newPlatformMXBeanProxy(connection, m.getObjectName().getCanonicalName(), mxbeanInterface));
+            }
+            return l;
+        }
         PlatformManagedObject o = singleton(mxbeanInterface);
         if (o == null) {
             throw notYet(mxbeanInterface);
         }
-        List<T> l = new ArrayList<>();
         l.add(newPlatformMXBeanProxy(connection, o.getObjectName().getCanonicalName(), mxbeanInterface));
         return l;
     }
@@ -370,6 +458,15 @@ public class ManagementFactory {
         s.add(com.sun.management.OperatingSystemMXBean.class);
         s.add(com.sun.management.UnixOperatingSystemMXBean.class);
         s.add(PlatformLoggingMXBean.class);
+        // n-java-mx: jdk26u's set holds every component's interfaces, the compilation component's though it has no bean
+        s.add(CompilationMXBean.class);
+        // n-java-f13
+        s.add(ClassLoadingMXBean.class);
+        s.add(MemoryMXBean.class);
+        s.add(MemoryPoolMXBean.class);
+        s.add(MemoryManagerMXBean.class);
+        s.add(GarbageCollectorMXBean.class);
+        s.add(com.sun.management.GarbageCollectorMXBean.class);
         return Collections.unmodifiableSet(s);
     }
 }

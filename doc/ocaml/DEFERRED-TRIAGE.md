@@ -827,3 +827,143 @@ runs now reach (`lib-marshal/intext` and `intext_par`: Marshal's Closures flag, 
 boundary's copy of a 131,072-element bigarray at each of its 41,000 calls), 5 stay `:c-api` (int64-unboxing and
 unboxed-primitive-args run only native, their bytecode names "" or a generated script; bigarrfml's Fortran; delayintr's and
 cloexec's helper programs, built and run by the test). The AOT levels keep all 25 in `:c-api` (their runtime has no C: OC198).
+
+## Triage of 2026-11-17 (queue 323, branch `323-ocaml-deferred`, from next `e4a7a30f3`)
+
+The matrix's OCaml cells on the native records (OC185 (a), recorded whole 2026-11-16): **eval 492 pass / 143 by design / 8
+deferred**, **AOT 428 / 144 / 71** (33 n/a a level, OC222 (a)); completeness 86, meant 96. This pass groups the 79 deferred rows by
+cause and checks each by-design class's reason against the decisions taken since. It is read from the records and classes alone
+(`bin/reap --entries`, `bin/oi divergences`, `--aot`: 0 failing): the VM it ran on has no copy of the pinned tarball
+(`.tmp/repr-ocaml/src/ocaml-5.5.0.tar.xz`, absent in the main checkout too; no network), so neither oi's library nor any testsuite
+program could be built or run, and no row was re-recorded. One probe ran: the AOT runtime loaded on stage 0's Java forms interpreter
+(`ARBACE_PATH=jdk/ocaml`, `(require 'ocaml.rt)`), a weak array of 100 fresh blocks: `Weak.check` 100 before, 0 after one
+`caml_gc_full_major` (OC216 (a)'s weak keys work at the light level).
+
+### The deferred rows by cause
+
+| cause | eval | AOT | where it is fixed |
+|---|---:|---:|---|
+| the light level's speed and depth (`:light-speed` 31 + the suite's 8, `:light-depth` 5) | 0 | 44 | the compiled level (OT8 (a), decided 2026-11-05): its records hold 33 of the 44 from 2026-11-05 (29 pass; `test_issue_11094` compiled-depth, `major_gc_wait_backup` gc, `memory-model/forbidden` and `test_uutf` slow); 11 never ran compiled |
+| C stubs on the stable C API (`:c-api`) | 0 | 25 | the compiled level with the C API (OC215 (a), built 2026-11-10, its runs never made: `test/ocaml/capi-compiled.txt`); at eval 17 of the 25 pass |
+| `Unix.execv` (`:unix-unported`, `test_unix_cmdline`) | 0 | 1 | the compiled level's exec request (OC208 (b): the light level keeps it, Java cannot replace its process) |
+| oi's speed (`:speed`, oi-slow.edn) | 7 | 0 | `parallel/churn` passes in 165 s alone, `misc/darkening_work` ends in 138 s with its known gc output, `ast-invariants` 211 s (OT29 (a) keeps it), `weak_array_par` Go's `weak.Make` per `Weak.set`, `fib_threads` four domains under one lock, `subarraystub` the boundary's copy of the bigarray each call, `opam/uutf/test_uutf` |
+| the instrumented runtime (`:header-flags`, `test_instrumented`: `-runtime-variant=i`) | 1 | 1 | OC218's model (its events are the instrumented runtime's counters); the class's `:why` ("flags ocdump does not pass") is stale |
+
+So 70 of the 71 AOT deferred rows wait on one job, the compiled level's whole record and OT8 (a)'s switch of the cell to it,
+decided twelve days ago and never run (`check-aot-compiled.edn` is 117 rows of 2026-11-05, before the native switch). At 2026-11-05's
+rate (29 of 33) and the C API plan's estimate (20 of 25), the AOT cell would move from 428 to about 487 passes of 643, the crop's
+completeness from 86 to about 88. Nothing cheap is left at eval: the 8 are speed (7, one of them decided to stay) and OC218's.
+
+### The by-design classes against the decisions
+
+The classes' `:kind :design` predates OC216-OC221 (the user, 2026-11-10), which decided to build most of what they hold. A class
+whose work is decided is a missing feature, deferred:
+
+| class (eval / AOT rows) | reason as written | holds? |
+|---|---|---|
+| `:runtime-parameters` (19 / 19, all `b=1`) | "oi has no debug events" | no: OC217 (a) decided backtraces (debug events in Translcore, Printexc's raw backtraces, `b`) |
+| `:backtraces` (4 / 3) | the same | no: OC217 (a) |
+| `:ocamltest-tools`' two flambda references (`backtrace_effects_nested`, `backtrace/lazy`) | `reference = ...flambda.reference` | no: OC217 (a) names their plain references; the other 12 (ocamldoc, caml-tex, the debugger, ocamldep, objinfo, the toplevel, `use_runtime`) hold |
+| `:gc-and-memory` (19 + 5 / 21 + 5) | Go's collector, counters at zero, Memprof samples nothing | no: OC218 (a) decided the heap accounting and Memprof; and at AOT `pr5233`, `weaklifetime`, `weaktest` pass at eval and time out under a pin of 2026-10-31 that predates OC216's weak keys (OT31) |
+| `:obj-representation` (1 / 1, `lazy/minor_major_force`) | Obj's minor and major heap | no: OC218 (a) lists Obj's minor/major |
+| `:dynlink` (6 / 6) | Lambda, no bytecode or shared objects | no: OC220 (a) decided Dynlink (plugins typed into Lambda units at eval, compiled ahead at the compiled level) |
+| `:c-runtime-internals` (18 / 19) | only OCaml's C runtime has them | for 11 / 12 no: OC221 (a) decided global roots (`gc-roots/*` 3, `pr11865/mkroot`), custom finalizers (`pr3612`), `caml_startup` (`embedded/cmcaml`), async callbacks (`alloc_async`), ephemerons' C API (`ephe-c-api/test`), the locale (`locale/test`, AOT), and `backtrace_c_exn`, `statmemprof/bigarray`, `user_data_regression` (OC217, OC218 with the C API); it holds for 7: the C threads' registration and master lock (`test_c_thread_register` 2, `test_c_thread_has_lock` 2), natdynlink (`lib-dynlink-native/main`), complete-obj (`output-complete-obj/test2`) as OC221 (a) says, and `lib-runtime-events/test`'s C consumer, which no decision names |
+| `:tools-and-targets` (10 / 10) | not a program run | for 8 yes; `test_create_cursor_failures` (`not-root`: ocamltest skips it as root, OC223 proposed 2026-11-11) and `lib-unix/unix-execvpe/exec` (`has-execvpe.sh`: ocamltest skips it when the C library has `execvpe`, which musl has) are skipped by ocamltest itself on the pinned configuration: OC222 (a)'s `:na` (OT32) |
+| `:compiler-output` 19, `:unix-fork` 5 + 2, `:opam-not-run` 10, `:header-none` 3, `:native-only` 2, `:backend` 2, `:packs`, `:fortran`, `:compiler-of-the-tree`, `:reference-uncompilable`, `:c-primitive`, `:thread-schedule`, `:unix-java` 2 | | yes: their reasons are unchanged by any later decision (`:unix-java`'s sockets are OC216's at the compiled level, which judges them once OT8 (a) switches the cell) |
+
+Moving the decided rows (eval 67, AOT 69) to deferred changes no pass and so no completeness; it moves meant from 96 to about 91 (eval
+492 / 567, AOT 428 / 568), which is what the crop has left to build under the user's own decisions.
+
+Other findings, minor: `embedded/cmcaml`'s eval failure is ci's parse of `cmmain.c:25:31` (`unexpected '*'`: a type name the
+clean-room `test/ocaml/capi/include/caml/` does not declare, likely misc.h's `char_os`; not read here), and six other C-runtime rows fail on headers the clean room lacks
+(`caml/gc_ctrl.h`, `domain_state.h`, `gc.h`, `runtime_events.h`): OC221's first step. `aot-known.edn`'s and
+`aot-compiled-known.edn`'s pins of the three weak programs were made before OC216 (a).
+
+### Lists for the main host's by-list runs
+
+`test/ocaml/light-compiled.txt` (the 36 run-corpus rows of `:light-speed` and `:light-depth`), `test/ocaml/light-suite-compiled.txt`
+(the suite's 8), `test/ocaml/weak-aot.txt` (OT31's three); `test/ocaml/capi-compiled.txt` (OC215's 25) was there already.
+
+### Proposed (OT30-OT32; none decided)
+
+- **OT30 The by-design classes whose work is decided.** (a) Each split: the rows of OC217 (`:runtime-parameters`, `:backtraces`, the two
+  flambda references), OC218 (`:gc-and-memory`, `:obj-representation`), OC220 (`:dynlink`) and OC221 (11 / 12 of
+  `:c-runtime-internals`) in classes of `:kind :deferred` naming the decision; the 7 C-runtime rows OC221 (a) leaves out stay by design;
+  completeness unchanged, meant 96 to about 91; half a day, no run (the rows keep their reasons, the classes' matches move). (b) As now,
+  each class's `:why` naming the decision that will empty it. (c) Moved one class at a time as each decision's work starts. *Recommended:
+  (a)*: the matrix then says what is left to build, as the queue's brief asks.
+- **OT31 The weak programs' AOT timeouts.** `pr5233`, `weaklifetime` and `weaktest` pass at eval and time out at both AOT levels under
+  pins that predate OC216 (a). (a) The main host reruns them by list with `OI_TIMEOUT=900` at the light level and at the compiled level:
+  a finish moves them to `aot-slow.edn` (`:light-speed`, deferred) and drops the pins, no finish is a runtime bug (deferred, its own
+  class) to fix; (b) as now (gc, by design). *Recommended: (a)*; the probe above shows the runtime's weak keys emptied by a requested
+  collection, so speed is the likelier cause.
+- **OT32 Two tests ocamltest skips on the pinned configuration.** (a) `:config-skipped` (`:na`) with two new actions in
+  `test/ocaml/ocamltest-config.edn`: `not-root` over the runner's uid (OC223 (a)) and `has-execvpe.sh` over the C library (musl
+  1.2.x has `execvpe`); 2 rows a level out of the denominators; (b) as now. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-17): OT30-OT32
+
+OT30 (a), OT31 (a) and OT32 (a) as recommended, OC223 (a) with OT32.
+
+## As built: OT30-OT32 and the cheap groups (2026-11-17, queue 323, branch `323-ocaml-deferred`)
+
+Run on the VM (arm64, stage 0 of next's seed 3c48859d), light: by list, at most two heavy processes, each under a memory watch that
+kills a process above 3.4 GB (4 GB for one rerun). The pinned tarball and the opam set were taken from the main checkout.
+
+- **OT30 (a)**, the classes only (no run): in every run level's classes file (divergences, -suite, -aot, -suite-aot, -aot-compiled,
+  -suite-aot-compiled; -testsuite's `:runtime-parameters`), `:runtime-parameters`, `:backtraces` (OC217 (a)), `:gc-and-memory` and
+  `:obj-representation` (OC218 (a)) are `:kind :deferred`; three classes are split off before theirs: `:dynlink-decided` (OC220 (a):
+  5 programs; `tool-debugger/dynlink/host`, the debugger's test, stays `:dynlink`), `:c-runtime-decided` (OC221 (a): 12 programs; the
+  C threads' registration and master lock 4, natdynlink, complete-obj and the runtime-events C consumer stay `:c-runtime-internals`)
+  and `:backtrace-references` (OC217 (a): `backtrace_effects_nested`, `backtrace/lazy`). One less than §"Triage of 2026-11-17"
+  counted at each level (the debugger's Dynlink test).
+- **OT32 (a)** with OC223 (a): `test_create_cursor_failures` (`not-root`) and `lib-unix/unix-execvpe/exec` (`has-execvpe.sh`) in
+  `:config-skipped` (`:na`) of divergences.edn and divergences-aot.edn; `test/ocaml/ocamltest-config.edn`'s `:config` gains
+  `runner_is_root` "true" and `has_execvpe` "true" (the installed OCaml 5.5.0's `caml/s.h` defines `HAS_EXECVPE`: musl has it), its
+  `:actions` `not-root` (ocamltest/builtin_actions.ml:308-313) and `has-execvpe.sh` (the test's script), each passing on "false".
+- **The light level's Gc counters (a runtime bug, fixed).** `jdk/ocaml/ocaml/rt/ExtGc.ae` counted the runtime's own collections by a
+  canary, a `WeakReference` read by `get` at each `Gc.quick_stat`: a get while Go's collector marks makes the referent strong for
+  that cycle, so a program that reads the counters in a loop never saw one (a probe on stage 0: 100 of Go's collections, the major
+  count 0; `weaklifetime`, which loops until 20 major collections, never ended). The canary is now seen collected on its
+  `ReferenceQueue` (jrt's cleanup enqueues it; nothing reads the referent), only the current canary counting, a fresh one after each
+  asked collection, its referent an array (jrt's bare Object is one pointer-free word, which Go's tiny allocator may share). The
+  same probe: 44 counted. The compiled level runs the same runtime.
+- **OT31 (a).** At `OI_TIMEOUT=900`, the light level: `weaklifetime` and `weaktest` time out at 920 s of CPU (before the canary fix),
+  `pr5233` grows past 3.4 GB (its `fill` of `Gc.stat`'s `heap_words`/3 conses: at the light level stage 0's whole heap). After the
+  fix, at 120 s: **`weaklifetime` passes** (39 s), `weaktest` still times out. `aot-known.edn`: weaklifetime's pin dropped, pr5233's
+  and weaktest's now `light:`, the new class `:light-unfinished` (`:kind :light`, deferred) in divergences-aot.edn. weaktest's row is
+  re-recorded in it; pr5233's row stays the main host's (a rerun here is killed by the memory watch, not a run of the program):
+  the main host's rerun moves it.
+- **oi's speed rows at eval.** `ast-invariants/test`, `parallel/churn` and `weak-ephe-final/weak_array_par` pass under the 120 s of
+  CPU on the VM (wall 145-239 s at a load of 20-28); they stay in oi-slow.edn (a listed program the limit stops is no change).
+  `misc/darkening_work` ends with its known gc output. `lib-bigarray/subarraystub` (41,000 `Gc.minor`, each two of Go's collections
+  while a finaliser is registered) and `parallel/fib_threads` (fib 42 on four domains) stay over the limit.
+- `go/arbace/oicapi/capi.ae`: the C stubs' `fstat` stores `Nlink` converted to `uint64` (linux/arm64's `Stat_t.Nlink` is `uint32`:
+  `bin/oi build` failed on arm64).
+- The light-speed rows: a sample on the VM (`ast-invariants`, `basic/tailcalls`, `lazy/lazy3` time out, `effect-syntax/coroutines`
+  at its depth) showed no cheap gain; the 44 rows stay the compiled level's (OT8 (a)).
+
+## As built: OC218 (a)'s first part, Gc's words and Memprof's sampling (2026-11-17, queue 331, branch `331-ocaml-decided-rows`)
+
+The cheapest of OT30's decided classes, `:gc-and-memory` (OC218 (a)), built at both levels; light, by list, on the VM.
+
+- **The words counted** (oi: `go/arbace/oi/ext_sys.ae` `countWords`, `countWordsT`, `countValue`; prim.ae; the AOT runtime: `Rt/words`,
+  `Rt/counted`). An allocation is counted at its making by its wosize plus its header, in the minor heap up to Max_young_wosize
+  (256), else in the major heap: the Lambda's `makeblock`, `makemutable`, lazy and forward blocks and float records; the results of
+  the allocating externals (arrays: make, sub, append, concat; strings; `Obj.dup`, `with_tag`, `new_block`). oi counts as ocamlc's
+  bytecode allocates: also the boxed results of float arithmetic, `floatfield`, `float_of_int`, and `Gc.minor_words`' and
+  `Gc.counters`' own boxes, after the read (probed against ocamlc 5.5.0 here: the same deltas, `2 2 2 4 4`). The light level counts
+  as ocamlopt allocates (`Sys.backend_type` is `Native` there: no float boxes). Not counted yet: closures, the boxed integers, the
+  runtime's own blocks. `Gc.stat`, `quick_stat`, `counters` and `minor_words` read the counters.
+- **Gc.Memprof's sampling** (oi: `memprofSample`, `memprofRun`; the runtime: `ExtGc/memprofSample`, `memprofRun`). A profile samples
+  the counted words at its rate (a word with probability lambda: the geometric distance of memprof.c's `rand_geom`). An allocation
+  with samples calls the tracker's `alloc_minor` (or `alloc_major` above 256 words) with its record `{n_samples; size; source; callstack}`.
+  The call runs in the allocating thread, at its next poll point (`tick`) or when the profile stops. Each thread keeps its own queue
+  and in-callback flag (oi's `Thread.mpQ`; a `ThreadLocal` in the runtime). A sample of a profile since stopped is dropped (the
+  profile's generation), a raising callback drops the samples after it, and the callbacks' own allocations are not sampled. Not
+  built: the tracked values' `promote`, `dealloc_minor` and `dealloc_major` (they need OC218's simulated minor heap), the callstack
+  (empty: OC217).
+- **A let's slot cleared at its scope's end** (`compile.ae`'s `let`, when its body is not in tail position). The bytecode pops the
+  variable at its scope's end. oi kept it in the frame's slot, so a finished let held a value against the collector: `lib-sys/opaque`'s
+  finaliser never ran.
+- `Main/reset` resets the runtime's profile and counters for a batch's next program.

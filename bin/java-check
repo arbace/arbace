@@ -197,6 +197,19 @@
 #                      (test/java/controls.edn, :forms), c00001's subject t03208 fresh forms compared by
 #                      the same comparison with t03209's committed ones, which must differ (one that is
 #                      equal fails the verify; one whose subject or reference is not in the run is left)
+#   bin/java-check sources [--jobs N] [--only REGEX] [--list FILE] [--scan DIR] [--record]
+#                      JOP13 (a) (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JOP13 (a)"): each test's source
+#                      set as Arbace's own record, test/java/sources.edn: the corpora scanned (or --scan DIR's plans,
+#                      a scan made before), each set made as --record-ref makes it (record_sources: javac -verbose
+#                      -implicit:class -sourcepath DIR and the source roots) but by javac on Arbace (bin/repr-java javac
+#                      on REPR_JAVA_EXE, GOMEMLIMIT JAVA_CHECK_SOURCES_MEM, default 1GiB; default 4 jobs), placed by
+#                      rename, compared with test/java/ref-jdk26.edn's :files and with --record written (the rows of
+#                      the tests not run kept); the levels' plans take a test's :files from it (java.check/plan;
+#                      JAVA_CHECK_SOURCES=jdk: the JDK's)
+#   bin/java-check sources --check [--complete]
+#                      the oracle tier's (java-sources-oracle): the JDK's sets against the own record, every test
+#                      with one, equal, differ or not made, and the negative control (a set judged against another
+#                      test's, which must differ); --complete fails a test the record lacks
 #   bin/java-check scan
 #                      the categories of the corpora's areas (java.check/scan), printed as a table
 #   bin/java-check verdicts [--verify]
@@ -320,9 +333,31 @@ record_sources() {
                  else for r in ${roots[@]+"${roots[@]}"}; do [ -f "$r/${a//.//}.java" ] && { files+=("$r/${a//.//}.java"); break; }; done; fi ;;
     esac
   done < "$d/plan.tsv"
+  # JOP13 (a): each file once (the plan names the main file for @compile, @build and @run alike): the JDK's javac
+  # takes a file named twice once, javac on Arbace's command line (jdk.internal.jrt.javac.Main) parses it again
+  # and fails on a duplicate class; the set is the same either way
+  local uniq=() f2
+  for f2 in "${files[@]}"; do case " ${uniq[*]+${uniq[*]}} " in *" $f2 "*) ;; *) uniq+=("$f2") ;; esac; done
+  files=("${uniq[@]}")
   rm -rf "$d/s1"; mkdir -p "$d/s1"
-  if (cd "$dir" && javac -J-Xmx1g -verbose -implicit:class -sourcepath "$sp" -d "$d/s1" -nowarn ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/s1.log" 2>&1; then
-    if [ ${#roots[@]} = 0 ]; then
+  # JOP13 (a): JAVA_CHECK_OWN_JAVAC (bin/repr-java, bin/java-check sources) makes the set on javac on Arbace, the
+  # same command line; its -verbose names every parsed file WrappedJavaFileObject[PATH] (PATH as given, or the
+  # source path's element and the file's name: ./REL, ROOT/REL), each process's peak and seconds in s1.time
+  local jv=(javac -J-Xmx1g)
+  if [ -n "${JAVA_CHECK_OWN_JAVAC:-}" ]; then
+    jv=("$JAVA_CHECK_OWN_JAVAC" javac)
+    ! command -v busybox > "$d/busybox" 2>&1 || jv=(busybox time -v -o "$d/s1.time" "${jv[@]}")
+    rm -f "$d/busybox"
+  fi
+  if (cd "$dir" && "${jv[@]}" -verbose -implicit:class -sourcepath "$sp" -d "$d/s1" -nowarn ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/s1.log" 2>&1; then
+    if [ -n "${JAVA_CHECK_OWN_JAVAC:-}" ]; then
+      sed -n 's|^\[parsing started WrappedJavaFileObject\[\(.*\)\]\]$|\1|p' "$d/s1.log" > "$d/parsed.txt"
+      if [ ${#roots[@]} = 0 ]; then
+        sed -e "s|^$dir/||" -e 's|^\./||' "$d/parsed.txt" | { grep -v '^/' || true; } | LC_ALL=C sort -u > "$d/sources.txt"
+      else
+        while IFS= read -r a; do case $a in /*) ;; *) a=$dir/$a ;; esac; src_rel "$dir" "$a"; done < "$d/parsed.txt" | LC_ALL=C sort -u > "$d/sources.txt"
+      fi
+    elif [ ${#roots[@]} = 0 ]; then
     # explicit files as SimpleFileObject[PATH], the source path's as DirectoryFileObject[.:REL]
     sed -n -e 's|^\[parsing started SimpleFileObject\[\(.*\)\]\]$|\1|p' -e 's|^\[parsing started DirectoryFileObject\[\.:\(.*\)\]\]$|\1|p' "$d/s1.log" \
       | sed -e "s|^$dir/||" -e 's|^\./||' | { grep -v '^/' || true; } | LC_ALL=C sort -u > "$d/sources.txt"
@@ -436,6 +471,63 @@ record_ref() {
   # a partial run (--only) changes no line but its plans' (JCS68 (a))
   [ -z "$only" ] || jc ref-unchanged "$work" "$work/ref-before.edn" "$ref"
   echo "java-check --record-ref: $((SECONDS - t0)) s"
+}
+
+# own_sources (JOP13 (a), taken overnight round 52; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JOP13 (a)"):
+# the source sets as Arbace's own record, test/java/sources.edn: the corpora scanned (java.check/scan, the
+# reference's plans), each planned test's set made by record_sources on javac on Arbace (bin/repr-java javac on
+# javac's tool executable, REPR_JAVA_EXE; GOMEMLIMIT JAVA_CHECK_SOURCES_MEM, default 1GiB), placed by rename and
+# compared with the JDK's (test/java/ref-jdk26.edn's :files); --record writes the rows (the other tests' kept);
+# --check alone: the oracle tier's comparison of the two records (no javac), --complete a test without a row fails
+own_sources() {
+  local jobs=4 only="" listf="" record="" check="" complete="" scan_dir="" t0=$SECONDS exe plat=build
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --jobs) jobs=$2; shift 2 ;;
+      --only) only=$2; shift 2 ;;
+      --list) listf=$2; shift 2 ;;
+      --record) record=1; shift ;;
+      --check) check=1; shift ;;
+      --complete) complete=--complete; shift ;;
+      --scan) scan_dir=$2; shift 2 ;;
+      *) echo "java-check sources: unknown option $1" >&2; return 2 ;;
+    esac
+  done
+  if [ -n "$check" ]; then jc sources-check "$ref" "$root/test/java/sources.edn" ${complete:+"$complete"}; return; fi
+  check_pin
+  exe=${REPR_JAVA_EXE:-$root/target/arbace-go/amd64/arbace-javac}
+  [ -x "$exe" ] || { echo "java-check sources: no javac tool executable $exe (REPR_JAVA_EXE)" >&2; return 1; }
+  ! grep -qx '# kind: own' "$root/jdk/javac/platform.sha256" || plat=own
+  local sw=$work/sources
+  rm -rf "$sw/record"; mkdir -p "$sw"
+  if [ -n "$scan_dir" ]; then
+    # a scan of the same checkout made before (its record/*/plan.tsv and record.list), copied
+    cp -r "$scan_dir/record" "$scan_dir/record.list" "$scan_dir/scan.tsv" "$sw/"
+    find "$sw/record" -mindepth 2 ! -name plan.tsv -delete
+  else
+    echo "== java-check sources: scan ($jdktest)" >&2
+    jc scan "$jdktest" "$corpora" "$ref" "$sw" > "$sw/scan.txt"; head -1 "$sw/scan.txt"
+  fi
+  local list=$sw/record.list
+  if [ -n "$listf" ]; then grep -v '^#' "$listf" | awk '{print $1}' > "$list.ids"; grep -Fx -f "$list.ids" "$list" > "$list.o" || true; mv "$list.o" "$list"; fi
+  if [ -n "$only" ]; then
+    { (cd "$sw/record" && grep -lE "$only" */plan.tsv | cut -d/ -f1) || true
+      sed 's/$/ /' "$list" | grep -E "$only" | sed 's/ $//' || true; } | sort -u > "$list.only"
+    grep -Fx -f "$list.only" "$list" > "$list.o" || true; mv "$list.o" "$list"
+  fi
+  [ -s "$list" ] || { echo "java-check sources: no test planned" >&2; return 1; }
+  echo "== java-check sources: $(wc -l < "$list") tests by javac on Arbace ($exe), $jobs at a time" >&2
+  export -f src_of src_rel record_sources
+  export root REPR_JAVA_EXE=$exe JAVA_CHECK_OWN_JAVAC=$root/bin/repr-java GOMEMLIMIT=${JAVA_CHECK_SOURCES_MEM:-1GiB}
+  work=$sw xargs -a "$list" -P "$jobs" -I{} bash -c 'record_sources "$1"' _ {}
+  jc rename "$sw" > "$sw/rename.txt"
+  # each javac's peak (kB) and seconds, from busybox time
+  for i in $(cat "$list"); do f=$sw/record/$i/s1.time; [ -f "$f" ] || continue
+    printf '%s\t%s\t%s\n' "$i" "$(sed -n 's/.*Maximum resident set size (kbytes): //p' "$f")" "$(sed -n 's/.*Elapsed (wall clock) time (h:mm:ss or m:ss): //p' "$f")"
+  done > "$sw/mem.tsv"
+  [ ! -s "$sw/mem.tsv" ] || echo "java-check sources: javac on Arbace's peak $(cut -f2 "$sw/mem.tsv" | sort -n | tail -1) kB (of $(wc -l < "$sw/mem.tsv") runs, $sw/mem.tsv)"
+  jc own-sources "$sw" "$ref" "$root/test/java/sources.edn" --platform "$plat" ${record:+--record 1}
+  echo "java-check sources: $((SECONDS - t0)) s"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1909,6 +2001,7 @@ case ${1:-} in
   --forms) shift; forms_cmd "$@" ;;
   --essential-compiled) shift; essential_compiled "$@" ;;
   scan) check_pin; mkdir -p "$work/scan"; jc scan "$jdktest" "$corpora" "$ref" "$work/scan" ;;
+  sources) shift; own_sources "$@" ;;
   rejudge-records) jc rejudge-records "$ref" "$root/test/java" "$root/test/java/oracle" ;;
   golden) shift; jc golden "$ref" "$root/test/java/jls/golden.edn" "$@" ;;
   verdicts) shift; check_pin; jc verdicts "$jdktest" "$ref" "$root/test/java/verdicts.edn" "$@" ;;

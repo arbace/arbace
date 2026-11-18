@@ -20,6 +20,11 @@
         the JDK's results (WORK/record/ID/: javac's status, the class files' digest, each run's
         status, stdout's digest and length, stderr's first line, twice) as the reference REF
         (test/java/ref-jdk26.edn, JCS5 (b)), one test a line
+    own-sources WORK REF OUT [--platform own|build] [--record 1]
+        JOP13 (a): after record_sources on javac on Arbace (bin/java-check sources) and rename, each
+        planned test's own source set as a row of OUT (test/java/sources.edn), compared with REF's
+    sources-check REF OWN [--complete]
+        JOP13 (a), the oracle tier's: REF's (the JDK's) source sets against OWN's rows, with a control
     plan REF WORK [--list FILE] [--only REGEX] [--corpus C,...]
         the check's plan of every test REF passes on the JDK (or FILE's, the essential subset):
         WORK/run/ID/plan.tsv and WORK/run.list
@@ -704,6 +709,106 @@
                   " (" (count (filter #(str/includes? % ":jdk :pass") tests)) " pass on the JDK)"))))
 
 ;; ---------------------------------------------------------------------------------------------
+;; JOP13 (a) (taken overnight, round 52; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JOP13 (a)"): the
+;; source sets as Arbace's own record, test/java/sources.edn: each test's set as javac on Arbace parses it
+;; (bin/java-check sources: record_sources with bin/repr-java javac -verbose -implicit:class -sourcepath),
+;; placed in the renamed tree by rename, one row a test, [ID {:sources :own :platform P :files [[REL DST] ...]
+;; :unnamed [DST ...]}]; a golden-diagnostics test (run in place by javac on Arbace, no set consumed) :in-place;
+;; a set javac on Arbace could not make :sources "why" (not :own). P the platform javac on Arbace read against:
+;; :own with the own pin (jdk/javac/platform.sha256's "# kind: own"), else the build tree's name. The levels
+;; take a test's :files from it when it has them (plan); the JDK's sets (REF's :files) are the oracle tier's
+;; comparison (sources-check); crops.score counts a case own when :sources and :platform are :own.
+
+(def sources-header
+  [";; Java's conformance tests' source sets as Arbace's own record (JOP13 (a), doc/classes/JAVA-FRONTEND-SURVEY.md,"
+   ";; \"As built: JOP13 (a)\"): per test, the files javac on Arbace parses for it (bin/repr-java javac -verbose"
+   ";; -implicit:class -sourcepath DIR and the test's source roots) and their places in the renamed tree (JCS4 (a));"
+   ";; :platform the platform javac on Arbace read against (:own with the own pin); :in-place a golden-diagnostics test"
+   ";; (run in place, no set consumed); a :sources other than :own the reason no set was made. The levels read a test's"
+   ";; :files from here (java.check/plan); test/java/ref-jdk26.edn's are the JDK's, compared in the oracle tier"
+   ";; (bin/java-check sources --check). Written by bin/java-check sources --record (a run of some tests keeps the rest)."])
+
+(defn- sources-row
+  "JOP13 (a): test ID's row of the own record from WORK/record/ID (its plan, javac on Arbace's parsed files,
+  rename's places), nil for a plan the scan skipped."
+  [work id platform]
+  (let [d (str work "/record/" id)
+        pm (plan-map (tsv (str d "/plan.tsv")))
+        ren (tsv (str d "/rename.tsv"))
+        base (second (first (pm "root")))]
+    (cond (pm "skip") nil
+          (= "diagnostics" (ffirst (pm "kind"))) [id (array-map :sources :own :platform platform :in-place true)]
+          (empty? (lines (str d "/sources.txt")))
+          [id (array-map :sources (str "javac on Arbace: " (or (clean (slurp1 (str d "/sources.err")) work id base) "no source set"))
+                         :platform platform)]
+          (= "!" (ffirst ren)) [id (array-map :sources (str "the renamed tree: " (second (first ren))) :platform platform)]
+          :else [id (array-map :sources :own :platform platform :files (vec (map #(vec (take 2 %)) ren))
+                               :unnamed (vec (for [[_ dst p] ren :when (= p "1")] dst)))])))
+
+(defn read-sources
+  "The own record's rows by id ({} when FILE is absent)."
+  [file]
+  (if (.isFile (io/file file)) (into {} (for [r (read-edn file) :when (vector? r)] [(first r) (second r)])) {}))
+
+(defn- write-sources [file rows]
+  (write-lines file (concat sources-header ["["] (for [[id m] (sort-by key rows)] (str " " (pr-str [id m]))) ["]"])))
+
+(defn- sources-compare
+  "Each test of IDS that REF passes with a source set (its :files) against the own record's row: [:equal|:differ|:unrecorded|:not-own ID why]."
+  [by-id own ids]
+  (for [id ids :let [t (by-id id) r (own id)] :when (seq (:files t))]
+    (cond (nil? r) [:unrecorded id "no row"]
+          (not= :own (:sources r)) [:not-own id (str (:sources r))]
+          (and (= (:files t) (:files r)) (= (set (:unnamed t)) (set (:unnamed r)))) [:equal id ""]
+          :else [:differ id (str "the JDK's " (pr-str (map first (:files t))) ", javac on Arbace's " (pr-str (map first (:files r))))])))
+
+(defn own-sources
+  "JOP13 (a): bin/java-check sources' rows of WORK/record.list's tests (after record_sources on javac on Arbace
+  and rename), compared with REF's sets and, with --record, written into OUT (the other tests' rows kept).
+  --platform P (own, else the build tree's)."
+  [work ref out & opts]
+  (let [o (apply hash-map opts)
+        platform (if (= "own" (o "--platform")) :own "jdk26u's build tree (jdk/javac/platform.sha256)")
+        ids (lines (str work "/record.list"))
+        rows (into {} (keep #(sources-row work % platform) ids))
+        by-id (into {} (for [t (ref-tests ref)] [(:id t) t]))
+        cmp (sources-compare by-id rows ids)
+        n (frequencies (map first cmp))]
+    (println (str "java-check sources: " (count rows) " rows (" (count (filter #(= :own (:sources (val %))) rows)) " own, "
+                  (count (filter #(:in-place (val %)) rows)) " in place); against the JDK's sets of "
+                  (count cmp) " tests: " (n :equal 0) " equal, " (n :differ 0) " differ, " (n :not-own 0) " not made"))
+    (doseq [[k id why] cmp :when (not= :equal k)] (println (str "   " (name k) " " id ": " why)))
+    (when (= "1" (o "--record"))
+      (write-sources out (merge (read-sources out) rows))
+      (println (str "java-check sources: wrote " out)))))
+
+(defn sources-check
+  "JOP13 (a), the oracle tier's: every test of REF with a source set against OWN's row (equal, differ, not made,
+  unrecorded), and the negative control (GTS81 (a)): the first equal row's set judged against the next test's
+  JDK set by the same comparison, which must differ. Exit 1 on a difference, a control that passes, and with
+  --complete on a test the record lacks."
+  [ref own & opts]
+  (let [o (set opts)
+        tests (ref-tests ref)
+        by-id (into {} (for [t tests] [(:id t) t]))
+        rows (read-sources own)
+        cmp (sources-compare by-id rows (map :id tests))
+        n (frequencies (map first cmp))
+        eq (filter #(= :equal (first %)) cmp)
+        [_ sid] (first eq)
+        other (first (for [t tests :when (and (seq (:files t)) (not= sid (:id t)) (not= (map first (:files t)) (map first (:files (rows sid)))))] (:id t)))
+        ctl (when (and sid other) (first (sources-compare {sid (by-id other)} rows [sid])))
+        bad (concat (filter #(#{:differ :not-own} (first %)) cmp)
+                    (when (contains? o "--complete") (filter #(= :unrecorded (first %)) cmp)))]
+    (println (str "java-check sources --check: " (count cmp) " tests with the JDK's source set; " (n :equal 0) " equal, "
+                  (n :differ 0) " differ, " (n :not-own 0) " not made by javac on Arbace, " (n :unrecorded 0) " not in " own))
+    (doseq [[k id why] bad] (println (str "   " (name k) " " id ": " why)))
+    (cond (nil? ctl) (println "   control: no equal row to cross (left)")
+          (= :equal (first ctl)) (println (str "   control FAILED: " sid "'s set judged equal to " other "'s"))
+          :else (println (str "   control: " sid "'s set against " other "'s differs, as it must")))
+    (when (or (seq bad) (= :equal (first ctl))) (shutdown-agents) (System/exit 1))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; plan: the check's per-test plan, from the reference
 
 ;; GTS81 (a): the negative controls, test/java/controls.edn beside the reference
@@ -763,7 +868,11 @@
                  :when (or (nil? listed) (listed (:id t)))
                  :when (or (nil? corp) (corp (:corpus t)))
                  :when (or (nil? only) (re-find only (str (:id t) " " (:test t))))]
-             t)]
+             t)
+        ;; JOP13 (a): a test's source set from Arbace's own record (test/java/sources.edn beside REF) when it has
+        ;; one, else the JDK's (JAVA_CHECK_SOURCES=jdk: the JDK's always)
+        own (if (= "jdk" (System/getenv "JAVA_CHECK_SOURCES")) {} (read-sources (str (.getParent (io/file ref)) "/sources.edn")))
+        ts (for [t ts :let [r (own (:id t))]] (if (and (= :own (:sources r)) (seq (:files r))) (merge t (select-keys r [:files :unnamed])) t))]
     (doseq [[controls by-id vm] [(let [cs (controls-of ref)] [cs (if (seq cs) (into {} (for [t (ref-tests ref)] [(:id t) t])) {}) (verdict-map ref)])]
             t ts
             :let [cs (for [c controls :when (= (:subject c) (:id t))
@@ -1635,6 +1744,8 @@
     "scan" (apply scan args)
     "rename" (apply rename args)
     "gather" (apply gather args)
+    "own-sources" (apply own-sources args)
+    "sources-check" (apply sources-check args)
     "plan" (apply plan args)
     "report" (apply report args)
     "gather-diag" (apply gather-diag args)

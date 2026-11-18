@@ -183,6 +183,10 @@
   .Ref for any, else a generated Up_ function."
   [x from to]
   (cond
+    ;; a null constant cast to a class, (cast String nil), is Go's untyped nil, which has no Ref:
+    ;; any's nil, as .Ref answers for a nil pointer (OneCaseSwitches' method.invoke(null, (String) null, ...),
+    ;; t05934; h-java-aot-triage)
+    (and (nil? x) (object-like? to)) (list 'conv 'any nil)
     ;; a fn's code (SA156) has no Ref: its values come from new, never null
     (and (object-like? to) (string? from) (str/starts-with? from "L") (m/code-class? (t/desc->internal from)))
     (list 'conv 'any x)
@@ -1193,6 +1197,25 @@
   {"Ljava/lang/Integer;" "int32" "Ljava/lang/Character;" "uint16" "Ljava/lang/Short;" "int16"
    "Ljava/lang/Byte;" "int8" "Ljava/lang/Long;" "int64"})
 
+(defn object-finalize?
+  "Is node an instance call of Object.finalize() itself: no class from the receiver's type up declares
+  finalize() (the analysis resolved the method to Object's)? invoke-val translates it as Object's empty
+  body (AT10)."
+  [node]
+  (and (= :invoke (:op node)) (not= :static (:kind node))
+       (= "java/lang/Object" (or (:owner (:method node)) (:owner node)))
+       (= ["finalize" "()V"] [(:name node) (:desc node)])))
+
+(defn receiver-null-check
+  "The null check of value tv, a call Go takes as a statement: jrt.NN, typed *T, when tv's Go type is a pointer
+  (a leaf class, String, an array), else J2g_NotNull[T], whose x compared as an any is nil for a nil interface
+  (an abstract or non-leaf class's C_I, an interface's, Object's any; :null-checked's choice). NN of an
+  interface-typed receiver was Go's \"cannot infer T\" (the Java review's risk of AT10, round 52, 2026-11-18)."
+  [tv]
+  (if (and (string? (:t tv)) (m/pointer-desc? (:t tv)))
+    (list (jsym "NN") (:x tv))
+    (list (list 'inst (jsym "J2g_NotNull") (gotype (:t tv))) (:x tv))))
+
 (defn invoke-val [node]
   (let [{:keys [kind owner name desc]} node
         mm (:method node)
@@ -1208,6 +1231,18 @@
       ;; var binding's alone)
       (lookup-call? node) (v (list 'conv (gotype r) nil) r)
       (vh-op node) (vh-val node (vh-op node))
+
+      ;; Object.finalize() itself: no class from the receiver's type up declares finalize (the analysis resolved it
+      ;; to Object), and jrt's Object has no Go method for it: jdk26u's empty body, the receiver evaluated and
+      ;; null-checked (receiver-null-check: jrt.NN on a pointer, J2g_NotNull on an interface), as C.this.finalize(), super.finalize() and
+      ;; Outer.super.finalize() of such a class (AT10, h-java-aot-triage, the user 2026-11-17: ProtectedAccess_3,
+      ;; t06387, was Go's "Finalize__V undefined"). A subclass's override is not dispatched to from such a call:
+      ;; the receiver's Go type has no Finalize__V to dispatch through
+      (object-finalize? node)
+      (let [tv (if (and (= kind :special) (not (:outer-super node)))
+                 (this-val)
+                 (first (operands [(:target node)] [nil])))]
+        (v (receiver-null-check tv) "V"))
 
       ;; an array's clone
       (:array-clone node)

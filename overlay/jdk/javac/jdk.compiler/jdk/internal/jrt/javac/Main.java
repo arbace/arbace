@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import javax.tools.JavaFileObject;
@@ -37,7 +38,8 @@ import jdk.internal.opt.CommandLine;
  * --system none, an empty --module-path and -encoding utf-8 (the files are read as UTF-8) are
  * accepted as what the file manager does anyway; every other option is javac's (JavacTool.getTask's, e.g.
  * -g:none, -source, --enable-preview, -XD...). @ARGFILE expands as on javac's command line
- * (jdk.internal.opt.CommandLine). The exit status is javac's: 0 when the compilation succeeds,
+ * (jdk.internal.opt.CommandLine). A file named twice (by any spelling of its path) is compiled once,
+ * under its first name, as by javac's command line. The exit status is javac's: 0 when the compilation succeeds,
  * 1 when it reports errors, 2 for a bad command line.
  */
 public final class Main {
@@ -53,6 +55,15 @@ public final class Main {
             fs.add(new File(s.isEmpty() ? "." : s));
         }
         return fs;
+    }
+
+    /** FSInfo.getCanonicalFile's path: the real one, else the absolute. */
+    static String canonical(File f) {
+        try {
+            return f.getCanonicalPath();
+        } catch (IOException e) {
+            return f.getAbsolutePath();
+        }
     }
 
     static List<String> expand(String[] args) throws IOException {
@@ -139,9 +150,17 @@ public final class Main {
         if (moduleSourcePath != null) {
             fm.setModuleSourcePath(moduleSourcePath);
         }
+        // a file named twice, by any spelling, compiled once under its first name, as javac's command
+        // line: Arguments keeps its files in a set, made file objects whose equality is the canonical
+        // path (JavacFileManager.getJavaFileObjectsFromPaths, FSInfo.getCanonicalFile) in a set too;
+        // javac's API cannot do it here, it wraps each of a client's file objects apart (ClientCodeWrapper)
         List<JavaFileObject> units = new ArrayList<>();
+        Set<String> named = new HashSet<>();
         for (String f : files) {
-            units.add(fm.source(new File(f)));
+            File file = new File(f);
+            if (named.add(canonical(file))) {
+                units.add(fm.source(file));
+            }
         }
         if (units.isEmpty()) {
             err.println("error: no source files");

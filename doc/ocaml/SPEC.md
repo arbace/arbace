@@ -1330,7 +1330,7 @@ Any node's form may end with a metadata map `{:loc POS}` (with `--loc`, only the
 | `(for ID LO HI DIR BODY)` | `Lfor`: `DIR` `:to` or `:downto` |
 | `(assign ID L)` | `Lassign` |
 | `(send KIND M O [L...])` | `Lsend`: `KIND` `:self`, `:public`, `:cached` |
-| `(event L)`, `(ifused ID L)` | `Levent` (only with `-g`; the dump has none), `Lifused` |
+| `(event L)`, `(ifused ID L)` | `Levent` (only with `-g`; the dump has none), `Lifused`; the native typer's `--debug` (OC217's first stage) writes an after-event as `(event L [:after DEFNAME FILE L1 C1 EOFF L2 C2])`, the location and scopes' name a bytecode backtrace prints |
 
 Constants: `(int N)`, `(char N)` (the code), `(float "t")`, `(int32 "N")`, `(int64 "N")`, `(nativeint "N")`, `(block TAG [C...])`,
 `(float-array ["t"...])`, `(immstring "S")` (a string, or a vector of bytes). Every head is one the checker knows; a

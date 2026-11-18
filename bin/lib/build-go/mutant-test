@@ -1,0 +1,58 @@
+#!/bin/bash
+# The unit tests of the build's mutant (bin/build-go --mutant, doc/go/BUILD.md, "A mutant"; the Ghidra
+# demo's A20, GH20 (a)): test/build/mutant_test.ae on the tools' host, no Go build (the record format,
+# the declaration found, the rewrites, the printed module); with --build also test/build/go/hello and
+# its mutants test/build/mutants/*.edn built by bin/build-go (Go alone, a tiny module, well under 1 GiB)
+# and run on hello's runs: the original must pass every run, each mutant fail at least one.
+#
+# Usage: bin/build-go mutant-test [--build]
+# Work in .tmp/build-go-mutant/.
+set -euo pipefail
+export CGO_ENABLED=0
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+build=
+case ${1:-} in
+  --build) build=1 ;;
+  "") ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
+out=$root/.tmp/build-go-mutant
+rm -rf "$out"; mkdir -p "$out"
+. "$root/bin/lib/repr-go-host.bash"
+ARBACE_PATH=$root/test repr_go_run build.mutant-test "$root" "$out/unit"
+[ -n "$build" ] || exit 0
+
+prog=$root/test/build/go/hello
+: > "$out/empty.in"
+# fails EXE: the number of hello's runs EXE fails (stdout and exit code against runs/NAME.out, .code)
+fails() {
+  local exe=$1 n=0 r code want
+  for r in "$prog"/runs/*.args; do
+    r=${r%.args}
+    local args=()
+    mapfile -t args < "$r.args"
+    code=0
+    "$exe" ${args[@]+"${args[@]}"} < "$out/empty.in" > "$out/run.out" 2> "$out/run.err" || code=$?
+    want=0; [ ! -f "$r.code" ] || want=$(cat "$r.code")
+    if ! cmp -s "$out/run.out" "$r.out" || [ "$code" != "$want" ]; then n=$((n + 1)); fi
+  done
+  echo "$n"
+}
+bad=0
+echo "== bin/build-go $prog (the original)"
+"$root/bin/build-go" --line-file --work "$out/work-orig" -o "$out/hello" "$prog" > "$out/build-orig.log" 2>&1 \
+  || { cat "$out/build-orig.log"; exit 1; }
+n=$(fails "$out/hello")
+if [ "$n" = 0 ]; then echo "ok   the original passes its runs"; else echo "FAIL the original fails $n runs"; bad=1; fi
+for m in "$root"/test/build/mutants/*.edn; do
+  name=$(basename "$m" .edn)
+  echo "== bin/build-go --mutant $m $prog"
+  "$root/bin/build-go" --line-file --work "$out/work-$name" -o "$out/$name" --mutant "$m" "$prog" > "$out/build-$name.log" 2>&1 \
+    || { cat "$out/build-$name.log"; echo "FAIL $name: the mutant does not build"; bad=1; continue; }
+  grep '^build-go: mutant' "$out/build-$name.log" || true
+  [ -s "$out/$name.mutant.edn" ] || { echo "FAIL $name: no applied record $out/$name.mutant.edn"; bad=1; }
+  n=$(fails "$out/$name")
+  if [ "$n" -gt 0 ]; then echo "ok   $name fails $n of $(ls "$prog"/runs/*.args | wc -l) runs"; else echo "FAIL $name passes every run: the control is blind"; bad=1; fi
+done
+exit $bad
