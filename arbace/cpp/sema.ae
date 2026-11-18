@@ -1388,7 +1388,9 @@
 (defn- declare-var!
   [scope n storage]
   (let [qt (get-in n [:type :qualType])
-        q (qualifier-before n)
+        ;; (queue 367, the code generator: a qualifier naming a template-id, as declare-fn!'s, cpp-s13: limits.cc's out-of-line
+        ;; definitions `constexpr bool numeric_limits<bool>::is_specialized;` of an explicit specialization's static members)
+        q (or (qualifier-before n) (when-not (checking?) (qualifier-tid-before n)))
         ;; (CP311 (a): a deduced class type, deduced from the initializer analyzed as global-init would)
         ct (when (empty? q) (ctad-template scope (or (:_ctad n) qt)))
         cv (when ct (binding [*cutoff* Long/MAX_VALUE]
@@ -1817,7 +1819,10 @@
                                     ;; declaration: its text holds the body)
                                     (re-find #"^\s*typedef\s+(?:struct|class|union)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)?\{" (or (node-text n) ""))
                                     (empty? (filter #(= :type (:e %)) (own-names scope (:name n)))))
-                             la
+                             ;; (queue 367: and the name its mangling takes, as the enumeration's and the `own` case's below:
+                             ;; musl's `typedef struct { ... } pthread_mutex_t`, __basic_file<char>'s __c_lock*, P15pthread_mutex_t,
+                             ;; had been mangled as an empty name, P0)
+                             (do (when-not (checking?) (abi/update-cls! (:id la) assoc :name (:name n))) la)
                              ;; `typedef enum { ... } E;` ([dcl.typedef]/9, the typedef name for linkage): the parser writes the
                              ;; type as `enum E`, the unnamed enumeration or class just declared (G5c: unwind.h's
                              ;; _Unwind_Reason_Code); it takes the name for its mangling
@@ -3440,7 +3445,10 @@
       (abi/class? pt)
       (cond
         (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
-        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2}
+        ;; (queue 367: with its classes, [over.ics.rank]/4.4.4: of two derived-to-base conversions of one class, the nearer
+        ;; base's better; basic_string's _M_construct(.., forward_iterator_tag) over (.., input_iterator_tag) for a
+        ;; random_access_iterator_tag, string-inst.cc's S::basic_string(C*, C*, const allocator<C>&))
+        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2 :d2b [(class-id at) (:id pt)]}
         *no-user* nil
         ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
         (and (class-id at) (conv-for (class-id at) (abi/unq pt) false (:c at))) {:rank 3}
@@ -3478,9 +3486,12 @@
 (defn- better-ics? [a b]
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
-           (if (and (:cvq a) (:cvq b))
+           (cond
+             (and (:d2b a) (:d2b b) (= (first (:d2b a)) (first (:d2b b))) (not= (second (:d2b a)) (second (:d2b b))))
+             (boolean (abi/derived-from? (second (:d2b a)) (second (:d2b b))))
+             (and (:cvq a) (:cvq b))
              (let [x (:cvq a) y (:cvq b)] (and (not= x y) (every? y x)))
-             (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
+             :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
 
 (declare resolve-overload*)
 
