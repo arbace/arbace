@@ -128,7 +128,7 @@
 
 (defn- param-type [scope p] (abi/unq (sema/resolve-type scope (:qt p))))
 
-(declare arg-entity)
+(declare extern-member! arg-entity)
 (declare ^:dynamic *unstable*)
 
 (defn- bind-scope
@@ -3145,6 +3145,8 @@
     "ExplicitInstantiationDecl"
     (do (when (and (not (:_extern n)) (:_fname n) (or (:_ftype n) (and (:_fctype n) (not (sema/checking?)))))
           (explicit-fn-instantiation! scope n))
+        (when (and (:_extern n) (not (re-find #"^\s*(?:class|struct)\b" (str (:_text n)))) (not (str/includes? (str (:_text n)) "(")))
+          (extern-member! scope (str (:_text n))))
         (when-let [[_ t] (and (:_extern n) (re-matches #"(?s)\s*(?:class|struct)\s+(.*?)\s*" (str (:_text n))))]
           (when-let [ty (sema/resolve-type scope t)]
             (when (abi/class? ty) (abi/update-cls! (:id ty) assoc :extern-inst true))))
@@ -3368,6 +3370,32 @@
                  (conj seen c))))
       seen)))
 
+(defn- extern-member!
+  "queue 382: an explicit instantiation declaration of a class template specialization's static data member,
+  `extern template basic_string<char>::size_type basic_string<char>::_Rep::_S_empty_rep_storage[];` (basic_string.tcc's,
+  PR 86138, when the class's own is not declared): the member named on its class (:extern-members), so the lazy round
+  declares it external as clang does, never defines it. The declarator is the text's last qualified name: its qualifier
+  the tokens back to the `::` chain's start, template argument lists kept whole."
+  [scope ^String text]
+  (let [t (str/trim (str/replace text #"\s*\[\s*[^\]]*\]\s*;?\s*$|\s*;\s*$" ""))
+        [_ head nm] (re-matches #"(?s)(.*?)\s*::\s*([A-Za-z_][A-Za-z_0-9]*)" t)]
+    (when (and head nm)
+      ;; the qualifier: the longest suffix of `head` that is a chain of names and template-ids joined by ::
+      (let [toks (vec (re-seq #"::|<|>|,|[A-Za-z_][A-Za-z_0-9]*|[^\sA-Za-z_0-9<>,:]+" head))
+            ;; one link back from i, its name's index: a template-id's argument list skipped to its <
+            name-at (fn [^long i]
+                      (if (= ">" (nth toks i))
+                        (dec (long (loop [k (dec i) d 1] (cond (neg? k) 0 (= ">" (nth toks k)) (recur (dec k) (inc d))
+                                                                (= "<" (nth toks k)) (if (= 1 d) k (recur (dec k) (dec d))) :else (recur (dec k) d)))))
+                        i))
+            start (loop [i (dec (count toks))]
+                    (let [k (long (name-at i))]
+                      (if (and (>= (- k 2) 0) (= "::" (nth toks (dec k)))) (recur (- k 2)) (max 0 k))))
+            q (str/join " " (subvec toks start))
+            ty (try (sema/resolve-type scope q) (catch arbace.lang.ExceptionInfo _ nil))]
+        (when (abi/class? (abi/unq ty))
+          (abi/update-cls! (:id (abi/unq ty)) update :extern-members (fnil conj #{}) nm))))))
+
 (defn- extern-class?
   "Whether the class (or a class enclosing it) is named by an explicit instantiation declaration."
   [cid]
@@ -3444,7 +3472,10 @@
         (swap! out conj [:fn id]))
       (doseq [id (:vars @acc) :let [v (sema/var* id)] :when (:pending-def v)
               ;; (a static member of a class an explicit instantiation declaration names: the library's, G5)
-              :when (if (and (extern-class? (:of-cls v)) (not (:explicit-inst v))) (do (upd-var! id #(-> % (assoc :extern true :defined false) (dissoc :pending-def))) false) true)]
+              :when (if (and (or (extern-class? (:of-cls v))
+                                 ;; (queue 382: or the member itself, `extern template T X<A>::m[];`, extern-member!)
+                                 (contains? (:extern-members (abi/cls (:of-cls v))) (:name v)))
+                             (not (:explicit-inst v))) (do (upd-var! id #(-> % (assoc :extern true :defined false) (dissoc :pending-def))) false) true)]
         (upd-var! id #(-> % (assoc :defined true) (dissoc :pending-def)))
         ;; a constant integral variable's initializer folded, as clang emits it (a constant, no guard)
         (let [t (:ty v)]
