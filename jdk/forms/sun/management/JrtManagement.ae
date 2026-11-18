@@ -4,6 +4,7 @@
 
 (import '(com.sun.management.internal GarbageCollectorExtImpl)
         '(java.lang.management MemoryManagerMXBean MemoryPoolMXBean MemoryUsage)
+        '(java.util ArrayList List)
         '(jdk.internal.jrt HostManagement))
 
 (defclass ^:public ^:final JrtManagement
@@ -25,9 +26,8 @@
     (when-not (some? pools)
       (HostManagement/watchGc0)
       (set! pools
-            (new
-              MemoryPoolMXBean/1
-              [(MemoryPoolImpl. HEAP_POOL true -1 -1) (MemoryPoolImpl. RUNTIME_POOL false -1 -1)]))
+            (new MemoryPoolMXBean/1
+                 [(MemoryPoolImpl. HEAP_POOL true 0 0) (MemoryPoolImpl. RUNTIME_POOL false 0 -1)]))
       (set! managers
             (new MemoryManagerMXBean/1
                  [(GarbageCollectorExtImpl. COLLECTOR) (MemoryManagerImpl. RUNTIME_MANAGER)]))))
@@ -109,4 +109,185 @@
                     (aget g 2)
                     before
                     after
-                    extAttValues)))))
+                    extAttValues))))
+
+  (field ^:static ^:final ^int USAGE 0)
+
+  (field ^:static ^:final ^int COLLECTION 1)
+
+  (defclass ^:private ^:static ^:final SensorInfo
+    (field ^Sensor sensor)
+
+    (field ^long high)
+
+    (field ^long low)
+
+    (field ^boolean on)
+
+    (field ^long count)
+
+    (field ^int pendingTrigger)
+
+    (field ^int pendingClear)
+
+    (field ^MemoryUsage usage)
+
+    (method enabled ^boolean [this] (and (some? sensor) (not (== high 0))))
+
+    (method pending ^boolean [this]
+      (or (> pendingTrigger 0) (> pendingClear 0)))
+
+    (method overHigh ^boolean [this ^MemoryUsage u]
+      (and (> high 0) (>= (.getUsed u) high)))
+
+    (method belowLow ^boolean [this ^MemoryUsage u]
+      (and (> low 0) (< (.getUsed u) low)))
+
+    (method gauge ^void [this ^MemoryUsage u]
+      (let [over (.overHigh this u)
+            below (.belowLow this u)]
+        (cond
+          (and over (or (and (not on) (== pendingTrigger 0)) (> pendingClear 0)))
+            (do
+              (set! pendingTrigger (unchecked-inc-int pendingTrigger))
+              (set! usage u)
+              (set! pendingClear 0))
+          (and below
+               (or (and on (== pendingClear 0)) (and (> pendingTrigger 0) (== pendingClear 0))))
+            (set! pendingClear (unchecked-inc-int pendingClear)))))
+
+    (method counter ^void [this ^MemoryUsage u]
+      (let [over (.overHigh this u)
+            below (.belowLow this u)]
+        (cond
+          over
+            (do
+              (set! pendingTrigger (unchecked-inc-int pendingTrigger))
+              (set! usage u)
+              (set! pendingClear 0))
+          (and below (or on (> pendingTrigger 0)))
+            (set! pendingClear (unchecked-inc-int pendingClear))))))
+
+  (field ^:private ^:static ^:final lock (Object.))
+
+  (field ^:private ^:static ^:final ^SensorInfo/2 sensors
+    (new SensorInfo/2 [[(SensorInfo.) (SensorInfo.)] [(SensorInfo.) (SensorInfo.)]]))
+
+  (method ^:private ^:static index ^int [^MemoryPoolMXBean p]
+    (JrtManagement/init)
+    (if (identical? p (aget pools 0)) 0 1))
+
+  (method ^:static setSensor ^void [^MemoryPoolMXBean p ^int kind ^Sensor s]
+    (let [i (JrtManagement/index p)]
+      (locking lock (set! (.-sensor (aget sensors i kind)) s))
+      (JrtManagement/startNotifier)))
+
+  (method ^:static setThreshold ^void [^MemoryPoolMXBean p ^int kind ^long threshold]
+    (let [i (JrtManagement/index p)
+          s (aget sensors i kind)
+          ^:mutable ^long prev 0]
+      (locking lock (set! prev (.-high s)) (set! (.-high s) threshold) (set! (.-low s) threshold))
+      (if (== kind COLLECTION)
+          (JrtManagement/gcEvents)
+          (when-not (== prev threshold)
+            (let [^:mutable ^boolean any false]
+              (locking lock
+                (set! any
+                      (or (not (== (.-high (aget sensors 0 USAGE)) 0))
+                          (not (== (.-high (aget sensors 1 USAGE)) 0)))))
+              (HostManagement/sampleUsage0 any)
+              (when (JrtManagement/detectUsage i) (HostManagement/notify0)))))))
+
+  (method ^:private ^:static detectUsage ^boolean [^int i]
+    (let [s (aget sensors i USAGE)]
+      (locking lock (when-not (.enabled s) (return false)))
+      (let [u (JrtManagement/usage (== i 0))]
+        (locking lock (if (not (.enabled s)) false (do (.gauge s u) (.pending s)))))))
+
+  (defclass ^:public ^:interface GcNotifier
+    (method notifyGc ^void [this ^long timestamp ^String gcAction ^String gcCause ^long index
+                            ^long startTime ^long endTime ^MemoryUsage/1 before ^MemoryUsage/1 after]))
+
+  (field ^:private ^:static ^:volatile ^GcNotifier gcNotifier)
+
+  (method ^:public ^:static setGcNotifier ^void [^GcNotifier n]
+    (JrtManagement/init)
+    (set! gcNotifier n)
+    (when (some? n) (JrtManagement/startNotifier))
+    (JrtManagement/gcEvents))
+
+  (method ^:private ^:static gcEvents ^void []
+    (let [^:mutable ^boolean on false]
+      (locking lock
+        (set! on (or (not (== (.-high (aget sensors 0 COLLECTION)) 0)) (some? gcNotifier))))
+      (HostManagement/gcEvents0 on)))
+
+  (field ^:private ^:static ^boolean notifierStarted)
+
+  (method ^:private ^:static ^:synchronized startNotifier ^void []
+    (when-not notifierStarted (set! notifierStarted true) (HostManagement/setNotifier0 (Notifier.))))
+
+  (field ^:static ^:final ^String GC_ACTION "end of major GC")
+
+  (field ^:static ^:final ^String GC_CAUSE_FORCED "System.gc()")
+
+  (field ^:static ^:final ^String GC_CAUSE_GOAL "Go heap goal")
+
+  (defclass ^:private ^:static ^:final Notifier
+    :implements [Runnable]
+
+    (method ^:public run ^void [this]
+      (loop [^int i 0] (when (< i 2) (JrtManagement/detectUsage i) (recur (unchecked-inc-int i))))
+      (let [^{:tag (List long/1)} cycles (ArrayList.)
+            ^:mutable ^long/1 g nil]
+        (while (some? (set! g (HostManagement/nextGc0)))
+          (.add cycles g)
+          (let [s (aget sensors 0 COLLECTION)
+                after (JrtManagement/usage (HostManagement/memory0 0) (aget g 4))]
+            (locking lock (when (.enabled s) (.counter s after)))))
+        (for-each [^SensorInfo/1 ss sensors]
+          (for-each [^SensorInfo s ss] (try (Notifier/process s) (catch Throwable t))))
+        (let [n gcNotifier]
+          (when (some? n)
+            (for-each [^long/1 c cycles]
+              (let [u (HostManagement/memory0 0)
+                    r (JrtManagement/usage false)
+                    before (new MemoryUsage/1 [(JrtManagement/usage u (aget c 3)) r])
+                    after (new MemoryUsage/1 [(JrtManagement/usage u (aget c 4)) r])]
+                (try
+                  (.notifyGc n
+                             (aget c 5)
+                             GC_ACTION
+                             ^String (if (not (== (aget c 6) 0)) GC_CAUSE_FORCED GC_CAUSE_GOAL)
+                             (aget c 0)
+                             (aget c 1)
+                             (aget c 2)
+                             before
+                             after)
+                  (catch Throwable t))))))))
+
+    (method ^:private ^:static process ^void [^SensorInfo s]
+      (let [^:mutable ^int n 0
+            ^:mutable ^boolean clear false
+            ^:mutable ^MemoryUsage u nil
+            ^:mutable ^Sensor sensor nil]
+        (locking lock
+          (when (or (not (.pending s)) (nil? (.-sensor s))) (return))
+          (set! n (.-pendingTrigger s))
+          (set! clear (> (.-pendingClear s) 0))
+          (set! u (.-usage s))
+          (set! sensor (.-sensor s))
+          (when clear
+            (set! (.-on s) false)
+            (set! (.-count s) (unchecked-add (.-count s) n))
+            (set! (.-pendingClear s) 0)
+            (set! (.-pendingTrigger s) (unchecked-subtract-int (.-pendingTrigger s) n))))
+        (if clear
+            (.clear sensor n)
+            (try
+              (.trigger sensor n u)
+              (finally
+                (locking lock
+                  (set! (.-on s) true)
+                  (set! (.-count s) (unchecked-add (.-count s) n))
+                  (set! (.-pendingTrigger s) (unchecked-subtract-int (.-pendingTrigger s) n))))))))))
