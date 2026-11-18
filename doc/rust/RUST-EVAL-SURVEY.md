@@ -1540,3 +1540,28 @@ never made, the user 2026-11-13) judge and never `--record`. Widening it, in cos
 pass at RE6) needs a subset record (RES65 (a)); the whole UI suite by rsi (3,718 programs, 3,409 by their own verdict) needs the UI IR
 pack (`bin/rsi ir-pack --corpus ui`, rustc 1.99.1, the oracle tier) and about 5.5 hours. Completeness is a ratio per cell, so the
 eval cell's 5 of 5 is already 100: widening buys coverage, and moves the judge stage's own-verdict share, not the score.
+
+## As built: queue 354, the path from 75 to 90 (2026-11-18, branch `354-rust` from mac/n-all `9cd2e4a96`)
+
+By the Mac VM's agent (light tier; stage 0 of next's seed `3c48859d`). Rust's completeness is the mean of four cells: read and
+print 33,342 / 1 / 3 (100 rounded), eval 5 / 0 / 0 (100), AOT "no check yet" (0), so 75. Only the AOT cell's record moves it: any
+AOT record with at least 60% passing gives 90, and every RES34 measure passed (5 of 5 essential programs). The cheapest record is
+the samples alone, six programs (`threads.rs` at worst classed deferred): proven on a scratch record (below), completeness 100,
+maturity 100. The record merges by corpus (run-judge's `--record` replaces only the corpora it ran), so the synthetic corpus can
+follow on another night.
+
+**What was built.** (1) The cell's case inputs (RFP53 (a), RIND5 (a)) moved from `bin/lib/rsi/check`'s bash into
+`arbace.rust.check/write-case-inputs`, which run-judge `--record` calls when the run passes: the run's corpora's rows are replaced
+and the others kept, as in the record (C++'s `write-case-inputs` rule), so a samples-then-synthetic record leaves 73 rows where the
+bash writer left the last corpus's alone; the file is the host's, `test/rust/{eval,aot}-inputs-linux-ARCH.edn` (queue 322's
+`record-file` rule), so an arm64 `--record` no longer overwrites amd64's. The values (C1 from `front.tsv`, C5 from `shims.tsv`, C7
+from `ARBACE_C_HOST`) are unchanged. (2) `rsi-aot`'s command takes the record's settings, `RSI_SHARD=1 RSI_GO_P=1
+RSI_CI_MEMLIMIT=1400MiB` (RES34's night command; queue 322's open finding), in `test/gate/steps.edn` and its fragment.
+
+**Proofs (run here, synthesized runs: make-fake).** `RSI_RECORD_ARCH=arm64 run-judge W aot --record samples`, then `... synthetic`:
+the inputs 6 rows, then 73 (the samples' kept, `std.rs`'s C1 and C5 :own from a front.tsv and shims.tsv written for it), the
+record 73; a failing run (`fmt.rs`'s output changed) leaves the inputs untouched; no amd64 file touched. Placed as the amd64 record
+and inputs with the cell's `:until` dropped (scratch, restored): samples alone `bin/reap` 6 / 0 / 0 after `--record`, 0 problems,
+`bin/crops-score --crop rust` 100 / 100 / 100 / 80 (completeness, without by design, maturity, independence; the AOT stage "0 of 6
+cases own in all 7 inputs"); samples and synthetic 73 / 0 / 0, the same scores. `bin/rsi judge-test` passes; the tree's `bin/reap`
+53 of 56 cells checked, 0 problems; `bin/crops-score --judge --strict` 0 problems.
