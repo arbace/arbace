@@ -390,6 +390,8 @@
    ;; (n-cpp-concepts: [temp.spec.partial.general]/9.2)
    [:template #"^codegen: partial specialization of '.*' does not specialize any template arguments" "partial specialization does not specialize any template arguments"]
    [:undecl #"^codegen: use of undeclared identifier" "use of undeclared identifier"]
+   ;; (queue 368: [dcl.enum]/5, an implicit enumerator value past a fixed underlying type's range)
+   [:enum #"^codegen: enumerator value '.*' is outside the range of underlying type" "enumerator value is outside the range of its underlying type"]
    ;; (round 54: [class.mi]/3)
    [:base #"^codegen: duplicate base type" "base class specified more than once as a direct base class"]
    ;; (CP368 (a): a member of a class being defined, clang's err_field_incomplete_or_sizeless; the instantiation depth,
@@ -876,6 +878,8 @@
   (cond
     (map? x) (cond (co-kinds (:kind x)) x
                    (= "LambdaExpr" (:kind x)) nil
+                   ;; (queue 368: nor into a local class's members or a nested function, whose bodies are their own)
+                   (or (#{"CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl"} (:kind x)) (fn-kinds (:kind x))) nil
                    :else (some (fn [[k v]] (when (and (not= k :_ent) (coll? v)) (first-co v))) x))
     (or (vector? x) (seq? x)) (some first-co x)
     :else nil))
@@ -891,12 +895,19 @@
                                               (and std? (:isInline n)) (ns-walk (:inner n) true)
                                               :else nil)
                         "LinkageSpecDecl" (ns-walk (:inner n) std?)
-                        "ClassTemplateDecl" (when std? (.add tmpls (:name n)))
+                        "ClassTemplateDecl" (when std? (.add tmpls (:name n))
+                                              ;; (queue 368: a coroutine_traits the main file defines itself, whose promise_type is
+                                              ;; not [coroutine.traits.primary]'s R::promise_type: pr105475-2.C's)
+                                              (when (= main (get-in n [:loc :file])) (.add tmpls (str "main:" (:name n)))))
                         "CXXRecordDecl" (when (and (not std?) (:name n) (:completeDefinition n) (= main (get-in n [:loc :file])))
                                           (.put classes (:name n) n))
                         nil)))]
             (ns-walk (:nodes u) false))
-        specialized (re-find #"coroutine_traits\s*<" src)
+        ;; (queue 368: a specialization's own head, `struct coroutine_traits<...>` or `class std::coroutine_traits<...>`, any qualifier (a namespace alias's `coro::`), in the
+        ;; text without its comments and literals; a use, `std::coroutine_traits<R>::promise_type`, or a comment is none)
+        specialized (re-find #"(?:struct|class)\s+(?:::\s*)?(?:[A-Za-z_]\w*\s*::\s*)*coroutine_traits\s*<"
+                             (-> src (str/replace #"(?s)/\*.*?\*/" " ") (str/replace #"//[^\n]*" " ")
+                                 (str/replace #"\"(?:\\.|[^\"\\\n])*\"" "\"\"")))
         report! (fn [c msg]
                   (when-let [off (get-in c [:range :begin :offset])]
                     (when (= main (or (get-in c [:range :begin :file]) (get-in c [:range :begin :expansionLoc :file])))
@@ -931,7 +942,7 @@
                    (cond
                      (not (.contains tmpls "coroutine_traits")) (report! c "coroutines require a traits template; cannot find 'std::coroutine_traits'")
                      (not (.contains tmpls "coroutine_handle")) (report! c "coroutines require a handle class template; cannot find 'std::coroutine_handle'")
-                     (and ret (not specialized)
+                     (and ret (not specialized) (not (.contains tmpls "main:coroutine_traits"))
                           (or (re-matches #"(?:(?:unsigned|signed|short|long|int|char|bool|float|double|void|wchar_t|char8_t|char16_t|char32_t)\s*)+" ret)
                               (when-let [cn (.get classes ret)]
                                 (and (empty? (:bases cn))
@@ -943,8 +954,18 @@
                     (and (fn-kinds (:kind n)) (= main (get-in n [:loc :file])))
                     (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
                       (let [qt (str (get-in n [:type :qualType]))
-                            ret (when-let [[_ r] (re-find #"^([^()<>:*&]+?)\s*\(" qt)] (str/trim r))]
-                        (check! b (when-not (#{"auto" "decltype"} ret) ret))))
+                            ret (when-let [[_ r] (re-find #"^([^()<>:*&]+?)\s*\(" qt)] (str/trim r))
+                            ;; (queue 368: [dcl.fct.def.coroutine]/4, a coroutine is no constructor, destructor, main function,
+                            ;; constexpr function or function with a C variadic parameter list: GCC's "'co_await' cannot be used in a
+                            ;; constructor", at the first co_ operator, before the promise's lookup)
+                            no-co (cond (= "CXXConstructorDecl" (:kind n)) "a constructor"
+                                        (= "CXXDestructorDecl" (:kind n)) "a destructor"
+                                        (and (= "FunctionDecl" (:kind n)) (= "main" (:name n))) "the 'main' function"
+                                        (:constexpr n) "a 'constexpr' function"
+                                        (re-find #"\.\.\.\)" qt) "a varargs function")]
+                        (if-let [c (and no-co (first-co b))]
+                          (report! c (str "'" (case (:kind c) "CoawaitExpr" "co_await" "CoyieldExpr" "co_yield" "co_return") "' cannot be used in " no-co))
+                          (check! b (when-not (#{"auto" "decltype"} ret) ret)))))
                     (= "LambdaExpr" (:kind n))
                     (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))] (check! b nil))
                     :else nil))
