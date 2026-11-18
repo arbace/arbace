@@ -12216,3 +12216,49 @@ sources) and its `:why` names the source sets' JDK origin; switch.patch the same
 (CaseFolding Arbace's own from pinned data; cacerts open, the user's). Scores unchanged (59.7; `crops-score --record` writes no
 difference), `--judge --strict` 0 problems; `git apply --check` of the patch passes. No key moves (bin/jrt-convert, test/ are in
 none of gate_key, arbace_javac_key); jrt-convert's and gate-tests' `--full` steps rerun. Every process under 4 GiB; no gate run.
+
+## 2026-11-18: n-c-last (round 54), C's last light rows: an unknown attribute's balanced tokens, tcc-pp's .S files, seven self-checking ci-run programs
+
+Branch `n-c-last` from `mac/n-all3` `2c633380a`. C's scores before: completeness 98.16, without by design 99.86, maturity 100,
+independence 99.78 (judge 0.9890); after: 98.17, 99.88, 100, 99.80 (judge 0.9900). Cells: print 4831/3/16 -> 4833/5/12; read,
+eval and AOT unchanged (5237/226/12, 2246/34/0, 2254/26/0).
+
+**The rows not passing and not truly by design (step 1).** Read's 12 deferred: dg's c23-auto-3, c23-complit-5, c23-constexpr-3
+(decl-diag: gcc's c-decl/c-typeck errors the checker lacks; c23-auto-3's `auto g { }` also stops the read), embed-4 (pp-diag:
+`__has_embed` in traditional C), c23-digit-separators-2 (pedantic-diag), embed-10 (parse-gap), c23-bool-errors-3 (wrong-reason);
+parse-check's five limits-*.c (eval-depth: 10,000-deep nesting; the evaluated parse hits the evaluator's MAX_DEPTH, the compiled
+one parse.ae's MAX-NEST 4000 bound, kept because the converter recurses past Go's stack). Print's 16 deferred: cc-grammar 3
+(c23-attr-syntax-5's `[[unknown_attribute(!)]]`; tcc-pp's 12.S and 13.S, assembler sources), eval-limits 11 (limits-*.c and
+pr46534 by depth or the read budget; c23-binary-constants-1, libunicode, quickjs, limits-blockid/externalid/fndefn time-dependent;
+sqlite3.c the budget), macro-context 1 (sqlite's shell.c, not rerun: its read exceeds the 3 GiB limit), objects-macro-body 1
+(unicode_gen.c). Eval's by design that are a choice rather than a necessity: speed 9 (the interpreter's timeouts; AOT passes
+them) and fenv 2 (no FP exception flags, SPEC §12.5).
+
+**Fixed (step 2).** (1) parse.ae's `balanced-garbage?` also takes an operator no expression ends with (`! ~ + - * / % & | ^ < > =
+? : ,`) just before a closer or a comma, so `[[unknown_attribute(!)]]` reads as balanced tokens (gcc ignores the unknown
+attribute's arguments); convert.ae marks such an unprefixed or gnu:: attribute's token string `^:c/tokens` and print.ae writes it
+as tokens, not as a string literal (doc/c/SPEC.md §5.6): c23-attr-syntax-5 passes levels 1-2, printed `[[unknown_attribute(!)]]`;
+c23-attr-syntax-1..8 rerun (round trip and tree check) as recorded but 5 (its tree row 6957 nodes, 0 errors, still :gcc-syntax:
+cc errs there); dg passes; annotations now read it and the checker's pedantic "attribute ignored" is gcc's at its dg-options
+(annot-known :gcc-rejects-at-options, its row known). No other corpus file matches the new rule's pattern (grep over gcc.dg's c23
+and gnu23 files, the torture tests and test/c). gate_key moves (repr/c is embedded). (2) tcc-pp's 12.S and 13.S: assembler
+sources, classed :assembler (design) at the print level as the read level already does (CS260 (a)'s rule): taken (round 54); the
+alternative, :na (outside both denominators), would change the corpus's counts. (3) c23-binary-constants-1 (time-dependent
+eval-limits) passed when rerun: its row pass. No gate_key move for (2)-(3) or for the records.
+
+**Independence (step 3).** The judge stage is what holds it below 100: 301 of 14,857 cases judged by gcc's records (0.5 each):
+ci-run's 12 output-only programs, benchmarksgame's 29, mir's lacc/new 36, cxgo 2 and the 18 selfref exceptions at eval and AOT
+(194), pp-gcc.sha256's 72 known preprocessor differences, parse-gcc.tsv's 35 print files. Moved here: seven ci-run programs
+(ptr-sub-unsigned "exit 3"; ptr-sub-narrow, fnptr-result-width, va-arg-pack, builtin-fpclass-fl, builtin-lockfree,
+builtin-assoc-barrier "exit 0") check their printed values against C's and the psABI's and carry CS299 (c)'s "ci-run verdict"
+line; their output is unchanged (gcc's recorded digests still hold, `bin/ci selfref agree`: 2179 of 2179 agree, self-check 7);
+`bin/ci check --only` and `check --aot --only` of the seven pass 7 of 7 each; independence.edn's cases 14542/315 -> 14556/301.
+builtin-lockfree's first version looped over a variable size: ci answered `__atomic_is_lock_free(n, 0)` with a non-constant n
+as not lock-free (gcc calls libatomic there); the check takes the constant sizes, the variable case left as a note for ci.
+
+**Records (step 4).** Rows changed by hand from the --only runs (the tools refuse --record with --only): roundtrip-results
+(attr-syntax-5 and binary-constants-1 pass, 12.S/13.S class assembler), roundtrip-known (attr-syntax-5's entry removed, the .S
+class), parse-check-results (attr-syntax-5), annot-results and annot-known (attr-syntax-5), divergences-print (:assembler). Then
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (9 pairs, 0 problems).
+Every process under 3 GiB (the round trip's peak 2.7 GiB under GOMEMLIMIT=2500MiB); no gate run, no whole-corpus run. The musl
+forms were reread twice (45 min) because a comment edit to parse.ae during the first read changed the cache's key.
