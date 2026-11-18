@@ -1102,6 +1102,16 @@ step 4 (2026-10-07); the others came with later work, as each says:
     descriptors); upstream's `protected-final-methods` finds them by `getDeclaredMethods`. So genclass's
     `ProtectedFinalTester` (CDR11: `ClassLoader` extendable) gets `superFindSystemClass`, and
     `protected-final-access` passes (checked on next's test build with the file loaded over the embedded copy).
+34. **gen-class in an AOT program: the compiled class kept** (2026-11-18, queue 361). `arbace/genclass.ae`:
+    `gen-class*` answers a class of the gen-class's name that the program holds compiled (`gc-compiled-class`:
+    a namespace's class, not `arbace.lang`'s nor the JDK's, that no evaluation made, `Compiler$AST/dynamic`)
+    instead of evaluating its Java form again (`gen-class-define`, the body before). In an AOT program c2j
+    compiles the class the form defined while the program prepared (`arbace.c2j.main`'s `java-forms-classes`),
+    and compiled code names it statically (`new`, casts, calls); evaluating the form again at load replaced the
+    name by an interpreted class (jrt's `DefineDynamic` replaces a compiled namespace's class), so the name and
+    the compiled code disagreed (`(instance? C x)` false for an `x` compiled code made). As upstream's gen-class,
+    which does nothing when not compiling: the class is the compiled one. Evaluated twice at the REPL (an
+    interpreted class), the form is evaluated again as before.
 
 ## Dialect divergences
 

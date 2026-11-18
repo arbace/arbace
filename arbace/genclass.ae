@@ -434,13 +434,21 @@
         (binding [*ns* n] (refer 'arbace.core))
         n)))
 
-(defn gen-class*
-  "Defines the class of gen-class's options-map (its :impl-ns the namespace that evaluated
-  gen-class) at run time, as a Java form, and answers it (doc/CLOJURE-DESIGN-REVIEW.md, CDR3).
-  A superclass the Go build's Java forms cannot extend (Compiler$CFGo/canExtend: Object, the
-  world's classes of arbace.j2g.dyn/sub-supers, an interpreted class) gives a class of that name
-  extending Object whose constructor throws, as a proxy of such a class does."
-  {:added "arbace"}
+(defn- gc-compiled-class
+  "The class named name when the program holds it compiled, a namespace's class (not the
+  runtime's, arbace.lang, nor the JDK's) that no evaluation made (Compiler$AST/dynamic): the
+  class c2j compiled from the Java form gen-class* evaluated while the program prepared (an
+  AOT program, arbace.c2j.main's java-forms-classes), else nil. Evaluating the form again would
+  replace it by an interpreted class of the same name (jrt's DefineDynamic replaces a compiled
+  namespace's class), which the class's name then finds while compiled code still makes and casts
+  to the compiled one, so that (instance? C (C.)) is false (queue 361)."
+  [^String name]
+  (when-not (some (fn [^String p] (.startsWith name p)) ["java." "javax." "jdk." "sun." "com.sun." "arbace.lang."])
+    (when-let [c (try (arbace.lang.RT/classForNameNonLoading name) (catch Throwable _ nil))]
+      (when-not (arbace.lang.Compiler$AST/dynamic c) c))))
+
+(defn- gen-class-define
+  "gen-class*'s definition of the class of options-map at run time, as a Java form."
   [options-map]
   (let [super (when-let [e (:extends options-map)] (the-class e))]
     (try
@@ -467,6 +475,19 @@
                            [(list 'constructor (with-meta '[this] {:public true})
                                   (list 'throw (list 'UnsupportedOperationException. why)))])))))
           (throw t))))))
+
+(defn gen-class*
+  "Defines the class of gen-class's options-map (its :impl-ns the namespace that evaluated
+  gen-class) at run time, as a Java form, and answers it (doc/CLOJURE-DESIGN-REVIEW.md, CDR3).
+  A superclass the Go build's Java forms cannot extend (Compiler$CFGo/canExtend: Object, the
+  world's classes of arbace.j2g.dyn/sub-supers, an interpreted class) gives a class of that name
+  extending Object whose constructor throws, as a proxy of such a class does. A class of that
+  name the program holds compiled (an AOT program's: gc-compiled-class) is answered as it is,
+  as Clojure's gen-class does nothing when not compiling and its class is the compiled one."
+  {:added "arbace"}
+  [options-map]
+  (or (gc-compiled-class (str (:name options-map)))
+      (gen-class-define options-map)))
 
 (defmacro gen-class
   "When compiling, generates compiled bytecode for a class with the
