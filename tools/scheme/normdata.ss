@@ -1,4 +1,7 @@
 ;;; tools/scheme/normdata.ss: the data of si's Unicode normalization (SM6), dumped from Chez Scheme 10.3.0 itself.
+;;; Since queue 350 go/arbace/scm/normdata.ae is generated from the pinned UCD 16.0.0 (bin/repr-scheme ucd gen, arbace.repr.scheme.ucd's
+;;; normalization; ucd check compares): this pair is the oracle's, by hand; its output, written to a scratch file, equals the committed
+;;; table from the (in-ns ...) line on (queue 350: the table line for line; the header names its generator).
 ;;;
 ;;;   chez --script tools/scheme/normdata.ss > RAW
 ;;;   python3 -I tools/scheme/normdata.py RAW go/arbace/scm/normdata.ae        (attaches the numeric classes, verifies, writes the table)

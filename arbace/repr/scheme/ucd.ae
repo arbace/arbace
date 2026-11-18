@@ -36,7 +36,10 @@
   with the report's classes over every scalar value, SPEC 9): above U+007F an <initial> is a <constituent>, a character of Lu,
   Ll, Lt, Lm, Lo, Mn, Nl, No, Pd, Pc, Po, Sc, Sm, Sk, So or Co; a <subsequent> is that or Nd, Mc or Me.
 
-    bin/repr-scheme ucd gen     (arbace_tool -m arbace.repr.scheme.ucd gen UCD-DIR ROOT): the four files written
+    go/arbace/scm/normdata.ae        si's Unicode normalization data (queue 350): UnicodeData.txt's decompositions and classes,
+                                     DerivedNormalizationProps.txt's Full_Composition_Exclusion (`normalization`)
+
+    bin/repr-scheme ucd gen     (arbace_tool -m arbace.repr.scheme.ucd gen UCD-DIR ROOT): the five files written
     bin/repr-scheme ucd check   (... check UCD-DIR ROOT OUT): written into OUT and compared byte for byte with the checkout's,
                                 and UnicodeData.txt's categories against extracted/DerivedGeneralCategory.txt's, code point
                                 for code point"
@@ -282,6 +285,104 @@
   "The runs [lo hi class] of equal Word_Break class from the classes a, the Other runs left out."
   [^bytes a]
   (runs a))
+
+;; ---- queue 350 (audit 344's DECISION 2 (a), the user 2026-11-18): si's Unicode normalization data (go/arbace/scm/normdata.ae), from
+;; UnicodeData.txt's canonical combining classes (field 3) and decomposition mappings (field 5) and DerivedNormalizationProps.txt's
+;; Full_Composition_Exclusion, by UAX #15's definitions (before: dumped from Chez Scheme 10.3.0 itself, tools/scheme/normdata.ss;
+;; the same table, line for line)
+
+(def ^:private s-base 0xAC00)
+(def ^:private s-count 11172)
+
+(defn- hangul? [^long c] (and (>= c s-base) (< c (+ s-base s-count))))
+
+(defn- hangul-decomposition
+  "UAX #15's (3.12) algorithmic decomposition of the Hangul syllable c: L V, or L V T."
+  [^long c]
+  (let [s (- c s-base) l (+ 0x1100 (quot s 588)) v (+ 0x1161 (quot (rem s 588) 28)) t (+ 0x11A7 (rem s 28))]
+    (if (== t 0x11A7) [l v] [l v t])))
+
+(defn- normalization-rows
+  "UnicodeData.txt's {:ccc {cp class} :dec {cp [compat? [cp ...]]}}: the classes above 0 and the decomposition mappings (compat? when
+  the mapping has a <tag>)."
+  [^String path]
+  (reduce (fn [m l]
+            (if (str/blank? l) m
+                (let [fs (str/split l #";" -1) cp (hex (nth fs 0))
+                      cc (Long/parseLong (str/trim (nth fs 3))) d (str/trim (nth fs 5))
+                      m (if (pos? cc) (assoc-in m [:ccc cp] cc) m)]
+                  (if (empty? d) m
+                      (let [compat (str/starts-with? d "<")
+                            d (if compat (str/trim (second (str/split d #">" 2))) d)]
+                        (assoc-in m [:dec cp] [compat (mapv hex (str/split d #" +"))]))))))
+          {:ccc {} :dec {}} (str/split-lines (slurp path))))
+
+(defn- full-decomposition
+  "The full (recursive) canonical, or with compat? compatibility, decomposition of c, before the canonical ordering."
+  [dec ^long c compat?]
+  (if (hangul? c)
+    (hangul-decomposition c)
+    (let [[k xs] (get dec c)]
+      (if (or (nil? xs) (and k (not compat?)))
+        [c]
+        (vec (mapcat #(full-decomposition dec % compat?) xs))))))
+
+(defn- canonical-order
+  "xs in canonical order (UAX #15, 3.11): each run of characters of class above 0 sorted by class, stably."
+  [ccc xs]
+  (loop [xs (seq xs) acc [] run []]
+    (let [flush (fn [] (into acc (sort-by #(get ccc %) run)))]
+      (cond (nil? xs) (flush)
+            (pos? (long (get ccc (first xs) 0))) (recur (next xs) acc (conj run (first xs)))
+            :else (recur (next xs) (conj (flush) (first xs)) [])))))
+
+(defn- hex-up ^String [^long n] (str/upper-case (Long/toHexString n)))
+
+(defn- range-text
+  "The ascending code points cs as `LO-HI` ranges and single `CP`s, one space between."
+  [cs]
+  (str/join " " (for [[lo hi] (reduce (fn [acc c] (let [[lo hi] (peek acc)] (if (and hi (== (long c) (inc (long hi)))) (conj (pop acc) [lo c]) (conj acc [c c]))))
+                                      [] (sort cs))]
+                  (if (== (long lo) (long hi)) (hex-up lo) (str (hex-up lo) "-" (hex-up hi))))))
+
+(defn normalization
+  "si's normalization table: {:text the lines (D CP X.., K CP X.., C CP A B, N CCC RANGES..) :counts {...}}.
+    D  every code point whose full canonical decomposition (canonically ordered) is not itself, the Hangul syllables aside
+       (algorithmic)
+    K  every one whose full compatibility decomposition differs from its canonical one
+    C  the primary composites: a canonical decomposition mapping of two code points, the code point not Full_Composition_Exclusion
+       (DerivedNormalizationProps.txt: the singletons, the non-starter decompositions and CompositionExclusions.txt's)
+    N  per class above 0 the code points of that class that do not decompose, as ranges"
+  [^String dir]
+  (let [{:keys [ccc dec]} (normalization-rows (str dir "/UnicodeData.txt"))
+        fce (set (mapcat (fn [[lo hi]] (range lo (inc (long hi))))
+                         (get (range-lines (str dir "/DerivedNormalizationProps.txt")) "Full_Composition_Exclusion")))
+        _ (when (empty? fce) (throw (ex-info "DerivedNormalizationProps.txt: no Full_Composition_Exclusion lines" {})))
+        cps (sort (keys dec))
+        canon (into {} (for [c cps] [c (canonical-order ccc (full-decomposition dec c false))]))
+        ds (for [c cps :let [d (canon c)] :when (not= d [c])] [c d])
+        ks (for [c cps :let [k (canonical-order ccc (full-decomposition dec c true))] :when (not= k (canon c))] [c k])
+        cs (for [c cps :let [[k xs] (dec c)] :when (and (not k) (== 2 (count xs)) (not (contains? fce c)))] [c xs])
+        dset (set (map first ds))
+        ns (sort-by key (group-by #(get ccc %) (remove dset (keys ccc))))
+        line (fn [tag c xs] (str tag " " (hex-up c) " " (str/join " " (map hex-up xs))))
+        lines (concat (for [[c d] ds] (line "D" c d)) (for [[c k] ks] (line "K" c k)) (for [[c xs] cs] (line "C" c xs))
+                      (for [[v xs] ns] (str "N " v " " (range-text xs))))]
+    {:text (apply str (map #(str % "\n") lines))
+     :counts {:D (count ds) :K (count ks) :C (count cs) :N (count ns) :excluded (count fce)}}))
+
+(defn normdata-file ^String [{:keys [norm]}]
+  (str ";; si's runtime: the data of Unicode normalization (string-normalize-nfd/nfc/nfkd/nfkc, SM6), generated by `bin/repr-scheme\n"
+       ";; ucd gen` (arbace.repr.scheme.ucd's normalization) from the Unicode Character Database 16.0.0's UnicodeData.txt and\n"
+       ";; DerivedNormalizationProps.txt, pinned by test/scheme/ucd.edn (queue 350; before, dumped from Chez Scheme 10.3.0 itself: the same\n"
+       ";; table, line for line); `bin/repr-scheme ucd check` regenerates it and compares. Do not edit. One entry per line:\n"
+       ";;   D CP X..      the full canonical decomposition of CP (Hangul syllables are algorithmic, not listed)\n"
+       ";;   K CP X..      the full compatibility decomposition, where it is not the canonical one\n"
+       ";;   C CP A B      CP is the primary composite of the pair A B (composition exclusions are not listed)\n"
+       ";;   N CCC R..     the characters (ranges LO-HI) of canonical combining class CCC; the rest are class 0\n"
+       "(in-ns 'go.arbace.scm)\n\n"
+       "(go/file \"normdata.go\" :imports [])\n\n"
+       "(go/const [^string normData \"" (str/replace (:text norm) "\n" "\\n") "\"])\n"))
 
 ;; ---- the generated files
 
@@ -544,7 +645,8 @@
   [["arbace/repr/scheme/category.ae" category-file]
    ["arbace/repr/scheme/unicode.ae" unicode-file]
    ["arbace/repr/scheme/casefold.ae" casefold-file]
-   ["go/arbace/scm/unicode.ae" go-unicode-file]])
+   ["go/arbace/scm/unicode.ae" go-unicode-file]
+   ["go/arbace/scm/normdata.ae" normdata-file]])
 
 (defn- cross-check
   "UnicodeData.txt's categories against DerivedGeneralCategory.txt's: [] or the first 20 code points where they differ."
@@ -559,14 +661,16 @@
         props (properties dir)
         simple (simple-mappings (str dir "/UnicodeData.txt"))
         special (special-casing (str dir "/SpecialCasing.txt"))
-        wb (word-break (str dir "/auxiliary/WordBreakProperty.txt"))]
+        wb (word-break (str dir "/auxiliary/WordBreakProperty.txt"))
+        norm (normalization dir)]
     (println (str "ucd: UnicodeData.txt " (count (runs a)) " runs of an assigned category; DerivedGeneralCategory.txt "
                   (if (empty? bad) "agrees code point for code point" (str "DIFFERS at " (pr-str bad)))
                   "; CaseFolding.txt " (count (:full f)) " full foldings (C, F), " (count (:simple f)) " simple (C, S)"
                   "; WordBreakProperty.txt " (count (wb-runs wb)) " runs of a class but Other; the simple mappings " (pr-str (into {} (map (fn [[k v]] [k (count v)]) simple)))
                   ", SpecialCasing.txt's unconditional " (pr-str (into {} (map (fn [[k v]] [k (count v)]) special)))
-                  ", the properties' ranges " (pr-str (into (sorted-map) (map (fn [[k v]] [k (quot (count v) 2)]) props)))))
-    [{:cats a :fold f :props props :simple simple :special special :wb wb} (empty? bad)]))
+                  ", the properties' ranges " (pr-str (into (sorted-map) (map (fn [[k v]] [k (quot (count v) 2)]) props)))
+                  "; the normalization table " (pr-str (:counts norm))))
+    [{:cats a :fold f :props props :simple simple :special special :wb wb :norm norm} (empty? bad)]))
 
 (defn -main [& [verb dir root out]]
   (let [status
