@@ -589,6 +589,11 @@ data, `:java`:
   246), the tool world's two variants, no `:outside`; `bin/clojure-tests` reads it for `--aot`'s program when it compiles a
   namespace of `test/clojure/jdk-extra/namespaces.txt` (clojure-xml, reflect) and for the eval level's extended test executable
   (`--jdk-extra-build`, `CLOJURE_TESTS_GO_EXTRA`); the test build, `bin/arbace-go` and `bin/lib` unchanged, so `gate_key` too.
+  Since queue 349 (the user's D343-1 (a), D343-2 (a), 2026-11-18) j2g takes javac's tool world's edge beside the shipped one
+  (`--edge jdk/edge.edn --edge jdk/javac/edge.edn`: the classes the 246 name outside themselves, which j2g otherwise refuses the
+  classes naming, JCS69 (b)), and `--aot` compiles the suite on the extended test executable when one of those namespaces is
+  compiled (reflect's `javax.xml.stream` does not resolve on the test build); `bin/clojure-tests --jdk-extra-plan [--essential |
+  --list FILE]` prints that selection without reading or building.
 - **The commands.** `bin/java-project plan|sources|classes|read MODEL WORK` (MODEL a program's
   directory or a plan file holding the same map; `--root`, `--repository`, `--only M,...`, `--check
   front|nread`: each module also read from the native trees, the forms equal to javac's trees' as
