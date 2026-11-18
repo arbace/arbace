@@ -58,6 +58,9 @@ END {
     if (depth == 1) body = body substr(text, k, 1)
   }
   sub(/^ *TEST/, "", body)
+  # a header of one branch with ocamltest's skip action (builtin_actions.ml's skip, "Always skip the test": ephe-c-api/test) is
+  # ocamltest's own skip at every level, whatever else the branch holds (round 54)
+  if (body !~ /[{}]/) { nb = split(body, sk, ";"); for (q = 1; q <= nb; q++) if (trim(sk[q]) == "skip") cls("skip") }
   # ocamltest's ${ocamlsrcdir}, the compiler's source tree (OT21 (b)): the pinned tarball's, bin/oi corpus puts its path for @OCAMLSRCDIR@
   gsub(/\$\{ocamlsrcdir\}/, "@OCAMLSRCDIR@", body)
   gsub(/\$\{test_source_directory\}/, "@TSD@", body)

@@ -11893,3 +11893,50 @@ javac's keys; test/j2g moves no build key.
 `t03939 pass`, `t04307 pass`, `t04821 pass`, `t04823 pass`, `t04824 pass`, `t05287 pass`, `t05288 pass`, `t05330 pass`,
 `t05425 pass`, `t05562 pass`, `t05719 pass` (t04307 t05287 t05288 if their later lines hold), beside the first pass's; the ids go
 into the first pass's `.tmp/njd54.txt` for its commands.
+
+## 2026-11-18: n-ocaml-bd, the audit of OCaml's eval and AOT non-passes (round 54; branch `n-ocaml-bd` from mac/n-all `9cd2e4a96`)
+
+Asked: raise OCaml's completeness (0.8753; the matrix's eval 532 / 75 by design / 34 deferred, AOT 434 / 74 / 133 with the
+light classes) by sorting every by-design and deferred row of test/ocaml/divergences{,-aot,-suite,-suite-aot}.edn into truly by
+design, fixable in oi (sized) or misclassed, fixing the cheapest with `bin/oi check --only-list` as proof, light work only (a full
+gate ran on the host). The rows were listed from the native records (check-oi-native.edn, check-aot-native.edn and the suite's)
+by each class's :match and :programs, as oi_check.ae's class-of reads them.
+
+Misclassed, fixed: ephe-c-api/test (eval and AOT :c-runtime-decided, deferred). Its header's one branch ends in ocamltest's
+`skip` action (ocaml-5.5.0 ocamltest/builtin_actions.ml:34-40, "Always skip the test"; the test's reason: the ephemerons' C API
+not ported to multicore), so ocamltest itself skips it on every configuration: OC222 (a)'s :na. Taken (round 54): the action
+`skip` in test/ocaml/ocamltest-config.edn's :actions over a key no configuration sets (`skip_action_passes` "false"), so
+crops-score's na-class-problems holds it as every other skip; ephe-c-api/test in :config-skipped's :skips and :programs at both
+levels, out of :c-runtime-decided; bin/lib/oi/header.awk classes a one-branch header with `skip` at every level (at aot=1 its
+C module classed it first). Alternatives: a new :na class (refused by OC222's rule, which names ocamltest's actions), leaving it
+deferred (it can never run). The AOT record's row keeps its recorded reason (`--aot --record --only` keeps a class row as recorded);
+its class is the matrix's.
+
+Fixable, prepared, not proved (left out of the commit, the patch kept in the worktree's .tmp/round54-minor-gc.patch):
+statmemprof/user_data_regression at eval (:c-runtime-decided). Its header sets `ocamlrunparam += ",s=100"` and its stub calls
+caml_request_minor_gc: header.awk taking OCAMLRUNPARAM's s, oi's gcControl minor_heap_size from s normalised as domain.c's
+caml_norm_minor_heap_size (at least 257 words, whole 512-word pages), caml_request_minor_gc in the C API marking oi's simulated
+minor heap full (signals.h's CAML_INTERNALS declaration in test/ocaml/capi). Its proof needs the C stubs' node program, whose musl
+forms cache had no shared copy at n-all's key: the read went at about 5 units a minute under the gate's load (200 of 1,331 in 40
+minutes), so the run was stopped. About an hour quiet; one eval row.
+
+Truly by design (unchanged): :unix-fork (Go cannot fork a threaded process; the programs fork), :compiler-output (compile_only
+tests and ocamlopt.byte build environments: no program run), :ocamltest-tools and :tools-and-targets (other tools: the debugger,
+ocamldoc, caml-tex, gdb/lldb, -function-sections), :c-runtime-internals (C threads' registration, natdynlink, complete-obj, the
+runtime-events consumer), :fortran, :dynlink (the debugger's), :native-only (OC199 (b): ocamltest runs them native only; an :na
+reading would break OC222's rule, its `native` action passes here), :backend, :unix-java, :c-primitive, :thread-schedule; the
+corpus kinds (:header-none, :opam-not-run, :reference-uncompilable) as recorded. Fixable, sized: :packs (one program; -pack's
+module of modules, decided by design OT19 (a): medium), :compiler-of-the-tree (warnings/mnemonics needs `ocamlc -warn-help`
+from the tree's compiler; the typer's warnings table could print it: small, but it is a tool, OT3 (a)). Deferred, sized, owners
+as recorded: :backtraces 7 eval and 3 AOT (OC217's second stage, the native library with -g: medium, it moves every backtrace),
+:runtime-parameters 19 AOT (b=1 needs the light level's backtraces: large), :c-api 25 AOT (the C API at the light level:
+large), :light-speed 39 and :light-depth 5 (the Java forms' interpreter: large), :gc-and-memory 7 eval and 19 AOT (OC218:
+ephemerons, Memprof's sources, the major collector), :dynlink-decided 5 AOT (the unit table in the AOT runtime: medium),
+:c-runtime-decided 9 eval and 11 AOT (OC221 on ci), :obj-representation, :header-flags (test_instrumented: -runtime-variant=i,
+native only; the pinned host has libasmruni.a), :speed, :backtrace-references (lazy is native only; backtrace_effects_nested's
+bytecode branch needs a fiber's callstack), :unix-unported 1 (o2j's execv).
+
+Then `bin/reap --record` (53 of 56 cells checked, 0 problems), `bin/crops-score --record` and `--judge --strict` (14 crops, 0
+problems), `bin/records-check` (9 pairs, 0 problems). OCaml: completeness 0.8753 -> 0.8758 (meant 0.9263 -> 0.9271); eval 532 /
+75 / 34 -> 532 / 75 / 33, AOT 434 / 74 / 133 -> 434 / 74 / 132, n/a 35 -> 36 at each. Every process under 1 GiB (the AOT partial
+record 0.8 GB). No gate run.
