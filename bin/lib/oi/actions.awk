@@ -41,7 +41,7 @@ END {
     # ocamltest's explicit build steps (OT9's third fix: badly-ordered-deps/coccinelle, required-external/main): from
     # setup-ocamlc.byte-build-env to its check-program-output, the modules compiled one by one, a library (.cma) made of some, the
     # program linked from all_modules and run; the run's units are the link's in order, a library's expanded to its modules (the test
-    # file last, as every run's). The other branches (ocamlopt's) are not read; a pack (-pack) stays a class.
+    # file last, as every run's). The other branches (ocamlopt's) are not read; a pack (-pack) is expanded as a library.
     if (build) {
       if (match(s, /^[a-z_]+ *= *"/)) {
         key = s; sub(/ *=.*/, "", key)
@@ -49,10 +49,12 @@ END {
         if (key == "module") { bmod = val; continue }
         if (key == "program") { bprog = val; continue }
         if (key == "all_modules") { ball = val; continue }
-        if (key == "flags") { if (val ~ /(^| )-pack( |$)/) { print "class\theader: flags " val; exit }; continue }
+        # a pack (-pack, the modules compiled -for-pack): its modules linked as units of their own, as a library's are (queue 355:
+        # link-test/test; the pack's own module, P, is not made: no program of the corpora names it)
+        if (key == "flags") { bpack = (val ~ /(^| )-pack( |$)/); continue }
         print "class\theader: " key " = " val; exit
       }
-      if (s == "ocamlc.byte") { if (bmod == "") { if (bprog ~ /\.cma$/) cma[bprog] = ball; else { blink = ball; nlink++ } }; continue }
+      if (s == "ocamlc.byte") { if (bmod == "") { if (bprog ~ /\.cma$/ || (bpack && bprog ~ /\.cmo$/)) cma[bprog] = ball; else { blink = ball; nlink++ } }; continue }
       if (s == "check-ocamlc.byte-output") continue
       if (s == "run") { bran = 1; continue }
       if (s == "check-program-output") {
@@ -72,7 +74,7 @@ END {
       }
       print "class\theader: " s; exit
     }
-    if (s == "setup-ocamlc.byte-build-env") { build = 1; bmod = ""; bprog = ""; ball = ""; blink = ""; bran = 0; nlink = 0; continue }
+    if (s == "setup-ocamlc.byte-build-env") { build = 1; bmod = ""; bprog = ""; ball = ""; blink = ""; bran = 0; nlink = 0; bpack = 0; continue }
     if (match(s, /^[a-z_]+ *\+?= *"/)) {
       key = s; sub(/ *\+?=.*/, "", key)
       val = s; sub(/^[^"]*"/, "", val); sub(/"[^"]*$/, "", val)

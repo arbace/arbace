@@ -4179,3 +4179,26 @@ thread_exit_in_callback and moved_while_blocking (a thread's queue at its exit, 
 `Obj.is_shared` and lazy/minor_major_force (`:obj-representation`: a block's age, which the model gives only to tracked values;
 an epoch field on every Block, its cost to measure first under OC218's 3% rule); Gc.stat's promoted_words (the promoted values'
 words, exact only for tracked values: left at 0); the AOT levels (the runtime's ThreadLocal queue, the same model in Java: a day).
+
+## As built: queue 355, the native library with -g, packs, Dynlink's unit table at the light level (2026-11-18, branch `355-ocaml`, from `n-ocaml-bd` `c02af50ff`)
+
+Light, by list (OI_JOBS=6, O2J_JOBS=6). Three of n-ocaml-bd's sized items:
+
+- **`:backtraces` at eval (OC217's second stage, OC226).** `bin/oi stdlib` types the stdlib (`stdlib-build --debug`) and the other
+  libraries (`lib_unit_native`'s `lambda --debug`) with -g, as their Makefiles' COMPFLAGS do. The typer's `event-after` puts no event
+  on a node with no location (compiler-libs' profile.ml under -g). `caml_thread_uncaught_exception` prints the backtrace after its
+  message when the backtraces are recorded (st_stubs.c). On test/ocaml/oc217.txt's 24: 21 pass. New passes: backtrace2, callstack,
+  backtrace_systhreads, lib-threads/uncaught_exception_handler. Left at eval: backtrace_domain_join, backtrace_effects and
+  effects/backtrace (a domain's and a fiber's frames: OC217's third stage). The AOT rows (callstack, event_after_prim, names) need
+  o2j's shadow stack (OC217's fifth stage), not built.
+- **`:packs`.** actions.awk's build mode reads a pack (`-pack`, its `-for-pack` modules) as a library: its modules are linked as
+  units of their own, and the pack's module itself is not made. link-test/test moves to the suite corpus and passes at eval and AOT.
+  Its run-corpus rows are dropped, and its suite reference was recorded by `bin/oi suite record-ref --only-list`.
+- **`:dynlink-decided` at the light level.** The runtime's `caml_oi_dynlink_units` (Main/units, set by run.ae from the program's
+  files) and `caml_oi_dynlink_global` (a unit's class's G). header.awk takes `include dynlink` at the light level.
+  lib-dynlink-init-info passes at AOT. The other four need the plugins' loader at the light level: o2j translating a plugin's Lambda
+  units at its load.
+
+OCaml: eval 532 / 75 / 33 to 537 / 74 / 29, AOT 434 / 74 / 132 to 436 / 73 / 131, completeness 0.8758 to 0.8786 (meant 0.9271 to
+0.9294). The essential lists are unchanged (oi 59 pass; the light level 57 pass and 1 slow). `own-verdicts --check` 0 differing;
+`bin/reap`, `crops-score --judge --strict`, `records-check` 0 problems.
