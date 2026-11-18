@@ -7782,6 +7782,7 @@ failing.
   its re-judge). The corpus has no such pair: the duplicate stdouts are cmp-eq/cmp-is, cmp-ne/cmp-is-not and matmul/aug-matmul,
   and the first passing program (synth/builtins/bool.py) has a stdout of its own. Not changed: aot.ae is the AOT generator's
   digest (`aot_gen`), so any edit reprints every compiled package and the runner.
+
 ## As built: 350 and 366, pyi's slotdocs and ast tables made by Arbace (2026-11-18, the Mac VM, queues 350 and 366)
 
 **350** (audit 344's DECISION 1 (a), the cheapest two of the tables CPython made): `tools/pyi/runtime_tables.ae slotdocs` (Objects/
