@@ -11742,3 +11742,19 @@ needs class files).
 rows at the night's --record: interp 159 now passing, then with the build t05485, t04647 t04648 (if their later lines hold), t04277
 t05100 t05469 t05767 (passing compiled already) and whichever of the other 18 "cannot extend" rows pass beyond; compiled t04647 t04648.
 Not re-recorded here. Details, the ids and the commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54)".
+
+## 2026-11-18: n-java-defer (round 54), review fixes: lt's uppercase from the first changing char; the keys' correction
+
+Correction of the round-54 entry above (not edited): it says the shipped world's keys move for `arbace/j2g/model.ae`; they also move for
+`arbace/classes/native.ae` and `go/arbace/jrt/locale.ae` (gate_key for all three, `arbace_runtime_key` and the javac keys for locale.ae
+as a file of `go/arbace/jrt` / j2g's inputs as the triage's "Keys" paragraph says), not model.ae alone.
+
+Fixed: `ltUpper` (go/arbace/jrt/locale.ae) dropped every U+0307 that follows a soft-dotted letter. The JDK (StringUTF16.toUpperCase,
+openjdk/jdk26u `baf63fbe4`) copies the chars before `first`, the first char that is a surrogate or that changes case, as they are and
+applies ConditionalSpecialCasing only from there. So `"ᵢ̇".toUpperCase(lt)` is `1D62 0307` (no char changes: the string is returned),
+`"xᵢ̇"` `0058 1D62`, `"ᵢ̇̇"` `1D62 0307 0307`. ltUpper now finds `first` (isSurrogate, charToUpperEx) and drops only at i >= first.
+Proof, as the round's: the file printed by `bin/repr-go print --layout gofmt`, in the stub module (`.tmp/keep/wt-n-java-defer-r54/lt-r2`, the
+stubs' root upper made from the JDK's own table) against the JDK on jdk26u's java (26.0.2.1-internal): `j/Gen.java` writes the JDK's
+`toUpperCase(lt)` of 4,448,265 strings (every non-surrogate code point c as c+U+0307, and with the prefixes i, U+1D62 and x) and nine
+hand cases; `go test`: 4,448,265 of 4,448,265 equal (573 with a dot dropped), the 7 lt upperings of the tests, the 1,114,112 combining-class
+buckets still equal; a control (the old rule, without `i >= first`) fails on `1D62 0307 0307` and 1,000s more. Nothing built.
