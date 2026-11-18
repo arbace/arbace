@@ -3421,6 +3421,17 @@ all (a), as recommended there:
 - **OC230 (a)** (taken overnight, round 52) a header that includes dynlink runs only when the rest of it runs (header.awk keeps the
   include's class otherwise), so the plugin tests and the debugger's stay in their classes; the AOT levels keep the class until the
   runtime has the unit table (OC220's next part).
+- **OC231 (a)** (taken overnight, round 52, as recommended) OC220's loader: a plugin is the file bin/oi writes where ocamlc writes the
+  unit's .cmo, a text header (`OI-CMO 1`, the interface imports, `lambda`) then the unit's Lambda as the native typer translated it, and
+  test/ocaml/dynlink/dynlink.ml's platform reads it, gives the Lambda to oi (parse, link, init, hide: four externals) and lets the
+  tarball's dynlink_common check it. (b) ocamlc's own .cmo format (a bytecode object with a reloc table): rejected, oi runs Lambda, not
+  bytecode, and the format would be written only to be read back. (c) the plugins linked into the main program at its start and
+  `loadfile` a lookup: rejected, the order, the domains' concurrent loads and Module_already_loaded would be pretended.
+- **OC232 (a)** (taken overnight, round 52, as recommended) an interface's digest is its file's (the .mli, or the signature as data a
+  unit without one leaves, NAME.cmi.ae) SHA-256 cut to 128 bits, written by the typer's `--imports-out` with every unit the
+  compilation read (Env.imports); the main program's table their union (OI_DYNLINK_IMPORTS). (b) every interface by its name (None):
+  rejected, check_interface_imports would never compare. (c) ocamlc's CRC of the .cmi's signature: rejected for now, the native .cmi
+  is not ocamlc's; two equal source interfaces have equal digests, as ocamlc's do.
 Order (the plan's): OC213, OC214 (S1) with OC209 and OC210 first (branch `ocaml-s1`), then OC215, OC216, OC217, OC218 then OC219,
 OC220 and OC221; OC222 with the scoring's next change.
 
@@ -4060,3 +4071,40 @@ header.awk's helper mode, `load` handing oi those units' headers and `run` compi
 At the AOT levels the five rows need the runtime's unit table first (jdk/ocaml's runtime: the program's units, the two externals, the
 library in `o2j clib`), about two hours and a runtime build, then lib-dynlink-init-info passes there too.
 
+
+## As built: OC220's loader, plugins on oi (2026-11-18, round 52, branch `n-oc220b`)
+
+OC231 (a), OC232 (a). `lib-dynlink-pr4229/main` (client.cmo prints `Abstract 10`, sub/abstract.cmo raises
+`Module_already_loaded "Abstract"`, exit 2) and `lib-dynlink-domains/main` (20 plugins loaded from 12 domains, each other's
+implementations imported, the stored set printed) pass at oi by their own verdicts.
+
+- **header.awk's dynlink mode.** A header at oi's level that includes dynlink and whose bytecode alternative builds
+  (setup-ocamlc.byte-build-env): `cwd = DIR; cd` move the current directory, `module = FILE; ocamlc.byte` a unit compiled there, one
+  link (`module = ""`, `all_modules = "A.cmo ... MAIN.cmo"`, its last unit the test's own, libraries "" or "dynlink") the main program,
+  then one run; `native-dynlink` or the ocamlopt build environment ends the alternative. The run's environment `@dyn=` (the units in
+  order), `@dynmain=`, `@dyncopy=` (readonly files, subdirectories). Anything else keeps the class `include dynlink`; the AOT levels
+  keep it.
+- **bin/oi's oi_dynlink.** The files copied, each .ml typed in its directory (`--include` it and the libraries; `--intf` when its .mli
+  is there, else `--cmi-out`; `--imports-out`), its .cmo written (`OI-CMO 1`, `import NAME DIGEST` lines, `lambda`, the Lambda); the
+  main program's units' imports into `dynlink.imports` (`OI_DYNLINK_IMPORTS`), their Lambda before the test's own on oi's command line.
+  The native path alone (the oracle's path refuses the row).
+- **The typer.** `lambda --imports-out FILE`: the unit's own interface first, then each unit find-unit read
+  (`arbace.repr.ocaml.typer.env/imported-units`), with its file's digest (OC232 (a)).
+- **The platform** (test/ocaml/dynlink/dynlink.ml). `fold_initial_units` the program's units and the imports table's interfaces;
+  `load` reads the header (anything else `Not_a_bytecode_file`), `caml_oi_dynlink_parse` the Lambda (the unit's name, its required
+  units and the globals its code names: the implementation imports); `run` links under dynlink's lock (`caml_oi_dynlink_link`: a
+  global no unit defines `Undefined_global "compilation unit `X'"`, one not initialised `Uninitialized_global`; then
+  Program.Compile) and initialises outside it on the calling thread (`caml_oi_dynlink_init`), an exception
+  `Library's_module_initializers_failed`; `finish` hides a private load's units (`caml_oi_dynlink_hide`). A plugin is never
+  `Unsafe_file`: the unit's own externals (cu_primitives) are not known from its Lambda.
+
+**Results (light).** `bin/oi check --record --only-list` on the two rows (the typer under OI_TYPER_GOMEMLIMIT=700MiB, the check's
+peak 0.97 GB): pass; check-oi-native.edn's two rows moved; lib-dynlink-init-info/test still passes. OCaml eval 522 / 75 / 44 to 524 / 75 / 42; completeness 87, meant 92. `bin/reap --record`,
+`bin/crops-score --record` and `--judge --strict` 0 problems; `bin/records-check` 0; `bin/oi own-verdicts --check` 0 differing; the
+negative control `_control/norm3-vs-norm2` differs (a run of norm3 and norm2, not recorded); `bin/oi divergences` fails only on 331's
+pins, not attested (expected). The native library rebuilt here
+under 700 MiB (its key holds dynlink.ml and the typer's forms): the stdlib-build process peaked at 1.19 GB, over the night's 1 GiB.
+
+**The rest of OC220**: lib-dynlink-bytecode/main (ocamlmklib, the plugins' C stubs, `.cma` loading, `loadfile_private`, Marshal's
+closures of plugin code, `-linkall`, `-custom`) and backtrace/backtrace_dynlink (native only), as "As built: OC220's first part"
+costs them; the AOT levels after the runtime's unit table.

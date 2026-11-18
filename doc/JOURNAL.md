@@ -10629,3 +10629,16 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   doc/ocaml/OCAML-SURVEY.md, "As built: OC220's first part".
 - bin/oi's change moves oi's keys (stdlib_key, native_key, the driver's forms_key): the main host's whole runs re-record.
 
+
+## 2026-11-18: OCaml, OC220's loader: plugins built and loaded at oi's level (round 52, branch `n-oc220b`)
+
+- On n-oc220's first part (dbbe0686e): header.awk's dynlink mode reads a test's bytecode alternative (its ocamlc steps, cwd, the
+  main program's link); bin/oi's oi_dynlink types each unit natively and writes its .cmo as a text plugin (header `OI-CMO 1`, the
+  interface imports, the Lambda); the typer's new `--imports-out` writes the imports with their files' digests; test/ocaml/dynlink/
+  dynlink.ml's platform reads the plugin and drives four new externals of go/arbace/oi (caml_oi_dynlink_parse, _link, _init, _hide)
+  under the tarball's dynlink_common (OCaml 5.5.0's otherlibs/dynlink, its byte/dynlink.ml read for the shape of load and run).
+- lib-dynlink-pr4229/main and lib-dynlink-domains/main pass by their own verdicts (`bin/oi check --record --only-list`, the two rows
+  alone); OCaml eval 522 to 524.
+- Decisions taken overnight (round 52), as recommended: OC231 (a) the text plugin of Lambda (not ocamlc's .cmo, not a link-time
+  pretence); OC232 (a) the interfaces' digests from their files (not names alone, not ocamlc's CRC).
+- Moves oi's keys (forms_key, stdlib_key, native_key: the typer and dynlink.ml): the main host's whole runs re-record.

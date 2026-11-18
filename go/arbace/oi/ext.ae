@@ -45,6 +45,51 @@
             (when (not ok)
               (return None))
             (Some v)))))
+;; Dynlink's loader (OC220 (a)'s next part, test/ocaml/dynlink/dynlink.ml's load and run): a plugin's unit, the Lambda text after
+    ;; its header, read and kept by its handle; the units it requires and the globals its code names (the implementation imports, as
+    ;; bytecode's cu_required_compunits and the reloc's give them), then linked (Symtable's patch_object and check_global_initialized:
+    ;; a global no unit of the program defines Undefined_global, one not initialised yet Uninitialized_global; else compiled), then its
+    ;; initialisation run on the calling thread; a private load's unit hidden after its run (Symtable.hide_additions)
+    (r "caml_oi_dynlink_parse" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [p (CurrentProgram)
+            (values u err) (ParseUnit (.-B (AsBytes (aget a 0))))]
+          (when (!= err nil)
+            (Failwith (+ "oi: dynlink: " (.Error err))))
+          (let [^{:tag (slice Value)} deps (zero (slice Value))
+              seen (lit (map string bool))]
+            (range [_ n (append (append (lit (slice string)) (spread (.-Required u))) (spread (.-Refs u)))]
+              (when (and (not (aget seen n)) (!= n (.-Name u)))
+                (aset seen n true)
+                (set! deps (append deps (Str n)))))
+            (set! (.-plugins p) (append (.-plugins p) (addr (lit dynUnit :U u))))
+            (Tuple (- (len (.-plugins p)) 1) (Str (.-Name u)) (addr (lit Block :Tag 0 :F deps)))))))
+    (r "caml_oi_dynlink_link" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [p (CurrentProgram)
+            d (aget (.-plugins p) (AsInt (aget a 0)))]
+          (range [_ n (.-Refs (.-U d))]
+            (let [(values g ok) (aget (.-globals p) n)]
+              (when (not ok)
+                (return (Some (NewBlock 0 (Str (+ "compilation unit `" n "'"))))))
+              (when (not (.-set g))
+                (return (Some (NewBlock 2 (Str n)))))))
+          (let [(values c err) (.Compile p (.-U d))]
+            (when (!= err nil)
+              (Failwith (+ "oi: dynlink: compile " (.-Name (.-U d)) ": " (.Error err))))
+            (set! (.-C d) c))
+          None)))
+    (r "caml_oi_dynlink_init" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+        (let [p (CurrentProgram)
+            d (aget (.-plugins p) (AsInt (aget a 0)))
+            cur (.-cur th)]
+          (set! (.-cur th) (.-C d))
+          (defer ((fn [] (set! (.-cur th) cur))))
+          (.RunInit p th (.-C d))
+          Unit)))
+    (r "caml_oi_dynlink_hide" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [p (CurrentProgram)
+            d (aget (.-plugins p) (AsInt (aget a 0)))]
+          (delete (.-globals p) (.-Name (.-U d)))
+          Unit)))
     (r "caml_obj_tag" ^{:go/end 32} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Tag (aget a 0))))
     (r "caml_obj_size" ^{:go/end 33} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Size (aget a 0))))
     (r "caml_obj_set_tag" ^{:go/end 34} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (set! (.-Tag (AsBlock (aget a 0))) (AsInt (aget a 1))) Unit))

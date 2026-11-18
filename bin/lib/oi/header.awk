@@ -86,9 +86,61 @@ END {
   }
   if (aot == 0 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
   if (aot >= 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.ml( +[A-Za-z0-9_]+\.ml)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  # dynlink mode (OC220 (a)'s loader, doc/ocaml/OCAML-SURVEY.md "As built: OC220's loader"): a test at oi's level that includes dynlink and
+  # whose bytecode alternative builds plugins: in its build environment (setup-ocamlc.byte-build-env) each `module = FILE; ocamlc.byte` a
+  # unit compiled in the current directory (cwd = DIR; cd), one link `all_modules = "A.cmo ... MAIN.cmo"; ocamlc.byte` (module = "") the
+  # main program, its last unit the test's own, libraries "" or "dynlink", then one run (exit_status the own verdict's), the native
+  # alternative (native-dynlink, setup-ocamlopt.*) ending it. The run's environment: @dyn=DIR/FILE,... the units in order (bin/oi's
+  # oi_dynlink types each .ml into Lambda and writes its .cmo, a plugin oi's Dynlink loads), @dynmain=DIR/UNIT,... the main program's,
+  # @dyncopy=FILE,... the readonly files and subdirectories. Anything else: the class (include dynlink)
+  dlmode = 0
+  if (aot == 0 && hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
+  # (a plugin test's readonly .ml files are its units, not helper programs)
+  if (dlmode) helper = 0
+  dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
+    if (dlmode) {
+      if (s ~ /^(readonly_files|subdirectories) *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] !~ /^[A-Za-z0-9_.]+$/) cls(""); dcopy = dcopy (dcopy == "" ? "" : ",") hm[q] }
+        continue
+      }
+      if (s == "shared-libraries" || s == "check-program-output") continue
+      if (s == "setup-ocamlc.byte-build-env") { if (dsetup) break; dsetup = 1; dcwd = ""; continue }
+      if (s == "native-dynlink" || s ~ /^setup-ocamlopt\.(byte|opt)-build-env$/) { if (dsetup && drun) break; cls(s) }
+      if (s ~ /^(cwd|module|program|all_modules|libraries) *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v)
+        if (s ~ /^cwd/) dnext = v
+        else if (s ~ /^module/) dmod = v
+        else if (s ~ /^all_modules/) dmods = v
+        else if (s ~ /^libraries/) { if (v != "" && v != "dynlink") cls("libraries = " v); dlibs = v }
+        continue
+      }
+      if (s == "cd") {
+        if (dnext == "..") { if (dcwd == "") cls(""); sub(/\/?[^\/]*$/, "", dcwd) }
+        else if (dnext != "." && dnext != "") { if (dnext !~ /^[A-Za-z0-9_]+$/) cls(""); dcwd = dcwd (dcwd == "" ? "" : "/") dnext }
+        continue
+      }
+      if (s == "ocamlc.byte") {
+        if (!dsetup || dlinked) cls("")
+        if (dmod != "") {
+          if (dmod !~ /^[A-Za-z0-9_]+\.mli?$/) cls("")
+          dsteps = dsteps (dsteps == "" ? "" : ",") (dcwd == "" ? "" : dcwd "/") dmod
+        } else {
+          c = split(dmods, hm, " "); if (c == 0) cls("")
+          for (q = 1; q <= c; q++) {
+            if (hm[q] !~ /^[A-Za-z0-9_]+\.cmo$/) cls("")
+            x = hm[q]; sub(/\.cmo$/, "", x); dmain = dmain (dmain == "" ? "" : ",") (dcwd == "" ? "" : dcwd "/") x
+          }
+          if (dcwd != "" || x != hbase) cls("")
+          dlinked = 1
+        }
+        continue
+      }
+      if (s == "run") { if (!dlinked || drun) cls(""); drun = 1; continue }
+    }
     if (helper) {
       if (s ~ /^readonly_files *= *"/) { roseen = 1; continue }
       if (s == "check-ocamlc.byte-output" || s == "check-program-output") continue
@@ -212,6 +264,10 @@ END {
     if (s == "native") sawnative = 1
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
     cls(s)
+  }
+  if (dlmode) {
+    if (!drun) cls("")
+    env = env " @dyn=" dsteps " @dynmain=" dmain (dcopy == "" ? "" : " @dyncopy=" dcopy)
   }
   if (helper) {
     if (!hmain || nruns == 0) cls("")

@@ -951,6 +951,44 @@ oi_helper() {
 }
 export -f oi_dump oi_helper
 
+# oi_dynlink ID D FLAGS INCS STEPS MAIN COPY (OC220 (a)'s loader, doc/ocaml/OCAML-SURVEY.md "As built: OC220's loader"; header.awk's dynlink
+# mode): the test's readonly files and subdirectories (COPY) copied into the run's directory D, then its ocamlc steps (STEPS, DIR/FILE in
+# order): each .ml typed and translated natively in its directory (the earlier units' interfaces there: its .mli, coerced to it, else the
+# signature as data, --cmi-out), its interface imports beside it (--imports-out), and its .cmo written as test/ocaml/dynlink/dynlink.ml's
+# loader reads a plugin (OI-CMO 1, the imports, the Lambda); an .mli is read by the units that need it. MAIN, the main program's units
+# (DIR/UNIT), linked as ocamlc's link step takes them: their imports into D/dynlink.imports (OI_DYNLINK_IMPORTS, the executable's CRC
+# table), their Lambda files but the last's (the test's own, oi_one's) printed, one a line. Status 0, else 1 with the row's reason
+oi_dynlink() {
+  local id=$1 d=$2 flags=$3 incs=$4 steps=$5 main=$6 copy=$7 src f dir file b U nf="" extra inc
+  src=$(dirname "$TESTS/$id")
+  [ "${NATIVE:-0}" = 1 ] || { echo "dynlink: plugins on the native path alone"; return 1; }
+  for f in $flags; do
+    case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;;
+      *) echo "dump: typer: flag $f not modelled"; return 1 ;; esac
+  done
+  for f in $(echo "$copy" | tr ',' ' '); do cp -r "$src/$f" "$d/"; done
+  for f in $(echo "$steps" | tr ',' ' '); do
+    case $f in *.mli) continue ;; esac
+    dir=$(dirname "$f"); file=$(basename "$f"); b=${file%.ml}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
+    inc="$d/$dir"; [ -n "$incs" ] && inc="$inc:$(inc_dirs "$incs")"
+    if [ -f "$d/$dir/$b.mli" ]; then extra=--intf; else extra="--cmi-out $d/$dir/$b.cmi.ae"; fi
+    if ! (cd "$d/$dir" && typer_ns lambda --simplify --stdlib "$(native_dir)" --include "$inc" $nf $extra --imports-out "$b.imports" --file "$file" "$file" > "$U.ae" 2> "typer-$b.err"); then
+      echo "dump: typer $f: $(typer_err_text "$d/$dir/typer-$b.err")"; return 1
+    fi
+    if grep -q '^(ocaml/error' "$d/$dir/$U.ae"; then echo "dump: $f: $(head -c 200 "$d/$dir/$U.ae" | tr '\n\t' '  ')"; return 1; fi
+    { echo "OI-CMO 1"; sed 's/^/import /' "$d/$dir/$b.imports"; echo lambda; cat "$d/$dir/$U.ae"; } > "$d/$dir/$b.cmo"
+  done
+  : > "$d/dynlink.imports"
+  local ms; ms=$(echo "$main" | tr ',' ' '); local last=${ms##* } m
+  for m in $ms; do
+    dir=$(dirname "$m"); b=$(basename "$m"); U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
+    [ -f "$d/$dir/$U.ae" ] || { echo "dynlink: the main program's unit $m was not compiled"; return 1; }
+    cat "$d/$dir/$b.imports" >> "$d/dynlink.imports"
+    [ "$m" = "$last" ] || echo "$d/$dir/$U.ae"
+  done
+}
+export -f oi_dynlink typer_err_text
+
 oi_one() {
   local id=$1 flags=$2 incs=$3 args=$4 env=$5
   local d=${RUN_DIR:-$OI_DIR/run}/$id src; src=$(test_src "$id")
@@ -960,8 +998,18 @@ oi_one() {
   local units=""
   cp "$src" "$d/"
   local why; why=$(mll_gen "$d" "$base") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
-  why=$(oi_dump "$d" "$base" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
-  units=$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')
+  # a test that builds plugins (header.awk's dynlink mode, OC220 (a)'s loader): its units built by its ocamlc steps, the main program's
+  # before the test's own
+  local dyn="" dynmain="" dyncopy="" mains="" kv
+  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;; esac; done
+  if [ -n "$dyn" ]; then
+    mains=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$mains"; return; }
+    mains=$(echo "$mains" | tr '\n' ' ')
+    env="$env OI_DYNLINK_IMPORTS=$d/dynlink.imports"
+  else
+    why=$(oi_dump "$d" "$base" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
+  fi
+  units="$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')$mains"
   local miss; miss=$(lib_missing $units)
   if [ -n "$miss" ]; then printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$miss"; return; fi
   # the program's own C stubs: their node program built by ci (cached by the sources' key), loaded by oi beside the program; the helper
