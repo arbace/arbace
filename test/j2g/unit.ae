@@ -872,7 +872,9 @@
     (check "object-finalize: control: hashCode is not finalize" (not (code/object-finalize? hash)))
     ;; the review's risk (round 52, 2026-11-18): jrt.NN takes a *T, so the emitted check is chosen by the receiver's
     ;; Go type: NN on a pointer (a leaf class), J2g_NotNull[T] on an interface (an abstract or non-leaf class's this,
-    ;; an interface-typed receiver); each method translated whole by decls/method-forms, as the translation does
+    ;; an interface-typed receiver); each method translated whole by decls/method-forms, as the translation does.
+    ;; D340-1 (a) (queue 340, 2026-11-18): a virtual call on an interface-typed receiver is J2g_Finalize of it, which
+    ;; dispatches to a subclass's Finalize__V (Sub's under Base's this); a super call stays the null check alone
     (let [mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {}}
           mw (assoc mw :subclass-index (m/make-subclass-index mw))
           go-of (fn [cls mn]
@@ -882,35 +884,53 @@
                       (let [mm (some #(when (= mn (:name %)) %) (:methods (a/decl cls)))]
                         (binding [decls/*reached* #{[cls (:name mm) (:desc mm)]}]
                           (try (decls/method-forms (m/pkg cls) cls mm) (catch Throwable t (str "threw: " t))))))))
+          sym-named? (fn [h n] (and (symbol? h) (= n (name h))))
           checks (fn [f] (filter #(and (seq? %) (let [h (first %)]
-                                                  (or (= "NN" (name (if (symbol? h) h '_)))
+                                                  (or (sym-named? h "NN") (sym-named? h "J2g_Finalize")
                                                       (and (seq? h) (= 'inst (first h)) (= "J2g_NotNull" (name (second h)))))))
                                  (tree-seq coll? seq f)))
           shape-of (fn [f] (let [cs (checks f)]
                              (when (= 1 (count cs))
                                (let [[h x] (first cs)]
-                                 (if (symbol? h) [:nn x] [:not-null (str (nth h 2)) x])))))
+                                 (cond (sym-named? h "NN") [:nn x]
+                                       (sym-named? h "J2g_Finalize") [:dispatch x]
+                                       :else [:not-null (str (nth h 2)) x])))))
           shape (fn [cls mn] (shape-of (go-of cls mn)))
-          ;; the judge of an interface-typed this: J2g_NotNull of this, instantiated at the class's interface C_I
+          ;; the judge of a super call on a non-leaf's this: J2g_NotNull of this, instantiated at the class's interface C_I
           iface-this? (fn [sh simple] (and (= :not-null (first sh)) (= 'this (nth sh 2))
                                            (str/ends-with? (second sh) (str simple "_J_I"))))
-          show (fn [cls mn] (pr-str (go-of cls mn)))]
-      (check "object-finalize: emitted: a leaf's this (Plain) is jrt.NN of t, the pointer"
+          ;; the judge of a dispatching call: J2g_Finalize of x
+          dispatch? (fn [sh x] (= [:dispatch x] sh))
+          translated? (fn [f] (and (seq? f) (seq f)))
+          show (fn [cls mn] (pr-str (go-of cls mn)))
+          own (go-of "z/Own" "fin")]
+      (check "object-finalize: emitted: a leaf's this (Plain) is jrt.NN of t, the pointer (no subclass to dispatch to)"
              (= [:nn 't] (shape "z/Plain" "fin")) (show "z/Plain" "fin"))
-      (check "object-finalize: emitted: an abstract class's this (Abs) is J2g_NotNull[Abs_I], not NN"
-             (iface-this? (shape "z/Abs" "fin") "Abs") (show "z/Abs" "fin"))
-      (check "object-finalize: emitted: a non-leaf class's this (Base, Sub extends it) is J2g_NotNull[Base_I]"
-             (iface-this? (shape "z/Base" "fin") "Base") (show "z/Base" "fin"))
-      (check "object-finalize: emitted: an interface-typed receiver (Shape) is J2g_NotNull[Shape] of the parameter"
-             (let [sh (shape "z/Base" "onShape")] (and (= :not-null (first sh)) (str/ends-with? (second sh) "Shape_J") (= (quote s) (nth sh 2))))
-             (show "z/Base" "onShape"))
+      (check "object-finalize: emitted: an abstract class's this (Abs) is J2g_Finalize of this, dispatching"
+             (dispatch? (shape "z/Abs" "fin") 'this) (show "z/Abs" "fin"))
+      (check "object-finalize: emitted: a non-leaf class's this (Base, Sub overriding finalize) is J2g_Finalize of this"
+             (dispatch? (shape "z/Base" "fin") 'this) (show "z/Base" "fin"))
+      (check "object-finalize: emitted: an interface-typed receiver (Shape) is J2g_Finalize of the parameter"
+             (dispatch? (shape "z/Base" "onShape") 's) (show "z/Base" "onShape"))
       (check "object-finalize: emitted: a leaf-class-typed parameter (Plain) is jrt.NN"
              (= :nn (first (shape "z/Base" "onPlain"))) (show "z/Base" "onPlain"))
-      (check "object-finalize: control: Own's own finalize is called, no Object check emitted"
-             (empty? (checks (go-of "z/Own" "fin"))) (show "z/Own" "fin"))
-      (check "object-finalize: negative control: the old shape, jrt.NN of Abs's interface-typed this, fails the judge"
+      (check "object-finalize: emitted: a leaf's super.finalize() (Sub's own finalize) is jrt.NN of t, no dispatch"
+             (= [:nn 't] (shape "z/Sub" "finalize")) (show "z/Sub" "finalize"))
+      (check "object-finalize: emitted: a non-leaf's super.finalize() (Mid, Low extends it) is J2g_NotNull[Mid_I], no dispatch"
+             (iface-this? (shape "z/Mid" "sup") "Mid") (show "z/Mid" "sup"))
+      ;; D340-3 (a): the control judges a translation (a thrown translation is a string, which has no checks either)
+      (check "object-finalize: control: Own's own finalize is called (.Finalize__V t), no Object check emitted"
+             (and (translated? own) (empty? (checks own))
+                  (some #(and (seq? %) (sym-named? (first %) ".Finalize__V") (= 't (second %))) (tree-seq coll? seq own)))
+             (pr-str own))
+      (check "object-finalize: control: a translation that threw fails the Own control's judge"
+             (not (translated? "threw: java.lang.RuntimeException")))
+      (check "object-finalize: negative control: AT10's shape, jrt.NN of Abs's interface-typed this, fails the judge"
              (let [old '((go/method Impl_Fin__V [t this] (jrt/NN this)))]
-               (and (= [:nn 'this] (shape-of old)) (not (iface-this? (shape-of old) "Abs"))))))))
+               (and (= [:nn 'this] (shape-of old)) (not (dispatch? (shape-of old) 'this)))))
+      (check "object-finalize: negative control: 902674691's shape, J2g_NotNull of Base's this, fails the dispatch judge"
+             (let [old '((go/method Impl_Fin__V [t this] ((inst jrt/J2g_NotNull J_z_Base_J_I) this)))]
+               (and (iface-this? (shape-of old) "Base") (not (dispatch? (shape-of old) 'this))))))))
 
 ;; A17 of the Ghidra case study's G2 plan (GH15 (a)): the entries' listings, META-INF/arbace/entries, that
 ;; jdk.internal.jrt.ClassPathResources answers getResources of a package and an entry's JarFile from
