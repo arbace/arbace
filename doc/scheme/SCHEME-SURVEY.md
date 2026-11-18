@@ -4847,3 +4847,21 @@ N lines); the table is the one Chez Scheme 10.3.0 dumped (`tools/scheme/normdata
 `test/scheme/ucd.edn`, read from `SI_UCD_DIR` as TestWordBreakUAX29 reads WordBreakTest.txt; the five columns' invariants and Part 1's
 rule that every code point it does not list is its own normal form), with a negative control, norm-chez.tsv left to the oracle's tier;
 (b) keep norm-chez.tsv and name it in Scheme's judge fact (a recorded Chez result). *Recommended: (a)*.
+
+## Decided (the user, 2026-11-18, via the VM's coordinator): SCS37 (a)
+
+## As built: SCS37 (a), normalization judged by UAX #15's conformance data (2026-11-18, the Mac VM, queue 366, round 2)
+
+- **The pin**: `test/scheme/ucd.edn` pins UCD 16.0.0's `NormalizationTest.txt` (SHA-256 d811971453e7..., 2,798,671 bytes, header
+  `# NormalizationTest-16.0.0.txt`, `# Date: 2024-04-30, 21:48:23 GMT`), fetched by the coordinator from unicode.org into the shared
+  `.tmp/scheme/ucd-16.0.0/`; `bin/repr-scheme ucd check` checks it with the other pins.
+- **The test**: `go/arbace/scm/norm_test.ae`'s `TestNormalizationUAX15` reads it from `SI_UCD_DIR` (as TestWordBreakUAX29 reads
+  WordBreakTest.txt): the 19,965 lines of Parts 0 to 5 by the file's 20 invariants each (399,300 checks), and Part 1's rule over the
+  277,494 code points assigned in 16.0.0 (unicode.ae's `Category`, not Cn) that Part 1 does not list, each its own NFC, NFD, NFKC and NFKD.
+  Run (`bin/si unit -run TestNormaliz -v`): 0 differ, 0 differ.
+- **The control** (`bin/si unit --control`, si-check's `unicode` part, beside WB3c's): the same copy of the runtime with normdata.ae's
+  entry `D C0 41 300` made `D C0 41 301` must make exactly 12 checks differ. Run: 12, rc 0; with the expected count 44 (a first guess),
+  rc 1; with a change that leaves the table alone (a comment of normdata.ae, a scratch copy of bin/si), "0 checks differ, 12 expected",
+  rc 1.
+- **norm-chez.tsv** (Chez 10.3.0's recorded results, `tools/scheme/normtests.ss`) is the oracle tier's: `TestNormalizeChez` skips
+  unless `SI_NORM_ORACLE=1` (by hand: 1,088 blocks, 3,500 strings, 0 bad). `TestNormalizeExamples` stays.

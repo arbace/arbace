@@ -1,6 +1,14 @@
-;; normalization's tests (SM6): string-normalize-nfd/nfc/nfkd/nfkc against Chez Scheme 10.3.0's recorded results
-;; (test/scheme/si/norm-chez.tsv, made by tools/scheme/normtests.ss; the format is in its header): every scalar value
-;; as a one-character string in blocks of 1024 (the hash of the four forms), and 3500 random strings.
+;; normalization's tests (SM6): string-normalize-nfd/nfc/nfkd/nfkc (nmNormalize).
+;; TestNormalizationUAX15 (SCS37 (a), the user 2026-11-18; queue 366): against UAX #15's own conformance data, NormalizationTest.txt of
+;; UCD 16.0.0 (pinned by test/scheme/ucd.edn; bin/si unit names it by SI_UCD_DIR, the main checkout's .tmp/scheme/ucd-16.0.0): every line
+;;   c1;c2;c3;c4;c5; # comment       source; NFC; NFD; NFKC; NFKD (each one or more code points, hex)
+;; of Parts 0 to 5 by the file's 20 invariants (NFC: c2 of c1, c2, c3 and c4 of c4, c5; NFD: c3 of c1, c2, c3 and c5 of c4, c5; NFKC: c4
+;; of all five; NFKD: c5 of all five), and its Part 1 rule: every code point assigned in UCD 16.0.0 (Category, unicode.ae: not Cn) that
+;; Part 1 does not list is its own NFC, NFD, NFKC and NFKD. Data only: nothing in the file is run. Its negative control is bin/si unit
+;; --control's (one normdata.ae entry changed must make a known number of checks differ).
+;; TestNormalizeChez, the oracle tier's since SCS37 (a), by hand (SI_NORM_ORACLE=1 bin/si unit -run TestNormalizeChez): against Chez
+;; Scheme 10.3.0's recorded results (test/scheme/si/norm-chez.tsv, made by tools/scheme/normtests.ss; the format is in its header):
+;; every scalar value as a one-character string in blocks of 1024 (the hash of the four forms), and 3500 random strings.
 (in-ns 'go.arbace.scm)
 
 (go/file "norm_test.go" :imports [[testing "testing"] [os "os"] [strings "strings"] [strconv "strconv"]])
@@ -16,9 +24,98 @@
 
 (go/func nmtSurrogate ^bool [^int n] (and (>= n 0xD800) (<= n 0xDFFF)))
 
+(go/func nmtRunes ^{:tag (slice rune)} [^{:tag (* testing/T)} t ^int ln ^string col]
+  (let [^{:tag (slice rune)} rs nil]
+    (range [_ h (strings/Fields col)]
+      (let [(values v e) (strconv/ParseUint h 16 32)]
+        (when (!= e nil)
+          (.Fatalf t "NormalizationTest.txt line %d: %q is no code point" ln h))
+        (set! rs (append rs (conv rune v)))))
+    rs))
+
+(go/func nmtEq ^bool [^{:tag (slice rune)} a ^{:tag (slice rune)} b]
+  (when (!= (len a) (len b))
+    (return false))
+  (range [i r a]
+    (when (!= r (aget b i))
+      (return false)))
+  true)
+
+(go/func nmtForm ^string [^int k] (aget (lit (slice string) "NFD" "NFC" "NFKD" "NFKC") k))
+
+(go/func TestNormalizationUAX15 [^{:tag (* testing/T)} t]
+  (let [dir (os/Getenv "SI_UCD_DIR")]
+    (when (== dir "")
+      (.Skip t "SI_UCD_DIR unset: the test needs the pinned UCD (bin/si unit sets it)")
+      (return))
+    (let [(values data err) (os/ReadFile (+ dir "/NormalizationTest.txt"))]
+      (when (!= err nil)
+        (.Fatalf t "NormalizationTest.txt: %v (bin/repr-scheme ucd fetch)" err))
+      (when (not (strings/HasPrefix (conv string data) "# NormalizationTest-16.0.0.txt"))
+        (.Fatalf t "NormalizationTest.txt: not UCD 16.0.0's"))
+      (let [lines 0
+            checks 0
+            bad 0
+            part ""
+            listed (make (map rune bool))]
+        (range [ln line (strings/Split (conv string data) "\n")]
+          (let [body line
+                h (strings/Index line "#")]
+            (when (>= h 0)
+              (set! body (subslice line 0 h)))
+            (set! body (strings/TrimSpace body))
+            (cond
+              (== body "")
+              (continue)
+              (strings/HasPrefix body "@")
+              (set! part body)
+              :else
+              (let [cols (strings/Split body ";")]
+                (when (< (len cols) 5)
+                  (.Fatalf t "NormalizationTest.txt line %d: %d columns" (+ ln 1) (len cols)))
+                (let [c (make (slice (slice rune)) 5)]
+                  (for [k 0] (< k 5) (inc! k)
+                    (aset c k (nmtRunes t (+ ln 1) (aget cols k))))
+                  (when (and (== part "@Part1") (== (len (aget c 0)) 1))
+                    (aset listed (aget (aget c 0) 0) true))
+                  (inc! lines)
+                  ;; the invariants: [form (k: 0 NFD, 1 NFC, 2 NFKD, 3 NFKC), the column it must give, the columns it is applied to]
+                  (range [_ inv (lit (slice (slice int)) (lit (slice int) 1 1 0 1 2) (lit (slice int) 1 3 3 4)
+                                     (lit (slice int) 0 2 0 1 2) (lit (slice int) 0 4 3 4)
+                                     (lit (slice int) 3 3 0 1 2 3 4) (lit (slice int) 2 4 0 1 2 3 4))]
+                    (let [k (aget inv 0)
+                          want (aget c (aget inv 1))]
+                      (range [_ src (subslice inv 2)]
+                        (inc! checks)
+                        (let [got (nmNormalize (aget c src) (>= k 2) (== (% k 2) 1))]
+                          (when (not (nmtEq got want))
+                            (inc! bad)
+                            (when (< bad 30)
+                              (.Errorf t "line %d: %s(c%d) = %X, c%d = %X (%s)" (+ ln 1) (nmtForm k) (+ src 1) got (+ (aget inv 1) 1) want body))))))))))))
+        ;; Part 1's rule over the code points it does not list
+        (let [others 0
+              obad 0]
+          (for [n 0] (<= n 0x10FFFF) (inc! n)
+            (let [r (conv rune n)]
+              (when (and (!= (Category r) "Cn") (not (aget listed r)))
+                (inc! others)
+                (let [one (lit (slice rune) r)]
+                  (for [k 0] (< k 4) (inc! k)
+                    (when (not (nmtEq (nmNormalize one (>= k 2) (== (% k 2) 1)) one))
+                      (inc! obad)
+                      (when (< obad 30)
+                        (.Errorf t "U+%04X not in Part 1: %s gives %X" n (nmtForm k) (nmNormalize one (>= k 2) (== (% k 2) 1))))))))))
+          (.Logf t "NormalizationTest.txt: %d lines, %d checks, %d differ; Part 1's rule: %d code points not listed, %d differ"
+                 lines checks bad others obad)
+          (when (or (< lines 19000) (< others 100000))
+            (.Fatalf t "NormalizationTest.txt: %d lines and %d other code points, at least 19000 and 100000 expected" lines others)))))))
+
 (go/func TestNormalizeChez [^{:tag (* testing/T)} t]
   (let [root (os/Getenv "SI_TEST_ROOT")
         (values data err) (os/ReadFile (+ root "/test/scheme/si/norm-chez.tsv"))]
+    (when (!= (os/Getenv "SI_NORM_ORACLE") "1")
+      (.Skip t "the oracle tier's, by hand (SCS37 (a)): SI_NORM_ORACLE=1 runs it; TestNormalizationUAX15 is the unit test's judge")
+      (return))
     (when (or (== root "") (!= err nil))
       (.Skip t "SI_TEST_ROOT unset or no recorded cases: the test needs the checkout")
       (return))
