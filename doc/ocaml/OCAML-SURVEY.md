@@ -4202,3 +4202,77 @@ Light, by list (OI_JOBS=6, O2J_JOBS=6). Three of n-ocaml-bd's sized items:
 OCaml: eval 532 / 75 / 33 to 537 / 74 / 29, AOT 434 / 74 / 132 to 436 / 73 / 131, completeness 0.8758 to 0.8786 (meant 0.9271 to
 0.9294). The essential lists are unchanged (oi 59 pass; the light level 57 pass and 1 slow). `own-verdicts --check` 0 differing;
 `bin/reap`, `crops-score --judge --strict`, `records-check` 0 problems.
+
+## As built: OC217's fifth stage, the backtraces at the light AOT level (2026-11-18, queue 370, branch `370-ocaml-aot-backtraces`, from `355-ocaml` `8c4b407fb`)
+
+o2j translates a -g unit's after-events into a shadow stack of the runtime's (`jdk/ocaml/ocaml/rt/Bt.ae`, new; oi's exn.go and
+compile.go's design, OC217's first stage, mirrored).
+
+- **o2j.** `event-node`: in tail position, or without information, the event is dropped. Around an application,
+  `apply-ev-node` enters the slot once the arguments and the function are evaluated into temporaries, or before them for four
+  arguments or more. Around a primitive the slot is entered around its operation, else around the expression. A raise takes the
+  innermost event of its argument (`raise-slot`, marked a raise; none: slot 0). `trywith` stashes the raise's slot and the slots
+  above its depth, then cuts the stack back; `staticcatch` cuts it back at its handler when its body has an event. A slot is a static
+  `int` field of the unit, `Bt/slot`'s index, registered when the class is initialised. The temporaries of a slot's call are cleared
+  after it, so a value only an argument held is not kept from the collector (callstack's finaliser).
+- **The runtime.**
+  - `Bt` holds the slots, the stack, the stashed backtrace and the last exception. Gil saves and restores them with the call depth,
+    so each thread has its own.
+  - `Exn` gains its raise's slot, reraise and raise_notrace. `Bt/raise` makes the exception and `Bt/stash` is caml_stash_backtrace.
+  - Printexc's externals moved from ExtGc to `Bt`: the raw backtrace, its conversion, `get_callstack`, `restore_raw_backtrace`.
+  - `Main/uncaught`: at_exit runs with the recording off, then "Fatal error" and the lines. `caml_thread_uncaught_exception` prints
+    the backtrace after its message.
+  - OCAMLRUNPARAM's b starts the recording. `Main/reset` resets it all for a batch's next program.
+- **header.awk.** `-g` and OCAMLRUNPARAM's `b=` reach the light level (`aot != 2`); the compiled level is unchanged.
+
+**Results (light, by list, O2J_JOBS=6).**
+- The 3 `:backtraces` AOT rows pass: callstack, event_after_prim, names.
+- Of the 19 `:runtime-parameters` rows (b=1), 16 now pass at the light level. Three are in `:backtraces` (pinned in aot-known.edn
+  as at oi's level, OC217's third stage): backtrace_domain_join, backtrace_effects, effects/backtrace. backtraces_and_finalizers is
+  `:light-speed` (13 million allocations; aot-slow.edn).
+- backtrace/methods' stale pin is dropped (it passes).
+- The control `_control/compare-vs-evaluation-order` differs.
+- The other run-corpus programs with -g or b= are unchanged: 2 pass, 15 classed, 1 slow.
+- One AOT row lost, asmcomp/optargs (suite). -g now reaches the light level, whose Lambda is the bytecode's, so the optional
+  arguments' Some blocks that ocamlopt's inlining of the default-argument wrapper removes stay, and Gc's words count them.
+  It is pinned `:backend` (by design, OC66 (a)). At eval the same row now passes: oi fails the assertion as ocamlc's recorded run
+  does (331's word counting).
+- The AOT essential list: unchanged.
+- **Cost** (user CPU seconds alone, stage 0, `GOMAXPROCS=1`, two rounds interleaved, the old tree `8c4b407fb` against this one):
+
+  | program | old | new |
+  |---|---|---|
+  | backtrace/names (-g) | 19.6 | 24.1 (+23%) |
+  | misc/boyer | 63.3 | 69.2 (+9%) |
+  | misc/takc | 62.1 | 63.0 (+1%) |
+  | misc/fib | 19.8 | 20.6 (+4%) |
+  | basic/sets | 16.8 | 20.7 (+23%) |
+
+  The library is -g since queue 355, so every program's library calls enter their slots. About 4 seconds of the increase is fixed:
+  the slots' registration at the library's load, which a batch pays once.
+
+OCaml: eval 537 / 74 / 29 to 538 / 73 / 29, AOT 436 / 73 / 131 to 453 / 74 / 113, completeness 0.8786 to 0.886 (meant 0.9294 to
+0.937). `bin/reap --record`, `crops-score --record` and `--judge --strict`, and `records-check` report 0 problems;
+`own-verdicts --check` reports 0 differing.
+
+## As built: OC217's third stage, the backtraces of domains and fibers (2026-11-18, queue 384, branch `384-ocaml-domain-fiber-bt`, from `370-ocaml-aot-backtraces` `5ac8d5a03`)
+
+The three b=1 rows 370 left, at eval and at the light level, as OCaml 5.5.0's runtime does them (runtime/domain.c's
+domain_thread_func, fiber.c's stacks, backtrace_byt.c's caml_get_current_callstack and caml_get_continuation_callstack):
+
+- **A domain's backtrace.** The exception a domain ends with is stashed in its own stack (every slot in flight), and
+  `Domain.join`'s `Error (exn, bt)` carries its raw backtrace (oi: SpawnDomain and caml_domain_spawn; the runtime: Effects/spawn).
+  `raise_with_backtrace` then re-raises it in the joiner: backtrace/backtrace_domain_join.
+- **A fiber's frames.**
+  - Exceptions: an exception leaving a fiber is stashed to the fiber's base, and its handler's thread takes that backtrace before
+    exnc runs (oi: Fiber's start and dispatch; the runtime: Effects/start and dispatch, `Bt/take`).
+  - `Printexc.get_callstack` in a fiber walks its own slots, then those of the thread that ran or resumed it, to the main stack
+    (oi: `Fiber.parent`; the runtime: `Fiber.chain`, its resumer's stack and the resumer's chain, made at runstack and resume).
+  - `Effect.Deep.get_callstack k` gives the slots of k's fiber when it suspended (oi: `Fiber.th`; the runtime: `Fiber.susp`, set at
+    suspend and reperform).
+  - Rows: backtrace/backtrace_effects, effects/backtrace.
+
+Results (light, by list): the three pass at both levels, their pins dropped; the control `_control/why-at-vs-why-swallow`
+(eval) and `_control/compare-vs-evaluation-order` (AOT) differ. The essential lists: oi 60 of 60, the light level 58 pass and 1
+slow; effects/backtrace (in the list) newly passes at both. `own-verdicts --check` 0 differing; `bin/reap`, `crops-score --judge
+--strict`, `records-check` 0 problems. OCaml eval 538 / 73 / 29 to 541 / 73 / 26, AOT 453 / 74 / 113 to 456 / 74 / 110.

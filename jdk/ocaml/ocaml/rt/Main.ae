@@ -41,7 +41,8 @@
     (set! ExtThread/made 0)
     (ExtIo/reset)
     (ExtRtEvents/reset)
-    (ExtGc/memprofReset))
+    (ExtGc/memprofReset)
+    (Bt/reset))
 
   (method ^:public ^:static atExit ^void []
     (let [f (.get Rt/named "Pervasives.do_at_exit")]
@@ -57,7 +58,8 @@
       (instance? Fatal e) (do (Main/flushQuiet)
                               (.println System/err (.getMessage e))
                               (.-code (cast Fatal e)))
-      (instance? Exn e) (Main/uncaught (.-v (cast Exn e)))
+      ;; caml_fatal_uncaught_exception after the raise's stash: every slot in flight (Bt, OC217 (a))
+      (instance? Exn e) (do (Bt/stash e 0) (Bt/unwind 0) (Main/uncaught (.-v (cast Exn e))))
       (instance? StackOverflowError e) (Main/uncaught Rt/Stack_overflow)
       :else (do (Main/flushQuiet)
                 (.println System/err (java-str "o2j: Java exception " e))
@@ -73,10 +75,17 @@
       (let [h (.get Rt/named "Printexc.handle_uncaught_exception")]
         (if (some? h)
           (do (Rt/ap2 h exn Rt/FALSE) 2)
-          (let [msg (Rt/formatException exn)]
+          (let [msg (Rt/formatException exn)
+                act Bt/active
+                kept (Bt/saveBuf)]
+            ;; printexc.c's default_fatal_uncaught_exception: at_exit with the backtraces off, the backtrace kept
+            (set! Bt/active false)
             (try (Main/atExit) (catch Exn _ nil))
+            (set! Bt/active act)
+            (Bt/restoreBuf kept)
             (Main/flushStd)
             (.print System/err (java-str "Fatal error: exception " msg "\n"))
+            (Bt/print)
             (.flush System/err)
             2)))
       (catch Exit x (.-code x))

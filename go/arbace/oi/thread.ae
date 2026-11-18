@@ -115,6 +115,10 @@
                 (defer (^{:go/end 100} (fn []
                       (when [r (recover)] (!= r nil)
                         (when [(values e ok) (assert (* Exn) r)] ok
+                          ;; the domain's backtrace (queue 384, domain.c's domain_thread_func: the exception with
+                          ;; caml_get_exception_raw_backtrace, Domain.join's Error (exn, bt)): its raise's stash, every slot in flight
+                          (.stash th e 0)
+                          (.unwind th 0)
                           (set! exn (.-V e))
                           (return))
                         ;; exit in a domain: Stdlib.exit ran the at_exit functions, the process ends
@@ -145,7 +149,9 @@
     ^{:line 119 :tag Value} hval ^Value hexn ^Value heff
     ^{:line 120 :tag (chan resumeMsg)} resumeCh
     ^{:line 121 :tag (chan fiberMsg)} reply
-    ^{:line 122 :tag bool} started))
+    ^{:line 122 :tag bool} started
+    ^{:tag (* Thread) :doc "th is the fiber's own thread (its goroutine's): its backtrace stack, a continuation's callstack (queue 384)\n"} th
+    ^{:tag (* Thread) :doc "parent is the thread that ran or resumed the fiber last, blocked there: its slots continue the fiber's callstack\n"} parent))
 
 
 (go/type resumeMsg (struct
@@ -164,7 +170,8 @@
     ^{:line 138 :tag int} kind
     ^{:line 139 :tag Value} v
     ^{:line 140 :tag Value} k
-    ^{:line 141 :tag any} goPanic))
+    ^{:line 141 :tag any} goPanic
+    ^{:tag (slice int) :doc "an exception's backtrace stashed in the fiber (queue 384), the parent's when its handler gets it\n"} bt))
 
 
 
@@ -190,11 +197,16 @@
         (.Lock gil)
         (let [th (addr (lit Thread :fiber fb :Dom dom))
             ^{:line 166 :tag fiberMsg} msg (zero fiberMsg)]
+          (set! (.-th fb) th)
           (^{:go/end 178} (fn []
               (defer (^{:go/end 176} (fn []
                     (when [r (recover)] (!= r nil)
                       (when [(values e ok) (assert (* Exn) r)] ok
-                        (set! msg (lit fiberMsg :kind msgExn :v (.-V e)))
+                        ;; the raise's stash up to the fiber's base, which the handler's thread takes (queue 384: the
+                        ;; exception reaches exnc with the fiber's frames, as OCaml's stack of fibers unwinds)
+                        (.stash th e 0)
+                        (.unwind th 0)
+                        (set! msg (lit fiberMsg :kind msgExn :v (.-V e) :bt (append (lit (slice int)) (spread (.-btBuf th)))))
                         (return))
 
                       (set! msg (lit fiberMsg :kind msgPanic :goPanic r))))))
@@ -221,6 +233,9 @@
     (case [msgDone]
       (set! (values (.-tcF th) (.-tcA th)) (values (.-hval fb) (lit (slice Value) (.-v m)))))
     (case [msgExn]
+      (when (and backtraceActive debugInfo)
+        (set! (.-btBuf th) (.-bt m))
+        (set! (.-btExn th) (.-v m)))
       (set! (values (.-tcF th) (.-tcA th)) (values (.-hexn fb) (lit (slice Value) (.-v m)))))
     (case [msgEffect]
       (set! (values (.-tcF th) (.-tcA th)) (values (.-heff fb) (lit (slice Value) (.-v m) (.-k m) fb))))
@@ -245,6 +260,7 @@
 ^{:go/end 224} (go/method runstackN ^Value [^{:tag (* Thread)} th ^Value s ^Value f ^Value arg]
   (let [fb (assert (* Fiber) s)
       ^{:line 221} reply (make (chan fiberMsg))]
+    (set! (.-parent fb) th)
     (.start fb f arg reply (.-Dom th))
     (.dispatch th fb (await reply))))
 
@@ -255,6 +271,7 @@
       (RaiseNamed "Effect.Continuation_already_resumed" nil))
 
     (let [reply (make (chan fiberMsg))]
+      (set! (.-parent fb) th)
       (.Unlock gil)
       (>! (.-resumeCh fb) (lit resumeMsg :f f :arg arg :reply reply))
       (let [m (<! reply)]
