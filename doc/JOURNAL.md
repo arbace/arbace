@@ -11783,3 +11783,47 @@ passes 953 to 995; reap's own-diag 693 to 659; C++ read 5,399 / 324 / 772 to 5,4
 0.9338 to 0.9352); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check`
 (9 pairs, 0). Every process under 2 GB; no gate. Alternatives not taken: the P2552R3 attribute files first (the most dg-error lines,
 but each needs a dozen pedwarns and lambda-specifier parses), the constant evaluator's union and dynamic groups (larger work per file).
+
+## 2026-11-18: n-cpp-bd, C++'s own-diag rows, second pass: 33 more files pass on the own front end, merged with 365's review (round 54)
+
+Same branch (`n-cpp-bd`, on 0d357c44f). Method as the first pass: the 677 own-diag files that fail both records (reap counts 659)
+read afresh on the own front end (`bin/repr-cpp dg --corpus dg-error --front native --own --only LIST`, three lists of 211-242,
+peaks 1.7 GB, about 6.5 minutes each; every row as recorded), 273 of them missing or adding one line only, those lines' dg-error
+messages grouped by the standard's rule they need, the rules ranked by whole files moved. Taken (round 54), each the standard's rule
+as the own front end's error with GCC's message (clean-room: GCC's messages, no GCC code):
+- checks (arbace.repr.cpp.diag, coroutines): [dcl.fct.def.coroutine]/15, `co_await promise.final_suspend()` not potentially-throwing:
+  final_suspend, the awaitable's operator co_await and destructor, the awaiter's await_ready, await_suspend, await_resume and
+  destructor, in that order, the first not declared noexcept (a destructor: noexcept(false)) reported at its declaration, once a
+  coroutine's return type: coroutines/pr95616-0..6.C, seven files;
+- parser (arbace.repr.cpp.parse): standard attributes between decl-specifiers ([dcl.spec.general]/1); `inline` on a friend
+  declaration of a template specialization that is no definition ([dcl.inline]/4); X<T>::X<T>( taken as the constructor's declarator so
+  [class.qual]/2's check sees it (DR1435), the C++20 template-id pedwarn not added to a friend's qualified one (dr2237.C's two lines);
+  `auto` as a template argument and as an alias-declaration's whole type ([dcl.spec.auto.general]); a virtual function with a deduced
+  return type; a do-while's missing `;` ([stmt.iter.general]/1, the statement kept); `typename` before a base-specifier and a
+  mem-initializer-id ([class.derived.general]/1, [class.base.init]/1, the name after it taken); a qualified enum-head-name naming no
+  declared enumeration ([dcl.enum]); before C++20 a block-scope using-declaration of a class member ([namespace.udecl]/8); [[noreturn]]
+  on a redeclaration whose first declaration was not noreturn ([dcl.attr.noreturn]/1; the standard attribute kept as the entity's
+  :stdnr, not in its type); more template headers than a class's name's qualifier allows ([temp.expl.spec], [temp.mem]); a literal
+  operator template with a pack of non-char type ([over.literal]/5); co_await and co_yield in a default argument ([expr.await]/2,
+  [expr.yield]/1); a class defined as a member of the class a type-id defines is the same "types may not be defined" error and a
+  type-id nested in it not again (pr85039-1/-2.C, parse/pr88180.C); a member access `a.x` on a variable whose class is still only
+  declared, reported at the variable ([expr.ref], pr79435.C, pr79463.C); a template with C language linkage at namespace scope
+  ([temp.pre]/6; a class's member templates left, [dcl.link]/5); and the first pass's "does not declare anything" no longer fires on
+  GNU typeof of a class's name (decltype7.C).
+Midway the main session passed on the Mac's review of the first pass (queue 365, reports/365-review-cpp-own-diag.md): the second pass
+was committed as it stood (450f97481), mac/365-cpp-review (b3f53d841: the three [temp.variadic]/5 checks removed, "names the
+constructor" not on a namespace qualifier, `int a[] = {}` an error only under -pedantic) merged (62831cc7c; one conflict, the
+ctor-name rule's region: theirs plus the two new rules), the pack checks not added back (365's DECISION 1 is the user's). The second
+pass's rules then probed on valid code, one probe a rule (19 header-free files but the coroutine's, .tmp/r2/probes/ in the worktree,
+each accepted by g++ 15.2 -std=c++20 -pedantic-errors -fsyntax-only): none gives an own error. The probes found one false error, fixed
+before the proof: `using F = auto (int) -> int;` (the alias rule now wants `auto ;`). g++ rejects a member template of a class in
+extern "C" ("template with C linkage"), which the own rule leaves by [dcl.link]/5: a missed diagnostic, not a false one. The Mac's own
+17 probes are in its worktree, not on this host: not rerun here.
+Proved on the merged code: the 32 target files (32 of 32), the record's 995 own passes in five lists of 195-200 (995 of 995 hold)
+and the 677 again (33 pass: the 32 and cpp2a/pr89913.C; 52 rows changed, the rest by the removed pack checks and the new rules'
+lines). Re-recorded rows only (`--only LIST --record`): the 52 and init/array44.C (365's finding 6, its row stale: passes); own-diag-
+review.edn's :own of the 40 changed files. Own passes 995 to 1029; reap's own-diag 659 to 626; C++ read 5,434 / 323 / 738 to 5,467 /
+323 / 705; completeness 0.9186 to 0.9198 (meant 0.9352 to 0.9365); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge
+--strict` (0 problems), `bin/records-check` (9 pairs, 0). Every process under 2 GB; no gate. Alternatives not taken: the P2552R3 attribute files (still a dozen lines each), GCC's
+own rules among the single lines (parse/ivdep.C's pragma, lookup/pr79766.C's and parse/qualified2.C's extra qualification, which the
+standard allows since CWG 482, parse/explicit1.C's class-scope explicit specialization, allowed since CWG 727).
