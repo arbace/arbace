@@ -12017,3 +12017,33 @@ passes 953 to 995; reap's own-diag 693 to 659; C++ read 5,399 / 324 / 772 to 5,4
 0.9338 to 0.9352); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check`
 (9 pairs, 0). Every process under 2 GB; no gate. Alternatives not taken: the P2552R3 attribute files first (the most dg-error lines,
 but each needs a dozen pedwarns and lambda-specifier parses), the constant evaluator's union and dynamic groups (larger work per file).
+
+## 2026-11-18: n-rust-aot, Rust's AOT cell recorded over the samples (round 54; branch `n-rust-aot` from mac/n-all2 `18a667977`)
+
+D354-1 (a), the user's: the AOT record over the samples first (queue report 354, `mac/queue:reports/354-rust-completeness.md`),
+the synthetic corpus in a later slot (not run here). On the main host, stage 0 `ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`.
+- std's IR: the main checkout's `.tmp/rsi/std` was stale (103 units, not `test/rust/runtime/ir.sha256`'s 110), so in the worktree
+  `bin/repr-rust src-take` and `bin/rsi std-build` on RIND11's pinned rustc 1.99.1 (`.tmp/rust-1.99.1/root`): 110 units at the pin,
+  82 s. `runtime-build --ci` then lowered std's 94 units, 0 refused, 558 s; the aot-lib's fragments came from the main checkout's
+  `.tmp/ci-aot-lib`.
+- The run: `RSI_SHARD=1 RSI_THREADS=1 RSI_JOBS=2 RSI_GO_P=1 RSI_CI_MEMLIMIT=1400MiB bin/heavy-lock bin/rsi check --aot --corpus
+  samples --record`. The host's big lock is held by the suspended `--full` gate, so the first run went under `ARBACE_HEAVY_HELD=1`
+  and the later ones under the worktree's own lock (`ARBACE_HEAVY_LOCK=<worktree>/.tmp/big.lock`); taken (round 54).
+- First run: 5 of 6 pass; `test/rust/eval/threads.rs` exits 134 at once, unclassed, so the judge refused the record (nothing
+  written). Rerun alone with `RSI_KEEP_RUNS=1`: its standard error is std's rtabort `fatal runtime error: current thread handle
+  already set during thread spawn, aborting`. On the compiled level the spawned thread starts with the spawner's thread-local CURRENT
+  still set. run1's fault grep (`bin/lib/rsi/check`) skipped that line, so the row had no reason a class could match.
+- Fixed: run1 also keeps std's own aborts (`^fatal runtime error: `) as the reason. They are not internal: run-judge's internal
+  pattern is `fatal error: `. The standard error compared is unchanged. New AOT class `:aot-thread-current` (`:deferred`) in
+  `test/rust/divergences-aot.edn`, which had none. It was checked on a scratch rejudge first.
+  Taken (round 54) over: (b) widening the shared `:threads` class, which describes the interpreted scheduler; (c) fixing the
+  compiled scheduler's thread-local swap at a thread start, larger work left to the class's :why.
+- Second run, whole samples corpus, `--record`: 6 programs, pass 5, aot-thread-current 1; compiled against interpreted: 5 both pass,
+  1 neither. It wrote `test/rust/check-aot-linux-amd64.edn`, `check-aot-times-linux-amd64.edn` and the case inputs
+  `aot-inputs-linux-amd64.edn` (6 rows, 0 cases own: C2-C4 and C6 are rustc's).
+- `bin/rsi divergences --aot`: 6 programs, 5 pass, the one in its class. `test/reap/cells.edn`: the AOT cell's `:until` dropped.
+  `test/crops/independence.edn`: the current AOT :why worded for the record (the `:at "rust-90"` snapshot left as it was).
+- `bin/reap --record`: 54 of 56 cells checked, 0 problems; Rust AOT 5 / 0 / 1. `bin/crops-score --record`, `--judge --strict` (0
+  problems), `bin/records-check` (9 pairs, 0).
+- Rust before: completeness 75.0, without by design 75.0, maturity 95.8, independence 80.0. After: 95.8, 95.8, 100, 80.
+  It is 95.8 and not 100, as report 354 projected, because threads.rs is deferred, not a pass.
