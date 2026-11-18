@@ -28,8 +28,9 @@
  * sun.management.VMManagementImpl, jdk26u's (https://github.com/openjdk/jdk26u at baf63fb,
  * src/java.management/share/classes/sun/management/VMManagementImpl.java) with its natives, HotSpot's jmm
  * interface in the JDK, written over jrt's (jdk.internal.jrt.HostManagement: the threads' counts, the start,
- * the uptime, the process id) and constants where jrt has nothing to measure yet (classes loaded, compilation,
- * safepoints, GC CPU time: 0, -1 for unsupported; no VM arguments; no performance data, as -XX:-UsePerfData);
+ * the uptime, the process id; since n-java-f13 the classes loaded and unloaded, the collector's CPU time and the
+ * verbose settings, sun.management.JrtManagement's) and constants where jrt has nothing to measure yet (compilation,
+ * safepoints: 0, -1 for unsupported; no VM arguments; no performance data, as -XX:-UsePerfData);
  * the optional supports false until their slice but thread contention monitoring (slice 2), the object
  * monitors' and the synchronizers' usage (slice 3b). Copyright (c) Oracle and/or its affiliates, under the GNU
  * General Public License version 2 with the Classpath Exception, as the notice above says (LICENSE.md).
@@ -156,22 +157,22 @@ class VMManagementImpl implements VMManagement {
         return (int) count;
     }
     public long getTotalClassCount() {
-        return 0;
+        return HostManagement.classCount0();
     }
     public long getUnloadedClassCount() {
-        return 0;
+        return HostManagement.unloadedClassCount0();
     }
 
     public boolean getVerboseClass() {
-        return false;
+        return JrtManagement.verboseClass();
     }
 
     // Memory Subsystem
     public long getTotalGcCpuTime() {
-        return -1;
+        return HostManagement.gcCpuTime0();
     }
     public boolean getVerboseGC() {
-        return false;
+        return JrtManagement.verboseGC();
     }
 
     // Runtime Subsystem

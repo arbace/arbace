@@ -312,6 +312,13 @@ place Java allows annotations:
   2026-10-07).
 - Annotations on record components propagate to the field, accessor and canonical constructor
   parameter by `@Target`, as javac does.
+- **Repeated annotations** (`@A(1) @A(2)`, `A` `@Repeatable(As.class)`) are written as their
+  container, as javac's class files and reflection have them: `^{As [(A {:value 1}) (A {:value 2})]}`,
+  at the first one's place (amendment, round 52, 2026-11-17). Two `^{A ...}` maps would read as one
+  map, the second replacing the first; the container is what javac's Annotate makes of them, so
+  the forms need no new meaning and the class files are javac's byte for byte. The printer writes
+  the container, `@As({@A(value = 1), @A(value = 2)})`, which javac compiles to the same class file
+  (one way: mode `:full` keeps the original text).
 
 ### 4.5 Fields
 
@@ -355,7 +362,12 @@ place Java allows annotations:
 - **Parameters.** A vector of symbols with tags and modifiers. An instance method's first
   parameter is its receiver, conventionally `this`, as in `deftype`; a static method has none.
   `& ^T/1 xs` makes the method variable-arity (`ACC_VARARGS`); its type must be an array.
-  A receiver parameter's annotations (`void f(@A C this)`) go on the receiver symbol.
+  A receiver parameter's annotations (`void f(@A C this)`) go on the receiver symbol, and its
+  declared type as its tag when annotations sit inside it (`void f(C<@A T> this)`:
+  `[^{:tag (C ^{A true} T)} this]`) or, with annotations, when it is an inner class constructor's
+  (the enclosing class's type, `Inner(@A Outer Outer.this)`: `[^{A true} ^{:tag Outer} this]`); the
+  tag gives the `METHOD_RECEIVER` type annotations their paths and changes nothing else (the
+  receiver's type is the class's; amendment, round 52, 2026-11-17).
 - **Return type** is the tag on the parameter vector; `^void` for none.
 - **Untyped** parameters and return mean `Object`, with one exception taken from `deftype`: if a
   method has no type at all and its supertypes declare exactly one method with its name and

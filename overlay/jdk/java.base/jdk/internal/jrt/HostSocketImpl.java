@@ -716,13 +716,28 @@ public final class HostSocketImpl extends SocketImpl implements PlatformSocketIm
         }
     }
 
+    // n-java-net: urgent data, NioSocketImpl's (Net.sendOOB) over HostNet.sendUrgent0; the receiver's SO_OOBINLINE
+    // is the host's option (hostSet)
     @Override
     protected boolean supportsUrgentData() {
-        return false;
+        return true;
     }
 
     @Override
     protected void sendUrgentData(int data) throws IOException {
-        throw new SocketException("Urgent data not supported");
+        writeLock.lock();
+        try {
+            int h;
+            synchronized (stateLock) {
+                ensureOpenAndConnected();
+                h = handle;
+            }
+            String[] error = new String[1];
+            int r = HostNet.sendUrgent0(h, data, error);
+            if (r < 0)
+                throw failure(r, error[0], "Write timed out");
+        } finally {
+            writeLock.unlock();
+        }
     }
 }

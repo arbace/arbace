@@ -263,16 +263,18 @@
 (defn rfp53-counts
   "RFP53 (a): of the cell's case ids IDS (TOTAL cases as test/reap/matrix.edn counts them), the cases whose every input of INPUTS
   is :own in ROWS ([ID {INPUT VALUE ...}] a case): {:self N :recorded M}, M every other case of the cell (no row, or an input not
-  :own: 0.5, RFP43 (a)); a row whose id is not the cell's counts nothing."
+  :own: 0.5, RFP43 (a)); a row whose id is not the cell's counts nothing. JOP13 (a): an id the cell's records hold twice (a
+  test at two checks of one cell, Java's read and classes) is two cases, as test/reap/matrix.edn counts them (at most TOTAL)."
   [ids rows inputs total]
   (let [own (set (for [r rows :when (and (vector? r) (own-case? inputs (second r)))] (first r)))
-        n (count (filter own (distinct ids)))]
+        n (min total (count (filter own ids)))]
     {:self n :recorded (max 0 (- total n))}))
 
 (defn- cell-ids
   "The ids of the cell's cases: the first element of each row of its sources' records."
   [t crop st]
-  (for [s (get-in (cells-spec t) [:cells [crop st] :sources]) :let [f (:file s)] :when (and (string? f) (has? t f))
+  ;; (JOP13 (a): not a source :role :beside, whose rows the matrix does not count as the cell's cases)
+  (for [s (get-in (cells-spec t) [:cells [crop st] :sources]) :let [f (:file s)] :when (and (string? f) (has? t f) (not= :beside (:role s)))
         ;; (bin/hsi check's records: one map a program, HF10-P29 (a))
         r (if (= :hsi-check (:reader s)) (edn-forms t f) (edn t f)) :when (or (vector? r) (and (map? r) (:id r)))]
     (if (map? r) (:id r) (first r))))
@@ -318,6 +320,36 @@
   [mixed n part]
   (let [[ps pn note] part]
     [(/ (+ mixed ps) 2.0) (+ n pn) note ps]))
+;; ---- JOP7 (a) (the user, 2026-11-17; taken overnight, round 52): a fact's :requires-line {:file F :line L :why W} holds the
+;; stage at 0.5 at most until F has the line L exactly (Java's: jdk/javac/platform.sha256's "# kind: own", the own platform's
+;; pin, JOP2 (a)): a claim above 0.5 on a tree whose F lacks it is refuted, so the facts cannot move ahead of the switch
+
+(defn requires-line-problem
+  "The refutation of fact F's :requires-line against S, the text of its :file (nil: no file), or nil when F names none or S
+  holds the line."
+  [f s]
+  (when-let [{:keys [file line why]} (:requires-line f)]
+    (when-not (and s (some #{line} (str/split-lines s)))
+      (str file " has no line " (pr-str line) (when why (str " (" why ")")) ": held at 0.5"))))
+
+;; ---- JOP13 (a) (taken overnight, round 52; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JOP13 (a)"): a fact's
+;; :requires-record {:file F :why W} holds the stage at 0.5 at most until F exists, is one run's outcome (not INTERIM) and has a
+;; row for every case of the cell (Java's: test/java/sources.edn, the source sets javac on Arbace made, a row a test), so a
+;; stated score cannot count a record that is missing or covers only some tests; with it, :case-inputs counts the cases
+
+(defn requires-record-problem
+  "The refutation of fact F's :requires-record against S, the text of its :file (nil: no file), ROWS its rows ([ID ...]) and
+  IDS the cell's case ids, or nil when F names none or the record covers every case."
+  [f s rows ids]
+  (when-let [{:keys [file why]} (:requires-record f)]
+    (let [have (set (map first (filter vector? rows)))
+          ids (distinct ids)
+          missing (remove have ids)]
+      (cond (nil? s) (str "no " file (when why (str " (" why ")")) ": held at 0.5")
+            (interim? s) (str file " is marked INTERIM: held at 0.5")
+            (empty? ids) (str file ": the cell has no recorded case to cover: held at 0.5")
+            (seq missing) (str file " covers " (- (count ids) (count missing)) " of " (count ids) " of the cell's tests (none for "
+                               (first missing) (when (next missing) ", ...") ")" (when why (str " (" why ")")) ": held at 0.5")))))
 
 ;; ---- OC222 (a) (the user, 2026-11-10): a class of :kind :na is ocamltest's own skip on the pinned configuration
 
@@ -443,11 +475,19 @@
                          claim (if mixed (/ (Math/round (* 1000.0 mixed)) 1000.0) stated)
                          refuted-reads (and (seq reads) claim (pos? claim))
                          refuted-helper (and (seq helped) claim (> claim 0.5))
+                         unpinned (when (and claim (> claim 0.5)) (requires-line-problem f (some->> (get-in f [:requires-line :file]) (text t))))
+                         ;; JOP13 (a): the record the stage consumes must exist and cover the cell's cases
+                         unpinned (or unpinned
+                                      (when (and claim (> claim 0.5) (:requires-record f))
+                                        (let [rf (get-in f [:requires-record :file]) s (when (has? t rf) (text t rf))]
+                                          (requires-record-problem f s (when (and s (not (interim? s))) (input-rows (edn-forms t rf)))
+                                                                   (cell-ids t crop st)))))
                          unverified (and claim (pos? claim) (empty? live))
                          score (cond (nil? claim) 0.0
                                      (and (seq hosted) (pos? claim)) 0.0
                                      refuted-reads 0.0
                                      refuted-helper 0.0
+                                     unpinned 0.5
                                      :else (double claim))
                          check (cond (nil? claim) "no fact (test/crops/independence.edn)"
                                      (seq hosted) (str (if (pos? claim) "CLAIM REFUTED: " "steps agree: ")
@@ -457,6 +497,7 @@
                                                                                                                 " (no " (:instead rule) ")")))))
                                      refuted-helper (str "CLAIM REFUTED: the cell's record written by a live helper: "
                                                          (str/join "; " (distinct (for [[fl sn] helped] (str fl " (\"" sn "\")")))))
+                                     unpinned (str "CLAIM REFUTED: " unpinned)
                                      (seq live) (if (zero? claim)
                                                   (str "claim 0 though " (str/join ", " (map :name live)) " name no toolchain host")
                                                   (str "steps agree: " (str/join ", " (map :name live)) " on no toolchain host"))
@@ -679,7 +720,25 @@
                                  (format "%.3f" (first (with-part m n [ps pn ""])))))
         cx-host (fn [rows] (vec (for [[id m] rows] [id (assoc m :ci-target "gcc's recorded answers, test/c/host")])))
         cx-good (cx-stage cx-rows cx-rt)
-        cx-ctl (cx-stage (cx-host cx-rows) (cx-host cx-rt))]
+        cx-ctl (cx-stage (cx-host cx-rows) (cx-host cx-rt))
+        ;; JOP7 (a): the own pin holds the line; the build tree's pin, and a pin that only mentions it, refute the claim
+        req {:score 1 :requires-line {:file "jdk/javac/platform.sha256" :line "# kind: own"}}
+        own-pin "# The platform of javac on Arbace\n# kind: own\nabc  java.base\n"
+        build-pin "# The platform of javac on Arbace (JFS15 (b)): jdk26u's build tree\nabc  java.base\n"
+        near-pin "# kind: own (not yet: the switch night writes it)\nabc  java.base\n"
+        ;; JOP13 (a): Java's read cell of 10 cases, 4 tests at read and classes each and 2 golden-diagnostics tests; the own
+        ;; record's rows with :platform and :sources :own count 10 of 10 (1.0); the control, the same rows on the build tree's
+        ;; platform, 0 (0.5); one test own counts twice (read and classes); the guard: a record covering every test passes, one
+        ;; without a test, no record and an INTERIM one hold the stage at 0.5
+        jv-in [:platform :sources]
+        jv-ids (concat ["t1" "t2" "t3" "t4"] ["t1" "t2" "t3" "t4"] ["d1" "d2"])
+        jv-rows (vec (for [id ["t1" "t2" "t3" "t4" "d1" "d2"]] [id {:sources :own :platform :own}]))
+        jv-build (vec (for [[id m] jv-rows] [id (assoc m :platform "jdk26u's build tree (jdk/javac/platform.sha256)")]))
+        jv-own (rfp53-counts jv-ids jv-rows jv-in 10)
+        jv-ctl (rfp53-counts jv-ids jv-build jv-in 10)
+        jv-one (rfp53-counts jv-ids [["t1" {:sources :own :platform :own}]] jv-in 10)
+        jv-f {:score 1 :requires-record {:file "test/java/sources.edn"}}
+        jv-text ";; the own record\n[]\n"]
     (concat
      (when-not (= c37 {:self 37 :recorded 36}) [(str "RFP53: 37 of 73 own counted " (pr-str c37))])
      (when-not (= "90.1" (indep c37)) [(str "RFP53: 37 of 73 own gives " (indep c37) ", the plan 90.1")])
@@ -697,6 +756,21 @@
      (when-not (= rt-pack {:self 0 :recorded 198}) [(str "CP333 (b) control (every unit the pack's) passed: counted " (pr-str rt-pack))])
      (when-not (= "0.683" (cpp-stage rt-pack)) [(str "CP333 (b): 60 of 82 own on the pack's runtime gives " (cpp-stage rt-pack) ", the plan 0.683")])
      (when-not (= "0.778" (cpp-stage rt-75)) [(str "CP333 (b): with 75 runtime units own gives " (cpp-stage rt-75) ", the plan 0.778")])
+     (when (requires-line-problem req own-pin) [(str "JOP7: the own pin refused: " (requires-line-problem req own-pin))])
+     (when (requires-line-problem {:score 1} build-pin) ["JOP7: a fact without :requires-line refuted"])
+     (when-not (requires-line-problem req build-pin) ["JOP7 control (the build tree's pin) passed"])
+     (when-not (requires-line-problem req near-pin) ["JOP7 control (a pin that only mentions the line) passed"])
+     (when-not (requires-line-problem req nil) ["JOP7 control (no pin file) passed"])
+     (when-not (= jv-own {:self 10 :recorded 0}) [(str "JOP13: 10 of 10 Java cases own counted " (pr-str jv-own))])
+     (when-not (= "1.000" (format "%.3f" (first (mixed-score {:cases jv-own})))) ["JOP13: 10 of 10 own does not give 1"])
+     (when-not (= jv-ctl {:self 0 :recorded 10}) [(str "JOP13 control (the build tree's platform) passed: counted " (pr-str jv-ctl))])
+     (when-not (= jv-one {:self 2 :recorded 8}) [(str "JOP13: one test at read and classes counted " (pr-str jv-one) ", not 2 cases")])
+     (when (requires-record-problem jv-f jv-text jv-rows jv-ids) [(str "JOP13: a covering record refused: " (requires-record-problem jv-f jv-text jv-rows jv-ids))])
+     (when (requires-record-problem {:score 1} nil [] jv-ids) ["JOP13: a fact without :requires-record refuted"])
+     (when-not (requires-record-problem jv-f jv-text (pop jv-rows) jv-ids) ["JOP13 control (a record without d2) passed"])
+     (when-not (requires-record-problem jv-f nil [] jv-ids) ["JOP13 control (no record) passed"])
+     (when-not (requires-record-problem jv-f (str ";; INTERIM\n" jv-text) jv-rows jv-ids) ["JOP13 control (an INTERIM record) passed"])
+     (when-not (requires-record-problem jv-f jv-text jv-rows []) ["JOP13 control (a cell with no case) passed"])
      (when-not (and (= "82.5" (compl before)) (= "84.2" (compl after)))
        [(str "OC222: completeness " (compl before) " to " (compl after) ", expected 82.5 to 84.2 (+1.7)")]))))
 
@@ -720,7 +794,7 @@
     (when (some #{"--self-test"} args)
       (let [fails (self-test)]
         (doseq [x fails] (println (str "   FAIL " x)))
-        (println (str "crops-score: self-test (RFP53 (a), OC222 (a), HF10-P29 (a), CP333 (b), CP401 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
+        (println (str "crops-score: self-test (RFP53 (a), OC222 (a), HF10-P29 (a), CP333 (b), CP401 (a), JOP7 (a), JOP13 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
         (shutdown-agents)
         (System/exit (if (empty? fails) 0 1))))
     (let [o (parse-args args)
@@ -755,7 +829,7 @@
             (println)
             (doseq [s scores] (print-details s))
             (println (str "crops-score: " (count scores) " crops; " (count refuted) " facts refuted by the gate's steps"
-                          (when (seq refuted) " (scored 0)") "; " (count problems) " problems"))
+                          (when (seq refuted) " (scored 0, or held at 0.5 by a :requires-line)") "; " (count problems) " problems"))
             (doseq [x refuted] (println (str "   refuted: " x)))
             ;; (c): a stage scored above 0 that no step of the tree runs: flagged, its score kept (not a problem)
             (println (str "crops-score: " (count unverified) " facts above 0 unverified (no step of the tree outside the oracle tier runs them)"))

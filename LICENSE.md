@@ -453,6 +453,16 @@ covers what.
     Xerces (jdk26u's `src/java.xml/share/legal/xerces.md`; their notice "Licensed to the Apache
     Software Foundation (ASF)"), the Apache License 2.0 (text in "Murmur3 (Guava): Apache License
     2.0" below), with Oracle's copyright line where the file has one.
+    The own platform (doc/classes/JAVA-FRONTEND-SURVEY.md, "Own platform", 2026-11-17): `jdk/javac/platform-gensrc.tar.xz`
+    (the generated sources of jdk26u's 16 modules that have some, made by the JDK build's own tools on javac's tool from
+    jdk26u's templates and data: each file keeps its template's notice, the GNU General Public License version 2 with the
+    Classpath Exception, Copyright (c) Oracle and/or its affiliates, and for jdk.localedata's CLDR-derived files the Unicode
+    License, jdk26u's `src/java.base/share/legal/cldr.md`, as jdk/data's CLDR data below), `jdk/javac/platform-records/`
+    (`java.base/jdk/internal/lang/CaseFolding.java`, the JDK build's generated file, GNU General Public License version 2
+    with the Classpath Exception, Copyright (c) Oracle and/or its affiliates; `java.base/lib/security/cacerts`, the JDK
+    build image's, as `jdk/data/lib/security/cacerts`), and `jdk/javac/platform-own-known.edn`,
+    `platform-gensrc-known.edn`, `platform-descriptors-known.edn` and `platform-build.edn`, `platform-gensrc.edn`
+    (Arbace's own, under the Eclipse Public License 1.0).
 - `overlay/jdk/java.base/java/util/zip/Deflater.java` (JN7, for javac's tool build, then in
   `overlay/jdk/javac/java.base/`; since JC6b, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built:
   JC6b", in the shipped program's world): jrt's `Deflater`, a port to Java of zlib 1.3.2's

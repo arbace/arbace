@@ -94,7 +94,7 @@
   (loop [t t n 0]
     (if (m/array? t) (recur (m/elemtype t) (inc n)) [t n])))
 
-(declare type-ann-items)
+(declare type-ann-items type-annotated?)
 
 (def ^:dynamic *skip-anns*
   "Binary names of the TYPE_USE annotations in a declaration's modifiers: javac also puts them
@@ -147,7 +147,9 @@
          (if (and (m/class-type? outer) (m/allparams? outer)
                   (not (m/static? c)) (not (m/local-class? c))
                   (not (and (identical? (get (:scope env) (m/simple-name c)) c)
-                            (m/own-type? outer))))
+                            (m/own-type? outer)
+                            ;; an annotated outer is written (round 52, n-java-conv)
+                            (not (type-annotated? outer)))))
            (list '.. (type-form* env outer false)
                  (annotate (if args
                              (apply list (symbol (m/simple-name c)) (map #(type-form* env % false) args))
@@ -160,7 +162,8 @@
                     (m/allparams? (m/enclosing-type t))
                     (not (m/static? (m/tsym t))) (not (m/local-class? (m/tsym t)))
                     (not (and (identical? (get (:scope env) (m/simple-name (m/tsym t))) (m/tsym t))
-                              (m/own-type? (m/enclosing-type t)))))
+                              (m/own-type? (m/enclosing-type t))
+                              (not (type-annotated? (m/enclosing-type t))))))
        anns))))
 
 (defn type-form
@@ -190,6 +193,13 @@
   annotations where it has some (the compiler erases it)."
   [env t]
   (if (type-annotated? t) (type-form env t) (erased-form env t)))
+
+(defn- form-annotated?
+  "Does type form `x` carry an annotation item anywhere?"
+  [x]
+  (boolean
+   (and x (or (some #(and (vector? %) (= :ann (first %))) (f/items x))
+              (and (sequential? x) (some form-annotated? x))))))
 
 (defn- generic? [t]
   (cond
@@ -246,20 +256,56 @@
 
 (declare compound-item)
 
+(defn- nested-annotation
+  "Annotation `c` as a nested annotation value, (A {:k v}), as attr-value writes one."
+  [env c]
+  (list (class-ref env (m/compound-class c))
+        (into {} (for [[n v] (m/compound-values c)] [(keyword n) (attr-value env v nil)]))))
+
+(defn- compound-items
+  "Metadata items for annotations `cs` (compounds) on one element, leaving out SOURCE ones. Two or
+  more of one repeatable class are its container, at the first one's place, their values in order,
+  as javac's Annotate makes it for the class file and reflection: `@A(1) @A(2)` is
+  `^{As [(A {:value 1}) (A {:value 2})]}`, since two `^{A ..}` maps read as one (round 52,
+  n-java-conv; SPEC §4.4)."
+  [env cs]
+  (let [k #(m/binary-name (m/compound-class %))
+        groups (group-by k cs)]
+    (if (every? #(= 1 (count %)) (vals groups))
+      (keep #(compound-item env %) cs)
+      (first
+       (reduce (fn [[out done] c]
+                 (let [n (k c)
+                       g (get groups n)]
+                   (cond
+                     (contains? done n) [out done]
+                     (= 1 (count g)) [(conj out (compound-item env c)) done]
+                     :else
+                     (let [cc (m/repeatable-container (m/compound-class c))]
+                       (cond
+                         (nil? cc) [(into out (map #(compound-item env %) g)) (conj done n)]
+                         (= "SOURCE" (m/class-retention cc)) [out (conj done n)]
+                         :else (do (note! :form/annotation-container)
+                                   [(conj out [:ann (class-ref env cc) (mapv #(nested-annotation env %) g)])
+                                    (conj done n)]))))))
+               [[] #{}] cs)))))
+
 (defn annotation-items
-  "Metadata items for the annotations `anns` (ANNOTATION trees), leaving out SOURCE ones."
+  "Metadata items for the annotations `anns` (ANNOTATION trees), leaving out SOURCE ones; repeated
+  ones in their container (compound-items)."
   [env anns]
-  (keep (fn [a] (some->> (attr/attribute a) (compound-item env))) anns))
+  (remove nil? (compound-items env (keep attr/attribute anns))))
 
 (defn type-ann-items
   "Metadata items for the type annotations of type `t`; at a declaration's element type
-  (`elem?`) without those of the declaration's modifiers (*skip-anns*)."
+  (`elem?`) without those of the declaration's modifiers (*skip-anns*); repeated ones in their
+  container (compound-items)."
   [env t elem?]
   (when t
-    (keep (fn [c]
-            (when-not (and elem? (contains? *skip-anns* (m/binary-name (m/compound-class c))))
-              (compound-item env c)))
-          (m/type-anns t))))
+    (remove nil?
+            (compound-items env
+                            (remove (fn [c] (and elem? (contains? *skip-anns* (m/binary-name (m/compound-class c)))))
+                                    (m/type-anns t))))))
 
 (defn- compound-item
   "The metadata item for annotation `c`, nil for a SOURCE one."
@@ -1083,6 +1129,18 @@
     (do (note! :conv/float-promotion) (list 'unchecked-float (:f x)))
     (:f x)))
 
+(defn- long-compare-operand
+  "Operand result `x` of a comparison on long (parameter type `p`) whose other operand is `y`: an int operand
+  compared with a long literal widened explicitly ((long x)), since the literal's form is the same integer
+  as an int literal's and the printed Java would compare ints (pos[0] != 0L, RP3 (a), the user 2026-11-17:
+  t03434); otherwise coerced as an assignment context converts it."
+  [env x y p]
+  (let [int-t? (fn [r] (and (m/type? (:t r)) (prim? (:t r)) (#{"INT" "SHORT" "BYTE" "CHAR"} (tag-name (:t r)))))
+        long-lit? (fn [r] (and (integer? (:f r)) (m/type? (:t r)) (prim? (:t r)) (= "LONG" (tag-name (:t r)))))]
+    (if (and (= "LONG" (tag-name p)) (int-t? x) (long-lit? y))
+      (do (note! :conv/long-compare-widening) (coerce env x p true))
+      (coerce env x p))))
+
 (defn- logic-form
   "Java's non-short-circuit boolean & | ^ over results `a` and `b`."
   [env tg a b]
@@ -1110,8 +1168,8 @@
       (logic-form env tg (assoc a :f (test-form env a)) (assoc b :f (test-form env b)))
       (#{"EQ" "NE"} tg)
       (let [refs? (not (prim? pa))
-            af (if refs? (:f a) (coerce env a pa))
-            bf (if refs? (:f b) (coerce env b pb))
+            af (if refs? (:f a) (long-compare-operand env a b pa))
+            bf (if refs? (:f b) (long-compare-operand env b a pb))
             float? (= "FLOAT" (tag-name pa))
             af (if float? (float-compare-operand env a) af)
             bf (if float? (float-compare-operand env b) bf)
@@ -1127,8 +1185,8 @@
       (cmp-ops tg)
       (let [float? (= "FLOAT" (tag-name pa))]
         (list (cmp-ops tg)
-              (if float? (float-compare-operand env a) (coerce env a pa))
-              (if float? (float-compare-operand env b) (coerce env b pb))))
+              (if float? (float-compare-operand env a) (long-compare-operand env a b pa))
+              (if float? (float-compare-operand env b) (long-compare-operand env b a pb))))
       :else
       (let [shift? (#{"SL" "SR" "USR"} tg)
             sym (op-sym tg (if shift? pa result))]
@@ -1181,9 +1239,9 @@
 ;;; Assignments, compound assignments, increments (§5.4, §7.6)
 
 (def ^:dynamic *hoistable*
-  "Postfix increments (JCUnary trees, by identity) whose update may move out of the
-  expression: before it (binding the old value) or after the statement."
-  #{})
+  "Postfix increments (JCUnary trees) whose update may move out of the expression: before it
+  (binding the old value) or after the statement; each tree's hoistable-increments info."
+  {})
 (def ^:dynamic *hoisted* nil)
 
 (defn- tree-children [x] (tr/children x))
@@ -1215,9 +1273,58 @@
 (defn- all-trees [t]
   (tree-seq #(and (tr/tree? %) (not (tr/is? % :CLASSDEF))) tree-children t))
 
+(defn- eval-safe?
+  "Can evaluating tree `x` complete abruptly? False when it cannot: a literal, a type, `this`, a
+  local, a field of `this` named simply, a type or package qualifier (a static field is not: it may
+  initialize its class)."
+  [x]
+  (let [x (tr/skip-parens x)
+        nm (when (#{:IDENT :SELECT} (tr/tag x)) (str (tr/f x :name)))]
+    (case (tr/tag x)
+      :LITERAL true
+      (:TYPEIDENT :TYPEARRAY :TYPEAPPLY :TYPEUNION :TYPEINTERSECTION :WILDCARD :TYPEBOUNDKIND) true
+      :IDENT (or (contains? #{"this" "super"} nm)
+                 (let [s (attr/sym x :hoist)]
+                   (and (some? s)
+                        (or (not= "VAR" (m/kind s)) (m/local? s) (not (m/static? s))))))
+      :SELECT (or (contains? #{"this" "super" "class"} nm)
+                  (let [s (attr/sym x :hoist)]
+                    (and (some? s) (#{"TYP" "PCK"} (m/kind s)))))
+      false)))
+
+(defn- callee-safe?
+  "Can the method part `meth` of a call complete abruptly before the arguments are evaluated? Not
+  when it is a simple name or a selection from a qualifier that cannot (JLS 15.12.4.1: the target
+  reference first, its null check after the arguments)."
+  [meth]
+  (let [meth (tr/skip-parens meth)]
+    (case (tr/tag meth)
+      :IDENT true
+      :SELECT (eval-safe? (tr/f meth :selected))
+      false)))
+
+(defn- store-safe?
+  "Can storing into lhs tree `l` complete abruptly? Not into a local or a field of `this` named simply."
+  [l]
+  (let [l (tr/skip-parens l)]
+    (and (tr/is? l :IDENT) (eval-safe? l))))
+
+(defn- lhs-safe?
+  "Can what is evaluated of lhs tree `l` before the right-hand side complete abruptly? An array
+  element's array and index, a field's qualifier (JLS 15.26.1: the null and bounds checks after)."
+  [l]
+  (let [l (tr/skip-parens l)]
+    (case (tr/tag l)
+      :IDENT true
+      :INDEXED (and (eval-safe? (tr/f l :indexed)) (eval-safe? (tr/f l :index)))
+      :SELECT (eval-safe? (tr/f l :selected))
+      false)))
+
 (defn hoistable-increments
   "The postfix increments in expression `e` evaluated unconditionally, on a variable that `e`
-  does not otherwise mention (a local, or a field when `e` calls nothing)."
+  does not otherwise mention (a local, or a field when `e` calls nothing): a map from each
+  (by tree) to {:field? f :pre p :post q}, :pre when nothing evaluated before the increment
+  can complete abruptly, :post when nothing evaluated after it can (SPEC §7.6)."
   [e]
   (let [trees (all-trees e)
         effects? (some #(#{:APPLY :NEWCLASS :ASSIGN :LAMBDA :REFERENCE} (tr/tag %)) trees)
@@ -1227,12 +1334,12 @@
         uses (delay (frequencies (keep #(when (#{:IDENT :SELECT} (tr/tag %)) (attr/sym % :hoist))
                                        trees)))
         local-uses (fn [loc] (count (filter #(and (tr/is? % :IDENT) (identical? loc (attr/local-of % :hoist))) trees)))
-        cands (volatile! #{})]
-    (letfn [(walk [x]
+        cands (volatile! {})]
+    (letfn [(walk [x pre post]
               (cond
-                (tr/is? x :CONDEXPR) (walk (tr/f x :cond))
+                (tr/is? x :CONDEXPR) (walk (tr/f x :cond) pre false)
                 (#{:AND :OR} (tr/tag x))
-                (walk (tr/f x :lhs))
+                (walk (tr/f x :lhs) pre false)
                 (#{:LAMBDA :CLASSDEF :SWITCH_EXPRESSION :NEWCLASS} (tr/tag x)) nil
                 :else
                 (do (when (#{:POSTINC :POSTDEC} (tr/tag x))
@@ -1240,19 +1347,33 @@
                         (when (tr/is? a :IDENT)
                           (if-let [loc (attr/local-of a :hoist)]
                             (when (= 1 (local-uses loc))
-                              (vswap! cands conj x))
+                              (vswap! cands assoc x {:field? false :pre pre :post post}))
                             (when (and (not effects?) (= 1 (@uses (attr/sym a :hoist))))
-                              (vswap! cands conj x))))))
-                    (run! walk (tree-children x)))))]
-      (walk e))
-    (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))
-    (let [s (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))]
-      (doseq [c @cands] (.add s c))
-      (set s))))
+                              (vswap! cands assoc x {:field? true :pre pre :post post}))))))
+                    (let [cs (vec (tree-children x))
+                          meth (when (tr/is? x :APPLY) (tr/f x :meth))
+                          lhs (when (tr/is? x :ASSIGN) (tr/f x :lhs))]
+                      (loop [i 0 pre pre]
+                        (when (< i (count cs))
+                          (let [c (nth cs i)
+                                post' (and post
+                                           (or (tr/is? x :PARENS)
+                                               (and lhs (not (identical? c lhs)) (store-safe? lhs))))]
+                            (walk c pre post')
+                            (recur (inc i)
+                                   (and pre (cond (and meth (identical? c meth)) (callee-safe? c)
+                                                  (and lhs (identical? c lhs)) (lhs-safe? c)
+                                                  :else (eval-safe? c)))))))))))]
+      (walk e true true))
+    @cands))
 
 (defn with-hoisting
   "Convert expression `e` with `f` (env e -> form), moving postfix increments out: :after the
-  statement (returns [form set!...]) or :before it (returns a let form)."
+  statement (returns [form set!...]) or :before it (returns a let form). An increment whose
+  variable is observable when the statement completes abruptly (a field, or a local a catch or
+  finally of an enclosing try sees, (:guarded env)) moves only where that cannot tell: :after
+  when nothing after it can complete abruptly, else :before when nothing before it can, else it
+  stays in place (JLS 15.14.2: the variable is incremented when the increment is evaluated)."
   [env e mode f]
   (let [h (hoistable-increments e)]
     (if (empty? h)
@@ -1260,12 +1381,25 @@
       (binding [*hoistable* h
                 *hoisted* (atom {:mode mode :incs []})]
         (let [form (f env e)
-              incs (:incs @*hoisted*)]
-          (cond
-            (empty? incs) [form]
-            (= mode :after) (into [form] (map #(nth % 2) incs))
-            :else [(apply list 'let (vec (mapcat (fn [[v g _]] [v g]) incs))
-                          (concat (map #(nth % 2) incs) [form]))]))))))
+              incs (:incs @*hoisted*)
+              before (filter #(= :before (nth % 3)) incs)
+              after (filter #(= :after (nth % 3)) incs)
+              form (if (seq before)
+                     (apply list 'let (vec (mapcat (fn [[v g _]] [v g]) before))
+                            (concat (map #(nth % 2) before) [form]))
+                     form)]
+          (into [form] (map #(nth % 2) after)))))))
+
+(defn- hoist-mode
+  "Where hoisted increment `info` (hoistable-increments') on place form `g` moves in a statement
+  hoisting to `mode`: :after, :before or nil (not hoisted)."
+  [env info g mode]
+  (if (or (:field? info) (contains? (:guarded env) g))
+    (cond
+      (and (= mode :after) (:post info)) :after
+      (:pre info) :before
+      :else nil)
+    mode))
 
 (defn- place
   "An assignable place for lhs tree `t`: {:get form :set (fn [v] form) :t type :binds [..]}."
@@ -1390,11 +1524,11 @@
                "FLOAT" (list (h env (if inc? 'unchecked-add-float 'unchecked-subtract-float)) g 1))
         setf ((:set p) newv)]
     (note! (keyword "op" tg))
-    (r (if (and value? post? *hoisted* (contains? *hoistable* t))
-         (let [mode (:mode @*hoisted*)
-               v (if (= mode :after) g (gensym! env (str/replace (str g) #"[^A-Za-z0-9_$]" "")))]
+    (r (if-let [mode (and value? post? *hoisted* (contains? *hoistable* t)
+                          (hoist-mode env (get *hoistable* t) g (:mode @*hoisted*)))]
+         (let [v (if (= mode :after) g (gensym! env (str/replace (str g) #"[^A-Za-z0-9_$]" "")))]
            (note! :flow/hoisted-increment)
-           (swap! *hoisted* update :incs conj [v g setf])
+           (swap! *hoisted* update :incs conj [v g setf mode])
            v)
          (if (and value? post?)
          (let [old (gensym! env "old")]
@@ -1924,6 +2058,12 @@
       (and (not var?) (m/tvar? decl)) (type-form env decl)
       :else nil))))
 
+(defn- unboxed-of
+  "The primitive a reference result `x` unboxes to: its own type's, else javac's type's (a generic result,
+  Iterator<Integer>'s next())."
+  [x]
+  (or (m/unboxed (:t x)) (some-> (:jtree x) (attr/type-of :types/expr) erasure m/unboxed)))
+
 (defn- binding-for
   "[sym-form init-form env'] for local declaration `d` (with `init` result or nil). In a
   loop binding (`loop?`) a primitive type other than long, double or boolean is always tagged,
@@ -1944,6 +2084,11 @@
                        (let [u (m/unboxed decl)
                              p (if (= :lit-int (:t init)) (int-type) (:t init))]
                          (m/boxed (if (and u (#{"BYTE" "SHORT" "CHAR"} (tag-name u))) u p)))
+                       ;; a box unboxed into a wider primitive (float i = it.next() of an Iterator<Integer>,
+                       ;; RP3 (a), the user 2026-11-17): the unboxed value's type is the box's, so the local is
+                       ;; tagged with its declared type (t06032: it was read untagged, an int)
+                       (and (prim? decl) (m/type? (:t init)) (not (prim? (:t init))) (unboxed-of init))
+                       (unboxed-of init)
                        :else decl)
                  nil)
         tg (or (local-tag env d init-t)
@@ -2730,6 +2875,11 @@
                                         s (if (and (symbol? (:f x)) (not (namespace (:f x)))) (:f x) (gensym! env nm))]
                                     [(conj bv s (:f x)) env])))
                               [[] env] resources)
+        ;; the locals a catch or finally sees: an increment of one in the body is not hoisted
+        ;; past what can throw (with-hoisting)
+        env' (if (or (seq (tr/f t :catchers)) (tr/f t :finalizer))
+               (update env' :guarded (fnil into #{}) (vals (:locals env)))
+               env')
         body (stmts env' ctx' (tr/f (tr/f t :body) :stats))
         body (if (seq resources)
                (do (note! :form/with-resources)
@@ -2975,8 +3125,18 @@
         env (if (= recv 'this) env (assoc-in env [:anon-this c] recv))
         [pv env'] (if compact? [[] env] (param-forms env md omit?))
         ;; a receiver parameter's annotations go on the receiver symbol (§4.6)
+        ;; and its declared type when annotations sit inside it, C<@A T>, or when it is an inner
+        ;; class constructor's, the enclosing class's (round 52, n-java-conv): ^{:tag (C ^{A 0} T)}
+        ;; this, the type's own annotations of the modifiers left out as a parameter's
         recv-sym (if-let [rp (tr/f md :recvparam)]
-                   (apply m+ recv (annotation-items env (tr/f (tr/f rp :mods) :annotations)))
+                   (let [anns (annotation-items env (tr/f (tr/f rp :mods) :annotations))
+                         rt (attr/type-of (tr/f rp :vartype) :names/type-tree)
+                         tf (when (or ctor? (type-annotated? rt))
+                              (binding [*skip-anns* (mods-type-anns (tr/f rp :mods))] (type-form env rt)))]
+                     (apply m+ recv (concat anns
+                                            (when (or (form-annotated? tf) (and ctor? tf (seq anns)))
+                                              (note! :form/receiver-type)
+                                              [[:tag tf]]))))
                    recv)
         pv (if static? pv (into [recv-sym] pv))
         rt (m/mret m)

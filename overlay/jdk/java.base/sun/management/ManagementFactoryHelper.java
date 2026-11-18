@@ -29,8 +29,9 @@
  * src/java.management/share/classes/sun/management/ManagementFactoryHelper.java) that makes the platform beans,
  * transcribed: the VM's management object and the beans made once. Its MBean registration, the logging and
  * buffer-pool beans' JMX adapters and the HotSpot internal MBeans (javax.management's MBean server, by design:
- * JCS95 (a)) are not in the Go build; the beans of the slices not built yet (memory, class loading, compilation,
- * the collectors and pools) are absent here, ManagementFactory says so (its header). toThreadState maps
+ * JCS95 (a)) are not in the Go build; since n-java-f13 the class loading and memory beans and the pools, managers
+ * and collectors (jdk26u's getters, the pools and managers made by jrt's sun.management.JrtManagement where jdk26u's
+ * VM makes them); the compilation bean is none (no JIT compiler: ManagementFactory's header). toThreadState maps
  * jmm's thread status as jdk26u's jdk.internal.misc.VM.toThreadState does (jrt's VM is a shim of its own). Copyright (c) Oracle and/or
  * its affiliates, under the GNU General Public License version 2 with the Classpath Exception, as the notice
  * above says (LICENSE.md).
@@ -42,9 +43,16 @@
  */
 package sun.management;
 
+import java.lang.management.ClassLoadingMXBean;
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.MemoryManagerMXBean;
+import java.lang.management.MemoryMXBean;
+import java.lang.management.MemoryPoolMXBean;
 import java.lang.management.PlatformLoggingMXBean;
 import java.lang.management.RuntimeMXBean;
 import java.lang.management.ThreadMXBean;
+import java.util.ArrayList;
+import java.util.List;
 
 public class ManagementFactoryHelper {
 
@@ -56,8 +64,25 @@ public class ManagementFactoryHelper {
         return jvm;
     }
 
+    private static ClassLoadingImpl    classMBean = null;
+    private static MemoryImpl          memoryMBean = null;
     private static ThreadImpl          threadMBean = null;
     private static RuntimeImpl         runtimeMBean = null;
+
+    // n-java-f13: jdk26u's
+    public static synchronized ClassLoadingMXBean getClassLoadingMXBean() {
+        if (classMBean == null) {
+            classMBean = new ClassLoadingImpl(jvm);
+        }
+        return classMBean;
+    }
+
+    public static synchronized MemoryMXBean getMemoryMXBean() {
+        if (memoryMBean == null) {
+            memoryMBean = new MemoryImpl(jvm);
+        }
+        return memoryMBean;
+    }
 
     public static synchronized ThreadMXBean getThreadMXBean() {
         if (threadMBean == null) {
@@ -72,6 +97,49 @@ public class ManagementFactoryHelper {
             runtimeMBean = new RuntimeImpl(jvm);
         }
         return runtimeMBean;
+    }
+
+    // n-java-f13: jdk26u's
+    public static List<MemoryPoolMXBean> getMemoryPoolMXBeans() {
+        MemoryPoolMXBean[] pools = MemoryImpl.getMemoryPools();
+        List<MemoryPoolMXBean> list = new ArrayList<>(pools.length);
+        for (MemoryPoolMXBean p : pools) {
+            list.add(p);
+        }
+        return list;
+    }
+
+    public static List<MemoryManagerMXBean> getMemoryManagerMXBeans() {
+        MemoryManagerMXBean[]  mgrs = MemoryImpl.getMemoryManagers();
+        List<MemoryManagerMXBean> result = new ArrayList<>(mgrs.length);
+        for (MemoryManagerMXBean m : mgrs) {
+            result.add(m);
+        }
+        return result;
+    }
+
+    public static List<GarbageCollectorMXBean> getGarbageCollectorMXBeans() {
+        MemoryManagerMXBean[]  mgrs = MemoryImpl.getMemoryManagers();
+        List<GarbageCollectorMXBean> result = new ArrayList<>(mgrs.length);
+        for (MemoryManagerMXBean m : mgrs) {
+            if (GarbageCollectorMXBean.class.isInstance(m)) {
+                 result.add(GarbageCollectorMXBean.class.cast(m));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Returns an array of the name of all memory pools.  The order of the memory pools is
+     * significant and maintained in the VM. (n-java-f13: jdk26u's stream as a loop)
+     */
+    public static String[] getAllMemoryPoolNames() {
+        MemoryPoolMXBean[] pools = MemoryImpl.getMemoryPools();
+        String[] names = new String[pools.length];
+        for (int i = 0; i < pools.length; i++) {
+            names[i] = pools[i].getName();
+        }
+        return names;
     }
 
     // JCS281 (b): jdk26u's getPlatformLoggingMXBean, java.util.logging always present

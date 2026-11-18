@@ -7123,3 +7123,244 @@ The platform's tree is about 160 MB on disk (27,598 class files), one per pin in
   `src/*/{unix,linux}/classes`, the build tree's `jdk/modules` (the reference), `images/jdk/bin/javap` (the comparison by hand).
 - javac's tool `.tmp/gate-exe/javac-f70d1a9d900eb07a9afc/arbace-javac` (2026-11-15). The PoC's work and logs:
   `.tmp/worktrees/h-java-platform/.tmp/poc/` (`jv1`-`jv3`, `cmp.sh`, `cmp*.txt`).
+
+## Decided (the user, 2026-11-17): JOP1-JOP8, all (a)
+
+The route (own class files), the pin's content (class files and descriptors, the generated modules' digests), the cache built
+on a miss with a weekly rebuild, the switch night's four steps, the build tree's other reads moved, the oracle step and the
+audit rule, the facts at the clean run after the switch, the known file as entries. The transition night is round 51.
+
+## As built: the own platform's tooling, for the switch night (2026-11-17; branch `h-java-platform`)
+
+By day, light: nothing here builds the platform or re-reads a corpus, and the pin stays the build tree's until the night's
+script rewrites it. With the build pin every command behaves as before (`bin/jrt-convert derive --check` 83 of 83; the weekly and
+oracle plans list the two new steps; `bin/gate-tests`).
+
+**The one setting.** `jdk/javac/platform.sha256`'s line `# kind: own` (JOP2 (a)). `bin/javac-vendor`'s `platform_kind` and
+`bin/lib/repr-java/platform.bash`'s `repr_java_platform_kind` read it; everything below follows it. The own pin keeps the format
+(a module a line, `module_hash` of its class files and descriptor) and adds a line `gensrc/MODULE` for each of the 16 generated
+modules (the SHA-256 of its `.java` files' listing). The switch is that file's rewrite (`platform-own --pin`); `git checkout` of it
+undoes it.
+
+**`bin/javac-vendor`** (logic in `test/javac-platform/own.bash`, out of every key as that directory is):
+
+| command | what |
+|---|---|
+| `platform-own [DIR] [--gensrc DIR] [--jobs N] [--pack] [--pin]` | the platform built into DIR: the generated sources (`--gensrc`'s, else the pack's), each module compiled as the build compiles it (`platform-build.edn`'s options and sources, `--module-source-path` over the own generated sources and jdk26u's `src`, `--system none`, each javac under `GOMEMLIMIT=2GiB`), its descriptor extended by `modinfo.ae` (`descriptor_args`, shared with `descriptors`), DIR/modules, DIR/listing.tsv (a line a class file), DIR/pin.sha256; `--pack` writes `jdk/javac/platform-gensrc.tar.xz` from `--gensrc` first (deterministic: sorted names, no owners, mtime 0, `xz -9e -T1`); `--pin` rewrites the pin |
+| `platform-cache [--check \| --jobs N \| --seed DIR]` | the own pin's platform in `ARBACE_GATE_EXES/platform-PIN20` (JCS365 (a); PIN20 the first 20 of the pin file's SHA-256), built on a miss beside it (`.tmp.PID`, under the hidden lock `.platform-PIN20.lock`) and checked against the pin (`own_check`); `--seed` moves a built platform in after the same check (the night's) |
+| `platform` (unchanged command) | with the own pin a tree of links to the cache, each module checked against the pin; with the build pin the build tree's as before |
+| `tool DIR` | with the own pin it also makes the platform on a miss after the tool (kept or built): the `javac-tool` step builds both, so no Java step needs a new `:needs`; `--check` misses when the platform is not there |
+| `platform-rebuild [--jobs N]` | JOP3 (a)'s weekly proof, the step `javac-platform-rebuild` (`:phase :weekly`, 7 GiB): `gensrc` again on the current tool, judged by the pin's `gensrc/` lines (`gensrc_judge_pin`, with a negative control), then the platform built again from them, `own_check` against the pin |
+| `platform-oracle` | JOP6 (a)'s oracle step `javac-platform-oracle` (`:phase :oracle`, hosts `:stage0 :jdk`): the cache against the build tree, every module's class files (the known file, `known`/`differ`/`stale`), every descriptor against the jmod's, every generated module against `support/gensrc`, the two controls; then `platform-build --check` and `platform-gensrc --check` |
+
+`gensrc` with the own pin judges by the pin and reads no build tree (`JAVAC_VENDOR_ORACLE=1`: against it, as before).
+`bin/gate --prune` keeps the newest 3 `platform-*` directories as its own kind (`bin/lib/gate-run.bash`), and `.tmp/javac-platform*`
+is a row of `test/gate/caches.edn`.
+
+**JOP5 (a), the build tree's other reads.** `repr_java_gensrc_root`: the build's `support/gensrc`, or with the own pin the pack
+unpacked once into `.tmp/javac-platform-gensrc/PACK20` (seconds, no javac). Its readers: `bin/lib/repr-java/front-check` and
+`parse-check` (the javac corpus's generated files), `bin/jrt-convert` (its generate step's reference, the C-preprocessed files'
+check), `jrt.derive` (`JRT_GENSRC`: HeapByteBuffer(R).java, SocketOptionRegistry.java). `bin/jrt-convert` with the own pin reads
+spec.gmk's `COPYRIGHT_YEAR` from `platform-gensrc.edn`, compares its data files with no reference (the oracle's), and takes its two
+build-tree inputs from `jdk/javac/platform-records/` (JOP10 below).
+
+**JOP6 (a), the audit.** `test/gate/audit.ae`'s `outside-problems` takes BUILD-BANNED, true when the pin is the own platform's
+(`own-pin?`) and the step is not `:phase :oracle`: a read under `$JDK/build/` fails, but the frozen JVM's `images/jdk` (its
+earlier rule, the hosts `:frozen` and `:jdk`).
+
+**JOP7 (a), staged.** `test/javac-platform/switch.patch`: `test/crops/independence.edn`'s Java read, eval, AOT and print 1 with the
+own platform's evidence (Java's independence 60 → 100, 99.7, measured with the patch applied), `javac-classes` to the oracle tier.
+The night's script applies it after its proofs.
+
+**The two bugs** (`bin/javac-vendor`): `pb_has_module` (a file and `grep -qx`, not a pipe: under `pipefail` the pipe refused
+java.base, the data's first module); `control2_pick` (passes over an equal module without a class, java.se). Also: `bin/javac-vendor`
+finds its root by `BASH_SOURCE` (sourced by the test), and `JAVAC_VENDOR_LIB=1` sources its functions without a command.
+
+**The known file** (JOP8 (a)): the 48 `:param-names` classes. From the own generated sources java.base's CaseFolding and
+VarHandleGuards classes will differ from the build's too (their sources are `platform-gensrc-known.edn`'s); the night's oracle adds
+them as `:runtime-unicode` and `:reflection-order` when they are the only new differences, and stops otherwise.
+
+**Proven by hand** (javac's tool `javac-f70d1a9d900e`): `platform-own` of three modules (`JAVAC_VENDOR_OWN_MODULES`, the PoC's own
+generated sources): 94 class files in 109 s, peak 1.96 GB; java.logging's and jdk.unsupported's module hashes are the build pin's
+(class files and descriptors), java.prefs differs by its known class; `platform-cache --seed`, `--check`, `platform` (links,
+checked), `platform-oracle` (classes 2 equal 1 known, descriptors 3 equal, gensrc 1 equal 1 known, both controls failing as they
+must). `test/gate/javac-platform-test.bash`: 21 checks, the pipefail control among them.
+
+**Keys.** `gate_key` and `arbace_runtime_key` do not move (`jdk/javac/`, `bin/lib/repr-java/`, `bin/lib/gate-run.bash`, `test/` and
+`bin/jrt-convert` are outside them). `arbace_javac_key` moves (`bin/javac-vendor`, `jdk/javac/platform-own-known.edn`,
+`jdk/javac/platform-records/`), and again at the switch (the pin, the pack): two tool builds, the night's. JCS365 (a)'s "out of
+`arbace_javac_key`" is not built: it is a change to `bin/lib/javac-key.bash`, which `gate_key` holds (a gate rebuild); JOP11 below.
+
+**The night** (`.tmp/goal/java-platform-night.sh [--dry-run] WORKTREE`): preflight; (1) `gensrc` on T against the build tree, then
+`platform-own --gensrc --pack --pin --jobs 3`, `platform-cache --seed`, `platform-oracle`; (2) `bin/jrt-convert update`,
+`bin/javac-vendor convert`, `bin/clojure-tests --java-fixtures update`, `bin/java-check --forms update`, `bin/repr-java platform-pack`
+and `platform-check`, then only the pin, the pack, the known file, `jdk/platform/` and the provenance files may have changed (in the
+four provenance files the `:jdk` line alone), `bin/provenance-check`; (3) T' built; (4) `platform-rebuild` on T'; then two commits
+(the platform; the facts with `bin/crops-score --record`, `--judge --strict`, `bin/reap`). About 2 h 10 min with both tool builds;
+peaks 45 GiB (the tool builds), 31 GiB (jrt-convert's update), 6.5 GiB (the platform builds), the rest under 9 GiB. `bin/repr-java
+check --jdk`'s hashes and the jtreg read level run in the night's `--full` after it (their steps declare the pin).
+
+### Proposed (JOP9-JOP11)
+
+- **JOP9** The cold build's generated sources. The generators run on javac's tool against a platform (the interpreted tools are read
+  by repr/java against it; flagsgenerator compiles `Flags.java` against it), so a clone without a cache cannot make the generated
+  sources before it has a platform. (a) **Commit them as a pack**, `jdk/javac/platform-gensrc.tar.xz` (the `.java` files of the 16
+  modules, Arbace's own output, about 3 MB; the support/gensrc of the build tree is 54 MB raw and 3.3 MB as xz), pinned by the pin's
+  `gensrc/` lines; a cold build compiles from it with no platform at all, and the weekly step regenerates it against the own platform
+  (the fixpoint); as built, the night writes it. (b) No pack: bootstrap from the previous cache, and a clone without one (the clean
+  run) cannot build. (c) Bootstrap the generators against the build tree on a cold miss (the 0.5 again). *Recommended: (a).*
+- **JOP10** jdk/'s two inputs from the build tree (not the platform: the runtime's data). `CaseFolding.java` (the boot JDK's Unicode
+  16 output; the tool's is Unicode 17's, 28 entries fewer) and `cacerts` (GenerateCacerts needs KeyStore and CertificateFactory,
+  which javac's tool's world lacks). (a) **Recorded copies, `jdk/javac/platform-records/`**, as built: jdk/ unchanged, the eval stage
+  reading two recorded files (a fact to list beside the judge's); (b) CaseFolding the tool's (jdk/'s one forms file changes, `gate_key`
+  moves, regex tests re-judged against the JDK's runs) and cacerts generated on the shipped program (which holds KeyStore since F2);
+  (c) as (a), then (b) in a Java night. *Recommended: (c).*
+- **JOP11** JCS365 (a)'s pin out of `arbace_javac_key`. (a) **With the next change that moves `gate_key` anyway** (`bin/lib/javac-key.bash`
+  is in it): `! -path 'jdk/javac/platform*'`, so a pin or pack change rebuilds no tool; (b) now (one gate rebuild). *Recommended: (a).*
+
+## Decided (the user, 2026-11-17, round 51): JOP9 (a), JOP10 (c), JOP11 (a)
+
+- **JOP9 (a):** the generated sources committed as `jdk/javac/platform-gensrc.tar.xz` (as built: the switch night writes it), pinned
+  by the own pin's `gensrc/` lines, regenerated weekly against the own platform.
+- **JOP10 (c):** the recorded copies of `CaseFolding.java` and `cacerts` (`jdk/javac/platform-records/`) kept; both generated in a
+  later Java night (CaseFolding the tool's with the regex tests re-judged, cacerts by GenerateCacerts on the shipped program).
+- **JOP11 (a):** the pin, the pack, the records and the known files out of `arbace_javac_key` (`! -path 'jdk/javac/platform*'` in
+  `bin/lib/javac-key.bash`) with the next change that moves `gate_key` anyway.
+
+## As built: Java's independence, stage by stage, and the facts' guard (2026-11-17, round 52; branch `n-java-indep`)
+
+**Why each stage is 0.5** (`test/crops/scores.edn`: independence 59.7, read, eval, AOT and print 0.5, judge 0.986). The rule
+(`test/crops/independence.edn`'s header): 1 when no host toolchain runs at check time and no record of one is consumed, 0.5 when
+the stage consumes a record a toolchain made. Every Java stage's steps run on Arbace's own hosts (`java-read`, `java-print`,
+`java-classes`, `java-diagnostics` on `:javac-prog :stage0`; `java-check` on `:prog`; `java-compiled` on `:gate`): javac on Arbace
+is Arbace's own executable, not a host toolchain, so neither javac's read nor the native read (`read --no-javac`, JN9f, the
+`nread` level of JFS123 (b), outside the gate) changes a score: both attribute against the platform's class files (javac through
+its file manager, the native provider through `arbace.repr.java.classfile` and `jdk/platform/java.base.decls`). The one reason for
+all four is the user's ruling of 2026-11-09: the platform, jdk26u's build tree's modules pinned by `jdk/javac/platform.sha256`, is
+a toolchain's product consumed at check time by the read, and through the forms made against it by the interpreter, j2g and the
+printer. It moves with the switch (JOP4 (a)), not before. The judge's 0.014 is the 207 jtreg `:stdout` tests (414 cases at interp
+and compiled) judged by the JDK's recorded stdout, kept by the user's JCV2 (b) (JCV2 (c), reviewed golden files, not chosen).
+
+**JOP12 (a), taken overnight (round 52): the facts cannot move ahead of the pin.** A fact may name `:requires-line {:file F :line
+L :why W}`: `crops.score` holds a claim above 0.5 at 0.5 and reports it CLAIM REFUTED (so `--judge --strict` fails) unless F has
+the line L exactly (`requires-line-problem`). Java's read, eval, AOT and print name `jdk/javac/platform.sha256`'s `# kind: own`
+(JOP2 (a)'s one setting); at their present 0.5 nothing changes. `test/javac-platform/switch.patch` regenerated over the new lines
+(it still applies, `git apply --check`; the night's preflight checks the same). Self-test: the own pin passes; the controls (the
+build tree's pin, a pin that only mentions the line in a comment, no pin file) refute, and with the check disabled the three
+controls fail the self-test as they must. Alternatives: (b) score the stages from the pin's kind (no stated score; but JOP7 (a)
+moves the facts at the clean run, not at the pin), (c) nothing (the patch could then be applied without the pin).
+
+**Proven light** (stage 0 of next, `GOMEMLIMIT=1GiB`): `bin/crops-score --self-test` 0 (508 MB); `--judge --strict` 0, 0 problems
+(996 MB, 66 s); `bin/reap` 0 problems, 53 of 56 cells (861 MB); `bin/records-check` 9 pairs, 0 problems (718 MB). The patch applied
+with the build tree's pin: Java's four stages held at 0.5, four refuted, `--strict` status 1 (59.7). The patch with a `# kind: own`
+line appended to the pin (temporarily, reverted): read, eval, AOT and print 1, independence 99.7, the only problem the record's
+difference (`--record` writes it). No record changes; `scores.edn` unchanged.
+
+**A finding on JOP7 (a).** `.tmp/goal/java-platform-night.sh` applies the patch and records the scores in the switch night's second
+commit; JOP7 (a) moves the facts in the commit that records the clean run's audited pass. The guard allows either (it needs the pin
+only). To follow JOP7 (a) the night stops after the platform's commit and the patch goes with the clean record.
+
+### Proposed (JOP13)
+
+- **JOP13, the source sets the read consumes.** Each test's source set (`test/java/ref-jdk26.edn`'s `:files`, the files and their
+  renamed places the read, interp, compiled and print levels take) is what the JDK's javac parsed (`bin/java-check record_sources`:
+  `javac -verbose -implicit:class -sourcepath`, the system's JDK), and JCV3 left it open ("a record of the JDK, the read stage's input
+  ... until crops-score counts the read stage's corpus records"). By the header's rule it is a record a toolchain made, consumed by
+  every stage, so after the switch the four stages would still be 0.5 by the letter. (a) **Make the source sets on javac on Arbace**
+  (JCV3 (b)): `record_sources` with `bin/repr-java javac` (javac's command line on the tool, the same `-verbose -sourcepath`), the
+  levels reading a source-set record of Arbace's own (`test/java/sources.edn`), the JDK's sets compared in the oracle tier
+  (`--judge --oracle`); per case through crops.edn's `:own-inputs :java [:platform :sources]` and `:case-inputs` if they are made in
+  parts (RFP53 (a)'s form). Cost: the verb and a night run (3,325 tests' `javac -verbose` on the tool; estimate 1 h at 8 jobs, about 2
+  GiB a javac). (b) Rule the source set a run list (which files make the test, as the corpus's selection is which tests run), not a
+  consumed record: the switch moves the four stages to 1 as staged. (c) Count it at the read alone (eval, AOT and print take the
+  read's forms, not the list). *Recommended: (a)*, the honest reading of the rule and JCV3's own condition; until it is built (b)'s
+  projection is the switch's.
+
+| state | read | eval | AOT | print | judge | independence |
+|---|---|---|---|---|---|---|
+| now (the build tree's pin) | 0.5 | 0.5 | 0.5 | 0.5 | 0.986 | 60 |
+| switch night (own pin), JOP7 (a)'s clean run, JOP13 (b) | 1 | 1 | 1 | 1 | 0.986 | 100 (99.7) |
+| switch night, JOP13 (a) until the own source sets | 0.5 | 0.5 | 0.5 | 0.5 | 0.986 | 60 |
+| JOP13 (a) built | 1 | 1 | 1 | 1 | 0.986 | 100 (99.7) |
+| JCV2 (c) (the 207 reviewed) | | | | | 1 | 100 |
+
+## As built: JOP13 (a), the source sets as Arbace's own record (2026-11-17, round 52; branch `n-java-sources`)
+
+**JOP13 (a), taken overnight (round 52).** Each test's source set is now made by javac on Arbace and kept as Arbace's own record,
+`test/java/sources.edn`, one row a test: `[ID {:sources :own :platform P :files [[REL DST] ...] :unnamed [DST ...]}]`, a
+golden-diagnostics test (run in place by javac on Arbace, no set consumed) `:in-place true`, a set javac on Arbace could not make
+`:sources "why"` (not own). `:platform` is the platform javac on Arbace read against: `:own` when `jdk/javac/platform.sha256` has
+`# kind: own`, else the build tree's name.
+
+| piece | what |
+|---|---|
+| `bin/java-check sources [--jobs N] [--only RE] [--list FILE] [--scan DIR] [--record]` | `java.check/scan` (or a scan made before, `--scan`), then `record_sources` as `--record-ref` runs it but with `JAVA_CHECK_OWN_JAVAC` (`bin/repr-java javac` on `REPR_JAVA_EXE`, the same `-verbose -implicit:class -sourcepath DIR[:ROOTS]`, `GOMEMLIMIT` `JAVA_CHECK_SOURCES_MEM`, default 1GiB, each javac under `busybox time -v`, `WORK/sources/mem.tsv`), `rename`, then `java.check/own-sources`: rows compared with `ref-jdk26.edn`'s `:files`, `--record` writing them (other tests' rows kept) |
+| javac on Arbace's `-verbose` | every parsed file as `WrappedJavaFileObject[PATH]` (the argument as given, `./REL` from the source path's `.`, `ROOT/REL` from a source root), parsed by its own branch of `record_sources`; the JDK's branch unchanged |
+| `record_sources`' file list | each file once: the plan names the main file for `@compile`, `@build` and `@run`; the JDK's javac takes a repeated file once, javac on Arbace's command line (`jdk.internal.jrt.javac.Main`) parses it again and fails with "duplicate class" (found here: 6 of the first 8 tests). The JDK's sets are unchanged by it |
+| `java.check/plan` | a test's `:files`/`:unnamed` from `sources.edn` (beside the reference) when its row has them and is `:own`, else the JDK's; `JAVA_CHECK_SOURCES=jdk`: the JDK's always. So the read, interp, compiled and print levels consume the own record where it exists |
+| `bin/java-check sources --check [--complete]`, step `java-sources-oracle` | the oracle tier's (`:phase :oracle`, `:hosts [:stage0]`, 1 GiB, records alone): every test with a JDK set against its row (equal, differ, not made, unrecorded), the negative control (the first equal row judged against another test's JDK set, which must differ); exit 1 on a difference, a set not made, a passing control, and with `--complete` a test the record lacks |
+| `test/crops/crops.edn` `:own-inputs :java` | `[:platform :sources]`: a case is own when both are `:own` |
+| `test/crops/independence.edn` | Java's read, eval, AOT and print: `:case-inputs {:file "test/java/sources.edn"}` and `:requires-record {:file "test/java/sources.edn"}` beside JOP12 (a)'s `:requires-line` |
+| `test/crops/score.ae` | `requires-record-problem`: a claim above 0.5 is held at 0.5, CLAIM REFUTED, unless the record exists, is not INTERIM and has a row for every case id of the cell; `rfp53-counts` counts an id the cell's records hold twice as two cases (Java's read cell: read and classes, as the matrix counts 7,844), at most the total; `cell-ids` leaves out the `:role :beside` sources (eval's diffcheck and oracle rows, which the matrix does not count) |
+| `test/javac-platform/switch.patch` | regenerated over the new keys and the new step (still `git apply --check`), the switched comment saying the stages are 1 once the own record, made against the own pin, covers them |
+
+**Proven light** (stage 0 of next, `GOMEMLIMIT=1GiB`, javac's tool `javac-f70d1a9d900e`, one process at a time): the scan 61 s, peak
+1.06 GB (stage 0; the one process just over 1 GiB, as `--record-ref`'s own scan); `sources --jobs 1` over 10 tests (t03208, t03213
+jls; t03219 hotspot; t04247, t04266 with Util.java; t04443, t04730 run-compile, 5 and 8 files, a subpackage; t04575 run-jitopts, 4
+files; t06427, t06430 golden-diagnostics): 8 javac runs, 0.44 to 1.05 s and 301 to 327 MB each, the verb's own peak 723 MB, 17 s;
+**8 of 8 sets equal to the JDK's** (`:files` and `:unnamed`), 2 in place; `--record` wrote the 10 rows. `sources --check`: 3,325 tests
+with a JDK set, 8 equal, 0 differ, 3,317 not recorded, the control differing (717 MB). `plan` of the 10 with the own record equals
+`JAVA_CHECK_SOURCES=jdk`'s byte for byte; with a row's place altered (a copy) the plan takes it. `crops-score --self-test` 0 (512
+MB): Java's 10-case cell 10 own (1.0), the build tree's platform 0 own (0.5), one test at read and classes 2 cases; the guard
+passes a covering record and holds a record without a test, no record, an INTERIM record and a cell with no case; with the guard
+disabled and the ids counted distinct, 7 failures, as they must. `--judge --strict` 0, 0 problems, Java 59.7 unchanged (1.0 GB);
+`bin/reap` 0 problems, 53 of 56 cells (848 MB); `bin/records-check` 9 pairs, 0 problems (715 MB); `bin/gate --oracle --plan` 0
+(the new step planned, 634 MB). Projections (applied, reverted): the patch and an own pin line with the 10 rows as `:platform :own`:
+the four stages refuted, "test/java/sources.edn covers 10 of 4519 of the cell's tests", held at 0.5 (59.7, `--strict` 1); with a
+full fabricated own record (4,519 ids): read, eval, AOT and print 1, 99.7, the only problem the scores record's difference.
+
+**The whole run, the main host's** (3,325 run tests; 5,230 scanned plans, 103 skipped, 1,212 golden-diagnostics in place, 3,915
+javac runs counting the tests the JDK fails): `REPR_JAVA_EXE=<the javac tool at the checkout's arbace_javac_key> bin/java-check sources
+--jobs 8 --record` (the scan 1 min at 1.06 GB; 3,915 javac runs at about 0.7 s and 0.33 GB each: about 6 min at 8 jobs, 2.7 GiB; the
+verb's stage 0 parts under 0.8 GB), then `bin/java-check sources --check --complete`, `bin/crops-score --judge --strict`. Before the
+switch it proves the sets (:platform the build tree's: no score moves); the counted record is made after the switch's pin, the same
+command, in the switch night before its facts' commit (or JOP7 (a)'s clean-run commit). A set that differs from the JDK's is
+recorded as javac on Arbace makes it (the levels then read it) and fails the oracle step until judged.
+
+**Keys.** `gate_key` and `arbace_runtime_key` do not move. Java's level steps (`:java-run`: `bin/java-check`, `test/java/`, so
+`check.ae` and `sources.edn`) and `java-judge` rerun at the night's `--full`; `crops-score` reruns; the new oracle step never passed.
+
+**A finding for later** (not in JOP13's scope): javac on Arbace's `Main` does not drop a repeated file argument as the JDK's javac
+does (javac's `Arguments` keeps the files in a set); the fix is in `overlay/jdk/javac/jdk.compiler`'s Main (moves
+`arbace_javac_key`: a tool build), until then the callers pass each file once.
+
+## As built: a file named twice, compiled once (2026-11-17, round 52; branch `n-javac-dup`)
+
+javac on Arbace's command line (`jdk.internal.jrt.javac.Main`) parsed a source file named twice twice and failed with
+"duplicate class"; the JDK's javac takes it once. How the JDK does it (jdk26u, `src/jdk.compiler/share/classes/com/sun/tools/javac`):
+`main/Option.java`'s SOURCEFILE adds `Paths.get(arg)` to `Arguments`' `files`, a `LinkedHashSet<Path>`; `getFileObjects` makes them
+file objects by `JavacFileManager.getJavaFileObjectsFromPaths` (`PathFileObject.forSimplePath` over `FSInfo.getCanonicalFile`:
+`toRealPath`, else the absolute normalized path), whose `equals` and `hashCode` are that path, into a `LinkedHashSet` again (and
+`JavaCompiler.parseFiles` keeps a set too). So a file named by any spelling of its path (`A.java`, `./A.java`, absolute, a symbolic
+link) is one unit, named as first given. Main hands its file objects to `JavacTool.getTask`, where `ClientCodeWrapper` wraps each
+of a client file manager's objects apart (`WrappedJavaFileObject`, equality by identity): equality on `FileManager.Obj` could not
+reach javac's sets.
+
+- **JFS162 (a), taken overnight (round 52):** Main takes each file once, by its canonical path (`File.getCanonicalPath`, else the
+  absolute: `FSInfo.getCanonicalFile`'s), the first spelling kept; `FileManager` and `StandardFileManager` unchanged. Rejected:
+  (b) equality on `Obj` by its path, as `PathFileObject`'s (no effect through the API's wrappers); (c) `@Trusted` on `Obj`, which
+  javac's wrapper would then pass through unwrapped (it changes how a client's exceptions are reported too: more than the fix).
+  The API's own case (a client passing one file twice to `SystemCompiler`'s task) is javac's with any client file manager, left as
+  it is.
+
+Changed: `overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/Main.java` and its forms `jdk/javac/forms/jdk/internal/jrt/javac/Main.ae`
+(written to the converter's layout by hand overnight, no conversion run: printed back by `bin/repr-java print`, the diff against
+the committed forms' print is the change alone; the day's `bin/javac-vendor verify` confirms them byte for byte, else `convert`
+replaces them); the regression case `samples-twice` in `bin/javac-vendor classes samples` (test/repr/java/java with
+`sample/Circle.java` named three times more, as `sample/Circle.java`, `./sample/Circle.java` and absolute, against the JVM's javac).
+Proven on the JDK: the overlay classes compiled by jdk26u's javac with `--patch-module jdk.compiler=...` and run as
+`java --patch-module jdk.compiler=DIR -m jdk.compiler/jdk.internal.jrt.javac.Main --platform <the build's jdk/modules>`: before,
+`A.java A.java`, `A.java ./A.java`, absolute and symbolic link all "duplicate class"; after, each compiles, as the JDK's javac, and
+`samples-twice`'s classes equal the JVM javac's byte for byte (before: `./sample/Circle.java:3: error: duplicate class`); two
+different files declaring one public class still fail as the JDK's. Keys: `arbace_javac_key` and `arbace_javac_rest_key`
+(bin/javac-vendor) move; `gate_key` and the runtime key do not.

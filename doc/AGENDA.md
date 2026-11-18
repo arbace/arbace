@@ -129,8 +129,11 @@ Six crops are above 90 on all three. What the others still need:
   repr/c (JCS369 (a)); `descriptors`, the 68 module descriptors as the image holds them, 67 equal and java.base known
   (ModuleHashes, JCS364 (a)); JCS389-JCS392 proposed. Stage 1's measure is done by day (h-java-platform, 2026-11-17: all 68 modules, 27,530 classes, 50 modules
   byte for byte, 48 classes `:param-names`, every process at most 2.07 GB under `GOMEMLIMIT=2GiB`); the open parts of stages 4-5
-  are JOP1-JOP8 for the user ([classes/JAVA-FRONTEND-SURVEY.md](classes/JAVA-FRONTEND-SURVEY.md), "Own platform"). Next: the known
-  file's 36 new entries, then stage 4's `platform --own` and switch. The
+  are JOP1-JOP8 for the user ([classes/JAVA-FRONTEND-SURVEY.md](classes/JAVA-FRONTEND-SURVEY.md), "Own platform"). The user approved JOP1-JOP8 (a)
+  (2026-11-17); the switch's tooling is ready on `h-java-platform` (the known file's 48 entries, `platform-own`, the cache built on a miss,
+  the weekly rebuild, the oracle step, the audit rule, JOP5's moves, the facts staged); next the switch night (round 51,
+  `.tmp/goal/java-platform-night.sh`, about 2 h 10 min), then the clean run that moves Java's independence to 100 (JOP7 (a)).
+  Decided too: JOP9 (a) the pack, JOP10 (c) the two recorded inputs until a Java night, JOP11 (a) the pin out of the javac key later. The
   score moves at stages 4-5: Java to 99.7.
   P2 by day on `java-p2` (2026-11-11; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)"): RecordComponent
   (slice 5), the classes made at run time deserializable (slice 8: Clojure's `serialization`), the platform logging bean

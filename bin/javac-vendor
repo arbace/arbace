@@ -91,7 +91,8 @@
 #                             jar: the reference while a JDK is at hand, JFS41). Corpora (default
 #                             baseline samples jdk):
 #                             baseline (the frozen clojure/'s 183 files), samples
-#                             (test/repr/java/java and module), jdk (java.base's closure, 838
+#                             (test/repr/java/java and module; samples-twice, java's with a file
+#                             named three times more, by other spellings: compiled once), jdk (java.base's closure, 838
 #                             files, made by bin/jrt-convert's sources and generate steps into
 #                             WORK/jdk-originals; JRT_WORK_RT names others), with the round
 #                             trip's javac options (bin/lib/repr-java/roundtrip, -g:none); and
@@ -143,7 +144,7 @@
 # whose support/gensrc holds the generated sources), REPR_JAVA_EXE (bin/repr-java's tool),
 # J2G_JVM_OPTS (the edge's recording on the frozen JVM, default -Xmx16g).
 set -uo pipefail
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/heavy.bash" # heavy_run: the corpus read under the gate's lock (GTS31 (b))
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
@@ -512,7 +513,19 @@ platform_make() {
 }
 # platform DIR: the platform made, each module checked against the pin
 platform() {
-  local d=$1 m h want st=0
+  local d=$1 m h want st=0 c
+  if [ "$(platform_kind)" = own ]; then
+    # the own platform (JOP2 (a), JOP3 (a)): a tree of links to the cache of the pin, ARBACE_GATE_EXES/platform-PIN20 (built
+    # on a miss), each module checked against the pin as the build tree's are
+    c=$(own_cache) || return 1
+    rm -rf "$d"; mkdir -p "$d"
+    for m in $(pin_modules); do cp -rs "$c/modules/$m" "$d/$m" || return 1; done
+    for m in $(pin_modules); do
+      h=$(module_hash "$d/$m"); want=$(pin_line "$out/platform.sha256" "$m")
+      [ "$h" = "$want" ] || { echo "javac-vendor: the own platform's $m: $h, pinned ${want:-none} ($out/platform.sha256)" >&2; st=1; }
+    done
+    return $st
+  fi
   platform_make "$d" || return 1
   for m in $(platform_modules); do
     h=$(module_hash "$d/$m")
@@ -524,6 +537,8 @@ platform() {
 # platform_pin OUT: OUT/platform.sha256
 platform_pin() {
   local o=$1 m
+  # the own platform's pin is written by platform-own --pin alone (JOP4 (a)); convert and verify keep it
+  if [ "$(platform_kind)" = own ]; then [ "$o/platform.sha256" -ef "$out/platform.sha256" ] || cp "$out/platform.sha256" "$o/platform.sha256"; return; fi
   platform_make "$work/platform" || return 1
   {
     echo "# The platform of javac on Arbace (bin/javac-vendor classes; doc/classes/JAVA-FRONTEND-SURVEY.md,"
@@ -665,6 +680,9 @@ pb_scalar() {
     cur == mod && (i = index($0, field)) { s = substr($0, i + length(field)); sub(/[ }].*/, "", s); gsub(/"/, "", s); print s; exit }' "${3:-$pbuild}"
 }
 pb_modules() { sed -n 's/^  "\([^"]*\)"$/\1/p' "${1:-$pbuild}"; }
+# pb_has_module MODULE [FILE]: the data has the module. Not a pipe into grep -q: under pipefail, grep's early exit
+# killed sed by SIGPIPE when the module was among the file's first (java.base, refused as "no module", 2026-11-17)
+pb_has_module() { pb_modules "${2:-$pbuild}" > "$TMPDIR/javac-vendor.pbm" && grep -qx -- "$1" "$TMPDIR/javac-vendor.pbm"; }
 # pb_files_rel MODULE [FILE]: the module's sources with placeholders, in the build's order
 pb_files_rel() {
   local m=$1 f=${2:-$pbuild} r d dd ex
@@ -765,6 +783,8 @@ platform_build_make() {
 pknown=${JAVAC_VENDOR_KNOWN:-$out/platform-own-known.edn}
 # the generated sources (JCS359 (a)(2)): platform-gensrc, gensrc
 . "$root/test/javac-platform/gensrc.bash"
+# the own platform (JOP1-JOP8 (a)): the pin's kind, own_build, own_cache
+. "$root/test/javac-platform/own.bash"
 # known_tsv FILE: MODULE CLASS BUILD OWN WHY, a line an entry
 known_tsv() {
   [ -f "$1" ] || return 0
@@ -840,6 +860,18 @@ module_run() {
   case $r in equal|known) return 0 ;; *) return 1 ;; esac
 }
 
+# control2_pick DIR: "MODULE CLASS", control 2's subject: the first module of DIR/summary.tsv equal or known that has a class
+# that does not differ (DIR/MODULE/build.sums less DIR/MODULE/diffs.tsv); a module without one (a descriptor shell: java.se,
+# no class) is passed over, not the end of the search (the 19-module run of 2026-11-17 took none though 12 were equal)
+control2_pick() {
+  local m c
+  for m in $(awk -F'\t' '$5 == "equal" || $5 == "known" {print $1}' "$1/summary.tsv"); do
+    [ -f "$1/$m/build.sums" ] && [ -f "$1/$m/diffs.tsv" ] || continue
+    c=$(awk -F'\t' 'FILENAME == ARGV[1] { d[$1] = 1; next } !($1 in d) {print $1; exit}' "$1/$m/diffs.tsv" "$1/$m/build.sums")
+    [ -z "$c" ] || { echo "$m $c"; return 0; }
+  done
+  echo
+}
 # modules_controls: the judgment's negative controls (GTS81 (a)), judged again on this run's own results with the known
 # file changed: (1) a known entry taken away, its module must differ; (2) an entry added for an equal class of a module
 # that ran, its module must be stale. A control that passes fails the run
@@ -854,9 +886,7 @@ modules_controls() {
     if [ "$(module_result "$k" "$u" "$s")" = differ ]; then echo "   control 1 ($m without its known $c): differ, as it must"
     else echo "   control 1 ($m without its known $c): $(module_result "$k" "$u" "$s"): PASSES, it must fail"; st=1; fi
   else echo "   control 1: no known module in this run (none taken)"; fi
-  m=$(awk -F'\t' '$5 == "equal" || $5 == "known" {print $1; exit}' "$d/summary.tsv")
-  c=
-  [ -z "$m" ] || c=$(awk -F'\t' 'FILENAME == ARGV[1] { d[$1] = 1; next } !($1 in d) {print $1; exit}' "$d/$m/diffs.tsv" "$d/$m/build.sums")
+  read -r m c < <(control2_pick "$d")
   if [ -n "$c" ]; then
     { cat "$d/known.tsv"; printf '%s\t%s\t%s\t%s\tcontrol\n' "$m" "$c" "$(awk -F'\t' -v c="$c" '$1 == c {print $2}' "$d/$m/build.sums")" "$(awk -F'\t' -v c="$c" '$1 == c {print $2}' "$d/$m/build.sums")"; } > "$d/control-2.tsv"
     module_judge "$m" "$d/$m/diffs.tsv" "$d/control-2.tsv" > "$d/control-2.txt"; read -r k u s < "$d/control-2.txt"
@@ -885,7 +915,7 @@ modules_corpus() {
   mkdir -p "$d"
   known_tsv "$pknown" > "$d/known.tsv"
   mods=${JAVAC_VENDOR_MODULES:-$(pb_modules)}
-  for m in $mods; do pb_modules | grep -qx "$m" || fail "no module $m in $pbuild"; done
+  for m in $mods; do pb_has_module "$m" || fail "no module $m in $pbuild"; done
   echo "   ${njobs:-1} at once (a module of more than $big files alone); the build's configuration ${pbuild#$root/}, the known differences ${pknown#$root/} ($(wc -l < "$d/known.tsv") classes)"
   for m in $mods; do
     n=$(pb_scalar "$m" files)
@@ -931,7 +961,11 @@ classes() {
         compile_both baseline "$frozen" -sourcepath "$frozen" || st=1 ;;
       samples)
         compile_both samples-java "$root/test/repr/java/java" || st=1
-        compile_both samples-module "$root/test/repr/java/module" || st=1 ;;
+        compile_both samples-module "$root/test/repr/java/module" || st=1
+        # a file named more than once, by other spellings of its path, compiled once, as javac's command line takes it
+        # (Arguments' set of files; javac on Arbace's Main, n-javac-dup): sample/Circle.java three times more
+        compile_both samples-twice "$root/test/repr/java/java" sample/Circle.java ./sample/Circle.java \
+          "$root/test/repr/java/java/sample/Circle.java" || st=1 ;;
       jdk)
         orig=${JRT_WORK_RT:-$work/jdk-originals}
         # made again when what they are made from changed, checked (bin/lib/repr-java/originals.bash)
@@ -953,6 +987,8 @@ classes() {
   return $st
 }
 
+# JAVAC_VENDOR_LIB=1: sourced for its functions (test/gate/javac-platform-test.bash), no command run
+if [ -n "${JAVAC_VENDOR_LIB:-}" ]; then return 0 2>"$quiet" || exit 0; fi
 case $cmd in
   convert) convert "$out" || exit 1 ;;
   edge) record_edge "$out" || exit 1 ;;
@@ -1024,6 +1060,11 @@ case $cmd in
     want=$(arbace_javac_key "$root")
     if [ -x "$d/arbace-javac" ] && [ "$(cat "$d/arbace-javac.key" 2>"$quiet")" = "$want" ] && [ -f "$d/j2g.log" ] && [ -f "$d/report.edn" ]; then
       echo "javac-vendor tool: kept, $d/arbace-javac (key ${want:0:12}, the checkout's)"
+      # JOP3 (a): with the own pin, the tool's step also makes the platform on a miss (the javac-tool step builds both: the
+      # Java steps that need the tool need the platform; 15-20 minutes at --jobs 3, about 6.5 GB, under the step's lock)
+      [ "$(platform_kind)" = own ] || exit 0
+      if [ -n "$check" ]; then JAVAC_VENDOR_PLATFORM_BUILD=0 own_cache > "$quiet" 2>&1 || { echo "javac-vendor tool: no own platform of the pin yet"; exit 1; }; exit 0; fi
+      own_jobs=${JAVAC_VENDOR_PLATFORM_JOBS:-3}; JAVAC_EXE=$d/arbace-javac REPR_JAVA_EXE=$d/arbace-javac own_cache || fail "tool: the own platform"
       exit 0
     fi
     # --check (GTS57 (a)): only whether the tool is there at its key (exit 0 for a hit), so that bin/gate takes no lock for it
@@ -1043,7 +1084,10 @@ case $cmd in
     . "$root/bin/lib/prog-units.bash"
     prog_units "$t/j2g-javac/prog:prog" > "$d/units.tsv.tmp" && mv "$d/units.tsv.tmp" "$d/units.tsv" \
       || { rm -f "$d/units.tsv.tmp"; echo "javac-vendor tool: no units of the tool's program" >&2; }
-    echo "javac-vendor tool: built, $d/arbace-javac (key ${want:0:12}, $(since "$t0"))" ;;
+    echo "javac-vendor tool: built, $d/arbace-javac (key ${want:0:12}, $(since "$t0"))"
+    if [ "$(platform_kind)" = own ]; then
+      own_jobs=${JAVAC_VENDOR_PLATFORM_JOBS:-3}; JAVAC_EXE=$d/arbace-javac REPR_JAVA_EXE=$d/arbace-javac own_cache || fail "tool: the own platform"
+    fi ;;
   build)
     # j2g on the program built from the checkout (JFS22 (a)), when there is one
     [ -z "${J2G_GO_EXE:-}" ] && [ -x "$root/target/arbace-go/amd64/arbace" ] && export J2G_GO_EXE=$root/target/arbace-go/amd64/arbace
@@ -1068,6 +1112,62 @@ case $cmd in
     platform "$d" || exit 1
     echo "$d" ;;
   platform-pin) platform_pin "$out" && cat "$out/platform.sha256" ;;
+  platform-own)
+    # JOP3 (a), JOP4 (a): the own platform built into DIR (default WORK/own) [--gensrc DIR: from those generated sources,
+    # else the committed pack] [--jobs N]; --pin: then OUT/platform.sha256 rewritten as its pin (the switch); --pack: the
+    # generated sources packed into OUT/platform-gensrc.tar.xz first (from --gensrc's DIR)
+    d=$work/own g= pin= pack=
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --gensrc) g=$2; shift 2 ;;
+        --jobs) own_jobs=$2; shift 2 ;;
+        --pin) pin=1; shift ;;
+        --pack) pack=1; shift ;;
+        *) d=$1; shift ;;
+      esac
+    done
+    case $d in /*) ;; *) d=$root/$d ;; esac
+    if [ -n "$pack" ]; then
+      [ -n "$g" ] || fail "platform-own --pack needs --gensrc DIR"
+      own_gensrc_pack "$g" "$own_pack" || fail "platform-own: the pack"
+      echo "javac-vendor platform-own: ${own_pack#$root/}, $(stat -c %s "$own_pack") bytes"
+    fi
+    t0=$(date +%s)
+    own_build "$d" "$g" || fail "platform-own: the build ($d)"
+    if [ -n "$pin" ]; then cp "$d/pin.sha256" "$out/platform.sha256"; echo "javac-vendor platform-own: ${out#$root/}/platform.sha256 is the own platform's pin"; fi
+    echo "javac-vendor platform-own: $d/modules ($(since "$t0"))" ;;
+  platform-cache)
+    # JOP3 (a): the own pin's platform, ARBACE_GATE_EXES/platform-PIN20, built on a miss (--check: only whether it is there)
+    [ "$(platform_kind)" = own ] || { echo "javac-vendor platform-cache: the pin is the build tree's (no own platform to keep)"; exit 0; }
+    case ${1:-} in
+      --check) JAVAC_VENDOR_PLATFORM_BUILD=0 own_cache || exit 1 ;;
+      --seed)
+        # a platform built by platform-own DIR, checked against the pin and moved into the cache (the switch night's)
+        sd=${2:?platform-cache --seed DIR}
+        own_check "$sd" "$out/platform.sha256" || fail "platform-cache --seed: $sd is not the pin's platform"
+        c=$(. "$root/bin/lib/gate-cache.bash" && arbace_gate_exes "$root")/platform-$(sha256sum < "$out/platform.sha256" | cut -c1-20)
+        mkdir -p "$(dirname "$c")"
+        cp "$out/platform.sha256" "$sd/pin.committed" && rm -rf "$c" "$sd/classes" "$sd/tmp" && mv "$sd" "$c" && touch "$c/ok" || fail "platform-cache --seed: not moved into $c"
+        echo "$c" ;;
+      --jobs) own_jobs=$2; own_cache || exit 1 ;;
+      '') own_cache || exit 1 ;;
+      *) fail "platform-cache [--check | --jobs N]" ;;
+    esac ;;
+  platform-oracle)
+    # JOP6 (a): the oracle tier's comparison of the own platform with the JDK build tree (javac-platform-oracle)
+    t0=$(date +%s)
+    platform_oracle || { echo "javac-vendor platform-oracle: the own platform differs from the build tree beyond the known differences, or a control passed ($(since "$t0"))"; exit 1; }
+    echo "javac-vendor platform-oracle: the own platform is the build tree's, byte for byte or known ($(since "$t0"))" ;;
+  platform-rebuild)
+    # JOP3 (a)'s weekly proof: the generated sources made again on the current javac tool against the own platform, the
+    # platform built again from them, both required to be the pin's, byte for byte [--jobs N]
+    [ "$(platform_kind)" = own ] || { echo "javac-vendor platform-rebuild: the pin is the build tree's (nothing to rebuild)"; exit 0; }
+    [ "${1:-}" != --jobs ] || own_jobs=$2
+    t0=$(date +%s)
+    gensrc || { echo "javac-vendor platform-rebuild: the generated sources made again are not the pin's ($(since "$t0"))"; exit 1; }
+    own_build "$work/rebuild" "$work/gensrc/out" || fail "platform-rebuild: the build"
+    own_check "$work/rebuild" "$out/platform.sha256" || { echo "javac-vendor platform-rebuild: the platform built again is not the pin's ($(since "$t0"))"; exit 1; }
+    echo "javac-vendor platform-rebuild: the generated sources and the platform made again are the pin's, byte for byte ($(since "$t0"))" ;;
   platform-build)
     # JCS362 (a): OUT/platform-build.edn derived from the build tree; --check (the oracle tier's): derived afresh and
     # compared, the committed file untouched

@@ -6,7 +6,8 @@
         '(java.text DateFormat DateFormatSymbols)
         '(java.time Instant)
         '(java.util.concurrent ConcurrentHashMap ConcurrentMap)
-        '(sun.util.locale.provider CalendarDataUtility))
+        '(java.util.function Function)
+        '(sun.util.locale.provider CalendarDataUtility TimeZoneNameUtility))
 
 (defclass ^:public ^:abstract Calendar
   :implements [Serializable Cloneable (Comparable Calendar)]
@@ -184,6 +185,201 @@
   (method ^:public ^:static getInstance ^Calendar [^TimeZone zone ^Locale aLocale]
     (GregorianCalendar. zone aLocale))
 
+  (method ^:private ^:static defaultTimeZone ^TimeZone [^Locale l]
+    (let [defaultTZ (TimeZone/getDefault)
+          shortTZID (.getUnicodeLocaleType l "tz")]
+      (if (some? shortTZID)
+          (cast TimeZone
+                (.orElse (.map (TimeZoneNameUtility/convertLDMLShortID shortTZID)
+                               (method-ref Function ^TimeZone [String] TimeZone/getTimeZone))
+                         defaultTZ))
+          defaultTZ)))
+
+  (defclass ^:public ^:static Builder
+    (field ^:private ^:static ^:final ^int NFIELDS (unchecked-add-int FIELD_COUNT 1))
+
+    (field ^:private ^:static ^:final ^int WEEK_YEAR FIELD_COUNT)
+
+    (field ^:private ^long instant)
+
+    (field ^:private ^int/1 fields)
+
+    (field ^:private ^int nextStamp)
+
+    (field ^:private ^int maxFieldIndex)
+
+    (field ^:private ^String type)
+
+    (field ^:private ^TimeZone zone)
+
+    (field ^:private ^boolean lenient true)
+
+    (field ^:private ^Locale locale)
+
+    (field ^:private ^int firstDayOfWeek)
+
+    (field ^:private ^int minimalDaysInFirstWeek)
+
+    (constructor ^:public [this])
+
+    (method ^:public setInstant ^Builder [this ^long instant]
+      (when (some? fields) (throw (IllegalStateException.)))
+      (set! (.-instant this) instant)
+      (set! nextStamp COMPUTED)
+      this)
+
+    (method ^:public setInstant ^Builder [this ^Date instant]
+      (.setInstant this (.getTime instant)))
+
+    (method ^:public set ^Builder [this ^int field ^int value]
+      (when (or (< field 0) (>= field FIELD_COUNT))
+        (throw (IllegalArgumentException. "field is invalid")))
+      (when (.isInstantSet this) (throw (IllegalStateException. "instant has been set")))
+      (.allocateFields this)
+      (.internalSet this field value)
+      this)
+
+    (method ^:public setFields ^Builder [this & ^int/1 fieldValuePairs]
+      (let [len (alength fieldValuePairs)]
+        (when-not (== (unchecked-remainder-int len 2) 0) (throw (IllegalArgumentException.)))
+        (when (.isInstantSet this) (throw (IllegalStateException. "instant has been set")))
+        (when (< (unchecked-add-int nextStamp (unchecked-divide-int len 2)) 0)
+          (throw (IllegalStateException. "stamp counter overflow")))
+        (.allocateFields this)
+        (let [^:mutable ^int i 0]
+          (while (< i len)
+            (let [field (aget fieldValuePairs (let [old-1 i] (set! i (unchecked-inc-int i)) old-1))]
+              (when (or (< field 0) (>= field FIELD_COUNT))
+                (throw (IllegalArgumentException. "field is invalid")))
+              (.internalSet this field (aget fieldValuePairs i))
+              (set! i (unchecked-inc-int i)))))
+        this))
+
+    (method ^:public setDate ^Builder [this ^int year ^int month ^int dayOfMonth]
+      (.setFields this YEAR year MONTH month DAY_OF_MONTH dayOfMonth))
+
+    (method ^:public setTimeOfDay ^Builder [this ^int hourOfDay ^int minute ^int second]
+      (.setTimeOfDay this hourOfDay minute second 0))
+
+    (method ^:public setTimeOfDay ^Builder [this ^int hourOfDay ^int minute ^int second ^int millis]
+      (.setFields this HOUR_OF_DAY hourOfDay MINUTE minute SECOND second MILLISECOND millis))
+
+    (method ^:public setWeekDate ^Builder [this ^int weekYear ^int weekOfYear ^int dayOfWeek]
+      (.allocateFields this)
+      (.internalSet this WEEK_YEAR weekYear)
+      (.internalSet this WEEK_OF_YEAR weekOfYear)
+      (.internalSet this DAY_OF_WEEK dayOfWeek)
+      this)
+
+    (method ^:public setTimeZone ^Builder [this ^TimeZone zone]
+      (when (nil? zone) (throw (NullPointerException.)))
+      (set! (.-zone this) zone)
+      this)
+
+    (method ^:public setLenient ^Builder [this ^boolean lenient]
+      (set! (.-lenient this) lenient)
+      this)
+
+    (method ^:public setCalendarType ^Builder [this ^:mutable ^String type]
+      (when (.equals type "gregorian") (set! type "gregory"))
+      (when (and (not (.contains (Calendar/getAvailableCalendarTypes) type))
+                 (not (.equals type "iso8601")))
+        (throw (IllegalArgumentException. (java-str "unknown calendar type: " type))))
+      (if (nil? (.-type this))
+          (set! (.-type this) type)
+          (when-not (.equals (.-type this) type)
+            (throw (IllegalStateException. "calendar type override"))))
+      this)
+
+    (method ^:public setLocale ^Builder [this ^Locale locale]
+      (when (nil? locale) (throw (NullPointerException.)))
+      (set! (.-locale this) locale)
+      this)
+
+    (method ^:public setWeekDefinition ^Builder [this ^int firstDayOfWeek
+                                                 ^int minimalDaysInFirstWeek]
+      (when (or (not (.isValidWeekParameter this firstDayOfWeek))
+                (not (.isValidWeekParameter this minimalDaysInFirstWeek)))
+        (throw (IllegalArgumentException.)))
+      (set! (.-firstDayOfWeek this) firstDayOfWeek)
+      (set! (.-minimalDaysInFirstWeek this) minimalDaysInFirstWeek)
+      this)
+
+    (method ^:public build ^Calendar [this]
+      (when (nil? locale) (set! locale (Locale/getDefault)))
+      (when (nil? zone) (set! zone (Calendar/defaultTimeZone locale)))
+      (when (nil? type) (set! type (.getUnicodeLocaleType locale "ca")))
+      (when (nil? type)
+        (if (and (.equals "TH" (.getCountry locale)) (.equals "th" (.getLanguage locale)))
+            (set! type "buddhist")
+            (set! type "gregory")))
+      (let [^Calendar cal (switch type
+                            "gregory" (GregorianCalendar. zone locale true)
+                            "iso8601"
+                              (let [gcal (GregorianCalendar. zone locale true)]
+                                (.setGregorianChange gcal (Date. Long/MIN_VALUE))
+                                (.setWeekDefinition this MONDAY 4)
+                                gcal)
+                            (throw (IllegalArgumentException.
+                                     (java-str "unknown calendar type: " type))))]
+        (.setLenient cal lenient)
+        (when-not (== firstDayOfWeek 0)
+          (.setFirstDayOfWeek cal firstDayOfWeek)
+          (.setMinimalDaysInFirstWeek cal minimalDaysInFirstWeek))
+        (if (.isInstantSet this)
+            (do (.setTimeInMillis cal instant) (.complete cal) cal)
+            (do
+              (when (some? fields)
+                (let [weekDate (and (.isSet this WEEK_YEAR)
+                                    (> (aget fields WEEK_YEAR) (aget fields YEAR)))]
+                  (when (and weekDate (not (.isWeekDateSupported cal)))
+                    (throw (IllegalArgumentException.
+                             (java-str "week date is unsupported by " type))))
+                  (loop [^int stamp MINIMUM_USER_STAMP]
+                    (when (< stamp nextStamp)
+                      (loop [^int index 0]
+                        (if (<= index maxFieldIndex)
+                            (if (== (aget fields index) stamp)
+                                (.set cal index (aget fields (unchecked-add-int NFIELDS index)))
+                                (recur (unchecked-inc-int index)))
+                            nil))
+                      (recur (unchecked-inc-int stamp))))
+                  (when weekDate
+                    (let [^int weekOfYear (if (.isSet this WEEK_OF_YEAR)
+                                              (aget fields (unchecked-add-int NFIELDS WEEK_OF_YEAR))
+                                              1)
+                          ^int dayOfWeek (if (.isSet this DAY_OF_WEEK)
+                                             (aget fields (unchecked-add-int NFIELDS DAY_OF_WEEK))
+                                             (.getFirstDayOfWeek cal))]
+                      (.setWeekDate cal
+                                    (aget fields (unchecked-add-int NFIELDS WEEK_YEAR))
+                                    weekOfYear
+                                    dayOfWeek)))
+                  (.complete cal)))
+              cal))))
+
+    (method ^:private allocateFields ^void [this]
+      (when (nil? fields)
+        (set! fields (new int/1 (unchecked-multiply-int NFIELDS 2)))
+        (set! nextStamp MINIMUM_USER_STAMP)
+        (set! maxFieldIndex -1)))
+
+    (method ^:private internalSet ^void [this ^int field ^int value]
+      (aset fields
+            field
+            (let [old-2 nextStamp] (set! nextStamp (unchecked-inc-int nextStamp)) old-2))
+      (when (< nextStamp 0) (throw (IllegalStateException. "stamp counter overflow")))
+      (aset fields (unchecked-add-int NFIELDS field) value)
+      (when (and (> field maxFieldIndex) (< field WEEK_YEAR)) (set! maxFieldIndex field)))
+
+    (method ^:private isInstantSet ^boolean [this] (== nextStamp COMPUTED))
+
+    (method ^:private isSet ^boolean [this ^int index]
+      (and (some? fields) (> (aget fields index) UNSET)))
+
+    (method ^:private isValidWeekParameter ^boolean [this ^int value]
+      (and (> value 0) (<= value 7))))
+
   (method ^:public ^:static ^:synchronized getAvailableLocales ^Locale/1 []
     (DateFormat/getAvailableLocales))
 
@@ -231,7 +427,7 @@
     (set! isTimeSet false)
     (set! areFieldsSet false)
     (aset isSet field true)
-    (aset stamp field (let [old-1 nextStamp] (set! nextStamp (unchecked-inc-int nextStamp)) old-1))
+    (aset stamp field (let [old-3 nextStamp] (set! nextStamp (unchecked-inc-int nextStamp)) old-3))
     (when (== nextStamp Integer/MAX_VALUE) (.adjustStamp this)))
 
   (method ^:public ^:final set ^void [this ^int year ^int month ^int date]
@@ -422,15 +618,57 @@
     (when-not isTimeSet (.updateTime this))
     (when (or (not areFieldsSet) (not areAllFieldsSet))
       (.computeFields this)
-      (.markFieldsComputed this)))
+      (set! areAllFieldsSet (set! areFieldsSet true))))
 
   (method ^:private markFieldsComputed ^void [this]
-    (loop [^int i 0]
-      (when (< i (alength fields))
-        (aset stamp i COMPUTED)
-        (aset isSet i true)
-        (recur (unchecked-inc-int i))))
-    (set! areFieldsSet (set! areAllFieldsSet true)))
+    (.setFieldsComputed this ALL_FIELDS))
+
+  (field ^:static ^:final ^int ALL_FIELDS
+    (unchecked-subtract-int (bit-shift-left-int 1 FIELD_COUNT) 1))
+
+  (method ^:final getSetStateFields ^int [this]
+    (let [^:mutable ^int mask 0]
+      (loop [^int i 0]
+        (if (< i (alength fields))
+            (if (not (== (aget stamp i) UNSET))
+                (do
+                  (set! mask (bit-or-int mask (bit-shift-left-int 1 i)))
+                  (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))
+            nil))
+      mask))
+
+  (method ^:final setFieldsComputed ^void [this ^:mutable ^int fieldMask]
+    (if (== fieldMask ALL_FIELDS)
+        (do
+          (loop [^int i 0]
+            (when (< i (alength fields))
+              (aset stamp i COMPUTED)
+              (aset isSet i true)
+              (recur (unchecked-inc-int i))))
+          (set! areFieldsSet (set! areAllFieldsSet true)))
+        (loop [^int i 0]
+          (when (< i (alength fields))
+            (cond
+              (== (bit-and-int fieldMask 1) 1) (do (aset stamp i COMPUTED) (aset isSet i true))
+              (and areAllFieldsSet (not (aget isSet i))) (set! areAllFieldsSet false))
+            (set! fieldMask (unsigned-bit-shift-right-int fieldMask 1))
+            (recur (unchecked-inc-int i))))))
+
+  (method ^:final setFieldsNormalized ^void [this ^:mutable ^int fieldMask]
+    (when-not (== fieldMask ALL_FIELDS)
+      (loop [^int i 0]
+        (when (< i (alength fields))
+          (when (== (bit-and-int fieldMask 1) 0)
+            (aset stamp i (aset fields i 0))
+            (aset isSet i false))
+          (set! fieldMask (bit-shift-right-int fieldMask 1))
+          (recur (unchecked-inc-int i)))))
+    (set! areFieldsSet true)
+    (set! areAllFieldsSet false))
+
+  (method ^:final isPartiallyNormalized ^boolean [this]
+    (and areFieldsSet (not areAllFieldsSet)))
 
   (method ^:final selectFields ^int [this]
     (let [^:mutable fieldMask (bit-shift-left-int 1 YEAR)]
@@ -528,8 +766,7 @@
 
   (method ^:private updateTime ^void [this]
     (.computeTime this)
-    (set! isTimeSet true)
-    (when areFieldsSet (.markFieldsComputed this)))
+    (set! isTimeSet true))
 
   (method ^:private adjustStamp ^void [this]
     (let [^:mutable max MINIMUM_USER_STAMP

@@ -10715,3 +10715,384 @@ mac/n-c-split 2fdd806f3 (CS329 (a), on n-c-print) pushed after the entry above; 
 appends (kept in order) and test/reap/matrix.edn's C print row (n-c-split's 4831 / 3 / 16) beside the C++ read row (n-cpp-night's);
 `bin/reap --record` unchanged, `bin/crops-score --judge --strict` and `bin/records-check` (9 pairs, 0 problems) pass, repr/c's convert
 and print and ci's check required and load-filed on stage 0 with no new warning, `bin/repr-c check --c23` rerun.
+
+## 2026-11-17: Java's interp members and missing classes by cause (branch `h-java-members`, from `next` `55e8c0ae7`)
+
+h-java-deferred's two costlier groups, the 48 "No accessible" / "No matching" members and the 37 ClassNotFoundExceptions, run
+again at interp on next's gate executable `f60652fb7fb9568e76b1` (85 tests, 55 s, the same results) and each test's cause read
+from its full trace and the executable's j2g output (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-members"). No cause is
+in the interpreter's analysis, so nothing is provable by day and no row moves. Built for the night (a build, no conversion):
+j2g's DynSub list gains ObjectInputStream, ObjectOutputStream, SimpleFileVisitor, FileTypeDetector, BreakIterator and HttpRequest
+(15 member tests and 6 "cannot extend" ones); j2g's support tables give Executable what Method and Constructor have (accessFlags,
+getAnnotated*, getParameters: 3), String.transform (1), System.setProperties over jrt's table (1) and Object's protected finalize
+(1); the member tables list an inner member class's constructors with the outer instance first (AQLS's ConditionObject, 1). Left,
+with the night's conversion list: jrt's hand-written gaps (getProtectionDomain, Thread.ofPlatform, ForkJoinPool's schedule and
+getStealCount, Semaphore's protected reducePermits, AQS's ConditionObject being ReentrantLock's), Package and the asynchronous
+channels outside the world, RMI (F27), SimpleFileVisitor missing from javac's tool's world (the launcher tests, 11),
+Calendar.Builder, MalformedParametersException. Alternatives considered: the members through the interpreter's reflection
+fallback (no: the methods are not in the Go program's tables at all); listing each extended class's protected members without a
+DynSub_C (no: an interpreted subclass needs the DynSub to call them).
+
+## 2026-11-17: Java's AOT cell triaged by root cause (branch `h-java-aot-triage`, from `next` `498d7296f`)
+
+The AOT cell's 536 deferred and 201 by-design rows (test/java/check-compiled.edn, gate 13c's) read by cause against the interp triage
+(h-java-deferred's run, h-java-members' tables) and one light measurement: `bin/java-check --levels compiled --analyze-only` of the 328
+rows recorded `:refused`, over today's jdk/forms (F26's conversion), on f26-ghidra's executable `31f89bf86be7dac52b3d` (52 min, peak
+2.8 GB): 140 of the 198 deferred refusals and 62 of the 130 by-design ones analyze today. The record predates B2's world and F26: 135
+rows wait on next's conversion (h-java-deferred's ObjectInputFilter, Logger, ClassCache; F26's Wrapper), 148 pass at interp already,
+52 are h-java-members', 24 compiled-only (javac's API on the shipped program 16, JCS158), 177 shared with interp's remaining causes.
+Built: j2g's `up-sym` gives `(conv any nil)` for a null constant cast to a class (t05934's "nil.Ref undefined"), with a unit test and its
+control. The by-design audit found `:design-also-compiled` stale (serialization out of by design since JCS167 (a), the class-file API in
+the world since F26: 44 of its rows deferred or passing at interp, 43 analyzing), `:classloading` taking world gaps by its pattern, `:jmx`
+wider than what JMX-1 left out: AT1-AT10 proposed (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-aot-triage"), no row moved.
+Alternatives considered: re-sorting the classes now (refused: the user decides, and the night's whole record moves them anyway); a light
+compiled run (not light: a shard is a whole-program j2g run and a build).
+
+## 2026-11-17: AT1-AT10 decided; AT9 and AT10 built (branch `h-java-aot-triage`, next merged at `7e2115a6e`)
+
+The user approved AT1-AT10 as recommended (round 51). AT1-AT8 are written into doc/classes/JAVA-DEFERRED-TRIAGE.md's decided list as the
+main host's steps after the night's whole compiled record, with their ids. Built: AT9, the edge recorder gives every class it records
+with an info its generics (`env/reflect-generics`, moved out of analyze's class-generics; jdk/edge.edn grows at the night's `bin/j2g-edge
+update`, which must precede the essential `j2g-edge` step); AT10, j2g translates an instance call of Object.finalize() that no class of
+the receiver's declares as Object's empty body (`jrt.NN` of the receiver; t06387). Each with a bin/j2g-unit test and controls (pass on
+`31f89bf86be7dac52b3d`). Alternatives: AT9 (b) java-check's compiled level over the platform's declarations (changes refusals into run-time
+stubs); AT10 (b) a Finalize__V on every translated struct (jrt and every class's code grow for one test).
+
+## 2026-11-17: RP3 (a), two of the converter's type losses fixed (branch `h-java-readprint`)
+
+arbace/repr/java/convert.ae: an int operand compared with a long literal is widened explicitly, `(== (long x) 0)` (the
+literal's form being an int literal's, the printed Java compared ints: t03434's `pos[0] != 0L`); a box unboxed into a wider
+primitive local keeps the local's declared type as its tag (`float i = it.next()` of an Iterator<Integer>, t06032, was an
+int). Proved on javac's tool at hand (it loads the changed converter from the checkout): both tests pass read, print (class
+files equal) and interp; repr/java's check as expected but the baseline's two ASM files (`bits == 0L`), their hashes updated;
+the samples' and baseline's round trips as known. The jdk corpora, jdk/ and jdk/javac/ forms and the essential forms wait for
+the night (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-readprint"). Alternatives considered: the literal written
+`(long 0)` (a cast of a constant javac folds; the widened operand is what javac's Lower compares); the printer writing every
+literal of a long comparison as long (it cannot tell a long literal from an int one in the forms).
+
+## 2026-11-17: the own platform's switch prepared by day (JOP1-JOP8 (a), the user; branch `h-java-platform`)
+
+The user approved JOP1-JOP8, all (a), and asked for the transition night (round 51). By day, light (no platform build, no
+re-read), on `h-java-platform` with next `8049a4359` merged: the known file's 48 `:param-names` entries (JOP8); the build tree's
+other reads behind the pin's kind (JOP5: `bin/lib/repr-java/platform.bash`, front-check, parse-check, `bin/jrt-convert`,
+`jrt.derive`; jdk/'s two build-tree inputs recorded in `jdk/javac/platform-records/`); `bin/javac-vendor platform-own`,
+`platform-cache` (built on a miss by javac-tool's step), `platform-rebuild` (weekly step `javac-platform-rebuild`), `platform-oracle`
+(oracle step `javac-platform-oracle`) and the audit's build-tree rule (JOP2-JOP4, JOP6; logic in `test/javac-platform/own.bash`); the
+two `bin/javac-vendor` bugs fixed with `test/gate/javac-platform-test.bash` (21 checks); the facts staged in
+`test/javac-platform/switch.patch` (JOP7); the night's script `.tmp/goal/java-platform-night.sh` (`--dry-run`). Proven on three modules
+by hand: the own build's java.logging and jdk.unsupported have the build pin's module hashes, java.prefs its known class; seed,
+platform and oracle as designed. Found: the generators need a platform, so a cold clone needs the generated sources committed (JOP9,
+proposed: a 3 MB pack, as built); jdk/'s conversion takes CaseFolding.java and cacerts from the build tree (JOP10, proposed: recorded
+copies as built); JCS365's pin out of the javac key needs a `gate_key` move (JOP11). Keys: `gate_key` and the runtime key unchanged,
+`arbace_javac_key` moved (and again at the switch). Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the own platform's
+tooling, for the switch night".
+
+## 2026-11-17: JOP9 (a), JOP10 (c), JOP11 (a) decided (the user, round 51)
+
+The generated sources' pack committed (as built), the two recorded inputs kept until a Java night generates them, the pin out of
+the javac key with the next `gate_key` move. Recorded in doc/classes/JAVA-FRONTEND-SURVEY.md, "Decided (the user, 2026-11-17, round
+51)". No code or key change.
+
+## 2026-11-17: the held Java branches stacked for review (branch `n-review-c`, on next `42bf8614b`)
+
+Merged in order h-java-members (`2aa918480`), h-java-aot-triage (`13536ac10`), h-java-readprint (RP3, `fd7c2b261`, `a511f218d`),
+h-java-platform (`9175b7e94`). One code conflict: arbace/j2g/out.ae's support `init`, next's F26 `cls-ms` (Class.describeConstable)
+beside h-java-members' `string-transform?` and `object-finalize?` (both kept, the `when` testing all three); the rest docs (each
+branch's sections and entries kept, RP3's paragraph inside "As built: h-java-readprint") and test/crops/scores.edn (re-recorded:
+Java print 3,258 / 29 / 38, completeness 89, meant 92). The finalize interaction read: AT10 (compiled: an instance call resolved
+to Object.finalize() is `jrt.NN` of the receiver) and h-java-members' Object table entry (interp: `finalize`, protected, an empty
+Invoke) agree: `super.finalize()` and `C.this.finalize()` of a class whose supertypes declare no finalize run Object's empty body at
+both levels; a class declaring finalize keeps its own (AT10's control; the interpreter's own klass method or the class's table
+first). Both share one divergence from the JVM: a virtual call resolved to Object's is not dispatched to an override in a subclass
+of the receiver's static type (none of the corpus's tests needs it). Checked light (each process under 1.1 GB): bin/j2g-unit on
+next's gate executable with arbace.classes.env and analyze from the checkout, 135 pass and the same 7 failures as next's own tree
+(type annotations' known rows, invokers' fixture); test/gate/javac-platform-test.bash 21 of 21; bin/reap 0 problems; crops-score
+--record, --judge --strict; records-check 0 problems; bin/gate --plan exits 0. Keys: gate_key (arbace/j2g, arbace/classes),
+arbace_javac_key (the platform's tooling) and the reader's key (convert.ae) move. Nothing built.
+
+## 2026-11-17: Java's independence read stage by stage; the facts' guard JOP12 (a) (branch `n-java-indep`, round 52)
+
+On n-review-c (`6ff92621f`, merged fast-forward). Why Java is 60: read, eval, AOT and print 0.5 for one reason, the platform (the
+JDK build tree's class files, the user's ruling of 2026-11-09); javac on Arbace and the native read (`--no-javac`, nread) are
+Arbace's own and move nothing; the judge's 0.986 is the 207 `:stdout` tests on the JDK's record (JCV2 (b)). JOP12 (a), taken
+overnight (round 52): a fact's `:requires-line` (test/crops/score.ae's `requires-line-problem`) holds a claim above 0.5 at 0.5,
+refuted, until its file has the line; Java's four stages require `jdk/javac/platform.sha256`'s `# kind: own`;
+`test/javac-platform/switch.patch` regenerated over it. Alternatives: scoring from the pin's kind (moves before JOP7 (a)'s clean
+run), nothing. Proven light under 1 GiB: crops-score --self-test (controls fail when the check is disabled), --judge --strict,
+reap, records-check; the patch with the build pin refuted (60), with an own pin line 99.7 (reverted). Found: the switch night's
+script commits the facts at the switch, JOP7 (a) at the clean run; and JOP13 proposed (the source sets in ref-jdk26.edn are the
+JDK javac's, consumed by every stage: (a) made by javac on Arbace, recommended). Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As
+built: Java's independence, stage by stage, and the facts' guard". No key moves (test/crops, test/javac-platform are in none);
+the crops-score step reruns.
+
+## 2026-11-17: JOP13 (a), the Java tests' source sets as Arbace's own record (branch `n-java-sources`, round 52)
+
+On n-java-indep (`09882cbae`). JOP13 (a), taken overnight (round 52): `bin/java-check sources` makes each test's source set by
+javac on Arbace (`record_sources` with `bin/repr-java javac -verbose -implicit:class -sourcepath`, its `WrappedJavaFileObject[...]`
+lines parsed) into `test/java/sources.edn` (a row a test, `:sources`, `:platform`, `:files`, `:unnamed`; golden-diagnostics tests
+`:in-place`); `java.check/plan` takes a test's files from it; `sources --check` and the oracle step `java-sources-oracle` compare the
+JDK's sets with it (with a negative control); crops.edn's `:own-inputs :java [:platform :sources]`, independence.edn's
+`:case-inputs` and the new `:requires-record` guard on read, eval, AOT and print (test/crops/score.ae: held at 0.5 until the record
+covers the cell's tests; an id at two checks of a cell two cases; `:role :beside` sources not cases), as n-cpp-indep's CP401 (a)
+(`0466c4d68`). switch.patch regenerated. Found: javac on Arbace's Main parses a repeated file argument twice ("duplicate class"),
+the JDK's javac once: `record_sources` passes each file once. Alternatives: JOP13 (b) (the set a run list, not a record) and (c)
+(counted at the read alone), not taken. Proven light under 1.1 GB a process: 10 tests, 8 of 8 sets equal to the JDK's (javac 0.3 GB,
+under 1.1 s each), the 10 rows recorded; self-test with controls; --judge --strict, reap, records-check 0 problems; Java 59.7
+unchanged; projections 59.7 (a partial own record, refuted) and 99.7 (a full one). The main host's whole run: `bin/java-check
+sources --jobs 8 --record`, about 7 min, 2.7 GiB. Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JOP13 (a)".
+
+## 2026-11-17: javac on Arbace's command line takes a file named twice once (branch `n-javac-dup`, round 52)
+
+`jdk.internal.jrt.javac.Main` compiled a source named twice twice ("duplicate class"); the JDK's javac keeps its files in a set of
+paths made file objects equal by canonical path (jdk26u `com/sun/tools/javac/main/Arguments.java`, `Option.java`'s SOURCEFILE,
+`file/JavacFileManager.getJavaFileObjectsFromPaths`, `FSInfo.getCanonicalFile`, `PathFileObject.equals`). Main now takes each file
+once by its canonical path, the first spelling kept (JFS162 (a), taken overnight (round 52); equality on the file manager's `Obj`
+rejected: javac's `ClientCodeWrapper` wraps a client's file objects one by one, so it never reaches javac's sets). Main.ae's forms
+written by hand to the converter's layout, checked by printing them back; the regression case `samples-twice` in `bin/javac-vendor
+classes samples`. Proven on the JDK (the overlay compiled with `--patch-module jdk.compiler`, driven as a module main against the
+build's exploded modules): before the fix four spellings fail, after each compiles as the JDK's javac, the classes byte for byte.
+Keys: `arbace_javac_key`, `arbace_javac_rest_key`; not `gate_key`, not the runtime key. The tool build and its checks by day. Details:
+doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: a file named twice, compiled once".
+
+## 2026-11-17: n-java-defer, the interp cell's untaken deferred rows (round 52, overnight; branch `n-java-defer` on n-review-c `6ff92621f`)
+
+Of the eval cell's 443 deferred Java rows, the 145 the stack's triage (h-java-deferred, h-java-members, AT1-AT10) did not take were
+classed from h-java-deferred's light run: serialization 21 (12 of them h-java-deferred's ObjectInputFilter cause, their reason the
+stdout's first line: add them to its night's list), reflection 20, net 13, jrt-dates 13, mxbeans 12, the rest 9 or fewer. Taken
+overnight (round 52), recommended: `:reflection`, the largest class with interpreter causes. Run at interp on next's gate executable
+`f60652fb7fb9568e76b1` (read on javac's tool `javac-f70d1a9d900eb07a9afc`, `REPR_JAVA_STALE_OK=1`, each process under 0.8 GB), its
+causes read one by one; two are the interpreter's and fixed: Compiler$CF$Rt.isInstance answers an object without a Klass (a Proxy of
+an interpreted interface: an annotation of an interpreted annotation type) by the Klass's Class (t04729; arbace/lang, compiled, built
+tomorrow), and arbace.classes.interp's implicit-params! gives an enum's constructor javac's descriptor, String and int first (t04717).
+Both proven light with the checkout on ARBACE_PATH (arbace/classes/ loaded from it; isInstance through an equivalent substitute in
+arbace.classes.interp, removed after), and 141 passing tests of the reflective, enum and cast areas pass alike. Others found, not
+fixed: repr/java drops a receiver parameter's type annotations (t04740 t04741) and writes repeated annotations as `^` maps the reader
+merges into one (t04727). No row moves tonight (java-check runs the embedded analyzer and runtime); keys: `gate_key` and the runtime
+key move (arbace/lang, arbace/classes). doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer".
+
+## 2026-11-17: n-java-conv, two converter bugs of repr/java (round 52, overnight)
+
+Branch n-java-conv from mac/n-review-c 6ff92621f, the two bugs n-java-defer found (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-defer" on mac/n-java-defer). (1) Repeated annotations were written as two `^{Ann ...}` maps, merged into
+one by the reader (t04727): now written as their container, `^{AnnCont [(Ann {:value 20}) (Ann {:value 21})]}`, as javac's
+Annotate makes it for the class file and reflection (taken overnight (round 52), recommended over a vector of annotations
+under the containee's key, which would need Annotate's wrapping in the analyzer and reads like an array element; the
+container needs nothing new downstream and javac compiles the printed container to the same class files). The container is
+the annotation class's @Repeatable value (arbace.repr.java.model's repeatable-container and class-retention, natively in
+nattr and through two new javac hooks). (2) A receiver parameter's type annotations inside its type were dropped (t04740,
+t04741): the receiver symbol now carries its declared type as its tag when annotated inside (and for an annotated inner
+class constructor's receiver), the analyzer gives them METHOD_RECEIVER paths, the printer prints the receiver (a
+constructor's as Outer.this); also type-form* no longer drops an annotated generic outer of the class's own inner type.
+SPEC §4.4 and §4.6 amended. Proof, light (under 0.9 GB a process): the three tests read natively and by javac's front, equal;
+printed and read again, equal; the class files of the originals and of the printed files equal byte for byte; at interp
+(the gate's executable, the checkout on ARBACE_PATH) t04727 passes, t04740/t04741 reach the annotations and stop at jrt's
+missing AnnotationInvocationHandler constructor (another row); 18 of 18 annotation tests that passed still pass. The reader's
+hash moves (already stale on the base); the day rewrites the provenance (bin/jrt-convert update, bin/javac-vendor convert,
+--java-fixtures update, --forms update).
+
+## 2026-11-17: n-jrt-aih, AnnotationInvocationHandler(Class, Map) in jrt (round 52, overnight)
+
+Branch n-jrt-aih from mac/n-java-conv 92eabf1b7: the row "AnnotationInvocationHandler's constructor missing from jrt"
+(t04724 t04735 t04738 t04742, t04740 t04741; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer" on
+mac/n-java-defer). jrt registers sun.reflect.annotation.AnnotationInvocationHandler itself (JCS210 (a)), so j2g does not
+translate jdk26u's copy; the type annotations' annotations come from translated jdk26u AnnotationParser.annotationForMap,
+`new AnnotationInvocationHandler(type, memberValues)`, which j2g wrote as J2g_Missing (the gate executable
+f60652fb7fb9568e76b1's report.edn). Added to go/arbace/jrt/annotation.ae: the constructor with jdk26u's checks
+(src/java.base/share/classes/sun/reflect/annotation/AnnotationInvocationHandler.java at jdk26u baf63fb), the map read by
+name through the world's member tables (serialCall) into the handler's annotation object in entrySet order; invoke's
+`o == proxy` rule; equalsImpl's asOneOfUs for proxies over the handler. Taken overnight (round 52), recommended: the
+constructor in jrt's handler, over translating jdk26u's class in place of jrt's (which would leave declaration annotations'
+handler to a package-private constructor reached by name and jrt alone without one). Left: memberValues() (Map return
+type; only VMSupport calls it), ExceptionProxy values at invoke, the serial form (JCS291). Proof, light: the two files
+printed alone by repr/go and accepted by gofmt; a unit test TestAnnotationHandlerNew for the day's bin/jrt test. Keys:
+gate_key, arbace_runtime_key, arbace_javac_key. The day: bin/jrt test, the build, java-check read,interp on the six ids.
+
+## 2026-11-17: n-java-serial, the interp cell's serialization rows outside the stack (round 52, overnight)
+
+Branch `n-java-serial` (from mac/n-review-c `6ff92621f`). Of `:serialization`'s 21 deferred rows outside the stack's triage, the 12
+of n-java-defer's `System$Logger` finding left as they are; the other 9 run at interp on next `42bf8614b`'s gate executable
+(`e8e0d017243dca8a9f9f`), every process under 1 GiB, and re-recorded (all ran differently from their pre-object-stream record):
+t04291 t04707 t05550 pass. Causes and fixes: t04389, the Java forms interpreter kept a dead local in its frame slot
+(arbace/classes/interp.ae: a let's slots released after its body, as javac reuses them; proved light, t04389 passes with the
+checkout on ARBACE_PATH, `--essential` 428 of 428 with it); t04433 t04440, a proxy class lacked Proxy's Serializable for the nominal
+instance check (arbace/j2g/dyn.ae); t04623, jrt's CaseInsensitiveComparator's member table and missing readResolve (overlay/jdk);
+t05237 t05251, MarshalInputStream's registry stub never in the closed world (a derived overlay, test/jrt/derive.ae). The last three
+wait for the next build. Records: check-interp.edn's 9 rows, test/reap/matrix.edn, test/crops/scores.edn. Decisions taken
+overnight (round 52) and the day's commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-serial".
+
+## 2026-11-18: n-java-dates, the interp cell's `:jrt-dates` rows (round 52, overnight)
+
+Branch `n-java-dates` from mac/n-review-c `6ff92621f`, under the night's rules (each process under 1 GiB). The 13 `:jrt-dates` rows of
+n-java-defer's triage run at interp on next `42bf8614b`'s gate executable (`e8e0d017243dca8a9f9f`, read on `javac-8526ceb9d1ea3ff0bd68`)
+as recorded: nothing re-recorded. Causes and fixes (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-dates"): jrt's own
+overlay/jdk/java.base/java/util/Calendar.java and GregorianCalendar.java take jdk26u's (openjdk/jdk26u `baf63fb`,
+src/java.base/share/classes/java/util/{Calendar,GregorianCalendar}.java, GPL 2 with the Classpath Exception, already in LICENSE.md)
+field states after computeTime (setFieldsNormalized, the caller's zone offsets, HOUR and AM_PM computed in the fields constructor),
+setWeekDate, getWeeksInWeekYear, add's zone-offset adjustment and roll's wall-clock hour (t05450 t05453 t05468 t05467 t05451 t05459
+t04927); go/arbace/jrt/date.ae's Date.UTC wraps the year as Java's int and compares the cutover's sides as day counts (t05506 t05507).
+Their jdk/forms by `bin/repr-java read-jdk --check --no-javac --origins` on the two files (HEAD's sources so give the committed
+forms byte for byte). Proof without a build: the two classes patched into jdk26u's JDK (`--patch-module java.base`), jdk26u's
+Calendar, DateFormat, Date, TimeZone, Formatter, CookieHandler and HttpCookie mains (99): 7 fail → pass, 0 pass → fail; Date.UTC
+printed by repr/go and run alone: 4,755 cases equal to the JDK's (942 differed before); `bin/java-check --essential` with the
+checkout on ARBACE_PATH 428 of 428, controls failing. Left: t05396 is repr/java's converter (a post-increment hoisted after a
+statement that throws; DECISION, recommended: hoist before in a try's body), t08307 waits for CDR1's `common` locales
+(mac/n-clojure-cdr `8a3d28662`: es, fr, it, sv's zone names), t05398 and t05462 need the Japanese and Buddhist calendars (F18).
+Decisions taken overnight (round 52): transcribe the field-state machinery rather than replace jrt's calendar by jdk26u's; fix
+Date.UTC in Go in place. Keys: gate_key and the runtime key (overlay/jdk, jdk/forms, go/arbace/jrt). Nothing built.
+
+## 2026-11-18: n-java-calb, jrt's Calendar.Builder (round 52, overnight)
+
+Branch `n-java-calb` from mac/n-java-dates `667665e41`, under the night's rules (each process under 1 GiB). t05460 (Bug8176847) and
+t05461 (Calendar/Builder/BuilderTest) failed on `java.util.Calendar$Builder`, missing from jrt's own Calendar. overlay/jdk/java.base/
+java/util/Calendar.java takes jdk26u's `Calendar.Builder` and `defaultTimeZone` (openjdk/jdk26u `baf63fb`,
+src/java.base/share/classes/java/util/Calendar.java, GPL 2 with the Classpath Exception, already in LICENSE.md), GregorianCalendar.java
+the JDK's empty instance; `build` builds "gregory" and "iso8601", any other type the JDK's unknown-type IllegalArgumentException (Buddhist
+and Japanese stay F18's). Forms by `bin/repr-java read-jdk --check --no-javac --origins` on the two files. Proof on jdk26u's JDK with
+the two classes patched in: Bug8176847 1 → 0; BuilderTest fails only at its Buddhist case (its Gregorian and ISO cases and exceptions
+pass, cut to them); the 99 date mains 1 fail → pass, 0 pass → fail; `bin/java-check --essential` with the checkout on ARBACE_PATH
+428 of 428, controls failing; `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes. `:jrt-dates` matches t05461's new reason.
+Decisions taken overnight (round 52): the JDK's exception for non-Gregorian types rather than a Gregorian stand-in; th_TH's default stays
+"buddhist". Keys: gate_key and the runtime key (overlay/jdk, jdk/forms). Nothing built (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-calb").
+
+## 2026-11-18: n-java-night, the night's nine Java branches stacked on n-review-c (round 52, overnight)
+
+Branch `n-java-night` from mac/n-review-c `6ff92621f` merges n-java-indep `09882cbae`, n-java-sources `f992724a5`, n-javac-dup
+`783585fdb`, n-java-defer `86db53b2e`, n-java-conv `92eabf1b7`, n-jrt-aih `a6aa49249`, n-java-serial `3e085c191`, n-java-dates
+`667665e41`, n-java-calb `ac17b290e`, in that order, so the day merges one head with one build and one reconversion. Conflicts only
+in the journal, JAVA-FRONTEND-SURVEY.md and JAVA-DEFERRED-TRIAGE.md (appended sections, both kept); no two branches touched the
+same form of jdk/ or the same row of check-interp.edn. Light proof: reap and crops-score re-recorded (unchanged), --judge --strict,
+records-check, the planner, java-check --essential 428 of 428 on next's gate executable with the checkout on ARBACE_PATH,
+javac-platform-test. Still running, to merge on top tomorrow: n-java-hoist, n-java-net. The day's list:
+doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-night".
+
+## 2026-11-18: n-java-hoist, a postfix increment hoisted past a throw (repr/java, round 52, overnight)
+
+Branch n-java-hoist from mac/n-java-conv 92eabf1b7. n-java-dates (mac/n-java-dates 667665e41, doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-dates") found t05396's cause in the converter: `c = text.charAt(index++);` in SimpleDateFormat's
+subParseNumericZone was converted `(set! c (.charAt text index)) (set! index ...)` (with-hoisting :after), so when charAt threw
+the catch saw the old index (JLS 15.14.2: the variable is incremented when the increment is evaluated). Decision (a), taken
+overnight (round 52), in its narrowest correct form: an increment whose variable is observable when the statement completes
+abruptly, a field or a local a catch or finally of an enclosing try sees (one in scope at the try: lambdas cannot mutate a
+captured local, and a local declared in the body is dead in the handlers, so neither loops nor lambdas need more), moves :after
+only when nothing after it can throw (`x = i++` into a local or a field of `this`), else :before when nothing evaluated before it
+can (literals, types, `this`, locals, fields of `this` by simple name, a call's target, an array element's array and index), else
+it stays in place, `(let [old-N i] ...)`. Found on the way: plain :before (decision (a) as worded, and the return statements' and
+fields' existing :before) is wrong too when something before the increment throws (`c = at(s.substring(5), i++)`), and fields
+were exposed the same way (only through returns, an assignment statement disables the field path): both covered by the rule.
+The printer folds `s; i++` back into `s` for such a local only for `x = i`. arbace/repr/java/convert.ae (hoistable-increments,
+with-hoisting, hoist-mode, try-stmt's :guarded), print.ae (fold-increment, try-lines), CONVERTER-NOTES.md, PRINTER-NOTES.md.
+Proof, light (each process under 1 GiB but two estimate batches at 1.04 and 1.07 GiB): a test file of 16 cases (i++, ++i, a[i++],
+i--, finally, return, a throwing left operand, a local declared in the try, a lambda, fields, a qualified static call) read by
+both fronts, equal; printed, read again, equal; javac on Arbace's class files equal to the original's; at interp on the gate's
+e8e0d017243dca8a9f9f equal to the JDK's output (the old forms: 3 of 16 wrong). SimpleDateFormat's subParseNumericZone verbatim in
+a driver: the old forms give the error indexes one short (t05396's "Bad error index=1, expected=2"), the new the JDK's. t05396
+itself cannot run on tonight's executable with new forms: the runtime's classes cannot be redefined (go/arbace/jrt/dyn.ae's
+DefineDynamic). jdk/forms: SimpleDateFormat's four statements; a sample, 0 of 155 java.base files and 1 of 59 likely ones
+(ArrayBlockingQueue), so about 5 to 15 files of java.base. The day reconverts.
+
+## 2026-11-17: n-java-net, the interp cell's 13 `:net` rows outside the stack's triage (round 52, overnight)
+
+Branch `n-java-net` from mac/n-review-c `6ff92621f`. The 13 rows run at interp on next's gate executable `e8e0d017243dca8a9f9f`
+(read on javac's tool `javac-8526ceb9d1ea3ff0bd68`); ten ran otherwise than recorded and are re-recorded alone (with
+test/reap/matrix.edn's Java eval classes). Causes and fixes, all jrt's (the next build carries them): DatagramChannelImpl's holder
+DatagramPackets reached DatagramPacket's fields through a private lookup's VarHandles (nil lookup in the Go build): a variant over
+public accessors DatagramPacket's new variant adds (4 rows); jrt's chanSockaddr wrote the IPv4 wildcard on an IPv6 socket as
+`::ffff:0.0.0.0`, which locks the address, so DatagramChannelImpl.disconnect's repair took macOS' branch: now `::`, as
+NET_InetAddressToSockaddr (1 row); AtomicInteger's and AtomicLong's updates and accumulations added, their functions four new
+stand-ins of java.util.function, the stand-ins, manifest and member tables regenerated on the frozen JVM (heap capped) (5 rows,
+java.net.http's Demand); InetAddress.isReachable as the JDK's TCP echo fallback (1 row); Socket.sendUrgentData over a new
+HostNet.sendUrgent0, MSG_OOB on the descriptor (1 row); t04983 (NetworkInterface's order, scopes and broadcasts, the host's own
+output) left deferred. Proved on jdk26u's JDK with the Java equivalents patched into java.base (loopback only) and by small Go
+programs over the printed Go (the wildcard's disconnect sequence, SendUrgent, the atomics' test with a negative control); no build
+tonight. Alternatives: teaching j2g private lookups (rejected: the variant pattern of F10b), `any` parameters for the atomics'
+functions (rejected: the generated tables name the classes), an ICMP echo (rejected: needs a raw socket). Details and the day's
+commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-net".
+
+## 2026-11-18: n-java-mx, java.lang.management's `:mxbeans` rows at interp (round 52, overnight)
+
+Branch `n-java-mx` from mac/n-java-night `c32d8d95f`, under the night's rules (each process under 1 GiB). The 13 interp rows of
+n-java-defer's `:mxbeans` table run on next `42bf8614b`'s gate executable (`e8e0d017243dca8a9f9f`, read on javac's tool
+`javac-8526ceb9d1ea3ff0bd68`); four ran otherwise than recorded (t04784, t04792, t04806, t04807: the beans and methods built since the
+record reached further) and are re-recorded alone. Fixed for the next build: jrt's OperatingSystemImpl without jdk26u's container
+branches (j2g refused every method naming jdk.internal.platform.Metrics: t07849-t07852), ManagementFactory without a compilation bean
+(the JDK's `-Xint` answers: t04782), Thread.start making the thread live before its goroutine runs (getThreadInfo right after start was
+null: t04811). Proved on jdk26u's JDK with `--patch-module` (the overlay over a stub HostManagement; `-Xint`'s answers) and by a probe of
+the executable; forms by `bin/repr-java read-jdk --check --no-javac --origins` with each file's context, HEAD's sources reproducing the
+committed forms. Found and left: the MXBean interfaces carry no generic signatures in the world (j2g writes them for a program's own
+classes only), so the platform MBean server cannot register RuntimeMXBean (t04792; a DECISION for the user: (a) the world's MXBean
+interfaces' Signatures, recommended; (b) every world class's; (c) leave); the interpreter's frames in ThreadInfo (t04806, t04807); the
+memory, class-loading, collector, pool and buffer-pool beans (F13's later slices, about two days). `:jmx`'s match narrowed so that a
+platform interface's NotCompliantMBeanException stays `:mxbeans`. Alternatives: Metrics in the world (rejected: cgroup readers the box
+has not), a CompilationImpl naming c2j (rejected: c2j is ahead of time), the test waiting for the thread (rejected: the JVM's contract).
+Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-mx".
+
+## 2026-11-18: n-j2g-mxsig, the world's MXBean interfaces' generic signatures (round 52, overnight)
+
+Branch `n-j2g-mxsig` from mac/n-java-mx `562cad2f9`. n-java-mx's DECISION taken overnight (round 52), recommended option (a): j2g
+writes the `G` records (members' Signatures) of the world's MXBean interfaces, so that JMX's MXBean introspection sees RuntimeMXBean's
+`List<String> getInputArguments()` and the platform MBean server can register it. `arbace.classes.annot/class-data` takes
+`:signatures` (the G records alone, the new `signature-lines`, as F27's `:throws` writes the E records), and arbace/j2g/out.ae passes
+it for `annot/mxbean-interface?`, JMX's rule (javax.management.JMX.isMXBeanInterface: `@MXBean`'s value, else a binary name ending in
+MXBean). 15 interfaces in the world, 4 generic members, 4 records. jrt unchanged (it already decodes G records). Proved by
+`bin/j2g-unit`'s new `test-mxbean-signatures` (fixture test/j2g/unit/mxsig, negative cases Plain, `@MXBean(false)` and a class, a
+forcing control) on the gate executable `e8e0d017243dca8a9f9f` under 1 GiB: 143 pass, HEAD's 7 unrelated failures unchanged.
+Alternatives: every world class's G records (rejected: the data of every generic member for one API's need), the name rule alone
+(rejected: not JMX's). By day: the build, then t04792 at interp and the 8 compiled rows stopping on getPlatformMBeanServer (t04785
+t04787 t04788 t04789 t04792 t07841 t07842 t07934). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-j2g-mxsig".
+
+## 2026-11-18: n-java-f13, java.lang.management's memory, class loading and collector beans (round 52, overnight)
+
+Branch `n-java-f13` from mac/n-j2g-mxsig `bc9b64242`, under the night's rules (each process under 1 GiB). F13's next slices for
+t04786 and t07840: jrt's Go (go/arbace/jrt/memory.ae: HostManagement's natives for the classes, two pools over runtime.MemStats, the
+collector's count, pauses and CPU time from MemStats and runtime/metrics, a finalizer watcher recording each cycle's live heap and
+allocations for GcInfo's usage before and after; dyn.ae counts a replaced class as unloaded); jrt's Java: jdk26u's ClassLoadingImpl,
+MemoryImpl, MemoryPoolImpl, MemoryManagerImpl, GarbageCollectorImpl, GcInfo, GcInfoBuilder and GarbageCollectorExtImpl as derived
+overlays over jrt's own sun.management.JrtManagement (test/jrt/derive.ae, from https://github.com/openjdk/jdk26u at baf63fb,
+src/java.management and src/jdk.management), NotificationEmitterSupport, Sensor, com.sun.management.GarbageCollectorMXBean,
+GarbageCollectionNotificationInfo and their composite data added to the closure as they are, ManagementFactoryHelper's getters,
+ManagementFactory's components and the platform MBean server's registrations. j2g writes the generic signatures of a
+CompositeDataView too (annot/mxbean-mapped?: GcInfo's Map getters, which JMX and GcInfoCompositeData map). Proved on jdk26u's JDK with
+`--patch-module` over a stub HostManagement (t04786 and t07840 status 0, a 38-check probe), the Go in a small module (`go test`), j2g's
+unit tests (145 pass, the same 7 unrelated failures), forms by `bin/repr-java read-jdk --check --no-javac --origins` (the context's
+unchanged files byte for byte the committed forms), `bin/java-check --essential` 428 of 428. Taken overnight: the pools' and managers'
+names, the pauses as the collection time, the watcher, no thresholds or GC notifications yet, derived overlays, the CompositeDataView
+rule (alternatives in the survey). Left: the usage thresholds (a sampler triggering the sensors), GC notifications, the buffer pools
+(jrt counting its direct and mapped buffers). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-f13".
+
+## 2026-11-18: n-review-java2, the night's Java line reviewed before its build (round 52, overnight)
+
+`git diff 42bf8614b..d71873b63` (n-java-f13: n-review-c's stack and the night's fourteen branches) read for what would break
+tomorrow's builds or the gate, with light checks only (each process under 1 GiB). Two breaks fixed: (1) go/arbace/jrt.ae's
+`go/package` did not list n-java-f13's new `memory.go` (nor load `jrt/memory`), so jrt printed alone (`bin/jrt build|test`)
+lacked memory.ae while dyn.ae now adds to its `classesUnloaded`: Go's "undefined"; j2g's program writes its own jrt.ae from
+every file, so the program build was not affected. With the line, jrt's hand-written package (printed alone, its tests too)
+builds for linux/amd64 and linux/arm64 and vets clean (gc of TamaGo's go1.27.1, -p 1, 0.78 GB). (2) jdk/sources.txt kept
+`sun/rmi/server/MarshalInputStream.java` as `share:java.rmi` though n-java-serial made it a derived overlay (its forms are the
+overlay's): the sources step (jrt.jrt-sources/print-sources, run alone) lists it as `overlay`, so `bin/jrt-convert verify`
+would have differed; moved, the counts unchanged (the step's output now equal to the file but the generate step's jrtgen line).
+Known and left to the day: the essential `provenance` step fails (repr/java's reader hash moved with RP3, n-java-conv and
+n-java-hoist; the reconversion rewrites the four provenance files). Checked passing: `bin/jrt-convert derive --check` (95),
+`bin/j2g-unit` (the same 7 failures as on the base, the new mxsig and finalize tests pass), `bin/java-check --essential` 428 of
+428 (the gate's executable at next's key), `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`, claude-md,
+caches-table, `bin/gate --plan`, javac-platform-test and seven planner tests.
+
+## 2026-11-18: n-java-thresh, the memory pools' thresholds and the collector's notifications (round 52, overnight)
+
+Branch `n-java-thresh` from mac/n-java-f13 `d71873b63`, under the night's rules (each process under 1 GiB). n-java-f13's left-over:
+HotSpot's LowMemoryDetector, SensorInfo and GCNotifier (https://github.com/openjdk/jdk26u at baf63fb,
+src/hotspot/share/services/lowMemoryDetector.cpp, gcNotifier.cpp, management.cpp; src/java.management/share/native/libmanagement/
+MemoryPoolImpl.c) ported into jrt's sun.management.JrtManagement; go/arbace/jrt/memory.ae gives the events (a 20 ms usage sampler
+while a usage threshold is set, the watcher's queue of cycles, a notifier goroutine as the hidden Notification Thread). The pools are
+made with thresholds 0 (the runtime's pool without a collection threshold); MemoryPoolImpl's derivation hands the thresholds and
+sensors to JrtManagement, GarbageCollectorExtImpl's hands it a sender of the GC notifications (createGCNotification with the cycle's
+GcInfo; "end of major GC", "System.gc()" or "Go heap goal"). Proved on jdk26u's JDK with --patch-module (t04791 status 0, a 26-check
+probe of the sensors and notifications, agreeing with HotSpot's own on the unpatched JDK; the 22 neighbouring tests' statuses
+unchanged), the Go by `go test` in a small module, forms by read-jdk --check --no-javac --origins, java-check --essential 428/428.
+Taken overnight: the logic in Java with Go's events, the 20 ms period, the notifier hidden, the action and causes, a missed cycle not
+notified, the sender handed over by the derivation (alternatives in the survey). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-thresh".
+
+## 2026-11-18: n-java-thresh, a correction
+
+The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-thresh").

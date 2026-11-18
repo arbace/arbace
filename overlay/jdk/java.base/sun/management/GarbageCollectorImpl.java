@@ -1,0 +1,67 @@
+/*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: n-java-f13"): jdk26u's
+ * sun.management.GarbageCollectorImpl (src/java.management/share/classes/sun/management/GarbageCollectorImpl.java
+ * at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):
+ * the natives HotSpot's management interface (jmm) answers have bodies over jrt's sun.management.JrtManagement and jdk.internal.jrt.HostManagement (go/arbace/jrt/memory.ae); nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General
+ * Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace
+ * authors; Eclipse Public License 1.0.
+ */
+/*
+ * Copyright (c) 2003, 2015, Oracle and/or its affiliates. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.  Oracle designates this
+ * particular file as subject to the "Classpath" exception as provided
+ * by Oracle in the LICENSE file that accompanied this code.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ */
+
+package sun.management;
+
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.ManagementFactory;
+import javax.management.ObjectName;
+
+/**
+ * Implementation class for the garbage collector.
+ *
+ * ManagementFactory.getGarbageCollectorMXBeans() returns a list
+ * of instances of this class.
+ */
+public class GarbageCollectorImpl extends MemoryManagerImpl
+    implements GarbageCollectorMXBean {
+
+    protected GarbageCollectorImpl(String name) {
+        super(name);
+    }
+
+    @Override
+    public long getCollectionCount() {
+        return jdk.internal.jrt.HostManagement.gcCount0();
+    }
+
+    @Override
+    public long getCollectionTime() {
+        return jdk.internal.jrt.HostManagement.gcTime0();
+    }
+
+    @Override
+    public ObjectName getObjectName() {
+        return Util.newObjectName(ManagementFactory.GARBAGE_COLLECTOR_MXBEAN_DOMAIN_TYPE, getName());
+    }
+}
