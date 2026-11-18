@@ -11803,3 +11803,93 @@ ARBACE_RUSTC_HOME a missing directory, gives ARBACE_RUSTC=rustc-not-at-the-pin (
 checks the marker under the lock and only trusts it when root/usr/bin/rustc exists (proof: marker present, no root, empty apks dir: it
 reaches the apk check and fails, no longer returns 0). (3) `rustc_pin_path` moves the tree's usr/bin to the front of PATH when it is
 already on it elsewhere (proof: PATH=/usr/bin:TREE:/bin gives TREE first, once). `bin/repr-rust pins check` and `bin/gate --pins`: ok.
+
+## 2026-11-18: n-java-defer (round 54), Java's deferred rows by cause; three light fixes (branch `n-java-defer` from mac/n-all `9cd2e4a96`)
+
+Java's completeness is 89 (eval 2,720 / 165 / 440, AOT 2,588 / 201 / 536 deferred on n-all; the "about 1,100 a cell" of the brief
+counts the non-passing rows with the by-design ones and the stale ones). The eval cell's 440 deferred less the 30 `:speed-hang` run at
+read,interp on next `42bf8614b`'s gate executable `e8e0d017243dca8a9f9f` (javac's tool `javac-8526ceb9d1ea3ff0bd68`,
+`REPR_JAVA_STALE_OK=1`, 6 jobs, 24 min, each process well under 4 GiB); the AOT cell grouped from its recorded (gate 13c's) reasons.
+Findings: 159 of the 410 pass already (a stale record: the night's `--record` frees them); 84 fail on causes n-all's merged night
+branches fixed and nobody built (h-java-members, n-java-night's nine, n-java-net, n-java-mx/f13/thresh, n-j2g-mxsig, AT9/AT10), 11 more
+on SimpleFileVisitor on javac's tool; 13 of the still-failing are in no class under their new reasons (t04264 t08306 and the 11
+SimpleFileVisitor rows). The 167 left ranked by rows per unit of work: "cannot extend" 22 (one list), jrt's hand-written members 16,
+RMI 13, the asynchronous channels 11, one class or module outside the world 11, System.Logger and StackWalker 10, jdk.charsets 4,
+Lithuanian casing 2 (+2 compiled), Object.clone's super call 4, references 4, the java.lang name shadowing 2, the rest one a test.
+
+Fixed (the top three light ones): (1) arbace/j2g/model.ae's class-supers takes the 13 translated classes the 22 "cannot extend" rows
+extend (TextCallbackHandler 7, CyclicBarrier, ConcurrentHashMap, FileOutputStream 2 each, IOException, BigDecimal, Hashtable,
+SocketAddress, ResponseCache, ResourceBundle, ExceptionInInitializerError, QueryEval, SslRMIClientSocketFactory); CountDownLatch is
+jrt's hand-written and left. Needs the build to show (canExtend asks the program's DynSub table). (2) go/arbace/jrt/locale.ae: jdk26u's
+ConditionalSpecialCasing lt entries (openjdk/jdk26u `baf63fbe4`, src/java.base/share/classes/java/lang/ConditionalSpecialCasing.java;
+the combining classes' buckets from src/java.base/share/data/unicodedata/UnicodeData.txt as a 333-range table; GPL 2 with the
+Classpath Exception, already in LICENSE.md); proven by the printed Go in a stub module against the JDK's answers and the JDK's
+getCombiningClass for every code point; test/jrt/testdata_reflect.ae's locale lines take lt inputs. (3) arbace/classes/native.ae's
+compile-top unmaps a java.lang default import a class of the test's package shadows (JLS 6.4.1): proven at interp with the checkout
+on ARBACE_PATH, t05485 passes, t04829 loads and stops at reflection's access checks (classed `:reflection` by id),
+`bin/java-check --essential` 428 of 428.
+
+Decisions taken (round 54), the recommended ones: class-supers lines rather than jrt class interfaces; unmapping only a default
+import; a generated combining-class table in jrt rather than a hook into the translated Normalizer (jrt cannot import translated
+packages). Alternatives considered: the clone super call (4 rows, dyncf and jrt's clone: more than light), Executable's generic
+parameter types (a jrt member with the manifest regenerated on the frozen JVM), MalformedParametersException (one file, but its test
+needs class files).
+
+**These touch the shipped world** (`gate_key`; jrt also the runtime key, j2g javac's keys): they merge with the day's build. Expected
+rows at the night's --record: interp 159 now passing, then with the build t05485, t04647 t04648 (if their later lines hold), t04277
+t05100 t05469 t05767 (passing compiled already) and whichever of the other 18 "cannot extend" rows pass beyond; compiled t04647 t04648.
+Not re-recorded here. Details, the ids and the commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54)".
+
+## 2026-11-18: n-java-defer (round 54), review fixes: lt's uppercase from the first changing char; the keys' correction
+
+Correction of the round-54 entry above (not edited): it says the shipped world's keys move for `arbace/j2g/model.ae`; they also move for
+`arbace/classes/native.ae` and `go/arbace/jrt/locale.ae` (gate_key for all three, `arbace_runtime_key` and the javac keys for locale.ae
+as a file of `go/arbace/jrt` / j2g's inputs as the triage's "Keys" paragraph says), not model.ae alone.
+
+Fixed: `ltUpper` (go/arbace/jrt/locale.ae) dropped every U+0307 that follows a soft-dotted letter. The JDK (StringUTF16.toUpperCase,
+openjdk/jdk26u `baf63fbe4`) copies the chars before `first`, the first char that is a surrogate or that changes case, as they are and
+applies ConditionalSpecialCasing only from there. So `"ᵢ̇".toUpperCase(lt)` is `1D62 0307` (no char changes: the string is returned),
+`"xᵢ̇"` `0058 1D62`, `"ᵢ̇̇"` `1D62 0307 0307`. ltUpper now finds `first` (isSurrogate, charToUpperEx) and drops only at i >= first.
+Proof, as the round's: the file printed by `bin/repr-go print --layout gofmt`, in the stub module (`.tmp/keep/wt-n-java-defer-r54/lt-r2`, the
+stubs' root upper made from the JDK's own table) against the JDK on jdk26u's java (26.0.2.1-internal): `j/Gen.java` writes the JDK's
+`toUpperCase(lt)` of 4,448,265 strings (every non-surrogate code point c as c+U+0307, and with the prefixes i, U+1D62 and x) and nine
+hand cases; `go test`: 4,448,265 of 4,448,265 equal (573 with a dot dropped), the 7 lt upperings of the tests, the 1,114,112 combining-class
+buckets still equal; a control (the old rule, without `i >= first`) fails on `1D62 0307 0307` and 1,000s more. Nothing built.
+
+## 2026-11-18: n-java-defer (round 54), the second pass: clone of interpreted subclasses, plain objects collected, filterCheck's logger, getStealCount
+
+The next five groups of the round's eval (interp) table (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54),
+the second pass"), under the day's rules (each process under 4 GiB, no j2g whole-program run, no javac tool build, no gate), on gate
+executable `e8e0d017243dca8a9f9f` and javac's tool `javac-8526ceb9d1ea3ff0bd68`. All four fixes are in the shipped world: none shows
+at interp before the day's build; each proven light.
+
+Fixed: (1) arbace/j2g/dyn.ae, dyncf.ae: a DynSub_C's Object.clone (`clone-call`: C's clone with the proxy as this, a jrt class's own,
+else a shallow copy of the struct and the dynCore when the class is Cloneable), the interpreter's super.clone() among C's supers and
+Object's in superCall; proven by j2g's unit test `test-dynsub-clone` (new fixture test/j2g/unit/clone), with a negative control.
+(2) go/arbace/jrt/object.ae: `objectInstance` padded to 16 bytes, out of Go's tiny allocator, which kept a weak referent `new
+Object()` alive while any object of its block lived; proven by a stand-alone Go test on TamaGo's go (old 1 of 50 collected, new 50 of
+50) and jrt's `TestWeakPlainObject` (system_test.ae; 50 of 50, its control on the old layout 0 of 50; `bin/jrt test --arch amd64
+--package jrt -run TestWeak`). (3) overlay/jdk/variants/ObjectInputStream.ae: filterCheck without its System.Logger logging (j2g's
+missing-class stub threw on every filtered read; jdk26u openjdk/jdk26u `baf63fbe4`, src/java.base/share/classes/java/io/
+ObjectInputStream.java, GPL 2 with the Classpath Exception, in LICENSE.md); proven by `bin/jrt-convert vet` on the file.
+(4) go/arbace/jrt/forkjoin.ae: ForkJoinPool.getStealCount (the forked tasks a new worker ran); manifest.edn, manifest_test.ae and
+reflect_tables.ae regenerated by `bin/jrt manifest` on the frozen JVM (3.8 GB); `bin/jrt build --arch amd64 --package jrt` clean.
+
+Decisions taken (round 54), the recommended ones: pad objectInstance alone, not the header of every object; leave finalization out
+(t04816, F17's JEP 421 stance) rather than a runtime.SetFinalizer for interpreted finalize(); cut the filter logging in a variant
+rather than bring System.Logger's bridge (jdk.internal.logger) into the world; leave StackWalker (the interpreter's frames are not Go
+frames), the asynchronous channels (a closure slice with their EPoll provider and `bin/jrt-convert update`) and jrt's other 15
+members (Thread.Builder, Package, ProtectionDomain's CodeSource, the cut ThreadDeath, DelayScheduler, ConditionObject, two closure
+classes) to slices: none is light.
+
+Rows per group (interp, expected after the build): System.Logger and StackWalker 3 of 10 (t04307 t05287 t05288); asynchronous
+channels 0 of 11; jrt's hand-written members 1 of 16 (t05719); Object.clone's super call 4 of 4 (t04823 t05330 t05425 t05562);
+references 3 of 4 (t03939 t04821 t04824).
+
+Keys: arbace/j2g moves `gate_key` and javac's keys; go/arbace/jrt and overlay/jdk/variants move `gate_key`, `arbace_runtime_key` and
+javac's keys; test/j2g moves no build key.
+
+**Expected rows at the night's --record** (interp, test/java/check-interp.edn, after the day's build; not re-recorded here):
+`t03939 pass`, `t04307 pass`, `t04821 pass`, `t04823 pass`, `t04824 pass`, `t05287 pass`, `t05288 pass`, `t05330 pass`,
+`t05425 pass`, `t05562 pass`, `t05719 pass` (t04307 t05287 t05288 if their later lines hold), beside the first pass's; the ids go
+into the first pass's `.tmp/njd54.txt` for its commands.

@@ -12,6 +12,8 @@
             [arbace.j2g.checks :as chk]
             [arbace.j2g.code :as code]
             [arbace.j2g.decls :as decls]
+            [arbace.j2g.dyn :as dyn]
+            [arbace.j2g.dyncf :as dyncf]
             [arbace.j2g.edge :as edge]
             [arbace.j2g.embed :as embed]
             [arbace.j2g.main :as jm]
@@ -932,6 +934,47 @@
              (let [old '((go/method Impl_Fin__V [t this] ((inst jrt/J2g_NotNull J_z_Base_J_I) this)))]
                (and (iface-this? (shape-of old) "Base") (not (dispatch? (shape-of old) 'this))))))))
 
+;; Round 54 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54), the second pass"): Object.clone of an
+;; object of an interpreted class extending a class of the world (a DynSub_C): its Clone__O is C's clone with the
+;; object as this, else Object's; its CloneShallow copies the struct and the core when the class is Cloneable (C's
+;; supertypes, else the core's interfaces at run time); the interpreter's super.clone() finds it among C's supers
+(defn test-dynsub-clone []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/clone" :tree true} {:files ["jdk/forms/java/lang/Cloneable.ae"]}] :variant-files []))
+        mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {} :vmethods-cache (atom {}) :trivial-cache (atom {})}
+        mw (assoc mw :subclass-index (m/make-subclass-index mw))
+        forms (fn [f & args]
+                (w/with-world world
+                  (binding [m/*w* mw env/*declared* (:classes e)
+                            code/*pkgstate* {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts (atom #{})}]
+                    (try (doall (apply f args)) (catch Throwable t [(str "threw: " t)])))))
+        method (fn [fs nme] (first (filter #(and (seq? %) (= 'go/method (first %)) (= nme (second %))) fs)))
+        sub (fn [cls] (forms #'dyn/sub-forms cls [] dyn/object-slots))
+        supers (fn [cls] (let [fs (forms #'dyncf/sub-forms cls)
+                               v (first (filter #(and (seq? %) (= 'go/var (first %)) (str/starts-with? (name (second %)) "dynCfSupers_")) fs))]
+                           (some (fn [x] (when (and (vector? x) (= "clone()Ljava/lang/Object;" (first x))) (second x))) (drop 2 (nth v 2)))))
+        has (fn [f x] (some #(= x %) (tree-seq coll? seq f)))
+        copied (sub "z/Copied") bare (sub "z/Bare")]
+    (check "dynsub-clone: the fixture analyzes" (empty? (:failed world)) (pr-str (:failed world)))
+    (check "dynsub-clone: Copied's Clone__O is Copied's clone with the proxy as this"
+           (has (method copied 'Clone__O) '(.Impl_Clone__O t t)) (pr-str (method copied 'Clone__O)))
+    (check "dynsub-clone: Copied's CloneShallow copies the struct and the core, no run-time check (Copied is Cloneable)"
+           (let [f (method copied 'CloneShallow)]
+             (and (has f '(set! (.-Self c) (addr c))) (has f '(.ClearHeader (addr c))) (has f '(.MarkDynamic (addr c)))
+                  (not (has f 'jrt/Cloneable_class)) (not (has f '(panic (jrt/CloneNotSupported t))))))
+           (pr-str (method copied 'CloneShallow)))
+    (check "dynsub-clone: Bare's Clone__O is Object's (CloneShallow), its CloneShallow asks the core for Cloneable"
+           (and (has (method bare 'Clone__O) '(.CloneShallow t))
+                (has (method bare 'CloneShallow) '(.DynImplements t jrt/Cloneable_class)))
+           (pr-str (method bare 'Clone__O) (method bare 'CloneShallow)))
+    (check "dynsub-clone: the interpreter's super.clone() of Copied is Copied's, of Bare Object's"
+           (and (has (supers "z/Copied") '(return (.Impl_Clone__O t t))) (has (supers "z/Bare") '(return (.CloneShallow t))))
+           (pr-str (supers "z/Copied") (supers "z/Bare")))
+    (check "dynsub-clone: negative control: the old CloneShallow (a panic) fails the judge"
+           (let [old '(go/method CloneShallow [t] (panic (jrt/CloneNotSupported t)))]
+             (not (has old '(set! (.-Self c) (addr c))))))))
+
 ;; A17 of the Ghidra case study's G2 plan (GH15 (a)): the entries' listings, META-INF/arbace/entries, that
 ;; jdk.internal.jrt.ClassPathResources answers getResources of a package and an entry's JarFile from
 (defn test-entries []
@@ -972,6 +1015,7 @@
 (defn -main [& _]
   (test-edge-generics)
   (test-object-finalize)
+  (test-dynsub-clone)
   (test-null-up)
   (test-support-tables)
   (test-unresolved-cause)

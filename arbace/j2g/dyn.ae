@@ -327,6 +327,16 @@
           (for [j (m/all-supertypes n) :when (and (not= j n) (m/interface? j))]
             (str "Is_" (m/go-name j))))))
 
+(defn clone-call
+  "Object.clone of t, a DynSub_C of class n (round 54): C's clone with t as this, a jrt class's own
+  (its Clone__O on the struct, as Reference's CloneNotSupportedException), else Object's (CloneShallow)."
+  [n]
+  (let [impl (m/impl-of n ["clone" "()Ljava/lang/Object;"])]
+    (case (:kind impl)
+      (:class :jrt-impl) '(.Impl_Clone__O t t)
+      :promoted (list '.Clone__O (list (symbol (str ".-" (m/go-name n))) 't))
+      '(.CloneShallow t))))
+
 (defn- sub-forms
   "The Go type DynSub_C of the proxies of class n, its methods and its slot table. It embeds C's
   struct and a dynCore, whose methods (the interfaces' methods and markers, Dyn's) it takes by
@@ -354,8 +364,20 @@
              (apply list 'lit '(map string string) (for [[nme desc] (sort (keys own))] [(str nme desc) nme])))
        (list 'go/method 'Ref (with-meta [(tag 't recv)] {:tag 'any}) '(when (== t nil) (return nil)) 't)
        (list 'go/method 'GetClass__Class (with-meta [(tag 't recv)] {:tag '(* jrt/Class)}) '(.-Cls (.-D t)))
-       (list 'go/method 'Clone__O (with-meta [(tag 't recv)] {:tag 'any}) '(panic (jrt/CloneNotSupported t)))
-       (list 'go/method 'CloneShallow (with-meta [(tag 't recv)] {:tag 'any}) '(panic (jrt/CloneNotSupported t)))]
+       ;; Object.clone (round 54): C's clone with this object as this, else Object's, a shallow copy
+       ;; of the struct and the core (its fields F copied, Self the copy) when the class is
+       ;; Cloneable (C, or the interpreted class itself: the core's interfaces)
+       (list 'go/method 'Clone__O (with-meta [(tag 't recv)] {:tag 'any}) (clone-call n))
+       (list* 'go/method 'CloneShallow (with-meta [(tag 't recv)] {:tag 'any})
+              (concat
+                (when-not (some #{"java/lang/Cloneable"} (m/all-supertypes n))
+                  ['(when (not (.DynImplements t jrt/Cloneable_class)) (panic (jrt/CloneNotSupported t)))])
+                ['(let [c (arbace.core/deref t)]
+                    (.ClearHeader (addr c))
+                    (.MarkDynamic (addr c))
+                    (set! (.-F c) (append (make (slice any) 0 (len (.-F t))) (spread (.-F t))))
+                    (set! (.-Self c) (addr c))
+                    (addr c))]))]
       (for [i (range (count object-slots))
             :let [k (nth object-slots i)]]
         (method-form recv i k (fn [pn r] (object-fallback n k pn))))
