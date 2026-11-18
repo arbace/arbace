@@ -1388,7 +1388,9 @@
 (defn- declare-var!
   [scope n storage]
   (let [qt (get-in n [:type :qualType])
-        q (qualifier-before n)
+        ;; (queue 367, the code generator: a qualifier naming a template-id, as declare-fn!'s, cpp-s13: limits.cc's out-of-line
+        ;; definitions `constexpr bool numeric_limits<bool>::is_specialized;` of an explicit specialization's static members)
+        q (or (qualifier-before n) (when-not (checking?) (qualifier-tid-before n)))
         ;; (CP311 (a): a deduced class type, deduced from the initializer analyzed as global-init would)
         ct (when (empty? q) (ctad-template scope (or (:_ctad n) qt)))
         cv (when ct (binding [*cutoff* Long/MAX_VALUE]
@@ -1831,11 +1833,10 @@
                                     ;; declaration: its text holds the body)
                                     (re-find #"^\s*typedef\s+(?:struct|class|union)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)?\{" (or (node-text n) ""))
                                     (empty? (filter #(= :type (:e %)) (own-names scope (:name n)))))
-                             ;; (queue 380: and mangled by that name, [dcl.typedef]/9's name for linkage purposes, Itanium's
-                             ;; <unqualified-name> of the typedef: musl's `typedef struct {...} pthread_mutex_t` in
-                             ;; __basic_file<char>'s constructor's parameter had mangled as an empty name, P0; the class keeps
-                             ;; no :name, so it still prints as unnamed)
-                             (do (abi/update-cls! (:id la) assoc :mname (abi/source-name (:name n))) la)
+                             ;; (queue 367: and the name its mangling takes, as the enumeration's and the `own` case's below:
+                             ;; musl's `typedef struct { ... } pthread_mutex_t`, __basic_file<char>'s __c_lock*, P15pthread_mutex_t,
+                             ;; had been mangled as an empty name, P0)
+                             (do (when-not (checking?) (abi/update-cls! (:id la) assoc :name (:name n))) la)
                              ;; `typedef enum { ... } E;` ([dcl.typedef]/9, the typedef name for linkage): the parser writes the
                              ;; type as `enum E`, the unnamed enumeration or class just declared (G5c: unwind.h's
                              ;; _Unwind_Reason_Code); it takes the name for its mangling
@@ -3507,10 +3508,10 @@
         (cond
           (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok)
           (cond-> {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
-            derived (assoc :dbase (class-id pt) :dfrom (class-id at))
+            derived (assoc :d2b [(class-id at) (class-id pt)])
             ;; (CX12, the checker: [over.ics.rank]/3.2.6 orders two such bindings by their cv-qualifiers' inclusion)
             (checking?) (assoc :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))))
-          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) (cond-> {:rank (if derived 2 0) :sub -1} derived (assoc :dbase (class-id pt) :dfrom (class-id at)))
+          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) (cond-> {:rank (if derived 2 0) :sub -1} derived (assoc :d2b [(class-id at) (class-id pt)]))
           ;; (cpp-s14: a class's conversion function binding the reference directly, [over.ics.ref]/1, [dcl.init.ref]/5.1.2)
           (and (not *no-user*) (class-id at) (not (or same derived)) (ref-conv-for (class-id at) p (:c at))) {:rank 3}
           ;; (CX12, the checker: a reference-related type losing a qualifier binds neither directly nor to a temporary,
@@ -3526,7 +3527,10 @@
       (abi/class? pt)
       (cond
         (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
-        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2 :dbase (:id pt) :dfrom (class-id at)}
+        ;; (queue 367: with its classes, [over.ics.rank]/4.4.4: of two derived-to-base conversions of one class, the nearer
+        ;; base's better; basic_string's _M_construct(.., forward_iterator_tag) over (.., input_iterator_tag) for a
+        ;; random_access_iterator_tag, string-inst.cc's S::basic_string(C*, C*, const allocator<C>&))
+        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2 :d2b [(class-id at) (:id pt)]}
         *no-user* nil
         ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
         (and (class-id at) (conv-for (class-id at) (abi/unq pt) false (:c at))) {:rank 3}
@@ -3568,11 +3572,8 @@
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
            (cond
-             ;; (queue 380, W3d: [over.ics.rank]/4.4.2-4.4.4, of one class converted to two of its bases, to the more derived
-             ;; base is better: cow_string.h's _S_construct(__beg, __end, __a, _Tag()) of a random_access_iterator_tag,
-             ;; forward_iterator_tag's over input_iterator_tag's, had been ambiguous)
-             (and (:dbase a) (:dbase b) (= (:dfrom a) (:dfrom b)) (not= (:dbase a) (:dbase b)))
-             (abi/derived-from? (:dbase a) (:dbase b))
+             (and (:d2b a) (:d2b b) (= (first (:d2b a)) (first (:d2b b))) (not= (second (:d2b a)) (second (:d2b b))))
+             (boolean (abi/derived-from? (second (:d2b a)) (second (:d2b b))))
              (and (:cvq a) (:cvq b))
              (let [x (:cvq a) y (:cvq b)] (and (not= x y) (every? y x)))
              :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))

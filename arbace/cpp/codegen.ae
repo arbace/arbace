@@ -365,12 +365,15 @@
   `resize_and_overwrite<_Operation&>` of basic_string<char>, hello.cpp's std::to_string, had been declared and never
   defined)."
   [f]
-  (cond (:extern-inst f) true (:tinst f) false :else
+  ;; (queue 367: an explicit specialization of a member is no instantiation, [temp.explicit]/11 does not reach it: defined
+  ;; where it is written, collate_members.cc's collate<char>::_M_compare under <locale>'s extern template class collate<char>;
+  ;; a member an explicit instantiation definition names is defined here)
+  (cond (:explicit-inst f) false (:spec-member f) false (:extern-inst f) true (:tinst f) false :else
   (loop [cid (:cls f)]
     (when cid
       (let [c (abi/cls cid)]
         (or (:extern-inst c)
-            (recur (loop [s (:outer c)] (cond (nil? s) nil (:cls s) (:cls s) :else (recur (:parent s)))))))))))
+            (recur (loop [s (:outer c)] (cond (nil? s) nil (= :fn (:kind s)) nil (:cls s) (:cls s) :else (recur (:parent s)))))))))))
 
 (defn- want-fn!
   "The function's symbol (a constructor's or destructor's variant `v`), its definition queued (or its declaration
@@ -382,7 +385,10 @@
     (when-not (contains? (:wanted @*top*) [fid v])
       (swap! *top* update :wanted conj [fid v])
       (if (and (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
-               (not (and (:tbody f) (not (:implicit f)) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))))
+               ;; (queue 367: a member defaulted outside its class is user-provided, [dcl.fct.def.default]/5: the library's under an
+               ;; explicit instantiation declaration, as a member with a body)
+               (not (and (or (:tbody f) (:ool-defaulted f)) (not (:implicit f)) (or (not (:defaulted f)) (:ool-defaulted f))
+                         (extern-inst? f) (not (:always-inline f)))))
         (do (when-not *eager-want* (reserve! nm))
             (swap! *top* update :queue conj [fid v]))
         (let [[r ps va plan] (fn-sig f v)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
@@ -2448,14 +2454,21 @@
   "A virtual destructor's deleting variant, written once (as clang, when a vtable refers to it): deferred among the
   functions, in the order first referred to (P23 (a))."
   [fid]
-  (when-not (some #(= fid %) (:d0s @*top*))
+  (cond
+    ;; (queue 367: a destructor of a class an explicit instantiation declaration names: its D0 the library's too)
+    (let [f (sema/fnd fid)] (and (:tbody f) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f))))
+    (declare! (abi/mangle-fn (sema/fnd fid) 0) 'void '[ptr] :nounwind (nothrow-fn? (sema/fnd fid)))
+    (not (some #(= fid %) (:d0s @*top*)))
+   (do
     (reserve! (abi/mangle-fn (sema/fnd fid) 0))
     (swap! *top* update :d0s conj-new fid)
-    (swap! *top* update :queue conj [:d0 fid])))
+    (swap! *top* update :queue conj [:d0 fid]))))
 
 (defn- linkage-of [f]
   (cond
     (:internal f) [:linkage :internal]
+    ;; (queue 367: a member an explicit instantiation definition names, clang's GVA_StrongODR)
+    (:explicit-inst f) [:linkage :weak_odr]
     (or (:inline f) (:implicit f) (and (:defaulted f) (not (:out-of-line-default f)))) [:linkage :linkonce_odr]
     :else []))
 
@@ -2599,9 +2612,11 @@
                                  (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
-        (when (and (#{:ctor :dtor} (:kind f)) (empty? (linkage-of f)) (not vbc))
+        ;; (queue 367: and for a weak_odr one, an explicit instantiation's, the alias weak_odr: clang's getCodegenToUse, Alias)
+        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (:explicit-inst f)) (not vbc))
           ;; written where the complete object's constructor or destructor is called, as clang emits it
-          (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)])))
+          (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (apply list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)]
+                                                                       (when (:explicit-inst f) [:linkage :weak_odr]))))
         nil))))
 
 (defn emit-d0!
@@ -2643,9 +2658,15 @@
   defines std::bad_alloc's); :external when it has a key function defined elsewhere (G4: std::exception's); else
   :linkonce, in each unit that uses it."
   [cid]
-  (if-let [k (key-fn cid)]
-    (let [f (sema/fnd k)] (if (or (and (:body f) (not (:lazy f))) (:out-of-line-default f)) :here :external))
-    :linkonce))
+  ;; (queue 367: a class template's specialization an explicit instantiation definition names: :weak, weak_odr here; one an
+  ;; explicit instantiation declaration names: :external, the library's -- clang's isVTableExternal and getVTableLinkage with
+  ;; TSK_ExplicitInstantiationDefinition and TSK_ExplicitInstantiationDeclaration)
+  (let [c (abi/cls cid)]
+    (cond (and (:explicit-inst-def c) (abi/dynamic? cid)) :weak
+          (and (:extern-inst c) (abi/dynamic? cid)) :external
+          :else (if-let [k (key-fn cid)]
+                  (let [f (sema/fnd k)] (if (or (and (:body f) (not (:lazy f))) (:out-of-line-default f)) :here :external))
+                  :linkonce))))
 
 (defn- external-class?
   "A dynamic class whose vtable and type_info are another unit's (its key function not defined here)."
@@ -2655,7 +2676,9 @@
 (defn- vt-linkage
   "The linkage options of the vtable, VTT and type_info of class `cid`: strong where its key function is defined."
   [cid]
-  (if (and (abi/dynamic? cid) (= :here (vtable-home cid))) [] [:linkage :linkonce_odr]))
+  (if (abi/dynamic? cid)
+    (case (vtable-home cid) :here [] :weak [:linkage :weak_odr] [:linkage :linkonce_odr])
+    [:linkage :linkonce_odr]))
 
 (defn- typeinfo! [cid]
   (let [t {:k :class :id cid}
@@ -2712,6 +2735,10 @@
              (str "_ZTc" (coff adj) (coff radj) (subs (abi/mangle-fn f nil) 2))
              (str (if (:v adj) (str "_ZTv" (num (:nv adj)) "_" (num (:v adj)) "_") (str "_ZTh" (num (:nv adj)) "_"))
                   (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2)))]
+    ;; (queue 367: the thunk of a function of a class an explicit instantiation declaration names: the library's, declared)
+    (when (and (not (contains? (:declared @*top*) nm)) (:tbody f) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))
+      (let [[ret ps va plan] (if (= :dtor (:kind f)) ['void '[ptr] false {:pattrs [[]]}] (fn-sig f))]
+        (declare! nm ret ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan))))
     (when-not (contains? (:declared @*top*) nm)
       (swap! *top* update :declared conj nm)
       (let [[ret ps va plan] (if (= :dtor (:kind f)) ['void '[ptr] false {:pattrs [[]]}] (fn-sig f))
@@ -2933,7 +2960,7 @@
                 nm (abi/mangle-var v)
                 init (:ginit v)
                 leaves (when-not (abi/ref? t) (const-leaves t init 0))
-                link (cond (:internal v) [:linkage :internal] (:linkonce v) [:linkage :linkonce_odr] :else [])]
+                link (cond (:internal v) [:linkage :internal] (:explicit-inst v) [:linkage :weak_odr] (:linkonce v) [:linkage :linkonce_odr] :else [])]
             ;; a use through an earlier `extern` declaration of the same object needs no declaration of its own
             (swap! *top* update :declared conj nm)
             (cond
@@ -3107,11 +3134,17 @@
             ;; never called; its destructors all are, through derived classes and D0's slot)
             (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
             (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
+        ;; (queue 367: an explicit instantiation definition's members, with their constructors' and destructors' variants)
+        (when (and (:explicit-inst f) (or (:tbody f) (and (:defaulted f) (not (:trivial f)))))
+          (want-fn! id)
+          (when (#{:ctor :dtor} (:kind f))
+            (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
+            (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
         (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
         (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id)))))
     ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
-    (doseq [cid (sort (keys @abi/*classes*)) :when (= :here (vtable-home cid))]
+    (doseq [cid (sort (keys @abi/*classes*)) :when (#{:here :weak} (vtable-home cid))]
       (want! :groups [:group [cid cid 0]] [cid cid 0])
       ;; (defined here: no external declaration of it, the type_info of a class derived from __si_class_type_info, in
       ;; si_class_type_info.cc, names __si_class_type_info's vtable)
@@ -3152,6 +3185,17 @@
         (while (pending?) (deferred!))))
     ;; (every slot filled: a wanted group or VTT is written)
     (swap! *top* update :forms (fn [fs] (filterv #(not (and (vector? %) (= ::slot (first %)))) fs)))
+    ;; (queue 367: a linkonce_odr variable, a template's static data member, written only where the module refers to it, as
+    ;; clang emits one when used: the analysis made some pending definitions from bodies no function of the module is;
+    ;; compatibility-c++0x.cc's and cow-string-io-inst.cc's basic_string<...>::_Rep::_S_empty_rep_storage)
+    (let [forms (:forms @*top*)
+          cands (set (keep (fn [[_ v]] (when (and (:linkonce v) (not (:explicit-inst v)) (#{:member-static :global} (:storage v)))
+                                         (try (gsym (abi/mangle-var v)) (catch Exception _ nil))))
+                           @sema/*vars*))
+          def? (fn [f] (and (seq? f) (= 'llvm/global (first f)) (contains? cands (second f))))
+          used (when (seq cands) (set (for [f forms :when (not (def? f)) x (tree-seq coll? seq f) :when (contains? cands x)] x)))]
+      (when (seq cands)
+        (swap! *top* assoc :forms (filterv #(not (and (def? %) (not (contains? used (second %))))) forms))))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
     ;; G5c: the thread-local variables' globals (their definitions and declarations) thread_local, as clang's
