@@ -4984,3 +4984,55 @@ transformers,mtl`).
 - directory and unix: hsc2hs modules.
 - The four elaborator stops above: associated types in the instance's own methods, instance signatures' givens, quantified
   constraints, TH brackets.
+
+## As built: queue 374, P17's slices 4 and 5 (2026-11-18, the Mac VM, branch `374-haskell-bytestring-time`, from `mac/363-haskell-containers` `c13eeaa64`)
+
+363-1 (a) (the user's decision of 2026-11-18): bytestring and time, then the packages directory needs: exceptions, os-string,
+filepath, unix (hsc2hs modules), file-io and directory. Each was built as 363's packages were: the lib-check record, two control
+files and a `--full` step `haskell-lib-own-P`.
+
+**The C.** The packages' C is hsi's own (`go/arbace/hs/cbits.ae`, `posix.ae`), as on the pack. The own STG's foreign calls are
+the pack's, call for call. No package here needs a foreign stub, so 364's branch was not merged.
+
+| package | modules | elaborate | binders equal to GHC's | stops (recorded) |
+|---|---:|---:|---|---|
+| bytestring | 31 | 30 | 706 of 706 | Data.ByteString.Internal.Type: its Lift instance's TH bracket |
+| time | 47 | 47 | 276 of 278 | |
+| exceptions | 2 | 1 | | Control.Monad.Catch: an instance's equality context (`e ~ SomeException =>`) not given to its superclass's check |
+| os-string | 11 | 7 | 17 of 17 | four modules' TH quasi-quoters |
+| filepath | 11 | 8 | 52 of 52 | three modules' TH brackets |
+| unix | 53 | 53 | 570 of 570 | |
+| file-io | 5 | 5 | | |
+| directory | 9 | 9 | 103 of 103 | |
+
+**Three fixes the packages needed**, each with every own library's STG rebuilt and judged (ghc-internal and base 0 worse):
+
+- **`aff838111`, an unboxed tuple's void component that computes is evaluated first.**
+  - Before, Unarise dropped every void component. `(# copyAddrToAddrNonOverlapping# src dest n s, () #)` (copyBytes) never
+    copied, and samples/LibBytes printed NULs.
+  - Such a component now gets CorePrep's case of the State# argument, and its void atom is dropped after.
+- **`7a863ddb7`, a package-qualified import in a closure.**
+  - Before, the closure's import scan skipped `import "os-string" M`. unix's `*.PosixString` modules stopped (4 of 53), and
+    programs over them stopped in hsi.
+- **`9915a473b`, a let is a join point only at its calls' arity.**
+  - Before, directory's `createDirs = letrec go = \ds -> .. in go`, called with one argument, was a join point of no parameter.
+  - samples/LibPosix stopped: "jump to createDirs with 1 arguments, 0 expected".
+
+**The programs** (`bin/hsi check --libs own`, `HSI_OWN_PACKAGES` the seventeen packages above base):
+- The dry plans try eval 761 → 774 of 909 cases and AOT 126 → 129 of 139.
+- The newly eligible:
+  - pass on the own libraries: LibBytes, LibMisc, LibPosix, cgrun059, T12757, T12855, reverse-complement;
+  - in their classes: fasta, k-nucleotide, T21651, T21969 and setnumcapabilities001 (the light cap, the CPU limit), and T24672
+    (`:process`);
+  - executablePath goes on own-fallback.txt: its `[os] <- getArgs` fails on the own libraries, as spellcheck's does.
+- AOT: LibBytes, LibMisc and LibPosix pass, `:vs-hsi :same`.
+- A regression run over 80 programs (346's sample and 363's package users) gives the same verdicts as before the fixes.
+- hsi-check's and hsi-check-aot's `HSI_OWN_TARS` take the eight `P-own.tar`.
+
+**The own interface level** (`roundtrip --layout --iface-own`):
+- The eight packages, 170 modules: 170 of 170 equal in braces, and 169 in the layout. Control.Monad.Catch's SrcLoc columns
+  differ in the layout and are known, class `:own-iface-srcloc-column`.
+- filepath is left out of the level. In the `--only` read, its System.OsPath.Posix and .Windows differ at the tree level (their
+  CPP `#include` of Haskell source). Its originals are still compiled, as unix's dependency.
+- The units grow from 666 to 824, and the judge's stated cases move 316: judge 0.901 → 0.922, Haskell independence 78.02 → 78.44.
+- With the night's two whole own records, the projection is 96 (0.9624).
