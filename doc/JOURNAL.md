@@ -12064,6 +12064,7 @@ passes 953 to 995; reap's own-diag 693 to 659; C++ read 5,399 / 324 / 772 to 5,4
 0.9338 to 0.9352); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check`
 (9 pairs, 0). Every process under 2 GB; no gate. Alternatives not taken: the P2552R3 attribute files first (the most dg-error lines,
 but each needs a dozen pedwarns and lambda-specifier parses), the constant evaluator's union and dynamic groups (larger work per file).
+
 ## 2026-11-18: RIND9 (a): set::entry, core's check and the whole alloc pass (round 54, branch `n-rust-alloc5`, on `6d68b7d2b`)
 
 - set::entry was 19 of 21 with map::entry passed before it: `CORE_TRACE=1` named OccupiedEntry's and VacantEntry's `inner`
@@ -12090,6 +12091,7 @@ but each needs a dozen pedwarns and lambda-specifier parses), the constant evalu
   `super`s (alternative: set's file as context, set aside: context carries ADTs' generics, not imports); RIND9a-20 (a) the
   trait ref alone in trait-bounds-defining (alternative: a depth guard, set aside: it hides the cause). doc/rust/FRONTEND-SURVEY.md,
   "As built: RIND9 (a), alloc's pass: set::entry and the whole crate".
+
 ## 2026-11-18: n-java-defer (round 54), the third pass: Thread.ofPlatform, java.lang.Package, Executable's generic types in jrt
 
 The 15 eval (interp) rows of the round's "jrt's hand-written members" left after getStealCount (doc/classes/JAVA-DEFERRED-TRIAGE.md,
