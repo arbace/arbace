@@ -2995,6 +2995,13 @@
      (list 'match [ce] [(list 'clause [(list 'psyn (matcher-name pn) evs dvars xs)] (app* (list 'v (builder-name pn)) (into bevs vals)))])]))
 
 (declare infer pat-args)
+(defn- th-string
+  "A string literal's core as GHC.HsToCore.Quote's coreStringLit gives it (mkStringExprFS): unpackCString# of the literal,
+  unpackCStringUtf8# when it is not ASCII"
+  [^String x]
+  (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
+        [(list 'lit (str (pr-str x) "#"))]))
+
 (defn- th-name-core
   "round 54: GHC.HsToCore.Quote's globalVar: an external Name as TH's mkNameG_d, mkNameG_v or mkNameG_tc of its unit, module
   and occurrence (string literals), or nil"
@@ -3004,8 +3011,7 @@
           unit (cond (= tm *module*) *unit*
                      (get-in (some-> *iface-meta* deref) [:units tm]) (get-in @*iface-meta* [:units tm])
                      (str/starts-with? tm "GHC.Internal.") "ghc-internal" :else *unit*)
-          s (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
-                          [(list 'lit (str (pr-str x) "#"))]))]
+          s th-string]
       (list 'app (list 'v (ext-name "var" "GHC.Internal.TH.Syntax" f)) [(s unit) (s tm) (s (occ n))]))))
 
 (defn- th-quote
@@ -3038,9 +3044,16 @@
                     (case (con xv)
                       HsPar (rep (arg xv 2))
                       HsApp (list 'app (lib "appE") [(qd) (rep (arg xv 2)) (rep (arg xv 3))])
-                      HsVar (let [n (nm (arg xv 2))]
-                              (if-let [nc (th-name-core n)]
+                      HsVar (let [n (nm (arg xv 2)) nc (th-name-core n) u (when-not n (lval (arg xv 2)))]
+                              (cond
+                                nc
                                 (list 'app (lib (if (= "data" (nth n 1)) "conE" "varE")) [(qd) nc])
+                                ;; (queue 388: a variable out of scope in an untyped quote is a hole, the renamer's HoleVar:
+                                ;; repE's repUnboundVar, unboundVarE of mkNameS OCC (repRdrName's Unqual); os-string's
+                                ;; Common.hs, whose Prelude import leaves out (==), [p|((==) osp' -> True)|])
+                                (and (not typed?) (seq? u) (= 'unqual (first u)) (= 'var (second u)) (string? (nth u 2)))
+                                (list 'app (lib "unboundVarE") [(qd) (list 'app (syn "mkNameS") [(th-string (nth u 2))])])
+                                :else
                                 (let [[tx cx] (infer env x) dl (want! [lift-cls [tx]])]
                                   (if typed?
                                     (list 'app (syn "unTypeCode") [(qd) (list 'app (list 'v lt-n) [dl (qd) cx])])
