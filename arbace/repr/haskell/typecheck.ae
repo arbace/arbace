@@ -1500,6 +1500,12 @@
   [c sb]
   (let [sb (remove (fn [[pn pc]] (and (= pc '(pbang (pwild))) (some-> *ltypes* deref (get (lv pn)) unlifted-ty?))) sb)]
     (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse sb))))
+(defn- strict-rhs
+  "Queue 369: a right-hand side's where bindings forced around it (*strict-binds*' [pn pattern]..., the unlifted banged
+  variables left as force-strict-binds leaves them): (strict-rhs [[x pattern]...] c), c itself when none is left"
+  [c sb]
+  (let [sb (remove (fn [[pn pc]] (and (= pc '(pbang (pwild))) (some-> *ltypes* deref (get (lv pn)) unlifted-ty?))) sb)]
+    (if (empty? sb) c (list 'strict-rhs (mapv (fn [[pn pc]] [(lv pn) pc]) sb) c))))
 (def ^:dynamic *uniq* nil)
 (defn- fresh-lv [o] (list 'lv o (str "u" (fresh-id))))
 
@@ -2088,6 +2094,7 @@
   [c ef]
   (cond (not (and ef (seq? c))) c
         (and (= 'guards (first c)) (= 2 (count c))) (list 'guards (second c) ef)
+        (= 'strict-rhs (first c)) (list 'strict-rhs (second c) (tag-guards (nth c 2) ef))
         (contains? #{'let 'letrec} (first c)) (list (first c) (second c) (tag-guards (nth c 2) ef))
         :else c))
 
@@ -3412,7 +3419,13 @@
 (defn infer-grhss
   "(GRHSs ext [GRHS...] localbinds) against result type r: core"
   [env grhss r]
-  (let [[env1 binds] (tc-local-binds env (arg grhss 3))
+  (let [;; (queue 369, 352's leftover: under the Strict extension the where bindings are strict as a let's are, dsGRHSs'
+        ;; dsLocalBinds: a variable binding, recursive or not, and a pattern binding but ~ ones forced before the guards; a
+        ;; banged where binding without Strict is not made strict here yet)
+        sb (when (contains? *exts* "Strict") (atom []))
+        [env1 binds] (if sb
+                       (binding [*strict-binds* {:atom sb :level (inc *level*)}] (tc-local-binds env (arg grhss 3)))
+                       (tc-local-binds env (arg grhss 3)))
         ;; HF10-P20: each guarded right-hand side its own implication (GHC.Tc.Gen.Match's tcGRHS: a pattern guard's
         ;; givens scope over the guards after it and the body, not over the where bindings: Data.Typeable's cast,
         ;; `Just HRefl <- ta `eqTypeRep` tb`, rewrote tb's Typeable b wanted, made in the where clause, to Typeable a)
@@ -3429,7 +3442,9 @@
                            (if (empty? gs) c (list 'guarded gs c))))))
                    (arg grhss 2)))
         body (if (and (= 1 (count alts)) (not (and (seq? (first alts)) (= 'guarded (first (first alts)))))) (first alts) (list 'guards alts))]
-    (wrap-lets binds body)))
+    ;; (the forces around the guards as (strict-rhs [[x PAT]...] BODY): the desugarer's dsGRHSs, whose guards' failure falls
+    ;; through to the next equation, not a failure of the forcing match's own)
+    (wrap-lets binds (if (and sb (seq @sb)) (strict-rhs body @sb) body))))
 
 (defn- rewrite-by-givens [t]
   (let [t (zonk t)]
