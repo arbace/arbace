@@ -97,6 +97,16 @@
                         :diff (vec (take 6 (:diff c)))
                         :missing (vec (take 12 (:missing c)))})))))))))
 
+(def ^:private srcmap
+  "Queue 363: a package above base's modules' source paths as GHC was given them (the corpus's :dir and module path:
+  libraries/containers/containers/src/Data/Map/Internal.hs), read from LIB_CHECK_SRCMAP (lib-check's srcmap.tsv, MODULE TAB
+  PATH); {} without it"
+  (delay (if-let [f (System/getenv "LIB_CHECK_SRCMAP")]
+           (if (.exists (File. ^String f))
+             (into {} (for [l (str/split-lines (slurp f)) :let [[m p] (str/split l #"\t")] :when p] [m p]))
+             {})
+           {})))
+
 (defn- stg-one
   "HF10: a module of the plan through the whole front end, desugared (arbace.repr.haskell.desugar, the -O0 Simplifier)
   and made STG (arbace.repr.haskell.tostg) in its own unit, into OUT/stg/UNIT/MODULE.stg.ae; with REF (a directory of
@@ -121,6 +131,7 @@
               srcfile (or (when (and gref (.exists (File. ^String gref)))
                             (with-open [rd (java.io.BufferedReader. (java.io.FileReader. ^String gref))]
                               (second (re-find #":file \"([^\"]*)\"" (or (.readLine rd) "")))))
+                          (get @srcmap nm)
                           (str "libraries/" unit "/src/" (str/replace nm "." "/") ".hs"))
               r (try (binding [tc/*ifdirs* (conj dirs local) tc/*iface-files* files tc/*srcfile* srcfile tc/*unit* unit] (tc/typecheck-module (:tree rr)))
                      (catch Throwable e {:fail (msg e)}))]
@@ -325,7 +336,7 @@
     (if (:fail rr)
       (merge base {:stage :rename :msg (:fail rr)})
       (let [;; the source path GHC is given (patError's and SrcLoc's text, in the Core an unfolding carries): lib-stg's
-            srcfile (str "libraries/" unit "/src/" (str/replace nm "." "/") ".hs")
+            srcfile (or (get @srcmap nm) (str "libraries/" unit "/src/" (str/replace nm "." "/") ".hs"))
             r (try (binding [tc/*ifdirs* [local] tc/*iface-files* files tc/*srcfile* srcfile tc/*unit* unit] (tc/typecheck-module (:tree rr)))
                    (catch Throwable e (when (System/getenv "LIB_CHECK_TRACE") (.printStackTrace e)) {:fail (msg e)}))]
         (if (:fail r)
@@ -774,7 +785,7 @@
               (doseq [line (str/split-lines (slurp (get opts "--plan")))
                       :when (not (str/blank? line))]
                 (let [t0 (System/currentTimeMillis)
-                      task (future (stg-one (str/split line #"\t") out units unit ref (= "1" (get opts "--o0-layout"))))
+                      task (future (stg-one (str/split line #"\t") out units unit ref (case (get opts "--o0-layout") "1" true "all" :all nil)))
                       r0 (deref task limit nil)
                       r (assoc (or r0 {:name (first (str/split line #"\t")) :stage :timeout})
                                :ms (- (System/currentTimeMillis) t0))]
