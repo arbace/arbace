@@ -343,3 +343,147 @@ digits): what the reworked arbace.instant needs (JRT-NOTES.md, \"#inst\").\n"
 
 (go/func init []
   (set! (.-IsInstance (.Info Date_class)) Date_InstanceOf))
+
+;; ---- Date.parse and Date(String) (round 54's fourth pass, doc/classes/JAVA-DEFERRED-TRIAGE.md: URLConnection's
+;; getHeaderFieldDate parses the last-modified header with it, GetLastModified's jar: URL)
+
+(go/var ^{:tag (slice string) :doc "dateWords is jdk26u's Date.wtb: the words parse knows.\n"} dateWords
+  (lit (slice string) "am" "pm" "monday" "tuesday" "wednesday" "thursday" "friday" "saturday" "sunday"
+       "january" "february" "march" "april" "may" "june" "july" "august" "september" "october" "november"
+       "december" "gmt" "ut" "utc" "est" "edt" "cst" "cdt" "mst" "mdt" "pst" "pdt"))
+
+(go/var ^{:tag (slice int) :doc "dateActions is jdk26u's Date.ttb: each word's action (1 pm, 14 am, 2..13 a month, 10000 + a zone's minutes west).\n"} dateActions
+  (lit (slice int) 14 1 0 0 0 0 0 0 0 2 3 4 5 6 7 8 9 10 11 12 13 10000 10000 10000 10300 10240 10360 10300
+       10420 10360 10480 10420))
+
+(go/func dateWordMatches "dateWordMatches is regionMatches(true, 0, s, st, n) of word w: s's n units a prefix of w, ignoring case.\n"
+  ^bool [^string w ^{:tag (slice uint16)} s ^int st ^int n]
+  (when (> n (len w))
+    (return false))
+  (for [j 0] (< j n) (inc! j)
+    (let [c (aget s (+ st j))]
+      (when (and (>= c \A) (<= c \Z))
+        (set! c (+ c 32)))
+      (when (!= c (conv uint16 (aget w j)))
+        (return false))))
+  true)
+
+(go/func dateParse
+  "dateParse is jdk26u's Date.parse(String) (java/util/Date.java at baf63fb, ported as written: the same
+syntax, the same tokens and the same failures): the milliseconds, ok false where the JDK throws
+IllegalArgumentException. The fields are interpreted in the default zone unless the text names an offset
+or a zone of the table; a year under 100 is in the century of the 80 years before now and 20 after.\n"
+  [^{:tag (slice uint16)} s] :results [^int64 ms ^bool ok]
+  (let [year -2147483648 mon -1 mday -1 hour -1 mi -1 sec -1 c -1 i 0 n -1 tzoffset -1 prevc 0
+        limit (len s)]
+    (while (< i limit)
+      (set! c (conv int (aget s i)))
+      (inc! i)
+      (cond
+        (or (<= c \space) (== c \,)) (continue)
+        (== c \() (let [depth 1]
+                    (while (< i limit)
+                      (set! c (conv int (aget s i)))
+                      (inc! i)
+                      (cond (== c \() (inc! depth)
+                            (== c \)) (do (dec! depth) (when (<= depth 0) (break)))))
+                    (continue))
+        (and (<= \0 c) (<= c \9))
+        (do
+          (set! n (- c \0))
+          (while (< i limit)
+            (set! c (conv int (aget s i)))
+            (when (not (and (<= \0 c) (<= c \9)))
+              (break))
+            (set! n (- (+ (* n 10) c) \0))
+            (inc! i))
+          (cond
+            (or (== prevc \+) (and (== prevc \-) (!= year -2147483648)))
+            (do
+              (if (< n 24)
+                (set! n (* n 60))
+                (set! n (+ (% n 100) (* (/ n 100) 60))))
+              (when (== prevc \+)
+                (set! n (- n)))
+              (when (and (!= tzoffset 0) (!= tzoffset -1))
+                (return 0 false))
+              (set! tzoffset n))
+            (>= n 70)
+            (cond (!= year -2147483648) (return 0 false)
+                  (or (<= c \space) (== c \,) (== c \/) (>= i limit)) (set! year n)
+                  :else (return 0 false))
+            (== c \:)
+            (cond (< hour 0) (set! hour (conv int (conv int8 n)))
+                  (< mi 0) (set! mi (conv int (conv int8 n)))
+                  :else (return 0 false))
+            (== c \/)
+            (cond (< mon 0) (set! mon (conv int (conv int8 (- n 1))))
+                  (< mday 0) (set! mday (conv int (conv int8 n)))
+                  :else (return 0 false))
+            (and (< i limit) (!= c \,) (> c \space) (!= c \-)) (return 0 false)
+            (and (>= hour 0) (< mi 0)) (set! mi (conv int (conv int8 n)))
+            (and (>= mi 0) (< sec 0)) (set! sec (conv int (conv int8 n)))
+            (< mday 0) (set! mday (conv int (conv int8 n)))
+            (and (== year -2147483648) (>= mon 0) (>= mday 0)) (set! year n)
+            :else (return 0 false))
+          (set! prevc 0))
+        (or (== c \/) (== c \:) (== c \+) (== c \-)) (set! prevc c)
+        :else
+        (let [st (- i 1)]
+          (while (< i limit)
+            (set! c (conv int (aget s i)))
+            (when (not (or (and (<= \A c) (<= c \Z)) (and (<= \a c) (<= c \z))))
+              (break))
+            (inc! i))
+          (when (<= i (+ st 1))
+            (return 0 false))
+          (let [k (- (len dateWords) 1)]
+            (while (>= k 0)
+              (when (dateWordMatches (aget dateWords k) s st (- i st))
+                (let [action (aget dateActions k)]
+                  (cond
+                    (== action 0) (do)
+                    (== action 1) (cond (or (> hour 12) (< hour 1)) (return 0 false)
+                                        (< hour 12) (set! hour (+ hour 12)))
+                    (== action 14) (cond (or (> hour 12) (< hour 1)) (return 0 false)
+                                         (== hour 12) (set! hour 0))
+                    (<= action 13) (if (< mon 0) (set! mon (- action 2)) (return 0 false))
+                    :else (set! tzoffset (- action 10000))))
+                (break))
+              (dec! k))
+            (when (< k 0)
+              (return 0 false)))
+          (set! prevc 0))))
+    (when (or (== year -2147483648) (< mon 0) (< mday 0))
+      (return 0 false))
+    (when (< year 100)
+      (let [start (- (conv int (.-year (.fields (Date_New)))) 80)]
+        (set! year (+ year (* (/ start 100) 100)))
+        (when (< year start)
+          (set! year (+ year 100)))))
+    (when (< sec 0) (set! sec 0))
+    (when (< mi 0) (set! mi 0))
+    (when (< hour 0) (set! hour 0))
+    ;; Date.getCalendarSystem(year): the Gregorian calendar from 1582 on (no cutover inside it), the Julian before
+    (let [days (gregorianDays (conv int64 year) (conv int64 (+ mon 1)) (conv int64 mday))]
+      (when (< year 1582)
+        (set! days (julianDays (conv int64 year) (conv int64 (+ mon 1)) (conv int64 mday))))
+    (let [u (+ (* days dayMillis) (* (conv int64 (+ (* (+ (* hour 60) mi) 60) sec)) 1000))]
+      (when (== tzoffset -1)
+        (return (utcOfLocal u) true))
+      (return (+ u (* (conv int64 tzoffset) 60000)) true)))))
+
+(go/func Date_Parse_String__J "Date_Parse_String__J is the deprecated Date.parse(String) (dateParse).\n"
+  ^int64 [^{:tag (* String)} s]
+  (when (== s nil)
+    (panic (IllegalArgumentException_New)))
+  (let [(values ms ok) (dateParse (.-value s))]
+    (when (not ok)
+      (panic (IllegalArgumentException_New)))
+    ms))
+
+(go/func Date_New_String "Date_New_String is the deprecated new Date(String): Date.parse's instant.\n"
+  ^{:tag (* Date)} [^{:tag (* String)} s]
+  (let [t (addr (lit Date))] (.Ctor_String t t s) t))
+(go/method Ctor_String [^{:tag (* Date)} t ^Date_I this ^{:tag (* String)} s]
+  (set! (.-F_fastTime t) (Date_Parse_String__J s)))

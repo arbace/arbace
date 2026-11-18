@@ -934,6 +934,62 @@
              (let [old '((go/method Impl_Fin__V [t this] ((inst jrt/J2g_NotNull J_z_Base_J_I) this)))]
                (and (iface-this? (shape-of old) "Base") (not (dispatch? (shape-of old) 'this))))))))
 
+;; Round 54's fourth pass (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54), the fourth pass"): the
+;; translated classes the eval cell's tests extend (their own subclasses, anonymous ones too, and RMI's stubs and objects)
+;; are class-supers: each a class of jdk/forms (not jrt's hand-written: those need a class interface, JC4c's way), not
+;; final and not an interface, so that it gets its DynSub_C; RemoteStub's DynSub_C has its protected constructor (the
+;; rmic stubs' super(ref)), the interpreter's "No accessible constructor of java.rmi.server.RemoteStub"
+(def ^:private r54-supers
+  ["com/sun/security/auth/callback/TextCallbackHandler" "java/util/concurrent/CyclicBarrier"
+   "java/util/concurrent/ConcurrentHashMap" "java/io/FileOutputStream" "java/io/IOException" "java/math/BigDecimal"
+   "java/util/Hashtable" "java/net/SocketAddress" "java/net/ResponseCache" "java/util/ResourceBundle"
+   "java/lang/ExceptionInInitializerError" "javax/management/QueryEval" "javax/rmi/ssl/SslRMIClientSocketFactory"
+   "java/util/concurrent/ConcurrentLinkedDeque" "java/util/concurrent/ConcurrentLinkedQueue"
+   "java/util/concurrent/LinkedTransferQueue" "java/util/concurrent/LinkedBlockingQueue"
+   "java/util/concurrent/LinkedBlockingDeque" "java/util/concurrent/ArrayBlockingQueue"
+   "java/util/concurrent/PriorityBlockingQueue" "java/util/concurrent/ThreadPoolExecutor" "java/net/CacheResponse"
+   "javax/rmi/ssl/SslRMIServerSocketFactory" "java/rmi/server/RemoteStub" "java/rmi/server/RemoteObject"
+   "java/rmi/server/UnicastRemoteObject" "javax/management/remote/rmi/RMIJRMPServerImpl"])
+
+(defn- extendable-translated?
+  "Is n a class of jdk/forms whose defclass is neither final nor an interface, and not jrt's hand-written."
+  [manifest n]
+  (let [f (io/file (str "jdk/forms/" n ".ae"))
+        simple (last (str/split n #"/"))]
+    (and (.exists f) (not (contains? manifest (str/replace n "/" ".")))
+         (let [head (some #(when (re-find (re-pattern (str "^\\(defclass .*\\b" (java.util.regex.Pattern/quote simple) "$")) %) %)
+                          (str/split-lines (slurp f)))]
+           (and head (not (str/includes? head "^:final")) (not (str/includes? head "^:interface")))))))
+
+(defn test-class-supers-r54 []
+  (let [manifest (set (map str (keys (read-string (slurp "go/arbace/jrt/manifest.edn")))))
+        ok? (partial extendable-translated? manifest)
+        listed (set dyn/sub-supers)]
+    (check "class-supers-r54: every round-54 class is listed (model/class-supers, dyn/sub-supers)"
+           (every? listed r54-supers) (pr-str (remove listed r54-supers)))
+    (check "class-supers-r54: each is a translated class of jdk/forms, not final, not an interface, not jrt's"
+           (every? ok? r54-supers) (pr-str (remove ok? r54-supers)))
+    (check "class-supers-r54: negative controls: a final class (java.util.Objects), an interface (java.rmi.Remote) and jrt's
+      CountDownLatch fail the judge"
+           (not-any? ok? ["java/util/Objects" "java/rmi/Remote" "java/util/concurrent/CountDownLatch"]))
+    (let [e (edge/read-edge "jdk/edge.edn")
+          files (map #(str "jdk/forms/java/rmi/" % ".ae") ["server/RemoteStub" "server/RemoteObject" "server/RemoteRef" "Remote"])
+          world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                  (try (w/load-world [{:files (vec files)}] :variant-files []) (catch Throwable t {:threw (str t)})))]
+      (if (:threw world)
+        (println (str "skip  class-supers-r54: RemoteStub's world alone does not load here: " (:threw world)))
+        (let [mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {} :vmethods-cache (atom {}) :trivial-cache (atom {})}
+              mw (assoc mw :subclass-index (m/make-subclass-index mw))
+              fs (w/with-world world
+                   (binding [m/*w* mw env/*declared* (:classes e)
+                             code/*pkgstate* {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts (atom #{})}]
+                     (try (doall (#'dyncf/sub-forms "java/rmi/server/RemoteStub")) (catch Throwable t [(str "threw: " t)]))))
+              txt (pr-str fs)]
+          (check "class-supers-r54: RemoteStub's DynSub constructors include its protected RemoteStub(RemoteRef)"
+                 (str/includes? txt "(Ljava/rmi/server/RemoteRef;)V") (subs txt 0 (min 600 (count txt))))
+          (check "class-supers-r54: RemoteStub is not a leaf once listed"
+                 (w/with-world world (binding [m/*w* mw] (not (m/leaf? "java/rmi/server/RemoteStub"))))))))))
+
 ;; Round 54 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54), the second pass"): Object.clone of an
 ;; object of an interpreted class extending a class of the world (a DynSub_C): its Clone__O is C's clone with the
 ;; object as this, else Object's; its CloneShallow copies the struct and the core when the class is Cloneable (C's
@@ -1016,6 +1072,7 @@
   (test-edge-generics)
   (test-object-finalize)
   (test-dynsub-clone)
+  (test-class-supers-r54)
   (test-null-up)
   (test-support-tables)
   (test-unresolved-cause)

@@ -12216,3 +12216,50 @@ sources) and its `:why` names the source sets' JDK origin; switch.patch the same
 (CaseFolding Arbace's own from pinned data; cacerts open, the user's). Scores unchanged (59.7; `crops-score --record` writes no
 difference), `--judge --strict` 0 problems; `git apply --check` of the patch passes. No key moves (bin/jrt-convert, test/ are in
 none of gate_key, arbace_javac_key); jrt-convert's and gate-tests' `--full` steps rerun. Every process under 4 GiB; no gate run.
+
+## 2026-11-18: n-java-defer (round 54), the fourth pass: DynSub lines past the first, RMI's stubs, seven closure lines, nine jrt fixes
+
+The next eval (interp) groups of the round's table (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54), the
+fourth pass"), each process under 5 GiB (peaks 3.8 GB), no j2g whole-program run, no gate, on gate `e8e0d017243dca8a9f9f` and javac's
+tool `javac-8526ceb9d1ea3ff0bd68`. All of it the shipped world's: nothing shows at interp before the day's build. j2g's analysis of the 35
+"cannot extend" and RMI tests (`--analyze-only`, `J2G_MISSING='^t0'`): all analyze, none of their own code stubbed.
+
+Built: (1) arbace/j2g/model.ae `class-supers` + 14: the classes the same tests extend past the one their row names (BiggernYours'
+seven queues, CacheResponse, ThreadPoolExecutor, SslRMIServerSocketFactory: a scan of every test file's extends and anonymous
+subclasses) and RMI's RemoteStub, RemoteObject, UnicastRemoteObject, RMIJRMPServerImpl. (2) overlay/jdk/variants/Util.ae (sun.rmi.server.Util,
+jdk26u's three methods with `rmiClass`, the class literals of DGCImpl_Stub, DGCImpl_Skel, RegistryImpl_Stub, RegistryImpl_Skel: names
+Class.forName could not find in the closed world). (3) test/jrt/jrt_sources.ae `r54-sources`: MalformedParametersException, java.prefs'
+two exceptions, java.smartcardio's ATR, CommandAPDU, ResponseAPDU, java.xml's XPathException (openjdk/jdk26u `baf63fbe4`, GPL 2 with
+the Classpath Exception, in LICENSE.md). (4) jrt: StringBuilder(n)'s capacity, the CharSequence constructors' negative length,
+contentEquals under a StringBuffer's lock, the 255-dimension limits of Array.newInstance and Class.arrayType, Date.parse and
+Date(String) (jdk26u's java/util/Date.java parse ported as written), the manifest and member tables regenerated (`bin/jrt manifest`,
+`bin/jrt testdata`). (5) overlay/jdk/variants/FileInputStream.ae (skip as jdk26u's: backwards, "Bad file descriptor" once closed) and
+HostFiles.ae (a NUL in a path: "Invalid file path").
+
+Proven light: `test-class-supers-r54` (bin/j2g-unit, its controls refused; the other tests as on the base, 7 failures there too);
+`bin/jrt-convert vet` of the three variants ok, a control refused; `bin/jrt-convert predict --list` of t04868 t05784 t08071 t08082 (0
+refused, 0 analysis failures, 0 stubs, the four analyzed); `TestRound54Strings`, `TestRound54MaxDim`, `TestRound54DateParse` (26 texts
+against jdk26u's build's own Date.parse) with their controls failing; `bin/jrt test --arch amd64 --package jrt` whole: all but
+TestAnnotationHandlerNew, which fails on the base too.
+
+Correction to the first pass's entry (this day's first round-54 entry): t05469 BiggernYours is not expected to pass at interp from
+ConcurrentHashMap's line alone; it also extends seven queues, listed now.
+
+Decisions taken (round 54), the recommended ones: the DynSub lines for every translated superclass a scan of the tests finds, not only
+the first; RMI's own stubs rooted by a variant of Util (shows at the build) over a derivation of DGCImpl and RegistryImpl (waits for the
+conversion); the single classes as closure lines, proven by `predict`, the areas (Preferences, JNDI's directory, SCTP, LdapLoginModule,
+Kerberos's tickets, dynalink, GarbageCollectorMXBean) left as slices; for jrt's own overlay Java (FileInputStream, HostFiles) variants,
+folded into the overlay at the next conversion; nine of the one-cause rows taken (each a jrt member or a variant), the rest left with
+their reasons in the triage (Math.pow's accuracy, stack traces of interpreted frames, the deserialization of interpreted subclasses of
+jrt's Throwable, run.ae's exit before non-daemon threads end, private JDK fields by reflection, Calendar's readObject, egd, class files).
+
+Keys: arbace/j2g moves `gate_key` and javac's keys; go/arbace/jrt and overlay/jdk/variants move `gate_key`, `arbace_runtime_key` and
+javac's keys; test/jrt/jrt_sources.ae moves jrt-convert's key and output: `bin/jrt-convert verify` fails until the night's `bin/jrt-convert
+update` (then `bin/jrt modules`); test/j2g none of the build keys.
+
+**Expected rows at the night's --record** (interp, test/java/check-interp.edn, after the day's build; not re-recorded here):
+`t04238 pass`, `t04264 pass`, `t04279 pass`, `t04504 pass`, `t04642 pass`, `t04651 pass`, `t04655 pass`, `t04837 pass`, `t05058 pass`;
+after the update `t05784 pass`, `t08071 pass`, `t08082 pass` (if their serialization holds); t04868 moves to its classes defined from
+bytes (by design); of the 18 "cannot extend" and RMI's 13, the rows whose later lines hold (likely t04448 t04905 t05547 t05469 t05241
+t05242 t05244 t05248 t05249 t05250 t08020; at risk t05243 t05252 t05253 t07954 and the SASL seven). The ids join the first pass's
+`.tmp/njd54.txt`.
