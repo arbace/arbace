@@ -12704,3 +12704,24 @@ The Mac VM's WIP of the same gaps (queue 379, `mac/379-haskell-elaborator-gaps` 
 - 54-3: roles from the module's annotations only. Role inference and the interfaces' roles wait for a module that needs them.
 
 Queue 381's gaps (os-string, bytestring, filepath, Control.Monad.Catch) were left alone.
+
+
+## 2026-11-18: RIND9 (a): std's whole pass with every fix, alloc's again, std's units recorded (round 54, branch `n-rust-std`, on `d12096365`)
+
+- Corrects the entry before: the hand-back there was not asked for; the runs it left open are done here.
+- `bin/rust-front std-iface`, two rounds, every fix of `d12096365` (std 230 module files): **4,566 of 4,644 helper facts equal**, 2
+  differ, 76 missing (adts 210 of 272, consts 17 of 17, fns 2,679 of 2,693, impls 1,630 of 1,632, traits 30 of 30; native extras
+  1,403), the control differing; 50 min on a loaded host, 2.24 GB. Before (two rounds, the expansion fixes alone): 4,468.
+- What is left: the dependency crates outside the helper's names. hashbrown (HashMap's and HashSet's `base`, their iterators and
+  entries: 16 ADTs) and libc (`sockaddr_un`, `cmsghdr`, `ucred`, `stat`, `DIR`, the `c_int`-typed fields under sys::fs, process,
+  net, thread, time, cascading to std::fs, std::process, std::time's ADTs and their functions); the 2 differing facts are
+  libc's FnOnce bound in `unix::net::addr`'s `new` and `process::CommandEnvs`' field through sys::process::env's missing ADT. None
+  of the 76 was checked one by one; the decision of `d12096365` (libc's and hashbrown's names from library/vendor next) stands.
+- alloc's whole pass again with the trait-object and Fn-sugar fixes: **3,863 of 3,863 equal**, 0 differ, 0 missing (extras
+  1,015), unchanged (20 min, 2.06 GB).
+- `bin/rust-front std-iface --units --record`: the pure cases passed (alloc's 42 and 11 new), 7 module lines of
+  `test/rust/front/std-iface-units.txt` every case passing (ascii 35/35, panic 41/41, nonpoison::mutex 55/55, ffi::os_str 225/225,
+  io::stdio 166/167, env 94/96, dwarf::eh 4/4; the missing ones the siblings' ADTs a module alone lacks), its known file
+  `std-iface-units-known.txt` recorded. os/raw's line dropped: it has no helper fact, so no control (taken, round 54).
+- core's checks were not rerun: core-essential, rind-test and core's whole check (5,696) ran on `d12096365`'s code but the globs
+  and `#[path]`, both gated to std.
