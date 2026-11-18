@@ -149,8 +149,18 @@ oracle_host_id() {  # TOOL
     cxx) oracle_cxx_id ;;
     llvm) oracle_llvm_id ;;
     ocaml) oracle_ocaml_id ;;
+    python) oracle_python_id ;;
     *) echo "oracle: no identity recipe for $1" >&2; echo none ;;
   esac
+}
+oracle_python_id() {  # steps.edn's :host-ids :python recipe (queue 320, from tools/pydump/records.bash's pyrec_python_id, queue 213):
+  # the version line, python3's bytes through its links, libpython's; none when python3 is not installed
+  local x p m=0
+  x=$(type -P python3) || { echo none; return; }
+  { command python3 --version 2>"$TMPDIR/oracle-python.err" | head -1
+    sha256sum < "$(readlink -f "$x")" | cut -c1-64
+    for p in /usr/lib/libpython3.*.so.1.0; do [ -f "$p" ] && { sha256sum < "$p" | cut -c1-64; m=1; }; done
+    [ $m = 1 ] || echo "missing /usr/lib/libpython3.*.so.1.0"; } | sha256sum | cut -c1-64
 }
 oracle_scheme_id() {  # CMD VERSION-FLAG FILE...: bin/lib/gate-run.bash's gate_scheme_id (:chez, :chibi): the version line, the executable's
   # SHA-256 through its links, the FILEs' (Chez's boot files); none when the command is not installed
@@ -230,6 +240,7 @@ oracle_host_version() {  # TOOL: its version line
     ghc) ghc --version 2>"$TMPDIR/oracle-ghc.err" | head -1 ;;
     rustc) rustc --version 2>"$TMPDIR/oracle-rustc.err" | head -1 ;;
     ocaml) echo "ocamlc $(ocamlc -version 2>"$TMPDIR/oracle-ocaml.err")" ;;
+    python) command python3 --version 2>&1 | head -1 ;;
     *) echo unknown ;;
   esac
 }

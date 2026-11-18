@@ -9717,6 +9717,19 @@ crops-score's maturity counts essential steps); keying them without stage 0 (wro
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
 
+## 2026-11-17: review of the Mac VM's Python branches (317's 80a6f9eaa, 318 84bc8fd21, 320 8b5fac0b4; h-review-mac-py)
+
+An independent review before the branches land on next. 317's merge of 201 (cb8457fc0) onto next (e4a7a30f3) is clean: its diff
+against next is 201's 31 files, the three changed on both sides equal git merge-file's clean merge, and the merged runtime passes
+`bin/pyi runtime vet` (go vet and go test of py and pyctypes, queue 261's ctypes work against 296-316's runtime). Fixed on
+h-review-mac-py (from 320): the eval fact and the judge's Lib/test cases in test/crops/independence.edn, stale since queues 234 and
+279 (bin/pyi check's runner is compiled by pyi's AOT, no python3; a stub run on amd64 proved it): eval 0 to 1, judge 0.196 to
+0.910, Python's independence 64 to 98 (test/crops/scores.edn recorded). Found, not fixed: 317's splice of
+test/gate/crops/python.edn as is makes the planner refuse the table (56 pins and rotation universes not yet recorded), so the
+main host's records come first (DECISION F1 of the review, (a) recommended); 320 needs 318's known-file fix on next's runtime
+(the koi8-r and cp1251 entries GONE, reproduced). Alternatives considered for F1: splicing only the steps whose files exist, or
+a planner exception for a :full step's missing files (rejected: weakens a check every crop relies on).
+
 ## 2026-11-17: Clojure's stale deferred rows recorded, gen-class's exposer, Go's by-design audit (branch `h-clojure-go`, from `next` `e4a7a30f3`)
 
 The host burst (light checks only). Clojure: the eval level's deferred classes `:q1-typing`, `:desktop` and `:javadoc-url` were
@@ -11485,3 +11498,22 @@ The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.
   doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the compare across the crate's modules".
 - core's native facts may move (Self in impl headers, const-parameter ADT arguments, array lengths naming constants, derives
   over projections): the day runs core-essential, rind-test, core's check and the whole alloc pass.
+
+## 2026-11-17: the Mac's integrated Python line reviewed onto next (branch `n-review-f`, from next `42bf8614b`)
+
+- Merged mac/python-1117-on-next `85a0b5096` (317's merge of 201, 318-321, 329's binary IR, 330's generator chains,
+  h-review-mac-py) into next `42bf8614b` (`53963579d`). Next changed nothing of Python since the line's base `d694a2f7e`
+  (bin/pyi identical), so 321's guard on runtime_from_source merges as built; conflicts only in test/crops/scores.edn and
+  test/reap/matrix.edn, next's side taken and both re-recorded (Python 0 / 0 / 83 / 98, every other crop next's).
+- 329's go/arbace/py/irbin.go printed from the forms and read against load.go's ReadIR, loadCode, loadConst and decodeArg case
+  by case (the same code objects in the same order; the Go writer's map order and string table are free, the cache files only);
+  `gofmt -l`, `go vet ./py` and `go test -run IR ./py` by TamaGo's go: clean, under 1 GiB.
+- Fixed: `bin/pyi records` took the gate's build by `arbace_gate_cache` with ARBACE_HOST_EXE as the caller set it, and
+  gate_key hashes that executable's bytes, so a caller with ARBACE_HOST_EXE set (a worktree's habit) missed the build and stopped;
+  the key is now computed without it, as the gate does.
+- Found, not fixed (the splice is after the records): 317-python-splice `f7fd30b40` was spliced from the fragment before 321's
+  DECISION 1 (a); merged onto this line it conflicts in python.edn and puts pyi-runtime into steps.edn with its old command
+  (stage 0, no PYI_RUNTIME_REQUIRE), python-night.edn holding the old pyi-check and pyi-check-aot-goi. It is to be redone by
+  `gate.crops splice` on this line after the records, not merged.
+- reap 0 problems; crops-score --judge --strict rc 0; records-check 9 pairs 0; `bin/gate --plan` rc 0. gate_key moves (the
+  embedded py runtime and arbace/python): next `e8e0d017...`, this line `485a184c...`.
