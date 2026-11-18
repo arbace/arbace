@@ -11545,6 +11545,7 @@ The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.
   `super`s (alternative: set's file as context, set aside: context carries ADTs' generics, not imports); RIND9a-20 (a) the
   trait ref alone in trait-bounds-defining (alternative: a depth guard, set aside: it hides the cause). doc/rust/FRONTEND-SURVEY.md,
   "As built: RIND9 (a), alloc's pass: set::entry and the whole crate".
+
 ## 2026-11-17: the Mac's integrated Python line reviewed onto next (branch `n-review-f`, from next `42bf8614b`)
 
 - Merged mac/python-1117-on-next `85a0b5096` (317's merge of 201, 318-321, 329's binary IR, 330's generator chains,
@@ -11829,3 +11830,32 @@ ARBACE_RUSTC_HOME a missing directory, gives ARBACE_RUSTC=rustc-not-at-the-pin (
 checks the marker under the lock and only trusts it when root/usr/bin/rustc exists (proof: marker present, no root, empty apks dir: it
 reaches the apk check and fails, no longer returns 0). (3) `rustc_pin_path` moves the tree's usr/bin to the front of PATH when it is
 already on it elsewhere (proof: PATH=/usr/bin:TREE:/bin gives TREE first, once). `bin/repr-rust pins check` and `bin/gate --pins`: ok.
+
+## 2026-11-18: RIND9 (a): std's interface pass, first results (round 54, branch `n-rust-std`, from `n-rust-alloc5` `1cb0ceeb8` with `mac/n-pins`)
+
+- `bin/rust-front std-iface [FILE...]`, `--list`, `--units [--record]` (bin/lib/repr-rust/core-build.bash): alloc's pass run for std
+  (`arbace.rust.front.alloc-check --crate std`; rust-src 1.99.1's library/std over the linux `sys`, core's cfg, std's features
+  backtrace and panic-unwind), std's facts taken out of the helper's std-iface, compared fact by fact (4,644 helper facts of std).
+- Causes fixed in arbace/rust/front/ (rustc's references in the comments): the module tree and the index read item-level
+  `cfg_select!` and `cfg_if!` arms that hold, re-read at their own places (core_check `splice-selects`; `#[cfg(doc)]` on the call
+  honoured: std 148 -> 230 module files); std's modules take std's prelude; the extern prelude of a library crate holds its
+  dependencies and its root's `extern crate alloc as alloc_crate` (resolve, and the index's re-exports); item-level `include!`;
+  `env!` of std's build variable STD_ENV_ARCH; eager `concat!`/`stringify!` in `include_str!` and `format_args!`; derive's
+  projection walk skipping FnRetTy's `(Ty ..)`; a trait object's elided lifetime 'static when its principal bounds Self by 'static
+  (`&'a (dyn Any + Send)`); Fn sugar's output elided by its one input lifetime (`FnOnce(&mut T) -> &mut U`); std's index takes glob
+  re-exports (`pub use self::unix::*`) and an outline `#[path]` relative to the declaring file (both std's alone).
+- Results: the whole pass, one round, before the later fixes: 4,305 of 4,644 equal (15 min, 2.14 GB). Two rounds with the expansion
+  fixes: 4,468 equal, 48 differ, 128 missing (49 min on a loaded host, 2.19 GB), every module's stages ok. Five modules alone with the
+  next fixes (os_str, stdio, nonpoison::mutex, panic, unix::net::addr): 496 of 503 equal, the rest libc and the order. The whole pass
+  with all fixes was started and stopped unfinished (the hand-back): not verified.
+- Open cause, the largest: std's dependency crates outside the helper's names (libc: `libc::sockaddr`, `c_int`; hashbrown:
+  HashMap's `base`), cascading to most of the missing ADTs (sys::fs, process, net, time). Decision taken (round 54): record it, the
+  next step libc's and hashbrown's names from library/vendor natively (alternative: the helper's names extended, set aside: an answer
+  read from rustc).
+- Verified unchanged: `bin/rust-front core-essential` (566 equal, its known file), `bin/rust-front rind-test` passed, core's whole
+  check `core-check --records` 5,696 / 166 / 32 differ / 6 refused / 6 (the recorded totals), the pure unit cases (42 alloc + 11 new)
+  passed and alloc's module tree 84 files; these ran before the last two fixes (globs, `#[path]`), which are std's alone. Not rerun:
+  alloc's whole pass (3,863) after the trait-object and Fn-sugar fixes, which may move alloc's facts; `std-iface --units` (its known
+  file not recorded). Decisions taken (round 54): std's features as the distributed sysroot's; cfg_if as a builtin (the crate's
+  macro's semantics); globs and `#[path]` gated to std until core's and alloc's checks rerun.
+

@@ -22,6 +22,10 @@
             [arbace.string :as str])
   (:import [java.io File]))
 
+(def ^:dynamic *tag*
+  "The output lines' prefix (round 54: std-iface for std's pass)"
+  "alloc-iface")
+
 (def kinds
   "The helper's std-iface kinds: the form's head and the load-std-iface key"
   [['si/fn :fns] ['si/adt :adts] ['si/trait :traits] ['si/impl :impls] ['si/const :consts]])
@@ -135,7 +139,7 @@
   "The compare's lines: one a kind (helper facts, equal, differing, missing, native extras), then the total"
   [cmp]
   (let [line (fn [nm {:keys [equal differs missing extra]}]
-               (format "alloc-iface: %s %d facts: %d equal, %d differ, %d missing (native extras %d)"
+               (format (str *tag* ": %s %d facts: %d equal, %d differ, %d missing (native extras %d)")
                        nm (+ equal (count differs) (count missing)) equal (count differs) (count missing) (count extra)))
         tot (reduce (fn [a [_ v]] (merge-with (fn [x y] (if (number? x) (+ x y) (into x y))) a v)) {:equal 0 :differs [] :missing [] :extra []} cmp)]
     (concat (for [[k v] cmp] (line (name k) v)) [(line "total" tot)])))
@@ -174,7 +178,7 @@
                 (if (.exists cache)
                   (read-string (slurp cache))
                   (let [t (binding [cc/*crate* crate] (cc/crate-index (remove :vendored mods)))]
-                    (println "alloc-iface:" crate "'s index over" (count mods) "files:" (count (:macros t)) "macros," (count (:names t)) "modules")
+                    (println (str *tag* ":") crate "'s index over" (count mods) "files:" (count (:macros t)) "macros," (count (:names t)) "modules")
                     (.mkdirs (File. ^String cache-dir))
                     (spit cache (pr-str t)) t)))
         names (cc/with-core-names (resolve/load-std-names std-file) (:names index))
@@ -200,10 +204,10 @@
                     (cc/run-module m table (cc/with-native-names names seen) std-file (cc/with-native-std std seen)
                                    (cc/with-native-iface si seen) lib-dir identity))]
               (when nat (swap! native #(merge-with merge % nat)))
-              (println (format "alloc-iface: round %d %s stages %s: %d fns, %d ADTs, %d traits, %d impls (%d s)" (inc r) (:path m) (pr-str stages)
+              (println (format (str *tag* ": round %d %s stages %s: %d fns, %d ADTs, %d traits, %d impls (%d s)") (inc r) (:path m) (pr-str stages)
                                (count (:fns nat)) (count (:adts nat)) (count (:traits nat)) (count (:impls nat)) (quot (- (System/nanoTime) t1) 1000000000)))
               (flush)))
-          (println (format "alloc-iface: round %d over %d files: %d functions, %d ADTs, %d traits, %d impls, %d consts (%d s)" (inc r) (count mods)
+          (println (format (str *tag* ": round %d over %d files: %d functions, %d ADTs, %d traits, %d impls, %d consts (%d s)") (inc r) (count mods)
                            (count (:fns @native)) (count (:adts @native)) (count (:traits @native)) (count (:impls @native)) (count (:consts @native))
                            (quot (- (System/nanoTime) t0) 1000000000))))))
     @native))
@@ -212,8 +216,10 @@
   (vec (for [l (str/split-lines (slurp f)) :when (seq (str/trim l)) :let [[p fl v] (str/split l #" ")]]
          {:path p :file fl :vendored (= v "vendored")})))
 
-(defn -main [cmd & args]
-  (binding [cc/*crate* "alloc"]
+(defn -main [& argv]
+  ;; round 54 (RIND9 (a), std): `--crate C` first names the crate (alloc by default; std over the linux `sys`)
+  (let [[crate cmd & args] (if (= "--crate" (first argv)) (rest argv) (cons "alloc" argv))]
+  (binding [cc/*crate* crate *tag* (str crate "-iface")]
     (case cmd
       ;; --list LIB: alloc's module files (core-check --list's lines)
       "--list" (doseq [m (cc/module-files (first args))] (println (:path m) (:file m) (if (:vendored m) "vendored" "")))
@@ -224,27 +230,27 @@
             mods (read-modules modules-file)
             by-file (into {} (for [m mods] [(:file m) m]))
             sel (if (seq files)
-                  (vec (for [f files :let [m (get by-file (.getCanonicalPath (File. ^String f)))]] (or m (throw (ex-info (str "not a module file of alloc: " f) {})))))
+                  (vec (for [f files :let [m (get by-file (.getCanonicalPath (File. ^String f)))]] (or m (throw (ex-info (str "not a module file of " crate ": " f) {})))))
                   mods)
-            setup (crate-setup "alloc" front cache mods)
+            setup (crate-setup crate front cache mods)
             rounds (Long/parseLong (or (System/getenv "ALLOC_IFACE_ROUNDS") "2"))
             mod-paths (map :path mods)
-            native (pass "alloc" lib setup sel mod-paths rounds)
-            facts (crate-facts native "alloc")
+            native (pass crate lib setup sel mod-paths rounds)
+            facts (crate-facts native crate)
             helper (facts-of-modules (:helper setup) mod-paths (map :path sel))
             cmp (compare-facts helper facts)]
         (spit out (facts-text facts))
         (spit (str out ".report") (report-text cmp helper facts))
         (doseq [l (summary-lines cmp)] (println l))
         (when-let [[p o d] (control helper facts)]
-          (println "alloc-iface: control (" p "against" o "):" (if d "differs, as it must" "PASSED (a bug)")))
-        (println "alloc-iface: wrote" out "and" (str out ".report")))
+          (println (str *tag* ": control (") p "against" o "):" (if d "differs, as it must" "PASSED (a bug)")))
+        (println (str *tag* ": wrote") out "and" (str out ".report")))
       ;; --compare FRONT NATIVE [MODULES]: the compare of a pass's output alone
       "--compare"
       (let [[front nat modules-file] args
-            helper (crate-facts (collect/load-std-iface (str front "/std-iface.edn")) "alloc")
+            helper (crate-facts (collect/load-std-iface (str front "/std-iface.edn")) crate)
             facts (read-facts nat)
             cmp (compare-facts helper facts)]
         (spit (str nat ".report") (report-text cmp helper facts))
         (doseq [l (summary-lines cmp)] (println l))))
-    (System/exit 0)))
+    (System/exit 0))))

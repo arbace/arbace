@@ -1044,11 +1044,17 @@
                               (lower-trait-ref (:trait b) self-dummy))}))
         auto? (fn [{:keys [tr]}] (let [d (first tr)] (if (number? d) (:auto (:node (def-of d))) (:auto (get (:traits *std*) d)))))
         principal (first (remove auto? lowered))
-        autos (filter auto? lowered)]
+        autos (filter auto? lowered)
+        ;; round 54 (dyn_trait.rs' compute_object_lifetime_bound before the default: object_region_bounds): an elided
+        ;; object lifetime whose principal trait bounds Self by 'static is 'static (`&'a (dyn Any + Send)`, Any: 'static)
+        static? (let [d (first (:tr principal))]
+                  (and (not (number? d)) (not (some :lifetime (:bounds t)))
+                       (some #(and (seq? %) (= 'type-outlives (first %)) (= '(param 0 "Self") (second %)) (= "'static" (nth % 2 nil)))
+                             (:predicates (get (:traits *si*) d)))))]
     [:dyn {:principal (when principal [(first (:tr principal)) (vec (rest (second (:tr principal))))])
            :projections (vec (for [[ad args term] (:constraints (meta (:tr principal)))] [ad (vec (rest args)) term]))
            :autos (vec (map (comp first :tr) autos))}
-     (object-region t *object-default*)]))
+     (if static? [:re-static] (object-region t *object-default*))]))
 
 (defn lower-ty [t]
   (case (:kind t)
@@ -1139,10 +1145,20 @@
     (let [seg (peek (:segs path))
           ga (:args seg)]
       (if (:paren ga)
-        (let [args [self-ty [:tuple (binding [*object-default* nil *elided* :binder *binder-counter* (or *binder-counter* (atom 0))]
-                                      (mapv lower-ty (:inputs ga)))]]
+        (let [ins (binding [*object-default* nil *elided* :binder *binder-counter* (or *binder-counter* (atom 0))]
+                    (mapv lower-ty (:inputs ga)))
+              args [self-ty [:tuple ins]]
               tr [d args]
-              out (if (:output ga) (binding [*elided* :erased] (lower-ty (:output ga))) unit)
+              ;; round 54 (resolve_fn_signature's elision in Fn sugar): the output's elided lifetimes are the inputs' one
+              ;; lifetime when there is one (std's MutexGuard::map: `F: FnOnce(&mut T) -> &mut U`, the output '^#0), else
+              ;; erased; an object type's default region not among them
+              in-regs (letfn [(regs [x] (cond (and (vector? x) (= :dyn (first x))) (regs (second x))
+                                              (and (vector? x) (keyword? (first x)) (str/starts-with? (name (first x)) "re-")) [x]
+                                              (map? x) (mapcat regs (vals x))
+                                              (sequential? x) (mapcat regs x)
+                                              :else []))]
+                        (distinct (regs ins)))
+              out (if (:output ga) (binding [*elided* (if (= 1 (count in-regs)) (first in-regs) :erased)] (lower-ty (:output ga))) unit)
               found (assoc-in-trait tr "Output")]
           (with-meta tr {:constraints (if found [[(first found) (second found) out]] [])}))
         (let [args (lower-generic-args d ga self-ty)
