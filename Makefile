@@ -70,6 +70,10 @@ fixpoint: ## G1 by stage 0, G2 by G1, G3 by G2; G2 = G3 required (bin/arbace-go 
 	bin/arbace-go --fixpoint
 program: ## a user's program of DIR=...: its namespaces (.ae, and .clj, .cljc translated by repr/clojure), Java forms and Go forms (compiled through its own goi table) built into one executable (bin/arbace-go --build-program DIR)
 	bin/arbace-go --build-program $(DIR)
+program-mutant: ## a kept program's mutant (doc/go/BUILD.md, "A mutant"): DIR=...'s forms kept by ARBACE_PROGRAM_KEEP=1 built again with one function rewritten by the record MUTANT=..., no j2g run (bin/arbace-go --build-program DIR --mutant MUTANT)
+	bin/arbace-go --build-program $(DIR) --mutant $(MUTANT)
+build-go-mutant-test: ## the mutant's unit tests (no Go build), then test/build/go/hello and its mutants built and run: the original passes, each mutant fails a run (bin/build-go mutant-test --build)
+	bin/build-go mutant-test --build
 programs-check: ## the samples of test/programs (Clojure, Java forms, Go forms, mixed) built and run against their runs, as bin/gate --full (bin/arbace-go --build-program --check)
 	bin/arbace-go --build-program --check
 java-project-test: ## the Java project model's fixtures: test/programs/java-project's modules compiled by javac on Arbace and read by repr/java from both trees and without javac, its closure and multi-release reports, the controls (bin/java-project test; after `make build-java`)
@@ -1098,6 +1102,7 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
 .PHONY: j2g-unit
+.PHONY: program-mutant build-go-mutant-test
 .PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)
 	bin/repr-ocaml roundtrip --cmi --record-results all

@@ -281,6 +281,58 @@ Arbace's JVM: about 2-3 s).
 | multi | amd64 | 2,433,452 | yes | yes | 3 of 3 |
 | multi | arm64 | 2,372,712 | yes | yes | 3 of 3, under qemu-aarch64 |
 
+## A mutant (2026-11-17: the Ghidra demo's A20, GH20 (a); round 52)
+
+A program's sensitivity control (the Ghidra case study's §3.5 seeded mutant): one function's body
+rewritten by a named, recorded rewrite, Go rebuilt alone, no j2g run; the mutant must fail at least one
+of the tests that pass on the original. `bin/build-go --mutant FILE` (also with `--print-only`) applies
+it; `bin/arbace-go --build-program DIR --mutant FILE` (`make program-mutant`) applies it to a kept
+program, its forms as j2g printed them (`ARBACE_PROGRAM_KEEP=1`'s `programs/NAME/j2g/prog`, with the
+same flags as the program's build: the lines layout, the overlay, x509roots, the program's `go/` root,
+the link flags), into `programs/NAME/mutant-ARCH/NAME`; a Go program (no `:main`, no `:main-class`) from
+DIR itself.
+
+- **The hook: the forms.** `arbace.build.go/apply-mutant` rewrites the collected package's declaration
+  before `print-module` prints it, so the rewrite is a Go form, names a declaration as the forms do
+  (package path, name, receiver type), keeps the head (doc, type parameters, parameters, results and
+  their metadata) and is printed by repr/go like every other form. The printed text (an edit of
+  `work-ARCH/mod/...go` and `go build` by hand) was the other hook considered: no reprint, but a
+  rewrite by line or by text, which positions and `--line-file`'s layout make fragile and which no
+  printer checks. The mutated package is printed past the print cache, read and written (its forms
+  files are the original's, so the cache's key would be theirs): the original's next build prints the
+  original.
+- **The record** (one map, the Clojure reader's; `read-mutant`): `:name` (in the panic's message and
+  the applied record), `:package` (the import path), `:func` (as the forms spell it, j2g's mangled
+  names included), `:receiver` (a `go/method`'s receiver type without `*` and type arguments; absent: a
+  `go/func`), `:file` (the `go/file`, when needed), `:rewrite`, `:forms` (`:prepend`'s and
+  `:replace-body`'s Go forms, in the file's context: its imports and the parameters' names),
+  `:sha256` (the original declaration's digest, its form printed with its metadata: another is an error,
+  the kept program changed since the rewrite was recorded) and `:why` (what it breaks, which tests reach
+  it). Exactly one declaration must match; an `^:extern` one is refused.
+- **The named rewrites**: `:panic` (`(panic "arbace mutant: NAME")` before the body, the body kept,
+  unreachable, so its imports and variables stay used: any test that reaches it fails), `:prepend`
+  (`:forms` before the body, such as an early `return` on a condition) and `:replace-body` (`:forms` in
+  place of the body: a value off by a field, the subtle mutant a sensitivity control wants).
+- **The applied record**, `OUT.mutant.edn` beside the executable (`--print-only`: `WORK/mutant.edn`):
+  the record, its path, the package, the Go file, the forms file, the declaration, the digests before
+  and after, and both forms; one line `build-go: mutant ...` on standard error.
+- **Tests.** `bin/build-go mutant-test` (`test/build/mutant_test.ae` on the tools' host, no Go build, 29
+  checks, about 350 MB): the record's refusals, the declaration found by name, receiver and file (and
+  every miss refused), each rewrite's form, the digest pin, a package from the collect index, the printed
+  `main.go` of `test/build/go/hello` with each mutant of `test/build/mutants/`; `--build` (`make
+  build-go-mutant-test`) also builds hello and its two mutants (Go alone, about 350 MB, 12 s) and runs
+  them on hello's runs: the original passes both, `hello-greeting` (`:replace-body`) and `hello-panic`
+  fail both.
+- **On a test program** (2026-11-17): `bin/arbace-go --build-program test/programs/hello-go --mutant
+  test/programs-mutants/hello-go-wc-string.edn` (the method `(Counts).String` of
+  `example.com/hellogo/wc`, the lines' count printed for the words', 4 s, 450 MB): the run `noargs`,
+  which prints no counts that differ, passes; `args` fails (`lines 2 words 2` for `lines 2 words 7`).
+- **A large program's** (the Ghidra demo's G2, by day: the mutant built from G2's kept program, about
+  5-10 GiB and 10-20 minutes, Go alone, then run over the classes that reach the rewritten method):
+  `ARBACE_PROGRAM_KEEP=1 bin/arbace-go --build-program DIR` once (the program kept), then
+  `bin/heavy-lock bin/arbace-go --build-program DIR --mutant RECORD`, the record's `:sha256` taken from a
+  first run's refusal or applied record.
+
 ## A user's program (REAP7, 2026-10-25; REAP7b)
 
 `bin/arbace-go --build-program DIR` builds a user's program into one static executable: its
