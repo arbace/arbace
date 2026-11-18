@@ -10470,3 +10470,13 @@ typeparam/issue54497.go and devirtualization.go on the gate's executable `e8e0d0
 peak 0.80 GB at `GOMEMLIMIT=600MiB`); `bin/ci dg --essential` (92 of 92, the control differs, 0.73 GB); `bin/reap --record` (Go
 eval 1762 / 70 / 2, C read 5237 / 226 / 12, C eval 2246 / 34 / 0, AOT 2254 / 26 / 0), `bin/crops-score --record`, `--judge
 --strict`, `bin/records-check` (9 pairs, 0 problems), `bin/gate --plan`.
+
+## 2026-11-18: C's macro printer, CS82 (b) (n-c-print, round 52)
+
+Built CS82 (b) in repr/c (`arbace/repr/c/{parse,convert,print}.ae`; doc/C23-SURVEY.md, "As built: the macro printer's fix"): a
+concatenated string literal's run of invocations recovered whole (its extent to its last piece), a callee an expansion hid from its
+function-like macro printed parenthesized, a statement an invocation made but for its `;` printed as the invocation, an asm's
+operands' invocations in the :lines print alone. Proved on listed round trips under gcc's judge (the five target files pass; a
+159-file regression list 157 pass, 2 known as recorded), rows merged by id (33 changed), print 4798 / 3 / 22 to 4830 / 3 / 17.
+shell.c not run (memory rule); the 159-file run peaked at 1.46 GB, over the night's 1 GiB. Taken overnight (round 52): CS82 (b).
+Proposed: CS329 (an #include inside an initializer or enum). Alternatives: keep the classes (CS82 (a)).

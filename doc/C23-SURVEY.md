@@ -6304,3 +6304,59 @@ LLVM row (`bin/llvmi check --only` of `cpp.runtime.thread-throw`, expected 134 =
     printf 'cpp.runtime.thread-throw\n' > .tmp/tt.txt; bin/llvmi check --only .tmp/tt.txt --record; bin/llvmi check --aot --only .tmp/tt.txt
     printf 'runtime/thread-throw.cpp\n' > .tmp/tt2.txt; bin/cppi check --only .tmp/tt2.txt; bin/cppi check --aot --only .tmp/tt2.txt
     bin/reap --record; bin/crops-score --record    # then drop :cpp-threads and :threads's a_crash pattern if nothing matches them
+
+## As built: the macro printer's fix (CS82 (b), 2026-11-18, branch `n-c-print`, from `mac/n-goc-night` `662322c1f`)
+
+The night's task (round 52, memory-free): the print cell's `:macro-context` (4) and `:objects-macro-body` (2) rows, which waited on
+CS82 (b) ("recover only invocations ... the layer's definitions in order", decided for C5), and a look at `:split-declaration` (2).
+The six files had four causes, each fixed in `arbace/repr/c/` (parse, convert, print):
+- **A concatenated literal of several invocations** (stringify.c's `STR(\n) STR($)`, 921227-1.c's `k(#) k(#undef k) k(x)`, shell.c's
+  `BOX_24 BOX_24 ...`): the parser kept only the first piece's token in the tree, so the literal's extent was its first piece's and
+  the first invocation alone was recovered, the rest lost (`"##undef kx"` printed `k(#)`). `parse/strlit-toks` keeps the absorbed
+  pieces' tokens; a literal's extent runs to its last piece's sequence number (`tok-range`, offsets unchanged so the directives'
+  placement is as before), the pieces are the groups' tokens (`tu-tokens`), and `group-match` recovers a run of invocations, one
+  after another, exactly over the literal, their texts joined by a space; a piece no invocation made (`STR(a) "b"`) leaves it
+  expanded. One invocation expanding to several literals (`#define S "a" "b"`) is now recovered too.
+- **A name an expansion hid from its macro** (macro-skip-expand.c's `square(square)(2)`, `square` painted): a callee named as a
+  function-like macro of the main file defined at its offset (the layer's executed `#define`/`#undef` lines, `macro-table`,
+  `fn-macro-at?`) is `:c/paren`, printed `(square)(2)`, which no macro takes; the reread's paren gives the same forms.
+- **A statement an invocation made but for its `;`** (inflate.c's `NEEDBITS(16);`, a do-while macro): `group-semi` gives it
+  `:c/macro-stmt "NEEDBITS(16);"` when the group ends right before the statement's own `;`, so gcc -O0's gotos keep one location
+  (the extra `nop; jmp` pairs gone).
+- **An invocation inside an asm's operands** (pr27528.c's `"i" (__FUNCTION__)`, whose expansion `__func__` names another object,
+  `__func__.0` against `__FUNCTION__.0`): the c/asm text stays the expansion's (ci parses its operands from it) and the :lines print
+  writes `^{:c/asm-text ...}`, the text with each invocation after the first token as itself (`asm-recovered`).
+Spec: doc/c/SPEC.md §9.4.
+
+Runs (`bin/repr-c roundtrip --only`, `REPR_C_THREADS=1`, `GOMEMLIMIT=600MiB`-`700MiB`, under `ARBACE_C_JUDGE=gcc`, levels 3-4 fresh):
+the five files (macro-skip-expand.c, stringify.c, 921227-1.c, pr27528.c, inflate.c) pass every level (0.92 GB peak each run);
+a regression list of 159 files (every listed objects-macro-body, macro-context and reexpansion row, all of zlib and tcc-tests2, and
+the files of torture, mir, compcert and the benchmarks game with do-while or stringizing macros): 157 pass, 2 known (`:objects`,
+memops-asm.c, strstr-asm.c, as recorded). That run peaked at 1.46 GB, over the night's 1 GiB rule (32 minutes, one process: the
+breach is this report's). shell.c (sqlite) was not run (its read alone risks the rule): the main host's whole record decides it.
+Records: the 159 rows merged by id into `test/repr/c/roundtrip-results.edn` (33 changed: the five, and 28 stale `:known` rows of
+objects-macro-body, split-declaration and self-include that CS274 and CS275 had fixed since their last record), the five known
+entries removed, 27 accepted problems removed from `test/records/accepted.edn`. Print 4798 / 3 / 22 to 4830 / 3 / 17 (macro-context
+4 to 1, objects-macro-body 2 to 0); C completeness 0.9813 to 0.9815, meant 0.9983 to 0.9986.
+
+`:split-declaration` (libregexp.c, unicode_gen.c: an `#include` with `#define`/`#undef` around it inside an initializer or an enum)
+is not light: the :lines print drops directives inside an item, so an initializer list and an enumerator list would need directive
+and include elements of their own (forms, printer, checker), as CS275 gave statement lists. Proposed as CS329.
+
+Keys: `arbace/repr/c/{parse,convert,print}.ae` are embedded (in `gate_key`): the key moves, the C steps and `--full` rerun, and
+stage 0 evaluates the changed namespaces from the checkout until the next re-seed. Nothing was built here. The converter's change
+moves musl's forms' key (their metadata: `:c/paren`, `:c/macro-stmt`, `:c/asm-text`; no value changes), so `bin/ci judge-test`,
+which began re-reading musl as forms (a conversion, outside the night's rule), was stopped by PID: ci's eval and AOT runs are the
+main host's to confirm.
+
+### Decided (taken overnight, round 52)
+
+- CS82 (b) built as above: recovery of a concatenated literal's run of invocations, the painted callee parenthesized, the
+  statement-plus-`;` invocation, the asm text's print-only recovery; (a), the class kept, was the alternative.
+
+### Proposed (DECISIONs for the user)
+
+- CS329: an `#include` (with the `#define`/`#undef` lines around it) inside an initializer or an enumerator list: (a) recommended,
+  `(c/include "x.h" :unit U)` and the directives as elements of `init` and of an enum's list, printed on their own lines, ci's read
+  unchanged (`*include-inside*` keeps the declaration whole), about a day with the checker's reading of the new elements; (b) keep
+  the class deferred.

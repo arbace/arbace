@@ -76,8 +76,13 @@
   (let [s (.-seq t)
         main (and (some? (.-pf t)) (identical? (.-pf t) (cx :main-file)))
         po (.-po t)]
-    (long-array [s s (if main po Long/MAX_VALUE) (if main (inc po) Long/MIN_VALUE)
-                 (if main 1 0) (if (or main (nil? (.-pf t))) 0 1)])))
+    (let [r (long-array [s s (if main po Long/MAX_VALUE) (if main (inc po) Long/MIN_VALUE)
+                         (if main 1 0) (if (or main (nil? (.-pf t))) 0 1)])]
+      ;; CS82 (b): a concatenated string literal's extent runs to its last piece's sequence number (the macro groups of its
+      ;; pieces are matched against it; its offsets stay its first piece's, where the directives are placed)
+      (when-let [ps (.get ^java.util.Map (cx :piece-toks) t)]
+        (doseq [^PTok p ps] (aset r 1 (max (aget r 1) (.-seq p)))))
+      r)))
 
 (defn- merge-range! ^longs [^longs a ^longs b]
   (aset a 0 (min (aget a 0) (aget b 0))) (aset a 1 (max (aget a 1) (aget b 1)))
@@ -587,22 +592,64 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Macro invocations recovered from the source (cemit's recovery; §9.4)
 
-(defn- group-at
-  "The text of the invocation whose tokens are exactly `n`'s, when one is unclaimed."
+(defn- concatenated? [n]
+  (and (= (nt n) "PrimaryExpression") (#{:PrimaryExpressionString :PrimaryExpressionLString} (cs n))
+       (some? (.get ^java.util.Map (cx :piece-toks) (g n :Token)))))
+
+(defn- group-match
+  "[text starts]: the invocation whose tokens are exactly `n`'s, when one is unclaimed; for a concatenated string literal
+  (CS82 (b)) also the invocations whose groups run one after another exactly over its pieces (stringify.c's `STR(a) STR(b)`,
+  921227-1.c's `k(#) k(#undef k) k(x)`, shell.c's `BOX_24 BOX_24 ...`), their texts joined by a space; a piece that no
+  invocation made (`STR(a) \"b\"`) leaves the literal printed expanded."
   [n]
   (when-let [^HashMap groups (cx :groups)]
     (when (and (instance? HashMap n) (has-main? n) (not (has-other? n)))
       (let [r (rng n)
+            hi (aget r 1)
+            ^HashSet claimed (cx :claimed)
             gr (.get groups (aget r 0))]
-        (when (and gr (= (:max gr) (aget r 1)) (not (.contains ^HashSet (cx :claimed) (aget r 0))))
-          (:text gr))))))
+        (when (and gr (not (.contains claimed (aget r 0))))
+          (cond
+            (= (long (:max gr)) hi) [(:text gr) [(aget r 0)]]
+            (and (< (long (:max gr)) hi) (concatenated? n))
+            (loop [gr gr texts [(:text gr)] starts [(aget r 0)]]
+              (let [nx (:next gr) g2 (when nx (.get groups nx))]
+                (when (and g2 (not (.contains claimed nx)) (<= (long (:max g2)) hi))
+                  (let [texts (conj texts (:text g2)) starts (conj starts nx)]
+                    (if (= (long (:max g2)) hi)
+                      [(str/join " " texts) starts]
+                      (recur g2 texts starts))))))))))))
+
+(defn- group-at
+  "The text of the invocation whose tokens are exactly `n`'s, when one is unclaimed (group-match's)."
+  [n]
+  (first (group-match n)))
 
 (defn- group-of
   "group-at, the group claimed (by the outermost node of its extent: nodes are claimed pre-order)."
   [n]
-  (when-let [t (group-at n)]
-    (.add ^HashSet (cx :claimed) (aget (rng n) 0))
+  (when-let [[t starts] (group-match n)]
+    (doseq [s starts] (.add ^HashSet (cx :claimed) s))
     t))
+
+(defn- macro-table
+  "CS82 (b): the main file's executed #define and #undef lines (the layer's), a name -> TreeMap offset -> function-like?
+  (an #undef or an object-like #define false)."
+  [layer main-name]
+  (let [m (HashMap.)]
+    (doseq [e layer
+            :when (and (= (:file e) main-name) (#{"define" "undef"} (:directive e)) (:off e))
+            :let [[_ nm paren] (re-find #"^#\s*(?:define|undef)\s+([A-Za-z_$][A-Za-z0-9_$]*)(\()?" (str (:text e)))]
+            :when nm]
+      (let [^java.util.TreeMap t (or (.get m nm) (let [t (java.util.TreeMap.)] (.put m nm t) t))]
+        (.put t (Long/valueOf (long (:off e))) (boolean (and paren (= "define" (:directive e)))))))
+    m))
+
+(defn- fn-macro-at?
+  "CS82 (b): `nm` names a function-like macro of the main file defined at offset `po` (its last #define or #undef before)."
+  [^String nm ^long po]
+  (when-let [^java.util.TreeMap t (some-> ^HashMap (cx :fn-macros) (.get nm))]
+    (when-let [e (.lowerEntry t (Long/valueOf po))] (true? (.getValue e)))))
 
 (def ^:private c23-constants {"nullptr" nil "true" true "false" false})
 
@@ -1116,7 +1163,14 @@
                   (let [callee (g n :PostfixExpression)
                         args (mapv #(g % :AssignmentExpression) (chain (g n :ArgumentExpressionList) :ArgumentExpressionList))]
                     (or (types-compatible-pattern callee args)
-                        (let [f (expr callee) as (map expr args)]
+                        (let [f (expr callee) as (map expr args)
+                              ;; CS82 (b): a callee named as a function-like macro defined where it stands came from an expansion
+                              ;; that hid it from the macro (macro-skip-expand.c's `square(square)(2)`, the name painted): printed
+                              ;; parenthesized, `(square)(2)`, which no macro takes, the reread's (:c/paren) the same
+                              f (if (and (symbol? f) (not (:c/macro (meta f))) (not (:c/paren (meta f))) (has-main? callee)
+                                         (fn-macro-at? (name f) (min-po callee)))
+                                  (addm f {:c/paren true})
+                                  f)]
                           (if (and (symbol? (value f)) (reserved-heads (value f)) (not (instance? Lit f)))
                             (Lv (list* 'c/call f as))
                             (Lv (cons f as))))))
@@ -1252,6 +1306,35 @@
       (when (and (pos? i) (pos? (.length ^String (.-sep t)))) (.append b " "))
       (.append b (.-src t)))
     (utf8-decode (str b))))
+
+(defn- asm-recovered
+  "CS82 (b): an asm statement's text as tokens-text gives it from `ts`, with each macro invocation that made a run of its
+  tokens after the first written as the invocation (pr27528.c's `\"i\" (__FUNCTION__)`, whose expansion `__func__` names
+  another object), or nil when none did. The forms keep the expanded text (ci parses the operands from it); the :lines
+  print writes this one (:c/asm-text)."
+  [ts]
+  (when-let [^HashMap groups (cx :groups)]
+    (let [v (vec ts) n (count v) b (StringBuilder.) ^HashSet claimed (cx :claimed)]
+      (loop [i 0 any false]
+        (if (>= i n)
+          (when any (str b))
+          (let [^PTok t (v i)
+                gr (when (pos? i) (.get groups (.-seq t)))
+                j (when (and gr (not (.contains claimed (.-seq t))))
+                    (loop [j i] (cond (>= j n) nil
+                                      (= (.-seq ^PTok (v j)) (long (:max gr))) j
+                                      (< (.-seq ^PTok (v j)) (long (:max gr))) (recur (inc j))
+                                      :else nil)))]
+            (when (and (pos? i) (pos? (.length ^String (.-sep t)))) (.append b " "))
+            (if j
+              (do (.append b ^String (:text gr)) (recur (inc (long j)) true))
+              (do (.append b (utf8-decode (.-src t))) (recur (inc i) any)))))))))
+
+(defn- asm-form
+  "(c/asm TEXT) of an Asm node, its print's text (asm-recovered) as :c/asm-text when an invocation made a part of it."
+  [n]
+  (let [ts (node-tokens n) f (list 'c/asm (tokens-text ts)) r (asm-recovered ts)]
+    (if (and r (not= r (second f))) (with-meta f {:c/asm-text r}) f)))
 
 (defn declaration
   "A Declaration's forms (§6.2-§6.8)."
@@ -1504,9 +1587,24 @@
   [st]
   (let [ds (dirs-at st 0)] (if (seq ds) (into (vec ds) (stmt-items* st)) (stmt-items* st))))
 
+(defn- group-semi
+  "CS82 (b): the text of the invocation that made all of statement `st` but the `;` the source wrote after it (zlib's
+  `NEEDBITS(16);`, a do-while macro's statement), that `;` with it, when unclaimed (then claimed): gcc -O0 gives the
+  expansion's tokens the invocation's location, so the print writes the invocation where it stood."
+  [st]
+  (when-let [^HashMap groups (cx :groups)]
+    (when (and (has-main? st) (not (has-other? st)))
+      (let [r (rng st) hi (aget r 1) ^HashSet claimed (cx :claimed) gr (.get groups (aget r 0))]
+        (when (and gr (< (long (:max gr)) hi) (= (:next gr) hi) (nil? (.get groups hi))
+                   (not (.contains claimed (aget r 0))))
+          (let [^PTok semi (peek (node-tokens st))]
+            (when (and semi (= (.-seq semi) hi) (= (.-ch semi) \;) (main-tok? semi))
+              (.add claimed (aget r 0))
+              (str (:text gr) ";"))))))))
+
 (defn stmt-items*
   [st]
-  (let [t (group-of st)
+  (let [t (or (group-of st) (group-semi st))
         items
         (case (cs st)
           :StatementLabeled
@@ -1580,7 +1678,7 @@
                  :JumpStatementBreakLabel (list 'break (keyword (tsrc (g j :Token2))))
                  :JumpStatementBreak (list 'break)
                  :JumpStatementReturn (if-let [e (g j :ExpressionList)] (L 'return (expr e)) (list 'return))))])
-          :StatementAsm [(at st (list 'c/asm (tokens-text (node-tokens (g (g st :AsmStatement) :Asm)))))]
+          :StatementAsm [(at st (asm-form (g (g st :AsmStatement) :Asm)))]
           (refuse :statement (str "statement " (cs st)) st))
         items (if-let [as (and (not= (cs st) :StatementLabeled) (not= (cs st) :StatementExpr) (attrs (g st :AttributeSpecifierList)))]
                 (if (seq items) (assoc items 0 (addm (items 0) {:c/attrs as})) items)
@@ -1893,6 +1991,8 @@
                                          (not-any? #{\#} between))
                           end (if (and (> end2 end) (or (every? #{\)} between) balanced?)) end2 end)]
                       (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
+                                              ;; the next token's (CS82 (b): a run of groups over a concatenated literal)
+                                              :next (when (< j cnt) (.-seq ^PTok (ts j)))
                                               :text (line-text (subvec sts si (inc end)))})))))))
           (recur j))))
     groups))
@@ -1910,7 +2010,11 @@
       (when-not (.isEmpty stack)
         (let [x (.pop stack)]
           (cond
-            (instance? PTok x) (when (and (main-tok? x) (.add seen (.-seq ^PTok x))) (.add out x))
+            (instance? PTok x) (when (and (main-tok? x) (.add seen (.-seq ^PTok x)))
+                                 (.add out x)
+                                 ;; CS82 (b): a concatenated string literal's other pieces, the macro groups' tokens too
+                                 (doseq [^PTok p (.get ^java.util.Map (cx :piece-toks) x)]
+                                   (when (and (main-tok? p) (.add seen (.-seq p))) (.add out p))))
             (instance? HashMap x)
             (if (and (= (nt x) "CompoundStatement") (g x :Token))
               (let [lb (g x :Token)]
@@ -1989,7 +2093,7 @@
           t (group-of d)
           fs (mapv #(at d %) (declaration d))]
       (if (and t (= 1 (count fs))) [(addm (first fs) {:c/macro-stmt t})] fs))
-    :ExternalDeclarationAsmStmt [(at ed (list 'c/asm (tokens-text (node-tokens (g (g ed :AsmStatement) :Asm)))))]
+    :ExternalDeclarationAsmStmt [(at ed (asm-form (g (g ed :AsmStatement) :Asm)))]
     :ExternalDeclarationEmpty []
     (refuse :declaration (str "external declaration " (cs ed)) ed)))
 
@@ -2034,7 +2138,8 @@
                  (some #(and (= (:directive %) "enter") (= (:path %) main-name)) (:layer r)))
         (refuse :self-include "the main file includes itself: its tokens are the main file's twice"))
       (binding [*cx* {:ranges ranges :main-file main-file :main-name main-name :main-bytes main-bytes :std std
-                      :pieces parse/strlit-pieces :typedefs (atom {}) :claimed (HashSet.)
+                      :pieces parse/strlit-pieces :piece-toks parse/strlit-toks
+                      :fn-macros (macro-table (:layer r) main-name) :typedefs (atom {}) :claimed (HashSet.)
                       :unit-of-off unit-of-off :line-starts (line-starts main-bytes)
                       ;; CS290 (a): the re-entered copy's pragmas, [seq [text ...]] in seq order (the parser's :pragmas), placed by
                       ;; block-items before the item of the first token after them (ci's read)
