@@ -1048,6 +1048,11 @@
     (case (con v)
       (HsAppTy) (head-class env (arg v 2))
       (HsParTy) (head-class env (arg v 2))
+      ;; (queue 379: an instance with a context, `instance Ord a => IsList (Set a)`, or an explicit forall: the head under
+      ;; them; before, the class was not found and a method binder resolved as an ordinary name, the module's own
+      ;; fromList for Data.Set.Internal's IsList (Set a), not the class's, GHC.Rename.Env's lookupInstDeclBndr)
+      HsQualTy (head-class env (arg v 3))
+      HsForAllTy (head-class env (arg v 3))
       HsTyVar (let [nl (arg v 3)] (when (rdr? (lval nl)) (binding [*errors* nil *occs* nil *uses* nil] (resolve-rdr env (lval nl)))))
       nil)))
 
@@ -1055,15 +1060,36 @@
   ;; (ClsInstDecl ext (L sp HsSig) binds sigs ats adts overlap)
   (let [sigl (arg v 2) {env1 :env} (rn-sig (assoc env :sp (lsp sigl)) (lsp sigl) (lval sigl))
         cls (head-class env1 (arg (lval sigl) 3))
-        kids (children-of cls)]
+        kids (children-of cls)
+        ;; queue 379: InstanceSigs' signatures first; an explicit forall's variables scope over the method's binding
+        ;; (ScopedTypeVariables; GHC.Rename.Bind's rnMethodBinds with the instance's signatures, as rn-class's for a
+        ;; default method): Data.Sequence.Internal's foldMap :: forall m a. Monoid m => ..., whose body's
+        ;; (foldMap :: (Elem a -> m) -> ...) means that m
+        scoped (atom {})]
+    (doseq [s (arg v 4)]
+      (let [sv (lval s)]
+        (if (and (seq? sv) (= 'ClassOpSig (con sv)) (not (true? (arg sv 2))))
+          (let [sig (arg sv 4)
+                _ (doseq [nl (arg sv 3)] (rn env1 nl))
+                r (rn-sig (assoc env1 :sp (lsp sig)) (lsp sig) (lval sig))]
+            (doseq [nl (arg sv 3)] (swap! scoped assoc (rdr-occ (lval nl)) (:scoped r))))
+          (rn env1 s))))
     (doseq [b (arg v 3)]
       (let [bv (lval b) benv (assoc env1 :sp (lsp b))]
         (if (= 'FunBind (con bv))
           (let [nl (arg bv 2) occ (rdr-occ (lval nl))
                 m (or (first (filter #(= (name-occ %) occ) kids)) (resolve-rdr env1 (lval nl)))]
-            (rn-funbind benv bv :fname m))
+            (rn-funbind benv bv :fname m :scoped (get @scoped occ)))
           (rn env1 b))))
-    (rn env1 (arg v 4)) (rn env1 (arg v 5)) (rn env1 (arg v 6))))
+    ;; (queue 379: an associated type instance's family is the class's child of that name, as a method binder is, in scope
+    ;; or not: `type Item (S a) = a` under `instance IsList (S a)` with GHC.Exts imported qualified; before, the name
+    ;; stayed unrenamed and the elaborator registered the equation under no family, Item (Set a) never reduced)
+    (doseq [d (concat (arg v 5) (arg v 6))]
+      (let [dv (lval d) e (when (seq? dv) (case (con dv) TyFamInstDecl (arg dv 2) DataFamInstDecl (arg dv 1) nil))
+            nl (when (seq? e) (arg e 2))
+            k (when (and nl (rdr? (lval nl))) (first (filter #(and (= "tc" (nth % 1)) (= (name-occ %) (rdr-occ (lval nl)))) kids)))]
+        (rn env1 d)
+        (when (and k *rnames* (nil? (.get ^java.util.IdentityHashMap *rnames* (lval nl)))) (emit-l! nl k))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Binding groups

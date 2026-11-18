@@ -407,7 +407,10 @@
   "Queue 379: a quantified constraint's type (QuantifiedConstraints' forall m'. Monad m' => Monad (t m')): a forall over a
   class's application, kept in a context as the predicate [:qc [TYPE]] (before, a context dropped it)"
   [p]
-  (and (= :forall (first p)) (seq (nth p 1)) (= :tc (first (nth p 3)))))
+  (and (= :forall (first p)) (seq (nth p 1)) (= :tc (first (nth p 3)))
+       ;; (an erased one, a quantified Coercible or equality, TypeNats' forall n. Coercible (SNat n) Natural, stays dropped:
+       ;; its evidence is a coercion, nothing at run time)
+       (not (contains? #{"Coercible" "~" "~~"} (nth (second (nth p 3)) 3 nil)))))
 
 (defn conv-type
   "A typeF form as a type"
@@ -2443,11 +2446,27 @@
 (defn- app-spine [v]
   (loop [x v args ()] (if (= 'HsApp (con x)) (recur (lval (arg x 2)) (cons (arg x 3) args)) [x (vec args)])))
 
+(defn- th-name-quote
+  "Queue 379: TemplateHaskell's name quote 'f, 'C, ''T (HsUntypedBracket of a VarBr) as GHC.HsToCore.Quote's globalVar
+  desugars an external name: mkNameG_d, mkNameG_v or mkNameG_tc applied to the unit's, the module's and the occurrence's
+  strings (mkStringExprFS); [type core], or nil for a name not ported (a local one: mkNameL's unique; a field)"
+  [n]
+  (when (and (ext? n) (contains? #{"data" "var" "tc"} (nth n 1)))
+    (when-let [unit (if (= (nmod n) *module*) *unit* (get-in @*iface-meta* [:units (nmod n)]))]
+      (let [s (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
+                            [(list 'lit (str (pr-str x) "#"))]))]
+        [(con-ty (ext-name "tc" "GHC.Internal.TH.Syntax" "Name"))
+         (list 'app (list 'v (ext-name "var" "GHC.Internal.TH.Syntax" (case (nth n 1) "data" "mkNameG_d" "var" "mkNameG_v" "tc" "mkNameG_tc")))
+               [(s unit) (s (nmod n)) (s (occ n))])]))))
+
 (defn infer
   "An expression's type and core"
   [env e]
   (let [v (lval e)]
     (case (con v)
+      HsUntypedBracket (let [q (lval (arg v 2))]
+                         (or (when (= 'VarBr (con q)) (some-> (nm (arg q 3)) th-name-quote))
+                             (do (error! "expression not handled: HsUntypedBracket") [(fresh-meta) (list 'lit "?")])))
       HsVar (if-let [n (nm (arg v 2))]
               ;; HF10-P54 (a): [] is an ExplicitList (GHC.Rename.Expr's rnExpr of nilDataConName, Note [Empty lists])
               (if (and (= n (ext-name "data" "GHC.Internal.Types" "[]")) (ovl-lists?))
@@ -4639,8 +4658,11 @@
                        (let [body (arg (lval (arg sv 4)) 3)
                              own (remove (set tvn) (tv-names-of body))
                              onames (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) own)]
-                         [(occ (nm nl)) (hs-type (merge (zipmap tvn (map (fn [x] [:tv x]) names)) (zipmap own (map (fn [x] [:tv x]) onames)))
-                                                 body)])))}))
+                         [(occ (nm nl)) (let [mt (hs-type (merge (zipmap tvn (map (fn [x] [:tv x]) names)) (zipmap own (map (fn [x] [:tv x]) onames)))
+                                                          body)]
+                                          ;; (the signature's own variables quantified, its explicit forall's in the HsSig's outer
+                                          ;; binders, as a class method's signature is made)
+                                          (if (= :forall (first mt)) [:forall (into onames (nth mt 1)) (nth mt 2) (nth mt 3)] [:forall onames [] mt]))])))}))
 
 (defn- method-type
   "A class method's type at an instance head: the rest of its type after the class's own forall and constraint"
