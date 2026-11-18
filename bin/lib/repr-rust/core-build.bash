@@ -188,8 +188,8 @@ core_attrs() {
 # copy: nothing patched), std's names and std's interface from the pack rust-front-std with every alloc fact taken out, the pass
 # writing alloc's facts in the helper's --std-iface shape into .tmp/rust-front/alloc/alloc-iface.edn and comparing them fact by
 # fact with the helper's (alloc-iface.edn.report; the summary printed, a negative control beside)
-#   bin/rust-front alloc-iface [FILE...]   the pass over every module file of alloc (or FILEs) then the compare: about 25 minutes
-#                                         and 2.3 GB for the whole crate (the day's proof; ALLOC_IFACE_ROUNDS=2 a second round)
+#   bin/rust-front alloc-iface [FILE...]   the pass over every module file of alloc (or FILEs) then the compare: two rounds (the
+#                                         second reads every module's first-round facts; ALLOC_IFACE_ROUNDS=1 one), about 50 minutes, 2.3 GB
 #   bin/rust-front alloc-iface --list      alloc's module files
 #   bin/rust-front alloc-iface --units [--record]
 #                                         the unit cases (test/rust/front/alloc_iface_test.ae), light: the pure cases (GOMEMLIMIT

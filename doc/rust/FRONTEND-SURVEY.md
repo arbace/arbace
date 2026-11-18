@@ -4527,7 +4527,7 @@ facts of that module. Three causes fixed in the code core's build shares, and th
 | `alloc::collections::btree::dedup_sorted_iter` | 2 | | 2 / 0 / 0 | 3 |
 | `alloc::collections::btree::map::entry` (ctx the map's) | 38 | 36 / 0 / 2 | 38 / 0 / 0 | 0 |
 | `alloc::collections::btree::set` (ctx the map's, merge_iter) | 222 | 220 / 2 / 0 | 222 / 0 / 0 | 1 |
-| `alloc::collections::btree::set::entry` (ctx the map's, map::entry, merge_iter, set) | 21 | 19 / 0 / 2 (map::entry not in ctx) | see the record | 0 |
+| `alloc::collections::btree::set::entry` (ctx the map's, map::entry, merge_iter, set) | 21 | 19 / 0 / 2 (with map::entry too) | 21 / 0 / 0 (round 54) | 0 |
 | `alloc::vec::cow` (ctx raw_vec, vec) | 10 | | 10 / 0 / 0 | 0 |
 | `alloc::vec::drain` (ctx) | 24 | | 24 / 0 / 0 | 0 |
 | `alloc::vec::extract_if` (ctx) | 11 | | 11 / 0 / 0 | 0 |
@@ -4557,7 +4557,7 @@ spec_extend.rs, spec_from_elem.rs, spec_from_iter.rs, spec_from_iter_nested.rs a
 spec_extend.rs and spec_from_iter.rs (20 files). With them every one of alloc's 84 module files has been passed: 64 in
 `alloc-iface-units.txt` (61 lines), every helper fact of theirs equal. The unit cases: 2 pure more (the control's pool, with its
 negative) and the module cases of btree::merge_iter (the derive's bound once) and btree::map::entry (the `super::super` import's
-field, OccupiedEntry written, no error left). WIP: the known file not yet re-recorded (the `--units --record` run was at line 38 of 61, every line so far passing, the first 30 identical to the old known file).
+field, OccupiedEntry written, no error left). (The known file was re-recorded in round 54, below.)
 
 core's pass shares the derive and resolve changes, so its native facts may move: derives on types naming the same projection in
 two fields (core's iter adapters' `#[derive(Clone, Debug)]` structs and enums over `I::Item`, `U::IntoIter`: a duplicate clause
@@ -4581,3 +4581,58 @@ a doc link).
   passing run.
 - The whole alloc pass, `bin/rust-front alloc-iface` (about 25 minutes, 2.3 GB, one process), and `ALLOC_IFACE_ROUNDS=2` for
   RIND9a-15 (still the user's).
+
+## As built: RIND9 (a), alloc's pass: set::entry and the whole crate (2026-11-18, day, round 54, branch `n-rust-alloc5`)
+
+set::entry stayed at 19 of 21 with map::entry passed before it: OccupiedEntry and VacantEntry were not written (`CORE_TRACE=1`:
+`inner`'s type `unresolved ["map" "OccupiedEntry"]`). set/entry.rs names `use super::{SetValZST, map}`, two of set's own imports
+(`use super::map::{self, BTreeMap, Keys}`, `use super::set_val::SetValZST`), and a module built alone sees set through the crate's
+index, which recorded a module's definitions and its single imports but skipped a `self` import. Two fixes in the index
+(`core_check/file-names`, so core's build shares them):
+
+- a `self` import binds the module it ends (`use super::map::{self, ..}`: `map`, its target the module itself), with-core-names
+  copying it under its name as any re-export; a chain of imports (set/entry's `map` through set's) is its two rounds;
+- each leading `super` one module up (`super::super::borrow` from btree::map::entry), where the index read the first alone.
+
+alloc's index rebuilt (84 files, 17 macros, 160 modules, unchanged counts). set::entry 21 of 21 with its siblings; its module
+cases (OccupiedEntry's `inner` through set's imports, VacantEntry written, the negative: no field unresolved) beside map::entry's.
+
+### Results
+
+- `bin/rust-front alloc-iface --units --record`: `bin/rust-front alloc-iface --units --record` from a passing run with all three fixes: 42 pure cases, 61 module lines (64 files), every line's helper facts equal (3,696 facts summed over the lines, 0 differ, 0 missing), every control differing; `alloc-iface-units-known.txt` re-recorded (609 lines), its earlier 283 lines unchanged. About 95 minutes on a loaded host, each process under 1 GiB.
+- The whole pass, `bin/rust-front alloc-iface`, now two rounds by default (RIND9a-15 (a), below): **3,863 of 3,863 helper facts
+  equal**, 0 differ, 0 missing (adts 128, consts 1, fns 2,373, impls 1,351, traits 10; native extras 1,015), the control
+  differing as it must; 15 min 20 s wall (two rounds of 398 s and 462 s on a loaded host), 2.07 GB peak. One round
+  (`ALLOC_IFACE_ROUNDS=1`): 3,841 equal, 18 differ, 4 missing, native extras 1,010: the order's differences, which the second round
+  closes, every one.
+- core: `bin/rust-front core-essential` equals its known file (566 equal, the control differing, no stub called);
+  `bin/rust-front rind-test` passes; both again after the third fix below. core's whole check, `bin/rust-front core-check
+  --records` over the 37 modules (the interface pass afresh; 35 min on a loaded host, 2.17 GB peak): first **5,693 equal**, 166
+  but for the allocations' ids, 6 but for the allocations, 30 differ, **11 refused**, five of them array's StackOverflowError
+  (from_fn, try_from_fn and its `{constant#2}`, map, try_map). The overflow was not this round's: since n-rust-alloc2 (RIND9 (a)'s
+  first causes) lower-trait-ref lowers an associated-type bound's bounds into the trait ref's `:clauses`, and
+  trait-bounds-defining, resolving `T::Residual` in `ChangeOutputType`'s `T: Try<Residual: Residual<V>>`, lowered the same bound
+  again without end. rustc's probe there (PredicateFilter::SelfTraitThatDefines) lowers the trait ref alone: collect's
+  `*trait-ref-only*`, bound by trait-bounds-defining, leaves `:clauses` out. After it: **5,696 equal**, 166, 6, 32 differ,
+  **6 refused** (array 88 -> 91 equal, 5 -> 0 refused, 1 -> 3 differ: from_fn and map now built, differing by a user type
+  annotation's `wrap_mut_1` path; try_from_fn and try_map equal); every other module's line unchanged between the two runs.
+  Against the last recorded run (RF20's, 2026-11-11: 5,594 / 161 / 33 differ / 6 refused) no module was compared line by line (that run's
+  per-module lines are not in the tree); the totals moved up. The whole alloc pass after the third fix: 3,863 of 3,863 again (14 min
+  16 s, 2.06 GB).
+
+### Decisions taken (round 54)
+
+- RIND9a-15 (a) two rounds the whole pass's default (`ALLOC_IFACE_ROUNDS=2`; `=1` one): taken. The one-round run's 22 differences
+  are all closed by the second; alternatives (b) a headers round and (c) a dependency order set aside (a new mode for what the
+  second round already gives, at 15 minutes).
+- RIND9a-19 (a) the index records a `self` import as its module's name and reads leading `super`s one module each: taken.
+  Alternative: resolve set/entry's imports by passing set's file as context, set aside (context gives ADTs' generics, not a
+  module's imports; the index is where a module built alone reads its parent's names).
+- RIND9a-20 (a) trait-bounds-defining lowers the bound's trait ref without its constraints' bounds (rustc's
+  SelfTraitThatDefines): taken. Alternative: a depth guard on type-relative, set aside (it hides the cause and refuses where rustc
+  resolves).
+
+### Left
+
+- alloc's interface is equal fact for fact; RIND9 (a)'s next crate (std over the linux `sys`) is the next step. array's from_fn
+  and map differ from rustc's MIR by a user type annotation's path (`NeverShortCircuit::wrap_mut_1`), now that they build.
