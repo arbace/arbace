@@ -1807,6 +1807,16 @@
      :c (vec (concat (for [h hdrs] (str "#include \"" h "\""))
                      [(str (when const? "const ") rc " " wname "(" argtypes ") {" (if void? call (str "return " call)) ";}")]))}))
 
+(defn- fexports-init
+  "foreignExportsInitialiser: the module's exports' closures registered (registerForeignExports) by its initializer"
+  [closures]
+  (when (seq closures)
+    (let [mstr *module*]
+      [(str "static struct ForeignExportsList stg_exports_" mstr " = {.exports =  {"
+            (str/join ", " (map #(str "(StgPtr) &" % "_closure") closures)) "}, .n_entries =  " (count closures) "};")
+       (str "void " (zenc mstr) "_init__fexports (void)")
+       (str "{registerForeignExports(&stg_exports_" mstr ");}")])))
+
 (defn- ffi-call-body
   "dsFCall's worker and wrapper body (inlined, as GHC's -O0 Simplifier does): the call f of spec sp on the unboxed
   atoms vals (their types val-tys) and the State# token, its unboxed result matched and boxed by resultWrapper
@@ -5531,9 +5541,32 @@
   "A renamed module (rn/module {...}) elaborated: {:types {NAME type} :core [(bind ...)...] :errors [...]}"
   [tree]
   (let [{:keys [module decls binds sigs]} (second tree)
-        m module]
+        m module
+        ;; queue 364: the foreign exports (tcFExport): each a top-level binding of a stable name, $fstable:N:UNIT:MOD:NAME
+        ;; (mkStableIdFromName, mkForeignExportOcc; N the module's wrapper counter, in source order) whose right-hand side is
+        ;; the exported name at the declared type (tcCheckPolyExpr: its dictionaries applied), signed by that type; the C
+        ;; stub calls it (fexport-cbits)
+        fexps (vec (map-indexed
+                    (fn [i [d fe]]
+                      (let [n (nm (arg fe 2)) es (lval (arg (arg fe 4) 2))
+                            sname (str "$f" (zenc (str "stable:" i ":" *unit* ":" module ":" (occ n))))
+                            sp (or (lsp d) (lsp (arg fe 2)))]
+                        {:n n :sig (arg fe 3) :cname (arg es 2) :sname sname :name (ext-name "var" module sname) :span sp}))
+                    (for [d decls :let [v (lval d)] :when (and (= 'ForD (con v)) (= 'ForeignExport (con (arg v 2))))]
+                      [d (arg v 2)])))
+        sigs (into (vec sigs) (for [{:keys [name sig span]} fexps]
+                                (list 'L span (list 'TypeSig nil [(list 'L span (list 'rn/name name))] (list 'HsWC 'NoExtField sig)))))
+        binds (into (vec binds)
+                    (for [{:keys [name n span]} fexps
+                          :let [l (fn [x] (list 'L span x)) rn (fn [x] (l (list 'rn/name x)))]]
+                      (list 'rn/group 'nonrec
+                            [(l (list 'FunBind 'NoExtField (rn name)
+                                      (list 'MG 'FromSource
+                                            (l [(l (list 'Match 'NoExtField (list 'FunRhs (rn name) 'Prefix 'NoSrcStrict nil) (list 'L nil [])
+                                                         (list 'GRHSs nil [(l (list 'GRHS nil [] (l (list 'HsVar 'NoExtField (rn n)))))]
+                                                               (list 'EmptyLocalBinds 'NoExtField))))]))))])))]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
-              *wrapper-num* (atom 0) *fstubs* (atom [])
+              *wrapper-num* (atom (count fexps)) *fstubs* (atom [])
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *tv-kinds* (atom {}) *tc-kinds* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
@@ -5636,6 +5669,12 @@
                                                   nil)))
                                          (list 'lit (str "foreign import " (occ n))))])))
             fimports (vec (for [[i [n]] (map-indexed vector fis)] (list 'bind n (get fis-core i))))
+            ;; the exports' stubs after the imports', last to first, then their initialiser
+            _ (doseq [{:keys [cname sname sig]} (reverse fexps)]
+                (swap! *fstubs* conj (try (let [[as res] (ffi-split (ffi-normalise (sig-type sig))) [r io?] (io-split res)]
+                                            (dissoc (fexport-cbits cname sname as r io?) :ts))
+                                          (catch Throwable _ {:h [] :c []}))))
+            _ (when-let [l (fexports-init (map :sname (reverse fexps)))] (swap! *fstubs* conj {:h [] :c l}))
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
             insts (into insts (phase :derive (derive-all! m decls)))
