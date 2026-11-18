@@ -830,6 +830,8 @@
         (when (<= 0 a b (long n))
           (String. cps (int a) (int (- b a))))))))
 
+(def ^:private ^:dynamic *const-depth* 0)
+
 (defn- eval-int-expr
   "RF12: an integer constant expression of literals (`32 - 1` from a macro's `$n - 1`), as const evaluation gives it; nil
   when it is anything else"
@@ -864,6 +866,14 @@
               (when (and a b)
                 (case (:op x) "+" (+ a b) "-" (when (>= a b) (- a b)) "*" (* a b)
                       "/" (when (pos? b) (quot a b)) "%" (when (pos? b) (rem a b)) nil)))
+    (:paren :group) (some-> (:expr x) eval-int-expr)
+    ;; round 52: a path to a constant of the crate, its own expression's value (btree's `[MaybeUninit<K>; CAPACITY]`,
+    ;; `CAPACITY = 2 * B - 1`, `B = 6`: rustc's type_of writes the length evaluated, 11)
+    :path (when (< (long *const-depth*) 16)
+            (when-let [r (try (res-def (:path x)) (catch Throwable _ nil))]
+              (when (and (= :local (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
+                (binding [*const-depth* (inc (long *const-depth*))]
+                  (some-> (:expr (:node (def-of (second r)))) eval-int-expr)))))
     nil))
 
 (defn const-int-value
@@ -1073,7 +1083,10 @@
     ;; RF12: TyKind::Pat, the pattern as its text (`!null`)
     :pat [:pat (lower-ty (:ty t)) (str/replace (:pat t) #"^! " "!")]
     :slice [:slice (lower-ty (:ty t))]
-    :array [:array (lower-ty (:ty t)) (let [c (lower-const-arg (:len t))]
+    ;; round 52: a length naming a constant of the crate evaluated (type_of's normalized length: btree's `CAPACITY`, 11)
+    :array [:array (lower-ty (:ty t)) (let [c (or (when (and (map? (:len t)) (= :path (:kind (:len t))) (not (scope-param (:ident (peek (:segs (:path (:len t))))))))
+                                                    (some->> (eval-int-expr (:len t)) str (vector :cval)))
+                                                  (lower-const-arg (:len t)))]
                                         ;; an unevaluated length in another file: its text there
                                         (if (and (= :cexpr (first c)) (str/starts-with? (str (second c)) "{const") (:len-span t))
                                           [:cexpr (or (snippet (:len-span t)) (second c))]
@@ -1598,10 +1611,13 @@
 
 (defn- input-regions
   "The lifetime positions of a signature's inputs, in order (a fn pointer's and a trait object's own binders, and an
-  object lifetime default, are not among them)"
+  object lifetime default, are not among them; nor the regions of a `Self` written in them: round 52, the path `Self` has
+  no lifetime of its own in resolve's elision candidates, though the impl's self type may be a reference, `impl Pattern
+  for &'b String`: lower-ty gives a `Self` the very object *self-ty* is)"
   [x]
-  (let [acc (java.util.ArrayList.)]
-    (letfn [(walk [x] (cond (region? x) (.add acc x)
+  (let [acc (java.util.ArrayList.) st *self-ty*]
+    (letfn [(walk [x] (cond (and (some? st) (identical? x st)) nil
+                            (region? x) (.add acc x)
                             (and (vector? x) (= :fnptr (first x))) nil
                             (and (vector? x) (= :dyn (first x))) nil
                             (vector? x) (doseq [y x] (walk y))

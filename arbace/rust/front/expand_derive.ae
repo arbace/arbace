@@ -108,8 +108,30 @@
                                                             (:name %))
                                                         gparams)) ">")
                            ""))
+        ;; round 52: generic/mod.rs' find_type_parameters: each field type's path whose first segment is a type parameter
+        ;; (`I::Item` in Splice's `Drain<'a, I::Item, A>`), not a parameter alone, bounded by the trait in the impl's where
+        ;; clause after the item's predicates, in the fields' order, outer before inner, every occurrence
+        proj-tys (let [names (set (map :name (filter #(= :type (:k %)) gparams)))
+                       acc (atom [])]
+                   (letfn [(w [x] (cond (and (seq? x) (= 'Ty (first x)))
+                                        (let [k (fget x :kind)]
+                                          (when (and (seq? k) (= 'Path (first k)))
+                                            (let [segs (fget (nth k 2) :segments)]
+                                              (when (and (contains? names (second (fget (first segs) :ident))) (> (count segs) 1))
+                                                (swap! acc conj x))))
+                                          (doseq [y (rest x)] (w y)))
+                                        (seq? x) (doseq [y x] (w y))
+                                        (vector? x) (doseq [y x] (w y))
+                                        :else nil))]
+                     (doseq [t (if (= kind :struct)
+                                 (let [[k fs] shape] (case k :named (map second fs) :tuple fs []))
+                                 (mapcat (fn [[_ [k fs]]] (case k :named (map second fs) :tuple fs [])) variants))]
+                       (w t)))
+                   @acc)
+        where-text (fn [bound] (if (seq proj-tys) (str " where " (str/join ", " (map #(str (fr %) ": " bound) proj-tys))) ""))
         head (fn [attrs unsafe? path bound body]
-               (str "#[automatically_derived] " attrs (if (contains? const-traits trait) "const " "") (if unsafe? "unsafe " "") "impl" (gens bound) " " path " for " self-ty " {" body "}\n"))
+               (str "#[automatically_derived] " attrs (if (contains? const-traits trait) "const " "") (if unsafe? "unsafe " "") "impl" (gens bound) " " path " for " self-ty
+                    (where-text bound) " {" body "}\n"))
         ;; RF13d: each assertion's field span recorded (assert_ty_bounds' span is field.span), put back by assert-spans
         asserts (fn [path fields-tys]
                   (let [seen (atom #{})]
@@ -353,8 +375,9 @@
                      (fget g :params))
             g (fset g :params ps)
             ;; the item's predicates in a where clause of the impl's own (no `where` token of its own)
+            ;; round 52: then the impl's own (the type parameters' projections, find_type_parameters')
             g (if (and wc (seq (fget wc :predicates)))
-                (fset g :where_clause (fset (fget g :where_clause) :predicates (fget wc :predicates)))
+                (fset g :where_clause (fset (fget g :where_clause) :predicates (into (vec (fget wc :predicates)) (fget (fget g :where_clause) :predicates))))
                 g)]
         (fset d :kind (list 'Impl (fset imp :generics g))))
       d)))
