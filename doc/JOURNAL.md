@@ -11706,3 +11706,23 @@ checked, 0 problems), `bin/crops-score --record` and `--judge --strict` (14 crop
 head that moved it), `bin/records-check` (9 pairs, 0 problems), `make check-makefile`, test/docs/claude-md-test.bash,
 test/gate/caches-test.bash (with `--coverage`), `bin/gate --plan` (52 steps) and `bin/gate --full --plan` (341 steps), every
 process under 1 GiB but bin/j2g-unit (1.2 GB: 160 pass, the 7 known failures of the base). Nothing built.
+
+## 2026-11-18: RIND9 (a): alloc's compare over the rest of the crate's modules (branch `n-rust-alloc5`, from `n-rust-alloc4` `527925a75`)
+
+- alloc's index rebuilt in the fresh worktree, then each of alloc's module files not yet in `test/rust/front/alloc-iface-units.txt`
+  (rust-src 1.99.1's library/alloc: fmt, sync, intrinsics, macros, lib; btree's mod, mem, merge_iter, dedup_sorted_iter, fix,
+  remove, split, append, map/entry, set, set/entry; vec's 13 submodules left; vec_deque/mod and its 8 submodules left; io's mod,
+  prelude, cursor, buf_read, copy and its two, buffered's mod, bufwriter, linewriter, linewritershim, bufreader/buffer) passed alone
+  or after its siblings (one process at a time, GOMEMLIMIT 500 MiB, each under 1 GiB) and compared with the helper's std-iface.
+- Causes fixed in arbace/rust/front/: derive's projection bounds written once per type (expand_derive; predicates_of's set of
+  (clause, span), every derived bound carrying the derive's span: merge_iter's Peeked had `I::Item: Clone` twice), and `super`
+  after a leading `super` (resolve's `super-res`, in paths and imports: btree/map/entry.rs' `use super::super::borrow::DormantMutRef`,
+  so VacantEntry and OccupiedEntry are written). The units' negative control takes a one-fact module's other fact from the crate's
+  helper facts.
+- Results: merge_iter 8 to 10 of 10, map::entry 36 to 38 of 38, set 222 of 222 with merge_iter first, every other new module
+  equal; 20 files have no helper fact (crate-private or reexports) and stay out. `alloc-iface-units.txt` 61 lines over 64 files (WIP: its
+  known file not yet re-recorded, the record run cut at line 38 of 61 by a harness restart, every line passing so far); 2 pure cases and the module cases of merge_iter and map::entry added.
+  Decisions RIND9a-16 to RIND9a-18 taken overnight (round 52); doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the
+  rest of the crate's modules".
+- core's native facts may move (a derive's duplicate projection bound gone; `super::super` paths): the day runs core-essential,
+  rind-test, core's check and the whole alloc pass.
