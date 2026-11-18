@@ -255,8 +255,12 @@ Prior art:
     hsi, the STG evaluator (`bin/hsi`, `go/arbace/hs`, doc/haskell/HASKELL-EVAL-SURVEY.md; `check --aot [--opt O1]`, `--front
     native`; out of every key); `arbace.repr.rust` (`arbace/repr/rust{.ae,/}`), Rust as Rust forms and back
     (spec `doc/rust/SPEC.md`, notes `doc/rust/RUST-NOTES.md`; helper `tools/rsdump`, a
-    `rustc_private` driver on the host's rustc, pinned by `tools/rsdump/RUSTC_VERSION`, built
-    against `rustc-dev` fetched as an apk into `.tmp/` and pinned by `tools/rsdump/apks.sha256`;
+    `rustc_private` driver on the pinned rustc, `tools/rsdump/RUSTC_VERSION`, built
+    against `rustc-dev` fetched as an apk into `.tmp/` and pinned by `tools/rsdump/apks.sha256`; since RIND11 (a)
+    (2026-11-18, doc/rust/RUST-NOTES.md, "The pinned rustc") the rustc is Alpine's rust 1.99.1-r0 with its cargo and LLVM 23.1.3,
+    apks pinned by `tools/rsdump/rustc-apks.sha256`, extracted into the main checkout's `.tmp/rust-1.99.1/root`, never installed
+    (`bin/repr-rust rustc fetch|take`): `bin/lib/repr-rust/rustc-pin.bash` puts it first on PATH and names it `ARBACE_RUSTC` for the
+    host `:rustc`, a rustc of another version that host absent;
     `bin/repr-rust read`, `print`, `roundtrip` (rustc's trees and lines; `--iface`: rustdoc's JSON
     of the crates, without spans; `--text`: mode `:full` printed back to the original text, byte
     for byte; `--pretty`: the forms without positions in the pretty layout, their trees), `test`;

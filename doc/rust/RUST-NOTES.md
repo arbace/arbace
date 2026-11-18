@@ -95,6 +95,10 @@ kind, attributes on expressions, slice and box patterns) round-trips likewise (8
   `librustc_driver`). Rebuilt when its source, `RUSTC_VERSION`, `apks.sha256` or `rustc --version`
   change (`.tmp/repr-rust/key`). `bin/repr-rust` refuses a host rustc whose version and commit are
   not the pin's, or without the pinned driver library.
+- Since RIND11 (a) (2026-11-18; "The pinned rustc" below) the rustc is the pinned tree's, not the
+  host's apk: `bin/lib/repr-rust/rustc-pin.bash` puts `.tmp/rust-1.99.1/root/usr/bin` first on PATH,
+  the sysroot is that tree's, rustc-dev's absolute link to `/usr/lib/librustc_driver-*.so` points
+  into it, and the helper carries an rpath to the tree's `usr/lib`.
 - `RUSTC_VERSION` pins `version 1.99.1`, `commit 58cf8f9c3`, `driver 61690d3e4c729118`; the helper
   compiles it in (`include_str!`) and refuses to run on another rustc: the version and commit from
   `rustc_interface::util::rustc_version_str()`, the driver's hash from the name of the
@@ -1175,3 +1179,35 @@ threads stand at once).
   the limit still); (c) repr/rust embedded and compiled (out of the crops' paths, every key). *Recommended: (a)*, light and
   local to the crop. The known files keep the three entries until `bin/repr-rust roundtrip --text --pretty --only-list LIST
   rustc-1.99.1-ui` reports them FIXED; then each FIXED entry is removed from the tree, text and pretty known files.
+
+## The pinned rustc (RIND11 (a), 2026-11-18, round 54; branch `n-rind11`)
+
+Alpine's apk moved the host to rustc 1.100.0 on 2026-11-15, but `tools/rsdump/RUSTC_VERSION` pins 1.99.1, so `bin/gate --pins`,
+the helper-based tools and the oracle tier's five `:rustc` steps failed (doc/rust/FRONTEND-SURVEY.md, "The host's rustc 1.100.0").
+The user chose RIND11 (a): the pinned toolchain held outside apk.
+
+- **The apks**, pinned by SHA-256 in `tools/rsdump/rustc-apks.sha256` (the format of `apks.sha256`): `rust-1.99.1-r0` (rustc,
+  rustdoc, the std libraries, `librustc_driver-61690d3e4c729118.so`), `cargo-1.99.1-r0`, and the LLVM it was built with:
+  `rustc -vV` of the tree says `LLVM version: 23.1.3`, so `llvm23-libs-23.1.3-r0` (`libLLVM.so.23.1`) and `scudo-malloc-23.1.3-r0`
+  (`libscudo.so`, which rustc and cargo link). rustc-dev and rust-src stay in `apks.sha256`; the fetched ones matched its pins.
+  Each signed by Alpine's key (`apk verify`, no install). dl-cdn's edge has dropped them; the lagging official mirrors keep them
+  (`http://mirror.mobinhost.com/alpine/edge/main/x86_64`: rust, rustc-dev, rust-src; `https://mirror.latigo.net/alpine/edge/main/x86_64`,
+  which keeps old files: cargo, llvm23-libs, scudo-malloc, and rust again with the same digest).
+- **The tree**: the four apks extracted into one root, the main checkout's `.tmp/rust-1.99.1/root` (shared by the worktrees;
+  `ARBACE_RUSTC_HOME` names another, `ARBACE_RUSTC_APKS` another apks directory). rustc, rustdoc and cargo find
+  `librustc_driver`, `libLLVM.so.23.1` and `libscudo.so` through their own `RUNPATH` (`$ORIGIN/../lib`; musl's loader searches
+  the needing chain's paths), so no `LD_LIBRARY_PATH` and the host's LLVM 23.1.5 tools are untouched. The rest is the host's
+  (musl, libstdc++, libgcc, zlib, zstd, libffi, libxml2, liblzma, curl, OpenSSL, sqlite, libssh2; gcc as the linker).
+- **The mechanism**, `bin/lib/repr-rust/rustc-pin.bash` (a crop library: in no key): `rustc_pin_path` puts the tree's `usr/bin`
+  first on PATH when its rustc is at the pin, and exports `ARBACE_RUSTC`: that rustc, else the PATH's when it is at the pin, else
+  `rustc-not-at-the-pin`, a name no command has. Sourced by `bin/repr-rust`, `bin/rust-front`, `bin/rust-unicode`, `bin/rsi`,
+  `bin/llvmi` and `bin/gate`; the `:rustc` recipe of `test/gate/steps.edn`'s `:host-ids` names `${ARBACE_RUSTC:-...}`, so a rustc
+  of another version is the host absent (no key, no run, no failure). `bin/repr-rust rustc fetch` (the main checkout only: from
+  `ARBACE_RUSTC_MIRRORS`, Alpine's mirrors, each file by its digest, never another version), `take` (checked and extracted,
+  `root.extracted` the pin file's digest), `which`. `bin/repr-rust pins check` checks the four apks and the tree's marker too, and
+  says "absent" in place of failing when no rustc is at the pin. The rustc-dev and rust-src apks are taken from the pinned
+  directory when `.tmp/repr-rust/apks` lacks them (no `apk fetch`, which would give 1.100's).
+- **Checks** (2026-11-18): `bin/repr-rust pins check` held (408 pinned files, the UI tarball not fetched) and absent with
+  `ARBACE_RUSTC_HOME` elsewhere (exit 0); `bin/repr-rust helper` built against the pinned rustc-dev (18 s, 0.7 GB; `RUNPATH` the
+  tree's `usr/lib`, the driver and libLLVM 23.1.3 from it); `bin/repr-rust test --samples` passed (1 min 14 s, 0.6 GB); `bin/gate
+  --pins`: rust's pin held (the haskell and oracle-packs pins fail as before, unrelated).

@@ -9,6 +9,11 @@
 #
 #   bin/repr-rust pins check      (GT9; bin/gate --pins) the pins hold, no fetch: the host's rustc, driver library and rustdoc at
 #                                 tools/rsdump/RUSTC_VERSION, and each pinned apk, crate and the UI tarball that is there at its SHA-256
+#   bin/repr-rust rustc fetch|take|which
+#                                 (RIND11 (a)) the pinned rustc: its apks (tools/rsdump/rustc-apks.sha256: rust, cargo and the
+#                                 LLVM it was built with) fetched from Alpine's mirrors into the main checkout's .tmp/rust-1.99.1
+#                                 (fetch; the main checkout only), extracted into its root/ (take), never installed; which: the
+#                                 rustc the tools run (bin/lib/repr-rust/rustc-pin.bash: the tree's first on PATH when at the pin)
 #   bin/repr-rust helper          build the helper into .tmp/repr-rust/rsdump (the host's rustc,
 #                                 with a sysroot of links to its std and rustc-dev's crates; rebuilt
 #                                 when its source, its pins or rustc --version change)
@@ -170,6 +175,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/crops/take.bash" # crop_take: a worktree's fetched inputs from the main checkout
+. "$root/bin/lib/repr-rust/rustc-pin.bash" # the pinned rustc's tree (RIND11 (a))
+rustc_pin_path
 work=$root/.tmp/repr-rust
 helper=$work/rsdump
 apks=$work/apks
@@ -184,13 +191,13 @@ pin() { sed -n "s/^$1 //p" "$root/tools/rsdump/RUSTC_VERSION"; }
 catf() { if [ -f "$1" ]; then cat "$1"; fi; }
 
 rustc_check() {
-  [ -n "$(command -v rustc)" ] || { echo "repr-rust: no rustc (Alpine's rust package, doc/ALPINE.md)" >&2; return 1; }
+  [ -n "$(command -v rustc)" ] || { echo "repr-rust: no rustc: the pinned one is bin/repr-rust rustc fetch (RIND11 (a))" >&2; return 1; }
   local v want
   v=$(rustc --version)
   want="rustc $(pin version) ($(pin commit) "
   case $v in
     "$want"*) ;;
-    *) echo "repr-rust: the host's rustc is '$v'; tools/rsdump/RUSTC_VERSION pins $(pin version) ($(pin commit)) (SPEC §10.5: moving the pin is a recorded decision)" >&2
+    *) echo "repr-rust: the host's rustc is '$v'; tools/rsdump/RUSTC_VERSION pins $(pin version) ($(pin commit)) (SPEC §10.5: moving the pin is a recorded decision); the pinned tree $(rustc_pin_home) is not there or not at the pin: bin/repr-rust rustc fetch (RIND11 (a))" >&2
        return 1 ;;
   esac
   host_sysroot=$(rustc --print sysroot)
@@ -210,12 +217,14 @@ apks_fetch() {
     local sha f name
     while read -r sha f; do
       name=${f%-*-r*.apk}
-      if { [ ! -f "$apks/$f" ] || [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; } &&
-         [ -n "${REPR_RUST_APKS:-}" ] && [ -f "$REPR_RUST_APKS/$f" ] &&
-         [ "$(sha256sum < "$REPR_RUST_APKS/$f" | cut -c1-64)" = "$sha" ]; then
-        echo "== repr-rust: $f from the cache $REPR_RUST_APKS" >&2
-        cp "$REPR_RUST_APKS/$f" "$apks/$f.part.$$" && mv "$apks/$f.part.$$" "$apks/$f"
-      fi
+      # the caches: REPR_RUST_APKS, then the pinned rustc's directory (RIND11 (a): rustc-dev and rust-src fetched beside it)
+      for d in ${REPR_RUST_APKS:-} "$(rustc_pin_dir)"; do
+        if { [ ! -f "$apks/$f" ] || [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; } &&
+           [ -f "$d/$f" ] && [ "$(sha256sum < "$d/$f" | cut -c1-64)" = "$sha" ]; then
+          echo "== repr-rust: $f from the cache $d" >&2
+          cp "$d/$f" "$apks/$f.part.$$" && mv "$apks/$f.part.$$" "$apks/$f"
+        fi
+      done
       if [ ! -f "$apks/$f" ] || [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; then
         # by name (apk fetch cannot select NAME=VERSION alone): the repositories' current build,
         # which must be the pinned one
@@ -233,6 +242,7 @@ apks_fetch() {
         tar --warning=no-unknown-keyword -xzf "$apks/$f" -C "$apks/$name"
         echo "$sha" > "$apks/$name.extracted"
       fi
+      rustc_pin_relink "$apks/$name" # RIND11 (a): rustc-dev's link to /usr/lib's driver library, the pinned tree's
     done < "$root/tools/rsdump/apks.sha256"
   ) 8> "$work/fetch.lock"
 }
@@ -248,10 +258,12 @@ rust_src_take() {
   mkdir -p "$apks"
   (
     flock 8
-    if [ ! -f "$apks/$f" ] && [ -n "${REPR_RUST_APKS:-}" ] && [ -f "$REPR_RUST_APKS/$f" ]; then
-      echo "== repr-rust: $f from the cache $REPR_RUST_APKS" >&2
-      cp "$REPR_RUST_APKS/$f" "$apks/$f.part.$$" && mv "$apks/$f.part.$$" "$apks/$f"
-    fi
+    for d in ${REPR_RUST_APKS:-} "$(rustc_pin_dir)"; do
+      if [ ! -f "$apks/$f" ] && [ -f "$d/$f" ]; then
+        echo "== repr-rust: $f from the cache $d" >&2
+        cp "$d/$f" "$apks/$f.part.$$" && mv "$apks/$f.part.$$" "$apks/$f"
+      fi
+    done
     if [ ! -f "$apks/$f" ]; then crop_take "$apks/$f" "bin/repr-rust corpus fetch" || exit 0; fi
     if [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; then
       echo "repr-rust: $apks/$f: SHA-256 differs from tools/rsdump/apks.sha256's $sha" >&2
@@ -264,7 +276,7 @@ rust_src_take() {
 }
 
 helper_hash() {
-  cat "$root"/tools/rsdump/*.rs "$root/tools/rsdump/RUSTC_VERSION" "$root/tools/rsdump/apks.sha256" | sha256sum | cut -c1-64
+  cat "$root"/tools/rsdump/*.rs "$root/tools/rsdump/RUSTC_VERSION" "$root/tools/rsdump/apks.sha256" "$root/tools/rsdump/rustc-apks.sha256" | sha256sum | cut -c1-64
 }
 
 build() {
@@ -272,7 +284,7 @@ build() {
   mkdir -p "$work"
   apks_fetch
   local key
-  key="$(helper_hash) $(rustc --version)"
+  key="$(helper_hash) $(rustc --version) $host_sysroot"
   (
     flock 7
     if [ -x "$helper" ] && [ "$(catf "$work/key")" = "$key" ]; then exit 0; fi
@@ -281,7 +293,8 @@ build() {
     rm -rf "$sysroot"; mkdir -p "$lib"
     for f in "$host_sysroot/lib/rustlib/$target/lib/"*; do ln -s "$f" "$lib/"; done
     for f in "$apks/rustc-dev/usr/lib/rustlib/$target/lib/"*; do ln -sf "$f" "$lib/"; done
-    RUSTC_BOOTSTRAP=1 rustc --edition 2024 -O --sysroot "$sysroot" "$root/tools/rsdump/rsdump.rs" \
+    # the driver library found where rustc's is (the pinned tree's lib/, RIND11 (a)), not the host's apk's
+    RUSTC_BOOTSTRAP=1 rustc --edition 2024 -O --sysroot "$sysroot" -C link-arg=-Wl,-rpath,"$host_sysroot/lib" "$root/tools/rsdump/rsdump.rs" \
       -o "$helper.new.$$" > "$work/build.log" 2>&1 ||
       { cat "$work/build.log" >&2; rm -f "$helper.new.$$"; exit 1; }
     mv -f "$helper.new.$$" "$helper"
@@ -617,13 +630,28 @@ read_files() {
 # $apks or REPR_RUST_APKS), the crates (test/rust/crates-2026-10-18.sha256, in the crates' cache, REPR_RUST_CRATES or Cargo's), the UI suite's source
 # tarball (the corpus's :tarball, in $work/src or REPR_RUST_SRC); one not fetched yet is said, not a failure (the fetch checks it)
 pins_check() {
-  local bad=0 n=0 absent=() sha f d have found tsha tf
-  rustc_check || bad=1
-  have=$(rustdoc --version 2>/dev/null | sed -n 's/^rustdoc \([0-9.]*\) (\([0-9a-f]*\) .*$/\1 \2/p')
-  [ "$have" = "$(pin version) $(pin commit)" ] || { echo "  PIN rustdoc is '$have', RUSTC_VERSION pins $(pin version) $(pin commit)"; bad=1; }
+  local bad=0 n=0 absent=() sha f d have found tsha tf host=held
+  # RIND11 (a): no rustc at the pin (neither the pinned tree nor the PATH's) is the host :rustc absent, not a failure; a pinned
+  # tree that is there is checked file by file against tools/rsdump/rustc-apks.sha256
+  if [ "$ARBACE_RUSTC" = "$rustc_pin_absent" ]; then
+    host=absent
+    echo "  rustc at the pin absent ($(command -v rustc 2>"$TMPDIR/rustc-pin.err" || echo none): $(rustc --version 2>"$TMPDIR/rustc-pin.err" || true)): the host :rustc absent; bin/repr-rust rustc fetch"
+  else
+    rustc_check || bad=1
+    have=$(rustdoc --version 2>"$TMPDIR/rustc-pin.err" | sed -n 's/^rustdoc \([0-9.]*\) (\([0-9a-f]*\) .*$/\1 \2/p')
+    [ "$have" = "$(pin version) $(pin commit)" ] || { echo "  PIN rustdoc is '$have', RUSTC_VERSION pins $(pin version) $(pin commit)"; bad=1; }
+  fi
+  if [ -f "$(rustc_pin_home).extracted" ] && [ "$(cat "$(rustc_pin_home).extracted")" != "$(sha256sum < "$rustc_pin_file" | cut -c1-64)" ]; then
+    echo "  PIN $(rustc_pin_home): extracted from other apks than tools/rsdump/rustc-apks.sha256's (bin/repr-rust rustc take)"; bad=1
+  fi
+  while read -r sha f; do
+    found=$(rustc_pin_dir)/$f
+    if [ ! -f "$found" ]; then absent+=("$f"); continue; fi
+    n=$((n + 1)); [ "$(sha256sum < "$found" | cut -c1-64)" = "$sha" ] || { echo "  PIN $found: SHA-256 is not $sha (tools/rsdump/rustc-apks.sha256)"; bad=1; }
+  done < "$rustc_pin_file"
   while read -r sha f; do
     found=""
-    for d in "$apks" ${REPR_RUST_APKS:-}; do [ -f "$d/$f" ] && { found=$d/$f; break; }; done
+    for d in "$apks" ${REPR_RUST_APKS:-} "$(rustc_pin_dir)"; do [ -f "$d/$f" ] && { found=$d/$f; break; }; done
     if [ -z "$found" ]; then absent+=("$f"); continue; fi
     n=$((n + 1)); [ "$(sha256sum < "$found" | cut -c1-64)" = "$sha" ] || { echo "  PIN $found: SHA-256 is not $sha (tools/rsdump/apks.sha256)"; bad=1; }
   done < "$root/tools/rsdump/apks.sha256"
@@ -638,7 +666,7 @@ pins_check() {
   found=""; for d in "$work/src" ${REPR_RUST_SRC:-}; do [ -f "$d/$tf" ] && { found=$d/$tf; break; }; done
   if [ -z "$found" ]; then absent+=("$tf"); else n=$((n + 1)); [ "$(sha256sum < "$found" | cut -c1-64)" = "$tsha" ] || { echo "  PIN $found: SHA-256 is not $tsha (the UI corpus's :tarball)"; bad=1; }; fi
   if [ $bad = 0 ]; then
-    echo "rust pins: rustc $(pin version) ($(pin commit)), its driver library and rustdoc; $n pinned files at their SHA-256${absent[*]:+; not fetched yet (the fetch checks them): ${#absent[@]} files}"
+    echo "rust pins: rustc $(pin version) ($(pin commit)), its driver library and rustdoc $host (${ARBACE_RUSTC}); $n pinned files at their SHA-256${absent[*]:+; not fetched yet (the fetch checks them): ${#absent[@]} files}"
   else echo "rust pins: NOT held" >&2; return 1; fi
 }
 
@@ -1366,6 +1394,8 @@ case $cmd in
   roundtrip) roundtrip "$@" ;;
   controls) mkdir -p "$work"; cd "$root" && arbace_tool -m arbace.repr.rust controls --file "$root/test/rust/roundtrip-edit-controls.edn" --work "$work/controls" ;;
   test) exec "$root/bin/lib/repr-rust/test" "$@" ;;
+  rustc) case ${1:-} in fetch) rustc_pin_fetch ;; take) rustc_pin_take ;; which) rustc_pin_path; echo "$ARBACE_RUSTC" ;;
+           *) echo "usage: bin/repr-rust rustc fetch|take|which" >&2; exit 2 ;; esac ;;
   pins) case ${1:-} in check|--check) pins_check ;; *) echo "usage: bin/repr-rust pins check" >&2; exit 2 ;; esac ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
