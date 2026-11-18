@@ -696,6 +696,10 @@
         :else (unsupported :section-name (pr-str e))))
 
 (defn directive! [ctx f]
+  (if (and (= 'asm/directive (first f)) (string? (second f)))
+    ;; the reader's generic form of a directive it does not name, (asm/directive "NAME" ARGS...): the directive NAME (queue 372:
+    ;; `.8byte`)
+    (directive! ctx (cons (symbol "asm" (str/replace (second f) #"^\." "")) (nnext f)))
   (let [h (name (first f)) args (rest f)
         cv (fn [e] (let [e (resolve-expr ctx e)] (or (const-value e @(:syms ctx)) (unsupported :expression (str "." h " " (pr-str e))))))
         own (if-let [d (:directive *arch*)] (d ctx h args) :unhandled)]
@@ -803,7 +807,7 @@
       "cfi_sections" (when-not (= ['.eh_frame] (vec args)) (unsupported :cfi (str ".cfi_sections " (pr-str args))))
       (if (.startsWith h "cfi_")
         (cfi! ctx h args)
-        (unsupported :directive (str "." h))))))
+        (unsupported :directive (str "." h)))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; layout and relaxation (MCAssembler::layout, relaxOnce, relaxFragment)
@@ -997,7 +1001,9 @@
           ;; ARS43 (a): a fixup's error reported at its item, the next fixup evaluated still (MCAssembler's reportError); an
           ;; expression MCValue cannot hold is LLVM's "expected relocatable expression"
           (catch arbace.lang.ExceptionInfo ex
-            (let [d (ex-data ex) pos (or (:pos (meta fx)) (:pos m)) e (nth fx 2)]
+            ;; a relaxed instruction's fixups have no place: MCAssembler::relaxInstruction encodes the fragment's opcode and
+            ;; operands again, and the fragment keeps no MCInst location (queue 372: MC/X86's fixup-overflow-32, `<unknown>:0:`)
+            (let [d (ex-data ex) pos (if (:relaxed m) [:unknown] (or (:pos (meta fx)) (:pos m))) e (nth fx 2)]
               (cond (:obj/error d) (report! ctx pos (:obj/error d) e)
                     (#{:expression :not-relocatable} (:obj/unsupported d)) (report! ctx pos "expected relocatable expression" e)
                     :else (throw ex))))))
@@ -1438,7 +1444,7 @@
 (defn- diag-expr-name
   "The first symbol an expression names that the source spells (not a temporary label), or nil."
   [e]
-  (cond (symbol? e) (let [n (name e)] (when-not (or (str/starts-with? n ".L") (str/includes? n "\u0000")) n))
+  (cond (symbol? e) (let [n (name e)] (when-not (str/includes? n "\u0000") n))
         (seq? e) (some diag-expr-name (rest e))
         :else nil))
 
@@ -1459,6 +1465,9 @@
         sym-i (when nm (or (diag-word-at t nm 0) (when-let [i (diag-word-at t (str "$" nm) 0)] (inc (long i)))))]
     (cond
       (nil? e) nil
+      ;; a number: its decimal spelling after the statement's first word (`.space -4`'s count, queue 372)
+      (integer? e) (let [m (re-matcher (re-pattern (str "(?<![\\w.$])" (java.util.regex.Pattern/quote (str e)) "(?![\\w.$])")) t)]
+                     (when (and (re-find #"^\s*\S+\s" t) (.find m (int (count (re-find #"^\s*\S+\s" t))))) (.start m)))
       ;; a directive's first operand's token (parseDirectiveLoc's file number)
       (= e :first-operand) (when-let [m (re-find #"^\S+\s+" t)] (count m))
       (and (seq? e) (= 'at (first e))) (let [lt (str/lower-case t) sp (str/lower-case (str (nth e 2)))
@@ -1497,13 +1506,16 @@
   ([^String src r file]
   (let [named (fn [buf] (if buf ["<instantiation>" buf] [file src]))]
     (vec (mapcat (fn [{:keys [pos msg expr]}]
+                   (if (= pos [:unknown])
+                     ;; an error with no place (SMLoc()): a relaxed instruction's fixup (queue 372)
+                     [(str "<unknown>:0: error: " msg)]
                    (if-let [[st en buf notes] pos]
                      (let [[nm text] (named buf)]
                        (concat (diag-lines text st en nm "error" msg expr)
                                (mapcat (fn [[nst nen nbuf]] (let [[nm text] (named nbuf)]
                                                               (diag-lines text nst nen nm "note" "while in macro instantiation" nil)))
                                        notes)))
-                     [(str file ": error: " msg)]))
+                     [(str file ": error: " msg)])))
                  (:errors r))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
