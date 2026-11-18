@@ -120,8 +120,17 @@ nd=$w/nd
 # P17: the dumps' tree is the package's: its library's source directory (hs-source-dirs) src/ for ghc-internal and base, the
 # package's root for deepseq, array, stm (the modules' directories at the top: a capital first letter); one directory else
 sd=$(cd "$nd" && find . -mindepth 1 -maxdepth 1 -type d -name '[a-z]*' | sed 's|^\./||' | sort)
-case $sd in '') sd=. ;; *$'\n'*) echo "lib-check: $pkg's dumps have more than one source directory ($(echo $sd)): not taken yet" >&2; exit 2 ;; esac
-sdp=$nd/$sd
+# (queue 363: a package of several source directories, template-haskell's `hs-source-dirs: ./vendored-filepath .`: modules at
+# the root beside a lowercase directory, or several lowercase directories, read as one tree of links, the root's first)
+root_mods=$(cd "$nd" && find . -mindepth 1 -maxdepth 1 \( -type d -name '[A-Z]*' -o -name '[A-Z]*.edn' \) | head -1)
+if [ -z "$sd" ]; then sdp=$nd
+elif [ -z "$root_mods" ] && [ "$sd" = "${sd%%$'\n'*}" ]; then sdp=$nd/$sd
+else
+  sdp=$w/nd-merged; rm -rf "$sdp"; mkdir -p "$sdp"
+  [ -z "$root_mods" ] || (cd "$nd" && find . -mindepth 1 -maxdepth 1 \( -type d -name '[A-Z]*' -o -name '[A-Z]*.edn' \) -exec cp -rs "$nd/{}" "$sdp/" \;)
+  for d in $sd; do cp -rsn "$nd/$d/." "$sdp/"; done
+  echo "== lib-check: $pkg's source directories read as one tree: $([ -z "$root_mods" ] || echo ". ")$(echo $sd)" >&2
+fi
 # MonadFail's interface too: a failable do pattern's fail is GHC's to find (GHC.Tc.Gen.Match's tcMonadFailOp), not an import
 extra=GHC.Internal.Control.Monad.Fail; [ "$pkg" = base ] && extra="Prelude $extra"
 partial=""
@@ -283,6 +292,12 @@ if [ "$ifaces" = own ]; then
     # HF10-P30 (a), P17: the packages below, transitively, in dependency order (their .cabal files' library build-depends, as the
     # installation's records name them: arbace.repr.haskell.target deps), from the pinned tarball's tree
     src=$root/.tmp/repr-haskell/corpus/ghc-9.14.1
+    # (queue 363: the modules' source paths as GHC was given them, the corpus's :dir and module path, for SrcLoc's and patError's
+    # text: libraries/containers/containers/src/Data/Map/Internal.hs, not the unit's name; lib-stg reads the same file)
+    sed -n "/{:name \"$pkg\"/,/:hsc/p" "$root/test/haskell/corpus-ghc-9.14.1.edn" |
+      sed -n 's/.*:dir "\([^"]*\)".*/DIR \1/p; s/.*\[\([A-Z][A-Za-z0-9_.]*\) "\([^"]*\)"\].*/\1 \2/p' |
+      awk '$1 == "DIR" {d = $2; next} {print $1 "\t" d "/" $2}' > "$ow/srcmap.tsv"
+    [ "$pkg" = base ] || export LIB_CHECK_SRCMAP=$ow/srcmap.tsv   # (base keeps its unit's path: its records, P14's)
     arbace_tool -m arbace.repr.haskell.target deps "$pkg" --src "$src" > "$ow/deps.tsv" 2> "$ow/deps.err" ||
       { grep -v '^Reflection warning' "$ow/deps.err" >&2; echo "lib-check: no dependencies of $pkg (bin/repr-haskell corpus fetch)" >&2; exit 2; }
     # the own pools of the dependencies that expose modules: LIB_CHECK_DEP_POOL_TAR=TAR[:TAR...] (the gate's producers' outputs,

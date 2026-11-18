@@ -4923,3 +4923,64 @@ the cap. It compiles now.
   `StackOverflowError`, on the original code too) and the light cap's programs (cacheprof, the nofib programs at 1 GiB). (a) Read the
   night's 16 GiB `--libs own --record` first, and port the next gap from its record; (b) port T5462Yes1's generic default now.
   *Recommended: (a)*: the light samples have few front stops left, and the whole run names the rest.
+
+## As built: queue 363, P17's slices 2 and 3 (2026-11-18, the Mac VM, branch `363-haskell-containers`, from `mac/352-haskell-front` `b67c44c4d`)
+
+346-1 (a)'s second step (the user's decision of 2026-11-18): the containers and the boot packages below and beside it on the own
+front end, one at a time under 1.2 GB (stage 0 of next's seed 3c48859d; `REPR_HASKELL_INPUTS=pack`, equal to the derived inputs;
+no GHC). The packages, in P17's order, each `lib-check --package P --ifaces own --record test/haskell/lib-check-own-P.edn` (its
+control `lib-check-controls-P.tsv`: a module's own interface against another's GHC one, differs) and `lib-stg --package P --ifaces
+own` (a measure until the oracle window records P's -O0 STG; `lib-stg-controls-P.txt` then), each a `--full` step
+`haskell-lib-own-P` in the chain haskell-lib, its `P-pool.tar` the next one's dependency and its `P-own.tar` hsi-check's:
+
+| package | modules | elaborate | binders equal to GHC's | stops (recorded) |
+|---|---:|---:|---|---|
+| pretty | 6 | 6 | 124 of 124 | |
+| ghc-boot-th | 10 | 10 | (none in GHC's pack) | |
+| template-haskell | 11 | 10 | 52 of 52 | Language.Haskell.TH.Syntax: Template Haskell's brackets (`HsUntypedBracket`) |
+| containers | 35 | 33 | 724 of 724 | Data.Set.Internal: IsList (Set a)'s `fromList`, `Ord (Item (Set a))` (the instance's own associated type not reduced); Data.Sequence.Internal: Foldable Seq's `foldMap` under its instance signature's `Monoid m` |
+| transformers | 24 | 24 | 57 of 60 | |
+| mtl | 24 | 23 | 10 of 10 | Control.Monad.Cont.Class: `liftCallCC`'s quantified constraint (`forall m'. Monad m' => Monad (t m')`) |
+
+**The tooling** (`2c235bf6f`):
+- **Several source directories.** template-haskell has `hs-source-dirs: ./vendored-filepath .`. lib-check now reads the dumps as
+  one tree of links, with the root's modules first. Before, it took the one lowercase directory and found 3 modules, not 11.
+- **GHC's source paths.** For a package above base, `srcmap.tsv` gives each module's path as GHC was given it: the corpus's `:dir`
+  and the module's path, read through `LIB_CHECK_SRCMAP`. It sets SrcLoc's and patError's text. Before, the path was
+  `libraries/containers-0.8-b42e/src/...` where GHC writes `libraries/containers/containers/src/...` (samples/Exc's and Trace's
+  stderr). base keeps its unit's path, as its records have it.
+- **The -O0 layout of every unit.** `lib-stg --o0-layout all` for a package above base (tostg's `*o0-layout*` `:all`) lays out
+  every unit's constructors as -O0 does.
+  - Before, containers built ghc-internal's SrcLoc with the -O2 pack's unboxed fields. The own ghc-internal's `prettySrcLoc`
+    then stopped on it ("case of an algebraic type on int64(629)").
+  - ghc-internal and base keep the unit's own layout, because GHC's -O0 references read the other units' -O2 layout.
+
+**Checks:**
+- Every package's lib-check was judged again at this tooling: 0 worse. The same holds for deepseq, array and stm.
+- base's lib-check: 0 worse, 1 better.
+- Every control differs, as it must.
+
+**The programs** (`bin/hsi check --libs own`, `HSI_OWN_PACKAGES=deepseq,array,stm,pretty,ghc-boot-th,template-haskell,containers,
+transformers,mtl`).
+- The dry plans try eval 747 → 761 of 909 cases and AOT 121 → 126 of 139.
+- All 50 tried programs whose main imports one of the packages (deepseq, array, stm or the new ones), with the newly eligible, were
+  run:
+  - 49 ran `:libs :own` and 45 pass. With T4809, which runs on the pack (a front stop), 46 pass.
+  - nofib/imaginary/kahan and testsuite/codeGen/should_run/T16846 are classed (CPU limit, memory).
+  - nofib/gc/spellcheck (`:own-lib`: its do pattern `[file1,file2] <- getArgs` fails on the own libraries) and
+    nofib/spectral/last-piece (`:untried-cap`) go on own-fallback.txt.
+- The 5 new AOT cases pass `:libs :own` (`:vs-hsi :same`).
+- hsi-check's and hsi-check-aot's `HSI_OWN_TARS` take the six `P-own.tar`.
+
+**The round trip's own interface level** (queue 325's DECISION 1 (a)):
+- It now covers the six packages: 110 modules, the tree level 110 of 110, and their own interfaces 110 of 110 equal in both
+  layouts (13 minutes, 1.2 GB).
+- The units file grows from 556 to 666, and the step `haskell-iface-own` covers the eleven packages.
+- The judge's stated cases move 220 from GHC's to the own: judge 0.887 → 0.901, Haskell independence 77.74 → 78.02.
+- With the night's two whole own records, the projection is 95 (0.9546), from scratch records through `bin/crops-score`.
+
+**Next** (by programs gained; P17's slices 4 and 5):
+- bytestring and time: their C, `cbits/`, made on ci.
+- directory and unix: hsc2hs modules.
+- The four elaborator stops above: associated types in the instance's own methods, instance signatures' givens, quantified
+  constraints, TH brackets.
