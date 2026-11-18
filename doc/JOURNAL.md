@@ -10644,3 +10644,22 @@ forcing control) on the gate executable `e8e0d017243dca8a9f9f` under 1 GiB: 143 
 Alternatives: every world class's G records (rejected: the data of every generic member for one API's need), the name rule alone
 (rejected: not JMX's). By day: the build, then t04792 at interp and the 8 compiled rows stopping on getPlatformMBeanServer (t04785
 t04787 t04788 t04789 t04792 t07841 t07842 t07934). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-j2g-mxsig".
+
+## 2026-11-18: n-java-f13, java.lang.management's memory, class loading and collector beans (round 52, overnight)
+
+Branch `n-java-f13` from mac/n-j2g-mxsig `bc9b64242`, under the night's rules (each process under 1 GiB). F13's next slices for
+t04786 and t07840: jrt's Go (go/arbace/jrt/memory.ae: HostManagement's natives for the classes, two pools over runtime.MemStats, the
+collector's count, pauses and CPU time from MemStats and runtime/metrics, a finalizer watcher recording each cycle's live heap and
+allocations for GcInfo's usage before and after; dyn.ae counts a replaced class as unloaded); jrt's Java: jdk26u's ClassLoadingImpl,
+MemoryImpl, MemoryPoolImpl, MemoryManagerImpl, GarbageCollectorImpl, GcInfo, GcInfoBuilder and GarbageCollectorExtImpl as derived
+overlays over jrt's own sun.management.JrtManagement (test/jrt/derive.ae, from https://github.com/openjdk/jdk26u at baf63fb,
+src/java.management and src/jdk.management), NotificationEmitterSupport, Sensor, com.sun.management.GarbageCollectorMXBean,
+GarbageCollectionNotificationInfo and their composite data added to the closure as they are, ManagementFactoryHelper's getters,
+ManagementFactory's components and the platform MBean server's registrations. j2g writes the generic signatures of a
+CompositeDataView too (annot/mxbean-mapped?: GcInfo's Map getters, which JMX and GcInfoCompositeData map). Proved on jdk26u's JDK with
+`--patch-module` over a stub HostManagement (t04786 and t07840 status 0, a 38-check probe), the Go in a small module (`go test`), j2g's
+unit tests (145 pass, the same 7 unrelated failures), forms by `bin/repr-java read-jdk --check --no-javac --origins` (the context's
+unchanged files byte for byte the committed forms), `bin/java-check --essential` 428 of 428. Taken overnight: the pools' and managers'
+names, the pauses as the collection time, the watcher, no thresholds or GC notifications yet, derived overlays, the CompositeDataView
+rule (alternatives in the survey). Left: the usage thresholds (a sampler triggering the sensors), GC notifications, the buffer pools
+(jrt counting its direct and mapped buffers). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-f13".

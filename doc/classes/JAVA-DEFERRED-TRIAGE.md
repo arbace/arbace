@@ -8480,3 +8480,96 @@ Decisions taken overnight (round 52): (a) the world's MXBean interfaces' Signatu
 every generic member in the executable, or (c) leaving it); JMX's own rule, `@MXBean`'s value first, then the name (rather than the
 name alone); the records written by `class-data`'s `:signatures` beside `:throws` (rather than `:members`, which would add the
 members' annotations and type annotations too).
+
+## As built: n-java-f13 (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-java-f13` (from mac/n-j2g-mxsig `bc9b64242`), under the night's rules (each process under 1 GiB): F13's next slices,
+the beans t04786 (GetPlatformManagementInterfaces: ClassLoading, Memory, GarbageCollector, MemoryManager, MemoryPool) and t07840
+(CheckSomeMXBeanImplPackage: com.sun.management.GarbageCollectorMXBean and GcInfo) need, with n-java-mx's ManagementFactory under them.
+
+- **The platform as a Go program has it.** Two pools: `Go heap` (HEAP, the collector's: runtime.MemStats' HeapAlloc used of HeapSys,
+  max the memory limit when one is set, else -1, as Runtime.maxMemory) and `Go runtime` (NON_HEAP: goroutine stacks, spans, caches,
+  the collector's metadata, the rest Go keeps); two managers: `Go GC` (the collector, jdk.management's GarbageCollectorExtImpl as
+  jdk26u's VM makes it when jdk.management is present, so it is both interfaces' bean) managing the heap, `Go runtime manager` the
+  runtime's pool. The collector's count is MemStats' NumGC (forced cycles too), its time the stop-the-world pauses (PauseTotalNs, ms),
+  MemoryMXBean's getTotalGcCpuTime runtime/metrics' `/cpu/classes/gc/total:cpu-seconds`. Classes: the registry's (class.ae: the closed
+  world's, defined at initialization, and those made at run time) plus those a class made at run time replaced (dyn.ae's
+  DefineDynamic, counted unloaded).
+- **jrt's Go** (go/arbace/jrt/memory.ae, HostManagement's natives; dyn.ae's count): the pools' usages and peaks (a peak noted at
+  every query and every cycle), the collector's facts, and a watcher started by the first memory bean: a finalizer re-armed each
+  cycle records the live heap the cycle left (`/gc/heap/live:bytes`) and the bytes allocated (`/gc/heap/allocs:bytes`), so a cycle's
+  heap before it is the previous cycle's live heap plus what was allocated since (for a cycle the watcher has not seen yet, the
+  same from its last record); GcInfo's start is its end (MemStats' LastGC) less the cycle's pauses.
+- **jrt's Java.** jdk26u's ClassLoadingImpl, MemoryImpl, MemoryPoolImpl, MemoryManagerImpl, GarbageCollectorImpl (java.management),
+  GcInfo, GcInfoBuilder, GarbageCollectorExtImpl (jdk.management) as derived overlays (test/jrt/derive.ae's `mx-derivations`: each
+  native given a body, verified native-free; GcInfo a static initializer handing HostManagement a factory over its private
+  constructor, as ThreadInfo's); NotificationEmitterSupport, Sensor, com.sun.management's GarbageCollectorMXBean and
+  GarbageCollectionNotificationInfo with their composite data (GcInfoCompositeData, GarbageCollectionNotifInfoCompositeData) jdk26u's as
+  they are (test/jrt/jrt_sources.ae's management-sources); jrt's own sun.management.JrtManagement (the pools and managers made once,
+  where jdk26u's VM makes them, the natives' bodies); ManagementFactoryHelper's jdk26u getters; VMManagementImpl's class counts, GC CPU
+  time and verbose settings over them; ManagementFactory: ClassLoading and Memory singletons, the pools, managers and collectors as
+  jdk26u's non-singleton components (getPlatformMXBean on one: "can have more than one instance"; the com.sun interface the same
+  beans), all registered in the platform MBean server under their names, getPlatformManagementInterfaces with their interfaces.
+- **j2g: GcInfo's generic signatures.** JMX maps GcInfo (a CompositeDataView, returned by getLastGcInfo) by its getters' generic
+  types, and GcInfoCompositeData's static initializer maps `getMemoryUsageBeforeGc`'s `Map<String,MemoryUsage>` by
+  getGenericReturnType: without its G records, registering the collector in the platform MBean server, or making any GcInfo, fails
+  in the Go build. annot's new `mxbean-mapped?` (n-j2g-mxsig's `mxbean-interface?`, or a class implementing
+  javax.management.openmbean.CompositeDataView: GcInfo and GarbageCollectionNotificationInfo in the world) is j2g's `:signatures` rule.
+  `bin/j2g-unit`'s test-mxbean-signatures: two new checks (fixture q/Info, a CompositeDataView; the MXBean rule unchanged under the new
+  predicate), 145 pass, the same 7 unrelated failures as at HEAD on the gate executable `e8e0d017243dca8a9f9f` (0.83 GB).
+- **Proof of the Java** on jdk26u's JDK (`.tmp/nf/jdk/`: `mk.sh` compiles the overlays in three passes, java.management and
+  jdk.management naming each other as in jrt's one world, over a stub HostManagement in java.base whose answers are made up; `rj.sh`
+  runs with the three modules patched, `--add-reads java.management=jdk.management`): t04786 status 0, t07840 status 0 ("--- PASSED!",
+  the collector com.sun.management.internal.GarbageCollectorExtImpl); a probe (`t/Probe.java`, 38 checks: counts, usages, pools'
+  and managers' links, no thresholds, GcInfo through the factory with its composite type and GcInfo.from, collection usage and peak,
+  the platform server's names, attributes and proxies, LastGcInfo through the server) PASSED. The other single-file tests of
+  java/lang/management's MemoryMXBean, MemoryPoolMXBean, GarbageCollectorMXBean, ClassLoadingMXBean, ManagementFactory,
+  PlatformLoggingMXBean and MXBean directories on the same patch: 11 of 22 status 0; the rest need the usage thresholds (MemoryTest,
+  ProxyTypeMapping, ValidateOpenTypes pick a pool that supports them), a real collector under the stub (LastGCInfo,
+  GcInfoCompositeType: the stub counts no System.gc), jtreg's arguments, the compilation bean or the JVM's thread dumps.
+- **Proof of the Go**: memory.ae printed by `bin/repr-go print --layout gofmt`, compiled in a small module beside a stub of the
+  registry and LongArray (`.tmp/nf/gomod`), `go test`: the counts, both pools' usages within MemoryUsage's rules, two forced cycles
+  counted, the watcher's record, LastGc0's before at least its after, the heap's peak above the 12.8 MB allocated and its reset
+  (0.4 GB).
+- **Forms** by `bin/repr-java read-jdk --check --no-javac --origins` (`.tmp/nf/cv.sh`, `REPR_JAVA_PATCH_ALL=1`, one thread) over the
+  closure's sources (`JRT_STEPS=sources bin/jrt-convert`) with the management, JMX and logging packages as context: 267 files,
+  0.94 GB, every target converted, the 254 unchanged files of the context byte for byte the committed forms; ManagementFactoryHelper in
+  a second read with java.util.logging (230 files, 0.91 GB), whose other targets were identical to the first's. 15 new forms, 4
+  changed, the three packages' loads; jdk/sources.txt's 15 lines, provenance's counts. `bin/java-check --essential` with the checkout on
+  ARBACE_PATH 428 of 428, the controls failing as they must; `bin/reap` 0 problems; `bin/jrt-convert derive --check` 95 overlays as
+  derived.
+- **Left for later (what they need).** The usage thresholds and their notifications (t04791 ThresholdTest, MemoryTest's choice of
+  pool): HotSpot's LowMemoryDetector, a sampler in jrt (the watcher's cycles for the collection thresholds, a goroutine for the usage
+  ones) triggering MemoryPoolImpl's sensors, the pools then made with thresholds 0; the collector's notifications
+  (GarbageCollectionNotificationInfo, GarbageCollectorExtImpl's createGCNotification from the watcher, setNotificationEnabled on);
+  the buffer pools (t04784): jrt counting its direct and mapped buffers (VM.getBufferPools, Bits' reservations released by a Cleaner;
+  jrt's direct buffers are heap buffers and its maps copies, counted nowhere), then sun.management's BufferPool beans; verbose output
+  for class loading and GC (the settings are kept, nothing printed).
+- **Not light here: `bin/jrt-convert vet --classes` over the slice's classes** reached 1.03 GB twice and was stopped (its default
+  GOMEMLIMIT is 1.5 GiB): by day.
+
+Decisions taken overnight (round 52): (1) two pools and two managers, the names `Go heap`, `Go runtime`, `Go GC`, `Go runtime
+manager` (rather than one pool, or HotSpot's names); (2) the collection time the stop-the-world pauses (rather than the GC CPU time,
+which getTotalGcCpuTime gives); (3) the heap before a cycle from a finalizer watcher (rather than the live heap both before and
+after); (4) no usage thresholds yet (pools made with -1, jdk26u's unsupported path) and no GC notifications; (5) the beans' classes
+as derived overlays over JrtManagement (rather than hand transcriptions); (6) j2g's `:signatures` also for a CompositeDataView (rather
+than naming GcInfo, or every world class's signatures).
+
+Keys: overlay/jdk, jdk/forms, jdk/sources.txt, go/arbace/jrt move `gate_key` and the runtime key; arbace/classes and arbace/j2g
+`gate_key` (j2g's world translation); test/jrt the jrt-derive step's; test/j2g the unit tests'.
+
+The day's commands (after `bin/arbace-go --gate-build`; then `bin/jrt-convert verify` in the night's `--full`):
+
+```sh
+bin/jrt-convert derive --check
+GOMEMLIMIT=1500MiB bin/jrt-convert vet --classes '^(sun/management/(ClassLoadingImpl|Memory|GarbageCollectorImpl|JrtManagement|Sensor|NotificationEmitterSupport|ManagementFactoryHelper|VMManagementImpl)|com/sun/management/|java/lang/management/ManagementFactory|jdk/internal/jrt/HostManagement)'
+bin/j2g-unit                                   # test-mxbean-signatures: 10 pass
+bin/jrt test --arch amd64 --package jrt -run 'TestLiveAtStart|TestLiveThreads|TestOperatingSystemFacts' -count=1
+printf 't04786\nt07840\nt04784\nt04791\nt04792\n' > .tmp/nf13.txt
+bin/java-check --levels interp --list .tmp/nf13.txt --save .tmp/nf13
+bin/java-check --judge --partial --record .tmp/nf13/results.tsv   # expected: t04786 t07840 pass; t04784, t04791 as before
+grep -E 'jdk/(java/lang/management|com/sun/management)' test/java/check-interp.edn | sed 's/^ *\["\(t[0-9]*\)".*/\1/' > .tmp/nf13-all.txt
+bin/java-check --levels interp --list .tmp/nf13-all.txt --save .tmp/nf13-all && bin/java-check --judge --partial .tmp/nf13-all/results.tsv
+bin/java-check --levels compiled --list .tmp/nf13-all.txt --save .tmp/nf13-c && bin/java-check --judge --partial .tmp/nf13-c/results.tsv
+bin/reap --record && bin/crops-score --record
+```

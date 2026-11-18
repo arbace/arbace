@@ -107,7 +107,25 @@
         (or (or (.equals n "java.lang.management.OperatingSystemMXBean")
                 (.equals n "com.sun.management.OperatingSystemMXBean"))
             (.equals n "com.sun.management.UnixOperatingSystemMXBean"))
-          (ManagementFactory/osBean))))
+          (ManagementFactory/osBean)
+        (.equals n "java.lang.management.ClassLoadingMXBean")
+          (ManagementFactoryHelper/getClassLoadingMXBean)
+        (.equals n "java.lang.management.MemoryMXBean") (ManagementFactoryHelper/getMemoryMXBean))))
+
+  (method ^:private ^:static multiple ^{:tag (List (? extends PlatformManagedObject))} [^{:tag (Class ?)} intf]
+    (let [n (.getName intf)]
+      (cond
+        (.equals n "java.lang.management.MemoryPoolMXBean")
+          (ManagementFactoryHelper/getMemoryPoolMXBeans)
+        (.equals n "java.lang.management.MemoryManagerMXBean")
+          (ManagementFactoryHelper/getMemoryManagerMXBeans)
+        (or (.equals n "java.lang.management.GarbageCollectorMXBean")
+            (.equals n "com.sun.management.GarbageCollectorMXBean"))
+          (let [^{:tag (List PlatformManagedObject)} l (ArrayList.)]
+            (for-each [^GarbageCollectorMXBean gc
+                         (ManagementFactoryHelper/getGarbageCollectorMXBeans)]
+              (when (.isInstance intf gc) (.add l gc)))
+            l))))
 
   (field ^:private ^:static ^HotSpotThreadImpl threadImpl)
 
@@ -129,11 +147,16 @@
   (method ^:public ^:static ^:synchronized getPlatformMBeanServer ^MBeanServer []
     (when (nil? platformMBeanServer)
       (set! platformMBeanServer (MBeanServerFactory/createMBeanServer))
-      (let [beans (new PlatformManagedObject/1
-                       [(ManagementFactory/threadBean)
-                        (ManagementFactoryHelper/getRuntimeMXBean)
-                        (ManagementFactory/osBean)
-                        (ManagementFactoryHelper/getPlatformLoggingMXBean)])]
+      (let [^{:tag (List PlatformManagedObject)} beans (ArrayList.
+                                                         (List/of
+                                                           (ManagementFactoryHelper/getClassLoadingMXBean)
+                                                           (ManagementFactoryHelper/getMemoryMXBean)
+                                                           (ManagementFactory/threadBean)
+                                                           (ManagementFactoryHelper/getRuntimeMXBean)
+                                                           (ManagementFactory/osBean)
+                                                           (ManagementFactoryHelper/getPlatformLoggingMXBean)))]
+        (.addAll beans (ManagementFactoryHelper/getMemoryPoolMXBeans))
+        (.addAll beans (ManagementFactoryHelper/getMemoryManagerMXBeans))
         (for-each [^PlatformManagedObject pmo beans]
           (ManagementFactory/addMXBean platformMBeanServer
                                        (.getCanonicalName (.getObjectName pmo))
@@ -198,6 +221,9 @@
       (throw (IllegalArgumentException.
                (java-str (.getName mxbeanInterface) " is not a platform management interface"))))
     (when-not (ManagementFactory/absent mxbeanInterface)
+      (when (some? (ManagementFactory/multiple mxbeanInterface))
+        (throw (IllegalArgumentException.
+                 (java-str (.getName mxbeanInterface) " can have more than one instance"))))
       (let [o (ManagementFactory/singleton mxbeanInterface)]
         (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
         (cast PlatformManagedObject (.cast mxbeanInterface o)))))
@@ -209,10 +235,17 @@
     (let [^{:tag (List T)} l (ArrayList.)]
       (if (ManagementFactory/absent mxbeanInterface)
           l
-          (let [o (ManagementFactory/singleton mxbeanInterface)]
-            (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
-            (.add l (cast PlatformManagedObject (.cast mxbeanInterface o)))
-            l))))
+          (let [^{:tag (List (? extends PlatformManagedObject))} ms (ManagementFactory/multiple
+                                                                      mxbeanInterface)]
+            (if (some? ms)
+                (do
+                  (for-each [^PlatformManagedObject m ms]
+                    (.add l (cast PlatformManagedObject (.cast mxbeanInterface m))))
+                  l)
+                (let [o (ManagementFactory/singleton mxbeanInterface)]
+                  (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
+                  (.add l (cast PlatformManagedObject (.cast mxbeanInterface o)))
+                  l))))))
 
   (method ^:public ^:static getPlatformMXBean :type-params [(T extends PlatformManagedObject)] :throws [IOException] ^T [^MBeanServerConnection connection
                                                                                                                          ^{:tag (Class T)} mxbeanInterface]
@@ -225,13 +258,17 @@
                 connection
                 COMPILATION_MXBEAN_NAME
                 mxbeanInterface))
-        (let [o (ManagementFactory/singleton mxbeanInterface)]
-          (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
-          (cast PlatformManagedObject
-                (ManagementFactory/newPlatformMXBeanProxy
-                  connection
-                  (.getCanonicalName (.getObjectName o))
-                  mxbeanInterface)))))
+        (do
+          (when (some? (ManagementFactory/multiple mxbeanInterface))
+            (throw (IllegalArgumentException.
+                     (java-str (.getName mxbeanInterface) " can have more than one instance"))))
+          (let [o (ManagementFactory/singleton mxbeanInterface)]
+            (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
+            (cast PlatformManagedObject
+                  (ManagementFactory/newPlatformMXBeanProxy
+                    connection
+                    (.getCanonicalName (.getObjectName o))
+                    mxbeanInterface))))))
 
   (method ^:public ^:static getPlatformMXBeans :type-params [(T extends PlatformManagedObject)] :throws [IOException] ^{:tag (List T)} [^MBeanServerConnection connection
                                                                                                                                         ^{:tag (Class T)} mxbeanInterface]
@@ -241,15 +278,27 @@
     (let [^{:tag (List T)} l (ArrayList.)]
       (if (ManagementFactory/absent mxbeanInterface)
           l
-          (let [o (ManagementFactory/singleton mxbeanInterface)]
-            (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
-            (.add l
-                  (cast PlatformManagedObject
-                        (ManagementFactory/newPlatformMXBeanProxy
-                          connection
-                          (.getCanonicalName (.getObjectName o))
-                          mxbeanInterface)))
-            l))))
+          (let [^{:tag (List (? extends PlatformManagedObject))} ms (ManagementFactory/multiple
+                                                                      mxbeanInterface)]
+            (if (some? ms)
+                (do
+                  (for-each [^PlatformManagedObject m ms]
+                    (.add l
+                          (cast PlatformManagedObject
+                                (ManagementFactory/newPlatformMXBeanProxy
+                                  connection
+                                  (.getCanonicalName (.getObjectName m))
+                                  mxbeanInterface))))
+                  l)
+                (let [o (ManagementFactory/singleton mxbeanInterface)]
+                  (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
+                  (.add l
+                        (cast PlatformManagedObject
+                              (ManagementFactory/newPlatformMXBeanProxy
+                                connection
+                                (.getCanonicalName (.getObjectName o))
+                                mxbeanInterface)))
+                  l))))))
 
   (method ^:public ^:static getPlatformManagementInterfaces ^{:tag (Set (Class (? extends PlatformManagedObject)))} []
     (let [^{:tag (Set (Class (? extends PlatformManagedObject)))} s (HashSet.)]
@@ -261,4 +310,10 @@
       (.add s UnixOperatingSystemMXBean)
       (.add s PlatformLoggingMXBean)
       (.add s CompilationMXBean)
+      (.add s ClassLoadingMXBean)
+      (.add s MemoryMXBean)
+      (.add s MemoryPoolMXBean)
+      (.add s MemoryManagerMXBean)
+      (.add s GarbageCollectorMXBean)
+      (.add s com.sun.management.GarbageCollectorMXBean)
       (Collections/unmodifiableSet s))))
