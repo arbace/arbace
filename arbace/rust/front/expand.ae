@@ -73,7 +73,7 @@
 (defn- root-src ^Src [] (:src *root*))
 
 (declare split-commas fget)
-(declare fset strip-cfg cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
+(declare eager-mac fset strip-cfg cfg-pred cfg-item include-expr include-items build-env unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Tokens
@@ -920,9 +920,15 @@
       "line" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (first (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "column" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (second (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "file" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (.getCanonicalPath (File. ^String (:file *root*))) :suffix 'None)) :span (foreign-span m) :attrs [])}
-      "include" {:ast (include-expr input)}
+      ;; round 54 (std's lib.rs: `include!("../../core/src/primitive_docs.rs");`): in an item's place the file's items
+      "include" {:ast (if (= :items (:kind call)) (include-items input) (include-expr input))}
+      ;; round 54: env! of the variables std's build script sets (library/std/build.rs: STD_ENV_ARCH, the target's arch)
+      "env" (let [[lit] (str-lit-of (first input))
+                  v (get build-env lit)]
+              (when-not v (throw (ex-info (str "expand: env! of " lit " is not a build variable") {:expand true})))
+              {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc v) :suffix 'None)) :span (foreign-span m) :attrs [])})
       ;; RF12: source_util.rs' include_str! (core's `#[doc = include_str!("..")]`): the file's text, relative to the root file
-      "include_str" (let [[lit] (str-lit-of (first input))
+      "include_str" (let [lit (or (first (str-lit-of (first input))) (eager-mac input))
                           f (File. (.getParentFile (.getAbsoluteFile (File. ^String (:file *root*)))) ^String lit)]
                       {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (slurp f)) :suffix 'None)) :span (foreign-span m) :attrs [])})
       "cfg" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Bool :symbol (str (boolean (second (cfg-pred input)))) :suffix 'None))
@@ -935,6 +941,22 @@
             _ (when-not i (throw (ex-info "expand: pattern_type! without `is`" {:expand true})))
             ty (parse-fragment (subvec (vec input) 0 i) :ty)]
         {:ast (list 'Ty :kind (list 'Pat ty (items-text (subvec (vec input) (inc i)))) :span (fget ty :span) :tokens 'None)})
+      ;; round 54 (std's vendored backtrace): the cfg-if crate's cfg_if! (vendor/cfg-if-1.0.4's macro_rules!: `if #[cfg(P)]
+      ;; { .. } else if #[cfg(Q)] { .. } else { .. }`, the first arm whose predicate holds), taken as a builtin as cfg_select!
+      "cfg_if"
+      (loop [xs (vec input)]
+        (cond
+          (and (>= (count xs) 4) (ident-item? (nth xs 0)) (= "if" (tsym (nth xs 0))) (punct-item? (nth xs 1) :Pound)
+               (= :OpenBracket (:g (nth xs 2))) (= :OpenBrace (:g (nth xs 3))))
+          (let [[c args] (:kids (nth xs 2))]
+            (when-not (and (ident-item? c) (= "cfg" (tsym c)) (= :OpenParen (:g args)))
+              (throw (ex-info "expand: cfg_if!'s arm is not #[cfg(..)]" {:expand true})))
+            (if (second (cfg-pred (:kids args)))
+              (:kids (nth xs 3))
+              (let [more (subvec xs 4)]
+                (if (and (seq more) (ident-item? (first more)) (= "else" (tsym (first more)))) (recur (subvec more 1)) []))))
+          (and (seq xs) (= :OpenBrace (:g (first xs)))) (:kids (first xs))
+          :else []))
       ;; RF12: rustc_builtin_macros/src/cfg_select.rs (rustc_parse's parse_cfg_select): arms `PREDICATE => { TOKENS }` or
       ;; `_ => { TOKENS }` (a non-brace arm's tokens to its comma); the first arm whose predicate holds gives its tokens
       "cfg_select"
@@ -952,6 +974,27 @@
                 hold? (or (and (= 1 (count pred)) (= "_" (tsym (first pred)))) (second (cfg-pred pred)))]
             (if hold? toks (recur more)))))
       (throw (ex-info (str "expand: the builtin " nm " is not taken") {:expand true})))))
+
+(def build-env
+  "The environment variables a library crate's build script sets for env! (round 54: std's build.rs, `cargo:rustc-env=
+  STD_ENV_ARCH=` the target's arch)"
+  {"STD_ENV_ARCH" "x86_64"})
+
+(defn- include-spans [x]
+  (cond (and (vector? x) (= 4 (count x)) (every? integer? x)) (apply list 'span "<include>" (conj x 0))
+        (seq? x) (apply list (map include-spans x))
+        (vector? x) (mapv include-spans x)
+        :else x))
+
+(defn include-items
+  "include! in an item's place: the file (relative to the root's directory) parsed as items, its spans written as
+  include-expr's"
+  [input]
+  (let [[lit] (str-lit-of (first input))
+        f (File. (.getParentFile (.getAbsoluteFile (File. ^String (:file *root*)))) ^String lit)
+        src (lx/source (slurp f))
+        {:keys [tree toks mt]} (binding [ps/*errs* (java.util.ArrayList.)] (ps/parse-file src (:ed *root*)))]
+    (include-spans (vec (fget (nat/out tree src toks mt (:ed *root*)) :items)))))
 
 (defn include-expr
   "include! in an expression's place: the file (relative to the root's directory) parsed as one expression, its spans
@@ -998,11 +1041,23 @@
         (str/replace s #"\s+" " "))
       :else (str/join " " (map tok-text toks)))))
 
+(defn- eager-mac
+  "round 54: a part `stringify!(..)` or `concat!(..)` of an eager builtin's input (rustc's expr_to_string expands its
+  argument first: std's os/raw `include_str!(concat!(\"..\", stringify!($t), \".md\"))`): its text, else nil"
+  [part]
+  (let [[a b c] part]
+    (when (and (= 3 (count part)) (ident-item? a) (punct-item? b :Bang) (:g c))
+      (case (tsym a)
+        "stringify" (items-text (:kids c))
+        "concat" (concat-text (:kids c))
+        nil))))
+
 (defn- concat-text [items]
   (apply str (for [part (split-commas items)
                    ;; RF12: an expression fragment of one literal (`$message:expr`) is its literal
                    :let [it (first part) it (if (and (:frag it) (= 1 (count (:items it)))) (first (:items it)) it) ^Tok t (:t it)]]
-               (cond (and t (= :Literal (.-kind t)) (= :Str (.-x t))) (unesc (.-sym t))
+               (cond (eager-mac part) (eager-mac part)
+                     (and t (= :Literal (.-kind t)) (= :Str (.-x t))) (unesc (.-sym t))
                      t (.-sym t)
                      :else ""))))
 
@@ -1023,7 +1078,7 @@
     (dump-tts->items (second (fget args :tokens)) nil)))
 
 (def ^:private std-builtins #{"cfg_select" "pattern_type" "include_str" "format_args" "format_args_nl" "const_format_args" "panic" "unreachable" "assert" "stringify"
-                              "line" "column" "file" "concat" "include" "cfg"})
+                              "line" "column" "file" "concat" "include" "cfg" "env" "cfg_if"})
 
 (declare expand-form)
 
@@ -1041,7 +1096,7 @@
         r (binding [*site* site]
             (cond user (expand-rules user input)
                   (contains? std-builtins nm)
-                  (builtin nm input {:span (or site [0 0 0 0])
+                  (builtin nm input {:span (or site [0 0 0 0]) :kind kind
                                      ;; RF10: a call written in a std macro's definition: its place there (`$crate::format_args_nl!(..)`)
                                      :fspan (let [cl (some-> (fget mac :args) (fget :dspan) (fget :close))]
                                               (cond

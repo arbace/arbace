@@ -50,12 +50,115 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Reading a file
 
-(defn parse-file
-  "A file of core read by the native reader: its items, edition 2024 (core's)"
-  [^String f]
-  (let [src (lx/source (slurp f))
+(defn- parse-text
+  "A source text read by the native reader: the crate (its :items), edition 2024 (core's, alloc's and std's)"
+  [^String text]
+  (let [src (lx/source text)
         {:keys [tree toks mt]} (binding [ps/*errs* (java.util.ArrayList.)] (ps/parse-file src 2024))]
     (nat/out tree src toks mt 2024)))
+
+(declare cfg-on?)
+
+(defn- line-offsets "Each line's first offset in TEXT (line 1 at index 0)" [^String text]
+  (loop [i 0 acc [0]] (let [j (.indexOf text "\n" (int i))] (if (neg? j) acc (recur (inc j) (conj acc (inc j)))))))
+
+(defn- blank-outside
+  "TEXT with every character outside [B, E) a space, its newlines kept: a part of a file read again at its own places"
+  [^String text b e]
+  (let [sb (StringBuilder. (count text))]
+    (dotimes [i (count text)]
+      (let [c (.charAt text i)] (.append sb (if (or (= c \newline) (and (>= i b) (< i e))) c \space))))
+    (str sb)))
+
+(defn- tree-span [t] (case (first t) Token (fget (second t) :span) Delimited (let [d (second t)] [(nth (fget d :open) 0) (nth (fget d :open) 1) (nth (fget d :close) 2) (nth (fget d :close) 3)]) nil))
+(defn- fat-arrow? [t] (and (= 'Token (first t)) (= 'FatArrow (fget (second t) :kind))))
+(defn- comma? [t] (and (= 'Token (first t)) (= 'Comma (fget (second t) :kind))))
+
+(defn- select-arms
+  "A cfg_select!'s arms from its token trees (rustc_parse's parse_cfg_select): [[PRED-SPAN-or-:wild BODY-B BODY-E]] as
+  [line col] pairs, a brace arm's body its inside, another's its tokens to the comma"
+  [trees]
+  (loop [xs (vec trees) out []]
+    (if (empty? xs) out
+      (let [i (first (keep-indexed (fn [i t] (when (fat-arrow? t) i)) xs))]
+        (if (nil? i) out
+          (let [pred (subvec xs 0 i) r (subvec xs (inc i)) body (first r)
+                wild? (and (= 1 (count pred)) (= 'Token (first (first pred))) (let [k (fget (second (first pred)) :kind)] (and (seq? k) (= "_" (second k)))))
+                ps (let [a (tree-span (first pred)) z (tree-span (peek pred))] [[(nth a 0) (nth a 1)] [(nth z 2) (nth z 3)]])]
+            (if (and (= 'Delimited (first body)) (= 'Brace (nth body 3)))
+              (let [d (second body) o (fget d :open) c (fget d :close) more (subvec r 1)]
+                (recur (if (and (seq more) (comma? (first more))) (subvec more 1) more)
+                       (conj out [(if wild? :wild ps) [(nth o 2) (nth o 3)] [(nth c 0) (nth c 1)]])))
+              (let [j (or (first (keep-indexed (fn [i t] (when (comma? t) i)) r)) (count r))
+                    a (tree-span (first r)) z (tree-span (nth r (dec j)))]
+                (recur (subvec r (min (count r) (inc j))) (conj out [(if wild? :wild ps) [(nth a 0) (nth a 1)] [(nth z 2) (nth z 3)]]))))))))))
+
+(defn- ident-tree? [t nm] (and (= 'Token (first t)) (let [k (fget (second t) :kind)] (and (seq? k) (= 'Ident (first k)) (= nm (second k))))))
+
+(defn- if-arms
+  "A cfg_if!'s arms (the cfg-if crate's `if #[cfg(P)] { .. } else if #[cfg(Q)] { .. } else { .. }`, backtrace's):
+  [[[:attr ATTR-B ATTR-E]-or-:wild BODY-B BODY-E]], the attribute's inside `cfg(P)`"
+  [trees]
+  (let [inside (fn [t] (let [d (second t) o (fget d :open) c (fget d :close)] [[(nth o 2) (nth o 3)] [(nth c 0) (nth c 1)]]))]
+    (loop [xs (vec trees) out []]
+      (cond
+        (and (>= (count xs) 4) (ident-tree? (nth xs 0) "if") (= 'Delimited (first (nth xs 2))) (= 'Delimited (first (nth xs 3))))
+        (let [[ab ae] (inside (nth xs 2)) [bb be] (inside (nth xs 3)) more (subvec xs 4)]
+          (recur (if (and (seq more) (ident-tree? (first more) "else")) (subvec more 1) more) (conj out [[:attr ab ae] bb be])))
+        (and (seq xs) (= 'Delimited (first (first xs))))
+        (let [[bb be] (inside (first xs))] (conj out [:wild bb be]))
+        :else out))))
+
+(defn- macro-name [it]
+  (let [k (fget it :kind)]
+    (when (and (seq? k) (= 'MacCall (first k)))
+      (let [segs (fget (fget (second k) :path) :segments)] (second (fget (last segs) :ident))))))
+
+(defn- cfg-select?
+  "An item `cfg_select! { .. }` (core's, std's: rustc_builtin_macros/src/cfg_select.rs), or `cfg_if::cfg_if! { .. }`
+  (std's vendored backtrace)"
+  [it]
+  (#{"cfg_select" "cfg_if"} (macro-name it)))
+
+(defn- splice-selects
+  "ITEMS with each item-level cfg_select! replaced by its first arm that holds for the build's cfg (core-cfg), the arm's
+  items read again from the file's TEXT at their own places (round 54, RIND9 (a), std: sys/pal/mod.rs' `unix => { mod unix;
+  pub use self::unix::*; }`, os/mod.rs' `pub mod linux;`), inline modules' items likewise: the module tree and the index see
+  the modules and items a cfg_select! declares, as rustc's expansion does"
+  [items ^String text]
+  (let [offs (delay (line-offsets text))
+        at (fn [[l c]] (+ (long (nth @offs (dec l))) (dec c)))
+        holds? (fn [ps] (or (= :wild ps)
+                            (let [attr? (= :attr (first ps)) ps (if attr? (rest ps) ps)
+                                  pt (subs text (at (first ps)) (at (second ps)))
+                                  it (first (fget (parse-text (if attr? (str "#[" pt "] mod __arm {}") (str "#[cfg(" pt ")] mod __arm {}"))) :items))]
+                              (cfg-on? it))))]
+    (vec (mapcat (fn [it]
+                   (cond
+                     (cfg-select? it)
+                     (if-not (cfg-on? it) [] ;; `#[cfg(doc)] cfg_select! {..}` (os/mod.rs)
+                     (let [trees (second (fget (fget (second (fget it :kind)) :args) :tokens))]
+                       (if-let [[_ b e] (first (filter #(holds? (first %)) ((if (= "cfg_if" (macro-name it)) if-arms select-arms) trees)))]
+                         (splice-selects (fget (parse-text (blank-outside text (at b) (at e))) :items) text)
+                         [])))
+                     (let [k (fget it :kind)] (and (seq? k) (= 'Mod (first k)) (seq? (nth k 3)) (= 'Loaded (first (nth k 3)))))
+                     (let [k (fget it :kind) mk (nth k 3)
+                           mk (apply list (first mk) (splice-selects (second mk) text) (drop 2 mk))
+                           k (apply list (concat (take 3 k) [mk] (drop 4 k)))]
+                       [(apply list (first it) (mapcat (fn [[x v]] [x (if (= x :kind) k v)]) (partition 2 (rest it))))])
+                     :else [it]))
+                 items))))
+
+(defn parse-file
+  "A file of core read by the native reader: its items, edition 2024 (core's); round 54: its item-level cfg_select!s
+  replaced by their arms that hold (splice-selects)"
+  [^String f]
+  (let [text (slurp f)
+        c (parse-text text)
+        items (fget c :items)]
+    (if (or (str/includes? text "cfg_select!") (str/includes? text "cfg_if!"))
+      (apply list (first c) (mapcat (fn [[x v]] [x (if (= x :items) (splice-selects v text) v)]) (partition 2 (rest c))))
+      c)))
 
 (defn- attr-path-name [a]
   (let [k (fget a :kind)]
@@ -69,12 +172,22 @@
                     (when (= 'Eq (head args)) (str (fget (second (fget (fget args :expr) :kind)) :symbol))))))
         attrs))
 
+(defn crate-cfg
+  "The cfg of the crate being built: core's (core-cfg), std's with the features the distributed std is built with
+  (round 54: library/sysroot's default `std/backtrace` and `std/panic-unwind`; backtrace's `cfg(feature = \"std\")` is
+  std's feature names, none of them `std`)"
+  []
+  (if (= *crate* "std") (assoc core-cfg "feature" #{"backtrace" "panic-unwind"}) core-cfg))
+
+(defn prelude-crate "The crate whose prelude a module of the crate being built reads: std's own for std, else core's" []
+  (if (= *crate* "std") "std" "core"))
+
 (defn- cfg-on?
   "Whether an item's cfg attributes hold for core's build (its cfg_attr ones are the expansion's)"
   [it]
   (let [attrs (vec (remove #(= "cfg_attr" (attr-path-name %)) (fget it :attrs)))
         it (apply list (first it) (mapcat (fn [[k v]] [k (if (= k :attrs) attrs v)]) (partition 2 (rest it))))]
-    (binding [ex/*cfg-names* core-cfg] (some? (ex/cfg-item it)))))
+    (binding [ex/*cfg-names* (crate-cfg)] (some? (ex/cfg-item it)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The module tree (rustc_expand/src/module.rs: mod_dir_path, default_submod_path)
@@ -98,6 +211,11 @@
                       (walk p file dir (second mk) (if pa (str (or inline-dir dir) "/" pa) sub-dir))
                       (walk p file dir (second mk) sub-dir))
                     (let [base (or inline-dir dir)
+                          ;; round 54: an outline module's #[path] is relative to the directory of the file that declares
+                          ;; it (module.rs' mod_file_path_from_attr: the file's directory, not its module's): backtrace's
+                          ;; gimli.rs `#[path = "gimli/mmap_unix.rs"] mod mmap;`, core's io_slice.rs `#[path =
+                          ;; "io_slice/repr_iovec.rs"] mod repr;`: std's alone until core's check is rerun
+                          base (if (and pa (nil? inline-dir) (= *crate* "std")) (.getParent (File. ^String file)) base)
                           f (cond pa (str base "/" pa)
                                   (.exists (File. (str base "/" nm ".rs"))) (str base "/" nm ".rs")
                                   :else (str base "/" nm "/mod.rs"))
@@ -117,7 +235,7 @@
 ;; core's macro_rules! from its sources
 
 (defn rel-path "A file of the copy of library/ as rustc's remapped path names it" [^String file]
-  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
+  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|std|backtrace|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
 
 (defn- foreign-spans
   "A macro definition's tokens with their spans written as places in FILE ((span FILE l1 c1 l2 c2 0)): the expansion
@@ -234,6 +352,9 @@
                                                 (when (< n (count ps)) (into (vec (drop-last n ps)) (drop n segs))))
                                       ;; core's own path (core's `use core::..`), and alloc's (RIND9 (a): an extern crate's)
                                       ("core") (vec segs)
+                                      ;; round 54: std's dependency alloc, by its name and its root's alias (`pub(crate) use
+                                      ;; alloc_crate::io::{IoHandle, SpecReadByte, ..}`, io/mod.rs)
+                                      ("alloc" "alloc_crate") (when (= *crate* "std") (into ["alloc"] r))
                                       ;; RFP52 (a): a uniform path's first name an item of the module (`use
                                       ;; unicode_data::alphabetic::lookup as Alphabetic`): core names no other crate
                                       (when (and f (re-matches #"[A-Za-z_][A-Za-z0-9_]*" f)) (into (vec (str/split m #"::")) segs)))))
@@ -250,6 +371,13 @@
                                                (when (and target (not= "self" (last segs)) (> (count target) 1))
                                                  (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :reexports (fnil conj []) [nm (str/join "::" target)])))))
                                       Nested (doseq [x (fget kk :items)] (tree (if (= 'tuple (head x)) (second x) x) segs))
+                                      ;; round 54 (RIND9 (a), std): a glob re-export (sys/pal/mod.rs' `pub use self::unix::*;`,
+                                      ;; sys/fd's, sys/fs's), its module's names copied by with-core-names; std's alone (core's
+                                      ;; and alloc's index as before, their private modules' globs left to std's names)
+                                      Glob (when (= *crate* "std")
+                                             (when-let [target (abs segs)]
+                                               (when (> (count target) 1)
+                                                 (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :globs (fnil conj []) (str/join "::" target)))))))
                                       nil)))]
                           (tree (second k) []))
                     nil))))]
@@ -274,18 +402,24 @@
               (let [e (get m p {:kind kind :children []})
                     have (set (map (juxt :ns :name) (:children e)))]
                 (assoc m p (update e :children into (remove #(have [(:ns %) (:name %)]) children)))))
-        m (reduce (fn [m [p {:keys [kind children]}]] (add m p kind children)) std-names names)]
-    ;; two rounds: a re-export of a re-export
-    (reduce (fn [m _]
-              (reduce (fn [m [p {:keys [reexports]}]]
-                        (reduce (fn [m [nm target]]
-                                  (let [i (.lastIndexOf ^String target "::")
-                                        parent (subs target 0 i) tn (subs target (+ i 2))
-                                        defs (filter #(= tn (:name %)) (:children (get m parent)))]
-                                    (if (seq defs) (add m p "Mod" (mapv #(assoc % :name nm) defs)) m)))
-                                m reexports))
-                      m names))
-            m [1 2])))
+        m (reduce (fn [m [p {:keys [kind children]}]] (add m p kind children)) std-names names)
+        reexport (fn [m]
+                   (reduce (fn [m [p {:keys [reexports]}]]
+                             (reduce (fn [m [nm target]]
+                                       (let [i (.lastIndexOf ^String target "::")
+                                             parent (subs target 0 i) tn (subs target (+ i 2))
+                                             defs (filter #(= tn (:name %)) (:children (get m parent)))]
+                                         (if (seq defs) (add m p "Mod" (mapv #(assoc % :name nm) defs)) m)))
+                                     m reexports))
+                           m names))
+        ;; round 54: a glob re-export's module's names, under the module's own (add keeps the module's own first)
+        glob (fn [m]
+               (reduce (fn [m [p {:keys [globs]}]]
+                         (reduce (fn [m target] (if-let [e (get m target)] (add m p "Mod" (:children e)) m)) m globs))
+                       m names))
+        globs? (some :globs (vals names))]
+    ;; two rounds: a re-export of a re-export (with globs, three rounds of both: sys::fs's `pub use unix::*` of a re-export)
+    (reduce (fn [m _] (cond-> (reexport m) globs? glob)) m (if globs? [1 2 3] [1 2]))))
 
 (defn with-adt-names
   "RF20: the names with core's structs as their modules' children where missing: the type and its constructor
@@ -657,8 +791,10 @@
         rel-file (rel-path file)
         out (atom [])]
     (try
-      (binding [ex/*cfg-names* core-cfg ex/*virtual* (atom nil) ex/*prelude-crate* "core" ex/*def-order* (atom 0)
-                resolve/*crate-path* path collect/*root-crate-override* "core"]
+      ;; round 54 (RIND9 (a), std): std's modules take std's own prelude (lib.rs' `#[prelude_import] use
+      ;; prelude::rust_2024::*;`, std-names' std::prelude), core's and alloc's core's; std's features its cfg's (crate-cfg)
+      (binding [ex/*cfg-names* (crate-cfg) ex/*virtual* (atom nil) ex/*prelude-crate* (prelude-crate) ex/*def-order* (atom 0)
+                resolve/*crate-path* path collect/*root-crate-override* (prelude-crate)]
         (let [mc (atom {}) sites (atom {})
               crate (stage stages :expand
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
@@ -833,7 +969,7 @@
     (if (str/starts-with? body "\n") (subs body 1) body)))
 
 (defn -main [lib-dir & args]
-  (binding [ex/*cfg-names* core-cfg]
+  (binding [ex/*cfg-names* (crate-cfg)]
     (case (first args)
       ;; RF19: --attrs FRONT-DIR CACHE-DIR MODULES-FILE OUT FILE...: the interface pass over FILEs (core's index from CACHE-DIR,
       ;; made by a core-check run), each function's attributes after expansion into OUT, {def-path [names]} (mono's

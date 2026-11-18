@@ -186,6 +186,30 @@
     ["negative: From<T> for Box<T> has no (other ..) clause"
      #(boolean (some (fn [c] (= 'other (first c))) (get-in % [:impls "alloc::boxed::convert::{impl#0}" :predicates]))) false]]})
 
+(def ^:private std-module-cases
+  "round 54 (RIND9 (a), std): the causes fixed on std's modules passed alone, fact by fact on the native facts"
+  {"std::panic"
+   [["an elided object lifetime of a trait bounding Self by 'static: `&'a (dyn Any + Send)`'s object 'static"
+     #(get-in % [:adts "std::panic::PanicHookInfo" :variants 0 :fields 0 1])
+     '(ref "'a" false (dyn (trait "core::any::Any" []) [] ["core::marker::Send"] "'static"))]
+    ["the same behind an elided reference in an output: payload's '^#0 and 'static"
+     #(get-in % [:fns "std::panic::{impl#0}::payload" :output])
+     '(ref "'^#0" false (dyn (trait "core::any::Any" []) [] ["core::marker::Send"] "'static"))]
+    ["negative: `Box<dyn Any + Send>` keeps 'static by its own default (no reference)"
+     #(boolean (str/includes? (pr-str (get-in % [:fns "std::panic::resume_unwind" :inputs])) "\"'_\"")) false]]
+   "std::sync::nonpoison::mutex"
+   [["Fn sugar's output elided by its one input lifetime: `F: FnOnce(&mut T) -> &mut U`'s Output '^#0"
+     #(last (get-in % [:fns "std::sync::nonpoison::mutex::{impl#17}::map" :predicates]))
+     '(proj "core::ops::function::FnOnce::Output" [(param 3 "F") (tuple [(ref "'^#0" true (param 1 "T"))])] (ref "'^#0" true (param 2 "U")))]
+    ["negative: no erased '_ left in map's clauses"
+     #(boolean (str/includes? (pr-str (get-in % [:fns "std::sync::nonpoison::mutex::{impl#17}::map" :predicates])) "'_")) false]]
+   "std::ffi::os_str"
+   [["the extern prelude's alloc: `impl Join<&OsStr> for [S]` names alloc::slice::Join"
+     #(second (get-in % [:impls "std::ffi::os_str::{impl#53}" :trait])) "alloc::slice::Join"]]
+   "std::io::stdio"
+   [["the root's alias alloc_crate in the index: io's `pub(crate) use alloc_crate::io::SpecReadByte`"
+     #(second (get-in % [:impls "std::io::stdio::{impl#9}" :trait])) "alloc::io::util::SpecReadByte"]]})
+
 (defn -main [lib & [front cache & files]]
   (let [bad (atom 0)
         check (fn [what ok] (println (if ok "ok  " "FAIL") what) (when-not ok (swap! bad inc)))]
@@ -297,6 +321,32 @@
                  (= [] (binding [collect/*self-ty* st] (ir [[:adt "core::option::Option" [st]]]))))
           (check "negative: the self type written out (`&'a str`, another object) counts its region"
                  (= [ra r1] (binding [collect/*self-ty* st] (ir [[:ref ra false [:prim "str"]] [:ref r1 false [:prim "str"]]])))))
+        ;; round 54 (RIND9 (a), std): the module tree and the index read the items a cfg_select! or a cfg_if! declares, the
+        ;; arm that holds for the build's cfg, at their own places
+        (let [pt #'cc/parse-text sp #'cc/splice-selects
+              fg (fn [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+              nm (fn [it] (let [k (fg it :kind)] (case (first k) Mod (second (nth k 2)) Fn (second (fg (second k) :ident)) (str (first k)))))
+              sel (fn [text] (sp (fg (pt text) :items) text))
+              t1 "cfg_select! {\n    windows => { mod w; }\n    unix => {\n        mod u;\n        pub fn f() {}\n    }\n    _ => { mod z; }\n}\n"]
+          (check "cfg_select!: the first arm that holds (unix), its items" (= ["u" "f"] (mapv nm (sel t1))))
+          (check "cfg_select!'s arm read at its own places: `pub fn f` on line 5" (= 5 (first (fg (second (sel t1)) :span))))
+          (check "cfg_select!: `_` when no other arm holds" (= ["z"] (mapv nm (sel "cfg_select! { windows => { mod w; } _ => { mod z; } }"))))
+          (check "negative: `#[cfg(doc)] cfg_select! {..}` declares nothing"
+                 (= [] (mapv nm (sel "#[cfg(doc)]\ncfg_select! { unix => { mod u; } }"))))
+          (check "cfg_if!: `if #[cfg(miri)] .. else if #[cfg(unix)] ..` the unix arm"
+                 (= ["u"] (mapv nm (sel "cfg_if::cfg_if! { if #[cfg(miri)] { mod m; } else if #[cfg(unix)] { mod u; } else { mod n; } }"))))
+          (check "cfg_if!: the else arm"
+                 (= ["n"] (mapv nm (sel "cfg_if::cfg_if! { if #[cfg(miri)] { mod m; } else { mod n; } }"))))
+          (check "an inline module's cfg_select! too"
+                 (= ["g"] (let [[a] (sel "mod a { cfg_select! { unix => { fn g() {} } } }")] (mapv nm (second (nth (fg a :kind) 3))))))
+          (check "negative: another macro call stays" (= ["MacCall"] (mapv nm (sel "foo! { unix => { mod u; } }")))))
+        (check "std's cfg: the features backtrace and panic-unwind; core's none"
+               (and (= #{"backtrace" "panic-unwind"} (get (binding [cc/*crate* "std"] (cc/crate-cfg)) "feature"))
+                    (nil? (get (binding [cc/*crate* "core"] (cc/crate-cfg)) "feature"))))
+        (check "std's modules read std's prelude, alloc's and core's core's"
+               (= ["std" "core" "core"] (mapv #(binding [cc/*crate* %] (cc/prelude-crate)) ["std" "alloc" "core"])))
+        (check "std's root aliases alloc as alloc_crate; negative: alloc's root none"
+               (and (= {"alloc_crate" "alloc"} (get resolve/root-extern-aliases "std")) (nil? (get resolve/root-extern-aliases "alloc"))))
         ;; the helper's shape written and read back
         (let [facts {:fns {"alloc::f" {:generics ['(type "T")] :parent-count 0 :has-self false :predicates [] :inputs [] :output '(param 0 "T")
                                        :variadic false :safety "Safe" :abi "\"Rust\"" :const false :promotable false :nounwind false :native true}}
@@ -311,22 +361,23 @@
                                                             (ac/crate-facts {:fns {"alloc::f" (ac/strip (get-in facts [:fns "alloc::f"]))} :adts (:adts facts)} "alloc")))))
       ;; one module's pass against the helper's facts of that module; round 52: FILES' earlier modules passed before it as its
       ;; context (vec/drain.rs after vec/mod.rs: its siblings' ADTs' generics), only the last one compared
-      (let [mods (binding [cc/*crate* "alloc"] (cc/module-files lib))
+      (let [crate (or (System/getenv "IFACE_CRATE") "alloc")
+            mods (binding [cc/*crate* crate] (cc/module-files lib))
             ms (vec (for [file files] (some #(when (= (.getCanonicalPath (File. ^String file)) (:file %)) %) mods)))
             m (peek ms)
-            setup (binding [cc/*crate* "alloc"] (ac/crate-setup "alloc" front cache mods))
+            setup (binding [cc/*crate* crate] (ac/crate-setup crate front cache mods))
             mps (map :path mods)
-            native (binding [cc/*crate* "alloc"] (ac/pass "alloc" lib setup ms mps 1))
-            facts (ac/facts-of-modules (ac/crate-facts native "alloc") mps [(:path m)])
+            native (binding [cc/*crate* crate] (ac/pass crate lib setup ms mps 1))
+            facts (ac/facts-of-modules (ac/crate-facts native crate) mps [(:path m)])
             helper (ac/facts-of-modules (:helper setup) mps [(:path m)])
             cmp (ac/compare-facts helper facts)
             ctl (ac/control helper facts (:helper setup))]
-        (doseq [l (ac/summary-lines cmp)] (println l))
+        (doseq [l (binding [ac/*tag* (str crate "-iface")] (ac/summary-lines cmp))] (println l))
         ;; RIND9 (a): the module's own cases, on the native facts alone
-        (doseq [[what f expected] (get module-cases (:path m))]
+        (doseq [[what f expected] (get (merge module-cases std-module-cases) (:path m))]
           (let [v (f facts)] (check (str what (when (not= v expected) (str ": " (pr-str v)))) (= v expected))))
-        (spit (str (System/getenv "TMPDIR") "/alloc-iface-" (str/replace (:path m) "::" "-") ".report") (ac/report-text cmp helper facts))
-        (check (str "no alloc fact read from the helper's interface: " (count (:fns (ac/crate-facts (:si setup) "alloc")))) (empty? (:fns (ac/crate-facts (:si setup) "alloc"))))
+        (spit (str (System/getenv "TMPDIR") "/" crate "-iface-" (str/replace (:path m) "::" "-") ".report") (ac/report-text cmp helper facts))
+        (check (str "no " crate " fact read from the helper's interface: " (count (:fns (ac/crate-facts (:si setup) crate)))) (empty? (:fns (ac/crate-facts (:si setup) crate))))
         (check (str "the control: " (pr-str ctl)) (and ctl (nth ctl 2)))))
-    (println (str "alloc-iface units: " (if (zero? @bad) "passed" (str @bad " failed"))))
+    (println (str (or (System/getenv "IFACE_CRATE") "alloc") "-iface units: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))

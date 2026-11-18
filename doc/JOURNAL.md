@@ -11499,6 +11499,53 @@ The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.
 - core's native facts may move (Self in impl headers, const-parameter ADT arguments, array lengths naming constants, derives
   over projections): the day runs core-essential, rind-test, core's check and the whole alloc pass.
 
+## 2026-11-18: RIND9 (a): alloc's compare over the rest of the crate's modules (branch `n-rust-alloc5`, from `n-rust-alloc4` `527925a75`)
+
+- alloc's index rebuilt in the fresh worktree, then each of alloc's module files not yet in `test/rust/front/alloc-iface-units.txt`
+  (rust-src 1.99.1's library/alloc: fmt, sync, intrinsics, macros, lib; btree's mod, mem, merge_iter, dedup_sorted_iter, fix,
+  remove, split, append, map/entry, set, set/entry; vec's 13 submodules left; vec_deque/mod and its 8 submodules left; io's mod,
+  prelude, cursor, buf_read, copy and its two, buffered's mod, bufwriter, linewriter, linewritershim, bufreader/buffer) passed alone
+  or after its siblings (one process at a time, GOMEMLIMIT 500 MiB, each under 1 GiB) and compared with the helper's std-iface.
+- Causes fixed in arbace/rust/front/: derive's projection bounds written once per type (expand_derive; predicates_of's set of
+  (clause, span), every derived bound carrying the derive's span: merge_iter's Peeked had `I::Item: Clone` twice), and `super`
+  after a leading `super` (resolve's `super-res`, in paths and imports: btree/map/entry.rs' `use super::super::borrow::DormantMutRef`,
+  so VacantEntry and OccupiedEntry are written). The units' negative control takes a one-fact module's other fact from the crate's
+  helper facts.
+- Results: merge_iter 8 to 10 of 10, map::entry 36 to 38 of 38, set 222 of 222 with merge_iter first, every other new module
+  equal; 20 files have no helper fact (crate-private or reexports) and stay out. `alloc-iface-units.txt` 61 lines over 64 files (WIP: its
+  known file not yet re-recorded, the record run cut at line 38 of 61 by a harness restart, every line passing so far); 2 pure cases and the module cases of merge_iter and map::entry added.
+  Decisions RIND9a-16 to RIND9a-18 taken overnight (round 52); doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the
+  rest of the crate's modules".
+- core's native facts may move (a derive's duplicate projection bound gone; `super::super` paths): the day runs core-essential,
+  rind-test, core's check and the whole alloc pass.
+
+## 2026-11-18: RIND9 (a): set::entry, core's check and the whole alloc pass (round 54, branch `n-rust-alloc5`, on `6d68b7d2b`)
+
+- set::entry was 19 of 21 with map::entry passed before it: `CORE_TRACE=1` named OccupiedEntry's and VacantEntry's `inner`
+  unresolved, `map::OccupiedEntry`. set/entry.rs' `use super::{SetValZST, map}` names two of set's own imports, and a module built
+  alone reads its parent through the crate's index, which skipped a `self` import (`use super::map::{self, BTreeMap, Keys}`) and read
+  only the first of leading `super`s. Fixed in core_check's `file-names` (core's build shares it): a `self` import binds its module
+  under its name, each leading `super` goes one module up. alloc's index rebuilt (84 files, 17 macros, 160 modules); set::entry 21
+  of 21, with three module cases (the field through set's imports, VacantEntry written, the negative).
+- core's whole check (`bin/rust-front core-check --records`, 37 modules, 35 min, 2.17 GB) first gave 5,693 equal and 11 refused,
+  five of them array's StackOverflowError (from_fn, try_from_fn, its `{constant#2}`, map, try_map): not this round's cause but
+  n-rust-alloc2's (lower-trait-ref lowering an associated-type bound's bounds into `:clauses`), which trait-bounds-defining then
+  re-entered resolving `T::Residual` in `T: Try<Residual: Residual<V>>`. rustc's probe (PredicateFilter::SelfTraitThatDefines)
+  lowers the trait ref alone: collect's `*trait-ref-only*`. After it: **5,696 equal**, 166 but for the allocations' ids, 6 but for
+  the allocations, 32 differ, **6 refused** (array 91 equal, 0 refused; from_fn and map now built and differing by a user type
+  annotation's path); every other module's line the same in both runs. RF20's last recorded run (2026-11-11) was 5,594 / 161 / 33 / 6.
+- `bin/rust-front core-essential` equals its known file (566 equal) and `bin/rust-front rind-test` passes, before and after the
+  third fix.
+- The whole alloc pass, two rounds now the default: **3,863 of 3,863 helper facts equal**, 0 differ, 0 missing (native extras
+  1,015), the control differing; 14 to 15 min, 2.07 GB peak, before and after the third fix. One round: 3,841 equal, 18 differ,
+  4 missing: the order's differences, every one closed by the second round.
+- `bin/rust-front alloc-iface --units --record` from a passing run with all three fixes: 42 pure cases, 61 module lines (64 files), every line's helper facts equal (3,696 facts summed over the lines, 0 differ, 0 missing), every control differing; `alloc-iface-units-known.txt` re-recorded (609 lines), its earlier 283 lines unchanged. About 95 minutes on a loaded host, each process under 1 GiB.
+- Decisions taken (round 54): RIND9a-15 (a) two rounds the whole pass's default (alternatives a headers round, a dependency order:
+  set aside, the second round already closes every difference at 15 minutes); RIND9a-19 (a) the index's `self` imports and leading
+  `super`s (alternative: set's file as context, set aside: context carries ADTs' generics, not imports); RIND9a-20 (a) the
+  trait ref alone in trait-bounds-defining (alternative: a depth guard, set aside: it hides the cause). doc/rust/FRONTEND-SURVEY.md,
+  "As built: RIND9 (a), alloc's pass: set::entry and the whole crate".
+
 ## 2026-11-17: the Mac's integrated Python line reviewed onto next (branch `n-review-f`, from next `42bf8614b`)
 
 - Merged mac/python-1117-on-next `85a0b5096` (317's merge of 201, 318-321, 329's binary IR, 330's generator chains,
@@ -12461,3 +12508,32 @@ the synthetic corpus in a later slot (not run here). On the main host, stage 0 `
   problems), `bin/records-check` (9 pairs, 0).
 - Rust before: completeness 75.0, without by design 75.0, maturity 95.8, independence 80.0. After: 95.8, 95.8, 100, 80.
   It is 95.8 and not 100, as report 354 projected, because threads.rs is deferred, not a pass.
+
+## 2026-11-18: RIND9 (a): std's interface pass, first results (round 54, branch `n-rust-std`, from `n-rust-alloc5` `1cb0ceeb8` with `mac/n-pins`)
+
+- `bin/rust-front std-iface [FILE...]`, `--list`, `--units [--record]` (bin/lib/repr-rust/core-build.bash): alloc's pass run for std
+  (`arbace.rust.front.alloc-check --crate std`; rust-src 1.99.1's library/std over the linux `sys`, core's cfg, std's features
+  backtrace and panic-unwind), std's facts taken out of the helper's std-iface, compared fact by fact (4,644 helper facts of std).
+- Causes fixed in arbace/rust/front/ (rustc's references in the comments): the module tree and the index read item-level
+  `cfg_select!` and `cfg_if!` arms that hold, re-read at their own places (core_check `splice-selects`; `#[cfg(doc)]` on the call
+  honoured: std 148 -> 230 module files); std's modules take std's prelude; the extern prelude of a library crate holds its
+  dependencies and its root's `extern crate alloc as alloc_crate` (resolve, and the index's re-exports); item-level `include!`;
+  `env!` of std's build variable STD_ENV_ARCH; eager `concat!`/`stringify!` in `include_str!` and `format_args!`; derive's
+  projection walk skipping FnRetTy's `(Ty ..)`; a trait object's elided lifetime 'static when its principal bounds Self by 'static
+  (`&'a (dyn Any + Send)`); Fn sugar's output elided by its one input lifetime (`FnOnce(&mut T) -> &mut U`); std's index takes glob
+  re-exports (`pub use self::unix::*`) and an outline `#[path]` relative to the declaring file (both std's alone).
+- Results: the whole pass, one round, before the later fixes: 4,305 of 4,644 equal (15 min, 2.14 GB). Two rounds with the expansion
+  fixes: 4,468 equal, 48 differ, 128 missing (49 min on a loaded host, 2.19 GB), every module's stages ok. Five modules alone with the
+  next fixes (os_str, stdio, nonpoison::mutex, panic, unix::net::addr): 496 of 503 equal, the rest libc and the order. The whole pass
+  with all fixes was started and stopped unfinished (the hand-back): not verified.
+- Open cause, the largest: std's dependency crates outside the helper's names (libc: `libc::sockaddr`, `c_int`; hashbrown:
+  HashMap's `base`), cascading to most of the missing ADTs (sys::fs, process, net, time). Decision taken (round 54): record it, the
+  next step libc's and hashbrown's names from library/vendor natively (alternative: the helper's names extended, set aside: an answer
+  read from rustc).
+- Verified unchanged: `bin/rust-front core-essential` (566 equal, its known file), `bin/rust-front rind-test` passed, core's whole
+  check `core-check --records` 5,696 / 166 / 32 differ / 6 refused / 6 (the recorded totals), the pure unit cases (42 alloc + 11 new)
+  passed and alloc's module tree 84 files; these ran before the last two fixes (globs, `#[path]`), which are std's alone. Not rerun:
+  alloc's whole pass (3,863) after the trait-object and Fn-sugar fixes, which may move alloc's facts; `std-iface --units` (its known
+  file not recorded). Decisions taken (round 54): std's features as the distributed sysroot's; cfg_if as a builtin (the crate's
+  macro's semantics); globs and `#[path]` gated to std until core's and alloc's checks rerun.
+
