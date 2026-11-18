@@ -1293,7 +1293,7 @@ o2j_run() {
 o2j_run_cpu() {
   local cpu=$1 wall=$2; shift 2
   limited_cpu "$cpu" "$wall" env ARBACE_PATH="$root/jdk/ocaml" TMPDIR="$O2J/tmp" GOMEMLIMIT="${O2J_GOMEMLIMIT:-900MiB}" GOMAXPROCS=1 \
-    "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+    O2J_SRC="$root/arbace/o2j.ae" O2J_RT="$O2J_RT" "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
 }
 
 # the AOT level's limit: TIMEOUT seconds of CPU a program (the wall time of a quiet host, one thread of Go) plus O2J_LOAD_ALLOWANCE (default 20,
@@ -1363,15 +1363,29 @@ cmd_aot_run() {
   exit $st
 }
 
-# o2j_dump ID FLAGS INCS: the program's Lambda (as oi_one dumps it) into .tmp/o6/run/ID/
+# o2j_dump ID FLAGS INCS [ENV]: the program's Lambda (as oi_one dumps it) into .tmp/o6/run/ID/; a test that builds plugins (ENV's @dyn=,
+# header.awk's dynlink mode at the light level, queue 373) as oi_one's: its units typed and their .cmo written by oi_dynlink, the main
+# program's units but the test's own listed in D/dynmains.txt (translated with the program), a refusal the dump's error form
 o2j_dump() {
-  local id=$1 flags=$2 incs=$3
+  local id=$1 flags=$2 incs=$3 env=${4:-}
   local d=$O2J/run/$id src; src=$(test_src "$id")
   rm -rf "$d"; mkdir -p "$d"
   local base; base=$(basename "$id")
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   cp "$src" "$d/"
   local why; why=$(mll_gen "$d" "$base") || { printf '(ocaml/error "%s")\n' "${why#dump: }" > "$d/$u.ae"; return 0; }
+  local dyn="" dynmain="" dyncopy="" kv
+  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;; esac; done
+  if [ -n "$dyn" ]; then
+    if ! why=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy"); then
+      printf '(ocaml/error "%s")\n' "$(echo "${why#dump: }" | tr '\n"\\' '   ' | head -c 200)" > "$d/$u.ae"; return 0
+    fi
+    printf '%s\n' "$why" | sed '/^$/d' > "$d/dynmains.txt"
+    # each plugin a .cmxs too, the native alternative's file (this level's Sys.backend_type is Native: pr4229 loads client.cmxs), the same
+    # Lambda the runtime's loader reads
+    local f; for f in $(find "$d" -name '*.cmo'); do cp "$f" "${f%.cmo}.cmxs"; done
+    return 0
+  fi
   o2j_dump_file "$d" "$base" "$flags" "$incs"
 }
 
@@ -1448,7 +1462,7 @@ cmd_check_aot() {
   [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
   mkdir -p "$O2J/tmp" "$O2J/run"; : > "$O2J/crash.log"
   export -f o2j_dump o2j_dump_file o2j_helpers; export O2J TESTS TESTLIB UNIXLIB OCD
-  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0 }' | xargs -0 -r -n 3 -P 4 bash -c 'o2j_dump "$@"' _
+  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $6, 0 }' | xargs -0 -r -n 4 -P 4 bash -c 'o2j_dump "$@"' _
   # the OCaml helper programs (OC206 (a)): dumped beside their tests, translated with them, run at this level
   selected | awk -F'\t' '$2 == "run" && $6 ~ /@helper=/ { printf "%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $6, 0 }' |
     xargs -0 -r -n 4 bash -c 'o2j_helpers "$1" "$O2J/run/$1" "$2" "$3" "$4" > "$O2J/run/$1/helpers.txt"' _
@@ -1459,7 +1473,10 @@ cmd_check_aot() {
   selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037' | while IFS=$'\037' read -r id kind flags incs args env; do
     local base u d; base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$O2J/run/$id
     if grep -q '^(ocaml/error' "$d/$u.ae"; then continue; fi
-    printf '%s\t%s%s\n' "$d/out" "$(inc_units "$incs" "$d/$u.ae" | sed 's/$/\t/' | tr -d '\n')" "$d/$u.ae" >> "$tl"
+    # (a plugin test's main program units before its own, queue 373; its run reads the program's interface digests)
+    local dm=""; [ -s "$d/dynmains.txt" ] && dm=$(sed 's/$/\t/' "$d/dynmains.txt" | tr -d '\n')
+    case " $env " in *" @dyn="*) env="$env OI_DYNLINK_IMPORTS=$d/dynlink.imports" ;; esac
+    printf '%s\t%s%s%s\n' "$d/out" "$(inc_units "$incs" "$d/$u.ae" | sed 's/$/\t/' | tr -d '\n')" "$dm" "$d/$u.ae" >> "$tl"
     local hn hm hu
     if [ -s "$d/helpers.txt" ]; then
       while read -r hn hm; do

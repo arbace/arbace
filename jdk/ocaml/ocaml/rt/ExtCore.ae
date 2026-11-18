@@ -37,17 +37,66 @@
       (when (instance? Block d) (set! (.-tag (cast Block d)) (Rt/ii t)))
       (Rt/counted d)))
   ;; Dynlink's platform at the AOT levels (OC220 (a), queue 355; oi's ext.go caml_oi_dynlink_units, _global): the program's units as
-  ;; the runner names them, a unit's module block (its class's G) when its class is defined, else None
+  ;; the runner names them, a unit's module block (its class's G) when it is a global (Main/defined: the program's or a plugin's, not hidden; queue
+  ;; 373) and initialised, else None
   (method ^:public ^:static caml_oi_dynlink_units [u]
     (let [n (alength Main/units) a (new Object/1 n)]
       (loop [^int i 0] (when (< i n) (aset a i (Rt/ofUtf8 (aget Main/units i))) (recur (unchecked-inc-int i))))
       (Block. 0 a)))
   (method ^:public ^:static caml_oi_dynlink_global [n]
+    (let [^String s (Rt/utf8 n)]
+      (if (Main/defined s)
+        (let [v (ExtCore/unitG s)]
+          (if (nil? v) Rt/NONE (Block. 0 (new Object/1 [v]))))
+        Rt/NONE)))
+  ;; a unit's module block (its class's G), nil when its class is not defined or not initialised
+  (method ^:static unitG [^String s]
     (try
-      (let [c (Class/forName (java-str "ocaml.u.M_" (Rt/utf8 n)))
-            v (.get (.getField c "G") nil)]
-        (if (nil? v) Rt/NONE (Block. 0 (new Object/1 [v]))))
-      (catch Throwable e Rt/NONE)))
+      (.get (.getField (Class/forName (java-str "ocaml.u.M_" s)) "G") nil)
+      (catch Throwable e nil)))
+  ;; Dynlink's loader at the light level (queue 373; oi's ext.go caml_oi_dynlink_parse, _link, _init, _hide; test/ocaml/dynlink/dynlink.ml's
+  ;; load and run): a plugin's Lambda text translated by o2j when it is read (the runner's Main/loader: arbace.o2j's plugin-unit), its
+  ;; handle the index of its entry in Main/plugins (the unit's name, the units it requires and the globals its code names, the Java
+  ;; forms); linked under dynlink's lock (a global no unit defines Undefined_global, one not initialised Uninitialized_global, else its
+  ;; class defined), initialised on the calling thread, a private load's unit hidden after its run
+  (method ^:static loader [^String verb x]
+    (when (nil? Main/loader) (throw (Rt/failwith (java-str "o2j: dynlink: the runner has no plugin loader"))))
+    (try
+      (.apply Main/loader (new Object/1 [verb x]))
+      (catch Exn e (throw e))
+      (catch Throwable e (throw (Rt/failwith (java-str "o2j: dynlink: " verb ": " (.getMessage e)))))))
+  (method ^:public ^:static caml_oi_dynlink_parse [text]
+    (let [^Object/1 r (cast Object/1 (ExtCore/loader "parse" (Rt/utf8 text)))
+          ^String/1 deps (cast String/1 (aget r 1))
+          n (alength deps)
+          a (new Object/1 n)]
+      (loop [^int i 0] (when (< i n) (aset a i (Rt/ofUtf8 (aget deps i))) (recur (unchecked-inc-int i))))
+      (let [h (.size Main/plugins)]
+        (.add Main/plugins r)
+        (Rt/tuple (new Object/1 [(Long/valueOf (long h)) (Rt/ofUtf8 (cast String (aget r 0))) (Block. 0 a)])))))
+  (method ^:public ^:static caml_oi_dynlink_link [h]
+    (let [^Object/1 r (cast Object/1 (.get Main/plugins (Rt/ii h)))
+          ^String/1 refs (cast String/1 (aget r 2))
+          n (alength refs)]
+      (loop [^int i 0]
+        (if (< i n)
+          (let [^String g (aget refs i)]
+            (cond
+              (not (Main/defined g)) (Block. 0 (new Object/1 [(Block. 0 (new Object/1 [(Rt/ofUtf8 (java-str "compilation unit `" g "'"))]))]))
+              (nil? (ExtCore/unitG g)) (Block. 0 (new Object/1 [(Block. 2 (new Object/1 [(Rt/ofUtf8 g)]))]))
+              :else (recur (unchecked-inc-int i))))
+          (do
+            (aset r 4 (ExtCore/loader "define" r))
+            (Main/linked (cast String (aget r 0)))
+            Rt/NONE)))))
+  (method ^:public ^:static caml_oi_dynlink_init [h]
+    (let [^Object/1 r (cast Object/1 (.get Main/plugins (Rt/ii h)))]
+      (.run (cast Runnable (aget r 4)))
+      Rt/UNIT))
+  (method ^:public ^:static caml_oi_dynlink_hide [h]
+    (let [^Object/1 r (cast Object/1 (.get Main/plugins (Rt/ii h)))]
+      (Main/hide (cast String (aget r 0)))
+      Rt/UNIT))
   (method ^:public ^:static caml_obj_dup [x] (Rt/counted (Rt/dup x)))
   (method ^:public ^:static caml_obj_raw_field [x i] (NInt. (Rt/l (Rt/field x (Rt/ii i)))))
   (method ^:public ^:static caml_obj_set_raw_field [x i v]

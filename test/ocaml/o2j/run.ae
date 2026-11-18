@@ -34,10 +34,39 @@
 (defn- unit-names [fs]
   (->> fs (map #(str/replace (.getName (File. ^String %)) #"\.ae$" "")) (remove #{"M__main"})))
 
+;; Dynlink's plugins at the light level (queue 373; jdk/ocaml's ExtCore caml_oi_dynlink_parse and _link, Main/loader): a plugin's
+;; Lambda text translated by arbace.o2j when Dynlink reads it (the checkout's, O2J_SRC, its externals' table from the runtime's
+;; forms, O2J_RT: loaded at the first plugin), its class defined when Dynlink links it, its initialisation a Runnable
+(def ^:private o2j-loaded (atom false))
+
+(defn- o2j! []
+  (locking o2j-loaded
+    (when-not @o2j-loaded
+      (let [src (System/getenv "O2J_SRC") rt (System/getenv "O2J_RT")]
+        (when-not (and src rt) (throw (ex-info "O2J_SRC and O2J_RT name arbace.o2j and the runtime's forms" {})))
+        (binding [*ns* *ns*] (load-file src))
+        ((resolve 'arbace.o2j/load-externals!) rt))
+      (reset! o2j-loaded true))))
+
+(defn- plugin-loader []
+  (reify java.util.function.Function
+    (apply [_ x]
+      (let [^objects x x verb (aget x 0) arg (aget x 1)]
+        (case verb
+          "parse" (do (o2j!)
+                      (let [{:keys [name deps refs forms]} ((resolve 'arbace.o2j/plugin-unit) arg)]
+                        (object-array [name (into-array String deps) (into-array String refs) forms nil])))
+          "define" (let [^objects e arg]
+                     (binding [*ns* *ns*] (doseq [f (aget e 3)] (eval f)))
+                     (eval (list 'fn [] (list (symbol (str "ocaml.u.M_" (aget e 0)) "init"))))))))))
+
+(defn- set-loader! [] ((eval '(fn [f] (ocaml.rt.Main/setLoader f))) (plugin-loader)))
+
 (defn- single [argv]
   (let [[files [_ & args]] (split-with #(not= "--" %) argv)]
     (when-not
       (try (require 'ocaml.rt)
+           (set-loader!)
            (doseq [f files] (load-file f))
            (eval (list 'ocaml.rt.Main/setUnits (list 'into-array 'String (vec (unit-names files)))))
            true
@@ -50,6 +79,7 @@
 
 (defn- batch [list-file results timeout libdir]
   (require 'ocaml.rt)
+  (set-loader!)
   (let [loaded (atom #{})
         out0 System/out err0 System/err
         ms (* 1000 (Long/parseLong timeout))

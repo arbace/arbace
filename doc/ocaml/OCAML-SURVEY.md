@@ -4202,3 +4202,51 @@ Light, by list (OI_JOBS=6, O2J_JOBS=6). Three of n-ocaml-bd's sized items:
 OCaml: eval 532 / 75 / 33 to 537 / 74 / 29, AOT 434 / 74 / 132 to 436 / 73 / 131, completeness 0.8758 to 0.8786 (meant 0.9271 to
 0.9294). The essential lists are unchanged (oi 59 pass; the light level 57 pass and 1 slow). `own-verdicts --check` 0 differing;
 `bin/reap`, `crops-score --judge --strict`, `records-check` 0 problems.
+
+## As built: queue 373, Dynlink's plugins at the light AOT level (2026-11-18, branch `373-ocaml-dynlink-aot`, from `355-ocaml` `8c4b407fb`)
+
+OC220 (a)'s loader at the light level. `lib-dynlink-pr4229/main` (client.cmxs prints `Abstract 10`, sub/abstract.cmxs raises
+`Module_already_loaded "Abstract"`, exit 2) and `lib-dynlink-domains/main` (20 plugins loaded from 12 domains) pass at the light AOT
+level by their own verdicts; `lib-dynlink-init-info/test` still passes.
+
+- **header.awk.** The dynlink mode at the light level too (`aot != 2`): the same `@dyn=`, `@dynmain=`, `@dyncopy=`. The compiled level
+  keeps the class `include dynlink`.
+- **bin/oi.** `o2j_dump` takes the row's environment: a plugin test's units typed and their .cmo written by `oi_dynlink`, as at oi's
+  level, the main program's units but the test's own in `D/dynmains.txt`, translated by o2j with the program (after the libraries'
+  units, before the test's own). Each plugin is written as a .cmxs too, the same file: this level's `Sys.backend_type` is `Native`,
+  so pr4229 loads `client.cmxs`, as the test's native alternative builds it. The run gets `OI_DYNLINK_IMPORTS` (the main program's
+  interface digests) and every light run `O2J_SRC` and `O2J_RT` (the loader's translator and the runtime's forms).
+- **arbace.o2j.** `plugin-unit`: a plugin's Lambda text read and translated (translate-unit's forms, the package ocaml.u), with its
+  name, its dependencies (the required units, then the globals its code names: oi's `caml_oi_dynlink_parse`) and those globals in
+  the order the code names them (oi's ParseUnit, the link's checks). `read-dump` now reads through `dump-of`.
+- **The runtime** (jdk/ocaml/ocaml/rt). `caml_oi_dynlink_parse`, `_link`, `_init` and `_hide` in ExtCore, oi's ext.go's at the
+  light level. `Main/loader` is the runner's Function: "parse" translates the text when Dynlink reads the file; "define" evaluates
+  the forms when Dynlink links the unit, and its value is the unit's init as a Runnable. A plugin's handle is its entry in
+  `Main/plugins`. Link checks each global: one that is not a global (`Main/defined`: the program's units, `Main/units`, or a
+  plugin's, not hidden) is `Undefined_global "compilation unit `X'"`, one whose class's G is not set is `Uninitialized_global`; then
+  the class is defined. Init runs the Runnable on the calling thread. Hide makes a private load's unit no global (Symtable's
+  hide_additions). `caml_oi_dynlink_global` now answers by `Main/defined` too, and `Main/reset` clears the plugins (the batch
+  runner).
+- **test/ocaml/o2j/run.ae.** The loader (`plugin-loader`, a `reify` of java.util.function.Function), set by both modes. The
+  checkout's arbace.o2j is loaded at the first plugin (O2J_SRC, its externals' table from O2J_RT), under a lock. A plugin's forms
+  are evaluated with `*ns*` bound, so a domain's thread can define them.
+- **The negative control** `_control/pr4229-vs-domains` (check-aot-native.edn): pr4229's run judged against domains' own verdict
+  differs.
+
+**Results (light; OI_JOBS=2, O2J_JOBS=2).**
+- `bin/oi check --aot --record --only-list` on the five `:dynlink-decided` rows and the control pair (asmcomp/compare,
+  evaluation_order): 5 pass (pr4229 and domains newly, init-info, the pair), 2 in the class; the oi column the same on all five.
+  CPU-bound wall seconds: pr4229 38, domains 54, init-info 32 (the library's load included). check-aot-native.edn's two rows moved.
+- The controls `_control/compare-vs-evaluation-order` and `_control/pr4229-vs-domains` differ.
+- The light level's essential list (`bin/oi check --aot --only-list test/ocaml/essential-check.txt`, the batch runner with the
+  loader set): 57 pass, 1 slow, no row changed.
+- `bin/oi own-verdicts --check`: 0 differ. `bin/reap --record` and `bin/crops-score --record`, then `bin/reap` and
+  `crops-score --judge --strict`: 0 problems. `bin/records-check`: 0 problems.
+- OCaml AOT went from 436 / 73 / 131 to 438 / 73 / 129. Completeness went from 0.8786 to 0.8794, and meant from 0.9294 to 0.9303.
+- `bin/oi divergences --aot` still fails on 331's pins, which are not attested (expected; 355's finding 1).
+
+**Left.** lib-dynlink-bytecode/main (ocamlmklib, the plugins' C stubs, `.cma`, `loadfile_private`, Marshal's closures of plugin code;
+the light level has no C) and backtrace/backtrace_dynlink (native only, `Dynlink.Native.run` frames: OC217's fifth stage), both
+`:dynlink-decided`. The compiled level: no dynlink library yet (the shard's registry, OC220 (a)'s compiled half). At the light level
+`Dynlink.is_native` is false and `adapt_filename` is the identity (the platform is oi's) while `Sys.backend_type` is `Native`; no
+row of the corpora sees the difference.
