@@ -5279,6 +5279,39 @@ to 1762 / 70 / 2; crops-score's Go completeness 99 (meant 100). `arbace/go/escap
    and the call sites): only `-m=2`'s costs see it; no program of the check needs it. *Recommended: not now.* Taken overnight
    (round 52).
 
+## Since v1: gc's maymorestack hook (2026-11-18, queue 358)
+
+`maymorestack.go`'s action is `run -gcflags=-d=maymorestack=main.mayMoreStack`: gc's prologue of each function it
+compiles with a stack check calls the hook first, and the program counts the calls (128: main and 127 of anotherFunc's).
+It was a known row of the flags' class (`:gc-flags`, "goi's calls have not"). Now `bin/goi check` passes a run action's
+go build flags to goi's run as `GOI_GCFLAGS` (`check_one`), and `arbace.go.run`'s `maymorestack` applies
+`-d=maymorestack=PKG.FN` to the program's main package (the action's `-gcflags` without a pattern) before the check: a
+call of FN first in every declared function and method body but FN's own and those marked `//go:nosplit` (gc's
+prologue has no stack check there), a hook of another package left as before. Not modelled: the calls gc inlines (no
+prologue of their own: no program of the check reaches one), function literals and the generated init. Every other
+flag stays gc's reference's alone. Checked (the VM, stage 0 with the checkout's goi by `ARBACE_PATH`): the program's
+forms (`bin/repr-go read`, linux/amd64) run by `bin/goi run` with the flag, status 0 and no output, as gc's build with
+the flag (TamaGo's go); without it the old panic `mayMoreStack not called` (status 2). The row `:pass`; Go eval
+1762 / 70 / 2 to 1763 / 69 / 2.
+
+## Since v1: gc's converthash (2026-11-18, queue 358, D358-2 (a))
+
+`convert5.go`'s action is `run -gcflags=-d=converthash=qy`: gc's hash for its new float-to-integer conversions matches every
+position, and on amd64 a signed conversion out of range (or of a NaN) is the type's maximum or minimum by the operand's sign
+(AMD64.rules' `Cvt*Fto*` under `ConvertHash`: CVTT's indefinite value XORed by the sign mask), an unsigned one clamps a negative
+operand to 0 and converts the excess of one at or past half the range with the top bit set (ssagen's `floatToUint`), the 8- and
+16-bit types through int32's (the conversion table). goi converted as Go does on the executable's architecture (`Fto*`): a known
+row. Now `arbace.go.run`'s `convert-hash!` sets `arbace.go.build/convert-hash` when the run's `GOI_GCFLAGS` holds
+`-d=converthash=qy` (or `=y`; another hash, a bisection's bit pattern, is left as the default), and `conv-node` makes the back end's
+`SatFto*` nodes (test/goi/gen_nodes.ae; go/arbace/goi/convert.ae's `satFtoI64`, `satFtoI32`, `satFtoU32`, `satFtoU64`). The flag
+applies to every package the run builds (a pattern of `-gcflags` is not read). Checked on the VM: the four functions printed by
+repr/go and built by TamaGo's go in convert5.go's place of each conversion: its output equal to `convert5.out` byte for byte; the
+control, amd64's default conversions modelled the same way, differs (35 lines, the FAILs of the known row). goi on stage 0 with the
+checkout's builder takes the new path (`goi: no factory SatFtoI32`: stage 0's back end predates the nodes); the row itself,
+`convert5.go` of test/goi/check-linux-amd64.edn, waits for an executable built with them (the main host: `bin/goi check --only
+'^convert5\.go$'` passes, then its known line goes and the row is recorded `:pass`). go/arbace/goi and arbace/go/build.ae are
+embedded: gate_key moves.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,

@@ -2741,3 +2741,44 @@ mutants and three hw modules), (4368 + 0.5 x 1158) / 5526 = 0.8952, independence
 the probes (LLS30), lli's 177 a level, the pack's 252 clang modules, verify-llvmtest's 49, 21 unknown mutants of verify-rt-heldout
 (an intrinsic's bundle checks 5, musttail 4, personality 3, others 1 each) and 4 of verify-rt; independence 99 needs about
 350 more cases on an own verdict (lli's 354, Arbace's synth-c23 and C++ samples with expected outputs, would be the one group that size).
+
+## As built: queue 358, the last points (2026-11-18, branch `358-go-llvm` from mac/n-all 9cd2e4a96)
+
+The VM's light tier (stage 0 of next's seed, each process under 3.2 GiB, a watcher killing by PID past it), round 52's day's
+commands run, and two fixes found on the way.
+- **LLS55 (a), LLS56 (a).** `bin/llvmi ir-make rt --mutants` (23 min, 0.77 GB): the 252 modules and 1,750 mutants of the pack,
+  every mutant's text the old pack's but the 21 first lines round 52 named (pr79354.g2.di-retarget.500483 `invalid` to `debug`;
+  15 `unknown: an attachment on the access` to LLParser's type errors, 4 di-retarget/di-drop expectation failures to `debug`,
+  2 constants and a global to LLParser's scalar errors); the manifest's other 13 lines the hw bases' digests, their mutants'
+  IR unchanged. hw/dbg.ll, implicit.ll and unnamed.ll take `; RUN: opt -passes=verify -disable-output %s`. `check verify-rt
+  --only` (9 mutants, the three hw) and `verify-rt-heldout --only` (12): all pass, all by their own verdict, pr79354 fixed, one
+  control failing in each; roundtrip-llvmtest and text-llvmtest on the three hw: pass. Read 3,844 / 1 / 1 to 3,845 / 1 / 0.
+- **RUN lines' arguments.** `own-verdict` takes the plain words after the file (`%lli %s test`, the same on every RUN line) as
+  `:args`, `run-args` writes them to WORK/args.tsv and bin/llvmi's runs pass them (`run_args`): ee.MCJIT.2003-05-07-ArgumentTest
+  passes at eval and AOT by its own verdict (it puts argv[1]; it faulted with no argument, lli too: `:crash-report`, removed).
+  `LLVMI_JUDGE=lli` gives back the old row (the control). No other module has arguments after its file.
+- **AOT's modules that unwind.** bin/llvmi took a built program's package from the shard list's sixth column, which an llvm-eh
+  list (`ID LOWERED.C EXTRA-LIB pN`) has not: no eh shard ever built (`"arbace/progs/": trailing slash`); the last column now.
+  With C++'s lowered runtime (`bin/cppi runtime-build`, then `runtime-ci` at `CPPI_CI_CHUNK=1` for the last 13 units: c++20/tzdb.cc's
+  chunk passed 3.3 GB at 4 a process; peak 2.9 GB), `bin/llvmi check --aot --only` of the 13 (16 min, peak 3.4 GB for the Go build
+  of a shard: the watcher killed library's package compile at 3.3 GB): 9 pass; ctor-throw, uncaught and thread-throw exit 134 with
+  g++'s stderr byte for byte (test/cpp/ref-gxx15.edn), lli adding its stack dump: `:abort-report`, thread-throw's at AOT
+  `:thread-abort-report` (divergences-aot.edn; at eval ci's abort off the main thread still faults, `:cpp-threads`);
+  cpp.runtime.library is test/llvm/aot-heavy.txt's now (its row kept for `LLVMI_AOT_HEAVY=1`). AOT 539 / 10 / 13 to 549 / 12 / 1.
+- **Scores** (bin/crops-score --record): completeness 0.9839 to 0.9888 (98 to 99), meant 0.9936 to 0.9991 (99 to 100), maturity 1,
+  independence 0.9786 to 0.9790 (98): the judge's cases 4,370 own and 1,156 recorded (the 20 mutants, the three hw, ArgumentTest at
+  two levels), 0.8954.
+
+What is left, each a row with its cause: read `:probe-pointer` (cc-s39: an address in opt's message, by design); eval `:cpp-threads`
+(thread-throw: ci's abort off the main thread, C's crop's runtime, deferred); AOT `:personality` (library: its build above the light
+tier, the night's `LLVMI_AOT_HEAVY=1`); by design at eval and AOT: `:long-double` 3 (ci's binary64 long double, CS35), `:ub-refinement`
+2, `:abort-report` 2 (+1 at AOT), `:envp` (ci's empty environment), `:lli-reference` (a module for lli's interpreter's va_list),
+`:datalayout`, `:target-type`.
+
+**Round 2 (D358-5 (a), the user, 2026-11-18).** A cpp corpus module whose lli record and g++ 15's (test/cpp/ref-gxx15.edn) agree on
+status 134 and stdout is judged against g++'s status, stdout and stderr (`arbace.llvm.check/gxx-reference`): lli's signal handler's
+stack dump is not the module's meaning. ctor-throw, uncaught and thread-throw pass at eval and AOT (thread-throw exits 134 at eval
+now, three runs on this tree's lowered runtime: ci's abort off the main thread no longer faults); the control (ctor-throw's run
+against thread-throw's g++ run: same status and stdout, another stderr) fails as it must; `:abort-report`, `:thread-abort-report` and
+`:cpp-threads` removed. Eval 550 / 11 / 1 to 553 / 9 / 0, AOT 549 / 12 / 1 to 552 / 9 / 1; completeness 0.9888 to 0.9915 (99), meant
+0.9991 to 0.9995 (100); the judge stays a recorded one (0.5): independence 0.9790.

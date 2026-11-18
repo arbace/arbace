@@ -1,4 +1,5 @@
 ; unnamed values: LLParser numbers an instruction written without `%N =` and a block written without a label
+; RUN: opt -passes=verify -disable-output %s
 source_filename = "unnamed.ll"
 define i32 @u(i32) {
   add i32 %0, 1
