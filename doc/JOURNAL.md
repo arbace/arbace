@@ -11772,3 +11772,14 @@ on mac holds none, rightly). Taken (round 54): `all_pins` keeps the pins whose l
 only packs. Alternatives: moving asm's pins out of `records/` (touches repr-asm's writer and its records for a tooling bug of
 oracle-records), or recording packs for them (there is no pack: the record is the committed file). `bin/oracle-records pins` exit 0
 (controls ok); `bin/gate --pins`: ok. Nothing heavy run.
+
+## 2026-11-18: the rustc pin's review fixes (n-pins)
+
+Review of this morning's branches, `bin/lib/repr-rust/rustc-pin.bash` and `test/gate/steps.edn`. (1) `rustc_pin_at` checked only the
+`rustc 1.99.1 (58cf8f9c3 ` prefix, which Alpine's later 1.99.1 rebuilds share: it now also requires the pinned driver library
+`librustc_driver-<RUSTC_VERSION's driver>.so` in the rustc's own sysroot (`--print sysroot`), for the tree and the PATH fallback; the
+host `:rustc`'s `:file` names that library, no longer a glob. Proof: a fake script printing the 1.99.1 banner first on PATH, with
+ARBACE_RUSTC_HOME a missing directory, gives ARBACE_RUSTC=rustc-not-at-the-pin (absent); the real tree still resolves. (2) `rustc_pin_take`
+checks the marker under the lock and only trusts it when root/usr/bin/rustc exists (proof: marker present, no root, empty apks dir: it
+reaches the apk check and fails, no longer returns 0). (3) `rustc_pin_path` moves the tree's usr/bin to the front of PATH when it is
+already on it elsewhere (proof: PATH=/usr/bin:TREE:/bin gives TREE first, once). `bin/repr-rust pins check` and `bin/gate --pins`: ok.

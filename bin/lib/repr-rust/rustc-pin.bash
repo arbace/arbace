@@ -23,18 +23,21 @@ rustc_pin_mirrors_default="https://dl-cdn.alpinelinux.org/alpine/edge/main/x86_6
 rustc_pin_of() { sed -n "s/^$1 //p" "$root/tools/rsdump/RUSTC_VERSION"; }
 rustc_pin_dir() { echo "${ARBACE_RUSTC_APKS:-$(crop_main)/.tmp/rust-$(rustc_pin_of version)}"; }
 rustc_pin_home() { echo "${ARBACE_RUSTC_HOME:-$(rustc_pin_dir)/root}"; }
-# rustc_pin_at EXE: status 0 when EXE runs and is the pinned build (its version and commit)
+# rustc_pin_at EXE: status 0 when EXE runs and is the pinned build (its version and commit, and the pinned driver library
+# librustc_driver-DRIVER.so in its sysroot's lib/)
 rustc_pin_at() {
-  local v
+  local v s
   v=$("$1" --version 2>"$TMPDIR/rustc-pin.err") || return 1
-  case $v in "rustc $(rustc_pin_of version) ($(rustc_pin_of commit) "*) return 0 ;; *) return 1 ;; esac
+  case $v in "rustc $(rustc_pin_of version) ($(rustc_pin_of commit) "*) ;; *) return 1 ;; esac
+  s=$("$1" --print sysroot 2>"$TMPDIR/rustc-pin.err") || return 1
+  [ -f "$s/lib/librustc_driver-$(rustc_pin_of driver).so" ]
 }
 
 rustc_pin_path() {
   local h p
   h=$(rustc_pin_home)
   if [ -x "$h/usr/bin/rustc" ] && rustc_pin_at "$h/usr/bin/rustc"; then
-    case ":$PATH:" in *":$h/usr/bin:"*) ;; *) PATH=$h/usr/bin:$PATH ;; esac
+    case ":$PATH:" in ":$h/usr/bin:"*) ;; *) PATH=$h/usr/bin:$(printf %s ":$PATH:" | sed "s|:$h/usr/bin:|:|g; s|^:||; s|:\$||") ;; esac
     export PATH ARBACE_RUSTC=$h/usr/bin/rustc
     return 0
   fi
@@ -46,10 +49,10 @@ rustc_pin_take() {
   local d h sha f want
   d=$(rustc_pin_dir); h=$(rustc_pin_home)
   want=$(sha256sum < "$rustc_pin_file" | cut -c1-64)
-  [ "$(cat "$h.extracted" 2>"$TMPDIR/rustc-pin.err")" != "$want" ] || return 0
   mkdir -p "$d"
   (
     flock 9
+    if [ "$(cat "$h.extracted" 2>"$TMPDIR/rustc-pin.err")" = "$want" ] && [ -x "$h/usr/bin/rustc" ]; then exit 0; fi
     while read -r sha f; do
       case $sha in ''|'#'*) continue ;; esac
       [ -f "$d/$f" ] || { echo "rustc pin: no $d/$f (tools/rsdump/rustc-apks.sha256): bin/repr-rust rustc fetch, in the main checkout" >&2; exit 1; }
