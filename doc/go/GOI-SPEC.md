@@ -5279,6 +5279,21 @@ to 1762 / 70 / 2; crops-score's Go completeness 99 (meant 100). `arbace/go/escap
    and the call sites): only `-m=2`'s costs see it; no program of the check needs it. *Recommended: not now.* Taken overnight
    (round 52).
 
+## Since v1: gc's maymorestack hook (2026-11-18, queue 358)
+
+`maymorestack.go`'s action is `run -gcflags=-d=maymorestack=main.mayMoreStack`: gc's prologue of each function it
+compiles with a stack check calls the hook first, and the program counts the calls (128: main and 127 of anotherFunc's).
+It was a known row of the flags' class (`:gc-flags`, "goi's calls have not"). Now `bin/goi check` passes a run action's
+go build flags to goi's run as `GOI_GCFLAGS` (`check_one`), and `arbace.go.run`'s `maymorestack` applies
+`-d=maymorestack=PKG.FN` to the program's main package (the action's `-gcflags` without a pattern) before the check: a
+call of FN first in every declared function and method body but FN's own and those marked `//go:nosplit` (gc's
+prologue has no stack check there), a hook of another package left as before. Not modelled: the calls gc inlines (no
+prologue of their own: no program of the check reaches one), function literals and the generated init. Every other
+flag stays gc's reference's alone. Checked (the VM, stage 0 with the checkout's goi by `ARBACE_PATH`): the program's
+forms (`bin/repr-go read`, linux/amd64) run by `bin/goi run` with the flag, status 0 and no output, as gc's build with
+the flag (TamaGo's go); without it the old panic `mayMoreStack not called` (status 2). The row `:pass`; Go eval
+1762 / 70 / 2 to 1763 / 69 / 2.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,

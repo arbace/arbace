@@ -91,6 +91,43 @@
 
 (declare full-forms? full-lines)
 
+(defn- maymorestack
+  "Package source src with gc's -d=maymorestack=PKG.FN applied (GOI_GCFLAGS, the run action's go
+  build flags, which bin/goi's check passes): gc's prologue of every function it compiles that
+  checks the stack (cmd/compile/internal/ssagen's maymorestack hook, obj's stack-split prologue)
+  calls FN first; goi's equivalent is a call of FN at the start of each declared function and method
+  body of the package gc compiles with the flag, the program's main package (the action's -gcflags
+  without a pattern), but FN itself and those marked //go:nosplit (gc's prologue has no stack check
+  there). FN must be the package's own (a hook of another package is left: the run is unchanged).
+  Not modelled: the calls gc inlines (no prologue of their own), function literals, and the package's
+  generated init."
+  [src]
+  (let [flags (System/getenv "GOI_GCFLAGS")
+        [_ pkg hook] (when flags (re-find #"-d=(?:[^ ]*,)?maymorestack=([^ ,]+)\.([^ ,.]+)" flags))]
+    (if (and hook (or (= pkg (:path src)) (and (= pkg "main") (= "main" (:name src)))))
+      (let [hook-sym (symbol hook)
+            instrument
+            (fn [d]
+              (if (and (seq? d) (#{'go/func 'go/method} (first d)))
+                (let [[head nm & more] d
+                      m (meta nm)]
+                  (if (or (= (name nm) hook) (:go/nosplit m) (:extern m))
+                    d
+                    ;; doc?, :type-params X, the signature (the parameters vector, :results V), then the body
+                    (let [[pre more] (loop [pre [] xs more]
+                                       (cond
+                                         (string? (first xs)) (recur (conj pre (first xs)) (rest xs))
+                                         (= :type-params (first xs)) (recur (into pre (take 2 xs)) (drop 2 xs))
+                                         :else [pre xs]))
+                          sig (first more)
+                          more (rest more)
+                          [res body] (if (= :results (first more)) [(take 2 more) (drop 2 more)] [nil more])
+                          call (with-meta (list hook-sym) {:line (or (:line (meta d)) (:line m) 1)})]
+                      (with-meta (apply list head nm (concat pre [sig] res [call] body)) (meta d)))))
+                d))]
+        (update src :files (fn [fs] (mapv (fn [fi] (update fi :decls #(mapv instrument %))) fs))))
+      src)))
+
 (defn run
   "Runs the program of package file pf (forms root root) with args: its exit status. The
   interpreted packages it imports (a directory test's) are checked, defined and initialized
@@ -100,7 +137,8 @@
   ;; os.Args, and goi's program mode from now on (its warnings at the REPL only)
   (b/op "SetOSArgs" (object-array (cons (str (.getName pf)) args)))
   (let [src (cond-> (load/package-source {:dir root} nil @repl/config pf)
-              (full-forms? root pf) (full-lines true))
+              (full-forms? root pf) (full-lines true)
+              true maymorestack)
         _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
         index (delay (dir-test-index pf))
         srcs (atom {})
