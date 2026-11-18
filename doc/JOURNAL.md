@@ -11464,3 +11464,24 @@ The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.
   taken overnight (round 52); P68 (the next stops) a DECISION. doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P66 (a), P67 (a)".
   Alternatives considered: a depth bound in `generalize` (P67 (b): stops the loop, leaves the four unsolved); leaving T1735 on the
   pack (P66 (b)).
+
+## 2026-11-18: RIND9 (a): alloc's compare across the crate's modules (branch `n-rust-alloc4`, from `n-rust-alloc3` `f4bb84552`)
+
+- alloc's index rebuilt with n-rust-alloc3's expansion, then 32 more modules of alloc (rust-src 1.99.1's library/alloc: task,
+  str, ffi/c_str, linked_list, binary_heap, boxed/iter, boxed/thin, bstr, wtf8, io's error, impls, read, util, cursor, buf_read,
+  buffered's bufreader, bufwriter, linewriter, btree's node, navigate, map, set, vec's into_iter, drain, splice, extract_if,
+  partial_eq, vec_deque's iter, drain, into_iter) passed alone or after the siblings whose ADTs they name (one process each, at
+  most 0.92 GB) and compared fact by fact with the helper's std-iface. Causes fixed in arbace/rust/front/: `Self` in an impl's
+  header and where clause (resolve walked them outside the SelfTyAlias rib: late.rs' resolve_implementation walks them inside),
+  a const parameter as an ADT's argument (core-check's writer), an array length naming a crate constant (collect's evaluation
+  through the constant's expression), derive's projection bounds (generic/mod.rs' find_type_parameters: Splice's
+  `I::Item: Debug`), a constant's `:value` compared only when the helper writes one, and n-rust-alloc3's open cause, Self-typed
+  arguments' regions no elision candidates.
+- Results: c_str 174 to 177 of 177, boxed/iter 46 to 71 of 71, btree/node 27 to 29 of 29, io/read, io/util, bufreader and
+  vec/splice one difference each to none; btree/map 320 of 320 and navigate 13 of 13 with their siblings first; every module
+  equal but btree/set (220 of 222, its merge_iter sibling not passed first). Unit cases 7 pure and six modules more,
+  `alloc-iface-units.txt` 30 lines (a line may name context files), its known file re-recorded from a passing `--units --record`.
+  Decisions RIND9a-11 to RIND9a-14 taken overnight (round 52); RIND9a-15 (the whole pass's order) left to the user;
+  doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the compare across the crate's modules".
+- core's native facts may move (Self in impl headers, const-parameter ADT arguments, array lengths naming constants, derives
+  over projections): the day runs core-essential, rind-test, core's check and the whole alloc pass.

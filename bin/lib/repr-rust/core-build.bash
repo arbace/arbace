@@ -195,7 +195,8 @@ core_attrs() {
 #                                         the unit cases (test/rust/front/alloc_iface_test.ae), light: the pure cases (GOMEMLIMIT
 #                                         500MiB), then each module of test/rust/front/alloc-iface-units.txt passed alone and compared
 #                                         (GOMEMLIMIT 600MiB, one process a module), the summary lines held to
-#                                         test/rust/front/alloc-iface-units-known.txt (--record rewrites it, by hand)
+#                                         test/rust/front/alloc-iface-units-known.txt (--record rewrites it, by hand); a line
+#                                         of several files passes the earlier ones first as context, the last compared
 alloc_modules() {
   local m=$work/alloc/modules.txt
   mkdir -p "$work/alloc"
@@ -222,11 +223,14 @@ alloc_iface() {
       : > "$u/summary.txt"
       while read -r f; do
         case $f in ''|'#'*) continue ;; esac
-        (cd "$root" && GOMEMLIMIT=${ALLOC_UNITS_MODULE_GOMEMLIMIT:-600MiB} arbace_tool -p "$root/test" -m rust.front.alloc-iface-test "$libsrc" "$fd" "$work/alloc" "$libsrc/alloc/src/$f" 2>&1 |
+        # a line's files: its earlier ones passed first as context (round 52: vec/drain.rs after vec/mod.rs), the last compared
+        local fs=() x last
+        for x in $f; do fs+=("$libsrc/alloc/src/$x"); last=$x; done
+        (cd "$root" && GOMEMLIMIT=${ALLOC_UNITS_MODULE_GOMEMLIMIT:-600MiB} arbace_tool -p "$root/test" -m rust.front.alloc-iface-test "$libsrc" "$fd" "$work/alloc" "${fs[@]}" 2>&1 |
            grep -v -E "$filt") > "$u/module.log"
         cat "$u/module.log"
         grep -q '^alloc-iface units: passed' "$u/module.log" || st=1
-        cp "$TMPDIR/alloc-iface-alloc-$(printf '%s' "${f%.rs}" | sed 's|/mod$||; s|/|-|g').report" "$u/" 2>/dev/null || true
+        cp "$TMPDIR/alloc-iface-alloc-$(printf '%s' "${last%.rs}" | sed 's|/mod$||; s|/|-|g').report" "$u/" 2>/dev/null || true
         { echo "# $f"; grep -E '^alloc-iface: (round|fns|adts|traits|impls|consts|total)' "$u/module.log" | sed 's/ ([0-9]* s)$//'; } >> "$u/summary.txt"
       done < "$root/test/rust/front/alloc-iface-units.txt"
       if [ $rec = 1 ]; then

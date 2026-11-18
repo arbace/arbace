@@ -4392,3 +4392,108 @@ attribute on an impl (option.rs, result.rs: their later `{impl#N}` renumbered as
   from a passing run.
 - The whole alloc pass, `bin/rust-front alloc-iface` (about 25 minutes, 2.3 GB), for the crate's counts after the fixes (remove
   `.tmp/rust-front/alloc/index.edn` first: the expansion changed).
+
+## As built: RIND9 (a), alloc's pass: the compare across the crate's modules (2026-11-18, night, branch `n-rust-alloc4`)
+
+alloc's index rebuilt with the new expansion (84 files, 17 macros, 160 modules), then 32 more of alloc's modules passed alone or
+after the siblings whose ADTs they name (one process each, at most 0.92 GB, GOMEMLIMIT 500 MiB, up to four at once), each cause
+the compare showed fixed in the code core's build shares, and n-rust-alloc3's open cause closed:
+
+- `Self` in an impl's header (`impl PartialEq<Cow<'_, Self>> for CStr`, `impl<R> SpecReadByte for BufReader<R> where Self:
+  Read`): resolve walked the generics, the trait ref and the self type outside the SelfTyAlias rib, so `Self` there was an error
+  (the impl not written, the clause dropped); they are now walked under it, as late.rs' resolve_implementation does (with_self_rib
+  around walk_trait_ref, visit_ty(self_type) and visit_generics).
+- A const parameter as an ADT's argument (`BoxedArrayIntoIter<T, N, A>`): core-check's writer had `cparam` only as an array's
+  length, so every impl of the type (eight in boxed/iter.rs) was dropped; it writes `(cparam I N)` among the arguments.
+- An array length naming a constant of the crate (btree's `[MaybeUninit<K>; CAPACITY]`, `CAPACITY = 2 * B - 1`, `[..; 2 * B]`):
+  collect's integer evaluation follows a path to a local constant to its expression (depth 16), so the length is the value
+  rustc's type_of writes, 11 and 12 (LeafNode and InternalNode were not written); parentheses and groups evaluated through.
+- derive's projections (`#[derive(Debug)] struct Splice<'a, I: Iterator + 'a, A ..> { drain: Drain<'a, I::Item, A>, .. }`): the
+  derived impl lacked `I::Item: Debug`; expand_derive now writes generic/mod.rs' find_type_parameters bounds, each field type's
+  path whose first segment is a type parameter (not the parameter alone), bounded by the trait, in the impl's where clause after
+  the item's predicates (impl-bounds keeps the impl's own predicates after the item's).
+- A constant's `:value` (std's interface writes none of its 192 constants; the pass keeps it for its own readers): compared only
+  when the helper's fact has one (io/read.rs' `DEFAULT_BUF_SIZE`, now evaluated through its `cfg_select!` group).
+- (n-rust-alloc3's open cause) an argument of type `Self` in an impl for a reference: lower-ty gives a `Self` the very object
+  `*self-ty*` is, and input-regions skips it, so Self's regions are no elision candidates (resolve's `Self` path has none of its
+  own). No compared fact of alloc shows it; the pure cases do.
+- Tooling: `CORE_TRACE=1` names each impl and ADT native-iface leaves out and why; a line of `alloc-iface-units.txt` may name
+  several files, the earlier passed first as context and the last compared (`--units`, the test's module mode).
+
+### Results (light, one process a pass; equal / differ / missing; "ctx" the siblings passed before it)
+
+| module | facts | before | after | native extras |
+|---|---|---|---|---|
+| `alloc::task` | 22 | 22 / 0 / 0 | 22 / 0 / 0 | 2 |
+| `alloc::str` | 25 | 25 / 0 / 0 | 25 / 0 / 0 | 4 |
+| `alloc::ffi::c_str` | 177 | 174 / 0 / 3 | 177 / 0 / 0 | 3 |
+| `alloc::collections::linked_list` | 181 | 181 / 0 / 0 | 181 / 0 / 0 | 8 |
+| `alloc::collections::binary_heap` | 163 | 163 / 0 / 0 | 163 / 0 / 0 | 10 |
+| `alloc::boxed::iter` | 71 | 46 / 1 / 24 | 71 / 0 / 0 | 6 |
+| `alloc::boxed::thin` | 29 | 29 / 0 / 0 | 29 / 0 / 0 | 14 |
+| `alloc::bstr` | 222 | 222 / 0 / 0 | 222 / 0 / 0 | 2 |
+| `alloc::wtf8` | 59 | 59 / 0 / 0 | 59 / 0 / 0 | 14 |
+| `alloc::io::error` | 4 | 4 / 0 / 0 | 4 / 0 / 0 | 6 |
+| `alloc::io::impls` | 108 | 108 / 0 / 0 | 108 / 0 / 0 | 0 |
+| `alloc::io::read` | 22 | 21 / 1 / 0 | 22 / 0 / 0 | 48 |
+| `alloc::io::util` | 61 | 60 / 1 / 0 | 61 / 0 / 0 | 5 |
+| `alloc::io::cursor` | 33 | 33 / 0 / 0 | 33 / 0 / 0 | 4 |
+| `alloc::io::buf_read` | 9 | 9 / 0 / 0 | 9 / 0 / 0 | 2 |
+| `alloc::io::buffered::bufreader` | 41 | 40 / 1 / 0 | 41 / 0 / 0 | 0 |
+| `alloc::io::buffered::bufwriter` | 41 | 41 / 0 / 0 | 41 / 0 / 0 | 5 |
+| `alloc::io::buffered::linewriter` | 18 | 18 / 0 / 0 | 18 / 0 / 0 | 0 |
+| `alloc::collections::btree::node` | 29 | 27 / 0 / 2 | 29 / 0 / 0 | 195 |
+| `alloc::collections::btree::navigate` (ctx borrow, node) | 13 | alone 5 / 8 / 0 | 13 / 0 / 0 | 74 |
+| `alloc::collections::btree::map` (ctx borrow, node, navigate, search, set_val) | 320 | alone 309 / 9 / 2 | 320 / 0 / 0 | 5 |
+| `alloc::collections::btree::set` (ctx the map's and map) | 222 | alone 219 / 3 / 0 | 220 / 2 / 0 (merge_iter not in ctx) | 1 |
+| `alloc::vec::into_iter` (ctx raw_vec, vec) | 49 | not measured | 49 / 0 / 0 | 4 |
+| `alloc::vec::drain` (ctx) | 24 | not measured | 24 / 0 / 0 | 0 |
+| `alloc::vec::splice` (ctx) | 14 | 13 / 1 / 0 | 14 / 0 / 0 | 0 |
+| `alloc::vec::extract_if` (ctx) | 11 | not measured | 11 / 0 / 0 | 0 |
+| `alloc::vec::partial_eq` (ctx) | 36 | not measured | 36 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque::iter` (ctx raw_vec, vec_deque) | 30 | not measured | 30 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque::drain` (ctx) | 19 | not measured | 19 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque::into_iter` (ctx) | 30 | not measured | 30 / 0 / 0 | 0 |
+| `alloc::ffi` (ffi/mod.rs) | 0 | no fact (reexports): left out | | |
+
+(rc.rs and ffi/c_str.rs rerun after the resolve change: 274 and 177 equal, as before.) Every difference left is a sibling's ADT
+written `Adt<>` when the sibling was not passed first: the whole pass's order (alloc's modules in the index's order: btree's map
+before node, navigate, search) leaves such fields empty in one round; a DECISION below. The unit cases: 7 pure ones more (Self's
+regions with a negative, a const parameter argument with a negative, a constant's :value with a negative) and the module cases of
+ffi::c_str, boxed::iter, btree::node, io::buffered::bufreader, io::util and vec::splice with negatives;
+`alloc-iface-units.txt` 30 lines (20 new, five with context), its known file re-recorded from a passing `--units --record` (40 pure cases, 30 module lines, about 75 minutes, peak 0.97 GB).
+
+core's pass shares every one of these, so its native facts may move toward the helper's: `Self` in impl headers and where
+clauses (core's `impl<T> PartialEq<..Self..>`, `where Self: Sized` on impls; formerly unresolved), impls of ADTs with const
+parameters (core_simd's `Simd<T, N>`, `MaybeEscapedCharacter<N>`, map_windows: formerly every such impl dropped), array lengths
+naming constants (core's `[u8; N_CONST]` fields), derives over projections (`#[derive(Clone, Debug)]` on structs with `I::Item`
+fields: iter adapters' Peekable, Flatten's, MapWindows), consts' `:value` through parentheses, and Self-typed arguments' elision.
+
+### Decisions taken overnight (round 52)
+
+- RIND9a-11 (a) resolve walks an impl's generics, trait ref and self type under the SelfTyAlias rib (late.rs' order inside it
+  kept as Arbace's: generics first): taken. Alternative: rustc's order (trait ref, self type, generics), set aside (no fact
+  separates them; the resolutions are by span).
+- RIND9a-12 (a) an array length naming a crate constant evaluated, a const generic argument naming one left unevaluated (rustc
+  prints an unevaluated anonymous constant there): taken. Alternative: evaluate both, set aside (no helper fact shows a const
+  argument naming a constant).
+- RIND9a-13 (a) a constant's `:value` compared only when the helper writes one: taken. Alternative: drop the native `:value`, set
+  aside (the pass's later modules read it).
+- RIND9a-14 (a) a units line's earlier files are context, only the last compared: taken. Alternative: compare every file of the
+  line, set aside (each context module is compared on a line of its own).
+
+### DECISION (for the user)
+
+- RIND9a-15 the whole pass's order: (a) the default `ALLOC_IFACE_ROUNDS=2` for the whole pass (the second round reads every
+  module's first-round facts; about 50 minutes, 2.3 GB; recommended: simplest, it closes every context difference seen);
+  (b) a first round of ADT and trait headers alone (generics, no bodies), then one full round (cheaper, a new mode);
+  (c) the modules ordered by the ADTs they name (a dependency order computed from the index).
+
+### The day's commands (not run here)
+
+- `rm .tmp/rust-front/alloc/index.edn` is not needed again (this branch's expansion is the index's), but the whole pass is:
+  `bin/rust-front alloc-iface` (about 25 minutes, 2.3 GB, one process) and `ALLOC_IFACE_ROUNDS=2 bin/rust-front alloc-iface`
+  for RIND9a-15.
+- core: `bin/rust-front core-essential` (its known summary may move: Self in impl headers, const-parameter ADT arguments, array
+  lengths) and `bin/rust-front rind-test`; core's whole check over `test/rust/front/core-modules.txt`, its known lines
+  re-recorded from a passing run.
