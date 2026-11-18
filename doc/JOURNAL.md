@@ -12216,6 +12216,7 @@ sources) and its `:why` names the source sets' JDK origin; switch.patch the same
 (CaseFolding Arbace's own from pinned data; cacerts open, the user's). Scores unchanged (59.7; `crops-score --record` writes no
 difference), `--judge --strict` 0 problems; `git apply --check` of the patch passes. No key moves (bin/jrt-convert, test/ are in
 none of gate_key, arbace_javac_key); jrt-convert's and gate-tests' `--full` steps rerun. Every process under 4 GiB; no gate run.
+
 ## 2026-11-18: n-cpp-bd, mac/368 merged; C++'s own-diag rows, fourth pass: 17 more files pass on the own front end (round 54)
 
 Same branch (`n-cpp-bd`, on 02ec7e3b9). First the Mac's fixes of review 365's lows merged, mac/368-cpp-review-lows-tip (cd3671886:
