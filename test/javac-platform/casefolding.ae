@@ -1,0 +1,101 @@
+;; java.base's generated jdk/internal/lang/CaseFolding.java without a JDK (JOP10, doc/classes/JAVA-FRONTEND-SURVEY.md, "Own
+;; platform"; round 54, branch `n-java-indep2`). The JDK build makes it with build.tools.generatecharacter.GenerateCaseFolding
+;; (jdk26u's make/jdk/src/classes/build/tools/generatecharacter/GenerateCaseFolding.java, at baf63fb) run on the build's boot
+;; JDK: its input is jdk26u's CaseFolding.txt (Unicode 17.0.0, src/java.base/share/data/unicodedata), but its regex part keeps
+;; an entry only when the folding does not map back to the original by the running JVM's Character.toUpperCase and
+;; toLowerCase, so the output depends on the boot JDK's Unicode (16.0.0 for JDK 26's boot JDK 25). jdk/'s conversion took the
+;; build tree's copy (jdk/javac/platform-records/, JOP10 (c)); javac's tool on Arbace runs Unicode 17 and keeps 28 entries fewer.
+;; Here the generator's logic is ported and the two case mappings are a UnicodeData.txt's simple mappings (fields 12 and 13,
+;; the identity when empty), as Character.toUpperCase(int) and toLowerCase(int) are documented to be: with UCD 16.0.0's
+;; (test/scheme/ucd.edn's pin, fetched by bin/repr-scheme ucd fetch) the output is the recorded copy byte for byte, so the
+;; record is Arbace's own generation from two pinned data files and the template. Run on the tools' host as
+;;
+;;   EXE test/javac-platform/casefolding.ae TEMPLATE CASEFOLDING-TXT UNICODEDATA-TXT OUT
+;;
+;; (bin/jrt-convert casefolding, which compares OUT with the recorded copy). Data only: nothing of a JDK runs.
+(ns javac.casefolding
+  (:require [arbace.string :as str]))
+
+(defn file-lines
+  "The lines of the file at P as java.nio.file.Files/lines gives them (\\n, \\r\\n or \\r ends a line; no empty last line)."
+  [p]
+  (let [s (slurp p)
+        ls (str/split s #"\r\n|\r|\n" -1)]
+    (if (and (seq ls) (= "" (peek ls))) (pop ls) ls)))
+
+(defn simple-case-maps
+  "UnicodeData.txt's lines LS as {:upper {CP CP'} :lower {CP CP'}}: each code point's simple uppercase (field 12) and lowercase
+  (field 13) mapping where it has one; a range's First/Last lines carry none."
+  [ls]
+  (reduce (fn [m l]
+            (let [f (str/split l #";" -1)
+                  cp (Long/parseLong (nth f 0) 16)
+                  u (nth f 12 "") lo (nth f 13 "")]
+              (cond-> m
+                (not= "" u) (assoc-in [:upper cp] (Long/parseLong u 16))
+                (not= "" lo) (assoc-in [:lower cp] (Long/parseLong lo 16)))))
+          {:upper {} :lower {}} (remove str/blank? ls)))
+
+(defn- supplementary? [cp] (and (>= cp 0x10000) (<= cp 0x10FFFF)))
+
+(defn folding->long
+  "GenerateCaseFolding.foldingToLong: FOLDING [cp m1 m2 ...] (hex strings) as its packed long."
+  [folding]
+  (let [cp (Long/parseLong (first folding) 16)
+        v (Long/parseLong (second folding) 16)]
+    (if (and (not (supplementary? cp)) (not= 2 (count folding)))
+      ;; shift 16, then 32 (then 64, which Java takes mod 64: CaseFolding.txt has at most three mappings)
+      (let [v (loop [v v j 2 shift 16]
+                (if (< j (count folding))
+                  (recur (bit-or v (bit-shift-left (Long/parseLong (nth folding j) 16) (mod shift 64))) (inc j) (* 2 shift))
+                  v))]
+        (bit-or v (bit-shift-left (long (dec (count folding))) 48)))
+      v)))
+
+(defn folding-entries
+  "GenerateCaseFolding.genFoldingEntries: the two arrays' text (ending with a newline)."
+  [foldings]
+  (let [n (count foldings) sb (StringBuilder.)]
+    (.append sb "    private static final int[] CASE_FOLDING_CPS = {\n")
+    (doseq [i (range n)]
+      (when (zero? (mod i 10)) (.append sb "        "))
+      (.append sb (str "0X" (first (nth foldings i))))
+      (when (< i (dec n)) (.append sb ", "))
+      (when (or (= 9 (mod i 10)) (= i (dec n))) (.append sb "\n")))
+    (.append sb "    };\n\n")
+    (.append sb "    private static final long[] CASE_FOLDING_VALUES = {\n")
+    (doseq [i (range n)]
+      (when (zero? (mod i 6)) (.append sb "        "))
+      (.append sb (format "0x%013xL" (folding->long (nth foldings i))))
+      (when (< i (dec n)) (.append sb ", "))
+      (when (or (= 5 (mod i 6)) (= i (dec n))) (.append sb "\n")))
+    (.append sb "    };\n")
+    (str sb)))
+
+(defn generate
+  "The generated file's text: TEMPLATE's lines, CASEFOLDING's lines (CaseFolding.txt) and MAPS (simple-case-maps), as
+  GenerateCaseFolding writes it (each line followed by a newline)."
+  [template casefolding maps]
+  (let [data (remove #(str/starts-with? % "#") casefolding)
+        foldings (for [l data :when (re-matches #"^.*; [CF]; .*$" l)
+                       :let [f (str/split l #"; ")]]
+                   (into [(nth f 0)] (str/split (str/trim (nth f 2)) #" ")))
+        up (:upper maps) lo (:lower maps)
+        expanded (for [l data :when (re-matches #"^.*; [CTS]; .*$" l)
+                       :let [c (str/split l #"; ")
+                             cp1 (Long/parseLong (nth c 0) 16) cp2 (Long/parseLong (nth c 2) 16)]
+                       :when (and (not= cp1 (get up cp2 cp2)) (not= cp1 (get lo cp2 cp2)))]
+                   (format "        entry(0x%s, 0x%s)" (nth c 0) (nth c 2)))
+        t0131 (format "        entry(0x%04x, 0x%04x),\n" 0x0131 0x49)
+        entries (folding-entries (vec foldings))
+        exp (str t0131 (str/join ",\n" expanded))]
+    (apply str (for [l template]
+                 (str (cond (str/includes? l "%%%Entries") entries
+                            (str/includes? l "%%%Expanded_Case_Map_Entries") exp
+                            :else l)
+                      "\n")))))
+
+(defn -main [template casefolding unicodedata out]
+  (spit out (generate (file-lines template) (file-lines casefolding) (simple-case-maps (file-lines unicodedata)))))
+
+(when (seq *command-line-args*) (apply -main *command-line-args*))

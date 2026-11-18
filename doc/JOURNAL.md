@@ -12165,3 +12165,54 @@ taken: the P2552R3 attribute files (a dozen lines each); the constant evaluator'
 constexpr-dynamic*.C: larger work per file); partial8.C's partial specialization after instantiation (needs matching A<int*> to
 A<T*>); redecl5.C and pr90138.C (their declarations do not parse, GCC's recovery); `__has_cpp_attribute(carries_dependency)`'s
 answer (the target's data, not a diagnostic rule).
+
+## 2026-11-18: Java's independence after the platform switch, stage by stage; CaseFolding.java from data (branch `n-java-indep2`, round 54)
+
+From mac/n-all2 `18a667977`. Java is 59.7 (read, eval, AOT, print 0.5; judge 0.986). What still runs a JDK or the frozen JVM at
+check time, or consumes a JDK-made record, verified against the commands (test/gate/steps.edn, bin/java-check, test/java/check.ae,
+bin/jrt-convert, bin/javac-vendor, test/crops/score.ae):
+- **read** (java-read, java-classes, java-diagnostics; all on `:javac-prog :stage0`): no JVM. Consumed: (1) the platform, the JDK
+  build tree's class files (jdk/javac/platform.sha256); (2) each test's source set: `java.check/plan` takes test/java/sources.edn's
+  own row (10 rows) else test/java/ref-jdk26.edn's `:files`, the JDK javac's `-verbose`; (3) the corpus itself is the tests the JDK
+  passes (`plan`'s `(= :pass (:jdk t))`, cells.edn's `:ref`). diagnostics' expectations are the tests' own (`diag-want`, the
+  @compile mode; bin/java-check's check_diag comment and its "(the JDK's N)" message are stale wording, the value is the test's).
+- **eval** (java-check on `:prog`, java-interp): the read's forms; the runtime jdk/ read against the platform (provenance `:jdk`);
+  jdk/'s two recorded inputs (jdk/javac/platform-records/: CaseFolding.java, the boot JDK's GenerateCaseFolding output; cacerts,
+  GenerateCacerts'); jdk/edge.edn and jdk/javac/edge.edn on the frozen JVM (exempt, 2026-11-09).
+- **AOT** (java-compiled on `:gate`, java-compiled-full): eval's inputs through j2g; no JVM.
+- **print** (java-print): the read's forms and the platform (javac on Arbace accepting the printed text).
+- **judge**: own verdicts but the 207 `:stdout` tests (414 cases at interp and compiled) judged by ref-jdk26.edn's stdout (JCV2 (b)).
+- Outside the stages' steps, no score effect: javac-classes runs the JDK's javac live at `--full` (`:jdk`); jrt-convert declares
+  `:frozen :jdk` but its script starts no JVM since JN7 (stale hosts: `bin/gate --audit jrt-convert` proves it); java-fixtures' `:jdk`
+  is bin/clojure-tests' `java -version`; javac-verify and repr-java run the frozen jar (exempt).
+
+**What the switch night removes** (`.tmp/goal/java-platform-night.sh`, then JOP7 (a)'s clean-run commit of test/javac-platform/switch.patch):
+the platform (1) for every stage, jdk/ and jdk/javac/ re-read against it, javac-classes to the oracle tier. **What remains**: (a) the
+source sets: the night does not run `bin/java-check sources --record`, so test/java/sources.edn keeps 10 rows of the build tree's
+platform and `:requires-record` holds read, eval, AOT and print at 0.5. Measured: the patch applied with a `# kind: own` pin line
+(reverted) gives Java 59.7, read "0 of 7844 cases own", not 100; (b) the judge's 207; (c) cacerts; (d) CaseFolding.java (now made
+here); (e) the corpus selection; (f) jrt-convert's stale hosts.
+
+**Work items.** (a) After the night's platform commit: `REPR_JAVA_EXE=<T'> bin/java-check sources --jobs 8 --record` (about 7 min,
+2.7 GiB, 0.33 GB a javac), `sources --check --complete`, then the patch and `bin/crops-score --record`: 59.7 to 99.7; files
+test/java/sources.edn, the night script's step 4 (recommended there, before the commits). (b) JCV2 (c) for the 207 (reviewed golden
+files as test/java/jls/'s, `bin/java-check golden`, control c00004): the user's JCV2 (b) stands, so it waits for the user; 99.7 to 100.
+(c) cacerts by GenerateCacerts on the shipped program (KeyStore since F2): `bin/jrt-convert cacerts`, the tool's forms run as the interp
+level runs a test, byte for byte the record; JOP10 (c)'s Java night. (d) wiring `casefolding` into jrt-convert's generate step for the
+own kind (the record then checked, not read), proven by `bin/jrt-convert verify` (heavy, the Java night). (f) the hosts dropped after
+an audited run.
+
+**Built (light).** JOP10's first half: test/javac-platform/casefolding.ae ports GenerateCaseFolding (jdk26u
+make/jdk/src/classes/build/tools/generatecharacter/GenerateCaseFolding.java at baf63fb) with the running JVM's
+Character.toUpperCase/toLowerCase as a UnicodeData.txt's simple mappings; with UCD 16.0.0 (test/scheme/ucd.edn's pin) its output is
+the recorded copy byte for byte, with jdk26u's Unicode 17 UnicodeData 28 entries fewer (the tool's, JFS43). `bin/jrt-convert
+casefolding [--ucd DIR] [OUT]` checks the pin and compares; test/gate/casefolding-test.bash (11 checks: foldingToLong, the regex
+filter's keep and drop, the layout, the record, the controls: another UnicodeData refused, Unicode 17's file differs by 28); its
+reads added to gate-tests' inputs. Taken (round 54): the verb and the test now, the conversion unchanged (JOP10 (c)'s night wires
+it); alternatives: wiring it now (jrt-convert verify, heavy, unproven tonight), nothing.
+
+**Facts fixed.** independence.edn's Java read `:steps` add java-classes and java-diagnostics (the read cell's classes and diagnostics
+sources) and its `:why` names the source sets' JDK origin; switch.patch the same, its comment on the two records rewritten
+(CaseFolding Arbace's own from pinned data; cacerts open, the user's). Scores unchanged (59.7; `crops-score --record` writes no
+difference), `--judge --strict` 0 problems; `git apply --check` of the patch passes. No key moves (bin/jrt-convert, test/ are in
+none of gate_key, arbace_javac_key); jrt-convert's and gate-tests' `--full` steps rerun. Every process under 4 GiB; no gate run.
