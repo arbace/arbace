@@ -363,6 +363,7 @@
                                             ;; C23 (6.2.7): the same members, of compatible types (self-references cut off);
                                             ;; enumerations: the same constants and values, and a fixed underlying type the same (CS152)
                                             (and (= (map :name (.get ra :members)) (map :name (.get rb :members)))
+                                                 (= (or (.get ra :ident-attrs) #{}) (or (.get rb :ident-attrs) #{}))
                                                  (or (not= ka :enum)
                                                      (and (= (.get ra :consts) (.get rb :consts))
                                                           (= (boolean (.get ra :fixed)) (boolean (.get rb :fixed)))
@@ -948,6 +949,24 @@
       (> v 65535) (do (err! (str "'_BitInt' argument '" v "' is larger than 'BITINT_MAXWIDTH' '65535'")) 32)
       :else v)))
 
+(declare vm-type?)
+
+(def ^:dynamic *uses*
+  "The functions of internal linkage named in the unevaluated operand being checked (sizeof's, typeof's, _Alignof's,
+  _Generic's controlling one), committed as used when its type is variably modified (gcc's in_typeof and pop_maybe_used);
+  nil in an evaluated context." nil)
+
+(defn- note-use! [^String n]
+  (if-let [^ArrayList u *uses*] (.add u n) (.add ^HashSet (cx :used-fns) n)))
+
+(defmacro ^:private unevaluated
+  "Checks `body` (whose value is a result or a type) as an unevaluated operand: its uses committed when `(vm? value)`."
+  [vm? & body]
+  `(let [u# (ArrayList.)
+         v# (binding [*uses* u#] ~@body)]
+     (when (~vm? v#) (doseq [n# u#] (note-use! n#)))
+     v#))
+
 (defn parse-type
   "A type form's type (§5.1); struct, union and enum definitions in it defined where they stand,
   their annotations and their expressions' written."
@@ -1019,8 +1038,8 @@
         complex {:k :complex :of (parse-type a)}
         bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a false)})
         unsigned-bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a true) :u true})
-        typeof (let [r (ex a)] (when (bit-field? r) (err! "'typeof' applied to a bit-field")) (or (:t r) t-invalid))
-        typeof-unqual (let [r (ex a)] (when (bit-field? r) (err! "'typeof_unqual' applied to a bit-field")) (unq (or (:t r) t-invalid)))
+        typeof (let [r (unevaluated (comp vm-type? unq :t) (ex a))] (when (bit-field? r) (err! "'typeof' applied to a bit-field")) (or (:t r) t-invalid))
+        typeof-unqual (let [r (unevaluated (comp vm-type? unq :t) (ex a))] (when (bit-field? r) (err! "'typeof_unqual' applied to a bit-field")) (unq (or (:t r) t-invalid)))
         typeof-type (parse-type a)
         typeof-unqual-type (unq (parse-type a))
         c/id (parse-type (symbol a))
@@ -1093,6 +1112,7 @@
    (case (:k t)
      :array (boolean (or (:vla t) (vm-type? (:of t) depth)))
      :ptr (vm-type? (:to t) depth)
+     :fn (vm-type? (:ret t) depth) ; a function returning a variably modified type (gcc's variably_modified_type_p)
      (:struct :union) (and (< (long depth) 3)
                            (boolean (some #(vm-type? (:t %) (inc (long depth))) (.get ^HashMap (:rec t) :members))))
      false)))
@@ -1153,6 +1173,8 @@
             packed (some #(= "packed" (first %)) as)
             al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)]
         (when al (.put r :min-align al))
+        ;; the attributes that affect the type's identity (gcc's comp_type_attributes: transaction_safe), compared by compatible?
+        (.put r :ident-attrs (set (keep #(when (#{"transaction_safe"} (first %)) (first %)) as)))
         ;; the 244 request: GNU's ms_struct (gcc_struct the default here; of the two the first written wins, gcc ignoring the
         ;; other as incompatible)
         (.put r :ms (= "ms_struct" (some #(#{"ms_struct" "gcc_struct"} (first %)) as)))
@@ -1198,6 +1220,24 @@
       (not neg) t-ulong
       :else t-long)))
 
+(def ^:dynamic *enum-decl*
+  "Whether the enum being checked is a declaration's whole specifiers (`enum e : T;`, where an underlying type may stand
+  without the list)." false)
+
+(defn- empty-decl-specs!
+  "gcc's shadow_tag_warned: the specifiers of an empty declaration of a tag (meta `m`), `fixed` when an enum's underlying
+  type without its list (`extern enum e : int;`)."
+  [m fixed]
+  (when fixed
+    (cond (or (:extern m) (:static m)) (err! "storage class specifier in empty declaration with 'enum' underlying type")
+          (:thread_local m) (err! "'_Thread_local' in empty declaration with 'enum' underlying type")
+          (contains? m :c/alignas) (err! "'alignas' in empty declaration with 'enum' underlying type")))
+  (when (:inline m) (err! "'inline' in empty declaration"))
+  (when (:noreturn m) (err! "'_Noreturn' in empty declaration"))
+  (when (file-scope?)
+    (when (:auto m) (err! "'auto' in file-scope empty declaration"))
+    (when (:register m) (err! "'register' in file-scope empty declaration"))))
+
 (defn- check-enum [f]
   (let [line0 *line*
         args (rest f)
@@ -1210,12 +1250,24 @@
                                    (let [^HashMap now (.get ^HashMap (:tags (top-scope)) tag)]
                                      (and now (not (identical? now pre0)) (= :enum (.get now :kind)) (.get now :complete)))))]
     (tag-attrs! (:c/attrs (meta f)) false)
-    (when (and under (= :bitint (:k (unq under))))
+    ;; C23 6.7.3.3: a struct or union tag of the scope named as an enumeration's (gcc's "wrong kind of tag")
+    (when (and tag pre0 (not= :enum (.get ^HashMap pre0 :kind)))
+      (err! (str "'" tag "' defined as wrong kind of tag")))
+    (cond
+      (and under (:c/underlying-implicit (meta f))) (err! "no 'enum' underlying type specified")
+      (and under (contains? (quals under) :restrict)) (err! "invalid use of 'restrict'")
+      (and under (or (= :bitint (:k (unq under))) (= :enum (:k (unq under))) (not (int-type? (unq under)))))
       (err! "invalid 'enum' underlying type"))
+    ;; C23 6.7.3.3 p8: an enum type specifier without the list only in `enum name : T;`
+    (when (and under (nil? body) (not *enum-decl*))
+      (err! "'enum' underlying type may not be specified here"))
     (if (nil? body)
       (let [^HashMap pre (when (and tag under) (.get ^HashMap (:tags (top-scope)) tag))
             _ (when (and pre (= :enum (.get pre :kind)) (not (.get pre :fixed)))
                 (err! "'enum' declared both with and without fixed underlying type"))
+            _ (when (and pre (= :enum (.get pre :kind)) (.get pre :fixed) (.get pre :under) (int-type? (unq under))
+                         (not (type-eq (.get pre :under) (unq under))))
+                (err! "'enum' underlying type incompatible with previous declaration"))
             ^HashMap r (if tag (tag-ref :enum tag (some? under)) (new-rec :enum nil))]
         (when under (.put r :under (unq under)) (.put r :fixed true))
         {:k :enum :rec r})
@@ -1224,6 +1276,9 @@
                 (err! "'enum' declared both with and without fixed underlying type"))
             _ (when (and here (nil? under) (= :enum (.get here :kind)) (.get here :fixed) (not (.get here :complete)))
                 (err! "'enum' declared with but defined without fixed underlying type"))
+            _ (when (and here under (= :enum (.get here :kind)) (.get here :fixed) (.get here :under) (not (.get here :complete))
+                         (int-type? (unq under)) (not (type-eq (.get here :under) (unq under))))
+                (err! "'enum' underlying type incompatible with previous declaration"))
             nested (and here (= :enum (.get here :kind)) (or (.get here :defining) (.get here :redefining)))
             redef (when (and here (= :enum (.get here :kind)) (.get here :complete) (not nested)) here)
             _ (when (or nested nested-under) (err! (str "nested redefinition of 'enum " tag "'")))
@@ -1247,7 +1302,7 @@
                   rv (when has-vf (exi vf))
                   v (if has-vf (when (integer? (:v rv)) (:v rv)) nxt)
                   _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
-                      (err! (if vf "enumerator value outside the range of the underlying type" "overflow in enumeration values")))
+                      (err! (if vf "enumerator value outside the range of underlying type" "overflow in enumeration values")))
                   ;; C23 6.7.3.3: a redefinition of an enumeration without a fixed type has the first definition's
                   ;; underlying type, and gcc's build_enumerator holds every value of the redefinition to it, an implicit
                   ;; one too (c23-tag-enum-6)
@@ -1642,8 +1697,10 @@
           ;; one when only one is (gcc's composite_type_internal takes each member's composite: char (*)[] and char
           ;; (*)[n] give char (*)[n]; gnu23-tag-composite-3, CS106)
           (or (compatible? ua ub) (compatible-ptr-targets? ua ub))
+          ;; and a member of constant size over one of variable size (char [2] and char [n] give char [2]: gnu23-tag-composite-5)
           (ptr (reduce qual (if (and (record-type? ua) (record-type? ub) (not (identical? (:rec ua) (:rec ub)))
-                                     (vm-type? ub) (not (vm-type? ua)))
+                                     (or (and (vm-type? ub) (not (vm-type? ua)))
+                                         (and (vla-struct? ua) (not (vla-struct? ub)) (not (vm-type? ub)))))
                               ub ua)
                        q))
           :else (do (when-not (cx :permissive) (err! "pointer type mismatch in conditional expression")) (ptr (reduce qual ua q)))))
@@ -1677,6 +1734,7 @@
       (= :enumconst (:kind e)) (do (when (= :enum (:k (:t e))) (feat! :cc-enum-type)) (res (:t e) :v (:v e)))
       (= :typedef (:kind e)) (do (err! (str "unexpected type name '" n "'")) (res t-invalid))
       :else (do (when (some? (:v e)) (feat! :cc-constexpr))
+                (when (and (= :fn (:kind e)) (= :i (:linkage e)) (:file-scope e)) (note-use! n))
                 (when (:attr-mode (:t e)) (feat! :cc-attr-mode))
                 (when (and (= :fn (:kind e)) (lookup (str "__builtin_" n))) (feat! :cc-builtin-types))
                 (res (:t e) :lv (not= :fn (:kind e)) :v (:v e) :entry e)))))
@@ -1806,6 +1864,8 @@
         known (when (and fname (not (#{"__atomic_load" "__atomic_store" "__atomic_exchange"} fname))) (lookup fname))
         bk (when (and fname (nil? known)) (lookup (str "__builtin_" fname)))
         _ (when (and bk (c99?)) (err! (str "implicit declaration of function '" fname "'")))
+        ;; c_parser_postfix_expression's __builtin_c23_va_start: the va_list operand is required (va_start (), c23-stdarg-11)
+        _ (when (and (= fname "__builtin_c23_va_start") (empty? args)) (err! "expected expression before ')' token"))
         rf (if (and fname (nil? known) (not= fname "__func__") (nil? bk))
              (cond
                (or (str/starts-with? fname "__builtin_") (str/starts-with? fname "__sync_") (str/starts-with? fname "__atomic_"))
@@ -1991,7 +2051,7 @@
         type-op (:c/type (meta f))
         ;; a type operand keeps its qualifiers (C2y), an expression's lvalue conversion drops them (DR 481)
         _ (when type-op (pedwarn-c2y! "ISO C does not support use of type name as the controlling operand of '_Generic' before C2Y"))
-        ct (if type-op (parse-type ctl) (let [r (ex ctl)] (unq (decay (unq (:t r))))))
+        ct (if type-op (parse-type ctl) (let [r (unevaluated (constantly false) (ex ctl))] (unq (decay (unq (:t r))))))
         chosen (atom nil)
         default (atom nil)
         rs (doall (for [a assocs]
@@ -2140,6 +2200,8 @@
 
 (declare ex*)
 
+(declare inline-static!)
+
 (defn ex
   "An expression form's result, its annotations written (and recorded, CS95 (a))."
   [f]
@@ -2238,11 +2300,11 @@
                                                (integer? v) (exact-of (java.math.BigDecimal. (biginteger v)) k)
                                                :else nil))))
                                :nfp (or (:nfp r) (float-type? (unq (:t r)))))))
-            sizeof (let [r (ex (first args))]
+            sizeof (let [r (unevaluated (comp var-size? :t) (ex (first args)))]
                      (when (bit-field? r) (err! "'sizeof' applied to a bit-field"))
                      (emit! (if (var-size? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
             sizeof-type (let [t (parse-type (first args))] (emit! (if (var-size? t) (res t-ulong :tt t) (sizeof-res t)))) ; :tt, the builder's (queue 165)
-            alignof (let [r (ex (first args))
+            alignof (let [r (unevaluated (constantly false) (ex (first args)))
                           dal (when (and (:entry r) (or (symbol? (first args)) (and (seq? (first args)) (= 'c/id (first (first args))))))
                                 (:dalign (:entry r)))]
                       (when (bit-field? r) (err! "'_Alignof' applied to a bit-field"))
@@ -2263,6 +2325,7 @@
                                      (first els))
                                r1 (if one (check-init one) (do (check-init (apply list 'init els)) nil))]
                            (when (vla? t) (err! "compound literal has variable size"))
+                           (when (:static (meta f)) (inline-static! "<anonymous>" (if (:constexpr (meta f)) (qual t :const) t)))
                            (when (:constexpr (meta f)) (constexpr-check! t (first els) r1))
                            (emit! (res t :lv true :av (when (and (scalar-type? (unq t)) (= 1 (count els)))
                                                         (let [e (first els)] (cond (integer? e) e (instance? Character e) (long (int (char e))) :else nil))))))
@@ -2431,6 +2494,11 @@
         e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)
            :id (Object.) :file-scope (file-scope?) :name n :dalign (when (pos? dal) dal)}]
     (attr-args! m)
+    (when (and fn? (not param) (or (not (:inline m)) (:extern m)) (or (file-scope?) (:extern m)))
+      (.add ^HashSet (cx :fn-extdef) n))
+    (when (and fn? (not param) (= :i lk) (file-scope?) (not (.containsKey ^HashMap (cx :fn-decl-at) n)))
+      (.put ^HashMap (cx :fn-decl-at) n [(or (:line m) *line*) *unit* *unit-line?* *system-unit* *unit-info* (:inline m)
+                                         (boolean (some #(#{"alias" "weakref" "ifunc"} (first %)) (apply attrs-of m all-attr-keys)))]))
     (binding [*line* (or (:line m) *line*)] (decl-position-attrs! m kind t))
     ;; cc types a library function gcc knows as a builtin by its __builtin_ declaration
     (when (and fn? (not param) (lookup (str "__builtin_" n))) (feat! :cc-builtin-types))
@@ -2441,6 +2509,17 @@
       (let [^ArrayList s (cx :scopes)]
         (when-not (.get ^HashMap (:ord (.get s 1)) n) (file-declare! n e))))
     e))
+
+(defn- inline-static!
+  "C99 6.7.4p3: a modifiable object of static storage (a static local or compound literal, `n` its name) in an inline
+  definition of a function of external linkage: gcc's check_inline_statics pedwarn, given at the unit's end unless a
+  declaration of the function without `inline` or with `extern` made the definition external (check-unit)."
+  [^String n t]
+  (when-let [fname (cx :fn-inline-ext)]
+    (when-not (or (:const (quals t)) (:constexpr (quals t)))
+      (.add ^ArrayList (cx :inline-statics)
+            [*line* *unit* *unit-line?* *system-unit* *unit-info* fname
+             (str "'" n "' is static but declared in inline function '" fname "' which is not static")]))))
 
 (defn- auto-type? [m]
   (or (:c/auto-type m) (and (:auto m) (:c/implicit-int m) (c23?))))
@@ -2554,6 +2633,26 @@
         (when (or (float-type? it) (complex-type? it))
           (err! "'constexpr' integer initializer is not an integer constant expression"))))))
 
+(def ^:dynamic *vm-scope*
+  "The scopes of variably modified identifiers (an object each) that enclose the statement being checked: a goto's label in
+  one its goto is not in is a jump into it (C23 6.8.7.2)." #{})
+
+(def ^:dynamic *decl-vm*
+  "A volatile the declarations of the item (or let bindings) being checked set when they declare a variably modified
+  identifier in a block." nil)
+
+(defn- note-vm-decl! [t]
+  (when (and *decl-vm* (not (file-scope?)) (vm-type? (unq t))) (vreset! *decl-vm* true)))
+
+(defn- check-jumps!
+  "A function body's gotos into the scope of a variably modified identifier (gcc's c_check_switch_jump_warnings' goto twin,
+  check_earlier_gotos / c_release_switch_bindings: an error)."
+  [^HashMap labels ^ArrayList gotos]
+  (doseq [[ln l gs] gotos]
+    (when-let [ls (.get labels l)]
+      (when (some #(not (contains? gs %)) ls)
+        (binding [*line* ln] (err! "jump into scope of identifier with variably modified type"))))))
+
 (defn- check-var
   "(c/var name init?)."
   [f]
@@ -2576,10 +2675,7 @@
             ;; C23: `{}` gives an array of unknown size none (gcc: the zero-size diagnostic), a variable-length array only `{}`
             _ (when (and has-init (not (cx :permissive)) (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))) empty-init)
                 (err! "zero or negative size array"))
-            _ (when (and has-init (or (vla? t)
-                                       ;; not through typeof: the composite type of two structs may not be of variable size
-                                       (and (vla-struct? t)
-                                            (not (some #{'typeof 'typeof-type 'typeof-unqual 'typeof-unqual-type} (tree-seq coll? seq (:tag m))))))
+            _ (when (and has-init (or (vla? t) (vla-struct? t)) ; through typeof the composite type's (cond-type)
                                    (not empty-init))
                 (err! "variable-sized object may not be initialized except with an empty initializer"))
             ;; an array of wide characters is not initialized by a narrow (or u8) string literal
@@ -2599,6 +2695,9 @@
             t (complete-array t (when has-init init))
             ;; the object is in scope in its own initializer (6.2.1)
             e (record! nm (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false))]
+        (note-vm-decl! t)
+        (when (and (:static m) (not (file-scope?)) (not= :fn (:k (unq t))))
+          (inline-static! n (if (:constexpr m) (qual t :const) t)))
         (when has-init
           (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init (let [ut (unq t)]
                                                                                         (when (and (= :array (:k ut)) (let [k (:k (unq (:of ut)))] (or (int-type? (unq (:of ut))) (#{:float :double :ptr :nullptr} k))))
@@ -2651,12 +2750,15 @@
         _ (when (and kr (seq ps) (>= (std-num) 123))
             (binding [*line* (or (:line (meta ps)) *line*)] (pedwarn! "old-style function definition")))
         ;; the result type first: a struct it defines is the enclosing scope's
-        ret (parse-type (or (:tag (meta ps)) 'int))]
+        ret (parse-type (or (:tag (meta ps)) 'int))
+        inline-ext (volatile! nil)]
     (with-scope ;; the parameters' scope (the body's block shares it)
       (let [[named ft] (params-of ps ret)]
         (pop-scope!) ;; the function itself is declared in the enclosing scope
-        (record! nm (declare-object! n ft m :fn nil false))
-        (push-scope!)
+        (let [fe (record! nm (declare-object! n ft m :fn nil false))]
+          (when (file-scope?) (.add ^HashSet (cx :fn-defined) n))
+          (push-scope!)
+          (vreset! inline-ext (when (and (:inline m) (= :x (:linkage fe)) (c99?) (not (#{:gnu89} (cx :std)))) n)))
         ;; CS294 (a): an identifier list's parameter no declaration names defaults to int, an error of gcc's since C99 (a
         ;; permerror of -Wimplicit-int: a warning under -fpermissive, which -w silences; C90 warns only), at the declarator's line;
         ;; CS297 (a): none under -Wno-implicit-int, a warning (not the checker's) under -Wno-error=implicit-int
@@ -2672,8 +2774,11 @@
                        (binding [*cx* (assoc *cx* :annotating (atom false))] (declare-object! pn pt pm :obj nil true))
                        (declare-object! pn pt pm :obj nil true)))))
         (record! ps ft)
-        (binding [*cx* (assoc *cx* :fn-name n :fn-ret (:ret ft))]
-          (check-block-items body))))))
+        (let [labels (HashMap.) gotos (ArrayList.)]
+          (binding [*cx* (assoc *cx* :fn-name n :fn-ret (:ret ft) :fn-inline-ext @inline-ext :labels labels :gotos gotos)
+                    *vm-scope* #{}]
+            (check-block-items body)
+            (check-jumps! labels gotos)))))))
 
 (defn- check-declare [f]
   (let [[_ nm ps] f
@@ -2708,6 +2813,7 @@
       (when (and prev (= :typedef (:kind prev)) (not (type-eq (:t prev) t)))
         (err! (str "conflicting types for '" n "'"))))
     (ann! (str "d " n " n " (tstr t)))
+    (note-vm-decl! t)
     (record! nm (declare! n {:kind :typedef :t t}))))
 
 (defn check-decl
@@ -2720,17 +2826,24 @@
       c/defn (check-defn f)
       c/typedef (check-typedef f)
       (c/struct c/union) (let [[h & args] f] (check-struct (vary-meta (apply list (symbol (name h)) args) merge (meta f)) (keyword (name h))))
-      c/enum (let [[_ & args] f] (check-enum (with-meta (apply list 'enum args) (meta f))))
+      c/enum (let [[_ & args] f]
+               (empty-decl-specs! (meta f) (and (:c/underlying (meta f)) (not-any? vector? args)))
+               (binding [*enum-decl* true] (check-enum (with-meta (apply list 'enum args) (meta f)))))
       c/group (let [[_ tf & ds] f
                     bt (parse-type tf)]
                 (binding [*base* bt] (doseq [d ds] (check-decl d))))
       c/static-assert (let [[_ e] f r (exi e)]
                         (if (and (integer? (:v r)) (zero? (:v r)) (not= :nullptr (:k (unq (:t r)))) (not (cx :exec-charset))) (err! "static assertion failed")))
       c/declare-specs (do (when (:c/bad-specs (meta f)) (err! (bad-specs-msg (meta f))))
+                          ;; `const enum e : long;`
+                          (let [t (second f)
+                                e (when (and (seq? t) (not= 'enum (first t))) (last t))]
+                            (when (and (seq? e) (= 'enum (first e)) (:c/underlying (meta e)) (not-any? vector? (rest e)))
+                              (err! "type qualifier in empty declaration with 'enum' underlying type")))
                           (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
                             ;; `[[...]];` at file scope reads as attribute-only specifiers
                             (attr-decl-check! (cons 'c/attr-decl (:c/decl-attrs (meta f))) nil :top))
-                          (parse-type (second f)))
+                          (binding [*enum-decl* true] (parse-type (second f))))
       c/attr-decl (attr-decl-check! f nil :top)
       c/local-labels nil
       nil)))
@@ -2783,13 +2896,18 @@
             (contains? #{"nodiscard" "noreturn" "_Noreturn"} n) (err! (str "'" n "' attribute can only be applied to declarations other than labels"))))))))
 
 (defn- check-block-items
-  "A statement list; the result of its last expression statement (a statement expression's value)."
+  "A statement list; the result of its last expression statement (a statement expression's value). A declaration of a
+  variably modified identifier among the items opens its scope (*vm-scope*) over the items after it."
   [items]
-  (let [last-r (atom nil)]
+  (let [last-r (atom nil)
+        scope (volatile! *vm-scope*)]
     (doseq [[s nxt] (map vector items (concat (rest items) [nil]))]
       (when (and (seq? s) (= 'c/attr-decl (first s))) (at-line s (attr-decl-check! s nxt :block)))
       (stmt-attrs! s)
-      (reset! last-r (check-stmt s)))
+      (let [v (volatile! false)]
+        (binding [*vm-scope* @scope *decl-vm* v]
+          (reset! last-r (check-stmt s)))
+        (when (and @v (decl-form? s)) (vswap! scope conj (Object.)))))
     @last-r))
 
 (defn- cond-expr [e] (when-not (= e '_) (ex e)))
@@ -2806,7 +2924,10 @@
           let (let [[bv & body] args]
                 ;; CS194 (a): the block a selection statement's declaration made (the converter's :c/sel-decl)
                 (when (:c/sel-decl (meta s)) (pedwarn-c2y! "ISO C does not support if declarations before C2Y"))
-                (with-scope (let-bindings bv) (check-block-items body)))
+                (with-scope (let [v (volatile! false)]
+                              (binding [*decl-vm* v] (let-bindings bv))
+                              (binding [*vm-scope* (if @v (conj *vm-scope* (Object.)) *vm-scope*)]
+                                (check-block-items body)))))
           when (do (ex (first args)) (with-scope (check-block-items (rest args))) nil)
           if (let [[c a b] args] (ex c) (with-scope (check-stmt a)) (with-scope (check-stmt b)) nil)
           cond (do (loop [xs (seq args)]
@@ -2856,7 +2977,9 @@
           (continue break) (do (when (seq args)
                                  (pedwarn-c2y! (str "ISO C does not support '" (name h) "' statement with an identifier operand before C2Y")))
                                nil)
-          (default label goto c/local-labels c/attr-decl) nil
+          label (do (when-let [^HashMap ls (cx :labels)] (.put ls (first args) *vm-scope*)) nil)
+          goto (do (when-let [^ArrayList gs (cx :gotos)] (.add gs [*line* (first args) *vm-scope*])) nil)
+          (default c/local-labels c/attr-decl) nil
           goto* (do (ex (first args)) nil)
           return (when (seq args)
                    (let [r (ex (first args))]
@@ -2942,7 +3065,8 @@
 
 (defn- new-cx [std opts]
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
-   :done-units (HashSet.) :defs (IdentityHashMap.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
+   :done-units (HashSet.) :defs (IdentityHashMap.) :inline-statics (ArrayList.) :fn-extdef (HashSet.)
+   :used-fns (HashSet.) :fn-defined (HashSet.) :fn-decl-at (HashMap.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
    :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts) :sys-dirs (:sys-dirs opts) :base (:base opts)
    :permissive (:permissive opts) :no-implicit-int (:no-implicit-int opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
 
@@ -2950,7 +3074,7 @@
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive no-implicit-int]}]
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive no-implicit-int compile]}]
   (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines :sys-dirs sys-dirs :base base
                                       :permissive permissive :no-implicit-int no-implicit-int :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
                  :units (into {} (for [[k u] (:units rd)] [(str k) u]))
@@ -2962,6 +3086,7 @@
         (doseq [f builtins] (try (check-top f) (catch Exception _ nil))))
       (push-scope!)
       (.clear ^ArrayList (cx :errors))
+      (.clear ^HashMap (cx :fn-decl-at))
       (doseq [f (:forms rd)]
         (let [a (ArrayList.) fs (java.util.TreeSet.)]
           (binding [*cx* (assoc *cx* :annot a :feats fs :annotating (atom (boolean annotate)))
@@ -2969,6 +3094,17 @@
             (check-top f))
           (when (and annotate (seq? f) (:line (meta f)) (not (#{'c/include 'c/define 'c/undef 'c/directive 'c/pragma} (first f))))
             (.add items [(:line (meta f)) (vec a) fs]))))
+      ;; a function of internal linkage used (evaluated) but never defined: gcc's check_global_declaration pedwarn; this and the
+      ;; inline statics' are diagnosed after the parse, by a compilation (`compile`: dg's compile and run tests), not -fsyntax-only
+      (doseq [n (when compile (sort (cx :used-fns)))]
+        (when-let [[ln u ul su ui inl alias] (.get ^HashMap (cx :fn-decl-at) n)]
+          (when-not (or inl alias (.contains ^HashSet (cx :fn-defined) n))
+            (binding [*line* ln *unit* u *unit-line?* ul *system-unit* su *unit-info* ui]
+              (pedwarn! (str "'" n "' used but never defined"))))))
+      ;; C99 6.7.4p3's statics of inline definitions still inline at the unit's end (gcc's check_inline_statics)
+      (doseq [[ln u ul su ui fname msg] (when compile (cx :inline-statics))]
+        (when-not (.contains ^HashSet (cx :fn-extdef) fname)
+          (binding [*line* ln *unit* u *unit-line?* ul *system-unit* su *unit-info* ui] (pedwarn! msg))))
       ;; the lexical pedantic notes (arbace.repr.c.pedantic), errors under -pedantic-errors
       (doseq [[ln msg always] notes]
         (when (or always (not (contains? (or ext-lines #{}) ln))) (.add ^ArrayList (cx :errors) (str ln ": " msg))))

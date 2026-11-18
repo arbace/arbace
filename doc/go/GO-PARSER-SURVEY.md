@@ -2593,3 +2593,20 @@ The user decided GPS49 (c)'s proposals as built:
 - GPS59 (a): GOGC kept at 200; `GOGC=400` the caller's choice.
 - GPS66 (a): no further speed work on the read now.
 - GPS67 (a): batched into the next re-seed.
+
+## As built: GPS43, types2's range and slice checks (2026-11-17)
+
+E1's last two (`fixedbugs/issue50372.go`, `slice3err.go`; goi's deferred class `:no-forms`, round 51's DECISION A (a))
+pass on branch `h-go-noforms`. Of GPS43's ways, neither (b)'s adapter of syntax's tree to the dump's go/ast shape (go/ast
+cannot hold a range clause of three variables, and the converter's and goi's checker's messages for the bad trees would
+have needed their own adapting) nor all of types2 on syntax's tree (a renamed copy of types2 and of the std internals it
+imports, in goi's table, interpreted until a re-seed): the smallest adapter is the driver's, as the go and defer check
+(2026-11-04) was. `go/arbace/repr/go/gcsyntax/errors.ae` (`Revision` 5) ports types2's checks these programs need,
+range.go's `rangeStmt`'s of the iteration variables and index.go's `sliceExpr`'s of the indices (and `index`'s bound),
+over a typing of the file's own syntax (`tchecker`: types2's scopes, a variable's type when its declaration writes one
+of basic types, arrays of a literal length, pointers, slices, maps and channels; every other operand unknown and not
+checked: the driver reports a subset of types2's errors, never one it does not). They run only on a file whose tree has
+a node go/parser rejects (`goParserRejects`), the files without forms; a file goi's checker checks is unchanged. gc's
+errors of both programs byte for byte (5 and 66 lines); a probe of the subset's edges (named types, `:=`, variadic
+parameters, shadowing, function literals, string constants) reports only lines gc reports. GOI-SPEC.md, "Since v1:
+types2's range and slice checks".

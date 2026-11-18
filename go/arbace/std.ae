@@ -1,0 +1,80 @@
+;; The package arbace's std support (GOI-SPEC.md §9.3, "Since v1: weak and unique"): the runtime's
+;; side of std's weak and unique for goi, which interprets the two packages from the digest (their
+;; generic API has no compiled instance for an interpreted type): weak's two runtime pulls are these
+;; functions (go/arbace/gotable.edn's :replace), weak.Pointer's word the runtime's own weak handle
+;; through compiled weak.Pointer[byte] (the runtime's handles are untyped); unique.Make is
+;; UniqueMake, a canonical copy per (static type, value) held weakly, as unique's own map holds it.
+(in-ns 'go.arbace)
+
+(go/file "std.go"
+  :imports [[reflect "reflect"] [runtime "runtime"] [strings "strings"] [sync "sync"] [unsafe "unsafe"] [weak "weak"]])
+
+(go/func WeakRegister
+  "WeakRegister is weak's runtime_registerWeakPointer for goi (doc/go/GOI-SPEC.md, \"Since v1: weak
+and unique\"): the runtime's weak handle of the object p points into, the word of a weak.Pointer.\n"
+  ^unsafe/Pointer [^unsafe/Pointer p]
+  (let [wp (weak/Make (conv (* byte) p))]
+    (deref (conv (* unsafe/Pointer) (conv unsafe/Pointer (addr wp))))))
+
+(go/func WeakStrong
+  "WeakStrong is weak's runtime_makeStrongFromWeak for goi: the pointer weak handle u was made
+from, or nil once its object was reclaimed.\n"
+  ^unsafe/Pointer [^unsafe/Pointer u]
+  (let [wp (lit (weak/Pointer byte))]
+    (set! (deref (conv (* unsafe/Pointer) (conv unsafe/Pointer (addr wp)))) u)
+    (conv unsafe/Pointer (.Value wp))))
+
+(go/type uniqueKey "uniqueKey is a value's key in uniqueMap: its static type and the value.\n"
+  (struct ^{:tag reflect/Type} t ^any v))
+
+(go/var ^{:tag sync/Mutex} uniqueMu)
+(go/var ^{:tag (map uniqueKey (weak/Pointer byte))
+          :doc "uniqueMap holds each canonical value weakly (uniqueMu), as unique's canonMap does.\n"}
+  uniqueMap (make (map uniqueKey (weak/Pointer byte))))
+(go/var ^{:tag uintptr :doc "uniqueZero is every zero-sized value's canonical address, as unique's zero.\n"} uniqueZero)
+
+(go/func uniqueClone
+  "uniqueClone clones the strings of v (a canonical copy, addressable) in place, through structs
+and arrays, so that it shares no memory with the value it was made from (unique's clone).\n"
+  [^{:tag reflect/Value} v]
+  (switch (.Kind v)
+    (case [reflect/String]
+      (let [p (conv (* string) (conv unsafe/Pointer (.UnsafeAddr v)))]
+        (set! (deref p) (strings/Clone (deref p)))))
+    (case [reflect/Struct]
+      (for [i 0] (< i (.NumField v)) (inc! i)
+        (uniqueClone (.Field v i))))
+    (case [reflect/Array]
+      (for [i 0] (< i (.Len v)) (inc! i)
+        (uniqueClone (.Index v i))))))
+
+(go/func uniqueCollected
+  "uniqueCollected is a canonical value's cleanup: its entry removed unless made again since.\n"
+  [^uniqueKey k]
+  (.Lock uniqueMu)
+  (defer (.Unlock uniqueMu))
+  (when [(values wp ok) (aget uniqueMap k)] (and ok (== (.Value wp) nil))
+    (delete uniqueMap k)))
+
+(go/func UniqueMake
+  "UniqueMake is unique.Make for goi (doc/go/GOI-SPEC.md, \"Since v1: weak and unique\"): the
+address of the canonical copy of v as a value of type t (Make's T), one per equal value while
+a handle holds it. It panics as Make does on a value that is not comparable.\n"
+  ^unsafe/Pointer [^{:tag reflect/Type} t ^any v]
+  (when (== (.Size t) 0)
+    (return (conv unsafe/Pointer (addr uniqueZero))))
+  (let [k (lit uniqueKey t v)]
+    (.Lock uniqueMu)
+    (defer (.Unlock uniqueMu))
+    (when [(values wp ok) (aget uniqueMap k)] ok
+      (when [p (.Value wp)] (!= p nil)
+        (return (conv unsafe/Pointer p))))
+    (let [c (reflect/New t)]
+      (if (== v nil)
+        (.Set (.Elem c) (reflect/Zero t))
+        (.Set (.Elem c) (reflect/ValueOf v)))
+      (uniqueClone (.Elem c))
+      (let [p (conv (* byte) (.UnsafePointer c))]
+        (aset uniqueMap k (weak/Make p))
+        (runtime/AddCleanup p uniqueCollected k)
+        (conv unsafe/Pointer p)))))
