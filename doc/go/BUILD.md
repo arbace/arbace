@@ -521,7 +521,12 @@ data, `:java`:
   path (javac's own closure: every file a reached type is declared in), `-verbose` naming the files it
   parsed; a file with an error (a type or a package javac cannot find, or any other error) is removed
   and the compilation run again, so a file naming a removed file fails next (the cascade) until a run
-  has no error; a root that fails is the step's failure. The report is data,
+  has no error; a root that fails is the step's failure. A root names a class's file; a nested class by
+  dots (`p.Outer.Inner`, the file `p/Outer.java`; `p.Outer$Inner` does not resolve). Classes a library
+  loads by computed names (bouncycastle's provider: its `$Mappings` and service classes) are roots twice:
+  to the cut here, and to j2g as native-image metadata, a `reflect-config.json` under
+  `META-INF/native-image/` of a `:resources` directory of the module (A6; the Ghidra case study's G2,
+  its `plan/BC.md`). The report is data,
   `WORK/closure/M/report.edn`: the roots, the rounds, the files kept, each file left out with its round,
   its cause (`:absent` and the name javac could not find, `:left-out` when that name is a file left out
   before, `:other` with javac's message) and the absent names counted. javac's default diagnostics are
