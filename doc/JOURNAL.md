@@ -12263,3 +12263,44 @@ after the update `t05784 pass`, `t08071 pass`, `t08082 pass` (if their serializa
 bytes (by design); of the 18 "cannot extend" and RMI's 13, the rows whose later lines hold (likely t04448 t04905 t05547 t05469 t05241
 t05242 t05244 t05248 t05249 t05250 t08020; at risk t05243 t05252 t05253 t07954 and the SASL seven). The ids join the first pass's
 `.tmp/njd54.txt`.
+
+## 2026-11-18: n-recs, D340-2 (a): the Java world's records regenerated on n-all3 with n-java-defer merged (round 54)
+
+Branch `n-recs` from `mac/n-all3` (2c633380a), `mac/n-java-defer` (67325e847) merged `--no-ff` (the journal's one conflict, both
+sides' appended entries, kept in order). The records of queue report 340's "main host's commands" (DECISION 2 (a)), in order, each
+heavy run under `bin/heavy-lock`:
+
+1. `bin/j2g-edge update`: the first run failed in j2g's collision check: n-java-defer's RMI stubs (overlay/jdk/variants/Util.ae)
+   bring `com.sun.management.GarbageCollectorMXBean` into the program, whose Go names collide with java.lang.management's
+   (`GarbageCollectorMXBean`, `_Cast`, `_InstanceOf`, `_class`, `_invoke`, `_members`, `Is_GarbageCollectorMXBean`). Fixed as F13's
+   two siblings are, a rename in `arbace/j2g/names.ae`: `com/sun/management/GarbageCollectorMXBean` -> `Sun_GarbageCollectorMXBean`.
+   Then it passed (3 min 54 s, peak 8.2 GB; jdk/edge.edn: classes' `:generics` recorded, jdk/javac/edge.edn and the provenance's
+   `:jdk-edge`), and `bin/javac-vendor edge` (1 min 21 s, 8.3 GB) wrote the same.
+2. javac's tool, `bin/javac-vendor tool .tmp/gate-exe/javac-KEY20` (MemAvailable checked at least 52 GiB first): the first build failed
+   in the prepare of its image: c2j refused `arbace/cpp/sema.ae` (h-cpp-consteval's `d36d4e385`, the const-object walk at its line 2513:
+   `recur` of `(and rc ...)` into the primitive boolean local `rc`). Fixed by `(boolean (and rc (not (:mutable fl))))`, the same value.
+   That edit moved javac's key (crops' embedded namespaces are in it since W); the tool was built at `9344f0231bff51fa66d0` (1 h 46 min,
+   peak 29.5 GB for one process), into the shared `.tmp/gate-exe/javac-9344f0231bff51fa66d0`.
+3. `bin/jrt-convert update` on that tool: the first run's read (repr/java's `read-jdk`, javac's tool) was killed by the OOM killer at
+   57.9 GB RSS (no GOMEMLIMIT); jrt-convert went on past the failure and was stopped by PID before its update step (jdk/ untouched).
+   Again with `GOMEMLIMIT=40GiB` and the host otherwise quiet: 16 min 55 s, the read's peak 49.5 GB; 3,372 Java files, 0 failed,
+   0 javac errors; jdk/forms 3,569 -> 3,579 (3,553 equal, 16 different, 10 added, 0 removed); jdk/sources.txt +7 (n-java-defer's closure
+   lines: MalformedParametersException, java.util.prefs' two exceptions, javax.smartcardio's ATR, CommandAPDU and ResponseAPDU,
+   javax.xml.xpath's XPathException). Then `bin/jrt modules` (go/arbace/jrt/module_table.ae: the three new packages); `provides --check`
+   current.
+4. With `REPR_JAVA_STALE_OK=1` (the update's own jdk/ moves javac's key past the tool it ran on; repr/java's reader is the tool's):
+   `bin/javac-vendor convert` (4 min 26 s, 8.7 GB: JIS0213 changed), `bin/clojure-tests --java-fixtures update` (36 s, 2.4 GB) and
+   `bin/java-check --forms update` (56 s, 0.9 GB): their forms unchanged but the provenance's converter and host.
+5. `bin/provenance-check` passes; `bin/j2g-edge verify` passes (1 min 58 s, 7.2 GB).
+
+The forms' diff by kind: (a) the post-increment hoist (723e433a3, t05396) in 12 of the 16 changed files of jdk/forms and in javac's
+JIS0213: `a[i++] = e` and `c = s.charAt(i++)` now bind the old index, increment, then store or read (`(let [i-1 i] (set! i ...) (aset a
+i-1 e))` where it was `(aset a i e) (set! i ...)`), so the right-hand side is evaluated after the increment as the JLS orders it
+(ArrayList, ArrayBlockingQueue, LinkedBlockingQueue, LinkedBlockingDeque, ObjectInputStream, SimpleDateFormat, RMIConnector, sun.nio.cs's
+DoubleByte, EUC_JP, EUC_TW, GB18030, HKSCS), with the gensyms after them renumbered (`old-7` -> `old-8`); nothing else in those files;
+(b) A17's ClassPathResources (D343-3, the package listings); (c) FloatingDecimal's `m > 0L` with `int m` now `(> (long m) 0)`, the
+binary promotion explicit; (d) the load lines: reflect.ae's new MalformedParametersException, sun/management.ae's MemoryManagerImpl and
+NotificationEmitterSupport reordered; (e) the seven added files above.
+
+Keys at the commit: javac's `718502f35f518f4b0873`, gate KEY20 `bcf477225969edde88bc`. No gate, no java-check levels, no jrt-convert
+verify (the update is the proof).
