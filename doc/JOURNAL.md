@@ -11753,3 +11753,22 @@ pinned rustc-dev (18 s, 0.7 GB); `bin/repr-rust test --samples` passed (1 min 14
 run failing on haskell's (`testsuite-core run-tests` 722 recorded, 743 now) and the asm oracle packs (five `obj-*-llvm-mc-23.1.5`
 packs not in `.tmp/oracle-packs`), neither touched here; `bin/gate --full --plan` planned (340 steps, 0.9 GB); test/gate/crops-test.bash
 and test/docs/claude-md-test.bash ok. Nothing heavy run.
+
+## 2026-11-18: `bin/gate --pins` passing again (round 54; branch `n-pins` from mac/n-rind11 `cd98c4d01`)
+
+Two causes, after RIND11 (a)'s rust pin. (1) Haskell's measures (`bin/hsi pins --check` against `test/haskell/eval-corpora.edn`):
+the pinned inputs are unchanged (the testsuite tarball's and GHC's tarball's SHA-256, nofib's tree, `:testsuite`'s files, lines and
+digest all hold); two of Arbace's own commits moved what is measured without re-recording it. `:testsuite-core`'s `:run-tests`
+722 -> 743: 829eb1d4e (HF10-P40) added `unboxedsums` to its `:dirs` (21 run tests; doc/haskell/FRONTEND-SURVEY.md's HF10-P40 already
+says "743 programs planned, 722 before", HASKELL-EVAL-SURVEY.md's "Found beside" too). `:samples`' lines 901 -> 902 and digest
+8833e007... -> 64461fab...: 5376b5ea7 (queue 325, DECISION 6 (a)) changed `test/haskell/eval/samples/LibSystem.hs` (one line more).
+Re-recorded both, taken (round 54): the rule over the same pinned input changed, so the record follows; the alternative, reverting
+either change, would undo reviewed work. (2) The six `test/asm/records/obj-*-llvm-mc-23.1.5.sha256` (five shown by the gate's
+`head -5`, `obj-synthetic` the sixth) are no oracle packs: they are `sha256sum` lines pinning the committed `.edn` records beside them
+(`bin/repr-asm object-record` writes them, `object-check` runs `sha256sum -c`), and `bin/oracle-records`' `all_pins` took every
+`test/*/records/*.sha256` as a pack's pin, so it looked for packs that were never made; nothing to fetch (the mirror `oracle-packs`
+on mac holds none, rightly). Taken (round 54): `all_pins` keeps the pins whose line names `NAME.tar.xz` (the 28 packs' format),
+`file_pins` the others, which `pins` checks by `sha256sum -c` against the committed file (all six hold); `mirror` and `fetch` see
+only packs. Alternatives: moving asm's pins out of `records/` (touches repr-asm's writer and its records for a tooling bug of
+oracle-records), or recording packs for them (there is no pack: the record is the committed file). `bin/oracle-records pins` exit 0
+(controls ok); `bin/gate --pins`: ok. Nothing heavy run.
