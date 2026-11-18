@@ -1926,6 +1926,10 @@
         active (remove (fn [d] (and (not (.get fam (:off d)))
                                     (some (fn [[a b]] (< a (:off d) b)) inactive-ranges)))
                        active)
+        ;; queue 371: a directive among an invocation's arguments is the invocation's (compute-groups!'s spans): printed in its
+        ;; text, or with it left out when the invocation is printed expanded; its family's other lines go with it (below)
+        ^java.util.TreeMap spans (cx :macro-spans)
+        in-span? (fn [^long off] (some (fn [[a v]] (and (<= (long a) off) (< off (long (:to v))))) spans))
         ;; CS275 (a): an executed family's group the main pass skipped, kept as its text (a c/directive of the lines between
         ;; the family's two lines), for a file that includes itself, whose second pass takes it: placed with its family
         active (sort-by :off (concat active
@@ -2017,7 +2021,12 @@
                     (cond (nil? inner) nil
                           (and (has-main? inner) (< off (min-po inner)) (<= (min-po x) off)) inner
                           :else (recur inner))))))]
-      (place-in :top tu-items active))
+      (place-in :top tu-items (remove #(in-span? (:off %)) active))
+      ;; 378 item 2: an executed directive of a span that is not a conditional family's line (#define, #undef, #pragma, ...):
+      ;; kept only when an invocation holding it is printed as its text (judged after the conversion: macro-directives!)
+      (doseq [d active
+              :when (and (not (:inactive d)) (not (.get fam (:off d))) (contains? executed (:off d)) (in-span? (:off d)))]
+        (.add ^ArrayList (cx :span-dirs) (:off d))))
     ;; a conditional family's lines all in one list, else none of them
     (let [drop (HashSet.)]
       (doseq [[id offs] fam-lines]
@@ -2036,9 +2045,62 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The groups of tokens a macro invocation made (§9.4)
 
+(defn- group-text
+  "An invocation's text: its tokens as line-text joins them, but a directive line among its arguments
+  (#if, #else, #endif inside the parentheses) on a line of its own, as the source has it, so the print
+  reads back: the tokens of one directive line, dline's key of a token's offset, kept apart from the
+  others by new-lines."
+  ^String [toks dline]
+  (let [b (StringBuilder.)]
+    (loop [ts (seq toks) first? true prev nil]
+      (when-let [^Tok t (first ts)]
+        (let [k (dline (.-po t))]
+          (cond
+            first? nil
+            (and (not= k prev) (or k prev)) (.append b "\n")
+            (pos? (.length ^String (.-sep t))) (.append b " "))
+          (.append b (.-src t))
+          (recur (next ts) false k))))
+    (utf8-decode (str b))))
+
+(defn- conditionals-closed?
+  "Queue 371: the directive lines among an invocation's tokens (`toks`, dline's keys) make whole conditional families: each
+  #if, #ifdef or #ifndef closed by its #endif inside them, no #elif, #else or #endif of a family begun outside."
+  [toks dline]
+  (loop [ts (seq toks) prev nil depth 0]
+    (if-let [^Tok t (first ts)]
+      (let [k (dline (.-po t))]
+        (if (and k (not= k prev) (= (.-ch t) \#))
+          (let [v (some-> ^Tok (second ts) .-src)
+                depth (case v
+                        ("if" "ifdef" "ifndef") (inc depth)
+                        ("elif" "elifdef" "elifndef" "else") (if (pos? depth) depth -1)
+                        "endif" (dec depth)
+                        depth)]
+            (if (neg? depth) false (recur (next ts) k depth)))
+          (recur (next ts) k depth)))
+      (zero? depth))))
+
+(defn- macro-directives!
+  "378 item 2: refuses the file (:macro-directive) when an executed directive among an invocation's arguments that is not a
+  conditional family's line (place-directives!'s (cx :span-dirs): `#define N 3` inside `f(1` / ... / `)`) lies in no invocation
+  printed as its text (claimed): the expansion printed in its place would leave it out, and moving it before the expansion
+  is not exact (an invocation before it in the same item, printed as its text, would read it). Not ci's read, which prints
+  nothing."
+  []
+  (when-not *include-inside*
+    (let [^java.util.TreeMap spans (cx :macro-spans) ^HashSet claimed (cx :claimed)]
+      (doseq [off (cx :span-dirs)]
+        (when-not (some (fn [[a v]] (and (<= (long a) (long off)) (< (long off) (long (:to v))) (.contains claimed (:seq v)))) spans)
+          (refuse :macro-directive "a directive among a macro invocation's arguments, the invocation printed expanded"))))))
+
 (defn- compute-groups!
   "The invocations' token groups of the main file: (cx :groups) maps a group's first sequence number to
-  {:max last-seq :text invocation-text}."
+  {:max last-seq :text invocation-text}. Queue 371: an invocation whose arguments hold a directive line (#if ... #endif inside
+  the parentheses) has its extent in (cx :macro-spans), from its name's offset to its end, the directives inside it the
+  invocation's (place-directives! leaves them to its text); its text keeps each such line on a line of its own (group-text),
+  and an invocation whose directives do not make whole conditional families (mac-dir-1.c's `f (` / `#if f(1)` / `0))` /
+  `#else` / `1))` / `#endif`, the family ending after the invocation) makes no group: it is printed expanded."
   [all-toks]
   (let [^bytes src (cx :main-bytes)
         n (alength src)
@@ -2052,6 +2114,8 @@
         ;; initializer, whose #define the print does not keep) is printed expanded
         dls (let [m (java.util.TreeMap.)] (doseq [d (directive-lines)] (.put m (Long/valueOf (long (:off d))) (Long/valueOf (long (or (:end d) n))))) m)
         on-directive? (fn [^long po] (when-let [e (.floorEntry ^java.util.TreeMap dls (Long/valueOf po))] (< po (long (.getValue e)))))
+        ;; the directive line a token is on (its offset), nil off one
+        dline (fn [^long po] (when-let [e (.floorEntry ^java.util.TreeMap dls (Long/valueOf po))] (when (< po (long (.getValue e))) (.getKey e))))
         groups (HashMap.)
         ts (vec all-toks)
         cnt (count ts)]
@@ -2092,10 +2156,16 @@
                                                       0 between))
                                          (not-any? #{\#} between))
                           end (if (and (> end2 end) (or (every? #{\)} between) balanced?)) end2 end)]
-                      (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
-                                              ;; the next token's (CS82 (b): a run of groups over a concatenated literal)
-                                              :next (when (< j cnt) (.-seq ^PTok (ts j)))
-                                              :text (line-text (subvec sts si (inc end)))})))))))
+                      (let [toks (subvec sts si (inc end))
+                            ^Tok lt (sts end)
+                            dirs? (some #(dline (.-po ^Tok %)) toks)]
+                        (when dirs?
+                          (.put ^java.util.TreeMap (cx :macro-spans) (Long/valueOf po) {:to (+ (.-po lt) (count (.-src lt))) :seq (.-seq t)}))
+                        (when (or (not dirs?) (conditionals-closed? toks dline))
+                          (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
+                                                  ;; the next token's (CS82 (b): a run of groups over a concatenated literal)
+                                                  :next (when (< j cnt) (.-seq ^PTok (ts j)))
+                                                  :text (group-text toks dline)})))))))))
           (recur j))))
     groups))
 
@@ -2242,6 +2312,8 @@
       (binding [*cx* {:ranges ranges :main-file main-file :main-name main-name :main-bytes main-bytes :std std
                       :pieces parse/strlit-pieces :piece-toks parse/strlit-toks
                       :fn-macros (macro-table (:layer r) main-name) :typedefs (atom {}) :claimed (HashSet.)
+                      ;; queue 371: the main file's extents of the invocations whose arguments hold a directive line (compute-groups!)
+                      :macro-spans (java.util.TreeMap.) :span-dirs (ArrayList.)
                       :unit-of-off unit-of-off :line-starts (line-starts main-bytes) :elems (IdentityHashMap.) :list-items (IdentityHashMap.) :dir-lines (atom nil)
                       ;; CS290 (a): the re-entered copy's pragmas, [seq [text ...]] in seq order (the parser's :pragmas), placed by
                       ;; block-items before the item of the first token after them (ci's read)
@@ -2394,6 +2466,7 @@
                       (doseq [f fs] (.add out f))
                       (when (seq fs) (.add items [(min-po ed) (first fs)]))))
                   (doseq [[off df] (placed-at :top (count main-eds))] (.add out df) (.add items [off df]))
+                  (macro-directives!)
                   {:forms (vec out) :units (into {} units) :items (vec items)})))))))
     (catch arbace.lang.ExceptionInfo e
       (cond

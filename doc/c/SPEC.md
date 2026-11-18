@@ -1044,6 +1044,17 @@ reads the resource.
   first token is the `:lines` print's, `^{:c/asm-text "..."}` on the `c/asm`. A callee named as a
   function-like macro of the main file defined where it stands (a name an expansion hid from the macro)
   is `^{:c/paren true}`, printed `(square)(2)`, which no macro takes.
+- Queue 371 (2026-11-18): an invocation whose arguments hold directive lines (`ARR({1,` / `#ifdef X` /
+  `2,` / `#endif` / `3})`, gcc's directives inside a macro's arguments) keeps each of them on a line of its
+  own in its text, as the source has it (`"ARR({1,\n#ifdef X\n2,\n#endif\n3})"`), so the print reads back;
+  the directives inside it are the invocation's, never placed between items or elements (§9.2), and are
+  left out with it when the invocation is printed expanded. An invocation whose directives do not make
+  whole conditional families (an `#if` inside it whose `#else` or `#endif` comes after it) is printed
+  expanded. Queue 378 (item 2): an executed directive inside such an invocation that is not a conditional
+  family's line (`#define`, `#undef`, `#pragma`) and that no invocation printed as its text holds refuses the
+  file (`:macro-directive`; its known class `:converter-gap`): the expansion would leave it out, and moving it
+  before the expansion is not exact (an invocation before it in the item, printed as its text, would read it).
+  ci's read keeps it.
 - An invocation **inside** a node (`#define BEGIN {`, `#define ARGS a, b`), or nested so that its
   expansion is part of a node, is `:full`'s only: `:lines` prints the expansion (N6).
 - The macros of a header (`EOF`, `errno`, `assert`, `va_arg`) are recovered the same way; `errno` is
