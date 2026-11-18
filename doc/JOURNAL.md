@@ -10679,3 +10679,7 @@ unchanged), the Go by `go test` in a small module, forms by read-jdk --check --n
 Taken overnight: the logic in Java with Go's events, the 20 ms period, the notifier hidden, the action and causes, a missed cycle not
 notified, the sender handed over by the derivation (alternatives in the survey). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md,
 "As built: n-java-thresh".
+
+## 2026-11-18: n-java-thresh, a correction
+
+The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-thresh").
