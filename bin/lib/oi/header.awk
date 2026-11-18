@@ -95,9 +95,10 @@ END {
   # main program, its last unit the test's own, libraries "" or "dynlink", then one run (exit_status the own verdict's), the native
   # alternative (native-dynlink, setup-ocamlopt.*) ending it. The run's environment: @dyn=DIR/FILE,... the units in order (bin/oi's
   # oi_dynlink types each .ml into Lambda and writes its .cmo, a plugin oi's Dynlink loads), @dynmain=DIR/UNIT,... the main program's,
-  # @dyncopy=FILE,... the readonly files and subdirectories. Anything else: the class (include dynlink)
+  # @dyncopy=FILE,... the readonly files and subdirectories. Anything else: the class (include dynlink). The light AOT level too (queue
+  # 373: the same units, the main program's translated by o2j, a plugin by its runtime's loader when Dynlink reads it); not the compiled level
   dlmode = 0
-  if (aot == 0 && hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
+  if (aot != 2 && hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
   # (a plugin test's readonly .ml files are its units, not helper programs)
   if (dlmode) helper = 0
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""

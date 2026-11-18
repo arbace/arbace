@@ -28,18 +28,22 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; the dump
 
+(defn- dump-of
+  "The dump of form x (SRC names it in errors): {:module :name :size :required :code}."
+  [x src]
+  (when-not (and (seq? x) (= 'ocaml/lambda (first x)))
+    (throw (ex-info (str "not a Lambda dump: " src) {:head (when (seq? x) (first x))})))
+  (let [[_ module size required code] (second x)
+        [h n] code
+        nm (when (and (= 'prim h) (str/starts-with? n "setglobal ")) (subs n 10))]
+    (when-not nm (throw (ex-info "the unit's code is not a setglobal" {:file (str src)})))
+    {:module module :size size :required required :code code
+     :name (str/replace (str/replace nm #"!$" "") #"/.*$" "")}))
+
 (defn read-dump
   "A Lambda dump: {:module :name :size :required :code}."
   [^File f]
-  (let [x (with-open [r (PushbackReader. (io/reader f))] (read r))]
-    (when-not (and (seq? x) (= 'ocaml/lambda (first x)))
-      (throw (ex-info (str "not a Lambda dump: " f) {:head (when (seq? x) (first x))})))
-    (let [[_ module size required code] (second x)
-          [h n] code
-          nm (when (and (= 'prim h) (str/starts-with? n "setglobal ")) (subs n 10))]
-      (when-not nm (throw (ex-info "the unit's code is not a setglobal" {:file (str f)})))
-      {:module module :size size :required required :code code
-       :name (str/replace (str/replace nm #"!$" "") #"/.*$" "")})))
+  (dump-of (with-open [r (PushbackReader. (io/reader f))] (read r)) f))
 
 (defn- node-body
   "A node's fields: the form less its head and a trailing metadata map."
@@ -811,6 +815,27 @@
                     (vector? x) (run! walk x)))]
       (walk (:code u)))
     (vec (sort (disj (into @acc (:required u)) (:name u))))))
+
+(defn plugin-unit
+  "A plugin's unit (Dynlink's loader at the light level, queue 373: jdk/ocaml's caml_oi_dynlink_parse through test/ocaml/o2j/run.ae)
+  from its Lambda dump's TEXT: {:name :deps :refs :forms}, deps the units it requires and then the globals its code names (the
+  implementation imports, as oi's caml_oi_dynlink_parse gives them), refs those globals in the order the code names them (oi's
+  ParseUnit, its link's checks), forms its class's Java forms (translate-unit's, the package ocaml.u)."
+  [^String text]
+  (let [u (dump-of (read-string text) "a plugin")
+        refs (volatile! [])
+        seen (volatile! #{(:name u)})]
+    (letfn [(walk [x]
+              (cond (seq? x) (do (when (and (= 'prim (first x)) (string? (second x)) (str/starts-with? (second x) "global "))
+                                   (let [g (global-name (subs (second x) 7))]
+                                     (when-not (or (predefs g) (@seen g)) (vswap! seen conj g) (vswap! refs conj g))))
+                                 (run! walk x))
+                    (vector? x) (run! walk x)))]
+      (walk (:code u)))
+    (let [deps (distinct (remove #{(:name u)} (concat (:required u) @refs)))
+          ;; (an external the runtime lacks throws Rt/missing when it is called, as a program's unit's does)
+          [forms _] (translate-unit u)]
+      {:name (:name u) :deps (vec deps) :refs @refs :forms forms})))
 
 (defn link
   "The library units programs' units need, in lib-order; deps: unit -> the units it needs. FORCED: library units the program
