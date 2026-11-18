@@ -284,7 +284,7 @@ echo "== hsi check: $(wc -l < "$plan") programs, $jobs at a time" >&2
 
 # HFS-I1 (a): the native front end's STG of the programs it can take (--front native), before the runs
 front_why=""
-front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own modules (HF10-P24 (a)) on the libraries' imports alone, no C, no foreign stubs
+front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own modules (HF10-P24 (a)) on the libraries' imports alone, no Cmm or assembly
   # queue 325: a refusal names its reason in front_why (CATEGORY DETAIL: kind, no-main, c, defer, pragma, local, import),
   # which the run's line of the program carries as :why (the rest named: what keeps it on GHC's STG)
   local src=$1 main=$2 flags=$3 kind=$4 ifs=$5 m f hit
@@ -297,7 +297,7 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own mod
   # which the front end does not apply, as GHC's -O0 does for a rule of the module's own, tcrun022)
   # (queue 352, 346-2 (a): a program's own C, its .c files and a .o whose .c is beside it (the run builds that .c), with -optc
   # flags, goes through the front end as the pack's program does: its C made by bin/hsi cnodes; Cmm, assembly and a .o alone
-  # are still refused, and a foreign stub's program below)
+  # are still refused; queue 364: a program whose modules need foreign stubs is taken too, its stubs the front end's)
   if [ "$flags" != - ]; then for f in $flags; do case $f in
     *.o) [ -f "$src/${f%.o}.c" ] || { front_why="c $f"; return 1; } ;;
     *.cmm|*.s|*.S) front_why="c $f"; return 1 ;;
@@ -325,13 +325,13 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own mod
     txt=$src/$cur
     case $cur in *.lhs) txt=$TMPDIR/hsi-front-unbird.$BASHPID; sed 's/^>[ \t]*//' "$src/$cur" > "$txt" ;; esac
     # (HF10-P63 (a), round 52: a CPP module, its LANGUAGE CPP or OPTIONS' -cpp/-XCPP, is taken: the front end preprocesses it)
-    # (queue 352, 346-2 (a) refused a foreign import "dynamic" as "wrapper"; queue 364: typecheck.ae desugars it as dsFCall
-    # does, a call of the FunPtr's address, ffi021 and T2276)
-    hit=$(grep -oE 'foreign +export|"wrapper"|foreign +import +capi|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$txt" | head -1) || true
+    # (queue 352, 346-2 (a) refused a foreign import "dynamic" as "wrapper"; queue 364 (report 346's item 5): typecheck.ae
+    # desugars "dynamic" and capi imports as GHC does and writes their stubs (GHC's text byte for byte), which the run
+    # takes (one() below); a foreign export and a "wrapper" import are still refused)
+    hit=$(grep -oE 'foreign +export|"wrapper"|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$txt" | head -1) || true
     if [ -n "$hit" ]; then
       case $hit in
         foreign*export) front_why="pragma foreign export" ;; *wrapper*) front_why="pragma foreign import wrapper" ;;
-        foreign*capi) front_why="pragma foreign import capi" ;;
         *defer*) front_why="defer pragma" ;; *RULES*) front_why="pragma RULES" ;; *) front_why="pragma ${hit//\"/}" ;;
       esac
       [ "$cur" = "$main" ] || front_why="$front_why (in $cur)"
@@ -612,7 +612,12 @@ one() {
   if [ ! -f "$prog/stubs.ok" ]; then
     rm -rf "$prog/stubs"
     if (cd "$src" && grep -qE 'foreign +export|"wrapper"|foreign +import +capi' "$main" $( [ "$kind" != plain ] && [ "$kind" != compile_and_run ] && find . -name '*.hs' -o -name '*.lhs' ) 2> "$prog/stubs.grep"); then
-      if [ -n "$live" ]; then
+      # queue 364 (report 346's item 5): a program the native front end compiled takes the stubs it wrote beside its STG
+      # (front/out/stubs/NAME/FILE_stub.{h,c}, typecheck.ae's foreign stubs: GHC's text byte for byte), not GHC's
+      if [ "${srcs#:stg :native}" != "$srcs" ]; then
+        if [ -n "$(ls "$work/front/out/stubs/$ob" 2>"$TMPDIR/hsi-stubs.err")" ]; then cp -r "$work/front/out/stubs/$ob" "$prog/stubs"
+        else mkdir -p "$prog/stubs"; touch "$prog/stubs/NONE"; fi
+      elif [ -n "$live" ]; then
         # the probe built first: a failed build is the recording's failure, never a program without stubs (NONE)
         local sp; sp=$("$root/bin/hsi" stubs-build) && [ -x "$sp" ] || { echo "hsi check: stubs-build failed for $id" >&2; exit 1; }
         (cd "$src" && timeout 300 "$sp" --stubs "$libdir" "$prog/stubs" -$opt ${fl[@]+"${fl[@]}"} -outputdir "$prog/stubobj" -- "$main") > "$prog/stubs.log" 2>&1 || true
