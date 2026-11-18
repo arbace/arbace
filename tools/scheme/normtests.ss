@@ -3,6 +3,9 @@
 ;;;
 ;;;   chez --script tools/scheme/normtests.ss > test/scheme/si/norm-chez.tsv
 ;;;
+;;; Since SCS37 (a) (the user 2026-11-18, queue 366) the oracle tier's, by hand (SI_NORM_ORACLE=1 bin/si unit -run TestNormalizeChez):
+;;; bin/si unit judges normalization by UAX #15's NormalizationTest.txt (TestNormalizationUAX15, the pinned UCD 16.0.0).
+;;;
 ;;; Two kinds of line (tab separated; HASH is the 32-bit h = (31 h + cp) mod 2^32 over the string's code points, 8 hex digits):
 ;;;   B START COUNT H1 H2 H3 H4    every code point START .. START+COUNT-1 (surrogates skipped) as a one-character
 ;;;                                string: the hash of the concatenation of the four forms' strings, for nfd nfc nfkd nfkc
