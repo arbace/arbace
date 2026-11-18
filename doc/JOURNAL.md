@@ -10480,3 +10480,16 @@ operands' invocations in the :lines print alone. Proved on listed round trips un
 159-file regression list 157 pass, 2 known as recorded), rows merged by id (33 changed), print 4798 / 3 / 22 to 4830 / 3 / 17.
 shell.c not run (memory rule); the 159-file run peaked at 1.46 GB, over the night's 1 GiB. Taken overnight (round 52): CS82 (b).
 Proposed: CS329 (an #include inside an initializer or enum). Alternatives: keep the classes (CS82 (a)).
+
+## 2026-11-18: an #include inside an initializer or an enum, CS329 (a) (n-c-split, round 52)
+
+Built CS329 (a) on `mac/n-c-print` `722bbae14` (doc/C23-SURVEY.md, "As built: the include inside a list"; doc/c/SPEC.md §9.2):
+repr/c's converter places the main file's directives between the elements of initializer and enumerator lists (an `#include`
+there a `(c/include ... :unit U)` element, its file's elements the directive's, the main file's commas around a directive as its
+`:c/comma-before`/`:c/comma-after`), the printer writes them on their own lines, the checker drops them
+(`arbace.c.check/strip-list-directives`); ci's read (`*include-inside*`) unchanged. quickjs's libregexp.c passes (was refused);
+unicode_gen.c reaches level 3 and is `:objects-macro-body` (an expanded assert's nop). A 20-file regression list
+(`test/repr/c/cs329-regression.txt`) passes after one fix (an `#embed`'s commas); 22 rows merged by id; print 4830 / 3 / 17 to
+4831 / 3 / 16. The quickjs run peaked at 1.47 GB, over the night's 1 GiB rule. Taken overnight (round 52): CS329 (a), every
+directive between a list's elements placed. Alternatives: (b) keep the class; placing only a list's directives when it holds an
+`#include` (narrower, but §9.2 already promised initializer elements).

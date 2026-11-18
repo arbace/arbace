@@ -6360,3 +6360,54 @@ main host's to confirm.
   `(c/include "x.h" :unit U)` and the directives as elements of `init` and of an enum's list, printed on their own lines, ci's read
   unchanged (`*include-inside*` keeps the declaration whole), about a day with the checker's reading of the new elements; (b) keep
   the class deferred.
+
+## As built: the include inside a list (CS329 (a), 2026-11-18, branch `n-c-split`, from `mac/n-c-print` `722bbae14`)
+
+The night's task (round 52, memory-free): the print cell's `:split-declaration` (2 rows), an `#include` with `#define`/`#undef`
+around it inside an initializer (quickjs's libregexp.c: `reopcode_info`, with an `#ifdef DUMP_REOP` family choosing the
+`#define`) or an enumerator list (unicode_gen.c: twelve tables and enums over `unicode_gen_def.h`). Built in `arbace/repr/c/`
+(convert, print) and `arbace/c/check.ae`; SPEC §9.2 (and §4.3, §5.5, §6.9):
+- **The converter** (`place-directives!`'s `nested`): an initializer list (`{...}`, a compound literal's too) and an enumerator
+  list are lists directives are placed in, between their elements, as a body's statements (CS275 (a)); the owner the list's head,
+  its items the elements without the link to the next and the preceding comma (`elem-node`, their extents registered), the
+  extent a directive falls in the braces' node (the elements may all be a header's). `list-with-dirs` writes the elements with
+  the placed directives among them: an element whose tokens all come from another file (an `#include` of the list brought it)
+  is the directive's, as a body's included statements are; the `split-later` check then finds the include placed and keeps the
+  declaration. A directive records the main file's commas around it (`:c/comma-before`, `:c/comma-after`; an `#embed`'s commas,
+  on its own line, are its elements'), which the print must write and a header's elements may bring themselves
+  (`DEF(id) GCAT_ ## id,`). Not ci's read (`*include-inside*`): its lists keep their included elements and get no directive, so
+  ci's and musl's forms are unchanged.
+- **The print** (`list-items-str`): a directive element on a line of its own, the recorded commas around it, the elements a
+  comma apart as before.
+- **The checker** (`strip-list-directives`, at `check-top`'s declarations): the elements alone, the form itself when it holds no
+  such directive (the reads the checker judges by hand, dg's, keep their forms' identity).
+- A side effect, wanted: every executed directive between a list's elements is now a form (`#if` families inside tables,
+  limits-enumconst.c's `#if __INT_MAX__ >= 100000` inside its enum, embed-1.c's `#define`s before an `#embed`), printed where it
+  stood rather than dropped to the active configuration (N6).
+
+Runs (`bin/repr-c roundtrip --only`, `REPR_C_THREADS=1`, `GOMEMLIMIT=600MiB`, `ARBACE_C_JUDGE=gcc`, levels 3-4 fresh):
+libregexp.c passes every level (was refused); unicode_gen.c passes levels 1 and 2 and differs at level 3 by one nop: an
+`assert` inside a `for` body printed expanded (its expansion holds `__LINE__`), whose tokens share one location in the original
+(the same file with that one line written as the invocation under a `#line` gives the original's instructions): class
+`:objects-macro-body`. That run peaked at 1.47 GB (the two quickjs files, libunicode.c included by unicode_gen.c), over the night's
+1 GiB rule: the breach is this report's. The regression list `test/repr/c/cs329-regression.txt` (20 files with directives
+inside an initializer or an enum: ffs-2, pr84478, limits-enumconst, structs, c23-enum-1, eleven of gcc-embed's, 46_grep,
+18_include, zlib's deflate and inflate), in two runs (1.02 GB and 0.84 GB peaks): 20 of 20 pass, after one fix (embed-1.c's
+`d[]`: an `#embed`'s commas, made on its line, had been taken for the main file's after its `#define`s; the run of embed-1.c and
+of the six other gcc-embed files again after it). limits-enumconst.c takes about 14 minutes (100,000 enumerators).
+
+Records: the 22 rows run merged by id into `test/repr/c/roundtrip-results.edn` (3 changed: libregexp.c to `:pass`, unicode_gen.c
+`:known` at level 3, zlib's inflate.c's stale class text); `test/repr/c/roundtrip-known.edn`: libregexp.c
+removed, unicode_gen.c `:objects-macro-body`; `test/c/divergences-print.edn`: `:split-declaration` a guard class. Print 4830 / 3 / 17 to 4831 / 3 / 16; C completeness
+0.9815 to 0.9816 (98, unchanged as a whole number), meant 0.9986. `bin/ci dg --essential` 92 of 92 (its control differs);
+`bin/records-check` 9 pairs, 0 problems; `bin/crops-score --judge --strict` passes.
+
+Keys: `arbace/repr/c/{convert,print}.ae` and `arbace/c/check.ae` are embedded (in `gate_key`): the key moves, the C steps and
+`--full` rerun, stage 0 evaluates the changed namespaces from the checkout until the next re-seed. ci's read places no list
+directive, so musl's forms do not change by value; nothing was built here.
+
+### Decided (taken overnight, round 52)
+
+- CS329 (a) built as above. Within it: every directive between a list's elements placed (not only a list holding an `#include`),
+  as §9.2 already said of initializer elements; the commas as the directives' metadata (an element's would need an IObj for
+  literals); ci's read unchanged; the checker strips the directives at the top form. Alternative: (b), the class kept deferred.
