@@ -11706,3 +11706,39 @@ checked, 0 problems), `bin/crops-score --record` and `--judge --strict` (14 crop
 head that moved it), `bin/records-check` (9 pairs, 0 problems), `make check-makefile`, test/docs/claude-md-test.bash,
 test/gate/caches-test.bash (with `--coverage`), `bin/gate --plan` (52 steps) and `bin/gate --full --plan` (341 steps), every
 process under 1 GiB but bin/j2g-unit (1.2 GB: 160 pass, the 7 known failures of the base). Nothing built.
+
+## 2026-11-18: n-java-defer (round 54), Java's deferred rows by cause; three light fixes (branch `n-java-defer` from mac/n-all `9cd2e4a96`)
+
+Java's completeness is 89 (eval 2,720 / 165 / 440, AOT 2,588 / 201 / 536 deferred on n-all; the "about 1,100 a cell" of the brief
+counts the non-passing rows with the by-design ones and the stale ones). The eval cell's 440 deferred less the 30 `:speed-hang` run at
+read,interp on next `42bf8614b`'s gate executable `e8e0d017243dca8a9f9f` (javac's tool `javac-8526ceb9d1ea3ff0bd68`,
+`REPR_JAVA_STALE_OK=1`, 6 jobs, 24 min, each process well under 4 GiB); the AOT cell grouped from its recorded (gate 13c's) reasons.
+Findings: 159 of the 410 pass already (a stale record: the night's `--record` frees them); 84 fail on causes n-all's merged night
+branches fixed and nobody built (h-java-members, n-java-night's nine, n-java-net, n-java-mx/f13/thresh, n-j2g-mxsig, AT9/AT10), 11 more
+on SimpleFileVisitor on javac's tool; 13 of the still-failing are in no class under their new reasons (t04264 t08306 and the 11
+SimpleFileVisitor rows). The 167 left ranked by rows per unit of work: "cannot extend" 22 (one list), jrt's hand-written members 16,
+RMI 13, the asynchronous channels 11, one class or module outside the world 11, System.Logger and StackWalker 10, jdk.charsets 4,
+Lithuanian casing 2 (+2 compiled), Object.clone's super call 4, references 4, the java.lang name shadowing 2, the rest one a test.
+
+Fixed (the top three light ones): (1) arbace/j2g/model.ae's class-supers takes the 13 translated classes the 22 "cannot extend" rows
+extend (TextCallbackHandler 7, CyclicBarrier, ConcurrentHashMap, FileOutputStream 2 each, IOException, BigDecimal, Hashtable,
+SocketAddress, ResponseCache, ResourceBundle, ExceptionInInitializerError, QueryEval, SslRMIClientSocketFactory); CountDownLatch is
+jrt's hand-written and left. Needs the build to show (canExtend asks the program's DynSub table). (2) go/arbace/jrt/locale.ae: jdk26u's
+ConditionalSpecialCasing lt entries (openjdk/jdk26u `baf63fbe4`, src/java.base/share/classes/java/lang/ConditionalSpecialCasing.java;
+the combining classes' buckets from src/java.base/share/data/unicodedata/UnicodeData.txt as a 333-range table; GPL 2 with the
+Classpath Exception, already in LICENSE.md); proven by the printed Go in a stub module against the JDK's answers and the JDK's
+getCombiningClass for every code point; test/jrt/testdata_reflect.ae's locale lines take lt inputs. (3) arbace/classes/native.ae's
+compile-top unmaps a java.lang default import a class of the test's package shadows (JLS 6.4.1): proven at interp with the checkout
+on ARBACE_PATH, t05485 passes, t04829 loads and stops at reflection's access checks (classed `:reflection` by id),
+`bin/java-check --essential` 428 of 428.
+
+Decisions taken (round 54), the recommended ones: class-supers lines rather than jrt class interfaces; unmapping only a default
+import; a generated combining-class table in jrt rather than a hook into the translated Normalizer (jrt cannot import translated
+packages). Alternatives considered: the clone super call (4 rows, dyncf and jrt's clone: more than light), Executable's generic
+parameter types (a jrt member with the manifest regenerated on the frozen JVM), MalformedParametersException (one file, but its test
+needs class files).
+
+**These touch the shipped world** (`gate_key`; jrt also the runtime key, j2g javac's keys): they merge with the day's build. Expected
+rows at the night's --record: interp 159 now passing, then with the build t05485, t04647 t04648 (if their later lines hold), t04277
+t05100 t05469 t05767 (passing compiled already) and whichever of the other 18 "cannot extend" rows pass beyond; compiled t04647 t04648.
+Not re-recorded here. Details, the ids and the commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54)".

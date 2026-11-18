@@ -8673,3 +8673,95 @@ The day's commands: `bin/arbace-go --gate-build` (gate_key moves: arbace/j2g), t
 
 Decisions taken overnight (round 52): (1) choose the check by the receiver's Go type (NN on a pointer, J2g_NotNull[T] otherwise) rather
 than J2g_NotNull always (NN keeps the pointer case's code as before) or a new jrt function taking any.
+
+## As built: n-java-defer (round 54), 2026-11-18 (write-ahead)
+
+Branch `n-java-defer` (from mac/n-all `9cd2e4a96`), under the day's rules (each process under 4 GiB; no j2g whole-program run, no
+javac tool build, no gate). The eval cell's 440 deferred rows (test/java/check-interp.edn on n-all) less the 30 `:speed-hang`: 410
+tests run at read,interp on next `42bf8614b`'s gate executable `e8e0d017243dca8a9f9f` (read on javac's tool
+`javac-8526ceb9d1ea3ff0bd68`, `REPR_JAVA_STALE_OK=1`, 6 jobs, 24 minutes; results kept in `.tmp/keep/wt-n-java-defer-r54/run1`).
+The AOT cell's 536 were grouped from their recorded reasons alone (gate 13c's, stale: "class X is not in the closed world" for the
+object streams and friends B2 and F26 brought); measuring them needs j2g's analysis or a build.
+
+**159 of the 410 pass already** (the record predates h-java-deferred's derivations and the night's B2 world in e8e0d017243dca8a9f9f).
+84 more fail on causes the night's branches merged into n-all fixed and nobody built yet (h-java-members' class-supers and member
+tables, n-java-night's nine, n-java-net, n-java-mx/f13/thresh, n-j2g-mxsig, AT9/AT10; their ids in the sections above), 11 more on
+`SimpleFileVisitor`'s protected constructor on javac's tool (t08312-t08322, h-java-members' class-supers line, the tool's build).
+13 of the 251 still failing are in no class under their new reasons (t04264 t08306 and the 11 SimpleFileVisitor rows): the night's
+interp record on an executable without n-all's world would fail its judgment on them.
+
+### The groups, ranked by rows freed per unit of work (interp; the 167 left after n-all's)
+
+| rank | group | rows | the work |
+|---|---|---|---|
+| 1 | the record: passing on e8e0d017243dca8a9f9f | 159 | the night's `--record` of interp |
+| 2 | n-all's fixes, unbuilt | 84 (+11 on javac's tool) | the day's build, then the record |
+| 3 | "cannot extend": translated classes missing from the DynSub list | 22 | one list, `arbace.j2g.model/class-supers` (**done here**) |
+| 4 | Lithuanian casing (jrt's locale.ae had no lt rules) | 2 interp + 2 compiled | one jrt file (**done here**) |
+| 5 | a test class named as a java.lang class (`Enum`, `Package`) | 2 | the interpreter's import (**done here**) |
+| 6 | jrt's hand-written classes' members | 16 | per member: Thread.ofPlatform (Thread.Builder) 3, java.lang.Package and Class.getPackage 3, getProtectionDomain 2, ForkJoinPool's schedule and getStealCount 2, Executable.getGenericParameterTypes, ThreadDeath's constructor, AQS's ConditionObject, makeClient, a class from bytes 2 |
+| 7 | RMI's stubs and protected constructors | 13 | F27's RMI slice |
+| 8 | the asynchronous channels | 11 | a slice of their own |
+| 9 | one class or module outside the world | 11 | prefs, JNDI's directory, SCTP, LdapLoginModule 2, kerberos, smartcardio, xpath, dynalink, MalformedParametersException, GarbageCollectorMXBean |
+| 10 | System.Logger used by the test, StackWalker | 10 | the world (System$Logger, StackWalker's options) |
+| 11 | jdk.charsets' charsets (ISO-2022-JP, MS950, x-eucJP-Open, PCK) | 4 | the closure |
+| 12 | Object.clone's super call from an interpreted subclass of a world class | 4 | dyncf's superCall and jrt's clone of a DynSub |
+| 13 | references under Go's collector | 4 | jrt's references |
+| — | the rest, one cause a test | ~54 | per test (stdout differences, line numbers, MethodParameters of local classes, ...) |
+
+The AOT cell's 536 by their recorded reasons: 198 refused by j2g's analysis (h-java-aot-triage measured 140 of its deferred
+refusals analyzing on F26's world), 168 "class X is not in the closed world" (96 of them the object streams), 23 "jrt lacks", 15 the
+JCA's providers, the rest after loading: mostly gate 13c's world, which the night's compiled record moves (h-java-aot-triage's groups
+A and B, 283 rows).
+
+### Built here
+
+- **arbace/j2g/model.ae** `class-supers`: com.sun.security.auth.callback.TextCallbackHandler, CyclicBarrier, ConcurrentHashMap,
+  FileOutputStream, IOException, BigDecimal, Hashtable, SocketAddress, ResponseCache, ResourceBundle, ExceptionInInitializerError,
+  javax.management.QueryEval, javax.rmi.ssl.SslRMIClientSocketFactory: each translated (jdk/forms, none in jrt's manifest) and not
+  final, so each gets its DynSub_C. CountDownLatch is jrt's hand-written class (manifest.edn) and is not listed. Rows (interp, the
+  first failure removed): t04277 t05100 (FileOutputStream), t04448, t04702, t04905, t04996, t05200, t05469 t05712, t05547, t05549
+  t05671, t05767, t07871 t07872 t07874 t07876 t07877 t07879 t07880 (TextCallbackHandler), t07950, t08020. Not provable at interp
+  without the build (Compiler$CFGo/canExtend asks the program's DynSub table). Of the 22, t04277 t05100 t05469 t05767 pass compiled
+  (their own subclasses translated with the world), so these four are expected to pass at interp; the rest's compiled rows are 13c's.
+- **arbace/classes/native.ae** `compile-top`: a class of the test's package whose simple name is one of java.lang's default imports
+  (t05485's `Enum`, t04829's `a.Package`) shadows it, as javac's package scope shadows java.lang's on-demand import (JLS 6.4.1): the
+  namespace's default mapping of the name is unmapped before the class is imported (Namespace.referenceClass refused the replacement:
+  "Enum already refers to: class java.lang.Enum"). **Proven at interp** on e8e0d017243dca8a9f9f with the checkout on ARBACE_PATH
+  (RT.toolSource loads arbace/classes/ from it; a wrapper executable `ARBACE_PATH=$ARBACE_PATH:CHECKOUT`): t05485 passes (load-failed
+  before); t04829 loads and stops at reflection's access checks ("Some cases failed": expected denied, actual allowed), filed under
+  `:reflection` by id beside t07688; `bin/java-check --essential` with the checkout on ARBACE_PATH 428 of 428 as recorded, the
+  controls c00001 c00003 c00004 failing as they must.
+- **go/arbace/jrt/locale.ae**: String.toLowerCase(Locale) and toUpperCase(Locale) for `lt` take jdk26u's
+  java/lang/ConditionalSpecialCasing.java lt entries (openjdk/jdk26u `baf63fbe4`; GPL 2 with the Classpath Exception, in LICENSE.md):
+  More_Above for I, J and I with ogonek, the three accented capitals, After_Soft_Dotted's combining dot dropped uppering; the
+  combining classes they need as three buckets (0, 230, other) in a range table made from jdk26u's
+  src/java.base/share/data/unicodedata/UnicodeData.txt (333 ranges). **Proven light**: the file printed by `bin/repr-go print --layout
+  gofmt`, gofmt-clean, `go test` in a small module with stubs of String and Locale (`.tmp/keep/wt-n-java-defer-r54/lt`): the 13 lt
+  lowerings and 7 lt upperings of jdk26u's ToLowerCase.java and ToUpperCase.java and 5 more checked against the JDK's own answers
+  (jdk26u's image), every code point's bucket equal to the JDK's `sun.text.Normalizer.getCombiningClass` (1,114,112 of 1,114,112), and
+  a control (en's lowering differs). test/jrt/testdata_reflect.ae's locale lines take 14 lt and root inputs for jrt's own `bin/jrt test`
+  (the testdata regenerated on the frozen JVM by day). Rows: t04647 t04648 at interp and compiled; their later lines (supplementary
+  characters, sigma) not run here.
+
+Keys: arbace/j2g moves `gate_key` and javac's keys; go/arbace/jrt moves `gate_key` and `arbace_runtime_key`; arbace/classes moves
+`gate_key`. All three are the shipped world's: they merge with the day's build.
+
+Decisions taken (round 54), each the recommended option: (1) class-supers lines for translated classes, not a jrt class interface
+(CountDownLatch's, JC4c's way, left: a hand-written class); (2) the shadowing in compile-top, unmapping only a default import (a
+test's explicit import of a java.lang name stays an error, as javac's duplicate single-type import); (3) the combining classes as a
+generated table in jrt over a hook into the translated Normalizer (jrt cannot import translated packages); the table's buckets alone,
+the conditions needing no more.
+
+### The night's commands
+
+```sh
+bin/arbace-go --gate-build                                    # with the day's: model.ae, native.ae, locale.ae move gate_key
+bin/jrt testdata && bin/jrt test --arch amd64 -run TestLocalesAgainstJVM   # the lt lines
+bin/java-check --levels interp --list .tmp/njd54.txt --save .tmp/njd54     # .tmp/njd54.txt: the 410 ids (or the whole level at night)
+bin/java-check --judge --partial --record .tmp/njd54/results.tsv
+bin/java-check --levels compiled --list .tmp/njd54-c.txt --save .tmp/njd54-c   # t04647 t04648
+```
+
+Expected at the night's interp record: the 159 passing now, t05485, t04647 t04648 (if their later lines hold), t04277 t05100 t05469
+t05767 and whichever of the 18 other "cannot extend" rows pass beyond, plus n-all's 84 as their sections say; at compiled t04647 t04648.
