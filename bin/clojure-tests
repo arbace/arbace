@@ -9,6 +9,7 @@
 #        bin/clojure-tests --aot [--essential] [-j JOBS] [--no-generative|--generative] [--only FILE] [NAMESPACE...]
 #        bin/clojure-tests --java-fixtures verify|update|OUT
 #        bin/clojure-tests --divergences [RESULTS]
+#        bin/clojure-tests --jdk-extra-build   (round 53 (1): the eval level's test executable with java.xml, below)
 #   -j JOBS          parallel test processes (default: number of CPUs)
 #   --no-generative  skip the test.generative phase (upstream's `ant test-generative`)
 #   --generative     run it (the default, with CLOJURE_TESTS_GO too)
@@ -87,6 +88,10 @@
 #   CLOJURE_TESTS_EXPECTED  the reference results (default: test/baseline-results.edn, the
 #                           frozen baseline's, with spec stubbed out; with CLOJURE_TESTS_GO
 #                           test/arbace-go-results.edn)
+#   CLOJURE_TESTS_GO_EXTRA  (round 53 (1)) the test executable with java.xml (--jdk-extra-build's) that runs
+#                           test/clojure/jdk-extra/namespaces.txt's namespaces at the eval level; --aot's program takes
+#                           java.xml itself (test/clojure/jdk-extra/java-xml.edn, by bin/java-project on javac's tool,
+#                           REPR_JAVA_EXE) when it compiles one of them; CLOJURE_TESTS_JDK_EXTRA=0: neither
 #   CLOJURE_TESTS_GEN_MSEC  test.generative run time in ms (default 60000, as upstream)
 #   CLOJURE_TESTS_TIMEOUT   per-process timeout in seconds (default 900); the reference's
 #                           :timeouts {ns seconds} gives single namespaces their own (the Go
@@ -147,6 +152,79 @@ arbace_use_java26 || exit 1
 . "$root/bin/lib/program.bash" # --aot's j2g and build-go calls, as --build-program's (RPS97 (b))
 . "$root/bin/lib/cover.bash" # ARBACE_COVER_DIR: the cover build, a GOCOVERDIR per namespace (GT8.3)
 base=$root/.tmp/clojure-tests
+# Round 53 (1) (the user, 2026-11-17: java.xml stays out of the shipped world): the suite's XML namespaces
+# (test/clojure/jdk-extra/namespaces.txt) take java.xml per program through bin/java-project's :jdk-extra
+# (doc/go/BUILD.md, "A JDK module as the program's world extension"): the plan test/clojure/jdk-extra/java-xml.edn,
+# read by bin/java-project read on javac's tool (REPR_JAVA_EXE) into .tmp/clojure-tests/jdk-extra/java-project (each
+# step cached by its key), its forms, resources and outside.args (the variants) added to j2g's arguments of the
+# suite's programs: --aot's (aot_build) and the eval level's extended test executable (--jdk-extra-build). Neither
+# bin/arbace-go, bin/lib nor the test build changes: gate_key does not move. CLOJURE_TESTS_JDK_EXTRA=0: none;
+# CLOJURE_TESTS_JDK_EXTRA_CHUNK: java-project's --chunk (default 20: each read process under 0.85 GiB, measured)
+jx_plan=$root/test/clojure/jdk-extra/java-xml.edn
+jx_nss=$root/test/clojure/jdk-extra/namespaces.txt
+jx_work=$base/jdk-extra/java-project
+jx_args=() jx_digest=
+# jx_wanted FILE: one of namespaces.txt's namespaces is in FILE (a list a line), and CLOJURE_TESTS_JDK_EXTRA is not 0
+jx_wanted() {
+  [ "${CLOJURE_TESTS_JDK_EXTRA:-1}" != 0 ] || return 1
+  grep -v '^#' "$jx_nss" | grep . | grep -qFx -f - "$1"
+}
+# jdk_extra_read: the plan read (bin/java-project read --no-classes), then jx_args (j2g's arguments, as
+# bin/arbace-go --build-program gives a program's :java ones) and jx_digest (what they are: the forms, the
+# resources, outside.args' text)
+jdk_extra_read() {
+  local d
+  mkdir -p "$base/jdk-extra"
+  echo "== bin/java-project read $jx_plan $jx_work --no-classes --chunk ${CLOJURE_TESTS_JDK_EXTRA_CHUNK:-20}"
+  "$root/bin/java-project" read "$jx_plan" "$jx_work" --no-classes --chunk "${CLOJURE_TESTS_JDK_EXTRA_CHUNK:-20}" \
+    > "$base/jdk-extra/java-project.log" 2>&1 \
+    || { tail -20 "$base/jdk-extra/java-project.log"; echo "clojure-tests: java.xml (:jdk-extra) not read ($base/jdk-extra/java-project.log)" >&2; return 1; }
+  grep '^  ' "$base/jdk-extra/java-project.log" || true
+  jx_args=(--java-namespaces "$jx_work/forms.all")
+  for d in $(cd "$jx_work/resources.jars" && ls -d */ 2>&1 | tr -d / | LC_ALL=C sort); do
+    [ -d "$jx_work/resources.jars/$d" ] && jx_args+=(--resources "$jx_work/resources.jars/$d")
+  done
+  if [ -s "$jx_work/outside.args" ]; then mapfile -t -O "${#jx_args[@]}" jx_args < "$jx_work/outside.args"; fi
+  jx_args+=(--input "$jx_work/forms.all")
+  jx_digest=$( { (cd "$jx_work" && find forms.all resources.jars -type f | LC_ALL=C sort | xargs -r -d '\n' sha256sum)
+                 cat "$jx_work/outside.args"; } | sha256sum | cut -c1-64)
+}
+# --jdk-extra-build: the eval level's extended test executable, the test build's program (the suite's Java
+# fixtures and the gate's compiled namespaces, test/java-fixtures/forms and ARBACE_GATE_EXES/KEY20/amd64/aot, as
+# bin/arbace-go --build-tests translates them) with java.xml (:jdk-extra), by j2g on the gate's executable and
+# bin/build-go: .tmp/clojure-tests/jdk-extra/eval-build/arbace-tests-extra, cached by key, printed. A heavy
+# command (j2g's whole-program run). CLOJURE_TESTS_GO_EXTRA=THAT runs namespaces.txt's namespaces at the eval
+# level on it (each namespace its own process), the others on CLOJURE_TESTS_GO
+if [ "${1:-}" = --jdk-extra-build ]; then
+  exes=${CLOJURE_TESTS_AOT_EXES:-}
+  eb=$base/jdk-extra/eval-build
+  mkdir -p "$eb"
+  if [ -z "$exes" ]; then
+    (cd "$root" && bin/arbace-go --gate-build) > "$eb/gate-build.log" 2>&1 \
+      || { tail -20 "$eb/gate-build.log"; echo "clojure-tests --jdk-extra-build: bin/arbace-go --gate-build failed" >&2; exit 1; }
+    exes=$(arbace_gate_cache "$root")/amd64
+  fi
+  program_aot_current "$exes/aot" \
+    || { echo "clojure-tests --jdk-extra-build: $exes/aot is not the checkout's compiled namespaces" >&2; exit 1; }
+  jdk_extra_read || exit 1
+  key=$( { sha256sum < "$exes/arbace"; cat "$exes/aot.key"; echo "$jx_digest"
+           (cd "$root" && find test/java-fixtures/forms -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
+            sha256sum bin/clojure-tests bin/lib/program.bash; bin/arbace-go --gate-key); } | sha256sum | cut -c1-64)
+  if [ -x "$eb/arbace-tests-extra" ] && [ "$(cat "$eb/key" 2>&1)" = "$key" ]; then
+    echo "clojure-tests --jdk-extra-build: the cached executable (key ${key:0:12}): $eb/arbace-tests-extra"; exit 0
+  fi
+  rm -rf "$eb/key" "$eb/arbace-tests-extra" "$eb/j2g" "$eb/work"
+  echo "== bin/j2g --program --input test/java-fixtures/forms --input $exes/aot ${jx_args[*]} (on $exes/arbace)"
+  program_j2g "$exes/arbace" "$eb/j2g.log" "$eb/j2g" --input "$root/test/java-fixtures/forms" --input "$exes/aot" "${jx_args[@]}" \
+    || { tail -20 "$eb/j2g.log"; echo "clojure-tests --jdk-extra-build: j2g failed ($eb/j2g.log)" >&2; exit 1; }
+  grep '^j2g: .*classes analyzed\|^j2g: error' "$eb/j2g.log" | head -20 || true
+  program_build_go "$exes/arbace" amd64 "$eb/work" "$eb/arbace-tests-extra" "$eb/build.log" "$eb/j2g/prog" \
+    || { grep -v '^==' "$eb/build.log" | tail -20; echo "clojure-tests --jdk-extra-build: the build failed ($eb/build.log)" >&2; exit 1; }
+  rm -rf "$eb/work" "$eb/j2g"
+  echo "$key" > "$eb/key"
+  echo "clojure-tests --jdk-extra-build: $eb/arbace-tests-extra ($(stat -c %s "$eb/arbace-tests-extra") bytes)"
+  exit 0
+fi
 if [ "${1:-}" = --divergences ]; then
   . "$root/bin/lib/tools.bash"
   results=${2:-$root/test/arbace-go-results.edn}
@@ -332,6 +410,11 @@ if [ "${1:-}" = "--run-one" ]; then
   timeout_s=${t:-$timeout_s}
   status=0
   if [ -n "$go_exe" ]; then
+    # round 53 (1): at the eval level a namespace of test/clojure/jdk-extra/namespaces.txt runs on the extended test
+    # executable when CLOJURE_TESTS_GO_EXTRA names it (bin/clojure-tests --jdk-extra-build), the others on CLOJURE_TESTS_GO
+    if [ -n "${CLOJURE_TESTS_GO_EXTRA:-}" ] && [ -z "${CLOJURE_TESTS_AOT:-}" ] && grep -v '^#' "$jx_nss" | grep -qFx -- "$ns"; then
+      go_exe=$CLOJURE_TESTS_GO_EXTRA
+    fi
     start=$(date +%s%N)
     [ -z "${ARBACE_COVER_DIR:-}" ] || export "$(cover_env "$cover_tool" "$ns")"
     go_run "$timeout_s" "$runner" run "$ns" "$work/out/$ns.edn" "$work/namespaces.txt" "$expected" \
@@ -549,7 +632,13 @@ aot_build() {
       || { echo "clojure-tests --aot: $exes/aot is not the checkout's compiled namespaces (key $(cat "$exes/aot.key" 2>/dev/null))" >&2; return 1; }
   fi
   gexe=$exes/arbace texe=$exes/arbace-tests
-  key=$( { sha256sum < "$gexe"; sha256sum < "$texe"
+  # round 53 (1): java.xml (:jdk-extra) when a namespace that needs it is compiled: the whole suite, or an
+  # essential list naming one (jx_wanted; CLOJURE_TESTS_JDK_EXTRA=0 none)
+  jx_args=() jx_digest=
+  local jx_list=$ab/jdk-extra-nss.txt
+  if [ -n "${ess_list:-}" ]; then grep -v '^#' "$ess_list" | grep . > "$jx_list" || true; else grep -v '^#' "$jx_nss" > "$jx_list"; fi
+  if jx_wanted "$jx_list"; then jdk_extra_read || return 1; fi
+  key=$( { sha256sum < "$gexe"; sha256sum < "$texe"; echo "jdk-extra $jx_digest"
            (cd "$suite" && find test src -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
            echo "$repr_clojure_stamp $deps"
            (cd "$root" && sha256sum test/suite_aot_hook.ae test/run_clojure_tests.clj bin/clojure-tests bin/lib/program.bash "$expected" ${ess_list:+"$ess_list"}
@@ -596,7 +685,7 @@ aot_build() {
   aot_sources_check "$ab" || return 1
   echo "   compiled: $(( $(date +%s) - t0 )) s"
   t0=$(date +%s)
-  program_j2g "$gexe" "$ab/j2g.log" "$ab/j2g" --input "$root/test/java-fixtures/forms" --input "$ab/aot" \
+  program_j2g "$gexe" "$ab/j2g.log" "$ab/j2g" --input "$root/test/java-fixtures/forms" --input "$ab/aot" ${jx_args[@]+"${jx_args[@]}"} \
     || { tail -20 "$ab/j2g.log"; echo "clojure-tests --aot: j2g failed ($ab/j2g.log)" >&2; return 1; }
   grep '^j2g: .*classes analyzed\|^j2g: error' "$ab/j2g.log" | head -20
   echo "   j2g: $(( $(date +%s) - t0 )) s"

@@ -11599,3 +11599,60 @@ The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.
   gate_key); (3) the program fixture pending outside `test/programs/`; (4) `-Xprefer:source` for a JDK module's cut;
   (5) `:classes` beside `:closure` (the coordinator's round 53 note, for Clojure's suite program: clojure.xml's SAX and
   xml-stream's StAX).
+
+## 2026-11-17: round 53 (1): Clojure's XML tests take java.xml per program (`:jdk-extra`; branch `n-cdr5-extra`, night round 52)
+
+- What: java.xml stays out of the shipped world (the user's round 53 (1); n-clojure-cdr's CDR5, `082330d04`, which put it
+  there, dropped). Clojure's suite takes it through A15's `:jdk-extra` (`n-g2-xml`, `92579b36b`, merged first):
+  `test/clojure/jdk-extra/java-xml.edn`, a plan of `:jdk-extra` alone (`test/java/project.ae` now accepts no `:modules`
+  beside `:jdk-extra`, a control the plan with neither), `:classes` `java-xml-classes.txt`, the variants javac's tool world's
+  `overlay/jdk/javac/variants/{SecuritySupport,JdkXmlConfig}.ae`, no `:outside`; `namespaces.txt`: clojure-xml (SAX) and
+  reflect (StAX's XMLInputFactory in invoke-checks-accessibility).
+- The list (246): overlay/jdk/javac/closure.txt's 221 java.xml lines (javac's tool world: the JDK's class loads, the
+  descriptors' classes of the members the callers call, their supertypes, the exceptions) and StAX's stream reader's 25
+  (n-clojure-cdr's probe, `.tmp/keep/wt-n-clojure-cdr/xmlprobe/`: 7 classes loaded beyond SAX's for XMLInputFactory/newInstance
+  and createXMLStreamReader, their supertypes and javax.xml signature types to a fixpoint, StreamSource). Checked here: every
+  java.xml class the probe's runs load (144 top-level, load-sax.txt and load-stax.txt) is in it. Measured and not taken:
+  the descriptor-and-supertype fixpoint over all the 246's own bytecode (javap -p -c, 0.17 GiB) is 446 (200 more: the
+  validator, DOM, XInclude, the schema grammar); their calls stay cut (J2G-SPEC §4.1, M3) as in javac's tool world, where
+  this SAX part runs. Outside java.xml the 246 name `java.io.CharConversionException` (MalformedByteSequenceException's
+  superclass), which the shipped world and jdk/edge.edn lack and javac's edge has: the day's build says whether j2g takes
+  the class (else an edge or jrt addition, which moves gate_key).
+- The suite's builds: the plain test executable is bin/arbace-go `--build-tests` (inside `--gate-build`, keyed by
+  gate_key: bin/arbace-go, bin/lib and test/java-fixtures are in it), not a program; `--aot`'s is bin/clojure-tests'
+  aot_build, j2g and build-go through bin/lib/program.bash's functions (not `--build-program`), keyed by its own key. Wired
+  in bin/clojure-tests alone: `jdk_extra_read` (bin/java-project read --no-classes --chunk 20 into
+  .tmp/clojure-tests/jdk-extra/java-project, cached by its steps' keys) gives j2g's arguments as `--build-program` gives a
+  program's `:java` ones (`--java-namespaces`, `--resources` a module, outside.args' `--variants`, `--input forms.all`);
+  aot_build adds them, and their digest to its key, when it compiles a namespace of namespaces.txt (the whole suite; the
+  essential list names none); `--jdk-extra-build` makes the eval level's extended test executable (the test build's program,
+  fixtures and the gate's compiled namespaces, with java.xml: .tmp/clojure-tests/jdk-extra/eval-build/arbace-tests-extra),
+  and `CLOJURE_TESTS_GO_EXTRA` runs namespaces.txt's namespaces on it, the others on CLOJURE_TESTS_GO (each namespace its own
+  process). gate_key unchanged (`bin/arbace-go --gate-key` before and after: `e8e0d017243d`). The gate's `suite-aot` (`--full`) needs javac-tool,
+  `:javac-prog`, `REPR_JAVA_EXE="$GATE_JAVAC"`, the platform's pin and the plan's inputs.
+- Proof (light, each process under 0.85 GiB): `bin/java-project test` 64 of 64 (58 before; four cases and a control new: the
+  suite's plan resolved, java.xml alone with 246 `:classes` and the two variants; the class set the tool world's 221 and
+  StAX's 25; the read with `--chunk 20`, 15 processes, the peak 0.81 GiB, 246 forms, the tool world's 221 byte for byte
+  jdk/javac/forms'; outside.args the variants alone; the control a plan with neither `:modules` nor `:jdk-extra`);
+  bin/clojure-tests' helpers run alone (jx_wanted on the whole list, a list without them, `CLOJURE_TESTS_JDK_EXTRA=0`,
+  test/clojure/essential-aot.txt: none; jdk_extra_read's j2g arguments); `bin/gate --full --plan` (suite-aot planned after
+  javac-tool). Nothing built: past 19:00 UTC.
+- Decisions taken overnight (round 52), each the recommended one: (1) the list is the tool world's proven set plus StAX's 25,
+  not the 446 of xerces' own descriptors (cuts as in the tool world); (2) no `:outside` for the suite (its world the test
+  build's plus java.xml; `:platform` would turn the rest of the suite's refusals into declarations); (3) the wiring in
+  bin/clojure-tests alone, so gate_key stays (the alternative, java.xml in `--build-tests`, moves gate_key and makes the
+  essential go-build read jdk26u through javac's tool); (4) the eval level by a separate executable and a per-namespace
+  switch, the gate's suite-go unchanged (DECISION for the user below); (5) the full `suite-aot` needs javac-tool.
+- DECISION (for the user): the eval level's two namespaces in the gate. (a) recommended: a `--full` step builds
+  `--jdk-extra-build` (a j2g whole-program run, about 32 GiB) and suite-go's record takes their rows from it (the night's);
+  (b) java.xml into the test build (`bin/arbace-go --build-tests`: gate_key moves, the essential go-build needs javac's tool
+  and jdk26u); (c) the eval rows stay `:xml`/`:xml-stream` deferred, the AOT level alone passes them.
+- The day's heavy proofs (in this worktree, one at a time, after `bin/heavy-lock` is free):
+  `REPR_JAVA_EXE=<javac tool at the key> CLOJURE_TESTS_AOT_EXES=$C/amd64 bin/heavy-lock bin/clojure-tests --jdk-extra-build`
+  (the j2g log: java.xml's classes translated, MalformedByteSequenceException's superclass); then unskip clojure-xml and
+  reflect's invoke-checks-accessibility in test/arbace-go-results.edn and
+  `CLOJURE_TESTS_GO=$C/amd64/arbace-tests CLOJURE_TESTS_GO_EXTRA=.tmp/clojure-tests/jdk-extra/eval-build/arbace-tests-extra
+  bin/clojure-tests --no-generative clojure.test-clojure.clojure-xml clojure.test-clojure.reflect`, expected
+  clojure-xml {:test 1 :pass 1 :fail 0 :error 0}, reflect {:test 5 :pass 7 :fail 0 :error 0}; the same unskipped in
+  test/arbace-go-aot-results.edn and `bin/heavy-lock bin/clojure-tests --aot` (the night's suite-aot, 45 GiB); then
+  test/clojure/divergences{,-aot}.edn less `:xml` and `:xml-stream`, `bin/reap --record`, `bin/crops-score --record`.
