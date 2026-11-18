@@ -1312,6 +1312,8 @@
            ;; clang invokes in del_op.cc's noexcept operator delete)
            :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
+           ;; queue 351: `throw()`, clang's EST_DynamicNone: before C++17 an exception filter, not noexcept's terminate scope
+           :dynamic-none (boolean (and (not (re-find #"\bnoexcept\b" (or qt ""))) (re-find #"\bthrow\s*\(\s*\)" (or qt ""))))
            :linkage (if (linkage-c? home) :c :cpp)
            :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
            :internal-l (boolean (and (not cid) (= "static" (:storageClass n)) (not (:internal home))))
@@ -1512,7 +1514,13 @@
         id (or old (next-id))
         ;; (a class of an unnamed namespace, or local to an internal function, has internal linkage and so have its
         ;; members, [basic.link]/4; G5c: libsupc++'s vec.cc's uncatch_exception, atexit_thread.cc's key_s)
-        internal (loop [s scope] (cond (nil? s) false (:internal s) true (= :ns (:kind s)) false :else (recur (:parent s))))
+        ;; (queue 351: a class local to a function that is neither inline nor a template's instance has internal linkage
+        ;; for the code generator too, clang's getLVForLocalDecl: shared_ptr.cc's get_mutex's M; an inline one's, linkonce_odr)
+        internal (loop [s scope] (cond (nil? s) false (:internal s) true (= :ns (:kind s)) false
+                                       (and (= :fn (:kind s)) (= :local (ffirst (:path s)))
+                                            (let [lf (second (first (:path s)))] (and (map? lf) (not (or (:inline lf) (:tinst lf))))))
+                                       true
+                                       :else (recur (:parent s))))
         cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id]) :internal internal))
         t {:k :class :id id}]
     (when-not old
@@ -1943,6 +1951,8 @@
         c (abi/cls id)
         f (merge {:id fid :name nm :kind k :cls id :ty ty :implicit k :inline true :path (conj (vec (:path c)) [:cls id])
                   :scope (:scope c) :def-scope (:scope c) :linkage :cpp :param-names (mapv (fn [_] nil) (:ps ty)) :defaults [] :pos -1}
+                 ;; (queue 351: an internal class's implicit members are internal, as its declared ones, [basic.link]/4)
+                 (when (:internal (:scope c)) {:internal true})
                  ;; a header class's implicit members analyzed when used (G4)
                  (when (:header c) {:lazy true})
                  more)]
@@ -2015,9 +2025,12 @@
       (let [fid (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [ctor-p] :va false} :trivial (trivial-copy? id))]
         (when del (upd-fn! fid merge del))))
     (doseq [x (:ctors (abi/cls id))]
-      (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
+      ;; (queue 351: trivial-copy? asks every copy constructor's :trivial, this one's too: taken as trivial while it is
+      ;; judged, so `X(const X&) = default` is trivial when the rest is ([class.copy.ctor]/11), a copy of bytes and the
+      ;; psABI's registers as clang's; before, never: futex.cc's chrono::seconds by the address of a copy made by a call)
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial true) (upd-fn! x assoc :trivial (trivial-copy? id)))))
     (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
-      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)))]
+      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (trivial-assign? id))]
         (when del (upd-fn! fid merge del)))))
     ;; CX12 (the checker): the implicit move constructor and move assignment ([class.copy.ctor]/8, [class.copy.assign]/4:
     ;; declared when the class declares no copy or move member and no destructor); one defined as deleted is no
@@ -2028,9 +2041,11 @@
                (let [d (:dtor (abi/cls id))] (or (nil? d) (:implicit (fnd d)))))
       (let [rref {:k :rref :to t}]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [rref] :va false} :trivial (trivial-copy? id) :cx-move true)
-        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)) :cx-move true))))
+        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (trivial-assign? id) :cx-move true))))
     (doseq [x (:methods (abi/cls id))]
-      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (and (trivial-copy? id) (trivial-assign? id))))))
+      ;; (queue 351: an assignment's triviality is its own, [class.copy.assign]/9: not the copy constructor's, which
+      ;; std::allocator's user-provided one made non-trivial; clang writes no call of allocator<char>::operator=)
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (trivial-assign? id)))))
     (abi/update-cls! id assoc :user-ctor (boolean (seq (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id)))))
                      :user-dtor (boolean (let [d (:dtor (abi/cls id))] (and d (not (:implicit (fnd d))))))
                      :user-copy-assign (boolean (some #(let [g (fnd %)] (and (copy-assign? g id) (not (:implicit g)))) (:methods (abi/cls id)))))
