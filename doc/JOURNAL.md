@@ -10700,3 +10700,13 @@ notified, the sender handed over by the derivation (alternatives in the survey).
 ## 2026-11-18: n-java-thresh, a correction
 
 The entry above's probe has 25 checks, not 26 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-thresh").
+
+## 2026-11-18: n-j2g-finalize, AT10's finalize on an interface-typed receiver
+
+Branch `n-j2g-finalize` (from mac/n-java-head `82546209b`, round 52, overnight). The Java review's risk: AT10's translation of a call
+resolving to Object.finalize() emitted `jrt.NN(receiver)`, and NN (go/arbace/jrt/object.ae) takes `*T`, so an abstract or non-leaf
+class's this or an interface-typed receiver would be Go's "cannot infer T". `arbace.j2g.code/receiver-null-check` now emits NN on a
+pointer Go type and j2g's `J2g_NotNull[T]` otherwise (the `:null-checked` node's choice). test/j2g/unit.ae's test-object-finalize
+gains the emitted-Go checks over the fixture (new classes z/Abs, z/Base, z/Sub, z/Shape) and a negative control; bin/j2g-unit 152 pass,
+the 7 known failures. The shapes compiled against a stub jrt, the old one failing with "cannot infer T". Alternatives: J2g_NotNull
+always, or a jrt function over any (not taken). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-j2g-finalize".

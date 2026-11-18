@@ -8645,3 +8645,31 @@ HotSpot's hidden Notification Thread); (4) the GC notification's action "end of 
 GarbageCollectorExtImpl's derivation (rather than JrtManagement calling its protected createGCNotification).
 
 Keys: overlay/jdk, jdk/forms, go/arbace/jrt move `gate_key` and the runtime key; test/jrt the jrt-derive step's.
+
+## As built: n-j2g-finalize (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-j2g-finalize` (from mac/n-java-head `82546209b`), under the night's rules (each process under 1 GiB): a risk the Java review
+found in AT10. `invoke-val` translated a call resolving to Object.finalize() as `jrt.NN(receiver)`, and jrt's NN
+(go/arbace/jrt/object.ae, `func NN[T any](p *T) *T`) takes a pointer alone: a receiver whose Go type is an interface (the this of an
+abstract or non-leaf class, `C_I`; an interface's or Object's static type) was Go's "cannot infer T".
+
+- **The fix.** `arbace.j2g.code/receiver-null-check`, chosen by the receiver's Go type at translation time as the `:null-checked` node
+  chooses: `jrt.NN` when `m/pointer-desc?` (a leaf class, String, an array), else `J2g_NotNull[T]` (j2g's support function,
+  arbace/j2g/out.ae: x compared as an any), T the receiver's Go type. Both are calls Go takes as a statement.
+- **Tests** (test/j2g/unit.ae's test-object-finalize, fixture test/j2g/unit/finalize: `z/Abs` abstract, `z/Base` with a subclass
+  `z/Sub`, the interface `z/Shape`): each method translated whole by `decls/method-forms` and its emitted check judged: Plain's this
+  `jrt/NN t`; Abs's this `(inst jrt/J2g_NotNull J_z_Abs_J_I) this`; Base's this `J_z_Base_J_I`; a Shape-typed parameter
+  `(inst jrt/J2g_NotNull J_z_Shape_J) s`; a Plain-typed parameter NN; Own's own finalize no check; the negative control: the old
+  shape (NN of Abs's this) fails the judge. With the fix reverted (NN always) three of them fail. bin/j2g-unit on the gate executable
+  `e8e0d017243dca8a9f9f` (GOMEMLIMIT=700MiB, ARBACE_PATH the worktree): 152 pass, the 7 known failures (type annotations 1, invokers 6).
+- **Go.** The emitted shapes against a stub jrt (NN and J2g_NotNull as defined) in a small module (`.tmp/nnshape`), TamaGo's go:
+  vet clean, run: nil Shape, nil Abs_I and nil *Plain each NullPointerException; the old shape `jrt.NN(this)` on an `Abs_I` fails to
+  build with "type Abs_I of this does not match *T (cannot infer T)". A typed nil pointer inside an interface is not caught, as for
+  every J2g_NotNull: j2g's up-conversions (`.Ref`) give the untyped nil for a nil pointer.
+
+The day's commands: `bin/arbace-go --gate-build` (gate_key moves: arbace/j2g), then `bin/j2g-unit`, and t06387 at the compiled level
+(`printf 't06387\n' > .tmp/nfin.txt; bin/java-check --levels compiled --list .tmp/nfin.txt --save .tmp/nfin && bin/java-check --judge
+--partial .tmp/nfin/results.tsv`).
+
+Decisions taken overnight (round 52): (1) choose the check by the receiver's Go type (NN on a pointer, J2g_NotNull[T] otherwise) rather
+than J2g_NotNull always (NN keeps the pointer case's code as before) or a new jrt function taking any.

@@ -869,7 +869,48 @@
            (pr-str (select-keys plain [:owner :name :desc :kind]) (:owner (:method plain))))
     (check "object-finalize: control: Own's this.finalize() is Own's" (not (code/object-finalize? own))
            (pr-str (select-keys own [:owner :name :desc :kind]) (:owner (:method own))))
-    (check "object-finalize: control: hashCode is not finalize" (not (code/object-finalize? hash)))))
+    (check "object-finalize: control: hashCode is not finalize" (not (code/object-finalize? hash)))
+    ;; the review's risk (round 52, 2026-11-18): jrt.NN takes a *T, so the emitted check is chosen by the receiver's
+    ;; Go type: NN on a pointer (a leaf class), J2g_NotNull[T] on an interface (an abstract or non-leaf class's this,
+    ;; an interface-typed receiver); each method translated whole by decls/method-forms, as the translation does
+    (let [mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {}}
+          mw (assoc mw :subclass-index (m/make-subclass-index mw))
+          go-of (fn [cls mn]
+                  (w/with-world world
+                    (binding [m/*w* mw env/*declared* (:classes e) decls/*reached* #{}
+                              code/*pkgstate* {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts (atom #{})}]
+                      (let [mm (some #(when (= mn (:name %)) %) (:methods (a/decl cls)))]
+                        (binding [decls/*reached* #{[cls (:name mm) (:desc mm)]}]
+                          (try (decls/method-forms (m/pkg cls) cls mm) (catch Throwable t (str "threw: " t))))))))
+          checks (fn [f] (filter #(and (seq? %) (let [h (first %)]
+                                                  (or (= "NN" (name (if (symbol? h) h '_)))
+                                                      (and (seq? h) (= 'inst (first h)) (= "J2g_NotNull" (name (second h)))))))
+                                 (tree-seq coll? seq f)))
+          shape-of (fn [f] (let [cs (checks f)]
+                             (when (= 1 (count cs))
+                               (let [[h x] (first cs)]
+                                 (if (symbol? h) [:nn x] [:not-null (str (nth h 2)) x])))))
+          shape (fn [cls mn] (shape-of (go-of cls mn)))
+          ;; the judge of an interface-typed this: J2g_NotNull of this, instantiated at the class's interface C_I
+          iface-this? (fn [sh simple] (and (= :not-null (first sh)) (= 'this (nth sh 2))
+                                           (str/ends-with? (second sh) (str simple "_J_I"))))
+          show (fn [cls mn] (pr-str (go-of cls mn)))]
+      (check "object-finalize: emitted: a leaf's this (Plain) is jrt.NN of t, the pointer"
+             (= [:nn 't] (shape "z/Plain" "fin")) (show "z/Plain" "fin"))
+      (check "object-finalize: emitted: an abstract class's this (Abs) is J2g_NotNull[Abs_I], not NN"
+             (iface-this? (shape "z/Abs" "fin") "Abs") (show "z/Abs" "fin"))
+      (check "object-finalize: emitted: a non-leaf class's this (Base, Sub extends it) is J2g_NotNull[Base_I]"
+             (iface-this? (shape "z/Base" "fin") "Base") (show "z/Base" "fin"))
+      (check "object-finalize: emitted: an interface-typed receiver (Shape) is J2g_NotNull[Shape] of the parameter"
+             (let [sh (shape "z/Base" "onShape")] (and (= :not-null (first sh)) (str/ends-with? (second sh) "Shape_J") (= (quote s) (nth sh 2))))
+             (show "z/Base" "onShape"))
+      (check "object-finalize: emitted: a leaf-class-typed parameter (Plain) is jrt.NN"
+             (= :nn (first (shape "z/Base" "onPlain"))) (show "z/Base" "onPlain"))
+      (check "object-finalize: control: Own's own finalize is called, no Object check emitted"
+             (empty? (checks (go-of "z/Own" "fin"))) (show "z/Own" "fin"))
+      (check "object-finalize: negative control: the old shape, jrt.NN of Abs's interface-typed this, fails the judge"
+             (let [old '((go/method Impl_Fin__V [t this] (jrt/NN this)))]
+               (and (= [:nn 'this] (shape-of old)) (not (iface-this? (shape-of old) "Abs"))))))))
 
 (defn -main [& _]
   (test-edge-generics)
