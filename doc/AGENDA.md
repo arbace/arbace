@@ -1,6 +1,6 @@
 # Agenda
 
-The current state of the work (as of 2026-11-17; the sections below "The consolidation" are as of 2026-11-10 unless dated). This file is rewritten as things change. For the history, see
+The current state of the work (as of 2026-11-17 evening; the sections below "The consolidation" are as of 2026-11-10 unless dated). This file is rewritten as things change. For the history, see
 [JOURNAL.md](JOURNAL.md) (since 2026-11-07), the journals at the tags
 [`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
 (2026-11-01 to 2026-11-07),
@@ -18,21 +18,30 @@ The current state of the work (as of 2026-11-17; the sections below "The consoli
 - **The seed** is `3c48859d…` (2026-11-17, the consolidation's re-seed W: W2's embedding of the crops, pyi, oi and goi's
   listing of `arbace/{py,libm,crt,ci}`; packed from the fixpoint's G3 at `53da41d93`, verified: stage 0 = G1 = G2 = G3). R
   (`w-retire-4`) retired the stopgaps the old seed `d5548e72` needed (`annot-lenient`, `classes_stale`,
-  `bin/lib/ci/fresh.bash`).
-- **The branches.** All work is consolidated on `stack-w2` (`f1969748f`, 2026-11-17): next, B1's revisit, B2 (java-night
-  without F26), the crops' records (rec-ocaml, rec-llvm-cpp), W1, W2, the re-seed, its two fixes and R. Its one full gate
-  (`bin/gate --full --concurrent`, 358 steps) runs by day 2026-11-17; main and next fast-forward to it when it ends, its
-  failures on a REVISIT list (round 50 (3)). Below: "The consolidation (2026-11-15/17)".
-- **The crops' scores** (`test/crops/scores.edn` on `stack-w2`; completeness, without by design, maturity, independence):
-  Clojure 99 99 100 100, Java 87 90 100 60, Go 97 100 100 100, C 96 100 100 100, C++ 91 96 100 72, OCaml 86 96 100 100,
-  Scheme 98 100 100 100, Haskell 97 99 100 76, Rust 75 75 96 80, LLVM IR 98 99 100 98, Python 0 0 83 60 (eval and AOT wait
-  for its records night), x86-64 assembly 99 100 100 100, arm64 assembly 100 100 100 100, WebAssembly 98 98 100 100.
-- **The REAP matrix** (`bin/reap`, `test/reap/matrix.edn` on `stack-w2`): fourteen rows (Clojure, Java, Go, C, C++,
-  OCaml, Scheme, Haskell, Rust, LLVM IR, Python, x86-64 and arm64 assembly, WebAssembly), 56 cells, 53 checked, 0 problems;
-  "no check yet": Rust's AOT and Python's eval and AOT (its records night).
-- **The gate** (at the morning's merge, `bin/gate --plan`): the essential tier 49 steps, about 44 minutes; `--full` 316
-  steps, about 9:52 simulated serial; the oracle tier (`--oracle`, the host toolchains) 64 steps. The crops' fragments
-  spliced: C++, Scheme, OCaml, LLVM IR, Rust, Haskell; Python's after its records night.
+  `bin/lib/ci/fresh.bash`). Unchanged by the day's burst.
+- **The branches.** main = next = `42bf8614b` (origin and mac) since 19:17 UTC 2026-11-17: the consolidation (`f1969748f`,
+  gated by the essential gate on main at 12:33, 126 min, 0 failures) plus the day's burst (45 first-parent commits, below "The
+  burst (2026-11-17)"). main reached `42bf8614b` before its full gate ran, by an advance watcher's mistake (it waited on the
+  gate's launcher, not the gate); the user kept it (round 52). Tonight's full gate (`bin/gate --full --concurrent` on
+  `42bf8614b`, from 19:15, log `.tmp/goal/g-full2.log`) decides the fixes: its failures go to `REVISIT-full2.md`
+  (`.tmp/goal/revisit-after-full2.sh`, which moves nothing) and to fix agents in the morning. Held until after it: the branches
+  listed in the burst's section (unbuilt compiled or embedded code, or records first).
+- **The crops' scores** (`test/crops/scores.edn` on next `42bf8614b`; completeness, without by design, maturity,
+  independence): Clojure 99 99 100 100, Java 89 92 100 60, Go 98 100 100 100, C 98 100 100 100, C++ 91 93 100 72, OCaml 86
+  96 100 100, Scheme 100 100 100 100, Haskell 97 99 100 76, Rust 75 75 96 80, LLVM IR 98 99 100 98, Python 0 0 83 60 (eval
+  and AOT wait for its records night; 98 independence on the held Python line), x86-64 assembly 99 100 100 100, arm64
+  assembly 100 100 100 100, WebAssembly 98 98 100 100 (100 with the held 326 and 327). C++'s 93 without by design (from 96)
+  is CP398 (a)+(c) and CP399 (a): rows moved from by design to deferred, on purpose.
+- **The REAP matrix** (`bin/reap`, `test/reap/matrix.edn` on next): fourteen rows (Clojure, Java, Go, C, C++, OCaml,
+  Scheme, Haskell, Rust, LLVM IR, Python, x86-64 and arm64 assembly, WebAssembly), 56 cells, 53 checked, 0 problems; "no
+  check yet": Rust's AOT (322 merged, its records after the gate) and Python's eval and AOT (its records night).
+  `bin/crops-score --judge --strict` and `bin/records-check` pass.
+- **The gate** (next `42bf8614b`, `bin/gate --plan`): the essential tier 52 steps since the crops tier (`gate-ess-diet`, 71 ->
+  51, then `rsi-shim-essential`): the core about 27 steps, 29.5 minutes of serial work measured after a re-seed; a crop's
+  essential subsets run by day only when its own paths (`:crop-paths`), declaration or environment changed, else `night`
+  (deferred to the night's gate); `--full --concurrent` 339 steps, simulated wall 8:02; the oracle tier (`--oracle`) as before.
+  The crops' fragments spliced: C++, Scheme, OCaml, LLVM IR, Rust, Haskell, the assembly crops, WebAssembly; Python's after
+  its records night (F1 (a): the records first, then the splice).
   Branch `gf-gate` (2026-11-12, night 12's 45 failures): the gate's own bugs fixed (lanes-test and cpp-selftest environment, the
   jdk corpus steps' memory declarations, haskell-lib's chain, repr-clojure's count); haskell-roundtrip and rust-roundtrip out of
   `--full` (their parts `:clean-only`, `GATE_ALL_PARTS=1`) until their records and printers are fixed.
@@ -280,6 +289,85 @@ Six crops are above 90 on all three. What the others still need:
   the checkout's (the user, 2026-11-09: 20 → about 79), Python's gate fragment spliced
   ([python/PYTHON-SURVEY.md](python/PYTHON-SURVEY.md)).
 
+## The burst (2026-11-17)
+
+After the consolidation (the goal cleared by the user at 10:59), a burst of high-thinking agents on this host (about 25, light
+targeted checks, no gates: `.tmp/goal/host-burst-rules.md`) and the Mac's batches 317-327 and 328-338, to use the week's
+allowance. Every merge onto next kept `bin/reap` at 0 problems and `bin/crops-score --judge --strict` passing; next was reviewed
+twice before the night (`h-review-diet`, `h-review-next2`: nothing breaking). The rule of the day: a branch that changes the
+build (compiled or embedded code, j2g, goi's table, a key) without having been built waits for after the full gate, since a
+build failure ends the whole gate (the morning's javac-tool). Each held branch's commands for the main host are in
+`.tmp/goal/after-gate-todo.md`. The decisions are round 51's (`.tmp/decidables-1110.md`); round 52 (19:15) set the night.
+
+- **The gate.** Landed: the crops tier (`gate-ess-diet`, essential 71 -> 51 steps; journal "the crops tier"), `memdecl-fix` (the
+  declared `:mem-gib` at the measured peaks), `tmpdates-fix` (old-dated archives extracted with `tar -m`), `fix-javac-tool`
+  (the Path variant retired; javac's key moved, gate_key not), javac-tool 51 GiB, diffcheck 50, programs-full 51. Held: the
+  cover (`h-keys-design` `e55d2456a`, GDS21-GDS26 (a); first prune units.tsv by `bin/gate-unit-keys measure` on tonight's log;
+  GDS27 for the user on its data).
+- **Java** (89 92 100 60, from 87 90). Landed: F26 and GH5 (iii)'s first slice in one conversion (`f26-ghidra`, merged as
+  `e30418178`: the class-file API, java.beans' PropertyChangeEvent and Listener, h-java-deferred's derivations, A8c; `bin/jrt-convert
+  verify` byte for byte, `bin/java-check --essential` 428 of 428); `h-java-deferred` (168 stale deferred interp rows recorded, eval
+  deferred 611 -> 443); RP1 (a), RP2 (a) (print deferred 107 -> 40); the own platform's design JOP1-JOP8 with its proof
+  (`h-java-platform`: 68 modules, 27,530 classes, only 48 `:param-names` classes differ). Ghidra: analyze's 20 failures -> 0
+  (`h-ghidra-20`), G2's A14, A16, A18 (`h-g2-arbace`). Held: RP3 (javac's key) and the platform's transition night
+  (`.tmp/goal/java-platform-night.sh`, about 2 h 10 min, 45 GiB peaks); `h-java-members` (`2aa918480`: 28 of 85 tests' causes
+  fixed in j2g, unbuilt); `h-java-aot-triage` (`1c4357d87`: the 536 compiled deferred grouped, AT1-AT10; its merge needs `bin/j2g-edge
+  update`). Round 51: System.Logger (a) per-class derivations; JOP1-JOP8 (a), JOP9 (a), JOP10 (c), JOP11 (a); RP1-RP3 (a);
+  finalize in Object's table (a); AT1-AT10 approved; Ghidra fix 1 (a), GH13-GH22 (a).
+- **Clojure** (99 99 100 100). Landed: `h-clojure-go` (CDR2's and CDR4 (b)'s rows recorded, eval deferred 50 -> 45; gen-class's
+  `:exposes-methods` takes the world's protected methods) and its fix `h-prepare-fail` (no fn defined after genclass.ae in
+  arbace.core). Held: genclass's record after a build at the new gate_key, then the AOT suite with test-dot, test-bean, genclass.
+- **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
+  and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
+  importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),
+  each Go eval deferred 9 -> 7; then a whole `bin/goi check` (corpus_key moved).
+- **C** (98 100 100 100, from 96). Landed: `h-judges` (67 andrewchambers_c rows judged by their own verdict, the judge 98 -> 99),
+  `h-c-deferred` (read and print rows), `h-c-run` (17 by-design programs pass; CS320 (a) GNU vector types and CS321 (a) nested
+  functions, first deferred then built: eval and AOT with no deferred row). Held: `h-c-decl-diag` (`a9079b556`, read deferred 27 ->
+  17, embedded C), then C's whole records. Round 51: judges D2 (a) gcc's record kept for MIR's new/; eval-depth (a) deferred.
+- **C++** (91 93 100 72). Landed: `h-cpp-read` (read deferred 136 -> 103: 33 syntax files and a fatal Sema recursion, compiled
+  sema's unbounded depth since W2; CP398 (a)+(c), CP399 (a)). Held, to merge together after the gate (round 51): `h-cpp-consteval`
+  (`d36d4e385`: class objects in the constant evaluator, `:own-diag` 863 -> 815; the evaluator is the code generator's too), the
+  Mac's 336 (both rounds, `-fconcepts`, D336-1 (a), D336-2 (a)), 324 with its review (`h-review-mac-crops-cpp` `b22363909`: the
+  own IR on the auto route, D1 (a), D2 (a)) and 338 (the VM-only Sema crash, 324's header bug; 338-1 (a), 338-2 (a)); then
+  cpp-runtime, the essential checks and the whole cpp-dg. Judges D3: the C++ judge's bound (about 91) accepted.
+- **OCaml** (86 96 100 100). Held: the Mac's 323 (`65109ab43`: OT30 (a) split, OT31 (a) weaklifetime fixed in ExtGc, OT32 (a)
+  `:config-skipped`; meant 96 -> 91 honestly once recorded; jdk/ocaml's runtime key moved: the whole records). 331 (OT30's
+  classes) runs on the Mac.
+- **Scheme** (100 100 100 100, from 98). Landed: `h-scheme` (the AOT cell widened to eval's corpora, 51 -> 2,513 cases; SCS27 (a),
+  SCS28 (a), SCS31 (a) `:na`, SCS32 (b) si-ecraven-aot weekly; SCS33-SCS36 (a)). Held: the Mac's 334 (si's speed), then
+  `SI_TIMEOUT=300 bin/si ecraven --aot --record` (about 1.5 h) and the source's `:until` dropped.
+- **Haskell** (97 99 100 76). Landed: `h-haskell-deferred` (the deferred rows and design classes audited), `h-hes-lls` (HES92 (a),
+  HES93 (a): print 1,345 / 0 / 0), `h-haskell-threaded` (HES84 (a), hsi's threaded way: eval deferred 35 -> 30, AOT 1 -> 0).
+  Held: HES91 (a) (`h-hes-lls-hes91` `d129fc245`: callback002's record at 16 GiB, with rts_clearMemory); the Mac's 325 (own STG,
+  D1-D6 (a), independence 76 -> 78 once recorded). Round 51: T24809 (a) kept skipped; the I/O manager (a) as designed, parallel
+  capabilities (a) after 333.
+- **Rust** (75 75 96 80). Landed: `h-rust-indep` (RIND1-RIND7 (a): the own allocator shim with `rsi-shim-essential`, rsi's ci on
+  Arbace's own C target, the samples from Arbace's MIR, 5 of the eval cell's 5 cases own through the shuffle, SIMD arithmetic and
+  swizzle; stage 4's measures and the StableCrateId finding), the Mac's 322 (the AOT cell, D1 (a), D2 (a)). Independence stays
+  80 until C2-C6. Held: 322's amd64 records (the cell's `:until` dropped with them); RIND8 (a), RIND9 (a), RIND10 (a) (the
+  portable-SIMD lines in core-attrs, proved by `bin/rust-front rsi-build vectors` before the night's `--front own` record).
+  Round 51: simd const eval (a), `--record` defaults to `--front own` (a).
+- **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred
+  17 -> 15, eval 15 -> 3), LLS54 (a) (the tx pack with dg-options), `h-judges`' split-file section, the Mac's 335 (Verifier rules:
+  read deferred 15 -> 1; D335-1 (a), D335-2 (a)). Held: 335's `ir-make rt --mutants` and `verify-rt-heldout --record`; the 13 eh
+  modules' AOT record. Judges D1 (a): lli's record kept.
+- **The assembly crops** (99 100 100 100, 100 100 100 100). Landed: `h-asm-deferred` (AXS95 (a) `:object-unjudged` deferred,
+  AXS96 (a) a real judge for the error tests, AXS97 (a) `:debug-trace` by design: amd64 read deferred 32 -> 1), `h-asm-directive`
+  (MCAsmStreamer's directive lines: print deferred 581 -> 531), the Mac's 337 (the object check, AXS99 (a), AXS100 (a), AXS101 (b)).
+  Held: 337's whole amd64 object-check record.
+- **Python** (0 0 83 60). Landed: `h-pyi-runtime` (pyi loads the checkout's runtime when it differs from stage 0's). Held: the
+  line `mac/python-1117-on-next` (`593c97d03`: 317-321, 330, the review's fixes; independence 98 on it): its records night first
+  (`GOGC=50 PYI_LIB_TEST_JOBS=4 bin/pyi records`, the packs, 318's results), then the splice (`317-python-splice`, F1 (a)).
+  Round 51: 304 PYTHONHASHSEED (a), 305 (b) as 316, 316 D1 (a), 320 D1-D3 (a), 321 D1 (a), D2 (a), 317 D1-D3, F5 (a), 330 D1 (a).
+- **WebAssembly** (98 98 100 100). Held: the Mac's 326 (both rounds, D326-1 to D326-4 (a)) and 327 (custom descriptors, D327-1 (a),
+  D327-2 (a); wasm 100), with their amd64 commands.
+
+The night (round 52): the full gate alone on the host; the burst goes on with memory-free agents (each process under 1 GiB:
+reviews of the held stacks, designs, code with unit tests, this record), decisions taken as recommended and logged "taken
+overnight (round 52)". After the gate, nothing heavy until the user is up: no Ghidra night jobs (deferred by the user), no
+held branch's records, no Java platform night. The Mac stays settled (no new tasks).
+
 ## The consolidation (2026-11-15/17)
 
 One stack, essential gates after the merges, the re-seed last, then one full gate (the user, 2026-11-16: the intermediate full
@@ -301,7 +389,11 @@ gates moved with every key the re-seed moves anyway; rounds 45-50 in the journal
   `2455fa2be`).
 - **R** (`w-retire-4`, merged as `f1969748f`).
 - **The full gate** on `f1969748f` from 09:20 UTC (plan: simulated wall 7:27); the essential gate before it was dropped as
-  redundant (the full tier runs every essential step; the user, 2026-11-17).
+  redundant (the full tier runs every essential step; the user, 2026-11-17). It ended after 59 minutes: the `javac-tool` build
+  failed (jrt's `java_nio_file_Path`: a duplicate `GetFileSystem`, the tool world's Path variant beside jdk26u's own since F9),
+  every check unrun, and its advance script moved main and next to `f1969748f` without checking round 50 (3)'s condition. The
+  user kept main (no force push); the essential gate on main passed at 12:33 (126 min, 0 failures). `fix-javac-tool`
+  (`2229a2093`) retired the variant; the full gate moved to the night, on the burst's next.
 - **Beside it** (light, branches to land after the advance): `tmpdates-fix` (every other extraction of an old-dated archive
   where the gate's age prune reaches), `memdecl-fix` (the steps whose peaks exceed their `:mem-gib`: cpp-runtime 8.1 GiB
   for 3, go-build 25 for 20, ...), `goal-records` (these records).

@@ -10319,3 +10319,75 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: the day's summary: the consolidation landed, the burst onto next, tonight's full gate (rounds 51 and 52)
+
+The consolidation's last steps (the entry "the consolidation's stack" above): the full gate on `f1969748f` started at 09:20 UTC
+and ended after 59 minutes, its `javac-tool` build failed (jrt's `java_nio_file_Path` had `GetFileSystem` twice: the tool
+world's Path variant in `overlay/jdk/javac/variants/Path.ae` beside jdk26u's own Path, the world's since F9), every check unrun.
+`fix-javac-tool` (`2229a2093`) removed the variant (javac's key moved, gate_key not); javac-tool's `:mem-gib` went to 45, then
+51 (its repr/go print near 41 GB). The essential gate on main `f1969748f` passed at 12:33 (126 min, 0 failures), so round 50
+(3)'s condition held after the fact; the user cleared the goal (10:59) and moved the full gate to the night (round 51).
+
+Step 4 by day (the user, 10:49): next = `f1969748f` with `goal-records`, `tmpdates-fix` and `memdecl-fix` (`cf8268ebf`); 9 merged
+worktrees removed (their scratch in `.tmp/keep/`), 41 local and 50 mac merged branches deleted (listed with their SHAs in
+`.tmp/keep/deleted-branches-1117.txt`), and the user deleted the superseded ones (`w-retire`, `-2`, `-3`, `jcs127-*`, `w2-trial`,
+`ghidra-g1n`, `window-w`, `embed-gaps`, `ocaml-libs1`, `305-python-speed`, ...; `oracle-packs` kept, ORS3 (a)'s mirror).
+
+Then the burst (the user, 13:26: use this subscription's week, settle at 98%, switch subscriptions): about 25 high-thinking
+agents on this host under `.tmp/goal/host-burst-rules.md` (light targeted checks, no gates, each process under about 2 GiB) and
+the Mac's batches 317-327 and 328-338 through the queue. What each crop got is listed in doc/AGENDA.md, "The burst
+(2026-11-17)", with each held branch and its commands; the branch entries above are the details. In short, on next
+`42bf8614b` (45 first-parent commits since `f1969748f`):
+- the gate: the crops tier (`gate-ess-diet`: the essential gate is the core and a crop's subsets run by day only when its
+  paths changed; 71 -> 51 steps, 52 with `rsi-shim-essential`), memdecl-fix, tmpdates-fix, diffcheck 50 GiB, programs-full 51;
+- Java: F26 and GH5 (iii)'s first slice in one conversion (`f26-ghidra`, with h-java-deferred's derivations and A8c), the stale
+  deferred rows recorded, RP1 (a), RP2 (a), the own platform's design JOP1-JOP8; Ghidra's analyze 20 -> 0 failures, G2's A14,
+  A16, A18; Clojure's CDR rows and gen-class's exposer; Go's by-design classes reclassified (A (a), B (a));
+- C's judge audit, read and print rows, CS320 (a) and CS321 (a) built (eval and AOT with no deferred row); C++'s read cell
+  (136 -> 103 deferred, Sema's depth guard; CP398 (a)+(c), CP399 (a)); Scheme's AOT cell over eval's corpora (51 -> 2,513);
+  Haskell's HES84 (a), HES92 (a), HES93 (a); Rust's RIND1-RIND7 (the allocator shim, ci on Arbace's C target, the eval cell's
+  five cases from Arbace's MIR) and the Mac's 322; LLVM's verifier checks (read 17 -> 1 deferred with 335), LLS54 (a); the
+  assembly crops' AXS95-AXS97 (a), the streamer's directive lines and the Mac's 337; pyi on the checkout's runtime.
+The scores on next (completeness, without by design, maturity, independence): Java 89 92 100 60 (from 87 90), Go 98 100 100 100
+(from 97), C 98 100 100 100 (from 96), C++ 91 93 100 72 (93 from 96 by CP398/CP399's honest reclassification), Scheme 100 100 100
+100 (from 98); the others unchanged (Clojure 99 99 100 100, OCaml 86 96 100 100, Haskell 97 99 100 76, Rust 75 75 96 80, LLVM IR
+98 99 100 98, Python 0 0 83 60, x86-64 assembly 99 100 100 100, arm64 assembly 100 100 100 100, WebAssembly 98 98 100 100). The
+REAP matrix: 56 cells, 53 checked, 0 problems. next was reviewed twice before the night (`h-review-diet`, `h-review-next2`:
+nothing breaking; `bin/gate --full --concurrent --plan` 339 steps, simulated wall 8:02).
+
+Held until after tonight's gate, by the rule the morning taught (a build failure ends the whole full gate, so a branch that
+changes the build without having been built waits): h-go-weak, h-go-noforms, h-c-decl-diag, h-cpp-consteval with the Mac's
+324, 336 and 338, h-java-members, h-java-aot-triage, h-java-platform's night with RP3, h-keys-design (the cover, GDS21-GDS26 (a)),
+HES91, and the branches whose records come first (Python's line, then its splice, F1 (a); the Mac's 323, 325, 326, 327, 334).
+Their commands are in `.tmp/goal/after-gate-todo.md`. The decisions of the day are round 51's (each recorded in its crop's survey
+and listed by crop in the AGENDA).
+
+Round 52 (19:15, the user going to sleep): the full gate on next `42bf8614b` (`bin/gate --full --concurrent`, log
+`.tmp/goal/g-full2.log`) alone on the host all night; main advances only if every essential step passed, checked before main
+moves; the other failures to `REVISIT-full2.md` and fix agents in the morning; after the gate nothing heavy until the user is
+up (no Ghidra night jobs, no held branch's records, no Java platform night); memory-free agents meanwhile (each process under 1
+GiB), their decisions taken as recommended and logged "taken overnight (round 52)"; the Mac settled.
+
+The day's mistakes and what changed:
+- The morning's advance on a failed gate: `.tmp/goal/advance-after-full.sh` fast-forwarded main and next to `f1969748f` and
+  pushed them when the full gate ended, without reading its result (round 50 (3) allowed an advance on failures only if the
+  essential steps passed; none had run). The user kept main without a force push and the essential gate on it passed at 12:33.
+  Changed: an advance script reads the gate's summary and checks the essential steps before it moves main; and a branch that
+  changes the build without having been built is held until after the gate.
+- The night's premature advance: the new watcher waited on the gate's launcher PID (10547), but `bin/gate` re-executes itself
+  under `bin/heavy-lock` (the gate's real PID 10664), so the wait returned at once and main went to `42bf8614b` at 19:17, before the
+  gate ran, pushed to origin and mac. The user kept it (round 52): tonight's full gate decides the fixes rather than the advance.
+  Changed: the watcher was replaced by `.tmp/goal/revisit-after-full2.sh`, which waits for the gate's summary line in its log (not a
+  PID) and moves nothing.
+- javac's tool removed with its worktree: at 12:23 `fix-javac-tool`'s worktree was removed with the tool it had built (67 minutes,
+  41 GB peak), so `f26-ghidra` built it again. Changed: a worktree is removed only after the builds and scratch its report names are
+  copied to `.tmp/keep/` or published into the shared executables' directory.
+- The Go build cache trimmed: about 17:00 the `f26-ghidra` agent trimmed the shared `/root/.cache/go-build` (7.1 GB -> 0.3 GB), so
+  tonight's first builds are colder (no build broke: none ran then; a trim on 11-16 had broken one). Changed: the host's agent
+  rules forbid any trim of Go's build cache (`.tmp/goal/host-burst-rules.md`; the gate's own LRU cap is the only trim).
+- A scratch lost: `gate-ess-diet`'s worktree was removed at 13:12 with its scratch (its cover check `.tmp/ess/cover.ae` among
+  it), not kept; the branch's commit holds the result, so nothing needed is lost. Changed: the same rule as for the tool (copy what
+  a report names before removing a worktree); also one review diff used `<(...)`, against the host's rules.
+Alternatives considered for the night's advance: reverting main to `f1969748f` (a force push to origin, which the user declined)
+and holding the gate until a corrected watcher (it would have moved the night's 8 hours into the morning).
