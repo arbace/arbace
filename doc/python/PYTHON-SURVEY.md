@@ -7783,3 +7783,10 @@ stay 0.5 for the rest (350's report, its plan and DECISION 1).
   `arbace_runtime_key` does not move (`arbace_runtime_not` keeps `go/arbace/py` out). Checked at 9cd2e4a96 and at 366's head with
   each tree's key functions (doc/scheme/SCHEME-SURVEY.md, "As built: 350 and 366", for the numbers: gate_key's per-file digests
   differ in exactly 350's four files and this table).
+- **Round 2 (the user's choice of the lows, 2026-11-18): the five tables of queue 265** (opcode, errno, fcntl, socket, posix) name their
+  generator the same way, `tools/pyi/runtime_tables.ae (TABLE)`; each `go/arbace/py/builtins_TABLE_table.ae` moves once, its header
+  comment alone (the `;;` line and the `:go/comments` entry), re-read from the generated Go in a one-file module (fcntl, socket and posix
+  for linux/amd64, their build line), each control (the committed printed Go read the same way) byte for byte the committed forms.
+  `bin/pyi runtime tables`, the oracle tier's comparison with the python3 generators, respells the python3 header to the Arbace one
+  before comparing (the rest byte for byte). Run: `bin/pyi runtime gen-tables`, the seven tables byte for byte and the seven controls
+  differing (97 s); the five python3 generators run on the VM's python3 3.14.10 through that pipeline equal to the new files.
