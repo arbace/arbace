@@ -12816,3 +12816,20 @@ recorded, every module by its own verdict (C++'s lowered runtime built here; run
 nan-to-unsigned passes, `:ub-refinement` removed. Judge 0.8965 to 0.9485: independence 0.9792 to 0.9898, completeness 0.9915 to
 0.9933; reap, crops-score --record and --judge --strict, records-check: 0 problems. Alternative considered: self-check lines in the C++
 sources (the decision's wording), not taken for the cascade above; doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS57 (b), LLS49 (c)".
+
+## 2026-11-18: n-all4, five branches merged (round 54): n-recs, 391, n-rust-aot, n-llvm-indep, 388
+
+`--no-ff` in order: mac/n-recs `d659abc86` (D340-2's records, names.ae's Sun_GarbageCollectorMXBean, sema.ae's `(boolean ...)`),
+mac/391-n-all4-arm64 `39077e664`, mac/n-rust-aot `80fd05759`, mac/n-llvm-indep `475cda469`, mac/388-n-all4-fixes `216da0b37`.
+Conflicts: the journal's appends (both sides kept, in order) and test/crops/scores.edn (re-recorded). arbace/cpp/sema.ae and
+lower.ae merged without a conflict. jdk/ taken from n-recs wholesale but jdk/ocaml/ (OCaml's crop, which n-all4 advanced past
+n-recs' base n-all3: n-recs' side would have dropped Bt.ae and 384's Main.ae); no other merged branch touches jdk/.
+Checks, light, every process under 4 GiB (peaks 1.4-3.0 GB): `bin/provenance-check` passes; `bin/cppi lower-essential` (runtime 198
+of 198, 6 of 6); Haskell's lib-check `--ifaces own --judge`: template-haskell 0 worse, exceptions and bytestring 0 worse (1 better
+each), os-string 0 worse 4 better, filepath 0 worse 3 better, os-string and filepath re-recorded (388-1 (a)); the pools of array,
+stm, transformers and mtl copied from n-hs-elab2's .tmp. `bin/reap --record` (54 of 56, 0 problems, matrix unchanged),
+`bin/crops-score --record` (Rust 95.8 to 99.99), `--judge --strict` 0 problems, `bin/records-check` 9 pairs 0, gate.crops check 0.
+`bin/j2g-unit`: 175 passes, 8 failures: n-all4's 7 and "base: control: with the edge alone they are refused", whose Handler is
+no longer refused now that n-recs' jdk/edge.edn records Thread$UncaughtExceptionHandler's generics (the control's premise, not
+fixed here). `bin/gate --full --concurrent --plan`: 355 steps, 319 run. Keys: gate KEY20 `0753b529a43fe68eabff`, javac's
+`826af88b21197c6b19c4`.
