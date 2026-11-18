@@ -1896,6 +1896,15 @@
         (contains? #{'let 'letrec} (first c)) (list (first c) (second c) (tag-guards (nth c 2) ef))
         :else c))
 
+(defn- strict-pat
+  "Queue 352, 346-1 (a): a match's outermost pattern under the Strict extension, GHC.HsToCore.Utils' decideBangHood
+  (matchWrapper's equations, matchSinglePat's statements): ~p is p, !p stays, any other p is !p; unchanged without Strict"
+  [p]
+  (cond (not (contains? *exts* "Strict")) p
+        (and (seq? p) (= 'plazy (first p))) (second p)
+        (and (seq? p) (= 'pbang (first p))) p
+        :else (list 'pbang p)))
+
 (def ^:dynamic *static-binds* nil) ; atom [BIND-or-nil...]: the module's static forms' top-level StaticPtr bindings, by number
 
 (declare fp-words fp-string)
@@ -2119,7 +2128,7 @@
                      a (fresh-meta)
                      ;; the pattern's equalities given to the statements after it (tcDoStmt's implication)
                      [env1 pc tr cr] (binding [*given-eqs* (scope-givens)]
-                                       (let [[env1 pc] (tc-pat env (arg v 2) a) [tr cr] (infer-stmts env1 more)] [env1 pc tr cr]))
+                                       (let [[env1 pc] (tc-pat env (arg v 2) a) [tr cr] (infer-stmts env1 more)] [env1 (strict-pat pc) tr cr]))
                      [tb cb] (global-occ env ">>=" "GHC.Internal.Base")
                      r (fresh-meta)]
                  (unify tb (fn-ty te (fn-ty (fn-ty a tr) r)))
@@ -3158,7 +3167,8 @@
                 BodyStmt (let [[t c] (infer env (arg v 2))] (unify t (con-ty tc-bool)) [env (conj gs c)])
                 BindStmt (let [[te ce] (infer env (arg v 3))
                                wi (count @*wanteds*) before (some-> *given-eqs* deref)
-                               [env1 pc] (tc-pat env (arg v 2) te)]
+                               [env1 pc] (tc-pat env (arg v 2) te)
+                               pc (strict-pat pc)]
                            ;; HF10-P20: a pattern that gives equalities: the wanteds made before it (its scrutinee's,
                            ;; eqT's heqT @a @b) are outside its implication; review 1111b (finding 1): every such pattern
                            ;; recorded with the givens before it, so a second guard's scrutinee is not rewritten by its own
@@ -3327,7 +3337,7 @@
                                   body (infer-grhss env1 (arg mv 4) r)]
                               (when (not= outer @*given-eqs*)
                                 (rewrite-wanteds! w0))
-                              [pcs body]))))
+                              [(mapv strict-pat pcs) body]))))
                       ms))
         _ (when (seq splits) (retry-implications! false) (solve-with-givens! @sws sgivens))
         ;; the split arguments' lambdas: the dictionaries of a polytype met after k arguments bound after them
@@ -3664,10 +3674,24 @@
       (do (swap! *patsyn-builders* conj (fn [env2] (patsyn-builder env2 psb n info argns))) [matcher])
       (vec (keep identity [matcher (patsyn-builder env psb n info argns)])))))
 
+(defn- field-strict?
+  "A constructor field's source bang (CDF ... UNPACKEDNESS STRICTNESS) strict: !, or since queue 352 any field but a ~ one
+  under StrictData (GHC.Tc.TyCl's srcStrictnessFor, the Strict extension implying it)"
+  [x]
+  (boolean (and (seq? x) (or (some #{'SrcStrict} x)
+                             (and (contains? *exts* "StrictData") (not (some #{'SrcLazy} x)))))))
+
 (defn- strict-var-bind?
   "A strict variable binding `!x = e` (FunRhs's SrcStrict: GHC's strict binding, dsStrictBind)"
   [b]
   (boolean (some (fn [x] (and (seq? x) (= 'FunRhs (first x)) (some #{'SrcStrict} x))) (take 400 (tree-seq coll? seq b)))))
+
+(defn- strict-ext-var-bind?
+  "Queue 352: a variable binding (a FunBind of no argument) made strict by the Strict extension: not ~x (FunRhs's SrcLazy)"
+  [b]
+  (let [v (lval b) ms (when (= 'FunBind (con v)) (lval (arg (arg v 3) 2))) m (when (= 1 (count ms)) (lval (first ms)))]
+    (boolean (and (contains? *exts* "Strict") m (empty? (lval (arg m 3)))
+                  (let [ctx (arg m 2)] (not (and (seq? ctx) (some #{'SrcLazy} ctx))))))))
 
 (defn tc-group
   "A binding group: [env' [(bind B core)...]]; sigs {NAME type}"
@@ -3675,7 +3699,9 @@
   (let [psbs (vec (mapcat #(tc-patsyn-bind! env %) (filter patsyn-bind? binds)))
         ;; a let's strict variable bindings: the body forces each (dsStrictBind: let x = e in x `seq` body)
         _ (when (and *strict-binds* (= (inc *level*) (:level *strict-binds*)))
-            (doseq [b binds :when (and (bind-name b) (strict-var-bind? b))]
+            ;; (queue 352: under Strict a variable binding `x = e` too, recursive or not, unless ~x: dsLocalBinds' strict binds,
+            ;; Binds.hs's force_var)
+            (doseq [b binds :when (and (bind-name b) (or (strict-var-bind? b) (strict-ext-var-bind? b)))]
               (swap! (:atom *strict-binds*) conj [(bind-name b) (list 'pbang (list 'pwild))])))
         binds (vec (remove patsyn-bind? binds))
         names (mapv bind-name binds)
@@ -3708,9 +3734,13 @@
                                           ;; a banged pattern binding (`let !(Just (Just y)) = e in b`, GHC's strict pattern
                                           ;; binding, dsStrictBind): the whole match forced before the let's body (T11601)
                                           (let [pv (lval (arg (lval b) 2))]
-                                            (when (and *strict-binds* (= *level* (:level *strict-binds*)) (= 'BangPat (con pv)) (not= 'VarPat (con (lval (arg pv 2)))))
+                                            ;; (queue 352: under Strict any pattern binding but ~p, decideBangHood in dsHsBind: DsStrictLet's
+                                            ;; `False = e` forced)
+                                            (when (and *strict-binds* (= *level* (:level *strict-binds*))
+                                                       (or (and (= 'BangPat (con pv)) (not= 'VarPat (con (lval (arg pv 2)))))
+                                                           (and (contains? *exts* "Strict") (not= 'LazyPat (con pv)))))
                                               (let [sm (into {} (map (fn [[x _]] [(lv x) (list 'lv (occ x) (str "sel" (fresh-id)))]) es))]
-                                                (swap! (:atom *strict-binds*) conj [pn (substitute sm pc)]))))
+                                                (swap! (:atom *strict-binds*) conj [pn (substitute sm (strict-pat pc))]))))
                                           ;; each selector's pattern variables locals of its own (the top level's
                                           ;; rename-mono turns the binders' names into the globals)
                                           (into [[pn c]] (mapv (fn [[n _]]
@@ -3957,7 +3987,7 @@
                                    :tycon (when (= :tc (first res)) (second res))}
                             :strict (into (vec (repeat (count ctx) false))
                                           (for [x cdfs] (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)]
-                                                          (boolean (and (seq? x) (some #{'SrcStrict} x))))))})
+                                                          (field-strict? x))))})
     {:name cn :arity (count argtys) :labels (mapv first fields) :infix? false :tys argtys}))
 
 (defn- tv-kind-anns
@@ -4156,7 +4186,7 @@
                                                        InfixCon [(arg det 1) (arg det 2)]
                                                        RecCon (mapcat (fn [f] (let [fv (lval f)] (repeat (count (arg fv 2)) (arg fv 3)))) (lval (arg det 1)))
                                                        [])]
-                                                   (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)] (boolean (and (seq? x) (some #{'SrcStrict} x))))))})))
+                                                   (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)] (field-strict? x))))})))
     ;; the derived instances: the stock classes' requests are kept for derive-all! (HF4), the others enter the table
     ;; with the context approximated as before
     (let [used (set (for [c conlist x (tree-seq coll? seq (lval c))
