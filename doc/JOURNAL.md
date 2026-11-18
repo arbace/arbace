@@ -11689,3 +11689,20 @@ pointer Go type and j2g's `J2g_NotNull[T]` otherwise (the `:null-checked` node's
 gains the emitted-Go checks over the fixture (new classes z/Abs, z/Base, z/Sub, z/Shape) and a negative control; bin/j2g-unit 152 pass,
 the 7 known failures. The shapes compiled against a stub jrt, the old one failing with "cannot infer T". Alternatives: J2g_NotNull
 always, or a jrt function over any (not taken). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-j2g-finalize".
+
+## 2026-11-18: n-all, the trial integration of the night's heads (round 52; branch `n-all` from next `42bf8614b`)
+
+Merged from mac/, in order: n-agenda 63843574b, n-review-cc c53c0514f, n-java-head 82546209b, n-oc218 51ee5c0c6, n-hs-elab
+50dc1d073, n-rust-alloc4 527925a75, n-review-f 6355437f0, n-g2-next 375ce22bc, n-g2-a20 bafd76627, n-g2-xml 92579b36b,
+n-cdr5-extra 8713a5091, n-g2-bc df3731018, then n-j2g-finalize 902674691 (pushed by then; n-rust-alloc5 was not). Left out, as
+they need their day runs first: h-keys-design e55d2456a, h-hes-lls-hes91 d129fc245, CDR1 8a3d28662 (its parent the dropped CDR5
+082330d04); none of the merged heads contains them. Conflicts, every one settled keeping both sides: the journal at each merge
+(the entries appended in merge order); test/crops/crops.edn (C++'s :cpp and Java's :java input rules, one closing brace);
+test/crops/score.ae (CP333 (b)/CP401 (a)'s and JOP7 (a)/JOP13 (a)'s helpers, self-test bindings and checks, the banner naming
+all); test/j2g/unit.ae twice (AT9/AT10's tests beside A17's test-entries; n-j2g-finalize's longer test-object-finalize end);
+test/reap/matrix.edn re-recorded. test/crops/independence.edn (six heads), test/gate/steps.edn (five heads), arbace/j2g/main.ae
+(three heads) merged without conflict; bin/lib/version.bash is changed by no head. Then `bin/reap --record` (53 of 56 cells
+checked, 0 problems), `bin/crops-score --record` and `--judge --strict` (14 crops, 0 problems; each crop's row equal to the one
+head that moved it), `bin/records-check` (9 pairs, 0 problems), `make check-makefile`, test/docs/claude-md-test.bash,
+test/gate/caches-test.bash (with `--coverage`), `bin/gate --plan` (52 steps) and `bin/gate --full --plan` (341 steps), every
+process under 1 GiB but bin/j2g-unit (1.2 GB: 160 pass, the 7 known failures of the base). Nothing built.
