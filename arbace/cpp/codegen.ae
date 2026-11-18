@@ -420,7 +420,7 @@
 
 (defn- run-cleanup! [c]
   (cond
-    (or (:try c) (:terminate c) (:eh-only c) (:delete c) (:guard-abort c)) nil
+    (or (:try c) (:terminate c) (:filter c) (:eh-only c) (:delete c) (:guard-abort c)) nil
     (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] (not (:might-throw c))))
     :else
   (if-let [fl (:flag c)]
@@ -463,7 +463,8 @@
 ;; cleanups from the innermost out, dispatches to a try's handlers by llvm.eh.typeid.for, and resumes past the outermost.
 ;; The cleanup stack's entries beside the destructors: {:try handlers} (each {:ti type_info-or-nil :label l}),
 ;; {:end-catch true}, {:eh-only true :addr :cls} (a constructed base or member while its constructor runs), {:delete p
-;; :size n} (new's storage while its initializer runs), {:terminate true} (the bottom of a noexcept function).
+;; :size n} (new's storage while its initializer runs), {:terminate true} (the bottom of a noexcept function), {:filter true}
+;; (the bottom of a `throw()` function before C++17: clang's EHFilterScope of no types, EmitStartEHSpec; queue 351).
 
 (def ^:dynamic *no-eh* false) ; inside a landing pad: calls are plain
 (def ^:dynamic *as-base* nil) ; {:vtt v}: the next constructor or destructor called is a base subobject's
@@ -471,7 +472,8 @@
 (defn- eh-state [] (vec (concat (:cleanups @*f*) (when *extend* @*extend*) (when *temps* @*temps*))))
 
 (defn- pad-plan
-  "[clauses cleanup?] of a landing pad for the cleanup stack `state` (clauses: type_info symbols, nil for catch-all)."
+  "[clauses cleanup? filter?] of a landing pad for the cleanup stack `state` (clauses: type_info symbols, nil for catch-all;
+  filter?: a `throw()` function's empty filter ends the list, clang's EmitLandingPad's hasFilter)."
   [state]
   (loop [cs (rseq state) clauses [] cleanup false]
     (if-let [c (first cs)]
@@ -481,6 +483,7 @@
                        cl (into clauses (map :ti (if all (concat (take-while :ti hs) [nil]) hs)))]
                    (if all [cl cleanup] (recur (rest cs) cl cleanup)))
         (:terminate c) [(conj clauses nil) cleanup]
+        (:filter c) [clauses cleanup true]
         :else (recur (rest cs) clauses true))
       [clauses cleanup])))
 
@@ -534,6 +537,11 @@
       (:terminate c) (let [e (val! (list 'load 'ptr ['ptr es] :align 8))]
                        (emit! (list 'call 'void (clang-call-terminate!) [['ptr e]] :attrs [:noreturn :nounwind]))
                        (emit! '(unreachable)))
+      ;; queue 351: the empty filter's dispatch, clang's emitFilterDispatchBlock: every exception is unexpected
+      (:filter c) (let [e (val! (list 'load 'ptr ['ptr es] :align 8))]
+                    (declare! "__cxa_call_unexpected" 'void '[ptr])
+                    (emit! (list 'call 'void (gsym "__cxa_call_unexpected") [['ptr e]] :attrs [:noreturn]))
+                    (emit! '(unreachable)))
       ;; G5c: __cxa_end_catch while unwinding may throw (a catch (...) or of a class: the exception's destructor), and a
       ;; cleanup that throws during unwinding terminates ([except.terminate]/1; clang's CallEndCatch on the EH path: an
       ;; invoke whose landing pad calls __clang_call_terminate; libsupc++'s vec.cc's catch (...) { ...; throw; })
@@ -565,8 +573,8 @@
   "The label of the landing pad for the cleanup stack `state` (written out of line once per state), or nil when no
   handler or cleanup is active."
   [state]
-  (let [[clauses cleanup] (pad-plan state)]
-    (when (or (seq clauses) cleanup)
+  (let [[clauses cleanup flt] (pad-plan state)]
+    (when (or (seq clauses) cleanup flt)
       (or (get-in @*f* [:pads state])
           (let [l (new-label "lpad")
                 saved (select-keys @*f* [:label :insts :term :blocks])
@@ -577,7 +585,8 @@
             (declare! "__gxx_personality_v0" 'i32 [] :va true)
             (start! l)
             (let [lp (val! (apply list 'landingpad '(struct ptr i32)
-                                  (concat (when cleanup [:cleanup]) (map (fn [ti] (list 'catch 'ptr (or ti 'null))) clauses))))]
+                                  (concat (when cleanup [:cleanup]) (map (fn [ti] (list 'catch 'ptr (or ti 'null))) clauses)
+                                          (when flt ['(filter (array 0 ptr) zeroinitializer)]))))]
               (emit! (list 'store ['ptr (val! (list 'extractvalue ['(struct ptr i32) lp] 0))] ['ptr es] :align 8))
               (emit! (list 'store ['i32 (val! (list 'extractvalue ['(struct ptr i32) lp] 1))] ['ptr ss] :align 4)))
             (binding [*no-eh* true *temps* nil *extend* nil] (eh-walk! (rseq state) es ss))
@@ -694,6 +703,13 @@
         obj)
       (and (:trivial f) (= :dtor (:kind f))) nil
       (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
+      ;; queue 351: a trivial copy or move constructor, a copy of bytes (clang's EmitCXXConstructorCall:
+      ;; isMemcpyEquivalentSpecialMember, EmitAggregateCopyCtor; futex.cc's chrono::seconds passed by value)
+      (and (:trivial f) (= :ctor (:kind f)) (= 1 (count (:ps (:ty f))))
+           (let [p (first (:ps (:ty f)))] (and (#{:ref :rref} (:k p)) (= (:cls f) (:id (abi/unq (:to p)))))))
+      (let [src (second (first (arg-values (:ps (:ty f)) inits)))]
+        (when-not (abi/empty-class? (:cls f)) (memcpy! obj src (abi/size-of {:k :class :id (:cls f)})))
+        obj)
       :else
       (let [plan (nth (fn-sig f v) 3)
             ;; (a virtual destructor called explicitly: its complete-object slot, D1)
@@ -2443,7 +2459,7 @@
             this (when (and (:cls f) (not (:static f))) (let [p (nth pnames @k)] (swap! k inc) p))
             vttp (when vtt? (let [p (nth pnames @k)] (swap! k inc) p))]
         (swap! *f* assoc :sret sret :vtt vttp)
-        (when (nothrow-fn? f) (push-cleanup! {:terminate true}))
+        (when (nothrow-fn? f) (push-cleanup! (if (and (:dynamic-none f) (< (long sema/*cxx-year*) 17)) {:filter true} {:terminate true})))
         (when this
           (let [s (alloca! 'ptr 8)]
             (emit! (list 'store ['ptr this] ['ptr s] :align 8))

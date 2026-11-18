@@ -223,6 +223,16 @@
     ;; (G5c: the ones that do not return, Builtins' NoThrow and NoReturn)
     "abort" "exit" "_Exit" "quick_exit"})
 
+;; queue 351: the C library functions clang 23.1.5 declares NoThrow (clang/include/clang/Basic/Builtins.td's LibBuiltin defs
+;; with NoThrow among their Attributes, as Sema::AddKnownFunctionAttributes adds it to their extern "C" declarations): calls
+;; of them are nounwind, never an invoke (assert_fail.cc's fprintf in a noexcept function: no terminate pad)
+(def ^:private clang-nothrow-libc
+  #{"abort" "fprintf" "isalnum" "isalpha" "isblank" "iscntrl" "isdigit" "isgraph" "islower" "isprint" "ispunct" "isspace"
+    "isupper" "isxdigit" "memchr" "memcpy" "memmove" "memset" "snprintf" "sprintf" "strcat" "strchr" "strcmp" "strcpy"
+    "strlen" "strncat" "strncmp" "strncpy" "strpbrk" "strrchr" "strspn" "strstr" "tolower" "toupper" "umask" "va_copy"
+    "va_end" "va_start" "vfprintf" "vprintf" "vsnprintf" "vsprintf" "wcschr" "wcscmp" "wcslen" "wcsncmp" "wmemchr" "wmemcmp"
+    "wmemcpy" "wmemmove"})
+
 (defn header-entities
   "Our entities for the header declaration the parts name ([\"printf\"], [\"std\" \"printf\"]), or nil."
   [parts]
@@ -248,7 +258,7 @@
                                  f {:id id :name (:name pe) :kind :fn :ty (resolve-type *root* (:qt pe)) :linkage :c :path []
                                     :scope *root* :param-names [] :defaults [] :pos -1 :header true
                                     ;; the C library functions clang knows as nothrow builtins (nounwind at their calls)
-                                    :noexcept (boolean (nothrow-libc (:name pe)))
+                                    :noexcept (boolean (or (nothrow-libc (:name pe)) (clang-nothrow-libc (:name pe))))
                                     ;; (and as not returning: Builtins.def's abort, exit, _Exit, quick_exit; G5c)
                                     :noreturn (contains? #{"abort" "exit" "_Exit" "quick_exit"} (:name pe))}]
                              (swap! *fns* assoc id f)
@@ -806,7 +816,11 @@
   "Whether a node is a header's (G4: its location's file a header's path, not the main file's)."
   [n]
   (let [f (:file (loc-of (get-in n [:range :begin])))]
-    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))))))
+    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))
+                  ;; (queue 351: for the code generator a source file the unit includes, `#include <hashtable-aux.cc>` in
+                  ;; hashtable_tr1.cc, a shim's `#include <assert_fail.cc>`, is the unit's own text, its definitions emitted as
+                  ;; clang emits every definition of the translation unit; the checker's reading unchanged)
+                  (not (and (not (checking?)) (re-find #"\.(cc|cpp|cxx)$" f)))))))
 
 (defn main-fn-node?
   "Whether a node is the program's `main` (a FunctionDecl named main, not a member): n-cpp-eval, g++.dg's torture/vshuf-*.C define
@@ -1313,8 +1327,11 @@
            :ctor-attr (when-let [x (gnu-attr-arg n "constructor")] (if (number? x) x 65535))
            ;; (the C library's functions that do not return, nothrow builtins for clang, G5c: musl's abort; not free, which
            ;; clang invokes in del_op.cc's noexcept operator delete)
-           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)))
+           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (or (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)
+                                                                                       (contains? clang-nothrow-libc nm))))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
+           ;; queue 351: `throw()`, clang's EST_DynamicNone: before C++17 an exception filter, not noexcept's terminate scope
+           :dynamic-none (boolean (and (not (re-find #"\bnoexcept\b" (or qt ""))) (re-find #"\bthrow\s*\(\s*\)" (or qt ""))))
            :linkage (if (linkage-c? home) :c :cpp)
            :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
            :internal-l (boolean (and (not cid) (= "static" (:storageClass n)) (not (:internal home))))
@@ -1453,8 +1470,10 @@
       (let [id (next-id)
             v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
                :linkage (if (linkage-c? home) :c :cpp)
-               :defined (not (or (= st :member-static) (= "extern" (:storageClass n))))
-               :extern (= "extern" (:storageClass n))
+               ;; (queue 351: `extern` with an initializer is a definition, [basic.def]/2: hashtable-aux.cc's `extern const
+               ;; unsigned long __prime_list[] = {...}`, external though const, [basic.link]/3)
+               :defined (not (or (= st :member-static) (and (= "extern" (:storageClass n)) (not init))))
+               :extern (and (= "extern" (:storageClass n)) (not init))
                :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
                ;; (CP369 (a): `static` on a static data member is not its linkage, [basic.link]/4: internal only by an unnamed
                ;; namespace on its class's path, its home's; clang's dso_local external global for `int A::y = f();`)
@@ -1567,7 +1586,13 @@
         id (or old (next-id))
         ;; (a class of an unnamed namespace, or local to an internal function, has internal linkage and so have its
         ;; members, [basic.link]/4; G5c: libsupc++'s vec.cc's uncatch_exception, atexit_thread.cc's key_s)
-        internal (loop [s scope] (cond (nil? s) false (:internal s) true (= :ns (:kind s)) false :else (recur (:parent s))))
+        ;; (queue 351: a class local to a function that is neither inline nor a template's instance has internal linkage
+        ;; for the code generator too, clang's getLVForLocalDecl: shared_ptr.cc's get_mutex's M; an inline one's, linkonce_odr)
+        internal (loop [s scope] (cond (nil? s) false (:internal s) true (= :ns (:kind s)) false
+                                       (and (= :fn (:kind s)) (= :local (ffirst (:path s)))
+                                            (let [lf (second (first (:path s)))] (and (map? lf) (not (or (:inline lf) (:tinst lf))))))
+                                       true
+                                       :else (recur (:parent s))))
         cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id]) :internal internal))
         t {:k :class :id id}]
     (when-not old
@@ -2010,6 +2035,8 @@
         c (abi/cls id)
         f (merge {:id fid :name nm :kind k :cls id :ty ty :implicit k :inline true :path (conj (vec (:path c)) [:cls id])
                   :scope (:scope c) :def-scope (:scope c) :linkage :cpp :param-names (mapv (fn [_] nil) (:ps ty)) :defaults [] :pos -1}
+                 ;; (queue 351: an internal class's implicit members are internal, as its declared ones, [basic.link]/4)
+                 (when (:internal (:scope c)) {:internal true})
                  ;; a header class's implicit members analyzed when used (G4)
                  (when (:header c) {:lazy true})
                  more)]
@@ -2082,9 +2109,12 @@
       (let [fid (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [ctor-p] :va false} :trivial (trivial-copy? id))]
         (when del (upd-fn! fid merge del))))
     (doseq [x (:ctors (abi/cls id))]
-      (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
+      ;; (queue 351: trivial-copy? asks every copy constructor's :trivial, this one's too: taken as trivial while it is
+      ;; judged, so `X(const X&) = default` is trivial when the rest is ([class.copy.ctor]/11), a copy of bytes and the
+      ;; psABI's registers as clang's; before, never: futex.cc's chrono::seconds by the address of a copy made by a call)
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial true) (upd-fn! x assoc :trivial (trivial-copy? id)))))
     (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
-      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)))]
+      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (trivial-assign? id))]
         (when del (upd-fn! fid merge del)))))
     ;; CX12 (the checker): the implicit move constructor and move assignment ([class.copy.ctor]/8, [class.copy.assign]/4:
     ;; declared when the class declares no copy or move member and no destructor); one defined as deleted is no
@@ -2095,9 +2125,11 @@
                (let [d (:dtor (abi/cls id))] (or (nil? d) (:implicit (fnd d)))))
       (let [rref {:k :rref :to t}]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [rref] :va false} :trivial (trivial-copy? id) :cx-move true)
-        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)) :cx-move true))))
+        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (trivial-assign? id) :cx-move true))))
     (doseq [x (:methods (abi/cls id))]
-      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (and (trivial-copy? id) (trivial-assign? id))))))
+      ;; (queue 351: an assignment's triviality is its own, [class.copy.assign]/9: not the copy constructor's, which
+      ;; std::allocator's user-provided one made non-trivial; clang writes no call of allocator<char>::operator=)
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (trivial-assign? id)))))
     (abi/update-cls! id assoc :user-ctor (boolean (seq (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id)))))
                      :user-dtor (boolean (let [d (:dtor (abi/cls id))] (and d (not (:implicit (fnd d))))))
                      :user-copy-assign (boolean (some #(let [g (fnd %)] (and (copy-assign? g id) (not (:implicit g)))) (:methods (abi/cls id)))))
