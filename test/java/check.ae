@@ -28,6 +28,12 @@
     plan REF WORK [--list FILE] [--only REGEX] [--corpus C,...]
         the check's plan of every test REF passes on the JDK (or FILE's, the essential subset):
         WORK/run/ID/plan.tsv and WORK/run.list
+    stale-reasons ROOT LEVEL [--ids]
+        D356-2 (a): CHECKDIR's record of LEVEL (ROOT/test/java/check-LEVEL.edn) against today's world, no run:
+        every row neither passing nor by design whose reason cites a class or member the world now holds (jrt's
+        manifest go/arbace/jrt/manifest.edn, jdk/forms, jdk/javac/forms, or jrt's own Java in overlay/jdk, converted
+        at the next update) is stale; their count by cited name (--ids: the rows). The controls first: fabricated rows
+        citing present names flagged, absent and the tests' own names not, else exit 1
     report REF WORK DIVERGENCES CHECKDIR LEVELS [--record] [--essential FILE] [--partial] [--corpora C,...]
         WORK/results.tsv (ID LEVEL RESULT REASON) against the recorded results
         (CHECKDIR/check-LEVEL.edn): as recorded, new, now passing; a test passing there and not
@@ -947,6 +953,144 @@
               classes)
         :unclassified)))
 
+;; ---------------------------------------------------------------------------------------------
+;; stale-reasons (D356-2 (a), queue 360, 2026-11-18): a record's reasons against today's world
+
+(defn- cited
+  "The JDK names reason S cites: [[:class \"a.b.C$D\"] ...] and [:member \"a.b.C\" \"m\" \"(params)\" or nil]: a class not in
+  the closed world, an unknown or unresolved class or type (the import naming its class), an edge class's generics, a class
+  not found, a member jrt lacks, a method not accessible in a class. A test's own class (package tNNNNN) is no JDK name."
+  [s]
+  (let [jdk? (fn [c] (and c (re-find #"^[a-z][\w]*\.[\w.$]+$" c) (not (re-find #"^t\d{5}[.$]" c))))
+        imported (fn [simple imp]
+                   ;; "Unknown type: T (the import P)": P is T's class, or T is a member class of P's top level
+                   (let [pkg (str/replace imp #"\.[^.]+$" "")
+                         top (first (str/split simple #"\$"))]
+                     (cond (str/ends-with? imp (str "." simple)) imp
+                           (str/ends-with? imp (str "." top)) (str pkg "." simple)
+                           :else imp)))
+        classes (concat
+                  (map second (re-seq #"class ([\w.$]+) is not in the closed world" s))
+                  (map second (re-seq #"Unknown class: ([\w.$]+)" s))
+                  (map second (re-seq #"Undeclared generics of class ([\w.$]+)" s))
+                  (map second (re-seq #"ClassNotFoundException: ([\w.$]+)" s))
+                  (map #(str/replace (second %) "/" ".") (re-seq #"NoClassDefFoundError: ([\w/.$]+)" s))
+                  (for [[_ t imp] (re-seq #"(?:Unknown type|Unable to resolve class): ([\w.$]+) \(the import ([\w.$]+)\)" s)]
+                    (imported t imp))
+                  (for [[_ _ imp] (re-seq #"Unable to resolve symbol: ([\w.$/]+) \(the import ([\w.$]+)\)" s)] imp))
+        members (concat
+                  (for [[_ c m ps] (re-seq #"jrt lacks ([\w.$]+)\.([\w$<>]+)\(([^)]*)\)" s)] [:member c m (str "(" ps ")")])
+                  (for [[_ m c] (re-seq #"No accessible (?:static )?method (\w+) in ([\w.$]+)" s)] [:member c m nil]))]
+    (distinct (concat (for [c classes :when (jdk? c)] [:class c])
+                      (filter #(jdk? (second %)) members)))))
+
+(defn- world-index
+  "Today's world under ROOT: jrt's manifest (class symbol -> its members) and the forms and overlay roots."
+  [root]
+  {:jrt (into {} (for [[k v] (read-edn (str root "/go/arbace/jrt/manifest.edn"))] [(str k) v]))
+   ;; javac's world (jdk/javac/forms) apart: a class only there is in javac's tool, not the shipped program
+   :forms [[:forms (str root "/jdk/forms")] [:javac (str root "/jdk/javac/forms")]]
+   :java (concat [(str root "/overlay/jdk/java.base")]
+                 (for [^File d (or (.listFiles (io/file root "overlay/jdk/javac")) []) :when (.isDirectory d)] (.getPath d)))
+   :texts (atom {})})
+
+(defn- text-of [w f]
+  (let [f (str f)]
+    (or (get @(:texts w) f)
+        (let [t (when (.isFile (io/file f)) (slurp f))]
+          (swap! (:texts w) assoc f t)
+          t))))
+
+(defn- class-place
+  "Where the world holds class C (a binary name, a.b.C$D): :jrt, :forms (jdk/forms), :javac (jdk/javac/forms alone: javac's
+  tool's world), :overlay (jrt's own Java, converted at the next update), else nil; with the text holding it."
+  [w c]
+  (let [[top & nested] (str/split c #"\$")
+        rel (str/replace top "." "/")
+        nested-in? (fn [t decl] (every? #(re-find (re-pattern (str decl "\\b" (java.util.regex.Pattern/quote %) "\\b")) t) nested))]
+    (or (when (get-in w [:jrt c]) [:jrt nil])
+        (some (fn [[place d]] (when-let [t (text-of w (str d "/" rel ".ae"))]
+                                (when (nested-in? t "\\(defclass(?: \\^\\S+)* ") [place t])))
+              (:forms w))
+        (some (fn [d] (when-let [t (text-of w (str d "/" rel ".java"))]
+                        (when (nested-in? t "(?:class|interface|enum|record) ") [:overlay t])))
+              (:java w)))))
+
+(defn- present?
+  "Whether the world holds the cited name X ([:class c] or [:member c m desc]): a member by its name (and its parameters'
+  descriptor when cited) in jrt's manifest, or by its name in the class's forms or Java."
+  [w [k c m desc]]
+  (let [[where t] (class-place w c)]
+    (case k
+      :class (some? where)
+      :member (case where
+                :jrt (boolean (some (fn [[kind n d]] (and (#{:method :ctor} kind) (= n m) (or (nil? desc) (str/starts-with? (str d) desc))))
+                                    (:members (get-in w [:jrt c]))))
+                (:forms :javac) (boolean (re-find (re-pattern (str "\\(method(?:\\s+\\^:\\S+)*\\s+" (java.util.regex.Pattern/quote m) "[\\s\\]]")) t))
+                :overlay (boolean (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote m) "\\s*\\(")) t))
+                false))))
+
+(defn- stale-row
+  "Row [id test result reason]'s cited names that the world W now holds, or nil."
+  [w [_ _ _ reason]]
+  (seq (filter #(present? w %) (cited (str reason)))))
+
+(defn- name-of [[k c m desc]] (if (= k :class) c (str c "." m (or desc ""))))
+
+(defn stale-reasons [root level & opts]
+  (let [ids? (some #{"--ids"} opts)
+        lv (keyword level)
+        w (world-index root)
+        classes (read-edn (str root "/test/java/divergences.edn"))
+        kinds (into {} (for [c classes] [(:id c) (:kind c)]))
+        ;; the controls: a fabricated row citing a present name is flagged, one citing an absent name, or a test's own
+        ;; class, is not (an absent name the world gains one day fails its control: pick another)
+        ctl [["present: a class in jdk/forms" true "status 1: java.lang.UnsupportedOperationException: j2g: class java.io.ObjectOutputStream is not in the closed world"]
+             ["present: a class of jrt's manifest" true "j2g: t00001/X: analysis: Unknown class: java.lang.Thread (line 1)"]
+             ["present: a member class in jdk/forms" true "j2g: t00001/X: analysis: Unable to resolve class: Calendar$Builder (the import java.util.Calendar) (line 9)"]
+             ["present: a member jrt has" true "j2g: jrt lacks java.util.concurrent.atomic.AtomicLong.getAndAccumulate(JLjava/util/function/LongBinaryOperator;)J"]
+             ["absent: a desktop class" false "status 1: java.lang.UnsupportedOperationException: j2g: class javax.swing.JFrame is not in the closed world"]
+             ["absent: a member jrt lacks" false "j2g: jrt lacks java.lang.Thread.noSuchMethodOfArbace()V"]
+             ["absent: the test's own class" false "java.lang.ClassNotFoundException: t00001.Helper"]]
+        bad (for [[what want reason] ctl
+                  :let [got (boolean (stale-row w ["c00000" "control" :fail reason]))]
+                  :when (not= want got)]
+              (str what ": " (if want "not flagged" "flagged") " (" reason ")"))]
+    (when (seq bad)
+      (doseq [b bad] (println (str "java-check --stale-reasons: CONTROL FAILED: " b)))
+      (shutdown-agents)
+      (System/exit 1))
+    (println (str "java-check --stale-reasons: controls ok (" (count ctl) ": " (count (filter second ctl)) " present names flagged, "
+                  (count (remove second ctl)) " absent not)"))
+    (let [f (str root "/test/java/check-" level ".edn")
+          _ (when-not (.isFile (io/file f))
+              (println (str "java-check --stale-reasons: no record " f " (a level: read, nread, interp, compiled, classes, diagnostics, print)"))
+              (shutdown-agents)
+              (System/exit 2))
+          rows (filter vector? (read-edn f))
+          open (for [[id _ r reason :as row] rows
+                     :when (not= :pass r)
+                     :let [c (classify classes lv id r (str reason))]
+                     :when (not (#{:design :harness-design} (kinds c)))]
+                 [row c])
+          stale (for [[row c] open :let [xs (stale-row w row)] :when xs] [row c xs])
+          by-name (reduce (fn [m [[id] _ xs]] (reduce #(update %1 (name-of %2) (fnil conj []) id) m xs)) (sorted-map) stale)
+          by-class (frequencies (map second stale))]
+      (println (str "java-check --stale-reasons: " level ": " (count stale) " of " (count open)
+                    " rows neither passing nor by design cite a class or member the world holds today (" f ")"))
+      (let [citing (count (filter (fn [[row]] (seq (cited (str (nth row 3))))) open))]
+        (println (str "   " (- citing (count stale)) " more cite only names the world still lacks, " (- (count open) citing)
+                      " cite no class or member (behaviour after loading, timeouts, ...)")))
+      (let [places (fn [xs] (set (map #(first (class-place w (second %))) xs)))
+            javac-only (count (filter (fn [[_ _ xs]] (= #{:javac} (places xs))) stale))
+            overlay-only (count (filter (fn [[_ _ xs]] (= #{:overlay} (places xs))) stale))]
+        (println (str "   of them " javac-only " cite names only javac's world holds (jdk/javac/forms: javac's tool, not the shipped"
+                      " program), " overlay-only " names only jrt's own Java holds (overlay/jdk: in the world at the next jrt-convert update)")))
+      (println (str "   by class: " (str/join ", " (for [[c n] (sort-by (comp - val) by-class)] (str (name c) " " n)))))
+      (doseq [[nm ids] (sort-by (comp - count val) by-name)]
+        (let [[where] (class-place w (first (str/split nm #"\.(?=[^.]*\()|\.(?=[a-z][\w$<>]*$)")))]
+          (println (str "   " (count ids) "  " nm (when where (str "  (" (name where) ")")) (when ids? (str ": " (str/join " " ids))))))))))
+
 (defn- recorded [f]
   (if (.isFile (io/file f))
     (into {} (for [[id _ r reason] (read-edn f)] [id [r reason]]))
@@ -1741,6 +1885,7 @@
     "verdicts" (apply verdicts args)
     "golden" (apply golden args)
     "rejudge-records" (apply rejudge-records args)
+    "stale-reasons" (apply stale-reasons args)
     "scan" (apply scan args)
     "rename" (apply rename args)
     "gather" (apply gather args)
