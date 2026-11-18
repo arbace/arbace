@@ -61,6 +61,10 @@
 (def ^:dynamic *tmpls* nil)
 ;; CP365 (a): the provisional instances, {arg-class-id #{instance-class-id}}, and how to make each again {cid (fn [])}
 (def ^:dynamic *provisional* nil)
+;; queue 367: a type trait whose operands are only named (__is_same): a class template's specialization not defined is an
+;; incomplete class there ([temp.inst]/2), not a refusal (<bits/locale_classes.tcc>'s __try_use_facet's
+;; __is_same(const _Facet, const codecvt<char, char, mbstate_t>) in a unit that defines no codecvt)
+(def ^:dynamic *name-only* false)
 
 (defn- same-arg? [a b] (if (and (map? a) (contains? a :val)) (= (:val a) (:val b)) (= a b)))
 (def ^:dynamic *scanned* nil)
@@ -124,7 +128,7 @@
 
 (defn- param-type [scope p] (abi/unq (sema/resolve-type scope (:qt p))))
 
-(declare arg-entity)
+(declare extern-member! arg-entity)
 (declare ^:dynamic *unstable*)
 
 (defn- bind-scope
@@ -656,6 +660,13 @@
                                                          :var (:ty (sema/var* (:id e)))
                                                          (sema/resolve-type scope r)))]
                                    (if (dependent? ty) {:k :texpr :o "sizeof" :type ty} (abi/size-of ty)))
+                  ;; (queue 380, W3d: alignof(T), C's _Alignof(T) and GNU's __alignof(T) of a type, as the analysis's
+                  ;; UnaryExprOrTypeTraitExpr: ios_failure.cc's `typedef char A[1 / (__alignof(ios::failure) <=
+                  ;; __alignof(runtime_error))]`; GNU's preferred alignment the ABI's on x86-64 for these)
+                  (and (#{"alignof" "_Alignof" "__alignof" "__alignof__"} t) (= "(" (peek)))
+                  (let [_ (next!)
+                        ty (abi/non-ref (sema/resolve-type scope (str/trim (run "(" ")"))))]
+                    (if (dependent? ty) (fail :template "a dependent alignof in a constant") (abi/align-of ty)))
                   ;; a value trait (G4): __is_same(T, U), its arguments types
                   (and (= k :id) (= "(" (peek)) (contains? value-traits t))
                   (let [_ (next!) txt (run "(" ")")]
@@ -1451,9 +1462,11 @@
                             (reset! b (if (= 1 (count oks)) (first oks) snap))
                             true)
                           ;; (CX12, the checker: the non-deduced contexts above)
-                          (and (sema/checking?) (bare-tparam P)
+                          ;; (queue 380, W3d: the braced list for the code generator too: ios.cc's std::__exchange(__rhs._M_word[__i], {})
+                          ;; of `template<typename _Tp, typename _Up = _Tp> _Tp __exchange(_Tp&, _Up&&)`, _Up its default)
+                          (and (bare-tparam P)
                                (or (= :init-list (:op e))
-                                   (and (= :fnset (:op e)) (empty? (:tmpls e)) (not (:obj e)) (>= (count (distinct (map #(:ty (sema/fnd %)) (:fns e)))) 2))))
+                                   (and (sema/checking?) (= :fnset (:op e)) (empty? (:tmpls e)) (not (:obj e)) (>= (count (distinct (map #(:ty (sema/fnd %)) (:fns e)))) 2))))
                           (do (swap! nondeduced conj (bare-tparam P)) true)
                           :else (unsure!)))))
         ;; a trailing function parameter pack: its pattern deduced from each remaining argument, each pack the
@@ -1947,7 +1960,8 @@
         (when-let [nm (System/getenv "CPP_INST_TRACE")]
           (when (= nm (:name t))
             (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
-        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args)) *provisional* (or sema/*main-retry* sema/*incomplete-ok*))
+        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args))
+                 (or (and *provisional* (or sema/*main-retry* sema/*incomplete-ok*)) *name-only*))
           (incomplete-instance! t args)
           (select-instance! t args nil)))))))
 
@@ -1991,7 +2005,7 @@
     (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
                                     :tmpl tid :targs args})
     (upd-tmpl! tid assoc-in [:insts args] cid)
-    (swap! *provisional* update-in [:templates tid] (fnil conj #{}) cid)
+    (when *provisional* (swap! *provisional* update-in [:templates tid] (fnil conj #{}) cid))
     (when (System/getenv "CPP_TMPL_TRACE")
       (binding [*out* *err*] (println "incomplete instance" (:name t) cid "waiting for its template's definition")))
     {:k :class :id cid}))
@@ -2316,9 +2330,14 @@
               (if (not (:finished c))
                 (abi/update-cls! icid assoc :ool-pending tid)
                 (fail :template "no member " (:name n) " of " (:name t) " to define")))
-            (when fid
+            ;; (queue 367: not a member explicitly specialized, [temp.expl.spec]: <istream>'s `template<> basic_istream<char>&
+            ;; basic_istream<char>::ignore(streamsize);` declared before istream.tcc defines the primary's ignore)
+            (when (and fid (not (:spec-member (sema/fnd fid))))
             (upd-fn! fid assoc :body (sema/body-of n) :node n :def-scope s :keep-def-scope true
-                     :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n)) :param-names (mapv :name pn) :lazy true :inline true)))
+                     :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n)) :param-names (mapv :name pn) :lazy true :inline true)
+            ;; (queue 367: a member defaulted outside its class, <streambuf>'s basic_streambuf(const basic_streambuf&) = default:
+            ;; a defaulted member's definition, as the class's own, [dcl.fct.def.default]/5)
+            (when (:explicitlyDefaulted n) (upd-fn! fid assoc :defaulted true :ool-defaulted true))))
       :var (let [vid (some #(when (= (:name (sema/var* %)) (:name n)) %) (:statics c))]
              (when-not vid (fail :template "no static member " (:name n) " of " (:name t) " to define"))
              ;; a definition without an initializer keeps the one the class gave (static const int x = 3; ... X<T>::x;)
@@ -2492,7 +2511,8 @@
                                                                (when-let [c (and (sema/checking?) (:cls (:scope t)))] (abi/ptr {:k :class :id c})))]
                             (sema/constraint-satisfied? ps rc))
                   (unsat "constraints")))
-            fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (#'sema/declare-fn! ps (:pattern t)))
+            fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d sema/*instantiating* {:tid tid :args args}]
+                  (#'sema/declare-fn! ps (:pattern t)))
             _ (when-not fid (unsat "constraints"))
             ;; (CP332 (a): a decltype in the signature that does not analyze with every argument bound is a substitution
             ;; failure, [temp.deduct.general]/8 -- std::size(const _Container&) -> decltype(__cont.size()) for a pair,
@@ -2846,15 +2866,62 @@
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-member-template! cid o (:params (tmpl tid)))))))
     :template))
 
+(defn- explicit-qualifier
+  "queue 367: the class an explicit instantiation names its function's or static data member's qualifier (`S::_M_construct<false>(...)`,
+  `istream::_M_extract(...)`, `S::basic_string(...)`, `rope<char, allocator<char> >::_S_min_len[N]`): over the declaration's
+  tokens (tok-text's, one space apart), the name `nm` after a `::`, the qualifier before it back to its start (template
+  arguments balanced, `::` joined), resolved in `scope`; nil when the name is unqualified or the qualifier no class.
+  `var?`: the name of a static data member, followed by `[` or nothing; else a function's, followed by `(` or `<`."
+  [scope ^String text ^String nm & [var?]]
+  (let [ts (vec (remove str/blank? (str/split (str/trim text) #"\s+")))
+        n (count ts)
+        ;; (an operator's name its tokens joined: `basic_ostream<char>::operator<<(nullptr_t)`, `operator <<`)
+        op-end (fn [k] (when (and (= "operator" (ts k)) (str/starts-with? nm "operator"))
+                         (let [j (first (filter #(= "(" (ts %)) (range (inc k) n)))]
+                           (when (and j (> j (inc k)) (= (subs nm 8) (str/join "" (subvec ts (inc k) j)))) j))))
+        k (first (filter (fn [k] (and (pos? k) (= "::" (ts (dec k)))
+                                      (or (op-end k)
+                                          (and (= nm (ts k))
+                                               (if var? (or (= k (dec n)) (= "[" (ts (inc k)))) (and (< (inc k) n) (#{"(" "<"} (ts (inc k)))))))))
+                         (range n)))]
+    (when k
+      (let [b (loop [j (- k 2) d 0]
+                (if (< j 0) 0
+                    (let [t (ts j)
+                          d2 (cond (re-matches #">+" t) (+ d (count t)) (= t "<") (dec d) :else d)]
+                      (cond (pos? d2) (recur (dec j) d2)
+                            (re-matches #">+" t) (recur (dec j) d2)
+                            (= t "<") (recur (dec j) d2)
+                            (re-matches #"[A-Za-z_][A-Za-z0-9_]*" t) (if (and (pos? j) (= "::" (ts (dec j)))) (recur (- j 2) d2) j)
+                            :else (inc j)))))
+            q (str/join " " (subvec ts b (dec k)))]
+        (when (seq q)
+          (let [t (try (sema/resolve-type scope q) (catch arbace.lang.ExceptionInfo _ nil))]
+            (when (abi/class? (abi/unq t)) (:id (abi/unq t)))))))))
+
+(defn- explicit-inst-mark!
+  "queue 367, the code generator: the function an explicit instantiation definition names emitted weak_odr there (clang's
+  GVA_StrongODR), made eager."
+  [fid]
+  (let [f (sema/fnd fid)]
+    (when (and f (not (:explicit-inst f)) (not (:deleted f)))
+      (upd-fn! fid #(-> % (assoc :explicit-inst true) (dissoc :lazy :extern-inst)))
+      (swap! sema/*order* conj [:fn fid]))))
+
 (defn- explicit-fn-instantiation!
   "CP305 (a), the checker: an explicit instantiation definition of a function template ([temp.explicit]/10: `template R
   f<args>(params);` instantiates the definition there), its specialization found as an explicit specialization's is
   ([temp.deduct.decl]: the written arguments, then deduction from its type) and its definition analyzed as a used one's
   (made eager, entered in the order), so its errors are judged. A declaration whose template or arguments the slice
-  cannot resolve is left (the code generator's explicit instantiations stay as they were: emitted when used)."
+  cannot resolve is left. queue 367, the code generator: the same specialization emitted weak_odr (explicit-inst-mark!), and
+  a qualified name's (a member of a class template's specialization, explicit-qualifier) found among its class's member
+  templates (a constructor's among its constructor templates) or, no template, among its members of that name and type."
   [scope n]
   (let [fname (:_fname n)
         text (str (:_text n))
+        qcid (when-not (sema/checking?) (explicit-qualifier scope text fname))
+        qc (when qcid (abi/cls qcid))
+        ctor? (and qc (= fname (:name qc)))
         ;; the written template arguments after the name: `f<int, int, char>`
         targs (let [m (re-matcher (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote fname) "\\s*<")) text)]
                 (when (.find m)
@@ -2866,8 +2933,16 @@
                                 (= c (char 62)) (if (= d 1) (subs text i (inc j)) (recur (inc j) (dec d)))
                                 (= c (char 40)) nil
                                 :else (recur (inc j) d))))))))
-        ft (try (dissoc (abi/unq (sema/resolve-type scope (:_ftype n))) :cq) (catch arbace.lang.ExceptionInfo _ nil))
-        es (try (sema/lookup scope fname) (catch arbace.lang.ExceptionInfo _ nil))
+        ;; (queue 367: a qualified name's parameter types named in its class's scope too, [basic.lookup.qual]: ext-inst.cc's
+        ;; rope<char>::_S_fetch(_Rope_RopeRep<char, allocator<char> >*, size_type))
+        fts (or (:_ftype n) (:_fctype n))
+        ft (or (try (dissoc (abi/unq (sema/resolve-type scope fts)) :cq) (catch arbace.lang.ExceptionInfo _ nil))
+               (when qc (try (dissoc (abi/unq (sema/resolve-type (:scope qc) fts)) :cq) (catch arbace.lang.ExceptionInfo _ nil))))
+        es (if qc
+             (if ctor?
+               (for [tid (:ctor-tmpls qc)] {:e :tmpl :tk :fn :id tid})
+               (seq (.get ^java.util.HashMap (:names (:scope qc)) fname)))
+             (try (sema/lookup scope fname) (catch arbace.lang.ExceptionInfo _ nil)))
         found (when (and ft (abi/fn? ft))
                 (keep (fn [e]
                         (when (and (= :tmpl (:e e)) (= :fn (:tk e)))
@@ -2878,13 +2953,33 @@
                                      (when-let [args (finish-deduction t @b)] [t args])))
                                  (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_EXPLICIT_TRACE") (binding [*out* *err*] (println "explicit instantiation" fname targs (.getMessage x)))) nil)))))
                       es))]
-    (when (= 1 (count found))
+    ;; (queue 367, the code generator: of several, the most specialized, as an explicit specialization's ([temp.deduct.decl]/2,
+    ;; [temp.func.order]): <ostream>'s operator<<(basic_ostream<char, _Traits>&, char) over the primary's for `template
+    ;; ostream& operator<<(ostream&, char);`)
+    (when (System/getenv "CPP_EXPLICIT_TRACE")
+      (binding [*out* *err*] (println "explicit fn" fname "class" (some-> qc :name) "ctor" ctor? "templates" (count (filter #(= :tmpl (:e %)) es)) "type" (pr-str ft) "found" (count found))))
+    (let [found (if (and (> (count found) 1) (not (sema/checking?)) ft)
+                  (let [np (count (:ps ft))
+                        best (filter (fn [[t _]] (every? (fn [[u _]] (or (= (:id t) (:id u)) (more-specialized-fn? (:id t) (:id u) np))) found)) found)]
+                    (if (= 1 (count best)) best found))
+                  found)]
+    (if (= 1 (count found))
       (let [[t args] (first found)
             fid (try (instantiate-fn (:id t) args) (catch arbace.lang.ExceptionInfo _ nil))
             f (when fid (sema/fnd fid))]
-        (when (:lazy f)
-          (upd-fn! fid dissoc :lazy)
-          (swap! sema/*order* conj [:fn fid]))))))
+        (if (sema/checking?)
+          (when (:lazy f)
+            (upd-fn! fid dissoc :lazy)
+            (swap! sema/*order* conj [:fn fid]))
+          (when fid (explicit-inst-mark! fid))))
+      ;; (queue 367: a member that is no template, `template void X<int>::f(int);`: its class's member of that name and
+      ;; parameter types)
+      (when (and qc (empty? found) ft (abi/fn? ft))
+        (let [ms (filter (fn [id] (let [g (sema/fnd id)]
+                                    (and (not (:tinst g)) (if ctor? (= :ctor (:kind g)) (= fname (:name g)))
+                                         (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))))))
+                         (concat (:ctors qc) (:methods qc)))]
+          (when (= 1 (count (distinct ms))) (explicit-inst-mark! (first ms)))))))))
 
 (defn- constraint-spelling
   "CP300 (a), [temp.over.link]/7: a function template's constraints as written (its type-constraints, its requires-clause,
@@ -2932,8 +3027,17 @@
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
         :template)
     (let [pattern (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))
-          scope (class-key-scope scope n)
-          old (find-template scope (:name n) :class)
+          scope0 (class-key-scope scope n)
+          old0 (find-template scope0 (:name n) :class)
+          ;; (queue 367, the code generator: a definition whose qualifier the source spells through a macro, <bits/locale_classes.h>'s
+          ;; `class _GLIBCXX_NAMESPACE_CXX11 collate`, of a template an inline namespace declared, <bits/localefwd.h>'s
+          ;; std::__cxx11::collate: that template defined, not a second std::collate, [namespace.def]/7)
+          [scope old] (or (when old0 [scope0 old0])
+                          (when (and (not (sema/checking?)) (:completeDefinition pattern))
+                            (some (fn [s] (when (.containsKey ^java.util.HashMap (:names s) " inline")
+                                            (when-let [t (find-template s (:name n) :class)] (when-not (:pattern (tmpl t)) [s t]))))
+                                  (:usings scope0)))
+                          [scope0 nil])
           tid (or old (next-id))]
       (when (and old (sema/checking?) (not (sema/header-node? n))) (class-redecl-constraints! (tmpl old) n))
       (if old
@@ -3042,16 +3146,36 @@
     ;; its members are the library's, clang emitting none of them at -O0 but the always-inline ones,
     ;; CodeGenModule::shouldEmitFunction with TSK_ExplicitInstantiationDeclaration)
     "ExplicitInstantiationDecl"
-    (do (when (and (not (:_extern n)) (:_fname n) (:_ftype n) (sema/checking?))
+    (do (when (and (not (:_extern n)) (:_fname n) (or (:_ftype n) (and (:_fctype n) (not (sema/checking?)))))
           (explicit-fn-instantiation! scope n))
+        (when (and (:_extern n) (not (re-find #"^\s*(?:class|struct)\b" (str (:_text n)))) (not (str/includes? (str (:_text n)) "(")))
+          (extern-member! scope (str (:_text n))))
         (when-let [[_ t] (and (:_extern n) (re-matches #"(?s)\s*(?:class|struct)\s+(.*?)\s*" (str (:_text n))))]
           (when-let [ty (sema/resolve-type scope t)]
             (when (abi/class? ty) (abi/update-cls! (:id ty) assoc :extern-inst true))))
         ;; (CP321 (a), the checker: an explicit instantiation definition of a class, its static members' in-class
         ;; initializers then analyzed, [temp.explicit]/10)
-        (when-let [[_ t] (and (not (:_extern n)) (sema/checking?) (re-matches #"(?s)\s*(?:class|struct|union)\s+(.*?)\s*" (str (:_text n))))]
+        ;; (queue 367, the code generator: and its members defined there emitted weak_odr, [temp.explicit]/10-12, clang's
+        ;; InstantiateClassMembers and GVA_StrongODR; an earlier `extern template` of it no longer holds, [temp.explicit]/11:
+        ;; libstdc++'s *-inst.cc after the headers' extern templates; pending makes them eager)
+        ;; (queue 367, the code generator: a constructor's, `template S::basic_string(C*, C*, const allocator<C>&);`, which the
+        ;; parser's skim gives no name and type: the name after the last `::` and the parameters' text as its type)
+        (when (and (not (:_extern n)) (not (:_fname n)) (not (sema/checking?)))
+          (when-let [[_ nm ps] (re-find #"::\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$" (str (:_text n)))]
+            (explicit-fn-instantiation! scope (assoc n :_fname nm :_fctype (str "void (" ps ")")))))
+        ;; (queue 367, the code generator: a static data member's, `template const unsigned long rope<char>::_S_min_len[N];`:
+        ;; defined here, weak_odr)
+        (when (System/getenv "CPP_EXPLICIT_TRACE") (binding [*out* *err*] (println "explicit instantiation decl" (pr-str (:_text n)) (:_fname n) (:_ftype n))))
+        (when (and (not (:_extern n)) (not (:_fname n)) (not (sema/checking?))
+                   (not (re-matches #"(?s)\s*(?:class|struct|union)\s.*" (str (:_text n)))))
+          (when-let [[_ nm] (re-find #"::\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)?$" (str (:_text n)))]
+            (when-let [cid (explicit-qualifier scope (str (:_text n)) nm true)]
+              (when-let [vid (some #(when (= nm (:name (sema/var* %))) %) (:statics (abi/cls cid)))]
+                (upd-var! vid assoc :explicit-inst-req true)
+                (when-not (:defined (sema/var* vid)) (upd-var! vid assoc :pending-def true))))))
+        (when-let [[_ t] (and (not (:_extern n)) (re-matches #"(?s)\s*(?:class|struct|union)\s+(.*?)\s*" (str (:_text n))))]
           (when-let [ty (try (sema/resolve-type scope t) (catch arbace.lang.ExceptionInfo _ nil))]
-            (when (abi/class? ty) (abi/update-cls! (:id ty) assoc :explicit-inst-def true))))
+            (when (abi/class? ty) (abi/update-cls! (:id ty) #(cond-> (assoc % :explicit-inst-def true) (not (sema/checking?)) (dissoc :extern-inst))))))
         ;; extern template R f(params): the function template's specialization of that type (deduced from it,
         ;; [temp.explicit]/7) the library's
         (when (and (:_extern n) (:_fname n) (:_ftype n))
@@ -3249,6 +3373,32 @@
                  (conj seen c))))
       seen)))
 
+(defn- extern-member!
+  "queue 382: an explicit instantiation declaration of a class template specialization's static data member,
+  `extern template basic_string<char>::size_type basic_string<char>::_Rep::_S_empty_rep_storage[];` (basic_string.tcc's,
+  PR 86138, when the class's own is not declared): the member named on its class (:extern-members), so the lazy round
+  declares it external as clang does, never defines it. The declarator is the text's last qualified name: its qualifier
+  the tokens back to the `::` chain's start, template argument lists kept whole."
+  [scope ^String text]
+  (let [t (str/trim (str/replace text #"\s*\[\s*[^\]]*\]\s*;?\s*$|\s*;\s*$" ""))
+        [_ head nm] (re-matches #"(?s)(.*?)\s*::\s*([A-Za-z_][A-Za-z_0-9]*)" t)]
+    (when (and head nm)
+      ;; the qualifier: the longest suffix of `head` that is a chain of names and template-ids joined by ::
+      (let [toks (vec (re-seq #"::|<|>|,|[A-Za-z_][A-Za-z_0-9]*|[^\sA-Za-z_0-9<>,:]+" head))
+            ;; one link back from i, its name's index: a template-id's argument list skipped to its <
+            name-at (fn [^long i]
+                      (if (= ">" (nth toks i))
+                        (dec (long (loop [k (dec i) d 1] (cond (neg? k) 0 (= ">" (nth toks k)) (recur (dec k) (inc d))
+                                                                (= "<" (nth toks k)) (if (= 1 d) k (recur (dec k) (dec d))) :else (recur (dec k) d)))))
+                        i))
+            start (loop [i (dec (count toks))]
+                    (let [k (long (name-at i))]
+                      (if (and (>= (- k 2) 0) (= "::" (nth toks (dec k)))) (recur (- k 2)) (max 0 k))))
+            q (str/join " " (subvec toks start))
+            ty (try (sema/resolve-type scope q) (catch arbace.lang.ExceptionInfo _ nil))]
+        (when (abi/class? (abi/unq ty))
+          (abi/update-cls! (:id (abi/unq ty)) update :extern-members (fnil conj #{}) nm))))))
+
 (defn- extern-class?
   "Whether the class (or a class enclosing it) is named by an explicit instantiation declaration."
   [cid]
@@ -3256,12 +3406,43 @@
     (when cid
       (let [c (abi/cls cid)]
         (or (:extern-inst c)
-            (recur (loop [s (:outer c)] (cond (nil? s) nil (:cls s) (:cls s) :else (recur (:parent s))))))))))
+            (recur (loop [s (:outer c)] (cond (nil? s) nil (= :fn (:kind s)) nil (:cls s) (:cls s) :else (recur (:parent s))))))))))
+
+(defn- explicit-inst-class?
+  "queue 367: whether the class (or a class enclosing it) is named by an explicit instantiation definition."
+  [cid]
+  (loop [cid cid]
+    (when cid
+      (let [c (abi/cls cid)]
+        (or (:explicit-inst-def c)
+            (recur (loop [s (:outer c)] (cond (nil? s) nil (= :fn (:kind s)) nil (:cls s) (:cls s) :else (recur (:parent s))))))))))
+
+(defn- explicit-inst-members!
+  "queue 367, the code generator: the members of the classes an explicit instantiation definition names (and of their member
+  classes) that are defined, marked :explicit-inst (weak_odr, [temp.explicit]/10: the member functions with a definition, not
+  the member templates, the implicit members or the deleted ones; the static data members defined): {:fns [id ...] (made eager)
+  :vars [id ...]}."
+  []
+  (if (sema/checking?)
+    {}
+    (let [fns (vec (for [[id f] @sema/*fns*
+                         :when (and (:cls f) (not (:explicit-inst f)) (not (:implicit f)) (not (:deleted f)) (not (:spec-member f))
+                                    (or (:body f) (and (:defaulted f) (not (:trivial f))))
+                                    (not (:tinst f)) (explicit-inst-class? (:cls f)))]
+                     id))
+          vars (vec (for [[id v] @sema/*vars*
+                          :when (and (= :member-static (:storage v)) (:pending-def v) (not (:explicit-inst v))
+                                     (or (:explicit-inst-req v) (explicit-inst-class? (:of-cls v))))]
+                      id))]
+      (doseq [id fns] (upd-fn! id assoc :explicit-inst true))
+      (doseq [id vars] (upd-var! id assoc :explicit-inst true))
+      {:fns fns :vars vars})))
 
 (defn pending
   "The :pending hook: the lazy definitions the analyzed bodies reference, made eager ([[:fn id] [:var id] ...])."
   []
-  (let [acc (atom {:fns #{} :vars #{} :classes #{}})]
+  (let [ei (explicit-inst-members!)
+        acc (atom {:fns (set (:fns ei)) :vars (set (:vars ei)) :classes #{}})]
     (doseq [[id f] @sema/*fns* :when (and (or (:analyzed f) (:tbody f)) (not (contains? @*scanned* [:fn id])))]
       (swap! *scanned* conj [:fn id])
       (walk-refs acc [(:tbody f) (:tinits f) (:tassign f)])
@@ -3294,7 +3475,10 @@
         (swap! out conj [:fn id]))
       (doseq [id (:vars @acc) :let [v (sema/var* id)] :when (:pending-def v)
               ;; (a static member of a class an explicit instantiation declaration names: the library's, G5)
-              :when (if (extern-class? (:of-cls v)) (do (upd-var! id #(-> % (assoc :extern true :defined false) (dissoc :pending-def))) false) true)]
+              :when (if (and (or (extern-class? (:of-cls v))
+                                 ;; (queue 382: or the member itself, `extern template T X<A>::m[];`, extern-member!)
+                                 (contains? (:extern-members (abi/cls (:of-cls v))) (:name v)))
+                             (not (:explicit-inst v))) (do (upd-var! id #(-> % (assoc :extern true :defined false) (dissoc :pending-def))) false) true)]
         (upd-var! id #(-> % (assoc :defined true) (dissoc :pending-def)))
         ;; a constant integral variable's initializer folded, as clang emits it (a constant, no guard)
         (let [t (:ty v)]
@@ -3949,7 +4133,7 @@
                              (when (and e (#{:tparam :tdep :tspec} (:k (:ty e))))
                                [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
          :trait-type (fn [scope nm forms] (if (contains? type-traits nm) (trait-type scope nm forms) (fail :type "unknown type " nm)))
-         :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE] (eval-text scope t)))
+         :trait-text (fn [scope t] (binding [sema/*cutoff* Long/MAX_VALUE *name-only* (boolean (re-find #"^\s*__is_same\b" (str t)))] (eval-text scope t)))
          ;; (CX12, CP281 (a): a type-constraint `C<A...>` (or `C`) applied to the type `T`, C<T, A...>: true, false, or
          ;; nil when the slice cannot tell)
          :type-constraint (fn [scope ^String text T]

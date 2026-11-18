@@ -869,6 +869,25 @@
     (when (and b l (< (long b) (long l)) (= (:file bl) (:file ll)))
       (let [src (text-of (:file bl))] (strip-directives (subs src b (min (count src) (long l))))))))
 
+(defn- expanded-qualifier
+  "queue 367-2 (a), the code generator: the parts of a function declaration's nested-name-specifier from the parser's
+  tokens after macro expansion (:_qual, tok-text's: `ctype_byname < wchar_t > ::`), each a name or a template-id; nil
+  when the node has none."
+  [n]
+  (when-let [^String t (when-not (checking?) (:_qual n))]
+    (let [t (str/trim (str/replace (str/trim t) #"(::\s*)?~?$" ""))
+          parts (loop [i 0 d 0 b 0 out []]
+                  (if (>= i (count t))
+                    (conj out (str/trim (subs t b)))
+                    (let [c (.charAt t i)]
+                      (cond (= c \<) (recur (inc i) (inc d) b out)
+                            (= c \>) (recur (inc i) (dec d) b out)
+                            (and (zero? d) (= c \:) (< (inc i) (count t)) (= \: (.charAt t (inc i))))
+                            (recur (+ i 2) d (+ i 2) (conj out (str/trim (subs t b i))))
+                            :else (recur (inc i) d b out)))))
+          parts (vec (remove str/blank? parts))]
+      (when (seq parts) parts))))
+
 (defn- qualifier-before
   "The parts of the nested-name-specifier written before a declaration's name (`int ns::P::get()`: [\"ns\" \"P\"])."
   [n]
@@ -1043,9 +1062,18 @@
   (and (= (:name f) (:name g)) (= (:kind f) (:kind g)) (= (boolean (:cq f)) (boolean (:cq g))) (= (:refq f) (:refq g))
        (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps (:ty g))))))
 
+;; queue 367-2 (a): the function template specialization being declared ({:tid :args}, template.ae's instantiate-fn): another
+;; specialization of the same template with other arguments is no redeclaration of it though their types are equal
+;; ([temp.over.link]: the template arguments are part of a specialization's identity; string-inst.cc's S::_M_construct<false>
+;; and <true>, both (const C*, size_t), had been one function, its arguments the last's)
+(def ^:dynamic *instantiating* nil)
+
 (defn- find-redecl [scope f]
-  (let [^java.util.HashMap m (:names scope)]
-    (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f)) (:id e))) (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
+  (let [^java.util.HashMap m (:names scope)
+        other-spec? (fn [g] (when-let [{:keys [tid args]} *instantiating*]
+                              (let [ti (:tinst g)] (and ti (= tid (:tid ti)) (not= args (:args ti))))))]
+    (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f) (not (other-spec? (fnd (:id e))))) (:id e)))
+          (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
 
 (declare analyze rv ce-try)
 
@@ -1271,7 +1299,8 @@
   (if (and (not sat) (not defer))
     nil
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n))
-            (or (qualifier-before n) (qualifier-tid-before n)))
+            (or (when-let [q (expanded-qualifier n)] (when (some #(str/includes? % "<") q) q))
+                (qualifier-before n) (qualifier-tid-before n)))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
@@ -1382,7 +1411,15 @@
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
                                       (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
                                       (when (and (or body (:explicitlyDefaulted n)) (lazy-header-node? n) (not (:used f))) {:lazy true})))
-          (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
+          ;; (queue 367-2 (a): a specialization whose type another specialization of its template already has is reached
+          ;; through its template alone, not entered by name: two entries of one type would make every call naming it
+          ;; ambiguous, basic_string's _M_construct<true>(__s, __n) once _M_construct<false> is its own function)
+          (when-not (and *instantiating*
+                         (some (fn [e] (when (= :fn (:e e))
+                                         (let [g (fnd (:id e))]
+                                           (and (same-sig? g f) (= (:tid *instantiating*) (:tid (:tinst g)))))))
+                               (.get ^java.util.HashMap (:names home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)))))
+            (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)}))
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
           (when (and cid (:virtual f)) (abi/update-cls! cid update :virtuals (fnil conj []) id))
@@ -1410,13 +1447,25 @@
 (defn- declare-var!
   [scope n storage]
   (let [qt (get-in n [:type :qualType])
-        q (qualifier-before n)
+        ;; (queue 367, the code generator: a qualifier naming a template-id, as declare-fn!'s, cpp-s13: limits.cc's out-of-line
+        ;; definitions `constexpr bool numeric_limits<bool>::is_specialized;` of an explicit specialization's static members)
+        q (or (qualifier-before n) (when-not (checking?) (qualifier-tid-before n)))
         ;; (CP311 (a): a deduced class type, deduced from the initializer analyzed as global-init would)
         ct (when (empty? q) (ctad-template scope (or (:_ctad n) qt)))
         cv (when ct (binding [*cutoff* Long/MAX_VALUE]
                       (ctad-var (cond-> {:scope scope :statics (atom [])} (and (checking?) (= :ns (:kind scope))) (assoc :cx-global true)) n ct qt)))
         cv (or cv (when (empty? q) (ctad-compound-var scope n qt)))
-        ty (if cv (:ty cv) (resolve-type scope qt))
+        home (if (seq q)
+               (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
+                 (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
+               scope)
+        ;; (queue 380, W3d: a qualified declarator's type in its class's or namespace's scope, [basic.lookup.unqual]/9 with
+        ;; [dcl.meaning]: pool_allocator.cc's `__pool_alloc_base::_Obj* volatile __pool_alloc_base::_S_free_list[_S_free_list_size]`,
+        ;; the bound the class's enumerator; the home scope's parents are the namespace's)
+        ty (if cv (:ty cv) (resolve-type (if (and (seq q) (not (identical? scope home))
+                                                  (not (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s))))))
+                                           home scope)
+                                         qt))
         ;; (cpp-s11: an array of unknown bound of scalars completed by its braced initializer's count at its declaration,
         ;; [dcl.array]/7, as a local's is at its initialization: <bits/unicode-data.h>'s `inline constexpr char32_t
         ;; __width_edges[] = {...}` given to std::end(T (&)[N]), whose N had been nil)
@@ -1436,11 +1485,12 @@
                (if (every? #(= "InitListExpr" (:kind %)) (kids i))
                  (assoc ty :n (count (kids i)))
                  (fail :init "an array of unknown bound of vectors with their braces elided"))
+               ;; (queue 380: of a class, each element its own braced list: <text_encoding>'s `static inline constexpr _Rep
+               ;; _S_reps[] = { {...}, ... }` given to std::end(T (&)[N]); with braces elided the count is not the bound: left)
+               (and (abi/arr? ty) (nil? (:n ty)) (abi/class? (abi/unq (:of ty))) (= "InitListExpr" (:kind i))
+                    (seq (kids i)) (every? #(= "InitListExpr" (:kind %)) (kids i)))
+               (assoc ty :n (count (kids i)))
                :else ty))
-        home (if (seq q)
-               (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
-                 (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
-               scope)
         ^java.util.HashMap m (:names home)
         old (some #(when (= :var (:e %)) (:id %)) (.get m (:name n)))
         init (init-kid n)
@@ -1468,17 +1518,20 @@
                                                   (not (or (:internal %) (= :member-static (:storage %)))) (assoc :linkonce true))))
           old)
       (let [id (next-id)
+            ;; (queue 380, W3d: an array of const elements is a const object, [basic.type.qualifier]/3, internal at namespace
+            ;; scope, [basic.link]/3.2: c_locale.cc's `const char* const category_names[...]` had been an external global)
+            cq (loop [t ty] (cond (:c t) true (abi/arr? t) (recur (:of t)) :else false))
             v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
                :linkage (if (linkage-c? home) :c :cpp)
                ;; (queue 351: `extern` with an initializer is a definition, [basic.def]/2: hashtable-aux.cc's `extern const
                ;; unsigned long __prime_list[] = {...}`, external though const, [basic.link]/3)
                :defined (not (or (= st :member-static) (and (= "extern" (:storageClass n)) (not init))))
                :extern (and (= "extern" (:storageClass n)) (not init))
-               :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
+               :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and cq (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
                ;; (CP369 (a): `static` on a static data member is not its linkage, [basic.link]/4: internal only by an unnamed
                ;; namespace on its class's path, its home's; clang's dso_local external global for `int A::y = f();`)
                :internal (boolean (or (:internal home) (and (not= st :member-static) (= "static" (:storageClass n)))
-                                      (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
+                                      (and (= st :global) cq (not= "extern" (:storageClass n)))))
                :def-scope scope
                :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv)
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
@@ -1884,7 +1937,10 @@
                                     ;; declaration: its text holds the body)
                                     (re-find #"^\s*typedef\s+(?:struct|class|union)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)?\{" (or (node-text n) ""))
                                     (empty? (filter #(= :type (:e %)) (own-names scope (:name n)))))
-                             la
+                             ;; (queue 367: and the name its mangling takes, as the enumeration's and the `own` case's below:
+                             ;; musl's `typedef struct { ... } pthread_mutex_t`, __basic_file<char>'s __c_lock*, P15pthread_mutex_t,
+                             ;; had been mangled as an empty name, P0)
+                             (do (when-not (checking?) (abi/update-cls! (:id la) assoc :name (:name n))) la)
                              ;; `typedef enum { ... } E;` ([dcl.typedef]/9, the typedef name for linkage): the parser writes the
                              ;; type as `enum E`, the unnamed enumeration or class just declared (G5c: unwind.h's
                              ;; _Unwind_Reason_Code); it takes the name for its mangling
@@ -2019,6 +2075,59 @@
     (and (not (abi/dynamic? id))
          (every? #(let [f (fnd %)] (or (not (copy-ctor? f id)) (and (or (:implicit f) (:defaulted f)) (:trivial f)))) (:ctors c))
          (every? trivial-copy? (class-like-members id)))))
+
+;; queue 378 (the main host's review of 351, item 1): the Itanium C++ ABI's "non-trivial for the purposes of calls" (§3.1.2.1, the
+;; psABI's MEMORY class for such a type: passed by address), as clang's Sema::canPassInRegisters decides it: every copy constructor,
+;; move constructor and the destructor that is not deleted is trivial, and one copy or move constructor is not deleted. A move
+;; constructor is trivial when implicit or defaulted and the moves of the bases and members are ([class.copy.ctor]/11); the implicit
+;; one is declared when the class declares no copy or move member and no destructor ([class.copy.ctor]/8), which codegen's analysis
+;; does not make an entity of, so it is judged here; a member's move is its move constructor's, or its copy constructor's when it
+;; has none.
+
+(declare move-trivial?)
+
+(defn- implicit-move?
+  "Whether the class `id` has an implicitly declared move constructor ([class.copy.ctor]/8)."
+  [id]
+  (let [c (abi/cls id)]
+    (and (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (or (copy-ctor? g id) (move-ctor? g id)))) (:ctors c))
+         (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (or (copy-assign? g id) (move-assign? g id)))) (:methods c))
+         (let [d (:dtor c)] (or (nil? d) (:implicit (fnd d)))))))
+
+(defn- members-move-trivial? [id] (and (not (abi/dynamic? id)) (every? move-trivial? (class-like-members id))))
+
+(defn move-trivial?
+  "Whether the constructor that moves an object of the class `id` is trivial: its declared move constructors defaulted (and the
+  bases' and members' moves trivial), else its implicit one's, else (no move constructor) its copy constructor's."
+  [id]
+  (let [c (abi/cls id)
+        mv (filter #(let [g (fnd %)] (and (move-ctor? g id) (not (:implicit g)))) (:ctors c))]
+    (cond (seq mv) (every? #(let [g (fnd %)] (and (:defaulted g) (not (:deleted g)) (members-move-trivial? id))) mv)
+          (implicit-move? id) (members-move-trivial? id)
+          :else (trivial-copy? id))))
+
+(defn trivial-for-call?
+  "Queue 378: the class `id` trivial for the purposes of calls (Itanium C++ ABI §3.1.2.1, clang's canPassInRegisters): passed in
+  registers when the psABI classifies it so, else by address."
+  [id]
+  (let [c (abi/cls id)
+        cs (map fnd (:ctors c))
+        live? (fn [g] (not (:deleted g)))
+        copies (filter #(copy-ctor? % id) cs)
+        moves (filter #(and (move-ctor? % id) (not (:implicit %))) cs)
+        imove (implicit-move? id)]
+    (and (not (abi/dynamic? id))
+         (every? #(or (not (live? %)) (and (or (:implicit %) (:defaulted %)) (:trivial %))) copies)
+         (every? #(or (not (live? %)) (and (:defaulted %) (members-move-trivial? id))) moves)
+         (or (not imove) (members-move-trivial? id))
+         (trivial-dtor? id)
+         (boolean (or (some live? copies) (some live? moves) imove)))))
+
+(defn call-memory?
+  "Queue 378: a class trivial for calls that holds a base or a member (an array's element) that is not, at any depth: the psABI's
+  MEMORY class (clang's X86_64ABIInfo::classify gives such a member's eightbytes MEMORY), passed on the stack (byval)."
+  [id]
+  (boolean (some #(or (not (trivial-for-call? %)) (call-memory? %)) (class-like-members id))))
 
 (defn- trivial-assign?
   "cpp-s3: the class's copy and move assignments trivial ([class.copy.assign]/9) as far as trivial-copy? does not tell:
@@ -2525,6 +2634,15 @@
 
 (declare str-units)
 
+(defn- fp->long
+  "queue 380: a floating value's integer for a conversion ([conv.fpint]/1), or not a constant when it has none, an infinity
+  or a NaN, or is past a long's range (undefined past 64 bits, so no constant, [expr.const]/5.8): ubsan/pr63956.C's
+  fn11(__builtin_inf()) had crashed Sema once __builtin_inf was a value."
+  ^long [v]
+  (let [d (double v)]
+    (when-not (< -9.2e18 d 9.2e18) (not-constant "a floating value out of an integer's range"))
+    (long d)))
+
 (defn ce-wrap
   "The value `v` as the type `t` holds it (integers wrapped to its width, bool 0/1, floats as doubles)."
   [t v]
@@ -2543,12 +2661,12 @@
       ;; (cpp-s13: reduced to the type's width, [conv.integral]/3, a BigInt when outside 64 bits: only inside an evaluation,
       ;; narrow-out refusing such a result where it leaves)
       (wide? t) (let [bits (int (* 8 (long (abi/size-of t))))
-                      x (biginteger (if (float? v) (long (double v)) (ce-num v)))
+                      x (biginteger (if (float? v) (fp->long v) (ce-num v)))
                       m (.shiftLeft java.math.BigInteger/ONE bits)
                       y (.mod x m)
                       y (if (and (abi/signed? t) (.testBit y (int (dec bits)))) (.subtract y m) y)]
                   (if (< (.bitLength y) 64) (.longValue y) (bigint y)))
-      (abi/integral? t) (let [bits (* 8 (abi/size-of t)) x (if (float? v) (long (double v)) (if (wide-value? v) (.longValue (biginteger v)) (long v)))]
+      (abi/integral? t) (let [bits (* 8 (abi/size-of t)) x (if (float? v) (fp->long v) (if (wide-value? v) (.longValue (biginteger v)) (long v)))]
                           (if (>= bits 64) x
                               (let [m (dec (bit-shift-left 1 bits)) y (bit-and x m)]
                                 (if (and (abi/signed? t) (>= y (bit-shift-left 1 (dec bits)))) (- y (bit-shift-left 1 bits)) y))))
@@ -2615,7 +2733,7 @@
                    _ (when (and (:cx-reinterpret e) (checking?)) (ub! e "'reinterpret_cast' is not a constant expression"))
                    v (ev (:e e))]
                (case (:ck e)
-                 (:noop :int :int->fp :fp :fp->int) (ce-wrap t (if (and (= :fp->int (:ck e))) (long (double v)) (from-src (:ty (:e e)) t v)))
+                 (:noop :int :int->fp :fp :fp->int) (ce-wrap t (if (and (= :fp->int (:ck e))) (fp->long v) (from-src (:ty (:e e)) t v)))
                  :to-bool (if (or (ce-ptr? v) (ce-loc? v)) 1 (if (zero? (double v)) 0 1))
                  ;; ([expr.const]/5.15: a reinterpret_cast, as a conversion between a pointer and an integer is)
                  (not-constant "cast " (:ck e))))
@@ -3247,6 +3365,11 @@
   (let [e (if (and (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
             (if-let [f (fn-matching e (:to (abi/unq t)))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} (fail :conversion "no function of the set matches"))
             e)
+        ;; (queue 380: &f of an overload set converted to a pointer to function: the set's function of the target's type)
+        e (if-let [f (when (and (= :fnaddr (:op e)) (:set e) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
+                       (fn-matching (:set e) (:to (abi/unq t))))]
+            {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr}
+            e)
         e (if (= :mptr-fnset (:op e))
             (let [mt (abi/unq t)
                   ok (filter #(let [n (mptr-fn-node %)] (= (:to (:ty n)) (:to mt))) (:fns e))]
@@ -3498,9 +3621,10 @@
         (cond
           (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok)
           (cond-> {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
+            derived (assoc :d2b [(class-id at) (class-id pt)])
             ;; (CX12, the checker: [over.ics.rank]/3.2.6 orders two such bindings by their cv-qualifiers' inclusion)
             (checking?) (assoc :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))))
-          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) {:rank (if derived 2 0) :sub -1}
+          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) (cond-> {:rank (if derived 2 0) :sub -1} derived (assoc :d2b [(class-id at) (class-id pt)]))
           ;; (cpp-s14: a class's conversion function binding the reference directly, [over.ics.ref]/1, [dcl.init.ref]/5.1.2)
           (and (not *no-user*) (class-id at) (not (or same derived)) (ref-conv-for (class-id at) p (:c at))) {:rank 3}
           ;; (CX12, the checker: a reference-related type losing a qualifier binds neither directly nor to a temporary,
@@ -3516,7 +3640,10 @@
       (abi/class? pt)
       (cond
         (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
-        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2}
+        ;; (queue 367: with its classes, [over.ics.rank]/4.4.4: of two derived-to-base conversions of one class, the nearer
+        ;; base's better; basic_string's _M_construct(.., forward_iterator_tag) over (.., input_iterator_tag) for a
+        ;; random_access_iterator_tag, string-inst.cc's S::basic_string(C*, C*, const allocator<C>&))
+        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2 :d2b [(class-id at) (:id pt)]}
         *no-user* nil
         ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
         (and (class-id at) (conv-for (class-id at) (abi/unq pt) false (:c at))) {:rank 3}
@@ -3544,6 +3671,9 @@
                   {:rank 3})))
       (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false (:c at))) {:rank 3})
       (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
+      ;; (queue 380: &f of an overload set, its set's function the parameter's type matches, an exact match, [over.ics.scs]/3)
+      (and (= :fnaddr (:op e)) (:set e) (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching (:set e) (:to (abi/unq pt))))
+      {:rank 0}
       :else (let [r (std-rank e (:ty (rv e)) pt)
                   ft (abi/unq (:ty (rv e))) tt (abi/unq pt)]
               ;; [over.ics.rank]/3.2.6: a pointer's qualification adjustment ranks behind the identity
@@ -3554,9 +3684,12 @@
 (defn- better-ics? [a b]
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
-           (if (and (:cvq a) (:cvq b))
+           (cond
+             (and (:d2b a) (:d2b b) (= (first (:d2b a)) (first (:d2b b))) (not= (second (:d2b a)) (second (:d2b b))))
+             (boolean (abi/derived-from? (second (:d2b a)) (second (:d2b b))))
+             (and (:cvq a) (:cvq b))
              (let [x (:cvq a) y (:cvq b)] (and (not= x y) (every? y x)))
-             (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
+             :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
 
 (declare resolve-overload*)
 
@@ -4414,6 +4547,22 @@
       (declare-fn! *root* {:kind "FunctionDecl" :name nm :type {:qualType qt}
                            :inner (mapv (fn [t] {:kind "ParmVarDecl" :type {:qualType t}}) ps)}))))
 
+(defn- type-named-by
+  "queue 380 (W3d): the type a name expression `n` names, when the native parser read a type's name as an expression
+  because the name was not a type in its scope (a member type of the class an out-of-class member's definition names,
+  `sizeof(_Rep_base)` in basic_string::_Rep::_S_max_size's initializer, `__wmask_type()` in ctype<wchar_t>'s member, a
+  class's injected name): the first entity its lookup finds, when that is a type ([expr.type.conv], [expr.sizeof]); else nil.
+  No name with explicit template arguments."
+  [ctx n]
+  (let [n (loop [k n] (if (and (map? k) (= "ParenExpr" (:kind k)) (= 1 (count (kids k)))) (recur (first (kids k))) k))]
+    (when (and (map? n) (= "DeclRefExpr" (:kind n)) (not (:explicitTemplateArgs n)))
+      (let [nm (get-in n [:referencedDecl :name]) [g q] (ref-qualifier n)
+            es (when (and nm (not (written-targs n nm)))
+                 (try (if (or g (seq q)) (lookup-qualified (:scope ctx) (conj q nm) g) (lookup (:scope ctx) nm))
+                      (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) nil (throw e)))))]
+        ;; (a type alone: a function or variable of the name, stat beside struct stat, is the call's)
+        (when (and (seq es) (= :type (:e (first es))) (:ty (first es)) (not-any? #(#{:fn :var :tmpl} (:e %)) es)) (:ty (first es)))))))
+
 (defn- name-expr [ctx n]
   (let [nm (get-in n [:referencedDecl :name])
         [g q] (ref-qualifier n)
@@ -5027,7 +5176,33 @@
    "__builtin_popcount" [:ctpop :uint] "__builtin_popcountl" [:ctpop :ulong] "__builtin_popcountll" [:ctpop :ullong] "__builtin_popcountg" [:ctpop nil]
    "__builtin_clz" [:ctlz :uint] "__builtin_clzl" [:ctlz :ulong] "__builtin_clzll" [:ctlz :ullong] "__builtin_clzg" [:ctlz nil]
    "__builtin_ctz" [:cttz :uint] "__builtin_ctzl" [:cttz :ulong] "__builtin_ctzll" [:cttz :ullong] "__builtin_ctzg" [:cttz nil]
-   "__builtin_bswap16" [:bswap :ushort] "__builtin_bswap32" [:bswap :uint] "__builtin_bswap64" [:bswap :ulong]})
+   "__builtin_bswap16" [:bswap :ushort] "__builtin_bswap32" [:bswap :uint] "__builtin_bswap64" [:bswap :ulong]
+   ;; (queue 380, W3d: <limits>'s numeric_limits<T>::infinity() and quiet_NaN(), c++locale.cc's long double's; clang folds
+   ;; them, its constant evaluator's VisitCallExpr: HUGE_VAL and inf a constant infinity of the type, nan("") the type's
+   ;; default quiet NaN)
+   "__builtin_huge_val" :fconst "__builtin_huge_valf" :fconst "__builtin_huge_vall" :fconst
+   "__builtin_inf" :fconst "__builtin_inff" :fconst "__builtin_infl" :fconst
+   "__builtin_nan" :fconst "__builtin_nanf" :fconst "__builtin_nanl" :fconst
+   ;; (queue 380, W3d: hashtable_c++0x.cc's __builtin_floor: the rounding builtins clang's CGBuiltin writes as LLVM's
+   ;; intrinsics whatever -fmath-errno says, llvm.floor and the rest of the operand's type; errno-setting ones stay calls)
+   "__builtin_floor" :fmath "__builtin_floorf" :fmath "__builtin_floorl" :fmath
+   "__builtin_ceil" :fmath "__builtin_ceilf" :fmath "__builtin_ceill" :fmath
+   "__builtin_trunc" :fmath "__builtin_truncf" :fmath "__builtin_truncl" :fmath
+   "__builtin_round" :fmath "__builtin_roundf" :fmath "__builtin_roundl" :fmath
+   "__builtin_rint" :fmath "__builtin_rintf" :fmath "__builtin_rintl" :fmath
+   "__builtin_nearbyint" :fmath "__builtin_nearbyintf" :fmath "__builtin_nearbyintl" :fmath
+   "__builtin_fabs" :fmath "__builtin_fabsf" :fmath "__builtin_fabsl" :fmath})
+
+(defn- fp-builtin
+  "A floating builtin's stem and type (queue 380): __builtin_floorl -> [\"floor\" long double], f float, l long double."
+  [^String nm]
+  (let [b (subs nm (count "__builtin_"))
+        stems #{"huge_val" "inf" "nan" "floor" "ceil" "trunc" "round" "rint" "nearbyint" "fabs"}
+        b0 (subs b 0 (dec (count b)))]
+    (cond (stems b) [b abi/double*]
+          (and (stems b0) (str/ends-with? b "f")) [b0 abi/float*]
+          (and (stems b0) (str/ends-with? b "l")) [b0 (abi/b :ldouble)]
+          :else (fail :name "unknown name " nm))))
 
 (def ^:private std-builtins
   {"move" :cast "forward" :cast "move_if_noexcept" :cast "as_const" :cast "forward_like" :cast "addressof" :addr "__addressof" :addr})
@@ -5047,7 +5222,12 @@
                  any-method (some #(and (:cls %) (not (:static %))) ms)
                  obj (or obj (when (and (:implicit-this callee) any-method (:this-type ctx)) (cx-via (deref-node (this-expr ctx)) (:cx-qcls callee))))
                  ;; (cpp-s8: a hidden friend only by ADL, friend-visible?)
-                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) (:fns callee))) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
+                 ;; (queue 367-2 (a), the code generator: a specialization of one of the call's templates is its candidate through
+                 ;; that template's deduction alone ([temp.over]/1), not again as the function its name lookup found: two of one
+                 ;; type made `_M_construct<true>(...)` ambiguous with `_M_construct<false>`)
+                 tset (set (:tmpls callee))
+                 own-fns (if (checking?) (:fns callee) (remove #(contains? tset (:tid (:tinst (fnd %)))) (:fns callee)))
+                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
                  _ (when (and (empty? cands) (empty? (:tmpls callee))) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args) (fail :name "unknown name " (:name callee)))
@@ -5894,7 +6074,12 @@
       (or (when (and (class-operand? e) (not= o "&")) (operator-call ctx o (if (and (#{"++" "--"} o) (:isPostfix n)) [e {:op :int :v 0 :ty abi/int* :cat :pr}] [e])))
           (when (class-operand? e) (no-operator! ctx o [e]))
           (case o
-            "&" (cond (= :fnset (:op e)) (let [f (first (:fns e))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr})
+            "&" (cond (= :fnset (:op e)) (let [f (first (:fns e))]
+                                           ;; (queue 380, W3d: the address of an overloaded name keeps its set, :set, for the
+                                           ;; target type to choose from, [over.over]/1: debug.cc's `pretty_print(ctx, s,
+                                           ;; &print_string)` of print_string's two overloads; the first stands alone)
+                                           (cond-> {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr}
+                                             (and (empty? (:tmpls e)) (< 1 (count (distinct (:fns e))))) (assoc :set e)))
                       (lv? e) {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr}
                       :else (fail :addr "& of an rvalue"))
             "*" (deref-node e)
@@ -5973,6 +6158,15 @@
           {:op :bitop :which which :e (convert-scalar x t false) :fb fb :ty (if (= :bswap which) t abi/int*) :cat :pr})
       (case b
         :expect (convert-scalar (rv (analyze ctx (second (kids n)))) abi/long* false)
+        :fconst (let [nm (get-in (first (kids n)) [:referencedDecl :name]) [stem t] (fp-builtin nm)]
+                  (if (= stem "nan")
+                    (let [a (loop [a (second (kids n))] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind a)) (recur (first (kids a))) a))
+                          s (when (= "StringLiteral" (:kind a)) (:s (analyze ctx a)))]
+                      (when-not (= "" s) (fail :expr nm " of a payload"))
+                      {:op :float :v Double/NaN :ty t :cat :pr})
+                    {:op :float :v Double/POSITIVE_INFINITY :ty t :cat :pr}))
+        :fmath (let [nm (get-in (first (kids n)) [:referencedDecl :name]) [stem t] (fp-builtin nm)]
+                 {:op :fmath :fn stem :e (convert-scalar (rv (analyze ctx (second (kids n)))) t false) :ty t :cat :pr})
         :constant-p {:op :int :v (if (ce-try (rv (analyze ctx (second (kids n))))) 1 0) :ty abi/int* :cat :pr}
         ;; (CP378 (a): 0 in code that runs, marked :ice: the evaluator's 1 when manifestly constant-evaluated)
         :is-constant-evaluated {:op :int :v 0 :ice true :ty abi/bool* :cat :pr}
@@ -6046,11 +6240,20 @@
                      (when-not (class-id (:ty o)) o)))]
      (if pseudo
       (cast-expr ctx abi/void pseudo true)
+    (if-let [t (type-named-by ctx cn)]
+      ;; (queue 380, W3d: T(args) whose T the parser read as a function's name, an explicit type conversion in
+      ;; functional notation, [expr.type.conv]/2, as CXXUnresolvedConstructExpr's analysis does it)
+      (let [args (analyze-args ctx an)]
+        (if (abi/class? (abi/unq t))
+          {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
+          (cond (empty? args) {:op :zero-val :ty t :cat :pr}
+                (= 1 (count args)) (cast-expr ctx t (first args) true)
+                :else (fail :expr "a functional cast of a scalar type with " (count args) " arguments"))))
     (let [callee (analyze ctx cn)
           args (analyze-args ctx an)]
       (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
         (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()" (when (System/getenv "CPP_HDR_TRACE") (str " of " (pr-str (:op callee)) " " (pr-str (:ty callee)) " " (some-> (class-id (:ty callee)) abi/cls :name)))))
-        (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args)))))
+        (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args))))))
 )
 ))
     "MemberExpr" (member-expr ctx n)
@@ -6184,7 +6387,12 @@
                        (when-not (#{:pack :varpack} (:e e)) (fail :pack "sizeof... of a non-pack " (:name n)))
                        {:op :int :v (count (or (:elems e) (:ids e))) :ty abi/ulong* :cat :pr})
     "UnaryExprOrTypeTraitExpr"
-    (let [t (if-let [at (get-in n [:argType :qualType])] (resolve-type (:scope ctx) at) (:ty (binding [*unevaluated* true] (analyze ctx (first (kids n))))))
+    (let [;; (queue 380, W3d: an operand the parser read as an expression that names a type, type-named-by)
+          at (get-in n [:argType :qualType])
+          nt (when-not at (type-named-by ctx (first (kids n))))
+          t (cond at (resolve-type (:scope ctx) at)
+                  nt nt
+                  :else (:ty (binding [*unevaluated* true] (analyze ctx (first (kids n))))))
           t (abi/non-ref t)]
       (case (:name n)
         "sizeof" {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr}

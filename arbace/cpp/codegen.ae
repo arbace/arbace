@@ -279,11 +279,14 @@
   "How a class type passes by value: :ignore, :ind (by address) or the eightbytes' parts."
   [t]
   (let [id (:id (abi/unq t))]
-    (if (and (sema/trivial-copy? id) (sema/trivial-dtor? id))
-      (let [c (abi/classify-class id)] (if (= :memory c) :ind c))
+    ;; (queue 378: the Itanium ABI's "non-trivial for the purposes of calls", the copy and move constructors and the destructor,
+    ;; sema/trivial-for-call?; before, the copy constructors and the destructor alone)
+    (if (sema/trivial-for-call? id)
+      ;; (and a base's or member's not trivial for calls, the psABI's MEMORY: byval, as clang's x86-64 classification gives it)
+      (let [c (if (sema/call-memory? id) :memory (abi/classify-class id))] (if (= :memory c) :ind c))
       :ind)))
 
-(defn- byval-class? [t] (let [id (:id (abi/unq t))] (and (sema/trivial-copy? id) (sema/trivial-dtor? id))))
+(defn- byval-class? [t] (let [id (:id (abi/unq t))] (sema/trivial-for-call? id)))
 
 (defn sig-plan
   "{:ret llvm-type :ret-k :sret|:regs|:ignore|:direct :ret-parts :ps [llvm-types] :params [{:k :direct|:regs|:ind|:ignore
@@ -362,12 +365,15 @@
   `resize_and_overwrite<_Operation&>` of basic_string<char>, hello.cpp's std::to_string, had been declared and never
   defined)."
   [f]
-  (cond (:extern-inst f) true (:tinst f) false :else
+  ;; (queue 367: an explicit specialization of a member is no instantiation, [temp.explicit]/11 does not reach it: defined
+  ;; where it is written, collate_members.cc's collate<char>::_M_compare under <locale>'s extern template class collate<char>;
+  ;; a member an explicit instantiation definition names is defined here)
+  (cond (:explicit-inst f) false (:spec-member f) false (:extern-inst f) true (:tinst f) false :else
   (loop [cid (:cls f)]
     (when cid
       (let [c (abi/cls cid)]
         (or (:extern-inst c)
-            (recur (loop [s (:outer c)] (cond (nil? s) nil (:cls s) (:cls s) :else (recur (:parent s)))))))))))
+            (recur (loop [s (:outer c)] (cond (nil? s) nil (= :fn (:kind s)) nil (:cls s) (:cls s) :else (recur (:parent s)))))))))))
 
 (defn- want-fn!
   "The function's symbol (a constructor's or destructor's variant `v`), its definition queued (or its declaration
@@ -379,7 +385,10 @@
     (when-not (contains? (:wanted @*top*) [fid v])
       (swap! *top* update :wanted conj [fid v])
       (if (and (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
-               (not (and (:tbody f) (not (:implicit f)) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))))
+               ;; (queue 367: a member defaulted outside its class is user-provided, [dcl.fct.def.default]/5: the library's under an
+               ;; explicit instantiation declaration, as a member with a body)
+               (not (and (or (:tbody f) (:ool-defaulted f)) (not (:implicit f)) (or (not (:defaulted f)) (:ool-defaulted f))
+                         (extern-inst? f) (not (:always-inline f)))))
         (do (when-not *eager-want* (reserve! nm))
             (swap! *top* update :queue conj [fid v]))
         (let [[r ps va plan] (fn-sig f v)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
@@ -467,6 +476,7 @@
 ;; (the bottom of a `throw()` function before C++17: clang's EHFilterScope of no types, EmitStartEHSpec; queue 351).
 
 (def ^:dynamic *no-eh* false) ; inside a landing pad: calls are plain
+(def ^:dynamic *in-eh-walk* false) ; queue 382: inside a landing pad's cleanups: a call that may throw terminates
 (def ^:dynamic *as-base* nil) ; {:vtt v}: the next constructor or destructor called is a base subobject's
 
 (defn- eh-state [] (vec (concat (:cleanups @*f*) (when *extend* @*extend*) (when *temps* @*temps*))))
@@ -516,6 +526,30 @@
                                  '(unreachable))])))
   (gsym "__clang_call_terminate"))
 
+(declare clang-call-terminate!)
+
+(defn- invoke-terminating!
+  "A call in a landing pad's cleanups that may throw: an invoke whose unwind is the function's terminate pad, a
+  landingpad catching everything and calling __clang_call_terminate ([except.terminate]/1; clang's terminate scope around
+  an EH cleanup); its result's operand (nil for void)."
+  [ret ty callee args]
+  (let [tl (or (:term-pad @*f*)
+               (let [l (new-label "terminate.lpad")] (swap! *f* assoc :term-pad l :term-pad-new true) l))
+        cont (new-label "invoke.cont")
+        inv (list 'invoke ty callee args :to cont :unwind tl)
+        r (if (= 'void ret) (do (emit! inv) nil) (val! inv))]
+    (close-block!)
+    (when (:term-pad-new @*f*)
+      (swap! *f* dissoc :term-pad-new)
+      (start! tl)
+      (let [lp (val! (list 'landingpad '(struct ptr i32) '(catch ptr null)))
+            e (val! (list 'extractvalue ['(struct ptr i32) lp] 0))]
+        (emit! (list 'call 'void (clang-call-terminate!) [['ptr e]] :attrs [:noreturn :nounwind]))
+        (emit! '(unreachable)))
+      (close-block!))
+    (start! cont)
+    r))
+
 (defn- eh-walk!
   "The landing pad's code from the cleanup entries `cs` (innermost first)."
   [cs es ss]
@@ -546,22 +580,9 @@
       ;; cleanup that throws during unwinding terminates ([except.terminate]/1; clang's CallEndCatch on the EH path: an
       ;; invoke whose landing pad calls __clang_call_terminate; libsupc++'s vec.cc's catch (...) { ...; throw; })
       (and (:end-catch c) (:might-throw c))
-      (let [tl (or (:term-pad @*f*)
-                   (let [l (new-label "terminate.lpad")] (swap! *f* assoc :term-pad l :term-pad-new true) l))
-            cont (new-label "invoke.cont")]
-        (declare! "__cxa_end_catch" 'void [])
-        (emit! (list 'invoke 'void (gsym "__cxa_end_catch") [] :to cont :unwind tl))
-        (close-block!)
-        (when (:term-pad-new @*f*)
-          (swap! *f* dissoc :term-pad-new)
-          (start! tl)
-          (let [lp (val! (list 'landingpad '(struct ptr i32) '(catch ptr null)))
-                e (val! (list 'extractvalue ['(struct ptr i32) lp] 0))]
-            (emit! (list 'call 'void (clang-call-terminate!) [['ptr e]] :attrs [:noreturn :nounwind]))
-            (emit! '(unreachable)))
-          (close-block!))
-        (start! cont)
-        (eh-walk! (rest cs) es ss))
+      (do (declare! "__cxa_end_catch" 'void [])
+          (invoke-terminating! 'void 'void (gsym "__cxa_end_catch") [])
+          (eh-walk! (rest cs) es ss))
       :else (do (run-cleanup-eh! c) (eh-walk! (rest cs) es ss)))
     (let [e (val! (list 'load 'ptr ['ptr es] :align 8))
           s (val! (list 'load 'i32 ['ptr ss] :align 4))
@@ -589,7 +610,7 @@
                                           (when flt ['(filter (array 0 ptr) zeroinitializer)]))))]
               (emit! (list 'store ['ptr (val! (list 'extractvalue ['(struct ptr i32) lp] 0))] ['ptr es] :align 8))
               (emit! (list 'store ['i32 (val! (list 'extractvalue ['(struct ptr i32) lp] 1))] ['ptr ss] :align 4)))
-            (binding [*no-eh* true *temps* nil *extend* nil] (eh-walk! (rseq state) es ss))
+            (binding [*no-eh* true *in-eh-walk* true *temps* nil *extend* nil] (eh-walk! (rseq state) es ss))
             (close-block!)
             (swap! *f* (fn [f] (-> f (update :pad-blocks (fnil into []) (:blocks f)) (merge saved) (assoc :term (boolean (:term saved))))))
             l)))))
@@ -599,15 +620,54 @@
   unwind inside a cleanup's or a handler's scope; its result's operand (nil for void)."
   [ret ty callee args nounwind]
   (let [pad (when-not (or nounwind *no-eh*) (landing-pad! (eh-state)))]
-    (if pad
+    (cond
+      ;; (queue 382: a cleanup's call that may throw while unwinding terminates, as clang's: numpunct<char>::~numpunct's
+      ;; facet::~facet before C++11)
+      (and *in-eh-walk* (not nounwind)) (invoke-terminating! ret ty callee args)
+      pad
       (let [cont (new-label "invoke.cont")
             inv (list 'invoke ty callee args :to cont :unwind pad)
             r (if (= 'void ret) (do (emit! inv) nil) (val! inv))]
         (close-block!) (start! cont) r)
+      :else
       (let [form (apply list 'call ty callee args (when nounwind [:attrs [:nounwind]]))]
         (if (= 'void ret) (do (emit! form) nil) (val! form))))))
 
-(defn- nothrow-fn? [f] (boolean (or (and (= :dtor (:kind f)) (not (:noexcept-false f))) (:noexcept f))))
+(declare dtor-nothrow?)
+
+(defn- nothrow-fn? [f] (boolean (or (:noexcept f) (and (= :dtor (:kind f)) (dtor-nothrow? f)))))
+
+(defn- body-may-throw?
+  "queue 382: whether a function body's forms hold an instruction that may throw, as LLVM's Instruction::mayThrow sees it
+  for TryMarkNoThrow: an invoke, a resume, or a call without nounwind (LLVM's intrinsics are nounwind)."
+  [body]
+  (boolean (some (fn [x] (and (seq? x)
+                              (case (first x)
+                                (invoke resume) true
+                                call (let [callee (nth x 2 nil)
+                                           cn (when (symbol? callee) (name callee))]
+                                       (not (or (some #(and (vector? %) (some #{:nounwind} %)) x)
+                                                (and cn (str/includes? cn "llvm.")))))
+                                false)))
+                 (tree-seq coll? seq body))))
+
+(defn- dtor-nothrow?
+  "Whether the destructor `f` throws nothing. Since C++11 one without noexcept(false) ([except.spec]/8: a destructor's is
+  noexcept unless it says otherwise, or a subobject's is potentially-throwing; the slice takes the first). queue 382: before
+  C++11 a declared destructor without a throw() may throw, and an implicit or defaulted one allows what its subobjects'
+  destructors allow (C++03 [except.spec]/13), as clang computes it: gnu++98's COW basic_string's ~basic_string()
+  _GLIBCXX_NOEXCEPT (empty) and numpunct<char>::~numpunct() unwind, their cleanups' calls under a terminate pad."
+  [f]
+  (cond
+    (:noexcept-false f) false
+    (>= (long sema/*cxx-year*) 11) true
+    (contains? (:nothrow-inferred @*top*) (:id f)) true
+    (or (:implicit f) (:defaulted f))
+    (let [c (abi/cls (:cls f))
+          subs (concat (map :cls (:bases c))
+                       (keep (fn [fl] (let [t (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t))] (when (abi/class? t) (:id t)))) (:fields c)))]
+      (every? (fn [cid] (let [d (:dtor (abi/cls cid))] (or (nil? d) (nothrow-fn? (sema/fnd d))))) subs))
+    :else false))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Calls
@@ -857,7 +917,12 @@
                                        (add-top! f))
                                      ;; a variable defined elsewhere (extern, a header's): declared
                                      ;; (cpp-s5b: a thread-local static data member defined in another unit too)
-                                     (when (and (or (:extern v) (tls-wrapped-elsewhere? v nm)) (not (contains? (:declared @*top*) nm)))
+                                     ;; (queue 380, W3d: and a static data member declared in its class and defined in no part
+                                     ;; of this unit, monetary_members_cow.cc's money_base::_S_default_pattern, a class copied by
+                                     ;; memcpy: lower's "unknown global" had refused the unit)
+                                     (when (and (or (:extern v) (tls-wrapped-elsewhere? v nm)
+                                                    (and (= :member-static (:storage v)) (not (:defined v)) (not (:pending-def v)) (not (:linkonce v))))
+                                                (not (contains? (:declared @*top*) nm)))
                                        (swap! *top* update :declared conj nm)
                                        ;; (CP373 (a): a reference's declaration is `ptr`, as clang's ConvertTypeForMem of a
                                        ;; reference type, `@r = external thread_local global ptr`; before, [8 x i8])
@@ -932,9 +997,14 @@
 (defn- fp-const [t ^double v & [lit]]
   (when (#{:float16 :float128} (abi/bn (abi/unq t))) (fail :codegen "a constant of " (name (abi/bn (abi/unq t)))))
   (if (= :float (abi/bn (abi/unq t)))
-    (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (float v)))))))
+    (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (.floatValue (Double/valueOf v))))))))
     (if (= :ldouble (abi/bn (abi/unq t)))
-      (list 'fp (fp80-hex (if lit lit (java.math.BigDecimal. v))))
+      ;; (queue 380: an infinity, x86's 80-bit one with its integer bit, and the default quiet NaN, APFloat's; a literal's
+      ;; own text first, 1.5e4000L is no double's infinity)
+      (list 'fp (cond lit (fp80-hex lit)
+                      (Double/isNaN v) "f0x7FFFC000000000000000"
+                      (Double/isInfinite v) (if (pos? v) "f0x7FFF8000000000000000" "f0xFFFF8000000000000000")
+                      :else (fp80-hex (java.math.BigDecimal. v))))
       (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits v))))))))
 
 (defn- int-cast! [from to v]
@@ -1375,6 +1445,14 @@
             (val! (list 'select ['i1 z] ['i32 (emit-rv fb)] ['i32 r])))
           r)))))
 
+(defn- emit-fmath!
+  "queue 380: a rounding builtin as clang's CGBuiltin writes it, LLVM's intrinsic of the operand's type (llvm.floor.f64)."
+  [e]
+  (let [lt (abi/llvm-type (:ty e)) x (emit-rv (:e e))
+        nm (str "llvm." (:fn e) "." ({'float "f32" 'double "f64" 'x86_fp80 "f80"} lt))]
+    (declare! nm lt [lt] :nounwind true)
+    (val! (list 'call lt (gsym nm) [[lt x]]))))
+
 (defn emit-rv
   "The operand of the scalar prvalue `e`."
   [e]
@@ -1567,6 +1645,7 @@
     :clear-padding (emit-clear-padding! e)
     :atomic (emit-atomic! e)
     :bitop (emit-bitop! e)
+    :fmath (emit-fmath! e)
     ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
     ;; area while gp_offset <= 40 (fp_offset <= 160), else from the overflow area
     :va-arg (let [t (:ty e)
@@ -1661,7 +1740,11 @@
                 (and cid (:dtor (abi/cls cid)) (:virtual (sema/fnd (:dtor (abi/cls cid)))))
                 (let [d (:dtor (abi/cls cid))
                       target (vcall-target cid d 0 p)]
-                  (emit! (list 'call 'void target [['ptr p]])))
+                  ;; (queue 382: a deleting destructor that may throw, before C++11 one without throw(), invoked where a cleanup
+                  ;; is pending, as clang's; a nothrow one the plain call as before)
+                  (if (nothrow-fn? (sema/fnd d))
+                    (emit! (list 'call 'void target [['ptr p]]))
+                    (call-insn! 'void 'void target [['ptr p]] false)))
                 :else
                 (do (call-dtor! cid p)
                     (declare! "_ZdlPvm" 'void '[ptr i64])
@@ -2426,14 +2509,21 @@
   "A virtual destructor's deleting variant, written once (as clang, when a vtable refers to it): deferred among the
   functions, in the order first referred to (P23 (a))."
   [fid]
-  (when-not (some #(= fid %) (:d0s @*top*))
+  (cond
+    ;; (queue 367: a destructor of a class an explicit instantiation declaration names: its D0 the library's too)
+    (let [f (sema/fnd fid)] (and (:tbody f) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f))))
+    (declare! (abi/mangle-fn (sema/fnd fid) 0) 'void '[ptr] :nounwind (nothrow-fn? (sema/fnd fid)))
+    (not (some #(= fid %) (:d0s @*top*)))
+   (do
     (reserve! (abi/mangle-fn (sema/fnd fid) 0))
     (swap! *top* update :d0s conj-new fid)
-    (swap! *top* update :queue conj [:d0 fid])))
+    (swap! *top* update :queue conj [:d0 fid]))))
 
 (defn- linkage-of [f]
   (cond
     (:internal f) [:linkage :internal]
+    ;; (queue 367: a member an explicit instantiation definition names, clang's GVA_StrongODR)
+    (:explicit-inst f) [:linkage :weak_odr]
     (or (:inline f) (:implicit f) (and (:defaulted f) (not (:out-of-line-default f)))) [:linkage :linkonce_odr]
     :else []))
 
@@ -2570,6 +2660,11 @@
             body (vec (concat [entry] (rest blocks) (:pad-blocks s)))
             params (mapv (fn [t a p] (vec (concat [t] a [p]))) ps (:pattrs plan) pnames)]
         (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
+        ;; (queue 382: clang's TryMarkNoThrow, CodeGenFunction::GenerateCode: a definition none of whose instructions may throw,
+        ;; no invoke and no call that is not nounwind, is nounwind, and the calls emitted after it are plain calls; taken here
+        ;; for a destructor before C++11, the one case dtor-nothrow? does not decide alone: G::~G() {} defined before M::~M)
+        (when (and (= :dtor (:kind f)) (< (long sema/*cxx-year*) 11) (not (nothrow-fn? f)) (not (body-may-throw? body)))
+          (swap! *top* update :nothrow-inferred (fnil conj #{}) fid))
         (place! [:fn nm] (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
                          (concat (linkage-of f)
                                  (when (or (nothrow-fn? f) (:always-inline f))
@@ -2577,9 +2672,11 @@
                                  (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
-        (when (and (#{:ctor :dtor} (:kind f)) (empty? (linkage-of f)) (not vbc))
+        ;; (queue 367: and for a weak_odr one, an explicit instantiation's, the alias weak_odr: clang's getCodegenToUse, Alias)
+        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (:explicit-inst f)) (not vbc))
           ;; written where the complete object's constructor or destructor is called, as clang emits it
-          (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)])))
+          (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (apply list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)]
+                                                                       (when (:explicit-inst f) [:linkage :weak_odr]))))
         nil))))
 
 (defn emit-d0!
@@ -2621,9 +2718,15 @@
   defines std::bad_alloc's); :external when it has a key function defined elsewhere (G4: std::exception's); else
   :linkonce, in each unit that uses it."
   [cid]
-  (if-let [k (key-fn cid)]
-    (let [f (sema/fnd k)] (if (or (and (:body f) (not (:lazy f))) (:out-of-line-default f)) :here :external))
-    :linkonce))
+  ;; (queue 367: a class template's specialization an explicit instantiation definition names: :weak, weak_odr here; one an
+  ;; explicit instantiation declaration names: :external, the library's -- clang's isVTableExternal and getVTableLinkage with
+  ;; TSK_ExplicitInstantiationDefinition and TSK_ExplicitInstantiationDeclaration)
+  (let [c (abi/cls cid)]
+    (cond (and (:explicit-inst-def c) (abi/dynamic? cid)) :weak
+          (and (:extern-inst c) (abi/dynamic? cid)) :external
+          :else (if-let [k (key-fn cid)]
+                  (let [f (sema/fnd k)] (if (or (and (:body f) (not (:lazy f))) (:out-of-line-default f)) :here :external))
+                  :linkonce))))
 
 (defn- external-class?
   "A dynamic class whose vtable and type_info are another unit's (its key function not defined here)."
@@ -2633,7 +2736,9 @@
 (defn- vt-linkage
   "The linkage options of the vtable, VTT and type_info of class `cid`: strong where its key function is defined."
   [cid]
-  (if (and (abi/dynamic? cid) (= :here (vtable-home cid))) [] [:linkage :linkonce_odr]))
+  (if (abi/dynamic? cid)
+    (case (vtable-home cid) :here [] :weak [:linkage :weak_odr] [:linkage :linkonce_odr])
+    [:linkage :linkonce_odr]))
 
 (defn- typeinfo! [cid]
   (let [t {:k :class :id cid}
@@ -2690,6 +2795,10 @@
              (str "_ZTc" (coff adj) (coff radj) (subs (abi/mangle-fn f nil) 2))
              (str (if (:v adj) (str "_ZTv" (num (:nv adj)) "_" (num (:v adj)) "_") (str "_ZTh" (num (:nv adj)) "_"))
                   (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2)))]
+    ;; (queue 367: the thunk of a function of a class an explicit instantiation declaration names: the library's, declared)
+    (when (and (not (contains? (:declared @*top*) nm)) (:tbody f) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))
+      (let [[ret ps va plan] (if (= :dtor (:kind f)) ['void '[ptr] false {:pattrs [[]]}] (fn-sig f))]
+        (declare! nm ret ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan))))
     (when-not (contains? (:declared @*top*) nm)
       (swap! *top* update :declared conj nm)
       (let [[ret ps va plan] (if (= :dtor (:kind f)) ['void '[ptr] false {:pattrs [[]]}] (fn-sig f))
@@ -2911,7 +3020,7 @@
                 nm (abi/mangle-var v)
                 init (:ginit v)
                 leaves (when-not (abi/ref? t) (const-leaves t init 0))
-                link (cond (:internal v) [:linkage :internal] (:linkonce v) [:linkage :linkonce_odr] :else [])]
+                link (cond (:internal v) [:linkage :internal] (:explicit-inst v) [:linkage :weak_odr] (:linkonce v) [:linkage :linkonce_odr] :else [])]
             ;; a use through an earlier `extern` declaration of the same object needs no declaration of its own
             (swap! *top* update :declared conj nm)
             (cond
@@ -3085,11 +3194,17 @@
             ;; never called; its destructors all are, through derived classes and D0's slot)
             (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
             (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
+        ;; (queue 367: an explicit instantiation definition's members, with their constructors' and destructors' variants)
+        (when (and (:explicit-inst f) (or (:tbody f) (and (:defaulted f) (not (:trivial f)))))
+          (want-fn! id)
+          (when (#{:ctor :dtor} (:kind f))
+            (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
+            (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
         (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
         (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id)))))
     ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
-    (doseq [cid (sort (keys @abi/*classes*)) :when (= :here (vtable-home cid))]
+    (doseq [cid (sort (keys @abi/*classes*)) :when (#{:here :weak} (vtable-home cid))]
       (want! :groups [:group [cid cid 0]] [cid cid 0])
       ;; (defined here: no external declaration of it, the type_info of a class derived from __si_class_type_info, in
       ;; si_class_type_info.cc, names __si_class_type_info's vtable)
@@ -3130,6 +3245,17 @@
         (while (pending?) (deferred!))))
     ;; (every slot filled: a wanted group or VTT is written)
     (swap! *top* update :forms (fn [fs] (filterv #(not (and (vector? %) (= ::slot (first %)))) fs)))
+    ;; (queue 367: a linkonce_odr variable, a template's static data member, written only where the module refers to it, as
+    ;; clang emits one when used: the analysis made some pending definitions from bodies no function of the module is;
+    ;; compatibility-c++0x.cc's and cow-string-io-inst.cc's basic_string<...>::_Rep::_S_empty_rep_storage)
+    (let [forms (:forms @*top*)
+          cands (set (keep (fn [[_ v]] (when (and (:linkonce v) (not (:explicit-inst v)) (#{:member-static :global} (:storage v)))
+                                         (try (gsym (abi/mangle-var v)) (catch Exception _ nil))))
+                           @sema/*vars*))
+          def? (fn [f] (and (seq? f) (= 'llvm/global (first f)) (contains? cands (second f))))
+          used (when (seq cands) (set (for [f forms :when (not (def? f)) x (tree-seq coll? seq f) :when (contains? cands x)] x)))]
+      (when (seq cands)
+        (swap! *top* assoc :forms (filterv #(not (and (def? %) (not (contains? used (second %))))) forms))))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
     ;; G5c: the thread-local variables' globals (their definitions and declarations) thread_local, as clang's
