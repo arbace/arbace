@@ -4839,3 +4839,87 @@ Peaks 1.13-1.16 GB (the cap of 1.15 GB with `HSI_FRONT_MEM=900MiB`; at the defau
   (b) put them on own-fallback.txt (run on the pack, `:no-dump`). That hides that the front end compiles them, and the list may only
   shrink; (c) keep refusing a program whose reference is `:no-build`. *Recommended and taken: (a)*. A program among the 29 that fails
   with another status (a crash, the light cap) stays unclassed: the night's 16 GiB run shows it, and its row gets its own class then.
+
+## As built: HF10-P66 (a), P67 (a), the front end's commonest stops on the own libraries (2026-11-18, round 52, branch `n-hs-elab`, from `mac/n-hs-cpp` `5ea3d6aae`)
+
+By an agent during the night's full gate (memory-free: one front process at a time but for two short comparisons, `HSI_JOBS=1`,
+`ARBACE_MEM_GIB=1`, one front shard, `HSI_FRONT_MEM=900MiB`, a watcher stopping any process of the worktree over 1.15 GB by PID;
+stage 0 linked from next; the own libraries the gate's tars of 2026-11-16, `HSI_OWN_TARS`; no GHC, no build, no network).
+
+**Where the front end stops.** The dry plan (`HSI_FRONT_DRY=1 bin/hsi check --libs own --corpus samples,synthetic,testsuite-core,nofib`)
+tries 739 of 950 programs on the own libraries. Two samples were read:
+- `bin/hsi check --libs own --only` on 25 programs in batches of 5: T1735 and four of the interim record's front failures (DsStrictLet,
+  T10846, tcrun033, TcNullaryTC), then 20 drawn by `shuf` (a fixed random source) from the 285 tried programs with no `:libs :own`
+  line in `test/haskell/check-hsi-own.edn` (the NofibUtils 29 left out). Front stops: T1735 (the elaborator, `unsolved: Data ctx a`
+  in `T1735_Help.Basics`) and nofib/real/cacheprof (the front process over the light 1.15 GB cap). The interim record's old
+  `:typecheck-errors` programs compile now. The other non-passes run: five nofib programs and throwto002 stop at the light 1 GiB
+  cap (Go's "runtime: out of memory", at `ARBACE_MEM_GIB=1`), DsStrictLet is classed (`:own-strict-extension`).
+- The front end alone (`arbace.repr.haskell.front build`, the plan's lines, a fresh process after a stop as the check's
+  `front_shard`) over the 209 testsuite programs of that pool: 202 compile, 7 stop: **4 the solver looping** (T5913, TcCoercible,
+  tcrun030, tcrun032: a stop by memory or no line in 150 s; the interim record had T5913, TcCoercible, tcrun030 and tcrun032 as
+  `:timeout` too), T15598 (HF10-P58, RebindableSyntax's bind at a polytype), T5462Yes1 and quotRem2Large over the light cap.
+
+So the commonest causes, by programs: the solver's cycle of instance contexts (4), then the polytypes met inside a type (T1735;
+T15598 is P58's own case).
+
+**HF10-P67 (a), recursive dictionaries in the inferred groups** (`typecheck.ae`'s `generalize`). A group without a signature
+simplified its wanteds by `reduce-by-instance` one instance at a time, the instance's context pushed back as new wanteds. A cycle of
+instance contexts (T5913's `instance L2 W => L1 W` and `instance L1 W => L2 W`; tcrun030's `Eq (D [])` by `Eq [D []]` by
+`Eq (D [])`; tcrun032's and TcCoercible's `Show (Fix ...)`) pushed its own predicate again without end, and the process's memory grew
+until it was stopped. `solve-pred` already has GHC's solved dictionaries (HF10-P50 (a): a predicate met again while its instance is
+being solved is the dictionary being made, a letrec). A closed predicate (no meta, no type variable) is now solved whole by
+`solve-pred` there. The others are reduced as before.
+
+**HF10-P66 (a), polytypes met inside a type** (`typecheck.ae`). T1735_Help.Basics has `type GenericQ ctx r = forall a. Data ctx a
+=> a -> r`. Its `gmapQ :: Proxy ctx -> GenericQ ctx r -> GenericQ ctx [r]` (two arguments) and `gmapT :: Proxy ctx -> GenericT ctx
+-> GenericT ctx` (defined with three, `gmapT ctx f x`) are such types. Four places did not look through them as GHC does:
+- `poly-syn`: a saturated synonym whose expansion is a polytype is expanded where a type is written (`hs-type`'s `HsTyVar`,
+  `HsAppTy` and `HsOpTy`), as GHC's `tcSplitSigmaTy` looks through it. Kept as a `:tc`, `check-expr` did not see the polytype to
+  skolemise, and `instantiate` did not see the variable `f :: GenericQ ctx r` to instantiate.
+- `infer-matches`: a polytype met among a binding's arguments (gmapT's after two) is skolemised there, as `matchExpectedFunTys`
+  does. Its context is given to the clauses, and its dictionaries are lambdas after the arguments before it. Before, the expected
+  type ran out there, and the clauses' type was unified with the polytype afterwards, its context wanted with no given.
+- `tc-app`: a polytype met after some arguments of a spine (`gmapQ xmlProxy (toXmlD dict) x`) is instantiated there, and its
+  context's evidence is applied before the next argument (`ev-args`), as `tcInstFun` does. A result polytype with quantifiers is
+  instantiated as a qualified result is. Before, `split-fun` wanted the constraints and dropped their evidence, so the arguments
+  after it were one dictionary short.
+- `var-occ`: a lambda-bound variable of a polytype with quantifiers (fromConstrM's `f :: forall b. Data ctx b => m b`, used bare in
+  `b <- f`) is instantiated and its evidence applied, as P20 did for a qualified type without quantifiers. Before, `f` went unapplied,
+  and `>>=` took the dictionary's function for the action. That was T1735's run on native STG: "no alternative for (ReadState :{..})".
+
+**Results.**
+
+| | before (5ea3d6aae) | after |
+|---|---:|---:|
+| the 25 programs' `:libs :own` passes from native STG (`bin/hsi check --libs own --only`, batches of 5) | 17 | 18 (+T1735; nofib/gc/linear's front went past the check's 300 s in the batch, and passes own in a rerun alone, see below) |
+| T1735, T5913, TcCoercible, tcrun030, tcrun032 (`--only`, one batch) | 0 of 5 own (T1735 on the pack, the four past the light cap or the 300 s) | 5 of 5 `:stg :native :libs :own` pass |
+| the 209 programs' front end alone | 202 compile, 7 stop | 204 compile, 5 stop (T15598; T5462Yes1 now `unsolved: GFunctor B`; three by memory in one long process, of which T23146 and dsrun023 compile alone and quotRem2Large stops in tostg on a `StackOverflowError`, as it does on the original code) |
+| samples/Hello (the control) | pass own | pass own; Hello against samples/Trace fails as it must |
+
+nofib/gc/linear compiled in 205 s before (`2052ds`) and passed own. In the after run its front gave no line within the check's
+`HSI_FRONT_TIMEOUT` (300 s). Under the same load, the front alone compiles it in 240 s (`2399ds`), so the run fell back to the pack
+(pass). Rerun alone (`--only nofib/gc/linear`), it compiles in 131 s and passes own from native STG. This is the light front's margin under load, not a stop. The host's load average was 67 to 94 then (the night's gate). Five codeGen
+programs compiled by the original and the new `typecheck.ae` back to back took the same time (60 to 121 ds against 52 to 105 ds).
+
+Small checks of the front end alone (`.tmp/dry/t1`, `t2` of the worktree): `type Q r = forall a. Show a => a -> r` with `q f = qr f`,
+an MPTC variant, a variant eta-expanded to three arguments, and an inline result forall all stopped "unsolved" before and compile
+now. T5913's three sections apart: only the one whose use solves the cycle (`l1 W` under `L2 W => L1 W`, `L1 W => L2 W`) went over
+the cap. It compiles now.
+
+**Not run**: the own libraries' lib-check and lib-stg (`typecheck.ae` elaborates them too: their keys move), the night's whole
+`--libs own --record`, the AOT level, the oracle tier.
+
+### Proposals
+
+- **HF10-P66 polytypes inside a type** (taken overnight, round 52: (a)). (a) Look through a polytype synonym, and skolemise or
+  instantiate a polytype where it is met (bindings' arguments, a spine's arguments, a bare rank-n variable), as GHC's
+  `tcSplitSigmaTy`, `matchExpectedFunTys` and `tcInstFun` do; (b) leave T1735 on the pack. *Recommended and taken: (a)*. It is GHC's
+  behaviour, and the variable case was wrong for any rank-n binder with a context.
+- **HF10-P67 recursive dictionaries in an inferred group** (taken overnight, round 52: (a)). (a) Solve a closed wanted whole with
+  `solve-pred`'s solved dictionaries; (b) a depth bound in `generalize`'s reduction (it stops the loop but leaves the four unsolved).
+  *Recommended and taken: (a)*.
+- **HF10-P68 the next stops** (DECISION for the user, next round). After P66 and P67 the light samples show T15598 (P58), T5462Yes1
+  (now `unsolved: GFunctor B`: a generic default method's instance, no longer past the light cap), quotRem2Large (tostg's
+  `StackOverflowError`, on the original code too) and the light cap's programs (cacheprof, the nofib programs at 1 GiB). (a) Read the
+  night's 16 GiB `--libs own --record` first, and port the next gap from its record; (b) port T5462Yes1's generic default now.
+  *Recommended: (a)*: the light samples have few front stops left, and the whole run names the rest.
