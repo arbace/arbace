@@ -645,6 +645,13 @@ covers what.
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below);
   recorded by the rule of B7. The rest of it is Arbace's own. (jrt's own `HostPath.java`, `Path.java`, `Files.java`
   and `GlobPatterns.java`, which held code transcribed from jdk26u's UnixPath, Path and Files, left with F9 below.)
+- Round 54 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54), the fourth pass"): `go/arbace/jrt/date.ae`'s
+  `dateParse`, `dateWords` and `dateActions` port jdk26u's (https://github.com/openjdk/jdk26u at `baf63fb`)
+  `src/java.base/share/classes/java/util/Date.java` `parse(String)` and its tables, and the variant
+  `overlay/jdk/variants/Util.ae` keeps the code of jdk26u's `sun/rmi/server/Util.java` methods it replaces: Copyright (c)
+  Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below).
+  The rest of them, and the variants `overlay/jdk/variants/FileInputStream.ae` and `HostFiles.ae` (jrt's own Java), are
+  Arbace's own.
 - Processes (doc/go/JRT-NOTES.md, "Processes"; recorded by the rule of B7): the variants
   `overlay/jdk/variants/ProcessImpl.ae`, `Process.ae`, `ProcessBuilder.ae` and
   `ProcessHandleImpl.ae` keep the code of the jdk26u methods they replace

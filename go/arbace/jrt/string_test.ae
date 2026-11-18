@@ -369,3 +369,96 @@ Throwable's exceptions and messages, and the run-time errors' mapping.\n"
       (case ["forNameArray"] (return (fn ^string [] (.GoName (Class_ForName_String__Class (Str "[[Ljava.lang.String;"))))))
       (case ["forNameMissing"] (return (fn ^string [] (.GoName (Class_ForName_String__Class (Str "no.such.Class")))))))
     nil))
+
+(go/type negCS "negCS is a CharSequence whose length is negative (AppendCharSequence's MyNegativeLenCharSeq); the
+embedded interface stands for the members the constructors do not call.\n"
+  (struct CharSequence ^int32 n))
+(go/method Length__I ^int32 [^{:tag (* negCS)} c] (.-n c))
+
+(go/func TestRound54Strings
+  "Round 54's fourth pass (doc/classes/JAVA-DEFERRED-TRIAGE.md): new StringBuilder(n)'s capacity is n
+(Capacity), a CharSequence of negative length gives NegativeArraySizeException (AppendCharSequence),
+contentEquals of a StringBuffer another thread changes never throws (StringContentEqualsBug).\n"
+  [^{:tag (* testing/T)} t]
+  (range [_ n (lit (slice int32) 0 1 7 16 17 900)]
+    (do
+      (when (!= (.Capacity__I (StringBuilder_New_I n)) n)
+        (.Errorf t "new StringBuilder(%d).capacity() = %d" n (.Capacity__I (StringBuilder_New_I n))))
+      (when (!= (.Capacity__I (StringBuffer_New_I n)) n)
+        (.Errorf t "new StringBuffer(%d).capacity() = %d" n (.Capacity__I (StringBuffer_New_I n))))
+      (let [b (StringBuilder_New_I n)]
+        (.EnsureCapacity_I__V b (+ n 1))
+        (when (!= (.Capacity__I b) (+ (* 2 n) 2))
+          (.Errorf t "StringBuilder(%d).ensureCapacity(%d): capacity %d" n (+ n 1) (.Capacity__I b))))))
+  (when (!= (.Capacity__I (StringBuilder_New)) 16)
+    (.Error t "new StringBuilder().capacity() != 16"))
+  (range [_ n (lit (slice int32) -1 -16 -17 -2147483648)]
+    (do
+      (when (!= (res (fn ^string [] (StringBuffer_New_CharSequence (addr (lit negCS :n n))) "ok"))
+                (+ "!java.lang.NegativeArraySizeException: Negative length: " (strconv/Itoa (conv int n))))
+        (.Errorf t "new StringBuffer(length %d): %s" n (res (fn ^string [] (StringBuffer_New_CharSequence (addr (lit negCS :n n))) "ok"))))
+      (when (!= (res (fn ^string [] (StringBuilder_New_CharSequence (addr (lit negCS :n n))) "ok"))
+                (+ "!java.lang.NegativeArraySizeException: Negative length: " (strconv/Itoa (conv int n))))
+        (.Errorf t "new StringBuilder(length %d)" n))))
+  (let [sb (StringBuffer_New)
+        aa (Str "AA")
+        done (make (chan bool))
+        bad ""]
+    (go ((fn []
+           (for [i 0] (< i 20000) (inc! i)
+             (.SetLength_I__V sb 0)
+             (.TrimToSize__V sb)
+             (.Append_String__StringBuffer sb aa))
+           (close done))))
+    (for [i 0] (< i 20000) (inc! i)
+      (let [r (res (fn ^string [] (bres (.ContentEquals_StringBuffer__Z aa sb))))]
+        (when (and (!= r "true") (!= r "false"))
+          (set! bad r))))
+    (<! done)
+    (when (!= bad "")
+      (.Errorf t "contentEquals of a changing StringBuffer: %s" bad))
+    (when (or (not (.ContentEquals_CharSequence__Z aa (StringBuilder_New_String aa)))
+              (.ContentEquals_CharSequence__Z aa (StringBuilder_New_String (Str "AB"))))
+      (.Error t "contentEquals of a StringBuilder"))))
+
+(go/func TestRound54DateParse
+  "Round 54's fourth pass: Date.parse against the JDK's answers (jdk26u's build, -Duser.timezone=GMT: jrt's tests run
+without the zone hooks, in GMT), 26 texts: RFC 1123 dates with GMT and numeric offsets, the US zones, am and
+pm, two-digit years, comments, abbreviations (\"may\" before \"march\"), the failures as IllegalArgumentException.\n"
+  [^{:tag (* testing/T)} t]
+  (let [cases (lit (slice string)
+       "Mon, 24 Aug 2026 12:42:01 GMT" "1787575321000"
+       "Sat, 12 Aug 1995 13:30:00 GMT+0430" "808218000000"
+       "Sat, 12 Aug 1995 13:30:00 GMT-3" "808245000000"
+       "12/25/1999 11:59 PM" "946166340000"
+       "12/25/99 11:59 pm" "946166340000"
+       "Dec 25, 1999 12:00 AM PST" "946108800000"
+       "1 Jan 1970 00:00:00 UT" "0"
+       "Thursday, 01-Jan-70 00:00:00 EST" "18000000"
+       "15 March 1600 10:20:30 EDT" "-11669650770000"
+       "10 Oct 1582 (a comment (nested)) 12:00 CDT" "-12219663600000"
+       "Jan 1 2026 25:61:70 MST" "IAE"
+       "2026 Feb 30 MDT" "1772431200000"
+       "Tue, 18 Aug 2026 10:00:00 +0200" "1787040000000"
+       "may 3 2000" "957312000000"
+       "mar 3 2000" "952041600000"
+       "Sun Nov 08 2026 01:02:03 utc" "1794099723000"
+       "garbage" "IAE"
+       "" "IAE"
+       "12:00" "IAE"
+       "Jan 99 1" "915148800000"
+       "1 jan 3000 3 pm" "IAE"
+       "13 pm Jan 1 2000" "IAE"
+       "Mon, 24 Aug 2026 12:42:01 XYZ" "IAE"
+       "5/6/07 7:8:9" "1178435289000"
+       "1/2/1970 +5" "68400000"
+       "7 July 2001 300:3" "IAE")]
+    (for [i 0] (< i (len cases)) (set! i (+ i 2))
+      (let [s (aget cases i) want (aget cases (+ i 1))
+            got (res (fn ^string [] (strconv/FormatInt (Date_Parse_String__J (Str s)) 10)))]
+        (when (== want "IAE")
+          (set! want "!java.lang.IllegalArgumentException"))
+        (when (!= got want)
+          (.Errorf t "Date.parse(%q) = %s, want %s" s got want))))
+    (when (!= (.GetTime__J (Date_New_String (Str "1 Jan 1970 00:00:01 GMT"))) 1000)
+      (.Error t "new Date(String)"))))
