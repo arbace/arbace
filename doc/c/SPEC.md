@@ -1050,7 +1050,11 @@ reads the resource.
   the directives inside it are the invocation's, never placed between items or elements (§9.2), and are
   left out with it when the invocation is printed expanded. An invocation whose directives do not make
   whole conditional families (an `#if` inside it whose `#else` or `#endif` comes after it) is printed
-  expanded.
+  expanded. Queue 378 (item 2): an executed directive inside such an invocation that is not a conditional
+  family's line (`#define`, `#undef`, `#pragma`) and that no invocation printed as its text holds refuses the
+  file (`:macro-directive`; its known class `:converter-gap`): the expansion would leave it out, and moving it
+  before the expansion is not exact (an invocation before it in the item, printed as its text, would read it).
+  ci's read keeps it.
 - An invocation **inside** a node (`#define BEGIN {`, `#define ARGS a, b`), or nested so that its
   expansion is part of a node, is `:full`'s only: `:lines` prints the expansion (N6).
 - The macros of a header (`EOF`, `errno`, `assert`, `va_arg`) are recovered the same way; `errno` is
