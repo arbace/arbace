@@ -1,4 +1,5 @@
 ; implicit numbering: unnamed blocks and an unnamed argument
+; RUN: opt -passes=verify -disable-output %s
 source_filename = "implicit.ll"
 define i32 @f(i32 %x, i32) {
   %2 = icmp eq i32 %x, 0

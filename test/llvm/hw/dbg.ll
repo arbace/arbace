@@ -1,4 +1,5 @@
 ; debug records and DI metadata, written by hand
+; RUN: opt -passes=verify -disable-output %s
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"
 
