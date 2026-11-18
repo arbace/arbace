@@ -12047,3 +12047,38 @@ the synthetic corpus in a later slot (not run here). On the main host, stage 0 `
   problems), `bin/records-check` (9 pairs, 0).
 - Rust before: completeness 75.0, without by design 75.0, maturity 95.8, independence 80.0. After: 95.8, 95.8, 100, 80.
   It is 95.8 and not 100, as report 354 projected, because threads.rs is deferred, not a pass.
+
+## 2026-11-18: n-rust-aot, Rust's AOT cell 6 of 6: thread-locals in cf2g's library units (round 54)
+
+The morning's entry left `test/rust/eval/threads.rs` in `:aot-thread-current` (status 134, std's `fatal runtime error: current thread
+handle already set during thread spawn`). Same worktree and host: stage 0 `ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`, the
+worktree's own heavy lock.
+- Cause: ci gives each thread its own block of thread-local objects (`go/arbace/ci/thread.ae`; static flag 2), and both the
+  interpreter (`IStatic`) and cf2g's program code (`(g IDX)` of a static in the package's `:tls` set) reach it. A prebuilt library
+  unit (RES34, `arbace.c.aotlib`) does not. In `translate-unit` a static is a placeholder `?sL`, and `"g"` compiled it to `G[S[L]]`,
+  the main thread's static address, for every thread. std's `CURRENT` is in a std unit, so a spawned thread's `set_current` read the
+  spawner's handle and rtaborted. The eval level runs the same units interpreted through `IStatic`, which is why it passes.
+- Fix: a unit now has a table `T` (`Bind` fills it from the new `ci.Prog.TLSOffsets(s)`: the S entry's offset in a thread's block,
+  -1 for the other statics) and a function `gs(t, l)`: the running thread's block plus the offset when it has one, else `G[S[l]]`.
+  The `"g"` node of a static placeholder under `*reloc*` calls `gs`. The cost on a static that is not thread-local is one slice
+  load and a compare.
+- Finding: the aot-lib's Go key (`aotlib/lib-key*`) takes cf2g's bytes through `arbace.c.runtime/source-bytes`. That function counts
+  only `arbace/repr/` as tool sources, but `RT.toolSource` also evaluates a changed `arbace/c/` from the checkout. So the key named
+  the embedded cf2g and the stale units were reused: the first rerun linked the old std units, and I stopped it. Taken (round 54):
+  bump `aotlib/aot-version` 1 to 2, since the units' Go format did change (T, gs, Bind). Not taken: making `source-bytes` follow
+  `RT/toolSource`. `arbace/c/{check,build,run}.ae` already differ from stage 0's embedded copies, so that would move every runtime
+  fragment key (std's and musl's fragments rebuilt) and belongs with the next re-seed's review.
+- Proved: threads.rs alone (`--only`, the record's settings) passes. Then the whole samples corpus, `RSI_SHARD=1 RSI_THREADS=1
+  RSI_JOBS=2 RSI_GO_P=1 RSI_CI_MEMLIMIT=1400MiB bin/heavy-lock bin/rsi check --aot --corpus samples --record`: 6 of 6 pass;
+  compiled against interpreted, 5 both pass and 1 compiled only. That rewrote `test/rust/check-aot-linux-amd64.edn`, its times and
+  `aot-inputs-linux-amd64.edn`, whose 6 rows came out unchanged. The new key's units were translated once into the main checkout's `.tmp/ci-aot-lib`
+  (std's 55 MB, musl's, cb's and the ports'); the old key's directories are left to `bin/ci aot-lib prune`.
+  C's `bin/ci check --aot --only test/c/essential-aot.txt` was also run on the new units: 10 of 10 pass compiled and interpreted, the controls differing as they must.
+- Records: `:aot-thread-current` dropped from `test/rust/divergences-aot.edn` (now empty, with a comment). `test/crops/independence.edn`'s
+  AOT :why says 6 of 6. `bin/rsi divergences --aot`. `bin/reap --record`: 54 of 56 cells checked, 0 problems; Rust AOT 6 / 0 / 0.
+  `bin/crops-score --record` and `--judge --strict` (0 problems). `bin/records-check` (9 pairs, 0). Rust: completeness 95.8 to 99.99
+  (meant 100), maturity 100, independence 80. go/arbace/ci is in gate_key, so the night's gate rebuilds the executables.
+  Every process under 3 GiB; no gate.
+- Alternatives not taken: keep the class and fix the compiled scheduler's swap at a thread start. The scheduler is not the cause,
+  because the program's own code already reaches its thread-locals per thread. Copy the bytes at one address on each switch, as RE6's
+  first design did: that breaks std's mpmc channels, which name a thread by a thread-local's address.
