@@ -91,11 +91,15 @@
     (when-let [ids @clang-identifiers] (not (contains? ids nm)))
     true))
 
+(def ^:private block-kinds
+  #{"CompoundStmt" "IfStmt" "ForStmt" "WhileStmt" "DoStmt" "SwitchStmt" "CXXForRangeStmt" "CXXCatchStmt" "FunctionDecl" "CXXMethodDecl"
+    "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "LambdaExpr"})
+
 (defn undeclared
   "Sema::DiagnoseEmptyLookup's \"use of undeclared identifier 'X'\" (clang/lib/Sema/SemaExpr.cpp, ActOnIdExpression): an
   unqualified id-expression no unqualified lookup finds, outside a template (the parser's :_undecl, at the name), not
   the callee of a call ADL could still resolve ([basic.lookup.argdep]: a call whose arguments are not all of
-  fundamental types; Sema::ActOnCallExpr's ADL happens before the diagnostic). Each name once a line."
+  fundamental types; Sema::ActOnCallExpr's ADL happens before the diagnostic). Each name once a line, and once a block (below)."
   [u starts _ _]
   (let [out (java.util.ArrayList.)
         ;; (CX12, third slice: every name a declaration of the unit names, the headers' too; a callee whose name none
@@ -103,18 +107,36 @@
         declared (delay (let [hs (java.util.HashSet.)]
                           (walk-nodes (fn [n _] (when-let [nm (:name n)] (when (string? nm) (.add hs nm)))) (:nodes u) nil)
                           hs))]
-    (walk-nodes (fn [n parent]
+    ;; (round 54, third pass: GCC's suppression of a repeated error, its unqualified_name_lookup_error's declaration of the
+    ;; name in the innermost block scope: an undeclared name is reported once in a block and the blocks it encloses, a later
+    ;; use there found; a compound statement, a selection or iteration statement's own scope, a handler and a function each a
+    ;; block, [basic.scope.block]/1; at namespace scope every use)
+    (letfn [(w [x parent levels]
+              (cond
+                (map? x) (let [levels (if (contains? block-kinds (:kind x)) (cons (java.util.HashSet.) levels) levels)]
+                           (when (:kind x) (f x parent levels))
+                           (binding [*params* (if-let [ps (seq (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (when (vector? (:inner x)) (:inner x))))]
+                                                (into *params* ps) *params*)]
+                             (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))]
+                               (w v (if (:kind x) x parent) levels))))
+                (or (vector? x) (seq? x)) (doseq [y x] (w y parent levels))
+                :else nil))
+            (f [n parent levels]
                   (when-let [[off nm] (:_undecl n)]
                     ;; in a template a non-dependent name is bound at its definition ([temp.res.general]/1, clang's two-phase
                     ;; lookup), so the same diagnostic; a call's name with a type-dependent argument waits for ADL at the
                     ;; instantiation ([temp.dep.candidate]): the literal-argument rule below covers both
                     (let [callee? (and parent (= "CallExpr" (:kind parent)) (identical? n (first (:inner parent))))]
                       (when (and (or (not callee?) (adl-free? parent) (not (.contains ^java.util.HashSet @declared nm)))
-                                 (not (contains? *params* nm)) (dunder-ok? nm))
+                                 (not (contains? *params* nm)) (dunder-ok? nm)
+                                 ;; (a braced list's element still: its auto deduction fails on the error, GCC's "unable to
+                                 ;; deduce", on that line)
+                                 (or (and parent (= "InitListExpr" (:kind parent))) (not-any? #(.contains ^java.util.HashSet % nm) levels)))
+                        (when-let [^java.util.HashSet b (first levels)] (.add b nm))
                         (let [[l c] (line-col starts (long off))]
                           (.add out {:line l :col c :kind :error :rule :undeclared
-                                     :msg (str "use of undeclared identifier '" nm "'")}))))))
-                (:nodes u) nil)
+                                     :msg (str "use of undeclared identifier '" nm "'")}))))))]
+      (w (:nodes u) nil ()))
     (distinct (vec out))))
 
 ;; Redeclarations (clang/lib/Sema/SemaDecl.cpp: Sema::MergeVarDecl's and CheckVariableDeclaration's err_redefinition,
@@ -880,6 +902,30 @@
                     (when (= main (or (get-in c [:range :begin :file]) (get-in c [:range :begin :expansionLoc :file])))
                       (let [[l col] (line-col starts (long off))]
                         (.add out {:line l :col col :kind :error :rule :coroutine :msg msg})))))
+        ;; (round 54, second pass: [dcl.fct.def.coroutine]/15, `co_await promise.final_suspend()` is not potentially-throwing:
+        ;; final_suspend, the awaitable's operator co_await, the awaiter's await_ready, await_suspend and await_resume, then the
+        ;; destructors (the awaitable's after its operator co_await, the awaiter's last), each a main-file class's member declared noexcept; GCC's
+        ;; "the expression 'X::f' is required to be non-throwing" at the first that is not, once a class)
+        seen (java.util.HashSet.)
+        member (fn [cn nm] (some #(when (and (= nm (:name %)) (fn-kinds (:kind %))) %) (:inner cn)))
+        throwing? (fn [m dtor?] (let [qt (str (get-in m [:type :qualType]))]
+                                  (if dtor? (boolean (re-find #"noexcept\(false\)" qt))
+                                      (not (or (re-find #"noexcept(?!\(false\))" qt) (re-find #"throw\(\)" qt))))))
+        rtype (fn [m] (when-let [[_ r] (re-find #"^([^()<>:*&]+?)\s*\(" (str (get-in m [:type :qualType])))] (.get classes (str/trim r))))
+        final-throwing! (fn [ret]
+                          (when-let [pt (some->> (.get classes ret) :inner (some #(when (and (= "CXXRecordDecl" (:kind %)) (= "promise_type" (:name %))) %)))]
+                            (when (.add seen ret)
+                              (let [fs (member pt "final_suspend")
+                                    obj (when fs (rtype fs))
+                                    oc (when obj (member obj "operator co_await"))
+                                    aw (if oc (rtype oc) obj)
+                                    cands (concat [[fs (str ret "::promise_type::final_suspend") false]]
+                                                  (when obj [[oc (str (:name obj) "::operator co_await") false]])
+                                                  (when (and obj (not= obj aw)) [[(member obj (str "~" (:name obj))) (str (:name obj) "::~" (:name obj)) true]])
+                                                  (when aw (for [f ["await_ready" "await_suspend" "await_resume"]] [(member aw f) (str (:name aw) "::" f) false]))
+                                                  (when aw [[(member aw (str "~" (:name aw))) (str (:name aw) "::~" (:name aw)) true]]))]
+                                (when-let [[m nm] (first (filter (fn [[m _ d]] (and m (throwing? m d))) cands))]
+                                  (report! m (str "the expression '" nm "' is required to be non-throwing")))))))
         check! (fn [body ret]
                  (when-let [c (first-co body)]
                    (cond
@@ -891,7 +937,7 @@
                                 (and (empty? (:bases cn))
                                      (not (some #(= "promise_type" (:name %)) (:inner cn)))))))
                      (report! c "unable to find the promise type for this coroutine")
-                     :else nil)))]
+                     :else (when ret (final-throwing! ret)))))]
     (walk-nodes (fn [n _]
                   (cond
                     (and (fn-kinds (:kind n)) (= main (get-in n [:loc :file])))
@@ -905,7 +951,233 @@
                 (:nodes u) nil)
     (vec out)))
 
-(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines]))
+;; (round 54, third pass) Class templates' redeclarations at namespace scope, a friend's among them ([temp.over.link]/6 with
+;; [temp.class.general]: every declaration of a class template has an equivalent template-head, its parameters of the same
+;; kinds, a non-type one of the same type, and as many): GCC's "redeclared with N template parameter(s)" at the later
+;; declaration, "template parameter 'int i'" at the earlier one's parameter of another kind. A non-type parameter's type is
+;; compared only when it is fundamental (a typedef's name not resolved), a constrained type parameter not at all.
+
+(defn- fund-key
+  "A fundamental type's spelling (`long int`, `int *`) as one key, nil when it is not one."
+  [^String t]
+  (let [t (str/trim t)]
+    (when (re-matches #"(?:(?:unsigned|signed|short|long|int|char|bool|wchar_t|char8_t|char16_t|char32_t)\s*)+(?:\*\s*)*" t)
+      (let [ptrs (count (filter #(= \* %) t))
+            ws (re-seq #"[a-z_0-9]+" t)
+            ws (if (some #{"char"} ws) ws (remove #{"signed"} (if (> (count ws) 1) (remove #{"int"} ws) ws)))
+            ws (if (empty? ws) ["int"] ws)]
+        (str (str/join " " (sort ws)) (apply str (repeat ptrs "*")))))))
+
+(defn- tparam-key [x]
+  (case (:kind x)
+    "TemplateTypeParmDecl" (if (some #(= "ConceptSpecializationExpr" (:kind %)) (:inner x)) :unknown [:type (boolean (:isParameterPack x))])
+    "NonTypeTemplateParmDecl" (if-let [k (fund-key (str (get-in x [:type :qualType])))] [:value (boolean (:isParameterPack x)) k] :unknown)
+    "TemplateTemplateParmDecl" [:template]
+    :unknown))
+
+(defn- tparam-desc [x]
+  (case (:kind x)
+    "TemplateTypeParmDecl" (str (or (:tagUsed x) "typename") (when (:name x) (str " " (:name x))))
+    "NonTypeTemplateParmDecl" (str (get-in x [:type :qualType]) (when (:name x) (str " " (:name x))))
+    (str "template" (when (:name x) (str " " (:name x))))))
+
+(defn template-heads
+  "The class template redeclarations' template-head checks of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        regions (java.util.HashMap.)
+        mine? (fn [x] (= main (get-in x [:loc :file])))
+        report! (fn [x msg] (let [[l c] (line-col starts (long (get-in x [:loc :offset])))]
+                              (.add out {:line l :col c :kind :error :rule :template-head :msg msg})))
+        rec-of (fn [t] (let [r (last (:inner t))] (when (= "CXXRecordDecl" (:kind r)) r)))
+        unqualified? (fn [r] (and (mine? r) (get-in r [:loc :offset]) (not (qualified-name? src (long (get-in r [:loc :offset]))))))
+        compare! (fn [^java.util.HashMap r t]
+                   (when-let [rec (rec-of t)]
+                     (when (and (:name t) (unqualified? rec))
+                       (if-let [o (.get r (:name t))]
+                         (let [ops (vec (butlast (:inner o))) nps (vec (butlast (:inner t)))
+                               ok (map tparam-key ops) nk (map tparam-key nps)
+                               pack? (some #(and (vector? %) (second %)) (concat ok nk))]
+                           (cond
+                             (and (not= (count ops) (count nps)) (not pack?) (mine? rec))
+                             (report! rec (str "redeclared with " (count nps) " template parameter" (when (not= 1 (count nps)) "s")))
+                             (= (count ops) (count nps))
+                             (when-let [i (first (filter #(let [a (nth ok %) b (nth nk %)]
+                                                            (and (vector? a) (vector? b) (not= a b)))
+                                                         (range (count ops))))]
+                               (let [x (nth ops i)]
+                                 (when (and (mine? x) (get-in x [:loc :offset]))
+                                   (report! x (str "template parameter '" (tparam-desc x) "'")))))
+                             :else nil))
+                         (.put r (:name t) t)))))
+        friends! (fn [r rec]
+                   (doseq [f (:inner rec) :when (= "FriendDecl" (:kind f))
+                           t (:inner f) :when (= "ClassTemplateDecl" (:kind t))]
+                     (compare! r t)))]
+    (letfn [(region! [path nodes]
+              (let [^java.util.HashMap r (or (.get regions path) (let [m (java.util.HashMap.)] (.put regions path m) m))]
+                (doseq [n nodes]
+                  (case (:kind n)
+                    "LinkageSpecDecl" (region! path (:inner n))
+                    "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") (:inner n))
+                    "ClassTemplateDecl" (do (compare! r n) (when-let [rec (rec-of n)] (friends! r rec)))
+                    "CXXRecordDecl" (friends! r n)
+                    nil))))]
+      (region! "" (:nodes u)))
+    (vec out)))
+
+;; (round 54, third pass) Exception specifications of a function's declarations ([except.spec]/5 (C++20 /4): every
+;; declaration of a function whose exception specification is not potentially-throwing has a compatible one; a dependent
+;; noexcept-specifier's expression equivalent, [temp.over.link]/5, its tokens the same up to the template parameters'
+;; names): GCC's "declaration of 'f' has a different exception specifier" at the later declaration, or at a friend of a
+;; class template, declared again when the class is instantiated (only then: a use of the template's name after it).
+;; The declarations compared: a namespace's functions and function templates, its classes' friends of either, a class's
+;; member functions with their out-of-class definitions (`X<T>::f`, its arguments the class template's parameters); both
+;; in the main file, no destructor, allocation or deallocation function or defaulted one (their implicit specifications).
+
+(defn- split-exc
+  "A function type's spelling without its exception specification, and that specification (nil when none)."
+  [^String qt]
+  (let [n (.length qt)
+        close (loop [i 0 d 0 seen false]
+                (cond (>= i n) nil
+                      (= \( (.charAt qt i)) (recur (inc i) (inc d) true)
+                      (= \) (.charAt qt i)) (if (and seen (= d 1)) i (recur (inc i) (dec d) seen))
+                      :else (recur (inc i) d seen)))]
+    (if-not close
+      [qt nil]
+      (let [m (re-matcher #"\b(noexcept|throw)\b" qt)]
+        (if (and (.find m (inc (long close))))
+          (let [b (.start m)
+                j (loop [j (.end m)] (if (and (< j n) (= \space (.charAt qt j))) (recur (inc j)) j))
+                e (if (and (< j n) (= \( (.charAt qt j)))
+                    (loop [k j d 0] (cond (>= k n) n
+                                          (= \( (.charAt qt k)) (recur (inc k) (inc d))
+                                          (= \) (.charAt qt k)) (if (= d 1) (inc k) (recur (inc k) (dec d)))
+                                          :else (recur (inc k) d)))
+                    (.end m))]
+            [(str/trim (str/replace (str (subs qt 0 b) " " (subs qt e)) #"\s+" " ")) (str/replace (subs qt b e) #"\s+" "")])
+          [(str/replace qt #"\s+" " ") nil])))))
+
+(defn- rename-params
+  "`s` with the template parameters `names` (by position) spelled @tpI@."
+  [^String s names]
+  (reduce (fn [s [i nm]] (if (seq nm) (str/replace s (re-pattern (str "\\b" (java.util.regex.Pattern/quote nm) "\\b")) (str "@tp" i "@")) s))
+          s (map-indexed vector names)))
+
+(defn- exc-class
+  "An exception specification's class: :none (potentially-throwing), :nothrow, [:dep expr] (a dependent noexcept-specifier,
+  its parameters renamed), or nil (not compared)."
+  [exc]
+  (cond (nil? exc) :none
+        (#{"noexcept" "noexcept(true)" "throw()"} exc) :nothrow
+        (= "noexcept(false)" exc) :none
+        (and (str/starts-with? exc "noexcept(") (str/includes? exc "@tp")) [:dep exc]
+        :else nil))
+
+(defn- out-of-class
+  "The class a qualified declarator-id at `off` names a member of, `X` of `X::f` or `X<T, U>::f`: [name [argument ...]], nil
+  when the qualifier is longer or an argument is not an identifier."
+  [^String src ^long off]
+  (let [ws (fn [^long i] (loop [i i] (if (and (>= i 0) (Character/isWhitespace (.charAt src (int i)))) (recur (dec i)) i)))
+        idc? (fn [c] (or (Character/isLetterOrDigit (char c)) (= \_ c)))
+        i (ws (dec off))]
+    (when (and (pos? i) (= \: (.charAt src (int i))) (= \: (.charAt src (int (dec i)))))
+      (let [j (ws (- i 2))
+            [j args] (if (and (>= j 0) (= \> (.charAt src (int j))))
+                       (let [k (loop [k (dec j) d 1] (cond (neg? k) nil
+                                                          (= \> (.charAt src (int k))) (recur (dec k) (inc d))
+                                                          (= \< (.charAt src (int k))) (if (= d 1) k (recur (dec k) (dec d)))
+                                                          :else (recur (dec k) d)))]
+                         (when k [(ws (dec k)) (mapv str/trim (str/split (subs src (inc k) j) #","))]))
+                       [j []])]
+        (when (and j (every? #(re-matches #"[A-Za-z_][A-Za-z_0-9]*" %) (remove #{""} args)) (not (some #{""} args)))
+          (let [k (loop [k j] (if (and (>= k 0) (idc? (.charAt src (int k)))) (recur (dec k)) k))
+                b (ws k)]
+            (when (and (< k j) (not (and (pos? b) (= \: (.charAt src (int b))))))
+              [(subs src (inc k) (inc j)) (if (= args [""]) [] args)])))))))
+
+(defn exception-specs
+  "The exception specifications' checks of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        decls (java.util.HashMap.)
+        heads (java.util.HashMap.)
+        mine? (fn [x] (= main (get-in x [:loc :file])))
+        report! (fn [x nm] (let [[l c] (line-col starts (long (get-in x [:loc :offset])))]
+                             (.add out {:line l :col c :kind :error :rule :exception-spec
+                                        :msg (str "declaration of '" nm "' has a different exception specifier")})))
+        excluded? (fn [f] (or (not (fn-kinds (:kind f))) (= "CXXDestructorDecl" (:kind f)) (:explicitlyDefaulted f)
+                              (re-find #"^operator\s*(new|delete)" (str (:name f))) (not (mine? f)) (nil? (get-in f [:loc :offset]))))
+        ;; enter! a declaration f under key k, its exception class c; `late` a friend of a class template the file instantiates
+        enter! (fn [k f c friend-of]
+                 (when c
+                   (if-let [[of oc ofr] (.get decls k)]
+                     (let [bad (or (and (#{:none :nothrow} oc) (#{:none :nothrow} c) (not= oc c))
+                                   (and (vector? oc) (vector? c) (not= oc c))
+                                   (and (= :none oc) (vector? c)) (and (vector? oc) (= :none c)))]
+                       (when bad
+                         (cond (#{:inst :uninst} friend-of) (when (= :inst friend-of) (report! f (:name f)))
+                               (#{:inst :uninst} ofr) (when (= :inst ofr) (report! of (:name of)))
+                               :else (report! f (:name f)))))
+                     (.put decls k [f c friend-of]))))
+        instantiated? (fn [rec nm]
+                        (let [e (get-in rec [:range :end :offset])]
+                          (boolean (and e (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote nm) "\\s*<")) (subs src (min (.length src) (inc (long e)))))))))
+        ;; a function or a function template: [f key-part exc-class own-names] or nil
+        fn-of (fn [n]
+                (let [tmpl? (= "FunctionTemplateDecl" (:kind n))
+                      f (if tmpl? (last (:inner n)) n)
+                      ps (when tmpl? (butlast (:inner n)))
+                      names (map :name ps)]
+                  (when (and (map? f) (not (excluded? f)) (every? some? names))
+                    (let [[sig exc] (split-exc (str (get-in f [:type :qualType])))]
+                      [f (str (when tmpl? (str "<" (str/join "," (map #(pr-str (tparam-key %)) ps)) ">")) (:name f) "|" (rename-params sig names))
+                       (exc-class (when exc (rename-params exc names))) names]))))]
+    (letfn [(region! [path nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  "LinkageSpecDecl" (region! path (:inner n))
+                  "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") (:inner n))
+                  ("FunctionDecl" "FunctionTemplateDecl" "CXXMethodDecl")
+                  (when-let [[f k c] (fn-of n)]
+                    (let [off (long (get-in f [:loc :offset]))]
+                      (if (qualified-name? src off)
+                        (when-let [[cls args] (out-of-class src off)]
+                          (when (and (= "CXXMethodDecl" (:kind f)) (not= "FunctionTemplateDecl" (:kind n))
+                                     (.containsKey heads [path cls]) (= (vec args) (vec (.get heads [path cls]))))
+                            (let [[sig exc] (split-exc (str (get-in f [:type :qualType])))]
+                              (enter! [:member path cls (str (:name f) "|" (rename-params sig args))] f
+                                      (exc-class (when exc (rename-params exc args))) nil))))
+                        (enter! [:ns path k] f c nil))))
+                  "ClassTemplateDecl" (when-let [rec (last (:inner n))] (class! path rec (map :name (butlast (:inner n))) (:name n)))
+                  "CXXRecordDecl" (class! path n nil (:name n))
+                  nil)))
+            (class! [path rec cnames cname]
+              (when (and cname (= "CXXRecordDecl" (:kind rec)))
+                (.put heads [path cname] (vec cnames))
+                (let [inst (when cnames (if (instantiated? rec cname) :inst :uninst))]
+                  (doseq [m (:inner rec)]
+                    (case (:kind m)
+                      "FriendDecl"
+                      (doseq [x (:inner m)]
+                        (when-let [[f k c] (fn-of x)]
+                          (when (and (not (qualified-name? src (long (get-in f [:loc :offset]))))
+                                     ;; (a friend naming the class template's parameters: a function of each specialization)
+                                     (not-any? #(and (seq %) (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote %) "\\b")) k)) cnames)
+                                     (not (and (vector? c) (some #(and (seq %) (str/includes? (second c) %)) cnames))))
+                            (enter! [:ns path k] f c (or inst :plain)))))
+                      "CXXMethodDecl"
+                      (when-not (excluded? m)
+                        (when (every? some? cnames)
+                          (let [[sig exc] (split-exc (str (get-in m [:type :qualType])))]
+                            (enter! [:member path cname (str (:name m) "|" (rename-params sig cnames))] m
+                                    (exc-class (when exc (rename-params exc cnames))) nil))))
+                      nil)))))]
+      (region! "" (:nodes u)))
+    (vec out)))
+
+(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
