@@ -4441,3 +4441,87 @@ fields: iter adapters' Peekable, Flatten's, MapWindows), consts' `:value` throug
 - core: `bin/rust-front core-essential` (its known summary may move: Self in impl headers, const-parameter ADT arguments, array
   lengths) and `bin/rust-front rind-test`; core's whole check over `test/rust/front/core-modules.txt`, its known lines
   re-recorded from a passing run.
+
+## As built: RIND9 (a), alloc's pass: the rest of the crate's modules (2026-11-18, night, branch `n-rust-alloc5`)
+
+alloc's index rebuilt (84 files, 17 macros, 160 modules), then every module file not yet in `alloc-iface-units.txt` passed alone or
+after the siblings whose ADTs it names (one process at a time, GOMEMLIMIT 500 MiB, each under 1 GiB) and compared with the helper's
+facts of that module. Three causes fixed in the code core's build shares, and the units' control generalized:
+
+- derive's projection bounds once: expand_derive wrote `I::Item: Clone` for every field that names it (`enum Peeked<I: Iterator> {
+  A(I::Item), B(I::Item) }`), the helper once: the bounds find_type_parameters adds all carry the derive's span, so predicates_of's
+  set of (clause, span) keeps the first. A field type already bounded (compared without its spans and identifiers' positions) adds
+  none; a written predicate equal to a derived one has another span and stays (unchanged).
+- `super` after a leading `super` (`use super::super::borrow::DormantMutRef` in btree/map/entry.rs): resolve read `super` only as
+  the first segment, so the second was a name looked up in `map` and every field naming the import was an error (VacantEntry and
+  OccupiedEntry not written, and set/entry.rs' entries, which wrap them). `super-res` gives a module's parent, a local module's or
+  std's (the root file's module built alone has std's module of `*crate-path*`'s parent), in paths and imports alike.
+- (tooling) the negative control needs a second fact of a kind: a module of one fact (fmt.rs' `format`, intrinsics.rs) takes it
+  from the crate's helper facts (`control`'s POOL); a module with no helper fact at all has nothing to judge and stays out of the list.
+
+### Results (light, one process a pass; equal / differ / missing; "ctx" the siblings passed before it)
+
+| module | facts | before | after | native extras |
+|---|---|---|---|---|
+| `alloc::fmt` | 1 | 1 / 0 / 0 (no control pair) | 1 / 0 / 0 | 0 |
+| `alloc::sync` | 287 | 287 / 0 / 0 (not in the list) | 287 / 0 / 0 | 35 |
+| `alloc::intrinsics` | 1 | | 1 / 0 / 0 | 0 |
+| `alloc::collections::btree::mem` | 2 | | 2 / 0 / 0 | 2 |
+| `alloc::collections::btree::merge_iter` | 10 | 8 / 2 / 0 | 10 / 0 / 0 | 4 |
+| `alloc::collections::btree::dedup_sorted_iter` | 2 | | 2 / 0 / 0 | 3 |
+| `alloc::collections::btree::map::entry` (ctx the map's) | 38 | 36 / 0 / 2 | 38 / 0 / 0 | 0 |
+| `alloc::collections::btree::set` (ctx the map's, merge_iter) | 222 | 220 / 2 / 0 | 222 / 0 / 0 | 1 |
+| `alloc::collections::btree::set::entry` (ctx the map's, map::entry, merge_iter, set) | 21 | 19 / 0 / 2 (map::entry not in ctx) | see the record | 0 |
+| `alloc::vec::cow` (ctx raw_vec, vec) | 10 | | 10 / 0 / 0 | 0 |
+| `alloc::vec::drain` (ctx) | 24 | | 24 / 0 / 0 | 0 |
+| `alloc::vec::extract_if` (ctx) | 11 | | 11 / 0 / 0 | 0 |
+| `alloc::vec::in_place_drop` (ctx) | 4 | | 4 / 0 / 0 | 4 |
+| `alloc::vec::partial_eq` (ctx) | 36 | | 36 / 0 / 0 | 0 |
+| `alloc::vec::peek_mut` (ctx) | 10 | | 10 / 0 / 0 | 0 |
+| `alloc::vec::set_len_on_drop` (ctx) | 2 | | 2 / 0 / 0 | 5 |
+| `alloc::collections::vec_deque` (ctx raw_vec) | 185 | alone 184 / 1 / 0 | 185 / 0 / 0 | 19 |
+| `alloc::collections::vec_deque::drain` (ctx raw_vec, vec_deque) | 19 | | 19 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque::extract_if` (ctx) | 11 | | 11 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque::into_iter` (ctx) | 30 | | 30 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque::iter_mut` (ctx) | 30 | | 30 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque::splice` (ctx) | 14 | | 14 / 0 / 0 | 0 |
+| `alloc::io::cursor` | 33 | | 33 / 0 / 0 | 4 |
+| `alloc::io::buf_read` | 9 | | 9 / 0 / 0 | 2 |
+| `alloc::io::copy` | 4 | | 4 / 0 / 0 | 0 |
+| `alloc::io::copy::specialization` | 8 | | 8 / 0 / 0 | 6 |
+| `alloc::io::buffered` | 15 | | 15 / 0 / 0 | 0 |
+| `alloc::io::buffered::bufwriter` | 41 | | 41 / 0 / 0 | 5 |
+| `alloc::io::buffered::linewriter` | 18 | | 18 / 0 / 0 | 0 |
+| `alloc::io::buffered::linewritershim` | 8 | | 8 / 0 / 0 | 8 |
+| `alloc::io::buffered::bufreader::buffer` | 1 | | 1 / 0 / 0 | 15 |
+
+Left out, no fact of theirs in the helper's interface (all crate-private, or reexports and macros alone): lib.rs, macros.rs,
+ffi/mod.rs, io/mod.rs, io/prelude.rs, io/copy/generic.rs, btree's mod.rs, fix.rs, remove.rs, split.rs and append.rs, vec's is_zero.rs,
+spec_extend.rs, spec_from_elem.rs, spec_from_iter.rs, spec_from_iter_nested.rs and in_place_collect.rs, vec_deque's macros.rs,
+spec_extend.rs and spec_from_iter.rs (20 files). With them every one of alloc's 84 module files has been passed: 64 in
+`alloc-iface-units.txt` (61 lines), every helper fact of theirs equal. The unit cases: 2 pure more (the control's pool, with its
+negative) and the module cases of btree::merge_iter (the derive's bound once) and btree::map::entry (the `super::super` import's
+field, OccupiedEntry written, no error left). WIP: the known file not yet re-recorded (the `--units --record` run was at line 38 of 61, every line so far passing, the first 30 identical to the old known file).
+
+core's pass shares the derive and resolve changes, so its native facts may move: derives on types naming the same projection in
+two fields (core's iter adapters' `#[derive(Clone, Debug)]` structs and enums over `I::Item`, `U::IntoIter`: a duplicate clause
+gone), and a `super::super::` path (core's iter/adapters/chain.rs and flatten.rs, iter/traits/iterator.rs, if any is a path and not
+a doc link).
+
+### Decisions taken overnight (round 52)
+
+- RIND9a-16 (a) a derive's projection bound written once per type, compared without spans and identifier positions (all of them
+  carry the derive's span; predicates_of dedups by clause and span): taken. Alternative: dedup every clause of predicates_of, set
+  aside (a written duplicate has its own span and rustc keeps it).
+- RIND9a-17 (a) `super` read after leading `super`s only, std's module parents through `*crate-path*` (rustc's resolve_path:
+  `super` only in the path's prefix): taken.
+- RIND9a-18 (a) a module of one fact takes its control's other fact from the crate's helper facts; a module of none stays out of
+  the units list: taken. Alternative: a synthetic other fact, set aside (the control must judge a real helper fact).
+
+### The day's commands (not run here)
+
+- core: `bin/rust-front core-essential` and `bin/rust-front rind-test` (derives over a repeated projection may drop a duplicate
+  clause from core's native facts); core's whole check over `test/rust/front/core-modules.txt`, its known lines re-recorded from a
+  passing run.
+- The whole alloc pass, `bin/rust-front alloc-iface` (about 25 minutes, 2.3 GB, one process), and `ALLOC_IFACE_ROUNDS=2` for
+  RIND9a-15 (still the user's).

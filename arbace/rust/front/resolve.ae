@@ -355,16 +355,31 @@
   (if (and (= "Block" (:kind m)) (:parent m)) (recur (:parent m)) m))
 (defn- parent-module [m] (let [n (normal-module m)] (or (:parent n) n)))
 
+(defn- parent-path [^String p] (subs p 0 (max 0 (.lastIndexOf p "::"))))
+
+(defn- super-res
+  "n-rust-alloc5: `super` of the module CUR (a local module or std's): its parent; the root file's module's parent is std's
+  module of *crate-path*'s parent (a module built alone), as `super::super::borrow` from btree::map::entry needs twice"
+  [cur]
+  (cond (= :local-def (:t cur)) (let [n (normal-module (:mod cur))]
+                                  (if (and *crate-path* (nil? (:parent n)))
+                                    (localize (std-module-res (parent-path *crate-path*)))
+                                    {:t :local-def :kind "Mod" :mod (parent-module n)}))
+        (and (= :def (:t cur)) (string? (:path cur))) (localize (std-module-res (parent-path (:path cur))))
+        :else nil))
+
+(defn- super-seg?
+  "A `super` after the path's leading `super`s (rustc's resolve_path: `super` only there)"
+  [ss i]
+  (and (pos? i) (every? #(= "super" (seg-name %)) (take (inc i) ss))))
+
 (defn- first-seg [s ns n-segs]
   (let [nm (seg-name s) ctxt (id-ctxt (fv s :ident))]
     (case nm
       "crate" (if *crate-path* (localize (std-module-res (crate-root))) {:t :local-def :kind "Mod" :mod *root*})
       "$crate" (if *crate-path* (dollar-crate ctxt) (lexical ns nm ctxt))
       "self" (if (and (= 1 n-segs) (= ns :value)) (lexical :value "self" ctxt) {:t :local-def :kind "Mod" :mod (normal-module (module-scope))})
-      "super" (let [n (normal-module (module-scope))]
-                (if (and *crate-path* (nil? (:parent n)))
-                  (localize (std-module-res (subs *crate-path* 0 (max 0 (.lastIndexOf ^String *crate-path* "::")))))
-                  {:t :local-def :kind "Mod" :mod (parent-module (module-scope))}))
+      "super" (super-res {:t :local-def :kind "Mod" :mod (normal-module (module-scope))})
       "{{root}}" :root
       (lexical ns nm ctxt))))
 
@@ -378,7 +393,8 @@
         (let [s (nth ss i) last? (== i (dec n)) sns (if last? ns :type)
               r (if (zero? i)
                   (first-seg s sns n)
-                  (cond (= :root cur) (localize (get @*extern* (seg-name s)))
+                  (cond (super-seg? ss i) (super-res cur)
+                        (= :root cur) (localize (get @*extern* (seg-name s)))
                         (module-like? cur) (or (localize (module-get cur sns (seg-name s)))
                                                (when (and last? (= ns :value) (#{"Enum"} (:kind cur))) nil))
                         :else nil))]
@@ -761,14 +777,13 @@
                       "crate" (if *crate-path* (localize (std-module-res (crate-root))) {:t :local-def :kind "Mod" :mod *root*})
                       "$crate" (if *crate-path* (dollar-crate (id-ctxt (fv s :ident))) {:t :local-def :kind "Mod" :mod *root*})
                       "self" {:t :local-def :kind "Mod" :mod (normal-module m)}
-                      "super" (if (and *crate-path* (nil? (:parent (normal-module m))))
-                                (localize (std-module-res (subs *crate-path* 0 (max 0 (.lastIndexOf ^String *crate-path* "::")))))
-                                {:t :local-def :kind "Mod" :mod (parent-module m)})
+                      "super" (super-res {:t :local-def :kind "Mod" :mod (normal-module m)})
                       "{{root}}" :root
                       (or (some #(module-get {:mod %} :type nm) (take-while some? (iterate (fn [mm] (when (= "Block" (:kind mm)) (:parent mm))) m)))
                           (get @*extern* nm)
                           (when-let [p @*prelude*] (module-get p :type nm))))
-                    (cond (= :root cur) (get @*extern* nm)
+                    (cond (super-seg? path i) (super-res cur)
+                          (= :root cur) (get @*extern* nm)
                           (module-like? cur) (localize (module-get cur :type nm))
                           :else nil))]
             (when r (recur (inc i) r))))))))
