@@ -40,7 +40,8 @@
 #                                      JFS28: repr/java's read on javac's tool executable,
 #                                      bin/repr-java's only host since JN6) by c2j on a first
 #                                      tool build, target/arbace-go/aot-reader, kept while its
-#                                      key holds (Arbace's sources, the runtime, javac's world;
+#                                      key holds (the runtime, javac's world, repr/java and the
+#                                      sources its compilation loaded, aot-reader.loaded, round 54;
 #                                      ARBACE_AOT=0: the reader evaluated); the key of its
 #                                      sources beside it, arbace-javac.key
 #                                      (bin/lib/javac-key.bash: the provenance files repr/java
@@ -384,19 +385,38 @@ build_tests() {
   echo "arbace-go: the test build in $(since "$t0")" >&2
 }
 
-# reader_key: what repr/java's reader compiled for javac's tool ($dir/aot-reader) is a function of:
-# the runtime (arbace_runtime_key: the compiler and the classes the compiled code names), the sources
-# of the compilation (c2j, the Java forms' analysis, the core namespaces and the rest the compile
-# loads or expands) less the namespaces it never loads (j2g, repr/go, repr/clojure, repr/haskell,
-# repr/rust, goi and the Go build, the box: bin/lib/version.bash's arbace_reader_sources), repr/java's own
-# sources (which no shipped build embeds) and javac's world, whose classes the reader's code names
-# (jdk/javac, overlay/jdk/javac, the edges). Since GT4, GT6 (GTS28 (a)) not aot_key, whose embedded
-# sources hold every namespace: a change to j2g's or repr/go's kept the compiled reader's key unchanged
-# no longer, and javac's world was translated twice (the first tool build, then the tool) after each
+# reader_key: what repr/java's reader compiled for javac's tool ($dir/aot-reader) is a function of
+# (round 54, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built / proposed: the reader's key by its load
+# closure"): the host's runtime as the compilation uses it (arbace_reader_runtime_key: the compiler, the
+# classes the compiled code names, jrt's natives), javac's world, whose classes the reader's code names
+# (jdk/javac, overlay/jdk/javac, the edges), repr/java's own sources, and the sources the last
+# compilation loaded ($dir/aot-reader.loaded, recorded by reader_compile from ARBACE_LOADED_LOG: core,
+# c2j, the Java forms' analysis, j2g's names and repr/go's printer that c2j's emitter requires), each
+# hashed: a change to one of them is the only way the closure itself can change, so the recorded list
+# keys the next compilation soundly (an early cutoff, as GD3's load closures key the gate's steps). No
+# record: no key (the compilation runs and records one). Until round 54 (GTS28 (a)) arbace/ less a list
+# of namespaces the compilation was said never to load: the crops' namespaces moved it, and j2g's and
+# repr/go's, which c2j loads, did not
 reader_key() {
-  (cd "$root" && { arbace_runtime_key "$root"; arbace_reader_sources "$root" | xargs -d '\n' sha256sum
-                   find arbace/repr/java.ae arbace/repr/java jdk/javac overlay/jdk/javac jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum; } \
+  local closure=$dir/aot-reader.loaded
+  [ -f "$closure" ] || { echo none; return 0; }
+  (cd "$root" && { echo "reader-key: the load closure (round 54)"; arbace_reader_runtime_key "$root"
+                   find arbace/repr/java.ae arbace/repr/java jdk/javac overlay/jdk/javac jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
+                   while read -r f; do if [ -f "$f" ]; then sha256sum "$f"; else echo "missing $f"; fi; done < "$closure"; } \
      | sha256sum | cut -c1-64)
+}
+
+# reader_closure LOG OUT: the files of the scriptbases LOG names (RT.load's ARBACE_LOADED_LOG: each load's
+# scriptbase), the checkout's .ae, else .clj, else .cljc, sorted and once, repr/java's own left out (the key
+# hashes its tree whole); a scriptbase with no file in the checkout as itself (the key says it is missing)
+reader_closure() {
+  local s f e
+  LC_ALL=C sort -u "$1" | while read -r s; do
+    case $s in arbace/repr/java|arbace/repr/java/*) continue ;; esac
+    f=$s
+    for e in .ae .clj .cljc; do [ -f "$root/$s$e" ] && { f=$s$e; break; }; done
+    echo "$f"
+  done | LC_ALL=C sort -u > "$2"
 }
 
 # reader_compile TOOL OUT: repr/java's namespaces (arbace/repr/java{.ae,/}) compiled to Java forms
@@ -418,12 +438,18 @@ reader_compile() {
   (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
   (System/exit (if (seq (:failed r)) 1 0)))
 ' "$nss" "$out" > "$dir/reader-compile.ae"
+  rm -f "$dir/reader-compile.loads" "$out.loaded"
   (cd "$root" && GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 ARBACE_PATH=$root \
-     ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$dir/reader-compile.image "$tool" "$dir/reader-compile.ae") \
+     ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$dir/reader-compile.image ARBACE_LOADED_LOG=$dir/reader-compile.loads \
+     "$tool" "$dir/reader-compile.ae") \
     > "$dir/reader-compile.log" 2>&1 \
     || { tail -20 "$dir/reader-compile.log" >&2; echo "arbace-go: repr/java's reader was not compiled" >&2; return 1; }
   grep '^aot:' "$dir/reader-compile.log" >&2
   [ -f "$out/packages.edn" ] || { echo "arbace-go: the reader compiled nothing ($dir/reader-compile.log)" >&2; return 1; }
+  # the load closure that keys the next compilation (reader_key)
+  [ -s "$dir/reader-compile.loads" ] || { echo "arbace-go: the reader's compilation recorded no loads ($dir/reader-compile.loads)" >&2; return 1; }
+  reader_closure "$dir/reader-compile.loads" "$out.loaded" || return 1
+  echo "   the load closure: $(wc -l < "$out.loaded") files ($out.loaded)" >&2
   echo "   compiled: $(since "$t0")" >&2
 }
 
@@ -450,13 +476,15 @@ build_java() {
     # repr/java's reader compiled into the tool (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built:
     # JN4", JFS28): by a first tool build when the compiled reader's tree is not of this key
     rkey=$(reader_key)
-    if [ "$(cat "$dir/aot-reader.key" 2>"$discard")" != "$rkey" ] || [ ! -f "$dir/aot-reader/packages.edn" ]; then
+    if [ "$rkey" = none ] || [ "$(cat "$dir/aot-reader.key" 2>"$discard")" != "$rkey" ] || [ ! -f "$dir/aot-reader/packages.edn" ]; then
       echo "== javac's tool build, first (the host that compiles repr/java's reader): ${j2g_args[*]}" >&2
       rm -f "$dir/aot-reader.key"
       saved=("${j2g_args[@]}")
       build || return 1
       j2g_args=("${saved[@]}")
       reader_compile "$dir/$(host_arch)/$exe" "$dir/aot-reader" || return 1
+      # the key of the closure just recorded (reader_key reads $dir/aot-reader.loaded)
+      rkey=$(reader_key)
       echo "$rkey" > "$dir/aot-reader.key"
     else
       echo "== repr/java's reader compiled: $dir/aot-reader (key ${rkey:0:12})" >&2
