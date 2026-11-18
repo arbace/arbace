@@ -2054,3 +2054,20 @@ triples). Queue 337 judges them by the tests' own verdicts, as AR4's arm64 verdi
 - **AXS101 ELF32.** 32 lines (i386's relocations, symbols, section headers; R_386_* in .reloc) and the x32 runs' 7 wait for an ELF32
   writer: (a) an ELF32 i386 writer in arbace.asm.elf with X86ELFObjectWriter's R_386 types (the i386 runs then judged whole);
   (b) keep `:elf32` deferred. *Recommended: (b)* until a crop needs i386 objects.
+
+## As built: queue 372, the object verdict's options, split-file parts and diagnostics (2026-11-18; branch `372-asm-objverdict`, from `337-asm-object-unjudged` `8b9bd6e60`; the Mac VM)
+
+- **-x86-relax-relocations=false** (X86ELFObjectWriter's X86RelaxRelocations): GOTPCREL without its GOTPCRELX, REX_GOTPCRELX and
+  CODE_4_GOTPCRELX forms; gotpcrelx's NORELAX run judged, 104 of 104 lines (52 `:options` before).
+- **split-file's parts** (`split-file %s %t`, a `--- NAME` line starting part NAME, its lines numbered as the test's): a run whose
+  input is a part (NAME or %t/NAME) assembles it, its CHECK lines read from the part FileCheck names; align-branch-fused 8 of 8
+  (16 `:split-file` before, its two runs over the whole file).
+- **The diagnostics' places**: a relaxed instruction's fixup error has no place (`<unknown>:0:`: MCAssembler::relaxInstruction
+  re-encodes the fragment's opcode and operands, whose fragment keeps no location); a `.L` symbol the source spells takes the caret
+  (only Arbace's own temporaries are skipped); a number's caret at its spelling (`.space -4`); i386's 64-bit data relocation is
+  getRelocType32's "unsupported relocation type"; the reader's generic `(asm/directive "NAME" ...)` dispatched by its name
+  (`.8byte`). fixup-overflow, fixup-overflow-32, space-err and directive-quad: every line met.
+- **Proof** (stage 0, scratch record): the verdict 68 files, 1,243 CHECK lines, 864 met, the rest `:other-format` 338, `:elf32` 32,
+  `:x32` 7, `:options` 1 (gnux32-dwarf-gen's -g), `:stats` 1; its seven controls failing as they must. Unchanged: object-check musl
+  32 of 32, synthetic 8 of 8 with obj-err 3 of 3, mc-x86-obj 49 of 49; arm64's a64-synthetic 3 of 3 with obj-err-arm64 2 of 2 and
+  object-verdict ok (2,819 of 2,832); `backend check` byte for byte.

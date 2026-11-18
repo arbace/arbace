@@ -48,7 +48,7 @@
   #{"-filetype" "--filetype" "-triple" "--triple" "-mtriple" "-arch" "--arch" "-o" "-show-encoding" "--show-encoding"
     "-mcpu" "--mcpu" "--x86-align-branch-boundary" "-x86-align-branch-boundary" "--x86-align-branch" "-x86-align-branch"
     "-x86-pad-max-prefix-size" "--x86-pad-max-prefix-size" "-x86-pad-for-align" "--x86-pad-for-align" "--mc-relax-all"
-    "-mc-relax-all" "-defsym" "--defsym" "--stats" "-stats" "--x86-branches-within-32B-boundaries" "-x86-branches-within-32B-boundaries"})
+    "-mc-relax-all" "-defsym" "--defsym" "--stats" "-stats" "-x86-relax-relocations" "--x86-relax-relocations" "--x86-branches-within-32B-boundaries" "-x86-branches-within-32B-boundaries"})
 
 (defn- backend-opts
   "The run's X86AsmBackend options, or [:options FLAG] for one this check does not take."
@@ -67,7 +67,9 @@
        :kinds (cond k (set (map keyword (str/split k #"\+"))) within #{:fused :jcc :jmp} :else #{})
        :prefix-max (if-let [v (val #"-x86-pad-max-prefix-size[= ](\d+)")] (Long/parseLong v) 0)
        :pad-for-align (boolean (re-find #"-x86-pad-for-align(?:=(?:1|true))?(?:\s|$)" mc))
-       :relax-all (boolean (re-find #"(?:^|\s)--?mc-relax-all(?:\s|$)" mc))})))
+       :relax-all (boolean (re-find #"(?:^|\s)--?mc-relax-all(?:\s|$)" mc))
+       ;; -x86-relax-relocations=false: GOTPCREL without its relaxable forms (queue 372)
+       :relax-relocations (not (re-find #"-x86-relax-relocations=(?:false|0)" mc))})))
 
 (defn- fc-opts [^String fc]
   {:prefixes (let [ps (mapcat #(str/split % #",") (map second (re-seq #"--?check-prefix(?:es)?[= ]+(\S+)" fc)))] (if (seq ps) (vec ps) ["CHECK"]))
@@ -94,12 +96,34 @@
           (and (re-find #"^llvm-readelf" viewer) (re-matches #"llvm-readelf(\s+(-S|-r|-x\s+\S+|--hex-dump=\S+))+\s+(-|%t\S*)" (str/trim viewer))) :readelf
           :else (keyword (str "view-" (first (str/split viewer #"\s+")))))))
 
+(defn split-parts
+  "split-file's parts of the test (llvm/tools/split-file: a `--- NAME` line after a comment's leader starts part NAME): NAME
+  -> its text, its lines after leading blank ones so that its line numbers are the test's (split-file without
+  --no-leading-lines; queue 372)."
+  [^String src]
+  (let [ls (vec (str/split-lines src))
+        marks (keep-indexed (fn [i l] (when-let [[_ n] (re-matches #"^(?:#|//|;|!|@)\s*--- (\S+)\s*$" l)] [i n])) ls)]
+    (into {} (for [[[i n] [j]] (partition 2 1 [[(count ls)]] marks)]
+               [n (str (str/join "\n" (concat (repeat (inc (long i)) "") (subvec ls (inc (long i)) j))) "\n")]))))
+
+(defn- part-of
+  "The split-file part a word names (NAME or %t/NAME), or nil."
+  [parts ^String w]
+  (or (get parts w) (when (str/starts-with? w "%t/") (get parts (subs w 3)))))
+
 (defn runs
   "The object runs of a test: [{:mc TEXT :target {...} :backend {...} :viewer TEXT :tool KIND :prefixes [...] :error? :stdin?
   :defsym :stats?}]: an llvm-mc -filetype=obj command and the viewer its object goes to (a pipe, or %t read by a later
   RUN line), FileCheck's options."
   [^String src]
   (let [lines (a/run-lines src)
+        parts (if (some #(re-find #"split-file\s+%s\s+%t" %) lines) (split-parts src) {})
+        ;; a run's input and its FileCheck's file in split-file's parts (queue 372): the part's text, its name
+        part-in (fn [^String mc] (some #(when-let [t (part-of parts %)] [t (if (str/starts-with? % "%t/") (subs % 3) %)])
+                                      (str/split (str/trim mc) #"\s+")))
+        part-fc (fn [^String fc] (let [ws (rest (str/split (str/trim fc) #"\s+"))
+                                       f (first (remove #(str/starts-with? % "-") ws))]
+                                   (when f (part-of parts f))))
         ;; the objects written to a file: NAME -> its llvm-mc command
         written (into {} (for [r lines :let [mc (first (str/split r #"\|"))]
                                :when (and (re-find #"llvm-mc\b" mc) (re-find #"filetype[= ]obj" mc))
@@ -109,7 +133,8 @@
         mk (fn [mc viewer fc extra]
              (merge {:mc mc :error? (boolean (re-find #"^\s*not\s" mc))
                      :stdin? (boolean (re-find #"<\s*%s" mc))
-                     :split? (boolean (or (re-find #"%t/|%S/|split-file" mc) (not (re-find #"%s" mc))))
+                     :split? (boolean (and (not (part-in mc)) (or (re-find #"%t/|%S/|split-file" mc) (not (re-find #"%s" mc)))))
+                     :part (part-in mc) :check-src (part-fc fc)
                      :target (target-of mc) :backend (backend-opts mc)
                      :defsym (o/defsym-of mc)
                      :viewer viewer :tool (if viewer (viewer-tool viewer) :no-viewer)}
@@ -142,7 +167,7 @@
   [^String path run]
   (try
     (let [{:keys [mode]} (:target run)]
-      (obj/assemble (asm/read-items (asm/latin1 path) asm/amd64)
+      (obj/assemble (asm/read-items (or (first (:part run)) (asm/latin1 path)) asm/amd64)
                     {:mode mode :defsym (o/defsyms (:defsym run)) :backend (:backend run) :rel? (not= 64 mode)}))
     (catch arbace.lang.ExceptionInfo e
       (if-let [c (:obj/unsupported (ex-data e))] {:unsupported c :what (.getMessage e)} {:unsupported :crash :what (str e)}))
@@ -281,7 +306,7 @@
       (:split? run) (all :split-file)
       (:error? run)
       (if (:errors r)
-        (let [outs (canon-lines (o/diagnostics src r (if (:stdin? run) "<stdin>" (or (:path run) "test.s"))))
+        (let [outs (canon-lines (o/diagnostics (or (first (:part run)) src) r (cond (:stdin? run) "<stdin>" (:part run) (second (:part run)) :else (or (:path run) "test.s"))))
               cs2 (mapv (fn [[l k c]] [l k (#'a/at-line c l)]) cs)
               res (into {} (map (fn [[l rr]] [l rr]) (binding [dc/*vars* true dc/*full-lines* (:full-lines run)] (dc/filecheck cs2 outs (:implicit-not run)))))]
           (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :message)]) cs))
@@ -315,7 +340,7 @@
   (let [src (asm/latin1 path)
         rs (mapv #(assoc % :path path) (runs src))
         asm (memoize (fn [run] (assemble-run path run)))
-        res (mapcat #(try (judge-run src % (asm (select-keys % [:target :backend :defsym])))
+        res (mapcat #(try (judge-run (or (:check-src %) src) % (asm (select-keys % [:target :backend :defsym :part])))
                           (catch Throwable e (binding [*out* *err*] (println (str "repr-asm object-verdict: " path ": " e)))
                             (mapv (fn [[l]] [l :view-crash]) (a/check-lines src (:prefixes %)))))
                     rs)]
@@ -414,5 +439,9 @@
                                    :readobj (a/view-readobj o (rest (str/split (str/trim (:viewer run)) #"\s+")))
                                    [(str "no view for " (:tool run))])]
                      (println l))))))
-    "runs" (doseq [r (runs (asm/latin1 (first args)))] (prn r)))
+    "runs" (doseq [r (runs (asm/latin1 (first args)))] (prn (dissoc r :part :check-src)))
+    ;; diagnostics FILE [N]: the errors of the file's Nth run (from 0) as llvm-mc prints them
+    "diagnostics" (let [[path n] args src (asm/latin1 path) run (assoc (nth (runs src) (Long/parseLong (or n "0"))) :path path)
+                        r (assemble-run path run)]
+                    (doseq [l (o/diagnostics (or (first (:part run)) src) r (if (:stdin? run) "<stdin>" path))] (println l))))
   (shutdown-agents))
