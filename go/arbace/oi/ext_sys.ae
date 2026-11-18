@@ -96,7 +96,6 @@
   ^{:line 93} [^bool runtimeWarnings]
   ^{:line 94} [^bool backtraceActive]
   ^{:line 95} [^bool parserTraceFlag]
-  ^{:line 96} [^bool memprofSampling]
   ^{:line 97} [gcControl (lit (slice Value) 262144 0 120 0 0 (stackWords) 0 0 44 100 8192)]
   ^{:line 98} [gcTweaks (lit (slice (struct
           ^{:line 99 :tag string} name
@@ -130,7 +129,16 @@
     (set! gcCompactions + compactions)
     (set! forcedMajorCount + forced)
     (.fullMajor th)
-    (set! gcAbsorbed + (- (conv int (.-NumGC (memStats))) (conv int before)))))
+    (set! gcAbsorbed + (- (conv int (.-NumGC (memStats))) (conv int before)))
+    ;; OC218 (a)'s heap model: an asked collection empties the simulated minor heap (its tracked values promoted or dead), a major one
+    ;; also finds the tracked major values' deaths; Go's collection ran (fullMajor's, when a weak pointer was made: every tracked
+    ;; value with an identity has one); their callbacks run now, or after the callback that asked for the collection
+    (set! minorUsed 0)
+    (memprofMinorGC th true)
+    (when (> majors 0)
+      (memprofMajorGC th))
+    (when (> (len (.-mpQ th)) 0)
+      (.memprofRun th))))
 
 
 
@@ -561,6 +569,10 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
           (r "caml_gc_get" ^{:go/end 444} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag 0 :F (append (conv (slice Value) nil) (spread gcControl))))))
           (r "caml_gc_set" ^{:go/end 453} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
               (let [b (AsBlock (aget a 0))]
+                ;; a new minor heap size empties the simulated minor heap (gc_ctrl.c's caml_set_minor_heap_wsz: a minor collection)
+                (when (and (> (len (.-F b)) 0) (!= (AsInt (aget (.-F b) 0)) (AsInt (aget gcControl 0))))
+                  (set! minorUsed 0)
+                  (set! minorDue true))
                 (range [i gcControl]
                   (when (< i (len (.-F b)))
                     (aset gcControl i (aget (.-F b) i))))
@@ -771,29 +783,37 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
                           (when (or (not ok) (< (AsInt (aget a 1)) 0) (not (and (>= lambda 0) (<= lambda 1))))
                             (InvalidArg "Gc.Memprof.start"))
 
-                          (when memprofSampling
-                            (Failwith "Gc.Memprof.start: profile already running."))
+                          ;; the samples taken before get their callbacks first (memprof.c's final attempt); a profile sampling in
+                          ;; th's domain is replaced, not stopped (it samples on in the domains that share it)
+                          (.memprofRun th)
+                          (let [p (addr (lit memprofProfile :tracker (AsBlock (aget a 2)) :lambda lambda))]
+                            (set! (.-mp (.-Dom th)) p)
+                            (set! memprofStarted true)
+                            (when (== memprofRng 0) (set! memprofRng 42))
+                            (when (< lambda 1) (set! memprofNext (memprofGeom lambda)))
+                            (addr (lit Custom :Name "_memprof" :V p))))))
 
-                          (set! memprofSampling true)
-                          (set! memprofTracker (aget a 2))
-                          (inc! memprofGen)
-                          (set! memprofLambda lambda)
-                          (set! (.-mpQ th) nil)
-                          (when (== memprofRng 0) (set! memprofRng 42))
-                          (when (< memprofLambda 1) (set! memprofNext (memprofGeom)))
-                          (addr (lit Custom :Name "_memprof")))))
-
-                    (r "caml_memprof_is_sampling" ^{:go/end 615} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool memprofSampling)))
+                    (r "caml_memprof_is_sampling" ^{:go/end 615} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+                        (let [p (.-mp (.-Dom th))]
+                          (Bool (and (!= p nil) (== (.-status p) 0))))))
                     (r "caml_memprof_stop" ^{:go/end 622} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
-                        (when (not memprofSampling)
-                          (Failwith "Gc.Memprof.stop: no profile running."))
                         ;; the samples taken before the stop get their callbacks first
                         (.memprofRun th)
-                        (set! memprofSampling false)
-                        (set! memprofTracker nil)
+                        (let [p (.-mp (.-Dom th))]
+                          (when (or (== p nil) (!= (.-status p) 0))
+                            (Failwith "Gc.Memprof.stop: no profile running."))
+                          (set! (.-status p) 1))
                         ^{:line 621} Unit))
 
-                    (r "caml_memprof_discard" ^{:go/end 623} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+                    (r "caml_memprof_discard" ^{:go/end 623} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (let [p (assert (* memprofProfile) (.-V (assert (* Custom) (aget a 0))))]
+                          (when (== (.-status p) 0)
+                            (Failwith "Gc.Memprof.discard: profile not stopped."))
+                          (when (== (.-status p) 2)
+                            (Failwith "Gc.Memprof.discard: profile already discarded."))
+                          (set! (.-status p) 2)
+                          (memprofDrop)
+                          Unit)))
 
                     ;; domain.c
                     (r "caml_ml_domain_id" ^{:go/end 626} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.-ID (.-Dom th))))
@@ -815,74 +835,214 @@ closures, the boxed numbers of arithmetic or the runtime's own blocks.\n"} minor
 
 (go/var ^{:tag int :doc "majorWords is the words allocated directly in the major heap (an allocation above Max_young_wosize).\n"} majorWords)
 
-(go/func countWords "countWords counts an allocation of wosize words (and its header; an atom, wosize 0, is static).\n" [^int wosize]
+;; OC218 (a)'s heap model (doc/ocaml/OCAML-SURVEY.md, "As built: OC218's heap model"): a simulated minor heap of Gc.control's
+;; minor_heap_size words. The counted minor allocations fill it; the one that would overflow it empties it first, a minor collection,
+;; which for Gc.Memprof's tracked values is Go's collection and, per value, its promotion (it lives: promote) or its death (dealloc_minor);
+;; the asked collections are minor collections too, the major ones (Gc.major, full_major, compact) also the death of the tracked major
+;; values (dealloc_major). A value lives when a weak pointer of Go's to it survives Go's collection (weakOf); oi's values are Go's, so
+;; Go's reachability is OCaml's, up to the slots oi keeps longer than the bytecode's stack.
+(go/var ^{:tag int :doc "minorUsed is the words the simulated minor heap holds since its last collection.\n"} minorUsed)
+(go/var ^{:tag bool :doc "minorDue is a minor collection the simulated heap made while a callback ran: its promotions wait for the callbacks' end.\n"} minorDue)
+
+(go/func countWords "countWords counts an allocation of wosize words (and its header; an atom, wosize 0, is static); it reports whether the
+allocation overflowed the simulated minor heap, which a minor collection empties before the block is made.\n" ^bool [^int wosize]
   (when (> wosize 256)
     (set! majorWords + (+ wosize 1))
-    (return))
-  (when (> wosize 0)
-    (set! minorWords + (+ wosize 1))))
+    (return false))
+  (when (<= wosize 0)
+    (return false))
+  (set! minorWords + (+ wosize 1))
+  (set! minorUsed + (+ wosize 1))
+  (when (> minorUsed (AsInt (aget gcControl 0)))
+    (set! minorUsed (+ wosize 1))
+    (return true))
+  false)
 
-(go/func countWordsT "countWordsT is countWords by the thread th, which samples it for Gc.Memprof when a profile runs.\n" [^{:tag (* Thread)} th ^int wosize]
-  (countWords wosize)
-  (when (and memprofSampling (> wosize 0) (!= th nil) (not (.-mpInCb th)))
-    (memprofSample th wosize)))
+(go/func countWordsT "countWordsT is allocV of a value without an identity (a boxed number).\n" [^{:tag (* Thread)} th ^int wosize]
+  (allocV th wosize nil))
 
-;; Gc.Memprof (memprof.c; OC218 (a), queue 331): a profile samples the counted words at its rate (each word with probability lambda:
-;; the distance to the next sampled word drawn from the geometric distribution, as memprof.c's rand_geom), and an allocation with
-;; samples calls the tracker's alloc_minor (alloc_major above Max_young_wosize) with its allocation record {n_samples; size; source;
-;; callstack} in the allocating thread (its queue, Thread.mpQ), at its next poll point (tick) or when the profile stops; the tracked values' promote and dealloc callbacks
-;; are not called (no simulated heap yet), callbacks' own allocations are not sampled, and the callstack is empty (no backtraces).
+(go/func allocV "allocV is the allocation of v (wosize words; nil for a value without an identity) by th: counted in Gc's words, the
+simulated minor heap collected first when the allocation overflows it, then v sampled for Gc.Memprof when th's domain samples, its
+allocation callback run at once, as the bytecode runtime runs it at the allocation, unless th is in a callback (whose allocations are
+not sampled). It returns v.\n" ^Value [^{:tag (* Thread)} th ^int wosize ^Value v]
+  (let [full (countWords wosize)]
+    (when (or (== th nil) (.-mpInCb th))
+      (when full (set! minorDue true))
+      (return v))
+    (when (or full minorDue)
+      (set! minorDue false)
+      (memprofMinorGC th false))
+    (when (and memprofStarted (> wosize 0))
+      (when [p (.-mp (.-Dom th))] (and (!= p nil) (== (.-status p) 0))
+        (memprofSample th p wosize v)))
+    (when (> (len (.-mpQ th)) 0)
+      (.memprofRun th))
+    v))
 
-(go/type memprofSampleT (struct ^int n ^int size ^bool major ^int gen))
+;; Gc.Memprof (memprof.c; OC218 (a), queue 331 and the heap model): a profile (memprofProfile, the value Gc.Memprof.start returns) is its
+;; domain's, shared by its threads and by the domains it spawns while it samples; it samples the counted words at its rate (each word
+;; with probability lambda: the distance to the next sampled word drawn from the geometric distribution, as memprof.c's rand_geom), and
+;; an allocation with samples calls the tracker's alloc_minor (alloc_major above Max_young_wosize) with its allocation record {n_samples;
+;; size; source; callstack} in the allocating thread at the allocation; a Some tracks the value (memprofEntry) through the simulated
+;; heap's collections, promote, dealloc_minor and dealloc_major called as they find it promoted or dead, until the profile is discarded.
+;; Callbacks' own allocations are not sampled, and the callbacks queued while one runs (an asked collection in a callback) run after it,
+;; never nested (Thread.mpQ). The callstack is empty (no backtraces of allocations).
+
+(go/type memprofProfile "memprofProfile is a profile: its tracker, its rate and its status (0 sampling, 1 stopped, 2 discarded).\n" (struct
+    ^{:tag (* Block)} tracker
+    ^{:tag float64} lambda
+    ^{:tag int} status))
+
+(go/type memprofEntry "memprofEntry is a tracked value: its profile, a weak pointer to it (nil: no identity), the tracker's data, its heap.\n" (struct
+    ^{:tag (* memprofProfile)} prof
+    ^{:tag (* weakRef)} ref
+    ^{:tag Value} data
+    ^{:tag bool} major))
+
+(go/type memprofSampleT "memprofSampleT is a queued callback: kind 0 an allocation's (n samples of size words), 1 a promotion's, 2 a minor
+deallocation's, 3 a major deallocation's (of ent).\n" (struct
+    ^{:tag int} kind
+    ^{:tag int} n
+    ^{:tag int} size
+    ^{:tag bool} major
+    ^{:tag (* memprofProfile)} prof
+    ^{:tag (* weakRef)} ref
+    ^{:tag (* memprofEntry)} ent))
 
 (go/var
-  [^{:tag Value} memprofTracker]
-  [^int memprofGen]
-  [^float64 memprofLambda]
+  [^bool memprofStarted]
   [^float64 memprofNext]
   [^uint64 memprofRng]
-  )
+  [^{:tag (slice (* memprofEntry))} memprofMinor]
+  [^{:tag (slice (* memprofEntry))} memprofMajor])
 
-(go/func memprofGeom "memprofGeom is the distance in words to the next sampled word (at least 1).\n" ^float64 []
+(go/func memprofGeom "memprofGeom is the distance in words to the next sampled word (at least 1) at the rate lambda.\n" ^float64 [^float64 lambda]
   (set! memprofRng (+ (* memprofRng 6364136223846793005) 1442695040888963407))
   (let [u (/ (+ (conv float64 (>> memprofRng 11)) 0.5) 9007199254740992.0)]
-    (+ (math/Floor (/ (math/Log u) (math/Log1p (- memprofLambda)))) 1)))
+    (+ (math/Floor (/ (math/Log u) (math/Log1p (- lambda)))) 1)))
 
-(go/func memprofSample "memprofSample draws the samples of an allocation of wosize words by th and queues its callback.\n" [^{:tag (* Thread)} th ^int wosize]
-  (let [words (conv float64 (+ wosize 1)) n 0]
-    (when (>= memprofLambda 1)
+(go/func memprofSample "memprofSample draws the samples of an allocation of v (wosize words) by th for the profile p and queues its callback.\n" [^{:tag (* Thread)} th ^{:tag (* memprofProfile)} p ^int wosize ^Value v]
+  (let [words (conv float64 (+ wosize 1)) n 0 lambda (.-lambda p)]
+    (when (>= lambda 1)
       (set! n (+ wosize 1)))
-    (when (and (> memprofLambda 0) (< memprofLambda 1))
+    (when (and (> lambda 0) (< lambda 1))
       (set! memprofNext - words)
       (while (<= memprofNext 0)
         (inc! n)
-        (set! memprofNext + (memprofGeom))))
+        (set! memprofNext + (memprofGeom lambda))))
     (when (> n 0)
-      (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :n n :size wosize :major (> wosize 256) :gen memprofGen))))))
+      (let [^{:tag (* weakRef)} r (zero (* weakRef))]
+        (when (!= v nil)
+          (when [(values w ok) (assert (* weakRef) (weakOf v))] ok
+            (set! r w)))
+        (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :kind 0 :n n :size wosize :major (> wosize 256) :prof p :ref r)))))))
 
-(go/method memprofRun "memprofRun calls the tracker's callbacks of the queued samples (a callback's exception is raised here).\n" [^{:tag (* Thread)} th]
-  (when (or (== (len (.-mpQ th)) 0) (.-mpInCb th))
+(go/func refAlive "refAlive reports whether a tracked value lives after Go's collection: its weak pointer not collected (nil, a value
+without an identity, is taken as dead: a boxed number does not outlive its use).\n" ^bool [^{:tag (* weakRef)} r]
+  (when (or (== r nil) (.Load (.-dead r)))
+    (return false))
+  (when (== ((.-get r)) nil)
+    (weakDead r)
+    (return false))
+  true)
+
+(go/func memprofMinorGC "memprofMinorGC is a minor collection for Gc.Memprof (memprof.c's caml_memprof_after_minor_gc): Go's collection
+unless gcDone (an asked collection ran it), then each tracked minor value's promote callback queued when it lives, else its dealloc_minor
+callback; a discarded profile's values dropped.\n" [^{:tag (* Thread)} th ^bool gcDone]
+  (set! minorDue false)
+  (when (== (len memprofMinor) 0)
     (return))
-  (do
-    (set! (.-mpInCb th) true)
-    (defer ((fn [] (set! (.-mpInCb th) false))))
-    ;; the queue taken whole: a callback's exception drops the samples after it, as the allocations after a raising callback
-    ;; are never made in OCaml (its callback runs at the allocation)
-    (let [q (.-mpQ th)]
-      (set! (.-mpQ th) nil)
-      ;; a sample of a profile since stopped (in a callback: stop, discard, a new start) gets no callback
-      (range [_ smp q]
-        (when (and memprofSampling (== (.-gen smp) memprofGen) (!= memprofTracker nil))
-          (let [info (addr (lit Block :Tag 0 :F (lit (slice Value) (.-n smp) (.-size smp) 0 (addr (lit Block :Tag 0)))))
-                k 0]
-            (when (.-major smp) (set! k 1))
-            (.Apply th (aget (.-F (AsBlock memprofTracker)) k) info)))))))
+  (when (not gcDone)
+    (runtime/GC))
+  (let [es memprofMinor]
+    (set! memprofMinor nil)
+    (range [_ e es]
+      (when (!= (.-status (.-prof e)) 2)
+        (let [k 2]
+          (when (refAlive (.-ref e)) (set! k 1))
+          (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :kind k :prof (.-prof e) :ent e))))))))
+
+(go/func memprofMajorGC "memprofMajorGC is a major collection's part for Gc.Memprof (after Go's collection): each tracked major value
+found dead gets its dealloc_major callback queued; a discarded profile's values dropped.\n" [^{:tag (* Thread)} th]
+  (let [kept (subslice memprofMajor 0 0) n (len memprofMajor)]
+    (range [_ e memprofMajor]
+      (when (!= (.-status (.-prof e)) 2)
+        (if (refAlive (.-ref e))
+          (set! kept (append kept e))
+          (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :kind 3 :prof (.-prof e) :ent e))))))
+    (for [i (len kept)] (< i n) (inc! i)
+      (aset memprofMajor i nil))
+    (set! memprofMajor kept)))
+
+(go/func memprofDrop "memprofDrop forgets the tracked values of the discarded profiles.\n" []
+  (let [mi (subslice memprofMinor 0 0) ma (subslice memprofMajor 0 0)]
+    (range [_ e memprofMinor]
+      (when (!= (.-status (.-prof e)) 2) (set! mi (append mi e))))
+    (range [_ e memprofMajor]
+      (when (!= (.-status (.-prof e)) 2) (set! ma (append ma e))))
+    (set! memprofMinor mi)
+    (set! memprofMajor ma)))
+
+(go/method memprofRun "memprofRun calls the queued callbacks in order, those they queue too, and the promotions of a minor collection
+made while one ran; a callback's exception is raised here, the allocation callbacks queued after it dropped (their allocations are never
+made in OCaml, whose callback runs at the allocation), the others kept for the next poll point.\n" [^{:tag (* Thread)} th]
+  (when (.-mpInCb th)
+    (return))
+  (set! (.-mpInCb th) true)
+  (let [finished false]
+    (defer ((fn []
+          (set! (.-mpInCb th) false)
+          (when (not finished)
+            (let [kept (subslice (.-mpQ th) 0 0)]
+              (range [_ smp (.-mpQ th)]
+                (when (!= (.-kind smp) 0)
+                  (set! kept (append kept smp))))
+              (set! (.-mpQ th) kept))))))
+    (while true
+      (when (== (len (.-mpQ th)) 0)
+        (when (not minorDue)
+          (break))
+        (memprofMinorGC th false)
+        (continue))
+      (let [smp (aget (.-mpQ th) 0)]
+        (set! (.-mpQ th) (subslice (.-mpQ th) 1))
+        (.memprofCall th smp)))
+    (set! finished true)))
+
+(go/method memprofCall "memprofCall is one queued callback: an allocation's (its value tracked when the callback returns Some), a
+promotion's (tracked on in the major heap when it returns Some), a deallocation's.\n" [^{:tag (* Thread)} th ^memprofSampleT smp]
+  (let [p (.-prof smp)]
+    (when (== (.-kind smp) 0)
+      ;; a sample of a profile stopped or replaced since gets no callback (the block is not tracked)
+      (when (or (!= p (.-mp (.-Dom th))) (!= (.-status p) 0))
+        (return))
+      (let [info (addr (lit Block :Tag 0 :F (lit (slice Value) (.-n smp) (.-size smp) 0 (addr (lit Block :Tag 0)))))
+            k 0]
+        (when (.-major smp) (set! k 1))
+        (when [(values b ok) (assert (* Block) (.Apply th (aget (.-F (.-tracker p)) k) info))] ok
+          (let [e (addr (lit memprofEntry :prof p :ref (.-ref smp) :data (aget (.-F b) 0) :major (.-major smp)))]
+            (if (.-major smp)
+              (set! memprofMajor (append memprofMajor e))
+              (set! memprofMinor (append memprofMinor e))))))
+      (return))
+    ;; a tracked value's callbacks: none once its profile is discarded
+    (when (== (.-status p) 2)
+      (return))
+    (let [e (.-ent smp)]
+      (switch (.-kind smp)
+        (case [1]
+          (when [(values b ok) (assert (* Block) (.Apply th (aget (.-F (.-tracker p)) 2) (.-data e)))] ok
+            (set! (.-data e) (aget (.-F b) 0))
+            (set! (.-major e) true)
+            (set! memprofMajor (append memprofMajor e))))
+        (case [2] (.Apply th (aget (.-F (.-tracker p)) 3) (.-data e)))
+        (case [3] (.Apply th (aget (.-F (.-tracker p)) 4) (.-data e)))))))
 
 (go/func countValue "countValue counts the allocation of v by th, a value just made (a block, a float array, a string, a boxed float).\n" [^{:tag (* Thread)} th ^Value v]
   (type-switch [x v]
-    (case [(* Block)] (countWordsT th (len (.-F x))))
-    (case [(* FloatArray)] (countWordsT th (len (.-F x))))
-    (case [(* Bytes)] (countWordsT th (+ (/ (len (.-B x)) 8) 1)))
+    (case [(* Block)] (allocV th (len (.-F x)) x))
+    (case [(* FloatArray)] (allocV th (len (.-F x)) x))
+    (case [(* Bytes)] (allocV th (+ (/ (len (.-B x)) 8) 1) x))
     (case [float64] (countWordsT th 1))))
 
 (go/func allocCounted "allocCounted reports whether the external cname allocates its result as OCaml's runtime does (counted by countValue).\n" ^bool [^string cname]

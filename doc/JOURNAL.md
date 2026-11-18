@@ -10642,3 +10642,26 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
 - Decisions taken overnight (round 52), as recommended: OC231 (a) the text plugin of Lambda (not ocamlc's .cmo, not a link-time
   pretence); OC232 (a) the interfaces' digests from their files (not names alone, not ocamlc's CRC).
 - Moves oi's keys (forms_key, stdlib_key, native_key: the typer and dynlink.ml): the main host's whole runs re-record.
+
+
+## 2026-11-18: OCaml, OC218's heap model: the simulated minor heap and Memprof's promote and dealloc at oi's level (round 52, branch `n-oc218`)
+
+- On n-oc220b (e56270a78), with 331's first part (Gc's word counters, Memprof's sampling): go/arbace/oi/ext_sys.ae models a minor
+  heap of Gc.control's minor_heap_size words, filled by the counted allocations and emptied by the overflowing one and by the asked
+  collections; a tracked value (an allocation callback's Some) is promoted or dead by Go's collection, judged through a weak pointer
+  (OC216 (a)'s weakOf); promote, dealloc_minor and dealloc_major run as the collections find them, never nested (Thread.mpQ). The
+  allocation callbacks run at the allocation (allocV), as the bytecode runtime's; profiles are per domain (Domain.mp, inherited by
+  spawned domains), a second start replaces the first, discard fails as memprof.c does. makearray, duparray and duprecord are
+  counted (the bytecode's MAKEBLOCK and caml_obj_dup). Read for the semantics: OCaml 5.5.0's runtime/memprof.c (caml_memprof_start,
+  stop, discard), stdlib/gc.mli (Memprof's contract) and testsuite/tests/statmemprof/*.ml, from the pinned tarball.
+- `bin/oi check --record --only-list` (18 rows and the control pair norm3/norm2) and `bin/oi suite check --record --only-list` (5
+  rows): statmemprof/arrays_in_minor, arrays_in_major, minor_heap_edge, restart, start_stop and, in the suite, discard_in_callback,
+  stop_start_in_callback, exception_comballoc pass; 331's passes still pass; intern now fails at its Marshal distribution checks
+  (re-pinned); OCaml eval 524 to 532, completeness 87 to 88, meant 92 to 93. own-verdicts --check 0 differing; reap, crops-score
+  (--judge --strict) and records-check 0 problems; `bin/oi test` passes; the control differs.
+- Decisions taken overnight (round 52), as recommended: OC233 (a) the simulated minor heap with Go's reachability (not every value
+  promoted, not an age on every block); OC234 (a) callbacks at the allocation (not 331's poll point); OC235 (a) profiles per domain,
+  start replacing (not one global profile).
+- The native stdlib was rebuilt here (OI_TYPER_GOMEMLIMIT=550MiB): compiler-libs' Parser unit was stopped at 1.05 GB by the night's
+  1 GiB watchdog (its unit refused in this worktree's library only); no other process passed 1 GiB.
+- Moves oi's driver key (go/arbace/oi's forms): the main host's whole runs re-record.

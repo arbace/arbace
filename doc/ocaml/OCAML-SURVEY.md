@@ -3432,6 +3432,18 @@ all (a), as recommended there:
   compilation read (Env.imports); the main program's table their union (OI_DYNLINK_IMPORTS). (b) every interface by its name (None):
   rejected, check_interface_imports would never compare. (c) ocamlc's CRC of the .cmi's signature: rejected for now, the native .cmi
   is not ocamlc's; two equal source interfaces have equal digests, as ocamlc's do.
+- **OC233 (a)** (taken overnight, round 52, as recommended) OC218's heap model: a simulated minor heap of minor_heap_size words
+  filled by the counted allocations, emptied by the overflowing one and by the asked collections; a tracked value's promotion or
+  death judged by Go's collection through a weak pointer (live: referenced from oi's roots). (b) every tracked value promoted at a
+  minor collection (no reachability): rejected, custom's and arrays_in_minor's ratios and dealloc_minor would be pretended. (c) a
+  heap of OCaml blocks in oi (an age and a remembered set on every block): rejected for now, every allocation would pay it, against
+  OC218's 3% rule.
+- **OC234 (a)** (taken overnight, round 52, as recommended) a sampled allocation's callback runs at the allocation, as the bytecode
+  runtime's, its consequences queued and run after it, never nested. (b) 331's poll point: rejected, a callback that stops or
+  restarts a profile would see the allocations made before the next poll under the old state.
+- **OC235 (a)** (taken overnight, round 52, as recommended) a profile is its domain's, inherited by the domains it spawns, and a
+  second start replaces it (memprof.c's); stopped profiles keep their tracked values' callbacks until discard. (b) one global
+  profile: rejected, restart's two domains and start_stop's double start fail.
 Order (the plan's): OC213, OC214 (S1) with OC209 and OC210 first (branch `ocaml-s1`), then OC215, OC216, OC217, OC218 then OC219,
 OC220 and OC221; OC222 with the scoring's next change.
 
@@ -4108,3 +4120,62 @@ under 700 MiB (its key holds dynlink.ml and the typer's forms): the stdlib-build
 **The rest of OC220**: lib-dynlink-bytecode/main (ocamlmklib, the plugins' C stubs, `.cma` loading, `loadfile_private`, Marshal's
 closures of plugin code, `-linkall`, `-custom`) and backtrace/backtrace_dynlink (native only), as "As built: OC220's first part"
 costs them; the AOT levels after the runtime's unit table.
+
+## As built: OC218's heap model, the simulated minor heap at oi's level (2026-11-18, round 52, branch `n-oc218`)
+
+OC233 (a), OC234 (a), OC235 (a). On 331's first part (Gc's word counters, Memprof's sampling): the smallest model that makes Memprof's
+promote and dealloc callbacks OCaml's, at oi's level (go/arbace/oi/ext_sys.ae, "OC218 (a)'s heap model").
+
+**The design.**
+
+- **A simulated minor heap of `minor_heap_size` words** (Gc.control's first field, 256k by default; `Gc.set` with another size
+  empties it, as caml_set_minor_heap_wsz collects). Every counted minor allocation (331's: wosize plus header, at most
+  Max_young_wosize, 256) fills it (`minorUsed`); the one that would overflow it empties it first: a minor collection, before the
+  block is made, as caml_alloc_small_dispatch collects before it allocates. The asked collections (Gc.minor, major, full_major,
+  compact) are minor collections too. Nothing else is simulated: no block knows its heap, no remembered set, no promoted words.
+- **Reachability is Go's.** oi's values are Go's, so a tracked value lives after a collection when a weak pointer of Go's to it
+  (weakOf, OC216 (a)'s weak keys) survives Go's collection (`runtime.GC`). 331's counters assumed nothing about liveness; the model
+  uses the real one, not "all objects": a promotion is a value still referenced from oi's roots (its stacks, globals and the
+  values they reach), which is OCaml's up to the slots oi keeps longer than the bytecode's stack (331's let-slot clearing narrows
+  that). Go's collection runs only when a minor collection has tracked minor values (or the asked collections, which ran it
+  already): a program without a profile pays the counters alone.
+- **Tracked values** (`memprofEntry`): an allocation callback's `Some d` tracks the value with d, in the minor table (alloc_minor)
+  or the major one (alloc_major). A minor collection takes the minor table whole: a value alive is promoted (its `promote`
+  callback; `Some d'` keeps it in the major table with d', None or an exception stops tracking it), a dead one gets
+  `dealloc_minor`. A major collection (Gc.major, full_major, compact; minor first) gives each dead major value `dealloc_major`.
+  OCaml's own major slices are not simulated: a major value's death is seen at the next asked major collection (the tests ask).
+  A value without an identity (a boxed float of arithmetic, nil to allocV) is taken as dead at the next minor collection.
+- **Callbacks at the allocation** (OC234 (a)): a sampled allocation's callback runs as the allocation returns (allocV), as the
+  bytecode runtime runs it, not at the next poll point (331's queue): a callback that stops, discards or restarts a profile then
+  sees each following allocation under the new state (start_stop, discard_in_callback, stop_start_in_callback's bytecode counts).
+  Callbacks never nest: those a callback causes (an asked collection inside it, a minor collection its allocations make) are
+  queued on the thread (Thread.mpQ) and run in order after it; an exception drops the queued allocation callbacks (their
+  allocations are never made in OCaml) and keeps the promotions and deallocations for the next poll point (tick).
+- **Profiles** (OC235 (a)): `start` returns a profile (memprofProfile in the Custom's V: tracker, rate, status sampling, stopped,
+  discarded), its domain's (Domain.mp), shared by the domain's threads and by the domains spawned while it is the spawner's
+  (spawnProf, as spawnMask). A start where one samples replaces it in this domain (it samples on elsewhere): memprof.c's, no
+  failure; `stop` stops the domain's; a stopped profile's values keep their promote and dealloc callbacks until `discard`, which
+  fails on a sampling profile ("profile not stopped") and on a discarded one ("already discarded"), memprof.c's messages, and
+  forgets its values.
+- **The words counted** grow by the array literals (makearray), duparray and duprecord, which the bytecode allocates with
+  MAKEBLOCK and caml_obj_dup: minor_heap_edge's 50-word arrays were not counted, so never sampled.
+
+**Results (light).** `bin/oi check --record --only-list` on 18 rows (the class's statmemprof rows, 331's passes as the
+regression set, misc/gcwords, lib-sys/opaque, lib-obj/with_tag, regression/pr7798) and the control pair norm3/norm2: 15 pass, 0
+failing; new passes statmemprof/arrays_in_minor, arrays_in_major, minor_heap_edge, restart and start_stop (+5 at eval, check-oi-native.edn's
+rows moved); 331's passes (alloc_counts, exception_callback, exception_callback_minor, lists_in_minor, gcwords, opaque, with_tag,
+pr7798) still pass. statmemprof/intern now reaches its distribution checks and fails there: Marshal's intern allocations are not
+counted (source Marshal), re-pinned to that failure. custom (bigarrays' custom blocks, source Custom) stays in the class. The suite's
+rows by `bin/oi suite check --record --only-list` (discard_in_callback, stop_start_in_callback, exception_comballoc,
+blocking_in_callback, thread_exit_in_callback): the first three pass (+3 in the suite, check-suite-oi-native.edn), blocking_in_callback
+still passes, thread_exit_in_callback stays in the class; the stale pins of the eight (oi-known.edn) dropped. The control differs. Peak
+RSS: the typer 0.97 GB, an oi run 0.98 GB (arrays_in_minor's million-slot root array), under the night's 1 GiB with
+`OI_TYPER_GOMEMLIMIT=700MiB`; minor_heap_edge runs in about 120 s at oi (its callbacks' 5 million interpreted loop turns, not the
+model: about 5,000 Go collections of a small heap).
+
+**Left in the class, and their costs.** Marshal's and custom blocks' sources (intern, custom, comballoc's: intern.c's and
+custom.c's allocations through allocV with their source, about half a day); the callstack (OC217's backtraces);
+thread_exit_in_callback and moved_while_blocking (a thread's queue at its exit, a callback across a blocking section: a day);
+`Obj.is_shared` and lazy/minor_major_force (`:obj-representation`: a block's age, which the model gives only to tracked values;
+an epoch field on every Block, its cost to measure first under OC218's 3% rule); Gc.stat's promoted_words (the promoted values'
+words, exact only for tracked values: left at 0); the AOT levels (the runtime's ThreadLocal queue, the same model in Java: a day).
