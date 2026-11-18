@@ -15,7 +15,7 @@
 ;;                   the oracle's build), Linux's UAPI headers (linux-headers 7.2.1) and BlueZ's (bluez-headers 5.87)
 ;;   --work DIR      the preprocessor's translation units, kept for reading (default OUT/work)
 ;; OUT the directory the tables' Go is written into, not gofmt'd (bin/pyi runtime gen-tables formats it with TamaGo's gofmt
-;; and compares it with the printed runtime's file byte for byte). TABLE: opcode, errno, fcntl, socket, posix.
+;; and compares it with the printed runtime's file byte for byte). TABLE: opcode, errno, fcntl, socket, posix, slotdocs and ast (queue 350).
 ;;
 ;; opcode (opcode_table.py's builtins_opcode_table.go): _opcode's predicates over Include/internal/pycore_opcode_metadata.h's
 ;; _PyOpcode_opcode_metadata (IS_VALID_OPCODE, OPCODE_HAS_*, pycore_opcode_utils.h's IS_BLOCK_PUSH_OPCODE) for each opcode
@@ -533,6 +533,104 @@
          (str/join (for [k (sort (keys confs)) :when (some? (confs k))] (str "\t" (cs k) ": \"" (confs k) "\", // " k "\n")))
          "}\n")))
 
+;; ---- slotdocs (queue 350, audit 344's DECISION 1 (a)): the slot wrappers' __doc__, slotdocs.go's slotDocs (recorded by python3 -I -B
+;; from CPython's own wrapper_descriptors), made from Objects/typeobject.c: its slotdefs table preprocessed with its own slot macros
+;; (BINSLOT's and the others' doc composition), TPSLOT, FLSLOT and ETSLOT, which every other one expands to, as markers; by
+;; add_operators' rule an entry without a wrapper makes no wrapper_descriptor (__getattr__, __new__); its __doc__ is
+;; _PyType_GetDocFromInternalDoc's (find_signature, skip_signature: the text after the signature's ")\n--\n\n", unless a blank line
+;; comes first; an empty one none); a name's doc the last entry's with a wrapper (they differ only for __iadd__ and __imul__, where the
+;; sequence slot's is the one the built-in types that define them fill: list, bytearray, collections.deque, array.array)
+
+(defn- doc-without-signature
+  "_PyType_DocWithoutSignature(name, doc): doc after its introspection signature, or doc itself"
+  [^String nm ^String doc]
+  (if-not (and (str/starts-with? doc nm) (= \( (get doc (count nm))))
+    doc
+    (loop [i (count nm)]
+      (cond (>= i (count doc)) doc
+            (.startsWith doc ")\n--\n\n" (int i)) (subs doc (+ i 6))
+            (.startsWith doc "\n\n" (int i)) doc
+            :else (recur (inc i))))))
+
+(defn- table-slotdocs [opts]
+  (let [f (str (:cpython opts) "/Objects/typeobject.c")
+        unit (str (region f #"^#define TPSLOT\(" #"^static pytype_slotdef slotdefs\[\] = \{")
+                  "\n#undef TPSLOT\n#undef FLSLOT\n#undef ETSLOT\n"
+                  "#define TPSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) __pys__(#NAME, WRAPPER, DOC)\n"
+                  "#define FLSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC, FLAGS) __pys__(#NAME, WRAPPER, DOC)\n"
+                  "#define ETSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) __pys__(#NAME, WRAPPER, DOC)\n"
+                  (region f #"^static pytype_slotdef slotdefs\[\] = \{" #"^\};") "\n};\n")
+        ents (markers (tokens (preprocess opts :amd64 [] "slotdefs.c" unit)) "__pys__")
+        _ (when (< (count ents) 80) (fail! "slotdocs: " (count ents) " slotdefs entries, fewer than 80"))
+        docs (reduce (fn [m [nm wrapper doc]]
+                       (let [nm (c-string nm)]
+                         (if (or (= wrapper ["NULL"]) (= doc ["NULL"]))
+                           m
+                           (let [d (doc-without-signature nm (c-string doc))]
+                             (if (empty? d) m (assoc m nm d))))))
+                     (sorted-map) ents)]
+    (str "package py\n\n"
+         "// slotDocs are the __doc__ strings of the slot wrappers (typeobject.c's slotdefs), by name; made by tools/pyi/runtime_tables.ae\n"
+         "// from CPython 3.14.10's Objects/typeobject.c: add_operators' entries with a wrapper, the last per name (queue 350).\n"
+         "var slotDocs = map[string]string{\n"
+         (str/join (for [[k v] docs] (str "\t\"" k "\": " (str/replace (go-quote v) "\n" "\\n") ",\n")))
+         "}\n")))
+
+;; ---- ast (queue 350, audit 344's DECISION 1 (a)): the _ast module's node table, builtins_ast_table.go's astTable (asdl_table.py's,
+;; python3 running CPython's own Parser/asdl.py), from Parser/Python.asdl by ASDL's grammar (asdl.py's parser: `module NAME { DEF* }`, a
+;; DEF `NAME = PRODUCT` with `( FIELDS ) [attributes ( FIELDS )]` or `NAME = CON | CON ... [attributes ( FIELDS )]`, a CON `NAME [( FIELDS )]`,
+;; a field `TYPE [?|*]... NAME` (the last quantifier decides), `--` to the line's end a comment); the release in the header from Include/patchlevel.h's PY_VERSION
+
+(defn- asdl-tokens [^String text]
+  (re-seq #"[A-Za-z_][A-Za-z0-9_]*|[=|(),?*{}]" (str/replace text #"--[^\n]*" "")))
+
+(defn- asdl-fields
+  "The fields at ts (after its `(`) up to the `)`: [[[name type q] ...] rest]"
+  [ts]
+  (loop [ts ts out []]
+    (let [[ty & ts] ts
+          ;; asdl.py's quantifiers: any number of ? and *, the last one deciding (Dict's expr?* keys a sequence)
+          qs (take-while #{"?" "*"} ts) ts (drop (count qs) ts) q (or (last qs) "")
+          [nm sep & ts] ts
+          out (conj out [nm ty q])]
+      (case sep "," (recur ts out) ")" [out ts] (fail! "ASDL: a field list ends at " sep)))))
+
+(defn- asdl-defs [text]
+  (let [ts (asdl-tokens text)
+        _ (when-not (and (= "module" (first ts)) (= "{" (nth ts 2))) (fail! "ASDL: no module"))
+        attrs (fn [ts] (if (= "attributes" (first ts))
+                         (do (when-not (= "(" (second ts)) (fail! "ASDL: attributes without (")) (asdl-fields (drop 2 ts)))
+                         [[] ts]))]
+    (loop [ts (drop 3 ts) out []]
+      (if (= "}" (first ts))
+        out
+        (let [[nm eq & ts] ts]
+          (when-not (= "=" eq) (fail! "ASDL: " nm " without ="))
+          (if (= "(" (first ts))
+            (let [[fs ts] (asdl-fields (rest ts)) [as ts] (attrs ts)]
+              (recur ts (conj out [:pro nm fs as])))
+            (let [[cons ts] (loop [ts ts cons []]
+                              (let [[cn & ts] ts
+                                    [fs ts] (if (= "(" (first ts)) (asdl-fields (rest ts)) [[] ts])
+                                    cons (conj cons [cn fs])]
+                                (if (= "|" (first ts)) (recur (rest ts) cons) [cons ts])))
+                  [as ts] (attrs ts)]
+              (recur ts (conj out [:sum nm cons as])))))))))
+
+(defn- table-ast [opts]
+  (let [py (:cpython opts)
+        fields (fn [fs] (if (empty? fs) "-" (str/join "," (for [[n t q] fs] (str n ":" t ":" q)))))
+        lines (mapcat (fn [[k nm a b]]
+                        (if (= k :pro)
+                          [(str "pro " nm " " (fields a) " " (fields b))]
+                          (cons (str "sum " nm " " (fields b)) (for [[cn fs] a] (str "con " cn " " nm " " (fields fs))))))
+                      (asdl-defs (slurp (str py "/Parser/Python.asdl"))))
+        version (or (second (re-find #"#define\s+PY_VERSION\s+\"([0-9.]+)" (slurp (str py "/Include/patchlevel.h")))) (fail! "no PY_VERSION"))]
+    (str "// Code generated by tools/pyi/asdl_table.py from CPython " version "'s Parser/Python.asdl; DO NOT EDIT.\n\n"
+         "package py\n\n"
+         "// astTable is the _ast module's node classes (PY6a): see tools/pyi/asdl_table.py for the format.\n"
+         "const astTable = `" (str/join "\n" lines) "\n`\n")))
+
 ;; ---- the command
 
 (let [[opts tables] (loop [as *command-line-args* opts {}]
@@ -543,7 +641,8 @@
       opts (update opts :work #(or % (str out "/work")))
       makers {"opcode" ["builtins_opcode_table.go" table-opcode] "errno" ["builtins_errno_table.go" table-errno]
               "fcntl" ["builtins_fcntl_table.go" table-fcntl] "socket" ["builtins_socket_table.go" table-socket]
-              "posix" ["builtins_posix_table.go" table-posix]}]
+              "posix" ["builtins_posix_table.go" table-posix] "slotdocs" ["slotdocs.go" table-slotdocs]
+              "ast" ["builtins_ast_table.go" table-ast]}]
   (.mkdirs (File. ^String (:work opts)))
   (doseq [t tables]
     (let [[f mk] (or (makers t) (fail! "no table " t ": " (str/join ", " (keys makers))))]

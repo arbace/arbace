@@ -144,7 +144,7 @@
 #                                  315 by the 3.15.2 oracle), each 3.15 one with its negative control (3.14.10's made into it);
 #                                  queue 265: also the five tables gen-tables makes, against tools/pyi/{errno,opcode,fcntl,socket,posix}_table.py;
 #                                  queue 290: builtins_textsig_table.go against tools/pyi/textsig_table.py (the oracle's __text_signature__)
-#                                  gen-tables [TABLE...] (queue 265): builtins_{opcode,errno,fcntl,socket,posix}_table.go made by
+#                                  gen-tables [TABLE...] (queue 265): builtins_{opcode,errno,fcntl,socket,posix}_table.go (queue 350: and slotdocs.go, builtins_ast_table.go) made by
 #                                  Arbace from pinned sources (tools/pyi/runtime_tables.ae on stage 0: the modules' own C preprocessed
 #                                  by repr/c's preprocessor against the CPython 3.14.10 and musl 1.2.6 tarballs, Alpine's pyconfig.h,
 #                                  Linux's and BlueZ's headers, tools/pyi/header-apks.sha256, and Go's syscall), gofmt'd, byte for
@@ -1973,10 +1973,12 @@ header_roots() {
 
 # the runtime tables Arbace makes (queue 265) and the sources the generator reads (CPython's tree: the negative controls'
 # copies hold these)
-RT_GEN_TABLES="opcode errno fcntl socket posix"
+RT_GEN_TABLES="opcode errno fcntl socket posix slotdocs ast"
+# rt_gen_file TABLE: the runtime's file a table is (queue 350: slotdocs is slotdocs.go)
+rt_gen_file() { case $1 in slotdocs) echo slotdocs.go ;; *) echo "builtins_$1_table.go" ;; esac; }
 RT_GEN_CPY="Include/opcode_ids.h Include/opcode.h Include/internal/pycore_opcode_metadata.h Include/internal/pycore_intrinsics.h
   Include/internal/pycore_ceval.h Python/intrinsics.c Python/ceval.c Modules/_opcode.c Lib/_opcode_metadata.py Modules/errnomodule.c
-  Modules/fcntlmodule.c Modules/socketmodule.c Modules/socketmodule.h Modules/posixmodule.c"
+  Modules/fcntlmodule.c Modules/socketmodule.c Modules/socketmodule.h Modules/posixmodule.c Objects/typeobject.c Parser/Python.asdl Include/patchlevel.h"
 
 # runtime_gen_tables [TABLE...] (queue 265): go/arbace/py's tables tools/pyi/*_table.py recorded from CPython's own modules,
 # made by Arbace (tools/pyi/runtime_tables.ae on stage 0: the modules' C sources preprocessed by repr/c's preprocessor
@@ -1993,14 +1995,17 @@ runtime_gen_tables() {
   [ ${#tables[@]} -gt 0 ] || read -ra tables <<< "$RT_GEN_TABLES"
   [ -d "$top/Lib" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
   musl=$(musl_src) || return 1
-  local hr; hr=$(header_roots) || return 1
+  # the header apks only for the tables that read them (queue 350: opcode, errno and slotdocs run without them)
+  local hr="" roots=()
+  case " ${tables[*]} " in *" fcntl "*|*" socket "*|*" posix "*)
+    hr=$(header_roots) || return 1; roots=(--root-amd64 "$hr/root-x86_64" --root-arm64 "$hr/root-aarch64") ;; esac
   rm -rf "$t"; mkdir -p "$t/out" "$t/ctl/out"; runtime_print "$t/src"
   gen() { (cd "$root" && ARBACE_PATH="$root" "$(arbace_exe)" "$root/tools/pyi/runtime_tables.ae" --cpython "$1" --musl "$2" \
-             --goroot "${ARBACE_GOROOT:-/root/tamago-go}" --root-amd64 "$hr/root-x86_64" --root-arm64 "$hr/root-aarch64" "$3" "${@:4}") \
+             --goroot "${ARBACE_GOROOT:-/root/tamago-go}" "${roots[@]}" "$3" "${@:4}") \
             2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; }; return "${PIPESTATUS[0]}"; }
   gen "$top" "$musl" "$t/out" "${tables[@]}" || return 1
   for tb in "${tables[@]}"; do
-    f=builtins_${tb}_table.go
+    f=$(rt_gen_file "$tb")
     tamago_go gofmt "$t/out/$f" > "$t/out/$f.fmt" || { rc=1; continue; }
     if cmp -s "$t/out/$f.fmt" "$t/src/py/$f"; then
       echo "runtime: $f is Arbace's from the pinned sources (tools/pyi/runtime_tables.ae $tb), byte for byte"
@@ -2017,9 +2022,11 @@ runtime_gen_tables() {
   sed -i 's/^#define F_ADD_SEALS\t1033$/#define F_ADD_SEALS\t1039/' "$m/include/fcntl.h"
   sed -i 's/^#define AI_NUMERICSERV  0x400$/#define AI_NUMERICSERV  0x800/' "$m/include/netdb.h"
   sed -i 's/^\t\t\[_SC_CLK_TCK\] = 100,$/\t\t[_SC_CLK_TCK] = 250,/' "$m/src/conf/sysconf.c"
+  sed -i 's|^\(           "__repr__(\$self, /)\\n--\\n\\n\)Return repr(self).")|\1Return the repr(self).")|' "$c/Objects/typeobject.c"
+  sed -i 's/^          | Return(expr? value)$/          | Return(expr value)/' "$c/Parser/Python.asdl"
   gen "$c" "$m" "$t/ctl/out" "${tables[@]}" >/dev/null || { echo "control not judged: runtime gen-tables: the generator failed on the controls' sources"; return 1; }
   for tb in "${tables[@]}"; do
-    f=builtins_${tb}_table.go
+    f=$(rt_gen_file "$tb")
     tamago_go gofmt "$t/ctl/out/$f" > "$t/ctl/out/$f.fmt" 2>/dev/null
     if cmp -s "$t/ctl/out/$f.fmt" "$t/src/py/$f"; then
       echo "control passed: runtime gen-tables $tb: a changed source made the committed table"; rc=1
