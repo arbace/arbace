@@ -255,7 +255,11 @@ At the merges, in order:
 3. PY7 (`mac/201-python-py7check`): `bin/pyi check --record` (the night's); remove `:until "PY7 ..."`; `bin/reap --record`.
    Since queue 321 steps 2 and 3 are one command, `bin/pyi records` (`make pyi-records`): the host checked to run the
    checkout's runtime, both records, the `:until` dropped, `bin/reap --record`, `bin/crops-score --record`
-   (PYTHON-SURVEY.md, "As built: 321").
+   (PYTHON-SURVEY.md, "As built: 321"). The two records are committed together, never the AOT record alone (queue 347's
+   DECISION 1 (a), the user 2026-11-18: alone it gives the eval cell the loop's 151 programs as its only check). When the
+   judge exits 3, class the methods, then `bin/pyi check --judge .tmp/repr-python/pyi/check/run --record` and, if the AOT
+   record needs a class, `bin/pyi check --aot --judge --record` (queue 353: the kept `runs.tsv` judged again), then
+   `bin/reap --record` and `bin/crops-score --record`, and commit both records with cells.edn, matrix.edn and scores.edn.
 4. R1 written: `bin/repr-python roundtrip --record`, `--text --record`, `lex-check --record`, `parse-check --full --record` on
    amd64; the read and print cells then count their passes (the "+" goes).
 5. GT9's planner changes, then the block of §2; `bin/gate --plan` and `bin/gate --audit pyi-aot-essential python-read-essential`.
