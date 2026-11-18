@@ -7,7 +7,8 @@
 ;; may extend (arbace.j2g.model/class-supers): its methods are promoted to a DynSub_ClassLoader.
 (in-ns 'go.arbace.jrt)
 
-(go/file "classloader.go")
+(go/file "classloader.go"
+  :imports [[sort "sort"] [strings "strings"] [sync "sync"]])
 
 (go/type ClassLoader_I
   "ClassLoader_I is java.lang.ClassLoader's class interface.\n"
@@ -16,7 +17,9 @@
     (LoadClass_String__Class ^{:tag (* Class)} [^{:tag (* String)} name])
     (LoadClass_String_Z__Class ^{:tag (* Class)} [^{:tag (* String)} name ^bool resolve])
     (GetParent__ClassLoader ^ClassLoader_I [])
-    (GetName__String ^{:tag (* String)} [])))
+    (GetName__String ^{:tag (* String)} [])
+    (GetDefinedPackage_String__Package ^{:tag (* Package)} [^{:tag (* String)} name])
+    (GetDefinedPackages__Package1 ^{:tag (* RefArray)} [])))
 
 (go/type ClassLoader
   "ClassLoader is java.lang.ClassLoader (abstract): a parent and a name.\n"
@@ -96,6 +99,210 @@ application loader.\n"
 
 (go/func ClassLoader_GetPlatformClassLoader__ClassLoader ^ClassLoader_I []
   platformLoader)
+
+;; ---------------------------------------------------------------------------------------
+;; java.lang.Package (round 54; jdk26u's java/lang/Package.java and ClassLoader's definePackage,
+;; getDefinedPackage, getDefinedPackages and getPackage): a name, the specification's and the
+;; implementation's title, version and vendor, the seal base. The closed world has no class loading,
+;; so a class's package is made on demand (Class.getPackage, Package.getPackage, of the loader the
+;; class reports: bootstrap or the application's) and a loader's own definePackage calls are kept
+;; by loader; no package-info class: a package has no annotations. Its superclass NamedPackage
+;; (package-private) is not here: Package's is Object.
+
+(go/type Package
+  "Package is java.lang.Package.\n"
+  (struct Object
+          ^{:tag (* String)} name
+          ^{:tag (* String)} specTitle ^{:tag (* String)} specVersion ^{:tag (* String)} specVendor
+          ^{:tag (* String)} implTitle ^{:tag (* String)} implVersion ^{:tag (* String)} implVendor
+          ^any sealBase))
+
+(go/var Package_class
+  (Define (addr (lit ClassInfo :Name "java.lang.Package" :Kind KindClass
+                     :Modifiers AccPublic :Super Object_class
+                     :Interfaces (lit (slice (* Class)) AnnotatedElement_class)
+                     :Go "arbace/jrt.Package"))))
+
+(go/var
+  [^{:tag sync/Mutex} packagesMu]
+  [^{:tag (map (* ClassLoader) (map string (* Package))) :doc "definedPackages: the packages a loader's definePackage defined, by loader and name.\n"}
+   definedPackages (make (map (* ClassLoader) (map string (* Package))))]
+  [^{:tag (map string (* Package)) :doc "classPackages: the packages made for the registry's classes, by name.\n"}
+   classPackages (make (map string (* Package)))])
+
+(go/func loaderKey ^{:tag (* ClassLoader)} [^ClassLoader_I l]
+  (when (== l nil) (return nil))
+  (.Self_ClassLoader l))
+
+(go/func registeredPackage
+  "registeredPackage is whether a class of package pkg (\"\" the unnamed package) is in the registry.\n"
+  ^bool [^string pkg]
+  (.RLock registryMu)
+  (defer (.RUnlock registryMu))
+  (range [n _ registry]
+    (let [i (strings/LastIndexByte n \.)]
+      (cond
+        (and (< i 0) (== pkg "")) (return true)
+        (and (>= i 0) (== (subslice n _ i) pkg) (not (strings/HasPrefix n "["))) (return true))))
+  false)
+
+(go/func classPackage
+  "classPackage is the package of the registry's classes named pkg: a loader's own when it defined one, else
+one made once.\n"
+  ^{:tag (* Package)} [^ClassLoader_I l ^string pkg]
+  (.Lock packagesMu)
+  (defer (.Unlock packagesMu))
+  (let [k (loaderKey l)]
+    (when (!= k nil)
+      (let [p (aget (aget definedPackages k) pkg)]
+        (when (!= p nil) (return p)))))
+  (let [p (aget classPackages pkg)]
+    (when (== p nil)
+      (set! p (addr (lit Package :name (Intern pkg))))
+      (aset classPackages pkg p))
+    p))
+
+(go/method GetPackage__Package
+  "GetPackage__Package is Class.getPackage: null for an array or a primitive type, else the package of the
+class's package name.\n"
+  ^{:tag (* Package)} [^{:tag (* Class)} c]
+  (when (or (.IsArray__Z c) (.IsPrimitive__Z c))
+    (return nil))
+  (classPackage (.GetClassLoader__ClassLoader c) (.String (.GetPackageName__String c))))
+
+(go/func Package_GetPackage_String__Package
+  "Package_GetPackage_String__Package is Package.getPackage (deprecated): the application loader's package
+of that name (a definePackage's, else one of the registry's classes), else null.\n"
+  ^{:tag (* Package)} [^{:tag (* String)} name]
+  (let [n (.String (NN name))]
+    (.Lock packagesMu)
+    (let [p (aget (aget definedPackages (loaderKey appLoader)) n)]
+      (.Unlock packagesMu)
+      (when (!= p nil) (return p)))
+    (when (not (registeredPackage n))
+      (return nil))
+    (classPackage appLoader n)))
+
+(go/func Package_GetPackages__Package1
+  "Package_GetPackages__Package1 is Package.getPackages: the packages of the registry's classes and those the
+application loader defined, by name.\n"
+  ^{:tag (* RefArray)} []
+  (let [names (make (map string bool))]
+    (.RLock registryMu)
+    (range [n _ registry]
+      (when (not (strings/HasPrefix n "["))
+        (let [i (strings/LastIndexByte n \.)]
+          (if (< i 0) (aset names "" true) (aset names (subslice n _ i) true)))))
+    (.RUnlock registryMu)
+    (.Lock packagesMu)
+    (range [n _ (aget definedPackages (loaderKey appLoader))]
+      (aset names n true))
+    (.Unlock packagesMu)
+    (let [ks (make (slice string) 0 (len names))]
+      (range [n _ names] (set! ks (append ks n)))
+      (sort/Strings ks)
+      (let [a (NewRefArray Package_class (conv int32 (len ks)))]
+        (range [i n ks] (aset (.-A a) i (classPackage appLoader n)))
+        a))))
+
+(go/method DefinePackage_String_String_String_String_String_String_String_URL__Package
+  "DefinePackage_String_String_String_String_String_String_String_URL__Package is ClassLoader.definePackage
+(protected): a new package of this loader; IllegalArgumentException when it defined one of that name already.
+The seal base, a java.net.URL (translated), is held as a value.\n"
+  ^{:tag (* Package)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name
+                       ^{:tag (* String)} specTitle ^{:tag (* String)} specVersion ^{:tag (* String)} specVendor
+                       ^{:tag (* String)} implTitle ^{:tag (* String)} implVersion ^{:tag (* String)} implVendor
+                       ^any sealBase]
+  (let [n (.String (NN name))
+        p (addr (lit Package :name name :specTitle specTitle :specVersion specVersion :specVendor specVendor
+                     :implTitle implTitle :implVersion implVersion :implVendor implVendor :sealBase sealBase))]
+    (.Lock packagesMu)
+    (defer (.Unlock packagesMu))
+    (let [m (aget definedPackages t)]
+      (when (== m nil)
+        (set! m (make (map string (* Package))))
+        (aset definedPackages t m))
+      (when (!= (aget m n) nil)
+        (panic (IllegalArgumentException_New_String name)))
+      (aset m n p))
+    p))
+
+(go/method GetDefinedPackage_String__Package
+  "GetDefinedPackage_String__Package is ClassLoader.getDefinedPackage: the package this loader defined by
+that name, else null; NullPointerException(\"name cannot be null\").\n"
+  ^{:tag (* Package)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name]
+  (when (== name nil)
+    (panic (NullPointerException_New_String (Str "name cannot be null"))))
+  (.Lock packagesMu)
+  (defer (.Unlock packagesMu))
+  (aget (aget definedPackages t) (.String name)))
+
+(go/method GetDefinedPackages__Package1
+  "GetDefinedPackages__Package1 is ClassLoader.getDefinedPackages: the packages this loader defined, by name.\n"
+  ^{:tag (* RefArray)} [^{:tag (* ClassLoader)} t]
+  (.Lock packagesMu)
+  (defer (.Unlock packagesMu))
+  (let [m (aget definedPackages t)
+        ks (make (slice string) 0 (len m))]
+    (range [n _ m] (set! ks (append ks n)))
+    (sort/Strings ks)
+    (let [a (NewRefArray Package_class (conv int32 (len ks)))]
+      (range [i n ks] (aset (.-A a) i (aget m n)))
+      a)))
+
+(go/method GetName__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-name p))
+(go/method GetSpecificationTitle__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-specTitle p))
+(go/method GetSpecificationVersion__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-specVersion p))
+(go/method GetSpecificationVendor__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-specVendor p))
+(go/method GetImplementationTitle__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-implTitle p))
+(go/method GetImplementationVersion__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-implVersion p))
+(go/method GetImplementationVendor__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-implVendor p))
+(go/method IsSealed__Z "IsSealed__Z is isSealed: whether a seal base was given.\n"
+  ^bool [^{:tag (* Package)} p] (!= (.-sealBase p) nil))
+(go/method HashCode__I "HashCode__I is Package.hashCode: the name's.\n"
+  ^int32 [^{:tag (* Package)} p] (.HashCode__I (.-name p)))
+(go/method ToString__String
+  "ToString__String is Package.toString: \"package NAME\", then \", TITLE\" and \", version V\" of the
+specification when not empty.\n"
+  ^{:tag (* String)} [^{:tag (* Package)} p]
+  (let [s (+ "package " (.String (.-name p)))]
+    (when (and (!= (.-specTitle p) nil) (!= (.String (.-specTitle p)) ""))
+      (set! s (+ s ", " (.String (.-specTitle p)))))
+    (when (and (!= (.-specVersion p) nil) (!= (.String (.-specVersion p)) ""))
+      (set! s (+ s ", version " (.String (.-specVersion p)))))
+    (Str s)))
+
+;; AnnotatedElement: no package-info class, no annotations
+(go/method Is_AnnotatedElement [^{:tag (* Package)} p])
+(go/method GetAnnotation_Class__Annotation ^Annotation [^{:tag (* Package)} p ^{:tag (* Class)} a]
+  (NN a)
+  nil)
+(go/method IsAnnotationPresent_Class__Z ^bool [^{:tag (* Package)} p ^{:tag (* Class)} a]
+  (AnnotatedElement_IsAnnotationPresent_Class__Z p a))
+(go/method GetAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p]
+  (annotationArray Annotation_class nil))
+(go/method GetDeclaredAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p]
+  (annotationArray Annotation_class nil))
+(go/method GetAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p ^{:tag (* Class)} a]
+  (AnnotatedElement_GetAnnotationsByType_Class__Annotation1 p a))
+(go/method GetDeclaredAnnotation_Class__Annotation ^Annotation [^{:tag (* Package)} p ^{:tag (* Class)} a]
+  (AnnotatedElement_GetDeclaredAnnotation_Class__Annotation p a))
+(go/method GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p ^{:tag (* Class)} a]
+  (AnnotatedElement_GetDeclaredAnnotationsByType_Class__Annotation1 p a))
+
+(go/method Ref ^any [^{:tag (* Package)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Package)} t] Package_class)
+(go/method Clone__O ^any [^{:tag (* Package)} t] (panic (CloneNotSupported t)))
+
+(go/func Package_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* Package) x)] ok))
+(go/func Package_Cast ^{:tag (* Package)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* Package) x)]
+    (when (not ok) (panic (ClassCast x Package_class)))
+    v))
+
+(go/func init []
+  (set! (.-IsInstance (.Info Package_class)) Package_InstanceOf))
 
 ;; ---------------------------------------------------------------------------------------
 ;; jdk.internal.foreign.Utils
