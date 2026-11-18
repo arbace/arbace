@@ -11706,3 +11706,37 @@ checked, 0 problems), `bin/crops-score --record` and `--judge --strict` (14 crop
 head that moved it), `bin/records-check` (9 pairs, 0 problems), `make check-makefile`, test/docs/claude-md-test.bash,
 test/gate/caches-test.bash (with `--coverage`), `bin/gate --plan` (52 steps) and `bin/gate --full --plan` (341 steps), every
 process under 1 GiB but bin/j2g-unit (1.2 GB: 160 pass, the 7 known failures of the base). Nothing built.
+
+## 2026-11-18: n-cpp-bd, C++'s by-design rows audited, two causes fixed natively (round 54)
+
+Branch `n-cpp-bd` (from mac/n-all `9cd2e4a96`). The brief's figures (read 1,182 by design, print 1,665, 96.8 without by design) are
+not n-all's: its matrix holds read 5,396 / 326 by design / 773 deferred and print 3,871 / 1 / 15 (completeness 0.9170, meant
+0.9338). test/cpp/divergences-read.edn has no by-design row left (gxx-rejects and modules-ts pass on clang's raw tokens since
+CP261 (a)); the read cell's 326 are the dg classes of test/cpp/divergences-dg.edn: gcc-dialect 175, gcc-own-rules 145, musl-libc 4,
+gxx-only-rules 2. The audit: the 326 files run on the own front end (`bin/repr-cpp dg --corpus dg-error --only LIST --front native`,
+one process under 4 GiB, 7 minutes), the 14 gcc-dialect files outside gomp/goacc/tm/contracts read by their options (each has
+-fpermissive or -fms-extensions), five gcc-own-rules files read (lookup/redecl1.C, init/enum1.C, template/array32.C,
+cpp0x/alias-decl-55.C, cpp0x/variadic-ex14.C, template/ttp16.C, cpp0x/inh-ctor3.C: each a GCC rule, option or limit). Sorted:
+- truly by design: gomp/goacc/tm/contracts (OpenMP, OpenACC, GNU TM, GCC's contracts), the -fpermissive files whose expectations
+  depend on the permissive downgrade (warn/pr12242.C: its `x = 10` lines are warnings there, errors by the standard), musl-libc,
+  gxx-only-rules and gcc-own-rules as queue 336 reviewed them;
+- misclassed, a stale record: gcc-dialect's eh/goto3.C, whose errors are [except.pre]/2's (-fpermissive leaves them), passes on the
+  own front end since round 52's jumps (n-cpp-read merged only its 12 rows); the print's one by design, samples/coroutine.cpp
+  (gxx-objects-location, a property of the g++ judge), sat in the "lists not recorded yet" source: the samples list had no own record;
+- fixable natively: gcc-dialect's ext/anon-struct3.C (-fms-extensions) and own-diag's ext/anon-struct2.C expect the standard's
+  "declaration does not declare anything" ([dcl.pre]/5, [class.mem.general]/3) at `typedef_A;` in a class: added to
+  arbace.repr.cpp.parse/parse-simple-decl, decl-specifiers naming a type that is no class, enumeration or elaborated specifier and no
+  declarator: an error in a class, a pedantic diagnostic elsewhere (GCC's pedwarn), a few lines. Left: template/spec32.C's `struct
+  B<0>;` on a template template parameter (elaborated, passes on clang), attrib45.C's attribute-only declaration (gcc-own-rules);
+  ext/integer-pack2.C's Sema crash (ClassCastException) and underlying_type7.C's long overflow, cpp0x/constexpr-recursion.C's stack
+  overflow: crashes of by-design files, their classes unchanged by a fix.
+Proved: the dg check on the own front end over the seven "does not declare anything" files and over the 28 own-passing files with
+a declaration-like `NAME;` line (28 of 28 still pass), roundtrip-corpus gxx-dg-essential --judge own (33 of 33) and samples (9 of
+9). Re-recorded rows only: test/cpp/check-dg-own-linux-amd64.edn's goto3.C, anon-struct2.C, anon-struct3.C to pass; goto3.C and
+anon-struct3.C out of gcc-dialect's :tests; own-diag-review.edn's anon-struct2.C :own :pass; a new own record of the samples list,
+test/repr/cpp/roundtrip-results/own/samples.edn (`roundtrip-corpus samples --judge own --corpus samples --record-results`, 9 pass).
+C++ read 5,396 / 326 / 773 to 5,399 / 324 / 772, print 3,871 / 1 / 15 to 3,880 / 0 / 15; completeness 0.9170 to 0.9172 (bin/reap
+--record, bin/crops-score --record). Taken (round 54): the samples list recorded under the own judge (alternative: drop
+coroutine.cpp's known class, which the clang judge still needs); the error in a class and a pedwarn elsewhere (alternative: an error
+everywhere, which -fpermissive and plain-mode files expecting a warning would contradict). The by-design cell cannot shrink much
+further without taking GCC's dialects, which CP399 (a) declined: the real lever is own-diag's 694 deferred.
