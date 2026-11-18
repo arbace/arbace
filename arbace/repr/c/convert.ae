@@ -983,6 +983,8 @@
             (list kw tag))]
     (-> f (with-attrs :c/attrs (g s :AttributeSpecifierList)) (with-attrs :c/end-attrs (g s :AttributeSpecifierList2)))))
 
+(declare list-with-dirs)
+
 (defn enum-form
   "An EnumSpecifier's type form (§5.5)."
   [e]
@@ -991,12 +993,12 @@
         under (:type us)
         f (if (= (cs e) :EnumSpecifierDef)
             (Lv (concat ['enum] (when tag [tag])
-                        [(mapv (fn [l]
-                                 (let [en (g l :Enumerator)
-                                       nm (ident-tok (g en :Token))
-                                       x (if (= (cs en) :EnumeratorExpr) (V [nm (expr (g en :ConstantExpression))]) nm)]
-                                   (at en (with-attrs x :c/attrs (g en :AttributeSpecifierList)))))
-                               (chain (g e :EnumeratorList) :EnumeratorList))]))
+                        [(list-with-dirs (g e :EnumeratorList) (chain (g e :EnumeratorList) :EnumeratorList) :EnumeratorList (g e :Token4)
+                                         (fn [l]
+                                           (let [en (g l :Enumerator)
+                                                 nm (ident-tok (g en :Token))
+                                                 x (if (= (cs en) :EnumeratorExpr) (V [nm (expr (g en :ConstantExpression))]) nm)]
+                                             [(at en (with-attrs x :c/attrs (g en :AttributeSpecifierList)))])))]))
             (list 'enum tag))
         f (if under (addm f {:c/underlying under}) f)
         ;; `enum e : const;`: no type specifier in the underlying type (gcc's error, the checker's)
@@ -1184,7 +1186,7 @@
                   :PostfixExpressionInc (L 'inc! (expr (g n :PostfixExpression)))
                   :PostfixExpressionDec (L 'dec! (expr (g n :PostfixExpression)))
                   :PostfixExpressionComplit
-                  (let [f (Lv (list* 'compound-lit (type-name-form (g n :TypeName)) (init-form (g n :InitializerList) true)))
+                  (let [f (Lv (list* 'compound-lit (type-name-form (g n :TypeName)) (init-form (g n :InitializerList) (g n :Token4))))
                         scs (keep #(storage-keys (cs %)) (g n :StorageClassSpecifiers))]
                     (if (seq scs) (addm f (zipmap scs (repeat true))) f))
                   (refuse :expression (str "postfix " c) n))
@@ -1230,28 +1232,94 @@
               :DesignatorField2 (keyword (tsrc (g d :Token))))))
         (chain dl :DesignatorList)))
 
-(declare initializer)
+(declare initializer placed-at directive-lines)
+
+;; CS329 (a): the directives inside an initializer list or an enumerator list (quickjs's `#define DEF(id, size) { #id, size },`
+;; `#include "libregexp-opcode.h"` `#undef DEF` inside a table), elements of the list's forms (SPEC §9.2)
+
+(defn elem-node
+  "CS329 (a): a list element's node, a link `l` of an InitializerList or an EnumeratorList without its link to the next
+  (`next-key`) and its preceding comma, its extent registered (one node a link, cached): the item place-directives! places a
+  directive before, whose extent the converter tests (a link's own extent runs to the list's end, the comma's offset begins it)."
+  [^HashMap l next-key]
+  (let [^IdentityHashMap em (cx :elems)]
+    (or (.get em l)
+        (let [w (doto (HashMap. l) (.remove next-key) (.remove :Token) (.put :c/elem true))
+              r (aclone no-range)]
+          (doseq [c (children w)]
+            (cond (instance? PTok c) (merge-range! r (tok-range c))
+                  (instance? HashMap c) (merge-range! r (rng c))))
+          (.put ^IdentityHashMap (cx :ranges) w r)
+          (.put em l w)
+          w))))
+
+(defn- list-with-dirs
+  "CS329 (a): the element forms of a list (the links `ls` of `owner`, an InitializerList's or an EnumeratorList's head; `fs-of`
+  a link's forms, a vector), the directives place-directives! placed before an element (or after the last) among them. An
+  element whose tokens all come from a file an #include of the list brought in is the directive's (the print writes the
+  #include, as a body's, CS275 (a)); ci's read (*include-inside*) places none and keeps them. A directive form records the
+  main file's commas around it, which the print writes (a header's elements may bring their own): :c/comma-before, a comma
+  between the element before it and it; :c/comma-after, a comma between it and what follows (an element, another directive,
+  the list's end). `trail` is the list's trailing comma token, when written."
+  [owner ls next-key trail fs-of]
+  (let [^HashMap m (when-let [^IdentityHashMap pl (cx :placed)] (when owner (.get pl owner)))]
+    (if (empty? m)
+      (vec (mapcat fs-of ls))
+      (let [;; the commas the main file's text holds: an #embed's (its elements' separators, its prefix's and suffix's, made
+            ;; on the directive's line) are its elements', printed with them
+            ^java.util.TreeMap dl (or @(cx :dir-lines)
+                                      (reset! (cx :dir-lines)
+                                              (let [m (java.util.TreeMap.)]
+                                                (doseq [d (directive-lines)] (.put m (Long/valueOf (long (:off d))) (Long/valueOf (long (or (:end d) Long/MAX_VALUE)))))
+                                                m)))
+            on-dir? (fn [^long po] (when-let [e (.floorEntry dl (Long/valueOf po))] (< po (long (.getValue e)))))
+            commas (vec (sort (keep (fn [t] (when (main-tok? t) (let [po (.-po ^PTok t)] (when-not (on-dir? po) po))))
+                                    (concat (map #(g % :Token) ls) [trail]))))
+            comma-in? (fn [^long lo ^long hi] (boolean (some #(and (<= lo (long %)) (< (long %) hi)) commas)))
+            out (ArrayList.)
+            n (count ls)]
+        (loop [i 0 prev nil prev-end -1 last-dir -1]
+          (let [ds (placed-at owner i)
+                [prev prev-end last-dir]
+                (reduce (fn [[prev prev-end last-dir] [off df]]
+                          (let [off (long off)]
+                            (when (>= (long last-dir) 0)
+                              (when (comma-in? prev-end off) (.set out (int last-dir) (vary-meta (.get out (int last-dir)) assoc :c/comma-after true))))
+                            (.add out (if (and (= prev :el) (comma-in? prev-end off)) (vary-meta df assoc :c/comma-before true) df))
+                            [:dir off (dec (.size out))]))
+                        [prev prev-end last-dir] ds)]
+            (if (< i n)
+              (let [l (nth ls i) w (elem-node l next-key)]
+                (if (and (not *include-inside*) (has-other? w) (not (has-main? w)))
+                  (recur (inc i) prev prev-end last-dir)
+                  (do (when (and (>= (long last-dir) 0) (comma-in? prev-end (min-po w)))
+                        (.set out (int last-dir) (vary-meta (.get out (int last-dir)) assoc :c/comma-after true)))
+                      (.addAll out ^java.util.Collection (fs-of l))
+                      (recur (inc i) :el (max-end w) -1))))
+              (do (when (and (>= (long last-dir) 0) (comma-in? prev-end Long/MAX_VALUE))
+                    (.set out (int last-dir) (vary-meta (.get out (int last-dir)) assoc :c/comma-after true)))
+                  (vec out)))))))))
 
 (defn init-form
-  "An InitializerList's elements (designations before their values)."
-  [il _]
-  (vec (mapcat (fn [l]
-                 (let [v (initializer (g l :Initializer))]
-                   (if-let [dn (g l :Designation)]
-                     (let [ds (designators (g dn :DesignatorList))
-                           field2 (= :DesignatorField2 (cs (g (g (g dn :DesignatorList) :Designator) :Designator)))]
-                       (if (and (= 1 (count ds)) (keyword? (first ds)))
-                         [(first ds) v]
-                         [(Lv (cons 'at ds)) v]))
-                     [v])))
-               (chain il :InitializerList))))
+  "An InitializerList's elements (designations before their values), the directives placed among them (CS329 (a)); `trail`
+  the list's trailing comma token."
+  [il trail]
+  (list-with-dirs il (chain il :InitializerList) :InitializerList trail
+                  (fn [l]
+                    (let [v (initializer (g l :Initializer))]
+                      (if-let [dn (g l :Designation)]
+                        (let [ds (designators (g dn :DesignatorList))]
+                          (if (and (= 1 (count ds)) (keyword? (first ds)))
+                            [(first ds) v]
+                            [(Lv (cons 'at ds)) v]))
+                        [v])))))
 
 (defn initializer [n]
   (recovered n
     (fn []
       (case (cs n)
         :InitializerExpr (expr (g n :AssignmentExpression))
-        :InitializerInitList (at n (Lv (cons 'init (init-form (g n :InitializerList) false))))))))
+        :InitializerInitList (at n (Lv (cons 'init (init-form (g n :InitializerList) (g n :Token2)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Declarations (§6)
@@ -1807,8 +1875,9 @@
   "Places the main file's active directives (those the preprocessor executed: the layer's offsets, and
   every directive of an executed conditional family) between the items of the statement lists of `tu`
   (the translation unit's top level and the function bodies): (cx :placed) maps a list's owner to
-  {item-index [forms]}. A conditional family that does not fall between the items of one list is left
-  out (:full keeps it); so is any directive inside an item."
+  {item-index [forms]}; since CS329 (a) the initializer lists and the enumerator lists too, between their elements (an owner
+  the list's head, list-with-dirs; not ci's read). A conditional family that does not fall between the items of one list is
+  left out (:full keeps it); so is any directive inside an item."
   [tu-items layer]
   (let [dls (directive-lines)
         executed (set (keep #(when (and (= (:file %) (cx :main-name)) (not= (:directive %) "enter")) (:off %)) layer))
@@ -1890,9 +1959,25 @@
                   (when-not (.isEmpty stack)
                     (let [x (.pop stack)]
                       (when (instance? HashMap x)
-                        (if (= (nt x) "CompoundStatement")
-                          (.add out [x (vec (remove #(func-injected? % (g x :Token)) (map #(g % :BlockItem) (chain (g x :BlockItemList) :BlockItemList))))])
-                          (doseq [c (children x)] (when (instance? HashMap c) (.push stack c))))))
+                        (let [;; CS329 (a): an initializer list's or an enumerator list's head, its elements and the node of its
+                              ;; braces (the extent a directive inside it falls in: the elements may all be a header's); not ci's
+                              ;; read (*include-inside*), whose lists keep their included elements
+                              [lk head] (when-not *include-inside*
+                                          (case (nt x)
+                                            "Initializer" (when (= (cs x) :InitializerInitList) [:InitializerList (g x :InitializerList)])
+                                            "PostfixExpression" (when (= (cs x) :PostfixExpressionComplit) [:InitializerList (g x :InitializerList)])
+                                            "EnumSpecifier" (when (= (cs x) :EnumSpecifierDef) [:EnumeratorList (g x :EnumeratorList)])
+                                            nil))]
+                          (cond
+                            (= (nt x) "CompoundStatement")
+                            (.add out [x (vec (remove #(func-injected? % (g x :Token)) (map #(g % :BlockItem) (chain (g x :BlockItemList) :BlockItemList))))])
+                            head
+                            (do (.add out [head (let [^IdentityHashMap li (cx :list-items)]
+                                                  (or (.get li head)
+                                                      (let [v (mapv #(elem-node % lk) (chain head lk))] (.put li head v) v)))
+                                           x])
+                                (doseq [c (children x)] (when (and (instance? HashMap c) (not (identical? c head))) (.push stack c))))
+                            :else (doseq [c (children x)] (when (instance? HashMap c) (.push stack c)))))))
                     (recur)))
                 (vec out)))
             (place-in [owner items ds]
@@ -1901,7 +1986,7 @@
                       inside (first (filter #(and (has-main? %) (<= (min-po %) off) (< off (max-end %))) items))]
                   (if inside
                     (let [subs (nested inside)
-                          sub (first (filter (fn [[o _]] (and (has-main? o) (<= (min-po o) off) (< off (max-end o)))) subs))]
+                          sub (first (filter (fn [[o _ ext]] (let [e (or ext o)] (and (has-main? e) (<= (min-po e) off) (< off (max-end e))))) subs))]
                       (if sub
                         (place-in (first sub) (second sub) [d])
                         ;; between a statement's labels and what they label (c23-named-loops-1.c's `g: h: #pragma GCC unroll 2
@@ -2140,7 +2225,7 @@
       (binding [*cx* {:ranges ranges :main-file main-file :main-name main-name :main-bytes main-bytes :std std
                       :pieces parse/strlit-pieces :piece-toks parse/strlit-toks
                       :fn-macros (macro-table (:layer r) main-name) :typedefs (atom {}) :claimed (HashSet.)
-                      :unit-of-off unit-of-off :line-starts (line-starts main-bytes)
+                      :unit-of-off unit-of-off :line-starts (line-starts main-bytes) :elems (IdentityHashMap.) :list-items (IdentityHashMap.) :dir-lines (atom nil)
                       ;; CS290 (a): the re-entered copy's pragmas, [seq [text ...]] in seq order (the parser's :pragmas), placed by
                       ;; block-items before the item of the first token after them (ci's read)
                       ;; CS299 (a): a TreeMap seq -> [[text entry] ...], every included file's pragmas (pp's PRAGMAS), taken by range
@@ -2153,7 +2238,8 @@
               eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))
               ;; CS275 (a): a declaration whose other files' tokens all come from files it includes inside it is the main file's
               ;; when each such #include stands between the items of a statement list (the print writes it there, the
-              ;; included items left to it: block-items); judged once the directives are placed (split-later)
+              ;; included items left to it: block-items), or since CS329 (a) between the elements of an initializer or an
+              ;; enumerator list (list-with-dirs); judged once the directives are placed (split-later)
               split-later (ArrayList.)
               _ (doseq [ed eds]
                   (when (and (has-other? ed) (has-main? ed))
