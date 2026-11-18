@@ -138,6 +138,7 @@
 (def ^:private ^:const DECLTYPES 13) ; G4: decltype's operands parsed ({text-without-spaces node}, a HashMap; *full-headers* only)
 (def ^:private ^:const GATTRS 15)  ; CP294 (a): the main file's GNU attributes clang does not know, by their first token (a HashMap)
 (def ^:private ^:const DIAGS 14)   ; CX12: the main file's syntax errors, one a decline: [offset why] in an ArrayList (arbace.repr.cpp.diag)
+(def ^:private ^:const SPECS 16)   ; queue 380: the explicit specializations defined, by their primary's scope (an IdentityHashMap) and arguments' text
 (def ^:private ^:const PATTRS 10)   ; the attributes the ptr-operators of the declarator being parsed carried     ; the template header the next declaration is under: its parameters' names (for the injected class name)
 
 (defn- stv [^P p k] (aget ^objects (.-st p) (int k)))
@@ -754,7 +755,7 @@
                           (do (seek! p b) :ok)))
       :else :ok)))
 
-(declare tp-declarator! tp-param-clause! is-type-id? is-function-declarator?)
+(declare spec-of-qualifier tp-declarator! tp-param-clause! is-type-id? is-function-declarator?)
 
 (defn- tp-fn-declarator!
   "TryParseFunctionDeclarator, the ( consumed."
@@ -2814,7 +2815,7 @@
         lastx (long-array 1)
         _ (aset lastx 0 (last-ix p))
         ;; after a qualified declarator-id the declarator's rest is in its class's scope (clang's DeclScopeObj)
-        qcls (when (and name (:q name)) (let [e (:q name)] (when (and (type-ent? e) (:scope e)) e)))
+        qcls (when (and name (:q name)) (let [e (:q name)] (when (and (type-ent? e) (:scope e)) (spec-of-qualifier p name e))))
         suffixes
         (fn []
              (loop [out []]
@@ -3046,6 +3047,13 @@
                   (let [old (sc/find-in (sc/decl-scope (scope p)) nm true)]
                     (when (and (:incomplete old) (:scope old) (not (identical? (:scope old) cs))) (sc/add-base! (:scope old) cs))))
               _ (when (and nm simple (nil? (:args lp))) (declare! p ent))
+              ;; (queue 380: an explicit specialization's entity, by its primary's scope and its arguments' text: its
+              ;; members defined outside it are looked up in its scope, spec-of-qualifier)
+              _ (when (and nm simple (:args lp) hdr (zero? (long (:n hdr))))
+                  (when-let [ps (:scope (sc/lookup (scope p) nm))]
+                    (let [^java.util.IdentityHashMap m (stv p SPECS)
+                          ^HashMap byargs (or (.get m ps) (let [h (HashMap.)] (.put m ps h) h))]
+                      (.put byargs (mapv #(arg-str p %) (:args lp)) ent))))
               _ (when nm (sc/declare! cs (cond-> (assoc ent :tag false)
                                           tmpl (assoc :inj (:names hdr))
                                           ;; (a parameter without a name, `template <typename, typename T2> struct bs`: no
@@ -3197,10 +3205,21 @@
           out (conj out (merge {:kind "CXXCtorInitializer" :inner [x]} who))]
       (if (accept! p ",") (recur out) out))))
 
+(defn- spec-of-qualifier
+  "queue 380 (W3d): the entity of the explicit specialization a qualified declarator-id's qualifier names, X<char> of
+  `X<char>::f`, when one was defined ([temp.expl.spec]: its members' definitions are looked up in the specialization's
+  scope, not the primary's: __basic_file<char>::open's `__basic_file*`, ctype<wchar_t>'s __wmask_type), else `e`."
+  [^P p qn e]
+  (let [qp (last (butlast (:parts qn)))
+        ^java.util.IdentityHashMap m (stv p SPECS)]
+    (or (when (and m (:args qp) (:scope e))
+          (when-let [^HashMap byargs (.get m (:scope e))] (.get byargs (mapv #(arg-str p %) (:args qp)))))
+        e)))
+
 (defn- class-of-qualifier
   "The class entity a qualified declarator-id's qualifier names (an out-of-class member's), or nil."
-  [qn]
-  (let [e (:q qn)] (when (type-ent? e) e)))
+  [^P p qn]
+  (let [e (:q qn)] (when (type-ent? e) (spec-of-qualifier p qn e))))
 
 (defn- with-late*
   "Runs f with the class being defined's complete scope (its pre-skim's) looked up first: a member function's body, a
@@ -3267,7 +3286,7 @@
     (:conv lp) "CXXConversionDecl"
     (:friend ds) "FunctionDecl"
     (= ctx :member) "CXXMethodDecl"
-    (class-of-qualifier qn) "CXXMethodDecl"
+    (class-of-qualifier p qn) "CXXMethodDecl"
     (and (:q qn) (some :args (butlast (:parts qn)))) "CXXMethodDecl"
     :else "FunctionDecl"))
 
@@ -3461,7 +3480,7 @@
                        [(.get ^HashMap (sema/info (:ent (class-ctx p))) :id) smk])
                   e1 (if (or pure dflt del) (last-ix p) ev)
                   body? (or (is? p "{") (is? p "try") (and (is? p ":") (not pure) (not dflt) (not del)))
-                  cls (class-of-qualifier qn)
+                  cls (class-of-qualifier p qn)
                   ;; (cpp-s8: a function template's name declared before its body, [basic.scope.pdecl]/1: its point of
                   ;; declaration is after its declarator, so the body names it -- qualified, <ranges_algobase.h>'s
                   ;; `ranges::__copy_or_move<_IsMove>(...)` in __copy_or_move's own body, which had read as `(a < b) > (...)`
@@ -4521,6 +4540,21 @@
           (recur (inc i) tf))))
     (.toString sb)))
 
+(defn- specs-of
+  "queue 380: the explicit specializations' registry (SPECS) as the caches keep it, [[primary-scope args entity] ...]: its
+  scopes the state's own objects, written with their sharing."
+  [^P p]
+  (vec (for [^java.util.Map$Entry e (.entrySet ^java.util.IdentityHashMap (stv p SPECS))
+             ^java.util.Map$Entry a (.entrySet ^HashMap (.getValue e))]
+         [(.getKey e) (.getKey a) (.getValue a)])))
+
+(defn- specs-from!
+  "queue 380: the registry read back from a cache's state (a state written before it has none: no specialization known)."
+  [^P p specs]
+  (let [^java.util.IdentityHashMap m (stv p SPECS)]
+    (doseq [[ps args ent] specs]
+      (let [^HashMap h (or (.get m ps) (let [h (HashMap.)] (.put m ps h) h))] (.put h args ent)))))
+
 (defn- skim-headers!
   "The leading run of header tokens skimmed (decl-seq's skim), its state taken from the header-skim cache when it holds
   it (arbace.repr.cpp.skim, keyed by the run's tokens and `parts`), else written into it: :hit, :stored or nil."
@@ -4542,13 +4576,13 @@
             st (try (skim/read-state path) (catch Exception _ nil))
             _ (when (System/getenv "REPR_CPP_TIME") (binding [*out* *err*] (println (format "repr/cpp native: the skim cache read %.2f s" (/ (- (System/nanoTime) t0) 1e9)))))]
         (if st
-          (let [[root mt i] st]
-            (st! p SCOPE root) (st! p ROOT root) (st! p MTMPL mt) (seek! p (long i))
+          (let [[root mt i specs] st]
+            (st! p SCOPE root) (st! p ROOT root) (st! p MTMPL mt) (seek! p (long i)) (specs-from! p specs)
             :hit)
           (let [root (stv p ROOT)]
             (run)
             (when (and (identical? root (stv p SCOPE)) (nil? (stv p CLS)) (nil? (stv p THDR)))
-              (try (skim/write-state path [root (stv p MTMPL) (ix p)]) :stored
+              (try (skim/write-state path [root (stv p MTMPL) (ix p) (specs-of p)]) :stored
                    (catch Exception e
                      (binding [*out* *err*] (println "repr/cpp: the header-skim cache not written:" (ex-message e)))
                      nil)))))))))
@@ -4577,14 +4611,14 @@
             _ (when (System/getenv "REPR_CPP_TIME")
                 (binding [*out* *err*] (println (format "repr/cpp native: the full-header key %.2f s, cache read %.2f s" (/ (- t1 t0) 1e9) (/ (- (System/nanoTime) t1) 1e9)))))]
         (if st
-          (let [[root mt i nodes ^HashMap dts unnamed] st]
-            (st! p SCOPE root) (st! p ROOT root) (st! p MTMPL mt) (seek! p (long i))
+          (let [[root mt i nodes ^HashMap dts unnamed specs] st]
+            (st! p SCOPE root) (st! p ROOT root) (st! p MTMPL mt) (seek! p (long i)) (specs-from! p specs)
             (.putAll ^HashMap (stv p DECLTYPES) dts) (st! p UNNAMED unnamed)
             [:hit nodes])
           (let [root (stv p ROOT)
                 nodes (run)]
             [(when (and (identical? root (stv p SCOPE)) (nil? (stv p CLS)) (nil? (stv p THDR)))
-               (try (skim/write-state path [root (stv p MTMPL) (ix p) nodes (stv p DECLTYPES) (stv p UNNAMED)]) :stored
+               (try (skim/write-state path [root (stv p MTMPL) (ix p) nodes (stv p DECLTYPES) (stv p UNNAMED) (specs-of p)]) :stored
                     (catch Exception e
                       (binding [*out* *err*] (println "repr/cpp: the full-header cache not written:" (ex-message e)))
                       nil)))
@@ -4639,9 +4673,9 @@
   ([toks main src year gnu] (parse-unit toks main src year gnu nil))
   ([^objects toks ^String main ^String src ^long year gnu cache-parts]
   (let [root (sc/new-scope :ns nil {:k :ns :name ""})
-        p (P. toks (alength toks) (long-array 1) (object-array 16) main src year gnu)]
+        p (P. toks (alength toks) (long-array 1) (object-array 17) main src year gnu)]
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
-    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.)) (st! p DIAGS (ArrayList.)) (st! p GATTRS (HashMap.))
+    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.)) (st! p DIAGS (ArrayList.)) (st! p GATTRS (HashMap.)) (st! p SPECS (java.util.IdentityHashMap.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
     (lexical-diags! p)
     ;; clang's builtin templates (BuiltinTemplateDecl: __type_pack_element<N, T...>, __make_integer_seq<Seq, T, N>), names in

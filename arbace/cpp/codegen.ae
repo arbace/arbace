@@ -932,9 +932,12 @@
 (defn- fp-const [t ^double v & [lit]]
   (when (#{:float16 :float128} (abi/bn (abi/unq t))) (fail :codegen "a constant of " (name (abi/bn (abi/unq t)))))
   (if (= :float (abi/bn (abi/unq t)))
-    (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (float v)))))))
+    (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (.floatValue (Double/valueOf v))))))))
     (if (= :ldouble (abi/bn (abi/unq t)))
-      (list 'fp (fp80-hex (if lit lit (java.math.BigDecimal. v))))
+      ;; (queue 380: an infinity, x86's 80-bit one with its integer bit, and the default quiet NaN, APFloat's)
+      (list 'fp (cond (Double/isNaN v) "f0x7FFFC000000000000000"
+                      (Double/isInfinite v) (if (pos? v) "f0x7FFF8000000000000000" "f0xFFFF8000000000000000")
+                      :else (fp80-hex (if lit lit (java.math.BigDecimal. v)))))
       (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits v))))))))
 
 (defn- int-cast! [from to v]
@@ -1375,6 +1378,14 @@
             (val! (list 'select ['i1 z] ['i32 (emit-rv fb)] ['i32 r])))
           r)))))
 
+(defn- emit-fmath!
+  "queue 380: a rounding builtin as clang's CGBuiltin writes it, LLVM's intrinsic of the operand's type (llvm.floor.f64)."
+  [e]
+  (let [lt (abi/llvm-type (:ty e)) x (emit-rv (:e e))
+        nm (str "llvm." (:fn e) "." ({'float "f32" 'double "f64" 'x86_fp80 "f80"} lt))]
+    (declare! nm lt [lt] :nounwind true)
+    (val! (list 'call lt (gsym nm) [[lt x]]))))
+
 (defn emit-rv
   "The operand of the scalar prvalue `e`."
   [e]
@@ -1567,6 +1578,7 @@
     :clear-padding (emit-clear-padding! e)
     :atomic (emit-atomic! e)
     :bitop (emit-bitop! e)
+    :fmath (emit-fmath! e)
     ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
     ;; area while gp_offset <= 40 (fp_offset <= 160), else from the overflow area
     :va-arg (let [t (:ty e)
