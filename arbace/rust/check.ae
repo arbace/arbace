@@ -227,6 +227,52 @@
   [aot kind arch]
   (str "test/rust/check" (if aot "-aot" "") "-" kind "linux-" arch ".edn"))
 
+(defn inputs-file
+  "The level's case inputs for ARCH (RFP53 (a), RIND5 (a)): test/rust/{eval,aot}-inputs-linux-ARCH.edn, named as record-file names
+  the record (queue 354: an arm64 --record never over amd64's, the ones test/crops/independence.edn's :case-inputs reads)"
+  [aot arch]
+  (str "test/rust/" (if aot "aot" "eval") "-inputs-linux-" arch ".edn"))
+
+(defn- inputs-row-text [[id m]]
+  (str "[" (pr-str id) " {" (str/join " " (for [[k v] (sort-by key m)] (str k " " (pr-str v)))) "}]"))
+
+(defn write-case-inputs
+  "RIND5 (a) (RUST-90's S6), queue 354: the cell's case inputs C1-C7 (test/crops/crops.edn's :own-inputs :rust) of the run in WORK,
+  one row a program of each corpus's WORK/CORPUS/list.tsv: C1 :own when WORK/CORPUS/front.tsv (a --front own run's, bin/rust-front
+  rsi-build) says own, C5 :own when WORK/CORPUS/shims.tsv (RSI_SHIM=own) says own, C7 :own when ARBACE_C_HOST is Arbace's c/target;
+  the rest the toolchain's products the leg still consumes. The rows of the run's CORPORA replace theirs and the others are kept, as
+  the record's (run-judge --record, so that the samples and the synthetic corpus may be recorded one after the other); the file the
+  host's (inputs-file). Written by run-judge --record when the run passes."
+  [work corpora aot arch]
+  (let [inf (inputs-file aot arch)
+        prefixes (map #(get corpus-prefix % %) corpora)
+        in? (fn [^String id] (some #(str/starts-with? id (str % "/")) prefixes))
+        c7 (if (str/ends-with? (str (System/getenv "ARBACE_C_HOST")) "/c/target") :own "test/c/host (gcc's recorded host)")
+        col2 (fn [^String f k] (some (fn [r] (when (= k (first r)) (second r))) (tsv f)))
+        new (for [c corpora
+                  l (lines? (str work "/" c "/list.tsv"))
+                  :let [id (first (str/split l #"\u001f" -1))
+                        k (key-of id)
+                        own1 (= "own" (col2 (str work "/" c "/front.tsv") id))]]
+              [id (array-map
+                    :c1 (if own1 :own (str "pack: test/rust/ir/" c ".tar.xz (rustc's -O0 IR)"))
+                    :c2 (if own1 "the pack rust-front-rsi (rustc's bodies of std's instances)" "rustc's: std's instances in the program's IR")
+                    :c3 (if own1 "the facts mono refuses from rust-front-rsi" "rustc's monomorphization (the IR pack)")
+                    :c4 (if own1 "the helper's std-iface and std-crates-rsi.edn (rustc's rlibs)" "rustc's (the IR pack)")
+                    :c5 (if (= "own" (col2 (str work "/" c "/shims.tsv") k)) :own "rustc's shim.ll (the IR pack)")
+                    :c6 "std's IR (Cargo, rustc, clang; test/rust/runtime/ir.sha256)"
+                    :c7 c7)])
+        old (let [f (first (read-all-forms inf))] (if (vector? f) f []))
+        all (sort-by first (concat (remove (comp in? first) old) new))
+        date (.format (java.time.LocalDate/now (java.time.ZoneOffset/UTC)) java.time.format.DateTimeFormatter/ISO_LOCAL_DATE)]
+    (spit inf (str ";; The " (if aot "aot" "eval") " cell's cases' inputs, RFP53 (a) (the user, 2026-11-10; doc/CROPS-SCORE.md): [ID {INPUT VALUE ...}], one row a case\n"
+                   ";; bin/rsi check --record ran (RIND5 (a): written by it, " date "; queue 354: the run's corpora's rows replaced, the others kept),\n"
+                   ";; the inputs C1-C7 of test/crops/crops.edn's :own-inputs :rust;\n"
+                   ";; :own when the input is Arbace's own, else the product of a toolchain the case consumes. A case scores 1 in the stage when\n"
+                   ";; all seven are :own, else 0.5 (RFP43 (a)). Read with the Clojure reader.\n[\n"
+                   (apply str (map #(str (inputs-row-text %) "\n") all)) "]\n"))
+    (println (str "rsi check: the case inputs written into " inf " (" (count new) " rows of " (str/join "," corpora) ", " (count all) " in all)"))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; The tests' own verdicts (rust-90; the user's decision of 2026-11-07: a test's own verdict is a judge no toolchain made).
 ;; Ported from compiletest, rustc 1.99.1's src/tools/compiletest/src/runtest/ui.rs (run_ui_test's run of the compiled test):
@@ -380,6 +426,7 @@
         (println "recorded" recf "and" timesf)))
     (let [fids (set (map first failing))
           failing (concat failing (remove #(fids (first %)) ((resolve 'arbace.c.run/report-record) cmp)) cfail)]
+      (when (and record (empty? failing)) (write-case-inputs work corpora aot arch))
       (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
       (System/exit (if (seq failing) 1 0)))))
 
