@@ -1,0 +1,78 @@
+;; Go-build variant of sun.rmi.server.Util (J2G-SPEC §4.6): read by j2g only. RMI finds the stubs and skeletons of
+;; its own remote objects by name, Class.forName(NAME + "_Stub") and "_Skel" (createStub, createSkeleton,
+;; stubClassExists): a name that is not a constant roots nothing in j2g's closed world (J2G-SPEC §4.1), so the
+;; distributed collector's DGCImpl_Stub and DGCImpl_Skel and the registry's RegistryImpl_Skel were not in the build and
+;; every export of a remote object failed ("ClassNotFoundException: sun.rmi.transport.DGCImpl_Stub": AddrInUse,
+;; GcDuringExport; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54), the fourth pass"). The
+;; added rmiClass names java.rmi's own four by their class literals, which root them, and asks Class.forName for any
+;; other (a program's or a test's rmic stubs), with initialize false as jdk26u's calls; the three methods are
+;; jdk26u's with that call in place of Class.forName (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with
+;; the Classpath Exception: LICENSE.md). RegistryImpl_Stub is rooted already (test/jrt/derive.ae's MarshalInputStream);
+;; it is named here too. The rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'sun.rmi.server)
+
+(j2g/variant Util
+  (j2g/add
+    (method ^:private ^:static rmiClass :throws [ClassNotFoundException] ^{:tag (Class ?)} [^String name
+                                                                                          ^ClassLoader loader]
+      (cond (.equals "sun.rmi.transport.DGCImpl_Stub" name) sun.rmi.transport.DGCImpl_Stub
+            (.equals "sun.rmi.transport.DGCImpl_Skel" name) sun.rmi.transport.DGCImpl_Skel
+            (.equals "sun.rmi.registry.RegistryImpl_Stub" name) sun.rmi.registry.RegistryImpl_Stub
+            (.equals "sun.rmi.registry.RegistryImpl_Skel" name) sun.rmi.registry.RegistryImpl_Skel
+            :else (Class/forName name false loader))))
+
+  (method ^:private ^:static stubClassExists ^boolean [^{:tag (Class ?)} remoteClass]
+    (when-not (.containsKey withoutStubs remoteClass)
+      (try
+        (Util/rmiClass (java-str (.getName remoteClass) "_Stub") (.getClassLoader remoteClass))
+        (return true)
+        (catch ClassNotFoundException cnfe (.put withoutStubs remoteClass nil))))
+    false)
+
+  (method ^:private ^:static createStub :throws [StubNotFoundException] ^RemoteStub [^{:tag (Class ?)} remoteClass
+                                                                                     ^RemoteRef ref]
+    (let [stubname (java-str (.getName remoteClass) "_Stub")]
+      (try
+        (let [^{:tag (Class ?)} stubcl (Util/rmiClass stubname (.getClassLoader remoteClass))
+              ^{:tag (Constructor ?)} cons (.getConstructor stubcl stubConsParamTypes)]
+          (cast RemoteStub (.newInstance cons (new Object/1 [ref]))))
+        (catch ClassNotFoundException e
+          (throw (StubNotFoundException. (java-str "Stub class not found: " stubname) e)))
+        (catch NoSuchMethodException e
+          (throw (StubNotFoundException. (java-str "Stub class missing constructor: " stubname) e)))
+        (catch InstantiationException e
+          (throw (StubNotFoundException. (java-str "Can't create instance of stub class: " stubname)
+                                         e)))
+        (catch IllegalAccessException e
+          (throw (StubNotFoundException. (java-str "Stub class constructor not public: " stubname)
+                                         e)))
+        (catch InvocationTargetException e
+          (throw (StubNotFoundException.
+                   (java-str "Exception creating instance of stub class: " stubname)
+                   e)))
+        (catch ClassCastException e
+          (throw (StubNotFoundException.
+                   (java-str "Stub class not instance of RemoteStub: " stubname)
+                   e))))))
+
+  (method ^:static createSkeleton :throws [SkeletonNotFoundException] ^Skeleton [^Remote object]
+    (let [^:mutable ^{:tag (Class ?)} cl nil]
+      (try
+        (set! cl (Util/getRemoteClass (.getClass object)))
+        (catch ClassNotFoundException ex
+          (throw (SkeletonNotFoundException.
+                   (java-str "object does not implement a remote interface: "
+                             (.getName (.getClass object)))))))
+      (let [skelname (java-str (.getName cl) "_Skel")]
+        (try
+          (let [^{:tag (Class ?)} skelcl (Util/rmiClass skelname (.getClassLoader cl))]
+            (cast Skeleton (.newInstance skelcl)))
+          (catch ClassNotFoundException ex
+            (throw (SkeletonNotFoundException. (java-str "Skeleton class not found: " skelname) ex)))
+          (catch InstantiationException ex
+            (throw (SkeletonNotFoundException. (java-str "Can't create skeleton: " skelname) ex)))
+          (catch IllegalAccessException ex
+            (throw (SkeletonNotFoundException. (java-str "No public constructor: " skelname) ex)))
+          (catch ClassCastException ex
+            (throw (SkeletonNotFoundException. (java-str "Skeleton not of correct class: " skelname)
+                                               ex))))))))

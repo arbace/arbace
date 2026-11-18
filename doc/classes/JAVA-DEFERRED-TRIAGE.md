@@ -8936,3 +8936,111 @@ longer asks the edge's `:cut` for it: `bin/j2g-edge verify` (essential, 8 GiB) d
 Expected at the night's interp record, after the day's build and the edge's update: t04689 t04690 t05166 (if their later lines
 hold: the virtual threads' stress, the selector's interrupts), t04539, t04869, t07858 (if the server's later lines hold); 6 rows.
 Their ids join the first pass's `.tmp/njd54.txt`.
+
+## As built: n-java-defer (round 54), the fourth pass: the next eval groups, 2026-11-18 (write-ahead)
+
+The next four groups of the round's table at eval (interp), under the same rules (each process under 5 GiB, peaks 3.8 GB; no j2g
+whole-program run, no gate), on the same executables (gate `e8e0d017243dca8a9f9f`, javac's tool `javac-8526ceb9d1ea3ff0bd68`,
+`REPR_JAVA_STALE_OK=1`). Everything built here is the shipped world's (j2g's DynSub list, jrt, j2g's variants, the closure):
+**none shows at interp before the day's build** (and, for the closure lines, the night's `bin/jrt-convert update`); each is proven
+light. Scratch kept in `.tmp/keep/wt-n-java-defer-r54/r4`.
+
+**The prediction.** `bin/java-check --levels read,compiled --analyze-only` with `J2G_MISSING='^t0'` over the 35 tests of the
+"cannot extend" and RMI groups (2 shards, 3.5 GB, 4.5 min): all 35 analyze, and none of their own code would be stubbed (`:missing
+[]`): what is left of them is behaviour, or a superclass the DynSub list lacks.
+
+### Built
+
+- **The "cannot extend" rows past their first superclass** (rank 3, the 18 the first pass expected no pass of). A scan of every file
+  of each test (`extends` and anonymous `new C(...) {`, `.tmp/keep/.../r4/supers.py`) against `class-supers` found the translated
+  classes the same tests extend after the one their row names: BiggernYours (t05469) subclasses seven more queues anonymously
+  (ConcurrentLinkedDeque, ConcurrentLinkedQueue, LinkedTransferQueue, LinkedBlockingQueue, LinkedBlockingDeque, ArrayBlockingQueue,
+  PriorityBlockingQueue), getResponseCode (t04996) CacheResponse, ThrowingTasks (t05712) ThreadPoolExecutor, SocketFactoryTest (t08020)
+  SslRMIServerSocketFactory: all listed in **arbace/j2g/model.ae** `class-supers`. **Correction to the first pass**: t05469 does not
+  pass at interp with ConcurrentHashMap alone (its compiled pass translates its subclasses with the world; the interpreter needs the
+  seven DynSubs too); it is expected with this pass's lines.
+- **RMI's 13** (rank 7). (1) `class-supers`: java.rmi.server.RemoteStub, RemoteObject, UnicastRemoteObject (the rmic stubs' protected
+  `super(ref)`, the tests' remote objects and UnrecognizedRefType's RemoteObject) and javax.management.remote.rmi.RMIJRMPServerImpl
+  (ConnectorStopDeadlockTest's protected makeClient): the interpreter's "No accessible constructor of java.rmi.server.RemoteStub" and
+  "No accessible method makeClient". (2) **overlay/jdk/variants/Util.ae**, sun.rmi.server.Util: createStub, createSkeleton and
+  stubClassExists ask an added `rmiClass`, which names DGCImpl_Stub, DGCImpl_Skel, RegistryImpl_Stub and RegistryImpl_Skel by their
+  class literals (rooting them in j2g's closed world) and Class.forName for any other: every export failed on "ClassNotFoundException:
+  sun.rmi.transport.DGCImpl_Stub" (t05244 AddrInUse, t05247 GcDuringExport; the skeletons, which the 1.1 protocol's server needs, were
+  not in the build either). **Proven**: j2g's unit test `test-class-supers-r54` (test/j2g/unit.ae: every round-54 class listed, each a
+  class of jdk/forms that is neither final nor an interface nor jrt's, negative controls Objects, Remote and CountDownLatch refused;
+  RemoteStub's DynSub forms, made from RemoteStub's world alone, carry its protected `(Ljava/rmi/server/RemoteRef;)V`); `bin/j2g-unit`
+  on e8e0d: its five pass, the other tests as on the base (7 failures, type annotations and invokers, there too). `bin/jrt-convert vet`
+  of the variant: ok, 3 members replaced, 1 added (3.6 GB); its control (a variant calling a missing member, through `--variants`)
+  refused.
+- **One class or module outside the world** (rank 9, the files that suffice alone): **test/jrt/jrt_sources.ae** `r54-sources`,
+  MalformedParametersException (t04868), java.prefs' BackingStoreException and InvalidPreferencesFormatException (t05784),
+  java.smartcardio's ATR, CommandAPDU and ResponseAPDU (t08071), java.xml's XPathException (t08082), KIND `share:MODULE`. **Proven** by
+  `bin/jrt-convert predict --list` of the four tests (6.3 min, 3.6 GB): the 7 files read with their context, vet of the world 0 refused,
+  j2g's analysis of the whole world 0 failures and 0 stubs in their classes, the four tests analyzed. Not built: Preferences itself,
+  JNDI's directory (t07839), SCTP (t07863), LdapLoginModule (t07869 t07870, javax.security.auth.login.Configuration's subclass and
+  JNDI's LDAP), Kerberos's tickets (t08053), dynalink (t08097), com.sun.management.GarbageCollectorMXBean (t07840, F13's later slice):
+  each an area. t04868 then reaches BadClassFiles' classes defined from bytes (by design, the Go build defines no class from bytes).
+- **The cheapest of the ~54 one-cause rows** (9, every one in jrt or a variant):
+  - t04655 Capacity: `new StringBuilder(n)` for n of 0 to 15 had capacity 16 (StringBuilder_New_I took the 16-unit array for any n up to
+    16): only 16 does now (go/arbace/jrt/stringbuilder.ae).
+  - t04651 AppendCharSequence: `new StringBuffer(cs)`/`new StringBuilder(cs)` of a negative length is NegativeArraySizeException
+    "Negative length: N" and the capacity saturates at Integer.MAX_VALUE, as AbstractStringBuilder(CharSequence) (`csCapacity`).
+  - t04642 StringContentEqualsBug: String.contentEquals of a StringBuffer compares under the buffer's lock, of a StringBuilder its
+    units directly (go/arbace/jrt/string.ae), as String.nonSyncContentEquals: a concurrent setLength threw
+    StringIndexOutOfBoundsException.
+  - t04837 ExceedMaxDim: Array.newInstance(C, n) of a C of 255 dimensions is IllegalArgumentException (array.ae); t04504 ArrayType:
+    Class.arrayType of a class of 255 dimensions UnsupportedOperationException (reflect.ae).
+  - t05058 GetLastModified: java.util.Date.parse(String) and `new Date(String)` (date.ae: jdk26u's Date.parse ported as written,
+    its word table, the Gregorian calendar from 1582 on and the Julian before, as getCalendarSystem): URLConnection's
+    getHeaderFieldDate parses a jar: URL's last-modified with it (it was missing from jrt's Date, so 0); `bin/jrt manifest` and
+    `bin/jrt testdata` regenerated (frozen JVM, 0.4 and 1.0 GB).
+  - t04279 NegativeAvailable, t04238 OpsAfterClose: **overlay/jdk/variants/FileInputStream.ae**, skip as jdk26u's for a file (a
+    negative n seeks backwards; 0 skips nothing), and on a closed stream IOException "Bad file descriptor" (jdk26u's isRegularFile0
+    fails on fstat(-1) before skip0; the JDK's output, run on jdk26u's build, differs from ours by exactly the two SKIP lines).
+  - t04264 NulFile: **overlay/jdk/variants/HostFiles.ae**, HostFiles.open refuses a path with a NUL: FileNotFoundException "Invalid
+    file path" (File.isInvalid), for FileInputStream and FileOutputStream.
+  **Proven**: `TestRound54Strings`, `TestRound54MaxDim`, `TestRound54DateParse` (string_test.ae, reflect_test.ae; the date cases are
+  26 texts with the JDK's answers, jdk26u's build at `-Duser.timezone=GMT`), `bin/jrt test --arch amd64 --package jrt -run
+  TestRound54`; their controls (the old capacity rule, the unlocked comparison, no rank check, pm's action 0) fail them;
+  `bin/jrt test --arch amd64 --package jrt` whole: every test but TestAnnotationHandlerNew, as on the base. The two variants: `bin/jrt-convert
+  vet` ok (1 member each).
+
+### Not built (the round's decisions, taken (round 54))
+
+- The rest of the one-cause rows, each beyond a light fix: t04583 PowLargeExpTests (Math.pow is StrictMath's fdlibm, 1 ulp off where
+  the test asks HotSpot's intrinsic; Go's math.Pow is worse: no cheap source), t04668 TestSynchronization (an interpreted class's
+  synchronized method as seen by Thread.getState), t04706 and t04702's subclass (deserializing an interpreted subclass of a jrt
+  hand-written Throwable: `cfSerialFor` has no case for hand-written superclasses, a j2g and jrt slice), t04402 ExpectedStackTrace and
+  t04701 ChainedExceptions (the interpreter's frames in stack traces), t05602 StoreDeadlock (run.ae exits after main without joining
+  the non-daemon threads, as the JVM's DestroyJavaVM does: a harness change for every test, a bounded join proposed for a later round),
+  t07910 FinalRestricted (a private field of a JDK class by reflection: the member tables list public members), t08306 Bug6653944 (jrt's
+  overlay Calendar has no readObject: its transient stamp is null after deserialization), t08235 StrongSeedReader (java.security.egd),
+  t04681 Versions (class files from disk), t07657 DoPrivileged (prints java.home).
+- The variants over jrt's own overlay Java (FileInputStream, HostFiles) rather than edits of `overlay/jdk/java.base`: they show at the next
+  build without the conversion; the overlay takes them, and the variants go, at the next `bin/jrt-convert update`.
+
+Alternatives considered: rooting RMI's stubs by a derivation of DGCImpl and RegistryImpl (test/jrt/derive.ae's way, MarshalInputStream's)
+rather than the variant (the derivation waits for the conversion); Date.parse over jdk26u's translated BaseCalendar (jrt imports no
+translated package); a NUL check in jrt's Go open (its message is the Java side's "PATH (REASON)", not the JDK's "Invalid file path").
+
+Keys: arbace/j2g (model.ae) moves `gate_key` and javac's keys; go/arbace/jrt (stringbuilder.ae, string.ae, array.ae, reflect.ae, date.ae,
+files.ae, manifest.edn, manifest_test.ae, reflect_tables.ae and the two test files) moves `gate_key`, `arbace_runtime_key` and javac's
+keys; overlay/jdk/variants (Util.ae, FileInputStream.ae, HostFiles.ae) moves `gate_key`, `arbace_runtime_key` and javac's keys;
+test/jrt/jrt_sources.ae moves jrt-convert's key and its output: **`bin/jrt-convert verify` fails until the night's `bin/jrt-convert
+update`** (sources.txt gains the 7 lines, jdk/forms the 7 files), then `bin/jrt modules` (three new packages) and the build. test/j2g
+moves none of the build keys.
+
+### The night's commands
+
+```sh
+bin/jrt-convert update                      # heavy: the 7 closure lines (then bin/jrt modules, commit jdk/ and module_table.ae)
+bin/arbace-go --gate-build                  # the day's: model.ae, jrt, the three variants
+bin/java-check --levels interp --list .tmp/njd54.txt --save .tmp/njd54   # the first pass's list with the ids below added
+bin/java-check --judge --partial --record .tmp/njd54/results.tsv
+```
+
+Expected at the night's interp record (beside the earlier passes'): t04655 t04651 t04642 t04837 t04504 t05058 t04279 t04238 t04264 (the
+one-cause nine); t05784 t08071 t08082 (after the update; if exception and value serialization hold); of the "cannot extend" 18 and RMI's
+13 the rows whose later lines hold, none measurable by day: likely t04448, t04905, t05547, t05469, t05241, t05242, t05248, t05249,
+t05250, t05244, t08020; at risk the ones F27 named (t05243, t05253, t05252, t07954) and the SASL seven (the DIGEST-MD5 exchange on
+their own callback handlers).
