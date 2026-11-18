@@ -12537,3 +12537,113 @@ the synthetic corpus in a later slot (not run here). On the main host, stage 0 `
   file not recorded). Decisions taken (round 54): std's features as the distributed sysroot's; cfg_if as a builtin (the crate's
   macro's semantics); globs and `#[path]` gated to std until core's and alloc's checks rerun.
 
+## 2026-11-18: n-c-last (round 54), C's last light rows: an unknown attribute's balanced tokens, tcc-pp's .S files, seven self-checking ci-run programs
+
+Branch `n-c-last` from `mac/n-all3` `2c633380a`. C's scores before: completeness 98.16, without by design 99.86, maturity 100,
+independence 99.78 (judge 0.9890); after: 98.17, 99.88, 100, 99.80 (judge 0.9900). Cells: print 4831/3/16 -> 4833/5/12; read,
+eval and AOT unchanged (5237/226/12, 2246/34/0, 2254/26/0).
+
+**The rows not passing and not truly by design (step 1).** Read's 12 deferred: dg's c23-auto-3, c23-complit-5, c23-constexpr-3
+(decl-diag: gcc's c-decl/c-typeck errors the checker lacks; c23-auto-3's `auto g { }` also stops the read), embed-4 (pp-diag:
+`__has_embed` in traditional C), c23-digit-separators-2 (pedantic-diag), embed-10 (parse-gap), c23-bool-errors-3 (wrong-reason);
+parse-check's five limits-*.c (eval-depth: 10,000-deep nesting; the evaluated parse hits the evaluator's MAX_DEPTH, the compiled
+one parse.ae's MAX-NEST 4000 bound, kept because the converter recurses past Go's stack). Print's 16 deferred: cc-grammar 3
+(c23-attr-syntax-5's `[[unknown_attribute(!)]]`; tcc-pp's 12.S and 13.S, assembler sources), eval-limits 11 (limits-*.c and
+pr46534 by depth or the read budget; c23-binary-constants-1, libunicode, quickjs, limits-blockid/externalid/fndefn time-dependent;
+sqlite3.c the budget), macro-context 1 (sqlite's shell.c, not rerun: its read exceeds the 3 GiB limit), objects-macro-body 1
+(unicode_gen.c). Eval's by design that are a choice rather than a necessity: speed 9 (the interpreter's timeouts; AOT passes
+them) and fenv 2 (no FP exception flags, SPEC §12.5).
+
+**Fixed (step 2).** (1) parse.ae's `balanced-garbage?` also takes an operator no expression ends with (`! ~ + - * / % & | ^ < > =
+? : ,`) just before a closer or a comma, so `[[unknown_attribute(!)]]` reads as balanced tokens (gcc ignores the unknown
+attribute's arguments); convert.ae marks such an unprefixed or gnu:: attribute's token string `^:c/tokens` and print.ae writes it
+as tokens, not as a string literal (doc/c/SPEC.md §5.6): c23-attr-syntax-5 passes levels 1-2, printed `[[unknown_attribute(!)]]`;
+c23-attr-syntax-1..8 rerun (round trip and tree check) as recorded but 5 (its tree row 6957 nodes, 0 errors, still :gcc-syntax:
+cc errs there); dg passes; annotations now read it and the checker's pedantic "attribute ignored" is gcc's at its dg-options
+(annot-known :gcc-rejects-at-options, its row known). No other corpus file matches the new rule's pattern (grep over gcc.dg's c23
+and gnu23 files, the torture tests and test/c). gate_key moves (repr/c is embedded). (2) tcc-pp's 12.S and 13.S: assembler
+sources, classed :assembler (design) at the print level as the read level already does (CS260 (a)'s rule): taken (round 54); the
+alternative, :na (outside both denominators), would change the corpus's counts. (3) c23-binary-constants-1 (time-dependent
+eval-limits) passed when rerun: its row pass. No gate_key move for (2)-(3) or for the records.
+
+**Independence (step 3).** The judge stage is what holds it below 100: 301 of 14,857 cases judged by gcc's records (0.5 each):
+ci-run's 12 output-only programs, benchmarksgame's 29, mir's lacc/new 36, cxgo 2 and the 18 selfref exceptions at eval and AOT
+(194), pp-gcc.sha256's 72 known preprocessor differences, parse-gcc.tsv's 35 print files. Moved here: seven ci-run programs
+(ptr-sub-unsigned "exit 3"; ptr-sub-narrow, fnptr-result-width, va-arg-pack, builtin-fpclass-fl, builtin-lockfree,
+builtin-assoc-barrier "exit 0") check their printed values against C's and the psABI's and carry CS299 (c)'s "ci-run verdict"
+line; their output is unchanged (gcc's recorded digests still hold, `bin/ci selfref agree`: 2179 of 2179 agree, self-check 7);
+`bin/ci check --only` and `check --aot --only` of the seven pass 7 of 7 each; independence.edn's cases 14542/315 -> 14556/301.
+builtin-lockfree's first version looped over a variable size: ci answered `__atomic_is_lock_free(n, 0)` with a non-constant n
+as not lock-free (gcc calls libatomic there); the check takes the constant sizes, the variable case left as a note for ci.
+
+**Records (step 4).** Rows changed by hand from the --only runs (the tools refuse --record with --only): roundtrip-results
+(attr-syntax-5 and binary-constants-1 pass, 12.S/13.S class assembler), roundtrip-known (attr-syntax-5's entry removed, the .S
+class), parse-check-results (attr-syntax-5), annot-results and annot-known (attr-syntax-5), divergences-print (:assembler). Then
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (9 pairs, 0 problems).
+Every process under 3 GiB (the round trip's peak 2.7 GiB under GOMEMLIMIT=2500MiB); no gate run, no whole-corpus run. The musl
+forms were reread twice (45 min) because a comment edit to parse.ae during the first read changed the cache's key.
+
+## 2026-11-18: n-c-last (round 54), second pass: C's judge by the tests' own outcomes, 110 more run cases
+
+Same branch, on `f72c28914`. The judge stage held C's independence at 99.80: 301 of 14,857 cases judged by gcc's records. Moved
+here, at eval and AOT each, 55 programs (110 cases), every expectation made without a compiler's run:
+
+**ci-run's 12 output-only programs check themselves** (builtin-atomic, -bitg, -clear-padding, -overflow-p, -stdc, complex-int,
+ms-struct, nan-to-unsigned, pack-in-body, signal-sync, vla-struct, vla-types; each now begins "ci-run verdict: exit N.",
+signal-sync's 136, SIGFPE at its default). Their printed output is unchanged (each run's SHA-256 is gcc's recorded digest), the
+checks added beside it: bitg and stdc against the builtins' definitions (gcc's manual, C23 7.18) computed bit by bit through shifts
+of the value widened to unsigned _BitInt(575), not the builtins, bit_ceil's overflow 0 as the manual's formula gives; overflow-p
+each triple, the constants and the storing forms by the infinite-precision rule, worked out by hand; atomic the 54 values in
+order and fmod's; clear-padding each object's bytes by the psABI layout; complex-int each part (integer complex division by
+gcc's method for an integer part type, tree-complex.cc's expand_complex_div_wide, Smith's: (10+5i)/(1+2i) is 2-5i);
+nan-to-unsigned the x86-64 sequence (cvttsd2si's integer indefinite, the 2^63 split) and 9.3e18 = 0x81103cb9fb220000;
+signal-sync the signals' numbers and three handler calls; vla-struct and vla-types every size, offset and value (vla-types'
+two choices C leaves unspecified, + left to right and the pointer type's size expression unevaluated, stated in its header);
+ms-struct and pack-in-body already aborted on a difference, their headers now name the rules (ms-struct: gcc's manual's t1-t5
+examples and the -mms-bitfields rules) and carry the verdict line. builtin-lockfree also checks `__atomic_is_lock_free(n, 0)`
+and `(n, &ll)` at a size known only at run time (n = 1, 2, 4, 8 through a volatile).
+
+**Negative controls.** Each of the 13 programs has a mutant, one expected value made wrong (complex-int's the straight method's
+4-3i, signal-sync's 101 + SIGSEGV, ...): test/c/selfcheck-mutants.tsv, run by the new `bin/ci selfcheck-controls`
+(bin/lib/ci/selfcheck-controls; scratch .tmp/ci-selfcheck-controls), which fails when a mutant meets its program's verdict. And
+four crossed controls in test/c/controls.edn: signal-sync against complex-int (status), fasta against fannkuch-redux's
+specification output (stdout), mir's immediate-pointer against issue19's derived empty output (stdout), whitespace against cxgo's
+main no args (status).
+
+**The benchmarks game by its specification.** test/c/benchspec.ae (namespace c.benchspec) computes binary-trees 10,
+fannkuch-redux 7, fasta 1000, mandelbrot 200, spectral-norm 2000 and reverse-complement on an empty input from the benchmarks'
+descriptions (benchmarksgame-team.pages.debian.net: the algorithms, the constants, the output layouts; the ALU sequence and the
+frequency tables typed from the description, not read from the corpus) at the argument each program takes with none (main's
+default, read in each source: binary-trees-5 10, fannkuchredux 7, fasta, -3, -4, -8, -9 1000, mandelbrot-8 200, spectral-norm 2000;
+reverse-complement-6 reads stdin, empty in the run corpora); `bin/ci selfref benchspec record|check` writes and checks the
+digests, test/c/benchspec.edn (spectral-norm's 2000 x 2000 power iteration is 2m40 of the 2m41 on the tools' host). All six
+digests equal gcc 15.2's recorded runs: an agreement found, not used. The other 19 programs keep gcc's run: 16 read argv[1]
+without testing argc (gcc's run is a SIGSEGV; no outcome follows from C), reverse-complement-2/-4/-5 need an input.
+
+**mir and cxgo derived from their own source.** test/c/selfref-derived.edn: 31 of mir's lacc and new programs with neither
+.expectrc nor .expect and cxgo's two, each read and its status (and exact output, or none where C leaves the order unspecified:
+macro-paste's three puts) worked out by hand with its reasoning (most of lacc's check themselves, `(unsigned char)(EXPR) != V`;
+whitespace and macro-paste return 1 because musl's puts returns 0; immediate-pointer prints "0x601044, 16"). Left with gcc's run:
+union-bitfield (unspecified bits), stringify (139 bytes not worked out), setjmp2 (setjmp through a pointer, undefined),
+non-pedantic-macro-redef (gcc's extension), and line-directive stays an exception (its .expectrc counts mir's file name).
+
+**selfref.** test/c/selfref.ae takes the two files first in `verdict` (kinds :spec and :derived); bin/lib/ci/selfref.bash keys
+the reference by them; test/gate/steps.edn moves them from the :c inputs to :c-records-run, beside selfref-exceptions.edn.
+
+**ci's `__atomic_is_lock_free (n, 0)` with a non-constant n** (the first pass's note): not a bug. The checker folds constant sizes;
+a variable one is built as the native call (go/arbace/ci/builtins.ae, libatomic's answer: 1 up to 8 bytes within one aligned word),
+and both `bin/ci run` and the AOT build answer 1 for 1, 2, 4 and 8 (16: 0, the target's; left out of the test as before). The first
+pass's failing loop is not in the history; builtin-lockfree's new run-time loop holds the answer now. Taken (round 54): the test,
+no change to ci; alternative: nothing.
+
+**Runs.** `bin/ci check --only` of the 56 (13 ci-run, 10 benchmarksgame, 31 mir, 2 cxgo): pass 55, spectral-norm speed (as
+recorded); the five run controls that apply differ. `check --aot --only` of the same: pass 56 (spectral-norm compiled within
+its budget), the five controls differ; `bin/ci selfcheck-controls`: 13 mutants, 13 miss their verdict (status 1, ms-struct's and
+pack-in-body's abort 134, signal-sync's 1 for 136); `bin/ci selfref benchspec check`: six of six. Judge stage
+(14,666 + 0.5 x 191) / 14,857 = 0.9940 (was 0.9900); C's independence 99.80 -> 99.88, completeness and maturity unchanged
+(`bin/reap --record`: matrix unchanged; `bin/crops-score --record`, `--judge --strict` 0 problems; `bin/records-check` 9 pairs, 0
+problems). No gate_key move (test/, bin/ci and bin/lib/ci/ are in no build's key). Every process under 3 GiB (GOMEMLIMIT=2500MiB); no gate run. Decisions taken (round 54): the
+benchmarks' outputs computed from the specification rather than the corpus's own data or a published output file (no download);
+the derived table per case with its reasoning rather than a rule for mir's directories (line-directive, macro-paste, stringify,
+whitespace and union-bitfield return non-zero, so "exit 0 without .expectrc" is not mir's convention); mutants as a separate verb
+rather than rows of controls.edn (which names no file of its own); gate wiring of the verb left for a gate-steps change.

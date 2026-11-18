@@ -1,0 +1,174 @@
+(ns c.benchspec
+  "The benchmarks game's programs' own verdict (n-c-last, round 54): the output each benchmark's specification defines
+  (benchmarksgame-team.pages.debian.net, the benchmark's description: the algorithm, its constants and its output
+  layout), computed here from the specification alone at the argument a program takes when run without one (the
+  default its main states; the run corpora run every program with no argument and an empty standard input), never from
+  a compiler's run. A program whose main reads argv[1] without testing argc (a null pointer dereferenced) or that needs
+  its input has no such output and keeps gcc's recorded run.
+    binary-trees N    min depth 4, max depth max(6, N), a stretch tree of max + 1; check = a tree's node count
+                      (2^(d+1) - 1); 2^(max - d + 4) trees of each depth d = 4, 6, ..., max; the long-lived tree
+    fannkuch-redux N  the permutations of 0..N-1 in the specification's order (rotations of prefixes with counters),
+                      the flips of each (reverse the first perm[0] + 1 until perm[0] = 0), the checksum (+flips at an
+                      even index, -flips at an odd one) and the maximum
+    fasta N           the ALU sequence repeated for 2N characters, then 3N and 5N characters chosen by the linear
+                      congruential generator (IM 139968, IA 3877, IC 29573, seed 42) over the IUB and Homo sapiens
+                      frequencies' cumulative probabilities (the first whose cumulative value exceeds r), 60 a line
+    mandelbrot N      an N x N portable bitmap (P4): C = (2x/N - 1.5, 2y/N - 1), Z = Z^2 + C for 50 iterations, a
+                      pixel set when |Z| never exceeds 2, eight pixels a byte, the first the most significant
+    spectral-norm N   10 power iterations of u = At A v over A(i,j) = 1 / ((i+j)(i+j+1)/2 + i + 1), then
+                      sqrt(u.v / v.v) printed with nine decimals (the exact double rounded to nearest)
+    reverse-complement  an empty input: no sequence, no output
+
+  record OUT    writes OUT (test/c/benchspec.edn): each output's SHA-256 and size, and the programs that take each
+  check FILE    computes the outputs again and requires FILE's digests"
+  (:require [arbace.string :as str])
+  (:import (java.security MessageDigest) (java.math BigDecimal RoundingMode)))
+
+(set! *warn-on-reflection* true)
+
+(defn binary-trees ^String [n]
+  (let [mn 4 mx (max (+ mn 2) n) st (inc mx)
+        check (fn [d] (dec (bit-shift-left 1 (inc d))))]
+    (str (format "stretch tree of depth %d\t check: %d\n" st (check st))
+         (str/join (for [d (range mn (inc mx) 2) :let [it (bit-shift-left 1 (+ (- mx d) mn))]]
+                     (format "%d\t trees of depth %d\t check: %d\n" it d (* it (check d)))))
+         (format "long lived tree of depth %d\t check: %d\n" mx (check mx)))))
+
+(defn fannkuch-redux ^String [n]
+  (let [p1 (long-array (range n)) cnt (long-array n) perm (long-array n)]
+    (loop [r n checksum 0 maxf 0 idx 0]
+      (let [r (loop [r r] (if (= r 1) r (do (aset cnt (dec r) r) (recur (dec r)))))
+            _ (dotimes [i n] (aset perm i (aget p1 i)))
+            flips (loop [f 0]
+                    (let [k (aget perm 0)]
+                      (if (zero? k) f
+                          (do (loop [i 0 j k]
+                                (when (< i j)
+                                  (let [t (aget perm i)] (aset perm i (aget perm j)) (aset perm j t))
+                                  (recur (inc i) (dec j))))
+                              (recur (inc f))))))
+            checksum (if (even? idx) (+ checksum flips) (- checksum flips))
+            maxf (max maxf flips)
+            ;; the next permutation: rotate the first r + 1 elements left until a counter is left
+            r (loop [r r]
+                (if (= r n) nil
+                    (let [p0 (aget p1 0)]
+                      (dotimes [i r] (aset p1 i (aget p1 (inc i))))
+                      (aset p1 r p0)
+                      (aset cnt r (dec (aget cnt r)))
+                      (if (pos? (aget cnt r)) r (recur (inc r))))))]
+        (if r
+          (recur r checksum maxf (inc idx))
+          (format "%d\nPfannkuchen(%d) = %d\n" checksum n maxf))))))
+
+(def ^:private alu
+  (str "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGG"
+       "GAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGA"
+       "CCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAAT"
+       "ACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCA"
+       "GCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGG"
+       "AGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCC"
+       "AGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"))
+
+(def ^:private iub
+  [[\a 0.27] [\c 0.12] [\g 0.12] [\t 0.27] [\B 0.02] [\D 0.02] [\H 0.02] [\K 0.02]
+   [\M 0.02] [\N 0.02] [\R 0.02] [\S 0.02] [\V 0.02] [\W 0.02] [\Y 0.02]])
+
+(def ^:private homo-sapiens
+  [[\a 0.3029549426680] [\c 0.1979883004921] [\g 0.1975473066391] [\t 0.3015094502008]])
+
+(defn fasta ^String [n]
+  (let [sb (StringBuilder.)
+        seed (long-array [42])
+        rnd (fn [] (let [s (rem (+ (* (aget seed 0) 3877) 29573) 139968)] (aset seed 0 s) (/ (double s) 139968.0)))
+        lines (fn [^String title total next-char]
+                (.append sb title)
+                (loop [left total]
+                  (when (pos? left)
+                    (let [k (min 60 left)]
+                      (dotimes [_ k] (.append sb (char (next-char))))
+                      (.append sb \newline)
+                      (recur (- left k))))))
+        cumulative (fn [tbl] (let [cs (reductions + (map second tbl))] (mapv vector (map first tbl) cs)))
+        pick (fn [cum] (fn [] (let [r (rnd)] (or (some (fn [[c p]] (when (< r (double p)) c)) cum) (first (peek cum))))))
+        pos (long-array [0])
+        repeat-char (fn [] (let [i (aget pos 0)] (aset pos 0 (rem (inc i) (count alu))) (.charAt ^String alu (int i))))]
+    (lines ">ONE Homo sapiens alu\n" (* 2 n) repeat-char)
+    (lines ">TWO IUB ambiguity codes\n" (* 3 n) (pick (cumulative iub)))
+    (lines ">THREE Homo sapiens frequency\n" (* 5 n) (pick (cumulative homo-sapiens)))
+    (str sb)))
+
+(defn mandelbrot
+  "The P4 bitmap's bytes."
+  ^bytes [n]
+  (let [header (.getBytes (format "P4\n%d %d\n" n n) "US-ASCII")
+        row (quot (+ n 7) 8)
+        out (byte-array (+ (alength header) (* n row)))]
+    (System/arraycopy header 0 out 0 (alength header))
+    (dotimes [y n]
+      (let [ci (- (/ (* 2.0 y) n) 1.0)]
+        (dotimes [x n]
+          (let [cr (- (/ (* 2.0 x) n) 1.5)
+                in (loop [i 0 zr 0.0 zi 0.0 tr 0.0 ti 0.0]
+                     (cond (> (+ tr ti) 4.0) false
+                           (= i 50) true
+                           :else (let [zi (+ (* 2.0 zr zi) ci) zr (+ (- tr ti) cr)]
+                                   (recur (inc i) zr zi (* zr zr) (* zi zi)))))]
+            (when in
+              (let [k (+ (alength header) (* y row) (quot x 8))]
+                (aset out k (unchecked-byte (bit-or (aget out k) (bit-shift-right 0x80 (rem x 8)))))))))))
+    out))
+
+(defn spectral-norm ^String [n]
+  (let [a (fn ^double [i j] (/ 1.0 (+ (quot (* (+ i j) (+ i j 1)) 2) i 1)))
+        times (fn [^doubles out ^doubles v t]
+                (dotimes [i n]
+                  (aset out i (double (loop [j 0 s 0.0]
+                                        (if (= j n) s (recur (inc j) (+ s (* (double (if t (a j i) (a i j))) (aget v j))))))))))
+        ata (fn [^doubles out ^doubles v] (let [w (double-array n)] (times w v false) (times out w true)))
+        u (double-array n 1.0) v (double-array n)]
+    (dotimes [_ 10] (ata v u) (ata u v))
+    (let [vbv (loop [i 0 s 0.0] (if (= i n) s (recur (inc i) (+ s (* (aget u i) (aget v i))))))
+          vv (loop [i 0 s 0.0] (if (= i n) s (recur (inc i) (+ s (* (aget v i) (aget v i))))))]
+      (str (.setScale (BigDecimal. (Math/sqrt (/ vbv vv))) 9 RoundingMode/HALF_EVEN) "\n"))))
+
+(def outputs
+  "Each output: the benchmark at its argument."
+  {:binary-trees-10 #(binary-trees 10)
+   :fannkuch-redux-7 #(fannkuch-redux 7)
+   :fasta-1000 #(fasta 1000)
+   :mandelbrot-200 #(mandelbrot 200)
+   :spectral-norm-2000 #(spectral-norm 2000)
+   :reverse-complement-empty (constantly "")})
+
+(def programs
+  "The programs whose default argument gives an output of the specification (main's default, read in each source)."
+  {"benchmarksgame/binary-trees-5.c" :binary-trees-10      ; n = ac > 1 ? atoi(av[1]) : 10
+   "benchmarksgame/fannkuchredux.c" :fannkuch-redux-7      ; argc > 1 ? atoi(argv[1]) : 7
+   "benchmarksgame/fasta.c" :fasta-1000                    ; n = 1000, sscanf(argv[1]) when argc > 1
+   "benchmarksgame/fasta-3.c" :fasta-1000
+   "benchmarksgame/fasta-4.c" :fasta-1000
+   "benchmarksgame/fasta-8.c" :fasta-1000
+   "benchmarksgame/fasta-9.c" :fasta-1000
+   "benchmarksgame/mandelbrot-8.c" :mandelbrot-200         ; (argc > 1) ? atoi(argv[1]) : 200
+   "benchmarksgame/spectral-norm.c" :spectral-norm-2000    ; (argc == 2) ? atoi(argv[1]) : 2000
+   "benchmarksgame/reverse-complement-6.c" :reverse-complement-empty})
+
+(defn- digest [x]
+  (let [^bytes b (if (string? x) (.getBytes ^String x "US-ASCII") x)
+        md (MessageDigest/getInstance "SHA-256")]
+    {:sha256 (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md b))) :bytes (alength b)}))
+
+(defn -main [cmd f]
+  (let [ds (into (sorted-map) (for [[k g] outputs] (let [t0 (System/currentTimeMillis) d (digest (g))]
+                                                     (binding [*out* *err*] (println "benchspec" (name k) (- (System/currentTimeMillis) t0) "ms"))
+                                                     [k d])))]
+    (case cmd
+      "record" (spit f (str ";; the benchmarks game's outputs by their specification (test/c/benchspec.ae, its header): written by\n"
+                            ";; bin/ci selfref benchspec record, checked by bin/ci selfref benchspec check. Read with the Clojure reader.\n"
+                            "{:outputs\n {" (str/join "\n  " (for [[k d] ds] (str (pr-str k) " " (pr-str d)))) "}\n"
+                            " :programs\n {" (str/join "\n  " (for [[p k] (sort programs)] (str (pr-str p) " " (pr-str k)))) "}}\n"))
+      "check" (let [want (:outputs (read-string (slurp f)))]
+                (doseq [[k d] ds] (println (format "benchspec %-26s %s %6d %s" (name k) (:sha256 d) (:bytes d) (if (= d (get want k)) "same" "DIFFERS"))))
+                (when (not= ds want) (println "benchspec: the outputs differ from" f) (System/exit 1))
+                (println "benchspec:" (count ds) "outputs as" f)))))

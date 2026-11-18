@@ -1,0 +1,33 @@
+#!/bin/bash
+# bin/ci selfcheck-controls [FILE...]: the self-checking ci-run programs' negative controls (test/c/selfcheck-mutants.tsv, its
+# header; n-c-last, round 54): each mutant (one expected value of test/c/run/FILE made wrong) built and run by bin/ci run; a
+# mutant whose status is its program's verdict ("ci-run verdict: exit N.", the first line) passes what differs and fails the
+# command. FILE... selects lines; CI_CONTROL_JOBS runs them at once (default 3).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+work=$root/.tmp/ci-selfcheck-controls
+rm -rf "$work"; mkdir -p "$work"
+n=0
+while IFS=$'\t' read -r f from to; do
+  case $f in '#'*|'') continue ;; esac
+  if [ $# -gt 0 ]; then case " $* " in *" $f "*) ;; *) continue ;; esac; fi
+  src=$(cat "$root/test/c/run/$f") || exit 1
+  case $src in *"$from"*) ;; *) echo "selfcheck-controls: $f: no $from" >&2; exit 1 ;; esac
+  printf '%s\n' "${src/"$from"/"$to"}" > "$work/$f"
+  n=$((n + 1))
+done < "$root/test/c/selfcheck-mutants.tsv"
+one() { # FILE
+  local f=$1 want st
+  want=$(head -1 "$root/test/c/run/$f" | sed -n 's|^/\* ci-run verdict: exit \([0-9]*\)\..*|\1|p')
+  [ -n "$want" ] || { printf '%s\tno verdict line\n' "$f"; return; }
+  "$root/bin/ci" run "$work/$f" > "$work/$f.out" 2> "$work/$f.err"; st=$?
+  if [ "$st" = "$want" ]; then printf '%s\tpasses (status %s, the verdict): the check passes what differs\n' "$f" "$st"
+  else printf '%s\tdiffers (status %s, the verdict %s), as a control must\n' "$f" "$st" "$want"; fi
+}
+export -f one; export root work
+ls "$work" | grep '\.c$' | xargs -P "${CI_CONTROL_JOBS:-3}" -I{} bash -c 'one "$1"' _ {} | sort > "$work/results.tsv"
+cat "$work/results.tsv"
+bad=$(grep -vc $'\tdiffers' "$work/results.tsv")
+echo "selfcheck-controls: $n mutants, $((n - bad)) differ as they must, $bad do not"
+[ "$bad" = 0 ]

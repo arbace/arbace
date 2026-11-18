@@ -6,7 +6,7 @@
 c_run_ref() {
   if [ "${ARBACE_C_JUDGE:-self}" = gcc ]; then echo test/c/ref-gcc15.edn; return 0; fi
   local k out modcache gccroot
-  k=$( (cd "$root" && sha256sum test/c/ref-gcc15.edn test/c/selfref.ae test/c/selfref-exceptions.edn test/c/corpora.edn) | sha256sum | cut -c1-16)
+  k=$( (cd "$root" && sha256sum test/c/ref-gcc15.edn test/c/selfref.ae test/c/selfref-exceptions.edn test/c/selfref-derived.edn test/c/benchspec.edn test/c/corpora.edn) | sha256sum | cut -c1-16)
   out=$root/.tmp/ci-selfref/$k.edn
   if [ ! -s "$out" ]; then
     mkdir -p "$root/.tmp/ci-selfref"

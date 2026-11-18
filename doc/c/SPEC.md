@@ -466,6 +466,10 @@ args      = forms (C context)           ; a standard or gnu:: attribute's argume
           | "balanced tokens"           ; another vendor's: the tokens' text, one string
 ```
 
+An unprefixed or `gnu::` attribute whose arguments no expression list reads (gcc ignores an unknown attribute's
+arguments as balanced tokens: `[[unknown_attribute(!)]]`) holds its tokens' text as one string too, on a vector marked
+`^{:c/tokens true}`, printed as the tokens (n-c-last, round 54).
+
 ```clojure
 (c/declare ^{:c/attrs [[nodiscard "why"]]} f ^int [void])     ; [[nodiscard("why")]] int f(void);
 (c/struct ^{:c/gnu-attrs [packed [aligned 8]]} s [^char c ^int i])
