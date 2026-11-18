@@ -10612,3 +10612,21 @@ programs over the printed Go (the wildcard's disconnect sequence, SendUrgent, th
 tonight. Alternatives: teaching j2g private lookups (rejected: the variant pattern of F10b), `any` parameters for the atomics'
 functions (rejected: the generated tables name the classes), an ICMP echo (rejected: needs a raw socket). Details and the day's
 commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-net".
+
+## 2026-11-18: n-java-mx, java.lang.management's `:mxbeans` rows at interp (round 52, overnight)
+
+Branch `n-java-mx` from mac/n-java-night `c32d8d95f`, under the night's rules (each process under 1 GiB). The 13 interp rows of
+n-java-defer's `:mxbeans` table run on next `42bf8614b`'s gate executable (`e8e0d017243dca8a9f9f`, read on javac's tool
+`javac-8526ceb9d1ea3ff0bd68`); four ran otherwise than recorded (t04784, t04792, t04806, t04807: the beans and methods built since the
+record reached further) and are re-recorded alone. Fixed for the next build: jrt's OperatingSystemImpl without jdk26u's container
+branches (j2g refused every method naming jdk.internal.platform.Metrics: t07849-t07852), ManagementFactory without a compilation bean
+(the JDK's `-Xint` answers: t04782), Thread.start making the thread live before its goroutine runs (getThreadInfo right after start was
+null: t04811). Proved on jdk26u's JDK with `--patch-module` (the overlay over a stub HostManagement; `-Xint`'s answers) and by a probe of
+the executable; forms by `bin/repr-java read-jdk --check --no-javac --origins` with each file's context, HEAD's sources reproducing the
+committed forms. Found and left: the MXBean interfaces carry no generic signatures in the world (j2g writes them for a program's own
+classes only), so the platform MBean server cannot register RuntimeMXBean (t04792; a DECISION for the user: (a) the world's MXBean
+interfaces' Signatures, recommended; (b) every world class's; (c) leave); the interpreter's frames in ThreadInfo (t04806, t04807); the
+memory, class-loading, collector, pool and buffer-pool beans (F13's later slices, about two days). `:jmx`'s match narrowed so that a
+platform interface's NotCompliantMBeanException stays `:mxbeans`. Alternatives: Metrics in the world (rejected: cgroup readers the box
+has not), a CompilationImpl naming c2j (rejected: c2j is ahead of time), the test waiting for the thread (rejected: the JVM's contract).
+Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-mx".

@@ -8345,3 +8345,83 @@ bin/java-check --levels interp --list .tmp/nnet-pass.txt --save .tmp/nnet-pass &
 bin/reap --record && bin/crops-score --record
 # then the night's --full: bin/jrt-convert verify (jdk/forms' two files), the compiled level's rows of the same tests
 ```
+
+## As built: n-java-mx (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-java-mx` (from mac/n-java-night `c32d8d95f`), under the night's rules (each process under 1 GiB): the interp cell's
+`:mxbeans` rows outside the stack's triage, 12 by n-java-defer's count (13 rows in its table: t04782 t04784 t04786 t04791 t04792
+t04806 t04807 t04811 t07840 t07849 t07850 t07851 t07852). Run at interp on next `42bf8614b`'s gate executable (`e8e0d017243dca8a9f9f`,
+read on javac's tool `javac-8526ceb9d1ea3ff0bd68`, `bin/java-check --levels read,interp --list`, each run under 0.7 GB). Four ran
+otherwise than recorded and are re-recorded alone (`--judge --partial --record`): t04784 (the platform logging bean exists since
+JCS281 (b); it now stops on BufferPoolMXBean), t04792 (getPlatformMBeanServer exists since JMX-1; it now stops on
+RuntimeMXBean's open-type mapping), t04806 and t04807 (Thread.getAllStackTraces exists since JCS320 (a); they now stop on the
+locked monitors' frames). test/reap/matrix.edn unchanged (the classes' counts are the same). By cause:
+
+- **t07849 t07850 t07851 t07852, OperatingSystemMXBean's memory and swap sizes: fixed (jrt's Java).** jrt's OperatingSystemImpl
+  kept jdk26u's container branches behind a `containerMetrics` field always null; j2g refuses every method that names
+  `jdk.internal.platform.Metrics` (not in the closed world), so getTotalMemorySize, getFreeMemorySize, the two swap sizes and the two
+  CPU loads threw (the executable, probed: six of the twelve getters). The overlay now has no container branch and no
+  ContainerCpuTicks: each getter answers the host's fact, as jdk26u's does where `Container.metrics()` is null. Proof on jdk26u's
+  JDK: the overlay compiled into jdk.management with `--patch-module` over a stub of jrt's HostManagement (os0 from /proc/meminfo):
+  the four tests status 0, and the stub's answers seen through ManagementFactory (the patch is the class used). Forms by
+  `bin/repr-java read-jdk --check --no-javac --origins` on the file with its context (HostManagement, BaseOperatingSystemImpl,
+  VMManagement, the bean interfaces, Util, ObjectName, as `bin/jrt-convert predict` reads context; 0.84 GB): HEAD's file so read
+  gives the committed forms byte for byte.
+- **t04782 CompilationMXBean/Basic: fixed (jrt's Java).** ManagementFactory threw "not in the Go build yet". The Go build has no JIT
+  compiler: getCompilationMXBean now answers null, getPlatformMXBeans an empty list, the connection variants jdk26u's (a proxy of
+  `java.lang:type=Compilation`, which no bean is registered under; an empty list), and getPlatformManagementInterfaces holds
+  CompilationMXBean, as jdk26u's on a VM without a compilation system. Proof on jdk26u's JDK with `-Xint`: Basic prints "The virtual
+  machine doesn't have a compilation system", status 0; getCompilationMXBean null, getPlatformMXBeans `[]`, the set holds the
+  interface: the answers the overlay now gives. Forms as above with the JMX packages as context (137 files, 0.80 GB; HEAD's identical).
+- **t04811 SynchronizationStatistics: one cause fixed (jrt's Go).** `getThreadInfo(tid)` right after `lt.start()` answered null:
+  jrt's thread became live (management.ae's registry) in its goroutine, after start returned (probe on the executable: null 198
+  times of 200). Thread.start now adds the thread before it starts the goroutine (go/arbace/jrt/thread.ae; liveAdd is idempotent,
+  threadEntry's add a no-op), as the JVM's JVM_StartThread does; test TestLiveAtStart (management_test.ae). Proof tonight: the
+  probe and the two files printed by repr/go (`print --layout gofmt`); `bin/jrt test` prints the whole module, 1.06 GB on stage 0,
+  over the night's limit (stopped): by day. The rest of the test (the blocked and waited counts, slice 2) shows with the build.
+- **t04792 LoggingMXBeanTest: the MXBean interfaces' generic signatures (not light here: a DECISION).** getPlatformMBeanServer
+  registers RuntimeMXBean through JMX's MXBean introspection, which maps `List<String> getInputArguments()` by its generic return
+  type; jrt's Method.getGenericReturnType answers the erased `java.util.List` for a world class (classdata.ae: no `G` record),
+  because j2g writes the members' Signatures only for a program's own classes (arbace/j2g/out.ae's `class-data :members`), and
+  List's getters map to Object: NotCompliantMBeanException. So the platform MBean server fails for every caller (8 compiled rows
+  name it). test/java/divergences.edn's `:jmx` match no longer takes a platform interface's NotCompliantMBeanException (it
+  stays `:mxbeans`, world). **DECISION** (left for the user: j2g and every world translation): (a, recommended) j2g writes the `G`
+  records of the world's MXBean interfaces (JMX's rule: a name ending in MXBean or `@MXBean`), a few dozen interfaces; (b) every
+  world class's `G` records, as the JVM keeps every Signature (getGenericReturnType right everywhere; the data of every generic
+  member in the executable); (c) leave it.
+- **t04806 t04807 LockedMonitors, LockedSynchronizers: the interpreter's frames (`:stack`'s cause, not light).** The locked
+  monitors are found, but their frames are none of the test's: a ThreadInfo's stack at interp holds jrt's and the runtime's Go
+  frames, the interpreted methods (A, B, C, D) none (CLASSFORMS-REPL §7). The compiled level is the one to watch.
+- **Left for F13's later slices (what they need):** t04786 GetPlatformManagementInterfaces needs a bean for each of ClassLoading,
+  Memory, GarbageCollector, MemoryManager and MemoryPool (jdk26u's ClassLoadingImpl, MemoryImpl, GarbageCollectorImpl, MemoryPoolImpl,
+  MemoryManagerImpl over jrt natives: the class registry's counts, Go's runtime/metrics for the heap, the collector's count and
+  pause time, one pool of Go's heap); t04791 ThresholdTest needs the pools' usage thresholds and their counts (HotSpot's
+  LowMemoryDetector: a sampler in jrt); t07840 needs com.sun.management.GarbageCollectorMXBean and GcInfo in the closure (GcInfo's
+  composite data over JMX's open types, which the world has since JMX-1) with the collector beans; t04784 GetObjectName needs the
+  buffer pools' beans, and they need jrt to count its direct and mapped buffers (VM.getBufferPools, Bits' reservations released by a
+  Cleaner; jrt's direct buffers are heap buffers and its maps copies, counted nowhere). About two days with the Go natives.
+
+No arbace/ change: `bin/java-check --essential` with the checkout on ARBACE_PATH 428 of 428, the controls c00001 c00003 c00004 failing as they must (the
+executable's jrt: no proof of the changes, no regression). `bin/reap` 0 problems, matrix unchanged; `bin/crops-score --judge --strict`
+and `bin/records-check` pass.
+
+Decisions taken overnight (round 52): (1) the container branches cut from jrt's OperatingSystemImpl (rather than Metrics in the world:
+jdk.internal.platform's cgroup readers, which the box has not); (2) no compilation system (getCompilationMXBean null, jdk26u's
+`-Xint` answers; rather than a CompilationImpl naming c2j, which compiles ahead of time, not at run time); (3) a thread live from its
+start (rather than the test waiting); (4) `:jmx`'s match narrowed (rather than reordering the classes). Keys: overlay/jdk, jdk/forms and
+go/arbace/jrt move `gate_key` and the runtime key; test/java/check-interp.edn and divergences.edn the judging steps'.
+
+The day's commands (after `bin/arbace-go --gate-build`; then `bin/jrt-convert verify` in the night's `--full`):
+
+```sh
+bin/jrt test --arch amd64 --package jrt -run 'TestLiveAtStart|TestLiveThreads|TestThreadStatesAndLocks|TestDeadlocks|TestLockedMonitorsAndSynchronizers|TestOtherThreadsStacks|TestOperatingSystemFacts' -count=1
+printf 't04782\nt04784\nt04786\nt04791\nt04792\nt04806\nt04807\nt04811\nt07840\nt07849\nt07850\nt07851\nt07852\n' > .tmp/nmx.txt
+bin/java-check --levels interp --list .tmp/nmx.txt --save .tmp/nmx
+bin/java-check --judge --partial --record .tmp/nmx/results.tsv      # expected: t04782 t07849-t07852 pass; t04811 past its NPE
+# no regression among the passing management and Thread rows at interp:
+grep -E 'jdk/(java/lang/management|com/sun/management|java/lang/Thread)' test/java/check-interp.edn | grep ':pass' \
+  | sed 's/^ *\["\(t[0-9]*\)".*/\1/' > .tmp/nmx-pass.txt
+bin/java-check --levels interp --list .tmp/nmx-pass.txt --save .tmp/nmx-pass && bin/java-check --judge --partial .tmp/nmx-pass/results.tsv
+bin/reap --record && bin/crops-score --record
+# the compiled level's rows of the same tests at the night's compiled shard
+```
