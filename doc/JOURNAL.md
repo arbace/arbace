@@ -11726,3 +11726,80 @@ process under 1 GiB but bin/j2g-unit (1.2 GB: 160 pass, the 7 known failures of 
   rest of the crate's modules".
 - core's native facts may move (a derive's duplicate projection bound gone; `super::super` paths): the day runs core-essential,
   rind-test, core's check and the whole alloc pass.
+
+## 2026-11-18: RIND11 (a), the pinned rustc held outside apk (round 54; branch `n-rind11` from mac/n-all `9cd2e4a96`)
+
+The user decided RIND11 (a) (doc/rust/FRONTEND-SURVEY.md, "Proposed (RIND11)"), with a network go-ahead for this fetch alone:
+the host's apk moved rust to 1.100.0-r0 on 2026-11-15 while `tools/rsdump/RUSTC_VERSION` pins 1.99.1 (`58cf8f9c3`, driver
+`61690d3e4c729118`), so `bin/gate --pins`, the helper-based tools and the oracle tier's five `:rustc` steps failed.
+
+Fetched, from Alpine's official mirrors alone (dl-cdn.alpinelinux.org's edge has dropped 1.99.1, 404; the release branches carry
+other versions: v3.24 1.96.1, v3.23 1.91.1; of the 103 mirrors of dl-cdn's MIRRORS.txt probed, http://mirror.mobinhost.com/alpine
+lags at an older edge index, rust 1.99.1-r0 built 2026-10-15 at aports `c5f7cbeff7c4`, and https://mirror.latigo.net/alpine keeps
+old files), into the main checkout's `.tmp/rust-1.99.1/`, each signature checked by `apk verify` (nothing installed, no apk
+add or remove):
+- rust-1.99.1-r0.apk `b2de908737a6be07982a4396d96391d8344752deb86875a0bc352b578f1ef448` (mobinhost; latigo's the same digest)
+- rustc-dev-1.99.1-r0.apk `8837fc729e228a54a18fe576974fa1d48f947664133fbd2137b4dab61a356b21` (mobinhost; = tools/rsdump/apks.sha256)
+- rust-src-1.99.1-r0.apk `0849c88c92333bdbe4f1867872db3499f33100851989a0760eb79685a4936cfb` (mobinhost; = tools/rsdump/apks.sha256)
+- cargo-1.99.1-r0.apk `57e7fd60fee36c64225bdfe842a4fa0f82433318bd293b9a50c4398bc3aeb99e` (latigo; the bin/repr-rust iface and std levels run cargo)
+- llvm23-libs-23.1.3-r0.apk `c92fac06add158d240bd1d68be9bfc01075d66620e90d7cc8494565d1b1ab13e` (latigo)
+- scudo-malloc-23.1.3-r0.apk `2d915fbfcd8b4d3e9f51dc67759a1f23ca6ff66846e0bff7aaa4faeb9c56d0f8` (latigo)
+The LLVM version is the one the extracted rustc reports (`rustc -vV`: `LLVM version: 23.1.3`), not the index's (mobinhost's lists
+23.1.4-r0, built after rust; the host has 23.1.5); latigo's directory has exactly one 23.1.3 build of each (`-r0`). rustdoc is in
+the rust package (no rustdoc apk). The four new files are pinned in `tools/rsdump/rustc-apks.sha256` (apks.sha256's format); rustc-dev
+and rust-src stay pinned in `apks.sha256`. The host's other libraries (musl, libstdc++, libgcc, zlib, zstd, libffi, libxml2, liblzma,
+curl, OpenSSL, sqlite, libssh2) are taken as they are: their sonames are stable and they are no part of the pin.
+
+The mechanism: `bin/lib/repr-rust/rustc-pin.bash` (a crop library under `bin/lib/repr-*`, so in no key): the tree
+`.tmp/rust-1.99.1/root` (the four apks extracted, `root.extracted` the pin file's digest; `ARBACE_RUSTC_HOME`, `ARBACE_RUSTC_APKS`
+override); `rustc_pin_path` puts its `usr/bin` first on PATH when its rustc is at the pin and exports `ARBACE_RUSTC` (that rustc,
+else the PATH's when at the pin, else `rustc-not-at-the-pin`, a name no command has); sourced by bin/repr-rust, bin/rust-front,
+bin/rust-unicode, bin/rsi, bin/llvmi and bin/gate (after the environment's scrub). The tree's rustc, rustdoc and cargo find their
+driver, libLLVM 23.1.3 and libscudo through their own RUNPATH `$ORIGIN/../lib` (no LD_LIBRARY_PATH, so the host's LLVM 23.1.5
+tools load their own). test/gate/steps.edn's `:rustc` recipe names `${ARBACE_RUSTC:-rustc-not-at-the-pin}` and hashes the tree's
+libLLVM too: a rustc of another version is the host absent (no key, no run, no failure). bin/repr-rust: `rustc fetch` (the main
+checkout only, from `ARBACE_RUSTC_MIRRORS`, each file by its digest, never another version), `rustc take`, `rustc which`; the
+rustc-dev and rust-src apks taken from the pinned directory before `apk fetch` (which gives 1.100's); rustc-dev's absolute link
+`librustc_driver-*.so -> /usr/lib/...` (the rust package's file) pointed into the tree (`rustc_pin_relink`; without it the helper's
+build failed, E0463, "can't find crate for rustc_driver"); the helper linked with an rpath to the tree's `usr/lib` and keyed by the
+sysroot too; `pins check` checks the four apks and the tree's marker, and says "absent" in place of failing when no rustc is at the
+pin. The proposal's name `REPR_RUST_RUSTC` became `ARBACE_RUSTC` with `ARBACE_RUSTC_HOME`: one variable for the gate's recipe and
+the tools. Alternatives: LD_LIBRARY_PATH (would load LLVM 23.1.3 into the host's llvm tools), the tree on PATH set by the gate
+alone (the tools by hand would still meet 1.100), a local apk repository and `apk add rust=1.99.1-r0` (RIND11 (d), installs).
+
+Checks: `bin/repr-rust pins check` held (408 pinned files; the UI tarball not fetched here) and, with `ARBACE_RUSTC_HOME` elsewhere,
+"absent", exit 0; the `:rustc` identity none in that case (gate_host_id over the recipe); `bin/repr-rust helper` built against the
+pinned rustc-dev (18 s, 0.7 GB); `bin/repr-rust test --samples` passed (1 min 14 s, 0.6 GB); `bin/gate --pins`: rust's pin held, the
+run failing on haskell's (`testsuite-core run-tests` 722 recorded, 743 now) and the asm oracle packs (five `obj-*-llvm-mc-23.1.5`
+packs not in `.tmp/oracle-packs`), neither touched here; `bin/gate --full --plan` planned (340 steps, 0.9 GB); test/gate/crops-test.bash
+and test/docs/claude-md-test.bash ok. Nothing heavy run.
+
+## 2026-11-18: `bin/gate --pins` passing again (round 54; branch `n-pins` from mac/n-rind11 `cd98c4d01`)
+
+Two causes, after RIND11 (a)'s rust pin. (1) Haskell's measures (`bin/hsi pins --check` against `test/haskell/eval-corpora.edn`):
+the pinned inputs are unchanged (the testsuite tarball's and GHC's tarball's SHA-256, nofib's tree, `:testsuite`'s files, lines and
+digest all hold); two of Arbace's own commits moved what is measured without re-recording it. `:testsuite-core`'s `:run-tests`
+722 -> 743: 829eb1d4e (HF10-P40) added `unboxedsums` to its `:dirs` (21 run tests; doc/haskell/FRONTEND-SURVEY.md's HF10-P40 already
+says "743 programs planned, 722 before", HASKELL-EVAL-SURVEY.md's "Found beside" too). `:samples`' lines 901 -> 902 and digest
+8833e007... -> 64461fab...: 5376b5ea7 (queue 325, DECISION 6 (a)) changed `test/haskell/eval/samples/LibSystem.hs` (one line more).
+Re-recorded both, taken (round 54): the rule over the same pinned input changed, so the record follows; the alternative, reverting
+either change, would undo reviewed work. (2) The six `test/asm/records/obj-*-llvm-mc-23.1.5.sha256` (five shown by the gate's
+`head -5`, `obj-synthetic` the sixth) are no oracle packs: they are `sha256sum` lines pinning the committed `.edn` records beside them
+(`bin/repr-asm object-record` writes them, `object-check` runs `sha256sum -c`), and `bin/oracle-records`' `all_pins` took every
+`test/*/records/*.sha256` as a pack's pin, so it looked for packs that were never made; nothing to fetch (the mirror `oracle-packs`
+on mac holds none, rightly). Taken (round 54): `all_pins` keeps the pins whose line names `NAME.tar.xz` (the 28 packs' format),
+`file_pins` the others, which `pins` checks by `sha256sum -c` against the committed file (all six hold); `mirror` and `fetch` see
+only packs. Alternatives: moving asm's pins out of `records/` (touches repr-asm's writer and its records for a tooling bug of
+oracle-records), or recording packs for them (there is no pack: the record is the committed file). `bin/oracle-records pins` exit 0
+(controls ok); `bin/gate --pins`: ok. Nothing heavy run.
+
+## 2026-11-18: the rustc pin's review fixes (n-pins)
+
+Review of this morning's branches, `bin/lib/repr-rust/rustc-pin.bash` and `test/gate/steps.edn`. (1) `rustc_pin_at` checked only the
+`rustc 1.99.1 (58cf8f9c3 ` prefix, which Alpine's later 1.99.1 rebuilds share: it now also requires the pinned driver library
+`librustc_driver-<RUSTC_VERSION's driver>.so` in the rustc's own sysroot (`--print sysroot`), for the tree and the PATH fallback; the
+host `:rustc`'s `:file` names that library, no longer a glob. Proof: a fake script printing the 1.99.1 banner first on PATH, with
+ARBACE_RUSTC_HOME a missing directory, gives ARBACE_RUSTC=rustc-not-at-the-pin (absent); the real tree still resolves. (2) `rustc_pin_take`
+checks the marker under the lock and only trusts it when root/usr/bin/rustc exists (proof: marker present, no root, empty apks dir: it
+reaches the apk check and fails, no longer returns 0). (3) `rustc_pin_path` moves the tree's usr/bin to the front of PATH when it is
+already on it elsewhere (proof: PATH=/usr/bin:TREE:/bin gives TREE first, once). `bin/repr-rust pins check` and `bin/gate --pins`: ok.
