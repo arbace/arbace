@@ -781,6 +781,20 @@
 
 (def ^:private abi-attrs #{"sret" "byval" "byref" "inalloca" "inreg" "preallocated" "returned" "swiftself" "swiftasync" "swifterror" "nest" "zeroext" "signext" "align" "elementtype"})
 
+;; Verifier.cpp's getParameterABIAttributes: the ABI-impacting kinds (StructRet, ByVal, InAlloca, InReg, StackAlignment,
+;; SwiftSelf, SwiftAsync, SwiftError, Preallocated, ByRef), and align only beside byval or byref
+(def ^:private abi-kinds #{"sret" "byval" "inalloca" "inreg" "alignstack" "swiftself" "swiftasync" "swifterror" "preallocated" "byref"})
+
+(defn- abi-key
+  "A parameter's ABI-impacting attributes as a comparable set (types normalized)."
+  [attrs]
+  (let [attrs (group-items attrs)
+        ns (names attrs)
+        norm (fn [a] (if (seq? a) (apply list (first a) (map #(if (or (symbol? %) (seq? %)) (vf/norm-type %) %) (rest a))) a))]
+    (set (for [a attrs :let [n (aname a)]
+               :when (or (abi-kinds n) (and (= n "align") (or (ns "byval") (ns "byref"))))]
+           (norm a)))))
+
 (defn ex-musttail
   "A call marked musttail: LLParser wants `...` in a varargs caller's call (P:3364); then verifyMustTailCall's checks in
   order: inline asm, varargs, return types, conventions, the next instruction a ret returning the call's result, the
@@ -799,7 +813,9 @@
     (cond
       (old-dbg? c) valid
       (:varargs? fsg) (llparser "expected '...' at end of argument list for musttail call in varargs function")
-      (not (or (symbol? c) (local? c))) (unknown "the callee is no name")
+      ;; V: verifyMustTailCall's first check; any other callee (a quoted global's name among them) is checked by the call's own
+      ;; function type, as CI.getFunctionType() (n-llvm-indep)
+      (and (seq? c) (= 'asm (first c))) (verifier "cannot use musttail call with inline asm")
       (not= (:varargs? fsg) callee-var?) (verifier "cannot guarantee tail call due to mismatched varargs")
       (not= (vf/norm-type (:ret fsg)) (vf/norm-type (:ret csg))) (verifier "cannot guarantee tail call due to mismatched return types")
       (not= (:cconv (opts-of (drop 4 f))) (:cconv o)) (verifier "cannot guarantee tail call due to mismatched calling conv")
@@ -811,8 +827,15 @@
       (verifier "cannot guarantee tail call due to mismatched parameter counts")
       (and (not (intrinsic-name? c)) (not= (map (comp vf/norm-type first) (:params fsg)) (map (comp vf/norm-type first) (:params csg))))
       (verifier "cannot guarantee tail call due to mismatched parameter types")
-      (some (fn [[_ as]] (some #(abi-attrs (aname %)) as)) (concat (:params fsg) (:params csg))) (unknown "ABI attributes to compare")
+      ;; V: getParameterABIAttributes over each of the caller's parameters, the caller's against the call's (n-llvm-indep)
+      (some (fn [i] (not= (abi-key (second (get (:params fsg) i))) (abi-key (second (get (:params csg) i)))))
+            (range (count (:params fsg))))
+      (verifier "cannot guarantee tail call due to mismatched ABI impacting function attributes")
       :else valid)))
+
+;; the intrinsics visitIntrinsicCall checks the bundles of: assume's tags, deoptimize's and guard's deopt bundle, the statepoint's,
+;; preallocated's token, the convergence intrinsics' convergencectrl, the ARC runtime calls' attachedcall
+(def ^:private bundle-intrinsics ["llvm.assume" "llvm.experimental." "llvm.call.preallocated." "llvm.objc." "llvm.coro."])
 
 (defn ex-bundle
   "An operand bundle set added to a call: visitCallBase's loop over the bundles, each tag's checks in order, then a direct
@@ -824,7 +847,9 @@
         ops (fn [bd] (vec (filter vector? (rest bd))))]
     (cond
       (old-dbg? c) valid
-      (intrinsic-name? c) (unknown "an intrinsic's own bundle checks")
+      ;; visitIntrinsicCall runs before the bundles' loop: the intrinsics whose own checks read the bundles are left to opt; any
+      ;; other intrinsic's checks held before the bundles were added and do not read them (n-llvm-indep)
+      (and (intrinsic-name? c) (some #(str/starts-with? (name c) %) bundle-intrinsics)) (unknown "an intrinsic's own bundle checks")
       (has-funclets? (nth m fi)) (unknown "a function with funclets")
       :else
       (or
@@ -898,7 +923,8 @@
       catchpad (verifier "CatchPadInst needs to be in a function with a personality.")
       cleanuppad (verifier "CleanupPadInst needs to be in a function with a personality.")
       catchswitch (verifier "CatchSwitchInst needs to be in a function with a personality.")
-      (unknown "no exception handling instruction"))))
+      ;; no instruction of the function needs the personality: the Verifier asks nothing more of it (n-llvm-indep)
+      valid)))
 
 (defn ex-unwind-dest
   "An invoke's unwind edge sent to its normal destination: that block's first non-phi is no pad (V:4253); a block visited

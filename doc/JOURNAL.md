@@ -11706,3 +11706,23 @@ checked, 0 problems), `bin/crops-score --record` and `--judge --strict` (14 crop
 head that moved it), `bin/records-check` (9 pairs, 0 problems), `make check-makefile`, test/docs/claude-md-test.bash,
 test/gate/caches-test.bash (with `--coverage`), `bin/gate --plan` (52 steps) and `bin/gate --full --plan` (341 steps), every
 process under 1 GiB but bin/j2g-unit (1.2 GB: 160 pass, the 7 known failures of the base). Nothing built.
+
+## 2026-11-18: n-llvm-indep, LLVM IR's judge: the heldout set's personality, bundle and musttail unknowns (branch `n-llvm-indep` from mac/358-go-llvm 9769b6772)
+
+What holds LLVM IR below 100, measured on stage 0 (bin/repr-llvm check verify-rt, verify-rt-heldout, verify-llvmtest: each run's
+verify.tsv; llvmi's records): independence's only stage below 1 is the judge, 1,156 cases on a recorded reference: the probes 478
+(LLS30, LLS48 (a)), llvmi's 176 a level (Arbace's own programs with no expected output, LLS49 (a)), verify-rt's 256 (the pack's 252
+modules of clang, rustc and llvm-stress, no RUN line, and 4 mutants), verify-llvmtest's 49, verify-rt-heldout's 21. Completeness's
+non-passes are by design but AOT's cpp.runtime.library (its build above 3 GiB). Built in arbace/repr/llvm/expect.ae (Verifier.cpp
+of llvm-project 23.1.5): a personality dropped where no pad needs it is valid; an intrinsic call's added bundles judged by
+visitCallBase's loop unless the intrinsic's own checks read bundles (assume, experimental.*, preallocated, objc, coro: left unknown);
+musttail's getParameterABIAttributes ported and any callee spelling checked by the call's type. Nine unit cases and three negative
+controls (test/repr/llvm/expect-test.bash: 59 cases, 18 controls, 0 failing). `bin/llvmi ir-make rt --mutants` (33 min, 1.48 GB):
+12 mutants' first lines changed, each equal to opt's recorded verdict and first message (test/llvm/ref-opt23.edn); verify-rt and
+verify-rt-heldout recorded whole (905 and 1,101 pass, the heldout set 1,092 own, 9 opt), heldout-check 886 own all met. The judge
+4,382 own, 1,144 recorded: independence 0.9790 to 0.9792; completeness 0.9915 unchanged. reap --record (unchanged), crops-score
+--record and --judge --strict, records-check: 0 problems. Proposed, not taken: LLS57 (the pack's 252 modules: a producer's RUN line,
+or counted once by their round trip), LLS49 (c) again with C's and C++'s decision (synth-c23's `:expect`, self-checking run
+programs), LLS58 (a fixed environment for llvmi's runs, C's runtime). Alternatives considered: porting the 9 remaining heldout kinds
+and verify-rt's 4 mutants (attribute, intrinsic-declaration and debug-info rules, a case or two each: left); doc/llvm/LLVM-CROP-SURVEY.md,
+"As built: n-llvm-indep".
