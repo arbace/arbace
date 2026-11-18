@@ -1,12 +1,18 @@
 ;; arbace.python.aot/judge's classed rows (queue 259's Low, P6): a classed row's :class is the class's :id (a class map's key),
 ;; not :differs/:refused. Fabricated runs: a refused one and a differing one, each judged with a class of its id and without
 ;; (the negative control: unclassed, the row is :failed with the default class, so the check tells the id from the default).
+;; Queue 347: the rules the first amd64 record (bin/pyi records' check --aot --record) is judged by, each on a fabricated run:
+;; a pass (compiled and loop CPython's, pyi's too), :pyi-differs (pyi's run alone not CPython's: a pass, marked), :as-pyi (the
+;; three runs agree, CPython's is not theirs; with pyi's run and without, --no-pyi's), the loop apart from the compiled run
+;; (:failed :differs unclassed), no reference (:failed :no-reference), an excluded reference (:classed :reference-excluded),
+;; a golden reference's stderr :any; and control's three outcomes (two passing programs of other references crossed fail as
+;; they must; one passing program is :left; two whose references are one and the same are not a pair).
 ;; Run: ARBACE_PATH=.:test $ARBACE_HOST_EXE -m python.aot-judge-test
 (ns python.aot-judge-test
   (:require [arbace.python.aot :as aot]))
 
 (defn -main [& _]
-  (let [sha (apply str (repeat 64 "a")) other (apply str (repeat 64 "b"))
+  (let [sha (apply str (repeat 64 "a")) other (apply str (repeat 64 "b")) third (apply str (repeat 64 "c"))
         ok ["0" sha ""] bad ["0" other ""]
         refs {"t/diff.py" {:status 0 :stdout sha :stderr-last ""}}
         runs [["t/ref.py" "refused" "5" "no such feature"]
@@ -14,10 +20,46 @@
         classes [{:id :fabricated-refused :ids ["t/ref.py"]} {:id :fabricated-differs :ids ["t/diff.py"]}]
         by (fn [cs] (into {} (map (juxt :id identity)) (aot/judge runs refs cs)))
         got (by classes) ctl (by [])
+        ;; the rules (queue 347): RUN id kind compile-ms, then compiled, loop and pyi (status sha stderr-last), then their ms
+        run (fn [id a l p] (into [id "ran" "5"] (concat a l (or p ["-" "-" "-"]) ["1" "1" (if p "1" "-")])))
+        rrefs {"t/pass.py" {:status 0 :stdout sha :stderr-last ""}
+               "t/pyi.py" {:status 0 :stdout sha :stderr-last ""}
+               "t/as.py" {:status 0 :stdout sha :stderr-last ""}
+               "t/as-nopyi.py" {:status 0 :stdout sha :stderr-last ""}
+               "t/loop.py" {:status 0 :stdout sha :stderr-last ""}
+               "t/excl.py" {:status 0 :stdout sha :excluded "its two runs differ"}
+               "t/gold.py" {:status 0 :stdout sha :stderr-last :any :golden true}}
+        rruns [(run "t/pass.py" ok ok ok)
+               (run "t/pyi.py" ok ok bad)
+               (run "t/as.py" bad bad bad)
+               (run "t/as-nopyi.py" bad bad nil)
+               (run "t/loop.py" ok bad ok)
+               (run "t/noref.py" ok ok ok)
+               (run "t/excl.py" ok ok ok)
+               (run "t/gold.py" ["0" sha "a warning"] ["0" sha "a warning"] ["0" sha "a warning"])]
+        r (into {} (map (juxt :id identity)) (aot/judge rruns rrefs []))
+        rule (fn [id] ((juxt :result :class) (get r id)))
+        ;; control: two passing programs, other references; one alone; two of one reference
+        cref {"t/a.py" {:status 0 :stdout sha :stderr-last ""} "t/b.py" {:status 0 :stdout third :stderr-last ""}
+              "t/c.py" {:status 0 :stdout sha :stderr-last ""}}
+        crun {"t/a.py" (run "t/a.py" ok ok ok) "t/b.py" (run "t/b.py" ["0" third ""] ["0" third ""] ["0" third ""])
+              "t/c.py" (run "t/c.py" ok ok ok)}
+        control (fn [ids] (:result (aot/control (mapv crun ids) cref)))
         checks [["refused row classed" (= [:classed :fabricated-refused] ((juxt :result :class) (get got "t/ref.py")))]
                 ["differing row classed" (= [:classed :fabricated-differs] ((juxt :result :class) (get got "t/diff.py")))]
                 ["control: unclassed refused row is :failed :refused" (= [:failed :refused] ((juxt :result :class) (get ctl "t/ref.py")))]
-                ["control: unclassed differing row is :failed :differs" (= [:failed :differs] ((juxt :result :class) (get ctl "t/diff.py")))]]
+                ["control: unclassed differing row is :failed :differs" (= [:failed :differs] ((juxt :result :class) (get ctl "t/diff.py")))]
+                ["the three runs CPython's: a pass, no :pyi-differs" (and (= [:pass nil] (rule "t/pass.py")) (not (:pyi-differs (get r "t/pass.py"))))]
+                ["pyi's run alone not CPython's: a pass marked :pyi-differs" (and (= :pass (:result (get r "t/pyi.py"))) (:pyi-differs (get r "t/pyi.py")))]
+                ["the three runs agree, not CPython's: :classed :as-pyi" (= [:classed :as-pyi] (rule "t/as.py"))]
+                ["no pyi run (--no-pyi), compiled as the loop, not CPython's: :classed :as-pyi" (= [:classed :as-pyi] (rule "t/as-nopyi.py"))]
+                ["the loop apart from the compiled run: :failed :differs" (= [:failed :differs] (rule "t/loop.py"))]
+                ["no reference: :failed :no-reference" (= [:failed :no-reference] (rule "t/noref.py"))]
+                ["an excluded reference: :classed :reference-excluded" (= [:classed :reference-excluded] (rule "t/excl.py"))]
+                ["a golden reference's stderr :any: a pass" (= :pass (:result (get r "t/gold.py")))]
+                ["control: two passing programs of other references fail as they must" (= :failed-as-it-must (control ["t/a.py" "t/b.py"]))]
+                ["control: one passing program is :left" (= :left (control ["t/a.py"]))]
+                ["control: two programs of one reference are no pair (:left)" (= :left (control ["t/a.py" "t/c.py"]))]]
         bad (remove second checks)]
     (doseq [[n p] checks] (println (if p "ok  " "FAIL") n))
     (System/exit (if (seq bad) 1 0))))
