@@ -1589,7 +1589,8 @@
         conv ({'CCallConv :ccall 'CApiConv :capi 'StdCallConv :stdcall 'PrimCallConv :prim 'JavaScriptCallConv :javascript} conv)
         safety ({'PlayRisky :unsafe 'PlaySafe :safe 'PlayInterruptible :interruptible} safety :safe)]
     (merge {:conv conv :safety safety}
-           (case (con sp)
+           ;; (CWrapper is a bare symbol, the others nodes)
+           (case (if (symbol? sp) sp (con sp))
              CFunction (let [tg (arg sp 1)]
                          (if (= 'StaticTarget (con tg)) {:target (arg tg 2) :fun (not (false? (arg tg 4)))} {:dynamic true}))
              CLabel {:label (arg sp 1)}
@@ -1714,6 +1715,70 @@
        void-ok [nil "void"]
        :else (throw (ex-info (str "toCType: " (pr-str t)) {}))))))
 
+(defn- ffi-prim-of
+  "getPrimTyOf: the primitive type constructor's occurrence of an exported function's argument or result (Int#: Bool's)"
+  [t]
+  (let [t (deep-expand t)]
+    (cond
+      (= tc-bool (second t)) "Int#"
+      (ffi-prim-type? t) (occ (second t))
+      (ffi-con-field t 'newtype) (ffi-prim-of (second (ffi-con-field t 'newtype)))
+      (ffi-con-field t 'data) (ffi-prim-of (second (ffi-con-field t 'data)))
+      :else (throw (ex-info (str "getPrimTyOf: " (pr-str t)) {})))))
+
+(defn- ffi-desc-char
+  "primTyDescChar (a 64-bit word): the argument's letter in the type string createAdjustor gets"
+  [t]
+  (if (unit-ty? t)
+    \v
+    (or ({"Int#" \L "Word#" \l "Char#" \l "Int8#" \B "Word8#" \b "Int16#" \S "Word16#" \s "Int32#" \W "Word32#" \w
+          "Int64#" \L "Word64#" \l "Addr#" \p "StablePtr#" \p "Float#" \f "Double#" \d} (ffi-prim-of t))
+        (throw (ex-info (str "primTyDescChar: " (pr-str t)) {})))))
+
+(defn- ffi-stg-type
+  "showFFIType of a type: its type constructor's occurrence after the newtypes unwrapped (unwrapType): HsInt's Int"
+  [t]
+  (let [t (deep-expand t)]
+    (if-let [[_ ft] (and (= :tc (first t)) (ffi-con-field t 'newtype))]
+      (ffi-stg-type ft)
+      (if (= :tc (first t)) (occ (second t)) (throw (ex-info (str "typeTyCon: " (pr-str t)) {}))))))
+
+(defn- fexport-cbits
+  "mkFExportCBits (the CCallConv's, no libffi): {:h [LINE] :c [LINE] :ts TYPE-STRING} of the C function c-nm calling the
+  exported closure target (its label's name), or, target nil, a wrapper's stub calling the closure its stable pointer
+  names; arg-tys and res-ty the Haskell types (an IO result's io? true: runIO, else runNonIO)"
+  [c-nm target arg-tys res-ty io?]
+  (let [args (vec (map-indexed (fn [i t] {:n (str "a" (inc i)) :ty (str "Hs" (ffi-stg-type t)) :t t
+                                          :float (contains? #{"Float#" "Double#"} (ffi-prim-of t))})
+                               arg-tys))
+        ts (apply str (map #(ffi-desc-char (:t %)) args))
+        ;; insertRetAddr (x86-64, not Windows): the return address's slot after the sixth integer argument
+        ret-addr (fn [as] (loop [n 0 as as acc []]
+                            (cond (= n 6) (into (conj acc {:n "original_return_addr" :ty "void*"}) as)
+                                  (empty? as) acc
+                                  (:float (first as)) (recur n (rest as) (conj acc (first as)))
+                                  :else (recur (inc n) (rest as) (conj acc (first as))))))
+        aug (if target args (into [{:n "the_stableptr" :ty "StgStablePtr"}] (ret-addr args)))
+        unit? (unit-ty? res-ty)
+        cres (if unit? "void" (str "Hs" (ffi-stg-type res-ty)))
+        proto (str cres " " c-nm "(" (if (empty? aug) "void" (str/join ", " (map #(str (:ty %) " " (:n %)) aug))) ")")
+        expr (reduce (fn [acc a] (str "rts_apply(cap," acc ",rts_mk" (subs (:ty a) 2) "(cap," (:n a) "))"))
+                     (if target (str "&" target "_closure") "(StgClosure*)deRefStablePtr(the_stableptr)")
+                     args)]
+    {:h [(str "extern " proto ";")]
+     :ts ts
+     :c (vec (concat [" "] (when target [(str "extern StgClosure " target "_closure;")])
+                     [proto "{" "Capability *cap;" "HaskellObj ret;"]
+                     (when-not unit? [(str cres " cret;")])
+                     ["cap = rts_lock();"
+                      (str "rts_inCall(&cap,rts_apply(cap," (if io? "ghc_hs_iface->runIO_closure" "ghc_hs_iface->runNonIO_closure")
+                           "," expr ") ,&ret);")
+                      (str "rts_checkSchedStatus(\"" c-nm "\",cap);")]
+                     (when-not unit? [(str "cret=rts_get" (subs cres 2) "(ret);")])
+                     ["rts_unlock(cap);"]
+                     (when-not unit? ["return cret;"])
+                     ["}"]))}))
+
 (defn- io-split
   "tcSplitIOType_maybe: [t true] of IO t, else [t false]"
   [t]
@@ -1754,7 +1819,7 @@
       (let [[pt wrap] rw
             ccall-res (if pt [:tc (utuple-tc 2) [state-rw pt]] [:tc (utuple-tc 1) [state-rw]])
             _ (swap! *genv* assoc f (reduce (fn [r a] (fn-ty a r)) (fn-ty state-rw ccall-res) (reverse val-tys)))
-            _ (swap! *fcalls* assoc f (assoc sp :unit *unit*))
+            _ (swap! *fcalls* assoc f (cond-> (dissoc sp :no-unit) (not (:no-unit sp)) (assoc :unit *unit*)))
             ;; mk_alt: the call's unboxed result matched, the result boxed; return_result: (# s, r #) for IO, r else
             s2 (ffi-lv "ds" state-rw)
             r (when pt (ffi-lv "ds" pt))
@@ -1767,15 +1832,44 @@
             (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "IO")) [(list 'lam [s] (call s))]))
           (call (list 'v (ext-name "var" "GHC.Internal.Prim" "realWorld#"))))))))
 
+(def ^:private addr-ty [:tc (ext-name "tc" "GHC.Internal.Prim" "Addr#") []])
+
 (defn ds-fimport
   "dsFImport: the binding of foreign import n :: t with the CImport ci, as Core, or nil when it is not desugared (an
   argument or result type unboxArg or resultWrapper refuses); a dynamic import (dsFCall's DynamicTarget, queue 364) is a
   call whose first argument, the FunPtr unboxed to its Addr#, is the function called; a capi import's call is its C
-  wrapper's, wname (capi-target's, the caller's); a \"wrapper\" import is not desugared yet"
+  wrapper's, wname (capi-target's, the caller's); a \"wrapper\" import (dsCFExportDynamic, queue 364) makes a stable
+  pointer of its function and calls createAdjustor with it, the stub's label and its type string (adj, [LABEL TS])"
   [n t ci & [{:keys [wname adj]}]]
   (let [sp (ffi-spec ci) [arg-tys res-ty] (ffi-split t)]
     (cond
-      (or (:wrapper sp) (:unknown sp) (nil? (:conv sp))) nil
+      (or (:unknown sp) (nil? (:conv sp))) nil
+      ;; dsCFExportDynamic: \cback -> bindIO (newStablePtr cback) (\stbl -> createAdjustor's call), the call dsCCall's
+      ;; (unsafe, no unit): the stable pointer unboxed, the stub's label (IsFunction) and the type string its arguments,
+      ;; the result (IO (FunPtr ...)) boxed
+      (:wrapper sp)
+      (let [[arg-tys res-ty] (ffi-split (ffi-normalise t))]
+      (when (and adj (= 1 (count arg-tys)))
+        ;; (the type normalised, as dsCFExportDynamic's coercionLKind: T493's MyIO (MyFunPtr ...) is IO (FunPtr ...))
+        (let [[label ts] adj
+              at (first arg-tys)
+              [inner _] (io-split res-ty)
+              sp-ty [:tc (ext-name "tc" "GHC.Internal.Stable" "StablePtr") [at]]
+              sp#-ty [:tc (ext-name "tc" "GHC.Internal.Prim" "StablePtr#") [at]]
+              cback (ffi-lv "ds" at)
+              stbl (ffi-lv "ds" sp-ty)
+              a (ffi-lv "ds" sp#-ty)
+              f (ext-name "ffi" *module* (str "ccall:createAdjustor:" (occ n)))
+              body (ffi-call-body f {:conv :ccall :safety :unsafe :target "createAdjustor" :fun true :no-unit true}
+                                  [a (list 'lit (str "&label:" label ":fun")) (list 'lit (str (pr-str ts) "#"))]
+                                  [sp#-ty addr-ty addr-ty] [:tc io-tc [inner]])]
+          (when body
+            (list 'lam [cback]
+                  (list 'app (list 'v (ext-name "var" "GHC.Internal.Base" "bindIO"))
+                        [(list 'app (list 'v (ext-name "var" "GHC.Internal.Stable" "newStablePtr")) [cback])
+                         (list 'lam [stbl]
+                               (list 'case stbl (ffi-lv "ds" sp-ty)
+                                     [(list 'alt (ext-name "data" "GHC.Internal.Stable" "StablePtr") [a] body)]))]))))))
       ;; dsFLabel: the label's address in the result's constructor (FunPtr or Ptr), IsFunction when it is a FunPtr
       (:label sp)
       (let [[c ft] (ffi-con-field res-ty 'data)]
@@ -1802,8 +1896,8 @@
                 (if (empty? xs) body (list 'lam xs body))))))))))
 
 (defn- fimport-stub
-  "A foreign import's stub and what its desugaring needs ({:stub {:h :c} :wname}): a capi function's C wrapper (its
-  number the module's next), any other's none"
+  "A foreign import's stub and what its desugaring needs ({:stub {:h :c} :wname :adj}): a capi function's C wrapper
+  (its number the module's next), a \"wrapper\" import's adjustor stub, any other's none"
   [n t ci]
   (let [sp (ffi-spec ci)
         hdr (let [h (arg ci 4)] (when (= 'Just (con h)) (arg (arg h 1) 2)))]
@@ -1811,6 +1905,14 @@
       (and (= :capi (:conv sp)) (:target sp))
       (let [w (capi-target (:target sp))]
         {:wname w :stub (try (capi-stub w (:target sp) (:fun sp) hdr t) (catch Throwable _ {:h [] :c []}))})
+      (:wrapper sp)
+      (try (let [[[at] res] (ffi-split (ffi-normalise t))
+                 label (zenc (str "$" *unit* "$" *module* "$" (zenc *module*) "_" (zenc (occ n))))
+                 [fargs fres] (ffi-split at)
+                 [r io?] (io-split fres)
+                 bits (fexport-cbits label nil fargs r io?)]
+             {:adj [label (:ts bits)] :stub (dissoc bits :ts)})
+           (catch Throwable e (when (System/getenv "REPR_HASKELL_FFI_TRACE") (binding [*out* *err*] (println "ffi-trace: wrapper stub:" (occ n) (.getMessage e)))) {:stub {:h [] :c []}}))
       :else {:stub {:h [] :c []}})))
 
 ;;; ------------------------------------------------------------------------------------------
