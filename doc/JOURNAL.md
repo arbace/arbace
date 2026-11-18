@@ -10395,3 +10395,25 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `:no-reference-own` until HF10-P64 (HF10-P65 (a)). HF10-P63 (a), P65 (a) taken overnight (round 52). doc/haskell/FRONTEND-SURVEY.md,
   "As built: HF10-P63 (a)". Alternatives considered: a second preprocessor (none needed); own-fallback.txt for the 29, or refusing
   programs whose reference is `:no-build` (P65 (b), (c)).
+
+## 2026-11-18: Haskell, HF10-P66 (a) and P67 (a): the front end's commonest stops on the own libraries (round 52, branch `n-hs-elab`)
+
+- Base: `mac/n-hs-cpp` `5ea3d6aae`; its dry plan tries 739 of 950 programs on the own libraries. Where the front end stops, two
+  samples: `bin/hsi check --libs own --only` on 25 programs in batches of 5 (T1735, four of the interim record's front failures, 20
+  drawn by `shuf` with a fixed random source from the 285 tried programs with no own line in check-hsi-own.edn), and the front end
+  alone over 209 testsuite programs of that pool (a fresh process after each stop, as the check's `front_shard`). Stops: the solver
+  looping on a cycle of instance contexts 4 (T5913, TcCoercible, tcrun030, tcrun032), T1735's polytype synonym 1, T15598 (HF10-P58)
+  1, the light 1.15 GB cap 3 (T5462Yes1, quotRem2Large, cacheprof).
+- Built (`arbace/repr/haskell/typecheck.ae`): P67 (a), `generalize` solves a closed wanted whole by `solve-pred`, whose solved
+  dictionaries make a cycle a letrec (before, `reduce-by-instance` pushed the instance's context back without end). P66 (a): a
+  saturated synonym whose expansion is a polytype is expanded where it is written (`poly-syn`); a polytype met among a binding's
+  arguments is skolemised there (`infer-matches`, matchExpectedFunTys), one met inside an application spine is instantiated with its
+  evidence applied before the next argument (`tc-app`'s `ev-args`, tcInstFun), and a bare lambda-bound variable of a polytype with
+  quantifiers takes its evidence (`var-occ`; T1735's `b <- f` in fromConstrM ran "no alternative for (ReadState :{..})" without it).
+- Checked light (`HSI_JOBS=1`, `ARBACE_MEM_GIB=1`, `HSI_FRONT_MEM=900MiB`, a 1.15 GB watcher): T1735, T5913, TcCoercible, tcrun030,
+  tcrun032 pass `:stg :native :libs :own` (0 of 5 before); samples/Hello passes and its control fails as it must; the 25 programs' own
+  passes 17 before, 18 after (+T1735; nofib/gc/linear's front went past the check's 300 s under the gate's load, then passed own
+  in a rerun alone). The front end alone over the 209: 202 compile before, 204 after (no program that compiled before stops now). P66 (a), P67 (a)
+  taken overnight (round 52); P68 (the next stops) a DECISION. doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P66 (a), P67 (a)".
+  Alternatives considered: a depth bound in `generalize` (P67 (b): stops the loop, leaves the four unsolved); leaving T1735 on the
+  pack (P66 (b)).

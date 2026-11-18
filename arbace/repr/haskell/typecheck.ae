@@ -182,6 +182,20 @@
         (if-let [r (reduce-family t)] (expand r) t))
       t)))
 
+;; HF10-P66 (a): a saturated synonym whose right-hand side is a polytype (RankNTypes' type GenericQ ctx r = forall a. Data
+;; ctx a => a -> r; LiberalTypeSynonyms') is expanded where the type is written or read, as GHC's tcSplitSigmaTy and
+;; matchExpectedFunTys look through it (coreView): a signature's GenericQ ctx [r] is then a polytype checked by skolemising
+;; (check-poly) and an argument f :: GenericQ ctx r a variable of a polytype, instantiated at each use. Kept as the synonym,
+;; the elaborator met a :tc where it looks for :forall (check-expr, instantiate) and the quantified variable's dictionary
+;; went unsolved (T1735_Help.Basics' gmapQ: "unsolved: Data ctx a")
+(defn- poly-syn
+  "t, or its expansion when t is a saturated synonym application whose expansion is a polytype"
+  [t]
+  (if (and (= :tc (first t)) (some-> *syns* deref (get (second t))))
+    (let [e (expand t)]
+      (if (and (= :forall (first e)) (or (seq (nth e 1)) (seq (nth e 2)))) e t))
+    t))
+
 (defn stuck-family?
   "A type family application that does not reduce (yet): GHC keeps it as a wanted equality, the elaborator defers
   the unification"
@@ -1352,8 +1366,8 @@
                       ;; (->) as a type constructor: FUN at the many multiplicity (GHC.Internal.Types' type (->) =
                       ;; FUN 'Many), the function type's constructor
                       (and (= "GHC.Internal.Types" (nmod n)) (= "->" (occ n))) [:tc fun-tc []]
-                      :else [:tc n []]))
-      HsAppTy (mk-app (hs-type tvs (arg v 2)) (hs-type tvs (arg v 3)))
+                      :else (poly-syn [:tc n []])))
+      HsAppTy (poly-syn (mk-app (hs-type tvs (arg v 2)) (hs-type tvs (arg v 3))))
       HsFunTy (fn-ty (hs-type tvs (arg v 3)) (hs-type tvs (arg v 4)))
       HsListTy (list-ty (hs-type tvs (arg v 2)))
       HsTupleTy (let [ts (mapv #(hs-type tvs %) (arg v 3))]
@@ -1388,7 +1402,7 @@
                  ;; HF10-P54 (a): a type variable used infix (tcrun034's a `m` b): its application, as HsTyVar's
                  (let [f (or (get tvs op) (get *scoped-tvs* (tv-key op)) (some-> *pat-tvs* deref (get (tv-key op))) [:tv (occ op)])]
                    (mk-app (mk-app f (hs-type tvs (arg v 3))) (hs-type tvs (arg v 5))))
-                 [:tc op [(hs-type tvs (arg v 3)) (hs-type tvs (arg v 5))]]))
+                 (poly-syn [:tc op [(hs-type tvs (arg v 3)) (hs-type tvs (arg v 5))]])))
       HsQualTy (let [ctx (lval (arg v 2)) body (hs-type tvs (arg v 3))]
                  [:forall [] (vec (mapcat (fn [c] (ctx-preds (hs-type tvs c))) ctx)) body])
       ;; RankNTypes: an inner forall a quantified type of its own (runST's (forall s. ST s a)); the elaborator
@@ -1704,11 +1718,15 @@
     (if (:mono e)
       (let [mt (prune (:mono e))]
         (when-not (:core e) (note-type! (lv n) (:mono e)))
-        (if (and (vector? mt) (= :forall (first mt)) (empty? (nth mt 1)) (seq (nth mt 2)))
+        (if (and (vector? mt) (= :forall (first mt)) (seq (nth mt 2)))
           ;; HF10-P20: a binder of a qualified type (withFrozenCallStack's do_this :: HasCallStack => a): its occurrence
           ;; takes its constraints' evidence (GHC's instantiation of a lambda-bound Id; the ?callStack the let gives),
-          ;; else do_this was returned unapplied and throwIO's continuation cased on a function
-          [(nth mt 3) (app* (or (:core e) (lv n)) (mapv #(want-at! % n sp label) (nth mt 2)))]
+          ;; else do_this was returned unapplied and throwIO's continuation cased on a function. HF10-P66 (a): a
+          ;; binder of a polytype with quantifiers too (fromConstrM's f :: forall b. Data ctx b => m b, used bare in
+          ;; `b <- f`): instantiated, its context's evidence applied; before, f went unapplied and the next bind took
+          ;; the dictionary's function for the action (T1735's "no alternative for (ReadState :{..})")
+          (let [[t ps] (instantiate mt)]
+            [t (app* (or (:core e) (lv n)) (mapv #(want-at! % n sp label) ps))])
           [(:mono e) (or (:core e) (lv n))]))
       (let [[t preds] (instantiate (:poly e))]
         ;; a binding of the module itself (or a local one) with HasCallStack pushes its call site too (EvCsPushCall)
@@ -2231,6 +2249,11 @@
 
 (declare con-arg-types)
 
+(defn- ev-args
+  "HF10-P66 (a): f applied to its arguments, each argument's evidence (a polytype instantiated before it) first"
+  [f evs cs]
+  (reduce (fn [c [e a]] (app* (app* c e) [a])) f (map vector evs cs)))
+
 (defn- split-fun
   "A function type's argument and result (matchExpectedFunTys: a meta split into fresh ones, a forall instantiated)"
   [t]
@@ -2255,12 +2278,26 @@
                   (if (and (vector? x) (= :forall (first x)) (seq (nth x 1)) (seq (nth x 2)) (seq args))
                     (let [[t2 ps] (instantiate x)] [t2 (app* cf (mapv want! ps))])
                     [tf cf]))
-        [ats r] (reduce (fn [[ats t] _] (let [[a r] (split-fun t)] [(conj ats a) r])) [[] tf] args)
+        ;; HF10-P66 (a): a polytype met after some arguments (gmapQ xmlProxy (toXmlD dict) x, gmapQ's type after two
+        ;; arguments forall a. Data ctx a => a -> [r]) instantiated there with its constraints' evidence applied before the
+        ;; next argument (tcInstFun instantiates at each forall of the spine); split-fun's instantiation wanted them and
+        ;; dropped the evidence, the arguments after it one dictionary short
+        [ats r evs] (reduce (fn [[ats t evs] _]
+                              (let [x (expand (prune t))]
+                                (if (and (= :forall (first x)) (seq (nth x 2)))
+                                  (let [[t2 ps] (instantiate x) e (mapv want! ps) [a r] (split-fun t2)] [(conj ats a) r (conj evs e)])
+                                  (let [[a r] (split-fun t)] [(conj ats a) r (conj evs [])]))))
+                            [[] tf []] args)
+        cf0 cf
         ;; HF10-P21: a result of a qualified type, a field's (CollectExceptionAnnotationMechanism's ceaCollect... :: HasCallStack =>
         ;; IO SomeExceptionAnnotation): instantiated after the arguments, its constraints' evidence applied (tcInstFun's final
         ;; instantiation); HasCallStack's call site the occurrence's, GHC's OccurrenceOfRecSel origin "a use of `f'" for a field
-        rq (let [x (prune r)] (when (and (vector? x) (= :forall (first x)) (empty? (nth x 1)) (seq (nth x 2))) x))
-        r (if rq (nth rq 3) r)
+        rq (let [x (expand (prune r))] (when (and (vector? x) (= :forall (first x)) (seq (nth x 2))) x))
+        ;; (HF10-P66 (a): a result polytype with quantifiers too, gmapT ctx f's forall a. Data ctx a => a -> a,
+        ;; instantiated, its context's evidence applied as a qualified type's)
+        [r rq] (cond (nil? rq) [r nil]
+                     (empty? (nth rq 1)) [(nth rq 3) rq]
+                     :else (let [[t2 ps] (instantiate rq)] [t2 [:forall [] ps t2]]))
         _ (when expected (unify r expected))
         ;; HF10-P44 (a): an argument checked against a qualified type ((cls => r), withDict's, a rank-n context) after the
         ;; others, so its givens' metas are the other arguments' types first (GHC solves the implication at the end:
@@ -2273,8 +2310,8 @@
       (let [n (when (= 'HsVar (con head)) (nm (arg head 2)))
             sp (when n (lsp (arg head 2)))
             label (when (and n (= "fld" (nth n 1))) (str "a use of `" (occ n) "'"))]
-        [r (app* (app* cf cs) (mapv #(if n (want-at! % n sp label) (want! %)) (nth rq 2)))])
-      [r (app* cf cs)])))
+        [r (app* (ev-args cf0 evs cs) (mapv #(if n (want-at! % n sp label) (want! %)) (nth rq 2)))])
+      [r (ev-args cf0 evs cs)])))
 
 (declare infer check-expr super-closure assume-eqs! dict-param)
 
@@ -3198,14 +3235,32 @@
   [env mg ctx & [expected]]
   (let [ms (lval (arg mg 2))
         n (count (lval (arg (lval (first ms)) 3)))
+        ;; HF10-P66 (a): a polytype met among the arguments (gmapT :: Proxy ctx -> GenericT ctx -> GenericT ctx, defined by
+        ;; gmapT ctx f x: after two arguments forall a. Data ctx a => a -> a) is skolemised there, as GHC.Tc.Utils.Unify's
+        ;; matchExpectedFunTys does (tcSkolemise at each forall it meets in checking mode): its quantifiers skolems, its
+        ;; context given to the clauses, its dictionaries the core's parameters after the arguments before it. Before,
+        ;; the expected type ran out there and the clauses' type was unified with the polytype afterwards, its context
+        ;; instantiated as wanteds no given solved
+        splits (atom [])
         [args r0] (loop [t expected as []]
                     (let [t (when t (expand (prune t)))]
                       (cond (= n (count as)) [as t]
                             (and t (= :tc (first t)) (= fun-tc (second t))) (recur (second (nth t 2)) (conj as (first (nth t 2))))
+                            (and t (not ctx) (= :forall (first t)) (or (seq (nth t 1)) (seq (nth t 2))))
+                            (let [sk (into {} (map (fn [x] [x [:tv (str x "_sk" (fresh-id))]]) (nth t 1)))
+                                  preds (mapv (fn [[c ts]] (zonk-pred [c (mapv #(subst sk %) ts)])) (nth t 2))]
+                              (swap! splits conj {:at (count as) :preds preds :params (mapv dict-param preds)})
+                              (recur (subst sk (nth t 3)) as))
                             :else [(into as (repeatedly (- n (count as)) fresh-meta)) nil])))
         args (vec args)
         r (or (:res ctx) (when (and expected r0 (= n (count args))) r0) (fresh-meta))
-        clauses (mapv (fn [m]
+        splits @splits
+        sgivens (when (seq splits) (super-closure (vec (mapcat (fn [sp] (map vector (:preds sp) (:params sp))) splits))))
+        sws (atom [])
+        clauses (binding [*wanteds* (if (seq splits) sws *wanteds*)
+                          *given-eqs* (if (seq splits) (scope-givens) *given-eqs*)]
+                  (when (seq splits) (assume-eqs! (mapcat :preds splits)))
+                  (mapv (fn [m]
                         (let [outer (some-> *given-eqs* deref)]
                           (binding [*given-eqs* (atom (or outer {})) *pat-tvs* (atom (or (some-> *pat-tvs* deref) {}))]
                             (let [w0 (count @*wanteds*)
@@ -3216,18 +3271,27 @@
                               (when (not= outer @*given-eqs*)
                                 (rewrite-wanteds! w0))
                               [pcs body]))))
-                      ms)]
+                      ms))
+        _ (when (seq splits) (retry-implications! false) (solve-with-givens! @sws sgivens))
+        ;; the split arguments' lambdas: the dictionaries of a polytype met after k arguments bound after them
+        split-lam (fn [ps body]
+                    (reduce (fn [b sp] (let [[before after] (split-at (:at sp) (second b))
+                                             inner (list 'lam (:params sp) (if (seq after) (list 'lam (vec after) (nth b 2)) (nth b 2)))]
+                                         (cond (empty? (:params sp)) b
+                                               (seq before) (list 'lam (vec before) inner)
+                                               :else inner)))
+                            (list 'lam ps body) (reverse splits)))]
     (if ctx
       [r (list 'match [(second (:scrut ctx))] (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses))]
-      (let [ty (reduce (fn [acc a] (fn-ty a acc)) r (reverse args))
+      (let [ty (if (seq splits) expected (reduce (fn [acc a] (fn-ty a acc)) r (reverse args)))
             simple? (and (= 1 (count clauses)) (every? #(= 'lv (first %)) (first (first clauses))))
             core (cond (zero? n) (second (first clauses))
-                       simple? (list 'lam (first (first clauses)) (second (first clauses)))
+                       simple? (split-lam (first (first clauses)) (second (first clauses)))
                        :else (let [ds (vec (repeatedly n #(fresh-lv "ds")))]
                                ;; the match's binders typed as the arguments (HF10-P20: a State# or Int# argument matched
                                ;; by equations was taken for a lifted one by tostg, ascii_decode's state token)
                                (doseq [[d t] (map vector ds args)] (note-type! d t))
-                               (list 'lam ds (list 'match ds (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)))))]
+                               (split-lam ds (list 'match ds (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)))))]
         [ty core]))))
 
 (defn- pat-binders
@@ -3296,10 +3360,18 @@
                      (if (empty? ws)
                        out
                        (let [w (first ws) [c ts] (zonk-pred (:pred w))
-                             inst (when (and (seq ts) (= :tc (first (first ts))) (not (eq-pred? [c ts]))) (reduce-by-instance [c ts]))]
+                             inst (when (and (seq ts) (= :tc (first (first ts))) (not (eq-pred? [c ts]))) (reduce-by-instance [c ts]))
+                             ;; HF10-P67 (a): a closed predicate (no meta, no type variable) solved whole by solve-pred, whose
+                             ;; recursive dictionaries are a letrec (GHC's solved dictionaries): reduced here instance by instance,
+                             ;; a cycle of instance contexts (T5913's L2 W => L1 W, L1 W => L2 W; tcrun030's Eq (D []) by
+                             ;; Eq [D []]) pushed its own predicate again without end, the front end's memory growing until it stopped
+                             closed (when (and inst (empty? (mapcat metas-of ts)) (empty? (mapcat tvs-of ts)))
+                                      (solve-pred [c ts] [] 0))]
                          (cond
                            (eq-pred? [c ts])
                            (do (unify (last (butlast ts)) (last ts)) (swap! *evidence* assoc (:ev w) (list 'co)) (recur (rest ws) out))
+                           closed
+                           (do (swap! *evidence* assoc (:ev w) closed) (recur (rest ws) out))
                            inst
                            (let [[dfun subs] inst
                                  sws (mapv (fn [p] {:ev (fresh-id) :pred p}) subs)]
