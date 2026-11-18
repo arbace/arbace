@@ -276,7 +276,9 @@ and, once per distinct content, the header unit's file:
   is answered from the host data (§9.1). A declaration that begins in one file and ends in another is
   refused with its position (such a file is classed `split-declaration`), unless every other file's token comes from an
   `#include` the declaration holds between the items of a statement list (CS275 (a)) or between the elements of an
-  initializer or an enumerator list (CS329 (a), §9.2): that `#include` is a form there, its tokens the directive's.
+  initializer or an enumerator list (CS329 (a), §9.2): that `#include` is a form there, its tokens the directive's. An
+  element or an item that holds both the main file's tokens and such a file's (an element or statement begun in the main file
+  and ended in the header beside it, or the reverse) is refused all the same (D342-1 (a)).
 - The header units of musl (CS11) are those its own sources and the corpora's units produce; ci's
   `(c/include "<stdio.h>")` at the REPL reads the header in the REPL unit's current context.
 

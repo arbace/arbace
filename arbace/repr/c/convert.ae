@@ -1232,7 +1232,7 @@
               :DesignatorField2 (keyword (tsrc (g d :Token))))))
         (chain dl :DesignatorList)))
 
-(declare initializer placed-at directive-lines)
+(declare initializer placed-at directive-lines straddles?)
 
 ;; CS329 (a): the directives inside an initializer list or an enumerator list (quickjs's `#define DEF(id, size) { #id, size },`
 ;; `#include "libregexp-opcode.h"` `#undef DEF` inside a table), elements of the list's forms (SPEC §9.2)
@@ -1292,7 +1292,9 @@
               (let [l (nth ls i) w (elem-node l next-key)]
                 (if (and (not *include-inside*) (has-other? w) (not (has-main? w)))
                   (recur (inc i) prev prev-end last-dir)
-                  (do (when (and (>= (long last-dir) 0) (comma-in? prev-end (min-po w)))
+                  (do (when (straddles? w)
+                        (refuse :split-declaration "a declaration that begins in one file and ends in another" w))
+                      (when (and (>= (long last-dir) 0) (comma-in? prev-end (min-po w)))
                         (.set out (int last-dir) (vary-meta (.get out (int last-dir)) assoc :c/comma-after true)))
                       (.addAll out ^java.util.Collection (fs-of l))
                       (recur (inc i) :el (max-end w) -1))))
@@ -1498,6 +1500,18 @@
                         (if ln (vary-meta l assoc :line ln) l))))
           (recur (next items) (conj out f)))))))
 
+(defn- straddles?
+  "D342-1 (a): whether the list element or body item `n` holds both the main file's tokens and another file's, the #include
+  that brought the other file's not inside it (no placed #include within its main-file extent): an element or a statement
+  that begins in the main file and ends in a header placed beside it, or the reverse (`{ 0,` `#include \"h\"` `3 }` with h
+  holding `1, 2 -`), which the print would write with the header's tokens twice. Not ci's read (*include-inside*)."
+  [n]
+  (and (not *include-inside*) (has-main? n) (has-other? n)
+       (let [^java.util.TreeSet t (cx :placed-incs)
+             lo (min-po n) hi (max-end n)
+             x (when t (.ceiling t (Long/valueOf lo)))]
+         (not (and x (< (long x) hi))))))
+
 (defn- placed-at
   "The directives placed before the item `i` of the statement list `owner`: [[offset form] ...]."
   [owner i]
@@ -1564,6 +1578,9 @@
       ;; an item an #include inside the body brought in is the directive's; under *include-inside* (ci's read, CS275 (b)) the
       ;; body's own item, as the libc's tables are the declaration's
       (when (or *include-inside* (nil? own) (some #(identical? (.-pf ^PTok %) own) (take 64 (node-tokens bi))))
+        ;; D342-1 (a): an item that straddles the body's file and a header an #include beside it brought in is refused
+        (when (and (some? own) (identical? own (cx :main-file)) (straddles? bi))
+          (refuse :split-declaration "a declaration that begins in one file and ends in another" bi))
         (case (cs bi)
           :BlockItemDecl (let [d (g bi :Declaration)
                                t (group-of d)
@@ -2330,7 +2347,15 @@
                             :when (and (= "enter" (:directive e)) (= main-name (:from e)) (<= lo (long (:off e)) hi))]
                       (when-not (contains? placed-offs (:off e))
                         (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)))]
-              (binding [*cx* (assoc *cx* :placed placed)]
+              (binding [*cx* (assoc *cx* :placed placed
+                                    ;; D342-1 (a): the offsets of the main file's #include lines placed between a list's elements
+                                    ;; or a body's items (straddles?)
+                                    :placed-incs (let [t (java.util.TreeSet.)]
+                                                   (doseq [e (:layer r)
+                                                           :when (and (= "enter" (:directive e)) (= main-name (:from e)) (:off e)
+                                                                      (contains? placed-offs (:off e)))]
+                                                     (.add t (Long/valueOf (long (:off e)))))
+                                                   t))]
                 (let [out (ArrayList.)
                       items (ArrayList.)
                       ;; CS274 (a): consecutive items one invocation made whole (their tokens exactly the invocation's, no
