@@ -65,6 +65,17 @@
         (recur (rest ls) nil (if cur (conj out (str/trim cur)) out)))
       (if cur (conj out (str/trim cur)) out))))
 
+(defn- sha256-bytes ^String [^bytes b]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md b)))))
+(defn- sha256-file ^String [^java.io.File f] (sha256-bytes (java.nio.file.Files/readAllBytes (.toPath f))))
+
+(def ^:private derived-file "test/llvm/selfref-derived.edn")
+(def ^:private derived*
+  (delay (let [f (java.io.File. ^String derived-file)]
+           (if (.exists f) (into {} (map (juxt :id identity) (read-string (slurp f)))) {}))))
+(defn- derived [] @derived*)
+
 (defn own-verdict
   "The module's own verdict, or nil (no verdict of its own: judged against lli's record):
   - llvm/test's ExecutionEngine modules (ee.*): lit's, the RUN lines run lli on the file with no argument and exit 0 (lit fails a
@@ -74,7 +85,10 @@
     (CHECK-NEXT, -NOT, -DAG, a prefix, a {{regex}} or [[variable]]), arguments that differ between the lines or are not plain
     words, or a `not`: no own verdict;
   - gcc's torture execute programs (tx-O0.*, tx-O2.*): gcc's harness's, the program exits 0 (abort() or exit(1) is a failure;
-    gcc.c-torture/execute's dg-do run, the programs' convention).
+    gcc.c-torture/execute's dg-do run, the programs' convention);
+  - synth-c23's programs (c-O0.synth.*, c-O2.synth.*): exit 0 and the stdout test/c/synth/NAME.expect, the table's :expect worked
+    out by hand (n-llvm-indep); test/c/run's (c-O*.run.*): the status their first line's `ci-run verdict: exit N` names, the
+    program checking itself; the C++ modules (cpp.*): test/llvm/selfref-derived.edn's status and stdout.
   {:status 0 :checks [PATTERN ...]}."
   [^String id ^String path]
   (cond
@@ -100,16 +114,31 @@
                          (map second (re-seq #"(?m)^;\s*XFAIL:(.*)$" text))))
         (cond-> {:status 0 :checks (if fc? checks []) :by (if fc? "lit's: exit 0 and FileCheck's CHECK lines" "lit's: exit 0")}
           (seq (args-of (first runs))) (assoc :args (args-of (first runs))))))
+    ;; n-llvm-indep (LLS49 (c), the user 2026-11-18): Arbace's own programs with an outcome of their own
+    (re-find #"^c-O[02]\.synth\." id)
+    (let [f (java.io.File. (str "test/c/synth/" (subs id (count "c-O0.synth.")) ".expect"))]
+      (when (.exists f) {:status 0 :stdout-sha (sha256-file f) :by (str "synth-c23's :expect (" f ")")}))
+    (re-find #"^c-O[02]\.run\." id)
+    (let [f (java.io.File. (str "test/c/run/" (subs id (count "c-O0.run.")) ".c"))]
+      (when-let [[_ n] (and (.exists f) (re-find #"^/\* ci-run verdict: exit (\d+)\." (slurp f)))]
+        {:status (Long/parseLong n) :by "the program's own check (its first line: ci-run verdict)"}))
+    (str/starts-with? id "cpp.")
+    (when-let [e (get (derived) id)]
+      {:status (:status e) :stdout-sha (sha256-bytes (.getBytes ^String (:stdout e) "UTF-8"))
+       :stderr-sha (when (:stderr e) (sha256-bytes (.getBytes ^String (:stderr e) "UTF-8")))
+       :by "the outcome worked out from its source (test/llvm/selfref-derived.edn)"})
     :else nil))
 
 (defn- blanks [s] (str/replace (str s) #"[ \t]+" " "))
 
 (defn- own-result
   "A run line's result against the module's own verdict: [RESULT REASON]. OUT is the run's stdout (WORK/out/ID.out)."
-  [[_ st _ ob _ _ ef] v ^String out]
+  [[_ st osha ob esha eb ef] v ^String out]
   (cond
-    (= st "timeout") [:timeout "ci's run timed out (the test's own verdict: exit 0)"]
-    (not= st "0") [:status (str "status " st ", the test's own verdict: exit 0 (" (:by v) "): " (clean ef))]
+    (= st "timeout") [:timeout (str "ci's run timed out (the test's own verdict: exit " (:status v 0) ")")]
+    (not= st (str (:status v 0))) [:status (str "status " st ", the test's own verdict: exit " (:status v 0) " (" (:by v) "): " (clean ef))]
+    (and (:stdout-sha v) (not= osha (:stdout-sha v))) [:stdout (str "stdout " ob " bytes, not the test's own expected output (" (:by v) ")")]
+    (and (:stderr-sha v) (not= esha (:stderr-sha v))) [:stderr (str "stderr " eb " bytes, not the test's own expected stderr (" (:by v) "): " (clean ef))]
     (seq (:checks v))
     (if (nil? out) [:stdout "the run's stdout was not kept (LLVMI_RUN_OUT)"]
         (let [o (blanks out)

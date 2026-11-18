@@ -16,6 +16,9 @@
 #                                        samples and runtime samples through clang++ -O0)
 #   bin/llvmi ir-make [PACK...]          the pinned IR made afresh by clang (packs tx, c; test/llvm/ir/): a pack per corpus set, its manifest
 #                                        and command; the check reads the IR from the packs and needs no clang (LLVMI_CLANG=1: compiled now)
+#   bin/llvmi ir-make c --stale          (n-llvm-indep) only the manifest's c-O0, c-O2 and cpp modules whose checkout source changed
+#                                        compiled again by clang with the corpus' command, the others' IR kept from the pack (no new
+#                                        module: a file the manifest does not name is not added); c.cmd names the refreshed ids
 #   bin/llvmi ir-make rt [--mutants]     the pack rt (LLS31 (a)): test/llvm/rt-builds.tsv's modules by clang, clang++, rustc and llvm-stress
 #                                        with Arbace's mutants of them (repr/llvm's families roundtrip-rt, text-rt, verify-rt, verify-rt-heldout);
 #                                        --mutants: the mutants made again from the pack's modules, no compiler
@@ -431,6 +434,35 @@ eh_link() { # eh_link C NODES: the lowered C of a module that unwinds linked wit
   [ -f "$2" ]
 }
 
+# c_refresh (ir-make c --stale): the pack c with the modules whose checkout source's digest is not the manifest's compiled again (the
+# corpus' own clang command, as modules does), every other module's IR the pack's; the manifest's lines in their order
+c_refresh() {
+  local w=$root/.tmp/llvmi/ir-make/c-stale n lab sh h p o f ids=""
+  [ -f "$irdir/c.tar.xz" ] || { echo "llvmi ir-make c --stale: no $irdir/c.tar.xz" >&2; return 1; }
+  (cd "$irdir" && sha256sum -c --quiet c.tar.xz.sha256) >&2 || { echo "llvmi ir-make c --stale: c.tar.xz does not match its pin" >&2; return 1; }
+  rm -rf "$w"; mkdir -p "$w/stage"; xz -dc "$irdir/c.tar.xz" | tar -xf - -C "$w/stage" || return 1
+  while IFS=$'\t' read -r n lab sh h; do
+    f=${lab#checkout:}
+    if [ "$f" != "$lab" ] && [ -f "$root/$f" ] && [ "$(sha256sum < "$root/$f" | cut -d' ' -f1)" != "$sh" ]; then
+      case $n in
+        c-O0.*|c-O2.*) o=${n%%.*}; o=${o#c-}
+          (cd "$root" && clang -$o -S -emit-llvm -std=gnu23 -w -I test/c/synth -ffile-prefix-map="$root/"= -o "$w/stage/$n.ll" "$f") || return 1 ;;
+        cpp.*) (cd "$root" && clang++ -O0 -S -emit-llvm -std=c++23 -w -ffile-prefix-map="$root/"= -o "$w/stage/$n.ll" "$f") || return 1 ;;
+        *) echo "llvmi ir-make c --stale: $n: no corpus" >&2; return 1 ;;
+      esac
+      sh=$(sha256sum < "$root/$f" | cut -d' ' -f1); h=$(sha256sum < "$w/stage/$n.ll" | cut -d' ' -f1); ids="$ids $n"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$n" "$lab" "$sh" "$h"
+  done < "$irdir/c.tsv" > "$w/c.tsv"
+  [ -n "$ids" ] || { echo "llvmi ir-make c --stale: no module's source changed"; return 0; }
+  mv "$w/c.tsv" "$irdir/c.tsv"
+  (cd "$w/stage" && LC_ALL=C tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --format=gnu -cf - .) | xz -9e -T1 > "$irdir/c.tar.xz"
+  (cd "$irdir" && sha256sum c.tar.xz > c.tar.xz.sha256)
+  { grep -v '^refreshed' "$irdir/c.cmd"; echo "refreshed (bin/llvmi ir-make c --stale, $(clang --version | head -1)):$ids"; } > "$w/c.cmd"; mv "$w/c.cmd" "$irdir/c.cmd"
+  echo "llvmi ir-make c --stale: $(echo $ids | wc -w) modules compiled again:$ids"
+  rm -rf "$w"
+}
+
 cmd=${1:-}; [ $# -gt 0 ] && shift
 # the checkout's ci, not the host's embedded copy of an older one: the lowered C is checked and built by arbace.c's builder on the
 # tools' host, and RT.toolSource evaluates a ci namespace that differs from the embedded copy (CS281 (a), since W2's re-seed;
@@ -463,6 +495,7 @@ case $cmd in
     [ $# -gt 0 ] || set -- tx c
     mkdir -p "$irdir"
     if [ "$1" = rt ]; then shift; rt_make "$@"; exit; fi
+    if [ "$1" = c ] && [ "${2:-}" = --stale ]; then c_refresh; exit; fi
     for pk in "$@"; do
       case $pk in tx) cs=tx-O0,tx-O2 ;; c) cs=c-O0,c-O2,cpp ;; *) echo "llvmi ir-make: no pack $pk (tx, c; rt alone: bin/llvmi ir-make rt [--mutants])" >&2; exit 2 ;; esac
       w=$root/.tmp/llvmi/ir-make/$pk
