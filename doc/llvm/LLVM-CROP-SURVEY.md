@@ -2782,3 +2782,57 @@ now, three runs on this tree's lowered runtime: ci's abort off the main thread n
 against thread-throw's g++ run: same status and stdout, another stderr) fails as it must; `:abort-report`, `:thread-abort-report` and
 `:cpp-threads` removed. Eval 550 / 11 / 1 to 553 / 9 / 0, AOT 549 / 12 / 1 to 552 / 9 / 1; completeness 0.9888 to 0.9915 (99), meant
 0.9991 to 0.9995 (100); the judge stays a recorded one (0.5): independence 0.9790.
+
+## As built: n-llvm-indep, what holds the judge and the cells (2026-11-18, branch `n-llvm-indep` from mac/358-go-llvm 9769b6772)
+
+Stage 0 of the main checkout (`ARBACE_HOST_EXE`), each process under 3 GiB (peaks 1.4-1.8 GB), no gate, no LLVM tool.
+
+**What holds independence (0.9790).** Read, eval, AOT and print are 1 (independence.edn's facts cross-checked with the steps:
+llvm-essential, llvm-read, llvm-print, llvmi-check, llvmi-aot run on `:stage0` and `:go` alone). The judge alone is below 1, its
+1,156 recorded cases measured from the runs (`bin/repr-llvm check verify-rt`, `verify-rt-heldout`, `verify-llvmtest`: WORK/run/verify.tsv's
+eighth column; test/llvm/check-eval-linux-amd64.edn's ids): the probes 478 (opt's record, LLS30, LLS48 (a)); llvmi's 176 at each level
+(c-O0 and c-O2's 74 synth-c23 and 7 test/c/run programs, the 14 C++ samples and runtime programs: Arbace's own programs with no
+expected output, lli's record, LLS49 (a)); verify-rt's 256 (the pack's 252 modules, IR made by clang, rustc and llvm-stress with no RUN
+line, and 4 mutants); verify-llvmtest's 49 (whole split-file tests, tool options, XFAIL); verify-rt-heldout's 21 mutants of unknown kinds.
+
+**Built: the heldout set's unknowns that a rule reaches** (arbace/repr/llvm/expect.ae; Verifier.cpp of llvm-project 23.1.5):
+- `ex-personality`: a personality dropped from a function no instruction of which needs one (no landingpad, resume, catchswitch,
+  catchpad, cleanuppad) is valid: the Verifier asks nothing more of it (was `unknown: no exception handling instruction`).
+- `ex-bundle`: visitIntrinsicCall runs before visitCallBase's bundle loop, and only some intrinsics' own checks read the bundles
+  (assume's tags, deoptimize's and guard's deopt, the statepoint's, preallocated's, the convergence intrinsics', ARC's, coroutines':
+  `bundle-intrinsics`, left `unknown`); any other intrinsic's checks held before the mutator added the bundles, so the loop's checks
+  give the verdict (was `unknown: an intrinsic's own bundle checks` for every intrinsic).
+- `ex-musttail`: getParameterABIAttributes ported (`abi-key`: StructRet, ByVal, InAlloca, InReg, StackAlignment, SwiftSelf, SwiftAsync,
+  SwiftError, Preallocated, ByRef, and align beside byval or byref), each of the caller's parameters against the call's,
+  `mismatched ABI impacting function attributes` (was `unknown: ABI attributes to compare` whenever any such attribute appeared);
+  a callee of any spelling checked by the call's own type, inline asm first (was `unknown: the callee is no name` for a quoted name).
+- Unit cases (test/repr/llvm/expect_test.ae): musttail with the same, a missing byval, a differing align beside byval, a quoted callee;
+  an intrinsic's deopt pair, an unknown tag, assume's (left unknown); a personality with no pad, and with resume; three new negative
+  controls. `test/repr/llvm/expect-test.bash`: 59 cases, 18 controls, 0 failing.
+- `bin/llvmi ir-make rt --mutants` (33 min, 1.48 GB): the 252 modules and 1,750 mutants, every mutant's text the old pack's; 12 first
+  lines changed (verify-rt-heldout's sets h1, h2: personality 3, bundle 5, musttail 4), each equal to opt's recorded verdict and first
+  message (test/llvm/ref-opt23.edn). verify-rt and verify-rt-heldout recorded whole; heldout-check run.
+
+**Scores** (bin/crops-score --record): the judge 4,382 own and 1,144 recorded, (4382 + 0.5 x 1144) / 5526 = 0.8965 (the score's stage 0.8960), independence 0.9790 to 0.9792 (98); bin/reap --record: the matrix unchanged (every record's rows the same); --judge --strict and bin/records-check: 0 problems.
+Completeness unchanged (0.9915): its non-passes are by design but one (eval 9, AOT 9: `:long-double` 3, `:ub-refinement` 2, `:envp`,
+`:lli-reference`, `:datalayout`, `:target-type`; read 1, `:probe-pointer`) and AOT's `:personality` (cpp.runtime.library, whose Go
+package's build is above 3 GiB, aot-heavy.txt's).
+
+**Left, each with its cause**: verify-rt-heldout's 9 (attribute pairs and values, immarg, an intrinsic's declaration and rename, three
+debug-info fields, an attachment on a typed access: each a further port of the Verifier's or AutoUpgrade's rule); verify-rt's 4 mutants;
+verify-llvmtest's 49 (a whole split-file test has no one verdict; the rest need lit's tool options read); the three large groups below.
+
+### Proposed (n-llvm-indep)
+
+- **LLS57 The pack's 252 modules in verify-rt.** They are roundtrip-rt's and text-rt's modules too, judged there by their own levels
+  (1); in verify-rt they are judged against opt's record of `valid` (0.5). (a) The pack's maker writes `; RUN: opt -passes=verify
+  -disable-output %s` into each module it compiled (a producer's output claimed valid: the claim is clang's, rustc's and
+  llvm-stress's, so it changes what counts as own); (b) count each module once, by its round trip, verify-rt's 252 rows out of the
+  judge's cases (the cell keeps them); (c) keep the record. Gain of (a) or (b): independence 97.9 to about 98.4.
+- **LLS49 again (c), with C's and C++'s decision**: synth-c23's table gets an `:expect` beside each `:show`, written from C23's rules
+  (bin/ci synth writing NAME.expect; C's selfref and llvmi's own-verdict judging stdout against it, tcc-tests2's convention), and the 7
+  test/c/run programs and the 14 C++ programs a `ci-run verdict` self-check (the c pack then re-made by clang, by hand). Gain: 352
+  cases, independence to about 98.6 (and C's and C++'s synth and samples with it).
+- **LLS58 A fixed environment for llvmi's runs** (completeness): ee.MCJIT.2003-08-21-EnvironmentTest reads envp[0], ci starts every
+  program with an empty environment. A fixed, host-independent one (`LIT=1`, say) keeps runs reproducible and passes it at eval and AOT:
+  completeness 0.9915 to 0.9924. It changes C's runtime's design (go/arbace/ci's RunMain), so it is C's crop's decision too.
