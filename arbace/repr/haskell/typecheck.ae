@@ -1859,6 +1859,52 @@
     (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) msg) "unpackCString#" "unpackCStringUtf8#")))
           [(list 'lit (str (pr-str msg) "#"))])))
 
+;; Queue 352, 346-1 (a): the pattern-match failure's text, as GHC.HsToCore.Utils' mkErrorAppDs writes it for patError and
+;; nonExhaustiveGuardsError ("SPAN|CONTEXT": the desugarer's current location, GHC.Types.SrcLoc's pprUserRealSpan, and
+;; GHC.Hs.Expr's matchContextErrString), the runtime's untangle making "SPAN: Non-exhaustive patterns in CONTEXT"
+
+(def ^:dynamic *match-span* nil) ; the span of the expression whose match group is checked (HsCase, HsLam: dsLExpr's location)
+
+(defn- span-text
+  "A span [l1 c1 l2 c2] (end column exclusive) as GHC prints a SrcSpan, with the source file"
+  [[l1 c1 l2 c2]]
+  (str (or *srcfile* (str (str/replace *module* "." "/") ".hs")) ":"
+       (if (= l1 l2)
+         (str l1 ":" c1 (when (> (- c2 c1) 1) (str "-" (dec c2))))
+         (str "(" l1 "," c1 ")-(" l2 "," (if (zero? c2) c2 (dec c2)) ")"))))
+
+(defn- match-ctx-text
+  "A match's context (Match's m_ctxt) as GHC's matchContextErrString, or nil for one not ported"
+  [ctx]
+  (case (if (seq? ctx) (first ctx) ctx)
+    FunRhs (when-let [n (nm (second ctx))] (str "function " (occ n)))
+    CaseAlt "case"
+    LamAlt (case (second ctx) LamSingle "lambda" LamCase "\\case" LamCases "\\cases" nil)
+    IfAlt "multi-way if"
+    nil))
+
+(defn- with-ef
+  "A match (match SCRUTS CLAUSES) with its failure's text EF [TEXT GUARDS?] after its clauses"
+  [m ef]
+  (if ef (apply list (concat m [ef])) m))
+
+(defn- tag-guards
+  "Right-hand-side guards' (guards ALTS) failure text EF [TEXT GUARDS?] appended, through the lets around them"
+  [c ef]
+  (cond (not (and ef (seq? c))) c
+        (and (= 'guards (first c)) (= 2 (count c))) (list 'guards (second c) ef)
+        (contains? #{'let 'letrec} (first c)) (list (first c) (second c) (tag-guards (nth c 2) ef))
+        :else c))
+
+(defn- strict-pat
+  "Queue 352, 346-1 (a): a match's outermost pattern under the Strict extension, GHC.HsToCore.Utils' decideBangHood
+  (matchWrapper's equations, matchSinglePat's statements): ~p is p, !p stays, any other p is !p; unchanged without Strict"
+  [p]
+  (cond (not (contains? *exts* "Strict")) p
+        (and (seq? p) (= 'plazy (first p))) (second p)
+        (and (seq? p) (= 'pbang (first p))) p
+        :else (list 'pbang p)))
+
 (def ^:dynamic *static-binds* nil) ; atom [BIND-or-nil...]: the module's static forms' top-level StaticPtr bindings, by number
 
 (declare fp-words fp-string)
@@ -2082,7 +2128,7 @@
                      a (fresh-meta)
                      ;; the pattern's equalities given to the statements after it (tcDoStmt's implication)
                      [env1 pc tr cr] (binding [*given-eqs* (scope-givens)]
-                                       (let [[env1 pc] (tc-pat env (arg v 2) a) [tr cr] (infer-stmts env1 more)] [env1 pc tr cr]))
+                                       (let [[env1 pc] (tc-pat env (arg v 2) a) [tr cr] (infer-stmts env1 more)] [env1 (strict-pat pc) tr cr]))
                      [tb cb] (global-occ env ">>=" "GHC.Internal.Base")
                      r (fresh-meta)]
                  (unify tb (fn-ty te (fn-ty (fn-ty a tr) r)))
@@ -2371,9 +2417,13 @@
       ;; HF10-P54 (a): PostfixOperators' left section (e op) is op e (GHC.Tc.Gen.Expr's SectionL, its postfix_ops)
       SectionL (if (contains? *exts* "PostfixOperators")
                  (tc-app env (arg v 3) [(arg v 2)] nil)
-                 (let [[te ce] (infer env (arg v 2)) [to co] (infer env (arg v 3)) b (fresh-meta) r (fresh-meta)]
+                 (let [[te ce] (infer env (arg v 2)) [to co] (infer env (arg v 3)) b (fresh-meta) r (fresh-meta) y (fresh-lv "y")]
                    (unify to (fn-ty te (fn-ty b r)))
-                   [(fn-ty b r) (app* co [ce])]))
+                   ;; queue 352: GHC's renamer makes a left section leftSection (op e), eta-expanded (Note [Left and right
+                   ;; sections]: (True `undefined`) `seq` () is ()), as the right section's rightSection
+                   [(fn-ty b r) (if *abs-binds*
+                                  (app* (list 'v (ext-name "var" "GHC.Internal.Types" "leftSection")) [(app* co [ce])])
+                                  (list 'lam [y] (app* co [ce y])))]))
       SectionR (let [[to co] (infer env (arg v 2)) [te ce] (infer env (arg v 3)) a (fresh-meta) r (fresh-meta)
                      x (fresh-lv "x")]
                  (unify to (fn-ty a (fn-ty te r)))
@@ -2382,10 +2432,10 @@
                  [(fn-ty a r) (if *abs-binds*
                                 (app* (list 'v (ext-name "var" "GHC.Internal.Types" "rightSection")) [co ce])
                                 (list 'lam [x] (app* co [x ce])))])
-      HsLam (infer-matches env (arg v 3) nil)
+      HsLam (binding [*match-span* (lsp e)] (infer-matches env (arg v 3) nil))
       HsCase (let [[ts cs] (infer env (arg v 2))
                    r (fresh-meta)
-                   [t c] (infer-matches env (arg v 3) {:scrut [ts cs] :res r})]
+                   [t c] (binding [*match-span* (lsp e)] (infer-matches env (arg v 3) {:scrut [ts cs] :res r}))]
                [t c])
       HsIf (let [[tc cc] (infer env (arg v 2)) [tt ct] (infer env (arg v 3)) [te ce] (infer env (arg v 4))]
              (unify tc (con-ty tc-bool)) (unify tt te)
@@ -2437,8 +2487,10 @@
       HsIPVar (let [t (fresh-meta) ev (want! [cls-ip [[:lit (second (arg v 2))] t]])]
                 [t (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip")) [ev])])
       ;; MultiWayIf (GHC.Tc.Gen.Expr's HsMultiIf): its alternatives as a right-hand side's guards
+      ;; (queue 352: its failure nonExhaustiveGuardsError "SPAN|multi-way if", dsExpr's HsMultiIf)
       HsMultiIf (let [r (fresh-meta)]
-                  [r (infer-grhss env (list 'GRHSs nil (arg v 2) (list 'EmptyLocalBinds 'NoExtField)) r)])
+                  [r (tag-guards (infer-grhss env (list 'GRHSs nil (arg v 2) (list 'EmptyLocalBinds 'NoExtField)) r)
+                                 (when (lsp e) [(str (span-text (lsp e)) "|multi-way if") true]))])
       ;; TypeApplications (GHC.Tc.Gen.App's tcApp: a type argument instantiates the next specified quantifier): the
       ;; head's type with its quantifiers taken by the type arguments in order, an erased kind's quantifier (not in
       ;; the body) skipped as GHC's inferred ones are; a local or unknown head ignores them
@@ -2621,7 +2673,7 @@
       HsApp (let [[h args] (app-spine v)] (second (tc-app env h args t)))
       OpApp (second (tc-app env (arg v 3) [(arg v 2) (arg v 4)] t))
       HsCase (let [[ts cs] (infer env (arg v 2))]
-               (second (infer-matches env (arg v 3) {:scrut [ts cs] :res t})))
+               (second (binding [*match-span* (lsp e)] (infer-matches env (arg v 3) {:scrut [ts cs] :res t}))))
       HsIf (let [[tc cc] (infer env (arg v 2))
                  _ (unify tc (con-ty tc-bool))
                  ct (check-expr env (arg v 3) t)
@@ -2633,8 +2685,9 @@
                   c (with-ips env1 (check-expr env1 (arg v 3) t))
                   c (force-strict-binds c @sb)]
               (wrap-lets binds c))
-      HsMultiIf (infer-grhss env (list 'GRHSs nil (arg v 2) (list 'EmptyLocalBinds 'NoExtField)) t)
-      HsLam (let [[t1 c] (infer-matches env (arg v 3) nil t)] (unify t1 t) c)
+      HsMultiIf (tag-guards (infer-grhss env (list 'GRHSs nil (arg v 2) (list 'EmptyLocalBinds 'NoExtField)) t)
+                            (when (lsp e) [(str (span-text (lsp e)) "|multi-way if") true]))
+      HsLam (let [[t1 c] (binding [*match-span* (lsp e)] (infer-matches env (arg v 3) nil t))] (unify t1 t) c)
       HsDo (let [fl (arg v 2)]
              (if (= 'ListComp (if (seq? fl) (first fl) fl))
                (let [et (fresh-meta)]
@@ -3046,10 +3099,18 @@
                     _ (if ovl (unify tl (fn-ty t (list-ty a))) (unify t (list-ty a)))
                     [env' pcs] (reduce (fn [[env pcs] p1] (let [[e c] (tc-pat env p1 a)] [e (conj pcs c)])) [env []] (arg v 2))]
                 [env' (if ovl (list 'pview cl (list 'plist pcs)) (list 'plist pcs))])
-      ;; GHC's tcNPat: the equality first, then the literal
+      ;; GHC's tcNPat: the equality first, then the literal; a negative literal pattern (-1, the NPat's mb_neg) the literal
+      ;; negated (queue 352): (nolit NEGATE LIT), folded into the literal by tidyNPat at a type with built-in literals, else
+      ;; negate applied to it (tcNPat's neg_lit) for the equality
       NPat (let [eqn (implicit-name v "==" (ext-name "var" "GHC.Internal.Classes" "=="))
                  [te ce] (var-occ env eqn)
-                 [lt lc] (overlit (list 'HsOverLit nil (lval (arg v 2))))]
+                 [lt lc] (overlit (list 'HsOverLit nil (lval (arg v 2))))
+                 neg? (and (seq? (arg v 3)) (= 'Just (first (arg v 3))))
+                 lc (if neg?
+                      (let [[tn cn] (var-occ env (implicit-name v "negate" (ext-name "var" "GHC.Internal.Num" "negate")))]
+                        (unify tn (fn-ty lt lt))
+                        (list 'nolit cn lc))
+                      lc)]
              (unify lt t)
              (unify te (fn-ty t (fn-ty t (con-ty tc-bool))))
              [env (list 'plit ce lc t)])
@@ -3106,7 +3167,8 @@
                 BodyStmt (let [[t c] (infer env (arg v 2))] (unify t (con-ty tc-bool)) [env (conj gs c)])
                 BindStmt (let [[te ce] (infer env (arg v 3))
                                wi (count @*wanteds*) before (some-> *given-eqs* deref)
-                               [env1 pc] (tc-pat env (arg v 2) te)]
+                               [env1 pc] (tc-pat env (arg v 2) te)
+                               pc (strict-pat pc)]
                            ;; HF10-P20: a pattern that gives equalities: the wanteds made before it (its scrutinee's,
                            ;; eqT's heqT @a @b) are outside its implication; review 1111b (finding 1): every such pattern
                            ;; recorded with the givens before it, so a second guard's scrutinee is not rewritten by its own
@@ -3235,6 +3297,10 @@
   [env mg ctx & [expected]]
   (let [ms (lval (arg mg 2))
         n (count (lval (arg (lval (first ms)) 3)))
+        ;; queue 352: the failure's text [TEXT false] (patError's "SPAN|CONTEXT"): the case's or lambda's span, else the
+        ;; matches' (a function binding's), and the first match's context
+        ef (when-let [t (and (seq ms) (match-ctx-text (arg (lval (first ms)) 2)))]
+             (when-let [sp (or *match-span* (lsp (arg mg 2)))] [(str (span-text sp) "|" t) false]))
         ;; HF10-P66 (a): a polytype met among the arguments (gmapT :: Proxy ctx -> GenericT ctx -> GenericT ctx, defined by
         ;; gmapT ctx f x: after two arguments forall a. Data ctx a => a -> a) is skolemised there, as GHC.Tc.Utils.Unify's
         ;; matchExpectedFunTys does (tcSkolemise at each forall it meets in checking mode): its quantifiers skolems, its
@@ -3257,7 +3323,8 @@
         splits @splits
         sgivens (when (seq splits) (super-closure (vec (mapcat (fn [sp] (map vector (:preds sp) (:params sp))) splits))))
         sws (atom [])
-        clauses (binding [*wanteds* (if (seq splits) sws *wanteds*)
+        clauses (binding [*match-span* nil
+                          *wanteds* (if (seq splits) sws *wanteds*)
                           *given-eqs* (if (seq splits) (scope-givens) *given-eqs*)]
                   (when (seq splits) (assume-eqs! (mapcat :preds splits)))
                   (mapv (fn [m]
@@ -3270,7 +3337,7 @@
                                   body (infer-grhss env1 (arg mv 4) r)]
                               (when (not= outer @*given-eqs*)
                                 (rewrite-wanteds! w0))
-                              [pcs body]))))
+                              [(mapv strict-pat pcs) body]))))
                       ms))
         _ (when (seq splits) (retry-implications! false) (solve-with-givens! @sws sgivens))
         ;; the split arguments' lambdas: the dictionaries of a polytype met after k arguments bound after them
@@ -3282,16 +3349,16 @@
                                                :else inner)))
                             (list 'lam ps body) (reverse splits)))]
     (if ctx
-      [r (list 'match [(second (:scrut ctx))] (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses))]
+      [r (with-ef (list 'match [(second (:scrut ctx))] (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)) ef)]
       (let [ty (if (seq splits) expected (reduce (fn [acc a] (fn-ty a acc)) r (reverse args)))
             simple? (and (= 1 (count clauses)) (every? #(= 'lv (first %)) (first (first clauses))))
-            core (cond (zero? n) (second (first clauses))
+            core (cond (zero? n) (tag-guards (second (first clauses)) ef)
                        simple? (split-lam (first (first clauses)) (second (first clauses)))
                        :else (let [ds (vec (repeatedly n #(fresh-lv "ds")))]
                                ;; the match's binders typed as the arguments (HF10-P20: a State# or Int# argument matched
                                ;; by equations was taken for a lifted one by tostg, ascii_decode's state token)
                                (doseq [[d t] (map vector ds args)] (note-type! d t))
-                               (split-lam ds (list 'match ds (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)))))]
+                               (split-lam ds (with-ef (list 'match ds (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)) ef))))]
         [ty core]))))
 
 (defn- pat-binders
@@ -3326,7 +3393,9 @@
   (let [v (lval b)]
     (case (con v)
       FunBind (infer-matches env (arg v 3) nil expected)
-      PatBind (let [t (or expected (fresh-meta))] [t (infer-grhss env (arg v 4) t)])
+      ;; (queue 352: its guards' failure nonExhaustiveGuardsError "SPAN|pattern binding", dsGuarded's)
+      PatBind (let [t (or expected (fresh-meta))]
+                [t (tag-guards (infer-grhss env (arg v 4) t) (when (lsp b) [(str (span-text (lsp b)) "|pattern binding") true]))])
       (do (error! "binding not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
 (defn- restricted?
@@ -3605,10 +3674,24 @@
       (do (swap! *patsyn-builders* conj (fn [env2] (patsyn-builder env2 psb n info argns))) [matcher])
       (vec (keep identity [matcher (patsyn-builder env psb n info argns)])))))
 
+(defn- field-strict?
+  "A constructor field's source bang (CDF ... UNPACKEDNESS STRICTNESS) strict: !, or since queue 352 any field but a ~ one
+  under StrictData (GHC.Tc.TyCl's srcStrictnessFor, the Strict extension implying it)"
+  [x]
+  (boolean (and (seq? x) (or (some #{'SrcStrict} x)
+                             (and (contains? *exts* "StrictData") (not (some #{'SrcLazy} x)))))))
+
 (defn- strict-var-bind?
   "A strict variable binding `!x = e` (FunRhs's SrcStrict: GHC's strict binding, dsStrictBind)"
   [b]
   (boolean (some (fn [x] (and (seq? x) (= 'FunRhs (first x)) (some #{'SrcStrict} x))) (take 400 (tree-seq coll? seq b)))))
+
+(defn- strict-ext-var-bind?
+  "Queue 352: a variable binding (a FunBind of no argument) made strict by the Strict extension: not ~x (FunRhs's SrcLazy)"
+  [b]
+  (let [v (lval b) ms (when (= 'FunBind (con v)) (lval (arg (arg v 3) 2))) m (when (= 1 (count ms)) (lval (first ms)))]
+    (boolean (and (contains? *exts* "Strict") m (empty? (lval (arg m 3)))
+                  (let [ctx (arg m 2)] (not (and (seq? ctx) (some #{'SrcLazy} ctx))))))))
 
 (defn tc-group
   "A binding group: [env' [(bind B core)...]]; sigs {NAME type}"
@@ -3616,7 +3699,9 @@
   (let [psbs (vec (mapcat #(tc-patsyn-bind! env %) (filter patsyn-bind? binds)))
         ;; a let's strict variable bindings: the body forces each (dsStrictBind: let x = e in x `seq` body)
         _ (when (and *strict-binds* (= (inc *level*) (:level *strict-binds*)))
-            (doseq [b binds :when (and (bind-name b) (strict-var-bind? b))]
+            ;; (queue 352: under Strict a variable binding `x = e` too, recursive or not, unless ~x: dsLocalBinds' strict binds,
+            ;; Binds.hs's force_var)
+            (doseq [b binds :when (and (bind-name b) (or (strict-var-bind? b) (strict-ext-var-bind? b)))]
               (swap! (:atom *strict-binds*) conj [(bind-name b) (list 'pbang (list 'pwild))])))
         binds (vec (remove patsyn-bind? binds))
         names (mapv bind-name binds)
@@ -3638,7 +3723,10 @@
                             (mapv (fn [b es]
                                     (if (bind-name b)
                                       (let [[t1 c] (bind-rhs env1 b)] (unify (second (first es)) t1) [[(ffirst es) c]])
-                                      (let [t (fresh-meta) c (infer-grhss env1 (arg (lval b) 4) t)
+                                      (let [t (fresh-meta)
+                                            ;; (queue 352: its guards' failure "SPAN|pattern binding", as bind-rhs's)
+                                            c (tag-guards (infer-grhss env1 (arg (lval b) 4) t)
+                                                          (when (lsp b) [(str (span-text (lsp b)) "|pattern binding") true]))
                                             [env2 pc] (tc-pat env1 (arg (lval b) 2) t)]
                                         (doseq [[n m] es] (unify m (:mono (get env2 n))))
                                         ;; the right-hand side bound once, each variable selected from it
@@ -3646,9 +3734,13 @@
                                           ;; a banged pattern binding (`let !(Just (Just y)) = e in b`, GHC's strict pattern
                                           ;; binding, dsStrictBind): the whole match forced before the let's body (T11601)
                                           (let [pv (lval (arg (lval b) 2))]
-                                            (when (and *strict-binds* (= *level* (:level *strict-binds*)) (= 'BangPat (con pv)) (not= 'VarPat (con (lval (arg pv 2)))))
+                                            ;; (queue 352: under Strict any pattern binding but ~p, decideBangHood in dsHsBind: DsStrictLet's
+                                            ;; `False = e` forced)
+                                            (when (and *strict-binds* (= *level* (:level *strict-binds*))
+                                                       (or (and (= 'BangPat (con pv)) (not= 'VarPat (con (lval (arg pv 2)))))
+                                                           (and (contains? *exts* "Strict") (not= 'LazyPat (con pv)))))
                                               (let [sm (into {} (map (fn [[x _]] [(lv x) (list 'lv (occ x) (str "sel" (fresh-id)))]) es))]
-                                                (swap! (:atom *strict-binds*) conj [pn (substitute sm pc)]))))
+                                                (swap! (:atom *strict-binds*) conj [pn (substitute sm (strict-pat pc))]))))
                                           ;; each selector's pattern variables locals of its own (the top level's
                                           ;; rename-mono turns the binders' names into the globals)
                                           (into [[pn c]] (mapv (fn [[n _]]
@@ -3895,7 +3987,7 @@
                                    :tycon (when (= :tc (first res)) (second res))}
                             :strict (into (vec (repeat (count ctx) false))
                                           (for [x cdfs] (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)]
-                                                          (boolean (and (seq? x) (some #{'SrcStrict} x))))))})
+                                                          (field-strict? x))))})
     {:name cn :arity (count argtys) :labels (mapv first fields) :infix? false :tys argtys}))
 
 (defn- tv-kind-anns
@@ -4094,7 +4186,7 @@
                                                        InfixCon [(arg det 1) (arg det 2)]
                                                        RecCon (mapcat (fn [f] (let [fv (lval f)] (repeat (count (arg fv 2)) (arg fv 3)))) (lval (arg det 1)))
                                                        [])]
-                                                   (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)] (boolean (and (seq? x) (some #{'SrcStrict} x))))))})))
+                                                   (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)] (field-strict? x))))})))
     ;; the derived instances: the stock classes' requests are kept for derive-all! (HF4), the others enter the table
     ;; with the context approximated as before
     (let [used (set (for [c conlist x (tree-seq coll? seq (lval c))
@@ -4871,7 +4963,11 @@
       ;; else fromString of it
       :str (let [l (second (hslit (list 'HsLit nil (list 'HsString nil val))))]
              (if (= (deep-expand t) (list-ty (con-ty tc-char))) l (list 'app (list 'v f) [ev l])))
-      :int (cond (= tn tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str val "#"))])
+      ;; (queue 352: at Int only within Int#'s range, as GHC's tcShortCutLit (platformInIntRange); a literal outside it is
+      ;; fromInteger of the Integer, which wraps: T9533b's 0x10000000000000001 :: Int is 1)
+      :int (cond (and (= tn tc-int) (let [n (bigint (if (string? val) (java.math.BigInteger. ^String val) val))]
+                                     (and (<= (bigint Long/MIN_VALUE) n) (<= n (bigint Long/MAX_VALUE)))))
+                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str val "#"))])
                  (= tn tc-double) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str val ".0##"))])
                  (= tn tc-float) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "F#")) [(list 'lit (str val ".0#"))])
                  (= tn tc-integer) (integer-lit-core val)
@@ -4896,6 +4992,17 @@
     (vector? c) (mapv drop-unused-ev c)
     :else c))
 
+(defn- negate-lit-core
+  "Queue 352: a built-in literal's core (K (lit S)) with its value negated (tidyNPat's negated mb_int_lit and mb_rat_lit at
+  Double, Float); a zero keeps no sign (the literal is a rational: -0.0 is 0.0)"
+  [r]
+  (let [a (when (and (seq? r) (= 'app (first r)) (vector? (nth r 2)) (= 1 (count (nth r 2)))) (first (nth r 2)))]
+    (if (and (seq? a) (= 'lit (first a)) (string? (second a)))
+      (let [s (second a)
+            s2 (cond (str/starts-with? s "-") (subs s 1) (re-matches #"[0.]+#+" s) s :else (str "-" s))]
+        (list 'app (second r) [(list 'lit s2)]))
+      (do (error! "negative literal pattern not handled: " (pr-str r)) r))))
+
 (defn resolve-core
   "The core with every evidence placeholder replaced by its term and the literals resolved"
   [c]
@@ -4903,6 +5010,9 @@
     (and (seq? c) (= 'ev (first c))) (let [t (get @*evidence* (second c))]
                                        (if t (resolve-core t) (list 'unsolved (second c))))
     (and (seq? c) (= 'olit (first c))) (let [[_ kind val ty ev f] c] (resolve-core (lit-core kind val ty ev f)))
+    ;; queue 352: a negative literal pattern's literal at a type without built-in literals, negate applied to it (tcNPat's
+    ;; neg_lit, the equality's argument)
+    (and (seq? c) (= 'nolit (first c))) (resolve-core (list 'app (nth c 1) [(nth c 2)]))
     ;; GHC's tidyNPat: a numeric literal pattern at a type with built-in literals is matched directly, no (==)
     (and (seq? c) (= 'plit (first c)) (= 4 (count c)))
     (let [t (expand (zonk (nth c 3)))]
@@ -4915,12 +5025,24 @@
       (if (and (= :tc (first t)) (contains? #{"Int" "Word" "Char" "Double" "Float"} (occ (second t)))
                (contains? #{"GHC.Internal.Types"} (nmod (second t)))
                (not (and (seq? (nth c 2)) (= 'olit (first (nth c 2))) (= :str (second (nth c 2))))))
-        (let [l (nth c 2)]
+        (let [l (nth c 2)
+              ;; queue 352: a negative literal pattern's literal (nolit NEGATE LIT) negated here, as tidyNPat's mb_int_lit
+              ;; and mb_rat_lit negate the value
+              neg (and (seq? l) (= 'nolit (first l)))
+              l (if neg (nth l 2) l)
+              tn (occ (second t))]
           ;; HF10-P20: at Word the literal W# n## (tidyNPat's mb_int_lit at wordTy; lit-core folds no Word literal,
-          ;; GHC's expressions keep fromInteger there: Num Word's `signum 0 = 0` matched nothing)
-          (if (and (= "Word" (occ (second t))) (seq? l) (= 'olit (first l)) (= :int (second l)))
-            (list 'plit (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "W#")) [(list 'lit (str (nth l 2) "##"))]))
-            (list 'plit (resolve-core l))))
+          ;; GHC's expressions keep fromInteger there: Num Word's `signum 0 = 0` matched nothing). Queue 352: at Int and
+          ;; Word the value wrapped to the type's 64 bits, as the desugarer's HsIntPrim and HsWordPrim literals are
+          ;; (mkLitIntWrap, mkLitWordWrap: T9533's -1 at Word, T9533b's 0x10000000000000001 at Int)
+          (if (and (contains? #{"Int" "Word"} tn) (seq? l) (= 'olit (first l)) (= :int (second l)))
+            (let [x (nth l 2) n (bigint (if (string? x) (java.math.BigInteger. ^String x) x)) n (if neg (- n) n)
+                  m (bigint (.shiftLeft java.math.BigInteger/ONE 64)) w (mod n m)
+                  v (if (and (= "Int" tn) (>= w (quot m 2))) (- w m) w)]
+              (list 'plit (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" (if (= "Int" tn) "I#" "W#")))
+                                [(list 'lit (str v (if (= "Int" tn) "#" "##")))])))
+            (let [r (resolve-core l)]
+              (list 'plit (if neg (negate-lit-core r) r)))))
         (list 'plit (resolve-core (nth c 1)) (resolve-core (nth c 2))))))
     (seq? c) (let [c' (apply list (map resolve-core c))]
                ;; flatten (app (app f a) b)
