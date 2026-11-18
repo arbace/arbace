@@ -106,6 +106,19 @@
             (when (some? l) (.print System/err (java-str l "\n"))))
           (recur (unchecked-inc-int i))))))
   (method ^:public ^:static saveBuf ^int/1 [] (Arrays/copyOf buf nbuf))
+  ;; the stack in flight, bottom first (a fiber's chain, a continuation's frames)
+  (method ^:public ^:static stack ^int/1 [] (Arrays/copyOf stk sp))
+  ;; a fiber's exception's backtrace taken by its handler's thread (queue 384)
+  (method ^:public ^:static take ^void [^int/1 b v]
+    (when (and active debugInfo (some? b))
+      (Bt/restoreBuf b)
+      (set! lastExn v)))
+  (method ^:public ^:static chainOf ^int/1 [^Fiber parent]
+    (let [own (Bt/stack)
+          below (if (and (some? parent) (some? (.-chain parent))) (.-chain parent) (new int/1 0))
+          r (Arrays/copyOf below (unchecked-add-int (alength below) (alength own)))]
+      (System/arraycopy own 0 r (alength below) (alength own))
+      r))
   (method ^:public ^:static restoreBuf ^void [^int/1 b] (set! buf (Arrays/copyOf b (unchecked-int (Math/max 16 (alength b))))) (set! nbuf (alength b)))
 
   ;; caml_convert_debuginfo: Known_location {is_raise; filename; start_lnum; start_char; end_offset; end_lnum; end_char; is_inline;
@@ -135,13 +148,32 @@
       (let [b (if active (Bt/entries buf nbuf) (Block. 0 (new Object/1 0)))]
         (Block. 0 (new Object/1 [(Bt/caml_convert_raw_backtrace b)])))))
   ;; the slots in flight, the innermost first
+  ;; a fiber's slots, then the chain below it (queue 384: caml_get_current_callstack walks the fibers' stacks to the domain's)
   (method ^:public ^:static caml_get_current_callstack [n]
     (let [k (Rt/l n) a (ArrayList.)]
       (when debugInfo
         (loop [^int i (unchecked-dec-int sp)]
           (when (and (>= i 0) (< (.size a) k))
             (.add a (Long/valueOf (long (aget stk i))))
-            (recur (unchecked-dec-int i)))))
+            (recur (unchecked-dec-int i))))
+        (let [fb (.-fiber (Effects/st))]
+          (when (and (some? fb) (some? (.-chain fb)))
+            (let [c (.-chain fb)]
+              (loop [^int i (unchecked-dec-int (alength c))]
+                (when (and (>= i 0) (< (.size a) k))
+                  (.add a (Long/valueOf (long (aget c i))))
+                  (recur (unchecked-dec-int i))))))))
+      (Block. 0 (.toArray a))))
+  ;; a continuation's callstack: its fiber's frames when it suspended, the innermost first
+  (method ^:public ^:static contCallstack [k n]
+    (let [lim (Rt/l n) a (ArrayList.)
+          f (aget (.-f (cast Block k)) 0)]
+      (when (and debugInfo (instance? Fiber f) (some? (.-susp (cast Fiber f))))
+        (let [c (.-susp (cast Fiber f))]
+          (loop [^int i (unchecked-dec-int (alength c))]
+            (when (and (>= i 0) (< (.size a) lim))
+              (.add a (Long/valueOf (long (aget c i))))
+              (recur (unchecked-dec-int i))))))
       (Block. 0 (.toArray a))))
   (method ^:public ^:static caml_restore_raw_backtrace [e b]
     (set! lastExn e)

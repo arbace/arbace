@@ -4254,3 +4254,25 @@ compile.go's design, OC217's first stage, mirrored).
 OCaml: eval 537 / 74 / 29 to 538 / 73 / 29, AOT 436 / 73 / 131 to 453 / 74 / 113, completeness 0.8786 to 0.886 (meant 0.9294 to
 0.937). `bin/reap --record`, `crops-score --record` and `--judge --strict`, and `records-check` report 0 problems;
 `own-verdicts --check` reports 0 differing.
+
+## As built: OC217's third stage, the backtraces of domains and fibers (2026-11-18, queue 384, branch `384-ocaml-domain-fiber-bt`, from `370-ocaml-aot-backtraces` `5ac8d5a03`)
+
+The three b=1 rows 370 left, at eval and at the light level, as OCaml 5.5.0's runtime does them (runtime/domain.c's
+domain_thread_func, fiber.c's stacks, backtrace_byt.c's caml_get_current_callstack and caml_get_continuation_callstack):
+
+- **A domain's backtrace.** The exception a domain ends with is stashed in its own stack (every slot in flight), and
+  `Domain.join`'s `Error (exn, bt)` carries its raw backtrace (oi: SpawnDomain and caml_domain_spawn; the runtime: Effects/spawn).
+  `raise_with_backtrace` then re-raises it in the joiner: backtrace/backtrace_domain_join.
+- **A fiber's frames.**
+  - Exceptions: an exception leaving a fiber is stashed to the fiber's base, and its handler's thread takes that backtrace before
+    exnc runs (oi: Fiber's start and dispatch; the runtime: Effects/start and dispatch, `Bt/take`).
+  - `Printexc.get_callstack` in a fiber walks its own slots, then those of the thread that ran or resumed it, to the main stack
+    (oi: `Fiber.parent`; the runtime: `Fiber.chain`, its resumer's stack and the resumer's chain, made at runstack and resume).
+  - `Effect.Deep.get_callstack k` gives the slots of k's fiber when it suspended (oi: `Fiber.th`; the runtime: `Fiber.susp`, set at
+    suspend and reperform).
+  - Rows: backtrace/backtrace_effects, effects/backtrace.
+
+Results (light, by list): the three pass at both levels, their pins dropped; the control `_control/why-at-vs-why-swallow`
+(eval) and `_control/compare-vs-evaluation-order` (AOT) differ. The essential lists: oi 60 of 60, the light level 58 pass and 1
+slow; effects/backtrace (in the list) newly passes at both. `own-verdicts --check` 0 differing; `bin/reap`, `crops-score --judge
+--strict`, `records-check` 0 problems. OCaml eval 538 / 73 / 29 to 541 / 73 / 26, AOT 453 / 74 / 113 to 456 / 74 / 110.
