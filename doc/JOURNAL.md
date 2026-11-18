@@ -10599,3 +10599,13 @@ Then `bin/ci check --only` of ci-run's thread-abort, atomic-gcc and ptr-sub-unsi
 `.tmp/ci`, its key differing only by `arbace/repr/go/syntax.ae`, which the printer does not use; musl's forms reread first, their
 key moved by `n-c-lex`'s repr/c, at one thread under `GOMEMLIMIT=550MiB`, about two hours): 3 of 3 pass, the four ci-run controls
 differ (thread-abort's two among them), peak 0.90 GB.
+
+## 2026-11-18: C's macro printer, CS82 (b) (n-c-print, round 52)
+
+Built CS82 (b) in repr/c (`arbace/repr/c/{parse,convert,print}.ae`; doc/C23-SURVEY.md, "As built: the macro printer's fix"): a
+concatenated string literal's run of invocations recovered whole (its extent to its last piece), a callee an expansion hid from its
+function-like macro printed parenthesized, a statement an invocation made but for its `;` printed as the invocation, an asm's
+operands' invocations in the :lines print alone. Proved on listed round trips under gcc's judge (the five target files pass; a
+159-file regression list 157 pass, 2 known as recorded), rows merged by id (33 changed), print 4798 / 3 / 22 to 4830 / 3 / 17.
+shell.c not run (memory rule); the 159-file run peaked at 1.46 GB, over the night's 1 GiB. Taken overnight (round 52): CS82 (b).
+Proposed: CS329 (an #include inside an initializer or enum). Alternatives: keep the classes (CS82 (a)).

@@ -1013,6 +1013,14 @@ reads the resource.
   (`^{:c/amacro {1 "LIMIT"}} (< i 10)` for `i < LIMIT`). The text is the invocation's tokens with single
   spaces (`:full` keeps the spacing). The `:lines` print writes the invocation in place of the node
   (cemit's recovery): the macro is defined where the print is compiled, by a `c/define` or a header.
+- CS82 (b) (2026-11-18): a concatenated string literal whose pieces are each one invocation's, one after
+  another (`k(#) k(#undef k) k(x)`, `BOX_24 BOX_24`), carries their texts joined by a space; a piece no
+  invocation made leaves the literal expanded. A statement one invocation made but for the `;` written
+  after it (`NEEDBITS(16);`, a do-while macro) carries `:c/macro-stmt "NEEDBITS(16);"`. An extended or
+  basic `asm`'s text stays the expansion's (ci parses its operands); an invocation inside it after its
+  first token is the `:lines` print's, `^{:c/asm-text "..."}` on the `c/asm`. A callee named as a
+  function-like macro of the main file defined where it stands (a name an expansion hid from the macro)
+  is `^{:c/paren true}`, printed `(square)(2)`, which no macro takes.
 - An invocation **inside** a node (`#define BEGIN {`, `#define ARGS a, b`), or nested so that its
   expansion is part of a node, is `:full`'s only: `:lines` prints the expansion (N6).
 - The macros of a header (`EOF`, `errno`, `assert`, `va_arg`) are recovered the same way; `errno` is
