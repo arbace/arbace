@@ -5322,6 +5322,16 @@ checkout's builder takes the new path (`goi: no factory SatFtoI32`: stage 0's ba
 '^convert5\.go$'` passes, then its known line goes and the row is recorded `:pass`). go/arbace/goi and arbace/go/build.ae are
 embedded: gate_key moves.
 
+**By architecture (queue 378's item 5, the main host's review).** The rules above are amd64's. goi's GOARCH (the run's
+`:config`, its table's) chooses: amd64, every conversion `SatFto*`; arm64, whose signed and 64-bit conversions are native either way
+(FCVTZS, FCVTZU: saturating, a NaN 0), only a uint32's, which ssagen reverts to the old conversion (through int64, truncated) on
+every architecture when the hash does not match: `SatA64FtoU32` (FCVTZU's: 0 for a NaN or a negative operand, the maximum past the
+range); another architecture, nothing. Checked on the VM (arm64): convert5.go with native conversions but its uint32 ones through
+`satA64FtoU32` (printed by repr/go, built by TamaGo's go) prints `convert5.out`, as gc arm64's build with the flag does; without
+the flag gc's arm64 build prints 3 FAIL lines (the uint32 of a negative operand), as goi's run does today: the control. goi on stage
+0 (linux/arm64's table) with the flag now stops at `goi: no factory SatA64FtoU32`; `convert-hash!` gives :amd64, :arm64 and false for
+amd64, arm64 and 386 programs.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,
