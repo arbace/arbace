@@ -126,15 +126,42 @@
 ;; one module's row
 
 (defn- run-result
-  "A run line's result against a reference entry: [RESULT REASON]."
+  "A run line's result against a reference entry: [RESULT REASON]. The reference is lli's record, or g++'s (:who, gxx-reference)."
   [[_ st osha ob esha eb ef] r]
-  (let [rs (str (:status r))]
+  (let [rs (str (:status r)) who (or (:who r) "lli")]
     (cond
-      (= st "timeout") (if (= :timeout (:status r)) [:pass ""] [:timeout (str "ci's run timed out; lli's status " rs)])
-      (not= st rs) [:status (str "status " st ", lli's " rs ": " (clean ef) (when (seq (:stderr-first r)) (str " | lli: " (:stderr-first r))))]
-      (not= osha (:stdout r)) [:stdout (str "stdout " ob " bytes, lli's " (:stdout-bytes r))]
-      (not= esha (:stderr r)) [:stderr (str "stderr " eb " bytes, lli's " (:stderr-bytes r) ": " (clean ef) (when (seq (:stderr-first r)) (str " | lli: " (:stderr-first r))))]
+      (= st "timeout") (if (= :timeout (:status r)) [:pass ""] [:timeout (str "ci's run timed out; " who "'s status " rs)])
+      (not= st rs) [:status (str "status " st ", " who "'s " rs ": " (clean ef) (when (seq (:stderr-first r)) (str " | " who ": " (:stderr-first r))))]
+      (not= osha (:stdout r)) [:stdout (str "stdout " ob " bytes, " who "'s " (:stdout-bytes r))]
+      (not= esha (:stderr r)) [:stderr (str "stderr " eb " bytes, " who "'s " (:stderr-bytes r) ": " (clean ef) (when (seq (:stderr-first r)) (str " | " who ": " (:stderr-first r))))]
       :else [:pass ""])))
+
+;; D358-5 (a) (the user, 2026-11-18): a C++ program that aborts (std::terminate: status 134) runs under lli with lli's own signal
+;; handler, which adds its stack dump ("Stack dump:", "PLEASE submit a bug report") to the program's stderr: lli's stderr is not the
+;; module's meaning there. Such a module of the cpp corpus (cpp.runtime.N: runtime/N.cpp, cpp.samples.N: samples/N.cpp) is judged
+;; against g++ 15's recorded run of the same program (test/cpp/ref-gxx15.edn, the C++ crop's reference: status, stdout and stderr by
+;; their digests) when lli's record and g++'s agree on the status (134) and the stdout: only lli's addition to stderr is left out.
+
+(def ^:private gxx-ref-file "test/cpp/ref-gxx15.edn")
+
+(defn- gxx-records
+  "g++'s record by its id (the file is one map a line, not a vector)."
+  []
+  (let [f (java.io.File. ^String gxx-ref-file)]
+    (if (.exists f)
+      (into {} (map (juxt :id identity) (read-string (str "[" (slurp f) "\n]"))))
+      {})))
+
+(defn- gxx-reference
+  "The reference of module id: g++'s record (gxx: by its source id) in lli's record r's place when r is an abort of a cpp module whose
+  status and stdout g++'s record shares; else r."
+  [id r gxx]
+  (let [src (when-let [[_ k n] (re-find #"^cpp\.(runtime|samples)\.(.+)$" (str id))] (str k "/" n ".cpp"))
+        g (when src (gxx src))]
+    (if (and r g (= 134 (:status r)) (= 134 (:status g)) (= (:stdout r) (:stdout g)) (string? (:stderr g)))
+      {:who "g++" :status 134 :stdout (:stdout g) :stdout-bytes (:bytes g) :stderr (:stderr g) :stderr-bytes "?"
+       :stderr-first (:first g) :ir (:ir r)}
+      r)))
 
 (defn- out-of [work id] (let [f (java.io.File. (str work "/out/" id ".out"))] (when (.exists f) (slurp f))))
 
@@ -147,7 +174,9 @@
 (defn- rows
   "Every module's row: [ID RESULT REASON]."
   [work refs owns]
-  (let [lower (into {} (map (juxt first identity) (tsv (str work "/c/lower.tsv"))))
+  (let [gxx (gxx-records)
+        refs (fn [id] (gxx-reference id (refs id) gxx))
+        lower (into {} (map (juxt first identity) (tsv (str work "/c/lower.tsv"))))
         build (into {} (map (juxt first identity) (tsv (str work "/build.tsv"))))
         goerr (into {} (map (juxt first identity) (tsv (str work "/go-errors.tsv"))))
         runs (into {} (map (juxt first identity) (tsv (str work "/run.tsv"))))]
@@ -214,8 +243,9 @@
         runs (into {} (map (juxt first identity) (tsv (str work "/run.tsv"))))
         ;; a control: the subject's run judged as the reference module is, by its own verdict when it has one, else against
         ;; lli's recorded run of it
+        gxx (gxx-records)
         ctl (for [{:keys [subject reference]} (or (read-file controls) [])
-                  :let [run (runs subject) r (refs reference) v (owns reference)]
+                  :let [run (runs subject) r (gxx-reference reference (refs reference) gxx) v (owns reference)]
                   :when (and run (or v r))]
               [subject reference (first (if v (own-result run v (out-of work subject)) (run-result run r)))])
         ctl-pass (filter #(= :pass (nth % 2)) ctl)
@@ -225,6 +255,8 @@
                          (for [[s r] ctl-pass] (str "the negative control passes: " s "'s run against " r "'s reference")))]
     (spit (str work "/results.edn") (str "[\n" (str/join (for [[id r why] rs] (str "[" (q id) " " r " " (q why) "]\n"))) "]\n"))
     (println "llvmi:" (count (filter val owns)) "modules judged by their own verdicts," (count (remove val owns)) "against lli's recorded runs"
+             (let [n (count (for [[id v] owns :when (and (nil? v) (:who (gxx-reference id (refs id) gxx)))] id))]
+               (str "(of which " n " against g++'s, " gxx-ref-file ", for lli's own abort report)"))
              (str "(LLVMI_JUDGE " (judge-mode) ")"))
     (println "llvmi: negative controls:" (count ctl) "judged," (count ctl-pass) "pass (each must not)")
     (doseq [p problems] (println "FAIL" p))
