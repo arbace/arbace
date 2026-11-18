@@ -3413,6 +3413,14 @@ all (a), as recommended there:
   again (`bin/oi record-ref --only-list`; the old ocamlc rows were runs without -g). (b) keep the exceptions and re-record the rows
   alone: rejected, the exceptions would be stale (`bin/oi own-verdicts --check` fails). (c) keep both as they were: rejected, oi's
   lines, equal to ocamlc -g's, would stay judged against a run without debug information.
+- **OC229 (a)** (taken overnight, round 52, as recommended) OC220's first part, Dynlink's init info at oi's level: the library is the
+  tarball's dynlink_types, dynlink_platform_intf and dynlink_common with Arbace's own platform (test/ocaml/dynlink/dynlink.ml) in
+  byte/dynlink.ml's place, the main program's units oi's unit table (the external caml_oi_dynlink_units). (b) a stub Dynlink unit
+  answering the two lists alone: rejected, the state, the allowed units and error_message would be written twice and the loader's
+  part would start over. (c) a per-program generated unit list: rejected, a typer run a program.
+- **OC230 (a)** (taken overnight, round 52) a header that includes dynlink runs only when the rest of it runs (header.awk keeps the
+  include's class otherwise), so the plugin tests and the debugger's stay in their classes; the AOT levels keep the class until the
+  runtime has the unit table (OC220's next part).
 Order (the plan's): OC213, OC214 (S1) with OC209 and OC210 first (branch `ocaml-s1`), then OC215, OC216, OC217, OC218 then OC219,
 OC220 and OC221; OC222 with the scoring's next change.
 
@@ -4014,4 +4022,41 @@ pass, judged against the old 0-byte ocamlopt row, until the AOT level runs again
 exception), `bin/oi divergences` (pins attested), the negative control `_control/why-at-vs-why-swallow` differs, `bin/reap --record`,
 `bin/crops-score --record` and `--judge --strict`, `bin/records-check`. The oracle path's check-oi.edn (ocdump, whose events carry no
 information) and the rollup were not run again. No code changed.
+
+## As built: OC220's first part, Dynlink's init info at oi's level (2026-11-18, round 52, branch `n-oc220`)
+
+OC229 (a), OC230 (a). `lib-dynlink-init-info/test` (#9338: `Dynlink.main_program_units` and `all_units` hold "Dynlink" before any
+load) passes at oi by its own verdict.
+
+- **The library.** `bin/oi stdlib`'s libs_native builds `DYNLIB` (`.tmp/oi/dynlib`) from the pinned tarball's otherlibs/dynlink:
+  dynlink_types, dynlink_platform_intf (its `.mli` its `.ml`, as the Makefile makes it), dynlink_common, and dynlink.ml from
+  test/ocaml/dynlink/ against the tarball's dynlink.mli. The platform `Oi` follows byte/dynlink.ml's shape: `fold_initial_units` gives
+  each unit of the program an implementation `Loaded` (no interface CRC), `unsafe_get_global_value` a unit's module block
+  (caml_oi_dynlink_global), `load` opens the file as the bytecode one does and then raises `Cannot_open_dynamic_library (Failure ...)`.
+  The sources are in stdlib_key and native_key.
+- **oi.** `Program.Units`: the units `Link` took, in link order (as the bytecode executable's global map holds them); the externals
+  `caml_oi_dynlink_units` and `caml_oi_dynlink_global` (go/arbace/oi/ext.ae).
+- **header.awk.** `include dynlink` at oi's level adds the library; `cls` keeps "include dynlink" as the class of a header that
+  includes it, so the other rows keep `:dynlink-decided` (and tool-debugger/dynlink `:dynlink`); the AOT levels keep the class.
+
+**Results (light).** `bin/oi check --record --only-list` on the row (the typer under GOMEMLIMIT=700MiB, peak 0.94 GB): pass;
+check-oi-native.edn's one row moved. OCaml eval 521 / 75 / 45 to 522 / 75 / 44; completeness 87, meant 92. `bin/reap --record`,
+`bin/crops-score --record` and `--judge --strict` 0 problems; `bin/oi own-verdicts --check` 0 differing; the negative control
+`_control/norm3-vs-norm2` differs (a run of the row with norm3 and norm2, not recorded). `bin/oi divergences` fails only on 331's pins, not
+attested (expected).
+The stdlib was rebuilt here under 700 MiB: compiler-libs' parser timed out at that limit (OI_LIB_TIMEOUT), which no row of this change
+reads; the main host's rebuild at the default limits builds it.
+
+**The other four rows** (OC220's rest; each needs the loader: a plugin the test's ocamlc steps build typed into Lambda units by
+header.awk's helper mode, `load` handing oi those units' headers and `run` compiling and initialising them, as Translmod's units are):
+
+| row | what it needs beyond the loader | cost |
+|---|---|---|
+| lib-dynlink-pr4229/main | the bytecode branch only: client.cmo, sub/abstract.cmo; `Module_already_loaded "Abstract"`, exit 2: dynlink_common's checks, with the units' interface imports in `Unit_header` | the loader, about a day; then the cheapest |
+| lib-dynlink-domains/main | 20 plugin .cmo loaded from domains at once (Domain.spawn, dynlink's lock), the native branch .cmxs | +hours after the loader |
+| lib-dynlink-bytecode/main | ocamlmklib, the plugins' C stubs on ci (oicapi), `.cma` loading, `loadfile_private`, Marshal's Closures of plugin code, the `-linkall` and `-custom` variants | about a day more |
+| backtrace/backtrace_dynlink | native only (ocamlopt, .cmxs): the compiled level's registry, and its reference prints `Dynlink.Native.run` frames: OC217 (b)'s backtraces at the AOT level | several days, last |
+
+At the AOT levels the five rows need the runtime's unit table first (jdk/ocaml's runtime: the program's units, the two externals, the
+library in `o2j clib`), about two hours and a runtime build, then lib-dynlink-init-info passes there too.
 

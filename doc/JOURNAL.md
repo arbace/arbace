@@ -10614,3 +10614,18 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `bin/crops-score --record` unchanged (53 of 56 cells, 0 problems), `--judge --strict` 0 problems; `bin/records-check` 0;
   `bin/gate --plan` plans (go-build: 334's go/arbace/scm moves gate_key).
 - On top tomorrow: n-rust-alloc4 and n-hs-elab (still running tonight).
+
+## 2026-11-18: OCaml, OC220's first part: Dynlink's init info at oi's level (round 52, branch `n-oc220`)
+
+- Built Dynlink at oi's level from OCaml 5.5.0's tarball (`ocaml-5.5.0.tar.xz`, pinned by `bin/repr-ocaml corpus fetch`):
+  otherlibs/dynlink's dynlink_types, dynlink_platform_intf, dynlink_common and dynlink.mli, with Arbace's own platform
+  test/ocaml/dynlink/dynlink.ml in byte/dynlink.ml's place (LGPL-2.1 with the linking exception, read for its shape). The main
+  program's units are oi's unit table (Program.Units, the external caml_oi_dynlink_units). header.awk takes `include dynlink` at oi's
+  level only when the rest of the header runs; the AOT levels keep the class.
+- lib-dynlink-init-info/test passes (`bin/oi check --record --only-list`, its row alone); OCaml eval 521 to 522.
+- Decisions taken overnight (round 52), as recommended: OC229 (a) the tarball's dynlink_common over our platform (not a two-function
+  stub, not a generated list); OC230 (a) the plugin tests keep their class, the AOT levels wait for the runtime's unit table.
+- The other four rows (pr4229, domains, bytecode, backtrace_dynlink) need a loader of the plugins the test builds; their costs are in
+  doc/ocaml/OCAML-SURVEY.md, "As built: OC220's first part".
+- bin/oi's change moves oi's keys (stdlib_key, native_key, the driver's forms_key): the main host's whole runs re-record.
+

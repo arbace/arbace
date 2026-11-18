@@ -4,7 +4,9 @@
 # "class<TAB>REASON", REASON the first statement outside that set.
 function trim(s) { gsub(/^[ \t\n]+|[ \t\n]+$/, "", s); return s }
 # a class: REASON, or in helper mode (below) past its readonly_files statement the reason the test had before that mode, that statement
-function cls(r) { if (helper && roseen) r = roclass; print "class\theader: " r; exit }
+# a header that includes dynlink (OC220 (a)'s first part: Dynlink's unit at oi's level, no plugin loaded yet) runs only when the rest of its
+# header runs too; a later class keeps the include's, the class of the plugins the test builds (:dynlink-decided) and of the debugger's
+function cls(r) { if (helper && roseen) r = roclass; if (dlseen) r = "include dynlink"; print "class\theader: " r; exit }
 # OC210 (a) (the user, 2026-11-10): ocamltest's expansion of a variable's value (environments.ml's expand, Buffer.add_substitute):
 # $NAME, ${NAME} or $(NAME) replaced by the variable's value, itself expanded, an unset one by nothing; \$ a literal $. The
 # variables are the header's `set NAME = "VALUE"` (setv); ${ocamlsrcdir} and the other builtins were replaced before (@OCAMLSRCDIR@,
@@ -189,6 +191,9 @@ END {
       if (lib == "str") { incs = incs " str"; continue }
       # the Runtime_events library (OC219 (a)): runtime_events.ml loaded with the program, its externals oi's ext_runtime_events
       if (lib == "runtime_events") { incs = incs " runtime_events"; continue }
+      # the Dynlink library (OC220 (a)'s first part): its units loaded with the program at oi's level (the platform test/ocaml/dynlink's,
+      # the main program's units oi's unit table); the AOT levels keep the class until the runtime has the unit table
+      if (lib == "dynlink" && (aot == "" || aot == 0)) { incs = incs " dynlink"; dlseen = 1; continue }
       if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       cls("include " lib)
     }
