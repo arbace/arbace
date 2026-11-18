@@ -10408,3 +10408,30 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   rest of the crate's modules".
 - core's native facts may move (a derive's duplicate projection bound gone; `super::super` paths): the day runs core-essential,
   rind-test, core's check and the whole alloc pass.
+
+## 2026-11-18: RIND9 (a): set::entry, core's check and the whole alloc pass (round 54, branch `n-rust-alloc5`, on `6d68b7d2b`)
+
+- set::entry was 19 of 21 with map::entry passed before it: `CORE_TRACE=1` named OccupiedEntry's and VacantEntry's `inner`
+  unresolved, `map::OccupiedEntry`. set/entry.rs' `use super::{SetValZST, map}` names two of set's own imports, and a module built
+  alone reads its parent through the crate's index, which skipped a `self` import (`use super::map::{self, BTreeMap, Keys}`) and read
+  only the first of leading `super`s. Fixed in core_check's `file-names` (core's build shares it): a `self` import binds its module
+  under its name, each leading `super` goes one module up. alloc's index rebuilt (84 files, 17 macros, 160 modules); set::entry 21
+  of 21, with three module cases (the field through set's imports, VacantEntry written, the negative).
+- core's whole check (`bin/rust-front core-check --records`, 37 modules, 35 min, 2.17 GB) first gave 5,693 equal and 11 refused,
+  five of them array's StackOverflowError (from_fn, try_from_fn, its `{constant#2}`, map, try_map): not this round's cause but
+  n-rust-alloc2's (lower-trait-ref lowering an associated-type bound's bounds into `:clauses`), which trait-bounds-defining then
+  re-entered resolving `T::Residual` in `T: Try<Residual: Residual<V>>`. rustc's probe (PredicateFilter::SelfTraitThatDefines)
+  lowers the trait ref alone: collect's `*trait-ref-only*`. After it: **5,696 equal**, 166 but for the allocations' ids, 6 but for
+  the allocations, 32 differ, **6 refused** (array 91 equal, 0 refused; from_fn and map now built and differing by a user type
+  annotation's path); every other module's line the same in both runs. RF20's last recorded run (2026-11-11) was 5,594 / 161 / 33 / 6.
+- `bin/rust-front core-essential` equals its known file (566 equal) and `bin/rust-front rind-test` passes, before and after the
+  third fix.
+- The whole alloc pass, two rounds now the default: **3,863 of 3,863 helper facts equal**, 0 differ, 0 missing (native extras
+  1,015), the control differing; 14 to 15 min, 2.07 GB peak, before and after the third fix. One round: 3,841 equal, 18 differ,
+  4 missing: the order's differences, every one closed by the second round.
+- `bin/rust-front alloc-iface --units --record` from a passing run with all three fixes: 42 pure cases, 61 module lines (64 files), every line's helper facts equal (3,696 facts summed over the lines, 0 differ, 0 missing), every control differing; `alloc-iface-units-known.txt` re-recorded (609 lines), its earlier 283 lines unchanged. About 95 minutes on a loaded host, each process under 1 GiB.
+- Decisions taken (round 54): RIND9a-15 (a) two rounds the whole pass's default (alternatives a headers round, a dependency order:
+  set aside, the second round already closes every difference at 15 minutes); RIND9a-19 (a) the index's `self` imports and leading
+  `super`s (alternative: set's file as context, set aside: context carries ADTs' generics, not imports); RIND9a-20 (a) the
+  trait ref alone in trait-bounds-defining (alternative: a depth guard, set aside: it hides the cause). doc/rust/FRONTEND-SURVEY.md,
+  "As built: RIND9 (a), alloc's pass: set::entry and the whole crate".
