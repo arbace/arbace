@@ -69,8 +69,10 @@
   "The module's own verdict, or nil (no verdict of its own: judged against lli's record):
   - llvm/test's ExecutionEngine modules (ee.*): lit's, the RUN lines run lli on the file with no argument and exit 0 (lit fails a
     test whose command fails), and when the output is piped to FileCheck the file's `CHECK:` lines are found in stdout in order
-    (FileCheck's rule: each after the last match, runs of blanks as one); any other directive (CHECK-NEXT, -NOT, -DAG, a prefix,
-    a {{regex}} or [[variable]]), an argument after the file, or a `not`: no own verdict;
+    (FileCheck's rule: each after the last match, runs of blanks as one); the program's arguments those the RUN lines write after
+    the file (plain words, the same on every line: `%lli %s test`, :args, which the run passes; queue 358); any other directive
+    (CHECK-NEXT, -NOT, -DAG, a prefix, a {{regex}} or [[variable]]), arguments that differ between the lines or are not plain
+    words, or a `not`: no own verdict;
   - gcc's torture execute programs (tx-O0.*, tx-O2.*): gcc's harness's, the program exits 0 (abort() or exit(1) is a failure;
     gcc.c-torture/execute's dg-do run, the programs' convention).
   {:status 0 :checks [PATTERN ...]}."
@@ -81,9 +83,10 @@
     (let [text (slurp path)
           runs (run-lines text)
           lli-runs (filter #(re-find #"%lli|(^|\s)lli\s" %) runs)
-          plain? (fn [r] (let [r (str/replace r #"\s*\|\s*FileCheck\s+%s\s*$" "")
-                               r (str/replace r #"\s*>\s*/dev/null\s*$" "")]
-                           (and (not (re-find #"(^|\s)not\s" r)) (re-find #"%s$" (str/trim r)))))
+          bare (fn [r] (-> r (str/replace #"\s*\|\s*FileCheck\s+%s\s*$" "") (str/replace #"\s*>\s*/dev/null\s*$" "") str/trim))
+          ;; the words after the file: the program's arguments (plain words alone)
+          args-of (fn [r] (when-let [[_ a] (re-find #"%s((?:\s+[A-Za-z0-9_.,=+-]+)*)$" (bare r))] (vec (remove str/blank? (str/split a #"\s+")))))
+          plain? (fn [r] (and (not (re-find #"(^|\s)not\s" (bare r))) (some? (args-of r))))
           fc? (some #(re-find #"FileCheck" %) runs)
           directives (re-seq #"(?m)^;\s*([A-Z][A-Z0-9_-]*):" text)
           checks (vec (for [[_ p] (re-seq #"(?m)^;\s*CHECK:\s?(.*)$" text)] (str/trim p)))]
@@ -91,10 +94,12 @@
                  (every? #(#{"RUN" "CHECK" "REQUIRES" "XFAIL" "UNSUPPORTED"} (second %)) directives)
                  (not-any? #(re-find #"\{\{|\[\[" %) checks)
                  (or fc? (empty? checks))
+                 (apply = (map args-of runs))
                  ;; an XFAIL for another target only (lit on x86_64 Linux expects a pass); REQUIRES and UNSUPPORTED are lit's to skip
                  (every? #(and (re-find #"target=" %) (not (re-find #"x86_64|x86-64|linux|\{\{\.\*\}\}$" %)))
                          (map second (re-seq #"(?m)^;\s*XFAIL:(.*)$" text))))
-        {:status 0 :checks (if fc? checks []) :by (if fc? "lit's: exit 0 and FileCheck's CHECK lines" "lit's: exit 0")}))
+        (cond-> {:status 0 :checks (if fc? checks []) :by (if fc? "lit's: exit 0 and FileCheck's CHECK lines" "lit's: exit 0")}
+          (seq (args-of (first runs))) (assoc :args (args-of (first runs))))))
     :else nil))
 
 (defn- blanks [s] (str/replace (str s) #"[ \t]+" " "))
@@ -244,8 +249,21 @@
     (doseq [[id r why] un] (println "FAIL in no class:" id (name r) why))
     (System/exit (if (seq un) 1 0))))
 
+(defn run-args
+  "run-args MODULES: each module's arguments its own verdict's RUN lines give (ID<TAB>ARG ... a line, the modules with
+  arguments alone), which bin/llvmi's runs pass to the program; none under LLVMI_JUDGE=lli (lli's record ran with none)."
+  [[modules]]
+  (when (= "own" (judge-mode))
+    (doseq [[id p] (tsv modules)
+            :let [a (:args (try (own-verdict id p) (catch Throwable _ nil)))]
+            :when (seq a)]
+      (println (str id "\t" (str/join " " a)))))
+  (flush)
+  (System/exit 0))
+
 (defn -main [verb & args]
   (case verb
+    "run-args" (run-args args)
     "record-ref" (let [[work ref only] args] (record-ref work ref (= only "--only")))
     "judge" (judge args)
     "divergences" (divergences args)
