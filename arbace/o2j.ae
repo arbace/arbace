@@ -257,6 +257,85 @@
                     (list 'ocaml.rt.Rt/ap c (list 'new 'Object/1 (vec args))))))
       (list 'ocaml.rt.Rt/ap f (list 'new 'Object/1 (vec args))))))
 
+;; ---- backtraces (OC217 (a)'s fifth stage, queue 370; oi's compile.go event, applyEvNode, primEv, raiseNode): a -g unit's
+;; after-events, `(event L [KIND DEF FILE L1 C1 EOFF L2 C2])`, are the slots of Bt's shadow stack
+
+(defn- ev-info "An event's information vector, nil without one (an oracle's dump)." [info]
+  (when (and (vector? info) (>= (count info) 8)) info))
+
+(defn- slot-ref
+  "The unit's static field holding the slot of event information info (a raise's, a primitive's)."
+  [info raise? prim?]
+  (let [[_ def file l1 c1 eoff l2 c2] info k (fresh "bt")]
+    (swap! (:slots *unit*) conj [k (list 'ocaml.rt.Bt/slot def file l1 c1 eoff l2 c2 raise? prim?)])
+    (symbol (str (unit-class)) (name k))))
+
+(defn- has-event? "Whether node x holds an event with its information." [x]
+  (cond (seq? x) (or (and (= 'event (first x)) (some? (ev-info (second (node-body x))))) (some has-event? x))
+        (vector? x) (some has-event? x)
+        :else false))
+
+(defn- with-all-args
+  "Evaluates arg nodes right to left into temporaries (every one that is not simple) and calls (k forms temps): nothing is
+  evaluated inside k's form (a slot entered after the arguments); k clears the temporaries after its call (`clear`), so that a
+  value only an argument held is not kept from the collector by the frame (callstack's finaliser)."
+  [ctx nodes k]
+  (let [temps (into {} (keep-indexed (fn [i x] (when-not (simple? x) [i (with-meta (fresh "t$") {:mutable true :tag 'Object})])) nodes))
+        forms (vec (map-indexed (fn [i x] (or (temps i) (expr ctx x false))) nodes))
+        bindings (vec (mapcat (fn [i] [(temps i) (expr ctx (nth nodes i) false)]) (reverse (sort (keys temps)))))
+        body (k forms (vals temps))]
+    (if (seq bindings) (list 'let bindings body) body)))
+
+(defn- clear "The forms that clear temporaries ts." [ts] (map (fn [t] (list 'set! t nil)) ts))
+
+(defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
+  (let [r (fresh "r$")]
+    (list 'do (list 'ocaml.rt.Bt/push ev) (concat (list 'let [r f]) (clear ts) [(list 'ocaml.rt.Bt/pop) r]))))
+
+(defn- apply-ev-node
+  "A non-tail application with an after-event: its slot entered once the arguments and the function are evaluated (bytegen's
+  APPLY1-3), before the arguments for four or more (PUSH_RETADDR)."
+  [ctx [f args] ev]
+  (if (>= (count args) 4)
+    (let [r (fresh "r$")]
+      (list 'do (list 'ocaml.rt.Bt/push ev)
+            (with-all-args ctx (into [f] args)
+                           (fn [as ts] (concat (list 'let [r (call-form (first as) (rest as))]) (clear ts) [(list 'ocaml.rt.Bt/pop) r])))))
+    (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
+
+(declare prim-value)
+
+(defn- event-node
+  "(event L [INFO]): in tail position, or without information, L alone (bytegen drops the event to keep the tail call); around
+  an event, the inner one; around an application or a primitive, their slot entered as they are called; else around L."
+  [ctx [inner info] tail?]
+  (let [info (ev-info info)]
+    (if (or (nil? info) tail?)
+      (expr ctx inner tail?)
+      (case (hd inner)
+        event (expr ctx inner tail?)
+        apply (apply-ev-node ctx (node-body inner) (slot-ref info false false))
+        prim (let [[n args] (node-body inner)]
+               (if (or (#{"&&" "||" "sequand" "sequor" "runstack" "resume" "reperform" "raise" "reraise" "raise_notrace"} n)
+                       (str/starts-with? n "setglobal ") (str/starts-with? n "global "))
+                 (expr ctx inner false)
+                 (let [ev (slot-ref info false true)]
+                   (with-all-args ctx args (fn [as ts] (around-slot ev (prim-value n as) ts))))))
+        (around-slot (slot-ref info false false) (expr ctx inner false))))))
+
+(defn- raise-slot
+  "A raise's argument and slot: the innermost event of the argument (the one at the RAISE's pc), marked a raise; an argument
+  that is no call is its value alone; with none, 0 (a compiler-inserted raise, skipped when printed)."
+  [x]
+  (loop [x x]
+    (let [info (when (= 'event (hd x)) (ev-info (second (node-body x))))]
+      (if (nil? info)
+        [x 0]
+        (let [inner (first (node-body x))]
+          (cond (= 'event (hd inner)) (recur inner)
+                (#{'apply 'prim} (hd inner)) [x (slot-ref info true false)]
+                :else [inner (slot-ref info true false)]))))))
+
 (defn- apply-node [ctx [f args] tail?]
   (let [self (:self ctx)]
     (if (and tail? self (= 'var (hd f)) (= (second f) (:id self)) (= (count args) (:arity self)))
@@ -501,6 +580,9 @@
 
 (defn- prim-node [ctx [^String n args] tail?]
   (cond
+    (#{"raise" "reraise" "raise_notrace"} n)
+    (let [[x sl] (raise-slot (first args))]
+      (with-args ctx [x] (fn [[a]] (list 'throw (list 'ocaml.rt.Bt/raise a sl (= n "reraise") (= n "raise_notrace"))))))
     (str/starts-with? n "global ")
     (let [g (global-name (subs n 7))]
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
@@ -561,10 +643,19 @@
         syms (mapv (fn [_] (fresh "h$")) vars)
         bctx (assoc-in ctx [:exits n] {:label e :vars syms})
         hctx (update ctx :env merge (zipmap (map first vars) syms))]
-    (list 'label k
-          (list 'let (vec (mapcat (fn [s] [(with-meta s {:mutable true :tag 'Object}) nil]) syms))
-                (list 'label e (list 'break k (expr bctx body tail?)))
-                (expr hctx handler tail?)))))
+    (if (has-event? body)
+      ;; an exit out of a slot's region leaves it entered: the handler cuts the stack back (oi's static exit)
+      (let [b0 (fresh "b0$")]
+        (list 'let [(with-meta b0 {:tag 'int}) 'ocaml.rt.Bt/sp]
+              (list 'label k
+                    (list 'let (vec (mapcat (fn [s] [(with-meta s {:mutable true :tag 'Object}) nil]) syms))
+                          (list 'label e (list 'break k (expr bctx body tail?)))
+                          (list 'ocaml.rt.Bt/unwind b0)
+                          (expr hctx handler tail?)))))
+      (list 'label k
+            (list 'let (vec (mapcat (fn [s] [(with-meta s {:mutable true :tag 'Object}) nil]) syms))
+                  (list 'label e (list 'break k (expr bctx body tail?)))
+                  (expr hctx handler tail?))))))
 
 (defn- staticraise-node [ctx [n args]]
   (let [{:keys [label vars]} (or (get-in ctx [:exits n]) (throw (ex-info (str "exit " n " not in scope") {})))]
@@ -576,13 +667,17 @@
               (concat (list 'do) (map (fn [v t] (list 'set! v t)) vars ts) [(list 'break label)]))))))
 
 (defn- trywith-node [ctx [body id handler] tail?]
-  (let [e (fresh "e$") s (munge-id id) d (fresh "d$")]
-    ;; the handler runs at the depth the try was entered at (the calls the exception left were not given back)
-    (list 'let [d 'ocaml.rt.Rt/depth]
+  (let [e (fresh "e$") s (munge-id id) d (fresh "d$") bs (fresh "bs$")]
+    ;; the handler runs at the depth the try was entered at (the calls the exception left were not given back); the backtrace
+    ;; (Bt): the raise's slot and the slots above the handler's depth stashed, the stack cut back to it
+    (list 'let [d 'ocaml.rt.Rt/depth (with-meta bs {:tag 'int}) 'ocaml.rt.Bt/sp]
           (list 'try (expr ctx body false)
                 (list 'catch 'Throwable e
                       (list 'set! 'ocaml.rt.Rt/depth d)
-                      (list 'let [s (rt 'exnValue e)] (expr (assoc-in ctx [:env id] s) handler tail?)))))))
+                      (list 'let [s (rt 'exnValue e)]
+                            (list 'ocaml.rt.Bt/stash e bs)
+                            (list 'ocaml.rt.Bt/unwind bs)
+                            (expr (assoc-in ctx [:env id] s) handler tail?)))))))
 
 (defn- for-node [ctx [id lo hi dir body]]
   (let [l (fresh "lo$") h (fresh "hi$") i (fresh "i$") s (munge-id id)
@@ -629,7 +724,7 @@
              (list 'let (vec (concat (mapcat (fn [t x] [t (expr ctx x false)]) (reverse ts) (reverse args))
                                      [ov (expr ctx o false) mv (expr ctx m false)]))
                    (call-form (rt 'getMethod (= kind :self) ov mv) (into [ov] ts))))
-      event (expr ctx (first b) tail?)
+      event (event-node ctx b tail?)
       ifused (expr ctx (second b) tail?)
       (throw (ex-info (str "Lambda node " h " not known") {:head h})))))
 
@@ -642,7 +737,7 @@
   [{:keys [name code]}]
   (let [cls (symbol (class-name name))]
     (binding [*unit* {:class (symbol (str (pkg-of name) "." cls)) :name name :n (atom 0)
-                      :classes (atom []) :consts (atom []) :missing (atom {})}]
+                      :classes (atom []) :consts (atom []) :slots (atom []) :missing (atom {})}]
       (let [[_ [body]] (node-body code)
             init (realize (expr {:env {} :exits {}} body false))
             classes (mapv realize @(:classes *unit*))
@@ -650,6 +745,8 @@
                    (list 'defclass (with-meta cls {:public true}))
                    [(list 'field (with-meta 'G {:public true :static true}))]
                    (for [[k init] @(:consts *unit*)] (list 'field (with-meta k {:public true :static true :final true}) init))
+                   ;; the unit's debugging events (OC217 (a)'s fifth stage): Bt's slots, registered when the class is initialised
+                   (for [[k init] @(:slots *unit*)] (list 'field (with-meta k {:public true :static true :final true :tag 'int}) init))
                    classes
                    [(list 'method (with-meta 'init {:public true :static true}) (with-meta [] {:tag 'void})
                           (list 'set! 'G init))])]

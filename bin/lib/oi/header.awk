@@ -190,7 +190,8 @@ END {
           if (f == "-w" || f == "-warn-error") { q++; continue }
           # -g (OC217 (a)): oi's level keeps it, the typer's debugging events its backtraces read; the AOT levels have no
           # backtraces yet (their class)
-          if (f == "-g") { if (aot == "" || aot == 0) flags = flags " -g"; continue }
+          # -g at oi's level and at the light level (queue 370: o2j's shadow stack, Bt), not yet the compiled level
+          if (f == "-g") { if (aot != 2) flags = flags " -g"; continue }
           if (f ~ /^-w[+-]/ || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
@@ -229,7 +230,8 @@ END {
       # runtime's call depth); the other parameters (b=, ...) keep the class
       if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
       # b, the backtraces' recording (OC217 (a)): oi's level records them (its backtrace stack over the typer's debugging events)
-      if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && (aot == "" || aot == 0)) { env = env " OCAMLRUNPARAM=" val; continue }
+      # (queue 370: at the light level too, Bt's backtraces; not yet the compiled level)
+      if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && aot != 2) { env = env " OCAMLRUNPARAM=" val; continue }
       if (key == "ocamlrunparam") { cls("ocamlrunparam " val) }
       cls(key " = " val)
     }

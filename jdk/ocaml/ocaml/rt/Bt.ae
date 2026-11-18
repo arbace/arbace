@@ -1,0 +1,169 @@
+;; Backtraces at the AOT levels (OC217 (a)'s fifth stage, queue 370; oi's exn.go and ext_sys.go's backtrace.c, OCaml 5.5.0's
+;; runtime/backtrace_byt.c, backtrace.c and interp.c read for their behaviour, written anew). o2j translates a -g unit's
+;; after-events (the typer's Translcore: `(event L [KIND DEF FILE L1 C1 EOFF L2 C2])`) into a shadow stack of slots: a call
+;; with an event enters its slot once its arguments and function are evaluated (before them for four arguments or more), a
+;; primitive's around its operation, an expression's around it; a raise names its slot (the innermost event of its argument).
+;; A handler (trywith) stashes the raise's slot and the slots above its own depth, then cuts the stack back; an uncaught
+;; exception stashes all of it. The raw backtrace is the slots' indexes; Printexc's conversion reads them. The stack, the
+;; stashed backtrace and the last exception are the lock holder's: Gil saves and restores them with the call depth.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util ArrayList Arrays))
+
+(defclass ^:public ^:final Bt
+  ;; the slots: [valid raise prim def file l1 c1 eoff l2 c2]; 0 a raise with no event, 1 a primitive's with none
+  (field ^:static ^:final ^ArrayList slots (Bt/initSlots))
+  (method ^:static initSlots ^ArrayList []
+    (let [a (ArrayList.)]
+      (.add a (new Object/1 [Boolean/FALSE Boolean/TRUE Boolean/FALSE "" "" (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0)]))
+      (.add a (new Object/1 [Boolean/FALSE Boolean/FALSE Boolean/FALSE "" "" (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0)]))
+      a))
+  ;; a program with an event has debugging information (oi's debugInfo); OCAMLRUNPARAM's b starts the recording
+  (field ^:public ^:static ^boolean debugInfo false)
+  (field ^:public ^:static ^boolean active (> (ExtCore/runParam 98) 0))
+
+  ;; a unit's event, registered when its class is initialised (its static field): its index
+  (method ^:public ^:static slot ^int [^String def ^String file ^long l1 ^long c1 ^long eoff ^long l2 ^long c2 ^boolean raise ^boolean prim]
+    (set! debugInfo true)
+    (locking slots
+      (.add slots (new Object/1 [Boolean/TRUE (Boolean/valueOf raise) (Boolean/valueOf prim) def file (Long/valueOf l1) (Long/valueOf c1)
+                                 (Long/valueOf eoff) (Long/valueOf l2) (Long/valueOf c2)]))
+      (unchecked-dec-int (.size slots))))
+  (method ^:static info ^Object/1 [^int i] (cast Object/1 (.get slots i)))
+  (method ^:static flag ^boolean [^int i ^int k] (.booleanValue (cast Boolean (aget (Bt/info i) k))))
+
+  ;; the lock holder's state: the stack of slots in flight, the stashed backtrace, the exception it is the backtrace of
+  (field ^:public ^:static ^int/1 stk (new int/1 64))
+  (field ^:public ^:static ^int sp 0)
+  (field ^:static ^int/1 buf (new int/1 16))
+  (field ^:static ^int nbuf 0)
+  (field ^:static lastExn nil)
+  (method ^:public ^:static save ^Object/1 [] (new Object/1 [stk (Integer/valueOf sp) buf (Integer/valueOf nbuf) lastExn]))
+  (method ^:public ^:static restore ^void [^Object/1 s]
+    (if (nil? s)
+      (do (set! stk (new int/1 64)) (set! sp 0) (set! buf (new int/1 16)) (set! nbuf 0) (set! lastExn nil))
+      (do (set! stk (cast int/1 (aget s 0))) (set! sp (.intValue (cast Integer (aget s 1))))
+          (set! buf (cast int/1 (aget s 2))) (set! nbuf (.intValue (cast Integer (aget s 3)))) (set! lastExn (aget s 4)))))
+  (method ^:public ^:static reset ^void []
+    (set! sp 0) (set! nbuf 0) (set! lastExn nil) (set! active (> (ExtCore/runParam 98) 0)))
+
+  (method ^:public ^:static push ^void [^int s]
+    (when (== sp (alength stk)) (set! stk (Arrays/copyOf stk (unchecked-multiply-int sp 2))))
+    (aset stk sp s)
+    (set! sp (unchecked-inc-int sp)))
+  (method ^:public ^:static pop ^void [] (set! sp (unchecked-dec-int sp)))
+  (method ^:public ^:static unwind ^void [^int base] (when (< base sp) (set! sp base)))
+
+  ;; a raise of v at slot s (-1: none, a primitive's), a reraise, a raise_notrace
+  (method ^:public ^:static raise ^Exn [v ^int s ^boolean re ^boolean nt]
+    (let [e (Exn. v)] (set! (.-at e) s) (set! (.-re e) re) (set! (.-nt e) nt) e))
+
+  (method ^:static add ^void [^int s]
+    (when (< nbuf 1024)
+      (when (== nbuf (alength buf)) (set! buf (Arrays/copyOf buf (unchecked-multiply-int nbuf 2))))
+      (aset buf nbuf s)
+      (set! nbuf (unchecked-inc-int nbuf))))
+  ;; caml_stash_backtrace for the throwable t caught by a handler entered at depth base
+  (method ^:public ^:static stash ^void [^Throwable t ^int base]
+    (let [x (if (instance? Exn t) (cast Exn t) nil)]
+      (when (and active debugInfo (or (nil? x) (not (.-nt x))))
+        (let [v (if (some? x) (.-v x) nil)]
+          (when (or (nil? x) (not (.-re x)) (not (identical? v lastExn)))
+            (set! nbuf 0)
+            (set! lastExn v))
+          (let [^:mutable top (unchecked-dec-int sp)
+                b (if (> base sp) sp base)]
+            (if (and (some? x) (>= (.-at x) 0))
+              (Bt/add (.-at x))
+              (if (and (>= top b) (Bt/flag (aget stk top) 2))
+                (do (Bt/add (aget stk top)) (set! top (unchecked-dec-int top)))
+                (Bt/add 1)))
+            (loop [^int i top]
+              (when (>= i b)
+                (Bt/add (aget stk i))
+                (recur (unchecked-dec-int i)))))))))
+
+  ;; print_location's line of entry s at position i; nil for a compiler-inserted raise
+  (method ^:public ^:static line ^String [^int s ^int i]
+    (let [f (Bt/info (if (and (>= s 0) (< s (.size slots))) s 1))
+          valid (.booleanValue (cast Boolean (aget f 0)))
+          raise (.booleanValue (cast Boolean (aget f 1)))]
+      (if (and (not valid) raise)
+        nil
+        (let [what (if raise (if (== i 0) "Raised at" "Re-raised at") (if (== i 0) "Raised by primitive operation at" "Called from"))]
+          (if (not valid)
+            (java-str what " unknown location")
+            (let [l1 (cast Long (aget f 5)) l2 (cast Long (aget f 8))
+                  lines (if (== (.longValue l1) (.longValue l2)) (java-str "line " l1) (java-str "lines " l1 "-" l2))]
+              (java-str what " " (aget f 3) " in file \"" (aget f 4) "\", " lines ", characters " (aget f 6) "-" (aget f 9))))))))
+  ;; caml_print_exception_backtrace
+  (method ^:public ^:static print ^void []
+    (when (and active debugInfo)
+      (loop [^int i 0]
+        (when (< i nbuf)
+          (let [l (Bt/line (aget buf i) i)]
+            (when (some? l) (.print System/err (java-str l "\n"))))
+          (recur (unchecked-inc-int i))))))
+  (method ^:public ^:static saveBuf ^int/1 [] (Arrays/copyOf buf nbuf))
+  (method ^:public ^:static restoreBuf ^void [^int/1 b] (set! buf (Arrays/copyOf b (unchecked-int (Math/max 16 (alength b))))) (set! nbuf (alength b)))
+
+  ;; caml_convert_debuginfo: Known_location {is_raise; filename; start_lnum; start_char; end_offset; end_lnum; end_char; is_inline;
+  ;; defname} or Unknown_location {is_raise}
+  (method ^:static convert [e]
+    (let [i (Rt/l e)]
+      (if (or (< i 0) (>= i (.size slots)))
+        (Block. 1 (new Object/1 [Rt/FALSE]))
+        (let [f (Bt/info (unchecked-int i))]
+          (if (not (.booleanValue (cast Boolean (aget f 0))))
+            (Block. 1 (new Object/1 [(Rt/b (.booleanValue (cast Boolean (aget f 1))))]))
+            (Block. 0 (new Object/1 [(Rt/b (.booleanValue (cast Boolean (aget f 1)))) (Rt/ofUtf8 (cast String (aget f 4)))
+                                     (aget f 5) (aget f 6) (aget f 7) (aget f 8) (aget f 9) Rt/FALSE (Rt/ofUtf8 (cast String (aget f 3)))])))))))
+  (method ^:static entries [^int/1 es ^int n]
+    (let [a (new Object/1 n)]
+      (loop [^int i 0] (when (< i n) (aset a i (Long/valueOf (long (aget es i)))) (recur (unchecked-inc-int i))))
+      (Block. 0 a)))
+
+  (method ^:public ^:static caml_record_backtrace [b] (set! active (Rt/t b)) Rt/UNIT)
+  (method ^:public ^:static caml_backtrace_status [u] (Rt/b active))
+  (method ^:public ^:static caml_ml_debug_info_status [u] (Long/valueOf 0))
+  (method ^:public ^:static caml_get_exception_raw_backtrace [u]
+    (if (and active debugInfo) (Bt/entries buf nbuf) (Block. 0 (new Object/1 0))))
+  (method ^:public ^:static caml_get_exception_backtrace [u]
+    (if (not debugInfo)
+      Rt/NONE
+      (let [b (if active (Bt/entries buf nbuf) (Block. 0 (new Object/1 0)))]
+        (Block. 0 (new Object/1 [(Bt/caml_convert_raw_backtrace b)])))))
+  ;; the slots in flight, the innermost first
+  (method ^:public ^:static caml_get_current_callstack [n]
+    (let [k (Rt/l n) a (ArrayList.)]
+      (when debugInfo
+        (loop [^int i (unchecked-dec-int sp)]
+          (when (and (>= i 0) (< (.size a) k))
+            (.add a (Long/valueOf (long (aget stk i))))
+            (recur (unchecked-dec-int i)))))
+      (Block. 0 (.toArray a))))
+  (method ^:public ^:static caml_restore_raw_backtrace [e b]
+    (set! lastExn e)
+    (let [f (.-f (cast Block b)) n (Math/min 1024 (alength f))]
+      (set! nbuf 0)
+      (loop [^int i 0] (when (< i n) (Bt/add (unchecked-int (Rt/l (aget f i)))) (recur (unchecked-inc-int i)))))
+    Rt/UNIT)
+  (method ^:public ^:static caml_raw_backtrace_length [b] (Long/valueOf (long (alength (.-f (cast Block b))))))
+  (method ^:public ^:static caml_convert_raw_backtrace [b]
+    (let [f (.-f (cast Block b))]
+      (if (not debugInfo)
+        (do (when (> (alength f) 0) (throw (Rt/failwith "No debug information available")))
+            (Block. 0 (new Object/1 0)))
+        (let [a (new Object/1 (alength f))]
+          (loop [^int i 0] (when (< i (alength f)) (aset a i (Bt/convert (aget f i))) (recur (unchecked-inc-int i))))
+          (Block. 0 a)))))
+  (method ^:public ^:static caml_convert_raw_backtrace_slot [s]
+    (when (not debugInfo) (throw (Rt/failwith "No debug information available")))
+    (Bt/convert s))
+  (method ^:public ^:static caml_raw_backtrace_slot [b n]
+    (let [f (.-f (cast Block b)) i (Rt/l n)]
+      (when (or (< i 0) (>= i (alength f)))
+        (throw (Rt/invalidArg "Printexc.get_raw_backtrace_slot: index out of bounds")))
+      (aget f (unchecked-int i))))
+  (method ^:public ^:static caml_raw_backtrace_next_slot [s] Rt/NONE))
