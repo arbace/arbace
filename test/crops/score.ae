@@ -320,6 +320,32 @@
   [mixed n part]
   (let [[ps pn note] part]
     [(/ (+ mixed ps) 2.0) (+ n pn) note ps]))
+;; ---- 345-1 (a) (the user, 2026-11-18; queues 345, 351): a fact's :count-from {:file F :result R :own K :rest L} counts two of its
+;; :cases from a results record F ([ID RESULT REASON] rows, one vector): K the rows whose result is R, L every other row, each with
+;; the weight the fact states for it (K 1, L 0.5 when none), so a stage counted from a record cannot fall behind it (C++'s read: the
+;; dg check's own front end's passes, test/cpp/check-dg-own-linux-amd64.edn, 823 stated while the record held 950); a missing or
+;; INTERIM record leaves the stated cases
+
+(defn count-from-cases
+  "345-1 (a): CASES with SPEC's :own key the number of ROWS whose second element is SPEC's :result and its :rest key the other
+  rows', each weight kept from CASES (1 and 0.5 when CASES has none)."
+  [cases spec rows]
+  (let [{:keys [result own rest]} spec
+        n (count (filter #(= result (second %)) rows))]
+    (assoc cases own [n (or (second (get cases own)) 1)] rest [(- (count rows) n) (or (second (get cases rest)) 0.5)])))
+
+(defn- count-from
+  "345-1 (a): fact F's :count-from in tree T: {:cases ... :note ...}, {:note ...} alone (the stated cases stand), or nil."
+  [t f]
+  (when-let [spec (:count-from f)]
+    (let [file (:file spec)]
+      (cond (not (has? t file)) {:note (str "345-1 (a): no " file ", the stated cases")}
+            (interim? (text t file)) {:note (str "345-1 (a): " file " is marked INTERIM, the stated cases")}
+            :else (let [rows (filter #(and (vector? %) (string? (first %))) (input-rows (edn-forms t file)))
+                        c (count-from-cases (:cases f) spec rows)]
+                    {:cases c :note (str "345-1 (a): " (first (get c (:own spec))) " of " (count rows) " " (name (:result spec))
+                                         " rows counted from " file)})))))
+
 ;; ---- JOP7 (a) (the user, 2026-11-17; taken overnight, round 52): a fact's :requires-line {:file F :line L :why W} holds the
 ;; stage at 0.5 at most until F has the line L exactly (Java's: jdk/javac/platform.sha256's "# kind: own", the own platform's
 ;; pin, JOP2 (a)): a claim above 0.5 on a tree whose F lacks it is refuted, so the facts cannot move ahead of the switch
@@ -463,6 +489,8 @@
                    :let [f (merge (get-in facts [:stages st]) (get at st))
                          ci (case-inputs t config m crop st f)
                          f (if (:self ci) (assoc f :cases (select-keys ci [:self :recorded]) :rfp53 true) f)
+                         cf (count-from t f)
+                         f (if (:cases cf) (assoc f :cases (:cases cf)) f)
                          named (mapcat #(by-name (str %)) (:steps f))
                          live (remove #(= :oracle (:phase %)) named)
                          hosted (for [s live h (:hosts s) :when (and (tool-hosts h) (not (exempt? s h)))] [(:name s) h])
@@ -505,6 +533,7 @@
                                      (pos? claim) "UNVERIFIED: no :steps (no step of the tree runs it)"
                                      :else "claimed (no step of the tree runs it)")
                          check (if (:note ci) (str check "; " (:note ci)) check)
+                         check (if (:note cf) (str check "; " (:note cf)) check)
                          check (if mixed
                                  (str check (if part-note
                                               (str "; CP333 (b): the mean of the cell's case-weighted score and " (get-in f [:mean-with :of] "its other part")
@@ -738,7 +767,14 @@
         jv-ctl (rfp53-counts jv-ids jv-build jv-in 10)
         jv-one (rfp53-counts jv-ids [["t1" {:sources :own :platform :own}]] jv-in 10)
         jv-f {:score 1 :requires-record {:file "test/java/sources.edn"}}
-        jv-text ";; the own record\n[]\n"]
+        jv-text ";; the own record\n[]\n"
+        ;; 345-1 (a): C++'s read counted from the dg own record: 950 :pass of 4,564 rows beside the token check's 1,931 give
+        ;; (1931 + 950 + 0.5 x 3614) / 6495 = 0.722; the control, the record with one pass turned :fail, must move the count
+        cf-spec {:file "x.edn" :result :pass :own :dg-own :rest :dg-clang}
+        cf-cases {:tokens [1931 1] :dg-own [823 1] :dg-clang [3741 0.5]}
+        cf-rows (vec (for [i (range 4564)] [(str "gxx-dg/f" i ".C") (if (< i 950) :pass :fail) "r"]))
+        cf-good (count-from-cases cf-cases cf-spec cf-rows)
+        cf-ctl (count-from-cases cf-cases cf-spec (assoc cf-rows 0 ["gxx-dg/f0.C" :fail "r"]))]
     (concat
      (when-not (= c37 {:self 37 :recorded 36}) [(str "RFP53: 37 of 73 own counted " (pr-str c37))])
      (when-not (= "90.1" (indep c37)) [(str "RFP53: 37 of 73 own gives " (indep c37) ", the plan 90.1")])
@@ -771,6 +807,9 @@
      (when-not (requires-record-problem jv-f nil [] jv-ids) ["JOP13 control (no record) passed"])
      (when-not (requires-record-problem jv-f (str ";; INTERIM\n" jv-text) jv-rows jv-ids) ["JOP13 control (an INTERIM record) passed"])
      (when-not (requires-record-problem jv-f jv-text jv-rows []) ["JOP13 control (a cell with no case) passed"])
+     (when-not (= (:dg-own cf-good) [950 1]) [(str "345-1: 950 own passes counted " (pr-str (:dg-own cf-good)))])
+     (when-not (= "0.722" (format "%.3f" (first (mixed-score {:cases cf-good})))) [(str "345-1: C++'s read from the record gives " (format "%.3f" (first (mixed-score {:cases cf-good}))) ", not 0.722")])
+     (when (= (:dg-own cf-ctl) (:dg-own cf-good)) ["345-1 control (one pass turned :fail) passed: the count did not move"])
      (when-not (and (= "82.5" (compl before)) (= "84.2" (compl after)))
        [(str "OC222: completeness " (compl before) " to " (compl after) ", expected 82.5 to 84.2 (+1.7)")]))))
 
@@ -794,7 +833,7 @@
     (when (some #{"--self-test"} args)
       (let [fails (self-test)]
         (doseq [x fails] (println (str "   FAIL " x)))
-        (println (str "crops-score: self-test (RFP53 (a), OC222 (a), HF10-P29 (a), CP333 (b), CP401 (a), JOP7 (a), JOP13 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
+        (println (str "crops-score: self-test (RFP53 (a), OC222 (a), HF10-P29 (a), CP333 (b), CP401 (a), JOP7 (a), JOP13 (a), 345-1 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
         (shutdown-agents)
         (System/exit (if (empty? fails) 0 1))))
     (let [o (parse-args args)
