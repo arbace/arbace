@@ -8965,3 +8965,19 @@ the judge names.
   for too few and too many alike). Proved: test/cpp/selftest/concepts/r17-default-arguments.C (`bin/cppi selftest concepts-diag`,
   18 cases, 0 not behaving, the control failing), the three g++.dg files with no error, the queue-336 messages unchanged on the
   others (two-parameter concept without defaults: "(1, should be 2)"). No record changes.
+
+## As built: queue 342's C++ fixes (D342-3 (a), D342-4 (a), 2026-11-18, round 54, branch `348-c-cpp-fixes` from mac/n-all `9cd2e4a96`)
+
+- **D342-3 (a), a type-constraint's least argument count from the parameters' own defaults.** n-review-cc's `nreq` took the first
+  parameter with an `=` among its tokens as the first defaulted one, so `template<class T, template<class = int> class TT>
+  concept Q2` counted 1 required parameter and `template<Q2 T>` was accepted (g++ 15.2: "wrong number of template arguments (1,
+  should be 2)"). `parse-template-params` now marks a parameter defaulted when its own `=` is accepted (each of the four
+  parameter kinds, skimmed or parsed; a template template parameter's inner list is the recursive call's). Selftest case
+  test/cpp/selftest/concepts/r18-default-in-template-template.C (Q2, a non-type parameter's default, a template template
+  parameter with its own and an inner default, too many arguments "(3, should be at least 1)"; g++ 15.2 gives its two errors
+  verbatim): `test/cpp/selftest/concepts-diag.sh` 19 cases, 0 not behaving; concepts-pr67147.C and -pr82794.C and a
+  header-free copy of -pr86269.C read with no error.
+- **D342-4 (a), gxx-dg/init/enum1.C back to `:own-diag`.** Queue 336 classed it `:gcc-own-rules` (design); its error (-1 with an
+  all-ones enumerator: no integral type represents both) is [dcl.enum]/7's, the standard's, as on a target without __int128:
+  test/cpp/own-diag-review.edn's entry `:own-diag :group :enums`, divergences-dg.edn's `:gcc-own-rules` `:tests` 82 of queue 336's.
+  C++ read 5,396 / 326 / 773 to 5,396 / 325 / 774 (reap and crops-score recorded).

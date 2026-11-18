@@ -3702,6 +3702,9 @@
     [[] []]
     (loop [ns [] names [] nreq nil]
       (let [b (ix p)
+            ;; D342-3 (a): whether this parameter has a default argument (its own `=`, not one inside a template template
+            ;; parameter's list or a type's tokens), skimmed or parsed
+            hd (volatile! false)
             [n nm]
             (cond
               ;; a type parameter by clang's isStartOfTemplateTypeParameter ([temp.param]/2): class or typename followed by
@@ -3717,7 +3720,7 @@
                 (let [pack (accept! p "...")
                       nm (when (id? p) (ts (cur p)))
                       ni (if nm (let [i (ix p)] (adv! p) i) (ix p))
-                      dflt (when (accept! p "=") (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-type-id p :targ))))]
+                      dflt (when (and (accept! p "=") (vreset! hd true)) (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-type-id p :targ))))]
                   (when nm (sc/declare! (scope p) (cond-> {:k :type :name nm :tparam true} pack (assoc :pack true))))
                   [(node p "TemplateTypeParmDecl" b (last-ix p)
                          (cond-> {:tagUsed kw :loc (loc p ni) :inner (if dflt [{:kind "TemplateArgument" :type {:qualType (qt dflt)}}] [])}
@@ -3737,7 +3740,7 @@
                   (let [pack (accept! p "...")
                         nm (when (id? p) (ts (cur p)))
                         _ (when nm (adv! p))]
-                    (when (accept! p "=") (skip-targ! p))
+                    (when (and (accept! p "=") (vreset! hd true)) (skip-targ! p))
                     (when nm (sc/declare! (scope p) {:k :type :name nm :tmpl true :tparam true}))
                     [(node p "TemplateTemplateParmDecl" b (last-ix p) (cond-> {} nm (assoc :name nm)))
                      (when nm (str nm (when pack "...")))]))
@@ -3751,7 +3754,7 @@
                     pack (accept! p "...")
                     nm (when (id? p) (ts (cur p)))
                     ni (if nm (let [i (ix p)] (adv! p) i) (ix p))
-                    dflt (when (accept! p "=") (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-type-id p :targ))))]
+                    dflt (when (and (accept! p "=") (vreset! hd true)) (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-type-id p :targ))))]
                 (when nm (sc/declare! (scope p) (cond-> {:k :type :name nm :tparam true} pack (assoc :pack true))))
                 ;; (queue 336: [temp.param]/4, the type-constraint's concept takes the parameter and its own arguments: as
                 ;; many as the concept's parameters unless its last is a pack, GCC's "wrong number of template arguments")
@@ -3783,7 +3786,7 @@
                     qn (:name (last (name-chain d)))
                     nm (name-plain qn)
                     ni (if qn (long (:i (peek (:parts qn)))) (ix p))
-                    dflt (when (accept! p "=") (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-cond-expr p))))
+                    dflt (when (and (accept! p "=") (vreset! hd true)) (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-cond-expr p))))
                     pack (or (:pack d) (= :pk (:t ty)))]
                 ;; CX12's checker (clang's DiagnoseUnexpandedParameterPack for a non-type parameter's type, [temp.variadic]/7):
                 ;; an enclosing template's parameter pack named in the type with no ... in it (g++.dg's cpp0x/variadic170.C,
@@ -3804,9 +3807,9 @@
                          nm (assoc :name nm) pack (assoc :isParameterPack true)))
                  (when nm (str nm (when pack "...")))]))]
         (let [;; (n-review-cc: the parameters before the first with a default argument, [temp.param]/14, which a
-              ;; concept's type-constraint may leave out: std::three_way_comparable<T, Cat = partial_ordering>; an `=` among the
-              ;; parameter's tokens, skimmed or not)
-              nreq (or nreq (when (some #(t= (tok-at p %) "=") (range (long b) (inc (long (last-ix p))))) (count ns)))
+              ;; concept's type-constraint may leave out: std::three_way_comparable<T, Cat = partial_ordering>; D342-3 (a): the
+              ;; parameter's own default (hd), not an `=` among its tokens: `template<class = int> class TT` has none)
+              nreq (or nreq (when @hd (count ns)))
               ns (conj ns n) names (conj names nm)]
           (if (accept! p ",") (recur ns names nreq)
               (do
