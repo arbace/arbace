@@ -222,16 +222,22 @@
   (or (System/getenv "RSI_RECORD_ARCH")
       (let [a (str (System/getProperty "os.arch"))] (case a ("x86_64" "amd64") "amd64" ("aarch64" "arm64") "arm64" a))))
 
+(defn record-dir
+  "The records' directory: test/rust, or RSI_RECORD_DIR (queue 362: bin/rsi judge-test's --record controls write into their
+  scratch directory, never into the tree)"
+  []
+  (or (System/getenv "RSI_RECORD_DIR") "test/rust"))
+
 (defn record-file
   "The level's record (KIND nil) or its times (KIND \"times-\") for ARCH: test/rust/check[-aot]-[KIND]linux-ARCH.edn"
   [aot kind arch]
-  (str "test/rust/check" (if aot "-aot" "") "-" kind "linux-" arch ".edn"))
+  (str (record-dir) "/check" (if aot "-aot" "") "-" kind "linux-" arch ".edn"))
 
 (defn inputs-file
   "The level's case inputs for ARCH (RFP53 (a), RIND5 (a)): test/rust/{eval,aot}-inputs-linux-ARCH.edn, named as record-file names
   the record (queue 354: an arm64 --record never over amd64's, the ones test/crops/independence.edn's :case-inputs reads)"
   [aot arch]
-  (str "test/rust/" (if aot "aot" "eval") "-inputs-linux-" arch ".edn"))
+  (str (record-dir) "/" (if aot "aot" "eval") "-inputs-linux-" arch ".edn"))
 
 (defn- inputs-row-text [[id m]]
   (str "[" (pr-str id) " {" (str/join " " (for [[k v] (sort-by key m)] (str k " " (pr-str v)))) "}]"))
@@ -407,28 +413,39 @@
       (let [both (frequencies (map (fn [r] [(= :pass (second r)) (= :pass (nth r 4 nil))]) rows))]
         (println "compiled against interpreted (the record):" (get both [true true] 0) "both pass," (get both [false false] 0) "neither,"
                  (get both [true false] 0) "compiled only," (get both [false true] 0) "interpreted only")))
-    (when record
-      (let [old (if (.exists (File. recf)) (read-string (slurp recf)) [])
-            in? (fn [^String id] (some #(str/starts-with? id (str % "/")) prefixes))
-            all (sort-by first (concat (remove (comp in? first) old) (map (fn [[id r reason]] [id r reason]) rows)))
-            told (if (.exists (File. timesf)) (read-string (slurp timesf)) {})
-            tnew (into {} (for [c corpora [id ir lw b r] (tsv (str work "/" c "/times.tsv"))]
-                            [id (mapv #(if (re-matches #"[0-9.]+" (str %)) (Double/parseDouble %) nil) [ir lw b r])]))
-            tall (into (sorted-map) (concat (remove (comp in? key) told) tnew))]
-        (spit recf (str ";; rsi's " (if aot "AOT check (bin/rsi check --aot --record): each program compiled by cf2g"
-                                        "check (bin/rsi check --record): each program run on ci")
-                        ",\n;; [ID RESULT REASON], against rustc 1.99.1's -O0 run (test/rust/ref-rustc-1.99.1.edn); its classes "
-                        (if aot "test/rust/divergences-aot.edn, then " "") "test/rust/divergences.edn. Read with the Clojure reader.\n[\n"
-                        (str/join "\n" (map pr-str all)) "\n]\n"))
-        (spit timesf (str ";; each program's seconds in bin/rsi check" (if aot " --aot" "") "'s last recorded run (GT8, GTS205's subsets): ID [IR LOWER "
-                          (if aot "BUILD+TRANSLATE" "BUILD") " RUN], the light tier's (4 jobs, 3 threads); nil: the step did not run.\n{\n"
-                          (str/join "\n" (for [[k v] tall] (str " " (pr-str k) " " (pr-str v)))) "\n}\n"))
-        (println "recorded" recf "and" timesf)))
+    ;; queue 362 (D354-2's low, the user 2026-11-18): --record writes nothing when the run fails (an unclassed non-pass, a
+    ;; control that passes, a recorded row absent, a regression from the record), so that a failing night leaves the tree's
+    ;; record as it was; a regression accepted on purpose (a recorded pass now failing in a class) is recorded with
+    ;; RSI_RECORD_REGRESSIONS=1, never an unclassed row or a control
     (let [fids (set (map first failing))
-          failing (concat failing (remove #(fids (first %)) ((resolve 'arbace.c.run/report-record) cmp)) cfail)]
-      (when (and record (empty? failing)) (write-case-inputs work corpora aot arch))
-      (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
-      (System/exit (if (seq failing) 1 0)))))
+          reg (remove #(fids (first %)) ((resolve 'arbace.c.run/report-record) cmp))
+          accept (and (= "1" (System/getenv "RSI_RECORD_REGRESSIONS")) (empty? failing) (empty? cfail)
+                      (every? #(str/starts-with? (str (nth % 2)) "regression: ") reg))
+          failing (concat failing reg cfail)
+          write? (and record (or (empty? failing) accept))]
+      (when write?
+        (let [old (if (.exists (File. recf)) (read-string (slurp recf)) [])
+              in? (fn [^String id] (some #(str/starts-with? id (str % "/")) prefixes))
+              all (sort-by first (concat (remove (comp in? first) old) (map (fn [[id r reason]] [id r reason]) rows)))
+              told (if (.exists (File. timesf)) (read-string (slurp timesf)) {})
+              tnew (into {} (for [c corpora [id ir lw b r] (tsv (str work "/" c "/times.tsv"))]
+                              [id (mapv #(if (re-matches #"[0-9.]+" (str %)) (Double/parseDouble %) nil) [ir lw b r])]))
+              tall (into (sorted-map) (concat (remove (comp in? key) told) tnew))]
+          (spit recf (str ";; rsi's " (if aot "AOT check (bin/rsi check --aot --record): each program compiled by cf2g"
+                                          "check (bin/rsi check --record): each program run on ci")
+                          ",\n;; [ID RESULT REASON], against rustc 1.99.1's -O0 run (test/rust/ref-rustc-1.99.1.edn); its classes "
+                          (if aot "test/rust/divergences-aot.edn, then " "") "test/rust/divergences.edn. Read with the Clojure reader.\n[\n"
+                          (str/join "\n" (map pr-str all)) "\n]\n"))
+          (spit timesf (str ";; each program's seconds in bin/rsi check" (if aot " --aot" "") "'s last recorded run (GT8, GTS205's subsets): ID [IR LOWER "
+                            (if aot "BUILD+TRANSLATE" "BUILD") " RUN], the light tier's (4 jobs, 3 threads); nil: the step did not run.\n{\n"
+                            (str/join "\n" (for [[k v] tall] (str " " (pr-str k) " " (pr-str v)))) "\n}\n"))
+          (println "recorded" recf "and" timesf)))
+      (when (and record (not write?))
+        (println (str "rsi judge: --record refused: the run fails (" (count failing) " programs); nothing recorded, " recf
+                      " and its times as they were (RSI_RECORD_REGRESSIONS=1 records classed regressions on purpose)")))
+      (when write? (write-case-inputs work corpora aot arch))
+      (doseq [r (take 40 failing)] (println (if accept "ACCEPTED (RSI_RECORD_REGRESSIONS=1)" "FAIL") (first r) (nth r 2)))
+      (System/exit (if (and (seq failing) (not accept)) 1 0)))))
 
 (defn own-verdicts
   "own-verdicts [RECORD]: the UI programs' own verdicts (own-verdict) counted over the corpus and over RECORD's rows (default

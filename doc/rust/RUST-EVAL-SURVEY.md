@@ -1565,3 +1565,18 @@ and inputs with the cell's `:until` dropped (scratch, restored): samples alone `
 `bin/crops-score --crop rust` 100 / 100 / 100 / 80 (completeness, without by design, maturity, independence; the AOT stage "0 of 6
 cases own in all 7 inputs"); samples and synthetic 73 / 0 / 0, the same scores. `bin/rsi judge-test` passes; the tree's `bin/reap`
 53 of 56 cells checked, 0 problems; `bin/crops-score --judge --strict` 0 problems.
+
+## As built: queue 362, the AOT record judged weekly and a failing run recorded nowhere (2026-11-18, branch `362-rust-weekly`)
+
+By the Mac VM's agent, on queue 354's `b7d49723d` (light tier). The user's D354-2 (a): `rsi-aot`'s samples part is `:phase
+:weekly` (`bin/gate --weekly --plan`: "rsi-aot.samples, the weekly tier"), so that the AOT cell's record is judged every week.
+354's low finding closed: `run-judge --record` wrote the record and its times even when the run failed, so a failing night left a
+changed record in the tree. It now writes nothing when the run fails (an unclassed non-pass, a control that passes, a recorded row
+absent, a regression from the record) and says so (`--record refused`); the case inputs only with a written record. A regression
+accepted on purpose (a recorded pass now failing in a class) is recorded with `RSI_RECORD_REGRESSIONS=1`, never an unclassed row
+or a failing control. `RSI_RECORD_DIR` (default `test/rust`) names the records' directory, so that `bin/rsi judge-test`'s three
+new record controls write into its scratch directory: a failing run (`fmt.rs`'s output changed) records nothing, a passing run
+records (the record and the inputs), and a failing run over that record leaves it byte for byte, `RSI_RECORD_REGRESSIONS=1`
+included. With the refusal taken out (`write?` always true), judge-test fails on the first and the third, as a control must.
+Proved by hand too: a recorded pass of `threads.rs` turned into `build-error undefined function __clone` (the class `threads`) is
+refused by default and recorded with `RSI_RECORD_REGRESSIONS=1`.
