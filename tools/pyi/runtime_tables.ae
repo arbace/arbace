@@ -1010,6 +1010,160 @@
                      (str "\n// cjkBlob" loc " is " h "'s arrays.\n"
                           "const cjkBlob" loc " = \"" (.encodeToString (java.util.Base64/getEncoder) (zlib9 (cjk-pack recs))) "\"\n"))))))
 
+;; ---- unicodedata, unicodedata315 (queue 357, D350-1 (a)): the Unicode database's tables, builtins_unicodedata_table.go and its 315
+;; variant (unicodedata_table.py's, python3 over the same headers), from the tarball's Objects/unicodetype_db.h, Modules/unicodedata_db.h
+;; and Modules/unicodename_db.h (3.14.10's, 3.15.2's with --cpython315: its records' first six fields, every name with the suffix):
+;; the arrays as the headers spell them packed as unicodedata_table.py's records, zlib level 9 by jrt's Deflater, base64; the switch
+;; functions' cases, the name tables, the constants; the rules unicodedata_table.py's, regular expression for regular expression
+
+(def ^:private ucd-arrays
+  [["ctypeRecords" :type "_PyUnicode_TypeRecords" 4 true "upper lower title decimal digit flags" nil]
+   ["ctypeExtendedCase" :type "_PyUnicode_ExtendedCase" 4 false "" nil]
+   ["ctypeIndex1" :type "index1" 2 false "" nil]
+   ["ctypeIndex2" :type "index2" 2 false "" nil]
+   ["dbRecords" :data "_PyUnicode_Database_Records" 1 false "category combining bidirectional mirrored east_asian_width normalization_quick_check" nil]
+   ["nfcFirst" :data "nfc_first" 4 false "start count index" nil]
+   ["nfcLast" :data "nfc_last" 4 false "start count index" nil]
+   ["dbIndex1" :data "index1" 2 false "" nil]
+   ["dbIndex2" :data "index2" 2 false "" nil]
+   ["decompData" :data "decomp_data" 4 false "" nil]
+   ["decompIndex1" :data "decomp_index1" 1 false "" nil]
+   ["decompIndex2" :data "decomp_index2" 2 false "" nil]
+   ["compIndex" :data "comp_index" 2 false "" nil]
+   ["compData" :data "comp_data" 4 false "" nil]
+   ["changes320Index" :data "changes_3_2_0_index" 1 false "" nil]
+   ["changes320Data" :data "changes_3_2_0_data" 1 false "" nil]
+   ["packedNameDawg" :name "packed_name_dawg" 1 false "" nil]
+   ["dawgPosToCodepoint" :name "dawg_pos_to_codepoint" 4 false "" nil]
+   ["dawgCodepointToPosIndex1" :name "dawg_codepoint_to_pos_index1" 1 false "" nil]
+   ["dawgCodepointToPosIndex2" :name "dawg_codepoint_to_pos_index2" 2 false "" nil]
+   ["nameAliases" :name "name_aliases" 4 false "" nil]
+   ["namedSequences" :name "named_sequences" 4 false "seqlen seq0 seq1 seq2 seq3" 4]
+   ["derivedNameRanges" :name "derived_name_ranges" 4 false "first last prefixid" nil]])
+
+(defn- ucd-array-body [^String text nm]
+  (let [m (re-matcher (re-pattern (str "\\b" (java.util.regex.Pattern/quote nm) "\\[\\] = \\{")) text)]
+    (when-not (.find m) (fail! "unicodedata: no array " nm))
+    (let [i (.end m)
+          j (loop [depth 1 j i] (if (zero? depth) j (let [c (.charAt text j)] (recur (case c \{ (inc depth) \} (dec depth) depth) (inc j)))))]
+      (subs text i (dec j)))))
+
+(defn- py-int
+  "Python's int(v, 0) of a C literal: [-]0xHEX or [-]DECIMAL"
+  [^String v]
+  (let [neg (str/starts-with? v "-") u (if neg (subs v 1) v)
+        n (if (re-matches #"0[xX][0-9A-Fa-f]+" u) (Long/parseLong (subs u 2) 16) (Long/parseLong u))]
+    (if neg (- n) n)))
+
+(defn- ucd-ints [^String text nm pad]
+  (let [b (ucd-array-body text nm)]
+    (if (nil? pad)
+      (mapv py-int (re-seq #"-?0x[0-9A-Fa-f]+|-?\d+" b))
+      (vec (mapcat (fn [[_ a inner]]
+                     (let [sq (map py-int (re-seq #"0x[0-9A-Fa-f]+|\d+" inner))]
+                       (concat [(py-int a)] sq (repeat (- pad (count sq)) 0))))
+                   (re-seq #"\{\s*(-?\w+)\s*,\s*\{([^}]*)\}\s*\}" b))))))
+
+(defn- ucd-strings [text nm] (mapv second (re-seq #"\"((?:[^\"\\]|\\.)*)\"" (ucd-array-body text nm))))
+
+(defn- ucd-define [text nm]
+  (or (second (re-find (re-pattern (str "#define " nm " (\\S+)")) text)) (fail! "unicodedata: no #define " nm)))
+
+(defn- ucd-scalar [text nm]
+  (or (second (re-find (re-pattern (str "\\b" nm " = (\\w+);")) text)) (fail! "unicodedata: no " nm)))
+
+(defn- ucd-switch
+  "A switch function's cases: [[codes expr] ...], the default last with no codes"
+  [^String text func]
+  (let [m (re-matcher (re-pattern (str (java.util.regex.Pattern/quote func) "\\([^)]*\\)\\s*\\{")) text)
+        _ (when-not (.find m) (fail! "unicodedata: no function " func))
+        body (subs text (.end m) (str/index-of text "\n}\n" (.end m)))]
+    (loop [ls (map str/trim (str/split body #"\n" -1)) codes [] out []]
+      (if-let [l (first ls)]
+        (let [codes (into codes (map #(Long/parseLong (subs (second %) 2) 16) (re-seq #"case (0x[0-9A-Fa-f]+):" l)))]
+          (if-let [[_ e] (re-find #"return (.*);" l)]
+            (recur (rest ls) [] (conj out [codes e]))
+            (recur (rest ls) codes out)))
+        out))))
+
+(defn- ucd-text [py sfx]
+  (let [release (or (second (re-find #"#define PY_VERSION\s+\"([^\"]+)\"" (slurp (str py "/Include/patchlevel.h")))) (fail! "no PY_VERSION"))
+        TYPE (slurp (str py "/Objects/unicodetype_db.h"))
+        DATA (slurp (str py "/Modules/unicodedata_db.h"))
+        NAME (slurp (str py "/Modules/unicodename_db.h"))
+        texts {:type TYPE :data DATA :name NAME}
+        hex (fn [n] (str/upper-case (Long/toHexString n)))
+        o (java.io.ByteArrayOutputStream.)
+        le (fn [^long v ^long w] (dotimes [i w] (.write o (int (bit-and (bit-shift-right v (* 8 i)) 0xff)))))
+        counts (vec (for [[go k c width signed fields pad] ucd-arrays
+                          :let [text (texts k)
+                                vals (if (and (= k :data) (#{"index1" "index2"} c))
+                                       (ucd-ints (subs DATA (str/index-of DATA "#define SHIFT 7")) c nil)
+                                       (ucd-ints text c pad))
+                                nf (if (seq fields) (count (str/split fields #" ")) 1)
+                                vals (if (= c "_PyUnicode_Database_Records")
+                                       (let [have (count (re-seq #"-?0x[0-9A-Fa-f]+|-?\d+" (second (re-find #"\{([^{}]*)\}" (ucd-array-body DATA c)))))]
+                                         (if (not= have nf) (vec (keep-indexed (fn [i v] (when (< (mod i have) nf) v)) vals)) vals))
+                                       vals)
+                                _ (when-not (zero? (mod (count vals) nf)) (fail! "unicodedata: " c ": " (count vals) " values, not records of " nf))
+                                nb (.getBytes (str go sfx) "UTF-8")]]
+                      (do (.write o (int (count nb))) (.write o nb 0 (count nb))
+                          (.write o (int (bit-or width (if signed 0x80 0)))) (le (count vals) 4)
+                          (doseq [v vals] (le v width))
+                          [(str go sfx) c (count vals) fields])))
+        numeric (sort-by #(Long/parseLong (first (str/split % #" ")) 16)
+                         (for [[codes e] (ucd-switch TYPE "_PyUnicode_ToNumeric")
+                               :let [e (str/trim (str/replace e "(double)" ""))
+                                     [a b] (let [i (str/index-of e "/")] (if i [(subs e 0 i) (subs e (inc i))] [e ""]))
+                                     b (str/trim b)]
+                               code codes]
+                           (str (hex code) " " (str/trim a) " " (if (empty? b) "1" b))))
+        caselist (fn [func] (let [cs (ucd-switch TYPE func)]
+                              (when-not (and (= "1" (second (first cs))) (= "0" (second (last cs)))) (fail! "unicodedata: " func))
+                              (str/join " " (map hex (first (first cs))))))
+        norm320 (for [[codes e] (ucd-switch DATA "normalization_3_2_0") code codes]
+                  (str (hex code) " " (hex (Long/parseLong (str/replace e #"^0[xX]" "") 16))))
+        changes (for [[_ r] (re-seq #"\{([^}]*)\}" (ucd-array-body DATA "change_records_3_2_0"))]
+                  (str/join " " (map str/trim (str/split r #","))))
+        b64 (.encodeToString (java.util.Base64/getEncoder) (zlib9 (.toByteArray o)))
+        goslice (fn [nm vals] (str "var " nm sfx " = []string{" (str/join ", " (for [v vals] (str "\"" v "\""))) "}\n"))
+        shift-of (fn [^String t] (nth (str/split (str/trim (subs t (str/index-of t "#define SHIFT"))) #"\s+") 2))
+        consts (map (fn [[n v]] [(str n sfx) v])
+                    [["ucdVersion" (ucd-define DATA "UNIDATA_VERSION")] ["ctypeShift" (shift-of TYPE)] ["dbShift" (shift-of DATA)]
+                     ["decompShift" (ucd-define DATA "DECOMP_SHIFT")] ["compShift" (ucd-define DATA "COMP_SHIFT")]
+                     ["totalFirst" (ucd-define DATA "TOTAL_FIRST")] ["totalLast" (ucd-define DATA "TOTAL_LAST")]
+                     ["nameMaxlen" (ucd-define NAME "NAME_MAXLEN")]
+                     ["dawgCodepointToPosShift" (ucd-define NAME "DAWG_CODEPOINT_TO_POS_SHIFT")]
+                     ["dawgCodepointToPosNotFound" (ucd-define NAME "DAWG_CODEPOINT_TO_POS_NOTFOUND")]
+                     ["aliasesStart" (ucd-scalar NAME "aliases_start")] ["aliasesEnd" (ucd-scalar NAME "aliases_end")]
+                     ["namedSequencesStart" (ucd-scalar NAME "named_sequences_start")] ["namedSequencesEnd" (ucd-scalar NAME "named_sequences_end")]])]
+    (str "// Code generated by tools/pyi/unicodedata_table.py from CPython " release "'s Objects/unicodetype_db.h,\n"
+         "// Modules/unicodedata_db.h and Modules/unicodename_db.h; DO NOT EDIT.\n\n"
+         "package py\n\n"
+         "// The Unicode database's tables (PY6c): see tools/pyi/unicodedata_table.py for the format.\n\n"
+         "const (\n" (str/join (for [[n v] consts] (str "\t" n " = " v "\n"))) ")\n\n"
+         (goslice "ucdCategoryNames" (ucd-strings DATA "_PyUnicode_CategoryNames"))
+         (goslice "ucdBidirectionalNames" (ucd-strings DATA "_PyUnicode_BidirectionalNames"))
+         (goslice "ucdEastAsianWidthNames" (ucd-strings DATA "_PyUnicode_EastAsianWidthNames"))
+         (goslice "ucdDecompPrefix" (ucd-strings DATA "decomp_prefix"))
+         (goslice "ucdDerivedNamePrefixes" (ucd-strings NAME "derived_name_prefixes"))
+         "\n// ucdArrayFields: each array of ucdBlob, its C name, its elements and its record's fields.\n"
+         "const ucdArrayFields" sfx " = `" (str/join "\n" (for [[g c n f] counts] (str g " " c " " n " " (if (seq f) (str/replace f " " ",") "-")))) "\n`\n\n"
+         "// ucdNumeric is _PyUnicode_ToNumeric: CODE A B, the value (double) A/B.\n"
+         "const ucdNumeric" sfx " = `" (str/join "\n" numeric) "\n`\n\n"
+         "// ucdWhitespace and ucdLinebreak are _PyUnicode_IsWhitespace's and _PyUnicode_IsLinebreak's cases.\n"
+         "const ucdWhitespace" sfx " = `" (caselist "_PyUnicode_IsWhitespace") "`\n\n"
+         "const ucdLinebreak" sfx " = `" (caselist "_PyUnicode_IsLinebreak") "`\n\n"
+         "// ucdNormalization320 is normalization_3_2_0: CODE NORMALIZED.\n"
+         "const ucdNormalization320" sfx " = `" (str/join "\n" norm320) "\n`\n\n"
+         "// ucdChanges320 is change_records_3_2_0: bidir category decimal mirrored east_asian_width numeric.\n"
+         "const ucdChanges320" sfx " = `" (str/join "\n" changes) "\n`\n\n"
+         "// ucdBlob is the arrays (the format above).\n"
+         "const ucdBlob" sfx " = \"" b64 "\"\n")))
+
+(defn- table-unicodedata [opts] (ucd-text (:cpython opts) ""))
+(defn- table-unicodedata315 [opts] (ucd-text (or (:cpython315 opts) (fail! "unicodedata315: no --cpython315")) "315"))
+
 ;; ---- the command
 
 (let [[opts tables] (loop [as *command-line-args* opts {}]
@@ -1024,7 +1178,8 @@
               "ast" ["builtins_ast_table.go" table-ast]
               "bytecode" ["bytecode_table.go" table-bytecode] "bytecode315" ["bytecode_table315.go" table-bytecode315]
               "opcode315" ["builtins_opcode_table315.go" table-opcode315]
-              "stat" ["builtins_stat_table.go" table-stat] "cjk" ["builtins_cjk_table.go" table-cjk]}]
+              "stat" ["builtins_stat_table.go" table-stat] "cjk" ["builtins_cjk_table.go" table-cjk]
+              "unicodedata" ["builtins_unicodedata_table.go" table-unicodedata] "unicodedata315" ["builtins_unicodedata_table315.go" table-unicodedata315]}]
   (.mkdirs (File. ^String (:work opts)))
   (doseq [t tables]
     (let [[f mk] (or (makers t) (fail! "no table " t ": " (str/join ", " (keys makers))))]
