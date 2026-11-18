@@ -11871,3 +11871,53 @@ taken: the P2552R3 attribute files (a dozen lines each); the constant evaluator'
 constexpr-dynamic*.C: larger work per file); partial8.C's partial specialization after instantiation (needs matching A<int*> to
 A<T*>); redecl5.C and pr90138.C (their declarations do not parse, GCC's recovery); `__has_cpp_attribute(carries_dependency)`'s
 answer (the target's data, not a diagnostic rule).
+
+## 2026-11-18: n-cpp-bd, mac/368 merged; C++'s own-diag rows, fourth pass: 17 more files pass on the own front end (round 54)
+
+Same branch (`n-cpp-bd`, on 02ec7e3b9). First the Mac's fixes of review 365's lows merged, mac/368-cpp-review-lows-tip (cd3671886:
+[dcl.enum]/5's implicit enumerator past a fixed underlying type, the coroutine detection stopping at local classes and nested
+functions and a specialization taken by its head, [dcl.fct.def.coroutine]/4, alias-decl-16.C's and gen-attrs-67.C's rules, four
+messages in g++'s words, its 229 rows re-recorded): one conflict, the [temp.param]/14 pack-last rule's region in parse.ae, taken as
+theirs (the pack's name in the message) with the third pass's default-argument rule kept after it; sema.ae's enum check, diag.ae's
+coroutine check and parse.ae's attribute and alias code merged cleanly and read against round 3's (the alias template's head check,
+`pre`, before the second pass's `auto` rule; the third pass's designator rule beside 368's message). Proved on the merge (83dce9b25):
+the record's 1058 own passes (1044 and 368's 14) in five lists of 191-248, 1058 of 1058; the 629 own-diag files that fail both
+records in three of 196-225, every row as recorded; the 25 probes of .tmp/r2/probes/ give no own error.
+Then the fourth pass, the same method: the 629 files' fresh rows, the single-line misses grouped by the standard's rule, the rules
+ranked by whole files moved. Taken (round 54), each the standard's rule as the own front end's error with GCC's message (clean-room:
+GCC's messages, no GCC code); the pack checks not added (D365-1 (a)):
+- parser (arbace.repr.cpp.parse): C++11's [expr.prim.lambda]/5, no default argument in a lambda's parameters (CWG 974 from C++14; a
+  pedwarn, "default argument specified for lambda parameter"): lambda/lambda-defarg.C; the constexpr lambda-specifier before C++17
+  ("'constexpr' lambda only available with '-std=c++17'"): cpp1z/constexpr-lambda14.C; C++98's numbers with an identifier suffix, no
+  user-defined literal there ("invalid suffix \"_mm\" on floating constant"): cpp0x/udlit-cpp98-neg.C; [class.pre]/3, a qualified
+  class-head-name names a class declared before in the namespace its qualifier nominates, a friend's name none ([namespace.memdef]/3;
+  "'B' in namespace 'N' does not name a class"; a class qualifier not judged): lookup/hidden-class8.C, hidden-temp-class10.C; a
+  template template parameter's pack and name position kept (:_pack, :_loc) for the third pass's template-head rule: cpp0x/vt-34314.C;
+- checks (arbace.repr.cpp.diag): a redefinition's signature without the function's own trailing exception specification
+  ([except.spec]/5: `A::~A() noexcept(true) {}` after `~A() = default;`): cpp0x/defaulted31.C; at block scope an extern declaration
+  after a local variable, parameter or condition variable of its scope ([basic.scope.scope]/4, [stmt.pre]/5; "'int x' conflicts with
+  a previous declaration"): diagnostic/redeclaration-7.C; [except.spec]/8, an overrider of a virtual function with a non-throwing
+  specification is non-throwing too ("looser exception specification on overriding virtual function"; the file's own non-template
+  bases by name, a deleted overrider not judged): cpp0x/noexcept82.C; `unions`: [class.union.general]'s reference members ("may not
+  have reference type"), [class.mem.general]/11 with an anonymous structure's initialized members counting, at the anonymous
+  union's brace, and [class.base.init]/5's mem-initializers of two members: cpp0x/pr78890-1.C, nsdmi-anon-struct1.C, nsdmi-union2.C;
+  `nsdmi-uses`: CWG 1397, a value-initialization `N()` in the outermost class's default member initializers or default arguments of
+  a class N (that class or one nested in it, no user-declared constructor) whose default constructor would use a default member
+  initializer not yet read ("default member initializer for 'A::i' required before the end of its enclosing class"; lambdas'
+  bodies and unevaluated operands not judged): cpp0x/nsdmi10.C, nsdmi15.C, nsdmi17.C;
+- Sema (arbace.cpp.sema, the checker): `o.B::Y` whose qualifier is an enumeration member of o's class ([expr.ref]/7.5, a member
+  enumerator), no longer "no member": cpp0x/enum25.C's false error.
+Probed on valid code: ten new probes in .tmp/r2/probes/ (v26-v35: lambda default arguments at C++14, constexpr lambdas at C++17,
+user-defined literals at C++11, block-scope extern declarations, noexcept-overloaded parameters and defined destructors, overriders,
+unions, value-initializations in default member initializers, qualified class definitions and member enumerators, template template
+packs), each accepted by g++ 15.2 -pedantic-errors -fsyntax-only at its standard (three first drafts were not: an overrider of an
+inherited noexcept function, anonymous structs under -pedantic-errors, a `{}` default argument of a nested class: changed); all 35
+probes give no own error. Proved: the 16 target files (16 of 16), the record's 1058 own passes (1058 of 1058) and the 629 (17 pass:
+the 16 and cpp0x/nsdmi-defer6.C; 29 rows changed, the other 12 lines fewer, no new extra line: diagnostic/redeclaration-4.C, pr78890-2.C,
+the P2552R3 attribute files' C++11 lambda lines). Re-recorded rows only (`--only LIST --record`): the 29; own-diag-review.edn's :own of
+the 19 whose class moved. Own passes 1058 to 1075; reap's own-diag 611 to 594; C++ read 5,482 / 323 / 690 to 5,499 / 323 / 673;
+completeness 0.9204 to 0.9211 (meant 0.9371 to 0.9378); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge
+--strict` (0 problems), `bin/records-check` (9 pairs, 0). Every process under 2 GB (peaks 1.6-1.8 GB); no gate. Alternatives not
+taken: noexcept02.C's dynamic exception specification against noexcept(false) (needs an explicit noexcept(false) told from none),
+lookup/extern-c-redecl5.C's linkage conflict of a friend and an extern "C" definition, lookup/using13.C's and using30.C's using-
+declaration conflicts (the using's target kind not in the tree), the constant evaluator's groups (larger work per file).

@@ -172,13 +172,32 @@
 ;; (round 54: a deleted or explicitly defaulted function definition is a definition, [dcl.fct.def.general]/1, [dcl.fct.def.delete]/1)
 (defn- fn-def? [n] (boolean (or (has-body? n) (:explicitlyDeleted n) (:explicitlyDefaulted n) (some #(= "CXXTryStmt" (:kind %)) (:inner n)))))
 
+(defn- strip-noexcept
+  "A function type's spelling without its own trailing exception specification (round 54, fourth pass: two declarations
+  that differ in it alone declare the same function, [except.spec]/5, so a second definition is one still; a parameter's
+  function type keeps its own, the specification after the parameter list's parenthesis only)."
+  [^String qt]
+  (when qt
+    (if-let [^String head (second (re-find #"^(.*?)\s+noexcept(?:\(.*\))?$" qt))]
+      (let [close (loop [i 0 d 0 last -1]
+                    (if (>= i (count head)) last
+                        (let [c (.charAt head (int i))]
+                          (cond (= c \() (recur (inc i) (inc d) last)
+                                (= c \)) (recur (inc i) (dec d) (if (= d 1) i last))
+                                :else (recur (inc i) d last)))))]
+        ;; the noexcept follows the outermost parameter list (and its cv- and ref-qualifiers), not a parameter's type
+        (if (and (>= (long close) 0) (re-matches #"(?:\s*(?:const|volatile|&|&&))*\s*" (subs head (inc (long close)))))
+          head
+          qt))
+      qt)))
+
 (defn- decl-class
   "A declaration's class for the redeclaration rules: [cls def? sig] or nil (not a name this check follows)."
   [n]
   (case (:kind n)
     "VarDecl" [:var (or (not= "extern" (:storageClass n)) (contains? n :init)) nil]
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
-    [:fn (fn-def? n) (get-in n [:type :qualType])]
+    [:fn (fn-def? n) (strip-noexcept (get-in n [:type :qualType]))]
     "FieldDecl" [:field true nil]
     ("CXXRecordDecl" "EnumDecl") [:tag (boolean (:completeDefinition n)) (:tagUsed n)]
     ("TypedefDecl" "TypeAliasDecl") [:typedef true nil]
@@ -198,7 +217,14 @@
     (cond
       (:poison o) nil
       ;; a variable defined twice; at block scope every declaration but an extern one defines
-      (and (= :var oc c)) (when (and (:def o) def (not (and (= rk :class)))) (str "redefinition of '" nm "'"))
+      (and (= :var oc c)) (cond (and (:def o) def (not (and (= rk :class)))) (str "redefinition of '" nm "'")
+                                ;; (round 54, fourth pass: [basic.scope.scope]/4, [basic.link]/8: at block scope an extern declaration
+                                ;; after a local variable (or parameter, or a condition's variable in a substatement's outermost
+                                ;; block, [stmt.pre]/5) of its name declares another entity in the same scope: GCC's "'int x' conflicts
+                                ;; with a previous declaration")
+                                (and (= rk :block) (:def o) (not def) (= "extern" (:storageClass n)) (not (contains? n :init))
+                                     (= "VarDecl" (:kind n)) (#{"VarDecl" "ParmVarDecl"} (:kind (:node o))))
+                                (str "'" (get-in n [:type :qualType]) " " nm "' conflicts with a previous declaration"))
       (= :fn oc c) (cond (and (= rk :class) (= sig (:sig o)) sig) "class member cannot be redeclared"
                          (and (:def o) def (= sig (:sig o)) sig) (str "redefinition of '" nm "'"))
       ;; (round 54: a function template defined twice with the same template-head and type, [basic.def.odr]/1; a variable template's
@@ -993,7 +1019,8 @@
   (case (:kind x)
     "TemplateTypeParmDecl" (if (some #(= "ConceptSpecializationExpr" (:kind %)) (:inner x)) :unknown [:type (boolean (:isParameterPack x))])
     "NonTypeTemplateParmDecl" (if-let [k (fund-key (str (get-in x [:type :qualType])))] [:value (boolean (:isParameterPack x)) k] :unknown)
-    "TemplateTemplateParmDecl" [:template]
+    ;; (round 54, fourth pass: a template template parameter pack against one that is none, its own parameters not compared)
+    "TemplateTemplateParmDecl" [:template (boolean (:_pack x))]
     :unknown))
 
 (defn- tparam-desc [x]
@@ -1026,7 +1053,8 @@
                              (when-let [i (first (filter #(let [a (nth ok %) b (nth nk %)]
                                                             (and (vector? a) (vector? b) (not= a b)))
                                                          (range (count ops))))]
-                               (let [x (nth ops i)]
+                               (let [x (nth ops i)
+                                     x (if (and (nil? (:loc x)) (:_loc x)) (assoc x :loc (:_loc x)) x)]
                                  (when (and (mine? x) (get-in x [:loc :offset]))
                                    (report! x (str "template parameter '" (tparam-desc x) "'")))))
                              :else nil))
@@ -1124,6 +1152,7 @@
   (let [out (java.util.ArrayList.)
         decls (java.util.HashMap.)
         heads (java.util.HashMap.)
+        recs (java.util.HashMap.)
         mine? (fn [x] (= main (get-in x [:loc :file])))
         report! (fn [x nm] (let [[l c] (line-col starts (long (get-in x [:loc :offset])))]
                              (.add out {:line l :col c :kind :error :rule :exception-spec
@@ -1177,6 +1206,31 @@
             (class! [path rec cnames cname]
               (when (and cname (= "CXXRecordDecl" (:kind rec)))
                 (.put heads [path cname] (vec cnames))
+                ;; (round 54, fourth pass: [except.spec]/8, a function overriding a virtual function whose exception specification
+                ;; is non-throwing has a non-throwing one too: GCC's "looser exception specification on overriding virtual
+                ;; function", at the overrider; the bases the file's own non-template classes of its region, by their names, their
+                ;; functions declared virtual; a deleted overrider, a destructor and a dependent specification not judged)
+                (when (and (nil? cnames) (mine? rec)) (.put recs [path cname] rec))
+                (when (and (nil? cnames) (mine? rec) (seq (:bases rec)))
+                  (let [bases (fn bases [r seen]
+                                (mapcat (fn [b] (let [bn (str/trim (str (get-in b [:type :qualType])))
+                                                      br (.get recs [path bn])]
+                                                  (when (and br (not (contains? seen bn))) (cons br (bases br (conj seen bn))))))
+                                        (:bases r)))
+                        bs (bases rec #{cname})]
+                    (doseq [m (:inner rec)
+                            :when (and (= "CXXMethodDecl" (:kind m)) (mine? m) (not (:explicitlyDeleted m)) (get-in m [:loc :offset]))
+                            :let [[sig exc] (split-exc (str (get-in m [:type :qualType])))]
+                            :when (= :none (exc-class exc))]
+                      (when (some (fn [br] (some (fn [bm] (and (= "CXXMethodDecl" (:kind bm)) (:virtual bm) (= (:name bm) (:name m))
+                                                                (let [[bsig bexc] (split-exc (str (get-in bm [:type :qualType])))]
+                                                                  (and (= bsig sig) (= :nothrow (exc-class bexc))))))
+                                                 (:inner br)))
+                                  bs)
+                        (let [[l c] (line-col starts (long (get-in m [:loc :offset])))
+                              [_ ret ps] (re-find #"^(.*?)\s*\((.*)\)(.*)$" sig)]
+                          (.add out {:line l :col c :kind :error :rule :exception-spec
+                                     :msg (str "looser exception specification on overriding virtual function 'virtual " ret " " cname "::" (:name m) "(" ps ")'")}))))))
                 (let [inst (when cnames (if (instantiated? rec cname) :inst :uninst))]
                   (doseq [m (:inner rec)]
                     (case (:kind m)
@@ -1198,7 +1252,108 @@
       (region! "" (:nodes u)))
     (vec out)))
 
-(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs]))
+;; (round 54, fourth pass) A union's members ([class.union.general]): no non-static data member of reference type (GCC's
+;; "non-static data member 'b' in a union may not have reference type 'int&'", at the member; a dependent type only when
+;; written as a reference); at most one variant member with a default member initializer ([class.mem.general]/11), an
+;; anonymous structure's member counting as its structure's (GCC's "multiple fields in union 'U' initialized", at the union;
+;; the union's own members alone are Sema's rule); a constructor's mem-initializer-list initializes at most one of its
+;; members ([class.base.init]/5: GCC's "initializations for multiple members of 'B'", at the second; an in-class constructor).
+
+(defn unions
+  "The union checks of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        off-of (fn [x] (or (get-in x [:loc :offset]) (get-in x [:range :begin :offset])))
+        mine? (fn [x] (let [f (or (get-in x [:loc :file]) (get-in x [:range :begin :file]))] (or (nil? f) (= main f))))
+        report! (fn [x msg] (when-let [o (off-of x)]
+                              (let [[l c] (line-col starts (long o))]
+                                (.add out {:line l :col c :kind :error :rule :union :msg msg}))))
+        nsdmi? (fn nsdmi? [r] (some (fn [m] (or (and (= "FieldDecl" (:kind m)) (:hasInClassInitializer m) (not (:isImplicit m)))
+                                                (and (= "CXXRecordDecl" (:kind m)) (nil? (:name m)) (nsdmi? m))))
+                                    (:inner r)))]
+    (walk-nodes
+     (fn [n _]
+       (when (and (= "CXXRecordDecl" (:kind n)) (= "union" (:tagUsed n)) (:completeDefinition n) (mine? n) (off-of n))
+         (let [ms (:inner n)]
+           (doseq [m ms :when (and (= "FieldDecl" (:kind m)) (not (:isImplicit m)) (mine? m))
+                   :let [qt (str (get-in m [:type :qualType]))]
+                   :when (re-find #"&$" (str/trim qt))]
+             (report! m (str "non-static data member '" (:name m) "' in a union may not have reference type '" (str/replace (str/trim qt) #"\s+(&&?)$" "$1") "'")))
+           (let [direct (count (filter #(and (= "FieldDecl" (:kind %)) (:hasInClassInitializer %) (not (:isImplicit %))) ms))
+                 anon (count (filter #(and (= "CXXRecordDecl" (:kind %)) (nil? (:name %)) (= "struct" (:tagUsed %)) (nsdmi? %)) ms))]
+             (when (and (<= direct 1) (> (+ direct anon) 1))
+               ;; (an anonymous union's location its brace, as GCC gives it)
+               (report! (if (:name n) n (let [o (long (off-of n)) i (.indexOf src "{" (int o))] (if (>= i 0) {:loc {:offset i}} n)))
+                        (str "multiple fields in union '" (or (:name n) "<unnamed union>") "' initialized"))))
+           (doseq [c ms :when (and (= "CXXConstructorDecl" (:kind c)) (mine? c))]
+             (when-let [i2 (second (filter #(and (= "CXXCtorInitializer" (:kind %)) (get-in % [:anyInit :name])) (:inner c)))]
+               (report! (or (first (:inner i2)) c) (str "initializations for multiple members of '" (:name n) "'")))))))
+     (:nodes u) nil)
+    (vec out)))
+
+;; (round 54, fourth pass) [class.mem.general]/? (CWG 1397), [class.default.ctor]/4: a default member initializer is a
+;; complete-class context of its outermost enclosing class E, read at E's end; so a value-initialization `N()` of a class N
+;; that is E or nested in E, whose implicit default constructor would use a default member initializer (N's own, or an
+;; anonymous or member subobject's of a class nested in E), cannot be used in E's default member initializers or in its
+;; member functions' default arguments: GCC's "default member initializer for 'A::i' required before the end of its
+;; enclosing class", at the use. Not judged: a class with a user-declared constructor, templates, lambdas' bodies and
+;; unevaluated operands.
+
+(defn nsdmi-uses
+  "The default member initializers' uses before their class's end in the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [x] (= main (get-in x [:loc :file])))
+        class? (fn [x] (and (= "CXXRecordDecl" (:kind x)) (:completeDefinition x) (not= "union" (:tagUsed x))))]
+    (doseq [e (let [tops (fn tops [ns] (mapcat #(if (#{"NamespaceDecl" "LinkageSpecDecl"} (:kind %)) (tops (:inner %)) [%]) ns))] (tops (:nodes u)))
+            :when (and (class? e) (:name e) (mine? e))]
+      (let [;; the classes nested in e, e among them, by name (an anonymous one by itself)
+            nested (loop [todo [e] acc []]
+                     (if-let [x (first todo)]
+                       (recur (into (vec (rest todo)) (filter class? (:inner x))) (conj acc x))
+                       acc))
+            by-name (into {} (keep #(when (:name %) [(:name %) %]) nested))
+            field-class (fn [f] (let [t (str/trim (str (get-in f [:type :qualType])))
+                                      nm (last (str/split (str/replace t #"^(?:const|volatile|struct|class)\s+" "") #"::"))]
+                                  (get by-name nm)))
+            ;; the first default member initializer N's implicit default constructor uses: [class-name field-name] or nil
+            needs (fn needs [n seen]
+                    (when-not (or (contains? seen n) (some #(and (= "CXXConstructorDecl" (:kind %)) (not (:isImplicit %))) (:inner n)))
+                      (let [seen (conj seen n)]
+                        (some (fn [m]
+                                (cond (and (= "FieldDecl" (:kind m)) (:hasInClassInitializer m)) [n m]
+                                      (and (= "FieldDecl" (:kind m)) (not (re-find #"[&*\[]" (str (get-in m [:type :qualType])))))
+                                      (when-let [c (field-class m)] (needs c seen))
+                                      (and (class? m) (nil? (:name m))) (needs m seen)
+                                      :else nil))
+                              (:inner n)))))
+            path (fn [n] (str/join "::" (keep #(when (and (:name %) (some (fn [y] (identical? y n)) (tree-seq map? (comp (partial filter map?) :inner) %))) (:name %)) nested)))
+            uses (fn uses [x]
+                   (cond (map? x) (case (:kind x)
+                                    ("LambdaExpr" "UnaryExprOrTypeTraitExpr" "CXXTypeidExpr" "CXXNoexceptExpr") nil
+                                    "CXXTemporaryObjectExpr"
+                                    (concat (when (empty? (:inner x))
+                                              (let [t (str/trim (str (get-in x [:type :qualType])))
+                                                    nm (last (str/split t #"::"))]
+                                                (when-let [n (get by-name nm)] [[x n]])))
+                                            (uses (:inner x)))
+                                    (mapcat (fn [[k v]] (when (and (not= k :_ent) (not= k :_t) (coll? v)) (uses v))) x))
+                         (sequential? x) (mapcat uses x)
+                         :else nil))
+            sites (concat
+                   (for [c nested, m (:inner c) :when (and (= "FieldDecl" (:kind m)) (:hasInClassInitializer m))] (:inner m))
+                   (for [c nested, f (:inner c) :when (fn-kinds (:kind f)), pm (:inner f) :when (= "ParmVarDecl" (:kind pm))] (:inner pm)))]
+        (doseq [site sites [x n] (uses site)]
+          (when-let [[owner fld] (needs n #{})]
+            (when-let [o (get-in x [:range :begin :offset])]
+              (when (= main (or (get-in x [:range :begin :file]) main))
+                (let [[l c] (line-col starts (long o))
+                      on (if (:name owner) (path owner) (str (path e) "::<unnamed struct>"))]
+                  (.add out {:line l :col c :kind :error :rule :nsdmi
+                             :msg (str "default member initializer for '" on "::" (:name fld) "' required before the end of its enclosing class")}))))))))
+    (vec (distinct out))))
+
+(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."

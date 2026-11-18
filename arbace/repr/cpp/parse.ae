@@ -1495,6 +1495,10 @@
                  (not (sc/lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
           (node p "ImaginaryLiteral" i i {})
           (let [[_ num sfx] (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)]
+            ;; (round 54, fourth pass: C++98 has no user-defined literal, [lex.icon], [lex.fcon]: a number's identifier suffix is
+            ;; GCC's error "invalid suffix \"_mm\" on floating constant", "... on integer constant")
+            (when (and num (< (.-year p) 2011))
+              (soft-diag! p i (str "invalid suffix \"" sfx "\" on " (if (lit/int-literal num) "integer" "floating") " constant")))
             (node p "UserDefinedLiteral" i i
                   (if num
                     (if-let [[v] (lit/int-literal num)]
@@ -3183,6 +3187,12 @@
                         :else nil)
                       (when (and (:tmpl qent) (some (fn [x] (some #(= "TemplateArgument" (:kind %)) (:inner x))) (:params hdr)))
                         (soft-diag! p (long (:i lp)) (str "default argument for template parameter for class enclosing '" (name-str p qn) "'"))))))
+              ;; (round 54, fourth pass: [class.pre]/3, a class-head-name with a nested-name-specifier names a class declared before
+              ;; in the namespace it nominates (a friend declaration's name is not one, [namespace.memdef]/3): GCC's "'B' in
+              ;; namespace 'N' does not name a class"; a class qualifier not judged)
+              _ (when (and qent (= :ns (:k qent)) (:scope qent) (nil? (:args lp)) (not (skim? p)) (not (:friend ds))
+                           (not-any? :args (:parts qn)) (nil? (sc/find-in (:scope qent) nm true)))
+                  (soft-diag! p (long (:i lp)) (str "'" nm "' in namespace '" (str/join "::" (map :s (butlast (:parts qn)))) "' does not name a class")))
               cs (sc/new-scope :class (if (:scope qent) (sc/new-scope :lookup (scope p) qent) (scope p)) nil)
               tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args lp))))
               ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)
@@ -3874,10 +3884,13 @@
                                   (when (or (is? p "struct") (is? p "union")) (adv! p))))
                   (let [pack (accept! p "...")
                         nm (when (id? p) (ts (cur p)))
+                        ni (ix p)
                         _ (when nm (adv! p))]
                     (when (accept! p "=") (skip-targ! p))
                     (when nm (sc/declare! (scope p) {:k :type :name nm :tmpl true :tparam true}))
-                    [(node p "TemplateTemplateParmDecl" b (last-ix p) (cond-> {} nm (assoc :name nm)))
+                    ;; (round 54, fourth pass: a pack's fact and the name's place kept apart, :_pack and :_loc, for the
+                    ;; template-heads' comparison alone)
+                    [(node p "TemplateTemplateParmDecl" b (last-ix p) (cond-> {} nm (assoc :name nm :_loc (loc p ni)) pack (assoc :_pack true)))
                      (when nm (str nm (when pack "...")))]))
               ;; a type-constraint: a concept's name (with arguments) before the parameter's
               ;; (n-cpp-concepts: not before auto or decltype(auto), a constrained placeholder's non-type parameter,
@@ -4670,7 +4683,18 @@
                    (let [ts (sc/new-scope :tparams (scope p) nil)]
                      (st! p SCOPE ts) (adv! p) (let [[tns] (parse-template-params p)] (expect! p ">") (vec tns))))
             _ (when (is? p "requires") (skip-requires-clause! p))
+            pi0 (ix p)
             pl (when (is? p "(") (adv! p) (parse-param-list p))
+            ;; (round 54, fourth pass: C++11's [expr.prim.lambda]/5, a lambda's parameter-declaration-clause has no default argument
+            ;; (allowed from C++14, CWG 974): GCC's pedwarn "default argument specified for lambda parameter", at the '=')
+            _ (when (and pl (= 2011 (.-year p)))
+                (loop [i (inc (long pi0)) d 0]
+                  (when (< i (long (ix p)))
+                    (let [^T t (tok-at p i)]
+                      (cond (or (t= t "(") (t= t "[") (t= t "{")) (recur (inc i) (inc d))
+                            (or (t= t ")") (t= t "]") (t= t "}")) (when (pos? d) (recur (inc i) (dec d)))
+                            (and (zero? d) (t= t "=")) (pedantic-diag! p i "default argument specified for lambda parameter")
+                            :else (recur (inc i) d))))))
             ;; (CX12: a lambda declared constexpr keeps the fact, `:_cexpr`, for the checker's rules of a constexpr function's
             ;; body, [dcl.constexpr]/3)
             cexpr (volatile! false)
@@ -4684,6 +4708,9 @@
                                  ;; GCC's pedwarn before it)
                                  (when-not (.add seen (ts (cur p))) (soft-diag! p (ix p) (str "duplicate '" (ts (cur p)) "' specifier")))
                                  (when (and (is? p "static") (< (.-year p) 2023)) (pedantic-diag! p (ix p) "'static' only valid in lambda with -std=c++23"))
+                                 ;; (round 54, fourth pass: [expr.prim.lambda.general]/4's constexpr lambda-specifier is C++17's: before it
+                                 ;; GCC's error "'constexpr' lambda only available with '-std=c++17' or '-std=gnu++17'")
+                                 (when (and (is? p "constexpr") (< (.-year p) 2017)) (soft-diag! p (ix p) "'constexpr' lambda only available with '-std=c++17' or '-std=gnu++17'"))
                                  (when (or (is? p "constexpr") (is? p "consteval")) (vreset! cexpr true)) (adv! p) (recur))
                              (is? p "noexcept") (do (adv! p)
                                                     (when (and (is? p "(") (is-at? p 1 ")")) (soft-diag! p (inc (ix p)) "expected primary-expression before ')' token"))
