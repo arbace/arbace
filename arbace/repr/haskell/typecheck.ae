@@ -1589,36 +1589,297 @@
         conv ({'CCallConv :ccall 'CApiConv :capi 'StdCallConv :stdcall 'PrimCallConv :prim 'JavaScriptCallConv :javascript} conv)
         safety ({'PlayRisky :unsafe 'PlaySafe :safe 'PlayInterruptible :interruptible} safety :safe)]
     (merge {:conv conv :safety safety}
-           (case (con sp)
+           ;; (CWrapper is a bare symbol, the others nodes)
+           (case (if (symbol? sp) sp (con sp))
              CFunction (let [tg (arg sp 1)]
                          (if (= 'StaticTarget (con tg)) {:target (arg tg 2) :fun (not (false? (arg tg 4)))} {:dynamic true}))
              CLabel {:label (arg sp 1)}
              CWrapper {:wrapper true}
              {:unknown true}))))
 
+(def ^:private zenc-chars
+  {\( "ZL" \) "ZR" \[ "ZM" \] "ZN" \: "ZC" \Z "ZZ" \z "zz" \& "za" \| "zb" \^ "zc" \$ "zd" \= "ze" \> "zg" \# "zh"
+   \. "zi" \< "zl" \- "zm" \! "zn" \+ "zp" \' "zq" \\ "zr" \/ "zs" \* "zt" \_ "zu" \% "zv"})
+
 (defn- zenc
-  "GHC.Utils.Encoding's zEncodeString"
+  "GHC.Utils.Encoding's zEncodeString (but its tuples' names): an ASCII letter or digit as it is (a leading digit
+  encoded), the table's characters, any other as z, its hexadecimal code (with a leading 0 when it starts with a
+  letter) and U (queue 364: the whole table, $ among them, for the stubs' names)"
   [^String s]
-  (apply str (for [ch s]
-               (cond (= ch \z) "zz" (= ch \Z) "ZZ" (= ch \_) "zu" (= ch \:) "ZC" (= ch \-) "zm" (= ch \.) "zi"
-                     (= ch \() "ZL" (= ch \)) "ZR" (= ch \[) "ZM" (= ch \]) "ZN" (= ch \#) "zh" (= ch \') "zq"
-                     (or (Character/isLetterOrDigit ch)) (str ch)
-                     :else (str "z" (Integer/toHexString (int ch)) "U")))))
+  (let [uni (fn [ch] (let [h (Integer/toHexString (int ch))] (str "z" (if (Character/isDigit (.charAt h 0)) h (str "0" h)) "U")))]
+    (apply str (map-indexed (fn [i ch]
+                              (cond (and (zero? i) (<= (int \0) (int ch) (int \9))) (uni ch)
+                                    (or (<= (int \a) (int ch) (int \z)) (<= (int \A) (int ch) (int \Z)) (<= (int \0) (int ch) (int \9)))
+                                    (if-let [e (zenc-chars ch)] e (str ch))
+                                    :else (or (zenc-chars ch) (uni ch))))
+                            s))))
+
+;; queue 364 (report 346's item 5): the module's wrapper counter, GHC's tcg_next_wrapper_num (mkWrapperName's): the
+;; foreign exports' stable names take its first numbers (the typechecker's, in source order), then the capi imports' C
+;; wrappers (the desugarer's, in dsForeigns' order: the imports last to first)
+(def ^:dynamic *wrapper-num* nil) ; atom n
+
+(defn- next-wrapper-num []
+  (if *wrapper-num* (let [n @*wrapper-num*] (swap! *wrapper-num* inc) n)
+      (count (filter #(= :capi (:conv %)) (vals @*fcalls*)))))
 
 (defn- capi-target
   "dsFCall's CApiConv: the call goes through the C wrapper GHC writes, named by mkWrapperName \"ghc_wrapper\" (the
   module's wrapper counter, the unit, the module, the C name), z-encoded"
   [sym]
-  (let [n (count (filter #(= :capi (:conv %)) (vals @*fcalls*)))]
-    (zenc (str "ghc_wrapper:" n ":" *unit* ":" *module* ":" sym))))
+  (zenc (str "ghc_wrapper:" (next-wrapper-num) ":" *unit* ":" *module* ":" sym)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The foreign stubs (queue 364, report 346's item 5): the C GHC 9.14.1 writes for a module's foreign declarations,
+;;; ported from GHC.HsToCore.Foreign.C (dsCFExport, dsCFExportDynamic, dsFCall's CApiConv, toCType, mkFExportCBits,
+;;; insertRetAddr), GHC.HsToCore.Foreign.Decl (dsForeigns', foreignExportsInitialiser), GHC.HsToCore.Foreign.Utils
+;;; (getPrimTyOf, primTyDescChar, ppPrimTyConStgType) and GHC.Types.ForeignStubs (initializerCStub) (BSD-3, The
+;;; University of Glasgow; LICENSE.md), each declaration's header and C as lines (an SDoc's $$, the empty doc none), for the
+;;; reference's platform: x86-64 Linux, whose wrapper stubs use no libffi and take the adjustor's return address after
+;;; their sixth integer argument (hsi's createAdjustor reads that parameter, NODES.adjust). Written as GHC's C compiler
+;;; gets them (tools/hsdump/probe/StubProbe.hs --stubs, the records' haskell-stg-progs ID/stubs/): BASE_stub.h and
+;;; BASE_stub.c, arbace.repr.haskell.front
+
+(def ^:dynamic *fstubs* nil) ; atom [{:h [LINE...] :c [LINE...]}...]: the module's foreign declarations' stubs, dsForeigns' order
+
+(def ^:private ptr-tc (ext-name "tc" "GHC.Internal.Ptr" "Ptr"))
+(def ^:private funptr-tc (ext-name "tc" "GHC.Internal.Ptr" "FunPtr"))
+
+(def ^:private ffi-ctypes
+  ;; the boot libraries' CTYPE pragmas, by type constructor (no interface carries them: read from ghc-internal 9.14.1's
+  ;; GHC/Internal/{Types,Int,Word,Stable}.hs, Foreign/C/Types.hs's and System/Posix/Types.hs's CTypes.h macros and
+  ;; System/Posix/Internals.hs; a newtype's matters under a Ptr, which normaliseFfiType does not look into)
+  (merge
+   (into {} (for [[m ts] {"GHC.Internal.Types" [["Char" "HsChar"] ["Int" "HsInt"] ["Word" "HsWord"] ["Float" "HsFloat"]
+                                                ["Double" "HsDouble"] ["Bool" "HsBool"]]
+                          "GHC.Internal.Int" [["Int8" "HsInt8"] ["Int16" "HsInt16"] ["Int32" "HsInt32"] ["Int64" "HsInt64"]]
+                          "GHC.Internal.Word" [["Word8" "HsWord8"] ["Word16" "HsWord16"] ["Word32" "HsWord32"] ["Word64" "HsWord64"]]
+                          "GHC.Internal.Stable" [["StablePtr" "HsStablePtr"]]}
+                  [o c] ts]
+              [(ext-name "tc" m o) c]))
+   (into {} (for [[o c] (partition 2 ["CChar" "char" "CSChar" "signed char" "CUChar" "unsigned char" "CShort" "short"
+                                      "CUShort" "unsigned short" "CInt" "int" "CUInt" "unsigned int" "CLong" "long"
+                                      "CULong" "unsigned long" "CLLong" "long long" "CULLong" "unsigned long long"
+                                      "CBool" "bool" "CFloat" "float" "CDouble" "double" "CPtrdiff" "ptrdiff_t"
+                                      "CSize" "size_t" "CWchar" "wchar_t" "CSigAtomic" "sig_atomic_t" "CClock" "clock_t"
+                                      "CTime" "time_t" "CUSeconds" "useconds_t" "CSUSeconds" "suseconds_t"
+                                      "CIntPtr" "intptr_t" "CUIntPtr" "uintptr_t" "CIntMax" "intmax_t" "CUIntMax" "uintmax_t"])]
+              [(ext-name "tc" "GHC.Internal.Foreign.C.Types" o) c]))
+   (into {} (for [[o c] (partition 2 ["CDev" "dev_t" "CIno" "ino_t" "CMode" "mode_t" "COff" "off_t" "CPid" "pid_t"
+                                      "CSsize" "ssize_t" "CGid" "gid_t" "CNlink" "nlink_t" "CUid" "uid_t" "CCc" "cc_t"
+                                      "CSpeed" "speed_t" "CTcflag" "tcflag_t" "CRLim" "rlim_t" "CBlkSize" "blksize_t"
+                                      "CBlkCnt" "blkcnt_t" "CClockId" "clockid_t" "CFsBlkCnt" "fsblkcnt_t"
+                                      "CFsFilCnt" "fsfilcnt_t" "CId" "id_t" "CKey" "key_t" "CTimer" "timer_t"
+                                      "CSocklen" "socklen_t" "CNfds" "nfds_t" "Fd" "int"])]
+              [(ext-name "tc" "GHC.Internal.System.Posix.Types" o) c]))
+   (into {} (for [o ["flock" "group" "lconv" "passwd" "sigaction" "stat" "termios" "tm" "tms" "utimbuf" "utsname"]]
+              [(ext-name "tc" "GHC.Internal.System.Posix.Internals" (str "C" (str/upper-case (subs o 0 1)) (subs o 1)))
+               (str "struct " o)]))
+   {(ext-name "tc" "GHC.Internal.System.Posix.Internals" "CFLock") "struct flock"
+    (ext-name "tc" "GHC.Internal.System.Posix.Internals" "CSigset") "sigset_t"}))
+
+(defn- prim-stg-type
+  "ppPrimTyConStgType: the C type of an unlifted FFI type's constructor (UnliftedFFITypes), or nil"
+  [tc]
+  (when (= "GHC.Internal.Prim" (nmod tc))
+    ({"Char#" "StgChar" "Int#" "StgInt" "Int8#" "StgInt8" "Int16#" "StgInt16" "Int32#" "StgInt32" "Int64#" "StgInt64"
+      "Word#" "StgWord" "Word8#" "StgWord8" "Word16#" "StgWord16" "Word32#" "StgWord32" "Word64#" "StgWord64"
+      "Float#" "StgFloat" "Double#" "StgDouble" "Addr#" "StgAddr" "StablePtr#" "StgStablePtr" "Array#" "const StgAddr"
+      "MutableArray#" "StgAddr" "ByteArray#" "const StgAddr" "MutableByteArray#" "StgAddr" "SmallArray#" "const StgAddr"
+      "SmallMutableArray#" "StgAddr"} (occ tc))))
+
+(defn- ffi-normalise
+  "normaliseFfiType: synonyms expanded, a newtype unwrapped (its constructor taken as in scope), IO's, FunPtr's and the
+  arrows' arguments normalised, any other type left as it is"
+  [t]
+  (let [t (deep-expand t)]
+    (cond
+      (= :forall (first t)) (assoc t 3 (ffi-normalise (nth t 3)))
+      (not= :tc (first t)) t
+      (contains? #{io-tc funptr-tc fun-tc} (second t)) [:tc (second t) (mapv ffi-normalise (nth t 2))]
+      (ffi-con-field t 'newtype) (ffi-normalise (second (ffi-con-field t 'newtype)))
+      :else t)))
+
+(defn- unit-ty? [t] (let [t (deep-expand t)] (and (= :tc (first t)) (= (tuple-tc 0) (second t)))))
+
+(defn- c-type
+  "toCType: [HEADER C-TYPE] of a capi call's argument or result (Ptr t and FunPtr t: t's, void when it has none, and *)"
+  ([t] (c-type t false))
+  ([t void-ok]
+   (let [t (deep-expand t)]
+     (cond
+       (and (= :tc (first t)) (contains? #{ptr-tc funptr-tc} (second t)) (= 1 (count (nth t 2))))
+       (let [[h c] (c-type (first (nth t 2)) true)] [h (str c "*")])
+       (and (= :tc (first t)) (get ffi-ctypes (second t))) [nil (get ffi-ctypes (second t))]
+       (and (= :tc (first t)) (prim-stg-type (second t))) [nil (prim-stg-type (second t))]
+       void-ok [nil "void"]
+       :else (throw (ex-info (str "toCType: " (pr-str t)) {}))))))
+
+(defn- ffi-prim-of
+  "getPrimTyOf: the primitive type constructor's occurrence of an exported function's argument or result (Int#: Bool's)"
+  [t]
+  (let [t (deep-expand t)]
+    (cond
+      (= tc-bool (second t)) "Int#"
+      (ffi-prim-type? t) (occ (second t))
+      (ffi-con-field t 'newtype) (ffi-prim-of (second (ffi-con-field t 'newtype)))
+      (ffi-con-field t 'data) (ffi-prim-of (second (ffi-con-field t 'data)))
+      :else (throw (ex-info (str "getPrimTyOf: " (pr-str t)) {})))))
+
+(defn- ffi-desc-char
+  "primTyDescChar (a 64-bit word): the argument's letter in the type string createAdjustor gets"
+  [t]
+  (if (unit-ty? t)
+    \v
+    (or ({"Int#" \L "Word#" \l "Char#" \l "Int8#" \B "Word8#" \b "Int16#" \S "Word16#" \s "Int32#" \W "Word32#" \w
+          "Int64#" \L "Word64#" \l "Addr#" \p "StablePtr#" \p "Float#" \f "Double#" \d} (ffi-prim-of t))
+        (throw (ex-info (str "primTyDescChar: " (pr-str t)) {})))))
+
+(defn- ffi-stg-type
+  "showFFIType of a type: its type constructor's occurrence after the newtypes unwrapped (unwrapType): HsInt's Int"
+  [t]
+  (let [t (deep-expand t)]
+    (if-let [[_ ft] (and (= :tc (first t)) (ffi-con-field t 'newtype))]
+      (ffi-stg-type ft)
+      (if (= :tc (first t)) (occ (second t)) (throw (ex-info (str "typeTyCon: " (pr-str t)) {}))))))
+
+(defn- fexport-cbits
+  "mkFExportCBits (the CCallConv's, no libffi): {:h [LINE] :c [LINE] :ts TYPE-STRING} of the C function c-nm calling the
+  exported closure target (its label's name), or, target nil, a wrapper's stub calling the closure its stable pointer
+  names; arg-tys and res-ty the Haskell types (an IO result's io? true: runIO, else runNonIO)"
+  [c-nm target arg-tys res-ty io?]
+  (let [args (vec (map-indexed (fn [i t] {:n (str "a" (inc i)) :ty (str "Hs" (ffi-stg-type t)) :t t
+                                          :float (contains? #{"Float#" "Double#"} (ffi-prim-of t))})
+                               arg-tys))
+        ts (apply str (map #(ffi-desc-char (:t %)) args))
+        ;; insertRetAddr (x86-64, not Windows): the return address's slot after the sixth integer argument
+        ret-addr (fn [as] (loop [n 0 as as acc []]
+                            (cond (= n 6) (into (conj acc {:n "original_return_addr" :ty "void*"}) as)
+                                  (empty? as) acc
+                                  (:float (first as)) (recur n (rest as) (conj acc (first as)))
+                                  :else (recur (inc n) (rest as) (conj acc (first as))))))
+        aug (if target args (into [{:n "the_stableptr" :ty "StgStablePtr"}] (ret-addr args)))
+        unit? (unit-ty? res-ty)
+        cres (if unit? "void" (str "Hs" (ffi-stg-type res-ty)))
+        proto (str cres " " c-nm "(" (if (empty? aug) "void" (str/join ", " (map #(str (:ty %) " " (:n %)) aug))) ")")
+        expr (reduce (fn [acc a] (str "rts_apply(cap," acc ",rts_mk" (subs (:ty a) 2) "(cap," (:n a) "))"))
+                     (if target (str "&" target "_closure") "(StgClosure*)deRefStablePtr(the_stableptr)")
+                     args)]
+    {:h [(str "extern " proto ";")]
+     :ts ts
+     :c (vec (concat [" "] (when target [(str "extern StgClosure " target "_closure;")])
+                     [proto "{" "Capability *cap;" "HaskellObj ret;"]
+                     (when-not unit? [(str cres " cret;")])
+                     ["cap = rts_lock();"
+                      (str "rts_inCall(&cap,rts_apply(cap," (if io? "ghc_hs_iface->runIO_closure" "ghc_hs_iface->runNonIO_closure")
+                           "," expr ") ,&ret);")
+                      (str "rts_checkSchedStatus(\"" c-nm "\",cap);")]
+                     (when-not unit? [(str "cret=rts_get" (subs cres 2) "(ret);")])
+                     ["rts_unlock(cap);"]
+                     (when-not unit? ["return cret;"])
+                     ["}"]))}))
+
+(defn- io-split
+  "tcSplitIOType_maybe: [t true] of IO t, else [t false]"
+  [t]
+  (let [t (deep-expand t)]
+    (if (and (= :tc (first t)) (= io-tc (second t))) [(first (nth t 2)) true] [t false])))
+
+(defn- capi-stub
+  "dsFCall's CApiConv's C: the wrapper wname calling (or, a value import, reading) the C name sym, its arguments and result
+  as toCType gives them from the normalised type nt (the original type t's ConstPtr result const), after the
+  declaration's header, the result's and the arguments' (each once, in that order)"
+  [wname sym fun? decl-header t]
+  (let [[arg-tys res] (ffi-split (ffi-normalise t))
+        [raw _] (io-split res)
+        [_ ores] (ffi-split t)
+        const? (let [r (deep-expand (first (io-split ores)))]
+                 (and (= :tc (first r)) (= (ext-name "tc" "GHC.Internal.Foreign.C.ConstPtr" "ConstPtr") (second r))))
+        void? (unit-ty? raw)
+        [rh rc] (if void? [nil "void"] (c-type raw))
+        cargs (mapv c-type arg-tys)
+        hdrs (distinct (remove nil? (concat [decl-header rh] (map first cargs))))
+        call (cond fun? (str sym "(" (str/join ", " (map #(str "a" (inc %)) (range (count arg-tys)))) ")")
+                   (empty? arg-tys) sym
+                   :else (throw (ex-info "dsFCall: Unexpected arguments to FFI value import" {})))
+        argtypes (if (empty? cargs) "void" (str/join ", " (map-indexed (fn [i [_ c]] (str c " a" (inc i))) cargs)))]
+    {:h []
+     :c (vec (concat (for [h hdrs] (str "#include \"" h "\""))
+                     [(str (when const? "const ") rc " " wname "(" argtypes ") {" (if void? call (str "return " call)) ";}")]))}))
+
+(defn- fexports-init
+  "foreignExportsInitialiser: the module's exports' closures registered (registerForeignExports) by its initializer"
+  [closures]
+  (when (seq closures)
+    (let [mstr *module*]
+      [(str "static struct ForeignExportsList stg_exports_" mstr " = {.exports =  {"
+            (str/join ", " (map #(str "(StgPtr) &" % "_closure") closures)) "}, .n_entries =  " (count closures) "};")
+       (str "void " (zenc mstr) "_init__fexports (void)")
+       (str "{registerForeignExports(&stg_exports_" mstr ");}")])))
+
+(defn- ffi-call-body
+  "dsFCall's worker and wrapper body (inlined, as GHC's -O0 Simplifier does): the call f of spec sp on the unboxed
+  atoms vals (their types val-tys) and the State# token, its unboxed result matched and boxed by resultWrapper
+  (mk_alt), in IO (\\s -> ...) for an IO result, else applied to realWorld#; nil when resultWrapper refuses the result"
+  [f sp vals val-tys res-ty]
+  (let [io? (and (= :tc (first res-ty)) (= io-tc (second res-ty)))
+        inner (if io? (first (nth res-ty 2)) res-ty)
+        rw (ffi-result-wrapper inner)]
+    (when rw
+      (let [[pt wrap] rw
+            ccall-res (if pt [:tc (utuple-tc 2) [state-rw pt]] [:tc (utuple-tc 1) [state-rw]])
+            _ (swap! *genv* assoc f (reduce (fn [r a] (fn-ty a r)) (fn-ty state-rw ccall-res) (reverse val-tys)))
+            _ (swap! *fcalls* assoc f (cond-> (dissoc sp :no-unit) (not (:no-unit sp)) (assoc :unit *unit*)))
+            ;; mk_alt: the call's unboxed result matched, the result boxed; return_result: (# s, r #) for IO, r else
+            s2 (ffi-lv "ds" state-rw)
+            r (when pt (ffi-lv "ds" pt))
+            ans (wrap r)
+            rhs (if io? (list 'app (list 'v (assoc (unboxed-con 2) 1 "var")) [s2 ans]) ans)
+            alt (list 'alt (unboxed-con (if pt 2 1)) (if pt [s2 r] [s2]) rhs)
+            call (fn [st] (list 'case (list 'app (list 'v f) (conj (vec vals) st)) (ffi-lv "wild" ccall-res) [alt]))]
+        (if io?
+          (let [s (ffi-lv "s" state-rw)]
+            (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "IO")) [(list 'lam [s] (call s))]))
+          (call (list 'v (ext-name "var" "GHC.Internal.Prim" "realWorld#"))))))))
+
+(def ^:private addr-ty [:tc (ext-name "tc" "GHC.Internal.Prim" "Addr#") []])
 
 (defn ds-fimport
-  "dsFImport: the binding of foreign import n :: t with the CImport ci, as Core, or nil when it is not desugared (a
-  \"wrapper\" or dynamic import, an argument or result type unboxArg or resultWrapper refuses)"
-  [n t ci]
+  "dsFImport: the binding of foreign import n :: t with the CImport ci, as Core, or nil when it is not desugared (an
+  argument or result type unboxArg or resultWrapper refuses); a dynamic import (dsFCall's DynamicTarget, queue 364) is a
+  call whose first argument, the FunPtr unboxed to its Addr#, is the function called; a capi import's call is its C
+  wrapper's, wname (capi-target's, the caller's); a \"wrapper\" import (dsCFExportDynamic, queue 364) makes a stable
+  pointer of its function and calls createAdjustor with it, the stub's label and its type string (adj, [LABEL TS])"
+  [n t ci & [{:keys [wname adj]}]]
   (let [sp (ffi-spec ci) [arg-tys res-ty] (ffi-split t)]
     (cond
-      (or (:wrapper sp) (:dynamic sp) (:unknown sp) (nil? (:conv sp))) nil
+      (or (:unknown sp) (nil? (:conv sp))) nil
+      ;; dsCFExportDynamic: \cback -> bindIO (newStablePtr cback) (\stbl -> createAdjustor's call), the call dsCCall's
+      ;; (unsafe, no unit): the stable pointer unboxed, the stub's label (IsFunction) and the type string its arguments,
+      ;; the result (IO (FunPtr ...)) boxed
+      (:wrapper sp)
+      (let [[arg-tys res-ty] (ffi-split (ffi-normalise t))]
+      (when (and adj (= 1 (count arg-tys)))
+        ;; (the type normalised, as dsCFExportDynamic's coercionLKind: T493's MyIO (MyFunPtr ...) is IO (FunPtr ...))
+        (let [[label ts] adj
+              at (first arg-tys)
+              [inner _] (io-split res-ty)
+              sp-ty [:tc (ext-name "tc" "GHC.Internal.Stable" "StablePtr") [at]]
+              sp#-ty [:tc (ext-name "tc" "GHC.Internal.Prim" "StablePtr#") [at]]
+              cback (ffi-lv "ds" at)
+              stbl (ffi-lv "ds" sp-ty)
+              a (ffi-lv "ds" sp#-ty)
+              f (ext-name "ffi" *module* (str "ccall:createAdjustor:" (occ n)))
+              body (ffi-call-body f {:conv :ccall :safety :unsafe :target "createAdjustor" :fun true :no-unit true}
+                                  [a (list 'lit (str "&label:" label ":fun")) (list 'lit (str (pr-str ts) "#"))]
+                                  [sp#-ty addr-ty addr-ty] [:tc io-tc [inner]])]
+          (when body
+            (list 'lam [cback]
+                  (list 'app (list 'v (ext-name "var" "GHC.Internal.Base" "bindIO"))
+                        [(list 'app (list 'v (ext-name "var" "GHC.Internal.Stable" "newStablePtr")) [cback])
+                         (list 'lam [stbl]
+                               (list 'case stbl (ffi-lv "ds" sp-ty)
+                                     [(list 'alt (ext-name "data" "GHC.Internal.Stable" "StablePtr") [a] body)]))]))))))
       ;; dsFLabel: the label's address in the result's constructor (FunPtr or Ptr), IsFunction when it is a FunPtr
       (:label sp)
       (let [[c ft] (ffi-con-field res-ty 'data)]
@@ -1636,31 +1897,33 @@
       (let [xs (mapv #(ffi-lv "ds" %) arg-tys)
             unb (map ffi-unbox-arg xs arg-tys)]
         (when (every? some? unb)
-          (let [io? (and (= :tc (first res-ty)) (= io-tc (second res-ty)))
-                inner (if io? (first (nth res-ty 2)) res-ty)
-                rw (ffi-result-wrapper inner)]
-            (when rw
-              (let [[pt wrap] rw
-                    ccall-res (if pt [:tc (utuple-tc 2) [state-rw pt]] [:tc (utuple-tc 1) [state-rw]])
-                    vals (mapv first unb)
-                    sp (if (= :capi (:conv sp)) (assoc sp :target (capi-target (:target sp)) :fun true) sp)
-                    f (ext-name "ffi" *module* (str (name (:conv sp)) ":" (:target sp) ":" (occ n)))
-                    _ (swap! *genv* assoc f (reduce (fn [r a] (fn-ty a r)) (fn-ty state-rw ccall-res)
-                                                    (reverse (map (fn [v] (get @*ltypes* v)) vals))))
-                    _ (swap! *fcalls* assoc f (assoc sp :unit *unit*))
-                    ;; mk_alt: the call's unboxed result matched, the result boxed; return_result: (# s, r #) for IO, r else
-                    s2 (ffi-lv "ds" state-rw)
-                    r (when pt (ffi-lv "ds" pt))
-                    ans (wrap r)
-                    rhs (if io? (list 'app (list 'v (assoc (unboxed-con 2) 1 "var")) [s2 ans]) ans)
-                    alt (list 'alt (unboxed-con (if pt 2 1)) (if pt [s2 r] [s2]) rhs)
-                    call (fn [st] (list 'case (list 'app (list 'v f) (conj vals st)) (ffi-lv "wild" ccall-res) [alt]))
-                    body (if io?
-                           (let [s (ffi-lv "s" state-rw)]
-                             (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "IO")) [(list 'lam [s] (call s))]))
-                           (call (list 'v (ext-name "var" "GHC.Internal.Prim" "realWorld#"))))
-                    body (reduce (fn [b [_ w]] (w b)) body (reverse unb))]
+          (let [vals (mapv first unb)
+                sp (if (= :capi (:conv sp)) (assoc sp :target (or wname (capi-target (:target sp))) :fun true) sp)
+                f (ext-name "ffi" *module* (str (name (:conv sp)) ":" (if (:dynamic sp) "dynamic" (:target sp)) ":" (occ n)))
+                body (ffi-call-body f sp vals (map (fn [v] (get @*ltypes* v)) vals) res-ty)]
+            (when body
+              (let [body (reduce (fn [b [_ w]] (w b)) body (reverse unb))]
                 (if (empty? xs) body (list 'lam xs body))))))))))
+
+(defn- fimport-stub
+  "A foreign import's stub and what its desugaring needs ({:stub {:h :c} :wname :adj}): a capi function's C wrapper
+  (its number the module's next), a \"wrapper\" import's adjustor stub, any other's none"
+  [n t ci]
+  (let [sp (ffi-spec ci)
+        hdr (let [h (arg ci 4)] (when (= 'Just (con h)) (arg (arg h 1) 2)))]
+    (cond
+      (and (= :capi (:conv sp)) (:target sp))
+      (let [w (capi-target (:target sp))]
+        {:wname w :stub (try (capi-stub w (:target sp) (:fun sp) hdr t) (catch Throwable _ {:h [] :c []}))})
+      (:wrapper sp)
+      (try (let [[[at] res] (ffi-split (ffi-normalise t))
+                 label (zenc (str "$" *unit* "$" *module* "$" (zenc *module*) "_" (zenc (occ n))))
+                 [fargs fres] (ffi-split at)
+                 [r io?] (io-split fres)
+                 bits (fexport-cbits label nil fargs r io?)]
+             {:adj [label (:ts bits)] :stub (dissoc bits :ts)})
+           (catch Throwable e (when (System/getenv "REPR_HASKELL_FFI_TRACE") (binding [*out* *err*] (println "ffi-trace: wrapper stub:" (occ n) (.getMessage e)))) {:stub {:h [] :c []}}))
+      :else {:stub {:h [] :c []}})))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
@@ -5278,8 +5541,32 @@
   "A renamed module (rn/module {...}) elaborated: {:types {NAME type} :core [(bind ...)...] :errors [...]}"
   [tree]
   (let [{:keys [module decls binds sigs]} (second tree)
-        m module]
+        m module
+        ;; queue 364: the foreign exports (tcFExport): each a top-level binding of a stable name, $fstable:N:UNIT:MOD:NAME
+        ;; (mkStableIdFromName, mkForeignExportOcc; N the module's wrapper counter, in source order) whose right-hand side is
+        ;; the exported name at the declared type (tcCheckPolyExpr: its dictionaries applied), signed by that type; the C
+        ;; stub calls it (fexport-cbits)
+        fexps (vec (map-indexed
+                    (fn [i [d fe]]
+                      (let [n (nm (arg fe 2)) es (lval (arg (arg fe 4) 2))
+                            sname (str "$f" (zenc (str "stable:" i ":" *unit* ":" module ":" (occ n))))
+                            sp (or (lsp d) (lsp (arg fe 2)))]
+                        {:n n :sig (arg fe 3) :cname (arg es 2) :sname sname :name (ext-name "var" module sname) :span sp}))
+                    (for [d decls :let [v (lval d)] :when (and (= 'ForD (con v)) (= 'ForeignExport (con (arg v 2))))]
+                      [d (arg v 2)])))
+        sigs (into (vec sigs) (for [{:keys [name sig span]} fexps]
+                                (list 'L span (list 'TypeSig nil [(list 'L span (list 'rn/name name))] (list 'HsWC 'NoExtField sig)))))
+        binds (into (vec binds)
+                    (for [{:keys [name n span]} fexps
+                          :let [l (fn [x] (list 'L span x)) rn (fn [x] (l (list 'rn/name x)))]]
+                      (list 'rn/group 'nonrec
+                            [(l (list 'FunBind 'NoExtField (rn name)
+                                      (list 'MG 'FromSource
+                                            (l [(l (list 'Match 'NoExtField (list 'FunRhs (rn name) 'Prefix 'NoSrcStrict nil) (list 'L nil [])
+                                                         (list 'GRHSs nil [(l (list 'GRHS nil [] (l (list 'HsVar 'NoExtField (rn n)))))]
+                                                               (list 'EmptyLocalBinds 'NoExtField))))]))))])))]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
+              *wrapper-num* (atom (count fexps)) *fstubs* (atom [])
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *tv-kinds* (atom {}) *tc-kinds* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
@@ -5365,13 +5652,29 @@
                    (catch Throwable e (when trace? (binding [*out* *err*] (println "tc-trace: kinds:" (.getMessage e))))))
             ;; foreign imports: their signature is their type
             ;; HF10-P5 (a): desugared as GHC's dsFImport does (ds-fimport); one it does not take stays the placeholder tostg drops
-            fimports (vec (for [d decls :let [v (lval d)] :when (and (= 'ForD (con v)) (= 'ForeignImport (con (arg v 2))))
-                                :let [fi (arg v 2) n (nm (arg fi 2))]]
-                            (let [t (sig-type (arg fi 3))]
-                              (swap! *genv* assoc n t)
-                              (list 'bind n (or (when-not (= "0" (System/getenv "REPR_HASKELL_FFI"))
-                                                  (try (ds-fimport n t (arg fi 4)) (catch Throwable _ nil)))
-                                                (list 'lit (str "foreign import " (occ n))))))))
+            ;; (queue 364: desugared as dsForeigns' does, the imports last to first (tcg_fords' order), each with its stub:
+            ;; a capi import's wrapper number is the module's next; the bindings in source order)
+            fis (vec (for [d decls :let [v (lval d)] :when (and (= 'ForD (con v)) (= 'ForeignImport (con (arg v 2))))
+                           :let [fi (arg v 2) n (nm (arg fi 2))]]
+                       [n (sig-type (arg fi 3)) (arg fi 4)]))
+            _ (doseq [[n t] fis] (swap! *genv* assoc n t))
+            fis-core (into {} (for [[i [n t ci]] (reverse (map-indexed vector fis))]
+                                (let [st (try (fimport-stub n t ci) (catch Throwable _ {:stub {:h [] :c []}}))]
+                                  (swap! *fstubs* conj (:stub st))
+                                  [i (or (when-not (= "0" (System/getenv "REPR_HASKELL_FFI"))
+                                           (try (ds-fimport n t ci st)
+                                                (catch Throwable e
+                                                  (when (System/getenv "REPR_HASKELL_FFI_TRACE")
+                                                    (binding [*out* *err*] (println "ffi-trace: dsFImport:" (occ n) (.getMessage e))))
+                                                  nil)))
+                                         (list 'lit (str "foreign import " (occ n))))])))
+            fimports (vec (for [[i [n]] (map-indexed vector fis)] (list 'bind n (get fis-core i))))
+            ;; the exports' stubs after the imports', last to first, then their initialiser
+            _ (doseq [{:keys [cname sname sig]} (reverse fexps)]
+                (swap! *fstubs* conj (try (let [[as res] (ffi-split (ffi-normalise (sig-type sig))) [r io?] (io-split res)]
+                                            (dissoc (fexport-cbits cname sname as r io?) :ts))
+                                          (catch Throwable _ {:h [] :c []}))))
+            _ (when-let [l (fexports-init (map :sname (reverse fexps)))] (swap! *fstubs* conj {:h [] :c l}))
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
             insts (into insts (phase :derive (derive-all! m decls)))
@@ -5503,6 +5806,10 @@
                      (w [decls sigs binds]) @acc)
          :genv @*genv*
          :fcalls @*fcalls*
+         ;; queue 364: the module's foreign stubs, BASE_stub.h's and BASE_stub.c's lines after their includes (a module
+         ;; without foreign declarations has empty ones: deSugar's appendStubC of HPC's initialiser, mempty, makes
+         ;; ForeignStubs of NoStubs)
+         :fstubs {:h (vec (mapcat :h @*fstubs*)) :c (vec (mapcat :c @*fstubs*))}
          ;; the foreign imports desugared (an INLINE unfolding of their arity, mkInlineUnfoldingWithArity)
          :fimports (set (for [[_ b e] fimports :when (not (and (seq? e) (= 'lit (first e))))] b))
          :kind-arity @*kind-arity*
