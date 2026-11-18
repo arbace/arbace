@@ -6411,3 +6411,26 @@ directive, so musl's forms do not change by value; nothing was built here.
 - CS329 (a) built as above. Within it: every directive between a list's elements placed (not only a list holding an `#include`),
   as §9.2 already said of initializer elements; the commas as the directives' metadata (an element's would need an IObj for
   literals); ci's read unchanged; the checker strips the directives at the top form. Alternative: (b), the class kept deferred.
+
+## As built: queue 342's C fixes (D342-1 (a), D342-2 (a), 2026-11-18, round 54, branch `348-c-cpp-fixes` from mac/n-all `9cd2e4a96`)
+
+Queue 342's review (the VM's report `342-review-nall-c-cpp-go.md`, findings 1 and 2); the user took (a) on both.
+- **D342-1 (a), the straddling element.** CS329's `list-with-dirs` kept an element that held both the main file's tokens and an
+  included header's (`{ 0,` `#include "h"` `3 }`, h holding `1, 2 -`: the element `2 - 3`), and the print wrote the `#include`
+  and the element, the header's tokens twice (`{0, 1, 2 - 2 - 3}`: the original exits 2, the print 0); CS275's `block-items`
+  likewise kept a statement begun in a header and ended in the main file (`#include "stmt.h"` holding `x = x +`, then `1;`).
+  `arbace/repr/c/convert.ae`'s `straddles?`: an element or a main-file body's item with both files' tokens and no placed
+  `#include` inside its main-file extent (the placed includes' offsets, `:placed-incs`) is refused `:split-declaration`, as next
+  refused it. An element holding a nested list the `#include` stands in (`{ { 0,` `#include "vals.h"` `}, ... }`) and an item
+  holding a nested body's `#include` keep their place. Not ci's read (`*include-inside*`).
+- **D342-2 (a), the checker's view.** `bin/ci dg` (`arbace/c/dg.ae`'s read) and `bin/ci diagnose`/`annot`
+  (`arbace/repr/c/annot.ae`'s `-main`) read as ci and annot's corpus check read, `*include-inside*` true, so an `#include` inside
+  a list or a body keeps the elements and statements its file brings in for the checker (it gave `'OP_A' undeclared` for a
+  quickjs-like enum and `zero or negative size array` for a table all of whose elements a header holds). No file of the dg
+  corpus includes inside braces (scanned), so its rows do not move.
+- Proofs: the review's probes (`.tmp/q342/probe/`, 18 files: e5, e7, e8 refused; e9 (an include in a body and in a nested
+  body, a nested list's) and the other 14 pass l1, l2 and l3 under gcc 15.2 -O0; test/c/run's include-in-body.c and
+  pack-in-include.c read and print as before); `bin/ci diagnose` of the probes gives no error, a misspelt enumerator still
+  `'OP_Z' undeclared`; `bin/repr-c roundtrip --corpus gcc-c23,gcc-embed,gcc-bitint --only` (cs329-regression.txt's 12 gcc
+  files, bitint-5.c, torture/bitint-12.c, `ARBACE_C_JUDGE=gcc`): 14 of 14 pass; `bin/ci dg --essential` 92 of 92 and the whole
+  `bin/ci dg` 612 of 619 supported, 8 unsupported, the record's counts (5 min, 1.57 GB peak), the control differing; the list's 8 ccorpus2 files (quickjs, zlib, tcc, torture) are the main host's.
