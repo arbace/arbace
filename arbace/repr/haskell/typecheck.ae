@@ -403,6 +403,12 @@
                          classes)]
         (if (or (= table' table) (> i 4)) table' (recur table' (inc i)))))))
 
+(defn- qc-type?
+  "Queue 379: a quantified constraint's type (QuantifiedConstraints' forall m'. Monad m' => Monad (t m')): a forall over a
+  class's application, kept in a context as the predicate [:qc [TYPE]] (before, a context dropped it)"
+  [p]
+  (and (= :forall (first p)) (seq (nth p 1)) (= :tc (first (nth p 3)))))
+
 (defn conv-type
   "A typeF form as a type"
   [f]
@@ -432,7 +438,7 @@
           (let [p (conv-type (nth f 3)) body (conv-type (nth f 4))
                 ;; a constraint whose head is a variable (withDict's cls => r): [:cvar [type]], solved once the variable
                 ;; is a class's application
-                pred (case (first p) :tc [(second p) (nth p 2)] (:tv :app) [:cvar [p]] nil)]
+                pred (case (first p) :tc [(second p) (nth p 2)] (:tv :app) [:cvar [p]] :forall (when (qc-type? p) [:qc [p]]) nil)]
             (if (= :forall (first body))
               (if (empty? (nth body 1)) [:forall [] (into (if pred [pred] []) (nth body 2)) (nth body 3)]
                   [:forall [] (if pred [pred] []) body])
@@ -1166,6 +1172,46 @@
               (or (> k 8) (= before (mapv zonk-pred preds))) nil
               :else (recur (inc k) terms'))))))
 
+(declare solve-pred)
+
+(defn- qc-match-ty
+  "match-ty with an application's against an application's (a quantified constraint's head (t m') against (t m))"
+  [vs m p t]
+  (let [t (expand (prune t))]
+    (if (and m (= :app (first p)) (= :app (first t)))
+      (qc-match-ty vs (qc-match-ty vs m (nth p 1) (nth t 1)) (nth p 2) (nth t 2))
+      (match-ty vs m p t))))
+
+(defn- qc-given
+  "Queue 379: the wanted [c ts] by a quantified given [[:qc [(forall vs. ps => H)]] q]: H, or a superclass of it, matching the
+  wanted, ps solved at the match (their terms q's arguments; a superclass's selection over that application), or nil"
+  [[c ts] givens depth]
+  (some (fn [[[gc gts] q]]
+          (when (= :qc gc)
+            (let [[_ vs ps hd] (first gts)
+                  hole (list 'qc-hole (str (swap! *counter* inc)))
+                  heads (binding [*ev-binds* nil] (super-closure [[[(second hd) (nth hd 2)] hole]]))]
+              (some (fn [[[hc hts] sel]]
+                      (when (and (= hc c) (= (count hts) (count ts)))
+                        (when-let [m (reduce (fn [m [p t]] (qc-match-ty (set vs) m p t)) {} (map vector hts ts))]
+                          (when (every? #(contains? m %) vs)
+                            (let [args (mapv (fn [[pc pts]] (solve-pred [pc (mapv #(subst m %) pts)] givens (inc depth))) ps)]
+                              (when (every? some? args)
+                                (walk/postwalk-replace {hole (if (seq args) (list 'app q args) q)} sel)))))))
+                    heads))))
+        givens))
+
+(defn- qc-wanted
+  "Queue 379: a quantified wanted (forall vs. ps => H) solved: H under the givens ps, the variables skolems: \\ds -> term"
+  [p givens depth]
+  (let [[_ vs ps hd] p
+        sk (zipmap vs (map (fn [x] [:tv (str x "_sk" (fresh-id))]) vs))
+        ps (mapv (fn [[pc pts]] [pc (mapv #(subst sk %) pts)]) ps)
+        params (mapv (fn [[pc _]] (fresh-lv (str "$d" (occ pc)))) ps)
+        hd (subst sk hd)
+        t (solve-pred [(second hd) (nth hd 2)] (into (vec givens) (super-closure (mapv vector ps params))) (inc depth))]
+    (when t (if (seq params) (list 'lam params t) t))))
+
 (def ^:dynamic *solving* {}) ; {pred (atom lv)}: the predicates whose instance is being solved (recursive dictionaries)
 
 (defn solve-pred
@@ -1182,6 +1228,11 @@
     (if (eq-pred? [c ts])
       (do (unify (last (butlast ts)) (last ts)) (list 'co))
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
+        ;; queue 379: QuantifiedConstraints (GHC.Tc.Solver.Dict's matchLocalInst): a quantified given's head, or one of its
+        ;; superclasses (quantified too, mkStrictSuperClasses), matched against the wanted, its context solved at the match;
+        ;; a quantified wanted solved under its context's givens, its skolems the quantified variables (an implication)
+        (when (< depth 30)
+          (if (= :qc c) (qc-wanted (first ts) givens depth) (qc-given [c ts] givens depth)))
         ;; HF10-P54 (a): a given rewritten by the given equalities (tcrun039's Read b with b ~ [a] from MkG :: GADT [a]:
         ;; the wanted Read [a]; GHC's inert givens are rewritten by the given equalities, GHC.Tc.Solver.Rewrite)
         ;; and a given whose arguments reduce (T3500b's Show (Id (f (Mu f))), a family application: Show (f (Mu f)))
@@ -1404,7 +1455,7 @@
                    (mk-app (mk-app f (hs-type tvs (arg v 3))) (hs-type tvs (arg v 5))))
                  (poly-syn [:tc op [(hs-type tvs (arg v 3)) (hs-type tvs (arg v 5))]])))
       HsQualTy (let [ctx (lval (arg v 2)) body (hs-type tvs (arg v 3))]
-                 [:forall [] (vec (mapcat (fn [c] (ctx-preds (hs-type tvs c))) ctx)) body])
+                 [:forall [] (vec (mapcat (fn [c] (let [p (hs-type tvs c)] (if (qc-type? p) [[:qc [p]]] (ctx-preds p)))) ctx)) body])
       ;; RankNTypes: an inner forall a quantified type of its own (runST's (forall s. ST s a)); the elaborator
       ;; instantiates it where it is used (trusted: no skolem escape check), its binders' kinds trusted
       HsForAllTy (let [bs (let [tele (arg v 2)] (when (seq? tele) (arg tele 2)))
@@ -4581,7 +4632,15 @@
                                  (some (fn [n] (let [o (str base n)] (when-not (contains? taken o) o))) (range))
                                  base))]
     (swap! *insts* conj {:dfun dfun :tvs names :ctx ctx :head [cls (mapv deep-expand ts)]})
-    {:dfun dfun :tvs names :ctx ctx :cls cls :ts ts :binds (arg d 3)}))
+    {:dfun dfun :tvs names :ctx ctx :cls cls :ts ts :binds (arg d 3)
+     ;; queue 379: InstanceSigs' signatures (cid_sigs' ClassOpSig), each method's type over the instance's variables
+     :isigs (into {} (for [s (arg d 4) :let [sv (lval s)] :when (and (seq? sv) (= 'ClassOpSig (con sv)) (not (true? (arg sv 2))))
+                           nl (arg sv 3)]
+                       (let [body (arg (lval (arg sv 4)) 3)
+                             own (remove (set tvn) (tv-names-of body))
+                             onames (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) own)]
+                         [(occ (nm nl)) (hs-type (merge (zipmap tvn (map (fn [x] [:tv x]) names)) (zipmap own (map (fn [x] [:tv x]) onames)))
+                                                 body)])))}))
 
 (defn- method-type
   "A class method's type at an instance head: the rest of its type after the class's own forall and constraint"
@@ -4590,10 +4649,26 @@
         body (subst (zipmap (:tvs info) ts) (nth t 3))]
     body))
 
+(defn- isig-scoped
+  "Queue 379: an instance signature's type variables as the method type's skolems (GHC.Tc.TyCl.Instance's tcMethodBody with
+  InstanceSigs: the signature's variables scope over the method's body, ScopedTypeVariables): {KEY skolem} when the
+  signature's body unifies with the method type's skolemised body binding each of its variables to a distinct skolem,
+  else nil (a more general signature: its variables left unscoped, as before)"
+  [isig body]
+  (when (and isig (= :forall (first isig)) (seq (nth isig 1)))
+    (let [ms (zipmap (nth isig 1) (repeatedly fresh-meta))
+          sb (subst ms (nth isig 3))
+          sb (if (= :forall (first sb)) (nth sb 3) sb)
+          errs (atom [])
+          ok (binding [*errors* errs *deferred-eqs* nil *implic-eqs* nil] (unify sb body))
+          m (into {} (for [[k mv] ms] [k (zonk mv)]))]
+      (when (and ok (empty? @errs) (every? #(= :tv (first %)) (vals m)) (apply distinct? (vals m)))
+        m))))
+
 (defn- check-method
   "A method body checked at type ty (a type closed by the instance's variables, with its own forall) with the
-  givens: core"
-  [env b ty givens params]
+  givens: core; isig the method's instance signature (InstanceSigs), its variables scoped over the body"
+  [env b ty givens params & [isig]]
   (let [skol-body (fn [t] (if (= :forall (first t))
                             (let [skol (zipmap (nth t 1) (map (fn [x] [:tv (str "sk_" x)]) (nth t 1)))]
                               [(subst skol (nth t 3)) (mapv (fn [[c ts]] [c (mapv #(subst skol %) ts)]) (nth t 2))])
@@ -4609,6 +4684,7 @@
         givens (into givens (binding [*ev-binds* evb] (super-closure (mapv vector inner iparams))))
         ws (atom [])
         own (when (= :forall (first ty)) (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) (nth ty 1))))
+        own (merge own (isig-scoped isig body))
         c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* own) *given-eqs* (scope-givens)]
             ;; the instance's context's equalities and the method's own (instance (a ~ Char) => IsString [a])
             (assume-eqs! (concat (map first givens) inner))
@@ -4645,7 +4721,7 @@
     (instance-binds* env inst)))
 
 (defn- instance-binds*
-  [env {:keys [dfun tvs ctx cls ts binds gnd]}]
+  [env {:keys [dfun tvs ctx cls ts binds gnd isigs]}]
   (let [skol (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs))
         ts (mapv #(subst skol %) ts)
         ctx (mapv (fn [[c xs]] [c (mapv #(subst skol %) xs)]) ctx)
@@ -4683,7 +4759,8 @@
                               (if (empty? iparams) c (list 'lam iparams c))
                               (if (empty? ps) c (list 'lam ps c))))
                           (if b
-                          (binding [*self-givens* self-givens] (check-method env b (method-type mn cls ts) givens params))
+                          (binding [*self-givens* self-givens]
+                            (check-method env b (method-type mn cls ts) givens params (some->> (get isigs (occ mn)) (subst skol))))
                           (if-let [dm (get (:defaults info) mn)]
                             ;; a default method with an INLINE pragma is inlined, as GHC does even at -O0
                             (let [d (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))
@@ -5536,7 +5613,9 @@
             (str "(fun t " many " " (type-form (first (nth t 2))) " " (type-form (second (nth t 2))) ")")
             (str "(tycon-app " (name-str (second t)) " [" (str/join " " (map type-form (nth t 2))) "])"))
       :app (str "(app " (type-form (nth t 1)) " " (type-form (nth t 2)) ")")
-      :forall (let [body (reduce (fn [acc [c ts]] (str "(fun c " many " (tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "]) " acc ")"))
+      :forall (let [body (reduce (fn [acc [c ts]] (if (= :qc c)
+                                                    (str "(fun c " many " " (type-form (first ts)) " " acc ")")
+                                                    (str "(fun c " many " (tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "]) " acc ")")))
                                  (type-form (nth t 3)) (reverse (nth t 2)))]
                 (reduce (fn [acc v] (str "(forall " (pr-str v) " specified " kind-type " " acc ")")) body (reverse (nth t 1))))
       (str "(lit " (pr-str (second t)) ")"))))
