@@ -1114,14 +1114,20 @@
   (reduce (fn [s [i nm]] (if (seq nm) (str/replace s (re-pattern (str "\\b" (java.util.regex.Pattern/quote nm) "\\b")) (str "@tp" i "@")) s))
           s (map-indexed vector names)))
 
+;; (round 54, fifth pass) the standard's year exc-class reads, bound by exception-specs
+(def ^:dynamic *exc-year* nil)
+
 (defn- exc-class
   "An exception specification's class: :none (potentially-throwing), :nothrow, [:dep expr] (a dependent noexcept-specifier,
   its parameters renamed), or nil (not compared)."
   [exc]
   (cond (nil? exc) :none
         (#{"noexcept" "noexcept(true)" "throw()"} exc) :nothrow
-        (= "noexcept(false)" exc) :none
+        (= "noexcept(false)" exc) :nfalse
         (and (str/starts-with? exc "noexcept(") (str/includes? exc "@tp")) [:dep exc]
+        ;; (round 54, fifth pass: before C++17 a dynamic exception specification, its set of types)
+        (and *exc-year* (< (long *exc-year*) 2017) (re-matches #"throw\((.+)\)" exc))
+        {:dyn (set (map str/trim (str/split (second (re-matches #"throw\((.+)\)" exc)) #",")))}
         :else nil))
 
 (defn- out-of-class
@@ -1149,6 +1155,7 @@
 (defn exception-specs
   "The exception specifications' checks of the unit `u` (see above)."
   [u starts ^String src ^String main]
+  (binding [*exc-year* (cxx-year (:std u))]
   (let [out (java.util.ArrayList.)
         decls (java.util.HashMap.)
         heads (java.util.HashMap.)
@@ -1163,7 +1170,14 @@
         enter! (fn [k f c friend-of]
                  (when c
                    (if-let [[of oc ofr] (.get decls k)]
-                     (let [bad (or (and (#{:none :nothrow} oc) (#{:none :nothrow} c) (not= oc c))
+                     (let [;; (round 54, fifth pass: C++11's [except.spec]/3, a dynamic exception specification is compatible
+                           ;; with one of the same set of types alone, not with noexcept(false) or a non-throwing one; a
+                           ;; declaration without one is not judged, as GCC)
+                           dyn (or (and (map? oc) (map? c) (not= oc c))
+                                   (and (map? oc) (#{:nfalse :nothrow} c)) (and (#{:nfalse :nothrow} oc) (map? c)))
+                           oc (if (= :nfalse oc) :none oc) c (if (= :nfalse c) :none c)
+                           bad (or dyn
+                                   (and (#{:none :nothrow} oc) (#{:none :nothrow} c) (not= oc c))
                                    (and (vector? oc) (vector? c) (not= oc c))
                                    (and (= :none oc) (vector? c)) (and (vector? oc) (= :none c)))]
                        (when bad
@@ -1221,7 +1235,7 @@
                     (doseq [m (:inner rec)
                             :when (and (= "CXXMethodDecl" (:kind m)) (mine? m) (not (:explicitlyDeleted m)) (get-in m [:loc :offset]))
                             :let [[sig exc] (split-exc (str (get-in m [:type :qualType])))]
-                            :when (= :none (exc-class exc))]
+                            :when (#{:none :nfalse} (exc-class exc))]
                       (when (some (fn [br] (some (fn [bm] (and (= "CXXMethodDecl" (:kind bm)) (:virtual bm) (= (:name bm) (:name m))
                                                                 (let [[bsig bexc] (split-exc (str (get-in bm [:type :qualType])))]
                                                                   (and (= bsig sig) (= :nothrow (exc-class bexc))))))
@@ -1250,7 +1264,7 @@
                                     (exc-class (when exc (rename-params exc cnames))) nil))))
                       nil)))))]
       (region! "" (:nodes u)))
-    (vec out)))
+    (vec out))))
 
 ;; (round 54, fourth pass) A union's members ([class.union.general]): no non-static data member of reference type (GCC's
 ;; "non-static data member 'b' in a union may not have reference type 'int&'", at the member; a dependent type only when
@@ -1353,7 +1367,212 @@
                              :msg (str "default member initializer for '" on "::" (:name fld) "' required before the end of its enclosing class")}))))))))
     (vec (distinct out))))
 
-(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses]))
+;; (round 54, fifth pass) GCC's spelling of a function `nm` of the function type `qt` ("int (void)", "void *(unsigned long)"):
+;; "int nm()", "void* nm(long unsigned int)" as far as the type's own text goes (pointers and references bound to their type).
+(defn- fn-spelling ^String [^String nm ^String qt]
+  (let [[sig _] (split-exc qt)
+        [_ ret ps] (or (re-matches #"(?s)^(.*?)\s*\((.*)\)\s*$" (str sig)) [nil (str sig) ""])
+        tight (fn [^String x] (str/replace (str/trim x) #"\s+([*&])" "$1"))
+        ps (if (= "void" (str/trim ps)) "" (str/join ", " (map tight (remove str/blank? (str/split ps #",")))))]
+    (str (tight ret) " " nm "(" ps ")")))
+
+;; (round 54, fifth pass) [dcl.link]/6 (C++23 /5): two declarations of one function with different language linkages are
+;; ill-formed; a function first declared with C++ language linkage (at namespace scope, or by a friend declaration of a
+;; class at namespace scope, which declares it there) and then with C language linkage: GCC's "conflicting declaration of
+;; 'int fork()' with 'C' linkage", at the later one. The same namespace, name and parameter types; both in the main file; a
+;; later declaration without a linkage-specification takes the first's ([dcl.link]/5), not judged.
+(defn linkage-conflicts
+  "The language linkage check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        seen (java.util.HashMap.)
+        mine? (fn [x] (= main (get-in x [:loc :file])))
+        key-of (fn [path f] [path (:name f) (str/replace (str/replace (first (split-exc (str (get-in f [:type :qualType])))) #"\(void\)" "()") #"\s+" " ")])
+        enter! (fn [path f lang]
+                 (when (and (= "FunctionDecl" (:kind f)) (:name f) (mine? f) (get-in f [:loc :offset])
+                            (not (qualified-name? src (long (get-in f [:loc :offset])))))
+                   (let [k (key-of path f)]
+                     (if-let [old (.get seen k)]
+                       (when (and (= :cpp old) (= :c lang))
+                         (let [[l c] (line-col starts (long (get-in f [:loc :offset])))]
+                           (.add out {:line l :col c :kind :error :rule :linkage
+                                      :msg (str "conflicting declaration of '" (fn-spelling (:name f) (str (get-in f [:type :qualType]))) "' with 'C' linkage")})))
+                       (.put seen k lang)))))]
+    (letfn [(region! [path lang nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  "LinkageSpecDecl" (region! path (if (= "C" (:language n)) :c :cpp) (:inner n))
+                  "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") lang (:inner n))
+                  "FunctionDecl" (enter! path n lang)
+                  "CXXRecordDecl" (doseq [m (:inner n) :when (= "FriendDecl" (:kind m)) x (:inner m)] (enter! path x lang))
+                  nil)))]
+      (region! "" :cpp (:nodes u)))
+    (vec out)))
+
+;; (round 54, fifth pass) [basic.stc.dynamic.allocation]/1, [basic.stc.dynamic.deallocation]/3 (C++23 /2): a template
+;; allocation or deallocation function has two or more parameters: GCC's "invalid template declaration of 'void operator
+;; delete(void*)'", at the parameter list's closing parenthesis; a namespace's and a class's (static) ones, in the main file.
+(defn alloc-templates
+  "The allocation function templates' check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes
+     (fn [n parent]
+       (when (= "FunctionTemplateDecl" (:kind n))
+         (let [f (last (:inner n))
+               nm (str (:name f))]
+           (when (and (map? f) (re-matches #"operator\s*(new|delete)(\s*\[\s*\])?" nm) (= main (get-in f [:loc :file])) (get-in f [:loc :offset]))
+             (let [ps (count (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))]
+               (when (< ps 2)
+                 (let [o (long (get-in f [:loc :offset]))
+                       open (.indexOf src "(" (int (+ o (count "operator"))))
+                       close (when (>= open 0)
+                               (loop [i (inc open) d 1]
+                                 (cond (>= i (.length src)) nil
+                                       (= \( (.charAt src i)) (recur (inc i) (inc d))
+                                       (= \) (.charAt src i)) (if (= d 1) i (recur (inc i) (dec d)))
+                                       :else (recur (inc i) d))))
+                       [l c] (line-col starts (long (or close o)))
+                       gnm (str/replace (str/replace nm #"operator\s*(new|delete)" "operator $1") #"\s*\[\s*\]" " []")
+                       cls (when (= "CXXRecordDecl" (:kind parent)) (:name parent))]
+                   (.add out {:line l :col c :kind :error :rule :alloc-template
+                              :msg (str "invalid template declaration of '" (when cls "static ")
+                                        (fn-spelling (str (when cls (str cls "::")) gnm) (str (get-in f [:type :qualType]))) "'")})))))))
+       nil)
+     (:nodes u) nil)
+    (vec out)))
+
+;; (round 54, fifth pass) [temp.local]/6: a template parameter's name is bound by no declaration in its scope; a class
+;; template's member (a class, enumeration, function, data member, typedef or member template, not a friend) named as one of
+;; the class template's own parameters: GCC's "declaration of 'struct U<non_template>::non_template' shadows template
+;; parameter", at the member; the main file's class templates.
+(defn tparam-shadows
+  "The template parameters' shadowing check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        tparam-kinds #{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"}
+        member-kinds #{"CXXRecordDecl" "EnumDecl" "CXXMethodDecl" "FieldDecl" "VarDecl" "TypedefDecl" "TypeAliasDecl"
+                       "FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"}]
+    (walk-nodes
+     (fn [n _]
+       (when (= "ClassTemplateDecl" (:kind n))
+         (let [ps (filter #(tparam-kinds (:kind %)) (:inner n))
+               names (set (keep :name ps))
+               rec (last (:inner n))]
+           (when (and (seq names) (= "CXXRecordDecl" (:kind rec)) (= main (get-in rec [:loc :file])))
+             (let [head (str (:name rec) "<" (str/join ", " (map #(or (:name %) "") ps)) ">")]
+               (doseq [m (:inner rec)
+                       :when (and (member-kinds (:kind m)) (not (:isImplicit m)) (contains? names (:name m))
+                                  (= main (get-in m [:loc :file])) (get-in m [:loc :offset]))]
+                 (let [[l c] (line-col starts (long (get-in m [:loc :offset])))
+                       f (if (= "FunctionTemplateDecl" (:kind m)) (last (:inner m)) m)
+                       what (case (:kind m)
+                              ("CXXRecordDecl" "EnumDecl") (str (or (:tagUsed m) "enum") " " head "::" (:name m))
+                              ("CXXMethodDecl" "FunctionTemplateDecl") (fn-spelling (str head "::" (:name m)) (str (get-in f [:type :qualType])))
+                              (str (get-in m [:type :qualType] "") " " head "::" (:name m)))]
+                   (.add out {:line l :col c :kind :error :rule :tparam-shadow
+                              :msg (str "declaration of '" (str/trim what) "' shadows template parameter")}))))))))
+     (:nodes u) nil)
+    (vec out)))
+
+;; (round 54, fifth pass) [dcl.spec.auto.general]/11 (C++14 [dcl.spec.auto]/11): a function whose declared return type
+;; holds an undeduced placeholder cannot be named by an expression until a return statement of its definition deduced it:
+;; GCC's "use of 'auto foo()' before deduction of 'auto'", at the name. The main file's functions of the global namespace
+;; declared only so (`auto f();`, `auto& f();`, no trailing return type), never defined in the file, a declaration before
+;; the use; their names' uses anywhere after.
+(defn undeduced-uses
+  "The undeduced placeholders' check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        decls (java.util.HashMap.)
+        bad (java.util.HashSet.)
+        off (fn [x] (or (get-in x [:range :begin :offset]) (get-in x [:loc :offset])))]
+    (doseq [n (:nodes u) :when (and (= "FunctionDecl" (:kind n)) (:name n))]
+      (let [qt (str (get-in n [:type :qualType]))
+            und (and (= main (get-in n [:loc :file])) (get-in n [:loc :offset])
+                     (re-find #"^(const )?auto( |&|\*|\()" qt) (not (str/includes? qt "->"))
+                     (not (some #(= "CompoundStmt" (:kind %)) (:inner n))))]
+        (if und
+          (when-not (.containsKey decls (:name n)) (.put decls (:name n) [(long (get-in n [:loc :offset])) qt]))
+          (.add bad (:name n)))))
+    (doseq [b bad] (.remove decls b))
+    (when (seq decls)
+      (walk-nodes
+       (fn [x _]
+         (when (= "DeclRefExpr" (:kind x))
+           (when-let [[o qt] (.get decls (get-in x [:referencedDecl :name]))]
+             (when-let [xo (off x)]
+               (when (and (> (long xo) (long o)) (= main (or (get-in x [:range :begin :file]) main)))
+                 (let [[l c] (line-col starts (long xo))
+                       nm (get-in x [:referencedDecl :name])]
+                   (.add out {:line l :col c :kind :error :rule :undeduced
+                              :msg (str "use of '" (str/replace (fn-spelling nm qt) #"^auto &" "auto& ") "' before deduction of 'auto'")})))))))
+       (:nodes u) nil))
+    (vec out)))
+
+;; (round 54, fifth pass) [temp.param]/12: a friend function template declaration with a default template argument is a
+;; definition, and no other declaration of the function template is reachable from it or it from one: GCC's "default template
+;; arguments may not be used in template friend declarations" at a friend that is no definition, and "redeclaration of
+;; friend 'template<class T> void g(X)' may not have default template arguments" at a namespace's later declaration with one
+;; of a function template a friend declared first (by name, the main file's).
+(defn friend-default-targs
+  "The friend templates' default arguments check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        friends (java.util.HashMap.)
+        mine? (fn [x] (and (= main (get-in x [:loc :file])) (get-in x [:loc :offset])))
+        dflt? (fn [t] (some #(and (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %))
+                                  (or (:_dflt %) (some (fn [a] (= "TemplateArgument" (:kind a))) (:inner %))))
+                            (butlast (:inner t))))
+        body? (fn [f] (some #(= "CompoundStmt" (:kind %)) (:inner f)))
+        report! (fn [f msg] (let [[l c] (line-col starts (long (get-in f [:loc :offset])))]
+                              (.add out {:line l :col c :kind :error :rule :friend-default :msg msg})))
+        head (fn [t] (str "template<" (str/join ", " (map #(str (if (= "TemplateTypeParmDecl" (:kind %)) "class" "auto") " " (:name %)) (butlast (:inner t)))) "> "))]
+    (doseq [n (:nodes u)]
+      (case (:kind n)
+        "CXXRecordDecl"
+        (doseq [m (:inner n) :when (= "FriendDecl" (:kind m)) t (:inner m)
+                :when (= "FunctionTemplateDecl" (:kind t))
+                :let [f (last (:inner t))]
+                :when (and (map? f) (mine? f) (not (qualified-name? src (long (get-in f [:loc :offset])))))]
+          (when (and (dflt? t) (not (body? f)))
+            (report! f "default template arguments may not be used in template friend declarations"))
+          (when-not (.containsKey friends (:name f)) (.put friends (:name f) t)))
+        "FunctionTemplateDecl"
+        (let [f (last (:inner n))]
+          (when-let [ft (and (map? f) (mine? f) (dflt? n) (.get friends (:name f)))]
+            (report! f (str "redeclaration of friend '" (head ft) (fn-spelling (:name f) (str (get-in (last (:inner ft)) [:type :qualType])))
+                            "' may not have default template arguments"))))
+        nil))
+    (vec out)))
+
+;; (round 54, fifth pass) [dcl.spec.auto.general]/? (C++23 [dcl.type.auto.deduct]/2.1): a function's return type `auto*` or
+;; `auto&` is deduced from its return statements' operands; `return;` deduces void, which no such type takes: GCC's
+;; "return-statement with no value, in function returning 'auto*'", at the statement (a lambda's body apart).
+(defn auto-void-returns
+  "The placeholder return types' check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes
+     (fn [n _]
+       (when (and (#{"FunctionDecl" "CXXMethodDecl"} (:kind n)) (= main (get-in n [:loc :file])))
+         (let [qt (str (get-in n [:type :qualType]))]
+           (when-let [[_ ptr] (and (not (str/includes? qt "->")) (re-find #"^auto\s*(\*|&&|&)\s*\(" qt))]
+             (letfn [(rets [x] (cond (map? x) (case (:kind x)
+                                                "LambdaExpr" nil
+                                                "ReturnStmt" (if (empty? (:inner x)) [x] nil)
+                                                (mapcat (fn [[k v]] (when (and (not= k :_ent) (coll? v)) (rets v))) x))
+                                     (sequential? x) (mapcat rets x)
+                                     :else nil))]
+               (doseq [b (:inner n) :when (= "CompoundStmt" (:kind b)) r (rets b)]
+                 (when-let [o (get-in r [:range :begin :offset])]
+                   (let [[l c] (line-col starts (long o))]
+                     (.add out {:line l :col c :kind :error :rule :auto-return
+                                :msg (str "return-statement with no value, in function returning 'auto" ptr "'")})))))))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."

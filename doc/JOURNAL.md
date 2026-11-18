@@ -11921,3 +11921,63 @@ completeness 0.9204 to 0.9211 (meant 0.9371 to 0.9378); `bin/reap --record` (0 p
 taken: noexcept02.C's dynamic exception specification against noexcept(false) (needs an explicit noexcept(false) told from none),
 lookup/extern-c-redecl5.C's linkage conflict of a friend and an extern "C" definition, lookup/using13.C's and using30.C's using-
 declaration conflicts (the using's target kind not in the tree), the constant evaluator's groups (larger work per file).
+
+## 2026-11-18: n-cpp-bd, mac/376 and mac/377 merged; C++'s own-diag rows, fifth pass: 18 more files pass on the own front end (round 54)
+
+Same branch (`n-cpp-bd`, on 6cbed9a49). First the Mac's two branches on 368's tip merged, mac/376-cpp-typeid-context (60ea17781:
+"types may not be defined ..." in g++ 15.2's words per context, `*tdef-ctx*` bound by parse-type-id's callers, and the parameter,
+exception-declaration and for-range contexts) and then mac/377-cpp-typedef-contexts (08f9ec458, on 376: `def-brace` and the
+__builtin_classify_type, new-type-id, exception-specification, enum-base and return-type contexts), both without a conflict
+(a0df00257, 4668ed6ee). Proved on the merge: the record's 1079 own passes (round 4's 1075 and 377's parse/ret-type2.C among them) in
+six lists of 158-205, 1079 of 1079; the 612 own-diag files that fail both records in three of 189-220, every row as recorded; the 35
+probes of .tmp/r2/probes/ give no own error.
+Then the fifth pass, the same method: the 612 files' fresh rows, the one- and two-line misses grouped by the standard's rule, the
+rules ranked by whole files moved, round 4's left-overs first. Taken (round 54), each the standard's rule as the own front end's
+error with GCC's message (clean-room: GCC's messages, no GCC code); the pack checks not added (D365-1 (a)); the constant
+evaluator's groups left (no rule there moves several files):
+- lexer and parser (arbace.repr.cpp.parse, arbace.repr.cpp.lit's `literal-c-chars`): [lex.ccon]/1 (P2362R3), a prefixed character
+  literal of one c-char ("multi-character literal cannot have an encoding prefix": u and U from C++11, u8 from C++17, L from C++23)
+  encodable in one code unit ("character not encodable in a single code unit": u8 past U+007F, u past U+FFFF); [lex.ccon]/3
+  (P1854R4), an ordinary literal's c-char in one UTF-8 code unit, GCC's pedwarn ("... in a single execution character code unit",
+  "at least one character in a multi-character literal ..."); a UCN past U+10FFFF in a UTF-16 literal ("converting UCN to execution
+  character set: Illegal byte sequence"): cpp23/wchar-multi1.C, wchar-multi2.C, cpp2a/ucn2.C; C++11's [dcl.spec.auto]/2, an auto
+  function without a trailing return type ("'f' function uses 'auto' type specifier without trailing return type"):
+  cpp1y/auto-fn35.C; [dcl.type.general]/2 and the cv-qualifier-seq, const and volatile once each ("duplicate 'volatile'", "duplicate
+  cv-qualifier"): diagnostic/duplicate1.C; C++17's [dcl.constexpr]/3, constexpr and virtual together before C++20, GCC's pedwarn
+  ("member 'foo' can be declared both 'virtual' and 'constexpr' only in ..."): diagnostic/virtual-constexpr.C; a constructor's or
+  destructor's ref-qualifier ("constructors may not be ref-qualified"): cpp0x/ref-qual4.C; C23's wb and uwb suffixes from C++11 a
+  ud-suffix with no literal operator ("unable to find numeric literal operator 'operator\"\"wb'"): ext/bitint2.C; [basic.scope.scope]/4
+  with [namespace.udecl]/1, a using-declarator conflicting with a namespace's or class's declaration of its name (two variables, or a
+  class and a typedef of a non-class type; "'int A::a' conflicts with a previous declaration", "'using H::type' conflicts ..."):
+  lookup/using13.C, using30.C (round 4's left-overs);
+- checks (arbace.repr.cpp.diag): C++11's [except.spec]/3, a dynamic exception specification compatible only with one of the same
+  set of types, not noexcept(false) nor a non-throwing one, before C++17 (`exc-class`'s {:dyn ...}, noexcept(false) told from none,
+  :nfalse): cpp0x/noexcept02.C (round 4's left-over); `linkage-conflicts`, [dcl.link]/6, a function first declared with C++ linkage
+  (a friend's declaration too) then with C linkage ("conflicting declaration of 'int fork()' with 'C' linkage"):
+  lookup/extern-c-redecl5.C (round 4's left-over); `alloc-templates`, [basic.stc.dynamic.allocation]/1 and deallocation/3, an
+  allocation or deallocation function template of fewer than two parameters ("invalid template declaration of 'void operator
+  delete(void*)'"): template/delete1.C; `tparam-shadows`, [temp.local]/6, a class template's member named as one of its
+  parameters, friends apart ("declaration of 'struct U<non_template>::non_template' shadows template parameter"):
+  template/friend84.C; `undeduced-uses`, [dcl.spec.auto.general]/11, a global function declared with an undeduced placeholder and
+  never defined in the file, named after its declaration ("use of 'auto foo()' before deduction of 'auto'"): cpp0x/pr59111.C,
+  auto41.C (with the C++11 rule above); `friend-default-targs`, [temp.param]/12, a friend function template's default template
+  argument only on a definition, and none on a later declaration of a template a friend declared ("default template arguments may
+  not be used in template friend declarations", "redeclaration of friend ... may not have default template arguments"):
+  cpp0x/temp_default4.C; `auto-void-returns`, a return type auto* or auto& and `return;` ("return-statement with no value, in
+  function returning 'auto*'", lambdas apart): template/pr18969-2.C.
+Tried and dropped: [expr.assign]/9's array assigned a braced list in Sema (cpp0x/initlist26.C's array is a VLA, which Sema does not
+analyze: no file moved). Probed on valid code: fourteen new probes in .tmp/r2/probes/ (v36-v49, one a rule: encodable literals,
+trailing return types at C++11, compatible dynamic specifications, using-declarations that conflict with nothing, agreeing
+linkages, two-parameter allocation templates, cv-qualifiers once, constexpr virtual at C++20, members and friends beside template
+parameters, deduced uses, C++'s own suffixes and a `_wb` literal operator, ref-qualified members, friend templates' defaults as
+allowed, auto returns), each accepted by g++ 15.2 -pedantic-errors -fsyntax-only at its standard (one first draft was not: `void m();`
+after `void m() throw(int);` is g++'s error too, which the own rule leaves: a missed diagnostic, not a false one; removed); all 49
+probes give no own error. Proved: the 18 target files (18 of 18), the record's 1079 own passes (1079 of 1079) and the 612 (18 pass, 2
+more rows lines fewer, no new extra line: cpp26/literals1.C, lookup/using29.C). Re-recorded rows only (`--only LIST --record`): the 20;
+own-diag-review.edn's :own of the 20. Own passes 1079 to 1097; reap's own-diag 594 to 576; C++ read 5,499 / 323 / 673 to 5,517 / 323 /
+655; completeness 0.9211 to 0.9218 (meant 0.9378 to 0.9386); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge
+--strict` (0 problems), `bin/records-check` (9 pairs, 0). Every process under 2 GB (peaks 1.1-1.8 GB, at most 220 files a process);
+no gate. Alternatives not taken: the braces-around-scalar files init/brace1.C and union2.C (Sema's aggregate initialization by
+nesting depth and standard), other/operator1.C's namespace operator= (its use's "not defined" needs the declaration dropped),
+parse/bitfield1.C (its second line needs the member dropped), the friend-of-namespace files parse/pr81247-a/b.C (an instantiated
+template-head in the message), the constant evaluator's groups.

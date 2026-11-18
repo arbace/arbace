@@ -1524,6 +1524,12 @@
             ;; GCC's error "invalid suffix \"_mm\" on floating constant", "... on integer constant")
             (when (and num (< (.-year p) 2011))
               (soft-diag! p i (str "invalid suffix \"" sfx "\" on " (if (lit/int-literal num) "integer" "floating") " constant")))
+            ;; (round 54, fifth pass: C23's bit-precise integer suffixes wb and uwb are not C++'s, [lex.icon]/1: from C++11 the
+            ;; suffix is a ud-suffix, [lex.ext]/1, whose literal operator lookup finds none, GCC's "unable to find numeric literal
+            ;; operator 'operator\"\"wb'")
+            (when-let [[_ _ bsfx] (and (nil? num) (>= (.-year p) 2011) (re-matches #"(?i)([0-9][0-9']*)(u?wb|wbu)" s))]
+              (when-not (sc/lookup (scope p) (str "operator\"\"" bsfx))
+                (soft-diag! p i (str "unable to find numeric literal operator 'operator\"\"" bsfx "'"))))
             (node p "UserDefinedLiteral" i i
                   (if num
                     (if-let [[v] (lit/int-literal num)]
@@ -2652,17 +2658,19 @@
             (= s "typedef") (do (adv! p) (recur (assoc ds :typedef true) words))
             (= s "friend") (do (adv! p) (recur (assoc ds :friend true) words))
             (#{"inline" "__inline" "__inline__"} s) (do (adv! p) (recur (assoc ds :inline true :inline-i (last-ix p)) words))
-            (= s "virtual") (do (adv! p) (recur (assoc ds :virtual true) words))
+            (= s "virtual") (do (adv! p) (recur (assoc ds :virtual true :virtual-i (last-ix p)) words))
             (= s "explicit") (do (adv! p) (when (is? p "(") (skip-balanced! p)) (recur (assoc ds :explicit true) words))
-            (= s "constexpr") (do (adv! p) (recur (assoc ds :constexpr true) words))
+            (= s "constexpr") (do (adv! p) (recur (assoc ds :constexpr true :constexpr-i (last-ix p)) words))
             (= s "consteval") (do (adv! p) (recur (assoc ds :consteval true) words))
             (= s "constinit") (do (adv! p) (recur (assoc ds :constinit true) words))
             ;; (cpp-s5b: the TLS kind as clang's VarDecl::getTLSKind gives it: thread_local's is dynamic, __thread's and
             ;; _Thread_local's static)
             (#{"thread_local" "_Thread_local" "__thread"} s) (do (when (:tls ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :tls (if (= s "thread_local") "dynamic" "static")) words))
             (#{"_Noreturn" "__extension__" "export"} s) (if (and (= s "export") (not= ctx :top)) (assoc ds :e (last-ix p)) (do (adv! p) (recur ds words)))
-            (#{"const" "__const"} s) (do (adv! p) (recur (assoc ds :c true) words))
-            (#{"volatile" "__volatile" "__volatile__"} s) (do (adv! p) (recur (assoc ds :v true) words))
+            ;; (round 54, fifth pass: [dcl.type.general]/2, const and volatile each at most once in a decl-specifier-seq: GCC's
+            ;; "duplicate 'volatile'")
+            (#{"const" "__const"} s) (do (when (:c ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :c true) words))
+            (#{"volatile" "__volatile" "__volatile__"} s) (do (when (:v ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :v true) words))
             (#{"__restrict" "__restrict__"} s) (do (adv! p) (recur ds words))
             (and (contains? builtin-kws s) (nil? (:type ds))) (do (adv! p) (recur ds (conj words s)))
             (and (= s "auto") (not has-type)) (do (adv! p) (recur (assoc ds :type (if (< (.-year p) 2011) {:t :b :w ["int"]} {:t :auto}) :auto-i (last-ix p)) words))
@@ -2884,11 +2892,13 @@
   [^P p]
   (loop [q "" m {}]
     (cond
-      (or (is? p "const") (is? p "__const")) (do (adv! p) (recur (str q " const") (assoc m :const true)))
-      (or (is? p "volatile") (is? p "__volatile__")) (do (adv! p) (recur (str q " volatile") (assoc m :volatile true)))
+      ;; (round 54, fifth pass: [dcl.decl.general]/? (C++23 [dcl.decl.general]/5), a cv-qualifier-seq names each cv-qualifier once:
+      ;; GCC's "duplicate cv-qualifier")
+      (or (is? p "const") (is? p "__const")) (do (when (:const m) (soft-diag! p (ix p) "duplicate cv-qualifier")) (adv! p) (recur (if (:const m) q (str q " const")) (assoc m :const true)))
+      (or (is? p "volatile") (is? p "__volatile__")) (do (when (:volatile m) (soft-diag! p (ix p) "duplicate cv-qualifier")) (adv! p) (recur (if (:volatile m) q (str q " volatile")) (assoc m :volatile true)))
       (or (is? p "__restrict") (is? p "__restrict__")) (do (adv! p) (recur q m))
-      (and (is? p "&") (not (:ref m))) (do (adv! p) (recur (str q " &") (assoc m :ref "&")))
-      (and (is? p "&&") (not (:ref m))) (do (adv! p) (recur (str q " &&") (assoc m :ref "&&")))
+      (and (is? p "&") (not (:ref m))) (do (adv! p) (recur (str q " &") (assoc m :ref "&" :ref-i (last-ix p))))
+      (and (is? p "&&") (not (:ref m))) (do (adv! p) (recur (str q " &&") (assoc m :ref "&&" :ref-i (last-ix p))))
       (is? p "noexcept")
       (do (adv! p)
           ;; (h-cpp-read: noexcept's operand is a constant-expression, none written is an error, [except.spec]/1)
@@ -3640,6 +3650,20 @@
                   (soft-diag! p (long (:i lp)) (str "'" (:s lp) "::" (:s lp) "' names the constructor, not the type")))
               ;; (round 54, second pass: [dcl.spec.auto.general], a function declared with a placeholder return type is not virtual;
               ;; GCC's "virtual function cannot have deduced return type")
+              ;; (round 54, fifth pass: C++11's [dcl.spec.auto]/2, a function declared with auto has a trailing return type; a
+              ;; deduced return type is C++14's: GCC's "'f' function uses 'auto' type specifier without trailing return type")
+              _ (when (and fs (= 2011 (.-year p)) (:auto-i ds) (= :auto (:t (:type ds))) (nil? (:cn (:type ds))) (nil? (:trailing fs)) nn)
+                  (soft-diag! p (long (:auto-i ds)) (str "'" nn "' function uses 'auto' type specifier without trailing return type")))
+              ;; (round 54, fifth pass: [class.ctor.general]/? (C++23 /4) and [class.dtor]/? (C++23 /4), a constructor's and a
+              ;; destructor's declarator has no ref-qualifier: GCC's "constructors may not be ref-qualified", at the qualifier)
+              _ (when-let [ri (and fs (or ctor (:dtor lp)) (get-in fs [:m :ref-i]))]
+                  (soft-diag! p (long ri) (str (if (:dtor lp) "destructors" "constructors") " may not be ref-qualified")))
+              ;; (round 54, fifth pass: before C++20 a constexpr function is not virtual, C++17's [dcl.constexpr]/3, P1064R0 lifting
+              ;; it: GCC's pedwarn "member 'foo' can be declared both 'virtual' and 'constexpr' only in '-std=c++20' or '-std=gnu++20'",
+              ;; at the first of the two)
+              _ (when (and fs (< (.-year p) 2020) (:virtual-i ds) (:constexpr-i ds) nn)
+                  (pedantic-diag! p (min (long (:virtual-i ds)) (long (:constexpr-i ds)))
+                                  (str "member '" nn "' can be declared both 'virtual' and 'constexpr' only in '-std=c++20' or '-std=gnu++20'")))
               _ (when (and fs (:virtual ds) (:auto-i ds) (= :auto (:t (:type ds))) (nil? (:trailing fs)))
                   (soft-diag! p (long (:auto-i ds)) "virtual function cannot have deduced return type"))
               ;; (round 54, second pass: [dcl.inline]/4, an inline friend declaration is a definition or redeclares an inline
@@ -4388,6 +4412,26 @@
                       (soft-diag! p (long (:b qn)) "using-declaration for member at non-class scope"))
                     (let [dep (or (nil? (:q qn)) (:tparam (:q qn))
                                   (some #(some (fn [a] (dependent-arg? p a)) (:args %)) (butlast (:parts qn))))
+                          ;; (round 54, fifth pass: [basic.scope.scope]/4 with [namespace.udecl]/1, a using-declarator's
+                          ;; declaration corresponds to one its namespace or class scope already holds and they conflict: both
+                          ;; variables, or both types, of other entities (a class and a variable of one name may coexist,
+                          ;; functions overload); GCC's "'int A::a' conflicts with a previous declaration" for a variable,
+                          ;; "'using H::type' conflicts ..." for a type; in the main file, a non-dependent qualifier)
+                          _ (when-let [nm (and (not dep) (not (skim? p)) (:s lp))]
+                              (let [ds (sc/decl-scope (scope p))
+                                    t (:ent qn)
+                                    old (when (#{:ns :class} (sc/kind-of ds)) (get (sc/names-of ds) nm))]
+                                (when (and t old (not (identical? t old)) (not= t old) (not (:using old))
+                                           (or (and (= :var (:k t)) (= :var (:k old)) (not (:tparam old)) (not (:anon old)))
+                                               ;; (a class and a typedef of a type that is no class: two typedefs of one type
+                                               ;; redeclare it, [dcl.typedef]/? (C++23 /5))
+                                               (and (= :type (:k t)) (= :type (:k old)) (not (:tparam old)) (not (:tmpl t)) (not (:tmpl old))
+                                                    (or (and (:scope old) (:tag old) (nil? (:scope t)) (:ty t))
+                                                        (and (:scope t) (:tag t) (nil? (:scope old)) (:ty old))))))
+                                  (soft-diag! p (long (:i lp))
+                                              (if (= :var (:k t))
+                                                (str "'" (if (:ty t) (str (qt (:ty t)) " ") "") (name-str p qn) "' conflicts with a previous declaration")
+                                                (str "'using " (name-str p qn) "' conflicts with a previous declaration"))))))
                           _ (when-let [nm (:s lp)]
                               (declare! p (cond-> (or (when-let [t (:ent qn)] (assoc t :name nm)) (if tn {:k :type :name nm} {:k :fn :name nm}))
                                             ;; a value named through a dependent qualifier: unresolved until instantiated
@@ -4981,6 +5025,34 @@
                   (str "universal character " u " is not valid in an identifier"))))
         (re-seq #"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})" s)))
 
+(defn- char-literal-error
+  "Round 54, fifth pass: what is wrong with a character literal token `s` (or a string literal's, `str?`) at the standard's
+  `year`, in cpplib's words, or nil. [lex.ccon]/1 (P2362R3): a literal with an encoding prefix holds one c-char ('multi-
+  character literal cannot have an encoding prefix'; u and U from C++11, u8 from C++17, L only from C++23, a warning before),
+  encodable in one code unit of its type ('character not encodable in a single code unit': u8 past U+007F, u past U+FFFF);
+  [lex.ccon]/3 (P1854R4), an ordinary literal's c-char encodable in one execution character code unit (UTF-8), GCC's pedwarn:
+  a universal-character-name's or source character's code point past U+007F ('character not encodable in a single execution
+  character code unit', or with more c-chars 'at least one character in a multi-character literal not encodable ...'); a
+  universal-character-name past U+10FFFF in a UTF-16 literal, string or character, which cannot be converted ('converting UCN
+  to execution character set: Illegal byte sequence')."
+  [^String s ^long year str?]
+  (let [[prefix cs] (try (lit/literal-c-chars s) (catch Exception _ nil))
+        wide? (fn [[k v]] (and (not= k :unit) (> (long v) 0x7F)))]
+    (cond
+      (nil? prefix) nil
+      (and (= prefix "u") (some (fn [[k v]] (and (= k :cp) (> (long v) 0x10FFFF))) cs))
+      "converting UCN to execution character set: Illegal byte sequence"
+      str? nil
+      (and (> (count cs) 1) (or (and (#{"u" "U"} prefix) (>= year 2011)) (and (= prefix "u8") (>= year 2017)) (and (= prefix "L") (>= year 2023))))
+      "multi-character literal cannot have an encoding prefix"
+      (and (= 1 (count cs)) (not= :unit (ffirst cs))
+           (or (and (= prefix "u8") (>= year 2017) (> (long (second (first cs))) 0x7F))
+               (and (= prefix "u") (>= year 2011) (> (long (second (first cs))) 0xFFFF))))
+      "character not encodable in a single code unit"
+      (and (= prefix "") (= 1 (count cs)) (wide? (first cs))) "pedantic: character not encodable in a single execution character code unit"
+      (and (= prefix "") (> (count cs) 1) (some wide? cs))
+      "pedantic: at least one character in a multi-character literal not encodable in a single execution character code unit")))
+
 (defn- lexical-diags!
   "h-cpp-read (CP262 (b)'s syntax files): the main file's own tokens' lexical errors the shared lexer leaves to the
   compiler proper: digit separators out of place (C++14 on) and identifiers' universal-character-names, each a syntax error
@@ -4992,6 +5064,9 @@
         (when-let [why (case (.-k t)
                          :num (when (>= (.-year p) 2014) (digit-sep-error (.-s t)))
                          :id (when (str/includes? (.-s t) "\\") (ucn-error (.-s t) (.-year p)))
+                         ;; (round 54, fifth pass: [lex.ccon]'s encodable literals)
+                         :chr (char-literal-error (.-s t) (.-year p) false)
+                         :str (when (str/starts-with? (.-s t) "u\"") (char-literal-error (.-s t) (.-year p) true))
                          ;; (a user-defined literal's ud-suffix is an identifier too, [lex.ext]/1)
                          :udls (let [^String s (.-s t) x (subs s (inc (.lastIndexOf s "\"")))] (when (str/includes? x "\\") (ucn-error x (.-year p))))
                          :udlc (let [^String s (.-s t) x (subs s (inc (.lastIndexOf s "'")))] (when (str/includes? x "\\") (ucn-error x (.-year p))))
