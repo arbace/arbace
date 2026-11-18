@@ -248,7 +248,8 @@ END {
       if (lib == "runtime_events") { incs = incs " runtime_events"; continue }
       # the Dynlink library (OC220 (a)'s first part): its units loaded with the program at oi's level (the platform test/ocaml/dynlink's,
       # the main program's units oi's unit table); the AOT levels keep the class until the runtime has the unit table
-      if (lib == "dynlink" && (aot == "" || aot == 0)) { incs = incs " dynlink"; dlseen = 1; continue }
+      # (queue 355: the light level's too, the runtime's Main/units; not the compiled level, whose library has no dynlink yet)
+      if (lib == "dynlink" && aot != 2) { incs = incs " dynlink"; dlseen = 1; continue }
       if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       cls("include " lib)
     }
