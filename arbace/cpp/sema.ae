@@ -3183,6 +3183,11 @@
   (let [e (if (and (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
             (if-let [f (fn-matching e (:to (abi/unq t)))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} (fail :conversion "no function of the set matches"))
             e)
+        ;; (queue 380: &f of an overload set converted to a pointer to function: the set's function of the target's type)
+        e (if-let [f (when (and (= :fnaddr (:op e)) (:set e) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
+                       (fn-matching (:set e) (:to (abi/unq t))))]
+            {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr}
+            e)
         e (if (= :mptr-fnset (:op e))
             (let [mt (abi/unq t)
                   ok (filter #(let [n (mptr-fn-node %)] (= (:to (:ty n)) (:to mt))) (:fns e))]
@@ -3434,9 +3439,10 @@
         (cond
           (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok)
           (cond-> {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
+            derived (assoc :dbase (class-id pt) :dfrom (class-id at))
             ;; (CX12, the checker: [over.ics.rank]/3.2.6 orders two such bindings by their cv-qualifiers' inclusion)
             (checking?) (assoc :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))))
-          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) {:rank (if derived 2 0) :sub -1}
+          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) (cond-> {:rank (if derived 2 0) :sub -1} derived (assoc :dbase (class-id pt) :dfrom (class-id at)))
           ;; (cpp-s14: a class's conversion function binding the reference directly, [over.ics.ref]/1, [dcl.init.ref]/5.1.2)
           (and (not *no-user*) (class-id at) (not (or same derived)) (ref-conv-for (class-id at) p (:c at))) {:rank 3}
           ;; (CX12, the checker: a reference-related type losing a qualifier binds neither directly nor to a temporary,
@@ -3452,7 +3458,7 @@
       (abi/class? pt)
       (cond
         (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
-        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2}
+        (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2 :dbase (:id pt) :dfrom (class-id at)}
         *no-user* nil
         ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
         (and (class-id at) (conv-for (class-id at) (abi/unq pt) false (:c at))) {:rank 3}
@@ -3480,6 +3486,9 @@
                   {:rank 3})))
       (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false (:c at))) {:rank 3})
       (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
+      ;; (queue 380: &f of an overload set, its set's function the parameter's type matches, an exact match, [over.ics.scs]/3)
+      (and (= :fnaddr (:op e)) (:set e) (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching (:set e) (:to (abi/unq pt))))
+      {:rank 0}
       :else (let [r (std-rank e (:ty (rv e)) pt)
                   ft (abi/unq (:ty (rv e))) tt (abi/unq pt)]
               ;; [over.ics.rank]/3.2.6: a pointer's qualification adjustment ranks behind the identity
@@ -3490,9 +3499,15 @@
 (defn- better-ics? [a b]
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
-           (if (and (:cvq a) (:cvq b))
+           (cond
+             ;; (queue 380, W3d: [over.ics.rank]/4.4.2-4.4.4, of one class converted to two of its bases, to the more derived
+             ;; base is better: cow_string.h's _S_construct(__beg, __end, __a, _Tag()) of a random_access_iterator_tag,
+             ;; forward_iterator_tag's over input_iterator_tag's, had been ambiguous)
+             (and (:dbase a) (:dbase b) (= (:dfrom a) (:dfrom b)) (not= (:dbase a) (:dbase b)))
+             (abi/derived-from? (:dbase a) (:dbase b))
+             (and (:cvq a) (:cvq b))
              (let [x (:cvq a) y (:cvq b)] (and (not= x y) (every? y x)))
-             (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
+             :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
 
 (declare resolve-overload*)
 
@@ -5872,7 +5887,12 @@
       (or (when (and (class-operand? e) (not= o "&")) (operator-call ctx o (if (and (#{"++" "--"} o) (:isPostfix n)) [e {:op :int :v 0 :ty abi/int* :cat :pr}] [e])))
           (when (class-operand? e) (no-operator! ctx o [e]))
           (case o
-            "&" (cond (= :fnset (:op e)) (let [f (first (:fns e))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr})
+            "&" (cond (= :fnset (:op e)) (let [f (first (:fns e))]
+                                           ;; (queue 380, W3d: the address of an overloaded name keeps its set, :set, for the
+                                           ;; target type to choose from, [over.over]/1: debug.cc's `pretty_print(ctx, s,
+                                           ;; &print_string)` of print_string's two overloads; the first stands alone)
+                                           (cond-> {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr}
+                                             (and (empty? (:tmpls e)) (< 1 (count (distinct (:fns e))))) (assoc :set e)))
                       (lv? e) {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr}
                       :else (fail :addr "& of an rvalue"))
             "*" (deref-node e)
