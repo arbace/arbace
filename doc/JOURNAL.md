@@ -10630,3 +10630,17 @@ memory, class-loading, collector, pool and buffer-pool beans (F13's later slices
 platform interface's NotCompliantMBeanException stays `:mxbeans`. Alternatives: Metrics in the world (rejected: cgroup readers the box
 has not), a CompilationImpl naming c2j (rejected: c2j is ahead of time), the test waiting for the thread (rejected: the JVM's contract).
 Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-mx".
+
+## 2026-11-18: n-j2g-mxsig, the world's MXBean interfaces' generic signatures (round 52, overnight)
+
+Branch `n-j2g-mxsig` from mac/n-java-mx `562cad2f9`. n-java-mx's DECISION taken overnight (round 52), recommended option (a): j2g
+writes the `G` records (members' Signatures) of the world's MXBean interfaces, so that JMX's MXBean introspection sees RuntimeMXBean's
+`List<String> getInputArguments()` and the platform MBean server can register it. `arbace.classes.annot/class-data` takes
+`:signatures` (the G records alone, the new `signature-lines`, as F27's `:throws` writes the E records), and arbace/j2g/out.ae passes
+it for `annot/mxbean-interface?`, JMX's rule (javax.management.JMX.isMXBeanInterface: `@MXBean`'s value, else a binary name ending in
+MXBean). 15 interfaces in the world, 4 generic members, 4 records. jrt unchanged (it already decodes G records). Proved by
+`bin/j2g-unit`'s new `test-mxbean-signatures` (fixture test/j2g/unit/mxsig, negative cases Plain, `@MXBean(false)` and a class, a
+forcing control) on the gate executable `e8e0d017243dca8a9f9f` under 1 GiB: 143 pass, HEAD's 7 unrelated failures unchanged.
+Alternatives: every world class's G records (rejected: the data of every generic member for one API's need), the name rule alone
+(rejected: not JMX's). By day: the build, then t04792 at interp and the 8 compiled rows stopping on getPlatformMBeanServer (t04785
+t04787 t04788 t04789 t04792 t07841 t07842 t07934). Details: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-j2g-mxsig".

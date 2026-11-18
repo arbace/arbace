@@ -8425,3 +8425,58 @@ bin/java-check --levels interp --list .tmp/nmx-pass.txt --save .tmp/nmx-pass && 
 bin/reap --record && bin/crops-score --record
 # the compiled level's rows of the same tests at the night's compiled shard
 ```
+
+## As built: n-j2g-mxsig (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-j2g-mxsig` (from mac/n-java-mx `562cad2f9`), under the night's rules (each process under 1 GiB). n-java-mx's DECISION on
+t04792 (the MXBean interfaces' generic signatures) **decided, taken overnight (round 52), recommended: (a)**, j2g writes the `G` records
+(the members' Signatures) of the world's MXBean interfaces.
+
+- **Where.** `G` records are written by `arbace.classes.annot/attribute-lines` (methods', constructors', fields' Signatures) only with
+  `class-data`'s `:members`, which j2g passes for a `--program`'s own classes alone (arbace/j2g/out.ae's `class-registration`,
+  `(and *absent-members* (nm/own-class? n))`); jrt decodes them into the class's `sigs` (go/arbace/jrt/classdata.ae) and
+  Method.getGenericInfo builds jdk26u's MethodRepository over the record, getGenericReturnType answering the erased return type
+  without one. The interpreter writes every member's record for its own classes (interp.ae's `:members true`), so only the
+  translated world lacked them.
+- **The change.** `class-data` takes `:signatures`: the `G` records alone (the new `signature-lines`, which `attribute-lines` now
+  calls too) for a class whose members' data is not written, as F27's `:throws` writes the `E` records. j2g passes
+  `:signatures (annot/mxbean-interface? n dd)`: JMX's rule (javax.management.JMX.isMXBeanInterface): an interface annotated
+  `@javax.management.MXBean` answers the annotation's value, else one whose binary name ends in `MXBean`. jrt is unchanged (its reader
+  already takes the records; its header's comment, "the class's own members", now also holds for these interfaces).
+- **Size.** The world's MXBean interfaces are 15 (jdk/forms: java.lang.management's 11, com.sun.management's 3, java.util.logging's
+  LoggingMXBean; none annotated `@MXBean`, none in overlay/jdk or javac's world), and 4 of their members are generic: RuntimeMXBean's
+  getInputArguments (`List<String>`) and getSystemProperties (`Map<String,String>`), PlatformLoggingMXBean's and LoggingMXBean's
+  getLoggerNames (`List<String>`): 4 records of about 80 bytes in the executable's class data.
+- **Proof (light).** `bin/j2g-unit`'s `test-mxbean-signatures` over the fixture test/j2g/unit/mxsig (q/Box<T>, as the unit tests'
+  world is the edge alone and java.util.List is not declared in it; javax.management.MXBean as jdk/forms has it): FooMXBean's two
+  generic getters' records with j2g's call and not its `long` getter's; @MXBean's Tagged (a name not ending in MXBean) its record; the
+  negative cases Plain (no MXBean), OptedOutMXBean (`@MXBean(false)`) and the class ImplMXBean none; the control: Plain's record
+  exists, `:signatures` forced writes it (so its absence is the rule's); none without `:signatures`; with `:members` and `:signatures`
+  each record once. Run on next `42bf8614b`'s gate executable `e8e0d017243dca8a9f9f` with the checkout on ARBACE_PATH under
+  `GOMEMLIMIT=700MiB` (peak 0.83 GB, 19 s): 143 pass (HEAD's 135, the 8 new), the same 7 FAIL as at HEAD on this executable (the
+  type annotations' known row, `invokers`'s fixture: the executable's analysis, unrelated).
+- **What the build shows (by day).** At interp t04792 (getPlatformMBeanServer, then NotCompliantMBeanException for RuntimeMXBean);
+  at the compiled level the 8 rows that stop on getPlatformMBeanServer in their recorded build (it exists since JMX-1): t04785
+  t04787 t04788 t04789 t04792 t07841 t07842 t07934. RuntimeMXBean's Map getter also needs the TabularData mapping of a
+  ParameterizedType, untested without the build.
+
+Keys: arbace/j2g and arbace/classes move `gate_key` (j2g's world translation: the next `--gate-build` is two Go-hosted builds); not the
+runtime key; test/j2g the unit tests'.
+
+The day's commands (after `bin/arbace-go --gate-build`):
+
+```sh
+bin/j2g-unit                                   # test-mxbean-signatures: 8 pass
+printf 't04792\n' > .tmp/mxsig-interp.txt
+bin/java-check --levels interp --list .tmp/mxsig-interp.txt --save .tmp/mxsig-i
+bin/java-check --judge --partial --record .tmp/mxsig-i/results.tsv
+printf 't04785\nt04787\nt04788\nt04789\nt04792\nt07841\nt07842\nt07934\n' > .tmp/mxsig-compiled.txt
+bin/java-check --levels compiled --list .tmp/mxsig-compiled.txt --save .tmp/mxsig-c
+bin/java-check --judge --partial --record .tmp/mxsig-c/results.tsv
+bin/reap && bin/crops-score --judge --strict
+```
+
+Decisions taken overnight (round 52): (a) the world's MXBean interfaces' Signatures (rather than (b) every world class's, the data of
+every generic member in the executable, or (c) leaving it); JMX's own rule, `@MXBean`'s value first, then the name (rather than the
+name alone); the records written by `class-data`'s `:signatures` beside `:throws` (rather than `:members`, which would add the
+members' annotations and type annotations too).
