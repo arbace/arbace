@@ -879,6 +879,30 @@
                     (when (= main (or (get-in c [:range :begin :file]) (get-in c [:range :begin :expansionLoc :file])))
                       (let [[l col] (line-col starts (long off))]
                         (.add out {:line l :col col :kind :error :rule :coroutine :msg msg})))))
+        ;; (round 54, second pass: [dcl.fct.def.coroutine]/15, `co_await promise.final_suspend()` is not potentially-throwing:
+        ;; final_suspend, the awaitable's operator co_await, the awaiter's await_ready, await_suspend and await_resume, then the
+        ;; destructors (the awaitable's after its operator co_await, the awaiter's last), each a main-file class's member declared noexcept; GCC's
+        ;; "the expression 'X::f' is required to be non-throwing" at the first that is not, once a class)
+        seen (java.util.HashSet.)
+        member (fn [cn nm] (some #(when (and (= nm (:name %)) (fn-kinds (:kind %))) %) (:inner cn)))
+        throwing? (fn [m dtor?] (let [qt (str (get-in m [:type :qualType]))]
+                                  (if dtor? (boolean (re-find #"noexcept\(false\)" qt))
+                                      (not (or (re-find #"noexcept(?!\(false\))" qt) (re-find #"throw\(\)" qt))))))
+        rtype (fn [m] (when-let [[_ r] (re-find #"^([^()<>:*&]+?)\s*\(" (str (get-in m [:type :qualType])))] (.get classes (str/trim r))))
+        final-throwing! (fn [ret]
+                          (when-let [pt (some->> (.get classes ret) :inner (some #(when (and (= "CXXRecordDecl" (:kind %)) (= "promise_type" (:name %))) %)))]
+                            (when (.add seen ret)
+                              (let [fs (member pt "final_suspend")
+                                    obj (when fs (rtype fs))
+                                    oc (when obj (member obj "operator co_await"))
+                                    aw (if oc (rtype oc) obj)
+                                    cands (concat [[fs (str ret "::promise_type::final_suspend") false]]
+                                                  (when obj [[oc (str (:name obj) "::operator co_await") false]])
+                                                  (when (and obj (not= obj aw)) [[(member obj (str "~" (:name obj))) (str (:name obj) "::~" (:name obj)) true]])
+                                                  (when aw (for [f ["await_ready" "await_suspend" "await_resume"]] [(member aw f) (str (:name aw) "::" f) false]))
+                                                  (when aw [[(member aw (str "~" (:name aw))) (str (:name aw) "::~" (:name aw)) true]]))]
+                                (when-let [[m nm] (first (filter (fn [[m _ d]] (and m (throwing? m d))) cands))]
+                                  (report! m (str "the expression '" nm "' is required to be non-throwing")))))))
         check! (fn [body ret]
                  (when-let [c (first-co body)]
                    (cond
@@ -890,7 +914,7 @@
                                 (and (empty? (:bases cn))
                                      (not (some #(= "promise_type" (:name %)) (:inner cn)))))))
                      (report! c "unable to find the promise type for this coroutine")
-                     :else nil)))]
+                     :else (when ret (final-throwing! ret)))))]
     (walk-nodes (fn [n _]
                   (cond
                     (and (fn-kinds (:kind n)) (= main (get-in n [:loc :file])))
