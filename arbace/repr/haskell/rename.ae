@@ -1006,7 +1006,16 @@
                HsOuterExplicit (rn-tvbs env (arg b 2))
                (let [fvs (free-tvs env [(arg eq 4) (arg eq 6)])]
                  (reduce (fn [e o] (assoc-in e [:l [:t o]] (loc-name "tv" o sp))) env fvs)))]
-    (rn-tc-name env (arg eq 2)) (rn env1 (arg eq 4)) (rn env1 (arg eq 6))))
+    ;; round 54: an associated instance's family is looked up among its class's children first (GHC.Rename.Env's
+    ;; lookupInstDeclBndr): Data.Set.Internal's `type Item (Set a) = a` under `instance GHCExts.IsList (Set a)`, Item in
+    ;; scope only qualified
+    (let [nl (arg eq 2)
+          kid (when (and (seq (:inst-kids env)) (L? nl) (rdr? (lval nl)))
+                (let [o (rdr-occ (lval nl))] (first (filter #(= (name-occ %) o) (:inst-kids env)))))]
+      (if kid
+        (do (use! kid) (emit-l! nl kid))
+        (rn-tc-name env nl)))
+    (rn env1 (arg eq 4)) (rn env1 (arg eq 6))))
 
 (defn- rn-class [env v]
   ;; (ClassDecl ext ctx lname qtvs fix fundeps sigs binds ats atdefs docs)
@@ -1048,6 +1057,8 @@
     (case (con v)
       (HsAppTy) (head-class env (arg v 2))
       (HsParTy) (head-class env (arg v 2))
+      ;; round 54: a head under its context or forall (instance Ord a => IsList (Set a)): the class its body's
+      (HsQualTy HsForAllTy) (head-class env (arg v 3))
       HsTyVar (let [nl (arg v 3)] (when (rdr? (lval nl)) (binding [*errors* nil *occs* nil *uses* nil] (resolve-rdr env (lval nl)))))
       nil)))
 
@@ -1055,15 +1066,28 @@
   ;; (ClsInstDecl ext (L sp HsSig) binds sigs ats adts overlap)
   (let [sigl (arg v 2) {env1 :env} (rn-sig (assoc env :sp (lsp sigl)) (lsp sigl) (lval sigl))
         cls (head-class env1 (arg (lval sigl) 3))
-        kids (children-of cls)]
+        kids (children-of cls)
+        ;; round 54: an instance signature's explicit forall scopes over its method's binding (InstanceSigs with
+        ;; ScopedTypeVariables; GHC.Rename.Bind's rnMethodBinds, as a top-level signature's over its binding: Data.Sequence.Internal's
+        ;; foldMap :: forall m a. Monoid m => ..., its body's (foldMap :: (Elem a -> m) -> ...) the same m)
+        scoped (atom {})]
+    (doseq [s (arg v 4)]
+      (let [sv (lval s)]
+        ;; (the parser makes an instance's signatures ClassOpSig, as a class's: GHC.Parser.PostProcess's cvBindsAndSigs)
+        (if (and (= 'ClassOpSig (con sv)) (not (true? (arg sv 2))))
+          (do (doseq [nl (arg sv 3)] (rn env1 nl))
+              (let [sig (arg sv 4)
+                    r (rn-sig (assoc env1 :sp (lsp sig)) (lsp sig) (lval sig))]
+                (doseq [nl (arg sv 3)] (swap! scoped assoc (rdr-occ (lval nl)) (:scoped r)))))
+          (rn env1 s))))
     (doseq [b (arg v 3)]
       (let [bv (lval b) benv (assoc env1 :sp (lsp b))]
         (if (= 'FunBind (con bv))
           (let [nl (arg bv 2) occ (rdr-occ (lval nl))
                 m (or (first (filter #(= (name-occ %) occ) kids)) (resolve-rdr env1 (lval nl)))]
-            (rn-funbind benv bv :fname m))
+            (rn-funbind benv bv :fname m :scoped (get @scoped occ)))
           (rn env1 b))))
-    (rn env1 (arg v 4)) (rn env1 (arg v 5)) (rn env1 (arg v 6))))
+    (rn (assoc env1 :inst-kids kids) (arg v 5)) (rn (assoc env1 :inst-kids kids) (arg v 6))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Binding groups
