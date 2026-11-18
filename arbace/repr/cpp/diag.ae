@@ -873,14 +873,17 @@
                                               (and std? (:isInline n)) (ns-walk (:inner n) true)
                                               :else nil)
                         "LinkageSpecDecl" (ns-walk (:inner n) std?)
-                        "ClassTemplateDecl" (when std? (.add tmpls (:name n)))
+                        "ClassTemplateDecl" (when std? (.add tmpls (:name n))
+                                              ;; (queue 368: a coroutine_traits the main file defines itself, whose promise_type is
+                                              ;; not [coroutine.traits.primary]'s R::promise_type: pr105475-2.C's)
+                                              (when (= main (get-in n [:loc :file])) (.add tmpls (str "main:" (:name n)))))
                         "CXXRecordDecl" (when (and (not std?) (:name n) (:completeDefinition n) (= main (get-in n [:loc :file])))
                                           (.put classes (:name n) n))
                         nil)))]
             (ns-walk (:nodes u) false))
-        ;; (queue 368: a specialization's own head, `struct coroutine_traits<...>` or `class std::coroutine_traits<...>`, in the
+        ;; (queue 368: a specialization's own head, `struct coroutine_traits<...>` or `class std::coroutine_traits<...>`, any qualifier (a namespace alias's `coro::`), in the
         ;; text without its comments and literals; a use, `std::coroutine_traits<R>::promise_type`, or a comment is none)
-        specialized (re-find #"(?:struct|class)\s+(?:::\s*)?(?:std\s*::\s*)?coroutine_traits\s*<"
+        specialized (re-find #"(?:struct|class)\s+(?:::\s*)?(?:[A-Za-z_]\w*\s*::\s*)*coroutine_traits\s*<"
                              (-> src (str/replace #"(?s)/\*.*?\*/" " ") (str/replace #"//[^\n]*" " ")
                                  (str/replace #"\"(?:\\.|[^\"\\\n])*\"" "\"\"")))
         report! (fn [c msg]
@@ -917,7 +920,7 @@
                    (cond
                      (not (.contains tmpls "coroutine_traits")) (report! c "coroutines require a traits template; cannot find 'std::coroutine_traits'")
                      (not (.contains tmpls "coroutine_handle")) (report! c "coroutines require a handle class template; cannot find 'std::coroutine_handle'")
-                     (and ret (not specialized)
+                     (and ret (not specialized) (not (.contains tmpls "main:coroutine_traits"))
                           (or (re-matches #"(?:(?:unsigned|signed|short|long|int|char|bool|float|double|void|wchar_t|char8_t|char16_t|char32_t)\s*)+" ret)
                               (when-let [cn (.get classes ret)]
                                 (and (empty? (:bases cn))
@@ -929,8 +932,18 @@
                     (and (fn-kinds (:kind n)) (= main (get-in n [:loc :file])))
                     (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
                       (let [qt (str (get-in n [:type :qualType]))
-                            ret (when-let [[_ r] (re-find #"^([^()<>:*&]+?)\s*\(" qt)] (str/trim r))]
-                        (check! b (when-not (#{"auto" "decltype"} ret) ret))))
+                            ret (when-let [[_ r] (re-find #"^([^()<>:*&]+?)\s*\(" qt)] (str/trim r))
+                            ;; (queue 368: [dcl.fct.def.coroutine]/4, a coroutine is no constructor, destructor, main function,
+                            ;; constexpr function or function with a C variadic parameter list: GCC's "'co_await' cannot be used in a
+                            ;; constructor", at the first co_ operator, before the promise's lookup)
+                            no-co (cond (= "CXXConstructorDecl" (:kind n)) "a constructor"
+                                        (= "CXXDestructorDecl" (:kind n)) "a destructor"
+                                        (and (= "FunctionDecl" (:kind n)) (= "main" (:name n))) "the 'main' function"
+                                        (:constexpr n) "a 'constexpr' function"
+                                        (re-find #"\.\.\.\)" qt) "a varargs function")]
+                        (if-let [c (and no-co (first-co b))]
+                          (report! c (str "'" (case (:kind c) "CoawaitExpr" "co_await" "CoyieldExpr" "co_yield" "co_return") "' cannot be used in " no-co))
+                          (check! b (when-not (#{"auto" "decltype"} ret) ret)))))
                     (= "LambdaExpr" (:kind n))
                     (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))] (check! b nil))
                     :else nil))
