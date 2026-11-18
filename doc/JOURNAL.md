@@ -11726,3 +11726,20 @@ or counted once by their round trip), LLS49 (c) again with C's and C++'s decisio
 programs), LLS58 (a fixed environment for llvmi's runs, C's runtime). Alternatives considered: porting the 9 remaining heldout kinds
 and verify-rt's 4 mutants (attribute, intrinsic-declaration and debug-info rules, a case or two each: left); doc/llvm/LLVM-CROP-SURVEY.md,
 "As built: n-llvm-indep".
+
+## 2026-11-18: n-llvm-indep, LLS57 (b) and LLS49 (c): LLVM IR's llvmi modules by their own outcomes (branch `n-llvm-indep`)
+
+The user decided LLS57 (b) and LLS49 (c) (relayed by the main session). Built: synth-c23's table gains `:expect`, each `:show`
+value worked out by hand from C23 and the target (four parallel derivations, nothing compiled or run, no record read; 726 values),
+`bin/ci synth` writing test/c/synth/ID.expect; checked afterwards against lli's recorded digests: 73 of 74 equal, pp-has-attribute
+corrected from C23's attribute table (the dates are not 202311L). test/c/run's seven pack programs taken byte for byte from mac/n-c-last
+31edae682 (self-checking, `ci-run verdict`), the pack c refreshed by the new `bin/llvmi ir-make c --stale` (14 modules compiled again,
+the rest the pack's). C++'s 14 programs: test/llvm/selfref-derived.edn (test/c/selfref-derived.edn's form: status, stdout, the aborts'
+stderr, worked out from source), all equal to the recorded runs afterwards; their sources not edited (the pack rt's bases, C++'s
+records). arbace.llvm.check's own verdict reads the three; four new negative controls (test/llvm/controls.edn). The self-checking
+programs found two lowering gaps, fixed in arbace/cpp/lower.ae: libatomic's `__atomic_is_lock_free` called as gcc's builtin, and
+llvm.experimental.cttz.elts. Runs on stage 0 (peaks to 2.8 GB under a 3 GiB watcher): llvmi eval and AOT over c-O0, c-O2 and cpp
+recorded, every module by its own verdict (C++'s lowered runtime built here; runtime-ci's index needed CPPI_CI_MEMLIMIT=2300MiB);
+nan-to-unsigned passes, `:ub-refinement` removed. Judge 0.8965 to 0.9485: independence 0.9792 to 0.9898, completeness 0.9915 to
+0.9933; reap, crops-score --record and --judge --strict, records-check: 0 problems. Alternative considered: self-check lines in the C++
+sources (the decision's wording), not taken for the cascade above; doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS57 (b), LLS49 (c)".

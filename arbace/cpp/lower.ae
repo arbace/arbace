@@ -106,6 +106,12 @@
 
 (def ^:private refused-externals {})
 
+(def ^:private builtin-externals
+  "libatomic's entry points whose signature is gcc's builtin of the same name (n-llvm-indep: clang calls libatomic's
+  `bool __atomic_is_lock_free(size_t, void *)` for a size known at run time; gcc's builtin takes the same arguments and ci
+  answers it, go/arbace/ci/builtins.ae): the call made to the builtin itself, no prototype declared."
+  #{"__atomic_is_lock_free"})
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Types and layout (the IR's data layout: e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128)
 
@@ -964,6 +970,11 @@
         vec-arg (some #(when (vec-type? (first %)) %) args)]
     (cond
       (re-matches #"llvm\.vector\.reduce\.[a-z]+\.v.*" nm) (reduce-stmts nm args res)
+      ;; n-llvm-indep: llvm.experimental.cttz.elts (LangRef): the index of the first true lane, the lane count when none is
+      ;; (the second argument, zero-is-poison, lets the optimizer leave that case undefined: the count is one meaning of it)
+      (re-matches #"llvm\.experimental\.cttz\.elts\.i\d+\.v\d+i1" nm)
+      (let [[vt v] (first args) e (value v vt) ls (lanes vt)]
+        [(list 'set! res (reduce (fn [acc i] (list '? (list '!= (lane e i) 0) i acc)) (count ls) (reverse ls)))])
       (and (vec-type? rt) (re-find #"\.v\d+([if]\d+|p0)" nm) (lane-intrinsics (nth parts 1)))
       (let [sc (str/replace nm #"\.v\d+([if]\d+|p0)" ".$1") et (vec-et rt)]
         (vec (mapcat (fn [i]
@@ -1430,8 +1441,9 @@
                                :let [s (gname-str (second f))]
                                :when (not (special s))]
                            (let [rn (runtime-renames s)
-                                 [c asm] (if rn [(symbol rn) nil] (c-global-name s))]
-                             [s {:c c :asm asm :kind (if (#{'llvm/global 'llvm/alias} (first f)) :var :fn) :form f
+                                 bi (and (= (first f) 'llvm/declare) (builtin-externals s))
+                                 [c asm] (cond rn [(symbol rn) nil] bi [(symbol s) nil] :else (c-global-name s))]
+                             [s {:c c :asm asm :builtin (boolean bi) :kind (if (#{'llvm/global 'llvm/alias} (first f)) :var :fn) :form f
                                  :attrs (:attrs (apply hash-map (if (#{'llvm/global 'llvm/alias} (first f)) (let [r (drop 3 f)] (if (keyword? (first r)) r (rest r))) (drop 4 f))))
                                  :sig (when (#{'llvm/declare 'llvm/define} (first f)) (fn-sig f))}])))]
 
@@ -1444,7 +1456,7 @@
                                           [s (assoc info :kind :fn :sig (:sig tg) :target tg)])))
               *typeids* (atom {})]
       (let [fns (for [f forms :when (#{'llvm/declare 'llvm/define} (first f))
-                      :let [s (gname-str (second f))] :when (not (str/starts-with? s "llvm."))]
+                      :let [s (gname-str (second f))] :when (not (str/starts-with? s "llvm.")) :when (not (:builtin (get globals s)))]
                   [f (get globals s)])
             protos (vec (for [[f info] fns]
                           (let [[_ _ rt ps & more] f o (apply hash-map more)

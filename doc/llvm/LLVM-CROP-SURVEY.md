@@ -2836,3 +2836,49 @@ verify-llvmtest's 49 (a whole split-file test has no one verdict; the rest need 
 - **LLS58 A fixed environment for llvmi's runs** (completeness): ee.MCJIT.2003-08-21-EnvironmentTest reads envp[0], ci starts every
   program with an empty environment. A fixed, host-independent one (`LIT=1`, say) keeps runs reproducible and passes it at eval and AOT:
   completeness 0.9915 to 0.9924. It changes C's runtime's design (go/arbace/ci's RunMain), so it is C's crop's decision too.
+
+## Decided (the user, 2026-11-18): LLS57 (b), LLS49 (c)
+
+- **LLS57 (b):** the pack's 252 modules counted once, by their own-judged round trip (roundtrip-rt, text-rt): verify-rt's rows of
+  them stay in the read cell, out of the judge's cases.
+- **LLS49 (c):** synth-c23's `:expect` worked out by hand, test/c/run's programs checking themselves, the C++ programs' outcomes,
+  each with a negative control; C's side as built on mac/n-c-last 31edae682 (test/c/selfref-derived.edn, test/c/selfcheck-mutants.tsv),
+  its form reused.
+
+## As built: LLS57 (b), LLS49 (c) (2026-11-18, branch `n-llvm-indep`)
+
+- **synth-c23's `:expect`** (test/c/synth/table.edn, test/c/synth/gen.ae): each row's values in `:show`'s order, worked out by hand
+  from ISO/IEC 9899:2024 and the target (four parallel derivations of the 79 programs, 726 values, no program compiled or run, no
+  record read); `bin/ci synth` writes ID.expect (the whole stdout, "EXPR = VALUE" a line) beside ID.c, `--check` compares them; the
+  .c files unchanged (the pack's sources). Checked afterwards against lli's recorded stdout digests (test/llvm/ref-lli23.edn) of the
+  74 programs in the pack c: 73 equal; pp-has-attribute's nine standard attributes were derived as 202311L, and C23's table
+  (6.7.13.1: deprecated, fallthrough, maybe_unused 201904L, nodiscard 202003L, noreturn 202202L, unsequenced, reproducible 202207L)
+  makes each `== 202311L` false: corrected from the standard, then equal. The five programs clang refuses (no module) are unchecked.
+- **test/c/run's programs**: the seven of the pack, as mac/n-c-last made them (each `/* ci-run verdict: exit N.` and its own
+  checks; C's mutants test/c/selfcheck-mutants.tsv prove they fail when a value is wrong), copied byte for byte.
+  `bin/llvmi ir-make c --stale` (new: only the modules whose checkout source changed compiled again by the corpus' command, clang
+  23.1.5; the others' IR the pack's; c.cmd's `refreshed` line names them): 14 modules.
+- **C++'s 14 programs**: test/llvm/selfref-derived.edn (test/c/selfref-derived.edn's form): the status, the exact stdout and, for the
+  three aborts, std::terminate's stderr, worked out from each source (each with its `:why`); checked afterwards: all 14 equal lli's
+  recorded digests, the aborts' stderr g++'s (test/cpp/ref-gxx15.edn). The sources are not given self-check lines, unlike the
+  decision's wording: test/cpp/samples are the pack rt's mutant bases (a change makes the pack stale and its mutants' records with it)
+  and C++'s crop's own records (ref-gxx15, check, lower, round trip) read them.
+- **The judge** (arbace/llvm/check.ae's own-verdict): c-O0/c-O2.synth.N by test/c/synth/N.expect (exit 0, stdout's digest),
+  c-O0/c-O2.run.N by the source's first line's status, cpp.N by test/llvm/selfref-derived.edn (status, stdout, stderr when given).
+  Negative controls (test/llvm/controls.edn): expr-arithmetic's run against expr-cast's .expect, ptr-sub-narrow's against
+  ptr-sub-unsigned's `exit 3`, io's against threads' derived stdout, uncaught's against ctor-throw's derived outcome: each fails.
+- **Two lowering gaps the self-checking programs found** (arbace/cpp/lower.ae): libatomic's `__atomic_is_lock_free` (clang's call for
+  a size known at run time) is called as gcc's builtin of the same signature, which ci answers (`builtin-externals`), not as an
+  undefined external; llvm.experimental.cttz.elts (builtin-stdc at -O2) lowered as the first true lane's index, else the lane count.
+- **Runs** (stage 0, peaks 1.7-2.6 GB): `bin/llvmi check --corpus c-O0,c-O2 --record` 162 of 162, all by their own verdicts
+  (nan-to-unsigned's self-check passes: `:ub-refinement` removed); `--aot` the same, 162 of 162 (lib-musl-tables at both levels is
+  aot-heavy.txt's, its rows kept); C++'s lowered runtime built here (`bin/cppi runtime-build`, 198 units; `runtime-ci` at
+  CPPI_CI_CHUNK=1, the index under CPPI_CI_MEMLIMIT=2300MiB: the default's 6 GiB limit let it pass 3 GiB, stopped by the watcher);
+  `--corpus cpp` 14 of 14 by their own verdicts.
+- **Scores** (bin/reap --record, bin/crops-score --record): eval 553 / 9 to 555 / 7, AOT 552 / 9 / 1 to 554 / 7 / 1 (nan-to-unsigned
+  at both levels); the judge's cases 4,731 own and 543 recorded ((4731 + 0.5 x 543) / 5274 = 0.9485, the score's stage 0.9490):
+  independence 0.9792 to 0.9898 (99), completeness 0.9915 to 0.9933 (99), meant 0.9995. `bin/llvmi check` over all 562 modules: every
+  one by its own verdict, 555 pass, the 7 by design; `--judge --strict`, records-check, expect-test, controls-test, `bin/ci synth
+  --check` and `bin/cppi lower-essential` (6 of 6, the lowering's change): 0 problems. What stays recorded: the probes 478 (LLS30),
+  verify-llvmtest's 49, verify-rt-heldout's 9, verify-rt's 4 mutants, AOT's 3 aot-heavy modules. C's crop can read the same
+  test/c/synth/*.expect (its selfref, on mac/n-c-last's line): not wired here, to keep that file's merge to one side.
