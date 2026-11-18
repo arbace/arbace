@@ -2997,8 +2997,11 @@
   (a constructor conE) of its Name, an application appE of the parts', a parenthesis its expression's, a variable bound outside
   the quote lifted (GHC.Rename.Splice's checkCrossStageLifting: lift x, in a typed quote unTypeCode (liftTyped x)); a typed quote
   [|| e ||] :: Code m t, e :: t, is unsafeCodeCoerce of the expression's quote. The types are TH.Lift's lift's and liftTyped's
-  (the Lift class in scope); anything else in the quote is not handled: [type core]"
-  [env e typed?]
+  (the Lift class in scope); queue 381 (n-all4's merge, one implementation): a pattern quote [p| p |] (pat?) of type m Pat,
+  as repP gives it: a parenthesis its pattern's, a view pattern viewP of the expression's and the pattern's quotes, a
+  constructor pattern of no argument conP NAME [] [] (os-string's and filepath's QuasiQuoters); anything else in the quote is
+  not handled: [type core]"
+  [env e typed? & [pat?]]
   (let [lib (fn [o] (list 'v (ext-name "var" "GHC.Internal.TH.Lib" o)))
         syn (fn [o] (list 'v (ext-name "var" "GHC.Internal.TH.Syntax" o)))
         lift-n (ext-name "var" "GHC.Internal.TH.Lift" "lift") lt-n (ext-name "var" "GHC.Internal.TH.Lift" "liftTyped")
@@ -3027,10 +3030,22 @@
                                     (list 'app (syn "unTypeCode") [(qd) (list 'app (list 'v lt-n) [dl (qd) cx])])
                                     (list 'app (list 'v lift-n) [dl (qd) cx])))))
                       (do (reset! bad (con xv)) (list 'lit "?")))))
-            core (rep e)]
+            nil-c (list 'v (ext-name "data" "GHC.Internal.Types" "[]"))
+            rep-p (fn rep-p [x]
+                    (let [xv (lval x)]
+                      (case (con xv)
+                        ParPat (rep-p (arg xv 2))
+                        ViewPat (list 'app (lib "viewP") [(qd) (rep (arg xv 2)) (rep-p (arg xv 3))])
+                        ConPat (let [n (nm (arg xv 2)) d (arg xv 3)
+                                     nc (when (and n (= 'PrefixCon (con d)) (empty? (pat-args d))) (th-name-core n))]
+                                 (if nc
+                                   (list 'app (lib "conP") [(qd) nc nil-c nil-c])
+                                   (do (reset! bad (con xv)) (list 'lit "?"))))
+                        (do (reset! bad (con xv)) (list 'lit "?")))))
+            core (if pat? (rep-p e) (rep e))]
         (when @bad (error! "expression not handled: " (if typed? "HsTypedBracket" "HsUntypedBracket") " of " @bad))
         (if-not typed?
-          [mexp core]
+          [(if pat? (mk-app m (con-ty (ext-name "tc" "GHC.Internal.TH.Syntax" "Pat"))) mexp) core]
           ;; the quoted expression's type (its own constraints not wanted: the quote is not run here)
           (let [[t _] (binding [*wanteds* (atom [])] (infer env e))
                 [ltt ltps] (instantiate lt)
@@ -3042,7 +3057,7 @@
 (defn- app-spine [v]
   (loop [x v args ()] (if (= 'HsApp (con x)) (recur (lval (arg x 2)) (cons (arg x 3) args)) [x (vec args)])))
 
-(declare infer*)
+(declare infer* pat-args)
 
 (defn infer
   "An expression's type and core"
@@ -3298,6 +3313,7 @@
                              nc (when n (th-name-core n))]
                          (cond
                            (= 'ExpBr (con q)) (th-quote env (arg q 2) false)
+                           (= 'PatBr (con q)) (th-quote env (arg q 2) false true)
                            nc [(con-ty (ext-name "tc" "GHC.Internal.TH.Syntax" "Name")) nc]
                            :else
                            (do (error! "expression not handled: " (con v) (if n (str " " (pr-str n)) (str " " (con q))))
@@ -5436,11 +5452,18 @@
                     (if (empty? heads)
                       cl
                       (filterv (fn [[_ t]] (not-any? #(contains? heads %) (tree-seq coll? seq t))) cl)))
-        supers (for [[sc sts] (:supers info)]
+        ;; (queue 381: under the instance context's given equalities, as its methods are: exceptions' `instance e ~
+        ;; SomeException => MonadCatch (Either e)`, whose superclass MonadThrow (Either e) is solved by `instance e ~
+        ;; SomeException => MonadThrow (Either e)`, its context e ~ SomeException given here; before, the superclass's
+        ;; solving unified the skolem e with SomeException outside the givens and failed)
+        supers (binding [*given-eqs* (scope-givens)]
+                 (assume-eqs! ctx)
+                 (doall
+                 (for [[sc sts] (:supers info)]
                  (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] sc-givens 0)
                      (do (error! "no superclass dictionary " (occ sc) " " (pr-str [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)]))
                          (when trace? (binding [*out* *err*] (println "tc-trace: instances of" (pr-str sc) (pr-str (filter #(= sc (first (:head %))) @*insts*)))))
-                         (list 'lit "?"))))
+                         (list 'lit "?"))))))
         dcon (list 'v (ext-name "var" (nmod cls) (dcon-occ cls)))
         ;; an instance with a context: each superclass dictionary a binding of its own over the context's
         ;; dictionaries ($cp1Cls), as GHC's tcSuperClasses makes it; without one the dictionary inline
