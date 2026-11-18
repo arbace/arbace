@@ -42,7 +42,8 @@
     bin/repr-scheme ucd gen     (arbace_tool -m arbace.repr.scheme.ucd gen UCD-DIR ROOT): the five files written
     bin/repr-scheme ucd check   (... check UCD-DIR ROOT OUT): written into OUT and compared byte for byte with the checkout's,
                                 and UnicodeData.txt's categories against extracted/DerivedGeneralCategory.txt's, code point
-                                for code point"
+                                for code point; its negative control (queue 366): one UnicodeData.txt line mutated must make
+                                normdata.ae differ from the checkout's, else the check fails"
   (:require [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
@@ -304,8 +305,8 @@
 
 (defn- normalization-rows
   "UnicodeData.txt's {:ccc {cp class} :dec {cp [compat? [cp ...]]}}: the classes above 0 and the decomposition mappings (compat? when
-  the mapping has a <tag>)."
-  [^String path]
+  the mapping has a <tag>), from its lines."
+  [lines]
   (reduce (fn [m l]
             (if (str/blank? l) m
                 (let [fs (str/split l #";" -1) cp (hex (nth fs 0))
@@ -315,7 +316,7 @@
                       (let [compat (str/starts-with? d "<")
                             d (if compat (str/trim (second (str/split d #">" 2))) d)]
                         (assoc-in m [:dec cp] [compat (mapv hex (str/split d #" +"))]))))))
-          {:ccc {} :dec {}} (str/split-lines (slurp path))))
+          {:ccc {} :dec {}} lines))
 
 (defn- full-decomposition
   "The full (recursive) canonical, or with compat? compatibility, decomposition of c, before the canonical ordering."
@@ -352,24 +353,26 @@
     K  every one whose full compatibility decomposition differs from its canonical one
     C  the primary composites: a canonical decomposition mapping of two code points, the code point not Full_Composition_Exclusion
        (DerivedNormalizationProps.txt: the singletons, the non-starter decompositions and CompositionExclusions.txt's)
-    N  per class above 0 the code points of that class that do not decompose, as ranges"
-  [^String dir]
-  (let [{:keys [ccc dec]} (normalization-rows (str dir "/UnicodeData.txt"))
-        fce (set (mapcat (fn [[lo hi]] (range lo (inc (long hi))))
-                         (get (range-lines (str dir "/DerivedNormalizationProps.txt")) "Full_Composition_Exclusion")))
-        _ (when (empty? fce) (throw (ex-info "DerivedNormalizationProps.txt: no Full_Composition_Exclusion lines" {})))
-        cps (sort (keys dec))
-        canon (into {} (for [c cps] [c (canonical-order ccc (full-decomposition dec c false))]))
-        ds (for [c cps :let [d (canon c)] :when (not= d [c])] [c d])
-        ks (for [c cps :let [k (canonical-order ccc (full-decomposition dec c true))] :when (not= k (canon c))] [c k])
-        cs (for [c cps :let [[k xs] (dec c)] :when (and (not k) (== 2 (count xs)) (not (contains? fce c)))] [c xs])
-        dset (set (map first ds))
-        ns (sort-by key (group-by #(get ccc %) (remove dset (keys ccc))))
-        line (fn [tag c xs] (str tag " " (hex-up c) " " (str/join " " (map hex-up xs))))
-        lines (concat (for [[c d] ds] (line "D" c d)) (for [[c k] ks] (line "K" c k)) (for [[c xs] cs] (line "C" c xs))
-                      (for [[v xs] ns] (str "N " v " " (range-text xs))))]
-    {:text (apply str (map #(str % "\n") lines))
-     :counts {:D (count ds) :K (count ks) :C (count cs) :N (count ns) :excluded (count fce)}}))
+    N  per class above 0 the code points of that class that do not decompose, as ranges
+  With mutate (the check's negative control, queue 366), UnicodeData.txt's lines are (mutate lines)."
+  ([^String dir] (normalization dir identity))
+  ([^String dir mutate]
+   (let [{:keys [ccc dec]} (normalization-rows (mutate (str/split-lines (slurp (str dir "/UnicodeData.txt")))))
+         fce (set (mapcat (fn [[lo hi]] (range lo (inc (long hi))))
+                          (get (range-lines (str dir "/DerivedNormalizationProps.txt")) "Full_Composition_Exclusion")))
+         _ (when (empty? fce) (throw (ex-info "DerivedNormalizationProps.txt: no Full_Composition_Exclusion lines" {})))
+         cps (sort (keys dec))
+         canon (into {} (for [c cps] [c (canonical-order ccc (full-decomposition dec c false))]))
+         ds (for [c cps :let [d (canon c)] :when (not= d [c])] [c d])
+         ks (for [c cps :let [k (canonical-order ccc (full-decomposition dec c true))] :when (not= k (canon c))] [c k])
+         cs (for [c cps :let [[k xs] (dec c)] :when (and (not k) (== 2 (count xs)) (not (contains? fce c)))] [c xs])
+         dset (set (map first ds))
+         ns (sort-by key (group-by #(get ccc %) (remove dset (keys ccc))))
+         line (fn [tag c xs] (str tag " " (hex-up c) " " (str/join " " (map hex-up xs))))
+         lines (concat (for [[c d] ds] (line "D" c d)) (for [[c k] ks] (line "K" c k)) (for [[c xs] cs] (line "C" c xs))
+                       (for [[v xs] ns] (str "N " v " " (range-text xs))))]
+     {:text (apply str (map #(str % "\n") lines))
+      :counts {:D (count ds) :K (count ks) :C (count cs) :N (count ns) :excluded (count fce)}})))
 
 (defn normdata-file ^String [{:keys [norm]}]
   (str ";; si's runtime: the data of Unicode normalization (string-normalize-nfd/nfc/nfkd/nfkc, SM6), generated by `bin/repr-scheme\n"
@@ -383,6 +386,25 @@
        "(in-ns 'go.arbace.scm)\n\n"
        "(go/file \"normdata.go\" :imports [])\n\n"
        "(go/const [^string normData \"" (str/replace (:text norm) "\n" "\\n") "\"])\n"))
+
+;; queue 366 (the host's review of 350): `ucd check`'s negative control. One UnicodeData.txt line mutated (U+00C0's canonical
+;; decomposition 0041 0300 made 0041 0301) must make the generated normdata.ae differ from the checkout's (its D and C lines of U+00C0);
+;; a control that gives the checkout's bytes (the line not found, or the generator not reading it) fails the check
+(def ^:private control-cp "00C0")
+(def ^:private control-from ";0041 0300;")
+(def ^:private control-to ";0041 0301;")
+
+(defn- control-mutate [lines]
+  (mapv (fn [^String l] (if (str/starts-with? l (str control-cp ";")) (str/replace l control-from control-to) l)) lines))
+
+(defn- normdata-control
+  "The control's normdata.ae against the checkout's text `checked`: {:differs? :lines the table's entries that differ from those
+  of norm, the unmutated generation}."
+  [^String dir ^String checked norm]
+  (let [cn (normalization dir control-mutate)
+        a (str/split-lines (:text cn)) b (str/split-lines (:text norm))]
+    {:differs? (not= (normdata-file {:norm cn}) checked)
+     :lines (max (count (remove (set b) a)) (count (remove (set a) b)))}))
 
 ;; ---- the generated files
 
@@ -685,7 +707,13 @@
                                      f))]
                     (doseq [f bad] (println (str "ucd check: " f " DIFFERS from its generation (bin/repr-scheme ucd gen)")))
                     (println (str "ucd check: " (- (count outputs) (count bad)) " of " (count outputs) " generated files equal to the checkout's, byte for byte"))
-                    (if (and ok (empty? bad)) 0 1))
+                    (let [nf (java.io.File. (str root "/go/arbace/scm/normdata.ae"))
+                          {:keys [differs? lines]} (normdata-control dir (if (.exists nf) (slurp nf) "") (:norm a))]
+                      (println (str "ucd check: the control (UnicodeData.txt's " control-cp " line, " (subs control-from 1 (dec (count control-from)))
+                                    " made " (subs control-to 1 (dec (count control-to))) "): "
+                                    (if differs? (str "normdata.ae differs (" lines " entries of the table changed), as it must")
+                                        "normdata.ae EQUAL to the checkout's: the check does not see UnicodeData.txt's decompositions")))
+                      (if (and ok (empty? bad) differs?) 0 1)))
           (do (println "usage: -m arbace.repr.scheme.ucd gen UCD-DIR ROOT | check UCD-DIR ROOT OUT") 2))]
     (flush)
     (System/exit status)))

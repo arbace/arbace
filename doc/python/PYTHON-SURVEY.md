@@ -7762,3 +7762,31 @@ base's; on goi (nf's stage 0, the checkout's runtime interpreted) test_generator
 pass, 84 classed, 0 failing, each the same as at 330's head. The generator programs of the synthetic corpus (13, `check
 --aot --no-pyi`): 13 pass compiled and on the loop by their golden text; `make python-essential`: 20 pass, 1 classed, 0
 failing.
+
+## As built: 350 and 366, pyi's slotdocs and ast tables made by Arbace (2026-11-18, the Mac VM, queues 350 and 366)
+
+**350** (audit 344's DECISION 1 (a), the cheapest two of the tables CPython made): `tools/pyi/runtime_tables.ae slotdocs` (Objects/
+typeobject.c's slotdefs through repr/c's preprocessor, add_operators' rule, the last entry per name: 79 entries; the recorded 80th,
+`_value_repr_`, the python3 walk's artifact, dropped) and `runtime_tables.ae ast` (Parser/Python.asdl by ASDL's grammar:
+builtins_ast_table.go byte for byte), both in `bin/pyi runtime gen-tables` with a negative control each. Python's eval and AOT facts
+stay 0.5 for the rest (350's report, its plan and DECISION 1).
+
+**366** (the host's review of 348-350):
+- **The ast table's header** names its generator, `tools/pyi/runtime_tables.ae (ast)`, and its format's comment points there (the format
+  stated in runtime_tables.ae). `go/arbace/py/builtins_ast_table.ae` moves once, its two comments alone (astTable's constant byte for
+  byte), re-read from the generated Go by `bin/repr-go read --full` in a one-file module (control: the committed printed Go read the
+  same way gives the committed forms byte for byte). `tools/pyi/asdl_table.py`, the oracle's, by hand: its output now differs from the
+  committed file in the header line alone. Run: `bin/pyi runtime gen-tables ast slotdocs`, both byte for byte, both controls differ.
+- **The keys these files move.** Since W2 (doc/W-WINDOW.md) `go/arbace/py` is copied into the program and listed in goi's table, out of
+  `bin/lib/version.bash`'s `arbace_crop_paths`, so `go/arbace/py/slotdocs.ae` (350) and `go/arbace/py/builtins_ast_table.ae` (366)
+  are in `gate_key` (bin/arbace-go) and the javac key: each moves the gate's builds, every step on `:gate` and javac's tool;
+  `arbace_runtime_key` does not move (`arbace_runtime_not` keeps `go/arbace/py` out). Checked at 9cd2e4a96 and at 366's head with
+  each tree's key functions (doc/scheme/SCHEME-SURVEY.md, "As built: 350 and 366", for the numbers: gate_key's per-file digests
+  differ in exactly 350's four files and this table).
+- **Round 2 (the user's choice of the lows, 2026-11-18): the five tables of queue 265** (opcode, errno, fcntl, socket, posix) name their
+  generator the same way, `tools/pyi/runtime_tables.ae (TABLE)`; each `go/arbace/py/builtins_TABLE_table.ae` moves once, its header
+  comment alone (the `;;` line and the `:go/comments` entry), re-read from the generated Go in a one-file module (fcntl, socket and posix
+  for linux/amd64, their build line), each control (the committed printed Go read the same way) byte for byte the committed forms.
+  `bin/pyi runtime tables`, the oracle tier's comparison with the python3 generators, respells the python3 header to the Arbace one
+  before comparing (the rest byte for byte). Run: `bin/pyi runtime gen-tables`, the seven tables byte for byte and the seven controls
+  differing (97 s); the five python3 generators run on the VM's python3 3.14.10 through that pipeline equal to the new files.
