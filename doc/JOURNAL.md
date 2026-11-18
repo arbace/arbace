@@ -10391,3 +10391,327 @@ The day's mistakes and what changed:
   a report names before removing a worktree); also one review diff used `<(...)`, against the host's rules.
 Alternatives considered for the night's advance: reverting main to `f1969748f` (a force push to origin, which the user declined)
 and holding the gate until a corrected watcher (it would have moved the night's 8 hours into the morning).
+
+## 2026-11-17: queue 324 (C++'s eval and AOT inputs records) reviewed on the main host (branch `h-review-mac-crops-cpp`)
+
+The Mac VM's `324-cpp-own-ir` 07ce58856 and its round 2 260f3777f (CP356 (a), CP333 (b); the user's DECISIONs 1 (a), 2 (a); round 2:
+Sema's header text from the target tree, CP241 (b)) read against next: the inputs
+record's wiring to `bin/lib/cppi/route.bash` (which writes each program's `route`, `ir.status`, `gen.refused`), `ir-input`, the
+runtime's `inputs.edn`, crops-score's `:mean-with`. No correctness bug found. `bin/cppi selftest case-inputs`, `bin/crops-score
+--self-test`, `--judge --strict` (0 problems, C++ independence 72 until the programs' record), `bin/records-check` pass on this host.
+Round 2 proved: `selftest sysroot-text`, and `bin/cppi codegen-gen` under strace (155 of 155, no `/usr/include` file opened by an Arbace
+process). Fixed: `bin/lib/cppi/check`'s header (auto, not clang, the default route since night 11) and the eval and AOT facts' `:evidence`. Not
+run: `bin/cppi check` (no lowered runtime at the key here; its records-mode build declares 8 GiB): the records stay the night's, as
+doc/cpp/CPP-SURVEY.md's "As built: queue 324" lists. Alternative considered: rebuilding the runtime at one job to run two samples
+(rejected: over the day's 2 GiB a process, and the night's record runs the same path whole).
+
+## 2026-11-17: h-cpp-consteval, C++'s constant-evaluation diagnostics (branch `h-cpp-consteval` from next 55e8c0ae7)
+
+- The constant-evaluation group of the read cell's :own-diag (167 files, the Mac's review 336 at mac/336-cpp-own-diag 82d055533,
+  test/cpp/own-diag-review.edn) taken rule by rule in arbace.cpp.sema's evaluator as a checker: const objects modified, unions'
+  members, non-constexpr calls anywhere, constinit, the potential constant check of a constexpr body (GCC's
+  potential_constant_expression, before C++23), reinterpret_cast, bounds/null/overflow at their operation, lifetimes, asm/goto,
+  indeterminate values; class objects' initializers and static_asserts' non-constant conditions evaluated. 48 files moved to pass
+  (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-consteval", per rule), no recorded pass lost, the dg control failing; the 48 rows recorded
+  alone. C++ read 5,309 / 243 / 943 to 5,357 / 243 / 895; crop completeness 91 to 92. Source: the standard's [expr.const] and
+  gcc-15.2.0's g++.dg tests (the pinned tarball); no GCC code read. gate_key moves. Alternative: a separate constant evaluator for
+  the checker (not taken: the code generator's folds share these semantics, and the checker's rules are gated by `checking?`).
+
+## 2026-11-17: n-review-b, the C++ stack held after the night's gate reviewed and merged (branch `n-review-b` from `next` 42bf8614b)
+
+- Merged in order h-review-mac-crops-cpp b22363909 (queue 324 round 2 with the main host's review fixes), mac/338-cpp-sema-crash
+  9609178aa (its sema.ae and sysroot-text hunks identical to 324's: an empty merge), mac/336-cpp-own-diag d2af54311, h-cpp-consteval
+  d36d4e385. Conflicts: doc/JOURNAL.md and doc/cpp/CPP-SURVEY.md (both sides' entries kept, in merge order), test/crops/scores.edn and
+  test/reap/matrix.edn (re-recorded). test/cpp/check-dg-own-linux-amd64.edn merged by rows (336's 42 and consteval's 48 disjoint);
+  own-diag-review.edn's `:own` made `:pass` for consteval's 48. C++ read 5,362 / 328 / 805 (36 n/a), completeness 92.
+- Read consteval's sema.ae for the code generator (the evaluator is shared; `checking?` gates the checker's rules alone): the list
+  of folds that now succeed or fail outside the checker is doc/cpp/CPP-SURVEY.md's "n-review-b"; the lowered runtime's IR can change
+  (a switch, a member array's decay and a union's write are the likeliest in libstdc++'s constexpr code). Fixed two of its bugs
+  (taken overnight, round 52): a reference bound to a temporary's member lost the temporary's lifetime extension, and a switch with a
+  label in a nested statement chose a wrong label. Alternatives considered: gating the lifetime tracking and the new folds by
+  `checking?` (rejected: the folds are the standard's, and the code generator then would keep the old, laxer semantics the checker
+  disagrees with; the IR check by day decides).
+- Note: the own dg run of 53 files peaked at 2.5 GB RSS (GOMEMLIMIT 1 GiB is a soft limit), over the night's 1 GiB a process; run once.
+
+## 2026-11-18: n-cpp-indep, C++'s eval and AOT independence counted from records (CP400 (a), CP401 (a), taken overnight, round 52)
+
+Branch `n-cpp-indep` from next 42bf8614b. C++'s independence 72.4 loses most in eval and AOT (0.5 each): the route that makes the
+programs' IR is Arbace's for 14 of 15 programs since night 11, but no record said so (CP356), ci read the lowered C on gcc's recorded
+test/c/host (and runtime-ci's overrides on the host's headers), and the runtime is clang's IR (P21 (b)). CP400 (a): bin/cppi's ci on
+c/target by c_target_host and c_sysroot, as rsi's RIND4 (a) (runtime-ci's key moves: one re-read by day). CP401 (a): run-judge
+--record and `bin/cppi inputs` write the programs' and the runtime's inputs records; crops.score's :case-inputs takes :runtime, the
+stage the mean of both (the user's CP333 (b)); facts in test/crops/independence.edn. Written tonight from the gate's run of next of
+2026-11-16 (on test/c/host): 72.4 unchanged; projected 74 after the day's samples+runtime records, about 81 with the samplings',
+about 85 with P21 (b). Alternatives: counting the programs alone (CP333 (a), 0.75 a program on a clang runtime) against the user's
+CP333 (b); leaving ci on test/c/host (no case own by RFP53's C7). doc/cpp/CPP-SURVEY.md, "As built: n-cpp-indep".
+
+## 2026-11-18: n-cpp-read, C++'s jumps into protected scopes in the own front end (branch `n-cpp-read` from mac/n-review-b aaa6d7786)
+
+- The read cell's deferred `:own-diag` (726) grouped by test/cpp/own-diag-review.edn's groups and the own record's expected messages;
+  concepts left to n-cpp-concepts. Taken: the `:jumps` group (10 files), one rule independent of types: `arbace.repr.cpp.diag/jumps`,
+  written from the standard ([stmt.dcl]/2, [except.pre], [stmt.if]/2) and GCC's manual for statement expressions, no compiler code
+  read. 11 files to pass (9 `:own-diag`, 2 `:gcc-own-rules`, out of its `:tests`); C++ read 5,362 / 328 / 805 to 5,373 / 326 / 796.
+  The 12 rows recorded by a row-wise merge of `bin/repr-cpp dg --corpus dg-error --only LIST --front native --own` (two lists of 6,
+  peak 936 MB); the 5 own-only passes holding a goto or a case label rerun, still passing. Decisions CP400-CP402 (a), taken overnight
+  (round 52), in doc/cpp/CPP-SURVEY.md's "As built: n-cpp-read". gate_key moves (repr/cpp embedded). Alternatives: the error at the
+  goto as clang places it (rejected: g++'s dg lines name the label); counting default-initialized class variables (rejected: their
+  triviality is not known here, and a wrong error would fail passing files); attr-assume8 left (needs the parser to keep the
+  attribute's expression).
+
+## 2026-11-18: n-cpp-eval, C++'s eval and AOT deferred rows (branch `n-cpp-eval` from mac/n-review-b aaa6d7786; round 52)
+
+- Each deferred row's cause found (doc/cpp/CPP-SURVEY.md, "As built: n-cpp-eval"): thread-throw.cpp ci's abort off the main thread
+  (n-ci-thread's); threads.cpp's AOT row older than `cppi_ci` (CP396 (b) waits for its run); vbase8-10.C generated by our route
+  since the record; embed-26.C's refusal gone on a reduction, the whole file over 1 GiB in gen-batch; vector1.C and vshuf-v16hi.C
+  refused for GNU vector types.
+- Fixed in arbace/cpp (abi, sema, codegen; the code generator only, the checker unchanged): GNU vector types (size, alignment,
+  lanes' list initialization, copies, constant globals, the mangling), GCC's `__builtin_shuffle`, an array of unknown bound of
+  vectors, and `main` in an included file never lazy nor dropped (vshuf-main.inc's main had been left out). Sources: GCC's manual
+  ("Using Vector Instructions through Built-in Functions") and gcc-15.2.0's g++.dg tests from the pinned tarball; no GCC or clang
+  code read.
+- Proven light (each process under 1 GiB): gen-batch of the four programs and of tmplattr5.C, their IR run natively and their
+  lowered C under gcc with the runtime's rt.c as g++'s runs, own samples against g++ 15.2, two negative controls aborting, 6 codegen
+  samples' forms unchanged. Not run: `bin/cppi check` (ci's evaluated builder in nodes-list passes 1 GiB at any setting), so no row
+  re-recorded. CP405 (a), CP406 (a) taken overnight (round 52); alternatives in the survey. gate_key moves (arbace/cpp embedded).
+
+## 2026-11-17/18: n-cpp-concepts, C++'s concept diagnostics in the own front end (branch `n-cpp-concepts` from next 42bf8614b)
+
+- Merged h-cpp-consteval (d36d4e385, the same evaluator) and 336 round 2 (d2af54311, -fconcepts read as GCC); the journal's,
+  the survey's, scores.edn's and matrix.edn's conflicts resolved by keeping both entries and recording reap and crops-score again.
+- The concepts group of the read cell's :own-diag (76 files, test/cpp/own-diag-review.edn) taken rule by rule, R1-R16
+  (doc/cpp/CPP-SURVEY.md, "As built: n-cpp-concepts"): requirements' and atomic constraints' sure substitution failures,
+  constrained placeholders' deduced types, a type-constraint's type concept and a bare concept as a type in the grammar, class and
+  variable template-ids' constraints, partial specializations more constrained than the primary, atoms of type bool,
+  return-type-requirements, block-scope requires-clauses, inherited constructors, redeclarations' and out-of-line members'
+  constraints, void parameters of a requires-expression, `this` in members' constraints. In arbace/cpp/sema.ae and template.ae
+  (gated by `checking?`: the code generator unchanged), arbace/repr/cpp/parse.ae, diag.ae and types.ae. Source: the standard's
+  [temp.constr], [expr.prim.req], [temp.param], [dcl.spec.auto], [temp.names], [temp.spec.partial] and gcc-15.2.0's g++.dg tests
+  (the pinned tarball); no GCC code read.
+- 23 of the 76 to pass (5 to 28), every one of the 913 recorded own passes still passing and the dg control failing, read in nine
+  lists of about 100 (one process each, under 1 GiB: the night's rules); two more outside the 76 (concepts/diagnostic14.C,
+  cpp0x/inh-ctor15.C) from a first list of the related files, stopped at its first part (1.48 GB, over the night's limit). The 25
+  rows recorded alone in
+  test/cpp/check-dg-own-linux-amd64.edn, the review's `:own` following them. C++ read 5,362 / 328 / 805 to 5,385 / 328 / 782;
+  completeness 92 (0.9157 to 0.9166), without by design 93 (0.9325 to 0.9334).
+- Unit cases test/cpp/selftest/concepts/ (a rule each and a negative control), `bin/cppi selftest concepts-diag`, 0.92 GB.
+- Taken overnight (round 52): CP400 (a) (an abbreviated template and a template of the same constraints are two templates, GCC's
+  reading), CP401 (a) (an inheriting class's initialization judged when every inherited base is known), CP402 (a) (a member's
+  constraint unsatisfied with a doubt keeps the function in the checker). Alternatives: the standard's reading of CP400 (one
+  template; concepts/equiv.C's "not equivalent" is GCC's), and leaving CP323 (a)'s not-judged rule for every inheriting class.
+- gate_key and arbace_javac_key move (arbace/cpp and repr/cpp are embedded since W2); no runtime key.
+
+## 2026-11-18: n-cpp-night, the night's four C++ branches on n-review-b's stack, and a correction: CP numbers renumbered (round 52)
+
+- Branch `n-cpp-night` from mac/n-review-b aaa6d7786; merged in order mac/n-cpp-indep 0466c4d68, mac/n-cpp-read 3b118ef27,
+  mac/n-cpp-eval bc7e9f7fe, mac/n-cpp-concepts 6607f42df. n-cpp-indep (from next) had built CP356 (a) again beside the stack's queue
+  324: 324's records and `:mean-with` kept, n-cpp-indep's CP400 (a) (ci on c/target), `:ci-target`, `bin/cppi inputs` and self-test
+  added on them, its second runtime mean dropped (alternative: both mechanisms side by side, rejected: two counts of one runtime).
+  n-cpp-concepts' consteval and 336 are the stack's own commits: the merge is the stack plus its own changes, line for line.
+  Records merged by rows, none changed by two branches. doc/cpp/CPP-SURVEY.md, "As built: n-cpp-night".
+- Correction to the entries above of n-cpp-read and n-cpp-concepts (2026-11-18): three branches each took CP400-CP402 tonight.
+  n-cpp-indep keeps CP400, CP401 (and its proposed CP402, CP403); n-cpp-read's CP400-CP402 (a) are CP407-CP409 (a) (the error at
+  the label; the conservative vacuousness; a `:tests` file of a class that now passes); n-cpp-concepts' CP400-CP402 (a) are
+  CP410-CP412 (a) (abbreviated and constrained templates two templates; an inheriting class's initialization judged when every
+  inherited base is known; a member's doubtful constraint keeps the function). n-cpp-eval's CP405, CP406 unchanged. The survey's
+  sections carry the new numbers.
+- Checked light (each process under 1 GiB, stopped by PID above): crops-score's self-test, `bin/cppi selftest concepts-diag`, the
+  36 moved dg rows in four lists of 9 (36 pass) and the dg control (fails as it must), reap, crops-score `--record` and `--judge
+  --strict`, records-check. C++ read 5,396 / 326 / 773, completeness 92, independence 72.
+## 2026-11-17: goi's weak and unique interpreted over Go's own, type literals written whole in messages (branch `h-go-weak`, from `next` `77630727b`)
+
+The host burst (light checks), round 51's deferred Go rows (test/goi/divergences.edn). `:std-weak-unique` (weak.go,
+escape_unique.go, fixedbugs/issue68415.go): weak and unique leave go/arbace/gotable.edn's `:out` and are interpretable packages of
+the digest, Go's own sources (go1.27.1's src/weak, src/unique, as tamago/goroot and the linux std conversion hold them), their
+runtime hooks compiled in the package arbace's new file std.go (go/arbace/std.ae; arbace/j2g/main.ae copies it with api.ae): weak's
+two runtime pulls `:replace`d by arbace.WeakRegister and arbace.WeakStrong over compiled weak.Pointer[byte] (the runtime's handles
+are untyped), unique.Make `:replace`d by arbace.UniqueMake (a canonical reflect.New copy per static type and value, strings cloned,
+held weakly and removed by runtime.AddCleanup), unique's canonmap.go, clone.go, uniqueMaps and uniqueMap left out by the list's new
+`:trim` (arbace.go.table/trim-source: their internal/sync and internal/abi imports leave the classification). `:abridged-type-literal`
+(issue11614): the checker's expr-str (arbace/go/check/code_expr.ae) writes struct, interface and func type literals whole as types2's
+syntax printer (ShortForm) does; issue11614 passes, its known entry gone, its row :pass, the class removed. escape_unique.go imports unique now and is a
+`:gc-m` known row (goi's escape port leaves out declarations that use generic instances). `GOI_DIGEST` (arbace.go.repl): a table's
+digest read in place of the executable's, so the new list's packages were checked on the gate's executable at next's key: weak.go
+pass, issue11614 pass, `--essential` 801 of 801 with the controls failing, the 118 errorcheck programs with type literals on ERROR
+lines without regression, AOT of the six unchanged; Go eval 1,755 / 70 / 9 to 1,757 / 70 / 7, completeness 98 (meant 99), reap and
+crops-score recorded. `:no-forms` (issue50372,
+slice3err) not taken: types2's checks on syntax's tree (GPS9 (c)'s adapter), not cheap. Proof: GOI-SPEC.md, "Since v1: weak and
+unique, type literals written whole". Alternatives considered: interpreting unique's own canonMap (internal/sync's HashTrieMap pulls
+the runtime's semaphores and rand: not interpretable), unique.Make[any] compiled with the handle's word reinterpreted (pointer-shaped
+types store the value in the interface's word: no stable *T), a strong map (never reclaimed: unique's contract says otherwise), and
+weak pointers by finalizers over hidden uintptrs (unsafe, one finalizer per object). fixedbugs/issue68415.go (a run of unique.Make) waits for an
+executable built with the new table, `:std-weak-unique` kept for it (gate_key moves: arbace/go, go/arbace, the list, j2g).
+## 2026-11-17: goi's deferred class `:no-forms` closed: types2's range and slice checks on syntax's tree (branch `h-go-noforms`, after next `55e8c0ae7`)
+
+- The class's two (`fixedbugs/issue50372.go`, `slice3err.go`, `$GOROOT/test` of TamaGo's go1.27.1): go/parser rejects them, so
+  goi's checker has no forms; gc's types2 reports their errors on syntax's tree. The smallest adapter is the gc syntax driver's,
+  as the go and defer check was (2026-11-04): `go/arbace/repr/go/gcsyntax/errors.ae` (`Revision` 5) ports from TamaGo's go1.27.1
+  `src/cmd/compile/internal/types2` range.go's `rangeStmt` (the iteration variables' checks, with stmt.go's extraction of
+  sKey, sValue, sExtra and `rangeKeyVal`), index.go's `sliceExpr` and `index` (3-index slice of string, a constant index out of
+  bounds, inverted constant indices) and operand.go's operand string, over a typing of the file's syntax (`tchecker`: types2's
+  scopes; a variable's type when its declaration writes basic types, arrays of a literal length, pointers, slices, maps or
+  channels; any other operand unknown and not checked, so the driver reports a subset of types2's errors). They run only on a
+  file whose tree has a node go/parser rejects (`goParserRejects`), so every file with forms keeps its errors.
+- Proven: gc's errors of both byte for byte (5 and 66 lines); a probe of the subset's edges reported only lines gc reports;
+  `bin/goi check --only` on E1's four: 4 pass; the errorcheck list (`--list`, 659): no regression (584 pass, the 17 -m programs
+  failing only for want of std's forms in a fresh worktree, then 17 of 17 with them); `--essential` 801 of 801 with the three
+  controls failing as they must; reap Go eval 1755 -> 1757 pass, deferred 9 -> 7; crops-score Go completeness 98 (meant 100).
+  Alternatives: GPS43 (b), syntax's tree adapted to the dump's go/ast shape (go/ast cannot hold a range of three
+  variables; the converter and the checker would need the bad trees adapted too); all of types2 as a renamed copy in goi's table
+  (with the std internals it imports; interpreted until a re-seed, a large program for two tests). The class left
+  `test/goi/divergences.edn`, the two lines `test/goi/check-known.edn`; doc/go/GOI-SPEC.md "Since v1: types2's range and slice
+  checks", doc/go/GO-PARSER-SURVEY.md "As built: GPS43, types2's range and slice checks".
+
+## 2026-11-17: C's read cell, the dg diagnostics h-c-deferred left (branch `h-c-decl-diag`, from `next` `498d7296f`)
+
+The host burst's task: the read cell's 27 deferred rows (dg 22, eval-depth 5). Ten dg rows fixed by porting gcc's diagnostics in
+its words, each proved on its file and on a list of 284 dg files (no other row changed); doc/C23-SURVEY.md, "As built: the read
+cell's dg diagnostics", lists them. The checker (`arbace/c/check.ae`): C99 6.7.4p3's statics of an inline definition (gcc's
+check_inline_statics) and "used but never defined" (unevaluated operands as gcc's in_typeof: sizeof, typeof, _Alignof, _Generic's
+controlling one), both only under a compilation (`check-unit`'s new `:compile`, given by dg's compile and run tests: gcc
+-fsyntax-only, the annotations' and round trip's reference, gives neither, as c23-complit-8.c's annotation row showed); a goto into
+the scope of a variably modified identifier; the conditional's composite of structures of constant and variable size; C23's fixed
+enums' empty declarations, misplaced and invalid underlying types, wrong kind of tag and incompatible redeclarations;
+`va_start ()`; `transaction_safe` in a structure's identity. The parser (`parse.ae`): a GNU nested function's definition gives the
+enclosing function's label scope back (cc's tree check keeps cc's "label undefined": gnu23-varmod-1.c known there as
+`:gcc-syntax`). The preprocessor (`pp.ae`): `__has_c_attribute` without its parenthesis in gcc's words at the operator; a pasting
+error of a stringized or `__VA_OPT__` operand at the invocation. Read 5225 / 223 / 27 to 5234 / 224 / 17; the read cell 96 (100
+without by design). Rows re-recorded by id from listed runs (h-c-deferred's merge, `.tmp/keep/wt-h-c-deferred/tools/merge.clj`,
+with the CSP5 path rule): dg 10, annotations 9, round trip 2 (levels 3-4 under `ARBACE_C_JUDGE=gcc`), tree check 2.
+Alternatives considered: a `(c/bad-defn MESSAGE TEXT)` form so that c23-auto-3.c's and c23-constexpr-3.c's reads go on past a
+definition whose declarator is not a function's (tried: the checker then runs and still misses 29 and about 150 lines of gcc's long
+tail; not kept); eval-depth's five limits-*.c rows: the parse stops at MAX-NEST 4000 by design and the converter never sees those
+trees, so no converter change helps without moving the cap (a DECISION for the user: an explicit stack in the parser's nesting
+productions and every tree walker after it, or the rows kept deferred).
+
+## 2026-11-17: gc's -m of generic instances, goi's `gc-m` 4 to 1 (branch `n-go-gcm`, night round 52, from `next` `42bf8614b` with `n-review-a`)
+
+The four `-m` programs of `gc-m` were about generic instances: `arbace.go.escape` left out every declaration that was generic or
+used generics, so `typeparam/pragma.go` and `typeparam/issue54497.go` lost all their lines and `devirtualization.go` its generic
+type's. Studied gc's unified IR stenciling (TamaGo's go1.27.1, `src/cmd/compile/internal/noder/reader.go`: `objIdx`, `Shapify`,
+`shapeSig`, `syntheticBody`, `callShaped`; `escape/escape.go`'s `paramTag`, which reports nothing for Wrapper and DUPOK functions;
+`cmd/internal/testdir`'s errorCheck, which drops other files' lines). Built (`arbace/go/escape.ae`'s `stencil`): for each
+instantiation the package's code reaches, the shaped function `f[go.shape.T]` (the generic body at the shapes) and the wrapper
+`f[T]` (a tail call of it), both with the generic declaration's pragmas; a generic type's instances' methods likewise, the
+devirtualized call to the wrapper; calls from non-generic code to the shaped function directly; instance names with types2's
+`uint8`/`int32`. A type assertion to `any` printed `(any)` again (the form is `(assert T x)`). Not modelled: the `.dict`
+parameter (only `-m=2`'s costs see it). The tags' cache version moved to `escape-9` (standard packages' own generic uses now
+analyzed). Proof, light (the gate's executable `e8e0d017243dca8a9f9f`, the checkout's goi, each process under 1 GiB): the three
+pass; `--list` of the 76 `-m` programs 59 pass, no regression; Go eval 1759 / 70 / 5 to 1762 / 70 / 2, reap and crops-score
+re-recorded. `escape_unique.go` stays in `gc-m` (deferred), narrowed: another package's generic instances, which gc stencils in
+the importer, and an executable whose table has `unique`. Decisions taken overnight (round 52): keep it deferred (Proposed 1, (a)
+recommended for goi's next generics round, 1-2 days); the `.dict` parameter not modelled (Proposed 2). Alternatives considered:
+dropping only generic declarations and keeping their users (their calls then an unknown callee's: wrong tags and no instance
+lines); substituting named generic types in the shaped receivers through the checker's `instantiate` (needs the checker's
+context; the receiver keeps its generic type instead). doc/go/GOI-SPEC.md "Since v1: gc's -m of generic instances".
+
+## 2026-11-18: C's read cell, #embed's parameters as libcpp parses them (branch `n-c-defer`, from `next` `42bf8614b` with `mac/n-review-a`)
+
+The night's task (round 52, memory-free, each process under 1 GiB): the C read cell's 17 and print cell's 22 deferred rows. Four
+dg rows of gcc 15.2's c-c++-common/cpp/embed-*.c had one cause: repr/c's preprocessor read `#embed`'s and `__has_embed`'s
+parameters its own way and looked the resource up after a parameter error (a fatal "No such file" closed embed-18.c and
+embed-27.c). Ported libcpp's `_cpp_parse_embed_params`, `skip_balanced_token_seq`, `finish_base64_embed` and `builtin_has_embed`
+(studied in gcc-15.2.0's tarball at the pin `:gcc-15.2.0`, libcpp/directives.cc, files.cc, macro.cc; GPL-3.0-or-later, no code
+copied) into `arbace/repr/c/pp.ae` (CS322 (a), taken overnight). embed-3.c and embed-18.c pass; embed-4.c and embed-27.c fail
+further on, in two new deferred classes of the C lexer (CS323 (a), taken overnight: `:unterminated-literal`, `:gnu-raw-strings`);
+gnu23-attr-syntax-3.c's row passes (h-c-decl-diag's checker). Read 5234 / 224 / 17 to 5237 / 224 / 14; C's completeness 0.9811 to
+0.9813. Rows re-recorded by id from listed runs (dg 5 rows); the token, tree and round trip checks of gcc-embed and gcc-cpp-c23 as
+recorded. Alternatives considered: widening the old messages one by one (rejected: the stops and the base64 rules are libcpp's
+logic, not words); gcc's "missing '(' in expression" in the #if evaluator (tried, reverted: the tree check compares #if errors with
+cc's; a dg-wording family instead); libcpp's unterminated literals and GNU raw strings in the C lexer (proposed as CS324, CS325: they
+need a night's whole token check). doc/C23-SURVEY.md, "As built: #embed's parameters as libcpp parses them".
+
+## 2026-11-18: C's lexer, libcpp's unterminated literals and GNU raw strings (CS324 (a), CS325 (a); branch `n-c-lex`, from `mac/n-c-defer` `95615687e`)
+
+The night's task (round 52, memory-free, each process under 1 GiB): n-c-defer's two proposed lexer DECISIONs, taken overnight as
+recommended. Studied in gcc 15.2's tarball (the pin `:gcc-15.2.0`; `libcpp/lex.cc` `lex_string`, `lex_number`; `libcpp/init.cc`
+`lang_defaults`; `gcc/c-family/c-lex.cc` `c_lex_with_flags`; GPL-3.0-or-later, no code copied). `arbace/repr/c/lex.ae`: an
+unterminated literal is one `:OTHER` token to the line's end in C too (C++'s CX2 path shared), no lexer error; `parse.ae` reports
+it as c-lex does ("missing terminating ' character", "stray 'X' in program") and drops it; `host.ae`'s `lex-mask` turns on
+`F-RAW` in gnu99 to gnu2y (lang_defaults' rliterals), `pp.ae`'s `gnu::base64` takes a raw string as a narrow literal, `convert.ae`
+gives a raw string's value. The dg rows embed-4.c and embed-27.c pass (CS323's two classes removed; a dg-wording family for
+embed-4.c's #if errors in cc's words); c23-digit-separators-2.c reads to its end but stays `:pedantic-diag`: libcpp's pp-number
+rule (every `'`, a trailing one given back) is a separate cause, proposed as CS326. The token check's new known entries
+(`:unterminated-literal`: embed-4.c, c23-digit-separators-2.c, tcc-pp's 13.S) are by design in the read cell (new classes in
+`test/c/divergences-read.edn`). Read 5237 / 224 / 14 to 5237 / 226 / 12; C's meant completeness 0.9982 to 0.9983. Rows re-recorded
+by id from listed or whole small-corpus runs (dg 3, token 3 rows and the known file of gcc-embed and tcc-pp, tree 5 rows). The token
+check's record now prints each corpus's entries sorted. Alternatives considered: a separate C feature bit for the unterminated
+literal (rejected: libcpp does it in every C mode and C++, so the path is unconditional); keeping the converter's `prefix-of` blind
+to raw strings (rejected: a raw string's value would be misread). The whole token, tree, round trip and annotation checks are the
+day's. doc/C23-SURVEY.md, "As built: libcpp's unterminated literals and GNU raw strings in C".
+
+## 2026-11-17: abort off the main thread, CS322 (a), CS323 (a) (branch `n-ci-thread`, from next `42bf8614b`)
+
+- Cause: crt's `tkill` and `tgkill` refused every tid but the process's (1000), so musl's abort on a thread (raise's and abort's
+  own `tkill(self)`) got ESRCH and fell to `a_crash`: status 139 where Linux gives 134 (LLVM's `cpp.runtime.thread-throw`, C++'s
+  `runtime/thread-throw.cpp`). Fix: `Sys.IsThread` (go/arbace/crt/sched.ae), any live thread's id accepted, the signal
+  process-directed as before (CS322 (a), taken overnight (round 52); alternatives per-thread signal state, or abort as a native).
+  go/arbace/crt is embedded: `gate_key` moves (the executables rebuild).
+- Test `test/c/run/thread-abort.c` ("ci-run verdict: exit 134."; selfref's ci-run rule reads "exit N", CS323 (a), taken
+  overnight (round 52)), two negative controls in test/c/controls.edn. `bin/ci run`: 134 (139 on the old tkill); `bin/ci check
+  --only` 4 of 4 and `--aot --only` 1 of 1, controls differ. LLVM's and C++'s rows not run (the lowered C++ runtime's build is
+  over 1 GiB): doc/C23-SURVEY.md, "As built: abort off the main thread", has the day's commands.
+
+## 2026-11-18: correction, n-ci-thread's CS322 and CS323 renumbered CS327 and CS328 (branch `n-goc-night`, night round 52)
+
+The entry "2026-11-17: abort off the main thread, CS322 (a), CS323 (a)" above (branch `n-ci-thread`, from `next` `42bf8614b`)
+numbered its two decisions CS322 and CS323, which `n-c-defer` had already taken (CS322: `#embed`'s parameters as libcpp parses
+them; CS323: the C lexer's two deferred classes), and `n-c-lex` took CS324 to CS326. Stacked on `n-goc-night` (from
+`mac/n-review-a` `413012075`, with `mac/n-go-gcm` `9a3ec7129`, `mac/n-c-lex` `e0dca79f8` on `mac/n-c-defer` `95615687e`, then
+`mac/n-ci-thread` `c48015a93`), they are CS327 (a) (crt's `tkill` and `tgkill` take any live thread's id, the signal
+process-directed) and CS328 (a) (`test/c/selfref.ae`'s ci-run rule reads "ci-run verdict: exit N."): doc/C23-SURVEY.md's "As built:
+abort off the main thread" and `test/c/run/README` renumbered; the code's comments named no CS number. The entries above keep their
+numbers. The merges' conflicts were the journal's and the survey's appends (both kept, in order) and `test/reap/matrix.edn` and
+`test/crops/scores.edn`, re-recorded on the stack; no record row was changed by two branches.
+Checked on the stack (light, each process under 1 GiB, stopped by PID when over): `bin/goi check --list` of typeparam/pragma.go,
+typeparam/issue54497.go and devirtualization.go on the gate's executable `e8e0d017243dca8a9f9f` with `ARBACE_PATH` (3 of 3 pass,
+peak 0.80 GB at `GOMEMLIMIT=600MiB`); `bin/ci dg --essential` (92 of 92, the control differs, 0.73 GB); `bin/reap --record` (Go
+eval 1762 / 70 / 2, C read 5237 / 226 / 12, C eval 2246 / 34 / 0, AOT 2254 / 26 / 0), `bin/crops-score --record`, `--judge
+--strict`, `bin/records-check` (9 pairs, 0 problems), `bin/gate --plan`.
+Then `bin/ci check --only` of ci-run's thread-abort, atomic-gcc and ptr-sub-unsigned (cirun copied from `n-ci-thread`'s
+`.tmp/ci`, its key differing only by `arbace/repr/go/syntax.ae`, which the printer does not use; musl's forms reread first, their
+key moved by `n-c-lex`'s repr/c, at one thread under `GOMEMLIMIT=550MiB`, about two hours): 3 of 3 pass, the four ci-run controls
+differ (thread-abort's two among them), peak 0.90 GB.
+
+## 2026-11-18: C's macro printer, CS82 (b) (n-c-print, round 52)
+
+Built CS82 (b) in repr/c (`arbace/repr/c/{parse,convert,print}.ae`; doc/C23-SURVEY.md, "As built: the macro printer's fix"): a
+concatenated string literal's run of invocations recovered whole (its extent to its last piece), a callee an expansion hid from its
+function-like macro printed parenthesized, a statement an invocation made but for its `;` printed as the invocation, an asm's
+operands' invocations in the :lines print alone. Proved on listed round trips under gcc's judge (the five target files pass; a
+159-file regression list 157 pass, 2 known as recorded), rows merged by id (33 changed), print 4798 / 3 / 22 to 4830 / 3 / 17.
+shell.c not run (memory rule); the 159-file run peaked at 1.46 GB, over the night's 1 GiB. Taken overnight (round 52): CS82 (b).
+Proposed: CS329 (an #include inside an initializer or enum). Alternatives: keep the classes (CS82 (a)).
+
+## 2026-11-18: n-review-cc, tonight's embedded heads reviewed for tomorrow's builds (round 52; branch `n-review-cc` from mac/n-cpp-night 684d75393)
+
+Merged mac/n-goc-night 9b8bcb98b and mac/n-c-print 722bbae14 (n-c-split had no commit yet: its worktree's work uncommitted) into
+mac/n-cpp-night: the conflicts were the journal's appends (both kept, in order) and test/reap/matrix.edn's C print and C++ read rows
+(n-c-print's C print, n-cpp-night's C++ read; `bin/reap --record` then wrote it unchanged). Checked, each process under 1 GiB: every
+changed namespace (repr/c, c, go, j2g, repr/go, cpp, repr/cpp, crops.score) required on stage 0 and the embedded ones load-filed from
+the checkout (no unresolved symbol, one new auto-boxing warning in repr/c's parse); crt, the package arbace (std.go) and gcsyntax printed
+by repr/go and built with TamaGo's go for linux/amd64 (crt also arm64), `go vet` clean but crt's spawn.go's old unreachable code;
+`bin/ci dg --essential` 92 of 92, `bin/repr-c check --c23` 59 pass / 3 expected / 0 failing, `bin/cppi selftest concepts-diag`,
+`bin/crops-score --judge --strict`, `bin/records-check` 9 pairs 0 problems; n-c-lex's gnu::base64 and #embed parameters in C++ mode
+compared on g++.dg/cpp's 26 embed files (only embed-24.C's tokens change, its gnu::offset now read; no C++ record lists it) and the
+own dg check's 5 recorded embed rows' diagnostics unchanged. Fixed: queue 336's type-constraint argument count ignored a concept's
+default template arguments (doc/cpp/CPP-SURVEY.md, "As built: n-review-cc"); taken overnight (round 52): count the parameters before the
+first default (alternative: drop the check when a concept has defaults, rejected: it loses GCC's "at least" errors).
+## 2026-11-18: an #include inside an initializer or an enum, CS329 (a) (n-c-split, round 52)
+
+Built CS329 (a) on `mac/n-c-print` `722bbae14` (doc/C23-SURVEY.md, "As built: the include inside a list"; doc/c/SPEC.md §9.2):
+repr/c's converter places the main file's directives between the elements of initializer and enumerator lists (an `#include`
+there a `(c/include ... :unit U)` element, its file's elements the directive's, the main file's commas around a directive as its
+`:c/comma-before`/`:c/comma-after`), the printer writes them on their own lines, the checker drops them
+(`arbace.c.check/strip-list-directives`); ci's read (`*include-inside*`) unchanged. quickjs's libregexp.c passes (was refused);
+unicode_gen.c reaches level 3 and is `:objects-macro-body` (an expanded assert's nop). A 20-file regression list
+(`test/repr/c/cs329-regression.txt`) passes after one fix (an `#embed`'s commas); 22 rows merged by id; print 4830 / 3 / 17 to
+4831 / 3 / 16. The quickjs run peaked at 1.47 GB, over the night's 1 GiB rule. Taken overnight (round 52): CS329 (a), every
+directive between a list's elements placed. Alternatives: (b) keep the class; placing only a list's directives when it holds an
+`#include` (narrower, but §9.2 already promised initializer elements).
+
+## 2026-11-18: n-review-cc, n-c-split merged too (round 52)
+
+mac/n-c-split 2fdd806f3 (CS329 (a), on n-c-print) pushed after the entry above; merged on top: the conflicts again the journal's
+appends (kept in order) and test/reap/matrix.edn's C print row (n-c-split's 4831 / 3 / 16) beside the C++ read row (n-cpp-night's);
+`bin/reap --record` unchanged, `bin/crops-score --judge --strict` and `bin/records-check` (9 pairs, 0 problems) pass, repr/c's convert
+and print and ci's check required and load-filed on stage 0 with no new warning, `bin/repr-c check --c23` rerun.

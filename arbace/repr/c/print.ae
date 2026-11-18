@@ -366,13 +366,36 @@
            (when-let [a (:c/end-attrs m)] (str " " (attrs-str a))))
       head)))
 
+(declare directive-str)
+
+(def ^:private list-directive-heads '#{c/include c/define c/undef c/pragma c/directive})
+
+(defn- list-directive? [x] (and (seq? x) (contains? list-directive-heads (first x))))
+
+(defn list-items-str
+  "CS329 (a): a list's items ([:el text] or [:dir form]) as the text inside its braces: the elements a comma apart, a directive on
+  a line of its own, the main file's commas around it as its form records them (:c/comma-before, :c/comma-after)."
+  ^String [items]
+  (let [b (StringBuilder.)]
+    (loop [xs (seq items) prev nil]
+      (if-let [[k v] (first xs)]
+        (if (= k :el)
+          (do (when (= prev :el) (.append b ", ")) (.append b ^String v) (recur (next xs) :el))
+          (let [m (meta v)]
+            (when (and (= prev :el) (:c/comma-before m)) (.append b ","))
+            (when-not (and (pos? (.length b)) (= \newline (.charAt b (dec (.length b))))) (.append b "\n"))
+            (.append b ^String (directive-str v)) (.append b "\n")
+            (when (:c/comma-after m) (.append b ","))
+            (recur (next xs) :dir)))
+        (str b)))))
+
 (defn enum-spec ^String [t]
   (let [m (meta t)
         [tag es] (cond (= 3 (count t)) [(nth t 1) (nth t 2)]
                        (vector? (second t)) [nil (second t)]
                        :else [(second t) nil])
         head (str (join-sp "enum" (attrs-str (:c/attrs m)) (when tag (if (seq? tag) (second tag) (name tag))))
-                  (when-let [u (:c/underlying m)] (str " : " (type-name u))))
+                  (when-let [u (:c/underlying m)] (str " : " (cond-> (type-name u) (:c/underlying-implicit m) (implicit {:c/implicit-int true})))))
         en (fn [e]
              (let [em (meta e)
                    a (when-let [a (:c/attrs em)] (str " " (attrs-str a)))]
@@ -380,7 +403,7 @@
                  (let [[nm v] e] (str (if (seq? nm) (second nm) (name nm)) a " = " (expr-str v 15 em 1)))
                  (str (if (seq? e) (second e) (name e)) a))))]
     (if es
-      (str head " { " (str/join ", " (map en es)) " }")
+      (str head " { " (list-items-str (map #(if (list-directive? %) [:dir %] [:el (en %)]) es)) " }")
       head)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -410,20 +433,22 @@
     :else (str "[" (expr-str d 16 nil nil) "]")))
 
 (defn init-str
-  "An initializer list's elements, as (init ...) and compound-lit hold them: the text inside its braces."
+  "An initializer list's elements, as (init ...) and compound-lit hold them: the text inside its braces (the directives among
+  them on their own lines, CS329 (a))."
   ^String [els pm off]
   (let [els (vec els)]
     (loop [i 0 out []]
       (if (< i (count els))
         (let [x (els i)]
           (cond
-            (keyword? x) (recur (+ i 2) (conj out (str "." (name x) " = " (expr-str (els (inc i)) 15 pm (+ off i 1)))))
+            (keyword? x) (recur (+ i 2) (conj out [:el (str "." (name x) " = " (expr-str (els (inc i)) 15 pm (+ off i 1)))]))
             (and (seq? x) (= (first x) 'at))
-            (recur (+ i 2) (conj out (str (apply str (map-indexed (fn [j d] (if (and (seq? d) false) "" (designation-str d))) (rest x)))
-                                          " = " (expr-str (els (inc i)) 15 pm (+ off i 1)))))
+            (recur (+ i 2) (conj out [:el (str (apply str (map-indexed (fn [j d] (if (and (seq? d) false) "" (designation-str d))) (rest x)))
+                                               " = " (expr-str (els (inc i)) 15 pm (+ off i 1)))]))
             (and (seq? x) (= (first x) 'c/embed)) (fail "#embed in an initializer" x)
-            :else (recur (inc i) (conj out (expr-str x 15 pm (+ off i))))))
-        (str/join ", " out)))))
+            (list-directive? x) (recur (inc i) (conj out [:dir x]))
+            :else (recur (inc i) (conj out [:el (expr-str x 15 pm (+ off i))]))))
+        (list-items-str out)))))
 
 (defn- head-name [x] (when (symbol? x) x))
 
@@ -600,7 +625,7 @@
                       head (join-sp (decl-head (merge (meta (second (first fs))) (when (= (first (first fs)) 'c/typedef) {:typedef true}))) bs)]
                   (str head " " (str/join ", " (map second parts)) (end-attrs m) ";"))
         c/static-assert (static-assert-str f)
-        c/asm (str (second f) ";")
+        c/asm (str (or (:c/asm-text (meta f)) (second f)) ";")
         c/attr-decl (str (attrs-str (vec (rest f))) ";")
         c/local-labels (str "__label__ " (str/join ", " (map name (rest f))) ";")
         c/defn ((resolve 'arbace.repr.c.print/defn-str) f)
@@ -744,7 +769,7 @@
           continue (line b (if (seq args) (str "continue " (name (first args)) ";") "continue;"))
           return (line b (if (seq args) (str "return " (expr-str (first args) 16 m 1) ";") "return;"))
           c/expr (line b (str (expr-str (first args) 16 m 1) ";"))
-          c/asm (line b (str (first args) ";"))
+          c/asm (line b (str (or (:c/asm-text (meta s)) (first args)) ";"))
           c/attr-decl (line b (decl-str s))
           (if (decl-heads h)
             (if (= h 'c/defn)

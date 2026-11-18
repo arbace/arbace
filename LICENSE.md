@@ -189,8 +189,10 @@ covers what.
   (`collectDecls`' and `checkPragmas`' checks, `funcExt`'s of a function's directives) and
   `src/cmd/compile/internal/ir/node.go` (the `PragmaFlag` bits), written in Go, adapted (gc's
   configuration fixed: package `p`, linux/amd64, outside the standard library and the runtime)
-  and read into Go forms by `bin/repr-go read`: Copyright The Go Authors, under Go's BSD 3-Clause
-  License (text below).
+  and read into Go forms by `bin/repr-go read`; and since 2026-11-17 (doc/go/GOI-SPEC.md, "Since v1: types2's range
+  and slice checks") a port, written in Go forms, of `src/cmd/compile/internal/types2`'s `range.go` (`rangeStmt`'s
+  checks of the iteration variables, `rangeKeyVal`), `stmt.go` (the range clause's variables), `index.go` (`sliceExpr`,
+  `index`) and `operand.go` (the operand's string): Copyright The Go Authors, under Go's BSD 3-Clause License (text below).
 - `arbace/python/scope.ae` (pyi's scope analysis, doc/python/PYI-SPEC.md §2; doc/python/PYTHON-SURVEY.md, "As built:
   PY5a"): a port to Arbace of CPython 3.14.10's `Python/symtable.c` (the symbol table's two passes, its mangling and its
   messages) and of `Python/future.c`'s `future_parse` and `future_check_features`, from the release tarball

@@ -274,7 +274,9 @@ and, once per distinct content, the header unit's file:
   form). The printer prints the directive, never the unit.
 - An include whose header is not found is a read error (the reference's message, §9.5); `__has_include`
   is answered from the host data (§9.1). A declaration that begins in one file and ends in another is
-  refused with its position (none in the measured corpora; such a file is classed `split-declaration`).
+  refused with its position (such a file is classed `split-declaration`), unless every other file's token comes from an
+  `#include` the declaration holds between the items of a statement list (CS275 (a)) or between the elements of an
+  initializer or an enumerator list (CS329 (a), §9.2): that `#include` is a form there, its tokens the directive's.
 - The header units of musl (CS11) are those its own sources and the corpora's units produce; ci's
   `(c/include "<stdio.h>")` at the REPL reads the header in the REPL unit's current context.
 
@@ -445,7 +447,8 @@ enumerator = NAME | [NAME expr]      ; with an explicit value
 
 An enumerator's implicit value (the previous plus one) and the enumerated type's compatible integer type
 (6.7.3.3; gcc's choice, §12.3) are derived, never written. Attributes on an enumerator: metadata on its
-symbol or on its vector (`^{:c/attrs [deprecated]} [OLD 1]`).
+symbol or on its vector (`^{:c/attrs [deprecated]} [OLD 1]`). A directive between enumerators is an element of the vector
+(§9.2, CS329 (a)).
 
 ### 5.6 Attributes
 
@@ -631,7 +634,8 @@ designator = :member | index-expr | [lo hi]
 ```
 
 Elements keep source order; brace elision is written as the source elides (the checker fills the
-aggregate as 6.7.11 says). `(c/embed ...)` may stand among the elements (§9.3).
+aggregate as 6.7.11 says). `(c/embed ...)` may stand among the elements (§9.3), and directives (§9.2: an `#include`
+inside a table, the `#define` and `#undef` around it, CS329 (a)).
 
 ## 7. Code
 
@@ -985,6 +989,23 @@ of a call) is a form there:
   read (`*include-inside*`), the pragmas of a re-entered main file (`MAIN#again`, whose offsets do not tell its copies apart) are
   placed by the token stream instead: the preprocessor hands each to the parser with the next token, and the body's items get a
   `c/pragma` before the item that token starts.
+- **In an initializer list or an enumerator list** (CS329 (a)) a directive between two elements, or before the first or after
+  the last, is an element of the list's forms: of `(init ...)` (and of a compound literal's elements), of an `(enum tag [...])`'s
+  vector. An `#include` there (quickjs's `#define DEF(id, size) { #id, size },` `#include "libregexp-opcode.h"` `#undef DEF`
+  inside a table) is `(c/include "\"x.h\"" :unit U)`, and the elements its file brought in are the directive's, as a body's
+  `#include` keeps its statements (U holds none of them): the print writes the `#include` and the reread expands it again.
+  Each directive on a line of its own; the main file's commas around it, which the print must write and a header's elements
+  may bring themselves, are its metadata: `:c/comma-before` (a comma between the element before it and it) and `:c/comma-after`
+  (a comma between it and what follows):
+
+  ```clojure
+  (c/typedef Op (enum [(c/define DEF [id size] "OP_ ## id,") (c/include "\"tbl.h\"" :unit c.h.e3b0c44298fc1c14) (c/undef DEF) OP_COUNT]))
+  (c/var ^{:tag (array int)} sizes (init 7 ^:c/comma-before (c/define DEF [id size] "size") (c/include "\"one.h\"" :unit c.h.e3b0c44298fc1c14)
+                                         ^:c/comma-after (c/undef DEF) 9))   ; { 7,  #define ... #include "one.h" #undef DEF , 9 }
+  ```
+
+  An `#embed` is the elements it expands to (§9.3), not one of these. The checker reads the elements alone (it drops these
+  forms, `arbace.c.check/strip-list-directives`); ci's read (`*include-inside*`) places none and keeps the included elements.
 - A directive that does not fall between two items (inside an expression, between a declaration's
   specifiers) is `:full`'s only; the `:lines` print gives the active configuration (N6).
 - **Eval and AOT ignore** `c/define`, `c/undef`, `c/directive`; `c/include` enters its unit (§4.3); the
@@ -1013,6 +1034,14 @@ reads the resource.
   (`^{:c/amacro {1 "LIMIT"}} (< i 10)` for `i < LIMIT`). The text is the invocation's tokens with single
   spaces (`:full` keeps the spacing). The `:lines` print writes the invocation in place of the node
   (cemit's recovery): the macro is defined where the print is compiled, by a `c/define` or a header.
+- CS82 (b) (2026-11-18): a concatenated string literal whose pieces are each one invocation's, one after
+  another (`k(#) k(#undef k) k(x)`, `BOX_24 BOX_24`), carries their texts joined by a space; a piece no
+  invocation made leaves the literal expanded. A statement one invocation made but for the `;` written
+  after it (`NEEDBITS(16);`, a do-while macro) carries `:c/macro-stmt "NEEDBITS(16);"`. An extended or
+  basic `asm`'s text stays the expansion's (ci parses its operands); an invocation inside it after its
+  first token is the `:lines` print's, `^{:c/asm-text "..."}` on the `c/asm`. A callee named as a
+  function-like macro of the main file defined where it stands (a name an expansion hid from the macro)
+  is `^{:c/paren true}`, printed `(square)(2)`, which no macro takes.
 - An invocation **inside** a node (`#define BEGIN {`, `#define ARGS a, b`), or nested so that its
   expansion is part of a node, is `:full`'s only: `:lines` prints the expansion (N6).
 - The macros of a header (`EOF`, `errno`, `assert`, `va_arg`) are recovered the same way; `errno` is

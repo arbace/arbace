@@ -472,6 +472,15 @@ void __atomic_store();
       (cond
         (= c \space) (recur b true)
         (= c \newline) (let [b (or b (StringBuilder.))] (.append b (.-sep t)) (.append b "\n") (recur b sp))
+        ;; CS324 (a): the lexer's stray token (an unterminated literal to its line's end, libcpp's CPP_OTHER): gcc's c-lex
+        ;; reports it and drops it ("missing terminating ' character", "stray 'L' in program"), the parse going on
+        (= c :OTHER)
+        (let [^String s (.-src t) q (when (pos? (.length s)) (.charAt s 0))]
+          (eh p (str (tpos (conv p t "" 0)) ": "
+                     (cond (or (= q \") (= q \')) (str "missing terminating " q " character")
+                           (and q (< 32 (int q) 127)) (str "stray '" q "' in program")
+                           :else (str "stray '\\" (Integer/toOctalString (int (or q 0))) "' in program"))))
+          (recur b sp))
         :else (let [seq (inc (long (slot p SEQ)))
                     ;; CS150 (*recover*): a space token of the preprocessor (a comment of a macro's body) before the token
                     sp-sep (if (and *recover* sp (= "" (.-sep t))) " " (.-sep t))]
@@ -553,6 +562,12 @@ void __atomic_store();
   each, since cc's widened tail does not keep a hex escape's end), by token (weak keys, identity)."
   (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
 
+(def strlit-toks
+  "Arbace (CS82 (b)): the tokens of the string literals a concatenated token absorbed after its first, by token (weak keys,
+  identity): the converter's extent of the literal (its last piece's sequence number, the files its pieces came from) and the
+  macro invocations its pieces came from (a run of invocations recovered as one text)."
+  (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
+
 (defn- sh
   "p.shift: the lookahead consumed, adjacent string literals concatenated into it (in builders: a
   macro may expand to a million literals, torture's pr46534.c)."
@@ -561,7 +576,7 @@ void __atomic_store();
    (let [r (shift0 p)
          concat! (fn [kinds]
                    (let [sep (StringBuilder. ^String (.-sep r)) b (StringBuilder. ^String (.-src r))
-                         pieces (ArrayList.)]
+                         pieces (ArrayList.) toks (ArrayList.)]
                      (.add pieces (.-src r))
                      (loop []
                        (let [c (rn p)]
@@ -571,10 +586,12 @@ void __atomic_store();
                              (canonicalize-tail! b)
                              (.append b (subs (.-src t) skip))
                              (.add pieces (.-src t))
+                             (.add toks t)
                              (recur))
                            (let [t (tree/with-texts r (.toString sep) (.toString b))]
                              ;; Arbace (C3b): the literals' own texts, for the converter's values
                              (.put ^java.util.Map strlit-pieces t (vec pieces))
+                             (.put ^java.util.Map strlit-toks t (vec toks))
                              t))))))
          r (cond
              (and (= (ch r) :STRINGLITERAL) (= (rn p) :STRINGLITERAL)) (concat! {:STRINGLITERAL 1 :LONGSTRINGLITERAL 2})
@@ -878,7 +895,10 @@ void __atomic_store();
 
 (defn- compound-statement [^Parser p in-fresh-new-scope is-fn-scope ^HashMap d]
   (when-not in-fresh-new-scope (new-scope! p))
-  (let [saved-gotos (slot p GOTOS)]
+  (let [saved-gotos (slot p GOTOS)
+        ;; a GNU nested definition (block-item's :BlockItemFuncDef) gives the enclosing function's scope back, where the
+        ;; enclosing body's later labels are declared
+        saved-fnscope (slot p FNSCOPE)]
     (when is-fn-scope
       (slot! p FNSCOPE (slot p SCOPE))
       (slot! p GOTOS [])
@@ -899,7 +919,8 @@ void __atomic_store();
       (when is-fn-scope
         (.put r :gotos (slot p GOTOS))
         (resolve-gotos! p r)
-        (slot! p GOTOS saved-gotos))
+        (slot! p GOTOS saved-gotos)
+        (when saved-fnscope (slot! p FNSCOPE saved-fnscope)))
       (when-not in-fresh-new-scope (close-scope! p))
       r)))
 

@@ -576,6 +576,15 @@
 
 (declare parse-defined parse-has parse-pragma parse-macro-args subst include-next-paths expression uv u?)
 
+(def ^:dynamic *paste-at*
+  "Arbace: the invocation's macro name token while its replacement list is substituted: where gcc places a pasting error
+  whose left operand the expansion made (a stringized argument) or that a __VA_OPT__'s body makes (va-opt-6)." nil)
+(def ^:dynamic *in-va-opt* "Arbace: whether a __VA_OPT__'s body is being substituted." false)
+(def ^:private stringized
+  "Arbace: the tokens stringize made (identity), the left operands glue places at the invocation."
+  (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
+(defn- stringized! [^Tok t] (.put ^java.util.Map stringized t true) t)
+
 (defn expand
   "cpp.expand: the tokens of `ts` expanded into `w` (an ArrayList); `outer`: one token at a time
   (the tokenizer's), `eval`: in a #if (defined and the __has_ operators)."
@@ -600,13 +609,14 @@
                         :else (recur (inc i) level)))))]
           (cond
             (and eval (= s "defined")) (recur (parse-defined c ts))
-            (and eval (has-ops s)) (recur (parse-has c ts s))
+            (and eval (has-ops s)) (recur (parse-has c ts s t))
             ;; Arbace: gcc answers the attribute and builtin operators outside #if too (cc: an identifier)
             (and (not eval) (#{"__has_attribute" "__has_c_attribute" "__has_builtin" "__has_cpp_attribute"} s)
                  (= (ch (first (ts-peek-non-blank ts))) \())
-            (recur (parse-has c ts s))
+            (recur (parse-has c ts s t))
             (and (not eval) (= s "__has_embed") (= (ch (first (ts-peek-non-blank ts))) \())
-            (let [w (ArrayList.)
+            (let [_ (eh c (str (pos-str t) ": '__has_embed' used outside of preprocessing directive")) ; gcc's, then evaluated
+                  w (ArrayList.)
                   body (loop [acc [] level 0]
                          (let [x (ts-shift ts)]
                            (cond
@@ -631,7 +641,7 @@
                             (slot! c COUNTER (inc n))
                             (assoc m :rl [(Tok. :PPNUMBER (str n) (.-sep t) (.-pf t) (.-po t) nil nil)]))
                           m)
-                      sub (subst c eval m (:rl m) nil nil (hs-add hs s) [])]
+                      sub (binding [*paste-at* t] (subst c eval m (:rl m) nil nil (hs-add hs s) []))]
                   (ts-prepend ts (mapv #(lex/with-pos-m % t m) sub))
                   (recur ts))
                 :else
@@ -645,7 +655,7 @@
                             (do (eh c (str (pos-str rparen) ": too many macro arguments"))
                                 (when (= (ret) ::more) (recur ts)))
                             :else
-                            (let [sub (subst c eval m (:rl m) (:params m) args (hs-add (hs-cap hs (.-hs rparen)) s) [])]
+                            (let [sub (binding [*paste-at* t] (subst c eval m (:rl m) (:params m) args (hs-add (hs-cap hs (.-hs rparen)) s) []))]
                               (ts-prepend ts (mapv #(lex/with-pos % t) sub))
                               (recur ts)))))
                     (when (= (ret) ::more) (recur ts))))))))))))
@@ -688,11 +698,16 @@
   "Arbace (cc: parseHasFeature, its own answers for __has_feature and __has_builtin, 0 else): the
   reference's __has_attribute, __has_c_attribute, __has_builtin, __has_feature, __has_extension:
   `op ( name )`, the name an identifier or `vendor::name`, replaced by the recorded answer."
-  [^Cpp c ts ^String op]
+  [^Cpp c ts ^String op ^Tok opt]
   (skip-blank ts)
-  (let [p (ts-peek ts 0)]
-    (if-not (= (ch p) \()
-      (do (eh c (str (pos-str p) ": operator \"" op "\" requires a parenthesized identifier")) ts)
+  (let [p (ts-peek ts 0)
+        ;; the line's end has no position: the operator's (review 006's finding 1)
+        p (if (and opt (nil? (lex/tok-position p))) opt p)]
+    (if-not (= (ch (ts-peek ts 0)) \()
+      (do (eh c (str (pos-str p) (if (contains? #{"__has_c_attribute" "__has_attribute" "__has_cpp_attribute"} op)
+                                   (str ": missing '(' after \"" op "\"") ; c_common_has_attribute's
+                                   (str ": operator \"" op "\" requires a parenthesized identifier"))))
+          ts)
       (do (ts-shift ts)
           (let [closed (volatile! false)
                 raw (loop [acc []]
@@ -819,7 +834,8 @@
                  (not (if cxx lexed (single-token? text)))
                  ;; Arbace (CS143): `::` is a token in C23 (6.4.7)
                  (not (and (= text "::") c23)))
-          (do (eh c (str (pos-str t) ": pasting \"" (.-src t) "\" and \"" (.-src r0)
+          (do (eh c (str (pos-str (if (and *paste-at* (or *in-va-opt* (.containsKey ^java.util.Map stringized t))) *paste-at* t))
+                         ": pasting \"" (.-src t) "\" and \"" (.-src r0)
                          "\" does not give a valid preprocessing token"))
               (-> ls (conj sp-tok) (into rs)))
           (let [t2 (Tok. k text "" (.-pf t) (.-po t) (.-m t) (hs-cap (.-hs t) (.-hs r0)))]
@@ -905,7 +921,7 @@
             (let [k (count bodies)
                   nm (str "__VA_OPT__\u0000" k)
                   body (if (va-present? c eval m aps)
-                         (subst c eval (assoc (dissoc m :opt :opt-bodies :opt-base) :pm true) content fp aps nil [])
+                         (binding [*in-va-opt* true] (subst c eval (assoc (dissoc m :opt :opt-bodies :opt-base) :pm true) content fp aps nil []))
                          [])]
               (recur (long j) (conj out (Tok. :IDENTIFIER nm (.-sep t) (.-pf t) (.-po t) (.-m t) (.-hs t)))
                      (assoc opt nm (+ 1000000 (count aps) k)) (conj bodies (trim body))))
@@ -933,7 +949,7 @@
                     (let [[^Tok t2 skip] (peek-non-blank-v is i)
                           skip (long skip)]
                       (when (and (= (.-ch t2) :IDENTIFIER) (>= (m-is m (.-src t2)) 0))
-                        [(+ i skip 1) (conj os (stringize t (ap-select m t2 aps (m-is m (.-src t2)))))])))
+                        [(+ i skip 1) (conj os (stringized! (stringize t (ap-select m t2 aps (m-is m (.-src t2))))))])))
                   (let [[^Tok t i space-deleted] (if (and (= (.-ch t) \space) (< i n) (= (ch (is i)) :PPPASTE))
                                                    [(is i) (inc i) true]
                                                    [t i false])]
@@ -949,7 +965,7 @@
                                  (and (= (.-ch t3) :IDENTIFIER) (>= (m-is m (.-src t3)) 0))))
                           (let [[^Tok t3 skip3] (peek-non-blank-v is (+ i skip 1))]
                             [(+ i skip 1 (long skip3) 1)
-                             (glue c os [(stringize t2 (ap-select m t3 aps (m-is m (.-src t3))))])])
+                             (glue c os [(stringized! (stringize t2 (ap-select m t3 aps (m-is m (.-src t3)))))])])
                           (>= k 0)
                           (if (arg-empty? m aps k)
                             [(+ i skip 1)
@@ -1170,7 +1186,11 @@
       ;; an angled include searches the -I directories, then the system ones (review 057's finding 3)
       :else (boolean (some #(has-file? c (join % nm)) (concat (:include (.-cfg c)) (:sys (.-cfg c))))))))
 
-(declare embed-resource)
+(declare embed-resource parse-embed-params)
+
+(def ^:dynamic *embed-param*
+  "Arbace (n-c-defer): whether the expression is an #embed parameter's (limit, gnu::offset): gcc's \"division by zero in #embed\"."
+  false)
 
 (defn- primary-expression [^Cpp c ^Toks s eval]
   (let [t (token s)]
@@ -1183,7 +1203,41 @@
       (do (ts-shift s)
           (let [nm (src t)]
             (cond
-              (#{"__has_include" "__has_include__" "__has_include_next" "__has_embed"} nm)
+              ;; Arbace (n-c-defer): libcpp's builtin_has_embed (macro.cc): its '(', its header-name, then its parameters by
+              ;; parse-embed-params; the tokens after what they took left to the expression, as gcc's are
+              (= nm "__has_embed")
+              (let [paren (= (ch (token s)) \()
+                    _ (if paren (ts-shift s) (eh c (str (pos-str t) ": missing '(' before '__has_embed' operand")))
+                    ^Tok t1 (token s)
+                    at1 (if (= (ch t1) :eof) t t1)
+                    raw (cond
+                          (and (= (ch t1) :STRINGLITERAL) (.startsWith (src t1) "\"") (.endsWith (src t1) "\"") (>= (count (src t1)) 2))
+                          (do (ts-shift s) (src t1))
+                          (= (ch t1) :HEADER_NAME) (do (ts-shift s) (src t1))
+                          (= (ch t1) \<)
+                          (let [b (StringBuilder.)]
+                            (ts-shift s)
+                            (.append b "<")
+                            (loop []
+                              (let [x (token s)]
+                                (cond
+                                  (= (ch x) :eof) (do (eh c (str (pos-str t1) ": missing terminating '>' character")) (.append b ">"))
+                                  (= (ch x) \>) (do (ts-shift s) (.append b ">"))
+                                  :else (do (ts-shift s) (.append b (src x)) (recur)))))
+                            (.toString b))
+                          :else
+                          (do (eh c (str (pos-str at1) ": operator '__has_embed' requires a header-name"))
+                              (ts-shift s) (when paren (ts-shift s)) nil))]
+                (if (nil? raw)
+                  0
+                  (let [rest (loop [acc []] (let [x (ts-shift s)] (if (= (ch x) :eof) acc (recur (conj acc x)))))
+                        r (parse-embed-params c rest true t1)
+                        _ (ts-prepend s (subvec (:v r) (min (count (:v r)) (long (:n r)))))
+                        ok (and (:ok r)
+                                (or (> (count raw) 2)
+                                    (do (eh c (str (pos-str t1) ": empty filename in '__has_embed'")) false)))]
+                    (if ok (embed-resource c t1 raw r true) 0))))
+              (#{"__has_include" "__has_include__" "__has_include_next"} nm)
               (if-not (= (ch (token s)) \()
                 (do (eh c (str (pos-str (token s)) ": expected '('"))
                     (loop [] (ts-shift s) (case (ch (token s)) \) (do (ts-shift s) 0) :eof 0 (recur))))
@@ -1201,20 +1255,9 @@
                                               (and (= nm "__has_embed") (= (ch t1) \>)))
                                         (do (when (= (ch t1) \>) (.append b ">") (ts-shift s)) (.toString b))
                                         (recur t1))))))]
-                      (if (= nm "__has_embed")
-                        ;; Arbace: C23's __has_embed (6.10.1): its parameters, balanced, to the parenthesis
-                        (let [params (loop [acc [] level 0]
-                                       (let [x (ts-shift s)]
-                                         (cond
-                                           (= (ch x) :eof) acc
-                                           (and (= (ch x) \)) (zero? level)) acc
-                                           (= (ch x) \() (recur (conj acc x) (inc level))
-                                           (= (ch x) \)) (recur (conj acc x) (dec level))
-                                           :else (recur (conj acc x) level))))]
-                          (embed-resource c t arg params true))
-                        (if (= (ch (token s)) \))
-                          (do (ts-shift s) (if (has-include? c t arg (= nm "__has_include_next")) 1 0))
-                          (do (eh c (str (pos-str (token s)) ": expected ')'")) 0))))))
+                      (if (= (ch (token s)) \))
+                        (do (ts-shift s) (if (has-include? c t arg (= nm "__has_include_next")) 1 0))
+                        (do (eh c (str (pos-str (token s)) ": expected ')'")) 0)))))
               ;; Arbace: true and false are 1 and 0 in C23's #if (6.10.1)
               (and (= nm "true") (or (#{:c23 :gnu23} (:std (.-cfg c))) (:cxx (.-cfg c)))) 1 ; Arbace (CX2): C++ too
               (= (rune-of s) \()
@@ -1279,7 +1322,7 @@
   (fn [lhs rhs eval ^Tok t]
     (if (and eval (typed? lhs) (typed? rhs))
       (if (zero? (uv rhs))
-        (do (eh c (str (pos-str t) ": division by zero")) lhs)
+        (do (eh c (str (pos-str t) ": division by zero" (when *embed-param* " in #embed"))) lhs)
         (if (and (not (u? lhs)) (not (u? rhs)))
           (fs (long lhs) (long rhs))
           (UVal. (long (fu (uv lhs) (uv rhs))))))
@@ -1516,7 +1559,7 @@
                       (enter! c g using sysdir pth entry))))
                   (do (eh c (str (pos-str s0) ": include file not found: " raw)) (slot! c CLOSED true)))))))))))
 
-(declare embed-params)
+(declare param-value offset-value)
 
 (defn- param-value
   "Arbace: an #embed parameter's integer, its tokens expanded and evaluated as #if's are."
@@ -1540,85 +1583,205 @@
     (when (= v Long/MAX_VALUE) (eh c (str (pos-str (first body)) ": too large 'gnu::offset' argument")))
     v))
 
+(defn- base64-bytes
+  "Arbace (n-c-defer): libcpp's finish_base64_embed's decoding (files.cc): the narrow string literals `ts` of a gnu::base64
+  parameter, their texts between the quotes joined, decoded as base64 with gcc's rules (a length a multiple of 4, '=' padding
+  in the last group alone, the unused bits of the last character 0); nil when not valid (escapes and other characters
+  included: gcc reads the spelling, not the value)."
+  [ts]
+  (let [s (apply str (map #(let [x (src %)] (subs x 1 (dec (count x)))) ts))
+        n (count s)
+        dec* (fn ^long [^long i] (let [c (int (.charAt ^String s (int i)))]
+                                   (cond (<= 65 c 90) (- c 65) (<= 97 c 122) (+ 26 (- c 97)) (<= 48 c 57) (+ 52 (- c 48))
+                                         (= c 43) 62 (= c 47) 63 :else -1)))]
+    (when (zero? (rem n 4))
+      (let [out (java.io.ByteArrayOutputStream.)
+            groups (quot n 4)]
+        (loop [g 0]
+          (if (>= g groups)
+            (.toByteArray out)
+            (let [o (* 4 g)
+                  last? (= g (dec groups))
+                  p2 (.charAt ^String s (int (+ o 2))) p3 (.charAt ^String s (int (+ o 3)))]
+              (if (and last? (= p3 \=))
+                ;; the padded last group: one byte (==) or two (=)
+                (let [a (dec* o) b (dec* (inc o))]
+                  (when-not (or (neg? a) (neg? b))
+                    (.write out (int (bit-and (bit-or (bit-shift-left a 2) (bit-shift-right b 4)) 0xff)))
+                    (if (= p2 \=)
+                      (when (zero? (bit-and b 15)) (.toByteArray out))
+                      (let [c (dec* (+ o 2))]
+                        (when-not (or (neg? c) (not (zero? (bit-and c 3))))
+                          (.write out (int (bit-and (bit-or (bit-shift-left b 4) (bit-shift-right c 2)) 0xff)))
+                          (.toByteArray out))))))
+                (let [a (dec* o) b (dec* (+ o 1)) c (dec* (+ o 2)) d (dec* (+ o 3))]
+                  (when-not (or (neg? a) (neg? b) (neg? c) (neg? d))
+                    (.write out (int (bit-and (bit-or (bit-shift-left a 2) (bit-shift-right b 4)) 0xff)))
+                    (.write out (int (bit-and (bit-or (bit-shift-left b 4) (bit-shift-right c 2)) 0xff)))
+                    (.write out (int (bit-and (bit-or (bit-shift-left c 6) d) 0xff)))
+                    (recur (inc g))))))))))))
+
 (defn- embed-resource
-  "Arbace: C23's #embed resource (6.10.4) found: as `has?` (__has_embed) its answer (0 not found, 1
-  found, 2 empty), else its bytes (gnu::offset(N) skipped, limit(N) kept), nil when not found."
-  [^Cpp c ^Tok t ^String raw params has?]
+  "Arbace: C23's #embed resource (6.10.4) found, its parameters `r` parse-embed-params's (ok): as `has?` (__has_embed) its
+  answer (0 not found or an error, 1 found, 2 empty), else its bytes (gnu::offset(N) skipped, limit(N) kept), nil when not
+  found, :error after an error of gnu::base64's (libcpp's _cpp_stack_embed and finish_base64_embed)."
+  [^Cpp c ^Tok t ^String raw r has?]
   (if (< (count raw) 2)
     (if has? 0 nil)
     (let [quoted (.startsWith raw "\"")
-          nm (subs raw 1 (dec (count raw)))
-          cur (nth (or (lex/tok-position t) ["" 0 0]) 0)
-          ;; gcc's search: a quoted name the current file's directory first, then the --embed-dirs; an
-          ;; absolute name itself
-          dirs (if (.startsWith nm "/")
-                 [""]
-                 (concat (when quoted [(dir-of cur)]) (:embed-dirs (.-cfg c))))
-          ps (embed-params c params)
-          known #{"limit" "prefix" "suffix" "if_empty" "gnu::offset" "gnu::base64"}
-          ;; gcc: gnu::base64 only on "." and without limit or gnu::offset
-          b64 (when (and quoted (= nm ".") (contains? ps "gnu::base64")
-                         (not (contains? ps "limit")) (not (contains? ps "gnu::offset")))
-                (let [ts (filter #(= (ch %) :STRINGLITERAL) (get ps "gnu::base64"))]
-                  (try (.decode (java.util.Base64/getDecoder)
-                                ^String (apply str (map #(let [x (src %)] (subs x 1 (dec (count x)))) ts)))
-                       (catch Exception _ nil))))
-          ;; gcc: a parameter it does not know makes the resource not found
-          f (when (and (every? known (keys ps)) (or b64 (not (contains? ps "gnu::base64"))))
-              (if b64 :base64 (some (fn [d] (let [p (join d nm)] (when (has-file? c p) p))) dirs)))
-          limit (when-let [b (get ps "limit")] (param-value c b))
-          offset (when-let [b (get ps "gnu::offset")] (offset-value c b))
-          bs (cond (= f :base64) b64 f (lex/read-bytes (.getPath (resolve-file c f))))
-          bs (if (and bs offset (pos? (long offset)))
-               (if (< (long offset) (alength ^bytes bs))
-                 (java.util.Arrays/copyOfRange ^bytes bs (int offset) (alength ^bytes bs))
-                 (byte-array 0))
-               bs)
-          bs (if (and bs limit (< (long limit) (alength ^bytes bs))) (java.util.Arrays/copyOf ^bytes bs (int limit)) bs)]
-      (if has?
-        (cond (nil? bs) 0 (zero? (alength ^bytes bs)) 2 :else 1)
-        bs))))
+          nm (subs raw 1 (dec (count raw)))]
+      (if (seq (:base64 r))
+        ;; gcc: gnu::base64's bytes are the resource, only on "."
+        (if (or (not quoted) (not= nm "."))
+          (do (when-not has? (eh c (str (pos-str t) ": 'gnu::base64' parameter can be only used with '\".\"'")))
+              (if has? 0 :error))
+          (if-let [bs (base64-bytes (:base64 r))]
+            (if has? (if (zero? (alength ^bytes bs)) 2 1) bs)
+            (do (eh c (str (pos-str t) ": 'gnu::base64' argument not valid base64 encoded string"))
+                (if has? 0 :error))))
+        (let [cur (nth (or (lex/tok-position t) ["" 0 0]) 0)
+              ;; gcc's search: a quoted name the current file's directory first, then the --embed-dirs; an
+              ;; absolute name itself
+              dirs (if (.startsWith nm "/")
+                     [""]
+                     (concat (when quoted [(dir-of cur)]) (:embed-dirs (.-cfg c))))
+              f (some (fn [d] (let [p (join d nm)] (when (has-file? c p) p))) dirs)
+              limit (:limit r)
+              offset (:offset r)
+              bs (when f (lex/read-bytes (.getPath (resolve-file c f))))
+              bs (if (and bs offset (pos? (long offset)))
+                   (if (< (long offset) (alength ^bytes bs))
+                     (java.util.Arrays/copyOfRange ^bytes bs (int offset) (alength ^bytes bs))
+                     (byte-array 0))
+                   bs)
+              bs (if (and bs limit (< (long limit) (alength ^bytes bs))) (java.util.Arrays/copyOf ^bytes bs (int limit)) bs)]
+          (if has?
+            (cond (nil? bs) 0 (zero? (alength ^bytes bs)) 2 :else 1)
+            bs))))))
 
-(def ^:private embed-known #{"limit" "prefix" "suffix" "if_empty" "gnu::offset" "gnu::base64"})
+(defn- nonblank-adjacent
+  "The tokens of `raw` but the blanks, and for each whether it follows the one before it with nothing between (libcpp's
+  COLON_SCOPE: a ':' immediately followed by ':' in C, where :: is two tokens)."
+  [raw]
+  (loop [xs (seq raw) prev-blank true v [] adj []]
+    (if-let [^Tok t (first xs)]
+      (if (blank? t)
+        (recur (next xs) true v adj)
+        (recur (next xs) false (conj v t) (conj adj (and (not prev-blank) (not (has-sep? t))))))
+      [v adj])))
 
-(defn- embed-params
-  "Arbace: an #embed's parameters: {name tokens}, the tokens of prefix(...), suffix(...), if_empty(...); the
-  diagnostics gcc gives (a name expected, a repeated parameter, a missing parenthesis) to `c`."
-  [^Cpp c toks]
-  (loop [ts (vec (remove #(= (ch %) \space) toks)) acc {}]
-    (if (empty? ts)
-      acc
-      (let [^Tok t (ts 0)
-            _ (when-not (= (ch t) :IDENTIFIER) (eh c (str (pos-str t) ": expected parameter name")))
-            [nm ts] (if (and (= (ch t) :IDENTIFIER) (> (count ts) 3) (= (ch (ts 1)) \:) (= (ch (ts 2)) \:))
-                      [(str (src t) "::" (src (ts 3))) (subvec ts 4)]
-                      [(src t) (subvec ts 1)])
-            nm (str/join "::" (map #(str/replace % #"^__(.*)__$" "$1") (str/split nm #"::")))
-            _ (when (contains? acc nm) (eh c (str (pos-str t) ": duplicate embed parameter '" nm "'")))
-            _ (when (and (= (ch t) :IDENTIFIER) (contains? embed-known nm) (not (and (seq ts) (= (ch (ts 0)) \()))) (eh c (str (pos-str t) ": expected '('")))]
-        (if (and (seq ts) (= (ch (ts 0)) \())
-          (let [closer {\( \) \[ \] \{ \}}
-                ;; CS143: the parameter's tokens balanced as gcc's stack does: a closer that does not close the innermost
-                ;; opener is an error and stays unmatched; an opener left open at the end is one too
-                [body rest] (loop [i 1 stack [\)]]
-                              (if (>= i (count ts))
-                                (do (eh c (str (pos-str t) ": unbalanced '(' in the embed parameter")) [(subvec ts 1) []])
-                                (let [k (ch (ts i))]
-                                  (cond
-                                    (contains? closer k) (recur (inc i) (conj stack (closer k)))
-                                    (contains? #{\) \] \}} k)
-                                    (cond (= k (peek stack))
-                                          (if (= 1 (count stack))
-                                            [(subvec ts 1 i) (subvec ts (inc i))]
-                                            (recur (inc i) (pop stack)))
-                                          :else (do (eh c (str (pos-str (ts i)) ": unbalanced '" (src (ts i)) "'")) (recur (inc i) stack)))
-                                    :else (recur (inc i) stack)))))]
-            (recur rest (assoc acc nm body)))
-          (recur ts (assoc acc nm [])))))))
+(defn- skip-balanced
+  "libcpp's skip_balanced_token_seq: the tokens of `v` from `i` to the closer `end` skipped, each opener's own run nested;
+  a closer of another kind is \"unbalanced 'C'\", the end of the line \"unbalanced 'O'\" of the run's opener. With `save?`
+  the tokens are kept (the outer closer not): [index after acc]."
+  [^Cpp c v ^long i end save? nested acc]
+  (let [n (count v)]
+    (loop [i i acc acc]
+      (if (>= i n)
+        (do (eh c (str (pos-str (if (pos? n) (v (dec n)) lex/eof-tok)) ": unbalanced '" ({\) \( \] \[ \} \{} end) "'"))
+            [i acc])
+        (let [^Tok t (v i)
+              k (ch t)
+              acc (if (and save? (or nested (not= k end))) (conj acc t) acc)]
+          (cond
+            (= k end) [(inc i) acc]
+            (= k \() (let [[i acc] (skip-balanced c v (inc i) \) save? true acc)] (recur (long i) acc))
+            (= k \[) (let [[i acc] (skip-balanced c v (inc i) \] save? true acc)] (recur (long i) acc))
+            (= k \{) (let [[i acc] (skip-balanced c v (inc i) \} save? true acc)] (recur (long i) acc))
+            (contains? #{\) \] \}} k) (do (eh c (str (pos-str t) ": unbalanced '" k "'")) (recur (inc i) acc))
+            :else (recur (inc i) acc)))))))
+
+(defn- uglified ^String [^String s]
+  (if (and (> (count s) 4) (.startsWith s "__") (.endsWith s "__")) (subs s 2 (- (count s) 2)) s))
+
+(defn- parse-embed-params
+  "Arbace (n-c-defer): libcpp's _cpp_parse_embed_params (directives.cc), ported: an #embed's (or, `has?`, a __has_embed's)
+  parameters from the tokens `raw` after its resource, with gcc's diagnostics in its words and order (a parameter name
+  expected, a scope's second name, a duplicate, an unknown parameter (not under __has_embed), a missing '(', gnu::base64's
+  narrow string literals and its ')', the balanced runs of prefix, suffix and if_empty and of an unknown parameter, the
+  values of limit and gnu::offset evaluated as #if's; at the end gnu::base64 against limit or gnu::offset and
+  -fpreprocessed's requirement). {:ok (false: the resource is not read) :n (the non-blank tokens taken: under __has_embed,
+  through its closing parenthesis or the token that stopped it) :v (raw's non-blank tokens) :params {\"prefix\" toks ...}
+  :base64 toks :limit n :offset n}. `loc` the resource's token."
+  [^Cpp c raw has? ^Tok loc]
+  (let [[v adj] (nonblank-adjacent raw)
+        n (count v)
+        at (fn ^Tok [^long i] (if (< i n) (v i) lex/eof-tok))
+        lastpos (fn [] (if (pos? n) (v (dec n)) loc))
+        ident? (fn [^long i] (and (< i n) (= (ch (v i)) :IDENTIFIER)))]
+    (loop [i 0 seen #{} r {:params {} :base64 [] :ok true}]
+      (if-not (ident? i)
+        (let [t (at i)
+              stop (fn [j] (assoc r :ok false :n j :v v))]
+          (cond
+            (and (>= i n) has?) (do (eh c (str (pos-str (lastpos)) ": expected ')'")) (stop i))
+            (and (< i n) (not (and has? (= (ch t) \))))) (do (eh c (str (pos-str t) ": expected parameter name")) (stop (inc i)))
+            :else
+            (let [r (assoc r :n (if (< i n) (inc i) i) :v v)
+                  b64 (:base64 r)]
+              (cond
+                (and (seq b64) (or (seen "limit") (seen "gnu::offset")))
+                (do (when-not has? (eh c (str (pos-str (first b64)) ": 'gnu::base64' parameter conflicts with 'limit' or 'gnu::offset' parameters")))
+                    (assoc r :ok false))
+                (and (empty? b64) (:preprocessed (.-cfg c)))
+                (do (when-not has? (eh c (str (pos-str loc) ": 'gnu::base64' parameter required in preprocessed source")))
+                    (assoc r :ok false))
+                :else r))))
+        (let [^Tok t0 (v i)
+              j (inc i)
+              ;; a scope: C++'s ::, or C's : immediately followed by :
+              [scope j] (cond (= (ch (at j)) :COLONCOLON) [true (inc j)]
+                              (and (= (ch (at j)) \:) (= (ch (at (inc j))) \:) (nth adj (inc j) false)) [true (+ j 2)]
+                              :else [false j])]
+          (if (and scope (not (ident? j)))
+            (do (eh c (str (pos-str (if (< j n) (v j) (lastpos))) ": expected parameter name")) (assoc r :ok false :n (min n (inc j)) :v v))
+            (let [[prefix ^Tok nt j] (if scope [(uglified (src t0)) (v j) (inc j)] [nil t0 j])
+                  nm (uglified (src nt))
+                  key (cond (nil? prefix) (when (#{"limit" "prefix" "suffix" "if_empty"} nm) nm)
+                            (= prefix "gnu") (when (#{"base64" "offset"} nm) (str "gnu::" nm)))
+                  shown (str (when prefix (str prefix "::")) nm)
+                  _ (when (and key (seen key)) (eh c (str (pos-str nt) ": duplicate embed parameter '" shown "'")))
+                  _ (when (and (nil? key) (not has?)) (eh c (str (pos-str nt) ": unknown embed parameter '" shown "'")))
+                  r (if key r (assoc r :ok false))
+                  seen (if key (conj seen key) seen)
+                  paren (= (ch (at j)) \()]
+              (cond
+                (and key (not paren))
+                (do (eh c (str (pos-str nt) ": expected '('")) (recur (long j) seen r))
+                (#{"limit" "gnu::offset"} key)
+                ;; the parenthesized expression (libcpp's _cpp_parse_expr from its '(')
+                (let [k (loop [k (inc j) depth 1]
+                          (cond (>= k n) k
+                                (= (ch (v k)) \() (recur (inc k) (inc depth))
+                                (= (ch (v k)) \)) (if (= depth 1) k (recur (inc k) (dec depth)))
+                                :else (recur (inc k) depth)))
+                      _ (when (>= k n) (eh c (str (pos-str (lastpos)) ": missing ')' in expression")))
+                      body (subvec v (inc j) (min k n))
+                      val (binding [*embed-param* true] (if (= key "limit") (param-value c body) (offset-value c body)))]
+                  (recur (long (min n (inc k))) seen (assoc r (if (= key "limit") :limit :offset) val)))
+                (= key "gnu::base64")
+                (let [k (inc j)
+                      ;; CS325 (a): a raw string (R"d(...)d", libcpp's CPP_STRING too) is a narrow string literal, its text not
+                      ;; base64 (base64-bytes: the spelling between the first and last characters)
+                      str? (fn [^long k] (and (< k n) (= (ch (v k)) :STRINGLITERAL)
+                                              (or (.startsWith (src (v k)) "\"") (.startsWith (src (v k)) "R\""))))]
+                  (if (str? k)
+                    (let [e (loop [e k] (if (str? e) (recur (inc e)) e))]
+                      (when-not (= (ch (at e)) \)) (eh c (str (pos-str (if (< e n) (v e) (lastpos))) ": expected ')'")))
+                      (recur (long (min n (inc e))) seen (update r :base64 into (subvec v k e))))
+                    ;; not a narrow string literal: the error, the token skipped unless it is the ')'
+                    (let [_ (eh c (str (pos-str (if (< k n) (v k) (lastpos))) ": expected character string literal"))
+                          k (if (and (< k n) (not= (ch (v k)) \))) (inc k) k)]
+                      (recur (long (min n (inc k))) seen r))))
+                paren
+                (let [save? (and (not has?) (#{"prefix" "suffix" "if_empty"} key))
+                      [k acc] (skip-balanced c v (inc j) \) save? false [])]
+                  (recur (long k) seen (if save? (update-in r [:params key] (fnil into []) acc) r)))
+                :else (recur (long j) seen r)))))))))
 
 (defn- embed!
   "Arbace: C23's #embed: its resource's bytes as a line of integer constants, with its prefix and
-  suffix, or if_empty's tokens (6.10.4)."
+  suffix, or if_empty's tokens (6.10.4); libcpp's do_embed (its resource's name, its parameters, then the resource)."
   [^Cpp c line]
   (let [^Tok verb (line 1)
         w (ArrayList.)
@@ -1627,32 +1790,29 @@
         _ (expand c false true (toks (tokens->cpp (subvec (pop line) 2) true (macros-of c))) w)
         s (vec w)
         raw (if (seq s) (include-arg s) "")
+        ;; gcc's _cpp_bracket_include: a < without its > takes the rest of the line ("missing terminating '>' character")
+        raw (if (and (.startsWith ^String raw "<") (or (= 1 (count raw)) (not (.endsWith ^String raw ">"))))
+              (do (eh c (str (pos-str (s 0)) ": missing terminating '>' character")) (str raw ">"))
+              raw)
         n-arg (if (and (seq s) (= (ch (s 0)) \<)) (inc (count (take-while #(not= (ch %) \>) s))) 1)
-        params (if (> (count raw) 1) (embed-params c (drop n-arg s)) {})
-        ;; CS143: a parameter gcc does not know is an error of its own (the directive is dropped, the file goes on), and the
-        ;; values of limit and gnu::offset are evaluated for their diagnostics
-        unknown (remove embed-known (keys params))
-        _ (doseq [nm unknown] (eh c (str (pos-str verb) ": unknown embed parameter '" nm "'")))
-        ;; gcc under -fpreprocessed: a preprocessed source's #embed holds its bytes as gnu::base64 (gcc.dg/cpp/embed-6.c)
-        pre-bad (and (:preprocessed (.-cfg c)) (> (count raw) 2) (empty? unknown) (not (contains? params "gnu::base64")))
-        _ (when pre-bad (eh c (str (pos-str verb) ": 'gnu::base64' parameter required in preprocessed source")))
-        unknown (if pre-bad ["gnu::base64"] unknown) ; the directive dropped, as an unknown parameter's
-        _ (when (and (> (count raw) 2) (empty? unknown))
-            (when-let [b (get params "limit")] (param-value c b))
-            (when-let [b (get params "gnu::offset")] (offset-value c b)))
-        bs (when (and (> (count raw) 2) (empty? unknown)) (embed-resource c (if (seq s) (s 0) verb) raw (drop n-arg s) false))
+        r (when (> (count raw) 2) (parse-embed-params c (drop n-arg s) false (s 0)))
+        bs (when (:ok r) (embed-resource c (s 0) raw r false))
+        params (:params r)
         nl (peek line)]
     (record! c {:directive "embed" :pos (lex/tok-position (line 0)) :off (.-po ^Tok (line 0)) :file (some-> ^CFile (.-pf ^Tok (line 0)) .-name) :text (line-text line) :resource raw})
-    (if (nil? bs)
+    (cond
+      (<= (count raw) 1) (eh c (str (pos-str verb) ": '#embed' expects '\"FILENAME\"' or '<FILENAME>'"))
+      (= 2 (count raw)) (eh c (str (pos-str (if (seq s) (s 0) verb)) ": empty filename in #embed"))
+      ;; a parameter's error that stops the directive, or gnu::base64's (given)
+      (or (not (:ok r)) (= bs :error)) nil
+      (nil? bs)
       (cond
-        (seq unknown) nil
-        (<= (count raw) 1) (eh c (str (pos-str verb) ": '#embed' expects \"FILENAME\" or <FILENAME>"))
-        (= 2 (count raw)) (eh c (str (pos-str verb) ": empty filename in #embed"))
         ;; libcpp's search_path_head: an angle-bracketed resource with no --embed-dir has no chain to search, an error that is
         ;; not fatal (the directive dropped; embed-9)
         (and (.startsWith ^String raw "<") (not (.startsWith ^String raw "</")) (empty? (:embed-dirs (.-cfg c))))
         (eh c (str (pos-str verb) ": no include path in which to search for " (subs raw 1 (dec (count raw)))))
         :else (do (eh c (str (pos-str verb) ": " raw ": No such file or directory")) (slot! c CLOSED true)))
+      :else
       (let [at (line 0)
             nums (if (zero? (alength ^bytes bs))
                    (get params "if_empty" [])

@@ -1,5 +1,6 @@
 ;; The pragma handling ported from src/cmd/compile/internal/noder (noder.go, lex.go, writer.go)
-;; and ir/node.go of TamaGo's go1.27.1 tree:
+;; and ir/node.go of TamaGo's go1.27.1 tree, and types2's checks ported from
+;; src/cmd/compile/internal/types2 (range.go, stmt.go, index.go, operand.go) of the same tree:
 ;; Copyright 2009, 2016 The Go Authors. All rights reserved.
 ;; Use of this source code is governed by a BSD-style
 ;; license that can be found in the LICENSE file.
@@ -19,7 +20,7 @@
 
     [syntax "arbace/repr/go/internal/syntax"]])
 
-(go/const ^{:val 4 :doc "Revision is the driver's revision, raised with every change to it: arbace.repr.go.syntax runs the checkout's driver, interpreted by goi, when a program's compiled one is of another revision (the tools' host built before the change).\n"} Revision 4)
+(go/const ^{:val 5 :doc "Revision is the driver's revision, raised with every change to it: arbace.repr.go.syntax runs the checkout's driver, interpreted by goi, when a program's compiled one is of another revision (the tools' host built before the change).\n"} Revision 5)
 
 (go/const "gc's configuration: base.Ctxt.Pkgpath, buildcfg.GOOS and GOARCH\n"
   [^{:val "p"} pkgpath "p"]
@@ -464,23 +465,452 @@
     (set! (values (.-file p) _) (syntax/Parse (syntax/NewFileBase path) (bytes/NewReader src) (.-error p) (.-pragma p) syntax/CheckBranches))
     p))
 
-(go/func Errors "Errors parses the Go file at path as gc's noder does (syntax.Parse, its errors to a handler, noder's pragma handler, CheckBranches) and returns its errors as gc prints them with -C, a line each, name:LINE: MESSAGE, after a first character S when one of them is a syntax error (gc stops after the parse), else -.\n" ^string [^string path ^string name]
+(go/func Errors "Errors parses the Go file at path as gc's noder does (syntax.Parse, its errors to a handler, noder's pragma handler, CheckBranches) and returns its errors as gc prints them with -C (with types2's go and defer check, and on a file go/parser rejects types2's range and slice checks: tchecker), a line each, name:LINE: MESSAGE, after a first character S when one of them is a syntax error (gc stops after the parse), else -.\n" ^string [^string path ^string name]
   (let [p (parse path)]
     (when (.-syn (.-errs p))
       (return (+ "S" (.text (.-errs p) name))))
 
     (when (!= (.-file p) nil)
-      (suspendedCalls (.-file p) (addr (.-errs p))))
+      (suspendedCalls (.-file p) (addr (.-errs p)))
+      (when (goParserRejects (.-file p))
+        (.file (addr (lit tchecker :errs (addr (.-errs p)))) (.-file p))))
 
     (+ "-" (.text (.-errs p) name))))
 
-(go/func suspendedCalls "suspendedCalls: types2's check of a go or defer statement's expression on syntax's tree (stmt.go, suspendedCall: expression in go must be function call), which gc reports with the parse's errors that are not syntax errors (noder goes on to types2): the one check of types2's that go/parser's rejection of the file hides from goi's checker, a statement go/parser accepts never failing it.\n" [^syntax/Node f ^{:tag (* errorList)} errs]
+(go/func suspendedCalls "suspendedCalls: types2's check of a go or defer statement's expression on syntax's tree (stmt.go, suspendedCall: expression in go must be function call), which gc reports with the parse's errors that are not syntax errors (noder goes on to types2): a check of types2's that go/parser's rejection of the file hides from goi's checker, a statement go/parser accepts never failing it (the others: tchecker).\n" [^syntax/Node f ^{:tag (* errorList)} errs]
   (syntax/Inspect f (fn ^bool [^syntax/Node n]
       (when [(values s ok) (assert (* syntax/CallStmt) n)] ok
         (when [(values _ call) (assert (* syntax/CallExpr) (.-Call s))] (not call)
           (.add errs (.Pos (.-Call s)) (+ "expression in " (.String (.-Tok s)) " must be function call"))))
 
       true)))
+
+(go/func goParserRejects "goParserRejects reports whether the tree has a node go/parser rejects though gc's syntax accepts it (a range clause of more than two iteration variables, a 3-index slice missing an index, a go or defer statement whose expression is not a call): the files without forms on which types2's checks below run, so that a file go/parser accepts, checked by goi's checker, has the errors it had.\n" ^bool [^{:tag (* syntax/File)} f]
+  (let [found false]
+    (syntax/Inspect f (fn ^bool [^syntax/Node n]
+        (type-switch [n n]
+          (case [(* syntax/RangeClause)]
+            (when [(values l ok) (assert (* syntax/ListExpr) (.-Lhs n))] (and ok (> (len (.-ElemList l)) 2))
+              (set! found true)))
+          (case [(* syntax/SliceExpr)]
+            (when (.-Full n)
+              (range [_ x (subslice (.-Index n) 1)]
+                (when [(values _ bad) (assert (* syntax/BadExpr) x)] bad
+                  (set! found true)))))
+          (case [(* syntax/CallStmt)]
+            (when [(values _ call) (assert (* syntax/CallExpr) (.-Call n))] (not call)
+              (set! found true))))
+
+        (not found)))
+
+    found))
+
+(go/type ttype "ttype: a type types2 would give an operand, as far as the checks below know it from the file's syntax alone: a basic type (its name; \"untyped string\" a string constant's), an array of a constant length, a pointer, a slice, a map or a channel of such types; nil (unknown) for any other, a named type's among them.\n" (struct
+    ^{:tag string} kind
+    ^{:tag string} name
+    ^{:tag int64} n
+    ^{:tag (* ttype)} elem
+    ^{:tag (* ttype)} key
+    ^{:tag syntax/ChanDir} dir))
+
+(go/method String "String: the type as types2's TypeString prints it.\n" ^string [^{:tag (* ttype)} t]
+  (switch (.-kind t)
+    (case ["array"]
+      (return (+ "[" (strconv/FormatInt (.-n t) 10) "]" (.String (.-elem t)))))
+    (case ["pointer"]
+      (return (+ "*" (.String (.-elem t)))))
+    (case ["slice"]
+      (return (+ "[]" (.String (.-elem t)))))
+    (case ["map"]
+      (return (+ "map[" (.String (.-key t)) "]" (.String (.-elem t)))))
+    (case ["chan"]
+      (switch (.-dir t)
+        (case [syntax/SendOnly]
+          (return (+ "chan<- " (.String (.-elem t)))))
+        (case [syntax/RecvOnly]
+          (return (+ "<-chan " (.String (.-elem t))))))
+
+      (return (+ "chan " (.String (.-elem t))))))
+
+  (.-name t))
+
+(go/func isString ^bool [^{:tag (* ttype)} t]
+  (and (== (.-kind t) "basic") (or (== (.-name t) "string") (== (.-name t) "untyped string"))))
+
+(go/var ^{:doc "basicNames: the universe's basic types the checks know.\n"} basicNames (lit (map string bool) ["bool" true] ["string" true] ["int" true] ["int8" true] ["int16" true] ["int32" true] ["int64" true] ["uint" true] ["uint8" true] ["uint16" true] ["uint32" true] ["uint64" true] ["uintptr" true] ["float32" true] ["float64" true] ["complex64" true] ["complex128" true] ["byte" true] ["rune" true]))
+
+(go/type tobj "tobj: an object of a scope: a variable (its type, nil when unknown) or another name.\n" (struct
+    ^{:tag bool} isVar
+    ^{:tag (* ttype)} typ))
+
+(go/type tscope "tscope: a scope of the file, its names' objects.\n" (struct
+    ^{:tag (* tscope)} parent
+    ^{:tag (map string (* tobj))} objs))
+
+(go/func newScope ^{:tag (* tscope)} [^{:tag (* tscope)} parent]
+  (addr (lit tscope :parent parent :objs (lit (map string (* tobj))))))
+
+(go/method declare [^{:tag (* tscope)} s ^{:tag (* syntax/Name)} n ^{:tag (* tobj)} o]
+  (when (and (!= n nil) (!= (.-Value n) "_"))
+    (aset (.-objs s) (.-Value n) o)))
+
+(go/method lookup "lookup: the object of name in s or a scope around it, and whether it is declared there (not: the universe's, or another file's).\n" [^{:tag (* tscope)} s ^string name] :results [(* tobj) bool]
+  (for [sc s] (!= sc nil) (set! sc (.-parent sc))
+    (when [(values o ok) (aget (.-objs sc) name)] ok
+      (return o true)))
+
+  (return nil false))
+
+(go/type toperand "toperand: an operand as types2 has it, as far as the checks know: a variable of a known type (mode 1) or an untyped string constant of length slen (mode 2); mode 0 unknown.\n" (struct
+    ^{:tag int} mode
+    ^{:tag (* ttype)} typ
+    ^{:tag int64} slen))
+
+(go/type tchecker "tchecker: the checks of types2 (cmd/compile/internal/types2) on syntax's tree of a file go/parser rejects, which goi's checker cannot run without forms (doc/go/GO-PARSER-SURVEY.md GPS43 (b)): range.go's rangeStmt's checks of the iteration variables and index.go's sliceExpr's checks of a slice's indices, on the operands whose types the file's syntax gives (typeOf, operand); an operand of any other type is not checked, so that the checks report only errors types2 reports.\n" (struct
+    ^{:tag (* errorList)} errs))
+
+(go/method typeOf "typeOf: the type the type expression e denotes in scope s, or nil (unknown).\n" ^{:tag (* ttype)} [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^syntax/Expr e]
+  (type-switch [e e]
+    (case [(* syntax/Name)]
+      (let [(values _ found) (.lookup s (.-Value e))]
+        (when (and (not found) (aget basicNames (.-Value e)))
+          (return (addr (lit ttype :kind "basic" :name (.-Value e)))))))
+    (case [(* syntax/ParenExpr)]
+      (return (.typeOf c s (.-X e))))
+    (case [(* syntax/ArrayType)]
+      (when [(values l ok) (assert (* syntax/BasicLit) (.-Len e))] (and ok (== (.-Kind l) syntax/IntLit) (not (.-Bad l)))
+        (when [(values n err) (strconv/ParseInt (.-Value l) 0 64)] (== err nil)
+          (when [el (.typeOf c s (.-Elem e))] (!= el nil)
+            (return (addr (lit ttype :kind "array" :n n :elem el)))))))
+    (case [(* syntax/SliceType)]
+      (when [el (.typeOf c s (.-Elem e))] (!= el nil)
+        (return (addr (lit ttype :kind "slice" :elem el)))))
+    (case [(* syntax/Operation)]
+      (when (and (== (.-Op e) syntax/Mul) (== (.-Y e) nil))
+        (when [el (.typeOf c s (.-X e))] (!= el nil)
+          (return (addr (lit ttype :kind "pointer" :elem el))))))
+    (case [(* syntax/MapType)]
+      (let [k (.typeOf c s (.-Key e))
+          v (.typeOf c s (.-Value e))]
+        (when (and (!= k nil) (!= v nil))
+          (return (addr (lit ttype :kind "map" :key k :elem v))))))
+    (case [(* syntax/ChanType)]
+      (when [el (.typeOf c s (.-Elem e))] (and (!= el nil) (!= (.-kind el) "chan"))
+        (return (addr (lit ttype :kind "chan" :elem el :dir (.-Dir e)))))))
+
+  nil)
+
+(go/method operand "operand: the operand of the expression e in scope s (toperand).\n" ^toperand [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^syntax/Expr e]
+  (type-switch [e e]
+    (case [(* syntax/ParenExpr)]
+      (return (.operand c s (.-X e))))
+    (case [(* syntax/Name)]
+      (when [(values o found) (.lookup s (.-Value e))] (and found (.-isVar o) (!= (.-typ o) nil))
+        (return (lit toperand :mode 1 :typ (.-typ o)))))
+    (case [(* syntax/BasicLit)]
+      (when (and (== (.-Kind e) syntax/StringLit) (not (.-Bad e)))
+        (when [(values v err) (strconv/Unquote (.-Value e))] (== err nil)
+          (return (lit toperand :mode 2 :typ (addr (lit ttype :kind "basic" :name "untyped string")) :slen (conv int64 (len v))))))))
+
+  (lit toperand))
+
+(go/method file "file: the checks over the file's declarations: its package scope first (every name of the file's declarations; a dot import's names unknown, so none is checked), then the variables' types, then the initializers and the functions' bodies.\n" [^{:tag (* tchecker)} c ^{:tag (* syntax/File)} f]
+  (let [pkg (newScope nil)]
+    (range [_ d (.-DeclList f)]
+      (type-switch [d d]
+        (case [(* syntax/ImportDecl)]
+          (if (!= (.-LocalPkgName d) nil)
+            (do
+              (when (== (.-Value (.-LocalPkgName d)) ".")
+                (return))
+
+              (.declare pkg (.-LocalPkgName d) (addr (lit tobj))))
+
+            (when (!= (.-Path d) nil)
+              (when [(values path err) (strconv/Unquote (.-Value (.-Path d)))] (== err nil)
+                (aset (.-objs pkg) (filepath/Base path) (addr (lit tobj)))))))
+        (case [(* syntax/ConstDecl)]
+          (range [_ n (.-NameList d)]
+            (.declare pkg n (addr (lit tobj)))))
+        (case [(* syntax/TypeDecl)]
+          (.declare pkg (.-Name d) (addr (lit tobj))))
+        (case [(* syntax/VarDecl)]
+          (range [_ n (.-NameList d)]
+            (.declare pkg n (addr (lit tobj :isVar true)))))
+        (case [(* syntax/FuncDecl)]
+          (when (== (.-Recv d) nil)
+            (.declare pkg (.-Name d) (addr (lit tobj)))))))
+
+    (range [_ d (.-DeclList f)]
+      (when [(values v ok) (assert (* syntax/VarDecl) d)] (and ok (!= (.-Type v) nil))
+        (let [t (.typeOf c pkg (.-Type v))]
+          (range [_ n (.-NameList v)]
+            (when [(values o found) (aget (.-objs pkg) (.-Value n))] (and found (.-isVar o))
+              (set! (.-typ o) t))))))
+
+    (range [_ d (.-DeclList f)]
+      (type-switch [d d]
+        (case [(* syntax/ConstDecl)]
+          (.expr c pkg (.-Values d)))
+        (case [(* syntax/VarDecl)]
+          (.expr c pkg (.-Values d)))
+        (case [(* syntax/FuncDecl)]
+          (.function c pkg (.-Recv d) (.-TParamList d) (.-Type d) (.-Body d)))))))
+
+(go/method function "function: a function's body in its scope: its type parameters, then its receiver, parameters and results, their types resolved before them (a parameter's scope is the body).\n" [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^{:tag (* syntax/Field)} recv ^{:tag (slice (* syntax/Field))} tparams ^{:tag (* syntax/FuncType)} t ^{:tag (* syntax/BlockStmt)} body]
+  (let [fs (newScope s)]
+    (range [_ p tparams]
+      (.declare fs (.-Name p) (addr (lit tobj))))
+
+    (let [^{:tag (slice (* syntax/Field))} fields (zero (slice (* syntax/Field)))]
+      (when (!= recv nil)
+        (set! fields (append fields recv)))
+
+      (when (!= t nil)
+        (set! fields (append fields (spread (.-ParamList t))))
+        (set! fields (append fields (spread (.-ResultList t)))))
+
+      (let [types (make (slice (* ttype)) (len fields))]
+        (range [i p fields]
+          (aset types i (.typeOf c fs (.-Type p))))
+
+        (range [i p fields]
+          (.declare fs (.-Name p) (addr (lit tobj :isVar true :typ (aget types i)))))))
+
+    (when (!= body nil)
+      (.stmts c (newScope fs) (.-List body)))))
+
+(go/method expr "expr: the checks of the slice expressions in e, a function literal's body in its scope.\n" [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^syntax/Expr e]
+  (when (== e nil)
+    (return))
+
+  (syntax/Inspect e (fn ^bool [^syntax/Node n]
+      (type-switch [n n]
+        (case [(* syntax/FuncLit)]
+          (.function c s nil nil (.-Type n) (.-Body n))
+          (return false))
+        (case [(* syntax/SliceExpr)]
+          (.slice c s n)))
+
+      true)))
+
+(go/method define "define: the variables a short variable declaration's left-hand side lhs declares in s (their types unknown).\n" [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^syntax/Expr lhs]
+  (type-switch [lhs lhs]
+    (case [(* syntax/Name)]
+      (.declare s lhs (addr (lit tobj :isVar true))))
+    (case [(* syntax/ListExpr)]
+      (range [_ x (.-ElemList lhs)]
+        (when [(values n ok) (assert (* syntax/Name) x)] ok
+          (.declare s n (addr (lit tobj :isVar true))))))))
+
+(go/method stmts [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^{:tag (slice syntax/Stmt)} list]
+  (range [_ st list]
+    (.stmt c s st)))
+
+(go/method stmt "stmt: the checks of a statement, the scopes of its blocks and declarations as types2's.\n" [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^syntax/Stmt st]
+  (type-switch [st st]
+    (case [(* syntax/DeclStmt)]
+      (range [_ d (.-DeclList st)]
+        (type-switch [d d]
+          (case [(* syntax/ConstDecl)]
+            (.expr c s (.-Values d))
+            (range [_ n (.-NameList d)]
+              (.declare s n (addr (lit tobj)))))
+          (case [(* syntax/VarDecl)]
+            (.expr c s (.-Values d))
+            (let [^{:tag (* ttype)} t (zero (* ttype))]
+              (when (!= (.-Type d) nil)
+                (set! t (.typeOf c s (.-Type d))))
+
+              (range [_ n (.-NameList d)]
+                (.declare s n (addr (lit tobj :isVar true :typ t))))))
+          (case [(* syntax/TypeDecl)]
+            (.declare s (.-Name d) (addr (lit tobj)))))))
+    (case [(* syntax/LabeledStmt)]
+      (.stmt c s (.-Stmt st)))
+    (case [(* syntax/BlockStmt)]
+      (.stmts c (newScope s) (.-List st)))
+    (case [(* syntax/ExprStmt)]
+      (.expr c s (.-X st)))
+    (case [(* syntax/SendStmt)]
+      (.expr c s (.-Chan st))
+      (.expr c s (.-Value st)))
+    (case [(* syntax/AssignStmt)]
+      (.expr c s (.-Rhs st))
+      (if (== (.-Op st) syntax/Def)
+        (.define c s (.-Lhs st))
+
+        (.expr c s (.-Lhs st))))
+    (case [(* syntax/CallStmt)]
+      (.expr c s (.-Call st)))
+    (case [(* syntax/ReturnStmt)]
+      (.expr c s (.-Results st)))
+    (case [(* syntax/IfStmt)]
+      (let [is (newScope s)]
+        (.stmt c is (.-Init st))
+        (.expr c is (.-Cond st))
+        (.stmt c is (.-Then st))
+        (.stmt c is (.-Else st))))
+    (case [(* syntax/ForStmt)]
+      (let [fs (newScope s)]
+        (if [(values r ok) (assert (* syntax/RangeClause) (.-Init st))] ok
+          (do
+            (.expr c s (.-X r))
+            (.rangeClause c s r)
+            (if (.-Def r)
+              (.define c fs (.-Lhs r))
+
+              (.expr c s (.-Lhs r))))
+
+          (do
+            (.stmt c fs (.-Init st))
+            (.expr c fs (.-Cond st))
+            (.stmt c fs (.-Post st))))
+
+        (.stmt c fs (.-Body st))))
+    (case [(* syntax/SwitchStmt)]
+      (let [ss (newScope s)
+          ^{:tag (* syntax/Name)} guard (zero (* syntax/Name))]
+        (.stmt c ss (.-Init st))
+        (if [(values g ok) (assert (* syntax/TypeSwitchGuard) (.-Tag st))] ok
+          (do
+            (.expr c ss (.-X g))
+            (set! guard (.-Lhs g)))
+
+          (.expr c ss (.-Tag st)))
+
+        (range [_ cc (.-Body st)]
+          (let [cs (newScope ss)]
+            (.expr c cs (.-Cases cc))
+            (when (!= guard nil)
+              (.declare cs guard (addr (lit tobj :isVar true))))
+
+            (.stmts c cs (.-Body cc))))))
+    (case [(* syntax/SelectStmt)]
+      (range [_ cc (.-Body st)]
+        (let [cs (newScope s)]
+          (.stmt c cs (.-Comm cc))
+          (.stmts c cs (.-Body cc)))))))
+
+(go/func rangeKeyVal "rangeKeyVal: range.go's, the key and value types of a range over an operand of type t, and whether the checks know them (a range over an integer, a function or a send-only channel not: types2's language version and iterator checks).\n" [^{:tag (* ttype)} t] :results [(* ttype) (* ttype) bool]
+  (let [u t
+      i (addr (lit ttype :kind "basic" :name "int"))]
+    (when (and (== (.-kind t) "pointer") (== (.-kind (.-elem t)) "array"))
+      (set! u (.-elem t)))
+
+    (switch (.-kind u)
+      (case ["basic"]
+        (when (isString u)
+          (return i (addr (lit ttype :kind "basic" :name "rune")) true)))
+      (case ["array" "slice"]
+        (return i (.-elem u) true))
+      (case ["map"]
+        (return (.-key u) (.-elem u) true))
+      (case ["chan"]
+        (when (!= (.-dir u) syntax/SendOnly)
+          (return (.-elem u) nil true))))
+
+    (return nil nil false)))
+
+(go/method rangeClause "rangeClause: range.go's rangeStmt's checks of the iteration variables (stmt.go's extraction of sKey, sValue and sExtra from the clause).\n" [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^{:tag (* syntax/RangeClause)} r]
+  (let [sKey (.-Lhs r)
+      ^syntax/Expr sValue (zero syntax/Expr)
+      ^syntax/Expr sExtra (zero syntax/Expr)]
+    (when [(values p ok) (assert (* syntax/ListExpr) sKey)] ok
+      (when (< (len (.-ElemList p)) 2)
+        (return))
+
+      (set! sKey (aget (.-ElemList p) 0))
+      (set! sValue (aget (.-ElemList p) 1))
+      (when (> (len (.-ElemList p)) 2)
+        (set! sExtra (aget (.-ElemList p) 2))))
+
+    (let [x (.operand c s (.-X r))]
+      (when (== (.-mode x) 0)
+        (return))
+
+      (let [(values k v ok) (rangeKeyVal (.-typ x))]
+        (when (not ok)
+          (return))
+
+        (switch
+          (case [(and (== k nil) (!= sKey nil))])
+          (case [(and (== v nil) (!= sValue nil))]
+            (.add (.-errs c) (syntax/StartPos sValue) (fmt/Sprintf "range over %s permits only one iteration variable" (operandString (.-X r) x))))
+          (case [(!= sExtra nil)]
+            (.add (.-errs c) (syntax/StartPos sExtra) "range clause permits at most two iteration variables")))))))
+
+(go/func operandString "operandString: operand.go's, for the operands the checks know.\n" ^string [^syntax/Expr e ^toperand x]
+  (when (== (.-mode x) 2)
+    (return (+ (syntax/String e) " (untyped string constant)")))
+
+  (+ (syntax/String e) " (variable of type " (.String (.-typ x)) ")"))
+
+(go/method slice "slice: index.go's sliceExpr's checks of a slice expression whose operand the checks know: a 3-index slice of a string, the constant indices out of bounds and inverted.\n" [^{:tag (* tchecker)} c ^{:tag (* tscope)} s ^{:tag (* syntax/SliceExpr)} e]
+  (let [x (.operand c s (.-X e))
+      length (conv int64 -1)]
+    (when (== (.-mode x) 0)
+      (return))
+
+    (let [t (.-typ x)]
+      (switch
+        (case [(isString t)]
+          (when (.-Full e)
+            (let [at (syntax/StartPos e)]
+              (when (!= (aget (.-Index e) 2) nil)
+                (set! at (syntax/StartPos (aget (.-Index e) 2))))
+
+              (.add (.-errs c) at "invalid operation: 3-index slice of string")
+              (return)))
+
+          (when (== (.-mode x) 2)
+            (set! length (.-slen x))))
+        (case [(== (.-kind t) "array")]
+          (set! length (.-n t)))
+        (case [(and (== (.-kind t) "pointer") (== (.-kind (.-elem t)) "array"))]
+          (set! length (.-n (.-elem t))))
+        (case [(== (.-kind t) "slice")])
+        (default
+          (return))))
+
+    (when (and (.-Full e) (or (== (aget (.-Index e) 1) nil) (== (aget (.-Index e) 2) nil)))
+      (return))
+
+    (let [^{:tag (array 3 int64)} ind (zero (array 3 int64))]
+      (range [i expr (.-Index e)]
+        (let [v (conv int64 -1)]
+          (switch
+            (case [(!= expr nil)]
+              (let [max (conv int64 -1)]
+                (when (>= length 0)
+                  (set! max (+ length 1)))
+
+                (set! v (.index c expr max))))
+            (case [(== i 0)]
+              (set! v 0))
+            (case [(>= length 0)]
+              (set! v length)))
+
+          (aset ind i v)))
+
+      (label :L
+        (range [i v (subslice ind _ 2)]
+          (when (> v 0)
+            (range [j y (subslice ind (+ i 1))]
+              (when (and (>= y 0) (< y v))
+                (.add (.-errs c) (syntax/StartPos (aget (.-Index e) (+ i 1 j))) (fmt/Sprintf "invalid slice indices: %d < %d" y v))
+                (break :L)))))))))
+
+(go/method index "index: index.go's index for a constant index the checks know (an integer literal): its value, an error when it is max or more (max at least 0); -1 for any other index.\n" ^int64 [^{:tag (* tchecker)} c ^syntax/Expr e ^int64 max]
+  (when [(values l ok) (assert (* syntax/BasicLit) (syntax/Unparen e))] (and ok (== (.-Kind l) syntax/IntLit) (not (.-Bad l)))
+    (when [(values v err) (strconv/ParseInt (.-Value l) 0 64)] (== err nil)
+      (when (and (>= max 0) (>= v max))
+        (.add (.-errs c) (syntax/StartPos e) (fmt/Sprintf "invalid argument: index %d out of bounds [0:%d]" v max))
+        (return -1))
+
+      (return v)))
+
+  -1)
 
 (go/type collector "collector: writer.go's declCollector, its checks of pragmas and go:embed.\n" (struct
     ^{:tag (* errorList)} errs
