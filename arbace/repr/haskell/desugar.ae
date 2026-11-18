@@ -190,9 +190,10 @@
                  v2 (if (and co (lv? v)) (list 'cast v {:l (:r co) :r (:l co)}) v)]
              (tidy (first (nth p 2)) v2))
            [p {}])
-    ;; a lazy pattern (tidy1's LazyPat, mkSelectorBinds): each variable a thunk selecting it from v
-    plazy (let [xs (pat-vars (second p))]
-            [(list 'pwild) (into {} (for [x xs] [x (match [v] [{:pats [(second p)] :sub {} :rhs (fn [_] x)}] (pat-error))]))])
+    ;; a lazy pattern (tidy1's LazyPat, mkSelectorBinds): each variable a thunk selecting it from v (queue 369: its failure
+    ;; patError of the elaborator's "SPAN|PAT", mkSelectorBinds' error_expr, when it gives one)
+    plazy (let [xs (pat-vars (second p)) ef (when-let [t (nth p 2 nil)] [t false])]
+            [(list 'pwild) (into {} (for [x xs] [x (match [v] [{:pats [(second p)] :sub {} :rhs (fn [_] x)}] (pat-error ef))]))])
     ;; a bang pattern (tidy1's tidy_bang_pat): dropped around a pattern that is strict already (a constructor's but a
     ;; newtype's, a literal, a list), kept around a variable, a wildcard or a lazy pattern (matchBangs evaluates)
     pbang (let [q (second p)]
@@ -384,6 +385,11 @@
     (head? b 'guarded) (with-fail fail (fn [f] (ds-guarded b f)))
     (head? b 'let) (list 'let (ds-binds (second b)) (ds-rhs (nth b 2) fail))
     (head? b 'letrec) (list 'letrec (ds-binds (second b)) (ds-rhs (nth b 2) fail))
+    ;; queue 369: a right-hand side's strict where bindings (Strict), each forced by a match that cannot fail around the
+    ;; guards, whose failure is the right-hand side's (dsGRHSs: dsLocalBinds around matchGuards)
+    (head? b 'strict-rhs) (with-fail fail
+                            (fn [f] (reduce (fn [c [x pc]] (match [x] [{:pats [pc] :sub {} :rhs (fn [_] c)}] f))
+                                            (ds-rhs (nth b 2) f) (reverse (second b)))))
     :else (ds b)))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -447,6 +453,9 @@
                          (match vs (mapv (fn [cl] {:pats (second cl) :sub {} :rhs (fn [f] (ds-rhs (nth cl 2) f))}) (nth x 2)) (pat-error (nth x 3 nil))))]
               (reduce (fn [b [s v]] (if (= s v) b (bind-non-rec v s b))) body (reverse (map vector ss vs))))
       (guards guarded) (ds-rhs x (pat-error (when (head? x 'guards) (nth x 2 nil))))
+      strict-rhs (ds-rhs x (pat-error (loop [b (nth x 2)] (cond (head? b 'guards) (nth b 2 nil)
+                                                                (and (seq? b) (contains? #{'let 'letrec 'strict-rhs} (first b))) (recur (nth b 2))
+                                                                :else nil))))
       listcomp (ds-listcomp (second x) (nth x 2) (worker nil-c))
       (apply list (map ds x)))))
 

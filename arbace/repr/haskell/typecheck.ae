@@ -37,6 +37,8 @@
             [arbace.walk :as walk]
             [arbace.repr.haskell.deriv :as deriv]
             [arbace.repr.haskell.famenv :as fam]
+            [arbace.repr.haskell.doc :as doc]
+            [arbace.repr.haskell.pprhs :as pprhs]
             [arbace.repr.haskell.rename :as rename])
   (:import [java.io File]))
 
@@ -117,6 +119,19 @@
 (defn fresh-meta []
   (let [i (fresh-id)] (swap! *metas* assoc i {:level *level*}) [:mv i]))
 (defn- error! [& msg] (when *errors* (swap! *errors* conj (apply str msg))))
+
+;; Queue 369 (346's item 7): -fdefer-type-errors, a type error raised where its evidence is used, in GHC's words
+;; (GHC.Tc.Errors' mkErrorTerm: the message, then "(deferred type error)", the argument of Control.Exception.Base's
+;; typeError). *defer-log* holds each failed unification with what GHC's message is made of: the two types that did not
+;; unify, the check's [actual expected] (TypeEqOrigin's uo_actual, uo_expected), the error contexts in force (innermost
+;; first, GHC's ErrCtxt stack: an expression's ExprCtxt, an argument's FunAppCtxt, an equation's MatchInCtxt) and the span
+;; of the innermost located expression (the CtLoc's)
+(def ^:dynamic *defer* false)     ; the module is compiled with -fdefer-type-errors
+(def ^:dynamic *defer-log* nil)   ; atom [{:errs ATOM :idx n :ty1 :ty2 :ea [act exp] :fun HEAD :ctxt (...) :span SP}...]
+(def ^:dynamic *ectx* ())         ; the contexts, innermost first: [:expr L-expr] [:arg head L-arg n] [:match L-match] [:main]
+(def ^:dynamic *espan* nil)       ; the innermost located expression's span
+(def ^:dynamic *ea* nil)          ; {:act :exp :fun}: the check whose unification is running (tcWrapResult, tcApp's result)
+(def ^:dynamic *ectx-nc* false)   ; the next expression adds no context of its own (tcPolyExprNC: an argument, a parenthesis's body)
 
 (defn prune [t]
   (if (= :mv (first t))
@@ -291,7 +306,11 @@
       (and (= :app (first a)) (= :app (first b))) (and (unify (nth a 1) (nth b 1)) (unify (nth a 2) (nth b 2)))
       (and *implic-eqs* *given-eqs* (seq (:pending @*given-eqs*)))
       (do (swap! *implic-eqs* conj [a b *given-eqs*]) true)
-      :else (do (error! "cannot unify " (pr-str (zonk a)) " with " (pr-str (zonk b)))
+      :else (do (when (and *defer-log* *errors*)
+                  (swap! *defer-log* conj {:errs *errors* :idx (count @*errors*) :ty1 (zonk a) :ty2 (zonk b) :span *espan*
+                                           :ea (when *ea* (assoc *ea* :act (zonk (:act *ea*)) :exp (zonk (:exp *ea*))))
+                                           :ctxt *ectx*}))
+                (error! "cannot unify " (pr-str (zonk a)) " with " (pr-str (zonk b)))
                 (when trace?
                   (binding [*out* *err*]
                     (println "tc-trace: cannot unify" (pr-str (zonk a)) (pr-str (zonk b)) "givens" (pr-str (some-> *given-eqs* deref)))
@@ -1481,6 +1500,12 @@
   [c sb]
   (let [sb (remove (fn [[pn pc]] (and (= pc '(pbang (pwild))) (some-> *ltypes* deref (get (lv pn)) unlifted-ty?))) sb)]
     (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse sb))))
+(defn- strict-rhs
+  "Queue 369: a right-hand side's where bindings forced around it (*strict-binds*' [pn pattern]..., the unlifted banged
+  variables left as force-strict-binds leaves them): (strict-rhs [[x pattern]...] c), c itself when none is left"
+  [c sb]
+  (let [sb (remove (fn [[pn pc]] (and (= pc '(pbang (pwild))) (some-> *ltypes* deref (get (lv pn)) unlifted-ty?))) sb)]
+    (if (empty? sb) c (list 'strict-rhs (mapv (fn [[pn pc]] [(lv pn) pc]) sb) c))))
 (def ^:dynamic *uniq* nil)
 (defn- fresh-lv [o] (list 'lv o (str "u" (fresh-id))))
 
@@ -2146,6 +2171,182 @@
     IfAlt "multi-way if"
     nil))
 
+;;; ------------------------------------------------------------------------------------------
+;;; Queue 369 (346's item 7): the deferred type errors' messages, as GHC.Tc.Errors' mkErrorTerm writes them: the error's
+;;; envelope (pprLocMsgEnvelope: FILE:LINE:COL: error: [GHC-CODE], its bullets nested 4), "(deferred type error)" below,
+;;; rendered at 100 columns. The mismatch is GHC.Tc.Errors.Ppr's pprMismatchMsg (TypeEqMismatch: the check's expected and
+;;; actual types when the failing pair looks the same, else the pair and "Expected:", "  Actual:"), the contexts its
+;;; pprErrCtxtMsg (ExprCtxt, FunAppCtxt, MatchInCtxt, MainCtxt; at most mAX_CONTEXTS = 3 that are not landmarks, the
+;;; landmark FunResCtxt's "Probable cause" first). GHC's words where the message is made of what is ported (closed types:
+;;; no variable to tidy, no "Relevant bindings"; the contexts above); else the same shape, the types and contexts as
+;;; near as the elaborator has them
+
+(def ^:dynamic ^:private *ppr-exact* nil) ; atom true: the message is GHC's (no part guessed)
+(defn- inexact! [] (when *ppr-exact* (reset! *ppr-exact* false)))
+
+(defn- unrn
+  "A renamed node as the parsed tree arbace.repr.haskell.pprhs prints: each (rn/name N) its occurrence, unqualified"
+  [x]
+  (walk/postwalk (fn [y] (if (and (seq? y) (= 'rn/name (first y)) (vector? (second y)))
+                           (let [n (second y)] (list 'unqual (symbol (nth n 1)) (occ n)))
+                           y))
+                 x))
+
+(defn- doc-text
+  "A document rendered, inexact when pprhs met a node it does not print (its constructor in angle brackets)"
+  [d]
+  (let [t (doc/render d 100)] (when (re-find #"<[A-Z][A-Za-z]*" t) (inexact!)) d))
+
+(defn- ppr-lexpr* [e] (doc-text (pprhs/ppr-lexpr (unrn e))))
+
+(defn- strip-parens [e] (if (= 'HsPar (con (lval e))) (recur (arg (lval e) 2)) e))
+
+(defn- ppr-ty*
+  "GHC's pprType of an elaborator's type at precedence p (0 the top, 1 an arrow's argument, 2 an application's)"
+  [t p]
+  (let [t (prune t)
+        par (fn [b x] (if b (str "(" x ")") x))
+        app (fn [h as] (if (empty? as) h (par (>= p 2) (str/join " " (cons h (map #(ppr-ty* % 2) as))))))]
+    (case (first t)
+      :tc (let [n (second t) as (nth t 2) o (occ n)]
+            (cond
+              (and (= n fun-tc) (= 2 (count as))) (par (>= p 1) (str (ppr-ty* (first as) 1) " -> " (ppr-ty* (second as) 0)))
+              (and (= n list-tc) (= 1 (count as))) (str "[" (ppr-ty* (first as) 0) "]")
+              (and (= "GHC.Internal.Tuple" (nmod n)) (re-matches #"Tuple[0-9]+" o) (= (count as) (Long/parseLong (subs o 5))))
+              (str "(" (str/join ", " (map #(ppr-ty* % 0) as)) ")")
+              (and (= "GHC.Internal.Tuple" (nmod n)) (= "Unit" o) (empty? as)) "()"
+              :else (app o as)))
+      :app (let [[h as] (loop [x t as ()] (if (= :app (first x)) (recur (prune (nth x 1)) (cons (nth x 2) as)) [x as]))]
+             (app (ppr-ty* h 2) as))
+      :tv (do (inexact!) (let [x (str (second t))] (or (second (re-matches #"(.*?)_sk[0-9]+" x)) (second (re-matches #"sk_([^_]+)_.*" x)) x)))
+      :mv (if-let [n (:name (get @*metas* (second t)))] (str n "0") (do (inexact!) "t0"))
+      (do (inexact!) (pr-str t)))))
+
+(defn- ppr-ty [t] (doc/text (ppr-ty* t 0)))
+
+(defn- atomic-ty? [t]
+  (let [t (prune t)] (or (contains? #{:tv :mv} (first t)) (and (= :tc (first t)) (empty? (nth t 2))))))
+
+(defn- arrows [t] (loop [t (expand (prune t)) n 0] (if (and (= :tc (first t)) (= fun-tc (second t))) (recur (expand (prune (second (nth t 2)))) (inc n)) n)))
+
+(defn- speak-nth [n]
+  (case (long n) 1 "first" 2 "second" 3 "third" 4 "fourth" 5 "fifth" 6 "sixth"
+    (str n (let [d (rem n 10)] (cond (<= n 20) "th" (= d 1) "st" (= d 2) "nd" (= d 3) "rd" :else "th")))))
+
+(defn- ctxt-doc
+  "An error context as pprErrCtxtMsg prints it; nil for none (a lambda's match: tcMatch adds no context), ::none when not
+  ported (inexact)"
+  [[k a b c]]
+  (case k
+    :expr (doc/hang (doc/text "In the expression:") 2 (ppr-lexpr* (strip-parens a)))
+    :arg (doc/hang (doc/hsep [(doc/text "In the") (doc/text (speak-nth c)) (doc/text "argument of")
+                              (doc/<> (doc/quotes (ppr-lexpr* a)) (doc/text ", namely"))])
+                   2 (doc/quotes (ppr-lexpr* b)))
+    :match (let [ctx (arg (lval a) 2) h (if (seq? ctx) (first ctx) ctx)
+                 pm (fn [what] (doc/hang (doc/<> (doc/text (str "In " what)) doc/colon) 4
+                                         (doc-text (@#'pprhs/ppr-match (unrn a)))))]
+             (case h
+               FunRhs (if-let [n (nm (second ctx))] (pm (str "an equation for ‘" (occ n) "’")) ::none)
+               CaseAlt (pm "a case alternative")
+               LamAlt (if (= 'LamSingle (second ctx)) nil ::none)
+               ::none))
+    :main (doc/text "When checking the type of the IO action ‘main’")
+    ::none))
+
+(defn- envelope
+  "pprLocMsgEnvelope's error at span sp with GHC's code and the bullets (formatBulleted), then the deferred error's line"
+  [sp code bullets]
+  (let [[l1 c1] sp
+        file (or *srcfile* (str (str/replace *module* "." "/") ".hs"))
+        header (doc/<+> (doc/<> (doc/text (if sp (str file ":" l1 ":" c1) (do (inexact!) (str file ":1:1")))) doc/colon)
+                        (doc/<> (doc/text "error") doc/colon) (doc/brackets (doc/text (str "GHC-" code))))
+        ds (remove doc/is-empty? bullets)
+        body (if (= 1 (count ds)) (first ds) (doc/vcat (map #(doc/<+> doc/bullet %) ds)))]
+    (doc/render (doc/$$ (doc/hang header 4 body) (doc/text "(deferred type error)")) 100)))
+
+(defn- mismatch-text
+  "A failed unification's deferred message (a *defer-log* entry): [text exact?]"
+  [{:keys [ty1 ty2 ea ctxt span]}]
+  (binding [*ppr-exact* (atom true)]
+    (let [herald (fn [h1 t1 h2 t2 atomic?]
+                   (let [pad (- (count h1) (count h2))]
+                     (if atomic?
+                       (doc/sep [(doc/<+> (doc/text h1) (doc/quotes (ppr-ty t1))) (doc/nest pad (doc/<+> (doc/text h2) (doc/quotes (ppr-ty t2))))])
+                       (doc/vcat [(doc/<+> (doc/<> (doc/text h1) doc/colon) (ppr-ty t1))
+                                  (doc/nest pad (doc/<+> (doc/<> (doc/text h2) doc/colon) (ppr-ty t2)))]))))
+          {:keys [act exp fun]} ea
+          same? (and ea (or (and (= act ty1) (= exp ty2)) (and (= exp ty1) (= act ty2))))
+          mm (cond
+               same? (herald "Couldn't match expected type" exp "with actual type" act (or (atomic-ty? exp) (atomic-ty? act)))
+               ea (doc/vcat [(herald "Couldn't match type" ty1 "with" ty2 (or (atomic-ty? ty1) (atomic-ty? ty2)))
+                             (doc/<+> (doc/text "Expected:") (ppr-ty exp))
+                             (doc/<+> (doc/text "  Actual:") (ppr-ty act))])
+               :else (do (inexact!) (herald "Couldn't match type" ty1 "with" ty2 (or (atomic-ty? ty1) (atomic-ty? ty2)))))
+          ;; FunResCtxt (a landmark: not counted): the check of an application's result, its function's type with more
+          ;; arguments than the expected type has, which is a data type's (not_fun)
+          fr (when (and fun ea)
+               (let [x (expand (prune exp))]
+                 (cond (and (> (arrows act) (arrows exp)) (= :tc (first x)) (not= fun-tc (second x)) (not (stuck-family? x)))
+                       (doc/<+> (doc/text "Probable cause:") (doc/quotes (ppr-lexpr* fun)) (doc/text "is applied to too few arguments"))
+                       (< (arrows act) (arrows exp)) (do (inexact!) nil)
+                       :else nil)))
+          cs (loop [cs ctxt out [] n 0]
+               (if (or (empty? cs) (>= n 3))
+                 out
+                 (let [d (ctxt-doc (first cs))]
+                   (cond (nil? d) (recur (rest cs) out n)
+                         (= ::none d) (do (inexact!) (recur (rest cs) out n))
+                         :else (recur (rest cs) (conj out d) (inc n))))))
+          t (envelope span "83865" [mm (doc/vcat (concat (when fr [fr]) cs))])]
+      [t @*ppr-exact*])))
+
+(defn- type-error-core
+  "Control.Exception.Base's typeError of the message (evDelayedError's term)"
+  [msg]
+  (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "typeError")) [(list 'lit (str (pr-str msg) "#"))]))
+
+(defn- dict-defer-text
+  "An unsolved wanted's deferred message (GHC's \"No instance for\", without its origin: not GHC's words)"
+  [w]
+  (let [[c ts] (zonk-pred (:pred w))]
+    (binding [*ppr-exact* (atom true)]
+      (envelope (:sp w) "39999"
+                [(doc/<+> (doc/text "No instance for")
+                          (doc/quotes (doc/text (str/join " " (cons (occ c) (map #(ppr-ty* % 2) ts))))))]))))
+
+(defn- defer-errors!
+  "Queue 369: under -fdefer-type-errors, a top-level binding group whose elaboration failed a unification (errors from n0 on,
+  the first a failed unification) has each binding's right-hand side raise its first error's message (GHC binds the
+  error's evidence at the binding: at -O0 the binding is typeError of it); its errors are no longer the module's. bs
+  unchanged otherwise"
+  [bs n0 l0]
+  (let [errs @*errors* new (subvec errs n0)]
+    (if (and *defer* (seq new) (str/starts-with? (first new) "cannot unify "))
+      (let [e (first (filter #(and (identical? (:errs %) *errors*) (>= (:idx %) n0)) (subvec @*defer-log* l0)))
+            [msg exact?] (if e (mismatch-text e) [(envelope nil "83865" [(doc/text (subs (first new) 0 (min 200 (count (first new)))))]) false])]
+        (when trace? (binding [*out* *err*] (println "tc-trace: deferred" (if exact? "(GHC's words)" "(approximate)") (pr-str msg))))
+        (reset! *errors* (subvec errs 0 n0))
+        (mapv (fn [b] (if (and (seq? b) (= 'bind (first b))) (list 'bind (second b) (type-error-core msg)) b)) bs))
+      bs)))
+
+(defn- with-ectx
+  "Queue 369: f under the expression's error context (GHC's addExprCtxt in tcPolyLExpr, tcMonoLExpr, tcInferRho: ExprCtxt and
+  the expression's span), none when the expression is an argument's or a parenthesis's body (the NC variants) or the
+  context is the same expression's already; only when type errors are deferred"
+  [e f]
+  (cond
+    (not *defer-log*) (f)
+    *ectx-nc* (binding [*ectx-nc* false *espan* (if (and (L? e) (lsp e)) (lsp e) *espan*)] (f))
+    (not (and (L? e) (lsp e))) (f)
+    (let [c (first *ectx*)] (and (= :expr (first c)) (identical? (second c) e))) (f)
+    :else (binding [*ectx* (cons [:expr e] *ectx*) *espan* (lsp e)] (f))))
+
+(defn- unify-ea
+  "Queue 369: unify the actual type act with the expected exp, a failure logged with them (TypeEqOrigin); fun the head of an
+  application or a variable whose result is checked (FunResCtxt)"
+  [act exp & [fun]]
+  (if *defer-log* (binding [*ea* {:act act :exp exp :fun fun}] (unify act exp)) (unify act exp)))
+
 (defn- with-ef
   "A match (match SCRUTS CLAUSES) with its failure's text EF [TEXT GUARDS?] after its clauses"
   [m ef]
@@ -2156,6 +2357,7 @@
   [c ef]
   (cond (not (and ef (seq? c))) c
         (and (= 'guards (first c)) (= 2 (count c))) (list 'guards (second c) ef)
+        (= 'strict-rhs (first c)) (list 'strict-rhs (second c) (tag-guards (nth c 2) ef))
         (contains? #{'let 'letrec} (first c)) (list (first c) (second c) (tag-guards (nth c 2) ef))
         :else c))
 
@@ -2579,7 +2781,7 @@
   "An application spine f a1 .. an (HsApp, or OpApp: the operator applied to its two operands): [type core]; expected
   the type to check against or nil"
   [env head args expected]
-  (let [[tf cf] (infer env head)
+  (let [[tf cf] (binding [*ectx-nc* (boolean *defer-log*)] (infer env head)) ; (queue 369: tcInferAppHead adds no context)
         ;; HF10-P50 (a): a head of a rank-n binder's polytype (higherRank's f :: forall a. (Num a, Bounded a) => a -> a,
         ;; T17594e) instantiated with its constraints' evidence applied (tcInstFun); split-fun's instantiation dropped
         ;; the evidence
@@ -2607,14 +2809,19 @@
         [r rq] (cond (nil? rq) [r nil]
                      (empty? (nth rq 1)) [(nth rq 3) rq]
                      :else (let [[t2 ps] (instantiate rq)] [t2 [:forall [] ps t2]]))
-        _ (when expected (unify r expected))
+        _ (when expected (unify-ea r expected (list 'L nil head)))
         ;; HF10-P44 (a): an argument checked against a qualified type ((cls => r), withDict's, a rank-n context) after the
         ;; others, so its givens' metas are the other arguments' types first (GHC solves the implication at the end:
         ;; withGift (\_ -> foo False) (23 :: Int) Proxy's Given ?a against foo's Given Int)
         qual? (fn [at] (let [x (prune at)] (and (vector? x) (= :forall (first x)) (seq (nth x 2)))))
         later (set (keep-indexed (fn [i at] (when (qual? at) i)) ats))
-        cs1 (into {} (keep-indexed (fn [i [a at]] (when-not (later i) [i (check-expr env a at)])) (map vector args ats)))
-        cs (vec (map-indexed (fn [i [a at]] (if (later i) (check-expr env a at) (get cs1 i))) (map vector args ats)))]
+        ;; (queue 369: each argument under its FunAppCtxt, at its span, checked as tcPolyExpr: no context of its own)
+        chk (fn [i a at] (if *defer-log*
+                           (binding [*ectx* (cons [:arg head a (inc i)] *ectx*) *espan* (or (when (L? a) (lsp a)) *espan*) *ectx-nc* true]
+                             (check-expr env a at))
+                           (check-expr env a at)))
+        cs1 (into {} (keep-indexed (fn [i [a at]] (when-not (later i) [i (chk i a at)])) (map vector args ats)))
+        cs (vec (map-indexed (fn [i [a at]] (if (later i) (chk i a at) (get cs1 i))) (map vector args ats)))]
     (if rq
       (let [n (when (= 'HsVar (con head)) (nm (arg head 2)))
             sp (when n (lsp (arg head 2)))
@@ -2655,8 +2862,14 @@
 (defn- app-spine [v]
   (loop [x v args ()] (if (= 'HsApp (con x)) (recur (lval (arg x 2)) (cons (arg x 3) args)) [x (vec args)])))
 
+(declare infer*)
+
 (defn infer
   "An expression's type and core"
+  [env e]
+  (with-ectx e #(infer* env e)))
+
+(defn- infer*
   [env e]
   (let [v (lval e)]
     (case (con v)
@@ -2905,14 +3118,20 @@
 ;; is inferred and its type unified with the expected one (tcWrapResult)
 (declare check-poly lit-core)
 
+(declare check-expr*)
+
 (defn check-expr
   "An expression checked against type t: core"
+  [env e t]
+  (with-ectx e #(check-expr* env e t)))
+
+(defn- check-expr*
   [env e t]
   (let [v (lval e) tp (prune t)]
     (if (and (= :forall (first tp)) (or (seq (nth tp 1)) (seq (nth tp 2))))
       (check-poly env e tp)
     (case (con v)
-      HsPar (check-expr env (arg v 2) t)
+      HsPar (binding [*ectx-nc* true] (check-expr env (arg v 2) t))
       HsPragE (check-expr env (arg v 3) t)
       ;; GHC.Tc.Utils.TcMType's tcShortCutLit (Note [Short cut for overloaded literals]): checked against Int, Word or
       ;; Integer (an integral literal), Float or Double (either), not under RebindableSyntax, the literal is built at its
@@ -2957,7 +3176,7 @@
                  (unify (list-ty et) t)
                  (second (infer-listcomp env (lval (arg v 3)) et)))
                (let [[t1 c] (infer env e)] (unify t1 t) c)))
-      (let [[t1 c] (infer env e)] (unify t1 t) c)))))
+      (let [[t1 c] (infer env e)] (unify-ea t1 t (when (= 'HsVar (con v)) e)) c)))))
 
 ;; a polytype expected (an argument of type KnownNat n => r, forall s. ST s a): GHC.Tc.Utils.Unify's tcSkolemise, the
 ;; quantifiers skolems, the context given (its dictionaries the core's parameters), the expression checked at the
@@ -3310,7 +3529,15 @@
       ;; a bang pattern: kept for the match compiler (HF10; GHC.HsToCore.Match's tidy1 and matchBangs)
       BangPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'pbang pc)])
       ;; a lazy pattern: kept for the match compiler (HF5), its variables bound by selectors
-      LazyPat (let [[env1 pc] (tc-pat env (arg v 2) t)] [env1 (list 'plazy pc)])
+      ;; (queue 369, 352's leftover: its failure's text "SPAN|PAT" as mkSelectorBinds writes it, tidy1's LazyPat: the span of
+      ;; the pattern under ~, the pattern printed with its outer bangs and parentheses stripped, strip_bangs; dsrun008)
+      LazyPat (let [p (arg v 2)
+                    [env1 pc] (tc-pat env p t)
+                    sp (when (L? p) (lsp p))
+                    q (loop [q p] (if (contains? '#{ParPat BangPat} (con (lval q))) (recur (arg (lval q) 2)) q))]
+                [env1 (if sp
+                        (list 'plazy pc (str (span-text sp) "|" (doc/render (pprhs/ppr-lpat (unrn q)) 100)))
+                        (list 'plazy pc))])
       AsPat (let [n (nm (arg v 2)) _ (note-type! (lv n) t) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
       ConPat (cond
                (some-> *patsyns* deref (get (nm (arg v 2)))) (tc-patsyn-pat env v t (get @*patsyns* (nm (arg v 2))))
@@ -3455,7 +3682,13 @@
 (defn infer-grhss
   "(GRHSs ext [GRHS...] localbinds) against result type r: core"
   [env grhss r]
-  (let [[env1 binds] (tc-local-binds env (arg grhss 3))
+  (let [;; (queue 369, 352's leftover: the where bindings are strict as a let's are, dsGRHSs' dsLocalBinds: a banged one, and
+        ;; under the Strict extension a variable binding, recursive or not, and a pattern binding but ~ ones, forced before
+        ;; the guards; 369-1 (a), the user 2026-11-18: a banged where binding without Strict too, `where !y = e`)
+        sb (atom [])
+        [env1 binds] (if sb
+                       (binding [*strict-binds* {:atom sb :level (inc *level*) :where true}] (tc-local-binds env (arg grhss 3)))
+                       (tc-local-binds env (arg grhss 3)))
         ;; HF10-P20: each guarded right-hand side its own implication (GHC.Tc.Gen.Match's tcGRHS: a pattern guard's
         ;; givens scope over the guards after it and the body, not over the where bindings: Data.Typeable's cast,
         ;; `Just HRefl <- ta `eqTypeRep` tb`, rewrote tb's Typeable b wanted, made in the where clause, to Typeable a)
@@ -3472,7 +3705,9 @@
                            (if (empty? gs) c (list 'guarded gs c))))))
                    (arg grhss 2)))
         body (if (and (= 1 (count alts)) (not (and (seq? (first alts)) (= 'guarded (first (first alts)))))) (first alts) (list 'guards alts))]
-    (wrap-lets binds body)))
+    ;; (the forces around the guards as (strict-rhs [[x PAT]...] BODY): the desugarer's dsGRHSs, whose guards' failure falls
+    ;; through to the next equation, not a failure of the forcing match's own)
+    (wrap-lets binds (if (and sb (seq @sb)) (strict-rhs body @sb) body))))
 
 (defn- rewrite-by-givens [t]
   (let [t (zonk t)]
@@ -3592,7 +3827,9 @@
                   (when (seq splits) (assume-eqs! (mapcat :preds splits)))
                   (mapv (fn [m]
                         (let [outer (some-> *given-eqs* deref)]
-                          (binding [*given-eqs* (atom (or outer {})) *pat-tvs* (atom (or (some-> *pat-tvs* deref) {}))]
+                          (binding [*given-eqs* (atom (or outer {})) *pat-tvs* (atom (or (some-> *pat-tvs* deref) {}))
+                                    ;; (queue 369: tcMatch's MatchInCtxt)
+                                    *ectx* (if *defer-log* (cons [:match m] *ectx*) *ectx*)]
                             (let [w0 (count @*wanteds*)
                                   mv (lval m) pats (lval (arg mv 3))
                                   [env1 pcs] (reduce (fn [[env pcs] [p t]] (let [[e c] (tc-pat env p t)] [e (conj pcs c)]))
@@ -3615,7 +3852,11 @@
       [r (with-ef (list 'match [(second (:scrut ctx))] (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)) ef)]
       (let [ty (if (seq splits) expected (reduce (fn [acc a] (fn-ty a acc)) r (reverse args)))
             simple? (and (= 1 (count clauses)) (every? #(= 'lv (first %)) (first (first clauses))))
-            core (cond (zero? n) (tag-guards (second (first clauses)) ef)
+            ;; (queue 369, 352's leftover: a \cases of no patterns and several matches, each line of guards its own match
+            ;; (T20768's \cases | 1 < 1 -> "foo" | otherwise -> "bar"): matched in order, a match whose guards all fail
+            ;; falling to the next, matchWrapper's equations of no column; the first alone was taken, its failure patError)
+            core (cond (and (zero? n) (> (count clauses) 1)) (with-ef (list 'match [] (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)) ef)
+                       (zero? n) (tag-guards (second (first clauses)) ef)
                        simple? (split-lam (first (first clauses)) (second (first clauses)))
                        :else (let [ds (vec (repeatedly n #(fresh-lv "ds")))]
                                ;; the match's binders typed as the arguments (HF10-P20: a State# or Int# argument matched
@@ -3999,9 +4240,14 @@
                                           (let [pv (lval (arg (lval b) 2))]
                                             ;; (queue 352: under Strict any pattern binding but ~p, decideBangHood in dsHsBind: DsStrictLet's
                                             ;; `False = e` forced)
+                                            ;; (369-1 (a): not a where clause's pattern binding of an unlifted variable, `where
+                                            ;; !(I# maxInt#) = maxInt`: its selection is a case at the binding already
+                                            ;; (dsUnliftedBind); the force made a second case of the same scrutinee, Enum's
+                                            ;; $dmenumFrom. A let's is forced as before: `let !(# s1, x #) = ...` needs it)
                                             (when (and *strict-binds* (= *level* (:level *strict-binds*))
                                                        (or (and (= 'BangPat (con pv)) (not= 'VarPat (con (lval (arg pv 2)))))
-                                                           (and (contains? *exts* "Strict") (not= 'LazyPat (con pv)))))
+                                                           (and (contains? *exts* "Strict") (not= 'LazyPat (con pv))))
+                                                       (not (and (:where *strict-binds*) (some (fn [[_ m]] (unlifted-ty? (zonk m))) es))))
                                               (let [sm (into {} (map (fn [[x _]] [(lv x) (list 'lv (occ x) (str "sel" (fresh-id)))]) es))]
                                                 (swap! (:atom *strict-binds*) conj [pn (substitute sm (strict-pat pc))]))))
                                           ;; each selector's pattern variables locals of its own (the top level's
@@ -5179,7 +5425,12 @@
                           ws)]
         (if (and (seq left) (< (count left) (count ws)) (not= before (mapv (comp zonk-pred :pred) ws)))
           (recur left)
-          (doseq [w left] (error! "unsolved: " (pr-str (zonk-pred (:pred w)))))))))))
+          ;; (queue 369: under -fdefer-type-errors an unsolved wanted's evidence raises its message, a dictionary of its own
+          ;; as GHC's deferred error is: Defer01's $dEq = typeError "... No instance for Eq B ...")
+          (doseq [w left]
+            (if *defer*
+              (swap! *evidence* assoc (:ev w) (type-error-core (dict-defer-text w)))
+              (error! "unsolved: " (pr-str (zonk-pred (:pred w))))))))))))
 
 ;; queue 325: an Integer literal outside Int#'s range (GHC.Core.Make's mkIntegerExpr: IS of an Int# literal only when
 ;; platformInIntRange, else IP / IN of a LitNumBigNat, which CorePrep's cvtLitBigNat builds from the literal's bytes). An IS
@@ -5537,6 +5788,27 @@
        v#)
      ~e))
 
+(defn- defer-main!
+  "Queue 369: checkMain's tcCheckMonoExpr of main against IO t (t a fresh meta, printed t0) under MainCtxt at main's binding,
+  under -fdefer-type-errors: nil when it unifies, else [NAME (bind NAME typeError-of-the-message)]"
+  [env binds]
+  (let [mn (ext-name "var" "Main" "main")
+        b (some (fn [g] (some #(when (= mn (bind-name %)) %) (arg g 2))) binds)
+        e (get env mn)]
+    (when (and b e (:poly e))
+      (let [nl (arg (lval b) 2) sp (lsp nl)
+            [t _] (instantiate (:poly e))
+            tv (fresh-meta) _ (swap! *metas* assoc-in [(second tv) :name] "t")
+            io [:tc (ext-name "tc" "GHC.Internal.Types" "IO") [tv]]
+            errs (atom []) log (atom [])
+            ex (list 'L sp (list 'HsVar 'NoExtField (list 'L sp (list 'rn/name mn))))]
+        (binding [*errors* errs *defer-log* log *ectx* (list [:expr ex] [:main]) *espan* sp]
+          (unify-ea t io ex))
+        (when (seq @errs)
+          (let [n (ext-name "var" "Main" "main$deferred")
+                msg (if (seq @log) (first (mismatch-text (first @log))) (envelope sp "83865" [(doc/text (first @errs))]))]
+            [n (list 'bind n (type-error-core msg))]))))))
+
 (defn typecheck-module
   "A renamed module (rn/module {...}) elaborated: {:types {NAME type} :core [(bind ...)...] :errors [...]}"
   [tree]
@@ -5564,7 +5836,9 @@
                                       (list 'MG 'FromSource
                                             (l [(l (list 'Match 'NoExtField (list 'FunRhs (rn name) 'Prefix 'NoSrcStrict nil) (list 'L nil [])
                                                          (list 'GRHSs nil [(l (list 'GRHS nil [] (l (list 'HsVar 'NoExtField (rn n)))))]
-                                                               (list 'EmptyLocalBinds 'NoExtField))))]))))])))]
+                                                               (list 'EmptyLocalBinds 'NoExtField))))]))))])))
+        ;; queue 369: -fdefer-type-errors (the last of it and -fno-defer-type-errors), the command line's or an OPTIONS_GHC's
+        defer? (= "-fdefer-type-errors" (last (filter #{"-fdefer-type-errors" "-fno-defer-type-errors"} (:fflags (second tree)))))]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *wrapper-num* (atom (count fexps)) *fstubs* (atom [])
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
@@ -5574,6 +5848,7 @@
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
               *implic-eqs* (atom []) *patsyns* (atom {}) *own-fam-insts* (atom []) *iface-meta* (atom {})
               *static-binds* (atom [])
+              *defer* defer? *defer-log* (when defer? (atom []))
               *defaults* (some (fn [d] (let [v (lval d)]
                                          (when (and (= 'DefD (con v)) (= 'DefaultDecl (con (arg v 2))))
                                            (mapv #(hs-type {} %) (last (arg v 2))))))
@@ -5694,9 +5969,16 @@
                                 (not-any? (fn [b] (some mine-var? (tree-seq coll? seq (arg (arg (lval b) 2) 4)))) (arg g 2))))
             binds (into (vec (filter hoist? binds)) (remove hoist? binds))
             [env core] (binding [*patsyn-builders* (atom [])]
-                         (let [[env core] (phase :binds (reduce (fn [[env out] g] (let [[env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)] [env1 (into out bs)]))
+                         (let [[env core] (phase :binds (reduce (fn [[env out] g]
+                                                                  (let [n0 (count @*errors*) l0 (if *defer-log* (count @*defer-log*) 0)
+                                                                        [env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)]
+                                                                    [env1 (into out (defer-errors! bs n0 l0))]))
                                                                 [{} []] binds))]
                            [env (into core (keep (fn [f] (f env)) @*patsyn-builders*))]))
+            ;; queue 369: GHC.Tc.Module's checkMain under -fdefer-type-errors: main's type against IO t (MainCtxt, main's
+            ;; span); a failure makes :Main.main run a binding of its own that raises the message (runMainIO (typeError ...),
+            ;; GHC's main_sat), main itself left as it is
+            main-def (when (and *defer* (= m "Main")) (defer-main! env binds))
             dms (phase :default-methods (vec (mapcat (fn [t] (when (= 'ClassDecl (con t)) (default-methods env (nm (arg t 3))))) tycl)))
             ibs (phase :instances (vec (mapcat #(instance-binds env %) insts)))
             ;; GHC's record selectors (GHC.Tc.TyCl.Utils.mkOneRecordSelector): one a field, an alternative for each
@@ -5766,11 +6048,13 @@
         {:module m
          :types (merge types cons-types)
          :syns @*syns*
-         :exported (set (mapcat (fn [[n kids]] (cons n kids)) (:exports (second tree))))
+         :exported (cond-> (set (mapcat (fn [[n kids]] (cons n kids)) (:exports (second tree)))) main-def (conj (first main-def)))
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
-         :core (phase :resolve-core (mapv (comp drop-unused-ev resolve-core) (concat fimports core (remove nil? @*static-binds*) dms ibs sels (typeable-binds m))))
+         :core (phase :resolve-core (mapv (comp drop-unused-ev resolve-core) (concat fimports core (remove nil? @*static-binds*) dms ibs sels (typeable-binds m)
+                                                                                      (when main-def [(second main-def)]))))
+         :main-deferred (first main-def)
          ;; the tables HF5-HF6 need (the match compiler's constructor families, STG's data and dictionaries)
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
