@@ -11940,3 +11940,80 @@ Then `bin/reap --record` (53 of 56 cells checked, 0 problems), `bin/crops-score 
 problems), `bin/records-check` (9 pairs, 0 problems). OCaml: completeness 0.8753 -> 0.8758 (meant 0.9263 -> 0.9271); eval 532 /
 75 / 34 -> 532 / 75 / 33, AOT 434 / 74 / 133 -> 434 / 74 / 132, n/a 35 -> 36 at each. Every process under 1 GiB (the AOT partial
 record 0.8 GB). No gate run.
+
+## 2026-11-18: n-cpp-bd, C++'s by-design rows audited, two causes fixed natively (round 54)
+
+Branch `n-cpp-bd` (from mac/n-all `9cd2e4a96`). The brief's figures (read 1,182 by design, print 1,665, 96.8 without by design) are
+not n-all's: its matrix holds read 5,396 / 326 by design / 773 deferred and print 3,871 / 1 / 15 (completeness 0.9170, meant
+0.9338). test/cpp/divergences-read.edn has no by-design row left (gxx-rejects and modules-ts pass on clang's raw tokens since
+CP261 (a)); the read cell's 326 are the dg classes of test/cpp/divergences-dg.edn: gcc-dialect 175, gcc-own-rules 145, musl-libc 4,
+gxx-only-rules 2. The audit: the 326 files run on the own front end (`bin/repr-cpp dg --corpus dg-error --only LIST --front native`,
+one process under 4 GiB, 7 minutes), the 14 gcc-dialect files outside gomp/goacc/tm/contracts read by their options (each has
+-fpermissive or -fms-extensions), five gcc-own-rules files read (lookup/redecl1.C, init/enum1.C, template/array32.C,
+cpp0x/alias-decl-55.C, cpp0x/variadic-ex14.C, template/ttp16.C, cpp0x/inh-ctor3.C: each a GCC rule, option or limit). Sorted:
+- truly by design: gomp/goacc/tm/contracts (OpenMP, OpenACC, GNU TM, GCC's contracts), the -fpermissive files whose expectations
+  depend on the permissive downgrade (warn/pr12242.C: its `x = 10` lines are warnings there, errors by the standard), musl-libc,
+  gxx-only-rules and gcc-own-rules as queue 336 reviewed them;
+- misclassed, a stale record: gcc-dialect's eh/goto3.C, whose errors are [except.pre]/2's (-fpermissive leaves them), passes on the
+  own front end since round 52's jumps (n-cpp-read merged only its 12 rows); the print's one by design, samples/coroutine.cpp
+  (gxx-objects-location, a property of the g++ judge), sat in the "lists not recorded yet" source: the samples list had no own record;
+- fixable natively: gcc-dialect's ext/anon-struct3.C (-fms-extensions) and own-diag's ext/anon-struct2.C expect the standard's
+  "declaration does not declare anything" ([dcl.pre]/5, [class.mem.general]/3) at `typedef_A;` in a class: added to
+  arbace.repr.cpp.parse/parse-simple-decl, decl-specifiers naming a type that is no class, enumeration or elaborated specifier and no
+  declarator: an error in a class, a pedantic diagnostic elsewhere (GCC's pedwarn), a few lines. Left: template/spec32.C's `struct
+  B<0>;` on a template template parameter (elaborated, passes on clang), attrib45.C's attribute-only declaration (gcc-own-rules);
+  ext/integer-pack2.C's Sema crash (ClassCastException) and underlying_type7.C's long overflow, cpp0x/constexpr-recursion.C's stack
+  overflow: crashes of by-design files, their classes unchanged by a fix.
+Proved: the dg check on the own front end over the seven "does not declare anything" files and over the 28 own-passing files with
+a declaration-like `NAME;` line (28 of 28 still pass), roundtrip-corpus gxx-dg-essential --judge own (33 of 33) and samples (9 of
+9). Re-recorded rows only: test/cpp/check-dg-own-linux-amd64.edn's goto3.C, anon-struct2.C, anon-struct3.C to pass; goto3.C and
+anon-struct3.C out of gcc-dialect's :tests; own-diag-review.edn's anon-struct2.C :own :pass; a new own record of the samples list,
+test/repr/cpp/roundtrip-results/own/samples.edn (`roundtrip-corpus samples --judge own --corpus samples --record-results`, 9 pass).
+C++ read 5,396 / 326 / 773 to 5,399 / 324 / 772, print 3,871 / 1 / 15 to 3,880 / 0 / 15; completeness 0.9170 to 0.9172 (bin/reap
+--record, bin/crops-score --record). Taken (round 54): the samples list recorded under the own judge (alternative: drop
+coroutine.cpp's known class, which the clang judge still needs); the error in a class and a pedwarn elsewhere (alternative: an error
+everywhere, which -fpermissive and plain-mode files expecting a warning would contradict). The by-design cell cannot shrink much
+further without taking GCC's dialects, which CP399 (a) declined: the real lever is own-diag's 694 deferred.
+
+## 2026-11-18: n-cpp-bd, C++'s own-diag rows: 31 more files pass on the own front end, the three Sema crashes fixed (round 54)
+
+Same branch (`n-cpp-bd`, on 749d92e27). The read cell's 772 deferred are mostly test/cpp/divergences-dg.edn's :own-diag (693
+recorded as reap counts them; 711 files fail both clang's record and the own one and are in no named class). Grouping: the 711 run
+afresh on the own front end (`bin/repr-cpp dg --corpus dg-error --front native --own --only LIST`, three lists of 222-256 files, three
+threads, GOMEMLIMIT=1500MiB, peaks 1.7 GB each, about 6 minutes), each failing file keyed by its missed lines' dg-error messages from
+gcc-15.2.0's g++.dg; 284 files miss one line only, 199 two. The groups are small (the largest standard rules: redefinition 17 files,
+"incomplete type" 9, coroutine traits 7, the P2552R3 attribute files 11 but each with 6-50 lines), so the ranking put first the rules
+of a few lines that move whole files. Taken (round 54), each a port of the standard's rule as the own front end's error, clean-room
+(GCC's messages for the lines, no GCC code):
+- parser (arbace.repr.cpp.parse): DR2237's template-id as a constructor's or destructor's declarator-id at C++20 (a pedwarn, GCC's
+  -Wtemplate-id-cdtor), `X<T>::X<T>()` naming the constructor ([class.qual]/2); the standard attributes that take no argument clause
+  and GNU's argument-less ones (noinline, always_inline, cold, ...) given one; duplicate decl-specifiers and conflicting storage
+  classes ([dcl.spec.general]/2, [dcl.stc]/1), duplicate lambda-specifiers and C++23's static lambda before C++23 (a pedwarn),
+  duplicate virt-specifiers (members and `final final`), thread_local twice; register on a function ([dcl.stc]); designators out of
+  the members' order or repeated ([dcl.init.aggr]/3.1); q/Q/w/W floating suffixes in a strict mode from C++11 (a ud-suffix with no
+  literal operator, [lex.ext]); a primary class, variable or alias template's pack not last ([temp.param]/14); a class or enumeration
+  defined in an alias template ([dcl.typedef]/2) or in a type-id; a pack parameter's name in a parameter's or declaration's type, or
+  sizeof(T) of a pack, outside an expansion ([temp.variadic]/5);
+- checks (arbace.repr.cpp.diag): coroutines ([dcl.fct.def.coroutine]: std::coroutine_traits and std::coroutine_handle not class
+  templates, no promise_type for a fundamental return type or a main-file class without one when coroutine_traits is not specialized);
+  redefinitions of deleted and defaulted functions (definitions, [dcl.fct.def.general]/1), of function templates with the same
+  template-head and type (no requires-clause) and of variable templates, member templates by their path;
+- Sema (arbace.cpp.sema, the checker only): a variable's definition of a class type incomplete at that point ([basic.def]/5), a
+  function definition's incomplete return type ([dcl.fct.def.general]/2), a duplicate direct base ([class.mi]/3), a union's
+  default member initializers or mem-initializers for more than one member ([class.base.init]/5), an array of unknown bound
+  initialized by {} (zero-size), each reported and the analysis going on.
+The three crashes: underlying_type7.C's long overflow was the next enumerator's value after LONG_MAX (unchecked now, never read);
+integer-pack2.C's ClassCastException a pack expansion of an expression, `__integer_pack(num)...`, taken for a pack's name in
+arbace.cpp.template/resolve-args (now the slice's clean refusal); constexpr-recursion.C's stack overflow the constant evaluation's
+unbounded calls: a depth bound, [implimits]'s 512 recursive constexpr invocations, -fconstexpr-depth=N from the file's options
+(the error at the call), so the file passes and leaves gcc-own-rules' :tests. Not reached: alignas21 and the attr-*1.C files (many
+pedwarns each), the overload-dependent designator files desig4/6.C, dr2237.C's friend line, the incomplete-type uses of pr79435.C.
+Proved: each rule on its files (6 lists of 2-25 files), then the 953 recorded own passes in four lists of 212-256 (953 of 953 still
+pass after one fix: pr77948-4.C's C++98 q suffix, GCC's extension there) and the 711 again (34 pass: these 31 and 3 rows the record
+had stale, constexpr-nonlit3/18.C and warn/pedantic1.C). Re-recorded rows only (`--only LIST --record`): the 115 of the 711 whose row
+changed, the three crash files, and 7 files clang's record already passes whose own row now passes (inherit/crash2/4/5/6.C,
+parse/crash39.C, other/mult-stor1.C, cpp1z/constexpr-lambda13.C); test/cpp/own-diag-review.edn's :own of the moved files (92). Own
+passes 953 to 995; reap's own-diag 693 to 659; C++ read 5,399 / 324 / 772 to 5,434 / 323 / 738; completeness 0.9172 to 0.9186 (meant
+0.9338 to 0.9352); `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check`
+(9 pairs, 0). Every process under 2 GB; no gate. Alternatives not taken: the P2552R3 attribute files first (the most dg-error lines,
+but each needs a dozen pedwarns and lambda-specifier parses), the constant evaluator's union and dynamic groups (larger work per file).
