@@ -2111,6 +2111,21 @@
                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip"))
                       [(want! (if ipn [cls-ip [[:lit ipn] (con-ty tc-callstack)]] [cls-callstack []]))])]))))
 
+(defn- push-given-callstack
+  "Queue 385: a HasCallStack given q with a call site pushed, the label at span sp (GHC's EvCsPushCall onto a given's
+  stack: an instance signature's \"a type signature in an instance\")"
+  [label sp q]
+  (let [cs (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" "unpackCString#")) [(list 'lit (str (pr-str x) "#"))]))
+        i (fn [x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str x "#"))]))
+        [l1 c1 l2 c2] (take-last 4 sp)]
+    (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "C:IP"))
+          [(list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "pushCallStack"))
+                 [(list 'app (list 'v (ext-name "var" "GHC.Internal.Tuple" "(,)"))
+                        [(cs label)
+                         (list 'app (list 'v (ext-name "var" "GHC.Internal.Stack.Types" "$WSrcLoc"))
+                               [(cs *unit*) (cs *module*) (cs (or *srcfile* (str (str/replace *module* "." "/") ".hs"))) (i l1) (i c1) (i l2) (i c2)])])
+                  (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" "ip")) [q])])])))
+
 (defn- want-at!
   "The evidence of a predicate of an occurrence: HasCallStack solved at once, the others wanted"
   [pred n sp & [label]]
@@ -2717,12 +2732,13 @@
                      r (fresh-meta)]
                  (unify tb (fn-ty te (fn-ty (fn-ty a tr) r)))
                  ;; a pattern that can fail (the renamer attached MonadFail's fail to the statement): fail in the monad
+                 ;; (queue 385: in a monad comprehension, GHC's MCompPatOrigin and matchDoContextErrString's "monad comprehension")
                  (if-let [fl (implicit-name v "fail" nil)]
-                   (let [[tf cf] (var-occ env fl (lsp (arg v 2)) "a do statement") ds (fresh-lv "ds")]
+                   (let [[tf cf] (var-occ env fl (lsp (arg v 2)) (if mc "a monad comprehension pattern" "a do statement")) ds (fresh-lv "ds")]
                      (note-type! ds a)
                      (unify tf (fn-ty (list-ty (con-ty tc-char)) tr))
                      [r (app* cb [ce (list 'lam [ds] (list 'match [ds] [(list 'clause [pc] cr)
-                                                                        (list 'clause [(list 'pwild)] (app* cf [(fail-msg "'do' block" (lsp (arg v 2)))]))]))])])
+                                                                        (list 'clause [(list 'pwild)] (app* cf [(fail-msg (if mc "monad comprehension" "'do' block") (lsp (arg v 2)))]))]))])])
                    [r (app* cb [ce (list 'lam [pc] cr)])]))
       LetStmt (let [[env1 binds] (tc-local-binds env (arg v 2))
                     [tr cr] (infer-stmts env1 more)]
@@ -5316,7 +5332,10 @@
 
 (defn- check-method
   "A method body checked at type ty (a type closed by the instance's variables, with its own forall) with the
-  givens: core"
+  givens: core. Queue 385: an instance signature (isig, InstanceSigs') whose context has HasCallStack (`fail :: HasCallStack
+  => String -> IO a`): the method's HasCallStack given is the class method's stack with the call site \"a type signature
+  in an instance\" pushed at the signature's span, as GHC's subsumption of the instance signature by the class method's type
+  solves it (InstanceSigOrigin, a call stack's push)"
   [env b ty givens params & [isig]]
   (let [skol-body (fn [t] (if (= :forall (first t))
                             (let [skol (zipmap (nth t 1) (map (fn [x] [:tv (str "sk_" x)]) (nth t 1)))]
@@ -5347,7 +5366,16 @@
             (assume-eqs! (concat (map first givens) inner))
             (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) (retry-implications! false) c))]
     (solve-with-givens! @ws givens)
-    (let [ps (into params iparams)] (if (empty? ps) c (list 'lam ps (wrap-ev-binds @evb c))))))
+    ;; (queue 385: an instance signature with HasCallStack: its given is the class method's stack, pushed)
+    (let [push-sp (when (and isig (some #(= cls-callstack %) (tree-seq coll? seq isig))) (lsp isig))
+          k (when push-sp (first (keep-indexed (fn [i p] (when (or (= cls-callstack (first p)) (callstack-ip p)) i)) inner)))
+          [iparams c] (if k
+                        (let [p (nth iparams k) q (dict-param (nth inner k))]
+                          [(assoc iparams k q)
+                           (list 'let [(list 'bind p (push-given-callstack "a type signature in an instance" push-sp q))] c)])
+                        [iparams c])
+          ps (into params iparams)]
+      (if (empty? ps) c (list 'lam ps (wrap-ev-binds @evb c))))))
 
 (defn- default-methods
   "A class's default methods: (bind $dmop (lam [$dCls] core))"
