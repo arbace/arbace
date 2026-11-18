@@ -8981,3 +8981,8 @@ the judge names.
   all-ones enumerator: no integral type represents both) is [dcl.enum]/7's, the standard's, as on a target without __int128:
   test/cpp/own-diag-review.edn's entry `:own-diag :group :enums`, divergences-dg.edn's `:gcc-own-rules` `:tests` 82 of queue 336's.
   C++ read 5,396 / 326 / 773 to 5,396 / 325 / 774 (reap and crops-score recorded).
+- Keys (queue 366): `arbace/repr/cpp/parse.ae` is embedded since W2 (out of `arbace_crop_paths`): D342-3 moves `gate_key`
+  (9cd2e4a96 `50d2859b4d8d` to 13f3d1a97 `98c58bc8e145`, `bin/arbace-go --gate-key` without `ARBACE_HOST_EXE`) and the embedded
+  sources, rebuilding the gate's executables; it is out of steps.edn's `:tools`, so beside the executables' steps only the `:cpp`
+  steps rerun. With 348's C part (doc/C23-SURVEY.md, "As built: queue 342's C fixes": repr/c and arbace/c in `:tools`) the whole
+  `--full` reruns.
