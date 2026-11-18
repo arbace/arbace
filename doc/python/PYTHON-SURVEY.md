@@ -7782,3 +7782,23 @@ failing.
   its re-judge). The corpus has no such pair: the duplicate stdouts are cmp-eq/cmp-is, cmp-ne/cmp-is-not and matmul/aug-matmul,
   and the first passing program (synth/builtins/bool.py) has a stdout of its own. Not changed: aot.ae is the AOT generator's
   digest (`aot_gen`), so any edit reprints every compiled package and the runner.
+## As built: 350 and 366, pyi's slotdocs and ast tables made by Arbace (2026-11-18, the Mac VM, queues 350 and 366)
+
+**350** (audit 344's DECISION 1 (a), the cheapest two of the tables CPython made): `tools/pyi/runtime_tables.ae slotdocs` (Objects/
+typeobject.c's slotdefs through repr/c's preprocessor, add_operators' rule, the last entry per name: 79 entries; the recorded 80th,
+`_value_repr_`, the python3 walk's artifact, dropped) and `runtime_tables.ae ast` (Parser/Python.asdl by ASDL's grammar:
+builtins_ast_table.go byte for byte), both in `bin/pyi runtime gen-tables` with a negative control each. Python's eval and AOT facts
+stay 0.5 for the rest (350's report, its plan and DECISION 1).
+
+**366** (the host's review of 348-350):
+- **The ast table's header** names its generator, `tools/pyi/runtime_tables.ae (ast)`, and its format's comment points there (the format
+  stated in runtime_tables.ae). `go/arbace/py/builtins_ast_table.ae` moves once, its two comments alone (astTable's constant byte for
+  byte), re-read from the generated Go by `bin/repr-go read --full` in a one-file module (control: the committed printed Go read the
+  same way gives the committed forms byte for byte). `tools/pyi/asdl_table.py`, the oracle's, by hand: its output now differs from the
+  committed file in the header line alone. Run: `bin/pyi runtime gen-tables ast slotdocs`, both byte for byte, both controls differ.
+- **The keys these files move.** Since W2 (doc/W-WINDOW.md) `go/arbace/py` is copied into the program and listed in goi's table, out of
+  `bin/lib/version.bash`'s `arbace_crop_paths`, so `go/arbace/py/slotdocs.ae` (350) and `go/arbace/py/builtins_ast_table.ae` (366)
+  are in `gate_key` (bin/arbace-go) and the javac key: each moves the gate's builds, every step on `:gate` and javac's tool;
+  `arbace_runtime_key` does not move (`arbace_runtime_not` keeps `go/arbace/py` out). Checked at 9cd2e4a96 and at 366's head with
+  each tree's key functions (doc/scheme/SCHEME-SURVEY.md, "As built: 350 and 366", for the numbers: gate_key's per-file digests
+  differ in exactly 350's four files and this table).

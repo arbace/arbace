@@ -7,6 +7,9 @@
 # Run: python3 -I -S -B tools/pyi/asdl_table.py .tmp/repr-python/Python-3.14.10 OUT.go
 # The header names the tree's release (Include/patchlevel.h's PY_VERSION; queue 236): 3.15.2's tree gives 3.15's table
 # (is_lazy of Import and ImportFrom, DictComp's optional value), the runtime's when pyi moves to 3.15 (PY315-SURVEY P3).
+# Since queue 350 the runtime's table is Arbace's (tools/pyi/runtime_tables.ae ast, bin/pyi runtime gen-tables): this is the
+# oracle's, run by hand; since queue 366 the committed file's header names that generator, so this one's output differs from it in
+# the first line alone.
 import re
 import sys
 
