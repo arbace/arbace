@@ -179,6 +179,9 @@
 ;; (round 54, second pass: a type-id's decl-specifiers being parsed, [dcl.type.general]/3: the depth of the class stack there, so
 ;; that a class defined as a member of the class the type-id defines is the same error, GCC's, and a type-id nested in it not again)
 (def ^:dynamic *tid-def* nil)
+;; queue 376: where a type-id stands, in GCC's words for "types may not be defined ..." ("in casts", "in 'sizeof' expressions",
+;; ...), bound by the callers of parse-type-id; nil: "in a type-id"
+(def ^:dynamic *tdef-ctx* nil)
 
 ;; G4 (doc/cpp/CODEGEN.md): the headers' declarations parsed in full, bodies and all, their nodes given with the main
 ;; file's (the code generator's mode: arbace.cpp.codegen binds it); a header construct the parser cannot read is dropped
@@ -533,7 +536,7 @@
                                       (let [en (:ent qn)] (and (= 1 (count (:parts qn))) (or (:inj en) (:inj-full en)))))))
               a (cond
                   (and (template-name-arg? p) (not (inj-type?))) {:k :tmpl :name (parse-name p :parse)}
-                  (is-type-id? p :targ) {:k :type :t (parse-type-id p :targ)}
+                  (is-type-id? p :targ) {:k :type :t (binding [*tdef-ctx* "in template arguments"] (parse-type-id p :targ))}
                   :else {:k :expr :x (parse-cond-expr p)})
               a (assoc a :b b :e (last-ix p))
               ;; (round 54, second pass: [dcl.spec.auto.general]/5, a placeholder is no template argument's type-id: GCC's
@@ -973,8 +976,15 @@
       (case r
         :true (tentatively p (fn [p]
                                ;; a declaration: which kind is decided by what follows its first declarator
-                               (tp-consume-decl-spec! p)
-                               (loop [] (when (not= :false (tp-decl-spec p :false)) (when (not= :error (tp-consume-decl-spec! p)) (recur))))
+                               (let [b0 (ix p)]
+                                 (tp-consume-decl-spec! p)
+                                 (loop [] (when (not= :false (tp-decl-spec p :false)) (when (not= :error (tp-consume-decl-spec! p)) (recur))))
+                                 ;; (queue 376: a class or enumeration defined in the decl-specifiers, `for (struct S { } *x : r)`: its
+                                 ;; body skipped, so the declarator after it decides, as GCC's parser does before its "types may not be
+                                 ;; defined in a for-range-declaration")
+                                 (when (and can-range (is? p "{") (#{"struct" "class" "union" "enum"} (ts (tok-at p b0))))
+                                   (skip-balanced! p)
+                                   (loop [] (when (not= :false (tp-decl-spec p :false)) (when (not= :error (tp-consume-decl-spec! p)) (recur))))))
                                ;; a structured binding: [ ... ] after the specifiers (and & or &&)
                                (when (or (is? p "&") (is? p "&&")) (when (is-at? p 1 "[") (adv! p)))
                                (if (and (is? p "[") (not (is-at? p 1 "[")))
@@ -1671,7 +1681,7 @@
       (t= t "{") (parse-braced-init p)
       (and (identical? k :kw) (contains? named-casts s))
       (do (adv! p) (expect! p "<")
-          (let [ty (with-gt p false (parse-type-id p :targ))]
+          (let [ty (binding [*tdef-ctx* "in casts"] (with-gt p false (parse-type-id p :targ)))]
             (expect! p ">")
             (expect! p "(")
             (let [x (with-gt p true (parse-expr p))]
@@ -1680,7 +1690,7 @@
       (t= t "typeid")
       (do (adv! p) (expect! p "(")
           (if (is-type-id? p :paren)
-            (let [ty (parse-type-id p :paren)] (expect! p ")") (node p "CXXTypeidExpr" b (last-ix p) {:typeArg {:qualType (qt ty)}}))
+            (let [ty (binding [*tdef-ctx* "in a 'typeid' expression"] (parse-type-id p :paren))] (expect! p ")") (node p "CXXTypeidExpr" b (last-ix p) {:typeArg {:qualType (qt ty)}}))
             (let [x (with-gt p true (parse-expr p))] (expect! p ")") (node p "CXXTypeidExpr" b (last-ix p) {:inner [x]}))))
       (t= t "requires") (parse-requires-expr p)
       (or (t= t "__func__") (t= t "__FUNCTION__") (t= t "__PRETTY_FUNCTION__")) (do (adv! p) (text-node p "PredefinedExpr" b))
@@ -1700,7 +1710,7 @@
       (and (= s "__builtin_offsetof") (is-at? p 1 "("))
       (let [r (tentatively p (fn [p]
                                (adv! p) (adv! p)
-                               (let [ty (parse-type-id p :paren)
+                               (let [ty (binding [*tdef-ctx* "within '__builtin_offsetof'"] (parse-type-id p :paren))
                                      _ (expect! p ",")
                                      id1 (let [^T t (cur p)] (when (identical? :id (.-k t)) (adv! p) (.-s t)))
                                      cs (when id1
@@ -1881,7 +1891,7 @@
         place (when (and (is? p "(") (not (paren-type?))) (paren-args p))
         ;; the allocated type: (type-id) or a new-type-id with its array bounds
         [ty dims] (if (paren-type?)
-                    (do (adv! p) (let [t (parse-type-id p :paren)] (expect! p ")") [t []]))
+                    (do (adv! p) (let [t (binding [*tdef-ctx* "in a new-expression"] (parse-type-id p :paren))] (expect! p ")") [t []]))
                     (let [base (parse-type-specs p :new)
                           ptrs (loop [t base] (cond (or (is? p "*") (is? p "&") (is? p "&&"))
                                                     (let [o (ts (cur p))] (adv! p)
@@ -1934,7 +1944,7 @@
                                (not (and (or (is? p "++") (is? p "--")) (not (let [_ (adv! p)] (cast-operand-start? p))))))]
                    (seek! p save) ok)))))
       (do (adv! p)
-          (let [ty (parse-type-id p :paren)
+          (let [ty (binding [*tdef-ctx* "in casts"] (parse-type-id p :paren))
                 ;; (h-cpp-read: a cast's type-id holds no placeholder type, [dcl.spec.auto.general]/5: GCC's "expected
                 ;; primary-expression")
                 _ (when (some #(= :auto (:t %)) (tree-seq map? (comp vector :of) ty))
@@ -1956,13 +1966,13 @@
                 ;; (queue 365: round 54's [temp.variadic]/5 check of `sizeof(T)` for a pack T removed: it fired inside the pattern of
                 ;; an expansion too, `(sizeof(Ts) + ...)`, `f(sizeof(Ts)...)`, valid code; the parser does not know the enclosing
                 ;; expansion here)
-                (let [ty (parse-type-id p :paren)] (expect! p ")") (node p "UnaryExprOrTypeTraitExpr" b (last-ix p) {:name "sizeof" :argType {:qualType (qt ty)}})))
+                (let [ty (binding [*tdef-ctx* "in 'sizeof' expressions"] (parse-type-id p :paren))] (expect! p ")") (node p "UnaryExprOrTypeTraitExpr" b (last-ix p) {:name "sizeof" :argType {:qualType (qt ty)}})))
             :else (let [x (parse-cast-expr p)] (node p "UnaryExprOrTypeTraitExpr" b (ne x) {:name "sizeof" :inner [x]}))))
       (or (t= t "alignof") (t= t "_Alignof") (t= t "__alignof") (t= t "__alignof__"))
       (let [nm (if (#{"alignof" "_Alignof"} s) "alignof" "__alignof")]
         (adv! p)
         (if (and (is? p "(") (let [save (ix p)] (adv! p) (let [r (is-type-id? p :paren)] (seek! p save) r)))
-          (do (adv! p) (let [ty (parse-type-id p :paren)] (expect! p ")") (node p "UnaryExprOrTypeTraitExpr" b (last-ix p) {:name nm :argType {:qualType (qt ty)}})))
+          (do (adv! p) (let [ty (binding [*tdef-ctx* (str "in '" s "' expressions")] (parse-type-id p :paren))] (expect! p ")") (node p "UnaryExprOrTypeTraitExpr" b (last-ix p) {:name nm :argType {:qualType (qt ty)}})))
           (let [x (parse-cast-expr p)] (node p "UnaryExprOrTypeTraitExpr" b (ne x) {:name nm :inner [x]}))))
       (and (t= t "noexcept") (is-at? p 1 "("))
       (do (adv! p) (adv! p)
@@ -2958,7 +2968,7 @@
         ;; a declaration's: a cast's, sizeof's, offsetof's or a template argument's type-id; GCC's "types may not be defined in ...")
         _ (when-let [tn (:tag-node ds)]
             (when (and (not= ctx :trailing) (nil? outer) (or (:completeDefinition tn) (and (= "EnumDecl" (:kind tn)) (seq (:inner tn)))))
-              (soft-diag! p (long (:b ds)) "types may not be defined in a type-id")))]
+              (soft-diag! p (long (:b ds)) (str "types may not be defined " (or *tdef-ctx* "in a type-id")))))]
     (if (= ctx :conv)
       (reduce (fn [t op] (assoc op :of t)) base (ptr-ops p))
       (build-type base (parse-declarator p :abstract)))))
@@ -2988,6 +2998,12 @@
           (let [;; C++23's explicit object parameter (P0847R7, [dcl.fct]/3): `this` before its declaration
                 xo (accept! p "this")
                 ds (parse-decl-specs p :param)
+                ;; (queue 376: [dcl.fct]/17 (C++23 [dcl.fct]/16), a class or enumeration defined in a parameter's type: GCC's
+                ;; "types may not be defined in parameter types", at the definition's opening brace)
+                _ (when-let [tn (:tag-node ds)]
+                    (when (and (not (skim? p)) (or (:completeDefinition tn) (and (= "EnumDecl" (:kind tn)) (seq (:inner tn)))))
+                      (let [bi (loop [i (long (:b ds))] (if (or (t= (tok-at p i) "{") (>= i (long (ix p)))) i (recur (inc i))))]
+                        (soft-diag! p bi "types may not be defined in parameter types"))))
                 base (or (ds-type ds) (perr p "a parameter's type"))
                 d (parse-declarator p :either)
                 cva (and (:pack d) (nil? (:name d)) (nil? (:nested d)) (is? p ")")
@@ -3118,7 +3134,7 @@
               (if alone (declare! p ent) (sc/declare! (or (sc/enclosing (scope p) #{:ns :block}) (scope p)) ent))))
           {:type {:t :elab :kw kw :s (if qn (name-str p qn) "") :ent e :kb kb :ni (when lp (:i lp)) :e (when qn (:e qn))} :node n})
         (let [_ (when (and *tid-def* (= ctx :member) (= (count (stv p CLS)) (inc (long *tid-def*))))
-                  (soft-diag! p kb "types may not be defined in a type-id"))
+                  (soft-diag! p kb (str "types may not be defined " (or *tdef-ctx* "in a type-id"))))
               lp (when qn (peek (:parts qn)))
               nm (:s lp)
               simple (and qn (= 1 (count (:parts qn))) (not (:g qn)))
@@ -4421,6 +4437,11 @@
   "A for-range-declaration: its VarDecl (or a structured binding's DecompositionDecl), the name declared."
   [^P p]
   (let [ds (parse-decl-specs p :block)
+        ;; (queue 376: [stmt.ranged]/2 with [dcl.type.general]/3, a for-range-declaration defines no class or enumeration: GCC's
+        ;; "types may not be defined in a for-range-declaration", a permerror, at the class-key)
+        _ (when-let [tn (:tag-node ds)]
+            (when (and (not (skim? p)) (or (:completeDefinition tn) (and (= "EnumDecl" (:kind tn)) (seq (:inner tn)))))
+              (soft-diag! p (long (:b ds)) "types may not be defined in a for-range-declaration")))
         base (or (ds-type ds) (perr p "a for-range declaration's type"))]
     (if (or (is? p "[") (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "[")))
       (parse-decomposition p ds :for-range base)
@@ -4435,6 +4456,12 @@
   "A handler's exception-declaration: [type name name-token first-token], the name declared."
   [^P p]
   (let [ds (parse-decl-specs p :param)
+        ;; (queue 376: [except.handle]/1 with [dcl.type.general]/3, an exception-declaration defines no class or enumeration:
+        ;; GCC's "types may not be defined in exception-declarations", at the definition's opening brace)
+        _ (when-let [tn (:tag-node ds)]
+            (when (and (not (skim? p)) (or (:completeDefinition tn) (and (= "EnumDecl" (:kind tn)) (seq (:inner tn)))))
+              (let [bi (loop [i (long (:b ds))] (if (or (t= (tok-at p i) "{") (>= i (long (ix p)))) i (recur (inc i))))]
+                (soft-diag! p bi "types may not be defined in exception-declarations"))))
         base (or (ds-type ds) (perr p "a handler's type"))
         d (parse-declarator p :either)
         qn (:name (last (name-chain d)))
