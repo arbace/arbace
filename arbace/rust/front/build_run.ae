@@ -790,12 +790,46 @@
 
 (defn- call-of [t] (when (and (seq? t) (= 'call (first t))) (:tc (meta (nth (second t) 2 nil)))))
 
+;; RUST-90 S4 (C2): a native instance's body judged against the record's (rustc's optimized MIR of the instance at -O0, the body
+;; the pack gives the run), so that a root taken natively is proven on the program's own instance, not only on core-check's
+;; generic body against rustc's built MIR
+
+(defn- strip-storage [stmts]
+  (vec (remove #(and (seq? %) (#{'storage-live 'storage-dead 'nop} (first %))) stmts)))
+
+(defn pack-compare
+  "OURS (an instance's runtime MIR) against REC (the record's optimized body): [:equal], [:equal-but-storage] (equal once
+  StorageLive, StorageDead and Nop are dropped: -O0's RemoveStorageMarkers), else [:differs WHERE]"
+  [ours rec]
+  (let [;; an ADT's id is the record's DefId, ours its path in core: the text and the arguments compared
+        norm (fn norm [x] (cond (and (seq? x) (= 'adt (first x))) (apply list 'adt (second x) (map norm (drop 3 x)))
+                                (seq? x) (apply list (map norm x))
+                                (vector? x) (mapv norm x)
+                                (map? x) (into {} (for [[k v] x] [k (norm v)]))
+                                :else x))
+        bl (fn [b f] (mapv (fn [x] {:stmts (f (vec (norm (:stmts x)))) :term (norm (:term x)) :cleanup (boolean (:cleanup x))}) (:blocks b)))
+        lt (fn [b] (mapv (comp norm :ty) (:locals b)))
+        cut (fn [x] (let [t (pr-str x)] (subs t 0 (min 160 (count t)))))]
+    (cond
+      (and (= (bl ours identity) (bl rec identity)) (= (lt ours) (lt rec))) [:equal]
+      (and (= (bl ours strip-storage) (bl rec strip-storage)) (= (lt ours) (lt rec))) [:equal-but-storage]
+      (not= (count (:blocks ours)) (count (:blocks rec))) [:differs (str "blocks " (count (:blocks ours)) " against " (count (:blocks rec)))]
+      (not= (count (:locals ours)) (count (:locals rec))) [:differs (str "locals " (count (:locals ours)) " against " (count (:locals rec)))]
+      (not= (lt ours) (lt rec)) (let [i (first (keep-indexed (fn [i [a b]] (when (not= a b) i)) (map vector (lt ours) (lt rec))))]
+                                  [:differs (str "local " i ": " (cut (nth (lt ours) i)) " against " (cut (nth (lt rec) i)))])
+      :else (let [[a b] (first (remove (fn [[a b]] (= a b)) (map vector (bl ours strip-storage) (bl rec strip-storage))))
+                  sa (:stmts a) sb (:stmts b)
+                  i (first (keep-indexed (fn [i [x y]] (when (not= x y) i)) (map vector (concat sa [(:term a)]) (concat sb [(:term b)]))))]
+              [:differs (if i (str "statement " i ": " (cut (nth (vec (concat sa [(:term a)])) i)) " against " (cut (nth (vec (concat sb [(:term b)])) i)))
+                            (str "statements " (count sa) " against " (count sb)))]))))
+
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
-  closure of the functions it reaches that the record has no body of: {:taken {record-name instance} :extra [instance]
-  :lines [..]}"
+  closure of the functions it reaches that the record has no body of: {:taken {record-symbol instance} :extra [instance]
+  :lines [..]} (S4: keyed by the instance's symbol, not its name, so that two instances of one def are both taken; each taken
+  root judged against the record's body, `pack-compare` lines, and a crossed control: the first root against another def's)"
   [roots rec-defs]
-  (let [nc (native-core-map) lines (atom [])
+  (let [nc (native-core-map) lines (atom []) pairs (atom [])
         close (fn close [def args seen]
                 ;; [instances] of DEF at ARGS and what it reaches natively, or throws why it cannot be taken
                 (let [e (get nc def)]
@@ -805,6 +839,10 @@
                     (contains? seen [def args]) []
                     :else
                     (let [inst (core-instance e args)
+                          ;; S4: a type the instance's forms cannot write (ty-form's `(other ..)`: a trait object, whose casts
+                          ;; need their vtable) stops it, the record's body the fallback
+                          _ (when-let [o (first (filter #(and (seq? %) (= 'other (first %))) (tree-seq coll? seq (:body inst))))]
+                              (throw (ex-info (str "a type its forms do not write " (pr-str o)) {})))
                           rec-has? (fn [cd] (contains? rec-defs (mono/print-path cd)))
                           seen (conj seen [def args])
                           more (for [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when ft
@@ -827,12 +865,19 @@
               (try (let [[root & extra] (close def (vec args) #{})]
                      (swap! lines conj (str "native " (:name rec) " (core's body built by Arbace, equal to rustc's built MIR"
                                             (when (seq extra) (str "; with " (count extra) " more: " (str/join ", " (map :def extra)))) ")"))
-                     (-> acc (assoc-in [:taken (:name rec)] root) (update :extra into extra)))
+                     (let [[k w] (try (pack-compare (:body root) rec) (catch Throwable e [:differs (str "the compare: " (.getMessage e))]))]
+                       (swap! lines conj (str "pack-compare " (name k) " " (:name rec) (when w (str " (" w ")")))))
+                     (swap! pairs conj [root rec])
+                     (-> acc (assoc-in [:taken (:symbol rec)] root) (update :extra into extra)))
                    (catch Throwable e
                      (swap! lines conj (str "record " (:name rec) " (core's body: " (.getMessage e) ")"))
                      acc)))
             {:taken {} :extra [] :lines []} roots)
-    :lines @lines)))
+    :lines (let [[[r0 c0] & more] @pairs
+                 [_ c1] (first (filter (fn [[r c]] (and (not= (:def r) (:def r0)) (not= (:blocks c) (:blocks c0)))) more))]
+             (cond-> @lines
+               c1 (conj (str "pack-compare control (" (:name c0) " against " (:name c1) "'s record): "
+                             (if (#{:equal :equal-but-storage} (first (pack-compare (:body r0) c1))) "PASSED (a bug)" "differs, as it must"))))))))
 
 ;; RFP23 (c): the run's facts from arbace.rust.front.mono (no record but core's bodies and, per fact, what mono refuses)
 
@@ -1046,20 +1091,28 @@
                                            (if-let [r (get rec-by-name nm)] (list 'mir/body r) (throw e))))
                                     (do (swap! lines conj (str "record " nm " (" err ")")) (fact! :bodies false)
                                         (list 'mir/body (or (get rec-by-name nm) (throw (ex-info (str "no body for " nm) {}))))))))
-                    ;; RF12-P6: the native core bodies made runtime bodies, all or none (a failure keeps the record's bodies)
-                    native-forms (when (or (seq core-items) (seq glue-shims))
-                                   (try (doall (concat
-                                                (for [[h i] core-items]
-                                                  (let [r (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)]
-                                                    (list 'mir/body (assoc r :phase "arbace-native-core"))))
-                                                (for [g glue-shims]
-                                                  (let [r (runtime-body (assoc (:body g) :name (:name (:rec g))) (:rec g) nf abort?)]
-                                                    (swap! lines conj (str "native " (:name (:rec g)) " (drop glue's shim, built natively)"))
-                                                    (fact! :core-bodies true)
-                                                    (list 'mir/body (assoc r :phase "arbace-native-core"))))))
-                                        (catch Throwable e
-                                          (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
-                                          nil)))
+                    ;; RF12-P6: the native core bodies made runtime bodies; S4: one by one, a body that fails at run time keeps the
+                    ;; record's body of its symbol (`record-kept`), all or none only when the record has no body of a failing one
+                    rec-syms (set (map :symbol rec-bodies))
+                    native-done (when (or (seq core-items) (seq glue-shims))
+                                  (try (doall (concat
+                                               (for [[h i] core-items
+                                                     :let [r (try (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)
+                                                                  (catch Throwable e
+                                                                    (if (rec-syms (:symbol h))
+                                                                      (do (swap! lines conj (str "record-kept " (:name h) " (a native body failed at run time: " (.getMessage e) ")")) nil)
+                                                                      (throw e))))]
+                                                     :when r]
+                                                 [(:symbol h) (list 'mir/body (assoc r :phase "arbace-native-core"))])
+                                               (for [g glue-shims]
+                                                 (let [r (runtime-body (assoc (:body g) :name (:name (:rec g))) (:rec g) nf abort?)]
+                                                   (swap! lines conj (str "native " (:name (:rec g)) " (drop glue's shim, built natively)"))
+                                                   (fact! :core-bodies true)
+                                                   [(:symbol (:rec g)) (list 'mir/body (assoc r :phase "arbace-native-core"))]))))
+                                       (catch Throwable e
+                                         (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
+                                         nil)))
+                    native-forms (when native-done (map second native-done))
                     ;; RF17: a std ADT's tuple constructor used as a function value and instantiated in the program's crate (the
                     ;; record's `mir/external`: rustc's build_ctor shim, whose MIR the helper does not dump), built natively
                     ;; (mono/ctor-shim-body) from the function constant naming it in the record's bodies
@@ -1096,8 +1149,8 @@
                                   (do (swap! lines conj (str "native " def " (a constructor's shim, built natively)"))
                                       (fact! :ctor-shims true)
                                       (list 'mir/body (assoc b :symbol symbol :name def :phase "arbace-native-ctor" :instance (str "Shim(Ctor(" def "))"))))))
-                    native-taken (if native-forms native-syms #{})
-                    _ (doseq [[h _] core-items :when native-forms] (swap! lines conj (str "native " (:name h))) (fact! :core-bodies true))
+                    native-taken (if native-done (set (map first native-done)) #{})
+                    _ (doseq [[h _] core-items :when (native-taken (:symbol h))] (swap! lines conj (str "native " (:name h))) (fact! :core-bodies true))
                     ;; the module from the collector's items: our bodies, then core's bodies (the record's: RF12), the statics,
                     ;; the lang items' symbols, the layouts; the record's entry wrapper for a std program
                     new-forms

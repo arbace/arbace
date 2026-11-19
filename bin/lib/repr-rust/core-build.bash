@@ -142,15 +142,54 @@ core_essential() {
 # built by core-check through the 21 passes and written with their equality to rustc's built MIR (the pack rust-core-built)
 # into .tmp/rust-front/core/native-core.edn, which `run-built --native-core` takes (RF_CORE_NATIVE) in place of the record's
 # core bodies where equal; about 40 minutes (num/mod.rs), 2.3 GB at GOMEMLIMIT=2000MiB
+#   bin/rust-front core-export --rsi [NAME...]
+#                                   RUST-90 S4 (C2, doc/rust/FRONTEND-SURVEY.md, "As built: S4's first slice"): the spec from rsi's
+#                                   programs (their stems; default the samples' five eval cases) by core_rsi_spec, the bodies into
+#                                   .tmp/rust-front/core/native-core-rsi.edn, which `rsi-build --native-core` takes
 core_export() {
   local lib spec=$root/test/rust/front/core-native.txt re files out=$work/core/native-core.edn
   lib=$(core_lib) || return 1
+  if [ "${1:-}" = --rsi ]; then
+    shift; spec=$work/core/native-core-rsi.txt out=$work/core/native-core-rsi.edn
+    core_rsi_spec "$@" > "$spec.tmp" || { rm -f "$spec.tmp"; return 1; }
+    mv "$spec.tmp" "$spec"
+  fi
   re=$(grep -v '^#' "$spec" | head -n 1)
   files=$(grep -v '^#' "$spec" | tail -n +2 | sed "s|^|$lib/core/src/|")
   rm -f "$out"
   # shellcheck disable=SC2086
   CORE_ONLY="$re" CORE_EXPORT_NAMES="$re" CORE_EXPORT=$out core_check --records $files
   [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out"
+}
+
+# RUST-90 S4 (C2): the core bodies rsi's programs NAME... (default the eval cell's five samples) instantiate, as a core-export spec:
+# each body of the pack rust-front-rsi's records (an Item instance of core: shims are drop-shim-plan's) whose key
+# (`ptr-mut_ptr-{impl#0}-cast`) the pack rust-core-built holds (core-check's 37 modules, the only oracle the export's :equal can be
+# judged by: RFP51), the regex of their names as core-check prints them (each quoted, \Q..\E), then their module files; the
+# defs outside the 37 modules counted on the standard error
+core_rsi_spec() {
+  local rs od m n names=("$@")
+  [ ${#names[@]} -gt 0 ] || names=(intrinsics panics std unwind vectors)
+  rs=$(rfr_stage rsi) || return 1
+  od=$(core_records_stage) || return 1
+  m=$(core_modules) || return 1
+  for n in "${names[@]}"; do
+    [ -f "$rs/$n/$n.record.edn" ] || { echo "core-export --rsi: no record of $n in the pack rust-front-rsi" >&2; return 1; }
+    grep '^(mir/body' "$rs/$n/$n.record.edn" | grep -o ':def-id "DefId([0-9]*:[0-9]* ~ core\[[0-9a-f]*\]::[^)]*)" :phase "[a-z]*" :instance "Item(' |
+      sed -E 's/^:def-id "DefId\([0-9]+:[0-9]+ ~ core\[[0-9a-f]+\]::([^)]*)\)".*/\1/'
+  done | LC_ALL=C sort -u | awk -F'\t' -v mods="$m" '
+    # each def in the module file of its longest module path (core-check --list'\''s modules.txt: `core::a::b FILE`)
+    BEGIN { while ((getline l < mods) > 0) { split(l, a, " "); f = a[2]; sub(/.*\/core\/src\//, "", f); file[a[1]] = f } }
+    NR == FNR { k = $1; sub(/^core\./, "", k); sub(/\.1-1-[0-9]+\.built\.after\.mir$/, "", k); name[k] = $2; next }
+    { k = $0; gsub(/::/, "-", k)
+      if (!(k in name)) { out++; next }
+      re = re (re == "" ? "" : "|") "\\Q" name[k] "\\E"; got++
+      n = split($0, seg, "::"); p = "core"; best = ""
+      for (i = 1; i <= n; i++) { p = p "::" seg[i]; if (p in file) best = file[p] }
+      if (best != "") used[best] = 1 }
+    END { print "^(" re ")$"; for (f in used) print f | "LC_ALL=C sort"; close("LC_ALL=C sort")
+          printf "core-export --rsi: %d of the programs'\'' core defs in rust-core-built'\''s modules, %d outside them (no oracle: RFP51)\n", got, out > "/dev/stderr" }
+  ' "$od/index.tsv" -
 }
 
 # RF19: bin/rust-front core-attrs: the codegen attributes of core's functions after expansion (the macro-made ones core's sources
