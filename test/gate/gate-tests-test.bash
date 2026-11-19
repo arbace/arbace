@@ -25,6 +25,10 @@ printf '#!/bin/bash\necho broken\nexit 1\n' > "$scratch/fail/b-test.bash"; chmod
 # report 055, finding 6: no test defaults its scratch directory to a fixed path (two runs at once would remove each other's)
 fixed=$(grep -l '^scratch=.*-test[};]' "$src"/test/gate/*-test.bash)
 [ -z "$fixed" ] && ok "the tests' default scratch directories are per process" || bad "fixed scratch default in: $fixed"
+# review 419, I2: nor a scratch directory fixed in the checkout's .tmp (T=$here/.tmp/NAME-test), nor a TMPDIR forced over the one
+# bin/gate-tests gives each test (two runs at once, or GATE_TESTS_JOBS, would share it): $TMPDIR/NAME-test, TMPDIR when unset
+fixed=$(grep -lE '^(T|W|scratch)=\$(here|root|src)/\.tmp/[A-Za-z0-9_-]+($|;| )|^export TMPDIR=\$(here|root|src)/' "$src"/test/gate/*-test.bash)
+[ -z "$fixed" ] && ok "no test's scratch is a fixed path of the checkout's .tmp, none forces TMPDIR" || bad "a fixed scratch path or a forced TMPDIR in: $fixed"
 # report 055, finding 5: without an executable the tests that need none run, the others are named, status 1 (0: --no-exe)
 r=$scratch/noexe-root; mkdir -p "$r/bin/lib" "$r/d"
 cp "$src/bin/gate-tests" "$r/bin/"; cp "$src/bin/lib/tmpdir.bash" "$src/bin/lib/host.bash" "$r/bin/lib/"

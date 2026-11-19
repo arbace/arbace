@@ -1,6 +1,6 @@
 #!/bin/bash
 # GD4 (doc/GATE-DIET-SURVEY.md, GDS12 (a), GDS13 (a), "As built: GD4"): the runner's disk and memory policy (bin/lib/gate-run.bash's
-# disk_admit, enospc, disk_retry, run_one's GATE_STEP_MEM_GIB) on a fabricated plan and store under .tmp/disk-policy-test, the free
+# disk_admit, enospc, disk_retry, run_one's GATE_STEP_MEM_GIB) on a fabricated plan and store under $TMPDIR/disk-policy-test, the free
 # disk given by GATE_DISK_FREE_FILE (honoured with a store of the test's own):
 #   1. above the floor a step runs; below it the cheap prune runs once, the step waits GATE_DISK_WAIT and is deferred (not failed,
 #      no pass), a step that needs it is deferred with it, and a later step is deferred at once (the wait is the run's, not each
@@ -13,8 +13,8 @@
 set -uo pipefail
 unset audit_step audit_all GATE_CLEAN_INNER GATE_LANES GATE_STEP_MEM_GIB ARBACE_DISK_POLICY
 here=$(cd "$(dirname "$0")/../.." && pwd)
-export TMPDIR=$here/.tmp/tmp; mkdir -p "$TMPDIR"
-T=$here/.tmp/disk-policy-test
+export TMPDIR=${TMPDIR:-$here/.tmp/tmp}; mkdir -p "$TMPDIR"
+T=$TMPDIR/disk-policy-test
 rm -rf "$T"; mkdir -p "$T"
 fail=0
 ok() { echo "ok   $*"; }

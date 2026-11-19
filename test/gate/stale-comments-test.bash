@@ -5,7 +5,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
 export TMPDIR=${TMPDIR:-$here/.tmp/tmp}
 mkdir -p "$TMPDIR"
-T=$here/.tmp/stale-comments-test
+T=$TMPDIR/stale-comments-test
 rm -rf "$T"; mkdir -p "$T"
 fail=0
 ok() { echo "ok   $*"; }
