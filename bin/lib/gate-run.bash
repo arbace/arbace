@@ -81,8 +81,8 @@ gate_env() {
   # GD4 (GDS12 (a), doc/GATE-DIET-SURVEY.md, "As built: GD4"): the disk is the gate's: every tool's own guard (cppi's, rsi's:
   # bin/gate-policy disk-ok) yields under ARBACE_DISK_POLICY=gate, the runner's floor before each step deciding instead
   export ARBACE_DISK_POLICY=gate
-  # GD4 (GDS17 (a)): Go's build cache is held to its size by the caches' table (gate_cache_cap), so bin/lib/gocache.bash's trim
-  # in the builds keeps Go's own five days (7200 minutes) in place of its 90-minute wipe, which started every night cold
+  # GD4 (GDS17 (a)): Go's build cache is held to its size by the caches' table (gate_cache_cap); bin/lib/gocache.bash's trim in the
+  # builds follows the same cap (n-gocache-trim) and, with Go's own five days (7200 minutes) here, removes no entry used since
   export ARBACE_GOCACHE_KEEP_MIN=${ARBACE_GOCACHE_KEEP_MIN:-7200}
 }
 
@@ -876,16 +876,8 @@ gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and exec
 #                 go, compile, link, asm; GATE_CACHES_GO_BUSY=1|0 decides instead, the tests): the user's rule, never trim Go's
 #                 cache under a live build (memory: a 2-hour trim still broke one); the row says it waited, and the next cap
 #                 (before a step, every 5 minutes) or the floor's deferral of the steps takes it up
-caches_go_busy() {  # 0 when a process of Go's toolchain (ARBACE_GOROOT's) runs on the host
-  case ${GATE_CACHES_GO_BUSY:-} in 1) return 0 ;; 0) return 1 ;; esac
-  local g=${ARBACE_GOROOT:-/root/tamago-go} p e
-  g=$(readlink -f "$g" 2>"$TMPDIR/caches-go.err" || echo "$g")
-  for p in /proc/[0-9]*; do
-    e=$(readlink "$p/exe" 2>"$TMPDIR/caches-go.err") || continue
-    case $e in "$g"/bin/*|"$g"/pkg/tool/*) return 0 ;; esac
-  done
-  return 1
-}
+# caches_go_busy and gocache_cap_kib: bin/lib/gocache.bash's, the same rule a build's trim by hand follows (n-gocache-trim)
+. "$root/bin/lib/gocache.bash"
 caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT FREE MIN IDLE, a line each (TSV)
   awk '
     /^[ \t]*;/ { next }
@@ -943,7 +935,7 @@ caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
             local fk sk
             if [ -n "${GATE_CACHES_FREE_KIB:-}" ]; then fk=$GATE_CACHES_FREE_KIB; else fk=$(df -Pk "$base" 2>"$lst.err" | awk 'NR == 2 {print $4 + 0}'); fi
             sk=$(du -sk "$base" 2>"$lst.err" | cut -f1)
-            capk=$(awk -v c="$capk" -v s="${sk:-0}" -v f="${fk:-0}" -v fr="$fr" -v mn="${mn/-/0}" 'BEGIN { k = s + f - fr * 1048576; if (k > c) k = c; if (k < mn * 1048576) k = mn * 1048576; printf "%d", k }')
+            capk=$(gocache_cap_kib "${sk:-0}" "${fk:-0}" "$a1" "$fr" "${mn/-/0}")
             echo "gate --prune: $base holds $(gib "${sk:-0}"), $(gib "${fk:-0}") free: its cap $(gib "$capk") (at most $a1 GiB, $fr GiB left free, at least ${mn/-/0} GiB)"
           fi
           find "$base" -type f -printf '%T@\t%s\t%p\n' 2>"$lst.err" | sort -n \
