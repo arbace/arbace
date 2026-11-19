@@ -1341,3 +1341,30 @@ code): the definitions that must be emitted written first in order without recur
 deferred vtables (groups and VTTs) first, then the deferred functions taken as a list, each written and, when it deferred more,
 EmitDeferred again before the next (depth first); a virtual destructor's deleting variant (D0) is a deferred function like the
 others, in the order first referred to (it was written in rounds of its own).
+
+## As built: coroutines (queue 393, W4; branch `393-cpp-coro`, 2026-11-19)
+
+Report 345's W4: the coroutine programs of the run checks (samples/coroutine.cpp and the six of gxx-dg-run's sampling:
+coroutines/pr106188.C, torture/class-02-templ-parm.C, co-await-20-do-while-cond.C, co-yield-02-loop.C, lambda-04-templ-parm.C,
+pr95519-01-initial-suspend.C) by our route, no clang. clang's IR of a coroutine at -O0 is already split (SPEC.md §14.3: LLVM's
+CoroSplit ran, no `llvm.coro.*` call left), so the code generator writes that split itself; the lowering's refusal of
+`llvm.coro.*` stays (nothing of ours emits one).
+
+| part | where | as built |
+|---|---|---|
+| the analysis | `arbace.cpp.sema`'s `coroutine-body`, `coro-await` | a function whose body holds co_await, co_yield or co_return outside a lambda's body or a local class ([dcl.fct.def.coroutine]/1): the promise type `std::coroutine_traits<R, [cv C& / C&&], P...>::promise_type` (/4, the pack grouped as the templates bind it); every parameter copied (/13: a class by value move-constructed, a reference bound again; the body's names the copies); the promise initialized from the copies' lvalues (with *this first for a member that is no lambda's call operator: clang's buildPromiseInitialization, the IR of lambda-04 calls `promise_type(int)`) when that initialization is valid, else default-initialized (/5); get_return_object's value the returned object at once when of the return type, else kept and converted when the ramp returns (clang's, class-02's `coro1(handle_type)` after the first suspension); `{ co_await p.initial_suspend(); try { body; [p.return_void();] } catch (...) { p.unhandled_exception(); } final: co_await p.final_suspend(); }`; co_return `p.return_value(e)` (a class local named alone moved) or `p.return_void()`, then the final suspension; an await-expression ([expr.await]/3): await_transform for co_await's operand when the promise declares one, operator co_await when viable, the awaiter materialized, `await_ready()` as a bool, `await_suspend(coroutine_handle<P>::from_address(frame))` (void or bool; a handle's symmetric transfer refused), `await_resume()` its value. Refused: a promise's own operator new or delete, `get_return_object_on_allocation_failure`, a parameter pack, an unnamed parameter, `std::noop_coroutine`. The checker (CX12, `*on-refusal*`) keeps its analysis as before |
+| the builtins | `:coro-builtin` | <coroutine>'s `__builtin_coro_done` (a null resume pointer), `_resume` and `_destroy` (the call through the frame's first and second word), `_promise(p, align, from)` (p ± alignTo(16, align)), as LLVM's CoroCleanup lowers them for the switch ABI |
+| the ramp | `arbace.cpp.codegen`'s `coro-ramp!` in `emit-fn!` | the frame by `::operator new` (freed if what follows throws), its header (the resume and destroy functions' pointers), the index 0 and the destroy flag, the flags the resume function's entry would clear, `this` and the copies, the promise at alignTo(16, align(P)), the returned object, then a call of NAME.resume; the return |
+| NAME.resume(frame) | `coro-resume!` | internal; the body with every alloca a frame slot (laid out in order after the header, the promise first; an alignment above 16 refused), entered by a switch on the suspension index (0 the start); the copies' and the promise's destructors the bottom of the cleanups ([dcl.fct.def.coroutine]/12); falling off the final suspension runs them and frees the frame |
+| a suspension point | `co-await!` | the awaiter's address kept in a frame slot (read again after a resumption), `await_ready`, then the index stored (at the final point the resume pointer nulled: `done()`), `await_suspend` (a bool's false resumes at once) and `ret void`; its resumption the switch's case: with the destroy flag set (NAME.destroy(frame) sets it and calls NAME.resume) the cleanups in force there run, the full-expression's temporaries first, and the frame is freed, else `await_resume` |
+| the check | `coro-check-ssa!` | a resume function whose value would cross a suspension point without a slot (`g + co_await a`: `g` loaded before) is refused (`coroutine`, "a value live across a suspension point"), by dominance over the blocks the dispatch's switch enters |
+
+Beside it, an `auto` static data member's type is deduced at its first use by the code generator's analysis
+(`var-node`; [dcl.spec.auto.general]/11): pr95519's `static constexpr auto initial_suspend = []() noexcept {...};`.
+
+The proofs (the VM, light): the seven programs by our route (`arbace.cpp.codegen gen-batch`) generated, lowered and, as a quick
+probe, built natively by gcc with the runtime of exceptions: the status and stdout of each the pack's recorded clang run
+(coroutine.cpp 3, the six 0); then `CPPI_ROUTE=ours bin/cppi check --only` on them, on ci with the lowered runtime, against the
+recorded runs (queue 393's report). Probes beside, natively against clang++'s own build: a coroutine destroyed while suspended (the
+awaiter, the locals, the promise and the copies destroyed in clang's order), a bool await_suspend that declines and a final
+suspension run to completion: the same output; `g + co_await A{}` refused.
