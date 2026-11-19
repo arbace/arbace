@@ -1418,7 +1418,7 @@ By an agent on the main host by day (the light tier: no gate, no build of Arbace
 | the records apart | `--record` | while ghc is the default, `test/haskell/check-hsi-native.edn` (`-aot-native`) beside `check-hsi.edn`; work `.tmp/hsi/check-native` |
 | the comparison | `bin/hsi compare-front [--aot] [NATIVE [GHC]]` (`bin/lib/hsi/compare-front`) | the native run against GHC's STG's record program by program: both pass, lost, gained, both fail, the native run's sources; fails on a pass lost from native STG (the switch's condition) |
 | knobs | `HSI_FRONT_REUSE=DIR` | an earlier run's front outputs reused, the front end run on the rest |
-| the front end's limit | `front_shard` (`HSI_FRONT_TIMEOUT`, default 300 s) | a program that gives no line for that long (a loop) or ends its process is recorded `timeout`, a fresh process takes the shard's rest |
+| the front end's limit | `front_shard` (`HSI_FRONT_TIMEOUT`, default 600 s since queue 422; 300 s before) | a program that gives no line for that long (a loop) or ends its process is recorded `timeout`, a fresh process takes the shard's rest |
 | two front-end fixes (GHC's rules) | `arbace/repr/haskell/simpleopt.ae` (`con-app`), `desugar.ae` (the constructors' `:strict`), `typecheck.ae` (`*strict-binds*`, `HsLet`) | exprIsConApp_maybe does not take a constructor application whose strict field's argument is not a value (the wrapper `$WCon` evaluates it; GHC floats that evaluation, keeping the case does the same); a banged pattern binding (dsStrictBind) forces its whole match before the let's body. `cgrun051` and `T11601` pass from native STG |
 | eligibility, two more rules | `front_eligible` | `-fdefer-type-errors` (flags or `OPTIONS_GHC`) and `RULES` pragmas: outside the front end's subset |
 

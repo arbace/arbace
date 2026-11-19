@@ -1677,6 +1677,9 @@
   (let [t (deep-expand t)]
     (cond
       (ffi-prim-type? t) [x identity]
+      ;; (queue 422: unboxArg's "Same for (# #)": an unboxed tuple whose representation is void, passed as it is (T24818's
+      ;; c_number :: (# #) -> Int64#); it was refused and the import left the placeholder, the literal 0)
+      (and (= :tc (first t)) (= (utuple-tc 0) (second t))) [x identity]
       ;; topNormaliseNewType_maybe: through the newtype (a match of its constructor, the cast the simple optimiser makes)
       (ffi-con-field t 'newtype)
       (let [[c rt] (ffi-con-field t 'newtype) y (ffi-lv "ds" rt)
@@ -5331,7 +5334,7 @@
                                  (some (fn [n] (let [o (str base n)] (when-not (contains? taken o) o))) (range))
                                  base))]
     (swap! *insts* conj {:dfun dfun :tvs names :ctx ctx :head [cls (mapv deep-expand ts)]})
-    {:dfun dfun :tvs names :ctx ctx :cls cls :ts ts :binds (arg d 3)
+    {:dfun dfun :tvs names :ctx ctx :cls cls :ts ts :binds (arg d 3) :sp (lsp sig)
      ;; round 54: the instance signatures (InstanceSigs), by the method's occ name: their HsSig
      :isigs (into {} (for [s (arg d 4) :let [sv (lval s)] :when (and (= 'ClassOpSig (con sv)) (not (true? (arg sv 2)))) nl (arg sv 3)]
                        [(occ (or (nm nl) (lval nl))) (arg sv 4)]))}))
@@ -5419,7 +5422,7 @@
     (instance-binds* env inst)))
 
 (defn- instance-binds*
-  [env {:keys [dfun tvs ctx cls ts binds gnd isigs]}]
+  [env {:keys [dfun tvs ctx cls ts binds gnd isigs sp]}]
   (let [skol (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs))
         ts (mapv #(subst skol %) ts)
         ctx (mapv (fn [[c xs]] [c (mapv #(subst skol %) xs)]) ctx)
@@ -5478,7 +5481,12 @@
                                                      (do (error! "unsolved: " (pr-str (zonk-pred pr))) (list 'lit "?"))))))
                                   a (list 'app f (into [d] extra))]
                               (if (empty? params) a (list 'lam params a)))
-                            (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))]))))]))
+                            ;; (queue 422: GHC.Tc.TyCl.Instance's tcMethods' error_rhs, noMethodBindingError of
+                            ;; "INST-SPAN|‘METHOD’" (the dictionary function's span, the instance's type; showSDoc's
+                            ;; quotes), its Chars cut to bytes by unsafeMkByteString as HsStringPrim's: ‘ and ’ are \x18
+                            ;; and \x19; it was the method's bare name, a literal tostg could not make)
+                            (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError"))
+                                  [(list 'lit (str (pr-str (str (if sp (span-text sp) "?") "|" (char 0x18) (occ mn) (char 0x19))) "#"))]))))]))
         ;; HF10-P50 (a): a superclass wanted of the instance not solved through the instance's own head met again among its
         ;; context's superclasses (GHC.Tc.Solver.Dict's prohibitedSuperClassSolve, Note [Solving superclass constraints]):
         ;; T21973b's Def (D c) not by ClassLedger c's superclass ClassDecode (D c)'s, the dictionary being defined (a
