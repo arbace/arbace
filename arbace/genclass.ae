@@ -349,28 +349,39 @@
         super-methods (for [^java.lang.reflect.Method meth (vals mm)]
                         (forwarding-method (.getName meth) (.getParameterTypes meth) (.getReturnType meth) false
                                            (super-call super)))
-        ;; an interface's default method (a class of the world's: the interpreter cannot call
-        ;; Iface.super's on one, j2g's Dyn can): not a method of the Java form but a fn set after
-        ;; it, for dispatch only (no member table entry, reflection finding the interface's),
-        ;; answering Compiler$Dyn's super marker without a fn, so that Dyn's Go method runs the
-        ;; default method (arbace.j2g.dyn's iface-fallback), as Clojure's emit-super-call
-        [iface-methods defaults]
-          (let [[_ acc ds]
-                (reduce1 (fn [[mm acc ds] ^java.lang.reflect.Method meth]
+        ;; an interface's default method, two ways (queue 399):
+        ;; - evaluated (the class the interpreter defines): not a method of the Java form but a
+        ;;   fn gen-class-define sets after it, for dispatch only (no member table entry,
+        ;;   reflection finding the interface's), answering Compiler$Dyn's super marker without
+        ;;   a fn, so that Dyn's Go method runs the default method (arbace.j2g.dyn's
+        ;;   iface-fallback): the interpreter cannot call Iface.super's on an interface of the
+        ;;   world (Compiler$CFGo/superCall), and a declared method answering the marker would
+        ;;   answer it to reflection;
+        ;; - compiled (an AOT program's class, the Java form c2j keeps: ::aot-form, recorded by
+        ;;   gen-class-define in place of the evaluated one): a forwarding method whose
+        ;;   alternative without a fn is the default method, Iface.super's (iface the interface
+        ;;   of :implements that has it), as Clojure's emit-super-call; without it the compiled
+        ;;   class ran the default, not the impl-ns's fn (Clojure's suite's interface-methods)
+        [iface-methods defaults default-methods]
+          (let [[_ acc ds dms]
+                (reduce1 (fn [[mm acc ds dms] [^Class iface ^java.lang.reflect.Method meth]]
                            (cond
-                             (contains? mm (method-sig meth)) [mm acc ds]
-                             (.isDefault meth) [(assoc mm (method-sig meth) meth) acc (conj ds meth)]
+                             (contains? mm (method-sig meth)) [mm acc ds dms]
+                             (.isDefault meth) [(assoc mm (method-sig meth) meth) acc (conj ds meth)
+                                                (conj dms (forwarding-method (.getName meth) (.getParameterTypes meth) (.getReturnType meth) false
+                                                                             (super-call iface)))]
                              :else [(assoc mm (method-sig meth) meth)
                                     (conj acc (forwarding-method (.getName meth) (.getParameterTypes meth) (.getReturnType meth) false
                                                                  unsupported-gen))
-                                    ds]))
-                         [mm [] []] (mapcat gc-instance-methods interfaces))]
+                                    ds dms]))
+                         [mm [] [] []] (for [i interfaces, m (gc-instance-methods i)] [i m]))]
             [acc (vec (for [^java.lang.reflect.Method meth ds
                             :let [mname (.getName meth) pcs (.getParameterTypes meth)]]
                         {:name mname :params pcs :ret (.getReturnType meth)
                          :vars (vec (concat (when (seq (overloads mname))
                                               [(gc-overload-name mname (seq pcs))])
-                                            [mname]))}))])
+                                            [mname]))}))
+             dms])
         extra-methods (for [[mname pclasses rclass :as msig] methods]
                         (forwarding-method mname pclasses rclass (:static (meta msig)) unsupported-gen))
         ;; the exposable methods [name pclasses rclass]: reflection's, then the world's protected
@@ -414,15 +425,20 @@
                                         (with-meta (vec (concat (when-not static? '[this]) [(gc-tag 'v ftype)])) {:tag 'void})
                                         (list 'set! place 'v))]))))
                          exposes)]
-    (with-meta
-     (apply list 'defclass (with-meta cname {:public true})
-           (concat
-             (when-not (some #{\.} name) [:package ""])
-             (when-not (= super Object) [:extends (gc-type super)])
-             (when (seq interfaces) [:implements (vec (map gc-type interfaces))])
-             statics state-field [clinit] ctors super-methods iface-methods extra-methods exposers
-             main-method field-exposers))
-     {::defaults defaults ::impl-ns impl-pkg-name ::prefix prefix})))
+    (let [form (fn [default-methods]
+                 ;; :arbace/gen-class: j2g lists every member of the class in its member table,
+                 ;; with its modifiers, as the JVM's reflection does (the private static Var
+                 ;; fields, which Clojure's suite reads by getDeclaredField: name-munging; queue 399)
+                 (apply list 'defclass (with-meta cname {:public true :arbace/gen-class true})
+                        (concat
+                          (when-not (some #{\.} name) [:package ""])
+                          (when-not (= super Object) [:extends (gc-type super)])
+                          (when (seq interfaces) [:implements (vec (map gc-type interfaces))])
+                          statics state-field [clinit] ctors super-methods iface-methods default-methods
+                          extra-methods exposers main-method field-exposers)))]
+      (with-meta (form nil)
+        {::defaults defaults ::impl-ns impl-pkg-name ::prefix prefix
+         ::aot-form (when (seq default-methods) (form default-methods))}))))
 
 (defn- gen-class-ns
   "The namespace gen-class's Java forms are evaluated in, arbace.genclass (arbace.core referred):
@@ -447,14 +463,29 @@
     (when-let [c (try (arbace.lang.RT/classForNameNonLoading name) (catch Throwable _ nil))]
       (when-not (arbace.lang.Compiler$AST/dynamic c) c))))
 
+(defn- gc-record-aot-form!
+  "While the program records the units it compiles (arbace.classes.native/compiled, ARBACE_COMPILE),
+  the Java form recorded for the class named name, the one just evaluated, replaced by aot-form
+  (generate-class's ::aot-form: the interfaces' default methods as forwarding methods, which the
+  interpreter's class has as fns for dispatch only), so that c2j keeps the class Clojure generates
+  (queue 399)."
+  [^String name aot-form]
+  (when-let [a (some-> (find-ns 'arbace.classes.native) (ns-resolve 'compiled) deref)]
+    (swap! a (fn [rs]
+               (let [i (last (keep-indexed (fn [i r] (when (= [name] (:names r)) i)) rs))]
+                 (if i
+                   (assoc rs i (assoc (nth rs i) :forms [(rest aot-form)]))
+                   rs))))))
+
 (defn- gen-class-define
   "gen-class*'s definition of the class of options-map at run time, as a Java form."
   [options-map]
   (let [super (when-let [e (:extends options-map)] (the-class e))]
     (try
       (let [form (generate-class options-map)
-            {ds ::defaults impl ::impl-ns prefix ::prefix} (meta form)
+            {ds ::defaults impl ::impl-ns prefix ::prefix aot-form ::aot-form} (meta form)
             c (binding [*ns* (gen-class-ns)] (eval form))]
+        (when aot-form (gc-record-aot-form! (.getName ^Class c) aot-form))
         (doseq [{:keys [name params ret vars]} ds]
           (let [vs (vec (map #(arbace.lang.Var/internPrivate impl (str prefix %)) vars))]
             (arbace.lang.Compiler$CFGo/setMethod
