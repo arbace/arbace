@@ -66,6 +66,7 @@
     (set! forcedMajorCount (unchecked-add forcedMajorCount forced))
     (ExtGc/weakCollect)
     (ExtGc/finCollect)
+    (ExtGc/memprofAsked majors)
     (set! canary (ExtGc/canaryRef)))
 
   (method ^:static gcStat []
@@ -93,6 +94,10 @@
   (method ^:public ^:static caml_gc_set [c]
     (let [f (.-f (cast Block c))
           n (Math/min (alength f) (alength gcControl))]
+      ;; a new minor heap size empties the simulated minor heap (caml_set_minor_heap_wsz: a minor collection)
+      (when (and (> (alength f) 0) (not (== (Rt/l (aget f 0)) (Rt/l (aget gcControl 0)))))
+        (set! minorUsed 0)
+        (set! minorDue true))
       (loop [^int i 0]
         (when (< i n) (aset gcControl i (aget f i)) (recur (unchecked-inc-int i))))
       Rt/UNIT))
@@ -293,14 +298,17 @@
   (field ^:static ^boolean weakUsed false)
   (method ^:static weakOf [v]
     (if (or (and (instance? Block v) (> (alength (.-f (cast Block v))) 0))
-            (instance? byte/1 v) (instance? double/1 v) (instance? Closure v) (instance? Pap v) (instance? Custom v))
+            (instance? byte/1 v) (instance? double/1 v) (instance? Closure v) (instance? Pap v) (instance? Custom v)
+            ;; (queue 438) an int64's or a nativeint's box: an object of its own, as OCaml's custom block (Int32's java.lang.Integer may be shared)
+            (instance? I64 v) (instance? NInt v))
       (do (set! weakUsed true) (WeakReference. v))
       v))
   (method ^:static ephSlot [v]
     (if (instance? WeakReference v)
       (let [y (.get (cast WeakReference v))] (if (nil? y) ephNone y))
       v))
-  (method ^:static ephClean ^void [e]
+  ;; ephe_clean: it reports whether it dropped a data
+  (method ^:static ephClean ^boolean [e]
     (let [f (.-f (cast Block e)) ^:mutable dead false]
       (loop [^int i 2]
         (when (< i (alength f))
@@ -308,20 +316,26 @@
             (aset f i ephNone)
             (set! dead true))
           (recur (unchecked-inc-int i))))
-      (when dead (aset f 1 ephNone))))
+      (if (and dead (not (identical? (aget f 1) ephNone)))
+        (do (aset f 1 ephNone) true)
+        false)))
+  ;; again while a cleaning dropped a data (queue 438, oi's: a data that is another ephemeron's key dies in the same collection)
   (method ^:static weakCollect ^void []
     (when weakUsed
-      (System/gc)
-      (let [live (ArrayList.)]
-        (loop [^int i 0]
-          (when (< i (.size ephRegistry))
-            (let [r (cast WeakReference (.get ephRegistry i)) e (.get r)]
-              (when (not (nil? e))
-                (ExtGc/ephClean e)
-                (.add live r)))
-            (recur (unchecked-inc-int i))))
-        (.clear ephRegistry)
-        (.addAll ephRegistry live))))
+      (loop [^int round 0]
+        (System/gc)
+        (let [live (ArrayList.) ^:mutable dropped false]
+          (loop [^int i 0]
+            (when (< i (.size ephRegistry))
+              (let [r (cast WeakReference (.get ephRegistry i)) e (.get r)]
+                (when (not (nil? e))
+                  (when (ExtGc/ephClean e) (set! dropped true))
+                  (.add live r)))
+              (recur (unchecked-inc-int i))))
+          (.clear ephRegistry)
+          (.addAll ephRegistry live)
+          (when (and dropped (< round 31))
+            (recur (unchecked-inc-int round)))))))
 
   (method ^:public ^:static caml_ephe_create [n]
     (let [e (ExtGc/ephCreate n)]
@@ -367,16 +381,27 @@
 
   ;; backtrace.c: Bt's (OC217 (a)'s fifth stage, queue 370)
 
-  ;; memprof.c (OC218 (a), queue 331; oi's ext_sys.go memprofSample, memprofRun): the counted words (Rt/words) sampled at the
-  ;; profile's rate, an allocation with samples calling the tracker's alloc_minor (alloc_major above 256 words) with its record
-  ;; {n_samples; size; source; callstack} at the next Rt/tick or the stop; no promote or dealloc calls, an empty callstack, the
-  ;; callbacks' own allocations not sampled
-  (field ^:static memprofTracker nil)
-  (field ^:static ^long memprofGen 0)
-  (field ^:static ^double memprofLambda 0.0)
+
+  ;; memprof.c (OC218 (a); queue 331's sampling, and since queue 438 OC218's heap model at the light level, oi's ext_sys.go allocV,
+  ;; memprofSample, memprofMinorGC, memprofMajorGC, memprofRun, memprofCall: OC233 (a), OC234 (a), OC235 (a)). Once a profile was
+  ;; started (memprofSampling, never cleared but by Main/reset), each counted allocation (Rt/words, Rt/wordsV with its value) fills a simulated minor heap of
+  ;; Gc.control's minor_heap_size words; the one that would overflow it empties it first, a minor collection, as the asked collections
+  ;; do (gcAsked). A profile (memprofProfile: [tracker lambda status], status 0 sampling, 1 stopped, 2 discarded) is its domain's
+  ;; (Dom/mp), inherited by the domains it spawns; it samples the counted words at its rate, and an allocation with samples calls the
+  ;; tracker's alloc_minor (alloc_major above Max_young_wosize, 256) with {n_samples; size; source; callstack} as the allocation
+  ;; returns, its Some tracking the value (an entry [profile weak-ref data major]) through the simulated collections: a minor one gives
+  ;; each tracked minor value its promote callback when it lives after System/gc (its WeakReference not cleared: jrt's weak pointers,
+  ;; Go's reachability), else dealloc_minor; a major one (Gc.major, full_major, compact) gives each dead major value dealloc_major.
+  ;; Callbacks never nest: those queued while one runs (the thread's queue of [kind n size major profile ref entry], kind 0 an
+  ;; allocation's, 1 a promotion's, 2 a minor deallocation's, 3 a major one's) run after it; an exception drops the queued allocation
+  ;; callbacks and keeps the others for the next Rt/tick. The callbacks' own allocations are not sampled; the callstack is empty.
   (field ^:static ^double memprofNext 0.0)
   (field ^:static ^long memprofRng 42)
-  ;; memprofPending: the samples queued in all threads; each thread's queue and in-callback flag its own (a ThreadLocal of
+  (field ^:static ^long minorUsed 0)
+  (field ^:static ^boolean minorDue false)
+  (field ^:static ^:final ^ArrayList mpMinor (ArrayList.))
+  (field ^:static ^:final ^ArrayList mpMajor (ArrayList.))
+  ;; memprofPending: the callbacks queued in all threads; each thread's queue and in-callback flag its own (a ThreadLocal of
   ;; [queue inCallback]), as memprof.c's thread states: a callback that blocks leaves the other threads' callbacks running
   (field ^:public ^:static ^int memprofPending 0)
   (field ^:static ^:final ^ThreadLocal memprofTL (ThreadLocal.))
@@ -385,73 +410,202 @@
       (if (nil? x)
         (let [st (new Object/1 [(ArrayList.) Boolean/FALSE])] (.set memprofTL st) st)
         (cast Object/1 x))))
-  (method ^:static memprofGeom ^double []
+  (method ^:static mpInCb ^boolean [^Object/1 st] (.booleanValue (cast Boolean (aget st 1))))
+  (method ^:static mpPush ^void [^Object/1 st ^long kind ^long n ^long size ^boolean major p r e]
+    (.add (cast ArrayList (aget st 0))
+          (new Object/1 [(Long/valueOf kind) (Long/valueOf n) (Long/valueOf size) (Boolean/valueOf major) p r e]))
+    (set! memprofPending (unchecked-inc-int memprofPending)))
+  (method ^:static mpStatus ^long [p] (Rt/l (aget (cast Object/1 p) 2)))
+  (method ^:static mpDomProf [] (.-mp (.-dom (Effects/st))))
+  (method ^:public ^:static spawnProf [] (ExtGc/mpDomProf))
+  (method ^:static memprofGeom ^double [^double lambda]
     (set! memprofRng (unchecked-add (unchecked-multiply memprofRng 6364136223846793005) 1442695040888963407))
     ;; (Java arithmetic on doubles, unchecked-divide and unchecked-negate: the compiled level's j2g world has no Numbers for / and
     ;; unary -, queue 396)
     (let [u (unchecked-divide (+ (double (unsigned-bit-shift-right memprofRng 11)) 0.5) 9007199254740992.0)]
-      (+ (Math/floor (unchecked-divide (Math/log u) (Math/log1p (unchecked-negate memprofLambda)))) 1.0)))
-  (method ^:public ^:static memprofSample ^void [^long wosize]
-    (when (not (.booleanValue (cast Boolean (aget (ExtGc/mpState) 1))))
-      (let [^:mutable n 0]
-        (if (>= memprofLambda 1.0)
-          (set! n (unchecked-inc wosize))
-          (when (> memprofLambda 0.0)
-            (set! memprofNext (- memprofNext (double (unchecked-inc wosize))))
-            (loop []
-              (when (<= memprofNext 0.0)
-                (set! n (unchecked-inc n))
-                (set! memprofNext (+ memprofNext (ExtGc/memprofGeom)))
-                (recur)))))
-        (when (> n 0)
-          (.add (cast ArrayList (aget (ExtGc/mpState) 0)) (new long/1 [n wosize (if (> wosize 256) 1 0) memprofGen]))
-          (set! memprofPending (unchecked-inc-int memprofPending))))))
+      (+ (Math/floor (unchecked-divide (Math/log u) (Math/log1p (unchecked-negate lambda)))) 1.0)))
+
+  ;; an allocation of v (wosize words, counted by Rt; nil: a value without an identity): the simulated minor heap filled, collected first
+  ;; when the allocation overflows it, then v sampled when the domain's profile samples, its callback run at once (OC234 (a)), unless the
+  ;; thread is in a callback
+  ;; memprofSample: an allocation whose value is not at hand (taken as dead at the next minor collection when tracked)
+  (method ^:public ^:static memprofSample ^void [^long wosize] (ExtGc/memprofAlloc wosize nil))
+  (method ^:public ^:static memprofAlloc ^void [^long wosize v]
+    (let [st (ExtGc/mpState) ^:mutable full false]
+      (when (<= wosize 256)
+        (set! minorUsed (unchecked-add minorUsed (unchecked-inc wosize)))
+        (when (> minorUsed (Rt/l (aget gcControl 0)))
+          (set! minorUsed (unchecked-inc wosize))
+          (set! full true)))
+      (if (ExtGc/mpInCb st)
+        (when full (set! minorDue true))
+        (do
+          (when (or full minorDue)
+            (ExtGc/memprofMinorGC st false))
+          (let [p (ExtGc/mpDomProf)]
+            (when (and (some? p) (== (ExtGc/mpStatus p) 0))
+              (ExtGc/memprofDraw st p wosize v)))
+          (when (> (.size (cast ArrayList (aget st 0))) 0)
+            (ExtGc/memprofRun))))))
+  ;; the samples of an allocation of v by the profile p, its callback queued
+  (method ^:static memprofDraw ^void [^Object/1 st p ^long wosize v]
+    (let [lambda (Rt/d (aget (cast Object/1 p) 1)) ^:mutable n 0]
+      (if (>= lambda 1.0)
+        (set! n (unchecked-inc wosize))
+        (when (> lambda 0.0)
+          (set! memprofNext (- memprofNext (double (unchecked-inc wosize))))
+          (loop []
+            (when (<= memprofNext 0.0)
+              (set! n (unchecked-inc n))
+              (set! memprofNext (+ memprofNext (ExtGc/memprofGeom lambda)))
+              (recur)))))
+      (when (> n 0)
+        (ExtGc/mpPush st 0 n wosize (> wosize 256) p (if (nil? v) nil (WeakReference. v)) nil))))
+  ;; a tracked value lives after System/gc: its weak reference not cleared (none: a value without an identity, taken as dead)
+  (method ^:static mpAlive ^boolean [r]
+    (and (some? r) (some? (.get (cast WeakReference r)))))
+  ;; a minor collection for the profiles (memprof.c's caml_memprof_after_minor_gc): System/gc unless gcDone, then each tracked minor
+  ;; value's promote callback queued when it lives, else its dealloc_minor; a discarded profile's values dropped
+  (method ^:static memprofMinorGC ^void [^Object/1 st ^boolean gcDone]
+    (set! minorDue false)
+    (when (> (.size mpMinor) 0)
+      (when (not gcDone) (System/gc))
+      (let [es (ArrayList. mpMinor)]
+        (.clear mpMinor)
+        (loop [^int i 0]
+          (when (< i (.size es))
+            (let [e (cast Object/1 (.get es i))]
+              (when (not (== (ExtGc/mpStatus (aget e 0)) 2))
+                (ExtGc/mpPush st (if (ExtGc/mpAlive (aget e 1)) 1 2) 0 0 false (aget e 0) nil e)))
+            (recur (unchecked-inc-int i)))))))
+  ;; a major collection's part (after System/gc): each tracked major value found dead gets its dealloc_major callback queued
+  (method ^:static memprofMajorGC ^void [^Object/1 st]
+    (let [es (ArrayList. mpMajor)]
+      (.clear mpMajor)
+      (loop [^int i 0]
+        (when (< i (.size es))
+          (let [e (cast Object/1 (.get es i))]
+            (when (not (== (ExtGc/mpStatus (aget e 0)) 2))
+              (if (ExtGc/mpAlive (aget e 1))
+                (.add mpMajor e)
+                (ExtGc/mpPush st 3 0 0 false (aget e 0) nil e))))
+          (recur (unchecked-inc-int i))))))
+  ;; gcAsked's part: the simulated minor heap emptied (its tracked values promoted or dead), a major collection's deaths too, the
+  ;; callbacks run now, or after the callback that asked for the collection
+  (method ^:static memprofAsked ^void [^long majors]
+    (when memprofSampling
+      (let [st (ExtGc/mpState)]
+        (set! minorUsed 0)
+        (when (or (> (.size mpMinor) 0) (and (> majors 0) (> (.size mpMajor) 0)))
+          (System/gc))
+        (ExtGc/memprofMinorGC st true)
+        (when (> majors 0) (ExtGc/memprofMajorGC st))
+        (when (> (.size (cast ArrayList (aget st 0))) 0)
+          (ExtGc/memprofRun)))))
+  ;; the forgotten values of the discarded profiles
+  (method ^:static memprofDrop ^void []
+    (loop [^int i (unchecked-dec-int (.size mpMinor))]
+      (when (>= i 0)
+        (when (== (ExtGc/mpStatus (aget (cast Object/1 (.get mpMinor i)) 0)) 2) (.remove mpMinor i))
+        (recur (unchecked-dec-int i))))
+    (loop [^int i (unchecked-dec-int (.size mpMajor))]
+      (when (>= i 0)
+        (when (== (ExtGc/mpStatus (aget (cast Object/1 (.get mpMajor i)) 0)) 2) (.remove mpMajor i))
+        (recur (unchecked-dec-int i)))))
+
+  ;; the queued callbacks in order, those they queue too, and the promotions of a minor collection made while one ran; a callback's
+  ;; exception is raised here, the allocation callbacks queued after it dropped (their allocations are never made in OCaml), the others
+  ;; kept for the next Rt/tick
   (method ^:public ^:static memprofRun ^void []
-    (let [st (ExtGc/mpState) mq (cast ArrayList (aget st 0))]
-     (when (and (> (.size mq) 0) (not (.booleanValue (cast Boolean (aget st 1)))))
-      (aset st 1 Boolean/TRUE)
-      (try
-        ;; the queue taken whole: a callback's exception drops the samples after it (oi's memprofRun)
-        (let [q (ArrayList. mq)]
-         (.clear mq)
-         (set! memprofPending (unchecked-subtract-int memprofPending (.size q)))
-         (loop [^int i 0]
-          (when (< i (.size q))
-            (let [s (cast long/1 (.get q i))
-                  info (Block. 0 (new Object/1 [(Long/valueOf (aget s 0)) (Long/valueOf (aget s 1)) (Long/valueOf 0)
-                                                (Block. 0 (new Object/1 0))]))]
-              ;; a sample of a profile since stopped (in a callback) gets no callback (oi's memprofRun)
-              (when (and memprofSampling (== (aget s 3) memprofGen) (some? memprofTracker))
-                (Rt/ap1 (aget (.-f (cast Block memprofTracker)) (unchecked-int (aget s 2))) info))
-              (recur (unchecked-inc-int i))))))
-        (finally
-          (aset st 1 Boolean/FALSE))))))
-  ;; Main/reset's part: no profile, no samples, the words counted from zero (a batch's next program)
+    (let [st (ExtGc/mpState) mq (cast ArrayList (aget st 0)) ^:mutable finished false]
+      (when (not (ExtGc/mpInCb st))
+        (aset st 1 Boolean/TRUE)
+        (try
+          (loop []
+            (if (== (.size mq) 0)
+              (when minorDue
+                (ExtGc/memprofMinorGC st false)
+                (recur))
+              (let [smp (cast Object/1 (.remove mq (unchecked-int 0)))]
+                (set! memprofPending (unchecked-dec-int memprofPending))
+                (ExtGc/memprofCall smp)
+                (recur))))
+          (set! finished true)
+          (finally
+            (aset st 1 Boolean/FALSE)
+            (when (not finished)
+              (loop [^int i (unchecked-dec-int (.size mq))]
+                (when (>= i 0)
+                  (when (== (Rt/l (aget (cast Object/1 (.get mq i)) 0)) 0)
+                    (.remove mq i)
+                    (set! memprofPending (unchecked-dec-int memprofPending)))
+                  (recur (unchecked-dec-int i))))))))))
+  ;; one queued callback: an allocation's (its value tracked when the callback returns Some), a promotion's (tracked on in the major heap
+  ;; when it returns Some), a deallocation's
+  (method ^:static memprofCall ^void [^Object/1 smp]
+    (let [kind (Rt/l (aget smp 0)) p (aget smp 4) pf (cast Object/1 p)
+          tf (.-f (cast Block (aget pf 0)))]
+      (if (== kind 0)
+        ;; a sample of a profile stopped or replaced since gets no callback (the block is not tracked)
+        (when (and (identical? p (ExtGc/mpDomProf)) (== (ExtGc/mpStatus p) 0))
+          (let [major (.booleanValue (cast Boolean (aget smp 3)))
+                info (Block. 0 (new Object/1 [(aget smp 1) (aget smp 2) (Long/valueOf 0) (Block. 0 (new Object/1 0))]))
+                r (Rt/ap1 (aget tf (if major 1 0)) info)]
+            (when (instance? Block r)
+              (let [e (new Object/1 [p (aget smp 5) (aget (.-f (cast Block r)) 0) (Boolean/valueOf major)])]
+                (if major (.add mpMajor e) (.add mpMinor e))))))
+        ;; a tracked value's callbacks: none once its profile is discarded
+        (when (not (== (ExtGc/mpStatus p) 2))
+          (let [e (cast Object/1 (aget smp 6))]
+            (cond (== kind 1)
+                  (let [r (Rt/ap1 (aget tf 2) (aget e 2))]
+                    (when (instance? Block r)
+                      (aset e 2 (aget (.-f (cast Block r)) 0))
+                      (aset e 3 Boolean/TRUE)
+                      (.add mpMajor e)))
+                  (== kind 2) (Rt/ap1 (aget tf 3) (aget e 2))
+                  :else (Rt/ap1 (aget tf 4) (aget e 2))))))))
+
+  ;; Main/reset's part: no profile, no samples, no tracked values, the words counted from zero (a batch's next program)
   (method ^:public ^:static memprofReset ^void []
     (set! memprofSampling false)
-    (set! memprofTracker nil)
     (set! memprofPending 0)
-    (.clear (cast ArrayList (aget (ExtGc/mpState) 0)))
+    (set! minorUsed 0)
+    (set! minorDue false)
+    (.clear mpMinor)
+    (.clear mpMajor)
+    (let [st (ExtGc/mpState)]
+      (.clear (cast ArrayList (aget st 0)))
+      (aset st 1 Boolean/FALSE))
+    (set! (.-mp (.-dom (Effects/st))) nil)
     (set! Rt/minorWords 0)
     (set! Rt/majorWords 0))
   (method ^:public ^:static caml_memprof_start [lambda csize tracker]
     (when (or (not (instance? Double lambda)) (< (Rt/l csize) 0)
               (not (and (>= (Rt/d lambda) 0.0) (<= (Rt/d lambda) 1.0))))
       (throw (Rt/invalidArg "Gc.Memprof.start")))
-    (when memprofSampling (throw (Rt/failwith "Gc.Memprof.start: profile already running.")))
-    (set! memprofTracker tracker)
-    (set! memprofGen (unchecked-inc memprofGen))
-    (set! memprofLambda (Rt/d lambda))
-    (.clear (cast ArrayList (aget (ExtGc/mpState) 0)))
-    (when (< memprofLambda 1.0) (set! memprofNext (ExtGc/memprofGeom)))
-    (set! memprofSampling true)
-    (Custom. "_memprof" nil))
-  (method ^:public ^:static caml_memprof_is_sampling [u] (Rt/b memprofSampling))
+    ;; the samples taken before get their callbacks first (memprof.c's final attempt); a profile sampling in this domain is replaced,
+    ;; not stopped (it samples on in the domains that share it)
+    (ExtGc/memprofRun)
+    (let [p (new Object/1 [tracker lambda (Long/valueOf 0)])]
+      (set! (.-mp (.-dom (Effects/st))) p)
+      (set! memprofSampling true)
+      (when (< (Rt/d lambda) 1.0) (set! memprofNext (ExtGc/memprofGeom (Rt/d lambda))))
+      (Custom. "_memprof" p)))
+  (method ^:public ^:static caml_memprof_is_sampling [u]
+    (let [p (ExtGc/mpDomProf)] (Rt/b (and (some? p) (== (ExtGc/mpStatus p) 0)))))
   (method ^:public ^:static caml_memprof_stop [u]
-    (when (not memprofSampling) (throw (Rt/failwith "Gc.Memprof.stop: no profile running.")))
     ;; the samples taken before the stop get their callbacks first
     (ExtGc/memprofRun)
-    (set! memprofSampling false)
-    (set! memprofTracker nil)
+    (let [p (ExtGc/mpDomProf)]
+      (when (or (nil? p) (not (== (ExtGc/mpStatus p) 0)))
+        (throw (Rt/failwith "Gc.Memprof.stop: no profile running.")))
+      (aset (cast Object/1 p) 2 (Long/valueOf 1)))
     Rt/UNIT)
-  (method ^:public ^:static caml_memprof_discard [t] Rt/UNIT))
+  (method ^:public ^:static caml_memprof_discard [t]
+    (let [p (.-v (cast Custom t))]
+      (when (== (ExtGc/mpStatus p) 0) (throw (Rt/failwith "Gc.Memprof.discard: profile not stopped.")))
+      (when (== (ExtGc/mpStatus p) 2) (throw (Rt/failwith "Gc.Memprof.discard: profile already discarded.")))
+      (aset (cast Object/1 p) 2 (Long/valueOf 2))
+      (ExtGc/memprofDrop))
+    Rt/UNIT))
