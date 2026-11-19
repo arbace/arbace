@@ -31,4 +31,8 @@ lacks CLAUDE.md '`go/arbace/{ci,cinterp,crt,oi,scm}`'
 has CLAUDE.md 'embedded and compiled with the program since C9'
 lacks arbace/j2g/embed.ae "repr/c's, which are not embedded"
 grep -q '^;; repr/c' "$here/arbace/j2g/embed.ae" && { echo "FAIL arbace/j2g/embed.ae: a column-0 comment inside the exclusions"; fail=1; } || echo "ok   arbace/j2g/embed.ae: its comments indented"
+# 1119: since W2 repr/scheme, repr/cpp, repr/llvm, repr/python and the Go forms oi, scm, scminterp, py, libm are embedded, out of arbace_crop_paths
+lacks CLAUDE.md "their namespaces (\`arbace/repr/{ocaml,scheme,cpp,llvm,python}\`"
+lacks CLAUDE.md '`go/arbace/{oi,scm,scminterp,py,'
+has CLAUDE.md "out of \`arbace_runtime_key\` alone (\`bin/lib/version.bash\`'s"
 exit $fail

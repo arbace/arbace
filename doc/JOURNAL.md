@@ -12951,3 +12951,24 @@ invokers' six), 399's five gen-class cases pass; `bin/gate --plan`: 52 essential
 a build (gate_key moved). doc/AGENDA.md's top rewritten for main plus these merges: the consolidation of 2026-11-18/19, the scores,
 the pending work (lanes 2 and 4, the Java platform night, tonight's --full, the Ghidra DECISIONs 403-1 and 405-1, the re-seed's
 stopgaps: ARBACE_NO_AOT for cpp-essential and c-parse's mutants, the Tok split, the aot-lib key reading stage 0's cf2g).
+
+## 2026-11-19: CLAUDE.md's crops keys after W2; parse-check --record's preprocessor errors (review 401, L2; branch `n-doc-1119`, on next `7dd3947a0`)
+
+- CLAUDE.md had drifted from `bin/lib/version.bash`: its crops paragraph and the `gate_key` and `arbace_runtime_key` passages still said
+  repr/scheme, repr/cpp, repr/llvm, repr/python (with `arbace/scheme/`, `arbace/cpp/`, `arbace/python/`) and the Go forms
+  `go/arbace/{oi,scm,scminterp,py,libm}` were not embedded and in `arbace_crop_paths`. Since W2 (doc/W-WINDOW.md) they are embedded
+  and out of that list, the Go forms out of `arbace_runtime_key` alone (`arbace_runtime_not`, W-P3 (a)). Corrected: the paragraph now
+  names both lists as version.bash holds them (`arbace_crop_paths`: repr/haskell, rust, ocaml, `arbace/rust`, `arbace/llvm`, repr/asm,
+  `arbace/asm/`, repr/wasm, `arbace/wasm/`, C++'s oracle check tools ncheck, tcheck, mutate and expect; the Go forms oicapi, expat,
+  pyexpat, hs, x86i, emu, a64i, wai and pyi's lazy modules with pyctypes; `jdk/ocaml/`; the crops' script libraries with wai's). The
+  other sentences were left as they were. `test/docs/claude-md-test.bash` (the essential `claude-md`) holds the correction: passes.
+- Review 401's L2 (`.tmp/review-1119.md`, item 7, the brief's item 5): `arbace.repr.c.parsecheck/port-pp-errors` cast the stream's
+  tokens `^Tok` inside a `(catch Throwable _ nil)`. On stage 0 before the re-seed (parsecheck compiled, lex.ae evaluated anew, two Tok
+  classes) the cast throws and a by-hand `bin/repr-c parse-check --record` guessed no `:pp-errors` without saying why. Fixed light: the
+  kind read through a new `arbace.repr.c.lex/tok-kind` (lex's own Tok, whichever is loaded), and the catch prints the reason on stderr.
+  Considered: running `--record` under `ARBACE_NO_AOT=1` until the re-seed (the review's stopgap; needs no code, but the failure stays
+  silent). The other `^Tok` hints of parsecheck (the mutants') are left: the gate's c-parse mutants already run under ARBACE_NO_AOT.
+  Unit check `c.judge-test/parse-port-pp-errors-runs` (test/c/judge_test.ae): the errors of a file with `#error`, none of a clean one,
+  and nil with the reason when the stream throws; run alone with `parse-record-pp-errors-only-the-preprocessors` on stage 0: both pass.
+- Keys (gate_key without `ARBACE_HOST_EXE`): gate KEY20 `efcc5118fcf5748217a6` -> `78bab1078a9f8303993a` (lex.ae and parsecheck.ae
+  are embedded), javac's `231da30c39a1` -> `53480937d838`; arbace_runtime_key unmoved. The night's gate rebuilds the executables.
