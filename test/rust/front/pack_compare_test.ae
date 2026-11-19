@@ -62,6 +62,33 @@
       (check "RenameReturnPlace: `_0 = copy _1` after the call, _1 renamed _0" (br/pack-compare o r) [:equal-o0 "locals,nrvo"])
       (check "negative: the return place from a local assigned twice is not renamed"
              (br/pack-compare (update-in o [:blocks 1 :stmts] #(into ['(assign (place 1) (use (copy (place 1))))] %)) r) :differs))
+    ;; queue 448: SizedTypeProperties' constants evaluated at the instance (sized-const-eval, a stub layout), the record's LAYOUT
+    ;; allocation compared by its bytes
+    (let [usz '(ty "usize" (uint "usize"))
+          lay '(ty "std::alloc::Layout" (adt "std::alloc::Layout" "DefId(2:1 ~ core[0]::alloc::layout::Layout)" []))
+          s24 [:adt "alloc::string::String" []]
+          uc (fn [nm ty] (list 'const (str "const <std::string::String as std::mem::SizedTypeProperties>::" nm) ty
+                               (with-meta (list 'unevaluated (str "core::mem::SizedTypeProperties::" nm) [] nil) {:nc [(str "core::mem::SizedTypeProperties::" nm) [s24]]})))
+          body (fn [c] {:args 0 :locals [{:ty usz}] :debug [] :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'use c))] :term '(return)}]})
+          layout (fn [t] (if (= t [:adt "core::alloc::layout::Layout" []]) {:size 16 :align 8 :fields [8 0]} {:size 24 :align 8 :fields [0 8 16]}))
+          ev (fn [b] (binding [br/*type-layout* layout] (#'br/sized-const-eval b)))
+          rec-max (body (list 'const "const <std::string::String as std::mem::SizedTypeProperties>::MAX_SLICE_LEN" usz '(scalar 384307168202282325 8)))]
+      (check "SizedTypeProperties::MAX_SLICE_LEN at String: isize::MAX / 24" (br/pack-compare (ev (body (uc "MAX_SLICE_LEN" usz))) rec-max) [:equal])
+      (check "negative: MAX_SLICE_LEN left unevaluated without a layout" (br/pack-compare (body (uc "MAX_SLICE_LEN" usz)) rec-max) :differs)
+      (check "SizedTypeProperties::ALIGNMENT at String: the alignment's scalar"
+             (br/pack-compare (ev (body (uc "ALIGNMENT" usz))) (body (list 'const "const <std::string::String as std::mem::SizedTypeProperties>::ALIGNMENT" usz '(scalar 8 8)))) [:equal])
+      (check "negative: SIZE is not MAX_SLICE_LEN" (br/pack-compare (ev (body (uc "SIZE" usz))) rec-max) :differs)
+      (let [rec-l (assoc (assoc-in (body (list 'const "const <std::string::String as std::mem::SizedTypeProperties>::LAYOUT" lay '(indirect alloc605 0))) [:locals 0 :ty] lay)
+                         :alloc-data [["alloc605" {:kind :memory :align 8 :mutable false :bytes "08000000000000001800000000000000" :init "1111111111111111" :relocs []}]])
+            ours-l (assoc-in (ev (body (uc "LAYOUT" lay))) [:locals 0 :ty] lay)]
+        (check "SizedTypeProperties::LAYOUT at String: its bytes (align, then size) against the record's allocation" (br/pack-compare ours-l rec-l) [:equal])
+        (check "negative: another type's LAYOUT" (br/pack-compare ours-l (assoc-in rec-l [:alloc-data 0 1 :bytes] "08000000000000002000000000000000")) :differs))
+      (let [isz '(ty "isize" (int "isize"))
+            lc (fn [p id] (list 'const (str "const " p) isz (with-meta (list 'unevaluated id [] nil) {:nc [p []]})))
+            rec-u (body (list 'const "const core::cell::UNUSED" isz '(scalar 0 8)))]
+        (check "core::cell::UNUSED by its local def id: 0" (br/pack-compare (ev (body (lc "core::cell::UNUSED" "85"))) rec-u) [:equal])
+        (check "negative: another private constant stays unevaluated" (br/pack-compare (ev (body (lc "core::cell::OTHER" "86"))) (body (lc "core::cell::OTHER" "86"))) [:equal])
+        (check "negative: ... and differs from the record's value" (br/pack-compare (ev (body (lc "core::cell::OTHER" "86"))) (body (list 'const "const core::cell::OTHER" isz '(scalar 0 8)))) :differs)))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)

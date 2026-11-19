@@ -433,6 +433,14 @@
   (let [static-data (atom [])
         vt-fn (atom (fn [_ _] nil))   ; RF16: a promoted constant's casts' vtables (set below)
         fix-static (fn [x]
+                     (cond
+                       ;; queue 448: a native instance's evaluated constant allocation (sized-const-eval's LAYOUT): an immutable
+                       ;; memory allocation of its bytes, named by them
+                       (and (seq? x) (= 'indirect-bytes (first x)))
+                       (let [[_ hx al] x a (str "allocL" hx)]
+                         (swap! static-data conj [a {:kind :memory :align al :mutable false :bytes hx :init (apply str (repeat (quot (count hx) 2) "1")) :relocs []}])
+                         (list 'indirect (symbol a) 0))
+                       :else
                      (if (and (seq? x) (= 'static-ptr (first x)))
                        (let [id (second x) nm (static-name ours id)
                              st (or (get (:statics facts) nm) (throw (ex-info (str "no static " nm " in the record") {})))
@@ -485,7 +493,7 @@
                              (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
                                                          :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
                              (apply list (concat (take 3 x) [(list 'ptr (symbol a) 0 8)] (drop 4 x))))
-                           x))))
+                           x)))))
         ;; RFP44 (a): an unsizing cast to a trait object carries its vtable's allocation (codegen's pair's second half): mono's
         ;; (vtable-alloc: the entries laid out natively), else the record's cast of the same types in the same body (counted)
         rec-vts (atom (reduce (fn [m [k v]] (update m k (fnil conj []) v)) {}
@@ -771,10 +779,71 @@
                               (assoc b :term (apply list 'call g new-args more))))))))
                   bs))))
 
+(def ^:dynamic *type-layout*
+  "queue 448: within a run, a type's layout (mono's type-layout-form: {:size :align :fields ..}), for the SizedTypeProperties
+  constants a native instance names; nil outside a run"
+  nil)
+
+(defn- walk-meta
+  "F over X's forms bottom-up, each list's and vector's metadata kept (the native forms' :tc and :nc)"
+  [f x]
+  (f (cond (seq? x) (with-meta (apply list (map #(walk-meta f %) x)) (meta x))
+           (vector? x) (with-meta (mapv #(walk-meta f %) x) (meta x))
+           (map? x) (into {} (for [[k v] x] [k (walk-meta f v)]))
+           :else x)))
+
+(defn- sized-const-eval
+  "queue 448: core::mem::SizedTypeProperties' constants at a native instance (`<String as SizedTypeProperties>::MAX_SLICE_LEN`,
+  the instance's type known) evaluated as CTFE evaluates them for the record (library/core/src/mem/mod.rs: SIZE size_of, ALIGN
+  align_of, ALIGNMENT the alignment, IS_ZST SIZE == 0, MAX_SLICE_LEN isize::MAX / SIZE (usize::MAX for a ZST), LAYOUT
+  Layout::new: its bytes an immutable allocation of Layout's own field order, `(indirect-bytes HEX ALIGN)` until the run names
+  it), from mono's layout of the type; a constant whose type's layout mono refuses stays unevaluated; and two of core's private
+  integer constants (below)"
+  [body]
+  (if-not *type-layout*
+    body
+    (walk-meta
+     (fn [x]
+       (let [v (when (and (seq? x) (= 'const (first x))) (nth x 3 nil))]
+         (if-not (and (seq? v) (= 'unevaluated (first v)) (nil? (nth v 3 nil)))
+           x
+           (let [[d args] (:nc (meta v))
+                 nm (when (string? d) (second (re-matches #"core::mem::SizedTypeProperties::(SIZE|ALIGN|ALIGNMENT|IS_ZST|MAX_SLICE_LEN|LAYOUT)" d)))
+                 l (when (and nm (= 1 (count args)) (vector? (first args)) (not (#{:param :proj :infer} (ffirst args))))
+                     (try (*type-layout* (first args))
+                          (catch Throwable e (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "sized-const-eval:" d (pr-str args) (.getMessage e)))) nil)))
+                 _ (when (and nm (nil? l) (System/getenv "RF_CONST_TRACE")) (binding [*out* *err*] (println "sized-const-eval: no layout" d (pr-str args))))
+                 sz (:size l) al (:align l)
+                 hex (fn [n w] (apply str (for [i (range w)] (format "%02x" (.intValue (.and (.shiftRight (biginteger (bigint n)) (int (* 8 i))) (biginteger 255)))))))
+                 val (when (and (integer? sz) (integer? al))
+                       (case nm
+                         "SIZE" (list 'scalar sz 8)
+                         "ALIGN" (list 'scalar al 8)
+                         ;; Alignment::new(Self::ALIGN).unwrap(): the enum's discriminant is the alignment (a usize scalar)
+                         "ALIGNMENT" (list 'scalar al 8)
+                         "IS_ZST" (list 'scalar (if (zero? sz) 1 0) 1)
+                         "MAX_SLICE_LEN" (list 'scalar (if (zero? sz) 18446744073709551615N (quot 9223372036854775807N (bigint sz))) 8)
+                         ;; Layout { size, align }: its fields at the offsets mono's layout of Layout gives (rustc puts the
+                         ;; niche-holding Alignment first: align's bytes, then size's)
+                         "LAYOUT" (let [ll (try (*type-layout* [:adt "core::alloc::layout::Layout" []]) (catch Throwable _ nil))
+                                        [os oa] (when (vector? (:fields ll)) (:fields ll))]
+                                    (when (and (= 16 (:size ll)) (#{[0 8] [8 0]} [os oa]))
+                                      (list 'indirect-bytes (if (zero? os) (str (hex sz 8) (hex al 8)) (str (hex al 8) (hex sz 8))) 8)))
+                         nil))
+                 ;; core's private constants the exported bodies name by their local def id (the export's `(unevaluated "85")`,
+                 ;; :nc its path), whose values follow from their definitions alone: library/core/src/cell.rs `const UNUSED:
+                 ;; BorrowCounter = 0` (isize), ptr/mod.rs swap_nonoverlapping_bytes' `const CHUNK_SIZE: usize =
+                 ;; size_of::<*const ()>()` (8 on the 64-bit target)
+                 val (or val (when (empty? args) (get {"core::cell::UNUSED" '(scalar 0 8)
+                                                       "core::ptr::swap_nonoverlapping_bytes::CHUNK_SIZE" '(scalar 8 8)}
+                                                      d)))]
+             (if val (with-meta (apply list (concat (take 3 x) [val])) (meta x)) x)))))
+     body)))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
-  (let [b (reprint (:body entry) args)]
+  (let [b (sized-const-eval (reprint (:body entry) args))]
     ;; LowerIntrinsics again at the instance (its own port may have grown since the export)
     {:def (:def entry) :args args :body ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
                                          (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))}))
@@ -997,6 +1066,19 @@
         prep (fn [b] {:args (:args b) :debug (vec (for [d (:debug b)] (list 'debug (norm (:value d))))) :locals (mapv (fn [l] {:ty (norm (:ty l))}) (:locals b))
                       :blocks (mapv (fn [x] {:stmts (vec (rec-extras (norm (vec (:stmts x))))) :term (rec-extras (norm (:term x))) :cleanup (boolean (:cleanup x))})
                                     (:blocks b))})
+        ;; queue 448: the record's evaluated constant allocations (`(indirect allocN 0)`, an immutable memory allocation
+        ;; without pointers) by their bytes, as ours names them (sized-const-eval's `(indirect-bytes HEX ALIGN)`)
+        rallocs (into {} (:alloc-data rec))
+        by-bytes (fn by-bytes [x] (cond (and (seq? x) (= 'indirect (first x)) (= 0 (nth x 2 nil)))
+                                        (let [a (get rallocs (str (second x)))]
+                                          (if (and (= :memory (:kind a)) (empty? (:relocs a)) (string? (:bytes a)))
+                                            (list 'indirect-bytes (:bytes a) (:align a))
+                                            x))
+                                        (seq? x) (apply list (map by-bytes x))
+                                        (vector? x) (mapv by-bytes x)
+                                        (map? x) (into {} (for [[k v] x] [k (by-bytes v)]))
+                                        :else x))
+        rec (if (seq rallocs) (update rec :blocks by-bytes) rec)
         po (prep ours) pr (prep rec)
         bl (fn [b f] (mapv (fn [x] (update x :stmts f)) (:blocks b)))
         lt (fn [b] (mapv :ty (:locals b)))
@@ -1057,6 +1139,11 @@
                           _ (when-let [u (first (filter #(and (seq? %) (= 'unevaluated (first %)) (string? (second %)) (re-matches #"\d+" (second %)))
                                                         (tree-seq coll? seq (concat [(:body inst)] (vals (:promoted-bodies (:body inst)))))))]
                               (throw (ex-info (str "an unevaluated constant of a local def id " (pr-str (take 2 u))) {})))
+                          ;; queue 448: a body calling drop glue (core::ptr::drop_in_place's `drop_glue::<T>()`, a shim rustc
+                          ;; builds per type and leaves out when the type needs none) stays the record's: its callee is no item
+                          ;; the module defines
+                          _ (when (some (fn [blk] (= "core::ptr::drop_glue" (second (call-of (:term blk))))) (:blocks (:body inst)))
+                              (throw (ex-info "a call of drop glue (a shim, the record's)" {})))
                           ;; queue 443: an instance-judged callee taken only when equal to one of the record's bodies of its def
                           _ (when (and (= :instance (:judge e)) (seq seen))
                               (let [rs (get rec-by-path def)
@@ -1169,20 +1256,46 @@
                     std-fn-syms (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))
                                            [_ a] (:alloc-data b) :when (= :fn (:kind a))]
                                        (:symbol a)))
-                    facts (mono/program-facts n bodies std-calls std-fn-syms)
+                    ;; queue 448, 433-1 (a): each call of the record's library bodies whose callee is a library body of the
+                    ;; record's (an Item instance): its function constant's [PATH ARG-FORMS], that body's def (its DefId's path
+                    ;; less the crate's hash: `core::fmt::{impl#4}::new`) and symbol, for mono to collect (RFP49's roots through
+                    ;; the record's bodies)
+                    rec-targets (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
+                                  (let [lib? (fn [b] (not (str/starts-with? (str (:def-id b)) "DefId(0:")))
+                                      by-sym (into {} (for [b rec-bodies :when (and (lib? b) (str/starts-with? (str (:instance b)) "Item("))
+                                                            :let [[_ c p] (re-find #"~ ([a-z_]+)\[[0-9a-f]+\]::(.*)\)$" (str (:def-id b)))] :when c]
+                                                        [(:symbol b) (str c "::" p)]))
+                                      acc (java.util.LinkedHashSet.)]
+                                  (doseq [b rec-bodies :when (lib? b) blk (:blocks b) :let [t (:term blk)]
+                                          :when (and (seq? t) (= 'call (first t)) (> (count t) 6))]
+                                    (let [f (second t) tyf (when (seq? f) (nth f 2 nil)) st (when (seq? tyf) (nth tyf 2 nil))
+                                          ci (nth t 6) sym (when (and (seq? ci) (map? (second ci))) (:symbol (second ci)))
+                                          d (get by-sym sym)]
+                                      (when (and d (seq? st) (= 'fndef (first st)) (string? (second st)) (vector? (nth st 2 nil)))
+                                        (.add acc [(second st) (nth st 2) d sym]))))
+                                  (vec acc)))
+                    facts (mono/program-facts n bodies std-calls std-fn-syms rec-targets)
                     _ (mem-mark (str n " facts"))
+                    _ (when (seq rec-targets)
+                        (swap! lines conj (str "rec-items: " (count (:rec-items facts)) " instances collected through the record's library bodies, of "
+                                               (count (distinct (map #(take 2 %) rec-targets))) " calls' constants")))
                     ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
-                                (native-core-plan (for [x (:ext-items facts) :let [rec (some #(when (= (:symbol x) (:symbol %)) %) rec-bodies)] :when rec]
-                                                    [rec (:def x) (:args x)])
+                               (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))]
+                                ;; queue 448, 433-1 (a): the collector's items, then the instances mono collected through the record's
+                                ;; library bodies (:rec-items), each record body a root once
+                                (native-core-plan (let [rec-by-sym (into {} (for [r rec-bodies] [(:symbol r) r])) seen (java.util.HashSet.)]
+                                                    (vec (for [x (concat (:ext-items facts) (:rec-items facts)) :let [rec (get rec-by-sym (:symbol x))]
+                                                               :when (and rec (.add seen (:symbol x)))]
+                                                           [rec (:def x) (:args x)])))
                                                   ;; a function the record has a body of stays the record's when no native one is equal
                                                   (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))] (:def b)))
                                                   ;; queue 443: the record's library bodies by their def's path (`alloc::raw_vec::{impl#0}::new`)
                                                   (update-vals (group-by :path (for [b rec-bodies :when (and (str/starts-with? (str (:instance b)) "Item(") (not (str/starts-with? (str (:def-id b)) "DefId(0:")))
                                                                         :let [[_ c p] (re-find #"~ ([a-z_]+)\[[0-9a-f]+\]::(.*)\)$" (str (:def-id b)))]
-                                                                        :when (#{"alloc" "std" "hashbrown"} c)]
+                                                                        :when (#{"core" "alloc" "std" "hashbrown"} c)]
                                                                     {:path (str c "::" p) :body b}))
-                                                               #(mapv :body %))))
+                                                               #(mapv :body %)))))
                     core-insts (when core-plan
                                  (vals (into {} (for [i (concat (vals (:taken core-plan)) (:extra core-plan))] [[(:def i) (:args i)] i]))))
                     ;; RF12-P6: drop glue's shims the program's types need, built natively when the glue is the type's Drop::drop alone
@@ -1416,7 +1529,10 @@
                       (for [f forms :when (= 'mir/entry (first f))] (do (fact! :entry false) f))))
                     _ (mem-mark (str n " module's forms"))
                     our-forms (mono/ty-forms (keep first (vals ours)))
-                    core-forms (mono/ty-forms (for [f new-forms :when (= 'mir/body (first f)) :let [b (second f)] :when (not= "arbace-built+cleanup" (:phase b))] (dissoc b :alloc-data)))
+                    core-forms (mono/ty-forms (concat (for [f new-forms :when (= 'mir/body (first f)) :let [b (second f)] :when (not= "arbace-built+cleanup" (:phase b))] (dissoc b :alloc-data))
+                                                      ;; queue 448: the record's bodies of the native ones too, which codegen takes in place
+                                                      ;; of a native body it refuses (check's emit-mono), so that their types have layouts
+                                                      (for [r rec-bodies :when (native-taken (:symbol r))] (dissoc r :alloc-data))))
                     ;; a layout mono refuses: the record's, when it has that type
                     lt ((:layouts-of facts) (concat our-forms core-forms))
                     table (into (sorted-map)
@@ -1505,7 +1621,12 @@
   crate's identity for the check of instances not collected)"
   [dir n & [crates]]
   ;; RF13: a failure past codegen (the printer's) is the program's refusal, not the batch's end
-  (let [[st what] (try ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n *std-linked*)
+  (let [;; queue 448: the program's crate's token for emit-mono's check of the native bodies' calls (an instance of the
+        ;; program's crate they call that no body defines: those bodies the record's, codegen-fallback)
+        tok0 (try (let [{:keys [id]} (binding [mono/*crates* (or mono/*crates* (mono/load-crates crates))] (mono/local-crate n))]
+                    (str "C" (mono/disambiguator (mono/u64 id)) (mono/ident (str/replace n "-" "_"))))
+                  (catch Throwable _ nil))
+        [st what] (try ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n *std-linked* tok0)
                        (catch Throwable e [:unsupported (str "the module's printing: " (.getMessage e))]))
         _ (mem-mark (str n " codegen done"))]
     (if (not= st :ok)

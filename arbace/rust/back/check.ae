@@ -158,7 +158,7 @@
   "DIR/NAME.mono.edn (the helper's --mono-mir) to DIR/NAME.ours.ll: every function instance of the program codegen'd; the
   functions it calls but does not define stubbed to abort (`native?` false: a no_std program to run alone) or declared (the
   host's std supplies them); or the first refusal: [:unsupported WHAT]."
-  [dir n native?]
+  [dir n native? & [local-tok]]
   (let [all (mir/read-all (slurp (str dir "/" n ".mono.edn")))
         lt (:layouts all)
         gl (cg/new-globals (:langsyms all))
@@ -174,8 +174,52 @@
                                        (list '= '%3 (list 'call 'i64 (gs lang-start) [['ptr (gs main)] ['i64 '%2] ['ptr '%1] ['i8 sigpipe]]))
                                        (list '= '%4 (list 'trunc 'i64 '%3 'i32))
                                        '(ret i32 %4))])))
-        fns (try (doall (concat (map (fn [b] (cg/codegen-fn b lt gl)) (filter #(= :body (:form %)) (:bodies all))) (when wrapper [wrapper])))
-                 (catch Throwable e [:unsupported (or (:codegen/unsupported (ex-data e)) (.getMessage e))]))]
+        ;; queue 448: a native library body (build-run's :phase "arbace-native-core") codegen refuses is replaced by the record's
+        ;; body of its symbol (DIR/NAME.record.edn, rsi-build's link to the pack's); one the record has no body of (a native
+        ;; body's callee the record lacks) is left out, and its native callers replaced in turn (they alone call it); each a
+        ;; line of DIR/NAME.codegen-fallback.txt (SYMBOL's name, record|dropped, why); any other body's refusal is the module's
+        bodies (filter #(= :body (:form %)) (:bodies all))
+        native-b? (fn [b] (= "arbace-native-core" (:phase b)))
+        callee-syms (fn [b] (set (for [blk (:blocks b) :let [t (:term blk)]
+                                       :when (and (seq? t) (= "call" (name (first t))) (> (count t) 6))
+                                       :let [ci (nth t 6)] :when (and (seq? ci) (map? (second ci)) (string? (:symbol (second ci))))]
+                                   (:symbol (second ci)))))
+        defined-syms (set (keep :symbol bodies))
+        refused (when (some native-b? bodies)
+                  (let [g (cg/new-globals (:langsyms all))]
+                    (cg/set-def-symbols! g (:bodies all))
+                    (into {} (for [b bodies :when (native-b? b)
+                                   :let [w (try (cg/codegen-fn b lt g) nil
+                                                (catch Throwable e (or (:codegen/unsupported (ex-data e)) (.getMessage e) "?")))
+                                         ;; an instance of the program's crate (LOCAL-TOK in its symbol) it calls that no body
+                                         ;; defines (a trait method mono left unresolved: specialization's spec_next): the link
+                                         ;; would fail (build-run's "a local instance not collected")
+                                         w (or w (when local-tok
+                                                   (when-let [u (first (filter #(and (str/includes? % local-tok) (not (defined-syms %))) (callee-syms b)))]
+                                                     (str "calls an instance of the program's crate no body defines: " u))))]
+                                   :when w]
+                               [(:symbol b) w]))))
+        fallbacks (atom [])
+        bodies (if (empty? refused)
+                 bodies
+                 (let [rec (let [f (java.io.File. (str dir "/" n ".record.edn"))]
+                             (if (.exists f) (into {} (for [b (:bodies (mir/read-all (slurp f))) :when (= :body (:form b))] [(:symbol b) b])) {}))
+                       natives (filter native-b? bodies)
+                       bad (loop [bad (set (keys refused))]
+                             (let [orphans (remove #(contains? rec %) bad)
+                                   more (set (for [b natives :when (not (bad (:symbol b))) :when (some (callee-syms b) orphans)] (:symbol b)))]
+                               (if (empty? more) bad (recur (into bad more)))))]
+                   (doall (keep (fn [b]
+                                  (if (and (native-b? b) (bad (:symbol b)))
+                                    (let [r (get rec (:symbol b)) why (get refused (:symbol b) "calls a body left out")]
+                                      (swap! fallbacks conj (str (:name b) "\t" (if r "record" "dropped") "\t" why))
+                                      r)
+                                    b))
+                                bodies))))
+        fns (try (doall (concat (map (fn [b] (cg/codegen-fn b lt gl)) bodies) (when wrapper [wrapper])))
+                 (catch Throwable e [:unsupported (or (:codegen/unsupported (ex-data e)) (.getMessage e))]))
+        _ (let [f (java.io.File. (str dir "/" n ".codegen-fallback.txt"))]
+            (if (seq @fallbacks) (spit f (str (str/join "\n" @fallbacks) "\n")) (.delete f)))]
     (if (= :unsupported (first fns))
       fns
       (let [extras (cg/module-extras gl)
