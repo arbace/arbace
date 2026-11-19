@@ -841,7 +841,7 @@ java-check-oracle: ## JCV1: the oracle tier, by hand at a tag: the same saved re
 	bin/java-check --judge --oracle --latest-saved
 java-check-stale: ## D356-2 (a): a level's record against today's world, no run (seconds): the rows neither passing nor by design whose reason cites a class or member the world now holds, by name, with the controls; LEVEL=compiled|interp|..., ARGS=--ids (bin/java-check --stale-reasons LEVEL)
 	bin/java-check --stale-reasons $(or $(LEVEL),compiled) $(ARGS)
-java-golden: ## JCV2: the jls programs' golden files (test/java/jls/NAME.out) against their review, line by line (test/java/jls/golden.edn; bin/java-check golden; ARGS=--oracle: each against the JDK's recorded stdout too)
+java-golden: ## JCV2, JCS361 (a): the golden files (test/java/jls/NAME.out, test/java/golden/ID.out) against their reviews, line by line (test/java/jls/golden.edn, test/java/golden/AREA.edn; bin/java-check golden; ARGS=--oracle: each against the JDK's recorded stdout too; --control: each jtreg golden file with a byte changed must fail)
 	bin/java-check golden $(ARGS)
 java-verdicts: ## JCV1: whose verdict judges each test (its own, jtreg's, or the JDK's recorded stdout), test/java/verdicts.edn checked against the sources (bin/java-check verdicts --verify)
 	bin/java-check verdicts --verify
