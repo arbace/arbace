@@ -794,6 +794,47 @@
           (when (and (:noreturn f) (abi/void? (abi/unq (:ret (:ty f))))) (emit! '(unreachable)))
           r)))))
 
+;; queue 392: a virtual call whose object's dynamic type is known is a direct one, as clang's EmitCXXMemberOrOperatorMemberCallExpr
+;; with CXXMethodDecl::getDevirtualizedMethod writes it at -O0 (clang/lib/CodeGen/CGExprCXX.cpp, clang/lib/AST/DeclCXX.cpp at
+;; llvmorg-23.1.5): the object, past its derived-to-base conversions, a variable of class type (not a reference), a member of
+;; class type or a temporary; the method called its final overrider in that class when that class or the object's declares it,
+;; else the call stays virtual (a covariant return, a pure overrider, an overrider in a class between the two). ios_init.cc's
+;; `buf_cout_sync.~stdio_sync_filebuf<char>()`, whose stdio_sync_filebuf<char>::~stdio_sync_filebuf (D2) clang defines there
+(declare overrides-fn?)
+
+(defn- devirtualized
+  "[fid obj] of the call node `e` (:virtual) made direct, or nil."
+  [e]
+  (let [f (sema/fnd (:fn e))
+        inner (loop [o (:obj e)] (if (= :base-lv (:op o)) (recur (:e o)) o))
+        known (case (:op inner)
+                :var (abi/class? (:ty (sema/var* (:id inner))))
+                :field (abi/class? (abi/unq (:ty inner)))
+                :temp true
+                false)
+        d (when known (:id (abi/unq (:ty inner))))
+        cf (:cls f)]
+    (when (and d (or (= d cf) (abi/derived-from? d cf)))
+      (let [own (fn [c] (first (filter #(let [g (sema/fnd %)] (and (:virtual g) (overrides-fn? f g)))
+                                       (if (= :dtor (:kind f)) (keep identity [(:dtor (abi/cls c))]) (:methods (abi/cls c))))))
+            ;; (the final overrider in d: d's own, else f's unless a class between them overrides it)
+            between (fn between [c] (some (fn [b] (let [bc (:cls b)]
+                                                    (when (and (not= bc cf) (or (abi/derived-from? bc cf)))
+                                                      (or (own bc) (between bc)))))
+                                          (:bases (abi/cls c))))
+            g (cond (= d cf) (:fn e) (own d) (own d) (between d) nil :else (:fn e))
+            gf (when g (sema/fnd g))]
+        (when (and gf (not (:pure gf)) (= (abi/unq (:ret (:ty gf))) (abi/unq (:ret (:ty f)))))
+          (cond (= (:cls gf) d) [g inner]
+                (= (:cls gf) cf) [g (:obj e)]))))))
+
+(defn- member-call!
+  "call! of the call node `e` (a method's on its object), devirtualized where clang does."
+  [e dest]
+  (if-let [[g o] (when (:virtual e) (devirtualized e))]
+    (call! g (emit-lv o) (:args e) dest false)
+    (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) dest (:virtual e))))
+
 (defn call-dtor!
   "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one); with `vtt`, a base
   subobject's (the base-object destructor of a class with virtual bases)."
@@ -1552,7 +1593,7 @@
     :stmt-expr (stmt-expr! e)
     :opaque (if (#{:lv :xv} (:cat e)) (fail :codegen "an opaque glvalue as a prvalue") (opaque-of e))
     :call (if (= :pr (:cat e))
-            (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) nil (:virtual e))
+            (member-call! e nil)
             (load! (:ty e) (emit-lv e)))
     :icall (if (= :pr (:cat e)) (icall! e nil) (load! (:ty e) (emit-lv e)))
     :new (let [et (:et e)
@@ -1852,7 +1893,7 @@
     :cond (cond-branches! e emit-lv 'ptr)
     :call (if (= :pr (:cat e))
             (materialize! e)
-            (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) nil (:virtual e)))
+            (member-call! e nil))
     :icall (if (= :pr (:cat e)) (materialize! e) (icall! e nil))
     :temp-obj (materialize! e)
     :raw (fail :codegen "raw as an lvalue")
@@ -1868,7 +1909,7 @@
   [e addr]
   (case (:op e)
     :temp-obj (emit-init addr (:ty e) (:init e))
-    :call (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) addr (:virtual e))
+    :call (member-call! e addr)
     :icall (icall! e addr)
     :mcall (mcall! e addr)
     :cond (cond-branches! e #(emit-into % addr) nil)
