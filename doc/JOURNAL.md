@@ -12930,3 +12930,24 @@ The essential gate at 22b4c6542 failed two steps; everything else passed.
   Details in doc/classes/JAVA-FRONTEND-SURVEY.md, "As built / proposed: javac's tool build, faster".
 - Keys: `bin/arbace-go` and `bin/lib/version.bash` move `gate_key` and `arbace_javac_key` once; the reader's key takes its new form
   (one (A) to record the closure).
+
+## 2026-11-19: next = main 88b8e7f1a plus the day's three merges (401-fix, 402-fix, 399-clj-genclass), for the night's gate
+
+On next = main = `88b8e7f1a` (essential-gated this morning), `--no-ff` in order:
+- mac/401-fix `b82e5bd83`: c-parse's mutants part under `ARBACE_NO_AOT` until the re-seed, as cpp-essential (test/gate/steps.edn only);
+- mac/402-fix `92e5adf6a`: review 402's fix (the reader's key guarded across javac's tool build, its script and startup files keyed). It
+  sits on n-javac-fast, so its merge brings n-javac-fast's two commits (`f47f1d9a2`, the compiled reader keyed by its load closure;
+  `5d8029f2e`, the survey's section and journal entry): intended, `reader_key` by the load closure moves gate_key and javac's key once.
+  The one conflict, doc/JOURNAL.md's appends: both sides kept, main's first;
+- mac/399-clj-genclass `d73c48d28` (the Mac's queue 399, `git branch -r --contains`): gen-class at the AOT level, the default methods and
+  the Var fields (arbace/genclass.ae, arbace/j2g/model.ae and out.ae, j2g-unit's gen-class fixture).
+
+Keys (gate_key without `ARBACE_HOST_EXE`, as the gate computes it): gate KEY20 `0753b529a43fe68eabff` -> `efcc5118fcf5748217a6`
+(bin/arbace-go, bin/lib/version.bash, arbace/genclass.ae, arbace/j2g/), javac's `826af88b2119` -> `231da30c39a1`; arbace_runtime_key
+unmoved (no file of arbace/lang, go, overlay/jdk or jdk changed). The night's gate rebuilds the executables and javac's tool.
+Light checks only (no build): `bin/reap` 54 of 56, 0 problems; `bin/crops-score --judge --strict` 0 problems (scores unchanged);
+`bin/records-check` 9 pairs, 0; `gate.crops check` 0; `bin/j2g-unit` 181 passes, the 7 known failures (type annotations' known rows,
+invokers' six), 399's five gen-class cases pass; `bin/gate --plan`: 52 essential steps, 20 run, 24 deferred to the night, go-build
+a build (gate_key moved). doc/AGENDA.md's top rewritten for main plus these merges: the consolidation of 2026-11-18/19, the scores,
+the pending work (lanes 2 and 4, the Java platform night, tonight's --full, the Ghidra DECISIONs 403-1 and 405-1, the re-seed's
+stopgaps: ARBACE_NO_AOT for cpp-essential and c-parse's mutants, the Tok split, the aot-lib key reading stage 0's cf2g).

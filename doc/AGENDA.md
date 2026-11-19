@@ -1,6 +1,6 @@
 # Agenda
 
-The current state of the work (as of 2026-11-17 evening; the sections below "The consolidation" are as of 2026-11-10 unless dated). This file is rewritten as things change. For the history, see
+The current state of the work (as of 2026-11-19 morning, the State's consolidation of 2026-11-18/19 included; the sections below "The consolidation (2026-11-15/17)" as of 2026-11-10 unless dated). This file is rewritten as things change. For the history, see
 [JOURNAL.md](JOURNAL.md) (since 2026-11-07), the journals at the tags
 [`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
 (2026-11-01 to 2026-11-07),
@@ -15,36 +15,56 @@ The current state of the work (as of 2026-11-17 evening; the sections below "The
 
 ## State
 
-- **The seed** is `3c48859d…` (2026-11-17, the consolidation's re-seed W: W2's embedding of the crops, pyi, oi and goi's
-  listing of `arbace/{py,libm,crt,ci}`; packed from the fixpoint's G3 at `53da41d93`, verified: stage 0 = G1 = G2 = G3). R
-  (`w-retire-4`) retired the stopgaps the old seed `d5548e72` needed (`annot-lenient`, `classes_stale`,
-  `bin/lib/ci/fresh.bash`). Unchanged by the day's burst.
-- **The branches.** main = next = `42bf8614b` (origin and mac) since 19:17 UTC 2026-11-17: the consolidation (`f1969748f`,
-  gated by the essential gate on main at 12:33, 126 min, 0 failures) plus the day's burst (45 first-parent commits, below "The
-  burst (2026-11-17)"). main reached `42bf8614b` before its full gate ran, by an advance watcher's mistake (it waited on the
-  gate's launcher, not the gate); the user kept it (round 52). Tonight's full gate (`bin/gate --full --concurrent` on
-  `42bf8614b`, from 19:15, log `.tmp/goal/g-full2.log`) decides the fixes: its failures go to `REVISIT-full2.md`
-  (`.tmp/goal/revisit-after-full2.sh`, which moves nothing) and to fix agents in the morning. Held until after it: the branches
-  listed in the burst's section (unbuilt compiled or embedded code, or records first).
-- **The crops' scores** (`test/crops/scores.edn` on next `42bf8614b`; completeness, without by design, maturity,
-  independence): Clojure 99 99 100 100, Java 89 92 100 60, Go 98 100 100 100, C 98 100 100 100, C++ 91 93 100 72, OCaml 86
-  96 100 100, Scheme 100 100 100 100, Haskell 97 99 100 76, Rust 75 75 96 80, LLVM IR 98 99 100 98, Python 0 0 83 60 (eval
-  and AOT wait for its records night; 98 independence on the held Python line), x86-64 assembly 99 100 100 100, arm64
-  assembly 100 100 100 100, WebAssembly 98 98 100 100 (100 with the held 326 and 327). C++'s 93 without by design (from 96)
-  is CP398 (a)+(c) and CP399 (a): rows moved from by design to deferred, on purpose.
-- **The REAP matrix** (`bin/reap`, `test/reap/matrix.edn` on next): fourteen rows (Clojure, Java, Go, C, C++, OCaml,
-  Scheme, Haskell, Rust, LLVM IR, Python, x86-64 and arm64 assembly, WebAssembly), 56 cells, 53 checked, 0 problems; "no
-  check yet": Rust's AOT (322 merged, its records after the gate) and Python's eval and AOT (its records night).
-  `bin/crops-score --judge --strict` and `bin/records-check` pass.
-- **The gate** (next `42bf8614b`, `bin/gate --plan`): the essential tier 52 steps since the crops tier (`gate-ess-diet`, 71 ->
-  51, then `rsi-shim-essential`): the core about 27 steps, 29.5 minutes of serial work measured after a re-seed; a crop's
-  essential subsets run by day only when its own paths (`:crop-paths`), declaration or environment changed, else `night`
-  (deferred to the night's gate); `--full --concurrent` 339 steps, simulated wall 8:02; the oracle tier (`--oracle`) as before.
-  The crops' fragments spliced: C++, Scheme, OCaml, LLVM IR, Rust, Haskell, the assembly crops, WebAssembly; Python's after
-  its records night (F1 (a): the records first, then the splice).
-  Branch `gf-gate` (2026-11-12, night 12's 45 failures): the gate's own bugs fixed (lanes-test and cpp-selftest environment, the
-  jdk corpus steps' memory declarations, haskell-lib's chain, repr-clojure's count); haskell-roundtrip and rust-roundtrip out of
-  `--full` (their parts `:clean-only`, `GATE_ALL_PARTS=1`) until their records and printers are fixed.
+- **The seed** is `3c48859d…` (2026-11-17, the consolidation's re-seed W, packed from the fixpoint's G3 at `53da41d93`,
+  verified: stage 0 = G1 = G2 = G3). Unchanged since. The namespaces changed after it are evaluated by stage 0 from the
+  checkout (RT.toolSource), which gave the re-seed's stopgaps below ("Next").
+- **The branches.** main = `88b8e7f1a` (origin and mac), essential-gated on 2026-11-19 morning: the consolidation of
+  2026-11-18/19 (below). next = main plus the day's three merges (`--no-ff`, for tonight's gate):
+  - mac/401-fix `b82e5bd83`: c-parse's mutants part under `ARBACE_NO_AOT` until the re-seed, as cpp-essential (steps.edn only);
+  - mac/402-fix `92e5adf6a`: review 402's fix of javac's reader key. It brings n-javac-fast's two commits along (`f47f1d9a2`,
+    the compiled reader keyed by its load closure, and `5d8029f2e`, the survey's section), as intended: `bin/arbace-go` and
+    `bin/lib/version.bash` move `gate_key` and `arbace_javac_key` once;
+  - mac/399-clj-genclass `d73c48d28`: gen-class at the AOT level, the default methods and the Var fields (queue 399).
+
+  The keys: gate KEY20 `0753b529a43fe68eabff` -> `efcc5118fcf5748217a6`, javac's `826af88b2119` -> `231da30c39a1`
+  (`arbace_runtime_key` unmoved: none of arbace/lang, go, overlay/jdk or jdk changed). So the night's gate makes two Go-hosted
+  builds and javac's tool afresh. The merges' light checks: `bin/reap` 54 of 56, 0 problems; `bin/crops-score --judge
+  --strict`, `bin/records-check` (9 pairs), `gate.crops check`: 0 problems; `bin/j2g-unit` 181 passes and the 7 known failures
+  (type annotations' known rows, invokers' six).
+- **The consolidation of 2026-11-18/19** (round 54): n-all, n-all2, n-all3 and n-all4 merged the day's branches of both hosts
+  (about 80 first-parent commits on `42bf8614b`: Java's deferred rows by cause (n-java-defer), Java's independence after the
+  platform switch (n-java-indep2), D340-2's Java records (n-recs), C++'s by-design rows audited and 125 own-diag files passing on
+  the own front end (n-cpp-bd), C's last light rows and judge (n-c-last), Rust's alloc and std passes (RIND9 (a)) and its AOT
+  cell 6 of 6 (n-rust-aot), LLVM IR's judge by own outcomes (n-llvm-indep), Haskell's elaborator stops (n-hs-elab2) and the
+  Mac's queue 347-391). Then three overnight lanes on n-all4: lane 5 (genclass eval 7/53 pass, AOT reference corrected; convert5;
+  goi essential 801/801; llvm-essential's 17 undeclared reads declared), lane 1 (C++: runtime 198/198, 124 by our route, check
+  and AOT records, the whole own dg record), lane 3 (OCaml: oi 423/451, AOT 352/544, suite 116 and 103 of 132; pins attested in
+  two steps). The essential gate at `22b4c6542` failed cpp-essential (two Toks, below) and suite-go (`--run-one`'s JDK check
+  under load), both fixed at `88b8e7f1a`, which passed and became main.
+- **The crops' scores** (`bin/crops-score` on next; completeness, without by design, maturity, independence): Clojure 99.1
+  99.6 100 100, Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
+  100 100, Scheme 99.9 100 100 100, Haskell 97.3 99.1 100 78.4, Rust 100 100 100 80.0, LLVM IR 99.3 100 100 99.0, Python 0 0
+  83.3 98.2 (eval and AOT wait for its records, lane 4), x86-64 assembly 99.4 99.9 100 100, arm64 assembly 99.9 99.9 100 99.9,
+  WebAssembly 100 100 100 100. Below 90% complete: Java and OCaml (and Python, unrecorded).
+- **The REAP matrix** (`bin/reap`, `test/reap/matrix.edn` on next): fourteen rows, 56 cells, 54 checked, 0 problems; "no check
+  yet": Python's eval and AOT (its records, lane 4).
+- **The gate** (next, `bin/gate --plan`): 52 essential steps on next: 3 always, 1 build (go-build: gate_key moved), 20 run, 1 after, 1 skip, 24
+  `night` (crops deferred), 1 absent, 1 none; the essential memory lane's simulated wall 0:59, serial sum 1:10.
+  The essential tier is the core plus the crops' subsets deferred to the night when their paths did not change (the crops
+  tier, 2026-11-17). Tonight: `bin/gate --full` on next (the merges' builds: gate_key and javac's key moved).
+- **Next**:
+  - lanes 2 and 4: Haskell's own records (17 packages) and Python's records (`bin/pyi` check and `check --aot`, both records
+    together; then Python's fragment spliced, F1 (a));
+  - the Java platform switch night (`.tmp/goal/java-platform-night.sh`, about 2 h 10 min, 45 GiB peaks; JOP13's sources record,
+    cacerts by GenerateCacerts against the record);
+  - tonight's `--full` on next; its failures to fix agents in the morning, then main advanced;
+  - the Ghidra demo's decisions (the Mac's queue 403-405, prepared on `g2-medium` 01b604d): 403-1, javac's tool for arm64
+    ((a) recommended: the main host builds arm64's `arbace-javac` and ships it with its platform), and 405-1, where M4's
+    mutant runs ((a) recommended: on the main host after job 7 keeps the program);
+  - the re-seed's stopgaps, to retire at the next re-seed: cpp-essential and c-parse's mutants part under `ARBACE_NO_AOT=1`
+    (`arbace/repr/c/lex.ae` changed after the seed, so stage 0 evaluates `Tok` anew beside ppcheck's compiled one: the Tok
+    split, doc/W-WINDOW.md §8's risk 2), and the aot-lib's key, which reads stage 0's embedded cf2g (`arbace.c.runtime/source-bytes`
+    counts only `arbace/repr/` as tool sources; bumped by `aotlib/aot-version` 2 for now; to follow RT.toolSource at the re-seed's review).
 - **The gate's diet** (2026-11-13, [GATE-DIET-SURVEY.md](GATE-DIET-SURVEY.md), branch `gate-diet`): night 13 took 18.6 h for a
   6 h budget, rerunning 311 of 331 steps; GDS1-GDS20 decided as recommended (the user, 2026-11-13). GD1 built on branch
   `gate-gd1` (to merge after main advances): `bin/night` (nightly every night, `bin/gate --weekly` on Saturday's), the weekly
