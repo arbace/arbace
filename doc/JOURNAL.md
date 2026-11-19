@@ -12972,3 +12972,15 @@ probed here (no executable built: no heavy runs today).
   test_pulldom 7 -> 11 of 11: 151 methods; one new row in no class (test_plistlib's
   test_dump_aware_datetime_without_aware_datetime_option: _pydatetime's message "can't subtract offset-naive and
   offset-aware datetimes" where the test's regex is _datetime's).
+
+## 2026-11-19: n-py-eval: PyConfig_Get's rows classed ahead; test_traceback measured
+
+- 4c48d37c6 (PyConfig_Get) also opens test_traceback, whose import failed the same way (377 methods in the records run):
+  `bin/pyi check --only test_traceback` (compiled runtime, the checkout's pyctypes) 205 pass, 175 classed, 2 in no class
+  (PurePythonTracebackErrorCaretTests' syntax-error and very-long-line tests: the script's file name in the frame line,
+  left to the morning's classing). With test_compile, test_dis, test_marshal and test_code: 557 methods.
+- Written ahead in test/python/divergences.edn and divergences-315.edn (the same edit): a new class `:code-objects`
+  (deferred, PY5b: test_code's 10 that a code object as pyi's IR answers otherwise: code() and code.replace refused,
+  co_lnotab absent, hash and equality, invalid bytecode, a code object's weakref), and `:code-positions` takes by name
+  test_compile's 6 match-case TestSourcePositions and test_dis's 4 position tests. The slice's 20 rows in no class are then
+  0 (the judge's --divergences over .tmp/repr-python/pyi/check/only-d278dec2701a, both files).
