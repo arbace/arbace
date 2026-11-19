@@ -13004,3 +13004,9 @@ native-only program. Run: the rollup (judge, 0 unclassed), bin/records-check (9 
 bin/reap and bin/crops-score --judge --strict (the matrix and scores unchanged). Keys: no core key moves (bin/oi and test/ocaml/
 are in arbace_crop_paths); the steps whose inputs hold bin/oi, test/ocaml/ or test/ocaml/*.edn rekey (OCaml's oi-check,
 ocaml-judges and the rest of its chain, oi-essential, and the essential reap and crops-score, which pass on it unchanged).
+
+## 2026-11-19: n-oc-rollup, a correction
+
+The entry above says bin/oi and test/ocaml/ are in arbace_crop_paths: they are not (its OCaml entries are bin/lib/oi/ and the Go
+forms). No core key moves because gate_key, gate_rest_key and arbace_runtime_key cover neither bin/oi nor test/ocaml/; the step
+keys that move are as listed there.
