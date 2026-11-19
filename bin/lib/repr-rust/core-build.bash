@@ -252,10 +252,15 @@ alloc_iface() {
 # RIND9 (a), std (doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), std's pass"; round 54): bin/rust-front std-iface: std's
 # interface built natively as alloc's is (arbace.rust.front.alloc-check --crate std), over the linux `sys` (core's cfg: x86_64,
 # linux, musl), std's names and std's interface from the pack rust-front-std with every std fact taken out (core's and alloc's
-# facts read from it), its facts into .tmp/rust-front/std/std-iface.edn and compared with the helper's (std-iface.edn.report)
+# facts read from it), its facts into .tmp/rust-front/std/std-iface.edn and compared with the helper's (std-iface.edn.report);
+# queue 400: std's vendored dependencies libc and hashbrown (library/vendor; their names and facts are none of the helper's) read
+# natively first, their module files, index and interface pass (DEPS_IFACE_ROUNDS, default 2; about 20 minutes, libc's 48 files
+# and hashbrown's 17) cached in .tmp/rust-front/std/deps/ (remove it after a change to the reader, the expansion or the
+# collection, as index.edn); STD_DEPS=0 leaves them out (std's names as before)
 #   bin/rust-front std-iface [FILE...]     the pass over std's module files (or FILEs, a module after the ones it names) and the
 #                                         compare of the modules passed (STD_IFACE_ROUNDS, default 2); GOMEMLIMIT 2400MiB
 #   bin/rust-front std-iface --list        std's module files
+#   bin/rust-front std-iface --deps        queue 400: libc's and hashbrown's names and facts into .tmp/rust-front/std/deps/
 #   bin/rust-front std-iface --units [--record]
 #                                         the pure unit cases (test/rust/front/alloc_iface_test.ae, alloc's and std's), then each
 #                                         line of test/rust/front/std-iface-units.txt passed alone (IFACE_CRATE=std, GOMEMLIMIT
@@ -276,11 +281,20 @@ std_iface() {
   rf_libsrc_take || { echo "std-iface: no $libsrc (bin/repr-rust src-take)" >&2; return 1; }
   case ${1:-} in
     --list) m=$(std_modules) || return 1; cat "$m" ;;
+    --deps)
+      fd=$(records_front) || return 1
+      cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --crate std --deps "$libsrc" "$fd" "$work/std" 2>&1 |
+        grep --line-buffered -v -E "$filt" ;;
     --units)
       local rec=0 u=$work/std-units st=0 f known=$root/test/rust/front/std-iface-units-known.txt
       [ "${2:-}" = --record ] && rec=1
       fd=$(records_front) || return 1
       rm -rf "$u"; mkdir -p "$u" "$work/std"
+      # queue 400: the dependencies' names and facts made first when not cached (about 20 minutes, 2.4 GB), the lines read them
+      if [ "${STD_DEPS:-1}" != 0 ]; then
+        (cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --crate std --deps "$libsrc" "$fd" "$work/std" 2>&1 |
+           grep -v -E "$filt" | grep -E '^(libc|hashbrown)-iface: (libc|hashbrown):') || st=1
+      fi
       (cd "$root" && GOMEMLIMIT=${STD_UNITS_GOMEMLIMIT:-500MiB} arbace_tool -p "$root/test" -m rust.front.alloc-iface-test "$libsrc" 2>&1 | grep -v -E "$filt") | tee "$u/pure.log"
       grep -q '^alloc-iface units: passed' "$u/pure.log" || st=1
       : > "$u/summary.txt"

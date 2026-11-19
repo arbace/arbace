@@ -120,11 +120,28 @@
   [it]
   (#{"cfg_select" "cfg_if"} (macro-name it)))
 
+(def ^:dynamic *item-macros*
+  "queue 400: the crate's item macros without parameters, name -> {:text T :b [l c] :e [l c]} (the macro's file's text and its
+  one arm's body inside): libc's `prelude!()`, whose `mod types;` and `mod prelude { .. }` the module tree and the index read
+  where the call stands (rustc's expansion: a macro-expanded outline module's file relative to the invocation's directory)"
+  {})
+
+(declare splice-selects)
+
+(defn- item-macro-items
+  "The items of an item macro without parameters (*item-macros*), its body read again from its file's text at their own
+  places, their cfg_select!s and item macros spliced in turn"
+  [{:keys [^String text b e]}]
+  (let [offs (line-offsets text)
+        at (fn [[l c]] (+ (long (nth offs (dec l))) (dec c)))]
+    (splice-selects (fget (parse-text (blank-outside text (at b) (at e))) :items) text)))
+
 (defn- splice-selects
   "ITEMS with each item-level cfg_select! replaced by its first arm that holds for the build's cfg (core-cfg), the arm's
   items read again from the file's TEXT at their own places (round 54, RIND9 (a), std: sys/pal/mod.rs' `unix => { mod unix;
   pub use self::unix::*; }`, os/mod.rs' `pub mod linux;`), inline modules' items likewise: the module tree and the index see
-  the modules and items a cfg_select! declares, as rustc's expansion does"
+  the modules and items a cfg_select! declares, as rustc's expansion does; queue 400: an item macro of the crate without
+  parameters (*item-macros*: libc's `prelude!()`) replaced by its body's items"
   [items ^String text]
   (let [offs (delay (line-offsets text))
         at (fn [[l c]] (+ (long (nth @offs (dec l))) (dec c)))
@@ -135,6 +152,8 @@
                               (cfg-on? it))))]
     (vec (mapcat (fn [it]
                    (cond
+                     (and (seq *item-macros*) (get *item-macros* (macro-name it)))
+                     (if-not (cfg-on? it) [] (item-macro-items (get *item-macros* (macro-name it))))
                      (cfg-select? it)
                      (if-not (cfg-on? it) [] ;; `#[cfg(doc)] cfg_select! {..}` (os/mod.rs)
                      (let [trees (second (fget (fget (second (fget it :kind)) :args) :tokens))]
@@ -156,7 +175,7 @@
   (let [text (slurp f)
         c (parse-text text)
         items (fget c :items)]
-    (if (or (str/includes? text "cfg_select!") (str/includes? text "cfg_if!"))
+    (if (or (str/includes? text "cfg_select!") (str/includes? text "cfg_if!") (seq *item-macros*))
       (apply list (first c) (mapcat (fn [[x v]] [x (if (= x :items) (splice-selects v text) v)]) (partition 2 (rest c))))
       c)))
 
@@ -172,12 +191,72 @@
                     (when (= 'Eq (head args)) (str (fget (second (fget (fget args :expr) :kind)) :symbol))))))
         attrs))
 
+(defn- item-macro-arm
+  "A macro_rules! of one arm without parameters (`() => { ITEMS }`): its body's inside [B E] as [line col] pairs, or nil"
+  [md]
+  (let [trees (vec (second (fget (fget md :body) :tokens)))
+        trees (if (and (seq trees) (= 'Token (first (peek trees))) (= 'Semi (fget (second (peek trees)) :kind))) (pop trees) trees)]
+    (when (and (= 3 (count trees)) (= 'Delimited (first (nth trees 0))) (empty? (second (nth (nth trees 0) 4)))
+               (fat-arrow? (nth trees 1)) (= 'Delimited (first (nth trees 2))))
+      (let [d (second (nth trees 2)) o (fget d :open) c (fget d :close)]
+        [[(nth o 2) (nth o 3)] [(nth c 0) (nth c 1)]]))))
+
+(defn crate-item-macros
+  "queue 400: the item macros without parameters of the crate whose root is LIB-FILE (*item-macros*' map): those of its
+  root's `#[macro_use] mod NAME;` files (libc's macros.rs: `prelude!`)"
+  [^String lib-file]
+  (let [dir (.getParent (File. lib-file))]
+    (into {} (for [it (fget (parse-text (slurp lib-file)) :items)
+                   :let [k (fget it :kind)]
+                   :when (and (= 'Mod (head k)) (not= 'Loaded (head (nth k 3)))
+                              (some #(= "macro_use" (attr-path-name %)) (fget it :attrs)))
+                   :let [nm (second (nth k 2))
+                         f (some #(when (.exists (File. ^String %)) %) [(str dir "/" nm ".rs") (str dir "/" nm "/mod.rs")])]
+                   :when f
+                   :let [text (slurp f)]
+                   m (fget (parse-text text) :items)
+                   :let [mk (fget m :kind)]
+                   :when (and (= 'MacroDef (head mk)) (fget (nth mk 2) :macro_rules))
+                   :let [arm (item-macro-arm (nth mk 2))]
+                   :when arm]
+               [(second (nth mk 1)) {:text text :b (first arm) :e (second arm)}]))))
+
 (defn crate-cfg
   "The cfg of the crate being built: core's (core-cfg), std's with the features the distributed std is built with
   (round 54: library/sysroot's default `std/backtrace` and `std/panic-unwind`; backtrace's `cfg(feature = \"std\")` is
   std's feature names, none of them `std`)"
   []
-  (if (= *crate* "std") (assoc core-cfg "feature" #{"backtrace" "panic-unwind"}) core-cfg))
+  (case *crate*
+    "std" (assoc core-cfg "feature" #{"backtrace" "panic-unwind"})
+    ;; queue 400: std's dependencies vendored in library/vendor, as std's Cargo.toml builds them (`default-features = false,
+    ;; features = ['rustc-dep-of-std']`) with their own features' closure (their Cargo.toml's [features]); libc also with
+    ;; its build script's cfgs for the target (build.rs: `freebsd12` by default; `musl_v1_2_3` when the target's cfg
+    ;; has `libc_unstable_musl_v1_2_3`, core-cfg's; nothing 32-bit)
+    "libc" (assoc core-cfg "feature" #{"rustc-dep-of-std" "align" "rustc-std-workspace-core"} "freebsd12" true "musl_v1_2_3" true)
+    "hashbrown" (assoc core-cfg "feature" #{"rustc-dep-of-std" "nightly" "core" "alloc" "rustc-internal-api"})
+    core-cfg))
+
+(def dep-crates
+  "queue 400: std's dependency crates read natively from library/vendor (their names and interfaces, which the helper's
+  std-names and std-iface do not hold): their `pub use m::*` re-exports and macro-declared modules taken as std's"
+  ["libc" "hashbrown"])
+
+(defn std-like?
+  "std or one of its vendored dependencies (round 54's std-only readings: glob re-exports, #[path] from the declaring file)"
+  [c]
+  (or (= c "std") (some #{c} dep-crates)))
+
+(defn crate-lib-file
+  "The crate's root file: LIB/CRATE/src/lib.rs for the library's crates, LIB/vendor/CRATE-VERSION/src/lib.rs for a
+  vendored dependency (queue 400; mono's lib-crate-root likewise)"
+  [^String lib-dir ^String crate]
+  (let [own (File. (str lib-dir "/" crate "/src/lib.rs"))]
+    (if (.exists own)
+      (.getCanonicalPath own)
+      (let [ds (sort-by #(.getName ^File %) (seq (.listFiles (File. (str lib-dir "/vendor")))))
+            d (some (fn [^File d] (when (re-matches (re-pattern (str "\\Q" crate "\\E-[0-9][0-9.]*")) (.getName d)) d)) ds)]
+        (when-not d (throw (ex-info (str "no crate " crate " under " lib-dir " (nor its vendor/)") {})))
+        (.getCanonicalPath (File. (str (.getPath ^File d) "/src/lib.rs")))))))
 
 (defn prelude-crate "The crate whose prelude a module of the crate being built reads: std's own for std, else core's" []
   (if (= *crate* "std") "std" "core"))
@@ -215,7 +294,7 @@
                           ;; it (module.rs' mod_file_path_from_attr: the file's directory, not its module's): backtrace's
                           ;; gimli.rs `#[path = "gimli/mmap_unix.rs"] mod mmap;`, core's io_slice.rs `#[path =
                           ;; "io_slice/repr_iovec.rs"] mod repr;`: std's alone until core's check is rerun
-                          base (if (and pa (nil? inline-dir) (= *crate* "std")) (.getParent (File. ^String file)) base)
+                          base (if (and pa (nil? inline-dir) (std-like? *crate*)) (.getParent (File. ^String file)) base)
                           f (cond pa (str base "/" pa)
                                   (.exists (File. (str base "/" nm ".rs"))) (str base "/" nm ".rs")
                                   :else (str base "/" nm "/mod.rs"))
@@ -226,16 +305,17 @@
                       (when (.exists (File. ^String f))
                         (swap! out conj {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))})
                         (walk p canon fd (fget (parse-file canon) :items) nil)))))))]
-      (let [lib (.getCanonicalPath (File. (str lib-dir "/" *crate* "/src/lib.rs")))]
-        (swap! out conj {:path *crate* :file lib})
-        (walk *crate* lib (.getParent (File. lib)) (fget (parse-file lib) :items) nil)))
+      (let [lib (crate-lib-file lib-dir *crate*)]
+        (binding [*item-macros* (if (some #{*crate*} dep-crates) (crate-item-macros lib) *item-macros*)]
+          (swap! out conj {:path *crate* :file lib})
+          (walk *crate* lib (.getParent (File. lib)) (fget (parse-file lib) :items) nil))))
     @out))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; core's macro_rules! from its sources
 
 (defn rel-path "A file of the copy of library/ as rustc's remapped path names it" [^String file]
-  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|std|backtrace|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
+  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|std|backtrace|stdarch|portable-simd|vendor)/.*)$" file)] (str "library/" (second m)) file))
 
 (defn- foreign-spans
   "A macro definition's tokens with their spans written as places in FILE ((span FILE l1 c1 l2 c2 0)): the expansion
@@ -353,11 +433,14 @@
                                       ;; core's own path (core's `use core::..`), and alloc's (RIND9 (a): an extern crate's)
                                       ("core") (vec segs)
                                       ;; round 54: std's dependency alloc, by its name and its root's alias (`pub(crate) use
-                                      ;; alloc_crate::io::{IoHandle, SpecReadByte, ..}`, io/mod.rs)
-                                      ("alloc" "alloc_crate") (when (= *crate* "std") (into ["alloc"] r))
-                                      ;; RFP52 (a): a uniform path's first name an item of the module (`use
-                                      ;; unicode_data::alphabetic::lookup as Alphabetic`): core names no other crate
-                                      (when (and f (re-matches #"[A-Za-z_][A-Za-z0-9_]*" f)) (into (vec (str/split m #"::")) segs)))))
+                                      ;; alloc_crate::io::{IoHandle, SpecReadByte, ..}`, io/mod.rs); queue 400: any dependency
+                                      ;; of the crate (resolve's crate-deps: std's libc and hashbrown, hashbrown's alloc) and
+                                      ;; its root's aliases (hashbrown's `extern crate alloc as stdalloc`)
+                                      (cond (contains? (get resolve/crate-deps *crate*) f) (vec segs)
+                                            (get (get resolve/root-extern-aliases *crate*) f) (into [(get (get resolve/root-extern-aliases *crate*) f)] r)
+                                            ;; RFP52 (a): a uniform path's first name an item of the module (`use
+                                            ;; unicode_data::alphabetic::lookup as Alphabetic`): core names no other crate
+                                            (and f (re-matches #"[A-Za-z_][A-Za-z0-9_]*" f)) (into (vec (str/split m #"::")) segs)))))
                                 (tree [t prefix]
                                   (let [segs (into prefix (map #(second (fget % :ident)) (fget (fget t :prefix) :segments)))
                                         kk (fget t :kind)]
@@ -374,7 +457,7 @@
                                       ;; round 54 (RIND9 (a), std): a glob re-export (sys/pal/mod.rs' `pub use self::unix::*;`,
                                       ;; sys/fd's, sys/fs's), its module's names copied by with-core-names; std's alone (core's
                                       ;; and alloc's index as before, their private modules' globs left to std's names)
-                                      Glob (when (= *crate* "std")
+                                      Glob (when (std-like? *crate*)
                                              (when-let [target (abs segs)]
                                                (when (> (count target) 1)
                                                  (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :globs (fnil conj []) (str/join "::" target)))))))
@@ -387,12 +470,17 @@
 (defn crate-index
   "core's macro table and names over its (non-vendored) module files"
   [files]
+  ;; queue 400: a vendored dependency's item macros (libc's prelude!()) read where they are called
+  (binding [*item-macros* (if-let [root (and (some #{*crate*} dep-crates) (:file (first (filter #(= *crate* (:path %)) files))))]
+                            (crate-item-macros root) *item-macros*)]
   (reduce (fn [acc {:keys [file path]}]
             (let [items (fget (parse-file file) :items)]
               (-> acc
                   (update :macros (fn [m] (reduce (fn [m [nm d]] (update m nm (fnil conj []) d)) m (file-macros items file path))))
-                  (update :names (fn [n] (merge-with (fn [a b] (-> a (update :children into (:children b)) (update :reexports (fnil into []) (:reexports b)))) n (file-names items path)))))))
-          {:macros {} :names {}} files))
+                  (update :names (fn [n] (merge-with (fn [a b] (cond-> (-> a (update :children into (:children b)) (update :reexports (fnil into []) (:reexports b)))
+                                                                    ;; queue 400: a module's globs from each of its files (libc's cfg_if arms)
+                                                                    (:globs b) (update :globs (fnil into []) (:globs b)))) n (file-names items path)))))))
+          {:macros {} :names {}} files)))
 
 (defn with-core-names
   "std's names with core's own definitions added where the interface lacks them (its private items), then its re-exports'
@@ -403,11 +491,23 @@
                     have (set (map (juxt :ns :name) (:children e)))]
                 (assoc m p (update e :children into (remove #(have [(:ns %) (:name %)]) children)))))
         m (reduce (fn [m [p {:keys [kind children]}]] (add m p kind children)) std-names names)
+        ;; queue 400: a module path through a module's renamed import (sys/fs/mod.rs' `use unix as imp; pub use imp::{File,
+        ;; ..}`: std::sys::fs::imp is std::sys::fs::unix), each segment the type namespace's module child of the one before;
+        ;; std's and its dependencies' alone (core's and alloc's index as before)
+        module-of (fn [m ^String path]
+                    (if (or (contains? m path) (not (std-like? *crate*)))
+                      path
+                      (let [[r & segs] (str/split path #"::")]
+                        (or (reduce (fn [cur sg]
+                                      (if-let [c (some #(when (and (= :type (:ns %)) (= sg (:name %)) (= "Mod" (:kind %))) %) (:children (get m cur)))]
+                                        (:path c) (reduced nil)))
+                                    r segs)
+                            path))))
         reexport (fn [m]
                    (reduce (fn [m [p {:keys [reexports]}]]
                              (reduce (fn [m [nm target]]
                                        (let [i (.lastIndexOf ^String target "::")
-                                             parent (subs target 0 i) tn (subs target (+ i 2))
+                                             parent (module-of m (subs target 0 i)) tn (subs target (+ i 2))
                                              defs (filter #(= tn (:name %)) (:children (get m parent)))]
                                          (if (seq defs) (add m p "Mod" (mapv #(assoc % :name nm) defs)) m)))
                                      m reexports))
@@ -415,11 +515,16 @@
         ;; round 54: a glob re-export's module's names, under the module's own (add keeps the module's own first)
         glob (fn [m]
                (reduce (fn [m [p {:keys [globs]}]]
-                         (reduce (fn [m target] (if-let [e (get m target)] (add m p "Mod" (:children e)) m)) m globs))
+                         (reduce (fn [m target] (if-let [e (get m (module-of m target))] (add m p "Mod" (:children e)) m)) m globs))
                        m names))
         globs? (some :globs (vals names))]
-    ;; two rounds: a re-export of a re-export (with globs, three rounds of both: sys::fs's `pub use unix::*` of a re-export)
-    (reduce (fn [m _] (cond-> (reexport m) globs? glob)) m (if globs? [1 2 3] [1 2]))))
+    ;; two rounds: a re-export of a re-export (with globs, three rounds of both: sys::fs's `pub use unix::*` of a re-export;
+    ;; queue 400: then on to a fixpoint, at most 8: libc's chain of globs, libc -> unix -> linux_like -> linux -> musl -> b64
+    ;; -> x86_64)
+    (if globs?
+      (loop [m (reduce (fn [m _] (glob (reexport m))) m [1 2 3]) n 3]
+        (let [m2 (glob (reexport m))] (if (or (= m2 m) (>= n 8)) m2 (recur m2 (inc n)))))
+      (reduce (fn [m _] (reexport m)) m [1 2]))))
 
 (defn with-adt-names
   "RF20: the names with core's structs as their modules' children where missing: the type and its constructor
@@ -794,6 +899,7 @@
       ;; round 54 (RIND9 (a), std): std's modules take std's own prelude (lib.rs' `#[prelude_import] use
       ;; prelude::rust_2024::*;`, std-names' std::prelude), core's and alloc's core's; std's features its cfg's (crate-cfg)
       (binding [ex/*cfg-names* (crate-cfg) ex/*virtual* (atom nil) ex/*prelude-crate* (prelude-crate) ex/*def-order* (atom 0)
+                ex/*raw-block-frags* (boolean (some #{*crate*} dep-crates))
                 resolve/*crate-path* path collect/*root-crate-override* (prelude-crate)]
         (let [mc (atom {}) sites (atom {})
               crate (stage stages :expand

@@ -4636,3 +4636,101 @@ cases (OccupiedEntry's `inner` through set's imports, VacantEntry written, the n
 
 - alloc's interface is equal fact for fact; RIND9 (a)'s next crate (std over the linux `sys`) is the next step. array's from_fn
   and map differ from rustc's MIR by a user type annotation's path (`NeverShortCircuit::wrap_mut_1`), now that they build.
+
+## As built: RIND9 (a), std's pass: libc's and hashbrown's names natively (2026-11-19, queue 400, branch `400-rust-vendor`)
+
+std's whole pass (round 54, `6aa150550`) left 76 helper facts missing and 2 differing, all of them through std's two vendored
+dependencies, libc and hashbrown, whose names and facts the helper's std-names and std-iface do not hold. Decided at
+`d12096365`: read their names from library/vendor natively, not from the helper. Built here, on mac/n-all4 `88b8e7f1a`.
+
+The two crates are read from rust-src 1.99.1's `library/vendor/libc-0.2.189` and `hashbrown-0.17.1`. These are the versions
+std's Cargo.lock pins, and the pinned crate set's `.crate` files hold the same versions (`test/rust/crates-2026-10-18.sha256`).
+Before std's modules, each crate goes through core-check's machinery as alloc does: its module tree, its index (macros and
+names from the sources), and its interface pass (`arbace.rust.front.alloc-check/deps-setup`). The pass runs two rounds
+(`DEPS_IFACE_ROUNDS`), because libc's aliases and structs name each other across its files: in round 1, new::musl's `cmsghdr`
+waits for unix's `socklen_t`. std's pass then reads three things from it:
+- the crates' index names, with their macro-made ADTs (libc's `s! { .. }` structs);
+- their native aliases with the aliases' generics (`socklen_t` -> u32);
+- their native facts (ADTs, functions, impls).
+
+The pieces are cached in `.tmp/rust-front/std/deps/`, as `index.edn` is, and `bin/rust-front std-iface --deps` makes them.
+`STD_DEPS=0` leaves them out.
+
+What the crates needed, each change gated to them (core's and alloc's readings as before):
+- **The crate root under library/vendor** (`core_check/crate-lib-file`, as mono's `lib-crate-root` finds it).
+- **Their cfg** (`crate-cfg`):
+  - std's `features = ['rustc-dep-of-std']` with each crate's own feature closure from its Cargo.toml: libc gets `align` and
+    `rustc-std-workspace-core`; hashbrown gets `nightly`, `core`, `alloc` and `rustc-internal-api`, so no `raw-entry`, no
+    `default-hasher` and no `equivalent`.
+  - libc's build script's cfgs for the target: `freebsd12` by default, and `musl_v1_2_3` because the target's cfg has
+    `libc_unstable_musl_v1_2_3`. Nothing 32-bit.
+- **libc's `prelude!()`**, a macro without parameters whose `mod types;` and `mod prelude { .. }` the tree and the index read
+  where the call stands (`*item-macros*`, `crate-item-macros`: the root's `#[macro_use] mod` files' one-arm, no-parameter
+  macros). rustc's expansion does the same: a macro-expanded outline module is resolved relative to the invocation.
+- **Glob re-exports** (`pub use unix::*`, hashbrown's `pub mod hash_map { pub use crate::map::*; }`) and `#[path]` relative to
+  the declaring file, as std's (`std-like?`).
+- **with-core-names' rounds of re-exports and globs to a fixpoint, at most 8.** libc's chain is libc -> unix -> linux_like ->
+  linux -> musl -> b64 -> x86_64. A module's globs from each of its files are merged (they were dropped when a module's entry
+  already existed).
+- **The index's `use` paths** (`file-names`): a dependency of the crate is absolute (resolve's `crate-deps`: std's libc and
+  hashbrown, hashbrown's alloc), and so is a root alias (`root-extern-aliases`: hashbrown's `extern crate alloc as stdalloc`).
+  The same tables give the resolver's extern prelude, so std's modules see `libc` and `hashbrown`.
+- **libc's f! and safe_f!** put `$body:block` where a function's body stands. The expander's placeholder ident is no block to
+  the native parser, which failed `unix`, `linux_like`, `linux` and `linux_l4re_shared` ("expand: the parser:"). For the
+  dependencies alone (`ex/*raw-block-frags*`), a block fragment goes into the output as its own tokens, as rustc's parser takes
+  the NtBlock's block. core's `const_eval_select!` keeps its placeholders.
+- **A re-export through a module's renamed import**, std's own: sys/fs/mod.rs' `use unix as imp; pub use imp::{File, ..}`
+  (sys::process's and sys::time's likewise). The first whole pass with the dependencies left fs's 13 ADTs, and process's and
+  time's, missing: `unresolved ["fs_imp" "File"]`, because std::sys::fs had no File. with-core-names now reads a re-export's
+  module path segment by segment through the modules' children (`module-of`: std::sys::fs::imp is std::sys::fs::unix), for
+  std and its dependencies alone. The 76 missing facts were never all libc's and hashbrown's (RIND9 (a)'s entry had not checked
+  them one by one): this cause was std's own.
+
+### Results
+
+- libc: 48 module files, every stage ok in both rounds: 182 ADTs, 112 aliases, 113 functions, 22 impls. Each libc type the
+  helper's std facts name is among them: `sockaddr_un`, `sockaddr`, `ucred`, x86_64's `stat`, `DIR`, `cmsghdr`. 2 rounds of 484
+  and 447 s.
+- hashbrown: 17 module files, every stage ok: 67 ADTs, 644 functions, 333 impls. 2 rounds of 134 s. After the module-alias
+  fix: 69 ADTs and 646 functions, because control::group's `use sse2 as imp; pub(crate) use self::imp::Group` now resolves.
+- os/unix/net/addr.rs and collections/hash/map.rs passed together (one round): **258 of 258 equal**, against 247 equal, 1
+  differing and 10 missing before. SocketAddr, HashMap and its 7 iterators and entries are now written, `from_parts` too, and
+  `new`'s FnOnce clause is equal.
+- `std-iface --units`: every pure case passes (69, 17 new). The 7 recorded lines are unchanged. The 2 new lines, addr.rs and
+  map.rs, are 15/15 and 243/243, and their module cases pass. Control: with `STD_DEPS=0` and the base's index, addr.rs is 12
+  equal, 1 differing and 2 missing, and both of its libc cases FAIL.
+- std's whole pass with the dependencies, before the module-alias fix (two rounds, 54 min, 1.19 GB): **4,605 of 4,644 equal**,
+  1 differs, 38 missing (adts 239 of 272, consts 17 of 17, fns 2,688 of 2,693, impls 1,631 of 1,632, traits 30 of 30; native
+  extras 1,468), the control differing. Before (`6aa150550`): 4,566 equal, 2 differ, 76 missing.
+  - Every libc and hashbrown cause is gone: SocketAddr, ucred, ancillary's messages, HashMap/HashSet and their iterators and
+    entries.
+  - What was left: fs's, process's and time's ADTs, through the module alias above.
+- The module-alias fix, proven narrow (the whole pass again is the main host's). The 15 module files that held the 38 are
+  passed together over two rounds: sys::fs::unix, fs, sys::process::{env, unix::common, unix::unix, unix}, process,
+  os::linux::process, sys::pal::unix::time, sys::time::unix, time, os::unix::net::ancillary, env, backtrace and io::stdio. The
+  result is **1,082 of 1,090 equal**, 1 differing, 7 missing (1 min 42 s for the two rounds).
+  - std::fs::File, DirEntry, ReadDir, OpenOptions and the rest of fs, Command, Child, ExitStatus and process's others, and
+    Instant and SystemTime are written and equal.
+  - What is left there: std::fs::Metadata (`fs_imp::FileAttr`), process's ChildStdin/out/err (the alias ChildPipe, from a file
+    not passed), CommandArgs' CStringIter lifetime (cstring_array, not passed), env's SplitPaths (sys::paths, not passed),
+    backtrace's Inner (its `LazyResolve` is an `impl FnOnce` alias, a TAIT) and stdio's `as_mut_buf` (returns `impl Read`).
+  - Several of these are context a narrow run lacks. Each is to be judged on the main host's whole pass.
+- alloc's whole pass: **3,863 of 3,863 equal**, 0 differ, 0 missing, native extras 1,015. This is unchanged, and the control
+  differs as it must (21 min 32 s).
+- core: `core-essential` equals its known file (566 equal, the control differing). `rind-test` passes.
+- `std-iface --units` after the module-alias fix: every case passes (71 pure). env.rs moves from 94/96 to 95/96. The other 8
+  lines are as recorded, and the known file is re-recorded (5 min 22 s with the dependencies cached).
+
+### Decisions
+
+- The dependencies' names and facts come natively from library/vendor, not from an extension of the helper's names
+  (`d12096365`'s decision, applied).
+- Each new reading is gated to std and its dependencies (`std-like?`, `dep-crates`, `*raw-block-frags*`), as round 54's globs
+  and `#[path]` were, so core's and alloc's checks stand as recorded. alloc's whole pass was rerun at 3,863 of 3,863, and
+  core-essential and rind-test pass.
+
+### Left
+
+- The main host's whole std pass on this branch, which gives the new total.
+- The few causes above that are not context: `fs::Metadata`, TAIT and RPIT signatures (backtrace's Inner, stdio's
+  `as_mut_buf`).
