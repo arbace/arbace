@@ -1364,7 +1364,9 @@ Beside it, an `auto` static data member's type is deduced at its first use by th
 
 The proofs (the VM, light): the seven programs by our route (`arbace.cpp.codegen gen-batch`) generated, lowered and, as a quick
 probe, built natively by gcc with the runtime of exceptions: the status and stdout of each the pack's recorded clang run
-(coroutine.cpp 3, the six 0); then `CPPI_ROUTE=ours bin/cppi check --only` on them, on ci with the lowered runtime, against the
-recorded runs (queue 393's report). Probes beside, natively against clang++'s own build: a coroutine destroyed while suspended (the
+(coroutine.cpp 3, the six 0); then `CPPI_ROUTE=ours bin/cppi check --only` on them (all seven's IR by `ours`), on ci with the lowered
+runtime: 7 of 7 pass, by their own verdicts and with `CPPI_JUDGE=gxx` by g++'s recorded runs; `check --aot --only` the same: 7 of 7
+(the sampling's six compiled-only against the interpreted record, which predates them); the control `_control/run/coroutine-vs-pr106188`
+(test/cpp/controls.edn) differs, as it must; `bin/cppi codegen-gen`: 155 of 155 samples' forms unchanged. Probes beside, natively against clang++'s own build: a coroutine destroyed while suspended (the
 awaiter, the locals, the promise and the copies destroyed in clang's order), a bool await_suspend that declines and a final
 suspension run to completion: the same output; `g + co_await A{}` refused.
