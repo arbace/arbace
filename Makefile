@@ -38,7 +38,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base pyi-universe pyi-universe-check
+  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-golden hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base pyi-universe pyi-universe-check
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -353,6 +353,8 @@ hsi-pins: ## Haskell's eval corpora: the testsuite tarball and nofib fetched by 
 	bin/hsi pins --check
 hsi-spec-check: ## doc/haskell/STG-SPEC.md's checklist against GHC 9.14.1's STG constructors (bin/hsi spec-check)
 	bin/hsi spec-check
+hsi-golden: ## queue 435: the testsuite's and nofib's golden files against their review (test/haskell/eval/golden/AREA.edn) and GHC's recorded runs, each with one byte changed failing (bin/hsi golden --oracle --control)
+	bin/hsi golden --oracle --control
 hsi-tests: ## the testsuite's all.T files read, its run tests listed in test/haskell/eval/testsuite-run.edn (bin/hsi tests)
 	bin/hsi tests
 hsi-dumps: ## the boot libraries and the samples compiled to STG forms by the helper, ABI hashes against the installed, read back, twice (bin/hsi dumps --samples --again; heavy: run by night)

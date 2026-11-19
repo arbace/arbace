@@ -1,0 +1,149 @@
+;; Queue 435 (the testsuite's and nofib's golden files): bin/hsi golden [--oracle] [--control]. The programs of hsi's run
+;; corpora that ship no expected output GHC's recorded run confirms (test/haskell/ref-ghc914.edn) carry a golden file written
+;; from their source: test/haskell/eval/golden/ID.stdout, ID.stderr (none: empty) and ID.exit (none: 0), each line reviewed in
+;; test/haskell/eval/golden/AREA.edn:
+;;   {ID {:src "the program's main, relative to its directory"
+;;        :stdout [[line text basis why] ...]   line a line number and text that line, or [A B] and a regular expression
+;;        :stderr [[line text basis why] ...]   every line A to B matches (generated output, the generator named in why)
+;;        :exit [status basis why]              (none: 0)
+;;        :why "..."                            a program that prints nothing: why its main writes nothing
+;;        :no-newline #{:stdout :stderr}}}      an output whose last line has no newline
+;; basis a set of :src (the program's own code fixes it), :report (the Haskell 2010 report), :lib (the boot libraries' source
+;; at the pin: GHC 9.14.1's tarball), :rts (the RTS's source at the pin), :plan (record-ref's plan: the arguments, stdin and
+;; program name it runs with), :shipped (the test's shipped expected file says the same). test/haskell/eval/golden/left.tsv:
+;; ID<TAB>reason for each program left on GHC's record. --oracle: each golden program's status, stdout and stderr against
+;; GHC's recorded run (SHA-256 and sizes). --control: each golden program with one byte of its stdout (an empty one: stderr;
+;; both empty: a byte added) changed must fail the review and leave the recorded digest.
+(ns hsi.review
+  (:require [arbace.string :as str] [arbace.java.io :as io]))
+
+(def review-bases #{:src :report :lib :rts :plan :shipped})
+
+(defn sha256 [^bytes bs]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and (int %) 0xff)) (.digest md bs)))))
+
+(defn file-bytes ^bytes [f] (if (.isFile (io/file f)) (java.nio.file.Files/readAllBytes (.toPath (io/file f))) (byte-array 0)))
+
+(defn split-lines* [text]
+  (let [v (str/split text #"\n" -1)] (if (= "" (peek v)) (pop v) v)))
+
+(defn rows-problems
+  "the output TEXT (stream K of ID) against its review ROWS: each row in order, covering every line once."
+  [id k text rows no-newline?]
+  (let [ls (if (= "" text) [] (split-lines* text))
+        bad (atom [])
+        bad! #(swap! bad conj (str id " " (name k) " " %))]
+    (when (and (not= "" text) (not= (not no-newline?) (str/ends-with? text "\n")))
+      (bad! (if no-newline? "ends with a newline (its review says :no-newline)" "does not end with a newline")))
+    (loop [rows rows nxt 1]
+      (if-let [[ln lt basis why] (first rows)]
+        (let [[a b] (if (vector? ln) ln [ln ln])]
+          (cond
+            (not= a nxt) (bad! (str "the review's row " (pr-str ln) ", the next line " nxt))
+            (or (> b (count ls)) (< b a)) (bad! (str "the review's row " (pr-str ln) ", the file's " (count ls) " lines"))
+            (and (not (vector? ln)) (not= (nth ls (dec a)) lt))
+            (bad! (str "line " a ": the review's text " (pr-str lt) ", the file's " (pr-str (nth ls (dec a)))))
+            (and (vector? ln) (some #(not (re-matches (re-pattern lt) %)) (subvec (vec ls) (dec a) b)))
+            (bad! (str "lines " a "-" b ": not every line matches " (pr-str lt)))
+            (or (not (set? basis)) (empty? basis) (seq (remove review-bases basis)))
+            (bad! (str "row " (pr-str ln) ": basis " (pr-str basis) " (a set of " (str/join " " (sort review-bases)) ")"))
+            (str/blank? why) (bad! (str "row " (pr-str ln) ": no why")))
+          (recur (rest rows) (inc b)))
+        (when (not= nxt (inc (count ls))) (bad! (str (count ls) " lines, " (dec nxt) " reviewed")))))
+    @bad))
+
+(defn review-problems [id rv out err exit]
+  (let [[ex eb ew] (or (:exit rv) [0 #{:src} "-"])
+        nn (or (:no-newline rv) #{})]
+    (concat
+      (rows-problems id :stdout out (:stdout rv) (contains? nn :stdout))
+      (rows-problems id :stderr err (:stderr rv) (contains? nn :stderr))
+      (when (not= ex exit) [(str id " exit: the review's " ex ", the file's " exit)])
+      (when (and (:exit rv) (or (not (set? eb)) (empty? eb) (seq (remove review-bases eb)) (str/blank? ew)))
+        [(str id " exit: a basis and a why")])
+      ;; a program that prints nothing: the review says why (:why), as a row would
+      (when (and (empty? (:stdout rv)) (empty? (:stderr rv)) (str/blank? (:why rv)))
+        [(str id ": no output and no :why")]))))
+
+(defn record-line [ref id]
+  (some #(when (str/starts-with? % (str "{:id \"" id "\" ")) (read-string %)) ref))
+
+(defn -main [root & flags]
+  (let [flags (set flags) oracle? (flags "--oracle") control? (flags "--control")
+        dir (str root "/test/haskell/eval/golden")
+        bad (atom []) bad! #(swap! bad conj %)
+        revs (sort (for [^java.io.File f (or (.listFiles (io/file dir)) []) :when (str/ends-with? (.getName f) ".edn")] (.getPath f)))
+        rv (reduce (fn [m f]
+                     (let [x (read-string (slurp f))]
+                       (doseq [id (keys x) :when (contains? m id)] (bad! (str id ": reviewed twice (" f ")")))
+                       (merge m x)))
+                   {} revs)
+        files (sort (for [^java.io.File f (file-seq (io/file dir)) :let [p (.getPath f)]
+                          :when (and (.isFile f) (str/ends-with? p ".stdout"))]
+                      (subs p (inc (count dir)) (- (count p) 7))))
+        ref (vec (filter #(str/starts-with? % "{:id ") (str/split-lines (slurp (str root "/test/haskell/ref-ghc914.edn")))))
+        left (into {} (for [l (str/split-lines (slurp (str dir "/left.tsv"))) :when (not (str/starts-with? l "#"))
+                            :let [[id why] (str/split l #"\t" 2)]]
+                        (do (when (str/blank? why) (bad! (str id ": left without a reason"))) [id why])))
+        rows (atom 0) bfreq (atom {}) controls (atom 0)]
+    (doseq [id files
+            :let [g (str dir "/" id) e (get rv id)
+                  ob (file-bytes (str g ".stdout")) eb (file-bytes (str g ".stderr"))
+                  out (String. ob "UTF-8") err (String. eb "UTF-8")
+                  exit (if (.isFile (io/file (str g ".exit"))) (Long/parseLong (str/trim (slurp (str g ".exit")))) 0)
+                  rl (record-line ref id)]]
+      (cond
+        (nil? rl) (bad! (str id ": no program of test/haskell/ref-ghc914.edn"))
+        (nil? e) (bad! (str id ": not reviewed in " dir "/*.edn"))
+        (contains? left id) (bad! (str id ": left in left.tsv, and a golden file"))
+        (and (.isFile (io/file (str g ".stderr"))) (= 0 (alength eb))) (bad! (str id ": an empty .stderr (none: empty)"))
+        (and (.isFile (io/file (str g ".exit"))) (= 0 exit)) (bad! (str id ": an .exit of 0 (none: 0)"))
+        :else
+        (do
+          (doseq [x (review-problems id e out err exit)] (bad! x))
+          (doseq [[_ _ b] (concat (:stdout e) (:stderr e) (when (:exit e) [[nil nil (second (:exit e))]])
+                                  (when (and (empty? (:stdout e)) (empty? (:stderr e))) [[nil nil #{:src :plan}]]))]
+            (swap! rows inc)
+            (doseq [x b] (swap! bfreq update x (fnil inc 0))))
+          (when oracle?
+            (let [so (sha256 ob) se (sha256 eb)]
+              (if (and (= exit (:status rl)) (= so (:stdout rl)) (= se (:stderr rl))
+                       (= (alength ob) (:bytes rl)) (= (alength eb) (:err-bytes rl)))
+                (println (str "   " id ": GHC's recorded run (status " exit ", stdout " (subs so 0 16) " " (alength ob)
+                              " bytes, stderr " (subs se 0 16) " " (alength eb) " bytes)"))
+                (bad! (str id ": not GHC's recorded run (status " exit " " (pr-str (:status rl)) ", stdout " (subs so 0 16) " "
+                           (alength ob) " bytes, the record's " (subs (str (:stdout rl) "-               ") 0 16) " " (:bytes rl)
+                           ", stderr " (alength eb) " bytes, the record's " (:err-bytes rl) ")")))))
+          (when control?
+            ;; one byte changed: stdout's middle byte, else stderr's, else a byte added to stdout
+            (let [[k bs] (cond (pos? (alength ob)) [:stdout (aclone ob)] (pos? (alength eb)) [:stderr (aclone eb)] :else [:stdout (byte-array [(byte 120)])])
+                  i (quot (alength bs) 2)
+                  _ (when (or (pos? (alength ob)) (pos? (alength eb)))
+                      (aset-byte bs i (byte (if (= (aget bs i) (byte 120)) 121 120))))
+                  m (String. ^bytes bs "UTF-8")
+                  rp (review-problems id e (if (= k :stdout) m out) (if (= k :stderr) m err) exit)
+                  d (sha256 bs)]
+              (if (and (seq rp) (not= d (if (= k :stdout) (:stdout rl) (:stderr rl))))
+                (swap! controls inc)
+                (bad! (str id ": control passed: its " (name k) " with byte " i " changed "
+                           (if (seq rp) "keeps the recorded digest" "passes the review")))))))))
+    (doseq [id (keys rv) :when (not (some #{id} files))] (bad! (str id ": reviewed, no golden file")))
+    ;; every program of the record has a verdict of its own (test/haskell/own-verdicts.tsv), a golden file, or a reason left
+    (let [own (set (for [l (str/split-lines (slurp (str root "/test/haskell/own-verdicts.tsv"))) :when (not (str/starts-with? l "#"))]
+                     (first (str/split l #"\t"))))
+          fs (set files)
+          ids (map #(second (re-find #"^\{:id \"([^\"]*)\"" %)) ref)]
+      (doseq [id ids :when (not (or (own id) (fs id) (left id)))]
+        (bad! (str id ": neither its own verdict, a golden file, nor left in left.tsv")))
+      (doseq [id (keys left) :when (not (some #{id} ids))] (bad! (str id ": left in left.tsv, no program of the record")))
+      (doseq [id (keys left) :when (own id)] (bad! (str id ": left in left.tsv, and its own verdict in own-verdicts.tsv")))
+      (println (str "hsi golden: " (count files) " golden files, " @rows " rows reviewed ("
+                    (str/join ", " (for [[k v] (sort-by key @bfreq)] (str v " " (name k)))) "), " (count left) " left on GHC's record"
+                    (when oracle? ", each GHC's recorded run")
+                    (when control? (str ", " @controls " of " (count files) " controls fail")))))
+    (when (seq @bad)
+      (doseq [b @bad] (println (str "FAIL " b)))
+      (System/exit 1))))
+
+(apply -main *command-line-args*)
