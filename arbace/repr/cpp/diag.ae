@@ -1578,7 +1578,136 @@
      (:nodes u) nil)
     (vec (distinct out))))
 
-(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns]))
+;; queue 460: [temp.variadic]/5, "a pack whose name appears within the pattern of a pack expansion is expanded by that
+;; expansion ... an appearance of a name of a pack that is not expanded is ill-formed" (GCC's "parameter packs not expanded with
+;; '...'"). Clean-room from the standard, over the native parser's tree of the main file: the packs of each template head (a
+;; template parameter declared with `...`; an inner head's parameter of the same name not a pack hides it) and the function
+;; parameter packs (a parameter whose type ends in `...`), named (a) by a DeclRefExpr whose entity is a pack (:ty {:t :pk}) or
+;; (b) in a type the declaration writes (the :qualType of a variable, member, alias, typedef, parameter, function, a cast's or a
+;; functional construction's type, a fixed underlying type, a base not written with `...`), outside every PackExpansionExpr,
+;; SizeOfPackExpr, CXXFoldExpr and PackIndexingExpr and not a lambda's capture initializer; in a type's text a name is expanded
+;; when an element of a bracket it is in (a template argument, a function parameter, the whole type) holds `...` at the element's
+;; own depth, sizeof...(N) and N...[i] expanding their operand. Constructs the tree holds no text for (mem-initializers,
+;; attributes, exception specifications, requires-expressions' parameters) are not judged.
+
+(defn- pack-text-tokens [^String s]
+  (re-seq #"\.\.\.|::|->|[A-Za-z_][A-Za-z_0-9]*|[<>()\[\]{},.]|[^\sA-Za-z_0-9<>()\[\]{},.]" s))
+
+(defn unexpanded-in-text
+  "The names of `packs` (a set) that appear unexpanded in the type text `s` (see above), or nil."
+  [packs ^String s]
+  (when (and (seq packs) s (re-find #"[A-Za-z_]" s))
+    (let [ts (vec (pack-text-tokens s))
+          n (count ts)
+          ;; each token's depth, and the [start end) of the element it is in at each depth (from the brackets and commas)
+          opens #{"<" "(" "[" "{"} closes #{">" ")" "]" "}"}
+          ;; (a `>` closes an angle bracket only when one is open: `->` and comparisons are other tokens or not in types)
+          depth (loop [i 0 d 0 stack [] out (transient [])]
+                  (if (= i n) (persistent! out)
+                      (let [t (ts i)]
+                        (cond (opens t) (recur (inc i) (inc d) (conj stack t) (conj! out d))
+                              (and (closes t) (seq stack)) (recur (inc i) (dec d) (pop stack) (conj! out (dec d)))
+                              :else (recur (inc i) d stack (conj! out d))))))
+          d-of (fn [i] (long (depth i)))
+          ;; the element of token i at the depth k (k <= its depth): back and forward to a comma or bracket at depth k-1..k
+          elem (fn [i k]
+                 (let [k (long k)
+                       lo (loop [j (dec (long i))] (if (< j 0) 0
+                                                       (let [t (ts j) dj (d-of j)]
+                                                         (if (or (and (= t ",") (= dj k)) (and (opens t) (= dj (dec k)))) (inc j) (recur (dec j))))))
+                       hi (loop [j (inc (long i))] (if (>= j n) n
+                                                       (let [t (ts j) dj (d-of j)]
+                                                         (if (or (and (= t ",") (= dj k)) (and (closes t) (= dj (dec k)))) j (recur (inc j))))))]
+                   [lo hi]))
+          ;; the token ranges sizeof...( ... ) covers
+          sized (set (for [i (range (- n 2)) :when (and (= "sizeof" (ts i)) (= "..." (ts (inc i))) (= "(" (ts (+ i 2))))
+                           j (range (+ i 3) (or (first (filter #(and (= ")" (ts %)) (= (d-of %) (d-of i))) (range (+ i 3) n))) n))]
+                       j))
+          expanded? (fn [i]
+                      (or (contains? sized i)
+                          (and (< (inc (long i)) n) (= "..." (ts (inc i))))
+                          (boolean (some (fn [k] (let [[lo hi] (elem i k)]
+                                                   (some #(and (= "..." (ts %)) (= (d-of %) k)) (range lo hi))))
+                                         (range (d-of i) -1 -1)))))]
+      (seq (distinct (for [i (range n) :let [t (ts i)]
+                           :when (contains? packs t)
+                           :when (not (and (pos? i) (#{"::" "." "->"} (ts (dec i)))))
+                           :when (not (expanded? i))]
+                       t))))))
+
+;; (a mem-initializer's expansion, B(b)..., is no PackExpansionExpr in the tree: a CXXCtorInitializer is not judged)
+(def ^:private pack-expanders #{"PackExpansionExpr" "SizeOfPackExpr" "CXXFoldExpr" "PackIndexingExpr" "CXXCtorInitializer"})
+(def ^:private pack-decl-kinds #{"VarDecl" "FieldDecl" "TypeAliasDecl" "TypedefDecl" "ParmVarDecl" "FunctionDecl" "CXXMethodDecl"
+                                 "CXXConstructorDecl" "CXXConversionDecl" "CXXFunctionalCastExpr" "CStyleCastExpr" "CXXStaticCastExpr"
+                                 "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXUnresolvedConstructExpr" "CXXTemporaryObjectExpr"})
+(def ^:private tparam-kinds #{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"})
+
+(defn unexpanded-packs
+  "[temp.variadic]/5's unexpanded packs in the unit `u`'s main file (see above): an error a declaration or expression."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        seen (java.util.HashSet.)
+        off-of (fn [x] (or (get-in x [:range :begin :offset]) (get-in x [:loc :offset])))
+        mine? (fn [x] (let [f (or (get-in x [:range :begin :file]) (get-in x [:loc :file]))] (= main f)))
+        report! (fn [x what]
+                  (when-let [o (off-of x)]
+                    (let [[l c] (line-col starts (long o))]
+                      (when (.add seen [l c])
+                        (.add out {:line l :col c :kind :error :rule :pack
+                                   :msg (str "parameter packs not expanded with '...' (" what ")")})))))
+        ;; (GCC diagnoses a lambda's unexpanded pack at the lambda's full expression: at the lambda, or at the call's `(` after
+        ;; its `}` when the lambda is called at once: lambda-variadic7.C, lambda-variadic10.C)
+        lam-at (fn [lam parent]
+                 (if (and (= "CallExpr" (:kind parent)) (identical? lam (first (:inner parent))))
+                   {:range {:begin {:offset (get-in lam [:range :end :offset])}}}
+                   lam))
+        walk (fn walk [x packs at parent]
+               (when (map? x)
+                 (let [k (:kind x)
+                       here (or at x)]
+                   (when-not (pack-expanders k)
+                     (let [;; a template head's parameters: its packs added, a non-pack of the same name hiding an outer pack
+                           ps (filter #(tparam-kinds (:kind %)) (when (vector? (:inner x)) (:inner x)))
+                           packs (reduce (fn [s p] (if (:name p) (if (:isParameterPack p) (conj s (:name p)) (disj s (:name p))) s)) packs ps)
+                           ;; a function's parameter packs (their names in its types and body)
+                           fps (when (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} k)
+                                 (keep #(when (and (map? %) (= "ParmVarDecl" (:kind %)) (:name %)
+                                                   (str/ends-with? (str/trim (str (get-in % [:type :qualType]))) "..."))
+                                          (:name %))
+                                       (:inner x)))
+                           packs (into packs fps)
+                           ;; (a partial specialization's arguments, its text from the name to its body: GCC drops the
+                           ;; specialization with the error, its members not diagnosed)
+                           spec-bad (when (and (= "ClassTemplatePartialSpecializationDecl" k) (seq packs) (mine? x))
+                                      (when-let [o (get-in x [:loc :offset])]
+                                        (let [e (let [b (.indexOf src "{" (int o)) c (.indexOf src ";" (int o))]
+                                                  (cond (neg? b) c (neg? c) b :else (min b c)))]
+                                          (when (pos? e) (unexpanded-in-text packs (subs src (int o) (int e)))))))]
+                       (if spec-bad
+                         (report! {:loc (:loc x)} (str "'" (first spec-bad) "'"))
+                         (do
+                           (when (and (seq packs) (mine? x))
+                             (when (and (= "DeclRefExpr" k) (= :pk (get-in x [:_ent :ty :t])))
+                               (report! here (str "'" (get-in x [:referencedDecl :name]) "'")))
+                             (when (and (pack-decl-kinds k) (not (:isImplicit x)))
+                               (when-let [bad (unexpanded-in-text packs (str (get-in x [:type :qualType])))] (report! here (str "'" (first bad) "'"))))
+                             (when-let [ft (get-in x [:fixedUnderlyingType :qualType])]
+                               (when-let [bad (unexpanded-in-text packs ft)] (report! here (str "'" (first bad) "'"))))
+                             (when (= "CXXRecordDecl" k)
+                               (doseq [b (:bases x) :when (not (:isPackExpansion b))]
+                                 (when-let [bad (unexpanded-in-text packs (str (get-in b [:type :qualType])))] (report! here (str "'" (first bad) "'"))))))
+                           (when (vector? (:inner x))
+                             (if (= "LambdaExpr" k)
+                               ;; (a lambda: its body and its call operator's declaration, at the lambda's full expression; its
+                               ;; captures' initializers, whose `...` the tree does not keep, not judged)
+                               (let [at2 (or at (lam-at x parent))]
+                                 (doseq [y (:inner x) :when (and (map? y) (#{"CompoundStmt" "CXXRecordDecl"} (:kind y)))]
+                                   (walk y packs at2 x)))
+                               (doseq [y (:inner x)] (walk y packs at x)))))))))))]
+    (doseq [n (:nodes u) :when (mine? n)] (walk n #{} nil nil))
+    (vec out)))
+
+(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
