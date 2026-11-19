@@ -4324,3 +4324,37 @@ the light level has no C) and backtrace/backtrace_dynlink (native only, `Dynlink
 `:dynlink-decided`. The compiled level: no dynlink library yet (the shard's registry, OC220 (a)'s compiled half). At the light level
 `Dynlink.is_native` is false and `adapt_filename` is the identity (the platform is oi's) while `Sys.backend_type` is `Native`; no
 row of the corpora sees the difference.
+
+## As built: queue 396, Dynlink's plugins at the compiled level (OC220 (a)'s compiled half, 373-1 (a); 2026-11-19, branch `396-oc-dynlink`, from `n-all4` `88b8e7f1a`)
+
+373-1 (a)'s WIP (`714a2ea3d`) merged and proven. `lib-dynlink-pr4229/main`, `lib-dynlink-domains/main` and
+`lib-dynlink-init-info/test` pass at the compiled level by their own verdicts; `lib-dynlink-bytecode/main` and
+`backtrace/backtrace_dynlink` stay `:dynlink-decided`, as at the light level.
+
+- **The plugins in the program (the WIP).** o2j's `cprogs` reads an entry `+DUMP` as a plugin: translated ahead into the program's
+  package as `D_<unit>` (apart from the program's units: pr4229's sub/abstract shares the name of its Abstract), the library units
+  only plugins name in the program's tree but not its link. A program that links Dynlink gets, at the compiled level, the registry
+  in its main class: `load` (the runtime's `Main/loader`, set in `main` with `Main/setUnits`), `plugin` (a Lambda text's key, its
+  String hashCode and length, `plugin-key`) and `global` (a unit's module block). ExtCore's externals are the light level's;
+  `unitG` asks the loader's "global", so the runtime has no `Class/forName`. header.awk's dynlink mode at every level, clib with
+  Dynlink's units, the compiled judgment by the tests' own verdicts (`OI_OWN`).
+- **The runtime's analysis (the base's failure).** j2g `--jdk` has no `arbace.lang.Numbers`: an arithmetic form the class bodies'
+  analyzer cannot make an instruction of falls back to Clojure's `:inline` call of Numbers, unresolved there. Two did, so every
+  compiled shard was refused at the runtime since 331 and OC216's rest: `ExtGc/memprofGeom` (`/` on doubles and unary `-`; now
+  `unchecked-divide` and `unchecked-negate`, Java's double arithmetic as `Rt/fdiv`) and `HostSys/call` (a four-operand `bit-or`;
+  now two at a time). `bin/j2g --jdk jdk/forms --analyze-only` over `jdk/ocaml/ocaml/rt` alone: 2 failures before, 0 of 6,997
+  classes after.
+- **An arm64 host.** bin/oi built every shard for amd64 (`--arch amd64`): on an arm64 host each program exits 126. The shard is now
+  built for the host's architecture (`C2_ARCH`, `O2J_ARCH` overrides). The main's `ocamlprog` used `syscall.Dup2`, which linux/arm64
+  lacks: a `dup2` as jrt's `InheritedChannel.dup2` (dup3 with no flags, the same descriptor twice a no-op once open).
+- **The class.** `divergences-aot-compiled.edn`'s `:dynlink-decided` lists the two rows left.
+
+**Results (the VM, arm64; OI_JOBS=2, O2J_JOBS=2).**
+- `bin/oi check --aot --level compiled --only-list` on the five dynlink rows and the control pair: 5 pass (pr4229, domains, init-info,
+  asmcomp/compare, evaluation_order), 2 in `:dynlink-decided`; against oi "same" on all five; `_control/pr4229-vs-domains` differs.
+  The shard of 5 programs: j2g 712 s, peak 5.2 GiB; Go's build 280 s with the cache warm (1,014 s and 8.0 GiB cold, one `compile`).
+  check-aot-compiled.edn is not re-recorded (its three new rows and two classed are the main host's record, amd64).
+- The light level after the WIP (`unitG` through the loader; ExtGc's and HostSys's forms): the same rows, statmemprof/alloc_counts and
+  exception_callback, `bin/oi check --aot --only-list`: 7 pass, 2 classed, no row changed; both controls differ.
+- `bin/reap`: 0 problems. `bin/crops-score --judge --strict`: 0 problems (OCaml's scores unchanged: the compiled level is in no
+  REAP cell). `bin/records-check`: 0 problems.
