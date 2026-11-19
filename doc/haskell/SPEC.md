@@ -251,7 +251,10 @@ The options are the words GHC splits the pragma into (`getOptions`), each a stri
 `OPTIONS_HADDOCK`, whose text is one string, as GHC keeps it. `CPP` is an extension like any
 other: a module that declares it was preprocessed by the helper, and its forms are those of the
 preprocessed text (§2.8; unlike ghc-lisp's D11, S4). Pragmas GHC does not recognize are comments
-(§7.3).
+(§7.3). A pragma in another file than the module's (hsc2hs's `.hsc`, R6; a CPP `#include` of Haskell
+source, filepath's `OsPath/Common.hs`: queue 452) carries `:hs/file` as the forms of another file
+do (R5); the printer writes the header pragmas run by run of one file, in the forms' order, each
+run by its lines, a `{-# LINE #-}` pragma where the file changes.
 
 ### 2.4 `hs/module`
 
