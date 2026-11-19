@@ -4417,3 +4417,47 @@ exception_comballoc's deallocations. discard_in_callback: the native backend's c
 Marshal's and custom blocks' sources. thread_exit_in_callback. ephetest's test6 and test7 (a key reachable from its data: Go has no
 ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the major collector's own work). struct_include_optimisation
 (the bytecode's Translmod blocks).
+## As built: queue 413, the C API at the light AOT level (2026-11-19, branch `413-oc-capi`, from `next` `aa9edac6f`)
+
+Asked: the AOT cell's `:c-api` class (25 rows, n-ocaml-bd's audit: "the C API at the light level: large"): what the light level's
+C API lacks, the cheapest groups built and proved on their programs. OC215 (a) had kept `:c-api` at the light level "until the
+embedding" because its runtime, Java forms interpreted on stage 0, has no main of ours to serve `capiPath`. It needs none: the
+runtime can spawn a process that does.
+
+**The route.** The light level's `CApi`, when the open of `capiPath` fails and `OI_CAPI_SERVER` and `OI_CSTUBS` are set, spawns
+`OI_CAPI_SERVER capi` (ProcessBuilder, its error output inherited) and sends the same messages over the child's standard streams.
+The server is the light driver of arbace/oi (`.tmp/oi/bin/oi`, which already links oicapi, ci and crt), so the stubs run as at
+eval and at the compiled level, by the same code:
+- `go/arbace/oicapi/wire.ae` (new): the wire form, the session and the workers, moved from the compiled main's capi.ae
+  unchanged but for names (`Handle`, `FlushStubs`; `wireLoad`, `wireApply`, `wireNamed`, `wireRun`). The compiled main's capi.ae
+  keeps its host and file (a message written is `oicapi.Handle`'s reply). Checked by a scratch build: the printed capi.go with the
+  printed oi, oicapi, ci and crt and a stand-in jrt vets (no shard built here).
+- oicapi's hooks: `Stdio` (the C's standard streams), `Pid` (the C's getpid) and `Signal` (its kill and raise); nil, the process's
+  as before.
+- `oi capi` (test/ocaml/oi/cmd/main.ae): a message in is u32 its length then it; the reply is chunks `o` (the C's standard output
+  since the last reply), `e` (its error output), `s` (the signals the C sent the program, one a byte), then `m` (Handle's reply).
+  The C's getpid is the server's parent (the program's process); a signal to it is sent back, others are the host's kill. `Z`
+  flushes the C's stdio at the program's end.
+- `CApi.ae`: writes `o` and `e` into System/out and System/err, where OCaml's channels write (so the output interleaves as the
+  calls made it), posts `s` to ExtSignal and handles the pending signals when the call returns. `CApi/finish` (Main/run, after
+  flushStd, as the compiled main's atEnd) sends `Z` and ends the server. Two fixes for both AOT levels: a callback runs with the
+  thread's fiber cleared (caml_callback's own stack: an effect it performs unhandled is Effect.Unhandled, callback/test7), and an
+  over-application from C is a loop (`CApi/apN`: caml_callbackN of 10,000 arguments was 10,000 nested Rt/ap at the
+  interpreter's depth, callback/test1).
+- header.awk: `@cstubs` at the light level too (aot=1, as aot=2). bin/oi's light level builds the node program (`cstubs_nodes`)
+  and puts `OI_CSTUBS` and `OI_CAPI_SERVER` (the driver) in the run's environment. Such a program has an environment, so it runs
+  alone (o2j_env_runs). A failed build is the row's reason.
+
+**Results** (`bin/oi check --aot --only-list`; native path; the 20 programs of the 25 the header now runs, with asmcomp's control
+pair): 15 pass: the 12 callback tests but test3 and signals_alloc (10), manyargs, blake2b_self_test, runtime-C-exceptions,
+recommended_domain_count and bigarrcml (callback/test1 and test7 after the two fixes). The rest, in a class:
+- callback/test3 is `:light-depth` (aot-known `depth:`): 100,000 non-tail calls inside a callback.
+- lib-bigarray/subarraystub is `:light-speed` (aot-slow; eval's `:speed` too).
+- lib-marshal/intext and intext_par stay `:c-api` (aot-known `c-api:`, the class's second match). Marshal reaches a custom block
+  the C allocated, and the AOT runtime has no route to the C's serialize. intext_par fails the same way alone at OI_TIMEOUT=900
+  (193 s), so at the default limit it is a timeout.
+- callback/signals_alloc stays `:c-api` too: its handler runs at the external's return (01324), OCaml's at the next allocation's
+  poll (01234).
+
+The header rows left in `:c-api`: int64-unboxing and unboxed-primitive-args (native only), bigarrfml (Fortran), delayintr, signal
+and cloexec (helper programs). The negative control `_control/capi-test1-vs-test2` (check-aot-native.edn) differs.

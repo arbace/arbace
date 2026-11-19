@@ -9,16 +9,21 @@
 ;;	                                       compiles a phrase, bin/oi's)
 ;;	oi cmain NODES [ARG...]                a C program's node program (a test's helper, OC201 (a))
 ;;	                                       run on ci, its main's status
+;;	oi capi                                the light AOT level's C API (queue 413): the stubs of OI_CSTUBS
+;;	                                       served to the Java runtime's CApi over the standard streams
 (in-ns 'go.arbace.oi.cmd.oi) (go/file "main.go" :doc "Command oi is the light driver of arbace/oi (bin/oi's, until the package is listed in goi's\ntable and the shipped program runs it, doc/ocaml/OCAML-SURVEY.md \"As built: O5\"): it runs a\nprogram's Lambda dumps against the library's, and the toplevel.\n\n\toi run LIBDIR UNIT.ae... [-- ARG...]   run the units (in order) with the library of LIBDIR\n\t                                       (LIBDIR/order.txt: the library's units in link order,\n\t                                       one name a line, each LIBDIR/NAME.ae)\n\toi repl LIBDIR WORKDIR ORACLE          the toplevel (phrases on stdin; ORACLE the command that\n\t                                       compiles a phrase, bin/oi's)\n" :imports [
 
 
     ^{:line 13} [bufio "bufio"]
+    [binary "encoding/binary"]
     ^{:line 14} [fmt "fmt"]
+    [io "io"]
     ^{:line 15} [os "os"]
     ^{:line 16} [filepath "path/filepath"]
     ^{:line 17} [debug "runtime/debug"]
     ^{:line 18} [pprof "runtime/pprof"]
     ^{:line 19} [strings "strings"]
+    [sync "sync"]
     [syscall "syscall"]
 
     ^{:line 21} [oi "arbace/oi"]
@@ -52,9 +57,77 @@
         (when (!= err nil)
           (fmt/Fprintf os/Stderr "oi: cmain: %v\n" err)
           (exit oi/StatusInternal))
-        (exit st))))
+        (exit st)))
+    ;; the light AOT level's C API (queue 413): the runtime's CApi spawns this process when no main serves capiPath
+    (case ["capi"]
+      (exit (capiServe))))
 
   (usage))
+
+;; The light AOT level's C API (queue 413; doc/ocaml/OCAML-SURVEY.md, "As built: queue 413"): the Java runtime on stage 0
+;; (jdk/ocaml/ocaml/rt/CApi.ae) has no main of ours to serve capiPath, so it spawns `oi capi` and speaks to it over its standard
+;; streams. A message in: u32 its length, then it (oicapi's wire form; 'Z' alone: the program ended, the C's stdio flushed). Its
+;; reply out: chunks, a byte and u32 a length then the bytes, 'o' what the C wrote to its standard output since the last reply, 'e' to
+;; its standard error, 's' the signals it sent the program (one a byte), then 'm' oicapi.Handle's reply (empty for 'Z'). The
+;; runtime writes the C's output into the program's own streams (System/out, System/err: OCaml's channels write there too), so it
+;; lands in the program's output where a call made it, and posts the signals as its own (ExtSignal).
+(go/type stdBuf "stdBuf is a C stream's bytes since the last reply (or the signals the C sent the program, one a byte).\n" (struct ^sync/Mutex mu ^{:tag (slice byte)} b))
+
+(go/method Write [^{:tag (* stdBuf)} s ^{:tag (slice byte)} p] :results [int error]
+  (.Lock (.-mu s))
+  (set! (.-b s) (append (.-b s) (spread p)))
+  (.Unlock (.-mu s))
+  (return (len p) nil))
+
+(go/method take ^{:tag (slice byte)} [^{:tag (* stdBuf)} s]
+  (.Lock (.-mu s))
+  (let [b (.-b s)]
+    (set! (.-b s) nil)
+    (.Unlock (.-mu s))
+    b))
+
+(go/func chunk "chunk writes the reply's chunk k (an empty output chunk left out).\n" [^{:tag (* bufio/Writer)} w ^byte k ^{:tag (slice byte)} b]
+  (when (and (!= k \m) (== (len b) 0))
+    (return))
+  (.WriteByte w k)
+  (let [h (make (slice byte) 4)]
+    (.PutUint32 binary/BigEndian h (conv uint32 (len b)))
+    (.Write w h)
+    (.Write w b)))
+
+(go/func capiServe "capiServe serves the runtime's messages until its end of the pipe closes.\n" ^int []
+  (let [out (addr (lit stdBuf))
+        errb (addr (lit stdBuf))
+        sigs (addr (lit stdBuf))
+        in (bufio/NewReader os/Stdin)
+        w (bufio/NewWriter os/Stdout)
+        hdr (make (slice byte) 4)]
+    (set! oicapi/Stdio (fn [] :results [io/Reader io/Writer io/Writer] (return nil out errb)))
+    ;; the program is the runtime that spawned this process: its pid the C's getpid, a signal to it (or to 0, or to this process) the
+    ;; runtime's own, sent back with the reply ('s'); another process's the host's kill
+    (set! oicapi/Pid os/Getppid)
+    (set! oicapi/Signal (fn ^error [^int p ^int sig]
+                          (when (or (== p 0) (== p (os/Getppid)) (== p (os/Getpid)))
+                            (when (and (> sig 0) (< sig 64))
+                              (.Write sigs (lit (slice byte) (conv byte sig))))
+                            (return nil))
+                          (syscall/Kill p (conv syscall/Signal sig))))
+    (while true
+      (when [(values _ err) (io/ReadFull in hdr)] (!= err nil)
+        (return 0))
+      (let [msg (make (slice byte) (.Uint32 binary/BigEndian hdr))]
+        (when [(values _ err) (io/ReadFull in msg)] (!= err nil)
+          (return oi/StatusInternal))
+        (let [^{:tag (slice byte)} reply nil]
+          (if (and (== (len msg) 1) (== (aget msg 0) \Z))
+            (oicapi/FlushStubs)
+            (set! reply (oicapi/Handle msg)))
+          (chunk w \o (.take out))
+          (chunk w \e (.take errb))
+          (chunk w \s (.take sigs))
+          (chunk w \m reply)
+          (when [err (.Flush w)] (!= err nil)
+            (return oi/StatusInternal)))))))
 
 
 ;; OC201 (a) (doc/ocaml/OCAML-SURVEY.md, "As built: OC199-OC201"): OCaml's runtime holds no descriptor beyond the standard streams,
@@ -83,7 +156,7 @@
 
 
 ^{:go/end 56} (go/func usage []
-  (fmt/Fprintln os/Stderr "usage: oi run LIBDIR UNIT.ae... [-- ARG...] | oi repl LIBDIR WORKDIR ORACLE | oi cmain NODES [ARG...]")
+  (fmt/Fprintln os/Stderr "usage: oi run LIBDIR UNIT.ae... [-- ARG...] | oi repl LIBDIR WORKDIR ORACLE | oi cmain NODES [ARG...] | oi capi")
   (os/Exit 2))
 
 
