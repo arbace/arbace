@@ -12942,3 +12942,17 @@ of 185, test_dis 125 of 145, test_marshal 63 of 79, test_code 10 of 42); the con
 10 of 10. The 20 methods now failing in no class are new rows for the classes (code objects that are pyi's IR: code()
 and code.replace of co_varnames, co_lnotab, code hashes and equality, a code object's weakref; match-case source positions
 None for 9; dis's positions of two programs).
+
+## 2026-11-19: n-py-eval: goi's stub families for pyi's bytes-like callbacks (write-ahead)
+
+test_ctypes' 31 errors (test_byteswap 8, test_pickling 8, ...) and test_memoryview's 1 are "pyi: Go panic: goi: compiled
+code called a method of an interpreted type whose signature has no stub left (go/arbace/gotable.edn, :stubs)", with no
+"no stub left" warning: the method has no family at all. The compiled runtime asserts pyi's bytes-like and buffer callbacks
+through unnamed interfaces (py/bytes.go's `interface{ BytesLike() []byte }`, binascii's `interface{ WritableBytes() ([]byte,
+bool) }`, memoryview's `interface{ BufferValid() error }`), which the table's families (the listed packages' named
+interfaces and :common) do not name, so ctypes' CData (interpreted, go/arbace/pyctypes) got the panicking stub. Added to
+:stubs :common BytesLike and WritableBytes, and BufferValid among func() error's names. Also the family of py.Object's Type()
+from 16 to 64 slots: pyi's lazy modules hold 22 interpreted object types, and test_sqlite3's run warned "no stub left for
+methods of type func() *py.Type ... *pysqlite3.Blob.Type panics". Write-ahead: the stubs are compiled into the executable,
+so this takes effect at the next build of the gate's executables (gate_key moves; it moves already with cfd69a6d2); not
+probed here (no executable built: no heavy runs today).
