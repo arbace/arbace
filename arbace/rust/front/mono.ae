@@ -757,9 +757,23 @@
                  ;; SIMD module (core::simd's `Simd<T, N>`, `#[repr(simd, packed)]`: the interface writes no repr(simd))
                  (and (or (not (tc/std-adt-known? adt)) (str/includes? (str adt) "simd")) (:simd (src-adt adt))) (assoc :simd true)))))
 
+(def ^:private niche-range-ends
+  "queue 462 (448-4 (a) 5): the inclusive ends of core::num::niche_types' range pattern types that std's interface writes by
+  their anonymous constant (`(usize) is 0..=core::::num::niche_types::UsizeNoHighBit::0::{constant#1}`), from
+  library/core/src/num/niche_types.rs (1.99.1): UsizeNoHighBit `usize is 0..=HALF_USIZE`, HALF_USIZE `usize::MAX >> 1` on the
+  64-bit target; U32NotAllOnes `u32 is 0..u32::MAX` and U64NotAllOnes `u64 is 0..u64::MAX`, their exclusive ends one less
+  (DECISION 462-2: these three from a table until core's anonymous constants are exported and evaluated)"
+  {"core::::num::niche_types::UsizeNoHighBit::0::{constant#1}" 9223372036854775807N
+   "core::::num::niche_types::U32NotAllOnes::0::{constant#1}" 4294967294N
+   "core::::num::niche_types::U64NotAllOnes::0::{constant#1}" 18446744073709551614N})
+
 (defn- pattern-field
-  "A std field written as text (the interface's pattern types, `(*const T) is !null`): its type, or [:err ...]"
+  "A std field written as text (the interface's pattern types, `(*const T) is !null`; queue 462: an integer's range
+  `(usize) is 0..=END`, END a literal or one of niche-range-ends): its type, or [:err ...]"
   [t adt]
+  (if-let [[_ int lo hi] (and (= :err (first t)) (re-find #"^\(text \"\(([iu](?:8|16|32|64|128|size))\) is (\d+)\.\.=(.+)\"\)$" (str (second t))))]
+    (let [hi (if (re-matches #"\d+" hi) (bigint hi) (get niche-range-ends hi))]
+      (if hi [:pat-range [(if (= \i (first int)) :int :uint) int] (bigint lo) hi] t))
   (if-let [[_ inner] (and (= :err (first t)) (re-find #"^\(text \"\((.*)\) is !null\"\)$" (str (second t))))]
     (let [ps (vec (keep-indexed (fn [i [k nm]] (when (= 'type k) [nm i])) (:generics (get (:adts c/*si*) adt))))
           pidx (fn [nm] (some (fn [[n i]] (when (= n nm) i)) ps))
@@ -767,7 +781,7 @@
                  (when (pidx nm) [:ptr (= m "mut") [:param (pidx nm) nm]])
                  (when (pidx inner) [:param (pidx inner) inner]))]
       (if base [:pat-notnull base] t))
-    t))
+    t)))
 
 ;; RFP58 (a): a private std ADT its interface lacks, from the library's sources (src-adt, below)
 (defn- std-adt-known-or-src? [p] (or (tc/std-adt-known? p) (some? (src-adt p))))
@@ -884,6 +898,11 @@
                      ups (if-let [as (nth t 3 nil)] (mapv #(erase-regions (c/subst % as)) ups) ups)]
                  (univariant (mapv layout-of ups) {} :always))
       :tuple (let [ts (second t)] (univariant (mapv layout-of ts) {} (if (empty? ts) :always :maybe-unsized)))
+      ;; queue 462: an integer's range pattern type (the niche types' `usize is 0..=HALF_USIZE`): the integer's scalar, its
+      ;; valid range the pattern's, the niche there
+      :pat-range (let [l (layout-of (second t))
+                       s (assoc (second (:abi l)) :range [(nth t 2) (nth t 3)])]
+                   (assoc l :abi [:scalar s] :niche {:offset 0 :prim (:prim s) :range (:range s)} :fields {:offsets [0] :order [0]}))
       :pat-notnull (let [l (layout-of (second t))
                          l (case (first (:abi l))
                              :scalar (assoc l :abi [:scalar (assoc-in (second (:abi l)) [:range 0] 1N)])
@@ -1788,13 +1807,16 @@
                [[(:def e) args] (:symbol e)]))))
 
 (defn- text-of [t]
-  (if (= :pat-notnull (first t)) (str "(" (text-of (second t)) ") is !null") (build/ty-text t)))
+  (case (first t)
+    :pat-notnull (str "(" (text-of (second t)) ") is !null")
+    :pat-range (str "(" (text-of (second t)) ") is " (nth t 2) "..=" (nth t 3))
+    (build/ty-text t)))
 
 (defn- components
   "collect_ty's closure: a pointee, an element, a tuple's fields, a struct's fields (not an enum's)"
   [t]
   (case (first t)
-    (:ref) [(nth t 3)] (:ptr) [(nth t 2)] (:slice :array :pat-notnull) [(second t)]
+    (:ref) [(nth t 3)] (:ptr) [(nth t 2)] (:slice :array :pat-notnull :pat-range) [(second t)]
     :tuple (second t)
     :adt (when-not (tc/enum? (second t)) (apply concat (variant-fields (second t) (nth t 2))))
     nil))

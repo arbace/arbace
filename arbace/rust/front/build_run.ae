@@ -724,6 +724,27 @@
   []
   (reduce (fn [acc e] (merge (:fns e) acc)) {} (vals (native-core-map))))
 
+(defn- native-extra-iface
+  "queue 462 (448-4 (a) 3): the crate-private impls' and traits' facts the exported bodies' function constants name (alloc's
+  `alloc::raw_vec::{impl#2}`, the trait `alloc::string::SpecToString`), {:impls {path m} :traits {path m}}, for the run's
+  interface, so that the constants print as rustc's MIR of the instance does"
+  []
+  (reduce (fn [acc e] (-> acc (update :impls #(merge (:impls e) %)) (update :traits #(merge (:traits e) %))))
+          {:impls {} :traits {}} (vals (native-core-map))))
+
+(defn- with-extra-iface
+  "SI (the run's interface) and STD (its names) with the exported bodies' crate-private facts: functions (443), impls and
+  traits (462), the traits' kinds and their functions' (`Trait`, `AssocFn`: print-def-path's qualified path of a trait's
+  method), each only where the interface has none: [si std]"
+  [si std]
+  (let [fs (native-extra-fns) {:keys [impls traits]} (native-extra-iface)
+        kinds (merge (into {} (for [p (keys traits)] [p "Trait"]))
+                     (into {} (for [p (keys fs) :let [pp (c/path-parent p)]
+                                    :when (and pp (or (contains? traits pp) (= "Trait" (get (:kinds std) pp))))]
+                                [p "AssocFn"])))]
+    [(-> si (update :fns #(merge fs %)) (update :impls #(merge impls %)) (update :traits #(merge traits %)))
+     (update std :kinds #(merge kinds %))]))
+
 (defn- builtin-normalize
   "The builtin projections an instance's types name once their parameters are known: <T as Pointee>::Metadata (the
   ptr_metadata_ty rule: () for a sized type, usize for a slice or str, DynMetadata<dyn ..> for a trait object), and
@@ -874,6 +895,36 @@
            (map? x) (into {} (for [[k v] x] [k (walk-meta f v)]))
            :else x)))
 
+(def ^:private const-bodies-cache (atom {}))
+
+(defn- const-bodies
+  "queue 462 (448-4 (a) 5): the exported constants' bodies (each entry's :consts, core-check's export-consts), {def-path body}"
+  []
+  (let [m (native-core-map)]
+    (or (get @const-bodies-cache (System/identityHashCode m))
+        (let [cs (reduce (fn [acc e] (merge acc (:consts e))) {} (vals m))]
+          (swap! const-bodies-cache assoc (System/identityHashCode m) cs)
+          cs))))
+
+(defn- eval-local-const
+  "queue 462 (448-4 (a) 5, DECISION 448-3 (a)): the value of a library crate's constant D (its def path, no arguments) as CTFE
+  evaluates it: its exported body (const-bodies) reprinted in the program's crate and evaluated by eval-promoted (a constant's
+  own body: _0's value), the constants it names in turn, size_of and align_of by mono's layout: `(scalar BITS SIZE)` for a
+  scalar's bytes, else nil (the constant stays unevaluated and the body refused, as before)"
+  [d seen]
+  (when-let [cb (and (string? d) (not (seen d)) (get (const-bodies) d))]
+    (try
+      (let [b (reprint cb [])
+            lc (fn [_ _ v] (let [[d2 as] (:nc (meta v))] (when (empty? as) (eval-local-const d2 (conj seen d)))))
+            lay (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
+            r (eval-promoted b nil nil nil nil nil lay lc true)
+            bs (:bytes r)]
+        (when (and (vector? bs) (empty? (:relocs r)) (#{1 2 4 8 16} (count bs)))
+          (list 'scalar (bytes->int bs) (count bs))))
+      (catch Throwable e
+        (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-local-const:" d (.getMessage e))))
+        nil))))
+
 (defn- sized-const-eval
   "queue 448: core::mem::SizedTypeProperties' constants at a native instance (`<String as SizedTypeProperties>::MAX_SLICE_LEN`,
   the instance's type known) evaluated as CTFE evaluates them for the record (library/core/src/mem/mod.rs: SIZE size_of, ALIGN
@@ -918,7 +969,9 @@
                  ;; size_of::<*const ()>()` (8 on the 64-bit target)
                  val (or val (when (empty? args) (get {"core::cell::UNUSED" '(scalar 0 8)
                                                        "core::ptr::swap_nonoverlapping_bytes::CHUNK_SIZE" '(scalar 8 8)}
-                                                      d)))]
+                                                      d)))
+                 ;; queue 462: another constant of the library's own, by its exported body
+                 val (or val (when (and (nil? nm) (empty? args)) (eval-local-const d #{})))]
              (if val (with-meta (apply list (concat (take 3 x) [val])) (meta x)) x)))))
      body)))
 
@@ -1337,8 +1390,9 @@
             (fn [bodies]
               (mem-mark (str n " bodies built"))
               ;; queue 443: the exported library bodies' crate-private functions in the run's interface (a path it has kept)
-              (when-let [x (not-empty (native-extra-fns))]
-                (try (set! c/*si* (update c/*si* :fns #(merge x %)))
+              ;; queue 462: and their crate-private impls and traits, with the traits' kinds in the names
+              (when (seq (native-core-map))
+                (try (let [[si std] (with-extra-iface c/*si* c/*std*)] (set! c/*si* si) (set! c/*std* std))
                      (catch IllegalStateException _ (swap! lines conj "native: the interface is not bound: no crate-private function added"))))
               (let [;; RFP49 (a): the function constants of the record's std instances' bodies, whose local instances mono's
                     ;; collector adds (rustc's std bodies are the pack's, RF12's part; what they reach of ours is mono's)
