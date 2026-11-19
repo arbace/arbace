@@ -1112,6 +1112,20 @@ step 4 (2026-10-07); the others came with later work, as each says:
     the compiled code disagreed (`(instance? C x)` false for an `x` compiled code made). As upstream's gen-class,
     which does nothing when not compiling: the class is the compiled one. Evaluated twice at the REPL (an
     interpreted class), the form is evaluated again as before.
+35. **gen-class in an AOT program: the default methods and the Var fields** (2026-11-19, queue 399).
+    `arbace/genclass.ae`'s `generate-class` also makes the Java form an AOT program's class is compiled from
+    (`::aot-form`): each default method of the `:implements` interfaces that no superclass method covers is a
+    forwarding method, its var's fn else the interface's default (`(.m Iface/super ...)`, Iface the interface
+    of `:implements` that has it), as upstream's class; `gen-class-define` evaluates the form without them (the
+    interpreter cannot call `Iface.super`'s on an interface of the world, and a declared method answering
+    `Compiler$Dyn`'s super marker would answer it to reflection: the fns for dispatch only stay) and, while the
+    program records its units (`arbace.classes.native/compiled`), records the `::aot-form` in place of the
+    evaluated one (`gc-record-aot-form!`), which c2j keeps. Before, the compiled class lacked the method and ran
+    the default, not the impl-ns's fn (the suite's `interface-methods` at the AOT level). The form's class name
+    carries `:arbace/gen-class`, by which j2g lists every member of the class in its member table with its
+    modifiers (`arbace.j2g.model/gen-class?`, `arbace.j2g.out/member-tables`), as a program's own class's and the
+    JVM's reflection: the private static `Var` fields (`foo_Object_int__var`, `toString__var`), which the suite's
+    `name-munging` reads by `getDeclaredField`, were not in the compiled class's table.
 
 ## Dialect divergences
 

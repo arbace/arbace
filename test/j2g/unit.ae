@@ -1071,7 +1071,46 @@
                (and (str/includes? f "META-INF/arbace/entries") (str/includes? f "JarURLConnection")))
         (println "skip  entries: jdk/forms' ClassPathResources predates A17 (bin/jrt-convert predict, then the night's update)")))))
 
+;; Queue 399: a class gen-class made (:arbace/gen-class, arbace/genclass.ae) lists every member in its member table,
+;; its private static Var fields among them (Clojure's suite's name-munging reads them by getDeclaredField), and its
+;; forwarding method of an interface's default method falls back on the interface's default function (Iface.super,
+;; interface-methods: J_g_Greeter_J_Greet__O of the receiver); the control, the same shape without the key, lists its
+;; public members alone
+
+(defn test-gen-class []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/genclass" :tree true}] :variant-files []))
+        mw (let [mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {}}]
+             (assoc mw :subclass-index (m/make-subclass-index mw)))
+        in-world (fn [f] (w/with-world world
+                           (binding [m/*w* mw env/*declared* (:classes e) decls/*reached* #{}
+                                     code/*pkgstate* {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts (atom #{})}]
+                             (try (f) (catch Throwable t (str "threw: " t " " (ex-cause t)))))))
+        field-lines (fn [n] (in-world #(let [ts (out/member-tables (m/pkg n) n)]
+                                         (if (string? ts) ts (vec (sort (map :line (:fields ts))))))))
+        gen (field-lines "g/Gen") plain (field-lines "g/Plain")
+        greet (in-world #(let [mm (some (fn [x] (when (= "greet" (:name x)) x)) (:methods (a/decl "g/Gen")))]
+                           (binding [decls/*reached* #{["g/Gen" (:name mm) (:desc mm)]}]
+                             (decls/method-forms (m/pkg "g/Gen") "g/Gen" mm))))
+        calls-default? (fn [f] (and (coll? f)
+                                    (some #(and (seq? %) (symbol? (first %)) (= "J_g_Greeter_J_Greet__O" (name (first %))) (= 't (second %)))
+                                          (tree-seq coll? seq f))))]
+    (check "gen-class: the fixture analyzes" (empty? (:failed world)) (pr-str (:failed world)))
+    (check "gen-class: m/gen-class? of Gen, not of Plain"
+           (= [true false] (w/with-world world [(m/gen-class? "g/Gen") (m/gen-class? "g/Plain")])))
+    (check "gen-class: Gen's member table lists its private static fields, with their modifiers (0x1a)"
+           (and (vector? gen) (some #(and (str/includes? % " greet__var ") (str/starts-with? % "G26 ")) gen)
+                (some #(str/includes? % " who__var ") gen))
+           (pr-str gen))
+    (check "gen-class: control: Plain's member table lists no private field"
+           (and (vector? plain) (not-any? #(str/includes? % "greet__var") plain))
+           (pr-str plain))
+    (check "gen-class: Gen's greet falls back on Greeter's default method's function (Greeter.super.greet())"
+           (calls-default? greet) (pr-str greet))))
+
 (defn -main [& _]
+  (test-gen-class)
   (test-edge-generics)
   (test-object-finalize)
   (test-dynsub-clone)
