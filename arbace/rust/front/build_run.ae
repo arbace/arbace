@@ -540,12 +540,22 @@
                                   (do (when-let [f (:vtable! facts)] (f false)) nil)))))))
         fix-cast (fn [x]
                    (if (and (seq? x) (= 'cast (first x)) (str/starts-with? (str (second x)) "PointerCoercion(Unsize")
-                            (not (some #{:vtable} x)) (seq? (nth x 3 nil)) (:vtables facts))
+                            (not (some #{:vtable} x)) (seq? (nth x 3 nil)) (or (:vtables facts) (seq @rec-vts)))
                      (let [tgt (second (nth x 3))
                            op (nth x 2) pl (when (and (seq? op) (#{'copy 'move} (first op))) (second op))
                            src (when (and (seq? pl) (= 2 (count pl))) (second (:ty (nth (:locals ours) (second pl) nil))))
                            nv (take-vt! tgt src)]
                        (cond
+                         ;; queue n-rust-dyn: a cast mono's facts do not name (a native library body's: mono collects none of
+                         ;; their casts) takes the record's cast of the same target type in the record's body of its symbol
+                         ;; (the instance the native body was judged equal to), its vtable's allocations copied; not from a trait object
+                         ;; (a coercion between trait objects keeps its metadata: codegen's)
+                         (and (= ::none nv) (seq (get @rec-vts tgt)) (not (str/includes? (str src) "dyn ")))
+                         (let [id (first (get @rec-vts tgt))]
+                           (swap! rec-vts update tgt (comp vec rest))
+                           (when-let [f (:vtable! facts)] (f false))
+                           (doseq [a (rec-closure id)] (when-let [v (get rec-allocs a)] (swap! static-data conj [a v])))
+                           (concat x [:vtable id]))
                          (= ::none nv) x
                          (and (map? nv) (not (mono/error? nv)))
                          (concat x [:vtable (symbol (vt-alloc! nv))])
@@ -781,6 +791,27 @@
           (with-meta (list 'adt t kind fields pp variant targs) (meta y)))
         (catch Throwable _ y)))))
 
+(def ^:dynamic *resolve-call*
+  "queue n-rust-dyn: within a run, a native body's trait-method call [DEF ARGS] resolved to the impl's method by mono
+  (mono/resolve-call), else nil; nil outside a run"
+  nil)
+
+(def ^:dynamic *normalize-ty*
+  "queue n-rust-dyn (448-4 (a) 4): within a run, a type's projections normalized by mono (mono/normalize-ty: the solver over
+  std's interface and the program); nil outside a run"
+  nil)
+
+(defn- has-proj? [t] (boolean (some #(and (vector? %) (= :proj (first %))) (tree-seq coll? seq t))))
+
+(defn- instance-normalize
+  "An instance's type: the builtin projections (builtin-normalize), then the rest normalized by the run's solver
+  (*normalize-ty*) when one is left (an associated type of a library impl: `<Chars<'_> as Iterator>::Item`)"
+  [t]
+  (let [t (builtin-normalize t)]
+    (if (and *normalize-ty* (has-proj? t))
+      (builtin-normalize (try (*normalize-ty* t) (catch Throwable _ t)))
+      t)))
+
 (defn- reprint
   "Native core forms printed in the program's crate at ARGS: each type form from its :tc, a function constant's text from its
   type, a named constant's from its :nc, an aggregate's ADT text and path from its path and arguments (queue 448b)"
@@ -790,7 +821,7 @@
     (let [m (meta x)
           y (apply list (map #(reprint % args) x))]
       (cond
-        (and (= 'ty (first y)) (:tc m)) (build/ty-form (builtin-normalize (c/subst (:tc m) args)))
+        (and (= 'ty (first y)) (:tc m)) (build/ty-form (instance-normalize (c/subst (:tc m) args)))
         (and (= 'adt (first y)) (= 7 (count y)) (string? (nth y 2)) (vector? (nth y 3))) (reprint-agg-adt (if m (with-meta y m) y))
         (and (= 'unevaluated (first y)) (:nc m)) (with-meta y (update m :nc (fn [[d as]] [d (mapv #(c/subst % args) as)])))
         (= 'const (first y))
@@ -801,7 +832,7 @@
           (with-meta (apply list 'const text (drop 2 y)) m))
         :else (if m (with-meta y m) y)))
     (vector? x) (let [y (mapv #(reprint % args) x)] (if (meta x) (with-meta y (meta x)) y))
-    (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(builtin-normalize (c/subst % args)) v) (reprint v args))]))
+    (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(instance-normalize (c/subst % args)) v) (reprint v args))]))
     :else x))
 
 (defn- remap-const-eval-select
@@ -938,6 +969,8 @@
     (seq? x) (let [y (loop [in (seq x) out []]
                        (cond (nil? in) out
                              (= :fn-symbol (first in)) (recur (nnext in) out)
+                             ;; queue n-rust-dyn: an unsizing cast's vtable allocation (the record's, the run's)
+                             (= :vtable (first in)) (recur (nnext in) out)
                              :else (recur (next in) (conj out (rec-extras (first in))))))
                    y (if (and (#{'call 'drop 'assert} (first y)) (> (count y) 6)) (subvec y 0 6) y)]
                (apply list y))
@@ -1187,8 +1220,10 @@
                     (contains? seen [def args]) []
                     :else
                     (let [inst (core-instance e args)
-                          ;; S4: a type the instance's forms cannot write (ty-form's `(other ..)`: a trait object, whose casts
-                          ;; need their vtable) stops it, the record's body the fallback
+                          ;; S4: a type the instance's forms cannot write (ty-form's `(other ..)`: a closure type; a trait object
+                          ;; is `(dyn)` since queue n-rust-dyn, its casts' vtables the record's, and a projection is normalized at
+                          ;; the instance by the run's solver, one left unnormalized `(other ":proj")`) stops it, the record's body
+                          ;; the fallback
                           _ (when-let [o (first (filter #(and (seq? %) (= 'other (first %))) (tree-seq coll? seq (:body inst))))]
                               (throw (ex-info (str "a type its forms do not write " (pr-str o)) {})))
                           ;; queue 443, 443-4 (b): a constant left unevaluated by a local definition's id (`(unevaluated "85" ..)`:
@@ -1214,7 +1249,11 @@
                           rec-has? (fn [cd] (or (contains? rec-defs (mono/print-path cd)) (contains? rec-by-path cd)))
                           seen (conj seen [def args])
                           more (for [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when ft
-                                     :let [[_ cd cargs] ft]
+                                     :let [[_ cd0 cargs0] ft
+                                           ;; queue n-rust-dyn: a trait method's call (its arguments concrete at the instance) by
+                                           ;; the impl's method it resolves to, as the collector reaches it
+                                           [cd cargs] (or (when (and *resolve-call* (string? cd0) (not (get nc cd0))) (*resolve-call* cd0 cargs0))
+                                                          [cd0 cargs0])]
                                      ;; an intrinsic is codegen's; a function core's export has is built; one that is MIR-available
                                      ;; without a native body stops the root; any other is an external symbol (core's own object)
                                      :when (and (string? cd) (not (mono/intrinsic? cd))
@@ -1339,7 +1378,9 @@
                                                (count (distinct (map #(take 2 %) rec-targets))) " calls' constants")))
                     ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
-                               (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))]
+                               (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))
+                                         *normalize-ty* (fn [t] (mono/normalize-ty n t))
+                                         *resolve-call* (fn [d args] (mono/resolve-call n d args))]
                                 ;; queue 448, 433-1 (a): the collector's items, then the instances mono collected through the record's
                                 ;; library bodies (:rec-items), each record body a root once
                                 (native-core-plan (let [rec-by-sym (into {} (for [r rec-bodies] [(:symbol r) r])) seen (java.util.HashSet.)]
