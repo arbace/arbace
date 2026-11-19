@@ -940,6 +940,15 @@
     (tc/with-solver (solver-def)
       (fn [] (layout-form (layout-of (or (:tc (meta tyf)) (form->ty tyf))))))))
 
+(defn normalize-ty
+  "queue n-rust-dyn (448-4 (a) 4): within build-program's bindings, the type T with its projections normalized (the
+  solver's deep-normalize: each <SELF as Trait>::Name through the impl selection finds, as instantiate_mir_and_normalize_
+  erasing_regions normalizes an instance's types), its regions erased; T unchanged where the solver leaves it"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (erase-regions (try (tc/normalize-deep (erase-regions t)) (catch Throwable _ t)))))))
+
 (defn- scalar-form [s]
   (let [[k bits signed] (:prim s) r (when-not (:union s) (vec (:range s)))]
     (case k :int (list 'int bits signed r) :float (list 'float bits r) :ptr (list 'ptr r))))
@@ -1755,8 +1764,11 @@
       ;; RF15: a record's trait object (`(dyn)`: its text alone) whose principal is a local trait without parameters and no
       ;; auto trait (`dyn Animal`), as a std call's argument
       dyn (let [[_ p] (re-matches #"dyn ([A-Za-z_][A-Za-z0-9_:]*)" (str (second f)))
-                tr (when p (local-trait-by-path p))]
-            (cond (and tr (empty? (filter #(not= :lifetime (:kind %)) (rest (c/all-params (c/generics-of tr))))))
+                tr (when p (local-trait-by-path p))
+                ;; queue n-rust-dyn: a native body's trait object (build/ty-form's `(dyn)`) carries its type
+                tc (let [t (:tc (meta f))] (when (and (vector? t) (= :dyn (first t))) t))]
+            (cond tc tc
+                  (and tr (empty? (filter #(not= :lifetime (:kind %)) (rest (c/all-params (c/generics-of tr))))))
                   [:dyn {:principal [tr []] :projections [] :autos []} [:re-erased]]
                   ;; RF18: std's Fn traits' sugar
                   :else (or (try (dyn-fn-sugar (str (second f))) (catch Throwable _ nil))
@@ -2291,6 +2303,18 @@
         (tc/with-solver (solver-def)
          (fn [] (when (trait-method? d)
                   (let [[d' a' shim] (resolve-instance d args)] (when (and (not shim) (not= d' d)) [d' a']))))))
+       (catch Throwable _ nil)))
+
+(defn resolve-call
+  "queue n-rust-dyn: a native library body's call of a trait method D at ARGS (`<[T] as SliceIndex<..>>::get_unchecked`,
+  concrete once the instance's arguments are known) resolved as the collector resolves it (Instance::try_resolve: the impl's
+  method at the impl's arguments): [DEF ARGS], else nil (not a trait method, a shim, a builtin candidate, or what the resolution
+  leaves)"
+  [n d args]
+  (try (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+        (tc/with-solver (solver-def)
+         (fn [] (when (trait-method? d)
+                  (let [[d' a' shim] (resolve-instance d (erase-regions args))] (when (and (not shim) (not= d' d)) [d' (vec a')]))))))
        (catch Throwable _ nil)))
 
 (defn ctor-shim-body

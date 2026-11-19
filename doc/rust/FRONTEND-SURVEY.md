@@ -4919,3 +4919,54 @@ The six named natives:
 - **fmt::Arguments::new**: built, but differs from the record at its aggregate's text, `fmt::Arguments::<'_>` against
   `std::fmt::Arguments::<'_>` (the export prints core's paths relative to core).
 - **Iterator::collect**: refused at the export (a closure type).
+
+## As built: S4's trait objects and projections at the instance (2026-11-19, branch `n-rust-dyn`)
+
+448-4 (a)'s items 2 and 4, on 448's tip (ce1b754ed), split from the Mac VM's items 1 and (b): the instance's forms write a trait
+object, a library projection is normalized at the instance, and a trait method's call in a native body is followed to the impl's
+method.
+
+- **Trait objects** (`build/ty-form`): `[:dyn ...]` is written `(ty "dyn std::fmt::Debug" (dyn))`, the helper's form (its
+  principal, projections and auto traits in the text alone), no longer `(other ":dyn")`, which native-core-plan refused. mono's
+  `form->ty` reads a native `(dyn)` by its `:tc`. An unsizing cast in a native body that mono's vtable facts do not name takes
+  the record's cast of the same target type in the record's body of its symbol, with its vtable's allocations
+  (`runtime-body`'s `fix-cast`; never from a trait object: a coercion between trait objects keeps its metadata, codegen's).
+  pack-compare does not compare a cast's `:vtable` (`rec-extras`).
+- **Projections** (`reprint`'s `instance-normalize`): after the builtin ones (`Pointee::Metadata`), a projection left in an
+  instance's type is normalized by the run's solver (`mono/normalize-ty`: typeck's deep-normalize over std's interface, as
+  `instantiate_mir_and_normalize_erasing_regions` normalizes), bound in the run as `*normalize-ty*`; one it leaves stays
+  `(other ":proj")` and is refused.
+- **Trait-method callees** (native-core-plan's closure): a native body's call of a trait method, concrete at the instance
+  (`<[T] as SliceIndex<..>>::get_unchecked`), is followed to the impl's method (`mono/resolve-call`, the collector's
+  `resolve-instance`; `*resolve-call*`), so the closure reaches its native body; before, "no native body of
+  core::slice::index::SliceIndex::get_unchecked" stopped the root once its projection was normalized.
+- `bin/rust-front pack-compare-test`: 28 cases, 4 new (a cast's record `:vtable` not compared; a library projection normalized by
+  the run's solver; negatives: a cast to another trait object, the projection left without the solver).
+
+### Results (run)
+
+Both runs on the main host, the same exports (core's `native-core-rsi.edn` of 433's run, `--rsi-outside` over 448's 42 files: 231
+bodies, `lib-export --rsi alloc`: 290, `std`: 53) and the same core-attrs file: before at ce1b754ed (448's numbers reproduced
+exactly), after at this branch. `RF11_BATCH=1 RF11_KEEP=1 bin/rust-front rsi-build --native-core intrinsics panics std unwind
+vectors`: 5 of 5 own in both, 0 stub calls, every `control` and `control-instance` differing.
+
+| sample | library bodies built natively, before | after | codegen's fallbacks, before / after | `native` lines, before / after |
+|---|---|---|---|---|
+| intrinsics | 303 | 314 | 9 / 12 | 607 / 626 |
+| panics | 175 | 202 | 0 / 4 | 347 / 398 |
+| std | 976 | 1,113 | 22 / 23 | 1,960 / 2,227 |
+| unwind | 154 | 179 | 0 / 1 | 303 / 349 |
+| vectors | 639 | 698 | 22 / 22 | 1,283 / 1,395 |
+| **total** | **2,247** | **2,506** | 53 / 62 | |
+
+core's core-check-equal roots by pack-compare kind, before -> after (equal-o0; equal; equal-but-storage): intrinsics 156 -> 156,
+13, 10; panics 78 -> 83, 8, 8; std 430 -> 468, 48 -> 49, 34 -> 38; unwind 68 -> 74, 7, 5; vectors 286 -> 288, 38, 20. The roots
+that differ grow too (std 320 -> 377): bodies that stopped at the type before now reach the compare.
+
+Refusals left (`a type its forms do not write`, lines of the build-run logs, before -> after): `(other ":dyn")` 0/38/74/26/3 ->
+0 in every sample; `(other ":proj")` 12/2/73/2/53 -> 0/0/1/0/0, the one `<&mut F as FnOnce<A>>::call_once` in std.rs (a
+closure's FnOnce::Output: item 7's closure types). Now in view: `(other ":closure")` (panics 51, unwind 41, std 18, vectors 6),
+whose bodies stopped at the trait object before. codegen's new fallbacks: three unsizing casts with no vtable (a core-check-equal
+root taken while its instance differs from the record, so the record's body has no cast of that target: Option::fmt, Result::
+unwrap at Box<dyn Any + Send>) and `<dyn Any as Any>::type_id`'s call of `TypeId::of::<dyn Any>`, which no body defines; each
+falls back to the record's body.
