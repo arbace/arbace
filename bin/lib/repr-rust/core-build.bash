@@ -361,3 +361,46 @@ std_iface() {
         grep --line-buffered -v -E "$filt" ;;
   esac
 }
+
+# queue 443 (RUST-90 S4, C2, doc/rust/FRONTEND-SURVEY.md, "As built: S4's alloc and std bodies"): bin/rust-front lib-export --rsi
+# CRATE [NAME...]: the bodies of CRATE (alloc or std) that rsi's programs NAME... (default the eval cell's five samples) instantiate
+# (each record's Item instance of the crate, its def's key `boxed-{impl#0}-new`), built by the front end on the crate's native
+# interface (arbace.rust.front.alloc-check --export: the interface pass over every module file first, cached in
+# .tmp/rust-front/CRATE/native-iface.edn) and written as core-export's entries (:judge :instance) into
+# .tmp/rust-front/CRATE/native-CRATE-rsi.edn (and .tsv: a line a key, built or refused and why; the sample std.rs's own items,
+# crate 0 named std, are not the library's), which `rsi-build --native-core`
+# takes beside core's; no built-MIR oracle of alloc or std: each instance is judged against the record's body at the run
+lib_rsi_keys() {
+  local c=$1 rs n names
+  shift; names=("$@")
+  [ ${#names[@]} -gt 0 ] || names=(intrinsics panics std unwind vectors)
+  rs=$(rfr_stage rsi) || return 1
+  for n in "${names[@]}"; do
+    [ -f "$rs/$n/$n.record.edn" ] || { echo "lib-export --rsi: no record of $n in the pack rust-front-rsi" >&2; return 1; }
+    grep '^(mir/body' "$rs/$n/$n.record.edn" | grep -o ":def-id \"DefId([1-9][0-9]*:[0-9]* ~ $c\[[0-9a-f]*\]::[^)]*)\" :phase \"[a-z]*\" :instance \"Item(" |
+      sed -E "s/^:def-id \"DefId\([0-9]+:[0-9]+ ~ $c\[[0-9a-f]+\]::([^)]*)\)\".*/\1/"
+  done | sed 's/::/-/g' | LC_ALL=C sort -u
+}
+
+lib_export() {
+  local c m fd keys out filt='^Reflection warning|recur arg|^Auto-boxing'
+  [ "${1:-}" = --rsi ] || { echo "usage: bin/rust-front lib-export --rsi alloc|std [NAME...]" >&2; return 2; }
+  c=${2:-}; shift 2 || true
+  case $c in
+    alloc) m=$(alloc_modules) || return 1 ;;
+    std) m=$(std_modules) || return 1 ;;
+    *) echo "lib-export: alloc or std, not '$c'" >&2; return 2 ;;
+  esac
+  fd=$(records_front) || return 1
+  keys=$work/$c/rsi-keys.txt out=$work/$c/native-$c-rsi.edn
+  lib_rsi_keys "$c" "$@" > "$keys.tmp" || { rm -f "$keys.tmp"; return 1; }
+  mv "$keys.tmp" "$keys"
+  rm -f "$out"
+  # queue 443: core's traits' associated constants the bodies name, from core's own sources (std's interface writes none)
+  LIB_CORE_DIR=$(core_lib) || return 1; core_modules > /dev/null || return 1
+  [ -f "$work/core/index.edn" ] || { echo "lib-export: no core index ($work/core/index.edn: bin/rust-front core-attrs or core-check makes it)" >&2; return 1; }
+  export LIB_CORE_DIR LIB_CORE_CACHE=$work/core LIB_CORE_CONSTS=${LIB_CORE_CONSTS:-mem/mod.rs}
+  cd "$root" && ALLOC_IFACE_ROUNDS=${LIB_IFACE_ROUNDS:-2} GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} arbace_tool -m arbace.rust.front.alloc-check --crate "$c" --export "$libsrc" "$fd" "$work/$c" "$m" "$out" "$keys" 2>&1 |
+    grep --line-buffered -v -E "$filt"
+  [ -s "$out" ] && echo "lib-export: $(grep -c '^(core/body' "$out") bodies of $c in $out"
+}
