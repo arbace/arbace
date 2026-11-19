@@ -263,3 +263,28 @@ At the merges, in order:
 4. R1 written: `bin/repr-python roundtrip --record`, `--text --record`, `lex-check --record`, `parse-check --full --record` on
    amd64; the read and print cells then count their passes (the "+" goes).
 5. GT9's planner changes, then the block of §2; `bin/gate --plan` and `bin/gate --audit pyi-aot-essential python-read-essential`.
+
+### The records night, step by step (queue 410; queue 347's DECISION 1 (a): both records together)
+
+On amd64, in a clean checkout at the merged head (a modified tracked file makes the gate's build `:dirty` and `bin/pyi records`
+refuses, 347's finding 5):
+1. The gate's build at the checkout's key: the nightly gate's `go-build`, or `bin/heavy-lock bin/arbace-go --gate-build`.
+2. `bin/heavy-lock env GOGC=50 PYI_LIB_TEST_JOBS=4 bin/pyi records` (the first line names `.../amd64/arbace (compiled ...)`).
+   Expected: AOT `151 programs: 150 pass, 1 classed, 0 failing` (del.py: `:as-pyi`, divergences-synth.edn's `:finalization`,
+   now that pyi on goi runs the compiled runtime; else `:finalization-goi`); Lib/test: 529 modules, the judge's exit 0 or 3.
+   Do not commit yet.
+3. The rows in no class, with no run:
+   `bin/pyi divergences --results .tmp/repr-python/pyi/check/run/results.tsv | grep -E 'in no class|takes it first|stale'`.
+   Queue 410's write-ahead classes (`:spawn-children-timing`, `:finalization-collect-spawn`, `:host-signal-kill`, before
+   `:skipped-by-test`) take what queue 321's slice saw and their siblings; their names the run passes show in the "stale"
+   line: delete those names, move the confirmed ones into their lasting classes (`:finalization-collect` for the second),
+   and drop "(write-ahead)" from what stays. Class every other row in test/python/divergences.edn (the same edit in
+   divergences-315.edn), each before `:skipped-by-test`.
+4. `bin/pyi check --judge .tmp/repr-python/pyi/check/run --record` (exit 0); if the AOT record has a row in no class or a
+   `:failed` row, class it (divergences-synth.edn or divergences-aot.edn) and `bin/pyi check --aot --judge --record`.
+5. `bin/pyi divergences` on the record: no row in no class (it still exits 1 on the two shadowed names queue 321 found,
+   test_capi's test_no_FatalError_infinite_loop and test_pyexpat's test_error_path_no_crash: older, not the night's), then
+   `bin/reap --record && bin/records-check && bin/crops-score --record && bin/crops-score --judge --strict`.
+6. One commit: `test/python/check-aot-linux-amd64.edn`, `test/python/check-lib-test-linux-amd64.edn`,
+   `test/python/divergences*.edn`, `test/reap/cells.edn` (the four `:until` dropped by step 2), `test/reap/matrix.edn`,
+   `test/crops/scores.edn`. Never the AOT record alone.
