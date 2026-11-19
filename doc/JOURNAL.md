@@ -13191,3 +13191,37 @@ its check --aot cases' shards). oi-aot's and oi-suite-aot's 4 GiB kept (four o2j
 programs, 11,413 s of runs, 39 timeouts each rerun alone), the nightly subset plus a seventh about 30-40 min; oi-suite-aot.suite
 whole about 45 min (121 programs, 2,808 s, 10 timeouts); ocaml-judges about 8 min warm. Deeper, not done: the rollup reads the
 oracle path's records while the gate's levels judge the native ones (a program recorded natively only is unclassed again).
+
+## 2026-11-19: n-oc-rollup, the testsuite's rollup reads the records the gate judges
+
+`bin/oi suite rollup` (test/ocaml/testsuite_check.ae) read the oracle path's records alone (check-oi.edn, check-aot.edn,
+check-suite-oi.edn, check-suite-aot.edn), while the gate's levels judge the native path's (bin/oi's default since TY24 (a):
+the BASE-native.edn records, suite.bash's suite_results, bin/oi's cmd_check_aot, typer.bash's cmd_check_native). A program recorded
+natively only was "unclassed" in the rollup: queue 355's link-test/test failed ocaml-judges so, and n-oc-dry worked around it by
+recording it on the oracle path too (that row kept). Now each level's native record, when it exists, is merged over the oracle
+path's, the native row winning for a program in both, and the native path's classes (divergences-native.edn) come first in oi's,
+as cmd_check_native judges; OI_CHECK_DEFAULT=ocdump keeps the oracle path's records alone. Alternatives: the native records alone
+(the same today: each native record holds every oracle row's program, 544 and 132 rows), kept to the merge so a program the oracle
+path alone recorded is not lost; a flag on the rollup, rejected (the gate judges one path, the default's).
+
+The code is neutral: under OI_CHECK_DEFAULT=ocdump the rollup judges the previous testsuite-results.edn equal. On the native
+records 69 rows of test/ocaml/testsuite-results.edn change, re-recorded (`bin/oi suite rollup --record`), each a program whose
+native row differs from its oracle row (checked by script: none without one): 39 programs the oracle path classed by header
+(check-oi.edn's "class" rows: ocamlrunparam b=1, C stubs, the runtime-events and dynlink libraries) that the native path runs,
+their ACTION now run and OI/AOT their native results (pass, or c-runtime-decided, c-runtime-internals, unix-fork, light-speed);
+30 more whose native OI or AOT result differs (statmemprof's and gc's tests mostly pass on oi natively, several AOT rows
+gc-and-memory where the oracle path's passed, asmcomp/optargs pass on oi and backend on AOT, two gc-and-memory now
+light-unfinished, parallel/churn and misc/darkening_work's speed rows). Still 0 files without a result or a class.
+
+The test: test/ocaml/rollup_native_test.bash (synthetic records, no run; in `bin/oi judges-test`'s fixtures): a program recorded only
+natively is classed, a program in both takes the native row, and its negative control, the oracle path alone, fails on the
+native-only program. Run: the rollup (judge, 0 unclassed), bin/records-check (9 pairs, 0 problems), gate.crops check (no problem),
+bin/reap and bin/crops-score --judge --strict (the matrix and scores unchanged). Keys: no core key moves (bin/oi and test/ocaml/
+are in arbace_crop_paths); the steps whose inputs hold bin/oi, test/ocaml/ or test/ocaml/*.edn rekey (OCaml's oi-check,
+ocaml-judges and the rest of its chain, oi-essential, and the essential reap and crops-score, which pass on it unchanged).
+
+## 2026-11-19: n-oc-rollup, a correction
+
+The entry above says bin/oi and test/ocaml/ are in arbace_crop_paths: they are not (its OCaml entries are bin/lib/oi/ and the Go
+forms). No core key moves because gate_key, gate_rest_key and arbace_runtime_key cover neither bin/oi nor test/ocaml/; the step
+keys that move are as listed there.
