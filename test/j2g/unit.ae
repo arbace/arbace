@@ -84,6 +84,50 @@
            (not-any? (fn [[_ msg]] (re-find #"Cannot convert .* to\s*$" (str msg))) failed)
            (pr-str failed))))
 
+(defn test-unresolved-related
+  "queue 447: a class built on an unresolved one (extending it, or a member class of it) that fails at
+  what it inherits or reads from it names that class's cause, though its message names no class."
+  []
+  (let [decls {"p/Sub" {:super "p/Base" :interfaces ["p/I"]} "p/Base" {:super "java/lang/Object"}
+               "p/I" {:interfaces ["p/J"]} "p/J" {} "p/Base$Counter" {:super "java/lang/Object" :outer "p/Base"}
+               "p/A$B$C" {:outer "p/A$B"} "p/A$B" {:outer "p/A"} "p/A" {}}
+        causes {"p/Base" "members: Unknown type: Gadget (the import javax.nonesuch.Gadget)"}]
+    (check "related: supertypes breadth first, superclass first, then outside the compilation kept"
+           (= (w/related-classes decls "p/Sub") ["p/Base" "p/I" "java/lang/Object" "p/J"])
+           (pr-str (w/related-classes decls "p/Sub")))
+    (check "related: enclosing classes, innermost first"
+           (= (w/related-classes decls "p/A$B$C") ["p/A$B" "p/A"]) (pr-str (w/related-classes decls "p/A$B$C")))
+    (check "related: a member class's superclass, then its holder"
+           (= (w/related-classes decls "p/Base$Counter") ["java/lang/Object" "p/Base"])
+           (pr-str (w/related-classes decls "p/Base$Counter")))
+    (check "related-cause: a message naming no class takes the related one's cause"
+           (= (w/unresolved-cause causes "analysis: No static field isWindows in p/Sub (line 3)" ["p/Base" "p/I"])
+              "analysis: No static field isWindows in p/Sub (line 3) (because p/Base: members: Unknown type: Gadget (the import javax.nonesuch.Gadget))"))
+    (check "related-cause: a class the message names wins over the related ones"
+           (= (w/unresolved-cause (assoc causes "p/X" "members: Unknown type: Y") "analysis: No accessible constructor of p.X" ["p/Base"])
+              "analysis: No accessible constructor of p.X (because p/X: members: Unknown type: Y)"))
+    (check "related-cause: no related class with a cause, the message as it is"
+           (= (w/unresolved-cause causes "analysis: Bad set! target: n" ["p/I" "java/lang/Object"]) "analysis: Bad set! target: n"))
+    (check "related-cause: not an analysis failure"
+           (= (w/unresolved-cause causes "bridges: x" ["p/Base"]) "bridges: x")))
+  (let [e (edge/read-edge "jdk/edge.edn")
+        ;; load-fixture's binding without its advance-ids! (as test-throws)
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/unresolved2" :tree true}] :variant-files []))
+        of (fn [n] (vec (for [[c msg] (:failed world) :when (= c n)] msg)))
+        because " (because p/Base: members: Unknown type: Gadget (the import javax.nonesuch.Gadget))"]
+    (check "unresolved2: Base's failure is its members'"
+           (= (of "p/Base") ["members: Unknown type: Gadget (the import javax.nonesuch.Gadget)"]) (pr-str (of "p/Base")))
+    (check "unresolved2: Sub, reading the static field it inherits, names Base's cause"
+           (let [[m & more] (of "p/Sub")] (and (nil? more) (str/starts-with? (str m) "analysis: ") (str/ends-with? (str m) because)))
+           (pr-str (of "p/Sub")))
+    (check "unresolved2: Base$Counter, setting its holder's static field, names Base's cause"
+           (let [[m & more] (of "p/Base$Counter")] (and (nil? more) (str/starts-with? (str m) "analysis: ") (str/ends-with? (str m) because)))
+           (pr-str (of "p/Base$Counter")))
+    (check "unresolved2: Other, built on none of them, fails without a cause (the control)"
+           (let [[m & more] (of "p/Other")] (and (nil? more) (str/starts-with? (str m) "analysis: ") (not (str/includes? (str m) "(because "))))
+           (pr-str (of "p/Other")))))
+
 (defn test-analyze-only
   "JCS265 (b): bin/j2g --analyze-only over the fixture, its report.edn the load's failures alone."
   []
@@ -1242,6 +1286,7 @@
   (test-support-tables)
   (test-unresolved-cause)
   (test-unresolved-world)
+  (test-unresolved-related)
   (test-analyze-only)
   (test-throws)
   (test-mxbean-signatures)
