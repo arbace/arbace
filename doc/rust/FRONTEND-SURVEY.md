@@ -4919,3 +4919,45 @@ The six named natives:
 - **fmt::Arguments::new**: built, but differs from the record at its aggregate's text, `fmt::Arguments::<'_>` against
   `std::fmt::Arguments::<'_>` (the export prints core's paths relative to core).
 - **Iterator::collect**: refused at the export (a closure type).
+
+## As built: aggregates' paths at the instance, drop glue no root, num and core_simd exported (2026-11-19, queue 448b, branch `448b-rust-fmt`)
+
+448-4 (b), then 448-4's item 1, on 448's tip (ce1b754ed).
+
+- **An aggregate's ADT text and path at the instance** (build-run's `reprint-agg-adt`). The export prints an aggregate's
+  `(adt TEXT KIND FIELDS PATH VARIANT ARGS)` in its own crate: core's own ADTs relative to core (`fmt::Arguments::<'_>`,
+  `option::Option::<usize>::Some`), another crate's by its visible path there (alloc's `core::option::Option`). The record
+  prints them in the program's crate (`std::fmt::Arguments::<'_>`, `core::fmt::rt::Argument::<'_>`). At the instance the path is
+  resolved to its def (the export crate's own first, then as written, by std's names or the interface's ADTs, then through std's
+  modules; `*export-crate*` from the entry's def), and TEXT is printed again as the variant's value path at the instance's
+  arguments (regions erased) and PATH as the ADT's. A path the interface does not know is left as written.
+- **Drop glue is no native-core-plan root.** The collector's drop glue shims and those mono collects through the record's bodies
+  (448's `:rec-items` whose def is drop_glue) were roots with no native body (33 in std.rs). They go to `glue-shims` instead (the
+  record's shim by its symbol), built natively when the glue is the type's Drop::drop alone; a shim that fails at run time keeps
+  the record's.
+- **`core-export --rsi-outside` takes a vendored module's file** (portable-simd's core_simd, outside core/src) at its absolute
+  path. num/mod.rs: 99 keys, 97 exported (about 6 minutes). core_simd: 43 keys, 40 exported. core_arch (sse2) stops at expansion
+  ("no macro static_assert_uimm_bits"). The three exports (448's 42 files, num/mod.rs, core_simd and core_arch) were put in one
+  `native-core-rsi-outside.edn`, 368 bodies.
+
+### Results (run)
+
+`RF11_BATCH=1 bin/rust-front rsi-build --native-core intrinsics panics std unwind vectors` (one run at e6f717317, 0 stub calls):
+5 of 5 own. Before is 448's run (603b387b6).
+
+| sample | library bodies built natively | core roots native / from the pack | roots with no native body | core judged at the instance: equal-o0 / differs |
+|---|---|---|---|---|
+| intrinsics | 303 → 359 | 287 / 516 → 342 / 403 | 105 → 44 | 14 / 35 → 69 / 37 |
+| panics | 175 → 194 | 158 / 399 → 172 / 353 | 49 → 23 | 8 / 16 → 22 / 14 |
+| std | 976 → 1,046 | 914 / 2,187 → 975 / 2,026 | 332 → 242 | 57 / 71 → 114 / 66 |
+| unwind | 154 → 175 | 134 / 357 → 152 / 308 | 47 → 23 | 7 / 21 → 25 / 16 |
+| vectors | 639 → 724 | 603 / 1,511 → 684 / 1,336 | 282 → 162 | 42 / 38 → 113 / 48 |
+
+- fmt::Arguments::new: its 38 roots in the five programs differed at the aggregate's text; all 38 are now equal-o0 and native.
+- core::num's methods built natively: 47, 9, 39, 9 and 27. core_simd's: 128 in vectors (11 roots still lack a body:
+  SimdPartialEq::simd_eq, Mask::resize).
+- Drop glue: no root lacks a body any more. Only unwind's shim is simple enough to build natively; the rest stay the record's
+  shims.
+- Every `control` and `control-instance` differs, in all five programs. A scratch probe of `reprint` in swizzle1's interface
+  printed core's, alloc's and the hidden `fmt::rt` paths as the record does, and its negative control (an unknown path) was left
+  as written.
