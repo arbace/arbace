@@ -24,7 +24,7 @@
 #                                  TY14's Tpoly) and the Lambda that differs (TY17's partiality among them)
 #   bin/oi run-native FILE.ml [ARG...]       FILE typed and translated by Arbace (no ocamlc, no ocdump) and run on oi with the native library
 #   bin/oi objinfo-check                     T12's compiler output (queue 434, doc/ocaml/TYPER.md section 30): the programs of
-#                                  test/ocaml/divergences.edn's :compiler-output, each whose ocamlobjinfo sections the native front end
+#                                  test/ocaml/divergences.edn's :compiler-output, :compiler-output-index and :compiler-output-cmo (D434-2 (a)), each whose ocamlobjinfo sections the native front end
 #                                  prints (-decls: arbace.repr.ocaml.typer.objinfo) typed by the native typer and judged by its own
 #                                  .reference, the others named by the section they need (the printed sections still compared:
 #                                  "decls equal"); each equal output judged against another test's reference, which must fail
