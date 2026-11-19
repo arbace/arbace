@@ -1226,7 +1226,7 @@
     (store! t nv a)
     (if (:post e) old a)))
 
-(declare emit-rv)
+(declare emit-rv linkage-of)
 
 (defn- place-values
   "The placement arguments' operands for the parameters `ps` (scalars, pointers and references: an allocation
@@ -2025,14 +2025,19 @@
                            (empty? leaves) [nil 'zeroinitializer]
                            :else (leaves-constant leaves s))
         cexpr (or cexpr lval)
-        ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))]
+        ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))
+        ;; queue 392: a static local of an inline function (or a template's specialization) with external linkage is one
+        ;; object for the program, linkonce_odr with its guard (clang's GetGVALinkageForVariable: the enclosing function's
+        ;; linkage, GVA_StrongODR downgraded to GVA_DiscardableODR); of any other function, internal: <ext/bitmap_allocator.h>'s
+        ;; free_list::_M_get_mutex()'s _S_mutex, bitmap_allocator.cc's _ZZN9__gnu_cxx9free_list12_M_get_mutexEvE8_S_mutex
+        lk (if (#{[:linkage :linkonce_odr] [:linkage :weak_odr]} (linkage-of f)) :linkonce_odr :internal)]
     (when (and (:tls v) (not (or cinit cexpr))) (fail :tls "a thread-local static with dynamic initialization (" (:name v) ")"))
-    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage :internal :align a))
+    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage lk :align a))
     (when-not (or cinit cexpr)
       ;; the guard ([stmt.dcl]/3, Itanium §3.3.2)
       (let [g (str "_ZGV" (subs nm 2))
             l1 (new-label "init.check") l2 (new-label "init") l3 (new-label "init.end")]
-        (add-top! (list 'llvm/global (gsym g) 'i64 0 :linkage :internal :align 8))
+        (add-top! (list 'llvm/global (gsym g) 'i64 0 :linkage lk :align 8))
         (declare! "__cxa_guard_acquire" 'i32 '[ptr])
         (declare! "__cxa_guard_release" 'void '[ptr])
         (let [gv (val! (list 'load 'i8 ['ptr (gsym g)] :align 8 :atomic :acquire))
