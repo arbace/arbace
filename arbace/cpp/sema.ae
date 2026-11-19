@@ -636,6 +636,44 @@
             (if k (recur (str (subs s 0 i) (subs s k))) (str/trim s))))))
     s))
 
+(defn- vector-bytes
+  "vector_size's BYTES, the spelling `b` (queue 439): an integer literal, or an integer constant expression of literals,
+  `sizeof ( TYPE )` (TYPE resolved in `scope`), + - * / and parentheses, its value; nil for anything else."
+  [scope ^String b]
+  (if (re-matches #"\s*\d+\s*" b)
+    (Long/parseLong (str/trim b))
+    (let [toks (re-seq #"sizeof\s*\(\s*[^()]+?\s*\)|\d+[uUlL]*|[-+*/()]|\S" b)
+          toks (mapv (fn [^String t]
+                       (cond (str/starts-with? t "sizeof")
+                             (let [[_ ty] (re-matches #"sizeof\s*\(\s*([^()]+?)\s*\)" t)
+                                   sz (try (abi/size-of (abi/unq (resolve-type scope ty))) (catch Exception _ nil))]
+                               (if sz (long sz) :bad))
+                             (re-matches #"\d+[uUlL]*" t) (Long/parseLong (str/replace t #"[uUlL]" ""))
+                             (#{"+" "-" "*" "/" "(" ")"} t) t
+                             :else :bad))
+                     toks)]
+      (when-not (some #{:bad} toks)
+        ;; recursive descent over toks: expr := term (+|- term)*, term := factor (*|/ factor)*, factor := N | ( expr ) | - factor
+        (let [pos (volatile! 0)
+              peek (fn [] (get toks @pos))
+              next! (fn [] (let [t (peek)] (vswap! pos inc) t))]
+          (letfn [(factor [] (let [t (next!)]
+                               (cond (number? t) t
+                                     (= "-" t) (when-let [v (factor)] (- (long v)))
+                                     (= "(" t) (let [v (expr)] (when (= ")" (next!)) v))
+                                     :else nil)))
+                  (term [] (loop [v (factor)]
+                             (if (and v (#{"*" "/"} (peek)))
+                               (let [op (next!) w (factor)]
+                                 (when w (recur (if (= op "*") (* (long v) (long w)) (when-not (zero? (long w)) (quot (long v) (long w)))))))
+                               v)))
+                  (expr [] (loop [v (term)]
+                             (if (and v (#{"+" "-"} (peek)))
+                               (let [op (next!) w (term)]
+                                 (when w (recur (if (= op "+") (+ (long v) (long w)) (- (long v) (long w))))))
+                               v)))]
+            (let [v (expr)] (when (= @pos (count toks)) v))))))))
+
 (defn resolve-type
   "The semantic type of clang's spelling `s` in `scope`."
   [scope ^String s0]
@@ -644,13 +682,15 @@
   ;; `__attribute__((__vector_size__(BYTES))) T`, BYTES a literal, is {:k :vec :n LANES :of T}: held, copied, initialized from a
   ;; list and given its size and alignment; its lanes' operators are refused where they are met. The checker still refuses the
   ;; type (its traits and conversions are not modelled)
+  ;; (queue 439: BYTES an integer constant expression of literals, sizeof (TYPE), + - * / and parentheses, g++.dg's
+  ;; ext/is_aggregate.C's `vector_size (4 * sizeof (int))`, evaluated by vector-bytes)
   (when (re-find #"vector_size__\s*\(" s0)
-    (let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((\d+)\)\)\)\s+(.*)$" s0)]
-      (when (or (checking?) (nil? b)) (fail :type "a GNU vector type (" s0 ")"))))
-  (if-let [[_ b et] (when-not (checking?) (re-find #"^\s*__attribute__\(\(__vector_size__\((\d+)\)\)\)\s+(.*)$" s0))]
+    (let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0)]
+      (when (or (checking?) (nil? b) (nil? (vector-bytes scope b))) (fail :type "a GNU vector type (" s0 ")"))))
+  (if-let [[_ b et] (when-not (checking?) (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0))]
     (let [e (abi/unq (resolve-type scope et))
           es (when (or (abi/integral? e) (abi/floating? e)) (abi/size-of e))
-          n (Long/parseLong b)]
+          n (long (vector-bytes scope b))]
       (when (or (nil? es) (not (pos? n)) (pos? (rem n (long es))) (not= 1 (Long/bitCount (quot n (long es)))))
         (fail :type "a GNU vector type (" s0 ")"))
       {:k :vec :n (quot n (long es)) :of e})
