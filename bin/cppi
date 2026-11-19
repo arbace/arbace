@@ -94,8 +94,9 @@
 #   bin/cppi runtime-ci [OUT]   the lowered runtime's units read by repr/c as ci's library, OUT/ci (CX8; keyed)
 #   bin/cppi runtime-inputs [OUT] [--record]
 #                               each runtime unit's IR source (queue 324, CP356 (a)): OUT/inputs.edn (runtime-judge's, OUT at the checkout's
-#                               key; default .tmp/cppi/runtime), or while the route is clang (cppi_runtime_route_default) every unit the pack
-#                               cpp-runtime-ir's by construction; printed, --record: test/cpp/runtime/inputs-linux-amd64.edn
+#                               key, its ci library at runtime-ci's key for the C target; default .tmp/cppi/runtime), or with
+#                               CPPI_RUNTIME_ROUTE=clang (auto the default since CP403 (a)) every unit the pack cpp-runtime-ir's by
+#                               construction; printed, --record: test/cpp/runtime/inputs-linux-amd64.edn
 #   bin/cppi record-ref [--corpus C,...] [--only] [--sample N] [--ids LIST]
 #                               g++ 15.2's -O0 runs of the run corpora recorded, test/cpp/ref-gxx15.edn (bin/lib/cppi/record-ref)
 #   bin/cppi check [--corpus C,...] [--only LIST] [--sample N] [--record] [--judge] [--resume]
@@ -527,6 +528,15 @@ disk_ok() { # the light tier's disk rule: stop past 90% (CPPI_DISK_MAX; 80 befor
   "$root/bin/gate-policy" disk-ok "${CPPI_DISK_MAX:-90}" 2>&1 | sed "s/^/lower-check: /" >&2; [ "${PIPESTATUS[0]}" = 0 ] || exit 3
 }
 
+runtime_ci_reader() { # what ci's library is read by (c_sysroot first): run.ae's key block, the sysroot's name, repr/c, musl's forms, the
+  # C target (chost) and ci's overrides
+  (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum; echo "sysroot ${ARBACE_C_SYSROOT##*/}"
+   find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae "$chost" test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum)
+}
+runtime_ci_key() { # runtime_ci_key OUT: OUT/ci/key's value at the checkout (c_sysroot first): OUT's records key and the reader's
+  { cat "$1/key.records"; runtime_ci_reader; } | sha256sum | cut -d' ' -f1
+}
+
 runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by repr/c as ci's library (CX8; arbace.cpp.run's
   # read-lib), made again when its key (OUT's key, the reader's sources and opts: arbace/cpp/run.ae, repr/c, the C target ARBACE_C_HOST (c/target, CP400 (a)))
   # changed; runtime-build first when OUT is not at the checkout's key. Prints OUT/ci.
@@ -541,13 +551,10 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by r
   # (c/include and musl's tarball, .tmp/c-target/KEY) under c/target, gcc's pack under ARBACE_C_TARGET=gcc, never the host's
   # /usr/include; the sysroot's name (its content's digest) in the keys
   c_sysroot >&2 || exit 1
-  local sk=${ARBACE_C_SYSROOT##*/}
   # the reader's key (its sources and options) apart from the runtime's: a unit read by the same reader from the same lowered C is
   # read again to the same forms (cppi-deferred)
-  rk=$( (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum; echo "sysroot $sk"
-         find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae "$chost" test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -d' ' -f1)
-  k=$( { cat "$out/key.records"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/cpp/run.ae | sha256sum; echo "sysroot $sk"
-                                 find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae "$chost" test/cpp/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
+  rk=$(runtime_ci_reader | sha256sum | cut -d' ' -f1)
+  k=$(runtime_ci_key "$out")
   if [ "$(cat "$out/ci/key" 2>"$TMPDIR/cppi-cikey.err")" != "$k" ]; then
     { cut -f1 "$out/units.tsv" | while read -r u; do printf '%s\t%s\n' "$u" "$out/units/$u/lowered.c"; done; printf 'cx-rt\t%s\n' "$out/rt.c"; } > "$TMPDIR/cppi-ci-list.$$"
     cut -f2 "$TMPDIR/cppi-ci-list.$$" | xargs sha256sum | awk '{ print $1 }' | paste "$TMPDIR/cppi-ci-list.$$" - | cut -f1,3 > "$TMPDIR/cppi-ci-sums.$$"
@@ -952,11 +959,23 @@ case ${1:-} in
   lower-check) shift; lower_check "$@" ;;
   runtime-ci) shift; runtime_ci "$@" ;;
   runtime-inputs) shift
-    # queue 324 (CP356 (a)): each unit's IR source; OUT a runtime-build's (its key checked), or none while the route is clang (by construction)
+    # queue 324 (CP356 (a)): each unit's IR source; OUT a runtime-build's (its key checked), or none while the route is clang (by construction;
+    # CPPI_RUNTIME_ROUTE=clang since CP403 (a))
     ri_out=- ri_rec=
     for a in "$@"; do case $a in --record) ri_rec=--record ;; -*) echo "runtime-inputs: unknown option $a" >&2; exit 2 ;; *) ri_out=$a ;; esac; done
     if [ "$ri_out" = - ] && [ "$(rt_route)" != clang ]; then ri_out=$root/.tmp/cppi/runtime; fi
-    if [ "$ri_out" != - ]; then runtime_key_check "$ri_out" || { echo "runtime-inputs: $ri_out is not at the checkout's key (runtime-build first)" >&2; exit 1; }; fi
+    if [ "$ri_out" != - ]; then runtime_key_check "$ri_out" || { echo "runtime-inputs: $ri_out is not at the checkout's key (runtime-build first)" >&2; exit 1; }
+      # queue 406 (queue 345's low finding): :ci-target names the C target ci's library was read on: the library at its key for this
+      # command's C target (chost), else refused
+      c_sysroot >&2 || exit 1
+      [ "$(cat "$ri_out/ci/key" 2>"$TMPDIR/cppi-ri.err")" = "$(runtime_ci_key "$ri_out")" ] \
+        || { echo "runtime-inputs: $ri_out/ci is not at the checkout's key for the C target $chost (runtime-ci first)" >&2; exit 1; }
+      # and every row of runtime-judge's OUT/inputs.edn written for that C target (arbace.cpp.check's c-target-input, as runtime-build ran)
+      ri_ct=$(arbace_tool -e "(require 'arbace.cpp.check) (pr (arbace.cpp.check/c-target-input))")
+      if grep '^\["' "$ri_out/inputs.edn" | grep -v -F -q ":ci-target $ri_ct}]"; then
+        echo "runtime-inputs: $ri_out/inputs.edn names another C target than $chost's ($ri_ct): runtime-build and runtime-ci under one ARBACE_C_TARGET" >&2; exit 1
+      fi
+    fi
     arbace_tool -m arbace.cpp.check runtime-inputs "$ri_out" "$(rt_route)" $ri_rec ;;
   record-ref) shift; exec "$root/bin/lib/cppi/record-ref" "$@" ;;
   check) shift
