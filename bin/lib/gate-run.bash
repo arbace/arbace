@@ -856,7 +856,8 @@ gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and exec
 #   [:size GIB :lru]   the files of the directory, the least recently used first (their mtime: Go refreshes an entry it
 #                      uses, hourly), removed until it holds GIB at most
 #   [:age DAYS]        the files not modified for DAYS days removed ([:age DAYS :atime]: not read: relatime's atime), then the
-#                      empty directories
+#                      empty directories not modified for DAYS days either (review 419, I2: every empty directory, a fresh
+#                      one too, lost a running test's scratch/logs under .tmp/tmp, and a prune runs beside the steps)
 #   [:key-gen N]       the directory's children named by a key (:match, an ERE, default 16 to 64 hex digits): the newest N kept
 #                      by mtime, an older one removed when a day old
 #   [:count N]         the newest N children kept, an older one removed when a day old
@@ -877,7 +878,8 @@ gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and exec
 #                 cache under a live build (memory: a 2-hour trim still broke one); the row says it waited, and the next cap
 #                 (before a step, every 5 minutes) or the floor's deferral of the steps takes it up
 # caches_go_busy and gocache_cap_kib: bin/lib/gocache.bash's, the same rule a build's trim by hand follows (n-gocache-trim)
-. "$root/bin/lib/gocache.bash"
+# (beside this file, else the checkout's: a test that sources gate-run.bash with a fabricated $root, or none)
+if [ -f "${BASH_SOURCE[0]%/*}/gocache.bash" ]; then . "${BASH_SOURCE[0]%/*}/gocache.bash"; else . "$root/bin/lib/gocache.bash"; fi
 caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT FREE MIN IDLE, a line each (TSV)
   awk '
     /^[ \t]*;/ { next }
@@ -958,7 +960,7 @@ caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
         freed=$(awk -F'\t' '{s += $1} END {print s + 0}' "$lst"); n=$(wc -l < "$lst")
         tot=$((tot + freed)); rm=$((rm + n))
         echo "gate --prune: ${dry:+would remove }$n entries of $base (its rule $r $a1$( [ "$a2" = - ] || echo " $a2"): $(gib $((freed / 1024))))"
-        [ -n "$dry" ] || { cut -f2- "$lst" | xargs -r -d '\n' rm -rf --; [ "$r" = age ] && find "$base" -mindepth 1 -type d -empty -delete 2>"$lst.err"; }
+        [ -n "$dry" ] || { cut -f2- "$lst" | xargs -r -d '\n' rm -rf --; [ "$r" = age ] && find "$base" -mindepth 1 -type d -empty -mtime +"$a1" -delete 2>"$lst.err"; }
       fi
       if [ "$x" != - ] && [ -d "$base" ]; then
         # GDS17 (a): no directory above :max-entries (night 12: ext4's directory index full at 208,000 entries)

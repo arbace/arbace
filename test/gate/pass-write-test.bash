@@ -26,6 +26,8 @@ if [ -n "${1:-}" ]; then
 else
   cp "$here/bin/lib/gate-run.bash" "$T/src/gate-run.bash"; cp "$here/bin/gate" "$T/src/gate"
 fi
+# gate-run.bash sources gocache.bash (n-gocache-trim) beside itself, else $root's: the checkout's beside the copy
+cp "$here/bin/lib/gocache.bash" "$T/src/gocache.bash"
 sed -n '/^publish_passes() {/,/^}/p' "$T/src/gate" > "$T/src/publish.bash"
 if [ ! -s "$T/src/publish.bash" ]; then
   # before GTS80: clean_launch's publication (a93329c0^'s bin/gate), FROM's store directories into TO by cp -an
