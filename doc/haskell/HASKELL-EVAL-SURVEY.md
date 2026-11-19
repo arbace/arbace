@@ -2628,6 +2628,26 @@ The judge's 153 programs with no expected output GHC's recorded run confirms (0.
   output not derived by hand), IPLocation, T7861 and FMA_ConstantFold (not derived).
 - Eval 756 to 830 of 909 by their own verdict, AOT 132 to 139 of 139; the judge 0.922 to 0.927.
 
+## As built: queue 444: the rest of the golden files
+
+Queue 435's 79 left were reviewed again, one by one.
+- IPLocation by a golden file: GHC 9.14's `prettyCallStackLines` header "(from HasCallStack)" (the shipped file's "(from
+  ImplicitParams)" is an older base's) and the source's present lines, plus f7's empty stack (#14043, absent from the shipped
+  file); GHC's record agrees (608 bytes).
+- 7 testsuite programs GHC did not build at record-ref, by golden files from their source alone: CallConv (its x86_64 assembly),
+  MulMayOflo_full, PopCnt, T5149, cgrun069 and T21305 (their Cmm, all.T's `multi_compile_and_run` companions record-ref does not
+  link), T24809 (`-prof`, no profiled libraries here). Their review says so, `:no-run "why"`, and `bin/hsi golden` requires the
+  mark exactly for a program whose record is `:no-build`; `--oracle` reports them as resting on the review alone; the control
+  still fails each. `bin/hsi own-verdicts` lists a `:no-build` program by its golden file alone. bin/hsi check's own path runs
+  six of them to an `:hsi` stop (the test's own Cmm or assembly, divergences.edn's class), which the reference does not change;
+  T24809 is all.T's skip.
+- Left (71, reasons in `golden/left.tsv`): nofib's 29 programs that import NofibUtils (their output a hash of a whole benchmark's
+  result; HF10-P64 (a) gives them GHC's run, after which their shipped nofib files are their own verdict with no golden file),
+  nofib's 28 others GHC did not build and nothing runs (DECISION D435-3), T7861 (GHC 9.14 raises another deferred error than the
+  shipped one: 1,026 bytes derived against the record's 1,076), FMA_ConstantFold (IEEE fma passes every check; the record's six
+  failures are the host's), and the 13 queue 435 left for timing, host, limits or size.
+- Eval 830 to 838 of 909 by their own verdict; the judge (6,660 + 0.5 x 1,133) / 7,793 = 0.927 (0.9268 to 0.9273).
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
