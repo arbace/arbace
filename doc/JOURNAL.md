@@ -13001,3 +13001,23 @@ stopgaps: ARBACE_NO_AOT for cpp-essential and c-parse's mutants, the Tok split, 
 - Alternatives: the build reading the table's row (an undeclared read of go-build's audit, or a new input for every build step);
   calling `caches_prune` from the build (sources the whole runner); keeping the 90-minute wipe only below the disk floor (two
   rules again).
+
+## 2026-11-19: n-gate-mem, the steps' :mem-gib by their measured peaks; programs-full a part a sample
+
+From the full gate of 2026-11-17/18 (its logs and `.mem` files in the next worktree's `.tmp/gate/`, the store's passes'
+`:maxrss-kib` and `:tree-peak-kib`): steps waited 20 h in all for the memory lanes, programs-full held 51 GiB for 3.6 h.
+Rule: a step whose `:mem-gib` exceeds 1.3 x its largest peak over its last 5 passes is declared at 1.15 x that peak, rounded
+up, when that figure also covers 1.1 x its largest peak of every pass in the store (else kept) and it has 3 passes or more.
+Lowered in `test/gate/steps.edn` (and the crop fragments scheme.edn, ocaml.edn, asm.edn): c-c23 3→2, repr-java-roundtrip 53→34
+(its jdk part, 29.2 GiB), repr-java-attr 55→49 (jdk part, 41.7), java-diagnostics 4→3, java-judge 2→1, java-held 2→1, goi 14→7,
+c-aot 4→3, c-tokens 6→5, scheme-read-essential 2→1, si-corpora 2→1, ocaml-read-essential 2→1, asm-amd64-encode 3→2,
+asm-amd64-decode 3→2. Kept (an older pass reached the old figure): goi-aot-essential (8.8 GiB once), goi-aot (9.0),
+c-parse.benchmarksgame (9.1), repr-go-native.linux-errtest (8.2), cpp-check-essential (4.1), c-check-essential, java-forms-verify;
+kept too for too few passes: a64i-go-compile, wasm-essential, wasm-wast, wai-js; javac-tool's 51 untouched. Raised: programs 34→49
+(mixed and bad-go: tree peaks 36-42 GiB over its last passes; the plan printed it UNDER). programs-full is not lowered to its
+27 GiB: the essential programs step's one j2g sample now reaches 42 GiB. Instead it is a part a sample (`--build-program --check
+{part}`, 16 parts, bin/arbace-go's check_programs takes one name), each at the step's 51 until its own passes are measured, hello-go
+and bad-go (no j2g run) at 12: the lanes now admit other steps between the samples. The planner has no build/run split of a step
+(alternative considered; it would need a --build-only/--run-only pair in check_programs). :mem-gib is out of every key, so only
+programs-full's keys move (its parts are new steps). `bin/gate --full --concurrent --plan`: simulated wall 9:24 before, 9:20 after;
+the declared memory at most 57.5 GiB at once both; lane 1 26 steps before, 39 after (the parts).
