@@ -392,6 +392,24 @@
          (every? (fn [fl] (and (nil? (:init fl)) (trivial-class? (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)) trivially-default?))) (:fields c))
          (every? #(trivially-default? (:cls %)) (:bases c)))))
 
+;; queue 439: __is_aggregate's class by the dialect, as clang's CXXRecordDecl::isAggregate ([dcl.init.aggr]/1): C++20 no
+;; user-declared or inherited constructor; C++17 no user-provided, explicit or inherited one; before C++17 no user-provided one
+;; and no base class; always no private or protected direct non-static data member, no virtual function and no virtual,
+;; private or protected base. (sema/aggregate? took the type, not its id: the trait answered false for every class.)
+(defn- aggregate-trait? [id]
+  (let [c (abi/cls id) y (long sema/*cxx-year*)
+        user (remove #(:implicit (sema/fnd %)) (:ctors c))
+        provided? (fn [f] (let [g (sema/fnd f)] (and (not (:deleted g)) (or (not (:defaulted g)) (:out-of-line-default g)))))]
+    (boolean
+      (and (not (abi/dynamic? id))
+           (every? #(= :public (:access %)) (:fields c))
+           (every? #(and (= :public (:access %)) (not (:virtual %))) (:bases c))
+           (or (>= y 17) (empty? (:bases c)))
+           (empty? (:inherits-ctors c))
+           (cond (>= y 20) (empty? user)
+                 (>= y 17) (not-any? #(or (provided? %) (:explicit (sema/fnd %))) user)
+                 :else (not-any? provided? user))))))
+
 (def ^:private value-traits
   {"__is_same" (fn [_ [a b]] (= a b))
    ;; (clang's alias of __is_same, TokenKinds.def's ALIAS("__is_same_as", __is_same, KEYCXX))
@@ -426,7 +444,9 @@
    "__is_polymorphic" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (abi/dynamic? (:id u))))))
    "__is_abstract" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (some #(:pure (sema/fnd (:fn %))) (:vtable (abi/cls (:id u))))))))
    "__is_final" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (:final (abi/cls (:id u)))))))
-   "__is_aggregate" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/arr? u) (and (abi/class? u) (boolean (sema/aggregate? (:id u)))))))
+   "__is_aggregate" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/arr? u) (and (abi/class? u) (aggregate-trait? (:id u)))
+                                                         ;; queue 439: clang's UTT_IsAggregate reports GNU vectors and _Complex as aggregates
+                                                         (contains? #{:vec :complex} (:k u)))))
    "__has_virtual_destructor" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (some-> (:dtor (abi/cls (:id u))) sema/fnd :virtual)))))
    "__is_base_of" (fn [_ [b d]] (let [b (abi/unq b) d (abi/unq d)]
                                   ;; (cpp-s8: a class whose definition is under way has not all its bases yet: the answer
@@ -1329,7 +1349,12 @@
       (do (when (:sig-pending (tmpl (:id t))) (fail :template "a signature that names its own template " (:name t)))
           (upd-tmpl! (:id t) assoc :sig-pending true)
           ;; (cpp-s15: with the parameters in scope for a decltype that names them, as declare-fn!'s: CP391 (a)'s fp_)
-          (let [s (try (sema/resolve-type (sema/fn-type-scope (sym-scope t) (:pattern t)) (get-in (:pattern t) [:type :qualType]))
+          ;; (queue 392: the names its declaration sees, not the caller's: a template found by argument-dependent lookup at an
+          ;; instantiation whose definition comes before it, std::__distance's `__last - __first` of two __normal_iterators,
+          ;; whose operator- <bits/stl_iterator.h> declares after <bits/stl_iterator_base_funcs.h>, had dropped out with "not a
+          ;; template: __normal_iterator" under the caller's cutoff: cow-stdexcept.cc)
+          (let [s (try (binding [sema/*cutoff* (max (long sema/*cutoff*) (long (or (:pos t) 0)))]
+                         (sema/resolve-type (sema/fn-type-scope (sym-scope t) (:pattern t)) (get-in (:pattern t) [:type :qualType])))
                        (finally (upd-tmpl! (:id t) dissoc :sig-pending)))
                 s (dissoc s :cq)]
             (upd-tmpl! (:id t) assoc :sig s)
@@ -1685,14 +1710,19 @@
   (let [tid (:id t)
         cid (or cid0 (next-id))
         ps (bind-scope (:scope t) params bargs nil)
-        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]))
+        ;; (queue 411: a specialization of a template of an unnamed namespace has internal linkage and so have its members,
+        ;; [basic.link]/4, as the class's own (sema's declare-class!): codecvt.cc's std::(anonymous)::range<char32_t, true>'s,
+        ;; linkonce_odr before)
+        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]) :internal (boolean (:internal ps)))
         first-fn (inc (long @sema/*ids*))
         ;; (CP365 (a): the argument classes not complete yet, declared only or still being defined)
         waits (set (for [a args :when (map? a) :let [u (abi/unq a)] :when (abi/class? u) :let [c (abi/cls (:id u))]
                          :when (or (not (:complete c)) (:defining c))]
                      (:id u)))]
-    (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
-                                    :union (= "union" (:tagUsed node)) :tmpl tid :targs args :header (sema/header-node? node)})
+    ;; (queue 392: an explicit specialization marked :espec, a class with a key function, codegen's key-fn)
+    (swap! abi/*classes* assoc cid (cond-> {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
+                                            :union (= "union" (:tagUsed node)) :tmpl tid :targs args :header (sema/header-node? node)}
+                                     explicit? (assoc :espec true)))
     (enter! ps (:name t) {:e :type :ty {:k :class :id cid} :pos -1})
     (upd-tmpl! tid assoc-in [:insts args] cid)
     (when-let [nm (System/getenv "CPP_INST_TRACE")]
@@ -2001,7 +2031,7 @@
   [t args]
   (let [tid (:id t) cid (next-id)
         ps (bind-scope (:scope t) (:params t) args nil)
-        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]))]
+        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]) :internal (boolean (:internal ps)))]
     (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
                                     :tmpl tid :targs args})
     (upd-tmpl! tid assoc-in [:insts args] cid)
@@ -2849,7 +2879,13 @@
     (when-not (or mid (sema/header-node? n)) (fail :template "no member template " (:name n) " to define"))
     ;; (a header's whose declaration in the class was dropped: none to define, G4)
     (when mid
-    (upd-tmpl! mid assoc :pattern pat :params params :sig nil
+    ;; (queue 392: `static` is the declaration's, which the definition outside the class does not repeat ([class.static]/1):
+    ;; kept, so a call from a static member has no object -- COW basic_string's _S_construct_aux's call of
+    ;; _S_construct<_FwdIterator>, defined in <bits/basic_string.tcc>, had been a member call on no object, "codegen:
+    ;; lvalue": cow-stdexcept.cc, the old ABI's locale-inst.cc and the COW string units)
+    (upd-tmpl! mid assoc :pattern (let [op (:pattern (tmpl mid))]
+                                    (cond-> pat (and (= "static" (:storageClass op)) (not (:storageClass pat))) (assoc :storageClass "static")))
+               :params params :sig nil
                :scope (if (seq (:pnames o))
                         (bind-scope (:scope c) (mapv (fn [nm p] {:name nm :kind (:kind p)}) (:pnames o) outer-params) (:targs c) nil)
                         (:scope c))))))
@@ -2882,7 +2918,8 @@
         ;; (an operator's name its tokens joined: `basic_ostream<char>::operator<<(nullptr_t)`, `operator <<`)
         op-end (fn [k] (when (and (= "operator" (ts k)) (str/starts-with? nm "operator"))
                          (let [j (first (filter #(= "(" (ts %)) (range (inc k) n)))]
-                           (when (and j (> j (inc k)) (= (subs nm 8) (str/join "" (subvec ts (inc k) j)))) j))))
+                           ;; (queue 392: a conversion function's name, `operator void *`, compared without its spaces)
+                           (when (and j (> j (inc k)) (= (str/replace (subs nm 8) #"\s+" "") (str/join "" (subvec ts (inc k) j)))) j))))
         k (first (filter (fn [k] (and (pos? k) (= "::" (ts (dec k)))
                                       (or (op-end k)
                                           (and (= nm (ts k))
@@ -2947,7 +2984,27 @@
                (for [tid (:ctor-tmpls qc)] {:e :tmpl :tk :fn :id tid})
                (seq (.get ^java.util.HashMap (:names (:scope qc)) fname)))
              (try (sema/lookup scope fname) (catch arbace.lang.ExceptionInfo _ nil)))
-        found (when (and ft (abi/fn? ft))
+        ;; (queue 392: a member that is no template and whose type matches is chosen before any template's specialization
+        ;; when no template arguments are written, clang's ActOnExplicitInstantiation's NonTemplateMatch ([temp.explicit]/4 with
+        ;; [over.match.best]/2.4's preference): misc-inst.cc's `template string& string::replace(iterator, iterator, char*,
+        ;; char*);` before C++11, basic_string's non-template replace, not replace<_InputIterator>)
+        ms (when (and qc ft (abi/fn? ft))
+             (let [cto (when-let [[_ t] (re-matches #"(?s)operator\s+(.*\S)\s*" fname)]
+                         (when-not (re-matches #"(?:new|delete)(?:\s*\[\s*\])?" t)
+                           (try (abi/unq (sema/resolve-type (:scope qc) t)) (catch arbace.lang.ExceptionInfo _ nil))))]
+               (distinct (filter (fn [id] (let [g (sema/fnd id)]
+                                            (and (not (:tinst g))
+                                                 (cond ctor? (= :ctor (:kind g))
+                                                       ;; (a conversion function's: the one converting to the type its name names,
+                                                       ;; ios_locale.cc's `template basic_ios<char>::operator void*() const;`)
+                                                       (= :conv (:kind g)) (and cto (= (abi/unq (:ret (:ty g))) cto))
+                                                       :else (= fname (:name g)))
+                                                 (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft)))
+                                                 ;; (and its cv-qualifier: c++17/string-inst.cc's `template char*
+                                                 ;; basic_string<char>::data() noexcept;`, not data() const)
+                                                 (or ctor? (= (boolean (:cq g)) (boolean (re-find #"\)\s*const\b[^()]*$" (str fts))))))))
+                                 (concat (:ctors qc) (:methods qc))))))
+        found (when (and ft (abi/fn? ft) (not (and (not targs) (= 1 (count ms)) (not (sema/checking?)))))
                 (keep (fn [e]
                         (when (and (= :tmpl (:e e)) (= :fn (:tk e)))
                           (let [t (tmpl (:id e))]
@@ -2979,11 +3036,7 @@
       ;; (queue 367: a member that is no template, `template void X<int>::f(int);`: its class's member of that name and
       ;; parameter types)
       (when (and qc (empty? found) ft (abi/fn? ft))
-        (let [ms (filter (fn [id] (let [g (sema/fnd id)]
-                                    (and (not (:tinst g)) (if ctor? (= :ctor (:kind g)) (= fname (:name g)))
-                                         (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))))))
-                         (concat (:ctors qc) (:methods qc)))]
-          (when (= 1 (count (distinct ms))) (explicit-inst-mark! (first ms)))))))))
+        (when (= 1 (count ms)) (explicit-inst-mark! (first ms))))))))
 
 (defn- constraint-spelling
   "CP300 (a), [temp.over.link]/7: a function template's constraints as written (its type-constraints, its requires-clause,
@@ -3184,7 +3237,11 @@
                 (when-not (:defined (sema/var* vid)) (upd-var! vid assoc :pending-def true))))))
         (when-let [[_ t] (and (not (:_extern n)) (re-matches #"(?s)\s*(?:class|struct|union)\s+(.*?)\s*" (str (:_text n))))]
           (when-let [ty (try (sema/resolve-type scope t) (catch arbace.lang.ExceptionInfo _ nil))]
-            (when (abi/class? ty) (abi/update-cls! (:id ty) #(cond-> (assoc % :explicit-inst-def true) (not (sema/checking?)) (dissoc :extern-inst))))))
+            ;; (queue 392: not an explicit specialization's either, [temp.explicit]/4 with [temp.expl.spec]: locale-inst.cc's `template
+            ;; class ctype_byname<C>;` of <bits/locale_facets.h>'s ctype_byname<char>, whose vtable is its key function's unit's, had
+            ;; been written weak_odr with its members)
+            (when (and (abi/class? ty) (not (:espec (abi/cls (:id ty)))))
+              (abi/update-cls! (:id ty) #(cond-> (assoc % :explicit-inst-def true) (not (sema/checking?)) (dissoc :extern-inst))))))
         ;; extern template R f(params): the function template's specialization of that type (deduced from it,
         ;; [temp.explicit]/7) the library's
         (when (and (:_extern n) (:_fname n) (:_ftype n))
@@ -3443,7 +3500,11 @@
     {}
     (let [fns (vec (for [[id f] @sema/*fns*
                          :when (and (:cls f) (not (:explicit-inst f)) (not (:implicit f)) (not (:deleted f)) (not (:spec-member f))
-                                    (or (:body f) (and (:defaulted f) (not (:trivial f))))
+                                    ;; (queue 411: a member defaulted on its first declaration is defined only when used, so
+                                    ;; not by the explicit instantiation, as clang's InstantiateClassMembers; one defaulted
+                                    ;; outside its class is: ext11-inst.cc's stdio_filebuf<char>'s `stdio_filebuf(stdio_filebuf&&) =
+                                    ;; default` and its move assignment had been emitted, clang writes neither)
+                                    (or (:body f) (and (:defaulted f) (not (:trivial f)) (:ool-defaulted f)))
                                     (not (:tinst f)) (explicit-inst-class? (:cls f)))]
                      id))
           vars (vec (for [[id v] @sema/*vars*
@@ -3461,7 +3522,8 @@
         acc (atom {:fns (set (:fns ei)) :vars (set (:vars ei)) :classes #{}})]
     (doseq [[id f] @sema/*fns* :when (and (or (:analyzed f) (:tbody f)) (not (contains? @*scanned* [:fn id])))]
       (swap! *scanned* conj [:fn id])
-      (walk-refs acc [(:tbody f) (:tinits f) (:tassign f)])
+      ;; (queue 393: a coroutine's ramp's parts too, the promise's and the copies' initializers and the returned object's)
+      (walk-refs acc [(:tbody f) (:tinits f) (:tassign f) (:coro f)])
       (doseq [v (:statics f)] (walk-refs acc (:sinit (sema/var* v)))))
     ;; (a destructor or constructor defaulted out of line, G5c's nested_exception::~nested_exception() = default: its class's
     ;; members' and bases' destructors used, as its definition destroys them)

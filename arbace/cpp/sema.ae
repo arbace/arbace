@@ -88,12 +88,10 @@
 (defn ucn-name
   "A name with its universal character names as their characters ([lex.charset]/2, [lex.name]: `\\u00C1`, `\\u00c1` and
   `\\U000000C1` one identifier, as clang's IdentifierInfo holds it); a name without a backslash itself (cpp-route: g++.dg's
-  other/ucnid-1.C)."
+  other/ucnid-1.C). Queue 439: their characters as UTF-8 bytes (abi/ucn-bytes), as the reader holds a UTF-8 source's: a name
+  spelled in UTF-8 and with universal character names one identifier."
   ^String [^String nm]
-  (if (and nm (>= (.indexOf nm "\\") 0))
-    (str/replace nm #"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})"
-                 (fn [[_ a b]] (String. (Character/toChars (Integer/parseInt ^String (or a b) 16)))))
-    nm))
+  (abi/ucn-bytes nm))
 
 (defn- enter! [scope ^String nm e]
   (when nm
@@ -639,6 +637,44 @@
             (if k (recur (str (subs s 0 i) (subs s k))) (str/trim s))))))
     s))
 
+(defn- vector-bytes
+  "vector_size's BYTES, the spelling `b` (queue 439): an integer literal, or an integer constant expression of literals,
+  `sizeof ( TYPE )` (TYPE resolved in `scope`), + - * / and parentheses, its value; nil for anything else."
+  [scope ^String b]
+  (if (re-matches #"\s*\d+\s*" b)
+    (Long/parseLong (str/trim b))
+    (let [toks (re-seq #"sizeof\s*\(\s*[^()]+?\s*\)|\d+[uUlL]*|[-+*/()]|\S" b)
+          toks (mapv (fn [^String t]
+                       (cond (str/starts-with? t "sizeof")
+                             (let [[_ ty] (re-matches #"sizeof\s*\(\s*([^()]+?)\s*\)" t)
+                                   sz (try (abi/size-of (abi/unq (resolve-type scope ty))) (catch Exception _ nil))]
+                               (if sz (long sz) :bad))
+                             (re-matches #"\d+[uUlL]*" t) (Long/parseLong (str/replace t #"[uUlL]" ""))
+                             (#{"+" "-" "*" "/" "(" ")"} t) t
+                             :else :bad))
+                     toks)]
+      (when-not (some #{:bad} toks)
+        ;; recursive descent over toks: expr := term (+|- term)*, term := factor (*|/ factor)*, factor := N | ( expr ) | - factor
+        (let [pos (volatile! 0)
+              peek (fn [] (get toks @pos))
+              next! (fn [] (let [t (peek)] (vswap! pos inc) t))]
+          (letfn [(factor [] (let [t (next!)]
+                               (cond (number? t) t
+                                     (= "-" t) (when-let [v (factor)] (- (long v)))
+                                     (= "(" t) (let [v (expr)] (when (= ")" (next!)) v))
+                                     :else nil)))
+                  (term [] (loop [v (factor)]
+                             (if (and v (#{"*" "/"} (peek)))
+                               (let [op (next!) w (factor)]
+                                 (when w (recur (if (= op "*") (* (long v) (long w)) (when-not (zero? (long w)) (quot (long v) (long w)))))))
+                               v)))
+                  (expr [] (loop [v (term)]
+                             (if (and v (#{"+" "-"} (peek)))
+                               (let [op (next!) w (term)]
+                                 (when w (recur (if (= op "+") (+ (long v) (long w)) (- (long v) (long w))))))
+                               v)))]
+            (let [v (expr)] (when (= @pos (count toks)) v))))))))
+
 (defn resolve-type
   "The semantic type of clang's spelling `s` in `scope`."
   [scope ^String s0]
@@ -647,16 +683,28 @@
   ;; `__attribute__((__vector_size__(BYTES))) T`, BYTES a literal, is {:k :vec :n LANES :of T}: held, copied, initialized from a
   ;; list and given its size and alignment; its lanes' operators are refused where they are met. The checker still refuses the
   ;; type (its traits and conversions are not modelled)
+  ;; (queue 439: BYTES an integer constant expression of literals, sizeof (TYPE), + - * / and parentheses, g++.dg's
+  ;; ext/is_aggregate.C's `vector_size (4 * sizeof (int))`, evaluated by vector-bytes)
   (when (re-find #"vector_size__\s*\(" s0)
-    (let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((\d+)\)\)\)\s+(.*)$" s0)]
-      (when (or (checking?) (nil? b)) (fail :type "a GNU vector type (" s0 ")"))))
-  (if-let [[_ b et] (when-not (checking?) (re-find #"^\s*__attribute__\(\(__vector_size__\((\d+)\)\)\)\s+(.*)$" s0))]
-    (let [e (abi/unq (resolve-type scope et))
-          es (when (or (abi/integral? e) (abi/floating? e)) (abi/size-of e))
-          n (Long/parseLong b)]
-      (when (or (nil? es) (not (pos? n)) (pos? (rem n (long es))) (not= 1 (Long/bitCount (quot n (long es)))))
-        (fail :type "a GNU vector type (" s0 ")"))
-      {:k :vec :n (quot n (long es)) :of e})
+    (let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0)]
+      (when (or (checking?) (nil? b) (nil? (vector-bytes scope b))) (fail :type "a GNU vector type (" s0 ")"))))
+  (if-let [[_ b et] (when-not (checking?) (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0))]
+    (let [n (long (vector-bytes scope b))
+          vec-of (fn [t]
+                   (let [e (abi/unq t)
+                         es (when (or (abi/integral? e) (abi/floating? e)) (abi/size-of e))]
+                     (when (or (nil? es) (not (pos? n)) (pos? (rem n (long es))) (not= 1 (Long/bitCount (quot n (long es)))))
+                       (fail :type "a GNU vector type (" s0 ")"))
+                     (cond-> {:k :vec :n (quot n (long es)) :of e} (:c t) (assoc :c true) (:v t) (assoc :v true))))
+          ;; (queue 439: the declaration specifiers' vector type in a declarator's type, `V f() const`, `V *p`: the attribute
+          ;; applies to the innermost type, the specifiers')
+          wrap (fn wrap [t]
+                 (case (:k t)
+                   (:ptr :ref :rref) (update t :to wrap)
+                   :arr (update t :of wrap)
+                   :fn (update t :ret wrap)
+                   (vec-of t)))]
+      (wrap (resolve-type scope et)))
   (let [s (strip-type-attrs s0)]
   (if (re-find #"\((unnamed|anonymous) (union|struct|class|enum) at " s)
     (let [t @*last-anon*] (cond-> t (re-find #"^const " s) (assoc :c true)))
@@ -1078,6 +1126,19 @@
     (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f) (not (other-spec? (fnd (:id e))))) (:id e)))
           (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
 
+;; queue 445: a block-scope function declaration ([basic.link]/6, [basic.scope.block]: `void terminate() noexcept;` in c++config.h's
+;; std::__terminate) declares the function of its innermost enclosing namespace, named in the block alone: clang mangles it
+;; at that namespace (_ZSt9terminatev, not a local entity's _ZZSt11__terminatevE9terminatev, which no unit defines). The
+;; code generator's (bound by analyze's DeclStmt when not checking): its declaration joins one of the namespace, and one
+;; made first is kept in the namespace under a key no lookup uses, which a later namespace-scope declaration joins.
+(def ^:dynamic *block-fn* false)
+
+(defn- block-fn-key ^String [^String nm] (str " block-fn " nm))
+
+(defn- find-block-redecl [scope f]
+  (when (= :fn (:kind f))
+    (some (fn [e] (when (same-sig? (fnd (:id e)) f) (:id e))) (.get ^java.util.HashMap (:names scope) (block-fn-key (:name f))))))
+
 (declare analyze rv ce-try)
 
 (defn- noexcept-of
@@ -1308,12 +1369,15 @@
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
                scope)
+        ;; (queue 445: a block-scope declaration's home is its innermost enclosing namespace, its types resolved in its block)
+        bns (when (and *block-fn* (empty? q)) (loop [s scope] (if (or (nil? (:parent s)) (= :ns (:kind s))) s (recur (:parent s)))))
+        home (or bns home)
         cid (:cls home)
         ;; (cpp-s9: a qualified declaration declared in a scope within the qualifier's, a member template's specialization
         ;; made from its out-of-line definition `template<class T> int S::h(T)` in a scope binding T over S's: its types
         ;; resolved there, where the template's parameters are, S's names through it)
-        rs (if (and (seq q) (not (identical? scope home))
-                    (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s)))))
+        rs (if (or bns (and (seq q) (not (identical? scope home))
+                    (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s))))))
              scope home)
         k (case (:kind n) "CXXConstructorDecl" :ctor "CXXDestructorDecl" :dtor "CXXConversionDecl" :conv (if cid :method :fn))
         qt (get-in n [:type :qualType])
@@ -1349,6 +1413,11 @@
            ;; (CP362 (a), cpp-s5: a consteval constructor, for the code generator, inlined as always_inline (clang emits no
            ;; immediate function: an immediate invocation is its value), its body not analyzed below)
            :always-inline (or (always-inline-node? n) (and (:_consteval n) (= "CXXConstructorDecl" (:kind n)) (not (checking?))))
+           ;; (queue 392: GNU's alias("target"), the function another name of the target's definition, clang's AliasAttr: an
+           ;; alias in the module; cow-stdexcept.cc's transactional clones, `_ZGTtNSt11logic_errorC2EPKc` of ...C1EPKc)
+           :alias-of (some #(when (and (= "NativeAttr" (:kind %)) (#{"alias" "__alias__"} (:_gnu %)))
+                              (not-empty (apply str (map second (re-seq #"\"((?:[^\"\\]|\\.)*)\"" (str (:_arg %)))))))
+                           (:inner n))
            ;; G5c: a call of it ends its block (clang's EmitCall: the call, then unreachable), so a catch (...) { abort(); }
            ;; ends no catch on the normal path
            :noreturn (noreturn-node? n)
@@ -1392,6 +1461,11 @@
                   (when (and c (not (:tmpl c)) (not (:lambda c)) (not (:defining c)) (not (:complete c)))
                     (*on-refusal* (ex-info (str "codegen: incomplete result type '" (:name c) "' in function definition") {:codegen/refused :incomplete}) n))))))
         old (find-redecl home f)
+        ;; (queue 445: a block-scope declaration made before it, kept under its hidden key)
+        hidden (when-not old (find-block-redecl home f))
+        old (or old hidden)
+        _ (when (and old (or bns hidden))
+            (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id old :pos (:pos f)}))
         id (or old (next-id))
         pinfo {:param-names (mapv :name pn)
                :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}]
@@ -1422,7 +1496,8 @@
                                          (let [g (fnd (:id e))]
                                            (and (same-sig? g f) (= (:tid *instantiating*) (:tid (:tinst g)))))))
                                (.get ^java.util.HashMap (:names home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)))))
-            (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)}))
+            (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)}))
+          (when bns (enter! home (block-fn-key nm) {:e :fn :id id :pos (:pos f)}))
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
           (when (and cid (:virtual f)) (abi/update-cls! cid update :virtuals (fnil conj []) id))
@@ -1452,7 +1527,10 @@
   (let [qt (get-in n [:type :qualType])
         ;; (queue 367, the code generator: a qualifier naming a template-id, as declare-fn!'s, cpp-s13: limits.cc's out-of-line
         ;; definitions `constexpr bool numeric_limits<bool>::is_specialized;` of an explicit specialization's static members)
-        q (or (qualifier-before n) (when-not (checking?) (qualifier-tid-before n)))
+        q (or (qualifier-before n) (when-not (checking?) (qualifier-tid-before n))
+              ;; (queue 411: a definition a macro writes, its qualifier from the parser's tokens after expansion: limits.cc's
+              ;; INT_N(__GLIBCXX_TYPE_INT_N_0), numeric_limits<__int128>'s static members)
+              (expanded-qualifier n))
         ;; (CP311 (a): a deduced class type, deduced from the initializer analyzed as global-init would)
         ct (when (empty? q) (ctad-template scope (or (:_ctad n) qt)))
         cv (when ct (binding [*cutoff* Long/MAX_VALUE]
@@ -2219,9 +2297,8 @@
     ;; the copy constructor and the copy assignment
     ;; CX12 (the checker): [class.copy.ctor]/6, [class.copy.assign]/2: a class that declares a move constructor or a move
     ;; assignment operator has its implicit copy constructor and copy assignment defined as deleted
-    (let [moves (when (checking?)
-                  (or (has-ctor-of? id move-ctor?) (some #(move-assign? (fnd %) id) (:methods (abi/cls id)))))
-          del (when moves {:deleted true :deleted-sure true :deleted-why "a user-declared move constructor or move assignment operator"})]
+    (let [moves (or (has-ctor-of? id move-ctor?) (some #(move-assign? (fnd %) id) (:methods (abi/cls id))))
+          del (when (and moves (checking?)) {:deleted true :deleted-sure true :deleted-why "a user-declared move constructor or move assignment operator"})]
     ;; ([class.copy.ctor]/7, [class.copy.assign]/2: the implicit copy constructor's parameter is X& when a base or member
     ;; of class type M has copy constructors none of which takes a const M&, else const X&; the copy assignment's alike)
     (let [non-const? (fn [pred sel]
@@ -2243,8 +2320,11 @@
         (when del (upd-fn! fid merge del)))))
     ;; CX12 (the checker): the implicit move constructor and move assignment ([class.copy.ctor]/8, [class.copy.assign]/4:
     ;; declared when the class declares no copy or move member and no destructor); one defined as deleted is no
-    ;; candidate ([over.match.funcs]/8, ctor-candidates)
-    (when (and (checking?) (not moves)
+    ;; candidate ([over.match.funcs]/8, ctor-candidates). (Queue 411, DECISION 392-1 (a): declared in the code generator's mode
+    ;; too, as clang declares them: an xvalue of such a class moved, not copied; COW basic_string's _Alloc_hider(_Alloc_hider&&),
+    ;; clang's _ZNSs12_Alloc_hiderC2EOS_ in cow-stdexcept.cc, cow-string-inst.cc, cow-wstring-inst.cc and cow-sstream-inst.cc. The
+    ;; copy constructor and copy assignment a user-declared move deletes stay the checker's alone.)
+    (when (and (not moves)
                (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (copy-ctor? g id))) (:ctors (abi/cls id)))
                (not-any? #(let [g (fnd %)] (and (not (:implicit g)) (copy-assign? g id))) (:methods (abi/cls id)))
                (let [d (:dtor (abi/cls id))] (or (nil? d) (:implicit (fnd d)))))
@@ -4618,8 +4698,18 @@
       {:op :deref :e {:op :load :e {:op :field :obj o :cls cid :i i :ty abi/void :cat :lv :raw true} :ty (abi/ptr (:to ft)) :cat :pr} :ty (:to ft) :cat :lv}
       {:op :field :obj o :cls cid :i i :ty (cond-> ft (and (:c (:ty obj)) (not (:mutable f))) (assoc :c true)) :cat (if (= :lv (:cat obj)) :lv :xv)})))
 
+(declare has-auto? global-init)
+
 (defn- var-node [id]
-  (let [v (var* id) t (:ty v)]
+  (let [v (var* id)
+        ;; (queue 393: a static data member or namespace-scope variable declared `auto` whose initializer was not analyzed
+        ;; yet, an inline static constexpr member's, `static constexpr auto f = []() {...};`: its type deduced at this use,
+        ;; [dcl.spec.auto.general]/11; g++.dg's coroutines/torture/pr95519-01-initial-suspend.C's promise's initial_suspend)
+        ;; (the checker's analysis as before: its dg records were made without it)
+        v (if (and (not (checking?)) (has-auto? (:ty v)) (:init v) (#{:member-static :global} (:storage v)) (not (:ginit v)))
+            (do (upd-var! id assoc :ginit (global-init id)) (var* id))
+            v)
+        t (:ty v)]
     (if (abi/ref? t)
       {:op :deref :e {:op :load :e {:op :var :id id :ty t :cat :lv :raw true} :ty (abi/ptr (:to t)) :cat :pr} :ty (:to t) :cat :lv}
       {:op :var :id id :ty t :cat :lv})))
@@ -5333,6 +5423,11 @@
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
    "__builtin_addressof" :addressof
+   ;; (queue 393, W4: <coroutine>'s coroutine_handle over the frame, clang's CGCoroutine's llvm.coro.done, .resume, .destroy
+   ;; and .promise, which CoroCleanup lowers as the switch ABI lays the frame out: the resume and destroy functions' pointers
+   ;; first, the promise after them at its alignment; arbace.cpp.codegen's :coro-builtin)
+   "__builtin_coro_done" :coro-done "__builtin_coro_resume" :coro-resume "__builtin_coro_destroy" :coro-destroy
+   "__builtin_coro_promise" :coro-promise "__builtin_coro_noop" :coro-noop
    ;; (cpp-s8: the type-generic floating-point classifications <format>'s __formatter_fp uses)
    "__builtin_signbit" :signbit "__builtin_isfinite" :isfinite
    "__builtin_alloca" :alloca
@@ -6037,6 +6132,58 @@
 
 (def ^:const max-analyze-depth 4000)
 
+;; ---------------------------------------------------------------------------------------------
+;; Coroutines (queue 393, W4; doc/cpp/CODEGEN.md, "As built: coroutines"): [dcl.fct.def.coroutine], [expr.await],
+;; [expr.yield], [stmt.return.coroutine] as clang's SemaCoroutine builds them; the frame, its suspension points and the
+;; split into the ramp, resume and destroy functions are arbace.cpp.codegen's (emit-coro!)
+
+(defn- typed-node [e] {:kind "_Typed" :_e e})
+
+(defn- member-call-node
+  "The node of the call obj.m(args...), `obj` and `args` typed expressions."
+  [obj ^String m args]
+  {:kind "CallExpr" :inner (vec (cons {:kind "MemberExpr" :name m :isArrow false :inner [(typed-node obj)]} (map typed-node args)))})
+
+(defn- std-template
+  "<coroutine>'s class template std::NM (in libstdc++'s inline namespace std::__n4861)."
+  [^String nm]
+  (or (first (filter #(= :tmpl (:e %)) (try (lookup-qualified *root* ["std" nm] true) (catch arbace.lang.ExceptionInfo _ nil))))
+      (fail :coroutine "no std::" nm " (<coroutine> not included)")))
+
+(defn- coro-promise-call
+  "promise.m(args...) of the coroutine whose body `ctx` analyzes ([dcl.fct.def.coroutine]/5's p)."
+  [ctx ^String m args]
+  (let [co (:coro ctx)]
+    (analyze ctx (member-call-node {:op :var :id (:promise co) :ty (:ptype co) :cat :lv} m args))))
+
+(defn- coro-await
+  "The await-expression of the operand `e` ([expr.await]/3.2-3.7): a co_await's operand through promise.await_transform
+  when the promise type declares one (`how` :await; not a co_yield's, nor the initial and final suspends), then its operator
+  co_await when one is viable, the awaiter materialized when a prvalue; await_ready contextually converted to bool,
+  await_suspend called with std::coroutine_handle<P>::from_address(the frame) converted to its parameter, await_resume the
+  expression's value. {:op :co-await :id k :e awaiter :ready :suspend :sk :void|:bool :resume :final}, the awaiter the opaque
+  value k in the three calls."
+  [ctx e how]
+  (let [co (or (:coro ctx) (fail :coroutine "co_await outside a coroutine"))
+        a (if (and (= how :await) (:await-transform co)) (coro-promise-call ctx "await_transform" [e]) e)
+        aw (or (when (class-operand? a) (operator-call ctx " co_await" [a])) a)
+        aw (if (and (= :pr (:cat aw)) (abi/class? (abi/unq (:ty aw)))) (materialize aw) aw)
+        _ (when-not (and (lv? aw) (class-id (:ty aw))) (fail :coroutine "an awaiter of type " (pr-str (:ty aw))))
+        k (swap! opaque-ids inc)
+        ov {:op :opaque :id k :ty (:ty aw) :cat :lv}
+        call (fn [m args] (analyze ctx (member-call-node ov m args)))
+        ready (to-bool (call "await_ready" []))
+        ht ((:instantiate-class @hooks) (:id (std-template "coroutine_handle")) [(:ptype co)])
+        fa (or (some (fn [[_ x]] (when (= :fn (:e x)) (:id x))) (class-lookup (class-id ht) "from_address"))
+               (fail :coroutine "no coroutine_handle<P>::from_address"))
+        h (fn-call ctx fa [{:op :coro-frame :ty (abi/ptr abi/void) :cat :pr}])
+        sus (call "await_suspend" [h])
+        st (abi/unq (:ty sus))
+        ;; ([expr.await]/5.1-5.3: a coroutine_handle's, the symmetric transfer, is not built yet)
+        sk (cond (abi/void? st) :void (= :bool (abi/bn st)) :bool :else (fail :coroutine "an await_suspend returning " (pr-str st)))
+        res (call "await_resume" [])]
+    {:op :co-await :id k :e aw :ready ready :suspend sus :sk sk :resume res :final (= how :final) :ty (:ty res) :cat (:cat res)}))
+
 (declare analyze*)
 
 (defn analyze
@@ -6064,6 +6211,14 @@
   (tick!)
   (when-let [a *at*] (when (:range n) (reset! a n)))
   (case (:kind n)
+    ;; (queue 393: an expression analyzed already, in a node the analysis builds, a coroutine's promise and awaiter calls)
+    "_Typed" (:_e n)
+    ;; (queue 393: co_await e and co_yield e, promise.yield_value(e) awaited ([expr.yield]/1), in a coroutine's body; the
+    ;; parser's CoyieldExpr holds clang's member call of yield_value, the written operand its second child)
+    "CoawaitExpr" (if (:coro ctx) (coro-await ctx (analyze ctx (first (kids n))) :await) (fail :expr "expression " (:kind n)))
+    "CoyieldExpr" (if (:coro ctx)
+                    (coro-await ctx (coro-promise-call ctx "yield_value" [(analyze ctx (second (kids (first (kids n)))))]) :yield)
+                    (fail :expr "expression " (:kind n)))
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
     "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
     ;; a type trait's value (G4: the headers' __is_constructible(T, Args...)), its text evaluated by the templates' hook
@@ -6377,11 +6532,22 @@
         ;; (CP338 (a): __atomic_always_lock_free(n, p) and __atomic_is_lock_free(n, p) with a constant size and a null pointer
         ;; (an object of n bytes aligned to n), folded as clang's x86-64 target does: lock-free for 1, 2, 4 and 8 bytes;
         ;; <bits/shared_ptr_base.h>'s _Sp_counted_base<_S_atomic>::_M_release)
-        :lock-free (let [[sz pp] (map #(rv (analyze ctx %)) (rest (kids n)))
-                         nv (:v (ce-try sz)) pv (when pp (ce-try pp))]
-                     (when-not (and (number? nv) pp (some? pv) (zero? (long (or (:v pv) 0))))
+        ;; (queue 411: and with an object's address, as clang's ExprConstant (VisitBuiltinCallExpr, BI__atomic_always_lock_free):
+        ;; a size of 1, 2, 4 or 8 is lock-free when the pointer is null, the size 1, or the pointee's alignment (the operand
+        ;; before its implicit conversions) at least the size; else __atomic_always_lock_free is false and __atomic_is_lock_free
+        ;; is left to the library; locale.cc's `__atomic_always_lock_free(sizeof(_M_index), &_M_index)`)
+        :lock-free (let [[szn pn] (rest (kids n))
+                         strip (fn [k] (loop [k k] (if (and (map? k) (= "ImplicitCastExpr" (:kind k)) (seq (kids k))) (recur (first (kids k))) k)))
+                         sz (rv (analyze ctx szn)) pp (when pn (rv (analyze ctx pn)))
+                         nv (:v (ce-try sz)) pv (when pp (ce-try pp))
+                         always (= "__atomic_always_lock_free" (get-in (first (kids n)) [:referencedDecl :name]))
+                         null (and pp (some? pv) (zero? (long (or (:v pv) 0))))
+                         pt (when (and pn (not null)) (let [t (abi/unq (:ty (rv (analyze ctx (strip pn)))))] (when (abi/ptr? t) (abi/unq (:to t)))))
+                         aligned (when (and (number? nv) pt (not (abi/void? pt)) (not (abi/fn? pt)))
+                                   (try (>= (abi/align-of pt) (long nv)) (catch Exception _ nil)))]
+                     (when-not (and (number? nv) pp (or null (= 1 (long nv)) aligned (and always (some? aligned))))
                        (fail :expr "a lock-free query not folded"))
-                     {:op :int :v (if (#{1 2 4 8} (long nv)) 1 0) :ty abi/bool* :cat :pr})
+                     {:op :int :v (if (and (#{1 2 4 8} (long nv)) (or null (= 1 (long nv)) aligned)) 1 0) :ty abi/bool* :cat :pr})
         ;; (n-cpp-eval: GCC's __builtin_shuffle(a, mask) and (a, b, mask), GCC's manual "Using Vector Instructions through
         ;; Built-in Functions": lane i of the result is lane mask[i] of a, or of a and b taken as one vector of 2N lanes, the
         ;; mask's lanes taken modulo N, or 2N; the mask an integer vector of as many lanes of the same width; clang has no such
@@ -6395,6 +6561,16 @@
                      (fail :expr "__builtin_shuffle of " (pr-str (mapv :ty as))))
                    {:op :vshuffle :a a :b b :m m :ty vt :cat :pr})
         :alloca {:op :alloca :e (convert-scalar (rv (analyze ctx (second (kids n)))) abi/ulong* false) :ty (abi/ptr abi/void) :cat :pr}
+        ;; (queue 393, W4: the coroutine builtins, a frame's address their first operand; __builtin_coro_promise(p, align, from)
+        ;; with a constant alignment, from-promise true the frame from the promise's address)
+        (:coro-done :coro-resume :coro-destroy :coro-promise)
+        (let [[p a fr] (map #(rv (analyze ctx %)) (rest (kids n)))
+              p (convert-scalar p (abi/ptr abi/void) true)
+              al (when a (let [v (:v (ce-try a))] (if (number? v) (long v) (fail :expr "__builtin_coro_promise of an alignment not constant"))))
+              from (when fr (let [v (:v (ce-try fr))] (cond (number? v) (not (zero? (long v))) (boolean? v) v :else (fail :expr "__builtin_coro_promise's direction not constant"))))]
+          {:op :coro-builtin :which b :p p :align al :from from :cat :pr
+           :ty (case b :coro-done abi/bool* :coro-promise (abi/ptr abi/void) abi/void)})
+        :coro-noop (fail :coroutine "__builtin_coro_noop (std::noop_coroutine)")
         ;; __builtin_{add,sub,mul}_overflow(a, b, &r): r = a op b in r's type; the overflow flag false (a divergence
         ;; when it overflows: no wider arithmetic yet; G4: <bits/stl_vector.h>'s size computations)
         (:add-overflow :sub-overflow :mul-overflow)
@@ -6482,6 +6658,19 @@
                   (and (checking?) (= "CStyleCastExpr" (:kind n)) (cx-reinterpret-cast? r))
                   (assoc r :cx-reinterpret true)
                   :else r)))))
+    ;; queue 439: GNU's compound literal `(T){...}` in C++ (g++.dg's ext/attribute-test-1.C, a vector's), for the code
+    ;; generator: a prvalue temporary list-initialized as T{...} is (clang's CompoundLiteralExpr of a C++ class, vector or
+    ;; scalar type, materialized where it is used); an array's (an lvalue in GNU C++) is refused. The checker refuses it still.
+    "CompoundLiteralExpr"
+    (let [t (when-not (checking?) (some->> (get-in n [:type :qualType]) (resolve-type (:scope ctx))))
+          tu (some-> t abi/unq)
+          [k] (kids n)]
+      (cond
+        (or (nil? tu) (abi/ref? tu) (abi/arr? tu) (not= "InitListExpr" (:kind k)))
+        (fail :expr "expression " (:kind n))
+        (abi/class? tu) {:op :temp-obj :init (init-for tu (analyze ctx k) ctx :direct) :ty tu :cat :pr}
+        (#{:vec :complex} (:k tu)) {:op :temp-obj :init (init-for tu (analyze ctx k) ctx :list) :ty tu :cat :pr}
+        :else (scalar-list-cast ctx tu (analyze-args ctx (kids k)))))
     ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
     (if-let [ct (when-not (= "CXXConstructExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
       (ctad-expr ctx n ct)
@@ -6968,7 +7157,8 @@
                            (enter! (:scope ctx) (or (:name d) "") {:e :var :id id})
                            (cond-> {:s :decl :var id :init init} (and (checking?) (:range d)) (assoc :cx-at (:range d))))))
            "CXXRecordDecl" (do (declare-class! (:scope ctx) d) {:s :null})
-           "FunctionDecl" (do (declare-fn! (:scope ctx) d) {:s :null}) ; a block-scope function declaration
+           ;; a block-scope function declaration (queue 445: the code generator's at its enclosing namespace, *block-fn*)
+           "FunctionDecl" (do (binding [*block-fn* (not (checking?))] (declare-fn! (:scope ctx) d)) {:s :null})
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
@@ -7222,6 +7412,18 @@
                            {:s :for :cond {:op :cmp :o "!=" :l (rv bvar) :r (rv evar) :ct pt :ty abi/bool* :cat :pr}
                             :inc {:op :incdec :o "++" :post false :e bvar :ty pt :cat :lv}
                             :body {:s :block :items (conj (vec decls) (stmt ic body))}}]})))))
+    ;; (queue 393: [stmt.return.coroutine]: co_return; and co_return of a void operand promise.return_void(), co_return e
+    ;; promise.return_value(e) -- a local of class type named alone moved, [class.copy.elision]/3 -- then the final suspend)
+    "CoreturnStmt" (if (:coro ctx)
+                     (let [[e] (kids n)
+                           x (when e (analyze ctx e))]
+                       (cond
+                         (nil? x) {:s :co-return :call (coro-promise-call ctx "return_void" [])}
+                         (abi/void? (:ty x)) {:s :co-return :pre x :call (coro-promise-call ctx "return_void" [])}
+                         :else (let [x (if (and (= :var (:op x)) (#{:local :param} (:storage (var* (:id x)))) (abi/class? (abi/unq (:ty x))))
+                                         (assoc x :cat :xv) x)]
+                                 {:s :co-return :call (coro-promise-call ctx "return_value" [x])})))
+                     (fail :stmt "statement " (:kind n)))
     "BreakStmt" {:s :break}
     "ContinueStmt" {:s :continue}
     ;; (CP338 (a): GNU's asm statement as clang's CodeGenFunction::EmitAsmStmt takes the one at -O0 that the lowering keeps,
@@ -7232,11 +7434,14 @@
                        _ (when-not (= "\"\"" (:template a)) (fail :stmt "an asm statement's template " (:template a)))
                        ins (mapv (fn [[nm c] x]
                                    (let [c (subs c 1 (dec (count c)))
-                                         _ (when (or nm (not (re-matches #"r+" c))) (fail :stmt "an asm operand's constraint " c))
+                                         ;; (queue 411: a register among memory, `rm`, is a value in a register too, as clang's
+                                         ;; EmitAsmInput takes a scalar when the constraint allows a register; the constraint kept
+                                         ;; as written: thread.cc's `asm ("" : : "rm" (depend))`)
+                                         _ (when (or nm (not (re-matches #"[rm]*r[rm]*" c))) (fail :stmt "an asm operand's constraint " c))
                                          e (rv (analyze ctx x))]
                                      (when-not (or (abi/integral? (abi/unq (:ty e))) (abi/ptr? (abi/unq (:ty e))))
                                        (fail :stmt "an asm operand of " (pr-str (:ty e))))
-                                     e))
+                                     (assoc e :asm-c c)))
                                  (:inputs a) (:inner n))
                        cl (mapv (fn [c] (let [c (subs c 1 (dec (count c)))]
                                           (when-not (#{"memory" "cc"} c) (fail :stmt "an asm clobber " c))
@@ -7390,6 +7595,81 @@
                    false))]
     (boolean (some #(and (map? %) (store? %)) (tree-seq #(and (map? %) (seq (:inner %))) :inner body)))))
 
+(defn coroutine-node?
+  "Whether a function body's node holds a co_await, co_yield or co_return outside a lambda's body or a local class: the
+  function is a coroutine ([dcl.fct.def.coroutine]/1)."
+  [n]
+  (boolean ((fn walk [x] (when (map? x)
+                           (case (:kind x)
+                             ("CoawaitExpr" "CoyieldExpr" "CoreturnStmt") true
+                             ("LambdaExpr" "CXXRecordDecl") false
+                             (some walk (:inner x)))))
+            n)))
+
+(defn- coroutine-body
+  "The body of the coroutine `fid` (queue 393, W4; [dcl.fct.def.coroutine]/5-13, as clang's SemaCoroutine builds it):
+  the promise type std::coroutine_traits<R, [cv C& for a member,] P1, ..., Pn>::promise_type (/4); each named parameter
+  copied (/13: a class by value move-constructed, a reference bound again) and the body's names the copies; the promise
+  initialized with the copies' lvalues (and *this for a member that is no lambda's call operator, as clang's
+  buildPromiseInitialization) when that initialization is valid, else default-initialized (/5); the returned object
+  initialized from promise.get_return_object() at once when of the same type, else that value kept and converted when
+  the ramp returns (clang's); the statement { co_await p.initial_suspend(); try { body; [p.return_void();] } catch (...)
+  { p.unhandled_exception(); } final-suspend: co_await p.final_suspend(); }. The ramp's parts in the function's :coro."
+  [ctx fid pids body-n]
+  (let [f (fnd fid)
+        _ (when (seq (:param-packs f)) (fail :coroutine "a coroutine with a function parameter pack"))
+        _ (when (some #(nil? (:name (var* %))) pids) (fail :coroutine "a coroutine with an unnamed parameter"))
+        member (when (and (:cls f) (not (:static f))) (cond-> {:k :class :id (:cls f)} (:cq f) (assoc :c true)))
+        targs (vec (concat [(:ret (:ty f))] (when member [(if (= :rref (:refq f)) (abi/rref member) (abi/lref member))]) (:ps (:ty f))))
+        ;; (<coroutine>'s template <typename _Result, typename... _ArgTypes>: the pack's arguments grouped, as the templates'
+        ;; argument lists bind them)
+        tt ((:instantiate-class @hooks) (:id (std-template "coroutine_traits")) [(first targs) {:pack (vec (rest targs))}])
+        pt (some-> (type-entity (map second (class-lookup (class-id tt) "promise_type"))) :ty abi/unq)
+        _ (when-not (class-id pt) (fail :coroutine "no promise_type in std::coroutine_traits"))
+        pc (class-id pt)
+        _ (doseq [m ["get_return_object_on_allocation_failure" "operator new" "operator delete"]]
+            (when (seq (class-lookup pc m)) (fail :coroutine "a promise type's " m)))
+        sc (new-scope :block (:scope ctx))
+        ref (fn [nm] {:kind "DeclRefExpr" :referencedDecl {:name nm}})
+        copies (vec (for [p pids]
+                      (let [v (var* p) t (:ty v)
+                            x (analyze ctx (ref (:name v)))
+                            x (if (or (= :rref (:k t)) (and (not (abi/ref? t)) (abi/class? (abi/unq t)))) (assoc x :cat :xv) x)
+                            ct (if (abi/ref? t) t (abi/unq t))
+                            id (next-id)]
+                        (swap! *vars* assoc id {:id id :name (:name v) :ty ct :storage :local :fn fid})
+                        {:var id :param p :init (if (abi/ref? ct) (init-for ct x ctx :copy) (init-for ct [x] ctx :direct))})))
+        _ (doseq [{:keys [var]} copies] (enter! sc (:name (var* var)) {:e :var :id var}))
+        c (assoc ctx :scope sc)
+        prid (next-id)
+        _ (swap! *vars* assoc prid {:id prid :name "__promise" :ty pt :storage :local :fn fid})
+        lambda-op (and member (:lambda (abi/cls (:cls f))))
+        args (vec (concat (when (and member (not lambda-op)) [(deref-node {:op :this :ty (:this-type ctx) :cat :pr})])
+                          (map (fn [{:keys [var]}] (analyze c (ref (:name (var* var))))) copies)))
+        pinit (or (when (seq args)
+                    (try (init-for pt args c :direct)
+                         (catch arbace.lang.ExceptionInfo x (if (:codegen/refused (ex-data x)) nil (throw x)))))
+                  (init-for pt nil c :default))
+        c (assoc c :coro {:promise prid :ptype pt :await-transform (boolean (seq (class-lookup pc "await_transform")))})
+        g (coro-promise-call c "get_return_object" [])
+        rt (:ret (:ty f))
+        gt (abi/unq (:ty g))
+        gro (cond (abi/void? rt) {:k :void :e g}
+                  (if (class-id gt) (= (class-id gt) (class-id rt)) (= gt (abi/unq rt))) {:k :eager :init (init-for rt g c :copy)}
+                  :else (let [gid (next-id)]
+                          (swap! *vars* assoc gid {:id gid :name "__coro_gro" :ty gt :storage :local :fn fid})
+                          {:k :deferred :var gid :init (init-for gt g c :copy)
+                           :ret (init-for rt {:op :var :id gid :ty gt :cat :xv} c :copy)}))
+        init-aw (coro-await c (coro-promise-call c "initial_suspend" []) :initial)
+        body (stmt c body-n)
+        fall (when (seq (class-lookup pc "return_void")) {:s :expr :e (coro-promise-call c "return_void" [])})
+        ue {:s :expr :e (coro-promise-call c "unhandled_exception" [])}
+        fin-aw (coro-await c (coro-promise-call c "final_suspend" []) :final)]
+    (upd-fn! fid assoc :coro {:promise prid :pinit pinit :copies copies :gro gro :this (boolean member)})
+    {:s :block :items [{:s :expr :e init-aw}
+                       {:s :try :body {:s :block :items (cond-> [body] fall (conj fall))} :handlers [{:body ue}]}
+                       {:s :label :name "__coro_final" :body {:s :expr :e fin-aw}}]}))
+
 (defn analyze-fn!
   "Analyzes a function's body (and a constructor's mem-initializers) into :tbody."
   [fid]
@@ -7433,8 +7713,11 @@
             ;; stores the mem-initializers' value, the program taken as valid, as clang and g++ accepted it)
             ;; (pending review 1111 #1, cpp-s5b: only a body that stores to no member; one that does is analyzed, the
             ;; constructor run when its immediate invocation is reached, its value the one clang folds)
-            body (when (:body f) (if (and (:consteval f) (= :ctor (:kind f)) (not (checking?)) (not (consteval-ctor-body-stores? cls (:body f))))
-                                   {:s :block :items []} (trace #(stmt ctx (:body f)))))
+            body (when (:body f) (cond (and (:consteval f) (= :ctor (:kind f)) (not (checking?)) (not (consteval-ctor-body-stores? cls (:body f))))
+                                       {:s :block :items []}
+                                       ;; (queue 393, W4: a coroutine's body, by the code generator; the checker's analysis as before)
+                                       (and (not (checking?)) (coroutine-node? (:body f))) (trace #(coroutine-body ctx fid pids (:body f)))
+                                       :else (trace #(stmt ctx (:body f)))))
             ;; a constructor's or destructor's function-try-block: control reaching a handler's end rethrows the exception
             ;; ([except.handle]/15; clang's ExitCXXTryStmt, doImplicitRethrow); another function's handler falls through to its end
             ;; ([except.handle]/16). The mem-initializers stay before the try (cpp-90: an exception of theirs is not caught by the
@@ -7528,7 +7811,10 @@
       (when (= 1 (count (:ps (:ty f))))
         ;; the implicit copy: each base and member copied from the source's
         (let [src (var-node (first pids))
-              src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (checking?) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
+              src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (or (checking?) (:defaulted f) (:cx-move f)) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
+              ;; (queue 392: a defaulted move constructor's source an xvalue in the code generator's mode too, as the move
+              ;; assignment's below: its bases and members moved, cow-stdexcept.cc's `logic_error(logic_error&&) noexcept =
+              ;; default` by exception(exception&&), clang's _ZNSt9exceptionC2EOS_)
               c (abi/cls cls)]
           (binding [*cutoff* Long/MAX_VALUE]
             (upd-fn! fid assoc :tinits
@@ -7542,7 +7828,7 @@
     (when (and (= :method (:kind f)) (= "=" (:op f)))
       ;; (a defaulted move assignment's source an xvalue in the code generator's mode too, its members moved:
       ;; explicit-obj-default2.C, cpp-s3)
-      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (or (checking?) (:defaulted f)) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
+      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (or (checking?) (:defaulted f) (:cx-move f)) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
             me (deref-node (this-expr ctx))
             c (abi/cls cls)]
         (binding [*cutoff* Long/MAX_VALUE]

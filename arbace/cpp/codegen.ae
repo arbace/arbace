@@ -429,8 +429,19 @@
 
 (defn- run-cleanup! [c]
   (cond
-    (or (:try c) (:terminate c) (:filter c) (:eh-only c) (:delete c) (:guard-abort c)) nil
+    (or (:try c) (:terminate c) (:filter c) (:eh-only c) (:delete c) (:guard-abort c) (:free-exn c)) nil
     (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] (not (:might-throw c))))
+    :else
+  (cond
+    ;; queue 392: the named return value's destructor on the normal path, skipped once its return ran (clang's
+    ;; DestroyNRVOVariable: nrvo.unused, nrvo.skipdtor)
+    (:nrvo-flag c)
+    (let [l1 (new-label "nrvo.unused") l2 (new-label "nrvo.skipdtor")
+          v (val! (list 'load 'i1 ['ptr (:nrvo-flag c)] :align 1))]
+      (condbr! v l2 l1)
+      (begin! l1)
+      (call-dtor! (:cls c) (:addr c) (:vtt c))
+      (begin! l2))
     :else
   (if-let [fl (:flag c)]
     (let [l1 (new-label "cleanup") l2 (new-label "cleanup.done")
@@ -444,7 +455,7 @@
     (if (:array c)
       (let [cid (:cls c) n (long (:n c)) sz (abi/size-of {:k :class :id cid})]
         (doseq [i (range (dec n) -1 -1)] (call-dtor! cid (offset! (:array c) (* i sz)))))
-      (call-dtor! (:cls c) (:addr c) (:vtt c))))))
+      (call-dtor! (:cls c) (:addr c) (:vtt c)))))))
 
 (defn- push-temp-cleanup! [cid addr]
   (when (nontrivial-dtor? cid)
@@ -472,7 +483,8 @@
 ;; cleanups from the innermost out, dispatches to a try's handlers by llvm.eh.typeid.for, and resumes past the outermost.
 ;; The cleanup stack's entries beside the destructors: {:try handlers} (each {:ti type_info-or-nil :label l}),
 ;; {:end-catch true}, {:eh-only true :addr :cls} (a constructed base or member while its constructor runs), {:delete p
-;; :size n} (new's storage while its initializer runs), {:terminate true} (the bottom of a noexcept function), {:filter true}
+;; :size n} (new's storage while its initializer runs), {:free-exn x} (a thrown object's storage while its initializer runs,
+;; __cxa_free_exception: clang's FreeException, EmitAnyExprToExn; queue 445), {:terminate true} (the bottom of a noexcept function), {:filter true}
 ;; (the bottom of a `throw()` function before C++17: clang's EHFilterScope of no types, EmitStartEHSpec; queue 351).
 
 (def ^:dynamic *no-eh* false) ; inside a landing pad: calls are plain
@@ -505,6 +517,10 @@
     (:guard-abort c) (do (declare! "__cxa_guard_abort" 'void '[ptr] :nounwind true)
                          (emit! (list 'call 'void (gsym "__cxa_guard_abort") [['ptr (:guard-abort c)]] :attrs [:nounwind])))
     (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
+    (:free-exn c) (do (declare! "__cxa_free_exception" 'void '[ptr] :nounwind true)
+                      (emit! (list 'call 'void (gsym "__cxa_free_exception") [['ptr (:free-exn c)]] :attrs [:nounwind])))
+    ;; (queue 392: the named return value while unwinding: destroyed, its flag not read)
+    (:nrvo-flag c) (call-dtor! (:cls c) (:addr c) (:vtt c))
     (:delete c) (if (:dealloc c)
                   (dealloc-call! (:dealloc c) (:delete c) (:size c) (:align c) (:places c))
                   (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
@@ -781,6 +797,47 @@
           (when (and (:noreturn f) (abi/void? (abi/unq (:ret (:ty f))))) (emit! '(unreachable)))
           r)))))
 
+;; queue 392: a virtual call whose object's dynamic type is known is a direct one, as clang's EmitCXXMemberOrOperatorMemberCallExpr
+;; with CXXMethodDecl::getDevirtualizedMethod writes it at -O0 (clang/lib/CodeGen/CGExprCXX.cpp, clang/lib/AST/DeclCXX.cpp at
+;; llvmorg-23.1.5): the object, past its derived-to-base conversions, a variable of class type (not a reference), a member of
+;; class type or a temporary; the method called its final overrider in that class when that class or the object's declares it,
+;; else the call stays virtual (a covariant return, a pure overrider, an overrider in a class between the two). ios_init.cc's
+;; `buf_cout_sync.~stdio_sync_filebuf<char>()`, whose stdio_sync_filebuf<char>::~stdio_sync_filebuf (D2) clang defines there
+(declare overrides-fn?)
+
+(defn- devirtualized
+  "[fid obj] of the call node `e` (:virtual) made direct, or nil."
+  [e]
+  (let [f (sema/fnd (:fn e))
+        inner (loop [o (:obj e)] (if (= :base-lv (:op o)) (recur (:e o)) o))
+        known (case (:op inner)
+                :var (abi/class? (:ty (sema/var* (:id inner))))
+                :field (abi/class? (abi/unq (:ty inner)))
+                :temp true
+                false)
+        d (when known (:id (abi/unq (:ty inner))))
+        cf (:cls f)]
+    (when (and d (or (= d cf) (abi/derived-from? d cf)))
+      (let [own (fn [c] (first (filter #(let [g (sema/fnd %)] (and (:virtual g) (overrides-fn? f g)))
+                                       (if (= :dtor (:kind f)) (keep identity [(:dtor (abi/cls c))]) (:methods (abi/cls c))))))
+            ;; (the final overrider in d: d's own, else f's unless a class between them overrides it)
+            between (fn between [c] (some (fn [b] (let [bc (:cls b)]
+                                                    (when (and (not= bc cf) (or (abi/derived-from? bc cf)))
+                                                      (or (own bc) (between bc)))))
+                                          (:bases (abi/cls c))))
+            g (cond (= d cf) (:fn e) (own d) (own d) (between d) nil :else (:fn e))
+            gf (when g (sema/fnd g))]
+        (when (and gf (not (:pure gf)) (= (abi/unq (:ret (:ty gf))) (abi/unq (:ret (:ty f)))))
+          (cond (= (:cls gf) d) [g inner]
+                (= (:cls gf) cf) [g (:obj e)]))))))
+
+(defn- member-call!
+  "call! of the call node `e` (a method's on its object), devirtualized where clang does."
+  [e dest]
+  (if-let [[g o] (when (:virtual e) (devirtualized e))]
+    (call! g (emit-lv o) (:args e) dest false)
+    (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) dest (:virtual e))))
+
 (defn call-dtor!
   "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one); with `vtt`, a base
   subobject's (the base-object destructor of a class with virtual bases)."
@@ -906,6 +963,20 @@
                                     (list '= '%t2 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
                                     (tls-wrapper-ret ref? '%t2))])))))
 
+(defn- declare-extern-var!
+  "A variable defined elsewhere (extern, a header's) declared once in the module, `nm` its name: `external global`."
+  [v ^String nm]
+  (when (and (or (:extern v) (tls-wrapped-elsewhere? v nm)
+                 (and (= :member-static (:storage v)) (not (:defined v)) (not (:pending-def v)) (not (:linkonce v))))
+             (not (contains? (:declared @*top*) nm)))
+    (swap! *top* update :declared conj nm)
+    ;; (CP373 (a): a reference's declaration is `ptr`, as clang's ConvertTypeForMem of a
+    ;; reference type, `@r = external thread_local global ptr`; before, [8 x i8])
+    (add-top! (list 'llvm/global (gsym nm) (cond (abi/ref? (abi/unq (:ty v))) 'ptr
+                                                 (abi/scalar? (abi/unq (:ty v))) (abi/llvm-type (:ty v))
+                                                 :else (list 'array (abi/size-of (:ty v)) 'i8))
+                    :linkage :external :align (abi/align-of (:ty v))))))
+
 (defn- var-addr [id]
   (or (get-in @*f* [:addr id])
       (let [v (sema/var* id)]
@@ -920,16 +991,7 @@
                                      ;; (queue 380, W3d: and a static data member declared in its class and defined in no part
                                      ;; of this unit, monetary_members_cow.cc's money_base::_S_default_pattern, a class copied by
                                      ;; memcpy: lower's "unknown global" had refused the unit)
-                                     (when (and (or (:extern v) (tls-wrapped-elsewhere? v nm)
-                                                    (and (= :member-static (:storage v)) (not (:defined v)) (not (:pending-def v)) (not (:linkonce v))))
-                                                (not (contains? (:declared @*top*) nm)))
-                                       (swap! *top* update :declared conj nm)
-                                       ;; (CP373 (a): a reference's declaration is `ptr`, as clang's ConvertTypeForMem of a
-                                       ;; reference type, `@r = external thread_local global ptr`; before, [8 x i8])
-                                       (add-top! (list 'llvm/global (gsym nm) (cond (abi/ref? (abi/unq (:ty v))) 'ptr
-                                                                                    (abi/scalar? (abi/unq (:ty v))) (abi/llvm-type (:ty v))
-                                                                                    :else (list 'array (abi/size-of (:ty v)) 'i8))
-                                                       :linkage :external :align (abi/align-of (:ty v)))))
+                                     (declare-extern-var! v nm)
                                      ;; a thread-local variable with dynamic initialization: through its wrapper (outside the
                                      ;; unit's __tls_init, which initializes it)
                                      (cond
@@ -1203,6 +1265,74 @@
 
 (defn- opaque-of [e] (let [v (get *opaque* (:id e) ::none)] (if (= ::none v) (fail :codegen "an unbound opaque value") v)))
 
+;; ---------------------------------------------------------------------------------------------
+;; Coroutines (queue 393, W4; doc/cpp/CODEGEN.md, "As built: coroutines"): the split LLVM's CoroSplit makes of clang's
+;; coroutine at -O0, the switch ABI, written directly (no llvm.coro.* intrinsic, which the lowering refuses): the ramp (the
+;; function itself) allocates the frame, copies the parameters, constructs the promise, initializes the returned object
+;; and calls NAME.resume; NAME.resume(frame) is the body, every object of its own in the frame, entered by a switch on the
+;; suspension index; NAME.destroy(frame) sets the frame's destroy flag and calls it, each suspension point then running
+;; the cleanups in force there and freeing the frame. The frame's header is the switch ABI's: the resume and destroy
+;; functions' pointers, the promise after them at its alignment (__builtin_coro_promise's offset); done() is a null
+;; resume pointer, written at the final suspension.
+
+(defn- coro-destroy-path!
+  "A suspension point resumed for destruction: the cleanups in force there run from the innermost out, the full-expression's
+  temporaries first (as a landing pad runs them, on the normal path), down to the copies' and the promise's; then the
+  frame freed."
+  []
+  (let [st (eh-state) all (:cleanups @*f*)]
+    (binding [*temps* nil *extend* nil]
+      (doseq [i (range (dec (count st)) -1 -1)]
+        (swap! *f* assoc :cleanups (subvec st 0 i))
+        (run-cleanup! (nth st i))))
+    (swap! *f* assoc :cleanups all)
+    (br! (:free (:coro @*f*)))))
+
+(defn- co-await!
+  "The await-expression `e` (sema's :co-await) in a resume function, its value by `f` ([expr.await]/5): the awaiter's address
+  (kept in the frame: it is read again after a resumption), await_ready, and when false a suspension point: the index
+  stored (at the final one the resume pointer nulled: done()), await_suspend (a bool's false resumes at once) and a return
+  to the resumer; the point's resumption the switch's case, which goes on to await_resume, or destroys."
+  [e f]
+  (let [co (or (:coro @*f*) (fail :coroutine "a co_await outside a coroutine's resume function"))
+        v (emit-lv (:e e))
+        sp (alloca! 'ptr 8)
+        _ (emit! (list 'store ['ptr v] ['ptr sp] :align 8))
+        k (inc (count @(:points co)))
+        lr (new-label "coro.ready") ls (new-label "coro.suspend") lres (new-label "coro.resume") ld (new-label "coro.destroy")
+        r (binding [*opaque* (assoc *opaque* (:id e) v)] (emit-rv (:ready e)))]
+    (swap! (:points co) conj [k lres])
+    (condbr! r lr ls)
+    (close-block!) (start! ls)
+    (emit! (list 'store ['i32 k] ['ptr (:index co)] :align 4))
+    (when (:final e) (emit! (list 'store ['ptr 'null] ['ptr (:frame co)] :align 8)))
+    (binding [*opaque* (assoc *opaque* (:id e) v)]
+      (case (:sk e)
+        :void (do (emit-rv (:suspend e)) (emit! '(ret void)))
+        :bool (let [s (emit-rv (:suspend e)) lx (new-label "coro.ret")]
+                (condbr! s lx lr) (close-block!) (start! lx) (emit! '(ret void)))))
+    (close-block!) (start! lres)
+    (let [fl (val! (list 'load 'i8 ['ptr (:dflag co)] :align 1))
+          c (val! (list 'icmp :ne 'i8 fl 0))]
+      (condbr! c ld lr))
+    (close-block!) (start! ld)
+    (coro-destroy-path!)
+    (close-block!) (start! lr)
+    (let [v2 (val! (list 'load 'ptr ['ptr sp] :align 8))]
+      (binding [*opaque* (assoc *opaque* (:id e) v2)] (f (:resume e))))))
+
+(defn- coro-builtin!
+  "<coroutine>'s builtins on the frame `p` (sema's :coro-builtin), as LLVM's CoroCleanup lowers llvm.coro.done, .resume,
+  .destroy and .promise for the switch ABI."
+  [e]
+  (let [p (emit-rv (:p e))]
+    (case (:which e)
+      :coro-done (val! (list 'icmp :eq 'ptr (val! (list 'load 'ptr ['ptr p] :align 8)) 'null))
+      :coro-resume (do (call-insn! 'void 'void (val! (list 'load 'ptr ['ptr p] :align 8)) [['ptr p]] false) nil)
+      :coro-destroy (do (call-insn! 'void 'void (val! (list 'load 'ptr ['ptr (offset! p 8)] :align 8)) [['ptr p]] false) nil)
+      :coro-promise (let [al (max 1 (long (:align e))) off (* al (quot (+ 16 al -1) al))]
+                      (val! (list 'getelementptr :inbounds 'i8 ['ptr p] ['i64 (if (:from e) (- off) off)]))))))
+
 (defn- incdec! [e]
   (let [t (abi/unq (:ty e)) a (emit-lv (:e e)) old (load! t a)
         nv (cond
@@ -1213,7 +1343,7 @@
     (store! t nv a)
     (if (:post e) old a)))
 
-(declare emit-rv)
+(declare emit-rv linkage-of)
 
 (defn- place-values
   "The placement arguments' operands for the parameters `ps` (scalars, pointers and references: an allocation
@@ -1536,10 +1666,13 @@
     :incdec (let [r (incdec! e)] (if (:post e) r (load! (:ty e) r)))
     :comma (do (emit-rv (:l e)) (emit-rv (:r e)))
     :bind-opaque (bind-opaque! e emit-rv)
+    :co-await (co-await! e emit-rv)
+    :coro-frame (:frame (or (:coro @*f*) (fail :coroutine "the frame outside a coroutine's resume function")))
+    :coro-builtin (coro-builtin! e)
     :stmt-expr (stmt-expr! e)
     :opaque (if (#{:lv :xv} (:cat e)) (fail :codegen "an opaque glvalue as a prvalue") (opaque-of e))
     :call (if (= :pr (:cat e))
-            (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) nil (:virtual e))
+            (member-call! e nil)
             (load! (:ty e) (emit-lv e)))
     :icall (if (= :pr (:cat e)) (icall! e nil) (load! (:ty e) (emit-lv e)))
     :new (let [et (:et e)
@@ -1611,7 +1744,11 @@
              (let [_ (declare! "__cxa_allocate_exception" 'ptr '[i64] :nounwind true)
                    _ (declare! "__cxa_throw" 'void '[ptr ptr ptr])
                    x (val! (list 'call 'ptr (gsym "__cxa_allocate_exception") [['i64 (abi/size-of t)]] :attrs [:nounwind]))
+                   ;; (queue 445: the storage freed when the initialization throws, eh/uncaught4.C's `throw e()`)
+                   d0 (count (:cleanups @*f*))
+                   _ (swap! *f* update :cleanups conj {:free-exn x})
                    _ (emit-init x t (:init e))
+                   _ (swap! *f* update :cleanups #(subvec % 0 d0))
                    ti (eh-typeinfo! t)
                    cid (when (abi/class? t) (:id t))
                    d (if (nontrivial-dtor? cid) (want-fn! (:dtor (abi/cls cid)) 1) 'null)]
@@ -1751,9 +1888,13 @@
                     (emit! (list 'call 'void (gsym "_ZdlPvm") [['ptr p] ['i64 (abi/size-of et)]]))))
               (begin! lend)
               nil)
-    (if (#{:lv :xv} (:cat e))
-      (load! (:ty e) (emit-lv e))
-      (fail :codegen "rvalue " (:op e)))))
+    (cond
+      (#{:lv :xv} (:cat e)) (load! (:ty e) (emit-lv e))
+      ;; (queue 439: a GNU vector's or _Complex's prvalue temporary, a compound literal `(V){...}`: its object made in a
+      ;; slot and loaded, as clang's .compoundliteral)
+      (and (= :temp-obj (:op e)) (#{:vec :complex} (:k (abi/unq (:ty e)))))
+      (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e)) (load! (:ty e) t))
+      :else (fail :codegen "rvalue " (:op e)))))
 
 (defn emit-lv
   "The address of the glvalue `e` (a class prvalue materialized)."
@@ -1835,11 +1976,12 @@
     :incdec (if (:post e) (fail :codegen "postfix as an lvalue") (incdec! e))
     :comma (do (emit-rv (:l e)) (emit-lv (:r e)))
     :bind-opaque (bind-opaque! e emit-lv)
+    :co-await (co-await! e emit-lv)
     :opaque (if (#{:lv :xv} (:cat e)) (opaque-of e) (fail :codegen "an opaque prvalue as a glvalue"))
     :cond (cond-branches! e emit-lv 'ptr)
     :call (if (= :pr (:cat e))
             (materialize! e)
-            (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) nil (:virtual e)))
+            (member-call! e nil))
     :icall (if (= :pr (:cat e)) (materialize! e) (icall! e nil))
     :temp-obj (materialize! e)
     :raw (fail :codegen "raw as an lvalue")
@@ -1855,12 +1997,13 @@
   [e addr]
   (case (:op e)
     :temp-obj (emit-init addr (:ty e) (:init e))
-    :call (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) addr (:virtual e))
+    :call (member-call! e addr)
     :icall (icall! e addr)
     :mcall (mcall! e addr)
     :cond (cond-branches! e #(emit-into % addr) nil)
     :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
     :bind-opaque (bind-opaque! e #(emit-into % addr))
+    :co-await (co-await! e #(emit-into % addr))
     :va-arg (memcpy! addr (va-arg-class! e) (abi/size-of (:ty e)))
     ;; <compare>'s orderings: one signed char ([cmp.categories]: libstdc++'s _M_value), a built-in three-way
     ;; comparison's -1, 0, 1 (partial_ordering's unordered 2) or a constant
@@ -1965,17 +2108,29 @@
   (let [v (sema/var* (:var s))
         t (:ty v)
         nrvo (= (:var s) (:nrvo @*f*))
-        addr (if nrvo (:sret @*f*) (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))]
+        addr (if nrvo (:sret @*f*) (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))
+        bt (loop [t (abi/unq t)] (if (abi/arr? t) (recur (abi/unq (:of t))) t))
+        dtor? (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
+        ;; queue 392: the named return value of a class with a non-trivial destructor is destroyed when its scope is left
+        ;; other than by its return, and on the exception path always: clang's EmitAutoVarAlloca's NRVO flag, false before
+        ;; the initialization, set by the return, and DestroyNRVOVariable's cleanup, the flag checked on the normal path
+        ;; only (cow-locale_init.cc's locale::name(), whose landing pad destroys its string `__ret`)
+        nfl (when (and nrvo dtor?)
+              (let [fl (alloca! 'i1 1)]
+                (emit! (list 'store ['i1 false] ['ptr fl] :align 1))
+                (swap! *f* assoc :nrvo-flag fl)
+                fl))]
     (swap! *f* assoc-in [:addr (:var s)] addr)
     (let [ext (atom [])]
       (with-full (binding [*extend* ext *decl-e* (when (= :expr (:i (:init s))) (:e (:init s)))] (emit-init addr t (:init s))))
       (doseq [c @ext] (push-cleanup! c)))
-    (when-not nrvo
-      (let [bt (loop [t (abi/unq t)] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
-        (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
-          (if (abi/arr? (abi/unq t))
-            (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
-            (push-cleanup! {:addr addr :cls (:id bt)})))))))
+    (when dtor?
+      (cond
+        nfl (push-cleanup! {:addr addr :cls (:id bt) :nrvo-flag nfl})
+        nrvo nil
+        (abi/arr? (abi/unq t))
+        (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
+        :else (push-cleanup! {:addr addr :cls (:id bt)})))))
 
 (declare const-leaves leaves-constant)
 
@@ -2000,14 +2155,19 @@
                            (empty? leaves) [nil 'zeroinitializer]
                            :else (leaves-constant leaves s))
         cexpr (or cexpr lval)
-        ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))]
+        ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))
+        ;; queue 392: a static local of an inline function (or a template's specialization) with external linkage is one
+        ;; object for the program, linkonce_odr with its guard (clang's GetGVALinkageForVariable: the enclosing function's
+        ;; linkage, GVA_StrongODR downgraded to GVA_DiscardableODR); of any other function, internal: <ext/bitmap_allocator.h>'s
+        ;; free_list::_M_get_mutex()'s _S_mutex, bitmap_allocator.cc's _ZZN9__gnu_cxx9free_list12_M_get_mutexEvE8_S_mutex
+        lk (if (#{[:linkage :linkonce_odr] [:linkage :weak_odr]} (linkage-of f)) :linkonce_odr :internal)]
     (when (and (:tls v) (not (or cinit cexpr))) (fail :tls "a thread-local static with dynamic initialization (" (:name v) ")"))
-    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage :internal :align a))
+    (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage lk :align a))
     (when-not (or cinit cexpr)
       ;; the guard ([stmt.dcl]/3, Itanium §3.3.2)
       (let [g (str "_ZGV" (subs nm 2))
             l1 (new-label "init.check") l2 (new-label "init") l3 (new-label "init.end")]
-        (add-top! (list 'llvm/global (gsym g) 'i64 0 :linkage :internal :align 8))
+        (add-top! (list 'llvm/global (gsym g) 'i64 0 :linkage lk :align 8))
         (declare! "__cxa_guard_acquire" 'i32 '[ptr])
         (declare! "__cxa_guard_release" 'void '[ptr])
         (let [gv (val! (list 'load 'i8 ['ptr (gsym g)] :align 8 :atomic :acquire))
@@ -2039,7 +2199,9 @@
       (:init s)
       (let [rt (:ret (:ty f))]
         (cond
-          (abi/class? (abi/unq rt)) (when-not (and (:nrvo-var s) (= (:nrvo-var s) (:nrvo @*f*)))
+          (abi/class? (abi/unq rt)) (if (and (:nrvo-var s) (= (:nrvo-var s) (:nrvo @*f*)))
+                                      ;; (queue 392: its flag set, so the cleanup leaves the returned object alone)
+                                      (when-let [fl (:nrvo-flag @*f*)] (emit! (list 'store ['i1 true] ['ptr fl] :align 1)))
                                       (with-full (emit-init (:sret @*f*) (abi/unq rt) (:init s))))
           (abi/ref? rt) (with-full (store! (abi/ptr abi/void) (case (:i (:init s)) :bind (emit-lv (:e (:init s))) (fail :return "a reference to a temporary")) (:ret-slot @*f*)))
           :else (with-full (store! rt (emit-rv (:e (:init s))) (:ret-slot @*f*))))))
@@ -2067,7 +2229,7 @@
     ;; (CP338 (a): an empty asm statement, clang's EmitAsmStmt: the inputs' constraints, the clobbers `~{memory}` (cc is
     ;; x86's flags, which the target adds anyway), then x86's own ~{dirflag},~{fpsr},~{flags}; nounwind)
     :asm (let [vs (mapv (fn [e] [(abi/llvm-type (abi/unq (:ty e))) (emit-rv e)]) (:ins s))
-               cs (str/join "," (concat (map (constantly "r") (:ins s))
+               cs (str/join "," (concat (map #(or (:asm-c %) "r") (:ins s))
                                         (keep #(when (= "memory" %) "~{memory}") (:clobbers s))
                                         ["~{dirflag}" "~{fpsr}" "~{flags}"]))]
            (emit! (list 'call 'void (list 'asm "" cs :sideeffect) vs :attrs [:nounwind])))
@@ -2114,6 +2276,13 @@
     :break (let [l (peek (:loops @*f*))] (unwind-to! (:depth l)) (br! (:break l)))
     :continue (let [l (last (filter :continue (:loops @*f*)))] (unwind-to! (:depth l)) (br! (:continue l)))
     :return (emit-return! s)
+    ;; (queue 393: co_return, sema's: the promise's return_value or return_void, the body's cleanups, the final suspension)
+    :co-return (let [co (or (:coro @*f*) (fail :coroutine "co_return outside a coroutine"))]
+                 (when (:pre s) (with-full (emit-rv (:pre s))))
+                 (with-full (emit-rv (:call s)))
+                 (unwind-to! (:base co))
+                 (br! (or (get-in @*f* [:user-labels "__coro_final"])
+                          (let [l (new-label "lbl.__coro_final")] (swap! *f* assoc-in [:user-labels "__coro_final"] l) l))))
     :switch (let [v (with-full (emit-rv (:e s)))
                   le (new-label "sw.end")
                   cases (atom [])
@@ -2535,6 +2704,182 @@
     (or (:inline f) (:implicit f) (and (:defaulted f) (not (:out-of-line-default f)))) [:linkage :linkonce_odr]
     :else []))
 
+(defn- lt-size
+  "The bytes of an alloca's LLVM type (the frame's slots)."
+  [t]
+  (cond
+    (= t va-tag) 24
+    (seq? t) (case (first t)
+               array (* (long (second t)) (long (lt-size (nth t 2))))
+               struct (if (= t '(struct i64 i64)) 16 (fail :coroutine "a frame slot of type " (pr-str t)))
+               (fail :coroutine "a frame slot of type " (pr-str t)))
+    :else (case t (i1 i8) 1 (i16 half) 2 (i32 float) 4 (i64 double ptr) 8 (i128 x86_fp80 fp128) 16
+            (fail :coroutine "a frame slot of type " (pr-str t)))))
+
+(defn- subst
+  "The form `x` with each symbol or keyword that is a key of `m` replaced by its value."
+  [x m]
+  (cond (contains? m x) (get m x)
+        (vector? x) (mapv #(subst % m) x)
+        (seq? x) (apply list (map #(subst % m) x))
+        :else x))
+
+(defn- coro-check-ssa!
+  "A resume function's blocks checked for a value that a suspension point would lose: every use of an instruction's result
+  dominated by its definition, in the graph the dispatch's switch adds its entries to (a value computed before a co_await in
+  the same expression, `a + co_await b`, has no frame slot: a refusal, not a wrong program)."
+  [blocks]
+  (let [term (fn [b] (let [x (last b)] (if (= '= (first x)) (nth x 2) x)))
+        succ (fn [b] (let [t (term b)]
+                       (case (first t)
+                         br (if (= 2 (count t)) [(second t)] [(nth t 3) (nth t 4)])
+                         switch (into [(nth t 3)] (map #(nth % 2) (nth t 4)))
+                         invoke (let [m (apply hash-map (drop-while #(not (keyword? %)) t))] [(:to m) (:unwind m)])
+                         [])))
+        labels (mapv second blocks)
+        entry (first labels)
+        succs (into {} (map (fn [b] [(second b) (succ b)]) blocks))
+        preds (reduce (fn [m [l ss]] (reduce #(update %1 %2 (fnil conj []) l) m ss)) {} succs)
+        live (loop [seen #{entry} todo [entry]]
+               (if-let [l (peek todo)]
+                 (let [ns (remove seen (get succs l))] (recur (into seen ns) (into (pop todo) ns)))
+                 seen))
+        labels (filterv live labels)
+        all (set labels)
+        dom (loop [d (assoc (zipmap labels (repeat all)) entry #{entry})]
+              (let [d2 (reduce (fn [d l]
+                                 (if (= l entry) d
+                                     (let [ps (filter live (get preds l))
+                                           x (reduce (fn [a p] (set (filter (get d p) a))) (get d (first ps)) (rest ps))]
+                                       (assoc d l (conj (or x #{}) l)))))
+                               d labels)]
+                (if (= d2 d) d (recur d2))))
+        defs (into {} (for [b blocks x (drop 2 b) :when (= '= (first x))] [(second x) (second b)]))
+        syms (fn syms [x] (cond (symbol? x) (when (contains? defs x) [x]) (or (seq? x) (vector? x)) (mapcat syms x) :else nil))
+        bad (fn [v at] (let [d (get defs v)] (when-not (contains? (get dom at) d) v)))]
+    (doseq [b blocks :when (live (second b)) x (drop 2 b)]
+      (let [l (second b) rhs (if (= '= (first x)) (nth x 2) x)]
+        (when-let [v (if (and (seq? rhs) (= 'phi (first rhs)))
+                       (some (fn [[v pl]] (when (and (symbol? v) (contains? defs v) (live pl)) (bad v pl))) (drop 2 rhs))
+                       (some #(bad % l) (syms rhs)))]
+          (fail :coroutine "a value live across a suspension point (" v ")"))))))
+
+(defn- coro-resume!
+  "The resume and destroy functions of the coroutine `f` named `nm` (sema's :coro and :tbody): NAME.resume(frame), the
+  body, its allocas the frame's slots after the header (the promise first, at its alignment past the two pointers),
+  entered by a switch on the suspension index (0 the start), the copies' and the promise's destruction the bottom of its
+  cleanups; NAME.destroy(frame), the destroy flag set and NAME.resume called. The layout for the ramp:
+  {:size :offs {slot offset} :pslot :this-slot :cslots :islot :dslot :entry-stores :resume :destroy}."
+  [f ^String nm]
+  (let [co (:coro f)
+        rnm (str nm ".resume") dnm (str nm ".destroy")
+        frame '%a0
+        state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores [] :fn f :ret-label '%return})]
+    (reserve! rnm) (reserve! dnm)
+    (binding [*f* state]
+      (let [pv (:promise co)
+            pt (abi/unq (:ty (sema/var* pv)))
+            pslot (slot! pt)
+            this-slot (when (:this co) (alloca! 'ptr 8))
+            cslots (mapv (fn [{:keys [var]}] (let [t (:ty (sema/var* var))] (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))) (:copies co))
+            islot (alloca! 'i32 4) dslot (alloca! 'i8 1)
+            free (new-label "coro.free")]
+        (swap! *f* assoc :this-slot this-slot :coro {:frame frame :index islot :dflag dslot :points (atom []) :free free})
+        (swap! *f* assoc-in [:addr pv] pslot)
+        (doseq [[{:keys [var]} sl] (map vector (:copies co) cslots)] (swap! *f* assoc-in [:addr var] sl))
+        (br! '%coro.dispatch)
+        (close-block!) (start! '%coro.start)
+        ;; the copies and the promise destroyed when the coroutine ends ([dcl.fct.def.coroutine]/12: the promise first)
+        (doseq [[{:keys [var]} sl] (map vector (:copies co) cslots)]
+          (let [t (:ty (sema/var* var))]
+            (when (and (not (abi/ref? t)) (abi/class? (abi/unq t)) (nontrivial-dtor? (:id (abi/unq t)))) (push-cleanup! {:addr sl :cls (:id (abi/unq t))}))))
+        (when (nontrivial-dtor? (:id pt)) (push-cleanup! {:addr pslot :cls (:id pt)}))
+        (swap! *f* assoc-in [:coro :base] (cleanup-depth))
+        (emit-stmt (:tbody f))
+        (when-not (:term @*f*) (unwind-to! 0) (br! free))
+        (close-block!) (start! free)
+        (dealloc-call! {:sym "_ZdlPvm" :size true} frame ::frame-size nil nil)
+        (emit! '(ret void))
+        (close-block!) (start! '%coro.dispatch)
+        (let [i (val! (list 'load 'i32 ['ptr islot] :align 4))]
+          (emit! (list 'switch 'i32 i '%coro.start (vec (for [[k l] @(:points (:coro @*f*))] ['i32 k l])))))
+        (close-block!)
+        (let [s @state
+              [offs end al] (reduce (fn [[m off al] x]
+                                      (let [[_ a [_ t _ a2]] x
+                                            a2 (max 1 (long a2))
+                                            o (* a2 (quot (+ (long off) a2 -1) a2))]
+                                        [(assoc m a o) (+ o (long (lt-size t))) (max (long al) a2)]))
+                                    [{} 16 8] (:allocas s))
+              _ (when (> (long al) 16) (fail :coroutine "a frame object aligned to " al " (an aligned operator new)"))
+              size (* (long al) (quot (+ (long end) (long al) -1) (long al)))
+              geps (for [[_ a] (:allocas s)] (list '= a (list 'getelementptr :inbounds 'i8 ['ptr frame] ['i64 (get offs a)])))
+              blocks (subst (:blocks s) {::frame-size size})
+              entry (first blocks)
+              body (vec (concat [(apply list 'block (second entry) (concat geps (drop 2 entry)))] (rest blocks) (subst (:pad-blocks s) {::frame-size size})))
+              _ (coro-check-ssa! body)]
+          (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
+          (place! [:fn rnm] (apply list 'llvm/define (gsym rnm) 'void [['ptr frame]]
+                                   (concat [:linkage :internal]
+                                           (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
+                                           [:body body])))
+          (place! [:fn dnm] (list 'llvm/define (gsym dnm) 'void [['ptr frame]] :linkage :internal
+                                  :body [(list 'block '%entry
+                                               (list '= '%t1 (list 'getelementptr :inbounds 'i8 ['ptr frame] ['i64 (get offs dslot)]))
+                                               (list 'store ['i8 1] ['ptr '%t1] :align 1)
+                                               (list 'call 'void (gsym rnm) [['ptr frame]])
+                                               '(ret void))]))
+          {:size size :offs offs :pslot pslot :this-slot this-slot :cslots cslots :islot islot :dslot dslot
+           :entry-stores (:entry-stores s) :resume (gsym rnm) :destroy (gsym dnm)})))))
+
+(defn- coro-ramp!
+  "The ramp, the coroutine `f`'s own body in emit-fn!'s function: the frame by ::operator new (freed if what follows
+  throws), its header and index, the flags the resume function's entry would clear, `this` and the parameters' copies,
+  the promise, the returned object from get_return_object (at once, or kept and converted after the first suspension),
+  then NAME.resume; the return."
+  [f]
+  (let [co (:coro f)
+        L (coro-resume! f (fn-name (:id f) 2))
+        at (fn [sl] (get (:offs L) sl))
+        [fr _] (alloc-call! {:sym "_Znwm" :places []} (:size L))
+        g (fn [off] (offset! fr off))
+        d (cleanup-depth)]
+    (push-cleanup! {:delete fr :size (:size L)})
+    (emit! (list 'store ['ptr (:resume L)] ['ptr fr] :align 8))
+    (emit! (list 'store ['ptr (:destroy L)] ['ptr (g 8)] :align 8))
+    (emit! (list 'store ['i32 0] ['ptr (g (at (:islot L)))] :align 4))
+    (emit! (list 'store ['i8 0] ['ptr (g (at (:dslot L)))] :align 1))
+    (doseq [es (:entry-stores L)]
+      (let [[op v [_ p] & more] es] (emit! (apply list op v ['ptr (g (at p))] more))))
+    (when-let [ts (:this-slot L)]
+      (emit! (list 'store ['ptr (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8))] ['ptr (g (at ts))] :align 8)))
+    (doseq [[{:keys [var init]} sl] (map vector (:copies co) (:cslots L))]
+      (let [a (g (at sl)) t (:ty (sema/var* var)) u (abi/unq t)]
+        (with-full (emit-init a t init))
+        (swap! *f* assoc-in [:addr var] a)
+        (when (and (not (abi/ref? t)) (abi/class? u) (nontrivial-dtor? (:id u))) (push-cleanup! {:eh-only true :addr a :cls (:id u)}))))
+    (let [pa (g (at (:pslot L))) pt (abi/unq (:ty (sema/var* (:promise co))))]
+      (swap! *f* assoc-in [:addr (:promise co)] pa)
+      (with-full (emit-init pa pt (:pinit co)))
+      (when (nontrivial-dtor? (:id pt)) (push-cleanup! {:eh-only true :addr pa :cls (:id pt)})))
+    (let [gro (:gro co) rt (:ret (:ty f))
+          ret! (fn [init] (cond (abi/class? (abi/unq rt)) (with-full (emit-init (:sret @*f*) (abi/unq rt) init))
+                                (abi/ref? rt) (fail :coroutine "a coroutine returning a reference")
+                                :else (with-full (store! rt (emit-rv (:e init)) (:ret-slot @*f*)))))
+          gt (when (= :deferred (:k gro)) (abi/unq (:ty (sema/var* (:var gro)))))
+          gslot (when gt (slot! gt))]
+      (case (:k gro)
+        :void (with-full (emit-rv (:e gro)))
+        :eager (ret! (:init gro))
+        :deferred (do (swap! *f* assoc-in [:addr (:var gro)] gslot) (with-full (emit-init gslot gt (:init gro)))))
+      ;; the frame and what it holds are the coroutine's from here
+      (swap! *f* update :cleanups #(subvec % 0 d))
+      (when (and gt (abi/class? gt) (nontrivial-dtor? (:id gt))) (push-cleanup! {:addr gslot :cls (:id gt)}))
+      (call-insn! 'void 'void (:resume L) [['ptr fr]] false)
+      (when gt (ret! (:ret gro)))
+      (unwind-to! 0)
+      (br! '%return))))
+
 (defn- emit-fn!
   "The definition of the function `fid` (a constructor's or destructor's variant `v`; a virtual destructor's D0 with
   its base-object or complete one)."
@@ -2621,7 +2966,11 @@
                         ;; [class.dtor]/13: <format>'s _Optional_locale's anonymous union had destroyed the locale it never held)
                         (doseq [[i fl] (map-indexed vector (:fields c)) :when (not (:union c))]
                           (let [bt (loop [t (abi/unq (:ty fl))] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
-                            (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
+                            ;; (queue 392: an anonymous union's destructor is not called either, its members variant
+                            ;; members of the class, clang's EnterDtorCleanups: sso_string.cc's __sso_string, whose union
+                            ;; holds a std::string, had called and defined `__sso_string::{unnamed}::~`, _ZNSt12__sso_stringUt_D2Ev)
+                            (when (and (abi/class? bt) (nontrivial-dtor? (:id bt))
+                                       (not (and (:anon fl) (:union (abi/cls (:id bt))))))
                               (if (abi/arr? (abi/unq (:ty fl)))
                                 (push-cleanup! {:array (offset! thisv (nth (:fields l) i)) :n (quot (abi/size-of (:ty fl)) (abi/size-of bt)) :cls (:id bt)})
                                 (push-cleanup! {:addr (offset! thisv (nth (:fields l) i)) :cls (:id bt)})))))))
@@ -2641,7 +2990,8 @@
                   (doseq [vb (reverse (abi/vbases-init cid)) :when (nontrivial-dtor? vb)]
                     (let [off (long (get (:vbases (abi/layout cid)) vb))]
                       (call-dtor! vb (offset! thisv off) (when (vb-class? vb) (vtt-ref cid nil (get (:sub-vtts lay) [vb off])))))))))
-            (when-let [b (:tbody f)] (emit-stmt b)))
+            ;; (queue 393: a coroutine's ramp, its body the resume function's)
+            (if (:coro f) (coro-ramp! f) (when-let [b (:tbody f)] (emit-stmt b))))
           ;; falling off the end
           (when-not (:term @*f*)
             (cond
@@ -2712,11 +3062,14 @@
 (defn- key-fn
   "The key function of the dynamic class `cid` (Itanium §5.2.3, clang's ASTContext::getCurrentKeyFunction): its first
   virtual function, in declaration order, that is not pure and not inline (defined in the class, declared or later
-  defined inline: clang's setNonKeyFunction), not implicit or defaulted; nil for a class template's specialization (its
-  vtable is the instantiation's, linkonce_odr) or a class without one."
+  defined inline: clang's setNonKeyFunction), not implicit or defaulted; nil for a class template's instantiation (its
+  vtable is the instantiation's, linkonce_odr) or a class without one. (queue 392: an explicit specialization has one, as
+  clang's computeKeyFunction excludes only the instantiations' kinds: <bits/locale_facets.h>'s ctype<char>, whose
+  ~ctype() ctype.cc defines, its vtable and type_info no longer written in ctype_configure_char.cc with its constructors)"
   [cid]
   (let [c (abi/cls cid)]
-    (when (and (abi/dynamic? cid) (not (:targs c)) (not (:tinst c)))
+    (when (and (abi/dynamic? cid) (not (:tinst c))
+               (or (not (:targs c)) (:espec c)))
       (first (filter (fn [id] (let [f (sema/fnd id)] (and (:virtual f) (not (:pure f)) (not (:inline f)) (not (:implicit f)))))
                      (:methods c))))))
 
@@ -2744,9 +3097,12 @@
 (defn- vt-linkage
   "The linkage options of the vtable, VTT and type_info of class `cid`: strong where its key function is defined."
   [cid]
-  (if (abi/dynamic? cid)
-    (case (vtable-home cid) :here [] :weak [:linkage :weak_odr] [:linkage :linkonce_odr])
-    [:linkage :linkonce_odr]))
+  (cond
+    ;; (queue 411: a class of an unnamed namespace, internal, [basic.link]/4: its vtable and type_info too, as clang's
+    ;; getVTableLinkage and getTypeInfoLinkage (an internal type's: InternalLinkage); ios_errcat.cc's io_error_category)
+    (:internal (:scope (abi/cls cid))) [:linkage :internal]
+    (abi/dynamic? cid) (case (vtable-home cid) :here [] :weak [:linkage :weak_odr] [:linkage :linkonce_odr])
+    :else [:linkage :linkonce_odr]))
 
 (defn- typeinfo! [cid]
   (let [t {:k :class :id cid}
@@ -2876,9 +3232,14 @@
 
 (defn- vtt! [cid]
   (let [{:keys [entries]} (vtt-layout cid)]
+    (if (external-class? cid)
+      ;; (queue 392: the VTT of a class whose vtable is another unit's is that unit's too, declared, and with it the
+      ;; construction vtables, as clang's CodeGenVTables::EmitVTTDefinition is reached only where the vtable is: cow-fstream-inst.cc's
+      ;; basic_fstream<char>'s _ZTT and _ZTC under <fstream>'s extern template class basic_fstream<char>)
+      (place! [:vtt cid] (list 'llvm/global (gsym (vtt-name cid)) (list 'array (count entries) 'ptr) :linkage :external :constant true :align 8))
     (place! [:vtt cid] (apply list 'llvm/global (gsym (vtt-name cid)) (list 'array (count entries) 'ptr)
                     (apply list 'array (for [e entries] ['ptr (address-point (:grp e) (:sub e))]))
-                    (concat (vt-linkage cid) [:constant true :align 8])))))
+                    (concat (vt-linkage cid) [:constant true :align 8]))))))
 
 (defn- vtable! [cid] (group! [cid cid 0]))
 
@@ -2949,7 +3310,13 @@
                                     :float (fp-const (:ty e) (:v e) (:lit e))
                                     :null 'null
                                     :decay (when (= :str (:op (:e e))) (gsym (str-global (:e e))))
-                                    :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))] (when (#{:global :member-static} (:storage v)) (gsym (abi/mangle-var v)))))
+                                    :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))]
+                                                                    (when (#{:global :member-static} (:storage v))
+                                                                      ;; (queue 411: a variable defined elsewhere declared, as var-addr
+                                                                      ;; declares it: locale_init.cc's locale::_S_twinned_facets, the
+                                                                      ;; addresses of numpunct<char>::id and the other facets' ids, which
+                                                                      ;; the lowering had refused as unknown globals)
+                                                                      (let [nm (abi/mangle-var v)] (declare-extern-var! v nm) (gsym nm)))))
                                     :fnaddr (want-fn! (:fn e))
                                     :cast (case (:ck e)
                                             (:int :noop) (when-let [x (cv (:e e))] (if (number? x)
@@ -3209,6 +3576,8 @@
             (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
             (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
         (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
+        ;; (queue 392: a function declared with GNU's alias attribute: an alias of its target, written whether used or not)
+        (when (and (:alias-of f) (not (:tbody f))) (swap! *top* update :gnu-aliases (fnil conj []) id))
         (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id)))))
     ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
@@ -3265,6 +3634,10 @@
       (when (seq cands)
         (swap! *top* assoc :forms (filterv #(not (and (def? %) (not (contains? used (second %))))) forms))))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
+    (doseq [id (distinct (:gnu-aliases @*top*))]
+      (let [f (sema/fnd id) nm (fn-name id) [ret ps] (fn-sig f 2)]
+        (swap! *top* update :forms (fn [fs] (filterv #(not (and (seq? %) (= 'llvm/declare (first %)) (= (gsym nm) (second %)))) fs)))
+        (add-top! (list 'llvm/alias (gsym nm) (list 'fn ret (vec ps)) ['ptr (gsym (:alias-of f))]))))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
     ;; G5c: the thread-local variables' globals (their definitions and declarations) thread_local, as clang's
     ;; CodeGenModule::setTLSMode writes them (the general-dynamic model's default)
@@ -3285,7 +3658,7 @@
   "The LLVM forms of the C++ file at `path` (read by the native parser at `std`, with the preprocessor's options `args`: -I, -D ...)."
   ([^String path ^String std] (gen-file path std []))
   ([^String path ^String std args]
-  (binding [sema/*cxx-year* (sema/cxx-year std) sema/*main-name* (.getName (java.io.File. path)) sema/*main-dir* (.getParent (.getAbsoluteFile (java.io.File. path))) ps/*full-headers* (not= "0" (System/getenv "CPP_FULL_HEADERS"))]
+  (binding [sema/*cxx-year* (sema/cxx-year std) sema/*main-name* (.getName (java.io.File. path)) sema/*main-dir* (.getParent (.getAbsoluteFile (java.io.File. path))) ps/*full-headers* (not= "0" (System/getenv "CPP_FULL_HEADERS")) ps/*vector-specs* true]
     (let [u (native/parse-file path (.getName (java.io.File. path)) std (vec args))
           _ (when (pos? (long (:declines u 0))) (fail :parse "the native parser declined " (:declines u) " constructs"
                                                            (when (seq (:reasons u)) (str ": " (str/join "; " (for [[w n] (sort-by key (:reasons u))] (str w " x" n)))))))
@@ -3482,7 +3855,10 @@
                   (binding [ps/*full-cache* (= "1" (System/getenv "CPP_GEN_FULL_CACHE"))]
                   (doseq [l (str/split-lines (slurp lst)) :when (seq l)]
                     (let [[p std out a] (str/split l #"\t")
-                          c (gen-one p (str/replace (or std "c++23") #"^gnu" "c") out (vec (remove str/blank? (str/split (or a "") #"\s+"))))]
+                          ;; (queue 411: CPP_GEN_GNU=1, the runtime's units, bin/cppi's runtime_ours: a GNU standard kept, as the oracle's
+                          ;; IR was compiled: gnu++11's __GLIBCXX_TYPE_INT_N_0, limits.cc's numeric_limits<__int128>, no __STRICT_ANSI__)
+                          c (gen-one p (if (= "1" (System/getenv "CPP_GEN_GNU")) (or std "c++23") (str/replace (or std "c++23") #"^gnu" "c"))
+                                     out (vec (remove str/blank? (str/split (or a "") #"\s+"))))]
                       (println (str out "\t" (if c (name c) "ok")))
                       (flush))))
                   (shutdown-agents) (System/exit 0))
