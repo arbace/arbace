@@ -960,6 +960,20 @@
                                     (list '= '%t2 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
                                     (tls-wrapper-ret ref? '%t2))])))))
 
+(defn- declare-extern-var!
+  "A variable defined elsewhere (extern, a header's) declared once in the module, `nm` its name: `external global`."
+  [v ^String nm]
+  (when (and (or (:extern v) (tls-wrapped-elsewhere? v nm)
+                 (and (= :member-static (:storage v)) (not (:defined v)) (not (:pending-def v)) (not (:linkonce v))))
+             (not (contains? (:declared @*top*) nm)))
+    (swap! *top* update :declared conj nm)
+    ;; (CP373 (a): a reference's declaration is `ptr`, as clang's ConvertTypeForMem of a
+    ;; reference type, `@r = external thread_local global ptr`; before, [8 x i8])
+    (add-top! (list 'llvm/global (gsym nm) (cond (abi/ref? (abi/unq (:ty v))) 'ptr
+                                                 (abi/scalar? (abi/unq (:ty v))) (abi/llvm-type (:ty v))
+                                                 :else (list 'array (abi/size-of (:ty v)) 'i8))
+                    :linkage :external :align (abi/align-of (:ty v))))))
+
 (defn- var-addr [id]
   (or (get-in @*f* [:addr id])
       (let [v (sema/var* id)]
@@ -974,16 +988,7 @@
                                      ;; (queue 380, W3d: and a static data member declared in its class and defined in no part
                                      ;; of this unit, monetary_members_cow.cc's money_base::_S_default_pattern, a class copied by
                                      ;; memcpy: lower's "unknown global" had refused the unit)
-                                     (when (and (or (:extern v) (tls-wrapped-elsewhere? v nm)
-                                                    (and (= :member-static (:storage v)) (not (:defined v)) (not (:pending-def v)) (not (:linkonce v))))
-                                                (not (contains? (:declared @*top*) nm)))
-                                       (swap! *top* update :declared conj nm)
-                                       ;; (CP373 (a): a reference's declaration is `ptr`, as clang's ConvertTypeForMem of a
-                                       ;; reference type, `@r = external thread_local global ptr`; before, [8 x i8])
-                                       (add-top! (list 'llvm/global (gsym nm) (cond (abi/ref? (abi/unq (:ty v))) 'ptr
-                                                                                    (abi/scalar? (abi/unq (:ty v))) (abi/llvm-type (:ty v))
-                                                                                    :else (list 'array (abi/size-of (:ty v)) 'i8))
-                                                       :linkage :external :align (abi/align-of (:ty v)))))
+                                     (declare-extern-var! v nm)
                                      ;; a thread-local variable with dynamic initialization: through its wrapper (outside the
                                      ;; unit's __tls_init, which initializes it)
                                      (cond
@@ -2140,7 +2145,7 @@
     ;; (CP338 (a): an empty asm statement, clang's EmitAsmStmt: the inputs' constraints, the clobbers `~{memory}` (cc is
     ;; x86's flags, which the target adds anyway), then x86's own ~{dirflag},~{fpsr},~{flags}; nounwind)
     :asm (let [vs (mapv (fn [e] [(abi/llvm-type (abi/unq (:ty e))) (emit-rv e)]) (:ins s))
-               cs (str/join "," (concat (map (constantly "r") (:ins s))
+               cs (str/join "," (concat (map #(or (:asm-c %) "r") (:ins s))
                                         (keep #(when (= "memory" %) "~{memory}") (:clobbers s))
                                         ["~{dirflag}" "~{fpsr}" "~{flags}"]))]
            (emit! (list 'call 'void (list 'asm "" cs :sideeffect) vs :attrs [:nounwind])))
@@ -2824,9 +2829,12 @@
 (defn- vt-linkage
   "The linkage options of the vtable, VTT and type_info of class `cid`: strong where its key function is defined."
   [cid]
-  (if (abi/dynamic? cid)
-    (case (vtable-home cid) :here [] :weak [:linkage :weak_odr] [:linkage :linkonce_odr])
-    [:linkage :linkonce_odr]))
+  (cond
+    ;; (queue 411: a class of an unnamed namespace, internal, [basic.link]/4: its vtable and type_info too, as clang's
+    ;; getVTableLinkage and getTypeInfoLinkage (an internal type's: InternalLinkage); ios_errcat.cc's io_error_category)
+    (:internal (:scope (abi/cls cid))) [:linkage :internal]
+    (abi/dynamic? cid) (case (vtable-home cid) :here [] :weak [:linkage :weak_odr] [:linkage :linkonce_odr])
+    :else [:linkage :linkonce_odr]))
 
 (defn- typeinfo! [cid]
   (let [t {:k :class :id cid}
@@ -3034,7 +3042,13 @@
                                     :float (fp-const (:ty e) (:v e) (:lit e))
                                     :null 'null
                                     :decay (when (= :str (:op (:e e))) (gsym (str-global (:e e))))
-                                    :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))] (when (#{:global :member-static} (:storage v)) (gsym (abi/mangle-var v)))))
+                                    :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))]
+                                                                    (when (#{:global :member-static} (:storage v))
+                                                                      ;; (queue 411: a variable defined elsewhere declared, as var-addr
+                                                                      ;; declares it: locale_init.cc's locale::_S_twinned_facets, the
+                                                                      ;; addresses of numpunct<char>::id and the other facets' ids, which
+                                                                      ;; the lowering had refused as unknown globals)
+                                                                      (let [nm (abi/mangle-var v)] (declare-extern-var! v nm) (gsym nm)))))
                                     :fnaddr (want-fn! (:fn e))
                                     :cast (case (:ck e)
                                             (:int :noop) (when-let [x (cv (:e e))] (if (number? x)
@@ -3573,7 +3587,10 @@
                   (binding [ps/*full-cache* (= "1" (System/getenv "CPP_GEN_FULL_CACHE"))]
                   (doseq [l (str/split-lines (slurp lst)) :when (seq l)]
                     (let [[p std out a] (str/split l #"\t")
-                          c (gen-one p (str/replace (or std "c++23") #"^gnu" "c") out (vec (remove str/blank? (str/split (or a "") #"\s+"))))]
+                          ;; (queue 411: CPP_GEN_GNU=1, the runtime's units, bin/cppi's runtime_ours: a GNU standard kept, as the oracle's
+                          ;; IR was compiled: gnu++11's __GLIBCXX_TYPE_INT_N_0, limits.cc's numeric_limits<__int128>, no __STRICT_ANSI__)
+                          c (gen-one p (if (= "1" (System/getenv "CPP_GEN_GNU")) (or std "c++23") (str/replace (or std "c++23") #"^gnu" "c"))
+                                     out (vec (remove str/blank? (str/split (or a "") #"\s+"))))]
                       (println (str out "\t" (if c (name c) "ok")))
                       (flush))))
                   (shutdown-agents) (System/exit 0))
