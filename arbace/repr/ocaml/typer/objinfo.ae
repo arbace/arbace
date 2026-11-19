@@ -1,12 +1,17 @@
 ;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
 ;; the order in which typing/typedecl.ml, typecore.ml, typemod.ml and datarepr.ml allocate Shape.Uid.t (Uid.mk), the
 ;; declarations file_formats/cmt_format.ml indexes (index_declarations, typing/tast_iterator.ml's item_declaration) and
-;; tools/objinfo.ml's printing of them (-decls), whose notices follow (LICENSE.md, "The OCaml Core System"):
+;; tools/objinfo.ml's printing of them (-decls); since queue 450 the occurrences cmt_format.ml indexes
+;; (iter_on_occurrences, index_occurrences, Tast_iterator's order), the shapes typemod.ml, typedecl.ml and env.ml give
+;; them (Env.find_shape, shape_of_path, find_uid), includemod.ml's Uid.Deps (signatures, signature_components,
+;; Directionality), parsing/pprintast.ml's longident and objinfo.ml's -index and -uid-deps, whose notices follow
+;; (LICENSE.md, "The OCaml Core System"):
 ;;
 ;;                                 OCaml
 ;;
 ;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
 ;;         Mehdi Dogguy, PPS laboratory, University Paris Diderot
+;;                   Fabrice Le Fessant, INRIA Saclay
 ;;
 ;;   Copyright 1996 Institut National de Recherche en Informatique et
 ;;     en Automatique.
@@ -17,17 +22,23 @@
 ;;   special exception on linking described in the file LICENSE.
 
 (ns arbace.repr.ocaml.typer.objinfo
-  "T12's compiler output (queue 434, doc/ocaml/TYPER.md section 30): what ocamlobjinfo -quiet -decls prints of the .cmt or .cmti
-  ocamlc -bin-annot writes, from the Parsetree of a unit the native typer accepts. The uids are numbered in the order the
-  typer allocates them (Uid.mk): a type group's types, then each declaration's labels (an inline record's before its
-  constructor) and constructors, then Datarepr's five inline-record types a group stores (Typedecl's environments); a value
-  binding's pattern variables before its expression, a case's before its guard and body, every case's pattern before the
-  first body; a module's body (and a constraint's signature) before the module; a functor's named parameter after its
-  type; a module's components forced at the first qualified access (Datarepr's inline-record type again), an inclusion
-  check's environment (the implementation's signature added) likewise. Classes, objects and recursive modules are outside
-  this slice (refused). `decls-text` is objinfo's section: \"Uid of decls:\" and one entry each declaration, sorted by uid,
-  each as Format prints \"@[<hov 2>%a:@ %a@]@;\" (margin 78)."
+  "T12's compiler output (queue 434, doc/ocaml/TYPER.md section 30; queue 450, section 31): what ocamlobjinfo -quiet prints
+  of the .cmt or .cmti ocamlc -bin-annot -bin-annot-occurrences writes, from the Parsetree of a unit the native typer accepts.
+
+  The walk is the Typedtree with environments the index needs: it numbers the uids in the order the typer allocates them
+  (Uid.mk: a type group's types, then each declaration's labels and constructors, then Datarepr's five inline-record types
+  a group stores; a value binding's pattern variables before its expression, a case's before its guard and body, every
+  case's pattern before the first body; a module's body and constraint before the module; a functor's named parameter
+  after its type; a module's components forced at the first qualified access, an inclusion check's environment likewise),
+  keeps an environment of the unit's names (values, types, constructors, labels, modules, module types; each with its path
+  and its declaration's uid, the modules with their signatures as data) and the shape of every identifier (Env.find_shape,
+  as Typemod, Typedecl and Includemod make them), and emits each occurrence Cmt_format.iter_on_occurrences indexes in
+  Tast_iterator's order. `analyze` gives the declarations (-decls), the index (each occurrence's components reduced by
+  Shape_reduce.local_reduce_for_uid, arbace.repr.ocaml.typer.shape) and Includemod's declaration dependencies (-uid-deps).
+  The typer's choice of a constructor (an extension's or a variant's, Typecore's type-directed disambiguation) is read from
+  `*choices*` by its location. Classes, objects and recursive modules are outside this slice (refused)."
   (:require [arbace.repr.ocaml.typer.format :as f]
+            [arbace.repr.ocaml.typer.shape :as sh]
             [arbace.string :as str]))
 
 (set! *warn-on-reflection* false)
@@ -35,24 +46,62 @@
 (defn- outside [what] (throw (ex-info (str "objinfo: outside the slice: " what) {:objinfo-outside what})))
 
 ;; ---------------------------------------------------------------------------------------------
-;; The state: the next uid, the declarations (uid name loc), the environment of modules (their inline-record count and
-;; whether their components were forced)
+;; The state: the next uid, the declarations (uid name loc), the identifiers' shapes and declarations, the occurrences,
+;; the declaration dependencies
 
 (def ^:private ^:dynamic *st* nil)
+(def ^:private ^:dynamic *occ* nil)
+
+(def ^:dynamic *choices*
+  "The typer's constructor choices of the unit: {[start end] {:ext bool}} by the longident's character offsets, or nil"
+  nil)
+
+(def ^:dynamic *units* "The other compilation units' module names (all_modules), as persistent modules" #{})
 
 (defn- mk! [] (let [n (:n @*st*)] (swap! *st* update :n inc) n))
 (defn- hidden! [k] (dotimes [_ k] (mk!)))
 (defn- decl! [uid name loc] (swap! *st* update :decls conj [uid name loc]))
 
+(defn- uid! "Uid.mk's value for the number N of this unit" [n] [:item (:unit @*st*) n (= :intf (:kind @*st*))])
+
+(defn- ident! [name] (let [s (:stamp @*st*)] (swap! *st* update :stamp inc) {:name name :stamp s}))
+(defn- pident [name] {:name name :stamp 0 :persistent true})
+(def ^:private stdlib-path [:Pident (pident "Stdlib")])
+(def ^:private unnamed-param {:name "()" :stamp -1})
+
+(defn- shape! [ns id s] (swap! *st* assoc-in [:shapes [ns id]] s))
+(defn- ident-data! [ns id m] (swap! *st* assoc-in [:idents [ns id]] m))
+
+(defn- find-shape [ns id]
+  (or (get-in @*st* [:shapes [ns id]])
+      (when (and (= ns :module) (:persistent id)) (sh/for-persistent-unit (:name id)))))
+
+(defn- emit! [occs] (when (seq occs) (swap! *occ* into occs)))
+(defn- collect "[(f) the occurrences f emitted]" [f] (let [a (atom [])] (binding [*occ* a] (let [r (f)] [r @a]))))
+(defn- occ! [lid ns path] (when (and lid path) (swap! *occ* conj {:lid lid :ns ns :path path})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Module infos: {:inline n :forced atom :mods {name info} :mtys {name info} :sig [item ...] :functor {:param :res}
+;; :mtid id}; an item {:k :value|:type|:typext|:module|:modtype :name :uid ...}
+
 (defn- info
   ([] (info 0 {} {}))
-  ([inline mods mtys] {:inline inline :forced (atom false) :mods mods :mtys mtys}))
+  ([inline mods mtys] {:inline inline :forced (atom false) :mods mods :mtys mtys :sig []}))
 
 (defn- fresh [i] (if i (assoc i :forced (atom false)) (info)))
 
 (defn- lid? [x] (and (vector? x) (#{:Lident :Ldot :Lapply} (first x))))
 
 (defn- lt "A longident's located component (5.5's Ldot of locs) as its value" [x] (if (map? x) (:txt x) x))
+
+(defn- sig-item [i k n] (last (filter #(and (= k (:k %)) (= n (:name %))) (:sig i))))
+
+(defn- sig-info
+  "A signature's info from its items and inline count"
+  [items n]
+  (let [mods (into {} (for [it items :when (= :module (:k it))] [(:name it) (:info it)]))
+        mtys (into {} (for [it items :when (= :modtype (:k it))] [(:name it) (:info it)]))]
+    (assoc (info n mods mtys) :sig (vec items))))
 
 (defn- resolve-path
   "The modules a module path names, outermost first (nil entries for unknown ones)"
@@ -62,6 +111,24 @@
     :Ldot (let [ps (resolve-path env (lt (nth lid 1))) l (last ps)]
             (conj ps (when l (get-in l [:mods (lt (nth lid 2))]))))
     [nil]))
+
+(defn- resolve-mod
+  "{:path :info} of a module longident, or nil"
+  [env lid]
+  (case (first lid)
+    :Lident (let [n (second lid)]
+              (if-let [b (get-in env [:mods n])]
+                {:path (:path b) :info b}
+                (cond (= n "Stdlib") {:path stdlib-path :info (info)}
+                      (contains? *units* n) {:path [:Pident (pident n)] :info (info)}
+                      :else {:path [:Pdot stdlib-path n] :info (info)})))
+    :Ldot (when-let [r (resolve-mod env (lt (nth lid 1)))]
+            (let [n (lt (nth lid 2))]
+              {:path (when (:path r) [:Pdot (:path r) n]) :info (or (get-in r [:info :mods n]) (info))}))
+    :Lapply (let [rf (resolve-mod env (lt (nth lid 1))) rx (resolve-mod env (lt (nth lid 2)))]
+              (when (and rf rx)
+                {:path (when (and (:path rf) (:path rx)) [:Papply (:path rf) (:path rx)])
+                 :info (or (get-in rf [:info :functor :res]) (info))}))))
 
 (defn- force-info! [i]
   (when (and i (not @(:forced i)))
@@ -76,304 +143,996 @@
   (when (= :Ldot (first lid)) (force-module! env (lt (nth lid 1)))))
 
 ;; ---------------------------------------------------------------------------------------------
-;; The walk
+;; The environment's names: {:vals {n {:path :pkg}} :types {n {:path :tdecl}} :ctors {n [ctor ...]} :labels {n [label ...]}
+;; :mods {n info+:path} :mtys {n info+:path}}; a ctor {:path :ns :ext :labels :lpath}, a label {:path :tpath :lbls}
 
-(declare walk walk-expr walk-pat walk-mod walk-mty walk-str-items walk-sig-items)
+(def ^:private predef-types
+  #{"int" "char" "string" "bytes" "float" "bool" "unit" "exn" "array" "iarray" "list" "option" "nativeint" "int32" "int64"
+    "lazy_t" "extension_constructor" "floatarray" "atomic_loc" "eff" "continuation" "float32"})
+
+(defn- type-tdecl-ctor [tpath c]
+  {:path [:Pextra_ty tpath [:cstr (:name c)]] :ns :constructor :ext false :labels (:labels c)
+   :lpath [:Pextra_ty tpath [:cstr (:name c)]]})
+
+(defn- ext-ctor [path labels]
+  {:path path :ns :extension-constructor :ext true :labels labels :lpath [:Pextra_ty path :ext]})
+
+(defn- bind-type [env n path tdecl]
+  (let [env (assoc-in env [:types n] {:path path :tdecl tdecl})
+        env (reduce (fn [env c] (update-in env [:ctors (:name c)] #(cons (type-tdecl-ctor path c) %))) env (:ctors tdecl))]
+    (reduce (fn [env l] (update-in env [:labels (:name l)] #(cons {:path [:Pextra_ty path [:cstr (:name l)]] :tpath path
+                                                                  :lbls (:labels tdecl)} %)))
+            env (:labels tdecl))))
+
+(defn- bind-ext [env n path labels] (update-in env [:ctors n] #(cons (ext-ctor path labels) %)))
+
+(defn- comp-path [mp n] (when mp [:Pdot mp n]))
+
+(defn- open-env
+  "Env.open_signature: the module's components named by their paths through MP"
+  [env mp i]
+  (reduce (fn [env it]
+            (let [n (:name it) p (comp-path mp n)]
+              (case (:k it)
+                :value (assoc-in env [:vals n] {:path p :pkg (:pkg it)})
+                :type (bind-type env n p (:tdecl it))
+                :typext (bind-ext env n p (:labels it))
+                :module (assoc-in env [:mods n] (assoc (:info it) :path p))
+                :modtype (assoc-in env [:mtys n] (assoc (:info it) :path p))
+                env)))
+          env (:sig i)))
+
+(defn- lookup-val [env lid]
+  (case (first lid)
+    :Lident (if-let [v (get-in env [:vals (second lid)])] v {:path [:Pdot stdlib-path (second lid)]})
+    :Ldot (when-let [r (resolve-mod env (lt (nth lid 1)))]
+            (let [n (lt (nth lid 2))] {:path (comp-path (:path r) n) :pkg (:pkg (sig-item (:info r) :value n))}))
+    nil))
+
+(defn- lookup-type-path [env lid]
+  (case (first lid)
+    :Lident (let [n (second lid)]
+              (if-let [t (get-in env [:types n])] (:path t) (when-not (predef-types n) [:Pdot stdlib-path n])))
+    :Ldot (when-let [r (resolve-mod env (lt (nth lid 1)))] (comp-path (:path r) (lt (nth lid 2))))
+    nil))
+
+(defn- lookup-mty [env lid]
+  (case (first lid)
+    :Lident (get-in env [:mtys (second lid)])
+    :Ldot (when-let [r (resolve-mod env (lt (nth lid 1)))]
+            (let [n (lt (nth lid 2)) i (get-in r [:info :mtys n])]
+              (when i (assoc i :path (comp-path (:path r) n)))))
+    nil))
+
+(defn- module-ctors
+  "The constructors named N of module R's signature, the latest first"
+  [r n]
+  (let [mp (:path r)]
+    (reverse
+     (for [it (:sig (:info r))
+           :let [c (case (:k it)
+                     :type (when-let [c (first (filter #(= n (:name %)) (:ctors (:tdecl it))))]
+                             (type-tdecl-ctor (comp-path mp (:name it)) c))
+                     :typext (when (= n (:name it)) (ext-ctor (comp-path mp n) (:labels it)))
+                     nil)]
+           :when c]
+       c))))
+
+(defn- loc-key [loc] [(.-cnum (first loc)) (.-cnum (second loc))])
+
+(defn- lookup-ctor
+  "Typecore's constructor lookup: the candidates by name, the typer's choice (an extension constructor or not) first"
+  [env llid]
+  (let [lid (:txt llid)
+        cands (case (first lid)
+                :Lident (get-in env [:ctors (second lid)])
+                :Ldot (when-let [r (resolve-mod env (lt (nth lid 1)))] (module-ctors r (lt (nth lid 2))))
+                nil)
+        ch (get *choices* (loc-key (:loc llid)))]
+    (or (when ch (first (filter #(= (:ext ch) (:ext %)) cands))) (first cands))))
+
+(defn- module-labels [r n]
+  (let [mp (:path r)]
+    (reverse (for [it (:sig (:info r)) :when (= :type (:k it))
+                   :let [ls (:labels (:tdecl it))] :when (some #(= n (:name %)) ls)
+                   :let [tp (comp-path mp (:name it))]]
+               {:path [:Pextra_ty tp [:cstr n]] :tpath tp :lbls ls}))))
+
+(defn- label-cands [env lid]
+  (case (first lid)
+    :Lident (get-in env [:labels (second lid)])
+    :Ldot (when-let [r (resolve-mod env (lt (nth lid 1)))] (module-labels r (lt (nth lid 2))))
+    nil))
+
+(defn- resolve-record
+  "The record type of a record expression or pattern's fields: {:lbls [{:name :uid}] :path-of (fn [name] path)}; an
+  inline record's from its constructor CTOR; else the first field's candidates that have every field (and only those when
+  CLOSED), the latest first (Typecore.disambiguate_label_by_ids)"
+  [env lids ctor closed]
+  (if (and ctor (seq (:labels ctor)))
+    {:lbls (:labels ctor) :path-of (fn [n] [:Pextra_ty (:lpath ctor) [:cstr n]])}
+    (let [names (map #(let [l (:txt %)] (if (= :Lident (first l)) (second l) (lt (nth l 2)))) lids)
+          cands (label-cands env (:txt (first lids)))
+          has (fn [c] (let [s (set (map :name (:lbls c)))] (every? s names)))
+          with (filter has cands)
+          exact (filter #(= (count names) (count (:lbls %))) with)
+          c (or (first (if closed (seq exact) nil)) (first with) (first cands))]
+      (when c {:lbls (:lbls c) :path-of (fn [n] [:Pextra_ty (:tpath c) [:cstr n]])}))))
+
+(defn- label-name [llid] (let [l (:txt llid)] (if (= :Lident (first l)) (second l) (lt (nth l 2)))))
+
+(defn- label-pos [rec n] (or (first (keep-indexed (fn [i l] (when (= n (:name l)) i)) (:lbls rec))) 1000000))
+
+;; ---------------------------------------------------------------------------------------------
+;; Includemod's declaration dependencies (Uid.Deps) and the shape of a constrained module
+
+(def ^:private ^:dynamic *mt-subst* nil)
+
+(defn- record-dep! [dir u1 u2]
+  (when (and u1 u2 (not (and (:in-eq dir) (= :neg (:pos dir)))))
+    (let [[k a b] (case (:pos dir) :neg [:decl u2 u1] :pos [:decl u1 u2] :strict [:def u1 u2])]
+      (when (not= a b) (swap! *st* update :deps conj [k a b])))))
+
+(defn- negate [dir] (assoc dir :pos (if (= :neg (:pos dir)) :pos :neg)))
+(defn- enter-eq [dir] (assoc dir :in-eq true :pos (if (= :strict (:pos dir)) :pos (:pos dir))))
+
+(def ^:private field-ns {:value :value :type :type :typext :extension-constructor :module :module :modtype :module-type})
+
+(declare modtypes find-uid)
+
+(defn- mtid= [a b] (and a b (= (get @*mt-subst* a a) (get @*mt-subst* b b))))
+
+(defn- signatures [dir i1 i2 shape]
+  (let [t1 (into {} (for [it (:sig i1) :when (field-ns (:k it))] [[(:k it) (:name it)] it]))
+        n2 (count (into #{} (for [it (:sig i2) :when (field-ns (:k it))] [(:k it) (:name it)])))
+        paired (vec (keep (fn [b] (when-let [a (get t1 [(:k b) (:name b)])] [a b])) (:sig i2)))
+        _ (doseq [[a b] paired :when (= :modtype (:k a))]
+            (when (and (:mtid (:info a)) (:mtid (:info b))) (swap! *mt-subst* assoc (:mtid (:info b)) (:mtid (:info a)))))
+        deep (atom false)
+        smap (reduce
+              (fn [smap [a b]]
+                (let [item [(:name a) (field-ns (:k a))]]
+                  (case (:k a)
+                    :module (let [orig (sh/proj shape item)
+                                  r (modtypes dir (:info a) (:info b) orig)]
+                              (when-not (identical? r orig) (reset! deep true))
+                              (record-dep! dir (:uid a) (:uid b))
+                              (assoc smap item (sh/set-uid-if-none r (:uid a))))
+                    :modtype (let [m1 (some-> (:info a) (dissoc :mtid)) m2 (some-> (:info b) (dissoc :mtid))]
+                               (when (and m1 m2 (not (:abstract m1)) (not (:abstract m2)))
+                                 (let [d (enter-eq dir)]
+                                   (modtypes d m1 m2 sh/dummy-mod)
+                                   (when-not (:in-eq dir) (modtypes (negate d) m2 m1 sh/dummy-mod))))
+                               (record-dep! dir (:uid a) (:uid b))
+                               (assoc smap item (sh/proj shape item)))
+                    (do (record-dep! dir (:uid a) (:uid b))
+                        (assoc smap item (sh/proj shape item))))))
+              sh/empty-items paired)]
+    (if (and (not @deep) (= (count t1) n2)) shape (sh/struct-shape (:uid shape) smap))))
+
+(defn- modtypes
+  "Includemod.modtypes over infos: the inclusion's dependencies recorded, the constrained shape returned"
+  [dir i1 i2 shape]
+  (cond (or (nil? i1) (nil? i2)) shape
+        (mtid= (:mtid i1) (:mtid i2)) shape
+        (and (:functor i1) (:functor i2))
+        (let [{p1 :param r1 :res} (:functor i1) {p2 :param r2 :res} (:functor i2)]
+          (when (and p1 p2) (modtypes (negate dir) (dissoc p2 :mtid-keep) p1 sh/dummy-mod))
+          (let [[var res-shape] (if (= :abs ((:desc shape) 0))
+                                  [((:desc shape) 1) ((:desc shape) 2)]
+                                  (let [v (ident! "shape-var")] [v (sh/app shape (sh/var-shape [:internal] v))]))
+                final (modtypes dir r1 r2 res-shape)]
+            (if (identical? final res-shape) shape (sh/abs var final))))
+        (and (:sig i1) (:sig i2) (not (:functor i1)) (not (:functor i2))) (signatures dir i1 i2 shape)
+        :else shape))
+
+(defn- check-functor-applications!
+  "Typetexp's lookup of a path through functor applications: Env's check_functor_application, each argument's
+  (strengthened) signature included in the functor's parameter (Includemod.check_modtype_inclusion)"
+  [env lid]
+  (case (first lid)
+    :Ldot (check-functor-applications! env (lt (nth lid 1)))
+    :Lapply (let [f (lt (nth lid 1)) x (lt (nth lid 2))]
+              (check-functor-applications! env f)
+              (check-functor-applications! env x)
+              (let [rf (resolve-mod env f) rx (resolve-mod env x)]
+                (when (and rf rx)
+                  (modtypes {:pos :pos} (dissoc (:info rx) :mtid) (get-in rf [:info :functor :param]) sh/dummy-mod))))
+    nil))
+
+;; ---------------------------------------------------------------------------------------------
+;; Core types (Typetexp): forced as typed, their occurrences emitted in Tast_iterator's order
+
+(declare walk walk-expr expr-occs sub-in bind-pat-vars pat-vars walk-mod walk-mod* walk-mty walk-str-items walk-sig-items)
+
+(defn- mty-occ! [env llid]
+  (occ! llid :module-type (:path (lookup-mty env (:txt llid)))))
+
+(defn- walk-typ [env t]
+  (when t
+    (let [d (:ptyp_desc t)]
+      (case (d 0)
+        :Ptyp_constr (do (force-prefix! env (:txt (d 1)))
+                         (check-functor-applications! env (:txt (d 1)))
+                         (occ! (d 1) :type (lookup-type-path env (:txt (d 1))))
+                         (doseq [a (d 2)] (walk-typ env a)))
+        :Ptyp_class (do (force-prefix! env (:txt (d 1))) (doseq [a (d 2)] (walk-typ env a)))
+        :Ptyp_package (let [pk (d 1)]
+                        (force-prefix! env (:txt (:ppt_path pk)))
+                        (mty-occ! env (:ppt_path pk))
+                        (doseq [[_ ct] (:ppt_constraints pk)] (walk-typ env ct)))
+        :Ptyp_open (let [lid (:txt (d 1))]
+                     (force-module! env lid)
+                     (let [r (resolve-mod env lid)]
+                       (occ! (d 1) :module (:path r))
+                       (walk-typ (open-env env (:path r) (:info r)) (d 2))))
+        (walk env (vec (rest d)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Type declarations (Typedecl)
 
 (defn- ctor-inline? [args] (and (vector? args) (= :Pcstr_record (first args))))
 
-(defn- walk-labels [env lds]
-  (doseq [ld lds]
-    (walk env (:pld_type ld))
-    (decl! (mk!) (:txt (:pld_name ld)) (:loc (:pld_name ld)))))
+(defn- walk-labels
+  "Label declarations: their types, then each one's uid; [{:name :uid}]"
+  [env lds]
+  (vec (for [ld lds]
+         (do (walk env (:pld_type ld))
+             (let [u (mk!)]
+               (decl! u (:txt (:pld_name ld)) (:loc (:pld_name ld)))
+               {:name (:txt (:pld_name ld)) :uid (uid! u)})))))
 
 (defn- walk-ctor-args [env args]
-  (if (ctor-inline? args) (walk-labels env (second args)) (walk env args)))
+  (if (ctor-inline? args) (walk-labels env (second args)) (do (walk env args) [])))
+
+(defn- label-map [lbls] (into sh/empty-items (map (fn [l] [[(:name l) :label] (sh/leaf (:uid l))]) lbls)))
+
+(defn- type-shape "Typedecl's typ_shape" [td]
+  (case (:kind td)
+    :variant (sh/struct-shape (:uid td) (into sh/empty-items (map (fn [c] [[(:name c) :constructor]
+                                                                         (sh/struct-shape (:uid c) (label-map (:labels c)))])
+                                                                  (:ctors td))))
+    :record (sh/struct-shape (:uid td) (label-map (:labels td)))
+    (sh/leaf (:uid td))))
 
 (defn- walk-type-group
   "Typedecl.transl_type_decl: the types' uids, then each declaration's labels and constructors (make_constructor before
-  cd_uid), then the inline-record types Datarepr makes each time the group is stored (five stores); its inline count"
+  cd_uid), then the inline-record types Datarepr makes each time the group is stored (five stores); [env' inline-count
+  [[name id tdecl] ...]]"
   [env decls]
-  (doseq [d decls]
-    (when (and (= :Private (:ptype_private d)) (#{:Ptyp_variant :Ptyp_object} (first (:ptyp_desc (:ptype_manifest d)))))
-      (outside "a private row type (Typedecl's #row type)"))
-    (decl! (mk!) (:txt (:ptype_name d)) (:loc (:ptype_name d))))
-  (let [n (atom 0)]
-    (doseq [d decls]
-      (walk env (:ptype_params d))
-      (walk env (:ptype_constraints d))
-      (let [k (:ptype_kind d)]
-        (when (vector? k)
-          (case (first k)
-            :Ptype_record (walk-labels env (second k))
-            :Ptype_variant (doseq [c (second k)]
-                             (when (seq (:pcd_vars c)) (walk env (:pcd_vars c)))
-                             (walk-ctor-args env (:pcd_args c))
-                             (walk env (:pcd_res c))
-                             (when (ctor-inline? (:pcd_args c)) (swap! n inc))
-                             (decl! (mk!) (:txt (:pcd_name c)) (:loc (:pcd_name c))))
-            (walk env k))))
-      (walk env (:ptype_manifest d)))
-    (hidden! (* 5 @n))
-    @n))
+  (let [tys (vec (for [d decls]
+                   (do (when (and (= :Private (:ptype_private d))
+                                  (#{:Ptyp_variant :Ptyp_object} (first (:ptyp_desc (:ptype_manifest d)))))
+                         (outside "a private row type (Typedecl's #row type)"))
+                       (let [u (mk!) n (:txt (:ptype_name d))]
+                         (decl! u n (:loc (:ptype_name d)))
+                         [n (ident! n) (uid! u)]))))
+        ;; the declarations' own types in scope (a recursive group's), kinds not yet known
+        env1 (reduce (fn [env [n id u]] (assoc-in env [:types n] {:path [:Pident id] :tdecl {:uid u}})) env tys)
+        cnt (atom 0)
+        tds (vec (for [[d [n id u]] (map vector decls tys)]
+                   (do (walk env1 (:ptype_params d))
+                       (walk env1 (:ptype_constraints d))
+                       (let [k (:ptype_kind d)
+                             td (if (vector? k)
+                                  (case (first k)
+                                    :Ptype_record {:uid u :kind :record :labels (walk-labels env1 (second k))}
+                                    :Ptype_variant {:uid u :kind :variant
+                                                    :ctors (vec (for [c (second k)]
+                                                                  (do (when (seq (:pcd_vars c)) (walk env1 (:pcd_vars c)))
+                                                                      (let [ls (walk-ctor-args env1 (:pcd_args c))]
+                                                                        (walk env1 (:pcd_res c))
+                                                                        (when (ctor-inline? (:pcd_args c)) (swap! cnt inc))
+                                                                        (let [cu (mk!)]
+                                                                          (decl! cu (:txt (:pcd_name c)) (:loc (:pcd_name c)))
+                                                                          {:name (:txt (:pcd_name c)) :uid (uid! cu) :labels ls})))))}
+                                    (do (walk env1 k) {:uid u :kind :abstract}))
+                                  {:uid u :kind (if (= k :Ptype_open) :open :abstract)})]
+                         (walk env1 (:ptype_manifest d))
+                         [n id td]))))]
+    (hidden! (* 5 @cnt))
+    (doseq [[_ id td] tds] (shape! :type id (type-shape td)) (ident-data! :type id {:uid (:uid td) :tdecl td}))
+    [(reduce (fn [env [n id td]] (bind-type env n [:Pident id] td)) env tds) @cnt tds]))
 
 (defn- walk-ext-ctors
-  "Typedecl.transl_extension_constructor for each, then each stored (Datarepr's inline record once); the inline count"
-  [env ecs]
-  (let [n (atom 0)]
-    (doseq [ec ecs]
-      (let [k (:pext_kind ec)]
-        (case (first k)
-          :Pext_decl (do (walk-ctor-args env (nth k 2)) (walk env (nth k 3))
-                         (when (ctor-inline? (nth k 2)) (swap! n inc)))
-          :Pext_rebind (force-prefix! env (:txt (second k))))
-        (decl! (mk!) (:txt (:pext_name ec)) (:loc (:pext_name ec)))))
+  "Typedecl.transl_extension_constructor for each, then each stored (Datarepr's inline record once); [env' inline-count
+  [[name id labels uid] ...]]; a rebinding's original emitted when REBIND-OCC (Tstr_exception's)"
+  [env ecs rebind-occ]
+  (let [n (atom 0)
+        out (vec (for [ec ecs]
+                   (let [k (:pext_kind ec)
+                         ls (case (first k)
+                              :Pext_decl (let [ls (walk-ctor-args env (nth k 2))]
+                                           (walk env (nth k 3))
+                                           (when (ctor-inline? (nth k 2)) (swap! n inc))
+                                           ls)
+                              :Pext_rebind (let [llid (second k)]
+                                             (force-prefix! env (:txt llid))
+                                             (let [c (lookup-ctor env llid)]
+                                               (when rebind-occ (occ! llid :extension-constructor (:path c)))
+                                               (:labels c))))
+                         u (mk!) nm (:txt (:pext_name ec))]
+                     (decl! u nm (:loc (:pext_name ec)))
+                     [nm (ident! nm) ls (uid! u)])))]
     (hidden! @n)
-    @n))
+    (doseq [[_ id ls u] out]
+      (shape! :extension-constructor id (sh/struct-shape u (label-map ls)))
+      (ident-data! :ext id {:uid u :labels ls}))
+    [(reduce (fn [env [nm id ls]] (bind-ext env nm [:Pident id] ls)) env out) @n out]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Patterns: [vars occs], vars [{:name :loc :uid}] in Typecore's order (enter_variable, uids allocated), occs
+;; {:own :hx :dx :kids} in Tast_iterator's order (the hook's constructor and labels, the extras' opens and types, the
+;; constraints' types, the sub-patterns)
+
+(defn- flat [o] (vec (concat (:own o) (:hx o) (:dx o) (:kids o))))
+(def ^:private no-occs {:own [] :hx [] :dx [] :kids []})
+
+(defn- unghost-pun
+  "Cmt_format: a punned label indexed although ghost, when its location is its pattern's or expression's"
+  [llid loc]
+  (let [[s e g] (:loc llid)]
+    (if (and g loc (not (nth loc 2)) (= (.-cnum s) (.-cnum (first loc))) (= (.-cnum e) (.-cnum (second loc))))
+      (assoc llid :loc [s e false])
+      llid)))
 
 (defn- pat-vars
-  "The pattern's variables in Typecore's order (enter_variable), uids allocated; [[name loc] ...] those Typedtree's
-  iter_bound_idents gives (an or-pattern's first branch)"
-  [env p]
-  (let [d (:ppat_desc p)]
-    (case (first d)
-      :Ppat_var (do (mk!) [[(:txt (second d)) (:loc (second d))]])
-      :Ppat_alias (let [vs (pat-vars env (nth d 1))] (mk!) (conj vs [(:txt (nth d 2)) (:loc (nth d 2))]))
-      :Ppat_or (let [a (pat-vars env (nth d 1))] (pat-vars env (nth d 2)) a)
-      :Ppat_unpack (do (walk env (nth d 2))
-                       (if (:txt (nth d 1)) (do (mk!) [[(:txt (nth d 1)) (:loc (nth d 1))]]) []))
-      :Ppat_construct (let [[_ lid arg] d]
-                        (force-prefix! env (:txt lid))
-                        (when (and arg (seq (first arg))) (outside "a constructor pattern's existential names"))
-                        (if arg (pat-vars env (second arg)) []))
-      :Ppat_open (do (force-module! env (:txt (nth d 1))) (pat-vars env (nth d 2)))
-      ;; the rest: their sub-patterns in order (tuples, records, arrays, constraints, lazy, exception, variants)
-      (let [out (atom [])]
-        (letfn [(sub [x] (cond (and (map? x) (:ppat_desc x)) (swap! out into (pat-vars env x))
-                               (and (map? x) (lid? (:txt x))) (force-prefix! env (:txt x))
-                               (map? x) (doseq [v (vals x)] (sub v))
-                               (or (vector? x) (seq? x)) (doseq [v x] (sub v))
-                               :else nil))]
-          (doseq [x (rest d)] (sub x)))
-        @out))))
+  ([env p] (pat-vars env p nil))
+  ([env p ctor]
+   (let [d (:ppat_desc p)
+         sub (fn [ps] (let [rs (mapv #(pat-vars env %) ps)]
+                        [(vec (mapcat first rs)) (assoc no-occs :kids (vec (mapcat (comp flat second) rs)))]))]
+     (case (first d)
+       :Ppat_var (let [u (mk!)] [[{:name (:txt (second d)) :loc (:loc (second d)) :uid u}] no-occs])
+       :Ppat_alias (let [[vs o] (pat-vars env (nth d 1)) u (mk!)]
+                     [(conj vs {:name (:txt (nth d 2)) :loc (:loc (nth d 2)) :uid u}) (assoc no-occs :kids (flat o))])
+       :Ppat_or (let [[a oa] (pat-vars env (nth d 1)) [_ ob] (pat-vars env (nth d 2))]
+                  [a (assoc no-occs :kids (vec (concat (flat oa) (flat ob))))])
+       :Ppat_unpack (do (walk env (nth d 2))
+                        (if (:txt (nth d 1))
+                          (let [u (mk!)] [[{:name (:txt (nth d 1)) :loc (:loc (nth d 1)) :uid u :module true}] no-occs])
+                          [[] no-occs]))
+       :Ppat_construct (let [[_ llid arg] d]
+                         (force-prefix! env (:txt llid))
+                         (when (and arg (seq (first arg))) (outside "a constructor pattern's existential names"))
+                         (let [c (lookup-ctor env llid)
+                               [vs o] (if arg (pat-vars env (second arg) c) [[] no-occs])
+                               ;; a variable bound to an inline record: its type the constructor's record (its fields'
+                               ;; labels found by it, Typecore's type-directed lookup)
+                               vs (if (and arg (seq (:labels c)) (= :Ppat_var (first (:ppat_desc (second arg)))))
+                                    (mapv #(assoc % :inline c) vs)
+                                    vs)]
+                           [vs (assoc no-occs :own (if c [{:lid llid :ns (:ns c) :path (:path c)}] []) :kids (flat o))]))
+       :Ppat_record (let [[_ fields closed] d
+                          _ (doseq [[llid _] fields] (force-prefix! env (:txt llid)))
+                          rec (resolve-record env (map first fields) ctor (= :Closed closed))
+                          fields (if rec (sort-by #(label-pos rec (label-name (first %))) fields) fields)
+                          rs (mapv (fn [[llid fp]] (pat-vars env fp)) fields)]
+                      [(vec (mapcat first rs))
+                       (assoc no-occs
+                              :own (vec (for [[llid fp] fields :when rec]
+                                          {:lid (unghost-pun llid (:ppat_loc fp)) :ns :label
+                                           :path ((:path-of rec) (label-name llid))}))
+                              :kids (vec (mapcat (comp flat second) rs)))])
+       :Ppat_open (let [lid (:txt (nth d 1))]
+                    (force-module! env lid)
+                    (let [r (resolve-mod env lid)
+                          [vs o] (pat-vars (open-env env (:path r) (:info r)) (nth d 2) ctor)]
+                      [vs (update o :hx #(vec (cons {:lid (nth d 1) :ns :module :path (:path r)} %)))]))
+       :Ppat_constraint (let [[vs o] (pat-vars env (nth d 1) ctor)
+                              [_ to] (collect #(walk-typ env (nth d 2)))]
+                          [vs (update o :dx #(vec (concat to %)))])
+       :Ppat_type (do (force-prefix! env (:txt (nth d 1)))
+                      [[] (assoc no-occs :hx [{:lid (nth d 1) :ns :type :path (lookup-type-path env (:txt (nth d 1)))}])])
+       (:Ppat_tuple) (sub (map second (nth d 1)))
+       (:Ppat_array) (sub (nth d (dec (count d))))
+       (:Ppat_lazy :Ppat_exception) (sub [(nth d 1)])
+       :Ppat_variant (sub (if (nth d 2) [(nth d 2)] []))
+       [[] no-occs]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Values
+
+(defn- bind-val
+  "A value's identifier: its shape a leaf of its uid (Env.add_value)"
+  [env name u & [pkg]]
+  (let [id (ident! name) uv (uid! u)]
+    (shape! :value id (sh/leaf uv))
+    (ident-data! :value id {:uid uv})
+    (assoc-in env [:vals name] {:path [:Pident id] :uid uv :pkg pkg})))
+
+(defn- pkg-of
+  "The package type of a value bound to (module M : S) or (e : (module S)), its module type's info (Pmod_unpack's
+  signature)"
+  [env e]
+  (let [d (:pexp_desc e)
+        pk (case (first d)
+             :Pexp_pack (nth d 2)
+             :Pexp_constraint (let [t (:ptyp_desc (nth d 2))] (when (= :Ptyp_package (first t)) (second t)))
+             nil)]
+    (when pk (lookup-mty env (:txt (:ppt_path pk))))))
 
 (defn- walk-vbs
   "Typecore.type_let: every binding's pattern, then (a constraint's locally abstract types, Ctype.new_local_type) each
-  expression; each binding's variables are Value_binding declarations named by its first variable"
-  [env vbs]
-  (doseq [vb vbs]
-    (let [uid0 (:n @*st*)
-          vs (pat-vars env (:pvb_pat vb))
-          uids (range uid0 (:n @*st*))]
-      (when (seq vs)
-        (let [[nm loc] (first vs)]
-          ;; the uids of the bound identifiers (an or-pattern's second branch allocates uids it does not bind)
-          (doseq [u (take (count vs) (keep-indexed (fn [_ u] u) uids))] (decl! u nm loc))))))
-  (doseq [vb vbs]
-    (when-let [c (:pvb_constraint vb)]
-      (when (= :Pvc_constraint (first c)) (hidden! (count (second c))))
-      (walk env c))
-    (walk-expr env (:pvb_expr vb))))
+  expression; each binding's variables are Value_binding declarations named by its first variable; [env' vars] with
+  the occurrences emitted binding by binding (pattern, then expression)"
+  [env rec? vbs]
+  (let [pats (vec (for [vb vbs]
+                    (let [uid0 (:n @*st*)
+                          [vs po] (pat-vars env (:pvb_pat vb))
+                          uids (range uid0 (:n @*st*))]
+                      (when (seq vs)
+                        (let [{nm :name loc :loc} (first vs)]
+                          (doseq [u (take (count vs) uids)] (decl! u nm loc))))
+                      [vs po])))
+        vars (vec (mapcat first pats))
+        bind (fn [env] (reduce (fn [env [vb [vs _]]]
+                                 (let [pk (when (= 1 (count vs)) (pkg-of env (:pvb_expr vb)))]
+                                   (reduce (fn [env v] (bind-val env (:name v) (:uid v) pk)) env vs)))
+                               env (map vector vbs pats)))
+        env' (bind env)
+        eenv (if rec? env' env)
+        exprs (vec (for [vb vbs]
+                     (let [c (:pvb_constraint vb)
+                           [_ ctyp] (collect #(when c
+                                                (when (= :Pvc_constraint (first c)) (hidden! (count (second c))))
+                                                (walk-typ eenv (if (= :Pvc_constraint (first c)) (nth c 2) (last c)))))
+                           [o r] (expr-occs eenv (:pvb_expr vb))
+                           poly (and c (= :Pvc_constraint (first c)) (empty? (second c))
+                                     (= :Ptyp_poly (first (:ptyp_desc (nth c 2))))) ]
+                       [ctyp o r poly])))]
+    (doseq [[[_ po] [ctyp o r poly]] (map vector pats exprs)]
+      ;; the pattern (its constraint's type among its extras), then the expression (its own occurrence, the
+      ;; constraint's type as an extra unless a polymorphic one, its sub-expressions)
+      (emit! (concat (:own po) (:hx po) ctyp (:dx po) (:kids po)))
+      (emit! (concat o (when-not poly ctyp) r)))
+    [env' vars]))
 
-(defn- walk-cases [env cases]
-  (doseq [c cases] (pat-vars env (:pc_lhs c)))
-  (doseq [c cases] (walk-expr env (:pc_guard c)) (walk-expr env (:pc_rhs c))))
+(defn- walk-cases
+  "Every case's pattern (uids), then each guard and body; occurrences case by case"
+  [env cases]
+  (let [ps (vec (for [c cases] (let [[vs o] (pat-vars env (:pc_lhs c))] [(bind-pat-vars env vs) o])))
+        bs (vec (for [[c [env' _]] (map vector cases ps)]
+                  (second (collect #(do (walk-expr env' (:pc_guard c)) (walk-expr env' (:pc_rhs c)))))))]
+    (doseq [[[_ o] b] (map vector ps bs)] (emit! (flat o)) (emit! b))))
+
+(defn- bind-pat-vars [env vs]
+  (reduce (fn [e v] (cond-> (bind-val e (:name v) (:uid v)) (:inline v) (assoc-in [:vals (:name v) :inline] (:inline v))))
+          env vs))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions: [own rest], the occurrence the index hook records first, then the extras' and sub-expressions'
+
+(defn- operator-of [e]
+  (let [d (:pexp_desc e)] (when (and (= :Pexp_ident (first d)) (= :Lident (first (:txt (second d))))) (second (:txt (second d))))))
+
+(defn- inferred? [sexp]
+  (let [d (:pexp_desc sexp)]
+    (case (first d)
+      (:Pexp_ident :Pexp_apply :Pexp_field :Pexp_constraint :Pexp_coerce :Pexp_send :Pexp_new) true
+      :Pexp_pack (some? (nth d 2))
+      :Pexp_sequence (inferred? (nth d 2))
+      false)))
+
+(defn- record-occs [env fields init ctor llid-of loc-of]
+  (let [rec (resolve-record env (map first fields) ctor (nil? init))
+        sorted (if rec (sort-by #(label-pos rec (label-name (first %))) fields) fields)]
+    [rec sorted
+     (vec (for [[llid e] sorted :when rec]
+            {:lid (unghost-pun llid (loc-of e)) :ns :label :path ((:path-of rec) (label-name llid))}))]))
+
+(defn- expr-occs
+  ([env e] (expr-occs env e nil))
+  ([env e ctor]
+   (if (nil? e)
+     [[] []]
+     (let [d (:pexp_desc e)
+           sub (fn [& es] (second (collect #(doseq [x es] (walk-expr env x)))))]
+       (case (first d)
+         :Pexp_ident (let [llid (second d)]
+                       (force-prefix! env (:txt llid))
+                       [(if-let [v (lookup-val env (:txt llid))] [{:lid llid :ns :value :path (:path v)}] []) []])
+         :Pexp_constant [[] []]
+         :Pexp_let (let [[[env' _] o] (collect #(walk-vbs env (= :Recursive (nth d 1)) (nth d 2)))]
+                     [[] (vec (concat o (sub-in env' (nth d 3))))])
+         :Pexp_function (let [[_ params c body] d
+                              [env' po] (reduce (fn [[env acc] p]
+                                                  (let [pd (:pparam_desc p)]
+                                                    (case (first pd)
+                                                      :Pparam_val (let [dflt (second (collect #(walk-expr env (nth pd 2))))
+                                                                        [vs o] (pat-vars env (nth pd 3))]
+                                                                    [(bind-pat-vars env vs) (into acc (concat (flat o) dflt))])
+                                                      :Pparam_newtype (do (mk!) [env acc]))))
+                                                [env []] params)
+                              [_ co] (collect #(when c (walk-typ env' (second c))))
+                              bo (case (first body)
+                                   :Pfunction_body (let [[o r] (expr-occs env' (second body))] (vec (concat o co r)))
+                                   :Pfunction_cases (vec (concat (second (collect #(walk-cases env' (second body)))) co)))]
+                          [[] (vec (concat po bo))])
+         (:Pexp_match :Pexp_try) [[] (vec (concat (sub (nth d 1)) (second (collect #(walk-cases env (nth d 2))))))]
+         :Pexp_apply (let [f (nth d 1) args (vec (nth d 2)) op (operator-of f)
+                           nolab (and (= 2 (count args)) (every? #(= :Nolabel (first (first %))) args))
+                           [f args] (cond (and nolab (= op "@@") (nil? (get-in env [:vals "@@"])))
+                                          (do (force-prefix! env (:txt (second (:pexp_desc f))))
+                                              [(second (first args)) [(second args)]])
+                                          (and nolab (= op "|>") (nil? (get-in env [:vals "|>"])) (inferred? (second (second args))))
+                                          [(second (second args)) [(first args)]]
+                                          :else [f args])]
+                       [[] (vec (concat (sub f) (apply sub (map second args))))])
+         :Pexp_tuple [[] (apply sub (map second (nth d 1)))]
+         :Pexp_construct (let [[_ llid arg] d]
+                           (force-prefix! env (:txt llid))
+                           (let [c (lookup-ctor env llid)
+                                 [ao ar] (expr-occs env arg c)]
+                             [(if c [{:lid llid :ns (:ns c) :path (:path c)}] []) (vec (concat ao ar))]))
+         :Pexp_variant [[] (sub (nth d 2))]
+         :Pexp_record (let [[_ fields init] d
+                            _ (doseq [[llid _] fields] (force-prefix! env (:txt llid)))
+                            io (sub init)
+                            [rec sorted lo] (record-occs env fields init ctor first :pexp_loc)
+                            fo (vec (for [[_ x] sorted] (sub x)))]
+                        [lo (vec (concat (apply concat fo) io))])
+         :Pexp_field (let [llid (nth d 2)]
+                       (force-prefix! env (:txt llid))
+                       (let [r (sub (nth d 1))
+                             xd (:pexp_desc (nth d 1))
+                             ic (when (and (= :Pexp_ident (first xd)) (= :Lident (first (:txt llid))))
+                                  (:inline (lookup-val env (:txt (second xd)))))
+                             path (if (and ic (some #(= (label-name llid) (:name %)) (:labels ic)))
+                                    [:Pextra_ty (:lpath ic) [:cstr (label-name llid)]]
+                                    (:path (first (label-cands env (:txt llid)))))]
+                         [(if path [{:lid llid :ns :label :path path}] []) r]))
+         :Pexp_setfield (let [llid (nth d 2)]
+                          (force-prefix! env (:txt llid))
+                          (let [r (sub (nth d 1) (nth d 3)) c (first (label-cands env (:txt llid)))]
+                            [(if c [{:lid llid :ns :label :path (:path c)}] []) r]))
+         :Pexp_for (let [[_ p lo hi _ body] d
+                         r1 (sub lo hi)
+                         env' (if (= :Ppat_var (first (:ppat_desc p))) (bind-val env (:txt (second (:ppat_desc p))) (mk!)) env)]
+                     [[] (vec (concat r1 (sub-in env' body)))])
+         :Pexp_newtype (do (mk!) (expr-occs env (nth d 2)))
+         :Pexp_constraint (let [[o r] (expr-occs env (nth d 1))
+                                [_ to] (collect #(walk-typ env (nth d 2)))]
+                            [o (vec (concat to r))])
+         :Pexp_coerce (let [[o r] (expr-occs env (nth d 1))
+                            [_ to] (collect #(do (walk-typ env (nth d 2)) (walk-typ env (nth d 3))))]
+                        [o (vec (concat to r))])
+         :Pexp_struct_item (let [[env' o] (collect #(walk-str-items env [(nth d 1)]))]
+                             [[] (vec (concat o (sub-in env' (nth d 2))))])
+         :Pexp_letop (let [{:keys [let_ ands body]} (second d)
+                           bops (cons let_ ands)
+                           ops (vec (for [b bops] (let [n (:txt (:pbop_op b))]
+                                                    {:lid {:txt [:Lident n] :loc (:loc (:pbop_op b))} :ns :value
+                                                     :path (:path (lookup-val env [:Lident n]))})))
+                           eo (vec (for [b bops] (sub (:pbop_exp b))))
+                           ps (vec (for [b bops] (pat-vars env (:pbop_pat b))))
+                           env' (reduce (fn [e [vs _]] (bind-pat-vars e vs)) env ps)
+                           bo (sub-in env' body)]
+                       [[] (vec (concat (mapcat (fn [o e] (cons o e)) ops eo) (mapcat (comp flat second) ps) bo))])
+         :Pexp_pack (let [[[i _] mo] (collect #(walk-mod* env (nth d 1) false))
+                          pk (nth d 2)
+                          [_ to] (collect #(when pk (walk-typ env {:ptyp_desc [:Ptyp_package pk]})))]
+                      (when pk (modtypes {:pos :pos} i (lookup-mty env (:txt (:ppt_path pk))) sh/dummy-mod))
+                      [[] (vec (concat to mo))])
+         :Pexp_extension (let [[{n :txt} payload] (second d)
+                               item (when (and (= :PStr (first payload)) (= 1 (count (second payload)))) (:pstr_desc (first (second payload))))
+                               x (when (= :Pstr_eval (first item)) (:pexp_desc (second item)))]
+                           (if (and (#{"extension_constructor" "ocaml.extension_constructor"} n) (= :Pexp_construct (first x)))
+                             (let [llid (second x) c (lookup-ctor env llid)]
+                               (force-prefix! env (:txt llid))
+                               [(if c [{:lid llid :ns :extension-constructor :path (:path c)}] []) []])
+                             [[] []]))
+         (:Pexp_object :Pexp_new :Pexp_send :Pexp_override :Pexp_setinstvar :Pexp_poly) (outside "classes and objects")
+         ;; the rest: their sub-expressions in order (sequences, conditionals, loops, arrays, assert, lazy)
+         [[] (second (collect #(walk env (vec (rest d)))))])))))
+
+(defn- sub-in [env e] (second (collect #(walk-expr env e))))
 
 (defn- walk-expr [env e]
-  (when e
-    (let [d (:pexp_desc e)]
-      (case (first d)
-        :Pexp_let (do (walk-vbs env (nth d 2)) (walk-expr env (nth d 3)))
-        :Pexp_function (let [[_ params c body] d]
-                         (doseq [p params]
-                           (let [pd (:pparam_desc p)]
-                             (case (first pd)
-                               :Pparam_val (do (walk-expr env (nth pd 2)) (pat-vars env (nth pd 3)))
-                               :Pparam_newtype (mk!))))
-                         (walk env c)
-                         (case (first body)
-                           :Pfunction_body (walk-expr env (second body))
-                           :Pfunction_cases (walk-cases env (second body))))
-        (:Pexp_match :Pexp_try) (do (walk-expr env (nth d 1)) (walk-cases env (nth d 2)))
-        :Pexp_for (let [[_ p lo hi _ body] d]
-                    (walk-expr env lo) (walk-expr env hi)
-                    (when (= :Ppat_var (first (:ppat_desc p))) (mk!))
-                    (walk-expr env body))
-        :Pexp_newtype (do (mk!) (walk-expr env (nth d 2)))
-        :Pexp_struct_item (walk-expr (walk-str-items env [(nth d 1)]) (nth d 2))
-        :Pexp_letop (let [{:keys [let_ ands body]} (second d) bops (cons let_ ands)]
-                      (doseq [b bops] (walk env (:pbop_op b)))
-                      (doseq [b bops] (walk-expr env (:pbop_exp b)))
-                      (doseq [b bops] (pat-vars env (:pbop_pat b)))
-                      (walk-expr env body))
-        :Pexp_pack (do (walk-mod env (nth d 1)) (walk env (nth d 2)))
-        (:Pexp_object :Pexp_new :Pexp_send :Pexp_override :Pexp_setinstvar :Pexp_poly) (outside "classes and objects")
-        (walk env (vec (rest d)))))))
+  (when e (let [[o r] (expr-occs env e)] (emit! o) (emit! r))))
 
 (defn- walk
   "The generic part of the walk: the nodes in order, a qualified name forcing its module's components"
   [env x]
   (cond (nil? x) nil
         (map? x) (cond (:pexp_desc x) (walk-expr env x)
-                       (:ppat_desc x) (pat-vars env x)
+                       (:ppat_desc x) (emit! (flat (second (pat-vars env x))))
                        (:pmod_desc x) (walk-mod env x)
                        (:pmty_desc x) (walk-mty env x)
+                       (:ptyp_desc x) (walk-typ env x)
                        (lid? (:txt x)) (force-prefix! env (:txt x))
                        :else (doseq [k (sort (keys x))] (walk env (get x k))))
         (or (vector? x) (seq? x)) (doseq [v x] (walk env v))
         :else nil))
 
-(defn- bind-mod [env name i] (if name (assoc-in env [:mods name] i) env))
-(defn- merge-info [env i] (-> env (update :mods merge (:mods i)) (update :mtys merge (:mtys i))))
+;; ---------------------------------------------------------------------------------------------
+;; Modules (Typemod)
 
-(defn- items-info
-  "A structure's or signature's info from the environment its items made, and their inline count"
-  [env0 env n]
-  (info n (into {} (remove (fn [[k v]] (identical? v (get-in env0 [:mods k]))) (:mods env)))
-        (into {} (remove (fn [[k v]] (identical? v (get-in env0 [:mtys k]))) (:mtys env)))))
+(defn- aliasable? [env lid]
+  (case (first lid)
+    :Lident (not (:not-aliasable (get-in env [:mods (second lid)])))
+    :Ldot (aliasable? env (lt (nth lid 1)))
+    false))
 
 (defn- walk-param
-  "A functor's parameter (Typemod's transl_modtype_functor_arg, then md_uid for a named one); the body's environment"
+  "A functor's parameter (Typemod's transl_modtype_functor_arg, then md_uid for a named one); [env' var param-info]"
   [env param]
   (if (= :Unit param)
-    env
+    [env unnamed-param nil]
     (let [[_ nm mty] param
           i (fresh (walk-mty env mty))]
-      (when (:txt nm) (mk!))
-      (bind-mod env (:txt nm) i))))
+      (if-let [n (:txt nm)]
+        (let [u (uid! (mk!)) id (ident! n)]
+          (shape! :module id (sh/var-shape u id))
+          (ident-data! :module id {:uid u :info i})
+          [(assoc-in env [:mods n] (assoc i :path [:Pident id] :not-aliasable true)) id i])
+        [env unnamed-param i]))))
 
-(defn- walk-mod [env me]
+(defn- walk-mod*
+  "A module expression: [info shape alias-uid], the occurrences emitted; ALIAS a module binding's (Pmod_ident an alias)"
+  [env me alias]
   (let [d (:pmod_desc me)]
     (case (first d)
-      :Pmod_ident (let [lid (:txt (second d))]
+      :Pmod_ident (let [llid (second d) lid (:txt llid)]
                     (force-prefix! env lid)
-                    (or (last (resolve-path env lid)) (info)))
-      :Pmod_structure (let [n (atom 0) env' (walk-str-items env (second d) n)] (items-info env env' @n))
-      :Pmod_functor (do (walk-mod (walk-param env (nth d 1)) (nth d 2)) (info))
+                    (let [r (resolve-mod env lid)
+                          s (or (sh/of-path find-shape :module (:path r)) sh/dummy-mod)
+                          al (and alias (aliasable? env lid))
+                          i (or (last (resolve-path env lid)) (:info r) (info))]
+                      (occ! llid :module (:path r))
+                      [(if al i (dissoc i :mtid)) (if al (sh/alias s) s)
+                       (when (and al (:path r)) (find-uid :module (:path r)))]))
+      :Pmod_structure (let [ctx {:n (atom 0) :sig (atom []) :smap (atom sh/empty-items)}]
+                        (walk-str-items env (second d) ctx)
+                        [(sig-info @(:sig ctx) @(:n ctx)) (sh/struct-shape @(:smap ctx)) nil])
+      :Pmod_functor (let [[env' var pi] (walk-param env (nth d 1))
+                          [bi bs] (walk-mod* env' (nth d 2) false)]
+                      [(assoc (info) :sig nil :functor {:param pi :res bi}) (sh/abs var bs) nil])
       :Pmod_apply (letfn [(args [m acc] (if (= :Pmod_apply (first (:pmod_desc m)))
                                           (args (nth (:pmod_desc m) 1) (conj acc (nth (:pmod_desc m) 2)))
                                           [m acc]))]
-                    (let [[f as] (args me [])]
-                      (doseq [a as] (walk-mod env a))
-                      (walk-mod env f)
-                      (info)))
-      :Pmod_apply_unit (do (walk-mod env (nth d 1)) (info))
-      :Pmod_constraint (let [i (walk-mod env (nth d 1)) t (walk-mty env (nth d 2))]
+                    (let [[f as] (args me [])
+                          ;; Typemod.type_application: extract_application types the arguments from the outermost,
+                          ;; then the functor; the applications from the innermost (Tast_iterator: the functor first)
+                          rs (vec (for [a as] (collect #(walk-mod* env a false))))
+                          [[fi fs] fo] (collect #(walk-mod* env f false))]
+                      (emit! fo)
+                      (doseq [[_ o] (reverse rs)] (emit! o))
+                      (loop [fi fi fs fs [[[ai as*] _] & more] (reverse rs)]
+                        (if (nil? ai)
+                          [fi fs nil]
+                          (do (modtypes {:pos :pos} ai (get-in fi [:functor :param]) sh/dummy-mod)
+                              (recur (fresh (get-in fi [:functor :res])) (sh/app fs as*) more))))))
+      :Pmod_apply_unit (let [[fi fs] (walk-mod* env (nth d 1) false)]
+                         [(fresh (get-in fi [:functor :res])) (sh/app fs sh/dummy-mod) nil])
+      :Pmod_constraint (let [[i s] (walk-mod* env (nth d 1) alias)
+                             t (walk-mty env (nth d 2))]
                          ;; Includemod.signatures: the implementation's signature added to the environment
                          (hidden! (:inline i))
-                         (fresh t))
-      :Pmod_unpack (do (walk-expr env (second d)) (info))
+                         [(fresh t) (modtypes {:pos :strict} i t s) nil])
+      :Pmod_unpack (let [e (second d)
+                         [o r] (expr-occs env e)
+                         ed (:pexp_desc e)
+                         pk (or (when (= :Pexp_ident (first ed)) (:pkg (lookup-val env (:txt (second ed)))))
+                                (pkg-of env e))]
+                     (emit! o) (emit! r)
+                     [(fresh pk) {:uid nil :desc [:pack (ident! "Pkg")] :approx false} nil])
       (outside (str "module expression " (first d))))))
+
+(defn- walk-mod [env me] (first (walk-mod* env me false)))
 
 (defn- walk-mty [env mty]
   (let [d (:pmty_desc mty)]
     (case (first d)
-      :Pmty_ident (let [lid (:txt (second d))]
+      :Pmty_ident (let [llid (second d) lid (:txt llid)]
                     (force-prefix! env lid)
-                    (fresh (case (first lid)
-                             :Lident (get-in env [:mtys (second lid)])
-                             :Ldot (get-in (last (resolve-path env (lt (nth lid 1)))) [:mtys (lt (nth lid 2))])
-                             nil)))
-      :Pmty_alias (let [lid (:txt (second d))] (force-prefix! env lid) (or (last (resolve-path env lid)) (info)))
-      :Pmty_signature (let [n (atom 0) env' (walk-sig-items env (second d) n)] (items-info env env' @n))
-      :Pmty_functor (do (walk-mty (walk-param env (nth d 1)) (nth d 2)) (info))
-      :Pmty_with (let [i (walk-mty env (nth d 1))]
-                   (doseq [c (nth d 2)]
-                     (case (first c)
-                       (:Pwith_type :Pwith_typesubst) (let [td (nth c 2)]
-                                                        (walk env (:ptype_params td)) (walk env (:ptype_manifest td))
-                                                        (decl! (mk!) (:txt (:ptype_name td)) (:loc (:ptype_name td))))
-                       :Pwith_modtype (do (walk-mty env (nth c 2)) (mk!))
-                       :Pwith_modtypesubst (walk-mty env (nth c 2))
-                       (:Pwith_module :Pwith_modsubst) (force-prefix! env (:txt (nth c 2)))))
-                   i)
-      :Pmty_typeof (walk-mod env (second d))
+                    (mty-occ! env llid)
+                    (fresh (lookup-mty env lid)))
+      :Pmty_alias (let [llid (second d) lid (:txt llid)]
+                    (force-prefix! env lid)
+                    (occ! llid :module (:path (resolve-mod env lid)))
+                    (dissoc (or (last (resolve-path env lid)) (info)) :mtid))
+      :Pmty_signature (let [ctx {:n (atom 0) :sig (atom [])}]
+                        (walk-sig-items env (second d) ctx)
+                        (sig-info @(:sig ctx) @(:n ctx)))
+      :Pmty_functor (let [[env' _ pi] (walk-param env (nth d 1))]
+                      (assoc (info) :sig nil :functor {:param pi :res (walk-mty env' (nth d 2))}))
+      :Pmty_with (let [[i io] (collect #(walk-mty env (nth d 1)))
+                       hook (atom [])
+                       parts (vec (for [c (nth d 2)]
+                                    (second
+                                     (collect
+                                      #(case (first c)
+                                         (:Pwith_type :Pwith_typesubst)
+                                         (let [td (nth c 2)]
+                                           (walk env (:ptype_params td)) (walk env (:ptype_manifest td))
+                                           (decl! (mk!) (:txt (:ptype_name td)) (:loc (:ptype_name td))))
+                                         :Pwith_modtype (do (walk-mty env (nth c 2)) (mk!))
+                                         :Pwith_modtypesubst (walk-mty env (nth c 2))
+                                         (:Pwith_module :Pwith_modsubst)
+                                         (let [llid (nth c 2)]
+                                           (force-prefix! env (:txt llid))
+                                           (swap! hook conj {:lid llid :ns :module :path (:path (resolve-mod env (:txt llid)))})))))))]
+                   (emit! @hook) (emit! io) (doseq [p parts] (emit! p))
+                   (dissoc i :mtid))
+      :Pmty_typeof (dissoc (walk-mod env (second d)) :mtid)
       (outside (str "module type " (first d))))))
 
 (defn- module-name [nm] (or (:txt nm) "_"))
 
+(defn- add-item!
+  "An item of the structure or signature being typed: its signature item and its shape in the structure's map"
+  [ctx item shape]
+  (swap! (:sig ctx) conj item)
+  (when (and shape (:smap ctx)) (swap! (:smap ctx) assoc [(:name item) (field-ns (:k item))] shape)))
+
+(defn- bind-module [env ctx n i u md-shape alias-uid]
+  (let [id (ident! n)
+        i (cond-> i alias-uid (assoc :alias-uid alias-uid))]
+    (shape! :module id md-shape)
+    (ident-data! :module id {:uid u :info i :alias-uid alias-uid})
+    (add-item! ctx {:k :module :name n :uid u :info i} md-shape)
+    (assoc-in env [:mods n] (assoc i :path [:Pident id]))))
+
+(defn- bind-modtype [env ctx n i u]
+  (let [id (ident! n)
+        i (assoc (or i (assoc (info) :abstract true)) :mtid u)]
+    (shape! :module-type id (sh/leaf u))
+    (ident-data! :module-type id {:uid u :info i})
+    (add-item! ctx {:k :modtype :name n :uid u :info i} (sh/leaf u))
+    (assoc-in env [:mtys n] (assoc i :path [:Pident id]))))
+
+(defn- include-items
+  "Env.enter_signature_and_shape: an included signature's items as the structure's own, each one's shape the included
+  module's projected (a signature's: its declaration's leaf)"
+  [env ctx i s]
+  (reduce (fn [env it]
+            (let [n (:name it) id (ident! n) ns (field-ns (:k it))
+                  shape (if s (sh/proj s [n ns]) (sh/leaf (:uid it)))]
+              (when ns (add-item! ctx it shape))
+              (case (:k it)
+                :value (do (shape! :value id shape) (ident-data! :value id {:uid (:uid it)})
+                           (assoc-in env [:vals n] {:path [:Pident id] :pkg (:pkg it)}))
+                :type (do (shape! :type id shape) (ident-data! :type id {:uid (:uid it) :tdecl (:tdecl it)})
+                          (bind-type env n [:Pident id] (:tdecl it)))
+                :typext (do (shape! :extension-constructor id shape) (ident-data! :ext id {:uid (:uid it) :labels (:labels it)})
+                            (bind-ext env n [:Pident id] (:labels it)))
+                :module (do (shape! :module id shape) (ident-data! :module id {:uid (:uid it) :info (:info it)})
+                            (assoc-in env [:mods n] (assoc (:info it) :path [:Pident id])))
+                :modtype (do (shape! :module-type id shape) (ident-data! :module-type id {:uid (:uid it) :info (:info it)})
+                             (assoc-in env [:mtys n] (assoc (:info it) :path [:Pident id])))
+                env)))
+          env (:sig i)))
+
+(defn- add-type-group! [ctx tds]
+  (doseq [[n id td] tds] (add-item! ctx {:k :type :name n :uid (:uid td) :tdecl td} (type-shape td))))
+
+(defn- add-exts! [ctx out]
+  (doseq [[n _ ls u] out] (add-item! ctx {:k :typext :name n :uid u :labels ls} (sh/struct-shape u (label-map ls)))))
+
 (defn- walk-str-items
-  ([env items] (walk-str-items env items (atom 0)))
-  ([env items n]
-   (reduce
-    (fn [env it]
-      (let [d (:pstr_desc it)]
-        (case (first d)
-          :Pstr_eval (do (walk-expr env (nth d 1)) env)
-          :Pstr_value (do (walk-vbs env (nth d 2)) env)
-          :Pstr_primitive (let [vd (second d)] (walk env (:pval_type vd))
-                            (decl! (mk!) (:txt (:pval_name vd)) (:loc (:pval_name vd))) env)
-          :Pstr_type (do (swap! n + (walk-type-group env (nth d 2))) env)
-          :Pstr_typext (let [te (second d)] (force-prefix! env (:txt (:ptyext_path te))) (walk env (:ptyext_params te))
-                         (swap! n + (walk-ext-ctors env (:ptyext_constructors te))) env)
-          :Pstr_exception (do (swap! n + (walk-ext-ctors env [(:ptyexn_constructor (second d))])) env)
-          :Pstr_module (let [mb (second d) i (walk-mod env (:pmb_expr mb)) u (mk!)]
-                         (decl! u (module-name (:pmb_name mb)) (:loc (:pmb_name mb)))
-                         (bind-mod env (:txt (:pmb_name mb)) i))
-          :Pstr_modtype (let [mtd (second d) i (if (:pmtd_type mtd) (walk-mty env (:pmtd_type mtd)) (info)) u (mk!)]
-                          (decl! u (:txt (:pmtd_name mtd)) (:loc (:pmtd_name mtd)))
-                          (assoc-in env [:mtys (:txt (:pmtd_name mtd))] i))
-          :Pstr_open (let [me (:popen_expr (second d))]
-                       (if (= :Pmod_ident (first (:pmod_desc me)))
-                         (let [lid (:txt (second (:pmod_desc me)))]
-                           (force-module! env lid)
-                           (merge-info env (or (last (resolve-path env lid)) (info))))
-                         (merge-info env (walk-mod env me))))
-          :Pstr_include (let [i (walk-mod env (:pincl_mod (second d)))]
-                          (hidden! (:inline i)) (swap! n + (:inline i)) (merge-info env i))
-          (:Pstr_attribute) env
-          :Pstr_recmodule (outside "recursive modules")
-          (:Pstr_class :Pstr_class_type) (outside "classes and objects")
-          (outside (str "structure item " (first d))))))
-    env items)))
+  ([env items] (walk-str-items env items {:n (atom 0) :sig (atom []) :smap (atom sh/empty-items)}))
+  ([env items ctx]
+   (let [n (:n ctx)]
+     (reduce
+      (fn [env it]
+        (let [d (:pstr_desc it)]
+          (case (first d)
+            :Pstr_eval (do (walk-expr env (nth d 1)) env)
+            :Pstr_value (let [[env' vars] (walk-vbs env (= :Recursive (nth d 1)) (nth d 2))]
+                          (doseq [v vars] (add-item! ctx {:k :value :name (:name v) :uid (uid! (:uid v))
+                                                          :pkg (:pkg (get-in env' [:vals (:name v)]))}
+                                                     (sh/leaf (uid! (:uid v)))))
+                          env')
+            :Pstr_primitive (let [vd (second d)]
+                              (walk-typ env (:pval_type vd))
+                              (let [u (mk!)]
+                                (decl! u (:txt (:pval_name vd)) (:loc (:pval_name vd)))
+                                (add-item! ctx {:k :value :name (:txt (:pval_name vd)) :uid (uid! u)} (sh/leaf (uid! u)))
+                                (bind-val env (:txt (:pval_name vd)) u)))
+            :Pstr_type (let [[env' k tds] (walk-type-group env (nth d 2))]
+                         (swap! n + k) (add-type-group! ctx tds) env')
+            :Pstr_typext (let [te (second d)]
+                           (force-prefix! env (:txt (:ptyext_path te)))
+                           (occ! (:ptyext_path te) :type (lookup-type-path env (:txt (:ptyext_path te))))
+                           (walk env (:ptyext_params te))
+                           (let [[env' k out] (walk-ext-ctors env (:ptyext_constructors te) false)]
+                             (swap! n + k) (add-exts! ctx out) env'))
+            :Pstr_exception (let [[env' k out] (walk-ext-ctors env [(:ptyexn_constructor (second d))] true)]
+                              (swap! n + k) (add-exts! ctx out) env')
+            :Pstr_module (let [mb (second d)
+                               [i s al] (walk-mod* env (:pmb_expr mb) true)
+                               u (mk!) uv (uid! u)]
+                           (decl! u (module-name (:pmb_name mb)) (:loc (:pmb_name mb)))
+                           (if-let [nm (:txt (:pmb_name mb))]
+                             (bind-module env ctx nm i uv (sh/set-uid-if-none s uv) al)
+                             env))
+            :Pstr_modtype (let [mtd (second d)
+                                i (when (:pmtd_type mtd) (walk-mty env (:pmtd_type mtd)))
+                                u (mk!)]
+                            (decl! u (:txt (:pmtd_name mtd)) (:loc (:pmtd_name mtd)))
+                            (bind-modtype env ctx (:txt (:pmtd_name mtd)) (some-> i (dissoc :mtid)) (uid! u)))
+            :Pstr_open (let [me (:popen_expr (second d))]
+                         (if (= :Pmod_ident (first (:pmod_desc me)))
+                           (let [llid (second (:pmod_desc me)) lid (:txt llid)]
+                             (force-module! env lid)
+                             (let [r (resolve-mod env lid)]
+                               (occ! llid :module (:path r))
+                               (open-env env (:path r) (or (last (resolve-path env lid)) (:info r)))))
+                           (open-env env nil (walk-mod env me))))
+            :Pstr_include (let [[i s] (walk-mod* env (:pincl_mod (second d)) false)]
+                            (hidden! (:inline i)) (swap! n + (:inline i))
+                            (include-items env ctx i s))
+            (:Pstr_attribute) env
+            :Pstr_recmodule (outside "recursive modules")
+            (:Pstr_class :Pstr_class_type) (outside "classes and objects")
+            (outside (str "structure item " (first d))))))
+      env items))))
 
 (defn- walk-sig-items
-  ([env items] (walk-sig-items env items (atom 0)))
-  ([env items n]
-   (reduce
-    (fn [env it]
-      (let [d (:psig_desc it)]
-        (case (first d)
-          :Psig_value (let [vd (second d)] (walk env (:pval_type vd))
-                        (decl! (mk!) (:txt (:pval_name vd)) (:loc (:pval_name vd))) env)
-          :Psig_type (do (swap! n + (walk-type-group env (nth d 2))) env)
-          :Psig_typesubst (do (swap! n + (walk-type-group env (second d))) env)
-          :Psig_typext (let [te (second d)] (force-prefix! env (:txt (:ptyext_path te))) (walk env (:ptyext_params te))
-                         (swap! n + (walk-ext-ctors env (:ptyext_constructors te))) env)
-          :Psig_exception (do (swap! n + (walk-ext-ctors env [(:ptyexn_constructor (second d))])) env)
-          :Psig_module (let [md (second d) i (walk-mty env (:pmd_type md)) u (mk!)]
-                         (decl! u (module-name (:pmd_name md)) (:loc (:pmd_name md)))
-                         (bind-mod env (:txt (:pmd_name md)) i))
-          :Psig_modsubst (let [ms (second d) lid (:txt (:pms_manifest ms))]
-                           (force-prefix! env lid)
-                           (decl! (mk!) (:txt (:pms_name ms)) (:loc (:pms_name ms)))
-                           (bind-mod env (:txt (:pms_name ms)) (or (last (resolve-path env lid)) (info))))
-          (:Psig_modtype :Psig_modtypesubst)
-          (let [mtd (second d) i (if (:pmtd_type mtd) (walk-mty env (:pmtd_type mtd)) (info)) u (mk!)]
-            (decl! u (:txt (:pmtd_name mtd)) (:loc (:pmtd_name mtd)))
-            (assoc-in env [:mtys (:txt (:pmtd_name mtd))] i))
-          :Psig_open (let [lid (:txt (:popen_expr (second d)))]
-                       (force-module! env lid)
-                       (merge-info env (or (last (resolve-path env lid)) (info))))
-          :Psig_include (let [i (walk-mty env (:pincl_mod (second d)))]
-                          (hidden! (:inline i)) (swap! n + (:inline i)) (merge-info env i))
-          (:Psig_attribute) env
-          :Psig_recmodule (outside "recursive modules")
-          (:Psig_class :Psig_class_type) (outside "classes and objects")
-          (outside (str "signature item " (first d))))))
-    env items)))
+  ([env items] (walk-sig-items env items {:n (atom 0) :sig (atom [])}))
+  ([env items ctx]
+   (let [n (:n ctx)]
+     (reduce
+      (fn [env it]
+        (let [d (:psig_desc it)]
+          (case (first d)
+            :Psig_value (let [vd (second d)]
+                          (walk-typ env (:pval_type vd))
+                          (let [u (mk!)]
+                            (decl! u (:txt (:pval_name vd)) (:loc (:pval_name vd)))
+                            (add-item! ctx {:k :value :name (:txt (:pval_name vd)) :uid (uid! u)} nil)
+                            (bind-val env (:txt (:pval_name vd)) u)))
+            (:Psig_type :Psig_typesubst) (let [[env' k tds] (walk-type-group env (if (= :Psig_type (first d)) (nth d 2) (second d)))]
+                                           (swap! n + k) (add-type-group! ctx tds) env')
+            :Psig_typext (let [te (second d)]
+                           (force-prefix! env (:txt (:ptyext_path te)))
+                           (occ! (:ptyext_path te) :type (lookup-type-path env (:txt (:ptyext_path te))))
+                           (walk env (:ptyext_params te))
+                           (let [[env' k out] (walk-ext-ctors env (:ptyext_constructors te) false)]
+                             (swap! n + k) (add-exts! ctx out) env'))
+            :Psig_exception (let [[env' k out] (walk-ext-ctors env [(:ptyexn_constructor (second d))] false)]
+                              (swap! n + k) (add-exts! ctx out) env')
+            :Psig_module (let [md (second d) i (walk-mty env (:pmd_type md)) u (mk!) uv (uid! u)]
+                           (decl! u (module-name (:pmd_name md)) (:loc (:pmd_name md)))
+                           (if-let [nm (:txt (:pmd_name md))] (bind-module env ctx nm i uv (sh/leaf uv) nil) env))
+            :Psig_modsubst (let [ms (second d) llid (:pms_manifest ms) lid (:txt llid)]
+                             (force-prefix! env lid)
+                             (occ! llid :module (:path (resolve-mod env lid)))
+                             (let [u (mk!)]
+                               (decl! u (:txt (:pms_name ms)) (:loc (:pms_name ms)))
+                               (assoc-in env [:mods (:txt (:pms_name ms))]
+                                         (assoc (or (last (resolve-path env lid)) (info)) :path (:path (resolve-mod env lid))))))
+            (:Psig_modtype :Psig_modtypesubst)
+            (let [mtd (second d) i (when (:pmtd_type mtd) (walk-mty env (:pmtd_type mtd))) u (mk!)]
+              (decl! u (:txt (:pmtd_name mtd)) (:loc (:pmtd_name mtd)))
+              (bind-modtype env ctx (:txt (:pmtd_name mtd)) (some-> i (dissoc :mtid)) (uid! u)))
+            :Psig_open (let [llid (:popen_expr (second d)) lid (:txt llid)]
+                         (force-module! env lid)
+                         (let [r (resolve-mod env lid)]
+                           (occ! llid :module (:path r))
+                           (open-env env (:path r) (or (last (resolve-path env lid)) (:info r)))))
+            :Psig_include (let [i (walk-mty env (:pincl_mod (second d)))]
+                            (hidden! (:inline i)) (swap! n + (:inline i))
+                            (include-items env ctx i nil))
+            (:Psig_attribute) env
+            :Psig_recmodule (outside "recursive modules")
+            (:Psig_class :Psig_class_type) (outside "classes and objects")
+            (outside (str "signature item " (first d))))))
+      env items))))
 
 ;; ---------------------------------------------------------------------------------------------
-;; The declarations and objinfo's printing
+;; The index (Cmt_format.index_occurrences) and Env.find_uid
+
+(defn- scrape [p] (if (= :Pextra_ty (p 0)) (scrape (p 1)) p))
+
+(defn- module-info-of [p]
+  (case (p 0)
+    :Pident (:info (get-in @*st* [:idents [:module (p 1)]]))
+    :Pdot (when-let [i (module-info-of (p 1))] (:info (sig-item i :module (p 2))))
+    :Papply (when-let [i (module-info-of (p 1))] (get-in i [:functor :res]))
+    nil))
+
+(defn- tdecl-of [p]
+  (case (p 0)
+    :Pident (:tdecl (get-in @*st* [:idents [:type (p 1)]]))
+    :Pdot (when-let [i (module-info-of (p 1))] (:tdecl (sig-item i :type (p 2))))
+    nil))
+
+(defn- ext-of [p]
+  (case (p 0)
+    :Pident (get-in @*st* [:idents [:ext (p 1)]])
+    :Pdot (when-let [i (module-info-of (p 1))] (sig-item i :typext (p 2)))
+    nil))
+
+(defn- named [xs n] (first (filter #(= n (:name %)) xs)))
+
+(defn- find-uid
+  "Env.find_uid: the uid of the declaration a path names (a module's through its aliases)"
+  [ns p]
+  (case ns
+    :value (case (p 0)
+             :Pident (:uid (get-in @*st* [:idents [:value (p 1)]]))
+             :Pdot (some-> (module-info-of (p 1)) (sig-item :value (p 2)) :uid)
+             nil)
+    :module (case (p 0)
+              :Pident (let [e (get-in @*st* [:idents [:module (p 1)]])] (or (:alias-uid e) (:uid e)))
+              :Pdot (when-let [it (some-> (module-info-of (p 1)) (sig-item :module (p 2)))]
+                      (or (:alias-uid (:info it)) (:uid it)))
+              nil)
+    :module-type (case (p 0)
+                   :Pident (:uid (get-in @*st* [:idents [:module-type (p 1)]]))
+                   :Pdot (some-> (module-info-of (p 1)) (sig-item :modtype (p 2)) :uid)
+                   nil)
+    :type (case (p 0)
+            :Pident (:uid (get-in @*st* [:idents [:type (p 1)]]))
+            :Pdot (some-> (module-info-of (p 1)) (sig-item :type (p 2)) :uid)
+            nil)
+    :extension-constructor (:uid (ext-of p))
+    :constructor (when (= :Pextra_ty (p 0)) (:uid (named (:ctors (tdecl-of (p 1))) (second (p 2)))))
+    :label (when (= :Pextra_ty (p 0))
+             (let [q (p 1) l (second (p 2))]
+               (:uid (named (if (= :Pextra_ty (q 0))
+                              (if (= :ext (q 2)) (:labels (ext-of (q 1))) (:labels (named (:ctors (tdecl-of (q 1))) (second (q 2)))))
+                              (:labels (tdecl-of q)))
+                            l))))
+    nil))
+
+(defn- definition-uid!
+  "Shape_reduce.make_definition_uid: a local opaque uid per parent identifier and declaration, its dependency recorded"
+  [parent decl]
+  (or (get-in @*st* [:lmemo [parent decl]])
+      (let [n (:lnext @*st*) u [:local (:unit @*st*) n]]
+        (swap! *st* #(-> % (update :lnext inc) (assoc-in [:lmemo [parent decl]] u) (update :deps conj [:def u decl])))
+        u)))
+
+(defn- index
+  "Cmt_format.index_occurrences over the occurrences in Tast_iterator's order: [[lid result] ...] as the list holds them
+  (the last occurrence first)"
+  [occs]
+  (let [out (atom ())]
+    (letfn [(store [ns llid path]
+              (when-not (nth (:loc llid) 2)
+                (when-let [s (sh/of-path find-shape ns path)]
+                  (when-not (= :predef (first (:uid s)))
+                    (swap! out conj [llid (sh/local-reduce-for-uid find-shape s #(find-uid ns path) definition-uid!)])))))
+            (components [ns llid path]
+              (let [lid (:txt llid) sp (scrape path)]
+                (cond (and (= :Ldot (first lid)) (= :Pdot (first sp)))
+                      (do (store ns llid path) (components :module (nth lid 1) (sp 1)))
+                      (and (= :Lapply (first lid)) (= :Papply (first sp)))
+                      (do (components :module (nth lid 2) (sp 2)) (components :module (nth lid 1) (sp 1)))
+                      (= :Lident (first lid)) (store ns llid path)
+                      :else nil)))]
+      (doseq [{:keys [lid ns path]} occs :when path] (components ns lid path)))
+    @out))
+
+;; ---------------------------------------------------------------------------------------------
+;; The unit's analysis
+
+(defn analyze
+  "The declarations [[uid name loc] ...] sorted by uid, the index [[lid result] ...], the dependencies [[kind u1 u2] ...]
+  and the signature's info of a unit's Parsetree (KIND :impl, a structure; :intf, a signature) named UNIT; INTF the
+  interface's info an implementation is checked against (Includemod.compunit)"
+  ([items kind] (analyze "" kind items nil))
+  ([unit kind items intf]
+   (binding [*st* (atom {:n 0 :decls [] :stamp 1 :shapes {} :idents {} :unit unit :kind kind :deps [] :lnext 0 :lmemo {}})
+             *occ* (atom [])
+             *mt-subst* (atom {})
+             sh/*memo* (sh/new-memo)]
+     (let [env {:mods {} :mtys {}}
+           ctx {:n (atom 0) :sig (atom []) :smap (atom sh/empty-items)}]
+       (if (= kind :intf) (walk-sig-items env items ctx) (walk-str-items env items ctx))
+       (let [i (sig-info @(:sig ctx) @(:n ctx))]
+         (when intf (modtypes {:pos :strict} i intf (sh/struct-shape [:cu unit] @(:smap ctx))))
+         (let [ix (index @*occ*)]
+           {:decls (vec (sort-by first (:decls @*st*))) :index ix :deps (:deps @*st*) :info i}))))))
 
 (defn decls
   "[[uid name loc] ...] sorted by uid: the declarations Cmt_format.index_declarations records for a unit's Parsetree
   (KIND :impl, a structure; :intf, a signature)"
   [items kind]
-  (binding [*st* (atom {:n 0 :decls []})]
-    (let [env {:mods {} :mtys {}}]
-      (if (= kind :intf) (walk-sig-items env items) (walk-str-items env items)))
-    (vec (sort-by first (:decls @*st*)))))
+  (:decls (analyze "" kind items nil)))
 
 (defn loc-text
   "Location.print_loc: File \"F\", line L, characters A-B (lines L1-L2 when they differ)"
@@ -393,39 +1152,102 @@
   [head body]
   (str (f/render (f/box :hov 2 (f/text (str head ":")) f/sp (f/text body))) "\n"))
 
+(defn decls-text*
+  "objinfo -decls's section of an analysis"
+  [unit kind a]
+  (apply str "\nUid of decls:\n"
+         (for [[uid nm loc] (:decls a)]
+           (entry-text (uid-text unit kind uid) (str nm " (" (loc-text loc) ")")))))
+
 (defn decls-text
   "objinfo -decls's section of one .cmt or .cmti"
   [unit kind items]
-  (apply str "\nUid of decls:\n"
-         (for [[uid nm loc] (decls items kind)]
-           (entry-text (uid-text unit kind uid) (str nm " (" (loc-text loc) ")")))))
+  (decls-text* unit kind (analyze unit kind items nil)))
+
+;; Pprintast.longident (kind Other)
+
+(def ^:private keywords
+  #{"and" "as" "assert" "asr" "begin" "class" "constraint" "do" "done" "downto" "else" "end" "exception" "external" "false"
+    "for" "fun" "function" "functor" "if" "in" "include" "inherit" "initializer" "land" "lazy" "let" "lor" "lsl" "lsr"
+    "lxor" "match" "method" "mod" "module" "mutable" "new" "nonrec" "object" "of" "open" "or" "private" "rec" "sig"
+    "struct" "then" "to" "true" "try" "type" "val" "virtual" "when" "while" "with" "effect"})
+
+(def ^:private infix-symbols (set "=<>@^|&+-*/$%#"))
+(def ^:private prefix-symbols (set "!?~"))
+(def ^:private special-infix #{"asr" "land" "lor" "lsl" "lsr" "lxor" "mod" "or" ":=" "!=" "::"})
+
+(defn- needs-parens [^String s]
+  (and (pos? (count s))
+       (or (contains? special-infix s) (contains? infix-symbols (first s)) (= \. (first s))
+           (and (> (count s) 3) (or (str/starts-with? s "let") (str/starts-with? s "and")) (contains? infix-symbols (nth s 3)))
+           (contains? prefix-symbols (first s)))))
+
+(defn- needs-spaces [^String s] (or (str/starts-with? s "*") (str/ends-with? s "*")))
+
+(defn- ident-doc [s]
+  (cond (contains? keywords s) (f/text (str "\\#" s))
+        (not (needs-parens s)) (f/text s)
+        (needs-spaces s) (f/docs (f/text "(") f/sp (f/text s) f/sp (f/text ")"))
+        :else (f/text (str "(" s ")"))))
+
+(defn- lid-doc [lid]
+  (case (first lid)
+    :Lident (ident-doc (second lid))
+    :Ldot (let [y (lt (nth lid 1)) s (lt (nth lid 2))]
+            (cond (not (needs-parens s)) (f/docs (lid-doc y) (f/text ".") (ident-doc s))
+                  (needs-spaces s) (f/docs (lid-doc y) (f/text ".(") f/sp (f/text s) f/sp (f/text ")"))
+                  :else (f/docs (lid-doc y) (f/text (str ".(" s ")")))))
+    :Lapply (f/docs (lid-doc (lt (nth lid 1))) (f/text "(") (lid-doc (lt (nth lid 2))) (f/text ")"))))
+
+(defn index-text
+  "objinfo -index's section: Indexed shapes:, then each entry as Format prints \"@[<hov 2>%a:@ %a@]@;\" in one stream"
+  [a]
+  (str "Indexed shapes:\n"
+       (f/render (apply f/docs (for [[llid r] (:index a)]
+                                 (f/docs (f/box :hov 2 (sh/result-doc r) (f/text ":") f/sp (lid-doc (:txt llid))
+                                                (f/text (str " (" (loc-text (:loc llid)) ")")))
+                                         f/sp))))))
+
+(defn uid-deps-text
+  "objinfo -uid-deps's section: the dependencies sorted by their uids, <- (definition to declaration) or <->"
+  [a]
+  (apply str "\nUid dependencies:\n"
+         (for [[k u1 u2] (sort (fn [[_ a1 a2] [_ b1 b2]] (let [c (sh/uid-compare a1 b1)] (if (zero? c) (sh/uid-compare a2 b2) c)))
+                               (:deps a))]
+           (str (sh/uid-text u1) (if (= k :def) " <- " " <-> ") (sh/uid-text u2) "\n"))))
 
 ;; ---------------------------------------------------------------------------------------------
-;; T12's check (queue 434): the compiler-output tests of test/ocaml/divergences.edn's :compiler-output, each judged by its own
-;; .reference when the native front end prints every section its ocamlobjinfo action asks for
+;; T12's check (queue 434, queue 450): the compiler-output tests of test/ocaml/divergences.edn's :compiler-output classes, each
+;; judged by its own .reference when the native front end prints every section its ocamlobjinfo action asks for
 
 (def sections
   "ocamlobjinfo's sections (tools/objinfo.ml) and whether the native front end prints them"
-  {"-decls" :printed "-index" "the occurrence index (Cmt_format.index_occurrences, Shape_reduce)"
-   "-uid-deps" "the uid dependencies (Includemod's Uid.Deps)" "-shape" "the implementation shape (Shape)"})
+  {"-decls" :printed "-index" :printed "-uid-deps" :printed "-shape" "the implementation shape (Shape)"})
 
 (defn header-action
-  "The test's ocamlobjinfo action read from its ocamltest header: {:flags [...] :files [...]}, or {:class REASON}"
+  "The test's ocamlobjinfo action read from its ocamltest header: {:flags [...] :files [...] :modules [...]}, or {:class REASON}"
   [^String text]
-  (let [prog (second (re-find #"program\s*=\s*\"([^\"]*)\"\s*;\s*output\s*=\s*\"out_objinfo\"" text))]
+  (let [prog (second (re-find #"program\s*=\s*\"([^\"]*)\"\s*;\s*output\s*=\s*\"out_objinfo\"" text))
+        mods (some-> (re-find #"all_modules\s*=\s*\"([^\"]*)\"" text) second str/trim (str/split #"\s+"))]
     (cond (and prog (re-find #"ocamlobjinfo\s*;" text) (str/starts-with? prog "-quiet "))
           (let [ws (rest (str/split (str/trim prog) #"\s+"))]
-            {:flags (vec (filter #(str/starts-with? % "-") ws)) :files (vec (remove #(str/starts-with? % "-") ws))})
+            {:flags (vec (filter #(str/starts-with? % "-") ws)) :files (vec (remove #(str/starts-with? % "-") ws))
+             :modules (vec mods)})
           (re-find #"ocamlobjinfo\s*;" text) {:class "ocamlobjinfo of a .cmo (cu_imports, required globals) and the compiler's warnings"}
           (re-find #"tools/dumpobj" text) {:class "dumpobj of the bytecode (no bytecode emitter)"}
           (re-find #"setup-ocamlopt" text) {:class "ocamlopt's native code (closures' arity, allocation)"}
           :else {:class "no ocamlobjinfo action"})))
 
+(defn- unit-of [^String f]
+  (let [b (subs f 0 (str/index-of f "."))] (str (str/upper-case (subs b 0 1)) (subs b 1))))
+
 (defn objinfo-text
   "ocamlobjinfo -quiet FLAGS FILES of the native front end, or {:missing [section...]} / {:refused msg}; PARSE the reader
-  (path fname kind) -> items, TYPE (path fname) -> nil or an error message (the typer accepts the unit)"
-  [dir {:keys [flags files]} parse type]
-  (let [missing (vec (remove #(= :printed (get sections %)) flags))]
+  (path fname kind) -> items, TYPE (path fname) -> an error message, or {:choices ...} (the typer accepts the unit, its
+  constructor choices by location)"
+  [dir {:keys [flags files modules]} parse type]
+  (let [missing (vec (remove #(= :printed (get sections %)) flags))
+        fl (set flags)]
     (if (seq missing)
       {:missing (mapv #(str % ": " (get sections % "unknown")) missing)}
       (try
@@ -433,10 +1255,18 @@
                       (for [f files]
                         (let [src (str/replace f #"\.cmti?$" (if (str/ends-with? f ".cmti") ".mli" ".ml"))
                               kind (if (str/ends-with? src ".mli") :intf :impl)
-                              b (subs src 0 (str/index-of src "."))
-                              u (str (str/upper-case (subs b 0 1)) (subs b 1))
-                              path (str dir "/" src)]
-                          (when-let [e (type path src)] (throw (ex-info (str "typer: " e) {:objinfo-outside e})))
-                          (decls-text u kind (parse path src kind)))))}
+                              u (unit-of src)
+                              path (str dir "/" src)
+                              t (type path src)
+                              _ (when (string? t) (throw (ex-info (str "typer: " t) {:objinfo-outside t})))
+                              mli (str/replace src #"\.ml$" ".mli")
+                              intf (when (and (= kind :impl) (some #{mli} modules))
+                                     (:info (binding [*units* (disj (set (map unit-of modules)) u)]
+                                              (analyze u :intf (parse (str dir "/" mli) mli :intf) nil))))
+                              a (binding [*choices* (:choices t) *units* (disj (set (map unit-of modules)) u)]
+                                  (analyze u kind (parse path src kind) intf))]
+                          (str (when (fl "-index") (index-text a))
+                               (when (fl "-uid-deps") (uid-deps-text a))
+                               (when (fl "-decls") (decls-text* u kind a))))))}
         (catch arbace.lang.ExceptionInfo e
           (if (:objinfo-outside (ex-data e)) {:refused (.getMessage e)} (throw e)))))))
