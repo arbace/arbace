@@ -5511,3 +5511,32 @@ with every class by name, are in doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergen
 moved: AOT 1,685 / 149 / 3 to 1,688 / 149 / 0 (RPS32 (a): repr/go prints the three invalid programs as written, the
 class `printer-invalid` removed; doc/FULL-SUPPORT-SURVEY.md, "As built: v2 small leftovers A"). Read, eval and print are
 as at v1 (12,158 / 204 / 0, 1,618 / 219 / 0, 2,584+ / 141 / 0).
+
+## Since v1: gc's front-end -d diagnostics, bodiless functions on their first call (2026-11-19, queue 420)
+
+Queue 420 audited the by-design classes of `test/goi/divergences.edn` that Go's eval cell still counts. Four of `:gc-flags`'
+programs ask for `-d` diagnostics that gc prints from decisions its front end or a plain rule makes, not from the SSA back
+end's passes; they are goi's now (`bin/goi`'s `check_err` passes them as the debug map `--escape-debug`):
+
+- `-d=typeassert` (`interface/assertinline.go`): ssagen's dottype1 says "type assertion inlined" at each `x.(T)`, "not
+  inlined" when T is a non-empty interface (a runtime call). `arbace.go.run/typeassert-lines` over the checked trees (generic
+  functions and type switches left out: gc reports at instances' dynamic assertions, and walk compiles type switches without
+  dottype1).
+- `-d=defer` (`defererrcheck.go`): ssagen's ODEFER message from buildssa's hasOpenDefers (at most 8 defers, each at loop depth
+  1 (escape's goDeferStmt: EscNever), no result moved to heap, returns times defers at most 15, no `-N`), else
+  stack-allocated for EscNever, else heap-allocated. `arbace.go.escape/defer-lines`: the escape analysis run at `-m` 0 with
+  `*defer-log*`, which records each defer's loop depth and the variables moved to heap.
+- `-d=append,slice` (`sliceopt.go`): ssagen's OAS of `x = append(x, ...)` with `ir.SameSafeExpr` sides, "(in local slice)" when
+  x can be SSA'd (canSSAName: a local not address-taken, captured or moved to heap, not a result of a function with a defer);
+  walkSlice's `x[:]`/`x[0:]` of a slice or string. `arbace.go.escape/append-slice-lines`.
+- `-d=checkptr` (`fixedbugs/issue35073b.go`, with `-m`): its instrumentation reports nothing; what changes `-m` is the inliner,
+  which refuses `go:nocheckptr` functions, reflect's `Value.UnsafeAddr` and `Value.Pointer` called as methods (#35073) and
+  every function of objabi's runtime packages (`arbace.go.escape`'s `checkptr-refused?`, `runtime-pkgs`).
+
+`:foreign-code`: in program mode (`arbace.go.run`, eager builds) a function without a body in a package without assembly
+(`no-assembly!` refuses those first) is built on its first call, as at the REPL (`build/lazily`): gc's linker needs its symbol
+only where a live call reaches it, so `fixedbugs/issue9608.go` (calls of `fail()` in constant-false branches and cases) runs;
+a program that does call one ends there with `goi: unsupported: a function without a body (assembly)`, status 125, as before.
+
+What stays by design in `:gc-flags`: `-live`, `-l=N`, `-wb`, and `-d=` of the SSA passes (`ssa/*`, `nil`, `wb`, `tailcall`,
+`checkbce`) and `escapedebug` (walk's dataWord over order's static temporaries: front-end work, not ported yet).
