@@ -685,8 +685,9 @@ Prior art:
   `records-check` (`bin/records-check`: each results file against its known file, `test/records/`; `make hooks` its opt-in pre-commit hook).
   Logs in `.tmp/gate/`. Every `bin/arbace-go --build`
   first trims Go's build cache of entries unused for 90 minutes (`bin/lib/gocache.bash`,
-  `ARBACE_GOCACHE_KEEP_MIN`); under the gate, since GD4, that is Go's own five days and the gate caps the cache at 8 GiB by the
-  least recently used (`test/gate/caches.edn`). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
+  `ARBACE_GOCACHE_KEEP_MIN`); under the gate, since GD4, that is Go's own five days and the gate caps the cache by the
+  least recently used at 40 GiB, less when keeping it would leave under 35 GiB free, never under 8, and trims nothing while a Go
+  build runs (`test/gate/caches.edn`; 8 GiB before 2026-11-19, which started each gate's builds cold). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
 
 ## Records
 

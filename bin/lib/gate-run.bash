@@ -867,7 +867,26 @@ gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and exec
 # :cheap true: also by --cheap (a gate's start, a step below the disk floor); :max-entries N: a directory (any under :path)
 # holding more entries is a warning of --prune (ext4's index filled at 208,000 in night 12); :shared true: content-keyed,
 # one copy at the main checkout's .tmp/shared for every worktree at the same key (bin/lib/ci/musl's forms)
-caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT, a line each (TSV)
+# A [:size GIB :lru] row may also take (n-gate-gocache, 2026-11-19: Go's build cache, whose warm set for go-build, javac's tool
+# and the fixpoint is about 30 to 37 GiB; an 8 GiB cap started each gate's builds cold):
+#   :free-gib F   the cap relative to the free disk: GIB at most, less when keeping it would leave under F GiB free on the
+#                 cache's file system (the cap = min(GIB, its size + free - F)), never under :min-gib M (default 0): larger
+#                 when the disk is free, smaller near GD4's floor (GATE_DISK_FLOOR, 25 GiB; F above it)
+#   :idle-only true  nothing removed while a Go build runs on the host (a process whose executable is under ARBACE_GOROOT:
+#                 go, compile, link, asm; GATE_CACHES_GO_BUSY=1|0 decides instead, the tests): the user's rule, never trim Go's
+#                 cache under a live build (memory: a 2-hour trim still broke one); the row says it waited, and the next cap
+#                 (before a step, every 5 minutes) or the floor's deferral of the steps takes it up
+caches_go_busy() {  # 0 when a process of Go's toolchain (ARBACE_GOROOT's) runs on the host
+  case ${GATE_CACHES_GO_BUSY:-} in 1) return 0 ;; 0) return 1 ;; esac
+  local g=${ARBACE_GOROOT:-/root/tamago-go} p e
+  g=$(readlink -f "$g" 2>"$TMPDIR/caches-go.err" || echo "$g")
+  for p in /proc/[0-9]*; do
+    e=$(readlink "$p/exe" 2>"$TMPDIR/caches-go.err") || continue
+    case $e in "$g"/bin/*|"$g"/pkg/tool/*) return 0 ;; esac
+  done
+  return 1
+}
+caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT FREE MIN IDLE, a line each (TSV)
   awk '
     /^[ \t]*;/ { next }
     /:path "/ {
@@ -882,7 +901,10 @@ caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT, 
       m = "-"; if (match(l, /:match "[^"]*"/)) m = substr(l, RSTART + 8, RLENGTH - 9)
       c = (l ~ /:cheap true/) ? "cheap" : "-"
       x = "-"; if (match(l, /:max-entries [0-9]+/)) x = substr(l, RSTART + 13, RLENGTH - 13)
-      print p "\t" w "\t" r "\t" a1 "\t" a2 "\t" m "\t" c "\t" x
+      fr = "-"; if (match(l, /:free-gib [0-9.]+/)) fr = substr(l, RSTART + 10, RLENGTH - 10)
+      mn = "-"; if (match(l, /:min-gib [0-9.]+/)) mn = substr(l, RSTART + 9, RLENGTH - 9)
+      id = (l ~ /:idle-only true/) ? "idle" : "-"
+      print p "\t" w "\t" r "\t" a1 "\t" a2 "\t" m "\t" c "\t" x "\t" fr "\t" mn "\t" id
     }' "$1"
 }
 caches_base() {  # caches_base WHERE PATH: the path on disk
@@ -903,16 +925,29 @@ caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
   now=$(date +%s)
   local lst=$TMPDIR/caches-prune.$$
   caches_rows "$tab" > "$lst.rows"
-  while IFS=$'\t' read -r p w r a1 a2 m c x; do
+  local fr mn id capk
+  while IFS=$'\t' read -r p w r a1 a2 m c x fr mn id; do
     [ "$which" = cheap ] && [ "$c" != cheap ] && continue
     for base in $(caches_base "$w" "$p"); do
       [ -e "$base" ] || continue
       : > "$lst"
+      if [ "${id:--}" = idle ] && caches_go_busy; then
+        echo "gate --prune: $base left alone: a Go build runs (:idle-only, never trimmed under a live build)"; continue
+      fi
       case $r in
         size)
-          # the least recently used files first, until the directory holds A1 GiB
+          # the least recently used files first, until the directory holds the cap: A1 GiB, or with :free-gib the smaller of
+          # A1 and what leaves FREE GiB free (its size + the free disk - FREE), at least :min-gib
+          capk=$(awk -v a="$a1" 'BEGIN {printf "%d", a * 1048576}')
+          if [ "${fr:--}" != - ]; then
+            local fk sk
+            if [ -n "${GATE_CACHES_FREE_KIB:-}" ]; then fk=$GATE_CACHES_FREE_KIB; else fk=$(df -Pk "$base" 2>"$lst.err" | awk 'NR == 2 {print $4 + 0}'); fi
+            sk=$(du -sk "$base" 2>"$lst.err" | cut -f1)
+            capk=$(awk -v c="$capk" -v s="${sk:-0}" -v f="${fk:-0}" -v fr="$fr" -v mn="${mn/-/0}" 'BEGIN { k = s + f - fr * 1048576; if (k > c) k = c; if (k < mn * 1048576) k = mn * 1048576; printf "%d", k }')
+            echo "gate --prune: $base holds $(gib "${sk:-0}"), $(gib "${fk:-0}") free: its cap $(gib "$capk") (at most $a1 GiB, $fr GiB left free, at least ${mn/-/0} GiB)"
+          fi
           find "$base" -type f -printf '%T@\t%s\t%p\n' 2>"$lst.err" | sort -n \
-            | awk -F'\t' -v cap="$a1" '{ f[NR] = $3; s[NR] = $2; t += $2 } END { lim = cap * 1073741824; for (i = 1; i <= NR && t > lim; i++) { print s[i] "\t" f[i]; t -= s[i] } }' > "$lst" ;;
+            | awk -F'\t' -v capk="$capk" '{ f[NR] = $3; s[NR] = $2; t += $2 } END { lim = capk * 1024; for (i = 1; i <= NR && t > lim; i++) { print s[i] "\t" f[i]; t -= s[i] } }' > "$lst" ;;
         age)
           if [ "$a2" = atime ]; then find "$base" -type f -atime +"$a1" -printf '%s\t%p\n' 2>"$lst.err" > "$lst"
           else find "$base" -type f -mtime +"$a1" -printf '%s\t%p\n' 2>"$lst.err" > "$lst"; fi ;;
