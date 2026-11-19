@@ -12979,3 +12979,7 @@ impl-ns's forEach runs, isEmpty is the default's; the same over List under `ARBA
 item 5's records) stays the main host's night.
 Keys (without `ARBACE_HOST_EXE`): gate KEY20 `efcc5118fcf5748217a6` -> `ca72eb47fd67b2006656`, javac's `231da30c39a1` -> `779edb1e6bbd`,
 `arbace_aot_key` `9dfc53c46d8f` -> `6a6277659883` (arbace/genclass.ae is embedded); arbace_runtime_key unmoved.
+
+## 2026-11-19: correction to "399's gen-class fix tested"
+
+The entry above says `bin/j2g-unit` 196 passes: the run (n-399-tests `4c997349b`, stage 0) had 191 passes and the 7 known failures.
