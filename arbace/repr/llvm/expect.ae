@@ -334,7 +334,11 @@
             k (nth (:blocks sim) bi)
             from (unwinds-to f k)]
         (cond
-          (dbg-record? y) (unknown "a debug record moved above the landingpad")
+          ;; queue 407: a debug record is no instruction: LLParser attaches it to the instruction after it, the landingpad, which
+          ;; stays the block's first non-phi; visitDbgRecords (V:519) asks only that the marked instruction be no PHI, and no check
+          ;; of a record reads its place (a record's value is metadata: no dominance check, V:7130-7215, a local of the function
+          ;; resolved by LLParser wherever it is defined, the landingpad's own result too)
+          (dbg-record? y) valid
           (some #(< % bi) from) (invalid :unwind-dest)
           (and (contains? (reachable f (:blocks sim)) bi) (result lp) (seq (real-uses-of y #{(lkey (result lp))}))) (invalid :dominate)
           :else (invalid :lpad-first))))))
@@ -401,15 +405,46 @@
 (defn- callee-decl [m callee] (first (filter #(and (#{'llvm/declare 'llvm/define} (first %)) (= (second %) callee)) m)))
 (defn- intrinsic-name? [c] (and (symbol? c) (= "g" (namespace c)) (str/starts-with? (name c) "llvm.")))
 
+(declare verifier)
+
+(def ^:private type-free-md
+  "Queue 407: the attachments of a load or a store whose Verifier checks (visitInstruction, V:5779-5913) read neither the
+  access's type nor its value's: their kind of instruction and their nodes alone (TBAA's struct-path nodes, V:7960; the scope
+  lists, V:5518; the access groups; !DIAssignID's instruction kind and uses, V:5335; MMRA's and annotation's nodes), or no check."
+  '#{!dbg !tbaa !tbaa.struct !alias.scope !noalias !llvm.access.group !invariant.group !invariant.load !noundef !nontemporal
+     !annotation !mmra !llvm.mem.parallel_loop_access !DIAssignID})
+
+(defn- cexpr-error
+  "Queue 407: LLParser's convertValIDToValue for a constant expression read with the type `t` (ValID::t_Constant, P:6942-6946):
+  the expression's own type must be `t`, `constant expression type mismatch: got type 'C' but expected 'T'`. The expression's type
+  is known here for a cast (its destination type) and a getelementptr over a pointer base whose indices are no vectors (its
+  base's pointer type, GetElementPtrInst::getGEPReturnType); nil otherwise, or when the types agree."
+  [t v]
+  (when (and (seq? v) (symbol? (first v)))
+    (let [h (first v) ps (vec (drop-while #(or (keyword? %) (and (seq? %) (keyword? (first %)))) (rest v)))
+          ct (cond ('#{trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint ptrtoaddr inttoptr bitcast addrspacecast} h)
+                   (some-> (nth ps 2 nil) vf/norm-type)
+                   (= h 'getelementptr)
+                   (let [[_ base & idxs] ps bt (when (vector? base) (vf/norm-type (first base)))
+                         ptr? #(or (= % 'ptr) (and (seq? %) (= 'ptr (first %))))
+                         vec? #(and (seq? %) (#{'vector 'vscale} (first %)))]
+                     (when (and bt (ptr? bt) (every? (fn [ix] (and (vector? ix) (not (vec? (vf/norm-type (first ix)))))) idxs)) bt))
+                   :else nil)
+          t (vf/norm-type t)]
+      (when (and ct (not= ct t))
+        (invalid :cexpr-type (str "constant expression type mismatch: got type '" (tstr ct) "' but expected '" (tstr t) "'"))))))
+
 (defn- const-error
   "Round 52: LLParser's error converting the constant `v` to the scalar type `t` (convertValIDToValue, getGlobalVal), as it
   parses the operand: null or a global's name read with an integer or floating-point type; nil when it is not one of these."
   [t v]
   (let [t (vf/norm-type t)
         scalar? (or (contains? '#{half bfloat float double x86_fp80 fp128 ppc_fp128} t) (and (symbol? t) (re-matches #"i[0-9]+" (name t))))]
-    (when scalar?
+    (if scalar?
       (cond (= v 'null) (invalid :null-type)
-            (and (symbol? v) (= "g" (namespace v))) (invalid :global-ptr)))))
+            (and (symbol? v) (= "g" (namespace v))) (invalid :global-ptr)
+            :else (cexpr-error t v))
+      (cexpr-error t v))))
 
 (defn ex-type
   "An instruction's type changed (arbace.repr.llvm.mutate's retype): LLParser reads each operand with the new type, so a
@@ -448,9 +483,27 @@
           ;; constrains the type (the Verifier's !range, atomic loads' and stores' sizes)
           ;; round 52: these two are the Verifier's (visitLoadInst's and visitStoreInst's atomic sizes, the attachments' checks), so
           ;; an LLParser error the simulation finds anywhere in the function comes first (::verifier: the cond below)
-          (load store) (cond (some #{:atomic} b) (assoc (unknown "an atomic access") ::verifier true)
-                             (body-md b) (assoc (unknown "an attachment on the access") ::verifier true)
-                             :else valid)
+          ;; queue 407: a store's value operand is a constant read with the new type first (LLParser, a constant expression's
+          ;; type); the attachments whose checks read no type of the access (visitInstruction, V:5779-5913: !dbg, TBAA's
+          ;; struct-path nodes, the scope lists, the access groups, !DIAssignID's instruction kind, ...) say nothing of the
+          ;; change; nonnull, dereferenceable(_or_null) and align ask the loaded type to be a pointer (V:5827, V:5215, V:5862), when no
+          ;; check before them in visitInstruction's order reads the type (fpmath, range, nofpclass, noalias.addrspace)
+          (load store) (let [ks (set (take-nth 2 (body-md b)))
+                             ce (when (= h 'store) (let [[t v] (second b)] (const-error t v)))
+                             ptr-ks (filter ks '[!nonnull !dereferenceable !dereferenceable_or_null !align])
+                             lt (when (= h 'load) (vf/norm-type (second b)))]
+                         (cond ce ce
+                               (some #{:atomic} b) (assoc (unknown "an atomic access") ::verifier true)
+                               (empty? ks) valid
+                               (and (= h 'load) (seq ptr-ks) (not-any? '#{!fpmath !range !nofpclass !noalias.addrspace} ks)
+                                    (not (or (= lt 'ptr) (and (seq? lt) (= 'ptr (first lt))))))
+                               (assoc (verifier (case (first ptr-ks)
+                                                  !nonnull "nonnull applies only to pointer types"
+                                                  (!dereferenceable !dereferenceable_or_null) "dereferenceable, dereferenceable_or_null apply only to pointer types"
+                                                  !align "align applies only to pointer types"))
+                                      ::verifier true)
+                               (every? type-free-md ks) valid
+                               :else (assoc (unknown "an attachment on the access") ::verifier true)))
           (add sub mul udiv sdiv urem srem shl lshr ashr and or xor icmp) valid
           (trunc zext sext ptrtoint inttoptr bitcast)
           (let [[_ t v t2] (vec (remove keyword? b)) t (vf/norm-type t) t2 (vf/norm-type t2)
@@ -679,6 +732,11 @@
              (map-indexed vector (take n (:params sg)))))
      (let [ns (names (:fn-attrs sg))]
        (some (fn [[p msg]] (when (p ns) msg)) fn-pair-checks))
+     ;; queue 407, V:2424: jumptable asks the function's global unnamed_addr (hasGlobalUnnamedAddr: not local_unnamed_addr);
+     ;; on a call the Verifier's cast<GlobalValue> of the call is undefined, left to ex-attr's unknown
+     (when (and (not (:call? sg)) ((names (:fn-attrs sg)) "jumptable")
+                (not= :unnamed_addr (:unnamed-addr (opts-of (drop 4 (:form sg))))))
+       "Attribute 'jumptable' requires 'unnamed_addr'")
      (some (fn [a] (let [r (fn-value-check a sg)] (when (and r (not= r :unknown)) r))) added-fn))))
 
 (defn- akey [a] (if (vector? a) (first a) (aname a)))
@@ -707,8 +765,14 @@
      (when (intrinsic-decl? m sg) valid)
      (when (and (:call? sg) (old-dbg? (:callee sg))) valid)
      (when (and (:call? sg) (some #(and (vector? %) (string? (first %))) added)) (unknown "a string attribute on a call"))
-     (when (some #(or (vec-t? (first %)) (and (seq? (vf/norm-type (first %))) (#{'struct 'packed 'array} (first (vf/norm-type (first %)))))) (:params sg))
-       (unknown "a vector or aggregate parameter"))
+     ;; a vector or aggregate parameter's attributes are not all ported: unknown when the attribute was added to such a
+     ;; parameter, or when the port finds an error in such a parameter's own attributes, which the mutant did not change
+     ;; (queue 407: otherwise its checks passed in the original and still do, and the added attribute's checks decide)
+     (let [agg? (fn [t] (or (vec-t? t) (and (seq? (vf/norm-type t)) (#{'struct 'packed 'array} (first (vf/norm-type t))))))]
+       (when (if (and pi (#{:param :dup} where))
+               (or (agg? ptype) (and pj (agg? (first (get (:params sg) pj)))))
+               (some (fn [[t as]] (and (agg? t) (param-attrs-check as t))) (:params sg)))
+         (unknown "a vector or aggregate parameter")))
      ;; V:3042 visitFunction: sret on the first or second parameter of a function that returns a value
      (when (and (not (:call? sg)) (not= 'void (vf/norm-type (:ret sg))) (some #(= (aname %) "sret") (second (get (:params sg) 1))))
        (verifier "Invalid struct return type!"))
@@ -718,7 +782,12 @@
      (when (and (:call? sg) (= where :param) (some #(= (aname %) "immarg") added))
        (let [d (callee-decl m (:callee sg))
              dp (when d (get (vec (filter vector? (nth d 3))) pi))]
-         (if (and dp (some #(= % :immarg) dp)) (unknown "immarg on an immediate parameter") (verifier "immarg may not apply only to call sites"))))
+         (if (and dp (some #(= % :immarg) dp))
+           ;; queue 407, V:3924-3946: the declaration's own immarg passes the call-site check, and paramHasAttr saw the
+           ;; declaration's immarg before the change, so the operand's checks (an immediate, its range) held already; the
+           ;; call-site set's own rule (immarg with no other attribute but range, V:2077) is param-attrs-check's, above
+           valid
+           (verifier "immarg may not apply only to call sites"))))
      ;; V:3985-4006: a varargs call's arguments past the fixed parameters
      (when (and (:call? sg) (:varargs? sg))
        (let [fixed (take (:nfixed sg) (:params sg)) extra (drop (:nfixed sg) (:params sg))
@@ -735,7 +804,7 @@
                extra)))
      (when (some #(= :unknown (fn-value-check % sg)) (if (= where :fn) (filter #(not (#{"noinline" "alwaysinline" "optnone" "minsize" "optsize" "optdebug" "jumptable"} (aname %))) added) []))
        (unknown "a function attribute's value the port does not check"))
-     (when (some #(#{"jumptable"} (aname %)) added) (unknown "jumptable's unnamed_addr"))
+     (when (and (:call? sg) (some #(#{"jumptable"} (aname %)) added)) (unknown "jumptable on a call (the Verifier's cast<GlobalValue>)"))
      (when (and (:call? sg) (some #(#{"swifterror" "preallocated" "inalloca"} (aname %)) added)) (unknown "a call's swifterror, preallocated or inalloca argument"))
      (when (some #(#{"swifterror"} (aname %)) added) (unknown "swifterror's uses"))
      valid)))
@@ -1200,6 +1269,53 @@
   [m id e]
   (if (and (= :debug (:verdict e)) (.contains ^java.util.Set (stripped-reachable m) id)) (assoc e :verdict :invalid) e))
 
+(defn- visit-roots
+  "Queue 407: the metadata the Verifier visits through visitMDNode, in its order, each root with its AreDebugLocsAllowed
+  (V:950): verifyModule's functions in the module's order (V:7671), a declaration's attachments with Yes (V:3210), a definition's
+  !dbg with Yes and its other attachments with No (V:3235-3271), then each instruction: its debug records first (visitDbgRecords,
+  V:519: the location Yes, V:531; the variable, the expression and the rest No, V:7169-7197), a call's metadata arguments No
+  (V:5958, V:1053), its !dbg Yes (V:5925), its other attachments No but !llvm.loop (V:5938-5945); then the named metadata with
+  Yes (verify(), V:300, V:946). A call of an old debug intrinsic is a record by then (its location first)."
+  [m]
+  (let [pairs (fn [md] (partition 2 md))
+        margs (fn [b] (when (and ('#{call invoke callbr} (first b)) (vector? (nth b 3 nil)))
+                        (md-ids-in (filter #(and (vector? %) (= 'metadata (first %))) (nth b 3)))))]
+    (concat
+     (for [f m :when (#{'llvm/define 'llvm/declare} (first f))
+           r (let [o (opts-of (drop 4 f))]
+               (if (= 'llvm/declare (first f))
+                 (for [[_ v] (pairs (:md o))] [:yes (md-ids-in [v])])
+                 (concat
+                  (for [[k v] (pairs (:md o))] [(if (= k '!dbg) :yes :no) (md-ids-in [v])])
+                  (for [bl (blocks-of f) x (items-of bl)
+                        r (let [b (body x)]
+                            (cond (dbg-record? x) [[:yes (md-ids-in [(peek (vec b))])] [:no (md-ids-in (pop (vec (rest b))))]]
+                                  (and (= 'call (first b)) (old-dbg? (nth b 2 nil)))
+                                  [[:yes (md-ids-in (keep (fn [[k v]] (when (= k '!dbg) v)) (pairs (body-md b))))] [:no (margs b)]]
+                                  :else (concat [[:no (margs b)]]
+                                                (for [[k v] (pairs (body-md b)) :when (= k '!dbg)] [:yes (md-ids-in [v])])
+                                                (for [[k v] (pairs (body-md b)) :when (not= k '!dbg)] [(if (= k '!llvm.loop) :yes :no) (md-ids-in [v])]))))]
+                    r))))]
+       r)
+     (for [f m :when (= (first f) 'llvm/named-meta)] [:yes (md-ids-in (nth f 2))]))))
+
+(defn- first-visit
+  "Queue 407: how the Verifier first reaches the node `id` (visit-roots' order, visitMDNode's worklist over each root, a node
+  visited once): :yes or :no (its AreDebugLocsAllowed), nil when no root reaches it."
+  [m id]
+  (let [nodes (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) m))
+        seen (java.util.HashSet.)]
+    (some (fn [[mode ids]]
+            (let [work (java.util.ArrayDeque.)]
+              (doseq [r ids] (when (.add seen r) (.add work r)))
+              (loop []
+                (when-let [r (.poll work)]
+                  (if (= r id)
+                    mode
+                    (do (doseq [s (md-ids-in (get nodes r))] (when (.add seen s) (.add work s)))
+                        (recur)))))))
+          (visit-roots m))))
+
 (defn- di-fields
   "A debug info node's fields as a map, field name (a string) -> value."
   [n]
@@ -1512,7 +1628,7 @@
 (defn ex-di-retarget
   "A debug info node's reference sent to a node of another kind: a DILocation's scope must be a local scope (V:3335, the
   debug info's, which opt strips); the other fields' rules are left to opt."
-  [m {:keys [i field to]} _]
+  [m {:keys [i field to]} orig]
   (let [kind (di-kind (nth (nth m i) 2)) tk (di-kind (md-node m to))]
     (if (and (= kind "DILocation") (= "scope" (fname field)))
       (let [id (second (nth m i))
@@ -1536,7 +1652,32 @@
           (some (fn [x] (some #{id} (rest (tuple-ops m (inst-loop x))))) (for [f fns b (blocks-of f) x (items-of b) :when (not (dbg-record? x))] x))
           (debugv "DILocation's scope must be a DILocalScope")
           :else (unknown "a DILocation no instruction or record uses")))
-      (di-field-rule m (second (nth m i)) kind (fname field) tk (di-fields (nth (nth m i) 2))))))
+      (let [id (second (nth m i)) f (fname field)]
+        (cond
+          ;; queue 407: visitDILexicalBlockBase (V:1608) and visitDILexicalBlockFile (V:1623) read no file (no visitDIScope); the
+          ;; new operand is visitMDNode's: a DILocation only where the block is first reached with locations allowed (V:983);
+          ;; another node judged as before when the original's Verifier reached it, and it holds no location
+          (and (#{"DILexicalBlock" "DILexicalBlockFile"} kind) (= f "file"))
+          (let [mode (first-visit m id)]
+            (cond (nil? mode) valid
+                  (and (= tk "DILocation") (= mode :no)) (debugv "DILocation not allowed within this metadata node")
+                  (nil? (first-visit orig to)) (unknown "a lexical block's file sent to a node the Verifier did not reach")
+                  (= tk "DILocation") valid
+                  (some #(= "DILocation" (md-kind m %)) (md-ids-in (md-node m to))) (unknown "a lexical block's file sent to a node with locations")
+                  :else valid))
+          ;; queue 407, D335-2 (a): a compile unit's global variable expression whose variable is a DILocation: visitDICompileUnit's
+          ;; list (V:1479-1486) reads the location as a variable through an unchecked cast, its first operand (the scope) as the
+          ;; variable's scope: a local scope there is `function-local variables are not allowed`, when a function's metadata reaches
+          ;; the unit (its visit) before verify()'s globals (visitGlobalVariable's direct visit: `invalid tag`, left)
+          (and (= kind "DIGlobalVariableExpression") (= f "var") (= tk "DILocation"))
+          (let [cus (filter (fn [x] (and (= 'llvm/meta (first x)) (= "DICompileUnit" (di-kind (nth x 2)))
+                                         (some #{id} (md-ids-in (md-node m (get (di-fields (nth x 2)) "globals"))))))
+                            m)
+                fn-reached (fn [cu] (let [mm (vec (remove #(= 'llvm/named-meta (first %)) m))] (first-visit mm (second cu))))]
+            (if (and (seq cus) (fn-reached (first cus)) (contains? local-scopes (md-kind m (get (md-fields m to) "scope"))))
+              (debugv "function-local variables are not allowed in a DICompileUnit's global variables list")
+              (unknown "a global variable expression's variable sent to a location")))
+          :else (di-field-rule m id kind f tk (di-fields (nth (nth m i) 2))))))))
 
 (defn ex-di-record
   "A debug record's variable, expression or location replaced by another node: the variable must be a DILocalVariable
@@ -1557,7 +1698,7 @@
 (defn ex-di-attach
   "A function's !dbg attachment sent to another node: it must be a DISubprogram (V:3244, the debug info's); LLS40 (a): an
   instruction's (LLParser's DILocation, then the walks of the locations) and a global's (a DIGlobalVariableExpression)."
-  [m {:keys [case fi at gi]} _]
+  [m {:keys [case fi at gi]} orig]
   (let [to-inst (when (= case :inst) (let [[fi bi ii] at] (inst-dbg (nth (items-of (nth (blocks-of (nth m fi)) bi)) ii))))
         tk-inst (md-kind m to-inst)
         to-global (when (= case :global) (second (drop-while #(not= % '!dbg) (:md (opts-of (drop 3 (nth m gi)))))))
@@ -1570,7 +1711,11 @@
         ;; LLS36 (a): a declaration's !dbg (V:3202): a call site's, which must be unique; the node is not checked as a subprogram
         (= 'llvm/declare (first f)) (cond distinct? (debugv "function declaration may only have a unique !dbg attachment")
                                           (= tk "DISubprogram") valid
-                                          :else (unknown "a declaration's !dbg sent to a node that is no subprogram (the Verifier's cast)"))
+                                          ;; queue 407: the cast's isDistinct is MDNode's (Metadata's storage), so a uniqued node
+                                          ;; of any kind passes V:3202; then visitMDNode with locations allowed (V:3210): the node's
+                                          ;; own checks, which held where the original's Verifier reached it (with Yes, no fewer)
+                                          (some? (first-visit orig to)) valid
+                                          :else (unknown "a declaration's !dbg sent to a node the original's Verifier did not reach"))
         (not= tk "DISubprogram") (debugv "function !dbg attachment must be a subprogram")
         ;; LLS40 (a): visitFunction's attachment checks (V:3239-3253), then its walk of the locations (V:3313)
         (not (md-distinct? m to)) (debugv "function definition may only have a distinct !dbg attachment")
@@ -1908,6 +2053,19 @@
       (some #(not= (call-fn-type %) nty) calls) (invalid :intr-sig)
       :else (if-let [e (sig-error base nty)] (verifier e) valid))))
 
+(defn- call-case-upgrade?
+  "Queue 407: whether UpgradeIntrinsicCall rewrites the calls of `g` (the intrinsic `id`'s remangled declaration) by its own case
+  (call-upgrade-ids). memcpy's, memmove's and memset's case takes only a call of five arguments (AutoUpgrade.cpp:5768: the old
+  alignment argument), the masked loads', gathers', stores' and scatters' only one of four (AutoUpgrade.cpp:5798); any other call
+  goes to DefaultCase (AutoUpgrade.cpp:5245): the callee replaced when the call's type is the new declaration's, else the call
+  left on the new function with its own type for the Verifier to catch, as a generic intrinsic's."
+  [m g id]
+  (let [n-case ({"llvm.memcpy" 5 "llvm.memmove" 5 "llvm.memset" 5 "llvm.masked.load" 4 "llvm.masked.gather" 4
+                 "llvm.masked.store" 4 "llvm.masked.scatter" 4} id)]
+    (and (contains? call-upgrade-ids id)
+         (or (nil? n-case)
+             (some (fn [f] (some #(= n-case (count (nth % 3))) (calls-in f g))) (filter #(= 'llvm/define (first %)) m))))))
+
 (defn ex-intr-decl
   "An intrinsic's declaration with a parameter or the return type changed (its calls unchanged): AutoUpgrade first (a ctlz or
   cttz of one parameter is declared again and its calls rebuilt: valid); a signature that is valid under another mangling is
@@ -1921,7 +2079,7 @@
       (= up [:mem5]) (mem5-upgraded m g nm fty)
       (= up [:life2]) (life2-upgraded m g nm fty)
       (vector? up) (unknown "ctlz/cttz upgraded over a non-integer, its calls rebuilt over their own arguments' types")
-      (and (= up :remangled) (contains? call-upgrade-ids (:name (intr/lookup nm)))) (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
+      (and (= up :remangled) (call-case-upgrade? m g (:name (intr/lookup nm)))) (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
       :else
       (let [cs (first-caller m g fi)]
         (cond
@@ -1953,7 +2111,7 @@
       (= up [:life2]) (life2-upgraded m to nm fty)
       (vector? up) (ctlz-rebuilt m to nm (second up))
       ;; remangled: the calls retargeted to the new declaration (appended at the module's end), then visited as its calls
-      (= up :remangled) (if (contains? call-upgrade-ids (:name (intr/lookup nm)))
+      (= up :remangled) (if (call-case-upgrade? m to (:name (intr/lookup nm)))
                           (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
                           (or (some #(intr-call-check m d nm %) (first-caller-fn m to (count m))) valid))
       :else
