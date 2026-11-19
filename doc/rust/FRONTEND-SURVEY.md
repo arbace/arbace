@@ -4891,3 +4891,31 @@ collector reaches from the program's own bodies.
   and the `rec-items` line.
 - `bin/rust-front pack-compare-test`: 24 cases, 9 new (MAX_SLICE_LEN, ALIGNMENT, LAYOUT by its bytes, UNUSED; negatives: left
   unevaluated, SIZE for MAX_SLICE_LEN, another type's LAYOUT, an unknown private constant).
+
+### Results (run)
+
+The core export: core-check over 42 module files. 273 keys, 231 bodies exported, all judged at the instance. Two modules stop at
+expansion: hash::sip ("no arm of compress matches") and intrinsics ("the derive ConstParamTy is not taken"). The rest of the keys
+are refused for closure or opaque types (Iterator::collect, map_fold, for_each).
+
+`RF11_BATCH=1 bin/rust-front rsi-build --native-core intrinsics panics std unwind vectors` (one run at 603b387b6, 0 stub calls):
+**5 of 5 own**. Before: 4 of 5 at 443's added8d8e, std alone own at ca3229eca.
+
+| sample | library bodies built natively, before | after | codegen's fallbacks | rec-items (collected / calls' constants) |
+|---|---|---|---|---|
+| intrinsics | 20 | 303 | 9 | 404 / 514 |
+| panics | 10 | 175 | 0 | 280 / 345 |
+| std | 39 | 976 | 22 | 1,563 / 2,353 |
+| unwind | 7 | 154 | 0 | 247 / 306 |
+| vectors | 11 | 639 | 22 | 1,026 / 1,569 |
+
+Every `control` and `control-instance` differs, in all five programs. core's roots against the record in std.rs: 48 equal, 34
+equal-but-storage, 430 equal-o0, 320 differ.
+
+The six named natives:
+- **Box::new_uninit**: native, except two `dyn` instances in std.rs.
+- **f64::sqrt** and **RefCell::new**: native in std.rs.
+- **Vec::len**: native 4 of 6 in std.rs and 3 of 5 in vectors. The other instances keep MAX_SLICE_LEN unevaluated.
+- **fmt::Arguments::new**: built, but differs from the record at its aggregate's text, `fmt::Arguments::<'_>` against
+  `std::fmt::Arguments::<'_>` (the export prints core's paths relative to core).
+- **Iterator::collect**: refused at the export (a closure type).
