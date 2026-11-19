@@ -688,12 +688,22 @@
     (let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0)]
       (when (or (checking?) (nil? b) (nil? (vector-bytes scope b))) (fail :type "a GNU vector type (" s0 ")"))))
   (if-let [[_ b et] (when-not (checking?) (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0))]
-    (let [e (abi/unq (resolve-type scope et))
-          es (when (or (abi/integral? e) (abi/floating? e)) (abi/size-of e))
-          n (long (vector-bytes scope b))]
-      (when (or (nil? es) (not (pos? n)) (pos? (rem n (long es))) (not= 1 (Long/bitCount (quot n (long es)))))
-        (fail :type "a GNU vector type (" s0 ")"))
-      {:k :vec :n (quot n (long es)) :of e})
+    (let [n (long (vector-bytes scope b))
+          vec-of (fn [t]
+                   (let [e (abi/unq t)
+                         es (when (or (abi/integral? e) (abi/floating? e)) (abi/size-of e))]
+                     (when (or (nil? es) (not (pos? n)) (pos? (rem n (long es))) (not= 1 (Long/bitCount (quot n (long es)))))
+                       (fail :type "a GNU vector type (" s0 ")"))
+                     (cond-> {:k :vec :n (quot n (long es)) :of e} (:c t) (assoc :c true) (:v t) (assoc :v true))))
+          ;; (queue 439: the declaration specifiers' vector type in a declarator's type, `V f() const`, `V *p`: the attribute
+          ;; applies to the innermost type, the specifiers')
+          wrap (fn wrap [t]
+                 (case (:k t)
+                   (:ptr :ref :rref) (update t :to wrap)
+                   :arr (update t :of wrap)
+                   :fn (update t :ret wrap)
+                   (vec-of t)))]
+      (wrap (resolve-type scope et)))
   (let [s (strip-type-attrs s0)]
   (if (re-find #"\((unnamed|anonymous) (union|struct|class|enum) at " s)
     (let [t @*last-anon*] (cond-> t (re-find #"^const " s) (assoc :c true)))
@@ -6393,6 +6403,19 @@
                   (and (checking?) (= "CStyleCastExpr" (:kind n)) (cx-reinterpret-cast? r))
                   (assoc r :cx-reinterpret true)
                   :else r)))))
+    ;; queue 439: GNU's compound literal `(T){...}` in C++ (g++.dg's ext/attribute-test-1.C, a vector's), for the code
+    ;; generator: a prvalue temporary list-initialized as T{...} is (clang's CompoundLiteralExpr of a C++ class, vector or
+    ;; scalar type, materialized where it is used); an array's (an lvalue in GNU C++) is refused. The checker refuses it still.
+    "CompoundLiteralExpr"
+    (let [t (when-not (checking?) (some->> (get-in n [:type :qualType]) (resolve-type (:scope ctx))))
+          tu (some-> t abi/unq)
+          [k] (kids n)]
+      (cond
+        (or (nil? tu) (abi/ref? tu) (abi/arr? tu) (not= "InitListExpr" (:kind k)))
+        (fail :expr "expression " (:kind n))
+        (abi/class? tu) {:op :temp-obj :init (init-for tu (analyze ctx k) ctx :direct) :ty tu :cat :pr}
+        (#{:vec :complex} (:k tu)) {:op :temp-obj :init (init-for tu (analyze ctx k) ctx :list) :ty tu :cat :pr}
+        :else (scalar-list-cast ctx tu (analyze-args ctx (kids k)))))
     ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
     (if-let [ct (when-not (= "CXXConstructExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
       (ctad-expr ctx n ct)

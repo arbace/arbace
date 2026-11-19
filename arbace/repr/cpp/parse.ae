@@ -191,6 +191,9 @@
 ;; P15 (b)'s full parse cache: on with CPP_FULL_CACHE=1, or where a caller binds this true (CP336 (a): the run checks' gen-batch,
 ;; arbace.cpp.codegen); CPP_FULL_CACHE=0 keeps it off everywhere
 (def ^:dynamic *full-cache* false)
+;; queue 439: GNU's vector_size among a declaration's specifiers or a cast's type-id makes their type the vector type (as a
+;; typedef's always does): arbace.cpp.codegen binds it true; the checker (arbace.repr.cpp.diag) refuses vector types, so off there
+(def ^:dynamic *vector-specs* false)
 
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
@@ -2005,14 +2008,14 @@
                                (not (and (or (is? p "++") (is? p "--")) (not (let [_ (adv! p)] (cast-operand-start? p))))))]
                    (seek! p save) ok)))))
       (do (adv! p)
-          (let [ty (binding [*tdef-ctx* "in casts"] (parse-type-id p :paren))
+          (let [ty (binding [*tdef-ctx* "in casts"] (parse-type-id p :cast))
                 ;; (h-cpp-read: a cast's type-id holds no placeholder type, [dcl.spec.auto.general]/5: GCC's "expected
                 ;; primary-expression")
                 _ (when (some #(= :auto (:t %)) (tree-seq map? (comp vector :of) ty))
                     (soft-diag! p (inc b) (str "expected primary-expression before '" (ts (tok-at p (inc b))) "'")))]
             (expect! p ")")
             (if (is? p "{")
-              (let [l (parse-braced-init p)] (node p "CompoundLiteralExpr" b (ne l) {:inner [l]}))
+              (let [l (parse-braced-init p)] (node p "CompoundLiteralExpr" b (ne l) (assoc (type-node-fields ty) :inner [l])))
               (let [x (parse-cast-expr p)] (cast-node p "CStyleCastExpr" b ty x)))))
       (and (identical? :punct (.-k t)) (contains? unary-ops s))
       (do ;; (round 54, sixth pass: [class.dtor]/? (C++23 /14), a destructor's address is not taken: `&X::~X` is GCC's "taking
@@ -3076,7 +3079,8 @@
 
 (defn parse-type-id
   "A type-id (a cast's, sizeof's, a template argument's, a trailing return type's...): its type. `ctx` :conv (a
-  conversion-type-id: ptr-operators alone after the specifiers)."
+  conversion-type-id: ptr-operators alone after the specifiers); :cast (a C-style cast's or a compound literal's: GNU's
+  vector_size among its attributes makes it the vector type in the code generator's mode, *vector-specs*, queue 439)."
   [^P p ctx]
   (let [outer *tid-def*
         ds (if (or outer (= ctx :trailing) (not (#{"class" "struct" "union" "enum"} (ts (cur p)))))
@@ -3093,7 +3097,8 @@
               (soft-diag! p (long (:b ds)) (str "types may not be defined " (or *tdef-ctx* "in a type-id")))))]
     (if (= ctx :conv)
       (reduce (fn [t op] (assoc op :of t)) base (ptr-ops p))
-      (build-type base (parse-declarator p :abstract)))))
+      (let [d (parse-declarator p :abstract) t (build-type base d)]
+        (if (and (= ctx :cast) *vector-specs*) (vectorized t (concat (:attrs ds) (:attrs d))) t)))))
 
 (defn parse-type-specs
   "The simple-type-specifier of a functional cast or a new-type-id: its type."
@@ -3137,7 +3142,7 @@
                 d (if cva (dissoc d :pack) d)
                 ;; (queue 365: round 54's [temp.variadic]/5 check of a parameter's type naming a pack removed: a parameter inside an
                 ;; expansion's pattern is valid, `fn<void(Ts)>...`, `void (*...fs)(Ts)`, a lambda's `(T x)` in a fold)
-                ty (build-type base d)
+                ty (build-type (cond-> base *vector-specs* (vectorized (:attrs ds))) d)
                 qn (:name (last (name-chain d)))
                 nm (name-plain qn)
                 ni (if qn (long (:i (peek (:parts qn)))) (ix p))
@@ -3730,7 +3735,11 @@
                          (pedantic-diag! p (long (:i lp)) "ISO C++ forbids declaration of 'main' with no type")
                          {:t :b :w ["int"]})
                        (perr p "a declaration without a type"))
-              ty (build-type base d)
+              ;; (queue 439: GNU's vector_size among the declaration specifiers' attributes makes the specifiers' type the vector
+              ;; type, as a typedef's: a function's return, a variable's, a member's or a parameter's, ext/attribute-test-1.C's
+              ;; `inline vector uint32_t deadbeef (void) const` and `union u { vector uint32_t v; }`; in the code generator's mode alone:
+              ;; the checker refuses vector types, and conversion/simd1.C's overloads on them were answered as on their elements)
+              ty (build-type (cond-> base *vector-specs* (vectorized (:attrs ds))) d)
               ni (if qn (long (:i lp)) (ix p))
               nm (when qn (name-plain qn))
               nn (:s lp)
