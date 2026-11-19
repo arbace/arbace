@@ -13166,3 +13166,28 @@ test's lines therefore print a0-a8 1 (each `== 202311L`, a7 the __nodiscard__ sp
 whose preprocessing answered the draft dates, so the .expect is not their outcome: arbace/llvm/check.ae's own verdict leaves
 them to lli's record (they pass by it as before). Alternative not taken: a per-front-end expectation in the table. The crops'
 scores are not re-recorded here (one C case moves from gcc's record to its own verdict, two llvm modules the other way).
+
+## 2026-11-19: n-oc-dry, OCaml's three never-passed --full steps dry-run on subsets
+
+oi-aot.run, oi-suite-aot.suite and ocaml-judges (test/gate/steps.edn, crops/ocaml.edn) had never passed: last night's oi-check.run
+failed (parallel/major_gc_wait_backup, a 120 s timeout in the rotation's subset) and the three were notrun behind it. Run here on
+mac/next 7dd3947a0 in a fresh worktree on stage 0 (ARBACE_HOST_EXE the main checkout's), each on a small subset:
+- `env O2J_JOBS=4 bin/oi check --aot --only-list` (5 programs of the run corpus): 4 pass, 1 in a class, the control differs, exit 0;
+  1m47 warm (6 min cold: the native stdlib and compiler-libs built), one process at most 1.23 GB.
+- `env O2J_JOBS=4 bin/oi suite check --aot --only-list` (5 of the suite, link-test/test among them): 5 pass, the control differs,
+  exit 0; 3m55, one process at most 1.79 GB, the tree sampled at most 2.7 GiB.
+- `bin/oi judges-test --fixtures`: one failure, judges_test's "rollup: a stale roles.tsv is regenerated, not judged": `bin/oi suite
+  rollup` fails on its own at next's head ("FAILING tests/link-test/test.ml: unclassed action", "the rollup differs from the record").
+  Cause: 355 (89a613a9c) made link-test/test a run of the suite corpus and recorded it in the native records only
+  (check-suite-oi-native.edn, check-suite-aot-native.edn), dropping it from check-oi.edn and check-aot.edn; the rollup
+  (test/ocaml/testsuite_check.ae) reads the oracle path's records, so its action fell to "unclassed". The same `suite rollup` ends
+  oi-check's command, so oi-check.run would have failed on it tonight too. 14m23 cold, one process at most 1.70 GB.
+Fixed (records, no code): link-test/test recorded on the oracle path, `bin/oi suite check --ocdump --record --only-list` (pass) and
+`suite check --aot --ocdump --record --only-list` (pass, same); then `bin/oi suite rollup --record`: link-test/test's row "run" with
+its oi and AOT passes, and pr8769 (a -pack test, 355's same reading) compiler-flags -> build-orchestration. `bin/oi suite rollup`
+then exit 0; `bin/records-check` 9 pairs, 0; `gate.crops check` 0. ocaml-judges' :mem-gib 2 -> 3 (one process 1.7 GB, beside
+its check --aot cases' shards). oi-aot's and oi-suite-aot's 4 GiB kept (four o2j shards under O2J_GOMEMLIMIT 900MiB, measured
+2.7 GiB). Estimates from next's whole runs of 2026-11-14 (.tmp/worktrees/next/.tmp/o6, o7): oi-aot.run whole about 3 h (389
+programs, 11,413 s of runs, 39 timeouts each rerun alone), the nightly subset plus a seventh about 30-40 min; oi-suite-aot.suite
+whole about 45 min (121 programs, 2,808 s, 10 timeouts); ocaml-judges about 8 min warm. Deeper, not done: the rollup reads the
+oracle path's records while the gate's levels judge the native ones (a program recorded natively only is unclassed again).
