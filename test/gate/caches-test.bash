@@ -57,6 +57,8 @@ now=$(date +%s)
 # Go's cache: 12 files of 1 MiB, ages 1..12 hours; a cap of 8 MiB (a toy table) removes the 4 oldest
 for i in $(seq 1 12); do yes | head -c 1048576 > "$G/f$i"; touch -d "@$(( now - i * 3600 ))" "$G/f$i"; done
 touch -d "@$(( now - 5 * 86400 ))" "$R/.tmp/tmp/old"; touch "$R/.tmp/tmp/new"
+# review 419, I2: an empty directory five days old removed with the old files, a fresh one (a running test's scratch/logs) kept
+mkdir -p "$R/.tmp/tmp/old-empty" "$R/.tmp/tmp/run.d/scratch/logs"; touch -d "@$(( now - 5 * 86400 ))" "$R/.tmp/tmp/old-empty"
 for k in aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc; do mkdir -p "$R/.tmp/goi-table/$k"; done
 touch -d "@$(( now - 3 * 86400 ))" "$R/.tmp/goi-table/aaaaaaaaaaaaaaaa"; touch -d "@$(( now - 2 * 86400 ))" "$R/.tmp/goi-table/bbbbbbbbbbbbbbbb"
 mkdir -p "$R/.tmp/goi-table/not-a-key"; touch -d "@$(( now - 9 * 86400 ))" "$R/.tmp/goi-table/not-a-key"
@@ -82,6 +84,8 @@ cmp -s "$T/before" "$T/after-dry" && grep -q 'would remove 4 entries of' "$T/dry
 env "${env3[@]}" bash -c 'root=$1 logs=$2; . "$1/bin/lib/gate-cache.bash"; . "$1/bin/lib/gate-run.bash"; caches_prune "" cheap' x "$here" "$T/logs" > "$T/cheap.out" 2>&1
 [ ! -e "$G/f12" ] && [ ! -e "$G/f9" ] && [ -e "$G/f8" ] && [ -e "$G/f1" ] && ok "[:size :lru]: the 4 least recently used removed, 8 MiB kept" || bad "the size cap: $(ls "$G" | tr '\n' ' ')"
 [ ! -e "$R/.tmp/tmp/old" ] && [ -e "$R/.tmp/tmp/new" ] && ok "[:age 2]: TMPDIR's 5-day-old file removed, a new one kept" || bad "the age rule: $(ls "$R/.tmp/tmp" | tr '\n' ' ')"
+[ ! -e "$R/.tmp/tmp/old-empty" ] && [ -d "$R/.tmp/tmp/run.d/scratch/logs" ] && ok "[:age 2]: an old empty directory removed, a fresh empty one kept" \
+  || bad "the age rule's empty directories: $(cd "$R/.tmp/tmp" && find . -type d | tr '\n' ' ')"
 [ -d "$R/.tmp/goi-table/aaaaaaaaaaaaaaaa" ] && [ -d "$R/.tmp/old-test" ] && ok "--cheap: the rows that are not cheap left alone" || bad "--cheap touched a row that is not cheap"
 env "${env3[@]}" bash -c 'root=$1 logs=$2; . "$1/bin/lib/gate-cache.bash"; . "$1/bin/lib/gate-run.bash"; caches_prune "" all' x "$here" "$T/logs" > "$T/all.out" 2>&1
 [ ! -e "$R/.tmp/goi-table/aaaaaaaaaaaaaaaa" ] && [ -d "$R/.tmp/goi-table/bbbbbbbbbbbbbbbb" ] && [ -d "$R/.tmp/goi-table/cccccccccccccccc" ] && [ -d "$R/.tmp/goi-table/not-a-key" ] \
