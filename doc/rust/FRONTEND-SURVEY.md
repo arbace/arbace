@@ -4793,6 +4793,7 @@ throws as before (no fact), and the round's re-exports are std's pass's alone.
 
 - std's interface is complete against the helper's (4,644 of 4,644). The main host's whole pass and `--units` confirm it on
   amd64.
+
 ## As built: S4's alloc and std bodies (2026-11-19, queue 443, branch `443-rust-s4b`)
 
 RUST-90 S4 (C2), after queue 433's first slice (core's bodies for rsi's five samples, `core-export --rsi`, `rsi-build

@@ -13306,6 +13306,7 @@ bash -n bin/hsi, test/gate/{chain-needs,crop-tier,crops,gate-key-crops,programs-
 `bin/cppi selftest case-inputs` (pass); `bin/gate --full --plan` rc 0 (375 steps: 3 always, 3 build (go-build, javac-tool, cpp-runtime), 333 run, 35 after, 1 absent; .tmp/goal/full-plan-next-final.log) and `--full --concurrent --plan` rc 0 (simulated 9:45; full-plan-next-final-concurrent.log). Not run: 400's std-iface passes (they need rust-src's
 deps cache, 20+ min) and 406's live selftests (oracle tier). Keys at the head: gate 8d0e46484347addebee7 (unchanged), javac
 36b769ce7c35115edd8c (unchanged), arbace_runtime_key unchanged.
+
 ## 2026-11-19: LLVM IR, queue 407 (the last Verifier rules): the pack remade on amd64
 
 The VM's branch 407-llvm-verifier (d98f9486a, base 88b8e7f1a n-all4) taken on the main host as n-llvm-407, stage 0 the main
@@ -13320,9 +13321,11 @@ checkout's (pins equal). Decisions: D407-1 (a) own verdict `unsupported bits` (d
 - `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (0 problems): scores
   unchanged, LLVM IR completeness 99, independence 99 (maturity 100).
 - Not run: bin/gate. For the night: llvm-essential, llvm-read, llvm-heldout (the pack changed).
+
 ## 2026-11-19: queue 400's main-host run (n-rust-400)
 
 On branch n-rust-400 (from mac/400-rust-vendor), with the host stage 0: `bin/rust-front std-iface` (whole pass) gave std's interface 4,640 of 4,644 facts equal, 0 differ, 4 missing, the control differing as it must (the VM's report had 4,605 before its last fix). The 4 missing, as the report names them: ADTs `std::backtrace::Inner` (a TAIT), `std::env::SplitPaths` (`sys::paths` not passed) and `std::fs::Metadata`, and fn `std::io::stdio::{impl#7}::as_mut_buf` (RPIT). `std-iface --units` passed and wrote test/rust/front/std-iface-units-known.txt unchanged; `core-essential` and `rind-test` passed (arbace/rust/front changed; alloc-iface skipped, its path is unchanged). `bin/reap`: 54 of 56 cells checked, 2 with no check yet, 0 problems. `bin/crops-score --crop rust --judge --strict`: 0 problems; Rust's scores completeness 100, without by design 100, maturity 100, independence 80. No record moved, so no `--record`.
+
 ## 2026-11-17: Ghidra G2 A19: the PKI tests' security areas measured (branch `n-g2-a19`; demo `g2-a19` `ed7fef9`)
 
 - The demo's G2 row A19 (GH16 (a)): what `KeyStore` (PKCS12, JKS), `CertificateFactory` (X.509), `KeyManagerFactory` and

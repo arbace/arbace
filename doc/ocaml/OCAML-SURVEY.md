@@ -4358,6 +4358,7 @@ row of the corpora sees the difference.
   exception_callback, `bin/oi check --aot --only-list`: 7 pass, 2 classed, no row changed; both controls differ.
 - `bin/reap`: 0 problems. `bin/crops-score --judge --strict`: 0 problems (OCaml's scores unchanged: the compiled level is in no
   REAP cell). `bin/records-check`: 0 problems.
+
 ## As built: queue 397, the night's new AOT rows (2026-11-19, branch `397-oc-rows`, from `n-all4` `88b8e7f1a`)
 
 Round 54's lane 3 left four AOT rows with a cause not proven: basic-more/pr1271 and regression/pr7798 classed as gc rows "since
@@ -4392,6 +4393,7 @@ stage 0 (nx's), alone, `GOMAXPROCS=1`.
 DECISION (for the main host): the light level's `O2J_GOMEMLIMIT` default (900 MiB) makes the collector a third of every
 run's CPU; 1500 MiB cut pr7798 from 120 to 67 s. Raising it changes the AOT records' timeouts and the oi-aot steps' `:mem-gib`, so
 it is the main host's (report 397).
+
 ## As built: queue 438, OC218's heap model at the light level (2026-11-19, branch `438-oc-gc`, from next `c6d53f85b`)
 
 OC233 (a), OC234 (a), OC235 (a) at the AOT level, after oi's (go/arbace/oi/ext_sys.ae): `jdk/ocaml/ocaml/rt/ExtGc.ae`'s memprof part.
@@ -4417,6 +4419,7 @@ exception_comballoc's deallocations. discard_in_callback: the native backend's c
 Marshal's and custom blocks' sources. thread_exit_in_callback. ephetest's test6 and test7 (a key reachable from its data: Go has no
 ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the major collector's own work). struct_include_optimisation
 (the bytecode's Translmod blocks).
+
 ## As built: queue 413, the C API at the light AOT level (2026-11-19, branch `413-oc-capi`, from `next` `aa9edac6f`)
 
 Asked: the AOT cell's `:c-api` class (25 rows, n-ocaml-bd's audit: "the C API at the light level: large"): what the light level's
