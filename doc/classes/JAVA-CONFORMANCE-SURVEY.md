@@ -5095,7 +5095,7 @@ hash codes masked, any other golden file byte for byte as before (none of the 16
 true` exactly when the file holds `@HASH` (`bin/java-check golden` checks it); `--oracle` takes each action's masked digest
 (`:out-masked`, `:det-masked`) and the recorded length less 2 to 4 bytes an `@HASH`; `--control`'s changed file must leave the
 masked digest too. 11 tests, in four batches (hotspot-compiler t03560 t03781, jdk-run t04238 t05267 t05554, langtools t06053
-t06134 t06273, jdk-other t07864 t07966 t08213; 285 rows, 25 of them `:jdk`: FileInputStream's "Stream Closed" and skip's
+t06134 t06273, jdk-other t07864 t07966 t08213; 309 rows, 27 of them `:jdk`: FileInputStream's "Stream Closed" and skip's
 "Bad file descriptor" from isRegularFile0's fstat, `IdentityHashMap$EntryIterator`, `Subject$SecureSet`, javac's
 `Private01$1`, Hashtable's 23-bucket order of RdnMisc's attributes, JDK 10 keytool's DSA key class), each written from the
 source and spec first, every masked digest met (t04238 at the second reading: skip's message). **Left** (24, reasons in
