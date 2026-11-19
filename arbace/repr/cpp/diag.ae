@@ -397,6 +397,8 @@
    ;; (CP310 (b): an immediate invocation of a function whose body is not constant)
    [:constexpr #"^codegen: call to consteval function '.*' is not a constant expression" "call to consteval function is not a constant expression"]
    [:overload #"^codegen: ambiguous call" "call is ambiguous"]
+   ;; (queue 412, round 7: [dcl.init.list]/7)
+   [:narrowing #"^codegen: narrowing conversion" "narrowing conversion"]
    [:sassert #"^codegen: static assertion failed" "static assertion failed"]
    ;; (h-cpp-consteval: a condition, or an initializer's operation, surely not constant, [expr.const]/5)
    [:sassert #"^codegen: non-constant condition for static assertion" "static assertion expression is not an integral constant expression"]
@@ -441,6 +443,8 @@
    [:assign #"^codegen: assignment to an rvalue" "expression is not assignable"]
    [:assign #"^codegen: no operator=" "no viable overloaded '='"]
    [:assign #"^codegen: assignment of read-only variable" "cannot assign to variable with const-qualified type"]
+   ;; (queue 412, round 7: [expr.assign]/1, an array as the left operand)
+   [:assign #"^codegen: (invalid array assignment|assigning to an array from an initializer list)" "array type is not assignable"]
    [:member #"^codegen: no member " "no member named in the class"]
    [:member #"^codegen: member of a non-class" "member reference base type is not a structure or union"]
    [:call #"^codegen: missing argument" "too few arguments to function call"]
@@ -497,10 +501,22 @@
         yr (resolve 'arbace.cpp.sema/*cxx-year*)
         pe (resolve 'arbace.cpp.sema/*pedantic-errors*)
         pd (resolve 'arbace.cpp.sema/*pedantic*)
+        nw (resolve 'arbace.cpp.sema/*narrowing*)
         dl (resolve 'arbace.cpp.sema/*deadline*)
         ad (resolve 'arbace.cpp.sema/*analyze-depth*)
         cd (resolve 'arbace.cpp.sema/*constexpr-depth*)
         cdn (or (some #(when-let [[_ d] (re-find #"^-fconstexpr-depth=(\d+)$" (str %))] (Long/parseLong d)) (:args u)) 512)
+        ;; (queue 412: the main file's lines where `#pragma GCC diagnostic ignored "-Wnarrowing"` is in force, push and pop
+        ;; kept: GCC's narrowing permerror is silenced there)
+        nw-off (loop [ls (str/split-lines src) i 1 on false stack () out #{}]
+                 (if-let [l (first ls)]
+                   (let [[on stack] (cond (re-find #"^\s*#\s*pragma\s+GCC\s+diagnostic\s+push\b" l) [on (cons on stack)]
+                                          (re-find #"^\s*#\s*pragma\s+GCC\s+diagnostic\s+pop\b" l) [(if (seq stack) (first stack) false) (rest stack)]
+                                          (re-find #"^\s*#\s*pragma\s+GCC\s+diagnostic\s+ignored\s+\"-Wnarrowing\"" l) [true stack]
+                                          (re-find #"^\s*#\s*pragma\s+GCC\s+diagnostic\s+(warning|error)\s+\"-Wnarrowing\"" l) [false stack]
+                                          :else [on stack])]
+                     (recur (rest ls) (inc i) on stack (if on (conj out i) out)))
+                   out))
         h (fn [e n]
             (let [cls (:codegen/refused (ex-data e)) m (str (ex-message e))
                   ;; (a refusal over a type the slice leaves undeduced or dependent is the slice's, not the program's)
@@ -511,13 +527,16 @@
               (when *sema-log* (swap! *sema-log* conj [cls (subs m 0 (min 120 (count m))) (boolean rule)]))
               (when (and rule off (= main (get-in n [:range :begin :file])))
                 (let [[l c] (line-col starts (long off))]
-                  (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")})))))]
+                  (when-not (and (= :narrowing cls) (contains? nw-off l))
+                    (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")}))))))]
     ;; CP325 (a): a unit's refusal (the slice's, :codegen/refused or a type's :cpp/gap, or a constant the evaluation does not reach) leaves the
     ;; unit with the errors found before it, as before; anything else thrown is a crash of the analysis, the file's read
     ;; then a failing :crash with its message (arbace.repr.cpp.dg/read-own), never an acceptance. CP329 (a): past the
     ;; deadline the analysis unwinds and the read is a :timeout.
     (try
       (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u))) pd (boolean (some #{"-pedantic" "-Wpedantic" "-pedantic-errors"} (:args u)))
+                      ;; (queue 412: [dcl.init.list]/7, GCC's permerror; nothing or a warning under these)
+                      nw (not (some #{"-Wno-narrowing" "-fpermissive" "-Wno-error=narrowing"} (:args u)))
                       dl (long *deadline*) ad (long-array 1) cd cdn}
         (sema (:nodes u) (:root u) src))
       (catch arbace.lang.ExceptionInfo e

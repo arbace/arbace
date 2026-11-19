@@ -39,6 +39,9 @@
 ;; queue 365: -pedantic, -Wpedantic or -pedantic-errors given (the checker): GCC's diagnostics of the GNU extensions it otherwise
 ;; accepts silently (a zero-size array)
 (def ^:dynamic *pedantic* false)
+;; queue 412 (round 7): [dcl.init.list]/7's narrowing conversions judged (the checker): false under -Wno-narrowing, -fpermissive
+;; or -Wno-error=narrowing (GCC's permerror then a warning or nothing), and for the code generator
+(def ^:dynamic *narrowing* false)
 ;; CX12 (second slice): the checker's rules that the code generator does not apply (on with *on-refusal*: a program the
 ;; checker reads may be ill-formed; the code generator's programs are not, and its analysis stays as it was)
 (defn checking? [] (some? *on-refusal*))
@@ -3859,6 +3862,129 @@
       {:op :std-init-list :elem e :n (count items) :items (mapv #(init-for e % ctx :copy) items)
        :ty (abi/unq (abi/non-ref t)) :cat :pr})))
 
+;; queue 412 (round 7): [dcl.init.list]/7, a narrowing conversion in a list-initialization (C++11 on). The implicit conversion
+;; of a list's element to a scalar element, member, object or parameter of arithmetic type: from a floating type to an integer
+;; type; from long double to double or float, or double to float, but a constant whose value is within the target's range;
+;; from an integer or unscoped enumeration type to a floating type, but a constant the target represents exactly; from an
+;; integer or unscoped enumeration type to an integer type that cannot represent all its values, but a constant that fits.
+;; GCC's permerror for a constant, its pedwarn (an error under -pedantic-errors alone) for a non-constant; an unscoped
+;; enumeration's non-constant value is not judged (GCC takes the enumeration's own range), nor a value the evaluator refuses,
+;; nor the extended floating types. Checked once the initialization is chosen (a candidate's conversions are not: narrowing
+;; does not take part in overload resolution, [over.ics.list]); a parenthesized aggregate initialization (P0960) is none.
+(def ^:private narrow-names
+  {:bool "bool" :char "char" :schar "signed char" :uchar "unsigned char" :char8 "char8_t" :short "short int"
+   :ushort "short unsigned int" :char16 "char16_t" :int "int" :uint "unsigned int" :char32 "char32_t" :wchar "wchar_t"
+   :long "long int" :ulong "long unsigned int" :llong "long long int" :ullong "long long unsigned int" :i128 "__int128"
+   :u128 "__int128 unsigned" :float "float" :double "double" :ldouble "long double"})
+
+(defn- narrow-type-name ^String [t]
+  (if (abi/enum? t) (str (:name (abi/enm (:id t)))) (get narrow-names (abi/bn t) "?")))
+
+(defn- narrow-int-range
+  "[lo hi] of the integer type `t`'s values."
+  [t]
+  (if (= :bool (abi/bn t))
+    [0 1]
+    (let [n (* 8 (abi/size-of t))]
+      (if (abi/signed? t)
+        [(- (.shiftLeft java.math.BigInteger/ONE (dec n))) (dec (.shiftLeft java.math.BigInteger/ONE (dec n)))]
+        [0 (dec (.shiftLeft java.math.BigInteger/ONE n))]))))
+
+(def ^:private narrow-fp-rank {:float 1 :double 2 :ldouble 3})
+
+(defn- narrowing-kind
+  "How the conversion from `ft` to `tt` (unqualified) narrows: :always, :fp-range, :fp-exact, :fits, or nil (it does not)."
+  [ft tt]
+  (cond
+    (= ft tt) nil
+    (not (abi/arith? tt)) nil
+    (and (abi/enum? ft) (:scoped (abi/enm (:id ft)))) nil
+    (abi/floating? ft) (cond (not (narrow-fp-rank (abi/bn ft))) nil
+                             (abi/integral? tt) :always
+                             (not (narrow-fp-rank (abi/bn tt))) nil
+                             (< (long (narrow-fp-rank (abi/bn tt))) (long (narrow-fp-rank (abi/bn ft)))) :fp-range)
+    (abi/integral? ft) (cond (abi/floating? tt) (when (narrow-fp-rank (abi/bn tt)) :fp-exact)
+                             (abi/integral? tt) (if (abi/enum? ft)
+                                                  :fits
+                                                  (let [[fl fh] (narrow-int-range ft) [tl th] (narrow-int-range tt)]
+                                                    (when (or (< (compare fl tl) 0) (> (compare fh th) 0)) :fits))))))
+
+(defn- narrow-int-value
+  "The integer the evaluation's `v` of the type `ft` stands for (a 64-bit unsigned value held as a negative long, 2^64 more)."
+  [ft v]
+  (let [b (biginteger v)]
+    (if (and (neg? (.signum b)) (not (abi/signed? ft)) (= 8 (abi/size-of (abi/underlying ft))))
+      (.add b (.shiftLeft java.math.BigInteger/ONE 64))
+      b)))
+
+(defn- narrows-value?
+  "Whether the constant `v` of the type `ft` narrows in the conversion of kind `k` to `tt`."
+  [k ft tt v]
+  (case k
+    :always true
+    :fp-range (let [d (double v)]
+                (and (not (Double/isNaN d)) (not (Double/isInfinite d)) (= :float (abi/bn tt))
+                     (> (Math/abs d) (double Float/MAX_VALUE))))
+    :fp-exact (let [b (narrow-int-value ft v)]
+                (case (abi/bn tt)
+                  :float (not= 0 (compare (.toBigInteger (java.math.BigDecimal. (double (float (.doubleValue b))))) b))
+                  :double (not= 0 (compare (.toBigInteger (java.math.BigDecimal. (.doubleValue b))) b))
+                  (> (.bitLength b) 64)))
+    :fits (let [b (narrow-int-value ft v) [lo hi] (narrow-int-range tt)]
+            (or (< (compare b lo) 0) (> (compare b hi) 0)))))
+
+(defn- narrow-value
+  "The constant value of the typed expression `e`, :nonconst when it is no constant, :unknown when the evaluation refuses it."
+  [e]
+  (try (let [v (binding [*ce-manifest* true] (ce-eval e))] (if (number? v) v :unknown))
+       (catch arbace.lang.ExceptionInfo x
+         (let [d (ex-data x)]
+           (cond (:cpp/timeout d) (throw x)
+                 (:codegen/not-constant d) :nonconst
+                 :else :unknown)))))
+
+(defn- narrow-check!
+  "The initializer `init` (init-for's) of an object of type `t` from the list element `src`: a narrowing conversion refused
+  (:narrowing, at the element). `init` returned."
+  [init t src]
+  (when (and *narrowing* (checking?) (>= (long *cxx-year*) 11) (map? init) (not= :init-list (:op src)))
+    (case (:i init)
+      :bind-temp (narrow-check! (:init init) (:ty init) src)
+      :expr (let [x (:e init) tt (abi/unq (abi/non-ref t))]
+              (when (and (= :cast (:op x)) (:e x) (abi/arith? tt))
+                (let [e (:e x) ft (abi/unq (:ty e))]
+                  (when-let [k (narrowing-kind ft tt)]
+                    (let [v (narrow-value e)]
+                      (when (cond (= v :unknown) false
+                                  (= v :nonconst) (and *pedantic-errors* (not (abi/enum? ft)))
+                                  :else (narrows-value? k ft tt v))
+                        (throw (ex-info (str "codegen: narrowing conversion from '" (narrow-type-name ft) "' to '" (narrow-type-name tt) "'"
+                                             (when (= v :nonconst) " (not a constant)"))
+                                        (if-let [r (or (:cx-at src) (:cx-at e))]
+                                          {:codegen/refused :narrowing :cx/node {:range r}}
+                                          ;; (a literal has no position of its own: the last node analyzed, a macro's at its
+                                          ;; expansion, `signed char a { __INT_MAX__ };`)
+                                          (let [n (some-> *at* deref) b (get-in n [:range :begin])]
+                                            (cond-> {:codegen/refused :narrowing}
+                                              (:expansionLoc b) (assoc :cx/node {:range (assoc (:range n) :begin (:expansionLoc b))}))))))))))))
+      nil))
+  init)
+
+(defn- narrow-list-check!
+  "narrow-check! over a std::initializer_list's backing array `a` (std-init-list's) built from the list `l`."
+  [a l]
+  (when (= :std-init-list (:op a))
+    (doseq [[init src] (map vector (:items a) (:items l))] (narrow-check! init (:elem a) src)))
+  a)
+
+(defn- narrow-ctor-check!
+  "narrow-check! over a constructor call's parameters (`r`, ctor-init's) initialized from the list's elements `items`."
+  [r items]
+  (when (and (= :ctor (:i r)) (:fn r) (vector? (:args r)))
+    (let [ps (:ps (:ty (fnd (:fn r))))]
+      (doseq [[init p src] (map vector (:args r) ps items)] (narrow-check! init p src))))
+  r)
+
 (defn- init-list-ctors
   "The initializer-list constructors of class `id` ([dcl.init.list]/2): a first parameter std::initializer_list<E> or a
   reference to one, every other with a default argument."
@@ -4012,9 +4138,12 @@
                   (when (seq viable)
                     (let [fid (if (= 1 (count viable)) (ffirst viable) (resolve-overload (map first viable) [(second (first viable))] nil))
                           a (some #(when (= fid (first %)) (second %)) viable)]
+                      ;; (narrowing judged when one initializer-list constructor is viable: between several the choice
+                      ;; above does not rank the elements' conversions, [over.ics.list]/7)
+                      (when (= 1 (count viable)) (narrow-list-check! a l))
                       {:i :ctor :fn fid :args (call-args (fnd fid) [a] ctx)})))
                 ;; 1.2: all the constructors with the list's elements (each an argument, a list among them too)
-                (ctor-init id (:items l) ctx (and (= 1 (count (:items l))) (= :init-list (:op (first (:items l))))))))))
+                (narrow-ctor-check! (ctor-init id (:items l) ctx (and (= 1 (count (:items l))) (= :init-list (:op (first (:items l)))))) (:items l))))))
       (and (empty? args)) (default-ctor-init id (= style :value))
       ;; from another class with a conversion function to this one: the conversion's prvalue ([dcl.init]/17.6.3,
       ;; [over.match.copy]; G5: strong_ordering to partial_ordering; else the copy constructor's reference would bind
@@ -4034,7 +4163,7 @@
              (if (and (= :overload (:codegen/refused (ex-data x))) (re-find #"no viable" (str (.getMessage x))))
                (let [subs (aggr-subs (abi/unq t) (count args))]
                  (when (> (count args) (count subs)) (throw x))
-                 (init-for t {:op :init-list :items (vec args)} ctx :list))
+                 (init-for t {:op :init-list :items (vec args) :paren true} ctx :list))
                (throw x))))
       :else (ctor-init id args ctx)))))
 
@@ -4231,7 +4360,7 @@
       ;; a semantic list's value-initialized element (the native parser's ImplicitValueInitExpr fill, [dcl.init.aggr]/5.2)
       (= :value-init (:op src)) (init-for t nil ctx :value)
       (and (= :init-list (:op src)) (init-list-elem t))
-      (let [a (or (std-init-list t src ctx) (fail :init "a list's element does not convert to the initializer_list's"))]
+      (let [a (narrow-list-check! (or (std-init-list t src ctx) (fail :init "a list's element does not convert to the initializer_list's")) src)]
         (if (abi/ref? t) {:i :bind-temp :init {:i :expr :e a} :ty (:ty a)} {:i :expr :e a}))
       ;; [dcl.init.list]/3.10: a list for a reference that is not a single element of a reference-related type: a prvalue of
       ;; the referenced type copy-list-initialized from it, the reference bound to the temporary (a const lvalue or an
@@ -4308,7 +4437,7 @@
           (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar :char8 :wchar :char16 :char32} (abi/bn (abi/unq el))))
             {:i :string :e (first items) :n (:n tu)}
             ;; (the elements not written value-initialized: analyzed only when there are some, [dcl.init.aggr]/5)
-            {:i :list :items (mapv #(init-for el % ctx :copy) items) :fill (when (and (:n tu) (< (count items) (long (:n tu)))) (init-for el nil ctx :value)) :n (:n tu)}))
+            {:i :list :items (mapv #(cond-> (init-for el % ctx :copy) (not (:paren src)) (narrow-check! el %)) items) :fill (when (and (:n tu) (< (count items) (long (:n tu)))) (init-for el nil ctx :value)) :n (:n tu)}))
         (and (abi/class? tu) (aggregate? tu))
         (let [c (abi/cls (:id tu))
               items (:items (brace-elide tu src))
@@ -4328,7 +4457,9 @@
                                             ;; (the native parser's semantic list holds a default member initializer's
                                             ;; place as CXXDefaultInitExpr, :default-init: the member's own initializer)
                                             (if (and (< i (count items)) (not= :default-init (:op (nth items i))))
-                                              (init-for (:ty s) (nth items i) ctx :copy)
+                                              (cond-> (init-for (:ty s) (nth items i) ctx :copy)
+                                                ;; (a union's: the member its designator names is not the one taken here)
+                                                (not (or (:paren src) (:union c))) (narrow-check! (:ty s) (nth items i)))
                                               (if-let [d (:init (:field s))]
                                                 ;; (its `this` the aggregate being initialized, [class.mem.general]/11; clang's
                                                 ;; CXXDefaultInitExprScope: :agg-this, the code generator binds it to the object)
@@ -4342,7 +4473,7 @@
                 0 {:i :zero}
                 ;; ([dcl.init.list]/3.9: from the element, by direct-initialization for direct-list-initialization;
                 ;; CP280 (a): an explicit conversion function is then a candidate, [over.match.conv]/1.1)
-                1 (init-for t (first (:items src)) ctx (if (= style :list) :direct :copy))
+                1 (narrow-check! (init-for t (first (:items src)) ctx (if (= style :list) :direct :copy)) t (first (:items src)))
                 (fail :init "several values for a scalar")))
       (abi/class? tu) (class-init tu [src] ctx style)
       (abi/arr? tu)
@@ -4705,6 +4836,12 @@
   (cond
     (abi/class? (abi/unq (:ty l))) (operator-call ctx "=" [l r])
     :else (do (when-not (lv? l) (fail :assign "assignment to an rvalue"))
+              ;; (queue 412, round 7, the checker: [expr.assign]/1 with [basic.lval]/7, an array is no modifiable lvalue; GCC's
+              ;; "invalid array assignment", from a braced list its "assigning to an array from an initializer list")
+              (when (and (checking?) (abi/arr? (abi/unq (:ty l))))
+                (if (= :init-list (:op r))
+                  (fail :assign "assigning to an array from an initializer list")
+                  (fail :assign "invalid array assignment")))
               (cx-read-only! l)
               (let [t (abi/unq (:ty l))
                     ;; (cpp-s11: a braced list on the right of a scalar, [expr.assign]/8: x = {} assigns a value-initialized
@@ -4712,7 +4849,8 @@
                     r (if (= :init-list (:op r))
                         (case (count (:items r))
                           0 (convert-scalar {:op :int :v 0 :ty abi/int* :cat :pr} t true)
-                          1 (convert-scalar (rv (first (:items r))) t false)
+                          ;; (queue 412: x = {e} as T{e}, [expr.assign]/8: narrowing judged)
+                          1 (:e (narrow-check! {:i :expr :e (convert-scalar (rv (first (:items r))) t false)} t (first (:items r))))
                           (fail :assign "a list of several values assigned to a scalar"))
                         (convert-scalar (rv r) t false))]
                 {:op :assign :l l :r r :ty (:ty l) :cat :lv}))))
@@ -4759,7 +4897,7 @@
   [ctx t items]
   (case (count items)
     0 {:op :zero-val :ty (abi/unq t) :cat :pr}
-    1 (cast-expr ctx t (first items) true)
+    1 (:e (narrow-check! {:i :expr :e (cast-expr ctx t (first items) true)} t (first items)))
     (fail :expr "a braced functional cast of a scalar type with " (count items) " elements")))
 
 (defn- cx-using-map
