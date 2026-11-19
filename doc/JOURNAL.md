@@ -12905,3 +12905,7 @@ The essential gate at 22b4c6542 failed two steps; everything else passed.
   its parent already made (it exported PATH and ARBACE_FROZEN_JAVA_HOME).
 - Keys: bin/clojure-tests and test/gate/*.edn are in neither gate_key, arbace_runtime_key nor arbace_javac_key, so the gate's
   executables (KEY20 0753b529a43fe68eabff) and javac's tool (826af88b2119) stay.
+
+## 2026-11-19: queue 400's main-host run (n-rust-400)
+
+On branch n-rust-400 (from mac/400-rust-vendor), with the host stage 0: `bin/rust-front std-iface` (whole pass) gave std's interface 4,640 of 4,644 facts equal, 0 differ, 4 missing, the control differing as it must (the VM's report had 4,605 before its last fix). The 4 missing, as the report names them: ADTs `std::backtrace::Inner` (a TAIT), `std::env::SplitPaths` (`sys::paths` not passed) and `std::fs::Metadata`, and fn `std::io::stdio::{impl#7}::as_mut_buf` (RPIT). `std-iface --units` passed and wrote test/rust/front/std-iface-units-known.txt unchanged; `core-essential` and `rind-test` passed (arbace/rust/front changed; alloc-iface skipped, its path is unchanged). `bin/reap`: 54 of 56 cells checked, 2 with no check yet, 0 problems. `bin/crops-score --crop rust --judge --strict`: 0 problems; Rust's scores completeness 100, without by design 100, maturity 100, independence 80. No record moved, so no `--record`.
