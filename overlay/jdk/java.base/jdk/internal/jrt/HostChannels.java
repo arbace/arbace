@@ -163,6 +163,13 @@ public final class HostChannels {
     /** Net.pollConnect: 1 connected, 0 not yet, or THROWN (the connection's error in err[0]). */
     public static native int pollConnect0(int fd, long timeout, int[] err);
 
+    /**
+     * UnixAsynchronousSocketChannelImpl.checkConnect (queue task 398): getsockopt's SO_ERROR of a socket
+     * whose connect the port reported done: 0 connected, or THROWN with the connection's error in err[0]
+     * (getsockopt's own failure as its negative).
+     */
+    public static native int checkConnect0(int fd, int[] err);
+
     /** Net.available (FIONREAD): the count or THROWN. */
     public static native int available0(int fd, int[] err);
 

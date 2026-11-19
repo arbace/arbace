@@ -201,6 +201,62 @@ descriptors; the eventfd reset by drain; a descriptor removed.\n"
         (when (!= n 0)
           (.Errorf t "epoll_wait after reset and removal %d" n))))))
 
+(go/func TestChannelAsyncConnect
+  "The asynchronous socket channels' connect as Linux's EPollPort and UnixAsynchronousSocketChannelImpl drive it
+(queue task 398): a non-blocking connect in progress; startPoll's EPOLL_CTL_MOD with EPOLLONESHOT answering ENOENT
+for a descriptor not yet added, then EPOLL_CTL_ADD; the port's epoll_wait reporting POLLOUT; checkConnect0 then
+connected (0); oneshot: no second event until re-armed; a refused connect reported by checkConnect0 as
+ECONNREFUSED after its event.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        (values l port) (chListen t)
+        ep (HostChannels_EpollCreate0_I1__I_native e)
+        of (NewIntArray 4)
+        oe (NewIntArray 4)
+        oneshot (bit-or (conv int32 pollOut) (<< (conv int32 1) 30))
+        start (fn [^int32 fd]
+                (let [r (HostChannels_EpollCtl0_I_I_I_I__I_native ep 3 fd oneshot)]
+                  (when (== r 2)
+                    (set! r (HostChannels_EpollCtl0_I_I_I_I__I_native ep 1 fd oneshot)))
+                  (when (!= r 0)
+                    (.Fatalf t "startPoll: epoll_ctl %d" r))))
+        connect (fn ^int32 []
+                  (let [c (HostChannels_Socket0_Z_Z_Z_I1__I_native false true false e)]
+                    (HostChannels_ConfigureBlocking0_I_Z_I1__I_native c false e)
+                    (let [r (HostChannels_Connect0_I_B1_I_I_I1__I_native c (loopback4) 0 port e)]
+                      (when (and (!= r 1) (!= r iosUnavailable))
+                        (.Fatalf t "connect %d errno %d" r (aget (.-A e) 0))))
+                    c))]
+    (when (< ep 0)
+      (.Fatalf t "epoll_create: errno %d" (aget (.-A e) 0)))
+    (defer (HostChannels_Close0_I_I1__I_native ep nil))
+    (let [c (connect)]
+      (defer (HostChannels_Close0_I_I1__I_native c nil))
+      (when (!= (HostChannels_EpollCtl0_I_I_I_I__I_native ep 3 c oneshot) 2)
+        (.Errorf t "EPOLL_CTL_MOD of a descriptor not added: not ENOENT"))
+      (start c)
+      (let [n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 4 2000 e)]
+        (when (or (!= n 1) (!= (aget (.-A of) 0) c) (== (bit-and (aget (.-A oe) 0) (conv int32 pollOut)) 0))
+          (.Fatalf t "epoll_wait %d fd %d events %d" n (aget (.-A of) 0) (aget (.-A oe) 0))))
+      (when [r (HostChannels_CheckConnect0_I_I1__I_native c e)] (!= r 0)
+        (.Errorf t "checkConnect0 of a connected socket %d errno %d" r (aget (.-A e) 0)))
+      (when [n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 4 50 e)] (!= n 0)
+        (.Errorf t "a oneshot descriptor reported again before re-arming: %d" n))
+      (start c)
+      (when [n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 4 2000 e)] (!= n 1)
+        (.Errorf t "a re-armed descriptor not reported: %d" n)))
+    ;; refused: the listener closed
+    (HostChannels_Close0_I_I1__I_native l nil)
+    (let [q (connect)]
+      (defer (HostChannels_Close0_I_I1__I_native q nil))
+      (start q)
+      (let [n (HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native ep of oe 4 2000 e)]
+        (when (!= n 1)
+          (.Fatalf t "epoll_wait of a refused connect %d" n)))
+      (let [r (HostChannels_CheckConnect0_I_I1__I_native q e)]
+        (when (or (!= r iosThrown) (!= (aget (.-A e) 0) 111))
+          (.Errorf t "checkConnect0 of a refused connect %d errno %d" r (aget (.-A e) 0)))))))
+
 (go/func unixName "unixName is the name in a RefArray slot of the UNIX natives, as a string (\"<nil>\" for none).\n"
   ^string [^{:tag (* RefArray)} a]
   (when (== (aget (.-A a) 0) nil)

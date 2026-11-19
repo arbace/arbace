@@ -8,7 +8,8 @@
  * buffers' remaining bytes (at most IOV_MAX buffers and WRITEV_MAX bytes, as jdk26u's), the bytes
  * then given to the buffers in order: one system call, as writev and readv. The signatures, the
  * results and the buffers' positions are jdk26u's; directIO's alignment is refused (no O_DIRECT in
- * jrt); the natives are jdk26u's over jdk.internal.jrt.HostChannels (IOUtil.c's).
+ * jrt); the natives are jdk26u's over jdk.internal.jrt.HostChannels (IOUtil.c's); the memory sessions'
+ * acquire and release (the asynchronous channels') do nothing, jrt's buffers having none.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package sun.nio.ch;
@@ -373,6 +374,28 @@ public class IOUtil {
      * Used to trigger loading of native libraries
      */
     public static void load() { }
+
+    // -- the buffers' memory sessions (the asynchronous channels, queue task 398) --
+    // jdk26u's acquire and release a buffer's MemorySegment session around an asynchronous operation, and refuse
+    // a thread-confined one. jrt's buffers have no session (java.lang.foreign's arenas are outside the Go build):
+    // nothing to acquire, none confined; the signatures are jdk26u's.
+
+    static void acquireScope(ByteBuffer bb, boolean async) { }
+
+    static void releaseScope(ByteBuffer bb) { }
+
+    static Runnable acquireScopes(ByteBuffer[] buffers) {
+        return null;
+    }
+
+    static Runnable acquireScopes(ByteBuffer buf, ByteBuffer[] buffers) {
+        return null;
+    }
+
+    static void releaseScopes(Runnable releasers) {
+        if (releasers != null)
+            releasers.run();
+    }
 
     static {
         // IOUtil.c's: IOV_MAX of limits.h (1024 on Linux), and INT_MAX for writev
