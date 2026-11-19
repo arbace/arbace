@@ -112,9 +112,19 @@ if [ -n "${LIB_CHECK_DUMPS:-}" ]; then
   [ -d "$LIB_CHECK_DUMPS" ] || { echo "lib-check: no $LIB_CHECK_DUMPS (LIB_CHECK_DUMPS)" >&2; exit 1; }
   rm -rf "$w/nd"; cp -r "$LIB_CHECK_DUMPS" "$w/nd"; echo "$bignum" > "$w/nd.bignum"
 elif [ ! -d "$w/nd/src" ] || [ "$(cat "$w/nd.bignum" 2>"$TMPDIR/lib-check-bignum.err")" != "$bignum" ]; then
-  echo "== lib-check: the native dumps of $pkg (bin/repr-haskell read --reader native --corpus, bignum $bignum)" >&2
-  REPR_HASKELL_BIGNUM=$bignum REPR_HASKELL_ONLY_PACKAGES=$pkg "$root/bin/repr-haskell" read --reader native --corpus > "$w/read.log" 2>&1
-  rm -rf "$w/nd"; cp -r "$nd" "$w/nd"; echo "$bignum" > "$w/nd.bignum"
+  # queue 425: the read and the copy under the native reads' lock (bin/repr-haskell's ndumps_locked: the read's rm -rf of the
+  # shared ndumps/ghc-9.14.1 lost a parallel lib-check's dumps before its copy, ceabce537), the key read again under it (a
+  # lib-check of the same package and work directory may have made them while this one waited), as bin/lib/hsi/aot's library
+  # generation does (a package whose dumps have no src/, deepseq's or transformers', misses the key always and reads again, as
+  # before)
+  mkdir -p "$root/.tmp/repr-haskell"
+  exec 9> "$root/.tmp/repr-haskell/ndumps.lock"; flock 9
+  if [ ! -d "$w/nd/src" ] || [ "$(cat "$w/nd.bignum" 2>"$TMPDIR/lib-check-bignum.err")" != "$bignum" ]; then
+    echo "== lib-check: the native dumps of $pkg (bin/repr-haskell read --reader native --corpus, bignum $bignum)" >&2
+    REPR_HASKELL_NDUMPS_HELD=1 REPR_HASKELL_BIGNUM=$bignum REPR_HASKELL_ONLY_PACKAGES=$pkg "$root/bin/repr-haskell" read --reader native --corpus > "$w/read.log" 2>&1
+    rm -rf "$w/nd"; cp -r "$nd" "$w/nd"; echo "$bignum" > "$w/nd.bignum"
+  fi
+  flock -u 9; exec 9>&-
 fi
 nd=$w/nd
 # P17: the dumps' tree is the package's: its library's source directory (hs-source-dirs) src/ for ghc-internal and base, the
