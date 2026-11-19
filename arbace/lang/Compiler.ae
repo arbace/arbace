@@ -6328,7 +6328,8 @@
       ;; (J2G-SPEC §10.5: Go's stack overflow is fatal)
       (field ^:public ^:static ^:final ^int MAX_DEPTH 10000)
 
-      ;; the depth at which calls from outside the interpreter start, per thread
+      ;; the thread's interpreter state (Thr): the depth at which calls from outside the
+      ;; interpreter start and the innermost interpreted frame (stack traces, StackWalker)
       (field ^:static ^:final ^ThreadLocal DEPTH (ThreadLocal.))
 
       ;; jump codes (Frame.jump): 0 none, RETURN, otherwise a target's break (id * 2) or its
@@ -6414,17 +6415,77 @@
           \D (Double/valueOf 0.0)
           nil))
 
-      ;; the call depth of this thread outside the interpreter's own calls
-      (method ^:public ^:static depth ^int []
-        (let [a (cast int/1 (.get DEPTH))]
-          (if (nil? a) 0 (aget a 0))))
-
-      (method ^:public ^:static enter ^int/1 []
-        (let [^:mutable a (cast int/1 (.get DEPTH))]
+      ;; this thread's interpreter state, made on its first call from outside the interpreter
+      (method ^:public ^:static enter ^Thr []
+        (let [^:mutable a (cast Thr (.get DEPTH))]
           (when (nil? a)
-            (set! a (new int/1 1))
+            (set! a (Thr.))
             (.set DEPTH a))
           a))
+
+      ;; ------------------------------------------------------------------------------------
+      ;; the interpreted frames of stack traces and StackWalker (queue 416): the frames of this
+      ;; thread from its innermost (Thr.top) by their callers, each frame's method, ENTRY after a
+      ;; frame entered from outside the interpreter (Meth.invoke, a static initializer), where
+      ;; jrt puts the frames among the Go frames (the Go frame of Meth.invoke or
+      ;; Klass.runClinit); nil when the thread runs no interpreted frame. A Snap (a Supplier,
+      ;; described when the trace is read: jrt's Throwable keeps it from fillInStackTrace)
+      (field ^:public ^:static ^:final ENTRY (Object.))
+
+      (method ^:public ^:static snapshot []
+        (let [t (if (nil? DEPTH) nil (cast Thr (.get DEPTH)))]
+          (if (or (nil? t) (nil? (.-top t)))
+              nil
+              (let [l (java.util.ArrayList.)]
+                (loop [f (.-top t)]
+                  (when (some? f)
+                    (.add l (.-meth f))
+                    (when (.-entry f) (.add l ENTRY))
+                    (recur (.-caller f))))
+                (Snap. (.toArray l))))))
+
+      ;; a frame's source file as javac names it by default: the top-level class's simple name
+      (method ^:public ^:static sourceFile ^String [^String cname]
+        (let [d (.lastIndexOf cname ".")
+              s (.substring cname (unchecked-inc-int d))
+              i (.indexOf s "$")]
+          (java-str (if (< i 0) s (.substring s 0 i)) ".java")))
+
+      ;; a snapshot's frames as jrt reads them, five slots a frame, innermost first: the Class
+      ;; (nil on the JVM's test host), the class's name, the method's, the source file (nil
+      ;; for a lambda's class) and the flags (an Integer): 1 the frame was entered from
+      ;; outside the interpreter, 2 hidden (a lambda's class, as the JVM's hidden classes), 4 a
+      ;; static main(String[]) (a launch: jrt shows no frame below one entered from outside).
+      ;; A lambda's method is two frames, as on the JVM: the lambda's body (its class's
+      ;; lambda$m$N) under its hidden class's method; a method reference's is the hidden one
+      (method ^:public ^:static describe ^Object/1 [^Object/1 snap]
+        (let [l (java.util.ArrayList.)]
+          (loop [^int i 0]
+            (when (< i (alength snap))
+              (let [x (aget snap i)]
+                (if (identical? x ENTRY)
+                    (let [j (unchecked-subtract-int (.size l) 1)]
+                      (.set l j (Integer/valueOf (bit-or-int (.intValue (cast Integer (.get l j))) 1))))
+                    (let [m (cast Meth x)
+                          k (.-k m)
+                          h (.-lambdaHost k)]
+                      (when (and (some? h) (some? (.-lambdaName k)))
+                        (.add l (.-cls h))
+                        (.add l (.-name h))
+                        (.add l (.-lambdaName k))
+                        (.add l (Rt/sourceFile (.-name h)))
+                        (.add l (Integer/valueOf 0)))
+                      (.add l (.-cls k))
+                      (.add l (.-name k))
+                      (.add l (.-name m))
+                      (.add l (if (some? h) nil (Rt/sourceFile (.-name k))))
+                      (.add l (Integer/valueOf
+                                (cond (some? h) 2
+                                      (and (.-isStatic m) (.equals (.-name m) "main")
+                                           (.equals (.-desc m) "([Ljava/lang/String;)V")) 4
+                                      :else 0))))))
+              (recur (unchecked-inc-int i))))
+          (.toArray l)))
 
       ;; an exception thrown by a reflective call, as the call itself would have thrown it
       (method ^:public ^:static unwrap ^Throwable [^Throwable e]
@@ -6699,6 +6760,21 @@
     ;; ------------------------------------------------------------------------------------
     ;; frames
 
+    ;; a thread's interpreter state (Rt/enter): the depth at which calls from outside the
+    ;; interpreter start, and the innermost interpreted frame running (the shadow stack's top,
+    ;; queue 416: Meth.run sets it and gives it back to the caller on return; a catch or finally
+    ;; takes it back to its own frame, Meth.invoke and Klass.runClinit to their caller's on exit)
+    (defclass ^:public ^:static Thr
+      (field ^:public ^int depth)
+      (field ^:public ^Frame top))
+
+    ;; the interpreted frames of a stack trace (Rt/snapshot): Rt/describe's frames when read
+    (defclass ^:public ^:static Snap
+      :implements [java.util.function.Supplier]
+      (field ^:public ^:final ^Object/1 frames)
+      (constructor ^:public [this ^Object/1 frames] (set! (.-frames this) frames))
+      (method ^:public get [this] (Rt/describe frames)))
+
     (defclass ^:public ^:static Frame
       ;; reference slots and long slots (doubles as their bits)
       (field ^:public ^:final ^Object/1 r)
@@ -6709,11 +6785,23 @@
       (field ^:public ^long jl)
       (field ^:public ^double jd)
       (field ^:public ^:final ^int depth)
+      ;; the shadow stack (queue 416): the method, the calling frame (for a frame entered from
+      ;; outside the interpreter, the thread's top then: the frame that called out, or nil),
+      ;; the thread's state, and whether the frame was entered from outside
+      (field ^:public ^:final ^Meth meth)
+      (field ^:public ^:final ^Frame caller)
+      (field ^:public ^:final ^Thr thr)
+      (field ^:public ^:final ^boolean entry)
 
-      (constructor ^:public [this ^int nr ^int np ^int depth]
+      (constructor ^:public [this ^int nr ^int np ^Meth meth ^Frame caller ^Thr thr ^int depth
+                             ^boolean entry]
         (set! (.-r this) (new Object/1 nr))
         (set! (.-p this) (new long/1 np))
+        (set! (.-meth this) meth)
+        (set! (.-caller this) caller)
+        (set! (.-thr this) thr)
         (set! (.-depth this) depth)
+        (set! (.-entry this) entry)
         (when (> depth Rt/MAX_DEPTH) (throw (StackOverflowError.))))
 
       (method ^:public getD ^double [this ^int i] (Double/longBitsToDouble (aget p i)))
@@ -7489,6 +7577,8 @@
               (set! r (.eval body f))
               (set! done true)
               (catch Throwable e
+                ;; the shadow stack's top back at this frame (queue 416)
+                (set! (.-top (.-thr f)) f)
                 (let [^:mutable ^int i -1]
                   (loop [^int k 0]
                     (when (< k (alength classes))
@@ -7502,6 +7592,7 @@
             (when (and done (some? nfin)) (Try/finish nfin f))
             (catch Throwable e
               (when (nil? fin) (throw e))
+              (set! (.-top (.-thr f)) f)
               (set! pend e)))
           (when (some? fin)
             (if (some? pend)
@@ -7564,6 +7655,11 @@
       (field ^:public ^boolean fnClass)
       ;; a record class (Class.isRecord; JCS167)
       (field ^:public ^boolean record)
+      ;; a lambda's or method reference's class (Outer$$Lambda/N): the class whose code made it
+      ;; and, for a lambda, its body's name as javac names its method (lambda$m$N), nil for a
+      ;; method reference (stack traces, StackWalker: queue 416)
+      (field ^:public ^Klass lambdaHost)
+      (field ^:public ^String lambdaName)
       ;; an interface that declares a default method: initialized with a class implementing it
       ;; (JLS 12.4.1, 12.4.2 step 7; JC4b)
       (field ^:public ^boolean hasDefaults)
@@ -7633,9 +7729,7 @@
         (try
           (when (some? sup) (.init sup))
           (when (not iface) (Klass/initDefaults this))
-          (when (some? clinit)
-            (let [f (Frame. clinitR clinitP (Rt/depth))]
-              (.exec clinit f)))
+          (when (some? clinit) (.runClinit this))
           (locking this
             (set! state 2)
             (.notifyAll this))
@@ -7645,7 +7739,17 @@
               (.notifyAll this))
             (if (instance? Error e)
                 (throw e)
-                (throw (ExceptionInInitializerError. e)))))))
+                (throw (ExceptionInInitializerError. e))))))
+
+      ;; the static initializer's run, a frame entered from outside the interpreter (jrt finds
+      ;; it by this method's Go frame: queue 416)
+      (method ^:public runClinit ^void [this]
+        (let [t (Rt/enter)
+              f (Frame. clinitR clinitP (Meth. this "<clinit>" "()V" 8) (.-top t) t (.-depth t) true)]
+          (set! (.-top t) f)
+          (try
+            (.exec clinit f)
+            (finally (set! (.-top t) (.-caller f)))))))
 
     ;; a method (or constructor) of an interpreted class
     (defclass ^:public ^:static Meth
@@ -7697,10 +7801,10 @@
         (when (nil? body)
           (throw (AbstractMethodError. (java-str (.-name k) "." name desc)))))
 
-      ;; a new frame for a call
-      (method ^:public frame ^Frame [this ^int depth]
+      ;; a new frame for a call from frame f
+      (method ^:public frame ^Frame [this ^Frame f]
         (.ensure this)
-        (Frame. nr np (unchecked-inc-int depth)))
+        (Frame. nr np this f (.-thr f) (unchecked-inc-int (.-depth f)) false))
 
       ;; stores argument i (an object) in its slot, converted to the parameter's type
       (method ^:public arg ^void [this ^Frame f ^int i v]
@@ -7710,25 +7814,38 @@
             \D (.setD f s (if (== pt \F) (unchecked-double (unchecked-float (Rt/toD v))) (Rt/toD v)))
             (aset (.-r f) s v))))
 
-      ;; runs the body in frame f (receiver and arguments stored): the result by kind
+      ;; runs the body in frame f (receiver and arguments stored): the result by kind. f is
+      ;; the thread's top while the body runs, its caller again when it returns (queue 416)
       (method ^:public run [this ^Frame f]
         (switch (Rt/kind ret)
           \J (Rt/box ret (.runJ this f))
           \D (Rt/boxD ret (.runD this f))
           \V (do (.runV this f) nil)
-          (let [v (.eval body f)]
-            (if (== (.-jump f) Rt/RETURN) (.-jv f) v))))
+          (let [t (.-thr f)]
+            (set! (.-top t) f)
+            (let [v (.eval body f)]
+              (set! (.-top t) (.-caller f))
+              (if (== (.-jump f) Rt/RETURN) (.-jv f) v)))))
 
       (method ^:public runJ ^long [this ^Frame f]
-        (let [v (.evalJ body f)]
-          (if (== (.-jump f) Rt/RETURN) (.-jl f) v)))
+        (let [t (.-thr f)]
+          (set! (.-top t) f)
+          (let [v (.evalJ body f)]
+            (set! (.-top t) (.-caller f))
+            (if (== (.-jump f) Rt/RETURN) (.-jl f) v))))
 
       (method ^:public runD ^double [this ^Frame f]
-        (let [v (.evalD body f)]
-          (if (== (.-jump f) Rt/RETURN) (.-jd f) v)))
+        (let [t (.-thr f)]
+          (set! (.-top t) f)
+          (let [v (.evalD body f)]
+            (set! (.-top t) (.-caller f))
+            (if (== (.-jump f) Rt/RETURN) (.-jd f) v))))
 
       (method ^:public runV ^void [this ^Frame f]
-        (.exec body f))
+        (let [t (.-thr f)]
+          (set! (.-top t) f)
+          (.exec body f)
+          (set! (.-top t) (.-caller f))))
 
       ;; a call from outside the interpreter: o the receiver (nil for a static method), the
       ;; arguments boxed; the result boxed
@@ -7736,18 +7853,20 @@
         (.ensure this)
         (when isStatic (.init k))
         (let [d (Rt/enter)
-              depth (aget d 0)
-              f (Frame. nr np (unchecked-inc-int depth))]
+              depth (.-depth d)
+              f (Frame. nr np this (.-top d) d (unchecked-inc-int depth) true)]
           (when (>= self 0) (aset (.-r f) self o))
           (Meth/capture this f o)
           (loop [^int i 0]
             (when (< i (alength pslots))
               (.arg this f i (aget args i))
               (recur (unchecked-inc-int i))))
-          (aset d 0 (unchecked-inc-int depth))
+          (set! (.-depth d) (unchecked-inc-int depth))
           (try
             (.run this f)
-            (finally (aset d 0 depth)))))
+            (finally
+              (set! (.-depth d) depth)
+              (set! (.-top d) (.-caller f))))))
 
       ;; a lambda's method: the captured values from the lambda object's fields
       (method ^:public ^:static capture ^void [^Meth m ^Frame f o]
@@ -7885,7 +8004,7 @@
           (when (not (== (.-jump f) 0)) (return nil))
           (when (and (some? target) (nil? o)) (throw (NullPointerException.)))
           (when (.-isStatic m) (.init (.-k m)))
-          (let [g (.frame m (.-depth f))]
+          (let [g (.frame m f)]
             (when (>= (.-self m) 0) (aset (.-r g) (.-self m) o))
             (if (Rt/args m args f g) g nil))))
       (method ^:public eval [this ^Frame f]
@@ -7944,7 +8063,7 @@
       ;; has one, the captured values of a lambda's object in theirs (as Meth.invoke does: a
       ;; lambda's method has no receiver slot, self -1)
       (method ^:public enter ^Frame [this ^Meth m o ^Frame f]
-        (let [g (.frame m (.-depth f))]
+        (let [g (.frame m f)]
           (when (>= (.-self m) 0) (aset (.-r g) (.-self m) o))
           (Meth/capture m g o)
           g))
@@ -8141,7 +8260,7 @@
                 (when (not (== (.-jump f) 0)) (return nil))
                 (.setField Rt/HOST o (aget xfields i) v))
               (recur (unchecked-inc-int i))))
-          (let [g (.frame ctor (.-depth f))]
+          (let [g (.frame ctor f)]
             (aset (.-r g) (.-self ctor) o)
             (when (not (Rt/args ctor args f g)) (return nil))
             (.runV ctor g)
@@ -8172,7 +8291,7 @@
                 (when (not (== (.-jump f) 0)) (return nil))
                 (.setField Rt/HOST o (aget xfields i) v))
               (recur (unchecked-inc-int i))))
-          (let [g (.frame ctor (.-depth f))]
+          (let [g (.frame ctor f)]
             (aset (.-r g) (.-self ctor) o)
             (when (Rt/args ctor args f g)
               (.runV ctor g))
@@ -8935,6 +9054,13 @@
     (defclass ^:public ^:static GoHost
       :extends CF$Host
 
+      ;; stack traces and StackWalker: jrt asks for the interpreted frames when an exception
+      ;; is made or the stack walked (queue 416)
+      (constructor ^:public [this]
+        (CFGo/setTraceHook
+          (anon java.util.function.Supplier []
+            (method ^:public get [this] (CF$Rt/snapshot)))))
+
       (method ^:public define ^Class [this ^CF$Klass k]
         (let [ifs (.-interfaces k)
               kis (.-ifaces k)
@@ -9039,6 +9165,9 @@
                               (method ^:public invoke [this] (.init k) nil)))
             (when-not (.-fnClass k)
               (CFGo/addField (.-cls k) name type flags i)))))
+
+    ;; jrt's hook for the interpreted frames of this thread (CF$Rt/snapshot), jrt's native
+    (method ^:public ^:static ^:native setTraceHook ^void [^java.util.function.Supplier s])
 
     ;; a class made at run time named name: kind 0 a class (its objects Dyn, whose fields
     ;; are the defaults' count; super Object or an interpreted class), 1 an interface, 2 a
