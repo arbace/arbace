@@ -12970,3 +12970,21 @@ Before / after: C's eval cell 2246+34 -> 2323+36, AOT 2254+26 -> 2331+28, comple
 (14666 + 0.5 x 191) / 14857 = 0.99357 -> (14822 + 0.5 x 193) / 15015 = 0.99357 (0.9940 recorded both), independence 0.9988 both:
 the 158 new cases are 156 own and 2 recorded, the ratio unchanged. Alternative not taken: correcting pp-has-attribute's :expect
 to 202311's answers, which would fail llvmi's clang modules; a split expectation per front end is left to the table's owner.
+
+## 2026-11-19: n-hasattr: synth-c23's pp-has-attribute settled from C23's table
+
+The conflict (mac/n-llvm-indep 475cda469 wrote pp-has-attribute's :expect as a0-a8 0, "C23's table gives dates other than
+202311L"; mac/n-c-expect 658ecf7b1 kept it and made the case an exception judged by gcc's run) settled from ISO/IEC 9899:2024
+itself: the final standard's __has_c_attribute table (§6.10.2 in the published numbering, the table N3220 gives) answers 202311L
+for every standard attribute: deprecated, fallthrough, maybe_unused, nodiscard, noreturn, _Noreturn, unsequenced and
+reproducible. The 201904/201910/202003/202202/202207 dates are the C2x working drafts' (N3096 and before), which clang 23.1.5
+still answers (it prints 201904 201910 202106 202003 202202 202202 0 0 here); gcc 15.2 answers 202311 for all eight. The
+test's lines therefore print a0-a8 1 (each `== 202311L`, a7 the __nodiscard__ spelling, a8 _Noreturn), a9 1 (gnu::packed is
+1), a10 and a11 1 (unknown names 0), in_if 1. Wrong: the .expect (n-llvm-indep's hand-worked value). Right: Arbace's target
+(c/target/dialect.edn's :c23-attribute-version 202311, has.tsv's rows; no target change) and gcc's recorded run
+(ref-gcc15.edn's stdout 26e290c4..., now byte for byte the .expect's digest). Done: table.edn's :expect all 1, `bin/ci synth`
+(`--check` clean), the exception dropped from test/c/selfref-exceptions.edn (the case judged by its own .expect again);
+`bin/ci check --corpus synth-c23 --only` on the file: pass 1. llvmi's c-O0/c-O2.synth.pp-has-attribute modules are clang's IR,
+whose preprocessing answered the draft dates, so the .expect is not their outcome: arbace/llvm/check.ae's own verdict leaves
+them to lli's record (they pass by it as before). Alternative not taken: a per-front-end expectation in the table. The crops'
+scores are not re-recorded here (one C case moves from gcc's record to its own verdict, two llvm modules the other way).
