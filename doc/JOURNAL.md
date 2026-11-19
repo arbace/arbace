@@ -12951,3 +12951,53 @@ invokers' six), 399's five gen-class cases pass; `bin/gate --plan`: 52 essential
 a build (gate_key moved). doc/AGENDA.md's top rewritten for main plus these merges: the consolidation of 2026-11-18/19, the scores,
 the pending work (lanes 2 and 4, the Java platform night, tonight's --full, the Ghidra DECISIONs 403-1 and 405-1, the re-seed's
 stopgaps: ARBACE_NO_AOT for cpp-essential and c-parse's mutants, the Tok split, the aot-lib key reading stage 0's cf2g).
+
+## 2026-11-19: Go's build cache kept warm: the gate's cap 40 GiB, relative to the free disk, never under a live build (n-gate-gocache)
+
+- Measured: `test/gate/caches.edn`'s `{gocache}` row capped `/root/.cache/go-build` at 8 GiB by the least recently used (GD4), and
+  the cheap prune runs at every gate's start and before a step every 5 minutes. This morning's prune removed 21 GiB, last night's
+  28.7 GiB; the earlier nights' logs (`.tmp/gate*/`, `.tmp/night*/`) show removals of 1 to 16.9 GiB a pass. So the builds' warm
+  set (`--gate-build`, javac's tool, the fixpoint's G2 and G3) is about 8 + 21 to 8 + 28.7, 29 to 37 GiB, and each gate's builds
+  started nearly cold: go-build 79 min, javac-tool 71 min, the fixpoint 81 min, against about 8 min warm for `--gate-build`. Today
+  at 09:57 UTC the cache held 10.5 GiB (4.3 GiB used within the hour, 6.2 GiB within 6 h), the disk 78% of 207 GB, 46 GB free.
+- The rule (`bin/lib/gate-run.bash`'s `caches_rows`, `caches_prune`, `caches_go_busy`): a `[:size G :lru]` row takes
+  `:free-gib F` (the cap min(G, its size + the free disk - F)), `:min-gib M` (never under M) and `:idle-only true` (nothing removed
+  while a process whose executable is under `ARBACE_GOROOT` runs on the host: go, compile, link, asm; the user's rule, never trim
+  the cache under a live build). The row: `[:size 40 :lru] :free-gib 35 :min-gib 8 :idle-only true`: 40 GiB holds the measured warm
+  set, 35 is GD4's floor (`GATE_DISK_FLOOR`, 25 GiB) and 10, so the cache yields before the floor defers steps, and 8 is the old
+  cap. GD4's floor and its deferral are unchanged; under a live build the floor's deferral waits for the build and the next cap.
+- Dry run now (`bin/gate --prune --dry-run --cheap`): "/root/.cache/go-build holds 10.5 GiB, 44.8 GiB free: its cap 20.3 GiB",
+  nothing removed (the old cap would have removed 2.5 GiB). On a disk with 70 GiB free the cap is 40 GiB.
+- Alternatives: a fixed 40 GiB (fills the disk toward the floor on a full night); the LRU sparing the entries of the last N builds
+  (Go's cache records no build, only entries' mtimes, refreshed at most hourly: a per-build index would be a tool of its own); a
+  GOCACHE per run (cold every time, as night 13 found).
+- Expected: the second and later builds of a night warm (go-build about 8 min in place of 79, javac's tool and the fixpoint alike
+  when their packages fit), about 3 hours a night with the three builds, the disk at most 35 GiB from full by the cache's share.
+- Tests: `test/gate/caches-test.bash` (17 ok: the free-relative cap, the minimum, a Go build running), `--coverage`,
+  `test/docs/claude-md-test.bash` pass; CLAUDE.md's sentence on the 8 GiB cap updated. Keys: `gate_key` and the runtime's do not
+  move (`bin/lib/gate-run.bash` and the table are in neither; the table is in no key); the steps `caches-table` (the table and
+  its test), `claude-md` (CLAUDE.md) and `gate-tests` (`test/gate/`, `bin/lib/gate-run.bash`) rerun.
+
+## 2026-11-19: Go's build cache by one rule by hand too: `bin/arbace-go --build`'s trim takes the gate's cap (n-gocache-trim, on `cd498e1d9`)
+
+- Why: n-gate-gocache gave the gate's prune the cap min(40, size + free - 35) GiB, at least 8, idle-only, but every
+  `bin/arbace-go --build` run by hand still removed every entry of Go's build cache unused for 90 minutes
+  (`bin/lib/gocache.bash`'s `gocache_trim`): about 10:00 today it cut the cache from 10.5 to 6.4 GiB, the next build cold.
+- Done: `bin/lib/gocache.bash` holds the rule once: `gocache_cap_kib SIZE FREE MAX [FREE_GIB [MIN]]` (the cap) and
+  `caches_go_busy` (moved from `bin/lib/gate-run.bash`, which now sources gocache.bash and computes `caches_prune`'s cap by the
+  same function). `gocache_trim` now does nothing while a Go build of `ARBACE_GOROOT` runs, nothing while the cache is under its
+  cap (no age-based wipe while there is disk to spare), else removes the least recently used down to the cap; its numbers
+  `ARBACE_GOCACHE_MAX_GIB` 40, `_FREE_GIB` 35, `_MIN_GIB` 8 repeat the table's `{gocache}` row (the build does not read
+  `test/gate/caches.edn`, so go-build's audited inputs do not grow; the test holds them equal). `ARBACE_GOCACHE_KEEP_MIN` keeps
+  its meaning as a bound: no entry used within that many minutes is removed (default 90; the gate's 7200), even over the cap.
+  `ARBACE_GOCACHE_TRIM_DRY=1` lists without removing. `build_go_print_cache_trim` (repr/go's print cache in `.tmp`) unchanged.
+- Tests: `test/gate/gocache-trim-test.bash` (new, a `gate-tests` member; 11 ok on a scratch cache: the defaults equal the
+  table's, the cap's three cases, nothing under the cap though 11 of 12 entries are hours old, the 4 least recently used over it,
+  KEEP_MIN's bound, a Go build running, the dry run), `test/gate/caches-test.bash` (17 ok) and `test/docs/claude-md-test.bash`
+  pass; CLAUDE.md's sentence on the trim rewritten. Go's real cache was never trimmed.
+- Keys: `bin/arbace-go` and `bin/lib/gocache.bash` are both in `gate_key` (and `gate_rest_key`: bin/lib less repr-java, repr-c,
+  ci, gate-run.bash, cover.bash and the crops'), so this commit moves `gate_key` once: one rebuild of the gate's executables
+  (two Go-hosted builds, about 8 minutes) and the checks on `:gate`/`:prog` rerun; `bin/lib/gate-run.bash` is in no key (the epoch).
+- Alternatives: the build reading the table's row (an undeclared read of go-build's audit, or a new input for every build step);
+  calling `caches_prune` from the build (sources the whole runner); keeping the 90-minute wipe only below the disk floor (two
+  rules again).

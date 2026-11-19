@@ -683,10 +683,13 @@ Prior art:
   `bin/gate --prune [--dry-run] [--cheap] [--worktrees]` (the cheap rows at every gate's start; the essential `caches-table` holds
   every `.tmp` name of `bin/` to a row); musl's forms shared by key in the main checkout's `.tmp/shared`; the essential
   `records-check` (`bin/records-check`: each results file against its known file, `test/records/`; `make hooks` its opt-in pre-commit hook).
-  Logs in `.tmp/gate/`. Every `bin/arbace-go --build`
-  first trims Go's build cache of entries unused for 90 minutes (`bin/lib/gocache.bash`,
-  `ARBACE_GOCACHE_KEEP_MIN`); under the gate, since GD4, that is Go's own five days and the gate caps the cache at 8 GiB by the
-  least recently used (`test/gate/caches.edn`). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
+  Logs in `.tmp/gate/`. Go's build cache follows one rule, by hand and in the gate (`bin/lib/gocache.bash`'s `gocache_cap_kib`
+  and `caches_go_busy`, `test/gate/caches.edn`'s `{gocache}` row; `test/gate/gocache-trim-test.bash`): the least recently used
+  trimmed to 40 GiB, less when keeping it would leave under 35 GiB free, never under 8, nothing while a Go build runs and nothing
+  while the cache is under its cap (no age-based wipe while there is disk to spare); every `bin/arbace-go --build` first applies it
+  (`gocache_trim`; `ARBACE_GOCACHE_KEEP_MIN`, default 90, the gate's Go's own five days: no entry used within that many minutes
+  removed), and the gate before its steps (8 GiB before 2026-11-19, which started each gate's builds cold; until then the builds
+  by hand removed every entry unused for 90 minutes). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
 
 ## Records
 
