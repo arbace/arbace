@@ -2600,6 +2600,34 @@ Proved (linux/arm64): `bin/hsi check --corpus synthetic` judged by the record an
 pass, 5 fail (arm64's floating point, below), 37 of 37 `:judge :own`; the control primops-int8 against primops-word8 fails
 against the golden file.
 
+## As built: queue 435: the testsuite's and nofib's golden files
+
+The judge's 153 programs with no expected output GHC's recorded run confirms (0.5) were reviewed one by one.
+- The testsuite's shipped files as its driver takes them (`testlib.py`'s `find_expected_file`: `NAME.stdout-ws-64` and the
+  `x86_64-unknown-linux` variants before `NAME.stdout`): `bin/hsi own-verdicts` reads the file the driver reads, 9 programs more
+  by their own verdict (T10245, T20137, T2838, T10962, arith003, arith011, numrun009, numrun012, tcrun002).
+- 65 programs by golden files written from their source: `test/haskell/eval/golden/ID.stdout`, `ID.stderr` (none: empty) and
+  `ID.exit` (none: 0), each line reviewed in `golden/AREA.edn` with its basis (`:src`, `:report`, `:lib` and `:rts`: the
+  libraries' and the RTS's source in GHC 9.14.1's tarball at its pin, `:plan`: record-ref's arguments and stdin, `:shipped`: the
+  test's shipped file agrees) and why; then checked against the record's SHA-256s and sizes (no program run, no GHC). Among them:
+  the shipped files that differ from the run only by the last newline (the driver does not compare it); the non-threaded RTS's
+  answers to threaded-way tests (conc069's forkOS failure, conc070's BlockedOnOther, conc072's capability 0,
+  foreignInterruptible's uninterrupted call); uncaught exceptions in GHC 9.14's layout (`GHC.Internal.Conc.Sync`'s handler,
+  `Backtrace`'s "HasCallStack backtrace:"), whose shipped `.stderr` files name an older ghc-internal's positions (169:13 and 89:42
+  for 170:37 and 90:42 at the pin); arguments the plan does not pass (an `extra_run_opts` that is an expression, nofib's
+  `NORM_OPTS`), so a pattern fails in `do` or a lambda; the RTS's usage text by `rts/RtsFlags.c`'s `usage_text` under the linked
+  RTS's `#if` branches (cgrun057, T16916); T3676's conversions through `toRational` of NaN and infinities; happy's `usageInfo`;
+  22 nofib benchmarks whose variant prints nothing.
+- `bin/hsi golden [--oracle] [--control]` (`test/haskell/eval/review.ae`): every golden file against its review; every program of
+  the record its own verdict, a golden file or left in `golden/left.tsv` with a reason; `--oracle` each against GHC's record;
+  `--control` each with one byte changed must fail the review and the digest (65 of 65). `own-verdicts.tsv` lists them as
+  `golden:NAME`; `bin/lib/hsi/check`'s `own_ref` reads them at -O0. hsi-essential runs it.
+- Left (79): 64 GHC did not build at record-ref (no run to check against); T4262 (the host's thread count), conc065, conc066,
+  conc067 (thread timing, `ignore_stdout`), fannkuch-redux and minimax (the CPU limit), k-nucleotide (a segfault on an empty
+  stdin), T15892 and T23071 (`ignore_stdout`, 0.96 MB and 13 MB), fasta, awards and gc/cacheprof (7.6 MB, 604 KB and 57 KB of
+  output not derived by hand), IPLocation, T7861 and FMA_ConstantFold (not derived).
+- Eval 756 to 830 of 909 by their own verdict, AOT 132 to 139 of 139; the judge 0.922 to 0.927.
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
