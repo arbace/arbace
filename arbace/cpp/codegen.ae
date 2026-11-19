@@ -432,6 +432,17 @@
     (or (:try c) (:terminate c) (:filter c) (:eh-only c) (:delete c) (:guard-abort c)) nil
     (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] (not (:might-throw c))))
     :else
+  (cond
+    ;; queue 392: the named return value's destructor on the normal path, skipped once its return ran (clang's
+    ;; DestroyNRVOVariable: nrvo.unused, nrvo.skipdtor)
+    (:nrvo-flag c)
+    (let [l1 (new-label "nrvo.unused") l2 (new-label "nrvo.skipdtor")
+          v (val! (list 'load 'i1 ['ptr (:nrvo-flag c)] :align 1))]
+      (condbr! v l2 l1)
+      (begin! l1)
+      (call-dtor! (:cls c) (:addr c) (:vtt c))
+      (begin! l2))
+    :else
   (if-let [fl (:flag c)]
     (let [l1 (new-label "cleanup") l2 (new-label "cleanup.done")
           v (val! (list 'load 'i8 ['ptr fl] :align 1))
@@ -444,7 +455,7 @@
     (if (:array c)
       (let [cid (:cls c) n (long (:n c)) sz (abi/size-of {:k :class :id cid})]
         (doseq [i (range (dec n) -1 -1)] (call-dtor! cid (offset! (:array c) (* i sz)))))
-      (call-dtor! (:cls c) (:addr c) (:vtt c))))))
+      (call-dtor! (:cls c) (:addr c) (:vtt c)))))))
 
 (defn- push-temp-cleanup! [cid addr]
   (when (nontrivial-dtor? cid)
@@ -505,6 +516,8 @@
     (:guard-abort c) (do (declare! "__cxa_guard_abort" 'void '[ptr] :nounwind true)
                          (emit! (list 'call 'void (gsym "__cxa_guard_abort") [['ptr (:guard-abort c)]] :attrs [:nounwind])))
     (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
+    ;; (queue 392: the named return value while unwinding: destroyed, its flag not read)
+    (:nrvo-flag c) (call-dtor! (:cls c) (:addr c) (:vtt c))
     (:delete c) (if (:dealloc c)
                   (dealloc-call! (:dealloc c) (:delete c) (:size c) (:align c) (:places c))
                   (do (declare! "_ZdlPvm" 'void '[ptr i64] :nounwind true)
@@ -1965,17 +1978,29 @@
   (let [v (sema/var* (:var s))
         t (:ty v)
         nrvo (= (:var s) (:nrvo @*f*))
-        addr (if nrvo (:sret @*f*) (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))]
+        addr (if nrvo (:sret @*f*) (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))
+        bt (loop [t (abi/unq t)] (if (abi/arr? t) (recur (abi/unq (:of t))) t))
+        dtor? (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
+        ;; queue 392: the named return value of a class with a non-trivial destructor is destroyed when its scope is left
+        ;; other than by its return, and on the exception path always: clang's EmitAutoVarAlloca's NRVO flag, false before
+        ;; the initialization, set by the return, and DestroyNRVOVariable's cleanup, the flag checked on the normal path
+        ;; only (cow-locale_init.cc's locale::name(), whose landing pad destroys its string `__ret`)
+        nfl (when (and nrvo dtor?)
+              (let [fl (alloca! 'i1 1)]
+                (emit! (list 'store ['i1 false] ['ptr fl] :align 1))
+                (swap! *f* assoc :nrvo-flag fl)
+                fl))]
     (swap! *f* assoc-in [:addr (:var s)] addr)
     (let [ext (atom [])]
       (with-full (binding [*extend* ext *decl-e* (when (= :expr (:i (:init s))) (:e (:init s)))] (emit-init addr t (:init s))))
       (doseq [c @ext] (push-cleanup! c)))
-    (when-not nrvo
-      (let [bt (loop [t (abi/unq t)] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
-        (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
-          (if (abi/arr? (abi/unq t))
-            (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
-            (push-cleanup! {:addr addr :cls (:id bt)})))))))
+    (when dtor?
+      (cond
+        nfl (push-cleanup! {:addr addr :cls (:id bt) :nrvo-flag nfl})
+        nrvo nil
+        (abi/arr? (abi/unq t))
+        (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
+        :else (push-cleanup! {:addr addr :cls (:id bt)})))))
 
 (declare const-leaves leaves-constant)
 
@@ -2039,7 +2064,9 @@
       (:init s)
       (let [rt (:ret (:ty f))]
         (cond
-          (abi/class? (abi/unq rt)) (when-not (and (:nrvo-var s) (= (:nrvo-var s) (:nrvo @*f*)))
+          (abi/class? (abi/unq rt)) (if (and (:nrvo-var s) (= (:nrvo-var s) (:nrvo @*f*)))
+                                      ;; (queue 392: its flag set, so the cleanup leaves the returned object alone)
+                                      (when-let [fl (:nrvo-flag @*f*)] (emit! (list 'store ['i1 true] ['ptr fl] :align 1)))
                                       (with-full (emit-init (:sret @*f*) (abi/unq rt) (:init s))))
           (abi/ref? rt) (with-full (store! (abi/ptr abi/void) (case (:i (:init s)) :bind (emit-lv (:e (:init s))) (fail :return "a reference to a temporary")) (:ret-slot @*f*)))
           :else (with-full (store! rt (emit-rv (:e (:init s))) (:ret-slot @*f*))))))
