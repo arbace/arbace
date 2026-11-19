@@ -323,6 +323,8 @@
     (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
 
 (declare prim-value const-arg)
+(def ^:private ^:dynamic *simple-args* "Whether the primitive's argument nodes are all simple (prim-node), or all
+  evaluated into temporaries (with-all-args): the inlined makeblock writes them twice." false)
 
 (defn- event-node
   "(event L [INFO]): in tail position, or without information, L alone (bytegen drops the event to keep the tail call); around
@@ -341,7 +343,7 @@
                        (and (str/starts-with? n "makeblock") (seq args) (const-arg ctx inner)))
                  (expr ctx inner false)
                  (let [ev (slot-ref info false true)]
-                   (with-all-args ctx args (fn [as ts] (around-slot ev (prim-value n as) ts))))))
+                   (with-all-args ctx args (fn [as ts] (around-slot ev (binding [*simple-args* true] (prim-value n as)) ts))))))
         (around-slot (slot-ref info false false) (expr ctx inner false))))))
 
 (defn- raise-slot
@@ -577,13 +579,17 @@
       (#{"makeblock" "makemutable"} word)
       (let [tag (num-arg n) w (count as)]
         (if (and (not= tag 254) (<= 1 w 256))
-          ;; Rt/block in place (queue 414): the block, then its words counted (a minor heap's block of w fields and its header)
-          ;; and the block given to a Gc.Memprof profile (queue 438's heap model tracks the value, as Rt/block)
-          (let [v (fresh "b$")]
-            (list 'let [v (list 'new 'ocaml.rt.Block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))]
-                  (list 'set! 'ocaml.rt.Rt/minorWords (list 'unchecked-add 'ocaml.rt.Rt/minorWords (inc w)))
-                  (list 'when 'ocaml.rt.ExtGc/memprofSampling (list 'ocaml.rt.ExtGc/memprofAlloc w v))
-                  v))
+          ;; Rt/block in place (queue 414) when every argument is simple (*simple-args*: their forms pure and small, so written twice):
+          ;; a Gc.Memprof profile running, Rt/block (the block counted once it exists and given to the profile, queue 438's heap
+          ;; model); else its words counted (a minor heap's block of w fields and its header), then the block. No local holds the
+          ;; block (a let's slot would keep it reachable while the frame lives: moved_while_blocking's promoted block); with an
+          ;; argument that is not simple (inline, evaluated once), the call
+          (if *simple-args*
+            (list 'if 'ocaml.rt.ExtGc/memprofSampling
+                  (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))
+                  (list 'do (list 'set! 'ocaml.rt.Rt/minorWords (list 'unchecked-add 'ocaml.rt.Rt/minorWords (inc w)))
+                        (list 'new 'ocaml.rt.Block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))))
+            (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as))))
           (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))))
       (= word "makefloatblock") (rt 'block 254 (list 'new 'Object/1 (vec as)))
       (= word "makelazyblock") (list 'ocaml.rt.Block. 246 (list 'new 'Object/1 (vec as)))
@@ -674,7 +680,7 @@
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
             :else (symbol (str (pkg-of g) "." (class-name g)) "G")))
     (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
-    :else (with-args ctx args (fn [as] (prim-value n as)))))
+    :else (binding [*simple-args* (every? simple? args)] (with-args ctx args (fn [as] (prim-value n as))))))
 
 ;; ---- tests
 
