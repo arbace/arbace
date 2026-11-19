@@ -303,7 +303,9 @@ code. Three kinds of things live here:
   TYPER.md §22) the modular explicits' Tfunctor of types.mli, ctype.ml, typetexp.ml, typecore.ml, typedtree.ml and oprint.ml, by hand, the
   files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own, and so is
   `typer/cmi.ae` (2026-11-07, OC184 (a): a unit's typed signature written as forms and read back, after the role of
-  typing/cmi_format.ml's read_cmi, not its code).
+  typing/cmi_format.ml's read_cmi, not its code); `typer/objinfo.ae` (2026-11-19, queue 434, TYPER.md §30) ports the order of
+  Uid.mk in typing/typedecl.ml, typecore.ml, typemod.ml and datarepr.ml, file_formats/cmt_format.ml's index_declarations with
+  typing/tast_iterator.ml's item_declaration, and tools/objinfo.ml's -decls printing, from the same tarball and notice.
 - `repr/rust.ae` and `repr/rust/` (repr/rust, Rust's bridge, `arbace.repr.rust` and `arbace.repr.rust.*`;
   doc/rust/SPEC.md; evaluated from the checkout, not embedded): its native reader's lexer and parser,
   `repr/rust/lex.ae`, `parse.ae` and `parse/{expr,pat,item}.ae`, with the meta items, literals and

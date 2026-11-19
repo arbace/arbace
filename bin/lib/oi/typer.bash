@@ -23,6 +23,11 @@
 #                                  in .tmp/oi/probe/check.txt: the printed types that differ (TY11's sharing, TY12's scopes,
 #                                  TY14's Tpoly) and the Lambda that differs (TY17's partiality among them)
 #   bin/oi run-native FILE.ml [ARG...]       FILE typed and translated by Arbace (no ocamlc, no ocdump) and run on oi with the native library
+#   bin/oi objinfo-check                     T12's compiler output (queue 434, doc/ocaml/TYPER.md section 30): the programs of
+#                                  test/ocaml/divergences.edn's :compiler-output, each whose ocamlobjinfo sections the native front end
+#                                  prints (-decls: arbace.repr.ocaml.typer.objinfo) typed by the native typer and judged by its own
+#                                  .reference, the others named by the section they need (the printed sections still compared:
+#                                  "decls equal"); each equal output judged against another test's reference, which must fail
 
 TYPER_DIR=$root/test/ocaml/typer
 TYPER_ORACLE=$TYPER_DIR/oracle
@@ -215,4 +220,10 @@ cmd_typer_probe() {
   typer_ns check --dir "$p/src" --oracle "$p/oracle" --out "$p/native" --stdlib "$(native_dir)" --include "$TESTLIB" \
     --report "$p/report.edn" "${names[@]}" > "$p/check.txt" 2>&1 || true
   tail -1 "$p/check.txt"
+}
+
+cmd_objinfo_check() {
+  [ $# -eq 0 ] || die "usage: bin/oi objinfo-check"
+  mkdir -p "$OI_DIR"; [ -d "$TESTS/shape-index" ] || need_source
+  typer_ns objinfo-check --tests "$TESTS" --divergences "$root/test/ocaml/divergences.edn" --stdlib "$TOP/stdlib" --control
 }
