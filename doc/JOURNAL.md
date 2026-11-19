@@ -13323,3 +13323,22 @@ checkout's (pins equal). Decisions: D407-1 (a) own verdict `unsupported bits` (d
 ## 2026-11-19: queue 400's main-host run (n-rust-400)
 
 On branch n-rust-400 (from mac/400-rust-vendor), with the host stage 0: `bin/rust-front std-iface` (whole pass) gave std's interface 4,640 of 4,644 facts equal, 0 differ, 4 missing, the control differing as it must (the VM's report had 4,605 before its last fix). The 4 missing, as the report names them: ADTs `std::backtrace::Inner` (a TAIT), `std::env::SplitPaths` (`sys::paths` not passed) and `std::fs::Metadata`, and fn `std::io::stdio::{impl#7}::as_mut_buf` (RPIT). `std-iface --units` passed and wrote test/rust/front/std-iface-units-known.txt unchanged; `core-essential` and `rind-test` passed (arbace/rust/front changed; alloc-iface skipped, its path is unchanged). `bin/reap`: 54 of 56 cells checked, 2 with no check yet, 0 problems. `bin/crops-score --crop rust --judge --strict`: 0 problems; Rust's scores completeness 100, without by design 100, maturity 100, independence 80. No record moved, so no `--record`.
+## 2026-11-17: Ghidra G2 A19: the PKI tests' security areas measured (branch `n-g2-a19`; demo `g2-a19` `ed7fef9`)
+
+- The demo's G2 row A19 (GH16 (a)): what `KeyStore` (PKCS12, JKS), `CertificateFactory` (X.509), `KeyManagerFactory` and
+  `SSLContext` need for ghidra.net's three test classes. The reference's class lists (R2) and M3's report do not exist yet, so
+  the runs are the JDK classes the tests' code reaches, read from Ghidra 12.2's `ghidra.net` sources and the providers'
+  defaults (`pkcs12`, `SunX509`, `PKIX`, PBES2 with AES-256 and HmacPBESHA256), 109 classes in 8 areas; the report the gate
+  executable's j2g `report.edn` at next `42bf8614b` (`:unavailable` and `:missing` as `[class why]` pairs, 407).
+- Result: 109 of 109 present in `jdk/sources.txt` with their services in jrt's tables (F1, F2, F3, F23); `SSLContext` is not on
+  the tests' path (only a `ModuleInitializer` Generic's tests never run). `bin/j2g-rank` (A14): one stub on the three runs'
+  path, `sun.security.util.Debug.formatCaller` (StackWalker), met only under `java.security.debug`; its controls (a run naming
+  `GaloisCounterMode` ranks it, `KeyStore` alone ranks nothing) behave. A smoke on the gate's executable (2 s, 0.44 GiB): cacerts
+  read as PKCS12 without a password (111), X.509 parsed back, RSA sign and verify, PKCS12 and JKS stored and reloaded, SunX509's
+  key manager, PKIX's trust manager accepting a root and rejecting it over another root, CertPathBuilder, CertStore, TLSv1.3's
+  SSLContext. No deferred class, nothing to port.
+- The risk is bouncycastle's: `CertTool` registers `BouncyCastleProvider`, whose `$Mappings` classes (108 names) and services are
+  loaded by computed names and built by reflection; bcprov's cut (A3) and the program's roots must keep them (A22 when job 7 runs).
+- Taken overnight (round 52): A19-1 (a) measure now on the sources' lists, rerun A14 on R2's; A19-2 (a) the JDK areas used as
+  they are, no deferred class; A19-3 (a) `Debug.formatCaller` not met, no fix. The demo's `plan/A19.md` and `plan/a19/` hold the
+  lists, the smoke and the rankings.
