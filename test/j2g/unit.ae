@@ -1071,7 +1071,132 @@
                (and (str/includes? f "META-INF/arbace/entries") (str/includes? f "JarURLConnection")))
         (println "skip  entries: jdk/forms' ClassPathResources predates A17 (bin/jrt-convert predict, then the night's update)")))))
 
+;; Queue 399: a class gen-class made (:arbace/gen-class, arbace/genclass.ae) lists every member in its member table,
+;; its private static Var fields among them (Clojure's suite's name-munging reads them by getDeclaredField), and its
+;; forwarding method of an interface's default method falls back on the interface's default function (Iface.super,
+;; interface-methods: J_g_Greeter_J_Greet__O of the receiver); the control, the same shape without the key, lists its
+;; public members alone
+
+(defn test-gen-class []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/genclass" :tree true}] :variant-files []))
+        mw (let [mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {}}]
+             (assoc mw :subclass-index (m/make-subclass-index mw)))
+        in-world (fn [f] (w/with-world world
+                           (binding [m/*w* mw env/*declared* (:classes e) decls/*reached* #{}
+                                     code/*pkgstate* {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts (atom #{})}]
+                             (try (f) (catch Throwable t (str "threw: " t " " (ex-cause t)))))))
+        field-lines (fn [n] (in-world #(let [ts (out/member-tables (m/pkg n) n)]
+                                         (if (string? ts) ts (vec (sort (map :line (:fields ts))))))))
+        gen (field-lines "g/Gen") plain (field-lines "g/Plain")
+        greet (in-world #(let [mm (some (fn [x] (when (= "greet" (:name x)) x)) (:methods (a/decl "g/Gen")))]
+                           (binding [decls/*reached* #{["g/Gen" (:name mm) (:desc mm)]}]
+                             (decls/method-forms (m/pkg "g/Gen") "g/Gen" mm))))
+        calls-default? (fn [f] (and (coll? f)
+                                    (some #(and (seq? %) (symbol? (first %)) (= "J_g_Greeter_J_Greet__O" (name (first %))) (= 't (second %)))
+                                          (tree-seq coll? seq f))))]
+    (check "gen-class: the fixture analyzes" (empty? (:failed world)) (pr-str (:failed world)))
+    (check "gen-class: m/gen-class? of Gen, not of Plain"
+           (= [true false] (w/with-world world [(m/gen-class? "g/Gen") (m/gen-class? "g/Plain")])))
+    (check "gen-class: Gen's member table lists its private static fields, with their modifiers (0x1a)"
+           (and (vector? gen) (some #(and (str/includes? % " greet__var ") (str/starts-with? % "G26 ")) gen)
+                (some #(str/includes? % " who__var ") gen))
+           (pr-str gen))
+    (check "gen-class: control: Plain's member table lists no private field"
+           (and (vector? plain) (not-any? #(str/includes? % "greet__var") plain))
+           (pr-str plain))
+    (check "gen-class: Gen's greet falls back on Greeter's default method's function (Greeter.super.greet())"
+           (calls-default? greet) (pr-str greet))
+    ;; review 1119, item 4: a default inherited from a superinterface, called through the :implements interface's
+    ;; super (Sub.super.hello(), as generate-class's form over java.util.List says List/super for Iterable's
+    ;; forEach), is the declaring interface's function (Hello's)
+    (let [hello (in-world #(let [mm (some (fn [x] (when (= "hello" (:name x)) x)) (:methods (a/decl "g/GenSub")))]
+                             (binding [decls/*reached* #{["g/GenSub" (:name mm) (:desc mm)]}]
+                               (decls/method-forms (m/pkg "g/GenSub") "g/GenSub" mm))))
+          names (fn [f] (set (keep #(when (and (seq? %) (symbol? (first %))) (name (first %))) (tree-seq coll? seq f))))]
+      (check "gen-class: GenSub's hello (Sub.super.hello(), Hello's default inherited) falls back on Hello's function"
+             (and (coll? hello) (contains? (names hello) "J_g_Hello_J_Hello__O")) (pr-str hello)))))
+
+;; Review 1119, items 1-3: arbace/genclass.ae's generate-class (in arbace.core; the checkout's, loaded by the test: the executable's
+;; embedded copy may be the seed's) over JDK interfaces. ::aot-form holds a forwarding method per default method, the
+;; var's fn else (.m Iface/super ...), Iface the :implements interface (java.util.List's forEach and stream, Iterable's
+;; and Collection's); the evaluated form holds none; an interface without a default gives no ::aot-form (the control),
+;; and an abstract method's forwarding method calls no super (the control of the super-call check). gc-record-aot-form!
+;; replaces the recorded unit naming the class alone, and answers :no-match with a warning otherwise. 399's base has no
+;; ::aot-form and no gc-record-aot-form!: these checks fail on it.
+
+(defn- test-gen-class-aot-form []
+  (load-file "arbace/genclass.ae")
+  (require 'arbace.classes.native)
+  (let [gen (ns-resolve 'arbace.core 'generate-class)
+        rec (ns-resolve 'arbace.core 'gc-record-aot-form!)
+        aot :arbace.core/aot-form
+        gc (fn [opts] (if gen
+                        (try (binding [*ns* (the-ns 'j2g.unit)] (@gen opts)) (catch Throwable t (str "threw: " t)))
+                        "no generate-class"))
+        method-named (fn [form n] (when (seq? form)
+                                    (some #(when (and (seq? %) (= 'method (first %)) (= n (str (second %)))) %) form)))
+        super-call? (fn [mth mname iface]
+                      (boolean (some #(and (seq? %) (= (symbol (str "." mname)) (first %)) (= (symbol iface "super") (second %)))
+                                     (tree-seq coll? seq mth))))
+        forwards? (fn [mth mname]
+                    (boolean (some #{(symbol (str mname "__var"))} (tree-seq coll? seq mth))))
+        cs (gc {:name "j2g.unit399.Chars" :implements ['java.lang.CharSequence]})
+        lst (gc {:name "j2g.unit399.Lst" :implements ['java.util.List]})
+        run (gc {:name "j2g.unit399.Run" :implements ['java.lang.Runnable]})
+        cs-aot (get (meta cs) aot) lst-aot (get (meta lst) aot)]
+    (check "gen-class aot-form: CharSequence's ::aot-form forwards chars to chars__var, else (.chars java.lang.CharSequence/super)"
+           (let [mth (method-named cs-aot "chars")]
+             (and mth (forwards? mth "chars") (super-call? mth "chars" "java.lang.CharSequence")))
+           (pr-str (if (seq? cs) (method-named cs-aot "chars") cs)))
+    (check "gen-class aot-form: the evaluated form holds no method of a default (chars, isEmpty: dispatch only)"
+           (and (seq? cs) (nil? (method-named cs "chars")) (nil? (method-named cs "isEmpty")) (method-named cs "length"))
+           (pr-str cs))
+    (check "gen-class aot-form: control: length, abstract, forwards and calls no super"
+           (let [mth (method-named cs-aot "length")]
+             (and mth (forwards? mth "length") (not (super-call? mth "length" "java.lang.CharSequence"))))
+           (pr-str (method-named cs-aot "length")))
+    (check "gen-class aot-form: an inherited default's super is the :implements interface's (java.util.List/super for Iterable's forEach and Collection's stream)"
+           (and (super-call? (method-named lst-aot "forEach") "forEach" "java.util.List")
+                (super-call? (method-named lst-aot "stream") "stream" "java.util.List"))
+           (pr-str [(method-named lst-aot "forEach") (method-named lst-aot "stream")]))
+    (check "gen-class aot-form: control: Runnable has no default, its ::aot-form nil"
+           (and (seq? run) (contains? (meta run) aot) (nil? (get (meta run) aot)))
+           (pr-str (if (seq? run) (meta run) run)))
+    (let [v (resolve 'arbace.classes.native/compiled)
+          units (fn [] [{:names ["j2g.unit399.Other"] :forms [:other]}
+                        {:names ["j2g.unit399.Chars"] :forms [:evaluated]}
+                        {:names ["j2g.unit399.Pair" "j2g.unit399.Pair2"] :forms [:pair]}])
+          call (fn [a name]
+                 (let [w (java.io.StringWriter.)
+                       r (if rec
+                           (try (with-redefs-fn {v a} #(binding [*err* w] (@rec name cs-aot)))
+                                (catch Throwable t (str "threw: " t)))
+                           "no gc-record-aot-form!")]
+                   [r (str w)]))
+          a1 (atom (units)) [r1 w1] (call a1 "j2g.unit399.Chars")
+          a2 (atom (units)) [r2 w2] (call a2 "j2g.unit399.Nope")
+          a3 (atom (units)) [r3 w3] (call a3 "j2g.unit399.Pair")
+          [r4 _] (call nil "j2g.unit399.Chars")]
+      (check "gen-class record: the unit naming the class alone gets ::aot-form's rest, the others kept"
+             (and (= :recorded r1) (= "" w1) (seq? cs-aot)
+                  (= [(rest cs-aot)] (:forms (nth @a1 1)))
+                  (= [:other] (:forms (nth @a1 0))) (= [:pair] (:forms (nth @a1 2))))
+             (pr-str [r1 w1 (map :forms @a1)]))
+      (check "gen-class record: no unit of that name: :no-match, a warning naming the class, nothing replaced"
+             (and (= :no-match r2) (str/includes? w2 "j2g.unit399.Nope") (= (units) @a2))
+             (pr-str [r2 w2]))
+      (check "gen-class record: a unit naming the class beside another is no match either (reported)"
+             (and (= :no-match r3) (str/includes? w3 "j2g.unit399.Pair") (= (units) @a3))
+             (pr-str [r3 w3]))
+      (check "gen-class record: control: the program records no units, nil and nothing done"
+             (nil? r4) (pr-str r4)))
+    nil))
+
 (defn -main [& _]
+  (test-gen-class)
+  (test-gen-class-aot-form)
   (test-edge-generics)
   (test-object-finalize)
   (test-dynsub-clone)

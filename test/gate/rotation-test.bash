@@ -330,10 +330,12 @@ old=$(( $(date +%s) - 40 * 86400 ))
 echo 83 > "$store/_rotation/.seq"; : > "$store/_rotation/.lock"; touch -d '2 days ago' "$store/_rotation/.seq" "$store/_rotation/.lock"
 printf '1\t%s\ttoy/p9.c\tfail\tc0ffee\tfalse\n' "$old" > "$store/_rotation/toy.toy.failed"
 mkdir -p "$t/exes"; exes=$t/exes
-gate_prune --dry-run > "$t/prune-dry.out" 2>&1
+# GATE_CACHES=none: the table's caches are the real checkout's ($root is it): its prune removed a running test's fresh empty
+# directories under .tmp/tmp (the parallel gate-tests' lost logs/files.sha256, review 419, I2)
+GATE_CACHES=none gate_prune --dry-run > "$t/prune-dry.out" 2>&1
 [ "$(wc -l < "$store/_rotation/toy.toy.s1.runs")" = 83 ] && grep -q 'would trim _rotation/toy.toy.s1.runs (83 runs, 50 kept)' "$t/prune-dry.out" \
   && ok "--prune --dry-run: the runs to trim named, none trimmed" || no "--prune --dry-run: $(cat "$t/prune-dry.out")"
-gate_prune > "$t/prune.out" 2>&1
+GATE_CACHES=none gate_prune > "$t/prune.out" 2>&1
 if [ "$(wc -l < "$store/_rotation/toy.toy.s1.runs")" = 50 ] && [ "$(tail -1 "$store/_rotation/toy.toy.s1.runs" | cut -f8)" = 83 ] \
    && [ "$(head -1 "$store/_rotation/toy.toy.s1.runs" | cut -f8)" = 34 ] && [ "$(wc -l < "$store/_rotation/toy.toy.s2.runs")" = 60 ]; then
   ok "--prune: a check's runs trimmed to the last 50, those of the last 30 days kept"; else no "--prune's runs: $(wc -l "$store"/_rotation/*.runs; cat "$t/prune.out")"; fi

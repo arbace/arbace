@@ -24,6 +24,7 @@
 #     when neither)
 # Seconds, no build, no gate run. Usage: test/gate/lanes-test.bash
 # needs: exe (gate.lanes and the planner on stage 0)
+# gate-tests: alone (its synthetic steps hold on each other by time: beside the others, under gate-reads-test's trace, a case lost its state, n-gate-parts)
 set -u
 # the gate's own run (bin/gate --clean's audit_step, GATE_CLEAN_INNER, audit_all) is not the fabricated runner's
 unset audit_step audit_all GATE_CLEAN_INNER

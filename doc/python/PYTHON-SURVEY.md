@@ -7831,3 +7831,41 @@ stay 0.5 for the rest (350's report, its plan and DECISION 1).
   controls differing (one run, about 17 minutes on the VM's load); before the re-read, the seven DIFFERED in their header line alone.
   `bin/pyi runtime tables` (the python3 tier, the VM's python3 3.14.10) on the new spelling: every table equal to its python3
   generator's and both 3.15 controls failing as they must, rc 0; builtins_opcode_table315.go not judged (no 3.15.2 oracle on the VM).
+
+## As built: 410, the records night prepared: the rows in no class predicted, written ahead (2026-11-19, the Mac VM, queue 410)
+
+347 extrapolated about 190 methods in no class for the first whole Lib/test record from its re-judge of 321's slice (15 of
+3,713 methods, 27 of 529 modules). Read again, 11 of the 15 are the slice's own and will not recur on the night's host:
+- **test_set's 9** (test_issue_37219 x7, test_unhashable_element x2): the slice ran next's runtime compiled (stage 0 of seed
+  3c48859d, `PYI_RUNTIME_STALE=1`); queue 304 fixed both in the checkout's runtime, which the gate's build compiles in. Probed:
+  the nine methods under `bin/pyi run` of a unittest script on the checkout's runtime (interpreted by goi): 9 ok.
+- **2 `crash Terminated`** (test_capi's test_adjustindices, test_modulefinder's test_extended_opargs): the VM's watchdog at
+  6 GB; the night's runner caps each driver at 8,192 MB (`:host-memory`'s line).
+
+The other 4 are test_multiprocessing_spawn.test_manager's: three Barrier tests broken by late spawned parties (pyi starts) and
+test_release_task_refs. 287's whole compiled run (the compiled launcher's children) classed or passed every other module's
+methods with the classes as they then were; the classes narrowed since (304 names taken out of :tests and 3 :match patterns dropped between 287's merge
+514b2df88 and this base, by queues 289-328) took out only methods those queues measured to pass. So the night's rows in no class come from what neither run saw: pyi's own children (sys.executable
+on the gate's executable, slower to start than the compiled launcher, faster than goi), amd64's load at 4 jobs, and any runtime
+change since 287 not run whole. Estimated 10 to 50, most in the child-heavy modules no pyi-children run judged
+(test_multiprocessing_spawn's processes, threads and misc, test_concurrent_futures' process pools).
+
+**Written ahead** (test/python/divergences.edn and divergences-315.edn, the same edit, before `:skipped-by-test`; each
+`:decided` says "write-ahead"):
+- `:spawn-children-timing` (deferred, 6 names): the slice's three WithManagerTestBarrier rows (test_reset, test_timeout,
+  test_wait_return) and, predicted, WithProcessesTestBarrier's same three.
+- `:finalization-collect-spawn` (deferred, 5 names): the slice's WithManagerTestPool.test_release_task_refs and, predicted
+  from the start-method grid of divergences.edn's names (night 12's fork and forkserver test_threads in `:finalization-collect`,
+  286's spawn as_completed row), spawn's test_threads test_release_task_refs, test_resource_warning, test_lose_target_ref and
+  test_process_pool's ProcessPoolSpawnProcessPoolExecutorTest.test_free_reference (the least sure: 287 passed it compiled).
+- `:host-signal-kill` (deferred, `:match` `^crash (Killed|Terminated)(\s|$)`): a driver killed from outside the runner.
+
+A write-ahead name the record passes is reported stale by `bin/pyi divergences` (no failure); the morning prunes those and
+moves the confirmed ones into their lasting classes (PY11-PREP.md §6, "The records night, step by step").
+- **Run**: `bin/pyi divergences --results` of 347's re-judged slice: 15 in no class -> 9 (the test_set rows above: the
+  slice's stale runtime), the new classes 3, 1 and 2; night 12's partial run (amd64, goi, 181 modules) re-judged: 408 in no
+  class -> 403, no new shadowed name. `bin/reap` (0 problems), `bin/reap --self-test`, `bin/records-check` (9 pairs, 0
+  problems), `bin/crops-score --judge --strict` (rc 0), `python.aot-judge-test` (rc 0), `make check-makefile`.
+- **The AOT record** needs nothing: del.py is classed either way (`:as-pyi`, divergences-synth.edn's `:finalization`, once pyi
+  on goi runs the compiled runtime; else divergences-aot.edn's `:finalization-goi`), the other 150 passed in 279's whole run and
+  347's sample.

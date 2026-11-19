@@ -168,10 +168,53 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The pass
 
+(declare pass)
+
+(defn- cached
+  "The value of FILE (read back) when it exists, else MAKE's, written there (CACHE-DIR's files: remove them after a change
+  to the reader, the expansion or the collection, as index.edn)"
+  [^String file make]
+  (let [c (File. file)]
+    (if (.exists c)
+      (read-string (slurp c))
+      (let [v (make)] (.mkdirs (.getParentFile c)) (spit c (pr-str v)) v))))
+
+(defn deps-setup
+  "queue 400: std's vendored dependencies (cc/dep-crates: libc, hashbrown; library/vendor/NAME-VERSION, their cfg
+  cc/crate-cfg's) read natively before std, as the helper's std-names and std-iface hold none of their names or facts: each
+  one's module files, its index (macros and names from the sources) and its interface pass (DEPS_IFACE_ROUNDS rounds, default 2:
+  libc's aliases name each other across its files) over std's names and interface; {:names {MODULE {:kind :children ..}}
+  (each crate's index with its macro-made ADTs, libc's `s! { .. }` structs, as with-core-names takes it) :native FACTS
+  (their ADTs, aliases with their generics, functions, traits, impls, constants)}; each piece cached in CACHE-DIR/deps/"
+  [^String lib-dir ^String std-file si-full ^String cache-dir]
+  (let [rounds (Long/parseLong (or (System/getenv "DEPS_IFACE_ROUNDS") "2"))]
+    (reduce
+     (fn [acc dep]
+       (binding [cc/*crate* dep *tag* (str dep "-iface")]
+         (let [d (str cache-dir "/deps/" dep)
+               mods (cached (str d "-modules.edn") #(cc/module-files lib-dir))
+               index (cached (str d "-index.edn")
+                             #(let [t (cc/crate-index (remove :vendored mods))]
+                                (println (str *tag* ":") dep "'s index over" (count mods) "files:" (count (:macros t)) "macros," (count (:names t)) "modules")
+                                t))
+               names (cc/with-core-names (resolve/load-std-names std-file) (:names index))
+               std (assoc (cc/with-core-kinds (collect/load-std std-file) (:names index)) :mods names)
+               native (cached (str d "-iface.edn")
+                              #(pass dep lib-dir {:std-file std-file :std std :si si-full :table (:macros index) :names names}
+                                     mods (map :path mods) rounds))]
+           (println (format (str *tag* ": %s: %d module files, %d functions, %d ADTs, %d aliases, %d traits, %d impls")
+                            dep (count mods) (count (:fns native)) (count (:adts native)) (count (:aliases native))
+                            (count (:traits native)) (count (:impls native))))
+           (-> acc
+               (update :names merge (cc/with-adt-names (:names index) (:adts native)))
+               (update :native #(merge-with merge % native))))))
+     {:names {} :native {}} cc/dep-crates)))
+
 (defn crate-setup
   "The pass's inputs over front-dir's std-names and std-iface, the crate's index (cached in CACHE-DIR/index.edn): {:std-file
-  :std :si (std's interface less the crate's facts) :helper (the crate's facts) :table :names}"
-  [crate front-dir cache-dir mods]
+  :std :si (std's interface less the crate's facts) :helper (the crate's facts) :table :names}; queue 400: for std with
+  LIB-DIR, its vendored dependencies' names and facts (deps-setup) read before std's own (STD_DEPS=0: not)"
+  [crate front-dir cache-dir mods & [lib-dir]]
   (let [std-file (str front-dir "/std-names.edn")
         si-full (collect/load-std-iface (str front-dir "/std-iface.edn"))
         index (let [cache (File. (str cache-dir "/index.edn"))]
@@ -181,9 +224,14 @@
                     (println (str *tag* ":") crate "'s index over" (count mods) "files:" (count (:macros t)) "macros," (count (:names t)) "modules")
                     (.mkdirs (File. ^String cache-dir))
                     (spit cache (pr-str t)) t)))
-        names (cc/with-core-names (resolve/load-std-names std-file) (:names index))
-        std (assoc (cc/with-core-kinds (collect/load-std std-file) (:names index)) :mods names)]
-    {:std-file std-file :std std :si (without-crate si-full crate) :helper (crate-facts si-full crate)
+        deps (when (and lib-dir (= crate "std") (not= "0" (System/getenv "STD_DEPS")))
+               (deps-setup lib-dir std-file si-full cache-dir))
+        base (cond-> (resolve/load-std-names std-file) deps (cc/with-core-names (:names deps)))
+        names (cc/with-core-names base (:names index))
+        std (assoc (cc/with-core-kinds (cond-> (collect/load-std std-file) deps (cc/with-core-kinds (:names deps))) (:names index)) :mods names)
+        std (cond-> std deps (cc/with-native-std (:native deps)))
+        si (cond-> (without-crate si-full crate) deps (cc/with-native-iface (:native deps)))]
+    {:std-file std-file :std std :si si :helper (crate-facts si-full crate)
      :table (:macros index) :names names}))
 
 (defn pass
@@ -232,7 +280,7 @@
             sel (if (seq files)
                   (vec (for [f files :let [m (get by-file (.getCanonicalPath (File. ^String f)))]] (or m (throw (ex-info (str "not a module file of " crate ": " f) {})))))
                   mods)
-            setup (crate-setup crate front cache mods)
+            setup (crate-setup crate front cache mods lib)
             rounds (Long/parseLong (or (System/getenv "ALLOC_IFACE_ROUNDS") "2"))
             mod-paths (map :path mods)
             native (pass crate lib setup sel mod-paths rounds)
@@ -245,6 +293,10 @@
         (when-let [[p o d] (control helper facts)]
           (println (str *tag* ": control (") p "against" o "):" (if d "differs, as it must" "PASSED (a bug)")))
         (println (str *tag* ": wrote") out "and" (str out ".report")))
+      ;; queue 400: --deps LIB FRONT CACHE: std's vendored dependencies' names and facts (deps-setup) made into CACHE/deps/
+      "--deps"
+      (let [[lib front cache] args]
+        (deps-setup lib (str front "/std-names.edn") (collect/load-std-iface (str front "/std-iface.edn")) cache))
       ;; --compare FRONT NATIVE [MODULES]: the compare of a pass's output alone
       "--compare"
       (let [[front nat modules-file] args

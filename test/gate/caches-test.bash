@@ -7,7 +7,7 @@
 #   2. every .tmp/NAME a bin/ script names is a row's (its first part matched by a row's glob): a new scratch area joins the table;
 #   3. each rule on the scratch tree: [:size G :lru] removes the least recently used first, [:age D] the old files, [:key-gen N]
 #      the older generations (a day old), [:age-self D] an old test directory, :keep and :list nothing; --dry-run removes nothing;
-#      --cheap only the cheap rows; :max-entries warns; an unlisted entry is listed, never removed;
+#      --cheap only the cheap rows; :free-gib, :min-gib and :idle-only bound a size cap; :max-entries warns; an unlisted entry is listed, never removed;
 #   4. worktrees_list names a merged worktree idle for a day, not an unmerged one, and removes nothing.
 # Usage: test/gate/caches-test.bash [--coverage]   (in gate-tests: 1, 3 and 4; --coverage: 2 alone, the essential step caches-table,
 #        whose inputs are bin/ and the table: gate-tests' key does not hold bin/ whole)
@@ -57,6 +57,8 @@ now=$(date +%s)
 # Go's cache: 12 files of 1 MiB, ages 1..12 hours; a cap of 8 MiB (a toy table) removes the 4 oldest
 for i in $(seq 1 12); do yes | head -c 1048576 > "$G/f$i"; touch -d "@$(( now - i * 3600 ))" "$G/f$i"; done
 touch -d "@$(( now - 5 * 86400 ))" "$R/.tmp/tmp/old"; touch "$R/.tmp/tmp/new"
+# review 419, I2: an empty directory five days old removed with the old files, a fresh one (a running test's scratch/logs) kept
+mkdir -p "$R/.tmp/tmp/old-empty" "$R/.tmp/tmp/run.d/scratch/logs"; touch -d "@$(( now - 5 * 86400 ))" "$R/.tmp/tmp/old-empty"
 for k in aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc; do mkdir -p "$R/.tmp/goi-table/$k"; done
 touch -d "@$(( now - 3 * 86400 ))" "$R/.tmp/goi-table/aaaaaaaaaaaaaaaa"; touch -d "@$(( now - 2 * 86400 ))" "$R/.tmp/goi-table/bbbbbbbbbbbbbbbb"
 mkdir -p "$R/.tmp/goi-table/not-a-key"; touch -d "@$(( now - 9 * 86400 ))" "$R/.tmp/goi-table/not-a-key"
@@ -82,6 +84,8 @@ cmp -s "$T/before" "$T/after-dry" && grep -q 'would remove 4 entries of' "$T/dry
 env "${env3[@]}" bash -c 'root=$1 logs=$2; . "$1/bin/lib/gate-cache.bash"; . "$1/bin/lib/gate-run.bash"; caches_prune "" cheap' x "$here" "$T/logs" > "$T/cheap.out" 2>&1
 [ ! -e "$G/f12" ] && [ ! -e "$G/f9" ] && [ -e "$G/f8" ] && [ -e "$G/f1" ] && ok "[:size :lru]: the 4 least recently used removed, 8 MiB kept" || bad "the size cap: $(ls "$G" | tr '\n' ' ')"
 [ ! -e "$R/.tmp/tmp/old" ] && [ -e "$R/.tmp/tmp/new" ] && ok "[:age 2]: TMPDIR's 5-day-old file removed, a new one kept" || bad "the age rule: $(ls "$R/.tmp/tmp" | tr '\n' ' ')"
+[ ! -e "$R/.tmp/tmp/old-empty" ] && [ -d "$R/.tmp/tmp/run.d/scratch/logs" ] && ok "[:age 2]: an old empty directory removed, a fresh empty one kept" \
+  || bad "the age rule's empty directories: $(cd "$R/.tmp/tmp" && find . -type d | tr '\n' ' ')"
 [ -d "$R/.tmp/goi-table/aaaaaaaaaaaaaaaa" ] && [ -d "$R/.tmp/old-test" ] && ok "--cheap: the rows that are not cheap left alone" || bad "--cheap touched a row that is not cheap"
 env "${env3[@]}" bash -c 'root=$1 logs=$2; . "$1/bin/lib/gate-cache.bash"; . "$1/bin/lib/gate-run.bash"; caches_prune "" all' x "$here" "$T/logs" > "$T/all.out" 2>&1
 [ ! -e "$R/.tmp/goi-table/aaaaaaaaaaaaaaaa" ] && [ -d "$R/.tmp/goi-table/bbbbbbbbbbbbbbbb" ] && [ -d "$R/.tmp/goi-table/cccccccccccccccc" ] && [ -d "$R/.tmp/goi-table/not-a-key" ] \
@@ -90,6 +94,20 @@ env "${env3[@]}" bash -c 'root=$1 logs=$2; . "$1/bin/lib/gate-cache.bash"; . "$1
 grep -q 'WARNING: .*forms/x holds 12 entries, more than its :max-entries 10' "$T/all.out" && [ -e "$M/.tmp/java-check/forms/x/e1" ] \
   && ok ":max-entries: a directory over it warned of, nothing removed (:keep)" || bad ":max-entries: $(grep -i warn "$T/all.out")"
 grep -q 'the table does not name.*scratch-unlisted' "$T/all.out" && [ -d "$R/.tmp/scratch-unlisted" ] && ok "an unlisted entry listed and kept" || bad "unlisted: $(grep 'does not name' "$T/all.out")"
+# [:size G :lru] with :free-gib, :min-gib and :idle-only (n-gate-gocache): 12 files of 1 MiB, 4 MiB free (GATE_CACHES_FREE_KIB);
+# :free-gib 8 MiB makes the cap 12 + 4 - 8 = 8 MiB (the 4 oldest out), :min-gib 10 MiB holds it at 10 (2 out), a Go build
+# running (GATE_CACHES_GO_BUSY=1) none
+fcap() {  # fcap MIN BUSY: a fresh G2, the toy row, the cheap prune; prints the files left
+  local G2=$T/gocache2 i; rm -rf "$G2"; mkdir -p "$G2"
+  for i in $(seq 1 12); do yes | head -c 1048576 > "$G2/f$i"; touch -d "@$(( now - i * 3600 ))" "$G2/f$i"; done
+  printf '[\n {:path "{gocache}" :where :home :owner "go" :rule [:size 1 :lru] :free-gib 0.0078125 :min-gib %s :idle-only true :cheap true}\n]\n' "$1" > "$T/toy-free.edn"
+  GATE_CACHES="$T/toy-free.edn" GATE_CACHES_GOCACHE="$G2" GATE_CACHES_FREE_KIB=4096 GATE_CACHES_GO_BUSY=$2 \
+    bash -c 'root=$1 logs=$2; . "$1/bin/lib/gate-cache.bash"; . "$1/bin/lib/gate-run.bash"; caches_prune "" cheap' x "$here" "$T/logs" > "$T/free.out" 2>&1
+  ls "$G2" | wc -l
+}
+[ "$(fcap 0 0)" = 8 ] && grep -q 'its cap 0.0 GiB (at most 1 GiB' "$T/free.out" && ok ":free-gib: the cap the size plus the free disk less F, the 4 oldest removed" || bad ":free-gib: $(tr '\n' ' ' < "$T/free.out")"
+[ "$(fcap 0.009765625 0)" = 10 ] && ok ":min-gib: the cap held at its floor, 2 removed" || bad ":min-gib: $(tr '\n' ' ' < "$T/free.out")"
+[ "$(fcap 0 1)" = 12 ] && grep -q 'left alone: a Go build runs' "$T/free.out" && ok ":idle-only: nothing removed while a Go build runs" || bad ":idle-only: $(tr '\n' ' ' < "$T/free.out")"
 GATE_CACHES=none bash -c 'root=$1 logs=$2; . "$1/bin/lib/gate-cache.bash"; . "$1/bin/lib/gate-run.bash"; caches_prune "" all' x "$here" "$T/logs" > "$T/none.out" 2>&1
 [ ! -s "$T/none.out" ] && ok "GATE_CACHES=none: no table, nothing done" || bad "GATE_CACHES=none printed $(head -2 "$T/none.out")"
 

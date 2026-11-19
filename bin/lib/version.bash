@@ -163,14 +163,19 @@ arbace_aot_key() {
      | sha256sum | cut -c1-64)
 }
 
-# arbace_reader_sources ROOT: the sources repr/java's reader is compiled with, one path a line, sorted
-# (bin/arbace-go's reader_key, GTS28 (a)): arbace/ less repr/java (named by reader_key itself) and
-# the namespaces the compilation never loads: j2g, repr/go, repr/clojure, repr/haskell, repr/rust, goi
-# (go.ae, go/), the Go build (build/) and the box (box.ae, box/)
-arbace_reader_sources() {
-  (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' \
-       ! -path 'arbace/j2g/*' ! -path arbace/repr/go.ae ! -path 'arbace/repr/go/*' ! -path arbace/repr/clojure.ae \
-       ! -path 'arbace/repr/clojure/*' ! -path arbace/repr/haskell.ae ! -path 'arbace/repr/haskell/*' \
-       ! -path arbace/repr/rust.ae ! -path 'arbace/repr/rust/*' ! -path arbace/go.ae ! -path 'arbace/go/*' \
-       ! -path 'arbace/build/*' ! -path arbace/box.ae ! -path 'arbace/box/*' | LC_ALL=C sort)
+# arbace_reader_runtime_key ROOT: the part of the runtime the compilation of repr/java's reader depends on (bin/arbace-go's
+# reader_key, round 54, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built / proposed: the reader's key by its load closure"):
+# arbace_runtime_key's files less the Go natives that compilation never runs: C's (ci, cinterp, crt: CInterp's), goi's
+# back end (goi: GoInterp's, for go/ namespaces alone), repr/go's Go packages (go/arbace/repr: goi's table's), goi's
+# table itself, and the Markdown notes. c2j analyzes the runtime's classes; the natives it runs are jrt's and the
+# program's own (go/arbace.ae, go/arbace/jrt, std, api, cmd), which stay
+arbace_reader_runtime_key() {
+  local discard=${TMPDIR:-$1/.tmp/tmp}/version.discard
+  mkdir -p "${discard%/*}"
+  (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' ! -path jdk/provenance.edn \
+       ! -path 'jdk/platform/*' "${arbace_not_crops[@]}" "${arbace_runtime_not[@]}" ! -path 'overlay/jdk/javac/*' \
+       ! -path go/arbace/ci.ae ! -path 'go/arbace/ci/*' ! -path go/arbace/cinterp.ae ! -path 'go/arbace/cinterp/*' \
+       ! -path go/arbace/crt.ae ! -path 'go/arbace/crt/*' ! -path go/arbace/goi.ae ! -path 'go/arbace/goi/*' \
+       ! -path 'go/arbace/repr/*' ! -path go/arbace/gotable.edn ! -name '*.md' 2>"$discard" \
+     | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
 }

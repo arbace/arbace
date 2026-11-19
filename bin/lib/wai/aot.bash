@@ -99,23 +99,26 @@ aot_go_verdict() {
 # aot_go_shared WORK: WAS40 (c), WAS50 (a): the modules the run's first pass collected (WORK/run/*.mod) translated by shape (w2g
 # --shared: each shape of the programs' functions once, their runtime and libraries shared) into one AOT program, kept by key in
 # the main checkout's .tmp/wai-go/aot-shared (the newest WAI_AOT_SHARED_KEEP, default 3, kept); exports WAI_AOT_SHARED_EXE, or 1
+# TAG (a third argument, n-gate-parts): the slice's own files (WORK/mods.TAG.list, shared.TAG.gen, .tsv, .err), so that slices
+# translate and build side by side (bin/lib/wai/go-run.bash's WAI_AOT_SLICE_JOBS)
 aot_go_shared() {
-  local work=$1 ids=${2:-} gen=$1/shared.gen t0 d n id
+  local work=$1 ids=${2:-} tg=${3:+.$3} gen t0 d n id
+  gen=$work/shared$tg.gen
   if [ -n "$ids" ]; then
     # a slice: the modules of its programs alone
     while read -r id; do
       id=${id#go/}; if [ -f "$work/run/${id//\//__}.mod" ]; then cat "$work/run/${id//\//__}.mod"; fi
-    done < "$ids" | LC_ALL=C sort -u > "$work/mods.list"
+    done < "$ids" | LC_ALL=C sort -u > "$work/mods$tg.list"
   else
-    find "$work/run" -name '*.mod' -exec cat {} + | LC_ALL=C sort -u > "$work/mods.list"
+    find "$work/run" -name '*.mod' -exec cat {} + | LC_ALL=C sort -u > "$work/mods$tg.list"
   fi
-  echo "wai go --aot: $(wc -l < "$work/mods.list") modules translated by shape into one program"
+  echo "wai go --aot: $(wc -l < "$work/mods$tg.list") modules translated by shape into one program"
   t0=$(date +%s)
   rm -rf "$gen"
-  if ! GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$wai_exe" w2g "$gen" --shared --stats "$work/shared.tsv" "@$work/mods.list" 2> "$work/shared.err"; then
-    echo "FAIL: wai go --aot: w2g --shared: $(head -1 "$work/shared.err" | cut -c1-200)"; return 1
+  if ! GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$wai_exe" w2g "$gen" --shared --stats "$work/shared$tg.tsv" "@$work/mods$tg.list" 2> "$work/shared$tg.err"; then
+    echo "FAIL: wai go --aot: w2g --shared: $(head -1 "$work/shared$tg.err" | cut -c1-200)"; return 1
   fi
-  awk -F'\t' '{f+=$2; t+=$3; a+=$5} END {printf "wai go --aot: %d of %d functions translated, %d shapes\n", t, f, a}' "$work/shared.tsv"
+  awk -F'\t' '{f+=$2; t+=$3; a+=$5} END {printf "wai go --aot: %d of %d functions translated, %d shapes\n", t, f, a}' "$work/shared$tg.tsv"
   mkdir -p "$gorun_dir/aot-shared"
   if ! AOT_BIN_DIR=$gorun_dir/aot-shared aot_exe "$gen"; then
     echo "FAIL: wai go --aot: the shared program does not build: $(grep -v '^#' "$gen.build.log" | head -2 | tr '\n' ' ' | cut -c1-300)"; return 1

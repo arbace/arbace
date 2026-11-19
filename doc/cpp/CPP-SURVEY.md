@@ -8986,3 +8986,47 @@ the judge names.
   sources, rebuilding the gate's executables; it is out of steps.edn's `:tools`, so beside the executables' steps only the `:cpp`
   steps rerun. With 348's C part (doc/C23-SURVEY.md, "As built: queue 342's C fixes": repr/c and arbace/c in `:tools`) the whole
   `--full` reruns.
+
+## As built: queue 406, CP403 (a): P21 (b)'s flip (2026-11-19; branch `406-cpp-cp403` from mac/n-all4 88b8e7f1a)
+
+- **The flip.** `bin/cppi`'s `cppi_runtime_route_default` is `auto` (324's DECISION 1 (a), the user's): `bin/cppi runtime-build` with
+  no route set generates `rt_ours_glob`'s units by Arbace's own front end and code generator (`runtime_ours`, gen-batch), each held
+  to the pack's IR by the names level (runtime-judge), the pack's IR for the other units and for a unit our route refuses;
+  `CPPI_RUNTIME_ROUTE=clang` is the old default. What moves:
+  - the runtime's key: `runtime_key` adds the route line (the route and `rt_ours_glob`'s list) and the route's sources (arbace/cpp's
+    sema, abi, codegen, template, inline; arbace/repr/cpp; cpp/target's two descriptions; test/cpp/target.ae; the sysroot script;
+    `runtime_ours`' text). A runtime built on clang's route is stale under the default, so the gate's `cpp-runtime` (a `:build`
+    step, its command unchanged, its `:inputs :cpp` already covering those files) builds it again once, then whenever one of them
+    changes: a C++ front end or code generator change now costs the essential gate gen-batch's 124 units (on the VM 43 min wall
+    under load 30, 24.6 CPU min, peak 1.6 GB; queues 367, 380 and 382 measured 10-22 min on a quieter VM) before cpp-essential. `gate_key` does not move (bin/cppi
+    and the selftests are no build's input).
+  - `runtime-ci`'s key (it hashes the runtime's records key): ci's library is read again where a unit's lowered C changed.
+  - The records: `test/cpp/runtime/inputs-linux-amd64.edn` (0 of 198 own) becomes runtime-build's (124 own, or 155 with queue 392's
+    list) at the host's next `bin/cppi runtime-inputs --record`, after runtime-build and runtime-ci on amd64; the run checks'
+    records (`check`, `check --aot`) are judged against a runtime with our units, as the night's chain judged it by hand.
+  - `cpp-runtime-swap-oracle` (the oracle tier) already names its routes; nothing else reads the default.
+- **runtime-inputs measures `:ci-target` (queue 345's low finding).** It now requires OUT's ci library at runtime-ci's key for the C
+  target it runs under (`runtime_ci_key`, the key runtime-ci writes, now one function: its value is unchanged) and every row of
+  runtime-judge's OUT/inputs.edn written for that target (`arbace.cpp.check/c-target-input`), else it refuses: a runtime whose ci
+  library was read on test/c/host can no longer be recorded `:ci-target :own`.
+- **Selftests.** `runtime-key` (the oracle tier's) was broken before the flip (its tree copy lacked test/oracle-records/, which
+  bin/cppi sources since ORS12, and its fake runtime had no key.records, the records mode's key); it copies them and cpp/ (the auto
+  key hashes cpp/target/), and gains the flip's cases (the default key names route auto and the code generator, the clang key
+  neither, a runtime at the default key is stale under clang, codegen.ae moves the default key and not the clang one; under
+  `CPPI_RUNTIME_ROUTE=clang` the test fails, its control). `headers-pin` and runtime-key's doctored-pin build run live
+  (`CPPI_LIVE=1`: from the records the headers are not the IR's input). `case-inputs` (the gate's cpp-selftest) leaves CP401 (a)'s
+  `:ci-target` open in its patterns (4 of its checks failed before this change, on rows that carry it).
+- **Checked (the VM, nx's stage 0, records mode: no clang and no gcc ran).**
+
+| check | result |
+|---|---|
+| `bin/cppi runtime-build`, no route set (the default) | 198 units, 198 pass, 124 by our route, the names level equal for each; 43 min wall under load 30, 24.6 CPU min, peak 1.6 GB |
+| `bin/cppi runtime-ci` on it (`CPPI_CI_CHUNK=8`, `CPPI_CI_MEMLIMIT=2GiB`) | ok, 199 units read; peak 2.6 GB (a first try with chunks of 40 passed 5 GB on the explicit-instantiation chunk and was stopped, its read rows kept) |
+| `bin/cppi check --only test/cpp/essential-check.txt` on that runtime | samples 4 of 4, runtime 4 of 4 (thread-throw and deferred among them), the run control differs as it must; 19 min, 1.6 GB |
+| `bin/cppi runtime-inputs` | 198 rows, 124 `{:ir :own, :ci-target :own}`; refused before runtime-ci, under `ARBACE_C_HOST=test/c/host`, and on rows not written for the target |
+| `bin/cppi selftest runtime-key`, `headers-pin`, `case-inputs` | pass (13, 3 and 8 checks); runtime-key under `CPPI_RUNTIME_ROUTE=clang` fails 2, as its control must |
+| projected (`bin/crops-score --crop cpp` with the build's inputs.edn as the runtime record, restored after) | C++ independence 75 (74.7) to 81 (80.9): eval and AOT 0.543 to 0.699 (the runtime's half 0.500 to 0.813); with queue 392's 155 units (its build's inputs.edn) 83 (82.5) |
+| `gate.crops check`, `bin/crops-score --judge --strict` | 0 problems, rc 0 |
+
+- **Merge order.** Queue 392 (`rt_ours_glob` 124 to 155, codegen and template fixes) and this branch merge cleanly either way
+  (`git merge-tree`; also with 393). 392 first, then this: the host then builds and records the runtime once, at 155 units.

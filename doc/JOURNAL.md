@@ -12905,3 +12905,404 @@ The essential gate at 22b4c6542 failed two steps; everything else passed.
   its parent already made (it exported PATH and ARBACE_FROZEN_JAVA_HOME).
 - Keys: bin/clojure-tests and test/gate/*.edn are in neither gate_key, arbace_runtime_key nor arbace_javac_key, so the gate's
   executables (KEY20 0753b529a43fe68eabff) and javac's tool (826af88b2119) stay.
+
+## 2026-11-18: javac's tool build: the compiled reader keyed by its load closure (round 54, branch `n-javac-fast`, on `064f06bd0`)
+
+- The night of 2026-11-17's `javac-tool` (`next` at `42bf8614`): 4,248 s, 20 CPU-h, 34.2 GiB peak; two tool builds. (A), the first,
+  only gives `reader_compile` a host of the checkout's runtime with javac's classes (`bin/arbace-go`'s `build_java`, JFS28 (b));
+  about 34 min and the step's peak (its `bin/build-go`). Its key, `reader_key`, missed for real that night: the runtime (1,416
+  files), javac's world (21), repr/java (2) and c2j (2) changed.
+- (i), c2j on the gate's executable with javac's forms on the path, tried and dropped: the reader's imports and top levels run
+  javac's classes (`ClassNotFoundException: com.sun.source.tree.Tree$Kind`), and the interpreter defines javac's cyclic packages
+  only in one `do` ("Class not found: com.sun.source.tree.TreeVisitor").
+- Built, taken (round 54): `reader_key` by the closure the last compilation loaded (`ARBACE_LOADED_LOG` into
+  `target/arbace-go/aot-reader.loaded`), `arbace_reader_runtime_key` (the runtime key less C's, goi's and repr/go's Go natives and
+  `*.md`), javac's world and repr/java. The old list left out `arbace/j2g/names`, `j2g/jrt` and `repr/go/print*`, which c2j's emitter
+  loads, and moved on every crop's change. Over the nine intervals between the last ten tool builds the old key missed on all eight
+  that changed anything, the new one on four.
+- Proof (light): on the night's tool with `ARBACE_NO_AOT=1`, the reader compiled with and without the log is identical (36 sources,
+  4,618 classes, 27 MB, `diff -r`), and the closure is the same 83 scriptbases from source or compiled. The key holds for crop, C,
+  goi, repr/go-native and README edits, and moves for the closure's files, the runtime, javac's world and repr/java.
+- The one tool build (`42bf8614` with the change) was OOM-killed in (A)'s print of the program (53.2 GiB tree; the host's repr/go
+  evaluated, stage 0 linked from the main checkout): no whole before/after. So `:mem-gib` stays 51 (38 was planned).
+- Proposed, not built: JFS163 a per-class j2g cache, JFS164 the Go packages split (shipped build too), JFS165 the reader's tree in
+  the shared store, JFS166 the previous tool as host under `ARBACE_NO_AOT` (60 s, 6.1 GB), JFS167 the print within a memory limit.
+  Details in doc/classes/JAVA-FRONTEND-SURVEY.md, "As built / proposed: javac's tool build, faster".
+- Keys: `bin/arbace-go` and `bin/lib/version.bash` move `gate_key` and `arbace_javac_key` once; the reader's key takes its new form
+  (one (A) to record the closure).
+
+## 2026-11-19: next = main 88b8e7f1a plus the day's three merges (401-fix, 402-fix, 399-clj-genclass), for the night's gate
+
+On next = main = `88b8e7f1a` (essential-gated this morning), `--no-ff` in order:
+- mac/401-fix `b82e5bd83`: c-parse's mutants part under `ARBACE_NO_AOT` until the re-seed, as cpp-essential (test/gate/steps.edn only);
+- mac/402-fix `92e5adf6a`: review 402's fix (the reader's key guarded across javac's tool build, its script and startup files keyed). It
+  sits on n-javac-fast, so its merge brings n-javac-fast's two commits (`f47f1d9a2`, the compiled reader keyed by its load closure;
+  `5d8029f2e`, the survey's section and journal entry): intended, `reader_key` by the load closure moves gate_key and javac's key once.
+  The one conflict, doc/JOURNAL.md's appends: both sides kept, main's first;
+- mac/399-clj-genclass `d73c48d28` (the Mac's queue 399, `git branch -r --contains`): gen-class at the AOT level, the default methods and
+  the Var fields (arbace/genclass.ae, arbace/j2g/model.ae and out.ae, j2g-unit's gen-class fixture).
+
+Keys (gate_key without `ARBACE_HOST_EXE`, as the gate computes it): gate KEY20 `0753b529a43fe68eabff` -> `efcc5118fcf5748217a6`
+(bin/arbace-go, bin/lib/version.bash, arbace/genclass.ae, arbace/j2g/), javac's `826af88b2119` -> `231da30c39a1`; arbace_runtime_key
+unmoved (no file of arbace/lang, go, overlay/jdk or jdk changed). The night's gate rebuilds the executables and javac's tool.
+Light checks only (no build): `bin/reap` 54 of 56, 0 problems; `bin/crops-score --judge --strict` 0 problems (scores unchanged);
+`bin/records-check` 9 pairs, 0; `gate.crops check` 0; `bin/j2g-unit` 181 passes, the 7 known failures (type annotations' known rows,
+invokers' six), 399's five gen-class cases pass; `bin/gate --plan`: 52 essential steps, 20 run, 24 deferred to the night, go-build
+a build (gate_key moved). doc/AGENDA.md's top rewritten for main plus these merges: the consolidation of 2026-11-18/19, the scores,
+the pending work (lanes 2 and 4, the Java platform night, tonight's --full, the Ghidra DECISIONs 403-1 and 405-1, the re-seed's
+stopgaps: ARBACE_NO_AOT for cpp-essential and c-parse's mutants, the Tok split, the aot-lib key reading stage 0's cf2g).
+
+## 2026-11-19: Go's build cache kept warm: the gate's cap 40 GiB, relative to the free disk, never under a live build (n-gate-gocache)
+
+- Measured: `test/gate/caches.edn`'s `{gocache}` row capped `/root/.cache/go-build` at 8 GiB by the least recently used (GD4), and
+  the cheap prune runs at every gate's start and before a step every 5 minutes. This morning's prune removed 21 GiB, last night's
+  28.7 GiB; the earlier nights' logs (`.tmp/gate*/`, `.tmp/night*/`) show removals of 1 to 16.9 GiB a pass. So the builds' warm
+  set (`--gate-build`, javac's tool, the fixpoint's G2 and G3) is about 8 + 21 to 8 + 28.7, 29 to 37 GiB, and each gate's builds
+  started nearly cold: go-build 79 min, javac-tool 71 min, the fixpoint 81 min, against about 8 min warm for `--gate-build`. Today
+  at 09:57 UTC the cache held 10.5 GiB (4.3 GiB used within the hour, 6.2 GiB within 6 h), the disk 78% of 207 GB, 46 GB free.
+- The rule (`bin/lib/gate-run.bash`'s `caches_rows`, `caches_prune`, `caches_go_busy`): a `[:size G :lru]` row takes
+  `:free-gib F` (the cap min(G, its size + the free disk - F)), `:min-gib M` (never under M) and `:idle-only true` (nothing removed
+  while a process whose executable is under `ARBACE_GOROOT` runs on the host: go, compile, link, asm; the user's rule, never trim
+  the cache under a live build). The row: `[:size 40 :lru] :free-gib 35 :min-gib 8 :idle-only true`: 40 GiB holds the measured warm
+  set, 35 is GD4's floor (`GATE_DISK_FLOOR`, 25 GiB) and 10, so the cache yields before the floor defers steps, and 8 is the old
+  cap. GD4's floor and its deferral are unchanged; under a live build the floor's deferral waits for the build and the next cap.
+- Dry run now (`bin/gate --prune --dry-run --cheap`): "/root/.cache/go-build holds 10.5 GiB, 44.8 GiB free: its cap 20.3 GiB",
+  nothing removed (the old cap would have removed 2.5 GiB). On a disk with 70 GiB free the cap is 40 GiB.
+- Alternatives: a fixed 40 GiB (fills the disk toward the floor on a full night); the LRU sparing the entries of the last N builds
+  (Go's cache records no build, only entries' mtimes, refreshed at most hourly: a per-build index would be a tool of its own); a
+  GOCACHE per run (cold every time, as night 13 found).
+- Expected: the second and later builds of a night warm (go-build about 8 min in place of 79, javac's tool and the fixpoint alike
+  when their packages fit), about 3 hours a night with the three builds, the disk at most 35 GiB from full by the cache's share.
+- Tests: `test/gate/caches-test.bash` (17 ok: the free-relative cap, the minimum, a Go build running), `--coverage`,
+  `test/docs/claude-md-test.bash` pass; CLAUDE.md's sentence on the 8 GiB cap updated. Keys: `gate_key` and the runtime's do not
+  move (`bin/lib/gate-run.bash` and the table are in neither; the table is in no key); the steps `caches-table` (the table and
+  its test), `claude-md` (CLAUDE.md) and `gate-tests` (`test/gate/`, `bin/lib/gate-run.bash`) rerun.
+
+## 2026-11-19: Go's build cache by one rule by hand too: `bin/arbace-go --build`'s trim takes the gate's cap (n-gocache-trim, on `cd498e1d9`)
+
+- Why: n-gate-gocache gave the gate's prune the cap min(40, size + free - 35) GiB, at least 8, idle-only, but every
+  `bin/arbace-go --build` run by hand still removed every entry of Go's build cache unused for 90 minutes
+  (`bin/lib/gocache.bash`'s `gocache_trim`): about 10:00 today it cut the cache from 10.5 to 6.4 GiB, the next build cold.
+- Done: `bin/lib/gocache.bash` holds the rule once: `gocache_cap_kib SIZE FREE MAX [FREE_GIB [MIN]]` (the cap) and
+  `caches_go_busy` (moved from `bin/lib/gate-run.bash`, which now sources gocache.bash and computes `caches_prune`'s cap by the
+  same function). `gocache_trim` now does nothing while a Go build of `ARBACE_GOROOT` runs, nothing while the cache is under its
+  cap (no age-based wipe while there is disk to spare), else removes the least recently used down to the cap; its numbers
+  `ARBACE_GOCACHE_MAX_GIB` 40, `_FREE_GIB` 35, `_MIN_GIB` 8 repeat the table's `{gocache}` row (the build does not read
+  `test/gate/caches.edn`, so go-build's audited inputs do not grow; the test holds them equal). `ARBACE_GOCACHE_KEEP_MIN` keeps
+  its meaning as a bound: no entry used within that many minutes is removed (default 90; the gate's 7200), even over the cap.
+  `ARBACE_GOCACHE_TRIM_DRY=1` lists without removing. `build_go_print_cache_trim` (repr/go's print cache in `.tmp`) unchanged.
+- Tests: `test/gate/gocache-trim-test.bash` (new, a `gate-tests` member; 11 ok on a scratch cache: the defaults equal the
+  table's, the cap's three cases, nothing under the cap though 11 of 12 entries are hours old, the 4 least recently used over it,
+  KEEP_MIN's bound, a Go build running, the dry run), `test/gate/caches-test.bash` (17 ok) and `test/docs/claude-md-test.bash`
+  pass; CLAUDE.md's sentence on the trim rewritten. Go's real cache was never trimmed.
+- Keys: `bin/arbace-go` and `bin/lib/gocache.bash` are both in `gate_key` (and `gate_rest_key`: bin/lib less repr-java, repr-c,
+  ci, gate-run.bash, cover.bash and the crops'), so this commit moves `gate_key` once: one rebuild of the gate's executables
+  (two Go-hosted builds, about 8 minutes) and the checks on `:gate`/`:prog` rerun; `bin/lib/gate-run.bash` is in no key (the epoch).
+- Alternatives: the build reading the table's row (an undeclared read of go-build's audit, or a new input for every build step);
+  calling `caches_prune` from the build (sources the whole runner); keeping the 90-minute wipe only below the disk floor (two
+  rules again).
+
+## 2026-11-19: n-gate-mem, the steps' :mem-gib by their measured peaks; programs-full a part a sample
+
+From the full gate of 2026-11-17/18 (its logs and `.mem` files in the next worktree's `.tmp/gate/`, the store's passes'
+`:maxrss-kib` and `:tree-peak-kib`): steps waited 20 h in all for the memory lanes, programs-full held 51 GiB for 3.6 h.
+Rule: a step whose `:mem-gib` exceeds 1.3 x its largest peak over its last 5 passes is declared at 1.15 x that peak, rounded
+up, when that figure also covers 1.1 x its largest peak of every pass in the store (else kept) and it has 3 passes or more.
+Lowered in `test/gate/steps.edn` (and the crop fragments scheme.edn, ocaml.edn, asm.edn): c-c23 3→2, repr-java-roundtrip 53→34
+(its jdk part, 29.2 GiB), repr-java-attr 55→49 (jdk part, 41.7), java-diagnostics 4→3, java-judge 2→1, java-held 2→1, goi 14→7,
+c-aot 4→3, c-tokens 6→5, scheme-read-essential 2→1, si-corpora 2→1, ocaml-read-essential 2→1, asm-amd64-encode 3→2,
+asm-amd64-decode 3→2. Kept (an older pass reached the old figure): goi-aot-essential (8.8 GiB once), goi-aot (9.0),
+c-parse.benchmarksgame (9.1), repr-go-native.linux-errtest (8.2), cpp-check-essential (4.1), c-check-essential, java-forms-verify;
+kept too for too few passes: a64i-go-compile, wasm-essential, wasm-wast, wai-js; javac-tool's 51 untouched. Raised: programs 34→49
+(mixed and bad-go: tree peaks 36-42 GiB over its last passes; the plan printed it UNDER). programs-full is not lowered to its
+27 GiB: the essential programs step's one j2g sample now reaches 42 GiB. Instead it is a part a sample (`--build-program --check
+{part}`, 16 parts, bin/arbace-go's check_programs takes one name), each at the step's 51 until its own passes are measured, hello-go
+and bad-go (no j2g run) at 12: the lanes now admit other steps between the samples. The planner has no build/run split of a step
+(alternative considered; it would need a --build-only/--run-only pair in check_programs). :mem-gib is out of every key, so only
+programs-full's keys move (its parts are new steps). `bin/gate --full --concurrent --plan`: simulated wall 9:24 before, 9:20 after;
+the declared memory at most 57.5 GiB at once both; lane 1 26 steps before, 39 after (the parts).
+
+## 2026-11-19: the full gate's long single steps split for the lanes (branch `n-gate-parts`, on mac/next `7dd3947a0`)
+
+Measured from the full gate of 2026-11-17/18 (wall, CPU, tree peak and wait per step; the next worktree's `.tmp/gate/` logs), the
+long single steps on the critical path: hsi-check-aot 8338 s, gate-tests 7672 s, wai-go-aot 4417 s, si-ecraven.ecraven 4291 s,
+java-interp.hotspot-compiler 4121 s, cpp-dg.dg-error-own 3909 s, hsi-check 2550 s; rsi-essential's passes up to 19767 s.
+
+- gate-tests (bin/gate-tests): its 45 tests ran one after another, and gate-reads-test.bash runs the whole of bin/gate-tests
+  again (`--nested`) under `strace -f` with every tracee stopped on every system call: the nested run took 110 of the step's
+  128 minutes (the outer tests 18). Now the tests run side by side, at most `GATE_TESTS_JOBS` at once (default 4; 1 is the old
+  serial order), each with a TMPDIR of its own (`TMPDIR/gate-tests[.nested].NAME.d`, removed when it passes) beside its log and its
+  status file, judged and reported afterwards in the directory's order with the same rules (77, `--nested`, `--no-exe`); and
+  gate-reads-test's strace takes `--seccomp-bpf`, as `bin/gate --audit`'s does: the same trace set (`%file`, execve, clone, chdir),
+  the tracees stopped only on those calls. A test marked `# gate-tests: alone` runs after the others, by itself: lanes-test and
+  needs-wait-test, whose synthetic steps hold on each other by time (the first parallel run: the nested lanes-test, beside the
+  others under the trace, lost its lane directory and waited; alone under the same `--seccomp-bpf` trace it passes in 46 s).
+  Three tests fail on `7dd3947a0` itself, serially too (costs-test: haskell-lib-own-* steps in no crop of `:crops`;
+  prepare-fail-test: the host compile's control, status 2; rotation-controls-test: c-check's and c-aot's control subjects not
+  in `:always`): not this branch's, left to their owners. Alternatives: a step a test (45 steps, each a planner row, for seconds-long tests), or
+  gate-reads-test as its own step (it would still hold the long pole).
+- hsi-check and hsi-check-aot: `:parts [{:part nofib+samples} {:part synthetic+testsuite-core}]`, `--corpus {part}` (bin/lib/hsi/check
+  takes `+` for `,` in `--corpus`), each part working apart (`HSI_CHECK_PART`: `.tmp/hsi/check[-aot]-own.PART`; whole, the work dir
+  was removed by each run); every part has negative controls of `test/haskell/hsi-controls.txt` (samples' three, synthetic's two;
+  testsuite's three in the second), so "no negative control ran" cannot fail a part; no longer `:heavy` (the heavy lock would run the
+  parts one after another): hsi-check's parts at `--jobs 2`, `:mem-gib 8` (12.2 GiB at `--jobs 4` whole), hsi-check-aot's at
+  `--jobs 2`, `:mem-gib 13` each, as measured whole: the free lane admits two when they fit. The records are unchanged; the night's
+  first run measures the parts (the simulation knows them as unmeasured). Not run here (heavy, hours).
+- wai-go-aot: its 1188 programs' three slices (WAI_AOT_SLICE 400) were translated by shape, built (about 1300 s each, 2.1 GiB) and
+  run one after another; `WAI_AOT_SLICE_JOBS` (default 1, the old order) runs that many slices side by side, each with its own
+  mods list, generated packages, stats, Go cache, log and rows (aot_go_shared's TAG), the run's shared programs all kept until it ends
+  (WAI_AOT_SHARED_KEEP the slices' count), the logs and rows put together in the slices' order and judged as before. The step
+  itself is unchanged: at three slices it declares about 7 GiB, past `:night-concurrent`'s `:max-step-gib` 4, which would take
+  wasm-full out of the chains beside the serial run (crops-test's check of steps.edn's chains fails so); the choice (the cap, or
+  wasm-full serial with its slices side by side) is the user's. Run once light:
+  `WAI_AOT_SLICE=6 WAI_AOT_SLICE_JOBS=3 bin/wai go --aot --list test/wasm/go-aot.txt`, three slices side by side (built in 210, 146
+  and 185 s), 18 of 18 pass, the controls as before, 4 min 43 s, 0.55 GiB (the main checkout's kept shared program put back).
+- Not split here: si-ecraven (one part `ecraven`, its rotation keyed by the part's name in test/scheme/subsets.edn: a second part would
+  have no subset and run whole every night; bin/si ecraven has no jobs option), cpp-dg's dg-error-own (rotated by its part's name
+  likewise; halves need a second :subset-key), java-interp.hotspot-compiler (Java's levels already a part a corpus).
+- rsi-essential: its passes in the store are bimodal: 1612-1924 s at a 3.7 GiB peak when the lowered std in the worktree's
+  `.tmp/rsi/runtime` is at the checkout's key, 11958-19767 s at 7.1 GiB when it is not (`runtime-build --ci`, 94 units, 926 s, then the
+  lowered std read into ci, all of it evaluated under the step's `ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`): the essential subset's 13
+  programs are minutes; the hours are the std's rebuild at every change of its key. Left as it is (the fix is the std's lowered
+  forms kept by key in the main checkout's `.tmp`, shared, or the re-seed that lets the step drop ARBACE_NO_AOT).
+
+Proof: `bin/gate --full --concurrent --plan` on `7dd3947a0`: simulated wall 9:19 (serial sum 29:09); on this branch 9:23 (serial sum
+26:40, hsi's four parts unmeasured, so counted as 0; gate-tests' duration is its last pass's, 0:21): the simulated critical path is
+lane 2's serial chain (repr-go, goi, goi-check-full, goi-aot.linux-amd64 ending at 9:19/9:23), not these steps; the measured night
+had them on it. `gate.crops check` 0 problems; crops-test passes on the final table. bin/gate-tests run once in the new form
+(4 jobs): gate-reads-test's traced nested run in under 4 minutes (110 before), failing only on the three tests above and on a
+crops-test that read the table while the reverted wai-go-aot change was in it.
+  The run's whole: 17 min 51 s wall, 0.95 GiB peak (128 min and 3.8 GiB on the night), status 1 on those four and on
+  gate-tests-test, whose cases run gate-reads-test (and so the nested run) again: its symlinked checkout's case fails on the same
+  nested failures, and its claude-md planner case lost its scratch `logs/files.sha256` (FileNotFoundException) beside the others:
+  not yet told apart from the base's state; the night's gate-tests or a serial `GATE_TESTS_JOBS=1` run decides it.
+
+## 2026-11-19: CLAUDE.md's crops keys after W2; parse-check --record's preprocessor errors (review 401, L2; branch `n-doc-1119`, on next `7dd3947a0`)
+
+- CLAUDE.md had drifted from `bin/lib/version.bash`: its crops paragraph and the `gate_key` and `arbace_runtime_key` passages still said
+  repr/scheme, repr/cpp, repr/llvm, repr/python (with `arbace/scheme/`, `arbace/cpp/`, `arbace/python/`) and the Go forms
+  `go/arbace/{oi,scm,scminterp,py,libm}` were not embedded and in `arbace_crop_paths`. Since W2 (doc/W-WINDOW.md) they are embedded
+  and out of that list, the Go forms out of `arbace_runtime_key` alone (`arbace_runtime_not`, W-P3 (a)). Corrected: the paragraph now
+  names both lists as version.bash holds them (`arbace_crop_paths`: repr/haskell, rust, ocaml, `arbace/rust`, `arbace/llvm`, repr/asm,
+  `arbace/asm/`, repr/wasm, `arbace/wasm/`, C++'s oracle check tools ncheck, tcheck, mutate and expect; the Go forms oicapi, expat,
+  pyexpat, hs, x86i, emu, a64i, wai and pyi's lazy modules with pyctypes; `jdk/ocaml/`; the crops' script libraries with wai's). The
+  other sentences were left as they were. `test/docs/claude-md-test.bash` (the essential `claude-md`) holds the correction: passes.
+- Review 401's L2 (`.tmp/review-1119.md`, item 7, the brief's item 5): `arbace.repr.c.parsecheck/port-pp-errors` cast the stream's
+  tokens `^Tok` inside a `(catch Throwable _ nil)`. On stage 0 before the re-seed (parsecheck compiled, lex.ae evaluated anew, two Tok
+  classes) the cast throws and a by-hand `bin/repr-c parse-check --record` guessed no `:pp-errors` without saying why. Fixed light: the
+  kind read through a new `arbace.repr.c.lex/tok-kind` (lex's own Tok, whichever is loaded), and the catch prints the reason on stderr.
+  Considered: running `--record` under `ARBACE_NO_AOT=1` until the re-seed (the review's stopgap; needs no code, but the failure stays
+  silent). The other `^Tok` hints of parsecheck (the mutants') are left: the gate's c-parse mutants already run under ARBACE_NO_AOT.
+  Unit check `c.judge-test/parse-port-pp-errors-runs` (test/c/judge_test.ae): the errors of a file with `#error`, none of a clean one,
+  and nil with the reason when the stream throws; run alone with `parse-record-pp-errors-only-the-preprocessors` on stage 0: both pass.
+- Keys (gate_key without `ARBACE_HOST_EXE`): gate KEY20 `efcc5118fcf5748217a6` -> `78bab1078a9f8303993a` (lex.ae and parsecheck.ae
+  are embedded), javac's `231da30c39a1` -> `53480937d838`; arbace_runtime_key unmoved. The night's gate rebuilds the executables.
+
+## 2026-11-19: 399's gen-class fix tested (review 1119, items 1-4)
+
+Review 1119 (the main host's, of the Mac's 1119 branches) found 399's (`d73c48d28`) unit check of the default's fallback written by hand
+(test/j2g/unit/genclass/g/Gen.ae: it tests only j2g's `Iface.super.m()`, which predates 399, so it passed on 399's base `88b8e7f1a`),
+nothing covering `::aot-form` or `gc-record-aot-form!`, the latter silent when no recorded unit matches, and no probe of a default inherited
+from a superinterface. On next `7dd3947a0`, branch n-399-tests:
+- arbace/genclass.ae: `gc-record-aot-form!` answers `:recorded`, nil when the program records no units, and `:no-match` with a warning on
+  `*err*` naming the class (no unit names it alone): the compiled class would lose its default methods again, the very bug 399 fixes, so it
+  is no longer silent. Its doc string says why the unit's `:vars` are not recomputed (the added methods name only the class's static
+  `__var` fields, `arbace.lang.IFn` and the interfaces' supers). Considered: throwing; not taken, as gen-class-define's catch would turn it
+  into the evaluated class's failure and a warning keeps the program built.
+- test/j2g/unit.ae: `test-gen-class-aot-form` loads the checkout's genclass (in arbace.core; stage 0 embeds the seed's) and calls
+  `generate-class` on JDK interfaces: CharSequence's `::aot-form` forwards `chars` to `chars__var`, else `(.chars java.lang.CharSequence/super)`;
+  the evaluated form holds no default's method; control: `length`, abstract, forwards and calls no super; java.util.List's form calls
+  `java.util.List/super` for Iterable's `forEach` and Collection's `stream` (item 4); control: Runnable, no default, `::aot-form` nil. Then
+  `gc-record-aot-form!` over a redefined `arbace.classes.native/compiled`: the unit naming the class alone replaced, the others kept; a
+  missing name and a unit naming the class beside another both `:no-match`, warned, nothing replaced; control: no recording, nil.
+- test/j2g/unit/genclass/g/{Hello,Sub,GenSub}.ae: a default inherited through a subinterface, `(.hello g.Sub/super)`, translated by j2g to
+  the declaring interface's function `J_g_Hello_J_Hello__O` (item 4, j2g's side).
+Proofs (stage 0, light): `bin/j2g-unit` 196 passes, the 7 known failures (type annotations' known rows, invokers' six; the same set as on
+`7dd3947a0`); with 88b8e7f1a's genclass.ae the new checks fail but one (8 of 9: "the evaluated form holds no default's method" holds on
+the base too, by design); an evaluated probe (gen-class over java.util.List with `-forEach`, over CharSequence without `-isEmpty`): the
+impl-ns's forEach runs, isEmpty is the default's; the same over List under `ARBACE_COMPILE=1`: the unit recorded, its forms calling
+`java.util.List/super` for forEach, stream, removeIf, spliterator and the rest, no warning. The AOT run of Clojure's genclass (review
+item 5's records) stays the main host's night.
+Keys (without `ARBACE_HOST_EXE`): gate KEY20 `efcc5118fcf5748217a6` -> `ca72eb47fd67b2006656`, javac's `231da30c39a1` -> `779edb1e6bbd`,
+`arbace_aot_key` `9dfc53c46d8f` -> `6a6277659883` (arbace/genclass.ae is embedded); arbace_runtime_key unmoved.
+
+## 2026-11-19: correction to "399's gen-class fix tested"
+
+The entry above says `bin/j2g-unit` 196 passes: the run (n-399-tests `4c997349b`, stage 0) had 191 passes and the 7 known failures.
+
+## 2026-11-19: C's judge reads synth-c23's hand-worked .expect (branch `n-c-expect`, on next `7dd3947a0`)
+
+n-llvm-indep (LLS49 (c)) wrote table.edn's :expect for synth-c23 into test/c/synth/NAME.expect (`bin/ci synth`), read by
+llvmi's judge but not C's. Done: test/c/selfref.ae's rule `synth-c23` (status 0, stdout NAME.expect's digest, verdict
+`:synth-expect`), its entries added from test/c/synth/ as ci-run's are when test/c/ref-gcc15.edn has none; the .expect files
+in `c_run_ref`'s key (bin/lib/ci/selfref.bash). The negative control `_control/decl-alignment-vs-synth-expect` (test/c/controls.edn:
+decl-alignment's run against decl-abstract-declarators.expect) differs, as it must. `bin/ci check --corpus synth-c23 --only` (all
+79): 76 pass, 2 by design (_Decimal32, _Float16), 1 fail: pp-has-attribute.c, whose :expect gives a0-a8 0 (clang's
+__has_c_attribute values, 201904 and the like: the 96 bytes of lli's recorded run), while C23's final value for every standard
+attribute is 202311 (c/target/dialect.edn), which Arbace's target and gcc 15 answer (gcc's run recorded now: "a0 = 1"). The
+table's value is kept (llvmi's clang IR passes by it); C's judge takes the case as an exception (test/c/selfref-exceptions.edn)
+judged by gcc's run: `bin/ci record-ref --corpus synth-c23 --only` (79 runs into ref-gcc15.edn, the README's step, by hand). Then
+synth-c23 recorded at both levels (`bin/ci check --corpus synth-c23 --record`, `check --aot ... --record`: 77 pass, 2 by design
+each; the REAP cells' :ref-runs need the record's cases). `bin/ci selfref agree`: synth-expect 78 cases, gcc's run meets all 78.
+Before / after: C's eval cell 2246+34 -> 2323+36, AOT 2254+26 -> 2331+28, completeness 0.9817 -> 0.9815; the judge stage
+(14666 + 0.5 x 191) / 14857 = 0.99357 -> (14822 + 0.5 x 193) / 15015 = 0.99357 (0.9940 recorded both), independence 0.9988 both:
+the 158 new cases are 156 own and 2 recorded, the ratio unchanged. Alternative not taken: correcting pp-has-attribute's :expect
+to 202311's answers, which would fail llvmi's clang modules; a split expectation per front end is left to the table's owner.
+
+## 2026-11-19: n-hasattr: synth-c23's pp-has-attribute settled from C23's table
+
+The conflict (mac/n-llvm-indep 475cda469 wrote pp-has-attribute's :expect as a0-a8 0, "C23's table gives dates other than
+202311L"; mac/n-c-expect 658ecf7b1 kept it and made the case an exception judged by gcc's run) settled from ISO/IEC 9899:2024
+itself: the final standard's __has_c_attribute table (§6.10.2 in the published numbering, the table N3220 gives) answers 202311L
+for every standard attribute: deprecated, fallthrough, maybe_unused, nodiscard, noreturn, _Noreturn, unsequenced and
+reproducible. The 201904/201910/202003/202202/202207 dates are the C2x working drafts' (N3096 and before), which clang 23.1.5
+still answers (it prints 201904 201910 202106 202003 202202 202202 0 0 here); gcc 15.2 answers 202311 for all eight. The
+test's lines therefore print a0-a8 1 (each `== 202311L`, a7 the __nodiscard__ spelling, a8 _Noreturn), a9 1 (gnu::packed is
+1), a10 and a11 1 (unknown names 0), in_if 1. Wrong: the .expect (n-llvm-indep's hand-worked value). Right: Arbace's target
+(c/target/dialect.edn's :c23-attribute-version 202311, has.tsv's rows; no target change) and gcc's recorded run
+(ref-gcc15.edn's stdout 26e290c4..., now byte for byte the .expect's digest). Done: table.edn's :expect all 1, `bin/ci synth`
+(`--check` clean), the exception dropped from test/c/selfref-exceptions.edn (the case judged by its own .expect again);
+`bin/ci check --corpus synth-c23 --only` on the file: pass 1. llvmi's c-O0/c-O2.synth.pp-has-attribute modules are clang's IR,
+whose preprocessing answered the draft dates, so the .expect is not their outcome: arbace/llvm/check.ae's own verdict leaves
+them to lli's record (they pass by it as before). Alternative not taken: a per-front-end expectation in the table. The crops'
+scores are not re-recorded here (one C case moves from gcc's record to its own verdict, two llvm modules the other way).
+
+## 2026-11-19: n-oc-dry, OCaml's three never-passed --full steps dry-run on subsets
+
+oi-aot.run, oi-suite-aot.suite and ocaml-judges (test/gate/steps.edn, crops/ocaml.edn) had never passed: last night's oi-check.run
+failed (parallel/major_gc_wait_backup, a 120 s timeout in the rotation's subset) and the three were notrun behind it. Run here on
+mac/next 7dd3947a0 in a fresh worktree on stage 0 (ARBACE_HOST_EXE the main checkout's), each on a small subset:
+- `env O2J_JOBS=4 bin/oi check --aot --only-list` (5 programs of the run corpus): 4 pass, 1 in a class, the control differs, exit 0;
+  1m47 warm (6 min cold: the native stdlib and compiler-libs built), one process at most 1.23 GB.
+- `env O2J_JOBS=4 bin/oi suite check --aot --only-list` (5 of the suite, link-test/test among them): 5 pass, the control differs,
+  exit 0; 3m55, one process at most 1.79 GB, the tree sampled at most 2.7 GiB.
+- `bin/oi judges-test --fixtures`: one failure, judges_test's "rollup: a stale roles.tsv is regenerated, not judged": `bin/oi suite
+  rollup` fails on its own at next's head ("FAILING tests/link-test/test.ml: unclassed action", "the rollup differs from the record").
+  Cause: 355 (89a613a9c) made link-test/test a run of the suite corpus and recorded it in the native records only
+  (check-suite-oi-native.edn, check-suite-aot-native.edn), dropping it from check-oi.edn and check-aot.edn; the rollup
+  (test/ocaml/testsuite_check.ae) reads the oracle path's records, so its action fell to "unclassed". The same `suite rollup` ends
+  oi-check's command, so oi-check.run would have failed on it tonight too. 14m23 cold, one process at most 1.70 GB.
+Fixed (records, no code): link-test/test recorded on the oracle path, `bin/oi suite check --ocdump --record --only-list` (pass) and
+`suite check --aot --ocdump --record --only-list` (pass, same); then `bin/oi suite rollup --record`: link-test/test's row "run" with
+its oi and AOT passes, and pr8769 (a -pack test, 355's same reading) compiler-flags -> build-orchestration. `bin/oi suite rollup`
+then exit 0; `bin/records-check` 9 pairs, 0; `gate.crops check` 0. ocaml-judges' :mem-gib 2 -> 3 (one process 1.7 GB, beside
+its check --aot cases' shards). oi-aot's and oi-suite-aot's 4 GiB kept (four o2j shards under O2J_GOMEMLIMIT 900MiB, measured
+2.7 GiB). Estimates from next's whole runs of 2026-11-14 (.tmp/worktrees/next/.tmp/o6, o7): oi-aot.run whole about 3 h (389
+programs, 11,413 s of runs, 39 timeouts each rerun alone), the nightly subset plus a seventh about 30-40 min; oi-suite-aot.suite
+whole about 45 min (121 programs, 2,808 s, 10 timeouts); ocaml-judges about 8 min warm. Deeper, not done: the rollup reads the
+oracle path's records while the gate's levels judge the native ones (a program recorded natively only is unclassed again).
+
+## 2026-11-19: n-oc-rollup, the testsuite's rollup reads the records the gate judges
+
+`bin/oi suite rollup` (test/ocaml/testsuite_check.ae) read the oracle path's records alone (check-oi.edn, check-aot.edn,
+check-suite-oi.edn, check-suite-aot.edn), while the gate's levels judge the native path's (bin/oi's default since TY24 (a):
+the BASE-native.edn records, suite.bash's suite_results, bin/oi's cmd_check_aot, typer.bash's cmd_check_native). A program recorded
+natively only was "unclassed" in the rollup: queue 355's link-test/test failed ocaml-judges so, and n-oc-dry worked around it by
+recording it on the oracle path too (that row kept). Now each level's native record, when it exists, is merged over the oracle
+path's, the native row winning for a program in both, and the native path's classes (divergences-native.edn) come first in oi's,
+as cmd_check_native judges; OI_CHECK_DEFAULT=ocdump keeps the oracle path's records alone. Alternatives: the native records alone
+(the same today: each native record holds every oracle row's program, 544 and 132 rows), kept to the merge so a program the oracle
+path alone recorded is not lost; a flag on the rollup, rejected (the gate judges one path, the default's).
+
+The code is neutral: under OI_CHECK_DEFAULT=ocdump the rollup judges the previous testsuite-results.edn equal. On the native
+records 69 rows of test/ocaml/testsuite-results.edn change, re-recorded (`bin/oi suite rollup --record`), each a program whose
+native row differs from its oracle row (checked by script: none without one): 39 programs the oracle path classed by header
+(check-oi.edn's "class" rows: ocamlrunparam b=1, C stubs, the runtime-events and dynlink libraries) that the native path runs,
+their ACTION now run and OI/AOT their native results (pass, or c-runtime-decided, c-runtime-internals, unix-fork, light-speed);
+30 more whose native OI or AOT result differs (statmemprof's and gc's tests mostly pass on oi natively, several AOT rows
+gc-and-memory where the oracle path's passed, asmcomp/optargs pass on oi and backend on AOT, two gc-and-memory now
+light-unfinished, parallel/churn and misc/darkening_work's speed rows). Still 0 files without a result or a class.
+
+The test: test/ocaml/rollup_native_test.bash (synthetic records, no run; in `bin/oi judges-test`'s fixtures): a program recorded only
+natively is classed, a program in both takes the native row, and its negative control, the oracle path alone, fails on the
+native-only program. Run: the rollup (judge, 0 unclassed), bin/records-check (9 pairs, 0 problems), gate.crops check (no problem),
+bin/reap and bin/crops-score --judge --strict (the matrix and scores unchanged). Keys: no core key moves (bin/oi and test/ocaml/
+are in arbace_crop_paths); the steps whose inputs hold bin/oi, test/ocaml/ or test/ocaml/*.edn rekey (OCaml's oi-check,
+ocaml-judges and the rest of its chain, oi-essential, and the essential reap and crops-score, which pass on it unchanged).
+
+## 2026-11-19: n-oc-rollup, a correction
+
+The entry above says bin/oi and test/ocaml/ are in arbace_crop_paths: they are not (its OCaml entries are bin/lib/oi/ and the Go
+forms). No core key moves because gate_key, gate_rest_key and arbace_runtime_key cover neither bin/oi nor test/ocaml/; the step
+keys that move are as listed there.
+
+## 2026-11-19: n-hs-libs: the own libraries' lib-check and lib-stg re-recorded at next's head (lane 2's light half)
+
+Branch `n-hs-libs` from mac/next `aa9edac6f` (n-hs-elab2, 381, 385, 364, 369 and 374's 17 own packages). The commands of queue
+reports 352, 363 and 374 ("the main host's amd64 commands"), each judged against its committed record first, in dependency order:
+`bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn`, `lib-stg --ifaces own --judge
+test/haskell/lib-stg-own-results.edn`, the same for `--package base` (`lib-stg-own-base-results.edn`), then for each of deepseq
+array stm pretty ghc-boot-th template-haskell containers transformers mtl bytestring time exceptions os-string filepath unix file-io
+directory `lib-check --package P --ifaces own --judge test/haskell/lib-check-own-P.edn` and `lib-stg --package P --ifaces own` (a
+measure: no -O0 reference above base). Light: every process under 1.75 GB (peak 1.71, ghc-internal's lib-stg, 22 min; its
+lib-check 16 min); at most four at once, a package started once its dependencies' lib-check had made their own pools. The pools
+of n-hs-elab2 (.tmp/keep/hs-own-pools) seeded the worktree's .tmp/repr-haskell (corpus, ndumps, target, iface2); every own pool
+was rebuilt by its run, since the front end changed after them (typecheck.ae, tostg.ae: 374's fixes).
+
+Results: every judge 0 worse, every control differs. lib-check: ghc-internal 265 modules, 1 better (GHC.Internal.Data.Data errors
+-> ok); base 241, 0 better; bytestring 31, 1 better (Data.ByteString.Internal.Type errors -> ok: its Lift instance); exceptions 2,
+1 better (Control.Monad.Catch errors -> ok: the instance's equality context); the other 14 packages 0 better. lib-stg: ghc-internal
+7,982 of 9,932 bindings equal (recorded 5,536), 42 modules better (GHC.Internal.Classes 96 -> 2,302 of 2,315; Exception.Context,
+Generics and Data.Data errors -> ok), control 0 of 171; base 584 of 1,072 (recorded 547), 13 better (Data.Fixed,
+Data.Functor.Classes, Data.Foldable1 errors -> ok); every package above base :ok in all its modules. Re-recorded (better rows
+only, the rest byte for byte): lib-check-own-{ghc-internal,bytestring,exceptions}.edn, lib-stg-own-results.edn (its two :runs rows
+kept as committed: record-stg rewrote them equal as data, keys reordered) and lib-stg-own-base-results.edn. Not run: `bin/hsi
+check --libs own --record` and its AOT twin (lane 2's heavy half).
+
+A false start, recorded: run four at once, transformers' and ghc-boot-th's lib-check each read their native dumps into the shared
+.tmp/repr-haskell/ndumps at the same moment, and transformers got 12 of its 24 dumps (23 worse, missing or unclassed). Not a
+regression: with the reads done one at a time first (`REPR_HASKELL_ONLY_PACKAGES=P bin/repr-haskell read --reader native
+--corpus`, copied into lib-check/iface2/P/nd) transformers and the mtl above it judged 24 of 24, 0 worse. Alternative not taken
+here: a lock around lib-check's read (the read's directory is shared by every package, as the script says), left to the tool's
+owner. Then `bin/reap --record` (matrix unchanged; 54 of 56, 0 problems), `bin/crops-score --record` and `--judge --strict` (0
+problems), `bin/records-check` (9 pairs, 0).
+
+## 2026-11-19: next: the Mac VM's filed branches that keep gate_key, merged before tonight's --full; review 419's decisions 2-4
+
+Goal: keep tonight's `bin/gate --full --concurrent` on next a hit on the executables pre-built by day at gate KEY20
+8d0e46484347addebee7 (`.tmp/gate-exe/8d0e46484347addebee7`, 59 min, 31 GiB), so only the branches whose merge leaves
+`bin/arbace-go --gate-key` at 8d0e46484347addebee7d3f70dbdd2c4dde4695ae2d4eb4dac58fb45bc230880 went in. Method: each branch of
+mac trial-merged alone into next 3479408b0 (`git merge --no-ff --no-commit`), the key computed, the merge aborted; then the
+holding ones merged one at a time, the key checked after each. Decisions: .tmp/mac-queue/tasks/ANSWERS.md, all (a).
+
+Merged (each --no-ff): 419-fix 3e84c699a (bin/hsi build under flock, the key read again under it; review 419 M1);
+n-hs-libs ceabce537 (Haskell's own lib-check and lib-stg re-recorded at next's head; journal conflict, both kept);
+395-hs-packages 4dca221fb (binary, text and process on the own front end, three haskell-lib-own steps; steps.edn's conflict in
+hsi-check and hsi-check-aot resolved to n-gate-parts' two parts with the three new tars added to :uses and HSI_OWN_TARS);
+400-rust-vendor 1a8b6eac1 (std's interface reads libc's and hashbrown's names natively, RIND9 (a); 400-1 (a), 400-2 (a));
+406-cpp-cp403 2b7371724 (CP403 (a): bin/cppi's runtime route auto by default, runtime-inputs' :ci-target guard; 406-1 (a),
+406-2 (a)); 410-py-prep 3b541f1f1 (Python's records night prepared; 410-1 (a)); 421-claude-md 434739163 (CLAUDE.md against the
+code, claude-md-test's cross-checks with eight built-in controls). 406 went in without 392, which it was meant to follow: 392
+moves gate_key, and 406 merges cleanly alone (its report: either order). So tonight's cpp-runtime builds the runtime on our
+route at 124 units (gen-batch, 10-40 min on the VM), and again at 155 when 392 lands.
+
+Not merged:
+- 395-hs-do-checking 4d3938847: it keeps the key (arbace/repr/haskell is a crop path), and it was merged once here, then
+  taken out before the push (next rebuilt from 0db000d14, never pushed with it), at the VM coordinator's word: unjudged, it
+  changes every library's do blocks and needs the whole own chain re-judged first (DECISION 395-1).
+- 394-hs-osstring: no branch, no change (the goal was met at the base by 388's 216da0b37).
+- Deferred until after tonight, each moves gate_key through the embedded sources or the runtime:
+  392-cpp-units and 393-cpp-coro (arbace/cpp/{abi,codegen,sema,template}.ae: arbace/cpp is embedded since W2);
+  396-oc-dynlink and 397-oc-rows (arbace/o2j.ae, embedded); 398-java-async (overlay/jdk/java.base/sun/nio/ch/,
+  go/arbace/jrt/); 415-java-slices (the same, with arbace/j2g/; built on 398); 407-llvm-verifier
+  (arbace/repr/llvm/verify.ae: expect.ae is a crop path, verify.ae is embedded); 408-c-cs326 and 409-c-judge
+  (arbace/repr/c/, embedded since C9; 409 also conflicts in test/c/controls.edn, independence.edn and scores.edn);
+  420-go (arbace/go/, goi's namespaces).
+
+Review 419's decisions, done here as small commits: (2) test/crops/independence.edn's judge facts after n-hasattr: C's
+:cases 14822/193 -> 14824/191 (pp-has-attribute judged by its own .expect at eval and AOT), llvm's 4731/543 -> 4727/547
+(c-O0's and c-O2's .synth.pp-has-attribute modules are clang's IR, left to lli's record by arbace/llvm/check.ae: llvmi's own
+outcomes 174 at eval and 171 at AOT), the texts dated rather than rewritten, llvm's stated :score 0.9485 -> 0.9481. (3)
+repr-java-attr's jdk part its own :mem-gib 62, its known peak; the step's 49 stays for the rest. (4) test/gate/programs-parts-test.bash:
+programs-full's :parts against `test/programs/` and `test/programs-fail/`'s directories, with two negative controls (a sample
+missing from :parts, a part with no sample); gate-tests' :inputs gain the two directories. None moves a key the gate builds by.
+
+Re-recorded: `bin/reap --record` (matrix unchanged, 54 of 56, 0 problems), `bin/crops-score --record`: llvm's judge 0.9490 ->
+0.9480, independence 0.9898 -> 0.9896; no other crop moves at four places (C's judge stays 0.9936); no whole integer moves.
+
+Checks at the head: bin/records-check (9 pairs, 0), bin/reap (0 problems), bin/crops-score --judge --strict (0 problems),
+gate.crops check (0), test/docs/claude-md-test.bash (66 ok), bin/oi suite rollup (0 files without a result or a class),
+bash -n bin/hsi, test/gate/{chain-needs,crop-tier,crops,gate-key-crops,programs-parts}-test.bash (all ok),
+`bin/cppi selftest case-inputs` (pass); `bin/gate --full --plan` rc 0 (375 steps: 3 always, 3 build (go-build, javac-tool, cpp-runtime), 333 run, 35 after, 1 absent; .tmp/goal/full-plan-next-final.log) and `--full --concurrent --plan` rc 0 (simulated 9:45; full-plan-next-final-concurrent.log). Not run: 400's std-iface passes (they need rust-src's
+deps cache, 20+ min) and 406's live selftests (oracle tier). Keys at the head: gate 8d0e46484347addebee7 (unchanged), javac
+36b769ce7c35115edd8c (unchanged), arbace_runtime_key unchanged.

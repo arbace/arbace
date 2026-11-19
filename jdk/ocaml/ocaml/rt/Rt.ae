@@ -251,34 +251,39 @@
 
   (field ^:public ^:static ^long minorWords 0)
   (field ^:public ^:static ^long majorWords 0)
-  (method ^:public ^:static words ^void [^long wosize]
+  (method ^:public ^:static words ^void [^long wosize] (Rt/wordsV wosize nil))
+  ;; (queue 438) the allocation of v, the value a Gc.Memprof profile tracks (OC218's heap model, ExtGc/memprofAlloc)
+  (method ^:public ^:static wordsV ^void [^long wosize v]
     (when (> wosize 0)
       (if (> wosize 256)
         (set! majorWords (unchecked-add majorWords (unchecked-inc wosize)))
         (set! minorWords (unchecked-add minorWords (unchecked-inc wosize))))
-      (when ExtGc/memprofSampling (ExtGc/memprofSample wosize))))
+      (when ExtGc/memprofSampling (ExtGc/memprofAlloc wosize v))))
   (method ^:public ^:static counted [v]
-    (cond (instance? Block v) (Rt/words (alength (.-f (cast Block v))))
-          (instance? double/1 v) (Rt/words (alength (cast double/1 v)))
-          (instance? byte/1 v) (Rt/words (unchecked-inc (unchecked-divide (long (alength (cast byte/1 v))) 8)))
+    (cond (instance? Block v) (Rt/wordsV (alength (.-f (cast Block v))) v)
+          (instance? double/1 v) (Rt/wordsV (alength (cast double/1 v)) v)
+          (instance? byte/1 v) (Rt/wordsV (unchecked-inc (unchecked-divide (long (alength (cast byte/1 v))) 8)) v)
           :else nil)
     v)
+  ;; (queue 438) the Lambda's duprecord and duparray (caml_obj_dup, as ocamlopt allocates them) and array literals counted
+  (method ^:public ^:static dupc [x] (Rt/counted (Rt/dup x)))
 
   ;; ---- blocks
 
   (method ^:public ^:static block [^int tag ^Object/1 fields]
-    ;; Rt/words in place (queue 414)
-    (let [w (alength fields)]
+    ;; Rt/wordsV in place (queue 414), counted once the value exists (queue 438: memprof tracks it)
+    (let [w (alength fields)
+          v (if (== tag 254)
+              (let [a (new double/1 w)]
+                (loop [^int i 0] (when (< i w) (aset a i (Rt/d (aget fields i))) (recur (unchecked-inc-int i))))
+                a)
+              (Block. tag fields))]
       (when (> w 0)
         (if (> w 256)
           (set! majorWords (unchecked-add majorWords (unchecked-inc (long w))))
           (set! minorWords (unchecked-add minorWords (unchecked-inc (long w)))))
-        (when ExtGc/memprofSampling (ExtGc/memprofSample (long w)))))
-    (if (== tag 254)
-      (let [n (alength fields) a (new double/1 n)]
-        (loop [^int i 0] (when (< i n) (aset a i (Rt/d (aget fields i))) (recur (unchecked-inc-int i))))
-        a)
-      (Block. tag fields)))
+        (when ExtGc/memprofSampling (ExtGc/memprofAlloc (long w) v)))
+      v))
 
   (method ^:public ^:static field [x ^int n]
     (cond (instance? Block x) (aget (.-f (cast Block x)) n)
@@ -361,7 +366,7 @@
     (cond (== (alength xs) 0) (Block. 0 xs)
           (or (.equals kind "float") (and (.equals kind "gen") (instance? Double (aget xs 0))))
           (Rt/block 254 xs)
-          :else (Block. 0 xs)))
+          :else (Rt/block 0 xs)))
 
   ;; ---- strings and bytes
 

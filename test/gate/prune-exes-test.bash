@@ -16,7 +16,10 @@ mk() { mkdir -p "$T/exes/$1"; touch -d "@$(( now - $2 ))" "$T/exes/$1"; }
 mk aaaaaaaaaaaaaaaaaaaa 172800; mk bbbbbbbbbbbbbbbbbbbb 200000; mk cccccccccccccccccccc 250000; mk dddddddddddddddddddd 300000
 mk aaaaaaaaaaaaaaaaaaaa.tmp.111 7200; mk bbbbbbbbbbbbbbbbbbbb.old.222 7200
 mk cccccccccccccccccccc.tmp.333 60   # a minute old: a build under way, kept
-store=$T/store exes=$T/exes
+# the checkout's scripts, but no cache of the table (GATE_CACHES=none): gate_prune's caches_prune would prune the real
+# checkout's .tmp and Go's cache (review 419, I2)
+root=$here store=$T/store exes=$T/exes
+export GATE_CACHES=none
 ( . "$here/bin/lib/gate-run.bash"; gate_prune ) > "$T/out" 2>&1
 left=$(ls "$T/exes" | tr '\n' ' ')
 for d in aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb cccccccccccccccccccc; do

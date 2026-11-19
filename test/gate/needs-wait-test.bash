@@ -10,6 +10,7 @@
 #     runner's queue (a later phase) at once, as before; a need whose runner ended without it, or is gone (killed), fails
 #     ("never run")
 # Seconds, no build, no gate run. Usage: test/gate/needs-wait-test.bash
+# gate-tests: alone (its synthetic steps hold on each other by time: beside the others, under gate-reads-test's trace, a case lost its state, n-gate-parts)
 set -u
 unset audit_step audit_all GATE_CLEAN_INNER GATE_NEED_WAIT
 for v in $(compgen -e); do case $v in GATE_LANES|GATE_LANES_*|GATE_LANE_*|GATE_MEM_BUDGET_GIB|GATE_MEM_LANE) unset "$v" ;; esac; done
