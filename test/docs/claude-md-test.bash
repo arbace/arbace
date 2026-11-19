@@ -59,10 +59,11 @@ for x in $(sed -n '/^arbace_runtime_key() {/,/^}/p' "$v" | grep -o "! -path '\?[
   case $rk in *"\`$x\`"*) echo "ok   CLAUDE.md: arbace_runtime_key's sentence names $x" ;; *) echo "FAIL CLAUDE.md: arbace_runtime_key leaves out $x (bin/lib/version.bash), its sentence does not say so"; fail=1 ;; esac
 done
 # the essential gate's core: test/gate/steps.edn's :pre, :build and :essential steps but the crops' (:essential-when-changed)
-# and cpp-runtime (C++'s build, run when a C++ check needs it)
+# and cpp-runtime (C++'s build, run when a C++ check needs it), pyi-aot-runtime likewise (pyi's AOT runtime, when a Python check
+# needs it: python.edn spliced, queue 428)
 same "the essential gate's core" \
   "$(printf '%s' "$flat" | grep -o 'the essential gate is the core ([^)]*)' | sed 's/.*core (//; s/)$//' | tr -d ' ' | tr ',' '\n')" \
-  "$(grep -E '^  \{:name ' "$steps" | grep -E ':phase :(pre|build|essential)\b' | grep -v ':essential-when-changed' | awk '{print $2}' | grep -vx cpp-runtime)"
+  "$(grep -E '^  \{:name ' "$steps" | grep -E ':phase :(pre|build|essential)\b' | grep -v ':essential-when-changed' | awk '{print $2}' | grep -vxE 'cpp-runtime|pyi-aot-runtime')"
 # the crops tier's steps it names are crops' essential steps
 for n in $(printf '%s' "$flat" | grep -o 'where their keys agree ([^;]*;' | grep -o '`[a-z0-9-]*`' | tr -d '`'); do
   grep -qE "^  \{:name $n .*:phase :essential .*:essential-when-changed" "$steps" && echo "ok   CLAUDE.md: $n a crop's essential step" \
