@@ -12,7 +12,7 @@ export TMPDIR=${TMPDIR:-$root/.tmp/tmp}; mkdir -p "$TMPDIR"
 . "$root/bin/lib/host.bash"
 exe=${ARBACE_HOST_EXE:-$(arbace_host_exe)}
 fx=$root/test/gate/prepare-fixture
-W=$root/.tmp/prepare-fail-test; rm -rf "$W"; mkdir -p "$W"
+W=$TMPDIR/prepare-fail-test; rm -rf "$W"; mkdir -p "$W"
 fail=0
 ok() { echo "ok   $*"; }
 bad() { echo "FAIL $*"; fail=1; }

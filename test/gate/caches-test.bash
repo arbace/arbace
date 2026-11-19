@@ -1,7 +1,7 @@
 #!/bin/bash
 # GD4 (doc/GATE-DIET-SURVEY.md, GDS17 (a), GDS18 (a), "As built: GD4"): the caches' table test/gate/caches.edn and the prune over it
 # (bin/lib/gate-run.bash's caches_rows, caches_prune, caches_unlisted, worktrees_list), on a scratch copy: a scratch checkout, main
-# checkout, HOME and Go cache under .tmp/caches-test, never the real ones (GATE_CACHES_ROOT, _MAIN, _HOME, _GOCACHE).
+# checkout, HOME and Go cache under $TMPDIR/caches-test, never the real ones (GATE_CACHES_ROOT, _MAIN, _HOME, _GOCACHE).
 #   1. every row of the table reads (caches_rows: one a line), with the Clojure reader too (stage 0), each with :path, :owner and a
 #      known :rule;
 #   2. every .tmp/NAME a bin/ script names is a row's (its first part matched by a row's glob): a new scratch area joins the table;
@@ -14,8 +14,8 @@
 # needs: exe
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
-export TMPDIR=$here/.tmp/tmp; mkdir -p "$TMPDIR"
-T=$here/.tmp/caches-test
+export TMPDIR=${TMPDIR:-$here/.tmp/tmp}; mkdir -p "$TMPDIR"
+T=$TMPDIR/caches-test
 rm -rf "$T"; mkdir -p "$T"
 fail=0
 ok() { echo "ok   $*"; }

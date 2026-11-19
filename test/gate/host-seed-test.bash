@@ -5,7 +5,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
 export TMPDIR=${TMPDIR:-$here/.tmp/tmp}
 mkdir -p "$TMPDIR"
-T=$here/.tmp/host-seed-test
+T=$TMPDIR/host-seed-test
 rm -rf "$T"; mkdir -p "$T"
 # the fake root a repository of its own: under the checkout's .tmp/, git's common dir would be the checkout's,
 # and GTS82 (a) (arbace_host_exe in a linked worktree) would take it for a linked worktree and refuse

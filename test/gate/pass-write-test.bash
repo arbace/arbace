@@ -3,7 +3,7 @@
 # 6): record_pass (bin/lib/gate-run.bash) writes a pass's files through temporary names, checked whole, the
 # record last, so that a full disk leaves the store without a cut pass or a record beside another run's log;
 # bin/gate --clean's publication (bin/gate's publish_passes) replaces a pass that is empty or does not read
-# and publishes none that does not read. On a fabricated store under .tmp/pass-write-test/: the full disk
+# and publishes none that does not read. On a fabricated store under $TMPDIR/pass-write-test/: the full disk
 # is a file size limit (ulimit -f with SIGXFSZ ignored: a real EFBIG from cp and printf), a record whose
 # write fails partway (printf overridden: the first 100 bytes, status 1), a rename that fails (mv
 # overridden). Usage: test/gate/pass-write-test.bash [REV]: REV's bin/lib/gate-run.bash and bin/gate
@@ -13,8 +13,8 @@ set -uo pipefail
 # the gate's own run (bin/gate --clean's audit_step, GATE_CLEAN_INNER, audit_all) is not the fabricated runner's
 unset audit_step audit_all GATE_CLEAN_INNER
 here=$(cd "$(dirname "$0")/../.." && pwd)
-export TMPDIR=$here/.tmp/tmp; mkdir -p "$TMPDIR"
-T=$here/.tmp/pass-write-test
+export TMPDIR=${TMPDIR:-$here/.tmp/tmp}; mkdir -p "$TMPDIR"
+T=$TMPDIR/pass-write-test
 rm -rf "$T"; mkdir -p "$T/src"
 fail=0
 ok() { echo "ok   $*"; }

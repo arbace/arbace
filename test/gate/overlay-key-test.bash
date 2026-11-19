@@ -5,12 +5,12 @@
 # overlay (an older host's print was packed once); a touch with the same bytes does not. The functions
 # overlay_key and make_overlay are extracted from bin/jrt (JRT=FILE: another version of the script, to see the
 # test fail on it); the printer is a stub counting its runs, the host a fabricated file: no Go build, no Arbace.
-# Fabricated tree under .tmp/overlay-key-test. Usage: test/gate/overlay-key-test.bash
+# Fabricated tree under $TMPDIR/overlay-key-test. Usage: test/gate/overlay-key-test.bash
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
 export TMPDIR=${TMPDIR:-$here/.tmp/tmp}
 mkdir -p "$TMPDIR"
-T=$here/.tmp/overlay-key-test
+T=$TMPDIR/overlay-key-test
 rm -rf "$T"; mkdir -p "$T"
 fail=0
 ok() { echo "ok   $*"; }

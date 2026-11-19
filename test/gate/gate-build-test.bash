@@ -1,14 +1,14 @@
 #!/bin/bash
 # bin/arbace-go --gate-build, the real script (not an extracted function) under its own set -uo pipefail,
-# in a fabricated checkout under .tmp/gate-build-test with a fake TamaGo directory: a hit at the key
+# in a fabricated checkout under $TMPDIR/gate-build-test with a fake TamaGo directory: a hit at the key
 # (also --check-cached) succeeds; a miss never removes the directory of another key, javac's tool's or the
 # executables' root (GTS121); a failed build leaves the directory it was to replace (GTS126). No build.
 # Usage: test/gate/gate-build-test.bash
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
-export TMPDIR=$here/.tmp/tmp
+export TMPDIR=${TMPDIR:-$here/.tmp/tmp}
 mkdir -p "$TMPDIR"
-T=$here/.tmp/gate-build-test
+T=$TMPDIR/gate-build-test
 rm -rf "$T"; mkdir -p "$T"
 fail=0
 ok() { echo "ok   $*"; }
