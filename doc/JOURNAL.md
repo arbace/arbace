@@ -13129,3 +13129,40 @@ Keys (without `ARBACE_HOST_EXE`): gate KEY20 `efcc5118fcf5748217a6` -> `ca72eb47
 ## 2026-11-19: correction to "399's gen-class fix tested"
 
 The entry above says `bin/j2g-unit` 196 passes: the run (n-399-tests `4c997349b`, stage 0) had 191 passes and the 7 known failures.
+
+## 2026-11-19: C's judge reads synth-c23's hand-worked .expect (branch `n-c-expect`, on next `7dd3947a0`)
+
+n-llvm-indep (LLS49 (c)) wrote table.edn's :expect for synth-c23 into test/c/synth/NAME.expect (`bin/ci synth`), read by
+llvmi's judge but not C's. Done: test/c/selfref.ae's rule `synth-c23` (status 0, stdout NAME.expect's digest, verdict
+`:synth-expect`), its entries added from test/c/synth/ as ci-run's are when test/c/ref-gcc15.edn has none; the .expect files
+in `c_run_ref`'s key (bin/lib/ci/selfref.bash). The negative control `_control/decl-alignment-vs-synth-expect` (test/c/controls.edn:
+decl-alignment's run against decl-abstract-declarators.expect) differs, as it must. `bin/ci check --corpus synth-c23 --only` (all
+79): 76 pass, 2 by design (_Decimal32, _Float16), 1 fail: pp-has-attribute.c, whose :expect gives a0-a8 0 (clang's
+__has_c_attribute values, 201904 and the like: the 96 bytes of lli's recorded run), while C23's final value for every standard
+attribute is 202311 (c/target/dialect.edn), which Arbace's target and gcc 15 answer (gcc's run recorded now: "a0 = 1"). The
+table's value is kept (llvmi's clang IR passes by it); C's judge takes the case as an exception (test/c/selfref-exceptions.edn)
+judged by gcc's run: `bin/ci record-ref --corpus synth-c23 --only` (79 runs into ref-gcc15.edn, the README's step, by hand). Then
+synth-c23 recorded at both levels (`bin/ci check --corpus synth-c23 --record`, `check --aot ... --record`: 77 pass, 2 by design
+each; the REAP cells' :ref-runs need the record's cases). `bin/ci selfref agree`: synth-expect 78 cases, gcc's run meets all 78.
+Before / after: C's eval cell 2246+34 -> 2323+36, AOT 2254+26 -> 2331+28, completeness 0.9817 -> 0.9815; the judge stage
+(14666 + 0.5 x 191) / 14857 = 0.99357 -> (14822 + 0.5 x 193) / 15015 = 0.99357 (0.9940 recorded both), independence 0.9988 both:
+the 158 new cases are 156 own and 2 recorded, the ratio unchanged. Alternative not taken: correcting pp-has-attribute's :expect
+to 202311's answers, which would fail llvmi's clang modules; a split expectation per front end is left to the table's owner.
+
+## 2026-11-19: n-hasattr: synth-c23's pp-has-attribute settled from C23's table
+
+The conflict (mac/n-llvm-indep 475cda469 wrote pp-has-attribute's :expect as a0-a8 0, "C23's table gives dates other than
+202311L"; mac/n-c-expect 658ecf7b1 kept it and made the case an exception judged by gcc's run) settled from ISO/IEC 9899:2024
+itself: the final standard's __has_c_attribute table (§6.10.2 in the published numbering, the table N3220 gives) answers 202311L
+for every standard attribute: deprecated, fallthrough, maybe_unused, nodiscard, noreturn, _Noreturn, unsequenced and
+reproducible. The 201904/201910/202003/202202/202207 dates are the C2x working drafts' (N3096 and before), which clang 23.1.5
+still answers (it prints 201904 201910 202106 202003 202202 202202 0 0 here); gcc 15.2 answers 202311 for all eight. The
+test's lines therefore print a0-a8 1 (each `== 202311L`, a7 the __nodiscard__ spelling, a8 _Noreturn), a9 1 (gnu::packed is
+1), a10 and a11 1 (unknown names 0), in_if 1. Wrong: the .expect (n-llvm-indep's hand-worked value). Right: Arbace's target
+(c/target/dialect.edn's :c23-attribute-version 202311, has.tsv's rows; no target change) and gcc's recorded run
+(ref-gcc15.edn's stdout 26e290c4..., now byte for byte the .expect's digest). Done: table.edn's :expect all 1, `bin/ci synth`
+(`--check` clean), the exception dropped from test/c/selfref-exceptions.edn (the case judged by its own .expect again);
+`bin/ci check --corpus synth-c23 --only` on the file: pass 1. llvmi's c-O0/c-O2.synth.pp-has-attribute modules are clang's IR,
+whose preprocessing answered the draft dates, so the .expect is not their outcome: arbace/llvm/check.ae's own verdict leaves
+them to lli's record (they pass by it as before). Alternative not taken: a per-front-end expectation in the table. The crops'
+scores are not re-recorded here (one C case moves from gcc's record to its own verdict, two llvm modules the other way).
