@@ -50,6 +50,12 @@
   "A volatile vector of the messages: [line text]."
   nil)
 
+(def ^:dynamic *defer-log*
+  "gc's -d=defer (defer-lines): nil, or a volatile map {:defers [[fn line esc-never]...], :heap
+  #{the variables moved to heap}} the analysis fills: each defer statement with its function
+  (call.go's goDeferStmt: EscNever for a defer at loop depth 1), the escaping variables (finish!)."
+  nil)
+
 (def ^:dynamic *wfile*
   "The file of the function a message is of."
   nil)
@@ -992,6 +998,8 @@
             (heap-hole e))
         c (:call n)
         f (curfn e)
+        _ (when (and defer? *defer-log*)
+            (vswap! *defer-log* update :defers (fnil conj []) [f (:line n) (= 1 (depth e))]))
         sig (when (#{:static :closure :compiled} (:kind c)) (node-type (:callee c)))
         normal (and sig (let [[_ ps rs] (under sig)] (and (empty? ps) (empty? rs))))]
     (if normal
@@ -1733,6 +1741,10 @@
         (let [wrapper (and (map? n) (= :fn (:op n)) (:wrapper n))]
           (when (and (pos? (long *m*)) (pos? (long (get *debug* :zerocopy 0))) (map? n) (= :conv (:op n)) (= :str2bytes (conv-kind n)) (not (has-attr? l attr-mutates)))
             (warn! (lget l :line) "zero-copy string->[]byte conversion"))
+          (when (and *defer-log* (has-attr? l attr-escapes) (name-loc? l))
+            (vswap! *defer-log* update :heap (fnil conj #{}) n))
+          (when (and *defer-log* (name-loc? l) (or (lget l :addrtaken) (lget l :captured)))
+            (vswap! *defer-log* update :unssa (fnil conj #{}) n))
           (if (has-attr? l attr-escapes)
             (if (name-loc? l)
               (when (and (pos? (long *m*)) (not (str/starts-with? (e/o n :name) ".")))
@@ -2362,6 +2374,8 @@
                        (fn-get f :noinline) "marked go:noinline"
                        ;; -race (gc's base.Flag.Race; bin/goi's -race gives the debug map :race)
                        (and (fn-get f :norace) (:race *debug*)) "marked go:norace with -race compilation"
+                       ;; -d=checkptr (gc's base.Debug.Checkptr; bin/goi's -d=checkptr gives the debug map :checkptr)
+                       (and (fn-get f :nocheckptr) (pos? (long (get *debug* :checkptr 0)))) "marked go:nocheckptr"
                        (seq (fn-get f :uintptr-pragmas)) "marked as having an escaping uintptr argument"
                        :else nil)
               [cost r] (if reason [0 reason] (hairy-cost f))
@@ -2533,8 +2547,30 @@
                     x))))]
     (il x false))))
 
+(def ^:private runtime-pkgs
+  "objabi's runtimePkgs (Go 1.27.1's src/cmd/internal/objabi/pkgspecial.go): the packages
+  types.IsRuntimePkg names, which -d=checkptr does not instrument."
+  #{"runtime" "internal/runtime/atomic" "internal/runtime/cgroup" "internal/runtime/exithook" "internal/runtime/gc"
+    "internal/runtime/gc/scan" "internal/runtime/maps" "internal/runtime/math" "internal/runtime/sys"
+    "internal/runtime/syscall/linux" "internal/runtime/syscall/windows" "internal/abi" "internal/bytealg"
+    "internal/byteorder" "internal/chacha8rand" "internal/coverage/rtcov" "internal/cpu" "internal/goarch"
+    "internal/godebugs" "internal/goexperiment" "internal/goos" "internal/profilerecord" "internal/strconv"
+    "internal/stringslite"})
+
+(defn- checkptr-refused?
+  "-d=checkptr's refusals at a call (inline/inl.go): reflect's Value.UnsafeAddr and Value.Pointer
+  called as methods (canInlineCallExpr, #35073), and a function of a runtime package (mkinlcall:
+  \"call to into runtime package function ... in -d=checkptr build\")."
+  [c callee]
+  (when (pos? (long (get *debug* :checkptr 0)))
+    (let [pkg (or (fn-get callee :pkg-path) (:local-pkg *ctx*))
+          nm (or (fn-get callee :local-name) (fn-get callee :name))]
+      (or (contains? runtime-pkgs pkg)
+          (and (= "reflect" pkg) (= :method (:kind c)) (#{"Value.UnsafeAddr" "Value.Pointer"} nm))))))
+
 (defn- try-inline [caller c chain]
   (let [callee (inl-callee caller c)
+        callee (when-not (and callee (checkptr-refused? c callee)) callee)
         inl (when callee (can-inline! callee))
         inl (when-not (and callee (intrinsic? callee)) inl)
         callee (if (and inl (fn-get callee :foreign)) (foreign-body callee) callee)
@@ -3191,6 +3227,118 @@
     (analyze-package r)
     (vec (sort-by (juxt first second) (distinct @*msgs*)))))
 
+(defn- count-returns
+  "ir.Func.NumReturns: the return statements of a function's body (walkReturn's count), its
+  literals' left out (each its own function)."
+  ^long [body]
+  (let [n (volatile! 0)]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (when-not (= :fn (:op x))
+                           (when (= :return (:op x)) (vswap! n inc))
+                           (doseq [[k v] x] (when-not (#{:type :to :sig :field :method :recv-type :iface :form} k) (walk v))))
+                (sequential? x) (doseq [v x] (walk v))
+                :else nil))]
+      (walk body))
+    @n))
+
+(defn defer-lines
+  "gc's -d=defer (Go 1.27.1's ssagen/ssa.go, its ODEFER case, and buildssa's hasOpenDefers; walk's
+  ODEFER: NumDefers, OpenCodedDeferDisallowed): each defer statement of checked package r,
+  \"open-coded defer\" when its function uses open-coded defers (at most 8 defers, every one at
+  loop depth 1, no result moved to heap, returns times defers at most 15), else
+  \"stack-allocated defer\" for a defer at loop depth 1 (EscNever), else \"heap-allocated defer\";
+  [file line message], sorted. nflag: gc's -N (no open-coded defers)."
+  [r nflag]
+  (let [log (volatile! {})]
+    (binding [*m* 0 *msgs* (volatile! []) *defer-log* log]
+      (analyze-package r))
+    (let [heap (:heap @log #{})
+          ;; each defer once (a function may be walked more than once)
+          ds (vals (into {} (for [[f line never :as d] (:defers @log)] [[(System/identityHashCode f) line] d])))
+          by-fn (group-by #(System/identityHashCode (first %)) ds)]
+      (vec (sort (for [[_ fds] by-fn
+                       :let [f (ffirst fds)
+                             nd (count fds)
+                             open (and (not nflag)
+                                       (<= nd 8)
+                                       (every? #(nth % 2) fds)
+                                       (not (some #(contains? heap %) (fn-get f :results)))
+                                       (<= (* (count-returns (fn-get f :body)) nd) 15))]
+                       [_ line never] fds]
+                   [(fn-get f :file) (long (or line 0))
+                    (cond open "open-coded defer" never "stack-allocated defer" :else "heap-allocated defer")]))))))
+
+(defn- same-safe?
+  "ir.SameSafeExpr: l and r the same side-effect-free expression (a place and its value alike)."
+  [l r]
+  (let [op (fn [n] (case (:op n) :place-local :local :place-global :global :place-deref :deref :place-field :field :place-index :index (:op n)))]
+    (and (map? l) (map? r) (= (op l) (op r))
+         (case (op l)
+           (:local :global) (identical? (:obj l) (:obj r))
+           :deref (same-safe? (:x l) (:x r))
+           :field (and (= (:path l) (:path r)) (same-safe? (:x l) (:x r)))
+           :index (and (same-safe? (:x l) (:x r)) (same-safe? (:index l) (:index r)))
+           :const (= (:val l) (:val r))
+           false))))
+
+(defn append-slice-lines
+  "gc's -d=append and -d=slice (Go 1.27.1's ssagen/ssa.go, its OAS case: x = append(x, ...) with
+  the same safe expression on both sides, \"append: len-only update (in local slice)\" when x can
+  be SSA'd (a local neither address-taken, captured nor moved to heap, not a result of a function
+  with a defer), else \"append: len-only update\"; walk/expr.go's walkSlice: x[:] and x[0:] of a
+  slice or a string, \"slice: omit slice operation\") over checked package r: [file line
+  message], sorted. app?, sl?: which of the two; nflag: gc's -N (no SSA, no append's special case)."
+  [r app? sl? nflag]
+  (let [log (volatile! {})]
+    (when app?
+      (binding [*m* 0 *msgs* (volatile! []) *defer-log* log]
+        (analyze-package r)))
+    (let [unssa (into (:heap @log #{}) (:unssa @log #{}))
+          out (volatile! #{})]
+      (doseq [d (:decl-infos r)
+              :when (and (:tree d) (not (:generic d)))
+              :let [file (file-of d)]]
+        (letfn [(has-defer? [body]
+                  (let [found (volatile! false)]
+                    (letfn [(w [x] (cond (map? x) (when-not (= :fn (:op x))
+                                                    (when (= :defer (:op x)) (vreset! found true))
+                                                    (doseq [[k v] x] (when-not (#{:type :to :sig :form} k) (w v))))
+                                         (sequential? x) (doseq [v x] (w v))
+                                         :else nil))]
+                      (w body))
+                    @found))
+                (ssa? [l fdefer results]
+                  (and (not nflag) (= :place-local (:op l))
+                       (not (contains? unssa (:obj l)))
+                       (not (and fdefer (some #(identical? % (:obj l)) results)))))
+                (walk [x fdefer results]
+                  (cond
+                    (map? x)
+                    (do
+                      (case (:op x)
+                        :slice (let [[lo hi mx] (:indexes x)
+                                     u (t/under (:type (:x x)))]
+                                 (when (and sl? (or (nil? lo) (and (const? lo) (= 0 (:val lo)))) (nil? hi) (nil? mx)
+                                            (or (= :string u) (and (vector? u) (= :slice (nth u 0)))))
+                                   (vswap! out conj [file (long (or (:line x) 0)) "slice: omit slice operation"])))
+                        :assign (let [[l] (:lhs x) [a] (:rhs x)]
+                                  (when (and app? (not nflag) (= 1 (count (:lhs x))) (= 1 (count (:rhs x)))
+                                             (= :call (:op a)) (= :builtin (:kind a)) (= "append" (:builtin a))
+                                             (same-safe? l (first (:args a))))
+                                    (vswap! out conj [file (long (or (:line x) 0))
+                                                      (if (ssa? l fdefer results) "append: len-only update (in local slice)" "append: len-only update")])))
+                        nil)
+                      (if (= :fn (:op x))
+                        (walk (:body x) (has-defer? (:body x)) (keep :obj (:results x)))
+                        (doseq [[k v] x] (when-not (#{:type :to :sig :field :method :recv-type :iface :form :obj} k) (walk v fdefer results)))))
+                    (sequential? x) (doseq [v x] (walk v fdefer results))
+                    :else nil))]
+          (let [tree (:tree d)]
+            (walk (:body tree) (has-defer? (:body tree)) (keep #(or (:obj %) (when (e/obj? %) %)) (:results tree)))
+            (when-not (= :func (:op tree)) (walk tree false nil)))))
+      (vec (sort @out)))))
+
 (defn- static-inlined? [x] (boolean (:inl-static x)))
 
 (defn- static-inlined-call?
@@ -3618,6 +3766,7 @@
                                          :noescape (boolean (:go/noescape mt))
                                          :noinline (boolean (:go/noinline mt))
                                          :norace (boolean (:go/norace mt))
+                                         :nocheckptr (boolean (:go/nocheckptr mt))
                                          :uintptrescapes (boolean (:go/uintptrescapes mt))
                                          :uintptr-pragmas (cond-> #{} (:go/uintptrescapes mt) (conj :escapes) (:go/uintptrkeepalive mt) (conj :keepalive))
                                          :wrapper (boolean (or (:esc-dupok d) (:esc-wrapper d)))

@@ -14,6 +14,7 @@
             [arbace.go.check.load :as load]
             [arbace.go.check.env :as env]
             [arbace.go.check.code :as code]
+            [arbace.go.check.types :as t]
             [arbace.go.build :as b])
   (:import (arbace.lang GoInterp)
            (java.io File)))
@@ -208,6 +209,8 @@
   first, in dependency order."
   [root ^File pf args]
   (reset! b/program-mode true)
+  ;; program mode's depth limit (1,000,000, or ARBACE_GOI_DEPTH) and the goroutines' stack sized for it (GC42 (b))
+  (b/set-depth-limit! true)
   ;; os.Args, and goi's program mode from now on (its warnings at the REPL only)
   (b/op "SetOSArgs" (object-array (cons (str (.getName pf)) args)))
   (let [src (cond-> (load/package-source {:dir root} nil @repl/config pf)
@@ -423,6 +426,8 @@
                 [(or f file) (+ (long n) (- line (long el)))]
                 [file line]))))))))
 
+(declare typeassert-lines)
+
 (defn errorcheck
   "Checks the package of package file pf (forms root root) without running it (GR7b, the
   errorcheck programs of §11): its errors on standard output as gc prints them with -C, one
@@ -507,6 +512,34 @@
                              (analyze r (:m gcflags)))]
                     (for [[f l m] el] (relocate (str f ":" l ": " m))))
                   lines)
+          ;; gc's -d=defer: each defer open-coded, stack- or heap-allocated (arbace.go.escape/defer-lines)
+          lines (if (and (not errs?) (pos? (long (get (:debug gcflags) :defer 0))))
+                  (let [_ (require 'arbace.go.escape)
+                        dl (with-bindings {(resolve 'arbace.go.escape/*import-root*) (:std gcflags)
+                                           (resolve 'arbace.go.escape/*tag-cache*) (:tag-cache gcflags)
+                                           (resolve 'arbace.go.escape/*debug*) (merge {:zerocopy 1} (:debug gcflags))
+                                           (resolve 'arbace.go.escape/*inline*) (boolean (:inline gcflags))}
+                             ((resolve 'arbace.go.escape/defer-lines) r (boolean (get (:debug gcflags) :N))))]
+                    (concat lines (for [[f l m] dl] (relocate (str f ":" l ": " m)))))
+                  lines)
+          ;; gc's -d=append,slice: x = append(x, ...)'s len-only update, x[:]'s omitted slice operation
+          ;; (arbace.go.escape/append-slice-lines)
+          lines (let [dbg (:debug gcflags)
+                      app? (pos? (long (get dbg :append 0)))
+                      sl? (pos? (long (get dbg :slice 0)))]
+                  (if (and (not errs?) (or app? sl?))
+                    (let [_ (require 'arbace.go.escape)
+                          al (with-bindings {(resolve 'arbace.go.escape/*import-root*) (:std gcflags)
+                                             (resolve 'arbace.go.escape/*tag-cache*) (:tag-cache gcflags)
+                                             (resolve 'arbace.go.escape/*debug*) (merge {:zerocopy 1} dbg)
+                                             (resolve 'arbace.go.escape/*inline*) (boolean (:inline gcflags))}
+                               ((resolve 'arbace.go.escape/append-slice-lines) r app? sl? (boolean (get dbg :N))))]
+                      (concat lines (for [[f l m] al] (relocate (str f ":" l ": " m)))))
+                    lines))
+          ;; gc's -d=typeassert: its SSA builder's type assertions, inlined or a runtime call
+          lines (if (and (not errs?) (pos? (long (get (:debug gcflags) :typeassert 0))))
+                  (concat lines (for [[f l m] (typeassert-lines r)] (relocate (str f ":" l ": " m))))
+                  lines)
           ;; gc's base.ErrorfAt: at the max-errors-th error (after its repeats are dropped) the
           ;; errors are flushed and the compilation ends with too many errors at its position
           lines (if (and max-errors (>= (count lines) max-errors))
@@ -517,6 +550,32 @@
       (doseq [l lines] (println l))
       (flush)
       (if errs? 1 0))))
+
+(defn- typeassert-lines
+  "gc's -d=typeassert (ssagen's dottype1, Go 1.27.1's src/cmd/compile/internal/ssagen/ssa.go): at
+  each type assertion x.(T) of the package's code, plain or comma-ok, \"type assertion inlined\",
+  or \"type assertion not inlined\" where T is a non-empty interface (a call of the runtime's
+  typeAssert); [file line message], sorted. Generic functions are left out (gc reports at their
+  instances' dynamic assertions, which goi's trees do not stencil), as are type switches (walk
+  compiles them without dottype1)."
+  [r]
+  (let [out (volatile! #{})]
+    (doseq [d (:decl-infos r)
+            :when (and (:tree d) (not (:generic d)))
+            :let [f (:file d)
+                  file (cond (string? f) f (map? f) (:name f) :else nil)]]
+      (letfn [(walk [x]
+                (cond
+                  (map? x) (do (when (and (= :assert (:op x)) (:line x))
+                                 (let [u (t/under (:to x))
+                                       inl (not (and (vector? u) (= :interface (nth u 0)) (not (t/empty-interface? (:to x)))))]
+                                   (vswap! out conj [file (long (:line x)) (if inl "type assertion inlined" "type assertion not inlined")])))
+                               (doseq [[k v] x]
+                                 (when-not (#{:type :to :sig :field :method :recv-type :iface :form :obj} k) (walk v))))
+                  (sequential? x) (doseq [v x] (walk v))
+                  :else nil))]
+        (walk (:tree d))))
+    (sort @out)))
 
 (defn -main
   "bin/goi run's Arbace side: ROOT NS [ARG...]; --errorcheck [--lang goV] [--max-errors N] [--raw]
