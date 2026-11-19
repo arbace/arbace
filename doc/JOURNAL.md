@@ -12921,3 +12921,24 @@ fallthroughs), its output gc's (printed by repr/go, built by TamaGo's go): base 
 programs of test/goi/run pass on the checkout's goi (ARBACE_PATH, RT.toolSource). pyexpat probe: chardata, buffered, default
 and comment handlers all parse. arbace/go/build.ae is embedded: gate_key moves (the executables rebuild at the next gate).
 Not taken: rewriting the fallthrough in expat's Go (hides the bug from every other interpreted package).
+
+## 2026-11-19: n-py-eval: PyConfig_Get in pyi's C API (test_compile, test_dis, test_marshal, test_code import)
+
+The ranking of pyi's eval failures (n-py-rec's records run, 330 modules finished at 17:01; .tmp/goal/py-eval-causes-1119.md)
+put first, by methods, four modules that did not import: test.support.requires_debug_ranges() calls
+`_testcapi.config_get('code_debug_ranges')` at import, and _testcapi (Modules/_testcapi/config.c on ci over pyi's handles)
+reached PyConfig_Get, which pyi's C API did not provide ("NotImplementedError: pyi's C API does not provide PyConfig_Get
+(queue 262)": 451 methods, class :capi-port). Added go/arbace/pyctypes/capi_config.ae: PyConfig_Get, PyConfig_GetInt and
+PyConfig_Names after CPython 3.14.10's Python/initconfig.c (PYCONFIG_SPEC's public and read-only members and
+PYPRECONFIG_SPEC's, linux, no Py_STATS/Py_DEBUG/Py_GIL_DISABLED): a SYS_ATTR member read from sys (lost sys.NAME a
+RuntimeError), write_bytecode and int_max_str_digits from sys as config_get does, the members sys.flags mirrors from pyi's
+sys.flags (use_environment, site_import, user_site_directory negated), the rest the defaults of a python3 run from its
+command line (code_debug_ranges unless -X no_debug_ranges or PYTHONNODEBUGRANGES; hash_seed and use_hash_seed from
+PYTHONHASHSEED; the stdio and filesystem encodings from sys); an unknown name "ValueError: unknown config option name: N",
+PyConfig_GetInt's TypeError and OverflowError as CPython's. Printed, edited, gofmt and go vet clean, read back
+(bin/pyi runtime print|read). Proof (`bin/pyi check --only` of the four, on the gate's executable 0753b529a43f with the
+compiled runtime, PYI_RUNTIME=compiled, pyctypes interpreted from the checkout): from 0 to 352 passing (test_compile 154
+of 185, test_dis 125 of 145, test_marshal 63 of 79, test_code 10 of 42); the controls' subjects test_bool 31 and test_getopt
+10 of 10. The 20 methods now failing in no class are new rows for the classes (code objects that are pyi's IR: code()
+and code.replace of co_varnames, co_lnotab, code hashes and equality, a code object's weakref; match-case source positions
+None for 9; dis's positions of two programs).
