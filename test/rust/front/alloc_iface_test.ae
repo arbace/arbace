@@ -208,7 +208,24 @@
      #(second (get-in % [:impls "std::ffi::os_str::{impl#53}" :trait])) "alloc::slice::Join"]]
    "std::io::stdio"
    [["the root's alias alloc_crate in the index: io's `pub(crate) use alloc_crate::io::SpecReadByte`"
-     #(second (get-in % [:impls "std::io::stdio::{impl#9}" :trait])) "alloc::io::util::SpecReadByte"]]})
+     #(second (get-in % [:impls "std::io::stdio::{impl#9}" :trait])) "alloc::io::util::SpecReadByte"]]
+   ;; queue 400: libc's and hashbrown's names and aliases read natively from library/vendor
+   "std::os::unix::net::addr"
+   [["libc's struct by its defining module through libc's globs (`libc::sockaddr_un`), socklen_t its alias's u32"
+     #(get-in % [:adts "std::os::unix::net::addr::SocketAddr" :variants 0 :fields])
+     '[["addr" (adt "libc::unix::linux_like::sockaddr_un" [])] ["len" (prim "u32")]]]
+    ["new's `F: FnOnce(*mut libc::sockaddr, *mut libc::socklen_t) -> c_int`: its Output i32"
+     #(last (get-in % [:fns "std::os::unix::net::addr::{impl#0}::new" :predicates]))
+     '(proj "core::ops::function::FnOnce::Output" [(param 0 "F") (tuple [(ptr true (adt "libc::unix::linux_like::sockaddr" [])) (ptr true (prim "u32"))])] (prim "i32"))]
+    ["negative: no libc type left unresolved in the module's facts"
+     #(boolean (some (fn [[_ f]] (str/includes? (pr-str f) "unresolved")) (concat (:fns %) (:adts %)))) false]]
+   "std::collections::hash::map"
+   [["hashbrown's HashMap by its defining module (`hashbrown::hash_map as base`, `pub use crate::map::*`)"
+     #(get-in % [:adts "std::collections::hash::map::HashMap" :variants 0 :fields])
+     '[["base" (adt "hashbrown::map::HashMap" [(param 0 "K") (param 1 "V") (param 2 "S") (param 3 "A")])]]]
+    ["an iterator's base: hashbrown's Iter with its lifetime"
+     #(get-in % [:adts "std::collections::hash::map::Iter" :variants 0 :fields])
+     '[["base" (adt "hashbrown::map::Iter" [(lt "'a") (param 1 "K") (param 2 "V")])]]]]})
 
 (defn -main [lib & [front cache & files]]
   (let [bad (atom 0)
@@ -347,6 +364,65 @@
                (= ["std" "core" "core"] (mapv #(binding [cc/*crate* %] (cc/prelude-crate)) ["std" "alloc" "core"])))
         (check "std's root aliases alloc as alloc_crate; negative: alloc's root none"
                (and (= {"alloc_crate" "alloc"} (get resolve/root-extern-aliases "std")) (nil? (get resolve/root-extern-aliases "alloc"))))
+        ;; queue 400: std's vendored dependencies, libc and hashbrown, read natively (their cfg, roots, item macros, module
+        ;; trees, the extern prelude and the index's paths through them)
+        (check "libc's cfg: rustc-dep-of-std's features, its build script's freebsd12 and musl_v1_2_3"
+               (let [c (binding [cc/*crate* "libc"] (cc/crate-cfg))]
+                 (and (= #{"rustc-dep-of-std" "align" "rustc-std-workspace-core"} (get c "feature")) (get c "freebsd12") (get c "musl_v1_2_3"))))
+        (check "hashbrown's cfg: rustc-dep-of-std's closure (nightly, core, alloc, rustc-internal-api); negative: no default-hasher, no raw-entry"
+               (let [f (get (binding [cc/*crate* "hashbrown"] (cc/crate-cfg)) "feature")]
+                 (and (= #{"rustc-dep-of-std" "nightly" "core" "alloc" "rustc-internal-api"} f) (not (f "default-hasher")) (not (f "raw-entry")))))
+        (check "a dependency's root under library/vendor; the library's crates' at LIB/CRATE/src"
+               (and (re-find #"/vendor/libc-0\.2\.189/src/lib\.rs$" (cc/crate-lib-file lib "libc"))
+                    (re-find #"/vendor/hashbrown-0\.17\.1/src/lib\.rs$" (cc/crate-lib-file lib "hashbrown"))
+                    (re-find #"/alloc/src/lib\.rs$" (cc/crate-lib-file lib "alloc"))))
+        (check "negative: a crate neither in the library nor vendored is refused"
+               (try (cc/crate-lib-file lib "nosuchcrate") false (catch Throwable _ true)))
+        (let [arm #'cc/item-macro-arm pt #'cc/parse-text
+              fg (fn [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+              md (fn [text] (nth (fg (first (fg (pt text) :items)) :kind) 2))]
+          (check "an item macro without parameters: its body's inside" (= [[1 25] [1 43]] (arm (md "macro_rules! p { () => { mod t; fn g() {} }; }"))))
+          (check "negative: a macro with parameters, or of two arms, is none"
+                 (and (nil? (arm (md "macro_rules! p { ($x:ident) => { mod $x; }; }")))
+                      (nil? (arm (md "macro_rules! p { () => { mod t; }; (x) => { mod u; }; }"))))))
+        (let [im (cc/crate-item-macros (cc/crate-lib-file lib "libc"))
+              mods (binding [cc/*crate* "libc"] (cc/module-files lib))
+              ps (set (map :path mods))]
+          (println "     libc's module files:" (count mods))
+          (check "libc's item macros: prelude!, from macros.rs" (= ["prelude"] (vec (keys im))))
+          (check "libc's tree: prelude!()'s `mod types;`, the unix arm's linux_like down to x86_64, new's musl sys::socket"
+                 (every? ps ["libc::types" "libc::primitives" "libc::unix::linux_like" "libc::unix::linux_like::linux::musl::b64::x86_64"
+                             "libc::new::musl::sys::socket"]))
+          (check "negative: no other platform's module (windows, glibc, apple)"
+                 (not-any? #(re-find #"windows|glibc|apple|::linux::gnu" %) ps))
+          (let [idx (binding [cc/*crate* "libc"] (cc/crate-index (filter #(#{"libc" "libc::unix"} (:path %)) mods)))]
+            (check "libc's index: prelude!()'s inline `mod prelude` with its re-exports"
+                   (some #(= ["c_int" "libc::c_int"] %) (get-in idx [:names "libc::prelude" :reexports])))
+            (check "libc's index: the root's and unix's globs (`pub use unix::*`, `pub use linux_like::*`)"
+                   (and (some #{"libc::unix"} (get-in idx [:names "libc" :globs])) (some #{"libc::unix::linux_like"} (get-in idx [:names "libc::unix" :globs]))))))
+        (let [hb (binding [cc/*crate* "hashbrown"] (cc/module-files lib))]
+          (check "hashbrown's tree: map, set, rustc_entry (rustc-internal-api); negative: no raw_entry"
+                 (let [ps (set (map :path hb))] (and (every? ps ["hashbrown::map" "hashbrown::set" "hashbrown::rustc_entry"]) (not (ps "hashbrown::raw_entry"))))))
+        (let [fnm #'cc/file-names pt #'cc/parse-text fg (fn [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+              its (fg (pt "use hashbrown::hash_map::{self as base, RustcOccupiedError};\nuse stdalloc::vec::Vec;") :items)]
+          (check "std's index: `use hashbrown::hash_map::{self as base, ..}` names hashbrown's module"
+                 (some #(= ["base" "hashbrown::hash_map"] %) (get-in (binding [cc/*crate* "std"] (fnm its "std::collections::hash::map")) ["std::collections::hash::map" :reexports])))
+          (check "hashbrown's index: its root's alias stdalloc is alloc"
+                 (some #(= ["Vec" "alloc::vec::Vec"] %) (get-in (binding [cc/*crate* "hashbrown"] (fnm its "hashbrown::map")) ["hashbrown::map" :reexports])))
+          (check "negative: core names no hashbrown (a uniform path of the module)"
+                 (some #(= ["base" "core::x::hashbrown::hash_map"] %) (get-in (binding [cc/*crate* "core"] (fnm its "core::x")) ["core::x" :reexports]))))
+        (let [names {"std" {:kind "Mod" :children [{:ns :type :name "a" :kind "Mod" :path "std::a"}]}
+                     "std::a" {:kind "Mod" :children [{:ns :type :name "unix" :kind "Mod" :path "std::a::unix"}]
+                               :reexports [["imp" "std::a::unix"] ["File" "std::a::imp::File"]]}
+                     "std::a::unix" {:kind "Mod" :children [{:ns :type :name "File" :kind "Struct" :path "std::a::unix::File"}]}}
+              file-of (fn [m] (some #(when (= "File" (:name %)) (:path %)) (:children (get m "std::a"))))]
+          (check "a re-export through a module's renamed import (`use unix as imp; pub use imp::File`): unix's File"
+                 (= "std::a::unix::File" (file-of (binding [cc/*crate* "std"] (cc/with-core-names {} names)))))
+          (check "negative: core's and alloc's index as before (no File through imp)"
+                 (nil? (file-of (binding [cc/*crate* "alloc"] (cc/with-core-names {} names))))))
+        (check "std's extern prelude takes libc and hashbrown; hashbrown's alloc, aliased stdalloc"
+               (and (every? (get resolve/crate-deps "std") ["libc" "hashbrown"]) (= #{"core" "alloc"} (get resolve/crate-deps "hashbrown"))
+                    (= {"stdalloc" "alloc"} (get resolve/root-extern-aliases "hashbrown"))))
         ;; the helper's shape written and read back
         (let [facts {:fns {"alloc::f" {:generics ['(type "T")] :parent-count 0 :has-self false :predicates [] :inputs [] :output '(param 0 "T")
                                        :variadic false :safety "Safe" :abi "\"Rust\"" :const false :promotable false :nounwind false :native true}}
@@ -365,7 +441,7 @@
             mods (binding [cc/*crate* crate] (cc/module-files lib))
             ms (vec (for [file files] (some #(when (= (.getCanonicalPath (File. ^String file)) (:file %)) %) mods)))
             m (peek ms)
-            setup (binding [cc/*crate* crate] (ac/crate-setup crate front cache mods))
+            setup (binding [cc/*crate* crate] (ac/crate-setup crate front cache mods lib))
             mps (map :path mods)
             native (binding [cc/*crate* crate] (ac/pass crate lib setup ms mps 1))
             facts (ac/facts-of-modules (ac/crate-facts native crate) mps [(:path m)])
