@@ -396,14 +396,36 @@ build_tests() {
 # keys the next compilation soundly (an early cutoff, as GD3's load closures key the gate's steps). No
 # record: no key (the compilation runs and records one). Until round 54 (GTS28 (a)) arbace/ less a list
 # of namespaces the compilation was said never to load: the crops' namespaces moved it, and j2g's and
-# repr/go's, which c2j loads, did not
+# repr/go's, which c2j loads, did not. Review 402: also the compilation's own commands (reader_compile's and
+# reader_closure's text), and the startup's scripts the checkout may hold on ARBACE_PATH (user.ae, data_readers.ae:
+# RT's init and arbace.core load them, RT.load does not log them); not jdk/javac/provenance.edn (repr/java's
+# output on the tool, rewritten after each reader change: arbace_javac_key leaves it out likewise)
 reader_key() {
   local closure=$dir/aot-reader.loaded
   [ -f "$closure" ] || { echo none; return 0; }
-  (cd "$root" && { echo "reader-key: the load closure (round 54)"; arbace_reader_runtime_key "$root"
-                   find arbace/repr/java.ae arbace/repr/java jdk/javac overlay/jdk/javac jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
-                   while read -r f; do if [ -f "$f" ]; then sha256sum "$f"; else echo "missing $f"; fi; done < "$closure"; } \
-     | sha256sum | cut -c1-64)
+  { reader_key_base
+    (cd "$root" && while read -r f; do if [ -f "$f" ]; then sha256sum "$f"; else echo "missing $f"; fi; done < "$closure"); } \
+    | sha256sum | cut -c1-64
+}
+
+# reader_key_base: reader_key's lines but the closure's
+reader_key_base() {
+  (cd "$root" && { echo "reader-key: the load closure (round 54, review 402)"; arbace_reader_runtime_key "$root"
+                   sed -n '/^reader_compile() {/,/^}/p; /^reader_closure() {/,/^}/p' bin/arbace-go | sha256sum
+                   find arbace/repr/java.ae arbace/repr/java jdk/javac overlay/jdk/javac jdk/edge.edn -type f ! -path jdk/javac/provenance.edn \
+                     | LC_ALL=C sort | xargs -d '\n' sha256sum
+                   for f in user.ae user.clj user.cljc data_readers.ae data_readers.clj data_readers.cljc; do
+                     [ ! -f "$f" ] || sha256sum "$f"; done; })
+}
+
+# reader_guard: reader_key_base and every file of arbace/ but the crops' (a superset of the closure: its scriptbases are
+# arbace/'s, and no crop's; the crops' left out as arbace_javac_key, the :javac host's identity, leaves them out).
+# reader_key is computed after the reader's compilation, from the closure it recorded; build_java compares this
+# before the first tool build and after the compilation and records no key when a source changed in between, so
+# that a tree compiled from older sources is never kept under the newer sources' key (review 402)
+reader_guard() {
+  { reader_key_base; (cd "$root" && find arbace -type f "${arbace_not_crops[@]}" | LC_ALL=C sort | xargs -d '\n' sha256sum); } \
+    | sha256sum | cut -c1-64
 }
 
 # reader_closure LOG OUT: the files of the scriptbases LOG names (RT.load's ARBACE_LOADED_LOG: each load's
@@ -455,7 +477,7 @@ reader_compile() {
 
 # build_java DIR...: javac's tool build (--build-java)
 build_java() {
-  local t0 d extra=() saved rkey jkey a
+  local t0 d extra=() saved rkey jkey a guard
   t0=$(date +%s)
   # the key of the tool's sources (bin/lib/javac-key.bash, JFS30 (b)), recorded beside each
   # executable when it is built: the provenance files repr/java writes on it name it
@@ -479,13 +501,19 @@ build_java() {
     if [ "$rkey" = none ] || [ "$(cat "$dir/aot-reader.key" 2>"$discard")" != "$rkey" ] || [ ! -f "$dir/aot-reader/packages.edn" ]; then
       echo "== javac's tool build, first (the host that compiles repr/java's reader): ${j2g_args[*]}" >&2
       rm -f "$dir/aot-reader.key"
+      guard=$(reader_guard)
       saved=("${j2g_args[@]}")
       build || return 1
       j2g_args=("${saved[@]}")
       reader_compile "$dir/$(host_arch)/$exe" "$dir/aot-reader" || return 1
-      # the key of the closure just recorded (reader_key reads $dir/aot-reader.loaded)
+      # the key of the closure just recorded (reader_key reads $dir/aot-reader.loaded), when the sources are those
+      # the build started from (review 402)
       rkey=$(reader_key)
-      echo "$rkey" > "$dir/aot-reader.key"
+      if [ "$(reader_guard)" = "$guard" ]; then
+        echo "$rkey" > "$dir/aot-reader.key"
+      else
+        echo "arbace-go: warning: repr/java's reader's sources changed during its compilation: no key recorded (the next --build-java compiles it again)" >&2
+      fi
     else
       echo "== repr/java's reader compiled: $dir/aot-reader (key ${rkey:0:12})" >&2
     fi

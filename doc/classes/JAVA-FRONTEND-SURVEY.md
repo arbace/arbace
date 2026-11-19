@@ -7421,6 +7421,19 @@ killer stopped it after 1,744 s (`Killed process 998 (arbace)`, 40.6 GB anon). S
 on a host whose repr/go is evaluated peaks above 50 GiB (`arbace.build.go`'s `read-all` holds every forms file of the 215 MB
 program at once); the night's, 34.2 GiB.
 
+**Review 402 (2026-11-19, the VM): three fixes to the key.** (1) The key was recorded after the first tool build and the
+reader's compilation, from the files as they were then; the round-54 code had computed it from them, where the old code
+recorded the key it computed before the build: a source changed during the build (the first tool's compiled core and c2j are
+the build's, the compilation's macros theirs) was keyed with a tree made before it, kept until the next change. Now
+`reader_guard` (the key's inputs but the closure, and arbace/ but the crops) is compared before the build and after the
+compilation, and no key is recorded when it moved. (2) `reader_compile`'s and `reader_closure`'s own text is hashed (a
+change to the compilation's script, its filter or its environment changed the tree under the same key), and the startup
+scripts on `ARBACE_PATH` (the checkout root's `user.ae`, `data_readers.ae` and their `.clj`, `.cljc`), which RT's init and
+arbace.core load without RT.load's log (probed: a root `user.ae` ran, a root `data_readers.ae` bound its tag, the log empty
+of both; none is in the repository). (3) `jdk/javac/provenance.edn` left out, as `arbace_javac_key` leaves it out: repr/java's
+output on the tool, rewritten by the provenance commits that follow a reader change (17 of the 45 commits since 2026-10-20
+that touched it changed nothing else of javac's world or repr/java), each a needless first tool build.
+
 **`:mem-gib` stays 51 (round 54).** 38 (1.1 x the night's 34.2 GiB) was the plan; the build above peaked over 53 GiB when its
 printer was evaluated, so 51 is not slack. Not changed.
 
