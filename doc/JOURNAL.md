@@ -13002,3 +13002,7 @@ lane 2's serial chain (repr-go, goi, goi-check-full, goi-aot.linux-amd64 ending 
 had them on it. `gate.crops check` 0 problems; crops-test passes on the final table. bin/gate-tests run once in the new form
 (4 jobs): gate-reads-test's traced nested run in under 4 minutes (110 before), failing only on the three tests above and on a
 crops-test that read the table while the reverted wai-go-aot change was in it.
+  The run's whole: 17 min 51 s wall, 0.95 GiB peak (128 min and 3.8 GiB on the night), status 1 on those four and on
+  gate-tests-test, whose cases run gate-reads-test (and so the nested run) again: its symlinked checkout's case fails on the same
+  nested failures, and its claude-md planner case lost its scratch `logs/files.sha256` (FileNotFoundException) beside the others:
+  not yet told apart from the base's state; the night's gate-tests or a serial `GATE_TESTS_JOBS=1` run decides it.
