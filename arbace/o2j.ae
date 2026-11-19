@@ -166,11 +166,20 @@
       (throw (ex-info (str "constant " h) {:const c})))))
 
 (defn- const-form
-  "A constant as an expression: small ints inline, the rest a static field of the unit."
+  "A constant as an expression: a static field of the unit, one per int value (queue 414: (Long/valueOf n) in place was a call
+  of a host method, by reflection at the light level, at each evaluation)."
   [c]
   (let [[h a] c]
     (if (#{'int 'char} h)
-      (list 'Long/valueOf a)
+      (if-let [ints (:ints *unit*)]
+        (let [v (long a)]
+          (or (get @ints v)
+              (let [k (fresh "i")
+                    f (symbol (str (unit-class)) (name k))]
+                (swap! (:consts *unit*) conj [k (list 'Long/valueOf v)])
+                (swap! ints assoc v f)
+                f)))
+        (list 'Long/valueOf a))
       (let [k (fresh "k")]
         (swap! (:consts *unit*) conj [k (const-init c)])
         (symbol (str (unit-class)) (name k))))))
@@ -250,12 +259,14 @@
     (if (seq bindings) (list 'let bindings body) body)))
 
 (defn- call-form
-  "The application of function form f to argument forms (already evaluated, simple)."
+  "The application of function form f to argument forms (already evaluated, simple). A closure is cast in place, Rt/fn called
+  only for another value (queue 414: at the light level each interpreted call is a frame)."
   [f args]
   (let [n (count args)]
     (if (<= 1 n 6)
-      (let [c (fresh "c$")]
-        (list 'let [c (list 'ocaml.rt.Rt/fn f)]
+      (let [c (fresh "c$") v (fresh "f$")]
+        (list 'let [v f
+                    c (list 'if (list 'instance? 'ocaml.rt.Closure v) (list 'cast 'ocaml.rt.Closure v) (list 'ocaml.rt.Rt/fn v))]
               (list 'if (list '== (list '.-arity c) n)
                     (apply list (symbol (str ".a" n)) c args)
                     (list 'ocaml.rt.Rt/ap c (list 'new 'Object/1 (vec args))))))
@@ -292,9 +303,13 @@
 
 (defn- clear "The forms that clear temporaries ts." [ts] (map (fn [t] (list 'set! t nil)) ts))
 
+(def ^:private bt-pop
+  "Bt/pop in place (queue 414)."
+  '(set! ocaml.rt.Bt/sp (unchecked-dec-int ocaml.rt.Bt/sp)))
+
 (defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
   (let [r (fresh "r$")]
-    (list 'do (list 'ocaml.rt.Bt/push ev) (concat (list 'let [r f]) (clear ts) [(list 'ocaml.rt.Bt/pop) r]))))
+    (list 'do (list 'ocaml.rt.Bt/push ev) (concat (list 'let [r f]) (clear ts) [bt-pop r]))))
 
 (defn- apply-ev-node
   "A non-tail application with an after-event: its slot entered once the arguments and the function are evaluated (bytegen's
@@ -304,7 +319,7 @@
     (let [r (fresh "r$")]
       (list 'do (list 'ocaml.rt.Bt/push ev)
             (with-all-args ctx (into [f] args)
-                           (fn [as ts] (concat (list 'let [r (call-form (first as) (rest as))]) (clear ts) [(list 'ocaml.rt.Bt/pop) r])))))
+                           (fn [as ts] (concat (list 'let [r (call-form (first as) (rest as))]) (clear ts) [bt-pop r])))))
     (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
 
 (declare prim-value const-arg)
@@ -386,7 +401,7 @@
               :group (not-empty (dissoc group self-id)) :tails tails}
         b (realize (expr ictx body true))
         ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
-        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (list 'do (list 'ocaml.rt.Rt/tick) b))) b)
+        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (list 'do '(ocaml.rt.Rt/tick) b))) b)
         ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
         ;; of another of the group; its entry calls tb and bounces (Rt/bounce: each TailCall's function's tb in turn, in one
         ;; frame). Every function of such a group has a tb, being a TailCall's target or not
@@ -399,7 +414,7 @@
         ;; the call depth (OC92 (a)): counted on entry, given back on the way out (an exception's way out is the handler's,
         ;; trywith-node)
         r (fresh "r$")
-        b (list 'do (list 'ocaml.rt.Rt/enter) (list 'let [r b] (list 'ocaml.rt.Rt/leave) r))]
+        b (list 'do '(ocaml.rt.Rt/enter) (list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r))]
     (when (= kind :tupled) (throw (ex-info "tupled function" {})))
     (swap! (:classes *unit*) conj
            (concat
@@ -467,7 +482,41 @@
 
 (defn- num-arg [^String n] (Long/parseLong (first (str/split (str/trim (subs n (inc (.indexOf n " ")))) #"\s+"))))
 
-(defn- rt [m & args] (apply list (symbol "ocaml.rt.Rt" (name m)) args))
+(declare inline-prim)
+
+(defn- rt [m & args]
+  (or (inline-prim m args)
+      (apply list (symbol "ocaml.rt.Rt" (name m)) args)))
+
+;; ---- the hot primitives in place (queue 414): at the light level each call of an Rt method is an interpreted call, a frame
+;; allocated, and the collector's work after it; the fast path (ints that are Longs, a block's field) is written into the code,
+;; the Rt method called for any other value, which does what it did (its error, its other representations)
+
+(defn- bind-vals
+  "Calls (k syms) with forms xs bound to locals, in order, where a form is not already a symbol (each evaluated once)."
+  [xs k]
+  (let [ps (mapv (fn [x] (if (symbol? x) [x nil] [(fresh "v$") x])) xs)
+        bs (vec (mapcat (fn [[t x]] (when (some? x) [t x])) ps))
+        body (k (mapv first ps))]
+    (if (seq bs) (list 'let bs body) body)))
+
+(defn- unbox [x] (list 'long (list 'cast 'Long x)))
+
+(defn- inline-prim
+  "The form of Rt's primitive m on args with its fast path in place, nil when m has none."
+  [m args]
+  (let [slow (fn [& xs] (apply list (symbol "ocaml.rt.Rt" (name m)) xs))
+        ints? (fn [xs] (cons 'and (map #(list 'instance? 'Long %) xs)))]
+    (cond
+      (= 'b m) (list 'if (first args) 'ocaml.rt.Rt/TRUE 'ocaml.rt.Rt/FALSE)
+      (= 't m)
+      (bind-vals args (fn [[x]] (list 'if (list 'instance? 'Long x) (list 'not (list '== 0 (unbox x))) true)))
+      (= 'field m)
+      (let [[a n] args]
+        (bind-vals [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x)
+                                       (list 'aget (list '.-f (list 'cast 'ocaml.rt.Block x)) n)
+                                       (slow x n)))))
+      :else nil)))
 
 (def ^:private int-ops
   {"~" 'neg "+" 'add "-" 'sub "*" 'mul "/" 'div "/u" 'div "mod" 'mod "mod_unsafe" 'mod "and" 'land
@@ -526,7 +575,13 @@
       (str/starts-with? n "+:=") (list 'ocaml.rt.Rt/setField a 0 (rt 'offset (rt 'field a 0) (Long/parseLong (subs n 3))))
       (= n "not") (rt 'b (list 'not (rt 't a)))
       (#{"makeblock" "makemutable"} word)
-      (let [tag (num-arg n)] (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as))))
+      (let [tag (num-arg n) w (count as)]
+        (if (and (not= tag 254) (<= 1 w 256))
+          ;; Rt/block in place (queue 414): its words counted (a minor heap's block of w fields and its header), then the block
+          (list 'do (list 'set! 'ocaml.rt.Rt/minorWords (list 'unchecked-add 'ocaml.rt.Rt/minorWords (inc w)))
+                (list 'when 'ocaml.rt.ExtGc/memprofSampling (list 'ocaml.rt.ExtGc/memprofSample w))
+                (list 'new 'ocaml.rt.Block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as))))
+          (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))))
       (= word "makefloatblock") (rt 'block 254 (list 'new 'Object/1 (vec as)))
       (= word "makelazyblock") (list 'ocaml.rt.Block. 246 (list 'new 'Object/1 (vec as)))
       (= word "makeforwardblock") (list 'ocaml.rt.Block. 250 (list 'new 'Object/1 (vec as)))
@@ -709,14 +764,17 @@
 
 (defn- for-node [ctx [id lo hi dir body]]
   (let [l (fresh "lo$") h (fresh "hi$") i (fresh "i$") s (munge-id id)
-        up (= dir :to)]
+        up (= dir :to)
+        lv (fresh "lv$") hv (fresh "hv$")]
+    ;; the bounds unboxed once (queue 414)
     (list 'let [l (expr ctx lo false) h (expr ctx hi false)]
-          (list 'when (list (if up '<= '>=) (rt 'l l) (rt 'l h))
-                (list 'loop [(with-meta i {:tag 'long}) (rt 'l l)]
-                      (list 'ocaml.rt.Rt/tick)
-                      (list 'let [s (list 'Long/valueOf i)] (expr (assoc-in ctx [:env id] s) body false))
-                      (list 'when (list 'not (list '== i (rt 'l h)))
-                            (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i)))))
+          (list 'let [(with-meta lv {:tag 'long}) (rt 'l l) (with-meta hv {:tag 'long}) (rt 'l h)]
+                (list 'when (list (if up '<= '>=) lv hv)
+                      (list 'loop [(with-meta i {:tag 'long}) lv]
+                            '(ocaml.rt.Rt/tick)
+                            (list 'let [(with-meta s {:tag 'Object}) i] (expr (assoc-in ctx [:env id] s) body false))
+                            (list 'when (list 'not (list '== i hv))
+                                  (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i))))))
           UNIT)))
 
 (defn- flatten-seq [x]
@@ -742,7 +800,7 @@
       ifthenelse (let [[c t f] b] (list 'if (test-form ctx c) (expr ctx t tail?) (expr ctx f tail?)))
       sequence (let [xs (flatten-seq x)]
                  (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
-      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) (list 'ocaml.rt.Rt/tick) (expr ctx body false)) UNIT))
+      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) '(ocaml.rt.Rt/tick) (expr ctx body false)) UNIT))
       for (for-node ctx b)
       assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
       send (let [[kind m o args] b
@@ -765,7 +823,7 @@
   [{:keys [name code]}]
   (let [cls (symbol (class-name name))]
     (binding [*unit* {:class (symbol (str (pkg-of name) "." cls)) :name name :n (atom 0)
-                      :classes (atom []) :consts (atom []) :slots (atom []) :missing (atom {})}]
+                      :classes (atom []) :consts (atom []) :ints (atom {}) :slots (atom []) :missing (atom {})}]
       (let [[_ [body]] (node-body code)
             init (realize (expr {:env {} :exits {}} body false))
             classes (mapv realize @(:classes *unit*))
