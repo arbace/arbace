@@ -292,14 +292,21 @@ Prior art:
     which judge the records and never `--record`: the records are recorded by hand (`--record`), and `bin/reap` judges them.
   - The other crops, repr/ocaml (`bin/repr-ocaml`, `bin/oi`), repr/scheme (`bin/repr-scheme`, `bin/si`), repr/cpp and repr/llvm
     (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`), repr/python and pyi (`bin/repr-python`, `bin/pyi`; doc/python/PYTHON-SURVEY.md, the
-    Mac VM's line, merged with batch 1): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm,python}`, `arbace/scheme/`, `arbace/cpp/`,
-    `arbace/python/`) are evaluated from the checkout, not embedded (`arbace/j2g/embed.ae`'s exclusions; pyi's embedding waits for the
-    re-seed window W, PYS18 (a)), and out of every key: since the keys commit (PYS30 (a), the user 2026-11-04; batch 1, 2026-11-07)
-    one list, `bin/lib/version.bash`'s `arbace_crop_paths` (the crops' namespaces, their Go forms `go/arbace/{oi,scm,scminterp,py,
-    expat,pyexpat,hs,libm}` and pyi's lazy modules `go/arbace/{clib,pybz2,pylzma,pyzstd,pyssl,pysqlite3}`, OCaml's `jdk/ocaml/`, the
-    crops' script libraries `bin/lib/{oi,repr-cpp,cppi,rsi,hsi,si,pyi,repr-*,crops}`), is left out by `gate_key`, `gate_rest_key`,
-    `arbace_runtime_key`, `arbace_embedded_sources`, `arbace_javac_key` and `arbace_javac_rest_key`, and the audit's hosts take it
-    (`test/gate/audit.ae`'s `crop-rules`; `test/gate/gate-key-crops-test.bash`): a crop's commit under it moves none of the keys.
+    Mac VM's line, merged with batch 1): since the re-seed window W2 (doc/W-WINDOW.md; CP180 (a), SC230 (a), PYS28 (a), W-D1 (a))
+    repr/scheme's, repr/cpp's, repr/llvm's and repr/python's namespaces, `arbace/scheme/`, `arbace/cpp/` and `arbace/python/` are
+    embedded and compiled with the program (RT.toolSource reloads a changed one from the checkout), so in `gate_key` and the javac
+    keys, and their Go forms si's `go/arbace/{scm,scminterp}`, oi's `go/arbace/oi`, pyi's `go/arbace/py` and the `go/arbace/libm` port
+    are copied into the program and listed in goi's table, out of `arbace_runtime_key` alone (`bin/lib/version.bash`'s
+    `arbace_runtime_not`, W-P3 (a)); repr/ocaml's namespaces stay evaluated from the checkout, not embedded (`arbace/j2g/embed.ae`'s
+    exclusions). Out of every key: since the keys commit (PYS30 (a), the user 2026-11-04; batch 1, 2026-11-07) one list,
+    `bin/lib/version.bash`'s `arbace_crop_paths` (the namespaces no executable embeds: repr/haskell, repr/rust, repr/ocaml, rsi's
+    `arbace/rust`, llvmi's `arbace/llvm`, repr/asm, `arbace/asm/`, repr/wasm, `arbace/wasm/`, and C++'s oracle check tools
+    `arbace/repr/cpp/{ncheck,tcheck}.ae` and `arbace/repr/llvm/{mutate,expect}.ae`, W-P4 (a); the Go forms `go/arbace/{oicapi,expat,
+    pyexpat,hs,x86i,emu,a64i,wai}`, pyi's lazy modules `go/arbace/{clib,pybz2,pylzma,pyzstd,pyssl,pysqlite3,pyctypes}`, OCaml's
+    `jdk/ocaml/`, the crops' script libraries `bin/lib/{oi,repr-cpp,cppi,rsi,hsi,si,pyi,repr-*,crops,wai}`), is left out by `gate_key`,
+    `gate_rest_key`, `arbace_runtime_key`, `arbace_embedded_sources`, `arbace_javac_key` and `arbace_javac_rest_key`, and the audit's
+    hosts take it (`test/gate/audit.ae`'s `crop-rules`; `test/gate/gate-key-crops-test.bash`): a crop's commit under it moves none of
+    the keys.
     Since batch 1, C++'s, Scheme's and OCaml's steps are in the gate (GT9, doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)",
     GTS210-GTS223, GTS240-GTS247): spliced into `test/gate/steps.edn` from their fragments `test/gate/crops/{cpp,scheme,ocaml}.edn`
     (`gate.crops splice`, `test/gate/crops.ae`; `gate.crops check`: every new crop's step declares `:mem-gib`, its essential checks
@@ -455,7 +462,7 @@ Prior art:
   mixed) against their runs (`bin/gate` the `mixed` sample and `bad-go`, the one that must not build, `make programs-essential`; `--full` all). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
-  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn`, `overlay/jdk/javac/` and `arbace_crop_paths`) is the checkout's, one j2g run, started as the host
+  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn`, `overlay/jdk/javac/`, `arbace_crop_paths` and `arbace_runtime_not`'s embedded crops' Go forms) is the checkout's, one j2g run, started as the host
   compiles them (SA160), about 2.5 to 3 minutes; else by a first build of the program, two runs, about
   5.5 minutes (after a change to the runtime). The test build reuses the shipped build's compiled namespaces when made from the same sources and
   runtime (`target/arbace-go/aot.key`); `bin/build-go` keeps a cache of printed packages
@@ -603,7 +610,7 @@ Prior art:
   the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss replaces only a directory of its own making, built beside it and swapped in under a lock, so a second run waits and then hits), and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less the namespaces no executable embeds (`bin/lib/version.bash`'s `arbace_embedded_sources`:
-  repr/java and `arbace_crop_paths`' namespaces), `go/` less the crops' Go forms (`arbace_crop_paths`'; ci's, cinterp's and crt's are in it since C9: j2g copies them into the program), `overlay/` and `jdk/` less
+  repr/java and `arbace_crop_paths`' namespaces; repr/scheme, repr/cpp, repr/llvm, repr/python and theirs are in it since W2), `go/` less the crops' Go forms (`arbace_crop_paths`'; ci's, cinterp's and crt's are in it since C9, and since W2 oi's, si's `scm` and `scminterp`, pyi's `py` and `libm`: j2g copies them into the program), `overlay/` and `jdk/` less
   javac's world, `jdk/platform/`, OCaml's `jdk/ocaml/` and the provenance files, `x509roots/`, the fixtures' forms,
   `bin/lib` (less the repr checks', C's `ci/`, `arbace_crop_paths`' libraries and `gate-run.bash`; queue 111: no build
   reads them), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
