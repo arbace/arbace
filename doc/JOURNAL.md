@@ -12905,3 +12905,18 @@ The essential gate at 22b4c6542 failed two steps; everything else passed.
   its parent already made (it exported PATH and ARBACE_FROZEN_JAVA_HOME).
 - Keys: bin/clojure-tests and test/gate/*.edn are in neither gate_key, arbace_runtime_key nor arbace_javac_key, so the gate's
   executables (KEY20 0753b529a43fe68eabff) and javac's tool (826af88b2119) stay.
+
+## 2026-11-19: LLVM IR, queue 407 (the last Verifier rules): the pack remade on amd64
+
+The VM's branch 407-llvm-verifier (d98f9486a, base 88b8e7f1a n-all4) taken on the main host as n-llvm-407, stage 0 the main
+checkout's (pins equal). Decisions: D407-1 (a) own verdict `unsupported bits` (d98f9486a kept), D407-2 (a) both debug rules kept.
+- `bin/llvmi ir-make rt --mutants` (no compiler, 31 min): rt, 252 modules, 1,750 mutants; test/llvm/ir/rt.tsv changes 13 rows (the 13 known
+  mutants' first lines), rt.tar.xz and its sha256 rewritten.
+- `bin/repr-llvm check verify-rt --record` (905 rows) and `verify-rt-heldout --record` (1,101 rows): all pass; the records are
+  unchanged (the check files' rows are the same).
+- `heldout-check`: 900 fresh mutants, 890 own verdicts, 890 met by Arbace's verifier, 10 unknown, 2 negative controls fail as they must.
+- `verify-probes`: 478 modules, 477 pass, 0 failing; `verify-llvmtest`: 806 of 806 pass, 0 failing (the jumptable fix changed nothing).
+- `test/repr/llvm/expect-test.bash`: 82 cases, 30 controls, 0 failing.
+- `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (0 problems): scores
+  unchanged, LLVM IR completeness 99, independence 99 (maturity 100).
+- Not run: bin/gate. For the night: llvm-essential, llvm-read, llvm-heldout (the pack changed).
