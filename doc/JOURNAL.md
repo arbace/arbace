@@ -13166,3 +13166,34 @@ test's lines therefore print a0-a8 1 (each `== 202311L`, a7 the __nodiscard__ sp
 whose preprocessing answered the draft dates, so the .expect is not their outcome: arbace/llvm/check.ae's own verdict leaves
 them to lli's record (they pass by it as before). Alternative not taken: a per-front-end expectation in the table. The crops'
 scores are not re-recorded here (one C case moves from gcc's record to its own verdict, two llvm modules the other way).
+
+## 2026-11-19: n-hs-libs: the own libraries' lib-check and lib-stg re-recorded at next's head (lane 2's light half)
+
+Branch `n-hs-libs` from mac/next `aa9edac6f` (n-hs-elab2, 381, 385, 364, 369 and 374's 17 own packages). The commands of queue
+reports 352, 363 and 374 ("the main host's amd64 commands"), each judged against its committed record first, in dependency order:
+`bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn`, `lib-stg --ifaces own --judge
+test/haskell/lib-stg-own-results.edn`, the same for `--package base` (`lib-stg-own-base-results.edn`), then for each of deepseq
+array stm pretty ghc-boot-th template-haskell containers transformers mtl bytestring time exceptions os-string filepath unix file-io
+directory `lib-check --package P --ifaces own --judge test/haskell/lib-check-own-P.edn` and `lib-stg --package P --ifaces own` (a
+measure: no -O0 reference above base). Light: every process under 1.75 GB (peak 1.71, ghc-internal's lib-stg, 22 min; its
+lib-check 16 min); at most four at once, a package started once its dependencies' lib-check had made their own pools. The pools
+of n-hs-elab2 (.tmp/keep/hs-own-pools) seeded the worktree's .tmp/repr-haskell (corpus, ndumps, target, iface2); every own pool
+was rebuilt by its run, since the front end changed after them (typecheck.ae, tostg.ae: 374's fixes).
+
+Results: every judge 0 worse, every control differs. lib-check: ghc-internal 265 modules, 1 better (GHC.Internal.Data.Data errors
+-> ok); base 241, 0 better; bytestring 31, 1 better (Data.ByteString.Internal.Type errors -> ok: its Lift instance); exceptions 2,
+1 better (Control.Monad.Catch errors -> ok: the instance's equality context); the other 14 packages 0 better. lib-stg: ghc-internal
+7,982 of 9,932 bindings equal (recorded 5,536), 42 modules better (GHC.Internal.Classes 96 -> 2,302 of 2,315; Exception.Context,
+Generics and Data.Data errors -> ok), control 0 of 171; base 584 of 1,072 (recorded 547), 13 better (Data.Fixed,
+Data.Functor.Classes, Data.Foldable1 errors -> ok); every package above base :ok in all its modules. Re-recorded (better rows
+only, the rest byte for byte): lib-check-own-{ghc-internal,bytestring,exceptions}.edn, lib-stg-own-results.edn (its two :runs rows
+kept as committed: record-stg rewrote them equal as data, keys reordered) and lib-stg-own-base-results.edn. Not run: `bin/hsi
+check --libs own --record` and its AOT twin (lane 2's heavy half).
+
+A false start, recorded: run four at once, transformers' and ghc-boot-th's lib-check each read their native dumps into the shared
+.tmp/repr-haskell/ndumps at the same moment, and transformers got 12 of its 24 dumps (23 worse, missing or unclassed). Not a
+regression: with the reads done one at a time first (`REPR_HASKELL_ONLY_PACKAGES=P bin/repr-haskell read --reader native
+--corpus`, copied into lib-check/iface2/P/nd) transformers and the mtl above it judged 24 of 24, 0 worse. Alternative not taken
+here: a lock around lib-check's read (the read's directory is shared by every package, as the script says), left to the tool's
+owner. Then `bin/reap --record` (matrix unchanged; 54 of 56, 0 problems), `bin/crops-score --record` and `--judge --strict` (0
+problems), `bin/records-check` (9 pairs, 0).
