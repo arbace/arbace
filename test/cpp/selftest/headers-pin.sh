@@ -6,7 +6,8 @@ pin=$t/headers.sha256
 d1=$(head -1 "$root/test/cpp/host/headers.sha256" | cut -c1); n1=$([ "$d1" = a ] && echo b || echo a)
 sed "1s/^./$n1/" "$root/test/cpp/host/headers.sha256" > "$pin"
 cmp -s "$pin" "$root/test/cpp/host/headers.sha256" && die "the doctored pin equals the real one"
-CPPI_HEADERS_PIN=$pin timeout 60 "$root/bin/cppi" runtime-build "$t/rt" --jobs 1 > "$t/rb.log" 2>&1; st=$?
+# (live, CPPI_LIVE=1: from the records, ORS12 (a), the headers are not the IR's input and are not checked; queue 406)
+CPPI_LIVE=1 CPPI_HEADERS_PIN=$pin timeout 60 "$root/bin/cppi" runtime-build "$t/rt" --jobs 1 > "$t/rb.log" 2>&1; st=$?
 [ $st = 1 ] && ok "runtime-build stops (exit 1)" || bad "runtime-build with a changed header digest: exit $st"
 h=$(head -1 "$root/test/cpp/host/headers.sha256" | sed 's/^[0-9a-f]*  //')
 grep -q "$h" "$t/rb.log" && ok "the header is named ($h)" || bad "no header named"
