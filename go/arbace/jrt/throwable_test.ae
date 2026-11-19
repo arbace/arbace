@@ -4,7 +4,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "throwable_test.go"
-  :imports [[strings "strings"] [testing "testing"]])
+  :imports [[runtime "runtime"] [strings "strings"] [testing "testing"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; try/catch/finally as j2g writes them
@@ -291,3 +291,80 @@
     (set! StderrPrint saved)
     (when (not (strings/HasPrefix out "Exception in thread \"main\" java.lang.IllegalStateException: x\n\tat "))
       (.Errorf t "uncaught: %q" out))))
+
+;; ---------------------------------------------------------------------------------------
+;; the interpreted Java frames among the Go frames (stackFrames, queue 416)
+
+(go/func goFrames ^{:tag (slice runtime/Frame)} [^{:tag (slice string)} names]
+  (let [^{:tag (slice runtime/Frame)} r nil]
+    (range [_ n names]
+      (set! r (append r (lit runtime/Frame :Function n :File "x.go" :Line 1))))
+    r))
+
+(go/func frameNames ^string [^{:tag (slice jframe)} fs]
+  (let [^{:tag (slice string)} ns nil]
+    (range [_ f fs]
+      (let [n (+ (.-cls f) "." (.-method f))]
+        (when (.-hidden f) (set! n (+ n "/h")))
+        (when (.-refl f) (set! n (+ n "/r")))
+        (set! ns (append ns n))))
+    (strings/Join ns " ")))
+
+(go/func interpSample ^{:tag (slice iframe)} []
+  (lit (slice iframe)
+       (lit iframe :cls "A" :method "m" :flags 0)
+       (lit iframe :cls "A" :method "n" :flags 1)
+       (lit iframe :cls "B" :method "lambda$x$0" :flags 0)
+       (lit iframe :cls "B$$Lambda/1" :method "run" :flags 2)
+       (lit iframe :cls "B" :method "main" :flags 5)))
+
+(go/func TestInterpFrames
+  "Two groups of interpreted frames, each at its entry's Go frame (Compiler$CF$Meth.invoke), the
+interpreter's nodes and its reflective call of compiled code not shown, a lambda's hidden frame only
+in a walk, nothing below the launched main.\n"
+  [^{:tag (* testing/T)} t]
+  (let [raw (goFrames (lit (slice string) "arbace/jrt.(*String).CharAt_I__C"
+                      "arbace/jrt.(*Method).Invoke_O_O1__O.func1" "arbace/jrt.callWrapping" "arbace/jrt.(*Method).Invoke_O_O1__O"
+                      "arbace/lang.(*Compiler_CF_CallR).Eval_Compiler_CF_Frame__O"
+                      "arbace/lang.(*Compiler_CF_Meth).Run_Compiler_CF_Frame__O"
+                      "arbace/lang.(*Compiler_CF_Meth).Invoke_O_O1__O.func1"
+                      "arbace/lang.(*Compiler_CF_Meth).Invoke_O_O1__O"
+                      "arbace/lang.(*Compiler_CF_MethodFn).Call_O1__O"
+                      "arbace/jrt.(*String).Length__I"
+                      "arbace/lang.(*Compiler_CF_CallV).Eval_Compiler_CF_Frame__O"
+                      "arbace/lang.(*Compiler_CF_Meth).Invoke_O_O1__O"
+                      "arbace/jrt.(*String).IsEmpty__Z"))
+        got (frameNames (stackFrames raw nil nil (interpSample) false))
+        want "java.lang.String.charAt A.m A.n java.lang.String.length B.lambda$x$0 B.main"]
+    (when (!= got want)
+      (.Errorf t "trace:\n got %s\nwant %s" got want))
+    (let [w (frameNames (stackFrames raw nil nil (interpSample) true))
+          ww "java.lang.String.charAt A.m A.n java.lang.String.length B.lambda$x$0 B$$Lambda/1.run/h B.main"]
+      (when (!= w ww)
+        (.Errorf t "walk:\n got %s\nwant %s" w ww)))
+    ;; without the interpreted frames (an entry the snapshot does not have), the Go frames alone
+    (let [n (frameNames (stackFrames raw nil nil nil false))]
+      (when (!= n "java.lang.String.charAt java.lang.String.length java.lang.String.isEmpty")
+        (.Errorf t "no interpreted frames: %s" n))))
+  ;; a reflective call the program makes (Method.invoke of an interpreted method's code) keeps its
+  ;; frame in a walk, once; the interpreter's own reflective call under it is not shown
+  (let [raw (goFrames (lit (slice string) "arbace/jrt.(*String).CharAt_I__C"
+                      "arbace/jrt.(*Method).Invoke_O_O1__O.func1" "arbace/jrt.callWrapping" "arbace/jrt.(*Method).Invoke_O_O1__O"
+                      "arbace/jrt.(*Method).Invoke_O_O1__O.func1" "arbace/jrt.callWrapping" "arbace/jrt.(*Method).Invoke_O_O1__O"
+                      "arbace/lang.(*Compiler_CF_CallV).Reflect_O_Compiler_CF_Frame__O"
+                      "arbace/lang.(*Compiler_CF_Meth).Invoke_O_O1__O"))
+        it (lit (slice iframe) (lit iframe :cls "C" :method "walk" :flags 1))
+        w (frameNames (stackFrames raw nil nil it true))]
+    (when (!= w "java.lang.String.charAt java.lang.reflect.Method.invoke/r C.walk")
+      (.Errorf t "reflective walk: %s" w))
+    (let [n (frameNames (stackFrames raw nil nil it false))]
+      (when (not (strings/HasSuffix n "java.lang.reflect.Method.invoke/r C.walk"))
+        (.Errorf t "reflective trace: %s" n))
+      (when (strings/Contains n "invoke/r java.lang.reflect.Method.invoke/r java.lang.reflect.Method.invoke/r")
+        (.Errorf t "the interpreter's reflective call shown: %s" n))))
+  ;; an interpreted exception's constructor frames at the top of its trace are not shown
+  (let [raw (goFrames (lit (slice string) "arbace/lang.(*Compiler_CF_Meth).Invoke_O_O1__O"))
+        it (lit (slice iframe) (lit iframe :k RuntimeException_class :cls "java.lang.RuntimeException" :method "<init>" :flags 0)
+                (lit iframe :cls "D" :method "f" :flags 1))]
+    (when (!= (frameNames (stackFrames raw nil nil it false)) "D.f")
+      (.Errorf t "constructor frame: %s" (frameNames (stackFrames raw nil nil it false))))))

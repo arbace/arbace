@@ -38,6 +38,7 @@ use.\n"
           ^{:tag (slice uintptr)} pcs
           ^{:tag (* RefArray)} evalTrace
           ^{:tag (slice GoiFrame)} goiTrace
+          ^{:tag any :doc "the interpreted Java frames when it was made (InterpTrace's snapshot), or nil\n"} interpTrace
           ^{:tag (* RefArray)} stackTrace
           ^{:tag (slice Throwable_I)} suppressed
           ^bool noSuppression
@@ -141,6 +142,7 @@ nothing (no JFR).\n"
     (set! (.-pcs t) (callers 2))
     (set! (.-evalTrace t) (evalTrace))
     (set! (.-goiTrace t) (goiTrace))
+    (set! (.-interpTrace t) (interpTrace))
     (set! (.-stackTrace t) nil))
   this)
 
@@ -149,7 +151,7 @@ nothing (no JFR).\n"
 
 (go/method ourStackTrace ^{:tag (* RefArray)} [^{:tag (* Throwable)} t]
   (when (== (.-stackTrace t) nil)
-    (set! (.-stackTrace t) (javaFrames (.-pcs t) (.-evalTrace t) (.-goiTrace t))))
+    (set! (.-stackTrace t) (javaFrames (.-pcs t) (.-evalTrace t) (.-goiTrace t) (.-interpTrace t))))
   (.-stackTrace t))
 
 (go/method Impl_SetStackTrace_StackTraceElement1__V
@@ -397,8 +399,13 @@ gives it (\"arbace/lang.(*PersistentVector).ArrayFor_I__O1\", \"arbace/lang.Util
       (set! n (runtime/Callers (+ skip 1) pcs)))
     (subslice pcs _ n)))
 
-(go/type jframe (struct ^string goName ^string cls ^string method ^string file ^int line ^bool elide ^bool refl
-                         ^string src))
+(go/type jframe
+  "jframe is a Java frame of a trace or a walk: refl a reflection frame (rcall: Method.invoke's or
+Constructor.newInstance's own, one a reflective call), k the frame's class when known (StackWalker's
+getDeclaringClass), hidden a frame of a hidden class (an interpreted lambda's class, java.lang.invoke's
+internals; StackWalker's SHOW_HIDDEN_FRAMES).\n"
+  (struct ^string goName ^string cls ^string method ^string file ^int line ^bool elide ^bool refl
+          ^string src ^bool rcall ^bool hidden ^{:tag (* Class)} k))
 
 (go/func demangle
   "demangle: the Java frame of a Go function that j2g's table does not list. jrt's own
@@ -532,6 +539,73 @@ innermost first (GOI-SPEC.md §10.6).\n"}
     (return nil))
   (GoiTrace))
 
+(go/var ^{:tag Supplier
+          :doc "InterpTrace, set by the Java forms' host (Compiler$CFGo$GoHost), gives a snapshot of the
+current thread's interpreted Java frames (Compiler$CF$Rt.snapshot: a Supplier of their description,
+Compiler$CF$Rt.describe), nil when it runs none (queue 416).\n"}
+  InterpTrace)
+
+(go/func interpTrace "interpTrace: the interpreted Java frames' snapshot when an exception is made, or nil.\n"
+  ^any []
+  (when (== InterpTrace nil)
+    (return nil))
+  (.Get__O InterpTrace))
+
+(go/type iframe
+  "iframe is an interpreted Java frame (Compiler$CF$Rt.describe): its class (nil when unknown), the
+class's and the method's names, the source file, and the flags: 1 entered from outside the interpreter,
+2 hidden (a lambda's class), 4 a static main(String[]).\n"
+  (struct ^{:tag (* Class)} k ^string cls ^string method ^string file ^int32 flags))
+
+(go/func strOf ^string [^any x]
+  (let [(values s ok) (assert (* String) x)]
+    (when (and ok (!= s nil))
+      (return (.String s)))
+    ""))
+
+(go/func interpFrames
+  "interpFrames: the interpreted frames of a snapshot (interpTrace's), innermost first, or nil.\n"
+  ^{:tag (slice iframe)} [^any snap]
+  (when (== snap nil)
+    (return nil))
+  (let [(values s ok) (assert Supplier snap)]
+    (when (not ok)
+      (return nil))
+    (let [(values a ok2) (assert (* RefArray) (.Get__O s))
+          ^{:tag (slice iframe)} fs nil]
+      (when (or (not ok2) (== a nil))
+        (return nil))
+      (for [i 0] (< (+ i 4) (len (.-A a))) (set! i (+ i 5))
+        (let [x (.-A a)
+              (values k _) (assert (* Class) (aget x i))
+              (values fl _) (Unbox Prim_int (aget x (+ i 4)))
+              (values f _) (assert int32 fl)]
+          (set! fs (append fs (lit iframe :k k :cls (strOf (aget x (+ i 1))) :method (strOf (aget x (+ i 2)))
+                                   :file (strOf (aget x (+ i 3))) :flags f)))))
+      fs)))
+
+(go/func isInterpEntry
+  "isInterpEntry: whether fn is the interpreter's entry from outside it (Compiler$CF$Meth.invoke, a static
+initializer's Compiler$CF$Klass.runClinit), where the frames it entered go (queue 416).\n"
+  ^bool [^string fn]
+  (and (or (strings/HasPrefix fn "arbace/lang.(*Compiler_CF_Meth).Invoke_")
+           (strings/HasPrefix fn "arbace/lang.(*Compiler_CF_Klass).RunClinit_"))
+       (not (strings/Contains fn ".func"))))
+
+(go/func isInterpInternal
+  "isInterpInternal: whether fn is the interpreter's own (its nodes, frames, methods, the Java forms'
+host), not shown.\n"
+  ^bool [^string fn]
+  (or (strings/HasPrefix fn "arbace/lang.(*Compiler_CF")
+      (strings/HasPrefix fn "arbace/lang.Compiler_CF")))
+
+(go/func isReflectCall
+  "isReflectCall: whether fn is Method.invoke's or Constructor.newInstance's own Go method, one a
+reflective call.\n"
+  ^bool [^string fn]
+  (or (== fn "arbace/jrt.(*Method).Invoke_O_O1__O")
+      (== fn "arbace/jrt.(*Constructor).NewInstance_O1__O")))
+
 (go/func evalTrace "evalTrace: the evaluated frames when an exception is made, or nil.\n"
   ^{:tag (* RefArray)} []
   (when (== EvalTrace nil)
@@ -602,15 +676,8 @@ traces.\n"
   (let [c (ForName name)]
     (and (!= c nil) (.assignableFrom Throwable_class c))))
 
-(go/func javaFrames
-  "javaFrames maps captured program counters to Java's StackTraceElement[]: the frames up to
-the last runtime.gopanic dropped (an exception made while a run-time error panics), the
-frames of fillInStackTrace and of the exception's constructors dropped at the top, as
-HotSpot drops them, elided frames left out, a function literal's frame merged with the frame
-of the function that called it.\n"
-  ^{:tag (* RefArray)} [^{:tag (slice uintptr)} pcs ^{:tag (* RefArray)} evals ^{:tag (slice GoiFrame)} goi]
+(go/func rawFrames ^{:tag (slice runtime/Frame)} [^{:tag (slice uintptr)} pcs]
   (let [^{:tag (slice runtime/Frame)} raw nil
-        ^{:tag (slice any)} ev nil
         frames (runtime/CallersFrames pcs)]
     (while true
       (let [(values fr more) (.Next frames)]
@@ -620,65 +687,148 @@ of the function that called it.\n"
     (range [i fr raw]
       (when (== (.-Function fr) "runtime.gopanic")
         (set! raw (subslice raw (+ i 1)))))
+    raw))
+
+(go/func javaFrames
+  "javaFrames maps captured program counters to Java's StackTraceElement[] (stackFrames).\n"
+  ^{:tag (* RefArray)} [^{:tag (slice uintptr)} pcs ^{:tag (* RefArray)} evals ^{:tag (slice GoiFrame)} goi ^any interp]
+  (let [fs (stackFrames (rawFrames pcs) evals goi (interpFrames interp) false)
+        a (NewRefArray StackTraceElement_class (conv int32 (len fs)))]
+    (range [i f fs]
+      (aset (.-A a) i (frameElement (.-cls f) (.-method f) (.-file f) (conv int32 (.-line f)))))
+    a))
+
+(go/func stackFrames
+  "stackFrames maps Go frames to Java's: the frames up to the last runtime.gopanic dropped (an
+exception made while a run-time error panics), the frames of fillInStackTrace and of the exception's
+constructors dropped at the top, as HotSpot drops them, elided frames left out, a function literal's
+frame merged with the frame of the function that called it; the evaluated frames (evals), goi's (goi)
+and the interpreted Java frames (interp, queue 416) in place of the Go frames of their evaluators, the
+interpreter's reflective calls of compiled code not shown, and no frame below an interpreted
+main(String[]) entered from outside the interpreter (a launch: the JVM's launcher shows none). walk:
+StackWalker's frames (every frame's class looked up, the hidden ones and one frame a reflective call
+marked, the top's exception frames kept).\n"
+  ^{:tag (slice jframe)} [^{:tag (slice runtime/Frame)} raw ^{:tag (* RefArray)} evals ^{:tag (slice GoiFrame)} goi
+                          ^{:tag (slice iframe)} it ^bool walk]
+  (let [^{:tag (slice any)} ev nil
+        ^{:tag (slice jframe)} fs nil
+        top (not walk)
+        stop false]
     (when (!= evals nil)
       (set! ev (.-A evals)))
-    (let [^{:tag (slice jframe)} fs nil
-          top true]
-      (range [i fr raw]
-        (let [f (frameOf fr)]
-          (cond
-            ;; an evaluated fn's or method's call (the evaluator's try body): its Clojure frame,
-            ;; the evaluator's own frames elided (J2G-SPEC §10.7)
-            (isEvalCall (.-Function fr))
-            (when (> (len ev) 0)
-              (let [e (assert (* StackTraceElement) (aget ev 0))
-                    file ""]
-                (set! ev (subslice ev 1))
-                (set! top false)
-                (when (!= (.-fileName e) nil)
-                  (set! file (.String (.-fileName e))))
-                (set! fs (append fs (lit jframe :cls (.String (.-declaringClass e)) :method (.String (.-methodName e))
-                                         :file file :line (conv int (.-lineNumber e)))))))
-            ;; the evaluator's interop: compiled code calls the method directly, so the
-            ;; reflective call's frames (Reflector, Method.invoke) above it are not shown
-            (isEvalInterop (.-Function fr))
+    (range [i fr raw]
+      (when stop
+        (break))
+      (let [f (frameOf fr)]
+        (cond
+          ;; the interpreter's entry: the interpreted frames it entered, innermost first, up to the
+          ;; frame entered there (queue 416)
+          (isInterpEntry (.-Function fr))
+          (while (> (len it) 0)
+            (let [x (aget it 0)]
+              (set! it (subslice it 1))
+              (cond
+                (and (not walk) (!= (bit-and (.-flags x) 2) 0)) (do)
+                (and top (== (.-method x) "<init>") (!= (.-k x) nil) (.assignableFrom Throwable_class (.-k x))) (do)
+                :else
+                (do
+                  (set! top false)
+                  (set! fs (append fs (lit jframe :cls (.-cls x) :method (.-method x) :file (.-file x) :line -1
+                                           :k (.-k x) :hidden (!= (bit-and (.-flags x) 2) 0))))))
+              (when (!= (bit-and (.-flags x) 1) 0)
+                (when (!= (bit-and (.-flags x) 4) 0)
+                  (set! stop true))
+                (break))))
+          ;; the interpreter's own frames; a reflective call it made (a method of compiled code) not shown
+          (isInterpInternal (.-Function fr))
+          (let [popped false]
             (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
-              (set! fs (subslice fs _ (- (len fs) 1))))
-            ;; an interpreted Go function's run (goi's call body): its Go frame, goi's other
-            ;; frames (its nodes) and the table's (invokers, adapters) elided (GOI-SPEC.md §10.6)
-            (== (.-Function fr) "arbace/goi.run")
-            (when (> (len goi) 0)
-              (let [g (aget goi 0)]
-                (set! goi (subslice goi 1))
-                (set! top false)
-                (set! fs (append fs (lit jframe :cls (.-NS g) :method (.-Name g) :file (.-File g) :line (.-Line g))))))
-            (or (strings/HasPrefix (.-Function fr) "arbace/goi.") (strings/HasPrefix (.-Function fr) "arbace/goi/")
-                (strings/HasPrefix (.-Function fr) "arbace/gotable."))
-            (do)
-            (isEvalInternal (.-Function fr)) (do)
-            (.-elide f) (do)
-            ;; a forwarder: its callee is the implementation Impl_M of its method M
-            (and (> i 0) (isForwarder (.-Function fr) (.-Function (aget raw (- i 1)))))
-            (do)
-            ;; the guarded entry of a static method of a class initialized at start: its callee
-            ;; is the method's guard-free entry C_m_NoInit (Futamura F4, arbace/j2g/start.ae)
-            (and (> i 0) (== (.-Function (aget raw (- i 1))) (+ (.-Function fr) "_NoInit")))
-            (do)
-            ;; the caller of a try body's function literal: the literal's frame stands for it
-            (and (> i 0) (isLiteralOf (.-Function (aget raw (- i 1))) (.-Function fr)))
-            (do)
-            (and top (or (== (.-method f) "fillInStackTrace")
-                         (and (== (.-method f) "<init>") (isThrowableClass (.-cls f)))))
-            (do)
-            :else
-            (do
+              (when (.-rcall (aget fs (- (len fs) 1)))
+                (when popped
+                  (break))
+                (set! popped true))
+              (set! fs (subslice fs _ (- (len fs) 1)))))
+          ;; an evaluated fn's or method's call (the evaluator's try body): its Clojure frame,
+          ;; the evaluator's own frames elided (J2G-SPEC §10.7)
+          (isEvalCall (.-Function fr))
+          (when (> (len ev) 0)
+            (let [e (assert (* StackTraceElement) (aget ev 0))
+                  file ""]
+              (set! ev (subslice ev 1))
               (set! top false)
-              (set! (.-refl f) (isReflection (.-Function fr)))
-              (set! fs (append fs f))))))
-      (let [a (NewRefArray StackTraceElement_class (conv int32 (len fs)))]
-        (range [i f fs]
-          (aset (.-A a) i (frameElement (.-cls f) (.-method f) (.-file f) (conv int32 (.-line f)))))
-        a))))
+              (when (!= (.-fileName e) nil)
+                (set! file (.String (.-fileName e))))
+              (set! fs (append fs (lit jframe :cls (.String (.-declaringClass e)) :method (.String (.-methodName e))
+                                       :file file :line (conv int (.-lineNumber e)))))))
+          ;; the evaluator's interop: compiled code calls the method directly, so the
+          ;; reflective call's frames (Reflector, Method.invoke) above it are not shown
+          (isEvalInterop (.-Function fr))
+          (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
+            (set! fs (subslice fs _ (- (len fs) 1))))
+          ;; an interpreted Go function's run (goi's call body): its Go frame, goi's other
+          ;; frames (its nodes) and the table's (invokers, adapters) elided (GOI-SPEC.md §10.6)
+          (== (.-Function fr) "arbace/goi.run")
+          (when (> (len goi) 0)
+            (let [g (aget goi 0)]
+              (set! goi (subslice goi 1))
+              (set! top false)
+              (set! fs (append fs (lit jframe :cls (.-NS g) :method (.-Name g) :file (.-File g) :line (.-Line g))))))
+          (or (strings/HasPrefix (.-Function fr) "arbace/goi.") (strings/HasPrefix (.-Function fr) "arbace/goi/")
+              (strings/HasPrefix (.-Function fr) "arbace/gotable."))
+          (do)
+          (isEvalInternal (.-Function fr)) (do)
+          (.-elide f) (do)
+          ;; a forwarder: its callee is the implementation Impl_M of its method M
+          (and (> i 0) (isForwarder (.-Function fr) (.-Function (aget raw (- i 1)))))
+          (do)
+          ;; the guarded entry of a static method of a class initialized at start: its callee
+          ;; is the method's guard-free entry C_m_NoInit (Futamura F4, arbace/j2g/start.ae)
+          (and (> i 0) (== (.-Function (aget raw (- i 1))) (+ (.-Function fr) "_NoInit")))
+          (do)
+          ;; the caller of a try body's function literal: the literal's frame stands for it
+          (and (> i 0) (isLiteralOf (.-Function (aget raw (- i 1))) (.-Function fr)))
+          (do)
+          (and top (or (== (.-method f) "fillInStackTrace")
+                       (and (== (.-method f) "<init>") (isThrowableClass (.-cls f)))))
+          (do)
+          ;; a walk: one frame a reflective call (Method.invoke's own), not its helpers
+          (and walk (isReflection (.-Function fr)) (not (isReflectCall (.-Function fr))))
+          (do)
+          :else
+          (do
+            (set! top false)
+            (set! (.-refl f) (isReflection (.-Function fr)))
+            (set! (.-rcall f) (isReflectCall (.-Function fr)))
+            (when walk
+              (set! (.-k f) (ForName (.-cls f)))
+              (set! (.-hidden f) (strings/HasPrefix (.-cls f) "java.lang.invoke.")))
+            (set! fs (append fs f))))))
+    fs))
+
+(go/func StackWalker_Frames0_I__O1_native
+  "StackWalker_Frames0_I__O1_native is jrt's StackWalker.frames0 (overlay/jdk/java.base/java/lang/
+StackWalker.java; queue 416): the current thread's frames from the caller of the StackWalker method
+that called it (StackWalker's own frames left out), two slots a frame, its Class and its
+StackTraceElement; a frame whose class is not known (an evaluated fn's, goi's) left out; the reflection
+frames when show has bit 1, the hidden frames when it has bit 2.\n"
+  ^{:tag (* RefArray)} [^int32 show]
+  (let [all (stackFrames (rawFrames (callers 1)) (evalTrace) (goiTrace) (interpFrames (interpTrace)) true)
+        ^{:tag (slice jframe)} fs nil
+        lead true]
+    (range [_ f all]
+      (when (and lead (strings/HasPrefix (.-cls f) "java.lang.StackWalker"))
+        (continue))
+      (set! lead false)
+      (cond
+        (== (.-k f) nil) (do)
+        (and (.-hidden f) (== (bit-and show 2) 0)) (do)
+        (and (.-refl f) (== (bit-and show 1) 0)) (do)
+        :else (set! fs (append fs f))))
+    (let [a (NewRefArray Object_class (conv int32 (* 2 (len fs))))]
+      (range [i f fs]
+        (aset (.-A a) (* 2 i) (.-k f))
+        (aset (.-A a) (+ (* 2 i) 1) (frameElement (.-cls f) (.-method f) (.-file f) (conv int32 (.-line f)))))
+      a)))
 
 ;; ---------------------------------------------------------------------------------------
 ;; StackTraceElement (shim, final)
