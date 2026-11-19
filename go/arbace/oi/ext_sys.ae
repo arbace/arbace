@@ -235,39 +235,45 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
     (return ephNone))
   v)
 
-(go/func ephClean "ephClean is weak.c's ephe_clean: the keys collected are unset, and the data with them when one was.\n" [^{:tag (* Block)} b]
+(go/func ephClean "ephClean is weak.c's ephe_clean: the keys collected are unset, and the data with them when one was; it reports whether\nit dropped a data.\n" ^bool [^{:tag (* Block)} b]
   (let [dead false]
     (for [i 2] (< i (len (.-F b))) (inc! i)
       (when [(values r ok) (assert (* weakRef) (aget (.-F b) i))] ok
         (when (.Load (.-dead r))
           (aset (.-F b) i ephNone)
           (set! dead true))))
-    (when dead
-      (aset (.-F b) 1 ephNone))))
+    (when (and dead (!= (aget (.-F b) 1) ephNone))
+      (aset (.-F b) 1 ephNone)
+      (return true))
+    false))
 
 (go/func ephRegister "ephRegister keeps a weak pointer to a weak array or an ephemeron, which the asked collections clean.\n" [^{:tag (* Block)} b]
   (.Lock ephMu)
   (set! ephRegistry (append ephRegistry (^{:inst [Block]} weak/Make b)))
   (.Unlock ephMu))
 
-(go/func weakCollect "weakCollect is the asked collections' part for the weak keys: Go's collection, then the live ephemerons cleaned (the\ncollected ones forgotten), so that the data of a dead key is unreachable for the collections that follow.\n" []
+(go/func weakCollect "weakCollect is the asked collections' part for the weak keys: Go's collection, then the live ephemerons cleaned (the\ncollected ones forgotten), so that the data of a dead key is unreachable for the collections that follow; again while a cleaning dropped\na data (queue 438: a data that is another ephemeron's key dies in the same collection, as OCaml's ephemeron marking reaches its fixpoint).\n" []
   (when (not weakUsed)
     (return))
-  (runtime/GC)
-  (.Lock ephMu)
-  ;; each live weak array's and ephemeron's keys: their flags read from their targets after the collection (no marking runs: a get
-  ;; keeps nothing alive), then the ephemeron cleaned; the collected arrays forgotten
-  (let [live (subslice ephRegistry 0 0)]
-    (range [_ p ephRegistry]
-      (when [b (.Value p)] (!= b nil)
-        (for [i 2] (< i (len (.-F b))) (inc! i)
-          (when [(values r ok) (assert (* weakRef) (aget (.-F b) i))] (and ok (not (.Load (.-dead r))))
-            (when (== ((.-get r)) nil)
-              (weakDead r))))
-        (ephClean b)
-        (set! live (append live p))))
-    (set! ephRegistry live))
-  (.Unlock ephMu))
+  (for [round 0] (< round 32) (inc! round)
+    (runtime/GC)
+    (.Lock ephMu)
+    ;; each live weak array's and ephemeron's keys: their flags read from their targets after the collection (no marking runs: a get
+    ;; keeps nothing alive), then the ephemeron cleaned; the collected arrays forgotten
+    (let [live (subslice ephRegistry 0 0) dropped false]
+      (range [_ p ephRegistry]
+        (when [b (.Value p)] (!= b nil)
+          (for [i 2] (< i (len (.-F b))) (inc! i)
+            (when [(values r ok) (assert (* weakRef) (aget (.-F b) i))] (and ok (not (.Load (.-dead r))))
+              (when (== ((.-get r)) nil)
+                (weakDead r))))
+          (when (ephClean b)
+            (set! dropped true))
+          (set! live (append live p))))
+      (set! ephRegistry live)
+      (.Unlock ephMu)
+      (when (not dropped)
+        (return)))))
 
 ^{:go/end 164} (go/func ephGet ^Value [^Value e ^int off ^bool cp]
   (ephClean (AsBlock e))

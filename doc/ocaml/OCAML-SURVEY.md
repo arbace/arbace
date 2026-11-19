@@ -4324,3 +4324,29 @@ the light level has no C) and backtrace/backtrace_dynlink (native only, `Dynlink
 `:dynlink-decided`. The compiled level: no dynlink library yet (the shard's registry, OC220 (a)'s compiled half). At the light level
 `Dynlink.is_native` is false and `adapt_filename` is the identity (the platform is oi's) while `Sys.backend_type` is `Native`; no
 row of the corpora sees the difference.
+
+## As built: queue 438, OC218's heap model at the light level (2026-11-19, branch `438-oc-gc`, from next `c6d53f85b`)
+
+OC233 (a), OC234 (a), OC235 (a) at the AOT level, after oi's (go/arbace/oi/ext_sys.ae): `jdk/ocaml/ocaml/rt/ExtGc.ae`'s memprof part.
+Once a profile was started, each counted allocation (`Rt/wordsV` with its value: `Rt/block`, `Rt/counted`; `Rt/words` without one)
+fills a simulated minor heap of Gc.control's `minor_heap_size` words; the overflowing one and the asked collections (gcAsked) are minor
+collections: `System/gc`, then each tracked minor value's promote (alive: its WeakReference not cleared) or dealloc_minor, and at a
+major one each dead major value's dealloc_major. The sampled allocation's callback runs as the allocation returns; callbacks queued
+while one runs run after it; an exception drops the queued allocation callbacks. A profile is its domain's (`Dom/mp`), inherited by
+the domains spawned (Effects/spawn), a second start replacing it; stop and discard as memprof.c. The Lambda's duprecord and duparray
+(`Rt/dupc`) and array literals (`Rt/makeArray` through `Rt/block`) are counted, as ocamlopt allocates them. Weak keys: an int64's or a
+nativeint's box (`I64`, `NInt`) is a weak key. At both levels the asked collections' ephemeron cleaning repeats (at most 32 rounds)
+while a cleaning drops a data, so a chain of ephemerons whose data are other ephemerons' keys dies in one collection.
+
+**Results** (`bin/oi check --aot --only-list`, `suite check --aot --only-list`, `check --only-list`, with their controls): AOT
+arrays_in_major, restart, start_stop and moved_while_blocking pass (4 rows out of `:gc-and-memory`); arrays_in_minor and
+minor_heap_edge are slow (aot-slow.edn: each collection a `System/gc` over the light level's ~700 MB heap); eval ephetest2 passes. The
+word-counting set (pr1271, localfunction, tuple_match, match-exception/allocation, gcwords, alloc_counts, with_tag) is unchanged.
+
+**Left.** The light level's interpreted frames keep a dead let's value reachable (`arbace/classes/interp.ae`'s release! frees a slot
+for reuse but does not clear it; a Lambda let the typer made of an inlined local function or of an argument's evaluation order holds
+its block until the method returns): opaque's lifetime, ephetest's data unset (tests 1, 2, 5), stop_start_in_callback's and
+exception_comballoc's deallocations. discard_in_callback: the native backend's counts with bytecode's Lambda. custom, intern:
+Marshal's and custom blocks' sources. thread_exit_in_callback. ephetest's test6 and test7 (a key reachable from its data: Go has no
+ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the major collector's own work). struct_include_optimisation
+(the bytecode's Translmod blocks).
