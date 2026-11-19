@@ -12833,3 +12833,28 @@ stm, transformers and mtl copied from n-hs-elab2's .tmp. `bin/reap --record` (54
 no longer refused now that n-recs' jdk/edge.edn records Thread$UncaughtExceptionHandler's generics (the control's premise, not
 fixed here). `bin/gate --full --concurrent --plan`: 355 steps, 319 run. Keys: gate KEY20 `0753b529a43fe68eabff`, javac's
 `826af88b21197c6b19c4`.
+
+## 2026-11-19: n-all4, lanes 5 and 1: small proofs and C++ (taken overnight (round 54))
+
+Lane 5, on the gate's executables (KEY20 `0753b529a43fe68eabff`, unchanged: no file of a build key was touched). Taken overnight (round 54):
+- `bin/clojure-tests clojure.test-clojure.genclass clojure.test-clojure.genclass.examples` (eval): 7 tests, 53 assertions, 0 fail, 0 error
+  (queue 359 expected 7 tests, 0 fail; the VM's 52 was one short). test/arbace-go-results.edn's genclass line set to `{:test 7 :pass 53 ...}`
+  and the class `:gen-class` taken out of test/clojure/divergences.edn; `bin/clojure-tests --divergences`: 0 not in a class.
+- `bin/clojure-tests --aot` of the same two namespaces (a first run was killed by the host's memory with other heavy runs beside it,
+  rerun alone on the cached j2g): 7 tests, 53 assertions, 50 pass, 1 fail (interface-methods: a JDK8 interface's default method answers
+  "default impl", not the override), 2 errors (name-munging: the compiled class lacks the `foo_Object_int__var` and `toString__var` fields). This
+  is not queue 361's 7/52/0/0: D361-1 (a), the reference corrected to the run (test/arbace-go-aot-results.edn, with `:failing`), the class
+  `:gen-class` of test/clojure/divergences-aot.edn kept (deferred) with its `:why` naming the two tests; the cause is left to a later task.
+- `bin/goi check --only '^(maymorestack|convert5)\.go$'`: both pass; convert5's line dropped from test/goi/check-known.edn (queue 358), its row in
+  check-linux-amd64.edn `:pass`. `bin/goi check --essential`: 801 of 801 pass, controls fail as they must. `bin/repr-asm x86i-check`: ok (45 of 46
+  programs equal the CPU's runs, the recorded {:cpuid 2}); `bin/generated-check`: ok; `bin/gate --pins`: ok.
+- `bin/gate --audit llvm-essential`: 17 undeclared reads (test/cpp/samples/ and test/cpp/runtime/samples/, bin/lib/crops/take.bash,
+  bin/lib/repr-rust/rustc-pin.bash, tools/rsdump/RUSTC_VERSION: llvmi's judge and the runtime's build read them). Declared in the step's `:inputs`
+  (test/gate/steps.edn); a data change, no build key.
+
+Lane 1, C++ (queue 382, 383, 387), every process under 6 GiB: `CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build` 198 of 198 pass, 124 by our route;
+`bin/cppi runtime-ci` ok; `bin/cppi check --record` samples 7 of 7, runtime 8 of 8 (runtime/thread-throw now passes); `check --aot --record` 15 of 15
+(thread-throw and threads now pass, 15 both pass); `bin/cppi codegen-gen` 155 of 155, both controls fail as they must; the whole own dg record
+(`bin/repr-cpp dg --corpus dg-error --front native --own --record`, 4564 files): 158 rows changed, 90 of them fail to pass, 68 still fail with a
+reason; 2 new timeouts past the 300 s (udlit-suffix-neg.C, initlist92.C, both under the load of the other lanes) rerun alone and recorded as they
+were (pass) with `--only LIST --record`. No unclassed row.
