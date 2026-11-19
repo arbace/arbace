@@ -3,7 +3,8 @@
 # crops-score's :case-inputs (CP333 (b)'s programs' half). A fabricated run of the samples corpus in a copy of test/cpp: a program
 # whose route file says ours with ir.status 0 is :own; one our route refused and clang made is the pack's (its refusal's class named);
 # one ours refused under CPPI_ROUTE=ours is none; one with no route file none. The control: the same run with every route file
-# `clang` counts no program own. Also runtime-inputs: every unit the pack's while the route is clang.
+# `clang` counts no program own. Also runtime-inputs: every unit the pack's while the route is clang. (queue 406: each row also carries
+# CP401 (a)'s :ci-target, which the patterns leave open: in this copy of test/cpp the C target is not the checkout's c/target)
 . "$(dirname "$0")/lib.bash"
 mkdir -p "$t/tree/test" && cp -r "$root/test/cpp" "$t/tree/test/" && rm -f "$t/tree/test/cpp/eval-inputs-linux-amd64.edn"
 mkrun() { # mkrun WORK ROUTE-OF-auto.cpp
@@ -20,15 +21,15 @@ mkrun() { # mkrun WORK ROUTE-OF-auto.cpp
 inputs=$t/tree/test/cpp/eval-inputs-linux-amd64.edn
 mkrun "$t/w1" ours
 (cd "$t/tree" && arbace_tool -m arbace.cpp.check run-judge "$t/w1" eval --record samples) > "$t/w1.log" 2>&1
-grep -q '^\["samples/auto.cpp" {:ir :own}\]$' "$inputs" && ok "a program our route made: :own" || bad "ours: $(head -12 "$inputs" 2>&1 | tail -6)"
-grep -q '^\["samples/bitfields.cpp" {:ir "pack: cpp-ir-samples (.*); our route refused it (expr)"}\]$' "$inputs" && ok "refused, clang's: the pack, the class named" || bad "pack: $(grep bitfields "$inputs")"
-grep -q '^\["samples/classes.cpp" {:ir "none: our route refused it (coroutine)"}\]$' "$inputs" && ok "refused under ours: none" || bad "none: $(grep classes.cpp "$inputs")"
-grep -q '^\["samples/coroutine.cpp" {:ir "none: no IR made (not built)"}\]$' "$inputs" && ok "no route: none" || bad "unbuilt: $(grep coroutine "$inputs")"
+grep -q '^\["samples/auto.cpp" {:ir :own[,}]' "$inputs" && ok "a program our route made: :own" || bad "ours: $(head -12 "$inputs" 2>&1 | tail -6)"
+grep -q '^\["samples/bitfields.cpp" {:ir "pack: cpp-ir-samples (.*); our route refused it (expr)"[,}]' "$inputs" && ok "refused, clang's: the pack, the class named" || bad "pack: $(grep bitfields "$inputs")"
+grep -q '^\["samples/classes.cpp" {:ir "none: our route refused it (coroutine)"[,}]' "$inputs" && ok "refused under ours: none" || bad "none: $(grep classes.cpp "$inputs")"
+grep -q '^\["samples/coroutine.cpp" {:ir "none: no IR made (not built)"[,}]' "$inputs" && ok "no route: none" || bad "unbuilt: $(grep coroutine "$inputs")"
 grep -q '^\["runtime/' "$inputs" && bad "the samples' run wrote another corpus's rows" || ok "only the run's corpus written"
 # the control: auto.cpp's route clang: no program own
 mkrun "$t/w2" clang
 (cd "$t/tree" && arbace_tool -m arbace.cpp.check run-judge "$t/w2" eval --record samples) > "$t/w2.log" 2>&1
-if grep -q '{:ir :own}' "$inputs"; then bad "control: a run with no route ours counted one own"; else ok "control: no route ours, none own (as a control must)"; fi
+if grep -q '{:ir :own[,}]' "$inputs"; then bad "control: a run with no route ours counted one own"; else ok "control: no route ours, none own (as a control must)"; fi
 # runtime-inputs while the route is clang: 198 units, each the pack's
 (cd "$t/tree" && arbace_tool -m arbace.cpp.check runtime-inputs - clang) > "$t/rt.edn" 2>&1
 n=$(grep -c '^\["' "$t/rt.edn"); p=$(grep -c '{:ir "pack: cpp-runtime-ir' "$t/rt.edn")
