@@ -12881,3 +12881,27 @@ killed and redone; its suite records copied back). Taken overnight (round 54):
   test/ocaml/pins-attested.tsv with a header saying so. `bin/oi pins` (12 pins attested), `divergences`, `divergences --aot`, `suite divergences`
   and `suite divergences --aot`: all exit 0, 0 not in a class. Alternative not taken: whole `--ocdump` and AOT runs (hours) for one attest.
 - reap --record (54 of 56 cells, 0 problems), crops-score --record, --judge --strict rc 0, records-check 9 pairs 0.
+
+## 2026-11-19: n-all4's essential gate: cpp-essential's two Toks and suite-go's lost namespace
+
+The essential gate at 22b4c6542 failed two steps; everything else passed.
+
+- cpp-essential: `bin/repr-cpp pp-check --essential` on stage 0 failed with "class arbace.repr.c.lex.Tok cannot be cast to
+  class arbace.repr.c.lex.Tok" in `arbace.repr.cpp.ppcheck/port-texts` (ppcheck.ae:125). Cause: e0dca79f8 (C's lexer, CS324 (a),
+  CS325 (a), merged with n-c-last) changed `arbace/repr/c/lex.ae` after the re-seed 03fec28a4 (seed 3c48859d). Stage 0 then loads
+  lex.ae and pp.ae from the checkout (RT.toolSource), evaluating `deftype Tok` anew, while `arbace/repr/cpp/ppcheck.ae`, unchanged
+  since the seed, runs compiled against the seed's Tok: doc/W-WINDOW.md §8's risk 2. The last pass (42bf8614, 2026-11-17) predates
+  the lexer's change. Not a bug of either side, so neither is reverted. Fix: cpp-essential's command runs under `ARBACE_NO_AOT=1`
+  (test/gate/steps.edn and its fragment test/gate/crops/cpp.edn) until the next re-seed: no compiled loaders, so every namespace is
+  the embedded or the checkout's source and there is one Tok (pp-check 79 s against 15 s compiled). Alternatives not taken: editing
+  an embedded namespace (moves gate_key, a 75-minute rebuild, and it only moves the boundary); the step on the gate's executable
+  (`ARBACE_HOST_EXE=$GATE_EXE`, consistent and fast, but the lowered runtime's key hashes the tools' host, so cpp-runtime,
+  cpp-essential and cpp-check-essential would all have to move together); the full PATH_FIRST trio (as rsi's steps use it; not
+  needed: the embedded image is the seed's, and NO_AOT alone gives one Tok).
+- suite-go: `clojure.test-clojure.api` had no result, with no `out/` files at all, so its `--run-one` process ended before the run.
+  The step's log holds the matching line "java26: ... is Java unknown, not 26": each `--run-one` (12 at once) ran
+  `arbace_use_java26`, whose `java -version` failed once under the load. Lane 5's records (380c3a694) are not involved, and
+  test/arbace-go-results.edn is unchanged: the record stays as it is. Fix: `bin/clojure-tests --run-one` skips the JDK check, which
+  its parent already made (it exported PATH and ARBACE_FROZEN_JAVA_HOME).
+- Keys: bin/clojure-tests and test/gate/*.edn are in neither gate_key, arbace_runtime_key nor arbace_javac_key, so the gate's
+  executables (KEY20 0753b529a43fe68eabff) and javac's tool (826af88b2119) stay.
