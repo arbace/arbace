@@ -1871,6 +1871,13 @@ covers what.
   under the BSD 3-Clause License below ("bytestring"); text, Copyright (c) 2008-2009 Tom Harper (the cbits files' own notices
   too, Andrew Lelechenko 2021), under the BSD 2-Clause License below ("text"). The rest of `go/arbace/hs/` (`posix.ae`,
   `cformat.ae` and the rest) is Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/repr/haskell/cmm.ae` and `test/haskell/eval/cmm/Cmm.h`, `MachDeps.h` (queue 332, hsi's Cmm, doc/haskell/HASKELL-EVAL-SURVEY.md,
+  "HES67's design: Cmm on hsi"): `cmm.ae` ports `compiler/GHC/Cmm/Lexer.x.source`, `compiler/GHC/Cmm/Parser.y.source` and
+  `compiler/GHC/Cmm/MachOp.hs`'s machOpResultType, the headers copy definitions of `rts/include/Cmm.h`, `rts/include/MachDeps.h` and
+  `rts/include/rts/storage/ClosureTypes.h`, from GHC 9.14.1's source tarball (the pin of `tools/repr-haskell`'s corpus): GHC, Copyright
+  The University Court of the University of Glasgow, under the Glasgow Haskell Compiler License below ("GHC: the Glasgow Haskell
+  Compiler License"). The Cmm forms, their elaboration and hsi's Cmm back end `go/arbace/hs/cmm.ae` are Arbace's own, under the Eclipse
+  Public License 1.0.
 - `go/arbace/hs/alloclimit.ae` and hsi's driver's `test/haskell/hsi/cmd/rtsflags.ae` and `rtsusage.ae` (HE9's allocation
   limits and the RTS's options, doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main"): `alloclimit.ae`'s rules from GHC
   9.14.1's `rts/Schedule.c` (schedulePostRunThread) and `rts/PrimOps.cmm` (stg_{get,set}ThreadAllocationCounterzh);
