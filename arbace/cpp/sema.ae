@@ -35,6 +35,8 @@
 ;; ((fn [ex node]) called with the refusal and that node, the analysis going on with the next entry); nil: off
 (def ^:dynamic *at* nil)
 (def ^:dynamic *on-refusal* nil)
+;; (queue 463: within an implicit special member's definition, analyze-implicit!)
+(def ^:dynamic *cx-in-implicit* false)
 (def ^:dynamic *pedantic-errors* false) ; CP311 (a): -pedantic-errors given, an extension's diagnostic an error (the checker)
 ;; queue 365: -pedantic, -Wpedantic or -pedantic-errors given (the checker): GCC's diagnostics of the GNU extensions it otherwise
 ;; accepts silently (a zero-size array)
@@ -1760,6 +1762,8 @@
                                                                                                          (if (= "class" (:tagUsed n)) "private" "public")))}
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true)))))
+      ;; (queue 463, the checker: the class's definition, where an implicitly deleted special member's reason is reported)
+      (when (and (checking?) (:range n)) (abi/update-cls! id assoc :cx-node {:range (:range n)}))
       ;; (round 54, the checker: [class.mi]/3, a class named twice as a direct base: reported at the class, the later one dropped)
       (when (checking?)
         (let [bs (:bases (abi/cls id))
@@ -3881,6 +3885,8 @@
 
 (declare resolve-overload*)
 
+(declare cx-deleted-implicit!)
+
 (defn resolve-overload
   "The best viable function of `cands` (fn ids) for the arguments `args` (typed expressions; `obj` the implicit object
   argument of a method call, or nil), or a refusal."
@@ -3927,6 +3933,7 @@
                            ;; tie-breakers)
                            (when (and (checking?) (:deleted-sure f)
                                       (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
+                             (cx-deleted-implicit! f)
                              (fail :overload "call to a deleted function " (:name f) (if (:implicit f) " (implicitly deleted)" "")))
                            b)
       (empty? viable)
@@ -4173,6 +4180,19 @@
             (cx-access! ctx (:cls f) (:name f) (:access f) nil nil))))))
   r)
 
+;; (queue 463, the checker: an implicitly declared special member deleted because a subobject's corresponding member is
+;; deleted ([class.default.ctor]/2, [class.copy.ctor]/10, [class.copy.assign]/7, [class.dtor]/7), at its first use: GCC
+;; reports the subobject's deleted call again at the class, where it implicitly defines the member ("use of deleted
+;; function" on the class's line, besides the use's); once a member)
+(defn- cx-deleted-implicit!
+  [f]
+  (when (and (checking?) *on-refusal* (not *cx-in-implicit*) (:implicit f) (:cx-sub-deleted f) (not (:cx-class-reported f)))
+    (when-let [cn (:cx-node (abi/cls (:cls f)))]
+      (upd-fn! (:id f) assoc :cx-class-reported true)
+      (*on-refusal* (ex-info (str "codegen: call to a deleted function " (:cx-sub-deleted f) " (implicitly defining " (:name f) ")")
+                             {:codegen/refused :overload :cx/node cn})
+                    cn))))
+
 ;; (queue 463, the checker: the destructor a variable's definition makes potentially invoked, [class.dtor]/15: "a program
 ;; is ill-formed if a destructor that is potentially invoked is deleted or not accessible from the context of the
 ;; invocation"; [basic.stc.static], [basic.stc.auto], [stmt.dcl]: a variable of class type, or an array of them, of static
@@ -4183,6 +4203,11 @@
     (let [u (loop [u (abi/unq t) k 0] (if (and (abi/arr? u) (< k 8)) (recur (abi/unq (:of u)) (inc k)) u))]
       (when (abi/class? u)
         (when-let [d (some-> (:dtor (abi/cls (:id u))) fnd)]
+          ;; (queue 463: a deleted one, written so or implicitly deleted for a subobject's, [class.dtor]/15 with
+          ;; [dcl.fct.def.delete]/2, GCC's "use of deleted function 'A::~A()'")
+          (when (and (:deleted d) (:deleted-sure d))
+            (cx-deleted-implicit! d)
+            (fail :overload "call to a deleted function " (:name d) (if (:implicit d) " (implicitly deleted)" "")))
           (when (and (#{:private :protected} (:access d)) (:cls d) (not (:implicit d)))
             (if (:cx-global ctx)
               (fail :access "'" (:name d) "' is a " (name (:access d)) " member of '" (:name (abi/cls (:cls d))) "'")
@@ -7778,7 +7803,7 @@
                 (upd-fn! fid #(-> % (assoc-in [:ty :ret] rt) (assoc :params pids :tbody {:s :return :init {:i :expr :e e}}))))))
     fid))
 
-(defn analyze-implicit!
+(defn- analyze-implicit*!
   "An implicit (or defaulted) special member's definition: params and, for a default constructor, the members'
   initializers."
   [fid]
@@ -7838,6 +7863,12 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The program
+
+(defn analyze-implicit!
+  "An implicit (or defaulted) special member's definition (analyze-implicit*!); a deleted call in it is the member's
+  deletion, no use of the deleted function (queue 463: cx-deleted-implicit! reports at a use only)."
+  [fid]
+  (binding [*cx-in-implicit* true] (analyze-implicit*! fid)))
 
 (defn- immediate-address
   "CP310 (b): the immediate function whose address the typed expression `e` is (a pointer to it, a pointer to member
@@ -8157,7 +8188,14 @@ protected:
                                                             (and (:codegen/refused (ex-data e)) (:header (abi/cls (:cls (fnd id)))))))
                                                  ;; (CX12: deleted for a subobject's deleted member, the checker sure of it)
                                                  (upd-fn! id assoc :deleted true :tinits nil
-                                                          :deleted-sure (boolean (and (checking?) (re-find #"call to a deleted function" (str (.getMessage e))))))
+                                                          :deleted-sure (boolean (and (checking?) (re-find #"call to a deleted function" (str (.getMessage e)))))
+                                                          ;; (queue 463: the subobject's deleted member, for cx-deleted-implicit!)
+                                                          :cx-sub-deleted (when (and (checking?)
+                                                                                     ;; (an assignment deleted for a reference or const member, [class.copy.assign]/7.2-3:
+                                                                                     ;; GCC names no subobject's member at the class: inherit/pr97268.C)
+                                                                                     (not (and (= "operator=" (:name (fnd id)))
+                                                                                               (some #(or (abi/ref? (:ty %)) (:c (:ty %))) (:fields (abi/cls (:cls (fnd id))))))))
+                                                                            (second (re-find #"call to a deleted function (\S+)" (str (.getMessage e))))))
                                                  (throw e)))))
                                     :else nil)))
                           ;; (the rest of CP313 (a): an error found while declaring, reported in order)
