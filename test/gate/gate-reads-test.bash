@@ -34,7 +34,9 @@ failed_calls_out "$TMPDIR/gate-reads.$$.fx" > "$TMPDIR/gate-reads.$$.fx.out"
 rm -f "$TMPDIR/gate-reads.$$.fx" "$TMPDIR/gate-reads.$$.fx.out"
 trace=$TMPDIR/gate-reads.$$.strace
 rm -f "$trace" "$trace.ok" "$trace.paths"
-GATE_TESTS_NESTED= strace -f -qq -y -s 4096 -e "trace=%file,execve,execveat,clone,clone3,fork,vfork,chdir,fchdir" -o "$trace" \
+# --seccomp-bpf (n-gate-parts, 2026-11-19, as bin/gate --audit's): the tracees stop only on the traced calls, the same
+# trace near full speed (without it the nested run took 110 of the step's 128 minutes on the night of 2026-11-17)
+GATE_TESTS_NESTED= strace -f -qq -y -s 4096 --seccomp-bpf -e "trace=%file,execve,execveat,clone,clone3,fork,vfork,chdir,fchdir" -o "$trace" \
   bash -c 'read -r canary < "$1"; shift; exec "$@"' _ "$src/LICENSE.md" "$src/bin/gate-tests" --nested > "$TMPDIR/gate-reads.$$.out" 2>&1 \
   || { echo "FAIL: bin/gate-tests under strace failed (its output kept: $TMPDIR/gate-reads.$$.out; each test's log TMPDIR/gate-tests.nested.NAME.log)"
        grep -a -A40 ' FAILED' "$TMPDIR/gate-reads.$$.out" | head -80; tail -5 "$TMPDIR/gate-reads.$$.out"; exit 1; }

@@ -12951,3 +12951,54 @@ invokers' six), 399's five gen-class cases pass; `bin/gate --plan`: 52 essential
 a build (gate_key moved). doc/AGENDA.md's top rewritten for main plus these merges: the consolidation of 2026-11-18/19, the scores,
 the pending work (lanes 2 and 4, the Java platform night, tonight's --full, the Ghidra DECISIONs 403-1 and 405-1, the re-seed's
 stopgaps: ARBACE_NO_AOT for cpp-essential and c-parse's mutants, the Tok split, the aot-lib key reading stage 0's cf2g).
+
+## 2026-11-19: the full gate's long single steps split for the lanes (branch `n-gate-parts`, on mac/next `7dd3947a0`)
+
+Measured from the full gate of 2026-11-17/18 (wall, CPU, tree peak and wait per step; the next worktree's `.tmp/gate/` logs), the
+long single steps on the critical path: hsi-check-aot 8338 s, gate-tests 7672 s, wai-go-aot 4417 s, si-ecraven.ecraven 4291 s,
+java-interp.hotspot-compiler 4121 s, cpp-dg.dg-error-own 3909 s, hsi-check 2550 s; rsi-essential's passes up to 19767 s.
+
+- gate-tests (bin/gate-tests): its 45 tests ran one after another, and gate-reads-test.bash runs the whole of bin/gate-tests
+  again (`--nested`) under `strace -f` with every tracee stopped on every system call: the nested run took 110 of the step's
+  128 minutes (the outer tests 18). Now the tests run side by side, at most `GATE_TESTS_JOBS` at once (default 4; 1 is the old
+  serial order), each with a TMPDIR of its own (`TMPDIR/gate-tests[.nested].NAME.d`, removed when it passes) beside its log and its
+  status file, judged and reported afterwards in the directory's order with the same rules (77, `--nested`, `--no-exe`); and
+  gate-reads-test's strace takes `--seccomp-bpf`, as `bin/gate --audit`'s does: the same trace set (`%file`, execve, clone, chdir),
+  the tracees stopped only on those calls. A test marked `# gate-tests: alone` runs after the others, by itself: lanes-test and
+  needs-wait-test, whose synthetic steps hold on each other by time (the first parallel run: the nested lanes-test, beside the
+  others under the trace, lost its lane directory and waited; alone under the same `--seccomp-bpf` trace it passes in 46 s).
+  Three tests fail on `7dd3947a0` itself, serially too (costs-test: haskell-lib-own-* steps in no crop of `:crops`;
+  prepare-fail-test: the host compile's control, status 2; rotation-controls-test: c-check's and c-aot's control subjects not
+  in `:always`): not this branch's, left to their owners. Alternatives: a step a test (45 steps, each a planner row, for seconds-long tests), or
+  gate-reads-test as its own step (it would still hold the long pole).
+- hsi-check and hsi-check-aot: `:parts [{:part nofib+samples} {:part synthetic+testsuite-core}]`, `--corpus {part}` (bin/lib/hsi/check
+  takes `+` for `,` in `--corpus`), each part working apart (`HSI_CHECK_PART`: `.tmp/hsi/check[-aot]-own.PART`; whole, the work dir
+  was removed by each run); every part has negative controls of `test/haskell/hsi-controls.txt` (samples' three, synthetic's two;
+  testsuite's three in the second), so "no negative control ran" cannot fail a part; no longer `:heavy` (the heavy lock would run the
+  parts one after another): hsi-check's parts at `--jobs 2`, `:mem-gib 8` (12.2 GiB at `--jobs 4` whole), hsi-check-aot's at
+  `--jobs 2`, `:mem-gib 13` each, as measured whole: the free lane admits two when they fit. The records are unchanged; the night's
+  first run measures the parts (the simulation knows them as unmeasured). Not run here (heavy, hours).
+- wai-go-aot: its 1188 programs' three slices (WAI_AOT_SLICE 400) were translated by shape, built (about 1300 s each, 2.1 GiB) and
+  run one after another; `WAI_AOT_SLICE_JOBS` (default 1, the old order) runs that many slices side by side, each with its own
+  mods list, generated packages, stats, Go cache, log and rows (aot_go_shared's TAG), the run's shared programs all kept until it ends
+  (WAI_AOT_SHARED_KEEP the slices' count), the logs and rows put together in the slices' order and judged as before. The step
+  itself is unchanged: at three slices it declares about 7 GiB, past `:night-concurrent`'s `:max-step-gib` 4, which would take
+  wasm-full out of the chains beside the serial run (crops-test's check of steps.edn's chains fails so); the choice (the cap, or
+  wasm-full serial with its slices side by side) is the user's. Run once light:
+  `WAI_AOT_SLICE=6 WAI_AOT_SLICE_JOBS=3 bin/wai go --aot --list test/wasm/go-aot.txt`, three slices side by side (built in 210, 146
+  and 185 s), 18 of 18 pass, the controls as before, 4 min 43 s, 0.55 GiB (the main checkout's kept shared program put back).
+- Not split here: si-ecraven (one part `ecraven`, its rotation keyed by the part's name in test/scheme/subsets.edn: a second part would
+  have no subset and run whole every night; bin/si ecraven has no jobs option), cpp-dg's dg-error-own (rotated by its part's name
+  likewise; halves need a second :subset-key), java-interp.hotspot-compiler (Java's levels already a part a corpus).
+- rsi-essential: its passes in the store are bimodal: 1612-1924 s at a 3.7 GiB peak when the lowered std in the worktree's
+  `.tmp/rsi/runtime` is at the checkout's key, 11958-19767 s at 7.1 GiB when it is not (`runtime-build --ci`, 94 units, 926 s, then the
+  lowered std read into ci, all of it evaluated under the step's `ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`): the essential subset's 13
+  programs are minutes; the hours are the std's rebuild at every change of its key. Left as it is (the fix is the std's lowered
+  forms kept by key in the main checkout's `.tmp`, shared, or the re-seed that lets the step drop ARBACE_NO_AOT).
+
+Proof: `bin/gate --full --concurrent --plan` on `7dd3947a0`: simulated wall 9:19 (serial sum 29:09); on this branch 9:23 (serial sum
+26:40, hsi's four parts unmeasured, so counted as 0; gate-tests' duration is its last pass's, 0:21): the simulated critical path is
+lane 2's serial chain (repr-go, goi, goi-check-full, goi-aot.linux-amd64 ending at 9:19/9:23), not these steps; the measured night
+had them on it. `gate.crops check` 0 problems; crops-test passes on the final table. bin/gate-tests run once in the new form
+(4 jobs): gate-reads-test's traced nested run in under 4 minutes (110 before), failing only on the three tests above and on a
+crops-test that read the table while the reverted wai-go-aot change was in it.

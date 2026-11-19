@@ -396,12 +396,38 @@ gorun_check() {
     if [ "$slice" -gt 0 ]; then
       split -l "$slice" -d -a 3 "$gorun_work/ids" "$gorun_work/slice."
       : > "$gorun_work/rows.tsv"
+      # n-gate-parts (2026-11-19): WAI_AOT_SLICE_JOBS slices at once (default 1, one after another as before), each with its own
+      # files, Go cache, log and rows, the logs and rows put together in the slices' order; the shared programs of the run kept
+      # until its end (WAI_AOT_SHARED_KEEP: one a slice, none of a running slice pruned by another)
+      local sj=${WAI_AOT_SLICE_JOBS:-1} ns running=0 sn st=0
+      ns=$(ls "$gorun_work"/slice.* | wc -l)
       for sl in "$gorun_work"/slice.*; do
-        echo "wai go --aot: slice ${sl##*.}: $(wc -l < "$sl") programs"
-        WAI_GOCACHE=$gorun_work/aot-gocache WAI_AOT_SHARED_KEEP=1 aot_go_shared "$gorun_work" "$sl" || return 1
-        rm -rf "$gorun_work/aot-gocache"
-        xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$sl" >> "$gorun_work/rows.tsv"
+        sn=${sl##*.}
+        if [ "$sj" -le 1 ]; then
+          echo "wai go --aot: slice $sn: $(wc -l < "$sl") programs"
+          WAI_GOCACHE=$gorun_work/aot-gocache WAI_AOT_SHARED_KEEP=1 aot_go_shared "$gorun_work" "$sl" || return 1
+          rm -rf "$gorun_work/aot-gocache"
+          xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$sl" >> "$gorun_work/rows.tsv"
+          continue
+        fi
+        ( echo "wai go --aot: slice $sn: $(wc -l < "$sl") programs"
+          WAI_GOCACHE=$gorun_work/aot-gocache.$sn WAI_AOT_SHARED_KEEP=$ns aot_go_shared "$gorun_work" "$sl" "$sn" || { echo 1 > "$gorun_work/slice-rc.$sn"; exit 1; }
+          rm -rf "$gorun_work/aot-gocache.$sn"
+          xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$sl" > "$gorun_work/rows.$sn.tsv"
+          echo 0 > "$gorun_work/slice-rc.$sn" ) > "$gorun_work/slice-log.$sn" 2>&1 &
+        running=$((running + 1))
+        if [ "$running" -ge "$sj" ]; then wait -n; running=$((running - 1)); fi
       done
+      if [ "$sj" -gt 1 ]; then
+        wait
+        for sl in "$gorun_work"/slice.[0-9]*; do
+          sn=${sl##*.}
+          cat "$gorun_work/slice-log.$sn"
+          [ "$(cat "$gorun_work/slice-rc.$sn" 2>&1)" = 0 ] || st=1
+          [ ! -f "$gorun_work/rows.$sn.tsv" ] || cat "$gorun_work/rows.$sn.tsv" >> "$gorun_work/rows.tsv"
+        done
+        [ $st = 0 ] || return 1
+      fi
     else
       aot_go_shared "$gorun_work" || return 1
     fi
