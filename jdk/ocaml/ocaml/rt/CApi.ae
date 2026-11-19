@@ -3,14 +3,18 @@
 ;; through arbace/oicapi's boundary, as oi runs a program's stubs). The runtime drives: each message is written to the file the main
 ;; serves (capiPath) and its reply read back; the main answers a call with its end, or with a callback or a named value the C asks for
 ;; ('K', 'Q'), which this class answers with its next message ('A'). The wire form and the ops are capi.ae's (test/ocaml/o2j/capi).
-;; At the light level (stage 0's interpreter) no host serves capiPath: the open fails and the external is missing, as before.
+;; At the light level (stage 0's interpreter) no host serves capiPath: the open fails, and when OI_CAPI_SERVER and OI_CSTUBS are set
+;; (bin/oi's light level, for a test with C stubs: queue 413) the runtime spawns OI_CAPI_SERVER's `capi` (the driver of
+;; arbace/oi, test/ocaml/oi/cmd) and speaks to it over its standard streams, the same messages framed (a message u32 its length then it;
+;; the reply chunks 'o' and 'e', the C's output since the last reply, written into the program's System/out and System/err, 's'
+;; the signals the C sent the process itself, one a byte, pending in ExtSignal, then 'm' the reply), and at the program's end (Main/run's finish) 'Z', the C's stdio flushed; else the external is missing, as before.
 ;;
 ;; The session: the values that crossed in an outermost call, by id (the order both sides gave them) and back; a C custom block the
 ;; C allocated (kept for the run) is one Custom by its address.
 
 (in-ns 'ocaml.rt)
 
-(import '(java.io ByteArrayOutputStream RandomAccessFile IOException) '(java.util ArrayList HashMap IdentityHashMap))
+(import '(java.io ByteArrayOutputStream DataInputStream File OutputStream RandomAccessFile IOException) '(java.util ArrayList HashMap IdentityHashMap))
 
 (defclass ^:public ^:final CApi
 
@@ -18,6 +22,10 @@
   ;; the channel (opened once; nil and failed when no host serves it)
   (field ^:static ^RandomAccessFile chan)
   (field ^:static ^boolean failed false)
+  ;; the light level's server (OI_CAPI_SERVER's `capi`): its process, its output read and its input written
+  (field ^:static ^Process proc)
+  (field ^:static ^DataInputStream pin)
+  (field ^:static ^OutputStream pout)
   ;; the session's nodes and their ids; the depth of calls in it
   (field ^:static ^ArrayList nodes)
   (field ^:static ^IdentityHashMap ids)
@@ -181,20 +189,81 @@
   ;; with 'N')
   (field ^int op)
   (method ^:static exchange ^CApi [^ByteArrayOutputStream o]
-    (let [b (.toByteArray o)]
-      (.write chan b 0 (alength b))
-      (let [n (.readInt chan) r (new byte/1 n)]
-        (.readFully chan r)
-        (let [rd (CApi. r)]
-          (set! (.-op rd) (unchecked-int (.rd8 rd)))
-          (when (not (== (.-op rd) 78)) (.getUpdates rd))
-          rd))))
+    (let [b (.toByteArray o)
+          r (if (some? chan)
+              (do (.write chan b 0 (alength b))
+                  (let [n (.readInt chan) r (new byte/1 n)]
+                    (.readFully chan r)
+                    r))
+              (CApi/pipeExchange b))
+          rd (CApi. r)]
+      (set! (.-op rd) (unchecked-int (.rd8 rd)))
+      (when (not (== (.-op rd) 78)) (.getUpdates rd))
+      rd))
+
+  ;; the light level's exchange: message b framed to the server, its reply's chunks read (the C's output into the program's streams)
+  ;; until the reply itself
+  (method ^:static pipeExchange ^byte/1 [^byte/1 b]
+    (let [h (ByteArrayOutputStream.)]
+      (CApi/u32 h (alength b))
+      (.write h b 0 (alength b))
+      (.write pout (.toByteArray h))
+      (.flush pout)
+      (loop []
+        (let [k (.read pin) n (.readInt pin) r (new byte/1 n)]
+          (.readFully pin r)
+          (cond
+            (== k 109) r
+            (== k 111) (do (.write System/out r 0 n) (recur))
+            (== k 101) (do (.write System/err r 0 n) (recur))
+            ;; a signal the C sent the process itself (raise, kill of its pid): the runtime's own, pending (ExtSignal), its handler
+            ;; run when the call returns (call3)
+            (== k 115) (do (loop [^int i 0]
+                             (when (< i n)
+                               (ExtSignal/post (long (aget r i)))
+                               (recur (unchecked-inc-int i))))
+                           (recur))
+            :else (throw (Rt/internal (java-str "the C API: a chunk " k))))))))
 
   (method ^:static open ^boolean []
-    (when (and (nil? chan) (not failed))
+    (when (and (nil? chan) (nil? proc) (not failed))
       (try (set! chan (RandomAccessFile. capiPath "rw"))
-           (catch IOException e (set! failed true))))
-    (some? chan))
+           (catch IOException e (CApi/spawn))))
+    (or (some? chan) (some? proc)))
+
+  ;; the light level's server spawned (OI_CAPI_SERVER and OI_CSTUBS set), else the channel failed
+  (method ^:static spawn ^void []
+    (let [srv (System/getenv "OI_CAPI_SERVER") stubs (System/getenv "OI_CSTUBS")]
+      (if (or (nil? srv) (nil? stubs) (.isEmpty srv) (.isEmpty stubs))
+        (set! failed true)
+        (let [argv (ArrayList.)]
+          (.add argv srv)
+          (.add argv "capi")
+          (let [pb (ProcessBuilder. ^java.util.List argv)]
+            (.directory pb (File. ExtSys/cwd))
+            (.redirectError pb ProcessBuilder$Redirect/INHERIT)
+            (try
+              (let [p (.start pb)]
+                (set! pin (DataInputStream. (java.io.BufferedInputStream. (.getInputStream p))))
+                (set! pout (java.io.BufferedOutputStream. (.getOutputStream p)))
+                (set! proc p))
+              (catch IOException e (set! failed true))))))))
+
+  ;; the program's end (Main/run): the light level's server asked to flush the C's stdio ('Z'), its output written, the process ended
+  (method ^:public ^:static finish ^void []
+    (when (some? proc)
+      (try
+        (let [o (ByteArrayOutputStream.)]
+          (CApi/u8 o 90)
+          (CApi/pipeExchange (.toByteArray o))
+          (.close pout)
+          (.waitFor proc))
+        (catch Throwable t nil))
+      (set! proc nil)
+      (set! pin nil)
+      (set! pout nil)
+      (.flush System/out)
+      (.flush System/err)))
 
   ;; ---- the call
 
@@ -221,7 +290,10 @@
         (CApi/bytes o (cast byte/1 (Rt/ofUtf8 reprs)))
         (CApi/u32 o (alength args))
         (loop [^int i 0] (when (< i (alength args)) (CApi/put o (aget args i)) (recur (unchecked-inc-int i))))
-        (CApi/serve (CApi/exchange o) name prim))
+        (let [v (CApi/serve (CApi/exchange o) name prim)]
+          ;; the signals the C sent itself, handled as OCaml's runtime does when an external returns
+          (when (not (== ExtSignal/pending 0)) (ExtSignal/process))
+          v))
       (finally
         (set! depth (unchecked-dec-int depth))
         (when (== depth 0)
@@ -246,12 +318,28 @@
 
   ;; a callback: f applied to a, the answer its result ('R'), the OCaml exception it raised ('E') or, for another throwable, kept for
   ;; the call's end ('T')
+  ;; (queue 413) the callback runs as caml_callback runs it, on a stack of its own: no handler of the caller's reaches it, so an
+  ;; effect it performs unhandled is Effect.Unhandled (callback/test7), the thread's fiber put back after
   (method ^:static apply ^CApi [f ^Object/1 a]
-    (let [^:mutable ^int k 82 ^:mutable r nil]
-      (try (set! r (Rt/ap f a))
+    (let [^:mutable ^int k 82 ^:mutable r nil
+          ts (Effects/st)
+          fb (.-fiber ts)]
+      (set! (.-fiber ts) nil)
+      (try (set! r (CApi/apN f a))
            (catch Exn e (set! k 69) (set! r (.-v e)))
-           (catch Throwable t (set! pending t) (set! k 84)))
+           (catch Throwable t (set! pending t) (set! k 84))
+           (finally (set! (.-fiber ts) fb)))
       (CApi/answer k r)))
+
+  ;; f applied to a as Rt/ap applies it, an over-application a loop (queue 413: caml_callbackN of 10,000 arguments, one a closure
+  ;; of arity 1 each, callback/test1, is 10,000 nested calls of Rt/ap, beyond the light level's interpreted depth)
+  (method ^:static apN [f ^Object/1 a]
+    (let [n (alength a)]
+      (loop [g f ^int i 0]
+        (let [c (Rt/fn g) ar (.-arity c)]
+          (if (<= (unchecked-subtract-int n i) ar)
+            (Rt/ap c (if (== i 0) a (java.util.Arrays/copyOfRange a i n)))
+            (recur (.exact c (java.util.Arrays/copyOfRange a i (unchecked-add-int i ar))) (unchecked-add-int i ar)))))))
 
   ;; the answer 'A': K and its value (R and E carry one)
   (method ^:static answer ^CApi [^int k v]

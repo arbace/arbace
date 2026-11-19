@@ -222,9 +222,10 @@ END {
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       # the program's own C stubs (the C API on ci, doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci"): modules that are all C
-      # files of the test's directory, built by ci beside the program (bin/oi's cstubs_nodes, the run's @cstubs=FILE,...); at the AOT
-      # light level (-v aot=1) the class it was; at the compiled level (-v aot=2, OC215 (a)) the C API of its main (test/ocaml/o2j/capi)
-      if (key == "modules" && aot != 1 && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
+      # files of the test's directory, built by ci beside the program (bin/oi's cstubs_nodes, the run's @cstubs=FILE,...); at the
+      # compiled level (-v aot=2, OC215 (a)) the C API of its main (test/ocaml/o2j/capi); at the light level (-v aot=1, queue 413) the
+      # driver's `oi capi`, which the runtime spawns (OI_CAPI_SERVER)
+      if (key == "modules" && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
       # OCAMLRUNPARAM's d (OC193 (a), the user 2026-11-09): oi and the AOT runtime read the domains' limit, so a header that sets d
       # alone (parallel/max_domains1, max_domains2) runs with it in the environment (ocamltest's ocamlrunparam variable, OCAMLRUNPARAM's
       # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT

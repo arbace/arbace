@@ -1,5 +1,6 @@
 (in-ns 'go.arbace.oicapi) (go/file "capi.go" :doc "Package oicapi runs a program's own C stubs beside oi (doc/ocaml/OCAML-SURVEY.md, \"As built: the C API on ci\"): the stubs,\noi's C runtime (test/ocaml/capi/runtime.c) and what they need of musl, one node program (bin/oi cnodes), loaded into\nci over an address space of its own. An external oi does not implement is the stubs' C function of its name; its\narguments cross as OCaml's words: an integer tagged, a block a copy in ci's memory (its header the word before, OCaml's\nlayout), made when the stub is called and read back when it returns, around a callback and when it raises. The copies of a\ncall live in the boundary's memory until the outermost stub returns; a custom block the C allocates is static, kept for the\nrun. No collector moves them, so the C's roots need no registration.\n" :imports [
     [fmt "fmt"]
+    [io "io"]
     [math "math"]
     [os "os"]
     [strconv "strconv"]
@@ -90,7 +91,8 @@
       (when (!= err nil)
         (return err))
       (let [m (crt/NewMem)
-            sys (crt/NewSys m os/Stdin os/Stdout os/Stderr)
+            (values sin sout serr) (stdio)
+            sys (crt/NewSys m sin sout serr)
             p (ci/NewProg sys)
             l (ci/NewLoader p)
             objs (lit (map string int))
@@ -133,6 +135,30 @@
         (set! oi/CustomDeserialize (fn [^string name ^{:tag (slice byte)} data ^uint64 expected] :results [oi/Value int int bool]
                                      (.deserialize c name data expected)))
         nil))))
+
+(go/var ^{:tag (func [] [io/Reader io/Writer io/Writer]) :doc "Stdio, when set, gives the C's standard streams in place of the process's (the light level's server, the driver's\n`oi capi`: its own standard streams carry the wire form, the C's output goes back to the runtime with each reply).\n"}
+  Stdio)
+
+(go/func stdio "stdio is the C's standard streams: Stdio's, else the process's.\n" [] :results [io/Reader io/Writer io/Writer]
+  (when (!= Stdio nil)
+    (return (Stdio)))
+  (return os/Stdin os/Stdout os/Stderr))
+
+(go/var ^{:tag (func [] [int]) :doc "Pid, when set, is the process the program is (the C's getpid) in place of this one's (the light level's server: its\nparent, the runtime that spawned it).\n"}
+  Pid)
+
+(go/var ^{:tag (func [int int] [error]) :doc "Signal, when set, is the C's kill(pid, sig) and raise in place of oi.SignalProcess (the light level's server: a signal\nto the program itself goes back to the runtime with the reply).\n"}
+  Signal)
+
+(go/func pid "pid is the C's getpid: Pid's, else the process's.\n" ^int []
+  (when (!= Pid nil)
+    (return (Pid)))
+  (os/Getpid))
+
+(go/func signal "signal is the C's kill: Signal's, else oi's.\n" ^error [^int p ^int sig]
+  (when (!= Signal nil)
+    (return (Signal p sig)))
+  (oi/SignalProcess p sig))
 
 (go/func Flush "Flush flushes C's stdio (libc's exit, after the OCaml channels' flush at the program's end).\n" []
   (when (and (!= the nil) (!= (.-flush the) nil))
@@ -742,11 +768,11 @@
                 (return (lit ci/Arg :K \i :I -1)))
               (lit ci/Arg :K \i :I 0))]
     (lit (map string (func [(* ci/Thread) (slice ci/Arg)] [ci/Arg]))
-      ["getpid" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a] (lit ci/Arg :K \i :I (conv int64 (os/Getpid))))]
+      ["getpid" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a] (lit ci/Arg :K \i :I (conv int64 (pid))))]
       ["kill" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
-                (res (oi/SignalProcess (conv int (conv int32 (.-I (aget a 0)))) (conv int (conv int32 (.-I (aget a 1)))))))]
+                (res (signal (conv int (conv int32 (.-I (aget a 0)))) (conv int (conv int32 (.-I (aget a 1)))))))]
       ["raise" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
-                 (res (oi/SignalProcess (os/Getpid) (conv int (conv int32 (.-I (aget a 0)))))))]
+                 (res (signal (pid) (conv int (conv int32 (.-I (aget a 0)))))))]
       ;; the process's descriptors (OC201 (a)): a stub's fstat and close of a descriptor are the host's, as OCaml's Unix.file_descr
       ;; oi gives it is (ci's own table, crt's, holds the standard streams alone); errno set as musl's wrapper sets it
       ["fstat" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
