@@ -2600,6 +2600,54 @@ Proved (linux/arm64): `bin/hsi check --corpus synthetic` judged by the record an
 pass, 5 fail (arm64's floating point, below), 37 of 37 `:judge :own`; the control primops-int8 against primops-word8 fails
 against the golden file.
 
+## As built: queue 435: the testsuite's and nofib's golden files
+
+The judge's 153 programs with no expected output GHC's recorded run confirms (0.5) were reviewed one by one.
+- The testsuite's shipped files as its driver takes them (`testlib.py`'s `find_expected_file`: `NAME.stdout-ws-64` and the
+  `x86_64-unknown-linux` variants before `NAME.stdout`): `bin/hsi own-verdicts` reads the file the driver reads, 9 programs more
+  by their own verdict (T10245, T20137, T2838, T10962, arith003, arith011, numrun009, numrun012, tcrun002).
+- 65 programs by golden files written from their source: `test/haskell/eval/golden/ID.stdout`, `ID.stderr` (none: empty) and
+  `ID.exit` (none: 0), each line reviewed in `golden/AREA.edn` with its basis (`:src`, `:report`, `:lib` and `:rts`: the
+  libraries' and the RTS's source in GHC 9.14.1's tarball at its pin, `:plan`: record-ref's arguments and stdin, `:shipped`: the
+  test's shipped file agrees) and why; then checked against the record's SHA-256s and sizes (no program run, no GHC). Among them:
+  the shipped files that differ from the run only by the last newline (the driver does not compare it); the non-threaded RTS's
+  answers to threaded-way tests (conc069's forkOS failure, conc070's BlockedOnOther, conc072's capability 0,
+  foreignInterruptible's uninterrupted call); uncaught exceptions in GHC 9.14's layout (`GHC.Internal.Conc.Sync`'s handler,
+  `Backtrace`'s "HasCallStack backtrace:"), whose shipped `.stderr` files name an older ghc-internal's positions (169:13 and 89:42
+  for 170:37 and 90:42 at the pin); arguments the plan does not pass (an `extra_run_opts` that is an expression, nofib's
+  `NORM_OPTS`), so a pattern fails in `do` or a lambda; the RTS's usage text by `rts/RtsFlags.c`'s `usage_text` under the linked
+  RTS's `#if` branches (cgrun057, T16916); T3676's conversions through `toRational` of NaN and infinities; happy's `usageInfo`;
+  22 nofib benchmarks whose variant prints nothing.
+- `bin/hsi golden [--oracle] [--control]` (`test/haskell/eval/review.ae`): every golden file against its review; every program of
+  the record its own verdict, a golden file or left in `golden/left.tsv` with a reason; `--oracle` each against GHC's record;
+  `--control` each with one byte changed must fail the review and the digest (65 of 65). `own-verdicts.tsv` lists them as
+  `golden:NAME`; `bin/lib/hsi/check`'s `own_ref` reads them at -O0. hsi-essential runs it.
+- Left (79): 64 GHC did not build at record-ref (no run to check against); T4262 (the host's thread count), conc065, conc066,
+  conc067 (thread timing, `ignore_stdout`), fannkuch-redux and minimax (the CPU limit), k-nucleotide (a segfault on an empty
+  stdin), T15892 and T23071 (`ignore_stdout`, 0.96 MB and 13 MB), fasta, awards and gc/cacheprof (7.6 MB, 604 KB and 57 KB of
+  output not derived by hand), IPLocation, T7861 and FMA_ConstantFold (not derived).
+- Eval 756 to 830 of 909 by their own verdict, AOT 132 to 139 of 139; the judge 0.922 to 0.927.
+
+## As built: queue 444: the rest of the golden files
+
+Queue 435's 79 left were reviewed again, one by one.
+- IPLocation by a golden file: GHC 9.14's `prettyCallStackLines` header "(from HasCallStack)" (the shipped file's "(from
+  ImplicitParams)" is an older base's) and the source's present lines, plus f7's empty stack (#14043, absent from the shipped
+  file); GHC's record agrees (608 bytes).
+- 7 testsuite programs GHC did not build at record-ref, by golden files from their source alone: CallConv (its x86_64 assembly),
+  MulMayOflo_full, PopCnt, T5149, cgrun069 and T21305 (their Cmm, all.T's `multi_compile_and_run` companions record-ref does not
+  link), T24809 (`-prof`, no profiled libraries here). Their review says so, `:no-run "why"`, and `bin/hsi golden` requires the
+  mark exactly for a program whose record is `:no-build`; `--oracle` reports them as resting on the review alone; the control
+  still fails each. `bin/hsi own-verdicts` lists a `:no-build` program by its golden file alone. bin/hsi check's own path runs
+  six of them to an `:hsi` stop (the test's own Cmm or assembly, divergences.edn's class), which the reference does not change;
+  T24809 is all.T's skip.
+- Left (71, reasons in `golden/left.tsv`): nofib's 29 programs that import NofibUtils (their output a hash of a whole benchmark's
+  result; HF10-P64 (a) gives them GHC's run, after which their shipped nofib files are their own verdict with no golden file),
+  nofib's 28 others GHC did not build and nothing runs (DECISION D435-3), T7861 (GHC 9.14 raises another deferred error than the
+  shipped one: 1,026 bytes derived against the record's 1,076), FMA_ConstantFold (IEEE fma passes every check; the record's six
+  failures are the host's), and the 13 queue 435 left for timing, host, limits or size.
+- Eval 830 to 838 of 909 by their own verdict; the judge (6,660 + 0.5 x 1,133) / 7,793 = 0.927 (0.9268 to 0.9273).
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
