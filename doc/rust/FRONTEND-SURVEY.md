@@ -4793,3 +4793,122 @@ throws as before (no fact), and the round's re-exports are std's pass's alone.
 
 - std's interface is complete against the helper's (4,644 of 4,644). The main host's whole pass and `--units` confirm it on
   amd64.
+## As built: S4's alloc and std bodies (2026-11-19, queue 443, branch `443-rust-s4b`)
+
+RUST-90 S4 (C2), after queue 433's first slice (core's bodies for rsi's five samples, `core-export --rsi`, `rsi-build
+--native-core`, the per-item map `test/rust/front/s4-items.tsv`). This round takes the next groups of the map toward std: alloc's
+and std's generic bodies that the five samples instantiate.
+
+- **`bin/rust-front lib-export --rsi alloc|std [NAME...]`** (`bin/lib/repr-rust/core-build.bash`, `arbace.rust.front.alloc-check
+  --export`). The keys are each record's Item instance of the crate, `boxed-{impl#0}-new`. The sample std.rs's own items (crate
+  0, named std) are left out. The crate's interface pass runs over every module file (two rounds), cached in
+  `.tmp/rust-front/CRATE/native-iface.edn`. Then the owning module files of the keys are built through the 21 passes
+  (core-check's `run-module` under `*only-key?*`, closures with their parent). The bodies are written as core-export's entries
+  with `:judge :instance` into `.tmp/rust-front/CRATE/native-CRATE-rsi.edn`, with a `.tsv` holding a line per key.
+  - core's traits' associated constants come from core's own sources (`core-consts`, `LIB_CORE_CONSTS`, default
+    `mem/mod.rs`). std's interface writes none of them, and the bodies name them (`T::IS_ZST`, `<T as
+    SizedTypeProperties>::LAYOUT`).
+  - Each entry carries the native facts of the crate-private functions its body names (`:fns`, `box_new_uninit`). The run adds
+    them to its interface, so their item types print.
+- **Judged at the instance, not against built MIR.** There is no built-MIR oracle of alloc or std (433-4 (a), a pack for the
+  main host). So an instance-judged body is taken only when its instance equals the record's body, up to -O0's passes (433-2
+  (a)). Otherwise the record's body stays, and the difference is printed.
+  - A root is judged against its own record body.
+  - A callee is judged against the record's bodies of its def (`rec-by-path`): the one whose forms agree. Such a callee is taken
+    in place of the record's body of that symbol.
+  - `pack-compare` (build-run) drops the record's facts beside the forms: symbols, callees, glue, locations, and a function
+    item's def text.
+  - It then classifies: `:equal`, `:equal-but-storage`, or `:equal-o0 KINDS`. The last means equal once both bodies go through
+    `o0-normalize`, a port of the parts of rustc 1.99.1's -O0 passes that our runtime MIR stops before: RemoveStorageMarkers,
+    SimplifyCfg-final (passes' `simplify-cfg`), InstSimplify's `&(*_b)` of _b's type, CopyProp's copies of locals (a move of the
+    copy becomes a copy of the source), RemoveZsts' zero-sized assignments, RenameReturnPlace, and SimplifyLocals (debug info's
+    places count as uses).
+  - A promoted constant's value is not compared, because ours is evaluated at the run. Its text and type are compared.
+  - Crossed controls: `control` over every root, and `control-instance` over the instance-judged roots alone. Each must differ.
+  - `bin/rust-front pack-compare-test` holds 15 pure cases (`test/rust/front/pack_compare_test.ae`), seven of them negative.
+- `rsi-build --native-core` takes alloc's and std's files beside core's (`RF_CORE_NATIVE`, `:`-separated). It prints a summary
+  line per crate (roots native or from the pack, the kinds, callees judged) and the instance control.
+
+### Results (run)
+
+The export:
+
+| crate | group | wanted | built | refused: closure types | refused: other |
+|---|---|---|---|---|---|
+| alloc | collections::btree | 112 | 99 | 12 | 1 (node `{impl#1}::new`, a field) |
+| alloc | vec | 49 | 44 | 2 | 3 (method callee x2, `<usize>::MAX` type-relative) |
+| alloc | collections::vec_deque | 39 | 39 | 0 | 0 |
+| alloc | raw_vec | 33 | 29 | 4 | 0 |
+| alloc | string | 22 | 22 | 0 | 0 |
+| alloc | rc | 17 | 17 | 0 | 0 |
+| alloc | boxed | 16 | 15 | 0 | 1 (`into_vec` on `Box<[T]>`: method callee) |
+| alloc | alloc | 15 | 11 | 0 | 4 (extern "Rust" functions: foreign items unresolved) |
+| alloc | slice, str, fmt, collections | 23 | 14 | 8 | 1 (str join's pattern) |
+| alloc | total | 326 | 290 | 26 | 10 |
+| std | collections::hash | 27 | 23 | 2 | 2 (`base::HashMap::with_hasher`: hashbrown's path) |
+| std | panicking, panic, hash, rt | 21 | 15 | 6 | 0 |
+| std | thread, sys, process, env, f32, f64 | 16 | 15 | 0 | 1 (ElaborateDrops: open drop of :err) |
+| std | total | 64 | 53 | 8 | 3 |
+
+hashbrown's 146 defs are not exported yet.
+
+`rsi-build --native-core intrinsics panics std unwind vectors` (one run, RF11_BATCH=1, 0 stub calls) gives the same 4 of 5 own as
+433's baseline. std.rs is on the pack: codegen refused, "unsupported const unevaluated". core's RefCell extras carry `(unevaluated
+"85" ..)` (core::cell::is_reading, `{impl#53}::new`; read, not bisected).
+
+Library instances taken natively:
+
+| sample | alloc roots native / pack | std roots native / pack | judged callees taken |
+|---|---|---|---|
+| intrinsics | 2 / 2 | 2 / 0 | 0 of 3 |
+| panics | 0 / 6 | 0 / 8 | 0 of 1 |
+| std | 7 / 26 | 2 / 4 | 4 of 25 |
+| unwind | 0 / 7 | 0 / 6 | 0 of 3 |
+| vectors | 7 / 3 | 0 / 7 | 0 of 7 |
+
+That is 24 alloc and std instances native: Vec's Deref and DerefMut, `[T]::sort`, String's `len` and Deref, Rc's Deref,
+`f32::powi`, `f64::powi`, `f64::sqrt`, HashMap's `into_iter`, and the callees `as_str`, Rc's `inner` and VecDeque's `len`. Each
+instance control differs.
+
+The judge on core's roots, against 433's baseline (the main host's run, every root but 4 differing): intrinsics 12 equal-o0,
+3 equal-but-storage, 2 differ; panics 7 and 2; std 1 equal, 2 equal-o0, 5 differ; unwind 2 and 3; vectors 4 equal-o0. That is 31
+of 36 explained by -O0's passes.
+
+Why the rest are not taken (run, from the build logs):
+- **Trait objects, `(other ":dyn")`, 18.** catch_unwind, downcast and payload.
+- **A named constant unevaluated, 9.** `SizedTypeProperties::LAYOUT` and `MAX_SLICE_LEN`. The record carries the evaluated value
+  (mono-time CTFE). This is not a -O0 pass.
+- **A trait method's function constant not resolved at the instance, 5.** `SpecToString::spec_to_string` where the record has
+  `<&str as SpecToString>::spec_to_string`.
+- **Unnormalized projections, `(other ":proj")`, 4.** Vec's Index.
+- **A crate-private ADT's impl printed `<impl {}>`, 2.** `RawVec::new`, so Vec::new differs.
+- **Our PromoteTemps adds a local where rustc reuses the temporary.** `box_new_uninit`, so Box::new_uninit's callee differs.
+- **std's HashMap bodies name hashbrown's types**, which the run's interface lacks.
+- **Closures**: the export does not carry closure types.
+
+### Left
+
+- hashbrown's export.
+- alloc's foreign items (`__rust_alloc`, which needs resolve, lower and collect of foreign functions, and their
+  rustc_std_internal_symbol names).
+- Closure types in the export.
+- Named constants evaluated at the instance.
+- Trait method constants resolved at reprint.
+- Crate-private ADTs and impls added to the run's interface, as `:fns` are.
+- std.rs's codegen refusal (bisect with RF11_KEEP=1).
+
+### 443-4 (b): std.rs back on Arbace's MIR (2026-11-19, the main host's answer)
+
+- **Plan-time refusal.** `native-core-plan` now refuses, at plan time, a native body whose forms (or promoted bodies) hold a
+  constant left unevaluated by a local def id, `(unevaluated "85" ..)`. The refusal is a `record`/`record-kept` line naming
+  the constant, and the record's body is kept. `rsi-build` prints `refused at plan time (an unevaluated constant of a def id): N:
+  NAMES`.
+- **`read_via_copy` and `write_via_move`.** After that refusal, std.rs's next codegen refusal was `read_via_copy`, in
+  core::mem::replace, an extra of RefCell::borrow. `passes/lower-intrinsics` now lowers both intrinsics as rustc 1.99.1's
+  lower_intrinsics.rs does: `_0 = copy (*_1)` and `(*_1) = move _2`, the call becoming a goto, or `unreachable` without a
+  target.
+- **Run.** `RF11_BATCH=1 bin/rust-front rsi-build --native-core std`: std.rs is own, with 11 of 2,866 bodies ours and 39 bodies
+  built natively. Native roots: 7 core, 7 alloc and 2 std, plus 4 judged callees. Three bodies are refused for `(unevaluated
+  "85")`: core::cell::is_reading, `{impl#31}::try_borrow_mut` and RefCell::new. Both controls differ.
+- **The two runs before.** With the refusal alone, codegen refused `read_via_copy`. Without either change (the five-program
+  run), codegen refused `unevaluated`.

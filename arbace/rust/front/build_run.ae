@@ -692,13 +692,19 @@
   []
   (if-let [f (System/getenv "RF_CORE_NATIVE")]
     (or (get @native-core-cache f)
-        (let [m (if (.exists (File. ^String f))
-                  (into {} (for [x (read-forms (slurp f)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)]
-                             [(:def e) e]))
-                  {})]
+        ;; queue 443: several files, `:`-separated (core's, then alloc's and std's from bin/rust-front lib-export)
+        (let [m (into {} (for [^String f1 (str/split f #":") :when (.exists (File. f1))
+                               x (read-forms (slurp f1)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)]
+                           [(:def e) e]))]
           (swap! native-core-cache assoc f m)
           m))
     {}))
+
+(defn- native-extra-fns
+  "queue 443: the native facts of the library functions the exported bodies name that std's interface lacks (alloc's
+  crate-private `box_new_uninit`), {path fact}, which the run's interface takes so that their items' types print"
+  []
+  (reduce (fn [acc e] (merge (:fns e) acc)) {} (vals (native-core-map))))
 
 (defn- builtin-normalize
   "The builtin projections an instance's types name once their parameters are known: <T as Pointee>::Metadata (the
@@ -790,22 +796,277 @@
 
 (defn- call-of [t] (when (and (seq? t) (= 'call (first t))) (:tc (meta (nth (second t) 2 nil)))))
 
+;; RUST-90 S4 (C2): a native instance's body judged against the record's (rustc's optimized MIR of the instance at -O0, the body
+;; the pack gives the run), so that a root taken natively is proven on the program's own instance, not only on core-check's
+;; generic body against rustc's built MIR
+
+(defn- strip-storage [stmts]
+  (vec (remove #(and (seq? %) (#{'storage-live 'storage-dead 'nop} (first %))) stmts)))
+
+(defn- rec-extras
+  "The record's facts beside a form (a function constant's :fn-symbol, a call's, drop's or assert's callee, glue, location and
+  trailing fields after its unwind action) dropped: what our instance's forms do not carry before the run"
+  [x]
+  (cond
+    (seq? x) (let [y (loop [in (seq x) out []]
+                       (cond (nil? in) out
+                             (= :fn-symbol (first in)) (recur (nnext in) out)
+                             :else (recur (next in) (conj out (rec-extras (first in))))))
+                   y (if (and (#{'call 'drop 'assert} (first y)) (> (count y) 6)) (subvec y 0 6) y)]
+               (apply list y))
+    (vector? x) (mapv rec-extras x)
+    (map? x) (into {} (for [[k v] x] [k (rec-extras v)]))
+    :else x))
+
+(defn- place-locals
+  "The locals a form names: each (place N ..) and each index projection's (index N)"
+  [x]
+  (let [acc (transient #{})]
+    (doseq [f (tree-seq coll? seq x) :when (seq? f)]
+      (case (first f)
+        place (conj! acc (second f))
+        index (when (number? (second f)) (conj! acc (second f)))
+        nil))
+    (persistent! acc)))
+
+(defn- map-locals
+  "FORM with each local renamed by F (places and index projections)"
+  [x f]
+  (cond
+    (seq? x) (let [y (apply list (map #(map-locals % f) x))]
+               (cond (and (= 'place (first y)) (number? (second y))) (apply list 'place (f (second y)) (drop 2 y))
+                     (and (= 'index (first y)) (number? (second y)) (= 2 (count y))) (list 'index (f (second y)))
+                     :else y))
+    (vector? x) (mapv #(map-locals % f) x)
+    :else x))
+
+(defn- plain-place [p] (when (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p)))
+
+(defn- o0-copy-prop
+  "CopyProp's case at -O0 (copy_prop.rs): a temporary defined once by `_t = move|copy _s` (S a local, neither borrowed, S
+  never assigned after its definition) is S: its uses renamed (a move of it a copy of S, as rustc's optimized MIR writes it)
+  and its definition dropped; [body changed?]"
+  [body]
+  (let [blocks (:blocks body)
+        stmts (for [b blocks s (:stmts b)] s)
+        defs (frequencies (concat (keep #(when (and (seq? %) (= 'assign (first %))) (plain-place (second %))) stmts)
+                                  (keep #(let [t (:term %)] (when (and (seq? t) (= 'call (first t))) (plain-place (nth t 3 nil)))) blocks)))
+        borrowed (set (for [f (tree-seq coll? seq blocks) :when (and (seq? f) (#{'ref 'rawptr} (first f)))
+                            :let [p (last f)] :when (and (seq? p) (= 'place (first p)))]
+                        (second p)))
+        nargs (long (or (:args body) 0))
+        cand (first (for [s stmts
+                          :when (and (seq? s) (= 'assign (first s)))
+                          :let [t (plain-place (second s)) rv (nth s 2 nil)]
+                          :when (and t (> (long t) nargs) (= 1 (get defs t)) (not (borrowed t))
+                                     (seq? rv) (= 'use (first rv)) (seq? (second rv)) (#{'move 'copy} (first (second rv))))
+                          :let [src (plain-place (second (second rv)))]
+                          :when (and src (not= src t) (not (borrowed src)) (not= 0 src)
+                                     (if (<= (long src) nargs) (zero? (get defs src 0)) (= 1 (get defs src))))]
+                      [s t src]))]
+    (if-not cand
+      [body false]
+      (let [[s t src] cand
+            ren (fn ren [x] (cond (and (seq? x) (= 'move (first x)) (seq? (second x)) (= t (second (second x))))
+                                  (list 'copy (map-locals (second x) #(if (= % t) src %)))
+                                  (seq? x) (apply list (map ren x))
+                                  (vector? x) (mapv ren x)
+                                  :else x))
+            fix (fn [f] (map-locals (ren f) #(if (= % t) src %)))]
+        [(assoc body :blocks (mapv (fn [b] (-> b (update :stmts (fn [ss] (mapv fix (remove #(identical? % s) ss)))) (update :term fix))) blocks)
+                     :debug (fix (:debug body)))
+         true]))))
+
+(defn- o0-simplify-locals
+  "SimplifyLocals (simplify.rs) at -O0: the locals no statement or terminator reads or writes dropped (an assignment's only
+  use of a local the statement too: remove_unused_definitions), the rest renumbered in order; [body changed?]"
+  [body]
+  (let [nargs (long (or (:args body) 0))]
+    (loop [b body changed false]
+      (let [blocks (:blocks b)
+            ;; a local's uses but the plain assignments to it
+            ;; (the debug info's places are uses: rustc keeps a local its var_debug_info names)
+            used (place-locals [(:debug b)
+                                (for [blk blocks]
+                                  [(for [st (:stmts blk)] (if (and (seq? st) (= 'assign (first st)) (plain-place (second st))) (drop 2 st) st)) (:term blk)])])
+            n (count (:locals b))
+            dead (set (for [i (range (inc nargs) n) :when (not (used i))] i))]
+        (if (empty? dead)
+          [b changed]
+          (let [keep (vec (remove dead (range n)))
+                remap (into {} (map-indexed (fn [j i] [i j]) keep))
+                blocks (mapv (fn [blk] (-> blk
+                                           (update :stmts (fn [ss] (mapv #(map-locals % remap)
+                                                                         (remove #(and (seq? %) (= 'assign (first %)) (dead (plain-place (second %)))) ss))))
+                                           (update :term #(map-locals % remap))))
+                             blocks)]
+            (recur (assoc b :blocks blocks :locals (mapv #(nth (:locals b) %) keep) :debug (map-locals (:debug b) remap)) true)))))))
+
+(defn- o0-inst-simplify
+  "InstSimplify's simplify_ref_deref (instsimplify.rs, -O0's BeforeInline): `_d = &(*_b)` (or &mut, or a raw pointer of it)
+  whose type is _b's is `_d = copy _b`; [body changed?]"
+  [body]
+  (let [lt (mapv :ty (:locals body)) changed (atom false)
+        f (fn [st]
+            (if-let [[d rv] (and (seq? st) (= 'assign (first st)) (plain-place (second st)) [(plain-place (second st)) (nth st 2 nil)])]
+              (let [pl (when (and (seq? rv) (#{'ref 'rawptr} (first rv))) (last rv))]
+                (if (and (seq? pl) (= 'place (first pl)) (= 3 (count pl)) (= '(deref) (nth pl 2)) (= (get lt d) (get lt (second pl))))
+                  (do (reset! changed true) (list 'assign (second st) (list 'use (list 'copy (list 'place (second pl))))))
+                  st))
+              st))
+        b (update body :blocks (fn [bs] (mapv (fn [x] (update x :stmts #(mapv f %))) bs)))]
+    [b @changed]))
+
+(defn- o0-remove-zsts
+  "RemoveZsts (remove_zsts.rs, -O0): an assignment of a zero-sized constant (`_0 = const ()`) dropped; [body changed?]"
+  [body]
+  (let [zst-assign? #(and (seq? %) (= 'assign (first %)) (plain-place (second %))
+                          (let [rv (nth % 2 nil)] (and (seq? rv) (= 'use (first rv)) (seq? (second rv)) (= 'const (first (second rv)))
+                                                       (= '(zst) (last (second rv))))))
+        b (update body :blocks (fn [bs] (mapv (fn [x] (update x :stmts #(vec (remove zst-assign? %)))) bs)))]
+    [b (not= (:blocks b) (:blocks body))]))
+
+(defn- o0-rename-return
+  "RenameReturnPlace (nrvo.rs, -O0): the return place's one assignment `_0 = copy|move _l` (_l a local neither an argument nor
+  borrowed, of _0's type) gone, _l renamed _0; [body changed?]"
+  [body]
+  (let [blocks (:blocks body) nargs (long (or (:args body) 0)) lt (mapv :ty (:locals body))
+        defs0 (for [b blocks s (:stmts b) :when (and (seq? s) (= 'assign (first s)) (= 0 (plain-place (second s))))] s)
+        calls0 (for [b blocks :let [t (:term b)] :when (and (seq? t) (= 'call (first t)) (= 0 (plain-place (nth t 3 nil))))] t)
+        borrowed (set (for [f (tree-seq coll? seq blocks) :when (and (seq? f) (#{'ref 'rawptr} (first f)))
+                            :let [p (last f)] :when (and (seq? p) (= 'place (first p)))]
+                        (second p)))
+        s (first defs0)
+        rv (when s (nth s 2 nil))
+        l (when (and (seq? rv) (= 'use (first rv)) (seq? (second rv)) (#{'copy 'move} (first (second rv)))) (plain-place (second (second rv))))]
+    (if (and (= 1 (count defs0)) (empty? calls0) l (> (long l) nargs) (not (borrowed l)) (= (get lt l) (get lt 0)))
+      [(assoc body :blocks (mapv (fn [b] (-> b (update :stmts (fn [ss] (mapv #(map-locals % (fn [x] (if (= x l) 0 x))) (remove #(identical? % s) ss))))
+                                             (update :term #(map-locals % (fn [x] (if (= x l) 0 x))))))
+                                 blocks)
+              :debug (map-locals (:debug body) (fn [x] (if (= x l) 0 x))))
+       true]
+      [body false])))
+
+(defn o0-normalize
+  "BODY as rustc's -O0 optimizations would leave it for the passes our runtime MIR stops before (RemoveStorageMarkers,
+  SimplifyCfg-final, InstSimplify's reborrow, CopyProp's copies of locals, RemoveZsts' unit assignments, RenameReturnPlace,
+  SimplifyLocals), the kinds that changed it: [body #{kind}]"
+  [body]
+  (let [kinds (atom #{})
+        b (update body :blocks (fn [bs] (mapv #(update % :stmts strip-storage) bs)))
+        _ (when (not= (:blocks b) (:blocks body)) (swap! kinds conj :storage))
+        b2 ((requiring-resolve 'arbace.rust.front.passes/simplify-cfg) b {:preserve-switch-reads false})
+        _ (when (not= (count (:blocks b2)) (count (:blocks b))) (swap! kinds conj :cfg))
+        [b2 c2] (o0-inst-simplify b2)
+        _ (when c2 (swap! kinds conj :inst-simplify))
+        b3 (loop [x b2] (let [[y c] (o0-copy-prop x)] (if c (do (swap! kinds conj :copy-prop) (recur y)) x)))
+        [b3 cz] (o0-remove-zsts b3)
+        _ (when cz (swap! kinds conj :zsts))
+        [b3 cr] (o0-rename-return b3)
+        _ (when cr (swap! kinds conj :nrvo))
+        [b4 c4] (o0-simplify-locals b3)
+        _ (when c4 (swap! kinds conj :locals))]
+    [b4 @kinds]))
+
+(defn- first-diff
+  "The first differing subforms of A and B (descending while both are lists or vectors of one length)"
+  [a b]
+  (if (and (sequential? a) (sequential? b) (= (count a) (count b)) (= (seq? a) (seq? b)))
+    (if-let [[x y] (first (remove (fn [[x y]] (= x y)) (map vector a b)))] (first-diff x y) [a b])
+    [a b]))
+
+(defn pack-compare
+  "OURS (an instance's runtime MIR) against REC (the record's optimized body at -O0): [:equal], [:equal-but-storage] (equal once
+  StorageLive, StorageDead and Nop are dropped: -O0's RemoveStorageMarkers), [:equal-o0 KINDS] (queue 443: equal once both are
+  through o0-normalize: the -O0 passes our runtime MIR stops before, named), else [:differs WHERE] (after the normalization).
+  The record's facts beside the forms (symbols, callees, locations) are not compared (rec-extras)"
+  [ours rec]
+  (let [;; an ADT's id is the record's DefId, ours its path in core: the text and the arguments compared
+        norm (fn norm [x] (cond (and (seq? x) (= 'adt (first x))) (apply list 'adt (second x) (map norm (drop 3 x)))
+                                ;; a function item's def text: ours instantiated (`black_box::<u8>`), the record's the def path
+                                ;; (`black_box`); the function constant's text and the arguments are compared
+                                (and (seq? x) (= 'fndef (first x)) (string? (second x))) (apply list 'fndef (map norm (drop 2 x)))
+                                ;; a promoted constant's value: ours its unevaluated body (evaluated at the run, eval-promoted), the
+                                ;; record's the evaluated pointer; the promoted is named by the constant's text, its type compared
+                                (and (seq? x) (= 'const (first x)) (string? (second x)) (re-find #"::promoted\[\d+\]$" (second x)))
+                                (list 'const (str/replace (second x) #"^const (std|core|alloc)::" "const ") (norm (nth x 2 nil)) 'promoted)
+                                (seq? x) (apply list (map norm x))
+                                (vector? x) (mapv norm x)
+                                (map? x) (into {} (for [[k v] x] [k (norm v)]))
+                                :else x))
+        prep (fn [b] {:args (:args b) :debug (vec (for [d (:debug b)] (list 'debug (norm (:value d))))) :locals (mapv (fn [l] {:ty (norm (:ty l))}) (:locals b))
+                      :blocks (mapv (fn [x] {:stmts (vec (rec-extras (norm (vec (:stmts x))))) :term (rec-extras (norm (:term x))) :cleanup (boolean (:cleanup x))})
+                                    (:blocks b))})
+        po (prep ours) pr (prep rec)
+        bl (fn [b f] (mapv (fn [x] (update x :stmts f)) (:blocks b)))
+        lt (fn [b] (mapv :ty (:locals b)))
+        cut (fn [x] (let [t (pr-str x)] (subs t 0 (min 160 (count t)))))]
+    (cond
+      (and (= (bl po identity) (bl pr identity)) (= (lt po) (lt pr))) [:equal]
+      (and (= (bl po strip-storage) (bl pr strip-storage)) (= (lt po) (lt pr))) [:equal-but-storage]
+      :else
+      (let [[no ko] (o0-normalize po) [nr _] (o0-normalize pr)
+            _ (when-let [d (System/getenv "RF_PACK_DUMP")]
+                (.mkdirs (File. ^String d))
+                (spit (str d "/" (Math/abs (hash [no nr])) ".edn") (with-out-str (prn :ours) (prn no) (prn :record) (prn nr))))]
+        (cond
+          (and (= (:blocks no) (:blocks nr)) (= (lt no) (lt nr))) [:equal-o0 (str/join "," (map name (sort ko)))]
+          (not= (count (:blocks no)) (count (:blocks nr))) [:differs (str "blocks " (count (:blocks no)) " against " (count (:blocks nr)))]
+          (not= (count (:locals no)) (count (:locals nr))) [:differs (str "locals " (count (:locals no)) " against " (count (:locals nr)))]
+          (not= (lt no) (lt nr)) (let [i (first (keep-indexed (fn [i [a b]] (when (not= a b) i)) (map vector (lt no) (lt nr))))]
+                                   [:differs (str "local " i ": " (cut (nth (lt no) i)) " against " (cut (nth (lt nr) i)))])
+          :else (let [[a b] (first (remove (fn [[a b]] (= a b)) (map vector (:blocks no) (:blocks nr))))
+                      sa (:stmts a) sb (:stmts b)
+                      i (first (keep-indexed (fn [i [x y]] (when (not= x y) i)) (map vector (concat sa [(:term a)]) (concat sb [(:term b)]))))]
+                  [:differs (cond i (let [[x y] (first-diff (nth (vec (concat sa [(:term a)])) i) (nth (vec (concat sb [(:term b)])) i))]
+                                      (str "statement " i ": " (cut x) " against " (cut y)))
+                                  (not= (:cleanup a) (:cleanup b)) "a block's cleanup flag"
+                                  :else (str "statements " (count sa) " against " (count sb)))]))))))
+
+(def ^:private pack-equal? #{:equal :equal-but-storage :equal-o0})
+
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
-  closure of the functions it reaches that the record has no body of: {:taken {record-name instance} :extra [instance]
-  :lines [..]}"
-  [roots rec-defs]
-  (let [nc (native-core-map) lines (atom [])
+  closure of the functions it reaches that the record has no body of: {:taken {record-symbol instance} :extra [instance]
+  :lines [..]} (S4: keyed by the instance's symbol, not its name, so that two instances of one def are both taken; each taken
+  root judged against the record's body, `pack-compare` lines, and a crossed control: the first root against another def's)"
+  [roots rec-defs & [rec-by-path]]
+  (let [nc (native-core-map) lines (atom []) pairs (atom [])
+        rec-by-path (or rec-by-path {})
         close (fn close [def args seen]
                 ;; [instances] of DEF at ARGS and what it reaches natively, or throws why it cannot be taken
                 (let [e (get nc def)]
                   (cond
                     (nil? e) (throw (ex-info (str "no native body of " def) {}))
-                    (not (:equal e)) (throw (ex-info (str def "'s built MIR differs from rustc's") {}))
+                    ;; queue 443: alloc's and std's bodies (:judge :instance, no built-MIR oracle) are judged against the record's
+                    ;; instance (a root against its own; a callee below against the record's bodies of its def, the one whose
+                    ;; locals agree); one the record has no body of has nothing to be judged by
+                    (and (= :instance (:judge e)) (seq seen) (empty? (get rec-by-path def)))
+                    (throw (ex-info (str def ": no record's instance to judge its body by") {}))
+                    (and (not (:equal e)) (not= :instance (:judge e))) (throw (ex-info (str def "'s built MIR differs from rustc's") {}))
                     (contains? seen [def args]) []
                     :else
                     (let [inst (core-instance e args)
-                          rec-has? (fn [cd] (contains? rec-defs (mono/print-path cd)))
+                          ;; S4: a type the instance's forms cannot write (ty-form's `(other ..)`: a trait object, whose casts
+                          ;; need their vtable) stops it, the record's body the fallback
+                          _ (when-let [o (first (filter #(and (seq? %) (= 'other (first %))) (tree-seq coll? seq (:body inst))))]
+                              (throw (ex-info (str "a type its forms do not write " (pr-str o)) {})))
+                          ;; queue 443, 443-4 (b): a constant left unevaluated by a local definition's id (`(unevaluated "85" ..)`:
+                          ;; core::cell::is_reading's BorrowFlag constant, which the export did not name by its path) is no
+                          ;; constant codegen can write: the body is refused at plan time, the record's kept
+                          _ (when-let [u (first (filter #(and (seq? %) (= 'unevaluated (first %)) (string? (second %)) (re-matches #"\d+" (second %)))
+                                                        (tree-seq coll? seq (concat [(:body inst)] (vals (:promoted-bodies (:body inst)))))))]
+                              (throw (ex-info (str "an unevaluated constant of a local def id " (pr-str (take 2 u))) {})))
+                          ;; queue 443: an instance-judged callee taken only when equal to one of the record's bodies of its def
+                          _ (when (and (= :instance (:judge e)) (seq seen))
+                              (let [rs (get rec-by-path def)
+                                    ks (for [r rs] (try (pack-compare (:body inst) r) (catch Throwable x [:differs (str "the compare: " (.getMessage x))])))
+                                    hit (first (filter (comp pack-equal? first) ks))
+                                    crate (first (str/split (str def) #"::"))]
+                                (swap! lines conj (str "pack-compare-" crate "-callee " (name (first (or hit (first ks)))) " " def
+                                                       (when-let [w (second (or hit (first ks)))] (str " (" w ")"))))
+                                (when-not hit (throw (ex-info (str def " differs from the record's instance: " (second (first ks))) {})))))
+                          rec-has? (fn [cd] (or (contains? rec-defs (mono/print-path cd)) (contains? rec-by-path cd)))
                           seen (conj seen [def args])
                           more (for [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when ft
                                      :let [[_ cd cargs] ft]
@@ -816,7 +1077,7 @@
                                  [cd (vec cargs)])]
                       ;; a callee without an equal native body that the record has a body of: the record's (the pack's fallback)
                       (into [inst] (mapcat (fn [[cd cargs]]
-                                             (if (and (rec-has? cd) (not (:equal (get nc cd)))) [] (try (close cd cargs seen)
+                                             (if (and (rec-has? cd) (not (:equal (get nc cd))) (not= :instance (:judge (get nc cd)))) [] (try (close cd cargs seen)
                                                                                                          (catch Throwable e
                                                                                                            (if (rec-has? cd)
                                                                                                              (do (swap! lines conj (str "record-kept " cd " (" (.getMessage e) ")")) [])
@@ -824,15 +1085,34 @@
                                            (distinct more)))))))]
     (assoc
     (reduce (fn [acc [rec def args]]
-              (try (let [[root & extra] (close def (vec args) #{})]
-                     (swap! lines conj (str "native " (:name rec) " (core's body built by Arbace, equal to rustc's built MIR"
+              (let [crate (first (str/split (str def) #"::"))
+                    inst? (= :instance (:judge (get nc def)))]
+              (try (let [[root & extra] (close def (vec args) #{})
+                         [k w] (try (pack-compare (:body root) rec) (catch Throwable e [:differs (str "the compare: " (.getMessage e))]))]
+                     (swap! lines conj (str (if inst? (str "pack-compare-" crate) "pack-compare") " " (name k) " " (:name rec) (when w (str " (" w ")"))))
+                     (swap! pairs conj [root rec inst?])
+                     ;; queue 443: an instance-judged body is taken only when it equals the record's instance (up to -O0's passes)
+                     (when (and inst? (not (pack-equal? k)))
+                       (throw (ex-info (str "differs from the record's instance: " w) {})))
+                     (swap! lines conj (str "native " (:name rec) (if inst?
+                                                                    (str " (" crate "'s body built by Arbace, equal to the record's instance")
+                                                                    " (core's body built by Arbace, equal to rustc's built MIR")
                                             (when (seq extra) (str "; with " (count extra) " more: " (str/join ", " (map :def extra)))) ")"))
-                     (-> acc (assoc-in [:taken (:name rec)] root) (update :extra into extra)))
+                     (-> acc (assoc-in [:taken (:symbol rec)] root) (update :extra into extra)))
                    (catch Throwable e
-                     (swap! lines conj (str "record " (:name rec) " (core's body: " (.getMessage e) ")"))
-                     acc)))
+                     (swap! lines conj (str "record " (:name rec) " (" (if (#{"alloc" "std" "hashbrown"} crate) crate "core") "'s body: " (.getMessage e) ")"))
+                     acc))))
             {:taken {} :extra [] :lines []} roots)
-    :lines @lines)))
+    :lines (let [control (fn [tag ps]
+                           (let [[[r0 c0] & more] ps
+                                 [_ c1] (first (filter (fn [[r c]] (and (not= (:def r) (:def r0)) (not= (:blocks c) (:blocks c0)))) more))]
+                             (when c1
+                               (str "pack-compare " tag " (" (:name c0) " against " (:name c1) "'s record): "
+                                    (if (pack-equal? (first (pack-compare (:body r0) c1))) "PASSED (a bug)" "differs, as it must")))))
+                 ;; queue 443: the instance-judged roots' own control (alloc's and std's), the first of them against another def's record
+                 c-all (control "control" @pairs)
+                 c-inst (control "control-instance" (filter #(nth % 2) @pairs))]
+             (cond-> @lines c-all (conj c-all) c-inst (conj c-inst))))))
 
 ;; RFP23 (c): the run's facts from arbace.rust.front.mono (no record but core's bodies and, per fact, what mono refuses)
 
@@ -872,6 +1152,10 @@
           (bc/build-program front-dir n
             (fn [bodies]
               (mem-mark (str n " bodies built"))
+              ;; queue 443: the exported library bodies' crate-private functions in the run's interface (a path it has kept)
+              (when-let [x (not-empty (native-extra-fns))]
+                (try (set! c/*si* (update c/*si* :fns #(merge x %)))
+                     (catch IllegalStateException _ (swap! lines conj "native: the interface is not bound: no crate-private function added"))))
               (let [;; RFP49 (a): the function constants of the record's std instances' bodies, whose local instances mono's
                     ;; collector adds (rustc's std bodies are the pack's, RF12's part; what they reach of ours is mono's)
                     std-calls (let [acc (java.util.LinkedHashSet.)]
@@ -892,7 +1176,13 @@
                                 (native-core-plan (for [x (:ext-items facts) :let [rec (some #(when (= (:symbol x) (:symbol %)) %) rec-bodies)] :when rec]
                                                     [rec (:def x) (:args x)])
                                                   ;; a function the record has a body of stays the record's when no native one is equal
-                                                  (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))] (:def b)))))
+                                                  (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))] (:def b)))
+                                                  ;; queue 443: the record's library bodies by their def's path (`alloc::raw_vec::{impl#0}::new`)
+                                                  (update-vals (group-by :path (for [b rec-bodies :when (and (str/starts-with? (str (:instance b)) "Item(") (not (str/starts-with? (str (:def-id b)) "DefId(0:")))
+                                                                        :let [[_ c p] (re-find #"~ ([a-z_]+)\[[0-9a-f]+\]::(.*)\)$" (str (:def-id b)))]
+                                                                        :when (#{"alloc" "std" "hashbrown"} c)]
+                                                                    {:path (str c "::" p) :body b}))
+                                                               #(mapv :body %))))
                     core-insts (when core-plan
                                  (vals (into {} (for [i (concat (vals (:taken core-plan)) (:extra core-plan))] [[(:def i) (:args i)] i]))))
                     ;; RF12-P6: drop glue's shims the program's types need, built natively when the glue is the type's Drop::drop alone
@@ -1046,20 +1336,28 @@
                                            (if-let [r (get rec-by-name nm)] (list 'mir/body r) (throw e))))
                                     (do (swap! lines conj (str "record " nm " (" err ")")) (fact! :bodies false)
                                         (list 'mir/body (or (get rec-by-name nm) (throw (ex-info (str "no body for " nm) {}))))))))
-                    ;; RF12-P6: the native core bodies made runtime bodies, all or none (a failure keeps the record's bodies)
-                    native-forms (when (or (seq core-items) (seq glue-shims))
-                                   (try (doall (concat
-                                                (for [[h i] core-items]
-                                                  (let [r (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)]
-                                                    (list 'mir/body (assoc r :phase "arbace-native-core"))))
-                                                (for [g glue-shims]
-                                                  (let [r (runtime-body (assoc (:body g) :name (:name (:rec g))) (:rec g) nf abort?)]
-                                                    (swap! lines conj (str "native " (:name (:rec g)) " (drop glue's shim, built natively)"))
-                                                    (fact! :core-bodies true)
-                                                    (list 'mir/body (assoc r :phase "arbace-native-core"))))))
-                                        (catch Throwable e
-                                          (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
-                                          nil)))
+                    ;; RF12-P6: the native core bodies made runtime bodies; S4: one by one, a body that fails at run time keeps the
+                    ;; record's body of its symbol (`record-kept`), all or none only when the record has no body of a failing one
+                    rec-syms (set (map :symbol rec-bodies))
+                    native-done (when (or (seq core-items) (seq glue-shims))
+                                  (try (doall (concat
+                                               (for [[h i] core-items
+                                                     :let [r (try (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)
+                                                                  (catch Throwable e
+                                                                    (if (rec-syms (:symbol h))
+                                                                      (do (swap! lines conj (str "record-kept " (:name h) " (a native body failed at run time: " (.getMessage e) ")")) nil)
+                                                                      (throw e))))]
+                                                     :when r]
+                                                 [(:symbol h) (list 'mir/body (assoc r :phase "arbace-native-core"))])
+                                               (for [g glue-shims]
+                                                 (let [r (runtime-body (assoc (:body g) :name (:name (:rec g))) (:rec g) nf abort?)]
+                                                   (swap! lines conj (str "native " (:name (:rec g)) " (drop glue's shim, built natively)"))
+                                                   (fact! :core-bodies true)
+                                                   [(:symbol (:rec g)) (list 'mir/body (assoc r :phase "arbace-native-core"))]))))
+                                       (catch Throwable e
+                                         (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
+                                         nil)))
+                    native-forms (when native-done (map second native-done))
                     ;; RF17: a std ADT's tuple constructor used as a function value and instantiated in the program's crate (the
                     ;; record's `mir/external`: rustc's build_ctor shim, whose MIR the helper does not dump), built natively
                     ;; (mono/ctor-shim-body) from the function constant naming it in the record's bodies
@@ -1096,8 +1394,8 @@
                                   (do (swap! lines conj (str "native " def " (a constructor's shim, built natively)"))
                                       (fact! :ctor-shims true)
                                       (list 'mir/body (assoc b :symbol symbol :name def :phase "arbace-native-ctor" :instance (str "Shim(Ctor(" def "))"))))))
-                    native-taken (if native-forms native-syms #{})
-                    _ (doseq [[h _] core-items :when native-forms] (swap! lines conj (str "native " (:name h))) (fact! :core-bodies true))
+                    native-taken (if native-done (set (map first native-done)) #{})
+                    _ (doseq [[h _] core-items :when (native-taken (:symbol h))] (swap! lines conj (str "native " (:name h))) (fact! :core-bodies true))
                     ;; the module from the collector's items: our bodies, then core's bodies (the record's: RF12), the statics,
                     ;; the lang items' symbols, the layouts; the record's entry wrapper for a std program
                     new-forms

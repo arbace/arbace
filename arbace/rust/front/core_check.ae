@@ -908,6 +908,7 @@
 
 (def ^:dynamic *collect-only* false)   ; RF12-P2: the interface pass: each module collected, no body built
 (def ^:dynamic *attrs-out* nil)   ; RF19: atom {def-path [attribute names]}: every function's codegen attributes, macro-made ones too
+(def ^:dynamic *only-key?* nil)   ; queue 443 (S4, alloc's and std's bodies): a predicate of a body's key (body-key) choosing the bodies built, each through the 21 passes
 
 (declare def-path-string)
 
@@ -958,15 +959,17 @@
                                    (catch Throwable _ nil)))))
                         (binding [build/*allocs* (atom {:next 1 :ids {}}) passes/*opaque-cache* (atom {}) passes/*panic-abort* false
                                   ;; RF12-P6: the exported bodies through the 21 passes to runtime MIR
-                                  build/*after-finish* (when-let [re (some-> (System/getenv "CORE_EXPORT_NAMES") re-pattern)]
+                                  build/*after-finish* (if-let [re (some-> (System/getenv "CORE_EXPORT_NAMES") re-pattern)]
                                                          (fn [b] (if (re-find re (str (:name b)))
                                                                    (assoc b :stages (into {} (passes/stages b "SimplifyCfg-pre-optimizations")))
-                                                                   b)))]
+                                                                   b))
+                                                         (when *only-key?*
+                                                           (fn [b] (assoc b :stages (into {} (passes/stages b "SimplifyCfg-pre-optimizations"))))))]
                           (doseq [d (if *collect-only* [] (collect/defs))
                                   :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
                                             (= "Closure" (:kind d)) (const-kind? d))]
                             (let [nm (try (build/mir-name d) (catch Throwable e (when (System/getenv "CORE_TRACE") (.printStackTrace e)) (str "?" (:id d))))]
-                              (when (or (nil? only) (re-find only nm))
+                              (when (and (or (nil? only) (re-find only nm)) (or (nil? *only-key?*) (*only-key?* (body-key path d))))
                               (swap! out conj
                                      (on-body
                                      (try [[nm (body-key path d)] (if (const-kind? d)
@@ -979,7 +982,7 @@
                               (when (#{"Fn" "AssocFn"} (:kind d))
                                 (doseq [ic (try (build/inline-consts d) (catch Throwable _ nil))
                                         :let [sfx (build/inline-const-suffix ic) inm (str nm sfx) ik (str (body-key path d) (str/replace sfx "::" "-"))]
-                                        :when (or (nil? only) (re-find only inm))]
+                                        :when (and (or (nil? only) (re-find only inm)) (or (nil? *only-key?*) (*only-key?* ik)))]
                                   (swap! out conj
                                          (on-body
                                           (try [[inm ik] (build/build-inline-const d ic {:overflow-checks false :edition 2024 :root-cache (atom {})}) nil]
