@@ -13256,3 +13256,53 @@ regression: with the reads done one at a time first (`REPR_HASKELL_ONLY_PACKAGES
 here: a lock around lib-check's read (the read's directory is shared by every package, as the script says), left to the tool's
 owner. Then `bin/reap --record` (matrix unchanged; 54 of 56, 0 problems), `bin/crops-score --record` and `--judge --strict` (0
 problems), `bin/records-check` (9 pairs, 0).
+
+## 2026-11-19: next: the Mac VM's filed branches that keep gate_key, merged before tonight's --full; review 419's decisions 2-4
+
+Goal: keep tonight's `bin/gate --full --concurrent` on next a hit on the executables pre-built by day at gate KEY20
+8d0e46484347addebee7 (`.tmp/gate-exe/8d0e46484347addebee7`, 59 min, 31 GiB), so only the branches whose merge leaves
+`bin/arbace-go --gate-key` at 8d0e46484347addebee7d3f70dbdd2c4dde4695ae2d4eb4dac58fb45bc230880 went in. Method: each branch of
+mac trial-merged alone into next 3479408b0 (`git merge --no-ff --no-commit`), the key computed, the merge aborted; then the
+holding ones merged one at a time, the key checked after each. Decisions: .tmp/mac-queue/tasks/ANSWERS.md, all (a).
+
+Merged (each --no-ff): 419-fix 3e84c699a (bin/hsi build under flock, the key read again under it; review 419 M1);
+n-hs-libs ceabce537 (Haskell's own lib-check and lib-stg re-recorded at next's head; journal conflict, both kept);
+395-hs-packages 4dca221fb (binary, text and process on the own front end, three haskell-lib-own steps; steps.edn's conflict in
+hsi-check and hsi-check-aot resolved to n-gate-parts' two parts with the three new tars added to :uses and HSI_OWN_TARS);
+400-rust-vendor 1a8b6eac1 (std's interface reads libc's and hashbrown's names natively, RIND9 (a); 400-1 (a), 400-2 (a));
+406-cpp-cp403 2b7371724 (CP403 (a): bin/cppi's runtime route auto by default, runtime-inputs' :ci-target guard; 406-1 (a),
+406-2 (a)); 410-py-prep 3b541f1f1 (Python's records night prepared; 410-1 (a)); 421-claude-md 434739163 (CLAUDE.md against the
+code, claude-md-test's cross-checks with eight built-in controls). 406 went in without 392, which it was meant to follow: 392
+moves gate_key, and 406 merges cleanly alone (its report: either order). So tonight's cpp-runtime builds the runtime on our
+route at 124 units (gen-batch, 10-40 min on the VM), and again at 155 when 392 lands.
+
+Not merged:
+- 395-hs-do-checking 4d3938847: it keeps the key (arbace/repr/haskell is a crop path), and it was merged once here, then
+  taken out before the push (next rebuilt from 0db000d14, never pushed with it), at the VM coordinator's word: unjudged, it
+  changes every library's do blocks and needs the whole own chain re-judged first (DECISION 395-1).
+- 394-hs-osstring: no branch, no change (the goal was met at the base by 388's 216da0b37).
+- Deferred until after tonight, each moves gate_key through the embedded sources or the runtime:
+  392-cpp-units and 393-cpp-coro (arbace/cpp/{abi,codegen,sema,template}.ae: arbace/cpp is embedded since W2);
+  396-oc-dynlink and 397-oc-rows (arbace/o2j.ae, embedded); 398-java-async (overlay/jdk/java.base/sun/nio/ch/,
+  go/arbace/jrt/); 415-java-slices (the same, with arbace/j2g/; built on 398); 407-llvm-verifier
+  (arbace/repr/llvm/verify.ae: expect.ae is a crop path, verify.ae is embedded); 408-c-cs326 and 409-c-judge
+  (arbace/repr/c/, embedded since C9; 409 also conflicts in test/c/controls.edn, independence.edn and scores.edn);
+  420-go (arbace/go/, goi's namespaces).
+
+Review 419's decisions, done here as small commits: (2) test/crops/independence.edn's judge facts after n-hasattr: C's
+:cases 14822/193 -> 14824/191 (pp-has-attribute judged by its own .expect at eval and AOT), llvm's 4731/543 -> 4727/547
+(c-O0's and c-O2's .synth.pp-has-attribute modules are clang's IR, left to lli's record by arbace/llvm/check.ae: llvmi's own
+outcomes 174 at eval and 171 at AOT), the texts dated rather than rewritten, llvm's stated :score 0.9485 -> 0.9481. (3)
+repr-java-attr's jdk part its own :mem-gib 62, its known peak; the step's 49 stays for the rest. (4) test/gate/programs-parts-test.bash:
+programs-full's :parts against `test/programs/` and `test/programs-fail/`'s directories, with two negative controls (a sample
+missing from :parts, a part with no sample); gate-tests' :inputs gain the two directories. None moves a key the gate builds by.
+
+Re-recorded: `bin/reap --record` (matrix unchanged, 54 of 56, 0 problems), `bin/crops-score --record`: llvm's judge 0.9490 ->
+0.9480, independence 0.9898 -> 0.9896; no other crop moves at four places (C's judge stays 0.9936); no whole integer moves.
+
+Checks at the head: bin/records-check (9 pairs, 0), bin/reap (0 problems), bin/crops-score --judge --strict (0 problems),
+gate.crops check (0), test/docs/claude-md-test.bash (66 ok), bin/oi suite rollup (0 files without a result or a class),
+bash -n bin/hsi, test/gate/{chain-needs,crop-tier,crops,gate-key-crops,programs-parts}-test.bash (all ok),
+`bin/cppi selftest case-inputs` (pass); `bin/gate --full --plan` rc 0 (375 steps: 3 always, 3 build (go-build, javac-tool, cpp-runtime), 333 run, 35 after, 1 absent; .tmp/goal/full-plan-next-final.log) and `--full --concurrent --plan` rc 0 (simulated 9:45; full-plan-next-final-concurrent.log). Not run: 400's std-iface passes (they need rust-src's
+deps cache, 20+ min) and 406's live selftests (oracle tier). Keys at the head: gate 8d0e46484347addebee7 (unchanged), javac
+36b769ce7c35115edd8c (unchanged), arbace_runtime_key unchanged.
