@@ -35,6 +35,7 @@
             [arbace.repr.ocaml.typer.typemod :as tm]
             [arbace.repr.ocaml.typer.translmod :as tmod]
             [arbace.repr.ocaml.typer.cmi :as cmi]
+            [arbace.repr.ocaml.typer.objinfo :as oinfo]
             [arbace.repr.ocaml.parser :as parser]
             [arbace.string :as str])
   (:import [java.io File]))
@@ -366,6 +367,71 @@
        (println (str "sigs: " @n " typed, " @bad " not typed (" root ")"))
        (flush))))
 
+(defn- do-objinfo-check
+  "objinfo-check --tests DIR --divergences FILE [--control] (T12, queue 434): the programs of FILE's classes :compiler-output, :compiler-output-index and :compiler-output-cmo (D434-2 (a))
+  (DIR/ID.ml, its ocamltest header), each whose ocamlobjinfo sections the native front end prints typed by the native typer
+  and printed as ocamlobjinfo -quiet prints it, judged against its .reference; a line ID<TAB>pass|fail|class<TAB>NOTE each,
+  a class's note naming the section not printed and whether the printed ones equal the reference's (\"decls equal\");
+  --control: each equal output (a pass's text, an equal section) judged against the next one's reference text, which must
+  fail (exit 1 when one passes)"
+  [{:keys [opts]}]
+  (with-stdlib opts
+    #(let [tdir (get opts "--tests")
+           ids (vec (mapcat :programs (filter (fn [c] (str/starts-with? (name (:id c)) "compiler-output")) (read-string (slurp (get opts "--divergences"))))))
+           parse (fn [path fname kind]
+                   (let [r (parser/parse (read-bytes path) fname kind)]
+                     (when-not (= :ok (first r)) (throw (ex-info (str "syntax error: " (nth r 2)) {:objinfo-outside true})))
+                     (second r)))
+           ;; the units all_modules compiles before a file: typed, their signatures written as interfaces into a scratch
+           ;; directory on the include path (ocamlc's .cmi of each in the build directory)
+           type (fn [path fname]
+                  (let [d (.getParent (File. ^String path))
+                        hdr (slurp (str d "/" (str/replace fname #"\.mli?$" ".ml")))
+                        mods (some-> (re-find #"all_modules\s*=\s*\"([^\"]*)\"" hdr) second str/trim (str/split #"\s+"))
+                        before (take-while (fn [m] (not= m fname)) mods)
+                        inc (str (System/getProperty "java.io.tmpdir") "/objinfo-" (abs (hash path)))]
+                    (.mkdirs (File. inc))
+                    (or (first (for [m before :when (str/ends-with? m ".ml")
+                                     :let [r (file-signature (str d "/" m) m false)]
+                                     :when (or (:error r) (do (spit (str inc "/" (str/replace m #"\.ml$" ".mli")) (str (:sig r) "\n")) nil))]
+                                 (:error r)))
+                        (binding [env/*include-dirs* (conj (vec env/*include-dirs*) inc)]
+                          (:error (file-signature path fname false))))))
+           decls-of (fn [^String t] (when-let [i (str/index-of t "\nUid of decls:\n")] (subs t i)))
+           rows (vec (for [id ids]
+                       (let [src (str tdir "/" id ".ml")
+                             run (File. (str tdir "/" id ".run"))
+                             act (oinfo/header-action (str (slurp src) (when (.exists run) (slurp run))))
+                             ref (slurp (str tdir "/" id ".reference"))
+                             d (.getParent (File. src))]
+                         (if (:class act)
+                           {:id id :v "class" :note (:class act)}
+                           (let [r (oinfo/objinfo-text d act parse type)]
+                             (cond (:missing r)
+                                   (let [part (when (and (some #{"-decls"} (:flags act)) (= 1 (count (:files act))))
+                                                (oinfo/objinfo-text d (assoc act :flags ["-decls"]) parse type))
+                                         want (decls-of ref)
+                                         eq (and (:text part) (= (:text part) want))]
+                                     {:id id :v "class"
+                                      :note (str "section not printed: " (str/join "; " (:missing r))
+                                                 (cond eq "; decls equal" (:refused part) (str "; decls " (:refused part))
+                                                       part "; decls differ" :else ""))
+                                      :text (when eq (:text part)) :want want})
+                                   (:refused r) {:id id :v "class" :note (:refused r)}
+                                   (= (:text r) ref) {:id id :v "pass" :note "" :text (:text r) :want ref}
+                                   :else {:id id :v "fail" :note "differs from the .reference"}))))))]
+       (doseq [{:keys [id v note]} rows] (println (str id "\t" v "\t" note)))
+       (println (str "objinfo-check: " (count (filter (fn [r] (= "pass" (:v r))) rows)) " pass, " (count (filter (fn [r] (= "fail" (:v r))) rows))
+                     " fail, " (count (filter (fn [r] (= "class" (:v r))) rows)) " class (" (count (filter :text rows)) " outputs equal)"))
+       (when (get opts "--control")
+         (let [eqs (filterv :text rows) n (count eqs)
+               ctl (for [i (range n) :let [a (eqs i) b (eqs (mod (inc i) n))] :when (not= (:id a) (:id b))]
+                     [(:id a) (:id b) (= (:text a) (:want b))])]
+           (doseq [[a b ok] ctl] (println (str "control: " a " judged by " b "'s reference: " (if ok "PASSES (bad)" "fails (good)"))))
+           (when (or (empty? ctl) (some last ctl)) (println "objinfo-check: a control did not fail") (flush) (System/exit 1))))
+       (flush)
+       (when (some (fn [r] (= "fail" (:v r))) rows) (System/exit 1)))))
+
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
@@ -377,5 +443,6 @@
       "stdlib-check" (do-stdlib-check (pa #{"--dir" "--lib" "--out"}))
       "canon-equal" (do-canon-equal (pa #{}))
       "sigs" (do-sigs (pa #{"--root" "--list" "--out" "--stdlib" "--include"}))
+      "objinfo-check" (do-objinfo-check (pa #{"--tests" "--divergences" "--stdlib" "--include"}))
       "stdlib-build" (do-stdlib-build (pa #{"--dir" "--out" "--bases" "--testing" "--testing-out"}))
       (do (println "usage: -m arbace.repr.ocaml.typer types|lambda|check ...") (System/exit 2)))))
