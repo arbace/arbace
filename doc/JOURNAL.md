@@ -13005,3 +13005,14 @@ test_builtin_functions; PyPicklingErrorTests' three newobj_ex) on the checkout's
 `builtins.open is io.open is _io.open`, open's text and binary files, open as a class attribute not bound, pickle round
 trips of str.maketrans, object.__new__ and open are the objects. The C classes' twins (CPicklerTests ...) run the same
 pure Pickler, so about 19 rows of the records run.
+
+## 2026-11-19: n-py-eval: the module _sysconfig (test_sysconfig imports)
+
+test_sysconfig imports `_sysconfig` at module level (line 36), so its 39 methods were one import row
+(:c-modules-deferred). Modules/_sysconfig.c of CPython 3.14.10 is one function: config_vars(), the build variables
+sysconfig exposes, on a POSIX build without Py_GIL_DISABLED and Py_DEBUG {"Py_GIL_DISABLED": 0, "Py_DEBUG": 0}; added beside
+_sysconfigdata__linux_ (go/arbace/py/builtins_sysconfigdata.ae; its text signature was already in the table). Proof:
+`bin/pyi check --only test_sysconfig` on the checkout's runtime: 25 pass, 6 classed, 8 that ask an installation layout pyi
+has not (the Makefile's and pyconfig.h's paths, LIBRARY, a platform EXT_SUFFIX, srcdir, the _sysconfig_vars JSON file, a
+venv's interpreter, the user scheme over an empty prefix), which `:venv-and-build` (design) now names (divergences.edn and
+divergences-315.edn, write-ahead): 0 in no class.
