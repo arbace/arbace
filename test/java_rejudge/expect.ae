@@ -1,0 +1,261 @@
+(ns java-rejudge.expect
+  "Queue 440 (2026-11-19): the morning's re-judge of Java's interp and compiled levels made one command plus a small
+  classing. The night's bin/gate --full saves both levels' results; bin/java-check --judge --latest-saved --record judges
+  them. Before that judgment, this namespace says what to expect and flags what differs. It runs on the tools' host and
+  reads java.check's own functions (classify, cited, the world's index, own-row), so a row is classed exactly as
+  java.check classes it.
+
+    predict ROOT ROWS437 OUT
+        Writes OUT (expected-1119.tsv): from ROOT's records (test/java/check-{interp,compiled}.edn), test/java/divergences.edn
+        and today's world, every recorded non-pass row, its class and kind, the names its reason cites that the world now
+        holds (java.check's stale-reasons, less the names only javac's world holds, plus the 'cannot extend X yet' rows
+        whose X arbace.j2g.model/class-supers lists now), the absent classes its test names (queue 437's static scan,
+        ROWS437), and a prediction: pass (stale, and its test names no class still absent), other (stale, but the test
+        names an absent class: it fails on that class instead), same (by design, or citing nothing the world gained),
+        either (a change not certain to be in the night's build). The header holds each level's totals.
+    expect ROOT PRED RESULTS... [--no-fail]
+        The saved RESULTS (bin/java-check --save's results.tsv: ID LEVEL RESULT REASON) against PRED. Rows are re-judged by
+        java.check/own-row and the controls are left out, as --judge does. Prints each level's pass count and score
+        (floor of 100 x pass / tests, the REAP cell's figure) expected and actual, and per class the rows recorded, the
+        rows predicted to leave, the rows predicted to remain and those that remain. Then the edits divergences.edn needs:
+        :tests ids that now pass at every level their class covers, classes that take no row any more, rows in no class.
+        Lines starting FLAG are deviations: a predicted pass that fails, a recorded pass that regressed, a row in no class,
+        a predicted row with no result, or a class whose remaining count differs. Exit 1 on any FLAG, unless --no-fail.
+    records-as-results ROOT OUT
+        ROOT's records written as one results.tsv, as a run that changed nothing would save them: the proof on today's
+        records."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [java.check :as jc]))
+
+(def ^:private classify @#'java.check/classify)
+(def ^:private cited @#'java.check/cited)
+(def ^:private world-index @#'java.check/world-index)
+(def ^:private class-place @#'java.check/class-place)
+(def ^:private present? @#'java.check/present?)
+(def ^:private read-edn @#'java.check/read-edn)
+(def ^:private tsv @#'java.check/tsv)
+(def ^:private write-lines @#'java.check/write-lines)
+(def ^:private controls-of @#'java.check/controls-of)
+(def ^:private at-level? @#'java.check/at-level?)
+
+(def levels [:interp :compiled])
+(def ^:private cell {:interp "eval" :compiled "aot"})
+
+;; test/reap/cells.edn's :kind-map of [:java :eval] and [:java :aot]: which classes count as by design in the REAP cell
+(def ^:private design-kinds #{:design :speed :harness-design})
+
+;; the absent names queue 437's scan lists that are no obstacle: source-retention annotations and j2g's edge markers
+(def ^:private benign #{"java.io.Serial" "java.lang.Override" "java.util.RandomAccess" "java.lang.FunctionalInterface"})
+
+;; changes the night's build may or may not carry, each with its reason (their rows predicted either)
+(def ^:private either
+  {"t05655" "437-java-slice (ThreadDeath): passes if 437 is merged before the night's build"
+   "t05370" "437-java-slice (JavaAWTFontAccess): passes if 437 is merged before the night's build"
+   "t04952" "437-java-slice (FilteredNormalizer2, UnicodeSet): passes if 437 is merged; new code, some risk"
+   "t04647" "n-java-defer round 54 (jrt locale.ae, lt casing): its later lines (supplementary characters, sigma) not run"
+   "t04648" "n-java-defer round 54 (jrt locale.ae, lt casing): its later lines not run"})
+
+;; rows a change already merged was proven on, with that proof
+(def ^:private proven
+  {[:interp "t05485"] "n-java-defer round 54: native.ae compile-top's shadowing, proven at interp on e8e0d"})
+
+(defn- record-rows [root lv]
+  (filter vector? (read-edn (str root "/test/java/check-" (name lv) ".edn"))))
+
+(defn- class-supers
+  "arbace.j2g.model/class-supers' names, dotted: the classes a Java form at the REPL may extend."
+  [root]
+  (let [t (slurp (str root "/arbace/j2g/model.ae"))
+        i (.indexOf t "(def class-supers")
+        j (.indexOf t "])" i)]
+    (set (map #(str/replace (second %) "/" ".") (re-seq #"\"([a-z][\w/$]*)\"" (subs t i j))))))
+
+(defn- rows437
+  "Queue 437's static scan: {[level id] #{absent class ...}} (rows.tsv: eval|aot ID CLASS TEST MISSING WHY)."
+  [f]
+  (into {} (for [[lev id _ _ miss] (tsv f)
+                 :let [ms (set (remove #(or (str/blank? %) (benign %))
+                                       (map #(str/replace % #"\[.*$" "") (str/split (or miss "") #"[ ,]+"))))]]
+             [[(if (= lev "eval") :interp :compiled) id] ms])))
+
+(defn- gained
+  "The names reason S cites that today's world holds and the shipped program has (not javac's world alone), and the
+  'cannot extend X yet' classes class-supers lists now."
+  [w supers s]
+  (concat (for [x (cited s)
+                :when (present? w x)
+                :when (not= :javac (first (class-place w (second x))))]
+            (if (= :class (first x)) (second x) (str (second x) "." (nth x 2))))
+          (for [[_ c] (re-seq #"cannot extend ([\w.$]+) yet" s) :when (supers c)] (str c " (class-supers)"))))
+
+(defn- tab [& xs] (str/join "\t" (map str xs)))
+
+(defn predict [root f437 out]
+  (let [classes (read-edn (str root "/test/java/divergences.edn"))
+        kinds (into {} (for [c classes] [(:id c) (:kind c)]))
+        w (world-index root)
+        supers (class-supers root)
+        scan (rows437 f437)
+        rows (for [lv levels
+                   [id _ r reason] (record-rows root lv)
+                   :when (not= :pass r)
+                   :let [reason (str reason)
+                         c (classify classes lv id r reason)
+                         k (kinds c)
+                         design? (design-kinds k)
+                         g (distinct (gained w supers reason))
+                         miss (sort (get scan [lv id]))
+                         [p basis] (cond
+                                     (either id) [:either (either id)]
+                                     (proven [lv id]) [:pass (proven [lv id])]
+                                     design? [:same "by design"]
+                                     (and (seq g) (empty? miss)) [:pass "its reason's names are in the world now"]
+                                     (seq g) [:other "its reason's names are in the world now; its test names absent classes"]
+                                     (seq (cited reason)) [:same "its reason cites names the world still lacks"]
+                                     :else [:same "its reason cites no class or member"])]]
+               [id lv r c (if design? :design :deferred) (str/join "," g) (str/join "," miss) p basis])
+        totals (for [lv levels :let [rs (record-rows root lv)]]
+                 ["#total" (name lv) (count rs) (count (filter #(= :pass (nth % 2)) rs))])]
+    (write-lines out (concat ["# queue 440: the expected results of the night's Java re-judge (java-rejudge.expect predict)"
+                              "# #total LEVEL TESTS RECORDED-PASS; then per recorded non-pass row:"
+                              "# ID LEVEL RECORDED-RESULT CLASS KIND GAINED-NAMES ABSENT-NAMES PREDICTION BASIS"]
+                             (map #(apply tab %) totals)
+                             (map #(apply tab (map (fn [x] (if (keyword? x) (name x) x)) %)) rows)))
+    (doseq [lv levels :let [rs (filter #(= lv (second %)) rows)]]
+      (println (str "java-rejudge predict: " (name lv) ": " (count rs) " non-pass rows: "
+                    (str/join ", " (for [[p n] (sort-by key (frequencies (map #(nth % 7) rs)))] (str n " " (name p)))))))
+    (println (str "java-rejudge predict: wrote " out))))
+
+(defn- read-pred [f]
+  (let [ls (tsv f)]
+    {:totals (into {} (for [[t lv n p] ls :when (= t "#total")] [(keyword lv) [(Long/parseLong n) (Long/parseLong p)]]))
+     :rows (for [[id lv r c k g m p basis] ls :when (not (str/starts-with? id "#"))]
+             {:id id :level (keyword lv) :rec (keyword r) :class (keyword c) :kind (keyword k)
+              :gained g :absent m :pred (keyword p) :basis basis})}))
+
+(defn- score [pass n] (quot (* 100 pass) n))
+
+(defn expect [root pred & args]
+  (let [no-fail? (some #{"--no-fail"} args)
+        files (remove #{"--no-fail"} args)
+        ref (str root "/test/java/ref-jdk26.edn")
+        classes (read-edn (str root "/test/java/divergences.edn"))
+        by-id (into {} (for [c classes] [(:id c) c]))
+        vm (jc/verdict-map ref)
+        cids (set (map :id (controls-of ref)))
+        {:keys [totals rows]} (read-pred pred)
+        results (for [f files
+                      [id lv r reason] (tsv f)
+                      :when (and lv (#{"interp" "compiled"} lv) (not (cids id)))]
+                  (jc/own-row vm [id (keyword lv) (keyword r) (or reason "")]))
+        flags (atom [])
+        flag! (fn [s] (swap! flags conj s))
+        actual-by-level (atom {})]
+    (println (str "java-rejudge expect: " (count results) " results at interp and compiled from " (count files) " files, against " pred))
+    (doseq [lv levels
+            :let [act (into {} (for [[id l r reason] results :when (= l lv)] [id [r reason]]))]
+            :when (seq act)
+            :let [[n rec-pass] (totals lv)
+                  prs (filter #(= lv (:level %)) rows)
+                  pm (into {} (for [p prs] [(:id p) p]))
+                  pass? (fn [id] (= :pass (first (act id))))
+                  cls (into {} (for [[id [r reason]] act :when (not= :pass r)] [id (classify classes lv id r reason)]))
+                  npred (frequencies (map :pred prs))
+                  exp-pass (+ rec-pass (npred :pass 0))
+                  exp-hi (+ exp-pass (npred :either 0))
+                  apass (count (filter #(= :pass (first (val %))) act))]]
+      (swap! actual-by-level assoc lv [act cls])
+      (println)
+      (println (str "== " (name lv) " (Java " (cell lv) "): " (count act) " results for " n " tests"))
+      (println (str "   pass: expected " exp-pass (when (pos? (npred :either 0)) (str " to " exp-hi)) " (recorded " rec-pass
+                    " + " (npred :pass 0) " predicted" (when (pos? (npred :either 0)) (str " + " (npred :either 0) " either")) ")"
+                    ", actual " apass))
+      (println (str "   score: expected " (score exp-pass n) (when (not= (score exp-pass n) (score exp-hi n)) (str " to " (score exp-hi n)))
+                    ", actual " (score apass n) " (recorded " (score rec-pass n) ")"))
+      (when (not= n (count act))
+        (flag! (str (name lv) ": " (count act) " results for " n " tests (a partial run, or rows lost)")))
+      ;; row by row
+      (let [bonus (atom []) moved (atom []) other (atom [])]
+        (doseq [[id [r reason]] (sort-by key act)
+                :let [p (pm id) c (cls id)]]
+          (cond
+            (nil? p) (when-not (= :pass r)
+                       (flag! (str (name lv) ": regression " id ": recorded pass, now " (name r) " [" (name c) "] " reason)))
+            (= :pass r) (when (#{:same :other} (:pred p)) (swap! bonus conj (str id " [" (name (:class p)) "]")))
+            (= :pass (:pred p)) (flag! (str (name lv) ": predicted pass fails " id " " (name r) " [" (name c) "; was "
+                                            (name (:class p)) ", gained " (:gained p) "] " reason))
+            (= :other (:pred p)) (swap! other conj (str id " " (name r) " [" (name c) "; was " (name (:class p)) "; absent "
+                                                       (:absent p) "] " reason))
+            (and (= :same (:pred p)) (not= c (:class p))) (swap! moved conj (str id " " (name (:class p)) " -> " (name c)
+                                                                               " " (name r) " " reason))))
+        (doseq [id (sort (remove act (keys pm)))]
+          (flag! (str (name lv) ": no result for predicted row " id " (" (name (:pred (pm id))) ")")))
+        (doseq [[id c] (sort-by key cls) :when (= :unclassified c)]
+          (flag! (str (name lv) ": in no class " id " " (name (first (act id))) " " (second (act id)))))
+        (println (str "   unexpected passes (predicted to stay): " (count @bonus) (when (seq @bonus) (str ": " (str/join " " @bonus)))))
+        (println (str "   predicted to fail for another reason, as they do (" (count @other) "; class them):"))
+        (doseq [s @other] (println (str "      " s)))
+        (println (str "   predicted to stay, now in another class: " (count @moved)))
+        (doseq [s @moved] (println (str "      " s))))
+      ;; per class: recorded, predicted to leave (pass), predicted to remain, remaining
+      (println "   | class | kind | recorded | predicted pass | either | predicted remain | remain | |")
+      (let [cs (distinct (concat (map :class prs) (vals cls)))
+            remain (frequencies (vals cls))]
+        (doseq [c (sort-by name cs)
+                :let [ps (filter #(= c (:class %)) prs)
+                      f (frequencies (map :pred ps))
+                      pr (+ (f :same 0) (f :other 0))
+                      a (remain c 0)
+                      ;; an either row may land either way; other rows may land in another class
+                      ok (<= pr a (+ pr (f :either 0)))]]
+          (println (str "   | " (name c) " | " (name (or (:kind (by-id c)) :none)) " | " (count ps) " | " (f :pass 0) " | " (f :either 0)
+                        " | " pr " | " a " | " (if ok "" "DEVIATION") " |"))
+          (when-not ok
+            (flag! (str (name lv) ": class " (name c) ": " a " rows remain, predicted " pr
+                        (when (pos? (f :either 0)) (str " to " (+ pr (f :either 0))))))))))
+    ;; the edits divergences.edn needs, from the actual results
+    (let [abl @actual-by-level
+          judged (set (keys abl))
+          base-taken (set (for [r rows] [(:level r) (:class r)]))]
+      (println)
+      (println "== the edits test/java/divergences.edn needs (from these results)")
+      (doseq [c classes
+              :let [lvs (filter #(at-level? c %) judged)]
+              :when (seq lvs)
+              :let [covers-other? (or (and (nil? (:level c)) (nil? (:levels c)))
+                                      (some #(not (#{:interp :compiled} %)) (remove nil? (concat [(:level c)] (:levels c)))))
+                    takes (fn [lv] (filter #(= (:id c) (val %)) (second (abl lv))))
+                    named-pass (filter (fn [id] (every? (fn [lv] (let [[act cls] (abl lv)]
+                                                                    (or (nil? (act id)) (not= (:id c) (cls id)))))
+                                                        lvs))
+                                       (:tests c))
+                    empty? (every? #(empty? (takes %)) lvs)
+                    already? (fn [id] (not-any? #(and (= id (:id %)) (= (:id c) (:class %)) ((set lvs) (:level %))) rows))]]
+        ;; an id the class did not take in the records either (a :tests entry stale before the night) said apart
+        (let [{fresh false old true} (group-by already? named-pass)]
+          (when (seq fresh)
+            (println (str "   " (name (:id c)) ": :tests names " (count fresh) " the class no longer takes at "
+                          (str/join "," (map name lvs)) (when covers-other? " (it covers other levels: check them first)")
+                          ": " (str/join " " fresh))))
+          (when (seq old)
+            (println (str "   " (name (:id c)) ": (already so in the records: " (count old) ") " (str/join " " old)))))
+        (when (and empty? (some #(base-taken [% (:id c)]) lvs) (#{:world :deferred :harness :interp :analysis :repl :repr-java :j2g :javac :other} (:kind c)))
+          (println (str "   " (name (:id c)) ": takes no row at " (str/join "," (map name lvs))
+                        " any more (" (name (:kind c)) "): narrow or retire it, its :why and counts rewritten")))))
+    (println)
+    (doseq [f @flags] (println (str "FLAG " f)))
+    (println (str "java-rejudge expect: " (count @flags) " flags"))
+    (shutdown-agents)
+    (System/exit (if (and (seq @flags) (not no-fail?)) 1 0))))
+
+(defn records-as-results [root out]
+  (write-lines out (for [lv levels [id _ r reason] (record-rows root lv)]
+                     (tab id (name lv) (name r) (str/replace (str reason) #"[\t\n]" " "))))
+  (println (str "java-rejudge records-as-results: wrote " out)))
+
+(defn -main [cmd & args]
+  (case cmd
+    "predict" (apply predict args)
+    "expect" (apply expect args)
+    "records-as-results" (apply records-as-results args)))
