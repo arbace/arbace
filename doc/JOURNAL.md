@@ -12905,3 +12905,19 @@ The essential gate at 22b4c6542 failed two steps; everything else passed.
   its parent already made (it exported PATH and ARBACE_FROZEN_JAVA_HOME).
 - Keys: bin/clojure-tests and test/gate/*.edn are in neither gate_key, arbace_runtime_key nor arbace_javac_key, so the gate's
   executables (KEY20 0753b529a43fe68eabff) and javac's tool (826af88b2119) stay.
+
+## 2026-11-19: n-py-eval: goi's liveness across a fallthrough (pyexpat's every element with content)
+
+Lib/test under pyi (n-py-rec's records run, 367 modules judged): test_minidom's 46 errors and 4 of multiprocessing spawn's
+were "SystemError: pyi: Go panic: reflect: call of reflect.Value.Interface on zero Value". Reduced: `pyexpat.ParserCreate().
+Parse(b"<a>x</a>", True)` fails with no handler set, on the gate's executable (01e4bb771) and on stage 0 (53da41d93) alike;
+`debug.Stack()` in the interpreted pyexpat put it in expat's doContent (go/arbace/expat, xmlparse_doc.go), the switch on
+m_parsingStatus.parsing whose `case XML_PARSING:` uses `next` inside an `if` and then falls through into `default:`, which
+assigns `s = next`. goi's liveness plan (arbace/go/build.ae, plan-stmt) planned each switch clause alone, so `next` (a cell:
+its address is taken) was cleared after the `if`, and the clause fallen into read a nil cell; `GOI_LIVENESS=0` passed. Fix: a
+clause ending in fallthrough keeps alive the variables the bodies it falls into use (the chain while they fall through); they
+die after the switch as before. Test: test/goi/run/go/t/fallthrough.ae (a cell and an S-slot value, a chain of two
+fallthroughs), its output gc's (printed by repr/go, built by TamaGo's go): base panics, head passes; the 24 interpreter
+programs of test/goi/run pass on the checkout's goi (ARBACE_PATH, RT.toolSource). pyexpat probe: chardata, buffered, default
+and comment handlers all parse. arbace/go/build.ae is embedded: gate_key moves (the executables rebuild at the next gate).
+Not taken: rewriting the fallthrough in expat's Go (hides the bug from every other interpreted package).
