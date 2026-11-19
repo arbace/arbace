@@ -4838,3 +4838,19 @@ Why the rest are not taken (run, from the build logs):
 - Trait method constants resolved at reprint.
 - Crate-private ADTs and impls added to the run's interface, as `:fns` are.
 - std.rs's codegen refusal (bisect with RF11_KEEP=1).
+
+### 443-4 (b): std.rs back on Arbace's MIR (2026-11-19, the main host's answer)
+
+- **Plan-time refusal.** `native-core-plan` now refuses, at plan time, a native body whose forms (or promoted bodies) hold a
+  constant left unevaluated by a local def id, `(unevaluated "85" ..)`. The refusal is a `record`/`record-kept` line naming
+  the constant, and the record's body is kept. `rsi-build` prints `refused at plan time (an unevaluated constant of a def id): N:
+  NAMES`.
+- **`read_via_copy` and `write_via_move`.** After that refusal, std.rs's next codegen refusal was `read_via_copy`, in
+  core::mem::replace, an extra of RefCell::borrow. `passes/lower-intrinsics` now lowers both intrinsics as rustc 1.99.1's
+  lower_intrinsics.rs does: `_0 = copy (*_1)` and `(*_1) = move _2`, the call becoming a goto, or `unreachable` without a
+  target.
+- **Run.** `RF11_BATCH=1 bin/rust-front rsi-build --native-core std`: std.rs is own, with 11 of 2,866 bodies ours and 39 bodies
+  built natively. Native roots: 7 core, 7 alloc and 2 std, plus 4 judged callees. Three bodies are refused for `(unevaluated
+  "85")`: core::cell::is_reading, `{impl#31}::try_borrow_mut` and RefCell::new. Both controls differ.
+- **The two runs before.** With the refusal alone, codegen refused `read_via_copy`. Without either change (the five-program
+  run), codegen refused `unevaluated`.
