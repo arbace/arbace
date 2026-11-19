@@ -13016,3 +13016,16 @@ _sysconfigdata__linux_ (go/arbace/py/builtins_sysconfigdata.ae; its text signatu
 has not (the Makefile's and pyconfig.h's paths, LIBRARY, a platform EXT_SUFFIX, srcdir, the _sysconfig_vars JSON file, a
 venv's interpreter, the user scheme over an empty prefix), which `:venv-and-build` (design) now names (divergences.edn and
 divergences-315.edn, write-ahead): 0 in no class.
+
+## 2026-11-19: n-py-eval: multiprocessing's "[Errno 10] No child process" rows classed in :fork
+
+The records run's largest group in no class (74 in the 527 modules judged at 18:45) was ChildProcessError in the three
+start methods' test_misc (TestSyncManagerTypes 17, TestWait 4, TestTimeouts 1, tearDownModule: 23 each) and
+concurrent_futures' forkserver initializer tests and tearDownModule. Cause, reproduced (`bin/pyi run` of a unittest suite
+of test_misc's TestStartMethod then TestWait.test_wait, the driver's reap_children after each test; test_wait passes
+alone): 3.14's default start method on Linux is forkserver, TestStartMethod's tests reset the start method to the default,
+the forkserver process dies at its own os.fork() (pyi has none), test.support.reap_children reaps it, and every later
+Process start (forkserver.ensure_running's os.waitpid(pid, WNOHANG)) and util._cleanup_tests' forkserver._stop
+(os.waitpid(pid, 0)) raise ECHILD. A consequence of the user's no-fork decision (2026-11-04), so `:fork` (design) names
+these 74 by name, its :why saying why (divergences.edn and divergences-315.edn). Left in no class: test_process_pool's
+three ProcessPoolSpawnProcessPoolExecutorTest test_force_shutdown_workers* (spawn context: not this cause, not probed).
