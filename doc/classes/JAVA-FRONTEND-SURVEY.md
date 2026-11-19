@@ -7364,3 +7364,99 @@ Proven on the JDK: the overlay classes compiled by jdk26u's javac with `--patch-
 `samples-twice`'s classes equal the JVM javac's byte for byte (before: `./sample/Circle.java:3: error: duplicate class`); two
 different files declaring one public class still fail as the JDK's. Keys: `arbace_javac_key` and `arbace_javac_rest_key`
 (bin/javac-vendor) move; `gate_key` and the runtime key do not.
+
+## As built / proposed: javac's tool build, faster (2026-11-18, round 54; branch `n-javac-fast`)
+
+The night of 2026-11-17 (`next` at `42bf8614`, `.tmp/gate/javac-tool.log`, `.mem`, `mem.tsv`): the step took 4,248 s wall, 72,079
+CPU-s (20 CPU-h), a peak of 34.2 GiB (the process tree; 31.7 GiB its largest process), `:mem-gib` 51. It built the tool twice
+(`bin/arbace-go`'s `build_java`):
+
+| phase | wall | peak (tree, 60 s max) |
+|---|---:|---:|
+| (A) the first tool build: j2g over javac's world | 863 s | 20-25.6 GiB |
+| (A) `bin/build-go`: the program printed, Go's build, the link | about 7 min | **34.2 GiB** |
+| (A) the image, then repr/java's reader by c2j on it (36 sources, 4,618 classes) | about 5 min (c2j 55 s) | 23.9, then 10 GiB |
+| (B) the tool: j2g over javac's world and the compiled reader | 1,800 s | 19-27.5 GiB |
+| (B) its print, Go build, link, image | about 6 min | 10.2 GiB (probably the print cache and Go's build cache holding (A)'s packages) |
+
+(A) exists only to have a host for `reader_compile`: c2j must run on an executable of the checkout's runtime whose world holds
+javac's classes (`bin/arbace-go`, `reader_compile` and `build_java`'s first `build`; JFS28 (b)). It runs when `aot-reader.key` is not
+`reader_key`.
+
+**Why (A) cannot go (option (i), tried).** The reader needs javac's classes as classes, not declarations: its namespaces' `import`s
+run `Class/forName` (`coverage.ae`'s `com.sun.source.tree.Tree$Kind`: "ClassNotFoundException" on the gate's executable with
+`jdk/javac/forms` on `ARBACE_PATH`, SPEC §9.2's source lookup entering declarations only), and their top levels run javac's code
+(`javac_tree.ae`'s `(JCTree$Tag/values)`, `class-map`'s class literals, `reflection-field-order`'s `getFields`). The Java forms
+interpreter could define them, but only within one `do` (`arbace.classes.interp`'s `desc->class` needs a `Class` for every
+signature type outside the do: "Class not found: com.sun.source.tree.TreeVisitor" loading `com.sun.source.tree` package by
+package), and javac's packages are cyclic, 6.6 MB of forms: not light, and its reflection would still have to be proven c2j's
+equal. Last night's miss was real under any key: the runtime (1,416 files: a `bin/jrt-convert update`), javac's world (21),
+repr/java (2) and c2j (2) changed.
+
+**Built (taken, round 54): the reader's key by its load closure.** `reader_key` hashed `arbace/` less a list of namespaces the
+compilation was said never to load (GTS28 (a)): every crop's namespace moved it, and the list was wrong the other way: the
+compilation loads `arbace/j2g/names`, `arbace/j2g/jrt` and `arbace/repr/go/print*` (c2j's emitter requires them), which it left out.
+Now `reader_compile` records the loads (`ARBACE_LOADED_LOG`, RT.load's) into `aot-reader.loaded` (47 files beside repr/java's 36
+namespaces at `42bf8614`: core, c2j, the Java forms' analysis, pprint, spec, j2g's names, repr/go's printer) and the key is
+`arbace_reader_runtime_key` (`bin/lib/version.bash`: `arbace_runtime_key`'s files less the Go natives the compilation never runs:
+ci, cinterp, crt, goi, `go/arbace/repr`, goi's table, `*.md`), javac's world, repr/java's tree and each recorded file's hash; no
+record, no key. Sound as GD3's closures: the closure changes only through a file of the closure. Over the nine intervals between
+the last ten tool builds (`javac-check`'s passes, `b36b03cf` to `42bf8614`), the old key missed on all eight that changed anything;
+the new one on four (the other four changed crops, C's and goi's Go natives or a README only).
+
+**The proof.** The new `reader_compile` differs from the old by `ARBACE_LOADED_LOG` alone. At `42bf8614`, on the night's tool
+(`ARBACE_GATE_EXES/javac-8526ceb9d1ea`) with `ARBACE_NO_AOT=1` (so the reader and the namespaces it needs load from source and are
+compiled, as on (A)): 36 sources, 4,618 classes, 0 failed (the night's (A): the same counts), 60 s and 6.1 GB; with the log and
+without, the 27 MB trees `diff -r` identical; the closure the same 83 scriptbases whether the namespaces load from source or
+compiled. The key, against `42bf8614` with one line appended to one file at a time: unchanged for `arbace/repr/c/lex.ae`,
+`arbace/box.ae`, `arbace/j2g/main.ae`, `arbace/repr/go.ae`, `go/arbace/ci.ae`, `go/arbace/goi/ops.ae`, `go/arbace/repr/go/godump`,
+`jdk/README.md`; moved for `arbace/j2g/names.ae`, `arbace/repr/go/print.ae`, `arbace/lang/RT.ae`, `arbace/core.ae`,
+`arbace/repr/java/lex.ae`, `jdk/javac/forms/.../JCTree.ae`, `go/arbace/jrt.ae`. Computing it takes 0.5 s.
+
+**The one tool build (2026-11-18, 18:21, `42bf8614` with this change, j2g on the night's gate executable): killed.** (A)'s j2g
+took 902 s (the night: 863 s), then `bin/build-go`'s print of the program (repr/go on the tools' host, stage 0: the main checkout's,
+linked, whose compiled repr/go and build are not the checkout's, so evaluated) grew to 53.2 GiB of the tree and the kernel's OOM
+killer stopped it after 1,744 s (`Killed process 998 (arbace)`, 40.6 GB anon). So no before-and-after of a whole build here: the
+"after" is the night's (B) alone, 2,200 s and 27.5 GiB, on a night when the key holds. The finding stands apart: the program's print
+on a host whose repr/go is evaluated peaks above 50 GiB (`arbace.build.go`'s `read-all` holds every forms file of the 215 MB
+program at once); the night's, 34.2 GiB.
+
+**Review 402 (2026-11-19, the VM): three fixes to the key.** (1) The key was recorded after the first tool build and the
+reader's compilation, from the files as they were then; the round-54 code had computed it from them, where the old code
+recorded the key it computed before the build: a source changed during the build (the first tool's compiled core and c2j are
+the build's, the compilation's macros theirs) was keyed with a tree made before it, kept until the next change. Now
+`reader_guard` (the key's inputs but the closure, and arbace/ but the crops) is compared before the build and after the
+compilation, and no key is recorded when it moved. (2) `reader_compile`'s and `reader_closure`'s own text is hashed (a
+change to the compilation's script, its filter or its environment changed the tree under the same key), and the startup
+scripts on `ARBACE_PATH` (the checkout root's `user.ae`, `data_readers.ae` and their `.clj`, `.cljc`), which RT's init and
+arbace.core load without RT.load's log (probed: a root `user.ae` ran, a root `data_readers.ae` bound its tag, the log empty
+of both; none is in the repository). (3) `jdk/javac/provenance.edn` left out, as `arbace_javac_key` leaves it out: repr/java's
+output on the tool, rewritten by the provenance commits that follow a reader change (17 of the 45 commits since 2026-10-20
+that touched it changed nothing else of javac's world or repr/java), each a needless first tool build.
+
+**`:mem-gib` stays 51 (round 54).** 38 (1.1 x the night's 34.2 GiB) was the plan; the build above peaked over 53 GiB when its
+printer was evaluated, so 51 is not slack. Not changed.
+
+**Proposed, not built:**
+- **JFS163 the per-class j2g cache** ((ii)): (B)'s 1,800 s are analysis 192, reachability 77, classes 492 and texts 783 (16 jobs); a
+  class's translation reads the whole program's facts (reached methods, overrides, collisions, names), so its key must hash what each
+  translation looked up, recorded by j2g. Some weeks with its proof; saves most of classes and texts in (A), (B), the shipped and test
+  builds when few classes change (20-25 min a tool build). Options: (a) build it; (b) not now.
+- **JFS164 the Go packages split** ((iii)): the program is two Go packages that matter, `arbace/jrt` (4,267 files, 91 MB) and
+  `arbace/lang` (65 MB, `j2g_dyn.go` 58 MB alone); Java's classes are cyclic and Go's packages may not be, so j2g would emit layers
+  joined by registries. Applies to the shipped and test builds alike (same j2g). Weeks; lowers the Go build's peak and lets Go's
+  cache reuse the unchanged packages. Options: (a) survey it; (b) not now.
+- **JFS165 the reader's tree in the shared store**: `target/arbace-go/aot-reader` is the checkout's (next's was removed on
+  2026-11-18), so a worktree or a wiped target misses; kept by key in `ARBACE_GATE_EXES/reader-KEY` (a `test/gate/caches.edn` row)
+  every worktree would hit. Options: (a) build it; (b) not now.
+- **JFS166 the previous tool as the reader's host**: `ARBACE_NO_AOT=1` on any tool of the same `arbace_reader_runtime_key` and
+  javac's world compiles the checkout's reader in 60 s at 6.1 GB (above), so (A) is needed only when the runtime or javac's world
+  moved, not when repr/java or the closure did. Needs its proof first: the tree against (A)'s at one commit (here the core and
+  c2j load from source, on (A) compiled). Options: (a) prove and build it; (b) not now.
+- **JFS167 the program's print within a memory limit**: `read-all`'s whole-program cache read by packages, or `GOMEMLIMIT` for
+  `bin/build-go`'s host; it also bounds the shipped build's print. Options: (a) survey it; (b) not now.
+- (v) GOGC/GOMEMLIMIT for j2g: already `GOGC=400`, `GOMEMLIMIT=20GiB` (`bin/j2g`); the live heap is near the limit, so a lower GOGC
+  buys a few GiB for CPU. Not proposed.
+
+Keys: `bin/arbace-go` and `bin/lib/version.bash` are in `gate_key` and `arbace_javac_key`: both move once (the executables and the
+tool are built again); the reader's key moves to the new form (one more (A) on the first build, which records the closure).

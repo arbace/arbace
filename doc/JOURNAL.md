@@ -12905,3 +12905,28 @@ The essential gate at 22b4c6542 failed two steps; everything else passed.
   its parent already made (it exported PATH and ARBACE_FROZEN_JAVA_HOME).
 - Keys: bin/clojure-tests and test/gate/*.edn are in neither gate_key, arbace_runtime_key nor arbace_javac_key, so the gate's
   executables (KEY20 0753b529a43fe68eabff) and javac's tool (826af88b2119) stay.
+
+## 2026-11-18: javac's tool build: the compiled reader keyed by its load closure (round 54, branch `n-javac-fast`, on `064f06bd0`)
+
+- The night of 2026-11-17's `javac-tool` (`next` at `42bf8614`): 4,248 s, 20 CPU-h, 34.2 GiB peak; two tool builds. (A), the first,
+  only gives `reader_compile` a host of the checkout's runtime with javac's classes (`bin/arbace-go`'s `build_java`, JFS28 (b));
+  about 34 min and the step's peak (its `bin/build-go`). Its key, `reader_key`, missed for real that night: the runtime (1,416
+  files), javac's world (21), repr/java (2) and c2j (2) changed.
+- (i), c2j on the gate's executable with javac's forms on the path, tried and dropped: the reader's imports and top levels run
+  javac's classes (`ClassNotFoundException: com.sun.source.tree.Tree$Kind`), and the interpreter defines javac's cyclic packages
+  only in one `do` ("Class not found: com.sun.source.tree.TreeVisitor").
+- Built, taken (round 54): `reader_key` by the closure the last compilation loaded (`ARBACE_LOADED_LOG` into
+  `target/arbace-go/aot-reader.loaded`), `arbace_reader_runtime_key` (the runtime key less C's, goi's and repr/go's Go natives and
+  `*.md`), javac's world and repr/java. The old list left out `arbace/j2g/names`, `j2g/jrt` and `repr/go/print*`, which c2j's emitter
+  loads, and moved on every crop's change. Over the nine intervals between the last ten tool builds the old key missed on all eight
+  that changed anything, the new one on four.
+- Proof (light): on the night's tool with `ARBACE_NO_AOT=1`, the reader compiled with and without the log is identical (36 sources,
+  4,618 classes, 27 MB, `diff -r`), and the closure is the same 83 scriptbases from source or compiled. The key holds for crop, C,
+  goi, repr/go-native and README edits, and moves for the closure's files, the runtime, javac's world and repr/java.
+- The one tool build (`42bf8614` with the change) was OOM-killed in (A)'s print of the program (53.2 GiB tree; the host's repr/go
+  evaluated, stage 0 linked from the main checkout): no whole before/after. So `:mem-gib` stays 51 (38 was planned).
+- Proposed, not built: JFS163 a per-class j2g cache, JFS164 the Go packages split (shipped build too), JFS165 the reader's tree in
+  the shared store, JFS166 the previous tool as host under `ARBACE_NO_AOT` (60 s, 6.1 GB), JFS167 the print within a memory limit.
+  Details in doc/classes/JAVA-FRONTEND-SURVEY.md, "As built / proposed: javac's tool build, faster".
+- Keys: `bin/arbace-go` and `bin/lib/version.bash` move `gate_key` and `arbace_javac_key` once; the reader's key takes its new form
+  (one (A) to record the closure).
