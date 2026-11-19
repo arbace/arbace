@@ -13306,3 +13306,16 @@ bash -n bin/hsi, test/gate/{chain-needs,crop-tier,crops,gate-key-crops,programs-
 `bin/cppi selftest case-inputs` (pass); `bin/gate --full --plan` rc 0 (375 steps: 3 always, 3 build (go-build, javac-tool, cpp-runtime), 333 run, 35 after, 1 absent; .tmp/goal/full-plan-next-final.log) and `--full --concurrent --plan` rc 0 (simulated 9:45; full-plan-next-final-concurrent.log). Not run: 400's std-iface passes (they need rust-src's
 deps cache, 20+ min) and 406's live selftests (oracle tier). Keys at the head: gate 8d0e46484347addebee7 (unchanged), javac
 36b769ce7c35115edd8c (unchanged), arbace_runtime_key unchanged.
+
+## 2026-11-19: Python's pydump packs and outcomes recorded on the main host (n-py-packs, from 436-py-night)
+
+Recorded on the main host (amd64, :python c94aabf8..., CPython 3.14.10): `REPR_PYTHON_ORACLE=record bin/repr-python records record
+stdlib site-packages lib-test mutants` (4,467 s) wrote the pins and manifests test/python/records/python-pydump-{stdlib (5,040
+members, eff4400b...), site-packages (6,447, 60232051...), lib-test (8,071, 46a3a285...), mutants-lex (24, d3dcaf2d...),
+mutants-parse (24, 884b89b9...)}.{sha256,tsv} and the printed-{stdlib,site-packages,lib-test} packs; the packs themselves are in the
+main checkout's .tmp/oracle-packs/ (to push to the mirror with bin/oracle-records). `records record outcomes` (1,465 s) needs the
+gate's build at the key whose go/arbace/py is the checkout's (the seed's stage 0 is stale for pyi runtime check): run with
+ARBACE_HOST_EXE=.tmp/gate-exe/8d0e46484347addebee7/amd64/arbace; it wrote outcomes/smoke (290 files), repl (4), wheels (18).
+`records verify --sample 8` over the four: all equal, crossed pairs differ. python-packs.edn spliced into steps.edn:
+gate.crops check 0 problems, `bin/gate --full --plan` accepts it with no stand-ins. Not spliced: python-night.edn (python-roundtrip
+waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on n-py-rec's check records).
