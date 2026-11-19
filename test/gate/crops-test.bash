@@ -91,15 +91,15 @@ printf '{:gate "a"}\n' > "$w/plan/hosts.edn"; cp "$w/plan/hosts.edn" "$w/hosts0.
 cmp -s "$w/plan/hosts.edn" "$w/hosts0.edn" && ok "no table host named: hosts.edn untouched (byte for byte)" || bad "hosts.edn changed with no host to add"
 
 # ---- the pins: awk (bin/gate --pins, before stage 0) and gate.crops agree
-# batch 4: the table's own gated crops (merge plan batches 1-2: C++, LLVM IR, OCaml, Scheme, Haskell, Rust), python added (not in :crops),
+# batch 4: the table's own gated crops (merge plan batches 1-2: C++, LLVM IR, OCaml, Scheme, Haskell, Rust; Python since queue 317),
 # :zz-test's empty entry not (a crop with no :crop-pins line)
 gate_crop_pins_list "$src/test/gate/steps.edn" > "$w/pins0.tsv"; crops pins "$src/test/gate/steps.edn" > "$w/pins0-ae.tsv"
-sed 's/^ :crops {:shared/ :crops {:python [y]\n         :zz-test []\n         :shared/' "$src/test/gate/steps.edn" > "$w/pins.edn"
+sed 's/^ :crops {:shared/ :crops {:zz-test []\n         :shared/' "$src/test/gate/steps.edn" > "$w/pins.edn"
 gate_crop_pins_list "$w/pins.edn" > "$w/pins-awk.tsv"; crops pins "$w/pins.edn" > "$w/pins-ae.tsv" 2>&1
-cmp -s "$w/pins-awk.tsv" "$w/pins-ae.tsv" && [ "$(cut -f1 "$w/pins-awk.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "$( { cut -f1 "$w/pins0.tsv"; echo python; } | LC_ALL=C sort | tr '\n' ' ')" ] \
-  && ok "the gated crops' pins (steps.edn's, python added; not :zz-test's empty entry), awk and gate.crops alike" \
+cmp -s "$w/pins-awk.tsv" "$w/pins-ae.tsv" && [ "$(cut -f1 "$w/pins-awk.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "$(cut -f1 "$w/pins0.tsv" | LC_ALL=C sort | tr '\n' ' ')" ] \
+  && ok "the gated crops' pins (steps.edn's; not :zz-test's empty entry), awk and gate.crops alike" \
   || { bad "the pins differ or are wrong"; diff "$w/pins-awk.tsv" "$w/pins-ae.tsv"; cat "$w/pins-awk.tsv"; }
-cmp -s "$w/pins0.tsv" "$w/pins0-ae.tsv" && [ "$(cut -f1 "$w/pins0.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "asm-amd64 asm-arm64 cpp haskell llvm ocaml rust scheme " ] && ok "steps.edn gates C++, Haskell, LLVM IR, OCaml, Rust and Scheme (merge plan batches 1-2) and the two assembly crops (AX10): --pins checks their pins" || bad "steps.edn's crop pins: $(cat "$w/pins0.tsv")"
+cmp -s "$w/pins0.tsv" "$w/pins0-ae.tsv" && [ "$(cut -f1 "$w/pins0.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "asm-amd64 asm-arm64 cpp haskell llvm ocaml python rust scheme " ] && ok "steps.edn gates C++, Haskell, LLVM IR, OCaml, Rust and Scheme (merge plan batches 1-2), the two assembly crops (AX10) and Python (queue 317): --pins checks their pins" || bad "steps.edn's crop pins: $(cat "$w/pins0.tsv")"
 
 # ---- GTS216 (a)'s chains
 cat > "$w/cc.edn" <<'F'
@@ -122,7 +122,7 @@ crops concurrent "$w/cc.edn" > "$w/cc.out" 2>&1
 [ "$(tr '\n' ' ' < "$w/cc.out")" = "a b " ] && ok "concurrent chains: a (its needs in the chain or outside :full) and b; not the four's, :heavy, a part above 4 GiB, a need on another chain, one another chain needs, no :mem-gib, nor c past :max-gib" \
   || bad "concurrent chains: $(cat "$w/cc.out")"
 crops concurrent "$src/test/gate/steps.edn" > "$w/cc0.out" 2>&1
-[ "$(tr '\n' ' ' < "$w/cc0.out")" = "haskell-target-probe scheme-full ocaml-full llvm-full asm-amd64-full asm-arm64-full wasm-full " ] && ok "steps.edn: the gated crops' chains beside the serial run (not haskell-lib since HF10-P29/P32 (3b577236f, ec06f5853): hsi-check and hsi-check-aot, the serial run's, use its outputs, so it is a chain another needs; haskell-roundtrip is out of --full), haskell-target-probe (HFS-I9 (b)), scheme-full, ocaml-full, llvm-full: merge plan batches 1-2; asm-amd64-full, asm-arm64-full: AX10; wasm-full: WA1-WA3 (B1, WAS23 (a), its crop in :new-crops since B1's revisit); cpp-full's cpp-check is 8 GiB, past :max-step-gib, and since GD1 rust-full's rsi-essential too, its 6.7 GiB peak declared)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
+[ "$(tr '\n' ' ' < "$w/cc0.out")" = "haskell-target-probe scheme-full ocaml-full llvm-full asm-amd64-full asm-arm64-full wasm-full pyi-aot " ] && ok "steps.edn: the gated crops' chains beside the serial run (not haskell-lib since HF10-P29/P32 (3b577236f, ec06f5853): hsi-check and hsi-check-aot, the serial run's, use its outputs, so it is a chain another needs; haskell-roundtrip is out of --full), haskell-target-probe (HFS-I9 (b)), scheme-full, ocaml-full, llvm-full: merge plan batches 1-2; asm-amd64-full, asm-arm64-full: AX10; wasm-full: WA1-WA3 (B1, WAS23 (a), its crop in :new-crops since B1's revisit), pyi-aot: Python's (queue 317; pyi-full's pyi-runtime is 5 GiB, past :max-step-gib); cpp-full's cpp-check is 8 GiB, past :max-step-gib, and since GD1 rust-full's rsi-essential too, its 6.7 GiB peak declared)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
 
 # ---- the rules
 mkdir -p "$w/r/test/ocaml"; echo '{}' > "$w/r/test/ocaml/controls.edn"; echo x > "$w/r/test/ocaml/other.edn"

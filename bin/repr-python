@@ -43,11 +43,18 @@
 #                                  Each stage's time and peak RSS per file and per process into
 #                                  .tmp/repr-python/rt/CORPUS/ (costs.edn); --record also writes the corpora's costs into
 #                                  test/python/roundtrip-costs.edn. The helper's stages run in N processes (default 2).
-#                                  In records mode (queue 257) levels 2 and 3 are CPython's recorded rows: the originals'
-#                                  (python-pydump-CORPUS's tree rows) and the print's (python-pydump-printed-CORPUS, keyed by
-#                                  the printed file's bytes, recorded by REPR_PYTHON_ORACLE=record bin/repr-python roundtrip
-#                                  CORPUS), once that pack is pinned (before: the oracle tier's, a line says so); their own
-#                                  negative control: the reference's print with the subject's print's digests fails level 2
+#                                  In records mode (queue 431) levels 2 and 3 are each file's own verdict by pyi, no CPython:
+#                                  level 2 pyi's ast (arbace.repr.python.astjson's tree without attributes, ast.dump's
+#                                  default), level 3 pyi's code objects (arbace.python.compile of the text read in mode :full)
+#                                  without positions, of the original and of the print (own-levels, in N processes), against
+#                                  test/python/roundtrip-own-known.edn (--record writes it alone in records mode: no results
+#                                  file, no costs; the rule :own-code-lines); their controls: the reference's print with the
+#                                  subject's print's digests fails level 2, and a mutated print (a statement added) fails
+#                                  level 2 and, its code beside the print's ast, level 3. REPR_PYTHON_RT_LEVELS=recorded: CPython's
+#                                  recorded rows (queue 257), the originals' (python-pydump-CORPUS's tree rows) and the print's
+#                                  (python-pydump-printed-CORPUS, keyed by the printed file's bytes, recorded by
+#                                  REPR_PYTHON_ORACLE=record bin/repr-python roundtrip CORPUS), once that pack is pinned (before:
+#                                  the oracle tier's, a line says so); live: CPython on the print, the oracle tier's
 #   bin/repr-python roundtrip --text [--record] [--jobs N] [CORPUS...]
 #                                  PY3, mode :full: each file also read in mode :full (every node's :pos, the tokens), the
 #                                  forms checked against the tokens (positions on tokens' edges, leaves equal to their
@@ -395,6 +402,8 @@ cmd_samples() {
 
 KNOWN="${REPR_PYTHON_KNOWN:-$root/test/python/roundtrip-known$PYSFX.edn}"
 FULL_KNOWN="${REPR_PYTHON_FULL_KNOWN:-$root/test/python/full-known$PYSFX.edn}"
+# queue 431: the round trip's files that do not pass levels 2 and 3 by pyi's own ast and compile (records mode's default)
+OWN_KNOWN="${REPR_PYTHON_OWN_KNOWN:-$root/test/python/roundtrip-own-known$PYSFX.edn}"
 COSTS="$root/test/python/roundtrip-costs.edn"
 TEXT_COSTS="$root/test/python/roundtrip-text-costs.edn"
 RT="$WORK/rt$PYSFX"
@@ -493,6 +502,22 @@ rt_levels() {
     END { exit bad }' "$2" "$1" > "$1.rec" && mv "$1.rec" "$1"
 }
 
+# own_levels BASE TSV (queue 431): the TSV's levels 2 and 3 columns by pyi's own ast and compile (own-levels), in $JOBS
+# processes over the TSV's rows split in turn, the rows sorted again
+own_levels() {
+  local base=$1 tsv=$2 i pids=() rc=0
+  if [ "${JOBS:-1}" -le 1 ]; then py_arbace own-levels --base "$base" --tsv "$tsv"; return; fi
+  rm -f "$tsv".own.*
+  awk -v n="$JOBS" -v f="$tsv.own." '{ print > (f (NR % n)) }' "$tsv"
+  for i in $(seq 0 $((JOBS - 1))); do
+    [ -s "$tsv.own.$i" ] || continue
+    py_arbace own-levels --base "$base" --tsv "$tsv.own.$i" & pids+=($!)
+  done
+  for i in "${pids[@]}"; do wait "$i" || rc=1; done
+  [ $rc = 0 ] || return 1
+  cat "$tsv".own.* | LC_ALL=C sort > "$tsv" && rm -f "$tsv".own.*
+}
+
 # rt_recorded_levels ID BASE DIR ORIGR (records mode, mode :lines; queue 257): levels 2 and 3 from CPython's records: the
 # originals' rows (python-pydump-ID's tree rows, as parse-check reads them; with REPR_PYTHON_RT_ORIG=helper they are the
 # rows already) and the print's (python-pydump-printed-ID, keyed by the printed file's bytes) into the TSVs compare reads
@@ -552,7 +577,7 @@ roundtrip_one() {
   # in records mode (queue 257, mode :lines): CPython's recorded rows, the original's (python-pydump-ID's tree rows) and
   # the print's (python-pydump-printed-ID), once that pack is pinned; before, the oracle tier's (compare --deferred: queue
   # 213); level 5 (--text) implied by level 4 there (queue 320: only a print of the original's bytes reaches it)
-  local deferred="" recorded=""
+  local deferred="" recorded="" own=""
   if pyrec_live; then
     timed helper-printed pyrec_run_helper tree "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
     if [ -z "$TEXT" ]; then
@@ -567,7 +592,15 @@ roundtrip_one() {
     fi
   else
     deferred=1; timed native-printed native_dumps "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
-    if [ -z "$TEXT" ]; then
+    # queue 431: levels 2 and 3 by pyi's own ast and compile (REPR_PYTHON_RT_LEVELS=own, the default: each file's own
+    # verdict, no record consumed); =recorded: CPython's recorded rows (python-pydump-printed-ID), the oracle tier's
+    local levels=${REPR_PYTHON_RT_LEVELS:-own}
+    case $levels in own|recorded) ;; *) die "REPR_PYTHON_RT_LEVELS: own or recorded (not $levels)" ;; esac
+    if [ -z "$TEXT" ] && [ "$levels" = own ]; then
+      timed own-orig own_levels "$base" "$d/helper-orig.tsv" || { echo "roundtrip $id: FAILED: pyi's levels 2 and 3 of the originals"; return 1; }
+      timed own-printed own_levels "$d/printed" "$d/helper-printed.tsv" || { echo "roundtrip $id: FAILED: pyi's levels 2 and 3 of the print"; return 1; }
+      deferred=""; own=1; known=$OWN_KNOWN
+    elif [ -z "$TEXT" ]; then
       if [ -f "$(pyrec_pin "printed-$id")" ]; then
         rt_recorded_levels "$id" "$base" "$d" "$origr" || { echo "roundtrip $id: FAILED: no record of levels 2 and 3 (the oracle's records, above)"; return 1; }
         deferred=""; recorded=1
@@ -576,11 +609,13 @@ roundtrip_one() {
       fi
     fi
   fi
-  local rc=0
+  local rc=0 rfile=""
+  [ -n "$record" ] && [ -z "$own" ] && rfile="$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"
   timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
     --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" --controls "$CONTROLS_READ" \
     ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} ${deferred:+--deferred} ${recorded:+--recorded} \
-    ${record:+--results-file "$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"} || rc=$?
+    ${own:+--own --printed "$d/printed"} \
+    ${rfile:+--results-file "$rfile"} || rc=$?
   { echo "{:corpus :$id :jobs $JOBS"
     echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"
     echo " :per-file $(costs "$d/helper-orig.tsv" ${TEXT:+"$d/helper-full.tsv"} "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
@@ -601,13 +636,16 @@ cmd_roundtrip() {
     esac
   done
   [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test)
-  [ -z "$record" ] || pyrec_live || die "roundtrip --record judges every level: the live oracle (REPR_PYTHON_ORACLE=live)"
+  # queue 431: in records mode --record writes the own levels' known file alone (test/python/roundtrip-own-known.edn: no
+  # CPython, no results file); every other record judges every level by CPython, live
+  [ -z "$record" ] || pyrec_live || { [ -z "$TEXT" ] && [ "${REPR_PYTHON_RT_LEVELS:-own}" = own ]; } \
+    || die "roundtrip --record judges every level: the live oracle (REPR_PYTHON_ORACLE=live)"
   fetch_tarball >/dev/null; fetch_apks >/dev/null
   for id in "${ids[@]}"; do
     rc=0; roundtrip_one "$id" "$record" || rc=$?
     [ $rc -gt $worst ] && worst=$rc
   done
-  if [ -n "$record" ]; then
+  if [ -n "$record" ] && pyrec_live; then
     { echo ";; The round trip's costs per corpus (bin/repr-python roundtrip ${TEXT:+--text }--record; GT8's budget): each stage's wall seconds"
       echo ";; (the helper's in :jobs processes), and per file each stage's seconds (total, mean, p50, p95, max and its file)"
       echo ";; and :peak-kib, the largest peak RSS of the stage's processes (each process's high-water mark after each file:"

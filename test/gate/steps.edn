@@ -279,6 +279,12 @@
   ;; WA11, WA12 (doc/wasm/WAI.md §10, doc/wasm/WEB.md): the js/wasm corpus on the headless world: also the shim and the demo's forms
   :wai-js ["bin/wai" "bin/lib/wai/" "go/arbace/wai.ae" "go/arbace/wai/" "test/wasm/" "wasm/web/" "wasm/demo/"]
   :wai-go ["bin/wai" "bin/lib/wai/" "bin/lib/limit.bash" "bin/goi" "go/arbace/wai.ae" "go/arbace/wai/" "test/wasm/" "test/goi/check-linux-amd64.edn"]
+  ;; repr/python's tools, the records (tools/pydump/records.bash over test/oracle-records/oracle.bash, records mode the default)
+  :python ["bin/repr-python" "arbace/repr/python.ae" "arbace/repr/python/" "tools/pydump/" "test/python/" "test/oracle-records/oracle.bash"]
+  ;; pyi: the front end and the AOT (arbace/python), its runtime as Go forms (go/arbace/py and the packages aot_module prints with
+  ;; it, all under :goi's go/), its C library's build (bin/pyi-clib, tools/pyi/clib), ssl's roots (x509roots/)
+  :pyi ["bin/pyi" "bin/pyi-clib" "arbace/python.ae" "arbace/python/" "go/arbace/py.ae" "go/arbace/py/" "go/arbace/libm.ae" "go/arbace/libm/"
+        "tools/pyi/" "x509roots/" :goi]
   ;;@ groups (GT9: a crop's groups spliced above this line, gate.crops splice: test/gate/crops/*.edn)
   }
 
@@ -2275,6 +2281,101 @@
    :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/wasm/corpora.edn"]
    :inputs [:lib-tools :tools :wai-js]
    :summary ["^wai js|^control|^check|^FAIL|^frames" 8]}
+  ;; ---- Python (PY6-PY11; GT9): pyi's AOT runtime, the essential chain, the chains python-read, pyi-aot and pyi-full at night
+  ;; cold (a changed runtime, or an empty AOT cache) it prints the runtime and compiles go/arbace/py as Go (GOMAXPROCS 4, aot_go):
+  ;; queue 258 on the VM (arm64), twice cold with an empty Go cache, 171 and 266 s, peak 4.0 GiB in one process (busybox time -v), the
+  ;; tree's 4.7 GiB (MemAvailable's drop); queue 235's 13.5 GB was a Go cache past its trim. Warm about 1 GB, seconds. Not :heavy (below
+  ;; 8 GiB); GTS222's amd64 nights measure it again
+  {:name pyi-aot-runtime :phase :build :kind :build :mem-gib 6
+   :cmd "bin/pyi check --aot --no-pyi --only samples/functions.py"
+   :hosts [:stage0 :go] :inputs [:lib-tools :tools :pyi]}
+  ;; the read and print levels on the essential corpora, from the committed records (test/python/records/essential/): the spec's
+  ;; checklist, the samples, both round trips, the tokens and both trees of samples and lex-errors (queue 212; 240r: no python3 called)
+  {:name python-read-essential :mem-gib 2 :phase :essential :chain python-essential :essential-when-changed :python
+   :cmd "bin/repr-python spec-check && bin/repr-python samples && bin/repr-python roundtrip samples && bin/repr-python roundtrip --text samples && bin/repr-python lex-check --no-mutants samples lex-errors && bin/repr-python parse-check --full --no-mutants samples lex-errors"
+   :hosts [:stage0] :never-loads [arbace.j2g]
+   :pins ["test/python/corpora.edn" "tools/pydump/PYTHON_VERSION" "test/python/records/python-pydump-samples.sha256"
+          "test/python/records/python-pydump-lex-errors.sha256"]
+   ;; queue 431: the round trip's levels 2 and 3 by pyi's own ast and compile load pyi's compiler
+   :inputs [:lib-tools :tools :python "arbace/python/compile.ae" "arbace/python/scope.ae" "arbace/python/ir.ae"]
+   :summary ["files, 0 failing|^roundtrip|^lex-check|^parse-check|FAIL|control" 12]}
+  ;; queue 258: pyi's front end and the programs' own verdict in one step (GT9's python-front-essential with queue 247's pyi-golden):
+  ;; the generated ops/ (gen --check), the golden texts against their reviews, CPython's recorded runs and the awk models (golden),
+  ;; scopes and code objects of samples, synthetic and errors (scope-check, compile-check --full); every verb's control is bin/pyi's
+  {:name pyi-essential :mem-gib 2 :phase :essential :chain python-essential :essential-when-changed :python
+   :cmd "bin/pyi gen --check && bin/pyi golden && bin/pyi universe --check && bin/pyi scope-check samples synthetic errors && bin/pyi compile-check --full samples synthetic errors"
+   :hosts [:stage0] :never-loads [arbace.j2g]
+   :pins ["test/python/corpora.edn" "tools/pydump/PYTHON_VERSION" "test/python/records/python-pydump-samples.sha256"
+          "test/python/records/python-pydump-synthetic.sha256" "test/python/records/python-pydump-errors.sha256"]
+   :inputs [:lib-tools :tools :python :pyi] :summary ["files, 0 failing|^golden|^universe|equal|differ|FAIL|control" 10]}
+  ;; queue 265: the five runtime tables tools/pyi/*_table.py recorded from CPython's modules, made by Arbace from the pinned sources
+  ;; (tools/pyi/runtime_tables.ae: the modules' C preprocessed by repr/c's preprocessor against musl's, Alpine's and Linux's headers),
+  ;; byte for byte the printed runtime's, a control per table (no python3)
+  {:name pyi-runtime-tables :mem-gib 2 :phase :essential :chain python-essential :essential-when-changed :python
+   :cmd "bin/pyi runtime gen-tables"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g]
+   :pins ["test/python/corpora.edn" "test/c/corpora.edn" "tools/pyi/header-apks.sha256"]
+   ;; review 1111 #7: runtime_tables.ae slurps C's recorded predefines; the tarball's fetch runs bin/repr-python pins --fetch,
+   ;; which reads test/python/corpora.edn (a pin) through test/python/corpora_rows.ae
+   :inputs [:lib-tools :tools :pyi "test/c/host/predefined/" "bin/repr-python" "test/python/corpora_rows.ae"]
+   :summary ["byte for byte|DIFFERS|control" 10]}
+  ;; test/python/essential-aot.txt's 21 programs compiled and on the loop (not on goi: --no-pyi), judged by their golden texts and
+  ;; CPython's recorded runs (queue 247), on the runtime pyi-aot-runtime keeps
+  ;; queue 357: builtins_textsig_table.go from the tarball's C sources (tools/pyi/runtime_tables.ae textsig: every module's tables
+  ;; preprocessed, about 2.5 minutes and 2 GB a run, its control a second run): --full, light
+  {:name pyi-runtime-textsig :mem-gib 3 :phase :full :chain pyi-aot
+   :cmd "bin/pyi runtime gen-tables textsig"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g]
+   :pins ["test/python/corpora.edn" "test/c/corpora.edn" "tools/pyi/header-apks.sha256"]
+   :inputs [:lib-tools :tools :pyi "bin/repr-python" "test/python/corpora_rows.ae"]
+   :summary ["byte for byte|DIFFERS|control" 4]}
+  {:name pyi-aot-essential :mem-gib 2 :phase :essential :chain python-essential :needs [pyi-essential pyi-aot-runtime] :essential-when-changed :python
+   :cmd "bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+   :summary ["^check --aot:|^verdicts|classed|failing|negative control" 5]}
+  ;; queue 206: arbace/python's and arbace/repr/python's namespaces compiled by c2j alone on stage 0, as c-c2j for C; :inputs as strace
+  ;; on stage 0 found them (c-c2j's c2j closure); no :never-loads arbace.j2g: c2j's emit requires arbace.j2g.jrt and names
+  {:name pyi-c2j :mem-gib 3 :phase :essential :chain python-essential :essential-when-changed :python
+   :cmd "bin/pyi c2j-check"
+   :hosts [:stage0]
+   :inputs [:lib-base "bin/pyi" "arbace/python.ae" "arbace/python/" "arbace/repr/python.ae" "arbace/repr/python/" "test/python/c2j/"
+            :c2j-runtime "arbace/c2j/" "arbace/j2g/jrt.ae" "arbace/j2g/names.ae" "arbace/classes/types.ae"
+            "arbace/repr/go/print.ae" "arbace/repr/go/print_*.ae" "go/arbace/jrt/*.ae"]
+   :summary ["^c2j-check: " 4]}
+  ;; ---- pyi-aot (light, beside the serial run): the 151 programs compiled and on the loop (whole), pyi on goi over them (a seventh a
+  ;; night over the night's record), the pinned wheels; judged by the programs' golden texts (127, queue 247) and CPython's recorded
+  ;; runs (24 of ops/), the wheels' samples by CPython's recorded runs and pip's recorded layout (test/python/records/outcomes/wheels/)
+  {:name pyi-check-aot :mem-gib 3 :phase :full :chain pyi-aot :needs [pyi-aot-runtime]
+   :cmd "bin/pyi check --aot --no-pyi"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+   :parts [{:part light}] :summary ["^check --aot:|^verdicts|classed|failing|negative control|FAIL" 6]}
+  ;; queues 205, 207: the pinned wheels installed by arbace.python.wheels and their samples on pyi; the wheels from the main
+  ;; checkout's .tmp (GTS212); pip on pyi against CPython's pip (pip-probe) is the oracle tier's pyi-oracle
+  {:name pyi-wheels :mem-gib 3 :phase :full :chain pyi-aot
+   :cmd "bin/pyi wheels fetch && bin/pyi wheels check"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/python/wheels.edn" "test/python/corpora.edn"]
+   :inputs [:lib-tools :tools :python :pyi] :summary ["^wheels |FAIL|control" 3]}
+  ;; ---- pyi-full (serial: its steps above :night-concurrent's 4 GiB)
+  ;; queue 235: bin/pyi runtime check (the smoke programs and REPL sessions against their recorded outcomes), its family's control
+  ;; test/python/controls-runtime.edn (a smoke program's and a REPL session's run against another's outcome, smoke_controls)
+  ;; on the gate's executable (DECISION 1 (a) of queue 321, as pyi-check-aot-goi)
+  {:name pyi-runtime :mem-gib 5 :phase :full :chain pyi-full :needs [go-build]
+   :cmd "env ARBACE_HOST_EXE=\"$GATE_EXE\" PYI_RUNTIME_REQUIRE=compiled bin/pyi runtime check"
+   :hosts [:prog :stage0 :go] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+   :summary ["^runtime: |^repl: |FAIL|^control" 12]}
+  {:name python-roundtrip-oracle :mem-gib 2 :phase :oracle :chain python-oracle
+   :cmd "REPR_PYTHON_ORACLE=live bin/repr-python roundtrip {part} && REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --text {part}"
+   :hosts [:stage0 :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn" "tools/pydump/PYTHON_VERSION"]
+   :inputs [:lib-tools :tools :python]
+   :parts [{:part samples} {:part stdlib} {:part site-packages} {:part lib-test}] :summary ["^roundtrip|FAIL|control" 6]}
+  {:name pyi-oracle :mem-gib 3 :phase :oracle :chain python-oracle
+   :cmd "bin/pyi record-ref --check"
+   :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn" "tools/pydump/PYTHON_VERSION" "test/python/wheels.edn"]
+   :inputs [:lib-tools :tools :python :pyi]
+   :parts [{:part refs} {:part tables :cmd "bin/pyi runtime tables"}
+           {:part pip-probe :cmd "bin/pyi wheels fetch && bin/pyi wheels pip-probe"}
+           {:part bench :cmd "bin/pyi bench"}]
+   :summary ["^check|differs|DIFFERS|^runtime|^wheels|benchmarks|classed|FAIL|control" 6]}
   ;;@ steps (GT9: a crop's steps spliced above this line, gate.crops splice: test/gate/crops/*.edn)
   ]
 
@@ -2303,6 +2404,7 @@
          :asm-amd64 [asm-amd64-essential asm-amd64-roundtrip asm-amd64-encode asm-amd64-decode asm-amd64-object asm-amd64-objverdict asm-amd64-table x86i-check x86i-decode asm-amd64-print-oracle asm-amd64-table-oracle asm-amd64-link-oracle]
          :asm-arm64 [asm-arm64-essential a64i-essential a64i-go-tools a64i-go-compile a64i-goroot a64i-check asm-arm64-table asm-arm64-table-oracle]
          :wasm [wasm-essential wasm-roundtrip wasm-wast wai-check wai-go wai-aot wai-go-aot wai-js]
+         :python [pyi-aot-runtime python-read-essential pyi-essential pyi-runtime-tables pyi-aot-essential pyi-c2j pyi-check-aot pyi-runtime-textsig pyi-wheels pyi-runtime python-roundtrip-oracle pyi-oracle]
          ;;@ crops (GT9: a crop's entry spliced above this line)
          }
  ;; GT8's budgets (the user, 2026-11-03), seconds, for :crops crops: the essential gate's wall (a merge), the nightly run
@@ -2353,9 +2455,15 @@
   :asm-arm64 ["bin/repr-asm" "arbace/repr/asm.ae" "arbace/repr/asm/" "arbace/asm/" "asm/" "test/asm/" "bin/a64i" "go/arbace/a64i.ae"
               "go/arbace/a64i/" "go/arbace/emu.ae" "go/arbace/emu/" "test/gate/crops/asm.edn"]
   ;; (Python's, for its fragment's steps when they are spliced)
-  :python ["bin/pyi" "bin/repr-python" "arbace/repr/python.ae" "arbace/repr/python/" "arbace/python.ae" "arbace/python/" "test/python/"
-           "tools/pydump/" "go/arbace/py.ae" "go/arbace/py/" "go/arbace/clib.ae" "go/arbace/clib/" "go/arbace/expat.ae" "go/arbace/expat/"
-           "go/arbace/pyexpat.ae" "go/arbace/pyexpat/" "go/arbace/libm.ae" "go/arbace/libm/" "bin/lib/crops/" "test/gate/crops/python.edn"]
+  ;; (Python's, its fragments' steps spliced by queue 317's way (queue 428): pyi's scripts, front end, runtime and its lazy modules' Go
+  ;; forms, the C library's build and node programs, the tools, the fragments)
+  :python ["bin/pyi" "bin/pyi-clib" "bin/repr-python" "arbace/repr/python.ae" "arbace/repr/python/" "arbace/python.ae" "arbace/python/"
+           "test/python/" "tools/pydump/" "tools/pyi/" "go/arbace/py.ae" "go/arbace/py/" "go/arbace/clib.ae" "go/arbace/clib/"
+           "go/arbace/expat.ae" "go/arbace/expat/" "go/arbace/pyexpat.ae" "go/arbace/pyexpat/" "go/arbace/libm.ae" "go/arbace/libm/"
+           "go/arbace/pybz2.ae" "go/arbace/pybz2/" "go/arbace/pylzma.ae" "go/arbace/pylzma/" "go/arbace/pyzstd.ae" "go/arbace/pyzstd/"
+           "go/arbace/pysqlite3.ae" "go/arbace/pysqlite3/" "go/arbace/pyssl.ae" "go/arbace/pyssl/" "go/arbace/pyctypes.ae"
+           "go/arbace/pyctypes/" "bin/lib/crops/" "test/gate/crops/python.edn" "test/gate/crops/python-oracle.edn"
+           "test/gate/crops/python-night.edn" "test/gate/crops/python-packs.edn"]
   :wasm ["bin/repr-wasm" "arbace/repr/wasm.ae" "arbace/repr/wasm/" "arbace/wasm/" "test/wasm/" "bin/wai" "bin/lib/wai/" "go/arbace/wai.ae"
          "go/arbace/wai/" "wasm/" "test/gate/crops/wasm.edn"]}
 
@@ -2557,5 +2665,16 @@
   wai-aot "test/wasm/controls-aot.txt"
   wai-go-aot "test/wasm/controls-go.txt"
   wai-js "test/wasm/controls-js.txt"
+  python-read-essential "test/python/controls-read.edn"
+  pyi-essential "bin/pyi"
+  pyi-runtime-tables "bin/pyi"
+  pyi-runtime-textsig "bin/pyi"
+  pyi-aot-essential "arbace/python/aot.ae"
+  pyi-c2j "test/python/c2j/pyi/c2j_control.ae"
+  pyi-check-aot "arbace/python/aot.ae"
+  pyi-wheels "bin/pyi"
+  pyi-runtime "test/python/controls-runtime.edn"
+  python-roundtrip-oracle "test/python/controls-read.edn"
+  pyi-oracle {:waived "record-ref --check judges two runs against the references (tools/pydump/refs.py check), the tables are regenerations compared byte for byte, pip-probe's controls are bin/pyi's, the bench is a speed record"}
   ;;@ controls (GT9: a crop's controls spliced above this line)
   }}
