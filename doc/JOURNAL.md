@@ -13306,3 +13306,11 @@ bash -n bin/hsi, test/gate/{chain-needs,crop-tier,crops,gate-key-crops,programs-
 `bin/cppi selftest case-inputs` (pass); `bin/gate --full --plan` rc 0 (375 steps: 3 always, 3 build (go-build, javac-tool, cpp-runtime), 333 run, 35 after, 1 absent; .tmp/goal/full-plan-next-final.log) and `--full --concurrent --plan` rc 0 (simulated 9:45; full-plan-next-final-concurrent.log). Not run: 400's std-iface passes (they need rust-src's
 deps cache, 20+ min) and 406's live selftests (oracle tier). Keys at the head: gate 8d0e46484347addebee7 (unchanged), javac
 36b769ce7c35115edd8c (unchanged), arbace_runtime_key unchanged.
+
+## 2026-11-19: the Java platform switch night prepared on n-java-platform (round 55)
+
+Branch `n-java-platform` on mac/next (c6d53f85b): h-java-platform (9175b7e94) is already an ancestor of next, so no merge. arbace_javac_key
+here is 36b769ce7c35115edd8c, the key tonight's --full builds at next. The night script (.tmp/goal/java-platform-night.sh, not in git) got
+step 5, JOP13 (a)'s `bin/java-check sources --jobs 8 --record` on T' with `sources --check --complete`, and a preflight that accepts
+switch.patch with no context (mac/432-java-golden's independence.edn moves the patch's context). cacerts by GenerateCacerts has no verb yet
+and stays out. Dry run only; the morning's lines are in .tmp/goal/java-platform-morning.md. No key moves (journal only).
