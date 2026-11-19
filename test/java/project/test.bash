@@ -211,5 +211,16 @@ sed -i 's/"world"/"wereld"/' "$w/c7/demo/app/Main.ae"
 must_fail "a forms file changed in the native trees' copy" "$w/c7.log" bash -c '
   diff -rq -x "repr-java-*.edn" "$1" "$2" | sed "s|^Files $1/\(.*\) and .* differ\$|\1|" > "$3"; [ ! -s "$3" ]' _ "$w/fx/forms/app" "$w/c7" "$w/c7.differ"
 
+# a sources jar's module-info.java: dropped from the unpacked tree, so javac reads on the class path (controls/modinfo)
+mkdir -p "$w/mi/repo/org/example/modlib/1.0"
+(cd "$ctl/modinfo/lib" && TZ=UTC zip -q -X -r "$w/mi/repo/org/example/modlib/1.0/modlib-1.0-sources.jar" module-info.java demo)
+expect "module-info.java in a sources jar: the dependent reads java.awt.Point (class path, no single-module javac)" \
+  bash -c '"$1" read "$2" "$3/mi/w" --repository "$3/mi/repo" --root "controls=$4" > "$3/mi.log" 2>&1 \
+    && [ ! -e "$3/mi/w/src/modlib/module-info.java" ] && [ -f "$3/mi/w/forms.all/demo/modapp/App.ae" ] && ! grep -q "does not read" "$3/mi.log"' \
+  _ "$jp" "$ctl/modinfo/model.edn" "$w" "$ctl"
+must_fail "the library as a module of sources with its module-info.java: javac's single-module mode, does not read" "$w/mi-src.log" \
+  "$jp" read "$ctl/modinfo/model-src.edn" "$w/mi/src" --root "controls=$ctl"
+expect "  (its message is javac's)" bash -c 'grep -rq "does not read" "$1" "$2"/mi/src/log' _ "$w/mi-src.log" "$w"
+
 echo "java-project test: $pass passed, $fail failed ($w)"
 [ $fail = 0 ]
