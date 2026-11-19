@@ -12956,3 +12956,19 @@ from 16 to 64 slots: pyi's lazy modules hold 22 interpreted object types, and te
 methods of type func() *py.Type ... *pysqlite3.Blob.Type panics". Write-ahead: the stubs are compiled into the executable,
 so this takes effect at the next build of the gate's executables (gate_key moves; it moves already with cfd69a6d2); not
 probed here (no executable built: no heavy runs today).
+
+## 2026-11-19: n-py-eval: the module _heapq; the pyexpat fix measured
+
+- `_heapq` (go/arbace/py/builtins_heapq.ae), Modules/_heapqmodule.c of CPython 3.14.10 in Go: heappush, heappop,
+  heapreplace, heappushpop, heapify and their _max variants (3.14's public max-heap API), positional only (METH_O's "takes
+  exactly one argument", _PyArg_CheckPositional's "expected 2 arguments"), the heap a list or a list subclass ("argument 1
+  must be list, not T"), every comparison PyObject_RichCompareBool(a, b, Py_LT), the size checked after each ("list changed
+  size during iteration"), heapify's cache-friendly order above 2,500 items, the module's __doc__ and __about__ the C
+  file's. heapq.py's `from _heapq import *` now takes them: test_heapq's TestHeapC and TestErrorHandlingC ran skipped
+  ("requires _heapq", :c-modules-deferred, 34 methods). Proof: `bin/pyi check --only test_heapq` on the checkout's runtime
+  (PYI_RUNTIME=checkout, interpreted by goi): 69 of 69 (35 before), the controls' subjects 41 of 41.
+- cfd69a6d2 (goi's liveness across a fallthrough) measured by `bin/pyi check --only` (compiled runtime, the checkout's goi):
+  test_minidom 86 -> 132 of 133, test_pyexpat 48 -> 84 of 87, test_sax 157 -> 191 of 191, test_plistlib 36 -> 67 of 71,
+  test_pulldom 7 -> 11 of 11: 151 methods; one new row in no class (test_plistlib's
+  test_dump_aware_datetime_without_aware_datetime_option: _pydatetime's message "can't subtract offset-naive and
+  offset-aware datetimes" where the test's regex is _datetime's).
