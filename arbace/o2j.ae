@@ -307,6 +307,18 @@
   "Bt/pop in place (queue 414)."
   '(set! ocaml.rt.Bt/sp (unchecked-dec-int ocaml.rt.Bt/sp)))
 
+(def ^:private tick-forms
+  "Rt/tick in place (queue 453: a loop's turn without a frame): the turn counted, the slow path past 128."
+  '[(set! ocaml.rt.Rt/ticks (unchecked-inc-int ocaml.rt.Rt/ticks))
+    (when (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/tickSlow))])
+
+(def ^:private enter-forms
+  "Rt/enter in place (queue 453: a call's entry without a frame): the depth and the turn counted, the slow path (the turn's work,
+  the depth's limit) past 128 turns."
+  '[(set! ocaml.rt.Rt/depth (unchecked-inc-int ocaml.rt.Rt/depth))
+    (set! ocaml.rt.Rt/ticks (unchecked-inc-int ocaml.rt.Rt/ticks))
+    (when (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/enterSlow))])
+
 (defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
   (let [r (fresh "r$")]
     (list 'do (list 'ocaml.rt.Bt/push ev) (concat (list 'let [r f]) (clear ts) [bt-pop r]))))
@@ -403,7 +415,7 @@
               :group (not-empty (dissoc group self-id)) :tails tails}
         b (realize (expr ictx body true))
         ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
-        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (list 'do '(ocaml.rt.Rt/tick) b))) b)
+        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (concat (list 'do) tick-forms [b]))) b)
         ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
         ;; of another of the group; its entry calls tb and bounces (Rt/bounce: each TailCall's function's tb in turn, in one
         ;; frame). Every function of such a group has a tb, being a TailCall's target or not
@@ -416,7 +428,7 @@
         ;; the call depth (OC92 (a)): counted on entry, given back on the way out (an exception's way out is the handler's,
         ;; trywith-node)
         r (fresh "r$")
-        b (list 'do '(ocaml.rt.Rt/enter) (list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r))]
+        b (concat (list 'do) enter-forms [(list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r)])]
     (when (= kind :tupled) (throw (ex-info "tupled function" {})))
     (swap! (:classes *unit*) conj
            (concat
@@ -502,7 +514,12 @@
         body (k (mapv first ps))]
     (if (seq bs) (list 'let bs body) body)))
 
-(defn- unbox [x] (list 'long (list 'cast 'Long x)))
+(defn- unbox
+  "A Long's long; an inlined int primitive's value (boxed by (cast Object ...), queue 453) unboxed by taking its long."
+  [x]
+  (if (and (seq? x) (= 'cast (first x)) (= 'Object (second x)) (seq? (nth x 2 nil)) (= 'bit-shift-right (first (nth x 2))))
+    (nth x 2)
+    (list 'long (list 'cast 'Long x))))
 
 (defn- inline-prim
   "The form of Rt's primitive m on args with its fast path in place, nil when m has none."
@@ -513,6 +530,16 @@
       (= 'b m) (list 'if (first args) 'ocaml.rt.Rt/TRUE 'ocaml.rt.Rt/FALSE)
       (= 't m)
       (bind-vals args (fn [[x]] (list 'if (list 'instance? 'Long x) (list 'not (list '== 0 (unbox x))) true)))
+      ;; (queue 453) the int primitives unboxed in place, no call: OCaml's types make their arguments ints (Longs); a value
+      ;; that is not (Obj.magic's) fails the cast, where Rt's method raised its internal error. The result boxed by a cast to
+      ;; Object, as every node's value (a primitive long bound by a let fails instance?: ast-invariants' load)
+      (#{'add 'sub 'mul} m)
+      (let [[a b] args op ({'add 'unchecked-add 'sub 'unchecked-subtract 'mul 'unchecked-multiply} m)]
+        (list 'cast 'Object (list 'bit-shift-right (list 'bit-shift-left (list op (unbox a) (unbox b)) 1) 1)))
+      (= 'offset m)
+      (let [[a n] args] (list 'cast 'Object (list 'bit-shift-right (list 'bit-shift-left (list 'unchecked-add (unbox a) n) 1) 1)))
+      (#{'lt 'le 'gt 'ge} m)
+      (let [[a b] args] (list ({'lt '< 'le '<= 'gt '> 'ge '>=} m) (unbox a) (unbox b)))
       (= 'field m)
       (let [[a n] args]
         (bind-vals [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x)
@@ -779,11 +806,11 @@
     (list 'let [l (expr ctx lo false) h (expr ctx hi false)]
           (list 'let [(with-meta lv {:tag 'long}) (rt 'l l) (with-meta hv {:tag 'long}) (rt 'l h)]
                 (list 'when (list (if up '<= '>=) lv hv)
-                      (list 'loop [(with-meta i {:tag 'long}) lv]
-                            '(ocaml.rt.Rt/tick)
-                            (list 'let [(with-meta s {:tag 'Object}) i] (expr (assoc-in ctx [:env id] s) body false))
-                            (list 'when (list 'not (list '== i hv))
-                                  (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i))))))
+                      (concat (list 'loop [(with-meta i {:tag 'long}) lv])
+                            tick-forms
+                            [(list 'let [(with-meta s {:tag 'Object}) i] (expr (assoc-in ctx [:env id] s) body false))
+                             (list 'when (list 'not (list '== i hv))
+                                   (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i)))])))
           UNIT)))
 
 (defn- flatten-seq [x]
@@ -809,7 +836,7 @@
       ifthenelse (let [[c t f] b] (list 'if (test-form ctx c) (expr ctx t tail?) (expr ctx f tail?)))
       sequence (let [xs (flatten-seq x)]
                  (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
-      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) '(ocaml.rt.Rt/tick) (expr ctx body false)) UNIT))
+      while (let [[c body] b] (list 'do (concat (list 'while (test-form ctx c)) tick-forms [(expr ctx body false)]) UNIT))
       for (for-node ctx b)
       assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
       send (let [[kind m o args] b
@@ -884,12 +911,25 @@
   [pkg]
   [(list 'ns (symbol pkg))])
 
+(defn- unlined
+  "Form x without the reader's :line and :column (queue 453): the forms this file quotes (bt-pop, the in-place entry and turn)
+  carry them, and each printed map is read, attached and kept with the loaded class at every run; the type hints stay."
+  [x]
+  (let [strip (fn [y] (if-let [m (meta y)]
+                        (let [m (dissoc m :line :column)] (with-meta y (when (seq m) m)))
+                        y))]
+    (cond (seq? x) (strip (with-meta (apply list (map unlined x)) (meta x)))
+          (vector? x) (strip (with-meta (mapv unlined x) (meta x)))
+          (map? x) (strip (with-meta (into (empty x) (map (fn [[k v]] [(unlined k) (unlined v)]) x)) (meta x)))
+          (symbol? x) (strip x)
+          :else x)))
+
 (defn write-forms [^File f forms header]
   (io/make-parents f)
   (with-open [w (io/writer f)]
     (binding [*out* w *print-meta* true *print-length* nil *print-level* nil]
       (println (str ";; " header))
-      (doseq [x forms] (newline) (prn x)))))
+      (doseq [x forms] (newline) (prn (unlined x))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; linking (oi's Link, run.go): the library units a program needs, in the library's order
