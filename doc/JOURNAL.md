@@ -12951,3 +12951,31 @@ invokers' six), 399's five gen-class cases pass; `bin/gate --plan`: 52 essential
 a build (gate_key moved). doc/AGENDA.md's top rewritten for main plus these merges: the consolidation of 2026-11-18/19, the scores,
 the pending work (lanes 2 and 4, the Java platform night, tonight's --full, the Ghidra DECISIONs 403-1 and 405-1, the re-seed's
 stopgaps: ARBACE_NO_AOT for cpp-essential and c-parse's mutants, the Tok split, the aot-lib key reading stage 0's cf2g).
+
+## 2026-11-19: 399's gen-class fix tested (review 1119, items 1-4)
+
+Review 1119 (the main host's, of the Mac's 1119 branches) found 399's (`d73c48d28`) unit check of the default's fallback written by hand
+(test/j2g/unit/genclass/g/Gen.ae: it tests only j2g's `Iface.super.m()`, which predates 399, so it passed on 399's base `88b8e7f1a`),
+nothing covering `::aot-form` or `gc-record-aot-form!`, the latter silent when no recorded unit matches, and no probe of a default inherited
+from a superinterface. On next `7dd3947a0`, branch n-399-tests:
+- arbace/genclass.ae: `gc-record-aot-form!` answers `:recorded`, nil when the program records no units, and `:no-match` with a warning on
+  `*err*` naming the class (no unit names it alone): the compiled class would lose its default methods again, the very bug 399 fixes, so it
+  is no longer silent. Its doc string says why the unit's `:vars` are not recomputed (the added methods name only the class's static
+  `__var` fields, `arbace.lang.IFn` and the interfaces' supers). Considered: throwing; not taken, as gen-class-define's catch would turn it
+  into the evaluated class's failure and a warning keeps the program built.
+- test/j2g/unit.ae: `test-gen-class-aot-form` loads the checkout's genclass (in arbace.core; stage 0 embeds the seed's) and calls
+  `generate-class` on JDK interfaces: CharSequence's `::aot-form` forwards `chars` to `chars__var`, else `(.chars java.lang.CharSequence/super)`;
+  the evaluated form holds no default's method; control: `length`, abstract, forwards and calls no super; java.util.List's form calls
+  `java.util.List/super` for Iterable's `forEach` and Collection's `stream` (item 4); control: Runnable, no default, `::aot-form` nil. Then
+  `gc-record-aot-form!` over a redefined `arbace.classes.native/compiled`: the unit naming the class alone replaced, the others kept; a
+  missing name and a unit naming the class beside another both `:no-match`, warned, nothing replaced; control: no recording, nil.
+- test/j2g/unit/genclass/g/{Hello,Sub,GenSub}.ae: a default inherited through a subinterface, `(.hello g.Sub/super)`, translated by j2g to
+  the declaring interface's function `J_g_Hello_J_Hello__O` (item 4, j2g's side).
+Proofs (stage 0, light): `bin/j2g-unit` 196 passes, the 7 known failures (type annotations' known rows, invokers' six; the same set as on
+`7dd3947a0`); with 88b8e7f1a's genclass.ae the new checks fail but one (8 of 9: "the evaluated form holds no default's method" holds on
+the base too, by design); an evaluated probe (gen-class over java.util.List with `-forEach`, over CharSequence without `-isEmpty`): the
+impl-ns's forEach runs, isEmpty is the default's; the same over List under `ARBACE_COMPILE=1`: the unit recorded, its forms calling
+`java.util.List/super` for forEach, stream, removeIf, spliterator and the rest, no warning. The AOT run of Clojure's genclass (review
+item 5's records) stays the main host's night.
+Keys (without `ARBACE_HOST_EXE`): gate KEY20 `efcc5118fcf5748217a6` -> `ca72eb47fd67b2006656`, javac's `231da30c39a1` -> `779edb1e6bbd`,
+`arbace_aot_key` `9dfc53c46d8f` -> `6a6277659883` (arbace/genclass.ae is embedded); arbace_runtime_key unmoved.
