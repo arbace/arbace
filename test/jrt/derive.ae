@@ -2035,6 +2035,110 @@ import java.lang.module.ModuleDescriptor;
               "        });\n"
               "    }") 1]])])
 
+;; queue task 398: java.nio's asynchronous channels (test/jrt/jrt_sources.ae's async-channel-sources): the four of
+;; jdk26u's classes whose text names what the Go build lacks. JavaNioAccess's isThreadConfined (a buffer of a confined
+;; java.lang.foreign Arena: none in the Go build, whose arenas are outside it) answers false; the asynchronous file
+;; channel's locks are jrt's lock table (jdk.internal.jrt.HostFileChannels, keyed as jrt's FileChannelImpl keys its
+;; own, so a FileChannel's and an AsynchronousFileChannel's locks of one file overlap as in jdk26u's FileLockTable);
+;; its I/O goes through jrt's FileChannelImpl over the same descriptor (uninterruptible, as jdk26u's file dispatcher's
+;; system calls are: an interrupted pooled thread does not close the channel), in place of FileDispatcherImpl's
+;; natives (jrt has no native memory, F7); UnixAsynchronousSocketChannelImpl's one native, checkConnect, is
+;; UnixAsynchronousSocketChannelImpl.c's getsockopt of SO_ERROR over jdk.internal.jrt.HostChannels.
+(def ^:private async-why
+  ["Arbace (overlay/jdk, queue task 398, java.nio's asynchronous channels): jdk26u's"
+   "%s (%s"
+   "at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive): %s;"
+   "nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General Public"
+   "License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace authors;"
+   "Eclipse Public License 1.0."])
+
+(defn- async-derivation [kind rel what ops]
+  (let [from (str "src/java.base/" kind "/classes/" rel)]
+    {:path rel
+     :from from
+     :header (fn [] (header (-> async-why
+                                (update 1 #(format % (-> rel (str/replace ".java" "") (str/replace "/" ".")) from))
+                                (update 2 #(format % what)))))
+     :ops ops}))
+
+(def ^:private not-confined
+  (str "    // Arbace: no buffer is thread-confined in the Go build (java.lang.foreign's arenas are outside it)\n"
+       "    private static boolean isThreadConfined(ByteBuffer bb) {\n"
+       "        return false;\n"
+       "    }\n"))
+
+(def ^:private async-derivations
+  [(async-derivation "share" "sun/nio/ch/AsynchronousFileChannelImpl.java"
+     (str "no JavaNioAccess (isThreadConfined false: no confined arena in the Go build); the locks in jrt's lock table "
+          "(jdk.internal.jrt.HostFileChannels, the key lockKey() of the subclass) in place of FileLockTable")
+     [["import jdk.internal.access.JavaNioAccess;\nimport jdk.internal.access.SharedSecrets;\n"
+       "import jdk.internal.jrt.HostFileChannels;\n" 1]
+      ["    private static final JavaNioAccess NIO_ACCESS = SharedSecrets.getJavaNioAccess();\n" not-confined 1]
+      ["NIO_ACCESS.isThreadConfined(" "isThreadConfined(" 4]
+      ["    private volatile FileLockTable fileLockTable;\n"
+       (str "    // Arbace: the key of this channel's file in jrt's lock table (HostFileChannels.lockKey)\n"
+            "    abstract Object lockKey();\n") 1]
+      [(str "        if (fileLockTable == null) {\n"
+            "            synchronized (this) {\n"
+            "                if (fileLockTable == null) {\n"
+            "                    fileLockTable = new FileLockTable(this, fdObj);\n"
+            "                }\n"
+            "            }\n"
+            "        }\n")
+       "        // Arbace: jrt's lock table is the process's, made with it\n" 1]
+      ["        if (fileLockTable != null) {\n            for (FileLock fl: fileLockTable.removeAll()) {"
+       "        {\n            for (FileLock fl: HostFileChannels.removeLocks(lockKey(), this)) {" 1]
+      ["            fileLockTable.add(fli);" "            HostFileChannels.addLock(lockKey(), fli);" 1]
+      ["        fileLockTable.remove(fli);" "        HostFileChannels.removeLock(lockKey(), fli);" 1]])
+   (async-derivation "share" "sun/nio/ch/AsynchronousSocketChannelImpl.java"
+     "no JavaNioAccess (isThreadConfined false: no confined arena in the Go build)"
+     [["import jdk.internal.access.JavaNioAccess;\nimport jdk.internal.access.SharedSecrets;\n" "" 1]
+      ["    private static final JavaNioAccess NIO_ACCESS = SharedSecrets.getJavaNioAccess();\n" not-confined 1]
+      ["NIO_ACCESS.isThreadConfined(" "isThreadConfined(" 6]])
+   (async-derivation "share" "sun/nio/ch/SimpleAsynchronousFileChannelImpl.java"
+     (str "its I/O through jrt's FileChannelImpl over the same descriptor, made uninterruptible (as the system calls of "
+          "jdk26u's FileDispatcherImpl are), in place of FileDispatcherImpl's natives: size, truncate, force and the "
+          "positional read and write the channel's; a lock granted by jrt's lock table alone (HostFileChannels: the "
+          "process's locks, as jrt's FileChannelImpl's, none of the kernel's), its release nothing more; lockKey the "
+          "file's key there")
+     [["    // Used to make native read and write calls\n    private static final FileDispatcher nd = new FileDispatcherImpl();\n"
+       (str "    // Arbace: jrt's file channel over the descriptor, uninterruptible, in place of the file dispatcher\n"
+            "    private final FileChannelImpl fc;\n\n"
+            "    // Arbace: the key of the file in jrt's lock table\n"
+            "    private final Object lockKey;\n\n"
+            "    // Arbace: FileDispatcher's results of a lock (jrt grants one in its lock table alone)\n"
+            "    private static final int NO_LOCK = -1, LOCKED = 0, INTERRUPTED = 2;\n") 1]
+      ["        this.path = path;\n"
+       (str "        this.path = path;\n"
+            "        this.fc = (FileChannelImpl) FileChannelImpl.open(fdObj, path, reading, writing, false, false, null);\n"
+            "        this.fc.setUninterruptible();\n"
+            "        this.lockKey = jdk.internal.jrt.HostFileChannels.lockKey(fdObj, path);\n") 1]
+      ["    @Override\n    public void close() throws IOException {\n"
+       "    @Override\n    Object lockKey() {\n        return lockKey;\n    }\n\n    @Override\n    public void close() throws IOException {\n" 1]
+      ["        nd.close(fdObj);" "        fc.close();" 1]
+      ["n = nd.size(fdObj);" "n = fc.size();" 2]
+      ["n = nd.truncate(fdObj, size);" "fc.truncate(size); n = 0;" 1]
+      ["n = nd.force(fdObj, metaData);" "fc.force(metaData); n = 0;" 1]
+      [#"n = nd\.lock\(fdObj, (?:true|false), position, (?:len|size), shared\);" "n = LOCKED;" 2]
+      ["FileDispatcher.INTERRUPTED" "INTERRUPTED" 3]
+      ["FileDispatcher.LOCKED" "LOCKED" 2]
+      ["FileDispatcher.NO_LOCK" "NO_LOCK" 1]
+      ["        nd.release(fdObj, fli.position(), fli.size());"
+       "        // Arbace: jrt's lock table holds the lock alone: removeFromFileLockTable releases it" 1]
+      ["n = IOUtil.read(fdObj, dst, position, nd);" "n = fc.read(dst, position);" 1]
+      ["n = IOUtil.write(fdObj, src, position, nd);" "n = fc.write(src, position);" 1]]
+     )
+   (async-derivation "unix" "sun/nio/ch/UnixAsynchronousSocketChannelImpl.java"
+     (str "the native checkConnect given a body over jdk.internal.jrt.HostChannels.checkConnect0 "
+          "(UnixAsynchronousSocketChannelImpl.c's getsockopt of SO_ERROR, its error thrown as handleSocketError throws it)")
+     [["    private static native void checkConnect(int fdVal) throws IOException;"
+       (str "    private static void checkConnect(int fdVal) throws IOException {\n"
+            "        int[] err = new int[1];\n"
+            "        if (jdk.internal.jrt.HostChannels.checkConnect0(fdVal, err) == jdk.internal.jrt.HostChannels.THROWN)\n"
+            "            throw err[0] < 0 ? jdk.internal.jrt.HostChannels.ioException(-err[0], \"getsockopt\")\n"
+            "                             : jdk.internal.jrt.HostChannels.socketException(err[0], null);\n"
+            "    }") 1]])])
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -2094,7 +2198,8 @@ import java.lang.module.ModuleDescriptor;
   http-derivations
   invoke-derivations
   hjd-derivations
-  mx-derivations))
+  mx-derivations
+  async-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 
