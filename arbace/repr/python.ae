@@ -27,7 +27,15 @@
         (test/python/controls-read.edn; GTS81 (a), queue 212): the corpus's crossed pairs, the subject's print judged
         by judge-file (judge-text) against the reference's original, which must fail
         (arbace.repr.python.results/judge-controls); a control that passes or is not judged fails the run, with
-        --record too (before anything is written)."
+        --record too (before anything is written). --own (queue 431, records mode's default): the TSVs' levels 2 and 3
+        columns are pyi's (own-levels), the known file test/python/roundtrip-own-known.edn, the writer's rule
+        :own-code-lines; --printed DIR adds the own levels' control, the reference's print with a statement added, which
+        must fail at level 2 and, its code beside the print's ast, at level 3
+    own-levels --base DIR --tsv FILE
+        queue 431: the TSV's ast and code columns (REL STATUS AST CODE ...) given by pyi for BASE/REL: own-ast, the
+        SHA-256 of pyi's ast (arbace.repr.python.astjson's tree without attributes, ast.dump's default), and own-code,
+        the SHA-256 of pyi's code objects (arbace.python.compile, mode exec, of the text read in mode :full) without
+        positions (own-norm-code); no CPython"
   (:require [arbace.repr.python.convert :as cv]
             [arbace.repr.python.print :as pr]
             [arbace.repr.python.results :as results]
@@ -105,6 +113,109 @@
   (let [[in out] args]
     (spit-mk out (pr/print-module (read-string (slurp in))))))
 
+;; ---- levels 2 and 3 by pyi's own ast and compile (queue 431) ----
+;;
+;; In records mode the round trip's levels 2 and 3 are each file's own verdict, no CPython: level 2 pyi's ast (the tree
+;; compile()'s PyCF_ONLY_AST gives pyi's ast module, arbace.repr.python.astjson, written without attributes as
+;; ast.dump(tree) shows it by default), level 3 pyi's code objects (the file's text read as pyi's compiler reads it, mode
+;; :full, compiled by arbace.python.compile in mode exec) without positions (own-norm-code, the counterpart of
+;; tools/pydump's norm_code), of the original and of its print. CPython's rows (python-pydump-CORPUS and
+;; python-pydump-printed-CORPUS) stay the oracle tier's (REPR_PYTHON_RT_LEVELS=recorded, or live).
+
+(defn- sha256-hex ^String [^String s]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) d))))
+
+(defn- edn-text ^String [x]
+  (binding [*print-length* nil *print-level* nil *print-meta* false *print-namespace-maps* false]
+    (pr-str x)))
+
+(defn own-ast
+  "Level 2's fact of a file's bytes by pyi: the SHA-256 of its ast (the native parser's tree, as pyi's ast module has it,
+  written by astjson without attributes); \"error\" when the parse rejects it"
+  ^String [^bytes bs]
+  (let [{:keys [error text]} ((requiring-resolve 'arbace.repr.python.native/source-text) bs)]
+    (if error
+      "error"
+      (try
+        (let [tree ((requiring-resolve 'arbace.repr.python.native/parse-text) text false)]
+          (sha256-hex (with-bindings {(requiring-resolve 'arbace.repr.python.astjson/*attributes*) false}
+                        ((requiring-resolve 'arbace.repr.python.astjson/tree-json) tree))))
+        (catch arbace.lang.ExceptionInfo e
+          (if (:python-error (ex-data e)) "error" (throw e)))))))
+
+(defn own-norm-code
+  "A code object of pyi's IR without positions (tools/pydump's norm_code's counterpart): :lines, :positions,
+  :firstlineno, :threaded (the dis view's) and :warnings left out; the :nop instructions dropped, each jump's target
+  renumbered; each constant written where an instruction takes it (:const, :call's keyword names, :make-function's
+  code, nested code objects likewise), a class body's __firstlineno__ (stored by name or into its cell) as a placeholder; each instruction's innermost
+  handler (target, depth, lasti) in place of the ranges"
+  [co]
+  (let [code (vec (:code co)) consts (vec (:consts co)) names (vec (:names co)) n (count code)
+        jump? (fn [op] (:jump (get @(requiring-resolve 'arbace.python.ir/ops) op)))
+        ;; at: an original index (0..n) -> the new index of the first kept instruction at or after it
+        at (loop [i 0 k 0 acc (transient [])]
+             (if (> i n) (persistent! acc)
+                 (recur (inc i) (if (and (< i n) (not= :nop (first (nth code i)))) (inc k) k) (conj! acc k))))
+        cv (fn cv [c] (cond (and (map? c) (:code c)) {:code (own-norm-code (:code c))}
+                            (and (map? c) (:tuple c)) {:tuple (mapv cv (:tuple c))}
+                            :else c))
+        const (fn [i] (cv (nth consts i)))
+        derefs (vec (concat (:cells co) (:frees co)))
+        ;; a class body's store of its first line: __firstlineno__ by name, or into its cell when the body declares it
+        ;; nonlocal (Lib/test/test_inspect's test_getsource_on_class_without_firstlineno)
+        firstlineno-store? (fn [[op arg]] (and (= :class (:kind co)) (= "__firstlineno__" (case op :store-name (get names arg) :store-deref (get derefs arg) nil))))
+        hs (vec (:handlers co))
+        hand (fn [i] (some (fn [[s e t d l]] (when (and (<= s i) (< i e)) [(nth at t) d l])) hs))]
+    {:name (:name co) :qualname (:qualname co) :kind (:kind co) :flags (vec (sort (map name (:flags co))))
+     :argcount (:argcount co) :posonly (:posonly co) :kwonly (:kwonly co)
+     :locals (:locals co) :cells (:cells co) :frees (:frees co) :names names :docstring (:docstring co)
+     :code (vec (for [i (range n) :let [[op arg] (nth code i)] :when (not= :nop op)]
+                  (let [nx (when (< (inc i) n) (nth code (inc i)))]
+                    [(cond
+                       (and (= :const op) (firstlineno-store? nx)) [op :firstlineno]
+                       (= :const op) [op (const arg)]
+                       (= :call op) [op [(first arg) (when-let [k (second arg)] (const k))]]
+                       (= :make-function op) [op [(const (first arg)) (second arg)]]
+                       (jump? op) [op (nth at arg)]
+                       :else [op arg])
+                     (hand i)])))}))
+
+(defn own-code
+  "Level 3's fact of a file's bytes by pyi: the SHA-256 of its code objects without positions (own-norm-code), the text
+  read in mode :full as pyi's compiler reads it and compiled in mode exec; \"compile-error: MSG\" for a SyntaxError of
+  the compiler, \"error\" when the reader rejects the file"
+  ^String [^bytes bs ^String rel]
+  (let [d (cv/convert ((requiring-resolve 'arbace.repr.python.native/read-dump) bs rel true true))]
+    (if (cv/error-form? d)
+      "error"
+      (try
+        (sha256-hex (edn-text (own-norm-code ((requiring-resolve 'arbace.python.compile/compile-source) d :exec))))
+        (catch arbace.lang.ExceptionInfo e
+          (if (= 'SyntaxError (:class (ex-data e)))
+            (str "compile-error: " (one-line (:msg (ex-data e))))
+            (throw e)))))))
+
+(defn own-mutant
+  "The own levels' negative control: own-ast's and own-code's facts of a print with a statement added at its end"
+  [^bytes bs ^String rel]
+  (let [m (byte-array (concat (seq bs) (seq (.getBytes "\n__own_control__ = 0\n" "UTF-8"))))]
+    [(own-ast m) (own-code m (.getName (File. rel)))]))
+
+(defn- do-own-levels
+  "own-levels --base DIR --tsv FILE: the TSV's rows (REL STATUS AST CODE ..., the native dumps' columns) given levels 2
+  and 3's facts by pyi (own-ast, own-code) of BASE/REL; a file either fails on gets \"failed: MSG\" in both"
+  [{:keys [opts]}]
+  (let [base (get opts "--base") f (get opts "--tsv")
+        rows (for [l (str/split-lines (slurp f)) :when (seq l)] (str/split l #"\t" -1))
+        out (for [c rows]
+              (let [r (first c)
+                    bs (java.nio.file.Files/readAllBytes (.toPath (File. (str base "/" r))))
+                    [a k] (try [(own-ast bs) (own-code bs (.getName (File. ^String r)))]
+                               (catch Throwable e (let [m (str "failed: " (one-line (.getMessage e)))] [m m])))]
+                (str/join "\t" (assoc (vec c) 2 a 3 k))))]
+    (spit f (str (str/join "\n" (doall out)) "\n"))))
+
 ;; ---- compare ----
 
 (defn- first-diff
@@ -144,15 +255,23 @@
  :charset {:what "mode :full's file is in an encoding Arbace's runtime has no charset for (the print's text is right, its bytes cannot be written: KOI8-R, Lib/test's module_koi8_r.py), so levels 4 and 5 are not reached"
             :decided "by design (queue 176's DECISION (a), the user, 2026-11-03): jrt's charsets are the root/English set the locales decision of 2026-10-11 chose; the printer's refusal, classed by rule"}
    :code-lines {:what "levels 1 and 2 pass (the forms and the ast without positions are equal) but the code compiled from the print differs from the original's after the normalization of tools/pydump's code_digest: CPython 3.14's code generation depends on the lines a node spans beyond what the normalization removes (where an exception range or a jump falls), and :lines carries no lines"
-                :decided "by design for :lines (queue 175's DECISION (a), the user, 2026-11-03): compile() is a function of the ast with its positions, so with the ast equal the difference is the positions'; checked under :full (PY3), which keeps them"}})
+                :decided "by design for :lines (queue 175's DECISION (a), the user, 2026-11-03): compile() is a function of the ast with its positions, so with the ast equal the difference is the positions'; checked under :full (PY3), which keeps them"}
+   :own-code-lines {:what "levels 1 and 2 by pyi pass (the forms and pyi's ast without attributes are equal) but pyi's code objects of the print differ from the original's after own-norm-code: pyi's compiler ports CPython's line passes (arbace.python.compile's flow!), whose output depends on the lines a statement spans beyond the :nop instructions the normalization drops"
+                    :decided "by design, as :code-lines (queue 175's DECISION (a)) for pyi's compiler: queue 431's DECISION 2 (a), pending the user's"}})
+
+(def ^:private ^:dynamic *own*
+  "queue 431: levels 2 and 3 by pyi's own ast and compile (compare --own, records mode's default): the TSVs' ast and code
+  columns are own-ast's and own-code's, the known file test/python/roundtrip-own-known.edn"
+  false)
 
 (defn- classify
   "The class the --record writer may give a file by rule, else nil (CS265 (a), CS266 (a): no guess): a rejection; a
-  code difference with the ast equal; the printer's own refusal naming its class (:charset)"
+  code difference with the ast equal (CPython's :code-lines, pyi's :own-code-lines); the printer's own refusal naming
+  its class (:charset)"
   [v]
   (case (:level v)
     :rejected :rejected
-    :code (when (:ast-equal v) :code-lines)
+    :code (when (:ast-equal v) (if *own* :own-code-lines :code-lines))
     :convert (when (= :charset (:refused v)) :charset)
     nil))
 
@@ -213,10 +332,11 @@
         classes (k (:classes known))
         rt (k (:roundtrip known))]
     (spit-mk file
-             (str ";; The files of repr/python's round trip (bin/repr-python roundtrip, levels 1-3: roundtrip-known.edn; roundtrip --text,\n"
+             (str ";; The files of repr/python's round trip (bin/repr-python roundtrip, levels 1-3: roundtrip-known.edn, CPython's levels 2-3,\n"
+                  ";; live and the oracle tier's; roundtrip-own-known.edn, levels 2-3 by pyi's own ast and compile, records mode; roundtrip --text,\n"
                   ";; levels 4-5: full-known.edn; doc/python/PYTHON-SURVEY.md, \"As built: PY2\", \"As built: PY3\") that do not pass every\n"
                   ";; level, by corpus, each with its class (:classes, each with what it is and the decision it rests on). Written by\n"
-                  ";; --record, the classes kept; the writer classes a file only by rule (:rejected, :code-lines, :charset) and never\n"
+                  ";; --record, the classes kept; the writer classes a file only by rule (:rejected, :code-lines, :own-code-lines, :charset) and never\n"
                   ";; writes a guess: a file of no class makes the run exit 3. Read with the Clojure reader.\n"
                   "{:classes\n {"
                   (str/join "\n  " (for [[c v] classes] (str (pr-str c) "\n  " (pr-str (into (sorted-map) v)))))
@@ -230,7 +350,7 @@
 (declare do-compare*)
 
 (defn- do-compare [{:keys [opts]}]
-  (binding [*deferred* (boolean (get opts "--deferred"))]
+  (binding [*deferred* (boolean (get opts "--deferred")) *own* (boolean (get opts "--own"))]
     (do-compare* opts)))
 
 (defn- do-compare* [opts]
@@ -267,6 +387,9 @@
                *deferred*
                (str "roundtrip " (name corpus) ": " n " files: level 1 (forms, the print read natively) " pass1
                     ", levels 2 (ast) and 3 (code) the oracle tier's; not passing " (pr-str (into (sorted-map) counts)))
+               *own*
+               (str "roundtrip " (name corpus) ": " n " files: level 1 (forms, the print read natively) " pass1
+                    ", level 2 (ast) " pass2 ", level 3 (code) " pass3 " (pyi's own ast and compile); not passing " (pr-str (into (sorted-map) counts)))
                (get opts "--recorded")
                (str "roundtrip " (name corpus) ": " n " files: level 1 (forms, the print read natively) " pass1
                     ", level 2 (ast) " pass2 ", level 3 (code) " pass3 " (CPython's, recorded); not passing " (pr-str (into (sorted-map) counts)))
@@ -310,7 +433,28 @@
                         (cond
                           (nil? v) :pass
                           (#{:ast :code} (:level v)) [:fail (str "level " (name (:level v)))]
-                          :else [:not-judged (str (name (:level v)) (when (:message v) (str ": " (:message v))))])))))))]
+                          :else [:not-judged (str (name (:level v)) (when (:message v) (str ": " (:message v))))]))))))
+           ;; queue 431: the own levels' control, a mutated print: the reference's print with a statement added
+           ;; (own-mutant), its pyi digests in the print's row (the forms still the print's: level 1 equal), which must
+           ;; fail at level 2; and its code digest alone beside the print's own ast digest, which must fail at level 3
+           (if (and *own* (get opts "--printed"))
+             (long (results/judge-controls
+                    "roundtrip (pyi's levels 2 and 3, a mutated print)" corpus (results/read-controls (get opts "--controls") corpus)
+                    (set files) (set (remove #(get failing %) files))
+                    (fn [_ reference]
+                      (let [bf (File. (str cand "/" reference ".ae"))
+                            a-text (slurp (File. (str orig "/" reference ".ae")))
+                            rb (get ob reference)
+                            pf (File. (str (get opts "--printed") "/" reference))
+                            [ma mc] (own-mutant (java.nio.file.Files/readAllBytes (.toPath pf)) reference)
+                            j (fn [row] (judge-file reference a-text (when (.exists bf) (slurp bf)) (get oa reference) row (get ct reference)))
+                            v2 (j (assoc rb 2 ma 3 mc))
+                            v3 (j (assoc rb 3 mc))]
+                        (cond
+                          (or (nil? v2) (nil? v3)) :pass
+                          (and (= :ast (:level v2)) (= :code (:level v3))) [:fail "level ast (the mutant's digests), level code (its code beside the print's ast)"]
+                          :else [:not-judged (str (name (:level v2)) " " (name (:level v3)))])))))
+             0))]
     (when (pos? ctl-bad) (println (str "roundtrip " (name corpus) ": " ctl-bad " negative control(s) failed")))
     (when-let [rf (get opts "--results")]
       (spit-mk rf (pr-str {:corpus corpus :files n :mode (if text? :full :lines) :passed [pass1 pass2 pass3]
@@ -406,6 +550,7 @@
     (case verb
       "convert" (do-convert (pa #{"--dumps" "--forms" "--printed" "--tsv"}))
       "print" (do-print (pa #{}))
-      "compare" (do-compare (pa #{"--corpus" "--orig" "--cand" "--orig-tsv" "--cand-tsv" "--convert-tsv" "--known" "--results" "--results-file" "--controls"}))
+      "compare" (do-compare (pa #{"--corpus" "--orig" "--cand" "--orig-tsv" "--cand-tsv" "--convert-tsv" "--known" "--results" "--results-file" "--controls" "--printed"}))
       "convert-full" (do-convert-full (pa #{"--dumps" "--lines" "--forms" "--printed" "--tsv"}))
+      "own-levels" (do-own-levels (pa #{"--base" "--tsv"}))
       (do (println "usage: -m arbace.repr.python convert|print|compare ...") (System/exit 2)))))
