@@ -4734,3 +4734,62 @@ What the crates needed, each change gated to them (core's and alloc's readings a
 - The main host's whole std pass on this branch, which gives the new total.
 - The few causes above that are not context: `fs::Metadata`, TAIT and RPIT signatures (backtrace's Inner, stdio's
   `as_mut_buf`).
+
+## As built: RIND9 (a), std's pass: the remaining facts (2026-11-19, queue 417, branch `417-rust-std`)
+
+After queue 400, a narrow run with the context the remaining facts need (24 module files: sys::fs and its unix, fs, sys::pipe
+and its unix, sys::fd::unix, sys::process with env, unix, unix::common, cstring_array and unix::unix, process, sys::paths and
+its unix, env, backtrace, io::stdio, sys::pal::unix::time, sys::time and its unix, time, os::unix::net::ancillary,
+os::linux::process; two rounds) gives **1,128 of 1,132 equal**, 0 differing, 4 missing. ChildStdin/out/err and CommandArgs'
+CStringIter lifetime were context alone (400's narrow run lacked sys::pipe and cstring_array). The 4 are std's own:
+- **std::fs::Metadata** (`Metadata(fs_imp::FileAttr)`). sys/fs/unix.rs declares FileAttr in a macro call (`cfg_has_statx!
+  {{ .. } else { pub struct FileAttr { stat: stat64 } }}`, its else arm on musl), so the index, read unexpanded, lacks it,
+  and sys::fs's `pub use imp::{.., FileAttr, ..}` re-exports nothing. The pass's own facts gave unix its FileAttr
+  (with-native-names) but the re-exports were taken once, at the setup. Now a later round of std's pass takes the index's
+  re-exports and globs again over the names with the round before's macro-made structs (`alloc-check/pass`:
+  `with-core-names (with-native-names names prev) index`, once a round, std alone).
+- **backtrace's Inner** (`Captured(LazyLock<Capture, LazyResolve>)`, `type LazyResolve = impl FnOnce() -> Capture + ..`) and
+  **env's SplitPaths** (`paths_imp::SplitPaths<'a>`, sys/paths/unix.rs' `type SplitPaths<'a> = Map<Split<'a, u8, impl
+  FnMut(&u8) -> bool>, impl FnMut(&[u8]) -> PathBuf>`). rustc keeps an alias of an impl Trait as the alias (a free alias),
+  which the helper's interface writes as its text (`(text "std::backtrace::helper::LazyResolve")`, `(text
+  "std::sys::paths::unix::SplitPaths<'a>")`: tools/rsdump/front.rs' `sty`, its fallback). collect expanded it, the impl
+  Trait inside was no fact, and the ADT was not written. Now, under `collect/*free-aliases*` (bound by run-module for std's
+  interface pass alone), a path to a local alias holding an impl Trait (`collect/tait-alias?`) lowers to `[:free-alias ALIAS
+  ARGS]`; native-iface writes such an alias as `(free-alias)` among its aliases, so a later module's path to it does the
+  same; ty->sty writes it as the helper does, `(text "PATH<LIFETIMES>")` (a type argument: no fact).
+- **stdio's `as_mut_buf`** (`fn as_mut_buf(&mut self) -> &mut BufReader<impl Read>` in `impl StdinLock<'_>`). ty->sty now
+  writes a return-position impl Trait as the helper does, `(opaque "FN::{opaque#N}" ARGS)`: the function's generics at
+  their identity, then the lifetimes the opaque type captures (edition 2024: every one in scope), the early ones in order
+  and then the signature's late-bound ones (`'^#N`): `[(lt "'_") (lt "'_") (lt "'^#0")]`. native-iface's path-of names the
+  OpaqueTy by its def path. std alone; a named late-bound lifetime is not written.
+
+Each change is gated to std (`(= "std" crate)`, `*crate*`, `*free-aliases*` bound only for std's collect-only pass), so
+core's, alloc's and the dependencies' readings are unchanged: without the binding no `:free-alias` is made, an `:opaque`
+throws as before (no fact), and the round's re-exports are std's pass's alone.
+
+### Results
+
+- The narrow run above, with the fixes: **1,132 of 1,132 equal**, the control differing (3 min, 1.05 GB, two rounds).
+- `std-iface --units`: every case passes (77 pure, 6 new: the round's re-export of a macro-made struct and its negative,
+  the free alias at a lifetime and its negative at a type argument, the opaque type and its negative for core and outside a
+  signature). io/stdio.rs moves from 166 to 167 of 167 (as_mut_buf, its case); env.rs, now after sys/paths/unix.rs, from 95
+  to 96 of 96 (SplitPaths, its case); the new line backtrace.rs is 36 of 36 (Inner, its case and lazy_resolve's negative).
+  The known file is re-recorded (12 min 53 s, 0.9 GB).
+- std's whole pass with the fixes (two rounds, 56 min 40 s, 1.2 GB): **4,644 of 4,644 equal**, 0 differ, 0 missing (adts
+  272, consts 17, fns 2,693, impls 1,632, traits 30; native extras 1,537), the control differing. 400's whole pass (before its
+  module-alias fix) was 4,605 equal, 1 differing, 38 missing.
+- core: `core-essential` equals its known file (566 equal, 1 equal up to alloc ids, the control differing), with the final
+  code (8 min 41 s, 1.5 GB).
+- alloc's whole pass not rerun: its code path is unchanged (every change gated to std); 400's 3,863 of 3,863 stands.
+
+### Decisions
+
+- An alias of an impl Trait is kept as the alias and written as the helper's text, for std's pass alone; the helper and its
+  pinned records are unchanged (the alternative, a structural form in both writers, would re-record the rust-front-std pack).
+- RPIT captures are written by edition 2024's rule in the interface writer (early lifetimes, then anonymous late-bound ones);
+  `collect/opaque-captures`, which omits an impl's elided lifetimes, is left as core's checks read it.
+
+### Left
+
+- std's interface is complete against the helper's (4,644 of 4,644). The main host's whole pass and `--units` confirm it on
+  amd64.

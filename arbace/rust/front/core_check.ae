@@ -643,6 +643,24 @@
                      (list 'dyn (first inner) (second inner)
                            (vec (sort-by (fn [p] [(get {"core::marker::Sync" 0 "core::marker::Send" 1} p 2) p]) (map d autos)))
                            (if (and (= :re-bound (first r)) (= :anon (nth r 2 nil))) "'_" (region-name r))))
+              ;; queue 417: std's return-position impl Trait (io/stdio.rs' `fn as_mut_buf(&mut self) -> &mut BufReader<impl
+              ;; Read>`) as the helper writes it: (opaque "FN::{opaque#N}" ARGS), ARGS the function's generics at their
+              ;; identity, then the lifetimes the opaque type captures (edition 2024: every one in scope), the early ones
+              ;; in order, then the signature's late-bound ones (`'^#N`); a named late-bound one not written (nil); std's
+              ;; alone (core's, alloc's and the dependencies' passes as before)
+              :opaque (let [[_ _ id args] t]
+                        (when-not (and id (= "std" *crate*) *late-sig* (zero? (long (first @*late-sig*))))
+                          (throw (ex-info "opaque" {})))
+                        (list 'opaque (d id)
+                              (vec (concat (map s args)
+                                           (for [a args :when (= :re-early (first a))] (list 'lt (region-name a)))
+                                           (for [k (range (count (second @*late-sig*)))] (list 'lt (str "'^#" k)))))))
+              ;; queue 417: std's type alias of an impl Trait (collect's [:free-alias ALIAS ARGS], *free-aliases*:
+              ;; backtrace.rs' `LazyResolve`, sys/paths/unix.rs' `SplitPaths<'a>`) as the helper writes it, its text:
+              ;; (text "PATH<ARGS>"), lifetimes its arguments
+              :free-alias (let [[_ a args] t
+                                as (for [x args] (if (collect/region? x) (region-name x) (throw (ex-info "free-alias arg" {}))))]
+                            (list 'text (str (d a) (when (seq as) (str "<" (str/join ", " as) ">")))))
               (if (collect/region? t) (list 'lt (region-name t)) (throw (ex-info "kind" {})))))]
     (try (s t) (catch Throwable _ nil))))
 
@@ -704,7 +722,10 @@
                             nil))))
         ;; a body's ADT named by its def path (an impl's self type); its traits, functions and the ADT's own fact not
         path-of (fn [id] (or (get rev id)
-                             (when (and (number? id) (#{"Struct" "Enum" "Union"} (:kind (collect/def-of id)))) (body-path id))))]
+                             (when (and (number? id) (#{"Struct" "Enum" "Union"} (:kind (collect/def-of id)))) (body-path id))
+                             ;; queue 417: a return-position impl Trait by its def path, `FN::{opaque#N}`
+                             (when (and (number? id) (= "OpaqueTy" (:kind (collect/def-of id))))
+                               (let [od (collect/def-of id)] (some-> (body-path (:parent od)) (str "::{opaque#" (:disamb od) "}"))))))]
     (reduce
      (fn [acc d]
        (let [p (get rev (:id d))]
@@ -752,6 +773,10 @@
              (nil? p) acc
              ;; RF20: a type alias std's names lack (`pub(crate) type ChangeOutputType<T, V> = <T::Residual as Residual<V>>::TryType`):
              ;; its type and generics as the helper's --std-names writes an alias, which collect expands at its arguments
+             ;; queue 417: std's type alias of an impl Trait (collect/tait-alias?) as the alias itself, (free-alias), which
+             ;; a path to it in a module after reads as [:free-alias ALIAS ARGS] (collect/*free-aliases*)
+             (and (= "TyAlias" (:kind d)) (not (get (:aliases collect/*std*) p)) collect/*free-aliases* (collect/tait-alias? (:id d)))
+             (-> acc (assoc-in [:aliases p] (list 'free-alias)) (assoc-in [:alias-generics p] (generics-sty (collect/generics-of (:id d)))))
              (and (= "TyAlias" (:kind d)) (not (get (:aliases collect/*std*) p)))
              (let [t (ty->sty (collect/type-of (:id d)) path-of)]
                (if t
@@ -900,7 +925,9 @@
       ;; prelude::rust_2024::*;`, std-names' std::prelude), core's and alloc's core's; std's features its cfg's (crate-cfg)
       (binding [ex/*cfg-names* (crate-cfg) ex/*virtual* (atom nil) ex/*prelude-crate* (prelude-crate) ex/*def-order* (atom 0)
                 ex/*raw-block-frags* (boolean (some #{*crate*} dep-crates))
-                resolve/*crate-path* path collect/*root-crate-override* (prelude-crate)]
+                resolve/*crate-path* path collect/*root-crate-override* (prelude-crate)
+                ;; queue 417: std's interface pass keeps its type aliases of an impl Trait as aliases (*free-aliases*)
+                collect/*free-aliases* (boolean (and *collect-only* (= "std" *crate*)))]
         (let [mc (atom {}) sites (atom {})
               crate (stage stages :expand
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
