@@ -70,7 +70,11 @@ code. Three kinds of things live here:
   (`GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs`, `GHC/Parser/Types.hs`), the same day; `fileargs.ae` the driver's
   header phase (`GHC/Parser/Header.hs`, `GHC/Driver/{CmdLine,Session}.hs`, `GHC/Driver/Pipeline/Execute.hs`'s
   getFileArgs), with `flags.ae`, the names and kinds of `flagsDynamic` as the helper's `flags` verb prints them
-  (2026-11-05); `unlit.ae` ports the tarball's `utils/unlit/unlit.c`
+  (2026-11-05); `cmm.ae` (queue 332, 2026-11-17, doc/haskell/HASKELL-EVAL-SURVEY.md, "HES67's design") ports Cmm's reader,
+  `compiler/GHC/Cmm/Lexer.x.source` and `compiler/GHC/Cmm/Parser.y.source`'s grammar and actions by hand (recursive descent),
+  with `GHC/Cmm/MachOp.hs`'s machOpResultType, over repr/c's preprocessor and hsi's `Cmm.h` (`test/haskell/eval/cmm/`, GHC's
+  `rts/include/Cmm.h`, `MachDeps.h` and `rts/storage/ClosureTypes.h` definitions for x86_64), the files carrying GHC's notice;
+  `unlit.ae` ports the tarball's `utils/unlit/unlit.c`
   (2026-11-04); `cpp.ae`, GCC's traditional preprocessor as GHC runs it, is a clean-room implementation of
   Arbace's own (2026-11-04): written from the documented behaviour of `-traditional` and judged against Alpine's
   gcc 15.2.0 `cpp -traditional` as a black box (its output and line markers on probe inputs), no GCC code read
