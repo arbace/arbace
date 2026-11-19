@@ -8,11 +8,13 @@
 # The options our route models (CP350 (a), decided 2026-11-10): the preprocessor's -D, -U and -I, and -fexceptions and -fno-exceptions
 # (the target's predefined macros follow them, cpp/target/dialect.edn's option deltas; the code generator's landing pads are
 # behaviour-neutral where g++ accepts the program); -std= is the list's STD, and -O*, -w and -pedantic never reach ARGS (cppi_opts:
-# the -O0 shape is kept, a program's behaviour is its verdict). Every program by ours is given its ARGS.
+# the -O0 shape is kept, a program's behaviour is its verdict). Every program by ours is given its ARGS. Queue 439 (DECISION 439-1):
+# -fstrict-enums too: clang's -O0 IR is the same with and without it (its !range metadata on enum loads is written from -O1 only,
+# CodeGenFunction::EmitLoadOfScalar), no macro follows it, and our route ignores it (gxx-dg-run's torture/pr50189.C).
 cppi_route_modelled() { # cppi_route_modelled ARGS: 0 when every option of ARGS is one our route models
   local o
   for o in $1; do
-    case $o in -D*|-U*|-I*|-fexceptions|-fno-exceptions) ;; *) return 1 ;; esac
+    case $o in -D*|-U*|-I*|-fexceptions|-fno-exceptions|-fstrict-enums) ;; *) return 1 ;; esac
   done
   return 0
 }
