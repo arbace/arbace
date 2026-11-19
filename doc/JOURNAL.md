@@ -12984,3 +12984,24 @@ probed here (no executable built: no heavy runs today).
   co_lnotab absent, hash and equality, invalid bytecode, a code object's weakref), and `:code-positions` takes by name
   test_compile's 6 match-case TestSourcePositions and test_dis's 4 position tests. The slice's 20 rows in no class are then
   0 (the judge's --divergences over .tmp/repr-python/pyi/check/only-d278dec2701a, both files).
+
+## 2026-11-19: n-py-eval: built-ins pickled by reference as CPython's (open, static methods, __new__, classmethod_descriptor)
+
+test_pickle's rows in no class and some of :c-accelerators' (the C classes run on the pure Pickler) were "Can't pickle
+<built-in function open>: it's not the same object as _io.open", "... maketrans>: it's not found as __main__.maketrans",
+"... <built-in method __new__ of type object>: it's not the same object as __main__.__new__", and test_c_methods' "TypeError
+not raised by dumps" for dict.__dict__['fromkeys']. Fixed in go/arbace/py, after CPython 3.14.10's methodobject.c and
+descrobject.c:
+- builtins.open is _io.open and io.open, one object (builtins_io.ae): _io's "open" is the registered builtin, which calls
+  its interpreter's _pyio.open (a staticmethod, kept per interpreter as its _io is made) instead of importing io and
+  calling io.open each time; pickle then finds _io.open the same object.
+- a built-in type's static method (str.maketrans, bytes.maketrans: METH_STATIC, m_self the type) reduces to
+  getattr(type, name) and reprs as "<built-in method maketrans of type object at 0x...>"; tp_new's wrapper
+  (object.__new__, int.__new__) reduces to getattr(type, '__new__') (func.ae, meth_reduce).
+- classmethod_descriptor has no __reduce__ (PyClassMethodDescr_Type has no tp_methods; queue 290 had given it one), so
+  pickling the descriptor itself is refused as CPython refuses it (descr.ae).
+Proof: the 9 methods (PyPicklerTests and InMemoryPickleTests' test_c_methods, test_complex_newobj_ex,
+test_builtin_functions; PyPicklingErrorTests' three newobj_ex) on the checkout's runtime: 9 of 9 (0 of 9 before); a probe:
+`builtins.open is io.open is _io.open`, open's text and binary files, open as a class attribute not bound, pickle round
+trips of str.maketrans, object.__new__ and open are the objects. The C classes' twins (CPicklerTests ...) run the same
+pure Pickler, so about 19 rows of the records run.
