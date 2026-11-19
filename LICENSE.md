@@ -534,7 +534,9 @@ covers what.
   `_ctypes_test_generated.c.h` and, since queue 262, its `Modules/_testlimitedcapi.c` and `Modules/_testlimitedcapi/`
   (all of it since queue 268, `heaptype_relative.c` and `vectorcall_limited.c` too), and since queue 269 its
   `Modules/_testcapimodule.c` (with `Modules/_testcapi_feature_macros.inc` inlined) and parts of `Modules/_testcapi/` in
-  the full API's mode, compiled against its `Include/` in the limited API's mode
+  the full API's mode, and since queue 456 its `Modules/_testclinic.c` (with `Modules/clinic/_testclinic.c.h` and
+  `_testclinic_depr.c.h`), `Modules/_testclinic_limited.c` (with its clinic header) and `Modules/_testbuffer.c`,
+  compiled against its `Include/` in the limited API's mode
   (from the release tarball test/python/corpora.edn pins, `:cpython-3.14.10`, SHA-256 `de414a57...b72032`; Copyright
   (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement, section "CPython: the PSF
   License Agreement for Python 3.14" below), built by ci's builder with the part of musl 1.2.6 it reaches (under the
