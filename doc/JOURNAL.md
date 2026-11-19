@@ -13440,3 +13440,12 @@ On branch n-rust-400 (from mac/400-rust-vendor), with the host stage 0: `bin/rus
   shards with 414, 438 and 413 together, intern's pin re-pinned, a compiled shard with 396's dynlink and 413's capi); `bin/rust-front
   essential`'s run-built on a warm cache (448); 446's four :speed rows on a quiet amd64 host; the new gate_key's build
   (`bin/arbace-go --gate-build`).
+
+## 2026-11-19: C++'s runtime and run records re-recorded on n-all5 (c428307cf)
+
+`bin/cppi codegen-gen` 155 of 155; `runtime-build` (route auto) 198 of 198 units, 166 by Arbace's route, `runtime-ci` read all 198;
+`check --record` (samples 7, runtime 8: pass 15) and `check --aot --record`: own 15 of 15 each; the gxx-dg-run sampling
+(`--sample 25`, `--record`, eval and AOT): 67 programs, pass 66, oracle-text 1, own 82 of 82 each; `runtime-inputs --record`: own 166, pack 32.
+The 82 cases were judged by those two record runs (no separate `check --only`). Then `bin/reap --record` and `bin/crops-score --record`:
+C++ completeness 96, without by design 97, maturity 100, independence 91 (from 75); `--judge --strict` and `bin/records-check` pass.
+Four recorded failures of the sampling now pass (vbase8-10, embed-26, vector1, vshuf-v16hi): their classes are to be cleared.
