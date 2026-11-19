@@ -1203,6 +1203,74 @@
 
 (defn- opaque-of [e] (let [v (get *opaque* (:id e) ::none)] (if (= ::none v) (fail :codegen "an unbound opaque value") v)))
 
+;; ---------------------------------------------------------------------------------------------
+;; Coroutines (queue 393, W4; doc/cpp/CODEGEN.md, "As built: coroutines"): the split LLVM's CoroSplit makes of clang's
+;; coroutine at -O0, the switch ABI, written directly (no llvm.coro.* intrinsic, which the lowering refuses): the ramp (the
+;; function itself) allocates the frame, copies the parameters, constructs the promise, initializes the returned object
+;; and calls NAME.resume; NAME.resume(frame) is the body, every object of its own in the frame, entered by a switch on the
+;; suspension index; NAME.destroy(frame) sets the frame's destroy flag and calls it, each suspension point then running
+;; the cleanups in force there and freeing the frame. The frame's header is the switch ABI's: the resume and destroy
+;; functions' pointers, the promise after them at its alignment (__builtin_coro_promise's offset); done() is a null
+;; resume pointer, written at the final suspension.
+
+(defn- coro-destroy-path!
+  "A suspension point resumed for destruction: the cleanups in force there run from the innermost out, the full-expression's
+  temporaries first (as a landing pad runs them, on the normal path), down to the copies' and the promise's; then the
+  frame freed."
+  []
+  (let [st (eh-state) all (:cleanups @*f*)]
+    (binding [*temps* nil *extend* nil]
+      (doseq [i (range (dec (count st)) -1 -1)]
+        (swap! *f* assoc :cleanups (subvec st 0 i))
+        (run-cleanup! (nth st i))))
+    (swap! *f* assoc :cleanups all)
+    (br! (:free (:coro @*f*)))))
+
+(defn- co-await!
+  "The await-expression `e` (sema's :co-await) in a resume function, its value by `f` ([expr.await]/5): the awaiter's address
+  (kept in the frame: it is read again after a resumption), await_ready, and when false a suspension point: the index
+  stored (at the final one the resume pointer nulled: done()), await_suspend (a bool's false resumes at once) and a return
+  to the resumer; the point's resumption the switch's case, which goes on to await_resume, or destroys."
+  [e f]
+  (let [co (or (:coro @*f*) (fail :coroutine "a co_await outside a coroutine's resume function"))
+        v (emit-lv (:e e))
+        sp (alloca! 'ptr 8)
+        _ (emit! (list 'store ['ptr v] ['ptr sp] :align 8))
+        k (inc (count @(:points co)))
+        lr (new-label "coro.ready") ls (new-label "coro.suspend") lres (new-label "coro.resume") ld (new-label "coro.destroy")
+        r (binding [*opaque* (assoc *opaque* (:id e) v)] (emit-rv (:ready e)))]
+    (swap! (:points co) conj [k lres])
+    (condbr! r lr ls)
+    (close-block!) (start! ls)
+    (emit! (list 'store ['i32 k] ['ptr (:index co)] :align 4))
+    (when (:final e) (emit! (list 'store ['ptr 'null] ['ptr (:frame co)] :align 8)))
+    (binding [*opaque* (assoc *opaque* (:id e) v)]
+      (case (:sk e)
+        :void (do (emit-rv (:suspend e)) (emit! '(ret void)))
+        :bool (let [s (emit-rv (:suspend e)) lx (new-label "coro.ret")]
+                (condbr! s lx lr) (close-block!) (start! lx) (emit! '(ret void)))))
+    (close-block!) (start! lres)
+    (let [fl (val! (list 'load 'i8 ['ptr (:dflag co)] :align 1))
+          c (val! (list 'icmp :ne 'i8 fl 0))]
+      (condbr! c ld lr))
+    (close-block!) (start! ld)
+    (coro-destroy-path!)
+    (close-block!) (start! lr)
+    (let [v2 (val! (list 'load 'ptr ['ptr sp] :align 8))]
+      (binding [*opaque* (assoc *opaque* (:id e) v2)] (f (:resume e))))))
+
+(defn- coro-builtin!
+  "<coroutine>'s builtins on the frame `p` (sema's :coro-builtin), as LLVM's CoroCleanup lowers llvm.coro.done, .resume,
+  .destroy and .promise for the switch ABI."
+  [e]
+  (let [p (emit-rv (:p e))]
+    (case (:which e)
+      :coro-done (val! (list 'icmp :eq 'ptr (val! (list 'load 'ptr ['ptr p] :align 8)) 'null))
+      :coro-resume (do (call-insn! 'void 'void (val! (list 'load 'ptr ['ptr p] :align 8)) [['ptr p]] false) nil)
+      :coro-destroy (do (call-insn! 'void 'void (val! (list 'load 'ptr ['ptr (offset! p 8)] :align 8)) [['ptr p]] false) nil)
+      :coro-promise (let [al (max 1 (long (:align e))) off (* al (quot (+ 16 al -1) al))]
+                      (val! (list 'getelementptr :inbounds 'i8 ['ptr p] ['i64 (if (:from e) (- off) off)]))))))
+
 (defn- incdec! [e]
   (let [t (abi/unq (:ty e)) a (emit-lv (:e e)) old (load! t a)
         nv (cond
@@ -1536,6 +1604,9 @@
     :incdec (let [r (incdec! e)] (if (:post e) r (load! (:ty e) r)))
     :comma (do (emit-rv (:l e)) (emit-rv (:r e)))
     :bind-opaque (bind-opaque! e emit-rv)
+    :co-await (co-await! e emit-rv)
+    :coro-frame (:frame (or (:coro @*f*) (fail :coroutine "the frame outside a coroutine's resume function")))
+    :coro-builtin (coro-builtin! e)
     :stmt-expr (stmt-expr! e)
     :opaque (if (#{:lv :xv} (:cat e)) (fail :codegen "an opaque glvalue as a prvalue") (opaque-of e))
     :call (if (= :pr (:cat e))
@@ -1835,6 +1906,7 @@
     :incdec (if (:post e) (fail :codegen "postfix as an lvalue") (incdec! e))
     :comma (do (emit-rv (:l e)) (emit-lv (:r e)))
     :bind-opaque (bind-opaque! e emit-lv)
+    :co-await (co-await! e emit-lv)
     :opaque (if (#{:lv :xv} (:cat e)) (opaque-of e) (fail :codegen "an opaque prvalue as a glvalue"))
     :cond (cond-branches! e emit-lv 'ptr)
     :call (if (= :pr (:cat e))
@@ -1861,6 +1933,7 @@
     :cond (cond-branches! e #(emit-into % addr) nil)
     :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
     :bind-opaque (bind-opaque! e #(emit-into % addr))
+    :co-await (co-await! e #(emit-into % addr))
     :va-arg (memcpy! addr (va-arg-class! e) (abi/size-of (:ty e)))
     ;; <compare>'s orderings: one signed char ([cmp.categories]: libstdc++'s _M_value), a built-in three-way
     ;; comparison's -1, 0, 1 (partial_ordering's unordered 2) or a constant
@@ -2114,6 +2187,13 @@
     :break (let [l (peek (:loops @*f*))] (unwind-to! (:depth l)) (br! (:break l)))
     :continue (let [l (last (filter :continue (:loops @*f*)))] (unwind-to! (:depth l)) (br! (:continue l)))
     :return (emit-return! s)
+    ;; (queue 393: co_return, sema's: the promise's return_value or return_void, the body's cleanups, the final suspension)
+    :co-return (let [co (or (:coro @*f*) (fail :coroutine "co_return outside a coroutine"))]
+                 (when (:pre s) (with-full (emit-rv (:pre s))))
+                 (with-full (emit-rv (:call s)))
+                 (unwind-to! (:base co))
+                 (br! (or (get-in @*f* [:user-labels "__coro_final"])
+                          (let [l (new-label "lbl.__coro_final")] (swap! *f* assoc-in [:user-labels "__coro_final"] l) l))))
     :switch (let [v (with-full (emit-rv (:e s)))
                   le (new-label "sw.end")
                   cases (atom [])
@@ -2535,6 +2615,182 @@
     (or (:inline f) (:implicit f) (and (:defaulted f) (not (:out-of-line-default f)))) [:linkage :linkonce_odr]
     :else []))
 
+(defn- lt-size
+  "The bytes of an alloca's LLVM type (the frame's slots)."
+  [t]
+  (cond
+    (= t va-tag) 24
+    (seq? t) (case (first t)
+               array (* (long (second t)) (long (lt-size (nth t 2))))
+               struct (if (= t '(struct i64 i64)) 16 (fail :coroutine "a frame slot of type " (pr-str t)))
+               (fail :coroutine "a frame slot of type " (pr-str t)))
+    :else (case t (i1 i8) 1 (i16 half) 2 (i32 float) 4 (i64 double ptr) 8 (i128 x86_fp80 fp128) 16
+            (fail :coroutine "a frame slot of type " (pr-str t)))))
+
+(defn- subst
+  "The form `x` with each symbol or keyword that is a key of `m` replaced by its value."
+  [x m]
+  (cond (contains? m x) (get m x)
+        (vector? x) (mapv #(subst % m) x)
+        (seq? x) (apply list (map #(subst % m) x))
+        :else x))
+
+(defn- coro-check-ssa!
+  "A resume function's blocks checked for a value that a suspension point would lose: every use of an instruction's result
+  dominated by its definition, in the graph the dispatch's switch adds its entries to (a value computed before a co_await in
+  the same expression, `a + co_await b`, has no frame slot: a refusal, not a wrong program)."
+  [blocks]
+  (let [term (fn [b] (let [x (last b)] (if (= '= (first x)) (nth x 2) x)))
+        succ (fn [b] (let [t (term b)]
+                       (case (first t)
+                         br (if (= 2 (count t)) [(second t)] [(nth t 3) (nth t 4)])
+                         switch (into [(nth t 3)] (map #(nth % 2) (nth t 4)))
+                         invoke (let [m (apply hash-map (drop-while #(not (keyword? %)) t))] [(:to m) (:unwind m)])
+                         [])))
+        labels (mapv second blocks)
+        entry (first labels)
+        succs (into {} (map (fn [b] [(second b) (succ b)]) blocks))
+        preds (reduce (fn [m [l ss]] (reduce #(update %1 %2 (fnil conj []) l) m ss)) {} succs)
+        live (loop [seen #{entry} todo [entry]]
+               (if-let [l (peek todo)]
+                 (let [ns (remove seen (get succs l))] (recur (into seen ns) (into (pop todo) ns)))
+                 seen))
+        labels (filterv live labels)
+        all (set labels)
+        dom (loop [d (assoc (zipmap labels (repeat all)) entry #{entry})]
+              (let [d2 (reduce (fn [d l]
+                                 (if (= l entry) d
+                                     (let [ps (filter live (get preds l))
+                                           x (reduce (fn [a p] (set (filter (get d p) a))) (get d (first ps)) (rest ps))]
+                                       (assoc d l (conj (or x #{}) l)))))
+                               d labels)]
+                (if (= d2 d) d (recur d2))))
+        defs (into {} (for [b blocks x (drop 2 b) :when (= '= (first x))] [(second x) (second b)]))
+        syms (fn syms [x] (cond (symbol? x) (when (contains? defs x) [x]) (or (seq? x) (vector? x)) (mapcat syms x) :else nil))
+        bad (fn [v at] (let [d (get defs v)] (when-not (contains? (get dom at) d) v)))]
+    (doseq [b blocks :when (live (second b)) x (drop 2 b)]
+      (let [l (second b) rhs (if (= '= (first x)) (nth x 2) x)]
+        (when-let [v (if (and (seq? rhs) (= 'phi (first rhs)))
+                       (some (fn [[v pl]] (when (and (symbol? v) (contains? defs v) (live pl)) (bad v pl))) (drop 2 rhs))
+                       (some #(bad % l) (syms rhs)))]
+          (fail :coroutine "a value live across a suspension point (" v ")"))))))
+
+(defn- coro-resume!
+  "The resume and destroy functions of the coroutine `f` named `nm` (sema's :coro and :tbody): NAME.resume(frame), the
+  body, its allocas the frame's slots after the header (the promise first, at its alignment past the two pointers),
+  entered by a switch on the suspension index (0 the start), the copies' and the promise's destruction the bottom of its
+  cleanups; NAME.destroy(frame), the destroy flag set and NAME.resume called. The layout for the ramp:
+  {:size :offs {slot offset} :pslot :this-slot :cslots :islot :dslot :entry-stores :resume :destroy}."
+  [f ^String nm]
+  (let [co (:coro f)
+        rnm (str nm ".resume") dnm (str nm ".destroy")
+        frame '%a0
+        state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores [] :fn f :ret-label '%return})]
+    (reserve! rnm) (reserve! dnm)
+    (binding [*f* state]
+      (let [pv (:promise co)
+            pt (abi/unq (:ty (sema/var* pv)))
+            pslot (slot! pt)
+            this-slot (when (:this co) (alloca! 'ptr 8))
+            cslots (mapv (fn [{:keys [var]}] (let [t (:ty (sema/var* var))] (slot! (if (abi/ref? t) (abi/ptr abi/void) t)))) (:copies co))
+            islot (alloca! 'i32 4) dslot (alloca! 'i8 1)
+            free (new-label "coro.free")]
+        (swap! *f* assoc :this-slot this-slot :coro {:frame frame :index islot :dflag dslot :points (atom []) :free free})
+        (swap! *f* assoc-in [:addr pv] pslot)
+        (doseq [[{:keys [var]} sl] (map vector (:copies co) cslots)] (swap! *f* assoc-in [:addr var] sl))
+        (br! '%coro.dispatch)
+        (close-block!) (start! '%coro.start)
+        ;; the copies and the promise destroyed when the coroutine ends ([dcl.fct.def.coroutine]/12: the promise first)
+        (doseq [[{:keys [var]} sl] (map vector (:copies co) cslots)]
+          (let [t (:ty (sema/var* var))]
+            (when (and (not (abi/ref? t)) (abi/class? (abi/unq t)) (nontrivial-dtor? (:id (abi/unq t)))) (push-cleanup! {:addr sl :cls (:id (abi/unq t))}))))
+        (when (nontrivial-dtor? (:id pt)) (push-cleanup! {:addr pslot :cls (:id pt)}))
+        (swap! *f* assoc-in [:coro :base] (cleanup-depth))
+        (emit-stmt (:tbody f))
+        (when-not (:term @*f*) (unwind-to! 0) (br! free))
+        (close-block!) (start! free)
+        (dealloc-call! {:sym "_ZdlPvm" :size true} frame ::frame-size nil nil)
+        (emit! '(ret void))
+        (close-block!) (start! '%coro.dispatch)
+        (let [i (val! (list 'load 'i32 ['ptr islot] :align 4))]
+          (emit! (list 'switch 'i32 i '%coro.start (vec (for [[k l] @(:points (:coro @*f*))] ['i32 k l])))))
+        (close-block!)
+        (let [s @state
+              [offs end al] (reduce (fn [[m off al] x]
+                                      (let [[_ a [_ t _ a2]] x
+                                            a2 (max 1 (long a2))
+                                            o (* a2 (quot (+ (long off) a2 -1) a2))]
+                                        [(assoc m a o) (+ o (long (lt-size t))) (max (long al) a2)]))
+                                    [{} 16 8] (:allocas s))
+              _ (when (> (long al) 16) (fail :coroutine "a frame object aligned to " al " (an aligned operator new)"))
+              size (* (long al) (quot (+ (long end) (long al) -1) (long al)))
+              geps (for [[_ a] (:allocas s)] (list '= a (list 'getelementptr :inbounds 'i8 ['ptr frame] ['i64 (get offs a)])))
+              blocks (subst (:blocks s) {::frame-size size})
+              entry (first blocks)
+              body (vec (concat [(apply list 'block (second entry) (concat geps (drop 2 entry)))] (rest blocks) (subst (:pad-blocks s) {::frame-size size})))
+              _ (coro-check-ssa! body)]
+          (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
+          (place! [:fn rnm] (apply list 'llvm/define (gsym rnm) 'void [['ptr frame]]
+                                   (concat [:linkage :internal]
+                                           (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
+                                           [:body body])))
+          (place! [:fn dnm] (list 'llvm/define (gsym dnm) 'void [['ptr frame]] :linkage :internal
+                                  :body [(list 'block '%entry
+                                               (list '= '%t1 (list 'getelementptr :inbounds 'i8 ['ptr frame] ['i64 (get offs dslot)]))
+                                               (list 'store ['i8 1] ['ptr '%t1] :align 1)
+                                               (list 'call 'void (gsym rnm) [['ptr frame]])
+                                               '(ret void))]))
+          {:size size :offs offs :pslot pslot :this-slot this-slot :cslots cslots :islot islot :dslot dslot
+           :entry-stores (:entry-stores s) :resume (gsym rnm) :destroy (gsym dnm)})))))
+
+(defn- coro-ramp!
+  "The ramp, the coroutine `f`'s own body in emit-fn!'s function: the frame by ::operator new (freed if what follows
+  throws), its header and index, the flags the resume function's entry would clear, `this` and the parameters' copies,
+  the promise, the returned object from get_return_object (at once, or kept and converted after the first suspension),
+  then NAME.resume; the return."
+  [f]
+  (let [co (:coro f)
+        L (coro-resume! f (fn-name (:id f) 2))
+        at (fn [sl] (get (:offs L) sl))
+        [fr _] (alloc-call! {:sym "_Znwm" :places []} (:size L))
+        g (fn [off] (offset! fr off))
+        d (cleanup-depth)]
+    (push-cleanup! {:delete fr :size (:size L)})
+    (emit! (list 'store ['ptr (:resume L)] ['ptr fr] :align 8))
+    (emit! (list 'store ['ptr (:destroy L)] ['ptr (g 8)] :align 8))
+    (emit! (list 'store ['i32 0] ['ptr (g (at (:islot L)))] :align 4))
+    (emit! (list 'store ['i8 0] ['ptr (g (at (:dslot L)))] :align 1))
+    (doseq [es (:entry-stores L)]
+      (let [[op v [_ p] & more] es] (emit! (apply list op v ['ptr (g (at p))] more))))
+    (when-let [ts (:this-slot L)]
+      (emit! (list 'store ['ptr (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8))] ['ptr (g (at ts))] :align 8)))
+    (doseq [[{:keys [var init]} sl] (map vector (:copies co) (:cslots L))]
+      (let [a (g (at sl)) t (:ty (sema/var* var)) u (abi/unq t)]
+        (with-full (emit-init a t init))
+        (swap! *f* assoc-in [:addr var] a)
+        (when (and (not (abi/ref? t)) (abi/class? u) (nontrivial-dtor? (:id u))) (push-cleanup! {:eh-only true :addr a :cls (:id u)}))))
+    (let [pa (g (at (:pslot L))) pt (abi/unq (:ty (sema/var* (:promise co))))]
+      (swap! *f* assoc-in [:addr (:promise co)] pa)
+      (with-full (emit-init pa pt (:pinit co)))
+      (when (nontrivial-dtor? (:id pt)) (push-cleanup! {:eh-only true :addr pa :cls (:id pt)})))
+    (let [gro (:gro co) rt (:ret (:ty f))
+          ret! (fn [init] (cond (abi/class? (abi/unq rt)) (with-full (emit-init (:sret @*f*) (abi/unq rt) init))
+                                (abi/ref? rt) (fail :coroutine "a coroutine returning a reference")
+                                :else (with-full (store! rt (emit-rv (:e init)) (:ret-slot @*f*)))))
+          gt (when (= :deferred (:k gro)) (abi/unq (:ty (sema/var* (:var gro)))))
+          gslot (when gt (slot! gt))]
+      (case (:k gro)
+        :void (with-full (emit-rv (:e gro)))
+        :eager (ret! (:init gro))
+        :deferred (do (swap! *f* assoc-in [:addr (:var gro)] gslot) (with-full (emit-init gslot gt (:init gro)))))
+      ;; the frame and what it holds are the coroutine's from here
+      (swap! *f* update :cleanups #(subvec % 0 d))
+      (when (and gt (abi/class? gt) (nontrivial-dtor? (:id gt))) (push-cleanup! {:addr gslot :cls (:id gt)}))
+      (call-insn! 'void 'void (:resume L) [['ptr fr]] false)
+      (when gt (ret! (:ret gro)))
+      (unwind-to! 0)
+      (br! '%return))))
+
 (defn- emit-fn!
   "The definition of the function `fid` (a constructor's or destructor's variant `v`; a virtual destructor's D0 with
   its base-object or complete one)."
@@ -2641,7 +2897,8 @@
                   (doseq [vb (reverse (abi/vbases-init cid)) :when (nontrivial-dtor? vb)]
                     (let [off (long (get (:vbases (abi/layout cid)) vb))]
                       (call-dtor! vb (offset! thisv off) (when (vb-class? vb) (vtt-ref cid nil (get (:sub-vtts lay) [vb off])))))))))
-            (when-let [b (:tbody f)] (emit-stmt b)))
+            ;; (queue 393: a coroutine's ramp, its body the resume function's)
+            (if (:coro f) (coro-ramp! f) (when-let [b (:tbody f)] (emit-stmt b))))
           ;; falling off the end
           (when-not (:term @*f*)
             (cond
