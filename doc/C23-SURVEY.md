@@ -6256,6 +6256,12 @@ the run corpora hold neither), then `bin/reap --record`, `bin/crops-score --reco
   c23-digit-separators-2.c also needs the converter to run past a parse error (or the parser to report gcc's digit separator
   errors), and gcc's location of a missing `;`; it stays `:pedantic-diag` until then.
 
+CS326 (a) built (2026-11-19, branch `408-c-cs326`): `arbace/repr/c/lex.ae`'s `ppnumber` (the one lexer of C and C++) takes every `'` under
+digit separators and gives a trailing run back; as gcc 15 and g++ lex it (probed with a macro after each case): a run of `'` joins
+the number only before an ASCII identifier character, no `.` right after a `'`, no sign after an exponent letter that follows a
+`'` (`1'e+2` is `1'e`, `+`, `2`). Unit test `pp-number-digit-separators` (test/c/judge_test.ae). No row moved; the whole token
+checks of both crops record it on a token night. Not changed: C before C23 takes separators too (libcpp's strict ISO C does not).
+
 ## As built: abort off the main thread (CS327 (a), CS328 (a), 2026-11-17, branch `n-ci-thread`, from `next` `42bf8614b`)
 
 (Numbered CS322 and CS323 on its branch; renumbered CS327 and CS328 when stacked on n-goc-night, 2026-11-18, CS322 to CS326

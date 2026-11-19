@@ -548,21 +548,31 @@
 (defn- skip-ucn [^Scanner s ^long n] (dotimes [_ n] (shift s)))
 
 (defn- ppnumber
-  "scanner.ppnumber (A.1.9), with go-whim's digit separators."
+  "scanner.ppnumber (A.1.9), with digit separators as libcpp's lex_number takes them (CS326 (a); go-whim's rule was
+  a `'` only before an identifier character)."
   ^Tok [^Scanner s]
   (shift s)
-  (loop []
+  (loop [q false]
     (let [c (rune s)]
       (cond
-        (= c 46) (do (shift s) (recur))
-        (contains? #{101 69 112 80} c) (do (shift s) (let [c (rune s)] (when (or (= c 43) (= c 45)) (shift s))) (recur))
-        (= c 39) (let [c2 (peek-byte s 1)]
-                   (if (and (feat? s F-DIGSEP) (or (and (>= c2 48) (<= c2 57)) (and (>= c2 97) (<= c2 122)) (and (>= c2 65) (<= c2 90)) (= c2 95)))
-                     (do (shift s) (shift s) (recur))
-                     (new-token s :PPNUMBER)))
-        (or (digit? c) (letter? c) (= c 95) (cont-mark? s c)) (do (shift s) (recur))
+        (= c 46) (do (shift s) (recur false))
+        ;; CS326 (a): libcpp takes no sign after an exponent letter that follows a digit separator (`1'e+2` is `1'e`,
+        ;; `+`, `2`, in gcc: probed)
+        (contains? #{101 69 112 80} c) (do (shift s) (let [c (rune s)] (when (and (not q) (or (= c 43) (= c 45))) (shift s))) (recur false))
+        ;; Arbace (CS326 (a)): libcpp's lex_number: under digit separators every `'` is taken, and the ones that
+        ;; end the number are given back ("A number can't end with a digit separator"): a run of `'` belongs to the
+        ;; number when an identifier character follows it (ASCII; a UCN or other byte would be read by forms_identifier_p
+        ;; only after the run was given back; libcpp takes no `.` right after a `'` either)
+        (and (= c 39) (feat? s F-DIGSEP))
+        (let [k (loop [k 1] (if (= (peek-byte s k) 39) (recur (inc k)) k))
+              c2 (peek-byte s k)]
+          (if (or (and (>= c2 48) (<= c2 57)) (and (>= c2 97) (<= c2 122)) (and (>= c2 65) (<= c2 90)) (= c2 95))
+            (do (dotimes [_ k] (shift s)) (recur true))
+            (new-token s :PPNUMBER)))
+        (= c 39) (new-token s :PPNUMBER)
+        (or (digit? c) (letter? c) (= c 95) (cont-mark? s c)) (do (shift s) (recur false))
         ;; Arbace (CS50 (a)): a universal character name is an identifier-nondigit of a pp-number too
-        (and (= c 92) (pos? (ucn-length s))) (do (skip-ucn s (ucn-length s)) (recur))
+        (and (= c 92) (pos? (ucn-length s))) (do (skip-ucn s (ucn-length s)) (recur false))
         :else (new-token s :PPNUMBER)))))
 
 (defn- identifier ^Tok [^Scanner s]
