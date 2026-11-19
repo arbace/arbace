@@ -1123,6 +1123,19 @@
     (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f) (not (other-spec? (fnd (:id e))))) (:id e)))
           (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
 
+;; queue 445: a block-scope function declaration ([basic.link]/6, [basic.scope.block]: `void terminate() noexcept;` in c++config.h's
+;; std::__terminate) declares the function of its innermost enclosing namespace, named in the block alone: clang mangles it
+;; at that namespace (_ZSt9terminatev, not a local entity's _ZZSt11__terminatevE9terminatev, which no unit defines). The
+;; code generator's (bound by analyze's DeclStmt when not checking): its declaration joins one of the namespace, and one
+;; made first is kept in the namespace under a key no lookup uses, which a later namespace-scope declaration joins.
+(def ^:dynamic *block-fn* false)
+
+(defn- block-fn-key ^String [^String nm] (str " block-fn " nm))
+
+(defn- find-block-redecl [scope f]
+  (when (= :fn (:kind f))
+    (some (fn [e] (when (same-sig? (fnd (:id e)) f) (:id e))) (.get ^java.util.HashMap (:names scope) (block-fn-key (:name f))))))
+
 (declare analyze rv ce-try)
 
 (defn- noexcept-of
@@ -1353,12 +1366,15 @@
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
                scope)
+        ;; (queue 445: a block-scope declaration's home is its innermost enclosing namespace, its types resolved in its block)
+        bns (when (and *block-fn* (empty? q)) (loop [s scope] (if (or (nil? (:parent s)) (= :ns (:kind s))) s (recur (:parent s)))))
+        home (or bns home)
         cid (:cls home)
         ;; (cpp-s9: a qualified declaration declared in a scope within the qualifier's, a member template's specialization
         ;; made from its out-of-line definition `template<class T> int S::h(T)` in a scope binding T over S's: its types
         ;; resolved there, where the template's parameters are, S's names through it)
-        rs (if (and (seq q) (not (identical? scope home))
-                    (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s)))))
+        rs (if (or bns (and (seq q) (not (identical? scope home))
+                    (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s))))))
              scope home)
         k (case (:kind n) "CXXConstructorDecl" :ctor "CXXDestructorDecl" :dtor "CXXConversionDecl" :conv (if cid :method :fn))
         qt (get-in n [:type :qualType])
@@ -1442,6 +1458,11 @@
                   (when (and c (not (:tmpl c)) (not (:lambda c)) (not (:defining c)) (not (:complete c)))
                     (*on-refusal* (ex-info (str "codegen: incomplete result type '" (:name c) "' in function definition") {:codegen/refused :incomplete}) n))))))
         old (find-redecl home f)
+        ;; (queue 445: a block-scope declaration made before it, kept under its hidden key)
+        hidden (when-not old (find-block-redecl home f))
+        old (or old hidden)
+        _ (when (and old (or bns hidden))
+            (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id old :pos (:pos f)}))
         id (or old (next-id))
         pinfo {:param-names (mapv :name pn)
                :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}]
@@ -1472,7 +1493,8 @@
                                          (let [g (fnd (:id e))]
                                            (and (same-sig? g f) (= (:tid *instantiating*) (:tid (:tinst g)))))))
                                (.get ^java.util.HashMap (:names home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)))))
-            (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)}))
+            (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)}))
+          (when bns (enter! home (block-fn-key nm) {:e :fn :id id :pos (:pos f)}))
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
           (when (and cid (:virtual f)) (abi/update-cls! cid update :virtuals (fnil conj []) id))
@@ -6977,7 +6999,8 @@
                            (enter! (:scope ctx) (or (:name d) "") {:e :var :id id})
                            (cond-> {:s :decl :var id :init init} (and (checking?) (:range d)) (assoc :cx-at (:range d))))))
            "CXXRecordDecl" (do (declare-class! (:scope ctx) d) {:s :null})
-           "FunctionDecl" (do (declare-fn! (:scope ctx) d) {:s :null}) ; a block-scope function declaration
+           ;; a block-scope function declaration (queue 445: the code generator's at its enclosing namespace, *block-fn*)
+           "FunctionDecl" (do (binding [*block-fn* (not (checking?))] (declare-fn! (:scope ctx) d)) {:s :null})
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
