@@ -915,3 +915,50 @@ still compared ("decls equal"); every equal output is judged against another tes
 control). 2026-11-19: 1 pass (`uids/intf_uids_test`), 0 fail, 18 class, 10 decls sections equal, the 10 controls failing.
 The rows stay in `:compiler-output` until the main host decides how a pass of this check reaches `check-oi.edn` and `check-aot.edn`
 (queue 434's DECISIONs).
+
+## 31. As built: T12b, the shape index (2026-11-19, queue 450, branch `450-oc-index`)
+
+D434-2 (a) put the 12 shape-index tests and `uid-deps/link_intf_impl` in `:compiler-output-index` (deferred): their `-index` and
+`-uid-deps` sections need Cmt_format.index_occurrences over a Typedtree with environments, Env.shape_of_path,
+Shape_reduce.local_reduce_for_uid with Shape's printers, and Includemod's Uid.Deps.
+
+**The Typedtree with environments is the walk's own.** The native typer keeps no environment per node and no uids; §30's walk
+already numbers the uids in the typer's Uid.mk order. It now also keeps, as it walks, the environment the index needs: each
+name (values, types with their constructors and labels, extension constructors, modules, module types) with its path
+(`Pident` of a stamped identifier, `Pdot`, `Papply`, `Pextra_ty` for constructors and labels) and its declaration's uid; each
+module's signature as data (ordered items with uids, a functor's parameter and result, a module type's identity for Includemod's
+path equality); and every identifier's shape as Typemod, Typedecl and Includemod give it (Env.find_shape: a value's leaf, a
+type's structure of constructors and labels, a structure's map, a functor's abstraction over its parameter's variable, an
+application, an alias for an aliasable module binding, an unpacked module's Pack, an included item's projection, a constrained
+module's restricted shape). The walk emits each occurrence `iter_on_occurrences` indexes (identifiers, constructors, labels by
+the record's label order with the pun rule, types, module types, modules, opens, binding operators, extension constructors,
+`[%extension_constructor]`, with-constraints' modules) in Tast_iterator's order, which differs from the typing order in places
+(value bindings, cases, functor applications, extras): sub-walks are collected and re-emitted. Typecore's rewriting of `f @@ x`
+and `x |> f` is followed (no occurrence of the operator).
+
+- `arbace.repr.ocaml.typer.shape` ports typing/shape.ml (uids and their order, items, shapes, `proj`, `of_path`, `print`) and
+  typing/shape_reduce.ml (the strong call-by-need reducer with its memo tables and fuel 10, `reduce_for_uid`,
+  `local_reduce_for_uid`, `print_result`), printing through the typer's Format engine.
+- `objinfo.ae`'s index: each occurrence's components (index_components), Predef's skipped, a missing uid stuck on a functor
+  parameter or an unpacked module resolved by Env.find_uid (through aliases) to a local opaque uid (make_definition_uid, memoized
+  by parent and declaration, its `<-` dependency recorded); printed in one Format stream as objinfo does.
+- Includemod's dependencies: signatures paired by kind and name (the last of a name), values, types, extension constructors,
+  modules (recursively) and module types (check_modtype_equiv: both directions, the nested one once) recorded by
+  Directionality (strictly positive `<-`, positive `<->`, negative reversed, in-equivalence negative skipped); functor parameters
+  negated; Mty_ident path equality (with the pairing's module type substitution) stops the recursion, an argument's
+  strengthened signature does not. The checks walked: functor applications, packing `(module M : S)`, constraints, type paths
+  through functor applications (Typetexp's check_functor_application) and, for an implementation whose `.mli` is in
+  `all_modules`, Includemod.compunit against the interface's walk (`[intf]` uids).
+- Type-directed lookups: Typecore's choice of a constructor (an extension constructor or a variant's, e.g. `raise E` with a type
+  `t = E` in scope) recorded by the typer by the longident's offsets (`typecore/*choices*`, nil outside objinfo-check) and read by
+  the walk; a record's labels chosen as disambiguate_label_by_ids does, an inline record's by its constructor, a variable bound
+  to an inline record (`Mod.A r -> r.lbl`) carrying its constructor; a value bound to `(module M : S)` carrying its package
+  type for `(val x)`.
+- The typer itself: `Pwith_modtype` (the module type declaration given the definition), `Psig_modsubst` (the name bound to the
+  module for the items after it) and inline records in type extensions (as an exception's, `E.#record` over the type's
+  parameters) are now typed; before they were refused.
+
+`bin/oi objinfo-check`, 2026-11-19: 13 pass (the 12 of `:compiler-output-index` but `shape-index/index_objects`, and
+`uids/intf_uids_test`), 0 fail, 3 class (`index_objects`: classes and objects are outside the walk, which would need Typeclass's
+Uid.mk order; `no-alias-deps/aliases`, `tool-dumpobj/test`), the 13 controls failing. The rows stay in their classes until
+D434-1 decides how a pass of this check reaches the records.
