@@ -2059,7 +2059,7 @@
 (defn program-facts
   "Within build-program's bindings: the program's native facts over its built BODIES ([[name body err] ...]); STD-CALLS (RFP49
   (a)): the record's std bodies' function constants [PATH ARG-FORMS], whose local instances the collector adds"
-  [n bodies & [std-calls std-fn-syms]]
+  [n bodies & [std-calls std-fn-syms rec-targets]]
   (let [;; RF18 (RFP62 (a)): every body as mono sees it after PostAnalysisNormalize (an opaque type, `impl Fn(i32) -> i32`,
         ;; revealed: its defining body's hidden type at the use's arguments), as rustc's collector walks runtime MIR, so that
         ;; a call through an opaque type resolves to the closure behind it
@@ -2181,6 +2181,28 @@
                                     ;; RF18 (RFP63 (a)): an upstream crate's instance is linked, not instantiated
                                     :when (and (string? cd) (not (intrinsic? cd)) (mir-available? cd) (not (upstream-symbol cd args)))]
                                 {:def cd :args (erase-regions args)}))
+          ;; queue 448, 433-1 (a): the library instances the record's library bodies call (REC-TARGETS: [PATH ARG-FORMS DEF
+          ;; SYMBOL], each call's function constant with the def and symbol of the record's body its callee names), collected by
+          ;; mono as the collector collects ours (a trait method's call resolved to its impl's method by resolve-instance, an
+          ;; inherent function's at its constant's arguments), each kept only when its instance is that def and its symbol
+          ;; mono's v0 of it is the record's (so that a core instance reached only through std's bodies can be a native root)
+          rec-items (let [seen (java.util.HashSet.)]
+                      (vec (for [[path forms tdef sym] rec-targets
+                                 :when (.add seen [path forms])
+                                 :let [x (try (let [r (try (let [[d args] (std-call path forms)] (resolve-instance d args)) (catch Throwable _ nil))
+                                                    [d args] (if (and r (nil? (nth r 2 nil)))
+                                                               [(first r) (second r)]
+                                                               [tdef (mapv (fn [f] (cond (and (seq? f) (= 'lt (first f))) [:re-erased]
+                                                                                         (and (seq? f) (= 'cst (first f))) [:cval (str (second f))]
+                                                                                         :else (form->ty f)))
+                                                                           forms)])
+                                                    args (erase-regions args)]
+                                                (when (and (string? d) (= d tdef) (not (intrinsic? d)) (mir-available? d)
+                                                           (= sym (instance-symbol {:def d :args args})))
+                                                  {:def d :args args :symbol sym :via :record}))
+                                              (catch Throwable _ nil))]
+                                 :when x]
+                             x)))
           ;; {body-name [[TARGET-TEXT vtable-or-error] ...]} in the body's order (the runtime body's casts take them in turn)
           ;; (RF16: each with its source's text, so a promoted constant's cast, which PromoteTemps moved out of the body, takes
           ;; its own: `&[&Dog, &Bird(1)]` as `&[&dyn Animal]`)
@@ -2220,6 +2242,7 @@
        ;; RF15: the generic instances' bodies to instantiate: {name [base-name args]}
        :instances (into {} (for [k items :when (and (vector? k) (item-body k))] [(by-def k) [(get by-def* (first k)) (second k)]]))
        :ext-items (vec (for [x ext-items] (assoc x :symbol (try-fact #(instance-symbol x)))))
+       :rec-items rec-items
        :callees callees :fsyms fsyms :statics statics :langsyms langsyms :vtables vtables
        :layouts-of (fn [forms] (binding [*local* *local* *layouts* (atom {}) *closure-upvars* upvars build/*closure-tys* (merge build/*closure-tys* upvars)]
                                  (tc/with-solver (solver-def) #(layout-table forms))))}))))))

@@ -4912,3 +4912,68 @@ Why the rest are not taken (run, from the build logs):
   "85")`: core::cell::is_reading, `{impl#31}::try_borrow_mut` and RefCell::new. Both controls differ.
 - **The two runs before.** With the refusal alone, codegen refused `read_via_copy`. Without either change (the five-program
   run), codegen refused `unevaluated`.
+
+## As built: S4's roots through the record's bodies (2026-11-19, queue 448, branch `448-rust-mono`)
+
+433-1 (a), on 443's tip (ca3229eca): every library instance std's program reaches can be a native root, not only those the
+collector reaches from the program's own bodies.
+
+- **mono collects through the record's library bodies.** build-run takes each call of the record's library bodies whose callee
+  is a library body of the record (an Item instance): its function constant's `[PATH ARG-FORMS]`, that body's def (its DefId's
+  path less the crate's hash, `core::fmt::{impl#4}::new`) and symbol (`rec-targets`). `mono/program-facts` resolves each as the
+  collector resolves ours: a trait method's call by `resolve-instance` to its impl's method, an inherent function's at its
+  constant's arguments. It keeps one only when the instance is that def and mono's own symbol of it is the record's
+  (`:rec-items`, `:via :record`). The roots are the collector's items, then these, each record body once. A run prints
+  `rec-items: N instances collected through the record's library bodies, of M calls' constants`.
+- **core's defs outside rust-core-built's modules.** `bin/rust-front core-export --rsi-outside FILE-REGEX [NAME...]` builds the
+  programs' core defs in the module files FILE-REGEX matches (core-check's `CORE_EXPORT_KEYS`: the bodies by key, no oracle).
+  Each entry is `:judge :instance` and is judged against the record's instance at the run, as alloc's and std's are (443-1
+  (a)). The entries go into `.tmp/rust-front/core/native-core-rsi-outside.edn`, which `rsi-build --native-core` takes beside
+  core's file. The record's core bodies are in `rec-by-path` too, so a core callee is judged like alloc's.
+- **Constants evaluated at the instance** (`sized-const-eval`). core::mem::SizedTypeProperties' SIZE, ALIGN, ALIGNMENT, IS_ZST,
+  MAX_SLICE_LEN and LAYOUT are evaluated from mono's layout of the instance's type, as CTFE evaluates them for the record (mem/mod.rs).
+  LAYOUT becomes `(indirect-bytes HEX ALIGN)`: the run makes it an immutable allocation, and pack-compare compares the record's
+  `(indirect allocN 0)` by its bytes. core's private `cell::UNUSED` (0) and `swap_nonoverlapping_bytes::CHUNK_SIZE` (8),
+  which the export names by a local def id, come from a two-entry table. A constant whose type mono cannot lay out (a closure
+  whose body was not built) stays unevaluated, and 443-4 (b) refuses it.
+- **LowerIntrinsics.** `offset` becomes BinOp::Offset, `copy_nonoverlapping` the CopyNonOverlapping statement, and
+  `aggregate_raw_ptr` a RawPtr aggregate of the destination's pointer type (lower_intrinsics.rs).
+- **A body calling drop glue stays the record's.** core::ptr::drop_in_place's `drop_glue::<T>()` is a shim rustc leaves out for a type
+  that needs no glue, so it is no item the module defines.
+- **codegen's fallback** (check's `emit-mono`). A native body codegen refuses is replaced by the record's body of its symbol. So is
+  one that calls an instance of the program's crate no body defines (specialization's `spec_next`, which mono leaves at the trait
+  method). A native callee the record has no body of is left out, and its native callers are replaced in turn. Each case is a
+  line of `NAME.codegen-fallback.txt`. The layout table includes the record's bodies of the native ones. Before this, one native
+  body that codegen refused sent the whole program to the pack.
+- `rsi-build` prints per program: core's instance-judged kinds; the library bodies built natively and codegen's fallbacks;
+  and the `rec-items` line.
+- `bin/rust-front pack-compare-test`: 24 cases, 9 new (MAX_SLICE_LEN, ALIGNMENT, LAYOUT by its bytes, UNUSED; negatives: left
+  unevaluated, SIZE for MAX_SLICE_LEN, another type's LAYOUT, an unknown private constant).
+
+### Results (run)
+
+The core export: core-check over 42 module files. 273 keys, 231 bodies exported, all judged at the instance. Two modules stop at
+expansion: hash::sip ("no arm of compress matches") and intrinsics ("the derive ConstParamTy is not taken"). The rest of the keys
+are refused for closure or opaque types (Iterator::collect, map_fold, for_each).
+
+`RF11_BATCH=1 bin/rust-front rsi-build --native-core intrinsics panics std unwind vectors` (one run at 603b387b6, 0 stub calls):
+**5 of 5 own**. Before: 4 of 5 at 443's added8d8e, std alone own at ca3229eca.
+
+| sample | library bodies built natively, before | after | codegen's fallbacks | rec-items (collected / calls' constants) |
+|---|---|---|---|---|
+| intrinsics | 20 | 303 | 9 | 404 / 514 |
+| panics | 10 | 175 | 0 | 280 / 345 |
+| std | 39 | 976 | 22 | 1,563 / 2,353 |
+| unwind | 7 | 154 | 0 | 247 / 306 |
+| vectors | 11 | 639 | 22 | 1,026 / 1,569 |
+
+Every `control` and `control-instance` differs, in all five programs. core's roots against the record in std.rs: 48 equal, 34
+equal-but-storage, 430 equal-o0, 320 differ.
+
+The six named natives:
+- **Box::new_uninit**: native, except two `dyn` instances in std.rs.
+- **f64::sqrt** and **RefCell::new**: native in std.rs.
+- **Vec::len**: native 4 of 6 in std.rs and 3 of 5 in vectors. The other instances keep MAX_SLICE_LEN unevaluated.
+- **fmt::Arguments::new**: built, but differs from the record at its aggregate's text, `fmt::Arguments::<'_>` against
+  `std::fmt::Arguments::<'_>` (the export prints core's paths relative to core).
+- **Iterator::collect**: refused at the export (a closure type).

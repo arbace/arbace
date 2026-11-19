@@ -146,9 +146,27 @@ core_essential() {
 #                                   RUST-90 S4 (C2, doc/rust/FRONTEND-SURVEY.md, "As built: S4's first slice"): the spec from rsi's
 #                                   programs (their stems; default the samples' five eval cases) by core_rsi_spec, the bodies into
 #                                   .tmp/rust-front/core/native-core-rsi.edn, which `rsi-build --native-core` takes
+#   bin/rust-front core-export --rsi-outside FILE-REGEX [NAME...]
+#                                   queue 448: the programs' core defs outside rust-core-built's modules (no oracle) in the module
+#                                   files FILE-REGEX matches (`^fmt/|^iter/traits/`), by their keys (CORE_EXPORT_KEYS), each
+#                                   entry :judge :instance (judged against the record's instance at the run, as alloc's and
+#                                   std's), into native-core-rsi-outside.edn, which `rsi-build --native-core` takes beside core's
 core_export() {
   local lib spec=$root/test/rust/front/core-native.txt re files out=$work/core/native-core.edn
   lib=$(core_lib) || return 1
+  if [ "${1:-}" = --rsi-outside ]; then
+    local fre=${2:?usage: core-export --rsi-outside FILE-REGEX [NAME...]} keys=$work/core/native-core-rsi-outside.keys
+    shift 2; out=$work/core/native-core-rsi-outside.edn; : > "$keys"; rm -f "$out"
+    CORE_RSI_OUTSIDE=$keys core_rsi_spec "$@" > "$work/core/native-core-rsi-outside.txt" || return 1
+    files=$(awk -F'\t' -v re="$fre" '$2 ~ re {print $2}' "$keys" | LC_ALL=C sort -u | sed "s|^|$lib/core/src/|")
+    [ -n "$files" ] || { echo "core-export --rsi-outside: no module file matches $fre" >&2; return 1; }
+    awk -F'\t' -v re="$fre" '$2 ~ re {print $1}' "$keys" > "$keys.sel"
+    echo "core-export --rsi-outside: $(wc -l < "$keys.sel") keys in $(printf '%s\n' "$files" | wc -l) files"
+    # shellcheck disable=SC2086
+    CORE_EXPORT_KEYS=$keys.sel CORE_EXPORT=$out core_check --records $files
+    [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out ($(grep -c ':judge :instance' "$out") judged at the instance)"
+    return 0
+  fi
   if [ "${1:-}" = --rsi ]; then
     shift; spec=$work/core/native-core-rsi.txt out=$work/core/native-core-rsi.edn
     core_rsi_spec "$@" > "$spec.tmp" || { rm -f "$spec.tmp"; return 1; }
@@ -177,12 +195,17 @@ core_rsi_spec() {
     [ -f "$rs/$n/$n.record.edn" ] || { echo "core-export --rsi: no record of $n in the pack rust-front-rsi" >&2; return 1; }
     grep '^(mir/body' "$rs/$n/$n.record.edn" | grep -o ':def-id "DefId([0-9]*:[0-9]* ~ core\[[0-9a-f]*\]::[^)]*)" :phase "[a-z]*" :instance "Item(' |
       sed -E 's/^:def-id "DefId\([0-9]+:[0-9]+ ~ core\[[0-9a-f]+\]::([^)]*)\)".*/\1/'
-  done | LC_ALL=C sort -u | awk -F'\t' -v mods="$m" '
+  done | LC_ALL=C sort -u | awk -F'\t' -v mods="$m" -v outf="${CORE_RSI_OUTSIDE:-}" '
     # each def in the module file of its longest module path (core-check --list'\''s modules.txt: `core::a::b FILE`)
     BEGIN { while ((getline l < mods) > 0) { split(l, a, " "); f = a[2]; sub(/.*\/core\/src\//, "", f); file[a[1]] = f } }
     NR == FNR { k = $1; sub(/^core\./, "", k); sub(/\.1-1-[0-9]+\.built\.after\.mir$/, "", k); name[k] = $2; next }
     { k = $0; gsub(/::/, "-", k)
-      if (!(k in name)) { out++; next }
+      if (!(k in name)) { out++
+        # queue 448: with CORE_RSI_OUTSIDE, each such key and its module file (by the longest module path) into that file
+        if (outf != "") { n = split($0, seg, "::"); p = "core"; best = ""
+          for (i = 1; i <= n; i++) { p = p "::" seg[i]; if (p in file) best = file[p] }
+          if (best != "") print k "\t" best > outf }
+        next }
       re = re (re == "" ? "" : "|") "\\Q" name[k] "\\E"; got++
       n = split($0, seg, "::"); p = "core"; best = ""
       for (i = 1; i <= n; i++) { p = p "::" seg[i]; if (p in file) best = file[p] }
