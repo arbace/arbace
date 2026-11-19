@@ -942,6 +942,24 @@
 
 (defn- adt-args [def ga] (lower-generic-args def ga nil))
 
+(def ^:dynamic *free-aliases*
+  "queue 417: a type alias of an impl Trait (type_alias_impl_trait: backtrace.rs' `type LazyResolve = impl FnOnce() ->
+  Capture + ..`, sys/paths/unix.rs' `type SplitPaths<'a> = Map<Split<'a, u8, impl FnMut(&u8) -> bool>, impl ..>`) kept as
+  the alias at its arguments, [:free-alias ALIAS ARGS], not expanded (rustc's free alias, which the helper's interface
+  writes as its text); bound by core-check's interface pass for std alone"
+  false)
+
+(defn tait-alias?
+  "queue 417: a local type alias whose type holds an impl Trait"
+  [id]
+  (let [d (def-of id)]
+    (and (= "TyAlias" (:kind d))
+         (letfn [(walk [x] (cond (and (map? x) (= :ty (:node x)) (= :impl (:kind x))) true
+                                 (map? x) (some walk (vals x))
+                                 (sequential? x) (some walk x)
+                                 :else false))]
+           (boolean (walk (:ty (:node d))))))))
+
 (defn- local-alias-ty [id args]
   (let [d (def-of id)]
     (subst (binding [*scope* [(generics-of id)] *module* (:parent d)] (lower-ty (:ty (:node d)))) args)))
@@ -1012,7 +1030,11 @@
       :ext (let [[_ p k] r]
              (case k
                ("Struct" "Enum" "Union") [:adt p (adt-args p (:args last-seg))]
-               "TyAlias" (if-let [a (get (:aliases *std*) p)] (subst (sty->ty a) (adt-args p (:args last-seg))) [:err (str "alias " p)])
+               "TyAlias" (if-let [a (get (:aliases *std*) p)]
+                           (if (and *free-aliases* (= 'free-alias (head a)))
+                             [:free-alias p (vec (adt-args p (:args last-seg)))]
+                             (subst (sty->ty a) (adt-args p (:args last-seg))))
+                           [:err (str "alias " p)])
                "ForeignTy" [:adt p []]
                ;; a module named as a primitive type (`use std::str;`): the primitive in type position
                "Mod" (or (get prim-tys (path-name p)) [:err (str "ext Mod " p)])
@@ -1020,7 +1042,9 @@
       :local (let [[_ id k] r]
                (case k
                  ("Struct" "Enum" "Union") [:adt id (adt-args id (:args last-seg))]
-                 "TyAlias" (local-alias-ty id (adt-args id (:args last-seg)))
+                 "TyAlias" (if (and *free-aliases* (tait-alias? id))
+                             [:free-alias id (vec (adt-args id (:args last-seg)))]
+                             (local-alias-ty id (adt-args id (:args last-seg))))
                  "ForeignTy" [:adt id []]
                  [:err (str "local " k)]))
       (or (type-relative path) [:err (str "unresolved " (pr-str (mapv :ident (:segs path))) " " (pr-str (:res path)))]))))
