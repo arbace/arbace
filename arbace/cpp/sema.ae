@@ -3609,6 +3609,18 @@
     (cond
       ;; an overload set converts to a pointer to function only ([over.over]; G5: std::endl among operator<<'s candidates)
       (and (= :fnset (:op e)) (not (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt)))))) nil
+      ;; (queue 423: a braced list for a reference to a class, [over.ics.list]/9 with [dcl.init.list]/3.10: one element of a
+      ;; reference-related class binds the reference to it, its own conversion; else the reference binds the list's temporary,
+      ;; an rvalue, so that [over.ics.rank]/3.2.3 prefers the rvalue reference: `s = {}` of an aggregate had ranked the
+      ;; implicit copy and move assignments equal, "ambiguous call (2 viable)")
+      (and (= :init-list (:op e)) (abi/ref? p) (abi/class? pt)
+           (= 1 (count (:items e))) (:ty (first (:items e))) (class-id (:ty (first (:items e))))
+           (or (= (class-id (:ty (first (:items e)))) (:id pt)) (abi/derived-from? (class-id (:ty (first (:items e)))) (:id pt))))
+      (ics (first (:items e)) p)
+      (and (= :init-list (:op e)) (abi/ref? p) (abi/class? pt))
+      (when-let [r (ics e pt)]
+        (when-not (and (= :ref (:k p)) (not (:c pt)))
+          (assoc r :sub (if (= :rref (:k p)) -1 1))))
       (= :init-list (:op e))
       (cond (init-list-elem pt) (let [el (init-list-elem pt) rs (map #(ics % el) (:items e))]
                                   ;; [over.ics.list]/5: the worst conversion of an element
@@ -6340,9 +6352,17 @@
           _ (when (checking?)
               (let [f (when-let [i (:fn-id ctx)] (fnd i))]
                 (when (and f (not (:cls f)) (not (:this-type ctx))) (check-type-access! (:scope ctx) (get-in n [:type :qualType]) n))))
-          args (analyze-args ctx (kids n))]
+          ks (kids n)
+          ;; (queue 423: T{...} of a dependent type, the native parser's CXXUnresolvedConstructExpr whose one operand is the
+          ;; braced list itself, ending where it ends (T({...}) ends at its parenthesis): list-initialization of T,
+          ;; [expr.type.conv]/2, as the functional cast's T{...} below, not a constructor called with one braced argument,
+          ;; which ranked the copy and move constructors equal for `t = T{}` of an aggregate, "ambiguous call (2 viable)")
+          brace? (and (= "CXXUnresolvedConstructExpr" (:kind n)) (= 1 (count ks)) (= "InitListExpr" (:kind (first ks)))
+                      (some? (:offset (loc-of (get-in n [:range :end]))))
+                      (= (:offset (loc-of (get-in n [:range :end]))) (:offset (loc-of (get-in (first ks) [:range :end])))))
+          args (analyze-args ctx ks)]
       (if (abi/class? (abi/unq t))
-        {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
+        {:op :temp-obj :init (if brace? (init-for t (first args) ctx :direct) (init-for t args ctx (if (empty? args) :value :direct))) :ty (abi/unq t) :cat :pr}
         (cond (empty? args) {:op :zero-val :ty t :cat :pr}
               ;; (cpp-s8: T{...} of a scalar type in a template, its one argument the braced list)
               (and (= 1 (count args)) (= :init-list (:op (first args))) (not (abi/ref? t))) (scalar-list-cast ctx t (:items (first args)))
