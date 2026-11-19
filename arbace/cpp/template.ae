@@ -2882,7 +2882,8 @@
         ;; (an operator's name its tokens joined: `basic_ostream<char>::operator<<(nullptr_t)`, `operator <<`)
         op-end (fn [k] (when (and (= "operator" (ts k)) (str/starts-with? nm "operator"))
                          (let [j (first (filter #(= "(" (ts %)) (range (inc k) n)))]
-                           (when (and j (> j (inc k)) (= (subs nm 8) (str/join "" (subvec ts (inc k) j)))) j))))
+                           ;; (queue 392: a conversion function's name, `operator void *`, compared without its spaces)
+                           (when (and j (> j (inc k)) (= (str/replace (subs nm 8) #"\s+" "") (str/join "" (subvec ts (inc k) j)))) j))))
         k (first (filter (fn [k] (and (pos? k) (= "::" (ts (dec k)))
                                       (or (op-end k)
                                           (and (= nm (ts k))
@@ -2947,7 +2948,27 @@
                (for [tid (:ctor-tmpls qc)] {:e :tmpl :tk :fn :id tid})
                (seq (.get ^java.util.HashMap (:names (:scope qc)) fname)))
              (try (sema/lookup scope fname) (catch arbace.lang.ExceptionInfo _ nil)))
-        found (when (and ft (abi/fn? ft))
+        ;; (queue 392: a member that is no template and whose type matches is chosen before any template's specialization
+        ;; when no template arguments are written, clang's ActOnExplicitInstantiation's NonTemplateMatch ([temp.explicit]/4 with
+        ;; [over.match.best]/2.4's preference): misc-inst.cc's `template string& string::replace(iterator, iterator, char*,
+        ;; char*);` before C++11, basic_string's non-template replace, not replace<_InputIterator>)
+        ms (when (and qc ft (abi/fn? ft))
+             (let [cto (when-let [[_ t] (re-matches #"(?s)operator\s+(.*\S)\s*" fname)]
+                         (when-not (re-matches #"(?:new|delete)(?:\s*\[\s*\])?" t)
+                           (try (abi/unq (sema/resolve-type (:scope qc) t)) (catch arbace.lang.ExceptionInfo _ nil))))]
+               (distinct (filter (fn [id] (let [g (sema/fnd id)]
+                                            (and (not (:tinst g))
+                                                 (cond ctor? (= :ctor (:kind g))
+                                                       ;; (a conversion function's: the one converting to the type its name names,
+                                                       ;; ios_locale.cc's `template basic_ios<char>::operator void*() const;`)
+                                                       (= :conv (:kind g)) (and cto (= (abi/unq (:ret (:ty g))) cto))
+                                                       :else (= fname (:name g)))
+                                                 (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft)))
+                                                 ;; (and its cv-qualifier: c++17/string-inst.cc's `template char*
+                                                 ;; basic_string<char>::data() noexcept;`, not data() const)
+                                                 (or ctor? (= (boolean (:cq g)) (boolean (re-find #"\)\s*const\b[^()]*$" (str fts))))))))
+                                 (concat (:ctors qc) (:methods qc))))))
+        found (when (and ft (abi/fn? ft) (not (and (not targs) (= 1 (count ms)) (not (sema/checking?)))))
                 (keep (fn [e]
                         (when (and (= :tmpl (:e e)) (= :fn (:tk e)))
                           (let [t (tmpl (:id e))]
@@ -2979,11 +3000,7 @@
       ;; (queue 367: a member that is no template, `template void X<int>::f(int);`: its class's member of that name and
       ;; parameter types)
       (when (and qc (empty? found) ft (abi/fn? ft))
-        (let [ms (filter (fn [id] (let [g (sema/fnd id)]
-                                    (and (not (:tinst g)) (if ctor? (= :ctor (:kind g)) (= fname (:name g)))
-                                         (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))))))
-                         (concat (:ctors qc) (:methods qc)))]
-          (when (= 1 (count (distinct ms))) (explicit-inst-mark! (first ms)))))))))
+        (when (= 1 (count ms)) (explicit-inst-mark! (first ms))))))))
 
 (defn- constraint-spelling
   "CP300 (a), [temp.over.link]/7: a function template's constraints as written (its type-constraints, its requires-clause,
