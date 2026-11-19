@@ -4324,3 +4324,38 @@ the light level has no C) and backtrace/backtrace_dynlink (native only, `Dynlink
 `:dynlink-decided`. The compiled level: no dynlink library yet (the shard's registry, OC220 (a)'s compiled half). At the light level
 `Dynlink.is_native` is false and `adapt_filename` is the identity (the platform is oi's) while `Sys.backend_type` is `Native`; no
 row of the corpora sees the difference.
+
+## As built: queue 397, the night's new AOT rows (2026-11-19, branch `397-oc-rows`, from `n-all4` `88b8e7f1a`)
+
+Round 54's lane 3 left four AOT rows with a cause not proven: basic-more/pr1271 and regression/pr7798 classed as gc rows "since
+queue 370's -g", statmemprof/intern ending with status 2 where its entry named a timeout, and statmemprof/lists_in_minor's pin
+dropped (past 900 s of CPU). Each was run at n-all4 and at 355's tip `c8468871a` (before 370) in a second worktree on the same
+stage 0 (nx's), alone, `GOMAXPROCS=1`.
+
+- **pr1271: not 370; queue 331's word counter and a block ocamlopt allocates statically.** It prints 2 at both commits (the record's
+  pass dates from 2026-11-16, before 331 counted words). The 2 words are the functor argument `struct let x = 42 end`, Lambda
+  `(let x 42 (makeblock 0 [x]))`, which ocamlopt's Closure makes a structured constant (simplif_prim_pure: an immutable
+  Pmakeblock whose arguments' approximations are all Value_const), statically allocated, not counted. **Fixed in o2j**: a let of a
+  constant records it as the variable's value (`:kconst`, Closure's approximation), and an immutable `makeblock` whose arguments
+  are all constants (a const node, such a variable, or such a makeblock) is a static constant of the unit (`const-arg`,
+  `const-form`): one block shared by every evaluation, as ocamlopt's. pr1271 passes. The sample of the programs that count words or
+  compare blocks, run with the fix (basic/localfunction, basic/tuple_match, lib-sys/opaque, match-exception/allocation, misc/gcwords,
+  typing-modules/struct_include_optimisation, statmemprof/alloc_counts, lib-obj/with_tag; the suite's asmcomp/bind_tuples,
+  static_catch_unboxing, optargs, compaction/test_compact_full), is unchanged, the known rows' pins still matched; the controls differ.
+- **pr7798: speed.** It prints 0 (passes) given the CPU: 97.5 and 100.2 s at 355's tip, 120.5 and 120.4 s at n-all4, against the level's
+  140. Under `O2J_GOMEMLIMIT`'s 900 MiB the collector takes 39 to 44% of a run (pr1271's gctrace: a live heap of 691 MB at 355's tip,
+  725 MB at n-all4, 40 and 47 collections), and since 370 the library's -g (its slots and the events' code) holds about 34 MB more of
+  it: 6.6 s more to load, the rest in more frequent cycles. Under 1500 MiB the same runs take 63.0 and 67.1 s. Listed in
+  aot-slow.edn; its known entry dropped.
+- **intern: its known Memprof result once it has the CPU.** Alone at `OI_TIMEOUT=900` it ends with status 2 (589 s of wall at load
+  30): check_counts_full_major's assertion at line 108, the alloc_minor count against dealloc_minor's and promote's, as arrays_in_major
+  (no promote or dealloc callback). Its entry now pins that output (`status ` `00d1d68c794c`, attested in pins-attested.tsv from
+  this run) under arrays_in_major's reason, and its timeout is its speed (aot-slow.edn).
+- **lists_in_minor: queue 331's sampling.** Its 192.3 s and its pin `15cf4ddf64d5` date from before 331 (2026-11-01, 2026-11-14), when
+  no sample was taken, so the first check's final assertion ended it. Since 331 its callbacks run and all seven checks run: the
+  first alone takes 188 to 196 s of CPU at 355's tip and 249 to 257 s at n-all4 (370's -g about 30% beside it), the seven past 900 s
+  at either. It stays slow, its pin dropped; aot-slow.edn's comment says why.
+
+DECISION (for the main host): the light level's `O2J_GOMEMLIMIT` default (900 MiB) makes the collector a third of every
+run's CPU; 1500 MiB cut pr7798 from 120 to 67 s. Raising it changes the AOT records' timeouts and the oi-aot steps' `:mem-gib`, so
+it is the main host's (report 397).

@@ -307,7 +307,7 @@
                            (fn [as ts] (concat (list 'let [r (call-form (first as) (rest as))]) (clear ts) [(list 'ocaml.rt.Bt/pop) r])))))
     (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
 
-(declare prim-value)
+(declare prim-value const-arg)
 
 (defn- event-node
   "(event L [INFO]): in tail position, or without information, L alone (bytegen drops the event to keep the tail call); around
@@ -321,7 +321,9 @@
         apply (apply-ev-node ctx (node-body inner) (slot-ref info false false))
         prim (let [[n args] (node-body inner)]
                (if (or (#{"&&" "||" "sequand" "sequor" "runstack" "resume" "reperform" "raise" "reraise" "raise_notrace"} n)
-                       (str/starts-with? n "setglobal ") (str/starts-with? n "global "))
+                       (str/starts-with? n "setglobal ") (str/starts-with? n "global ")
+                       ;; a static block (const-arg) allocates nothing and cannot raise: no slot
+                       (and (str/starts-with? n "makeblock") (seq args) (const-arg ctx inner)))
                  (expr ctx inner false)
                  (let [ev (slot-ref info false true)]
                    (with-all-args ctx args (fn [as ts] (around-slot ev (prim-value n as) ts))))))
@@ -446,13 +448,16 @@
 ;; ---- lets
 
 (defn- let-chain
-  "Consecutive let and mutlet nodes as one let."
+  "Consecutive let and mutlet nodes as one let. A let of a constant (or of an immutable block of constants) records the constant
+  as the variable's value (:kconst), Closure's Value_const approximation that makes such a block static (const-arg)."
   [ctx x tail?]
   (loop [x x ctx ctx bindings []]
     (case (hd x)
       let (let [[_ _ id def body] (node-body x)
-                s (munge-id id)]
-            (recur body (assoc-in ctx [:env id] s) (conj bindings s (expr ctx def false))))
+                s (munge-id id)
+                k (const-arg ctx def)
+                ctx2 (cond-> (assoc-in ctx [:env id] s) k (assoc-in [:kconst id] k) (nil? k) (update :kconst dissoc id))]
+            (recur body ctx2 (conj bindings s (expr ctx def false))))
       mutlet (let [[_ id def body] (node-body x)
                    s (with-meta (munge-id id) {:mutable true :tag 'Object})]
                (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))
@@ -582,8 +587,27 @@
       ;; another name: a C stub's (OC215 (a), CApi/prim), else unsupported as before
       :else (do (note-missing! (str "%" n)) (list 'ocaml.rt.CApi/prim n (list 'new 'Object/1 (vec as)))))))
 
+;; ---- static blocks (ocamlopt's Closure, simplif_prim_pure: an immutable Pmakeblock whose arguments' approximations are all
+;; Value_const is a structured constant, statically allocated: no allocation counted by Gc.minor_words, one block shared by every
+;; evaluation; basic-more/pr1271's functor argument `struct let x = 42 end`, queue 397)
+
+(defn- const-arg
+  "The constant node x has the value of (its payload: a const's, a variable's let-bound constant, an immutable makeblock's of
+  constants as a block constant), else nil."
+  [ctx x]
+  (case (hd x)
+    const (second x)
+    var (get (:kconst ctx) (second x))
+    prim (let [[^String n args] (node-body x)]
+           (when (= "makeblock" (first (str/split n #"[ \[]")))
+             (let [ks (map #(const-arg ctx %) args)]
+               (when (every? some? ks) (list 'block (num-arg n) (vec ks))))))
+    nil))
+
 (defn- prim-node [ctx [^String n args] tail?]
   (cond
+    (and (str/starts-with? n "makeblock") (seq args) (const-arg ctx (list 'prim n args)))
+    (const-form (const-arg ctx (list 'prim n args)))
     (#{"raise" "reraise" "raise_notrace"} n)
     (let [[x sl] (raise-slot (first args))]
       (with-args ctx [x] (fn [[a]] (list 'throw (list 'ocaml.rt.Bt/raise a sl (= n "reraise") (= n "raise_notrace"))))))
