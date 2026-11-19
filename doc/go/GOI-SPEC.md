@@ -688,8 +688,8 @@ flow, calls, defer and select.
   `Thread` gains one field for goi's state (`Interp any`), set on the goroutine's first
   interpreted call (S22). So compiled code calling back into interpreted code (a `sort.Slice` less)
   continues the same thread: one stack, one trace.
-- **Depth.** A thread counts its interpreted calls; at goi's limit (`ARBACE_GOI_DEPTH`, default
-  100,000) a call panics with gc's fatal text as a value (`runtime: goroutine stack exceeds
+- **Depth.** A thread counts its interpreted calls; at goi's limit (100,000 at the REPL, 1,000,000 in
+  program mode, `ARBACE_GOI_DEPTH` in both: "Since v1: the depth limit") a call panics with gc's fatal text as a value (`runtime: goroutine stack exceeds
   1000000000-byte limit`; in program mode reported as gc's `fatal error: stack overflow` with
   status 2), since Go's own stack overflow is fatal and would end the REPL (S23).
 
@@ -5540,3 +5540,22 @@ a program that does call one ends there with `goi: unsupported: a function witho
 
 What stays by design in `:gc-flags`: `-live`, `-l=N`, `-wb`, and `-d=` of the SSA passes (`ssa/*`, `nil`, `wb`, `tailcall`,
 `checkbce`) and `escapedebug` (walk's dataWord over order's static temporaries: front-end work, not ported yet).
+
+## Since v1: the depth limit (2026-11-19, queue 426, DECISION 420-A (a), GC42 (b))
+
+`peano.go` (`:call-depth`) counts 362,880 Peano numbers by recursion, past the REPL's 100,000. In program mode goi's
+limit is now 1,000,000 (`arbace.go.build/depth-limits`), and `ARBACE_GOI_DEPTH`, named by the docs since S23 but read by
+nothing, is read: `arbace.go.build/depth-limit` takes its integer, clamped to the floor 1,000 and the ceiling 1,048,576 (a
+warning on stderr when clamped; a value that is not an integer warned about and ignored), at the REPL too (once, when
+`arbace.go.repl` loads; unset, the back end's 100,000 stays). `set-depth-limit!` hands it to the back end's
+`SetDepthLimit` (go/arbace/goi/frame.ae, a factory of the registry), which sets `DepthLimit` and the current thread's
+limit and raises the goroutines' stack limit (`debug.SetMaxStack`) to the power of two that holds the limit's calls at
+`FrameStackBytes` (1 KiB) each, never below Go's default (1,000,000,000 bytes, which allows a 512 MiB stack) and at most
+1 GiB (Go's largest goroutine stack: stacks are powers of two under `maxstackceiling`, 2,000,000,000 bytes). The ceiling
+is that 1 GiB at 1 KiB a call. One interpreted call of `count` takes 340 to 520 bytes of Go stack on arm64 (measured on
+stage 0 by `runtime.MemStats.StackInuse` at depths 1,000 to 99,000: 32 MiB at 64,000, 64 MiB at 99,000), so a runaway
+recursion still ends in goi's depth error (gc's text, status 2), not in Go's fatal overflow, whose text names its own
+limit and prints `runtime: sp=` and the runtime's trace. An executable whose back end predates `SetDepthLimit` keeps
+100,000 (the op's absence is caught). Tests: `test/goi/run/go/t/deep.ae` (300,000 calls; gc's run the same), and
+`bin/goi test`'s depth checks (`depth_tests`): `depth-limit`'s cases, `deep.ae` under `ARBACE_GOI_DEPTH=150000` and
+`test/goi/run/go/depth/runaway.ae` under program mode's default, each ending in goi's depth error.

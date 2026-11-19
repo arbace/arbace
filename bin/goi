@@ -407,6 +407,43 @@ stderr_head() {
   awk '/^goroutine /{exit} {print}' "$1" | sed -E 's/^\[signal ([A-Z]+): (.*) code=0x[0-9a-f]+ addr=0x[0-9a-f]+ pc=0x[0-9a-f]+\]$/[signal \1: \2 code=X addr=X pc=X]/'
 }
 
+# depth_tests EXE DIR: goi's depth limit in program mode (S23, GC42 (b); GOI-SPEC.md "Since v1: the depth limit"):
+# arbace.go.build/depth-limit's parse of ARBACE_GOI_DEPTH (default, floor, ceiling, junk); test/goi/run/go/t/deep.ae
+# (300,000 calls, which passes in the loop above under program mode's 1,000,000) under ARBACE_GOI_DEPTH=150000, and the
+# runaway recursion test/goi/run/go/depth/runaway.ae under program mode's default: each must end in goi's depth error
+# (gc's text, status 2), not Go's fatal stack overflow (its limit's own number, "runtime: sp=", the runtime's trace)
+depth_tests() {
+  local exe=$1 t=$2 n st fail=0
+  local want='runtime: goroutine stack exceeds 1000000000-byte limit
+fatal error: stack overflow'
+  st=0
+  (cd "$root" && ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} "$exe" -e "(require 'arbace.go.build)
+    (let [dl (fn [p e] (arbace.go.build/depth-limit p e (fn [_])))
+          cases [[false nil nil] [true nil 1000000] [true \"\" 1000000] [false \"250000\" 250000] [true \" 300000 \" 300000]
+                 [true \"+2000\" 2000] [true \"10\" 1000] [false \"-5\" 1000] [true \"99999999\" 1048576]
+                 [true \"999999999999999999999\" 1000000] [true \"lots\" 1000000] [false \"1e6\" nil]]
+          bad (remove (fn [[p e want]] (= want (dl p e))) cases)]
+      (if (seq bad) (do (println \"depth-limit: wrong:\" (vec (map (fn [[p e w]] [p e w (dl p e)]) bad))) (System/exit 1))
+          (println \"depth-limit:\" (count cases) \"cases\")))") > "$t/depth-limit.txt" 2>&1 || st=$?
+  if [ "$st" = 0 ]; then tail -1 "$t/depth-limit.txt"
+  else echo "goi test: depth-limit's cases failed:" >&2; head -5 "$t/depth-limit.txt" >&2; fail=1; fi
+  for n in deep:t:150000 runaway:depth:; do
+    local name=${n%%:*} rest=${n#*:} dir lim
+    dir=${rest%%:*} lim=${rest#*:}
+    st=0
+    (cd "$goroot/test" && env ${lim:+ARBACE_GOI_DEPTH=$lim} timeout 300 "$exe" -m arbace.go.run "$root/test/goi/run" "go.$dir.$name" \
+      > "$t/depth-$name.out" 2> "$t/depth-$name.err.raw") || st=$?
+    stderr_head "$t/depth-$name.err.raw" > "$t/depth-$name.err"
+    if [ "$st" = 2 ] && [ "$(cat "$t/depth-$name.err")" = "$want" ]; then
+      echo "goi test: $name${lim:+ (ARBACE_GOI_DEPTH=$lim)} ends in goi's depth error"
+    else
+      echo "goi test: $name${lim:+ (ARBACE_GOI_DEPTH=$lim)}: status $st, not goi's depth error (2):" >&2
+      head -3 "$t/depth-$name.err.raw" >&2; fail=1
+    fi
+  done
+  return $fail
+}
+
 # run_tests [--gc] [--regen]: goi's interpreter tests, test/goi/run/go/t/NAME.ae: each program run
 # by bin/goi run, its standard output, standard error (up to the goroutines' traces) and exit
 # status against NAME.out, NAME.err, NAME.exit; --gc builds each with gc (printed by repr/go)
@@ -449,6 +486,7 @@ run_tests() {
     fi
   done
   echo "goi test: the interpreter's programs (test/goi/run): $pass passed, $failn failed"
+  depth_tests "$exe" "$t" || failn=$((failn + 1))
   # Go forms at the REPL (test/goi/repl.ae, its package on ARBACE_PATH: test/goi/repl-pkgs)
   st=0
   ARBACE_PATH=$root/test/goi/repl-pkgs${ARBACE_PATH:+:$ARBACE_PATH} "$exe" "$root/test/goi/repl.ae" > "$t/repl.txt" 2>&1 || st=$?
