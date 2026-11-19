@@ -1630,6 +1630,9 @@
             v (cond-> v (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
             ;; (h-cpp-consteval, the checker: a constinit variable's initializer a constant expression too, [dcl.constinit]/2)
             v (cond-> v (and (checking?) (not (:constexpr n)) (:constinit v)) (assoc :cx-constinit true :cx-range (:range n)))
+            ;; (queue 463, the checker: a static data member's access, [class.access]/1, judged where it is named)
+            v (cond-> v (and (checking?) (:cls home)) (assoc :cx-cls (:cls home))
+                    (and (checking?) (:cls home) (#{:private :protected} *member-access*)) (assoc :cx-access *member-access*))
             ;; (CX12, the checker: the type's member names' access, an unqualified declarator at namespace scope)
             v (cond-> v (and (checking?) (empty? q) (= :ns (:kind home)) (not (header-node? n)))
                 (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl {:range (:range n)}))]
@@ -4076,7 +4079,7 @@
       (:lambda ctx) nil
       (and f (:tinst f)) nil
       f (if-let [cid (:cls f)] (when-let [rs (cx-enclosing-classes cid)] {:records rs :fn f}) {:records #{} :fn f})
-      :else (if-let [cid (:cls (:scope ctx))] (when-let [rs (cx-enclosing-classes cid)] {:records rs}) {:records #{}}))))
+      :else (if-let [cid (or (:cx-member-of ctx) (:cls (:scope ctx)))] (when-let [rs (cx-enclosing-classes cid)] {:records rs}) {:records #{}}))))
 
 (defn- cx-friend-of?
   "GetFriendKind: whether class `c` may befriend the context `cx`: a friend function of its function's name, a friend
@@ -4145,6 +4148,16 @@
               (fail :access "'" nm "' is a member of '" (:name (abi/cls dc)) "', an inaccessible base of '" (:name (abi/cls nc)) "'")
               (fail :access "'" nm "' is a " (name a) " member of '" (:name (abi/cls dc)) "'"))))))))
 
+;; (queue 463: a static data member's access; in a constraint's satisfaction, [temp.constr.atomic]/3, the access is checked in
+;; the constrained declaration's context, which a friend declaration of a template may name -- not judged, the satisfaction
+;; doubtful, so that no friend's access makes a false constraint failure: cpp2a/concepts-access2.C)
+(defn- cx-static-access!
+  [ctx dc nm a nc]
+  (if *constraint-doubt*
+    (try (cx-access! ctx dc nm a nc nil)
+         (catch arbace.lang.ExceptionInfo x (if (= :access (:codegen/refused (ex-data x))) (doubt!) (throw x))))
+    (cx-access! ctx dc nm a nc nil)))
+
 (defn- cx-ctor-access!
   "CX12 (the checker): the constructor an initialization `r` calls, private or protected, inaccessible in its context
   ([class.access]/1-2; [class.protected]: a protected one through a derived class's member or friend; the rest of CP313
@@ -4152,13 +4165,28 @@
   a namespace-scope variable's initializer alone)."
   [ctx r]
   (when (and (checking?) (map? r))
-    (when-let [fid (or (when (= :ctor (:i r)) (:fn r)) (when (= :ctor (:i (:then r))) (:fn (:then r))))]
+    (when-let [fid (or (when (= :ctor (:i r)) (:fn r)) (when (= :ctor (:i (:then r))) (:fn (:then r))) (:cx-ctor r))]
       (let [f (fnd fid)]
         (when (and (#{:private :protected} (:access f)) (:cls f) (not (:implicit f)))
           (if (:cx-global ctx)
             (fail :access "'" (:name f) "' is a " (name (:access f)) " member of '" (:name (abi/cls (:cls f))) "'")
             (cx-access! ctx (:cls f) (:name f) (:access f) nil nil))))))
   r)
+
+;; (queue 463, the checker: the destructor a variable's definition makes potentially invoked, [class.dtor]/15: "a program
+;; is ill-formed if a destructor that is potentially invoked is deleted or not accessible from the context of the
+;; invocation"; [basic.stc.static], [basic.stc.auto], [stmt.dcl]: a variable of class type, or an array of them, of static
+;; or automatic storage duration; the user-declared destructor's access as cx-ctor-access! judges a constructor's)
+(defn- cx-dtor-access!
+  [ctx t]
+  (when (and (checking?) t (not (abi/ref? t)))
+    (let [u (loop [u (abi/unq t) k 0] (if (and (abi/arr? u) (< k 8)) (recur (abi/unq (:of u)) (inc k)) u))]
+      (when (abi/class? u)
+        (when-let [d (some-> (:dtor (abi/cls (:id u))) fnd)]
+          (when (and (#{:private :protected} (:access d)) (:cls d) (not (:implicit d)))
+            (if (:cx-global ctx)
+              (fail :access "'" (:name d) "' is a " (name (:access d)) " member of '" (:name (abi/cls (:cls d))) "'")
+              (cx-access! ctx (:cls d) (:name d) (:access d) nil nil))))))))
 
 (defn- class-init
   "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
@@ -4339,7 +4367,9 @@
     (when (and (checking?) (:deleted-sure (fnd fid))) (fail :overload "call to a deleted function " (:name (fnd fid))))
     (let [f (fnd fid)]
       (cond
-        (:trivial f) (if value? {:i :zero} {:i :none})
+        ;; (queue 463, the checker: the trivial default constructor chosen, a user-declared defaulted one among them, kept
+        ;; for its access, cx-ctor-access!, [class.access]/1 with [class.default.ctor]: `class B { B() = default; }; B b;`)
+        (:trivial f) (cond-> (if value? {:i :zero} {:i :none}) (and (checking?) (not (:implicit f))) (assoc :cx-ctor fid))
         (and value? (or (:implicit f) (:defaulted f))) {:i :zero-then :then {:i :ctor :fn fid :args []}}
         :else {:i :ctor :fn fid :args (call-args f [] {:scope (:scope f)})}))))
 
@@ -4460,7 +4490,8 @@
         :else (fail :init "several values for a scalar"))
       (nil? src)
       (cond
-        (abi/class? tu) (default-ctor-init (:id tu) (= style :value))
+        ;; (queue 463, the checker: default-initialization's constructor, its access as class-init's, [dcl.init.general]/7.1)
+        (abi/class? tu) (cx-ctor-access! ctx (default-ctor-init (:id tu) (= style :value)))
         (abi/arr? tu) (let [el (init-for (:of tu) nil ctx style)] (if (#{:none :zero} (:i el)) el {:i :list :items [] :fill el :n (:n tu)}))
         (= style :value) {:i :zero}
         :else {:i :none})
@@ -4683,6 +4714,10 @@
   (let [e (first es)]
     (case (if (empty? es) :fn (:e e))
       :var (let [v (var* (:id e))]
+             ;; (queue 463, the checker: a static data member named by an id-expression, its access through the naming class:
+             ;; the qualifier's, else the function's class it is looked up from, [class.access.base]/5)
+             (when (and (checking?) (:cx-access v))
+               (cx-static-access! ctx (:cx-cls v) (:name v) (:cx-access v) (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls))))
              (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)) (not *unevaluated*))
                (capture-field ctx (:id e))
                (var-node (:id e))))
@@ -5078,7 +5113,10 @@
         (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
                               (field-node (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) (:cls e) (:i e)))
         (= :indirect (:e e)) (reduce (fn [o [c i]] (field-node o c i)) (if (= :pr (:cat obj)) (materialize obj) obj) (:chain e))
-        (= :var (:e e)) {:op :comma :l obj :r (var-node (:id e)) :ty (:ty (var* (:id e))) :cat :lv}
+        (= :var (:e e)) (let [v (var* (:id e))]
+                          ;; (queue 463, the checker: a static data member named by a class member access, o.m, [expr.ref]/7.1)
+                          (when (and (checking?) (:cx-access v)) (cx-static-access! ctx (:cx-cls v) nm (:cx-access v) (or qcid cid)))
+                          {:op :comma :l obj :r (var-node (:id e)) :ty (:ty v) :cat :lv})
         (#{:fn :tmpl} (:e e))
         (let [tm (vec (keep (fn [[_ x]] (when (= :tmpl (:e x)) (:id x))) (class-lookup (or qcid cid) nm)))
               t (or (node-text n) "")]
@@ -6769,7 +6807,10 @@
                      (let [e (analyze ctx k)
                            r (if (abi/class? (abi/unq (:ty e))) e (rv e))
                            t (abi/unq (:ty r))]
-                       {:op :throw :ety t :init (init-for t e ctx :copy) :ty abi/void :cat :pr})
+                       ;; (queue 463, the checker: the exception object's destructor potentially invoked, [except.throw]/5)
+                       (let [i (init-for t e ctx :copy)]
+                         (cx-dtor-access! ctx t)
+                         {:op :throw :ety t :init i :ty abi/void :cat :pr}))
                      {:op :throw :ty abi/void :cat :pr})
     (fail :expr "expression " (:kind n) (when (System/getenv "CPP_HDR_TRACE") (str " at " (pr-str (loc-of (get-in n [:range :begin]))))))))
 
@@ -7093,11 +7134,13 @@
                              (let [c (count (filter #(= (:name (var* %)) (:name v)) @(:statics ctx)))]
                                (upd-var! id assoc :disc (dec c) :init-node (first (kids d))))
                              (let [init (decl-init ctx id d)]
+                               (cx-dtor-access! ctx (:ty (var* id)))
                                (cx-check-constant! (var* id) init)
                                (enter! (:scope ctx) (or (:name d) "") {:e :var :id id})
                                (upd-var! id assoc :sinit init)
                                (cond-> {:s :static-local :var id} (checking?) (assoc :cx-at (:range d)))))
                          (let [init (decl-init ctx id d)
+                               _ (cx-dtor-access! ctx (:ty (var* id)))
                                _ (cx-check-constant! (var* id) init)
                                t (:ty (var* id))
                                ;; a constexpr local, or a const integral one, initialized by a constant: folded (clang
@@ -7917,12 +7960,19 @@
         sc (or (:def-scope v) (:scope v))
         ;; (CX12, the checker: a namespace-scope variable's own initializer, a context no friend declaration names --
         ;; friendship is granted to functions and classes, [class.friend]/1-2 -- nor a derived class's member)
-        ctx (cond-> {:scope sc :statics (atom [])} (and (checking?) (= :ns (:kind sc))) (assoc :cx-global true))
+        ;; (queue 463: a static data member's definition, `int A::x = ...;`, its initializer in A's context, [class.static.data]/3)
+        ctx (cond-> {:scope sc :statics (atom [])}
+              (and (checking?) (:cx-cls v)) (assoc :cx-member-of (:cx-cls v))
+              (and (checking?) (= :ns (:kind sc)) (not (:cx-cls v))) (assoc :cx-global true))
         init (:init v)]
+    ;; (queue 463, the checker: a refusal with no node of its own -- a default-initialized variable's constructor or
+    ;; destructor, cx-ctor-access! and cx-dtor-access! -- at the variable's declaration, not the last node analyzed before)
+    (when (and (checking?) *at* (:cx-decl v)) (reset! *at* (:cx-decl v)))
     (binding [*cutoff* Long/MAX_VALUE]
       (let [i (cond
                 (nil? init) (init-for (:ty v) nil ctx :value)
                 :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl")))
+            _ (cx-dtor-access! ctx (:ty (var* vid)))
             _ (cx-check-constant! v i)]
         ;; a scalar initialized by a constant expression: constant initialization ([basic.start.static])
         ;; (CP378 (a): a constexpr variable's or a const integral one's initializer manifestly constant-evaluated)
