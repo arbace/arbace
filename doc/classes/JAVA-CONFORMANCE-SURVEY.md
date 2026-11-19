@@ -5044,3 +5044,38 @@ records it, and then decides the class `interp-volatile`.
     whole interp level is simplest (about 72 minutes).
   - `bin/diffcheck` (the Java forms interpreted against translated), `bin/java-check --essential`, the suite and the
     oracle as the essential gate runs them.
+
+## As built: JCS361 (a), the jtreg `:stdout` tests' golden files (2026-11-19, queue 432; branch `432-java-golden`, from next dfce89df7)
+
+JCS361 (a), JCV2's way extended to the 207 jtreg `:stdout` tests (the user's direction of 2026-11-19, CoMaIn lever 9: Java's
+judge). **The golden files.** `test/java/golden/ID.out`: the test's expected stdout, byte for byte, written from its source set
+(jdk26u's test tree at the platform's pin) and the Java SE specification before it was compared with anything; then its
+SHA-256 and length checked against the JDK's recorded stdout (`test/java/ref-jdk26.edn`'s `:out`, `:out-len`, every action:
+t08142's two runs print the same). The JDK was not run: the 153 files met their digests from the source (three after a second
+reading: TinyBuffers' StreamDecoder buffer sizes, RC4AliasPermCheck's `ARCFOUR`, one review row). **The review.**
+`test/java/golden/AREA.edn` (hotspot-compiler 46, hotspot-runtime 10, langtools 42, jdk-run 23, jdk-other 32): per test
+`{:test PATH :lines [[line text basis why] ...]}`, a row per line (a range `[[A B] regex ...]` for generated lines, none used
+but by the format), basis `:src` (the test's own code), `:jls`, `:api`, `:jdk` (the implementation alone: exception
+messages such as `NegativeArraySizeException: -1`, SunJCE's names, the proxy class's `jdk.proxy1.$Proxy0`, StreamDecoder's
+buffer sizes, the javax/script tests' message for no engine, ...; 52 of 665 rows), `:no-newline true` for t07644's
+`printf("Done")`. **Left** (`test/java/golden/left.tsv`, 54, the reason in `verdicts.edn`'s why): 19 whose two JDK runs
+disagreed (`:det false`), 13 printing identity hash codes, 2 a key's `Object.toString` hash over its encoding, 11 the
+host's environment or threads' timing (interfaces, ICMP, `java.home`, `test.src`'s path, the properties, the VM's options
+and dcmd listing, the Unix user), 5 fuzz-generated programs, the heap-size count of TestOutOfMemory, Reflect's
+`getDeclaredMethods` order, SignWithOutputBuffer's nondeterministic second action, TestOptimizeStringConcat's 1 MB.
+
+**The judge.** `java.check/verdict-of` gives a would-be `:stdout` test with a golden file `:golden` ("its golden file
+test/java/golden/ID.out, reviewed from its source (JCS361 (a))"); `golden-path` names that file, so `plan`'s `golden` line and
+`judge_golden` judge it at interp and compiled as the jls programs (status 0, stdout equal byte for byte). `bin/java-check
+golden` checks the reviews (every golden file reviewed once, each line's text, the rows covering every line, a basis and a
+why; a left test with a golden file fails); `--oracle` each action's digest; `--control` each golden file with its middle
+byte changed must fail the review and leave the recorded digest (the gate's `java-check-judge` runs `golden --control`;
+`test/java/golden/` among `:java-judge`'s inputs). `verdicts.edn`: 3,103 `:status`, 54 `:stdout`, 1,362 `:golden` (168 run
+tests with a golden file). The moved tests' failing rows in `check-interp.edn` (3) and `check-compiled.edn` (13) read "(expected
+0)", own-row's rule; their differ rows stay differ (the golden file is the record's output).
+
+**Proved** (light, no test run: the digest suffices): `bin/java-check golden --oracle --control` per batch and over all:
+153 golden files, 154 actions' digests and lengths the recorded ones, 665 rows, 153 of 153 controls fail; bin/java-check's own
+`judge_golden` (extracted, run on each file): 153 pass their golden file, 153 mutants (the middle byte changed) differ;
+`bin/java-check verdicts --verify` as written; `bin/crops-score --judge --strict` 0 problems. **Independence:** the judge's
+mixed fact 14,080 own and 414 the JDK's (0.986) to 14,386 and 108 (0.996); Java's independence 59.72 to 59.92.
