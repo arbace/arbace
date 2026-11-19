@@ -580,7 +580,13 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   (`world/unresolved-cause`). A test refused so falls in the world's classes by the area of the class
   named (test/java/divergences.edn). The runtime's and javac's builds have no header or members
   failure, so their translations do not change. Unit tests: `bin/j2g-unit` (test/j2g/unit.ae, the
-  fixture test/j2g/unit/unresolved).
+  fixture test/j2g/unit/unresolved). Since queue 447 (2026-11-19) a failure naming no such class takes
+  the cause of the first class it is built on that has one (`world/related-classes`: its supertypes in the
+  compilation, breadth first, then its enclosing classes): a subclass reading a static field it inherits
+  (`No static field isWindows in t08314/DefaultLocaleTestRun`, a launcher test extending jtreg's TestHelper,
+  whose members name `java.util.spi.ToolProvider`) or a member class setting its holder's
+  (`Bad set! target: testExitValue`). Only the messages change: what is analyzed and translated does not
+  (the fixture test/j2g/unit/unresolved2).
 - **The analysis alone** (JCS265 (b), decided 2026-11-08, built 2026-11-08: doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   "As built: JCS265 (b)"). `bin/j2g --analyze-only` runs the load (`w/load-world`: read, enter, headers,
   members, bridges, analysis, the variants applied) and stops: nothing is reached, translated or written but
