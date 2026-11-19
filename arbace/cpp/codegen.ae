@@ -429,7 +429,7 @@
 
 (defn- run-cleanup! [c]
   (cond
-    (or (:try c) (:terminate c) (:filter c) (:eh-only c) (:delete c) (:guard-abort c)) nil
+    (or (:try c) (:terminate c) (:filter c) (:eh-only c) (:delete c) (:guard-abort c) (:free-exn c)) nil
     (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] (not (:might-throw c))))
     :else
   (cond
@@ -483,7 +483,8 @@
 ;; cleanups from the innermost out, dispatches to a try's handlers by llvm.eh.typeid.for, and resumes past the outermost.
 ;; The cleanup stack's entries beside the destructors: {:try handlers} (each {:ti type_info-or-nil :label l}),
 ;; {:end-catch true}, {:eh-only true :addr :cls} (a constructed base or member while its constructor runs), {:delete p
-;; :size n} (new's storage while its initializer runs), {:terminate true} (the bottom of a noexcept function), {:filter true}
+;; :size n} (new's storage while its initializer runs), {:free-exn x} (a thrown object's storage while its initializer runs,
+;; __cxa_free_exception: clang's FreeException, EmitAnyExprToExn; queue 445), {:terminate true} (the bottom of a noexcept function), {:filter true}
 ;; (the bottom of a `throw()` function before C++17: clang's EHFilterScope of no types, EmitStartEHSpec; queue 351).
 
 (def ^:dynamic *no-eh* false) ; inside a landing pad: calls are plain
@@ -516,6 +517,8 @@
     (:guard-abort c) (do (declare! "__cxa_guard_abort" 'void '[ptr] :nounwind true)
                          (emit! (list 'call 'void (gsym "__cxa_guard_abort") [['ptr (:guard-abort c)]] :attrs [:nounwind])))
     (:eh-only c) (call-dtor! (:cls c) (:addr c) (:vtt c))
+    (:free-exn c) (do (declare! "__cxa_free_exception" 'void '[ptr] :nounwind true)
+                      (emit! (list 'call 'void (gsym "__cxa_free_exception") [['ptr (:free-exn c)]] :attrs [:nounwind])))
     ;; (queue 392: the named return value while unwinding: destroyed, its flag not read)
     (:nrvo-flag c) (call-dtor! (:cls c) (:addr c) (:vtt c))
     (:delete c) (if (:dealloc c)
@@ -1741,7 +1744,11 @@
              (let [_ (declare! "__cxa_allocate_exception" 'ptr '[i64] :nounwind true)
                    _ (declare! "__cxa_throw" 'void '[ptr ptr ptr])
                    x (val! (list 'call 'ptr (gsym "__cxa_allocate_exception") [['i64 (abi/size-of t)]] :attrs [:nounwind]))
+                   ;; (queue 445: the storage freed when the initialization throws, eh/uncaught4.C's `throw e()`)
+                   d0 (count (:cleanups @*f*))
+                   _ (swap! *f* update :cleanups conj {:free-exn x})
                    _ (emit-init x t (:init e))
+                   _ (swap! *f* update :cleanups #(subvec % 0 d0))
                    ti (eh-typeinfo! t)
                    cid (when (abi/class? t) (:id t))
                    d (if (nontrivial-dtor? cid) (want-fn! (:dtor (abi/cls cid)) 1) 'null)]
