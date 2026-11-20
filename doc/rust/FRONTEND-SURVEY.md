@@ -5470,3 +5470,18 @@ bits against LLVM's decimal is now compared by value, `canon-fp`: none of the 85
 Before it, the largest refusals were alloc's causes not yet carried to core's export: core-check's `export-entry` carries `:nested-attrs` but not
 alloc-check's crate-private `:fns`, `:impls`, `:traits` and `:adts` (a `<impl {}>` path, v0 of the type `[:err]`, a missing layout);
 then the named constants core's export leaves unevaluated (`U128_MAX_DEC_N`, `char::MAX_LEN_UTF8`) and the static `POW10`.
+
+### std's 325 items, first measure
+
+`lib-unit keys std` (325), `export std` (std's interface pass, two rounds, then the bodies: 1 h 6 min, 2.7 GB; 266 bodies exported),
+`build std` (2 min 32 s, 2.3 GB: 172 runtime bodies), `compare std` (1 min 17 s, 1.1 GB, std's units read as fragments): **61 of 325
+equal**, 51 differ, 213 refused (120 not exported: the export's build refusals, "a method call without its callee" 33, "a static's
+value" 19, inference left open 18, and the 10 `__rustc` items, whose keys the census names by their `__rustc` symbol path; 45 a layout;
+14 a callee; 17 constants; 7 an unsizing cast's vtable), the control differing.
+
+| crate | items | equal | differ | refused |
+|---|---|---|---|---|
+| alloc | 25 | 18 | 5 | 2 |
+| core | 275 | 109 | 85 | 78 |
+| std | 325 | 61 | 51 | 213 |
+| **total** | **625** | **188** | 141 | 293 |
