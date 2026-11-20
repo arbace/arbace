@@ -9,7 +9,9 @@ stage).
 
 ```
 bin/crops-score                       the checkout's records, every crop: a table, then each crop's evidence
-bin/crops-score --ref REF             REF's records, read by git show (no checkout)
+bin/crops-score --ref REF             REF's records, read by git show (no checkout): every input, crops.edn and
+                                      independence.edn too (queue 507; the checkout's only when REF has none), the
+                                      checkout's :at for REF merged over them
 bin/crops-score --newest              each crop on its newest held branch (crops.edn's :branches over refs/remotes/mac,
                                       the newest by committer date whose test/reap/cells.edn has the crop's row)
 bin/crops-score --crop C              one crop (clojure java go c cpp ocaml scheme haskell rust llvm python)
@@ -20,6 +22,8 @@ bin/crops-score --judge               the checkout's matrix judged afresh by rea
                                       difference from test/reap/matrix.edn is a problem (exit 1)
 bin/crops-score --strict              a fact of independence.edn the tree's gate steps refute is a problem (exit 1)
 bin/crops-score --self-test           the rulings' own tests (fabricated cases, a negative control each; also run by --judge)
+bin/crops-score --self-test-ref       queue 507: on a clean tree --ref HEAD equals the checkout's scores row by row; its
+                                      control (independence.edn from a working tree behind HEAD) must differ
 bin/crops-score --record              the checkout's scores of every crop written into test/crops/scores.edn (CSP1 (b));
                                       without it, scoring the checkout (no --ref, --newest, --input) compares each crop
                                       with its line there, and any difference is a problem (exit 1)
