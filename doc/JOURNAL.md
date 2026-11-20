@@ -13833,3 +13833,15 @@ lib-unit export std (std's interface pass then the bodies, 1 h 6 min, 2.7 GB), b
 `__rustc` items mis-keyed by the census), the control differing. With alloc's 18 of 25 and core's 109 of 275: 188 of the five
 cases' 625 items in these crates equal to std's IR. Jobs now under `ulimit -v 8388608` (the coordinator's rule); core's
 replacement interface pass restarted with one round (its second round ran four times slower than the first: about 4 h).
+
+## 2026-11-20: rust-c6-1120: C4's switch built, its measure running; DECISION C4-1 (std's names)
+
+doc/rust/FRONTEND-SURVEY.md, "As built: C4's switch". The interface assembled from the crates' native passes (alloc-check
+--assemble, bin/rust-front std-iface-native) and rsi-build's RF_NATIVE_IFACE=1 (that interface, the computed StableCrateIds,
+inputs.tsv for the case inputs' writer, C4 own only when no input is the helper's) are built; std's pass 4,644 of 4,644 equal (the
+:self-param compare fixed); core's replacement pass (core's facts taken out, all 378 module files) never ran for the whole crate
+before: one round takes 65 min (2.4 GB), the second ran four times slower and was stopped; the one-round pass and the measure after
+it (std-iface-native, the five samples' rsi-build on the native interface against the helper's baseline, 5 of 5 own) are running
+in the worktree (.tmp/c6/chains2.sh), not recorded here. DECISION C4-1: std's names (std-names.edn, the helper's: modules,
+macros, lang items, generics, aliases, traits) native too before C4 counts own (recommended), or C4 own on the interface and the
+identities alone.
