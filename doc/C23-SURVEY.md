@@ -6449,3 +6449,30 @@ Queue 342's review (the VM's report `342-review-nall-c-cpp-go.md`, findings 1 an
   (repr/c and arbace/c are not among its exclusions), which nearly every step on stage 0 declares: C's change reruns the whole
   `--full` (a count from steps.edn's inputs and hosts: 178 of its 192 steps, the 14 left the seed's, stage 0's, javac's and a few
   of no input), while C++'s parse.ae, out of `:tools`, reruns the `:cpp` steps and the executables' (49).
+
+## As built: the print level's own verdicts on the files cc's tree does not give (queue 495, 2026-11-20, branch `495-c-print-own` from mac/next `939037429`)
+
+C's judge held gcc 15.2's recorded acceptance (`test/repr/c/parse-gcc.tsv`, CS61 (a)) for the print level's files the reader
+rejects and cc's tree does not give: 32 today (the facts' 35 were c-indep-b1's count), 16 of them judged by their dg-error line
+and words since queue 409 (`own-rejects?`), 16 by gcc's status. Now all 32 by their own verdict (`arbace.repr.c.rtcheck/own-verdict`):
+
+- `own-rejects?` reads a dg-error regexp's leading column as gcc-dg.exp's process-message does ("N:" the column the error must
+  be at, "-:" none: c23-digit-separators-2's `12:missing terminating`), and takes the dg check's reviewed wording families of the
+  file (`test/c/dg-wording.edn`, `arbace.c.dg/family-explains?`, now public): cc's words for gcc's at the same line
+  (c23-attr-syntax-6/-7, c23-elifdef-2, embed-7/-8). 22 files own-rejects.
+- `test/repr/c/print-own.edn`: the 10 others, each judged by hand from C23 and its own directives, `:invalid` with the reader's
+  first error `:at` (LINE:COL: MESSAGE) and the reasoning (`:basis` `:c23-tu`, `:dg-line`, `:dg-status`; `:why`). Accept
+  "own-invalid" only while the reader's first error is exactly `:at`; an entry whose row is not fails the judgment as stale. Seven
+  are dg-do preprocess files whose translation unit C23 makes invalid at that first error (c23-ucnid-1-utf8, c23-va-opt-1,
+  embed-5, -6, -13, -14), plus c23-complit-5 and embed-10 at a stated dg-error line by C23's syntax, c23-ucnid-1 and
+  gcc.dg/cpp/embed-4 at a stated line for another reason (a status verdict, as gcc's was). `:counted-out` is empty: no file's
+  validity is an implementation choice the corpus leaves unstated.
+- Three `:roundtrip-own` controls (`test/c/controls.edn`): the recorded verdict's words (ucnid-1-utf8 against embed-6, the same
+  5:1), its line (embed-10 against gcc.dg/cpp/embed-4) and the wording families (attr-syntax-6 against c23-elifdef-2's line 46).
+- The no-gcc driver (`bin/lib/repr-c/roundtrip`) fails when the judge stops before every corpus's summary (it passed a judge
+  that threw after the first corpus).
+
+Proofs: `bin/repr-c roundtrip --only` over the 32: before 16 own-rejects, 16 both-reject; after 22 own-rejects, 10 own-invalid,
+0 both-reject, 32 pass, the five `:roundtrip-own` controls differ; an `:at` changed by one column fails as stale. `c.judge-test`'s
+three own-verdict tests, 29 assertions, 0 failures. C's judge `{:self 14883 :recorded 132}`: (14883 + 0.5 x 132) / 15015.
+Main host: `bin/repr-c roundtrip --record` (no gcc) rewrites roundtrip-results.edn's 32 rows' acceptance labels.
