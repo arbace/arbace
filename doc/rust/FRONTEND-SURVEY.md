@@ -5460,6 +5460,13 @@ again 28 min): **109 of 275 equal**, 85 differ, 78 refused (30 not exported, 14 
 unevaluated, 5 a callee, 2 the static `POW10`, 5 others), 3 symbols absent; the v0 refusals of crate-private impls and ADTs are gone
 (223 runtime bodies, 202 before), the control differing.
 
+The 85 that differ lead with one cause: **rustc 1.99's -O0 inlines `#[inline(always)]` callees in MIR** (std's IR has no call of
+`cast_unsigned`, `MaybeUninit::assume_init_ref` or `CStr::from_bytes_with_nul_unchecked`, each `#[inline(always)]`: their bodies
+are in the caller; ours calls them), which also moves the callers' locals (the first `alloca`s that differ); then
+`const_eval_select`'s runtime function (`cell::panic_already_borrowed::do_panic`'s `runtime`, where ours calls the wrapper). The next
+port is rustc_mir_transform's Inline as -O0 runs it, `#[inline(always)]` callees alone. (A float constant written as its double's
+bits against LLVM's decimal is now compared by value, `canon-fp`: none of the 85 moves by it alone.)
+
 Before it, the largest refusals were alloc's causes not yet carried to core's export: core-check's `export-entry` carries `:nested-attrs` but not
 alloc-check's crate-private `:fns`, `:impls`, `:traits` and `:adts` (a `<impl {}>` path, v0 of the type `[:err]`, a missing layout);
 then the named constants core's export leaves unevaluated (`U128_MAX_DEC_N`, `char::MAX_LEN_UTF8`) and the static `POW10`.
