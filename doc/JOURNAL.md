@@ -13371,3 +13371,45 @@ DECISION JCS50-1 (the survey, "As built: JCS50 (b)"): the link into the build tr
 `--release` need the host `:jdk`; options (a) ct.sym made by Arbace with CreateSymbols on javac's tool from jdk26u's
 `src/jdk.compiler/share/data/symbols` and the own platform, (b) the build's ct.sym committed as a 6.3 MB xz record, (c) the
 audit taught the pin; recommended (a), (b) as its bridge.
+
+## 2026-11-20: JCS50-1 (a), the own ct.sym (branch `jcs50-release`)
+
+The user decided JCS50-1 (a): ct.sym made by Arbace, so that Java's independence never drops; jcs50-release waits for it. The
+constraints: no javac tool rebuild for it if another way serves, a bounded run (about 8 GiB a process, chunks if need be, the heavy
+lock above 4 GiB), made once and cached by its inputs, pinned, out of every gate step but a weekly and an oracle one.
+
+Studied: jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259, `make/modules/jdk.compiler/Gendata.gmk` (CreateSymbols' build-ctsym
+and its arguments), `make/langtools/src/classes/build/tools/symbolgenerator/CreateSymbols.java` (run, not vendored: read by repr/java
+at make time from the jdk26u checkout at the pin, nothing of it committed), `src/jdk.compiler/share/data/symbols/` (its input), the
+build tree's `spec.gmk` (SOURCE_DATE 1787576400, JDK_SOURCE_TARGET_VERSION 26, VERSION_PRE internal, USE_EXTERNAL_LIBZ true) and
+`support/symbols/included-modules`. Nothing copied into the tree: no doc/ARBACE.md or LICENSE.md entry (the made ct.sym is kept in a
+cache, not committed; its digest is).
+
+Done: CreateSymbols read on last night's javac tool (`javac-60886b4973e7356caf1b`, REPR_JAVA_STALE_OK=1) and interpreted there by
+`test/javac-platform/ctsym-run.ae` (gensrc-run.ae, the own platform's way for interpreted build tools); the JN7 alternative (compiled
+into javac's world's buildtools) rejected: a tool build each time, 4,400 more lines in every build, for a minute's run. First run:
+ExceptionInInitializerError in java.lang.constant (ConstantDescs and PrimitiveClassDescImpl initialize each other; entered from
+PrimitiveClassDescImpl the cycle leaves ConstantDescs' CD_int null): the runner initializes ConstantDescs first, as a JDK's boot has it
+(a jrt follow-up noted in the survey). Second run, over the own platform's cache's modules: 21,054 entries, all but 58 equal to the
+build's; the 58 are Q/*/module-info.sig with a ModuleTarget attribute, from the jmods' descriptors the cache's modules carry where the
+build passes its exploded image. Third run, over an exploded view (the cache's modules with its descriptors/MODULE/exploded.class, the
+own build's exploded descriptors): byte for byte the build's ct.sym, 642d31ba38e4b2222b1992206863983e87fdc529d99ee4fe2d6b77c7d31ba6f4.
+One process, 50 to 106 s, 1.75 to 1.8 GiB peak in five runs: not chunked (well under 8 GiB; per-module chunks would change the output,
+CreateSymbols strips annotations whose class no module holds and maps packages to modules across modules), no heavy lock (under 4 GiB).
+
+Built: `test/javac-platform/ctsym.bash` (sourced by bin/javac-vendor: ct_sym_make, ct_sym_own, ct_sym, ct_sym_build_make), the verbs
+`ct-sym-own [--check]`, `ct-sym-rebuild`, `ct-sym-oracle`, `ct-sym-build [--check]`; `jdk/javac/ct-sym-build.edn` (the build's arguments,
+derived from the build tree, checked by the oracle tier); `jdk/javac/ct-sym.sha256` now `# kind: own` (the digest unchanged, the own
+file's); the cache in the own platform's directory, `ct-sym-KEY20/ct.sym` (KEY over the platform pin, ct-sym-build.edn, CreateSymbols.java,
+the symbols data and the scripts), made on a miss by the javac-tool step (`tool_platform`, hit or built; `tool --check` needs it made)
+and by `ct-sym-own`, never by a check; gate steps `javac-ctsym-rebuild` (weekly: made afresh, the pin's, with a negative control: one
+byte changed must differ) and `javac-ctsym-oracle` (the cache's file the build tree's byte for byte, ct-sym-build --check), javac-tool's
+:pins and :inputs; crops-score's `:requires-line` takes a vector, Java's read, eval, AOT and print facts require both pins' `# kind: own`
+(self-test and control in test/crops/score.ae; on the tree, the ct.sym pin without the marker holds the four stages at 0.5, checked and
+restored). The cache made: ARBACE_GATE_EXES/platform-f78bf8a60472ee97bef0/ct-sym-5bb408863f540bb96133. CLAUDE.md updated (and the weekly
+step named, claude-md-test).
+
+Checks: ct-sym-own (made, the pin's), ct-sym-own --check, ct-sym-oracle (byte for byte), ct-sym-rebuild (the pin's; control fails as it
+must), ct-sym-build --check, bin/crops-score --judge --strict and --self-test, test/gate/{chain-needs,caches,crop-tier,crops}-test.bash,
+caches-test --coverage, claude-md-test. No tool build; the 49 rows stay the next gate's (javac's key moves with bin/javac-vendor, the pins
+and ct-sym-build.edn).

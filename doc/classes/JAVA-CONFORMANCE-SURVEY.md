@@ -5120,7 +5120,8 @@ Arbace accepts them), print 2 (the same two: the printed Java accepted, its clas
 `bin/crops-score --record`. The negative control: `bin/repr-java javac --release 7 X.java` and `--release 27` still
 "release version N not supported", status 2 (proven on the JDK above: the releases are ct.sym's, 8 to 26).
 
-**DECISION JCS50-1: where the platform's ct.sym comes from.** As built, `DIR/ct.sym` is a link into jdk26u's build
+**DECISION JCS50-1: where the platform's ct.sym comes from** (decided by the user the same day: (a); "As built: JCS50 (b), the own
+ct.sym" below). As built, `DIR/ct.sym` is a link into jdk26u's build
 tree (`images/jdk/lib/ct.sym`, the frozen JVM's image, checked by its pin). The audit (`test/gate/audit.ae`'s
 `outside-problems`) asks the host `:jdk` for any read under that image, and JOP6 (a) keeps the build tree to the oracle
 tier with the own platform: a Java step that compiles with `--release` (diagnostics, classes, print, interp's tool
@@ -5138,3 +5139,69 @@ build's; an hour; (c) as built, the build tree's copy, and the audit taught that
 *Recommended: (a)*, with (b) as its bridge if the next gate's audit must pass before (a) lands: (a) is JOP's own-platform
 rule applied to the releases (Arbace's output from jdk26u's sources), and CreateSymbols is one more JDK build tool on
 javac's tool, as JN7's and JFS48 (b)'s are.
+
+## As built: JCS50 (b), the own ct.sym (2026-11-20, branch `jcs50-release`; JCS50-1 (a), the user)
+
+The user took JCS50-1 (a) the same day, with constraints: no javac tool rebuild for it if any other way serves, a bounded run
+(about 8 GiB a process at most, in chunks if need be, under `bin/heavy-lock` above 4 GiB), made once and cached by its inputs,
+pinned, and out of every gate step but a weekly and an oracle one.
+
+**What the JDK build does** (jdk26u at baf63fb, `make/modules/jdk.compiler/Gendata.gmk`): `build.tools.symbolgenerator.CreateSymbols
+build-ctsym` (`make/langtools/src/classes/build/tools/symbolgenerator/CreateSymbols.java`, 4,396 lines; java.lang.classfile,
+java.nio.file, java.util.zip; javac's API only in the description-building verbs) over `src/jdk.compiler/share/data/symbols/symbols`
+(the releases 8 to 25 as `.sym.txt` histories, a file per module and release, 14 MB), the build's exploded image
+`$(JDK_OUTPUTDIR)/modules/` (the current release, 26), `SOURCE_DATE_EPOCH` (the zip's times), `JDK_SOURCE_TARGET_VERSION`,
+`VERSION_PRE` and `support/symbols/included-modules` (CT_MODULES, their transitive dependences and jdk.unsupported).
+
+**How it runs here: interpreted on javac's tool.** CreateSymbols is read by repr/java on javac's tool (with Gendata.gmk's four
+`--add-exports`), and its `main` run by the interpreter on that tool (`test/javac-platform/ctsym-run.ae` over `gensrc-run.ae`, as
+the own platform's interpreted build tools are, JCS359). The alternative was the JN7 way: CreateSymbols in javac's world's module
+`buildtools`, compiled into the tool by j2g. That would run compiled (faster) but needs a tool build each time the tool's world
+changes, puts 4,400 lines more into every tool build (j2g and Go's compile of javac's world are the build's bulk), and ties the
+ct.sym to a rebuild. Interpreted, it needs no rebuild (it ran on last night's tool, `javac-60886b4973e7356caf1b`), and it is fast
+enough: one process, 50 to 106 s (the host's load), 1.75 to 1.8 GiB peak, under the 4 GiB at which the heavy lock is due. So it is
+not chunked: one process is well under the 8 GiB bound, and per-module chunks would change the output (stripNonExistentAnnotations
+keeps an annotation only when its class is among all modules' classes, and a package's module is looked up across modules by
+release).
+
+**One finding, in jrt's class initialization order**: run as is, CreateSymbols' first `MethodTypeDesc.ofDescriptor` failed
+(ExceptionInInitializerError, NullPointerException in `ConstantDescs.<clinit>`). java.lang.constant's classes initialize each other in a
+cycle (ConstantDescs' `CD_int` is PrimitiveClassDescImpl's, whose constructor reads ConstantDescs' `BSM_PRIMITIVE_CLASS` and
+`CD_Class`), which completes only when ConstantDescs is entered first, as a JDK's boot always has it. `ctsym-run.ae` initializes
+ConstantDescs first. (A program that enters the cycle from PrimitiveClassDescImpl on Arbace meets the same error: worth a jrt
+follow-up, not this change's.)
+
+**The first comparison: 58 entries differ, then none.** Over the own platform's modules as they are, 21,054 entries, names and
+order equal, every `.sig` of releases 8 to 25 equal (CRC, length, compressed size), 58 different: `Q/*/module-info.sig`, 37 bytes
+longer, each with a `ModuleTarget` attribute (linux-amd64). The cache's modules carry the jmods' descriptors (the image's: javac
+sees them), the build passes its exploded image, whose descriptors have none. The own platform's cache keeps those too
+(`descriptors/MODULE/exploded.class`, own_build's step 1, equal to the build's exploded ones), so the run is given an exploded view
+(the cache's modules, their descriptors the exploded ones): **the made ct.sym is the JDK build's byte for byte**, SHA-256
+`642d31ba38e4b2222b1992206863983e87fdc529d99ee4fe2d6b77c7d31ba6f4`, the zip's deflated entries included (jrt's Deflater, a port of zlib
+1.3.2, against the build's system zlib, `USE_EXTERNAL_LIBZ := true`). So the pin's digest is unchanged; it is now the own file's.
+
+**Built** (`test/javac-platform/ctsym.bash`, sourced by `bin/javac-vendor`; its header):
+
+- `jdk/javac/ct-sym-build.edn`: the build's arguments as data (`:source-date-epoch "1787576400"`, `:release "26"`, `:version-pre
+  "internal"`, `:included-modules`, 61 modules), derived from the build tree by `bin/javac-vendor ct-sym-build`, re-checked by
+  `ct-sym-build --check` (the oracle tier's), never read from the tree otherwise.
+- `bin/javac-vendor ct-sym-own [--check]`: the own ct.sym in the own platform's cache, `ARBACE_GATE_EXES/platform-PIN20/ct-sym-KEY20/
+  ct.sym`, KEY the digest of platform.sha256, ct-sym-build.edn, CreateSymbols.java, the symbols data and the three scripts; made on a
+  miss (read, exploded view, run; the newest 3 keys kept) and required equal to the pin, else nothing is cached.
+- `jdk/javac/ct-sym.sha256`: `# kind: own`, the made file's digest. `ct_sym DIR` links the cached file as `DIR/ct.sym` (`bin/javac-vendor
+  platform`, `ct-sym DIR`), never making it but in `ct-sym DIR` (a miss leaves the platform without one, warned: --release refused);
+  with a build pin (no `# kind: own`), the build tree's file as before.
+- The gate: the javac-tool step makes it on a miss beside the own platform (`tool_platform`: hit or built; `tool --check` needs both
+  made) and links it into the checkout's `.tmp/repr-java-platform`; no check makes it. `javac-ctsym-rebuild` (`:phase :weekly`): made
+  afresh, the pin's byte for byte, and a negative control (the made file with a byte changed must differ). `javac-ctsym-oracle`
+  (`:phase :oracle`): the cache's file equal to the build tree's `images/jdk/lib/ct.sym`, and `ct-sym-build --check`.
+- crops-score: Java's read, eval, AOT and print facts require both pins' `# kind: own` (`:requires-line` takes a vector,
+  test/crops/score.ae, with a self-test and its control); on the tree, the ct.sym's pin without the marker holds the four stages at
+  0.5 (checked by hand and restored).
+
+**Runs** (each one process; wall, peak RSS): the read of CreateSymbols on the tool 11 s, 0.9 GiB; CreateSymbols 50 s to 106 s, 1.75
+to 1.8 GiB (five runs: the probe that met the initialization cycle, the ModuleTarget run, three over the exploded view); `ct-sym-own`
+all in 68 to 123 s; `ct-sym-rebuild` 65 s; `ct-sym-oracle` under a second.
+
+The on-Arbace proof of `--release N` (the 49 rows) is still the next gate's: the tool must hold ReleasePlatforms, and javac's key
+moved again (`bin/javac-vendor`, the pins and ct-sym-build.edn are in it).
