@@ -60,6 +60,13 @@ const unsigned long Py_Version = 0x030E0AF0;
 /* _PyByteArray_empty_string (Objects/bytearrayobject.c; queue 270): PyByteArray_AS_STRING of an empty bytearray */
 char _PyByteArray_empty_string[] = "";
 
+/* _PyRuntime (Python/pylifecycle.c's _PyRuntimeState; queue 475, 473-3 (a)): a C module built in Py_BUILD_CORE's mode
+   reads its static objects in place (_testclinic's deprecation checks: _Py_LATIN1_CHR, the one-character strings of
+   static_objects.singletons.strings), so the link gives it an address: sizeof(_PyRuntimeState) as ci lays out CPython
+   3.14.10's Include/internal/pycore_runtime_structs.h on LP64, 314016 bytes, zeroed. arbace/pyctypes binds the strings'
+   256 slots to str objects (bindStaticStrings); nothing else of it is filled. */
+struct pyi_runtime { long words[314016 / 8]; } _PyRuntime;
+
 /* Python/pyctype.c's tables (queue 270: the full API's Py_ISALNUM and friends read them inline; CPython 3.14.10, the
    PSF's license, LICENSE.md): the flags PY_CTF_LOWER 0x01, UPPER 0x02, DIGIT 0x04, SPACE 0x08, XDIGIT 0x10 of the
    ASCII characters (none above 127), and Py_TOLOWER's and Py_TOUPPER's maps. */
