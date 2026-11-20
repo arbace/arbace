@@ -3033,3 +3033,55 @@ below is CPU time (user + sys) unless named wall, base and head run back to back
 | goroot-check, a64i's runs summed (1,141 passing) | 303 | 141 | 2.15x |
 | goroot-check whole (--record, 3 jobs) | 382 (308 s wall in 4 pieces) | 206 (174 s wall) | 1.85x |
 | bin/a64i check | 113 (117 s wall) | 111 (117 s wall) | the eval's builds on stage 0 and the lockstep's ptrace |
+
+## As built: judge-rest, the object check by the tests' own words (2026-11-20; branch `judge-rest-1120`, from next `939037429`)
+
+The user's goal of 2026-11-20: complete the crops' independence, each recorded case of a judge made own wherever an accepted
+precedent applies (the user's decision of 2026-11-07: a test's own verdict is a judge no toolchain made; the toolchain's records
+move to the oracle tier). arm64's judge held one recorded part: the AOT cell's object check, 126 files (`a64-musl` 13,
+`a64-synthetic` 3, `mc-aarch64-obj` 110) compared byte for byte with llvm-mc 23.1.5's objects in `test/asm/records/` (0.5 each).
+
+- **Which of the 126 state their expected encodings.** 43 of the 110 MC/AArch64 object tests carry a `-show-encoding` run whose
+  CHECK lines state each instruction's bytes (`// CHECK-ENCODING: encoding: [0x00,0x20,0x78,0xd5]`, `// CHECK: ... // encoding:
+  [0bAAA00010,A,0b100AAAAA,0xd2]` with a fixup's bits as letters), 1,626 lines; `armv8.9a-debug-pmu` states 349 more but is not in
+  the object check (llvm-mc's record has no object of it). None of musl's 13 sources or Arbace's 3 synthetic tests state anything.
+  The 43: arm-poe2, arm-poe2-tlbid, arm64-elf-relocs, arm64-large-relocs, armv8.6a-fgt, armv8.8a-mops, armv8.9a-ats1a,
+  armv8.9a-clrbhb, armv8.9a-lrcpc3, armv8.9a-specres2, armv8.9a-the, armv9-mrrs, armv9-msrr, armv9.2a-mec, armv9.4a-chk,
+  armv9.4a-ebep, armv9.4a-gcs, armv9.4a-lse128, armv9.5a-cpa, armv9.5a-e3dse, armv9.5a-fgwte3, armv9.5a-hacdbs, armv9.5a-hdbss,
+  armv9.5a-spmu2, armv9.5a-step2, armv9.5a-tlbiw, armv9.6a-lsui, armv9.6a-mpam, armv9.6a-occmo, armv9.6a-pcdphint, armv9.6a-rme-gpc3,
+  armv9.6a-srmask, armv9.6a-statistical-profiling, armv9.6a-trbe-exception, armv9.7a-memsys, armv9.7a-tlbid, armv9a-sysp,
+  armv9a-tlbip, hinte, neon-fdot, neon-fmmla, neon-fmmla-HtoS, tls-relocs. llvm-mc
+  prints with `-show-encoding` the bytes its object writer emits, so the words of the test's object, in the run's order, are the
+  stated ones: `arbace.asm.arm64.objcheck/judge-encodings` holds each line to the code sections' words of Arbace's object as FileCheck
+  holds the run's output (in order, each after the one before; a fixup's letters any bit; `0x0b'A'`, a byte partly a fixup's, its
+  stated bits set; an empty `encoding: []` no case), per run, a line several runs state met when each meets it. The object verdict's
+  rows carry them as `:enc {:stated :met :by}` (`test/asm/objverdict-results-arm64.edn`: 1,975 of 1,975 met), beside in REAP's AOT
+  cell (the same lines are the read cell's at the encoder's level, `encode-check`).
+- **Two-step runs and `--sd`.** `objcheck/runs` also takes an object written to a file on one RUN line (`llvm-mc ... -filetype=obj
+  -o %t`) and read by a viewer on a later one (`llvm-readobj -S --sd %t | FileCheck ...`), paired with the last llvm-mc that wrote
+  it (a big-endian or another triple's overwriting it: no run), and `view-readobj` prints `--sd`'s SectionData blocks (ScopedPrinter's
+  printBinaryBlock: 16 bytes a line in groups of 4, upper case, the ASCII column aligned). `align-code`, `inst-directive` and
+  `size-directive` state their sections' alignment and bytes so: 33 lines, all met. The same reading made 28 lines visible whose
+  views are not built (`large-eh-encoding`'s llvm-dwarfdump, `mapping-within-section`'s `readelf -Ss` with numeric variables,
+  `mov-expr-as-immediate`'s `objdump -Dr`): deferred in their classes, AOT 3,102 / 13 -> 3,136 / 40. A run with no viewer that reads
+  llvm-mc's diagnostics and states only -NOT lines (`cfi-bad-nesting-elf`'s `ELF-NOT: error:`) is held to the object assembler's
+  diagnostics (none for an object it assembled).
+- **The object check by its own words.** `bin/repr-asm --arch arm64 object-check` judges a file by its own words where it states
+  them: its object runs' CHECK lines and its stated encodings, every one met (`objcheck/own-rows`, `own-verdict`; the row's detail
+  "own: N CHECK lines ..., M stated encodings, met"); 95 of the 110 MC/AArch64 files. The other 31, `test/asm/object-recorded-arm64.tsv`
+  with each one's reason (musl's 13 and the 3 synthetic tests state nothing; 15 MC/AArch64 files state only the decoder's text
+  (`armv9.7a-mpamv2`, `fixup-absolute`, `fixup-absolute-signed`, `macro-hex-int`, `mov-expression-as-immediate`, `optional-hash`,
+  `prfum`, `rprfm`), views not built (`cfi_val_offset`, `large-eh-encoding`, `mapping-within-section`, `mov-expr-as-immediate`),
+  FileCheck's numeric variables (`elf-reloc-addsubimm`, 1 of 3 lines judged), llvm-rtdyld's checks (`ELF_ARM64_large-relocations`),
+  or nothing FileCheck reads (`elf-objdump`)), stay against llvm-mc's record. The list is checked both ways: a listed file its own
+  words judge whole is stale, an unlisted one whose words are not (`:not-own`) is refused. A control whose reference is judged by
+  its own words is held to them. Every file against the record, byte for byte, is the oracle tier's: `object-check --oracle`
+  (`test/asm/object-oracle-results-arm64.edn`, the step `asm-arm64-object-oracle`, no LLVM tool; 126 of 126 at this branch).
+- **Controls.** `test/asm/controls-objverdict-arm64.txt`: `msrr-vs-mrrs-encodings` (armv9-msrr's object held to armv9-mrrs's stated
+  encodings; the other way it meets every line, mrrs's file holding msrr's 22 instructions too) and `size-vs-inst-directive` (a
+  two-step run's `--sd` lines held to another file's object); `test/asm/controls-object-arm64.txt`: `mrrs-vs-sysp-own` (a reference
+  judged by its own words). Each fails as it must. By hand: armv9-msrr.s with one stated encoding's byte changed (`0x58` to `0x59`)
+  gives `[:fail "... 22 stated encodings: {:fail 1}"]`, inst-directive.s with its SectionData word changed gives `{:fail 2}`; the
+  originals pass.
+- Judge 0.9973 -> 0.9993 ((23,032 + 0.5 x 31) / 23,063); independence 0.99945 -> 0.99987. Completeness 99.9 -> 99.7 (the 28 deferred
+  lines now seen).

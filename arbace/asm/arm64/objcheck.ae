@@ -41,48 +41,70 @@
   (let [ps (concat (mapcat #(str/split % #",") (map second (re-seq #"--?check-prefix(?:es)?[= ]+(\S+)" fc))))]
     (if (seq ps) (vec ps) ["CHECK"])))
 
+(defn- run-of
+  "One object run: llvm-mc's command `mc`, the viewer reading its object (nil: none), FileCheck's command `fc`, the RUN line `r`."
+  [^String mc viewer ^String fc ^String r]
+  {:error? (boolean (re-find #"^not\s" mc))
+   ;; the input's name in the diagnostics (ARS43 (a)): `<stdin>` when llvm-mc reads it there, else its path
+   :stdin? (boolean (re-find #"<\s*%s" mc))
+   :full-lines (boolean (re-find #"--match-full-lines" fc))
+   :split? (boolean (re-find #"split-file|%t/" r))
+   ;; llvm-mc's standard error FileCheck reads (`2>&1`, no viewer: its diagnostics alone)
+   :stderr? (boolean (re-find #"2>\s*&1" mc))
+   :prefixes (prefixes-of fc)
+   :implicit-not (mapv second (re-seq #"--implicit-check-not[= ](\S+)" fc))
+   :viewer viewer
+   ;; -implicit-mapsyms (ARS47 (a)): the object assembled so
+   :implicit-mapsyms (boolean (re-find #"-implicit-mapsyms" mc))
+   ;; --defsym NAME=VALUE (ARS49 (a)): the object assembled with it (an error run's `.ifdef ERR`)
+   ;; the values' text, read by arbace.asm.obj/defsyms when the run is assembled, inside its try (review 1111 (8): one
+   ;; parser, llvm-mc's radix sensing)
+   :defsym (o/defsym-of mc)
+   :tool (cond (nil? viewer) :no-viewer
+               (and (re-find #"^llvm-objdump" viewer) (= #{"-t" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :objdump-t
+               (and (re-find #"^llvm-readelf" viewer) (= #{"-s" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :readelf-s
+               (and (re-find #"^llvm-readelf" viewer) (= #{"--arch-specific" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :readelf-arch
+               (and (re-find #"^llvm-readelf" viewer) (re-matches #"llvm-readelf\s+--hex-dump=\S+\s+-" (str/trim viewer))) :readelf-x
+               ;; ARS49 (a): GNU style's section headers, relocations and hex dumps together (elf-reloc-ptrauth's -S -r -x)
+               (and (re-find #"^llvm-readelf" viewer)
+                    (re-matches #"llvm-readelf(\s+(-S|-r|-x\s+\S+|--hex-dump=\S+))+\s+-" (str/trim viewer))) :readelf
+               (and (re-find #"^llvm-objdump" viewer) (re-find #"(^|\s)-[a-zA-Z]*d" viewer)) :objdump-d
+               (and (re-find #"^llvm-objdump" viewer) (re-find #"(^|\s)-r\b" viewer)) :objdump-r
+               (and (re-find #"^llvm-readobj" viewer) (re-find #"(^|\s)(-r|--relocs|--relocations)\b" viewer)
+                    (not (re-find #"(^|\s)(-S|--sections|-s|--symbols|--section-data|--sd)\b" viewer))) :readobj-r
+               ;; AR6: llvm-readobj's sections, relocations and symbols together; judge-rest: and the sections' data (--sd)
+               (and (re-find #"^llvm-readobj" viewer)
+                    (every? #{"-S" "--sections" "--section-headers" "-r" "--relocs" "--relocations" "--symbols" "--syms" "-" "--elf-output-style=LLVM"
+                              "--sd" "--section-data"}
+                            (rest (str/split (str/trim viewer) #"\s+")))) :readobj
+               :else (keyword (str "view-" (first (str/split viewer #"\s+")))))})
+
 (defn runs
-  "The object runs of a test: [{:tool :objdump-d|:objdump-r|:readobj-r|KEYWORD :opts TEXT :prefixes [...] :error? :defsym?}]."
+  "The object runs of a test: [{:tool :objdump-d|:objdump-r|:readobj-r|KEYWORD :opts TEXT :prefixes [...] :error? :defsym?}]: a
+  RUN line that pipes llvm-mc's object (-filetype=obj, an ELF triple) to a viewer and FileCheck, and (judge-rest) a two-step one,
+  llvm-mc writing the object to a file (`-o %t`) on one RUN line and a later RUN line's viewer reading that file (`llvm-readobj -S
+  --sd %t | FileCheck ...`), paired with the last llvm-mc that wrote it (another triple's, big-endian's, overwriting it: no run)."
   [^String src]
-  (vec (for [r (run-lines src)
-             :let [pieces (mapv str/trim (str/split r #"\|"))
-                   mc (first pieces)
-                   triple (second (re-find #"-m?triple[= ]*(\S+)" mc))]
-             :when (and (re-find #"llvm-mc\b" mc) (re-find #"filetype[= ]obj" mc) (elf-triple? triple))
-             :let [fc (first (filter #(re-find #"FileCheck" %) pieces))
-                   viewer (first (filter #(re-find #"^llvm-(objdump|readobj|readelf|dwarfdump|nm)\b" %) (rest pieces)))]
-             :when fc]
-         {:error? (boolean (re-find #"^not\s" mc))
-          ;; the input's name in the diagnostics (ARS43 (a)): `<stdin>` when llvm-mc reads it there, else its path
-          :stdin? (boolean (re-find #"<\s*%s" mc))
-          :full-lines (boolean (re-find #"--match-full-lines" fc))
-          :split? (boolean (re-find #"split-file|%t/" r))
-          :prefixes (prefixes-of fc)
-          :implicit-not (mapv second (re-seq #"--implicit-check-not[= ](\S+)" fc))
-          :viewer viewer
-          ;; -implicit-mapsyms (ARS47 (a)): the object assembled so
-          :implicit-mapsyms (boolean (re-find #"-implicit-mapsyms" mc))
-          ;; --defsym NAME=VALUE (ARS49 (a)): the object assembled with it (an error run's `.ifdef ERR`)
-          ;; the values' text, read by arbace.asm.obj/defsyms when the run is assembled, inside its try (review 1111 (8): one
-          ;; parser, llvm-mc's radix sensing)
-          :defsym (o/defsym-of mc)
-          :tool (cond (nil? viewer) :no-viewer
-                      (and (re-find #"^llvm-objdump" viewer) (= #{"-t" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :objdump-t
-                      (and (re-find #"^llvm-readelf" viewer) (= #{"-s" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :readelf-s
-                      (and (re-find #"^llvm-readelf" viewer) (= #{"--arch-specific" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :readelf-arch
-                      (and (re-find #"^llvm-readelf" viewer) (re-matches #"llvm-readelf\s+--hex-dump=\S+\s+-" (str/trim viewer))) :readelf-x
-                      ;; ARS49 (a): GNU style's section headers, relocations and hex dumps together (elf-reloc-ptrauth's -S -r -x)
-                      (and (re-find #"^llvm-readelf" viewer)
-                           (re-matches #"llvm-readelf(\s+(-S|-r|-x\s+\S+|--hex-dump=\S+))+\s+-" (str/trim viewer))) :readelf
-                      (and (re-find #"^llvm-objdump" viewer) (re-find #"(^|\s)-[a-zA-Z]*d" viewer)) :objdump-d
-                      (and (re-find #"^llvm-objdump" viewer) (re-find #"(^|\s)-r\b" viewer)) :objdump-r
-                      (and (re-find #"^llvm-readobj" viewer) (re-find #"(^|\s)(-r|--relocs|--relocations)\b" viewer)
-                           (not (re-find #"(^|\s)(-S|--sections|-s|--symbols|--section-data)\b" viewer))) :readobj-r
-                      ;; AR6: llvm-readobj's sections, relocations and symbols together
-                      (and (re-find #"^llvm-readobj" viewer)
-                           (every? #{"-S" "--sections" "--section-headers" "-r" "--relocs" "--relocations" "--symbols" "--syms" "-" "--elf-output-style=LLVM"}
-                                   (rest (str/split (str/trim viewer) #"\s+")))) :readobj
-                      :else (keyword (str "view-" (first (str/split viewer #"\s+")))))})))
+  (loop [rls (run-lines src) outs {} acc []]
+    (if (empty? rls)
+      acc
+      (let [r (first rls)
+            pieces (mapv str/trim (str/split r #"\|"))
+            mc (first pieces)
+            triple (second (re-find #"-m?triple[= ]*(\S+)" mc))
+            fc (first (filter #(re-find #"FileCheck" %) pieces))
+            obj? (and (re-find #"llvm-mc\b" mc) (re-find #"filetype[= ]obj" mc))
+            out (when obj? (second (re-find #"(?:^|\s)-o\s+(\S+)" mc)))
+            outs (if (and out (not= out "-")) (if (elf-triple? triple) (assoc outs out mc) (dissoc outs out)) outs)
+            ;; a viewer reading a file an earlier RUN line's llvm-mc wrote: the file's name as `-`, as the piped runs read it
+            in (when-not obj? (when (re-find #"^llvm-(objdump|readobj|readelf|dwarfdump|nm|rtdyld)\b" mc)
+                                (first (filter #(contains? outs %) (rest (str/split mc #"\s+"))))))]
+        (cond
+          (and obj? (elf-triple? triple) fc)
+          (recur (rest rls) outs (conj acc (run-of mc (first (filter #(re-find #"^llvm-(objdump|readobj|readelf|dwarfdump|nm)\b" %) (rest pieces))) fc r)))
+          (and in fc)
+          (recur (rest rls) outs (conj acc (run-of (get outs in) (str/join " " (map #(if (= % in) "-" %) (str/split mc #"\s+"))) fc r)))
+          :else (recur (rest rls) outs acc))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the views (llvm-objdump's and llvm-readobj's formats, the lines CHECK lines hold to)
@@ -138,6 +160,21 @@
    ["SHF_TLS" 0x400] ["SHF_WRITE" 0x1] ["SHF_GNU_RETAIN" 0x200000]])
 (defn- shf-names [] (concat shf-base (:shf *target*)))
 
+(defn- section-data-lines
+  "Bytes `d` as llvm-readobj's --sd prints them (ScopedPrinter's printBinaryBlock, raw_ostream's FormattedBytes): 16 a line, in
+  groups of 4, upper case, the offset in 4 digits at least (as many as the last line's needs), the ASCII column aligned."
+  [^bytes d ^long indent]
+  (let [n (if d (alength d) 0)
+        last-off (* 16 (quot n 16))
+        width (max 4 (quot (+ 3 (if (pos? last-off) (- 64 (Long/numberOfLeadingZeros (dec last-off))) 0)) 4))
+        block 35]
+    (vec (for [off (range 0 n 16)
+               :let [bs (mapv #(bit-and (long (aget d (long %))) 0xff) (range off (min n (+ off 16))))
+                     hex (str/join " " (map #(apply str (map (fn [b] (format "%02X" b)) %)) (partition-all 4 bs)))]]
+           (str (apply str (repeat indent \space)) (format (str "%0" width "X") off) ": " hex
+                (apply str (repeat (+ 2 (- block (count hex))) \space))
+                "|" (apply str (map #(if (<= 0x20 (long %) 0x7e) (char %) \.) bs)) "|")))))
+
 (defn view-readobj
   "llvm-readobj's LLVM style (ELFDumper's LLVMELFDumper): the file's summary, then as the options ask the sections (-S), the
   relocations (-r) and the symbols (--symbols), in the tool's order."
@@ -158,7 +195,11 @@
                                    (for [[nm v] set-fl] (str "      " nm " (" (hexu v) ")"))
                                    ["    ]" "    Address: 0x0" (str "    Offset: " (hexu (:offset s))) (str "    Size: " (:size s))
                                     (str "    Link: " (:link s)) (str "    Info: " (:info s)) (str "    AddressAlignment: " (:align s))
-                                    (str "    EntrySize: " (:entsize s)) "  }"])))
+                                    (str "    EntrySize: " (:entsize s))]
+                                   ;; --sd (judge-rest): the section's bytes, but a SHT_NOBITS one's (ELFDumper's printSectionHeaders)
+                                   (when (and (has "--sd" "--section-data") (not= 8 (long (:type s))))
+                                     (concat ["    SectionData (" ] (section-data-lines (:data s) 6) ["    )"]))
+                                   ["  }"])))
                        secs)
                ["]"]))
      (when (has "-r" "--relocs" "--relocations") (view-readobj-r o))
@@ -412,6 +453,84 @@
                   (if off (str off ": " h) h2)))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
+;; the stated encodings (judge-rest, the user's goal of 2026-11-20: the object check judged by the test's own words). Many object
+;; tests also state each instruction's bytes in a -show-encoding run (`// CHECK-ENCODING: encoding: [0x00,0x20,0x78,0xd5]`):
+;; llvm-mc prints there the bytes its object writer emits, so the words of the test's object, in the run's order, are the stated
+;; ones. Each such line is a case: held to the code sections' words of Arbace's object as FileCheck holds the run's output (in
+;; order, each after the one before), a fixup's bits (the encoding's letters, `0bAAA00010`, `A`) any value
+
+(defn show-runs
+  "A test's -show-encoding runs: the RUN lines whose first command is llvm-mc with -show-encoding for an ELF triple, not an
+  error run (`not llvm-mc`), an object run or a disassembly, piped to FileCheck: [{:prefixes [...]}]."
+  [^String src]
+  (vec (for [r (run-lines src)
+             :let [pieces (mapv str/trim (str/split r #"\|"))
+                   mc (first pieces)
+                   triple (second (re-find #"-m?triple[= ]*(\S+)" mc))
+                   fc (first (filter #(re-find #"FileCheck" %) pieces))]
+             :when (and (re-find #"^llvm-mc\b" mc) (re-find #"(^|\s)--?show-encoding\b" mc)
+                        (not (re-find #"filetype[= ]obj" mc)) (not (re-find #"(^|\s)--?disassemble\b" mc))
+                        (elf-triple? triple) fc)]
+         {:prefixes (prefixes-of fc)})))
+
+(defn enc-bytes
+  "A stated encoding's text `0x1f,0bAAA10000,A,0xd5` as [[MASK VALUE] ...], a byte's letters its fixup's bits (mask 0), `0x0b'A'`
+  its stated bits set; nil when a byte is spelled otherwise."
+  [^String s]
+  (let [bs (mapv str/trim (str/split s #","))
+        one (fn [^String b]
+              (cond (re-matches #"0x[0-9a-fA-F]{1,2}" b) [0xff (Long/parseLong (subs b 2) 16)]
+                    (re-matches #"0b[01A-Za-z]{8}" b)
+                    (reduce (fn [[m v] ch] (case ch \0 [(inc (* 2 m)) (* 2 v)] \1 [(inc (* 2 m)) (inc (* 2 v))] [(* 2 m) (* 2 v)]))
+                            [0 0] (subs b 2))
+                    (re-matches #"[A-Za-z]" b) [0 0]
+                    ;; `0x0b'A'`: a byte some of whose bits a fixup fills (MCAsmStreamer's AddEncodingComment), the stated bits set
+                    ;; in the object (the fixup's field is zero in the stated value and ORed in)
+                    (re-matches #"0x[0-9a-fA-F]{1,2}'[A-Za-z]'" b) (let [v (Long/parseLong (subs b 2 (.indexOf b "'")) 16)] [v v])
+                    :else nil))
+        r (mapv one bs)]
+    (when (every? some? r) r)))
+
+(defn- code-words
+  "The object's code: every 4-byte word of its executable sections, in section order, each [B0 B1 B2 B3]."
+  [o]
+  (vec (for [s (:sections o) :when (pos? (bit-and (long (:flags s)) elf/SHF_EXECINSTR))
+             :let [^bytes d (:data s)] :when d
+             off (range 0 (- (alength d) 3) 4)]
+         (mapv #(bit-and (long (aget d (+ (long off) (long %)))) 0xff) (range 4)))))
+
+(defn judge-encodings
+  "The stated encodings of the test's -show-encoding runs against the object `r` (arbace.asm.arm64.obj/assemble's result):
+  [[LINE RESULT]], one a line (a line several runs state is met when every one of them meets it). Each run's lines in order, each
+  found among the code words after the one the line before matched (FileCheck's order; -NOT and -DAG lines not encodings' cases);
+  a line not found :fail, the search going on from the same place."
+  [^String src r]
+  (let [rs (show-runs src)
+        lines-of (fn [run] (vec (for [[l k c] (check-lines src (:prefixes run))
+                                      :when (not (#{"-NOT" "-DAG"} k))
+                                      ;; (an empty encoding, `.tlsdesccall var // encoding: []`, states no word: no case)
+                                      :let [[_ e] (re-find #"encoding:\s*\[([^\]]*)\]" c)] :when (and e (not (str/blank? e)))]
+                                  [l (enc-bytes e)])))
+        per-run (mapv lines-of rs)
+        stated (into (sorted-set) (map first (apply concat per-run)))]
+    (cond
+      (empty? stated) []
+      (not (:bytes r)) (mapv (fn [l] [l (if (:error r) :object-error (keyword (str "unsupported-" (name (or (:unsupported r) :crash)))))]) stated)
+      :else
+      (let [ws (code-words (elf/read-object (:bytes r)))
+            hit? (fn [w enc] (and (= (count enc) 4) (every? (fn [[b [m v]]] (= (bit-and (long b) (long m)) (long v))) (map vector w enc))))
+            judged (for [ls per-run]
+                     (loop [ls ls pos 0 out {}]
+                       (if (empty? ls)
+                         out
+                         (let [[l enc] (first ls)
+                               i (when enc (first (filter #(hit? (nth ws %) enc) (range pos (count ws)))))]
+                           (recur (rest ls) (if i (inc (long i)) pos)
+                                  (assoc out l (cond (nil? enc) :enc-spelling i :pass :else :fail)))))))
+            worst (fn [a b] (cond (nil? a) b (= a :pass) b :else a))]
+        (vec (for [l stated] [l (reduce worst nil (keep #(get % l) judged))]))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
 ;; a test
 
 (defn- canon-lines [ls] (mapv (fn [l] {:text l}) ls))
@@ -448,6 +567,12 @@
           (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :message)]) cs))
         (mapv (fn [[l]] [l (cond (:bytes r) :error-accepted (:unsupported r) (unsupported) :else :message)]) cs))
       (not (:bytes r)) (mapv (fn [[l]] [l (if (:error r) :object-error (unsupported))]) cs)
+      ;; judge-rest: a run that reads llvm-mc's diagnostics of an object it writes (`-o /dev/null 2>&1 | FileCheck`, no viewer)
+      ;; and states only what they must not hold (every line a -NOT, cfi-bad-nesting-elf's `ELF-NOT: error:`): the object
+      ;; assembler's diagnostics of an object it assembled, none (it writes no warning), held to the lines
+      (and (= :no-viewer (:tool run)) (:stderr? run) (every? #(= "-NOT" (second %)) cs))
+      (let [res (into {} (map (fn [[l rr]] [l rr]) (binding [dc/*vars* true] (dc/filecheck cs [] (:implicit-not run)))))]
+        (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :not-found :fail :fail)]) cs))
       (#{:objdump-d :objdump-r :readobj-r :readobj :objdump-t :readelf-s :readelf-arch :readelf-x :readelf} (:tool run))
       (let [o (elf/read-object (:bytes r))
             view (case (:tool run)
@@ -495,16 +620,68 @@
                     rs)
         f (frequencies (map second res))
         ;; a disassembly's text is the decoder's (AR3): beside the object's cases, not one of them
-        text (get f :decoder-text 0)]
+        text (get f :decoder-text 0)
+        ;; judge-rest: the stated encodings of its -show-encoding runs, held to the object assembled without options
+        enc (try (judge-encodings src (asm false nil))
+                 (catch Throwable e (binding [*out* *err*] (println (str "repr-asm object-verdict: " path ": encodings: " e)))
+                   [[0 :view-crash]]))
+        fe (frequencies (map second enc))]
     (cond-> {:stated (- (count res) text) :met (get f :pass 0) :by (into (sorted-map) (dissoc f :pass :decoder-text))}
-      (pos? text) (assoc :beside {:decoder-text text}))))
+      (pos? text) (assoc :beside {:decoder-text text})
+      (seq enc) (assoc :enc {:stated (count enc) :met (get fe :pass 0) :by (into (sorted-map) (dissoc fe :pass))}))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the object check by the test's own words (judge-rest, the user's goal of 2026-11-20): a file of the object check's corpora that
+;; states words of its own about its object (its object runs' CHECK lines, its -show-encoding runs' encodings), every one judged
+;; by the object verdict, is judged by them in place of llvm-mc's recorded object (whose byte-for-byte comparison is the oracle
+;; tier's: bin/repr-asm --arch arm64 object-check --oracle); the others, test/asm/object-recorded-arm64.tsv's, by the record
+
+(def failing #{:fail :object-error :view-crash :unsupported-crash})
+
+(def ^:private unjudged
+  "The classes of a stated line the object verdict does not judge: a view or a FileCheck feature not built, a split test."
+  #{:no-viewer :filecheck-var :split-file :view-llvm-readobj :view-llvm-readelf :view-llvm-objdump :view-llvm-dwarfdump
+    :view-llvm-nm :view-llvm-rtdyld :enc-spelling})
+
+(defn own-verdict
+  "The object check's verdict of the file at PATH by its own words: [RESULT DETAIL], RESULT :pass when it states a line or an
+  encoding at least and every one is met; :not-own when it states none, or one the views do not judge (unjudged); a class of
+  the object assembler (an unsupported directive...) when that keeps one from being met; else :fail."
+  [^String path]
+  (let [row (file-row path)
+        enc (:enc row)
+        n (+ (long (:stated row)) (long (get enc :stated 0)))
+        by (merge-with + (:by row) (:by enc))
+        what (str (:stated row) " CHECK lines of its object runs" (when enc (str ", " (:stated enc) " stated encodings")))]
+    (cond
+      (zero? n) [:not-own "states nothing the object verdict judges (list it in test/asm/object-recorded-arm64.tsv)"]
+      (empty? by) [:pass (str "own: " what ", met")]
+      (some unjudged (keys by)) [:not-own (str "states lines the object verdict does not judge " (pr-str by) " (list it in test/asm/object-recorded-arm64.tsv)")]
+      (some failing (keys by)) [:fail (str what ": " (pr-str by))]
+      :else [(first (keys (into (sorted-map) by))) (str what ": " (pr-str by))])))
+
+(defn own-rows
+  "Each NAME<tab>PATH of OWN (the files judged by their own words) appended to WORK/obj.tsv as the object check's rows (NAME RESULT
+  DETAIL); each of RECORDED (judged by llvm-mc's record) checked not to be judged whole by its own words: a stale entry of
+  test/asm/object-recorded-arm64.tsv. Exits non-zero on a stale entry."
+  [own work recorded]
+  (let [rows (fn [f] (vec (for [l (str/split-lines (slurp f)) :when (seq l)] (str/split l #"\t"))))
+        res (vec (for [[n p] (rows own)] (into [n] (own-verdict p))))
+        stale (vec (for [[n p] (rows recorded) :when (= :pass (first (own-verdict p)))] n))]
+    (spit (str work "/obj.tsv") (apply str (for [[n c d] res] (str n "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))) :append true)
+    (let [f (frequencies (map second res))]
+      (println (str "repr-asm object-check: " (get f :pass 0) " of " (count res) " objects judged by their own words (their object runs' "
+                    "CHECK lines and stated encodings), met; " (pr-str (into (sorted-map) (dissoc f :pass))))))
+    (doseq [n stale] (println (str "FAIL: repr-asm object-check: " n " is judged whole by its own words: stale in test/asm/object-recorded-arm64.tsv")))
+    (when (seq stale) (shutdown-agents) (System/exit 1))))
 
 (defn control
   "A negative control: SUBJECT's object judged by REFERENCE's CHECK lines (its runs): `differs` as it must when a line is not
   met, `same` when every one is, `left` when the reference states nothing or the subject does not assemble."
   [subj ref]
   (let [src (asm/latin1 ref) r (obj/assemble-file subj)
-        res (mapcat #(judge-run src % r) (runs src))]
+        ;; judge-rest: the reference's stated encodings too (another test's words must part from the subject's object)
+        res (concat (mapcat #(judge-run src % r) (runs src)) (judge-encodings src r))]
     (cond (or (empty? res) (not (:bytes r))) "left"
           (every? #(= :pass (second %)) (filter #(#{:pass :fail} (second %)) res))
           (if (some #(= :fail (second %)) res) "differs" "same")
@@ -522,9 +699,12 @@
     (println (str "repr-asm object-verdict: " (count rows) " files, " (tot :stated) " CHECK lines of their object runs judge the object, "
                   (tot :met) " met; " (pr-str (into (sorted-map) by)) "; beside, the decoder's text (AR3): "
                   (reduce + 0 (map #(get-in (second %) [:beside :decoder-text] 0) rows)) " lines"))
+    (let [enc (keep (comp :enc second) rows)]
+      (println (str "repr-asm object-verdict: " (count enc) " files state their encodings in -show-encoding runs: "
+                    (reduce + 0 (map :stated enc)) " stated, " (reduce + 0 (map :met enc)) " met by the words of Arbace's object; "
+                    (pr-str (into (sorted-map) (apply merge-with + {} (map :by enc)))))))
     rows))
 
-(def failing #{:fail :object-error :view-crash :unsupported-crash})
 
 (def header
   (str ";; repr/asm's arm64 object verdict (bin/repr-asm --arch arm64 object-verdict; doc/asm/ARM64-SURVEY.md, AR4): MC/AArch64's object\n"
@@ -543,15 +723,18 @@
         oldm (into {} old)
         classes (set (map :id (read-string (slurp classes-path))))
         problems (atom [])]
-    (doseq [[i r] run [c n] (:by r)]
+    (doseq [[i r] run [c n] (concat (:by r) (:by (:enc r)))]
       (cond (failing c) (swap! problems conj (str "failing: " i " " n " " (name c)))
             (not (classes c)) (swap! problems conj (str "unclassed: " i " " n " " (name c)))))
     (if (and (seq record) (empty? @problems))
-      (do (spit results (str header "[\n" (apply str (map (fn [[i r]] (str (pr-str [i (into (sorted-map) (update r :by #(into (sorted-map) %)))]) "\n")) (sort-by first run))) "]\n"))
+      (do (spit results (str header "[\n" (apply str (map (fn [[i r]] (str (pr-str [i (into (sorted-map) (cond-> (update r :by #(into (sorted-map) %))
+                                                                                                         (:enc r) (update :enc (fn [e] (into (sorted-map) (update e :by #(into (sorted-map) %)))))))]) "\n")) (sort-by first run))) "]\n"))
           (println (str "repr-asm: recorded " (count run) " rows into " results)))
       (do (doseq [[i r] run :let [o (oldm i)]]
             (cond (nil? o) (swap! problems conj (str "not recorded: " i))
-                  (< (long (:met r)) (long (:met o))) (swap! problems conj (str i ": " (:met r) " met, recorded " (:met o)))))
+                  (< (long (:met r)) (long (:met o))) (swap! problems conj (str i ": " (:met r) " met, recorded " (:met o)))
+                  (or (not= (get-in r [:enc :stated]) (get-in o [:enc :stated])) (< (long (get-in r [:enc :met] 0)) (long (get-in o [:enc :met] 0))))
+                  (swap! problems conj (str i ": its stated encodings " (pr-str (:enc r)) ", recorded " (pr-str (:enc o))))))
           (doseq [[i] old :when (not (some #(= i (first %)) run))] (swap! problems conj (str "recorded, not run: " i)))))
     (doseq [p @problems] (println (str "FAIL: " p)))
     (when (empty? @problems) (println "repr-asm object-verdict: ok"))
@@ -563,10 +746,14 @@
     "judge" (when (seq (apply judge args)) (shutdown-agents) (System/exit 1))
     "control" (println (apply control args))
     "row" (prn (file-row (first args)))
+    "own" (prn (own-verdict (first args)))
+    "own-rows" (apply own-rows args)
     "diagnostics" (let [src (asm/latin1 (first args)) r (obj/assemble-file (first args))]
                     (doseq [l (diagnostics src r)] (println l)))
     "lines" (let [src (asm/latin1 (first args))]
               (doseq [run (runs src) [l res] (judge-run src (assoc run :path (first args)) (obj/assemble-file (first args) (boolean (:implicit-mapsyms run)) (o/defsyms (:defsym run))))
                       :when (not= res :pass)]
-                (println l res (nth (str/split-lines src) (dec (long l)))))))
+                (println l res (nth (str/split-lines src) (dec (long l)))))
+              (doseq [[l res] (judge-encodings src (obj/assemble-file (first args))) :when (not= res :pass)]
+                (println l res "(stated encoding)" (nth (str/split-lines src) (dec (long l)))))))
   (shutdown-agents))

@@ -91,12 +91,22 @@
 #                                                    (test/asm/obj-arm64/) by default, mc-aarch64-obj (MC/AArch64's ELF object
 #                                                    tests); llvm-mc's triple aarch64-linux-musl -mattr=+all; rows
 #                                                    test/asm/object-results-arm64.edn, classes divergences-object-arm64.edn,
-#                                                    controls controls-object-arm64.txt
+#                                                    controls controls-object-arm64.txt. judge-rest (2026-11-20): object-check
+#                                                    judges a file by its own words where it states them (arbace.asm.arm64.objcheck
+#                                                    own-rows: its object runs' CHECK lines and its stated encodings, every one
+#                                                    met), the files of test/asm/object-recorded-arm64.tsv alone against llvm-mc's
+#                                                    record (the list checked: a stale entry and an unlisted file its words do
+#                                                    not judge whole fail); --oracle: every file against the record, byte for byte
+#                                                    (the oracle tier's, asm-arm64-object-oracle), rows
+#                                                    test/asm/object-oracle-results-arm64.edn
 #   bin/repr-asm --arch arm64 object-verdict [--record]
 #                                                    AR4: mc-aarch64-obj's object runs judged by their own CHECK lines, no LLVM
 #                                                    tool (arbace.asm.arm64.objcheck: Arbace's view of the object in llvm-objdump
-#                                                    -d's bytes and relocations, -r, llvm-readobj -r; the disassembly's text
-#                                                    AR3's, beside); rows test/asm/objverdict-results-arm64.edn, controls
+#                                                    -d's bytes and relocations, -r, llvm-readobj -r, -S --sd; the disassembly's
+#                                                    text AR3's, beside; judge-rest: two-step runs, the object written to %t and
+#                                                    read on a later RUN line, and each -show-encoding run's stated encodings
+#                                                    held to the words of Arbace's object, the row's :enc); rows
+#                                                    test/asm/objverdict-results-arm64.edn, controls
 #                                                    test/asm/controls-objverdict-arm64.txt
 #   bin/repr-asm --arch arm64 run-check [--record]  AR4: test/asm/run-arm64/'s programs, linked for AArch64, run by this host's
 #                                                    arm64 CPU, else REPR_ASM_RUNNER (qemu-aarch64 by default: an emulation);
@@ -976,9 +986,15 @@ case ${1:-} in
     (cd "$root" && sha256sum "test/asm/records/${rec##*/}") > "${rec%.edn}.sha256"
     echo "repr-asm object-record: $(grep -c ':sha256' "$rec") objects into ${rec#$root/}, pinned" ;;
   object-check)
-    shift; record=; ids=()
-    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    shift; record=; oracle=; ids=()
+    for a in "$@"; do case $a in --record) record=1 ;; --oracle) oracle=1 ;; *) ids+=("$a") ;; esac; done
     [ ${#ids[@]} -gt 0 ] || ids=("${obj_default[@]}")
+    # judge-rest (the user's goal of 2026-11-20): arm64's files judged by their own words but test/asm/object-recorded-arm64.tsv's;
+    # --oracle every file against llvm-mc's record, byte for byte, the oracle tier's own rows
+    own_list=
+    if [ "$arch" = arm64 ]; then
+      if [ -n "$oracle" ]; then obj_results=$root/test/asm/object-oracle-results-arm64.edn; else own_list=$root/test/asm/object-recorded-arm64.tsv; fi
+    elif [ -n "$oracle" ]; then echo "repr-asm object-check: --oracle is arm64's" >&2; exit 2; fi
     export REPR_ASM_TABLE=$root/asm/amd64/table.edn
     fails=0 works=()
     for id in "${ids[@]}"; do
@@ -989,7 +1005,16 @@ case ${1:-} in
       # the files llvm-mc assembled when the record was made (a file it refuses has no object to judge against)
       grep -o '^  "[^"]*"' "$rec" | tr -d ' "' > "$work/recorded.txt"
       awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/recorded.txt" "$lists/$id.list" > "$work/list"
-      arbace_tool -m $objns check "$work/list" "$work" "$rec" || fails=$((fails + 1))
+      if [ -n "$own_list" ]; then
+        # the list's names of this corpus judged by the record, the others by their own words (own-rows appends their rows)
+        awk -F'\t' -v c="$id" '$1 !~ /^#/ && index($1, c "/") == 1 { print substr($1, length(c) + 2) }' "$own_list" > "$work/by-record.txt"
+        awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/by-record.txt" "$work/list" > "$work/list.record"
+        awk -F'\t' 'NR == FNR { r[$1] = 1; next } !r[$1]' "$work/by-record.txt" "$work/list" > "$work/list.own"
+        arbace_tool -m $objns check "$work/list.record" "$work" "$rec" || fails=$((fails + 1))
+        arbace_tool -m arbace.asm.arm64.objcheck own-rows "$work/list.own" "$work" "$work/list.record" || fails=$((fails + 1))
+      else
+        arbace_tool -m $objns check "$work/list" "$work" "$rec" || fails=$((fails + 1))
+      fi
       works+=("$work")
       # review 1111 (1): Arbace's own error files (test/asm/obj-err*/NAME.s) with their diagnostics as llvm-mc would print them,
       # NAME.err, derived by hand from LLVM's rules (no llvm-mc record): with the synthetic corpus
@@ -1019,7 +1044,13 @@ case ${1:-} in
         case $rc in
           obj-err*) v=$(arbace_tool -m $objns diag-check "$sp" "$root/test/asm/$rc/${ref#*/}.err" ${sopts:+"$sopts"} | tail -1) || true
                     case $v in pass) v=same ;; "FAIL: error-diagnostics"*|"FAIL: assembled"*) v=differs ;; *) v="left ($v)" ;; esac ;;
-          *) v=$(arbace_tool -m $objns control "$sp" "${ref#*/}" "$rec" "$sopts" | tail -1) ;;
+          *) # judge-rest: a reference judged by its own words is held to them (its object runs' lines, its encodings)
+             if [ -n "$own_list" ] && ! awk -F'\t' -v r="$ref" '$1 == r { f = 1 } END { exit !f }' "$own_list"; then
+               rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/$rc.list")
+               v=$(arbace_tool -m arbace.asm.arm64.objcheck control "$sp" "$rp" | tail -1)
+             else
+               v=$(arbace_tool -m $objns control "$sp" "${ref#*/}" "$rec" "$sopts" | tail -1)
+             fi ;;
         esac
         if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
       done < "$obj_controls"
