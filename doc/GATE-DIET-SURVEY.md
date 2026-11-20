@@ -1603,3 +1603,20 @@ c-judge-test (the judges' unit tests: no cases to rotate).
 OsPath pragma printed as TypeApplications for TemplateHaskellQuotes, and 14 stale known entries at the text level; 86 minutes,
 14.4 GiB) and rust-roundtrip's five parts (the lines level's ModSpans.inner_span count, 92 files over three corpora; 6.4-14.9
 GiB): the next clean run plans them (GATE_ALL_PARTS=1) and fails on them until they are fixed; the user queues their tasks.
+
+**The plans** (the shared store, 2026-11-20 17:00-18:00; before: the merge `300eae8f7`, in a worktree of its own; after: `d568131fa`):
+
+| plan | before | after |
+|---|---|---|
+| essential | 58: 50 run, 1 after, 1 absent; wall 1:31, serial 2:58 | the same (no essential step changed; the crops' fragments wake their subsets once) |
+| `--full` | 381: 330 run, 34 after, 8 covered, 2 absent; wall 25:26, serial 30:44 | 382: 325 run, 35 after, 13 covered, 2 absent; 24:18, 28:33 |
+| `--nightly` | 546: 492 run, 40 after, 5 covered, 2 absent; 18:29, 22:27 | 554: 494 run, 41 after, 10 covered, 2 absent; 17:18, 20:05 |
+| `--weekly` | 395: 343 run, 34 after, 9 covered, 2 absent; 25:56, 32:25 | 396: 338 run, 35 after, 14 covered, 2 absent; 24:43, 30:14 |
+
+`--nightly` covers goi-aot-essential, suite-aot-essential, programs (programs-full in tonight's plan by `:also-changed`), cpp-check-essential
+and, new, c-dg-essential (its rotated subset holding the essential files), si-essential, scheme-read-essential, oi-essential,
+ocaml-read-essential and llvm-essential; it runs the rotated checks' subsets and one slice each (llvmi-check.eval.sub/.s1,
+llvm-read.verify-rt(-heldout).sub/.s1, c-dg.dg.sub/.s1, si-aot.check.sub/.s1, wasm-roundtrip.modules.sub/.s1,
+haskell-lib-stg.ghc-internal.sub/.s1). The simulation's durations are the store's, which knows no subset yet (a rotated check is
+counted at its part's whole time less the planner's share), so the night's real saving shows on the first nights' passes.
+`gate_key` unchanged (`ab36afadd0b1`), the epoch unchanged: the steps not edited keep their keys.
