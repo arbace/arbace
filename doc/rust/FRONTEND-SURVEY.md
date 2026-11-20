@@ -5455,6 +5455,11 @@ over the 49 module files that own them, without debug assertions; 28 min, 2.8 GB
 | our symbol absent from std's IR | 1 |
 | the crossed control | differs, as it must |
 
-The largest refusals are alloc's causes not yet carried to core's export: core-check's `export-entry` carries `:nested-attrs` but not
+With core-check's export carrying the crate-private facts too (`cc/with-private-facts`, shared with alloc-check's export; the export
+again 28 min): **109 of 275 equal**, 85 differ, 78 refused (30 not exported, 14 at the instance, 12 a layout, 10 a constant
+unevaluated, 5 a callee, 2 the static `POW10`, 5 others), 3 symbols absent; the v0 refusals of crate-private impls and ADTs are gone
+(223 runtime bodies, 202 before), the control differing.
+
+Before it, the largest refusals were alloc's causes not yet carried to core's export: core-check's `export-entry` carries `:nested-attrs` but not
 alloc-check's crate-private `:fns`, `:impls`, `:traits` and `:adts` (a `<impl {}>` path, v0 of the type `[:err]`, a missing layout);
 then the named constants core's export leaves unevaluated (`U128_MAX_DEC_N`, `char::MAX_LEN_UTF8`) and the static `POW10`.

@@ -13818,3 +13818,10 @@ bin/rust-front lib-unit export core (core-check at the items' keys over their 49
 build (202 runtime bodies) and compare: 95 of 275 equal, 79 differ, 100 refused, 1 symbol absent, the control differing. The
 refusals lead with what alloc-check's export carries and core-check's does not (crate-private functions, impls, traits and ADTs),
 then named constants and a static.
+
+## 2026-11-20: rust-c6-1120: core's items with their crate-private facts: 109 of 275 equal to std's IR
+
+cc/with-private-facts (alloc-check's export's carriage moved into core-check and shared): core's CORE_EXPORT_KEYS export carries
+the crate-private functions, impls, traits and ADTs its bodies name. lib-unit compare core: 109 equal (95 before), 85 differ, 78
+refused (30 not exported, 14 at the instance, 12 layouts, 10 constants, 5 callees, 2 a static), 3 symbols absent; alloc's 18 of
+25 unchanged.
