@@ -1,0 +1,262 @@
+(ns arbace.asm.arm64.objrt
+  "arm64's object round trip (judge-rest, 2026-11-20; doc/asm/ARM64-SURVEY.md, \"As built: judge-rest\"): an object judged by its
+  own source, no LLVM tool, for the files that state nothing about their object (musl's sources, Arbace's synthetic tests). The
+  file is assembled by Arbace's object assembler (arbace.asm.arm64.obj, the object the object check judges) and linked alone
+  (arbace.asm.link) with a stub that defines each symbol it leaves undefined, so every relocation's field is filled at one
+  layout: WORK/NAME, the image. The same file is laid out by the eval (arbace.asm.arm64.eval: each instruction a placeholder,
+  its form kept) and linked with the same stub at the same layout: WORK/NAME.forms, each instruction's form at its address with
+  its symbolic operands' values there. a64i's forms check (`a64i forms-check`, test/asm/a64i-driver) lowers each form to its
+  Inst (go/arbace/a64i's forms.go, no encoder) and decodes the image's word at its address (a64i/Decode, no encoder): the two
+  equal for every instruction. A relocation's field is judged through the link: the linker fills it from the relocation's type,
+  symbol and addend, the form's operand is the symbol's value at the same layout, so a wrong field, type or addend makes the
+  decoded instruction differ wherever the layout's values tell them apart (a MOVW group above the value's bits is zero whatever
+  its type; the controls' mutants show an addend, a type and a symbol told apart); the object's own bits under the field,
+  overwritten by the linker, are llvm-mc's convention, the oracle tier's byte-for-byte comparison. Beside, the image outside the instructions' words is the eval layout's byte for byte
+  (every code word the object holds is an instruction of the source, or what its data directives and alignment put there).
+  Data is not judged apart: the eval writes it by the object assembler's own directives."
+  (:require [arbace.asm.arm64.obj :as a64]
+            [arbace.asm.arm64.eval :as ev]
+            [arbace.asm.link :as link]
+            [arbace.asm.obj :as o]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- write-bytes [^String path ^bytes b]
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) b ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn- u ^long [^bytes b ^long at ^long n]
+  (loop [i (dec n) v 0] (if (neg? i) v (recur (dec i) (bit-or (bit-shift-left v 8) (bit-and (long (aget b (+ at i))) 0xff))))))
+
+(defn undefined-symbols
+  "The global and weak symbols the object names and does not define: [[NAME TLS?]...], in its symbol table's order."
+  [^bytes obj]
+  (vec (distinct (for [s (:symbols (elf/read-object obj))
+                       :when (and (pos? (long (:index s))) (zero? (long (:shndx s))) (seq (:name s)) (not= elf/STB_LOCAL (:bind s)))]
+                   [(:name s) (= elf/STT_TLS (:type s))]))))
+
+(defn stub-text
+  "The stub that defines each of `syms` ([NAME TLS?]) for the object's lone link: 16 zero bytes apiece at a 16-byte boundary
+  (the strictest :lo12: load's alignment, ldr q's), in .text after the object's (a branch's reach), a TLS symbol in .tbss."
+  [syms]
+  (let [one (fn [[n tls?]] (str "\t.p2align 4\n\t.globl " n "\n" (when tls? (str "\t.type " n ",@tls_object\n")) n ":\n\t.zero 16\n"))
+        [t c] ((juxt filter remove) second syms)]
+    (str "// the stub of judge-rest's object round trip (arbace.asm.arm64.objrt): the object's undefined symbols defined\n"
+         (when (seq c) (apply str "\t.text\n" (map one c)))
+         (when (seq t) (apply str "\t.section .tbss,\"awT\",@nobits\n" (map one t))))))
+
+(defn- sections
+  "The executable's sections with contents: [[ADDR OFFSET SIZE]...]."
+  [^bytes b]
+  (let [shoff (u b 40 8) shnum (u b 60 2)]
+    (vec (for [i (range 1 shnum) :let [h (+ shoff (* 64 i))] :when (not= elf/SHT_NOBITS (u b (+ h 4) 4))]
+           [(u b (+ h 16) 8) (u b (+ h 24) 8) (u b (+ h 32) 8)]))))
+
+(defn image-rest
+  "The bytes of the image `a` (the AOT link) that differ from the eval layout's `e` outside the instructions' words (`insns`,
+  their addresses): [COUNT FIRST-OFFSET] (COUNT 0: none), or [-1 nil] when their sizes differ."
+  [^bytes a ^bytes e insns]
+  (if (not= (alength a) (alength e))
+    [-1 nil]
+    (let [covered (set (for [x insns k (range 4)] (+ (long x) (long k))))
+          secs (sections a)
+          va (fn [^long off] (some (fn [[ad of sz]] (when (and (pos? (long ad)) (<= (long of) off) (< off (+ (long of) (long sz))))
+                                                      (+ (long ad) (- off (long of)))))
+                                   secs))
+          bad (filter (fn [^long i] (and (not= (aget a i) (aget e i)) (not (contains? covered (va i))))) (range (alength a)))]
+      [(count bad) (first bad)])))
+
+(defn- assemble-text
+  "The stub's objects, AOT and eval, from its source at PATH."
+  [^String path]
+  [(a64/assemble-file path) (ev/assemble-file path)])
+
+(def layouts
+  "The layouts a file is linked at, in turn, the first that holds every relocation taken: lld's default for AArch64 (the a64i
+  check's programs': image base 0x200000, 64 KiB pages), then a low one (image base 0x1000, 4 KiB pages) for an object whose
+  relocations reach both its code and an address under 64 KiB (relocs.s: `.hword u`, R_AARCH64_ABS16, beside `tbz x0, #3, u`;
+  there every MOVW group of u above its low 16 bits is zero, judged as zero), or whose signed G0 group's value must fit 17 bits
+  (elf-reloc-movw.s)."
+  [["default" link/aarch64]
+   ["low" (assoc link/aarch64 :image-base 0x1000 :max-page 4096)]])
+
+(defn- link-at
+  "The AOT and eval links of the objects ([PATH AOT-RESULT EVAL-RESULT]...) at the first of `layouts` (or the one named `only`)
+  that links them: {:layout NAME :aot BYTES :eval BYTES :forms TEXT}, or {:class :what} (the first layout's failure)."
+  [objs only]
+  ;; (the linker's warning that no _start is found, an object linked alone, kept out of the run's output)
+  (binding [*err* (java.io.StringWriter.)]
+    (let [try1 (fn [[lname arch]]
+                 (binding [link/*arch* arch]
+                   (let [crash (fn [e] {:unsupported :crash :what (str e)})
+                         la (try (link/link (mapv (fn [[p a]] [p (:bytes a)]) objs)) (catch Throwable e (crash e)))
+                         le (when (:bytes la)
+                              (try (link/link (mapv (fn [[p _ e]] [p (:bytes e)]) objs) {:layout true}) (catch Throwable e (crash e))))
+                         t (when (:bytes le)
+                             (try (ev/forms-text (mapv #(nth % 2) objs) (:layout le))
+                                  (catch arbace.lang.ExceptionInfo e
+                                    (let [d (ex-data e)]
+                                      (cond (:obj/unsupported d) {:class (keyword (str "eval-" (name (:obj/unsupported d)))) :what (.getMessage e)}
+                                            (:link/error d) {:class :eval-link-error :what (:link/error d)}
+                                            :else (throw e))))))]
+                     (cond
+                       (:error la) {:class :link-error :what (:error la)}
+                       (:unsupported la) {:class (keyword (str "link-" (name (:unsupported la)))) :what (:what la)}
+                       (:error le) {:class :eval-link-error :what (:error le)}
+                       (:unsupported le) {:class (keyword (str "eval-link-" (name (:unsupported le)))) :what (:what le)}
+                       (map? t) t
+                       :else {:layout lname :aot (:bytes la) :eval (:bytes le) :forms t}))))
+          rs (map try1 (if (seq only) (filter #(= only (first %)) layouts) layouts))]
+      (or (first (filter :layout rs)) (first rs)))))
+
+(defn build-one
+  "The round trip's images of the file at PATH (the list's OPTS: --defsym), into WORK: NAME (the AOT link), NAME.eval, NAME.forms,
+  NAME.stub.s and NAME.layout (FROM, another file's outputs WORK2/NAME2: its stub and its layout instead, a control's mutant linked
+  as its subject is). [CLASS DETAIL COUNT]: CLASS :built (COUNT the instructions laid out, DETAIL the layout and the image's other
+  bytes judged), else the class of what failed."
+  [^String n ^String path ^String opts ^String work ^String from]
+  (let [defsym (o/defsyms (o/defsym-of opts))
+        fail (fn [e] (if-let [c (:obj/unsupported (ex-data e))] {:unsupported c :what (.getMessage ^Throwable e)} {:unsupported :crash :what (str e)}))
+        aot (try (a64/assemble-file path {:defsym defsym}) (catch arbace.lang.ExceptionInfo e (fail e)) (catch Throwable e {:unsupported :crash :what (str e)}))
+        evo (when (:bytes aot)
+              (if (seq defsym)
+                {:unsupported :options :what (str "the eval takes no --defsym: " opts)}
+                (try (ev/assemble-file path) (catch arbace.lang.ExceptionInfo e (fail e)) (catch Throwable e {:unsupported :crash :what (str e)}))))
+        cls (fn [pre r] [(keyword (str pre (name (:unsupported r)))) (:what r) 0])]
+    (cond
+      (:error aot) [:assemble-error (:error aot) 0]
+      (:unsupported aot) (cls "assemble-" aot)
+      (:error evo) [:eval-error (:error evo) 0]
+      (:unsupported evo) (cls "eval-" evo)
+      :else
+      (let [sp (str work "/" n ".stub.s")
+            _ (spit sp (if (seq from) (slurp (str from ".stub.s")) (stub-text (undefined-symbols (:bytes aot)))))
+            [sa se] (try (assemble-text sp) (catch Throwable e [{:error (str e)} nil]))]
+        (if-not (and (:bytes sa) (:bytes se))
+          [:stub-error (str (or (:error sa) (:what sa) (:error se) (:what se))) 0]
+          (let [r (link-at [[path aot evo] [sp sa se]] (when (seq from) (str/trim (slurp (str from ".layout")))))]
+            (if-not (:layout r)
+              [(:class r) (:what r) 0]
+              (let [t (:forms r)
+                    insns (vec (for [l (str/split-lines t) :when (seq l)] (Long/parseLong (first (str/split l #"\t")) 16)))
+                    [k at] (image-rest (:aot r) (:eval r) insns)]
+                (write-bytes (str work "/" n) (:aot r))
+                (write-bytes (str work "/" n ".eval") (:eval r))
+                (spit (str work "/" n ".forms") t)
+                (spit (str work "/" n ".layout") (str (:layout r) "\n"))
+                [:built (str "layout " (:layout r) "; "
+                             (case (long k)
+                               -1 "image: the AOT and eval links' sizes differ"
+                               0 "image: equal to the eval layout's outside the instructions"
+                               (str "image: " k " bytes outside the instructions differ from the eval layout's, the first at file offset 0x"
+                                    (Long/toHexString (long at)))))
+                 (count insns)]))))))))
+
+(defn build
+  "Each DIR of `dirs` (WORK/CORPUS, a control's WORK/controls): its list DIR/list (NAME<tab>PATH[<tab>OPTS[<tab>FROM]]) built by
+  build-one into DIR, the rows DIR/build.tsv: NAME CLASS DETAIL COUNT."
+  [& dirs]
+  (doseq [d dirs]
+    (let [rows (for [l (str/split-lines (slurp (str d "/list"))) :when (seq l)] (str/split l #"\t" -1))
+          res (vec (for [[n p opts from] rows] (into [n] (build-one n p (or opts "") d (or from "")))))]
+      (spit (str d "/build.tsv") (apply str (for [[n c dt k] res] (str n "\t" (name c) "\t" (str/replace (str dt) #"[\t\n]" " ") "\t" k "\n"))))
+      (println (str "repr-asm object-roundtrip: " d ": " (count (filter #(= :built (second %)) res)) " of " (count res) " files linked alone, AOT and eval at one layout")))))
+
+(defn- read-tsv [path]
+  (let [f (java.io.File. ^String path)]
+    (if (.exists f)
+      (vec (for [l (str/split-lines (slurp f)) :when (seq l)] (str/split l #"\t" -1)))
+      [])))
+
+(defn forms-check
+  "a64i's forms-check output (FILE, its stdout): {:same :total :diff :unlowered :undecoded :first LINE} or nil (no summary)."
+  [^String path]
+  (let [f (java.io.File. path)]
+    (when (.exists f)
+      (let [ls (str/split-lines (slurp f))]
+        (when-let [[_ s t d un ud] (some #(re-find #"^forms-check: (\d+) of (\d+) equal, (\d+) differ, (\d+) not lowered, (\d+) not decoded" %) ls)]
+          {:same (Long/parseLong s) :total (Long/parseLong t) :diff (Long/parseLong d) :unlowered (Long/parseLong un)
+           :undecoded (Long/parseLong ud)
+           :first (first (filter #(re-find #"^(DIFF|NOWORD|UNLOWERED|UNDECODED) " %) ls))})))))
+
+(defn verdict
+  "One file's round-trip verdict from its build row [CLASS DETAIL COUNT] and its forms check (forms-check's map): [RESULT DETAIL]."
+  [[c d k] fc]
+  (let [k (Long/parseLong (str (or (not-empty k) "0")))]
+    (cond
+      (not= c "built") [(keyword c) d]
+      (nil? fc) [:no-check "a64i's forms check gave no summary"]
+      (pos? (long (:diff fc))) [:differs (str (:diff fc) " of " (:total fc) " instructions differ from the words of the object: " (:first fc))]
+      (pos? (long (:undecoded fc))) [:undecoded (str (:undecoded fc) " of " (:total fc) " words a64i does not decode: " (:first fc))]
+      (pos? (long (:unlowered fc))) [:unlowered (str (:unlowered fc) " of " (:total fc) " forms a64i does not lower: " (:first fc))]
+      (not= (:total fc) k) [:no-check (str (:total fc) " forms checked, " k " laid out")]
+      (not (str/includes? d "equal to the eval layout's")) [:image-differs d]
+      (zero? k) [:no-code "no instruction in the source: the round trip has nothing to judge"]
+      :else [:pass (str "own round trip: " k " instructions, each the word of the object at its place as a64i decodes it; " d)])))
+
+(def failing
+  "The classes that fail the command: the object differs from its source, or the check did not run whole. The others are gaps:
+  what Arbace's object assembler, eval, linker or a64i's forms front end does not take (assemble-*, eval-*, link-*, unlowered),
+  or a source with no instruction (no-code)."
+  #{:differs :image-differs :undecoded :no-check})
+
+(defn rows
+  "The round trip's rows of WORK/CORPUS (objrt.tsv): {NAME [RESULT DETAIL]}, RESULT a keyword; the object check's own rows can take
+  them for the files that state nothing else."
+  [work corpus]
+  (into {} (for [[n r d] (read-tsv (str work "/" corpus "/objrt.tsv"))] [n [(keyword r) d]])))
+
+(defn judge
+  "The rows of each corpus (WORK/CORPUS: build.tsv and NAME.fc): WORK/CORPUS/objrt.tsv (NAME RESULT DETAIL) and WORK/objrt.tsv
+  (CORPUS/NAME RESULT DETAIL); then the controls (WORK/controls/controls.tsv: ID SUBJECT REFERENCE FC, a subject's image held
+  to another file's forms at the same layout, or to its mutant's): each must differ (its forms check a difference, its subject
+  and a file reference passing by themselves, a mutant built). Prints the summary; exits non-zero when a control does not
+  differ or a row is `failing`'s, or STRICT (\"strict\") and a row is not a pass."
+  [work strict & corpora]
+  (let [rows (vec (for [c corpora [n cl d k] (read-tsv (str work "/" c "/build.tsv"))]
+                    [c n (verdict [cl d k] (forms-check (str work "/" c "/" n ".fc")))]))
+        tsv (fn [rs] (apply str (for [[n [r d]] rs] (str n "\t" (name r) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))))
+        by (into {} (for [[c n v] rows] [(str c "/" n) v]))
+        layout (fn [x] (let [f (java.io.File. (str work "/" x ".layout"))] (when (.exists f) (str/trim (slurp f)))))]
+    (doseq [c corpora] (spit (str work "/" c "/objrt.tsv") (tsv (for [[c2 n v] rows :when (= c c2)] [n v]))))
+    (spit (str work "/objrt.tsv") (tsv (for [[c n v] rows] [(str c "/" n) v])))
+    (doseq [c corpora]
+      (let [f (frequencies (for [[c2 _ [r]] rows :when (= c c2)] r))]
+        (println (str "repr-asm object-roundtrip: " c ": " (get f :pass 0) " of " (reduce + 0 (vals f))
+                      " objects equal to their sources, word for word by a64i's decoder; " (pr-str (into (sorted-map) (dissoc f :pass)))))))
+    (doseq [[c n [r d]] rows :when (not= :pass r)]
+      (println (str (if (failing r) "FAIL: " "") "repr-asm object-roundtrip: " c "/" n ": " (name r) ": " d)))
+    (let [ctl (read-tsv (str work "/controls/controls.tsv"))
+          mutants (into {} (for [[n cl] (read-tsv (str work "/controls/build.tsv"))] [n cl]))
+          bad (vec (for [[id subj ref fcp] ctl
+                         :let [fc (forms-check fcp)
+                               pass? (fn [x] (= :pass (first (by x))))
+                               mutant? (str/starts-with? ref "mutant:")
+                               v (cond (not (pass? subj)) (str "left (its subject " subj " does not pass by itself)")
+                                       (and mutant? (not= "built" (mutants id))) (str "left (its mutant is not built: " (mutants id) ")")
+                                       (and (not mutant?) (not (pass? ref))) (str "left (its reference " ref " does not pass by itself)")
+                                       (and (not mutant?) (not= (layout subj) (layout ref)))
+                                       (str "left (its subject's layout " (layout subj) " is not its reference's, " (layout ref) ")")
+                                       (nil? fc) "left (no forms check)"
+                                       (pos? (long (:diff fc))) "differs"
+                                       (zero? (+ (long (:unlowered fc)) (long (:undecoded fc)))) "same"
+                                       :else "left (a form not lowered or a word not decoded, no difference)")]
+                         :when (do (println (if (= v "differs")
+                                              (str "control " id ": fails as it must (" subj "'s object held to " ref "'s forms: " (:first fc) ")")
+                                              (str "FAIL: control " id ": " v)))
+                                   (not= v "differs"))]
+                     id))
+          npass (count (filter #(= :pass (first (nth % 2))) rows))
+          nfail (count (filter #(failing (first (nth % 2))) rows))]
+      (println (str "repr-asm object-roundtrip: " npass " of " (count rows) " pass, " nfail " failing; "
+                    (- (count ctl) (count bad)) " of " (count ctl) " controls fail as they must (rows in " work "/objrt.tsv)"))
+      (shutdown-agents)
+      (System/exit (if (or (seq bad) (pos? nfail) (and (= strict "strict") (< npass (count rows)))) 1 0)))))
+
+(defn -main
+  "build DIR...; judge WORK STRICT CORPUS..."
+  [verb & args]
+  (case verb
+    "build" (do (apply build args) (shutdown-agents))
+    "judge" (apply judge args)))

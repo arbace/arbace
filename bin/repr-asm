@@ -99,6 +99,21 @@
 #                                                    not judge whole fail); --oracle: every file against the record, byte for byte
 #                                                    (the oracle tier's, asm-arm64-object-oracle), rows
 #                                                    test/asm/object-oracle-results-arm64.edn
+#   bin/repr-asm --arch arm64 object-roundtrip [--strict] [--work DIR] [CORPUS|CORPUS/NAME...]
+#                                                    judge-rest: an object's own round trip, for the files that state nothing
+#                                                    about their object (default a64-musl a64-synthetic: the object check's files
+#                                                    of each corpus; CORPUS/NAME one file): the file assembled by Arbace and
+#                                                    linked alone with a stub defining its undefined symbols (lld's default
+#                                                    layout, else a low one: image base 0x1000), laid out by the eval at the same
+#                                                    layout, each instruction's form lowered by a64i against the image's word
+#                                                    there decoded by a64i (a64i forms-check), the image otherwise the eval's
+#                                                    byte for byte (arbace.asm.arm64.objrt); rows WORK/CORPUS/objrt.tsv
+#                                                    (NAME<tab>RESULT<tab>DETAIL, RESULT pass or a class) and WORK/objrt.tsv
+#                                                    (CORPUS/NAME ...), WORK .tmp/repr-asm/objrt; the controls of
+#                                                    test/asm/controls-object-roundtrip-arm64.txt (another file's forms, a
+#                                                    mutant of the subject's source) must differ; fails on a control that does
+#                                                    not, or a failing row (differs, image-differs, undecoded, no-check);
+#                                                    --strict on any row not a pass
 #   bin/repr-asm --arch arm64 object-verdict [--record]
 #                                                    AR4: mc-aarch64-obj's object runs judged by their own CHECK lines, no LLVM
 #                                                    tool (arbace.asm.arm64.objcheck: Arbace's view of the object in llvm-objdump
@@ -706,7 +721,7 @@ rows() {
 case ${1:-} in
   print-oracle|link-oracle|decode|decode-object|decode-check|x86i|x86i-check|x86i-decode-check)
     [ "$arch" = amd64 ] || { echo "repr-asm: $1 is amd64's" >&2; exit 2; } ;;
-  a64i|a64i-check)
+  a64i|a64i-check|object-roundtrip)
     [ "$arch" = arm64 ] || { echo "repr-asm: $1 is arm64's (--arch arm64)" >&2; exit 2; } ;;
 esac
 case ${1:-} in
@@ -1058,6 +1073,77 @@ case ${1:-} in
     judge=(-e "(do (load-file \"$root/test/asm/object_judge.ae\") nil)" -e "(asm.object-judge/main \"$obj_results\" \"${works[*]}\" \"$obj_classes\" \"${record:-}\")")
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
+  object-roundtrip)
+    # judge-rest (2026-11-20): the object's own round trip, for the files that state nothing about their object (musl's sources,
+    # the synthetic tests): each file assembled by Arbace (the object object-check judges) and linked alone with a stub for its
+    # undefined symbols (arbace.asm.arm64.objrt: WORK/CORPUS/NAME), laid out by the eval at the same layout (NAME.forms, each
+    # instruction's form at its address), each form lowered by a64i against the word of the image there decoded by a64i (a64i
+    # forms-check: NAME.fc); rows WORK/CORPUS/objrt.tsv (NAME RESULT DETAIL) and WORK/objrt.tsv (CORPUS/NAME ...), the controls
+    # of test/asm/controls-object-roundtrip-arm64.txt (a subject's object held to another file's forms, or to its own source's
+    # mutant's: each must differ). A whole corpus is the object check's files (those llvm-mc's record holds); CORPUS/NAME one
+    # file. Fails on a control that does not differ or a failing row (differs, image-differs, undecoded, no-check); --strict on
+    # any row not a pass.
+    shift; strict= work=$root/.tmp/repr-asm/objrt sel=()
+    while [ $# -gt 0 ]; do case $1 in
+      --strict) strict=strict; shift ;;
+      --work) [ $# -ge 2 ] || { echo "repr-asm --arch arm64 object-roundtrip [--strict] [--work DIR] [CORPUS|CORPUS/NAME...]" >&2; exit 2; }; work=$2; shift 2 ;;
+      -*) echo "repr-asm --arch arm64 object-roundtrip [--strict] [--work DIR] [CORPUS|CORPUS/NAME...]" >&2; exit 2 ;;
+      *) sel+=("$1"); shift ;; esac; done
+    [ ${#sel[@]} -gt 0 ] || sel=("${obj_default[@]}")
+    rm -rf "$work"; mkdir -p "$work/controls"
+    corps=()
+    for x in "${sel[@]}"; do c=${x%%/*}; case " ${corps[*]} " in *" $c "*) ;; *) corps+=("$c") ;; esac; done
+    for c in "${corps[@]}"; do
+      obj_list "$c" > "$asm_tmp/objrt-list.out"
+      mkdir -p "$work/$c"
+      if printf '%s\n' "${sel[@]}" | grep -qx -- "$c"; then
+        rec=$root/test/asm/records/obj-$c-llvm-mc-23.1.5.edn
+        [ -f "$rec" ] || { echo "repr-asm object-roundtrip: $c is not an object check's corpus (no ${rec#$root/})" >&2; exit 2; }
+        grep -o '^  "[^"]*"' "$rec" | tr -d ' "' > "$work/$c/files.txt"
+      else
+        printf '%s\n' "${sel[@]}" | sed -n "s|^$c/||p" > "$work/$c/files.txt"
+        unknown=$(awk -F'\t' 'NR == FNR { h[$1] = 1; next } !($1 in h)' "$lists/$c.list" "$work/$c/files.txt")
+        [ -z "$unknown" ] || { echo "repr-asm object-roundtrip: not in $c's list:" $unknown >&2; exit 2; }
+      fi
+      awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/$c/files.txt" "$lists/$c.list" > "$work/$c/list"
+    done
+    # the controls: ID SUBJECT REFERENCE (another file's forms: CORPUS/NAME), or ID SUBJECT mutant LINE OLD NEW (the subject's source
+    # with OLD on its line LINE replaced by NEW, laid out with the subject's stub at its layout); a control whose subject or reference
+    # is not in this run is left out
+    ctl=$root/test/asm/controls-object-roundtrip-arm64.txt
+    : > "$work/controls/list"; : > "$work/controls/wanted.tsv"
+    while read -r cid subj ref line old new; do
+      case $cid in ''|'#'*) continue ;; esac
+      sc=${subj%%/*} sn=${subj#*/}
+      in_run() { [ -f "$work/${1%%/*}/list" ] && awk -F'\t' -v n="${1#*/}" '$1 == n { f = 1 } END { exit !f }' "$work/${1%%/*}/list"; }
+      if ! in_run "$subj" || { [ "$ref" != mutant ] && ! in_run "$ref"; }; then echo "control $cid: not in this run"; continue; fi
+      if [ "$ref" = mutant ]; then
+        sp=$(awk -F'\t' -v n="$sn" '$1 == n { print $2 }' "$work/$sc/list")
+        awk -v l="$line" -v o="$old" -v nw="$new" 'NR == l { i = index($0, o); if (i == 0) bad = 1; else $0 = substr($0, 1, i - 1) nw substr($0, i + length(o)) }
+             { print } END { exit bad }' "$sp" > "$work/controls/$cid.s" || { echo "FAIL: control $cid: $old is not on line $line of $subj"; rm -f "$work/controls/$cid.s"; }
+        [ -f "$work/controls/$cid.s" ] && printf '%s\t%s\t\t%s\n' "$cid" "$work/controls/$cid.s" "$work/$sc/$sn" >> "$work/controls/list"
+        printf '%s\t%s\tmutant:%s:%s:%s\t%s\n' "$cid" "$subj" "$line" "$old" "$new" "$work/controls/$cid" >> "$work/controls/wanted.tsv"
+      else
+        printf '%s\t%s\t%s\t%s\n' "$cid" "$subj" "$ref" "$work/${ref%%/*}/${ref#*/}" >> "$work/controls/wanted.tsv"
+      fi
+    done < "$ctl"
+    dirs=(); for c in "${corps[@]}"; do dirs+=("$work/$c"); done
+    arbace_tool -m arbace.asm.arm64.objrt build "${dirs[@]}" "$work/controls"
+    a64i_ensure
+    for c in "${corps[@]}"; do
+      while IFS=$'\t' read -r n cl _; do
+        [ "$cl" = built ] || continue
+        "$a64i_exe" forms-check "$work/$c/$n" "$work/$c/$n.forms" > "$work/$c/$n.fc" 2>&1 || true
+      done < "$work/$c/build.tsv"
+    done
+    # each control's forms check: the subject's image against the reference's forms (a file's, or the mutant's)
+    : > "$work/controls/controls.tsv"
+    while IFS=$'\t' read -r cid subj ref forms; do
+      fc=$work/controls/$cid.fc
+      [ -f "$work/${subj%%/*}/${subj#*/}" ] && [ -f "$forms.forms" ] && "$a64i_exe" forms-check "$work/${subj%%/*}/${subj#*/}" "$forms.forms" > "$fc" 2>&1 || true
+      printf '%s\t%s\t%s\t%s\n' "$cid" "$subj" "$ref" "$fc" >> "$work/controls/controls.tsv"
+    done < "$work/controls/wanted.tsv"
+    arbace_tool -m arbace.asm.arm64.objrt judge "$work" "${strict:-lenient}" "${corps[@]}" ;;
   object-verdict)
     if [ "$arch" = amd64 ]; then
       # queue 337: MC/X86's object tests mc-x86-obj leaves out by their own CHECK lines (arbace.asm.amd64.objcheck; no LLVM tool):
