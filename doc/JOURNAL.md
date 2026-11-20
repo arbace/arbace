@@ -13802,3 +13802,18 @@ outcome is undefined, unspecified or left unstated leaves the judge's cases with
   --only test/llvm/aot-heavy.txt --record`, 3 h 43 min with the queue; C++'s runtime built and read by ci, peak 8.6 GB): 3 of 3 by their
   own verdicts, cpp.runtime.library from :refused to a pass. LLVM: 5,432 judge cases all own, the stage 1.0000, independence 1.0000,
   completeness 0.9899. crops-score --judge --strict, records-check, reap: 0 problems.
+
+## 2026-11-20: llvm-sections-1120, D1120-3 (a): the 62 sections' rules ported (branch `llvm-sections-1120` from a5e100f56)
+
+The main session took D1120-3 (a): the rules D1120-2's 62 sections showed repr/llvm lacks, ported by group, largest first, each from
+llvm-project 23.1.5's source (llvm-project-23.1.5.src.tar.xz, the pinned tarball: lib/IR/Verifier.cpp, VerifierAMDGPU.cpp,
+AutoUpgrade.cpp, Type.cpp, ProfDataUtils.cpp, FPEnv.cpp, lib/AsmParser/LLParser.cpp, lib/Support/APFloat.cpp, lib/IR/DataLayout.cpp,
+include/llvm/IR/DataLayout.h, include/llvm/ProfileData/InstrProfData.inc, include/llvm/BinaryFormat/Dwarf.h) with its lines cited in
+arbace/repr/llvm/verify.ae and read.ae; proven on its sections, the messages against the tests' CHECK lines; five commits (69ddf1fdd,
+7a562c14a, c4ecfce74, 9db8d85a9 and the last), each with verify-llvmtest recorded, the class shrunk, reap and the scores recorded.
+Groups: arbitrary-fp conversions 8, the value profile and `unknown` !prof 7, target extension types' properties 7, block addresses
+across address spaces 7, the ptrauth init/fini upgrade 7, reqd_work_group_size 6, symbolic address spaces 6, splats 4, ptrtoaddr's
+address width 3, global numbering 2, PAuth ABI module flags 2, atomicrmw's store size, the dialect field, module asm's value 1 each.
+Result: verify-llvmtest 1,009 of 1,009; verify-probes, the round trips and the rt families unchanged; LLVM read 4,049 / 0 / 0;
+completeness 0.9899 -> 0.9938 (meant 1.0000), independence 1.0000. Not run: bin/gate. For the night: llvm-essential, llvm-read, the
+round trips (arbace/repr/llvm is embedded: gate_key moves).

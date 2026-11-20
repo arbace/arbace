@@ -881,6 +881,14 @@
                          (verr :parser/blockaddress (str "type of blockaddress must be a pointer and not '" (tstr (norm-type t)) "'") at))
                        (.put *bafwd* fk (conj (vec (.get *bafwd* fk)) [(nth v 2) (addrspace rt)]))))))
                (cond
+                 ;; D1120-3 (llvm-sections-1120): a splat (llvm-project 23.1.5 llvm/lib/AsmParser/LLParser.cpp:4725-4737: its constant parsed
+                 ;; with its own type; convertValIDToValue 6949-6957: the expected type a vector, the constant's type its element type)
+                 (and (= h 'splat) (vector? (second v)))
+                 (let [[it iv] (second v) at {:at [:val {:text "splat"}]} rt (resolve-type t)]
+                   (use-value st iv (norm-type it))
+                   (when-not (vec-type? rt) (verr :parser/constant-type "vector constant must have vector type" at))
+                   (when-not (= (norm-type it) (norm-type (elem rt)))
+                     (verr :parser/constant-type (str "constant expression type mismatch: got type '" (tstr (norm-type it)) "' but expected '" (tstr (norm-type (elem rt))) "'") at)))
                  ('#{struct packed} h)
                  (let [rt (resolve-type t) at {:at [:str value-brace]}]
                    (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))   ; the elements are parsed first
@@ -1097,6 +1105,14 @@
                                                         (verr :parser/atomicrmw (str "atomicrmw " opn " operand must be a floating point or fixed vector of floating point type") {:at [:op 1]}))
                            :else (when-not (int-ish? st)
                                    (verr :parser/atomicrmw (str "atomicrmw " opn " operand must be an integer or fixed vector of integer type") {:at [:op 1]})))
+                         ;; D1120-3: the value's store size in bits a power of two, at least 8 (llvm-project 23.1.5
+                         ;; llvm/lib/AsmParser/LLParser.cpp:9250-9254; getTypeStoreSizeInBits: the type's bits rounded up to bytes)
+                         (let [eb (fn [t] (if (ptr-type? t) (dl-ptr-bits (addrspace t)) (bits t)))
+                               tb (if (vec-type? vt) (when-let [b (eb (elem vt))] (* (long (nth vt 1)) (long b))) (eb vt))]
+                           (when tb
+                             (let [sz (* 8 (quot (+ (long tb) 7) 8))]
+                               (when (or (< sz 8) (not (zero? (bit-and sz (dec sz)))))
+                                 (verr :parser/atomicrmw "atomicrmw operand must have a power-of-two byte size" {:at [:op 1]})))))
                          (check-align (:align o)))
       (= h 'cmpxchg) (let [[pv c n so fo] ps]
                        (when (= so :unordered) (verr :parser/cmpxchg "invalid cmpxchg success ordering" {:at [:inst-end]}))
