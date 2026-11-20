@@ -1480,7 +1480,12 @@
                             (and (:defaulted f) (not (header-node? n))) (assoc :defaulted true :out-of-line-default true)
                             ;; (CX12, the checker: a deleted function redeclared -- ill-formed, or two overloads the
                             ;; slice's types do not tell apart, noexcept among them -- is not trusted to be deleted)
-                            (and (checking?) (or (:deleted g) (:deleted f))) (assoc :deleted-sure false)
+                            ;; (queue 460: but a plain redeclaration of the same type after the deleted definition keeps it,
+                            ;; [dcl.fct.def.delete]/4: the deleted definition is the first declaration, later ones redeclare it)
+                            (and (checking?) (or (:deleted g) (:deleted f))
+                                 (not (and (:deleted-sure g) (not (:deleted f)) (not body) (= (:ty g) (:ty f))
+                                           (= (:cq g) (:cq f)) (= (:refq g) (:refq f)))))
+                            (assoc :deleted-sure false)
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
@@ -3455,6 +3460,77 @@
 
 (defn- class-id [t] (when (abi/class? (abi/unq t)) (:id (abi/unq t))))
 
+;; queue 460 (the checker alone): implicit conversions between scalar types the standard conversions do not make
+;; ([conv]/1: an implicit conversion sequence is the standard conversions of [conv.lval]-[conv.bool] in order; [conv.ptr]/2-3,
+;; [conv.qual]/3, [conv.mem]/2, [conv.integral]/1 from an unscoped enumeration only, [conv.bool]/1's std::nullptr_t by
+;; direct-initialization only), refused with a message of their own that the dg check's own read reports (arbace.repr.cpp.diag's
+;; sema-rules); a type the slice knows only in part (a pointer to an unknown type, a function or array pointee, a class not
+;; complete, an undeduced or dependent type) is left as before.
+
+(def ^:dynamic *cx-union-init* false) ; queue 460: inside a union's aggregate initialization (its member as the slice takes it)
+
+(defn- cx-sure-scalar?
+  "A scalar type whose conversions the checker judges: arithmetic, an enumeration, a pointer to object of such a type or
+  of a complete class (cv-qualified at any level), a pointer to member."
+  [t]
+  (let [t (abi/unq t)]
+    (case (:k t)
+      :b (not (#{:float16 :float128 :i128 :u128} (:n t)))
+      :enum (some? (abi/enm (:id t)))
+      :mptr (some? (:to t))
+      :class (let [c (abi/cls (:id t))] (boolean (and c (:complete c) (not (:tmpl c)))))
+      :ptr (let [p (:to t)] (and (some? p) (if (and (= :b (:k p)) (= :void (:n p))) true (cx-sure-scalar? p))))
+      false)))
+
+(defn- cx-cv-ok?
+  "Whether `to`'s cv-qualifiers include `from`'s ([conv.qual]/3's first level)."
+  [from to]
+  (and (or (:c to) (not (:c from))) (or (:v to) (not (:v from)))))
+
+(defn- cx-shape [t] (if (= :ptr (:k t)) (assoc (abi/unq t) :to (cx-shape (:to t))) (abi/unq t)))
+
+(defn- cx-bad-ptr-conv?
+  "Whether the prvalue of pointer type `from` surely does not convert implicitly to the pointer type `to` ([conv.ptr]/2-3:
+  to cv void* and to a base class's pointer; [conv.qual]: the cv-qualifiers added only, judged at the first level, the
+  deeper levels' alone similar; the rest no standard conversion makes)."
+  [from to]
+  (let [f (:to from) t (:to to)]
+    (when (and (cx-sure-scalar? from) (cx-sure-scalar? to))
+      (cond
+        (abi/void? t) (not (cx-cv-ok? f t))
+        (abi/void? f) true
+        (= (abi/unq f) (abi/unq t)) (not (cx-cv-ok? f t))
+        (and (class-id f) (class-id t)) (or (not (abi/derived-from? (class-id f) (class-id t))) (not (cx-cv-ok? f t)))
+        (and (abi/ptr? f) (abi/ptr? t)) (not= (cx-shape f) (cx-shape t))
+        :else true))))
+
+(defn- cx-tyname ^String [t] (pr-str (select-keys (abi/unq t) [:k :n :id :to :cls])))
+
+(defn- cx-implicit-scalar!
+  "Queue 460, the checker: the copy- (`style` :copy) or direct-initialization of the scalar type `to` from the prvalue `e`
+  of scalar type, refused where no implicit conversion is made (see cx-sure-scalar?)."
+  [e to style]
+  (when (and (checking?) (not *cx-union-init*))
+    (let [from (abi/unq (:ty e)) to (abi/unq to)]
+      (cond
+        ;; ([conv.bool]/1: std::nullptr_t converts to bool by direct-initialization alone; DR 1423)
+        (and (= :bool (abi/bn to)) (= :nullptr (abi/bn from)) (not= style :direct))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (std::nullptr_t to bool requires direct-initialization)")
+        ;; ([conv.integral]/1, [conv.fpint]/2, [conv.bool]/1: a scoped enumeration converts to no arithmetic type)
+        (and (abi/enum? from) (:scoped (abi/enm (:id from))) (abi/arith? to))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a scoped enumeration)")
+        ;; ([conv.ptr]/1: a null pointer constant is an integer literal of value zero, or a prvalue of std::nullptr_t; an
+        ;; integral constant expression of value zero before C++11, CWG 903 -- a folded constant counts as one here)
+        (and (abi/ptr? to) (or (abi/arith? from) (abi/enum? from)) (not (null-constant? e)) (cx-sure-scalar? to))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (an integer to a pointer)")
+        (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e))
+             ;; (a string literal's decay to char*: ISO C++11's ill-formed conversion GCC gives as a warning unless
+             ;; -pedantic-errors, -Wwrite-strings; not judged here)
+             (not (and (= :decay (:op e)) (= :str (:op (:e e)))))
+             (cx-bad-ptr-conv? from to))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (no pointer conversion)")
+        :else nil))))
+
 (defn convert-scalar
   "The standard conversion of the prvalue `e` to the scalar type `t` (implicit or, with `explicit?`, a cast's)."
   [e t explicit?]
@@ -3499,6 +3575,10 @@
            (not= (:to to) (:to from))
            (= (apply dissoc (:to to) [:refq :cq :vq]) (apply dissoc (:to from) [:refq :cq :vq])))
       (fail :conversion "incompatible member function pointer types (qualifiers)")
+      ;; (queue 460, the checker: an implicit conversion between scalar types it knows, none of the above, is refused
+      ;; as the program's: void, std::nullptr_t to an integer, a pointer to an integer, unrelated pointers to members)
+      (and (checking?) (not explicit?) (not *cx-union-init*) (cx-sure-scalar? from) (cx-sure-scalar? to) (not= :nullptr (abi/bn to)))
+      (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly")
       :else (fail :conversion "conversion from " (pr-str from) " to " (pr-str to)))))
 
 ;; Implicit conversion sequences: {:rank 0 exact, 1 promotion, 2 conversion, 3 user-defined, 4 ellipsis, :sub n}
@@ -3842,7 +3922,11 @@
                            ;; CX12 (the checker): the best viable function deleted ([dcl.fct.def.delete]/2; clang's
                            ;; err_ovl_deleted_call, err_ovl_deleted_special_init), when it was the only viable one: the
                            ;; slice's ranking is not trusted to have chosen it over another)
-                           (when (and (checking?) (:deleted-sure f) (= 1 (count viable)))
+                           ;; (queue 460: or when each of its conversions is exact, [over.ics.scs]/3's Exact Match rank, which
+                           ;; no other candidate's betters: the others lost by a worse conversion or by [over.match.best]/2's
+                           ;; tie-breakers)
+                           (when (and (checking?) (:deleted-sure f)
+                                      (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
                              (fail :overload "call to a deleted function " (:name f) (if (:implicit f) " (implicitly deleted)" "")))
                            b)
       (empty? viable)
@@ -4545,7 +4629,9 @@
             :else
             (do (when (> (count items) (count subs)) (fail :init "too many initializers"))
                 {:i :list :cls (:id tu)
-                 :items (vec (map-indexed (fn [i s]
+                 ;; (queue 460: a union's list takes its first member, a designator not read: the member's implicit
+                 ;; conversion not judged)
+                 :items (binding [*cx-union-init* (or *cx-union-init* (boolean (:union c)))] (vec (map-indexed (fn [i s]
                                             ;; (the native parser's semantic list holds a default member initializer's
                                             ;; place as CXXDefaultInitExpr, :default-init: the member's own initializer)
                                             (if (and (< i (count items)) (not= :default-init (:op (nth items i))))
@@ -4558,7 +4644,7 @@
                                                 (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
                                                         (assoc :agg-this true))
                                                 (init-for (:ty s) {:op :init-list :items []} ctx :value))))
-                                          subs))
+                                          subs)))
                  :fields-used (mapv (comp :i :field) (remove :base subs))})))
         (abi/class? tu) (class-init tu [src] ctx :list)
         :else (case (count (:items src))
@@ -4581,6 +4667,8 @@
                    (or (and (abi/enum? ft) (:scoped (abi/enm (:id ft))))
                        (and (= style :copy) (or (abi/enum? ft) (abi/arith? ft)))))
           (fail :conversion "cannot initialize a variable of type '" (:name (abi/enm (:id tu))) "' with a value of another type"))
+        ;; (queue 460: an implicit conversion no standard conversion makes, the checker's)
+        (when-not (abi/class? ft) (cx-implicit-scalar! e tu style))
         ;; (direct-initialization: the explicit conversion functions too, [over.match.conv]/1.1; CP280 (a))
         {:i :expr :e (convert-scalar (if (abi/class? (abi/unq (:ty e))) (user-conv ctx e tu (= style :direct)) e) tu false)}))))
 
@@ -4954,7 +5042,10 @@
                           ;; (queue 412: x = {e} as T{e}, [expr.assign]/8: narrowing judged)
                           1 (:e (narrow-check! {:i :expr :e (convert-scalar (rv (first (:items r))) t false)} t (first (:items r))))
                           (fail :assign "a list of several values assigned to a scalar"))
-                        (convert-scalar (rv r) t false))]
+                        (let [r (rv r)]
+                          ;; (queue 460: [expr.assign]/3, the right operand implicitly converted, the checker's)
+                          (when-not (abi/class? (abi/unq (:ty r))) (cx-implicit-scalar! r t :copy))
+                          (convert-scalar r t false)))]
                 {:op :assign :l l :r r :ty (:ty l) :cat :lv}))))
 
 (defn- compound-node [o l r]
