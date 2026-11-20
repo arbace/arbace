@@ -2688,6 +2688,7 @@
   (let [ts (filter #(and (= :tmpl (:e %)) (= :fn (:tk %)))
                    (if cid (.get ^java.util.HashMap (:names scope) (:name n)) (sema/lookup scope (:name n))))
         targs (filter #(= "TemplateArgument" (:kind %)) (kids n))
+        doubt (atom false)
         try1 (fn [e]
                (let [t (tmpl (:id e))]
                  (try
@@ -2696,12 +2697,28 @@
                          b (atom (into {} (map-indexed vector ex)))]
                      (when (deduce-type b (:id t) (sym-sig t) ty)
                        (when-let [args (finish-deduction t @b)] [t args])))
-                   (catch arbace.lang.ExceptionInfo _ nil))))
+                   (catch arbace.lang.ExceptionInfo _ (reset! doubt true) nil))))
         ;; of the templates it could specialize, the most specialized ([temp.deduct.decl]/1, [temp.func.order])
         found (keep try1 ts)
         np (count (:ps (dissoc (sema/resolve-type scope (get-in n [:type :qualType])) :cq)))
         best (filter (fn [[t _]] (every? (fn [[u _]] (or (= (:id t) (:id u)) (more-specialized-fn? (:id t) (:id u) np))) found)) found)
-        [t args] (or (first best) (first found) (fail :template "no template for the explicit specialization " (:name n)))
+        [t args] (or (first best) (first found)
+                     (do
+                       ;; (queue 484, the checker: [temp.expl.spec]/12 with [temp.deduct.decl]/1, an explicit specialization
+                       ;; that no function template of its name matches -- none declared, or each deduction failing by the
+                       ;; algorithm alone, no type deduced from a placeholder and no pack; g++'s "template-id ... does not match
+                       ;; any template declaration", template/spec39.C; reported at the declaration, then the refusal as before)
+                       (when (and (sema/checking?) (not @doubt)
+                                  (not (re-find #"\b(auto|decltype)\b" (str (get-in n [:type :qualType]))))
+                                  (every? (fn [e] (let [t (tmpl (:id e))]
+                                                    (and (not-any? :pack (:params t))
+                                                         (not (re-find #"\b(auto|decltype)\b" (str (get-in (:pattern t) [:type :qualType])))))))
+                                          ts))
+                         (sema/*on-refusal* (ex-info (str "codegen: explicit specialization of '" (:name n) "' matches no template declaration")
+                                                     {:codegen/refused :template})
+                                            ;; (at the declarator's name, as GCC: template/crash9.C's `template<>` on the line before)
+                                            (let [l (:loc n)] (if (and (:offset l) (:file l)) (assoc n :range {:begin l}) n))))
+                       (fail :template "no template for the explicit specialization " (:name n))))
         ps (if cid
              (new-scope :tparams scope :cls cid :path (:path scope) :internal (:internal scope))
              (new-scope :tparams scope :internal (:internal scope)))
