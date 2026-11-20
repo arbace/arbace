@@ -431,6 +431,11 @@
   (let [frames (vec (filter #(:end @%) (:frames ctx)))]
     (when (seq frames)
       (let [sec (section! ctx ".eh_frame" (or (:eh-frame-type *arch*) 0x70000001) elf/SHF_ALLOC 0 nil false)
+            ;; MCObjectFileInfo's FDECFIEncoding: DW_EH_PE_pcrel | DW_EH_PE_sdata4, sdata8 (0x1c) under llvm-mc's --large-eh-encoding
+            ;; or --large-code-model (judge-rest: AArch64's, `assemble`'s :large-eh; x86-64's large personality, LSDA and TType
+            ;; encodings are not built, its checks never pass it): the CIE's augmentation data, the FDE's pc_begin and range in
+            ;; its size, a FDE not last padded to it
+            fde-enc (if (:large-eh ctx) 0x1c 0x1b)
             _ (data! ctx)
             ch (cur-data! ctx)
             ^java.util.ArrayList b (:bytes @ch)
@@ -487,7 +492,7 @@
                                 (out! (uleb (+ (if (:personality m) (+ 1 (enc-size (:pers-enc m))) 0) (if (:lsda m) 1 0) 1)))
                                 (when (:personality m) (out! [(:pers-enc m)]) (sym-value! (:personality m) (:pers-enc m)))
                                 (when (:lsda m) (out! [(:lsda-enc m)]))
-                                (out! [0x1b])
+                                (out! [fde-enc])
                                 (vreset! cfa 0)
                                 (when-not (:simple m) (out! (:init (:cie *arch*))) (vreset! cfa (:cfa (:cie *arch*))))
                                 (pad! 4)
@@ -499,8 +504,8 @@
                   _ (u32! 0)
                   fde-start (.size b)
                   _ (u32! (- fde-start cie-start))
-                  _ (sym-value! (:begin m) 0x1b)
-                  _ (u32! (- (long (off-of (:end m))) (long (off-of (:begin m)))))
+                  _ (sym-value! (:begin m) fde-enc)
+                  _ (let [r (- (long (off-of (:end m))) (long (off-of (:begin m))))] (out! (for [i (range (enc-size fde-enc))] (bit-shift-right r (* 8 i)))))
                   _ (out! (uleb (if (:lsda m) (enc-size (:lsda-enc m)) 0)))
                   _ (when (:lsda m) (sym-value! (:lsda m) (:lsda-enc m)))
                   _ (vreset! cfa init-cfa)
@@ -510,7 +515,7 @@
                           (out! (advance d))
                           (out! (insn-bytes i))
                           (recur (rest is) (:label i)))))
-                  _ (pad! (if (= (inc k) n) 8 4))]
+                  _ (pad! (if (= (inc k) n) 8 (enc-size fde-enc)))]
               (set32! len-at (- (.size b) fde-start))
               (recur (rest frs) kk cie-start (inc k)))))))))
 
@@ -1342,12 +1347,12 @@
 (defn assemble
   "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
   {:unsupported CLASS :what TEXT}, or {:error MESSAGE :errors [...]} (the namespace's doc)."
-  [items & [{:keys [mode defsym] :or {mode 64}}]]
+  [items & [{:keys [mode defsym large-eh] :or {mode 64}}]]
   ((or (:wrap *arch*) (fn [t] (t)))
    (fn []
     (let [ctx-of (volatile! nil)]
     (try
-      (let [ctx (new-ctx)]
+      (let [ctx (cond-> (new-ctx) large-eh (assoc :large-eh true))]
         (vreset! ctx-of ctx)
         (vreset! (:mode ctx) mode)
         ;; initSections: .text, aligned to 4 by an empty code alignment

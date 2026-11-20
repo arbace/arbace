@@ -173,7 +173,7 @@ cmd_check_native() {
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   # its key, so check --aot's oi column takes these rows (oi_rows_for), as the oracle path's check.tsv
   if [ -z "$ONLY" ] && [ -z "$ONLY_LIST" ]; then oi_key "$OI_DIR/corpus.tsv" > "$out.key"; else rm -f "$out.key"; fi
-  local own; own=$(own_verdicts oi)
+  local own; own=$(own_verdicts oi) || exit $?
   # the judgment's directory: oi_check.ae reads the known programs, the slow ones and the controls beside the results file, so the native
   # path's are merged there with ocamlc's (oi-known-native.edn after oi-known.edn; divergences-native.edn's classes before divergences.edn's)
   local j=$OI_DIR/native-judge; rm -rf "$j"; mkdir -p "$j"

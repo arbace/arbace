@@ -4464,3 +4464,36 @@ recommended_domain_count and bigarrcml (callback/test1 and test7 after the two f
 
 The header rows left in `:c-api`: int64-unboxing and unboxed-primitive-args (native only), bigarrfml (Fortran), delayintr, signal
 and cloexec (helper programs). The negative control `_control/capi-test1-vs-test2` (check-aot-native.edn) differs.
+
+## As built: judge-rest, the opam set's demonstrations by reviewed golden files (2026-11-20, branch `judge-rest-1120`, from next `939037429`)
+
+The user's goal of 2026-11-20: the judges' recorded cases own wherever an accepted precedent applies; here the user's precedent of
+reviewed golden files (JCS361 (a) for Java's jtreg tests, extended to C and C++ the same day). OCaml's judge held, measured today by
+`bin/oi own-verdicts --check`, 16 programs at oi's level and 11 at the AOT level on ocamlc's and ocamlopt's recorded runs: the opam
+set's 11 demonstrations their packages do not run as tests (cmdliner 2.1.1's examples, blueprints and test_shell, `~run:false` in
+its B0.ml; pprint's PPrintTest), and at oi's level the 5 of `test/ocaml/own-verdict.edn`.
+
+- **The 11 golden files.** `test/ocaml/opam/golden/PKG-NAME.reference`: the merged standard output and error as `run_redirected`
+  writes them, and the exit status, written from the program's text, the library's source (cmdliner's `Cmdliner_manpage` plain
+  renderer, its messages and `Cmd.Exit` codes; pprint's engine at width 80, ribbon 40) and OCaml 5.5.0's `Format`, before they were
+  compared with anything; then checked against `test/ocaml/ref-suite.edn`: 11 of 11 equal to ocamlc's and ocamlopt's status and
+  SHA-256 at the first writing (Arbace's earlier `oi.out` files not opened). Reviewed in `test/ocaml/opam/golden.edn`
+  (`{:id :status :file :basis :why}`, the basis keys `:src :lib :fmt :args :env :cwd`). `test/ocaml/opam-verdicts.tsv`'s kind
+  `golden` names them; `bin/oi`'s `golden_check` (called by `own_verdicts`) refuses a golden line without its review, whose review
+  gives another status or file, whose file is missing, and a review without its line; the callers stop on `own_verdicts`' refusal
+  (`local own; own=$(own_verdicts ...) || exit $?`: before, `OI_OWN=$(...) cmd` went on).
+- **The environment (DECISION).** example_chorus (`-n 2 a b`: `-n` is no option, `Exit.cli_error` 124) and example_rm (`-f a b`,
+  no file `a`: 124) print their usage and error styled: `Cmdliner_base.Fmt.styler'` takes Ansi unless `NO_COLOR` is non-empty or
+  `TERM` is `dumb` or unset, which nothing in the harness fixed (the recorded runs were made with colour). Their corpus rows fix it,
+  `TERM=xterm-256color NO_COLOR=` (`test/ocaml/opam-programs.tsv`'s optional sixth column ENV, exported by `run_redirected` for every
+  runner); the alternative, recording the dependence in the review's `:env` alone, would fail under a shell without TERM.
+- **Controls.** `test/ocaml/controls.txt`'s `_control/tail-vs-cp-golden` (example_tail's run judged against example_cp's golden
+  file, both status 0) at the four suite judgments; by hand, `own-verdicts --check` with one byte of example_tail's golden file
+  changed reports a DISAGREE at both levels and fails (exit 2), and with example_revolt2's review removed refuses; restored after.
+  The control's judgment on the 2026-11-15 suite rows (`oi_check.ae judge-only`, no run): differs, as a control must. The old
+  control's comment called example_chorus's 124 a timeout: it is `Exit.cli_error`.
+- **After.** `own-verdicts --check`: run 451 of 453 and suite 119 of 122 by their own verdict at oi's level, 453 and 122 of 122 at
+  the AOT level, 0 differ, no stale entry. The 5 left at oi's level have no verdict of their own, by design: the native back end's
+  allocation counts (typing-modules/struct_include_optimisation, asmcomp/optargs, asmcomp/static_catch_unboxing), ocamlopt's
+  inlined debug frames (backtrace/lazy), a program ocamlc does not compile (callback/callback_effects_domains_gc). Judge 0.9982 ->
+  0.9997 at today's corpora ((61 + 3,101 + 3,082 + 570 + 575 + 0.5 x 5) / 7,394).

@@ -499,7 +499,8 @@
                          last-load (last loads)]
                      (cond-> {"__ehdr_start" image-base "__executable_start" image-base}
                        (seq ro-loads) (assoc "_etext" (when-let [o (last-sec (last ro-loads))] (end-of o)))
-                       last-load (assoc "_end" (end-of (last-sec last-load))
+                       ;; (a load of the headers alone, an object with no content linked alone: no _end, as no _etext)
+                       last-load (assoc "_end" (when-let [o (last-sec last-load)] (end-of o))
                                         "_edata" (let [o (last (filter #(not= elf/SHT_NOBITS (:type %)) (map by-name (filter string? (:secs last-load)))))]
                                                    (when o (end-of o))))
                        (by-name ".bss") (assoc "__bss_start" (long (.get addr ".bss")))
@@ -629,12 +630,16 @@
                              imm12! (fn [^long v] (set-w! 0x3ffc00 (bit-shift-left (bit-and v 0xfff) 10)))
                              ldst! (fn [^long v ^long sh] (set-w! 0x3ffc00 (bit-shift-left (bit-shift-right (bit-and v 0xfff) sh) 10)))
                              movw! (fn [^long v ^long g] (set-w! 0x1fffe0 (bit-shift-left (bit-and (bit-shift-right v (* 16 g)) 0xffff) 5)))
-                             ;; writeSMovWImm: a signed group's MOVZ, or MOVN of the inverted value when negative
-                             smovw! (fn [^long v ^long g]
-                                      (let [imm (bit-shift-right v (* 16 g)) w (u32 b at)]
-                                        (when-not (<= -4294967296 (bit-shift-right v (* 16 (max 0 (dec g)))) 4294967295)
-                                          (fail (str "relocation " tname " out of range: " v)))
-                                        (if (bit-test w 30)
+                             ;; writeSMovWImm: a signed group's MOVZ, or MOVN of the inverted value when negative; a MOVK (opc 11,
+                             ;; bit 29) keeps its opcode (judge-rest: bit 30 was tested, set in MOVZ too, so a MOVZ never turned
+                             ;; MOVN); the range lld's checkInt, 17, 33 and 49 bits for G0, G1 and G2 (G0's was 33), none for an
+                             ;; _NC group (`nc`) or G3
+                             smovw! (fn [^long v ^long g & [nc]]
+                                      (let [imm (bit-shift-right v (* 16 g)) w (u32 b at) bits (when-not nc (get [17 33 49] g))]
+                                        (when (and bits (not (<= (- (bit-shift-left 1 (dec (long bits)))) v (dec (bit-shift-left 1 (dec (long bits)))))))
+                                          (fail (str "relocation " tname " out of range: " v " is not in [" (- (bit-shift-left 1 (dec (long bits)))) ", "
+                                                     (dec (bit-shift-left 1 (dec (long bits)))) "]")))
+                                        (if (bit-test w 29)
                                           (movw! v g)
                                           (let [neg (bit-test imm 16)
                                                 imm (if neg (bit-xor imm 0xffff) imm)
@@ -668,6 +673,11 @@
                            0x227 (imm12! (tp))
                            0x220 (smovw! (tp) 2) 0x221 (smovw! (tp) 1) 0x222 (movw! (tp) 1) 0x223 (smovw! (tp) 0) 0x224 (movw! (tp) 0)
                            0x10e (smovw! (s+a) 0) 0x10f (smovw! (s+a) 1) 0x110 (smovw! (s+a) 2)
+                           ;; MOVW_PREL_G0..G3 (judge-rest's object round trip, relocs.s's :prel_g1:): S + A - P's group, a
+                           ;; signed one (lld's R_PC, writeSMovWImm, the _NC ones too)
+                           0x11f (smovw! (- (s+a) p) 0) 0x120 (smovw! (- (s+a) p) 0 true) 0x121 (smovw! (- (s+a) p) 1)
+                           0x122 (smovw! (- (s+a) p) 1 true) 0x123 (smovw! (- (s+a) p) 2) 0x124 (smovw! (- (s+a) p) 2 true)
+                           0x125 (smovw! (- (s+a) p) 3)
                            (0x228 0x229) (ldst! (tp) 0) (0x22a 0x22b) (ldst! (tp) 1) (0x22c 0x22d) (ldst! (tp) 2) (0x22e 0x22f) (ldst! (tp) 3)
                            (0x23a 0x23b) (ldst! (tp) 4)
                            (unsupported :reloc (str "relocation " tname)))))

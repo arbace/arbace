@@ -23,7 +23,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
   repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle repr-asm-object-verdict repr-asm-object-verdict-record repr-asm-backend-check \
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
-  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
+  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 repr-asm-object-roundtrip-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
   a64i-light a64i-run a64i-trace a64i-check a64i-record a64i-table-check a64i-go-check a64i-go-tools a64i-go-compile a64i-goroot-check a64i-arbace-check \
   x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
@@ -693,6 +693,8 @@ repr-asm-encode-check-arm64: ## AR2's encode check: MC/AArch64's stated encoding
 	bin/repr-asm --arch arm64 encode-check $(CORPORA)
 repr-asm-encode-record-arm64: ## AR2's encode check recorded into test/asm/encode-results-arm64.edn (bin/repr-asm --arch arm64 encode-check --record)
 	bin/repr-asm --arch arm64 encode-check --record $(CORPORA)
+repr-asm-object-roundtrip-arm64: ## judge-rest: arm64's objects judged by their own sources' round trip, each linked alone and its words decoded by a64i against the source's forms at the same layout, with the controls of test/asm/controls-object-roundtrip-arm64.txt (bin/repr-asm --arch arm64 object-roundtrip [CORPUS|CORPUS/NAME...]; CORPORA=..., default a64-musl a64-synthetic)
+	bin/repr-asm --arch arm64 object-roundtrip $(CORPORA)
 repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)
 	bin/repr-llvm check $(FAMILY)
 repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)

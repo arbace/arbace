@@ -465,3 +465,39 @@ toolchain host). arm64's eval and AOT stages do not exist yet and score 0.
   recorded" after `--record`; it takes `[a-z][a-z0-9-]*` now.
 - The scores at the branch `asm-ax10` (2026-11-10): x86-64 assembly completeness 97.9% (98.5% without by design), maturity 100.0%,
   independence 100.0%; arm64 assembly 49.9% (49.9%), 91.7%, 60.0%.
+
+## Done (2026-11-20, branch `judge-rest-1120`): the judges' last recorded cases of Java, OCaml and arm64 assembly
+
+The user's goal of 2026-11-20: complete the crops' independence. Three crops sat just under 100 for a few recorded cases in their
+judge stage (0.5 each); each was read again and made own wherever an accepted precedent applies (reviewed golden files, JCS361 (a)
+and its extension to C and C++; the test's own stated expectations), the rest left on the record with its reason.
+
+| crop | recorded before | made own | left, why | judge | independence |
+|---|---|---|---|---|---|
+| Java | 24 `:stdout` tests (48 cases) | 3 by reviewed golden files: t03912 (1 MB, one range row), t05050 and t05278 (test.src masked as `@TESTSRC`) | 21: output not fixed by the source (threads, identity hashes, DSA's DER lengths, heap size, method order), the host's environment, HotSpot's listings, fuzz-generated programs (`test/java/golden/left.tsv`) | 0.9983 -> 0.9986 | 0.9996 -> 0.9998 |
+| OCaml | 27 programs-levels (16 at oi's level, 11 at the AOT level, at today's corpora) | the opam set's 11 demonstrations by reviewed golden files (`test/ocaml/opam/golden.edn`), at both levels | 5 at oi's level, by design: the native back end's allocations (3), ocamlopt's debug frames (1), a program ocamlc does not compile (1) | 0.9982 -> 0.9997 | 0.9996 -> 1.0000 |
+| arm64 asm | the object check's 126 files | 95 MC/AArch64 object tests by their own words (object runs' CHECK lines, two-step runs, `--sd`, and 1,626 stated encodings of 43 files) | 31: musl's 13 sources and the 3 synthetic tests state nothing; 15 tests state only the decoder's text, unbuilt views, numeric variables, rtdyld or nothing FileCheck reads (`test/asm/object-recorded-arm64.tsv`) | 0.9973 -> 0.9993 | 0.9994 -> 0.9998 |
+
+The recorded scores (`test/crops/scores.edn`, the judge rounded to 3 decimals by `crops.score`): Java 0.9996 -> 0.9998, OCaml
+0.9996 -> 1.0000, arm64 assembly 0.9994 -> 0.9998 (floors: 99.9 -> 99.9, 99.9 -> 100.0, 99.9 -> 99.9). arm64's completeness 99.87 ->
+99.66: the two-step runs show 28 stated lines whose views are not built (deferred), beside 33 now met. The byte-for-byte comparison of
+every arm64 object with llvm-mc's record is the oracle tier's `asm-arm64-object-oracle`; the JDK's and ocamlc's records stay the
+oracle tier's as before.
+
+### The second round (2026-11-20, later the same day; the user's decision: a case whose expected output nothing defines leaves the judge's cases)
+
+The user decided the same day that a judge case whose expected output is undefined, unspecified or host-dependent leaves the
+judge's cases (as the n/a cases and D435-3 (a)), its run still counted in completeness, its reason written per case (`:out-of-cases
+{:file F :cases N}`, `crops.score`'s check from c-cpp-golden-1120, taken here unchanged). Java: 16 of its 21 `:stdout` tests out
+(`test/java/golden/out.edn`, 32 cases); the 5 fuzz-generated stay on the JDK's record (DECISION: their output is fixed by their source,
+which states none of it, and no evaluator independent of the JDK and of Arbace's Java exists). arm64: the disassembly's texts
+encoded by Arbace, the views -D, -Ss and the call frames, FileCheck's numeric variables, the large EH encoding, and the object round
+trip (a64i's decoder against the source's forms) for the files that state nothing: 125 of the object check's 126 files own,
+elf-objdump (an empty source) out (`test/asm/object-out-arm64.edn`).
+
+| crop | judge | independence (recorded) | floor |
+|---|---|---|---|
+| Java | 0.9986 -> 0.99965 ((14,452 + 0.5 x 10) / 14,462; 32 out) | 0.9998 -> 1.0000 | 99.9 -> 100.0 |
+| arm64 asm | 0.9993 -> 1.0 (23,059 own, 1 out) | 0.9998 -> 1.0000 | 99.9 -> 100.0 |
+
+arm64's completeness 99.66 -> 99.97 (the 28 deferred lines of the first round met, 1 left: error-location-ldr-pseudo's literal pool).

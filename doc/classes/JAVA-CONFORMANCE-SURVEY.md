@@ -5110,3 +5110,39 @@ run): `bin/java-check golden --oracle --control` per batch (164 golden files, 11
 pass, 11 mutants differ; a review without `:masked` over a file with `@HASH` fails the review; `verdicts --verify` as written.
 **Independence:** the judge's mixed fact 14,386 own and 108 the JDK's (0.996) to 14,446 and 48 (0.998); Java's independence
 59.92 to 59.96.
+
+## As built: judge-rest, three more golden files (2026-11-20; branch `judge-rest-1120`, from next `939037429`)
+
+The user's goal of 2026-11-20: the judges' recorded cases own wherever an accepted precedent applies (JCS361 (a)'s reviewed golden
+files). Of the 24 `:stdout` tests `test/java/golden/left.tsv` held after queue 451, each was read again:
+
+- **t03912** (TestOptimizeStringConcat), left for its size (1,020,005 bytes): its output is fixed by its source (10,000 turns, each
+  printing the null value's one line, then `true`). Its golden file holds them; its review in `hotspot-compiler.edn` is one range row
+  (lines 1-10,000, the text as the pattern, the generator named) and the last line. git stores the file compressed (a few KB).
+- **t05050** (GetURLsTest) and **t05278** (CheckInputStream), left for test.src's path in their output: their output is fixed by
+  their source but for where the jdk26u checkout lies. `judge_golden` masks stdout's test.src (`$dir`, jtreg's test.src) as
+  `@TESTSRC` before the run's directories (mask_dirs), when the golden file holds `@TESTSRC`, as JCS70 (a) masks the working
+  directories; their reviews say `:testsrc true` (`java.check/golden-jtreg` holds the two together) and `golden --oracle` puts
+  the JDK's directory back (`--jdktest`): both meet the JDK's recorded digests, as t03912's does.
+- `bin/java-check golden --oracle --control`: 167 jtreg golden files, each action the JDK's recorded stdout, 167 controls fail.
+  `judge_golden` itself, by hand with the JDK's stdout (the golden file with the directories put back): both pass; a corrupted
+  golden file and another directory than test.src each give `differ`.
+- `bin/java-check verdicts`: 3,122 `:status`, 182 run tests `:golden`, 21 `:stdout` (interp and compiled: 3,304 of 3,325 own).
+  The 21 left keep their reasons in left.tsv; t05322's corrected: its action 0 varies too (DSA 512's q, ParameterCache's `q512`, has
+  its top bit set, so r and s take 20 or 21 bytes in DER by k's draw: 44, 45 or 46; the JDK's two runs agreed by chance).
+- Judge 0.9983 -> 0.9986 ((14,452 + 0.5 x 42) / 14,494).
+- **Out of the judge's cases** (the user's decision of 2026-11-20, later the same day: a case whose expected output is undefined,
+  unspecified or host-dependent leaves the judge's cases, as the n/a cases and D435-3 (a), its run still counted in completeness, its
+  reason written per case). 16 of the 21 `:stdout` tests, each reviewed: `test/java/golden/out.edn` (`{ID {:kind :levels :why}}`):
+  6 `:unspecified` (threads' order t03385 t04989, identity hash sums t03503, getDeclaredMethods' order t04849 t05778, the DSA
+  signatures' DER lengths t05322), 6 `:host` (the heap's size t07649, the network interfaces t04983, ICMP on loopback t04991, the
+  system properties t05602, java.home t07657, the Unix user t07867), 4 `:implementation-defined` (HotSpot's jcmd help t07842, its
+  diagnostic options t07845 t07848, the JDK's key-material layouts t08207), at interp and compiled (32 cases). `java.check/verdicts`
+  refuses an entry with a verdict of its own (`:status`, `:golden`), not a test the JDK passes, or without a kind, its levels and a
+  reason, and runs its control every time (t03219, a `:status` test, put in the list must be refused); by hand, t03912 (a golden test)
+  put in the list and t03385's reason blanked were each refused. Their runs are still judged against the JDK's recorded stdout. The 5
+  fuzz-generated (t03455-t03458, t03567) stay on the JDK's record, DECISION: their output is fixed by their source but nothing states
+  it (the generator printed the exception and the fields, "a randomly generated test that exposed a crash"), no evaluator independent
+  of the JDK and of Arbace's Java implementation exists, and their 822-1,581 generated lines are not reviewable by hand; jtreg's
+  status alone, their verdict under jtreg, is the alternative JCV1 did not take for tests that only print. Judge 0.9986 -> 0.99965
+  ((14,452 + 0.5 x 10) / 14,462).

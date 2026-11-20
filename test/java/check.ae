@@ -1751,6 +1751,10 @@
                                  :let [[id why] (str/split l #"\t" 2)]]
                              [id why])))))
 
+(def ^:private golden-out
+  "judge-rest: the cases out of the judge's, test/java/golden/out.edn ({ID {:kind :levels :why}})."
+  (memoize (fn [] (let [f (io/file "test/java/golden/out.edn")] (if (.isFile f) (read-edn (.getPath f)) {})))))
+
 (def ^:private self-check
   "What lets a main action fail by itself: a throw statement, System.exit, Runtime's exit or halt."
   #"\bthrow\b|\bSystem\s*\.\s*exit\s*\(|\bRuntime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*(?:exit|halt)\s*\(")
@@ -1795,15 +1799,47 @@
         (.isFile (io/file (golden-path t)))
         [:golden (str "its golden file " (golden-path t) ", reviewed from its source (JCS361 (a))")]
         :else [:stdout (if-let [why (get (golden-left) (:id t))]
-                         (str "no throw, System.exit or Runtime.exit/halt in the source set, and it prints; no golden file: " why " (JCS361 (a))")
+                         (str "no throw, System.exit or Runtime.exit/halt in the source set, and it prints; no golden file: " why " (JCS361 (a))"
+                              (when-let [o (get (golden-out) (:id t))] (str "; out of the judge's cases, " (name (:kind o)) " (test/java/golden/out.edn)")))
                          "no throw, System.exit or Runtime.exit/halt in the source set, and it prints")]))))
+
+(def out-kinds #{:undefined :unspecified :constraint :implementation-defined :host :by-design})
+
+(defn out-problems
+  "judge-rest (the user's decision of 2026-11-20): the problems of OUT ({ID {:kind :levels :why}}, test/java/golden/out.edn, the
+  cases out of the judge's) against VS ([id kind why] of the tests REF passes): an entry that is no such test, whose verdict is its
+  own (:status, :golden: a defined output cannot be counted out), or without its kind, its levels (:eval, :aot) or a reason."
+  [vs out]
+  (let [vk (into {} (map (fn [[id k]] [id k]) vs))]
+    (for [[id e] (sort-by key out)
+          :let [p (cond (not (contains? vk id)) "no test the JDK passes"
+                        (not= :stdout (vk id)) (str "a verdict of its own (" (vk id) "): a defined output cannot be counted out")
+                        (not (out-kinds (:kind e))) (str "no kind of " (pr-str (sort out-kinds)))
+                        (not (and (seq (:levels e)) (every? #{:eval :aot} (:levels e)))) "no :levels (:eval, :aot)"
+                        (str/blank? (str (:why e))) "no written reason")]
+          :when p]
+      (str "out of the judge's cases (test/java/golden/out.edn): " id ": " p))))
 
 (defn verdicts
   "bin/java-check verdicts: every test REF passes on the JDK classified by verdict-of, written to OUT
-  (test/java/verdicts.edn), or with --verify compared with it; the shares printed per level."
+  (test/java/verdicts.edn), or with --verify compared with it; the shares printed per level. judge-rest: the cases out of the
+  judge's (test/java/golden/out.edn beside REF's golden/) checked by out-problems, and its control run (the first :status test
+  put in the list must be refused); a problem fails."
   [jdktest ref out & opts]
   (let [ts (filter #(= :pass (:jdk %)) (ref-tests ref))
         vs (for [t ts :let [[k why] (verdict-of t jdktest)]] [(:id t) k why])
+        out-file (str (.getParent (io/file ref)) "/golden/out.edn")
+        outs (if (.isFile (io/file out-file)) (read-edn out-file) {})
+        out-bad (out-problems vs outs)
+        ctl-id (first (for [[id k] vs :when (= :status k)] id))
+        ctl-bad (when ctl-id (out-problems vs (assoc outs ctl-id {:kind :unspecified :levels [:eval :aot] :why "the control"})))
+        ctl-ok (some #(str/includes? % (str ctl-id ":")) ctl-bad)
+        _ (println (str "   out of the judge's cases: " (count outs) " tests, " (reduce + (map (comp count :levels) (vals outs)))
+                        " cases (" out-file "): " (if (seq out-bad) (str (count out-bad) " refused") "each with its kind, levels and reason")
+                        "; the control (" ctl-id ", a :status test, put in the list) " (if ctl-ok "refused, as it must" "NOT refused")))
+        _ (when (or (seq out-bad) (not ctl-ok))
+            (doseq [x out-bad] (println (str "   " x)))
+            (shutdown-agents) (System/exit 1))
         text (str/join "\n"
                        (concat [";; Whose verdict judges each test of test/java/ref-jdk26.edn the JDK passes (doc/classes/JAVA-CONFORMANCE-SURVEY.md,"
                                 ";; \"Decided (the user, 2026-11-07)\", \"As built: JCV1\"): [id kind why], kind :status (jtreg's main action,"
@@ -1892,7 +1928,7 @@
   compares): it holds @HASH, a file without :masked none, and ORACLE takes each action's masked digest (:out-masked, the
   JDK's two runs agreeing on it) and its length less 2 to 4 bytes an @HASH (the 6 to 8 hex digits it stands for); its
   CONTROL leaves the masked digest too. Problems into BAD!, the counts printed."
-  [ref dir oracle? control? bad!]
+  [ref dir oracle? control? bad! & [jdktest]]
   (let [revs (sort (for [^File f (or (.listFiles (io/file dir)) []) :when (str/ends-with? (.getName f) ".edn")] (.getPath f)))
         rv (reduce (fn [m f]
                      (let [x (read-edn f)]
@@ -1921,8 +1957,16 @@
           (when (not= (boolean (:masked e)) (str/includes? text "@HASH"))
             (bad! (str id (if (:masked e) ": reviewed :masked, no @HASH in its golden file" ": @HASH in its golden file, its review not :masked"))))
           (when (:masked e) (swap! masked inc))
+          ;; judge-rest: the test's source directory as @TESTSRC exactly when the review says :testsrc (judge_golden masks
+          ;; stdout's test.src); ORACLE takes the golden file with the directory the JDK ran it from, JDKTEST/DIR
+          (when (not= (boolean (:testsrc e)) (str/includes? text "@TESTSRC"))
+            (bad! (str id (if (:testsrc e) ": reviewed :testsrc, no @TESTSRC in its golden file" ": @TESTSRC in its golden file, its review not :testsrc"))))
           (when oracle?
-            (let [d (sha16 g) len (.length (io/file g))
+            (let [[d len] (if (:testsrc e)
+                            (let [bs (.getBytes (str/replace text "@TESTSRC" (str jdktest "/" (:dir t))) "UTF-8")
+                                  md (java.security.MessageDigest/getInstance "SHA-256")]
+                              [(subs (apply str (map #(format "%02x" (bit-and (int %) 0xff)) (.digest md bs))) 0 16) (alength bs)])
+                            [(sha16 g) (.length (io/file g))])
                   nh (count (re-seq #"@HASH" text))]
               (doseq [[i r] (map-indexed vector (:runs t))]
                 (if (if (:masked e)
@@ -2005,7 +2049,7 @@
       (println (str "java-check golden: " (count jls) " jls programs, " (count @bases) " lines reviewed: "
                     (str/join ", " (for [[k v] (sort-by key fr)] (str v " " k))))))
     ;; JCS361 (a): the jtreg tests' golden files, reviewed in test/java/golden/AREA.edn
-    (golden-jtreg ref (str (.getParent (io/file ref)) "/golden") oracle? control? bad!)
+    (golden-jtreg ref (str (.getParent (io/file ref)) "/golden") oracle? control? bad! (second (drop-while #(not= "--jdktest" %) opts)))
     (if (seq @problems)
       (do (doseq [x @problems] (println (str "   " x))) (shutdown-agents) (System/exit 1))
       (println (str "   every line of every golden file reviewed, as its text")))))

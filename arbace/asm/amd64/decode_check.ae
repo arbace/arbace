@@ -221,6 +221,27 @@
                     (cond
                       ;; the anonymous numeric match `[[#]]`: an unsigned decimal number
                       (= body "#") (do (.append out "(?:[0-9]+)") (recur (+ k 2)))
+                      ;; judge-rest (2026-11-20): FileCheck's numeric variables, `[[#NAME:]]` (or `[[#%x,NAME:]]`, the formats
+                      ;; %u %d %x %X) defines NAME as the number matched, `[[#NAME]]`, `[[#NAME+N]]`, `[[#NAME-N]]` match its value
+                      ;; (plus N) in its format; kept in the bindings as "#NAME" -> "FMT:TEXT"
+                      (re-matches #"#(?:%([udxX]),)?([A-Za-z_][A-Za-z0-9_]*):" body)
+                      (let [[_ fmt nm] (re-matches #"#(?:%([udxX]),)?([A-Za-z_][A-Za-z0-9_]*):" body)
+                            g (str "fcv" (.size defs))]
+                        (.add defs [(str "#" nm) g (or fmt "u")])
+                        (.append out (str "(?<" g ">" (case (or fmt "u") "x" "[0-9a-f]+" "X" "[0-9A-F]+" "d" "-?[0-9]+" "[0-9]+") ")"))
+                        (recur (+ k 2)))
+                      (re-matches #"#\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:([+-])\s*([0-9]+))?\s*" body)
+                      (let [[_ nm sg n] (re-matches #"#\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:([+-])\s*([0-9]+))?\s*" body)
+                            d (first (filter #(= (str "#" nm) (first %)) defs))]
+                        (cond
+                          d nil ;; a use on the line that defines it: not taken
+                          (contains? env (str "#" nm))
+                          (let [[fmt txt] (str/split (get env (str "#" nm)) #":" 2)
+                                radix (if (#{"x" "X"} fmt) 16 10)
+                                v (+ (Long/parseLong txt radix) (if sg ((if (= sg "+") + -) 0 (Long/parseLong n)) 0))
+                                t (case fmt "x" (Long/toHexString v) "X" (str/upper-case (Long/toHexString v)) (str v))]
+                            (.append out (java.util.regex.Pattern/quote t)) (recur (+ k 2)))
+                          :else nil))
                       (nil? nm) nil
                       (some? rx) (let [g (str "fcv" (.size defs))]
                                    (.add defs [nm g]) (.append out (str "(?<" g ">" rx ")")) (recur (+ k 2)))
@@ -244,7 +265,7 @@
         last-m (atom nil)
         find-in (fn [p ^long li ^long col] (let [s ^String (nth lines li) m (re-matcher p s)]
                                              (when (.find m (int (min col (count s))))
-                                               (reset! last-m (into {} (for [[nm g] @cur-defs] [nm (.group m ^String g)])))
+                                               (reset! last-m (into {} (for [[nm g fmt] @cur-defs] [nm (if fmt (str fmt ":" (.group m ^String g)) (.group m ^String g))])))
                                                [(.start m) (.end m)])))]
     (loop [cs cs li 0 col 0 nots [] started false]
       (if (empty? cs)
