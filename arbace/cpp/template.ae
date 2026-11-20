@@ -532,6 +532,53 @@
                        :else [(sema/resolve-type-form scope f)]))
                forms)))
 
+(defn- cx-incomplete-class
+  "Queue 484: the class `t` names when it is incomplete for the checker: declared in the main file and not defined (not a
+  template's specialization, a lambda's, a header's, nor one being defined), else nil."
+  [t]
+  (let [u (abi/unq t)]
+    (when (abi/class? u)
+      (let [c (abi/cls (:id u))]
+        (when (and c (not (:complete c)) (not (:defining c)) (not (:tmpl c)) (not (:targs c)) (not (:lambda c)) (not (:header c)))
+          c)))))
+
+(def ^:private cx-trait-kinds
+  "Queue 484: the value traits' preconditions on their arguments' completeness, as GCC's finish_trait_expr checks them
+  ([meta.unary.prop], [meta.rel]; check_trait_type's kinds): :k1 a complete type, cv void or an array of unknown bound
+  (else its element type complete), every argument; :k2 the type with all its array extents removed complete or void;
+  :nonunion a non-union class complete, the type itself; :class a class or union complete, the type itself; :base-of the
+  second argument complete when both are distinct non-union classes."
+  (merge (zipmap ["__has_nothrow_assign" "__has_trivial_assign" "__has_nothrow_constructor" "__has_trivial_constructor"
+                  "__has_nothrow_copy" "__has_trivial_copy" "__has_trivial_destructor"
+                  "__is_constructible" "__is_nothrow_constructible" "__is_trivially_constructible"
+                  "__is_assignable" "__is_nothrow_assignable" "__is_trivially_assignable"]
+                 (repeat :k1))
+         (zipmap ["__is_pod" "__is_trivial" "__is_standard_layout" "__is_trivially_copyable" "__is_literal_type"
+                  "__has_unique_object_representations"]
+                 (repeat :k2))
+         (zipmap ["__has_virtual_destructor" "__is_abstract" "__is_empty" "__is_polymorphic"] (repeat :nonunion))
+         (zipmap ["__is_aggregate" "__is_final"] (repeat :class))
+         {"__is_base_of" :base-of}))
+
+(defn- cx-trait-incomplete!
+  "Queue 484, the checker: a value trait applied to an incomplete class its precondition excludes (cx-trait-kinds),
+  ext/unary_trait_incomplete.C, ext/is_assignable1.C: g++'s \"invalid use of incomplete type\", clang's
+  err_incomplete_type_used_in_type_trait_expr."
+  [^String nm ts]
+  (when-let [k (and (sema/checking?) (cx-trait-kinds nm))]
+    (let [strip (fn [t] (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))
+          bad (case k
+                :k1 (some (fn [t] (when-not (and (abi/arr? t) (nil? (:n t))) (cx-incomplete-class (strip t)))) ts)
+                :k2 (cx-incomplete-class (strip (first ts)))
+                :nonunion (when-let [c (cx-incomplete-class (first ts))] (when-not (:union c) c))
+                :class (cx-incomplete-class (first ts))
+                :base-of (let [[b d] (map abi/unq ts)]
+                           (when (and (abi/class? b) (abi/class? d) (not= (:id b) (:id d))
+                                      (not (:union (abi/cls (:id b)))) (not (:union (abi/cls (:id d)))))
+                             (cx-incomplete-class d))))]
+      (when bad
+        (throw (ex-info (str "codegen: incomplete type '" (:name bad) "' in the type trait " nm) {:codegen/refused :incomplete}))))))
+
 (defn trait-value
   "A value trait's constant (0 or 1) of its type arguments' forms, or a dependent {:k :texpr :o :trait} in a template's
   signature."
@@ -539,7 +586,8 @@
   (let [ts (trait-args scope forms)]
     (if (some dependent? ts)
       {:k :texpr :o :trait :name nm :types ts}
-      (if ((value-traits nm) scope ts) 1 0))))
+      (do (cx-trait-incomplete! nm ts)
+          (if ((value-traits nm) scope ts) 1 0)))))
 
 (defn trait-type
   "A transform trait's type of its type arguments' forms (__remove_cv(T), __decay(T), ...), dependent in a signature."
@@ -687,6 +735,13 @@
                   (let [_ (next!)
                         ty (abi/non-ref (sema/resolve-type scope (str/trim (run "(" ")"))))]
                     (if (dependent? ty) (fail :template "a dependent alignof in a constant") (abi/align-of ty)))
+                  ;; (queue 484, the checker: GNU's older traits the slice does not evaluate, __has_nothrow_assign(T) and the
+                  ;; rest of cx-trait-kinds, their preconditions judged before the refusal)
+                  (and (= k :id) (= "(" (peek)) (not (contains? value-traits t)) (cx-trait-kinds t) (sema/checking?))
+                  (let [_ (next!) txt (run "(" ")")
+                        ts (try (trait-args scope (mapv #(list 'cpp/text %) (split-top-commas txt))) (catch arbace.lang.ExceptionInfo _ nil))]
+                    (when (and ts (not-any? dependent? ts)) (cx-trait-incomplete! t ts))
+                    (fail :template "not a constant: " t))
                   ;; a value trait (G4): __is_same(T, U), its arguments types
                   (and (= k :id) (= "(" (peek)) (contains? value-traits t))
                   (let [_ (next!) txt (run "(" ")")]
