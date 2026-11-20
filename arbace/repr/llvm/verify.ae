@@ -76,6 +76,7 @@
 (def ^:dynamic *renames* {})   ; implicit intrinsic declarations: the name written -> the mangled name LLParser gives
 (def ^:dynamic ^java.util.Map *gdefs* nil)   ; global name -> {:kind :type}
 (def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
+(def ^:dynamic ^"[J" *gnext* nil)        ; D1120-3: the module NumberedVals' next id (LLParser.cpp:3595-3600)
 (def ^:dynamic ^java.util.Map *bafwd* nil)   ; D1120-3: LLParser's ForwardRefBlockAddresses: function name -> [[label addrspace] ...]
 (def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
 (def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
@@ -1270,12 +1271,15 @@
       (verr :parser/visibility "symbol with local linkage must have default visibility" {:at (if (#{:declare :define} what) [:linkage] :start)}))
     (when (and (local-linkage? l) (:dll o)) (verr :parser/dll "symbol with local linkage cannot have a DLL storage class" {:at (if (#{:declare :define} what) [:linkage] :start)}))))
 
+(declare check-global-number!)
+
 (defn- parse-function [f]
   (let [[h nm rt ps & opts] f
         o (apply hash-map opts)
         what (if (= h 'llvm/define) :define :declare)
         st (fn-state)
         k (global-key nm)]
+    (check-global-number! k "function")
     (check-linkage o what)
     (when (and (true? (:comdat o)) (numbered? k)) (verr :parser/comdat "comdat cannot be unnamed" {:at [:find "{"]}))
     (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
@@ -1332,6 +1336,7 @@
         [init opts] (if (and (seq more) (not (keyword? (first more)))) [(first more) (rest more)] [nil more])
         o (apply hash-map opts)
         k (global-key nm)]
+    (check-global-number! k "global")
     (check-linkage o :global)
     (let [rt (resolve-type (norm-type t))]
       (when (or (and (seq? rt) (= 'fn (first rt))) (#{'void 'label 'metadata 'token 'x86_amx} rt))
@@ -1348,8 +1353,18 @@
     (.put *gdefs* k {:kind :global :type (norm-type t) :form f})
     (.remove *gfwd* k)))
 
+(defn- check-global-number!
+  "LLParser::checkValueID at a numbered global's or function's name (llvm-project 23.1.5 llvm/lib/AsmParser/LLParser.cpp:875,
+  7124, 3595-3600; D1120-3): its number not below the module's next one; then the next one past it."
+  [^String k kind]
+  (when (and *gnext* (numbered? k))
+    (let [n (Long/parseLong k) nxt (aget ^"[J" *gnext* 0)]
+      (when (< n nxt) (verr :parser/numbering (str kind " expected to be numbered '@" nxt "' or greater") {:at [:mod-find (str "@" k)]}))
+      (aset ^"[J" *gnext* 0 (inc n)))))
+
 (defn- parse-alias [f]
   (let [[h nm t a & opts] f o (apply hash-map opts) k (global-key nm)]
+    (check-global-number! k "global")
     (check-linkage o :alias)
     (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]}))
     (if (vector? a) (use-value nil (second a) (norm-type (first a))) (use-value nil a 'ptr))
@@ -4047,6 +4062,33 @@
     (every? #(null-value? (peek %)) (rest v))
     :else false))
 
+(defn- ptrauth-init-fini-upgraded?
+  "AutoUpgrade's upgradePtrauthInitFiniArrays (llvm-project 23.1.5 llvm/lib/IR/AutoUpgrade.cpp:6389-6486; D1120-3, llvm-sections-1120):
+  whether the parser's UpgradeModuleFlags replaces the ptrauth constants of @llvm.global_ctors and @llvm.global_dtors by their pointers
+  (and adds the ptrauth-init-fini module flags): no such flag already, every structor of both arrays a 3-field struct whose function is
+  a ptrauth of discriminator 0xD9D4 (55764) with no address discriminator or the marker inttoptr (i64 1 to ptr), all of one mode."
+  [forms]
+  (let [flags (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) forms)
+        flag-names (keep #(let [[_ id] (md-ops %)] (md-str id)) flags)
+        mode (volatile! nil)
+        one (fn [v]   ; UpgradeSinglePointer: true when the pointer upgrades in the mode decided so far
+              (when (and (seq? v) (= 'ptrauth (first v)))
+                (let [[_ _ d a] (rest v)
+                      ad (cond (or (nil? a) (= 'null (second a))) false
+                               (let [x (second a)] (and (seq? x) (= 'inttoptr (first x)) (= 1 (second (strip-flags (rest x)))))) true
+                               :else ::unknown)]
+                  (when (and d (= 55764 (second d)) (not= ad ::unknown) (or (nil? @mode) (= @mode ad)))
+                    (vreset! mode ad) true))))]
+    (and (not-any? #{"ptrauth-init-fini" "ptrauth-init-fini-address-discrimination"} flag-names)
+         (let [gs (keep (fn [k] (some #(when (and (= 'llvm/global (first %)) (= k (global-key (nth % 1))) (some? (global-init %))) %) forms))
+                        ["llvm.global_ctors" "llvm.global_dtors"])]
+           (and (seq gs)
+                (every? (fn [g] (let [init (global-init g)]
+                                  (and (seq? init) (= 'array (first init)) (seq (rest init))
+                                       (every? (fn [[_ st]] (and (seq? st) (= 'struct (first st)) (= 3 (count (rest st))) (one (second (nth st 2)))))
+                                               (rest init)))))
+                        gs))))))
+
 (defn- check-global-variable
   "Verifier::visitGlobalVariable, then visitGlobalValue."
   [forms f]
@@ -4077,7 +4119,14 @@
             (verr :verifier/global "wrong type for intrinsic global variable" :global))
           (when-not (= 3 (count es))
             (verr :verifier/global "the third field of the element type is mandatory, specify ptr null to migrate from the obsoleted 2-field form" :none))
-          (when-not (ptr-type? (norm-type (nth es 2))) (verr :verifier/global "wrong type for intrinsic global variable" :global)))))
+          (when-not (ptr-type? (norm-type (nth es 2))) (verr :verifier/global "wrong type for intrinsic global variable" :global))))
+      ;; D1120-3: a ptrauth structor left by the upgrade (Verifier.cpp's visitGlobalVariable, after the element type's checks)
+      (when (and (seq? init) (= 'array (first init)) (not (ptrauth-init-fini-upgraded? forms)))
+        (doseq [[_ st] (rest init)]
+          (when (and (seq? st) (= 'struct (first st)) (= 3 (count (rest st))))
+            (let [fv (second (nth st 2))]
+              (when (and (seq? fv) (= 'ptrauth (first fv)))
+                (verr :verifier/global "signing of ctors/dtors should be requested via module flags")))))))
     (when (#{"llvm.used" "llvm.compiler.used"} k)
       (when (and (some? init) (not= (:linkage o) :appending)) (verr :verifier/global "invalid linkage for intrinsic global variable" :global))
       (when (pos? (long (count-global-uses forms k))) (verr :verifier/global "invalid uses of intrinsic global variable" :global))
@@ -4210,7 +4259,7 @@
             *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
-            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)
             *errs2* (java.util.ArrayList.)
             *renames* {}]
@@ -4236,7 +4285,7 @@
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
             *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
-            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)]
     (try (phase-parser forms) [nil]
          (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) [e] (throw e))))))
