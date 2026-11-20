@@ -71,18 +71,41 @@
 (defn- sha256-file ^String [^java.io.File f] (sha256-bytes (java.nio.file.Files/readAllBytes (.toPath f))))
 
 (def ^:private derived-file "test/llvm/selfref-derived.edn")
+
+;; llvm-judge-1120 (the coordinator's item, from c-cpp-golden-1120 3dbf9f3a6): the C++ programs' outcomes are C++'s reviewed golden files,
+;; one source for both crops: beside test/cpp/samples/N.cpp and test/cpp/runtime/samples/N.cpp, N.expect (stdout), N.cpp.expectrc (the
+;; status when not 0), N.expect-stderr (stderr when it writes one: no file, no stderr check, as the entries of selfref-derived.edn were),
+;; each a verdict only with its review in test/cpp/selfref-golden.edn (cpp.selfref's rule); the modules cpp.samples.N, cpp.runtime.N
+(def ^:private golden-review-file "test/cpp/selfref-golden.edn")
+(defn- golden-entries []
+  (let [rf (java.io.File. ^String golden-review-file)
+        reviewed (if (.exists rf) (set (map :id (read-string (slurp rf)))) #{})]
+    (into {} (for [[kind dir rdir] [["samples" "test/cpp/samples/" "samples/"] ["runtime" "test/cpp/runtime/samples/" "runtime/"]]
+                   :let [d (java.io.File. ^String dir)]
+                   n (sort (or (seq (.list d)) []))
+                   :let [n (str n)]
+                   :when (str/ends-with? n ".expect")
+                   :let [b (subs n 0 (- (count n) (count ".expect"))) rc (java.io.File. (str dir b ".cpp.expectrc"))
+                         er (java.io.File. (str dir b ".expect-stderr")) id (str "cpp." kind "." b)]
+                   :when (reviewed (str rdir b ".cpp"))]
+               [id {:id id :from :golden :golden (str dir b ".expect")
+                    :status (if (.exists rc) (Long/parseLong (str/trim (slurp rc))) 0)
+                    :stdout (slurp (str dir n)) :stderr (when (.exists er) (slurp er))}]))))
+
 (def ^:private derived*
   (delay (let [f (java.io.File. ^String derived-file)]
-           (if (.exists f) (into {} (map (juxt :id identity) (read-string (slurp f)))) {}))))
+           (merge (golden-entries)
+                  (if (.exists f) (into {} (map (juxt :id identity) (read-string (slurp f)))) {})))))
 (defn- derived [] @derived*)
 
 (defn- entry-verdict
-  "The own verdict an entry of test/llvm/selfref-derived.edn states: its status, stdout's and stderr's digests."
+  "The own verdict an entry of test/llvm/selfref-derived.edn (or C++'s golden files) states: its status, stdout's and stderr's digests."
   [e]
   {:status (:status e) :stdout-sha (sha256-bytes (.getBytes ^String (:stdout e) "UTF-8"))
    :stderr-sha (when (:stderr e) (sha256-bytes (.getBytes ^String (:stderr e) "UTF-8")))
-   :by (if (= :ir (:from e))
-         "the outcome worked out from the module's IR (test/llvm/selfref-derived.edn)"
+   :by (case (:from e)
+         :ir "the outcome worked out from the module's IR (test/llvm/selfref-derived.edn)"
+         :golden (str "C++'s reviewed golden files (" (:golden e) ", its review test/cpp/selfref-golden.edn)")
          "the outcome worked out from its source (test/llvm/selfref-derived.edn)")})
 
 (defn- derived-verdict
@@ -351,7 +374,9 @@
   [[ref controls]]
   (let [refs (into {} (map (juxt :id identity) (or (read-file ref) [])))
         gxx (gxx-records)
-        es (sort-by :id (vals (derived)))
+        ;; a golden file of a program llvmi has no module of (not in the packs' manifests) is C++'s alone
+        [es mine] ((juxt remove filter) #(and (= :golden (:from %)) (nil? (pack-ir (:id %)))) (sort-by :id (vals (derived))))
+        _ (doseq [e mine] (println (format "  %-44s -      no module of llvmi's (not in test/llvm/ir's manifests): C++'s alone" (:id e))))
         rec (fn [id] (gxx-reference id (refs id) gxx))
         line (fn [id r] [id (if (= :timeout (:status r)) "timeout" (str (:status r))) (:stdout r) (str (:stdout-bytes r))
                          (:stderr r) (str (:stderr-bytes r)) (str (:stderr-first r))])

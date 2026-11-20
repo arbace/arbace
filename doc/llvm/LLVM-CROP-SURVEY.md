@@ -3035,3 +3035,13 @@ the 203 sections and 6 reviewed in), the stage 0.949 to 0.954, LLVM's independen
 0.9933 to 0.9894 (floor 99 to 98): the read cell's 62 new deferred rows, the gaps the sections show. `--judge --strict`,
 `bin/records-check`, `make check-makefile`: 0 problems. The rules to port are arbace/repr/llvm's reader and verify.ae (embedded since
 W2, so in `gate_key`): porting ten of the 62 brings completeness back to 0.990.
+
+**C++'s golden files read by llvmi** (the coordinator's item, from mac/c-cpp-golden-1120 3dbf9f3a6: its 26 golden files beside
+test/cpp/samples and test/cpp/runtime/samples and their reviews test/cpp/selfref-golden.edn taken into this branch by `git checkout`,
+nothing else of it). llvmi's 14 C++ modules were already judged by their own outcomes (LLS49 (c): test/llvm/selfref-derived.edn), not
+by g++'s record, so no case moves; the two reviews agreed, compared file by file, but for runtime/hello, whose stderr `to stderr\n` the
+C++ review records and the llvmi entry left out. One source for both crops now: `arbace.llvm.check/golden-entries` reads N.expect,
+N.cpp.expectrc and N.expect-stderr of each reviewed program (a golden file without its review is no verdict: checked, hello's review
+renamed gives nil), and selfref-derived.edn keeps the two IR entries. `bin/llvmi derived-check`: 16 of 16 met by the recorded runs
+(hello's stderr by lli's 10 bytes), 36 controls fail; runtime/deferred has golden files and no module of llvmi's (it is not in the pack
+c: C++'s alone, reported). own-verdict over the 562 modules: all own, the 14 by C++'s golden files.
