@@ -13651,3 +13651,60 @@ ARBACE_HOST_EXE=.tmp/gate-exe/8d0e46484347addebee7/amd64/arbace; it wrote outcom
 `records verify --sample 8` over the four: all equal, crossed pairs differ. python-packs.edn spliced into steps.edn:
 gate.crops check 0 problems, `bin/gate --full --plan` accepts it with no stand-ins. Not spliced: python-night.edn (python-roundtrip
 waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on n-py-rec's check records).
+
+## 2026-11-20: n-merge-1120, today's branches in one branch for next (from main `9f322d9a4`)
+
+- What: branch `n-merge-1120` from main `9f322d9a4` (next's tip, its essential gate passed in the worktree next-ess), merging
+  `--no-ff` from the remote mac, in this order: `n-all5` `dfe9d80e2` (the 11-19 consolidation in queue 441's order, with the C++
+  records); Rust `472-rust-blockers` `ec4f067d9` (it carries 462-rust-items, 448b, n-rust-dyn and 464-rust-closures, so only it);
+  OCaml `450-oc-index` `512f635fe`, `461-oc-eval` `049c43ae9`, `467-ocaml-light` `983f2425b` (on 453-oc-speed2 `1164ceb55`, with
+  `d844a1f64`, the fix of 438's makeblock frame retention); Java `454-java-super` `19d70eb96`, `455-java-project-modinfo` `86be1e83e`;
+  Python `458-py-ctypes` `a32ecf291`, `465-py-standins` `d9b0a3b1d` (on n-py-eval `37eeca8b3`), `n-py-rec` `30b132126`, `n-py-packs`
+  `55bae330a`, `456-py-testc` `c0088bb4f`, `457-py-small` `c481a6d5d`, `459-py-accel` `ea603bf42`; C++ `460-cpp-dg-own` `983620e19`,
+  `463-cpp-dg-own2` `54b5b195e`; Haskell `452-hs-iface-last` `802d18d4c` (queue 452, filepath into haskell-iface-own: no record rows,
+  so nothing against n-all5's Haskell records). No branch was already in the tree. Not merged (a later batch: they need
+  `bin/jrt-convert update` or a javac tool rebuild): `466-java-serialization`, `469-java-j2g-unresolved`, `jcs50-release`.
+- Conflicts, each resolved keeping both sides' intent:
+  - n-all5: `test/crops/independence.edn` Java's print stage 1 (main's own platform, JOP7 (b)) with n-all5's judge 0.998 (queue 451);
+    the journal both; `test/crops/scores.edn` re-recorded.
+  - 467: `arbace/o2j.ae`'s makeblock in place is 467's (`d844a1f64`: no local holds the block; Rt/block, which counts it and hands it
+    to the profile, while a Memprof profile runs), 396's plugins (`class-of`) kept; `jdk/ocaml/ocaml/rt/Rt.ae`'s Rt/block 467's
+    spelling (the same behaviour as 438's); `test/ocaml/aot-slow.edn` both (413's subarraystub, 470's note); `doc/ocaml/OCAML-SURVEY.md`
+    n-all5's sections for queues 396 and 413. `arbace.o2j` loads from the file on stage 0. `bin/oi check --aot --only-list` (light level) on statmemprof/moved_while_blocking (467's case; the record's
+    row a timeout) and basic/pr7533: 2 of 2 pass by their own verdicts, both "same" against oi (8.6 min, 2.5 GiB peak).
+  - 465 against 458: `go/arbace/gotable.edn`'s stub families are n-py-eval's (`a2606432e`: BytesLike, WritableBytes and BufferValid,
+    64 slots for py.Object's Type), the more complete set; 458's had the same two families and slots without BufferValid.
+  - n-py-rec: `test/python/divergences{,-315}.edn`'s `:fork` holds n-py-rec's ECHILD match and decision with n-py-eval's names and why
+    (a name a pattern also finds costs nothing); `:spawn-children-timing` and `:finalization-collect-spawn` hold queue 418's whys
+    with the records night's decisions. Matrix and scores re-recorded.
+  - n-py-packs: it recorded the outcomes n-all5's `test/gate/crops/python-outcomes.edn` waited on (`a428195a0`, D441-2), so that
+    fragment is gone: pyi-wheels and pyi-runtime back in `test/gate/crops/python.edn` and `test/gate/steps.edn` where n-py-packs has
+    them (its Python section byte for byte), the fragment's path out of `:crop-paths :python`, CLAUDE.md's list of fragments not
+    spliced yet updated. Its packs (python-pydump-{stdlib,site-packages,lib-test,mutants-lex,mutants-parse} and the three printed
+    ones) pushed with `bin/oracle-records mirror --push` (mac's oracle-packs `3dd7a82..a90d4d2`).
+  - 456: `go/arbace/pyctypes/capi.ae` (Go forms, mode :full) fills capiNatives from configTable (465) then clinicTable (456), the
+    positions after them 3 lines down, the comment "// queue 456" at line 302; `go/arbace/pyctypes.ae`'s :files, loads and
+    :init-order hold both files (capi.go's init at 660, then argParsers, configSpecs). Checked by printing: `bin/repr-go print` of
+    the merged package gives capi.go equal to `git merge-file` of the printed sides, the other files equal to their side's.
+  - 459: `go/arbace/py.ae`'s :files and :init-order hold both sides' additions at their anchors (465's builtins_heapq.go,
+    builtins_symtable.go, steType; 459's builtins_functools.go, builtins_json.go, functoolsNames, jsonScannerType,
+    jsonEncoderType); the package prints.
+  - Rust, n-py-packs and n-all5's journal: both sides' entries kept.
+- Fixed after the merges: `bin/reap` found test_symtable's (and one test_inspect) 37 rows of the records night's record in no class:
+  465 took `_symtable` out of `:c-modules-deferred`'s match when it built the module, and the record predates it. The match holds
+  `_symtable` again (as it holds `_sysconfig` and `_heapq`) until a record after 465. `bin/gate --plan` refused python's
+  `:crop-paths` rule for the removed fragment: dropped.
+- Records: `bin/reap --record` (56 of 56 cells, 0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems),
+  `bin/records-check` (9 pairs, 0 problems). Scores (completeness / without by design / maturity / independence, floors), n-all5 ->
+  here: Java 89/91/100/59 -> 89/91/100/99 (main's own platform), Python 49/49/91/98 -> 94/97/100/98 (n-py-rec's records); the
+  other twelve unchanged.
+- Gate key (`bin/arbace-go --gate-key`, ARBACE_HOST_EXE unset): `ab36afadd0b14aa89697`, moved from `8d0e46484347addebee7`
+  (gotable.edn, 454's arbace/classes, among others): the next gate builds the executables (two Go-hosted builds).
+- `bin/gate --plan` (essential): 3 always, 3 builds (go-build, cpp-runtime, pyi-aot-runtime), 43 checks run (the core with
+  java-check-judge after java-check; the crops tier's C, C++, OCaml, LLVM, Rust, Haskell and Python steps, Python's five never
+  passed), 7 deferred to the night (scheme-c2j, si-essential, scheme-read-essential, the two asm and a64i, wasm), arm64-host
+  absent. Not run: bin/gate (the next worktree's full gate holds the host's memory).
+- Left: `bin/pyi divergences` still fails on 29 write-ahead names of 465's (21 in `:testcapi-behaviour` that `:testcapi` takes first,
+  8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
+  record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
+  three steps wait on n-py-rec's check records, now in the tree, to be spliced.
