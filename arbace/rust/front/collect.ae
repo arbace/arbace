@@ -1779,21 +1779,40 @@
         ("TyAlias" "AssocTy") (when (:ty n) (lower-ty (:ty n)))
         (if (str/starts-with? (str (:kind d)) "Static") (binding [*elided* :static] (lower-ty (:ty n))) nil)))))
 
+(defn- local-def-path
+  "C4-1: a local definition's def path (core's own modules: the root file's module path, then the items' names)"
+  [id]
+  (when-let [cp resolve/*crate-path*]
+    (loop [d (def-of id) acc ()]
+      (let [[k n] (:data d)]
+        (case k
+          :crate (str/join "::" (concat [cp] acc))
+          (:type :value) (recur (def-of (:parent d)) (cons n acc))
+          nil)))))
+
+(defn- lang?
+  "Whether the definition D is the lang item NM: std's names' path, or (building the crate that defines it: core's
+  core::marker) the local definition of that path"
+  [d nm]
+  (let [l (lang nm)]
+    (boolean (and l (or (= d l) (and (number? d) (= l (local-def-path d))))))))
+
 (defn- sized-bounds-of
   "collect_sizedness_bounds over a parameter's inline bounds and the where clauses on it: :sized, :maybe-sized,
   :meta-sized or :pointee-sized when one is written"
   [bounds]
-  (let [sized (lang "sized") meta (lang "meta_sized") pointee (lang "pointee_sized")
-        tr (fn [b] (when (:trait b) (trait-def-of (:trait b))))]
-    {:sized-pos (some #(and (= sized (tr %)) (not (#{'Maybe 'Negative} (head (:polarity %))))) bounds)
-     :sized-maybe (some #(and (= sized (tr %)) (#{'Maybe 'Negative} (head (:polarity %)))) bounds)
-     :other (some #(#{meta pointee} (tr %)) bounds)}))
+  (let [tr (fn [b] (when (:trait b) (trait-def-of (:trait b))))]
+    {:sized-pos (some #(and (lang? (tr %) "sized") (not (#{'Maybe 'Negative} (head (:polarity %))))) bounds)
+     :sized-maybe (some #(and (lang? (tr %) "sized") (#{'Maybe 'Negative} (head (:polarity %)))) bounds)
+     :other (some #(or (lang? (tr %) "meta_sized") (lang? (tr %) "pointee_sized")) bounds)}))
 
 (defn- implicit-sizedness
-  "add_implicit_sizedness_bounds: a trait's MetaSized supertrait, a parameter's Sized, ?Sized as MetaSized"
-  [self-ty bounds trait?]
+  "add_implicit_sizedness_bounds: a trait's MetaSized supertrait (none for PointeeSized itself nor an auto trait, C4-1), a
+  parameter's Sized, ?Sized as MetaSized"
+  [self-ty bounds trait? & [trait-id]]
   (let [{:keys [sized-pos sized-maybe other]} (sized-bounds-of bounds)]
-    (cond (and sized-maybe (not sized-pos) (not other)) [[:trait [(lang "meta_sized") [self-ty]]]]
+    (cond (and trait? trait-id (or (lang? trait-id "pointee_sized") (:auto (:node (def-of trait-id))))) []
+          (and sized-maybe (not sized-pos) (not other)) [[:trait [(lang "meta_sized") [self-ty]]]]
           (or sized-pos sized-maybe other) []
           trait? [[:trait [(lang "meta_sized") [self-ty]]]]
           :else [[:trait [(lang "sized") [self-ty]]]])))
@@ -1813,7 +1832,7 @@
                               (lower-trait-ref (:trait b) self-ty))]
                      (cond (nil? tr) [[:err (str "bound " (pr-str (mapv :ident (:segs (:trait b)))))]]
                            (= 'Maybe (head (:polarity b))) []
-                           (= (first tr) (lang "pointee_sized")) []
+                           (lang? (first tr) "pointee_sized") []
                            :else (into [[:trait tr]] (or (:clauses (meta tr))
                                                          (for [[ad args term] (:constraints (meta tr))] [:proj ad args term])))))
                    :else []))
@@ -1875,7 +1894,7 @@
       (binding [*late* (:late own) *elided* :erased]
         (let [trait-clauses (when (= "Trait" (:kind d))
                               (let [bs (:bounds (:node d)) self [:param 0 "Self"]]
-                                (into (implicit-sizedness self bs true) (lower-bounds self bs))))
+                                (into (implicit-sizedness self bs true id) (lower-bounds self bs))))
               preds (where-preds g)
               param-clauses (for [p (:params own) :when (:hir p) :when (not= :lifetime (:kind p))]
                               (let [h (:hir p)]

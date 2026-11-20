@@ -83,6 +83,16 @@
     Struct (every? #(= 'Public (fget (fget % :vis) :kind)) (fget data :fields))
     true))
 
+(defn- adt-generics!
+  "An ADT's own generic parameters (kind and name) into ACC's :adt-generics, when none has a default: the generics a type the
+  interface lacks takes from its source (core_arch's macro-made SIMD types, read where the interface pass cannot expand them)"
+  [acc p g]
+  (let [ps (fget g :params)]
+    (when (every? #(let [pk (fget % :kind)] (or (= 'Lifetime pk) (nil? (some-val (fget pk :default))))) ps)
+      (swap! acc assoc-in [:adt-generics p]
+             (vec (for [gp ps :let [pk (fget gp :kind)]]
+                    (list (cond (= 'Lifetime pk) 'lifetime (= 'Const (head pk)) 'const :else 'type) (id-name (fget gp :ident)))))))))
+
 (def ^:dynamic *raw*
   "true while a module file is scanned unexpanded (its expansion failed): its items' #[cfg] evaluated here, as the expansion
   would have"
@@ -126,6 +136,7 @@
           TraitAlias (add-def! m "Mod" {:ns :type :name nm :kind "TraitAlias" :path p :vis vis})
           (Struct Union)
           (do (add-def! m "Mod" {:ns :type :name nm :kind (str (head k)) :path p :vis vis})
+              (adt-generics! acc p (nth k 2))
               (lang! attrs p)
               ;; the constructor's visibility: the struct's, lowered to the crate's when a field is not public or the struct
               ;; is #[non_exhaustive] (rustc_resolve's build_reduced_graph_for_item, ctor_vis)
@@ -134,6 +145,7 @@
                                    :vis (if (and (= :pub vis) (fields-pub? (nth k 3)) (not (attr? attrs "non_exhaustive"))) :pub (when vis :restricted))})))
           Enum
           (do (add-def! m "Mod" {:ns :type :name nm :kind "Enum" :path p :vis vis})
+              (adt-generics! acc p (nth k 2))
               (lang! attrs p)
               (ensure! p "Enum" (doc-hidden? attrs))
               (doseq [v (fget (nth k 3) :variants)]
@@ -341,6 +353,7 @@
         aliases (apply merge (map :aliases native-maps))
         alias-gens (merge (apply merge (map :alias-generics scans)) (apply merge (map :alias-generics native-maps)))
         traits (apply merge (map :traits scans))
+        adt-gens (apply merge (map :adt-generics scans))
         macros (into {} (for [s scans m (:macros s)] [(:path m) m]))
         out (StringBuilder.)
         gens (atom []) extra (atom [])
@@ -360,7 +373,7 @@
                 (let [d (:path c) k (:kind c)]
                   (when (and (#{"Struct" "Enum" "Union" "TyAlias" "Trait"} k) (not (@gen-seen d)))
                     (swap! gen-seen conj d)
-                    (if-let [g (if (= "TyAlias" k) (get alias-gens d) (:generics (get facts d)))]
+                    (if-let [g (if (= "TyAlias" k) (get alias-gens d) (or (:generics (get facts d)) (get adt-gens d)))]
                       (swap! gens conj (str "(names/generics " (q d) " [" (str/join " " (map sty-text g)) "])"))
                       (swap! missing update :generics conj d))
                     (when (= "TyAlias" k)
