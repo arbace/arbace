@@ -2041,6 +2041,7 @@
     t))
 
 (declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access!)
+(declare cx-tinst-member-type-access! cx-alias-member-access! cx-base-type-access! cx-member-tparam-access!) ; queue 506
 
 (defn- declare-class! [scope0 n]
   (let [nm (:name n)
@@ -2099,6 +2100,7 @@
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true)))))
       ;; (queue 463, the checker: the class's definition, where an implicitly deleted special member's reason is reported)
       (when (and (checking?) (:range n)) (abi/update-cls! id assoc :cx-node {:range (:range n)}))
+      (cx-base-type-access! scope id n) ; (queue 506: a base-specifier's names in the derived class's context)
       ;; (round 54, the checker: [class.mi]/3, a class named twice as a direct base: reported at the class, the later one dropped)
       (when (checking?)
         (let [bs (:bases (abi/cls id))
@@ -2127,7 +2129,9 @@
         (binding [*last-anon* (atom nil)]
         (doseq [k (kids n)]
           (when (and (checking?) (#{"FieldDecl" "TypedefDecl" "TypeAliasDecl"} (:kind k)))
-            (cx-member-type-access! cs id k))
+            (cx-member-type-access! cs id k)
+            (cx-tinst-member-type-access! cs id k) ; (queue 506: T::X's access in a class template's specialization)
+            (cx-alias-member-access! cs k))        ; (queue 506: an alias template's T::X in its own context)
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
             "FieldDecl" (if (and (nil? @*last-anon*) (header-node? k)
@@ -2271,6 +2275,7 @@
       ;; constraint, is reported at the declaration and dropped, the unit going on, as a statement's refusal is)
       (if (checking?)
         (try (cx-tparam-access! scope n) ; (queue 502: a namespace-scope template's parameters' access)
+             (cx-member-tparam-access! scope n) ; (queue 506: a member template's parameters' access)
              (declare-node*! scope n)
              (catch arbace.lang.ExceptionInfo e
                (if-let [r (when-not (:cls scope) (cx-sure-incomplete-refusal n nil e))]
@@ -5903,6 +5908,118 @@
           (if (= :access (:codegen/refused (ex-data e)))
             (*on-refusal* e p)
             (throw e)))))))
+
+;; queue 506 (the checker; 502-3 (a)): type access on instantiation. A member type named through a template parameter,
+;; T::X, has its access checked in the specialization, in the context the name appears in ([temp.inst], [class.access]/2
+;; with [temp.res.general]): a class template's member declaration in the instantiated class's (template/access3.C's
+;; `typename T::template X<int> x;`, template/qualttp8.C's `C<T::template B> c;` with T a class whose X or B is private),
+;; an alias template's defining-type-id in the alias template's (cpp0x/alias-decl-22.C's `using foo = typename T::bar;`,
+;; foo<B> named by B's member, EDG's and GCC's reading); and, in or out of templates, a base-specifier's names in the
+;; derived class's ([class.access]/7, CWG 372: template/access31.C's `struct exploit2 : C::Private`) and a member
+;; template's parameters' in the class's ([class.access]/8, as cx-tparam-access! at namespace scope: access31.C's
+;; `template<class U = C::Private>`). Judged only where sure: a member declared in the qualifier's class itself (no base's),
+;; cx-access-ok? false (a friend by name grants), no header's declaration, and an alias template's specialization only
+;; when a declaration's own type names it (a substitution in a deduction is SFINAE, not judged).
+
+(def ^:dynamic *cx-alias-check* nil) ; queue 506: the template-id form whose alias template's specialization is checked
+
+(defn- cx-qual-type-names
+  "Queue 506: the [qualifier-parts name] steps of the qualified names the type spelling `text` writes, `typename` and the
+  `template` disambiguator dropped: T::X and T::X::Y of T::X::Y."
+  [text]
+  (let [t (-> (str text) (str/replace #"\btypename\s+" "") (str/replace #"::\s*template\s+" "::") (str/replace #"\s*::\s*" "::"))]
+    (for [[_ q0 nm0] (re-seq #"(?<![\w:])((?:[A-Za-z_]\w*::)+)([A-Za-z_]\w*)" t)
+          :let [all (conj (vec (remove str/blank? (str/split q0 #"::"))) nm0)]
+          j (range 1 (count all))]
+      [(subvec all 0 j) (nth all j)])))
+
+(defn- cx-qual-type-access!
+  "Queue 506: the first qualified name the type spelling `text` writes (cx-qual-type-names, its qualifier's parts chosen by
+  `pred`, resolved in `scope` to a class) whose member type or member class template, declared in that class, is private or
+  protected and surely inaccessible in the context `cx` (cx-access-ok? false): reported at `node` (*on-refusal*), true."
+  [scope text node cx pred]
+  (when (and (checking?) *on-refusal* cx (string? text) (str/includes? text "::"))
+    (when-let [[nm acc qc]
+               (some (fn [[parts nm]]
+                       (when (pred parts)
+                         (let [ce (try (first (filter #(= :type (:e %)) (lookup-qualified scope parts))) (catch arbace.lang.ExceptionInfo _ nil))
+                               qc (when ce (class-id (:ty ce)))
+                               c (when qc (abi/cls qc))
+                               acc (when (:scope c)
+                                     (some #(when (or (= :type (:e %)) (and (= :tmpl (:e %)) (= :class (:tk %)))) (:access %))
+                                           (.get ^java.util.HashMap (:names (:scope c)) nm)))]
+                           (when (and (#{:private :protected} acc) (false? (cx-access-ok? cx qc acc qc nil)))
+                             [nm acc qc]))))
+                     (cx-qual-type-names text))]
+      (*on-refusal* (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls qc)) "'")
+                             {:codegen/refused :access :cx/node node})
+                    node)
+      true)))
+
+(defn- cx-tparam-qualifier
+  "Queue 506: a predicate over a qualifier's parts: one name, a parameter the scope `bs` (a :tparams scope) binds."
+  [bs]
+  (fn [parts] (and (= 1 (count parts)) (boolean (seq (.get ^java.util.HashMap (:names bs) (first parts)))))))
+
+(defn- cx-tinst-member-type-access!
+  "Queue 506: a member declaration `k` (a field, typedef or alias) of the class `cid` (its scope `cs`) declared in a scope
+  binding template parameters (a class template's specialization, or a member class of one): its type's T::X with T a
+  parameter bound to a class, X's access checked in the class's context (cx-qual-type-access!). In a template's pattern T
+  stands for itself, no class: not judged."
+  [cs cid k]
+  (when (and (checking?) (not (header-node? k)))
+    (when-let [bs (loop [s (:parent cs)] (case (:kind s) :tparams s :class (recur (:parent s)) nil))]
+      (when-let [rs (cx-enclosing-classes cid)]
+        (cx-qual-type-access! cs (str (get-in k [:type :qualType])) k {:records rs} (cx-tparam-qualifier bs))))))
+
+(defn cx-alias-access!
+  "Queue 506: the alias template `t`'s specialization, its parameters bound by the scope `bs`, named by a declaration's own
+  type (template-id's alias branch, when *cx-alias-check* is its form): its defining-type-id's T::X with T a parameter
+  checked in the alias template's context, a namespace's (cx-qual-type-access!), reported at the alias's declaration."
+  [t bs]
+  (let [p (:pattern t)]
+    (when (and (checking?) p (:range p) (not (header-node? p)) (= :ns (:kind (:scope t))))
+      (cx-qual-type-access! bs (str (get-in p [:type :qualType])) p {:records #{}} (cx-tparam-qualifier bs)))))
+
+(defn- cx-alias-member-access!
+  "Queue 506: a member declaration `k` of a class (its scope `cs`) whose type is an unqualified alias template's
+  specialization, foo<B>: the template-id resolved once more with *cx-alias-check* its form, so that cx-alias-access!
+  judges that specialization alone (not the template-ids inside it, nor a deduction's)."
+  [cs k]
+  (when (and (checking?) *on-refusal* (not (header-node? k)) (:template-id @hooks))
+    (let [qt (str (get-in k [:type :qualType]))]
+      (when (str/includes? qt "<")
+        (let [f (try (ct/parse-type (strip-type-attrs qt)) (catch Exception _ nil))]
+          (when (and (seq? f) (= '<> (first f)) (symbol? (second f)) (nil? (namespace (second f)))
+                     (some #(and (= :tmpl (:e %)) (= :alias (:tk %))) (lookup cs (name (second f)))))
+            (binding [*cx-alias-check* f]
+              (try ((:template-id @hooks) cs f) (catch Exception _ nil)))))))))
+
+(defn- cx-base-type-access!
+  "Queue 506: the base-specifiers of the class `id` (its node `n`, declared in `scope`): a qualified name's member type
+  checked in the derived class's context ([class.access]/7, CWG 372), cx-qual-type-access!."
+  [scope id n]
+  (when (and (checking?) *on-refusal* (not (header-node? n)))
+    (when-let [rs (cx-enclosing-classes id)]
+      (doseq [bs (:bases n)
+              :let [qt (str (get-in bs [:type :qualType]))]
+              :when (and (not (:isPackExpansion bs)) (str/includes? qt "::"))]
+        (cx-qual-type-access! scope qt (if (:range bs) bs n) {:records rs} (constantly true))))))
+
+(defn- cx-member-tparam-access!
+  "Queue 506: a member template `n` of the class whose scope is `scope`: a type parameter's default and a non-type
+  parameter's type naming a member type, checked in the class's context ([class.access]/8), cx-qual-type-access!."
+  [scope n]
+  (when (and (checking?) *on-refusal* (= :class (:kind scope)) (:cls scope) (not (header-node? n))
+             (#{"ClassTemplateDecl" "FunctionTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind n)))
+    (when-let [rs (cx-enclosing-classes (:cls scope))]
+      (doseq [p (:inner n)
+              :let [qt (case (:kind p)
+                         "TemplateTypeParmDecl" (some #(when (= "TemplateArgument" (:kind %)) (get-in % [:type :qualType])) (:inner p))
+                         "NonTypeTemplateParmDecl" (get-in p [:type :qualType])
+                         nil)]
+              :when qt]
+        (cx-qual-type-access! scope (str qt) p {:records rs} (constantly true))))))
 
 (defn- friend-may-grant?
   "CP313 (a), clang's SemaAccess.cpp (llvmorg-23.1.5) EffectiveContext and GetFriendKind for a non-member function `f`
