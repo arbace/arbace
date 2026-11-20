@@ -2097,6 +2097,7 @@
 ;; env: {NAME {:mono type} | {:poly type :core term}}
 
 (def ^:dynamic *module* nil)
+(def ^:dynamic *deriv-aux* nil) ; atom [[NAME :datatype|:constr binding]...]: derived Data's auxiliary bindings ($tT, $cC)
 (def ^:dynamic *derivs* nil)     ; atom [{:cls :tn :names :res :desc}]: the stock deriving requests of the module
 (def ^:dynamic *ddescs* nil)     ; atom {TYCON {:desc :names}}: the module's data types as deriving sees them
 (def ^:dynamic *exts* #{})
@@ -5314,14 +5315,26 @@
         (when (some (fn [[d c]] (not= c (get cur d))) ctxs)
           (swap! *insts* (fn [is] (mapv (fn [i] (if-let [c (get ctxs (:dfun i))] (assoc i :ctx c) i)) is)))
           (when (< k 20) (recur (inc k))))))
-    (let [ctx-by (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))]
+    (let [ctx-by (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))
+          ;; a stock Data instance's auxiliary bindings, $tT and $cC (gen_Data_binds' DerivDataDataType, DerivDataConstr),
+          ;; top-level bindings of the module (*deriv-aux*), and dataCast1/2 by the type constructor's kind (* -> *, * -> * -> *)
+          data-desc (fn [r]
+                      (if (and (= "Data" (occ (:cls r))) (= "GHC.Internal.Data.Data" (nmod (:cls r))) (not (gnd-of r)) (not (:anyclass? r)))
+                        (let [desc (:desc r) names (deriv/data-aux-names m desc)
+                              k (some-> (get-in @*tycons* [(:tn r) :kind]) zonk deep-expand)
+                              cast (cond (= k (deep-expand (fn-ty star-kind star-kind))) 1
+                                         (= k (deep-expand (fn-ty star-kind (fn-ty star-kind star-kind)))) 2)
+                              desc (assoc desc :data (assoc names :cast cast))]
+                          (when *deriv-aux* (swap! *deriv-aux* into (deriv/data-aux desc)))
+                          desc)
+                        (:desc r)))]
       (vec (for [r reqs]
              {:dfun (dfun r) :tvs (:tvs r) :ctx (get ctx-by (dfun r))
               :cls (:cls r) :ts (:ts r)
               :gnd (gnd-of r)
               :binds (when-not (or (gnd-of r) (:anyclass? r)
                                    (and (generic? r) (= "Generic1" (occ (:cls r))) (not (deriv/gen1-ok? (:desc r)))))
-                       (deriv/derive-binds (occ (:cls r)) (:desc r)))})))))
+                       (deriv/derive-binds (occ (:cls r)) (data-desc r)))})))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -6200,7 +6213,7 @@
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
               *tv-kinds* (atom {}) *tc-kinds* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
-              *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
+              *derivs* (atom []) *deriv-aux* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
               *implic-eqs* (atom []) *patsyns* (atom {}) *own-fam-insts* (atom []) *iface-meta* (atom {})
               *static-binds* (atom [])
@@ -6321,7 +6334,11 @@
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
             insts (into insts (phase :derive (derive-all! m decls)))
-            top-sigs (sigs-of sigs)
+            ;; derived Data's auxiliary bindings, one recursive group with their signatures ($tT :: DataType, $cC :: Constr)
+            top-sigs (into (sigs-of sigs)
+                           (for [[n kind _] @*deriv-aux*]
+                             [n [:forall [] [] [:tc (ext-name "tc" "GHC.Internal.Data.Data" (if (= kind :datatype) "DataType" "Constr")) []]]]))
+            binds (if (seq @*deriv-aux*) (conj (vec binds) (list 'rn/group 'rec (mapv #(nth % 2) @*deriv-aux*))) binds)
             ;; the pattern synonyms' signatures: their pattern types, their builders' types
             _ (doseq [s sigs :let [sv (lval s)] :when (= 'PatSynSig (con sv)) nl (arg sv 2)]
                 (let [info (assoc (patsyn-info (arg sv 3)) :sig true)]
@@ -6450,6 +6467,8 @@
          ;; the INLINE pragmas' binders and their real arities (makeCorePair: an INLINE unfolding of that arity, the binding
          ;; eta-expanded to it)
          :inline-arities @*inline-arities*
+         ;; derived Data's auxiliary binders ($tT, $cC), not exported
+         :deriv-aux (set (map first @*deriv-aux*))
          :noinline (let [acc (atom #{})
                          w (fn w [x] (cond (and (seq? x) (= 'InlineSig (first x)))
                                            (let [n (nm (arg x 2))
