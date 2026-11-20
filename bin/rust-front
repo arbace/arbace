@@ -455,6 +455,26 @@ case ${1:-} in
       mkdir -p "$md/$n"; cp "$rs/$n/$n.record.edn" "$md/$n/$n.record.edn"; names+=("$n")
     done
     cd "$root" && arbace_tool -m arbace.rust.front.mono-check "$fd" "$root/test/rust/front/std-crates.edn" "$libsrc" "$md" $ctl "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  std-iface-native)
+    # C4 (doc/rust/FRONTEND-SURVEY.md, "As built: C4's switch"): std's interface assembled from the crates' native passes alone
+    # (core's whole pass: core-check with CORE_IFACE_FILES=all CORE_IFACE_ONLY=1, its native-iface.edn; alloc's: the pass of
+    # alloc-iface or lib-export, native-iface-nodebug.edn or alloc-iface.edn; std's: bin/rust-front std-iface's std-iface.edn) into
+    # $work/std-iface-native.edn, then each crate's facts compared with the helper's std-iface, fact by fact (alloc-check --compare)
+    shift; filt='^Reflection warning|recur arg|^Auto-boxing'
+    cn=${CORE_NATIVE_IFACE:-$work/core/native-iface.edn}
+    an=${ALLOC_NATIVE_IFACE:-$(ls "$work/alloc/alloc-iface.edn" "$work/alloc/native-iface-nodebug.edn" "$work/alloc/native-iface.edn" 2>/dev/null | head -1)}
+    sn=${STD_NATIVE_IFACE:-$work/std/std-iface.edn}
+    for f in "$cn" "$an" "$sn"; do [ -n "$f" ] && [ -s "$f" ] || { echo "std-iface-native: a crate's native interface is missing ($f): core-check's whole pass, alloc-iface, std-iface" >&2; exit 1; }; done
+    fd=$(records_front) || exit 1
+    cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --assemble "$work/std-iface-native.edn" "core=$cn" "alloc=$an" "std=$sn" 2>&1 | grep -v -E "$filt" || exit 1
+    st=0
+    for c in core alloc std; do
+      cp "$work/std-iface-native.edn" "$work/std-iface-native-$c.edn"
+      GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --crate "$c" --compare "$fd" "$work/std-iface-native-$c.edn" 2>&1 | grep -v -E "$filt" | sed "s/^/$c: /"
+      grep -q -E '(differ|missing)[^0-9]*[1-9]' "$work/std-iface-native-$c.edn.report" 2>/dev/null && st=1
+      rm -f "$work/std-iface-native-$c.edn"
+    done
+    exit $st ;;
   std-crates)
     # C6-2 (b) (doc/rust/FRONTEND-SURVEY.md, "As built: C6-2"): --native, std's crates' identities computed by Arbace (Cargo's metadata
     # hash ported, arbace.rust.front.cargo-meta, over the library build's units test/rust/front/std-build-units.edn; no cargo, no
@@ -702,13 +722,27 @@ case ${1:-} in
       # queue 448: core's defs outside rust-core-built's modules (core-export --rsi-outside), judged at the instance
       [ -s "$work/core/native-core-rsi-outside.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/core/native-core-rsi-outside.edn
       for c in alloc std; do [ -s "$work/$c/native-$c-rsi.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/$c/native-$c-rsi.edn; done; fi
-    rw=${RF11_WORK:-$work/rsi}; mkdir -p "$rw"; rm -f "$rw/front.tsv"
+    rw=${RF11_WORK:-$work/rsi}; mkdir -p "$rw"; rm -f "$rw/front.tsv" "$rw/inputs.tsv"
     stubs=$work/stubs; mkdir -p "$stubs"
     for t in rustc rustdoc cargo gcc cc clang; do printf '#!/bin/sh\necho "stub $0 called" >> "%s/stubs.log"\nexit 99\n' "$stubs" > "$stubs/$t"; chmod +x "$stubs/$t"; done
     : > "$stubs/stubs.log"
     plan=$(rfr_rsi_list) || exit 1
     rs=$(rfr_stage rsi) || { echo "rsi-build: the pack rust-front-rsi is not current (bin/rust-front records make rsi, on the host with rustc)"; exit 1; }
     fd=$(records_front) || exit 1
+    # C4 (doc/rust/FRONTEND-SURVEY.md, "As built: C4's switch"): RF_NATIVE_IFACE=1, std's interface and its crates' identities
+    # Arbace's own: the interface assembled from the crates' native passes ($work/std-iface-native.edn, bin/rust-front
+    # std-iface-native) in place of the helper's std-iface.edn, and the StableCrateIds computed (bin/rust-front std-crates --native,
+    # Cargo's metadata hash ported) in place of std-crates-rsi.edn's (the rlibs'); the inputs written to $rw/inputs.tsv
+    crates=$root/test/rust/front/std-crates-rsi.edn c4=""
+    if [ "${RF_NATIVE_IFACE:-0}" = 1 ]; then
+      [ -s "$work/std-iface-native.edn" ] || { echo "rsi-build: no $work/std-iface-native.edn (bin/rust-front std-iface-native)"; exit 1; }
+      "$0" std-crates --native > "$rw/std-crates-native.log" 2>&1 || { cat "$rw/std-crates-native.log"; exit 1; }
+      crates=$work/std-crates-native.edn
+      nfd=$work/records/front-native; rm -rf "$nfd"; mkdir -p "$nfd"
+      for f in "$fd"/*; do [ "$(basename "$f")" = std-iface.edn ] || ln -s "$(readlink -f "$f")" "$nfd/"; done
+      ln -s "$work/std-iface-native.edn" "$nfd/std-iface.edn"; fd=$nfd
+      c4="std's interface from the crates' native passes, the StableCrateIds by Cargo's metadata hash ported (std-names.edn the helper's)"
+    fi
     libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}
     rf_libsrc_take || { echo "rsi-build: no $libsrc (bin/repr-rust src-take)"; exit 1; }
     specs=() ids=() eds=() skipped=0
@@ -735,7 +769,7 @@ case ${1:-} in
     : > "$rw/batch.log"; : > "$rw/mono-all.log"; bsz=${RF11_BATCH:-6}
     for ((i = 0; i < ${#specs[@]}; i += bsz)); do
       (cd "$root" && PATH=$stubs:$PATH BUILD_PASS=SimplifyCfg-pre-optimizations RF_EDITION=$ed RF_OVERFLOW_CHECKS=1 RF_MONO_LIB=$libsrc RF_SRC_ROOT=$srcdir GOMEMLIMIT=${RF11_GOMEMLIMIT:-1800MiB} GOMAXPROCS=${RF11_PROCS:-4} \
-         arbace_tool -m arbace.rust.front.build-run batch "$root/test/rust/front/std-crates-rsi.edn" "$fd" "$rw" --std "${specs[@]:$i:$bsz}" 2>&1 |
+         arbace_tool -m arbace.rust.front.build-run batch "$crates" "$fd" "$rw" --std "${specs[@]:$i:$bsz}" 2>&1 |
          grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >> "$rw/batch.log")
       # RF14: each batch's mono-check of its programs' native facts against their records (the batch rewrites mono.log)
       grep -v '^mono-check: [0-9]* programs: ' "$rw/mono.log" >> "$rw/mono-all.log" 2>&1
@@ -753,6 +787,8 @@ case ${1:-} in
       # the module's forms are the record's size: kept with RF11_KEEP=1
       [ "${RF11_KEEP:-0}" = 1 ] || rm -f "$rw/$n/$n.mono.edn" "$rw/$n/$n.ours.c"
     done > "$rw/front.tsv"
+    # C4: the inputs the run read (the case inputs' writer, arbace.rust.check/write-case-inputs, reads WORK/front/CORPUS/inputs.tsv)
+    for id in "${ids[@]}"; do printf '%s\tc4\t%s\n' "$id" "${c4:-the helper's std-iface.edn and std-crates-rsi.edn (the rlibs')}"; done > "$rw/inputs.tsv"
     cut -f2,3 "$rw/front.tsv" | sed -E 's/ \(.*//; s/^own\t.*/own/' | sort | uniq -c | sort -rn
     # S4: with --native-core, each program's core roots taken natively and judged against the record's instance (pack-compare)
     if [ -n "${RF_CORE_NATIVE:-}" ]; then

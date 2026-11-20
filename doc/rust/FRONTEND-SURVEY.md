@@ -5382,3 +5382,35 @@ manifests, Cargo.lock and the vendored crates, features unified, profiles merged
 - (c) (a) now, (b) when a second library build (another target or profile) needs another description.
 *Recommended: (a)*, then (c)'s (b) only if a second description is needed: the description is a build's configuration, the hash
 was the toolchain's part. Not decided here: C4's own count waits on it.
+
+## As built: C6-4 (a), alloc's causes (2026-11-20, branch `rust-c6-1120`)
+
+C6-4 (a) as decided: the slice's four causes on alloc's 25 items, cheapest first. `bin/rust-front lib-unit export|build|compare alloc`
+after each (the export about 2 minutes with alloc's interface cached; build and compare under 2 GB):
+
+| | equal | differ | refused |
+|---|---|---|---|
+| the first slice (above) | 7 | 6 | 12 |
+| + projections in layouts | 7 | 7 | 11 |
+| + caller locations at the expansion's cause | 8 | 6 | 11 |
+| + a root-file call's own place; crate-private ADTs in the export | **9** | 6 | 10 |
+
+- **Projections in layouts** (`mono/layout-of*`'s `:proj`): a projection an ADT's field leaves at the instance is normalized by the
+  solver, as layout_of normalizes its type: `Cow<'_, str>`'s `<str as ToOwned>::Owned` is `String`. `From<Cow<str>> for String`
+  reaches the compare (it differs at a block, below); `String::from_utf8_lossy` reaches codegen and stops at a constant left
+  unevaluated (`REPLACEMENT`'s text).
+- **Caller locations** (`ex/virtual-cause`, `ex/root-span?`, core-check's `externalize`): a call made by an expansion takes the
+  expansion's root call site in the body's own file (ExpnId::expansion_cause, span_as_caller_location's topmost: the token's mark,
+  its recorded site), a call written in the body's own file its own place; a macro's file already remapped is no longer prefixed
+  twice (`/rustc/COMMIT//rustc/COMMIT/library/..` before). `capacity_overflow` (`alloc/src/raw_vec/mod.rs:28:5`) and `From<
+  TryReserveError> for io::Error` (`Into::into`'s location) are equal. This reaches C2's exports too (their native bodies' panic
+  locations, the record's before where none was written).
+- **Crate-private ADTs** (`alloc-check --export`'s `:adts`, build-run's `with-extra-iface`): an entry carries the native facts of the
+  crate-private ADTs its types name, which the run's interface takes beside 443's functions and 462's impls and traits:
+  `btree::node::LeftOrRight` lays out, `splitpoint` reaches the compare.
+
+Left on alloc (16): 6 differ structurally (four first `alloca`s: a local's size or order; two blocks: `splitpoint`, `From<Cow<str>>`,
+rustc's -O0 CFG a block shorter), 5 refused for a fn-local type's symbol (`BufWriter::flush_buf`'s `BufGuard`, `CString::new`'s
+`SpecNewImpl`), 4 for a fn-local ADT's layout (`StringError` twice, `PanicGuard`, `BufGuard`'s Drop), 1 a constant unevaluated. The
+fn-local items (an item inside a function body) need the interface pass to collect them and v0 to print their parent function in
+the value namespace (`Nv`, the `PanicGuard` symbol's `Nt` above): the next cause, then core's 275 items (C6-4 (a)).

@@ -13781,3 +13781,14 @@ coordinator relayed it with the order C6-2, then C4's switch to the native inter
   passes on this one.
 - DECISION C6-5 (the user's): the 36 units as the library build's description, data (recommended), or Cargo's workspace resolution
   ported too (5-8 days). C4's own count waits on it.
+
+## 2026-11-20: rust-c6-1120: C6-4 (a), alloc's causes: 9 of 25 items equal to std's IR (7 before)
+
+doc/rust/FRONTEND-SURVEY.md, "As built: C6-4 (a), alloc's causes". Projections in layouts normalized by the solver (mono's
+layout-of*), caller locations at the expansion's root call site or the call's own place in the body's file (expand's
+virtual-cause and root-span?, core-check's externalize; the double remap prefix gone), crate-private ADTs carried by the export
+(`:adts`) into the run's interface: 7 -> 9 equal, the crossed control differing; 6 differ structurally, 10 refused (fn-local
+items' symbols and layouts, one constant). The location and export changes reach C2's exports too (not rerun here). Also in this
+commit, off by default and not measured yet: C4's switch (`RF_NATIVE_IFACE=1` for rsi-build: the interface assembled from the
+crates' native passes, `bin/rust-front std-iface-native`, `alloc-check --assemble`, and the computed StableCrateIds; rsi-build's
+`inputs.tsv`, read by the case inputs' writer, C4 own only when nothing of std's interface is the helper's).
