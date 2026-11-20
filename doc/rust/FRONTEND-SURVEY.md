@@ -5508,6 +5508,24 @@ value" 19, inference left open 18, and the 10 `__rustc` items, whose keys the ce
   rsi-build intrinsics panics std unwind vectors` gives 5 of 5 own, 0 stub calls (17 min, 2.25 GB; `.tmp/rust-front/rsi-helper`),
   the run the native interface's is to equal.
 
+### C4's measure (2026-11-20, evening)
+
+- **core's interface pass, the whole crate, first time** (`alloc-check --crate core --pass`, 378 module files, one round: 1 h 25 min,
+  3.8 GB under the 8 GiB cap): **25,812 of 27,498 facts equal**, 474 differ, 1,212 missing, the control differing. Missing: 912
+  functions (core_simd's `to_bytes` 366, `vendor` 60, `ops` 40; `intrinsics::simd` 78; `num` 72; `hash::sip` 33, whose module stops at
+  expansion: "no arm of compress matches"; `pat` 14), 234 impls, 40 ADTs, 25 constants. Differing: functions' `:const` 155,
+  `:predicates` 65, `:output` 45, `:promotable` 29, `:nounwind` 9, `:inputs` 2 (`fmt::Arguments::new`'s among them); impls'
+  `:predicates` 109, `:items` 17; ADTs' `:variants` 10, `:repr`/`:discrs` 5; traits' `:predicates` 12. alloc 3,863 of 3,863 and std
+  4,644 of 4,644 in the same assembly.
+- **The switch's run** (`RF_NATIVE_IFACE=1 RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind vectors`, 16 min, 2.2
+  GB): **0 of 5 own**, against the helper's 5 of 5: each program's `main` takes the pack ("no callee for
+  `std::fmt::Arguments::<'_>::new::<13, _>`": `format_args!`'s constructor's inputs, one of core's differing facts, leave a type
+  variable), then codegen refuses a Transmute between layouts the native interface gives differently. `inputs.tsv` writes C4 as
+  "std's interface from the crates' native passes, the StableCrateIds by Cargo's metadata hash ported (std-names.edn the helper's)".
+- So C4 needs core's interface as RIND9 gave alloc's and std's: the 1,686 facts above, cheapest first (the `:const` flag of trait
+  methods, the functions' `:promotable`, the expansion of `hash::sip` and core_simd's macros), each a module run with its known
+  file; then the switch's run equal to the helper's. C6-5 (the 36 units) is the user's in the morning: C4 counted own only after it.
+
 ### DECISION C4-1 (for the user): std's names
 
 A run reads two files of std's from the helper: `std-iface.edn` (the interface, now assembled natively) and `std-names.edn` (std's

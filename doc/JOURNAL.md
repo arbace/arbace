@@ -13845,3 +13845,12 @@ it (std-iface-native, the five samples' rsi-build on the native interface agains
 in the worktree (.tmp/c6/chains2.sh), not recorded here. DECISION C4-1: std's names (std-names.edn, the helper's: modules,
 macros, lang items, generics, aliases, traits) native too before C4 counts own (recommended), or C4 own on the interface and the
 identities alone.
+
+## 2026-11-20: rust-c6-1120: C4's measure: core's whole interface 25,812 of 27,498 facts; the switch's run 0 of 5 own
+
+core's replacement interface pass ran over all 378 module files for the first time (one round, 1 h 25 min, 3.8 GB): 25,812 of
+27,498 facts equal, 474 differ, 1,212 missing (core_simd's macro-made functions, intrinsics::simd, num, hash::sip's expansion
+failure; trait methods' :const, :predicates, :output, :promotable); alloc's and std's all equal in the same assembly. On that
+interface with the computed StableCrateIds, rsi-build gives 0 of 5 own (fmt::Arguments::new's inputs, one of core's differing
+facts, leave a type variable in each main; then a Transmute between differing layouts), against 5 of 5 on the helper's. C4 waits
+on core's interface (RIND9's work for core) and on C6-5 (the user's, in the morning).
