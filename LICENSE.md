@@ -542,7 +542,7 @@ covers what.
   License Agreement for Python 3.14" below), built by ci's builder with the part of musl 1.2.6 it reaches (under the
   MIT License, section "musl: MIT License" below) and `tools/pyi/clib/ctypestest/pyctypes_test.c` and `pycapi.c`
   (Arbace's own; `testcapi_parts.c`, the stubs of the parts not built, removed by queue 274b once all 38 were; `pycapi.c`'s `_Py_ctype_table`, `_Py_ctype_tolower` and `_Py_ctype_toupper` since
-  queue 270 the tables of CPython 3.14.10's `Python/pyctype.c`, under the PSF License Agreement). `tools/pyi/capi/include/pyconfig.h`: Arbace's own configuration for CPython's `Include/` (the clean-room
+  queue 270 the tables of CPython 3.14.10's `Python/pyctype.c`, and its `_Py_ascii_whitespace` since queue 481 the table of `Objects/unicodeobject.c`, under the PSF License Agreement). `tools/pyi/capi/include/pyconfig.h`: Arbace's own configuration for CPython's `Include/` (the clean-room
   `Python.h` of queue 244 was removed by queue 262), under the Eclipse Public License 1.0. `go/arbace/pyctypes.ae` and
   `go/arbace/pyctypes/` (package `arbace/pyctypes`): libffi's part over ci, Arbace's own (written from libffi's
   documented interface, `ffi_prep_cif`, `ffi_call`, `ffi_prep_closure_loc`; no libffi code), under the Eclipse Public
