@@ -9030,3 +9030,22 @@ the judge names.
 
 - **Merge order.** Queue 392 (`rt_ours_glob` 124 to 155, codegen and template fixes) and this branch merge cleanly either way
   (`git merge-tree`; also with 393). 392 first, then this: the host then builds and records the runtime once, at 155 units.
+
+## As built: queues 505, 506 and 508, the dg own verdicts' integration (2026-11-20; branch `508-cpp-dg-own12` from mac/506-cpp-dg-own11 579ce661e, mac/505-cpp-dg-own10 8776e9175 merged)
+
+- 505: friend functions' identity (`cx-friend-fn-ident!`, `cx-friend-fn-miss?`) and the elaborated-type-specifier's class in its
+  namespace or block (`cx-elab-decl-scope`, `cx-elab-declare!`, the parser's `:_elab-decl`); 6 rows.
+- 506: type access on instantiation (`cx-qual-type-access!` and its four rules: a class template's member types, an alias
+  template's specialization, base-specifiers, a member template's parameters); 4 rows.
+- 508: use of deleted functions: before C++17 the copy or move constructor an elided copy from a class prvalue chooses
+  (`cx-elided-copy!`, [class.temporary]/1 of C++14), a closure type's deleted default constructor and copy assignment
+  (`cx-closure-members!`, [expr.prim.lambda.closure]), a default-initialization's refusal located at its declaration; 8 rows.
+
+Rows that wait on the explicit instantiation's member bodies (505-1 (b), the main host 2026-11-20: in checking mode
+`explicit-inst-members!` analyzes no member body of `template class X<...>;`, [temp.explicit]/10, not for now):
+
+| row | the line it misses, and why |
+|---|---|
+| template/using16 | line 25: `B<T>::type`'s private constructor used in `C<int>::f`, reached only through `template class C<int>;` (line 41, a repeated `using typename D<T>::type;`, [namespace.udecl]/10, is a separate rule) |
+| template/friend82 | line 18: `c.x`, a private member of `A<int*>::C<long>`, in `A<double*>::B<long>::foo`, which only `template struct A<double*>::B<long>;` (line 23) instantiates (`A<int*>::C<long>` befriends `A<int*>::B`, not `A<double*>::B`); friend identity (505) is not the gap: the file with its friends removed is still accepted |
+| template/memfriend17 | line 42: `F1<int*>::foo`, private, in `A<int>::B::func2`, which only `template class A<int>;` (line 46) instantiates |
