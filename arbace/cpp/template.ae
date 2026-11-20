@@ -1567,6 +1567,12 @@
                            (cond (and pk1 (not pk2)) false
                                  (and pk2 pk1) (deduce-by-type-match (atom @b) tid2 (:of p2) (:of p1) #{} :call)
                                  pk2 (deduce-by-type-match (atom @b) tid2 (:of p2) p1 #{} :call)
+                                 ;; (cpp-rt-own: one a reference and the other not, [temp.deduct.partial]/5 and /7: the referred
+                                 ;; type and no top-level cv-qualifier on both sides: <bits/stl_iterator.h>'s __niter_wrap(const _Iterator&,
+                                 ;; _Iterator) more specialized than __niter_wrap(_From, _To), which had been taken for (_Dir**, _Dir**),
+                                 ;; cow-fs_dir.cc's; both references keep the match as before)
+                                 (not= (boolean (abi/ref? p2)) (boolean (abi/ref? p1)))
+                                 (deduce-by-type-match b tid2 (abi/unq (abi/non-ref p2)) (abi/unq (abi/non-ref p1)) #{} :call)
                                  :else (deduce-by-type-match b tid2 p2 p1 #{} :call))))
                        p2s p1s))))
 
@@ -2005,8 +2011,13 @@
         (when-let [nm (System/getenv "CPP_INST_TRACE")]
           (when (= nm (:name t))
             (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
-        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args))
-                 (or (and *provisional* (or sema/*main-retry* sema/*incomplete-ok*)) sema/*name-only*))
+        (if (or (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args))
+                     (or (and *provisional* (or sema/*main-retry* sema/*incomplete-ok*)) sema/*name-only*))
+                ;; (cpp-rt-own: an explicit specialization declared and not defined yet is that specialization, incomplete
+                ;; till its definition, never the primary's instance, [temp.expl.spec]/7: <complex>'s `template<> class
+                ;; complex<double>;` named by complex<float>'s constructors before complex<double>'s definition, whose
+                ;; complex(double, double) and operator=(double) were the primary's, complex_io.cc's)
+                (and (get-in t [:spec-decls args]) (not (contains? (:specs t) args))))
           (incomplete-instance! t args)
           (select-instance! t args nil)))))))
 
@@ -2903,7 +2914,8 @@
       (let [vid (or (some #(when (= (:name (sema/var* %)) (:name n)) %) (:statics c)) (fail :template "no static member " (:name n)))]
         (if (first (kids n))
           (do (upd-var! vid #(-> % (assoc :init (first (kids n)) :init-style (:init n) :def-scope scope :defined true :linkonce false
-                                          :internal false :internal-l false)
+                                          ;; (cpp-rt-own: no longer the header's declaration without an initializer, extern)
+                                          :extern false :internal false :internal-l false)
                                  (dissoc :pending-def)))
               ;; (cpp-rt-own: and defined in this unit, among the definitions emit-globals writes: locale_facets.cc's
               ;; `template<> const char* __timepunct_cache<char>::_S_timezones[14] = {...};`, never written before)
@@ -3423,8 +3435,14 @@
                     (let [c (abi/cls ic)
                           cs (new-scope :class (:outer c) :cls ic :path (conj (vec (:path c)) [:cls ic]))]
                       (swap! abi/*classes* assoc ic (assoc (select-keys c [:id :name :path :outer :tmpl :targs]) :scope cs :fields [] :bases []))
-                      (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic))))))
-        nil)
+                      (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic)))
+                    ;; (cpp-rt-own: one an explicit specialization's declaration left incomplete: completed in place by it)
+                    (and (get-in (tmpl tid) [:spec-decls args]) (not (:complete (abi/cls ic))))
+                    (do (when (and *provisional* (incomplete-waiting? tid ic)) (swap! *provisional* update-in [:templates tid] disj ic))
+                        (declare-instance! (tmpl tid) args n [] [] true ic)
+                        (drop-layouts!)))))
+        ;; (cpp-rt-own: declared alone, `template<> class complex<double>;`: marked, its uses wait for its definition)
+        (when-not (get-in (tmpl tid) [:insts args]) (upd-tmpl! tid assoc-in [:spec-decls args] true)))
       :template)
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "VarDecl")
     (let [text (or (node-text n) "")]

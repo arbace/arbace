@@ -1688,6 +1688,9 @@
                                                                                                      (not (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s))))))
                                                                                               home scope))
             (upd-var! old assoc :defined true :extern false))
+          ;; (cpp-rt-own: and among the definitions emit-globals writes, a static data member of a template's instance not
+          ;; there before: locale_facets.cc's `template<> const char* __timepunct_cache<char>::_S_timezones[14] = {...};`)
+          (when (and init (not (some #{[:var old]} @*order*))) (swap! *order* conj [:var old]))
           ;; (cpp-s7: a static data member's out-of-line definition in a header is an ordinary definition, not linkonce:
           ;; before CP369 every such member was internal and so never linkonce here; now external, thread_local11.h's
           ;; `thread_local S T::u3` would have been taken for a template's member, thread_local12e.C refused)
@@ -3974,7 +3977,10 @@
             (and (abi/scalar? pt) (<= (count (:items e)) 1)) {:rank (if (seq (:items e)) (or (std-rank (rv (first (:items e))) (:ty (rv (first (:items e)))) pt) 9) 0)}
             :else nil)
       (abi/ref? p)
-      (let [same (= (arr-unq at) (arr-unq pt))
+      ;; (cpp-rt-own: marked a reference binding, :refb, whose :sub better-ics? weighs against another reference binding's alone,
+      ;; [over.ics.rank]/3.2.3 and /3.2.6: `const I&` and a by-value `F` for an lvalue are both identities, the call then decided
+      ;; by the templates' partial ordering, <bits/stl_iterator.h>'s __niter_wrap(const _Iterator&, _Iterator))
+      (some-> (let [same (= (arr-unq at) (arr-unq pt))
             derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))
             cv-ok (and (or (:c (arr-cv pt)) (not (:c (arr-cv at))))
                        ;; CX12 (the checker): volatile too ([dcl.init.ref]/4-5, reference-compatible: cv1 >= cv2)
@@ -4004,6 +4010,7 @@
           ;; a const lvalue reference or an rvalue reference to a temporary
           (and (= :rref (:k p)) (= :lv (:cat e)) (or same derived)) nil
           :else (when-let [r (ics (if (lv? e) e e) pt)] (assoc r :sub (if (= :rref (:k p)) -1 (inc (long (or (:sub r) 0))))))))
+              (assoc :refb true))
       (abi/class? pt)
       (cond
         (and (class-id at) (= (class-id at) (:id pt))) {:rank 0}
@@ -4076,6 +4083,9 @@
              (boolean (abi/derived-from? (second (:d2b a)) (second (:d2b b))))
              (and (:cvq a) (:cvq b))
              (let [x (:cvq a) y (:cvq b)] (and (not= x y) (every? y x)))
+             ;; (cpp-rt-own: a reference binding's :sub against another's alone; a pointer's qualification adjustment's against
+             ;; a non-reference's)
+             (not= (boolean (:refb a)) (boolean (:refb b))) false
              :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
 
 (declare resolve-overload*)
@@ -5318,6 +5328,18 @@
                   (fail :assign "assigning to an array from an initializer list")
                   (fail :assign "invalid array assignment")))
               (cx-read-only! l)
+              (if-let [cx (let [t (abi/unq (:ty l)) rr (when-not (= :init-list (:op r)) (rv r))]
+                            (when (and (= :complex (:k t)) rr (abi/arith? (abi/unq (:ty rr))) (lv? l))
+                              ;; (cpp-rt-own: a real value assigned to a GNU complex, its real part the value and its imaginary
+                              ;; part zero (GCC's manual, "Complex Numbers"): <complex>'s complex<float>::operator=(float),
+                              ;; `_M_value = __f;`, complex_io.cc's)
+                              (let [et (:of t)
+                                    part (fn [i] {:op :cpart :part i :e l :ty et :cat :lv})
+                                    zero (if (abi/floating? et) {:op :float :v 0.0 :ty et :cat :pr} {:op :int :v 0 :ty et :cat :pr})]
+                                {:op :comma :l {:op :assign :l (part 0) :r (convert-scalar rr et false) :ty et :cat :lv}
+                                 :r {:op :comma :l {:op :assign :l (part 1) :r zero :ty et :cat :lv} :r l :ty (:ty l) :cat :lv}
+                                 :ty (:ty l) :cat :lv})))]
+                cx
               (let [t (abi/unq (:ty l))
                     ;; (cpp-s11: a braced list on the right of a scalar, [expr.assign]/8: x = {} assigns a value-initialized
                     ;; T, x = {e} e converted as T{e}; <charconv>'s `__res.ec = {};` of the enumeration errc)
@@ -5333,7 +5355,7 @@
                           ;; (cpp-rt-own: a class's by its conversion function, [expr.assign]/3 with [over.match.conv]: a captureless
                           ;; lambda assigned to a pointer to function, libcpp's errors.cc `m_pfile->cb.diagnostic = [] (...) { ... };`)
                           (convert-scalar (if (and (abi/class? (abi/unq (:ty r))) (not (abi/class? t))) (user-conv ctx r t false) r) t false)))]
-                {:op :assign :l l :r r :ty (:ty l) :cat :lv}))))
+                {:op :assign :l l :r r :ty (:ty l) :cat :lv})))))
 
 (defn- compound-node [o l r]
   (cx-read-only! l)
