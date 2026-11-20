@@ -1980,7 +1980,7 @@
         (swap! abi/*enums* assoc-in [id :nonneg] true)))
     t))
 
-(declare cx-friend-member-access! cx-friend-class-ns!)
+(declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access!)
 
 (defn- declare-class! [scope0 n]
   (let [nm (:name n)
@@ -2208,7 +2208,8 @@
       ;; whose constraints are surely not satisfied, or deduces a constrained placeholder's type that does not satisfy its
       ;; constraint, is reported at the declaration and dropped, the unit going on, as a statement's refusal is)
       (if (checking?)
-        (try (declare-node*! scope n)
+        (try (cx-tparam-access! scope n) ; (queue 502: a namespace-scope template's parameters' access)
+             (declare-node*! scope n)
              (catch arbace.lang.ExceptionInfo e
                ;; (queue 487: and one that names an ambiguous name, cx-unqualified-ambiguous!, cx-qualified-ambiguous!)
                (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type)" (str (.getMessage e)))
@@ -5764,6 +5765,54 @@
             :when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))]
       (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
                       {:codegen/refused :access :cx/node node})))))
+
+(defn- cx-tparam-access!
+  "Queue 502 (the checker): the template parameters of a namespace-scope template declaration `n` (a class, function,
+  variable or alias template) name members whose access is checked where they appear, in the namespace's context
+  ([class.access]/1-2, [class.access]/8: a default template argument's names at its declaration, not at its uses): a
+  non-type parameter's type or a type parameter's default naming a private or protected member type (check-type-access!),
+  a non-type parameter's default naming a private or protected static data member (A::b), a template template parameter's
+  default naming a private or protected member class template (A::c); each reported at the parameter (*on-refusal*), the
+  declaration going on. Not judged when the member's class may grant it by a friend (cx-type-friend?). GCC's \"'typedef
+  int foo::memfun' is private within this context\" (parse/access8.C, template/access18.C)."
+  [scope n]
+  (when (and (checking?) *on-refusal* (= :ns (:kind scope))
+             (#{"ClassTemplateDecl" "FunctionTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind n)))
+    (doseq [p (:inner n)
+            :let [k (:kind p)
+                  report (fn [nm acc cid]
+                           (*on-refusal* (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
+                                                  {:codegen/refused :access :cx/node p})
+                                         p))]]
+      (try
+        (case k
+          "TemplateTypeParmDecl"
+          (when-let [qt (some #(when (= "TemplateArgument" (:kind %)) (get-in % [:type :qualType])) (:inner p))]
+            (check-type-access! scope (str qt) p))
+          "NonTypeTemplateParmDecl"
+          (do (check-type-access! scope (str (get-in p [:type :qualType])) p)
+              (doseq [a (:inner p) :when (= "TemplateArgument" (:kind a))
+                      d (:inner a) :when (and (= "DeclRefExpr" (:kind d)) (seq (:qualifier d)) (not (:_g d)))
+                      :let [nm (get-in d [:referencedDecl :name])
+                            v (when (string? nm)
+                                (some #(when (= :var (:e %)) (var* (:id %)))
+                                      (try (lookup-qualified scope (conj (vec (:qualifier d)) nm)) (catch arbace.lang.ExceptionInfo _ nil))))]
+                      :when (and v (#{:private :protected} (:cx-access v)) (:cx-cls v) (not (cx-type-friend? (:cx-cls v) (:cx-access v))))]
+                (report nm (:cx-access v) (:cx-cls v))))
+          "TemplateTemplateParmDecl"
+          (when-let [[_ q0 nm] (re-find #"=\s*((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)([A-Za-z_][A-Za-z_0-9]*)\s*$" (or (node-text p) ""))]
+            (let [parts (vec (remove str/blank? (map str/trim (str/split q0 #"::"))))
+                  ce (try (first (filter #(= :type (:e %)) (lookup-qualified scope parts))) (catch arbace.lang.ExceptionInfo _ nil))
+                  cid (when ce (class-id (:ty ce)))
+                  acc (when cid (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:access %))
+                                      (.get ^java.util.HashMap (:names (:scope (abi/cls cid))) nm)))]
+              (when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))
+                (report nm acc cid))))
+          nil)
+        (catch arbace.lang.ExceptionInfo e
+          (if (= :access (:codegen/refused (ex-data e)))
+            (*on-refusal* e p)
+            (throw e)))))))
 
 (defn- friend-may-grant?
   "CP313 (a), clang's SemaAccess.cpp (llvmorg-23.1.5) EffectiveContext and GetFriendKind for a non-member function `f`
