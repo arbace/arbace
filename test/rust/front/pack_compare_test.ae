@@ -50,6 +50,44 @@
       (check "a reborrow: InstSimplify's &(*_1), then CopyProp" (br/pack-compare o r) [:equal-o0 "copy-prop,inst-simplify,locals,storage"])
       (check "negative: a reborrow of another type is not simplified"
              (br/pack-compare (assoc-in o [:locals 2 :ty] '(ty "&mut i8" (ref (ty "i8" (int "i8")) true))) r) :differs))
+    ;; queue 493: CopyProp of a copy of a shared-borrowed argument (alloc_impl_runtime's `_9 = copy _1; alloc(move _9)` with
+    ;; `_4 = &_1` for `layout.size()`: rustc's `alloc(copy _1)`), the borrowed local SSA when its type is Freeze
+    (let [lay '(ty "std::alloc::Layout" (adt "std::alloc::Layout" []))
+          rl '(ty "&std::alloc::Layout" (ref (ty "std::alloc::Layout" (adt "std::alloc::Layout" [])) false))
+          size (list 'const "size" '(ty "fn(&Layout) -> usize {size}" (fndef "size" [])) '(zst))
+          alloc (list 'const "alloc" '(ty "unsafe fn(Layout) -> *mut u8 {alloc}" (fndef "alloc" [])) '(zst))
+          us '(ty "usize" (uint "usize")) pu '(ty "*mut u8" (ptr (ty "u8" (uint "u8")) true))
+          o {:args 1 :locals [{:ty pu} {:ty lay} {:ty us} {:ty rl} {:ty lay}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 3) (ref :shared (place 1)))] :term (list 'call size '[(move (place 3))] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts ['(assign (place 4) (use (copy (place 1))))] :term (list 'call alloc '[(move (place 4))] '(place 0) 2 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          r (-> o (update :locals pop) (assoc-in [:blocks 1] {:cleanup false :stmts [] :term (list 'call alloc '[(copy (place 1))] '(place 0) 2 '(continue))}))
+          fz (fn [f] (binding [br/*freeze-ty?* (fn [t] (and f (= (second t) "std::alloc::Layout")))] (br/pack-compare o r)))]
+      (check "CopyProp: a copy of a shared-borrowed Freeze argument" (fz true) [:equal-o0 "copy-prop,locals"])
+      (check "negative: the argument's type not known Freeze (a shared borrow makes it not SSA)" (fz false) :differs)
+      (check "negative: the argument mutably borrowed"
+             (binding [br/*freeze-ty?* (constantly true)]
+                      (br/pack-compare (-> o (assoc-in [:blocks 0 :stmts 0] '(assign (place 3) (ref :mut (place 1))))) (assoc-in r [:blocks 0 :stmts 0] '(assign (place 3) (ref :mut (place 1)))))) :differs)
+      (check "negative: the copy itself borrowed"
+             (binding [br/*freeze-ty?* (constantly true)]
+                      (br/pack-compare (update-in o [:blocks 1 :stmts] conj '(assign (place 3) (ref :shared (place 4)))) r)) :differs)
+      (check "negative: a copy of another type"
+             (binding [br/*freeze-ty?* (constantly true)] (br/pack-compare (assoc-in o [:locals 4 :ty] us) r)) :differs))
+    ;; queue 493: a borrow through a deref is a use, not a borrow of the local (as_mut_ptr_range's `_3 = copy _1` with `&(*_1)`)
+    (let [ms '(ty "&mut [i32]" (ref (ty "[i32]" (slice (ty "i32" (int "i32")))) true))
+          ss '(ty "&[i32]" (ref (ty "[i32]" (slice (ty "i32" (int "i32")))) false))
+          us '(ty "usize" (uint "usize"))
+          f (list 'const "f" '(ty "fn(&mut [i32]) -> usize {f}" (fndef "f" [])) '(zst))
+          o {:args 1 :locals [{:ty us} {:ty ms} {:ty ms} {:ty ss}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 3) (ref :shared (place 1 (deref)))) '(assign (place 2) (use (copy (place 1))))]
+                       :term (list 'call f '[(move (place 2))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          r {:args 1 :locals [{:ty us} {:ty ms} {:ty ss}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 2) (ref :shared (place 1 (deref))))] :term (list 'call f '[(copy (place 1))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}]
+      (check "CopyProp: an argument borrowed through a deref" (br/pack-compare o r) [:equal-o0 "copy-prop,locals"])
+      (check "negative: the argument itself borrowed mutably"
+             (br/pack-compare (assoc-in o [:blocks 0 :stmts 0] '(assign (place 3) (ref :mut (place 1)))) (assoc-in r [:blocks 0 :stmts 0] '(assign (place 2) (ref :mut (place 1))))) :differs))
     (let [unit '(ty "()" (tuple))
           callu (list 'const "g" '(ty "fn() {g}" (fndef "g" [])) '(zst))
           r {:args 0 :locals [{:ty unit}] :debug [] :blocks [{:cleanup false :stmts [] :term (list 'call callu [] '(place 1) 1 '(continue))} {:cleanup false :stmts [] :term '(return)}]}

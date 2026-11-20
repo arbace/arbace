@@ -1150,33 +1150,61 @@
 
 (defn- plain-place [p] (when (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p)))
 
+(def ^:dynamic *freeze-ty?*
+  "queue 493: within pack-compare, whether a local's type form is Freeze (the instance's types, by passes/freeze? on their :tc):
+  SsaLocals keeps a shared-borrowed local SSA only then; nil (not known Freeze) elsewhere"
+  nil)
+
+(defn- o0-ssa
+  "queue 493: SsaLocals' facts (ssa.rs) over BODY's forms, in the MIR visitor's places (passes' stmt-places, term-places): a
+  place through a deref a use of its local; a plain store or call destination a definition; any other mutating use, a raw
+  borrow, a mutable borrow, a drop: not SSA; a shared or mutable borrow not through a deref observes the address (borrowed),
+  and a borrowed local not Freeze is not SSA: {:ssa? (fn [local]) :borrowed #{local}}"
+  [body]
+  (let [sp @(requiring-resolve 'arbace.rust.front.passes/stmt-places)
+        tp @(requiring-resolve 'arbace.rust.front.passes/term-places)
+        pls (concat (for [b (:blocks body) s (:stmts b) pc (sp s)] pc)
+                    (for [b (:blocks body) :when (:term b) pc (tp (:term b))] pc))
+        defs (java.util.HashMap.) many (java.util.HashSet.) borrowed (java.util.HashSet.)]
+    (doseq [[p ctx] pls :when (and (seq? p) (= 'place (first p)) (number? (second p)))
+            :let [l (second p) proj (drop 2 p)]
+            :when (not= '(deref) (first proj))]
+      (cond (and (empty? proj) (#{[:mut :store] [:mut :call]} ctx)) (.put defs l (inc (long (or (.get defs l) 0))))
+            (#{[:nonmut :shared-borrow]} ctx) (.add borrowed l)
+            (#{[:mut :borrow] [:nonmut :raw-borrow] [:mut :raw-borrow]} ctx) (do (.add borrowed l) (.add many l))
+            (= :mut (first ctx)) (.add many l)
+            :else nil))
+    (let [nargs (long (or (:args body) 0))
+          ty (fn [l] (:ty (nth (:locals body) l nil)))]
+      {:borrowed (set borrowed)
+       :ssa? (fn [l] (and (not (.contains many l))
+                          (if (<= 1 (long l) nargs) (nil? (.get defs l)) (= 1 (.get defs l)))
+                          (or (not (.contains borrowed l)) (boolean (and *freeze-ty?* (*freeze-ty?* (ty l)))))))})))
+
 (defn- o0-copy-prop
-  "CopyProp's case at -O0 (copy_prop.rs): a temporary defined once by `_t = move|copy _s` (S a local, neither borrowed, S
-  never assigned after its definition) is S: its uses renamed (a move of it a copy of S, as rustc's optimized MIR writes it)
-  and its definition dropped; [body changed?]"
+  "CopyProp's case at -O0 (copy_prop.rs, ssa.rs' compute_copy_classes): a local defined once by `_t = move|copy _s`, both SSA,
+  of one type, _t not borrowed (queue 493: _s may be, a shared borrow of a Freeze type keeping it SSA: alloc_impl_runtime's
+  `alloc(copy _1)` with `&_1` taken for `size()`; a borrow through a deref is a use), is S: its uses renamed, a move of either a
+  copy (Replacer's unified locals; a move through a deref kept) and its definition dropped; [body changed?]"
   [body]
   (let [blocks (:blocks body)
         stmts (for [b blocks s (:stmts b)] s)
-        defs (frequencies (concat (keep #(when (and (seq? %) (= 'assign (first %))) (plain-place (second %))) stmts)
-                                  (keep #(let [t (:term %)] (when (and (seq? t) (= 'call (first t))) (plain-place (nth t 3 nil)))) blocks)))
-        borrowed (set (for [f (tree-seq coll? seq blocks) :when (and (seq? f) (#{'ref 'rawptr} (first f)))
-                            :let [p (last f)] :when (and (seq? p) (= 'place (first p)))]
-                        (second p)))
-        nargs (long (or (:args body) 0))
+        {:keys [ssa? borrowed]} (o0-ssa body)
+        lt (fn [l] (:ty (nth (:locals body) l nil)))
         cand (first (for [s stmts
                           :when (and (seq? s) (= 'assign (first s)))
                           :let [t (plain-place (second s)) rv (nth s 2 nil)]
-                          :when (and t (> (long t) nargs) (= 1 (get defs t)) (not (borrowed t))
+                          :when (and t (not= 0 t) (ssa? t) (not (borrowed t))
                                      (seq? rv) (= 'use (first rv)) (seq? (second rv)) (#{'move 'copy} (first (second rv))))
                           :let [src (plain-place (second (second rv)))]
-                          :when (and src (not= src t) (not (borrowed src)) (not= 0 src)
-                                     (if (<= (long src) nargs) (zero? (get defs src 0)) (= 1 (get defs src))))]
+                          :when (and src (not= src t) (not= 0 src) (ssa? src) (some? (lt t)) (= (lt t) (lt src)))]
                       [s t src]))]
     (if-not cand
       [body false]
       (let [[s t src] cand
-            ren (fn ren [x] (cond (and (seq? x) (= 'move (first x)) (seq? (second x)) (= t (second (second x))))
-                                  (list 'copy (map-locals (second x) #(if (= % t) src %)))
+            ren (fn ren [x] (cond (and (seq? x) (= 'move (first x)) (seq? (second x)) (#{t src} (second (second x)))
+                                       (not= '(deref) (nth (second x) 2 nil)))
+                                  (list 'copy (second x))
                                   (seq? x) (apply list (map ren x))
                                   (vector? x) (mapv ren x)
                                   :else x))
@@ -1430,6 +1458,9 @@
                                                      :else x)))
                ours)
         po (prep ours) pr (prep rec)
+        ;; queue 493: the instance's local types Freeze or not (CopyProp's SSA of a shared-borrowed local), by their :tc
+        fz (into {} (for [l (:locals ours) :let [t (:tc (meta (:ty l)))] :when t]
+                      [(norm (:ty l)) (try (boolean ((requiring-resolve 'arbace.rust.front.passes/freeze?) t)) (catch Throwable _ false))]))
         bl (fn [b f] (mapv (fn [x] (update x :stmts f)) (:blocks b)))
         lt (fn [b] (mapv :ty (:locals b)))
         cut (fn [x] (let [t (pr-str x)] (subs t 0 (min 160 (count t)))))]
@@ -1437,7 +1468,10 @@
       (and (= (bl po identity) (bl pr identity)) (= (lt po) (lt pr))) [:equal]
       (and (= (bl po strip-storage) (bl pr strip-storage)) (= (lt po) (lt pr))) [:equal-but-storage]
       :else
-      (let [[no ko] (o0-normalize po true (:zst-locals ours)) [nr _] (o0-normalize pr)
+      (let [outer *freeze-ty?*
+            fz? (fn [t] (if (contains? fz t) (fz t) (boolean (and outer (outer t)))))
+            [no ko] (binding [*freeze-ty?* fz?] (o0-normalize po true (:zst-locals ours)))
+            [nr _] (binding [*freeze-ty?* fz?] (o0-normalize pr))
             _ (when-let [d (System/getenv "RF_PACK_DUMP")]
                 (.mkdirs (File. ^String d))
                 (spit (str d "/" (Math/abs (hash [no nr])) ".edn") (with-out-str (prn :ours) (prn no) (prn :record) (prn nr))))]
