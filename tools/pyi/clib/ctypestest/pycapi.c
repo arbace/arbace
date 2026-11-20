@@ -53,12 +53,37 @@ struct pyi_type PyCFunction_Type = { 1, 0 };
 struct pyi_type _PyWeakref_RefType = { 1, 0 };
 struct pyi_type _PyWeakref_ProxyType = { 1, 0 };
 struct pyi_type _PyWeakref_CallableProxyType = { 1, 0 };
+/* queue 481 (475-1 (a)): PyCMethod_Type (Include/cpython/methodobject.h's PyCMethod_Check, PyCFunction_GET_CLASS),
+   bound by pyctypes to its builtin_method, a subtype of builtin_function_or_method. An undefined data symbol is now
+   placed by ci's link at address 0 ((at N 0), queue 475's finding 1): bin/pyi-clib build refuses a world with one,
+   but for the linker's own (bin/pyi-clib undefined) */
+struct pyi_type PyCMethod_Type = { 1, 0 };
 
 /* Py_Version (Include/pylifecycle.h; queue 269: _testcapi reads it): Py_PACK_FULL_VERSION of 3.14.10 final */
 const unsigned long Py_Version = 0x030E0AF0;
 
 /* _PyByteArray_empty_string (Objects/bytearrayobject.c; queue 270): PyByteArray_AS_STRING of an empty bytearray */
 char _PyByteArray_empty_string[] = "";
+
+/* _PyRuntime (Python/pylifecycle.c's _PyRuntimeState; queue 475, 473-3 (a)): a C module built in Py_BUILD_CORE's mode
+   reads its static objects in place (_testclinic's deprecation checks: _Py_LATIN1_CHR, the one-character strings of
+   static_objects.singletons.strings), so the link gives it an address: sizeof(_PyRuntimeState) as ci lays out CPython
+   3.14.10's Include/internal/pycore_runtime_structs.h on LP64, 314016 bytes, zeroed. arbace/pyctypes binds the strings'
+   256 slots to str objects (bindStaticStrings); nothing else of it is filled. */
+struct pyi_runtime { long words[314016 / 8]; } _PyRuntime;
+
+/* Objects/unicodeobject.c's _Py_ascii_whitespace (queue 481, 475-1 (a): the full API's Py_UNICODE_ISSPACE reads it
+   inline; CPython 3.14.10, the PSF's license, LICENSE.md): 1 for the ASCII whitespace characters, 0x09-0x0D, 0x1C-0x20 */
+const unsigned char _Py_ascii_whitespace[] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
 
 /* Python/pyctype.c's tables (queue 270: the full API's Py_ISALNUM and friends read them inline; CPython 3.14.10, the
    PSF's license, LICENSE.md): the flags PY_CTF_LOWER 0x01, UPPER 0x02, DIGIT 0x04, SPACE 0x08, XDIGIT 0x10 of the

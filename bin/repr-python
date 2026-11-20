@@ -218,6 +218,23 @@ fetch() {
 
 TOP() { echo "$root/$(pin "$CPIN" extracted-into)"; }
 
+# extract_into TARBALL TOP SHA TAR-FLAG: TARBALL extracted into TOP (its first component stripped), TOP/.extracted SHA,
+# unless it already is; one extraction at a time (queue 481: two pyi runs of a fresh checkout each extracted the tarball,
+# one's rm -rf under the other's tar, a tree of 5,077 of its 5,145 files and no .extracted), into a directory of its own
+# first, TOP replaced when it is whole
+extract_into() {
+  local tb=$1 top=$2 sha=$3 flag=$4 lk
+  [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ] || return 0
+  mkdir -p "$(dirname "$top")"; exec {lk}>"$top.lock"; flock "$lk"
+  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
+    rm -rf "$top.new"; mkdir -p "$top.new"
+    tar "$flag" "$tb" -C "$top.new" --strip-components=1
+    echo "$sha" > "$top.new/.extracted"
+    rm -rf "$top"; mv "$top.new" "$top"
+  fi
+  flock -u "$lk"; exec {lk}>&-
+}
+
 fetch_tarball() {
   local tb url sha sha5 top
   tb="$root/$(pin "$CPIN" fetched-into)"; url=$(pin "$CPIN" url)
@@ -225,11 +242,7 @@ fetch_tarball() {
   if [ ! -f "$tb" ] || [ "$(sha256 "$tb")" != "$sha" ]; then rm -f "$tb"; fetch "$url" "$tb" "$(basename "$tb")"; fi
   [ "$(sha256 "$tb")" = "$sha" ] || die "$tb: SHA-256 $(sha256 "$tb"), pinned $sha"
   [ "$(sha512sum < "$tb" | cut -c1-128)" = "$sha5" ] || die "$tb: SHA-512 differs from the pin"
-  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
-    rm -rf "$top"; mkdir -p "$top"
-    tar -xJf "$tb" -C "$top" --strip-components=1
-    echo "$sha" > "$top/.extracted"
-  fi
+  extract_into "$tb" "$top" "$sha" -xJf
   echo "$CPIN: $tb (SHA-256 and SHA-512 ok), extracted into ${top#$root/}"
 }
 
@@ -253,11 +266,17 @@ fetch_apks() {
     done < "$APKS"
     local out="$WORK/site-packages/$arch"
     if [ "$(cat "$out/.extracted" 2>/dev/null)" != "$key" ]; then
-      rm -rf "$out"; mkdir -p "$out"
-      while read -r sha rel; do
-        case $rel in "$arch"/*) tar --warning=no-unknown-keyword -xzf "$dir/$(basename "$rel")" -C "$out" usr ;; esac
-      done < "$APKS"
-      echo "$key" > "$out/.extracted"
+      # one extraction at a time, whole before it replaces the tree (queue 481, as extract_into)
+      local lk; mkdir -p "$(dirname "$out")"; exec {lk}>"$out.lock"; flock "$lk"
+      if [ "$(cat "$out/.extracted" 2>/dev/null)" != "$key" ]; then
+        rm -rf "$out.new"; mkdir -p "$out.new"
+        while read -r sha rel; do
+          case $rel in "$arch"/*) tar --warning=no-unknown-keyword -xzf "$dir/$(basename "$rel")" -C "$out.new" usr ;; esac
+        done < "$APKS"
+        echo "$key" > "$out.new/.extracted"
+        rm -rf "$out"; mv "$out.new" "$out"
+      fi
+      flock -u "$lk"; exec {lk}>&-
     fi
     echo "site-packages: $(grep -c "  $arch/" "$APKS") apks for $arch (SHA-256 ok), extracted into ${out#$root/}"
   done
@@ -272,11 +291,7 @@ fetch_pyperformance() {
   if [ ! -f "$tb" ] || [ "$(sha256 "$tb")" != "$sha" ]; then rm -f "$tb"; fetch "$url" "$tb" "$(basename "$tb")"; fi
   [ "$(sha256 "$tb")" = "$sha" ] || die "$tb: SHA-256 $(sha256 "$tb"), pinned $sha"
   [ "$(stat -c %s "$tb")" = "$bytes" ] || die "$tb: $(stat -c %s "$tb") bytes, pinned $bytes"
-  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
-    rm -rf "$top"; mkdir -p "$top"
-    tar -xzf "$tb" -C "$top" --strip-components=1
-    echo "$sha" > "$top/.extracted"
-  fi
+  extract_into "$tb" "$top" "$sha" -xzf
   echo "pyperformance-1.14.0: $tb (SHA-256 and size ok), extracted into ${top#$root/}"
 }
 
