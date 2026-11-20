@@ -2134,7 +2134,7 @@
         (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
         :else (push-cleanup! {:addr addr :cls (:id bt)})))))
 
-(declare const-leaves leaves-constant)
+(declare const-leaves leaves-constant array-constant)
 
 (defn- static-local! [vid]
   (let [v (sema/var* vid)
@@ -2155,7 +2155,7 @@
         [ltype lval] (cond (nil? leaves) [nil nil]
                            (abi/scalar? (abi/unq t)) (when (<= (count leaves) 1) [nil (if (seq leaves) (nth (first leaves) 2) (zero-mem t))])
                            (empty? leaves) [nil 'zeroinitializer]
-                           :else (leaves-constant leaves s))
+                           :else (or (array-constant t leaves s) (leaves-constant leaves s)))
         cexpr (or cexpr lval)
         ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))
         ;; queue 392: a static local of an inline function (or a template's specialization) with external linkage is one
@@ -3414,6 +3414,36 @@
                 (when-let [v (sema/ce-object t init)] (object-leaves t v off)))))
       nil)))
 
+(defn- array-constant
+  "cpp-rt-own: [type value] of an array (nested arrays flattened) whose leaves are its elements', as clang writes one: an LLVM
+  array, `[N x i8] c\"...\"` for bytes, `[N x iK] [...]` for other scalars (an element without a leaf zero), `[N x T] [...]`
+  for classes whose elements' leaves make one packed struct type T (an element without a leaf zeroinitializer); nil for another
+  object (a packed struct of the leaves then). libcpp's charset.cc `uname2c_tree[218382]` had been a packed struct of 218,382
+  members, `uname2c_dict` one of 61,913, their lowered C structs of as many fields (repr/c's read about 15 GB)."
+  [t leaves ^long size]
+  (let [u (abi/unq t)
+        et (loop [e u] (let [e (abi/unq e)] (if (abi/arr? e) (recur (:of e)) e)))
+        es (long (if (abi/arr? u) (abi/size-of et) 0))
+        n (if (pos? es) (quot size es) 0)]
+    (when (and (abi/arr? u) (> n 1) (= size (* n es)) (seq leaves)
+               (every? (fn [[o _ _]] (< (quot (long o) es) n)) leaves))
+      (cond
+        (and (abi/scalar? et) (not (abi/mptr? et)))
+        (let [lt (abi/llvm-type et)]
+          (when (and (every? (fn [[o t _]] (and (= t lt) (zero? (rem (long o) es)))) leaves)
+                     (or (not= lt 'i8) (every? (fn [[_ _ v]] (number? v)) leaves)))
+            (let [m (into {} (map (fn [[o _ v]] [(quot (long o) es) v]) leaves))]
+              (if (= lt 'i8)
+                [(list 'array n 'i8) (list 'c-string (apply str (map #(char (bit-and (long (get m % 0)) 0xff)) (range n))))]
+                (let [z (zero-mem et)] [(list 'array n lt) (apply list 'array (map (fn [i] [lt (get m i z)]) (range n)))])))))
+        (abi/class? et)
+        (let [g (group-by (fn [[o _ _]] (quot (long o) es)) leaves)
+              cs (into {} (map (fn [[i ls]] [i (leaves-constant (map (fn [[o t v]] [(- (long o) (* (long i) es)) t v]) ls) es)]) g))
+              ts (distinct (map first (vals cs)))]
+          (when (= 1 (count ts))
+            (let [ct (first ts)]
+              [(list 'array n ct) (apply list 'array (map (fn [i] [ct (if-let [c (get cs i)] (second c) 'zeroinitializer)]) (range n)))])))))))
+
 (defn- leaves-constant
   "[type value] of a packed struct holding the leaves with byte padding, `size` bytes."
   [leaves ^long size]
@@ -3447,7 +3477,7 @@
               ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!)
                (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-mem t)) (concat link [:align a])))
               leaves
-              (let [[ct cv] (leaves-constant leaves s)
+              (let [[ct cv] (or (array-constant t leaves s) (leaves-constant leaves s))
                     bt (abi/unq t)]
                 ;; a constant object with a destructor: registered with __cxa_atexit by the global constructor
                 (if (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
