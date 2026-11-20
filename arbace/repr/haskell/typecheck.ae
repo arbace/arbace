@@ -3040,6 +3040,8 @@
           s th-string]
       (list 'app (list 'v (ext-name "var" "GHC.Internal.TH.Syntax" f)) [(s unit) (s tm) (s (occ n))]))))
 
+(declare integer-lit-core)
+
 (defn- th-quote
   "round 54: an expression quote, as GHC.HsToCore.Quote's repE gives it over the Quote m dictionary: a global variable varE
   (a constructor conE) of its Name, an application appE of the parts', a parenthesis its expression's, a variable bound outside
@@ -3070,6 +3072,27 @@
                     (case (con xv)
                       HsPar (rep (arg xv 2))
                       HsApp (list 'app (lib "appE") [(qd) (rep (arg xv 2)) (rep (arg xv 3))])
+                      ;; repE's overloaded integral literal: litE (integerL n) (repOverloadedLiteral; TH.Lift's bytesOffset = 0)
+                      HsOverLit (let [val (arg (arg xv 2) 2)]
+                                  (if (= 'HsIntegral (con val))
+                                    (list 'app (lib "litE") [(qd) (list 'app (lib "integerL") [(integer-lit-core (nth (arg val 1) 3))])])
+                                    (do (reset! bad (con xv)) (list 'lit "?"))))
+                      ;; repE's nested splice: $(e) in an untyped quote is e itself, an m Exp of the quote's monad
+                      ;; (base's Data.Array.Byte's [| addrToByteArray $(lift len) $(..) |], TH.Lift's [| TExp $(lift e) |])
+                      HsUntypedSplice (let [sp (arg xv 2)]
+                                        (if (and (not typed?) (seq? sp) (= 'HsUntypedSpliceExpr (first sp)))
+                                          (check-expr env (arg sp 2) mexp)
+                                          (do (reset! bad (con xv)) (list 'lit "?"))))
+                      ;; repE's record construction: recConE 'C [fieldExp 'f <e>..] (TH.Lift's Bytes { bytesPtr = .. })
+                      RecordCon (let [n (nm (arg xv 2)) nc (when n (th-name-core n)) rf (arg xv 3)
+                                      fes (for [f (arg rf 2) :let [fb (lval f) fn (some-> (arg fb 2) lval (arg 2) nm)]]
+                                            (when (and fn (not (true? (arg fb 4))) (not (and (seq? (arg rf 3)) (= 'Just (first (arg rf 3))))))
+                                              (list 'app (lib "fieldExp") [(qd) (th-name-core fn) (rep (arg fb 3))])))]
+                                  (if (and nc (every? some? fes))
+                                    (list 'app (lib "recConE")
+                                          [(qd) nc (reduce (fn [acc x] (list 'app (list 'v (ext-name "data" "GHC.Internal.Types" ":")) [x acc]))
+                                                           (list 'v (ext-name "data" "GHC.Internal.Types" "[]")) (reverse fes))])
+                                    (do (reset! bad (con xv)) (list 'lit "?"))))
                       HsVar (let [n (nm (arg xv 2)) nc (th-name-core n) u (when-not n (lval (arg xv 2)))]
                               (cond
                                 nc
