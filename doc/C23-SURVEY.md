@@ -6449,3 +6449,19 @@ Queue 342's review (the VM's report `342-review-nall-c-cpp-go.md`, findings 1 an
   (repr/c and arbace/c are not among its exclusions), which nearly every step on stage 0 declares: C's change reruns the whole
   `--full` (a count from steps.edn's inputs and hosts: 178 of its 192 steps, the 14 left the seed's, stage 0's, javac's and a few
   of no input), while C++'s parse.ae, out of `:tools`, reruns the `:cpp` steps and the executables' (49).
+
+## As built: c-cpp-golden, the run cases left by gcc's run reviewed for golden files (2026-11-20; branch `c-cpp-golden-1120` from next `939037429`)
+
+The user's decision of 2026-11-20: reviewed golden files for C's output-only run cases. Their form is `test/c/selfref-derived.edn`'s
+(an exact `:stdout` and status with its reasoning, n-c-last and queue 409), since the corpora's files are the pinned gomodcache's.
+The 104 programs of 2026-11-17 with no verdict of their own (benchmarksgame 29, ci-run's output-only 19, mir's lacc and new 36, cxgo 2,
+the 18 exceptions) are 30 on next today (`c.selfref ref` at the reference's key `9c8cd8ed20a7c69f`: 2,329 of 2,619 by their own
+verdict; the others were moved by n-c-last's self-checks, benchspec and derived outcomes, queue 409 and n-hasattr). Each of the 30 was
+read again; none admits a golden file, the output of each not determined by its source: 16 benchmarks run without an argument pass
+`argv[1]`, a null pointer, to atoi or atol (7.1.4); reverse-complement-2 and -5 search for '>' from `buf - 1` on the empty input; the
+two 20031003-1 convert a float out of int's range (6.3.1.4); gnu23-tag-alias-2, -3, -5, -7 store through an incompatible struct type
+and read through the original (their verdict is -O2's alias analysis); mir's union-bitfield (unspecified bits), setjmp2 (setjmp through
+a pointer, 7.13.1.1), non-pedantic-macro-redef (a constraint violation); tcc-tests2's 93 and 95 (bit-fields of types other than int,
+implementation-defined, 6.7.3.2, for which doc/c/SPEC.md states no choice of its own; 95 also prints size_t by %d); dfp-8 (refused by
+design, its verdict needs fenv_exceptions_dfp). No file under test/c/ changed (every C step keys test/c/): the reasons are the judge's
+fact in test/crops/independence.edn, the 9 exceptions' also in selfref-exceptions.edn. C's judge stays (14867 + 0.5 x 148) / 15015.

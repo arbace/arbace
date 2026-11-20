@@ -13708,3 +13708,40 @@ waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on
   8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
   record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
   three steps wait on n-py-rec's check records, now in the tree, to be spliced.
+
+## 2026-11-20: c-cpp-golden, reviewed golden files for C's output-only run cases and C++'s sample prints
+
+The user's decision of 2026-11-20: extend reviewed golden files (Java's JCS361 (a), Haskell's queue 325g) to C's run cases with no
+verdict of their own and to C++'s samples. A reviewed golden file is a program's expected output written after reading the program
+and confirming it must print exactly that, its reason recorded, never a copy of a toolchain's output; a program whose output its
+source does not determine stays recorded, with its reason. Branch `c-cpp-golden-1120` from next `939037429`. No test was run: the
+golden files were judged against the recorded outputs (g++'s record, the night's recorded runs of next).
+
+- C++ (doc/cpp/CPP-SURVEY.md, "As built: c-cpp-golden"): the 15 samples and runtime programs with a `main` have golden files beside
+  them, `NAME.expect` (stdout), `NAME.cpp.expectrc` (status, when not 0), `NAME.expect-stderr` (stderr, ctor-throw, hello,
+  thread-throw, uncaught), each derived from the source and C++23, the target's ABI (the Itanium names, the psABI's layout, abort's
+  134) and libstdc++ 15.2's source (its messages and verbose terminate handler, read in the pinned gcc tarball
+  `.tmp/c1/gcc/gcc-15.2.0.tar.xz`, sha256 per test/cpp/corpora.edn, members extracted into the worktree's `.tmp/gcc-src`), reviewed
+  in `test/cpp/selfref-golden.edn`. `test/cpp/selfref.ae` reads them (a new mechanism, kept to C's file names: C++'s judge read no
+  expected-output file before, its suites' rule being the status alone): status, stdout and stderr compared as g++'s run was, a
+  golden file without its review or a review without its file refused. `bin/lib/cppi/selfref.bash` keys the reference on them. Two
+  controls added (test/cpp/controls.edn: classes-vs-auto, status alone; ctor-throw-vs-thread-throw, stderr alone). All 15 met
+  g++'s recorded digests at the first writing (an agreement, not used). Proved: `arbace.cpp.check run-judge` over the next
+  worktree's `.tmp/cppi-check` and `.tmp/cppi-aot` (2026-11-20 05:10 and 06:09, their tables copied) with the golden reference: 15
+  of 15 pass at eval and AOT, the controls differ; three golden files corrupted (stdout, stderr, status) fail at both levels;
+  `cpp.selfref agree` 220 of 220. Left with g++'s run: ubsan/null-8.C and ubsan/vptr-1.C (no sanitizer under the harness, each run
+  then undefined). Not changed: arbace/cpp/ (embedded since W2, in gate_key; cpp-rt-own-1120 works on arbace/cpp/codegen), so
+  run-judge's control line still says "g++ run" for a reference that is now a golden file.
+- C (doc/C23-SURVEY.md, "As built: c-cpp-golden"): the brief's 104 programs (the 2026-11-17 count in independence.edn) are 30 on
+  next: n-c-last (round 54), queue 409 and n-hasattr moved the rest to self-checks, benchspec and selfref-derived.edn, C's golden
+  form. The 30 were read again; none admits a golden file (undefined behaviour: 16 benchmarks' atoi(NULL), reverse-complement-2/-5's
+  read before the buffer, 20031003-1 x2, gnu23-tag-alias x4, setjmp2; unspecified: union-bitfield; a constraint violation:
+  non-pedantic-macro-redef; implementation-defined with no choice of SPEC's own: tcc 93, 95; by design: dfp-8). Their reasons went
+  into the judge's fact (test/crops/independence.edn), not test/c/: every C step keys test/c/, and no record changes.
+- Scores (bin/crops-score --record, --judge --strict: 0 problems; bin/records-check: 9 pairs, 0 problems): C++'s judge 0.907 ->
+  0.908 (the 30 cases, 15 at eval and 15 at AOT, from 0.5 to 1), independence 0.9138 -> 0.9140; C's unchanged (judge 0.995,
+  independence 0.999).
+- Alternatives: golden files under a directory of their own (Java's test/java/golden/) rather than beside the samples: beside, as
+  C's .expect and Haskell's NAME.stdout, and both directories are C++'s inputs anyway; the review inline with the text (C's
+  selfref-derived.edn) rather than files: the brief asked for .expect files; for C, a test/c/selfref-left.edn of the 30's reasons:
+  not written, it would rerun every C step for data no step reads.

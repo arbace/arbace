@@ -9030,3 +9030,36 @@ the judge names.
 
 - **Merge order.** Queue 392 (`rt_ours_glob` 124 to 155, codegen and template fixes) and this branch merge cleanly either way
   (`git merge-tree`; also with 393). 392 first, then this: the host then builds and records the runtime once, at 155 units.
+
+## As built: c-cpp-golden, the samples' golden files (2026-11-20; branch `c-cpp-golden-1120` from next `939037429`)
+
+The user's decision of 2026-11-20: reviewed golden files for C++'s sample prints, JCS361 (a)'s way (Java) and queue 325g's (Haskell).
+The samples and the runtime's samples (test/cpp/samples, test/cpp/runtime/samples, 15 programs with a `main`) were judged by g++'s
+recorded run alone (`test/cpp/ref-gxx15.edn`, 0.5 in the judge stage). **The files.** Beside each program: `NAME.expect`, its stdout
+byte for byte (empty when it prints nothing; its presence gives the verdict, as tcc-tests2's and mir's `.expect` do for C);
+`NAME.cpp.expectrc`, its status when not 0 (mir's `NAME.c.expectrc`); `NAME.expect-stderr`, its stderr when it writes one. Each written
+from the program's source and C++23 before it was compared with anything; where the output is the implementation's, the target's:
+the Itanium ABI's type names (`7Derived`, `PKc`, `St6vectorIiSaIiEE`), the x86-64 psABI's layout (`sizeof(LD)` 48, 16), libstdc++
+15.2's messages read in its source from the pinned gcc tarball (`__verbose_terminate_handler` in libsupc++/vterminate.cc, bad_alloc's
+`std::bad_alloc`, `<variant>`'s `std::get: wrong index for variant`, functional.cc's `bad_function_call`, `<any>`'s `bad any_cast`,
+`__stoa`'s `stoi`), abort's status 134. **The review.** `test/cpp/selfref-golden.edn`: per program `{:id :basis :why}` (`:src`,
+`:abi`, `:lib`, `:gnu`), the why covering every line. **The judge.** `test/cpp/selfref.ae`'s `verdict` gives a sample with its
+`.expect` and its review `:golden` (`{:status S :stdout SHA :stderr SHA}`); `merged` writes it `:o2 :same`, so
+`arbace.cpp.check/run-result` compares status, stdout and stderr as it compared g++'s run (no change to arbace/cpp); a golden file
+without its review, or a review without its golden file, fails `ref` (the check); `agree` compares a golden verdict's three parts;
+`bin/lib/cppi/selfref.bash` keys the reference on the golden files and the review. A new mechanism (C++'s judge read no expected-output
+file before: its suites' rule is the status alone) kept minimal: C's file names, one review file. **Controls** (test/cpp/controls.edn,
+:level :run): `bitfields-vs-io` (stdout: io.cpp's reference is its golden file since), `classes-vs-auto` (status alone) and
+`ctor-throw-vs-thread-throw` (stderr alone), new.
+
+**Proved** (no run; the night's recorded runs of next, 2026-11-20, `.tmp/cppi-check` and `.tmp/cppi-aot` of the next worktree, their
+list, nodes and run tables copied): `cpp.selfref ref` 220 of 225 by their own verdict (15 golden), `agree` 220 of 220 met by g++'s
+recorded runs (15 of 15 golden files equal its digests at the first writing: an agreement found, not used); `arbace.cpp.check
+run-judge` with the golden reference, eval and AOT: 15 of 15 pass each, the four controls in the run differ; with three golden files
+corrupted (a byte of library.expect, a byte of ctor-throw.expect-stderr, auto's status 12) each fails at both levels (differ stdout,
+differ stderr, differ status); `ref` refuses a golden file whose review is removed and a review whose file is removed. **Left** with
+g++'s run: the sampling's ubsan/null-8.C and ubsan/vptr-1.C (their dg-output is the sanitizer's message under -fsanitize, which the
+harness does not give; without it each run is undefined: a reference bound to `*null`, an S accessed through a T*); the three
+programs g++ does not build (decls.cpp and layouts.cpp have no `main`, libstdcxx's 27_io/basic_fstream/cons/wchar_t/1.cc) are no run.
+**Independence:** the judge's `:check-recorded` and `:aot-recorded` (15 each, 0.5) became `:check-golden` and `:aot-golden` (1):
+0.907 to 0.908, C++'s independence 0.9138 to 0.9140.
