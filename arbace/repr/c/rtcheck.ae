@@ -263,21 +263,78 @@
   controls)."
   nil)
 
+(def ^:private wording (delay (dg/load-wording)))
+
+(defn- dg-message-finds?
+  "Whether the dg-error regexp `re` finds the message `msg` at column `col` (a number or nil): gcc-dg.exp's process-message
+  reads a leading \"N:\" as the column the diagnostic must be at and a leading \"-:\" as no column (queue 495)."
+  [^String re ^String msg col]
+  (let [[_ c rest] (re-matches #"(?s)^(\d+|-):(.*)$" re)
+        [re ok] (cond (nil? c) [re true]
+                      (= c "-") [rest true]
+                      :else [rest (= (str col) c)])]
+    (boolean (and ok (try (re-find (re-pattern re) msg) (catch Exception _ nil))))))
+
 (defn own-rejects?
   "The test's own verdict on a file the reader rejects (the user's decision of 2026-11-07: each test judged by its own
   verdict): the read's first error, `detail` (FILE:LINE:COL: MESSAGE, or LINE:COL: MESSAGE), is on a line of the main file
   `path` whose dg-error directives (arbace.c.dg/analyze: the selectors evaluated on the reference host) expect an error there,
-  and one of their regexps finds the message: the file is an error test and the reader rejects it for the reason it states.
-  A rejection on another line or in other words (a parser's gap: c23-attr-syntax-5.c's balanced tokens) is not."
-  [^String path ^String detail]
+  and one of their regexps finds the message (a leading column \"N:\" held to the error's column, queue 495), or, for the file
+  `fid` (CORPUS/NAME), a family of the dg check's reviewed wordings (test/c/dg-wording.edn, arbace.c.dg/family-explains?: the
+  same error in the parser's words, cc's, against gcc's) explains it: the file is an error test and the reader rejects it for
+  the reason it states. A rejection on another line or in other words (a parser's gap: c23-attr-syntax-5.c's balanced tokens)
+  is not."
+  ([^String path ^String detail] (own-rejects? path detail nil))
+  ([^String path ^String detail fid]
   (boolean
     (when (and path detail (.exists (java.io.File. path)))
       (let [[f l] (if-let [[_ l] (re-find #"^(\d+):\d+: " detail)] [nil (Long/parseLong l)] (dg/error-line detail))
+            col (some-> (re-find #"^(?:.*?:)?\d+:(\d+): " detail) second Long/parseLong)
             msg (second (re-find #"^(?:.*?:)?\d+:(?:\d+:)? (.*)$" detail))
             res (get (:msgs (dg/analyze (String. ^bytes (lex/read-bytes path) "ISO-8859-1"))) l)]
         (and l msg (seq res)
              (or (nil? f) (= f path) (.endsWith path (str "/" f)))
-             (some (fn [^String re] (try (re-find (re-pattern re) msg) (catch Exception _ nil))) res))))))
+             (or (some (fn [^String re] (dg-message-finds? re msg col)) res)
+                 (and fid (some #(dg/family-explains? % fid res [detail msg]) (:families @wording))))))))))
+
+;; queue 495: the print level's files the reader rejects whose dg-error line and words do not decide them (a dg-do preprocess
+;; file, whose directives say nothing of the translation unit it preprocesses to, or a file the reader rejects on its first
+;; syntax error in other words than gcc's): each judged by hand from C23 and the file's own directives, its verdict and the
+;; reader's first error recorded in test/repr/c/print-own.edn, :invalid {FID {:at "LINE:COL: MESSAGE" :basis K :why TEXT}}.
+
+(def own-file "test/repr/c/print-own.edn")
+
+(defn load-own
+  "test/repr/c/print-own.edn (or `path`): {:invalid {FID entry} :counted-out {FID reason}}; empty when absent."
+  ([] (load-own own-file))
+  ([^String path]
+   (let [f (java.io.File. path)] (if (.exists f) (read-string (slurp f)) {:invalid {} :counted-out {}}))))
+
+(def ^:private own-table (delay (load-own)))
+
+(defn own-invalid?
+  "The file `fid` (CORPUS/NAME, main file `path`) is invalid by its own recorded verdict (load-own's :invalid) and the reader's
+  first error, `detail`, is in the main file at the entry's :at (LINE:COL: MESSAGE) exactly: the reader rejects it where the
+  verdict's reasoning places the error. Another error (the reader changed) is not: the entry is stale (judge fails on it)."
+  ([path fid detail] (own-invalid? @own-table path fid detail))
+  ([table ^String path fid ^String detail]
+   (boolean
+     (when-let [e (and fid detail (get (:invalid table) fid))]
+       (let [f (when-not (re-find #"^\d+:\d+: " detail) (first (dg/error-line detail)))
+             lcm (second (re-find #"^(?:.*?:)?(\d+:\d+: .*)$" detail))]
+         (and (= lcm (:at e))
+              (or (nil? f) (nil? path) (= f path) (.endsWith ^String path (str "/" f)))))))))
+
+(defn own-verdict
+  "The test's own verdict on a file the reader rejects: \"own-rejects\" (own-rejects?: its dg-error line and words),
+  \"own-invalid\" (own-invalid?: its recorded verdict, test/repr/c/print-own.edn), or nil."
+  [^String path fid ^String detail]
+  (cond (own-rejects? path detail fid) "own-rejects"
+        (own-invalid? path fid detail) "own-invalid"))
+
+(def ^:dynamic *corpus*
+  "The corpus judge-row judges (bound by judge with *base*), for own-verdict's file id; nil elsewhere."
+  nil)
 
 (defn- judge-row
   "A file's status at each level and overall: {:status pass|known|fail :levels {...} :class k}."
@@ -292,11 +349,12 @@
         l4 (cond (not run?) "-" (not= read "ok") "-" (nil? same) "-" :else same)
         ;; queue 409: the test's own verdict first (its dg-error line and words, own-rejects?), then the reference's rejection
         ;; (cc's, else gcc's recorded one for a file cc's tree does not give); under the oracle tier's judge gcc's first, as before
-        own (fn [] (own-rejects? (when *base* (str *base* "/" nm)) detail))
-        accept (cond (= read "error") (cond (and (not (host/gcc-judge?)) (own)) "own-rejects"
-                                            (not= gcc "0") "both-reject"
-                                            (own) "own-rejects"
-                                            :else "port-only-rejects")
+        ;; queue 495: own-verdict, the dg-error line and words or the file's recorded verdict (test/repr/c/print-own.edn)
+        own (fn [] (own-verdict (when *base* (str *base* "/" nm)) (when *corpus* (str *corpus* "/" nm)) detail))
+        accept (cond (= read "error") (or (when-not (host/gcc-judge?) (own))
+                                          (when (not= gcc "0") "both-reject")
+                                          (own)
+                                          "port-only-rejects")
                      (nil? gcc) "unrecorded"
                      (= gcc "0") "agree"
                      :else "gcc-only-rejects")
@@ -374,7 +432,7 @@
         names (results/partial-names work id)
         known (results/in-run (get-in known-all [:roundtrip (keyword id)] {}) names)
         base (let [f (java.io.File. (str d "/base.txt"))] (when (.exists f) (str/trim (slurp f))))
-        js (binding [*base* base]
+        js (binding [*base* base *corpus* id]
              (mapv (fn [r] (judge-row r (get obj (first r)) (get run (first r)) (get gcc [id (first r)]) (get known (first r)) run?)) rows))
         ;; CS282 (a): a file of no recorded level 3 (not read when the oracle tier recorded it) whose entry's class only levels 3
         ;; and 4 give stays known by it, as the driver's no-gcc judgment defers it: the oracle tier's to judge again
@@ -393,6 +451,15 @@
                     :when (not (and (:time-dependent e) (ran nm)))] nm)
         timed (for [[nm e] known :when (and (:time-dependent e) (some #(and (= (:name %) nm) (= (:status %) "pass")) js))] nm)
         unclassed (for [[nm k] known :when (not (contains? (:classes known-all) (:class k)))] nm)
+        ;; queue 495: an entry of test/repr/c/print-own.edn whose file the run judged and whose row is not own-invalid (the
+        ;; reader's first error moved, or own-rejects? now decides it) is stale: its verdict's reasoning no longer holds the row
+        own-stale (when-not (host/gcc-judge?)
+                    (for [[fid _] (:invalid @own-table)
+                          :let [i (.indexOf ^String fid "/")]
+                          :when (= id (subs fid 0 i))
+                          :let [j (first (filter #(= (subs fid (inc i)) (:name %)) js))]
+                          :when (and j (not= "own-invalid" (:accept j)))]
+                      (:name j)))
         fr (fn [k] (into (sorted-map) (frequencies (map k js))))
         report {:corpus id :files (count js) :status (fr :status) :read (fr :read) :level1 (fr :l1) :level2 (fr :l2)
                 :level3 (fr :l3) :level4 (fr :l4) :accept (fr :accept) :failing (count failing) :stale-known (vec stale)
@@ -407,14 +474,16 @@
                   (when (seq stale) (str "; " (count stale) " known entries stale"))
                   (when (seq timed) (str "; " (count timed) " time-dependent entries passing (accepted)"))
                   (when (seq unclassed) (str "; " (count unclassed) " of no class"))
+                  (when (seq own-stale) (str "; " (count own-stale) " print-own.edn entries stale"))
                   (when names (str " (a partial run: " (count names) " listed files)"))))
     ;; GT8: each failing file as FAIL CORPUS/NAME WHY (the rotation's :failed-re)
     (results/print-failing id (concat (for [j failing] [(:name j) (str "levels " (str/join "," (map name (:bad j))) ": read " (:read j)
-                                                                         ", l1 " (:l1 j) ", l2 " (:l2 j) ", l3 " (:l3 j) ", l4 " (:l4 j) " " (:detail j))]))
+                                                                         ", l1 " (:l1 j) ", l2 " (:l2 j) ", l3 " (:l3 j) ", l4 " (:l4 j) " " (:detail j))])
+                                      (for [nm own-stale] [nm "test/repr/c/print-own.edn's entry stale: the reader's first error is not its :at"]))
                               (for [nm stale] [nm "known entry stale"]))
     (when rec (println (str id ": levels 3-4 and gcc's acceptance from " recorded " (the oracle tier's rows, CS282 (a)): "
                             (count (filter #(contains? obj (first %)) rows)) " files with a recorded level 3")))
-    (if (or (seq failing) (seq stale) (seq unclassed)) 1 0))))
+    (if (or (seq failing) (seq stale) (seq unclassed) (seq own-stale)) 1 0))))
 
 ;; GTS81 (a): the negative controls of the round trip (test/c/controls.edn, :level :roundtrip): the subject's own row (read,
 ;; levels 1 and 2, its acceptance) with its levels 3 and 4 crossed, its print's object file and run against the reference's
@@ -551,7 +620,8 @@
 (defn own-control-result
   "A :roundtrip-own control judged after the corpora (ids): :left when a corpus was not judged, the reference is not in the run
   or the subject's own read is not rejected for its own directives' reason, else own-rejects? on the subject's error (its line,
-  column and message, the file's name dropped) against the reference's file: :passes or :differs."
+  column and message, the file's name dropped) against the reference's file: :passes or :differs. Since queue 495 own-verdict:
+  also the reference's recorded verdict (test/repr/c/print-own.edn's :at) must not accept the subject's error."
   [^String work ids {:keys [subject reference]}]
   (let [split (fn [^String fid] (let [i (.indexOf fid "/")] [(subs fid 0 i) (subs fid (inc i))]))
         [sc sn] (split subject) [rc rn] (split reference)
@@ -564,8 +634,9 @@
             lcm (second (re-find #"^(?:.*?:)?(\d+:\d+: .*)$" (str detail)))]
         (cond
           (not (and (= read "error") sb rb lcm (contains? (read-tsv (str rd "/forms.tsv")) rn))) :left
-          (not (own-rejects? (str sb "/" sn) detail)) :left
-          (own-rejects? (str rb "/" rn) lcm) :passes
+          ;; queue 495: own-verdict, the dg-error words or the recorded verdict (print-own.edn), with each file's own id
+          (not (own-verdict (str sb "/" sn) subject detail)) :left
+          (own-verdict (str rb "/" rn) reference lcm) :passes
           :else :differs)))))
 
 (defn own-controls
