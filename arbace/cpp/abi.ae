@@ -547,11 +547,20 @@
             (when-not ab (swap! *subs* conj [:prefix (subvec parts 0 i)]))
             (recur (inc i) s)))))))
 
+(def ^:dynamic *mangle-id*
+  "cpp-rt-own: the id of the function or variable whose name is being mangled (mangle-fn, mangle-var), or nil."
+  nil)
+
 (defn path-of-type
-  "The scope path naming a class or enumeration type: its enclosing path and itself."
+  "The scope path naming a class or enumeration type: its enclosing path and itself. (cpp-rt-own: a class defined by a qualified
+  name through an inline namespace, sema's :mangle-path-after [PATH ID]: the definition's namespace PATH for an entity made after
+  it, ids from ID on, the first declaration's before -- clang mangles a name when it first emits it, the class's interesting
+  declaration the definition from then on: fs_dir.cc's __shared_ptr<std::filesystem::__cxx11::_Dir> explicitly instantiated before
+  `struct fs::_Dir`, its deque<std::filesystem::_Dir> after)"
   [t]
   (case (:k t)
-    :class (conj (vec (:path (cls (:id t)))) [:cls (:id t)])
+    :class (let [c (cls (:id t)) after (:mangle-path-after c)]
+             (conj (vec (if (and after *mangle-id* (>= (long *mangle-id*) (long (second after)))) (first after) (:path c))) [:cls (:id t)]))
     :enum (conj (vec (:path (enm (:id t)))) [:enum (:id t)])))
 
 (declare local-encoding)
@@ -627,10 +636,18 @@
                (str "clsr" (source-name (:name w)) (when (seq (:args w)) (template-args (:args w)))
                     "E" (source-name (:name x)) (when (seq (:targs x)) (template-args (:targs x))) "E")
                (let [b (unq (:base x))
-                     _ (when-not (and b (= :class (:k b))) (fail :mangle "a member call of " (pr-str b)))
-                     c (cls (:id b))]
-                 (str "clsr" (apply str (map part-name (:path c))) (source-name (:name c)) (when (seq (:targs c)) (template-args (:targs c)))
-                      "E" (source-name (:name x)) (when (seq (:targs x)) (template-args (:targs x))) "E")))
+                     tail (str "E" (source-name (:name x)) (when (seq (:targs x)) (template-args (:targs x))) "E")]
+                 (case (:k b)
+                   :class (let [c (cls (:id b))]
+                            (str "clsr" (apply str (map part-name (:path c))) (source-name (:name c)) (when (seq (:targs c)) (template-args (:targs c))) tail))
+                   ;; (cpp-rt-own: a dependent template-id's member, an unresolved name as written as :sr's: <tuple>'s
+                   ;; `_TCC<true>::template __is_implicitly_default_constructible<>()`, _TCC an alias of _TupleConstraints<_Cond,
+                   ;; _Elements...> in tuple<_Elements...>, clang's clsr17_TupleConstraintsIXT_ES2_S4_EE37__is_implicitly_default_constructibleE
+                   ;; in thread.cc's and future.cc's tuple constructors: the arguments as written, a pack's elements one by one)
+                   :tspec (let [w (:written b) args (if w (vec (take w (:args b))) (:args b))
+                                targs (template-args (vec (mapcat #(if (and (map? %) (contains? % :pack) (nil? (:k %))) (:pack %) [%]) args)))]
+                            (str "clsr" (apply str (map source-name (:qual b))) (source-name (:name b)) targs tail))
+                   (fail :mangle "a member call of " (pr-str b)))))
       ;; (cpp-s4: a variable template's specialization with dependent arguments, an unresolved name as written:
       ;; <source-name> <template-args>, clang's 23is_copy_constructible_vIT0_E in any's converting constructor)
       :vt (str (source-name (:name x)) (template-args (:args x)))
@@ -745,7 +762,7 @@
                   :ref (sub-or [:t sk] #(str "R" (mangle-type* (:to bare))))
                   :rref (sub-or [:t sk] #(str "O" (mangle-type* (:to bare))))
                   :arr (sub-or [:t sk] #(str "A" (let [n (:n bare)] (if (map? n) (template-param (:i n)) n)) "_" (mangle-type* (:of bare))))
-                  :mptr (sub-or [:t sk] #(str "M" (mangle-type* {:k :class :id (:cls bare)})
+                  :mptr (sub-or [:t sk] #(str "M" (mangle-type* (if (map? (:cls bare)) (:cls bare) {:k :class :id (:cls bare)}))
                                                 (if (= :fn (:k (:to bare))) (str (when (:cq (:to bare)) "K") (mangle-type* (dissoc (:to bare) :cq))) (mangle-type* (:to bare)))))
                   :fn (sub-or [:t sk] #(str "F" (mangle-type* (:ret bare))
                                               (if (and (empty? (:ps bare)) (not (:va bare))) "v" (apply str (map mangle-type* (:ps bare))))
@@ -890,7 +907,7 @@
    (cond
      (= :c (:linkage f)) (:name f)
      (and (= "main" (:name f)) (empty? (:path f)) (not (:cls f))) "main"
-     :else (binding [*subs* (atom [])] (str "_Z" (encoding* f variant))))))
+     :else (binding [*subs* (atom []) *mangle-id* (:id f)] (str "_Z" (encoding* f variant))))))
 
 (defn- encoding*
   "A function's <encoding> (its mangled name without _Z) in the current substitution table: a local entity's
@@ -942,6 +959,7 @@
 (defn mangle-var
   "A variable's mangled name at namespace or class scope (a global in the global namespace keeps its name; static: L)."
   ^String [v]
+  (binding [*mangle-id* (:id v)]
   (let [path (vec (:path v))
         ti (:tinst v)]
     (cond
@@ -957,7 +975,7 @@
                 (empty? path) (str "_ZL" (source-name (:name v)))
                 ;; ::std::x: an unscoped name, St x (§5.1.2)
                 (= [[:ns "std"]] path) (str "_ZSt" (source-name (:name v)))
-                :else (str "_ZN" (mangle-prefix path) (source-name (:name v)) "E"))))))
+                :else (str "_ZN" (mangle-prefix path) (source-name (:name v)) "E")))))))
 
 (defn local-encoding
   "A function's encoding as a local name's prefix: its mangled name without _Z (main's: 4main), in the current

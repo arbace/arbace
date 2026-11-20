@@ -1486,6 +1486,17 @@
                                           (:fns e))]
                             (reset! b (if (= 1 (count oks)) (first oks) snap))
                             true)
+                          ;; (cpp-rt-own: a braced list for std::initializer_list<P'> (cv, a reference to it), [temp.deduct.call]/1:
+                          ;; P' deduced from each element in turn, memory_resource.cc's `std::min({max_blocks, __opts.max_blocks_per_chunk,
+                          ;; size_t(_M_blocks_per_chunk * 2)})`, min(initializer_list<_Tp>) no candidate before)
+                          (and (= :init-list (:op e)) (seq (:items e))
+                               (let [q (abi/unq (abi/non-ref (abi/unq P)))]
+                                 (and (= :tspec (:k q)) (= "initializer_list" (:name q)) (= [[:ns "std"]] (:path q)) (= 1 (count (:args q))))))
+                          (let [P1 (first (:args (abi/unq (abi/non-ref (abi/unq P)))))]
+                            (every? (fn [x] (if-let [[P2 A2 tdf2] (adjust-for-deduction P1 x tid)]
+                                              (deduce-by-type-match b tid P2 A2 tdf2 :none)
+                                              (unsure!)))
+                                    (:items e)))
                           ;; (CX12, the checker: the non-deduced contexts above)
                           ;; (queue 380, W3d: the braced list for the code generator too: ios.cc's std::__exchange(__rhs._M_word[__i], {})
                           ;; of `template<typename _Tp, typename _Up = _Tp> _Tp __exchange(_Tp&, _Up&&)`, _Up its default)
@@ -1528,7 +1539,11 @@
   (vec (for [tid (:tmpls e)
              :let [t (tmpl tid)
                    fid (try (let [sig (sym-sig t)
-                                  b (atom {})]
+                                  ;; (cpp-rt-own: the template arguments written after the name first, [temp.deduct.funcaddr]/1
+                                  ;; with [temp.arg.explicit]/2: cxx11-shim_facets.cc's `_M_dtor = __destroy_string<C>;`,
+                                  ;; whose C the target type void(*)(void*) does not name)
+                                  ex (when (:targs-text e) (explicit-args t (:targs-text e) (:targs-scope e)))
+                                  b (atom (into {} (map-indexed vector ex)))]
                               (when (and (= (count (:ps sig)) (count (:ps ft)))
                                          (every? true? (map (fn [P A] (deduce-by-type-match b tid P A #{} :none)) (cons (:ret sig) (:ps sig)) (cons (:ret ft) (:ps ft)))))
                                 (when-let [a (finish-deduction t @b)] (instantiate-fn tid a))))
@@ -1552,6 +1567,12 @@
                            (cond (and pk1 (not pk2)) false
                                  (and pk2 pk1) (deduce-by-type-match (atom @b) tid2 (:of p2) (:of p1) #{} :call)
                                  pk2 (deduce-by-type-match (atom @b) tid2 (:of p2) p1 #{} :call)
+                                 ;; (cpp-rt-own: one a reference and the other not, [temp.deduct.partial]/5 and /7: the referred
+                                 ;; type and no top-level cv-qualifier on both sides: <bits/stl_iterator.h>'s __niter_wrap(const _Iterator&,
+                                 ;; _Iterator) more specialized than __niter_wrap(_From, _To), which had been taken for (_Dir**, _Dir**),
+                                 ;; cow-fs_dir.cc's; both references keep the match as before)
+                                 (not= (boolean (abi/ref? p2)) (boolean (abi/ref? p1)))
+                                 (deduce-by-type-match b tid2 (abi/unq (abi/non-ref p2)) (abi/unq (abi/non-ref p1)) #{} :call)
                                  :else (deduce-by-type-match b tid2 p2 p1 #{} :call))))
                        p2s p1s))))
 
@@ -1990,8 +2011,13 @@
         (when-let [nm (System/getenv "CPP_INST_TRACE")]
           (when (= nm (:name t))
             (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
-        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args))
-                 (or (and *provisional* (or sema/*main-retry* sema/*incomplete-ok*)) sema/*name-only*))
+        (if (or (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args))
+                     (or (and *provisional* (or sema/*main-retry* sema/*incomplete-ok*)) sema/*name-only*))
+                ;; (cpp-rt-own: an explicit specialization declared and not defined yet is that specialization, incomplete
+                ;; till its definition, never the primary's instance, [temp.expl.spec]/7: <complex>'s `template<> class
+                ;; complex<double>;` named by complex<float>'s constructors before complex<double>'s definition, whose
+                ;; complex(double, double) and operator=(double) were the primary's, complex_io.cc's)
+                (and (get-in t [:spec-decls args]) (not (contains? (:specs t) args))))
           (incomplete-instance! t args)
           (select-instance! t args nil)))))))
 
@@ -2272,7 +2298,13 @@
 (defn- ool-qualifier
   "[name template-id-text] of the template-id a member's qualifier ends with (`Box<int>::`), or nil."
   [n]
-  (let [t0 (sema/text-before-name n)]
+  (let [t0 (sema/text-before-name n)
+        ;; (cpp-rt-own: a conditional's inactive group between the qualifier and the name stays in the source's text after
+        ;; its directives' lines are left out -- basic_string.tcc's `basic_string<_CharT, _Traits, _Alloc>::` `#ifdef
+        ;; __glibcxx_string_resize_and_overwrite` `resize_and_overwrite(...)` `#else` `__resize_and_overwrite(...)` below C++23,
+        ;; system_error.cc's: the member template had no body, declared and never defined -- so the parser's tokens of the
+        ;; qualifier after preprocessing, :_qual, the code generator's, stand for it)
+        t0 (if (and t0 (:_qual n) (not (str/ends-with? (str/trim (str/replace t0 #"~\s*$" "")) "::"))) (:_qual n) t0)]
     (when t0
       (let [t (str/trim (str/replace t0 #"~\s*$" ""))]
         ;; Name<...>:: at the end: the brackets matched backward from the last >; plain names after it (Out<T>::In::,
@@ -2512,6 +2544,27 @@
   (boolean (some #(and (map? %) (= :tdep (:k %)) (= "decltype" (get-in % [:base :name])))
                  (tree-seq coll? #(if (map? %) (vals %) (seq %)) t))))
 
+(defn- internal-args?
+  "cpp-rt-own: whether template arguments name a type of internal linkage: a class of an unnamed namespace or local to an
+  internal function (its scope's :internal, sema's declare-class!), a closure named $_N (sema's: in a function neither inline
+  nor a template's instance, internal as its call operator), a specialization of a class with such arguments, through
+  pointers, references, arrays, function types and packs."
+  [args]
+  (let [seen (java.util.HashSet.)]
+    (letfn [(ty? [t]
+              (cond
+                (not (map? t)) false
+                (and (contains? t :pack) (nil? (:k t)) (sequential? (:pack t))) (boolean (some ty? (:pack t)))
+                (= :class (:k t)) (let [id (:id t)]
+                                    (and (.add seen id)
+                                         (let [c (abi/cls id)]
+                                           (boolean (or (:internal (:scope c)) (and (:lambda c) (:dollar-key c))
+                                                        (some ty? (:targs c)))))))
+                (#{:ptr :ref :rref :arr} (:k t)) (ty? (or (:to t) (:of t)))
+                (= :fn (:k t)) (boolean (or (ty? (:ret t)) (some ty? (:ps t))))
+                :else false))]
+      (boolean (some ty? args)))))
+
 (defn instantiate-fn
   "The specialization of the function template `tid` for the complete arguments `args`: its declaration (the pattern
   declared in a scope binding the parameters; its definition analyzed when used), memoized."
@@ -2568,6 +2621,11 @@
         (when (= :conv (:kind (sema/fnd fid)))
           (upd-fn! fid assoc :mangle-ret (:ret (sym-sig t)))
           (abi/update-cls! (:cls (sema/fnd fid)) update :methods (fn [ms] (vec (remove #{fid} ms)))))
+        ;; (cpp-rt-own: a specialization whose arguments name a type of internal linkage is internal itself, [basic.link]/4-5 and
+        ;; clang's LinkageComputer (the arguments' linkage merged): a closure of a function neither inline nor a template's
+        ;; instance ($_N), a class of an unnamed namespace or local to an internal function -- system_error.cc's
+        ;; basic_string::__resize_and_overwrite<$_0> of the anonymous namespace's strerror_string, linkonce_odr before)
+        (when (internal-args? args) (upd-fn! fid assoc :internal true))
         (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true
                  :tinst (cond-> {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t)}
                           (:constraint t) (assoc :q {:node (:constraint t) :pidx (into {} (map-indexed (fn [i p] [(:name p) i]) (:params t)))
@@ -2855,9 +2913,13 @@
     (if (= "VarDecl" (:kind n))
       (let [vid (or (some #(when (= (:name (sema/var* %)) (:name n)) %) (:statics c)) (fail :template "no static member " (:name n)))]
         (if (first (kids n))
-          (upd-var! vid #(-> % (assoc :init (first (kids n)) :init-style (:init n) :def-scope scope :defined true :linkonce false
-                                      :internal false :internal-l false)
-                             (dissoc :pending-def)))
+          (do (upd-var! vid #(-> % (assoc :init (first (kids n)) :init-style (:init n) :def-scope scope :defined true :linkonce false
+                                          ;; (cpp-rt-own: no longer the header's declaration without an initializer, extern)
+                                          :extern false :internal false :internal-l false)
+                                 (dissoc :pending-def)))
+              ;; (cpp-rt-own: and defined in this unit, among the definitions emit-globals writes: locale_facets.cc's
+              ;; `template<> const char* __timepunct_cache<char>::_S_timezones[14] = {...};`, never written before)
+              (when-not (some #{[:var vid]} @sema/*order*) (swap! sema/*order* conj [:var vid])))
           ;; without an initializer a declaration, not a definition ([temp.expl.spec]/14): defined elsewhere (G5:
           ;; <locale_facets_nonio.h>'s template<> const char* __timepunct_cache<char>::_S_timezones[14];)
           (upd-var! vid #(-> % (assoc :extern true :defined false :linkonce false :internal false :internal-l false) (dissoc :pending-def)))))
@@ -3373,8 +3435,14 @@
                     (let [c (abi/cls ic)
                           cs (new-scope :class (:outer c) :cls ic :path (conj (vec (:path c)) [:cls ic]))]
                       (swap! abi/*classes* assoc ic (assoc (select-keys c [:id :name :path :outer :tmpl :targs]) :scope cs :fields [] :bases []))
-                      (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic))))))
-        nil)
+                      (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic)))
+                    ;; (cpp-rt-own: one an explicit specialization's declaration left incomplete: completed in place by it)
+                    (and (get-in (tmpl tid) [:spec-decls args]) (not (:complete (abi/cls ic))))
+                    (do (when (and *provisional* (incomplete-waiting? tid ic)) (swap! *provisional* update-in [:templates tid] disj ic))
+                        (declare-instance! (tmpl tid) args n [] [] true ic)
+                        (drop-layouts!)))))
+        ;; (cpp-rt-own: declared alone, `template<> class complex<double>;`: marked, its uses wait for its definition)
+        (when-not (get-in (tmpl tid) [:insts args]) (upd-tmpl! tid assoc-in [:spec-decls args] true)))
       :template)
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "VarDecl")
     (let [text (or (node-text n) "")]

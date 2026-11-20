@@ -202,6 +202,52 @@
     (when s (if (and (= :tparams (sc/kind-of s)) (pos? (.size ^java.util.HashMap (sc/names-of s)))) true (recur (sc/parent-of s))))))
 (defn- scope ^Scope [^P p] (stv p SCOPE))
 
+;; (cpp-rt-own: the two below are parse.ae's, not arbace.repr.cpp.scope's: a change to that namespace redefines its deftype Scope
+;; while the stage 0 seed's compiled skim and sema keep the old class, the "Tok cannot be cast to Tok" of doc/W-WINDOW.md §8 risk 2)
+(defn- lookup
+  "Unqualified lookup of `nm` from the scope `s` outward (arbace.repr.cpp.scope/lookup), but that a lookup scope of a qualified
+  declarator-id's class or namespace (an out-of-class member's, `struct N::C::D`, `void N::f(...)`: its entity a :type or :ns)
+  is followed by the definition's own template parameter lists and then by the namespaces enclosing that class or namespace,
+  before the scopes the definition is written in ([basic.lookup.unqual]/9, C++23 [basic.lookup.unqual]/4: the names after a
+  member's declarator-id are looked up in its class, its enclosing classes and namespaces; [temp.local]/7: the definition's
+  template parameters hide the namespace's members): libstdc++'s fs_dir.cc defines `struct fs::_Dir` and
+  `fs::directory_iterator::directory_iterator(const path& p, ..., error_code* ecptr)` at the global namespace, `fs` an alias of
+  std::filesystem."
+  ([s nm] (lookup s nm false))
+  ([s nm tags?]
+   (loop [s s]
+     (when s
+       (or (sc/find-in s nm tags?)
+           (let [e (sc/ent-of s) cs (:scope e)]
+             (if (and (= :lookup (sc/kind-of s)) (#{:type :ns} (:k e)) (some? cs))
+               (let [[r q] (loop [q (sc/parent-of s)]
+                             (if (and q (= :tparams (sc/kind-of q)))
+                               (if-let [r (sc/find-in q nm tags?)] [r q] (recur (sc/parent-of q)))
+                               [nil q]))]
+                 (or r
+                     (loop [o (sc/parent-of cs)] (when o (or (when (= :ns (sc/kind-of o)) (sc/find-in o nm tags?)) (recur (sc/parent-of o)))))
+                     (recur q)))
+               (recur (sc/parent-of s)))))))))
+
+(defn- redeclare-incomplete!
+  "A class defined by a qualified name (`struct N::C { ... }`): `e` replaces the incomplete class `nm` declared before in the
+  scope `s` or one of its inline namespaces (<bits/fs_dir.h>'s `struct _Dir;` in std::filesystem::__cxx11), in the scope that
+  holds it, its names and its tags; true when one was replaced."
+  [s nm e]
+  (let [seen (java.util.IdentityHashMap.)]
+    (letfn [(go [s]
+              (when (and s (not (.containsKey seen s)))
+                (.put seen s true)
+                (let [^HashMap m (sc/names-of s) ^HashMap t (sc/tags-of s)
+                      o (.get m nm) ot (.get t nm)
+                      inc? (fn [x] (and (sc/type-ent? x) (:incomplete x)))]
+                  (if (or (inc? o) (inc? ot))
+                    (do (when (inc? o) (.put m nm (cond-> e (:tmpl o) (assoc :tmpl true))))
+                        (when (inc? ot) (.put t nm (cond-> e (:tmpl ot) (assoc :tmpl true))))
+                        true)
+                    (some go (sc/inline-of s))))))]
+      (boolean (go s)))))
+
 (defmacro ^:private with-scope
   "Runs body with a new scope of kind `kind` (entity `ent`) pushed, popped after."
   [p kind ent & body]
@@ -461,8 +507,8 @@
            (let [s (.-s t) i (ix p)
                  e (cond member (when (or (is-at? p 1 "::")
                                           (and (is-at? p 1 "<") (let [c (angle-close p (inc (ix p)))] (and c (t= (tok-at p (inc (long c))) "::")))))
-                                  (sc/lookup (scope p) s))
-                         first? (sc/lookup (scope p) s)
+                                  (lookup (scope p) s))
+                         first? (lookup (scope p) s)
                          :else (find-member qe s))]
              (adv! p)
              (let [lt (when (is? p "<") (angle-close p (ix p)))
@@ -1522,11 +1568,11 @@
         (do ;; (round 54: GNU's q, Q, w and W floating suffixes, GCC's extension in its GNU modes alone; in a strict mode the suffix
             ;; from C++11 is a ud-suffix, [lex.ext]/1 (C++98 has none: the suffix GCC's extension again), whose literal operator lookup finds none: GCC's "unable to find numeric literal operator")
             (when-let [[_ sfx] (and (not (.-gnu p)) (>= (.-year p) 2011) (re-find #"[0-9.]([qQwW])$" s))]
-              (when-not (sc/lookup (scope p) (str "operator\"\"" sfx))
+              (when-not (lookup (scope p) (str "operator\"\"" sfx))
                 (soft-diag! p i (str "unable to find numeric literal operator 'operator\"\"" sfx "'"))))
             (node p "FloatingLiteral" i i {:value v :type {:qualType ty} :valueCategory "prvalue"}))
         (if (and (re-matches #"(?i)[0-9.][0-9a-z.'+-]*?(i|j)(f|l|u|ul|ll|ull)?|(?i)[0-9.][0-9a-z.'+-]*?(f|l)(i|j)" s)
-                 (not (sc/lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
+                 (not (lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
           (node p "ImaginaryLiteral" i i {})
           (let [[_ num sfx] (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)]
             ;; (round 54, fourth pass: C++98 has no user-defined literal, [lex.icon], [lex.fcon]: a number's identifier suffix is
@@ -1537,7 +1583,7 @@
             ;; suffix is a ud-suffix, [lex.ext]/1, whose literal operator lookup finds none, GCC's "unable to find numeric literal
             ;; operator 'operator\"\"wb'")
             (when-let [[_ _ bsfx] (and (nil? num) (>= (.-year p) 2011) (re-matches #"(?i)([0-9][0-9']*)(u?wb|wbu)" s))]
-              (when-not (sc/lookup (scope p) (str "operator\"\"" bsfx))
+              (when-not (lookup (scope p) (str "operator\"\"" bsfx))
                 (soft-diag! p i (str "unable to find numeric literal operator 'operator\"\"" bsfx "'"))))
             (node p "UserDefinedLiteral" i i
                   (if num
@@ -1773,7 +1819,7 @@
         (cond-> (text-node p "BuiltinExpr" b) (map? r) (assoc :_offsetof r)))
       (and (identical? k :kw) (#{"__builtin_va_arg" "__builtin_offsetof" "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr"} s))
       (do (adv! p) (when (is? p "(") (skip-balanced! p)) (text-node p "BuiltinExpr" b))
-      (and (identical? k :id) (is-at? p 1 "(") (trait-name? s) (not (sc/lookup (scope p) s)))
+      (and (identical? k :id) (is-at? p 1 "(") (trait-name? s) (not (lookup (scope p) s)))
       (do (when (= s "__is_nothrow_constructible")
             ;; the trait evaluates the constructor's exception specification
             (tentatively p (fn [p]
@@ -1794,7 +1840,7 @@
            (not (#{"__atomic_thread_fence" "__atomic_signal_fence" "__atomic_always_lock_free" "__atomic_is_lock_free"} s))
            ;; (a function the program declares under such a name is called as one: libstdc++'s <ext/atomicity.h>
            ;; __atomic_add_single and __atomic_add_dispatch, CallExprs in clang's AST; cpp-s2)
-           (not (sc/lookup (scope p) s))
+           (not (lookup (scope p) s))
            (not (in-template? p)))
       ;; G5c: the operands kept for the code generator (clang's AtomicExpr, Sema::BuildAtomicExpr; libsupc++'s guard.cc,
       ;; new_handler.cc, atomicity.h), in the source's order under an underscored field (the dump's children are clang's
@@ -1874,15 +1920,15 @@
         ;; the member function it names, for an unresolved call (unresolved-call)
         [mfn dep] (when (and (:s lp) (or (in-template? p) (dep-this? p)) (= 1 (count (:parts qn))))
                     (if (= "CXXThisExpr" (:kind base))
-                      (let [e (sc/lookup (scope p) (:s lp))] (when (and (= :fn (:k e)) (class-member? p (:s lp))) [e (dep-this? p)]))
+                      (let [e (lookup (scope p) (:s lp))] (when (and (= :fn (:k e)) (class-member? p (:s lp))) [e (dep-this? p)]))
                       (when-let [[ce d] (object-class p base arrow)]
                         (let [e (sc/find-in (:scope ce) (:s lp))] (when (= :fn (:k e)) [e d])))))]
     ;; (round 54, second pass: [expr.ref]/3, the object expression of `.` has a complete class type: a variable whose class is
     ;; still only declared, GCC's "'a' has incomplete type" at the variable's declaration)
     (when (and (not arrow) (= "DeclRefExpr" (:kind base)))
-      (when-let [ve (sc/lookup (scope p) (str (get-in base [:referencedDecl :name])))]
+      (when-let [ve (lookup (scope p) (str (get-in base [:referencedDecl :name])))]
         (when (and (= :var (:k ve)) (:vat ve) (= :n (:t (:ty ve))) (:class (:ent (:ty ve))))
-          (when-let [ce (sc/lookup (scope p) (str (:name (:ent (:ty ve)))))]
+          (when-let [ce (lookup (scope p) (str (:name (:ent (:ty ve)))))]
             (when (and (:incomplete ce) (:class ce) (= (:at ce) (:at (:ent (:ty ve)))))
               (soft-diag! p (long (:vat ve)) (str "'" (get-in base [:referencedDecl :name]) "' has incomplete type")))))))
     (node p "MemberExpr" (nb base) (:e qn)
@@ -2627,7 +2673,7 @@
              (or (t= (tok-at p (inc i)) ")")
                  (let [save (ix p)] (seek! p (inc i)) (let [r (try (tp-param-clause! p false) (catch arbace.lang.ExceptionInfo _ :error))] (seek! p save) (not= r :false)))
                  (and (identical? :id (tk (tok-at p (inc i)))) (t= (tok-at p (+ i 2)) "::")
-                      (:tparam (sc/lookup (scope p) (ts (tok-at p (inc i)))))))))
+                      (:tparam (lookup (scope p) (ts (tok-at p (inc i)))))))))
       (name-start? p)
       (when-let [[qn e] (scan-name p)]
         (let [parts (:parts qn)
@@ -2643,7 +2689,7 @@
   "A deduction guide: a class template's name, (...), then ->."
   [^P p]
   (when (and (id? p) (is-at? p 1 "("))
-    (let [e (sc/lookup (scope p) (ts (cur p)))]
+    (let [e (lookup (scope p) (ts (cur p)))]
       (and (type-ent? e) (:tmpl e)
            (let [save (ix p)]
              (adv! p)
@@ -2798,7 +2844,7 @@
               (do ;; (h-cpp-read: before C++20 a dependent qualified name names a type only after typename, [temp.res]/3: GCC's
                   ;; "need 'typename' before 'T::type' because 'T' is a dependent scope", for a declarator's name after it)
                   (when (and (< (.-year p) 2020) (not (:friend ds)) (not= ctx :alias) (id? p)
-                             (some-> (sc/lookup (scope p) (:s (first (:parts qn)))) :tparam))
+                             (some-> (lookup (scope p) (:s (first (:parts qn)))) :tparam))
                     (soft-diag! p save (str "need 'typename' before '" (name-str p qn) "' because '" (:s (first (:parts qn))) "' is a dependent scope")))
                   (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn}) words))
               (and decl-ctx (nil? e) (id? p) (not (#{"final" "override"} (ts (cur p)))))
@@ -2875,7 +2921,10 @@
       (case (sc/kind-of s)
         :class (let [e (or (sc/find-in s nm) (when-let [late (:late (class-ctx p))] (sc/find-in late nm)))]
                  (and e (#{:var :fn} (:k e)) (not (:static e))))
-        :lookup (let [e (sc/find-in s nm)] (and e (#{:var :fn} (:k e)) (not (:static e))))
+        ;; (cpp-rt-own: a namespace's lookup scope, a namespace member defined outside it, holds no member: its name is no class's)
+        :lookup (if (= :ns (:k (sc/ent-of s)))
+                  (if (sc/find-in s nm) false (recur (sc/parent-of s)))
+                  (let [e (sc/find-in s nm)] (and e (#{:var :fn} (:k e)) (not (:static e)))))
         (if (.get ^java.util.HashMap (sc/names-of s) nm) false (recur (sc/parent-of s)))))))
 
 (defn- in-body-member?
@@ -2889,8 +2938,11 @@
         :class (let [e (or (sc/find-in s nm) (when-let [late (:late (class-ctx p))] (sc/find-in late nm)))]
                  (and body e (#{:var :fn} (:k e)) (not (:static e)) (not (:enumerator e)) (not (:anon e)) (not (:unres e)) (not (:tmpl e))))
         ;; the lookup scope of a default member initializer (with-late*: its entity has no kind) is the class's own
-        :lookup (let [e (sc/find-in s nm)]
-                  (and (or body (nil? (:k (sc/ent-of s)))) e (#{:var :fn} (:k e)) (not (:static e)) (not (:enumerator e)) (not (:anon e)) (not (:unres e)) (not (:tmpl e))))
+        ;; (cpp-rt-own: a namespace's lookup scope, fs_ops.cc's `fs::copy(...)` calling `copy(from, to, options, ec)`, is no class's)
+        :lookup (if (= :ns (:k (sc/ent-of s)))
+                  (if (sc/find-in s nm) false (recur (sc/parent-of s) body))
+                  (let [e (sc/find-in s nm)]
+                    (and (or body (nil? (:k (sc/ent-of s)))) e (#{:var :fn} (:k e)) (not (:static e)) (not (:enumerator e)) (not (:anon e)) (not (:unres e)) (not (:tmpl e)))))
         (if (.get ^java.util.HashMap (sc/names-of s) nm)
           false
           (recur (sc/parent-of s) (or body (contains? #{:fparams :block} (sc/kind-of s)))))))))
@@ -3033,7 +3085,10 @@
                                       (is-function-declarator? p)))
                  (let [f (parse-fn-suffix p)] (aset lastx 0 (last-ix p)) (recur (conj out f)))
                  :else out)))
-        sufs (if qcls (in-scope p (sc/new-scope :lookup (scope p) qcls) (suffixes)) (suffixes))
+        ;; (cpp-rt-own: a namespace's member defined outside it, `fs::path fs::absolute(const path& p)` at the global namespace
+        ;; (fs an alias of std::filesystem): the rest in the namespace's scope, then its enclosing ones (arbace.repr.cpp.scope/lookup))
+        qns (when (and (nil? qcls) name (:q name)) (let [e (:q name)] (when (and (= :ns (:k e)) (:scope e)) e)))
+        sufs (if-let [lk (or qcls qns)] (in-scope p (sc/new-scope :lookup (scope p) lk) (suffixes)) (suffixes))
         as (into (into pattrs mid) (attr-nodes p))]
     {:ptrs ptrs :name name :ni ni :nested nested :sufs sufs :pack pack :b b :e (aget lastx 0) :attrs as
      :after (ix p)}))
@@ -3138,7 +3193,7 @@
                          (not (= :auto (:t base))) (not (:pack (:ent base)))
                          ;; a type naming a parameter pack (typename decay<B>::type...): a pack expansion, not C's ...
                          (not (and (#{:n :tn} (:t base)) (:s base)
-                                   (some (fn [w] (:pack (sc/lookup (scope p) w))) (re-seq #"[A-Za-z_]\w*" (:s base))))))
+                                   (some (fn [w] (:pack (lookup (scope p) w))) (re-seq #"[A-Za-z_]\w*" (:s base))))))
                 d (if cva (dissoc d :pack) d)
                 ;; (queue 365: round 54's [temp.variadic]/5 check of a parameter's type naming a pack removed: a parameter inside an
                 ;; expansion's pattern is valid, `fn<void(Ts)>...`, `void (*...fs)(Ts)`, a lambda's `(T x)` in a fold)
@@ -3221,7 +3276,7 @@
   "A template's parameters as class template argument deduction asks them: [{:name :ent :dflt :pack :nontype}]."
   [^P p params]
   (mapv (fn [n] (let [nm (:name n)]
-                  (cond-> {:name nm :ent (when nm (sc/lookup (scope p) nm)) :dflt (:_dflt n)}
+                  (cond-> {:name nm :ent (when nm (lookup (scope p) nm)) :dflt (:_dflt n)}
                     (:isParameterPack n) (assoc :pack true)
                     (or (nil? nm) (not= "TemplateTypeParmDecl" (:kind n))) (assoc :nontype true))))
         params))
@@ -3246,7 +3301,7 @@
           defn? (or (is? p "{") (and (is? p ":") (not (is-at? p 1 ":")) (or (nil? qn) (not (#{:member} ctx)) true)))]
       (if-not defn?
         (let [nm (when qn (name-plain qn))
-              e (or (:ent qn) (when nm (sc/lookup (scope p) nm true)))
+              e (or (:ent qn) (when nm (lookup (scope p) nm true)))
               lp (when qn (peek (:parts qn)))
               e (if (and e (= (:at e) (:i lp))) nil e)
               alone (and (is? p ";") (not (:friend ds)))
@@ -3254,7 +3309,11 @@
               new? (and nm (nil? (:args lp)) (or alone (nil? e)))
               n (when (and (or new? spec) (not (:friend ds)) (not (skim? p)))
                   (node p "CXXRecordDecl" kb (:e qn) (cond-> {:tagUsed kw :name (or nm (:s lp)) :loc (loc p (:i lp))}
-                                                       spec (assoc :_args (:args lp) :_qn qn))))]
+                                                       spec (assoc :_args (:args lp) :_qn qn)
+                                                       ;; (cpp-rt-own: not alone, an elaborated-type-specifier declaring its class in
+                                                       ;; the namespace or block that holds it, as the entity below: the code generator's
+                                                       ;; sema declares it there too)
+                                                       (and new? (not alone)) (assoc :_elab true))))]
           (when (and new? (not (:friend ds)))
             (let [ent {:k :type :name nm :tag true :class true :scope (sc/new-scope :class (scope p) nil) :incomplete true :at (:i lp)
                        :tps (:params hdr)
@@ -3271,7 +3330,7 @@
               qent (when (and qn (> (count (:parts qn)) 1))
                      (let [ps (butlast (:parts qn))]
                        (reduce (fn [e part] (when (:scope e) (sc/find-in (:scope e) (:s part))))
-                               (sc/lookup (scope p) (:s (first ps))) (rest ps))))
+                               (lookup (scope p) (:s (first ps))) (rest ps))))
               ;; (round 54, third pass: a member class defined out of its class template, [temp.mem]/1 and [temp.class.general]/3:
               ;; its template-head the class template's, or the member template's own after it, and as many parameters, GCC's
               ;; "redeclared with N template parameters" ([temp.over.link]/6); and no default template argument there,
@@ -3305,7 +3364,7 @@
               ;; `template<> struct X { };` of a class template X is GCC's "template specifiers not specified in declaration
               ;; of 'X'", at the name)
               _ (when (and hdr (zero? (long (:n hdr))) simple (nil? (:args lp)) (not (skim? p)) (not (:friend ds)))
-                  (when-let [te (sc/lookup (scope p) nm true)]
+                  (when-let [te (lookup (scope p) nm true)]
                     (when (and (:tmpl te) (:class te))
                       (soft-diag! p (long (:i lp)) (str "template specifiers not specified in declaration of '" nm "'")))))
               cs (sc/new-scope :class (if (:scope qent) (sc/new-scope :lookup (scope p) qent) (scope p)) nil)
@@ -3329,10 +3388,17 @@
                   (when (and (:udecl o) (= :type (:k o)) (:tag o))
                     (soft-diag! p (long (:i lp)) (str "redefinition of '" kw " " (name-str p qn) "'"))))
               _ (when (and nm simple (nil? (:args lp))) (declare! p ent))
+              ;; (cpp-rt-own: a class declared in a namespace or class and defined outside it by a qualified name, fs_dir.cc's
+              ;; `struct fs::_Dir : _Dir_base { ... }` of <bits/fs_dir.h>'s `struct _Dir;`: the definition is the entity its
+              ;; qualifier's scope names from then on, its declaration's scope looking in the definition's as CP338's)
+              _ (when (and nm (not simple) (nil? (:args lp)) qent (:scope qent))
+                  (let [old (sc/find-in (:scope qent) nm true)]
+                    (when (and (:incomplete old) (:scope old) (not (identical? (:scope old) cs))) (sc/add-base! (:scope old) cs))
+                    (when (:incomplete old) (redeclare-incomplete! (:scope qent) nm ent))))
               ;; (queue 380: an explicit specialization's entity, by its primary's scope and its arguments' text: its
               ;; members defined outside it are looked up in its scope, spec-of-qualifier)
               _ (when (and nm simple (:args lp) hdr (zero? (long (:n hdr))))
-                  (when-let [ps (:scope (sc/lookup (scope p) nm))]
+                  (when-let [ps (:scope (lookup (scope p) nm))]
                     (let [^java.util.IdentityHashMap m (stv p SPECS)
                           ^HashMap byargs (or (.get m ps) (let [h (HashMap.)] (.put m ps h) h))]
                       (.put byargs (mapv #(arg-str p %) (:args lp)) ent))))
@@ -3394,11 +3460,11 @@
                   (parse-type-specs p :type-id))
           body? (is? p "{")]
       (if (and (not body?) (not fixed) (not (and scoped (is? p ";"))))
-        (let [e (or (:ent qn) (when nm (sc/lookup (scope p) nm true)))]
+        (let [e (or (:ent qn) (when nm (lookup (scope p) nm true)))]
           (when (and nm (nil? e)) (sc/declare! (or (sc/enclosing (scope p) #{:ns :block}) (scope p)) {:k :type :name nm :tag true :scope (sc/new-scope :enum (scope p) nil)}))
           {:type {:t :elab :kw "enum" :s (if qn (name-str p qn) "") :ent e} :node nil})
         (let [_ (when (and qn (> (count (:parts qn)) 1) (nil? (:ent qn)) (not-any? :args (:parts qn))
-                           (when-let [q (sc/lookup (scope p) (:s (first (:parts qn))))] (not (:tparam q))))
+                           (when-let [q (lookup (scope p) (:s (first (:parts qn))))] (not (:tparam q))))
                   ;; (round 54, second pass: [dcl.enum]/4, a qualified enum-head-name names an enumeration declared before in the
                   ;; class or namespace its nested-name-specifier nominates: GCC's "'bar' in 'class foo' does not name an enumeration")
                   (soft-diag! p (long (:i (peek (:parts qn)))) (str "'" nm "' in '" (str/join "::" (map :s (butlast (:parts qn)))) "' does not name an enumeration")))
@@ -3704,7 +3770,7 @@
                 ;; `__typeof__ (B);`)
                 (and base0 (not (#{:elab :unnamed} (:t base0)))
                      (not (when-let [[_ _ w] (re-matches #"(__typeof__|__typeof|typeof)\((\w+)\)" (str (:s base0)))]
-                            (let [en (sc/lookup (scope p) w)] (and (type-ent? en) (or (:tag en) (:inj en) (:inj-full en) (some? (:scope en))))))))
+                            (let [en (lookup (scope p) w)] (and (type-ent? en) (or (:tag en) (:inj en) (:inj-full en) (some? (:scope en))))))))
                 (do (if (= ctx :member)
                             (soft-diag! p (long (:b ds)) "declaration does not declare anything")
                             (pedantic-diag! p (long (:b ds)) "declaration does not declare anything"))
@@ -3843,7 +3909,7 @@
                         (when (not-any? #(t= (tok-at p %) "...") (range rb re))
                           (when-let [i (first (filter (fn [i] (let [^T t (tok-at p i)]
                                                                 (and (identical? :id (.-k t))
-                                                                     (let [en (sc/lookup (scope p) (.-s t))] (and (:tparam en) (:pack en))))))
+                                                                     (let [en (lookup (scope p) (.-s t))] (and (:tparam en) (:pack en))))))
                                                       (range rb re)))]
                             (soft-diag! p i (str "parameter packs not expanded with '...': '" (ts (tok-at p i)) "'"))))))
                   ev (if (seq virts) (ne (peek virts)) (long (:e d)))
@@ -3852,7 +3918,7 @@
                                           (is-at? p 1 "default") (do (adv! p) (adv! p) [nil true nil])
                                           (is-at? p 1 "delete") (do (adv! p) (adv! p) (when (is? p "(") (delete-reason! p)) [nil nil true])
                                           :else (perr p "a function's = ")))
-                  _ (when guide (when-let [ge (sc/lookup (scope p) nn)] (when-let [^HashMap gi (sema/info ge)] (.put gi :user-guide true))))
+                  _ (when guide (when-let [ge (lookup (scope p) nn)] (when-let [^HashMap gi (sema/info ge)] (.put gi :user-guide true))))
                   smk (when (= ctx :member)
                         (when-let [ce (:ent (class-ctx p))]
                           (sema/sm-kind ce (:name (class-ctx p)) (and ctor (not (:friend ds))) lp (:types fs) (:friend ds))))
@@ -3867,7 +3933,7 @@
                           (when ctor
                             (when-not (.get i :ctors) (.put i :ctors (ArrayList.)))
                             (.add ^ArrayList (.get i :ctors)
-                                  (cond-> {:types (:types fs) :mtps (if tmpl (mapv (fn [n] {:name n :ent (sc/lookup (scope p) n)}) (:names tmpl)) [])}
+                                  (cond-> {:types (:types fs) :mtps (if tmpl (mapv (fn [n] {:name n :ent (lookup (scope p) n)}) (:names tmpl)) [])}
                                     (and tmpl (some #(.endsWith ^String % "...") (:names tmpl))) (assoc :pack true)
                                     (:va fs) (assoc :pack true)))
                             (.put i :user-ctor true)
@@ -3911,7 +3977,11 @@
                   [inits body] (when body?
                                  (let [old (stv p RET)]
                                    (st! p RET (when (= :f (:t ty)) (:r ty)))
-                                   (try (fn-body p (:names fs) cls ctor (:types fs)) (finally (st! p RET old)))))
+                                   (try (if-let [qns (and (nil? cls) (let [e (:q qn)] (when (and (= :ns (:k e)) (:scope e)) e)))]
+                                          ;; (cpp-rt-own: a namespace's member defined outside it: its body in the namespace's scope too)
+                                          (in-scope p (sc/new-scope :lookup (scope p) qns) (fn-body p (:names fs) nil ctor (:types fs)))
+                                          (fn-body p (:names fs) cls ctor (:types fs)))
+                                        (finally (st! p RET old)))))
                   _ (when (and ctor body? (not (skim? p)))
                       (when-let [ce (or cls (:ent (class-ctx p)))]
                         (.add ^ArrayList (stv p USES)
@@ -3924,7 +3994,7 @@
                   ;; redeclarations' too (a header's declaration of a library function among them)
                   fty (if (and (= :f (:t fty)) (#{"delete" "delete[]"} (:op lp)) (not (:noexcept (:m fs))) (not (:throw (:m fs))))
                         (assoc fty :q (str (:q fty) " noexcept")) fty)
-                  fe (when nm (sc/lookup (scope p) nm))
+                  fe (when nm (lookup (scope p) nm))
                   gnu (set (keep #(some-> (:_gnu %) (str/replace #"^__|__$" "")) (concat (:attrs ds) (:attrs d) (:attrs (:m fs)) as1 as2)))
                   nothrow (or (gnu "nothrow") (:nothrow fe))
                   noreturn (or (gnu "noreturn") (:noreturn fe))
@@ -4205,7 +4275,7 @@
                     (when (not-any? #(t= (tok-at p %) "...") (range b e))
                       (when-let [i (first (filter (fn [i] (let [^T t (tok-at p i)]
                                                             (and (identical? :id (.-k t))
-                                                                 (let [en (sc/lookup (scope p) (.-s t))] (and (:tparam en) (:pack en))))))
+                                                                 (let [en (lookup (scope p) (.-s t))] (and (:tparam en) (:pack en))))))
                                                   (range b e)))]
                         (soft-diag! p i (str "non-type template parameter type contains unexpanded parameter pack '" (ts (tok-at p i)) "'"))))))
                 (when nm (sc/declare! (scope p) {:k :var :name nm :tparam true :ty ty}))
@@ -4533,7 +4603,7 @@
   (case (:k a)
     :type (dependent-type? (:t a))
     :expr (and (in-template? p)
-               (some (fn [i] (let [^T t (tok-at p i)] (and (identical? :id (.-k t)) (:tparam (sc/lookup (scope p) (.-s t))))))
+               (some (fn [i] (let [^T t (tok-at p i)] (and (identical? :id (.-k t)) (:tparam (lookup (scope p) (.-s t))))))
                      (range (:b a) (inc (long (:e a))))))
     false))
 
@@ -4983,7 +5053,7 @@
                           (accept! p "...")
                           (if (id? p)
                             (let [nm (ts (cur p)) i (ix p)
-                                  outer (sc/lookup (scope p) nm)]
+                                  outer (lookup (scope p) nm)]
                               (adv! p) (accept! p "...")
                               ;; a capture by copy copies its variable (its class's copy constructor)
                               (when (and (not amp) (not (is? p "=")) (not (is? p "{")) (not (is? p "(")) (:ty outer))
