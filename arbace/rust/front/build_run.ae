@@ -1688,6 +1688,36 @@
               r "T needs no drop, the record has its shim"
               :else true)))))
 
+(defn native-fallback
+  "queue 503 (498-2 (a)): the run-time fallback per body. ENTRIES [{:symbol :name :twin? :body :error :what}], each native body
+  made a runtime body (:body) or not (:body nil, :error why; :what the failure's words); :twin? when the record has a body of
+  its symbol. A failing body with a twin is the record's (`record-kept`); one without (an instance the closure reached that the
+  record lacks) is left out (`native-dropped`), and every native body naming its symbol (a call's callee, a function pointer)
+  left out in turn, the record's when it has a twin, else left out and its namers in turn (as codegen's fallback, back/check.ae).
+  The program's own and the record's bodies name no such symbol: rustc calls only an instance it defines (a twin) or an
+  upstream one, which the module does not define either way. {:kept [entry] :lines [..]}, the kept in ENTRIES' order"
+  [entries]
+  (let [lines (atom [])
+        line (fn [e why] (swap! lines conj (str (if (:twin? e) "record-kept " "native-dropped ") (:name e) " (" why ")")))
+        failed (filter #(nil? (:body %)) entries)
+        _ (doseq [e failed] (line e (str (or (:what e) "a native body failed at run time") ": " (:error e))))
+        missing (set (keep #(when-not (:twin? %) (:symbol %)) failed))
+        ok (remove #(nil? (:body %)) entries)
+        dropped (if (empty? missing)
+                  #{}
+                  (let [cands (set (keep #(when-not (:twin? %) (:symbol %)) entries))
+                        refs (into {} (for [e ok] [(:symbol e) (set (filter #(and (string? %) (cands %)) (tree-seq coll? seq (:body e))))]))]
+                    (loop [missing missing dropped #{}]
+                      (let [more (for [e ok :when (not (dropped (:symbol e)))
+                                       :let [u (first (filter missing (sort (disj (get refs (:symbol e)) (:symbol e)))))] :when u]
+                                   [e u])]
+                        (if (empty? more)
+                          dropped
+                          (do (doseq [[e u] more] (line e (str "names " u ", a native body left out (the record has no body of it)")))
+                              (recur (into missing (keep (fn [[e _]] (when-not (:twin? e) (:symbol e))) more))
+                                     (into dropped (map (comp :symbol first) more)))))))))]
+    {:kept (vec (remove #(dropped (:symbol %)) ok)) :lines @lines}))
+
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
   closure of the functions it reaches that the record has no body of: {:taken {record-symbol instance} :extra [instance]
@@ -2127,29 +2157,25 @@
                                     (do (swap! lines conj (str "record " nm " (" err ")")) (fact! :bodies false)
                                         (list 'mir/body (or (get rec-by-name nm) (throw (ex-info (str "no body for " nm) {}))))))))
                     ;; RF12-P6: the native core bodies made runtime bodies; S4: one by one, a body that fails at run time keeps the
-                    ;; record's body of its symbol (`record-kept`), all or none only when the record has no body of a failing one
+                    ;; record's body of its symbol (`record-kept`); queue 503 (498-2 (a)): one the record has no body of is left
+                    ;; out with the native bodies naming it, the rest native (native-fallback), no longer all or none
                     rec-syms (set (map :symbol rec-bodies))
                     native-done (when (or (seq core-items) (seq glue-shims))
-                                  (try (doall (concat
-                                               (for [[h i] core-items
-                                                     :let [r (try (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)
-                                                                  (catch Throwable e
-                                                                    (if (rec-syms (:symbol h))
-                                                                      (do (swap! lines conj (str "record-kept " (:name h) " (a native body failed at run time: " (.getMessage e) ")")) nil)
-                                                                      (throw e))))]
-                                                     :when r]
-                                                 [(:symbol h) (list 'mir/body (assoc r :phase "arbace-native-core"))])
-                                               ;; queue 448b: a shim that fails at run time keeps the record's (std's types' glue now
-                                               ;; among them), as a core body does
-                                               (for [g glue-shims
-                                                     :let [r (try (runtime-body (assoc (:body g) :name (:name (:rec g))) (:rec g) nf abort?)
-                                                                  (catch Throwable e
-                                                                    (swap! lines conj (str "record-kept " (:name (:rec g)) " (drop glue's shim failed at run time: " (.getMessage e) ")"))
-                                                                    nil))]
-                                                     :when r]
-                                                 (do (swap! lines conj (str "native " (:name (:rec g)) " (drop glue's shim, built natively)"))
-                                                     (fact! :core-bodies true)
-                                                     [(:symbol (:rec g)) (list 'mir/body (assoc r :phase "arbace-native-core"))]))))
+                                  (try (let [entry (fn [h b what]
+                                                     (let [base {:symbol (:symbol h) :name (:name h) :twin? (boolean (rec-syms (:symbol h))) :what what}]
+                                                       (try (assoc base :body (runtime-body (assoc b :name (:name h)) h nf abort?))
+                                                            (catch Throwable e (assoc base :body nil :error (.getMessage e))))))
+                                             core-es (doall (for [[h i] core-items] (assoc (entry h (:body i) "a native body failed at run time") :core true)))
+                                             ;; queue 448b: a shim that fails at run time keeps the record's (std's types' glue now
+                                             ;; among them), as a core body does
+                                             glue-es (doall (for [g glue-shims] (entry (:rec g) (:body g) "drop glue's shim failed at run time")))
+                                             {:keys [kept] fl :lines} (native-fallback (concat core-es glue-es))]
+                                         (doseq [l fl] (swap! lines conj l))
+                                         (doall (for [e kept]
+                                                  (do (when-not (:core e)
+                                                        (swap! lines conj (str "native " (:name e) " (drop glue's shim, built natively)"))
+                                                        (fact! :core-bodies true))
+                                                      [(:symbol e) (list 'mir/body (assoc (:body e) :phase "arbace-native-core"))]))))
                                        (catch Throwable e
                                          (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
                                          nil)))

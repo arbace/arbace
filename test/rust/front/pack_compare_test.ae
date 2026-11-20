@@ -411,6 +411,29 @@
       (check "negative: a switch on a local not constant unchanged" (let [x (assoc-in (b '(move (place 1))) [:blocks 0 :stmts] [])] (= x (br/prune-const-arms x))) true)
       (check "negative: a local read twice is no one-use constant"
              (let [x (update-in (b '(move (place 1))) [:blocks 1 :stmts] conj '(assign (place 0) (use (copy (place 1)))))] (= x (br/prune-const-arms x))) true))
+    ;; queue 503 (498-2 (a)): the run-time fallback per body. X (no record's twin) fails at run time: X left out, Y (no twin)
+    ;; naming X left out in turn, A (a twin) naming Y the record's; E (a twin) fails and is the record's alone, F naming E stays
+    ;; native, as do B and D (unrelated), G naming X by a function pointer's symbol left out
+    (let [body (fn [& syms] {:blocks (vec (for [s syms] {:stmts [] :term (list 'call '(const "f") [] '(place 0) 1 '(continue) (list 'callee {:kind "item" :symbol s}))}))})
+          es [{:symbol "a" :name "A" :twin? true :body (body "y")}
+              {:symbol "b" :name "B" :twin? true :body (body "core-ext")}
+              {:symbol "x" :name "X" :twin? false :body nil :error "no callee for p::precondition_check"}
+              {:symbol "y" :name "Y" :twin? false :body (body "x" "b")}
+              {:symbol "d" :name "D" :twin? false :body (body "b")}
+              {:symbol "e" :name "E" :twin? true :body nil :error "boom"}
+              {:symbol "f" :name "F" :twin? false :body (body "e")}
+              {:symbol "g" :name "G" :twin? true :body {:blocks [{:stmts ['(assign (place 1) (use (const "x" (ty "fn()") (zst) :fn-symbol "x")))] :term '(return)}]}}]
+          r (br/native-fallback es)]
+      (check "one failing body without a twin leaves the rest native: B, D, F kept" (mapv :name (:kept r)) ["B" "D" "F"])
+      (check "the lines: X and Y left out, A and G the record's (naming them), E the record's"
+             (sort (:lines r))
+             (sort ["native-dropped X (a native body failed at run time: no callee for p::precondition_check)"
+                    "record-kept E (a native body failed at run time: boom)"
+                    "native-dropped Y (names x, a native body left out (the record has no body of it))"
+                    "record-kept G (names x, a native body left out (the record has no body of it))"
+                    "record-kept A (names y, a native body left out (the record has no body of it))"]))
+      (check "negative: X with a record's twin drops nobody but X and E" (mapv :name (:kept (br/native-fallback (assoc-in es [2 :twin?] true)))) ["A" "B" "Y" "D" "F" "G"])
+      (check "negative: nothing failing keeps every body" (count (:kept (br/native-fallback (remove #(nil? (:body %)) es)))) 6))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)
