@@ -3085,3 +3085,23 @@ move to the oracle tier). arm64's judge held one recorded part: the AOT cell's o
   originals pass.
 - Judge 0.9973 -> 0.9993 ((23,032 + 0.5 x 31) / 23,063); independence 0.99945 -> 0.99987. Completeness 99.9 -> 99.7 (the 28 deferred
   lines now seen).
+
+### judge-rest, the second round (2026-11-20, later the same day: the coordinator's round toward complete independence)
+
+- **The disassembly's stated text, by Arbace's encoder.** arm64 has no disassembler of Arbace's (AR3 not built: a64i's decoder gives
+  its own instructions, not llvm-objdump's text), so a disassembly line that states an instruction's text alone, the decoder's text
+  beside until now, is held to the object the other way: its text read by Arbace's reader and encoded by Arbace's encoder
+  (`arbace.repr.asm.arm64.lenc`) gives a word that must be among the code words of Arbace's object in the run's order
+  (`objcheck/judge-texts`, the row's `:text`, beside in REAP's AOT cell as `:enc` is). A text the reader or the encoder does not take,
+  a FileCheck pattern, a label, or a bare number (a PC-relative target as llvm-objdump prints it, `adr x2, 0x4`: the address, not the
+  immediate; `adr`'s five lines failed before that rule) is not judged and stays beside. 2,337 of the 2,356 text lines are judged
+  (47 files), 2,337 met. DECISION: the encode direction for want of AR3 (alternative: AR3's decoder first, the survey's 2 to 4 days).
+- **llvm-objdump -D** (every allocated section; `mov-expr-as-immediate`'s `-Dr`) and **llvm-readelf -Ss** (the section headers then
+  the symbol table; `mapping-within-section`) as views; **FileCheck's numeric variables** in the subset (`[[#NAME:]]`, `[[#%x,NAME:]]`,
+  `[[#NAME]]`, `[[#NAME+N]]`; arbace.asm.amd64.decode-check's pattern-vars under `*vars*`); and a disassembly line whose offset a
+  string variable defines (`[[addr:[0-9a-f]+]]: 91000062 add ...`, `elf-reloc-addsubimm`) held to its offset and word.
+- Own now, out of `test/asm/object-recorded-arm64.tsv`: armv9.7a-mpamv2, fixup-absolute, fixup-absolute-signed, macro-hex-int,
+  mov-expression-as-immediate, optional-hash, prfum, rprfm (their texts), mov-expr-as-immediate, mapping-within-section,
+  elf-reloc-addsubimm. Controls: `prfum-vs-rprfm-texts`, `inst-vs-mapping-numeric` (objverdict), `optional-hash-vs-rprfm-own`
+  (object-check); by hand, fixup-absolute.s with one movk immediate changed, mapping-within-section.s with one symbol's value changed,
+  and with `[[#TEXT+1]]` for `[[#TEXT]]`, each fails.

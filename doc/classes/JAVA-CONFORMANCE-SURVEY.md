@@ -5131,3 +5131,18 @@ files). Of the 24 `:stdout` tests `test/java/golden/left.tsv` held after queue 4
   The 21 left keep their reasons in left.tsv; t05322's corrected: its action 0 varies too (DSA 512's q, ParameterCache's `q512`, has
   its top bit set, so r and s take 20 or 21 bytes in DER by k's draw: 44, 45 or 46; the JDK's two runs agreed by chance).
 - Judge 0.9983 -> 0.9986 ((14,452 + 0.5 x 42) / 14,494).
+- **Out of the judge's cases** (the user's decision of 2026-11-20, later the same day: a case whose expected output is undefined,
+  unspecified or host-dependent leaves the judge's cases, as the n/a cases and D435-3 (a), its run still counted in completeness, its
+  reason written per case). 16 of the 21 `:stdout` tests, each reviewed: `test/java/golden/out.edn` (`{ID {:kind :levels :why}}`):
+  6 `:unspecified` (threads' order t03385 t04989, identity hash sums t03503, getDeclaredMethods' order t04849 t05778, the DSA
+  signatures' DER lengths t05322), 6 `:host` (the heap's size t07649, the network interfaces t04983, ICMP on loopback t04991, the
+  system properties t05602, java.home t07657, the Unix user t07867), 4 `:implementation-defined` (HotSpot's jcmd help t07842, its
+  diagnostic options t07845 t07848, the JDK's key-material layouts t08207), at interp and compiled (32 cases). `java.check/verdicts`
+  refuses an entry with a verdict of its own (`:status`, `:golden`), not a test the JDK passes, or without a kind, its levels and a
+  reason, and runs its control every time (t03219, a `:status` test, put in the list must be refused); by hand, t03912 (a golden test)
+  put in the list and t03385's reason blanked were each refused. Their runs are still judged against the JDK's recorded stdout. The 5
+  fuzz-generated (t03455-t03458, t03567) stay on the JDK's record, DECISION: their output is fixed by their source but nothing states
+  it (the generator printed the exception and the fields, "a randomly generated test that exposed a crash"), no evaluator independent
+  of the JDK and of Arbace's Java implementation exists, and their 822-1,581 generated lines are not reviewable by hand; jtreg's
+  status alone, their verdict under jtreg, is the alternative JCV1 did not take for tests that only print. Judge 0.9986 -> 0.99965
+  ((14,452 + 0.5 x 10) / 14,462).
