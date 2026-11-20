@@ -4827,7 +4827,10 @@
       {:i :none}
     (do
     (when-not fid (fail :init "no default constructor for " (:name (abi/cls id))))
-    (when (and (checking?) (:deleted-sure (fnd fid))) (fail :overload "call to a deleted function " (:name (fnd fid))))
+    (when (and (checking?) (:deleted-sure (fnd fid)))
+      ;; (queue 492: an implicitly deleted one's reason at its class too, as resolve-overload*'s)
+      (cx-deleted-implicit! (fnd fid))
+      (fail :overload "call to a deleted function " (:name (fnd fid))))
     (let [f (fnd fid)]
       (cond
         ;; (queue 463, the checker: the trivial default constructor chosen, a user-declared defaulted one among them, kept
@@ -8275,6 +8278,11 @@
                                        (binding [*out* *err*] (println "in the body of" (:name f) (pr-str (loc-of (get-in (:node f) [:range :begin]))) ":" (.getMessage e)))
                                        (throw e)))
                             (g)))
+            ;; (queue 492, the checker: a refusal of a subobject's implicit initialization, which has no node of its own, at
+            ;; the constructor's when it has no mem-initializer (GCC's place: `C4() {}`), not at the last node an earlier
+            ;; function's analysis left, init/pr29043.C; with mem-initializers GCC's place is theirs, left as before)
+            _ (when (and (checking?) *at* (= :ctor (:kind f)) (not (:implicit f)) (:range (:node f)) (empty? (:inits f)))
+                (reset! *at* (:node f)))
             inits (when (= :ctor (:kind f)) (when-not (:implicit f) (trace #(ctor-inits ctx f))))
             ;; (CP362 (a), the user 2026-11-11: a consteval constructor's body, which only checks (basic_format_string's runs
             ;; the format string's scanner at compile time), is not evaluated by the code generator: the immediate invocation
@@ -8385,6 +8393,14 @@
                 :let [d (some-> (abi/cls sc) :dtor fnd)]
                 :when (and d (:deleted d) (:deleted-sure d))]
           (fail :overload "call to a deleted function ~" (:name (abi/cls sc))))
+        ;; (a default constructor, deleted for a reference member or a const member of a type that is no class, with no
+        ;; default member initializer, [class.default.ctor]/2.2-2.3 (an anonymous union's members aside): the member,
+        ;; as cx-deleted-implicit! reports it at the class, GCC's "uninitialized const member in 'class bar'")
+        (when (and (empty? (:ps (:ty f))) (not (:union c)))
+          (doseq [fl (:fields c)
+                  :when (and (not (:static fl)) (not (:init fl)) (string? (:name fl)) (seq (:name fl)) (:ty fl)
+                             (or (abi/ref? (:ty fl)) (and (:c (:ty fl)) (abi/scalar? (abi/unq (:ty fl))))))]
+            (fail :overload "call to a deleted function " (:name fl))))
         ;; (a union's default constructor, deleted when a variant member's default constructor is, no member having a
         ;; default member initializer, [class.default.ctor]/2.1-2.4: the union's members are not initialized by the
         ;; analysis below)
