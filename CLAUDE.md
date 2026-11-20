@@ -320,9 +320,9 @@ Prior art:
     `arbace/llvm/`, in `arbace_crop_paths`) on C's own target; Rust's from `crops/llvm-rust.edn` and `natives.edn` (`rust-read-essential`,
     `rust-front-essential`, `rust-core-essential`, `rsi-shim-essential` in the crops tier; `--full` the chains `rust-full`, `rsi-essential` its first,
     and `rust-aot`, on stage 0 and Go; the host `:rustc` only the oracle tier's, `rust-native-essential` among its steps).
-    The fragments of later batches not spliced yet wait in `test/gate/crops/`: cpp-native's, `python-night.edn`'s three (Python's steps that name the records night's check records, queue 436) and `python-packs.edn`'s three (those that read
-    its pydump packs), `python-outcomes.edn`'s two (pyi-wheels and pyi-runtime, held until the main host records their outcomes;
-    the rest of `python.edn` and `python-oracle.edn` spliced, queue 428), `natives.edn`'s
+    The fragments of later batches not spliced yet wait in `test/gate/crops/`: cpp-native's, `python-night.edn`'s three (Python's steps that name the records night's check records, queue 436; `python-packs.edn`'s three,
+    those that read its pydump packs, spliced since n-py-packs recorded the packs, and `python.edn`'s pyi-wheels and pyi-runtime since it
+    recorded their outcomes; the rest of `python.edn` and `python-oracle.edn` spliced, queue 428), `natives.edn`'s
     `ocaml-native-essential` and `ocaml-native`, `llvm-rust.edn`'s `llvm-roundtrip` (haskell's oracle steps are spliced).
     C++'s since CX10 (doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"), on stage 0 (the host's g++
     and clang++, the host `:cxx`, only the oracle tier's steps' since cpp-indep and cpp-90; `bin/gate --pins` runs `bin/repr-cpp pins check` and `host check`, `:crop-pins :cpp`):

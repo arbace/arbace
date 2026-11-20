@@ -13639,3 +13639,15 @@ write-ahead). 739 passing names of older classes' `:tests` are reported stale an
 move many).
 
 Python's scores (bin/crops-score): completeness 45, without by design 48, maturity 92, independence 98 (were 0, 0, 83, 98).
+## 2026-11-19: Python's pydump packs and outcomes recorded on the main host (n-py-packs, from 436-py-night)
+
+Recorded on the main host (amd64, :python c94aabf8..., CPython 3.14.10): `REPR_PYTHON_ORACLE=record bin/repr-python records record
+stdlib site-packages lib-test mutants` (4,467 s) wrote the pins and manifests test/python/records/python-pydump-{stdlib (5,040
+members, eff4400b...), site-packages (6,447, 60232051...), lib-test (8,071, 46a3a285...), mutants-lex (24, d3dcaf2d...),
+mutants-parse (24, 884b89b9...)}.{sha256,tsv} and the printed-{stdlib,site-packages,lib-test} packs; the packs themselves are in the
+main checkout's .tmp/oracle-packs/ (to push to the mirror with bin/oracle-records). `records record outcomes` (1,465 s) needs the
+gate's build at the key whose go/arbace/py is the checkout's (the seed's stage 0 is stale for pyi runtime check): run with
+ARBACE_HOST_EXE=.tmp/gate-exe/8d0e46484347addebee7/amd64/arbace; it wrote outcomes/smoke (290 files), repl (4), wheels (18).
+`records verify --sample 8` over the four: all equal, crossed pairs differ. python-packs.edn spliced into steps.edn:
+gate.crops check 0 problems, `bin/gate --full --plan` accepts it with no stand-ins. Not spliced: python-night.edn (python-roundtrip
+waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on n-py-rec's check records).

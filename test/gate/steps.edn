@@ -2397,6 +2397,20 @@
    :cmd "bin/pyi check --aot --no-pyi"
    :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
    :parts [{:part light}] :summary ["^check --aot:|^verdicts|classed|failing|negative control|FAIL" 6]}
+  ;; queues 205, 207: the pinned wheels installed by arbace.python.wheels and their samples on pyi; the wheels from the main
+  ;; checkout's .tmp (GTS212); pip on pyi against CPython's pip (pip-probe) is the oracle tier's pyi-oracle
+  {:name pyi-wheels :mem-gib 3 :phase :full :chain pyi-aot
+   :cmd "bin/pyi wheels fetch && bin/pyi wheels check"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/python/wheels.edn" "test/python/corpora.edn"]
+   :inputs [:lib-tools :tools :python :pyi] :summary ["^wheels |FAIL|control" 3]}
+  ;; ---- pyi-full (serial: its steps above :night-concurrent's 4 GiB)
+  ;; queue 235: bin/pyi runtime check (the smoke programs and REPL sessions against their recorded outcomes), its family's control
+  ;; test/python/controls-runtime.edn (a smoke program's and a REPL session's run against another's outcome, smoke_controls)
+  ;; on the gate's executable (DECISION 1 (a) of queue 321, as pyi-check-aot-goi)
+  {:name pyi-runtime :mem-gib 5 :phase :full :chain pyi-full :needs [go-build]
+   :cmd "env ARBACE_HOST_EXE=\"$GATE_EXE\" PYI_RUNTIME_REQUIRE=compiled bin/pyi runtime check"
+   :hosts [:prog :stage0 :go] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+   :summary ["^runtime: |^repl: |FAIL|^control" 12]}
   {:name python-roundtrip-oracle :mem-gib 2 :phase :oracle :chain python-oracle
    :cmd "REPR_PYTHON_ORACLE=live bin/repr-python roundtrip {part} && REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --text {part}"
    :hosts [:stage0 :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn" "tools/pydump/PYTHON_VERSION"]
@@ -2410,6 +2424,54 @@
            {:part pip-probe :cmd "bin/pyi wheels fetch && bin/pyi wheels pip-probe"}
            {:part bench :cmd "bin/pyi bench"}]
    :summary ["^check|differs|DIFFERS|^runtime|^wheels|benchmarks|classed|FAIL|control" 6]}
+  ;; ---- python-read: the front end over the big corpora (whole) and the tokens and trees (a seventh a night over the results file)
+  {:name python-front :mem-gib 2 :phase :full :chain python-read
+   :cmd "bin/pyi scope-check {part} && bin/pyi compile-check --full {part}"
+   :hosts [:stage0] :never-loads [arbace.j2g]
+   :pins ["test/python/corpora.edn"]
+   :inputs [:lib-tools :tools :python :pyi]
+   :parts [{:part stdlib :pins ["test/python/records/python-pydump-stdlib.sha256"]}
+           {:part site-packages :pins ["test/python/records/python-pydump-site-packages.sha256"]}
+           {:part lib-test :pins ["test/python/records/python-pydump-lib-test.sha256"]}]
+   :summary ["equal|not passing|FAIL|control" 4]}
+  ;; queue 240: syntax-errors' cases are made by pyi (bin/pyi script tools/pydump/syntax_cases.py, compiled by pyi's AOT over the
+  ;; runtime pyi-aot-runtime compiles) and judged by their own verdicts: TamaGo's go and the runtime's inputs
+  {:name python-native :mem-gib 2 :phase :full :chain python-read :needs [pyi-aot-runtime]
+   :cmd "bin/repr-python lex-check --no-mutants {only} {part} && bin/repr-python parse-check --full --no-mutants {only} {part}"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g]
+   :pins ["test/python/corpora.edn"]
+   :inputs [:lib-tools :tools :python :pyi]
+   :parts [{:part stdlib :pins ["test/python/records/python-pydump-stdlib.sha256"]}
+           {:part site-packages :pins ["test/python/records/python-pydump-site-packages.sha256"]}
+           {:part lib-test :pins ["test/python/records/python-pydump-lib-test.sha256"]}
+           {:part lex-errors :pins ["test/python/records/python-pydump-lex-errors.sha256"]}
+           {:part syntax-errors :pins ["test/python/records/python-pydump-syntax-errors.sha256"]
+            :cmd "bin/repr-python parse-check --no-mutants syntax-errors && bin/repr-python parse-check --full --no-mutants syntax-errors"}
+           {:part mutants :clean-only true
+            :pins ["test/python/records/python-pydump-mutants-lex.sha256" "test/python/records/python-pydump-mutants-parse.sha256"]
+            :cmd "bin/repr-python lex-check samples && bin/repr-python parse-check --full samples"}]
+   :summary ["^lex-check|^parse-check|FAIL|control" 6]
+   :rotate {:only "--only-list {list}" :universe "test/python/parse-check-results.edn" :id-re "^\\[\"([^ \"]+) ([^\"]+)\"" :id-as "$1/$2"
+            :subset "test/python/corpora.edn" :subset-key :subset-native :failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"
+            :always ["stdlib/Lib/keyword.py" "stdlib/Lib/colorsys.py" "lib-test/Lib/test/test_keyword.py" "lib-test/Lib/test/test_colorsys.py"
+                     "site-packages/usr/lib/python3.14/site-packages/packaging/_structures.py"
+                     "site-packages/usr/lib/python3.14/site-packages/packaging/errors.py"]}}
+  {:name python-records-verify :mem-gib 2 :phase :oracle :chain python-oracle
+   :cmd "bin/repr-python records verify {part}"
+   :hosts [:stage0 :go :python] :never-loads [arbace.j2g]
+   :pins ["test/python/corpora.edn" "tools/pydump/PYTHON_VERSION"]
+   :inputs [:lib-tools :tools :python :pyi]
+   :parts [{:part essential :cmd "bin/repr-python records verify samples synthetic errors lex-errors syntax-errors"
+            :pins ["test/python/records/python-pydump-samples.sha256" "test/python/records/python-pydump-synthetic.sha256"
+                   "test/python/records/python-pydump-errors.sha256" "test/python/records/python-pydump-lex-errors.sha256"
+                   "test/python/records/python-pydump-syntax-errors.sha256"]}
+           {:part stdlib :cmd "bin/repr-python records verify --sample 64 stdlib" :pins ["test/python/records/python-pydump-stdlib.sha256"]}
+           {:part site-packages :cmd "bin/repr-python records verify --sample 64 site-packages"
+            :pins ["test/python/records/python-pydump-site-packages.sha256"]}
+           {:part lib-test :cmd "bin/repr-python records verify --sample 64 lib-test" :pins ["test/python/records/python-pydump-lib-test.sha256"]}
+           {:part mutants :pins ["test/python/records/python-pydump-mutants-lex.sha256" "test/python/records/python-pydump-mutants-parse.sha256"]}
+           {:part outcomes}]
+   :summary ["^verify|^records|FAIL|control" 12]}
   ;;@ steps (GT9: a crop's steps spliced above this line, gate.crops splice: test/gate/crops/*.edn)
   ]
 
@@ -2438,7 +2500,7 @@
          :asm-amd64 [asm-amd64-essential asm-amd64-roundtrip asm-amd64-encode asm-amd64-decode asm-amd64-object asm-amd64-objverdict asm-amd64-table x86i-check x86i-decode asm-amd64-print-oracle asm-amd64-table-oracle asm-amd64-link-oracle]
          :asm-arm64 [asm-arm64-essential a64i-essential a64i-go-tools a64i-go-compile a64i-goroot a64i-check asm-arm64-table asm-arm64-table-oracle]
          :wasm [wasm-essential wasm-roundtrip wasm-wast wai-check wai-go wai-aot wai-go-aot wai-js]
-         :python [pyi-aot-runtime python-read-essential pyi-essential pyi-runtime-tables pyi-aot-essential pyi-c2j pyi-check-aot pyi-runtime-textsig python-roundtrip-oracle pyi-oracle]
+         :python [pyi-aot-runtime python-read-essential pyi-essential pyi-runtime-tables pyi-aot-essential pyi-c2j pyi-check-aot pyi-runtime-textsig pyi-wheels pyi-runtime python-roundtrip-oracle pyi-oracle python-front python-native python-records-verify]
          ;;@ crops (GT9: a crop's entry spliced above this line)
          }
  ;; GT8's budgets (the user, 2026-11-03), seconds, for :crops crops: the essential gate's wall (a merge), the nightly run
@@ -2706,7 +2768,12 @@
   pyi-aot-essential "arbace/python/aot.ae"
   pyi-c2j "test/python/c2j/pyi/c2j_control.ae"
   pyi-check-aot "arbace/python/aot.ae"
+  pyi-wheels "bin/pyi"
+  pyi-runtime "test/python/controls-runtime.edn"
   python-roundtrip-oracle "test/python/controls-read.edn"
   pyi-oracle {:waived "record-ref --check judges two runs against the references (tools/pydump/refs.py check), the tables are regenerations compared byte for byte, pip-probe's controls are bin/pyi's, the bench is a speed record"}
+  python-front "bin/pyi"
+  python-native "test/python/controls-read.edn"
+  python-records-verify {:waived "the verifies' own crossed pairs (one file's live dump, or one outcome's live run, against another's record, which must differ: control passed or the verify fails; tools/pydump/records.bash)"}
   ;;@ controls (GT9: a crop's controls spliced above this line)
   }}
