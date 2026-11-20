@@ -14026,3 +14026,92 @@ Alternatives considered:
 - A hand-written golden file for T15892 (961 KB): not needed under D435-2 (a).
 - Counting T7861 out as unspecified: not done. Its text is GHC's implementation's and deterministic, a defined output not derived,
   as the user's rule keeps such cases.
+
+## 2026-11-20: hs-lane2-1120: lane 2, Haskell's own-libraries records (bin/hsi check --libs own, eval and AOT, whole)
+
+Branch `hs-lane2-1120` = `62fed300a` (mac/hs-own-stg-1120 `b26839c64` merged with mac/hs-judge-1120 `a83f27150`). HF10-P29 (a)'s
+two records, `test/haskell/check-hsi-own.edn` and `check-hsi-aot-own.edn`, made by runs instead of the INTERIM merge of hs-p22
+(review 1111b, finding 2). They decide Haskell's eval and AOT independence stages (crops.edn's `:own-inputs :haskell`, the stated
+0.5 each while the record was INTERIM or absent).
+
+The preparation (`.tmp/lane2/prep.sh` in the worktree): `bin/hsi pins --fetch`, `bin/repr-haskell corpus fetch`, then the own
+libraries at the branch's head as the gate's producers make them: `lib-check --ifaces own --judge` and `lib-stg --ifaces own` of
+ghc-internal, base and the 20 packages above base (deepseq to process), every process under 1.9 GB. Every judge 0 worse but two:
+bytestring 2 modules and time 17 modules `ok -> errors` (Data.ByteString.Lazy.Internal, Short.Internal; time's Calendar, Clock and
+LocalTime internals), the errors "no type for GHC.Internal.TH.Lib appE/conE" and an unsolved `Quote`: the derived `Lift` instances
+of hs-own-stg's second round reach Template Haskell's library, whose interface the packages' closure lacks. Not fixed here (the
+records were not re-recorded); hs-own-stg's line to look at.
+
+The runs, with `ARBACE_MEM_GIB=16` and `HSI_OWN_PACKAGES` the 20 packages, under the heavy lock: eval `bin/hsi check --libs own
+--corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record` (59 min, tree peak 11.7 GB): 950 programs, 879 own, exit 1 with
+13 programs in no class; AOT `--aot` with `--only` check-hsi-aot.edn's 139 ids, `--jobs 2 --record` (40 min, tree 7.1 GB): exit 0,
+135 own (133 pass), 4 on the pack (4 pass), fibheaps in `:own-speed`, AsyncRerun in `:async-revert`, 0 unclassed.
+
+Eval's 13, by cause:
+- Four bugs of the front end, fixed:
+  - T9533b, T10246 and mul2 stopped hsi with "no STG for the module main::": an Int literal outside Int#'s range checked against
+    Int (`case 0x10000000000000001 :: Int of`, `g 0xFD94E3B7FE36FB18 49`) took typecheck.ae's short cut, `lit-core` with no
+    fromInteger and no evidence, an STG call of `"main:/"`. GHC's `shortCutLit` (GHC.Tc.Utils.TcMType's go_integral) takes Int only
+    in `platformInIntRange` and Word only in `platformInWordRange`; outside, the literal is `fromInteger` of the Integer with Num's
+    evidence, which wraps. `check-expr`'s HsOverLit does so now (both ranges).
+  - T24818 stopped hsi with "not a word: (##){..}": `cmm_number (# #)`, the foreign import's wrapper inlined at its call, passed
+    `(##)` itself to the primcall. tostg.ae's foreign call makes a `(# #)` argument void#, as Unarise's unariseFunArg makes a
+    MultiVal [] argument voidArg (the wrapper already passed void#).
+  The four STG files after the fix differ from the run's only there (`fromInteger $fNumInt` of the Integer; void# for `(##)`). No
+  other STG of either run has the patterns (no `"main:/"`, no `(##)` in an ffi or primcall argument, no Word literal of 20 digits
+  or negative, in the 891 eval and 136 AOT programs' STG and the 882 own library modules'), and the AOT programs with foreign calls,
+  primcalls or Integer literals of several chunks (synthetic primops-int and primops-word, T24893, ffi003, ffi004, ffi014, ffi017,
+  ffi021, ffi022) compiled again with the fixes give their STG byte for byte. So the fixes change these four programs alone.
+- Nine at the check's 60 s of CPU (status 137, `:reason :limit`) on the own -O0 libraries: hash, mutstore2, dom-lt, T22798,
+  T21969 and unpack_sums_6 (on the pack within the limit: 14 to 35 s; unpack_sums_6 has no pack line, its GHC record pending, a
+  timing test, fragile(22504) in all.T, -O in GHC's run), and bspt, fulsom and pic (no reference: the NofibUtils programs of
+  `:no-reference-own`, whose outcome had been status 0).
+
+A targeted rerun of the 13 (`--only`, `--jobs 2`, `HSI_FRONT_SHARDS=2`, the same `ARBACE_MEM_GIB=16` and packages; 12 min, tree peak
+6.2 GB; not under the heavy lock, which had three live tickets waiting since 18:40, and not under `ulimit -v 8388608`, which the
+check's own `ulimit -v` of 16 GiB per program cannot raise): the four pass, the nine are killed at the limit again (54 to 85 s of wall
+on a loaded host). `--record` replaced the 13 lines and kept the other 937.
+
+Classes (the check's rules: classed by what fails):
+- `divergences-own.edn` `:own-speed`: hash, mutstore2, dom-lt, T22798, T21969 and unpack_sums_6 (none passed in either run: further
+  over the limit than gate B1's members, the same cause, HF10's -O1 line). T21969 leaves `:light-cap-stdout-ok`: at 16 GiB it is no
+  longer Go's out-of-memory at the light cap but the CPU limit, its stderr equal (`:differs [:status]`).
+- `:no-reference-own` takes the killed outcome too (`:outcomes`, status 0 or 137): bspt, fulsom, pic, judged against the missing
+  reference either way; HF10-P64 (a) still takes them out.
+- `divergences.edn` `:oracle-pending` (deferred): T5462Yes1, T13688 and unboxedsums_unit_tests, HF10-P35 (a)'s `:oracle-pending`
+  (no GHC record, and they need GHC's STG: the front end's typecheck errors, or the ghc package). The check leaves the result out of
+  its judging (the user's decision of 2026-11-13: in no class, not failing); bin/reap reads every non-pass of a record as a case and
+  reported them as 3 problems once it read the own record. The class is for the matrix; the check is unchanged.
+The check's own judge (bin/lib/hsi/check's lines from `unclassed=0` to the loop's end, run on the record): 0 unclassed over the whole
+record; on the first run's record with the committed classes 13, with the new classes 4 (the front end's four), as it must.
+
+Checks of the records: every run line is `:libs :own` (879) or `:libs :pack` with its `:front` (40: 23 `:fallback`, 7
+`:typecheck-errors`, 8 `:ineligible` with `:why`, 1 `:timeout`, 1 `:stg`); the 31 lines without `:libs` are never run (28
+`:no-dump`, 2 `:skipped`, T17920's Cmm main, which passes with no STG); 27 lines of status 137, none a pass (D-HSJ-3 (a)); the first
+line is the check's header, not ";; INTERIM"; the eleven negative controls failed as they must in the whole run (the rerun ran none).
+The AOT record: 139 lines, 135 own, 4 pack, 1 of status 137 (fibheaps), not a pass.
+
+The 71 programs not own: never run (31): 19 import the parallel package (Control.Parallel, its Strategies, Parallel, Control.Seq),
+2 System.Random, 2 System.Time, 1 Data.STRef.Unboxed, 3 have no main file, nofib/smp/threads004 stops the front end (forkOnIO), and
+GHC built none of these 28 (`:no-dump`); T24809 and T4262 skipped by all.T; T17920 a Cmm main. On the pack (40): 23 of
+own-fallback.txt (21 pass; compareByteArrays and T23071 at the limit), 7 stopped by the front end's typecheck (5 pass; T5462Yes1 and
+T13688 oracle-pending), ManyUbxSums's front end timeout, quotRem2Large's StackOverflowError in tostg, and 8 ineligible: the ghc
+package (T13825-unit; unboxedsums_unit_tests, oracle-pending), IOExts (nofib/gc/happy), GHCi.TH.Binary, GHC.Utils.Encoding,
+GHC.TypeLits.Experimental, GHC.Internal.PrimopWrappers, and tcrun022's RULES pragma.
+
+crops-score counted 841 of 950 eval cases own, not 879: `cell-ids` took the cell's ids from the source's `:file`, the pack's
+check-hsi.edn (909 programs), while bin/reap's hsi-pick reads the `:own-file` (950), so the 38 own programs only the own record holds
+(own verdicts pending, own-verdicts-pending.tsv) counted 0.5. `test/crops/score.ae`'s `source-file` reads a source's `:own-file`
+once it is there and not INTERIM, as hsi-pick does, for the cell's ids; a self-test with its control (an own file not there keeps
+the source's file). No other crop has an `:own-file`; `scores.edn` changed in Haskell's block alone.
+
+Results: `bin/reap --record`: Haskell eval 859 / 61 / 30 (was the pack's 815 / 62 / 32, 909 cases), AOT 137 / 1 / 1 (was 138 / 1 /
+0); 56 of 56 cells, 0 problems. `bin/crops-score --record`: Haskell's eval stage 0.5 -> 0.963 (879 of 950 own), AOT 0.5 -> 0.986
+(135 of 139), independence 79.92 -> 98.90 (floor 79 -> 98), completeness 97.21 -> 97.22 (meant 99.03 -> 98.95), maturity 100.
+`--judge --strict` 0 problems; `bin/records-check` 9 pairs, 0 problems; `bin/reap --self-test` and `bin/crops-score --self-test`
+pass. `bin/hsi divergences` on the pack's record: 909 programs, 0 not (the new class's three members not in it, a note).
+
+Alternatives not taken: classing the four front-end programs in a new own class instead of fixing them (the fixes are GHC's rules
+and change nothing else); dropping `:oracle-pending` rows from reap's reader (the user's decision counts them); a whole second run
+for one record state (the fixes provably touch the four programs alone; `--only --record` is the check's way to replace lines).
+Not done: doc/AGENDA.md (the main session's), the gate.
