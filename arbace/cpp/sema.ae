@@ -4946,6 +4946,39 @@
                                                                     *cx-copy-list*)))))))))
   r)
 
+(defn- cx-closure-members!
+  "Queue 508 (the checker): a closure type's special members ([expr.prim.lambda.closure]/13 of C++20; /20 of C++17):
+  before C++20 it has a deleted default constructor and a deleted copy assignment operator (so no implicit move
+  assignment, its move assignment deleted alike); from C++20 the same for a lambda with a lambda-capture (`[&]` and `[=]`
+  among them), which has no default constructor at all, a captureless one's both defaulted. GCC's \"use of deleted
+  function\" at the default-initialization or the assignment (cpp2a/lambda1.C, cpp0x/lambda/lambda-ctor-neg.C)."
+  [id capture?]
+  (when (and (checking?) (or (< (long *cxx-year*) 20) capture?))
+    (let [c (abi/cls id)
+          del {:deleted true :deleted-sure true :deleted-why "a lambda closure type has a deleted default constructor or copy assignment operator"}]
+      (doseq [x (:ctors c) :let [g (fnd x)] :when (and (:implicit g) (empty? (:ps (:ty g))))]
+        (if (< (long *cxx-year*) 20)
+          (upd-fn! x merge del)
+          (abi/update-cls! id update :ctors (fn [cs] (vec (remove #{x} cs))))))
+      (doseq [x (:methods c) :let [g (fnd x)] :when (and (:implicit g) (= "=" (:op g)))]
+        (upd-fn! x merge del)))))
+
+(defn- cx-elided-copy!
+  "Queue 508 (the checker): before C++17 an object of class `id` initialized from a prvalue of its own class -- the
+  converted prvalue of a copy-initialization ([dcl.init]/17.6.3 of C++14: \"the result of the call ... is then used to
+  direct-initialize\"), a variable, return value, argument or member initialized from one, a mem-initializer's
+  `b(f())` -- is initialized by a copy or move constructor that may be elided, and still [class.copy]/31 of C++14 requires
+  it ([class.temporary]/1: \"even if the copy/move constructor is not called, all the semantic restrictions, such as
+  accessibility, shall be satisfied\"): a deleted one chosen is GCC's \"use of deleted function\". Judged as CX12's rule
+  judges any call (resolve-overload*: the deleted one chosen surely); any other refusal of that choice is not judged.
+  `e` the prvalue (or nil: a prvalue of the class made by the copy-initialization's converting constructor)."
+  [id e]
+  (when (and (checking?) (< (long *cxx-year*) 17))
+    (let [a (or e {:op :temp :init {:i :none} :ty {:k :class :id id} :cat :pr})]
+      (try (resolve-overload (ctor-candidates id) [a] nil)
+           (catch arbace.lang.ExceptionInfo x
+             (when (re-find #"call to a deleted function" (str (.getMessage x))) (throw x)))))))
+
 (defn- class-init
   "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
   [t args ctx style]
@@ -4959,7 +4992,7 @@
     (cond
       ;; copy-initialization from a prvalue of the class: in place ([dcl.init]/17.6.1)
       (and (= 1 (count args)) (not= :init-list (:op (first args))) (= (class-id (:ty (first args))) id) (= :pr (:cat (first args))))
-      {:i :expr :e (first args)}
+      (do (cx-elided-copy! id (first args)) {:i :expr :e (first args)})
       ;; (cpp-s11: a braced list as the one argument of a parenthesized direct-initialization, `U u({3, 4})`, is no
       ;; list-initialization of U: the constructors are chosen for the list as their argument, [dcl.init.general]/16.6.2.1
       ;; with [over.ics.list]; it had initialized U from the list's elements, <format>'s _Utf32_view<subrange<iterator>>
@@ -5007,6 +5040,11 @@
                  (when (> (count args) (count subs)) (throw x))
                  (init-for t {:op :init-list :items (vec args) :paren true} ctx :list))
                (throw x))))
+      ;; (queue 508, the checker: a copy-initialization from another type, by a converting constructor, before C++17
+      ;; then copies the prvalue it made, cx-elided-copy!)
+      (and (= style :copy) (= 1 (count args)) (not= :init-list (:op (first args)))
+           (let [c (class-id (:ty (first args)))] (not (and c (or (= c id) (abi/derived-from? c id))))))
+      (let [r (ctor-init id args ctx)] (cx-elided-copy! id nil) r)
       :else (ctor-init id args ctx)))))
 
 (defn- inheriting-ctor!
@@ -6968,6 +7006,7 @@
         ret (if (= :auto (:k ret)) abi/void ret)
         _ (upd-fn! fid #(-> % (assoc-in [:ty :ret] ret) (assoc :params pids :tbody body-s :nrvo (nrvo-var body-s) :statics @(:statics lctx))))
         _ (finish-class! id)
+        _ (cx-closure-members! id (not (str/blank? intro)))
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
             (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
         inits (sort-by first @(:inits lam))]
@@ -7126,6 +7165,7 @@
             (abi/update-cls! id assoc :glam-conv {:tid tid :base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id])
                                                                     :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}}))
         _ (finish-class! id)
+        _ (cx-closure-members! id (not (str/blank? intro)))
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
             (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
         inits (sort-by first @(:inits lam))]
@@ -8237,7 +8277,13 @@
                                          (catch arbace.lang.ExceptionInfo x
                                            (when (and (checking?) (:codegen/refused (ex-data x)) (:name d) (not (has-auto? (:ty (var* id)))))
                                              (enter! (:scope ctx) (:name d) {:e :var :id id}))
-                                           (throw x)))
+                                           ;; (queue 508, the checker: a default-initialization's refusal, no initializer
+                                           ;; analyzed to locate it, at the declaration, as GCC: it had taken the stale last
+                                           ;; node, a later function's line)
+                                           (if (and (checking?) (:codegen/refused (ex-data x)) (nil? (:cx/node (ex-data x)))
+                                                    (nil? (init-kid d)) (:range d))
+                                             (throw (ex-info (.getMessage x) (assoc (ex-data x) :cx/node d) x))
+                                             (throw x))))
                                t (:ty (var* id))
                                ;; a constexpr local, or a const integral one, initialized by a constant: folded (clang
                                ;; emits the value)
