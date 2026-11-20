@@ -2986,3 +2986,52 @@ than now: D1120-1's 6, the heavy rows' 3 and one mutant rule; or D1120-2 alone.
     (floor 99).
   - (b) Count the whole files out only (no sections): the stage 0.951; but 32 of the read cell's cases would have no judge at all.
   - (c) Keep opt's record (LLS46/LLS50's boundary: a whole split-file test has no one verdict).
+
+## Decided (the main session for the user, 2026-11-20): D1120-1 (a), D1120-2 (a)
+
+## As built: D1120-2 (a), D1120-1 (a) (2026-11-20, branch `llvm-judge-1120`)
+
+**D1120-2 (a): the sections in the whole split-file tests' place.** `section_verdict` (bin/repr-llvm) gives `invalid` to a section
+every command naming which is a `not llvm-as` or `not opt` (no pass but verify) reading it as its input (its last positional word, else
+its stdin's `<`) with only own_verdicts' plain options (-S, -disable-output, -passes=verify, -f, -o FILE, redirections;
+-allow-incomplete-ir relaxing: no fragment), as own_verdicts takes a whole file's `not llvm-as %s`; the fragment what follows `error:` on
+the first check line of that line's FileCheck prefixes in FileCheck's check file (`%s` the parent, `%t/NAME` a section, read from the
+section's directory). A section also taken by a plain command, or under `not --crash` or another tool's `not`, has none; a read with
+`--disable-verify` claims nothing and leaves a rejection standing (ptrtoaddr's dst_not_addr_size: parsed by `llvm-as --disable-verify`,
+rejected by `not llvm-as`), and still bars `valid` (LLS50 unchanged: the 60 earlier sections' verdicts computed again, all the same).
+The sections: `bin/llvm-corpus split-tests` (new; `scan` runs it after its own split) expands the parents of
+`test/llvm/llvm-test-split-reject.list` by the pin's split-file with each test's own options (--leading-lines) into the main checkout's
+`.tmp/llvm/split/`, each test into a fresh directory swapped in; the list holds the 203 sections of 30 of the 32 tests that have an own
+verdict (182 invalid, 21 valid; 9 have none: `not --crash` 2, a pass 7; loop-md-errs and ctx-instrumentation-invalid-roots none at all),
+byte for byte the scratch split they were chosen from. verify-llvmtest reads the list beside its four: 1,009 modules, 967 by their own
+verdict, 42 opt's (the 32 whole files, kept in the read cell and counted out of the judge's cases as LLS57 (b) did, 6 sections only
+`cat` or llvm-diff reads, 2 XFAIL, lds-reject, GCOVProfiling/version). Of the 203: 141 pass; 62 do not (61 verdicts, 1 first message),
+rejections the whole file's opt record hid behind its first section's error: class `:llvmtest-section-rules` (deferred,
+test/llvm/divergences-read.edn: the rules LLParser and the Verifier of 23.1.5 have and repr/llvm lacks: llvm.convert.to/from.arbitrary.fp
+8, the ptrauth global_ctors autoupgrade 7, blockaddress across address spaces 7, target extension types' properties 7, AMDGPU's
+work-group-size attributes 6, value-profile !prof 5, symbolic address spaces 6, constant splats 4, ptrtoaddr's width 3, pauthabi module
+flags 2, branch_weights' unknown kinds 2 (one a false error), skip-value-numbers 2, three of 1). Recorded (`check verify-llvmtest
+--record`, 36 s, 1.4 GB), `bin/reap --record` (LLVM read 3,845 / 1 / 0 to 3,986 / 1 / 62, 0 problems). Controls:
+`_control/section-reject-vs-valid` (verify-controls.txt) fails as it must; controls-test.bash's fake tree: section b (a plain `not opt`)
+now `invalid` (its valid content: the verdict differs), new parent D/v.ll: i (`not llvm-as <`, its parent's prefix: the fragment) and
+j (`FileCheck %t/j.ll` after a `--disable-verify` read: the section's own CHECK line) invalid and met, k (`not --crash`) and l (a pass)
+none; all 17 cases ok.
+
+**D1120-1 (a): the reviewed verdicts.** `test/llvm/llvmtest-reviewed.tsv` (NAME, VERDICT, FRAGMENT, BASIS, WHY), read by own_verdicts
+for a module its RUN lines leave `-` (a row for one they judge is refused, the RUN lines' verdict kept; the fifth column `reviewed`).
+The six rows, each with its RUN and CHECK lines and the 23.1.5 source lines: the four DirectX tests declare none of their intrinsics,
+so LLParser's validateEndOfModule declares each from its call and rejects the call's signature against the intrinsic's table
+(LLParser.cpp:377-389, Intrinsics.cpp:975-976) while parsing, before opt sets `-mtriple` (optdriver.cpp:614-616); cooperative.atomic's
+rule is keyed by the intrinsic and the pointer's address space number (VerifierAMDGPU.cpp:371-380, called for every intrinsic call at
+Verifier.cpp:7087); noalias_scope_decl's first CHECK is the single-scope rule (Verifier.cpp:7586-7599), before the option's guard
+(7603-7605). The review corrected itself once: saturate_errors' undefined attribute group #0 is no error at all (LLParser.cpp:217-227
+merges only the groups it knows), not a later one. `bin/repr-llvm reviewed-check` (new): five columns, VERDICT valid or invalid, a
+BASIS with a RUN line and a source line, a WHY, a module of verify-llvmtest its RUN lines alone leave `-`; 6 rows, 0 refused; three bad
+rows (a module its RUN lines judge, a VERDICT `broken`, a BASIS with no source line) refused. `check verify-llvmtest --only` the six:
+each `invalid` by its reviewed verdict, verdict and message met; `_control/reviewed-vs-valid` fails as it must.
+
+**Scores** (`bin/crops-score --record`): the judge's cases 4,732 own and 542 recorded to 4,941 and 504 of 5,445 (the 32 whole files out,
+the 203 sections and 6 reviewed in), the stage 0.949 to 0.954, LLVM's independence 0.9898 to 0.9908 (floor 98 to 99); completeness
+0.9933 to 0.9894 (floor 99 to 98): the read cell's 62 new deferred rows, the gaps the sections show. `--judge --strict`,
+`bin/records-check`, `make check-makefile`: 0 problems. The rules to port are arbace/repr/llvm's reader and verify.ae (embedded since
+W2, so in `gate_key`): porting ten of the 62 brings completeness back to 0.990.

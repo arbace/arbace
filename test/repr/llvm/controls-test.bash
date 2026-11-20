@@ -38,8 +38,19 @@ printf 'D-t.ll-a\t%s\nD-t.ll-b\t%s\nD-t.ll-c\t%s\nD-t.ll-d\t%s\nAssembler-invali
 echo "_control/section-vs-reject Assembler-invalid-dilocation-field-bad D-t.ll-a" > "$w/sec-ctl.txt"
 grep -v 'D-t.ll-[bc]' "$w/sec.list" > "$w/sec2.list"
 LLVM_SRC=$w/fk/src REPR_LLVM_VERIFY_CONTROLS=$w/sec-ctl.txt "$src/bin/repr-llvm" verify-check "$w/sec2.list" "$w/s1" > "$w/s1.log" 2>&1; expect "verify-check: a section's own verdict from its parent's RUN lines (a, d), the control fails as it must" 0 $? "$w/s1.log" '^control _control/section-vs-reject fails as it must'
-# b (under not) and c (an output only) have no verdict of their own: opt's, and no record here, so the verb fails, with three own verdicts (a, d, the rejection)
-LLVM_SRC=$w/fk/src "$src/bin/repr-llvm" verify-check "$w/sec.list" "$w/s2" > "$w/s2.log" 2>&1; expect "verify-check: a section under not, or an output only, has no own verdict" 1 $? "$w/s2.log" '\(3 by their own verdict, 2 opt'
+# c (an output only) has no verdict of its own: opt's, and no record here, so the verb fails; b (under a plain `not opt`) is rejected by its
+# own verdict since D1120-2 (a), its content a valid module: four own verdicts (a, b, d, the rejection)
+LLVM_SRC=$w/fk/src "$src/bin/repr-llvm" verify-check "$w/sec.list" "$w/s2" > "$w/s2.log" 2>&1; expect "verify-check: a section under a plain not is rejected by its own verdict, an output only has none" 1 $? "$w/s2.log" '\(4 by their own verdict, 1 opt'
+expect "verify-check: the plain not's own invalid against a valid module's verify differs" 1 1 "$w/s2/verify.tsv" '^D-t.ll-b	invalid	valid	differs	'
+# D1120-2 (a): `invalid` sections with their fragment, from the parent (i: --check-prefix) or from the section itself (j: FileCheck %t/j.ll,
+# after a read with --disable-verify, which claims nothing); `not --crash` (k) and a `not` of a pass (l) give none
+printf '; RUN: split-file %%s %%t\n; RUN: not llvm-as < %%t/i.ll 2>&1 | FileCheck %%s --check-prefix=BAD-I\n; RUN: llvm-as %%t/j.ll --disable-verify -o /dev/null\n; RUN: not llvm-as %%t/j.ll -o /dev/null 2>&1 | FileCheck %%t/j.ll\n; RUN: not --crash opt %%t/k.ll -S\n; RUN: not opt -passes=instcombine %%t/l.ll -S\n; BAD-I: <stdin>:4:18: error: invalid field \x27bad\x27\n' > "$w/fk/src/llvm-project-23.1.5.src/llvm/test/D/v.ll"
+mkdir -p "$w/fk/split/D/v.ll"
+for x in i j k l; do cp "$e/Assembler-invalid-dilocation-field-bad.ll" "$w/fk/split/D/v.ll/$x.ll"; done
+{ for x in i j k l; do printf 'D-v.ll-%s\t%s\n' "$x" "$w/fk/split/D/v.ll/$x.ll"; done; } > "$w/sec4.list"
+LLVM_SRC=$w/fk/src "$src/bin/repr-llvm" verify-check "$w/sec4.list" "$w/s4" > "$w/s4.log" 2>&1; expect "verify-check: sections a plain not llvm-as rejects are invalid by their own verdict, not --crash and a pass are not" 1 $? "$w/s4.log" '\(2 by their own verdict, 2 opt'
+expect "verify-check: the parent's prefix gives a section its fragment" 1 1 "$w/s4/verify.tsv" "^D-v.ll-i	invalid	invalid	same	same	invalid field 'bad'"
+expect "verify-check: FileCheck's check file a section gives its fragment" 1 1 "$w/s4/verify.tsv" "^D-v.ll-j	invalid	invalid	same	same	invalid field 'bad'"
 # review 1111, finding 5: sections the tools may never verify have no own verdict: `||` (the failure allowed), --disable-verify=VALUE,
 # llc started after the IR verifier, llvm-link dropping the unused (--only-needed), and any section of an XFAIL parent (D/x.ll)
 printf '; RUN: split-file %%s %%t\n; RUN: opt %%t/e.ll -disable-output || true\n; RUN: opt --disable-verify=true %%t/f.ll -S\n; RUN: llc -start-after=codegenprepare %%t/g.ll -o -\n; RUN: llvm-link --only-needed %%t/h.ll -S\n' > "$w/fk/src/llvm-project-23.1.5.src/llvm/test/D/u.ll"

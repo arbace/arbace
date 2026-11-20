@@ -12,6 +12,10 @@
 #   bin/llvm-corpus sample          the committed sample lists test/llvm/llvm-test-{valid,reject,split}.list (NAME<tab>llvm/test/...
 #                                   or split/..., deterministic: every k-th file of each stratum, by sorted path)
 #   bin/llvm-corpus resolve LIST OUT  LIST's relative paths made absolute (OUT: NAME<tab>ABSOLUTE PATH), the lists the repr/llvm verbs take
+#   bin/llvm-corpus split-tests [LIST]  (D1120-2 (a), llvm-judge-1120) the whole split-file tests of KIND reject whose sections stand in their
+#                                   place (LIST's sections, default test/llvm/llvm-test-split-reject.list: NAME<tab>split/DIR/TEST.ll/SECTION.ll)
+#                                   expanded by the pin's split-file with the options of the test's own split-file line (--leading-lines)
+#                                   into .tmp/llvm/split/ beside scan's; nothing removed (scan runs it too, after its own)
 #   bin/llvm-corpus intrinsics      the intrinsic table of the verifier (arbace/repr/llvm/intr_table.ae): llvm/include's .td
 #                                   files out of the tarball, the pin's llvm-tblgen --dump-json over Intrinsics.td, each
 #                                   intrinsic's name, IIT type signature (TypeSig), overloaded flag, immarg and Range params,
@@ -41,6 +45,22 @@ tar_=${LLVM_TARBALL:-$main/.tmp/llvm/llvm-project-23.1.5.src.tar.xz}
 test_=$src/$top/llvm/test
 w=${LLVM_WORK:-$main/.tmp/llvm}   # the scan's and the split sections' directory
 split_file=${LLVM_SPLIT_FILE:-/usr/lib/llvm23/bin/split-file}
+# split_tests LIST: the parents of LIST's sections (split/DIR/TEST.ll/SECTION.ll) split into $w/split/DIR/TEST.ll, each by its own
+# split-file line's options (--leading-lines, --no-leading-lines), into a fresh directory swapped in (a reader never sees half a test)
+split_tests() {
+  local f o d
+  [ -f "$1" ] || { echo "llvm-corpus split-tests: no $1" >&2; return 1; }
+  awk -F'\t' '!/^#/ && NF { p = $2; sub(/^split\//, "", p); sub(/\.ll\/[^\/]*$/, ".ll", p); print p }' "$1" | LC_ALL=C sort -u | while read -r f; do
+    [ -f "$test_/$f" ] || { echo "llvm-corpus split-tests: no $test_/$f (bin/llvm-corpus extract)" >&2; return 1; }
+    o=$(grep -m1 'RUN:.*split-file' "$test_/$f" | grep -o -- '--\(no-\)\?leading-lines' | head -1) || o=
+    d=$w/split/$f; mkdir -p "$(dirname "$d")"
+    rm -rf "$d.new"; mkdir -p "$d.new"
+    "$split_file" $o "$test_/$f" "$d.new" 2>/dev/null || { echo "split-file failed: $f" >&2; rm -rf "$d.new"; continue; }
+    rm -rf "$d.old"; [ -d "$d" ] && mv "$d" "$d.old"; mv "$d.new" "$d"; rm -rf "$d.old"
+  done
+  awk -F'\t' -v w="$w" '!/^#/ && NF { if ((getline l < (w "/" $2)) < 0) { print "llvm-corpus split-tests: missing " $2; bad = 1 } close(w "/" $2) } END { exit bad }' "$1" >&2 || return 1
+  echo "llvm-corpus split-tests: $(awk -F'\t' '!/^#/ && NF' "$1" | wc -l) sections of $(awk -F'\t' '!/^#/ && NF { p = $2; sub(/\/[^\/]*$/, "", p); print p }' "$1" | sort -u | wc -l) tests in $w/split"
+}
 
 scan_awk() { cat <<'AWK'
 function flush(   k, f, t) {
@@ -215,6 +235,8 @@ PY
         case $s in *.ll) printf '%s\t%s\t%s\n' "$f" "${s#$w/split/}" "$(wc -c < "$s")" >> "$w/sections.tsv" ;; esac
       done
     done
+    # D1120-2 (a): the whole split-file tests of KIND reject whose sections stand in their place (not in sections.tsv: sample's strata unchanged)
+    split_tests "$root/test/llvm/llvm-test-split-reject.list" || exit 1
     # the counts
     {
       printf '# llvm/test of llvmorg-23.1.5 (llvm-project-23.1.5.src.tar.xz): .ll files by top directory and KIND (bin/llvm-corpus scan)\n'
@@ -309,6 +331,8 @@ PY
     [ -s "$work/verify.tsv" ] && [ -s "$work/full.tsv" ] || { echo "verify-record: verify-check wrote no results in $work" >&2; exit 1; }
     awk -F'\t' 'NR == FNR { f[$1] = $2; next } { print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" f[$1] }' "$work/full.tsv" "$work/verify.tsv" > "$out"
     echo "verify-record: $(wc -l < "$out") rows in $out; verdicts $(awk -F'\t' '$4 == "same"' "$out" | wc -l), whole stderr $(awk -F'\t' '$6 == "same"' "$out" | wc -l)" ;;
+  split-tests)
+    split_tests "${2:-$root/test/llvm/llvm-test-split-reject.list}" ;;
   resolve)
     awk -F'\t' -v s="$src/$top" -v w="$w" '{ p = ($2 ~ /^split\//) ? w "/" $2 : s "/" $2; print $1 "\t" p }' "$2" > "$3" ;;
   full-lists)
