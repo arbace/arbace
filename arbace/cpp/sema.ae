@@ -1480,10 +1480,25 @@
                  (:inner n))))
 
 
+;; queue 497 (the checker): GNU's unavailable attribute ("the entity is available for declaration but not for use":
+;; __attribute__((unavailable)), [[gnu::unavailable]]), whose use GCC rejects ("'f' is unavailable"), as clang's
+;; err_unavailable: a declaration that carries it.
+(defn- unavailable-node? [n]
+  (boolean (and (map? n)
+                (or (some #(and (map? %) (= "NativeAttr" (:kind %)) (#{"unavailable" "__unavailable__"} (:_gnu %))) (:inner n))
+                    (some #(#{"unavailable" "__unavailable__"} (:name %)) (:_gattrs n))))))
+
+(declare explicit-spec*)
+
 (defn- explicit-spec
   "A function declaration's explicit-specifier ([dcl.fct.spec]/3): `explicit`, or `explicit(constant-expression)` true
   when the expression converts to true (C++20; CP280 (a)); a value the slice cannot evaluate counts as explicit, as
   before."
+  [scope ^String text]
+  (first (explicit-spec* scope text)))
+
+(defn- explicit-spec*
+  "explicit-spec's [explicit? sure?]: sure? false for an explicit(cond) whose value the slice could not evaluate (queue 497)."
   [scope ^String text]
   (let [t (or text "")]
     (if-let [[_ rest] (re-find #"(?s)^\s*(?:inline\s+|constexpr\s+)*explicit(?![A-Za-z0-9_$])\s*(\(.*)?" t)]
@@ -1497,9 +1512,9 @@
               x (when end (subs rest 1 end))
               v (when x (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope x)))
                              (catch arbace.lang.ExceptionInfo _ nil)))]
-          (if (number? v) (not (zero? (double v))) true))
-        true)
-      false)))
+          (if (number? v) [(not (zero? (double v))) true] [true false]))
+        [true true])
+      [false true])))
 
 (defn- unfinished-targs?
   "cpp-s11: whether `scope` is a class template specialization's (or within one) whose template arguments name a class
@@ -1623,6 +1638,18 @@
                        (and (checking?) (abi/class? (:ty e)) (cx-incomplete-cls (:ty e)))
                        (throw (ex-info (str "codegen: invalid use of incomplete type '" (:name (abi/cls (:id (abi/unq (:ty e))))) "'")
                                        {:codegen/refused :incomplete :cx/node n}))
+                       ;; (queue 497, the checker: [class.mfct]/4 with [dcl.meaning.general]/2.1, a member function or
+                       ;; conversion function declared with its class's name before its own, of a complete class (no
+                       ;; template's) that declares no member of that name at all (for a conversion function no conversion
+                       ;; function): GCC's "no declaration matches", at the declaration)
+                       (and (checking?) (abi/class? (:ty e)) (#{"CXXMethodDecl" "CXXConversionDecl"} (:kind n)) (string? (:name n))
+                            (let [c (abi/cls-of (:ty e))]
+                              (and c (:complete c) (not (:defining c)) (not (:tmpl c)) (not (:targs c)) (not (:lambda c)) (not (:header c))
+                                   (if (= "CXXConversionDecl" (:kind n))
+                                     (not-any? #(= :conv (:kind (fnd %))) (:methods c))
+                                     (empty? (.get ^java.util.HashMap (:names (:scope c)) (:name n)))))))
+                       (throw (ex-info (str "codegen: no declaration matches '" (:name n) "' in '" (:name (abi/cls-of (:ty e))) "'")
+                                       {:codegen/refused :decl :cx/node n}))
                        (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
                scope)
         ;; (queue 445: a block-scope declaration's home is its innermost enclosing namespace, its types resolved in its block)
@@ -1696,6 +1723,8 @@
            :path (:path home)
            :scope home
            :explicit (explicit-spec scope (node-text n))
+           ;; (queue 497, the checker: whether that is the program's value, not the slice's default)
+           :explicit-sure (or (not (checking?)) (second (explicit-spec* scope (node-text n))))
            :defaulted (when (:explicitlyDefaulted n) true) :deleted (boolean (:explicitlyDeleted n))
            :pos (long (or (:_b n) 0))
            :src *src*}
@@ -1706,7 +1735,9 @@
         f (cond-> f xobj (assoc :xobj xobj) tags (assoc :abi-tags tags))
         ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
         f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
-                                       :access (when cid *member-access*)))
+                                       :access (when cid *member-access*)
+                                       ;; (queue 497: GNU's unavailable attribute)
+                                       :unavailable (unavailable-node? n)))
         ;; (round 54, the checker: [dcl.fct.def.general]/2, a function definition's return type a class incomplete at its body -- declared,
         ;; not defined there, not one being defined (a member's body is a complete-class context) nor a template's instance; clang's
         ;; err_func_def_incomplete_result)
@@ -1753,6 +1784,7 @@
                             (:always-inline f) (assoc :always-inline true)
                             (:used f) (assoc :used true)
                             (:noreturn f) (assoc :noreturn true)
+                            (:unavailable f) (assoc :unavailable true)
                             ;; an out-of-line `= default` definition (G5c: nested_exception::~nested_exception() noexcept = default
                             ;; in nested_exception.cc): defined here, not inline, the class's key function
                             (and (:defaulted f) (not (header-node? n))) (assoc :defaulted true :out-of-line-default true)
@@ -1812,6 +1844,12 @@
   [n ty]
   (when (and (checking?) (not= "extern" (:storageClass n)) (not (:extern n)) (abi/class? ty))
     (let [c (abi/cls (:id ty))]
+      ;; (queue 497: a variable of a class declared with GNU's unavailable attribute, GCC's "'Foo' is unavailable")
+      ;; (named by the class's own name: a typedef's name is no use of it to GCC, ext/attr-unavailable-8.C)
+      (when (and c (:unavailable c) (not (:tmpl c))
+                 (re-find (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote (str (:name c))) "(?![A-Za-z0-9_])"))
+                          (str (get-in n [:type :qualType]))))
+        (*on-refusal* (ex-info (str "codegen: '" (:name c) "' is unavailable") {:codegen/refused :unavailable}) n))
       (when (and c (not (:tmpl c)) (not (:lambda c)) (or (:defining c) (not (:complete c))))
         (*on-refusal* (ex-info (str "codegen: variable has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))))
 
@@ -1910,6 +1948,7 @@
             ;; scope, [basic.link]/3.2: c_locale.cc's `const char* const category_names[...]` had been an external global)
             cq (loop [t ty] (cond (:c t) true (abi/arr? t) (recur (:of t)) :else false))
             v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
+               :unavailable (and (checking?) (unavailable-node? n))
                :linkage (if (linkage-c? home) :c :cpp)
                ;; (queue 351: `extern` with an initializer is a definition, [basic.def]/2: hashtable-aux.cc's `extern const
                ;; unsigned long __prime_list[] = {...}`, external though const, [basic.link]/3)
@@ -2094,7 +2133,9 @@
         t {:k :class :id id}]
     (when-not old
       (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
-                                     :union (= "union" (:tagUsed n)) :header (header-node? n)})
+                                     :union (= "union" (:tagUsed n)) :header (header-node? n)
+                                     ;; (queue 497, the checker: GNU's unavailable attribute on the class)
+                                     :unavailable (and (checking?) (unavailable-node? n))})
       (when nm (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
                                   ;; (queue 492, the checker: a member class's access, as a member typedef's, check-type-access!)
                                   (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*)))))
@@ -2292,7 +2333,8 @@
         (try (declare-node*! scope n)
              (catch arbace.lang.ExceptionInfo e
                ;; (queue 487: and one that names an ambiguous name, cx-unqualified-ambiguous!, cx-qualified-ambiguous!)
-               (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type)" (str (.getMessage e)))
+               ;; (queue 497: and an out-of-line member declaration no member of its class matches)
+               (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches ')" (str (.getMessage e)))
                  (do (*on-refusal* e n) nil)
                  (throw e))))
         (declare-node*! scope n)))))
@@ -4417,7 +4459,12 @@
                                         (or (some true? (map better-ics? a b)) (tiebreak fa fb n0))))
         best (filter (fn [x] (every? #(or (identical? % x) (better x %)) viable)) viable)]
     (cond
-      (= 1 (count best)) (let [b (ffirst best) f (fnd b)]
+      (= 1 (count best)) (let [b (ffirst best) f (fnd b)
+                               ;; (queue 497, the checker: GNU's unavailable attribute on the function chosen, GCC's "is
+                               ;; unavailable", when chosen as surely as the CX12 rule below trusts a choice)
+                               _ (when (and (checking?) (:unavailable f)
+                                            (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
+                                   (fail :unavailable "'" (:name f) "' is unavailable"))]
                            ;; CX12 (the checker): the best viable function deleted ([dcl.fct.def.delete]/2; clang's
                            ;; err_ovl_deleted_call, err_ovl_deleted_special_init), when it was the only viable one: the
                            ;; slice's ranking is not trusted to have chosen it over another)
@@ -4428,6 +4475,16 @@
                                       (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
                              (cx-deleted-implicit! f)
                              (fail :overload "call to a deleted function " (:name f) (if (:implicit f) " (implicitly deleted)" "")))
+                           ;; (queue 497, the checker: [class.compare.default]/2, a defaulted == of a class with a member of
+                           ;; reference type or with variant members (a union, an anonymous union member) is defined as
+                           ;; deleted; chosen as the CX12 rule above trusts a choice)
+                           (when (and (checking?) (:defaulted f) (= "==" (:op f))
+                                      (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
+                             (when-let [c (some-> (or (:cls f) (class-id (abi/non-ref (first (:ps (:ty f)))))) abi/cls)]
+                               (when (or (:union c)
+                                         (some #(abi/ref? (:ty %)) (:fields c))
+                                         (some #(and (:anon %) (:union (abi/cls-of (:ty %)))) (:fields c)))
+                                 (fail :overload "call to a deleted function " (:name f) " (implicitly deleted)"))))
                            b)
       (empty? viable)
       (let [{:keys [sure-drops unsure-drops]} (when (checking?) *drops*)]
@@ -4843,9 +4900,15 @@
     (when-let [f (some-> (:fn r) fnd)]
       ;; (a conditional explicit-specifier, explicit(e), and a template's specialization not judged: a value the slice
       ;; cannot evaluate counts as explicit, explicit-spec)
-      (when (and (:explicit f) (:node f) (not (re-find #"\bexplicit\s*\(" (str (node-text (:node f))))))
+      ;; (queue 497: explicit(cond) judged when the slice evaluated cond, :explicit-sure)
+      (when (and (:explicit f) (:node f) (:explicit-sure f))
         (throw (ex-info (str "codegen: converting to '" (:name (abi/cls (:id (abi/unq t)))) "' from initializer list would use explicit constructor")
-                        (cond-> {:codegen/refused :init} (map? *cx-copy-list*) (assoc :cx/node *cx-copy-list*)))))))
+                        ;; (queue 497: at the braced list's end, as GCC: cpp2a/explicit20.C's list over five lines)
+                        (cond-> {:codegen/refused :init}
+                          (map? *cx-copy-list*) (assoc :cx/node (let [r (:range *cx-copy-list*)]
+                                                                  (if (and (:end r) (:offset (:end r)))
+                                                                    (assoc *cx-copy-list* :range {:begin (merge (:begin r) (:end r))})
+                                                                    *cx-copy-list*)))))))))
   r)
 
 (defn- class-init
@@ -6352,7 +6415,17 @@
                                          (count args))
                       (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x)))
                                                            (do (when (System/getenv "CPP_OP_TRACE") (binding [*out* *err*] (println "operator" o (.getMessage x) (count members) (count frees))))
-                                                               (when (re-find #"ambiguous|deleted function" (.getMessage x)) (throw x)))
+                                                               (when (re-find #"ambiguous|deleted function" (.getMessage x)) (throw x))
+                                                               ;; (queue 497, the checker: an assignment to a class, which has no
+                                                               ;; built-in candidate ([over.built] has none for a class), whose
+                                                               ;; operator= candidates are surely none viable: GCC's "no match for
+                                                               ;; 'operator='")
+                                                               (when (and (checking?) (= o "=") lc (not *cx-in-implicit*)
+                                                                          ;; (not inside an implicit or defaulted member's body: a deleted
+                                                                          ;; copy assignment's memberwise body, constexpr-tracking-const3.C)
+                                                                          (not (some-> (:fn-id ctx) fnd ((some-fn :implicit :defaulted))))
+                                                                          (re-find #"^codegen: no viable function among [1-9]" (.getMessage x)))
+                                                                 (fail :nomatch "no match for 'operator=' (operand types " (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")))
                                                            (throw x))))]
         (cond
           (nil? best) (cond (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
@@ -7170,7 +7243,12 @@
     "CXXNullPtrLiteralExpr" {:op :null :ty abi/nullptr-t :cat :pr}
     "GNUNullExpr" {:op :int :v 0 :ty abi/long* :cat :pr}
     "ParenExpr" (analyze ctx (first (kids n)))
-    "DeclRefExpr" (name-expr ctx n)
+    "DeclRefExpr" (let [x (name-expr ctx n)]
+                    ;; (queue 497, the checker: a variable declared with GNU's unavailable attribute, named)
+                    (when-let [v (when (checking?) (some #(when (and (map? %) (= :var (:op %)) (:id %)) %) [x (:e x) (:e (:e x))]))]
+                      (when (:unavailable (var* (:id v)))
+                        (fail :unavailable "'" (:name (var* (:id v))) "' is unavailable")))
+                    x)
     "CXXThisExpr" (this-expr ctx)
     "UnaryOperator"
     (or
@@ -7582,6 +7660,15 @@
     "CXXDeleteExpr" (let [e (rv (analyze ctx (first (kids n))))
                           et (:to (abi/unq (:ty e)))
                           arr (boolean (:isArrayAsWritten n))
+                          ;; (queue 497, the checker: [expr.delete]/9-10 with [dcl.fct.def.delete]/2, the class's own lookup of
+                          ;; operator delete (a destroying one, [expr.delete]/10.1, among them) finding deleted functions alone:
+                          ;; whichever the selection takes is deleted, GCC's "use of deleted function")
+                          _ (when (and (checking?) (not (:isGlobal n)))
+                              (when-let [cid (let [u (abi/unq et)] (when (abi/class? u) (class-id u)))]
+                                (let [dn (if arr "operator delete[]" "operator delete")
+                                      [k ids] (alloc-lookup cid dn false)]
+                                  (when (and (= :class k) (seq ids) (every? #(let [f (fnd %)] (and (:deleted f) (:deleted-sure f))) ids))
+                                    (fail :overload "call to a deleted function " dn)))))
                           d (delete-dealloc et arr (boolean (:isGlobal n)))
                           bt (loop [t (abi/unq et)] (if (abi/arr? t) (recur (abi/unq (:of t))) t)) c (class-id bt)]
                       {:op :delete :e e :array arr :dealloc d :global (boolean (:isGlobal n))
@@ -7712,6 +7799,7 @@
         st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
         v (cond-> {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n)) :tls (boolean (:tls n))}
             cv (assoc :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv))
+            (and (checking?) (unavailable-node? n)) (assoc :unavailable true)
             (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n))
             (and (checking?) (not (:constexpr n)) (or (:_constinit n) (some #(= "ConstInitAttr" (:kind %)) (:inner n)))) (assoc :cx-constinit true :cx-range (:range n)))
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
@@ -7985,7 +8073,26 @@
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
-           "StaticAssertDecl" (do (when-not (some-> (:fn-id ctx) fnd :tinst) (check-static-assert! ctx d)) {:s :null})
+           ;; (queue 497, the checker: in a function template's specialization for arguments with no dependent part too,
+           ;; [temp.inst]/11 with [dcl.pre]/10, its failure alone judged -- a sure false value; any other refusal there the
+           ;; slice's, dropped)
+           "StaticAssertDecl" (do (if-let [ti (some-> (:fn-id ctx) fnd :tinst)]
+                                    (when (and (checking?)
+                                               (not-any? #(and (map? %) (#{:tparam :tparam-v :ttp :dep :tdep :texpr :auto :pack-exp} (:k %)))
+                                                         (tree-seq coll? seq (:args ti)))
+                                               ;; (no requires-expression: its value is the slice's approximation, [expr.prim.req]'s
+                                               ;; substitution judged by what the slice analyzes; cpp2a/spaceship-sfinae3.C)
+                                               (not-any? #(and (map? %) (= "RequiresExpr" (:kind %)))
+                                                         (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (dissoc % :_t :_ent :range :loc)) (seq %)) d))
+                                               ;; (on one line: GCC reports a failed conjunct where it is written)
+                                               (let [b (get-in d [:range :begin :offset]) e (get-in d [:range :end :offset])]
+                                                 (and b e (<= (long b) (long e) (count *src*))
+                                                      (not (str/includes? (subs *src* (int b) (int e)) "\n")))))
+                                      (try (check-static-assert! ctx d)
+                                           (catch arbace.lang.ExceptionInfo x
+                                             (when (= "codegen: static assertion failed" (.getMessage x)) (throw x)))))
+                                    (check-static-assert! ctx d))
+                                  {:s :null})
            (fail :decl "local declaration " (:kind d)))))))
 
 (defn- block-ctx [ctx] (assoc ctx :scope (new-scope :block (:scope ctx))))
@@ -8368,6 +8475,19 @@
         _ (when (and (checking?) (:union c))
             (when-let [i2 (second (filter #(and (not (:baseInit %)) (not (:delegatingInit %)) (get-in % [:anyInit :name])) (:inits f)))]
               (throw (ex-info (str "codegen: initializations for multiple members of '" (:name c) "'") {:codegen/refused :union :cx/node i2}))))]
+    ;; (queue 497, the checker: [class.base.init]/12, a non-delegating user-provided constructor potentially invokes the
+    ;; destructor of each potentially constructed subobject of class type (a union's variant members aside), and
+    ;; [class.dtor]/15 makes a deleted one ill-formed: GCC's "use of deleted function 'A::~A()'" at the constructor)
+    (when (and (checking?) (not deleg) (not (:implicit f)) (not (:defaulted f)) (not (:inh-from f)) (not (:union c)))
+      (doseq [t (concat (map (fn [b] {:k :class :id (:cls b)}) (:bases c))
+                        (map (fn [v] {:k :class :id v}) (abi/vbases-init cid))
+                        (map :ty (remove :anon (:fields c))))
+              :let [u (loop [u (abi/unq t) k 0] (if (and (abi/arr? u) (< k 8)) (recur (abi/unq (:of u)) (inc k)) u))]
+              :when (and (not (abi/ref? t)) (abi/class? u))
+              :let [d (some-> (:dtor (abi/cls (:id u))) fnd)]
+              :when (and d (:deleted d) (:deleted-sure d))]
+        (throw (ex-info (str "codegen: call to a deleted function " (:name d) (if (:implicit d) " (implicitly deleted)" ""))
+                        (cond-> {:codegen/refused :overload} (:node f) (assoc :cx/node (:node f)))))))
     (if deleg
       {:delegate (init-of {:k :class :id cid} deleg)}
       {:bases (vec (for [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
