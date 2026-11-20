@@ -13748,3 +13748,26 @@ store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 
   repr-java-report, -split, -attr equal byte for byte; the logs equal but the times), `--check --no-javac` (forms and report
   equal; repr-java-nojavac.edn but its times and :peak-rss), `--full --origins` (forms equal); a failing chunk's process
   (a tool that exits 3): 181 FAILED, the summary line "0 converted, 181 failed".
+
+## 2026-11-20: java-split-1120, part 2: jrt-convert's convert step in chunk processes, proven by verify
+
+- Measured first (under bin/heavy-lock): jrt-convert's javac step (java.base's closure compiled twice by javac on Arbace, one
+  context, GOMEMLIMIT 28GiB) peaks at 3.4 GiB in 145 s: not a hog; the step's 40.1 GiB is its convert read alone. A chunk's
+  process of front-check's jdk read takes 2.2 to 3.5 GiB (27 of 28 chunks, run under `ulimit -v 8 GiB`, the coordinator's
+  rule for jobs under 8 GiB), but the chunk holding `jdk/internal/util/regex/IndicConjunctBreak.java` overran 8 GiB: its
+  forms (1.19 MB, `(or (or (or ...)))` some 600 deep: a generated `||` chain) take the layout (arbace.repr.java.layout, at
+  write-output) 9.0 GiB and 210 s a side, read alone (the regex package's two files, GOMEMLIMIT 4GiB, 7 minutes for both
+  fronts). So two chunk processes at once, not three: the step's peak is that chunk's and one other's.
+- `bin/jrt-convert`'s convert: `bin/repr-java main -m repr.java.chunks read-jdk` (ARBACE_PATH ROOT/test), REPR_JAVA_PROCS 2,
+  REPR_JAVA_PROC_GOMEMLIMIT 4GiB (the environment's win). The round trip's two jdk reads the same (`bin/lib/repr-java/roundtrip`).
+- Proof: `GOMEMLIMIT=28GiB bin/jrt-convert verify` (the gate's command) at 42494a700, where jdk/ verified on 2026-11-20 with
+  the same javac tool (`javac-60886b4973e7`, its key the checkout's), with this branch's bin/jrt-convert, front-check,
+  roundtrip and test/repr/java/chunks.ae laid over (worktree `.tmp/worktrees/java-split-ref`): "verify: jdk is the conversion,
+  byte for byte (3579 forms files, 22 data files)", status 0; its lines as the gate's pass of 2026-11-20 (3,372 files, 3,281
+  native, 91 fallbacks "declined :names/hoist: no symbol", 0 failed, 3,579 of 3,579 equal, 7,032 classes, edge 168 classes and
+  1,356 members), the fallbacks' list in the same order. Peak 12.4 GiB of the process tree (the IndicConjunctBreak chunk's
+  process 11.8 GiB), 1,367 s (convert 1,040 s), against 40.1 GiB and 2,119 s (convert 1,758 s, 41,672 CPU s: the collector's
+  thrash under one process's limit gone; the read's native-ms 929,523 against 2,571,474).
+- test/gate/steps.edn: jrt-convert `:mem-gib` 34 -> 14 (1.1 x 12.4); its command unchanged (GOMEMLIMIT 28GiB now bounds only
+  the light steps; the chunk processes take 4GiB each). The admission is the larger of `:mem-gib` and 1.1 x the largest kept
+  pass's peak, so the old passes (42 GiB) keep it high until they age out of the store (plan.ae's `admission`).
