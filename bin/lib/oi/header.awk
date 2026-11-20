@@ -114,10 +114,51 @@ END {
   if (hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
   # (a plugin test's readonly .ml files are its units, not helper programs)
   if (dlmode) helper = 0
+  # depend mode (queue 478, DECISION 476-1 (a): ocamltest's tools as Arbace's own, judged by the test's own .reference): a test whose
+  # bytecode alternative runs `ocamlc -depend ARGS` (commandline = "-depend ARGS"; ocamlc.byte) in its build environment, its readonly
+  # files and subdirectories copied there, and compares the compiler's output with its own .reference (compiler_reference =
+  # "${test_source_directory}/BASE.reference"; check-ocamlc.byte-output), the native alternative ending it. The run is bin/oi's
+  # depend program (test/ocaml/depend/ocamldep.ml on compiler-libs' units, `bin/oi depend`) with ARGS in that directory: the row's
+  # arguments, its libraries compiler-libs', its environment @depend=1 and @dyncopy=FILE,... (the light AOT level too; not the
+  # compiled level, whose library has no compiler-libs run yet). Anything else in the alternative: the class
+  dpmode = 0
+  if (aot != 2 && hasbuild && !dlmode) for (j = 1; j <= m; j++) if (trim(st[j]) ~ /^commandline *= *"-depend /) dpmode = 1
+  # (only a header whose statements are all of that set, to the native alternative: another keeps the class it had)
+  if (dpmode) for (j = 1; j <= m; j++) {
+    s = trim(st[j]); if (s == "") continue
+    if (s ~ /^setup-ocamlopt\.(byte|opt)-build-env$/) break
+    if (s !~ /^((readonly_files|subdirectories|commandline|compiler_reference) *= *"|(setup-ocamlc\.byte-build-env|ocamlc\.byte|check-ocamlc\.byte-output)$)/) { dpmode = 0; break }
+  }
+  if (dpmode) helper = 0
+  psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
+    if (dpmode) {
+      if (s ~ /^(readonly_files|subdirectories) *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] !~ /^[A-Za-z0-9_.]+$/) cls(""); pcopy = pcopy (pcopy == "" ? "" : ",") hm[q] }
+        continue
+      }
+      if (s == "setup-ocamlc.byte-build-env") { if (psetup) break; psetup = 1; continue }
+      if (s ~ /^setup-ocamlopt\.(byte|opt)-build-env$/) { if (pchk) break; cls(s) }
+      if (s ~ /^commandline *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v)
+        if (!psetup || pdone || v !~ /^-depend( |$)/) cls("commandline = " v)
+        sub(/^-depend */, "", v); gsub(/[ \t]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.\/+-]+$/) cls("commandline = -depend " v)
+        pargs = v; continue
+      }
+      if (s == "ocamlc.byte") { if (!psetup || pargs == "" || pdone) cls(s); pdone = 1; continue }
+      if (s ~ /^compiler_reference *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v)
+        if (v != "@TSD@/" hbase ".reference") cls("compiler_reference = " v)
+        continue
+      }
+      if (s == "check-ocamlc.byte-output") { if (!pdone) cls(s); pchk = 1; continue }
+      cls(s)
+    }
     if (dlmode) {
       if (s ~ /^(readonly_files|subdirectories) *= *"/) {
         v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
@@ -289,6 +330,10 @@ END {
   if (dlmode) {
     if (!drun) cls("")
     env = env " @dyn=" dsteps " @dynmain=" dmain (dcopy == "" ? "" : " @dyncopy=" dcopy)
+  }
+  if (dpmode) {
+    if (!pchk) cls("")
+    args = pargs; incs = " complib"; env = env " @depend=1" (pcopy == "" ? "" : " @dyncopy=" pcopy)
   }
   if (helper) {
     if (!hmain || nruns == 0) cls("")
