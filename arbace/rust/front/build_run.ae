@@ -1276,10 +1276,28 @@
        true]
       [body false])))
 
+(defn- o0-simplify-const-condition
+  "SimplifyConstCondition (simplify_branches.rs, -O0's AfterConstProp after SingleUseConsts, and Final): a switch whose
+  operand is a constant scalar made a goto to the target its value selects (queue 479: assert_unsafe_precondition!'s
+  `if !false` in unreachable_unchecked's and NonZero::new_unchecked's precondition_check, `_1 = const false; switchInt(move
+  _1)`, its operand made the constant by SingleUseConsts; SimplifyCfg-final then drops the dead arm and merges the goto);
+  [body changed?]"
+  [body]
+  (let [fold (fn [t] (if-let [[_ op targets otherwise] (when (and (seq? t) (= 'switch (first t))) t)]
+                       (let [v (when (and (seq? op) (= 'const (first op))) (nth op 3 nil))
+                             bits (when (and (seq? v) (= 'scalar (first v)) (integer? (second v))) (second v))]
+                         (if (and bits (vector? targets) (integer? otherwise))
+                           (list 'goto (or (some (fn [[k b]] (when (= (bigint k) (bigint bits)) b)) targets) otherwise))
+                           t))
+                       t))
+        b (update body :blocks (fn [bs] (mapv #(update % :term fold) bs)))]
+    [b (not= (:blocks b) (:blocks body))]))
+
 (defn o0-normalize
   "BODY as rustc's -O0 optimizations would leave it for the passes our runtime MIR stops before (RemoveStorageMarkers,
   RemoveZsts' unit assignments, SimplifyCfg-final, InstSimplify's reborrow, SingleUseConsts (OURS? alone: our body, not the
-  record's), CopyProp's copies of locals, RenameReturnPlace, SimplifyLocals), in rustc's order (queue 474: RemoveZsts before
+  record's), SimplifyConstCondition (queue 479) with SimplifyCfg-final again, CopyProp's copies of locals, RenameReturnPlace,
+  SimplifyLocals), in rustc's order (queue 474: RemoveZsts before
   SimplifyCfg, run_optimization_passes' order: a branch's `_t = const ()` gone before the arms' goto blocks merge), the kinds
   that changed it: [body #{kind}]"
   [body & [ours?]]
@@ -1294,6 +1312,12 @@
         _ (when c2 (swap! kinds conj :inst-simplify))
         [b2 cs] (if ours? (o0-single-use-consts b2) [b2 false])
         _ (when cs (swap! kinds conj :single-use-consts))
+        ;; queue 479: SimplifyConstCondition, then SimplifyCfg-final over what it left dead or merged (idempotent: the record's
+        ;; optimized body has been through both)
+        [b2 cc] (o0-simplify-const-condition b2)
+        b2 (if cc (do (swap! kinds conj :const-condition)
+                      ((requiring-resolve 'arbace.rust.front.passes/simplify-cfg) b2 {:preserve-switch-reads false}))
+               b2)
         b3 (loop [x b2] (let [[y c] (o0-copy-prop x)] (if c (do (swap! kinds conj :copy-prop) (recur y)) x)))
         [b3 cr] (o0-rename-return b3)
         _ (when cr (swap! kinds conj :nrvo))
