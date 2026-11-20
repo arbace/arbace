@@ -1262,3 +1262,170 @@ newest 3 are kept: run it before another two builds).
   by the seed's units: helps no re-seed (-core moves), only a seed whose runtime is unchanged; (c) per-step loaded units instead
   of all-but-never (the clean runs' `NAME.loaded`, refreshed by each clean run, the audit holding them honest as GD3's closures
   are). Recommended: (a) first (the `:prog` machinery exists), measured on tonight's gate; then (c); (b) not.
+
+## As built: the 11-20 audit (branch `gate-audit-1120`, from `next` `939037429`, 2026-11-20; decisions GDS28-GDS32)
+
+The user (2026-11-20): "investigate the steps of the gate carefully and drop all redundant or unnecessary parts". Every step of
+`test/gate/steps.edn` (224 table steps, 392 checks in `--full`'s plan, 557 in `--nightly`'s) read with its command, its parts,
+its lists and the scripts behind them; each claim below proven from the code and the records, the durations and peaks the store's
+(`.tmp/gate-pass/STEP/*.edn`, the median of the latest five passes; peaks the larger of the process's and the tree's RSS). Plans
+only, no gate run (the user: no gate tonight). Two branches edit the table beside this one: `gate-split-1120` (parts for
+rsi-essential, hsi-check(-aot), gate-tests, rsi-check, cpp-dg, cpp-aot, cpp-check, oi-check, cpp-roundtrip, wai-go-aot) and
+`java-split-1120` (repr-java's jdk checks, jrt-convert); their steps' `:parts` are left alone here.
+
+### The cover, taken from `h-keys-design` (`e55d2456a`, GDS21-GDS26 (a), the user's round 51)
+
+Cherry-picked onto next (941 commits later). Conflicts: `test/gate/steps.edn` (suite-aot now on javac's tool and the jdk-extra
+program, round 53 (1) and queue 349; programs-full parted, n-gate-mem; c-aot's `:mem-gib` 3), resolved by next's declarations with
+the `:subsumes` lines added; `doc/JOURNAL.md` (its 2026-11-17 entry is not replayed: this audit's entry records the take). The eight
+pairs verified again on next:
+- goi-check by goi-check-full: `test/goi/essential.txt`'s 801 programs all in `test/goi/check-linux-amd64.edn` (1,837); the whole
+  check runs its corpus list, fails a program of the record it did not list ("missing"), and goi.divergences holds the essential list
+  passing. goi-aot-essential by goi-aot: `essential-aot.txt`'s 248 programs all in the AOT record; the whole check's divergences hold
+  the list (bin/goi's check_divergences, report 069).
+- suite-aot-essential by suite-aot: `bin/clojure-tests --aot --essential` cuts the suite to `essential-aot.txt`'s 15 namespaces (each
+  must be the suite's, ess_filter) and judges them against the AOT reference less `essential-aot-skipped.edn`'s one test, which the
+  whole run keeps; the whole program now also holds java.xml (jdk-extra): more, not less.
+- programs by programs-full: `mixed` and `bad-go` are two of its 16 parts, the same command and base.
+- java-compiled by java-compiled-full: the essential tests that pass compiled, each a row of `check-compiled.edn`, which
+  java-judge holds every corpus's compiled level to (a recorded pass that fails is a regression).
+- cpp-check-essential by cpp-check: `essential-check.txt`'s 8 programs (samples 4, runtime 4) are of the run corpora
+  `bin/cppi check` runs whole (`--only` refuses others), each a recorded `:pass` of `test/cpp/check-linux-amd64.edn`; the same
+  environment (CPPI_THREADS=2, CPPI_CI_MEMLIMIT=2GiB).
+- c-aot-essential by c-aot: `essential-aot.txt`'s 10 programs in six of the 15 parts, each a recorded `:pass` of
+  `check-aot-linux-amd64.edn`; the full step adds CI_AOT_NODES=1.
+- c-dg-essential by c-dg: `essential-dg.txt`'s 92 files in the seven groups `bin/ci dg` runs by default, each a recorded `:pass`;
+  the whole run fails "a file it passes that does not pass now" (arbace/c/dg.ae), what `--essential`'s "every one must pass" adds.
+
+Two changes to the planner (`test/gate/plan.ae`), both found in the audit:
+- A parted subsumed check: `cover` looked its subsumers up by the decided check's name, so a part (NAME.PART) of a subsumed step
+  was never covered, and gate-split-1120 parts rsi-essential. `subsumers-of`: a part's are its table step's; the rule's check
+  (validate) takes a subsumed step's parts.
+- A `:full` check under a `:weekly` subsumer (`tier-rank`: essential below full below weekly; a subsumer's tier above its
+  subsumed's): rsi-essential (`bin/rsi check --essential`: `test/rust/essential.txt`'s 13 programs, all of `test/rust/synthetic/`,
+  `--corpus samples,synthetic`) is subsumed by rsi-check (`:weekly`, parts samples and synthetic whole: the synthetic part's 67
+  programs judged by the same run judge and controls; RSI_BATCH=3 only groups the builder's programs). In `--weekly` (and a night
+  whose changes bring rsi-check in) rsi-essential is covered; in `--full` and `--nightly` rsi-check is not in the plan and
+  rsi-essential runs as before.
+`test/gate/subsume-test.bash` 17 of 17 (two new: a parted essential check's parts covered; a `:full` check covered by a `:weekly`
+one in `--weekly`, run in `--full`).
+
+### The candidates
+
+Each row: the step and part, the evidence, what dropping it loses, its cost a night (the store's median of the latest five passes
+in minutes, its peak in GiB) and what was done. "A night" is a `--full`, `--nightly` or `--weekly` run whose keys moved (the
+essential steps run in all three, the crops' chains beside the serial run).
+
+| # | step (part) | evidence | lost | min, GiB | done |
+|---|---|---|---|---|---|
+| 1 | goi-check | `bin/goi check --essential` lists `essential.txt` (801) of the whole check's corpus; the whole check fails a recorded program it did not run and holds the list in goi.divergences | nothing | 7.5, 8.0 (not `--nightly`: goi-check-full rotated) | covered (h-keys) |
+| 2 | goi-aot-essential | the same, `essential-aot.txt` (248); goi-aot whole in `--nightly` too | nothing | 5.8, 1.5 | covered |
+| 3 | suite-aot-essential | ess_filter's namespaces of the suite, the AOT reference less one skipped test the whole run keeps | nothing (the 15 namespaces compiled alone: a smaller composition, GDS22 (c)'s) | 13.3, 44.2 (lane 1) | covered |
+| 4 | programs | `mixed`, `bad-go`: two of programs-full's 16 parts, the same command | nothing | 26.9, 42.0 (lane 1; `--weekly` and its `:also-changed` nights) | covered |
+| 5 | java-compiled | its tests are rows of `check-compiled.edn`, which java-judge holds the whole level to | nothing (one program against shards: composition) | 31.5, 52.0 (lane 1; not `--nightly`: rotated) | covered |
+| 6 | cpp-check-essential | its 8 programs of samples and runtime, recorded `:pass`; cpp-check runs them whole, same environment | nothing | 17.1, 2.2 | covered |
+| 7 | c-aot-essential | its 10 programs in six of c-aot's parts, recorded `:pass` | nothing | 3.9, 1.9 (not `--nightly`: rotated) | covered |
+| 8 | c-dg-essential | its 92 files in c-dg's seven default groups, recorded `:pass`; the whole run fails a recorded pass that fails | nothing | 1.3, 1.4 | covered |
+| 9 | rsi-essential (`:full`) | `--essential` = `test/rust/essential.txt`'s 13 synthetic programs; rsi-check.synthetic runs all 67 with the same judge and controls | nothing | 32.1 (the latest 3.3 h), 6.9; `--weekly` only | covered by rsi-check (new: `:full` under `:weekly`) |
+| 10 | scheme-read (probes, racket-r6rs, larceny-r6rs, chibi-r7rs, srfi) | scheme-read-essential's `bin/repr-scheme check --corpus probes --corpus racket-r6rs --corpus larceny-r6rs --corpus chibi-r7rs --corpus srfi-*`; `record_unit` takes the essential copies only when their digest is the manifest's: the same dumps, the same judge; its key holds the pack's pin (test/scheme/) | nothing | 1.7, 0.7 | dropped |
+| 11 | scheme-roundtrip (the same five) | scheme-read-essential's `bin/repr-scheme roundtrip` of the same corpora; identical inputs and pins | nothing | 1.6, 0.7 | dropped |
+| 12 | si-corpora's `bin/si r7rs`, `bin/si srfi`, `bin/si corpora files` | si-essential's and scheme-read-essential's, the same commands and inputs; `r7rs --chibi-test` and `chibi-tests` work in their own directories; `corpora divergences` reads the records | nothing | about 0.5, 0.7 | dropped |
+| 13 | asm-amd64-object (musl, synthetic) | asm-amd64-essential's `bin/repr-asm object-check musl`, `object-check synthetic`: the same command, inputs and pins; their controls (controls-object.txt's musl and synthetic pairs) run there | nothing | 1.2, 1.1 | dropped |
+| 14 | a64i-goroot | on amd64 `echo ... skipped, not an arm64 host`: an empty pass a night; B1's rule (`:host-ids :arm64`'s comment) names it among the steps that declare `:arm64` | nothing | 0 | `:hosts [... :arm64]`, the command `bin/a64i goroot-check`: absent on amd64 |
+| 15 | cpp-roundtrip (samples) | cpp-essential's `bin/repr-cpp roundtrip-corpus samples --judge own` (ARBACE_NO_AOT=1 apart: evaluated, not compiled, until the next re-seed) | nothing | 1.3, 1.7 | left: gate-split-1120's step (drop at its merge) |
+| 16 | cpp-dg (dg-error) | its log: "dg-error: no record yet (CP247 (a) ...); skipped": a pass that judges nothing | nothing | 0 | left: gate-split-1120's step (drop or make absent at its merge) |
+| 17 | repr-java-front (samples, baseline, javac) | attr-check is front-check `--attr native`: the same reads, every native fact compared with javac's; `attr-check-known.edn` lists no differing fact, so the converter gets javac's answers in both and the forms are the same | front-check's diagnosis when attr-check fails; the implication holds only while the known file lists no fact | 5.2, 6.0 | GDS30 |
+| 18 | haskell-iface-own's `lib-check --ifaces own` runs | ghc-internal's and 21 packages' own interfaces built again (haskell-lib-check-own and haskell-lib-own-*'s `lib-check --package P --ifaces own`), under REPR_HASKELL_BIGNUM=native | unproven: the bignum setting may change the pools | up to 95 (the lib steps' whole time; never passed itself) | GDS29 |
+| 19 | the crops' essential subsets that full steps nearly cover | oi-essential (oi-check runs its list; not test, repl-check, own-verdicts, the judgments), cpp-essential, c-check-essential (CI_LINK_CHECK=1 on stage 0), si-essential (unit, test --si, controls-test), scheme-read-essential (spec-check), ocaml-read-essential (the six checks besides its round trip, which ocaml-roundtrip's `--types` parts hold), llvm-essential (controls-test) | each extra check unless moved | about 40 together | GDS28 |
+| 20 | the largest whole nightly checks with records by case | haskell-lib-stg(-own), wasm-roundtrip, llvmi-check, llvm-read verify-rt(-heldout), c-dg, si-aot, cpp-codegen-gen, c-judge-test | each case judged weekly, not nightly | about 182 together | GDS31 |
+| 21 | the parked `:clean-only` parts | haskell-roundtrip.all and rust-roundtrip's five (never passed), rsi-check-ui.ui, repr-go-native's box and tamago parts, repr-java's jdk parts, asm-amd64-decode dis and rt, asm-amd64-table tables, python-native mutants, cpp-dg modules: planned by no night, only by the clean run | - | 0 a night | GDS32 |
+| 22 | oracle work in `--full`/`--nightly` | no non-oracle step on `:gcc :cxx :chez :chibi :ocaml :rustc :ghc :llvm :llvm-mc :python`; no live flag in their commands (`bin/hsi golden --oracle` compares GHC's recorded digests; `bin/si chibi-tests` and `r7rs --chibi-test` run no Chibi without `--chibi`) | - | - | none found |
+| 23 | retired paths (the JVM's, tools gone) | the `:frozen`/`:jdk` steps (oracle-go, j2g-edge, javac-verify, repr-java, jrt-convert, suite-go, suite-aot(-essential), java-fixtures, gate-tests) are the frozen jar's documented uses; javac-check (0 s) judges the tool build's j2g log | - | - | none dropped |
+
+### Dropped (rows 1-14)
+
+The cover's nine checks (rows 1-9: the eight pairs, rsi-essential new); the ten scheme parts, si-corpora's three commands and
+asm-amd64-object's two parts (rows 10-13); a64i-goroot on `:arm64` (row 14). Edited in `test/gate/steps.edn` and the fragments
+(`test/gate/crops/{scheme,asm,llvm-rust,cpp}.edn`), each step's text the same in both. Keys: the parts dropped leave the other
+parts' keys (a part's declaration is its step's less `:parts`); si-corpora, a64i-goroot and asm-amd64-object's step text move only
+their own; the fragments are their crops' `:crop-paths`, so the next essential gate runs the scheme, asm and a64i subsets once
+(scheme-c2j, si-essential, scheme-read-essential, asm-amd64-essential, asm-arm64-essential, a64i-essential: about 11 minutes);
+`:lib` less `bin/lib/gate-run.bash` (h-keys') moves repr-go's and repr-go-native's once. `gate_key` unchanged (no build input).
+
+Not dropped, with why: rows 15-16 are gate-split-1120's steps (their `:parts` are its); rows 17-21 lose a real check or need a
+proof first (the decisions below); rows 22-23 found nothing. Also read and kept: c-check-essential (CI_LINK_CHECK=1 on stage 0, which
+c-check on the gate's executable does not do), hsi-essential (hsi-check runs `--libs own`), java-check (its outputs feed
+java-check-judge, whose `golden --control` java-judge does not run), repr-go's six round trips (the forms levels build and run, the
+text level compares bytes: neither implies the other; repr-go-native compares the native reader with the helper), llvm-heldout
+(fresh mutants, not llvm-read's recorded held-out sets), the repr-java nojavac and attr checks (no javac at all against facts
+compared with javac's: neither implies the other).
+
+### The plans before and after (`bin/gate [--full|--nightly|--weekly] --plan`, the shared store, 2026-11-20 15:44-16:20)
+
+The keys of most checks moved since their passes (next's day of merges), so the counts are of a night that runs nearly everything;
+the simulation's durations are the store's (the lanes view's, the free memory rule).
+
+| plan | before (`939037429`) | after |
+|---|---|---|
+| essential | 58: 43 run, 1 after, 7 night, 1 absent; wall 1:33, serial 2:43 | 58: 49 run, 1 after, 1 night, 1 absent (the six crop subsets woken once by the fragments); 1:31, 2:55 |
+| `--full` | 392: 350 run, 34 after, 1 absent; wall 24:44, serial 31:38; lane 1 39 steps, 9:33 | 380: 329 run, 34 after, 8 covered, 2 absent; 24:09, 30:44; lane 1 36 steps, 9:12; declared at most 55.5 GiB at once (58) |
+| `--nightly` | 557: 509 run, 40 after, 1 absent; 17:34, 23:05; lane 1 52, 6:19 | 545: 491 run, 40 after, 5 covered, 2 absent; 17:10, 22:27; lane 1 50, 6:06 |
+| `--weekly` | 402: 360 run, 34 after, 1 absent; 27:53, 35:59; lane 1 41, 9:40 | 390: 338 run, 34 after, 9 covered, 2 absent; 26:50, 34:33; lane 1 38, 9:19 |
+
+Covered in `--full`: goi-check, goi-aot-essential, java-compiled, suite-aot-essential, programs (programs-full is in tonight's
+plan by its `:also-changed`), c-dg-essential, c-aot-essential, cpp-check-essential; `--nightly`: goi-aot-essential,
+suite-aot-essential, programs, c-dg-essential, cpp-check-essential (goi-check, java-compiled and c-aot-essential run: their subsumers
+rotated); `--weekly`: the eight and rsi-essential. Absent: arm64-host and a64i-goroot. Gone: scheme-read and scheme-roundtrip's
+probes, racket-r6rs, larceny-r6rs, chibi-r7rs and srfi, asm-amd64-object's musl and synthetic. By the store's medians a night
+whose keys move spares, serially: `--full` 80 minutes of essential checks plus 27 when programs-full runs and about 5 of
+duplicated parts; `--nightly` 38 (goi-aot-essential, suite-aot-essential, cpp-check-essential, c-dg-essential) plus 27 with
+programs-full plus 5; `--weekly` 139 plus 5; the three lane-1 steps covered (java-compiled 52 GiB, suite-aot-essential 44,
+programs 42) free the big lane for 72 minutes in `--full`.
+
+### Decisions for the user (GDS28-GDS32)
+
+GDS21-GDS26 were decided (a) by the user (round 51, 2026-11-17); GDS27 waits for `bin/gate-unit-keys measure` on a night's log.
+The savings are per night whose keys move, serial minutes (the crops' chains run beside the serial run: mostly CPU, not wall).
+
+- **GDS28 The crops' essential subsets their full steps nearly cover** (GDS22 (b), crop by crop). (a) Move each extra check into
+  the crop's full step and add `:subsumes`: oi-essential's `bin/oi test`, `repl-check --native`, `own-verdicts --check` and the four
+  judgments into oi-check (after gate-split-1120's merge, which parts oi-check); si-essential's `bin/si unit`, `test --si` and
+  `corpora controls-test` into si-check; scheme-read-essential's `spec-check` into scheme-read's scans part; ocaml-read-essential's
+  corpus check, menhir, embed, ocamllex, ocamlyacc and own-read checks into an ocaml-full step (its round trip is ocaml-roundtrip's
+  `--types` parts', rotated by night: covered in `--full` and `--weekly`); llvm-essential's `controls-test` into llvm-read;
+  c-check-essential's CI_LINK_CHECK=1 into c-check's ci-run part (and stage 0 against the gate's executable: one more difference to
+  weigh); cpp-essential's target verify, `pp-check --essential`, the gxx-dg-essential round trip and lowering into cpp-full (after
+  gate-split's merge). Each move reruns that full step once. About 40 minutes a night (oi 13, cpp 9, c-check 5.3, si 3.7, ocaml-read
+  3.7, llvm 3.8, scheme-read 1.4). (b) As now. Recommended: (a), crop by crop with the crops' owners, the ones on gate-split's steps
+  after its merge.
+- **GDS29 haskell-iface-own's interfaces.** (a) Measure whether REPR_HASKELL_BIGNUM=native changes ghc-internal's and the 21
+  packages' own pools (`lib-check --ifaces own` with and without it, the pools compared byte for byte); if not, take them from
+  haskell-lib-check-own's and haskell-lib-own-*'s outputs (`:uses`, LIB_CHECK_DEP_POOL_TAR) and build only the packages no lib step
+  builds; up to 95 minutes a full night (the lib steps' whole time; haskell-iface-own has never passed, so its own time is not
+  known). (b) As now. Recommended: (a), by the Haskell crop's owner (the hs-own-stg line is active).
+- **GDS30 repr-java-front's samples, baseline and javac parts.** (a) Drop them: repr-java-attr's same parts make the same reads
+  and hold every native fact equal to javac's (`attr-check-known.edn`: no differing fact, three declined, javac's), so the forms
+  front-check compares are made from the same answers; with a guard in attr-check that fails when the known file lists a differing
+  fact (the implication's condition); 5.2 minutes and a 6 GiB step a night. Its jdk part (weekly) stays: attr's is `:clean-only`.
+  (b) Keep front-check (its diagnosis when attr-check fails: the native trees alone, without the native provider). Recommended: (a)
+  with the guard, after java-split-1120's merge (it parts these steps' jdk checks).
+- **GDS31 The largest whole nightly checks.** (a) Rotate them by GD2's rule (`bin/gate-subsets`; their records name their cases):
+  haskell-lib-stg (34), haskell-lib-stg-own (44), wasm-roundtrip (26), llvmi-check (17), llvm-read verify-rt and verify-rt-heldout
+  (20), c-dg (12), si-aot (11), cpp-codegen-gen (9), c-judge-test (10): about 180 minutes a night less a subset's share; each case
+  judged once a week whole, its subset nightly. (b) As now. Recommended: (b): they run in the crops' chains beside the serial run
+  (the night's wall is the serial run's), and a rotation is a real loss of nightly coverage; revisit if a chain becomes the
+  critical path.
+- **GDS32 The parked clean-only parts.** haskell-roundtrip.all and rust-roundtrip's five parts never passed (the 2026-11-12
+  decisions took them out of `--full` until fixed); the clean run (GATE_ALL_PARTS=1) still plans them and would fail on them.
+  (a) As decided: the clean run at the next tag holds them (a tag needs them fixed or parked by name). (b) Out of the clean run too
+  until fixed (a `:parked` part: planned by no gate, the clean record naming it). Recommended: (a), unless the next tag comes before
+  their fixes.
+
+### Checked
+
+`test/gate/subsume-test.bash` 17 of 17; `test/gate/unitkeys-test.bash`; the gate's tests the table and planner reach
+(`arm64-host`, `crops`, `crop-tier`, `chain-needs`, `weekly`, `plan-logic`, `rotation`, `admit`, `needs-wait`, `programs-parts`,
+`declared-env`: all pass; `lanes-test` (mem-check: declarations far above their peaks) and `rotation-controls-test` (16 C control
+subjects not in `:always`) fail on next `939037429` alike, not by this change); `gate.crops check` 0 problems;
+`bin/crops-score --judge --strict` 0 problems (the scores unchanged); `test/docs/claude-md-test.bash`; the four plans above. No
+build, no gate run.

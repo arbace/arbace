@@ -13708,3 +13708,46 @@ waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on
   8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
   record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
   three steps wait on n-py-rec's check records, now in the tree, to be spliced.
+
+## 2026-11-20: the 11-20 audit of the gate's steps (branch `gate-audit-1120`, from `next` `939037429`)
+
+The user: "investigate the steps of the gate carefully and drop all redundant or unnecessary parts". Every step of
+`test/gate/steps.edn` read with its command, parts, lists and scripts (doc/GATE-DIET-SURVEY.md, "As built: the 11-20 audit", the
+candidates' table with the evidence and the savings; durations and peaks the store's). Plans only, no gate run.
+- The cover taken from `mac/h-keys-design` (`e55d2456a`; GDS21-GDS26 (a), the user's round 51): cherry-picked; the conflicts in
+  `test/gate/steps.edn` (suite-aot on javac's tool and the jdk-extra program, programs-full parted, c-aot's 3 GiB) resolved by next's
+  declarations with the eight `:subsumes` added; its 2026-11-17 journal entry not replayed (this one records it: the cover's
+  planner rule and runner status `covered`, `bin/gate-unit-keys` with `test/gate/unitkeys.ae` for GDS26/GDS27's measurement, the
+  `:lib` group less `bin/lib/gate-run.bash`, the survey's "The cover and unit keys" with GDS21-GDS27). The eight pairs
+  verified again on next from the lists and records (goi's essential lists in its records, clojure-tests' ess_filter and skipped
+  overlay, the C and C++ essential lists' rows all recorded `:pass` and in the corpora their full steps run, the whole runs failing a
+  recorded pass that fails). Two planner changes: a part of a parted subsumed step is covered (gate-split-1120 parts rsi-essential),
+  and a `:full` check may be subsumed by a `:weekly` one (`tier-rank`): rsi-check subsumes rsi-essential (13 synthetic programs of
+  the 67 its synthetic part runs, the same judge), covered in `--weekly`. `test/gate/subsume-test.bash` 17 of 17.
+- Dropped as pure duplicates (the same command, inputs and judge in the same run; an essential step runs in every tier):
+  scheme-read's and scheme-roundtrip's parts probes, racket-r6rs, larceny-r6rs, chibi-r7rs and srfi (scheme-read-essential's own
+  `bin/repr-scheme check` and `roundtrip` of those corpora, the same dumps by the same manifest); si-corpora's `bin/si r7rs`,
+  `bin/si srfi` (si-essential's) and `bin/si corpora files` (scheme-read-essential's); asm-amd64-object's parts musl and synthetic
+  (asm-amd64-essential's `object-check musl`, `object-check synthetic`). a64i-goroot moved onto the host `:arm64` as B1's rule says
+  (it ran a command that skipped itself on amd64 and recorded an empty pass a night). Edited in `test/gate/steps.edn` and the
+  fragments (`test/gate/crops/{scheme,asm,llvm-rust}.edn`), the spliced text the same in both.
+- Not found: no oracle-tier work in `--full`/`--nightly` (no non-oracle step on a toolchain host; the commands' live flags none:
+  `bin/hsi golden --oracle` reads recorded digests, `bin/si chibi-tests` runs Chibi only with `--chibi`); the JVM's steps are the
+  frozen jar's documented uses.
+- Left for gate-split-1120's merge (its steps' parts): cpp-roundtrip.samples (cpp-essential's `roundtrip-corpus samples --judge own`,
+  ARBACE_NO_AOT=1 apart) and cpp-dg.dg-error (its log "no record yet ... skipped": a pass that judges nothing).
+- Plans (the shared store, keys of next's day moved): `--full` 392 -> 380 checks, 8 covered, a64i-goroot absent; simulated wall
+  24:44 -> 24:09, serial 31:38 -> 30:44, lane 1 39 -> 36 steps; `--nightly` 557 -> 545, 5 covered, 17:34 -> 17:10; `--weekly`
+  402 -> 390, 9 covered, 27:53 -> 26:50; the essential plan runs the scheme, asm and a64i subsets once (their fragments changed).
+  By the store's medians a moved night spares 80 minutes serial in `--full` (107 with programs-full), 38 in `--nightly`, 139 in
+  `--weekly`, and about 5 of duplicated parts in each.
+- Tests: subsume-test 17 of 17, unitkeys-test, crops, crop-tier, chain-needs, weekly, plan-logic, rotation, admit, needs-wait,
+  programs-parts, declared-env, arm64-host, `gate.crops check`, `bin/crops-score --judge --strict`, claude-md-test; lanes-test and
+  rotation-controls-test fail on next alike (declarations above peaks; C control subjects not in `:always`), not by this change.
+- DECISIONs GDS28-GDS32 for the user (the survey): the crops' essential subsets their full steps nearly cover (the extras moved, then
+  covered), repr-java-front's non-jdk parts implied by repr-java-attr's, haskell-iface-own's lib-check runs, the unrotated large
+  nightly checks, the parked clean-only parts.
+Alternatives considered: covering the crops' merged essential steps whole (refused by the cover's rule while each holds a check no
+full step runs; GDS28); dropping the essential side of the scheme and asm duplicates instead of the full parts (the essential gate
+needs them by day, and they run in every tier, so the full parts are the copies); a `:skip-when` rule for the vacuous cpp-dg part
+(not a planner feature worth adding for one part that gate-split is restructuring).

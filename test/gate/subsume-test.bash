@@ -8,7 +8,9 @@
 #     (a pass at its key) covers nothing; --nightly with the subsumer rotated (its subset and a slice) covers nothing, --full (whole) does
 #  4. the table's rules: :subsumes on an essential step, naming a full step or an essential one with :outputs, refused
 #  5. the runner: a covered check's status covered, reported "covered", a need of a step that runs, no pass recorded, no failure
-#  6. the checkout's table: its :subsumes valid (the planner's check), each naming an essential check of the same family
+#  6. the checkout's table: its :subsumes valid (the planner's check), each naming a check of a lower tier
+#  7. (the 11-20 audit) a :full check a :weekly step subsumes: covered in --weekly, run in --full (the subsumer not in its plan); a
+#     parted essential check: each part covered
 # Seconds, no build, no gate run. Usage: test/gate/subsume-test.bash
 # needs: exe (the planner on stage 0)
 set -u
@@ -41,6 +43,10 @@ cat > "$r/test/gate/steps.edn" <<EOT
   {:name f3 :mem-gib 1 :phase :full :cmd "bin/tool {part}" :inputs [:core] :hosts [:stage0] :subsumes [e3] :parts [{:part p}]
    :rotate {:only "--only {list}" :universe "rec/u.edn" :subset "rec/corpora.edn" :failed-re "^FAIL (.+)$"}}
   {:name f4 :mem-gib 1 :phase :full :cmd "bin/tool" :inputs [:core] :hosts [:stage0] :needs [e1]}
+  {:name e5 :mem-gib 1 :phase :essential :cmd "bin/tool {part}" :inputs [:core] :hosts [:stage0] :parts [{:part m} {:part n}]}
+  {:name f5 :mem-gib 1 :phase :full :cmd "bin/tool" :inputs [:core] :hosts [:stage0] :subsumes [e5]}
+  {:name g1 :mem-gib 1 :phase :full :cmd "bin/tool" :inputs [:core] :hosts [:stage0]}
+  {:name w1 :mem-gib 1 :phase :weekly :cmd "bin/tool" :inputs [:core] :hosts [:stage0] :subsumes [g1]}
   ${1:-}]}
 EOT
 }
@@ -64,7 +70,7 @@ plan "$t/p1" full || no "the full plan: $(head -5 "$t/p1.out")"
 grep -q "covered *e1 *covered by f1: its run in this gate checks every case of this one" "$t/p1.out" \
   && grep -q "covered *e2 *covered by f2 (2 checks)" "$t/p1.out" && ok "the plan says by what (a parted subsumer's checks counted)" \
   || no "the why: $(grep -E ' e[12] ' "$t/p1.out")"
-grep -q '3 covered' "$t/p1.out" && ok "the summary counts the covered checks" || no "the summary: $(sed -n 1p "$t/p1.out")"
+grep -q '5 covered' "$t/p1.out" && ok "the summary counts the covered checks" || no "the summary: $(sed -n 1p "$t/p1.out")"
 
 # ---- 2. :subsumes is in no key
 grep '^decl ' "$t/p1/plan/f1.inputs" | grep -q subsumes && no "f1's decl line holds :subsumes" || ok ":subsumes is in no key (f1's decl line leaves it out)"
@@ -97,9 +103,9 @@ sed -e 's/{:name e2 :mem-gib 1 :phase :essential :cmd "bin\/tool" :inputs \[:cor
     -e 's/:subsumes \[e1\]}/:subsumes [e1 f4 e4]}/' "$t/good.edn" > "$r/test/gate/steps.edn"
 plan "$t/p7" full; st=$?
 [ $st != 0 ] && grep -q 'e2: :subsumes on a step that is not a :full or :weekly check' "$t/p7.out" \
-  && grep -q 'f1: :subsumes f4, which is not an essential check without :outputs' "$t/p7.out" \
-  && grep -q 'f1: :subsumes e4, which is not an essential check without :outputs' "$t/p7.out" \
-  && ok "the planner refuses :subsumes on an essential step, naming a full step, naming one with :outputs" || no "the rules (status $st): $(head -8 "$t/p7.out")"
+  && grep -q 'f1: :subsumes f4, which is not a check of a lower tier' "$t/p7.out" \
+  && grep -q 'f1: :subsumes e4, which is not a check of a lower tier' "$t/p7.out" \
+  && ok "the planner refuses :subsumes on an essential step, naming a step of its own tier (a full step under a full one), naming one with :outputs" || no "the rules (status $st): $(head -8 "$t/p7.out")"
 cp "$t/good.edn" "$r/test/gate/steps.edn"
 
 # ---- 5. the runner
@@ -123,14 +129,24 @@ cat > "$t/table.ae" <<EOF
 (let [t (read-string (slurp "$here/test/gate/steps.edn"))
       by (into {} (for [s (:steps t)] [(str (:name s)) s]))
       pairs (for [s (:steps t) x (:subsumes s)] [(str (:name s)) (str x)])
-      bad (for [[f e] pairs :let [d (by e)] :when (not (and d (= :essential (:phase d)) (#{:full :weekly} (:phase (by f)))))] [f e])]
+      rank {:essential 0 :full 1 :weekly 2}
+      bad (for [[f e] pairs :let [d (by e)] :when (not (and d (#{:full :weekly} (:phase (by f))) (< (rank (:phase d) 9) (rank (:phase (by f)) 9))))] [f e])]
   (println "pairs" (count pairs) (vec (map (fn [[f e]] (str f "/" e)) pairs)))
   (println "bad" (vec bad)))
 EOF
 "$ARBACE_HOST_EXE" "$t/table.ae" > "$t/table.out" 2>&1
 grep -qx 'bad \[\]' "$t/table.out" && grep -q '^pairs [1-9]' "$t/table.out" \
-  && ok "the checkout's table: every :subsumes a full or weekly step's, naming an essential step ($(sed -n 1p "$t/table.out" | cut -d' ' -f2) pairs)" \
+  && ok "the checkout's table: every :subsumes a full or weekly step's, naming a step of a lower tier ($(sed -n 1p "$t/table.out" | cut -d' ' -f2) pairs)" \
   || no "the checkout's table: $(cat "$t/table.out")"
+
+# ---- 7. (the 11-20 audit) a :full check under a :weekly subsumer; a parted essential check
+export GATE_STEPS=$r/test/gate/steps.edn
+[ "$(dec "$t/p1" e5.m e5.n g1)" = "e5.m=covered e5.n=covered g1=run" ] \
+  && ok "--full: a parted essential check's parts covered (by f5); g1 runs (its :weekly subsumer w1 not in --full's plan)" \
+  || no "--full: $(dec "$t/p1" e5.m e5.n g1 w1)"
+plan "$t/p8" full --weekly || no "the weekly plan: $(head -5 "$t/p8.out")"
+[ "$(dec "$t/p8" g1 w1 e1)" = "g1=covered w1=run e1=covered" ] && grep -q "covered *g1 *covered by w1" "$t/p8.out" \
+  && ok "--weekly: g1 (a :full check) covered by w1 (a :weekly one), which runs" || no "--weekly: $(dec "$t/p8" g1 w1 e1)"
 
 echo "subsume-test: $((n - bad)) of $n ok"
 exit $((bad > 0))

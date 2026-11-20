@@ -400,6 +400,11 @@
       (str label ": no group " x)
       (str label ": input rule " s " matches no file"))))
 
+(defn tier-rank
+  "the cover's order of the tiers (the 11-20 audit): :essential below :full below :weekly; a subsumer's tier above its subsumed's"
+  [phase]
+  (get {:essential 0 :full 1 :weekly 2} phase 9))
+
 (defn- validate
   "the problems of the table, as strings: a duplicate step, a :needs or :start-after naming no step,
   a host absent from hosts.edn, an unknown group, an input rule or pin matching no file, a :cmd's bin/
@@ -428,15 +433,22 @@
                  [(str nm ": :essential-when-changed on a step that is not an essential check")])
                (when-not (contains? crop-paths c) [(str nm ": :essential-when-changed " c " names no :crop-paths entry")])))
             (when-not (contains? #{nil :check :build :always} (:kind s)) [(str nm ": unknown :kind " (:kind s))])
-            ;; the cover: :subsumes [STEP ...] on a full-tier check, each STEP an essential check
+            ;; the cover: :subsumes [STEP ...] on a full-tier check, each STEP a check of a lower tier (the 11-20 audit: an
+            ;; essential check, or a :full one under a :weekly subsumer) without :outputs
             (when-let [xs (:subsumes s)]
               (concat
                (when-not (and (#{:full :weekly} (:phase s)) (contains? #{nil :check} (:kind s)))
                  [(str nm ": :subsumes on a step that is not a :full or :weekly check")])
                (for [x xs
-                     :let [d (first (filter #(= (str x) (str (:name %))) steps))]
-                     :when (not (and d (= :essential (:phase d)) (contains? #{nil :check} (:kind d)) (not (:outputs d))))]
-                 (str nm ": :subsumes " x ", which is not an essential check without :outputs"))))
+                     ;; (the steps are expanded: a parted subsumed step is its parts, NAME.PART)
+                     :let [ds (filter #(or (= (str x) (str (:name %)))
+                                           (and (:part %) (= (str (:name %)) (str x "." (:part %)))))
+                                      steps)]
+                     :when (not (and (seq ds)
+                                     (every? (fn [d] (and (< (tier-rank (:phase d)) (tier-rank (:phase s))) (contains? #{nil :check} (:kind d))
+                                                          (not (:outputs d))))
+                                             ds)))]
+                 (str nm ": :subsumes " x ", which is not a check of a lower tier (essential, or full under a weekly step) without :outputs"))))
             (for [x (:needs s) :when (not (known (str x)))] (str nm ": :needs names no step: " x))
             ;; night 7 (crops-score ran beside reap and found no status): the essential phase runs its chains at once and
             ;; a step's :needs is only read, never waited on, so an essential step needs an essential one of its own chain
@@ -803,9 +815,15 @@
        (str/blank? (System/getenv "GATE_CLEAN_INNER"))))
 
 (defn subsumers
-  "the table's :subsumes as {ESSENTIAL [SUBSUMER ...]}, names as strings, the subsumers in the table's order"
+  "the table's :subsumes as {SUBSUMED [SUBSUMER ...]}, names as strings, the subsumers in the table's order"
   [steps]
   (reduce (fn [m s] (reduce (fn [m x] (update m (str x) (fnil conj []) (str (:name s)))) m (:subsumes s))) {} steps))
+
+(defn- subsumers-of
+  "the subsumers of the decided check D: its table step's (the 11-20 audit: a part of a parted subsumed step, NAME.PART, is the step's)"
+  [covers d]
+  (let [^String n (:name d)]
+    (or (get covers n) (when (:part (:step d)) (get covers (first (str/split n #"\." 2)))))))
 
 (defn- checks-of
   "the decisions of a table step's checks in this plan: the step itself, or its parts and their rotated checks (NAME.PART, NAME.PART.sub,
@@ -819,7 +837,9 @@
   or slice (the night's, which may leave the essential cases out), not skipped (a subsumer's pass does not hold the essential step's own
   inputs: its list, its records)"
   [decided d ss used]
-  (when (and (seq ss) (= "run" (:decision d)) (= :essential (:phase (:step d))) (not (used (:name d))))
+  ;; (the 11-20 audit: a :full check too, which only a :weekly subsumer names, the planner's rule: in --full and --nightly that
+  ;; subsumer is not in the plan, so nothing covers it there)
+  (when (and (seq ss) (= "run" (:decision d)) (#{:essential :full} (:phase (:step d))) (not (used (:name d))))
     (let [per (for [b ss] [b (checks-of decided b)])]
       (when (every? (fn [[_ cs]] (and (seq cs) (every? #(and (#{"run" "after"} (:decision %)) (not (:rotation (:step %)))) cs))) per)
         (str "covered by " (str/join ", " (for [[b cs] per] (if (= 1 (count cs)) b (str b " (" (count cs) " checks)"))))
@@ -828,7 +848,7 @@
 (defn cover
   "the decisions with the covered essential checks decided covered (COVERS: subsumers' output; USED: the steps whose outputs others use)"
   [decided covers used]
-  (mapv (fn [d] (if-let [w (cover-of decided d (get covers (:name d)) used)]
+  (mapv (fn [d] (if-let [w (cover-of decided d (subsumers-of covers d) used)]
                   (assoc d :decision "covered" :why w :key nil)
                   d))
         decided))
