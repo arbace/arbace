@@ -6,7 +6,7 @@
   cases (an operand, a local's type, a block's cleanup flag, a borrowed temporary not propagated) differ. `bin/rust-front
   pack-compare-test`."
   (:require [arbace.rust.front.build-run :as br] [arbace.rust.front.passes :as passes] [arbace.rust.front.mono :as mono]
-            [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc]))
+            [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.resolve :as resolve]))
 
 (def i8 '(ty "i8" (int "i8")))
 (def u8 '(ty "u8" (uint "u8")))
@@ -114,6 +114,17 @@
       (check "negative: a reference's elided lifetime outside a fn pointer erased" (pr (tc/erase-ty (c/lower-ty r))) "&mut ()")
       (check "negative: the binder's variables as a free region (before 493) erased"
              (pr (tc/erase-ty [:fnptr {:inputs [[:ref [:re-bound nil 1] true [:tuple []]]] :output [:tuple []]}])) "fn(&mut ())"))
+    ;; queue 493: an explicit glob import's name before the prelude's (rt.rs' `use super::*`: fmt's trait Debug, where the 2024
+    ;; prelude has only the derive macro; new_debug's `<T as Debug>::fmt` was the macro's, 'a qualified path')
+    (let [glob (fn [segs prelude?] {:kind :use :use :glob :path (mapv (fn [i] {:ident i}) segs) :attrs (if prelude? [{:parsed "PreludeImport"}] [])})
+          std {:mods {"core" {:children [{:ns :type :name "fmt" :path "core::fmt"} {:ns :type :name "prelude" :path "core::prelude"}]}
+                      "core::prelude" {:children [{:ns :type :name "rust_2024" :path "core::prelude::rust_2024"}]}
+                      "core::prelude::rust_2024" {:children [{:ns :macro :name "Debug" :path "core::fmt::macros::Debug"}]}
+                      "core::fmt" {:children [{:ns :type :name "Debug" :path "core::fmt::Debug"} {:ns :macro :name "Debug" :path "core::fmt::macros::Debug"}]}}}
+          look (fn [uses] (binding [c/*defs* (atom [{:id 0 :data [:crate] :uses uses}]) c/*std* std resolve/*crate-path* "core::fmt::rt"]
+                            (c/lookup-name "Debug" 0 false)))]
+      (check "lookup: the explicit glob's trait before the prelude's macro" (look [(glob ["core" "prelude" "rust_2024"] true) (glob ["super"] false)]) [:ext "core::fmt::Debug"])
+      (check "negative: the prelude alone gives the macro" (look [(glob ["core" "prelude" "rust_2024"] true)]) [:ext "core::fmt::macros::Debug"]))
     (let [unit '(ty "()" (tuple))
           callu (list 'const "g" '(ty "fn() {g}" (fndef "g" [])) '(zst))
           r {:args 0 :locals [{:ty unit}] :debug [] :blocks [{:cleanup false :stmts [] :term (list 'call callu [] '(place 1) 1 '(continue))} {:cleanup false :stmts [] :term '(return)}]}
