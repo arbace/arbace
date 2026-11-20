@@ -60,10 +60,10 @@ for x in $(sed -n '/^arbace_runtime_key() {/,/^}/p' "$v" | grep -o "! -path '\?[
 done
 # the essential gate's core: test/gate/steps.edn's :pre, :build and :essential steps but the crops' (:essential-when-changed)
 # and cpp-runtime (C++'s build, run when a C++ check needs it), pyi-aot-runtime likewise (pyi's AOT runtime, when a Python check
-# needs it: python.edn spliced, queue 428)
+# needs it: python.edn spliced, queue 428), cpp-ppref likewise (pp-ref's libcpp reference build, when a C++ or C token check needs it)
 same "the essential gate's core" \
   "$(printf '%s' "$flat" | grep -o 'the essential gate is the core ([^)]*)' | sed 's/.*core (//; s/)$//' | tr -d ' ' | tr ',' '\n')" \
-  "$(grep -E '^  \{:name ' "$steps" | grep -E ':phase :(pre|build|essential)\b' | grep -v ':essential-when-changed' | awk '{print $2}' | grep -vxE 'cpp-runtime|pyi-aot-runtime')"
+  "$(grep -E '^  \{:name ' "$steps" | grep -E ':phase :(pre|build|essential)\b' | grep -v ':essential-when-changed' | awk '{print $2}' | grep -vxE 'cpp-runtime|pyi-aot-runtime|cpp-ppref')"
 # the crops tier's steps it names are crops' essential steps
 for n in $(printf '%s' "$flat" | grep -o 'where their keys agree ([^;]*;' | grep -o '`[a-z0-9-]*`' | tr -d '`'); do
   grep -qE "^  \{:name $n .*:phase :essential .*:essential-when-changed" "$steps" && echo "ok   CLAUDE.md: $n a crop's essential step" \
