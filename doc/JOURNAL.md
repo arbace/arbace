@@ -13745,3 +13745,38 @@ golden files were judged against the recorded outputs (g++'s record, the night's
   C's .expect and Haskell's NAME.stdout, and both directories are C++'s inputs anyway; the review inline with the text (C's
   selfref-derived.edn) rather than files: the brief asked for .expect files; for C, a test/c/selfref-left.edn of the 30's reasons:
   not written, it would rerun every C step for data no step reads.
+
+## 2026-11-20: c-cpp-golden, part 2: the benchmarks at their .arg, and the cases out of the judge's cases
+
+Two decisions of 2026-11-20 on c-cpp-golden's report: the main session's (run the 16 benchmarks left by gcc's run with their
+corpus's NAME.arg, as the benchmark's specification defines; tcc 93 and dfp-8 stay recorded; the wording fixes at the next window;
+llvmi's C++ modules passed to the LLVM agent) and the user's (a case whose expected output is undefined, unspecified or
+host-dependent leaves the judge's cases, as the n/a cases and D435-3 (a), its run still counted in completeness, its reason
+written per case; dfp-8 on the ground of its design). Then the memory rule of the same day: jobs under about 8 GiB run directly
+under `ulimit -v` 8 GiB, not in the heavy-lock queue.
+
+- The benchmarks (doc/C23-SURVEY.md, "As built: c-cpp-golden, the cases out of the judge's cases"): the .arg files are the
+  benchmarks game's full sizes. Measured once each, 2026-11-20 18:38-19:08 UTC (the measurement's ticket waited 2 h 10 min in the
+  heavy-lock queue, then ran directly under the new rule): eval by `cirun` on the kept node programs of next's night
+  (`.tmp/worktrees/next/.tmp/ci-check/benchmarksgame/*.nodes`, its `.tmp/ci/cirun`, key `635f2bd8...`), AOT by `bin/ci check --aot
+  --corpus benchmarksgame --only` with an argument hook (`ci_args`; `.tmp/bench/args-hook.patch`), 60 s caps. Eval: 15 past 60 s,
+  nbody-4 stops on `_mm_loadl_pd` (an SSE intrinsic ci lacks). AOT: fasta-2 19 s, fasta-7 25 s, fasta-5 43 s, mandelbrot-2 34 s,
+  status 0 at the specification's exact lengths (254,166,745 and 32,000,015 bytes); 11 past 60 s, each twice (the quiet retry).
+  None moved: none fits the check at both levels, and C's reference is one for both; the hook not committed (unused). Not done
+  therefore: the expected outputs at the .arg sizes and records for moved rows.
+- Out of the judge's cases: `test/c/selfref-out.edn` (30 programs: 25 undefined, 1 unspecified, 1 constraint violation, 2
+  implementation-defined, dfp-8 by design) and `test/cpp/selfref-out.edn` (ubsan/null-8.C, ubsan/vptr-1.C), `{ID {:kind :levels
+  :why}}`; `c.selfref`'s and `cpp.selfref`'s `ref` refuse an entry with a verdict of its own, no kind, levels or reason, or no case
+  of the reference, and run a control each time (the first case with a verdict of its own put in the list must be refused; proved
+  by hand too: benchspec's fasta.c and the golden io.cpp listed were refused, as were an entry with no reason and one of an unknown
+  kind). bin/crops-score's `:out-of-cases {:file F :cases N}`: every entry a kind, its levels and a written reason, the levels
+  summed to N, else the stage held at 0.5 (self-tests with four controls; on the tree, :cases 62 against the list's 60 refuted).
+  C's list is a run-level record (steps.edn's `:c-records-run`, out of `:c`); test/c/selfref.ae's change reruns every C step at
+  the next night.
+- Scores (bin/crops-score --record, --judge --strict: 0 problems; bin/records-check: 9 pairs, 0 problems): C's judge 0.995
+  ((14867 + 0.5 x 148) / 15015) -> 0.997 ((14867 + 0.5 x 88) / 14955), independence 0.9990 -> 0.9994; C++'s judge 0.90826 ->
+  0.90841 (10,542 cases), independence 0.9140; completeness unchanged (no record changed).
+- Alternatives: the two fasta programs that fit at AOT moved at AOT alone (a level-specific reference, benchspec's fasta at
+  25,000,000 computed by streaming, 30 s budgets near their measured 19 and 25 s at load 25-55, 254 MB written per run): left to the
+  main session; C's reasons in test/crops/independence.edn alone (no rerun of the C steps) instead of the judge's own file and
+  control: the user asked for the judge to read them and refuse a defined output.

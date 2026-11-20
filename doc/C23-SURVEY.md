@@ -6478,3 +6478,16 @@ out), with no kind, levels or reason, or no case of the reference, and runs its 
 its own put in the list must be refused. The file is the run level's record (`:c-records-run`, out of `:c`), keyed into the
 reference's cache; `test/c/selfref.ae`'s change reruns every C step at the next night. The judge fact counts it by
 `:out-of-cases` (doc/CROPS-SCORE.md): C's judge (14867 + 0.5 x 148) / 15015 = 0.995 to (14867 + 0.5 x 88) / 14955 = 0.997.
+
+**The 16 benchmarks at their corpus's NAME.arg** (the main session's choice: run them as the benchmark's specification defines).
+The .arg files are the benchmarks game's full sizes: binary-trees 21, fannkuch-redux 12, fasta 25,000,000 (254,166,745 bytes of
+output), mandelbrot 16000 (32,000,015 bytes), nbody 50,000,000. Measured once each (2026-11-20, 18:38-19:08 UTC, load 20-60,
+directly under `ulimit -v` 8 GiB): at eval `cirun` on the check's kept node programs (next's night of 2026-11-20) with the
+argument, 60 s caps, four at a time; at AOT `bin/ci check --aot --corpus benchmarksgame --only` the 16 with an argument hook
+(`ci_args`, a file of `ID ARGS` lines, run1's command line; kept as `.tmp/bench/args-hook.patch`, not committed), one at a time,
+60 s caps, the quiet retry running each timeout again alone. Eval: 15 past 60 s (small sizes timed first: nbody 100,000 in 5.2 s,
+fasta 100,000 in 0.9 s, mandelbrot 400 in 2.7 s, binary-trees 12 in 7.0 s, fannkuch 8 in 0.1 s, so about 43 min, 3.5 min, 70 min, 1
+h and 28 min at the full sizes); nbody-4 stops at once at both levels on `_mm_loadl_pd` (`<immintrin.h>`, no intrinsic of ci's).
+AOT: fasta-2 19 s, fasta-7 25 s, fasta-5 43 s and mandelbrot-2 34 s end with status 0 at the specification's exact lengths; the
+other 11 pass 60 s twice. No program fits the check at both levels, and C's reference (`c.selfref ref`) is one for both, so none
+moved: the 16 leave the judge's cases as the check runs them, with no argument, the measurement in each reason.
