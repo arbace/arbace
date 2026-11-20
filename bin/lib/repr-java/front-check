@@ -152,7 +152,8 @@ read_both() {
 }
 
 # read_jdk DIR MODULE SRC THREADS [all]: read-jdk --front both --split, from WORK (its patch
-# directories), REPR_JAVA_THREADS chunks; with all, REPR_JAVA_PATCH_ALL (the vendoring scripts')
+# directories), REPR_JAVA_THREADS chunks (with jdk_procs set, processes: jdk_read); with all,
+# REPR_JAVA_PATCH_ALL (the vendoring scripts')
 read_jdk() {
   local d=$1 m=$2 src=$3 threads=$4 all=${5:-} st=0 s
   rm -rf "$d"; mkdir -p "$d"
@@ -171,13 +172,26 @@ read_jdk() {
 # limit (GOMEMLIMIT, default 26GiB; the environment's wins): the tool's collector runs at GOGC 200
 # (go/arbace/jrt/tuning.ae), and the slices' heaps were a third or less of their RSS, so without a limit
 # the jdk corpus's read grew to 48 GiB (night 12) and 61.4 GiB (night 13, OOM-killed on a 54.7 GiB host)
-# while its live heap stays far below (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk parts' memory")
+# while its live heap stays far below (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk parts' memory").
+# With jdk_procs set (the jdk and jdk26u corpora: java.base's closure is 28 chunks), read-jdk's chunks are read
+# each in a process of its own, jdk_procs (two) at once, each under GOMEMLIMIT jdk_proc_mem (test/repr/java/chunks.ae,
+# REPR_JAVA_PROCS, REPR_JAVA_PROC_GOMEMLIMIT; the environment's win): read-jdk's forms, reports and lines, file for
+# file, no process holding more than a chunk's javac and forms (java-split-1120; doc/classes/JAVA-FRONTEND-SURVEY.md,
+# "As built: the jdk reads in chunk processes": a chunk's process 2.2 to 3.5 GiB, but the one with IndicConjunctBreak.java,
+# whose forms' layout takes about 9 GiB alone, hence two at once)
+jdk_procs=
+jdk_proc_mem=
 jdk_read() {
-  local threads=$1 all=$2
+  local threads=$1 all=$2 rj=(read-jdk)
   shift 2
+  [ -z "$jdk_procs" ] || rj=(main -m repr.java.chunks read-jdk)
   (cd "$work" && export REPR_JAVA_THREADS=$threads GOMEMLIMIT=${GOMEMLIMIT:-26GiB} &&
      { [ -n "$all" ] && export REPR_JAVA_PATCH_ALL=1 || unset REPR_JAVA_PATCH_ALL; } &&
-     heavy_run "$root/bin/repr-java" read-jdk --check "$@")
+     { if [ -n "$jdk_procs" ]; then
+         export REPR_JAVA_PROCS=${REPR_JAVA_PROCS:-$jdk_procs} REPR_JAVA_PROC_GOMEMLIMIT=${REPR_JAVA_PROC_GOMEMLIMIT:-$jdk_proc_mem} \
+                ARBACE_PATH=$root/test${ARBACE_PATH:+:$ARBACE_PATH}
+       else unset REPR_JAVA_PROCS; fi; } &&
+     heavy_run "$root/bin/repr-java" "${rj[@]}" --check "$@")
 }
 
 summary_line() { grep ' Java files, ' "$1" | sed 's/ in [0-9.]*s$//' | paste -sd ';' -; }
@@ -194,7 +208,7 @@ for c in ${corpora//,/ }; do
       orig=$root/.tmp/repr-java-parse-check/jdk-originals
       arbace_jdk_originals "$orig" "$work/jrt.log" | sed 's/^/jdk: /'
       [ "${PIPESTATUS[0]}" = 0 ] || { status=1; continue; }
-      read_jdk "$work/jdk/java.base" java.base "$orig/src/java.base" 4 all || status=1 ;;
+      jdk_procs=2 jdk_proc_mem=4GiB read_jdk "$work/jdk/java.base" java.base "$orig/src/java.base" 4 all || status=1 ;;
     javac)
       # every file of the list copied, the generated ones from the generated sources' root (JOP5 (a): the JDK build's
       # support/gensrc, or with the own pin the own pack's; bin/lib/repr-java/platform.bash), as parse-check's
@@ -229,7 +243,7 @@ for c in ${corpora//,/ }; do
         || { echo "jdk26u: FAILED (no jdk26u modules at $jdk_src/*/share/classes: JDK_SRC)"; status=1; continue; }
       for d in "$jdk_src"/*/share/classes; do
         m=${d#"$jdk_src"/}; m=${m%%/*}
-        read_jdk "$work/jdk26u/$m" "$m" "$d" 4 || status=1
+        jdk_procs=2 jdk_proc_mem=4GiB read_jdk "$work/jdk26u/$m" "$m" "$d" 4 || status=1
       done ;;
     *) echo "front-check: no corpus $c (samples, baseline, jdk, javac, jdk26u)" >&2; exit 2 ;;
   esac

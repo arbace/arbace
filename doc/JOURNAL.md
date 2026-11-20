@@ -13771,3 +13771,20 @@ store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 
 - test/gate/steps.edn: jrt-convert `:mem-gib` 34 -> 14 (1.1 x 12.4); its command unchanged (GOMEMLIMIT 28GiB now bounds only
   the light steps; the chunk processes take 4GiB each). The admission is the larger of `:mem-gib` and 1.1 x the largest kept
   pass's peak, so the old passes (42 GiB) keep it high until they age out of the store (plan.ae's `admission`).
+
+## 2026-11-20: java-split-1120, part 3: front-check's jdk corpus in chunk processes
+
+- `bin/lib/repr-java/front-check`'s `jdk_read`: for the jdk and jdk26u corpora (`jdk_procs`, `jdk_proc_mem`) read-jdk through
+  `repr.java.chunks`, two processes at once, GOMEMLIMIT 4GiB each (REPR_JAVA_PROCS, REPR_JAVA_PROC_GOMEMLIMIT win); the javac
+  corpus's modules (at most 9.5 GiB, four chunks) keep the threads. One script for front-check, attr-check and nojavac-check.
+- Proof (`bin/repr-java front-check --corpus jdk`, the gate's part command, under bin/heavy-lock, javac's tool
+  `javac-60886b4973e7`, at `next` 939037429 with this branch): "jdk: 3630 forms files from javac's trees, the native trees'
+  equal", both sides "3421 Java files, 3421 converted, 0 failed, 0 javac errors, 3630 files written, 0 unreadable", the
+  differing files none (test/repr/java/front-check-known.edn: none), status 0; the split summed (split.md). Peak 11.5 GiB of
+  the tree, 1,401 s (with the originals made again, 2.5 minutes): the chunks' processes 2.2 to 3.6 GiB each (their summaries'
+  :peak-rss), the one with IndicConjunctBreak.java 10.4 GiB (the last chunk, alone at the end). Before: 48.3 GiB, 340 s for
+  2,277 files (2026-11-12; the corpus is 3,421 files since). An earlier run with each process under `ulimit -v 8 GiB` (the
+  coordinator's rule for light jobs) failed that chunk alone: 27 of 28 chunks converted, 74 files FAILED (its log: "runtime:
+  out of memory ... 6558318592 in use").
+- test/gate/steps.edn: repr-java-front's jdk part `:mem-gib 14` (two processes at once with that chunk: 15 at most), the
+  step's default 48 -> 14.
