@@ -2,13 +2,16 @@
 # bin/lib/cppi/check and check-aot after $root, bin/lib/tmpdir.bash, bin/lib/tools.bash and bin/lib/cppi/lists.bash:
 #   cppi_run_ref  prints the reference file the judges read: by default .tmp/cppi-selfref/KEY.edn, test/cpp/ref-gxx15.edn's cases
 #                 with a verdict of their own (g++.dg's and libstdc++'s dg-do run tests: exit 0) judged by it (test/cpp/selfref.ae,
-#                 its exceptions test/cpp/selfref-exceptions.edn) and the others (samples, runtime, dg-output files) by g++'s run;
+#                 its exceptions test/cpp/selfref-exceptions.edn), the samples and the runtime's by their reviewed golden files
+#                 (NAME.expect, NAME.cpp.expectrc, NAME.expect-stderr beside each, reviewed in test/cpp/selfref-golden.edn; c-cpp-golden)
+#                 and the others (dg-output files, a sample without golden files) by g++'s run;
 #                 CPPI_JUDGE=gxx: test/cpp/ref-gxx15.edn itself (the oracle tier's judge, by hand)
 cppi_run_ref() {
   if [ "${CPPI_JUDGE:-self}" = gxx ]; then echo test/cpp/ref-gxx15.edn; return 0; fi
   local k out ex
   ex=test/cpp/selfref-exceptions.edn; [ -f "$root/$ex" ] || ex=
-  k=$( (cd "$root" && sha256sum test/cpp/ref-gxx15.edn test/cpp/selfref.ae $ex test/cpp/corpora.edn) | sha256sum | cut -c1-16)
+  k=$( (cd "$root" && sha256sum test/cpp/ref-gxx15.edn test/cpp/selfref.ae $ex test/cpp/corpora.edn test/cpp/selfref-golden.edn test/cpp/selfref-out.edn \
+          test/cpp/samples/*.expect* test/cpp/runtime/samples/*.expect*) | sha256sum | cut -c1-16)
   out=$root/.tmp/cppi-selfref/$k.edn
   if [ ! -s "$out" ]; then
     mkdir -p "$root/.tmp/cppi-selfref"

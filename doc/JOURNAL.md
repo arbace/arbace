@@ -14174,3 +14174,75 @@ and ct-sym-build.edn).
 - Left: the compiled level's hotspot-compiler, hotspot-runtime, jls and langtools-run parts wait for a night's whole run; the
   `:tests` entries the check's report names stale (classes no longer taking a listed test: speed, design-also, serialization,
   reflection, ...) not pruned here; queue 440's prediction file not updated.
+
+## 2026-11-20: c-cpp-golden, reviewed golden files for C's output-only run cases and C++'s sample prints
+
+The user's decision of 2026-11-20: extend reviewed golden files (Java's JCS361 (a), Haskell's queue 325g) to C's run cases with no
+verdict of their own and to C++'s samples. A reviewed golden file is a program's expected output written after reading the program
+and confirming it must print exactly that, its reason recorded, never a copy of a toolchain's output; a program whose output its
+source does not determine stays recorded, with its reason. Branch `c-cpp-golden-1120` from next `939037429`. No test was run: the
+golden files were judged against the recorded outputs (g++'s record, the night's recorded runs of next).
+
+- C++ (doc/cpp/CPP-SURVEY.md, "As built: c-cpp-golden"): the 15 samples and runtime programs with a `main` have golden files beside
+  them, `NAME.expect` (stdout), `NAME.cpp.expectrc` (status, when not 0), `NAME.expect-stderr` (stderr, ctor-throw, hello,
+  thread-throw, uncaught), each derived from the source and C++23, the target's ABI (the Itanium names, the psABI's layout, abort's
+  134) and libstdc++ 15.2's source (its messages and verbose terminate handler, read in the pinned gcc tarball
+  `.tmp/c1/gcc/gcc-15.2.0.tar.xz`, sha256 per test/cpp/corpora.edn, members extracted into the worktree's `.tmp/gcc-src`), reviewed
+  in `test/cpp/selfref-golden.edn`. `test/cpp/selfref.ae` reads them (a new mechanism, kept to C's file names: C++'s judge read no
+  expected-output file before, its suites' rule being the status alone): status, stdout and stderr compared as g++'s run was, a
+  golden file without its review or a review without its file refused. `bin/lib/cppi/selfref.bash` keys the reference on them. Two
+  controls added (test/cpp/controls.edn: classes-vs-auto, status alone; ctor-throw-vs-thread-throw, stderr alone). All 15 met
+  g++'s recorded digests at the first writing (an agreement, not used). Proved: `arbace.cpp.check run-judge` over the next
+  worktree's `.tmp/cppi-check` and `.tmp/cppi-aot` (2026-11-20 05:10 and 06:09, their tables copied) with the golden reference: 15
+  of 15 pass at eval and AOT, the controls differ; three golden files corrupted (stdout, stderr, status) fail at both levels;
+  `cpp.selfref agree` 220 of 220. Left with g++'s run: ubsan/null-8.C and ubsan/vptr-1.C (no sanitizer under the harness, each run
+  then undefined). Not changed: arbace/cpp/ (embedded since W2, in gate_key; cpp-rt-own-1120 works on arbace/cpp/codegen), so
+  run-judge's control line still says "g++ run" for a reference that is now a golden file.
+- C (doc/C23-SURVEY.md, "As built: c-cpp-golden"): the brief's 104 programs (the 2026-11-17 count in independence.edn) are 30 on
+  next: n-c-last (round 54), queue 409 and n-hasattr moved the rest to self-checks, benchspec and selfref-derived.edn, C's golden
+  form. The 30 were read again; none admits a golden file (undefined behaviour: 16 benchmarks' atoi(NULL), reverse-complement-2/-5's
+  read before the buffer, 20031003-1 x2, gnu23-tag-alias x4, setjmp2; unspecified: union-bitfield; a constraint violation:
+  non-pedantic-macro-redef; implementation-defined with no choice of SPEC's own: tcc 93, 95; by design: dfp-8). Their reasons went
+  into the judge's fact (test/crops/independence.edn), not test/c/: every C step keys test/c/, and no record changes.
+- Scores (bin/crops-score --record, --judge --strict: 0 problems; bin/records-check: 9 pairs, 0 problems): C++'s judge 0.907 ->
+  0.908 (the 30 cases, 15 at eval and 15 at AOT, from 0.5 to 1), independence 0.9138 -> 0.9140; C's unchanged (judge 0.995,
+  independence 0.999).
+- Alternatives: golden files under a directory of their own (Java's test/java/golden/) rather than beside the samples: beside, as
+  C's .expect and Haskell's NAME.stdout, and both directories are C++'s inputs anyway; the review inline with the text (C's
+  selfref-derived.edn) rather than files: the brief asked for .expect files; for C, a test/c/selfref-left.edn of the 30's reasons:
+  not written, it would rerun every C step for data no step reads.
+
+## 2026-11-20: c-cpp-golden, part 2: the benchmarks at their .arg, and the cases out of the judge's cases
+
+Two decisions of 2026-11-20 on c-cpp-golden's report: the main session's (run the 16 benchmarks left by gcc's run with their
+corpus's NAME.arg, as the benchmark's specification defines; tcc 93 and dfp-8 stay recorded; the wording fixes at the next window;
+llvmi's C++ modules passed to the LLVM agent) and the user's (a case whose expected output is undefined, unspecified or
+host-dependent leaves the judge's cases, as the n/a cases and D435-3 (a), its run still counted in completeness, its reason
+written per case; dfp-8 on the ground of its design). Then the memory rule of the same day: jobs under about 8 GiB run directly
+under `ulimit -v` 8 GiB, not in the heavy-lock queue.
+
+- The benchmarks (doc/C23-SURVEY.md, "As built: c-cpp-golden, the cases out of the judge's cases"): the .arg files are the
+  benchmarks game's full sizes. Measured once each, 2026-11-20 18:38-19:08 UTC (the measurement's ticket waited 2 h 10 min in the
+  heavy-lock queue, then ran directly under the new rule): eval by `cirun` on the kept node programs of next's night
+  (`.tmp/worktrees/next/.tmp/ci-check/benchmarksgame/*.nodes`, its `.tmp/ci/cirun`, key `635f2bd8...`), AOT by `bin/ci check --aot
+  --corpus benchmarksgame --only` with an argument hook (`ci_args`; `.tmp/bench/args-hook.patch`), 60 s caps. Eval: 15 past 60 s,
+  nbody-4 stops on `_mm_loadl_pd` (an SSE intrinsic ci lacks). AOT: fasta-2 19 s, fasta-7 25 s, fasta-5 43 s, mandelbrot-2 34 s,
+  status 0 at the specification's exact lengths (254,166,745 and 32,000,015 bytes); 11 past 60 s, each twice (the quiet retry).
+  None moved: none fits the check at both levels, and C's reference is one for both; the hook not committed (unused). Not done
+  therefore: the expected outputs at the .arg sizes and records for moved rows.
+- Out of the judge's cases: `test/c/selfref-out.edn` (30 programs: 25 undefined, 1 unspecified, 1 constraint violation, 2
+  implementation-defined, dfp-8 by design) and `test/cpp/selfref-out.edn` (ubsan/null-8.C, ubsan/vptr-1.C), `{ID {:kind :levels
+  :why}}`; `c.selfref`'s and `cpp.selfref`'s `ref` refuse an entry with a verdict of its own, no kind, levels or reason, or no case
+  of the reference, and run a control each time (the first case with a verdict of its own put in the list must be refused; proved
+  by hand too: benchspec's fasta.c and the golden io.cpp listed were refused, as were an entry with no reason and one of an unknown
+  kind). bin/crops-score's `:out-of-cases {:file F :cases N}`: every entry a kind, its levels and a written reason, the levels
+  summed to N, else the stage held at 0.5 (self-tests with four controls; on the tree, :cases 62 against the list's 60 refuted).
+  C's list is a run-level record (steps.edn's `:c-records-run`, out of `:c`); test/c/selfref.ae's change reruns every C step at
+  the next night.
+- Scores (bin/crops-score --record, --judge --strict: 0 problems; bin/records-check: 9 pairs, 0 problems): C's judge 0.995
+  ((14867 + 0.5 x 148) / 15015) -> 0.997 ((14867 + 0.5 x 88) / 14955), independence 0.9990 -> 0.9994; C++'s judge 0.90826 ->
+  0.90841 (10,542 cases), independence 0.9140; completeness unchanged (no record changed).
+- Alternatives: the two fasta programs that fit at AOT moved at AOT alone (a level-specific reference, benchspec's fasta at
+  25,000,000 computed by streaming, 30 s budgets near their measured 19 and 25 s at load 25-55, 254 MB written per run): left to the
+  main session; C's reasons in test/crops/independence.edn alone (no rerun of the C steps) instead of the judge's own file and
+  control: the user asked for the judge to read them and refuse a defined output.

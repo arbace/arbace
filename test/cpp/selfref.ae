@@ -8,16 +8,27 @@
                 output DejaGnu matches by regexp), a dg-shouldfail or an xfail on its run keeps g++'s reference
     libstdcxx   libstdc++-v3's testsuite run tests (libstdc++.exp's v3-dg-runtest, the same dg-test): VERIFY() aborts on a
                 failure, so a program passes when it exits 0; dg-output, dg-shouldfail and xfail files keep g++'s
-  samples and runtime (Arbace's own samples, test/cpp/samples, test/cpp/runtime/samples) carry no verdict of their own: g++'s
-  recorded run stays their reference (0.5 in bin/crops-score's judge stage). An entry g++ could not build (:status :no-build)
-  stays g++'s.
+    samples     Arbace's own samples (test/cpp/samples, test/cpp/runtime/samples), since c-cpp-golden (the user's decision of
+    runtime     2026-11-20) by their reviewed golden files beside each: NAME.expect its stdout byte for byte, NAME.cpp.expectrc its
+                status (0 without one; mir's NAME.c.expectrc), NAME.expect-stderr its stderr (empty without one), each reviewed in
+                test/cpp/selfref-golden.edn (written from the source, never copied from a run); status, stdout and stderr compared,
+                as g++'s run was. A golden file without its review, or a review without its golden file, fails ref
+  The others (the dg-output, dg-shouldfail and xfail files, a sample without golden files) have no verdict of their own: g++'s
+  recorded run stays their reference (0.5 in bin/crops-score's judge stage). An entry g++ could not build (:status :no-build) stays g++'s.
+  Out of the judge's cases (the user's decision of 2026-11-20): test/cpp/selfref-out.edn's cases, whose expected output is undefined,
+  unspecified or host-dependent, each with its reason; their runs still judged against g++'s run. ref refuses an entry with a verdict
+  of its own (a defined output cannot be counted out), with no :kind, :levels or :why, or no case of GXX-REF, and runs its control:
+  the first case with a verdict of its own put in the list must be refused.
 
   ref ROOTS GXX-REF OUT   OUT: GXX-REF's entries, each with a verdict of its own replaced by it ({:id :status 0 :stdout \"-\"
                           :stderr \"-\" :o2 :differ (the status alone, arbace.cpp.check/run-result) :judge :self :verdict
-                          KIND}); the counts printed. ROOTS: {:gxx-dg DIR :libstdcxx DIR}, the extracted trees (bin/lib/cppi/lists.bash)
-  agree ROOTS GXX-REF     for each case with a verdict of its own, whether g++'s recorded run meets it (status 0); the
-                          disagreements listed"
-  (:require [arbace.string :as str]))
+                          KIND}; a golden file's {:id :status S :stdout SHA :stderr SHA :o2 :same :judge :self :verdict :golden});
+                          the counts printed. ROOTS: {:gxx-dg DIR :libstdcxx DIR}, the extracted trees (bin/lib/cppi/lists.bash);
+                          the samples' paths are the checkout's, relative to the working directory
+  agree ROOTS GXX-REF     for each case with a verdict of its own, whether g++'s recorded run meets it (status 0; a golden file's
+                          status, stdout and stderr); the disagreements listed"
+  (:require [arbace.string :as str])
+  (:import (java.security MessageDigest)))
 
 (set! *warn-on-reflection* true)
 
@@ -29,27 +40,87 @@
   "test/cpp/selfref-exceptions.edn: {ID REASON}, the cases whose own verdict the check's harness does not meet."
   (delay (let [f (java.io.File. "test/cpp/selfref-exceptions.edn")] (if (.exists f) (read-string (slurp f)) {}))))
 
+(def golden-reviews
+  "test/cpp/selfref-golden.edn: the reviews of the samples' golden files, by id (c-cpp-golden)."
+  (delay (let [f (java.io.File. "test/cpp/selfref-golden.edn")]
+           (if (.exists f) (into {} (map (juxt :id identity) (read-string (slurp f)))) {}))))
+
 (defn- file-of ^java.io.File [roots ^String id]
   (let [i (.indexOf id "/") c (subs id 0 i) rel (subs id (inc i))]
     (case c
       "gxx-dg-run" (java.io.File. (str (:gxx-dg roots) "/" rel))
       "libstdcxx" (java.io.File. (str (:libstdcxx roots) "/" rel))
+      "samples" (java.io.File. (str "test/cpp/samples/" rel))
+      "runtime" (java.io.File. (str "test/cpp/runtime/samples/" rel))
       nil)))
 
+(defn- sha256 ^String [^bytes b]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md b)))))
+
+(defn- file-sha256 ^String [^java.io.File f] (sha256 (java.nio.file.Files/readAllBytes (.toPath f))))
+
+(defn- golden-files
+  "A sample's golden files beside F: [stdout status-file stderr], each a File (existing or not)."
+  [^java.io.File f]
+  (let [b (str/replace (.getName f) #"\.cpp$" "") sib #(java.io.File. (.getParentFile f) ^String %)]
+    [(sib (str b ".expect")) (sib (str (.getName f) ".expectrc")) (sib (str b ".expect-stderr"))]))
+
 (defn verdict
-  "Case ID's own verdict: {:status 0 :verdict KIND}, or nil (no verdict of its own, an exception, or no file)."
+  "Case ID's own verdict: {:status 0 :verdict KIND} (the status alone), a sample's golden verdict {:status S :stdout SHA :stderr
+  SHA :verdict :golden}, or nil (no verdict of its own, an exception, or no file)."
   [roots ^String id]
   (let [^java.io.File f (file-of roots id)]
     (when (and f (.exists f) (not (contains? @exceptions id)))
-      (let [t (slurp f)]
-        ;; the run's own directives: dg-output's expected text, dg-shouldfail's expected failure, an xfail on the run
-        (when-not (re-find #"dg-output|dg-shouldfail|dg-do run[^}]*xfail" t)
-          {:status 0 :verdict (if (str/starts-with? id "libstdcxx/") :verify :dg-run)})))))
+      (if (re-find #"^(samples|runtime)/" id)
+        ;; c-cpp-golden: the reviewed golden files, a verdict only with their review
+        (let [[^java.io.File out ^java.io.File rc ^java.io.File err] (golden-files f)]
+          (when (and (.exists out) (contains? @golden-reviews id))
+            {:status (if (.exists rc) (Long/parseLong (str/trim (slurp rc))) 0)
+             :stdout (file-sha256 out)
+             :stderr (if (.exists err) (file-sha256 err) (sha256 (byte-array 0)))
+             :verdict :golden}))
+        (let [t (slurp f)]
+          ;; the run's own directives: dg-output's expected text, dg-shouldfail's expected failure, an xfail on the run
+          (when-not (re-find #"dg-output|dg-shouldfail|dg-do run[^}]*xfail" t)
+            {:status 0 :verdict (if (str/starts-with? id "libstdcxx/") :verify :dg-run)}))))))
+
+(defn- golden-problems
+  "c-cpp-golden: a golden file without its review, a review without its golden file (ids under ENTRIES' samples and runtime)."
+  [roots ids]
+  (let [has (set (for [id ids :when (re-find #"^(samples|runtime)/" id)
+                       :let [f (file-of roots id)] :when (and f (.exists f) (.exists ^java.io.File (first (golden-files f))))]
+                   id))
+        rev (set (keys @golden-reviews))]
+    (concat (for [id (sort has) :when (not (rev id))] (str "golden file without a review in test/cpp/selfref-golden.edn: " id))
+            (for [id (sort rev) :when (not (has id))] (str "review without a golden file (or a case of test/cpp/ref-gxx15.edn): " id)))))
+
+(def out-kinds #{:undefined :unspecified :constraint :implementation-defined :host :by-design})
+
+(def out-cases
+  "test/cpp/selfref-out.edn: {ID {:kind :levels :why}}, the cases out of the judge's cases."
+  (delay (let [f (java.io.File. "test/cpp/selfref-out.edn")] (if (.exists f) (read-string (slurp f)) {}))))
+
+(defn- out-problems
+  "The problems of OUT ({ID {:kind :levels :why}}) against the reference's entries ES: an entry with a verdict of its own (a
+  defined output), no case of ES, or without its kind, levels or reason."
+  [roots es out]
+  (let [ids (set (map :id es))]
+    (for [[id e] (sort-by key out)
+          :let [p (cond (not (ids id)) "no case of the reference"
+                        (verdict roots id) "a verdict of its own: a defined output cannot be counted out"
+                        (not (out-kinds (:kind e))) (str "no kind of " (pr-str (sort out-kinds)))
+                        (not (and (seq (:levels e)) (every? #{:eval :aot} (:levels e)))) "no :levels (:eval, :aot)"
+                        (str/blank? (str (:why e))) "no written reason")]
+          :when p]
+      (str "out of the judge's cases (test/cpp/selfref-out.edn): " id ": " p))))
 
 (defn- merged [roots gref]
   (for [e (read-all gref)]
     (if-let [v (and (not= :no-build (:status e)) (verdict roots (:id e)))]
-      {:id (:id e) :status (:status v) :stdout "-" :stderr "-" :o2 :differ :judge :self :verdict (:verdict v)}
+      (if (= :golden (:verdict v))
+        {:id (:id e) :status (:status v) :stdout (:stdout v) :stderr (:stderr v) :o2 :same :judge :self :verdict :golden}
+        {:id (:id e) :status (:status v) :stdout "-" :stderr "-" :o2 :differ :judge :self :verdict (:verdict v)})
       (assoc e :judge :gxx))))
 
 (defn- corpus [^String id] (subs id 0 (.indexOf id "/")))
@@ -57,7 +128,16 @@
 (defn -main [cmd roots-s gref & [out]]
   (let [roots (read-string roots-s)]
     (case cmd
-      "ref" (let [es (merged roots gref)]
+      "ref" (let [es (merged roots gref)
+                  bad (concat (golden-problems roots (map :id es)) (out-problems roots es @out-cases))
+                  ;; the control: a case with a verdict of its own put in the list must be refused
+                  own (first (filter #(= :self (:judge %)) es))
+                  ctl (when own (out-problems roots es {(:id own) {:kind :undefined :levels [:eval] :why "the control"}}))]
+              (when (seq bad) (doseq [b bad] (println "selfref:" b)) (System/exit 1))
+              (if (seq ctl)
+                (println "selfref: control: an out entry with a verdict of its own" (str "(" (:id own) ")") "refused, as it must")
+                (do (println "selfref: control PASSES: an out entry with a verdict of its own is accepted" (pr-str (:id own))) (System/exit 1)))
+              (println (format "selfref: %d cases out of the judge's cases (test/cpp/selfref-out.edn)" (count @out-cases)))
               (spit out (str ";; C++'s run corpora's references (test/cpp/selfref.ae): each case's own verdict, else g++ 15.2's run\n"
                              (str/join "\n" (map pr-str es)) "\n"))
               (doseq [[c xs] (sort (group-by (comp corpus :id) es))]
@@ -66,7 +146,9 @@
               (println (format "selfref: %d of %d cases judged by their own verdict" (count (filter #(= :self (:judge %)) es)) (count es))))
       "agree" (let [gs (read-all gref)
                     rows (for [g gs :when (not= :no-build (:status g)) :let [v (verdict roots (:id g))] :when v]
-                           {:id (:id g) :kind (:verdict v) :ok (= (:status g) (:status v)) :status (:status g)})]
+                           {:id (:id g) :kind (:verdict v) :status (:status g)
+                            :ok (and (= (:status g) (:status v))
+                                     (or (not= :golden (:verdict v)) (and (= (:stdout g) (:stdout v)) (= (:stderr g) (:stderr v)))))})]
                 (println (format "selfref agree: %d cases with a verdict of their own; g++'s recorded run meets it in %d"
                                  (count rows) (count (filter :ok rows))))
                 (doseq [x (remove :ok rows)] (println "  g++'s run against the verdict:" (:id x) (name (:kind x)) "status" (:status x)))))))

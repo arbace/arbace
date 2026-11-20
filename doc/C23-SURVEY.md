@@ -6505,3 +6505,45 @@ Proofs (the VM, no cc, no gcc): `c.judge-test`'s new `identifier-ucn-and-utf8-al
 failures; on the base's lexer and notes (the control) 14 fail. `bin/ci dg --corpus gcc-cpp-c23 --only` the three ucnid files: 3
 of 3 pass. `bin/repr-c roundtrip --only` the 18 files (sqlite3.c left out: its lexer dump does not move and its read is near
 4 GB): 18 pass, c23-ucnid-1.c own-invalid at 5:1; with the base's print-own.edn entry (9:1) the row fails as stale.
+
+## As built: c-cpp-golden, the run cases left by gcc's run reviewed for golden files (2026-11-20; branch `c-cpp-golden-1120` from next `939037429`)
+
+The user's decision of 2026-11-20: reviewed golden files for C's output-only run cases. Their form is `test/c/selfref-derived.edn`'s
+(an exact `:stdout` and status with its reasoning, n-c-last and queue 409), since the corpora's files are the pinned gomodcache's.
+The 104 programs of 2026-11-17 with no verdict of their own (benchmarksgame 29, ci-run's output-only 19, mir's lacc and new 36, cxgo 2,
+the 18 exceptions) are 30 on next today (`c.selfref ref` at the reference's key `9c8cd8ed20a7c69f`: 2,329 of 2,619 by their own
+verdict; the others were moved by n-c-last's self-checks, benchspec and derived outcomes, queue 409 and n-hasattr). Each of the 30 was
+read again; none admits a golden file, the output of each not determined by its source: 16 benchmarks run without an argument pass
+`argv[1]`, a null pointer, to atoi or atol (7.1.4); reverse-complement-2 and -5 search for '>' from `buf - 1` on the empty input; the
+two 20031003-1 convert a float out of int's range (6.3.1.4); gnu23-tag-alias-2, -3, -5, -7 store through an incompatible struct type
+and read through the original (their verdict is -O2's alias analysis); mir's union-bitfield (unspecified bits), setjmp2 (setjmp through
+a pointer, 7.13.1.1), non-pedantic-macro-redef (a constraint violation); tcc-tests2's 93 and 95 (bit-fields of types other than int,
+implementation-defined, 6.7.3.2, for which doc/c/SPEC.md states no choice of its own; 95 also prints size_t by %d); dfp-8 (refused by
+design, its verdict needs fenv_exceptions_dfp). No file under test/c/ changed (every C step keys test/c/): the reasons are the judge's
+fact in test/crops/independence.edn, the 9 exceptions' also in selfref-exceptions.edn. C's judge stays (14867 + 0.5 x 148) / 15015.
+
+## As built: c-cpp-golden, the cases out of the judge's cases (2026-11-20; the user's decision of that day)
+
+A case whose expected output is undefined, unspecified or host-dependent leaves the judge's cases (as the n/a cases and Haskell's
+D435-3 (a)), its run still counted in completeness as before, its reason written per case; dfp-8 leaves on the ground of its design.
+`test/c/selfref-out.edn`: the 30 programs above, `{ID {:kind K :levels [:eval :aot] :why W}}` (25 `:undefined`: the 16 benchmarks
+run with no argument, reverse-complement-2 and -5, the two 20031003-1, the four gnu23-tag-alias, setjmp2; 1 `:unspecified`
+union-bitfield, 1 `:constraint` non-pedantic-macro-redef, 2 `:implementation-defined` tcc 93 and 95, 1 `:by-design`
+dfp-8). `c.selfref`'s `ref` (every check's reference) refuses an entry with a verdict of its own (a defined output cannot be counted
+out), with no kind, levels or reason, or no case of the reference, and runs its control each time: the first case with a verdict of
+its own put in the list must be refused. The file is the run level's record (`:c-records-run`, out of `:c`), keyed into the
+reference's cache; `test/c/selfref.ae`'s change reruns every C step at the next night. The judge fact counts it by
+`:out-of-cases` (doc/CROPS-SCORE.md): C's judge (14867 + 0.5 x 148) / 15015 = 0.995 to (14867 + 0.5 x 88) / 14955 = 0.997.
+
+**The 16 benchmarks at their corpus's NAME.arg** (the main session's choice: run them as the benchmark's specification defines).
+The .arg files are the benchmarks game's full sizes: binary-trees 21, fannkuch-redux 12, fasta 25,000,000 (254,166,745 bytes of
+output), mandelbrot 16000 (32,000,015 bytes), nbody 50,000,000. Measured once each (2026-11-20, 18:38-19:08 UTC, load 20-60,
+directly under `ulimit -v` 8 GiB): at eval `cirun` on the check's kept node programs (next's night of 2026-11-20) with the
+argument, 60 s caps, four at a time; at AOT `bin/ci check --aot --corpus benchmarksgame --only` the 16 with an argument hook
+(`ci_args`, a file of `ID ARGS` lines, run1's command line; kept as `.tmp/bench/args-hook.patch`, not committed), one at a time,
+60 s caps, the quiet retry running each timeout again alone. Eval: 15 past 60 s (small sizes timed first: nbody 100,000 in 5.2 s,
+fasta 100,000 in 0.9 s, mandelbrot 400 in 2.7 s, binary-trees 12 in 7.0 s, fannkuch 8 in 0.1 s, so about 43 min, 3.5 min, 70 min, 1
+h and 28 min at the full sizes); nbody-4 stops at once at both levels on `_mm_loadl_pd` (`<immintrin.h>`, no intrinsic of ci's).
+AOT: fasta-2 19 s, fasta-7 25 s, fasta-5 43 s and mandelbrot-2 34 s end with status 0 at the specification's exact lengths; the
+other 11 pass 60 s twice. No program fits the check at both levels, and C's reference (`c.selfref ref`) is one for both, so none
+moved: the 16 leave the judge's cases as the check runs them, with no argument, the measurement in each reason.
