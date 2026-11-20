@@ -448,6 +448,10 @@
             (cond
               (:fpi v) {:x :fp :i (:fpi v) :c (boolean (:c (:ty v))) :v (boolean (:v (:ty v)))}
               (= :nttp (:e e)) {:x :tpv :i (:i e)}
+              ;; (cpp-rt-own2: a non-static data member of the enclosing class named alone, an implicit this's member access,
+              ;; clang's dtdefpT <name>: <bits/refwrap.h>'s _Mem_fn_base<_MemObjPtr, false>::operator()'s
+              ;; decltype(std::__invoke(_M_pm, ...)), fs_ops' and exp ops' _Mem_fn_base<long stat::*>, had been sr-less 5_M_pm)
+              (= :field (:e e)) (member n nil)
               ;; (a variable not a parameter: clang's L <mangled> E, not written)
               v {:x :fail :what (str "variable " nm)}
               ;; a function's or template's name, or nothing found: an unresolved name (the call's ADL)
@@ -1162,6 +1166,30 @@
 
 (defn- linkage-c? [scope] (:extern-c scope))
 
+(defn internal-type?
+  "cpp-rt-own2: whether the type `t` names a type of internal linkage (clang's LinkageComputer: a compound type's linkage is the
+  least of its parts'): a class of an unnamed namespace or local to an internal function (its scope's :internal, declare-class!),
+  a closure named $_N (internal as its call operator), a specialization of a class template with such arguments, an enumeration
+  of an unnamed namespace, through pointers, references, arrays, member pointers, function types and packs. Template's
+  internal-args? over a specialization's arguments; a member function's type (declare-fn!), clang's getLVForClassMember."
+  ([t] (internal-type? t (java.util.HashSet.)))
+  ([t ^java.util.HashSet seen]
+   (letfn [(ty? [t]
+             (cond
+               (not (map? t)) false
+               (and (contains? t :pack) (nil? (:k t)) (sequential? (:pack t))) (boolean (some ty? (:pack t)))
+               (= :class (:k t)) (let [id (:id t)]
+                                   (and (.add seen id)
+                                        (let [c (abi/cls id)]
+                                          (boolean (or (:internal (:scope c)) (and (:lambda c) (:dollar-key c))
+                                                       (some ty? (:targs c)))))))
+               (= :enum (:k t)) (boolean (some #(= [:anon] %) (:path (abi/enm (:id t)))))
+               (#{:ptr :ref :rref :arr} (:k t)) (ty? (or (:to t) (:of t)))
+               (= :mptr (:k t)) (or (ty? (:to t)) (ty? (if (map? (:cls t)) (:cls t) {:k :class :id (:cls t)})))
+               (= :fn (:k t)) (boolean (or (ty? (:ret t)) (some ty? (:ps t))))
+               :else false))]
+     (ty? t))))
+
 (defn- ns-scope! [parent nm anon]
   (let [k (if anon "" nm)
         ^java.util.HashMap m (:names parent)
@@ -1510,7 +1538,10 @@
            ;; queue 351: `throw()`, clang's EST_DynamicNone: before C++17 an exception filter, not noexcept's terminate scope
            :dynamic-none (boolean (and (not (re-find #"\bnoexcept\b" (or qt ""))) (re-find #"\bthrow\s*\(\s*\)" (or qt ""))))
            :linkage (if (linkage-c? home) :c :cpp)
-           :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home)))
+           ;; (cpp-rt-own2: a member function whose type as written names a type of internal linkage is not externally
+           ;; visible, clang's getLVForClassMember (UniqueExternalLinkage, emitted internal): memory_resource.cc's
+           ;; __pool_resource::_Pool::vector::begin() returning an unnamed namespace's chunk*, linkonce_odr before)
+           :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home) (and cid (internal-type? ty))))
            :internal-l (boolean (and (not cid) (= "static" (:storageClass n)) (not (:internal home))))
            :inline (boolean (or (:inline n) (:constexpr n) (and cid (= scope home) (or body (:explicitlyDefaulted n)))))
            :path (:path home)
@@ -1564,6 +1595,12 @@
                             ;; an out-of-line `= default` definition (G5c: nested_exception::~nested_exception() noexcept = default
                             ;; in nested_exception.cc): defined here, not inline, the class's key function
                             (and (:defaulted f) (not (header-node? n))) (assoc :defaulted true :out-of-line-default true)
+                            ;; (cpp-rt-own2: a header's out-of-line `= default` definition, user-provided and so not trivial,
+                            ;; [dcl.fct.def.default]/5, defined where used as an inline function's, linkonce_odr: <experimental/bits/
+                            ;; fs_path.h>'s `inline path::path(const path&) = default;`, `inline path::~path() = default;` and its
+                            ;; copy assignment, declared alone before, exp/filesystem/ops.cc's calls of them undefined in its IR)
+                            (and (:defaulted f) (header-node? n) (not (:defaulted g)))
+                            (assoc :defaulted true :ool-defaulted true :trivial false :inline (or (:inline g) (boolean (:inline n))))
                             ;; (CX12, the checker: a deleted function redeclared -- ill-formed, or two overloads the
                             ;; slice's types do not tell apart, noexcept among them -- is not trusted to be deleted)
                             ;; (queue 460: but a plain redeclaration of the same type after the deleted definition keeps it,
@@ -1876,7 +1913,7 @@
     (when-let [tags (and nm (not-empty (vec (sort (distinct (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"abi_tag" "__abi_tag__"} (:_gnu a)))
                                                                   [_ t] (re-seq #"\"([^\"]*)\"" (str (:_arg a)))]
                                                               t))))))]
-      (abi/update-cls! id assoc :mname (str (abi/source-name nm) (apply str (map #(str "B" (count %) %) tags)))))
+      (abi/update-cls! id assoc :mname (str (abi/source-name nm) (apply str (map #(str "B" (count %) %) tags))) :abi-tags tags))
     (when (:completeDefinition n)
       (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
       (abi/update-cls! id assoc :complete true :defining true
@@ -2137,6 +2174,11 @@
     r
   (case (:kind n)
     "NamespaceDecl" (let [s (ns-scope! scope (:name n) (nil? (:name n)))]
+                      ;; (cpp-rt-own2: GNU's abi_tag on a namespace, the implicit tags of the functions whose return type uses it,
+                      ;; abi's fn-abi-tags: <c++config.h>'s `inline namespace __cxx11 __attribute__((__abi_tag__ ("cxx11")))`)
+                      ;; (the native parser's :_abi-tags)
+                      (when-let [tags (and abi/*ns-tags* (:name n) (not-empty (:_abi-tags n)))]
+                        (swap! abi/*ns-tags* update (:path s) #(vec (sort (distinct (concat % tags))))))
                       ;; an inline namespace's members are members of the enclosing one too ([namespace.def]/7; G4:
                       ;; std::__cxx11)
                       (when (and (:isInline n) (:name n))
@@ -2428,6 +2470,19 @@
       (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
                         (some #(let [b (abi/cls %)] (some (fn [x] (let [g (fnd x)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b))) (class-like-members id)))]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
+    ;; (cpp-rt-own2: and when a base's default constructor is inherited by a using-declaration and the class declares none of its
+    ;; own, as clang's needsImplicitDefaultConstructor declares it (HasInheritedDefaultConstructor): unique_ptr's __uniq_ptr_data,
+    ;; `using __uniq_ptr_impl<_Tp, _Dp>::__uniq_ptr_impl;` beside its defaulted move constructor, value-initialized by unique_ptr()
+    ;; : _M_t(), clang's __uniq_ptr_data<...>::__uniq_ptr_data() C2Ev, not the inheriting constructor CI2 default-ctor-init had
+    ;; called (fs_ops' unique_ptr<char[], (anonymous)::free_as_in_malloc>, its _Head_base<0, char*>() then unwritten))
+    (when (and (not (checking?)) (seq (:inherits-ctors (abi/cls id)))
+               (not-any? #(empty? (:ps (:ty (fnd %)))) (:ctors (abi/cls id)))
+               (some (fn [b] (and (not (:virtual b)) (contains? (:inherits-ctors (abi/cls id)) (:name (abi/cls (:cls b))))
+                                  (some #(let [g (fnd %)] (and (empty? (:ps (:ty g))) (not (:deleted g)))) (:ctors (abi/cls (:cls b))))))
+                     (:bases c)))
+      (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
+                        (some #(let [b (abi/cls %)] (some (fn [x] (let [g (fnd x)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b))) (class-like-members id)))]
+        (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
     (doseq [x (:ctors (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (empty? (:ps (:ty g))))
                          ;; (trivial only when its bases' and members' default constructors are: [class.default.ctor]/3;
@@ -2481,7 +2536,10 @@
     (doseq [x (:methods (abi/cls id))]
       ;; (queue 351: an assignment's triviality is its own, [class.copy.assign]/9: not the copy constructor's, which
       ;; std::allocator's user-provided one made non-trivial; clang writes no call of allocator<char>::operator=)
-      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (trivial-assign? id)))))
+      ;; (cpp-rt-own2: a move assignment defaulted on its first declaration likewise: <fs_fwd.h>'s file_status&
+      ;; operator=(file_status&&) noexcept = default over two enumerations, a copy of the bytes in clang's IR, no
+      ;; _ZNSt10filesystem11file_statusaSEOS0_ written)
+      (let [g (fnd x)] (when (and (:defaulted g) (not (:ool-defaulted g)) (or (copy-assign? g id) (move-assign? g id))) (upd-fn! x assoc :trivial (trivial-assign? id)))))
     (abi/update-cls! id assoc :user-ctor (boolean (seq (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id)))))
                      :user-dtor (boolean (let [d (:dtor (abi/cls id))] (and d (not (:implicit (fnd d))))))
                      :user-copy-assign (boolean (some #(let [g (fnd %)] (and (copy-assign? g id) (not (:implicit g)))) (:methods (abi/cls id)))))
@@ -2545,6 +2603,8 @@
 (defn ce-num
   "An evaluation's integral value as a number to compute with: a long, or a BigInt outside 64 bits (a 128-bit value)."
   [v]
+  ;; (cpp-rt-own2: a pointer's or an object's value, a map, is no number: not a constant, never a ClassCastException)
+  (when (map? v) (throw (ex-info "not a constant: a pointer or an object as a number" {:codegen/not-constant true})))
   (if (and (integer? v) (not (instance? Long v)) (or (> v Long/MAX_VALUE) (< v Long/MIN_VALUE))) (bigint v) (long v)))
 
 (defn- wide-value? [v] (and (integer? v) (not (instance? Long v)) (or (> v Long/MAX_VALUE) (< v Long/MIN_VALUE))))
@@ -2600,6 +2660,9 @@
 ;; invocation), where `__builtin_is_constant_evaluated()` and `if consteval` say true; false in the folds of code that runs
 ;; (fold-mark's, ce-try's), as clang's InConstantContext
 (def ^:dynamic *ce-manifest* false)
+;; (cpp-rt-own2: an atom while ce-object evaluates a namespace-scope object's initializer, which may then take the address of an
+;; object of static storage duration, [expr.const]/13's address constant: ce-global-addr; it holds true once one was taken)
+(def ^:dynamic *ce-gaddr* nil)
 
 (defn- var-const-int
   "A const integral variable's value, its initializer's constant (const-int in its definition's scope), kept on the variable
@@ -2749,6 +2812,22 @@
 
 (defn- ce-loc? [v] (and (map? v) (contains? v ::cell)))
 
+(defn- ce-gaddr?
+  "cpp-rt-own2: whether the evaluator's value is the address of an object of static storage duration: {::gaddr VAR-ID ::off
+  BYTES}, made by ce-global-addr under ce-object alone; passed, stored and returned, never read through or computed with."
+  [v]
+  (and (map? v) (contains? v ::gaddr)))
+
+(defn ce-global-addr
+  "cpp-rt-own2: [var-id byte-offset] of an address value of ce-object's object (the code generator's pointer leaf), else nil."
+  [v]
+  (when (ce-gaddr? v) [(::gaddr v) (::off v)]))
+
+(defn ce-union-member
+  "cpp-rt-own2: the active member's index of a union's value of ce-object's, nil when none is."
+  [v]
+  (when (map? v) (first (filter integer? (keys v)))))
+
 (defn- ce-member-name [cid k]
   (let [c (abi/cls cid)] (str (:name c) "::" (:name (nth (:fields c) k nil)))))
 
@@ -2875,6 +2954,31 @@
 
 (defn- ce-cell-loc [v] {::cell (atom v) ::path []})
 
+(defn- ce-static-addr
+  "cpp-rt-own2: the address of the glvalue `e` as ce-gaddr? holds it when `e` names an object of static storage duration (a
+  namespace-scope or static data member variable, not thread-local, not a local of the evaluation) or a non-bit-field member or
+  non-virtual base subobject of one, else nil: memory_resource.cc's `__constinit constant_init<atomic_mem_res>
+  default_res{&newdel_res.obj}`, constant-initialized by clang, atomic<memory_resource*>'s constructor never emitted."
+  [e env]
+  (let [g (letfn [(walk [e]
+                    (case (:op e)
+                      :var (when-not (contains? env (:id e))
+                             (let [v (var* (:id e))]
+                               (when (and (#{:global :member-static} (:storage v)) (not (:tls v)) (not (abi/ref? (:ty v))))
+                                 {::gaddr (:id e) ::off 0})))
+                      :field (when-let [g (walk (:obj e))]
+                               (let [cid (some-> (:ty (:obj e)) abi/unq :id) c (when cid (abi/cls cid))
+                                     fd (when c (nth (:fields c) (:i e) nil))]
+                                 (when (and fd (not (:bits fd)))
+                                   (update g ::off + (long (nth (:fields (abi/layout cid)) (:i e)))))))
+                      :base-lv (when-let [g (walk (:e e))]
+                                 (let [fc (some-> (:ty (:e e)) abi/unq :id) [_ off vb] (when fc (abi/base-path fc (:to e)))]
+                                   (when (and off (nil? vb)) (update g ::off + (long off)))))
+                      nil))]
+            (walk e))]
+    (when g (reset! *ce-gaddr* true))
+    g))
+
 (declare str-units)
 
 (defn- fp->long
@@ -2895,6 +2999,8 @@
       (ce-ptr? v) (if (or (abi/ptr? t) (= :bool (abi/bn t))) (if (abi/ptr? t) v 1) (not-constant "a pointer as " (pr-str t)))
       ;; (CP378 (a): a pointer to an object, `this`, a location)
       (ce-loc? v) (if (abi/ptr? t) v (if (= :bool (abi/bn t)) 1 (not-constant "a pointer as " (pr-str t))))
+      ;; (cpp-rt-own2: the address of an object of static storage duration, ce-object's: a pointer's value alone)
+      (ce-gaddr? v) (if (abi/ptr? t) v (not-constant "an address as " (pr-str t)))
       (= :bool (abi/bn t)) (if (if (number? v) (not (zero? (double v))) v) 1 0)
       ;; (h-cpp-consteval, the checker: a null pointer, :null's 0)
       (and (or (abi/ptr? t) (= :nullptr (abi/bn t))) (number? v) (zero? (double v)) (checking?)) 0
@@ -2967,7 +3073,7 @@
        :null (if (checking?) 0 (not-constant "a null pointer"))
        ;; (CP378 (a): class objects: `this`, an address, a prvalue object, a value-initialized scalar)
        :this (or (::this env) (not-constant "this outside a member's evaluation"))
-       :addr (ce-lv (:e e) env)
+       :addr (or (when *ce-gaddr* (ce-static-addr (:e e) env)) (ce-lv (:e e) env))
        :temp-obj (ce-init (:ty e) (:init e) env)
        :zero-val (if (abi/class? (abi/unq t)) (ce-init t {:i :zero} env) 0)
        :cast (let [_ (when (#{:ptr->int :int->ptr} (:ck e))
@@ -2976,8 +3082,16 @@
                    _ (when (and (:cx-reinterpret e) (checking?)) (ub! e "'reinterpret_cast' is not a constant expression"))
                    v (ev (:e e))]
                (case (:ck e)
-                 (:noop :int :int->fp :fp :fp->int) (ce-wrap t (if (and (= :fp->int (:ck e))) (fp->long v) (from-src (:ty (:e e)) t v)))
-                 :to-bool (if (or (ce-ptr? v) (ce-loc? v)) 1 (if (zero? (double v)) 0 1))
+                 (:noop :int :int->fp :fp :fp->int) (if (ce-gaddr? v)
+                                                      (if (= :noop (:ck e)) (ce-wrap t v) (not-constant "an address converted"))
+                                                      (ce-wrap t (if (and (= :fp->int (:ck e))) (fp->long v) (from-src (:ty (:e e)) t v))))
+                 :to-bool (if (or (ce-ptr? v) (ce-loc? v) (ce-gaddr? v)) 1 (if (zero? (double v)) 0 1))
+                 ;; (cpp-rt-own2: a derived class's address of static storage duration to its non-virtual base's, offset by its place)
+                 :base (if (ce-gaddr? v)
+                         (let [fc (some-> (:ty (:e e)) abi/unq :to abi/unq :id) tc (some-> t abi/unq :to abi/unq :id)
+                               [_ off vb] (when (and fc tc) (abi/base-path fc tc))]
+                           (if (and off (nil? vb)) (update v ::off + (long off)) (not-constant "an address to a virtual base")))
+                         (not-constant "cast :base"))
                  ;; ([expr.const]/5.15: a reinterpret_cast, as a conversion between a pointer and an integer is)
                  (not-constant "cast " (:ck e))))
        :unop (let [v (ev (:e e))]
@@ -3516,10 +3630,14 @@
   arrays vectors), or nil when it is no constant: the constant initialization clang's ConstantEmitter makes of `constexpr
   _cpp_trigraph_map_s _cpp_trigraph_map_d;` (libcpp's init.cc), whose constructor's body assigns the map's elements."
   [t i]
+  ;; (cpp-rt-own2: with the addresses of objects of static storage duration, ce-static-addr; an unforeseen use of one in a
+  ;; computation, a host exception, is no constant rather than a crash)
+  (let [ga (atom false)]
   (try (binding [*ce-steps* (atom 0) *ce-const* (or *ce-const* (atom #{})) *ce-pos* (or *ce-pos* (atom nil)) *ce-dead* (or *ce-dead* (atom #{}))
-                 *ce-temps* (or *ce-temps* (atom [])) *ce-manifest* true]
+                 *ce-temps* (or *ce-temps* (atom [])) *ce-manifest* true *ce-gaddr* ga]
          (let [v (ce-init t i {})] (when (map? v) v)))
-       (catch arbace.lang.ExceptionInfo x (when-not (or (:codegen/not-constant (ex-data x)) (:codegen/refused (ex-data x))) (throw x)) nil)))
+       (catch arbace.lang.ExceptionInfo x (when-not (or (:codegen/not-constant (ex-data x)) (:codegen/refused (ex-data x))) (throw x)) nil)
+       (catch RuntimeException x (if @ga nil (throw x))))))
 
 (defn ce-field-value
   "cpp-rt-own: a member's value in an object value of ce-object's: the field of index `i`, or the base `cid`'s ([:b cid]); nil when
@@ -8543,7 +8661,7 @@ protected:
   [nodes proot ^String src]
   (let [root (new-scope :ns nil :path [])]
   (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
-            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})
+            abi/*classes* (atom {}) abi/*enums* (atom {}) abi/*ns-tags* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})
             *conv-tmpl-cache* (atom {})]
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
@@ -8655,4 +8773,4 @@ protected:
                  (when-let [more (seq (when-let [h (:pending @hooks)] (h)))]
                    (doseq [x more] (entry! x))
                    (recur i))))))))
-      {:fns @*fns* :vars @*vars* :order @*order* :classes @abi/*classes* :enums @abi/*enums* :root root}))))
+      {:fns @*fns* :vars @*vars* :order @*order* :classes @abi/*classes* :enums @abi/*enums* :ns-tags @abi/*ns-tags* :root root}))))

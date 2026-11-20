@@ -3298,15 +3298,36 @@
 
 (def ^:dynamic *const-top* true) ; the complete object's constant (its vptrs written), not a base's
 
+(defn- global-addr-const
+  "cpp-rt-own2: the constant address `off` bytes into the variable `id` (an object of static storage duration, sema's
+  ce-global-addr): its symbol, or a getelementptr of i8 from it; the variable's definition, written when first used, written
+  now (var-addr's rule), one defined elsewhere declared; nil for one defined in this unit and not written yet (emit-globals
+  has not reached it: a dynamic initialization then)."
+  [id ^long off]
+  (let [v (sema/var* id) nm (abi/mangle-var v)
+        lazy (get-in @*top* [:lazy nm])]
+    (when (or lazy (contains? (:declared @*top*) nm) (not (:defined v)) (:extern v))
+      (when lazy (swap! *top* update :lazy dissoc nm) (add-top! lazy))
+      (declare-extern-var! v nm)
+      (if (zero? off) (gsym nm) (list 'getelementptr :inbounds 'i8 ['ptr (gsym nm)] ['i64 off])))))
+
 (defn- object-leaves
   "cpp-rt-own: the constant leaves [[offset llvm-type value] ...] of an object value of sema's ce-object (a class's fields and bases
   by its layout, arrays element by element, integers and floats), at `off`; nil for what it cannot write (a pointer, a bit-field, a
-  dynamic class, a union, an unset member)."
+  dynamic class, a union, an unset member). cpp-rt-own2: a pointer holding the address of an object of static storage duration
+  (global-addr-const), a union by its active member (none: zero)."
   [t v ^long off]
   (let [u (abi/unq t)]
     (cond
       (or (abi/integral? u) (abi/enum? u)) (when (number? v) [[off (abi/llvm-type u) (if (= :bool (abi/bn u)) (if (zero? (long v)) 0 1) (long (sema/ce-wrap u v)))]])
       (abi/floating? u) (when (number? v) [[off (abi/llvm-type u) (fp-const u (double v))]])
+      (abi/ptr? u) (when-let [[id o] (sema/ce-global-addr v)] (when-let [c (global-addr-const id (long o))] [[off 'ptr c]]))
+      (and (abi/class? u) (:union (abi/cls (:id u))))
+      (when (and (map? v) (not (abi/dynamic? (:id u))))
+        (if-let [k (sema/ce-union-member v)]
+          (let [fd (nth (:fields (abi/cls (:id u))) k nil)]
+            (when (and fd (not (:bits fd))) (object-leaves (:ty fd) (get v k) (+ off (long (nth (:fields (abi/layout (:id u))) k))))))
+          []))
       (abi/arr? u) (when (vector? v)
                      (let [et (:of u) es (abi/size-of et)
                            ls (map-indexed (fn [i x] (object-leaves et x (+ off (* (long i) (long es))))) v)]
@@ -3619,7 +3640,7 @@
   "The LLVM forms of the program `prog` (arbace.cpp.sema's analyze-program) of the file named `file`."
   [prog ^String file]
   (binding [sema/*fns* (atom (:fns prog)) sema/*vars* (atom (:vars prog))
-            abi/*classes* (atom (:classes prog)) abi/*enums* (atom (:enums prog))
+            abi/*classes* (atom (:classes prog)) abi/*enums* (atom (:enums prog)) abi/*ns-tags* (atom (or (:ns-tags prog) {}))
             *top* (atom {:forms [] :declared #{} :strings {} :wanted #{} :queue [] :vtables #{}})
             abi/*dollars* (atom {})]
     (reset! vt-cache {})
