@@ -1620,3 +1620,23 @@ llvm-read.verify-rt(-heldout).sub/.s1, c-dg.dg.sub/.s1, si-aot.check.sub/.s1, wa
 haskell-lib-stg.ghc-internal.sub/.s1). The simulation's durations are the store's, which knows no subset yet (a rotated check is
 counted at its part's whole time less the planner's share), so the night's real saving shows on the first nights' passes.
 `gate_key` unchanged (`ab36afadd0b1`), the epoch unchanged: the steps not edited keep their keys.
+
+**The four gate tests that failed at the merge base** (they would have failed gate-tests in the next gate). Each decided on the
+evidence; no test changed:
+- **rotation-controls-test** (16 C control subjects not in `:always`): the table was wrong. test/c/controls.edn's `:run` controls
+  grew (409-c-judge, n-c-expect and their kin, 2026-11-19) and c-check's and c-aot's `:always` (review 181 L4: the subjects and
+  references in the subset and every slice) kept the first seven files. Now all 23 subjects and references, each in both records.
+- **lanes-test's mem-check** (goi declared 7 GiB, recorded 13.3 GiB): the table was wrong. GTS227 (a)'s rule holds a declaration to
+  the store's passes and the clean records; n-gate-mem (2026-11-19) lowered goi to 7 by the store's passes alone, while
+  clean-arbace-reaps-3-crops-v2.edn's goi peaked at 13.3 GiB (its command then also ran `bin/goi check`, goi-check-full's since).
+  goi `:mem-gib 12` (12 x 1.1 + 0.5 holds 13.3); the next clean run's record lets it come down. (Tried and refused: skipping a
+  record whose step's command changed since its tag; it dropped 21 records' peaks, most for a command's small change, a loosening.)
+- **costs-test** (17 haskell lib steps in no crop): the table was wrong. Queue 363 and its kin added haskell-lib-own-pretty to
+  -process without `:crops :haskell` entries; added, with their `:controls` (test/haskell/lib-check-controls-P.tsv, which lib-check
+  --package P reads, as base's, deepseq's, array's and stm's), which gate.crops check then requires.
+- **`bin/gate-subsets --check`** (java's and C's subsets): the table's data were stale. Their inputs changed after the subsets were
+  last written (test/java/corpora.edn 11-15, its records and classes 11-18/19; test/c/corpora.edn 11-17, its records and controls
+  11-19); written again by `bin/gate-subsets java` and `c` (C's with the 23 control files above).
+After: rotation-controls, lanes, costs, crops, rotation, chain-needs, subsume, weekly and plan-logic tests pass; `bin/gate-subsets
+--check` "the subsets of all are the rule's"; crops-score `--judge --strict` 0 problems; claude-md; `bin/gate --plan` (58 steps)
+and `--nightly --plan` (554 checks, 10 covered).

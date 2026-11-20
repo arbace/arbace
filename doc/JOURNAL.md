@@ -13831,3 +13831,18 @@ clean-only parts). Built (doc/GATE-DIET-SURVEY.md, "As built: the 11-20 audit, r
 Alternatives considered: rotating without `:subsumes-cases` (the covers would lapse on every rotated night, the subsets running
 the essential cases twice); a cpp move into an unrotated new step (the same work under another name); per-group c-dg parts (its
 negative control crosses two groups and would be left in both).
+
+## 2026-11-20: the 11-20 audit: the four gate tests failing at the merge base fixed (branch `gate-audit-1120`)
+
+The coordinator's ask: the tests that failed on next and at gate-split's merge would fail gate-tests in the next gate. Each was the
+table's fault, not the test's (doc/GATE-DIET-SURVEY.md, round 2's last paragraph):
+- rotation-controls: c-check's and c-aot's `:always` now hold all 23 files of test/c/controls.edn's `:run` controls (7 before; the
+  controls added on 2026-11-19 had left 8 subjects out).
+- lanes' mem-check: goi `:mem-gib` 7 -> 12, holding clean-arbace-reaps-3-crops-v2.edn's 13.3 GiB (goi then also ran `bin/goi
+  check`); n-gate-mem had lowered it by the store's passes alone. A mem-check that skips records of a changed command was tried and
+  reverted: it dropped 21 records' peaks.
+- costs: the 17 haskell-lib-own steps (pretty .. process) in `:crops :haskell`, with their controls
+  (test/haskell/lib-check-controls-P.tsv), which gate.crops check requires of a crop's step.
+- `bin/gate-subsets --check`: java's and C's subsets written again by the rule (their records, classes and controls had changed
+  since 11-15 and 11-17).
+Checked: the gate tests named, crops-score `--judge --strict`, claude-md, `bin/gate --plan`, `--nightly --plan`. No gate run.
