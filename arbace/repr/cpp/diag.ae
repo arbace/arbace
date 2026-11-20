@@ -382,6 +382,8 @@
    [:pack-element #"^codegen: __type_pack_element's index \d+ is out of range" "index of __type_pack_element is out of range"]
    [:overload #"^codegen: no viable function among [1-9]" "no matching function for call"]
    [:overload #"^codegen: call to a deleted function" "call to deleted function"]
+   ;; (queue 497: GNU's unavailable attribute)
+   [:unavailable #"^codegen: '.*' is unavailable" "is unavailable"]
    [:access #"^codegen: '.*' is a (private|protected) member of" "is a private member of"]
    ;; (the rest of CP313 (a): a member named through an inaccessible base, [class.access.base]/5; structured bindings,
    ;; [dcl.struct.bind]/4)
@@ -429,6 +431,10 @@
    [:redecl #"^codegen: redefinition of enumerator '" "redefinition of enumerator"]
    ;; (queue 484: [temp.expl.spec]/12, [temp.deduct.decl]/1)
    [:template #"^codegen: explicit specialization of '.*' matches no template declaration" "no function template matches function template specialization"]
+   ;; (queue 497: an out-of-line member declaration of a class with no such member)
+   [:decl #"^codegen: no declaration matches '" "out-of-line declaration does not match any declaration"]
+   ;; (queue 497: an explicit instantiation's)
+   [:template #"^codegen: explicit instantiation of '.*' matches no template declaration" "explicit instantiation does not refer to a function template"]
    ;; (queue 484: a qualified name a complete class without bases, or an enumeration, does not declare, [basic.lookup.qual]/1,
    ;; [class.member.lookup]; name-expr's refusal, which the constraints' sure-failure? had already taken as the program's)
    [:name #"^codegen: unknown name \S+: no member of the complete class" "no member named in the class"]
@@ -1690,8 +1696,53 @@
 (def ^:private pack-expanders #{"PackExpansionExpr" "SizeOfPackExpr" "CXXFoldExpr" "PackIndexingExpr" "CXXCtorInitializer"})
 (def ^:private pack-decl-kinds #{"VarDecl" "FieldDecl" "TypeAliasDecl" "TypedefDecl" "ParmVarDecl" "FunctionDecl" "CXXMethodDecl"
                                  "CXXConstructorDecl" "CXXConversionDecl" "CXXFunctionalCastExpr" "CStyleCastExpr" "CXXStaticCastExpr"
-                                 "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXUnresolvedConstructExpr" "CXXTemporaryObjectExpr"})
+                                 "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXUnresolvedConstructExpr" "CXXTemporaryObjectExpr"
+                                 ;; (queue 497: a friend's declared type)
+                                 "FriendDecl"})
 (def ^:private tparam-kinds #{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"})
+
+;; (queue 497: the template heads of an out-of-line member's definition, which the tree holds no parameters of: read from the
+;; source text at the declaration's start, `template <...>` after `template <...>`, a parameter a pack when `...` at the
+;; head's own depth is followed by its name)
+(defn- head-packs
+  "The names of the packs the template heads at the source offset `o` of `src` declare (a set, possibly empty)."
+  [^String src o]
+  (loop [i (long o) acc #{}]
+    (let [m (re-matcher #"\Gtemplate\s*<" src)
+          j (loop [j i] (if (and (< j (count src)) (Character/isWhitespace (.charAt src j))) (recur (inc j)) j))]
+      (if-not (and (< j (count src)) (.find (.region m (int j) (count src))))
+        acc
+        (let [b (.end m)
+              ;; the head's closing `>`: the brackets' depth, a `>` closing only an open `<`; its parameters split at depth 0
+              [e ps] (loop [k b stack [] start b ps []]
+                       (if (>= k (count src)) [nil ps]
+                           (let [c (.charAt src k)]
+                             (cond (and (= c \>) (empty? stack)) [k (conj ps (subs src start k))]
+                                   (and (= c \,) (empty? stack)) (recur (inc k) stack (inc k) (conj ps (subs src start k)))
+                                   (#{\< \( \[ \{} c) (recur (inc k) (conj stack c) start ps)
+                                   (and (#{\) \] \}} c) (seq stack)) (recur (inc k) (pop stack) start ps)
+                                   (and (= c \>) (= \< (peek stack))) (recur (inc k) (pop stack) start ps)
+                                   :else (recur (inc k) stack start ps)))))]
+          (if-not e
+            acc
+            (recur (inc (long e))
+                   (into acc (keep (fn [^String q] (second (re-find #"^[^<(\[{]*\.\.\.\s*([A-Za-z_][A-Za-z_0-9]*)\s*(?:=.*)?$" (str/trim (loop [q q] (let [r (str/replace q #"<[^<>]*>" "")] (if (= r q) q (recur r)))))))) ps)))))))))
+
+(defn- explicit-text
+  "The condition of an `explicit(...)` written in `src` between the offsets `b` and `e`, or nil."
+  [^String src b e]
+  (when (and b e (< (long b) (long e)) (<= (long e) (count src)))
+    (let [t (subs src (int b) (int e))]
+      (when-let [m (re-find #"\bexplicit\s*\(" t)]
+        (let [o (+ (.indexOf t ^String m) (count m))]
+          (loop [k o d 1]
+            (when (< k (count t))
+              (let [c (.charAt t k)]
+                (cond (= c \() (recur (inc k) (inc d))
+                      (= c \)) (if (= d 1) (subs t o k) (recur (inc k) (dec d)))
+                      :else (recur (inc k) d))))))))))
+
+(defn- no-strings ^String [^String s] (when s (str/replace s #"\"(?:[^\"\\]|\\.)*\"" "\"\"")))
 
 (defn unexpanded-packs
   "[temp.variadic]/5's unexpanded packs in the unit `u`'s main file (see above): an error a declaration or expression."
@@ -1712,14 +1763,33 @@
                  (if (and (= "CallExpr" (:kind parent)) (identical? lam (first (:inner parent))))
                    {:range {:begin {:offset (get-in lam [:range :end :offset])}}}
                    lam))
+        ;; (queue 497: a mem-initializer not followed by `...` is no expansion: the source after its last argument's end, past
+        ;; the initializer's own closing `)` or `}`, does not start with `...`; one the tree holds no argument range of stays
+        ;; unjudged)
+        ctor-init-unexpanded? (fn [x]
+                                (when-let [e (some #(when (map? %) (get-in % [:range :end :offset])) (:inner x))]
+                                  (let [n (count src)
+                                        c (loop [k (long e) d 0]
+                                            (when (< k n)
+                                              (let [ch (.charAt src (int k))]
+                                                (cond (#{\( \[ \{} ch) (recur (inc k) (inc d))
+                                                      (#{\) \] \}} ch) (if (zero? d) k (recur (inc k) (dec d)))
+                                                      :else (recur (inc k) d)))))]
+                                    (when c
+                                      (let [t (str/triml (subs src (inc (long c)) (min n (+ (long c) 40))))]
+                                        (not (str/starts-with? t "...")))))))
         walk (fn walk [x packs at parent]
                (when (map? x)
                  (let [k (:kind x)
                        here (or at x)]
-                   (when-not (pack-expanders k)
+                   (when-not (and (pack-expanders k) (not (and (= "CXXCtorInitializer" k) (ctor-init-unexpanded? x))))
                      (let [;; a template head's parameters: its packs added, a non-pack of the same name hiding an outer pack
                            ps (filter #(tparam-kinds (:kind %)) (when (vector? (:inner x)) (:inner x)))
-                           packs (reduce (fn [s p] (if (:name p) (if (:isParameterPack p) (conj s (:name p)) (disj s (:name p))) s)) packs ps)
+                           ;; (queue 497: a template template parameter pack is marked :_pack)
+                           packs (reduce (fn [s p] (if (:name p) (if (or (:isParameterPack p) (:_pack p)) (conj s (:name p)) (disj s (:name p))) s)) packs ps)
+                           ;; (queue 497: an out-of-line definition's own heads, read from the text)
+                           qual (when (and (string? (:_qual x)) (pos? (long (or (:_qtmpl x) 0))) (mine? x)) (:_qual x))
+                           packs (if qual (into packs (head-packs src (off-of x))) packs)
                            ;; a function's parameter packs (their names in its types and body)
                            fps (when (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} k)
                                  (keep #(when (and (map? %) (= "ParmVarDecl" (:kind %)) (:name %)
@@ -1729,8 +1799,11 @@
                            packs (into packs fps)
                            ;; (a partial specialization's arguments, its text from the name to its body: GCC drops the
                            ;; specialization with the error, its members not diagnosed)
-                           spec-bad (when (and (= "ClassTemplatePartialSpecializationDecl" k) (seq packs) (mine? x))
-                                      (when-let [o (get-in x [:loc :offset])]
+                           spec-bad (when (and (#{"ClassTemplatePartialSpecializationDecl" "VarTemplatePartialSpecializationDecl"} k) (seq packs) (mine? x))
+                                      ;; (queue 497: a variable template's, from its VarDecl's name)
+                                      (when-let [o (if (= "VarTemplatePartialSpecializationDecl" k)
+                                                     (some #(when (= "VarDecl" (:kind %)) (get-in % [:loc :offset])) (:inner x))
+                                                     (get-in x [:loc :offset]))]
                                         (let [e (let [b (.indexOf src "{" (int o)) c (.indexOf src ";" (int o))]
                                                   (cond (neg? b) c (neg? c) b :else (min b c)))]
                                           (when (pos? e) (unexpanded-in-text packs (subs src (int o) (int e)))))))]
@@ -1742,6 +1815,23 @@
                                (report! here (str "'" (get-in x [:referencedDecl :name]) "'")))
                              (when (and (pack-decl-kinds k) (not (:isImplicit x)))
                                (when-let [bad (unexpanded-in-text packs (str (get-in x [:type :qualType])))] (report! here (str "'" (first bad) "'"))))
+                             ;; (queue 497: the texts the tree keeps of other constructs: an out-of-line definition's qualifier
+                             ;; (at its name), a DeclRefExpr's nested-name-specifier, sizeof's or alignof's type operand, an
+                             ;; attribute's argument, a using-declaration, and a constructor's or conversion's explicit(cond))
+                             (when qual
+                               (when-let [bad (unexpanded-in-text packs qual)] (report! (if (:loc x) {:loc (:loc x)} here) (str "'" (first bad) "'"))))
+                             (when (= "DeclRefExpr" k)
+                               (doseq [q (:qualifier x) :when (string? q)]
+                                 (when-let [bad (unexpanded-in-text packs q)] (report! here (str "'" (first bad) "'")))))
+                             (when (= "UnaryExprOrTypeTraitExpr" k)
+                               (when-let [bad (unexpanded-in-text packs (get-in x [:argType :qualType]))] (report! here (str "'" (first bad) "'"))))
+                             (when (= "NativeAttr" k)
+                               (when-let [bad (unexpanded-in-text packs (no-strings (:_arg x)))] (report! here (str "'" (first bad) "'"))))
+                             (when (= "UsingDecl" k)
+                               (when-let [bad (unexpanded-in-text packs (:_text x))] (report! here (str "'" (first bad) "'"))))
+                             (when (#{"CXXConstructorDecl" "CXXConversionDecl"} k)
+                               (when-let [bad (unexpanded-in-text packs (explicit-text src (get-in x [:range :begin :offset]) (get-in x [:loc :offset])))]
+                                 (report! here (str "'" (first bad) "'"))))
                              (when-let [ft (get-in x [:fixedUnderlyingType :qualType])]
                                (when-let [bad (unexpanded-in-text packs ft)] (report! here (str "'" (first bad) "'"))))
                              (when (= "CXXRecordDecl" k)
@@ -1751,9 +1841,19 @@
                              (if (= "LambdaExpr" k)
                                ;; (a lambda: its body and its call operator's declaration, at the lambda's full expression; its
                                ;; captures' initializers, whose `...` the tree does not keep, not judged)
-                               (let [at2 (or at (lam-at x parent))]
+                               (let [at2 (or at (lam-at x parent))
+                                     ;; (queue 497: a generic lambda's own packs, `auto...` parameters and its own template
+                                     ;; head's packs, judged in its body at the construct itself)
+                                     gl (some #(when (map? %) (:_glam %)) (:inner x))
+                                     own (set (concat (keep #(when (and (map? %) (:name %) (str/ends-with? (str/trim (str (get-in % [:type :qualType]))) "..."))
+                                                               (:name %))
+                                                            (:params gl))
+                                                      (keep #(when (and (map? %) (:name %) (or (:isParameterPack %) (:_pack %))) (:name %)) (:tparams gl))))]
                                  (doseq [y (:inner x) :when (and (map? y) (#{"CompoundStmt" "CXXRecordDecl"} (:kind y)))]
-                                   (walk y packs at2 x)))
+                                   (walk y packs at2 x))
+                                 (when (seq own)
+                                   (doseq [y (:inner x) :when (and (map? y) (= "CompoundStmt" (:kind y)))]
+                                     (walk y own nil x))))
                                (doseq [y (:inner x)] (walk y packs at x)))))))))))]
     (doseq [n (:nodes u) :when (mine? n)] (walk n #{} nil nil))
     (vec out)))
