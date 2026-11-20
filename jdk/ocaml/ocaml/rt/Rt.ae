@@ -61,11 +61,19 @@
       (if (nil? v)
         (let [d (unchecked-divide (ExtCore/stackWords) 4)] (if (< d 200000) (unchecked-int d) (int 200000)))
         (Integer/parseInt v))))
+  ;; (queue 453) a call's entry and a loop's turn test one counter (ticks): o2j writes them in place, Rt/enter's and Rt/tick's
+  ;; frames gone (each interpreted call a frame and its arrays: the collector's work at the light level). A pending action forces
+  ;; the slow path at the next turn (Rt/force: a signal posted, a Memprof callback queued), the finalisers' poll counts the turns
+  ;; it skipped (ExtGc/finPollN), and near DEPTH_LIMIT every entry takes the slow path (ticks kept above 128), so Stack_overflow
+  ;; comes at the depth it came at
   (method ^:public ^:static enter ^void []
-    ;; Rt/tick's test in place (queue 414: each interpreted call a frame); its work in tickSlow
+    (set! depth (unchecked-inc-int depth))
     (set! ticks (unchecked-inc-int ticks))
-    (when (or (> ticks 128) (not (== ExtSignal/pending 0)) (not (== ExtGc/finCount 0)) (not (== ExtGc/memprofPending 0)))
-      (Rt/tickSlow))
+    (when (> ticks 128) (Rt/enterSlow)))
+  ;; an entry's slow path: the turn's work at the caller's depth, then the depth's limit
+  (method ^:public ^:static enterSlow ^void []
+    (set! depth (unchecked-dec-int depth))
+    (Rt/tickSlow)
     (set! depth (unchecked-inc-int depth))
     (when (> depth DEPTH_LIMIT)
       (set! depth (unchecked-dec-int depth))
@@ -73,21 +81,25 @@
   (method ^:public ^:static leave ^void [] (set! depth (unchecked-dec-int depth)))
   ;; a call's or a loop's turn (oi's tick): while other domains run, every 128 turns the thread lets them run (Gil/yield), as
   ;; OCaml's domains run in parallel (a domain spinning on a reference another one sets, parallel/pingpong)
-  (field ^:static ^int ticks 0)
+  (field ^:public ^:static ^int ticks 0)
   (method ^:public ^:static tick ^void []
     (set! ticks (unchecked-inc-int ticks))
-    (when (or (> ticks 128) (not (== ExtSignal/pending 0)) (not (== ExtGc/finCount 0)) (not (== ExtGc/memprofPending 0)))
-      (Rt/tickSlow)))
+    (when (> ticks 128) (Rt/tickSlow)))
+  ;; a pending action's turn at the next entry or loop turn
+  (method ^:public ^:static force ^void [] (set! ticks 129))
   ;; a turn's work once its counter or a pending action asks for it (ticks counted by the caller)
   (method ^:public ^:static tickSlow ^void []
     (when (not (== ExtSignal/pending 0)) (ExtSignal/process))
-    ;; the finalisers of the values a collection cleared (ExtGc, OC192 (a)), as a pending action
-    (when (not (== ExtGc/finCount 0)) (ExtGc/finPoll))
+    ;; the finalisers of the values a collection cleared (ExtGc, OC192 (a)), as a pending action, the turns since the last poll counted
+    (when (not (== ExtGc/finCount 0)) (ExtGc/finPollN ticks))
     ;; Gc.Memprof's queued callbacks (ExtGc/memprofRun)
     (when (not (== ExtGc/memprofPending 0)) (ExtGc/memprofRun))
-    (when (> ticks 128)
-      (set! ticks 0)
-      (when (or (> Effects/domainsRunning 0) ExtSignal/watching) (Gil/yield))))
+    (when (or (> Effects/domainsRunning 0) ExtSignal/watching) (Gil/yield))
+    ;; every turn the slow one again while an action is still pending (a masked signal, a callback kept) or the depth is near its
+    ;; limit (an entry's 128 unchecked turns)
+    (set! ticks (if (or (not (== ExtSignal/pending 0)) (not (== ExtGc/memprofPending 0))
+                        (> depth (unchecked-subtract-int DEPTH_LIMIT 256)))
+                  129 0)))
   ;; the result of a letrec group function's body (TailCall, OC84 (c)): the tail calls it returns made in turn, in this frame
   (method ^:public ^:static bounce [r]
     (loop [x r]
@@ -122,31 +134,31 @@
   (method ^:public ^:static mul [a b] (if (and (instance? Long a) (instance? Long b)) (bit-shift-right (bit-shift-left (unchecked-multiply (long (cast Long a)) (long (cast Long b))) 1) 1) (throw (Rt/notInts a b))))
   (method ^:public ^:static offset [a ^long n] (if (instance? Long a) (bit-shift-right (bit-shift-left (unchecked-add (long (cast Long a)) n) 1) 1) (throw (Rt/notInt a))))
   (method ^:public ^:static div [a b]
-    (let [y (Rt/l b)]
+    (let [y (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b)))]
       (when (== y 0) (throw (Exn. Division_by_zero)))
-      (Rt/wrap (unchecked-divide (Rt/l a) y))))
+      (bit-shift-right (bit-shift-left (unchecked-divide (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a))) y) 1) 1)))
   (method ^:public ^:static mod [a b]
-    (let [y (Rt/l b)]
+    (let [y (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b)))]
       (when (== y 0) (throw (Exn. Division_by_zero)))
-      (Rt/wrap (unchecked-remainder (Rt/l a) y))))
+      (bit-shift-right (bit-shift-left (unchecked-remainder (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a))) y) 1) 1)))
   (method ^:public ^:static land [a b] (if (and (instance? Long a) (instance? Long b)) (bit-and (long (cast Long a)) (long (cast Long b))) (throw (Rt/notInts a b))))
   (method ^:public ^:static lor [a b] (if (and (instance? Long a) (instance? Long b)) (bit-or (long (cast Long a)) (long (cast Long b))) (throw (Rt/notInts a b))))
   (method ^:public ^:static lxor [a b] (if (and (instance? Long a) (instance? Long b)) (bit-xor (long (cast Long a)) (long (cast Long b))) (throw (Rt/notInts a b))))
   (method ^:public ^:static lsl [a b] (if (and (instance? Long a) (instance? Long b)) (bit-shift-right (bit-shift-left (bit-shift-left (long (cast Long a)) (bit-and (long (cast Long b)) 63)) 1) 1) (throw (Rt/notInts a b))))
   (method ^:public ^:static lsr [a b]
-    (Rt/wrap (unsigned-bit-shift-right (bit-and (Rt/l a) 9223372036854775807) (bit-and (Rt/l b) 63))))
+    (bit-shift-right (bit-shift-left (unsigned-bit-shift-right (bit-and (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a))) 9223372036854775807) (bit-and (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b))) 63)) 1) 1))
   (method ^:public ^:static asr [a b]
-    (let [s (Rt/l b)] (Long/valueOf (bit-shift-right (Rt/l a) (if (or (< s 0) (> s 62)) 62 s)))))
+    (let [s (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b)))] (bit-shift-right (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a))) (if (or (< s 0) (> s 62)) 62 s))))
   (method ^:public ^:static lt ^boolean [a b] (if (and (instance? Long a) (instance? Long b)) (< (long (cast Long a)) (long (cast Long b))) (throw (Rt/notInts a b))))
   (method ^:public ^:static le ^boolean [a b] (if (and (instance? Long a) (instance? Long b)) (<= (long (cast Long a)) (long (cast Long b))) (throw (Rt/notInts a b))))
   (method ^:public ^:static gt ^boolean [a b] (if (and (instance? Long a) (instance? Long b)) (> (long (cast Long a)) (long (cast Long b))) (throw (Rt/notInts a b))))
   (method ^:public ^:static ge ^boolean [a b] (if (and (instance? Long a) (instance? Long b)) (>= (long (cast Long a)) (long (cast Long b))) (throw (Rt/notInts a b))))
   (method ^:public ^:static compareInts [a b]
-    (let [x (Rt/l a) y (Rt/l b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0)))))
+    (let [x (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a))) y (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b)))] (if (< x y) (long -1) (if (> x y) (long 1) (long 0)))))
   ;; isout: (unsigned) b > a
-  (method ^:public ^:static isout ^boolean [a b] (> (Long/compareUnsigned (Rt/l b) (Rt/l a)) 0))
+  (method ^:public ^:static isout ^boolean [a b] (> (Long/compareUnsigned (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b))) (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a)))) 0))
   (method ^:public ^:static bswap16 [a]
-    (let [x (Rt/l a)] (Long/valueOf (bit-or (bit-shift-left (bit-and x 255) 8) (bit-and (bit-shift-right x 8) 255)))))
+    (let [x (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a)))] (Long/valueOf (bit-or (bit-shift-left (bit-and x 255) 8) (bit-and (bit-shift-right x 8) 255)))))
 
   ;; ---- physical equality: numbers by value (floats by their bits), the rest by identity
 
@@ -221,12 +233,12 @@
         "and" (Rt/mkb kind (bit-and x (Rt/bv b)))
         "or" (Rt/mkb kind (bit-or x (Rt/bv b)))
         "xor" (Rt/mkb kind (bit-xor x (Rt/bv b)))
-        "lsl" (Rt/mkb kind (bit-shift-left x (bit-and (Rt/l b) (long (unchecked-dec-int w)))))
-        "lsr" (let [s (bit-and (Rt/l b) (long (unchecked-dec-int w)))]
+        "lsl" (Rt/mkb kind (bit-shift-left x (bit-and (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b))) (long (unchecked-dec-int w)))))
+        "lsr" (let [s (bit-and (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b))) (long (unchecked-dec-int w)))]
                 (if (== w 32)
                   (Rt/mkb kind (unsigned-bit-shift-right (bit-and x 4294967295) s))
                   (Rt/mkb kind (unsigned-bit-shift-right x s))))
-        "asr" (Rt/mkb kind (bit-shift-right x (bit-and (Rt/l b) (long (unchecked-dec-int w)))))
+        "asr" (Rt/mkb kind (bit-shift-right x (bit-and (if (instance? Long b) (long (cast Long b)) (throw (Rt/notInt b))) (long (unchecked-dec-int w)))))
         "==" (Rt/b (== x (Rt/bv b)))
         "!=" (Rt/b (not (== x (Rt/bv b))))
         "<" (Rt/b (< x (Rt/bv b)))
@@ -239,9 +251,9 @@
                   (Rt/mkb kind (long (Integer/reverseBytes (unchecked-int x))))
                   (Rt/mkb kind (Long/reverseBytes x)))
         (throw (Rt/internal (java-str "boxed integer primitive " op))))))
-  (method ^:public ^:static bintOfInt [^int kind a] (Rt/mkb kind (Rt/l a)))
+  (method ^:public ^:static bintOfInt [^int kind a] (Rt/mkb kind (if (instance? Long a) (long (cast Long a)) (throw (Rt/notInt a)))))
   (method ^:public ^:static compareBints [a b]
-    (let [x (Rt/bv a) y (Rt/bv b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0)))))
+    (let [x (Rt/bv a) y (Rt/bv b)] (if (< x y) -1 (if (> x y) 1 0))))
 
   ;; ---- Gc's words (OC218 (a), queue 331; oi's ext_sys.go countWords): an allocation of OCaml's bytecode counted at its making by
   ;; its wosize plus its header in the minor heap (above Max_young_wosize, 256, in the major heap): the Lambda's blocks and the
@@ -271,11 +283,11 @@
   ;; ---- blocks
 
   (method ^:public ^:static block [^int tag ^Object/1 fields]
-    ;; Rt/words in place (queue 414), counted after the value is made so that a profile tracks it (queue 438: Rt/wordsV's body)
+    ;; Rt/wordsV in place (queue 414), counted once the value exists (queue 438: memprof tracks it)
     (let [w (alength fields)
           v (if (== tag 254)
-              (let [n (alength fields) a (new double/1 n)]
-                (loop [^int i 0] (when (< i n) (aset a i (Rt/d (aget fields i))) (recur (unchecked-inc-int i))))
+              (let [a (new double/1 w)]
+                (loop [^int i 0] (when (< i w) (aset a i (Rt/d (aget fields i))) (recur (unchecked-inc-int i))))
                 a)
               (Block. tag fields))]
       (when (> w 0)
@@ -343,7 +355,7 @@
   (method ^:public ^:static boundError []
     (Exn. (Block. 0 (new Object/1 [Invalid_argument (Rt/s "index out of bounds")]))))
   (method ^:public ^:static agetChecked [a i]
-    (let [k (Rt/l i)]
+    (let [k (if (instance? Long i) (long (cast Long i)) (throw (Rt/notInt i)))]
       (if (instance? double/1 a)
         (let [d (cast double/1 a)]
           (when (or (< k 0) (>= k (alength d))) (throw (Rt/boundError)))
@@ -352,7 +364,7 @@
           (when (or (< k 0) (>= k (alength f))) (throw (Rt/boundError)))
           (aget f (unchecked-int k))))))
   (method ^:public ^:static asetChecked [a i v]
-    (let [k (Rt/l i)]
+    (let [k (if (instance? Long i) (long (cast Long i)) (throw (Rt/notInt i)))]
       (if (instance? double/1 a)
         (let [d (cast double/1 a)]
           (when (or (< k 0) (>= k (alength d))) (throw (Rt/boundError)))
@@ -386,18 +398,18 @@
   (method ^:public ^:static slen [x] (long (alength (cast byte/1 x))))
   (method ^:public ^:static sget [x i] (bit-and (long (aget (cast byte/1 x) (if (instance? Long i) (unchecked-int (long (cast Long i))) (throw (Rt/notInt i))))) 255))
   (method ^:public ^:static sgetChecked [x i]
-    (let [k (Rt/l i) b (cast byte/1 x)]
+    (let [k (if (instance? Long i) (long (cast Long i)) (throw (Rt/notInt i))) b (cast byte/1 x)]
       (when (or (< k 0) (>= k (alength b))) (throw (Rt/boundError)))
       (bit-and (long (aget b (unchecked-int k))) 255)))
-  (method ^:public ^:static sset [x i c] (aset (cast byte/1 x) (Rt/ii i) (unchecked-byte (Rt/l c))) UNIT)
+  (method ^:public ^:static sset [x i c] (aset (cast byte/1 x) (if (instance? Long i) (unchecked-int (long (cast Long i))) (throw (Rt/notInt i))) (unchecked-byte (if (instance? Long c) (long (cast Long c)) (throw (Rt/notInt c))))) UNIT)
   (method ^:public ^:static ssetChecked [x i c]
-    (let [k (Rt/l i) b (cast byte/1 x)]
+    (let [k (if (instance? Long i) (long (cast Long i)) (throw (Rt/notInt i))) b (cast byte/1 x)]
       (when (or (< k 0) (>= k (alength b))) (throw (Rt/boundError)))
-      (aset b (unchecked-int k) (unchecked-byte (Rt/l c)))
+      (aset b (unchecked-int k) (unchecked-byte (if (instance? Long c) (long (cast Long c)) (throw (Rt/notInt c)))))
       UNIT))
   ;; the little-endian loads and stores of 2, 4 and 8 bytes (string.get16 ...)
   (method ^:public ^:static sload [x i ^int width]
-    (let [b (cast byte/1 x) k (Rt/l i)]
+    (let [b (cast byte/1 x) k (if (instance? Long i) (long (cast Long i)) (throw (Rt/notInt i)))]
       (when (or (< k 0) (> (unchecked-add k width) (alength b))) (throw (Rt/boundError)))
       (let [^:mutable ^long v 0 ^int at (unchecked-int k)]
         (loop [^int j (unchecked-dec-int width)]
@@ -409,8 +421,8 @@
           4 (Integer/valueOf (unchecked-int v))
           (I64. v)))))
   (method ^:public ^:static sstore [x i v ^int width]
-    (let [b (cast byte/1 x) k (Rt/l i)
-          w (cond (instance? Long v) (Rt/l v) :else (Rt/bv v))]
+    (let [b (cast byte/1 x) k (if (instance? Long i) (long (cast Long i)) (throw (Rt/notInt i)))
+          w (cond (instance? Long v) (if (instance? Long v) (long (cast Long v)) (throw (Rt/notInt v))) :else (Rt/bv v))]
       (when (or (< k 0) (> (unchecked-add k width) (alength b))) (throw (Rt/boundError)))
       (loop [^int j 0]
         (when (< j width)
@@ -459,7 +471,7 @@
   ;; the method of a send: obj's own table's (self) or the public method looked up by its label
   (method ^:public ^:static getMethod [^boolean self obj tag]
     (if self
-      (aget (.-f (cast Block (aget (.-f (cast Block obj)) 0))) (Rt/ii tag))
+      (aget (.-f (cast Block (aget (.-f (cast Block obj)) 0))) (if (instance? Long tag) (unchecked-int (long (cast Long tag))) (throw (Rt/notInt tag))))
       (ExtCore/caml_get_public_method obj tag)))
 
   ;; ---- exceptions

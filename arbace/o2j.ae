@@ -321,6 +321,18 @@
   "Bt/pop in place (queue 414)."
   '(set! ocaml.rt.Bt/sp (unchecked-dec-int ocaml.rt.Bt/sp)))
 
+(def ^:private tick-forms
+  "Rt/tick in place (queue 453: a loop's turn without a frame): the turn counted, the slow path past 128."
+  '[(set! ocaml.rt.Rt/ticks (unchecked-inc-int ocaml.rt.Rt/ticks))
+    (when (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/tickSlow))])
+
+(def ^:private enter-forms
+  "Rt/enter in place (queue 453: a call's entry without a frame): the depth and the turn counted, the slow path (the turn's work,
+  the depth's limit) past 128 turns."
+  '[(set! ocaml.rt.Rt/depth (unchecked-inc-int ocaml.rt.Rt/depth))
+    (set! ocaml.rt.Rt/ticks (unchecked-inc-int ocaml.rt.Rt/ticks))
+    (when (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/enterSlow))])
+
 (defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
   (let [r (fresh "r$")]
     (list 'do (list 'ocaml.rt.Bt/push ev) (concat (list 'let [r f]) (clear ts) [bt-pop r]))))
@@ -337,6 +349,8 @@
     (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
 
 (declare prim-value const-arg)
+(def ^:private ^:dynamic *simple-args* "Whether the primitive's argument nodes are all simple (prim-node), or all
+  evaluated into temporaries (with-all-args): the inlined makeblock writes them twice." false)
 
 (defn- event-node
   "(event L [INFO]): in tail position, or without information, L alone (bytegen drops the event to keep the tail call); around
@@ -355,7 +369,7 @@
                        (and (str/starts-with? n "makeblock") (seq args) (const-arg ctx inner)))
                  (expr ctx inner false)
                  (let [ev (slot-ref info false true)]
-                   (with-all-args ctx args (fn [as ts] (around-slot ev (prim-value n as) ts))))))
+                   (with-all-args ctx args (fn [as ts] (around-slot ev (binding [*simple-args* true] (prim-value n as)) ts))))))
         (around-slot (slot-ref info false false) (expr ctx inner false))))))
 
 (defn- raise-slot
@@ -415,7 +429,7 @@
               :group (not-empty (dissoc group self-id)) :tails tails}
         b (realize (expr ictx body true))
         ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
-        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (list 'do '(ocaml.rt.Rt/tick) b))) b)
+        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (concat (list 'do) tick-forms [b]))) b)
         ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
         ;; of another of the group; its entry calls tb and bounces (Rt/bounce: each TailCall's function's tb in turn, in one
         ;; frame). Every function of such a group has a tb, being a TailCall's target or not
@@ -428,7 +442,7 @@
         ;; the call depth (OC92 (a)): counted on entry, given back on the way out (an exception's way out is the handler's,
         ;; trywith-node)
         r (fresh "r$")
-        b (list 'do '(ocaml.rt.Rt/enter) (list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r))]
+        b (concat (list 'do) enter-forms [(list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r)])]
     (when (= kind :tupled) (throw (ex-info "tupled function" {})))
     (swap! (:classes *unit*) conj
            (concat
@@ -514,7 +528,12 @@
         body (k (mapv first ps))]
     (if (seq bs) (list 'let bs body) body)))
 
-(defn- unbox [x] (list 'long (list 'cast 'Long x)))
+(defn- unbox
+  "A Long's long; an inlined int primitive's value (boxed by (cast Object ...), queue 453) unboxed by taking its long."
+  [x]
+  (if (and (seq? x) (= 'cast (first x)) (= 'Object (second x)) (seq? (nth x 2 nil)) (= 'bit-shift-right (first (nth x 2))))
+    (nth x 2)
+    (list 'long (list 'cast 'Long x))))
 
 (defn- inline-prim
   "The form of Rt's primitive m on args with its fast path in place, nil when m has none."
@@ -525,6 +544,16 @@
       (= 'b m) (list 'if (first args) 'ocaml.rt.Rt/TRUE 'ocaml.rt.Rt/FALSE)
       (= 't m)
       (bind-vals args (fn [[x]] (list 'if (list 'instance? 'Long x) (list 'not (list '== 0 (unbox x))) true)))
+      ;; (queue 453) the int primitives unboxed in place, no call: OCaml's types make their arguments ints (Longs); a value
+      ;; that is not (Obj.magic's) fails the cast, where Rt's method raised its internal error. The result boxed by a cast to
+      ;; Object, as every node's value (a primitive long bound by a let fails instance?: ast-invariants' load)
+      (#{'add 'sub 'mul} m)
+      (let [[a b] args op ({'add 'unchecked-add 'sub 'unchecked-subtract 'mul 'unchecked-multiply} m)]
+        (list 'cast 'Object (list 'bit-shift-right (list 'bit-shift-left (list op (unbox a) (unbox b)) 1) 1)))
+      (= 'offset m)
+      (let [[a n] args] (list 'cast 'Object (list 'bit-shift-right (list 'bit-shift-left (list 'unchecked-add (unbox a) n) 1) 1)))
+      (#{'lt 'le 'gt 'ge} m)
+      (let [[a b] args] (list ({'lt '< 'le '<= 'gt '> 'ge '>=} m) (unbox a) (unbox b)))
       (= 'field m)
       (let [[a n] args]
         (bind-vals [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x)
@@ -591,13 +620,17 @@
       (#{"makeblock" "makemutable"} word)
       (let [tag (num-arg n) w (count as)]
         (if (and (not= tag 254) (<= 1 w 256))
-          ;; Rt/block in place (queue 414): the block, then its words counted (a minor heap's block of w fields and its header) and the
-          ;; block given to a profile (queue 438: ExtGc/memprofAlloc tracks the value; memprofSample's would be taken as dead)
-          (let [b 'blk$]
-            (list 'let [b (list 'new 'ocaml.rt.Block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))]
-                  (list 'set! 'ocaml.rt.Rt/minorWords (list 'unchecked-add 'ocaml.rt.Rt/minorWords (inc w)))
-                  (list 'when 'ocaml.rt.ExtGc/memprofSampling (list 'ocaml.rt.ExtGc/memprofAlloc w b))
-                  b))
+          ;; Rt/block in place (queue 414) when every argument is simple (*simple-args*: their forms pure and small, so written twice):
+          ;; a Gc.Memprof profile running, Rt/block (the block counted once it exists and given to the profile, queue 438's heap
+          ;; model); else its words counted (a minor heap's block of w fields and its header), then the block. No local holds the
+          ;; block (a let's slot would keep it reachable while the frame lives: moved_while_blocking's promoted block); with an
+          ;; argument that is not simple (inline, evaluated once), the call
+          (if *simple-args*
+            (list 'if 'ocaml.rt.ExtGc/memprofSampling
+                  (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))
+                  (list 'do (list 'set! 'ocaml.rt.Rt/minorWords (list 'unchecked-add 'ocaml.rt.Rt/minorWords (inc w)))
+                        (list 'new 'ocaml.rt.Block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))))
+            (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as))))
           (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as)))))
       (= word "makefloatblock") (rt 'block 254 (list 'new 'Object/1 (vec as)))
       (= word "makelazyblock") (list 'ocaml.rt.Block. 246 (list 'new 'Object/1 (vec as)))
@@ -688,7 +721,7 @@
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
             :else (symbol (class-of g) "G")))
     (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
-    :else (with-args ctx args (fn [as] (prim-value n as)))))
+    :else (binding [*simple-args* (every? simple? args)] (with-args ctx args (fn [as] (prim-value n as))))))
 
 ;; ---- tests
 
@@ -787,11 +820,11 @@
     (list 'let [l (expr ctx lo false) h (expr ctx hi false)]
           (list 'let [(with-meta lv {:tag 'long}) (rt 'l l) (with-meta hv {:tag 'long}) (rt 'l h)]
                 (list 'when (list (if up '<= '>=) lv hv)
-                      (list 'loop [(with-meta i {:tag 'long}) lv]
-                            '(ocaml.rt.Rt/tick)
-                            (list 'let [(with-meta s {:tag 'Object}) i] (expr (assoc-in ctx [:env id] s) body false))
-                            (list 'when (list 'not (list '== i hv))
-                                  (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i))))))
+                      (concat (list 'loop [(with-meta i {:tag 'long}) lv])
+                            tick-forms
+                            [(list 'let [(with-meta s {:tag 'Object}) i] (expr (assoc-in ctx [:env id] s) body false))
+                             (list 'when (list 'not (list '== i hv))
+                                   (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i)))])))
           UNIT)))
 
 (defn- flatten-seq [x]
@@ -817,7 +850,7 @@
       ifthenelse (let [[c t f] b] (list 'if (test-form ctx c) (expr ctx t tail?) (expr ctx f tail?)))
       sequence (let [xs (flatten-seq x)]
                  (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
-      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) '(ocaml.rt.Rt/tick) (expr ctx body false)) UNIT))
+      while (let [[c body] b] (list 'do (concat (list 'while (test-form ctx c)) tick-forms [(expr ctx body false)]) UNIT))
       for (for-node ctx b)
       assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
       send (let [[kind m o args] b
@@ -936,12 +969,25 @@
   [pkg]
   [(list 'ns (symbol pkg))])
 
+(defn- unlined
+  "Form x without the reader's :line and :column (queue 453): the forms this file quotes (bt-pop, the in-place entry and turn)
+  carry them, and each printed map is read, attached and kept with the loaded class at every run; the type hints stay."
+  [x]
+  (let [strip (fn [y] (if-let [m (meta y)]
+                        (let [m (dissoc m :line :column)] (with-meta y (when (seq m) m)))
+                        y))]
+    (cond (seq? x) (strip (with-meta (apply list (map unlined x)) (meta x)))
+          (vector? x) (strip (with-meta (mapv unlined x) (meta x)))
+          (map? x) (strip (with-meta (into (empty x) (map (fn [[k v]] [(unlined k) (unlined v)]) x)) (meta x)))
+          (symbol? x) (strip x)
+          :else x)))
+
 (defn write-forms [^File f forms header]
   (io/make-parents f)
   (with-open [w (io/writer f)]
     (binding [*out* w *print-meta* true *print-length* nil *print-level* nil]
       (println (str ";; " header))
-      (doseq [x forms] (newline) (prn x)))))
+      (doseq [x forms] (newline) (prn (unlined x))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; linking (oi's Link, run.go): the library units a program needs, in the library's order

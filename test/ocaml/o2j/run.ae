@@ -64,6 +64,20 @@
           "global" (try (.get (.getField (Class/forName (str "ocaml.u.M_" arg)) "G") nil)
                         (catch Throwable _ nil)))))))
 
+;; DECISION 453-3 (a), queue 467: the analyser's bodies dropped once built. arbace.classes.interp keeps each class's analysed
+;; bodies (its declaration's :state, :bodies :clinit :init: the analyser's trees over the reader's forms) after it has built every
+;; method from them, reachable from env/defined and each Klass's :compile-set: about 225 of the 790 MB live after the library's load
+;; (lib-hashtbl/htbl's units), which every collection marks. Only a class whose methods and static initializer are all built
+;; drops them (a body that names a sibling defined later is built on its first call, from its :bodies); its declaration (names,
+;; types, members' signatures), which later compilations read, stays
+(defn- drop-analysed! []
+  (doseq [[n ^arbace.lang.Compiler$CF$Klass k] (some-> (resolve 'arbace.classes.interp/registry) deref deref)
+          :let [st (:state (get (:compile-set (.-info k)) n))]
+          :when (and st (not (instance? arbace.lang.Compiler$CF$CallI (.-clinit k)))
+                     (not-any? (fn [[_ ^arbace.lang.Compiler$CF$Meth m]] (some? (.-builder m))) (concat (.-methods k) (.-ctors k))))]
+    (when (or (:bodies @st) (:clinit @st) (:init @st))
+      (swap! st dissoc :bodies :clinit :init))))
+
 (defn- set-loader! [] ((eval '(fn [f] (ocaml.rt.Main/setLoader f))) (plugin-loader)))
 
 (defn- single [argv]
@@ -72,6 +86,7 @@
       (try (require 'ocaml.rt)
            (set-loader!)
            (doseq [f files] (load-file f))
+           (drop-analysed!)
            (eval (list 'ocaml.rt.Main/setUnits (list 'into-array 'String (vec (unit-names files)))))
            true
            (catch Throwable e
@@ -103,6 +118,7 @@
         (try
           (doseq [f lib :when (not (@loaded f))] (load-file f) (swap! loaded conj f))
           (doseq [f own] (load-file f))
+          (drop-analysed!)
           (eval '(ocaml.rt.Main/reset))
           (io-reset)
           ;; the program's units, as Dynlink's platform reads them (queue 355)
