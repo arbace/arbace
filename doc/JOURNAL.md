@@ -13609,3 +13609,33 @@ Process start (forkserver.ensure_running's os.waitpid(pid, WNOHANG)) and util._c
 (os.waitpid(pid, 0)) raise ECHILD. A consequence of the user's no-fork decision (2026-11-04), so `:fork` (design) names
 these 74 by name, its :why saying why (divergences.edn and divergences-315.edn). Left in no class: test_process_pool's
 three ProcessPoolSpawnProcessPoolExecutorTest test_force_shutdown_workers* (spawn context: not this cause, not probed).
+## 2026-11-19: Python's eval and AOT records written (the records night, amd64)
+
+What: `bin/pyi records` (n-py-rec, gate executable 0753b529a43f at 01e4bb771; AOT 39 min, Lib/test 5 h 56 min, peak 6.6 GB a process) wrote
+`test/python/check-aot-linux-amd64.edn` and `check-lib-test-linux-amd64.edn`. The judge found 610 methods in no class (the closing
+reap's "605 cases" were the same record's unwritten rows). They were classed in `test/python/divergences.edn` and `divergences-315.edn`
+(the same edit, before `:skipped-by-test`), `bin/pyi check --judge ... --record` then `bin/pyi divergences` exit 0, then `bin/reap --record`,
+`bin/crops-score --record`, `bin/crops-score --judge --strict` and `bin/records-check`, 0 problems each.
+
+Counts: AOT 151 programs, 150 pass, 1 classed (del.py, `:finalization-goi` / `:finalization`), 0 failing. Lib/test 529 modules, 48,170
+methods: 39,054 pass, 9,116 classed, 0 failing (reap's eval cell 39,204 / 5,360 / 3,757 with the 150 loop programs).
+
+New classes (decided: the main session, 2026-11-19 (records night)), all deferred, by match:
+- `:goi-liveness-fallthrough` (about 450 methods: pyexpat and what is built on it; goi's liveness plan cleared a cell after an `if` in a
+  fallthrough switch clause; fixed on n-py-eval, cfd69a6d2, not in this executable);
+- `:goi-stub-table` (about 40: test_ctypes, test_io's CBufferedRWPairTest, test_memoryview; goi's `:stubs`, a2606432e on n-py-eval, takes
+  effect at the next executable build);
+- `:pickle-builtin-reference` (8: test_pickle's built-ins pickled by reference).
+Existing classes taking rows: `:fork` gains the match `^error \[Errno 10\] No child process$` (74 methods: 3.14's default start method is
+forkserver, a TestStartMethod resets to it, the forkserver dies at `os.fork()`, `support.reap_children()` reaps it, every later Process
+start meets `ensure_running`'s waitpid); names into `:spawn-children-timing` (5 Barrier rows beside the 6, confirmed, "(write-ahead)"
+dropped), `:multiprocessing-children` (9), `:subinterpreters` 3, `:source-decoding` 4, `:venv-and-build` 3, `:interactive-mode` 1,
+`:core-objects-287` 3.
+Pruned: the three stale threads names of `:finalization-collect-spawn` (it keeps spawn.test_manager's test_release_task_refs and
+test_free_reference, which host-memory takes here; the run predates queue 418's id() fix, 418-1 (a); "(write-ahead)" stays), and, by
+410-2 (a), the shadowed names (test_capi's test_no_FatalError_infinite_loop, test_pyexpat's test_error_path_no_crash) plus 42 more
+shadowed ones the whole run found (their class takes the row first), so `bin/pyi divergences` exits 0. `:host-signal-kill` took no row (stays
+write-ahead). 739 passing names of older classes' `:tests` are reported stale and left (not a failure; a record on the fixed executable will
+move many).
+
+Python's scores (bin/crops-score): completeness 45, without by design 48, maturity 92, independence 98 (were 0, 0, 83, 98).
