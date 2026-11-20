@@ -125,7 +125,7 @@ work=$root/.tmp/hsi/check
 # non-pass's class looked up in test/haskell/divergences-O1.edn first (the classes only -O1 has: :eval-order), then in
 # test/haskell/divergences.edn. The compiled level's runs at -O1 (--aot --opt O1); hsi's own level stays at -O0.
 case $opt in O0) sfx="" ;; O1) sfx=-O1 ;; *) echo "hsi check: --opt O0 or O1" >&2; exit 2 ;; esac
-ref=$root/test/haskell/ref-ghc914$sfx.edn
+ref=${HSI_REF:-$root/test/haskell/ref-ghc914$sfx.edn} # HSI_REF: another record (a scratch reference: queue 332's arm64 probes)
 divs=$root/test/haskell/divergences.edn divs1=$root/test/haskell/divergences$sfx.edn
 work=$work$sfx
 # --aot (HE8, the first slice): each program built by bin/hsi aot build (its modules and the library closures a first
@@ -286,14 +286,18 @@ echo "== hsi check: $(wc -l < "$plan") programs, $jobs at a time" >&2
 
 # HFS-I1 (a): the native front end's STG of the programs it can take (--front native), before the runs
 front_why=""
-front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own modules (HF10-P24 (a)) on the libraries' imports alone, no Cmm or assembly
+front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own modules (HF10-P24 (a)) on the libraries' imports alone, no Cmm main or assembly
   # queue 325: a refusal names its reason in front_why (CATEGORY DETAIL: kind, no-main, c, pragma, local, import),
   # which the run's line of the program carries as :why (the rest named: what keeps it on GHC's STG)
   local src=$1 main=$2 flags=$3 kind=$4 ifs=$5 m f hit
   front_why=""
   # (HF10-P24 (a): multimod_compile_and_run, a main file and the modules it imports, as GHC's --make compiles them)
-  case $kind in plain|compile_and_run|multimod_compile_and_run|nofib) ;; *) front_why="kind $kind"; return 1 ;; esac
+  # (queue 422, report 346's item 8: multi_compile_and_run, a main and all.T's extra sources, as multimod's: its C files taken
+  # as a program's own C, an extra Haskell source as one of its modules (found by the imports' scan below), its .cmm taken below)
+  case $kind in plain|compile_and_run|multimod_compile_and_run|multi_compile_and_run|nofib) ;; *) front_why="kind $kind"; return 1 ;; esac
   [ "$main" != - ] && [ -f "$src/$main" ] || { front_why="no-main $main"; return 1; }
+  # (queue 422: a Cmm main, all.T's cmm_src (T17920), is no Haskell module: refused, not read as one)
+  case $main in *.cmm) front_why="c $main"; return 1 ;; esac
   # (HF10-P32: an OPTIONS or OPTIONS_GHC pragma's -cpp or -XCPP is CPP too: cgrun044, conc036, conc037 read as empty modules;
   # RULES: rewrite rules, which the front end does not apply, as GHC's -O0 does for a rule of the module's own, tcrun022)
   # (queue 369, 346's item 7: -fdefer-type-errors, on the command line or in an OPTIONS_GHC pragma, is taken: the elaborator
@@ -303,7 +307,9 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own mod
   # are still refused; queue 364: a program whose modules need foreign stubs is taken too, its stubs the front end's)
   if [ "$flags" != - ]; then for f in $flags; do case $f in
     *.o) [ -f "$src/${f%.o}.c" ] || { front_why="c $f"; return 1; } ;;
-    *.cmm|*.s|*.S) front_why="c $f"; return 1 ;;
+    # (queue 422, after 332's merge: a test's own .cmm read by arbace.repr.haskell.cmm and loaded by hsi run --cmm beside the
+    # native STG, as beside GHC's; a Cmm main stays refused above; assembly refused)
+    *.s|*.S) front_why="c $f"; return 1 ;;
     # (HF10-P59 (a): GHC's -main-is FN names Main's entry, an unqualified FN resolved in Main's scope by the front end:
     # T16453M6, T19397M2-M4; a module's name, M or M.fn, another main module, is refused)
     -main-is) case $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//') in [a-z_]*) ;;
@@ -379,8 +385,35 @@ if [ "$front" = native ]; then
   # --libs own: the own interfaces and the own libraries' constructors; the fallback list's programs not tried (P23 (a))
   if [ "$libs_set" = own ]; then ifaces=$own_if; flibs=$own_libs; fi
   fb=$own_fallback_list
+  # front_gen ID SRC GEN MAIN (queue 422, report 346's item 8; HES92 (a)'s pre_cmd on the native path): the main all.T's pre_cmd
+  # `{compiler} --run ./GEN.hs` writes (unboxedsums/ManyUbxSums), made by this compiler, not GHC's: GEN through the native front
+  # end over the same interfaces and run on hsi over the same libraries (as `one` runs a program, under the caps) in a copy of
+  # SRC, $fw/gen/ID, whose directory then stands for SRC in the front end's plan; prints that directory, or fails (the reason in
+  # front_why's form on stdout)
+  front_gen() {
+    local id=$1 src=$2 gen=$3 main=$4 ob=${1//\//_} g gl l la=() mem=${ARBACE_MEM_GIB:-16}
+    g=$fw/gen/$ob; rm -rf "$g"; mkdir -p "$g/src"; cp -r "$src"/. "$g/src"/
+    printf '%s@%s\t\n' "$g/src/$gen" "${ob}_gen" > "$g/plan.tsv"
+    (export GOMEMLIMIT=${HSI_FRONT_MEM:-1536MiB}; cd "$root" && exec env ARBACE_PATH=$root "$("$root/bin/hsi" exe)" -m arbace.repr.haskell.front build \
+       --ifaces "$ifaces" --libs "${flibs//:/,}" ${front_inst[@]+"${front_inst[@]}"} -o "$g/out" --plan "$g/plan.tsv") > "$g/front.log" 2>&1 || true
+    gl=$(grep -E "^${ob}_gen (ok|read|rename|typecheck|typecheck-errors|stg|crash) " "$g/front.log" | head -1)
+    case $gl in "${ob}_gen ok"*) ;; *) gl="$gl (not ok)" ;; esac
+    [ "${gl% (not ok)}" = "$gl" ] && [ -d "$g/out/stg/${ob}_gen" ] || { echo "pre-gen $gen: the front end: ${gl:-no line}" | cut -c1-120; return 1; }
+    local plibs=$libs pimages=$images
+    [ "$libs_set" != own ] || { plibs=$own_libs; pimages=$own_images; }
+    IFS=: read -r -a dirs <<< "$plibs"; for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
+    [ "$pimages" != none ] && la+=(--image "$pimages")
+    (cd "$g/src" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$g/src" timeout -s KILL $((HSI_TIMEOUT * 3)) \
+       sh -c "ulimit -v $((mem * 1048576)); export GOMEMLIMIT=$((mem * 768))MiB; ulimit -t $HSI_TIMEOUT; exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$g/out/stg/${ob}_gen" --name "${gen%.*}" --)" \
+       < /dev/null > "$g/gen.stdout" 2> "$g/gen.stderr") || { echo "pre-gen $gen: its run on hsi failed ($(head -c 80 "$g/gen.stderr" | tr '\n' ' '))"; return 1; }
+    [ -f "$g/src/$main" ] || { echo "pre-gen $gen: wrote no $main"; return 1; }
+    echo "$g/src"
+  }
   : > "$fw/plan.tsv"; : > "$fw/ineligible.tsv"
   while IFS=$'\037' read -r id src main flags ropts name sin kind; do
+    if [ "$main" != - ] && [ ! -f "$src/$main" ] && gen=$(hsi_pre_gen "$id") && [ -n "$gen" ]; then
+      if ! src=$(front_gen "$id" "$src" "$gen" "$main"); then printf '%s\t%s\n' "${id//\//_}" "$src" >> "$fw/ineligible.tsv"; continue; fi
+    fi
     # review 1111b (finding 4): HSI_OWN_FALLBACK=try runs the listed programs on the own libraries too (a pass fails the check:
     # the list may only shrink)
     if [ "$libs_set" = own ] && [ "$own_fallback" != try ] && [ -f "$fb" ] && awk -v i="$id" '$1 == i {f = 1} END {exit !f}' "$fb"; then
@@ -411,8 +444,9 @@ if [ "$front" = native ]; then
   n=$(grep -c . "$fw/plan.tsv" || true); k=${HSI_FRONT_SHARDS:-4}
   [ -z "${HSI_FRONT_DRY:-}" ] || { echo "== hsi check: $n of $(wc -l < "$plan") programs eligible for the native front end ($fw/plan.tsv)" >&2; exit 0; }
   echo "== hsi check: the native front end on $n of $(wc -l < "$plan") programs, $k processes" >&2
-  # a shard: one process for its programs; a program that gives no line for HSI_FRONT_TIMEOUT seconds (default 300: a front end
-  # that loops) is stopped, recorded "NAME timeout", and a fresh process takes the rest
+  # a shard: one process for its programs; a program that gives no line for HSI_FRONT_TIMEOUT seconds (default 600: a front end
+  # that loops; queue 422: 300 before, under ManyUbxSums' generated module of 1,331 functions, 342 s on the Mac VM's arm64)
+  # is stopped, recorded "NAME timeout", and a fresh process takes the rest
   front_shard() { # PLAN LOG
     local pl=$1 log=$2 rest=$1.rest pid n n0 last now nm
     : > "$log"
@@ -424,14 +458,14 @@ if [ "$front" = native ]; then
         sleep 5; now=$(date +%s)
         n=$(grep -cE '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' "$log" || true)
         if [ "$n" != "$n0" ]; then n0=$n; last=$now
-        elif [ $((now - last)) -gt "${HSI_FRONT_TIMEOUT:-300}" ]; then kill "$pid" 2>"$TMPDIR/hsi-front-kill.err"; break; fi
+        elif [ $((now - last)) -gt "${HSI_FRONT_TIMEOUT:-600}" ]; then kill "$pid" 2>"$TMPDIR/hsi-front-kill.err"; break; fi
       done
       wait "$pid" 2>"$TMPDIR/hsi-front-kill.err" || true
       awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, w, " "); done[w[1]] = 1 }; ARGV[2] = "" }
                    { b = $1; sub(/^.*@/, "", b) } !(b in done)' "$pl" "$log" > "$rest"
       [ -s "$rest" ] || break
       # the first program without a line stopped the process (a loop, or a crash of the process itself)
-      nm=$(head -1 "$rest" | cut -f1 | sed 's/^.*@//'); echo "$nm timeout no line in ${HSI_FRONT_TIMEOUT:-300} s, or the process ended" >> "$log"
+      nm=$(head -1 "$rest" | cut -f1 | sed 's/^.*@//'); echo "$nm timeout no line in ${HSI_FRONT_TIMEOUT:-600} s, or the process ended" >> "$log"
       tail -n +2 "$rest" > "$pl.next"; mv "$pl.next" "$pl"
     done
     rm -f "$rest"
@@ -478,6 +512,12 @@ own_ref() {
   [ -n "$line" ] || { line=$(awk -F'\t' -v i="$id" '$1 == i' "$root/test/haskell/own-verdicts-pending.tsv"); pending=1; }
   [ -n "$line" ] || return 0
   IFS=$'\t' read -r _ ex so se <<< "$line"
+  case $so in
+    # queue 435: a testsuite or nofib program's reviewed golden file (test/haskell/eval/golden/ID.stdout, .stderr), at -O0 as
+    # the samples' (bin/hsi golden reviews them, bin/hsi own-verdicts lists them when GHC's recorded -O0 run agrees)
+    golden:*) [ -z "${sfx:-}" ] || return 0
+      d=$root/test/haskell/eval/golden/$(dirname "$id"); so=${so#golden:}; se=${se#golden:} ;;
+    *)
   case $id in
     testsuite/*) d=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests/$(dirname "${id#testsuite/}") ;;
     nofib/*) d=$root/.tmp/hsi/nofib/${id#nofib/} ;;
@@ -486,6 +526,7 @@ own_ref() {
     # choices are -O1's record's (five synthetic programs print otherwise at -O1, ref-ghc914-O1.edn)
     samples/*|synthetic/*) [ -z "${sfx:-}" ] || return 0; d=$root/test/haskell/eval/${id%%/*} ;;
     *) return 0 ;;
+  esac ;;
   esac
   e=$(printf '' | sha256sum | cut -c1-64)
   if [ -n "$pending" ]; then
@@ -533,12 +574,13 @@ one() {
   if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$divs" | grep -qF "\"$id\""; then
     echo "{:id \"$id\" :result :skipped :dump 0 :run 0}" > "$res"; return 0
   fi
-  # a Cmm main (all.T's cmm_src, T17920; HES92 (a)): the helper dumps the Haskell's STG alone, so there is none (the class :test-cmm)
-  case $main in *.cmm) echo "{:id \"$id\" :result :no-dump :error \"a Cmm main (all.T's cmm_src): no Haskell, no STG\"}" > "$res"; return 0 ;; esac
+  # a Cmm main (all.T's cmm_src, T17920; HES92 (a)): no Haskell, no STG; since queue 332 (HES67's design) the .cmm read by
+  # arbace.repr.haskell.cmm and run by hsi (hsi run --cmm FORMS --cmm-main), the dump and the records skipped
+  local cmm_main=""; case $main in *.cmm) cmm_main=1 ;; esac
   # the dump's flags: all.T's, less a test's own C, Cmm, assembly and objects (the helper compiles Haskell only); its
   # C files built by ci into a node program hsi loads (HES64 (a), bin/hsi cnodes), with the flags the C reads (-I, -D)
   # (an extra Haskell source of all.T's, multi_compile_and_run's ManyUbxSums_Addr.hs, given the helper as a file: HES92 (a))
-  local fl=() f cfiles=() cflags=() optc="" hsf=(); if [ "$flags" != - ]; then for f in $flags; do
+  local fl=() f cfiles=() cflags=() cmmfiles=() optc="" hsf=(); if [ "$flags" != - ]; then for f in $flags; do
     # -optcX: X for the C compiler, a lone -D, -I or -U joined to the next one's (-optc-D -optcFOO is -DFOO)
     if [[ $f == -optc* ]]; then
       f=${f#-optc}
@@ -546,9 +588,14 @@ one() {
       case $f in -D|-I|-U) optc=$f ;; -D*|-I*|-U*) cflags+=("$f") ;; esac
       continue
     fi
-    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm|*.s|*.S|*.h|*.cpp|*.cc) ;; *.hs|*.lhs) hsf+=("$f") ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
+    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm) cmmfiles+=("$f") ;; *.s|*.S|*.h|*.cpp|*.cc) ;; *.hs|*.lhs) hsf+=("$f") ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
   # the dump's key: the main file, the flags, the helper; a test of several modules: its directory's sources too
-  local key prog
+  local key prog stg="" srcs="" td=0
+  if [ -n "$cmm_main" ]; then
+    cmmfiles+=("$main"); prog=$root/.tmp/hsi/progs$sfx/$id/cmm-main; mkdir -p "$prog"; srcs=":stg :none"
+    local plibs=$libs pimages=$images la=() l
+    [ -z "$dump_only" ] || { echo "{:id \"$id\" :result :dumped :dump 0}" > "$res"; return 0; }
+  else
   key=$(prog_key "$src" "$main" "$flags" "$kind" "$id")
   prog=$root/.tmp/hsi/progs$sfx/$id/$key
   local td=0 t0 t1
@@ -634,6 +681,7 @@ one() {
     touch "$prog/stubs.ok"
   fi
   [ -z "$dump_only" ] || { echo "{:id \"$id\" :result :dumped :dump $td}" > "$res"; return 0; }
+  fi
   local sf; for sf in "$prog"/stubs/*_stub.c; do [ -f "$sf" ] && cfiles+=("$sf"); done
   # a wrapper's stub whose parameters hold the x86-64 adjustor's original_return_addr: its name and that parameter's
   # index (the stable pointer's 0), for hsi's createAdjustor (NODES.adjust, read beside the node program)
@@ -659,6 +707,22 @@ one() {
     # a -no-hs-main program: its C's main is the entry (hsi run --c-main)
     [[ " $flags " == *" -no-hs-main "* ]] && la+=(--c-main)
   fi
+  # the test's own Cmm (queue 332, HES67's design): its .cmm files read into Cmm forms by arbace.repr.haskell.cmm (bin/hsi cmm, the
+  # flags' -D), kept by the files', the reader's and its headers' digests, loaded by hsi run --cmm
+  if [ ${#cmmfiles[@]} -gt 0 ]; then
+    local ck; ck=$( { (cd "$src" && sha256sum "${cmmfiles[@]}"); printf '%s\n' ${cflags[@]+"${cflags[@]}"}
+                      sha256sum "$root/arbace/repr/haskell/cmm.ae" "$root"/test/haskell/eval/cmm/*.h; } | sha256sum | cut -c1-64)
+    if [ ! -f "$prog/cmm.key" ] || [ "$(cat "$prog/cmm.key")" != "$ck" ]; then
+      rm -f "$prog/cmm.key"
+      if ! (cd "$src" && "$root/bin/hsi" cmm "$prog/cmm.ae" $(printf '%s\n' ${cflags[@]+"${cflags[@]}"} | grep '^-D' || true) "${cmmfiles[@]}") > "$prog/cmm.log" 2>&1; then
+        local e; e=$(grep -m1 '^cmm: ' "$prog/cmm.log" | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
+        echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi: ${e:-cmm: the reader failed}\" :reason :cmm-read :dump $td :run 0}" > "$res"; return 0
+      fi
+      echo "$ck" > "$prog/cmm.key"
+    fi
+    la+=(--cmm "$prog/cmm.ae")
+    [ -z "$cmm_main" ] || la+=(--cmm-main)
+  fi
   IFS=: read -r -a dirs <<< "$plibs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
   [ "$pimages" != none ] && la+=(--image "$pimages")
@@ -679,7 +743,7 @@ one() {
     # arguments), then the program's executable built with them compiled (bin/hsi aot build, kept by key)
     local pw=$w.profile pcmd
     rm -rf "${pw:?}"; mkdir -p "$pw"; cp -r "$src"/. "$pw"/ 2> "$pw.cp.log" || true; rm -f "$pw.cp.log"; : > "$pw/.empty"
-    pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$stg" --name "$name" --) $ro"
+    pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" ${stg:+--prog "$stg"} --name "$name" --) $ro"
     # (its run is hsi's: kept to compare the compiled run with, :vs-hsi, and its seconds, :hsi-run)
     local pt0 pt1; pt0=$(date +%s.%N); pst=0
     (cd "$pw" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$pw" HSI_AOT_MODULES="$prog/aot-closures.txt" \
@@ -695,7 +759,7 @@ one() {
       rm -rf "$w"; echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi aot: $e\" :dump $td :run 0}" > "$res"; return 0; }
     t3=$(date +%s.%N); ab=$(printf '%.2f' "$(echo "$t3 - $t2" | bc)")
   fi
-  local cmd; cmd="exec $(printf '%q ' "$exe" run "${la[@]}" --prog "$stg" --name "$name" --) $ro"
+  local cmd; cmd="exec $(printf '%q ' "$exe" run "${la[@]}" ${stg:+--prog "$stg"} --name "$name" --) $ro"
   local o=$work/out/${id//\//_} st=0
   # the memory cap (bin/lib/limit.bash's ARBACE_MEM_GIB, default 16 GiB: ulimit -v at it, GOMEMLIMIT at three
   # quarters), so a leaking program fails alone; the deep-stack programs name their own (HSI_MEM_CAPS, ID=GIB)

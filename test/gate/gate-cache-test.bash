@@ -2,12 +2,12 @@
 # The scripts that look for the gate's build by hand default to ARBACE_GATE_EXES/KEY20 (bin/lib/
 # gate-cache.bash, doc/GATE-SURVEY.md, GTS120), not to the .tmp/arbace-go-gate nothing populates since
 # GTS24 (a); and a miss of the gate's build never removes a directory of another key.
-# Fabricated trees under .tmp/gate-cache-test, no build. Usage: test/gate/gate-cache-test.bash
+# Fabricated trees under $TMPDIR/gate-cache-test, no build. Usage: test/gate/gate-cache-test.bash
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
 export TMPDIR=${TMPDIR:-$here/.tmp/tmp}
 mkdir -p "$TMPDIR"
-T=$here/.tmp/gate-cache-test
+T=$TMPDIR/gate-cache-test
 rm -rf "$T"; mkdir -p "$T"
 fail=0
 ok() { echo "ok   $*"; }

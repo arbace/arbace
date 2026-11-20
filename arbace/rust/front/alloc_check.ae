@@ -232,16 +232,21 @@
         std (cond-> std deps (cc/with-native-std (:native deps)))
         si (cond-> (without-crate si-full crate) deps (cc/with-native-iface (:native deps)))]
     {:std-file std-file :std std :si si :helper (crate-facts si-full crate)
-     :table (:macros index) :names names}))
+     :table (:macros index) :names names :index (:names index)}))
 
 (defn pass
   "The interface pass over MODS (in order) for ROUNDS rounds: the native facts {:fns :adts :traits :impls :consts :aliases
   :alias-generics}; each module's stages printed"
-  [crate lib-dir {:keys [std-file std si table names]} mods all-mod-paths rounds]
-  (let [native (atom {})]
+  [crate lib-dir {:keys [std-file std si table names index]} mods all-mod-paths rounds]
+  (let [native (atom {}) names0 names]
     (binding [cc/*crate* crate]
       (dotimes [r rounds]
-        (let [t0 (System/nanoTime) prev @native]
+        (let [t0 (System/nanoTime) prev @native
+              ;; queue 417: a later round of std's pass: the macro-made structs of the round before (sys/fs/unix.rs'
+              ;; `cfg_has_statx! {{ pub struct FileAttr .. } else { .. }}`, which the index, read unexpanded, lacks) taken
+              ;; through the index's re-exports and globs again (sys/fs/mod.rs' `pub use imp::{.., FileAttr, ..}`), as
+              ;; with-core-names takes the index's own definitions: fs.rs' `Metadata(fs_imp::FileAttr)`
+              names (if (and (pos? r) index (= "std" crate)) (cc/with-core-names (cc/with-native-names names0 prev) index) names0)]
           (reset! native (if (zero? r) {} (without-modules prev all-mod-paths (map :path mods))))
           (doseq [m mods]
             (let [t1 (System/nanoTime)
@@ -263,6 +268,36 @@
 (defn read-modules "core-check --list's lines as module maps" [^String f]
   (vec (for [l (str/split-lines (slurp f)) :when (seq (str/trim l)) :let [[p fl v] (str/split l #" ")]]
          {:path p :file fl :vendored (= v "vendored")})))
+
+(defn fndef-types
+  "The types (the :tc metadata) of a body's forms, a vector of them"
+  [body]
+  (let [acc (transient [])]
+    (letfn [(w [x] (when-let [t (:tc (meta x))] (conj! acc t))
+                   (cond (map? x) (doseq [v (vals x)] (w v)) (coll? x) (doseq [y x] (w y))))]
+      (w body))
+    (persistent! acc)))
+
+(defn core-consts
+  "queue 443: the associated constants of core's traits in core's FILES (relative to core/src: `mem/mod.rs`'s
+  SizedTypeProperties::IS_ZST, LAYOUT, MAX_SLICE_LEN), which std's interface does not write and alloc's and std's bodies name:
+  core's interface pass (core-check's, over CORE-LIB, core's patched copy, with core-check's index and modules in CORE-CACHE)
+  over FILES, its :consts kept; {path fact}"
+  [^String core-lib ^String core-cache ^String std-file si-full files]
+  (binding [cc/*crate* "core"]
+    (let [mods (read-modules (str core-cache "/modules.txt"))
+          by-file (into {} (for [m mods] [(:file m) m]))
+          index (read-string (slurp (str core-cache "/index.edn")))
+          names (cc/with-adt-names (cc/with-core-names (resolve/load-std-names std-file) (:names index)) (:adts si-full))
+          std (assoc (cc/with-core-kinds (collect/load-std std-file) (:names index)) :mods names)
+          acc (atom {})]
+      (doseq [f files :let [m (get by-file (.getCanonicalPath (File. (str core-lib "/core/src/" f))))]]
+        (if-not m
+          (println (str *tag* ": core-consts: not a module file of core: " f))
+          (let [{:keys [native stages]} (binding [cc/*collect-only* true] (cc/run-module m (:macros index) names std-file std si-full core-lib identity))]
+            (swap! acc merge (into {} (filter #(str/starts-with? (key %) (str (:path m) "::")) (:consts native))))
+            (println (str *tag* ": core-consts: " (:path m) " stages " (pr-str stages) ": " (count (:consts native)) " constants")))))
+      @acc)))
 
 (defn -main [& argv]
   ;; round 54 (RIND9 (a), std): `--crate C` first names the crate (alloc by default; std over the linux `sys`)
@@ -293,6 +328,68 @@
         (when-let [[p o d] (control helper facts)]
           (println (str *tag* ": control (") p "against" o "):" (if d "differs, as it must" "PASSED (a bug)")))
         (println (str *tag* ": wrote") out "and" (str out ".report")))
+;; queue 443 (RUST-90 S4, C2): --export LIB FRONT CACHE MODULES OUT KEYS-FILE: the crate's bodies whose keys
+      ;; (body-key's, `boxed-{impl#0}-new`, one a line: the defs rsi's samples instantiate) KEYS-FILE lists, with their
+      ;; closures, built through the 21 passes on the crate's native interface (the pass over every module file, cached in
+      ;; CACHE/native-iface.edn: remove it after a change to the front end) and written as core-export's entries into OUT
+      ;; (`(core/body {..})`, :judge :instance: no built-MIR oracle of the crate, each instance judged against the record's
+      ;; body at the run, build-run's pack-compare); a line a module (wanted, built, refused, and why)
+      "--export"
+      (let [[lib front cache modules-file out keys-file] args
+            mods (read-modules modules-file)
+            setup (crate-setup crate front cache mods lib)
+            mod-paths (map :path mods)
+            by-path (into {} (for [m mods] [(:path m) m]))
+            si-full (collect/load-std-iface (str front "/std-iface.edn"))
+            nf (File. (str cache "/native-iface.edn"))
+            native (if (.exists nf)
+                     (read-string (slurp nf))
+                     (let [n (pass crate lib setup mods mod-paths (Long/parseLong (or (System/getenv "ALLOC_IFACE_ROUNDS") "2")))]
+                       (spit nf (pr-str n)) n))
+            ;; queue 443: core's traits' associated constants (LIB_CORE_CONSTS, core/src files; LIB_CORE_DIR, LIB_CORE_CACHE
+            ;; core-check's copy and caches), which std's interface lacks and the bodies name (`T::IS_ZST`)
+            native (if-let [cf (System/getenv "LIB_CORE_CONSTS")]
+                     (update native :consts merge
+                             (core-consts (System/getenv "LIB_CORE_DIR") (System/getenv "LIB_CORE_CACHE") (:std-file setup)
+                                          si-full (str/split cf #" ")))
+                     native)
+            want (set (for [l (str/split-lines (slurp keys-file)) :let [l (str/trim l)] :when (seq l)] l))
+            key-path (fn [k] (str crate "::" (str/replace k "-" "::")))
+            ;; each wanted key's module: the longest module path owning its def path (a module's own key is its path less the crate)
+            by-mod (group-by #(owner mod-paths (key-path %)) want)
+            pred (fn [k] (or (contains? want k) (boolean (some #(str/starts-with? k (str % "-{closure#")) want))))
+            entries (atom [])]
+        (println (format (str *tag* ": export: %d keys in %d modules (%d without a module)") (count want) (count (dissoc by-mod nil)) (count (get by-mod nil))))
+        (doseq [[mp ks] (sort-by key (dissoc by-mod nil)) :let [m (get by-path mp)]]
+          (let [t0 (System/nanoTime)
+                {:keys [stages bodies]}
+                (binding [cc/*only-key?* pred]
+                  (cc/run-module m (:table setup) (cc/with-native-names (:names setup) native) (:std-file setup)
+                                 (cc/with-native-std (:std setup) native) (cc/with-native-iface (:si setup) native) lib
+                                 (fn [[[nm k] b err detail]]
+                                   (let [e (if b
+                                             (let [e (assoc (cc/export-entry b k nil) :judge :instance)
+                                                   ;; the crate's functions the body names that std's interface lacks (crate-private:
+                                                   ;; `box_new_uninit`), their native facts, so that the run prints their items' types
+                                                   fs (into {} (for [x (tree-seq coll? seq (fndef-types (:body e)))
+                                                                     :when (and (vector? x) (= :fndef (first x)) (string? (second x)))
+                                                                     :let [p (second x) f (get-in native [:fns p])]
+                                                                     :when (and f (not (get-in si-full [:fns p])))]
+                                                                 [p (dissoc f :native)]))]
+                                               (cond-> e (seq fs) (assoc :fns fs)))
+                                             {:key k :refused (str "the build: " err (when (and detail (not= "nil" detail)) (str " " detail)))})]
+                                     (swap! entries conj (assoc e :module mp :name nm))
+                                     e))))
+                got (set (map :key bodies))
+                ok (count (filter :body bodies))]
+            (println (format (str *tag* ": export %s stages %s: wanted %d, built %d of %d bodies (%d s)%s") mp (pr-str stages) (count ks) ok (count bodies)
+                             (quot (- (System/nanoTime) t0) 1000000000)
+                             (let [miss (remove got ks)] (if (seq miss) (str "; not built: " (str/join " " (take 8 (sort miss)))) ""))))
+            (doseq [e bodies :when (:refused e)] (println "  refused" (:key e) (subs (str (:refused e)) 0 (min 240 (count (str (:refused e)))))))
+            (flush)))
+        (spit out (binding [*print-meta* true] (with-out-str (doseq [e @entries :when (:body e)] (prn (list 'core/body (dissoc e :module)))))))
+        (spit (str out ".tsv") (str/join "" (for [e @entries] (str (:module e) "\t" (:key e) "\t" (if (:body e) "built" (str "refused\t" (:refused e))) "\n"))))
+        (println (str *tag* ": exported") (count (filter :body @entries)) "bodies," (count (remove :body @entries)) "refused, to" out))
       ;; queue 400: --deps LIB FRONT CACHE: std's vendored dependencies' names and facts (deps-setup) made into CACHE/deps/
       "--deps"
       (let [[lib front cache] args]

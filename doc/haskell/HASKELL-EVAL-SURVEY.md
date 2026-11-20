@@ -2600,6 +2600,54 @@ Proved (linux/arm64): `bin/hsi check --corpus synthetic` judged by the record an
 pass, 5 fail (arm64's floating point, below), 37 of 37 `:judge :own`; the control primops-int8 against primops-word8 fails
 against the golden file.
 
+## As built: queue 435: the testsuite's and nofib's golden files
+
+The judge's 153 programs with no expected output GHC's recorded run confirms (0.5) were reviewed one by one.
+- The testsuite's shipped files as its driver takes them (`testlib.py`'s `find_expected_file`: `NAME.stdout-ws-64` and the
+  `x86_64-unknown-linux` variants before `NAME.stdout`): `bin/hsi own-verdicts` reads the file the driver reads, 9 programs more
+  by their own verdict (T10245, T20137, T2838, T10962, arith003, arith011, numrun009, numrun012, tcrun002).
+- 65 programs by golden files written from their source: `test/haskell/eval/golden/ID.stdout`, `ID.stderr` (none: empty) and
+  `ID.exit` (none: 0), each line reviewed in `golden/AREA.edn` with its basis (`:src`, `:report`, `:lib` and `:rts`: the
+  libraries' and the RTS's source in GHC 9.14.1's tarball at its pin, `:plan`: record-ref's arguments and stdin, `:shipped`: the
+  test's shipped file agrees) and why; then checked against the record's SHA-256s and sizes (no program run, no GHC). Among them:
+  the shipped files that differ from the run only by the last newline (the driver does not compare it); the non-threaded RTS's
+  answers to threaded-way tests (conc069's forkOS failure, conc070's BlockedOnOther, conc072's capability 0,
+  foreignInterruptible's uninterrupted call); uncaught exceptions in GHC 9.14's layout (`GHC.Internal.Conc.Sync`'s handler,
+  `Backtrace`'s "HasCallStack backtrace:"), whose shipped `.stderr` files name an older ghc-internal's positions (169:13 and 89:42
+  for 170:37 and 90:42 at the pin); arguments the plan does not pass (an `extra_run_opts` that is an expression, nofib's
+  `NORM_OPTS`), so a pattern fails in `do` or a lambda; the RTS's usage text by `rts/RtsFlags.c`'s `usage_text` under the linked
+  RTS's `#if` branches (cgrun057, T16916); T3676's conversions through `toRational` of NaN and infinities; happy's `usageInfo`;
+  22 nofib benchmarks whose variant prints nothing.
+- `bin/hsi golden [--oracle] [--control]` (`test/haskell/eval/review.ae`): every golden file against its review; every program of
+  the record its own verdict, a golden file or left in `golden/left.tsv` with a reason; `--oracle` each against GHC's record;
+  `--control` each with one byte changed must fail the review and the digest (65 of 65). `own-verdicts.tsv` lists them as
+  `golden:NAME`; `bin/lib/hsi/check`'s `own_ref` reads them at -O0. hsi-essential runs it.
+- Left (79): 64 GHC did not build at record-ref (no run to check against); T4262 (the host's thread count), conc065, conc066,
+  conc067 (thread timing, `ignore_stdout`), fannkuch-redux and minimax (the CPU limit), k-nucleotide (a segfault on an empty
+  stdin), T15892 and T23071 (`ignore_stdout`, 0.96 MB and 13 MB), fasta, awards and gc/cacheprof (7.6 MB, 604 KB and 57 KB of
+  output not derived by hand), IPLocation, T7861 and FMA_ConstantFold (not derived).
+- Eval 756 to 830 of 909 by their own verdict, AOT 132 to 139 of 139; the judge 0.922 to 0.927.
+
+## As built: queue 444: the rest of the golden files
+
+Queue 435's 79 left were reviewed again, one by one.
+- IPLocation by a golden file: GHC 9.14's `prettyCallStackLines` header "(from HasCallStack)" (the shipped file's "(from
+  ImplicitParams)" is an older base's) and the source's present lines, plus f7's empty stack (#14043, absent from the shipped
+  file); GHC's record agrees (608 bytes).
+- 7 testsuite programs GHC did not build at record-ref, by golden files from their source alone: CallConv (its x86_64 assembly),
+  MulMayOflo_full, PopCnt, T5149, cgrun069 and T21305 (their Cmm, all.T's `multi_compile_and_run` companions record-ref does not
+  link), T24809 (`-prof`, no profiled libraries here). Their review says so, `:no-run "why"`, and `bin/hsi golden` requires the
+  mark exactly for a program whose record is `:no-build`; `--oracle` reports them as resting on the review alone; the control
+  still fails each. `bin/hsi own-verdicts` lists a `:no-build` program by its golden file alone. bin/hsi check's own path runs
+  six of them to an `:hsi` stop (the test's own Cmm or assembly, divergences.edn's class), which the reference does not change;
+  T24809 is all.T's skip.
+- Left (71, reasons in `golden/left.tsv`): nofib's 29 programs that import NofibUtils (their output a hash of a whole benchmark's
+  result; HF10-P64 (a) gives them GHC's run, after which their shipped nofib files are their own verdict with no golden file),
+  nofib's 28 others GHC did not build and nothing runs (DECISION D435-3), T7861 (GHC 9.14 raises another deferred error than the
+  shipped one: 1,026 bytes derived against the record's 1,076), FMA_ConstantFold (IEEE fma passes every check; the record's six
+  failures are the host's), and the 13 queue 435 left for timing, host, limits or size.
+- Eval 830 to 838 of 909 by their own verdict; the judge (6,660 + 0.5 x 1,133) / 7,793 = 0.927 (0.9268 to 0.9273).
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
@@ -2626,3 +2674,107 @@ wherever its bits do: castDoubleToWord64#, decodeFloat, significand, toRational,
   against class-realfrac's arm64 run, elsewhere against its golden file; it fails as it must.
 Proved (linux/arm64): the six and four others by `bin/hsi check`, without the arm64 reference (`HSI_REF_ARCH=amd64`): 4 pass,
 6 fail, 4 in no class; with it: 8 pass, 2 fail (`:arm64-amd64-ops`), 0 in no class, every control failing as it must.
+
+## HES67's design: Cmm on hsi (queue 332, 2026-11-17)
+
+HES67 (a) kept the tests' own Cmm a class until HE8; its (b) proposed the helper dumping GHC's parsed `CmmGroup`. This design
+takes neither form of (b): **the Cmm is read by Arbace, not by GHC**, so the class leaves without a new GHC-made input, and hsi's
+back end runs it over the machine it already has. The first stage covers what the testsuite's `.cmm` sources of `:test-cmm` use.
+
+### The parts
+
+1. **The reader, `arbace.repr.haskell.cmm`** (`arbace/repr/haskell/cmm.ae`, evaluated from the checkout on stage 0, `bin/hsi cmm
+   OUT [-D...] FILE...`):
+   - **preprocessing** by repr/c's preprocessor (`arbace.repr.c.pp`, cc's, already Arbace's) as GHC runs the C preprocessor on a
+     `.cmm`; the `#include "Cmm.h"` is **hsi's own header** (`test/haskell/eval/cmm/Cmm.h`, `MachDeps.h`): the definitions of GHC
+     9.14.1's `rts/include/Cmm.h` for x86_64-linux that hsi gives a meaning to (the types, `WDS`, `TO_W_`, `Sp(n)`, `ASSERT`,
+     `ccall`, `RET_R1`, the closure types' numbers), and of `DerivedConstants.h` only the closures hsi lays out (`SIZEOF_StgHeader`,
+     `SIZEOF_StgArrBytes`, `StgArrBytes_bytes`). GHC's own `Cmm.h` includes generated headers (`ghcautoconf.h`,
+     `DerivedConstants.h`) that only a GHC build makes; a macro hsi's header lacks is a name the parser makes a label, as GHC's
+     does, so a test needing more fails at its use, by name (HES94);
+   - **the lexer** as `compiler/GHC/Cmm/Lexer.x` (names with `.` `$` `@`, the global registers before names, octal, hexadecimal,
+     the signed float token, strings with C's escapes), over the preprocessed text;
+   - **the parser** as `compiler/GHC/Cmm/Parser.y`'s grammar, by recursive descent: the operators' precedences of its `%left` and
+     `%nonassoc` lines, unary `-` at `-`'s level (Happy's rule), `bool_expr`'s `&&`, `||`, `!` beside expressions in parentheses,
+     every statement of `stmt` but `push`, `reserve` and `unwind` (refused by name), the info tables' headers, `section`s' statics,
+     `CLOSURE`, `import`, `export`;
+   - **elaboration** as the semantic actions build the `CmmGroup`: a procedure's declarations visible throughout it (`loopDecls`),
+     names to locals, `initEnv`'s constants (`SIZEOF_StgHeader`, `SIZEOF_StgInfoTable`) or labels (`lookupName`), each MachOp's
+     width from its first argument's type and its result's type as `machOpResultType`, a store of a narrower value coerced
+     (`doStore`), the `exprMacros` of tables next to code (`ENTRY_CODE`, `INFO_PTR`, `GET_ENTRY`), `callishMachOps` with the
+     `memcpy` family's constant alignment, `stmtMacros`' names checked, `if`/`else` and the boolean operators lowered to labels and
+     branches as `cmmIfThenElse` and `emitCond`, `switch`'s arms out of line, a string literal an anonymous `rodata` datum;
+   - **the forms** (the namespace's docstring is their grammar): `(cmm FILE TOP...)`, `TOP` a `data`, `closure` or `proc` (its
+     convention, info table, formals and locals, then a flat vector of statements over labels), expressions `int`, `float` (IEEE
+     bits), `label`, `local`, `global`, `load`, `op` (GHC's MachOp names and widths).
+2. **The back end, `go/arbace/hs/cmm.ae`** (`cmm.go`): the forms loaded (`hsi run --cmm FILE`, `--cmm-main`), the data laid out in
+   crt's memory (a `.string` NUL-terminated, as GHC's assembler output), the procedures compiled to statements over closures, and
+   interpreted. The model is x86_64's GHC where the forms reach:
+   - **registers**: R1-R10, F1-F6 and D1-D6 as XMM1-XMM6 (one counter for both, `passFloatArgsInXmm`), L1, Sp, Hp, BaseReg and the
+     rest, words; every value a word, a float its IEEE bits;
+   - **calls**: `GHC.Cmm.CallConv`'s `assignArgumentsPos` on x86_64 (R1-R6, XMM1-XMM6; a stack argument refused): a Haskell
+     primcall's non-void arguments assigned by `NativeNodeCall`, a procedure's formals copied in from them, `return (...)` assigning
+     `NativeReturn`'s registers and jumping to the stack's top word; the Haskell's call pushes that word, the **return address**, on
+     a Cmm stack in crt's memory (`Sp`), so `jump %ENTRY_CODE(Sp(0)) [R1]` returns as GHC's does; the results read from the
+     registers by the primcall's REPS;
+   - **heap objects** a Cmm function gets (a gcptr argument) are words of an **object window** (`0x4000000000000000 + index <<
+     32`), laid out as GHC lays out what hsi can (a byte array: its info word, its size, its payload at `SIZEOF_StgArrBytes`), the
+     same word for the same object, and a gcptr result back to its object; code labels are words of a code window, a jump to one
+     the procedure's code;
+   - **the MachOps** at their widths (MulMayOflo exact: no false positives, as Note [MO_S_MulMayOflo significant width] wants;
+     the conversions; amd64's `cvttsd2si` and `minsd`/`maxsd` as hsi's primops have them), the callish ones the tests use
+     (`memcpy`, `memset`, `memmove`, `memcmp`, `popcnt*`, `bswap*`, the fences);
+   - **foreign "C" calls** to the program's own C (ci) or hsi's table of C functions (`puts`, `printf`, `malloc`, `free`), and the
+     RTS's `stg_exit` (C's `exit`: the C stdio flushed, no `hs_exit`) and `_assertFail` (`barf`'s text, then `abort`, status 134);
+   - **a Cmm main** (all.T's `cmm_src`, T17920): `hs_main`'s `rts_evalLazyIO` entering `ZCMain_main_closure`, its info pointer's
+     code run with R1 the closure; `SAVE_`/`RESTORE_SCALAR_ARG_REGS` into BaseReg's table (hsi's layout).
+3. **The entry points** in hsi (kept to lines that keep the files' line counts, so the forms' positions do not move: queue 333
+   works on the evaluator beside): `compile.ae`'s primcall that hsi's own `primcalls` lack is a `PrimE` whose code
+   (`cmmPrimcallOf`) runs the Cmm procedure of that label when one is loaded, else stops as before ("unimplemented: primcall
+   LBL", reason `:primcall`); the images write such a primcall by its label and results (`cmmImageName`, read back by
+   `cmmImagePrimcall`), so a library's Cmm call keeps its message; the driver takes `--cmm` and `--cmm-main` (`hs.CmmArgs`) and
+   runs through `RunMain`. Nothing of the machine's loop, frames or scheduling changed.
+4. **`bin/hsi check`** gives a test's `.cmm` sources (all.T's flags, multi_compile_and_run's extra sources) to the reader with the
+   flags' `-D` (the forms kept by the files', the reader's and the headers' digests, `PROG/cmm.ae`), and a Cmm main runs with no
+   STG (`:stg :none`: no dump, no record of haskell-stg-progs). `HSI_REF` names another reference file (a probe's scratch record).
+
+### Not in the first stage (the second's, when a test needs it)
+
+`call` (a Cmm call that returns: its continuation's frame), stack arguments and results, `push`/`reserve`, info tables read back
+(`%INFO_TYPE` and the rest), the RTS's own Cmm (`rts/*.cmm`: the libraries' primcalls hsi lacks, `getStackClosurezh` and the
+stack decoder's) and other heap objects' layouts (a closure's fields), the profiling headers. Assembly (CallConv's `.s`) is another
+crop's (repr/asm, x86i): out of this design.
+
+### Proposed (HES94 onward)
+
+- **HES94 Cmm.h's source.** (a) hsi's own header, GHC's definitions for x86_64 copied for what hsi models (as built); (b) GHC's
+  `rts/include/Cmm.h` from the source tarball with the generated headers made by Arbace (a port of `utils/deriveConstants` over
+  hsi's layouts): every macro GHC has, more work. **Recommended: (a)** until a test needs more of the RTS's macros.
+- **HES95 the references built without their Cmm.** (a) the main host's `bin/hsi record-ref --only` the five multi_compile_and_run
+  tests (MulMayOflo_full, PopCnt, T5149, cgrun069, T21305; CallConv stays `:no-build`: all.T names its `.s` under `when(arch(...))`,
+  which the plan does not evaluate, and it is assembly), then `bin/hsi check --only ... --record` and the class
+  narrowed to CallConv and T21305 (prepared on the branch `332-haskell-cmm-classes`); (b) leave them :fail in the class. **Recommended: (a)**.
+- **HES96 T21305's out-of-bounds writes** (DECISION 332-1 of queue 332's report): (a) a class of its own by design, the test's
+  undefined behaviour (its `writeByteArray#` steps by 8 elements, past a 3-element array); (b) hsi drops a byte array's write past
+  its end, as GHC's heap absorbs it unseen. **Recommended: (a)**: (b) would hide hsi's bounds checks from every other program.
+
+## As built: HES67's design, the first stage (queue 332, 2026-11-17, branch `332-haskell-cmm`)
+
+On the Mac VM (linux/arm64), stage 0 next's seed 3c48859d. The Cmm runs from the checkout: stage 0 embeds pyi's Go (`arbace/py.`
+symbols) but none of `arbace/hs.` (0 symbols), and hsi is `bin/hsi build`'s driver printed from `go/arbace/hs` (its key the
+forms' digest). The reader reads all nine `.cmm` files of the class (33 procedures in cgrun069's). `bin/hsi check --only` the
+eleven tests and the controls' programs (the haskell-stg-progs entries of 6cc1ea87f's pack, equal to next's for these tests;
+next's pack is not on the VM's mirror): **T17920, T24598, T24598b, T24598c and T24818 pass** against the committed record (the
+last four by their own verdicts; T24818 with its C on ci), and **MulMayOflo_full, PopCnt, T5149 and cgrun069 pass** against GHC
+9.14.1's arm64 builds of them (`HSI_REF`, a scratch record by `bin/hsi record-ref --only`: their recorded references predate the
+plan's extra sources). CallConv (assembly) and T21305 (its own out-of-bounds writes; its Cmm's three results checked on a copy of
+its STG with the writes in bounds: `[9,80,300,770000]`) stay in `:test-cmm`. The controls fail as they must, with a new one
+(T24598 against T24598c's own verdict). MulMayOflo's 64 `ASSERT`s hold; with one inverted, hsi prints barf's message and status 134;
+MulMayOflo's widths 8 and 16 were checked against the exact product for every pair of 8 bits and one in 8 of 16 bits.
+The images: a Cmm primcall a library makes (ghc-internal's stack decoder's `getStackClosurezh` and the others hsi lacks) is written
+by its label and results and read back to the same code (a unit test of the encoding, and `hsi image` over the 1,320 modules of
+haskell-stg-libs); a first `hsi image` crashed once on the compiler's parallel jobs writing the primcalls' table, now under a lock
+(five runs since, 0 errors). hsi-essential's command on the VM: 117 pass, 1 `:threaded-way`, the 5 synthetic programs of arm64's
+NaN sign in no class (queue 325's arm64 reference is not on next), the same as before the branch. The classes stay as recorded
+(`:test-cmm`'s `:results` take `:fail` for the four whose references predate their sources) until the main host's records
+(HES95 (a)); `bin/hsi divergences` over the committed record: 909 programs, 812 pass, 0 unclassed.

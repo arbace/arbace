@@ -13314,3 +13314,146 @@ here is 36b769ce7c35115edd8c, the key tonight's --full builds at next. The night
 step 5, JOP13 (a)'s `bin/java-check sources --jobs 8 --record` on T' with `sources --check --complete`, and a preflight that accepts
 switch.patch with no context (mac/432-java-golden's independence.edn moves the patch's context). cacerts by GenerateCacerts has no verb yet
 and stays out. Dry run only; the morning's lines are in .tmp/goal/java-platform-morning.md. No key moves (journal only).
+
+## 2026-11-19: LLVM IR, queue 407 (the last Verifier rules): the pack remade on amd64
+
+The VM's branch 407-llvm-verifier (d98f9486a, base 88b8e7f1a n-all4) taken on the main host as n-llvm-407, stage 0 the main
+checkout's (pins equal). Decisions: D407-1 (a) own verdict `unsupported bits` (d98f9486a kept), D407-2 (a) both debug rules kept.
+- `bin/llvmi ir-make rt --mutants` (no compiler, 31 min): rt, 252 modules, 1,750 mutants; test/llvm/ir/rt.tsv changes 13 rows (the 13 known
+  mutants' first lines), rt.tar.xz and its sha256 rewritten.
+- `bin/repr-llvm check verify-rt --record` (905 rows) and `verify-rt-heldout --record` (1,101 rows): all pass; the records are
+  unchanged (the check files' rows are the same).
+- `heldout-check`: 900 fresh mutants, 890 own verdicts, 890 met by Arbace's verifier, 10 unknown, 2 negative controls fail as they must.
+- `verify-probes`: 478 modules, 477 pass, 0 failing; `verify-llvmtest`: 806 of 806 pass, 0 failing (the jumptable fix changed nothing).
+- `test/repr/llvm/expect-test.bash`: 82 cases, 30 controls, 0 failing.
+- `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (0 problems): scores
+  unchanged, LLVM IR completeness 99, independence 99 (maturity 100).
+- Not run: bin/gate. For the night: llvm-essential, llvm-read, llvm-heldout (the pack changed).
+
+## 2026-11-19: queue 400's main-host run (n-rust-400)
+
+On branch n-rust-400 (from mac/400-rust-vendor), with the host stage 0: `bin/rust-front std-iface` (whole pass) gave std's interface 4,640 of 4,644 facts equal, 0 differ, 4 missing, the control differing as it must (the VM's report had 4,605 before its last fix). The 4 missing, as the report names them: ADTs `std::backtrace::Inner` (a TAIT), `std::env::SplitPaths` (`sys::paths` not passed) and `std::fs::Metadata`, and fn `std::io::stdio::{impl#7}::as_mut_buf` (RPIT). `std-iface --units` passed and wrote test/rust/front/std-iface-units-known.txt unchanged; `core-essential` and `rind-test` passed (arbace/rust/front changed; alloc-iface skipped, its path is unchanged). `bin/reap`: 54 of 56 cells checked, 2 with no check yet, 0 problems. `bin/crops-score --crop rust --judge --strict`: 0 problems; Rust's scores completeness 100, without by design 100, maturity 100, independence 80. No record moved, so no `--record`.
+
+## 2026-11-17: Ghidra G2 A19: the PKI tests' security areas measured (branch `n-g2-a19`; demo `g2-a19` `ed7fef9`)
+
+- The demo's G2 row A19 (GH16 (a)): what `KeyStore` (PKCS12, JKS), `CertificateFactory` (X.509), `KeyManagerFactory` and
+  `SSLContext` need for ghidra.net's three test classes. The reference's class lists (R2) and M3's report do not exist yet, so
+  the runs are the JDK classes the tests' code reaches, read from Ghidra 12.2's `ghidra.net` sources and the providers'
+  defaults (`pkcs12`, `SunX509`, `PKIX`, PBES2 with AES-256 and HmacPBESHA256), 109 classes in 8 areas; the report the gate
+  executable's j2g `report.edn` at next `42bf8614b` (`:unavailable` and `:missing` as `[class why]` pairs, 407).
+- Result: 109 of 109 present in `jdk/sources.txt` with their services in jrt's tables (F1, F2, F3, F23); `SSLContext` is not on
+  the tests' path (only a `ModuleInitializer` Generic's tests never run). `bin/j2g-rank` (A14): one stub on the three runs'
+  path, `sun.security.util.Debug.formatCaller` (StackWalker), met only under `java.security.debug`; its controls (a run naming
+  `GaloisCounterMode` ranks it, `KeyStore` alone ranks nothing) behave. A smoke on the gate's executable (2 s, 0.44 GiB): cacerts
+  read as PKCS12 without a password (111), X.509 parsed back, RSA sign and verify, PKCS12 and JKS stored and reloaded, SunX509's
+  key manager, PKIX's trust manager accepting a root and rejecting it over another root, CertPathBuilder, CertStore, TLSv1.3's
+  SSLContext. No deferred class, nothing to port.
+- The risk is bouncycastle's: `CertTool` registers `BouncyCastleProvider`, whose `$Mappings` classes (108 names) and services are
+  loaded by computed names and built by reflection; bcprov's cut (A3) and the program's roots must keep them (A22 when job 7 runs).
+- Taken overnight (round 52): A19-1 (a) measure now on the sources' lists, rerun A14 on R2's; A19-2 (a) the JDK areas used as
+  they are, no deferred class; A19-3 (a) `Debug.formatCaller` not met, no fix. The demo's `plan/A19.md` and `plan/a19/` hold the
+  lists, the smoke and the rankings.
+
+## 2026-11-19: n-all5, today's held branches in one branch for next (from next `c6d53f85b`; queue 441's order)
+
+- What: one branch, `n-all5`, from mac/next `c6d53f85b`, merging today's held tips `--no-ff` in queue 441's proven order (the
+  VM's trial `441-merge-trial` `ed6f8465e`, D441-1..4 (a)), so that after tonight's gate it lands in next as one merge. Each
+  merge names its branch, tip and decisions; contained branches came along. Order and tips:
+  1. no shared records: 424-gate-hygiene `098b9db84` (its 098b9db84 already next's dfce89df7), 426-goi-depth `bba46f7d3` (with
+     420-go), n-llvm-407 `61c565059`, n-rust-400 `d625b008d`, 417-rust-std `56e3bf004`, 432-java-golden `66493b2b2`, 443-rust-s4b
+     `ca3229eca` (with 433-rust-s4), then, by the coordinator's later word, 448-rust-mono `ce1b754ed` (contains 443) and
+     451-java-golden2 `dc8ce5c0a` (contains 432; D451-1, D451-2 (a)) merged on top of the two they contain.
+  2. C: 408-c-cs326 `a701a05ae`, 409-c-judge `217c95b8b`.
+  3. Java: 437-java-slice `305693ba6` (with 398, 415), 416-java-sw `7d07596cf`, 440-java-prep `61127d5b1`, 447-java-j2g `eeb991a80`.
+  4. OCaml: 396-oc-dynlink `0c863b955` (with 373-1's WIP), 414-oc-speed `c3a9dafcf` (with 397), 438-oc-gc `48b15ae04`, 413-oc-capi
+     `2792f15ef` (413-1 (a), the user), 434-oc-compiler-output `b8f32f1a3` (D434-2 (a), the user).
+  5. C++: 412-cpp-diag `61c62cb40`, 423-cpp-assign `5d9c2fde7` (whole, first), 449-cpp-last `778bb06fa` (392, 411, 393, 439, 445).
+  6. Python: 418-py-gaps `546f4dbd9`, 436-py-night `a2726bf90` (428, 431, the splice 0a3badc73).
+  7. Haskell: 446-hs-speed `efaf5e154` (with 430), 442-hs-cmm at `5f9b23bce`, not its tip (442-2 (a): 332-haskell-cmm, 422-hs-rest,
+     cmm-front-after-332.diff; 3204ad1b0 with 332-haskell-cmm-classes after the host's record-ref), 429-hs-iface-rest `5d4b4f7e7`
+     (with 425), 444-hs-golden-rest `37c8816f4` (with 435).
+  8. From the triage below: n-g2-a19 `ae334c22c` (its journal entry alone).
+- Conflicts and their resolutions (the journal, AGENDA and surveys keep both sides, appended in merge order; the derived
+  test/reap/matrix.edn and test/crops/scores.edn take next's side and are re-recorded once at the end, D441-1 (a)):
+  - 443: doc/rust/FRONTEND-SURVEY.md, 417's and 443's "As built" both.
+  - 409: test/c/controls.edn (next's n-c-expect control and 409's three), test/c/judge_test.ae (408's pp-number-digit-separators and
+    409's roundtrip-own-first-and-control), test/crops/independence.edn's C `:judge` as the trial's hand merge: `{:self 14867
+    :recorded 148}` over 15015, next's `:why` followed by 409's (D441-4 (a)).
+  - 414 on 396: arbace/o2j.ae's unit binding, 396's `class-of` with 414's `:ints` atom.
+  - 438 on 414, as 438's report prescribes: jdk/ocaml/ocaml/rt/Rt.ae's `block`, 414's inlined count made after the value with
+    `(ExtGc/memprofAlloc (long w) v)`; ExtGc.ae, 438's heap model with 396's j2g-safe arithmetic in `memprofGeom`
+    (`unchecked-divide`, `unchecked-negate`: the compiled level's world has no Numbers); test/ocaml/aot-known.edn, 438's
+    deletions (minor_heap_edge, restart, start_stop) and 397's intern pin kept; test/ocaml/pins-attested.tsv, both headers, 397's
+    intern line, restart dropped, 438's exception_comballoc and stop_start_in_callback digests. And arbace/o2j.ae's inlined
+    makeblock (414's) now makes the block first and calls `(ocaml.rt.ExtGc/memprofAlloc w blk$)` with it (438's required change:
+    with `memprofSample`, Gc.Memprof would take every tracked makeblock value as dead at the next minor collection).
+  - 413: test/ocaml/aot-slow.edn and controls.txt both sides; check-aot-native.edn's two rows each side's pass
+    (blake2b_self_test 413's C stubs, md5 414's speed).
+  - 434: matrix.edn, next's.
+  - 436: scores.edn, next's. Its splice put pyi-wheels and pyi-runtime into steps.edn, which judge against outcomes not
+    recorded (436's high finding, D441-2): both moved into a new fragment `test/gate/crops/python-outcomes.edn` (out of
+    steps.edn and python.edn, the crop's paths and CLAUDE.md's list of unspliced fragments naming it), spliced after
+    `REPR_PYTHON_ORACLE=record bin/repr-python records record outcomes`.
+  - 442 on 446: hsi's runtime forms (go/arbace/hs.ae, hs/compile.ae, hs/image.ae, test/haskell/hsi/cmd/main.ae) carry
+    positions, so they were not merged as forms: the three versions printed by repr/go (base next, ours with 446, theirs
+    5f9b23bce), compile.go, image.go and main.go merged by `git merge-file` (no conflict), 442's new cmm.go added, built by
+    TamaGo's go, then read back by `bin/hsi runtime read`; test/haskell/hsi-controls.txt both sides.
+  - 444 on 429: independence.edn's Haskell `:judge`, both comment blocks, 444's `:why` and evidence (429 changed neither), the
+    counts summed over next's: 429 +866 own, 444 with 435 +89, `{:self 7526 :recorded 267}` (7,793).
+- Fixes made on the merged tree: Cabal's two known interface units (429-1 (a): UnifyM, PackageIndex, "signatures' implicit
+  binders named by their span") matched by the class `:own-iface-span-lines` of test/haskell/divergences-{read,print}.edn (bin/reap
+  had 4 problems); test/c/judge_test.ae's message-as-verdict count of `:wrong-reason` 2 to 1 (stale on next since 95615687e,
+  which took embed-3 out of test/c/dg-wording.edn).
+- Targeted checks (stage 0 the main checkout's): `bin/ci judge-test` 113 tests, the one failure the stale count above (then the
+  three touched deftests 41 of 41); `bin/rust-front essential` (448's LowerIntrinsics): build-check 62 of 62 and the pass judge 60
+  of 60 bodies equal, capture-check 34 of 34, then run-built's cold lib-export of alloc passed the 10 minutes allowed (2.1 GB):
+  left for the morning; `bin/j2g --jdk jdk/forms --analyze-only` over jdk/ocaml/ocaml/rt: 0 analysis failures (3 min, 2.9 GB);
+  `bin/hsi runtime check`: only go/arbace/hs/fdwait.ae differs, a hand comment in next since de86bcf06 (not this merge);
+  hsi-essential's command on the merged hsi: own-verdicts current, golden controls, 123 of 123 pass; 446's four :speed rows at
+  the 60 s cap (queens, AtomicPrimops, T21651, setnumcapabilities001) are killed by the limit on this host (load 12) with the
+  merged hsi and with 446's hsi alone, so they stay :speed until a quiet amd64 run; `bin/java-check golden --oracle --control`:
+  164 jtreg golden files (11 masked), every control failing as it must.
+- Light checks: `bin/reap --record` 54 of 56 cells checked, 0 problems; `bin/crops-score --record`, `--judge --strict` 0
+  problems; `bin/records-check` 9 pairs, 0 problems; `gate.crops check` 0 problems (test/gate/crops-test.bash ok);
+  test/docs/claude-md-test.bash ok; `bin/gate --full --plan` rc 0 (383 steps). Scores (completeness, without by design, maturity,
+  independence): Clojure 99 100 100 100, Java 89 92 100 60, Go 99 100 100 100, C 98 100 100 100, C++ 93 95 100 75, OCaml 90 94
+  100 100, Scheme 100 100 100 100, Haskell 97 99 100 80, Rust 100 100 100 80, LLVM IR 99 100 100 99, Python 50 50 92 99, x86-64
+  assembly 99 100 100 100, arm64 assembly 100 100 100 100, WebAssembly 100 100 100 100.
+- Triage of the older tips on mac (commit messages, the journal, the AGENDA, the queue's reports):
+  - n-g2-a19 `ae334c22c`: finished, wanted, journal only: merged.
+  - 317-python-splice `f7fd30b40`: superseded by 428's splice `0a3badc73` and 436's split (the journal of 2026-11-17: to be redone by
+    `gate.crops splice` after the records, not merged).
+  - f26-classfile `acaae3905`: superseded by f26-ghidra (next `e30418178`): its four code commits cherry-picked there, its entry kept.
+  - h-ghidra-20 `b6c576acd` and ghidra-a8 `352535191`: superseded by f26-ghidra: ghidra-a8's six commits and A8c (`607fbacb6`,
+    `764f10c14` in next) picked.
+  - n-cpp-rt `96a9989f3`: superseded: its 118-unit runtime proof records were held on purpose (HANDOFF-1119), then 406-cpp-cp403's
+    flip (next `7077bc585`, the 124-unit route) and 449's chain; the C++ records are the morning's, made on top of all of them.
+  - n-clojure-cdr `ff0b351ab`: CDR5 `082330d04` superseded by round 53 (1) (`n-cdr5-extra`: java.xml per program through
+    `:jdk-extra`); CDR1 `8a3d28662` (JRT_LOCALES common) parked: it sits on the dropped CDR5, changes the shipped world (gate_key,
+    a build) and needs its day runs (the journal's n-all entry); to be rebased off CDR5.
+  - 333-haskell-speed `ed8db6715`: parked: finished at 1.10-1.15x (333-1..3 (a)) but never merged, and it conflicts with 446 and
+    442 in hsi's evaluator (arena, compile, machine, nodes) and bin/hsi; a rebase onto them and its PGO profile measured again first.
+  - 395-hs-do-checking `4d3938847`: parked by 395-1 (a): out of next until the whole own chain judges it on the main host.
+  - h-hes-lls-hes91 `d129fc245`: parked: HES91 (a) waits for callback002's record (a 16 GiB run with rts_clearMemory), the AGENDA's.
+  - h-keys-design `e55d2456a`: parked: the cover (GDS21-GDS26 (a)) waits for `bin/gate-unit-keys measure` on a night's log and
+    GDS27, the user's; it changes the planner and the runner.
+  - oracle-packs `3dd7a8254`: not a work branch (no history in common with next): the packs' mirror, kept by ORS3 (a).
+  - Left alone as asked: n-aotlib-key, n-reseed-plan (the re-seed's), 441-merge-trial (scratch).
+- The morning's heavy follow-ups (none run here): `bin/jrt-convert update && verify` (and `bin/j2g-edge update` if stale) after
+  437, 416 and 398/415's overlays, then Java's re-judge (440's, 437-1 (a), 447-1 (a)); C++: `bin/cppi codegen-gen` (forms.sha256
+  after 412, 423 and 449's sema and codegen), then `bin/ci`/`bin/cppi check --only` over the 82 cases (449-2 (a)) and the C++
+  records (runtime-build, runtime-inputs --record, check, aot); Python: `REPR_PYTHON_ORACLE=record bin/repr-python records record
+  outcomes` and the pydump packs (436-1 (a)), then the splices of python-outcomes.edn, python-night.edn and python-packs.edn;
+  Haskell: 442's record-ref of the five references and its `--only --record` run, then 3204ad1b0; OCaml's light records (oi-aot's
+  shards with 414, 438 and 413 together, intern's pin re-pinned, a compiled shard with 396's dynlink and 413's capi); `bin/rust-front
+  essential`'s run-built on a warm cache (448); 446's four :speed rows on a quiet amd64 host; the new gate_key's build
+  (`bin/arbace-go --gate-build`).
+
+## 2026-11-19: C++'s runtime and run records re-recorded on n-all5 (c428307cf)
+
+`bin/cppi codegen-gen` 155 of 155; `runtime-build` (route auto) 198 of 198 units, 166 by Arbace's route, `runtime-ci` read all 198;
+`check --record` (samples 7, runtime 8: pass 15) and `check --aot --record`: own 15 of 15 each; the gxx-dg-run sampling
+(`--sample 25`, `--record`, eval and AOT): 67 programs, pass 66, oracle-text 1, own 82 of 82 each; `runtime-inputs --record`: own 166, pack 32.
+The 82 cases were judged by those two record runs (no separate `check --only`). Then `bin/reap --record` and `bin/crops-score --record`:
+C++ completeness 96, without by design 97, maturity 100, independence 91 (from 75); `--judge --strict` and `bin/records-check` pass.
+Four recorded failures of the sampling now pass (vbase8-10, embed-26, vector1, vshuf-v16hi): their classes are to be cleared.

@@ -966,7 +966,7 @@
   (let [w (dg/load-wording)]
     (is (seq (:families w)))
     (is (every? (fn [f] (and (keyword? (:id f)) (re-pattern (:gcc f)) (re-pattern (:checker f)))) (:families w)))
-    (is (= 2 (count (:wrong-reason w)))) ; 13 to 5: c-compl (doc/C23-SURVEY.md, CC.1) gave eight files gcc's wording; 5 to 4: CS292 (a)'s family (c23-attr-syntax-7); 4 to 3: CS293 (c23-attr-syntax-6); 3 to 2: CS294 (a) (gnu23-attr-syntax-3)
+    (is (= 1 (count (:wrong-reason w)))) ; 13 to 5: c-compl (doc/C23-SURVEY.md, CC.1) gave eight files gcc's wording; 5 to 4: CS292 (a)'s family (c23-attr-syntax-7); 4 to 3: CS293 (c23-attr-syntax-6); 3 to 2: CS294 (a) (gnu23-attr-syntax-3); 2 to 1: 95615687e (#embed's parameters as libcpp parses them: embed-3 left the table; this count not updated then, n-all5)
     (is (every? (fn [[_ v]] (and (seq (:lines v)) (string? (:why v)))) (:wrong-reason w)))))
 
 (deftest every-directive-needs-a-message
@@ -1759,6 +1759,60 @@
     (is (not (rt/own-rejects? f (str f ":2:5: 'auto' requires an initialized data declaration"))) "a line no dg-error names")
     (is (not (rt/own-rejects? (str w "/other.c:3:1: x") (str w "/other.c:3:1: initialized data declaration"))) "an included file's")
     (is (not (rt/own-rejects? nil "3:1: initialized data declaration")) "no file (a control's row)")))
+
+;; CS326 (a): libcpp's pp-number rule for ' (lex_number), C's lexer and C++'s (one lexer, the feature mask's F-DIGSEP), each case's
+;; split probed against gcc 15 and g++ -E (a macro Z after the case shows whether it was one pp-number): every ' taken, the
+;; trailing ones given back, no `.` right after a ', no sign after an exponent letter that follows a '
+(deftest pp-number-digit-separators
+  (require 'arbace.repr.c.lex 'arbace.repr.cpp.host)
+  (let [tokens (resolve 'arbace.repr.c.lex/tokens)
+        new-file (resolve 'arbace.repr.c.lex/new-file)
+        feature-mask (resolve 'arbace.repr.cpp.host/feature-mask)
+        split (fn [mask text]
+                (let [[ts _] (tokens (new-file "<t>" (.getBytes ^String text "ISO-8859-1")) mask)]
+                  (vec (for [t ts :when (not= (.-ch ^arbace.repr.c.lex.Tok t) \newline)] (.-src ^arbace.repr.c.lex.Tok t)))))
+        cxx14 (feature-mask "c++14" false false)
+        cxx11 (feature-mask "c++11" false false)]
+    (doseq [mask [false cxx14]]
+      (is (= ["1''Z"] (split mask "1''Z")) "adjacent separators: one pp-number, the converter's error")
+      (is (= ["1'2'3"] (split mask "1'2'3")))
+      (is (= ["1" "' "] (take 2 (split mask "1' "))) "a trailing separator given back")
+      (is (= ["1" "''" "."] (take 3 (split mask "1''."))) "trailing separators given back as a run")
+      (is (= ["1" "'.Z"] (split mask "1'.Z")) "no `.` right after a separator")
+      (is (= ["1'e" "+" "2"] (split mask "1'e+2")) "no sign after an exponent letter that follows a separator")
+      (is (= ["0x1'p" "-" "2"] (split mask "0x1'p-2")))
+      (is (= ["1'0e+2"] (split mask "1'0e+2")) "the sign where the letter follows a digit")
+      (is (= ["1e+2"] (split mask "1e+2")))
+      (is (= ["1.'5"] (split mask "1.'5")) "a separator after a `.` is taken")
+      (is (= ["1'_x"] (split mask "1'_x")))
+      (is (= ["1'Z'Z"] (split mask "1'Z'Z"))))
+    (is (= ["1" "'Z"] (split cxx11 "1'Z")) "C++11: no digit separators")))
+
+;; queue 409: the round trip's acceptance takes the test's own verdict before the reference's rejection (a file both reject and
+;; own-rejects? accepts is "own-rejects"), and the :roundtrip-own control judges the subject's error against another file's
+;; directives: another line or other words differ, the subject's own file passes (what the control must catch)
+(deftest roundtrip-own-first-and-control
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-own-control")
+        b (str w "/c")]
+    (put-files w {"c/base.txt" b
+                  "c/t.c" (str "/* { dg-do compile } */\n" "int a;\n" "auto g { } /* { dg-error \"initialized data declaration\" } */\n")
+                  "c/u.c" (str "/* { dg-do compile } */\n" "int a;\n" "int b; /* { dg-error \"something else\" } */\n")
+                  "c/v.c" (str "/* { dg-do compile } */\n" "auto g { } /* { dg-error \"initialized data declaration\" } */\n")
+                  "c/forms.tsv" (str "t.c\terror\t-\t-\t" b "/t.c:3:1: 'auto' requires an initialized data declaration\n"
+                                     "u.c\terror\t-\t-\t" b "/u.c:3:1: other\n" "v.c\terror\t-\t-\t" b "/v.c:2:1: other\n")})
+    (binding [rt/*base* b]
+      (is (= "own-rejects" (:accept (#'rt/judge-row ["t.c" "error" "-" "-" (str b "/t.c:3:1: 'auto' requires an initialized data declaration")]
+                                                    nil nil "1" nil false)))
+          "both reject, the test's own verdict first")
+      (is (= "both-reject" (:accept (#'rt/judge-row ["u.c" "error" "-" "-" (str b "/u.c:3:1: other")] nil nil "1" nil false)))
+          "the reference's rejection where the own verdict does not hold"))
+    (let [r (fn [s ref] (rt/own-control-result w ["c"] {:subject (str "c/" s) :reference (str "c/" ref)}))]
+      (is (= :differs (r "t.c" "u.c")) "the same line, other words")
+      (is (= :differs (r "t.c" "v.c")) "the same words, another line")
+      (is (= :passes (r "t.c" "t.c")) "its own directives accept it")
+      (is (= :left (r "u.c" "t.c")) "a subject not rejected for its own reason")
+      (is (= :left (rt/own-control-result w ["d"] {:subject "c/t.c" :reference "c/u.c"})) "a corpus not judged"))
+    (is (= 2 (count (filter #(= :roundtrip-own (:level %)) (read-string (slurp "test/c/controls.edn"))))))))
 
 ;; h-c-deferred: the converter's digit separators (gcc's cpp_classify_number errors), C23's typeof against GNU's __typeof__, and
 ;; __declspec read as an attribute and printed back

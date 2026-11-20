@@ -688,8 +688,8 @@ flow, calls, defer and select.
   `Thread` gains one field for goi's state (`Interp any`), set on the goroutine's first
   interpreted call (S22). So compiled code calling back into interpreted code (a `sort.Slice` less)
   continues the same thread: one stack, one trace.
-- **Depth.** A thread counts its interpreted calls; at goi's limit (`ARBACE_GOI_DEPTH`, default
-  100,000) a call panics with gc's fatal text as a value (`runtime: goroutine stack exceeds
+- **Depth.** A thread counts its interpreted calls; at goi's limit (100,000 at the REPL, 1,000,000 in
+  program mode, `ARBACE_GOI_DEPTH` in both: "Since v1: the depth limit") a call panics with gc's fatal text as a value (`runtime: goroutine stack exceeds
   1000000000-byte limit`; in program mode reported as gc's `fatal error: stack overflow` with
   status 2), since Go's own stack overflow is fatal and would end the REPL (S23).
 
@@ -5511,3 +5511,51 @@ with every class by name, are in doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergen
 moved: AOT 1,685 / 149 / 3 to 1,688 / 149 / 0 (RPS32 (a): repr/go prints the three invalid programs as written, the
 class `printer-invalid` removed; doc/FULL-SUPPORT-SURVEY.md, "As built: v2 small leftovers A"). Read, eval and print are
 as at v1 (12,158 / 204 / 0, 1,618 / 219 / 0, 2,584+ / 141 / 0).
+
+## Since v1: gc's front-end -d diagnostics, bodiless functions on their first call (2026-11-19, queue 420)
+
+Queue 420 audited the by-design classes of `test/goi/divergences.edn` that Go's eval cell still counts. Four of `:gc-flags`'
+programs ask for `-d` diagnostics that gc prints from decisions its front end or a plain rule makes, not from the SSA back
+end's passes; they are goi's now (`bin/goi`'s `check_err` passes them as the debug map `--escape-debug`):
+
+- `-d=typeassert` (`interface/assertinline.go`): ssagen's dottype1 says "type assertion inlined" at each `x.(T)`, "not
+  inlined" when T is a non-empty interface (a runtime call). `arbace.go.run/typeassert-lines` over the checked trees (generic
+  functions and type switches left out: gc reports at instances' dynamic assertions, and walk compiles type switches without
+  dottype1).
+- `-d=defer` (`defererrcheck.go`): ssagen's ODEFER message from buildssa's hasOpenDefers (at most 8 defers, each at loop depth
+  1 (escape's goDeferStmt: EscNever), no result moved to heap, returns times defers at most 15, no `-N`), else
+  stack-allocated for EscNever, else heap-allocated. `arbace.go.escape/defer-lines`: the escape analysis run at `-m` 0 with
+  `*defer-log*`, which records each defer's loop depth and the variables moved to heap.
+- `-d=append,slice` (`sliceopt.go`): ssagen's OAS of `x = append(x, ...)` with `ir.SameSafeExpr` sides, "(in local slice)" when
+  x can be SSA'd (canSSAName: a local not address-taken, captured or moved to heap, not a result of a function with a defer);
+  walkSlice's `x[:]`/`x[0:]` of a slice or string. `arbace.go.escape/append-slice-lines`.
+- `-d=checkptr` (`fixedbugs/issue35073b.go`, with `-m`): its instrumentation reports nothing; what changes `-m` is the inliner,
+  which refuses `go:nocheckptr` functions, reflect's `Value.UnsafeAddr` and `Value.Pointer` called as methods (#35073) and
+  every function of objabi's runtime packages (`arbace.go.escape`'s `checkptr-refused?`, `runtime-pkgs`).
+
+`:foreign-code`: in program mode (`arbace.go.run`, eager builds) a function without a body in a package without assembly
+(`no-assembly!` refuses those first) is built on its first call, as at the REPL (`build/lazily`): gc's linker needs its symbol
+only where a live call reaches it, so `fixedbugs/issue9608.go` (calls of `fail()` in constant-false branches and cases) runs;
+a program that does call one ends there with `goi: unsupported: a function without a body (assembly)`, status 125, as before.
+
+What stays by design in `:gc-flags`: `-live`, `-l=N`, `-wb`, and `-d=` of the SSA passes (`ssa/*`, `nil`, `wb`, `tailcall`,
+`checkbce`) and `escapedebug` (walk's dataWord over order's static temporaries: front-end work, not ported yet).
+
+## Since v1: the depth limit (2026-11-19, queue 426, DECISION 420-A (a), GC42 (b))
+
+`peano.go` (`:call-depth`) counts 362,880 Peano numbers by recursion, past the REPL's 100,000. In program mode goi's
+limit is now 1,000,000 (`arbace.go.build/depth-limits`), and `ARBACE_GOI_DEPTH`, named by the docs since S23 but read by
+nothing, is read: `arbace.go.build/depth-limit` takes its integer, clamped to the floor 1,000 and the ceiling 1,048,576 (a
+warning on stderr when clamped; a value that is not an integer warned about and ignored), at the REPL too (once, when
+`arbace.go.repl` loads; unset, the back end's 100,000 stays). `set-depth-limit!` hands it to the back end's
+`SetDepthLimit` (go/arbace/goi/frame.ae, a factory of the registry), which sets `DepthLimit` and the current thread's
+limit and raises the goroutines' stack limit (`debug.SetMaxStack`) to the power of two that holds the limit's calls at
+`FrameStackBytes` (1 KiB) each, never below Go's default (1,000,000,000 bytes, which allows a 512 MiB stack) and at most
+1 GiB (Go's largest goroutine stack: stacks are powers of two under `maxstackceiling`, 2,000,000,000 bytes). The ceiling
+is that 1 GiB at 1 KiB a call. One interpreted call of `count` takes 340 to 520 bytes of Go stack on arm64 (measured on
+stage 0 by `runtime.MemStats.StackInuse` at depths 1,000 to 99,000: 32 MiB at 64,000, 64 MiB at 99,000), so a runaway
+recursion still ends in goi's depth error (gc's text, status 2), not in Go's fatal overflow, whose text names its own
+limit and prints `runtime: sp=` and the runtime's trace. An executable whose back end predates `SetDepthLimit` keeps
+100,000 (the op's absence is caught). Tests: `test/goi/run/go/t/deep.ae` (300,000 calls; gc's run the same), and
+`bin/goi test`'s depth checks (`depth_tests`): `depth-limit`'s cases, `deep.ae` under `ARBACE_GOI_DEPTH=150000` and
+`test/goi/run/go/depth/runaway.ae` under program mode's default, each ending in goi's depth error.

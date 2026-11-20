@@ -9044,3 +9044,35 @@ one-cause nine); t05784 t08071 t08082 (after the update; if exception and value 
 13 the rows whose later lines hold, none measurable by day: likely t04448, t04905, t05547, t05469, t05241, t05242, t05248, t05249,
 t05250, t05244, t08020; at risk the ones F27 named (t05243, t05253, t05252, t07954) and the SASL seven (the DIGEST-MD5 exchange on
 their own callback handlers).
+
+## As built: queue 416 (write-ahead), StackWalker over the interpreted frames (F20's first part)
+
+The interpreter's frames were not Go frames a walker could name (n-java-defer's second pass: traces showed
+Compiler$CF's nodes) and StackWalker was a cut class. Built, waiting for the main host's build and records:
+
+- **The shadow stack** (arbace/lang/Compiler.ae, Compiler$CF): each Frame keeps its method, its caller, its
+  thread's state (Thr, which replaces the int[] of Rt.DEPTH) and whether it was entered from outside the
+  interpreter. Meth.run/runJ/runD/runV make the frame the thread's top and give it back to the caller on
+  return; a catch or finally (Try) takes it back to its own frame; Meth.invoke and the new Klass.runClinit
+  (the static initializer's frame, an entry) restore it on exit. Rt.snapshot copies the chain (each frame's
+  method, ENTRY after an entry) into a Snap, a Supplier that Rt.describe expands when read: an interpreted
+  lambda's method two frames (its body as `Outer.lambda$m$N`, then its hidden class's method; a method
+  reference's only the hidden one: interp.ae sets Klass.lambdaHost and lambdaName), file the top-level
+  class's `Simple.java`, no line (-1), flag 4 on a static main(String[]).
+- **jrt** (go/arbace/jrt/throwable.ae): javaFrames is stackFrames over the Go frames, the evaluated frames,
+  goi's and now the interpreted ones (InterpTrace, set by Compiler$CFGo$GoHost through the native
+  Compiler_CFGo_SetTraceHook_Supplier__V_native; Throwable keeps the snapshot from fillInStackTrace): a group
+  of interpreted frames at its entry's Go frame (Meth.invoke, Klass.runClinit), the interpreter's own Go
+  frames elided with the reflective call it makes of compiled code (Method.invoke's frames up to one
+  reflective call), the hidden frames left out of traces, and no frame below an interpreted main(String[])
+  entered from outside (a launch, as the JVM's launcher shows none). Thread.getStackTrace and the management
+  traces take the interpreted frames too.
+- **StackWalker** (overlay/jdk/java.base/java/lang/StackWalker.java, jrt's own Java): jdk26u's API, checks
+  and messages over the native StackWalker_Frames0_I__O1_native (the frames from the walker's caller as
+  [Class, StackTraceElement] pairs, frames of unknown class left out, reflection and hidden frames by
+  option), walk's stream over that array invalid once walk returns, getCallerClass the reflection and
+  hidden frames skipped; IllegalCallerException added to the closure (test/jrt/jrt_sources.ae).
+- **Cost** (a stand-in; the main host measures the interpreter): a Go model of the interpreter's call
+  (the frame and its two slot arrays) +20% CPU with the four fields and the top's two stores, +8% with
+  the method and caller alone (3 interleaved rounds under load 18-29); stage 0's interpreter makes about
+  170 ns a call, mostly those allocations. Queue 416's report has the DECISION.

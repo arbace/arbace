@@ -349,21 +349,47 @@
   a class using it stops at its missing members (\"No accessible constructor of p.C$D\", \"No
   static field f in p/C\") while the cause is the class the other one could not resolve
   (JCS69 (b)); \" (because p/C$D: members: Unknown type: X (the import q.X))\" appended. The
-  first such class the message names, in the message's order; else msg as it is."
-  [causes ^String msg]
-  (if (or (empty? causes) (not (str/starts-with? msg "analysis: ")))
-    msg
-    (let [hits (for [[n why] causes
-                     :let [bin (str/replace (str n) "/" ".")
-                           i (max (.indexOf msg (str n)) (.indexOf msg ^String bin))]
-                     :when (and (not (neg? i))
-                                ;; the whole name: not a prefix of a longer one (p.C of p.C$D)
-                                (let [j (+ i (count bin))]
-                                  (or (= j (count msg)) (not (re-find #"[\w$]" (subs msg j (inc j)))))))]
-                 [i n why])]
-      (if-let [[_ n why] (first (sort-by (juxt first (comp - count str second)) hits))]
-        (str msg " (because " n ": " why ")")
-        msg))))
+  first such class the message names, in the message's order; else, with related (queue 447: the
+  failing class's supertypes and enclosing classes, related-classes), the first of them with a
+  cause: a subclass or a member class of the unresolved class stops at what the class inherits or
+  reads from it (\"No static field isWindows in t08314/DefaultLocaleTestRun\" of a test extending
+  jtreg's TestHelper, whose members name ToolProvider; \"Bad set! target\" of a member class setting
+  its holder's static field), naming no class; else msg as it is."
+  ([causes msg] (unresolved-cause causes msg nil))
+  ([causes ^String msg related]
+   (if (or (empty? causes) (not (str/starts-with? msg "analysis: ")))
+     msg
+     (let [hits (for [[n why] causes
+                      :let [bin (str/replace (str n) "/" ".")
+                            i (max (.indexOf msg (str n)) (.indexOf msg ^String bin))]
+                      :when (and (not (neg? i))
+                                 ;; the whole name: not a prefix of a longer one (p.C of p.C$D)
+                                 (let [j (+ i (count bin))]
+                                   (or (= j (count msg)) (not (re-find #"[\w$]" (subs msg j (inc j)))))))]
+                  [i n why])]
+       (if-let [[_ n why] (first (sort-by (juxt first (comp - count str second)) hits))]
+         (str msg " (because " n ": " why ")")
+         (if-let [[n why] (first (for [r related :let [why (get causes r)] :when why] [r why]))]
+           (str msg " (because " n ": " why ")")
+           msg))))))
+
+(defn related-classes
+  "queue 447: the classes class n is built on, as unresolved-cause tries them: its supertypes in the
+  compilation (superclass first, breadth first, each once), then its enclosing classes, innermost
+  first; decl-of gives a class's declaration (arbace.classes.analyze/decl), nil outside it."
+  [decl-of n]
+  (let [supers (fn [c] (when-let [d (decl-of c)] (remove nil? (cons (:super d) (:interfaces d)))))
+        sups (loop [q (vec (supers n)) seen #{} out []]
+               (if-let [c (first q)]
+                 (if (or (seen c) (= c n))
+                   (recur (subvec q 1) seen out)
+                   (recur (into (subvec q 1) (supers c)) (conj seen c) (conj out c)))
+                 out))
+        outs (loop [o (some-> (decl-of n) :outer) out []]
+               (if (and o (not (some #{o} out)))
+                 (recur (some-> (decl-of o) :outer) (conj out o))
+                 out))]
+    (vec (distinct (concat sups outs)))))
 
 (defn load-world
   "Reads, enters and analyzes the Java forms of the inputs, each {:root :dirs|:tree|:files},
@@ -629,7 +655,8 @@
                    causes (into {} (for [[n msg] @unresolved] [n (named n msg)]))]
                (vec (sort-by (juxt first second)
                              (for [[n msg] @failed]
-                               [n (unresolved-cause causes (named n msg))]))))
+                               [n (unresolved-cause causes (named n msg)
+                                                    (when-not (contains? causes n) (related-classes #(get @cs %) n)))]))))
      :variants @applied :erased erased}))
 
 (defmacro with-world

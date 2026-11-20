@@ -1,7 +1,7 @@
 #!/bin/bash
 # n-gocache-trim (2026-11-19): bin/lib/gocache.bash's gocache_trim, the trim of Go's build cache before every bin/arbace-go --build,
 # follows the gate's rule (test/gate/caches.edn's "{gocache}" row, bin/lib/gate-run.bash's caches_prune), on a scratch cache under
-# .tmp/gocache-trim-test (GATE_CACHES_GOCACHE, GATE_CACHES_FREE_KIB, GATE_CACHES_GO_BUSY), never Go's real cache:
+# $TMPDIR/gocache-trim-test (GATE_CACHES_GOCACHE, GATE_CACHES_FREE_KIB, GATE_CACHES_GO_BUSY), never Go's real cache:
 #   1. gocache_trim's defaults (ARBACE_GOCACHE_MAX_GIB, _FREE_GIB, _MIN_GIB) are the table row's :rule [:size N], :free-gib, :min-gib,
 #      and caches_prune computes its cap by the same gocache_cap_kib;
 #   2. gocache_cap_kib: min(MAX, size + free - FREE), at least MIN;
@@ -11,8 +11,8 @@
 # Usage: test/gate/gocache-trim-test.bash
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
-export TMPDIR=$here/.tmp/tmp; mkdir -p "$TMPDIR"
-T=$here/.tmp/gocache-trim-test
+export TMPDIR=${TMPDIR:-$here/.tmp/tmp}; mkdir -p "$TMPDIR"
+T=$TMPDIR/gocache-trim-test
 rm -rf "$T"; mkdir -p "$T"
 fail=0
 ok() { echo "ok   $*"; }

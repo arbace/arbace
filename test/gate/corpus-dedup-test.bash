@@ -9,7 +9,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
 export TMPDIR=${TMPDIR:-$here/.tmp/tmp}
 mkdir -p "$TMPDIR"
-T=$here/.tmp/corpus-dedup-test
+T=$TMPDIR/corpus-dedup-test
 rm -rf "$T"; mkdir -p "$T"/{c1,c2,go,java,clj}
 fail=0
 ok() { echo "ok   $*"; }

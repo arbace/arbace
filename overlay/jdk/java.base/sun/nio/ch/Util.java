@@ -1,6 +1,6 @@
 /*
  * Arbace (overlay/jdk, F10 of doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"): the members
- * of jdk26u's sun.nio.ch.Util (baf63fb) that the Go build's channels use: ungrowableSet, jdk26u's;
+ * of jdk26u's sun.nio.ch.Util (baf63fb) that the Go build's channels use: ungrowableSet and subsequence, jdk26u's;
  * the temporary direct buffers (a per-thread cache of native memory in jdk26u) are heap buffers
  * allocated per use, as jrt has no native memory (IOUtil's overlay reads and writes arrays).
  * jdk26u's code: Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception
@@ -40,6 +40,17 @@ public class Util {
      * Releases a temporary buffer to the tail of the cache (nothing to release in jrt).
      */
     static void offerLastTemporaryDirectBuffer(ByteBuffer buf) {
+    }
+
+    // jdk26u's (the asynchronous socket channels' scattering reads and gathering writes, queue task 398)
+    static ByteBuffer[] subsequence(ByteBuffer[] bs, int offset, int length) {
+        if ((offset == 0) && (length == bs.length))
+            return bs;
+        int n = length;
+        ByteBuffer[] bs2 = new ByteBuffer[n];
+        for (int i = 0; i < n; i++)
+            bs2[i] = bs[offset + i];
+        return bs2;
     }
 
     static <E> Set<E> ungrowableSet(final Set<E> s) {

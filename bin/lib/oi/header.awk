@@ -95,10 +95,11 @@ END {
   # main program, its last unit the test's own, libraries "" or "dynlink", then one run (exit_status the own verdict's), the native
   # alternative (native-dynlink, setup-ocamlopt.*) ending it. The run's environment: @dyn=DIR/FILE,... the units in order (bin/oi's
   # oi_dynlink types each .ml into Lambda and writes its .cmo, a plugin oi's Dynlink loads), @dynmain=DIR/UNIT,... the main program's,
-  # @dyncopy=FILE,... the readonly files and subdirectories. Anything else: the class (include dynlink). The light AOT level too (queue
-  # 373: the same units, the main program's translated by o2j, a plugin by its runtime's loader when Dynlink reads it); not the compiled level
+  # @dyncopy=FILE,... the readonly files and subdirectories. Anything else: the class (include dynlink). The AOT levels too (queue 373:
+  # the same units, the main program's translated by o2j; a plugin by the runtime's loader when Dynlink reads it at the light level, ahead
+  # into the program's registry at the compiled level, 373-1)
   dlmode = 0
-  if (aot != 2 && hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
+  if (hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
   # (a plugin test's readonly .ml files are its units, not helper programs)
   if (dlmode) helper = 0
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
@@ -222,9 +223,10 @@ END {
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       # the program's own C stubs (the C API on ci, doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci"): modules that are all C
-      # files of the test's directory, built by ci beside the program (bin/oi's cstubs_nodes, the run's @cstubs=FILE,...); at the AOT
-      # light level (-v aot=1) the class it was; at the compiled level (-v aot=2, OC215 (a)) the C API of its main (test/ocaml/o2j/capi)
-      if (key == "modules" && aot != 1 && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
+      # files of the test's directory, built by ci beside the program (bin/oi's cstubs_nodes, the run's @cstubs=FILE,...); at the
+      # compiled level (-v aot=2, OC215 (a)) the C API of its main (test/ocaml/o2j/capi); at the light level (-v aot=1, queue 413) the
+      # driver's `oi capi`, which the runtime spawns (OI_CAPI_SERVER)
+      if (key == "modules" && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
       # OCAMLRUNPARAM's d (OC193 (a), the user 2026-11-09): oi and the AOT runtime read the domains' limit, so a header that sets d
       # alone (parallel/max_domains1, max_domains2) runs with it in the environment (ocamltest's ocamlrunparam variable, OCAMLRUNPARAM's
       # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT
@@ -251,8 +253,8 @@ END {
       if (lib == "runtime_events") { incs = incs " runtime_events"; continue }
       # the Dynlink library (OC220 (a)'s first part): its units loaded with the program at oi's level (the platform test/ocaml/dynlink's,
       # the main program's units oi's unit table); the AOT levels keep the class until the runtime has the unit table
-      # (queue 355: the light level's too, the runtime's Main/units; not the compiled level, whose library has no dynlink yet)
-      if (lib == "dynlink" && aot != 2) { incs = incs " dynlink"; dlseen = 1; continue }
+      # (queue 355: the light level's too, the runtime's Main/units; queue 373-1: the compiled level's, its library in o2j clib)
+      if (lib == "dynlink") { incs = incs " dynlink"; dlseen = 1; continue }
       if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       cls("include " lib)
     }

@@ -75,6 +75,41 @@
 
 (defonce ^{:doc "Program mode (bin/goi run, §2.7): set by arbace.go.run."} program-mode (atom false))
 
+(def depth-limits
+  "goi's interpreted call depth (S23, GC42 (b); GOI-SPEC.md \"Since v1: the depth limit\"): the REPL's default (the back end's
+  DepthLimit), program mode's (peano.go's 362,881 frames and more: gc's 1 GB stack holds about a million small frames),
+  and ARBACE_GOI_DEPTH's floor and ceiling. The ceiling is Go's: a goroutine's stack is at most 1 GiB (stackalloc's 32-bit
+  sizes, maxstackceiling), and the back end sizes the stack at 1 KiB a frame (go/arbace/goi/frame.ae's FrameStackBytes),
+  so that the depth error, not Go's fatal stack overflow, ends a runaway recursion."
+  {:repl 100000 :program 1000000 :floor 1000 :ceiling 1048576})
+
+(defn depth-limit
+  "The depth limit goi takes for a run (program? true: program mode) given ARBACE_GOI_DEPTH's value env (nil: unset): env's
+  integer within depth-limits' floor and ceiling (clamped), else program mode's default; nil at the REPL without env (the
+  back end's default stays). An env that is not an integer is warned about (warn, a fn of the message) and ignored."
+  ([program? env] (depth-limit program? env (fn [msg] (binding [*out* *err*] (println msg) (flush)))))
+  ([program? env warn]
+   (let [{:keys [floor ceiling program]} depth-limits
+         s (some-> env str/trim)
+         n (when-not (str/blank? s)
+             (if (re-matches #"[+-]?[0-9]{1,18}" s)
+               (Long/parseLong (cond-> s (str/starts-with? s "+") (subs 1)))
+               (do (warn (str "goi: ARBACE_GOI_DEPTH=" env " is not an integer: ignored")) nil)))]
+     (cond
+       (nil? n) (when program? program)
+       (< n floor) (do (warn (str "goi: ARBACE_GOI_DEPTH=" env " below the floor: " floor)) floor)
+       (> n ceiling) (do (warn (str "goi: ARBACE_GOI_DEPTH=" env " above the ceiling (a 1 GiB stack): " ceiling)) ceiling)
+       :else n))))
+
+(defn set-depth-limit!
+  "Sets goi's depth limit for a run (depth-limit of ARBACE_GOI_DEPTH): the back end's SetDepthLimit, which also raises the
+  goroutines' stack limit (debug.SetMaxStack) to hold it. The limit set, or nil: none to set, or an executable whose back end
+  predates SetDepthLimit (its DepthLimit, 100,000, stays)."
+  [program?]
+  (when-let [n (depth-limit program? (System/getenv "ARBACE_GOI_DEPTH"))]
+    (try (op "SetDepthLimit" (int n)) n
+         (catch Throwable _ nil))))
+
 (defonce ^{:doc "gc's -d=converthash=qy (D358-2 (a)): the architecture whose conversions under the flag goi makes, or false: :amd64,
   every float-to-integer conversion the back end's SatFto* node (go/arbace/goi/convert.ae's satFto*); :arm64, a uint32's
   SatA64FtoU32 (arm64's others are native either way); else Fto*'s (Go's own on the executable's architecture).

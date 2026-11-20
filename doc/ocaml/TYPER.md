@@ -881,3 +881,37 @@ native one (`external ( + ) : int64 -> int64 -> int64 = "" "test_int64_add" [@@u
 unboxed int64, int32, nativeint, `F` an unboxed float, `t` an untagged int; the declaration's `[@@unboxed]`/`[@@untagged]` and each
 type's `[@unboxed]`/`[@untagged]`). ocamlc prints `""` there (printlambda's prim_name) and cannot run such a program; no other external
 changes, so the oracle's dumps are untouched.
+
+## 30. As built: T12's compiler output, the declarations' uids (2026-11-19, queue 434, branch `434-oc-compiler-output`)
+
+The 19 programs of `test/ocaml/divergences.edn`'s `:compiler-output` (OT2 (a): by design at eval and AOT, "judged with the typer
+later (T12) as a check of its own") compare a compiler's output with their `.reference`, not a run. Each one's output, and what
+the native front end can print:
+
+| tests | output (ocamltest action) | native front end |
+|---|---|---|
+| `uids/intf_uids_test` | `ocamlobjinfo -quiet -decls intf_uids.cmti intf_uids.cmt` | printed: passes |
+| `shape-index/` 12 | `ocamlobjinfo -quiet -index -decls` (`-uid-deps` too: `index_aliases`, `index_functor`, `index_local_opaque_defs`) of `-bin-annot -bin-annot-occurrences`'s .cmt | `-decls` printed, equal in 10 (`index` and `index_constrs_records`: the typer refuses `Pwith_modtype` and inline records in type extensions; `index_objects`: classes outside the walk); `-index` not (Cmt_format.index_occurrences over a Typedtree with environments, Env.shape_of_path, Shape_reduce.local_reduce_for_uid, Shape's printers) |
+| `uid-deps/link_intf_impl` | `ocamlobjinfo -quiet -uid-deps` | not printed (Includemod's Uid.Deps from the inclusion checks); the uids' numbering agrees with the test's comments (0-27, `[intf]` 0-11) |
+| `no-alias-deps/aliases` | `ocamlobjinfo -null-crc aliases.cmo` (cu_imports, required globals) and the compiler's warnings 49 | not printed: a .cmo's unit infos and Persistent_env's imports (Consistbl.extract's reversed sorted names, a crc only for an interface read) |
+| `syntactic-arity/` 3 | ocamlopt programs: closures' raw arity field, `Gc.minor_words` | not compiler output: native code's representation (by design: oi is not ocamlopt) |
+| `tool-dumpobj/test` | `dumpobj` of the bytecode | not printed: no bytecode emitter |
+
+`arbace.repr.ocaml.typer.objinfo` numbers a unit's uids as the typer allocates them (Uid.mk), from its Parsetree: a type group's
+types, then each declaration's labels (an inline record's before its constructor) and constructors, then the five inline-record
+types Datarepr makes as Typedecl stores the group; a value binding's pattern variables before its expression, every case's pattern
+before the first guard and body, a function's parameters in order, a locally abstract type one (Ctype.new_local_type); a module's
+body and a constraint's signature before the module, a functor's named parameter after its type, a functor application's
+arguments before the functor; a module's components forced at the first qualified access or open, and an inclusion check's or an
+include's signature stored, each one more uid per inline record. The declarations are Cmt_format.index_declarations' (every value
+binding, local ones too, named by its first variable; types, labels, constructors, extension constructors, modules, module types,
+module substitutions; not functor parameters, other pattern variables, with-constraint module types or the hidden uids), printed
+sorted as objinfo prints them (Format's `@[<hov 2>%a:@ %a@]@;` at margin 78). Classes, objects and recursive modules are refused.
+
+`bin/oi objinfo-check` (`-m arbace.repr.ocaml.typer objinfo-check`): each program of the class whose header's ocamlobjinfo sections
+the front end prints is typed by the native typer (the units `all_modules` compiles before it typed first, their signatures as
+interfaces on the include path) and judged by its `.reference`; the others name the section they need, their printed sections
+still compared ("decls equal"); every equal output is judged against another test's reference, which must fail (the negative
+control). 2026-11-19: 1 pass (`uids/intf_uids_test`), 0 fail, 18 class, 10 decls sections equal, the 10 controls failing.
+The rows stay in `:compiler-output` until the main host decides how a pass of this check reaches `check-oi.edn` and `check-aot.edn`
+(queue 434's DECISIONs).

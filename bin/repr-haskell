@@ -238,6 +238,17 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 work=$root/.tmp/hsdump
 helper=${REPR_HASKELL_HELPER:-$work/hsdump}
 rh=$root/.tmp/repr-haskell
+# ndumps_locked CMD...: CMD under the native reads' lock (queue 425). A native corpus read rewrites directories every package
+# shares: native_dump_corpus starts with rm -rf of .tmp/repr-haskell/ndumps/CORPUS (all packages' dumps, not only the selected
+# ones), read_files of nforms/CORPUS, and native_place_inputs copies the pack's inputs into the extracted tree. Two at once
+# (lib-check's reads of two packages, REPR_HASKELL_ONLY_PACKAGES=P each) lost the first one's dumps (n-hs-libs, ceabce537:
+# transformers 12 of 24). One read at a time, the lock .tmp/repr-haskell/ndumps.lock; a caller that holds it (lib-check,
+# around its read and its copy) sets REPR_HASKELL_NDUMPS_HELD=1, as it does for CMD's children
+ndumps_locked() {
+  if [ -n "${REPR_HASKELL_NDUMPS_HELD:-}" ]; then "$@"; return; fi
+  mkdir -p "$rh"
+  ( flock 6; export REPR_HASKELL_NDUMPS_HELD=1; "$@" ) 6> "$rh/ndumps.lock"
+}
 jobs=${REPR_HASKELL_JOBS:-$(nproc)}
 [ "$jobs" -gt 32 ] && jobs=32
 pin=$(cat "$root/tools/hsdump/GHC_VERSION")
@@ -1853,11 +1864,15 @@ case $cmd in
       shift; c=${1:-ghc-9.14.1}
       # the corpus's dumps are the records' unless REPR_HASKELL_LIVE=1 (the helper, GHC)
       if [ "$reader" = native ]; then
-        corpus_fetch "$c"; native_env; native_place_inputs "$c"
-        native_dump_corpus "$c" "$rh/ndumps/$c${full:+-full}" "$([ -n "$full" ] && echo full || echo lines)"
-        out=$rh/nforms/$c${full:+-full}
-        rm -rf "$out"
-        read_files --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$rh/ndumps/$c${full:+-full}"
+        corpus_fetch "$c"
+        native_read_corpus() {
+          native_env; native_place_inputs "$c"
+          native_dump_corpus "$c" "$rh/ndumps/$c${full:+-full}" "$([ -n "$full" ] && echo full || echo lines)"
+          out=$rh/nforms/$c${full:+-full}
+          rm -rf "$out"
+          read_files --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$rh/ndumps/$c${full:+-full}"
+        }
+        ndumps_locked native_read_corpus
       else
       if [ -n "$live" ]; then ghc_check; build; corpus_fetch "$c"; fi
       dump_corpus "$c" "$rh/dumps/$c${full:+-full}" $full
@@ -1869,7 +1884,8 @@ case $cmd in
       read_files --jobs "$jobs" "$@"
     fi ;;
   print) arbace_tool -m arbace.repr.haskell print --jobs "$jobs" "$@" ;;
-  roundtrip) roundtrip "$@" ;;
+  roundtrip) # the native reader's levels rewrite the shared ndumps and nforms (ndumps_locked)
+             if [ "${REPR_HASKELL_READER:-native}" = native ]; then ndumps_locked roundtrip "$@"; else roundtrip "$@"; fi ;;
   native-check) ghc_check; build
                 if [ "${1:-}" = --errors ]; then shift; errors_check "$@"; else native_check "$@"; fi ;;
   tables) ghc_check; tables "$@" ;;

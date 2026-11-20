@@ -70,7 +70,11 @@ code. Three kinds of things live here:
   (`GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs`, `GHC/Parser/Types.hs`), the same day; `fileargs.ae` the driver's
   header phase (`GHC/Parser/Header.hs`, `GHC/Driver/{CmdLine,Session}.hs`, `GHC/Driver/Pipeline/Execute.hs`'s
   getFileArgs), with `flags.ae`, the names and kinds of `flagsDynamic` as the helper's `flags` verb prints them
-  (2026-11-05); `unlit.ae` ports the tarball's `utils/unlit/unlit.c`
+  (2026-11-05); `cmm.ae` (queue 332, 2026-11-17, doc/haskell/HASKELL-EVAL-SURVEY.md, "HES67's design") ports Cmm's reader,
+  `compiler/GHC/Cmm/Lexer.x.source` and `compiler/GHC/Cmm/Parser.y.source`'s grammar and actions by hand (recursive descent),
+  with `GHC/Cmm/MachOp.hs`'s machOpResultType, over repr/c's preprocessor and hsi's `Cmm.h` (`test/haskell/eval/cmm/`, GHC's
+  `rts/include/Cmm.h`, `MachDeps.h` and `rts/storage/ClosureTypes.h` definitions for x86_64), the files carrying GHC's notice;
+  `unlit.ae` ports the tarball's `utils/unlit/unlit.c`
   (2026-11-04); `cpp.ae`, GCC's traditional preprocessor as GHC runs it, is a clean-room implementation of
   Arbace's own (2026-11-04): written from the documented behaviour of `-traditional` and judged against Alpine's
   gcc 15.2.0 `cpp -traditional` as a black box (its output and line markers on probe inputs), no GCC code read
@@ -303,7 +307,9 @@ code. Three kinds of things live here:
   TYPER.md §22) the modular explicits' Tfunctor of types.mli, ctype.ml, typetexp.ml, typecore.ml, typedtree.ml and oprint.ml, by hand, the
   files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own, and so is
   `typer/cmi.ae` (2026-11-07, OC184 (a): a unit's typed signature written as forms and read back, after the role of
-  typing/cmi_format.ml's read_cmi, not its code).
+  typing/cmi_format.ml's read_cmi, not its code); `typer/objinfo.ae` (2026-11-19, queue 434, TYPER.md §30) ports the order of
+  Uid.mk in typing/typedecl.ml, typecore.ml, typemod.ml and datarepr.ml, file_formats/cmt_format.ml's index_declarations with
+  typing/tast_iterator.ml's item_declaration, and tools/objinfo.ml's -decls printing, from the same tarball and notice.
 - `repr/rust.ae` and `repr/rust/` (repr/rust, Rust's bridge, `arbace.repr.rust` and `arbace.repr.rust.*`;
   doc/rust/SPEC.md; evaluated from the checkout, not embedded): its native reader's lexer and parser,
   `repr/rust/lex.ae`, `parse.ae` and `parse/{expr,pat,item}.ae`, with the meta items, literals and

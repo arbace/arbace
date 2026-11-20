@@ -1,0 +1,100 @@
+(ns rust.front.pack-compare-test
+  "Queue 443 (RUST-90 S4, C2; doc/rust/FRONTEND-SURVEY.md, \"As built: S4's alloc and std bodies\"): build-run's pack-compare, the
+  judge of an instance-judged library body (alloc's, std's) against the record's optimized body at -O0. Pure cases: the record's
+  facts beside the forms ignored, RemoveStorageMarkers, SimplifyCfg's goto chain, CopyProp's copy of an argument (a move made a
+  copy, as rustc's optimized MIR writes it), SimplifyLocals' unused local and renumbering, each named in :equal-o0; the negative
+  cases (an operand, a local's type, a block's cleanup flag, a borrowed temporary not propagated) differ. `bin/rust-front
+  pack-compare-test`."
+  (:require [arbace.rust.front.build-run :as br]))
+
+(def i8 '(ty "i8" (int "i8")))
+(def u8 '(ty "u8" (uint "u8")))
+(def callee (list 'const "std::intrinsics::black_box::<i8>" '(ty "fn(i8) -> i8 {std::intrinsics::black_box::<i8>}" (fndef "std::intrinsics::black_box" [(ty "i8" (int "i8"))])) '(zst)))
+
+;; rustc's -O0 optimized black_box::<i8>, as the pack rust-front-rsi records it (its symbols, callee and location beside the forms)
+(def rec {:args 1 :locals [{:mut true :scope 0 :ty i8} {:mut false :scope 0 :ty i8}] :debug [{:name "dummy" :scope 0 :value '(place 1)}]
+          :blocks [{:cleanup false :stmts [] :after-dbg []
+                    :term (list 'call (concat callee [:fn-symbol "_RINvNtCs_4core10intrinsics9black_boxaE"]) '[(copy (place 1))] '(place 0) 1 '(unreachable)
+                                '(callee {:kind "intrinsic" :symbol ""}) '(loc "library/core/src/hint.rs" 491 5) 0)}
+                   {:cleanup false :stmts [] :after-dbg [] :term '(return)}]})
+
+;; our runtime MIR of the same instance (the built temporary, its storage markers)
+(def ours {:args 1 :locals [{:ty i8} {:ty i8} {:ty i8}] :debug [{:name "dummy" :value '(place 1)}]
+           :blocks [{:cleanup false :stmts ['(storage-live 2) '(assign (place 2) (use (move (place 1))))]
+                     :term (list 'call callee '[(move (place 2))] '(place 0) 1 '(unreachable))}
+                    {:cleanup false :stmts ['(storage-dead 2)] :term '(return)}]})
+
+(defn -main [& _]
+  (let [bad (atom 0)
+        check (fn [what got want] (let [ok (= want (if (= :differs want) (first got) got))]
+                                    (println (if ok "ok  " "FAIL") what (pr-str got)) (when-not ok (swap! bad inc))))]
+    (check "the record against itself" (br/pack-compare rec rec) [:equal])
+    (check "the record's facts beside the forms ignored (its symbols, callee, location)"
+           (br/pack-compare (update rec :blocks (fn [bs] (assoc-in bs [0 :term] (list 'call callee '[(copy (place 1))] '(place 0) 1 '(unreachable))))) rec) [:equal])
+    (check "storage markers alone" (br/pack-compare (update-in rec [:blocks 1 :stmts] conj '(storage-dead 1)) rec) [:equal-but-storage])
+    (check "our built instance: CopyProp's copy, SimplifyLocals, storage" (br/pack-compare ours rec) [:equal-o0 "copy-prop,locals,storage"])
+    (check "a goto chain and a dead local too"
+           (br/pack-compare {:args 1 :locals [{:ty i8} {:ty i8} {:ty i8} {:ty i8}] :debug [{:name "dummy" :value '(place 1)}]
+                             :blocks [{:cleanup false :stmts ['(storage-live 2) '(assign (place 2) (use (move (place 1))))] :term '(goto 1)}
+                                      {:cleanup false :stmts ['(assign (place 3) (use (copy (place 2))))] :term (list 'call callee '[(move (place 2))] '(place 0) 2 '(unreachable))}
+                                      {:cleanup false :stmts ['(storage-dead 2)] :term '(return)}]}
+                            rec)
+           [:equal-o0 "cfg,copy-prop,locals,storage"])
+    (let [rt '(ty "&i8" (ref (ty "i8" (int "i8")) false))
+          callr (list 'const "f" '(ty "fn(&i8) -> i8 {f}" (fndef "f" [])) '(zst))
+          r {:args 1 :locals [{:ty i8} {:ty rt}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call callr '[(copy (place 1))] '(place 0) 1 '(continue))} {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 1 :locals [{:ty i8} {:ty rt} {:ty rt}] :debug []
+             :blocks [{:cleanup false :stmts ['(storage-live 2) '(assign (place 2) (ref :shared (place 1 (deref))))] :term (list 'call callr '[(move (place 2))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts ['(storage-dead 2)] :term '(return)}]}]
+      (check "a reborrow: InstSimplify's &(*_1), then CopyProp" (br/pack-compare o r) [:equal-o0 "copy-prop,inst-simplify,locals,storage"])
+      (check "negative: a reborrow of another type is not simplified"
+             (br/pack-compare (assoc-in o [:locals 2 :ty] '(ty "&mut i8" (ref (ty "i8" (int "i8")) true))) r) :differs))
+    (let [unit '(ty "()" (tuple))
+          callu (list 'const "g" '(ty "fn() {g}" (fndef "g" [])) '(zst))
+          r {:args 0 :locals [{:ty unit}] :debug [] :blocks [{:cleanup false :stmts [] :term (list 'call callu [] '(place 1) 1 '(continue))} {:cleanup false :stmts [] :term '(return)}]}
+          o (assoc-in r [:blocks 1 :stmts] ['(assign (place 0) (use (const "const ()" (ty "()" (tuple)) (zst))))])]
+      (check "RemoveZsts: `_0 = const ()` dropped" (br/pack-compare o r) [:equal-o0 "zsts"]))
+    (let [callr (list 'const "f" '(ty "fn() -> i8 {f}" (fndef "f" [])) '(zst))
+          r {:args 0 :locals [{:ty i8}] :debug [] :blocks [{:cleanup false :stmts [] :term (list 'call callr [] '(place 0) 1 '(continue))} {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 0 :locals [{:ty i8} {:ty i8}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call callr [] '(place 1) 1 '(continue))} {:cleanup false :stmts ['(assign (place 0) (use (copy (place 1))))] :term '(return)}]}]
+      (check "RenameReturnPlace: `_0 = copy _1` after the call, _1 renamed _0" (br/pack-compare o r) [:equal-o0 "locals,nrvo"])
+      (check "negative: the return place from a local assigned twice is not renamed"
+             (br/pack-compare (update-in o [:blocks 1 :stmts] #(into ['(assign (place 1) (use (copy (place 1))))] %)) r) :differs))
+    ;; queue 448: SizedTypeProperties' constants evaluated at the instance (sized-const-eval, a stub layout), the record's LAYOUT
+    ;; allocation compared by its bytes
+    (let [usz '(ty "usize" (uint "usize"))
+          lay '(ty "std::alloc::Layout" (adt "std::alloc::Layout" "DefId(2:1 ~ core[0]::alloc::layout::Layout)" []))
+          s24 [:adt "alloc::string::String" []]
+          uc (fn [nm ty] (list 'const (str "const <std::string::String as std::mem::SizedTypeProperties>::" nm) ty
+                               (with-meta (list 'unevaluated (str "core::mem::SizedTypeProperties::" nm) [] nil) {:nc [(str "core::mem::SizedTypeProperties::" nm) [s24]]})))
+          body (fn [c] {:args 0 :locals [{:ty usz}] :debug [] :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'use c))] :term '(return)}]})
+          layout (fn [t] (if (= t [:adt "core::alloc::layout::Layout" []]) {:size 16 :align 8 :fields [8 0]} {:size 24 :align 8 :fields [0 8 16]}))
+          ev (fn [b] (binding [br/*type-layout* layout] (#'br/sized-const-eval b)))
+          rec-max (body (list 'const "const <std::string::String as std::mem::SizedTypeProperties>::MAX_SLICE_LEN" usz '(scalar 384307168202282325 8)))]
+      (check "SizedTypeProperties::MAX_SLICE_LEN at String: isize::MAX / 24" (br/pack-compare (ev (body (uc "MAX_SLICE_LEN" usz))) rec-max) [:equal])
+      (check "negative: MAX_SLICE_LEN left unevaluated without a layout" (br/pack-compare (body (uc "MAX_SLICE_LEN" usz)) rec-max) :differs)
+      (check "SizedTypeProperties::ALIGNMENT at String: the alignment's scalar"
+             (br/pack-compare (ev (body (uc "ALIGNMENT" usz))) (body (list 'const "const <std::string::String as std::mem::SizedTypeProperties>::ALIGNMENT" usz '(scalar 8 8)))) [:equal])
+      (check "negative: SIZE is not MAX_SLICE_LEN" (br/pack-compare (ev (body (uc "SIZE" usz))) rec-max) :differs)
+      (let [rec-l (assoc (assoc-in (body (list 'const "const <std::string::String as std::mem::SizedTypeProperties>::LAYOUT" lay '(indirect alloc605 0))) [:locals 0 :ty] lay)
+                         :alloc-data [["alloc605" {:kind :memory :align 8 :mutable false :bytes "08000000000000001800000000000000" :init "1111111111111111" :relocs []}]])
+            ours-l (assoc-in (ev (body (uc "LAYOUT" lay))) [:locals 0 :ty] lay)]
+        (check "SizedTypeProperties::LAYOUT at String: its bytes (align, then size) against the record's allocation" (br/pack-compare ours-l rec-l) [:equal])
+        (check "negative: another type's LAYOUT" (br/pack-compare ours-l (assoc-in rec-l [:alloc-data 0 1 :bytes] "08000000000000002000000000000000")) :differs))
+      (let [isz '(ty "isize" (int "isize"))
+            lc (fn [p id] (list 'const (str "const " p) isz (with-meta (list 'unevaluated id [] nil) {:nc [p []]})))
+            rec-u (body (list 'const "const core::cell::UNUSED" isz '(scalar 0 8)))]
+        (check "core::cell::UNUSED by its local def id: 0" (br/pack-compare (ev (body (lc "core::cell::UNUSED" "85"))) rec-u) [:equal])
+        (check "negative: another private constant stays unevaluated" (br/pack-compare (ev (body (lc "core::cell::OTHER" "86"))) (body (lc "core::cell::OTHER" "86"))) [:equal])
+        (check "negative: ... and differs from the record's value" (br/pack-compare (ev (body (lc "core::cell::OTHER" "86"))) (body (list 'const "const core::cell::OTHER" isz '(scalar 0 8)))) :differs)))
+    ;; the negative cases: what -O0's passes do not explain
+    (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
+    (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)
+    (check "negative: a block's cleanup flag" (br/pack-compare (assoc-in ours [:blocks 1 :cleanup] true) rec) :differs)
+    (check "negative: a borrowed temporary is not propagated"
+           (br/pack-compare (update-in ours [:blocks 0 :stmts] conj '(assign (place 0) (ref :shared (place 2)))) rec) :differs)
+    (check "negative: the unwind action" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(move (place 2))] '(place 0) 1 '(continue))) rec) :differs)
+    (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
+    (System/exit (if (zero? @bad) 0 1))))

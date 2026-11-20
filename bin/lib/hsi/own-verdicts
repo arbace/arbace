@@ -14,6 +14,11 @@
 # (test/haskell/eval/synthetic) by their reviewed golden files, NAME.stdout, NAME.stderr (none: empty) and NAME.exit (none: 0)
 # beside each program (the synthetic corpus's written by its generator, test/haskell/eval/gen.ae, from its own model of each
 # line), listed when GHC's recorded run is the same (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: queue 325g").
+# Queue 435: the testsuite's and nofib's programs that ship no expected output GHC's run confirms, by their reviewed golden files
+# (test/haskell/eval/golden/ID.stdout, ID.stderr none: empty, ID.exit none: 0; reviewed in golden/AREA.edn, bin/hsi golden),
+# listed as golden:NAME.stdout and golden:NAME.stderr; a testsuite test's shipped files as the driver takes them
+# (testlib.py's find_expected_file: the x86_64-unknown-linux and word size 64 variants first). Queue 444: a program GHC did not
+# build at record-ref (:no-build) by its golden file alone, its review marked :no-run (no run to agree with).
 #   --record   writes the list (by hand, beside a new record-ref)
 #   --check    the list against a fresh computation (exit 1 on a difference); default: prints the counts
 # HF10-P35 (a): beside it, test/haskell/own-verdicts-pending.tsv (the same columns): the run tests of eval-corpora.edn's
@@ -42,6 +47,11 @@ ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.
   awk -F'\t' '{print $1 "\t" $2 "\t" $7 "\t" $8 "\t" $5}' > "$work/testsuite.tsv"
 empty=$(printf '' | sha256sum | cut -c1-64)
 sha() { if [ -f "$1" ]; then sha256sum < "$1" | cut -c1-64; else echo "$empty"; fi; }
+# expected_file DIR BASE: the testsuite driver's choice among BASE's platform variants (testlib.py's find_expected_file, the
+# record's host x86_64-unknown-linux, word size 64), BASE when none exists
+expected_file() {
+  local v; for v in -ws-64-x86_64-unknown-linux -x86_64-unknown-linux -ws-64-linux -linux -ws-64 ""; do
+    [ -f "$1/$2$v" ] && { echo "$2$v"; return; }; done; echo "$2"; }
 : > "$work/new.tsv"
 n=0 own=0
 while IFS= read -r line; do
@@ -49,14 +59,36 @@ while IFS= read -r line; do
   n=$((n + 1))
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$line")
   rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$line"); rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$line")
+  gd=$root/test/haskell/eval/golden
+  # queue 444: a program GHC did not build at record-ref (:no-build, no run to agree with) is listed by its reviewed golden
+  # file alone (its review says so, :no-run; bin/hsi golden checks it): the test's own verdict, as the pending list's
+  if [ "$rst" = :no-build ] && [ -f "$gd/$id.stdout" ]; then
+    d=$gd/$(dirname "$id"); name=$(basename "$id"); exit=0; [ ! -f "$d/$name.exit" ] || exit=$(cat "$d/$name.exit")
+    printf '%s\t%s\t%s\t%s\n' "$id" "$exit" "golden:$name.stdout" "$([ -f "$d/$name.stderr" ] && echo "golden:$name.stderr" || echo -)" >> "$work/new.tsv"
+    own=$((own + 1)); continue
+  fi
   [ -n "$rso" ] || continue
+  if [ -f "$gd/$id.stdout" ]; then
+    # queue 435: a testsuite or nofib program with a reviewed golden file (test/haskell/eval/golden/ID.stdout, ID.stderr none:
+    # empty, ID.exit none: 0; each line reviewed in test/haskell/eval/golden/AREA.edn, bin/hsi golden), listed when it is GHC's
+    # recorded run; one that is not is a review left open: reported, and --check fails
+    d=$gd/$(dirname "$id"); name=$(basename "$id"); so=$name.stdout; se=$name.stderr
+    exit=0; [ ! -f "$d/$name.exit" ] || exit=$(cat "$d/$name.exit")
+    if ! { [ "$rst" = "$exit" ] && [ "$(sha "$d/$so")" = "$rso" ] && [ "$(sha "$d/$se")" = "$rse" ]; }; then
+      echo "$id" >> "$work/golden-differs.txt"; continue
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$id" "$exit" "golden:$so" "$([ -f "$d/$se" ] && echo "golden:$se" || echo -)" >> "$work/new.tsv"
+    own=$((own + 1)); continue
+  fi
   case $id in
     testsuite/*)
       IFS=$'\t' read -r _ dir exit name _ <<< "$(awk -F'\t' -v i="$id" '$1 == i' "$work/testsuite.tsv")"
       [ -n "${dir:-}" ] || continue
       # (queue 325: a test that ships no NAME.stdout expects an empty one, as the testsuite driver's compare_outputs reads a
       # missing expected file and as the pending list below already takes it; the record must still agree)
-      d=$tests/$dir; so=$name.stdout; se=$name.stderr ;;
+      # (queue 435: the expected file the driver takes, testlib.py's find_expected_file: NAME.stdout-ws-64-x86_64-unknown-linux,
+      # -x86_64-unknown-linux, -ws-64-linux, -linux, -ws-64, then NAME.stdout, the first that exists; the record's host's)
+      d=$tests/$dir; so=$(expected_file "$d" "$name.stdout"); se=$(expected_file "$d" "$name.stderr") ;;
     nofib/*)
       d=$nofib/${id#nofib/}; name=$(basename "$d"); exit=0; so=""
       for f in "$name.faststdout" "$name.stdout"; do [ -f "$d/$f" ] && { so=$f; break; }; done
@@ -127,11 +159,12 @@ twhdr() {
 hdr() {
   echo "# hsi's programs judged by their own verdict (bin/hsi own-verdicts; the user's decision of 2026-11-07): ID, the expected"
   echo "# status, the shipped expected stdout and stderr (relative to the test's directory; - an empty one); made from the trees and"
-  echo "# test/haskell/ref-ghc914.edn, each listed one's shipped expectations equal to GHC 9.14.1's recorded run"
+  echo "# test/haskell/ref-ghc914.edn, each listed one's shipped expectations equal to GHC 9.14.1's recorded run (queue 444: a program GHC"
+  echo "# did not build, :no-build, by its reviewed golden file alone, its review marked :no-run)"
 }
 # queue 325g: the golden files GHC's recorded run does not confirm
 if [ -s "$work/golden-differs.txt" ]; then
-  echo "own-verdicts: $(wc -l < "$work/golden-differs.txt") golden files of the samples or the synthetic corpus are not GHC's recorded run (a review left open): $(paste -sd' ' "$work/golden-differs.txt")" >&2
+  echo "own-verdicts: $(wc -l < "$work/golden-differs.txt") golden files (the samples, the synthetic corpus, test/haskell/eval/golden) are not GHC's recorded run (a review left open): $(paste -sd' ' "$work/golden-differs.txt")" >&2
   [ "$mode" != --check ] || exit 1
 fi
 case $mode in

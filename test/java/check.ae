@@ -830,10 +830,12 @@
 
 (defn golden-path
   "JCV2: a jls test's golden file, its expected stdout beside its program (test/java/jls/NAME.out), relative to
-  the checkout."
+  the checkout; JCS361 (a): a jtreg test's, test/java/golden/ID.out (reviewed in test/java/golden/AREA.edn)."
   [t]
-  (let [n (last (str/split (str (:test t)) #"/"))]
-    (str (:dir t) "/" (str/replace n #"\.java$" "") ".out")))
+  (if (= :jls (:corpus t))
+    (let [n (last (str/split (str (:test t)) #"/"))]
+      (str (:dir t) "/" (str/replace n #"\.java$" "") ".out"))
+    (str "test/java/golden/" (:id t) ".out")))
 
 (defn- controls-judged!
   "GTS81 (a): the controls' results of RESULTS at the level LV (rows [id lv result reason]) against
@@ -1742,6 +1744,13 @@
   [^String text]
   (str/replace text literal-or-comment " "))
 
+(def ^:private golden-left
+  "JCS361 (a): the :stdout tests left on the JDK's recorded stdout, each with the reason its output cannot be reviewed
+  from its source (test/java/golden/left.tsv: ID<TAB>reason), as {ID reason}."
+  (memoize (fn [] (into {} (for [l (lines "test/java/golden/left.tsv") :when (not (str/starts-with? l "#"))
+                                 :let [[id why] (str/split l #"\t" 2)]]
+                             [id why])))))
+
 (def ^:private self-check
   "What lets a main action fail by itself: a throw statement, System.exit, Runtime's exit or halt."
   #"\bthrow\b|\bSystem\s*\.\s*exit\s*\(|\bRuntime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*(?:exit|halt)\s*\(")
@@ -1777,7 +1786,17 @@
         ;; throws nothing and does not crash (hotspot's compiler tests, most), jtreg's status again;
         ;; the JDK's stdout would only say "nothing"
         (every? #(= 0 (:out-len %)) (:runs t)) [:status "no output: the runtime's own exceptions and crashes"]
-        :else [:stdout "no throw, System.exit or Runtime.exit/halt in the source set, and it prints"]))))
+        ;; D432-1 (a), queue 451: the JDK's two runs printed different stdout at every action, masked or not (no
+        ;; :det, no :det-masked): no fixed output to review, the record's judgment was the status alone already
+        (every? #(not (or (:det %) (:det-masked %))) (:runs t))
+        [:status "no fixed output (the JDK's two runs disagree at every action): jtreg's status (D432-1 (a))"]
+        ;; JCS361 (a): a test that prints, with a golden file written from its source and reviewed line by line
+        ;; (test/java/golden/AREA.edn), its digest the JDK's recorded stdout's: judged by it (every action's stdout)
+        (.isFile (io/file (golden-path t)))
+        [:golden (str "its golden file " (golden-path t) ", reviewed from its source (JCS361 (a))")]
+        :else [:stdout (if-let [why (get (golden-left) (:id t))]
+                         (str "no throw, System.exit or Runtime.exit/halt in the source set, and it prints; no golden file: " why " (JCS361 (a))")
+                         "no throw, System.exit or Runtime.exit/halt in the source set, and it prints")]))))
 
 (defn verdicts
   "bin/java-check verdicts: every test REF passes on the JDK classified by verdict-of, written to OUT
@@ -1791,7 +1810,8 @@
                                 ";; its source set can fail by itself: the status judges it, the JDK's stdout is the oracle tier's), :stdout"
                                 ";; (nothing in it but a crash can fail it, or Arbace's own jls corpus: the JDK's recorded stdout judges it, as"
                                 ";; before), :golden (a golden-diagnostics test: its @compile modes and shipped golden files; since JCV2 a jls"
-                                ";; program with its golden file test/java/jls/NAME.out, reviewed in test/java/jls/golden.edn). Written by"
+                                ";; program with its golden file test/java/jls/NAME.out, reviewed in test/java/jls/golden.edn; since JCS361 (a)"
+                                ";; a jtreg test with its golden file test/java/golden/ID.out, reviewed in test/java/golden/AREA.edn). Written by"
                                 ";; bin/java-check verdicts (java.check/verdicts, from the sources at the platform's pin; --verify compares)."
                                 ";; Read with the Clojure reader."
                                 "["]
@@ -1830,6 +1850,113 @@
         bs (.digest md (java.nio.file.Files/readAllBytes (.toPath (io/file f))))]
     (subs (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bs)) 0 16)))
 
+(def ^:private jtreg-bases #{:src :jls :api :jdk})
+
+(defn- jtreg-review-problems
+  "JCS361 (a): a jtreg test's golden file TEXT against its review ROWS: each row [line text basis why] in order,
+  line a line number and text that line, or line [A B] and text a regular expression every line A to B matches
+  (generated output, its generator named in why); the rows cover every line once; the text ends with a newline
+  unless NO-NEWLINE (the review's :no-newline true); basis a set of :src (the test's own
+  code fixes it), :jls, :api, :jdk; a why. The problems as strings, ID first."
+  [id text rows & [no-newline?]]
+  (let [ls (let [v (str/split text #"\n" -1)] (if (= "" (peek v)) (pop v) v))
+        bad (atom [])
+        bad! #(swap! bad conj (str id " " %))]
+    ;; a test whose last print has no line separator (printf("Done")): :no-newline true in its review
+    (when (not= (not no-newline?) (str/ends-with? text "\n"))
+      (bad! (if no-newline? "ends with a newline (its review says :no-newline)" "does not end with a newline")))
+    (loop [rows rows next 1]
+      (if-let [[k lt basis why] (first rows)]
+        (let [[a b] (if (vector? k) k [k k])]
+          (cond
+            (not= a next) (bad! (str "the review's row " (pr-str k) ", the next line " next))
+            (or (> b (count ls)) (< b a)) (bad! (str "the review's row " (pr-str k) ", the file's " (count ls) " lines"))
+            (and (= a b) (not (vector? k)) (not= (nth ls (dec a)) lt))
+            (bad! (str "line " a ": the review's text " (pr-str lt) ", the file's " (pr-str (nth ls (dec a)))))
+            (and (vector? k) (some #(not (re-matches (re-pattern lt) %)) (subvec (vec ls) (dec a) b)))
+            (bad! (str "lines " a "-" b ": not every line matches " (pr-str lt)))
+            (or (not (set? basis)) (empty? basis) (seq (remove jtreg-bases basis)))
+            (bad! (str "row " (pr-str k) ": basis " (pr-str basis) " (a set of :src :jls :api :jdk)"))
+            (str/blank? why) (bad! (str "row " (pr-str k) ": no why")))
+          (recur (rest rows) (inc b)))
+        (when (not= next (inc (count ls))) (bad! (str (count ls) " lines, " (dec next) " reviewed")))))
+    @bad))
+
+(defn- golden-jtreg
+  "JCS361 (a): the jtreg tests' golden files (test/java/golden/ID.out) against their review (the directory DIR's
+  .edn files, one per area, each {ID {:test PATH :lines [[line text basis why] ...]}}): every golden file reviewed once,
+  every review a golden file of a test REF passes with its :test, no jls test. ORACLE: each action's recorded stdout
+  digest and length the golden file's. CONTROL: each golden file with one byte changed (its middle byte) must fail
+  the review and leave the recorded digest. Queue 451 (D451-1): a review with :masked true has a golden file with
+  identity hash codes as @HASH (Object.toString's, as mask_hashes writes them; judge_golden masks stdout before it
+  compares): it holds @HASH, a file without :masked none, and ORACLE takes each action's masked digest (:out-masked, the
+  JDK's two runs agreeing on it) and its length less 2 to 4 bytes an @HASH (the 6 to 8 hex digits it stands for); its
+  CONTROL leaves the masked digest too. Problems into BAD!, the counts printed."
+  [ref dir oracle? control? bad!]
+  (let [revs (sort (for [^File f (or (.listFiles (io/file dir)) []) :when (str/ends-with? (.getName f) ".edn")] (.getPath f)))
+        rv (reduce (fn [m f]
+                     (let [x (read-edn f)]
+                       (doseq [id (keys x) :when (contains? m id)] (bad! (str id ": reviewed twice (" f ")")))
+                       (merge m x)))
+                   {} revs)
+        review (str dir "/*.edn")
+        by-id (into {} (for [t (ref-tests ref) :when (= :pass (:jdk t)) :when (not= :jls (:corpus t))] [(:id t) t]))
+        files (sort (for [^File f (or (.listFiles (io/file dir)) [])
+                          :when (str/ends-with? (.getName f) ".out")]
+                      (str/replace (.getName f) #"\.out$" "")))
+        bases (atom [])
+        controls (atom 0)
+        masked (atom 0)]
+    (doseq [id files
+            :let [t (by-id id) g (str "test/java/golden/" id ".out") e (get rv id)]]
+      (cond
+        (nil? t) (bad! (str g ": no jtreg test " id " the JDK passes"))
+        (nil? e) (bad! (str g ": not reviewed in " review))
+        (not= (:test t) (:test e)) (bad! (str id ": the review's test " (:test e) ", the reference's " (:test t)))
+        :else
+        (let [text (slurp g)]
+          (doseq [x (jtreg-review-problems id text (:lines e) (:no-newline e))] (bad! x))
+          (doseq [[_ _ basis] (:lines e)] (swap! bases conj basis))
+          ;; D451-1: identity hash codes as @HASH exactly when the review says :masked
+          (when (not= (boolean (:masked e)) (str/includes? text "@HASH"))
+            (bad! (str id (if (:masked e) ": reviewed :masked, no @HASH in its golden file" ": @HASH in its golden file, its review not :masked"))))
+          (when (:masked e) (swap! masked inc))
+          (when oracle?
+            (let [d (sha16 g) len (.length (io/file g))
+                  nh (count (re-seq #"@HASH" text))]
+              (doseq [[i r] (map-indexed vector (:runs t))]
+                (if (if (:masked e)
+                      (and (:det-masked r) (= d (:out-masked r)) (number? (:out-len r))
+                           (<= (+ len (* 2 nh)) (:out-len r) (+ len (* 4 nh))))
+                      (and (= d (:out r)) (= len (:out-len r))))
+                  (println (str "   " id " action " i ": the JDK's recorded stdout (" d ", " len " bytes"
+                                (when (:masked e) (str ", " nh " identity hash codes masked: the masked digest, the JDK's " (:out-len r) " bytes")) ")"))
+                  (bad! (str id " action " i ": leaves the JDK's recorded stdout (" d " " len " bytes, the JDK's "
+                             (if (:masked e) (str "masked " (:out-masked r)) (:out r)) " " (:out-len r) ")"))))))
+          (when control?
+            (let [bs (.getBytes ^String text "UTF-8")
+                  i (quot (alength bs) 2)
+                  _ (aset-byte bs i (byte (if (= (aget bs i) (byte 120)) 121 120)))
+                  m (String. bs "UTF-8")
+                  md (java.security.MessageDigest/getInstance "SHA-256")
+                  d (subs (apply str (map #(format "%02x" (bit-and (int %) 0xff)) (.digest md bs))) 0 16)
+                  rp (jtreg-review-problems id m (:lines e) (:no-newline e))]
+              (if (and (seq rp) (not-any? #(or (= d (:out %)) (= d (:out-masked %))) (:runs t)))
+                (swap! controls inc)
+                (bad! (str id ": control passed: its golden file with byte " i " changed "
+                           (if (seq rp) "keeps the recorded digest" "passes the review")))))))))
+    (doseq [id (keys rv) :when (not (some #{id} files))]
+      (bad! (str id ": reviewed in " review ", no golden file")))
+    (doseq [id (keys (golden-left)) :when (some #{id} files)]
+      (bad! (str id ": left in test/java/golden/left.tsv, and a golden file")))
+    (let [fr (frequencies (map #(str/join "+" (map name (sort-by {:src 0 :jls 1 :api 2 :jdk 3} %))) @bases))]
+      (println (str "java-check golden: " (count files) " jtreg tests' golden files (" @masked " with identity hash codes masked), "
+                    (count @bases) " rows reviewed: "
+                    (str/join ", " (for [[k v] (sort-by key fr)] (str v " " k)))))
+      (when control?
+        (println (str "   controls: " @controls " of " (count files) " golden files with one byte changed fail the review"
+                      " and leave the recorded digest"))))))
+
 (defn golden
   "JCV2 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JCV2\"): bin/java-check golden [--oracle]: every
   golden file of the jls programs reviewed in REVIEW (test/java/jls/golden.edn): each line of the file a
@@ -1839,6 +1966,7 @@
   JDK's recorded stdout's (test/java/ref-jdk26.edn); a golden file may leave the JDK's on purpose, then said."
   [ref review & opts]
   (let [oracle? (some #{"--oracle"} opts)
+        control? (some #{"--control"} opts)
         rv (read-edn review)
         jls (for [t (ref-tests ref) :when (= :jls (:corpus t)) :when (= :pass (:jdk t))] t)
         problems (atom [])
@@ -1876,6 +2004,8 @@
     (let [fr (frequencies (map #(str/join "+" (map name (sort-by {:jls 0 :api 1 :jdk 2} %))) @bases))]
       (println (str "java-check golden: " (count jls) " jls programs, " (count @bases) " lines reviewed: "
                     (str/join ", " (for [[k v] (sort-by key fr)] (str v " " k))))))
+    ;; JCS361 (a): the jtreg tests' golden files, reviewed in test/java/golden/AREA.edn
+    (golden-jtreg ref (str (.getParent (io/file ref)) "/golden") oracle? control? bad!)
     (if (seq @problems)
       (do (doseq [x @problems] (println (str "   " x))) (shutdown-agents) (System/exit 1))
       (println (str "   every line of every golden file reviewed, as its text")))))

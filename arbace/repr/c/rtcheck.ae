@@ -290,8 +290,12 @@
                  (not= ps "0") "print-rejected"
                  :else cmp)
         l4 (cond (not run?) "-" (not= read "ok") "-" (nil? same) "-" :else same)
-        accept (cond (= read "error") (cond (not= gcc "0") "both-reject"
-                                            (own-rejects? (when *base* (str *base* "/" nm)) detail) "own-rejects"
+        ;; queue 409: the test's own verdict first (its dg-error line and words, own-rejects?), then the reference's rejection
+        ;; (cc's, else gcc's recorded one for a file cc's tree does not give); under the oracle tier's judge gcc's first, as before
+        own (fn [] (own-rejects? (when *base* (str *base* "/" nm)) detail))
+        accept (cond (= read "error") (cond (and (not (host/gcc-judge?)) (own)) "own-rejects"
+                                            (not= gcc "0") "both-reject"
+                                            (own) "own-rejects"
                                             :else "port-only-rejects")
                      (nil? gcc) "unrecorded"
                      (= gcc "0") "agree"
@@ -540,6 +544,43 @@
                :when (#{:passes :not-judged} v)]
            [id :fail (str "control " (name v) " (test/c/controls.edn)")]))))
 
+;; queue 409: the own verdict's control (test/c/controls.edn, :level :roundtrip-own): the subject, a file the reader rejects for
+;; the reason its own dg-error directives state (own-rejects?), its read error's line and message judged by own-rejects? against
+;; the reference's directives, which must not accept them (the line judge and the words judge alike).
+
+(defn own-control-result
+  "A :roundtrip-own control judged after the corpora (ids): :left when a corpus was not judged, the reference is not in the run
+  or the subject's own read is not rejected for its own directives' reason, else own-rejects? on the subject's error (its line,
+  column and message, the file's name dropped) against the reference's file: :passes or :differs."
+  [^String work ids {:keys [subject reference]}]
+  (let [split (fn [^String fid] (let [i (.indexOf fid "/")] [(subs fid 0 i) (subs fid (inc i))]))
+        [sc sn] (split subject) [rc rn] (split reference)
+        sd (str work "/" sc) rd (str work "/" rc)
+        base (fn [^String d] (let [f (java.io.File. (str d "/base.txt"))] (when (.exists f) (str/trim (slurp f)))))]
+    (if-not (and (some #{sc} ids) (some #{rc} ids))
+      :left
+      (let [[read _ _ detail] (get (read-tsv (str sd "/forms.tsv")) sn)
+            sb (base sd) rb (base rd)
+            lcm (second (re-find #"^(?:.*?:)?(\d+:\d+: .*)$" (str detail)))]
+        (cond
+          (not (and (= read "error") sb rb lcm (contains? (read-tsv (str rd "/forms.tsv")) rn))) :left
+          (not (own-rejects? (str sb "/" sn) detail)) :left
+          (own-rejects? (str rb "/" rn) lcm) :passes
+          :else :differs)))))
+
+(defn own-controls
+  "The :roundtrip-own controls of the corpora judged (ids), each printed; the failing ones as rows [ID :fail WHY]."
+  [^String work ids]
+  (vec (for [{:keys [id subject reference] :as c} (filter #(= :roundtrip-own (:level %)) (read-string (slurp "test/c/controls.edn")))
+             :let [v (own-control-result work ids c)
+                   pair (str subject "'s read error against " reference "'s dg-error directives")
+                   _ (println (case v
+                                :differs (str "repr-c roundtrip: control " id " (" pair "): differs, as a control must (GTS81 (a))")
+                                :passes (str "repr-c roundtrip: control passed: " id " (" pair "): the judge passes what differs")
+                                :left (str "repr-c roundtrip: control " id ": left (" subject " or " reference " not in the run, or " subject " not rejected for its own reason)")))]
+             :when (= :passes v)]
+         [id :fail (str "control " (name v) " (test/c/controls.edn)")])))
+
 (defn record
   "Rewrites test/repr/c/roundtrip-known.edn's entries of the corpora `ids` from WORK: every file that
   does not pass, its class kept. A failing file of no class is not written (no placeholder class: queue 122, F1): it is
@@ -585,7 +626,7 @@
           st (reduce max 0 (map #(judge work % recorded) ids))
           ;; GTS81 (a): the negative controls (test/c/controls.edn, :roundtrip), no row of files.tsv or the counts; under
           ;; judge-recorded the :roundtrip ones are left (no object in the run: obj.tsv absent)
-          cs (into (roundtrip-controls work ids) (text-controls work ids))]
+          cs (-> (roundtrip-controls work ids) (into (text-controls work ids)) (into (own-controls work ids)))]
       (doseq [r cs] (println (str "FAIL " (first r) "\t" (nth r 2))))
       (shutdown-agents)
       (System/exit (if (seq cs) 1 st)))

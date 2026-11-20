@@ -4324,3 +4324,143 @@ the light level has no C) and backtrace/backtrace_dynlink (native only, `Dynlink
 `:dynlink-decided`. The compiled level: no dynlink library yet (the shard's registry, OC220 (a)'s compiled half). At the light level
 `Dynlink.is_native` is false and `adapt_filename` is the identity (the platform is oi's) while `Sys.backend_type` is `Native`; no
 row of the corpora sees the difference.
+
+## As built: queue 396, Dynlink's plugins at the compiled level (OC220 (a)'s compiled half, 373-1 (a); 2026-11-19, branch `396-oc-dynlink`, from `n-all4` `88b8e7f1a`)
+
+373-1 (a)'s WIP (`714a2ea3d`) merged and proven. `lib-dynlink-pr4229/main`, `lib-dynlink-domains/main` and
+`lib-dynlink-init-info/test` pass at the compiled level by their own verdicts; `lib-dynlink-bytecode/main` and
+`backtrace/backtrace_dynlink` stay `:dynlink-decided`, as at the light level.
+
+- **The plugins in the program (the WIP).** o2j's `cprogs` reads an entry `+DUMP` as a plugin: translated ahead into the program's
+  package as `D_<unit>` (apart from the program's units: pr4229's sub/abstract shares the name of its Abstract), the library units
+  only plugins name in the program's tree but not its link. A program that links Dynlink gets, at the compiled level, the registry
+  in its main class: `load` (the runtime's `Main/loader`, set in `main` with `Main/setUnits`), `plugin` (a Lambda text's key, its
+  String hashCode and length, `plugin-key`) and `global` (a unit's module block). ExtCore's externals are the light level's;
+  `unitG` asks the loader's "global", so the runtime has no `Class/forName`. header.awk's dynlink mode at every level, clib with
+  Dynlink's units, the compiled judgment by the tests' own verdicts (`OI_OWN`).
+- **The runtime's analysis (the base's failure).** j2g `--jdk` has no `arbace.lang.Numbers`: an arithmetic form the class bodies'
+  analyzer cannot make an instruction of falls back to Clojure's `:inline` call of Numbers, unresolved there. Two did, so every
+  compiled shard was refused at the runtime since 331 and OC216's rest: `ExtGc/memprofGeom` (`/` on doubles and unary `-`; now
+  `unchecked-divide` and `unchecked-negate`, Java's double arithmetic as `Rt/fdiv`) and `HostSys/call` (a four-operand `bit-or`;
+  now two at a time). `bin/j2g --jdk jdk/forms --analyze-only` over `jdk/ocaml/ocaml/rt` alone: 2 failures before, 0 of 6,997
+  classes after.
+- **An arm64 host.** bin/oi built every shard for amd64 (`--arch amd64`): on an arm64 host each program exits 126. The shard is now
+  built for the host's architecture (`C2_ARCH`, `O2J_ARCH` overrides). The main's `ocamlprog` used `syscall.Dup2`, which linux/arm64
+  lacks: a `dup2` as jrt's `InheritedChannel.dup2` (dup3 with no flags, the same descriptor twice a no-op once open).
+- **The class.** `divergences-aot-compiled.edn`'s `:dynlink-decided` lists the two rows left.
+
+**Results (the VM, arm64; OI_JOBS=2, O2J_JOBS=2).**
+- `bin/oi check --aot --level compiled --only-list` on the five dynlink rows and the control pair: 5 pass (pr4229, domains, init-info,
+  asmcomp/compare, evaluation_order), 2 in `:dynlink-decided`; against oi "same" on all five; `_control/pr4229-vs-domains` differs.
+  The shard of 5 programs: j2g 712 s, peak 5.2 GiB; Go's build 280 s with the cache warm (1,014 s and 8.0 GiB cold, one `compile`).
+  check-aot-compiled.edn is not re-recorded (its three new rows and two classed are the main host's record, amd64).
+- The light level after the WIP (`unitG` through the loader; ExtGc's and HostSys's forms): the same rows, statmemprof/alloc_counts and
+  exception_callback, `bin/oi check --aot --only-list`: 7 pass, 2 classed, no row changed; both controls differ.
+- `bin/reap`: 0 problems. `bin/crops-score --judge --strict`: 0 problems (OCaml's scores unchanged: the compiled level is in no
+  REAP cell). `bin/records-check`: 0 problems.
+
+## As built: queue 397, the night's new AOT rows (2026-11-19, branch `397-oc-rows`, from `n-all4` `88b8e7f1a`)
+
+Round 54's lane 3 left four AOT rows with a cause not proven: basic-more/pr1271 and regression/pr7798 classed as gc rows "since
+queue 370's -g", statmemprof/intern ending with status 2 where its entry named a timeout, and statmemprof/lists_in_minor's pin
+dropped (past 900 s of CPU). Each was run at n-all4 and at 355's tip `c8468871a` (before 370) in a second worktree on the same
+stage 0 (nx's), alone, `GOMAXPROCS=1`.
+
+- **pr1271: not 370; queue 331's word counter and a block ocamlopt allocates statically.** It prints 2 at both commits (the record's
+  pass dates from 2026-11-16, before 331 counted words). The 2 words are the functor argument `struct let x = 42 end`, Lambda
+  `(let x 42 (makeblock 0 [x]))`, which ocamlopt's Closure makes a structured constant (simplif_prim_pure: an immutable
+  Pmakeblock whose arguments' approximations are all Value_const), statically allocated, not counted. **Fixed in o2j**: a let of a
+  constant records it as the variable's value (`:kconst`, Closure's approximation), and an immutable `makeblock` whose arguments
+  are all constants (a const node, such a variable, or such a makeblock) is a static constant of the unit (`const-arg`,
+  `const-form`): one block shared by every evaluation, as ocamlopt's. pr1271 passes. The sample of the programs that count words or
+  compare blocks, run with the fix (basic/localfunction, basic/tuple_match, lib-sys/opaque, match-exception/allocation, misc/gcwords,
+  typing-modules/struct_include_optimisation, statmemprof/alloc_counts, lib-obj/with_tag; the suite's asmcomp/bind_tuples,
+  static_catch_unboxing, optargs, compaction/test_compact_full), is unchanged, the known rows' pins still matched; the controls differ.
+- **pr7798: speed.** It prints 0 (passes) given the CPU: 97.5 and 100.2 s at 355's tip, 120.5 and 120.4 s at n-all4, against the level's
+  140. Under `O2J_GOMEMLIMIT`'s 900 MiB the collector takes 39 to 44% of a run (pr1271's gctrace: a live heap of 691 MB at 355's tip,
+  725 MB at n-all4, 40 and 47 collections), and since 370 the library's -g (its slots and the events' code) holds about 34 MB more of
+  it: 6.6 s more to load, the rest in more frequent cycles. Under 1500 MiB the same runs take 63.0 and 67.1 s. Listed in
+  aot-slow.edn; its known entry dropped.
+- **intern: its known Memprof result once it has the CPU.** Alone at `OI_TIMEOUT=900` it ends with status 2 (589 s of wall at load
+  30): check_counts_full_major's assertion at line 108, the alloc_minor count against dealloc_minor's and promote's, as arrays_in_major
+  (no promote or dealloc callback). Its entry now pins that output (`status ` `00d1d68c794c`, attested in pins-attested.tsv from
+  this run) under arrays_in_major's reason, and its timeout is its speed (aot-slow.edn).
+- **lists_in_minor: queue 331's sampling.** Its 192.3 s and its pin `15cf4ddf64d5` date from before 331 (2026-11-01, 2026-11-14), when
+  no sample was taken, so the first check's final assertion ended it. Since 331 its callbacks run and all seven checks run: the
+  first alone takes 188 to 196 s of CPU at 355's tip and 249 to 257 s at n-all4 (370's -g about 30% beside it), the seven past 900 s
+  at either. It stays slow, its pin dropped; aot-slow.edn's comment says why.
+
+DECISION (for the main host): the light level's `O2J_GOMEMLIMIT` default (900 MiB) makes the collector a third of every
+run's CPU; 1500 MiB cut pr7798 from 120 to 67 s. Raising it changes the AOT records' timeouts and the oi-aot steps' `:mem-gib`, so
+it is the main host's (report 397).
+
+## As built: queue 438, OC218's heap model at the light level (2026-11-19, branch `438-oc-gc`, from next `c6d53f85b`)
+
+OC233 (a), OC234 (a), OC235 (a) at the AOT level, after oi's (go/arbace/oi/ext_sys.ae): `jdk/ocaml/ocaml/rt/ExtGc.ae`'s memprof part.
+Once a profile was started, each counted allocation (`Rt/wordsV` with its value: `Rt/block`, `Rt/counted`; `Rt/words` without one)
+fills a simulated minor heap of Gc.control's `minor_heap_size` words; the overflowing one and the asked collections (gcAsked) are minor
+collections: `System/gc`, then each tracked minor value's promote (alive: its WeakReference not cleared) or dealloc_minor, and at a
+major one each dead major value's dealloc_major. The sampled allocation's callback runs as the allocation returns; callbacks queued
+while one runs run after it; an exception drops the queued allocation callbacks. A profile is its domain's (`Dom/mp`), inherited by
+the domains spawned (Effects/spawn), a second start replacing it; stop and discard as memprof.c. The Lambda's duprecord and duparray
+(`Rt/dupc`) and array literals (`Rt/makeArray` through `Rt/block`) are counted, as ocamlopt allocates them. Weak keys: an int64's or a
+nativeint's box (`I64`, `NInt`) is a weak key. At both levels the asked collections' ephemeron cleaning repeats (at most 32 rounds)
+while a cleaning drops a data, so a chain of ephemerons whose data are other ephemerons' keys dies in one collection.
+
+**Results** (`bin/oi check --aot --only-list`, `suite check --aot --only-list`, `check --only-list`, with their controls): AOT
+arrays_in_major, restart, start_stop and moved_while_blocking pass (4 rows out of `:gc-and-memory`); arrays_in_minor and
+minor_heap_edge are slow (aot-slow.edn: each collection a `System/gc` over the light level's ~700 MB heap); eval ephetest2 passes. The
+word-counting set (pr1271, localfunction, tuple_match, match-exception/allocation, gcwords, alloc_counts, with_tag) is unchanged.
+
+**Left.** The light level's interpreted frames keep a dead let's value reachable (`arbace/classes/interp.ae`'s release! frees a slot
+for reuse but does not clear it; a Lambda let the typer made of an inlined local function or of an argument's evaluation order holds
+its block until the method returns): opaque's lifetime, ephetest's data unset (tests 1, 2, 5), stop_start_in_callback's and
+exception_comballoc's deallocations. discard_in_callback: the native backend's counts with bytecode's Lambda. custom, intern:
+Marshal's and custom blocks' sources. thread_exit_in_callback. ephetest's test6 and test7 (a key reachable from its data: Go has no
+ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the major collector's own work). struct_include_optimisation
+(the bytecode's Translmod blocks).
+
+## As built: queue 413, the C API at the light AOT level (2026-11-19, branch `413-oc-capi`, from `next` `aa9edac6f`)
+
+Asked: the AOT cell's `:c-api` class (25 rows, n-ocaml-bd's audit: "the C API at the light level: large"): what the light level's
+C API lacks, the cheapest groups built and proved on their programs. OC215 (a) had kept `:c-api` at the light level "until the
+embedding" because its runtime, Java forms interpreted on stage 0, has no main of ours to serve `capiPath`. It needs none: the
+runtime can spawn a process that does.
+
+**The route.** The light level's `CApi`, when the open of `capiPath` fails and `OI_CAPI_SERVER` and `OI_CSTUBS` are set, spawns
+`OI_CAPI_SERVER capi` (ProcessBuilder, its error output inherited) and sends the same messages over the child's standard streams.
+The server is the light driver of arbace/oi (`.tmp/oi/bin/oi`, which already links oicapi, ci and crt), so the stubs run as at
+eval and at the compiled level, by the same code:
+- `go/arbace/oicapi/wire.ae` (new): the wire form, the session and the workers, moved from the compiled main's capi.ae
+  unchanged but for names (`Handle`, `FlushStubs`; `wireLoad`, `wireApply`, `wireNamed`, `wireRun`). The compiled main's capi.ae
+  keeps its host and file (a message written is `oicapi.Handle`'s reply). Checked by a scratch build: the printed capi.go with the
+  printed oi, oicapi, ci and crt and a stand-in jrt vets (no shard built here).
+- oicapi's hooks: `Stdio` (the C's standard streams), `Pid` (the C's getpid) and `Signal` (its kill and raise); nil, the process's
+  as before.
+- `oi capi` (test/ocaml/oi/cmd/main.ae): a message in is u32 its length then it; the reply is chunks `o` (the C's standard output
+  since the last reply), `e` (its error output), `s` (the signals the C sent the program, one a byte), then `m` (Handle's reply).
+  The C's getpid is the server's parent (the program's process); a signal to it is sent back, others are the host's kill. `Z`
+  flushes the C's stdio at the program's end.
+- `CApi.ae`: writes `o` and `e` into System/out and System/err, where OCaml's channels write (so the output interleaves as the
+  calls made it), posts `s` to ExtSignal and handles the pending signals when the call returns. `CApi/finish` (Main/run, after
+  flushStd, as the compiled main's atEnd) sends `Z` and ends the server. Two fixes for both AOT levels: a callback runs with the
+  thread's fiber cleared (caml_callback's own stack: an effect it performs unhandled is Effect.Unhandled, callback/test7), and an
+  over-application from C is a loop (`CApi/apN`: caml_callbackN of 10,000 arguments was 10,000 nested Rt/ap at the
+  interpreter's depth, callback/test1).
+- header.awk: `@cstubs` at the light level too (aot=1, as aot=2). bin/oi's light level builds the node program (`cstubs_nodes`)
+  and puts `OI_CSTUBS` and `OI_CAPI_SERVER` (the driver) in the run's environment. Such a program has an environment, so it runs
+  alone (o2j_env_runs). A failed build is the row's reason.
+
+**Results** (`bin/oi check --aot --only-list`; native path; the 20 programs of the 25 the header now runs, with asmcomp's control
+pair): 15 pass: the 12 callback tests but test3 and signals_alloc (10), manyargs, blake2b_self_test, runtime-C-exceptions,
+recommended_domain_count and bigarrcml (callback/test1 and test7 after the two fixes). The rest, in a class:
+- callback/test3 is `:light-depth` (aot-known `depth:`): 100,000 non-tail calls inside a callback.
+- lib-bigarray/subarraystub is `:light-speed` (aot-slow; eval's `:speed` too).
+- lib-marshal/intext and intext_par stay `:c-api` (aot-known `c-api:`, the class's second match). Marshal reaches a custom block
+  the C allocated, and the AOT runtime has no route to the C's serialize. intext_par fails the same way alone at OI_TIMEOUT=900
+  (193 s), so at the default limit it is a timeout.
+- callback/signals_alloc stays `:c-api` too: its handler runs at the external's return (01324), OCaml's at the next allocation's
+  poll (01234).
+
+The header rows left in `:c-api`: int64-unboxing and unboxed-primitive-args (native only), bigarrfml (Fortran), delayintr, signal
+and cloexec (helper programs). The negative control `_control/capi-test1-vs-test2` (check-aot-native.edn) differs.

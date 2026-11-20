@@ -6,6 +6,7 @@
   gives the main file's nodes and the lines of its directives the preprocessor ran (cxxdump's `{:executed ...}`)."
   (:require [arbace.repr.c.pp :as pp]
             [arbace.repr.cpp.host :as host]
+            [arbace.repr.cpp.lit :as lit]
             [arbace.repr.cpp.parse :as ps]
             [arbace.string :as str]))
 
@@ -50,6 +51,13 @@
         ;; keywords below C++20; the predefined macros stay those of the options without it, as before
         concepts (boolean (some #{"-fconcepts"} args))
         fc (host/file-config (vec (remove #{"-fconcepts"} args)) std)
+        ;; queue 411 (DECISION 392-2 (a)): -fchar8_t below C++20 (the runtime's limits.cc, codecvt.cc, locale_init.cc and
+        ;; localename.cc are compiled with it) makes char8_t a keyword and u8 literals of it (arbace.repr.cpp.lit/*char8*), and adds
+        ;; the macros clang 23 adds for it (clang++ -std=gnu++11 -fchar8_t -dM -E against no option: __cpp_char8_t and the two
+        ;; atomics' lock-freedom); the last of -fchar8_t and -fno-char8_t wins
+        char8 (and (< (long (host/std-year (:std fc))) 2020)
+                   (= "-fchar8_t" (last (filter #{"-fchar8_t" "-fno-char8_t"} args))))
+        fc (cond-> fc char8 (update :pre str "#define __CLANG_ATOMIC_CHAR8_T_LOCK_FREE 2\n#define __GCC_ATOMIC_CHAR8_T_LOCK_FREE 2\n#define __cpp_char8_t 202207L\n"))
         ;; the file preprocessed under its name as the oracle was given it (__FILE__'s), from the directory it is relative to
         [base nm] (if (and (str/ends-with? path (str "/" main)) (not (str/starts-with? main "/")))
                     [(subs path 0 (- (count path) (count main) 1)) main]
@@ -62,9 +70,11 @@
         year (host/std-year (:std fc))
         gnu (str/starts-with? (:std fc) "gnu")
         ;; (h-cpp-read: -fno-gnu-keywords takes typeof out of the keywords, as GCC's D_EXT keywords; ext/no-gnu-keywords-1.C)
-        toks (ps/tokens (:tokens r) nm main src (ps/keywords year (and gnu (not (some #{"-fno-gnu-keywords"} args))) concepts))
+        toks (binding [lit/*char8* char8]
+               (ps/tokens (:tokens r) nm main src (cond-> (ps/keywords year (and gnu (not (some #{"-fno-gnu-keywords"} args))) concepts)
+                                                    char8 (conj "char8_t"))))
         _ (when (System/getenv "REPR_CPP_TIME") (binding [*out* *err*] (println (format "repr/cpp native: tokens %.2f s" (/ (- (System/nanoTime) t1) 1e9)))))
-        u (ps/parse-unit toks main src year gnu [(:std fc)])
+        u (binding [lit/*char8* char8] (ps/parse-unit toks main src year gnu (cond-> [(:std fc)] char8 (conj "-fchar8_t"))))
         t2 (System/nanoTime)]
     ;; REPR_CPP_TIME: the preprocessor's and the parser's seconds, the header-skim cache's use (stderr)
     (when (System/getenv "REPR_CPP_TIME")

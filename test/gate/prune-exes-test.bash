@@ -4,8 +4,8 @@
 # (review 048, N5). Usage: test/gate/prune-exes-test.bash
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
-export TMPDIR=$here/.tmp/tmp; mkdir -p "$TMPDIR"
-T=$here/.tmp/prune-exes-test
+export TMPDIR=${TMPDIR:-$here/.tmp/tmp}; mkdir -p "$TMPDIR"
+T=$TMPDIR/prune-exes-test
 rm -rf "$T"; mkdir -p "$T/store" "$T/exes"
 fail=0
 ok() { echo "ok   $*"; }

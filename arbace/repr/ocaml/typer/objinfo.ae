@@ -1,0 +1,442 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; the order in which typing/typedecl.ml, typecore.ml, typemod.ml and datarepr.ml allocate Shape.Uid.t (Uid.mk), the
+;; declarations file_formats/cmt_format.ml indexes (index_declarations, typing/tast_iterator.ml's item_declaration) and
+;; tools/objinfo.ml's printing of them (-decls), whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;         Mehdi Dogguy, PPS laboratory, University Paris Diderot
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;   Copyright 2010 Mehdi Dogguy
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.objinfo
+  "T12's compiler output (queue 434, doc/ocaml/TYPER.md section 30): what ocamlobjinfo -quiet -decls prints of the .cmt or .cmti
+  ocamlc -bin-annot writes, from the Parsetree of a unit the native typer accepts. The uids are numbered in the order the
+  typer allocates them (Uid.mk): a type group's types, then each declaration's labels (an inline record's before its
+  constructor) and constructors, then Datarepr's five inline-record types a group stores (Typedecl's environments); a value
+  binding's pattern variables before its expression, a case's before its guard and body, every case's pattern before the
+  first body; a module's body (and a constraint's signature) before the module; a functor's named parameter after its
+  type; a module's components forced at the first qualified access (Datarepr's inline-record type again), an inclusion
+  check's environment (the implementation's signature added) likewise. Classes, objects and recursive modules are outside
+  this slice (refused). `decls-text` is objinfo's section: \"Uid of decls:\" and one entry each declaration, sorted by uid,
+  each as Format prints \"@[<hov 2>%a:@ %a@]@;\" (margin 78)."
+  (:require [arbace.repr.ocaml.typer.format :as f]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(defn- outside [what] (throw (ex-info (str "objinfo: outside the slice: " what) {:objinfo-outside what})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The state: the next uid, the declarations (uid name loc), the environment of modules (their inline-record count and
+;; whether their components were forced)
+
+(def ^:private ^:dynamic *st* nil)
+
+(defn- mk! [] (let [n (:n @*st*)] (swap! *st* update :n inc) n))
+(defn- hidden! [k] (dotimes [_ k] (mk!)))
+(defn- decl! [uid name loc] (swap! *st* update :decls conj [uid name loc]))
+
+(defn- info
+  ([] (info 0 {} {}))
+  ([inline mods mtys] {:inline inline :forced (atom false) :mods mods :mtys mtys}))
+
+(defn- fresh [i] (if i (assoc i :forced (atom false)) (info)))
+
+(defn- lid? [x] (and (vector? x) (#{:Lident :Ldot :Lapply} (first x))))
+
+(defn- lt "A longident's located component (5.5's Ldot of locs) as its value" [x] (if (map? x) (:txt x) x))
+
+(defn- resolve-path
+  "The modules a module path names, outermost first (nil entries for unknown ones)"
+  [env lid]
+  (case (first lid)
+    :Lident [(get-in env [:mods (second lid)])]
+    :Ldot (let [ps (resolve-path env (lt (nth lid 1))) l (last ps)]
+            (conj ps (when l (get-in l [:mods (lt (nth lid 2))]))))
+    [nil]))
+
+(defn- force-info! [i]
+  (when (and i (not @(:forced i)))
+    (reset! (:forced i) true)
+    (hidden! (:inline i))))
+
+(defn- force-module! [env lid] (doseq [i (resolve-path env lid)] (force-info! i)))
+
+(defn- force-prefix!
+  "Env.lookup of a qualified name forces its module path's components (Datarepr's inline records)"
+  [env lid]
+  (when (= :Ldot (first lid)) (force-module! env (lt (nth lid 1)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The walk
+
+(declare walk walk-expr walk-pat walk-mod walk-mty walk-str-items walk-sig-items)
+
+(defn- ctor-inline? [args] (and (vector? args) (= :Pcstr_record (first args))))
+
+(defn- walk-labels [env lds]
+  (doseq [ld lds]
+    (walk env (:pld_type ld))
+    (decl! (mk!) (:txt (:pld_name ld)) (:loc (:pld_name ld)))))
+
+(defn- walk-ctor-args [env args]
+  (if (ctor-inline? args) (walk-labels env (second args)) (walk env args)))
+
+(defn- walk-type-group
+  "Typedecl.transl_type_decl: the types' uids, then each declaration's labels and constructors (make_constructor before
+  cd_uid), then the inline-record types Datarepr makes each time the group is stored (five stores); its inline count"
+  [env decls]
+  (doseq [d decls]
+    (when (and (= :Private (:ptype_private d)) (#{:Ptyp_variant :Ptyp_object} (first (:ptyp_desc (:ptype_manifest d)))))
+      (outside "a private row type (Typedecl's #row type)"))
+    (decl! (mk!) (:txt (:ptype_name d)) (:loc (:ptype_name d))))
+  (let [n (atom 0)]
+    (doseq [d decls]
+      (walk env (:ptype_params d))
+      (walk env (:ptype_constraints d))
+      (let [k (:ptype_kind d)]
+        (when (vector? k)
+          (case (first k)
+            :Ptype_record (walk-labels env (second k))
+            :Ptype_variant (doseq [c (second k)]
+                             (when (seq (:pcd_vars c)) (walk env (:pcd_vars c)))
+                             (walk-ctor-args env (:pcd_args c))
+                             (walk env (:pcd_res c))
+                             (when (ctor-inline? (:pcd_args c)) (swap! n inc))
+                             (decl! (mk!) (:txt (:pcd_name c)) (:loc (:pcd_name c))))
+            (walk env k))))
+      (walk env (:ptype_manifest d)))
+    (hidden! (* 5 @n))
+    @n))
+
+(defn- walk-ext-ctors
+  "Typedecl.transl_extension_constructor for each, then each stored (Datarepr's inline record once); the inline count"
+  [env ecs]
+  (let [n (atom 0)]
+    (doseq [ec ecs]
+      (let [k (:pext_kind ec)]
+        (case (first k)
+          :Pext_decl (do (walk-ctor-args env (nth k 2)) (walk env (nth k 3))
+                         (when (ctor-inline? (nth k 2)) (swap! n inc)))
+          :Pext_rebind (force-prefix! env (:txt (second k))))
+        (decl! (mk!) (:txt (:pext_name ec)) (:loc (:pext_name ec)))))
+    (hidden! @n)
+    @n))
+
+(defn- pat-vars
+  "The pattern's variables in Typecore's order (enter_variable), uids allocated; [[name loc] ...] those Typedtree's
+  iter_bound_idents gives (an or-pattern's first branch)"
+  [env p]
+  (let [d (:ppat_desc p)]
+    (case (first d)
+      :Ppat_var (do (mk!) [[(:txt (second d)) (:loc (second d))]])
+      :Ppat_alias (let [vs (pat-vars env (nth d 1))] (mk!) (conj vs [(:txt (nth d 2)) (:loc (nth d 2))]))
+      :Ppat_or (let [a (pat-vars env (nth d 1))] (pat-vars env (nth d 2)) a)
+      :Ppat_unpack (do (walk env (nth d 2))
+                       (if (:txt (nth d 1)) (do (mk!) [[(:txt (nth d 1)) (:loc (nth d 1))]]) []))
+      :Ppat_construct (let [[_ lid arg] d]
+                        (force-prefix! env (:txt lid))
+                        (when (and arg (seq (first arg))) (outside "a constructor pattern's existential names"))
+                        (if arg (pat-vars env (second arg)) []))
+      :Ppat_open (do (force-module! env (:txt (nth d 1))) (pat-vars env (nth d 2)))
+      ;; the rest: their sub-patterns in order (tuples, records, arrays, constraints, lazy, exception, variants)
+      (let [out (atom [])]
+        (letfn [(sub [x] (cond (and (map? x) (:ppat_desc x)) (swap! out into (pat-vars env x))
+                               (and (map? x) (lid? (:txt x))) (force-prefix! env (:txt x))
+                               (map? x) (doseq [v (vals x)] (sub v))
+                               (or (vector? x) (seq? x)) (doseq [v x] (sub v))
+                               :else nil))]
+          (doseq [x (rest d)] (sub x)))
+        @out))))
+
+(defn- walk-vbs
+  "Typecore.type_let: every binding's pattern, then (a constraint's locally abstract types, Ctype.new_local_type) each
+  expression; each binding's variables are Value_binding declarations named by its first variable"
+  [env vbs]
+  (doseq [vb vbs]
+    (let [uid0 (:n @*st*)
+          vs (pat-vars env (:pvb_pat vb))
+          uids (range uid0 (:n @*st*))]
+      (when (seq vs)
+        (let [[nm loc] (first vs)]
+          ;; the uids of the bound identifiers (an or-pattern's second branch allocates uids it does not bind)
+          (doseq [u (take (count vs) (keep-indexed (fn [_ u] u) uids))] (decl! u nm loc))))))
+  (doseq [vb vbs]
+    (when-let [c (:pvb_constraint vb)]
+      (when (= :Pvc_constraint (first c)) (hidden! (count (second c))))
+      (walk env c))
+    (walk-expr env (:pvb_expr vb))))
+
+(defn- walk-cases [env cases]
+  (doseq [c cases] (pat-vars env (:pc_lhs c)))
+  (doseq [c cases] (walk-expr env (:pc_guard c)) (walk-expr env (:pc_rhs c))))
+
+(defn- walk-expr [env e]
+  (when e
+    (let [d (:pexp_desc e)]
+      (case (first d)
+        :Pexp_let (do (walk-vbs env (nth d 2)) (walk-expr env (nth d 3)))
+        :Pexp_function (let [[_ params c body] d]
+                         (doseq [p params]
+                           (let [pd (:pparam_desc p)]
+                             (case (first pd)
+                               :Pparam_val (do (walk-expr env (nth pd 2)) (pat-vars env (nth pd 3)))
+                               :Pparam_newtype (mk!))))
+                         (walk env c)
+                         (case (first body)
+                           :Pfunction_body (walk-expr env (second body))
+                           :Pfunction_cases (walk-cases env (second body))))
+        (:Pexp_match :Pexp_try) (do (walk-expr env (nth d 1)) (walk-cases env (nth d 2)))
+        :Pexp_for (let [[_ p lo hi _ body] d]
+                    (walk-expr env lo) (walk-expr env hi)
+                    (when (= :Ppat_var (first (:ppat_desc p))) (mk!))
+                    (walk-expr env body))
+        :Pexp_newtype (do (mk!) (walk-expr env (nth d 2)))
+        :Pexp_struct_item (walk-expr (walk-str-items env [(nth d 1)]) (nth d 2))
+        :Pexp_letop (let [{:keys [let_ ands body]} (second d) bops (cons let_ ands)]
+                      (doseq [b bops] (walk env (:pbop_op b)))
+                      (doseq [b bops] (walk-expr env (:pbop_exp b)))
+                      (doseq [b bops] (pat-vars env (:pbop_pat b)))
+                      (walk-expr env body))
+        :Pexp_pack (do (walk-mod env (nth d 1)) (walk env (nth d 2)))
+        (:Pexp_object :Pexp_new :Pexp_send :Pexp_override :Pexp_setinstvar :Pexp_poly) (outside "classes and objects")
+        (walk env (vec (rest d)))))))
+
+(defn- walk
+  "The generic part of the walk: the nodes in order, a qualified name forcing its module's components"
+  [env x]
+  (cond (nil? x) nil
+        (map? x) (cond (:pexp_desc x) (walk-expr env x)
+                       (:ppat_desc x) (pat-vars env x)
+                       (:pmod_desc x) (walk-mod env x)
+                       (:pmty_desc x) (walk-mty env x)
+                       (lid? (:txt x)) (force-prefix! env (:txt x))
+                       :else (doseq [k (sort (keys x))] (walk env (get x k))))
+        (or (vector? x) (seq? x)) (doseq [v x] (walk env v))
+        :else nil))
+
+(defn- bind-mod [env name i] (if name (assoc-in env [:mods name] i) env))
+(defn- merge-info [env i] (-> env (update :mods merge (:mods i)) (update :mtys merge (:mtys i))))
+
+(defn- items-info
+  "A structure's or signature's info from the environment its items made, and their inline count"
+  [env0 env n]
+  (info n (into {} (remove (fn [[k v]] (identical? v (get-in env0 [:mods k]))) (:mods env)))
+        (into {} (remove (fn [[k v]] (identical? v (get-in env0 [:mtys k]))) (:mtys env)))))
+
+(defn- walk-param
+  "A functor's parameter (Typemod's transl_modtype_functor_arg, then md_uid for a named one); the body's environment"
+  [env param]
+  (if (= :Unit param)
+    env
+    (let [[_ nm mty] param
+          i (fresh (walk-mty env mty))]
+      (when (:txt nm) (mk!))
+      (bind-mod env (:txt nm) i))))
+
+(defn- walk-mod [env me]
+  (let [d (:pmod_desc me)]
+    (case (first d)
+      :Pmod_ident (let [lid (:txt (second d))]
+                    (force-prefix! env lid)
+                    (or (last (resolve-path env lid)) (info)))
+      :Pmod_structure (let [n (atom 0) env' (walk-str-items env (second d) n)] (items-info env env' @n))
+      :Pmod_functor (do (walk-mod (walk-param env (nth d 1)) (nth d 2)) (info))
+      :Pmod_apply (letfn [(args [m acc] (if (= :Pmod_apply (first (:pmod_desc m)))
+                                          (args (nth (:pmod_desc m) 1) (conj acc (nth (:pmod_desc m) 2)))
+                                          [m acc]))]
+                    (let [[f as] (args me [])]
+                      (doseq [a as] (walk-mod env a))
+                      (walk-mod env f)
+                      (info)))
+      :Pmod_apply_unit (do (walk-mod env (nth d 1)) (info))
+      :Pmod_constraint (let [i (walk-mod env (nth d 1)) t (walk-mty env (nth d 2))]
+                         ;; Includemod.signatures: the implementation's signature added to the environment
+                         (hidden! (:inline i))
+                         (fresh t))
+      :Pmod_unpack (do (walk-expr env (second d)) (info))
+      (outside (str "module expression " (first d))))))
+
+(defn- walk-mty [env mty]
+  (let [d (:pmty_desc mty)]
+    (case (first d)
+      :Pmty_ident (let [lid (:txt (second d))]
+                    (force-prefix! env lid)
+                    (fresh (case (first lid)
+                             :Lident (get-in env [:mtys (second lid)])
+                             :Ldot (get-in (last (resolve-path env (lt (nth lid 1)))) [:mtys (lt (nth lid 2))])
+                             nil)))
+      :Pmty_alias (let [lid (:txt (second d))] (force-prefix! env lid) (or (last (resolve-path env lid)) (info)))
+      :Pmty_signature (let [n (atom 0) env' (walk-sig-items env (second d) n)] (items-info env env' @n))
+      :Pmty_functor (do (walk-mty (walk-param env (nth d 1)) (nth d 2)) (info))
+      :Pmty_with (let [i (walk-mty env (nth d 1))]
+                   (doseq [c (nth d 2)]
+                     (case (first c)
+                       (:Pwith_type :Pwith_typesubst) (let [td (nth c 2)]
+                                                        (walk env (:ptype_params td)) (walk env (:ptype_manifest td))
+                                                        (decl! (mk!) (:txt (:ptype_name td)) (:loc (:ptype_name td))))
+                       :Pwith_modtype (do (walk-mty env (nth c 2)) (mk!))
+                       :Pwith_modtypesubst (walk-mty env (nth c 2))
+                       (:Pwith_module :Pwith_modsubst) (force-prefix! env (:txt (nth c 2)))))
+                   i)
+      :Pmty_typeof (walk-mod env (second d))
+      (outside (str "module type " (first d))))))
+
+(defn- module-name [nm] (or (:txt nm) "_"))
+
+(defn- walk-str-items
+  ([env items] (walk-str-items env items (atom 0)))
+  ([env items n]
+   (reduce
+    (fn [env it]
+      (let [d (:pstr_desc it)]
+        (case (first d)
+          :Pstr_eval (do (walk-expr env (nth d 1)) env)
+          :Pstr_value (do (walk-vbs env (nth d 2)) env)
+          :Pstr_primitive (let [vd (second d)] (walk env (:pval_type vd))
+                            (decl! (mk!) (:txt (:pval_name vd)) (:loc (:pval_name vd))) env)
+          :Pstr_type (do (swap! n + (walk-type-group env (nth d 2))) env)
+          :Pstr_typext (let [te (second d)] (force-prefix! env (:txt (:ptyext_path te))) (walk env (:ptyext_params te))
+                         (swap! n + (walk-ext-ctors env (:ptyext_constructors te))) env)
+          :Pstr_exception (do (swap! n + (walk-ext-ctors env [(:ptyexn_constructor (second d))])) env)
+          :Pstr_module (let [mb (second d) i (walk-mod env (:pmb_expr mb)) u (mk!)]
+                         (decl! u (module-name (:pmb_name mb)) (:loc (:pmb_name mb)))
+                         (bind-mod env (:txt (:pmb_name mb)) i))
+          :Pstr_modtype (let [mtd (second d) i (if (:pmtd_type mtd) (walk-mty env (:pmtd_type mtd)) (info)) u (mk!)]
+                          (decl! u (:txt (:pmtd_name mtd)) (:loc (:pmtd_name mtd)))
+                          (assoc-in env [:mtys (:txt (:pmtd_name mtd))] i))
+          :Pstr_open (let [me (:popen_expr (second d))]
+                       (if (= :Pmod_ident (first (:pmod_desc me)))
+                         (let [lid (:txt (second (:pmod_desc me)))]
+                           (force-module! env lid)
+                           (merge-info env (or (last (resolve-path env lid)) (info))))
+                         (merge-info env (walk-mod env me))))
+          :Pstr_include (let [i (walk-mod env (:pincl_mod (second d)))]
+                          (hidden! (:inline i)) (swap! n + (:inline i)) (merge-info env i))
+          (:Pstr_attribute) env
+          :Pstr_recmodule (outside "recursive modules")
+          (:Pstr_class :Pstr_class_type) (outside "classes and objects")
+          (outside (str "structure item " (first d))))))
+    env items)))
+
+(defn- walk-sig-items
+  ([env items] (walk-sig-items env items (atom 0)))
+  ([env items n]
+   (reduce
+    (fn [env it]
+      (let [d (:psig_desc it)]
+        (case (first d)
+          :Psig_value (let [vd (second d)] (walk env (:pval_type vd))
+                        (decl! (mk!) (:txt (:pval_name vd)) (:loc (:pval_name vd))) env)
+          :Psig_type (do (swap! n + (walk-type-group env (nth d 2))) env)
+          :Psig_typesubst (do (swap! n + (walk-type-group env (second d))) env)
+          :Psig_typext (let [te (second d)] (force-prefix! env (:txt (:ptyext_path te))) (walk env (:ptyext_params te))
+                         (swap! n + (walk-ext-ctors env (:ptyext_constructors te))) env)
+          :Psig_exception (do (swap! n + (walk-ext-ctors env [(:ptyexn_constructor (second d))])) env)
+          :Psig_module (let [md (second d) i (walk-mty env (:pmd_type md)) u (mk!)]
+                         (decl! u (module-name (:pmd_name md)) (:loc (:pmd_name md)))
+                         (bind-mod env (:txt (:pmd_name md)) i))
+          :Psig_modsubst (let [ms (second d) lid (:txt (:pms_manifest ms))]
+                           (force-prefix! env lid)
+                           (decl! (mk!) (:txt (:pms_name ms)) (:loc (:pms_name ms)))
+                           (bind-mod env (:txt (:pms_name ms)) (or (last (resolve-path env lid)) (info))))
+          (:Psig_modtype :Psig_modtypesubst)
+          (let [mtd (second d) i (if (:pmtd_type mtd) (walk-mty env (:pmtd_type mtd)) (info)) u (mk!)]
+            (decl! u (:txt (:pmtd_name mtd)) (:loc (:pmtd_name mtd)))
+            (assoc-in env [:mtys (:txt (:pmtd_name mtd))] i))
+          :Psig_open (let [lid (:txt (:popen_expr (second d)))]
+                       (force-module! env lid)
+                       (merge-info env (or (last (resolve-path env lid)) (info))))
+          :Psig_include (let [i (walk-mty env (:pincl_mod (second d)))]
+                          (hidden! (:inline i)) (swap! n + (:inline i)) (merge-info env i))
+          (:Psig_attribute) env
+          :Psig_recmodule (outside "recursive modules")
+          (:Psig_class :Psig_class_type) (outside "classes and objects")
+          (outside (str "signature item " (first d))))))
+    env items)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The declarations and objinfo's printing
+
+(defn decls
+  "[[uid name loc] ...] sorted by uid: the declarations Cmt_format.index_declarations records for a unit's Parsetree
+  (KIND :impl, a structure; :intf, a signature)"
+  [items kind]
+  (binding [*st* (atom {:n 0 :decls []})]
+    (let [env {:mods {} :mtys {}}]
+      (if (= kind :intf) (walk-sig-items env items) (walk-str-items env items)))
+    (vec (sort-by first (:decls @*st*)))))
+
+(defn loc-text
+  "Location.print_loc: File \"F\", line L, characters A-B (lines L1-L2 when they differ)"
+  [[s e _]]
+  (let [l1 (.-lnum s) l2 (.-lnum e)]
+    (str "File \"" (.-fname s) "\", "
+         (if (= l1 l2) (str "line " l1) (str "lines " l1 "-" l2))
+         ", characters " (- (.-cnum s) (.-bol s)) "-" (- (.-cnum e) (.-bol e)))))
+
+(defn uid-text
+  "Shape.Uid.print of an item's uid: [intf] for an interface's, the unit, its number"
+  [unit kind n]
+  (str (when (= kind :intf) "[intf]") unit "." n))
+
+(defn entry-text
+  "objinfo's \"@[<hov 2>%a:@ %a@]@;\" of an entry printed at the start of a line, with its newline"
+  [head body]
+  (str (f/render (f/box :hov 2 (f/text (str head ":")) f/sp (f/text body))) "\n"))
+
+(defn decls-text
+  "objinfo -decls's section of one .cmt or .cmti"
+  [unit kind items]
+  (apply str "\nUid of decls:\n"
+         (for [[uid nm loc] (decls items kind)]
+           (entry-text (uid-text unit kind uid) (str nm " (" (loc-text loc) ")")))))
+
+;; ---------------------------------------------------------------------------------------------
+;; T12's check (queue 434): the compiler-output tests of test/ocaml/divergences.edn's :compiler-output, each judged by its own
+;; .reference when the native front end prints every section its ocamlobjinfo action asks for
+
+(def sections
+  "ocamlobjinfo's sections (tools/objinfo.ml) and whether the native front end prints them"
+  {"-decls" :printed "-index" "the occurrence index (Cmt_format.index_occurrences, Shape_reduce)"
+   "-uid-deps" "the uid dependencies (Includemod's Uid.Deps)" "-shape" "the implementation shape (Shape)"})
+
+(defn header-action
+  "The test's ocamlobjinfo action read from its ocamltest header: {:flags [...] :files [...]}, or {:class REASON}"
+  [^String text]
+  (let [prog (second (re-find #"program\s*=\s*\"([^\"]*)\"\s*;\s*output\s*=\s*\"out_objinfo\"" text))]
+    (cond (and prog (re-find #"ocamlobjinfo\s*;" text) (str/starts-with? prog "-quiet "))
+          (let [ws (rest (str/split (str/trim prog) #"\s+"))]
+            {:flags (vec (filter #(str/starts-with? % "-") ws)) :files (vec (remove #(str/starts-with? % "-") ws))})
+          (re-find #"ocamlobjinfo\s*;" text) {:class "ocamlobjinfo of a .cmo (cu_imports, required globals) and the compiler's warnings"}
+          (re-find #"tools/dumpobj" text) {:class "dumpobj of the bytecode (no bytecode emitter)"}
+          (re-find #"setup-ocamlopt" text) {:class "ocamlopt's native code (closures' arity, allocation)"}
+          :else {:class "no ocamlobjinfo action"})))
+
+(defn objinfo-text
+  "ocamlobjinfo -quiet FLAGS FILES of the native front end, or {:missing [section...]} / {:refused msg}; PARSE the reader
+  (path fname kind) -> items, TYPE (path fname) -> nil or an error message (the typer accepts the unit)"
+  [dir {:keys [flags files]} parse type]
+  (let [missing (vec (remove #(= :printed (get sections %)) flags))]
+    (if (seq missing)
+      {:missing (mapv #(str % ": " (get sections % "unknown")) missing)}
+      (try
+        {:text (apply str
+                      (for [f files]
+                        (let [src (str/replace f #"\.cmti?$" (if (str/ends-with? f ".cmti") ".mli" ".ml"))
+                              kind (if (str/ends-with? src ".mli") :intf :impl)
+                              b (subs src 0 (str/index-of src "."))
+                              u (str (str/upper-case (subs b 0 1)) (subs b 1))
+                              path (str dir "/" src)]
+                          (when-let [e (type path src)] (throw (ex-info (str "typer: " e) {:objinfo-outside e})))
+                          (decls-text u kind (parse path src kind)))))}
+        (catch arbace.lang.ExceptionInfo e
+          (if (:objinfo-outside (ex-data e)) {:refused (.getMessage e)} (throw e)))))))
