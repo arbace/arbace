@@ -17,7 +17,9 @@
 ;; program name it runs with), :shipped (the test's shipped expected file says the same), :ghc (hs-judge-1120: the compiler's
 ;; source at the pin, GHC 9.14.1's tarball's compiler/: a decision record-ref's -O0 build makes at compile time, such as
 ;; GHC.Core.Opt.ConstantFold's rewrites of primops on literals). test/haskell/eval/golden/left.tsv:
-;; ID<TAB>reason for each program left on GHC's record. --oracle: each golden program's status, stdout and stderr against
+;; ID<TAB>reason for each program left on GHC's record. golden/na.tsv (D435-3 (a), hs-judge-1120): ID<TAB>reason for each
+;; program GHC did not build and nothing runs, out of the judge's cases. test/haskell/eval/boot.edn (D-HSJ-2 (a)): the digests of the
+;; expected outputs a nofib boot.sh makes (bin/hsi boot), each a program own-verdicts.tsv lists. --oracle: each golden program's status, stdout and stderr against
 ;; GHC's recorded run (SHA-256 and sizes). --control: each golden program with one byte of its stdout (an empty one: stderr;
 ;; both empty: a byte added) changed must fail the review and leave the recorded digest.
 (ns hsi.review
@@ -92,6 +94,12 @@
         left (into {} (for [l (str/split-lines (slurp (str dir "/left.tsv"))) :when (not (str/starts-with? l "#"))
                             :let [[id why] (str/split l #"\t" 2)]]
                         (do (when (str/blank? why) (bad! (str id ": left without a reason"))) [id why])))
+        ;; D435-3 (a) (hs-judge-1120): the programs out of the judge's cases: GHC did not build them, nothing runs them (na.tsv)
+        na (into {} (for [l (str/split-lines (slurp (str dir "/na.tsv"))) :when (not (str/starts-with? l "#"))
+                          :let [[id why] (str/split l #"\t" 2)]]
+                      (do (when (str/blank? why) (bad! (str id ": n/a without a reason"))) [id why])))
+        ;; D-HSJ-2 (a) (hs-judge-1120): the expected outputs a nofib boot.sh makes, kept as digests (test/haskell/eval/boot.edn)
+        boot (let [f (io/file (str root "/test/haskell/eval/boot.edn"))] (if (.isFile f) (read-string (slurp f)) {}))
         rows (atom 0) bfreq (atom {}) controls (atom 0)]
     (doseq [id files
             :let [g (str dir "/" id) e (get rv id)
@@ -147,15 +155,36 @@
                      (first (str/split l #"\t"))))
           fs (set files)
           ids (map #(second (re-find #"^\{:id \"([^\"]*)\"" %)) ref)]
-      (doseq [id ids :when (not (or (own id) (fs id) (left id)))]
-        (bad! (str id ": neither its own verdict, a golden file, nor left in left.tsv")))
+      (doseq [id ids :when (not (or (own id) (fs id) (left id) (na id)))]
+        (bad! (str id ": neither its own verdict, a golden file, left in left.tsv nor n/a in na.tsv")))
       (doseq [id (keys left) :when (not (some #{id} ids))] (bad! (str id ": left in left.tsv, no program of the record")))
       (doseq [id (keys left) :when (own id)] (bad! (str id ": left in left.tsv, and its own verdict in own-verdicts.tsv")))
+      ;; D435-3 (a): an n/a program is one GHC did not build, and nothing else judges it
+      (doseq [id (keys na) :let [rl (record-line ref id)]]
+        (cond (nil? rl) (bad! (str id ": n/a in na.tsv, no program of the record"))
+              (not= :no-build (:status rl)) (bad! (str id ": n/a in na.tsv, but GHC's record ran it"))
+              (or (own id) (fs id) (left id)) (bad! (str id ": n/a in na.tsv, and its own verdict, a golden file or left"))))
+      ;; D-HSJ-2 (a): a boot digest belongs to a program of the record listed in own-verdicts.tsv; --oracle: it is GHC's recorded
+      ;; run's; --control: the digest with its first hex digit changed is not
+      (doseq [[id e] boot :let [rl (record-line ref id) d (str (:stdout e))]]
+        (cond (nil? rl) (bad! (str id ": in boot.edn, no program of the record"))
+              (not (re-matches #"[0-9a-f]{64}" d)) (bad! (str id ": boot.edn's :stdout is no SHA-256"))
+              (not (own id)) (bad! (str id ": in boot.edn, not in own-verdicts.tsv"))
+              :else
+              (do (when oracle?
+                    (if (and (= 0 (:status rl)) (= d (:stdout rl)) (= (:bytes e) (:bytes rl)))
+                      (println (str "   " id ": boot.edn's digest, GHC's recorded run (" (subs d 0 16) " " (:bytes e) " bytes)"))
+                      (bad! (str id ": boot.edn's digest is not GHC's recorded run"))))
+                  (when control?
+                    (if (not= (str (if (= \0 (first d)) \1 \0) (subs d 1)) (:stdout rl))
+                      (swap! controls inc)
+                      (bad! (str id ": the boot control keeps the recorded digest")))))))
       (println (str "hsi golden: " (count files) " golden files, " @rows " rows reviewed ("
-                    (str/join ", " (for [[k v] (sort-by key @bfreq)] (str v " " (name k)))) "), " (count left) " left on GHC's record"
+                    (str/join ", " (for [[k v] (sort-by key @bfreq)] (str v " " (name k)))) "), " (count left) " left on GHC's record, "
+                    (count na) " n/a (no run: out of the judge), " (count boot) " by a boot digest"
                     (when oracle? (let [nr (count (filter #(string? (:no-run (get rv %))) files))]
                                     (str ", " (- (count files) nr) " GHC's recorded run" (when (pos? nr) (str ", " nr " with no run (:no-run, the review's basis alone)")))))
-                    (when control? (str ", " @controls " of " (count files) " controls fail")))))
+                    (when control? (str ", " @controls " of " (+ (count files) (count boot)) " controls fail")))))
     (when (seq @bad)
       (doseq [b @bad] (println (str "FAIL " b)))
       (System/exit 1))))
