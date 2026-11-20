@@ -568,6 +568,20 @@ covers what.
   own under the Eclipse Public License 1.0 but for its copies of `Objects/unicodeobject.c`'s `_PyUnicode_ScanIdentifier` and
   `_Py_ascii_whitespace` and `Parser/pegen.c`'s three `_PyPegen_byte_offset_to_character_offset*` functions (under the PSF
   License Agreement, marked in the file).
+- `tools/pyi/clib/pyparser/` and `go/arbace/clib/pyparser.ae`, `go/arbace/clib/pyparser/` (queue 494, parse-check's own
+  reference): the node program of CPython 3.14.10's parser, its `Parser/parser.c`, `pegen.c`, `pegen_errors.c`,
+  `action_helpers.c`, `string_parser.c` and `peg_api.c`, `Python/Python-ast.c`, `asdl.c`, `pyarena.c`, `future.c`,
+  `ast_preprocess.c` and `mystrtoul.c`, and the tokenizer's files of the entry above with `Parser/tokenizer/string_tokenizer.c`
+  and `utf8_tokenizer.c`, unmodified, compiled against its `Include/` (the same tarball and license as the entry above),
+  built by ci's builder with the part of musl 1.2.6 it reaches (under the MIT License) and
+  `tools/pyi/clib/pyparser/parseharness.c`, Arbace's own under the Eclipse Public License 1.0 but for its copies of
+  `Modules/unicodedata.c`'s normalization and name lookup (NFKC, the DAWG, the derived names; Copyright (c) Corporation for
+  National Research Initiatives, under the PSF License Agreement; the harness reads their tables from the tarball's
+  `Modules/unicodedata_db.h` and `unicodename_db.h` at run time), of
+  `Objects/unicodeobject.c`'s `_PyUnicode_DecodeUnicodeEscapeInternal2`, `_PyUnicode_ScanIdentifier` and
+  `_Py_ascii_whitespace`, `Objects/bytesobject.c`'s `_PyBytes_DecodeEscape2`, `Objects/longobject.c`'s `_PyLong_DigitValue`,
+  `Python/ast.c`'s `_PyAST_GetDocString`, `Python/pystrcmp.c`'s `PyOS_mystrnicmp` and `Python/codegen.c`'s `_Py_CArray_*` (under the PSF License Agreement, marked
+  in the file).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2; `overlay/jdk/javac/buildtools/` and `buildtools-world/`, the tool-world variants of the JDK build's tools and of
