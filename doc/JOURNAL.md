@@ -13989,3 +13989,19 @@ per case; and asked for the rest of Java's 21 and arm64's 31 to be made own. Two
   0.9024 -> 0.9051), Python 94/97/100/98 unchanged.
 - Not run (the gate's, or the Mac's at those heads): the whole OCaml suite and corpora, `bin/oi test`, `table-check`, `pins`,
   `bin/pyi runtime check`, `test/python/aot-lock-test.bash`, `bin/gate`.
+
+## 2026-11-20: ocamldoc runs on oi (queue 480, the Mac; committed at the merge n-merge-1120b)
+
+Queue 480 (the Mac; DECISION 478-2 (a)), branch `480-ocaml-ocamldoc` (aeefee2d2, on 478's 2ab36fb26): ocamldoc runs on oi. OCaml
+5.5.0's ocamldoc/ (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba, paths ocamldoc/*.ml, *.mli, *.mll, *.mly; LGPL 2.1 with the OCaml
+linking exception) is taken from the pinned tarball at build time, unmodified and not copied into the tree, as compiler-libs' units are
+(bin/lib/oi/ocamldoc.bash's ocamldoc_build): its lexers by the native ocamllex, its parsers by the native ocamlyacc, its 45 units typed
+by Arbace's typer. compiler-libs' native units grow by typing/, file_formats/cmi_format and cmt_format, lambda/debuginfo and lambda,
+and driver/pparse, compenv, main_args and compmisc of the same tarball. Five typer fixes (Psig_modtypesubst; Includemod's
+strengthened_modtypes; a functor's substitution into an exception's inline record; classes of leniently read interfaces; methods'
+type_approx) let all 114 library units build. test/ocaml/ocamldoc/oicmi.ml (Arbace's own, EPL) makes the stdlib's .cmi files on oi.
+header.awk's ocamldoc mode runs tool-ocamldoc/t01-t05 (odoc_test.ml as a Dynlink plugin) at oi's level, judged by their own
+.reference: 5 pass. At the light AOT level t01 had not finished after 600 s of CPU (7 GB resident), so the AOT levels keep
+:ocamltest-tools (DECISION 480-1 (a), the main session). Alternatives considered: committing a copy of ocamldoc/ as 478 did for
+makedepend.ml (not needed: no change to it; DECISION 480-2 (a)); ocamlc-made .cmi files (rejected: the native path takes no ocamlc).
