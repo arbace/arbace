@@ -391,6 +391,26 @@
              :drop)
       (check "negative: a body that differs otherwise keeps its own reason"
              (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare (assoc-in o [:locals 1 :ty] unit) r)) :differs))
+    ;; queue 498: SimplifyConstCondition's arms at the instance (prune-const-arms): slice::iter's `if T::IS_ZST` takes one arm, the
+    ;; dead arm's call (zst_shrink!'s unchecked_sub) neither closed nor emitted
+    (let [bt '(ty "bool" (bool))
+          k (fn [v] (list 'const (str "const " v) bt (list 'scalar (if v 1 0) 1)))
+          f (list 'const "dead" '(ty "fn() {dead}" (fndef "dead" [])) '(zst))
+          b (fn [op] {:args 0 :locals [{:ty '(ty "()" (tuple))} {:ty bt}] :debug []
+                      :blocks [{:cleanup false :stmts [(list 'assign '(place 1) (list 'use (k true)))] :term (list 'switch op [[0 2]] 1)}
+                               {:cleanup false :stmts [] :term '(return)}
+                               {:cleanup false :stmts [] :term (list 'call f [] '(place 0) 3 '(continue))}
+                               {:cleanup false :stmts [] :term '(return)}]})
+          pr (br/prune-const-arms (b '(move (place 1))))]
+      (check "SimplifyConstCondition at the instance: a one-use constant local's switch a goto, the dead arm unreachable"
+             (mapv :term (:blocks pr)) ['(goto 1) '(return) '(unreachable) '(unreachable)])
+      (check "the switch on the constant itself" (mapv :term (:blocks (br/prune-const-arms (b (k false))))) ['(goto 2) '(unreachable) (:term (nth (:blocks (b nil)) 2)) '(return)])
+      (check "the pruned body still equal to the record's after -O0's passes"
+             (first (br/pack-compare pr {:args 0 :locals [{:ty '(ty "()" (tuple))}] :debug [] :blocks [{:cleanup false :stmts [] :term '(return)}]}))
+             :equal-o0)
+      (check "negative: a switch on a local not constant unchanged" (let [x (assoc-in (b '(move (place 1))) [:blocks 0 :stmts] [])] (= x (br/prune-const-arms x))) true)
+      (check "negative: a local read twice is no one-use constant"
+             (let [x (update-in (b '(move (place 1))) [:blocks 1 :stmts] conj '(assign (place 0) (use (copy (place 1)))))] (= x (br/prune-const-arms x))) true))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)

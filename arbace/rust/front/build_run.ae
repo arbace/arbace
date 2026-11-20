@@ -1071,6 +1071,36 @@
     :tuple (every? generic-zst? (second g))
     false))
 
+(declare o0-single-use-consts o0-simplify-const-condition strip-storage)
+
+(defn prune-const-arms
+  "queue 498: BODY with SimplifyConstCondition's folds (simplify_branches.rs, -O0): a switch whose operand is a constant scalar,
+  directly or through SingleUseConsts' one-use local (`_t = const C; switchInt(move _t)`), made a goto to the arm its value
+  selects, and every block no longer reachable from the start made `unreachable` with no statements (the block indices kept,
+  SimplifyCfg's remove_dead_blocks left to the compare's o0-normalize); BODY itself when no switch folds"
+  [body]
+  (let [blocks (:blocks body)
+        [sb _] (o0-single-use-consts (update body :blocks (fn [bs] (mapv #(update % :stmts strip-storage) bs))))
+        [cb _] (o0-simplify-const-condition sb)
+        folded (set (for [i (range (count blocks))
+                          :let [t (:term (nth blocks i)) t2 (:term (nth (:blocks cb) i))]
+                          :when (and (seq? t) (= 'switch (first t)) (seq? t2) (= 'goto (first t2)))]
+                      i))]
+    (if (empty? folded)
+      body
+      (let [succ @(requiring-resolve 'arbace.rust.front.passes/successors)
+            term (fn [i] (if (folded i) (:term (nth (:blocks cb) i)) (:term (nth blocks i))))
+            live (loop [stack [0] seen #{}]
+                   (if-let [i (peek stack)]
+                     (if (or (seen i) (not (< -1 i (count blocks))))
+                       (recur (pop stack) seen)
+                       (recur (into (pop stack) (succ (term i))) (conj seen i)))
+                     seen))]
+        (assoc body :blocks (vec (map-indexed (fn [i b] (cond (not (live i)) (assoc b :stmts [] :term '(unreachable))
+                                                              (folded i) (assoc b :term (term i))
+                                                              :else b))
+                                              blocks)))))))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
@@ -1094,9 +1124,12 @@
     ;; rustc's optimized_mir's (the record's: `_n = PtrMetadata(copy _s)` where the built body calls `<[T]>::len`, str::len's and
     ;; every slice method's), as runtime-body lowers the program's own bodies: the instance is our lowering of what codegen
     ;; takes, so the call is gone before the compare and before its callees are closed (slice_len_fn has no native body)
+    ;; queue 498: then SimplifyConstCondition's arms (prune-const-arms): a switch on a constant the instance knows (`T::IS_ZST`)
+    ;; takes its one arm, as rustc's -O0 MIR of the instance does, so the dead arm's callees (slice::iter's zst_shrink!'s
+    ;; `unchecked_sub`) are neither closed nor emitted
     {:def (:def entry) :args args :body (cond-> (let [lb ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
                                                           (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))]
-                                                  (update lb :blocks lower-slice-len-calls))
+                                                  (prune-const-arms (update lb :blocks lower-slice-len-calls)))
                                           (seq zst) (assoc :zst-locals zst))})))
 
 (defn- drop-shim-body
