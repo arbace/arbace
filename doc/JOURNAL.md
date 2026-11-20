@@ -13800,3 +13800,14 @@ alloc-check --export carries the entry's own impl and the functions enclosing it
 BufGuard, btree::mem::replace's PanicGuard and Box<dyn Error>::from's StringError build and compare equal. lib-unit compare alloc:
 16 equal (9 before), 7 differ (structure: four first allocas, three a block earlier), 2 refused (a fn-local trait's impl symbol,
 a fn-local &str constant), the crossed control differing. alloc's interface pass made again for it (about 20 minutes, 2 GB).
+
+## 2026-11-20: rust-c6-1120: native bodies dropped nothing; a drop's glue, 18 of 25 alloc items equal to std's IR
+
+Found while comparing alloc's items: build-run's runtime-body wrote every drop terminator without its glue, and codegen takes a
+drop without glue for a plain branch, so Arbace's bodies (the programs' own, C1, and the native library bodies, C2) called no
+drop_glue and ran no Drop impl (rsi-build's unwind.ours.ll: `deep` never drops its `Noisy` guard; `bin/rust-front rsi-native`
+on the pinned std's rlibs: stdout without the "drop odd/even" lines). Sent to the coordinator for rust-rec-1120's --front own
+record. runtime-body now writes `(glue {:symbol drop_glue::<T>})` from a facts function (`mono/drop-glue-symbol`): lib-unit's always
+(alloc: 16 -> 18 equal, `_from_vec_unchecked` and `format_inner` with their invokes and landing pads), the programs' run only with
+`RF_DROP_GLUE=1` (unwind.rs stays own and drops its guard, but its native-std run faults at the second catch_unwind: the ci leg must
+judge before it is the default).

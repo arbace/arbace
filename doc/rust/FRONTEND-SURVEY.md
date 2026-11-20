@@ -5394,7 +5394,8 @@ after each (the export about 2 minutes with alloc's interface cached; build and 
 | + projections in layouts | 7 | 7 | 11 |
 | + caller locations at the expansion's cause | 8 | 6 | 11 |
 | + a root-file call's own place; crate-private ADTs in the export | 9 | 6 | 10 |
-| + items defined inside a function (their ADTs, impls and enclosing functions) | **16** | 7 | 2 |
+| + items defined inside a function (their ADTs, impls and enclosing functions) | 16 | 7 | 2 |
+| + a drop's glue (drop_glue::<T> of the dropped local's type) | **18** | 5 | 2 |
 
 - **Projections in layouts** (`mono/layout-of*`'s `:proj`): a projection an ADT's field leaves at the instance is normalized by the
   solver, as layout_of normalizes its type: `Cow<'_, str>`'s `<str as ToOwned>::Owned` is `String`. `From<Cow<str>> for String`
@@ -5415,6 +5416,19 @@ after each (the export about 2 minutes with alloc's interface cached; build and 
   the functions enclosing its definition and the ADTs it names, so that v0 prints `replace` and `flush_buf` in the value namespace):
   `BufWriter::flush_buf`'s `BufGuard` (its four methods and its Drop), `btree::mem::replace`'s `PanicGuard`, `Box<dyn Error>::from`'s
   `StringError` (Display and Debug) build; 9 -> **16 of 25 equal**. alloc's interface pass made again for it (about 20 minutes).
+
+- **A drop's glue** (runtime-body's `:drop-glue` fact, `mono/drop-glue-symbol`): runtime-body wrote every drop terminator without
+  its glue (`(drop P T U r d nil)`), and codegen takes a drop without glue for a plain branch: Arbace's bodies dropped nothing (no
+  drop_glue call, no landing pad), the library's as well as the programs' own (found here; sent to the coordinator). The unit gives
+  each drop drop_glue::<T> of the dropped local's type when it needs drop: `CString::_from_vec_unchecked` and `format_inner` (their
+  invokes and landing pads) are equal, 16 -> **18 of 25**. The programs' run (build-run's native-run) takes it only with
+  `RF_DROP_GLUE=1`: with it unwind.rs's `deep` drops its guard (invoke, landing pad), still own in rsi-build, but its native-std
+  run (`bin/rust-front rsi-native`, rustc linking the pinned std's rlibs) faults (status 139) at the second catch_unwind, where
+  without it the run ends as rustc's but for the missing drop lines; the ci leg (runtime-ci) is the judge before it is the default.
+
+Left on alloc after the drop glue (7 of 25): 5 differ structurally (`custom_owner_from_box`'s first `alloca`, `to_uppercase` at its
+31st line, three where rustc's -O0 CFG returns a block earlier), 2 refused (a fn-local trait's impl symbol, a fn-local `&str`
+constant).
 
 Left on alloc after the fn-local items (9 of 25): 7 differ structurally (four first `alloca`s: a local's size or order; three where
 rustc's -O0 CFG returns a block earlier: `splitpoint`, `From<Cow<str>>`, `BufGuard`'s Drop), 1 refused for a fn-local trait's impl
