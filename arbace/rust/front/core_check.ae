@@ -1164,6 +1164,35 @@
                (inc depth)))))
   (catch Throwable _ nil)))
 
+(defn- body-types
+  "The types (the :tc metadata) of a body's forms"
+  [body]
+  (let [acc (transient [])]
+    (letfn [(w [x] (when-let [t (:tc (meta x))] (conj! acc t))
+                   (cond (map? x) (doseq [v (vals x)] (w v)) (coll? x) (doseq [y x] (w y))))]
+      (w body))
+    (persistent! acc)))
+
+(defn with-private-facts
+  "An export's entry E with the native facts (NATIVE, the crate's interface pass) of the crate-private items its body names that
+  std's interface SI-FULL lacks, which the run's interface takes (build-run's with-extra-iface): queue 443's functions it calls
+  (`box_new_uninit`), 462's impls and traits of those (`RawVec`'s inherent impl, `SpecToString`), so that the run prints the
+  function constants as rustc does (`RawVec::<u8>::ptr`, not `<impl {}>::ptr`); C6-4 (a)'s ADTs its types name (`btree::node::
+  LeftOrRight`), its own impl (a fn-local struct's inherent impl) and the functions enclosing its definition and those ADTs (a
+  fn-local item's parent, in the value namespace of its v0 path)"
+  [e native si-full]
+  (let [ts0 (tree-seq coll? seq (body-types [(:body e) (:promoted e)]))
+        fps (set (for [x ts0 :when (and (vector? x) (= :fndef (first x)) (string? (second x)))] (second x)))
+        adt-ps (set (for [x ts0 :when (and (vector? x) (= :adt (first x)) (string? (second x)))] (second x)))
+        ancestors (fn [^String p] (let [segs (str/split p #"::")] (for [i (range 2 (count segs))] (str/join "::" (take i segs)))))
+        pick (fn [k ps] (into {} (for [p ps :let [f (get-in native [k p])] :when (and f (not (get-in si-full [k p])))] [p (dissoc f :native)])))
+        fs (pick :fns (concat fps (ancestors (str (:def e))) (mapcat ancestors adt-ps)))
+        parents (set (keep #(let [i (.lastIndexOf ^String % "::")] (when (pos? i) (subs % 0 i))) (conj fps (str (:def e)))))
+        is (pick :impls parents)
+        ts (pick :traits parents)
+        as (pick :adts adt-ps)]
+    (cond-> e (seq fs) (assoc :fns fs) (seq is) (assoc :impls is) (seq ts) (assoc :traits ts) (seq as) (assoc :adts as))))
+
 (defn export-entry
   "The exported body of a built body B (its last stage after the passes, its promoted bodies); queue 462: with K, the bodies
   of the crate's constants it names by a local def id (:consts, export-consts)"
@@ -1257,6 +1286,7 @@
             std-file (str front-dir "/std-names.edn")
             std (collect/load-std std-file)
             si (collect/load-std-iface (str front-dir "/std-iface.edn"))
+            si-full si   ; C6-4 (a): the helper's interface, before core's native facts are layered over it
             oracle (load-oracle oracle-dir)
             judge @(requiring-resolve 'arbace.rust.front.build-check/judge-row)
             print-text (fn [b] (try (build/print-built b) (catch Throwable e (str "print failed: " e))))
@@ -1327,7 +1357,9 @@
                             (when-let [rd (System/getenv "CORE_RAW")] (when b (.mkdirs (File. ^String rd)) (spit (str rd "/" k ".edn") (binding [*print-meta* true] (pr-str b)))))
                             (let [row (if (nil? w) [:no-oracle nm k] (judge nm (oracle-text w) t err detail))]
                               (when (and b (or (and export-re (re-find export-re (str nm))) (and export-keys (export-keys k))))
-                                (when-let [e (export-entry b k (contains? #{:equal :equal-alloc-ids :equal-allocs} (first row)))]
+                                (when-let [e (cond-> (export-entry b k (contains? #{:equal :equal-alloc-ids :equal-allocs} (first row)))
+                                               ;; C6-4 (a): core's crate-private facts the body names, as alloc's export carries them
+                                               export-keys (with-private-facts @native-all si-full))]
                                   (swap! exported conj (if (= :no-oracle (first row)) (assoc e :judge :instance) e))))
                               row)))
                 {:keys [stages bodies native]} (binding [*only-key?* (or *only-key?* export-keys)]
