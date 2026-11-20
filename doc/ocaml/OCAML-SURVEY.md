@@ -4423,3 +4423,36 @@ ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the ma
   level).
 - Controls (`test/ocaml/controls.txt`): the depend row against lib-runtime-events/test's reference, and lib-runtime-events/test against
   test_caml's (the C consumer's counts must part from the OCaml consumer's).
+
+## As built: queue 480 (2026-11-20, the VM): ocamldoc on oi
+
+- DECISION 478-2 (a), the second of ocamltest's tools as Arbace's own: OCaml 5.5.0's `ocamldoc/` runs on oi. Its sources are the pinned
+  tarball's, unmodified (`bin/lib/oi/ocamldoc.bash`'s `ocamldoc_build`, kept in `.tmp/oi/ocamldoc` by its key): its four lexers by the
+  native ocamllex, its two parsers (`odoc_parser.mly`, `odoc_text_parser.mly`) by the native ocamlyacc, its 45 units (odoc_info's, then
+  ocamldoc's, the Makefile's order) typed and translated by Arbace's typer against compiler-libs', Unix's, Str's and Dynlink's interfaces.
+- compiler-libs on the native path (`COMPLIB_UNITS`) holds ocamldoc's part of ocamlcommon now: all of `typing/` (typing_SOURCES'
+  order, with `file_formats/`'s cmi_format and cmt_format), `lambda/`'s debuginfo and lambda (Typeopt's), `driver/`'s pparse, compenv,
+  main_args and compmisc; the interfaces without an implementation (annot, value_rec_types, outcometree) beside parsetree. All 114 units
+  of the other libraries are built natively (`bin/oi stdlib`), after five fixes to the typer:
+  - `Psig_modtypesubst` (`module type S := ...`, printtyp.mli): bound for the later items, no item of its own;
+  - Includemod's `strengthened_modtypes`: a submodule's implementation strengthened (aliasable) by its path before its inclusion is
+    checked (gprinttyp's `type decoration = Decoration.r`, `Decoration.make : ... -> decoration`);
+  - a functor's result substituted into an exception's inline record too (Consistbl.Make's `Inconsistency { unit_name : Module_name.t }`
+    in persistent_env), the record registered afresh;
+  - a unit's interface read leniently types its classes (odoc_scan.mli's `class scanner`, inherited by odoc_cross and by the plugins),
+    a refused one a hole as before;
+  - Typeclass's first pass: a method without a type gets its body's approximation (`Typecore.type_approx`: labels and optional
+    parameters), so `self#text_of_module_kind ~with_def_syntax:false` before the method's body is typed takes its `?with_def_syntax`.
+- ocamltest's `-nostdlib -I stdlib`: the standard library's .cmi files are made on oi too, by `test/ocaml/ocamldoc/oicmi.ml` (Arbace's own:
+  `ocamlc -c FILE.mli` over compiler-libs, Pparse, Typemod.type_interface, Env.save_signature) for each of StdlibModules' units with
+  stdlib/Compflags' flags (stdlib.mli and the *Labels.mli through expand_module_aliases.awk, named stdlib__X.cmi), in passes until every
+  interface's dependencies are there: 71 .cmi files, no ocamlc.
+- `header.awk`'s ocamldoc mode: a header of ocamltest's `ocamldoc` test alone (no backend; `plugins = "FILE.ml"`, `flags = "-I
+  ${ocamlsrcdir}/ocamldoc"`) is a run row, environment `@ocamldoc=1 @plugins=FILE,...`, at oi's level and the light AOT level. The run
+  (`oi_ocamldoc_prog`): each plugin typed against ocamldoc's interfaces and written as oi's plugin file (OI-CMO 1, its imports for
+  Dynlink's checks; a `.cmxs` copy at the light level), ocamldoc's `odoc.ml` the row's program, its arguments ocamltest's (`-nostdlib -I
+  STDLIB -g FILE.cmo TEST.ml -o TEST.result`), the program's interface digests `OI_DYNLINK_IMPORTS`. The row's output (`ocamldoc_output`)
+  is TEST.result, judged by the test's own .reference (check-program-output); ocamldoc's own output is held to TEST.ocamldoc.reference
+  (none: no output, check-ocamldoc-output), a difference appended so the row fails. `tool-ocamldoc/t01`-`t05` (odoc_test.ml loaded by oi's
+  Dynlink, OC220) leave `:ocamltest-tools`. The other ocamldoc tests (backends html, latex, man, texinfo) are no rows of the run corpus.
+- Control (`test/ocaml/controls.txt`): t01's run against t04's reference must differ.
