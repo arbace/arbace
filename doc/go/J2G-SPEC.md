@@ -325,11 +325,20 @@ translation each, small beside the world. So:
   the gate's admission (`bin/gate-policy mem`).
 - Not cut: the world. Its 17.7 GiB is the floor of one process; batches in separate processes
   would each load and analyze it (the closed world: every translation asks any class), so they
-  were not made. What it is made of (a heap profile, `ARBACE_MEMPROFILE` with `J2G_MEM_EXIT=load`):
-  the Java forms as read (lists, symbols, their metadata), which the analyzer keeps (a method's
-  `:member` holds its body, and every call node its method), and the vectors built through
-  transients, each keeping the transient's copy of the empty root (32 slots, 512 bytes in Go's
-  interface words), a fifth of the world.
+  were not made. What it is made of (a heap profile of the world of `jdk/forms` and the runtime,
+  7,946 classes, `ARBACE_MEMPROFILE` with `J2G_MEM_EXIT=load`; 2.2 GB of objects sampled in use):
+  - the vectors built through transients (`mapv`, `vec`, `into`), each keeping the transient's copy
+    of the empty root, 32 slots (512 bytes in Go's interface words) and its node: 0.44 GB, a fifth.
+    The runtime keeps `EMPTY_NODE` since (doc/VENDOR-NOTES.md, hand change 36): in j2g's runs on an
+    executable built from that runtime (the gate's, whose `j2g` javac's tool and the programs' builds
+    run on; stage 0 after the next re-seed);
+  - the Java forms as read (the reader's lists, symbols, their position maps): about 0.5 GB, a
+    fifth, still in use after the analysis. Dropping the members' forms once analyzed (the
+    methods' and fields' `:member` bare, the class's `:members` bare after `analyze-class!`) freed
+    none of them (the same objects in use, measured): they are held elsewhere, and were left;
+  - the analysis's maps and the strings (UTF-16 in jrt) for the rest.
+  The heap in use after a collection was 1.6 to 2 times the objects sampled, by when the collector
+  last ran (the spans the world's objects share with the garbage of their analysis).
 
 **jrt's own Java and the JDK's variants** (amendment K1, accepted 2026-10-09). The JDK input is
 `bin/jrt-convert`'s output (committed as `jdk/forms` since standalone S1, 2026-10-12; `--jdk`'s
