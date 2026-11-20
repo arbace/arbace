@@ -5,7 +5,7 @@
   copy, as rustc's optimized MIR writes it), SimplifyLocals' unused local and renumbering, each named in :equal-o0; the negative
   cases (an operand, a local's type, a block's cleanup flag, a borrowed temporary not propagated) differ. `bin/rust-front
   pack-compare-test`."
-  (:require [arbace.rust.front.build-run :as br]))
+  (:require [arbace.rust.front.build-run :as br] [arbace.rust.front.passes :as passes] [arbace.rust.front.mono :as mono]))
 
 (def i8 '(ty "i8" (int "i8")))
 (def u8 '(ty "u8" (uint "u8")))
@@ -194,6 +194,61 @@
       (check "negative: a non-zero-sized constant's text is still compared"
              (br/pack-compare (assoc-in r [:blocks 0 :term] (list 'call cf ['(const "const 1_u8" (ty "u8" (uint "u8")) (scalar 1 1))] '(place 0) 1 '(continue)))
                               (assoc-in r [:blocks 0 :term] (list 'call cf ['(const "const 1" (ty "u8" (uint "u8")) (scalar 1 1))] '(place 0) 1 '(continue)))) :differs))
+    ;; queue 483: LowerSliceLenCalls at the instance (core-instance): str::len's `<[u8]>::len(move _2)`, the record's
+    ;; `_0 = PtrMetadata(move _2)` merged into the block of as_bytes' return
+    (let [usz '(ty "usize" (uint "usize")) sr '(ty "&str" (ref (ty "str" str) false)) br8 '(ty "&[u8]" (ref (ty "[u8]" (slice (ty "u8" (uint "u8")))) false))
+          fc (fn [txt d] (list 'const txt (with-meta (list 'ty (str "fn {" txt "}") (list 'fndef d [])) {:tc [:fndef d [[:uint "u8"]]]}) '(zst)))
+          ab (fc "core::str::<impl str>::as_bytes" "core::str::{impl#0}::as_bytes")
+          ln (fc "core::slice::<impl [u8]>::len" "core::slice::{impl#0}::len")
+          o {:args 1 :locals [{:ty usz} {:ty sr} {:ty br8}] :debug [{:name "self" :value '(place 1)}]
+             :blocks [{:cleanup false :stmts ['(storage-live 2)] :term (list 'call ab '[(copy (place 1))] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts [] :term (list 'call ln '[(move (place 2))] '(place 0) 2 '(continue))}
+                      {:cleanup false :stmts ['(storage-dead 2)] :term '(return)}]}
+          r {:args 1 :locals [{:ty usz} {:ty sr} {:ty br8}] :debug [{:name "self" :value '(place 1)}]
+             :blocks [{:cleanup false :stmts [] :term (list 'call ab '[(copy (place 1))] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts ['(assign (place 0) (unop "PtrMetadata" (move (place 2))))] :term '(return)}]}
+          lo (update o :blocks br/lower-slice-len-calls)]
+      (check "LowerSliceLenCalls at the instance: `<[u8]>::len` by its def path made PtrMetadata, the goto merged"
+             (br/pack-compare lo r) [:equal-o0 "cfg,storage"])
+      (check "negative: the instance without the pass (the call kept)" (br/pack-compare o r) :differs)
+      (check "negative: another callee is not lowered"
+             (br/pack-compare (update (assoc-in o [:blocks 1 :term] (list 'call (fc "core::slice::<impl [u8]>::is_empty" "core::slice::{impl#0}::is_empty") '[(move (place 2))] '(place 0) 2 '(continue)))
+                                      :blocks br/lower-slice-len-calls) r) :differs))
+    ;; queue 483: LowerIntrinsics' overflowing operators (overflowing_mul at usize: `mul_with_overflow::<u64>(move _6, move _7)`,
+    ;; the record's `_5 = MulWithOverflow(move _6, move _7)`, as the pack records it)
+    (let [u64t '(ty "u64" (uint "u64")) usz '(ty "usize" (uint "usize")) bool '(ty "bool" bool)
+          pair (fn [a] (list 'ty (str "(" (second a) ", bool)") (list 'tuple a bool)))
+          mwo (list 'const "std::intrinsics::mul_with_overflow::<u64>"
+                    (with-meta (list 'ty "fn(u64, u64) -> (u64, bool) {std::intrinsics::mul_with_overflow::<u64>}" (list 'fndef [u64t]))
+                      {:tc [:fndef "core::intrinsics::mul_with_overflow" [[:uint "u64"]]]})
+                    '(zst))
+          tail ['(assign (place 3) (use (copy (place 5 (field 0 (ty "u64" (uint "u64")))))))
+                '(assign (place 4) (use (copy (place 5 (field 1 (ty "bool" bool))))))
+                '(assign (place 8) (cast "IntToInt" (copy (place 3)) (ty "usize" (uint "usize"))))
+                '(assign (place 0) (aggregate (tuple) [(move (place 8)) (copy (place 4))]))]
+          head ['(assign (place 6) (cast "IntToInt" (copy (place 1)) (ty "u64" (uint "u64"))))
+                '(assign (place 7) (cast "IntToInt" (copy (place 2)) (ty "u64" (uint "u64"))))]
+          locals (mapv (fn [t] {:ty t}) [(pair usz) usz usz u64t bool (pair u64t) u64t u64t usz])
+          dbg (vec (for [i [1 2 3 4]] {:name "x" :value (list 'place i)}))
+          o {:args 2 :locals locals :debug dbg
+             :blocks [{:cleanup false :stmts head :term (list 'call mwo '[(move (place 6)) (move (place 7))] '(place 5) 1 '(unreachable))}
+                      {:cleanup false :stmts tail :term '(return)}]}
+          r {:args 2 :locals locals :debug dbg
+             :blocks [{:cleanup false :stmts (vec (concat head ['(assign (place 5) (binop "MulWithOverflow" (move (place 6)) (move (place 7))))] tail)) :term '(return)}]}]
+      (check "LowerIntrinsics: mul_with_overflow made MulWithOverflow, the goto merged" (br/pack-compare (passes/lower-intrinsics o) r) [:equal-o0 "cfg"])
+      (check "negative: the instance without the pass (the intrinsic's call kept)" (br/pack-compare o r) :differs)
+      (check "negative: the record's AddWithOverflow"
+             (br/pack-compare (passes/lower-intrinsics o) (assoc-in r [:blocks 0 :stmts 2] '(assign (place 5) (binop "AddWithOverflow" (move (place 6)) (move (place 7)))))) :differs))
+    ;; queue 483: drop_in_place's call of drop_glue::<T> taken natively only where the shim it resolves to is the record's
+    ;; (drop-glue-ok-fn, mono's needs_drop and symbol stubbed)
+    (let [shim (fn [tt sym] {:instance (str "Shim(DropGlue(DefId(2:3 ~ core[bdd4]::ptr::drop_glue), Some(" tt ")))") :symbol sym})
+          ok? (fn [info recs] (with-redefs [mono/drop-glue-info (fn [_ _] info)] ((#'br/drop-glue-ok-fn nil recs) [:uint "u8"])))]
+      (check "drop glue: T needs drop, the record's shim of T at mono's symbol" (ok? {:needs-drop true :symbol "_RS"} [(shim "u8" "_RS")]) true)
+      (check "drop glue: T needs no drop, the record has no shim of T (the empty glue)" (ok? {:needs-drop false :symbol "_RS"} [(shim "u16" "_RT")]) true)
+      (check "negative: the record's shim of T at another symbol" (ok? {:needs-drop true :symbol "_RS"} [(shim "u8" "_RX")]) false)
+      (check "negative: T needs drop and the record has no shim of it" (ok? {:needs-drop true :symbol "_RS"} [(shim "u16" "_RS")]) false)
+      (check "negative: T needs no drop by mono, but the record has its shim" (ok? {:needs-drop false :symbol "_RS"} [(shim "u8" "_RS")]) false)
+      (check "negative: mono refuses T (no symbol)" (ok? nil []) false))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)

@@ -1675,8 +1675,14 @@
   resolve-assoc-fn), any other function itself: [DEF ARGS]; a builtin candidate (closures' Fn traits, Clone's shims) and what
   the resolution leaves refused"
   [d args]
-  (if-not (trait-method? d)
+  (cond
+    ;; queue 483: the lang item drop_glue (core::ptr::drop_in_place's `drop_glue(&mut *to_drop)`) resolves to its shim,
+    ;; InstanceKind::DropGlue(_, Some(T)) when T needs drop, else the empty glue (DropGlue(_, None), a no-op at codegen)
+    (and (= d "core::ptr::drop_glue") (= 1 (count args)) (vector? (first args)))
+    [d args (if (build/needs-drop? (first args)) "drop-glue" "drop-glue-empty")]
+    (not (trait-method? d))
     [d args]
+    :else
     (let [tr (if (number? d) (:parent (c/def-of d)) (c/path-parent d))
           self (first (filter type-arg? args))
           fk (get fn-trait-kind tr)]
@@ -1710,7 +1716,7 @@
   (let [[cd args] (resolve-instance cd (erase-regions args))]
     (when (and *unknown-refused* (string? cd) (str/starts-with? cd "core::") (not (intrinsic? cd)) (not (:known (attrs-of cd))))
       (throw (ex-info (str "mono: " cd "'s attributes are not in core's sources (a macro-made item)") {:fact :callee})))
-    (if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args args}))))
+    (if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args args :shim (when (= cd "core::ptr::drop_glue") :drop-glue)}))))
 
 (defn callee-fact
   "Instance::try_resolve's callee as the helper writes it: {:kind :symbol :def :can-unwind :track-caller [:intrinsic] [:external]}
@@ -2347,6 +2353,15 @@
     (tc/with-solver (solver-def)
       (fn [] (when (and (= :adt (first t)) (number? (second t)) (= [t] (vec (drop-glues t))))
                (local-drop-impl t))))))
+
+(defn drop-glue-info
+  "queue 483: drop_glue::<T>'s shim as a native library instance calls it (core::ptr::drop_in_place's body): {:needs-drop
+  :symbol} (the shim's symbol, as the vtables' drop entries and the collector's glue items name it)"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (let [t (erase-regions t)]
+               {:needs-drop (boolean (build/needs-drop? t)) :symbol (instance-symbol {:def (c/lang "drop_glue") :args [t] :shim :drop-glue})})))))
 
 (defn resolve-const
   "RF17: a local trait's associated constant D at ARGS (`<i32 as Zero>::ZERO`) resolved to the impl's constant, as

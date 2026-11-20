@@ -428,6 +428,8 @@
 
 (defn- slice-len-fn? [d]
   (or (= d "core::slice::<impl [T]>::len")
+      ;; queue 483: a native library instance's callee, by its def path (std-names' slice_len_fn, also outside a run)
+      (= d "core::slice::{impl#0}::len")
       (= d (try (c/lang "slice_len_fn") (catch Throwable _ ::none)))))
 
 (defn lower-slice-len-calls
@@ -1068,9 +1070,13 @@
                                     (not-any? #(and (vector? %) (= :param (first %))) (tree-seq coll? seq g)))
                          :when (= 0 (:size (try (*type-layout* t) (catch Throwable _ nil))))]
                      i)))]
-    ;; LowerIntrinsics again at the instance (its own port may have grown since the export)
-    {:def (:def entry) :args args :body (cond-> ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
-                                                 (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))
+    ;; LowerIntrinsics again at the instance (its own port may have grown since the export); queue 483: then LowerSliceLenCalls,
+    ;; rustc's optimized_mir's (the record's: `_n = PtrMetadata(copy _s)` where the built body calls `<[T]>::len`, str::len's and
+    ;; every slice method's), as runtime-body lowers the program's own bodies: the instance is our lowering of what codegen
+    ;; takes, so the call is gone before the compare and before its callees are closed (slice_len_fn has no native body)
+    {:def (:def entry) :args args :body (cond-> (let [lb ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
+                                                          (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))]
+                                                  (update lb :blocks lower-slice-len-calls))
                                           (seq zst) (assoc :zst-locals zst))})))
 
 (defn- drop-shim-body
@@ -1463,6 +1469,26 @@
             _ (when (System/getenv "RF_WHY_TRACE") (binding [*out* *err*] (println "why-trace:" (str e)) (doseq [f (take 40 fs)] (println "  at" (str f)))))]
         (str (.getName (class e)) (when-let [f (first fs)] (str " at " f)) (when (and own (not= own (first fs))) (str " from " own)))))))
 
+(def ^:dynamic *drop-glue-ok?*
+  "queue 483: within a run, whether a native library instance may call drop_glue::<T> (T concrete): the run's (native-run),
+  nil elsewhere (such a body stays the record's)"
+  nil)
+
+(defn- drop-glue-ok-fn
+  "queue 483: *drop-glue-ok?* for the run of N over the record's bodies: T's shim as the record has it, by mono's needs_drop
+  and symbol: a type that needs drop only when the record has its shim (`Shim(DropGlue(.., Some(T)))`) at mono's symbol, one
+  that needs none only when the record has no shim of it (its call the empty glue, a no-op); else nil (the record's body kept)"
+  [n rec-bodies]
+  (let [shims (into {} (for [b rec-bodies :let [i (str (:instance b))] :when (str/starts-with? i "Shim(DropGlue(")
+                             :let [[_ tt] (re-find #", Some\((.*)\)\)\)$" i)] :when tt]
+                         [tt b]))]
+    (fn [t]
+      (let [{:keys [needs-drop symbol]} (try (mono/drop-glue-info n t) (catch Throwable _ nil))
+            r (get shims (binding [c/*in-value* false] (c/print-ty t)))]
+        (if needs-drop
+          (boolean (and r (= symbol (:symbol r))))
+          (and (some? symbol) (nil? r)))))))
+
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
   closure of the functions it reaches that the record has no body of: {:taken {record-symbol instance} :extra [instance]
@@ -1500,8 +1526,11 @@
                           ;; queue 448: a body calling drop glue (core::ptr::drop_in_place's `drop_glue::<T>()`, a shim rustc
                           ;; builds per type and leaves out when the type needs none) stays the record's: its callee is no item
                           ;; the module defines
-                          _ (when (some (fn [blk] (= "core::ptr::drop_glue" (second (call-of (:term blk))))) (:blocks (:body inst)))
-                              (throw (ex-info "a call of drop glue (a shim, the record's)" {})))
+                          ;; queue 483: unless the run's *drop-glue-ok?* finds the shim the call resolves to: the empty glue
+                          ;; (a no-op) where the record has no shim of the type, or the record's shim by mono's symbol
+                          _ (doseq [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when (= "core::ptr::drop_glue" (second ft))]
+                              (when-not (and *drop-glue-ok?* (= 1 (count (nth ft 2 nil))) (*drop-glue-ok?* (first (nth ft 2))))
+                                (throw (ex-info "a call of drop glue (a shim, the record's)" {}))))
                           ;; queue 443: an instance-judged callee taken only when equal to one of the record's bodies of its def
                           _ (when (and (= :instance (:judge e)) (seq seen))
                               (let [rs (get rec-by-path def)
@@ -1523,7 +1552,8 @@
                                                           [cd0 cargs0])]
                                      ;; an intrinsic is codegen's; a function core's export has is built; one that is MIR-available
                                      ;; without a native body stops the root; any other is an external symbol (core's own object)
-                                     :when (and (string? cd) (not (mono/intrinsic? cd))
+                                     ;; (queue 483: drop glue is a shim, no body of its def's: *drop-glue-ok?*'s above)
+                                     :when (and (string? cd) (not (mono/intrinsic? cd)) (not= cd "core::ptr::drop_glue")
                                                 (or (get nc cd) (mono/mir-available? cd)))]
                                  [cd (vec cargs)])]
                       ;; a callee without an equal native body that the record has a body of: the record's (the pack's fallback)
@@ -1678,6 +1708,7 @@
                     ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))
+                                         *drop-glue-ok?* (drop-glue-ok-fn n rec-bodies)
                                          *normalize-ty* (fn [t] (mono/normalize-ty n t))
                                          *resolve-call* (fn [d args] (mono/resolve-call n d args))
                                          ;; queue 464: the program's closures as the instances' arguments, written and laid out
