@@ -2686,6 +2686,34 @@ text). The 71 programs were read again, one by one; two more are judged by their
 - Eval 838 to 840 of 909 by their own verdict; the judge (7,528 + 0.5 x 265) / 7,793 = 0.98300 (0.98287 before); Haskell's
   independence 79.66 (79.657 to 79.660).
 
+Rounds 2 and 3, on the main session's decisions (D-HSJ-1 (a), D-HSJ-2 (a), D-HSJ-3 (a), D435-2 (a), D435-3 (a)) and the user's of
+2026-11-20 (a case whose output is undefined, unspecified or host-dependent leaves the judge's cases, its reason per case):
+- D435-2 (a): a test all.T gives `ignore_stdout` is judged as GHC's driver judges it, by status and stderr; `own-verdicts.tsv`'s
+  STDOUT column `ignore` (`own_ref` passes it on, the check's `ign` leaves the stdout uncompared): T15892, T23071, conc065,
+  conc066, conc067.
+- D-HSJ-2 (a): `test/haskell/eval/boot.edn` keeps the digest and size of an expected output a nofib boot.sh makes by running its
+  shipped generator, made by Arbace: `bin/hsi boot` (`bin/lib/hsi/boot`) runs the generator's C by ci and pipes it through
+  `tr -d '\r'` as boot.sh does, then compares; fasta's `fasta-c.c` at FAST_OPTS 750000 gives 7,625,077 bytes, e275cebf..., GHC's
+  record. `own-verdicts.tsv` lists it as `boot:fasta.stdout`, `own_ref` reads the digest, `bin/hsi golden` checks the entry
+  (`--oracle` against the record, `--control` a changed digest).
+- D435-3 (a) and the user's decision: `test/haskell/eval/golden/na.tsv` (ID, KIND, reason) lists the programs out of the judge's
+  cases, their runs still counted in completeness. Kind `no-run`: the 28 GHC did not build that nothing runs (the record's
+  `:no-build`, check-hsi.edn's `:no-dump`, no own plan, no AOT run). Kind `undefined`: T4262 (`/proc/PID/task`'s count, the host's
+  and the RTS's threads; GHC's record 11, the shipped file 8; all.T skips it) and k-nucleotide (status 139: an empty stdin, its
+  ByteString read past the input). `bin/hsi golden` requires an undefined case's evidence: the record's run ended on a signal
+  other than the check's limit kills (137, 152), or all.T skips the test; so a defined output cannot be counted out (the
+  controls: fannkuch-redux and minimax at 137, cacheprof and fasta at 0, conc064 at 1, each listed undefined, fail it). Kept
+  judged after review: the 29 NofibUtils programs (a hash, defined), T7861 (GHC's deferred error, its text GHC's: defined, not
+  derived), cacheprof, fannkuch-redux and minimax.
+- D-HSJ-3 (a): `bin/lib/hsi/check` never passes a run killed at the check's limits (137, 152), even against a reference killed the
+  same way; its status counts as differing, the reason `:limit`. fannkuch-redux and spectral/minimax, which passed by matching
+  GHC's killed record, are `:speed` (`test/haskell/divergences.edn`).
+- Proofs, with no program run beyond the two killed ones' rerun: the judge's own path (`own_ref`, extracted) on the six new own
+  verdicts against hsi's recorded runs, `:pass :judge :own` each; controls that fail: conc065 with status 1, conc064 (no
+  `ignore_stdout`) listed `ignore`, fasta's digest with a digit changed (`own_ref` and `bin/hsi boot`), the n/a list's two
+  (a program GHC ran as `no-run`, an n/a program also left) and the five defined outputs listed `undefined`.
+- Eval 846 of 879 judged programs by their own verdict, 33 by the record; the judge (7,534 + 0.5 x 229) / 7,763 = 0.98525.
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
