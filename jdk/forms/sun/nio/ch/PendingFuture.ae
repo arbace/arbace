@@ -1,0 +1,131 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/ch/PendingFuture.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io IOException)
+        '(java.nio.channels AsynchronousChannel CompletionHandler)
+        '(java.util.concurrent CancellationException
+                               CountDownLatch
+                               ExecutionException
+                               Future
+                               TimeUnit
+                               TimeoutException))
+
+(defclass ^:final PendingFuture
+  :implements [(Future V)]
+  :type-params [V A]
+
+  (field ^:private ^:final ^AsynchronousChannel channel)
+
+  (field ^:private ^:final ^{:tag (CompletionHandler V (? super A))} handler)
+
+  (field ^:private ^:final ^A attachment)
+
+  (field ^:private ^:volatile ^boolean haveResult)
+
+  (field ^:private ^:volatile ^V result)
+
+  (field ^:private ^:volatile ^Throwable exc)
+
+  (field ^:private ^CountDownLatch latch)
+
+  (field ^:private ^{:tag (Future ?)} timeoutTask)
+
+  (field ^:private ^:volatile context)
+
+  (constructor [this ^AsynchronousChannel channel ^{:tag (CompletionHandler V (? super A))} handler
+                ^A attachment context]
+    (set! (.-channel this) channel)
+    (set! (.-handler this) handler)
+    (set! (.-attachment this) attachment)
+    (set! (.-context this) context))
+
+  (constructor [this ^AsynchronousChannel channel ^{:tag (CompletionHandler V (? super A))} handler
+                ^A attachment]
+    (set! (.-channel this) channel)
+    (set! (.-handler this) handler)
+    (set! (.-attachment this) attachment))
+
+  (constructor [this ^AsynchronousChannel channel]
+    (this. channel nil nil))
+
+  (constructor [this ^AsynchronousChannel channel context]
+    (this. channel nil nil context))
+
+  (method channel ^AsynchronousChannel [this] channel)
+
+  (method handler ^{:tag (CompletionHandler V (? super A))} [this]
+    handler)
+
+  (method attachment ^A [this] attachment)
+
+  (method setContext ^void [this context] (set! (.-context this) context))
+
+  (method getContext [this] context)
+
+  (method setTimeoutTask ^void [this ^{:tag (Future ?)} task]
+    (locking this (if haveResult (.cancel task false) (set! (.-timeoutTask this) task))))
+
+  (method ^:private prepareForWait ^boolean [this]
+    (locking this
+      (if haveResult false (do (when (nil? latch) (set! latch (CountDownLatch. 1))) true))))
+
+  (method setResult ^void [this ^V res]
+    (locking this
+      (when-not haveResult
+        (set! result res)
+        (set! haveResult true)
+        (when (some? timeoutTask) (.cancel timeoutTask false))
+        (when (some? latch) (.countDown latch)))))
+
+  (method setFailure ^void [this ^:mutable ^Throwable x]
+    (when-not (instance? IOException x) (set! x (IOException. x)))
+    (locking this
+      (when-not haveResult
+        (set! exc x)
+        (set! haveResult true)
+        (when (some? timeoutTask) (.cancel timeoutTask false))
+        (when (some? latch) (.countDown latch)))))
+
+  (method setResult ^void [this ^V res ^Throwable x]
+    (if (nil? x) (.setResult this res) (.setFailure this x)))
+
+  (method ^:public get :throws [ExecutionException InterruptedException] ^V [this]
+    (when-not haveResult (let [needToWait (.prepareForWait this)] (when needToWait (.await latch))))
+    (when (some? exc)
+      (when (instance? CancellationException exc) (throw (CancellationException.)))
+      (throw (ExecutionException. exc)))
+    result)
+
+  (method ^:public get :throws [ExecutionException InterruptedException TimeoutException] ^V [this
+                                                                                              ^long timeout
+                                                                                              ^TimeUnit unit]
+    (when-not haveResult
+      (let [needToWait (.prepareForWait this)]
+        (when needToWait (when-not (.await latch timeout unit) (throw (TimeoutException.))))))
+    (when (some? exc)
+      (when (instance? CancellationException exc) (throw (CancellationException.)))
+      (throw (ExecutionException. exc)))
+    result)
+
+  (method exception ^Throwable [this]
+    (when-not (instance? CancellationException exc) exc))
+
+  (method value ^V [this] result)
+
+  (method ^:public isCancelled ^boolean [this]
+    (instance? CancellationException exc))
+
+  (method ^:public isDone ^boolean [this] haveResult)
+
+  (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+    (locking this
+      (when haveResult (return false))
+      (when (instance? Cancellable (.channel this))
+        (.onCancel (cast Cancellable (.channel this)) this))
+      (set! exc (CancellationException.))
+      (set! haveResult true)
+      (when (some? timeoutTask) (.cancel timeoutTask false)))
+    (when mayInterruptIfRunning (try (.close (.channel this)) (catch IOException ignore)))
+    (when (some? latch) (.countDown latch))
+    true))

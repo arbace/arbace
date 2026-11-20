@@ -1,0 +1,407 @@
+;; Converted from jdk26u src/jdk.security.auth/share/classes/com/sun/security/auth/module/LdapLoginModule.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.security.auth.module)
+
+(import '(com.sun.security.auth LdapPrincipal UserPrincipal)
+        '(java.io IOException)
+        '(java.security Principal)
+        '(java.util Arrays Hashtable Map Set)
+        '(java.util.regex Matcher Pattern)
+        '(javax.naming Context InvalidNameException NamingEnumeration NamingException)
+        '(javax.naming.directory SearchControls SearchResult)
+        '(javax.naming.ldap InitialLdapContext LdapContext)
+        '(javax.security.auth Subject)
+        '(javax.security.auth.callback Callback
+                                       CallbackHandler
+                                       NameCallback
+                                       PasswordCallback
+                                       UnsupportedCallbackException)
+        '(javax.security.auth.login FailedLoginException LoginException)
+        '(javax.security.auth.spi LoginModule)
+        '(sun.security.util ResourcesMgr))
+
+(defclass ^:public LdapLoginModule
+  :implements [LoginModule]
+
+  (field ^:private ^:static ^:final ^String USERNAME_KEY "javax.security.auth.login.name")
+
+  (field ^:private ^:static ^:final ^String PASSWORD_KEY "javax.security.auth.login.password")
+
+  (field ^:private ^:static ^:final ^String USER_PROVIDER "userProvider")
+
+  (field ^:private ^:static ^:final ^String USER_FILTER "userFilter")
+
+  (field ^:private ^:static ^:final ^String AUTHC_IDENTITY "authIdentity")
+
+  (field ^:private ^:static ^:final ^String AUTHZ_IDENTITY "authzIdentity")
+
+  (field ^:private ^:static ^:final ^String USERNAME_TOKEN "{USERNAME}")
+
+  (field ^:private ^:static ^:final ^Pattern USERNAME_PATTERN (Pattern/compile "\\{USERNAME\\}"))
+
+  (field ^:private ^String userProvider)
+
+  (field ^:private ^String userFilter)
+
+  (field ^:private ^String authcIdentity)
+
+  (field ^:private ^String authzIdentity)
+
+  (field ^:private ^String authzIdentityAttr nil)
+
+  (field ^:private ^boolean useSSL true)
+
+  (field ^:private ^boolean authFirst false)
+
+  (field ^:private ^boolean authOnly false)
+
+  (field ^:private ^boolean useFirstPass false)
+
+  (field ^:private ^boolean tryFirstPass false)
+
+  (field ^:private ^boolean storePass false)
+
+  (field ^:private ^boolean clearPass false)
+
+  (field ^:private ^boolean debug false)
+
+  (field ^:private ^boolean succeeded false)
+
+  (field ^:private ^boolean commitSucceeded false)
+
+  (field ^:private ^String username)
+
+  (field ^:private ^char/1 password)
+
+  (field ^:private ^LdapPrincipal ldapPrincipal)
+
+  (field ^:private ^UserPrincipal userPrincipal)
+
+  (field ^:private ^UserPrincipal authzPrincipal)
+
+  (field ^:private ^Subject subject)
+
+  (field ^:private ^CallbackHandler callbackHandler)
+
+  (field ^:private ^{:tag (Map String Object)} sharedState)
+
+  (field ^:private ^{:tag (Map String ?)} options)
+
+  (field ^:private ^LdapContext ctx)
+
+  (field ^:private ^Matcher identityMatcher nil)
+
+  (field ^:private ^Matcher filterMatcher nil)
+
+  (field ^:private ^{:tag (Hashtable String Object)} ldapEnvironment)
+
+  (field ^:private ^SearchControls constraints nil)
+
+  (constructor ^:public [this])
+
+  (method ^:public initialize ^void [this ^Subject subject ^CallbackHandler callbackHandler
+                                     ^{:tag (Map String ?)} sharedState
+                                     ^{:tag (Map String ?)} options]
+    (set! (.-subject this) subject)
+    (set! (.-callbackHandler this) callbackHandler)
+    (set! (.-sharedState this) sharedState)
+    (set! (.-options this) options)
+    (set! ldapEnvironment (Hashtable. 9))
+    (.put ldapEnvironment Context/INITIAL_CONTEXT_FACTORY "com.sun.jndi.ldap.LdapCtxFactory")
+    (for-each [^String key (.keySet options)]
+      (when (> (.indexOf key \.) -1) (.put ldapEnvironment key (.get options key))))
+    (set! userProvider (cast String (.get options USER_PROVIDER)))
+    (when (some? userProvider) (.put ldapEnvironment Context/PROVIDER_URL userProvider))
+    (set! authcIdentity (cast String (.get options AUTHC_IDENTITY)))
+    (when (and (some? authcIdentity) (not (== (.indexOf authcIdentity USERNAME_TOKEN) -1)))
+      (set! identityMatcher (.matcher USERNAME_PATTERN authcIdentity)))
+    (set! userFilter (cast String (.get options USER_FILTER)))
+    (when (some? userFilter)
+      (when-not (== (.indexOf userFilter USERNAME_TOKEN) -1)
+        (set! filterMatcher (.matcher USERNAME_PATTERN userFilter)))
+      (set! constraints (SearchControls.))
+      (.setSearchScope constraints SearchControls/SUBTREE_SCOPE)
+      (.setReturningAttributes constraints (new String/1 0)))
+    (set! authzIdentity (cast String (.get options AUTHZ_IDENTITY)))
+    (when (and (and (some? authzIdentity) (.startsWith authzIdentity "{"))
+               (.endsWith authzIdentity "}"))
+      (when (some? constraints)
+        (set! authzIdentityAttr
+              (.substring authzIdentity 1 (unchecked-subtract-int (.length authzIdentity) 1)))
+        (.setReturningAttributes constraints (new String/1 [authzIdentityAttr])))
+      (set! authzIdentity nil))
+    (when (some? authcIdentity) (if (some? userFilter) (set! authFirst true) (set! authOnly true)))
+    (if (.equalsIgnoreCase "false" (cast String (.get options "useSSL")))
+        (do (set! useSSL false) (.remove ldapEnvironment Context/SECURITY_PROTOCOL))
+        (.put ldapEnvironment Context/SECURITY_PROTOCOL "ssl"))
+    (set! tryFirstPass (.equalsIgnoreCase "true" (cast String (.get options "tryFirstPass"))))
+    (set! useFirstPass (.equalsIgnoreCase "true" (cast String (.get options "useFirstPass"))))
+    (set! storePass (.equalsIgnoreCase "true" (cast String (.get options "storePass"))))
+    (set! clearPass (.equalsIgnoreCase "true" (cast String (.get options "clearPass"))))
+    (set! debug (.equalsIgnoreCase "true" (cast String (.get options "debug"))))
+    (when debug
+      (cond
+        authFirst
+          (.println System/out
+                    (java-str "\t\t[LdapLoginModule] authentication-first mode; "
+                              (if useSSL "SSL enabled" "SSL disabled")))
+        authOnly
+          (.println System/out
+                    (java-str "\t\t[LdapLoginModule] authentication-only mode; "
+                              (if useSSL "SSL enabled" "SSL disabled")))
+        :else
+          (.println System/out
+                    (java-str "\t\t[LdapLoginModule] search-first mode; "
+                              (if useSSL "SSL enabled" "SSL disabled"))))))
+
+  (method ^:public login :throws [LoginException] ^boolean [this]
+    (when (nil? userProvider)
+      (throw (LoginException. "Unable to locate the LDAP directory service")))
+    (when debug
+      (.println System/out (java-str "\t\t[LdapLoginModule] user provider: " userProvider)))
+    (cond
+      tryFirstPass
+        (try
+          (.attemptAuthentication this true)
+          (set! succeeded true)
+          (when debug (.println System/out "\t\t[LdapLoginModule] tryFirstPass succeeded"))
+          (return true)
+          (catch LoginException le
+            (.cleanState this)
+            (when debug
+              (.println System/out
+                        (java-str "\t\t[LdapLoginModule] tryFirstPass failed: " (.toString le))))))
+      useFirstPass
+        (try
+          (.attemptAuthentication this true)
+          (set! succeeded true)
+          (when debug (.println System/out "\t\t[LdapLoginModule] useFirstPass succeeded"))
+          (return true)
+          (catch LoginException le
+            (.cleanState this)
+            (when debug (.println System/out "\t\t[LdapLoginModule] useFirstPass failed"))
+            (throw le))))
+    (try
+      (.attemptAuthentication this false)
+      (set! succeeded true)
+      (when debug (.println System/out "\t\t[LdapLoginModule] authentication succeeded"))
+      true
+      (catch LoginException le
+        (.cleanState this)
+        (when debug (.println System/out "\t\t[LdapLoginModule] authentication failed"))
+        (throw le))))
+
+  (method ^:public commit :throws [LoginException] ^boolean [this]
+    (if (= succeeded false)
+        false
+        (do
+          (when (.isReadOnly subject)
+            (.cleanState this)
+            (throw (LoginException. "Subject is read-only")))
+          (let [^{:tag (Set Principal)} principals (.getPrincipals subject)]
+            (when-not (.contains principals ldapPrincipal) (.add principals ldapPrincipal))
+            (when debug
+              (.println System/out
+                        (java-str "\t\t[LdapLoginModule] added LdapPrincipal \""
+                                  ldapPrincipal
+                                  "\" to Subject")))
+            (when-not (.contains principals userPrincipal) (.add principals userPrincipal))
+            (when debug
+              (.println System/out
+                        (java-str "\t\t[LdapLoginModule] added UserPrincipal \""
+                                  userPrincipal
+                                  "\" to Subject")))
+            (when (and (some? authzPrincipal) (not (.contains principals authzPrincipal)))
+              (.add principals authzPrincipal)
+              (when debug
+                (.println System/out
+                          (java-str "\t\t[LdapLoginModule] added UserPrincipal \""
+                                    authzPrincipal
+                                    "\" to Subject")))))
+          (.cleanState this)
+          (set! commitSucceeded true)
+          true)))
+
+  (method ^:public abort :throws [LoginException] ^boolean [this]
+    (when debug (.println System/out "\t\t[LdapLoginModule] aborted authentication"))
+    (if (= succeeded false)
+        false
+        (do
+          (if (and (= succeeded true) (= commitSucceeded false))
+              (do
+                (set! succeeded false)
+                (.cleanState this)
+                (set! ldapPrincipal nil)
+                (set! userPrincipal nil)
+                (set! authzPrincipal nil))
+              (.logout this))
+          true)))
+
+  (method ^:public logout :throws [LoginException] ^boolean [this]
+    (when (.isReadOnly subject) (.cleanState this) (throw (LoginException. "Subject is read-only")))
+    (let [^{:tag (Set Principal)} principals (.getPrincipals subject)]
+      (when (some? ldapPrincipal) (.remove principals ldapPrincipal))
+      (when (some? userPrincipal) (.remove principals userPrincipal))
+      (when (some? authzIdentity) (.remove principals authzPrincipal))
+      (.cleanState this)
+      (set! succeeded false)
+      (set! commitSucceeded false)
+      (set! ldapPrincipal nil)
+      (set! userPrincipal nil)
+      (set! authzPrincipal nil)
+      (when debug (.println System/out "\t\t[LdapLoginModule] logged out Subject"))
+      true))
+
+  (method ^:private attemptAuthentication :throws [LoginException] ^void [this
+                                                                          ^boolean getPasswdFromSharedState]
+    (.getUsernamePassword this getPasswdFromSharedState)
+    (when (or (nil? password) (== (alength password) 0))
+      (throw ^LoginException (FailedLoginException. "No password was supplied")))
+    (let [^:mutable dn ""]
+      (if (or authFirst authOnly)
+          (let [id (.replaceUsernameToken this identityMatcher authcIdentity username)]
+            (.put ldapEnvironment Context/SECURITY_CREDENTIALS password)
+            (.put ldapEnvironment Context/SECURITY_PRINCIPAL id)
+            (when debug
+              (.println System/out
+                        (java-str "\t\t[LdapLoginModule] attempting to authenticate user: "
+                                  username)))
+            (try
+              (set! ctx (InitialLdapContext. ldapEnvironment nil))
+              (catch NamingException e
+                (throw (cast LoginException
+                             (.initCause (FailedLoginException. "Cannot bind to LDAP server") e)))))
+            (if (some? userFilter) (set! dn (.findUserDN this ctx)) (set! dn id)))
+          (do
+            (try
+              (set! ctx (InitialLdapContext. ldapEnvironment nil))
+              (catch NamingException e
+                (throw
+                  (cast LoginException
+                        (.initCause (FailedLoginException. "Cannot connect to LDAP server") e)))))
+            (set! dn (.findUserDN this ctx))
+            (try
+              (.addToEnvironment ctx Context/SECURITY_AUTHENTICATION "simple")
+              (.addToEnvironment ctx Context/SECURITY_PRINCIPAL dn)
+              (.addToEnvironment ctx Context/SECURITY_CREDENTIALS password)
+              (when debug
+                (.println System/out
+                          (java-str "\t\t[LdapLoginModule] attempting to authenticate user: "
+                                    username)))
+              (.reconnect ctx nil)
+              (catch NamingException e
+                (throw (cast LoginException
+                             (.initCause (FailedLoginException. "Cannot bind to LDAP server") e)))))))
+      (when (and (and storePass (not (.containsKey sharedState USERNAME_KEY)))
+                 (not (.containsKey sharedState PASSWORD_KEY)))
+        (.put sharedState USERNAME_KEY username)
+        (.put sharedState PASSWORD_KEY password))
+      (set! userPrincipal (UserPrincipal. username))
+      (when (some? authzIdentity) (set! authzPrincipal (UserPrincipal. authzIdentity)))
+      (try
+        (set! ldapPrincipal (LdapPrincipal. dn))
+        (catch InvalidNameException e
+          (when debug
+            (.println System/out "\t\t[LdapLoginModule] cannot create LdapPrincipal: bad DN"))
+          (throw (cast LoginException
+                       (.initCause (FailedLoginException. "Cannot create LdapPrincipal") e)))))))
+
+  (method ^:private findUserDN :throws [LoginException] ^String [this ^LdapContext ctx]
+    (let [^:mutable userDN ""]
+      (if (some? userFilter)
+          (when debug
+            (.println System/out
+                      (java-str "\t\t[LdapLoginModule] searching for entry belonging to user: "
+                                username)))
+          (do
+            (when debug
+              (.println System/out
+                        (java-str
+                          "\t\t[LdapLoginModule] cannot search for entry belonging to user: "
+                          username)))
+            (throw ^LoginException (FailedLoginException. "Cannot find user's LDAP entry"))))
+      (try
+        (let [canonicalUserFilter (.replaceUsernameToken
+                                    this
+                                    filterMatcher
+                                    userFilter
+                                    (.escapeUsernameChars this))
+              ^{:tag (NamingEnumeration SearchResult)} results (.search
+                                                                 ctx
+                                                                 ""
+                                                                 canonicalUserFilter
+                                                                 constraints)]
+          (cond
+            (.hasMore results)
+              (let [entry (cast SearchResult (.next results))]
+                (set! userDN (.getNameInNamespace entry))
+                (when debug
+                  (.println System/out (java-str "\t\t[LdapLoginModule] found entry: " userDN)))
+                (when (some? authzIdentityAttr)
+                  (let [attr (.get (.getAttributes entry) authzIdentityAttr)]
+                    (when (some? attr)
+                      (let [val (.get attr)]
+                        (when (instance? String val) (set! authzIdentity (cast String val)))))))
+                (.close results))
+            debug (.println System/out "\t\t[LdapLoginModule] user's entry not found")))
+        (catch NamingException e))
+      (if (.equals userDN "")
+          (throw ^LoginException (FailedLoginException. "Cannot find user's LDAP entry"))
+          userDN)))
+
+  (method ^:private escapeUsernameChars ^String [this]
+    (let [len (.length username)
+          escapedUsername (StringBuilder. (unchecked-add-int len 16))]
+      (loop [^int i 0]
+        (when (< i len)
+          (let [c (.charAt username i)]
+            (switch c
+              \* (do (.append escapedUsername "\\\\2A") (recur (unchecked-inc-int i)))
+              \( (do (.append escapedUsername "\\\\28") (recur (unchecked-inc-int i)))
+              \) (do (.append escapedUsername "\\\\29") (recur (unchecked-inc-int i)))
+              \\ (do (.append escapedUsername "\\\\5C") (recur (unchecked-inc-int i)))
+              \u0000 (do (.append escapedUsername "\\\\00") (recur (unchecked-inc-int i)))
+              (do (.append escapedUsername c) (recur (unchecked-inc-int i)))))))
+      (.toString escapedUsername)))
+
+  (method ^:private replaceUsernameToken ^String [this ^Matcher matcher ^String string
+                                                  ^String username]
+    (if (some? matcher) (.replaceAll matcher username) string))
+
+  (method ^:private getUsernamePassword :throws [LoginException] ^void [this
+                                                                        ^boolean getPasswdFromSharedState]
+    (if getPasswdFromSharedState
+        (do
+          (set! username (cast String (.get sharedState USERNAME_KEY)))
+          (set! password (cast char/1 (.get sharedState PASSWORD_KEY))))
+        (do
+          (when (nil? callbackHandler)
+            (throw
+              (LoginException.
+                "No CallbackHandler available to acquire authentication information from the user")))
+          (let [callbacks (new Callback/1 2)]
+            (aset callbacks 0 (NameCallback. (ResourcesMgr/getAuthResourceString "username.")))
+            (aset callbacks
+                  1
+                  (PasswordCallback. (ResourcesMgr/getAuthResourceString "password.") false))
+            (try
+              (.handle callbackHandler callbacks)
+              (set! username (.getName (cast NameCallback (aget callbacks 0))))
+              (let [tmpPassword (.getPassword (cast PasswordCallback (aget callbacks 1)))]
+                (set! password (new char/1 (alength tmpPassword)))
+                (System/arraycopy tmpPassword 0 password 0 (alength tmpPassword))
+                (.clearPassword (cast PasswordCallback (aget callbacks 1))))
+              (catch IOException ioe (throw (LoginException. (.toString ioe))))
+              (catch UnsupportedCallbackException uce
+                (throw (LoginException.
+                         (java-str
+                           "Error: "
+                           (.toString (.getCallback uce))
+                           " not available to acquire authentication information from the user")))))))))
+
+  (method ^:private cleanState ^void [this]
+    (set! username nil)
+    (when (some? password) (Arrays/fill password \space) (set! password nil))
+    (try (when (some? ctx) (.close ctx)) (catch NamingException e))
+    (set! ctx nil)
+    (when clearPass (.remove sharedState USERNAME_KEY) (.remove sharedState PASSWORD_KEY))))

@@ -1,0 +1,477 @@
+;; Converted from overlay/jdk/java.base/sun/nio/ch/UnixAsynchronousSocketChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.net InetSocketAddress SocketAddress)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels AlreadyConnectedException
+                            AsynchronousChannel
+                            AsynchronousCloseException
+                            ClosedChannelException
+                            CompletionHandler
+                            ConnectionPendingException
+                            InterruptedByTimeoutException
+                            ShutdownChannelGroupException)
+        '(java.util.concurrent Future TimeUnit)
+        '(jdk.internal.jrt HostChannels)
+        '(jdk.internal.util Exceptions)
+        '(sun.net ConnectionResetException))
+
+(defclass UnixAsynchronousSocketChannelImpl
+  :extends AsynchronousSocketChannelImpl
+  :implements [Port$PollableChannel]
+
+  (field ^:private ^:static ^:final ^NativeDispatcher nd (SocketDispatcher.))
+
+  (defclass ^:private ^:static ^:enum OpType
+    (constants CONNECT READ WRITE))
+
+  (field ^:private ^:static ^:final ^boolean disableSynchronousRead)
+
+  (static-initializer
+    (let [propValue (System/getProperty "sun.nio.ch.disableSynchronousRead" "false")]
+      (set! disableSynchronousRead (if (.isEmpty propValue) true (Boolean/parseBoolean propValue)))))
+
+  (field ^:private ^:final ^Port port)
+
+  (field ^:private ^:final ^int fdVal)
+
+  (field ^:private ^:final updateLock (Object.))
+
+  (field ^:private ^boolean connectPending)
+
+  (field ^:private ^{:tag (CompletionHandler Void Object)} connectHandler)
+
+  (field ^:private connectAttachment)
+
+  (field ^:private ^{:tag (PendingFuture Void Object)} connectFuture)
+
+  (field ^:private ^SocketAddress pendingRemote)
+
+  (field ^:private ^boolean readPending)
+
+  (field ^:private ^boolean isScatteringRead)
+
+  (field ^:private ^ByteBuffer readBuffer)
+
+  (field ^:private ^ByteBuffer/1 readBuffers)
+
+  (field ^:private ^Runnable readScopeHandleReleasers)
+
+  (field ^:private ^{:tag (CompletionHandler Number Object)} readHandler)
+
+  (field ^:private readAttachment)
+
+  (field ^:private ^{:tag (PendingFuture Number Object)} readFuture)
+
+  (field ^:private ^{:tag (Future ?)} readTimer)
+
+  (field ^:private ^boolean writePending)
+
+  (field ^:private ^boolean isGatheringWrite)
+
+  (field ^:private ^ByteBuffer writeBuffer)
+
+  (field ^:private ^ByteBuffer/1 writeBuffers)
+
+  (field ^:private ^Runnable writeScopeHandleReleasers)
+
+  (field ^:private ^{:tag (CompletionHandler Number Object)} writeHandler)
+
+  (field ^:private writeAttachment)
+
+  (field ^:private ^{:tag (PendingFuture Number Object)} writeFuture)
+
+  (field ^:private ^{:tag (Future ?)} writeTimer)
+
+  (constructor :throws [IOException] [this ^Port port]
+    (super. port)
+    (try
+      (IOUtil/configureBlocking (.-fd this) false)
+      (catch IOException x (.close nd (.-fd this)) (throw x)))
+    (set! (.-port this) port)
+    (set! (.-fdVal this) (IOUtil/fdVal (.-fd this)))
+    (.register port fdVal this))
+
+  (constructor :throws [IOException] [this ^Port port ^FileDescriptor fd ^InetSocketAddress remote]
+    (super. port fd remote)
+    (set! (.-fdVal this) (IOUtil/fdVal fd))
+    (IOUtil/configureBlocking fd false)
+    (try
+      (.register port fdVal this)
+      (catch ShutdownChannelGroupException x (throw (IOException. x))))
+    (set! (.-port this) port))
+
+  (method ^:public group ^AsynchronousChannelGroupImpl [this] port)
+
+  (method ^:private updateEvents ^void [this]
+    (java-assert (Thread/holdsLock updateLock))
+    (let [^:mutable ^int events 0]
+      (when readPending (set! events (bit-or-int events Net/POLLIN)))
+      (when (or connectPending writePending) (set! events (bit-or-int events Net/POLLOUT)))
+      (when-not (== events 0) (.startPoll port fdVal events))))
+
+  (method ^:private lockAndUpdateEvents ^void [this]
+    (locking updateLock (.updateEvents this)))
+
+  (method ^:private finish ^void [this ^boolean mayInvokeDirect ^boolean readable ^boolean writable]
+    (let [^:mutable finishRead false
+          ^:mutable finishWrite false
+          ^:mutable finishConnect false]
+      (locking updateLock
+        (when (and readable (.-readPending this))
+          (set! (.-readPending this) false)
+          (set! finishRead true))
+        (when writable
+          (if (.-writePending this)
+              (do (set! (.-writePending this) false) (set! finishWrite true))
+              (when (.-connectPending this)
+                (set! (.-connectPending this) false)
+                (set! finishConnect true)))))
+      (if finishRead
+          (do (when finishWrite (.finishWrite this false)) (.finishRead this mayInvokeDirect))
+          (do
+            (when finishWrite (.finishWrite this mayInvokeDirect))
+            (when finishConnect (.finishConnect this mayInvokeDirect))))))
+
+  (method ^:public onEvent ^void [this ^int events ^boolean mayInvokeDirect]
+    (let [^:mutable readable (> (bit-and-int events Net/POLLIN) 0)
+          ^:mutable writable (> (bit-and-int events Net/POLLOUT) 0)]
+      (when (> (bit-and-int events (bit-or-int Net/POLLERR Net/POLLHUP)) 0)
+        (set! readable true)
+        (set! writable true))
+      (.finish this mayInvokeDirect readable writable)))
+
+  (method implClose :throws [IOException] ^void [this]
+    (.unregister port fdVal)
+    (.close nd (.-fd this))
+    (.finish this false true true))
+
+  (method ^:public onCancel ^void [this ^{:tag (PendingFuture ? ?)} task]
+    (when (identical? (.getContext task) OpType/CONNECT) (.killConnect this))
+    (when (identical? (.getContext task) OpType/READ) (.killReading this))
+    (when (identical? (.getContext task) OpType/WRITE) (.killWriting this)))
+
+  (method ^:private setConnected :throws [IOException] ^void [this]
+    (locking (.-stateLock this)
+      (set! (.-state this) UnixAsynchronousSocketChannelImpl/ST_CONNECTED)
+      (set! (.-localAddress this) (Net/localAddress (.-fd this)))
+      (set! (.-remoteAddress this) (cast InetSocketAddress pendingRemote))))
+
+  (method ^:private finishConnect ^void [this ^boolean mayInvokeDirect]
+    (let [^:mutable ^Throwable e nil]
+      (try
+        (.begin this)
+        (UnixAsynchronousSocketChannelImpl/checkConnect fdVal)
+        (.setConnected this)
+        (catch Throwable ^:mutable x
+          (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+          (set! e x))
+        (finally (.end this)))
+      (when (some? e)
+        (when (instance? IOException e)
+          (let [isa (cast InetSocketAddress pendingRemote)]
+            (set! e (Exceptions/ioException (cast IOException e) isa))))
+        (try (.close this) (catch Throwable suppressed (.addSuppressed e suppressed))))
+      (let [^{:tag (CompletionHandler Void Object)} handler connectHandler]
+        (set! connectHandler nil)
+        (let [att connectAttachment
+              ^{:tag (PendingFuture Void Object)} future connectFuture]
+          (cond
+            (nil? handler) (.setResult future nil e)
+            mayInvokeDirect (Invoker/invokeUnchecked handler att nil e)
+            :else (Invoker/invokeIndirectly this handler att nil e))))))
+
+  (method implConnect :type-params [A] ^{:tag (Future Void)} [this ^SocketAddress remote
+                                                              ^A attachment
+                                                              ^{:tag (CompletionHandler Void (? super A))} handler]
+    (if (not (.isOpen this))
+        (let [^Throwable e (ClosedChannelException.)]
+          (if (nil? handler)
+              (CompletedFuture/withFailure e)
+              (do (Invoker/invoke this handler attachment nil e) nil)))
+        (let [isa (Net/checkAddress remote)]
+          (locking (.-stateLock this)
+            (when (== (.-state this) UnixAsynchronousSocketChannelImpl/ST_CONNECTED)
+              (throw (AlreadyConnectedException.)))
+            (when (== (.-state this) UnixAsynchronousSocketChannelImpl/ST_PENDING)
+              (throw (ConnectionPendingException.)))
+            (set! (.-state this) UnixAsynchronousSocketChannelImpl/ST_PENDING)
+            (set! pendingRemote remote))
+          (let [^:mutable ^Throwable e nil]
+            (try
+              (.begin this)
+              (let [n (Net/connect (.-fd this) (.getAddress isa) (.getPort isa))]
+                (when (== n IOStatus/UNAVAILABLE)
+                  (let [^:mutable ^{:tag (PendingFuture Void A)} result nil]
+                    (locking updateLock
+                      (if (nil? handler)
+                          (do
+                            (set! result (PendingFuture. this OpType/CONNECT))
+                            (set! (.-connectFuture this) result))
+                          (do
+                            (set! (.-connectHandler this) handler)
+                            (set! (.-connectAttachment this) attachment)))
+                      (set! (.-connectPending this) true)
+                      (.updateEvents this))
+                    (return result)))
+                (.setConnected this))
+              (catch Throwable ^:mutable x
+                (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+                (set! e x))
+              (finally (.end this)))
+            (when (some? e)
+              (when (instance? IOException e)
+                (set! e (Exceptions/ioException (cast IOException e) isa)))
+              (try (.close this) (catch Throwable suppressed (.addSuppressed e suppressed))))
+            (if (nil? handler)
+                (CompletedFuture/withResult nil e)
+                (do (Invoker/invoke this handler attachment nil e) nil))))))
+
+  (method ^:private finishRead ^void [this ^boolean mayInvokeDirect]
+    (let [^:mutable ^int n -1
+          ^:mutable ^Throwable exc nil
+          scattering isScatteringRead
+          ^{:tag (CompletionHandler Number Object)} handler readHandler
+          att readAttachment
+          ^{:tag (PendingFuture Number Object)} future readFuture
+          ^{:tag (Future ?)} timeout readTimer]
+      (try
+        (.begin this)
+        (if scattering
+            (set! n (unchecked-int (IOUtil/read (.-fd this) readBuffers true nd)))
+            (set! n (IOUtil/read (.-fd this) readBuffer -1 true nd)))
+        (when (== n IOStatus/UNAVAILABLE) (locking updateLock (set! readPending true)) (return))
+        (set! (.-readBuffer this) nil)
+        (set! (.-readBuffers this) nil)
+        (set! (.-readAttachment this) nil)
+        (set! (.-readHandler this) nil)
+        (IOUtil/releaseScopes readScopeHandleReleasers)
+        (.enableReading this)
+        (catch Throwable ^:mutable x
+          (.enableReading this)
+          (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+          (when (instance? ConnectionResetException x) (set! x (IOException. (.getMessage x))))
+          (set! exc x))
+        (finally
+          (when-not (instance? AsynchronousCloseException exc) (.lockAndUpdateEvents this))
+          (.end this)))
+      (when (some? timeout) (.cancel timeout false))
+      (let [^Number result (when-not (some? exc)
+                             (if scattering ^Number (Long/valueOf n) ^Number (Integer/valueOf n)))]
+        (cond
+          (nil? handler) (.setResult future result exc)
+          mayInvokeDirect (Invoker/invokeUnchecked handler att result exc)
+          :else (Invoker/invokeIndirectly this handler att result exc)))))
+
+  (field ^:private ^Runnable readTimeoutTask
+    (anon Runnable []
+      (method ^:public run ^void [this]
+        (let [^:mutable ^{:tag (CompletionHandler Number Object)} handler nil
+              ^:mutable ^Object att nil
+              ^:mutable ^{:tag (PendingFuture Number Object)} future nil]
+          (locking updateLock
+            (when-not readPending (return))
+            (set! readPending false)
+            (set! handler readHandler)
+            (set! att readAttachment)
+            (set! future readFuture))
+          (.enableReading UnixAsynchronousSocketChannelImpl/this true)
+          (let [^Exception exc (InterruptedByTimeoutException.)]
+            (if (nil? handler)
+                (.setFailure future exc)
+                (let [^AsynchronousChannel ch UnixAsynchronousSocketChannelImpl/this]
+                  (Invoker/invokeIndirectly ch handler att nil exc))))))))
+
+  (method implRead :type-params [(V extends Number) A] ^{:tag (Future V)} [this
+                                                                           ^boolean isScatteringRead
+                                                                           ^ByteBuffer dst
+                                                                           ^ByteBuffer/1 dsts
+                                                                           ^long timeout
+                                                                           ^TimeUnit unit
+                                                                           ^A attachment
+                                                                           ^{:tag (CompletionHandler V (? super A))} handler]
+    (let [^:mutable ^Invoker$GroupAndInvokeCount myGroupAndInvokeCount nil
+          ^:mutable invokeDirect false
+          ^:mutable attemptRead false]
+      (when-not disableSynchronousRead
+        (if (nil? handler)
+            (set! attemptRead true)
+            (do
+              (set! myGroupAndInvokeCount (Invoker/getGroupAndInvokeCount))
+              (set! invokeDirect (Invoker/mayInvokeDirect myGroupAndInvokeCount port))
+              (set! attemptRead (or invokeDirect (not (.isFixedThreadPool port)))))))
+      (let [^:mutable n IOStatus/UNAVAILABLE
+            ^:mutable ^Throwable exc nil
+            ^:mutable pending false]
+        (try
+          (.begin this)
+          (when attemptRead
+            (if isScatteringRead
+                (set! n (unchecked-int (IOUtil/read (.-fd this) dsts true nd)))
+                (set! n (IOUtil/read (.-fd this) dst -1 true nd))))
+          (when (== n IOStatus/UNAVAILABLE)
+            (let [^:mutable ^{:tag (PendingFuture V A)} result nil]
+              (locking updateLock
+                (set! (.-isScatteringRead this) isScatteringRead)
+                (set! (.-readScopeHandleReleasers this) (IOUtil/acquireScopes dst dsts))
+                (set! (.-readBuffer this) dst)
+                (set! (.-readBuffers this) dsts)
+                (if (nil? handler)
+                    (do
+                      (set! (.-readHandler this) nil)
+                      (set! result (PendingFuture. this OpType/READ))
+                      (set! (.-readFuture this) result)
+                      (set! (.-readAttachment this) nil))
+                    (do
+                      (set! (.-readHandler this) handler)
+                      (set! (.-readAttachment this) attachment)
+                      (set! (.-readFuture this) nil)))
+                (when (> timeout 0)
+                  (set! (.-readTimer this) (.schedule port readTimeoutTask timeout unit)))
+                (set! (.-readPending this) true)
+                (.updateEvents this))
+              (set! pending true)
+              (return result)))
+          (catch Throwable ^:mutable x
+            (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+            (when (instance? ConnectionResetException x) (set! x (IOException. (.getMessage x))))
+            (set! exc x))
+          (finally (when-not pending (.enableReading this)) (.end this)))
+        (let [^Number result (when-not (some? exc)
+                               (if isScatteringRead
+                                   ^Number (Long/valueOf n)
+                                   ^Number (Integer/valueOf n)))]
+          (if (some? handler)
+              (do
+                (if invokeDirect
+                    (Invoker/invokeDirect myGroupAndInvokeCount handler attachment result exc)
+                    (Invoker/invokeIndirectly this handler attachment result exc))
+                nil)
+              (CompletedFuture/withResult result exc))))))
+
+  (method ^:private finishWrite ^void [this ^boolean mayInvokeDirect]
+    (let [^:mutable ^int n -1
+          ^:mutable ^Throwable exc nil
+          gathering (.-isGatheringWrite this)
+          ^{:tag (CompletionHandler Number Object)} handler (.-writeHandler this)
+          att (.-writeAttachment this)
+          ^{:tag (PendingFuture Number Object)} future (.-writeFuture this)
+          ^{:tag (Future ?)} timer (.-writeTimer this)]
+      (try
+        (.begin this)
+        (if gathering
+            (set! n (unchecked-int (IOUtil/write (.-fd this) writeBuffers true nd)))
+            (set! n (IOUtil/write (.-fd this) writeBuffer -1 true nd)))
+        (when (== n IOStatus/UNAVAILABLE) (locking updateLock (set! writePending true)) (return))
+        (set! (.-writeBuffer this) nil)
+        (set! (.-writeBuffers this) nil)
+        (set! (.-writeAttachment this) nil)
+        (set! (.-writeHandler this) nil)
+        (IOUtil/releaseScopes writeScopeHandleReleasers)
+        (.enableWriting this)
+        (catch Throwable ^:mutable x
+          (.enableWriting this)
+          (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+          (set! exc x))
+        (finally
+          (when-not (instance? AsynchronousCloseException exc) (.lockAndUpdateEvents this))
+          (.end this)))
+      (when (some? timer) (.cancel timer false))
+      (let [^Number result (when-not (some? exc)
+                             (if gathering ^Number (Long/valueOf n) ^Number (Integer/valueOf n)))]
+        (cond
+          (nil? handler) (.setResult future result exc)
+          mayInvokeDirect (Invoker/invokeUnchecked handler att result exc)
+          :else (Invoker/invokeIndirectly this handler att result exc)))))
+
+  (field ^:private ^Runnable writeTimeoutTask
+    (anon Runnable []
+      (method ^:public run ^void [this]
+        (let [^:mutable ^{:tag (CompletionHandler Number Object)} handler nil
+              ^:mutable ^Object att nil
+              ^:mutable ^{:tag (PendingFuture Number Object)} future nil]
+          (locking updateLock
+            (when-not writePending (return))
+            (set! writePending false)
+            (set! handler writeHandler)
+            (set! att writeAttachment)
+            (set! future writeFuture))
+          (.enableWriting UnixAsynchronousSocketChannelImpl/this true)
+          (let [^Exception exc (InterruptedByTimeoutException.)]
+            (if (some? handler)
+                (Invoker/invokeIndirectly UnixAsynchronousSocketChannelImpl/this
+                                          handler
+                                          att
+                                          nil
+                                          exc)
+                (.setFailure future exc)))))))
+
+  (method implWrite :type-params [(V extends Number) A] ^{:tag (Future V)} [this
+                                                                            ^boolean isGatheringWrite
+                                                                            ^ByteBuffer src
+                                                                            ^ByteBuffer/1 srcs
+                                                                            ^long timeout
+                                                                            ^TimeUnit unit
+                                                                            ^A attachment
+                                                                            ^{:tag (CompletionHandler V (? super A))} handler]
+    (let [myGroupAndInvokeCount (Invoker/getGroupAndInvokeCount)
+          invokeDirect (Invoker/mayInvokeDirect myGroupAndInvokeCount port)
+          attemptWrite (or (or (nil? handler) invokeDirect) (not (.isFixedThreadPool port)))
+          ^:mutable n IOStatus/UNAVAILABLE
+          ^:mutable ^Throwable exc nil
+          ^:mutable pending false]
+      (try
+        (.begin this)
+        (when attemptWrite
+          (if isGatheringWrite
+              (set! n (unchecked-int (IOUtil/write (.-fd this) srcs true nd)))
+              (set! n (IOUtil/write (.-fd this) src -1 true nd))))
+        (when (== n IOStatus/UNAVAILABLE)
+          (let [^:mutable ^{:tag (PendingFuture V A)} result nil]
+            (locking updateLock
+              (set! (.-isGatheringWrite this) isGatheringWrite)
+              (set! (.-writeScopeHandleReleasers this) (IOUtil/acquireScopes src srcs))
+              (set! (.-writeBuffer this) src)
+              (set! (.-writeBuffers this) srcs)
+              (if (nil? handler)
+                  (do
+                    (set! (.-writeHandler this) nil)
+                    (set! result (PendingFuture. this OpType/WRITE))
+                    (set! (.-writeFuture this) result)
+                    (set! (.-writeAttachment this) nil))
+                  (do
+                    (set! (.-writeHandler this) handler)
+                    (set! (.-writeAttachment this) attachment)
+                    (set! (.-writeFuture this) nil)))
+              (when (> timeout 0)
+                (set! (.-writeTimer this) (.schedule port writeTimeoutTask timeout unit)))
+              (set! (.-writePending this) true)
+              (.updateEvents this))
+            (set! pending true)
+            (return result)))
+        (catch Throwable ^:mutable x
+          (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+          (set! exc x))
+        (finally (when-not pending (.enableWriting this)) (.end this)))
+      (let [^Number result (when-not (some? exc)
+                             (if isGatheringWrite
+                                 ^Number (Long/valueOf n)
+                                 ^Number (Integer/valueOf n)))]
+        (if (some? handler)
+            (do
+              (if invokeDirect
+                  (Invoker/invokeDirect myGroupAndInvokeCount handler attachment result exc)
+                  (Invoker/invokeIndirectly this handler attachment result exc))
+              nil)
+            (CompletedFuture/withResult result exc)))))
+
+  (method ^:private ^:static checkConnect :throws [IOException] ^void [^int fdVal]
+    (let [err (new int/1 1)]
+      (when (== (HostChannels/checkConnect0 fdVal err) HostChannels/THROWN)
+        (throw (if (< (aget err 0) 0)
+                   (HostChannels/ioException (unchecked-negate-int (aget err 0)) "getsockopt")
+                   (HostChannels/socketException (aget err 0) nil))))))
+
+  (static-initializer (IOUtil/load)))

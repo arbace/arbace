@@ -1,0 +1,147 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/ch/Invoker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.nio.channels AsynchronousChannel CompletionHandler ShutdownChannelGroupException)
+        '(java.util.concurrent Executor RejectedExecutionException))
+
+(defclass Invoker
+  (constructor ^:private [this])
+
+  (field ^:private ^:static ^:final ^int maxHandlerInvokeCount
+    (Integer/getInteger "sun.nio.ch.maxCompletionHandlersOnStack" 16))
+
+  (defclass ^:static GroupAndInvokeCount
+    (field ^:private ^:final ^AsynchronousChannelGroupImpl group)
+
+    (field ^:private ^int handlerInvokeCount)
+
+    (constructor [this ^AsynchronousChannelGroupImpl group]
+      (set! (.-group this) group))
+
+    (method group ^AsynchronousChannelGroupImpl [this] group)
+
+    (method invokeCount ^int [this] handlerInvokeCount)
+
+    (method setInvokeCount ^void [this ^int value]
+      (set! handlerInvokeCount value))
+
+    (method resetInvokeCount ^void [this] (set! handlerInvokeCount 0))
+
+    (method incrementInvokeCount ^void [this]
+      (set! handlerInvokeCount (unchecked-inc-int handlerInvokeCount))))
+
+  (field ^:private ^:static ^:final ^{:tag (ThreadLocal GroupAndInvokeCount)} myGroupAndInvokeCount
+    (ThreadLocal.))
+
+  (method ^:static bindToGroup ^void [^AsynchronousChannelGroupImpl group]
+    (.set myGroupAndInvokeCount (GroupAndInvokeCount. group)))
+
+  (method ^:static getGroupAndInvokeCount ^GroupAndInvokeCount []
+    (cast GroupAndInvokeCount (.get myGroupAndInvokeCount)))
+
+  (method ^:static isBoundToAnyGroup ^boolean []
+    (some? (.get myGroupAndInvokeCount)))
+
+  (method ^:static mayInvokeDirect ^boolean [^GroupAndInvokeCount myGroupAndInvokeCount
+                                             ^AsynchronousChannelGroupImpl group]
+    (if (and (and (some? myGroupAndInvokeCount) (identical? (.group myGroupAndInvokeCount) group))
+             (< (.invokeCount myGroupAndInvokeCount) maxHandlerInvokeCount))
+        true
+        false))
+
+  (method ^:static invokeUnchecked :type-params [V A] ^void [^{:tag (CompletionHandler V (? super A))} handler
+                                                             ^A attachment ^V value ^Throwable exc]
+    (if (nil? exc) (.completed handler value attachment) (.failed handler exc attachment))
+    (Thread/interrupted))
+
+  (method ^:static invokeDirect :type-params [V A] ^void [^GroupAndInvokeCount myGroupAndInvokeCount
+                                                          ^{:tag (CompletionHandler V (? super A))} handler
+                                                          ^A attachment ^V result ^Throwable exc]
+    (.incrementInvokeCount myGroupAndInvokeCount)
+    (Invoker/invokeUnchecked handler attachment result exc))
+
+  (method ^:static invoke :type-params [V A] ^void [^AsynchronousChannel channel
+                                                    ^{:tag (CompletionHandler V (? super A))} handler
+                                                    ^A attachment ^V result ^Throwable exc]
+    (let [^:mutable invokeDirect false
+          ^:mutable identityOkay false
+          thisGroupAndInvokeCount (cast GroupAndInvokeCount (.get myGroupAndInvokeCount))]
+      (when (some? thisGroupAndInvokeCount)
+        (when (identical? (.group thisGroupAndInvokeCount) (.group (cast Groupable channel)))
+          (set! identityOkay true))
+        (when (and identityOkay (< (.invokeCount thisGroupAndInvokeCount) maxHandlerInvokeCount))
+          (set! invokeDirect true)))
+      (if invokeDirect
+          (Invoker/invokeDirect thisGroupAndInvokeCount handler attachment result exc)
+          (try
+            (Invoker/invokeIndirectly channel handler attachment result exc)
+            (catch RejectedExecutionException ree
+              (if identityOkay
+                  (Invoker/invokeDirect thisGroupAndInvokeCount handler attachment result exc)
+                  (throw (ShutdownChannelGroupException.))))))))
+
+  (method ^:static invokeIndirectly :type-params [V A] ^void [^AsynchronousChannel channel
+                                                              ^:final ^{:tag (CompletionHandler V (? super A))} handler
+                                                              ^:final ^A attachment
+                                                              ^:final ^V result
+                                                              ^:final ^Throwable exc]
+    (try
+      (.executeOnPooledThread (.group (cast Groupable channel))
+                              (anon Runnable []
+                                (method ^:public run ^void [this]
+                                  (let [thisGroupAndInvokeCount (cast
+                                                                  GroupAndInvokeCount
+                                                                  (.get myGroupAndInvokeCount))]
+                                    (when (some? thisGroupAndInvokeCount)
+                                      (.setInvokeCount thisGroupAndInvokeCount 1))
+                                    (Invoker/invokeUnchecked handler attachment result exc)))))
+      (catch RejectedExecutionException ree (throw (ShutdownChannelGroupException.)))))
+
+  (method ^:static invokeIndirectly :type-params [V A] ^void [^:final ^{:tag (CompletionHandler V (? super A))} handler
+                                                              ^:final ^A attachment ^:final ^V value
+                                                              ^:final ^Throwable exc
+                                                              ^Executor executor]
+    (try
+      (.execute executor
+                (anon Runnable []
+                  (method ^:public run ^void [this]
+                    (Invoker/invokeUnchecked handler attachment value exc))))
+      (catch RejectedExecutionException ree (throw (ShutdownChannelGroupException.)))))
+
+  (method ^:static invokeOnThreadInThreadPool ^void [^Groupable channel ^Runnable task]
+    (let [^:mutable ^boolean invokeDirect false
+          thisGroupAndInvokeCount (cast GroupAndInvokeCount (.get myGroupAndInvokeCount))
+          targetGroup (.group channel)]
+      (if (nil? thisGroupAndInvokeCount)
+          (set! invokeDirect false)
+          (set! invokeDirect (identical? (.-group thisGroupAndInvokeCount) targetGroup)))
+      (try
+        (if invokeDirect (.run task) (.executeOnPooledThread targetGroup task))
+        (catch RejectedExecutionException ree (throw (ShutdownChannelGroupException.))))))
+
+  (method ^:static invokeUnchecked :type-params [V A] ^void [^{:tag (PendingFuture V A)} future]
+    (java-assert (.isDone future))
+    (let [^{:tag (CompletionHandler V (? super A))} handler (.handler future)]
+      (when (some? handler)
+        (Invoker/invokeUnchecked handler (.attachment future) (.value future) (.exception future)))))
+
+  (method ^:static invoke :type-params [V A] ^void [^{:tag (PendingFuture V A)} future]
+    (java-assert (.isDone future))
+    (let [^{:tag (CompletionHandler V (? super A))} handler (.handler future)]
+      (when (some? handler)
+        (Invoker/invoke (.channel future)
+                        handler
+                        (.attachment future)
+                        (.value future)
+                        (.exception future)))))
+
+  (method ^:static invokeIndirectly :type-params [V A] ^void [^{:tag (PendingFuture V A)} future]
+    (java-assert (.isDone future))
+    (let [^{:tag (CompletionHandler V (? super A))} handler (.handler future)]
+      (when (some? handler)
+        (Invoker/invokeIndirectly (.channel future)
+                                  handler
+                                  (.attachment future)
+                                  (.value future)
+                                  (.exception future))))))

@@ -1,0 +1,155 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/ch/UnixAsynchronousServerSocketChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.net InetSocketAddress)
+        '(java.nio.channels AcceptPendingException
+                            AsynchronousCloseException
+                            AsynchronousSocketChannel
+                            ClosedChannelException
+                            CompletionHandler
+                            NotYetBoundException)
+        '(java.util.concurrent Future)
+        '(java.util.concurrent.atomic AtomicBoolean))
+
+(defclass UnixAsynchronousServerSocketChannelImpl
+  :extends AsynchronousServerSocketChannelImpl
+  :implements [Port$PollableChannel]
+
+  (field ^:private ^:static ^:final ^NativeDispatcher nd (SocketDispatcher.))
+
+  (field ^:private ^:final ^Port port)
+
+  (field ^:private ^:final ^int fdVal)
+
+  (field ^:private ^:final ^AtomicBoolean accepting (AtomicBoolean.))
+
+  (method ^:private enableAccept ^void [this] (.set accepting false))
+
+  (field ^:private ^:final updateLock (Object.))
+
+  (field ^:private ^boolean acceptPending)
+
+  (field ^:private ^{:tag (CompletionHandler AsynchronousSocketChannel Object)} acceptHandler)
+
+  (field ^:private acceptAttachment)
+
+  (field ^:private ^{:tag (PendingFuture AsynchronousSocketChannel Object)} acceptFuture)
+
+  (constructor :throws [IOException] [this ^Port port]
+    (super. port)
+    (try
+      (IOUtil/configureBlocking (.-fd this) false)
+      (catch IOException x (.close nd (.-fd this)) (throw x)))
+    (set! (.-port this) port)
+    (set! (.-fdVal this) (IOUtil/fdVal (.-fd this)))
+    (.register port fdVal this))
+
+  (method implClose :throws [IOException] ^void [this]
+    (.unregister port fdVal)
+    (.close nd (.-fd this))
+    (let [^:mutable ^{:tag (CompletionHandler AsynchronousSocketChannel Object)} handler nil
+          ^:mutable ^Object att nil
+          ^:mutable ^{:tag (PendingFuture AsynchronousSocketChannel Object)} future nil]
+      (locking updateLock
+        (when-not acceptPending (return))
+        (set! acceptPending false)
+        (set! handler acceptHandler)
+        (set! att acceptAttachment)
+        (set! future acceptFuture))
+      (let [x (AsynchronousCloseException.)]
+        (.setStackTrace x (new StackTraceElement/1 0))
+        (if (nil? handler) (.setFailure future x) (Invoker/invokeIndirectly this handler att nil x)))))
+
+  (method ^:public group ^AsynchronousChannelGroupImpl [this] port)
+
+  (method ^:public onEvent ^void [this ^int events ^boolean mayInvokeDirect]
+    (locking updateLock (when-not acceptPending (return)) (set! acceptPending false))
+    (let [newfd (FileDescriptor.)
+          isaa (new InetSocketAddress/1 1)
+          ^:mutable ^Throwable exc nil]
+      (try
+        (.begin this)
+        (let [n (Net/accept (.-fd this) newfd isaa)]
+          (when (== n IOStatus/UNAVAILABLE)
+            (locking updateLock (set! acceptPending true))
+            (.startPoll port fdVal Net/POLLIN)
+            (return)))
+        (catch Throwable ^:mutable x
+          (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+          (set! exc x))
+        (finally (.end this)))
+      (let [^:mutable ^AsynchronousSocketChannel child nil]
+        (when (nil? exc)
+          (try
+            (set! child (.finishAccept this newfd (aget isaa 0)))
+            (catch Throwable ^:mutable x
+              (when-not (instance? IOException x) (set! x (IOException. x)))
+              (set! exc x))))
+        (let [^{:tag (CompletionHandler AsynchronousSocketChannel Object)} handler acceptHandler
+              att acceptAttachment
+              ^{:tag (PendingFuture AsynchronousSocketChannel Object)} future acceptFuture]
+          (.enableAccept this)
+          (if (nil? handler)
+              (do
+                (.setResult future child exc)
+                (when (and (some? child) (.isCancelled future))
+                  (try (.close child) (catch IOException ignore))))
+              (Invoker/invoke this handler att child exc))))))
+
+  (method ^:private finishAccept :throws [IOException] ^AsynchronousSocketChannel [this
+                                                                                   ^FileDescriptor newfd
+                                                                                   ^:final ^InetSocketAddress remote]
+    (let [^:mutable ^AsynchronousSocketChannel ch nil]
+      (try
+        (set! ch (UnixAsynchronousSocketChannelImpl. port newfd remote))
+        (catch IOException x (.close nd newfd) (throw x)))
+      ch))
+
+  (method implAccept ^{:tag (Future AsynchronousSocketChannel)} [this att
+                                                                 ^{:tag (CompletionHandler AsynchronousSocketChannel Object)} handler]
+    (if (not (.isOpen this))
+        (let [^Throwable e (ClosedChannelException.)]
+          (if (nil? handler)
+              (CompletedFuture/withFailure e)
+              (do (Invoker/invoke this handler att nil e) nil)))
+        (do
+          (when (nil? (.-localAddress this)) (throw (NotYetBoundException.)))
+          (when (.isAcceptKilled this)
+            (throw (RuntimeException. "Accept not allowed due cancellation")))
+          (when-not (.compareAndSet accepting false true) (throw (AcceptPendingException.)))
+          (let [newfd (FileDescriptor.)
+                isaa (new InetSocketAddress/1 1)
+                ^:mutable ^Throwable exc nil]
+            (try
+              (.begin this)
+              (let [n (Net/accept (.-fd this) newfd isaa)]
+                (when (== n IOStatus/UNAVAILABLE)
+                  (let [^:mutable ^{:tag (PendingFuture AsynchronousSocketChannel Object)} result
+                          nil]
+                    (locking updateLock
+                      (if (nil? handler)
+                          (do
+                            (set! (.-acceptHandler this) nil)
+                            (set! result (PendingFuture. this))
+                            (set! (.-acceptFuture this) result))
+                          (do
+                            (set! (.-acceptHandler this) handler)
+                            (set! (.-acceptAttachment this) att)))
+                      (set! (.-acceptPending this) true))
+                    (.startPoll port fdVal Net/POLLIN)
+                    (return result))))
+              (catch Throwable ^:mutable x
+                (when (instance? ClosedChannelException x) (set! x (AsynchronousCloseException.)))
+                (set! exc x))
+              (finally (.end this)))
+            (let [^:mutable ^AsynchronousSocketChannel child nil]
+              (when (nil? exc)
+                (try
+                  (set! child (.finishAccept this newfd (aget isaa 0)))
+                  (catch Throwable x (set! exc x))))
+              (.enableAccept this)
+              (if (nil? handler)
+                  (CompletedFuture/withResult child exc)
+                  (do (Invoker/invokeIndirectly this handler att child exc) nil))))))))

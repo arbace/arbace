@@ -1,0 +1,156 @@
+;; Converted from jdk26u src/java.base/linux/classes/sun/nio/ch/EPollPort.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io IOException)
+        '(java.nio.channels.spi AsynchronousChannelProvider)
+        '(java.util.concurrent ArrayBlockingQueue RejectedExecutionException)
+        '(java.util.concurrent.atomic AtomicInteger))
+
+(defclass ^:final EPollPort
+  :extends Port
+
+  (field ^:private ^:static ^:final ^int MAX_EPOLL_EVENTS 512)
+
+  (field ^:private ^:static ^:final ^int ENOENT 2)
+
+  (field ^:private ^:final ^int epfd)
+
+  (field ^:private ^:final ^long address)
+
+  (field ^:private ^boolean closed)
+
+  (field ^:private ^:final ^int/1 sp)
+
+  (field ^:private ^:final ^AtomicInteger wakeupCount (AtomicInteger.))
+
+  (defclass ^:static Event
+    (field ^:final ^Port$PollableChannel channel)
+
+    (field ^:final ^int events)
+
+    (constructor [this ^Port$PollableChannel channel ^int events]
+      (set! (.-channel this) channel)
+      (set! (.-events this) events))
+
+    (method channel ^Port$PollableChannel [this] channel)
+
+    (method events ^int [this] events))
+
+  (field ^:private ^:final ^{:tag (ArrayBlockingQueue Event)} queue)
+
+  (field ^:private ^:final ^Event NEED_TO_POLL (Event. nil 0))
+
+  (field ^:private ^:final ^Event EXECUTE_TASK_OR_SHUTDOWN (Event. nil 0))
+
+  (constructor :throws [IOException] [this ^AsynchronousChannelProvider provider ^ThreadPool pool]
+    (super. provider pool)
+    (set! (.-epfd this) (EPoll/create))
+    (set! (.-address this) (EPoll/allocatePollArray MAX_EPOLL_EVENTS))
+    (try
+      (let [fds (IOUtil/makePipe true)]
+        (set! (.-sp this)
+              (new int/1 [(unchecked-int (unsigned-bit-shift-right fds 32)) (unchecked-int fds)])))
+      (catch IOException ioe
+        (EPoll/freePollArray address)
+        (FileDispatcherImpl/closeIntFD epfd)
+        (throw ioe)))
+    (EPoll/ctl epfd EPoll/EPOLL_CTL_ADD (aget sp 0) EPoll/EPOLLIN)
+    (set! (.-queue this) (ArrayBlockingQueue. MAX_EPOLL_EVENTS))
+    (.offer (.-queue this) NEED_TO_POLL))
+
+  (method start ^EPollPort [this]
+    (.startThreads this (EventHandlerTask.))
+    this)
+
+  (method ^:private implClose ^void [this]
+    (locking this (when closed (return)) (set! closed true))
+    (try (FileDispatcherImpl/closeIntFD epfd) (catch IOException ioe))
+    (try (FileDispatcherImpl/closeIntFD (aget sp 0)) (catch IOException ioe))
+    (try (FileDispatcherImpl/closeIntFD (aget sp 1)) (catch IOException ioe))
+    (EPoll/freePollArray address))
+
+  (method ^:private wakeup ^void [this]
+    (when (== (.incrementAndGet wakeupCount) 1)
+      (try
+        (IOUtil/write1 (aget sp 1) (unchecked-byte 0))
+        (catch IOException x (throw (AssertionError. x))))))
+
+  (method executeOnHandlerTask ^void [this ^Runnable task]
+    (locking this
+      (when closed (throw (RejectedExecutionException.)))
+      (.offerTask this task)
+      (.wakeup this)))
+
+  (method shutdownHandlerTasks ^void [this]
+    (let [^:mutable nThreads (.threadCount this)]
+      (if (== nThreads 0)
+          (.implClose this)
+          (while (> (let [old-1 nThreads] (set! nThreads (unchecked-dec-int nThreads)) old-1) 0)
+            (.wakeup this)))))
+
+  (method startPoll ^void [this ^int fd ^int events]
+    (let [^:mutable err (EPoll/ctl epfd
+                                   EPoll/EPOLL_CTL_MOD
+                                   fd
+                                   (bit-or-int events EPoll/EPOLLONESHOT))]
+      (when (== err ENOENT)
+        (set! err (EPoll/ctl epfd EPoll/EPOLL_CTL_ADD fd (bit-or-int events EPoll/EPOLLONESHOT))))
+      (when-not (== err 0) (throw (AssertionError.)))))
+
+  (defclass ^:private EventHandlerTask
+    :implements [Runnable]
+
+    (method ^:private poll :throws [IOException] ^Event [this]
+      (try
+        (while true
+          (let [^:mutable ^int n 0]
+            (loop []
+              (set! n (EPoll/wait epfd address MAX_EPOLL_EVENTS -1))
+              (when (== n IOStatus/INTERRUPTED) (recur)))
+            (.lock (.readLock (.-fdToChannelLock EPollPort/this)))
+            (try
+              (while (> (let [old-2 n] (set! n (unchecked-dec-int n)) old-2) 0)
+                (let [eventAddress (EPoll/getEvent address n)
+                      fd (EPoll/getDescriptor eventAddress)]
+                  (when (== fd (aget sp 0))
+                    (when (== (.decrementAndGet wakeupCount) 0)
+                      (let [^:mutable ^int nread 0]
+                        (loop []
+                          (set! nread (IOUtil/drain1 (aget sp 0)))
+                          (when (== nread IOStatus/INTERRUPTED) (recur)))))
+                    (when (> n 0) (.offer queue EXECUTE_TASK_OR_SHUTDOWN) (continue))
+                    (return EXECUTE_TASK_OR_SHUTDOWN))
+                  (let [channel (cast Port$PollableChannel (.get (.-fdToChannel EPollPort/this) fd))]
+                    (when (some? channel)
+                      (let [events (EPoll/getEvents eventAddress)
+                            ev (Event. channel events)]
+                        (if (> n 0) (.offer queue ev) (return ev)))))))
+              (finally (.unlock (.readLock (.-fdToChannelLock EPollPort/this)))))))
+        (finally (.offer queue NEED_TO_POLL))))
+
+    (method ^:public run ^void [this]
+      (let [myGroupAndInvokeCount (Invoker/getGroupAndInvokeCount)
+            isPooledThread (some? myGroupAndInvokeCount)
+            ^:mutable replaceMe false
+            ^:mutable ^Event ev nil]
+        (try
+          (while true
+            (when isPooledThread (.resetInvokeCount myGroupAndInvokeCount))
+            (try
+              (set! replaceMe false)
+              (set! ev (cast Event (.take queue)))
+              (when (identical? ev NEED_TO_POLL)
+                (try (set! ev (.poll this)) (catch IOException x (.printStackTrace x) (return))))
+              (catch InterruptedException x (continue)))
+            (if (identical? ev EXECUTE_TASK_OR_SHUTDOWN)
+                (let [task (.pollTask EPollPort/this)]
+                  (when (nil? task) (return))
+                  (set! replaceMe true)
+                  (.run task))
+                (try
+                  (.onEvent (.channel ev) (.events ev) isPooledThread)
+                  (catch [Error RuntimeException] x (set! replaceMe true) (throw x)))))
+          (finally
+            (let [remaining (.threadExit EPollPort/this this replaceMe)]
+              (when (and (== remaining 0) (.isShutdown EPollPort/this)) (.implClose EPollPort/this)))))))))
