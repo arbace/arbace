@@ -13486,3 +13486,126 @@ core-essential, rind-test (ty-form's `(dyn)` reaches our own programs' bodies to
 
 Coordination with the VM's item 1: native-core-plan's closure (`close`, build_run.ae) is touched here (the callees' `more`
 list), next to 448's drop-glue refusal in the same function; the drop glue itself and the export are not.
+## 2026-11-19: n-py-eval: goi's liveness across a fallthrough (pyexpat's every element with content)
+
+Lib/test under pyi (n-py-rec's records run, 367 modules judged): test_minidom's 46 errors and 4 of multiprocessing spawn's
+were "SystemError: pyi: Go panic: reflect: call of reflect.Value.Interface on zero Value". Reduced: `pyexpat.ParserCreate().
+Parse(b"<a>x</a>", True)` fails with no handler set, on the gate's executable (01e4bb771) and on stage 0 (53da41d93) alike;
+`debug.Stack()` in the interpreted pyexpat put it in expat's doContent (go/arbace/expat, xmlparse_doc.go), the switch on
+m_parsingStatus.parsing whose `case XML_PARSING:` uses `next` inside an `if` and then falls through into `default:`, which
+assigns `s = next`. goi's liveness plan (arbace/go/build.ae, plan-stmt) planned each switch clause alone, so `next` (a cell:
+its address is taken) was cleared after the `if`, and the clause fallen into read a nil cell; `GOI_LIVENESS=0` passed. Fix: a
+clause ending in fallthrough keeps alive the variables the bodies it falls into use (the chain while they fall through); they
+die after the switch as before. Test: test/goi/run/go/t/fallthrough.ae (a cell and an S-slot value, a chain of two
+fallthroughs), its output gc's (printed by repr/go, built by TamaGo's go): base panics, head passes; the 24 interpreter
+programs of test/goi/run pass on the checkout's goi (ARBACE_PATH, RT.toolSource). pyexpat probe: chardata, buffered, default
+and comment handlers all parse. arbace/go/build.ae is embedded: gate_key moves (the executables rebuild at the next gate).
+Not taken: rewriting the fallthrough in expat's Go (hides the bug from every other interpreted package).
+
+## 2026-11-19: n-py-eval: PyConfig_Get in pyi's C API (test_compile, test_dis, test_marshal, test_code import)
+
+The ranking of pyi's eval failures (n-py-rec's records run, 330 modules finished at 17:01; .tmp/goal/py-eval-causes-1119.md)
+put first, by methods, four modules that did not import: test.support.requires_debug_ranges() calls
+`_testcapi.config_get('code_debug_ranges')` at import, and _testcapi (Modules/_testcapi/config.c on ci over pyi's handles)
+reached PyConfig_Get, which pyi's C API did not provide ("NotImplementedError: pyi's C API does not provide PyConfig_Get
+(queue 262)": 451 methods, class :capi-port). Added go/arbace/pyctypes/capi_config.ae: PyConfig_Get, PyConfig_GetInt and
+PyConfig_Names after CPython 3.14.10's Python/initconfig.c (PYCONFIG_SPEC's public and read-only members and
+PYPRECONFIG_SPEC's, linux, no Py_STATS/Py_DEBUG/Py_GIL_DISABLED): a SYS_ATTR member read from sys (lost sys.NAME a
+RuntimeError), write_bytecode and int_max_str_digits from sys as config_get does, the members sys.flags mirrors from pyi's
+sys.flags (use_environment, site_import, user_site_directory negated), the rest the defaults of a python3 run from its
+command line (code_debug_ranges unless -X no_debug_ranges or PYTHONNODEBUGRANGES; hash_seed and use_hash_seed from
+PYTHONHASHSEED; the stdio and filesystem encodings from sys); an unknown name "ValueError: unknown config option name: N",
+PyConfig_GetInt's TypeError and OverflowError as CPython's. Printed, edited, gofmt and go vet clean, read back
+(bin/pyi runtime print|read). Proof (`bin/pyi check --only` of the four, on the gate's executable 0753b529a43f with the
+compiled runtime, PYI_RUNTIME=compiled, pyctypes interpreted from the checkout): from 0 to 352 passing (test_compile 154
+of 185, test_dis 125 of 145, test_marshal 63 of 79, test_code 10 of 42); the controls' subjects test_bool 31 and test_getopt
+10 of 10. The 20 methods now failing in no class are new rows for the classes (code objects that are pyi's IR: code()
+and code.replace of co_varnames, co_lnotab, code hashes and equality, a code object's weakref; match-case source positions
+None for 9; dis's positions of two programs).
+
+## 2026-11-19: n-py-eval: goi's stub families for pyi's bytes-like callbacks (write-ahead)
+
+test_ctypes' 31 errors (test_byteswap 8, test_pickling 8, ...) and test_memoryview's 1 are "pyi: Go panic: goi: compiled
+code called a method of an interpreted type whose signature has no stub left (go/arbace/gotable.edn, :stubs)", with no
+"no stub left" warning: the method has no family at all. The compiled runtime asserts pyi's bytes-like and buffer callbacks
+through unnamed interfaces (py/bytes.go's `interface{ BytesLike() []byte }`, binascii's `interface{ WritableBytes() ([]byte,
+bool) }`, memoryview's `interface{ BufferValid() error }`), which the table's families (the listed packages' named
+interfaces and :common) do not name, so ctypes' CData (interpreted, go/arbace/pyctypes) got the panicking stub. Added to
+:stubs :common BytesLike and WritableBytes, and BufferValid among func() error's names. Also the family of py.Object's Type()
+from 16 to 64 slots: pyi's lazy modules hold 22 interpreted object types, and test_sqlite3's run warned "no stub left for
+methods of type func() *py.Type ... *pysqlite3.Blob.Type panics". Write-ahead: the stubs are compiled into the executable,
+so this takes effect at the next build of the gate's executables (gate_key moves; it moves already with cfd69a6d2); not
+probed here (no executable built: no heavy runs today).
+
+## 2026-11-19: n-py-eval: the module _heapq; the pyexpat fix measured
+
+- `_heapq` (go/arbace/py/builtins_heapq.ae), Modules/_heapqmodule.c of CPython 3.14.10 in Go: heappush, heappop,
+  heapreplace, heappushpop, heapify and their _max variants (3.14's public max-heap API), positional only (METH_O's "takes
+  exactly one argument", _PyArg_CheckPositional's "expected 2 arguments"), the heap a list or a list subclass ("argument 1
+  must be list, not T"), every comparison PyObject_RichCompareBool(a, b, Py_LT), the size checked after each ("list changed
+  size during iteration"), heapify's cache-friendly order above 2,500 items, the module's __doc__ and __about__ the C
+  file's. heapq.py's `from _heapq import *` now takes them: test_heapq's TestHeapC and TestErrorHandlingC ran skipped
+  ("requires _heapq", :c-modules-deferred, 34 methods). Proof: `bin/pyi check --only test_heapq` on the checkout's runtime
+  (PYI_RUNTIME=checkout, interpreted by goi): 69 of 69 (35 before), the controls' subjects 41 of 41.
+- cfd69a6d2 (goi's liveness across a fallthrough) measured by `bin/pyi check --only` (compiled runtime, the checkout's goi):
+  test_minidom 86 -> 132 of 133, test_pyexpat 48 -> 84 of 87, test_sax 157 -> 191 of 191, test_plistlib 36 -> 67 of 71,
+  test_pulldom 7 -> 11 of 11: 151 methods; one new row in no class (test_plistlib's
+  test_dump_aware_datetime_without_aware_datetime_option: _pydatetime's message "can't subtract offset-naive and
+  offset-aware datetimes" where the test's regex is _datetime's).
+
+## 2026-11-19: n-py-eval: PyConfig_Get's rows classed ahead; test_traceback measured
+
+- 4c48d37c6 (PyConfig_Get) also opens test_traceback, whose import failed the same way (377 methods in the records run):
+  `bin/pyi check --only test_traceback` (compiled runtime, the checkout's pyctypes) 205 pass, 175 classed, 2 in no class
+  (PurePythonTracebackErrorCaretTests' syntax-error and very-long-line tests: the script's file name in the frame line,
+  left to the morning's classing). With test_compile, test_dis, test_marshal and test_code: 557 methods.
+- Written ahead in test/python/divergences.edn and divergences-315.edn (the same edit): a new class `:code-objects`
+  (deferred, PY5b: test_code's 10 that a code object as pyi's IR answers otherwise: code() and code.replace refused,
+  co_lnotab absent, hash and equality, invalid bytecode, a code object's weakref), and `:code-positions` takes by name
+  test_compile's 6 match-case TestSourcePositions and test_dis's 4 position tests. The slice's 20 rows in no class are then
+  0 (the judge's --divergences over .tmp/repr-python/pyi/check/only-d278dec2701a, both files).
+
+## 2026-11-19: n-py-eval: built-ins pickled by reference as CPython's (open, static methods, __new__, classmethod_descriptor)
+
+test_pickle's rows in no class and some of :c-accelerators' (the C classes run on the pure Pickler) were "Can't pickle
+<built-in function open>: it's not the same object as _io.open", "... maketrans>: it's not found as __main__.maketrans",
+"... <built-in method __new__ of type object>: it's not the same object as __main__.__new__", and test_c_methods' "TypeError
+not raised by dumps" for dict.__dict__['fromkeys']. Fixed in go/arbace/py, after CPython 3.14.10's methodobject.c and
+descrobject.c:
+- builtins.open is _io.open and io.open, one object (builtins_io.ae): _io's "open" is the registered builtin, which calls
+  its interpreter's _pyio.open (a staticmethod, kept per interpreter as its _io is made) instead of importing io and
+  calling io.open each time; pickle then finds _io.open the same object.
+- a built-in type's static method (str.maketrans, bytes.maketrans: METH_STATIC, m_self the type) reduces to
+  getattr(type, name) and reprs as "<built-in method maketrans of type object at 0x...>"; tp_new's wrapper
+  (object.__new__, int.__new__) reduces to getattr(type, '__new__') (func.ae, meth_reduce).
+- classmethod_descriptor has no __reduce__ (PyClassMethodDescr_Type has no tp_methods; queue 290 had given it one), so
+  pickling the descriptor itself is refused as CPython refuses it (descr.ae).
+Proof: the 9 methods (PyPicklerTests and InMemoryPickleTests' test_c_methods, test_complex_newobj_ex,
+test_builtin_functions; PyPicklingErrorTests' three newobj_ex) on the checkout's runtime: 9 of 9 (0 of 9 before); a probe:
+`builtins.open is io.open is _io.open`, open's text and binary files, open as a class attribute not bound, pickle round
+trips of str.maketrans, object.__new__ and open are the objects. The C classes' twins (CPicklerTests ...) run the same
+pure Pickler, so about 19 rows of the records run.
+
+## 2026-11-19: n-py-eval: the module _sysconfig (test_sysconfig imports)
+
+test_sysconfig imports `_sysconfig` at module level (line 36), so its 39 methods were one import row
+(:c-modules-deferred). Modules/_sysconfig.c of CPython 3.14.10 is one function: config_vars(), the build variables
+sysconfig exposes, on a POSIX build without Py_GIL_DISABLED and Py_DEBUG {"Py_GIL_DISABLED": 0, "Py_DEBUG": 0}; added beside
+_sysconfigdata__linux_ (go/arbace/py/builtins_sysconfigdata.ae; its text signature was already in the table). Proof:
+`bin/pyi check --only test_sysconfig` on the checkout's runtime: 25 pass, 6 classed, 8 that ask an installation layout pyi
+has not (the Makefile's and pyconfig.h's paths, LIBRARY, a platform EXT_SUFFIX, srcdir, the _sysconfig_vars JSON file, a
+venv's interpreter, the user scheme over an empty prefix), which `:venv-and-build` (design) now names (divergences.edn and
+divergences-315.edn, write-ahead): 0 in no class.
+
+## 2026-11-19: n-py-eval: multiprocessing's "[Errno 10] No child process" rows classed in :fork
+
+The records run's largest group in no class (74 in the 527 modules judged at 18:45) was ChildProcessError in the three
+start methods' test_misc (TestSyncManagerTypes 17, TestWait 4, TestTimeouts 1, tearDownModule: 23 each) and
+concurrent_futures' forkserver initializer tests and tearDownModule. Cause, reproduced (`bin/pyi run` of a unittest suite
+of test_misc's TestStartMethod then TestWait.test_wait, the driver's reap_children after each test; test_wait passes
+alone): 3.14's default start method on Linux is forkserver, TestStartMethod's tests reset the start method to the default,
+the forkserver process dies at its own os.fork() (pyi has none), test.support.reap_children reaps it, and every later
+Process start (forkserver.ensure_running's os.waitpid(pid, WNOHANG)) and util._cleanup_tests' forkserver._stop
+(os.waitpid(pid, 0)) raise ECHILD. A consequence of the user's no-fork decision (2026-11-04), so `:fork` (design) names
+these 74 by name, its :why saying why (divergences.edn and divergences-315.edn). Left in no class: test_process_pool's
+three ProcessPoolSpawnProcessPoolExecutorTest test_force_shutdown_workers* (spawn context: not this cause, not probed).

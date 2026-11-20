@@ -20,6 +20,57 @@ def inline_values_stand_in(name):
         sys.modules.setdefault("_testinternalcapi", m)
 
 
+def testinternalcapi_stand_in(name):
+    """_testinternalcapi is by design (244-4 (a): CPython's internals, subinterpreters, its compiler's and optimizer's
+    state). test_capi's modules and test_crossinterp import it at module level, so none of their methods ran (queue
+    465): a stand-in for their imports alone, for those modules alone, so that their other tests run. It answers
+    nothing: an attribute it lacks raises AbsentInternal, an AttributeError (hasattr and getattr's default still see it
+    absent) that is also unittest's SkipTest (a test, or a helper of test.support, that needs it skips, with the reason
+    "pyi has no _testinternalcapi (by design, 244-4 (a)): NAME"); the names a module takes at its import (test_opt's
+    TIER2_THRESHOLD, test_misc's pending_threadfunc in a class body, test_crossinterp's get_crossinterp_data) are
+    placeholders that raise it when called or used. The module stays absent for the rest of Lib/test, whose tests
+    skip without it."""
+    taken = {"test_capi": ("TIER2_THRESHOLD", "pending_threadfunc"), "test_crossinterp": ("get_crossinterp_data",)}
+    base = name[5:] if name.startswith("test.") else name
+    base = base.split(".")[0]
+    if base not in taken or sys.implementation.name == "cpython":
+        return
+    import types
+    import unittest
+    why = "pyi has no _testinternalcapi (by design, 244-4 (a)): "
+
+    class AbsentInternal(AttributeError, unittest.SkipTest):
+        pass
+
+    class Placeholder:
+        __slots__ = ("_name",)
+
+        def __init__(self, n):
+            self._name = n
+
+        def __repr__(self):
+            return "<pyi: _testinternalcapi." + self._name + " absent>"
+
+        def _absent(self, *args, **kwargs):
+            raise AbsentInternal(why + self._name)
+
+        __call__ = __index__ = __int__ = __float__ = __bool__ = __iter__ = __len__ = __getitem__ = _absent
+        __add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = __truediv__ = __floordiv__ = __mod__ = _absent
+        __lt__ = __le__ = __gt__ = __ge__ = __neg__ = _absent
+
+    m = types.ModuleType("_testinternalcapi")
+
+    def __getattr__(attr):
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError("module '_testinternalcapi' has no attribute '" + attr + "'")
+        raise AbsentInternal(why + attr)
+
+    m.__getattr__ = __getattr__
+    for n in taken[base]:
+        setattr(m, n, Placeholder(n))
+    sys.modules.setdefault("_testinternalcapi", m)
+
+
 # The work is under __name__ == "__main__", as libtest_run.py's (queue 249: a script's __main__ has __spec__ None, as
 # CPython's, so multiprocessing's spawn children run the parent's main script again as __mp_main__).
 if __name__ == "__main__":
@@ -36,6 +87,7 @@ if __name__ == "__main__":
         support.use_resources = []  # regrtest's -u none, before the module's decorators ask: no network, cpu ...
         support.verbose = 0  # regrtest without -v (its "testing with ..." prints would split the CASE lines; PY6c)
         inline_values_stand_in(name)
+        testinternalcapi_stand_in(name)
         mod = __import__("test." + name, fromlist=["*"])
         import unittest
     except BaseException as e:
