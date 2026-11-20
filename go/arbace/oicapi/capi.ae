@@ -565,7 +565,16 @@
             (set! args (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 arr)) (lit ci/Arg :K \i :I (conv int64 (len a))))))))
       (let [r (.Call (.-p c) t f args)]
         (.fromCAll c)
-        (.decode c (conv uint64 (.-I r)))))))
+        (.result c r)))))
+
+(go/method result "result is a stub's result word as oi's value. A stub of C's void type (lib-runtime-events/test's start_runtime_events,
+an external of type unit -> unit) leaves its result undefined, which OCaml's caller of a unit result never reads: ci's 0 is ()
+here, not a null pointer (queue 478).
+"
+  ^oi/Value [^{:tag (* capi)} c ^ci/Arg r]
+  (when (== (.-I r) 0)
+    (return oi/Unit))
+  (.decode c (conv uint64 (.-I r))))
 
 (go/method callRaw "callRaw is call with the representations reprs (CallRaw's): a value encoded, an unboxed or untagged argument as\nitself, the result likewise.\n"
   ^oi/Value [^{:tag (* capi)} c ^{:tag (* ci/Func)} f ^string reprs ^{:tag (slice oi/Value)} a]
@@ -608,7 +617,7 @@
           (case [\n] (return (conv oi/Nativeint (.-I r))))
           (case [\i] (return (conv int32 (.-I r))))
           (case [\t] (return (conv int (.-I r)))))
-        (.decode c (conv uint64 (.-I r)))))))
+        (.result c r)))))
 
 (go/method callback "callback is caml_callbackN_exn: the closure applied to the n arguments at args on oi's thread; the result, or\nthe exception raised marked as caml_callback_exn marks it.\n"
   ^uint64 [^{:tag (* capi)} c ^uint64 clos ^int n ^uint64 args]
@@ -682,6 +691,22 @@
                                           (oi/Failwith "Marshal.to_buffer: buffer overflow"))
                                         (copy (.W (.-m c) (arg a 2) (conv uint64 (len b))) b)
                                         (ai (conv uint64 (len b)))))]
+      ;; the C consumer of runtime events (runtime_events_consumer.h) over oi's ring (ext_runtime_events.go)
+      ["__oi_re_control" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                           (ai (conv uint64 (oi/RuntimeEventsControl (conv int (arg a 0))))))]
+      ["__oi_re_cursor" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                          (let [p (arg a 0)
+                                pid (conv int (conv int32 (arg a 1)))
+                                dir "."]
+                            (when (!= p 0)
+                              (set! dir (.CString (.-m c) p)))
+                            (ai (conv uint64 (conv int64 (oi/RuntimeEventsCursor (and (== p 0) (< pid 0)) dir pid))))))]
+      ["__oi_re_next" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                        (let [(values st next kind dom ts id data) (oi/RuntimeEventsNext (conv int (conv int64 (arg a 0))))
+                              out (arg a 1)]
+                          (range [i w (lit (slice int64) (conv int64 next) (conv int64 kind) (conv int64 dom) ts (conv int64 id) data)]
+                            (.Store64 (.-m c) (+ out (conv uint64 (* 8 i))) (conv uint64 w)))
+                          (ai (conv uint64 (conv int64 st)))))]
       ["caml_input_value_from_block" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                                        (let [b (append (lit (slice byte)) (spread (.R (.-m c) (arg a 0) (arg a 1))))
                                              (values v _) (oi/UnmarshalValue b 0)]

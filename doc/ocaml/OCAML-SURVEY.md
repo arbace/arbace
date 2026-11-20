@@ -4396,3 +4396,30 @@ ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the ma
 - The C API on ci: `<caml/domain_state.h>`'s `Caml_state_opt`, NULL inside a stub's blocking section (`test/ocaml/capi/runtime.c`):
   `c-api/test_c_thread_has_lock` and `_systhread` pass at eval and leave `:c-runtime-internals` there (the AOT levels keep them: the
   light level runs no C stubs).
+
+## As built: queue 478 (2026-11-20, the VM): `oi depend`, the runtime-events C consumer
+
+- `bin/oi depend [-depend] ARG...` (DECISION 476-1 (a), the first of ocamltest's tools as Arbace's own): `ocamlc -depend ARG...` on oi.
+  Its program, `test/ocaml/depend/ocamldep.ml`, is OCaml 5.5.0's `driver/makedepend.ml` with Pparse's reading of a source (no `-pp`, no
+  `-ppx`) and Compenv's argument parsing (`Arg.parse_argv` over makedepend's options; no OCAMLPARAM) put in its place; typed by Arbace's
+  typer and run on compiler-libs' units (`depend`, `parse`, the parser and the lexer: `COMPLIB_UNITS`), the depend program kept in
+  `.tmp/oi/depend` by its key. `header.awk`'s depend mode runs a test whose bytecode alternative is `commandline = "-depend ARGS";
+  ocamlc.byte; compiler_reference = "${test_source_directory}/BASE.reference"; check-ocamlc.byte-output` (its readonly files and
+  subdirectories copied, nothing else in the alternative): the row's program the depend program (`oi_depend_prog`, `o2j_dump`'s
+  depend branch), ARGS its arguments, judged by the test's own `.reference`. `tool-ocamldep-shadowing/a` passes at eval and leaves
+  `:ocamltest-tools` at eval and at the light AOT level. At the light level it prints the .reference, but its 26 compiler-libs units
+  (Parser's 6.6 MB of Java forms) take 161.8 s of CPU to load against the level's 140: `test/ocaml/aot-slow.edn`, `:light-speed`
+  (DECISION 478-1). The compiled level keeps the class. `tool-ocamldep-modalias` (a Makefile
+  build, no run row) keeps its class.
+- runtime events' C consumer (DECISION 476-3 (a)): `<caml/runtime_events.h>` and `<caml/runtime_events_consumer.h>` on ci (OCaml's
+  enumerations and declarations, LGPL), implemented in `test/ocaml/capi/runtime.c` over oi's ring through three natives
+  (`go/arbace/oicapi`: `__oi_re_control`, `__oi_re_cursor`, `__oi_re_next`; `go/arbace/oi/ext_runtime_events.ae`'s
+  `RuntimeEventsControl`, `RuntimeEventsCursor`, `RuntimeEventsNext`): start, pause, resume, are_active; a cursor on the process's
+  own ring read from its start, the runtime_begin, runtime_end, runtime_counter, lifecycle and lost_events callbacks (a callback's 0
+  ends the poll), max_events and events_consumed. A user events callback is kept and not called. A stub's result word 0 is `()`
+  (`oicapi`'s `result`: a C function of type void, as lib-runtime-events/test's `start_runtime_events`, leaves its result undefined;
+  ci's is 0, which was "a C stub's value is a null pointer"). `lib-runtime-events/test` passes at eval ("minors: 18 / 36", the
+  three compactions' cycles of OC219's model) and leaves `:c-runtime-internals` there; the AOT levels keep it (no C stubs at the light
+  level).
+- Controls (`test/ocaml/controls.txt`): the depend row against lib-runtime-events/test's reference, and lib-runtime-events/test against
+  test_caml's (the C consumer's counts must part from the OCaml consumer's).

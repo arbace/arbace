@@ -294,7 +294,16 @@ covers what.
   `cnodes.ae`) are Arbace's own, under the Eclipse Public License 1.0: clean-room, written from OCaml's manual (chapter 22,
   "Interfacing C with OCaml": the value layout, the macros' and functions' names and meanings) without OCaml's runtime headers
   or sources; `runtime.c`'s BLAKE2b is written from RFC 7693's specification (the initialization vector and the message schedule
-  are the RFC's constants).
+  are the RFC's constants). Two exceptions (queue 478, doc/ocaml/OCAML-SURVEY.md "As built: queue 478"): the headers
+  `test/ocaml/capi/include/caml/runtime_events.h` and `runtime_events_consumer.h` take their enumerations (the ring's numbering)
+  and their functions' declarations from OCaml 5.5.0's `runtime/caml/runtime_events.h` and
+  `otherlibs/runtime_events/caml/runtime_events_consumer.h` (the tarball above), under the GNU Lesser General Public License
+  version 2.1 with the OCaml LGPL linking exception (below); `runtime.c`'s consumer over oi's ring is Arbace's own.
+- `bin/oi depend`'s program `test/ocaml/depend/ocamldep.ml` (queue 478, doc/ocaml/OCAML-SURVEY.md "As built: queue 478") is OCaml
+  5.5.0's `driver/makedepend.ml` (the tarball above, Copyright INRIA; its notice kept) with its reading of a source and its
+  arguments' parsing put in place of `driver/pparse.ml`'s and `driver/compenv.ml`'s: under the GNU Lesser General Public License
+  version 2.1 with the OCaml LGPL linking exception (below). `go/arbace/oi/ext_runtime_events.ae` (OC219) follows the behaviour of
+  `runtime/runtime_events.c` and `otherlibs/runtime_events/runtime_events_consumer.c` of the same tarball, under the same license.
 - repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"): `arbace/repr/ocaml/lex.ae`
   (parsing/lexer.mll, the parts of stdlib/lexing.ml that update the positions, utils/misc.ml's Utf8_lexeme),
   `docstrings.ae` (parsing/docstrings.ml), `ast.ae`'s constructors and docstring attributes (parsing/ast_helper.ml,
