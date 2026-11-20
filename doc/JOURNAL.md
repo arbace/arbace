@@ -14606,3 +14606,37 @@ address width 3, global numbering 2, PAuth ABI module flags 2, atomicrmw's store
 Result: verify-llvmtest 1,009 of 1,009; verify-probes, the round trips and the rt families unchanged; LLVM read 4,049 / 0 / 0;
 completeness 0.9899 -> 0.9938 (meant 1.0000), independence 1.0000. Not run: bin/gate. For the night: llvm-essential, llvm-read, the
 round trips (arbace/repr/llvm is embedded: gate_key moves).
+
+## 2026-11-20: parse-check's own reference: CPython 3.14.10's parser on Arbace's C (queue 494, py-own-judge-1 (a), 489-3 (a); committed at the merge n-merge-1120b)
+
+As queue 489 did for lex-check, parse-check (the native reader, arbace.repr.python.native) is judged at check time by
+CPython's own parser compiled from source by Arbace's C. Built on the Mac VM, branch 494-py-c-parser (adc26b094, on 489's
+c87121d0f).
+
+- Origin: https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+  de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032 (test/python/corpora.edn's :cpython-3.14.10): Parser/parser.c,
+  pegen.c, pegen_errors.c, action_helpers.c, string_parser.c, peg_api.c, Python/Python-ast.c, asdl.c, pyarena.c, future.c,
+  ast_preprocess.c, mystrtoul.c, 489's tokenizer files with Parser/tokenizer/string_tokenizer.c and utf8_tokenizer.c, and
+  Include/, unmodified (tools/pyi/clib/pyparser/lib.conf). Copied into the harness (marked, PSF): Objects/unicodeobject.c's
+  _PyUnicode_DecodeUnicodeEscapeInternal2, _PyUnicode_ScanIdentifier, _Py_ascii_whitespace; Objects/bytesobject.c's
+  _PyBytes_DecodeEscape2; Objects/longobject.c's _PyLong_DigitValue; Python/ast.c's _PyAST_GetDocString; Python/codegen.c's
+  _Py_CArray_*; Python/pystrcmp.c's PyOS_mystrnicmp; Modules/unicodedata.c's NFKC and name lookup, their tables read at
+  run time from the tarball's Modules/unicodedata_db.h and unicodename_db.h (compiled in: a 33 MB node program, cf2g past
+  4 GiB). License: PSF (LICENSE.md).
+- Built: ci's builder (bin/pyi-clib build pyparser) with Arbace's harness tools/pyi/clib/pyparser/parseharness.c (the C API
+  with exceptions as instances, CPython's str/bytes layouts, compile()'s PyCF_ONLY_AST path, tools/pydump/pydump.py's
+  tree_one and Writer ported to C over the parser's mod_ty, mode :full's tokens by _tokenize) into go/arbace/clib/pyparser
+  (key a94b0f88); bin/pyi-clib exe compiles it by cf2g and TamaGo's go. bin/repr-python parse-check:
+  REPR_PYTHON_PARSE_REF=own (records mode's default for 3.14); recorded / live / record / verify are the oracle tier's.
+- Proved: one whole run in each mode (parse-check --record, own): the harness's dumps equal CPython's recorded trees (the
+  pydump manifests' SHA-256) on 3,736 of 3,736 files in :lines and in :full, and the 3,846 mutants of each mode equal CPython
+  3.14.10 live. Control: a planted native-parser bug (parser.ae's conjunction as Or) fails samples/control.py and
+  Lib/fnmatch.py in own mode. Found: the native reader fails Lib/test/test_fstring.py and test_tstring.py (a debug
+  f-string's comment), independent of the reference.
+- Scores: independence.edn's :parse-check [5724 1] and :syntax-errors-harness [256 1] (were 0.5); Python's judge
+  0.932 -> 0.977, independence 98.6 -> 99.5.
+- Alternatives: CPython's recorded trees kept (0.5); unicodedata.c compiled whole (too big for the VM's cf2g and go build);
+  pydump.py on pyi (it parses with the native reader itself, so it would be circular).
+- Decisions (the main session): 494-1 (a) host-dependent error texts kept as judge cases, as 489-1; 494-2 (a) the executables'
+  builds a step of their own, :mem-gib 5 (not built yet); 494-3 (a) the native reader's debug f-string text fixed (task 501);
+  494-4 this host records the results file at the merge, after bin/pyi-clib verify pyparser.
