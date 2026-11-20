@@ -13314,3 +13314,60 @@ here is 36b769ce7c35115edd8c, the key tonight's --full builds at next. The night
 step 5, JOP13 (a)'s `bin/java-check sources --jobs 8 --record` on T' with `sources --check --complete`, and a preflight that accepts
 switch.patch with no context (mac/432-java-golden's independence.edn moves the patch's context). cacerts by GenerateCacerts has no verb yet
 and stays out. Dry run only; the morning's lines are in .tmp/goal/java-platform-morning.md. No key moves (journal only).
+
+## 2026-11-20: JCS50 (b), javac on Arbace's `--release N` (branch `jcs50-release`, from next 9f322d9a4); the proof on Arbace deferred
+
+The user's decision of 2026-11-20 (JCS50 (a) with (b) first; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-25):
+JCS50-JCS55"): `--release N` failed for every N ("release version N not supported": no ct.sym in the platform, and javac's
+tool world's ServiceLoader finds no PlatformProvider). Studied: jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259,
+`src/jdk.compiler/share/classes/com/sun/tools/javac/platform/{JDKPlatformProvider,PlatformUtils,PlatformDescription,PlatformProvider}.java`,
+`main/Arguments.java` (handleReleaseOptions), `main/DelegatingJavaFileManager.java`, `file/Locations.java`, and
+`make/modules/jdk.compiler/Gendata.gmk` (CreateSymbols, which makes ct.sym). Finding: JDK 26's javac serves its own release
+from ct.sym too (the `Q` sections), so with a ct.sym step (1) and step (2) are one mechanism; step (1) (26 as -source/-target 26
+with the platform's modules) is kept as the fallback when the platform has no ct.sym.
+
+Built: `overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/ReleasePlatforms.java` (the PlatformProvider: releases from
+ct.sym's section names as JDKPlatformProvider computes them, 8 to 26; descriptions as PlatformDescriptionImpl's; without
+ct.sym the own release with the platform's modules) and `CtSymFileManager.java` (JDKPlatformProvider's release file manager
+over ct.sym read by jrt's java.util.zip.ZipFile, no zip file system: SYSTEM_MODULES per module, or PLATFORM_CLASS_PATH for
+8, `.sig` as class files, file objects with the zip file system's jar: URIs), both Arbace's (EPL); `FileManager.addPlatform`
+registers the platform's directories; the tool world's `ServiceLoader` variant returns ReleasePlatforms for
+`com.sun.tools.javac.platform.PlatformProvider`. The pin `jdk/javac/ct-sym.sha256`: the JDK build's
+`build/linux-x86_64-server-release/images/jdk/lib/ct.sym` of jdk26u at baf63fb, SHA-256
+642d31ba38e4b2222b1992206863983e87fdc529d99ee4fe2d6b77c7d31ba6f4 (11,076,142 bytes, 21,054 entries, sections 8 to Q), kept
+apart from `platform.sha256` (whose digest keys the own platform's cache: a line there would rebuild it); `bin/javac-vendor
+platform DIR` links it into the platform as `DIR/ct.sym` after checking it (`ct_sym`; the verb `ct-sym DIR`), and `bin/javac-vendor
+tool` (hit or miss, `--check` too) into the checkout's `.tmp/repr-java-platform`, which `bin/repr-java` remakes only when
+platform.sha256 changes; a file beside the module directories, which neither FileManager nor repr/java's `dir-platform` takes for
+a module. First done in `bin/repr-java` (relinked when the pin changed), then moved out: `bin/repr-java` is in repr/java's reader
+hash, so the edit made the essential `provenance` step fail on all four provenance files (835e66a3... at the base, ddd88dcb...
+with it). The 27 gate steps that pin `platform.sha256` pin it too.
+javac's forms: the package read by `bin/repr-java read-jdk --no-javac` on the night's tool (javac-60886b4973e7356caf1b,
+`REPR_JAVA_STALE_OK=1`) with the vendoring's origins, the three unchanged files byte for byte the committed forms, the two
+new ones and FileManager's call taken; `jdk/javac/sources.txt` (+2) and the provenance's counts (814, 374, 901) by hand as
+convert writes them (the provenance's :host left the tree's); `bin/javac-vendor edge` on the frozen JVM: `jdk/javac/edge.edn`
+unchanged. CLAUDE.md names the pin.
+
+Proven on the JDK (jdk26u's image; the overlay compiled with `--patch-module jdk.compiler`, PlatformUtils patched to ask
+ReleasePlatforms, `jdk.internal.jrt.javac.Main --platform` over the platform's modules and the pinned ct.sym): `--release 8`,
+`11`, `17`, `21`, `26` give the JDK javac's raw diagnostics line for line and its class files byte for byte where both compile;
+without ct.sym `--release 26` compiles to the same class file and `--release 17` is refused; `--release 7` and `27` are refused
+as by the JDK's javac (the negative control). `bin/javac-vendor ct-sym` with a wrong pin fails naming both digests.
+
+Not proven on Arbace, by the user's decision: javac's key moves (1a2277a0fecc75f9e2e8 at the head; 36fbf6b1399462aeb97b before
+bin/javac-vendor's tool hook, the key the builds below were for). The tool build was run twice by
+hand under bin/heavy-lock after the night's full gate was stopped (14:10 UTC) and the essential gate after it: the first, at
+GOMEMLIMIT=40GiB, was killed by the OOM killer in its bin/build-go step (the build.go driver at 27 GiB RSS beside its compile at
+29 GiB, other agents' processes beside them; the orphaned go build killed, the partial target/ removed); the second, at 20 GiB,
+was stopped while waiting for the big lock: after this branch merges onto today's next javac's key differs again, so the next
+gate builds the tool anyway. No record is touched: the 49 rows (diagnostics 44, classes 2, print 2, interp 1, all "release
+version N not supported") and the source sets of t04718, t06345, t06352, t06401 are for that gate's tool and a Java re-judge
+(the survey's "As built: JCS50 (b)" lists what they must show), then :diag-release emptied or narrowed. Checks here: bin/reap
+(54 of 56, 0 problems), bin/crops-score --judge --strict (0 problems), bin/records-check (9 pairs, 0), test/docs/claude-md-test.bash
+(all ok), bin/provenance-check, bash -n bin/javac-vendor; test/gate/javac-platform-test.bash fails one case ("own-pin?" expects the checkout's pin
+to be a build pin; the checkout's is the own pin since 39806d6a7): not this change's. Java's CoMaIn unchanged (89/100/99).
+
+DECISION JCS50-1 (the survey, "As built: JCS50 (b)"): the link into the build tree's image makes an audited Java step that uses
+`--release` need the host `:jdk`; options (a) ct.sym made by Arbace with CreateSymbols on javac's tool from jdk26u's
+`src/jdk.compiler/share/data/symbols` and the own platform, (b) the build's ct.sym committed as a 6.3 MB xz record, (c) the
+audit taught the pin; recommended (a), (b) as its bridge.

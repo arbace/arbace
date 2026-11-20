@@ -76,7 +76,9 @@
 #                             --full's javac-tool): DIR/arbace-javac when its key is the checkout's
 #                             arbace_javac_key, else built (--build-java for amd64, j2g on EXE, the
 #                             compiled namespaces of DIR's aot/ when of the checkout's key) and
-#                             copied into DIR with its j2g run's log and report
+#                             copied into DIR with its j2g run's log and report; first, hit or miss
+#                             (and with --check), the pinned ct.sym linked into the checkout's
+#                             .tmp/repr-java-platform when that is there (JCS50 (b), ct-sym below)
 #   bin/javac-vendor check --from DIR
 #                             check's verdict from the tool build's own j2g run in DIR (javac's world
 #                             translated once): the tool of the checkout's key, status 0 and no class
@@ -109,7 +111,13 @@
 #   bin/javac-vendor platform [DIR]
 #                             the platform made into DIR (default WORK/platform) and checked
 #                             against OUT/platform.sha256; prints DIR (repr/java on Arbace,
-#                             bin/repr-java, JN4)
+#                             bin/repr-java, JN4); with the JDK build's lib/ct.sym linked in as
+#                             DIR/ct.sym, checked against OUT/ct-sym.sha256 (JCS50 (b): javac on
+#                             Arbace's --release N, jdk.internal.jrt.javac.ReleasePlatforms)
+#   bin/javac-vendor ct-sym [DIR]
+#                             only the pinned ct.sym linked into DIR (default WORK/platform); prints
+#                             DIR/ct.sym (bin/repr-java's platform, .tmp/repr-java-platform, made before
+#                             the pin: bin/javac-vendor ct-sym .tmp/repr-java-platform; tool does it too)
 #   bin/javac-vendor platform-build [--check]
 #                             the JDK build's configuration as data (JCS362 (a)): each module's javac options,
 #                             sources (roots and excludes), the version strings, the C preprocessor's flags and
@@ -511,7 +519,20 @@ platform_make() {
     [ "$(head -c 4 "$d/$m/module-info.class" | od -An -tx1 | tr -d ' ')" = cafebabe ] || fail "no module descriptor in $b/images/jmods/$m.jmod"
   done
 }
-# platform DIR: the platform made, each module checked against the pin
+# ct_sym DIR: the JDK build's lib/ct.sym linked into DIR as DIR/ct.sym (javac on Arbace's --release N, JCS50 (b):
+# jdk.internal.jrt.javac.ReleasePlatforms), checked against its pin OUT/ct-sym.sha256 (apart from platform.sha256, by
+# which the own platform's cache is keyed); none without the pin
+ct_sym() {
+  local d=$1 pin=$out/ct-sym.sha256 c f h want
+  [ -f "$pin" ] || return 0
+  c=$(conf); [ -n "$c" ] || { echo "javac-vendor: no JDK build tree in $jdk/build (its images/jdk/lib/ct.sym)" >&2; return 1; }
+  f=$(dirname "$c")/images/jdk/lib/ct.sym
+  [ -f "$f" ] || { echo "javac-vendor: no $f (the ct.sym $pin pins)" >&2; return 1; }
+  h=$(sha256sum < "$f" | cut -c1-64); want=$(pin_line "$pin" ct.sym)
+  [ "$h" = "$want" ] || { echo "javac-vendor: $f: $h, pinned ${want:-none} ($pin)" >&2; return 1; }
+  ln -sfn "$f" "$d/ct.sym"
+}
+# platform DIR: the platform made, each module checked against the pin, with the pinned ct.sym (ct_sym)
 platform() {
   local d=$1 m h want st=0 c
   if [ "$(platform_kind)" = own ]; then
@@ -524,6 +545,7 @@ platform() {
       h=$(module_hash "$d/$m"); want=$(pin_line "$out/platform.sha256" "$m")
       [ "$h" = "$want" ] || { echo "javac-vendor: the own platform's $m: $h, pinned ${want:-none} ($out/platform.sha256)" >&2; st=1; }
     done
+    ct_sym "$d" || st=1
     return $st
   fi
   platform_make "$d" || return 1
@@ -532,6 +554,7 @@ platform() {
     want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $m\$/\1/p" "$out/platform.sha256" 2>"$quiet")
     if [ "$h" != "$want" ]; then echo "javac-vendor: the platform's $m: $h, pinned ${want:-none} ($out/platform.sha256)" >&2; st=1; fi
   done
+  ct_sym "$d" || st=1
   return $st
 }
 # platform_pin OUT: OUT/platform.sha256
@@ -1056,6 +1079,10 @@ case $cmd in
         *) fail "tool: unknown option $1" ;;
       esac
     done
+    # JCS50 (b): the pinned ct.sym linked into the checkout's .tmp/repr-java-platform, bin/repr-java's platform, when it
+    # is there (bin/repr-java makes it again only when platform.sha256 changes, and bin/repr-java is in the reader's hash:
+    # the tool's step, hit or miss, keeps it with the pin before the Java steps that need the tool)
+    if [ -d "$root/.tmp/repr-java-platform" ]; then ct_sym "$root/.tmp/repr-java-platform" || fail "tool: the pinned ct.sym"; fi
     . "$root/bin/lib/javac-key.bash"
     want=$(arbace_javac_key "$root")
     if [ -x "$d/arbace-javac" ] && [ "$(cat "$d/arbace-javac.key" 2>"$quiet")" = "$want" ] && [ -f "$d/j2g.log" ] && [ -f "$d/report.edn" ]; then
@@ -1112,6 +1139,11 @@ case $cmd in
     platform "$d" || exit 1
     echo "$d" ;;
   platform-pin) platform_pin "$out" && cat "$out/platform.sha256" ;;
+  ct-sym)
+    # JCS50 (b): the pinned ct.sym linked into the platform DIR (default WORK/platform) as DIR/ct.sym
+    d=${1:-$work/platform}
+    ct_sym "$d" || exit 1
+    echo "$d/ct.sym" ;;
   platform-own)
     # JOP3 (a), JOP4 (a): the own platform built into DIR (default WORK/own) [--gensrc DIR: from those generated sources,
     # else the committed pack] [--jobs N]; --pin: then OUT/platform.sha256 rewritten as its pin (the switch); --pack: the

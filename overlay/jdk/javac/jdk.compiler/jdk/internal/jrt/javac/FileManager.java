@@ -9,7 +9,8 @@
  * javac's Modules, ModuleFinder and ClassWriter ask. It decides only where files come from and go to, not what javac makes of
  * them. Since JFS52 (b) StandardFileManager extends it, the standard file manager of javac's
  * JavaCompiler on Arbace (SystemCompiler). Since F6 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
- * F6") a class file without -d goes where javac's own file manager puts it. Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
+ * F6") a class file without -d goes where javac's own file manager puts it. Since JCS50 (b) its platforms
+ * are --release's too (ReleasePlatforms, CtSymFileManager). Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
  * baf63fb): Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt.javac;
@@ -156,12 +157,16 @@ public class FileManager implements JavaFileManager {
         this.classOutput = classOutput;
     }
 
-    /** Every directory of platform holding a module-info.class, a system module, in name order. */
+    /**
+     * Every directory of platform holding a module-info.class, a system module, in name order; the
+     * platform registered for --release (ReleasePlatforms: its ct.sym, else its own release).
+     */
     public void addPlatform(File platform) throws IOException {
         File[] fs = platform.listFiles();
         if (fs == null) {
             throw new IOException("no platform directory " + platform);
         }
+        ReleasePlatforms.platform(platform);
         Arrays.sort(fs);
         for (File d : fs) {
             if (new File(d, "module-info.class").isFile() && !system.containsKey(d.getName())) {

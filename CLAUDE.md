@@ -440,7 +440,8 @@ Prior art:
   manager (jrt's own Java in `overlay/jdk/javac/jdk.compiler`), against the platform: the JDK build
   tree's exploded modules with their jmods' module descriptors (since JN6 all 68 of the image, as
   the JVM's javac sees them; the provenance files' `:jdk` names the platform by its pin), pinned by
-  `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`); `bin/javac-vendor classes`
+  `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`), and `--release N` served from the JDK build's `lib/ct.sym`, pinned
+  by `jdk/javac/ct-sym.sha256` and linked into the platform (JCS50 (b), `jdk.internal.jrt.javac.ReleasePlatforms`); `bin/javac-vendor classes`
   compiles the baseline, the samples and java.base's closure (`-g:none`) by javac on Arbace and by
   the JVM's javac and compares the class files byte for byte (`java.base`: java.base as the JDK
   build compiles it, against the build's classes). repr/java's reader runs on the tool (JN4; the
