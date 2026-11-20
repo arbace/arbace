@@ -7900,3 +7900,35 @@ tokenizer, built from the pinned tarball by Arbace's C, as lex-check's reference
   the files, `own_tokdump`); `recorded`, and the live, record and verify modes, run or read tokdump.py's dumps, the oracle tier's;
   3.15 keeps its oracle. The gate fragment's `python-read-essential` and `python-native` declare the harness's inputs
   (`:pytokenizer`) and the `:go` host.
+
+## As built: 494, parse-check judged by CPython's parser on Arbace's C (2026-11-20, the Mac VM, queue 494; py-own-judge-1 (a), the user's)
+
+489-3 (a): parse-check's reference made as lex-check's (As built: 489), CPython 3.14.10's own parser built from the pinned
+tarball by Arbace's C, at check time; CPython's recorded trees moved to the oracle tier.
+
+- **The program.** `tools/pyi/clib/pyparser/` (lib.conf, `parseharness.c`): `Parser/parser.c`, `pegen.c`, `pegen_errors.c`,
+  `action_helpers.c`, `string_parser.c` and `peg_api.c`, `Python/Python-ast.c` (the constructors; its object conversion and types
+  never run), `asdl.c`, `pyarena.c`, `future.c` and `ast_preprocess.c` (what `compile()`'s `PyCF_ONLY_AST` path runs after the
+  parser: `_PyFuture_FromAST`'s "not a chance" and undefined features, the preprocess without folding), `mystrtoul.c`, and 489's
+  tokenizer with `Parser/tokenizer/string_tokenizer.c` and `utf8_tokenizer.c` (ast.parse reads from a string), unmodified, as 489's.
+  `bin/pyi-clib build pyparser`: the node program `go/arbace/clib/pyparser` (key a94b0f88, 9.2 MB; VM 21 min at 2.8 GiB);
+  `bin/pyi-clib exe pyparser` (cf2g and the go build, 14 min at 4.1 GiB on two CPUs).
+- **The harness** (`parseharness.c`, Arbace's own): 489's object model widened: the exceptions as instances in
+  `tstate->current_exception` (pegen.c reads it; CPython's `PySyntaxErrorObject` first in the layout, whose `metadata` pegen.c sets
+  in place), SyntaxError's attributes from its arguments and the syntax-location setters (the program text of a file named by the
+  corpus's relative path is none, as in CPython's working directory), UnicodeDecodeError's attributes and `str()` (the parser's
+  "(unicode error) ..."), UTF-8's reasons, the numbers' boxes with longobject.c's 4,300-digit limit, `PyUnicodeWriter`, `%R`.
+  Copied from CPython (PSF): `_PyUnicode_DecodeUnicodeEscapeInternal2`, `_PyBytes_DecodeEscape2`, `_PyLong_DigitValue`,
+  `_PyAST_GetDocString`, `_Py_CArray_*`, `PyOS_mystrnicmp`, and `Modules/unicodedata.c`'s NFKC and name lookup (the identifiers'
+  normalization, `\N{...}`), whose tables the harness reads at start from the tarball's `Modules/unicodedata_db.h` and
+  `unicodename_db.h`: compiled in, their initializers made a 33 MB node program whose cf2g translation passed 4 GiB. Then
+  pydump.py's `tree_one` (`ast.parse`, again with `type_comments=True`, `detect_encoding`, the decoded text) and its `Writer`
+  ported to C over the parser's own tree (`mod_ty`), mode `:full`'s `:tokens` from `_tokenize.TokenizerIter` as tokenize.tokenize
+  runs it: pydump.py tree's (and tree --full's) dumps, byte for byte.
+- **The mode.** `bin/repr-python parse-check`'s reference: `REPR_PYTHON_PARSE_REF=own`, records mode's default for 3.14
+  (`own_treedump`, `--full` with `--full`); `recorded`, live, record and verify read or run pydump.py, the oracle tier's. The gate
+  fragment's `python-read-essential` and `python-native` add the inputs `:pyparser`.
+- **Proved** (one whole run in each mode, own): the harness's dumps equal CPython's recorded ones (the pydump manifests' SHA-256) on
+  3,736 of 3,736 files in `:lines` and in `:full` (samples, stdlib, site-packages, lib-test, lex-errors, syntax-errors), the 3,846
+  mutants of each mode equal CPython 3.14.10 live; a planted native-parser bug (parser.ae's conjunction an Or) fails control.py
+  and fnmatch.py in own mode. independence.edn: parse-check's 5,724 cases and the 256 syntax-errors cases without a stated error 1.
