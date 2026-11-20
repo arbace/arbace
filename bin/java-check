@@ -132,7 +132,18 @@
 #                      run, and DIR/partial for a partial run (--only, --list, --essential), DIR/corpus the
 #                      corpora of a run of whole corpora (--corpus alone: the gate's parts), which --judge
 #                      reads (judged whole within those corpora). --list FILE (GT8, the gate's rotation): the
-#                      tests whose ids (tNNNNN) FILE lists, one a line, a partial run (no --record). Status 0 when the levels ran, whatever their results
+#                      tests whose ids (tNNNNN) FILE lists, one a line, a partial run (no --record). Status 0 when the levels ran, whatever their results,
+#                      but for rows no test earned (queue 485): a shard that failed (its tests' "error the shard failed") or
+#                      a plan missing or cut (WORK/run/ID/plan.tsv: no end line, no run line; java.check writes it whole, an
+#                      end line last), more than JAVA_CHECK_ERRORS_MAX (default 0) fail the run (status 1), the results saved
+#                      all the same; the run's errors fail a run without --save too. One run in a WORK at a time
+#                      (WORK/run.lock: a second waits; JAVA_CHECK_WORK another WORK)
+#   bin/java-check saved-errors [STORE]
+#                      read-only (queue 485): the saved results of the gate's Java steps in the store of passes
+#                      (default ARBACE_GATE_STORE's, else the main checkout's .tmp/gate-pass) that hold rows no test
+#                      earned (the shard failed, a plan missing or cut) or whose step log shows plans missing (their
+#                      tests passed unrun before queue 485): step/key, pass, date, the counts, newest (what
+#                      --judge --latest-saved took before it); removes nothing. --latest-saved passes over them
 #   bin/java-check --judge [--oracle] [--latest-saved] [--essential] [--record] [--partial] [--levels L,...] [--held FILE] RESULTS...
 #                      the judgment alone (GT5): the RESULTS files (--save's results.tsv) judged as a run
 #                      of their levels is, against test/java/check-LEVEL.edn, test/java/divergences.edn and
@@ -904,14 +915,33 @@ test_limit() {
   echo $((t * ${tmo_scale:-1}))
 }
 
+# plan_bad RUN (queue 485, 477-3): when the test's plan RUN/plan.tsv cannot be trusted, prints why and returns 0;
+# returns 1 when it is whole: present, its last line end (java.check's write-plan writes it last, the file renamed
+# into place) and, but for a golden-diagnostics test, a run line. A plan missing or cut (another java-check that
+# removed WORK/run under this one, a run killed while it planned) is an error of every row it covers, never a pass:
+# a run without its plan read no action, and an empty result counted as a pass (104 rows of 477's second run)
+plan_bad() {
+  local f=$1/plan.tsv
+  if [ ! -f "$f" ]; then echo "no plan: $f is missing (WORK/run removed under the run: another java-check in the same WORK?)"; return 0; fi
+  if [ "$(tail -n 1 "$f")" != end ]; then echo "the plan $f is partial (no end line)"; return 0; fi
+  grep -q '^kind	diagnostics' "$f" && return 1
+  grep -q '^run	' "$f" || { echo "the plan $f has no run line"; return 0; }
+  return 1
+}
+
 # run_actions LEVEL EXE LOAD FORMS: each main action of the test (id, p, dir: check_one's) run by
 # EXE's test/java/run.ae, its classes defined from FORMS as LOAD says (do, files: the interpreter;
 # none: the program's own, compiled), in the run's directories (run_dirs, JCS19 (b)), judged;
 # prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON, the first action not passing its result; each action
 # under the test's limit (test_limit: its line in test/java/timeouts.txt, GTS102)
 run_actions() {
-  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo vk gold ores="" ojr jst pl
+  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo vk gold ores="" ojr jst pl why nrun=0 ended=""
   local -a x c props=() props0=() pa=()
+  # queue 485: no plan, no pass (plan_bad); the loop below checks again that it read the runs and the end line
+  if why=$(plan_bad "$p"); then
+    printf '%s\t%s\terror\t%s\n' "$id" "$level" "$why" | sed -e "s|$root|.|g"
+    return 0
+  fi
   # F6: a tool test interpreted on javac's tool, its system compiler against the platform
   if [ "$level" = interp ] && [ -n "${texe:-}" ] && tool_test; then
     exe=$texe props0=(-Djdk.internal.jrt.javac.platform="$tplatform")
@@ -932,8 +962,9 @@ run_actions() {
   [ "$(awk -F'\t' '$1=="root"{print $2}' "$p/plan.tsv")" != checkout ] || tbase=$root
   mapfile -t tprops <<< "$(jtreg_props "$work/no-jdk" "$tbase" "$(awk -F'\t' '$1 == "test" { print $2; exit }' "$p/plan.tsv")" "$work/classes/$id")"
   while [ -z "$res" ] && IFS=$'\t' read -r -a x; do
+    [ "${x[0]}" = end ] && ended=1
     [ "${x[0]}" = run ] || continue
-    i=${x[1]}
+    i=${x[1]} nrun=$((nrun + 1))
     # JCS335 (a): the action's system properties (the plan's props line of run I), given to run.ae as -Dk=v
     props=(${props0[@]+"${props0[@]}"})
     pl=$(awk -F'\t' -v i="$i" '$1 == "props" && $2 == i' "$p/plan.tsv")
@@ -979,6 +1010,12 @@ run_actions() {
       esac
     fi
   done < "$p/plan.tsv"
+  # queue 485: a pass is a plan read to its end line with a run line in it (a plan removed or cut while the
+  # test ran is an error, never the empty result that counts as a pass)
+  if [ -z "$res" ] && { [ "$nrun" = 0 ] || [ -z "$ended" ]; }; then
+    res="error	the plan $p/plan.tsv was cut while the test ran (${nrun} run lines read, $( [ -n "$ended" ] && echo "its end line read" || echo "no end line"))"
+    ores=$res
+  fi
   # GTS81 (a), test/java/controls.edn: the controls whose subject this test is (plan lines control CID
   # EXIT OUT LEN DET MASKED DET-MASKED, their reference's first action): its first action's run judged
   # again by judge, against the reference's status and stdout; printed under the control's id. JCV2:
@@ -1259,7 +1296,13 @@ compiled_level() {
     cat "$work/j2g/s$s/results.tsv"
   done
   # the golden-diagnostics tests (the diagnostics level's, JC3) have no compiled level
+  local why
   while read -r id; do
+    # queue 485: a test whose plan is missing or cut: an error, unless a shard's results hold its row (run_actions')
+    if why=$(plan_bad "$work/run/$id"); then
+      cat "$work"/j2g/s*/results.tsv 2>/dev/null | grep -q "^$id	" || printf '%s\tcompiled\terror\t%s\n' "$id" "$why" | sed -e "s|$root|.|g"
+      continue
+    fi
     grep -q '^kind	diagnostics' "$work/run/$id/plan.tsv" && continue
     [ -f "$work/run/$id/forms.dir" ] || printf '%s\tcompiled\tunread\tthe read failed\n' "$id"
   done < "$work/run.list"
@@ -1274,7 +1317,15 @@ classes_verdict() {
 
 # check_one ID: the test's levels; prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON per level
 check_one() {
-  local id=$1 p=$work/run/$1 dir rel dst pre k x forms key st reason r i tmo opts=() files=() res
+  local id=$1 p=$work/run/$1 dir rel dst pre k x forms key st reason r i tmo opts=() files=() res why l
+  # queue 485: a plan missing or cut is an error at each of check_one's levels of the run (compiled and print:
+  # their own, compiled_level and print_level), never a pass
+  if why=$(plan_bad "$p"); then
+    for l in read nread interp classes diagnostics; do
+      case ",$levels," in *,$l,*) printf '%s\t%s\terror\t%s\n' "$id" "$l" "$why" | sed -e "s|$root|.|g" ;; esac
+    done
+    return 0
+  fi
   grep -q '^kind	diagnostics' "$p/plan.tsv" && { check_diag "$id"; return; } # the diagnostics level's
   dir=$(test_dir "$p")
   while IFS=$'\t' read -r k rel; do [ "$k" = javac ] && opts+=("$rel"); done < "$p/plan.tsv"
@@ -1462,6 +1513,22 @@ mark_audited() {
   fi
 }
 
+# run_errors RESULTS (queue 485): the rows of RESULTS that are the run's own errors, not a test's: result error
+# with the reason the shard failed (run_shard) or a plan missing or cut (plan_bad, run_actions)
+run_errors() {
+  awk -F'\t' '$3 == "error" && ($4 ~ /^the shard failed/ || $4 ~ /^no plan/ || $4 ~ /^the plan .* (is partial|has no run line|was cut)/) { n++ } END { print n + 0 }' "$1"
+}
+
+# run_errors_ok RESULTS (queue 485): 1, and the reason on stderr, when RESULTS holds more of the run's own errors
+# (run_errors) than JAVA_CHECK_ERRORS_MAX (default 0); else 0
+run_errors_ok() {
+  local n
+  n=$(run_errors "$1")
+  [ "$n" -gt "${JAVA_CHECK_ERRORS_MAX:-0}" ] || return 0
+  echo "java-check: FAILED: $n rows of the run's own errors (the shard failed, a plan missing or cut), above JAVA_CHECK_ERRORS_MAX=${JAVA_CHECK_ERRORS_MAX:-0}: no test earned them; the first: $(awk -F'\t' '$3 == "error"' "$1" | head -1 | cut -c1-300)" >&2
+  return 1
+}
+
 check() {
   local only="" corpus="" record="" essential="" list=""
   save=""
@@ -1518,7 +1585,15 @@ check() {
       fi ;;
   esac
   cover_setup || return 1
-  mkdir -p "$formsc"; : > "$work/empty"
+  mkdir -p "$formsc" "$work"; : > "$work/empty"
+  # queue 485 (477-3): one run in a WORK at a time. A second run removed WORK/run under the first, whose compiled runs
+  # then found no plan and passed 104 rows unrun. The lock (fd 8, closed for the runs' children below, so that no
+  # process a test leaves behind holds it) makes the second wait for the first (JAVA_CHECK_WORK: a run beside it)
+  exec 8>> "$work/run.lock"
+  if ! flock -n 8; then
+    echo "java-check: another java-check runs in $work (its lock $work/run.lock): waiting for it (JAVA_CHECK_WORK names another WORK, for a run beside it)" >&2
+    flock 8
+  fi
   rm -rf "$work/run"; rm -f "$work/forms-misses"
   # GTS41 (c): JAVA_CHECK_FORMS_ONLY=1 forces the read's cache for the levels that consume its output
   # (interp, compiled, print run without the read level); a run with the read level reads as ever
@@ -1540,20 +1615,26 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe${texe:+; the tests naming the javac API on $texe})" >&2
-  export -f src_of cache_slot cache_take tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions jtreg_props run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
+  export -f src_of cache_slot cache_take tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions jtreg_props run_dirs mask_hashes mask_dirs test_dir plan_bad check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe texe tplatform tool_re cf_re reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
-  xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
-  case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
+  xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} 8>&- | LC_ALL=C sort > "$work/results.tsv"
+  case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one 8>&- ;; esac
   case ",$levels," in
     *,compiled,*)
       export -f compiled_one compiled_one_on again
       export jobs
-      compiled_level > "$work/results-compiled.tsv" || return 1
+      compiled_level > "$work/results-compiled.tsv" 8>&- || return 1
       LC_ALL=C sort -o "$work/results.tsv" "$work/results.tsv" "$work/results-compiled.tsv" ;;
   esac
-  case ",$levels," in *,print,*) print_level > "$work/results-print.tsv" || return 1; LC_ALL=C sort -o "$work/results.tsv" "$work/results.tsv" "$work/results-print.tsv" ;; esac
+  case ",$levels," in *,print,*) print_level > "$work/results-print.tsv" 8>&- || return 1; LC_ALL=C sort -o "$work/results.tsv" "$work/results.tsv" "$work/results-print.tsv" ;; esac
   echo "java-check: $(wc -l < "$work/run.list") tests in $((SECONDS - t0)) s"
+  # queue 485: the rows no test earned, the run's own errors (a shard that failed: its tests' "error the shard
+  # failed"; a plan missing or cut), above JAVA_CHECK_ERRORS_MAX (default 0) fail the run, with --save too: the
+  # gate records no pass of a level step whose shards failed (night 11-20's langtools-run part: 514 such rows
+  # saved as a pass, which --judge --latest-saved would take). Its results are still saved, for the triage
+  local errs=0
+  run_errors_ok "$work/results.tsv" || errs=1
   if [ -s "$work/forms-misses" ]; then
     echo "java-check: FAILED: $(wc -l < "$work/forms-misses") tests' forms not in the read's cache $formsc (JAVA_CHECK_FORMS_ONLY=1; $work/forms-misses), the first: $(head -1 "$work/forms-misses")" >&2
     return 1
@@ -1578,14 +1659,15 @@ check() {
         done < "$work/run.list" | LC_ALL=C sort > "$save/forms.sha256" ;;
     esac
     echo "java-check: the results of $levels saved in $save ($(wc -l < "$save/results.tsv") lines; judged by bin/java-check --judge)"
-    return 0
+    return "$errs"
   fi
   local rargs=()
   [ -n "$record" ] && rargs+=(--record)
   [ -n "$essential" ] && rargs+=(--essential "$root/test/java/essential.txt")
   { [ -n "$only" ] || [ -n "$list" ]; } && rargs+=(--partial)
   [ -n "$only$list" ] || [ -z "$corpus" ] || rargs+=(--corpora "$corpus")
-  jc report "$ref" "$work" "$root/test/java/divergences.edn" "$root/test/java" "$levels" ${rargs[@]+"${rargs[@]}"}
+  jc report "$ref" "$work" "$root/test/java/divergences.edn" "$root/test/java" "$levels" ${rargs[@]+"${rargs[@]}"} || return 1
+  return "$errs"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1688,9 +1770,11 @@ print_check_one() {
 # print_level: the print level of the tests WORK/run.list holds (the read level's forms in
 # WORK/run/ID/forms.dir); prints ID print RESULT REASON per test; unread tests 'unread'
 print_level() {
-  local list=$work/print.list id
+  local list=$work/print.list id why
   : > "$list"
   while read -r id; do
+    # queue 485: a plan missing or cut is the test's error, never printed
+    if why=$(plan_bad "$work/run/$id"); then printf '%s\tprint\terror\t%s\n' "$id" "$why" | sed -e "s|$root|.|g"; continue; fi
     grep -q '^kind	diagnostics' "$work/run/$id/plan.tsv" && continue
     if [ -f "$work/run/$id/forms.dir" ]; then echo "$id" >> "$list"; else printf '%s\tprint\tunread\tthe read failed\n' "$id"; fi
   done < "$work/run.list"
@@ -1869,7 +1953,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions jtreg_props judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions plan_bad jtreg_props judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
@@ -1923,6 +2007,55 @@ essential_compiled() {
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
+# gate_store: the store of passes (ARBACE_GATE_STORE, default the main checkout's .tmp/gate-pass/)
+gate_store() { echo "${ARBACE_GATE_STORE:-$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)/.tmp/gate-pass}"; }
+
+# saved_bad OUT (queue 485): when the saved results OUT (a pass's KEY.out in the store, --save's DIR) hold rows no test
+# earned, prints why and returns 0: rows of the run's own errors (run_errors: the shard failed, a plan missing or cut),
+# or a log beside it (KEY.log, the step's) that shows plans missing while the run ran (before queue 485 such a run's
+# tests passed unrun: 477-3); returns 1 otherwise
+saved_bad() {
+  local o=$1 n m log=${1%.out}.log
+  n=$(run_errors "$o/results.tsv")
+  m=0
+  [ ! -f "$log" ] || m=$(plan_missing_ids "$log" | wc -l)
+  [ "$n" = 0 ] && [ "$m" = 0 ] && return 1
+  echo "$n rows of the run's own errors, $m tests whose plan was missing in its log"
+}
+
+# plan_missing_ids LOG: the ids of the tests whose plan LOG says was missing (awk's or bash's error on WORK/run/ID/plan.tsv)
+plan_missing_ids() {
+  { grep -oE "run/t[0-9]+/plan\.tsv('? for reading)?: No such file" "$1" || true; } | sed -E 's|^run/(t[0-9]+)/.*|\1|' | LC_ALL=C sort -u
+}
+
+# saved_errors [STORE] (queue 485): read-only, removes nothing: the saved results of the gate's Java steps in the store of
+# passes (default gate_store's) that saved_bad finds; a line each: STEP/KEY, whether it is a pass (KEY.edn), its date, the
+# rows of the run's own errors (the shard failed; a plan missing or cut), the tests whose plan its log shows missing
+# (passed unrun before queue 485), the rows saved, and whether --judge --latest-saved took it before queue 485 (newest)
+saved_errors() {
+  local store=${1:-$(gate_store)} d o n m tot date newest k nb=0 ns=0
+  [ -d "$store" ] || { echo "java-check saved-errors: no store $store" >&2; return 1; }
+  printf 'step/key\tpass\tdate\tshard-or-plan-errors\tplan-missing-in-log\trows\tnewest\n'
+  for d in "$store"/java-*; do
+    [ -d "$d" ] || continue
+    newest=$(ls -td "$d"/*.out 2>/dev/null | head -1) || true
+    for o in "$d"/*.out; do
+      [ -f "$o/results.tsv" ] || continue
+      ns=$((ns + 1))
+      saved_bad "$o" > /dev/null || continue
+      nb=$((nb + 1))
+      k=${o%.out}
+      n=$(run_errors "$o/results.tsv")
+      m=0; [ ! -f "$k.log" ] || m=$(plan_missing_ids "$k.log" | wc -l)
+      tot=$(wc -l < "$o/results.tsv")
+      date=$(sed -n 's/.*:date "\([^"]*\)".*/\1/p' "$k.edn" 2>/dev/null | head -1) || true
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${d##*/}/${k##*/}" "$( [ -f "$k.edn" ] && echo pass || echo no)" "${date:--}" "$n" "$m" "$tot" \
+        "$( [ "$o" = "$newest" ] && echo newest || echo -)"
+    done
+  done
+  echo "java-check saved-errors: $nb of $ns saved results in $store hold rows no test earned (nothing removed)" >&2
+}
+
 # judge_saved [--essential] [--record] [--partial] [--levels L,...] [--held FILE] RESULTS...: the judgment of saved
 # runs (GT5); not named judge, the run's judgment above (a second definition replaced it: every run of
 # interp and compiled passed whatever its status and output, 2026-10-28 to 2026-10-31). The levels:
@@ -1947,13 +2080,21 @@ judge_saved() {
   # passes (ARBACE_GATE_STORE, default the main checkout's .tmp/gate-pass/): the whole corpus judged again from
   # saved runs alone (the night's re-judgment, bin/java-check --judge [--oracle] --latest-saved)
   if [ -n "$latest" ]; then
-    store=${ARBACE_GATE_STORE:-$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)/.tmp/gate-pass}
+    store=$(gate_store)
+    local o why
     for st in java-read java-interp java-classes java-diagnostics java-compiled-full java-print; do
       for d in "$store/$st".*; do
         case $d in *.sub) continue ;; esac
         [ -d "$d" ] || continue
-        f=$(ls -td "$d"/*.out 2>/dev/null | head -1)
-        [ -n "$f" ] && [ -f "$f/results.tsv" ] && saved+=("$f/results.tsv")
+        # queue 485: the newest saved results that hold none of the run's own errors and whose log shows no plan
+        # missing (saved_bad); a newer one that does is named and passed over
+        f=""
+        for o in $(ls -td "$d"/*.out 2>/dev/null); do
+          [ -f "$o/results.tsv" ] || continue
+          if why=$(saved_bad "$o"); then echo "java-check --judge --latest-saved: $o passed over: $why" >&2; continue; fi
+          f=$o; break
+        done
+        [ -n "$f" ] && saved+=("$f/results.tsv")
       done
     done
     [ ${#saved[@]} -gt 0 ] || { echo "java-check --judge --latest-saved: no saved results in $store" >&2; return 1; }
@@ -2022,6 +2163,7 @@ case ${1:-} in
   rejudge-records) jc rejudge-records "$ref" "$root/test/java" "$root/test/java/oracle" ;;
   --stale-reasons) shift; [ $# -ge 1 ] || usage; jc stale-reasons "$root" "$@" ;;
   golden) shift; jc golden "$ref" "$root/test/java/jls/golden.edn" "$@" ;;
+  saved-errors) shift; saved_errors "$@" ;;
   verdicts) shift; check_pin; jc verdicts "$jdktest" "$ref" "$root/test/java/verdicts.edn" "$@" ;;
   *) check "$@" ;;
 esac
