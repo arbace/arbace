@@ -5307,3 +5307,38 @@ all in 68 to 123 s; `ct-sym-rebuild` 65 s; `ct-sym-oracle` under a second.
 
 The on-Arbace proof of `--release N` (the 49 rows) is still the next gate's: the tool must hold ReleasePlatforms, and javac's key
 moved again (`bin/javac-vendor`, the pins and ct-sym-build.edn are in it).
+
+## As built: JCS122 (a), package-private methods renamed apart (2026-11-20, queue 490; branch `490-j2g-jcs122`, from next 939037429)
+
+The user's queue task 490 takes JCS122 (a) over the recommended (b): since n-java-dates jrt's `Calendar` (overlay/jdk) has
+jdk26u's package-private `getSetStateFields()`, and the tests' own `Koyomi` (another package) declares one too, so t05452
+and t05465 regressed to `:j2g-pp-override` (java-rejudge-1120). **j2g** (J2G-SPEC §4.4, "As built (JCS122 (a))"):
+`arbace.j2g.model/pp-families`, computed once per world where it has a pair and empty elsewhere: among the declarations of
+one name and descriptor (the translated classes' and their supertypes'), the families are the components of JVMS 5.4.5's
+direct overriding; the family holding the overridden side of a pair is named `NAME-pp-PKG` (`go-mname`; Go
+`GetSetStateFields_pp_java_util__I`) in its definitions (`decls/method-forms`), the class interfaces (`iface-method-elem`),
+the dispatch keys (`vmethods`, `impl-of` through `find-vmethod`: forwarders, abstract stubs, DynSub types), the calls
+(`code/invoke-val` and method references through `vbase`, the declaration in the receiver class's superclass chain), the
+member tables and the frame table (the demangler reads the Java name back); the other side keeps its name, so a subclass
+in another package has both. RTA (`reach/pp-hidden`, through `reach-impl!`) reaches for an instantiated class the
+package-private implementations above its own that it does not override (B's `ppm` on an S of the fixture: the
+implementation by name alone missed it). Not renamable, and still the check's error (`checks/package-private-overrides`,
+now refusing only a pair whose two sides have one Go name): a family holding an interface's method or a jrt class's, or a
+declaration overriding both sides (`p.T extends q.S extends p.A`). j2g logs the families it renames ("package-private
+methods renamed apart (JCS122)").
+
+**The shipped program's Go is unchanged**: it has no pair (j2g refused one until now), so every name and every reach is as
+before; the arm64 build at the branch translated the runtime with no family renamed (j2g.log: no rename line, "0
+package-private overrides"; no `_pp_` method name in the generated Go). `gate_key` moves (`arbace/j2g` is embedded), the
+translation does not.
+
+**Proofs** (arm64 VM): `bin/j2g-unit`'s `test-pp-override` over the fixture `test/j2g/unit/ppover` (p.A, p.B, q.S; the
+negative control p.A2, q.S2, p.T2), 12 checks pass (the families, the check refusing only the control's pair, the Go
+names of definitions, calls, forwarder and class interface, `pp-hidden`, the reach); the other failures of the run are
+the base's own (8, the same on 939037429). Control on 939037429's j2g, the same fixture: the reach misses B's `ppm` and
+the check refuses three pairs (A/S, B/S, A2/S2). Compiled rows (`bin/java-check --levels compiled`, one program of 7, the
+programs for arm64 by 471-2's `prog_arch`): t05451, t05452, t05465 (Calendar's family renamed in their program) and
+t07703 (VTableTest: `pkg.A.m` apart from the interface's default and C's) pass; t04829 (AccessControlTest) now
+translates and runs, failing 189 of 400 cases, every one "expected denied, actual allowed" (run-time access checks,
+which the Go build leaves out: JCS123's caller-sensitive checks), judged in `:reflection`; the controls t05450 and
+t05466 (Calendar tests of the same program) pass. Recorded with `--judge --partial --record` (0 regressions).
