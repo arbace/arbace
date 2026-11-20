@@ -1286,6 +1286,16 @@ covers what.
   decoder written after rustc 1.99.1, the same revision and under the same terms (MIT): the grammar `compiler/rustc_symbol_mangling/
   src/v0.rs` prints (paths, impl paths, types, constants, back-references, identifiers, disambiguators). The census, the keys and the
   judge, build-run's `lib-unit-run` and `bin/rust-front lib-unit` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/cargo_meta.ae` (C6-2 (b), 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C6-2"): Arbace forms porting
+  Cargo 0.100.0 (cargo 1.99.1, https://github.com/rust-lang/cargo at 5f94df478, the pinned rustc-1.99.1-src.tar.xz's
+  `src/tools/cargo`): `src/compiler/build_runner/compilation_files.rs` (compute_metadata, hash_rustc_version),
+  `src/workspace/{package_id,source_id,profiles,manifest}.rs`, `src/compiler/{build_config,lto,compile_kind,crate_type}.rs`,
+  `crates/cargo-util-schemas` (SourceKind, TomlDebugInfo, TomlTrimPaths); semver 1.0.28's `Version` hash and rustc-stable-hash
+  0.1.2's `StableSipHasher128` writes (the same tarball's `vendor/`): copyright the Cargo, semver and Rust project contributors,
+  dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust
+  (rustc 1.99.1): MIT License or Apache License 2.0" below). Its JSON reader, `test/rust/front/std-build-units.edn` (the library
+  build's units as data), `bin/rsi std-build --units` and `bin/rust-front std-crates --native|--units` are Arbace's own, under the
+  Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the

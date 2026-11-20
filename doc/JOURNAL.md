@@ -13755,3 +13755,29 @@ five eval cases take from std's IR (rsi's std build: Cargo, rustc 1.99.1, clang;
   rsi-build, the essential Rust steps (the cfg_attr fix touches C2's exports' attributes; the night's rsi-build shows its effect).
 - Scratch kept in the worktree's `.tmp/c6/` and `.tmp/rust-front/lib-unit/` (the census TSV, the keys, the export, the unit, the
   logs); core's index cache copied from rust-rec-1120's worktree (its paths rewritten).
+
+## 2026-11-20: rust-c6-1120: C6-2 (b), std's StableCrateIds computed by Arbace (Cargo's metadata hash ported)
+
+The user decided C6-1 (a) (std as pinned, the seven backtrace crates ported) and C6-2 (b) (Cargo's metadata hash ported); the
+coordinator relayed it with the order C6-2, then C4's switch to the native interface, then C6-4/L1. doc/rust/FRONTEND-SURVEY.md,
+"As built: C6-2".
+
+- Cargo's source: the pinned `rustc-1.99.1-src.tar.xz` (SHA-256 `6451598a99e77f07571960f6b21d577399d3a30f33e80cbd2e3a4aae6535d265`,
+  test/rust/corpus-rustc-1.99.1-ui.edn's `:tarball`, https://static.rust-lang.org/dist/rustc-1.99.1-src.tar.xz) was not on this
+  host; fetched by that pin into the worktree's `.tmp/repr-rust/src/` (no new pin), its `src/tools/cargo` (cargo 1.99.1, git
+  5f94df4789f005f9a352888e8355ffc645b7ed0e, crate version 0.100.0) and `vendor/{rustc-stable-hash-0.1.2,semver-1.0.28}` read.
+- Built: `arbace/rust/front/cargo_meta.ae` (compute_metadata and the Hash impls it reaches, as bytes into rustc-stable-hash's
+  StableSipHasher128 over mono's SipHasher128; a small JSON reader for Cargo's unit graph), `test/rust/front/std-build-units.edn`
+  (the 36 units of `bin/rsi std-build`'s build, from Cargo's `--unit-graph`, with the trim-paths and panic_abort's profile rustflags
+  the graph does not write), `bin/rsi std-build --units` and `bin/rust-front std-crates --units` (the oracle, by hand: cargo -v's
+  `-C metadata`), `bin/rust-front std-crates --native` (no cargo or rustc: the identities computed, held to std-crates-rsi.edn's).
+- Proven: 31 of 31 units' `-C metadata` equal to the pinned cargo's (core `ffe947da80e854e5`, alloc `94a1e9115eaca776`, std
+  `a2511a1c84299cbe`), and the StableCrateIds of the pinned build, core `f4c9f03271ecd18b`, alloc `58bfcc358ad62d5f`, std
+  `9a0bbe83fa8f68b1` (1 min 19 s, 1.2 GB with cargo's build; the native computation seconds). Two inputs found missing from the
+  unit graph on the way (build scripts' trim-paths, panic_abort's profile rustflags), each with its wrong units named.
+- `test/rust/front/std-crates-rsi.edn` and `test/rust/records/rust-front-rsi.{sha256,tsv}`: rust-rec-1120's uncommitted rewrite (the
+  pinned build's rmeta, and the pack re-recorded at that file's key, `4159566a..` in the shared store) taken byte for byte, so the
+  merge is clean in either order; rust-rec-1120's commit wins if they differ. `std-crates --native` FAILs on next's stale file and
+  passes on this one.
+- DECISION C6-5 (the user's): the 36 units as the library build's description, data (recommended), or Cargo's workspace resolution
+  ported too (5-8 days). C4's own count waits on it.

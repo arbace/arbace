@@ -5327,3 +5327,58 @@ What is left, by cause (each the next work of L1, as it holds for core's and std
 - **C6-4 The next slice.** (a) **The four causes above, cheapest first (projections in layouts, caller locations, then fn-local
   and crate-private ADTs in the export), measured on alloc's 25, then core's 275 items (core-export's module run at the items'
   keys)**; (b) core's items first, the causes as they come. *Recommended: (a)*: each cause recurs in core and std.
+
+## Decided (2026-11-20, the user, relayed by the coordinator): C6-1 (a), C6-2 (b); C6-3 (a), C6-4 (a) the main session's
+
+C6-1 (a): std stays as pinned; the seven backtrace crates are ported (L1/L3). C6-2 (b): Cargo's metadata hash is ported, so that
+Arbace computes std's StableCrateIds itself; Cargo's source taken from the pinned `rustc-1.99.1-src.tar.xz` (SHA-256 `6451598a..`,
+`test/rust/corpus-rustc-1.99.1-ui.edn`'s `:tarball`), its `src/tools/cargo` (cargo 1.99.1, git `5f94df478`), no new pin.
+
+## As built: C6-2, Cargo's metadata hash and std's StableCrateIds computed by Arbace (2026-11-20, branch `rust-c6-1120`)
+
+- **`arbace/rust/front/cargo_meta.ae`** (`arbace.rust.front.cargo-meta`): Cargo's `compute_metadata` ported (cargo 1.99.1,
+  `src/compiler/build_runner/compilation_files.rs`): METADATA_VERSION; the package id's stable hash (name, semver 1.0.28's Version,
+  the source's kind and its path relative to the workspace or its URL); the features; the profile's comparable tuple (opt-level,
+  LTO, codegen backend and units, debuginfo, split-debuginfo, debug assertions, overflow checks, rpath, incremental, panic, strip,
+  profile rustflags, trim-paths); the mode; compiler::lto's LTO; the kind's fingerprint; the target's name and kind (crate types);
+  `rustc -vV`'s lines (a target unit's without `host:`); `is_std`; then the dependencies' `-C metadata` sorted. The bytes are Rust's
+  Hash into rustc-stable-hash 0.1.2's StableSipHasher128 (`write_isize`'s one byte under 0xFF, usize as u64, a str and 0xFF), over
+  mono's SipHasher128; `finish` its halves `a * 3 + b`. A crate's StableCrateId is then `mono/stable-crate-id` (StableCrateId::new
+  over its `-C metadata`), already ported (RFP23 (c)).
+- **`test/rust/front/std-build-units.edn`**: the library build's 36 units (the packages, features, profiles, modes, kinds,
+  targets, dependencies, `rustc -vV`), read once from Cargo's `--unit-graph` of `bin/rsi std-build`'s own build (std.edn) by
+  `cargo-meta units`; what the unit graph does not write is given there: every unit's trim-paths (`-Ztrim-paths` with the
+  profile's `TRIM_PATHS=all`, build scripts' too) and panic_abort's profile rustflags (`-Cpanic=abort`, library/Cargo.toml's
+  `[profile.release.package.panic_abort]`). No host path in it.
+- **`bin/rsi std-build --units`** (the oracle tier, by hand): the same build with Cargo's unit graph and `-v` (each unit's
+  `-C metadata`, `metadata.txt`). **`bin/rust-front std-crates --units`**: that build in `.tmp/rust-front/std-units`, the
+  description written, each computed `-C metadata` held to cargo's. **`bin/rust-front std-crates --native`** (no cargo, no
+  rustc): the identities computed into `.tmp/rust-front/std-crates-native.edn` and held to `std-crates-rsi.edn`'s.
+
+### Results
+
+- `bin/rust-front std-crates --units` (1 min 19 s, 1.2 GB; cargo 53 s): **31 of 31 units' `-C metadata` equal to cargo -v's** (the
+  26 target libraries and the 5 build scripts' compiles; the 5 build-script runs invoke no rustc), and the StableCrateIds of the
+  pinned std build: **core `f4c9f03271ecd18b`, alloc `58bfcc358ad62d5f`, std `9a0bbe83fa8f68b1`** (`-C metadata` `ffe947da80e854e5`,
+  `94a1e9115eaca776`, `a2511a1c84299cbe`). On the way: trim-paths left out of build scripts' profiles gave 5 build scripts and
+  every unit depending on one wrong; panic_abort's profile rustflags left out gave panic_abort, std and their dependents wrong.
+- `bin/rust-front std-crates --native` (seconds): against `next`'s stale `std-crates-rsi.edn` FAIL (the finding of 14:58); against
+  the file as rust-rec-1120 rewrote it from the pinned build's rmeta (taken here byte for byte, with its re-recorded
+  `rust-front-rsi` pack `4159566a..`, `test/rust/records/rust-front-rsi.{sha256,tsv}`): equal.
+- Coordination: `std-crates-rsi.edn` and the pack's two record files are rust-rec-1120's content; this branch carries them
+  byte for byte (sha256 of the edn `64b88365cff1a3b3..`), so either merge order is clean; rust-rec-1120's commit wins if they
+  ever differ (the pack is recorded at that file's key).
+
+### DECISION C6-5 (for the user): where the library build's units come from
+
+The hash is Arbace's; its input, the 36 units, is today read from Cargo's `--unit-graph` (Cargo's resolver over library's
+manifests, Cargo.lock and the vendored crates, features unified, profiles merged, build scripts' units added).
+- (a) **The units are the library build's description, data like `std.edn` (Arbace's library build is described by it; made
+  once by `std-crates --units` and held to Cargo's in the oracle tier): C4's identities counted own on (a)**. Cost: none more.
+- (b) Port Cargo's resolution of the library workspace too: a TOML reader, the manifests (dependencies, target-specific ones
+  under `cfg` against the target's cfgs, `[patch]`, source replacement, workspace inheritance), Cargo.lock, the feature resolver
+  (v2), the profiles' merge (manifest, `--config`, environment, build-override), the build scripts' units, compiler::lto. About
+  5-8 agent days.
+- (c) (a) now, (b) when a second library build (another target or profile) needs another description.
+*Recommended: (a)*, then (c)'s (b) only if a second description is needed: the description is a build's configuration, the hash
+was the toolchain's part. Not decided here: C4's own count waits on it.
