@@ -3045,3 +3045,13 @@ N.cpp.expectrc and N.expect-stderr of each reviewed program (a golden file witho
 renamed gives nil), and selfref-derived.edn keeps the two IR entries. `bin/llvmi derived-check`: 16 of 16 met by the recorded runs
 (hello's stderr by lli's 10 bytes), 36 controls fail; runtime/deferred has golden files and no module of llvmi's (it is not in the pack
 c: C++'s alone, reported). own-verdict over the 562 modules: all own, the 14 by C++'s golden files.
+
+**The 13 mutants (the coordinator's step 3): done already, the facts stale.** The pack's 1,750 mutants all carry a verdict line (1,522
+invalid, 124 valid, 104 debug; none `unknown`): queue 407 (2026-11-19, `61c565059`, the VM's 407-llvm-verifier taken on the main host)
+ported the last Verifier rules and made the mutants again (`ir-make rt --mutants`), its journal saying so, while independence.edn's
+judge kept counting 9 + 4 recorded. Measured here on the checkout's pack: `bin/repr-llvm check verify-rt` 905 of 905 pass, 653 by
+their own verdict, 252 opt's (exactly the pack's modules, out of the judge's cases since LLS57 (b); 4 min 55 s, 1.8 GB) and
+`verify-rt-heldout` 1,101 of 1,101, every one by its own verdict (9 min 55 s, 1.8 GB); records unchanged. No port and no remake left:
+13 cases from recorded to own, the facts corrected (4,954 own, 491 recorded: the probes 478, verify-llvmtest's 10, AOT's 3 kept rows),
+the stage 0.954 to 0.955, independence 0.9908 to 0.9910. `test/gate/steps.edn`: llvm-essential's inputs gain
+`test/cpp/selfref-golden.edn` (llvmi's judge reads it now: the audit's rule).
