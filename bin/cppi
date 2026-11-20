@@ -301,6 +301,7 @@ rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lo
   [ -f "$d/print.ll" ] && cpr_live && { ( cd "$d" && timeout 600 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
   if [ -f "$d/x.o" ] && [ -f "$d/print.o" ]; then
     if cmp -s "$d/x.o" "$d/print.o"; then echo same > "$d/object"; else echo differs > "$d/object"; fi
+  elif [ -f "$d/c-defs.txt" ] && [ ! -f "$d/x.ll" ]; then echo skipped > "$d/object" # a C unit by our own C: no IR (runtime_ours_c)
   elif ! cpr_live && [ "$(cat "$d/ir.status" 2>"$TMPDIR/cppi-rt2.err")" = 0 ]; then echo skipped > "$d/object"
   fi
   rm -f "$d/x.o" "$d/print.o" "$d/forms.ae" "$d/print.ll" "$d/lowered.c.ae"
@@ -333,7 +334,9 @@ runtime_key() { # what the lowered runtime is built from, a digest a line (revie
     printf 'route  %s %s\n' "$(rt_route)" "$(rt_ours_glob)"
     ( cd "$root" && sha256sum arbace/cpp/sema.ae arbace/cpp/abi.ae arbace/cpp/codegen.ae arbace/cpp/template.ae arbace/cpp/inline.ae \
         arbace/repr/cpp/*.ae arbace/repr/cpp.ae cpp/target/libstdcxx.edn cpp/target/clang.edn cpp/target/libraries.sha256 test/cpp/target.ae bin/lib/repr-cpp/sysroot.bash 2>"$TMPDIR/cppi-key.err" )
-    printf '%s  bin/cppi:runtime_ours\n' "$(declare -f runtime_ours rt_ours_glob rt_ours_match | sha256sum | cut -d' ' -f1)"
+    printf '%s  bin/cppi:runtime_ours\n' "$(declare -f runtime_ours runtime_ours_c rt_ours_glob rt_ours_match | sha256sum | cut -d' ' -f1)"
+    # DECISION cpp-rt-own-1 (a): a C unit's route is decided by repr/c's read (above) and ci's checker on the C target
+    ( cd "$root" && sha256sum arbace/cpp/run.ae arbace/c/run.ae arbace/c/check.ae && printf '%s  c/target\n' "$(find c/target -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)" )
   fi
   printf '%s  GCC_FLAGS\n' "$(printf '%s' "$GCC_FLAGS" | sha256sum | cut -d' ' -f1)"
   # ORS27: gcc builds the runtime's objects only when CPPI_LIVE is set; the records' key names no gcc (OUT/key.records, which a live
@@ -447,10 +450,11 @@ runtime_ours() { # CP240 (c), CODEGEN.md G5c: the C++ units whose name begins wi
   fi
   mkdir -p "$rt/gen/bits"; : > "$rt/gen/bits/largefile-config.h"
   [ -f "$rt/gen/tzdata.zi.h" ] || { echo 'static const char tzdata_chars[] = R"__libstdcxx__('; cat "$gcc_root/libstdc++-v3/src/c++20/tzdata.zi"; echo ')__libstdcxx__";'; } > "$rt/gen/tzdata.zi.h"
-  : > "$rt/ours.tsv"
+  : > "$rt/ours.tsv"; : > "$rt/ours-c.tsv"
   while IFS=$'\t' read -r u s a f; do
-    [ "$a" = c ] && continue
     rt_ours_match "$u" || continue
+    # DECISION cpp-rt-own-1 (a): a C unit (libsupc++/cp-demangle.c) is read from its own C source by repr/c (runtime_ours_c below)
+    if [ "$a" = c ]; then printf '%s\t%s\t%s\n' "$u" "$s" "$f" >> "$rt/ours-c.tsv"; continue; fi
     x=$(grep -F -x -A1 "$s" "$rt/shims.txt" | sed -n 2p || true)
     if [ -n "$x" ]; then x=$root/test/cpp/runtime/shims/$x; else x=$gcc_root/$s; fi
     # the preprocessor's options of rt_ir's command line (the -f flags are the compiler's, not the reader's; but -fchar8_t, which
@@ -461,10 +465,12 @@ runtime_ours() { # CP240 (c), CODEGEN.md G5c: the C++ units whose name begins wi
     # oracle's IR read it; before, gcc's by -iquote, ABI-equal)
     printf '%s\t%s\t%s\t%s\n' "$x" "$a" "$d" "-D_GNU_SOURCE -I$rt/gen -I$gcc_root/libgcc -I$gcc_root/libstdc++-v3/libsupc++ -I$gcc_root/$(dirname "$s") $fl" >> "$rt/ours.tsv"
   done < "$rt/units.tsv"
-  [ -s "$rt/ours.tsv" ] || { echo "runtime-build: no unit begins with $g" >&2; exit 2; }
+  [ -s "$rt/ours.tsv" ] || [ -s "$rt/ours-c.tsv" ] || { echo "runtime-build: no unit begins with $g" >&2; exit 2; }
   . "$root/bin/lib/repr-cpp/sysroot.bash"; cpp_sysroot || exit 1
   # (queue 411: CPP_GEN_GNU=1, each unit read at its GNU standard as the oracle compiled it, not the ISO one the programs' route reads)
-  CPP_GEN_GNU=1 GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$rt/ours.tsv" > "$rt/ours.log" 2>&1 || { tail -5 "$rt/ours.log" >&2; exit 1; }
+  if [ -s "$rt/ours.tsv" ]; then
+    CPP_GEN_GNU=1 GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$rt/ours.tsv" > "$rt/ours.log" 2>&1 || { tail -5 "$rt/ours.log" >&2; exit 1; }
+  fi
   while IFS=$'\t' read -r x a d f; do
     u=${d%/ours}; u=${u#"$rt/units/"}
     if [ -f "$d/gen.ll" ] && [ ! -f "$d/gen.refused" ]; then
@@ -477,7 +483,52 @@ runtime_ours() { # CP240 (c), CODEGEN.md G5c: the C++ units whose name begins wi
     fi
     rm -f "$d/forms.ae" "$d/gen.c" # the IR is the unit's; the lowering below makes its C
   done < "$rt/ours.tsv"
+  [ -s "$rt/ours-c.tsv" ] && runtime_ours_c "$route"
   echo "runtime-build: our route (CPPI_RUNTIME_ROUTE=$route, units $g*): $(cat "$rt"/units/*/route "$rt"/units/*/*/route 2>"$TMPDIR/cppi-ours.err" | sort | uniq -c | awk '{printf "%s%s %s", (n++ ? ", " : ""), $2, $1}')" >&2
+}
+runtime_ours_c() { # runtime_ours_c ROUTE: DECISION cpp-rt-own-1 (a) (2026-11-20): OUT/ours-c.tsv's C units (UNIT SOURCE FLAGS; the one is
+  # libsupc++/cp-demangle.c) by Arbace's own C, no IR: the unit's lowered C is its own source (the macros of rt_ir's clang command
+  # line for a C unit first, then the tarball's file; the headers it includes by quotes copied beside it, so that ci's read-lib, which
+  # takes a unit's directory as its quoted search, finds them), read by repr/c on the C target and checked by ci's checker as ci's
+  # library reads and checks a unit (arbace.cpp.run c-unit: OUT/units/U/rt.status, the read's level, and c-defs.txt, the external
+  # names its forms define, which runtime-judge's names level holds to the pack's IR, kept as clang.ll). Not lowered: no x.ll.
+  # A unit repr/c or ci's checker refuses keeps the pack's IR under auto, fails under ours (ir.status 98).
+  local route=$1 u s f d h
+  if [ ! -f "$gcc_root/libiberty/cp-demangle.c" ]; then
+    mkdir -p "$root/.tmp/cppi/gcc"
+    tar -xJf "$(tarball_check)" -C "$root/.tmp/cppi/gcc" gcc-15.2.0/libiberty/cp-demangle.c gcc-15.2.0/libiberty/cp-demangle.h \
+      gcc-15.2.0/include/demangle.h gcc-15.2.0/include/libiberty.h gcc-15.2.0/include/ansidecl.h
+  fi
+  . "$root/bin/lib/repr-c/sysroot.bash"; c_sysroot || exit 1
+  : > "$rt/ours-c.list"
+  while IFS=$'\t' read -r u s f; do
+    d=$rt/units/$u
+    [ -f "$d/x.ll" ] && mv "$d/x.ll" "$d/clang.ll"
+    # rt_ir's macros for a C unit (-DHAVE_STDLIB_H -DHAVE_STRING_H -DIN_GLIBCPP_V3; its -Iinclude: the headers copied), and the
+    # unit's own -D flags
+    { printf '/* %s: %s read by Arbace'"'"'s own C (bin/cppi runtime_ours_c, DECISION cpp-rt-own-1 (a)): rt_ir'"'"'s macros, then the file */\n' "$u" "$s"
+      for h in HAVE_STDLIB_H HAVE_STRING_H IN_GLIBCPP_V3 $(printf '%s' "$f" | tr ' ' '\n' | sed -n 's/^-D//p'); do
+        case $h in *=*) printf '#define %s %s\n' "${h%%=*}" "${h#*=}" ;; *) printf '#define %s 1\n' "$h" ;; esac; done
+      cat "$gcc_root/$s"; } > "$d/lowered.c"
+    for h in $(sed -n 's/^[ \t]*#[ \t]*include[ \t]*"\([^"]*\)".*/\1/p' "$gcc_root/$s"); do
+      if [ -f "$gcc_root/$(dirname "$s")/$h" ]; then cp "$gcc_root/$(dirname "$s")/$h" "$d/"; elif [ -f "$gcc_root/include/$h" ]; then cp "$gcc_root/include/$h" "$d/"; fi
+    done
+    printf '%s\n' "$d" >> "$rt/ours-c.list"
+  done < "$rt/ours-c.tsv"
+  (cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} cppi_ci arbace_tool -m arbace.cpp.run c-unit "$rt/ours-c.list") > "$rt/ours-c.log" 2>&1 || true
+  while IFS=$'\t' read -r u s f; do
+    d=$rt/units/$u
+    if [ "$(cat "$d/rt.status" 2>"$TMPDIR/cppi-ours.err")" = ok ] && [ -f "$d/c-defs.txt" ]; then
+      echo 0 > "$d/ir.status"; echo ours > "$d/route"
+    elif [ "$route" = ours ]; then
+      echo 98 > "$d/ir.status"; echo ours > "$d/route"
+      { printf 'our route refused: '; cat "$d/rt.status" 2>"$TMPDIR/cppi-ours.err" || echo "not read"; } > "$d/ir.log"
+    else
+      [ -f "$d/clang.ll" ] && mv "$d/clang.ll" "$d/x.ll"
+      { printf 'our route refused (the C read): '; cat "$d/rt.status" 2>"$TMPDIR/cppi-ours.err" || echo "not read"; } > "$d/ours-c.refused"
+      rm -f "$d/lowered.c" "$d/rt.status" "$d/c-defs.txt"; find "$d" -maxdepth 1 -name '*.h' -delete; echo clang > "$d/route"
+    fi
+  done < "$rt/ours-c.tsv"
 }
 
 runtime_build() {
