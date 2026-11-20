@@ -655,6 +655,8 @@
         (= :xv (:cat x)) (abi/rref (:ty x))
         :else (:ty x)))))
 
+(declare cx-elab-declare!)
+
 (defn resolve-type-form [scope f]
   (cond
     (symbol? f)
@@ -706,7 +708,11 @@
                                  [(resolve-type-form scope %)])
                               ps))
             :va (boolean va)}))
-      cpp/elaborated (resolve-type-form scope (nth f 2))
+      cpp/elaborated (try (resolve-type-form scope (nth f 2))
+                          (catch arbace.lang.ExceptionInfo e
+                            ;; (queue 505: a class first named by an elaborated-type-specifier the parser did not leave a
+                            ;; node for, a parameter's, cx-elab-declare!)
+                            (if-let [t (cx-elab-declare! scope f e)] t (throw e))))
       ;; (n-cpp-concepts, the checker: a constrained placeholder, `C auto` ([dcl.spec.auto.general]/1), an auto with its
       ;; type-constraint's text, checked once deduced: placeholder-check!; the code generator refuses it as before)
       constrained (if (and (checking?) (:tc-text (meta f)) (#{'auto 'decltype-auto} (nth f 2 nil)))
@@ -2040,10 +2046,11 @@
         (swap! abi/*enums* assoc-in [id :nonneg] true)))
     t))
 
-(declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-friend-fn-ident!)
+(declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-elab-decl-scope cx-friend-fn-ident!)
 
 (defn- declare-class! [scope0 n]
-  (let [nm (:name n)
+  (let [scope0 (cx-elab-decl-scope scope0 n) ; (queue 505: an elaborated-type-specifier's class, in its namespace or block)
+        nm (:name n)
         ;; a nested class defined outside its class (class L::F { ... }, [class.nest]/3): in the enclosing class's
         ;; scope (G5: <locale_classes.h>'s class locale::facet)
         ;; (not a class template's specialization's, declared in its parameters' scope: `template<...> class
@@ -2287,6 +2294,42 @@
                  (do (*on-refusal* e n) nil)
                  (throw e))))))
         (declare-node*! scope n)))))
+
+;; queue 505 (500-2 (a), the checker): a class first declared by an elaborated-type-specifier `class-key identifier` that
+;; is not a declaration of its own (`struct T { struct S *a; };`, `void f(struct S *p);`) is declared in the smallest
+;; namespace or block scope that contains the declaration ([basic.scope.pdecl]/7.2, [dcl.type.elab]/3; a function
+;; prototype's parameters and a class's members are neither), as GCC and clang declare it: opt/pr69483.C's `struct S b;`
+;; then names the incomplete ::S. Before, the class's node, which the parser leaves among the members, declared T::S, and a
+;; parameter's class was no class at all: the unit refused on "unknown type S".
+(defn- cx-elab-target
+  "Queue 505: the smallest namespace or block scope enclosing the scope `s` (a class's, template parameters', an
+  enumeration's or a function type's parameters' scopes passed by)."
+  [s]
+  (loop [s s] (cond (nil? s) nil
+                    (or (#{:class :tparams :enum} (:kind s)) (:fn-type s)) (recur (:parent s))
+                    :else s)))
+
+(defn- cx-elab-decl-scope
+  "Queue 505 (the checker): the scope declare-class! enters the class node `n` in: for a node the parser marks :_elab-decl
+  (a class first named by an elaborated-type-specifier of a declaration with declarators) declared in a class's scope,
+  the smallest enclosing namespace or block scope (cx-elab-target); else `scope`."
+  [scope n]
+  (or (when (and (checking?) (:_elab-decl n) (not (:completeDefinition n)) (#{:class :tparams} (:kind scope)))
+        (cx-elab-target scope))
+      scope))
+
+(defn- cx-elab-declare!
+  "Queue 505 (the checker): the type of the elaborated-type-specifier form `f` ((cpp/elaborated KEY NAME)) whose name
+  lookup in `scope` found nothing (`e`, the refusal): with `struct`, `class` or `union` and a plain identifier, while the
+  main file's declarations are entered (*main-retry*), the class declared in the smallest enclosing namespace or block
+  scope ([basic.scope.pdecl]/7.2), incomplete, and its type; else nil."
+  [scope f e]
+  (let [[_ kw nm] f]
+    (when (and (checking?) *main-retry* (= :type (:codegen/refused (ex-data e)))
+               (#{'struct 'class 'union} kw) (symbol? nm) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" (str nm)))
+      (when-let [s (cx-elab-target scope)]
+        (declare-class! s {:kind "CXXRecordDecl" :tagUsed (str kw) :name (str nm)})
+        (resolve-type-form scope nm)))))
 
 (defn- placeholder-split
   "cpp-s11: a parameter's type as written with a placeholder ([dcl.spec.auto]: `auto`, `C auto`, `C<A...> auto`, cv and
