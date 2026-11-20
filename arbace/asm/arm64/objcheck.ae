@@ -1042,20 +1042,58 @@
       (some failing (keys by)) [:fail (str what ": " (pr-str by))]
       :else [(first (keys (into (sorted-map) by))) (str what ": " (pr-str by))])))
 
+(def out-kinds #{:undefined :unspecified :constraint :implementation-defined :host :by-design})
+
 (defn own-rows
   "Each NAME<tab>PATH of OWN (the files judged by their own words) appended to WORK/obj.tsv as the object check's rows (NAME RESULT
-  DETAIL); each of RECORDED (judged by llvm-mc's record) checked not to be judged whole by its own words: a stale entry of
-  test/asm/object-recorded-arm64.tsv. Exits non-zero on a stale entry."
-  [own work recorded]
-  (let [rows (fn [f] (vec (for [l (str/split-lines (slurp f)) :when (seq l)] (str/split l #"\t"))))
+  DETAIL); judge-rest's second round: each of RT (the files test/asm/object-recorded-arm64.tsv judges by their round trip,
+  bin/repr-asm --arch arm64 object-roundtrip) by its row of RT-ROWS (NAME RESULT DETAIL: pass, else the round trip's class); each
+  of RECORDED (judged by llvm-mc's record) and RT checked not to be judged whole by its own words (a stale entry of the list). OUT
+  (test/asm/object-out-arm64.edn, {CORPUS/NAME {:kind :levels :why}}, the cases out of the judge's: the user's decision of
+  2026-11-20) for CORPUS: each entry a file RECORDED judges, without words of its own, with a kind, its levels (:aot) and a reason;
+  its control (the first file OWN judges, put in the list) refused. Exits non-zero on a stale entry or an entry refused."
+  ([own work recorded] (own-rows own work recorded nil nil nil nil))
+  ([own work recorded rt rt-rows out corpus]
+  (let [rows (fn [f] (if (and f (.exists (java.io.File. ^String f)) (seq (str/trim (slurp f))))
+                       (vec (for [l (str/split-lines (slurp f)) :when (seq l)] (str/split l #"\t" -1)))
+                       []))
         res (vec (for [[n p] (rows own)] (into [n] (own-verdict p))))
-        stale (vec (for [[n p] (rows recorded) :when (= :pass (first (own-verdict p)))] n))]
-    (spit (str work "/obj.tsv") (apply str (for [[n c d] res] (str n "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))) :append true)
+        rtm (into {} (for [[n r d] (rows rt-rows)] [n [r d]]))
+        rres (vec (for [[n] (rows rt) :let [[r d] (get rtm n ["no-roundtrip" "the round trip gave no row"])]]
+                    [n (keyword r) (if (= r "pass") (str "own: the round trip, " d) d)]))
+        rec (rows recorded)
+        stale (vec (for [[n p] (concat rec (rows rt)) :when (= :pass (first (own-verdict p)))] n))
+        ;; the cases out of the judge's (OUT) of this corpus
+        outs (if (and out (.exists (java.io.File. ^String out))) (read-string (slurp out)) {})
+        mine (into {} (for [[k e] outs :when (str/starts-with? (str k) (str corpus "/"))] [(subs (str k) (inc (count (str corpus)))) e]))
+        recn (set (map first rec))
+        ownv (into {} (for [[n p] (concat (rows own) rec)] [n p]))
+        out-bad (fn [m] (vec (for [[n e] (sort-by key m)
+                                  :let [p (cond (not (recn n)) "no file the record judges (test/asm/object-recorded-arm64.tsv's record)"
+                                                (and (ownv n) (= :pass (first (own-verdict (ownv n))))) "words of its own: a defined object cannot be counted out"
+                                                (not (out-kinds (:kind e))) (str "no kind of " (pr-str (sort out-kinds)))
+                                                (not (and (seq (:levels e)) (every? #{:aot} (:levels e)))) "no :levels (:aot)"
+                                                (str/blank? (str (:why e))) "no written reason")]
+                                  :when p]
+                              (str n ": " p))))
+        bad (out-bad mine)
+        ctl (first (filter #(= :pass (second %)) res))
+        ctl-ok (or (nil? ctl) (seq (out-bad (assoc mine (first ctl) {:kind :unspecified :levels [:aot] :why "the control"}))))]
+    (spit (str work "/obj.tsv") (apply str (for [[n c d] (concat res rres)] (str n "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))) :append true)
     (let [f (frequencies (map second res))]
       (println (str "repr-asm object-check: " (get f :pass 0) " of " (count res) " objects judged by their own words (their object runs' "
                     "CHECK lines, stated encodings and disassembly texts), met; " (pr-str (into (sorted-map) (dissoc f :pass))))))
+    (when (seq rres)
+      (let [f (frequencies (map second rres))]
+        (println (str "repr-asm object-check: " (get f :pass 0) " of " (count rres) " objects judged by their round trip (their source's "
+                      "instructions, a64i's decoder), met; " (pr-str (into (sorted-map) (dissoc f :pass)))))))
+    (when (seq mine)
+      (println (str "repr-asm object-check: " (count mine) " out of the judge's cases (" out "), each with its kind, levels and reason"
+                    (when ctl (str "; the control (" (first ctl) ", judged by its own words, put in the list) " (if ctl-ok "refused, as it must" "NOT refused"))))))
     (doseq [n stale] (println (str "FAIL: repr-asm object-check: " n " is judged whole by its own words: stale in test/asm/object-recorded-arm64.tsv")))
-    (when (seq stale) (shutdown-agents) (System/exit 1))))
+    (doseq [x bad] (println (str "FAIL: repr-asm object-check: out of the judge's cases (" out "): " x)))
+    (when-not ctl-ok (println (str "FAIL: repr-asm object-check: the out list's control passed")))
+    (when (or (seq stale) (seq bad) (not ctl-ok)) (shutdown-agents) (System/exit 1)))))
 
 (defn control
   "A negative control: SUBJECT's object judged by REFERENCE's CHECK lines (its runs): `differs` as it must when a line is not

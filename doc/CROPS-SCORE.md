@@ -483,3 +483,21 @@ The recorded scores (`test/crops/scores.edn`, the judge rounded to 3 decimals by
 99.66: the two-step runs show 28 stated lines whose views are not built (deferred), beside 33 now met. The byte-for-byte comparison of
 every arm64 object with llvm-mc's record is the oracle tier's `asm-arm64-object-oracle`; the JDK's and ocamlc's records stay the
 oracle tier's as before.
+
+### The second round (2026-11-20, later the same day; the user's decision: a case whose expected output nothing defines leaves the judge's cases)
+
+The user decided the same day that a judge case whose expected output is undefined, unspecified or host-dependent leaves the
+judge's cases (as the n/a cases and D435-3 (a)), its run still counted in completeness, its reason written per case (`:out-of-cases
+{:file F :cases N}`, `crops.score`'s check from c-cpp-golden-1120, taken here unchanged). Java: 16 of its 21 `:stdout` tests out
+(`test/java/golden/out.edn`, 32 cases); the 5 fuzz-generated stay on the JDK's record (DECISION: their output is fixed by their source,
+which states none of it, and no evaluator independent of the JDK and of Arbace's Java exists). arm64: the disassembly's texts
+encoded by Arbace, the views -D, -Ss and the call frames, FileCheck's numeric variables, the large EH encoding, and the object round
+trip (a64i's decoder against the source's forms) for the files that state nothing: 125 of the object check's 126 files own,
+elf-objdump (an empty source) out (`test/asm/object-out-arm64.edn`).
+
+| crop | judge | independence (recorded) | floor |
+|---|---|---|---|
+| Java | 0.9986 -> 0.99965 ((14,452 + 0.5 x 10) / 14,462; 32 out) | 0.9998 -> 1.0000 | 99.9 -> 100.0 |
+| arm64 asm | 0.9993 -> 1.0 (23,059 own, 1 out) | 0.9998 -> 1.0000 | 99.9 -> 100.0 |
+
+arm64's completeness 99.66 -> 99.97 (the 28 deferred lines of the first round met, 1 left: error-location-ldr-pseudo's literal pool).

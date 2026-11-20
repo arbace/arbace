@@ -3162,3 +3162,16 @@ move to the oracle tier). arm64's judge held one recorded part: the AOT cell's o
   (:abs_gN_s:, :prel_gN:) as the ABI's MOV[NZ] by the value's sign, and a constant PC-relative operand (`adr x0, 100`, `b #8`) as an
   offset from pc; `a64i forms-check` reading a word outside the code sections or at an address not a multiple of 4 (align-code.s,
   mapping-across-sections.s). a64i-check's essential subset still passes (113 of 113, forms 113 of 113).
+
+- **The object check takes the round trip** (judge-rest's second round, integration). `test/asm/object-recorded-arm64.tsv` gains
+  a JUDGE column: `roundtrip` for the files that state no words of their own but hold instructions (musl's 13, the 3 synthetic
+  tests, ELF_ARM64_large-relocations, whose checks are llvm-rtdyld's -check expressions over a linked image: its 2 instructions
+  round-trip), judged by `object-roundtrip` inside `object-check` (own-rows takes its rows: pass "own: the round trip, ...", any
+  other class unclassed in the object check's classes, so a gap fails), and `record` for elf-objdump alone. elf-objdump's source is
+  empty (a test of llvm-objdump's: "We just want to see if llvm-objdump works at all", its RUN line without FileCheck), so it has
+  neither words nor instructions; its object, the assembler's choice of sections, is defined by no standard: out of the judge's
+  cases (the user's decision of 2026-11-20), `test/asm/object-out-arm64.edn` (`:implementation-defined`, `:aot`), still held to
+  llvm-mc's record at check time; own-rows refuses an out entry that is no record-judged file or that has words of its own, and
+  runs that control each time. cfi_val_offset and large-eh-encoding left the list (their own words). The essential step's inputs
+  hold `:a64i` now (the round trip builds a64i's light driver) and its controls the round trip's. arm64's judge: 23,059 own of
+  23,060 cases, 1 out, none recorded (judge 1.0).

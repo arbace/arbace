@@ -13750,3 +13750,49 @@ files' digests against the JDK's and ocamlc's records, the object verdict over A
 - Records: `bin/reap --record` (56 of 56, 0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check`
   (9 pairs, 0 problems). Scores (independence, recorded): Java 0.9996 -> 0.9998, OCaml 0.9996 -> 1.0000, arm64 assembly 0.9994 -> 0.9998
   (floors 99.9 -> 99.9, 99.9 -> 100.0, 99.9 -> 99.9); arm64's completeness 99.87 -> 99.66 (the 28 deferred lines now seen).
+
+## 2026-11-20: judge-rest, the second round: Java's and arm64's last recorded judge cases (branch `judge-rest-1120`)
+
+The coordinator relayed the user's decision of the day: a judge case whose expected output is undefined, unspecified or
+host-dependent leaves the judge's cases (as the n/a cases and D435-3 (a)), its run still counted in completeness, a written reason
+per case; and asked for the rest of Java's 21 and arm64's 31 to be made own. Two subagents worked beside in their own worktrees
+(`judge-rest-dwarf`: the call frames' view; `judge-rest-rt`: the object round trip), merged here (`b48891ada`, `989a256ce`).
+
+- **Java** (commit `724c8e9bb`). `test/java/golden/out.edn`: 16 tests out at interp and compiled (32 cases), each reviewed with its
+  kind and reason: 6 :unspecified (threads' interleaving t03385 t04989, identity hash sums t03503, getDeclaredMethods' order t04849
+  t05778, DSA signatures' DER lengths t05322), 6 :host (the heap's size t07649, network interfaces t04983, ICMP on loopback t04991,
+  system properties t05602, java.home t07657, the Unix user t07867), 4 :implementation-defined (HotSpot's jcmd help t07842, its
+  diagnostic options t07845 t07848, the JDK's key-material layouts t08207). java.check/verdicts refuses an entry with a verdict of its
+  own (its control, the first :status test in the list, every run; by hand a golden test and a blank reason refused).
+  test/crops/score.ae's `:out-of-cases` taken from c-cpp-golden-1120's `c87a84622` unchanged (both branches carry the same hunk).
+  DECISION: the 5 fuzz-generated (t03455-t03458, t03567) stay on the JDK's record: their output is fixed by their source, but their
+  sources state no value ("a randomly generated test that exposed a crash", they print the exception and their fields), no evaluator
+  independent of the JDK and of Arbace's Java exists, and 822-1,581 generated lines are not reviewable by hand; alternative, jtreg's
+  status alone (their verdict under jtreg), which JCV1 did not take for tests that only print: the user's to decide. Judge 0.9986 ->
+  0.99965 ((14,452 + 0.5 x 10) / 14,462).
+- **arm64: the disassembly's text** (commit `724c8e9bb`). No disassembler of Arbace's exists (AR3 not built; a64i's decoder gives its own
+  instructions, not llvm-objdump's text), so a disassembly line that states an instruction's text alone is held to the object by
+  Arbace's encoder: the text read and encoded must be among the object's code words in the run's order (2,337 of 2,356 lines judged,
+  all met; a bare number, a PC-relative target as printed, is not judged: adr's five lines failed before that rule). DECISION: the
+  encode direction for want of AR3 (alternative: AR3's decoder, the survey's 2 to 4 days). Also llvm-objdump -D, llvm-readelf -Ss,
+  FileCheck's numeric variables (`[[#NAME:]]`, formats, `+N`), an offset a string variable defines. 11 MC files own more.
+- **arm64: the call frames** (subagent, `2e9b7fcd8`): llvm-dwarfdump's --debug-frame / -eh-frame view over Arbace's ELF reader,
+  written from llvm-project 23.1.5's DWARFDebugFrame.cpp and its printers (read from the pinned tarball), and llvm-mc's
+  --large-eh-encoding / --large-code-model in the object assembler (FDE encoding sdata8); cfi_val_offset (9) and large-eh-encoding (15)
+  met; controls frames-vs-val-offset, sdata4-vs-large-eh; by hand, the host's llvm-dwarfdump gave the same text for 14 files (the
+  oracle's role, never at check time).
+- **arm64: the object round trip** (subagent, `9cf79a4e7`, `054f9370a`): `bin/repr-asm --arch arm64 object-roundtrip`
+  (arbace.asm.arm64.objrt): each file assembled by Arbace and linked alone with a stub for its undefined symbols, every instruction of
+  its source lowered by a64i equal to the image's word there decoded by a64i, the image otherwise the eval layout's; 9 controls (four
+  other files' forms, five mutants: an immediate, a register, a branch's symbol, a :lo12: addend, a GOT load's type). Fixes it needed:
+  the linker's MOVW_PREL groups, its signed-group writer (bit 29, as lld), the 17-bit range of SABS/TPREL/PREL G0, the eval's symbolic
+  constants folded after layout, a64i's forms' uxtw, signed groups and constant PC-relative operands (a64i-check 140 of 140 after).
+- **arm64: integration** (this commit). `test/asm/object-recorded-arm64.tsv` gains a JUDGE column: `roundtrip` for musl's 13, the 3
+  synthetic tests and ELF_ARM64_large-relocations (17 of 17 pass inside object-check), `record` for elf-objdump alone, which is out of
+  the judge's cases (`test/asm/object-out-arm64.edn`, :implementation-defined: an empty source, a test of llvm-objdump's with no
+  FileCheck, no instruction; the object of an empty source is the assembler's choice of sections); own-rows refuses an out entry with
+  words of its own (its control every run). The essential step's inputs take `:a64i` and the round trip's controls. Object check:
+  125 of 126 own (108 MC files by their words, 17 by their round trip), 1 out; `--oracle` 126 of 126 byte for byte.
+- Records: `bin/reap --record` (56 of 56, 0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check`
+  (9 pairs, 0 problems), `gate.crops check` (0 problems). Scores (recorded): Java independence 0.9998 -> 1.0000 (judge 0.99965), arm64
+  assembly 0.9998 -> 1.0000 (judge 1.0), completeness 0.9966 -> 0.9997; OCaml 1.0000 as in the first round.

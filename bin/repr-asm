@@ -1021,12 +1021,24 @@ case ${1:-} in
       grep -o '^  "[^"]*"' "$rec" | tr -d ' "' > "$work/recorded.txt"
       awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/recorded.txt" "$lists/$id.list" > "$work/list"
       if [ -n "$own_list" ]; then
-        # the list's names of this corpus judged by the record, the others by their own words (own-rows appends their rows)
-        awk -F'\t' -v c="$id" '$1 !~ /^#/ && index($1, c "/") == 1 { print substr($1, length(c) + 2) }' "$own_list" > "$work/by-record.txt"
+        # the list's names of this corpus judged by the record (JUDGE record) and by their round trip (JUDGE roundtrip, judge-rest's
+        # second round), the others by their own words (own-rows appends their rows, the round trip's too; test/asm/object-out-arm64.edn
+        # the record-judged cases out of the judge's)
+        awk -F'\t' -v c="$id" '$1 !~ /^#/ && index($1, c "/") == 1 && $2 == "record" { print substr($1, length(c) + 2) }' "$own_list" > "$work/by-record.txt"
+        awk -F'\t' -v c="$id" '$1 !~ /^#/ && index($1, c "/") == 1 && $2 == "roundtrip" { print substr($1, length(c) + 2) }' "$own_list" > "$work/by-roundtrip.txt"
         awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/by-record.txt" "$work/list" > "$work/list.record"
-        awk -F'\t' 'NR == FNR { r[$1] = 1; next } !r[$1]' "$work/by-record.txt" "$work/list" > "$work/list.own"
+        awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/by-roundtrip.txt" "$work/list" > "$work/list.roundtrip"
+        awk -F'\t' 'NR == FNR { r[$1] = 1; next } !r[$1]' <(cat "$work/by-record.txt" "$work/by-roundtrip.txt") "$work/list" > "$work/list.own"
         arbace_tool -m $objns check "$work/list.record" "$work" "$rec" || fails=$((fails + 1))
-        arbace_tool -m arbace.asm.arm64.objcheck own-rows "$work/list.own" "$work" "$work/list.record" || fails=$((fails + 1))
+        : > "$work/rt-rows.tsv"
+        if [ -s "$work/list.roundtrip" ]; then
+          # shellcheck disable=SC2046
+          "$0" --arch arm64 object-roundtrip --work "$work/rt" $(cut -f1 "$work/list.roundtrip" | sed "s|^|$id/|") > "$work/roundtrip.log" 2>&1 || fails=$((fails + 1))
+          grep -E '^(repr-asm object-roundtrip: [0-9]|control |FAIL)' "$work/roundtrip.log" || true
+          [ -f "$work/rt/$id/objrt.tsv" ] && cp "$work/rt/$id/objrt.tsv" "$work/rt-rows.tsv"
+        fi
+        arbace_tool -m arbace.asm.arm64.objcheck own-rows "$work/list.own" "$work" "$work/list.record" "$work/list.roundtrip" "$work/rt-rows.tsv" \
+          "$root/test/asm/object-out-arm64.edn" "$id" || fails=$((fails + 1))
       else
         arbace_tool -m $objns check "$work/list" "$work" "$rec" || fails=$((fails + 1))
       fi
@@ -1060,7 +1072,7 @@ case ${1:-} in
           obj-err*) v=$(arbace_tool -m $objns diag-check "$sp" "$root/test/asm/$rc/${ref#*/}.err" ${sopts:+"$sopts"} | tail -1) || true
                     case $v in pass) v=same ;; "FAIL: error-diagnostics"*|"FAIL: assembled"*) v=differs ;; *) v="left ($v)" ;; esac ;;
           *) # judge-rest: a reference judged by its own words is held to them (its object runs' lines, its encodings)
-             if [ -n "$own_list" ] && ! awk -F'\t' -v r="$ref" '$1 == r { f = 1 } END { exit !f }' "$own_list"; then
+             if [ -n "$own_list" ] && ! awk -F'\t' -v r="$ref" '$1 == r && $2 == "record" { f = 1 } $1 == r && $2 == "roundtrip" { f = 1 } END { exit !f }' "$own_list"; then
                rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/$rc.list")
                v=$(arbace_tool -m arbace.asm.arm64.objcheck control "$sp" "$rp" | tail -1)
              else
