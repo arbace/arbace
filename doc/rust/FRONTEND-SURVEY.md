@@ -5393,7 +5393,8 @@ after each (the export about 2 minutes with alloc's interface cached; build and 
 | the first slice (above) | 7 | 6 | 12 |
 | + projections in layouts | 7 | 7 | 11 |
 | + caller locations at the expansion's cause | 8 | 6 | 11 |
-| + a root-file call's own place; crate-private ADTs in the export | **9** | 6 | 10 |
+| + a root-file call's own place; crate-private ADTs in the export | 9 | 6 | 10 |
+| + items defined inside a function (their ADTs, impls and enclosing functions) | **16** | 7 | 2 |
 
 - **Projections in layouts** (`mono/layout-of*`'s `:proj`): a projection an ADT's field leaves at the instance is normalized by the
   solver, as layout_of normalizes its type: `Cow<'_, str>`'s `<str as ToOwned>::Owned` is `String`. `From<Cow<str>> for String`
@@ -5409,7 +5410,18 @@ after each (the export about 2 minutes with alloc's interface cached; build and 
   crate-private ADTs its types name, which the run's interface takes beside 443's functions and 462's impls and traits:
   `btree::node::LeftOrRight` lays out, `splitpoint` reaches the compare.
 
-Left on alloc (16): 6 differ structurally (four first `alloca`s: a local's size or order; two blocks: `splitpoint`, `From<Cow<str>>`,
+- **Items defined inside a function** (core-check's `native-iface`: such an ADT named by its def path, `body-path`, as it already
+  named their impls; `alloc-check --export`: an entry's own impl among the parents whose facts it carries, and the native facts of
+  the functions enclosing its definition and the ADTs it names, so that v0 prints `replace` and `flush_buf` in the value namespace):
+  `BufWriter::flush_buf`'s `BufGuard` (its four methods and its Drop), `btree::mem::replace`'s `PanicGuard`, `Box<dyn Error>::from`'s
+  `StringError` (Display and Debug) build; 9 -> **16 of 25 equal**. alloc's interface pass made again for it (about 20 minutes).
+
+Left on alloc after the fn-local items (9 of 25): 7 differ structurally (four first `alloca`s: a local's size or order; three where
+rustc's -O0 CFG returns a block earlier: `splitpoint`, `From<Cow<str>>`, `BufGuard`'s Drop), 1 refused for a fn-local trait's impl
+symbol (`CString::new`'s `SpecNewImpl` for `&[u8]`: v0 of the type), 1 for a fn-local `&str` constant left unevaluated
+(`from_utf8_lossy`'s `REPLACEMENT`).
+
+Before the fn-local items, left on alloc (16): 6 differ structurally (four first `alloca`s: a local's size or order; two blocks: `splitpoint`, `From<Cow<str>>`,
 rustc's -O0 CFG a block shorter), 5 refused for a fn-local type's symbol (`BufWriter::flush_buf`'s `BufGuard`, `CString::new`'s
 `SpecNewImpl`), 4 for a fn-local ADT's layout (`StringError` twice, `PanicGuard`, `BufGuard`'s Drop), 1 a constant unevaluated. The
 fn-local items (an item inside a function body) need the interface pass to collect them and v0 to print their parent function in

@@ -13792,3 +13792,11 @@ items' symbols and layouts, one constant). The location and export changes reach
 commit, off by default and not measured yet: C4's switch (`RF_NATIVE_IFACE=1` for rsi-build: the interface assembled from the
 crates' native passes, `bin/rust-front std-iface-native`, `alloc-check --assemble`, and the computed StableCrateIds; rsi-build's
 `inputs.tsv`, read by the case inputs' writer, C4 own only when nothing of std's interface is the helper's).
+
+## 2026-11-20: rust-c6-1120: C6-4 (a), items defined inside a function: 16 of 25 alloc items equal to std's IR
+
+core-check's native-iface writes an ADT defined inside a function's body by its def path (as it wrote their impls), and
+alloc-check --export carries the entry's own impl and the functions enclosing its definition and its ADTs: BufWriter::flush_buf's
+BufGuard, btree::mem::replace's PanicGuard and Box<dyn Error>::from's StringError build and compare equal. lib-unit compare alloc:
+16 equal (9 before), 7 differ (structure: four first allocas, three a block earlier), 2 refused (a fn-local trait's impl symbol,
+a fn-local &str constant), the crossed control differing. alloc's interface pass made again for it (about 20 minutes, 2 GB).
