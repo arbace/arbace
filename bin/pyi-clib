@@ -19,6 +19,11 @@
 #                                (a)); status 1 when one is not the linker's own (__init_array_*, __fini_array_*,
 #                                _DYNAMIC: a static link's empty arrays and no dynamic section, 0 as ld gives them),
 #                                which `build` and `verify` refuse: a C module reading one reads address 0
+#   bin/pyi-clib exe LIB [OUT]   a program's committed node program (its glue has a main; queue 489: pytokenizer)
+#                                translated whole by cf2g into a main package and built by TamaGo's go with ci's back end
+#                                (bin/ci cirun-build's printed go/arbace/{ci,crt}) into OUT/LIB (default the main
+#                                checkout's .tmp/pyi-clib/LIB/exe), kept by the Nodes' digest and the back end's key;
+#                                the executable's path printed
 #   bin/pyi-clib aot LIB OUT     the committed node program translated by cf2g (arbace.c.cf2g) into OUT/prog.go, the
 #                                package arbace/clib/LIB/aot whose init registers its compiled functions with
 #                                arbace/clib (pyi's AOT links it: the library compiled), kept by the Nodes' digest
@@ -189,6 +194,30 @@ case $cmd in
     else
       echo "pyi-clib: go/arbace/clib/$lib DIFFERS from the build (diff -r go/arbace/clib/$lib $work/verify/forms/go/arbace/clib/$lib)"; exit 1
     fi ;;
+  exe)
+    # one build at a time (two lex-checks at once wait, then keep it); its key: the Nodes' digest and ci's back end's
+    out=${3:-$cmain/.tmp/pyi-clib/$lib/exe}
+    mkdir -p "$out"
+    exec {lk}>"$out.lock"; flock "$lk"
+    "$root/bin/ci" cirun-build --ensure > "$out/cirun-build.log" 2>&1 || { cat "$out/cirun-build.log" >&2; die "ci's back end did not build"; }
+    nk=$( { sha256sum < "$root/go/arbace/clib/$lib/nodes.ae"; cat "$root/.tmp/ci/key"; } | sha256sum | cut -c1-64)
+    if [ -x "$out/$lib" ] && [ "$(cat "$out/exe.key" 2>/dev/null)" = "$nk" ]; then echo "$out/$lib"; exit 0; fi
+    rm -f "$out/exe.key" "$out/$lib"
+    n=$out/prog.nodes
+    rm -rf "$out/src" "$out/mod"; mkdir -p "$out/src" "$out/mod/prog"
+    ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/clib/$lib.ae" "$out/src" > "$out/print.log" 2>&1 \
+      || { cat "$out/print.log" >&2; die "the node program of $lib does not print"; }
+    arbace_tool "$root/tools/pyi/clib/aot_text.ae" nodes "$out/src/nodes.go" "$n" || die "the node program's text of $lib"
+    (cd "$root" && arbace_tool -m arbace.c.cf2g translate "$n" "$out/mod/prog") > "$out/cf2g.log" 2>&1 \
+      || { cat "$out/cf2g.log" >&2; die "cf2g refused $lib"; }
+    cp -r "$root/.tmp/ci/go/ci" "$root/.tmp/ci/go/crt" "$out/mod/"
+    printf 'module arbace\n\ngo 1.27\n' > "$out/mod/go.mod"
+    (cd "$out/mod" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 \
+       "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -p 2 -trimpath -o "$out/$lib" ./prog) > "$out/build.log" 2>&1 \
+      || { tail -20 "$out/build.log" >&2; die "$lib's Go does not build"; }
+    rm -rf "$out/src" "$n"
+    echo "$nk" > "$out/exe.key"
+    echo "$out/$lib" ;;
   aot)
     out=${3:?bin/pyi-clib aot LIB OUT}
     mkdir -p "$out"

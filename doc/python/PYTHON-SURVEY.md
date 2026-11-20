@@ -7869,3 +7869,34 @@ moves the confirmed ones into their lasting classes (PY11-PREP.md §6, "The reco
 - **The AOT record** needs nothing: del.py is classed either way (`:as-pyi`, divergences-synth.edn's `:finalization`, once pyi
   on goi runs the compiled runtime; else divergences-aot.edn's `:finalization-goi`), the other 150 passed in 279's whole run and
   347's sample.
+
+## As built: 489, lex-check judged by CPython's C tokenizer on Arbace's C (2026-11-20, the Mac VM, queue 489; py-own-judge-1 (a), the user's)
+
+py-own-judge-1120 found Lib/tokenize.py on pyi no judge of the native lexer: since 3.12 it tokenizes through
+`_tokenize.TokenizerIter`, which on pyi is the native lexer itself. Its option (a), decided by the user: CPython's own C
+tokenizer, built from the pinned tarball by Arbace's C, as lex-check's reference at check time.
+
+- **The program.** `tools/pyi/clib/pytokenizer/` (lib.conf, `tokharness.c`): CPython 3.14.10's `Parser/lexer/` (lexer.c, state.c,
+  buffer.c), `Parser/tokenizer/helpers.c` and `readline_tokenizer.c`, `Parser/token.c`, `Python/Python-tokenize.c` (the `_tokenize`
+  module, the iterator's rules: extra tokens, positions in characters, the errors' arguments), `Objects/unicodectype.c` (the XID
+  tables of the identifier scan) and `Python/pyctype.c`, unmodified, compiled in `Py_BUILD_CORE_MODULE`'s mode as a release build
+  (`NDEBUG`) against the tarball's `Include/` with Arbace's `pyconfig.h`. `bin/pyi-clib build pytokenizer` builds them with the
+  harness by ci's builder into one node program, committed as `go/arbace/clib/pytokenizer` (a crop path: no key moves).
+- **The harness** (`tokharness.c`, Arbace's own): the C API the sources call, str and bytes in CPython's own layouts (the
+  headers' inline accessors read them in place), UTF-8's decoder with "replace" as CPython's (one U+FFFD a maximal subpart),
+  `PyUnicode_FromFormat`'s formats, the exception types and SyntaxError's arguments as `SyntaxError.__init__` takes them and
+  `PyErr_SyntaxLocationObject` sets them, the module and type machinery `Python-tokenize.c`'s module needs (its exec slot makes
+  the type; the iterator is reached through its slots), `Py_BuildValue`'s formats; and `tokenize.detect_encoding` ported (the BOM,
+  PEP 263's cookie, `_get_normal_name`, `check`), the codecs looked up in the tarball's `Lib/encodings` as `encodings.search_function`
+  does (aliases.py, the module's file), decoders for utf-8, latin-1, ascii and every charmap codec (its `decoding_table` read from the
+  module's source); another codec is the harness's refusal, a `!HelperError` line. Copied from CPython (PSF): `Parser/pegen.c`'s
+  three byte-offset conversions, `Objects/unicodeobject.c`'s `_PyUnicode_ScanIdentifier` and `_Py_ascii_whitespace`. It writes
+  `tools/pydump/tokdump.py`'s format, the same lines.
+- **The executable.** `bin/pyi-clib exe pytokenizer`: the committed node program translated whole by cf2g into a main package,
+  built by TamaGo's go with ci's back end (`bin/ci cirun-build`'s printed `go/arbace/{ci,crt}`) into the main checkout's
+  `.tmp/pyi-clib/pytokenizer/exe/`, kept by the Nodes' digest and the back end's key (VM: cf2g 100 s, go build 580 s at 2.4 GiB,
+  once a key). Interpreted by cirun it is 12 times slower (82 s for 18 stdlib files, 6.9 s compiled).
+- **The mode.** `bin/repr-python lex-check`'s reference: `REPR_PYTHON_LEX_REF=own`, records mode's default for 3.14 (the harness over
+  the files, `own_tokdump`); `recorded`, and the live, record and verify modes, run or read tokdump.py's dumps, the oracle tier's;
+  3.15 keeps its oracle. The gate fragment's `python-read-essential` and `python-native` declare the harness's inputs
+  (`:pytokenizer`) and the `:go` host.

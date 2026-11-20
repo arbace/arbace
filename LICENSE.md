@@ -573,6 +573,17 @@ covers what.
   `Python/context.c`), `capi_monitoring.ae` (queue 274b: sys.monitoring's C API of `Python/instrumentation.c`), of the
   C API's functions in its `Objects/` and `Python/`, under the PSF License
   Agreement (section above).
+- `tools/pyi/clib/pytokenizer/` and `go/arbace/clib/pytokenizer.ae`, `go/arbace/clib/pytokenizer/` (queue 489, lex-check's own
+  reference): the node program of CPython 3.14.10's C tokenizer, its `Parser/lexer/` (`lexer.c`, `state.c`, `buffer.c`),
+  `Parser/tokenizer/helpers.c` and `readline_tokenizer.c`, `Parser/token.c`, `Python/Python-tokenize.c` (with
+  `Python/clinic/Python-tokenize.c.h`), `Objects/unicodectype.c` (with `unicodetype_db.h`) and `Python/pyctype.c`, unmodified,
+  compiled against its `Include/` (from the release tarball test/python/corpora.edn pins, `:cpython-3.14.10`, SHA-256
+  `de414a57...b72032`; Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement,
+  section "CPython: the PSF License Agreement for Python 3.14" below), built by ci's builder with the part of musl 1.2.6 it
+  reaches (under the MIT License, section "musl: MIT License" below) and `tools/pyi/clib/pytokenizer/tokharness.c`, Arbace's
+  own under the Eclipse Public License 1.0 but for its copies of `Objects/unicodeobject.c`'s `_PyUnicode_ScanIdentifier` and
+  `_Py_ascii_whitespace` and `Parser/pegen.c`'s three `_PyPegen_byte_offset_to_character_offset*` functions (under the PSF
+  License Agreement, marked in the file).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2; `overlay/jdk/javac/buildtools/` and `buildtools-world/`, the tool-world variants of the JDK build's tools and of
