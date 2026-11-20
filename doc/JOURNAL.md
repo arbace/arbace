@@ -14005,3 +14005,31 @@ header.awk's ocamldoc mode runs tool-ocamldoc/t01-t05 (odoc_test.ml as a Dynlink
 .reference: 5 pass. At the light AOT level t01 had not finished after 600 s of CPU (7 GB resident), so the AOT levels keep
 :ocamltest-tools (DECISION 480-1 (a), the main session). Alternatives considered: committing a copy of ocamldoc/ as 478 did for
 makedepend.ml (not needed: no change to it; DECISION 480-2 (a)); ocamlc-made .cmi files (rejected: the native path takes no ocamlc).
+
+## 2026-11-20: lex-check's own reference: CPython 3.14.10's C tokenizer on Arbace's C (queue 489, py-own-judge-1 (a); committed at the merge n-merge-1120b)
+
+The user's decision py-own-judge-1 (a): lex-check (the native lexer, arbace.repr.python.lex) judged at check time by
+CPython's own C tokenizer compiled from source by Arbace's C, since Lib/tokenize.py on pyi is the native lexer itself
+(py-own-judge-1120, 48f9f5037). Built on the Mac VM, branch 489-py-c-tokenizer (c87121d0f, on 481's a8f898637).
+
+- Origin: https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+  de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032 (test/python/corpora.edn's :cpython-3.14.10), its
+  Parser/lexer/lexer.c, state.c, buffer.c, Parser/tokenizer/helpers.c, readline_tokenizer.c, Parser/token.c,
+  Python/Python-tokenize.c with Python/clinic/Python-tokenize.c.h, Objects/unicodectype.c with unicodetype_db.h,
+  Python/pyctype.c and Include/, unmodified (extracted by bin/pyi-clib, tools/pyi/clib/pytokenizer/lib.conf); copied
+  into the harness (marked): Parser/pegen.c's _PyPegen_byte_offset_to_character_offset{,_line,_raw},
+  Objects/unicodeobject.c's _PyUnicode_ScanIdentifier and _Py_ascii_whitespace. License: PSF (LICENSE.md).
+- Built: ci's builder (bin/pyi-clib build pytokenizer) with Arbace's harness tools/pyi/clib/pytokenizer/tokharness.c
+  (the C API, CPython's str/bytes layouts, SyntaxError's arguments, _tokenize's module slots, detect_encoding, the
+  codecs of the tarball's Lib/encodings) into go/arbace/clib/pytokenizer (key b78d8ac5); bin/pyi-clib exe compiles it
+  by cf2g and TamaGo's go. bin/repr-python lex-check: REPR_PYTHON_LEX_REF=own (records mode's default for 3.14);
+  recorded / live / record / verify the oracle tier's.
+- Proved (the Mac): one whole run (lex-check --record, own): the harness's dumps equal CPython's recorded ones (the pydump
+  manifests' SHA-256, main/next 55bae330a) on 2,862 of 2,862 files; the 3,846 mutants equal CPython 3.14.10 live; the
+  native lexer equal to the harness on 6,708 of 6,708; the 2,862 result rows identical to next's record. Control: a
+  seeded native-lexer bug (lex.ae:654 COMMENT as NL) fails 6 of 6 samples in own mode, where tokenize.py on pyi passed it.
+- Scores: independence.edn's :lex-check [2862 1] (was 0.5); Python's judge 0.910 -> 0.932 at its base.
+- Decisions (the main session): 489-1 (a) the 3 E_EOF cases stay judge cases; 489-2 (a) the results file recorded with
+  --no-mutants; 489-3 (a) parse-check the same way, task 494.
+- Alternatives: the recorded tokens kept (0.5); tokenize.py on pyi (circular, rejected by py-own-judge-1120); the
+  harness interpreted by cirun (12x slower, not used for runs).
