@@ -1575,6 +1575,13 @@ covers what.
   implementation (2026-11-04) written from the documented behaviour of traditional mode and judged
   against Alpine's gcc 15.2.0 `cpp -traditional` run as a black box, no code of GCC's (it replaced a
   port of GCC's libcpp, under the GPL version 3, made on the branch `haskell-pp` and never merged).
+- `tools/ppref/` (the token checks' reference, doc/cpp/CPP-SURVEY.md, "As built: pp-ref"; the user's CP413 (a) of
+  2026-11-20): `ppref.cc`, the harness, and `shim.c` are Arbace's own, under the Eclipse Public License 1.0, no line of GCC's
+  in them. `bin/repr-cpp ppref build` links the harness, in `.tmp` only, with GCC 15.2.0's libcpp (GPL-3.0-or-later) and
+  libiberty's files (LGPL-2.0-or-later) from the pinned gcc-15.2.0 tarball, unmodified, built by Arbace's own C++ and C (or,
+  `--native`, by the host's g++, the oracle tier's); the result, the lowered C and Go made from those files and the executable,
+  stays in `.tmp` and the gate's local caches: it is run, never committed, packed or pushed (GPLv3 section 2: a covered work one
+  makes and runs without conveying it). No GPL code enters the tree.
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

@@ -18,6 +18,12 @@
 #   --record-results  test/repr/cpp/pp-check-results.edn's rows of the corpora run written from the check (CX10, refused for a failing
 #              file): the read cell's passes, bin/reap; run over the recorded samplings (cpp-lexical whole, gxx-dg --sample 10, libstdcxx-headers --sample 8);
 #              with --only the rows of its files alone replaced, each already in the record (cpp-props)
+#   --fidelity the reference's runs (below) against the recorded digests file by file (ppcheck's fidelity: WORK/ID/fidelity.tsv; the
+#              oracle tier's), then the check; --fidelity-only: no check after it
+# REPR_CPP_PP_JUDGE=own (pp-ref, CP413 (a), CP414 (a)): each file judged by the reference run at check time, GCC 15.2.0's libcpp behind
+#   Arbace's harness tools/ppref, built by Arbace alone from the pinned gcc tarball (bin/repr-cpp ppref build; REPR_CPP_PPREF names
+#   another build of it): the stream against its stream, the raw tokens against its raw tokens; the recorded digests (records, the
+#   default until that build is the default's) the oracle tier's
 # REPR_CPP_TARGET=arbace (default; CP244 (b)) the port reads Arbace's C++ target cpp/target/host (computed, `bin/repr-cpp target gen`), gxx
 #   g++'s recorded answers test/cpp/host (predefined macros, option deltas, __has_ answers, search list; the oracle tier's)
 #   --level    lex (the raw tokens against clang's), pp (the stream against g++'s); default both
@@ -37,7 +43,7 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tools.bash"
 cd "$root"
 
-corpora=cpp-lexical,gxx-dg,libstdcxx-headers levels=lex,pp record= recknown= sample=1 addmissing= redigest= only= okey= recresults= listsonly=
+corpora=cpp-lexical,gxx-dg,libstdcxx-headers levels=lex,pp record= recknown= sample=1 addmissing= redigest= only= okey= recresults= listsonly= fidelity=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
@@ -52,6 +58,8 @@ while [ $# -gt 0 ]; do
     --record-known) recknown=1; shift ;;
     --redigest) redigest=1; record=1; shift ;;
     --add-missing) addmissing=1; shift ;;
+    --fidelity) fidelity=1; shift ;;
+    --fidelity-only) fidelity=only; shift ;;
     *) sed -n '11,31p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
@@ -110,6 +118,35 @@ done
 arbace_tool -m arbace.repr.cpp.ppcheck lists "$work" "$roots" "$sample" "${ids[@]}" || exit 1
 # CX10: the lists alone (WORK/ID/roundtrip.list, bin/repr-cpp roundtrip-corpus)
 [ -z "$listsonly" ] || exit 0
+
+# the reference (pp-ref): its runs of every file, a process for a few files (cc1's reader is never destroyed), in the corpus's
+# directory as g++ was run
+judge=${REPR_CPP_PP_JUDGE:-records}
+case $judge in own|records) ;; *) echo "pp-check: REPR_CPP_PP_JUDGE is own or records" >&2; exit 2 ;; esac
+export REPR_CPP_PP_JUDGE=$judge
+if [ "$judge" = own ] || [ -n "$fidelity" ]; then
+  ppref=${REPR_CPP_PPREF:-}
+  if [ -z "$ppref" ]; then ppref=$("$root/bin/repr-cpp" ppref exe) || { echo "pp-check: no reference (bin/repr-cpp ppref build)" >&2; exit 1; }; fi
+  arbace_tool -m arbace.repr.cpp.ppcheck ref-lists "$work" "${ids[@]}" || exit 1
+  mapfile -t refargs < "$work/ref.args"
+  for id in "${ids[@]}"; do
+    d=$work/$id; base=$(cat "$d/base.txt")
+    rm -rf "$d/ref.chunks"; mkdir -p "$d/ref.chunks"
+    for kind in pp lex; do
+      case $kind in pp) [[ $levels == *pp* ]] || continue ;; lex) [[ $levels == *lex* || $levels == *pp* ]] || continue ;; esac
+      split -l "${REPR_CPP_PPREF_CHUNK:-20}" -d -a 5 "$d/ref.$kind.list" "$d/ref.chunks/$kind."
+    done
+    t0=$(date +%s)
+    # shellcheck disable=SC2016
+    find "$d/ref.chunks" -type f | sort | xargs -P "$REPR_CPP_THREADS" -I{} bash -c 'k=$(basename "$1"); k=${k%%.*}; cd "$2" && "$3" "$k" "${@:4}" --list "$1" 2> "$1.log" || echo "pp-check: the reference failed on $1 (status $?)" >&2' _ {} "$base" "$ppref" "${refargs[@]}"
+    echo "$id: the reference ran in $(( $(date +%s) - t0 )) s"
+  done
+  if [ -n "$fidelity" ]; then
+    arbace_tool -m arbace.repr.cpp.ppcheck fidelity "$work" "${ids[@]}"; fst=$?
+    echo "pp-check: fidelity status $fst"
+    [ "$fidelity" = only ] && exit $fst
+  fi
+fi
 
 # gxx_run DIR NAME STD ARGS READ: g++ -E -P of one file, its status beside; clang's raw tokens likewise
 gxx_run() {

@@ -1654,7 +1654,9 @@
              (val! (list 'icmp (case (:o e) "==" :eq "!=" :ne "<" :ult ">" :ugt "<=" :ule ">=" :uge) 'ptr a b))
              (cmp! (:o e) (abi/underlying (:ct e)) a b))))
     (:land :lor) (short-circuit! e)
-    :cond (cond-branches! e emit-rv (abi/llvm-type (:ty e) true))
+    ;; (cpp-rt-own: a void conditional, `c ? (void) (...) : f (...)`, joins no value: libcpp's obstack_free without GNU C,
+    ;; a phi of void before, "llvm print: value: nil")
+    :cond (cond-branches! e emit-rv (when-not (abi/void? (abi/unq (:ty e))) (abi/llvm-type (:ty e) true)))
     :ptradd (let [p (emit-rv (:p e)) n (emit-rv (:n e))
                   n (if (= "-" (:o e)) (val! (list 'sub 'i64 0 n)) n)]
               (val! (list 'getelementptr :inbounds (elem-type (:to (abi/unq (:ty e)))) ['ptr p] ['i64 n])))
@@ -3031,7 +3033,9 @@
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
         ;; (queue 367: and for a weak_odr one, an explicit instantiation's, the alias weak_odr: clang's getCodegenToUse, Alias)
-        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (:explicit-inst f)) (not vbc))
+        ;; (cpp-rt-own: not for an internal one, an explicit instantiation of a class template of an unnamed namespace: clang writes
+        ;; no complete-object alias of an internal constructor; cxx11-shim_facets.cc's collate_shim<char>, a weak_odr C1 before)
+        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (and (:explicit-inst f) (not (:internal f)))) (not vbc))
           ;; written where the complete object's constructor or destructor is called, as clang emits it
           (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (apply list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)]
                                                                        (when (:explicit-inst f) [:linkage :weak_odr]))))
@@ -3294,6 +3298,31 @@
 
 (def ^:dynamic *const-top* true) ; the complete object's constant (its vptrs written), not a base's
 
+(defn- object-leaves
+  "cpp-rt-own: the constant leaves [[offset llvm-type value] ...] of an object value of sema's ce-object (a class's fields and bases
+  by its layout, arrays element by element, integers and floats), at `off`; nil for what it cannot write (a pointer, a bit-field, a
+  dynamic class, a union, an unset member)."
+  [t v ^long off]
+  (let [u (abi/unq t)]
+    (cond
+      (or (abi/integral? u) (abi/enum? u)) (when (number? v) [[off (abi/llvm-type u) (if (= :bool (abi/bn u)) (if (zero? (long v)) 0 1) (long (sema/ce-wrap u v)))]])
+      (abi/floating? u) (when (number? v) [[off (abi/llvm-type u) (fp-const u (double v))]])
+      (abi/arr? u) (when (vector? v)
+                     (let [et (:of u) es (abi/size-of et)
+                           ls (map-indexed (fn [i x] (object-leaves et x (+ off (* (long i) (long es))))) v)]
+                       (when (every? some? ls) (vec (apply concat ls)))))
+      (abi/class? u) (let [cid (:id u) c (abi/cls cid) l (abi/layout cid)]
+                       (when (and (map? v) (not (abi/dynamic? cid)) (not (:union c)) (not-any? :bits (:fields c)) (not (vb-class? cid)))
+                         (let [bl (map-indexed (fn [i b] (object-leaves {:k :class :id (:cls b)} (sema/ce-field-value v [:b (:cls b)]) (+ off (long (nth (:bases l) i)))))
+                                               (:bases c))
+                               fl (map (fn [fd] (let [x (sema/ce-field-value v (:i fd))]
+                                                  (if (and (nil? x) (abi/class? (abi/unq (:ty fd))) (abi/empty-class? (:id (abi/unq (:ty fd)))))
+                                                    []
+                                                    (object-leaves (:ty fd) x (+ off (long (nth (:fields l) (:i fd))))))))
+                                       (:fields c))]
+                           (when (and (every? some? bl) (every? some? fl)) (vec (concat (apply concat bl) (apply concat fl)))))))
+      :else nil)))
+
 (defn- const-leaves
   "The initializer as constant leaves [[offset llvm-type value] ...] of an object of type `t` at `off`, or nil when it
   is not a constant (a dynamic initialization then)."
@@ -3330,7 +3359,11 @@
                                             :to-bool (when-let [x (cv (:e e))] (when (number? x) (if (zero? (long x)) 0 1)))
                                             nil)
                                     :unop (when (= "-" (:o e)) (let [x (cv (:e e))] (when (number? x) (- (long x)))))
-                                    nil))]
+                                    ;; (cpp-rt-own: another constant expression folded by the evaluator, as clang's ConstantEmitter
+                                    ;; tries every initializer: libcpp's files.cc `static constexpr signed char base64_dec[] = {
+                                    ;; base64_dec_fn (0), ... }`, initialized at run time before and base64_dec_fn written)
+                                    (when-let [r (sema/ce-try e)]
+                                      (case (:op r) :int (:v r) :float (fp-const (:ty r) (:v r) nil) nil))))]
                           (cv e))
                       v (if (and (= :bool (abi/bn tu)) (boolean? v)) (if v 1 0) v)]
                   (when (some? v) [[off lt v]]))))
@@ -3357,8 +3390,15 @@
              (when (every? some? ls) (vec (apply concat ls))))
       ;; an implicit or defaulted default constructor that only stores constants (constexpr: clang initializes the
       ;; object as a constant, its vptrs included)
-      :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)]
-              (when (and (or (:implicit f) (:defaulted f)) (empty? (:ps (:ty f))) (empty? (:args init)) (not (vb-class? cid)) ti (not (:delegate ti)))
+      ;; (cpp-rt-own: and a constexpr one whose body is empty, its mem-initializers constants: ios_errcat.cc's and system_error.cc's
+      ;; `__constinit constant_init io_category_instance{}`, `constexpr constant_init() : cat() { }` of an anonymous union holding
+      ;; a polymorphic category, which clang constant-initializes (its vptr) and whose base's constructor it then never emits)
+      :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)
+                  body (:tbody f)]
+              (or
+              (when (and (or (:implicit f) (:defaulted f)
+                             (and (:constexpr f) (= :block (:s body)) (empty? (:items body))))
+                         (empty? (:ps (:ty f))) (empty? (:args init)) (not (vb-class? cid)) ti (not (:delegate ti)))
                 (let [l (abi/layout cid)
                       bl (binding [*const-top* false] (mapv (fn [b] (const-leaves {:k :class :id (:base b)} (:init b) (+ off (long (nth (:bases l) (:idx b)))))) (:bases ti)))
                       fl (binding [*const-top* true] (mapv (fn [fi] (let [fd (nth (:fields (abi/cls cid)) (:field fi))]
@@ -3367,7 +3407,11 @@
                       vl (when (and *const-top* (abi/dynamic? cid))
                            (for [{c :cls o :off} (vptr-list cid)] [(+ off (long o)) 'ptr (address-point [cid cid 0] [c o])]))]
                   (when (and (every? some? bl) (every? some? fl))
-                    (vec (concat (apply concat bl) (apply concat fl) vl))))))
+                    (vec (concat (apply concat bl) (apply concat fl) vl)))))
+              ;; (cpp-rt-own: else a constexpr constructor's object by the evaluator, its body's assignments too, when the object
+              ;; is a constant: libcpp's init.cc `constexpr _cpp_trigraph_map_s _cpp_trigraph_map_d;`)
+              (when (and (:constexpr f) *const-top* (not (abi/dynamic? cid)))
+                (when-let [v (sema/ce-object t init)] (object-leaves t v off)))))
       nil)))
 
 (defn- leaves-constant
