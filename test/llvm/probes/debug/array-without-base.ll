@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - The array DICompositeType !20 has no baseType (would fail 'array types must have a base type', Verifier.cpp:1394), but the parser does not check that and nothing references !20; the verifier only walks metadata reachable from named metadata, attachments and debug records. The rest is the valid module.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

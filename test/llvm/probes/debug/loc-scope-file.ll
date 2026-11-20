@@ -1,3 +1,5 @@
+; verdict: debug DILocation's scope must be a DILocalScope
+; rule: llvm/lib/IR/Verifier.cpp:3334 !11 (the store's !dbg) has a DIFile scope; the parser only requires the attachment to be a DILocation. visitFunction checks every instruction's !dbg scope (VisitDebugLoc) before any instruction or record is visited, so this precedes 'location requires a valid scope'.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

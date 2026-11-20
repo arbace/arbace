@@ -1,3 +1,5 @@
+; verdict: invalid CleanupReturnInst needs to be provided a CleanupPad
+; rule: llvm/lib/IR/Verifier.cpp:5176 cleanupret from a catchpad; the catchpad and its users otherwise pass.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

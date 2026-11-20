@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - Sibling cleanuppad unwinds %p to %q form a chain with no cycle.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

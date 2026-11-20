@@ -2882,3 +2882,240 @@ verify-llvmtest's 49 (a whole split-file test has no one verdict; the rest need 
   --check` and `bin/cppi lower-essential` (6 of 6, the lowering's change): 0 problems. What stays recorded: the probes 478 (LLS30),
   verify-llvmtest's 49, verify-rt-heldout's 9, verify-rt's 4 mutants, AOT's 3 aot-heavy modules. C's crop can read the same
   test/c/synth/*.expect (its selfref, on mac/n-c-last's line): not wired here, to keep that file's merge to one side.
+
+## As built: llvm-judge-1120, llvmi's last lli-judged modules by their IR's reviewed outcome (2026-11-20, branch `llvm-judge-1120` from next 939037429)
+
+Stage 0 of the main checkout (`ARBACE_HOST_EXE`), no gate (the user), no LLVM tool, nothing run but one verify-check of 7 modules
+(0.9 GB) and no module run by llvmi.
+
+**The recorded cases, measured** (the judge's 547 of 5,274 at next): `arbace.llvm.check/own-verdict` evaluated over llvmi's 562
+modules (`bin/llvmi modules`, the packs) and `bin/repr-llvm`'s `own_verdicts` over verify-llvmtest's 806 (the four lists resolved, no
+verify run). llvmi's "177 at each level" are history: LLS49 (c) moved 176 to their own outcomes and queue 358 the ee module; what
+lli's record still judged at eval was c-O0's and c-O2's `.synth.pp-has-attribute` alone (n-hasattr left them to it), at AOT the same
+two and aot-heavy.txt's 3 kept rows. So: the probes 478 (LLS30), verify-llvmtest's 49, verify-rt-heldout's 9 and verify-rt's 4 mutants
+of unknown kinds, llvmi's 2 x 2, AOT's 3.
+
+**Built: an outcome worked out from the module's IR** (`test/llvm/selfref-derived.edn`, `:from :ir`). The two pp-has-attribute
+modules are clang 23.1.4's IR of `test/c/synth/pp-has-attribute.c`, whose preprocessor answered `__has_c_attribute` with the C2x
+drafts' dates: each `== 202311L` of a0-a8 was false, so the IR holds 0 there, while the C source's `.expect` (C23's 202311, n-hasattr)
+says 1. The module is the test, so its outcome is the IR's, read instruction by instruction: at -O0 (optnone) main makes 13 calls
+`printf(@.str = "%s = %d\0A", @.str.N, load @aK)` in the order a0 ... a11, in_if, the globals internal and never stored (main's one
+store is to its retval alloca), so each load reads its initializer (@a0-@a8 `i32 0`, @a9 @a10 @a11 @in_if `i32 1`); at -O2 the same 13
+tail calls with the folded constants; `ret i32 0`; nothing on stderr: 96 bytes. Each entry carries a `:review` row a printed line
+(the line, its basis in the IR) and `:ir`, the reviewed module's SHA-256 (the pack's manifest, `test/llvm/ir/c.tsv`): a pack made again
+by another clang has no outcome from it, and lli's record judges it until it is reviewed again. `arbace.llvm.check`'s own verdict reads
+any module's entry first (`derived-verdict`, `entry-verdict`; the C++ programs' entries as before, `:from` absent: their source).
+The golden file's way, Java's JCS361 (a) and Haskell's queue 325g, within LLS49 (c)'s form (the user, 2026-11-18): written from the
+IR, then held to the record.
+
+**Built: `bin/llvmi derived-check`** (`make llvmi-derived-check`; `arbace.llvm.check/derived-check`): every reviewed outcome judged by
+the check's own judge (`own-result`) against the module's recorded run, `test/llvm/ref-lli23.edn` (an abort's stderr g++'s,
+`gxx-reference`, D358-5 (a)), nothing run, as Java's golden files are held to the JDK's digests; an `:ir` entry must be the IR the run
+was recorded from and the pack's, its `:review` rows its stdout's lines, each with a basis. Controls, each must not pass: every
+entry's outcome with its stdout's middle byte changed (an empty stdout: its status), every entry's record against the next entry of
+another outcome, and `test/llvm/controls.edn`'s pairs whose reference has an entry (the subject's recorded run). Result: 16 of 16
+outcomes met by the recorded runs (3 aborts' stderr g++'s), 36 controls, 0 pass. Its own controls proved it: the first version passed
+all 16 changed outcomes (it looked the entry up again by id and ignored the change), fixed by `entry-verdict`; a review row changed and
+an `:ir` changed each fail it (checked by hand, reverted). `own-verdict` over the 562 modules: all 562 by their own verdict, the two
+"worked out from the module's IR"; the -O0 module with `@a9`'s initializer changed: no own verdict (nil). A new control in
+`test/llvm/controls.edn`: `c-O2.synth.pp-define`'s run against pp-has-attribute's reviewed stdout (both exit 0; 189 bytes against 96),
+judged in llvmi's full runs, and now by derived-check on pp-define's recorded run: it fails as it must.
+
+**Built: `-allow-incomplete-ir` is a relaxing option** (`bin/repr-llvm` `own_verdicts`, LLS46 (a)'s way). LLParser.cpp of the pinned
+23.1.5 reads it in three places, all in validateEndOfModule (334: unknown metadata attachments dropped; 406: undefined globals
+declared; 461: an assertion): it never adds an error, so a `not llvm-as -allow-incomplete-ir` rejection is a rejection without it. The
+first message may differ (the smallest undefined metadata id over every use, or an undefined value), so the verdict is taken without
+its fragment. One module: `Assembler-incomplete-ir-metadata-unsupported` (`invalid`), met by Arbace's verifier (`check verify-llvmtest
+--only`: 7 modules, 7 by their own verdict, 7 pass, 0 failing, its record unchanged). Control `_control/relaxed-vs-valid`
+(`Analysis-BasicAA-128-bit-ptr` against it) fails as it must.
+
+**Scores** (`bin/crops-score --record`): the judge's cases 4,727 own and 547 recorded to 4,732 and 542, (4732 + 0.5 x 542) / 5274 =
+0.94862, the stage (rounded to three places) 0.948 to 0.949, LLVM's independence 0.9896 to 0.9898 (floor 98 both); completeness
+unchanged (0.9933); `--judge --strict` 0 problems, `bin/records-check` 0 problems; no record changed.
+
+**Left on a record, and why** (542):
+- the probes 478: LLS30 (the user, 2026-11-07), not touched.
+- verify-llvmtest's 48 (each RUN line read; opt's recorded verdicts compared only after the reading):
+  - 32 whole split-file tests (Assembler 21, Verifier 7, Bitcode, CodeGen 2, Analysis, Transforms: 215 sections, 189 `not llvm-as`/`not
+    opt` lines): the RUN lines feed the sections one at a time; nothing reads the whole file, whose opt verdict is about the
+    concatenation (`expected top-level entity` where a section is YAML, `invalid redefinition` where two sections define one function):
+    no verdict of the test's. D1120-2.
+  - 6 sections no RUN line gives a verifying tool alone: five only concatenated by `cat` (ptrauth-sign-personality's authflag,
+    stack-guard-tls's a, Mips stack-alignment's _32, InstrProfiling comdat's disable, SimpleLoopUnswitch's main with a `.prof`) and
+    llvm-diff's a (`not llvm-diff`).
+  - 2 `XFAIL: *` (X86 GlobalISel ext, StructurizeCFG backedge-id-bug): the test expects its own failure.
+  - 8 read under a target, a pass or an extra check: AMDGPU lds-reject-mixed-absolute-addresses (the test says opt takes it under
+    `-mtriple=amdgpu--`, whose datalayout makes the `!absolute_symbol` range's i32 the pointer's width; plain verify on the default
+    datalayout rejects it: the verdict depends on the triple, none of the test's for plain verify); GCOVProfiling/version (the RUN lines
+    feed `cat little.txt %s version.txt`, the file needs the appended `!9`); and 6 whose test states the verdict under an option the
+    source shows leaves the rule alone: D1120-1.
+- verify-rt-heldout's 9 and verify-rt's 4 mutants of unknown kinds (n-llvm-indep's list: an attachment on a typed access 4, a debug
+  record above a landingpad, attribute pairs and values, immarg, an intrinsic's declaration and rename, three debug-info fields): each
+  a further port into `arbace.repr.llvm.expect`, then the pack's mutants made again (`bin/llvmi ir-make rt --mutants`, 33 min, 1.5 GB).
+- AOT's 3 aot-heavy rows (c-O0/c-O2.synth.lib-musl-tables, cpp.runtime.library): their own verdicts exist (the `.expect`, the C++
+  entry); their kept rows date from 2026-11-05's run, judged against lli then. By hand, under the lock (Go's compiler 2.9-3.3 GB, the C++
+  runtime built): `LLVMI_AOT_HEAVY=1 bin/heavy-lock bin/llvmi check --aot --only test/llvm/aot-heavy.txt --record`: 3 cases.
+
+**The floor.** The stage is scored rounded to three places: 0.950 (independence 0.99, floor 99) needs at most 532 recorded, 10 fewer
+than now: D1120-1's 6, the heavy rows' 3 and one mutant rule; or D1120-2 alone.
+
+### Proposed (llvm-judge-1120)
+
+- **D1120-1 Reviewed verify verdicts for llvm/test modules read under an option that leaves the rule alone** (6 cases).
+  - (a) *Recommended.* A reviewed table, `test/llvm/llvmtest-reviewed.tsv` (NAME, VERDICT, FRAGMENT, BASIS, WHY), read by `own_verdicts`
+    for a module its RUN lines leave `-`: the test's `not` line and CHECK message, and the 23.1.5 source line that makes it plain verify's
+    verdict; the golden file's way (JCS361 (a)) for a verdict; a control. The six, with their basis: DirectX discard_error,
+    firstbitshigh_error, firstbituhigh_error, saturate_errors (`not opt -dxil-op-lower -mtriple=dxil-...`): the CHECK message is
+    `Intrinsic::isSignatureValid`'s (Intrinsics.cpp:975-976), called by LLParser.cpp:378 and Verifier.cpp:3297 from the intrinsic's
+    table, not the triple: opt fails on its input before the pass, `invalid` with that message; AMDGPU llvm.amdgcn.cooperative.atomic
+    (`-mtriple=amdgcn -mcpu=gfx1250 -passes=verify`): VerifierAMDGPU.cpp:371-380, keyed by the intrinsic's ID and called unconditionally
+    (Verifier.cpp:7087): `invalid`, "cooperative atomic intrinsics require a generic or global pointer"; noalias_scope_decl
+    (`--verify-noalias-scope-decl-dom`, an added check): the first CHECK's rule (Verifier.cpp:7597-7599) runs before the option's guard
+    (7605): `invalid`, "!id.scope.list must point to a list with a single scope". Gain 6: 0.9486 to 0.9492 (the stage 0.949 either way).
+    A caution the review found: my first reading of the DirectX tests (the pass's message reached, so opt's input verification took the
+    module: `valid`) was wrong; the message is the verifier's own, printed before the pass (found when opt's record was compared after
+    the reading, confirmed in the source). Each row needs its source line, not a reading of the tools' order.
+  - (b) Keep opt's record for them: the expectation is derived from LLVM's source, not stated by the test for plain verify (LLS30's
+    reading for the probes).
+- **D1120-2 The 32 whole split-file tests.**
+  - (a) *Recommended.* Their sections in their place: `section_verdict` extended to `invalid` (a `not llvm-as` or `not opt
+    -passes=verify` naming `%t/SECTION` with plain options, the fragment from the line's check prefix, as `own_verdicts` does for a whole
+    file), the sections (about 215) added to verify-llvmtest's lists and the whole files counted out of the judge's cases (the read cell
+    keeping them as reader input, as LLS57 (b) kept the pack's modules). A corpus change: the record re-recorded (light, about 30 s), the
+    sections' opt records the oracle tier's. Gain: 32 recorded cases leave, about 215 own join: the stage about 0.953, independence 0.99
+    (floor 99).
+  - (b) Count the whole files out only (no sections): the stage 0.951; but 32 of the read cell's cases would have no judge at all.
+  - (c) Keep opt's record (LLS46/LLS50's boundary: a whole split-file test has no one verdict).
+
+## Decided (the main session for the user, 2026-11-20): D1120-1 (a), D1120-2 (a)
+
+## As built: D1120-2 (a), D1120-1 (a) (2026-11-20, branch `llvm-judge-1120`)
+
+**D1120-2 (a): the sections in the whole split-file tests' place.** `section_verdict` (bin/repr-llvm) gives `invalid` to a section
+every command naming which is a `not llvm-as` or `not opt` (no pass but verify) reading it as its input (its last positional word, else
+its stdin's `<`) with only own_verdicts' plain options (-S, -disable-output, -passes=verify, -f, -o FILE, redirections;
+-allow-incomplete-ir relaxing: no fragment), as own_verdicts takes a whole file's `not llvm-as %s`; the fragment what follows `error:` on
+the first check line of that line's FileCheck prefixes in FileCheck's check file (`%s` the parent, `%t/NAME` a section, read from the
+section's directory). A section also taken by a plain command, or under `not --crash` or another tool's `not`, has none; a read with
+`--disable-verify` claims nothing and leaves a rejection standing (ptrtoaddr's dst_not_addr_size: parsed by `llvm-as --disable-verify`,
+rejected by `not llvm-as`), and still bars `valid` (LLS50 unchanged: the 60 earlier sections' verdicts computed again, all the same).
+The sections: `bin/llvm-corpus split-tests` (new; `scan` runs it after its own split) expands the parents of
+`test/llvm/llvm-test-split-reject.list` by the pin's split-file with each test's own options (--leading-lines) into the main checkout's
+`.tmp/llvm/split/`, each test into a fresh directory swapped in; the list holds the 203 sections of 30 of the 32 tests that have an own
+verdict (182 invalid, 21 valid; 9 have none: `not --crash` 2, a pass 7; loop-md-errs and ctx-instrumentation-invalid-roots none at all),
+byte for byte the scratch split they were chosen from. verify-llvmtest reads the list beside its four: 1,009 modules, 967 by their own
+verdict, 42 opt's (the 32 whole files, kept in the read cell and counted out of the judge's cases as LLS57 (b) did, 6 sections only
+`cat` or llvm-diff reads, 2 XFAIL, lds-reject, GCOVProfiling/version). Of the 203: 141 pass; 62 do not (61 verdicts, 1 first message),
+rejections the whole file's opt record hid behind its first section's error: class `:llvmtest-section-rules` (deferred,
+test/llvm/divergences-read.edn: the rules LLParser and the Verifier of 23.1.5 have and repr/llvm lacks: llvm.convert.to/from.arbitrary.fp
+8, the ptrauth global_ctors autoupgrade 7, blockaddress across address spaces 7, target extension types' properties 7, AMDGPU's
+work-group-size attributes 6, value-profile !prof 5, symbolic address spaces 6, constant splats 4, ptrtoaddr's width 3, pauthabi module
+flags 2, branch_weights' unknown kinds 2 (one a false error), skip-value-numbers 2, three of 1). Recorded (`check verify-llvmtest
+--record`, 36 s, 1.4 GB), `bin/reap --record` (LLVM read 3,845 / 1 / 0 to 3,986 / 1 / 62, 0 problems). Controls:
+`_control/section-reject-vs-valid` (verify-controls.txt) fails as it must; controls-test.bash's fake tree: section b (a plain `not opt`)
+now `invalid` (its valid content: the verdict differs), new parent D/v.ll: i (`not llvm-as <`, its parent's prefix: the fragment) and
+j (`FileCheck %t/j.ll` after a `--disable-verify` read: the section's own CHECK line) invalid and met, k (`not --crash`) and l (a pass)
+none; all 17 cases ok.
+
+**D1120-1 (a): the reviewed verdicts.** `test/llvm/llvmtest-reviewed.tsv` (NAME, VERDICT, FRAGMENT, BASIS, WHY), read by own_verdicts
+for a module its RUN lines leave `-` (a row for one they judge is refused, the RUN lines' verdict kept; the fifth column `reviewed`).
+The six rows, each with its RUN and CHECK lines and the 23.1.5 source lines: the four DirectX tests declare none of their intrinsics,
+so LLParser's validateEndOfModule declares each from its call and rejects the call's signature against the intrinsic's table
+(LLParser.cpp:377-389, Intrinsics.cpp:975-976) while parsing, before opt sets `-mtriple` (optdriver.cpp:614-616); cooperative.atomic's
+rule is keyed by the intrinsic and the pointer's address space number (VerifierAMDGPU.cpp:371-380, called for every intrinsic call at
+Verifier.cpp:7087); noalias_scope_decl's first CHECK is the single-scope rule (Verifier.cpp:7586-7599), before the option's guard
+(7603-7605). The review corrected itself once: saturate_errors' undefined attribute group #0 is no error at all (LLParser.cpp:217-227
+merges only the groups it knows), not a later one. `bin/repr-llvm reviewed-check` (new): five columns, VERDICT valid or invalid, a
+BASIS with a RUN line and a source line, a WHY, a module of verify-llvmtest its RUN lines alone leave `-`; 6 rows, 0 refused; three bad
+rows (a module its RUN lines judge, a VERDICT `broken`, a BASIS with no source line) refused. `check verify-llvmtest --only` the six:
+each `invalid` by its reviewed verdict, verdict and message met; `_control/reviewed-vs-valid` fails as it must.
+
+**Scores** (`bin/crops-score --record`): the judge's cases 4,732 own and 542 recorded to 4,941 and 504 of 5,445 (the 32 whole files out,
+the 203 sections and 6 reviewed in), the stage 0.949 to 0.954, LLVM's independence 0.9898 to 0.9908 (floor 98 to 99); completeness
+0.9933 to 0.9894 (floor 99 to 98): the read cell's 62 new deferred rows, the gaps the sections show. `--judge --strict`,
+`bin/records-check`, `make check-makefile`: 0 problems. The rules to port are arbace/repr/llvm's reader and verify.ae (embedded since
+W2, so in `gate_key`): porting ten of the 62 brings completeness back to 0.990.
+
+**C++'s golden files read by llvmi** (the coordinator's item, from mac/c-cpp-golden-1120 3dbf9f3a6: its 26 golden files beside
+test/cpp/samples and test/cpp/runtime/samples and their reviews test/cpp/selfref-golden.edn taken into this branch by `git checkout`,
+nothing else of it). llvmi's 14 C++ modules were already judged by their own outcomes (LLS49 (c): test/llvm/selfref-derived.edn), not
+by g++'s record, so no case moves; the two reviews agreed, compared file by file, but for runtime/hello, whose stderr `to stderr\n` the
+C++ review records and the llvmi entry left out. One source for both crops now: `arbace.llvm.check/golden-entries` reads N.expect,
+N.cpp.expectrc and N.expect-stderr of each reviewed program (a golden file without its review is no verdict: checked, hello's review
+renamed gives nil), and selfref-derived.edn keeps the two IR entries. `bin/llvmi derived-check`: 16 of 16 met by the recorded runs
+(hello's stderr by lli's 10 bytes), 36 controls fail; runtime/deferred has golden files and no module of llvmi's (it is not in the pack
+c: C++'s alone, reported). own-verdict over the 562 modules: all own, the 14 by C++'s golden files.
+
+**The 13 mutants (the coordinator's step 3): done already, the facts stale.** The pack's 1,750 mutants all carry a verdict line (1,522
+invalid, 124 valid, 104 debug; none `unknown`): queue 407 (2026-11-19, `61c565059`, the VM's 407-llvm-verifier taken on the main host)
+ported the last Verifier rules and made the mutants again (`ir-make rt --mutants`), its journal saying so, while independence.edn's
+judge kept counting 9 + 4 recorded. Measured here on the checkout's pack: `bin/repr-llvm check verify-rt` 905 of 905 pass, 653 by
+their own verdict, 252 opt's (exactly the pack's modules, out of the judge's cases since LLS57 (b); 4 min 55 s, 1.8 GB) and
+`verify-rt-heldout` 1,101 of 1,101, every one by its own verdict (9 min 55 s, 1.8 GB); records unchanged. No port and no remake left:
+13 cases from recorded to own, the facts corrected (4,954 own, 491 recorded: the probes 478, verify-llvmtest's 10, AOT's 3 kept rows),
+the stage 0.954 to 0.955, independence 0.9908 to 0.9910. `test/gate/steps.edn`: llvm-essential's inputs gain
+`test/cpp/selfref-golden.edn` (llvmi's judge reads it now: the audit's rule).
+
+### Proposed (llvm-judge-1120, after D1120-2 (a))
+
+- **D1120-3 The 62 sections' rules** (completeness 0.9894: ten of them bring it back to 0.990, all 62 to about 0.9988).
+  - (a) *Recommended.* Port them into repr/llvm's reader and `verify.ae` by group, the largest first (llvm.convert.to/from.arbitrary.fp
+    8, the ptrauth global_ctors autoupgrade 7, blockaddress across address spaces 7, target extension types' properties 7, AMDGPU's
+    work-group-size attributes 6, symbolic address spaces 6, value-profile 5, then the small ones), each group a commit with its
+    sections passing and `:llvmtest-section-rules` shrinking. `arbace/repr/llvm` is embedded since W2, so each change moves `gate_key`
+    (the night's builds run again): batch them in one or two nights.
+  - (b) Leave them deferred: the read cell holds them as found gaps.
+
+## Decided (the user, 2026-11-20): LLS30 revisited, the probes' own verdicts; a case without a stated outcome leaves the judge
+
+## As built: the probes' reviewed verdicts, the cases out of the judge (2026-11-20, branch `llvm-judge-1120`)
+
+**The reviews.** Each of the 478 probes now states its verdict in its first two lines: `; verdict: VERDICT[ MESSAGE]` (valid;
+invalid or debug with the first message LLVM 23.1.5 prints; out) and `; rule: SOURCE WHY` (the path:line in llvm-project 23.1.5 of the
+check that fires first, and why it is first). Five reviews in parallel (attrs 121, cc and intrinsics 81, metadata and debug 97,
+musttail and funclets 106, verify 73; the guide `.tmp/probes-review/GUIDE.md`) each worked from the probe's IR and the pinned tarball's
+source alone (LLParser.cpp, LLLexer.cpp, Verifier.cpp, VerifierAMDGPU.cpp, AutoUpgrade.cpp, Intrinsics.cpp, Function.h, ...), forbidden
+to open opt's record or run any tool; only then were they compared with opt's record. 470 agreed at once; the 8 that did not (all in
+verify) were settled again from the source, each ending where opt's record is and each row saying it was corrected: verify-fpc
+(a decimal `1.5` lexes as a FloatLiteral, LLLexer.cpp:1308, so LLParser.cpp:4218's "floating-point constant invalid for type", not the
+APFloat token's 6873), verify-intr4 (the parser's UpgradeCallsToIntrinsic, LLParser.cpp:472, remangles llvm.smax.i64(i32, i32) to
+llvm.smax.i32, AutoUpgrade.cpp:1979: valid), verify-intr7, o1, o2, o3, o7 (the declaration is visited before the caller; a call of
+another function type is a use Function::hasAddressTaken counts, Function.cpp:987: "Invalid user of intrinsic instruction!",
+Verifier.cpp:3284), verify-o5 (the first function's own lifetime.start on an argument, Verifier.cpp:7019). Three are `out`, the
+user's rule below: cc-c8 (`cc 99999` breaks setCallingConv's assertion, Function.h:278; a release build truncates the id into other
+flags), funclets-v22 (visitFuncletPadInst calls getParentPad on a landingpad, an unchecked cast<CatchSwitchInst>, Verifier.cpp:4776:
+undefined behaviour), metadata-w29 (ProfDataUtils.cpp:167's assertion; an assertions build aborts). Counts: 309 invalid, 154 valid,
+12 debug, 3 out.
+
+**The checks.** `own_verdicts` reads a module's `; verdict:` line when it has no RUN line (the fifth column `probe`: a valid is valid
+alone, as a mutant's); `out` leaves it to opt's record. `bin/repr-llvm probes-check`: every probe a verdict and a rule line of the form
+(478 stated, 0 refused; a probe with `maybe`, and one without its rule line, refused: checked by hand and reverted); `probes-oracle`
+(the oracle tier: no tool run, opt's record read): 475 stated, 475 agree with opt's verdict and first message, 3 out; every verdict
+flipped is a control, 475, none agrees. `check verify-probes --record`: 478 of 478 pass, 475 by their own verdict and 323 rejections with
+the stated message, Arbace's verifier meeting each; cc-s39 (`:probe-pointer`, opt printing an address) passes by its own verdict now.
+The probes' files changed by two comment lines, so opt's runs of them were recorded again by hand (`bin/repr-llvm record-opt
+test/llvm/probes.list`, the pinned host opt 23.1.5, the oracle tier's verb): every probe's verdict and first message the same as
+before, only the digests new, and no other entry of ref-opt23.edn changed. Controls: verify-controls.txt's two probe controls now cross
+stated verdicts; controls-test.bash's p-good (addf, stated invalid, met) and p-flip (addf stated valid: differs, the verb fails); all
+20 cases ok.
+
+**A case without a stated outcome leaves the judge** (the user, 2026-11-20: undefined, unspecified or host-dependent expected outcomes
+leave the judge's cases with a written reason, their rows still counting in completeness). `test/llvm/judge-out.tsv`, a row a case
+with its reason: verify-llvmtest's 42 opt-judged modules (the 32 whole split-file tests of D1120-2 (a), 6 sections the tests only
+concatenate or diff, 2 `XFAIL: *`, lds-reject whose verdict depends on the target's datalayout, GCOVProfiling/version read only
+concatenated) and the 3 out probes. `bin/repr-llvm judge-out-check` holds it to the checks: every module of verify-llvmtest and the
+probes that its own verdict leaves to opt's record is a row, and every row such a module (1,487 modules, 45 rows, 0 problems).
+
+**Scores** (`bin/crops-score --record`): the judge's cases 4,954 own and 491 recorded to 5,429 own and 3 recorded of 5,432 (the 3:
+AOT's kept rows of aot-heavy.txt until `LLVMI_AOT_HEAVY=1`'s run), (5429 + 1.5) / 5432 = 0.99972, the stage 1.000, LLVM's independence
+0.9910 to 1.0000 (100); completeness 0.9895 (99 to 98 since D1120-2 (a): D1120-3); `--judge --strict`, `bin/records-check`, `bin/reap`
+(LLVM read 3,987 / 0 / 62), `make check-makefile`: 0 problems. Makefile: repr-llvm-probes-check, -probes-oracle, -reviewed-check,
+-judge-out-check.
+
+**The heavy AOT rows (the coordinator's step 2).** `LLVMI_AOT_HEAVY=1 bin/heavy-lock bin/llvmi check --aot --only
+test/llvm/aot-heavy.txt --record` (3 h 43 min wall, about half of it in the lock's queue; a fresh worktree builds C++'s lowered runtime,
+`cppi runtime-build` 35 min, and ci reads its 199 units, `read-lib` 52 min at up to 8.6 GB; then two Go builds, the eh one 3.8 GB): 3 of
+3 pass by their own verdicts (the two lib-musl-tables modules by synth-c23's `.expect`, cpp.runtime.library by C++'s golden files, from
+its 2026-11-05 `:refused` row: the `:personality` class holds none now). `bin/reap --record`: LLVM AOT 554 / 7 / 1 to 555 / 7 / 0.
+**Final:** the judge's cases 5,432, every one by its own verdict (45 out with their reasons, test/llvm/judge-out.tsv): the stage 1.0000,
+LLVM's independence 1.0000 (100); completeness 0.9899 (98: D1120-3's 62 sections), meant 0.9962, maturity 1.0000.

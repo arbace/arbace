@@ -1,3 +1,5 @@
+; verdict: invalid CatchSwitchInst handlers must be catchpads
+; rule: llvm/lib/IR/Verifier.cpp:5167 catchswitch cs is visited before cp; cp's first non-PHI is the add, so the handler check fires before the catchpad's own check.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

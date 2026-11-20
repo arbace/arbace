@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - A well-formed CU, subprogram, variable, expressions and locations, with Debug Info Version 3: both UpgradeDebugInfo's verification and opt's pass.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

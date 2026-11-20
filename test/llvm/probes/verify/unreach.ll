@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: llvm/lib/IR/Dominators.cpp:180 Block x is unreachable: any use there is dominated, so the use-before-def of %z within it is accepted; forward ref %z is same type i32.
 define i32 @f() {
   ret i32 0
 x:
