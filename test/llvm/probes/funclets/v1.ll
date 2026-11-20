@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: llvm/lib/IR/Verifier.cpp:4779 A well-formed invoke to catchswitch, catchpad, catchret chain.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

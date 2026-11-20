@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: llvm/lib/IR/Verifier.cpp:3297 Every declaration's signature and mangled name match its Intrinsics.td definition (checked one by one, e.g. va_copy/ptrmask/masked.load/scmp overload lists); declarations only, no body.
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 declare void @llvm.memcpy.inline.p0.p0.i64(ptr, ptr, i64, i1)
 declare void @llvm.memmove.p0.p0.i32(ptr, ptr, i32, i1)

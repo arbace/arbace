@@ -13778,3 +13778,23 @@ rows by hand under the lock, the 13 mutants' rules and one remake; then C++'s go
   the 62 deferred sections). crops-score --judge --strict, records-check, bin/reap: 0 problems.
 Alternatives not taken: adding only the sections that pass (a selection, not the tests); porting the 62 sections' rules here (verify.ae
 and the reader are embedded since W2, so in gate_key: proposed apart, D1120-3).
+
+## 2026-11-20: llvm-judge-1120, LLS30 revisited: the 478 probes' reviewed verdicts; the cases out of the judge
+
+The user revisited LLS30 for complete independence: the probes get own verdicts, reviewed from the IR and LLVM 23.1.5's source, the
+source line cited, checked by Arbace's verifier, opt's record the oracle tier's; and ruled the same day that a case whose expected
+outcome is undefined, unspecified or left unstated leaves the judge's cases with a written reason.
+- Reviews: five subagents in parallel (four Sonnet, metadata and debug Opus), each with the guide .tmp/probes-review/GUIDE.md, the
+  probes and llvm-project-23.1.5.src.tar.xz's source extracted (the pinned tarball: lib/AsmParser, lib/IR, include/llvm/IR,
+  include/llvm/BinaryFormat, tools/opt, tools/llvm-as), forbidden opt's record, the probes' history and every tool. Their tables then
+  compared with test/llvm/ref-opt23.edn: 470 of 478 agreed; the 8 that did not were settled again from the source by the main reviewer
+  (verify-fpc's lexer token, verify-intr4's remangling, five intrinsic declarations' non-call uses, verify-o5's first function), each
+  ending where opt's record is, each row marked corrected. Three left as out (cc-c8, funclets-v22: undefined behaviour in LLVM itself;
+  metadata-w29: an assertion). Written into the probes' first two lines (`; verdict:`, `; rule:`; .tmp/probes-review/write.py).
+- Built: own_verdicts reads a probe's verdict line (strict valid); bin/repr-llvm probes-check, probes-oracle (each flipped verdict a
+  control), judge-out-check; test/llvm/judge-out.tsv (45 rows: verify-llvmtest's 42, the 3 out probes); controls-test's p-good and
+  p-flip; Makefile targets. opt's runs of the probes recorded again by hand (record-opt, the pinned host opt: verdicts and first messages
+  unchanged, digests new). verify-probes recorded: 478 of 478 pass, 475 own.
+- Scores: 5,429 own and 3 recorded of 5,432: the judge stage 0.955 to 1.000, LLVM's independence 0.9910 to 1.0000 (100). Completeness
+  0.9895 (98; D1120-3 proposes the 62 sections' rules). Not run: bin/gate (the user). For the night: llvm-essential, llvm-read
+  (verify-probes, verify-llvmtest), llvm-controls-test.

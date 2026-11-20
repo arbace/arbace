@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - The DISubrange with both count and upperBound (would fail 'Subrange can have any one of count or upperBound', Verifier.cpp:1135) is reachable only from !22, which nothing references, so the verifier never visits it; the parser accepts both fields.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

@@ -51,6 +51,15 @@ for x in i j k l; do cp "$e/Assembler-invalid-dilocation-field-bad.ll" "$w/fk/sp
 LLVM_SRC=$w/fk/src "$src/bin/repr-llvm" verify-check "$w/sec4.list" "$w/s4" > "$w/s4.log" 2>&1; expect "verify-check: sections a plain not llvm-as rejects are invalid by their own verdict, not --crash and a pass are not" 1 $? "$w/s4.log" '\(2 by their own verdict, 2 opt'
 expect "verify-check: the parent's prefix gives a section its fragment" 1 1 "$w/s4/verify.tsv" "^D-v.ll-i	invalid	invalid	same	same	invalid field 'bad'"
 expect "verify-check: FileCheck's check file a section gives its fragment" 1 1 "$w/s4/verify.tsv" "^D-v.ll-j	invalid	invalid	same	same	invalid field 'bad'"
+# LLS30 revisited (2026-11-20): a probe states its reviewed verdict (`; verdict:`): p-good's (addf: `add` on a float, invalid with
+# LLParser's message) is met; the same probe flipped to valid (p-flip) differs, as a flipped verdict must
+mkdir -p "$w/pr"
+{ printf '; verdict: invalid invalid operand type for instruction\n; rule: llvm/lib/AsmParser/LLParser.cpp:1 (the control)\n'; cat "$src/test/llvm/probes/verify/addf.ll"; } > "$w/pr/p-good.ll"
+{ printf '; verdict: valid\n; rule: - (the flipped control)\n'; cat "$src/test/llvm/probes/verify/addf.ll"; } > "$w/pr/p-flip.ll"
+printf 'p-good\t%s\np-flip\t%s\n' "$w/pr/p-good.ll" "$w/pr/p-flip.ll" > "$w/pr.list"
+"$src/bin/repr-llvm" verify-check "$w/pr.list" "$w/s5" > "$w/s5.log" 2>&1; expect "verify-check: a probe's stated verdict is its own (2 own, 0 opt), the flipped one fails the verb" 1 $? "$w/s5.log" '\(2 by their own verdict, 0 opt'
+expect "verify-check: a probe's stated verdict met" 1 1 "$w/s5/verify.tsv" '^p-good	invalid	invalid	same	same	'
+expect "verify-check: a probe's flipped verdict differs" 1 1 "$w/s5/verify.tsv" '^p-flip	valid	invalid	differs	'
 # review 1111, finding 5: sections the tools may never verify have no own verdict: `||` (the failure allowed), --disable-verify=VALUE,
 # llc started after the IR verifier, llvm-link dropping the unused (--only-needed), and any section of an XFAIL parent (D/x.ll)
 printf '; RUN: split-file %%s %%t\n; RUN: opt %%t/e.ll -disable-output || true\n; RUN: opt --disable-verify=true %%t/f.ll -S\n; RUN: llc -start-after=codegenprepare %%t/g.ll -o -\n; RUN: llvm-link --only-needed %%t/h.ll -S\n' > "$w/fk/src/llvm-project-23.1.5.src/llvm/test/D/u.ll"

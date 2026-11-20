@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - A catchswitch with two catchpad handlers is legal.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

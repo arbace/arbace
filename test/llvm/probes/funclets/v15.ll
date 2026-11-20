@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - A call with a funclet bundle naming the enclosing catchpad is legal.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

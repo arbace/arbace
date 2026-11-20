@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - A call in a cleanuppad funclet without a funclet bundle is not checked (only intrinsic calls are).
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

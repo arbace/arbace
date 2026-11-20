@@ -1,3 +1,5 @@
+; verdict: out
+; rule: - undefined: visitFuncletPadInst follows the cleanupret's unwind edge to a landingpad and calls getParentPad on it, an unchecked cast<CatchSwitchInst> of a LandingPadInst (llvm/lib/IR/Verifier.cpp:4776) in a release build, undefined behaviour before any message; an assertions build aborts
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

@@ -1,3 +1,5 @@
+; verdict: invalid missing required field 'scope'
+; rule: llvm/lib/AsmParser/LLParser.cpp:5755 parseDILocation declares scope REQUIRED; !11 = !DILocation(line: 2, column: 7) lacks it (a parse error at line 27).
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

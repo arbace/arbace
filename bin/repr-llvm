@@ -36,6 +36,9 @@
 #   bin/repr-llvm mutants LIST OUT [N [FIRST [FAMILY]]] N mutants (default 300; the FIRST-th on, default 0) of LIST's
 #                                              modules, each one change meant to be invalid, into OUT/, OUT/mutants.list;
 #                                              FAMILY: base, attrs, cc, musttail, bundles, ... (arbace.repr.llvm.mutate/families)
+#   bin/repr-llvm probes-check                 (LLS30 revisited) every probe's reviewed `; verdict:` and `; rule:` lines held to their form
+#   bin/repr-llvm probes-oracle [REF]          (the oracle tier, no tool run) the probes' stated verdicts against opt's record, each flipped a control
+#   bin/repr-llvm judge-out-check              (the user's rule) test/llvm/judge-out.tsv: every case left to opt's record has its row and reason
 #   bin/repr-llvm reviewed-check [TABLE]       (D1120-1 (a)) test/llvm/llvmtest-reviewed.tsv's reviewed verdicts checked: each a module of
 #                                              verify-llvmtest its RUN lines leave without one, its BASIS a RUN line and a source line; nothing run
 #   bin/repr-llvm records-verify [--sample N]  (ORS30 (a), the oracle tier) every N-th module of ref-opt23.edn and ref-rt23.edn recorded
@@ -167,6 +170,7 @@ own_verdicts() {
     awk -v n="$n" '
       function flush() { if (cur != "") { runs[++nr] = cur; cur = "" } }
       NR == 1 && /^; MUTANT: / { mut = $0 }
+      /^; verdict: / { if (pv == "") pv = $0 }
       /^[;#\/ ]*XFAIL:/ { xf = 1 }
       /^[;#\/ ]*RUN:/ { l = $0; sub(/^[;#\/ ]*RUN: ?/, "", l); c = (l ~ /\\ *$/); sub(/\\ *$/, "", l); cur = cur " " l; if (!c) flush(); next }
       { flush(); lines[++nl] = $0 }
@@ -186,7 +190,16 @@ own_verdicts() {
               m = mut; sub(/^; MUTANT: [^ ]+ /, "", m); v = m; sub(/ .*/, "", v); frag = ""
               if (v == "invalid" || v == "debug") { frag = m; sub(/^[a-z]+ [A-Za-z]+: /, "", frag) } else if (v != "valid") v = "-"
               printf "%s\t%s\t%s\t\tmutant\n", n, v, frag; exit }
-            flush(); v = (nr > 0) ? "valid" : "-"; np = 0; delete pre
+            flush()
+            # a probe (LLS30 revisited, the user 2026-11-20): no RUN line, a reviewed `; verdict: VERDICT[ MESSAGE]` line (valid, invalid,
+            # debug: from the IR and LLVM 23.1.5'"'"'s LLParser and Verifier, the rule cited on its `; rule:` line); `out` (a verdict the module
+            # does not determine) and any other word leave it to opt'"'"'s record; the fifth column `probe` (a valid is valid alone)
+            if (pv != "" && nr == 0) { v = pv; sub(/^; verdict: */, "", v); frag = v; sub(/ .*/, "", v)
+              if (frag == v) frag = ""; else sub(/^[a-z]+ +/, "", frag)
+              if (v != "valid" && v != "invalid" && v != "debug") { v = "-"; frag = "" }
+              if (v == "valid") frag = ""
+              printf "%s\t%s\t%s\t\tprobe\n", n, v, frag; exit }
+            v = (nr > 0) ? "valid" : "-"; np = 0; delete pre
             for (i = 1; i <= nr; i++) { r = " " runs[i] " "
               if (r ~ /split-file/) { v = "-"; break }
               if (match(r, /[ ;|(]not +(--crash +)?(llvm-as|opt) [^|;]*/)) {
@@ -575,6 +588,63 @@ case ${1:-} in
       exit 0
     fi
     exit $st ;;
+  probes-check)
+    # probes-check (LLS30 revisited, the user 2026-11-20): every probe of test/llvm/probes.list states its reviewed verdict: a `; verdict:`
+    # line (valid; invalid or debug with the first message LLVM 23.1.5 prints; out: the module does not determine it) and a `; rule:` line
+    # (the source's path:line of the check, then why; for out, `-` then what the module leaves unstated); nothing is run
+    awk -F'\t' 'NF { print $2 }' "$root/test/llvm/probes.list" | while read -r f; do
+      awk -v f="$f" '/^; verdict: / { nv++; v = $0 } /^; rule: / { nr++; r = $0 }
+        END { sub(/^; verdict: */, "", v); w = v; sub(/ .*/, "", w); m = v; if (m == w) m = ""; else sub(/^[a-z]+ +/, "", m)
+              sub(/^; rule: */, "", r)
+              if (nv != 1 || nr != 1) print "FAIL " f ": " nv + 0 " verdict lines, " nr + 0 " rule lines"
+              else if (w !~ /^(valid|invalid|debug|out)$/) print "FAIL " f ": verdict " w
+              else if ((w == "invalid" || w == "debug") && m == "") print "FAIL " f ": " w " without its message"
+              else if ((w == "valid" || w == "out") && m != "") print "FAIL " f ": " w " with a message"
+              else if (w != "out" && w != "valid" && r !~ /^llvm\/[^ ]+\.(cpp|h|td|def):[0-9]+/) print "FAIL " f ": a rule without its source line"
+              else if (w == "out" && r !~ /^- +[^ ]/) print "FAIL " f ": out without what is unstated"
+              else print "ok " w }' "$root/$f"
+    done > "$TMPDIR/probes-check.$$"
+    grep '^FAIL' "$TMPDIR/probes-check.$$" || true
+    echo "probes-check: $(wc -l < "$TMPDIR/probes-check.$$") probes, $(grep -c '^ok' "$TMPDIR/probes-check.$$") stated ($(awk '/^ok/ { c[$2]++ } END { for (k in c) printf "%s %d ", k, c[k] }' "$TMPDIR/probes-check.$$")), $(grep -c '^FAIL' "$TMPDIR/probes-check.$$") refused"
+    st=0; grep -q '^FAIL' "$TMPDIR/probes-check.$$" && st=1; rm -f "$TMPDIR/probes-check.$$"; exit $st ;;
+  probes-oracle)
+    # probes-oracle [REF] (the oracle tier: no LLVM tool, opt's record read): each probe's reviewed verdict against opt's recorded run of it
+    # (REF, default test/llvm/ref-opt23.edn: :verdict and :first, by id; the record's :ll may predate the verdict lines, comments only):
+    # `agree` (the verdict, and the stated message within opt's first), `verdict` or `message` (differs), `out` (left to the record, not
+    # compared), `none` (no record); controls: every stated verdict flipped (invalid or debug to valid, valid to invalid) must not agree.
+    # Exit 1 on a difference or a control that agrees
+    ref=${2:-$optref} st=0
+    awk -F'\t' 'NF { print $1 "\t" $2 }' "$root/test/llvm/probes.list" | while IFS=$'\t' read -r n f; do
+      printf '%s\t%s\n' "$n" "$(grep -m1 '^; verdict: ' "$root/$f" | sed 's/^; verdict: *//')"
+    done > "$TMPDIR/probes-oracle.$$"
+    awk -F'\t' -v ref="$ref" 'BEGIN { while ((getline l < ref) > 0) if (l ~ /^\{:id "/) { id = l; sub(/^\{:id "/, "", id); sub(/".*/, "", id)
+            v = l; if (match(v, /:verdict :[a-z]+/)) v = substr(v, RSTART + 10, RLENGTH - 10); else v = ""
+            m = ""; if (match(l, /:first "([^"\\]|\\.)*"/)) { m = substr(l, RSTART + 8, RLENGTH - 9); gsub(/\\"/, "\"", m); gsub(/\\\\/, "\\", m) }
+            V[id] = v; M[id] = m } }
+      { w = $2; m = w; sub(/ .*/, "", w); if (m == w) m = ""; else sub(/^[a-z]+ +/, "", m)
+        if (w == "out" || w == "") { o++; print "out " $1; next }
+        if (!($1 in V)) { nn++; print "none " $1; next }
+        r = (w != V[$1]) ? "verdict" : (m != "" && index(M[$1], m) == 0) ? "message" : "agree"
+        c[r]++; if (r != "agree") print r " " $1 ": stated " w (m != "" ? " \"" m "\"" : "") ", opt " V[$1] " \"" M[$1] "\""
+        fw = (w == "valid") ? "invalid" : "valid"; if (fw == V[$1]) { cp++; print "control agrees: " $1 " flipped to " fw } else cf++ }
+      END { printf "probes-oracle: %d stated, %d agree with opt'"'"'s record, %d verdicts and %d messages differ, %d out, %d not recorded; controls: %d flipped verdicts, %d agree (each must not)\n", \
+              c["agree"] + c["verdict"] + c["message"], c["agree"], c["verdict"], c["message"], o, nn, cf + cp, cp
+            exit (c["verdict"] + c["message"] + nn + cp > 0) }' "$TMPDIR/probes-oracle.$$" > "$TMPDIR/probes-oracle.$$.out" || st=$?
+    grep -v '^out \|^none ' "$TMPDIR/probes-oracle.$$.out" || true
+    rm -f "$TMPDIR/probes-oracle.$$" "$TMPDIR/probes-oracle.$$.out"; exit "${st:-0}" ;;
+  judge-out-check)
+    # judge-out-check (the user's rule of 2026-11-20; llvm-judge-1120): test/llvm/judge-out.tsv, the cases out of the judge's cases, held
+    # to the checks: every module of verify-llvmtest's lists and of the probes that its own verdict leaves to opt's record (`-`, with
+    # the reviewed table) is a row with a REASON, and every row is such a module; nothing is run
+    t=$root/test/llvm work=$root/.tmp/repr-llvm/judge-out-check; rm -rf "$work"; mkdir -p "$work"
+    cat "$t/llvm-test-valid.list" "$t/llvm-test-reject.list" "$t/llvm-test-split.list" "$t/llvm-test-reject-opt.list" "$t/llvm-test-split-reject.list" "$t/probes.list" | grep . | awk -F'\t' '!s[$1]++' > "$work/rel.list"
+    "$root/bin/llvm-corpus" resolve "$work/rel.list" "$work/abs.list"
+    awk -F'\t' -v r="$root" 'FILENAME == ARGV[1] { a[$1] = $2; next } { print $1 "\t" ($2 ~ /^test\// ? r "/" $2 : a[$1]) }' "$work/abs.list" "$work/rel.list" > "$work/list"
+    own_verdicts "$work/list" "$work/own.tsv"
+    awk -F'\t' 'FILENAME == ARGV[1] { if ($0 !~ /^#/ && NF) { if (NF != 3 || $3 == "") { print "FAIL a row without its reason: " $1; bad++ } O[$1] = 1 } next }
+      { n++; if ($2 == "-") { m++; if (!($1 in O)) { print "FAIL left to opt, not in judge-out.tsv: " $1; bad++ } delete O[$1] } else if ($1 in O) { print "FAIL in judge-out.tsv, judged by its own verdict: " $1; bad++; delete O[$1] } }
+      END { for (k in O) { print "FAIL in judge-out.tsv, no module of the checks: " k; bad++ }
+            printf "judge-out-check: %d modules, %d left to opt'"'"'s record, each a row of test/llvm/judge-out.tsv; %d problems\n", n, m, bad; exit (bad > 0) }' "$t/judge-out.tsv" "$work/own.tsv" ;;
   reviewed-check)
     # reviewed-check [TABLE] (D1120-1 (a)): test/llvm/llvmtest-reviewed.tsv's rows: five columns, VERDICT valid or invalid, a BASIS
     # naming its RUN line and a source line, a WHY; each NAME a module of verify-llvmtest's lists whose RUN lines alone give `-` (the
@@ -810,8 +880,8 @@ case ${1:-} in
     # by invalid; its message is the declared fragment, met when verify's output holds it (`-` when the test declares none)
     awk -F'\t' -v arb="$work/arb" 'NR == FNR { v[$1] = $2; m[$1] = $3; w[$1] = $4; mu[$1] = $5; next }
       { if (w[$1] == "own") {
-          # a mutant, its own verdict (LLS33 (b)): valid is valid alone, debug (the debug info stripped) debug, with its message
-          sv = ((v[$1] == "valid" && ($2 == "valid" || ($2 == "debug" && mu[$1] != "mutant"))) || (v[$1] == "invalid" && $2 == "invalid") || (v[$1] == "debug" && $2 == "debug")) ? "same" : "differs"
+          # a mutant, its own verdict (LLS33 (b)), and the reviewed verdict of a probe: valid is valid alone, debug (the debug info stripped) debug, with its message
+          sv = ((v[$1] == "valid" && ($2 == "valid" || ($2 == "debug" && mu[$1] != "mutant" && mu[$1] != "probe"))) || (v[$1] == "invalid" && $2 == "invalid") || (v[$1] == "debug" && $2 == "debug")) ? "same" : "differs"
           if ((v[$1] != "invalid" && v[$1] != "debug") || m[$1] == "") sm = "-"
           else { f = arb "/" $1 ".err"; t = ""; while ((getline l < f) > 0) t = t l "\n"; close(f); sm = index(t, m[$1]) ? "same" : "differs" }
         } else {

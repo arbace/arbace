@@ -1,3 +1,5 @@
+; verdict: invalid Unfinished range!
+; rule: llvm/lib/IR/Verifier.cpp:4472 Three operands: an odd count.
 define i32 @f(ptr %p) {
  %v = load i32, ptr %p, !range !0
  ret i32 %v

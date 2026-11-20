@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - A cleanuppad ended by br rather than cleanupret is not checked by the verifier.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

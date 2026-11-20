@@ -1,3 +1,5 @@
+; verdict: debug line specified with no file
+; rule: llvm/lib/IR/Verifier.cpp:1514 !5, the function's DISubprogram and the first DI node visited (from visitFunction's !dbg attachment), has line: 1 but no file.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

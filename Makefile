@@ -18,7 +18,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   java-check-oracle java-check-rejudge java-check-stale java-verdicts java-golden ci-musl-lock-test \
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-shim-check rsi-check-essential \
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences llvmi-derived-check cppi-codegen-check cppi-codegen-gen \
-  repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
+  repr-llvm-check repr-llvm-check-essential repr-llvm-probes-check repr-llvm-probes-oracle repr-llvm-reviewed-check repr-llvm-judge-out-check llvm-controls-test llvmi-check-essential \
   repr-asm-extract repr-asm-pins repr-asm-ensure asm-essential asm-amd64-essential asm-arm64-essential repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
   repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle repr-asm-object-verdict repr-asm-object-verdict-record repr-asm-backend-check \
@@ -697,6 +697,14 @@ repr-llvm-check: ## repr/llvm's check families against their records, the tests'
 	bin/repr-llvm check $(FAMILY)
 repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)
 	bin/repr-llvm check roundtrip-llvmtest --essential && bin/repr-llvm check verify-llvmtest --essential && bin/repr-llvm check verify-probes --essential && bin/repr-llvm check text-llvmtest --essential
+repr-llvm-probes-check: ## the probes' reviewed `; verdict:` and `; rule:` lines held to their form, nothing run (bin/repr-llvm probes-check)
+	bin/repr-llvm probes-check
+repr-llvm-probes-oracle: ## the oracle tier: the probes' stated verdicts against opt's record, each flipped a control (bin/repr-llvm probes-oracle)
+	bin/repr-llvm probes-oracle
+repr-llvm-reviewed-check: ## llvm/test's reviewed verify verdicts (test/llvm/llvmtest-reviewed.tsv) checked against their RUN lines (bin/repr-llvm reviewed-check)
+	bin/repr-llvm reviewed-check
+repr-llvm-judge-out-check: ## the cases out of the judge's cases (test/llvm/judge-out.tsv) held to the checks' own verdicts (bin/repr-llvm judge-out-check)
+	bin/repr-llvm judge-out-check
 llvm-controls-test: ## the LLVM row's negative controls wired: a control crossing a module with itself fails each check (test/repr/llvm/controls-test.bash)
 	test/repr/llvm/controls-test.bash
 repr-llvm-record-opt: ## opt -passes=verify's verdicts of IR lists recorded into test/llvm/ref-opt23.edn, verify-check's reference without opt (bin/repr-llvm record-opt LIST...; LISTS=...)

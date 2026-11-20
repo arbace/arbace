@@ -3065,3 +3065,49 @@ the stage 0.954 to 0.955, independence 0.9908 to 0.9910. `test/gate/steps.edn`: 
     sections passing and `:llvmtest-section-rules` shrinking. `arbace/repr/llvm` is embedded since W2, so each change moves `gate_key`
     (the night's builds run again): batch them in one or two nights.
   - (b) Leave them deferred: the read cell holds them as found gaps.
+
+## Decided (the user, 2026-11-20): LLS30 revisited, the probes' own verdicts; a case without a stated outcome leaves the judge
+
+## As built: the probes' reviewed verdicts, the cases out of the judge (2026-11-20, branch `llvm-judge-1120`)
+
+**The reviews.** Each of the 478 probes now states its verdict in its first two lines: `; verdict: VERDICT[ MESSAGE]` (valid;
+invalid or debug with the first message LLVM 23.1.5 prints; out) and `; rule: SOURCE WHY` (the path:line in llvm-project 23.1.5 of the
+check that fires first, and why it is first). Five reviews in parallel (attrs 121, cc and intrinsics 81, metadata and debug 97,
+musttail and funclets 106, verify 73; the guide `.tmp/probes-review/GUIDE.md`) each worked from the probe's IR and the pinned tarball's
+source alone (LLParser.cpp, LLLexer.cpp, Verifier.cpp, VerifierAMDGPU.cpp, AutoUpgrade.cpp, Intrinsics.cpp, Function.h, ...), forbidden
+to open opt's record or run any tool; only then were they compared with opt's record. 470 agreed at once; the 8 that did not (all in
+verify) were settled again from the source, each ending where opt's record is and each row saying it was corrected: verify-fpc
+(a decimal `1.5` lexes as a FloatLiteral, LLLexer.cpp:1308, so LLParser.cpp:4218's "floating-point constant invalid for type", not the
+APFloat token's 6873), verify-intr4 (the parser's UpgradeCallsToIntrinsic, LLParser.cpp:472, remangles llvm.smax.i64(i32, i32) to
+llvm.smax.i32, AutoUpgrade.cpp:1979: valid), verify-intr7, o1, o2, o3, o7 (the declaration is visited before the caller; a call of
+another function type is a use Function::hasAddressTaken counts, Function.cpp:987: "Invalid user of intrinsic instruction!",
+Verifier.cpp:3284), verify-o5 (the first function's own lifetime.start on an argument, Verifier.cpp:7019). Three are `out`, the
+user's rule below: cc-c8 (`cc 99999` breaks setCallingConv's assertion, Function.h:278; a release build truncates the id into other
+flags), funclets-v22 (visitFuncletPadInst calls getParentPad on a landingpad, an unchecked cast<CatchSwitchInst>, Verifier.cpp:4776:
+undefined behaviour), metadata-w29 (ProfDataUtils.cpp:167's assertion; an assertions build aborts). Counts: 309 invalid, 154 valid,
+12 debug, 3 out.
+
+**The checks.** `own_verdicts` reads a module's `; verdict:` line when it has no RUN line (the fifth column `probe`: a valid is valid
+alone, as a mutant's); `out` leaves it to opt's record. `bin/repr-llvm probes-check`: every probe a verdict and a rule line of the form
+(478 stated, 0 refused; a probe with `maybe`, and one without its rule line, refused: checked by hand and reverted); `probes-oracle`
+(the oracle tier: no tool run, opt's record read): 475 stated, 475 agree with opt's verdict and first message, 3 out; every verdict
+flipped is a control, 475, none agrees. `check verify-probes --record`: 478 of 478 pass, 475 by their own verdict and 323 rejections with
+the stated message, Arbace's verifier meeting each; cc-s39 (`:probe-pointer`, opt printing an address) passes by its own verdict now.
+The probes' files changed by two comment lines, so opt's runs of them were recorded again by hand (`bin/repr-llvm record-opt
+test/llvm/probes.list`, the pinned host opt 23.1.5, the oracle tier's verb): every probe's verdict and first message the same as
+before, only the digests new, and no other entry of ref-opt23.edn changed. Controls: verify-controls.txt's two probe controls now cross
+stated verdicts; controls-test.bash's p-good (addf, stated invalid, met) and p-flip (addf stated valid: differs, the verb fails); all
+20 cases ok.
+
+**A case without a stated outcome leaves the judge** (the user, 2026-11-20: undefined, unspecified or host-dependent expected outcomes
+leave the judge's cases with a written reason, their rows still counting in completeness). `test/llvm/judge-out.tsv`, a row a case
+with its reason: verify-llvmtest's 42 opt-judged modules (the 32 whole split-file tests of D1120-2 (a), 6 sections the tests only
+concatenate or diff, 2 `XFAIL: *`, lds-reject whose verdict depends on the target's datalayout, GCOVProfiling/version read only
+concatenated) and the 3 out probes. `bin/repr-llvm judge-out-check` holds it to the checks: every module of verify-llvmtest and the
+probes that its own verdict leaves to opt's record is a row, and every row such a module (1,487 modules, 45 rows, 0 problems).
+
+**Scores** (`bin/crops-score --record`): the judge's cases 4,954 own and 491 recorded to 5,429 own and 3 recorded of 5,432 (the 3:
+AOT's kept rows of aot-heavy.txt until `LLVMI_AOT_HEAVY=1`'s run), (5429 + 1.5) / 5432 = 0.99972, the stage 1.000, LLVM's independence
+0.9910 to 1.0000 (100); completeness 0.9895 (99 to 98 since D1120-2 (a): D1120-3); `--judge --strict`, `bin/records-check`, `bin/reap`
+(LLVM read 3,987 / 0 / 62), `make check-makefile`: 0 problems. Makefile: repr-llvm-probes-check, -probes-oracle, -reviewed-check,
+-judge-out-check.

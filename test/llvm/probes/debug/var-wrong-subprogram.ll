@@ -1,3 +1,5 @@
+; verdict: debug !dbg attachment points at wrong subprogram for function
+; rule: llvm/lib/IR/Verifier.cpp:3350 The load's (and ret's) !dbg !12 is scoped in !13 'other', not in @main's !5. visitFunction's VisitDebugLoc catches it before the #dbg_value's 'mismatched subprogram between #dbg record variable and DILocation' check is reached.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"
