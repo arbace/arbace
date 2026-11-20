@@ -434,6 +434,37 @@
                     "record-kept A (names y, a native body left out (the record has no body of it))"]))
       (check "negative: X with a record's twin drops nobody but X and E" (mapv :name (:kept (br/native-fallback (assoc-in es [2 :twin?] true)))) ["A" "B" "Y" "D" "F" "G"])
       (check "negative: nothing failing keeps every body" (count (:kept (br/native-fallback (remove #(nil? (:body %)) es)))) 6))
+    ;; queue 503: a library closure as rustc prints another crate's closure (finish_grow's, an impl's method: print_def_path at
+    ;; the impl's arguments, A = Global a default left out; the struct's path def_path_str in value form), in a small interface
+    (let [si {:fns {"alloc::raw_vec::{impl#7}::finish_grow" {:generics [] :parent-count 1 :has-self false}
+                    "x::f" {:generics '[(type "M")] :parent-count 0 :has-self false}}
+              :impls {"alloc::raw_vec::{impl#7}" {:trait nil :self '(adt "alloc::raw_vec::RawVecInner" [(param 0 "A")]) :generics '[(type "A")] :parent-count 0}}
+              :adts {"alloc::raw_vec::RawVecInner" {:generics '[(type "A" (adt "alloc::alloc::Global" []))]}}}
+          sd {:generics {"alloc::raw_vec::RawVecInner" '[(type "A" (adt "alloc::alloc::Global" []))]}
+              :kinds {"alloc::raw_vec::RawVecInner" "Struct" "alloc::raw_vec" "Mod" "alloc::alloc::Global" "Struct" "x" "Mod" "x::f" "Fn"}}
+          cl (fn [p args] [:closure p [:fnsig [] [:tuple []]] args [:upvars] :fn-once])
+          g [[:adt "alloc::alloc::Global" []]]]
+      (binding [c/*si* si c/*std* sd]
+        (check "a library closure inside an impl's method: rustc's text and struct path"
+               (c/lib-closure-print (cl "alloc::raw_vec::{impl#7}::finish_grow::{closure#0}" g))
+               ["alloc::raw_vec::RawVecInner::finish_grow" "alloc::raw_vec::RawVecInner::<A>::finish_grow" "{closure#0}"])
+        (check "its type's text, the record's" (binding [c/*in-value* false] (c/print-ty (cl "alloc::raw_vec::{impl#7}::finish_grow::{closure#0}" g)))
+               "{closure@alloc::raw_vec::RawVecInner::finish_grow::{closure#0}}")
+        (check "a free function's closure keeps its parent's arguments (begin_panic<u64>'s)"
+               (binding [c/*in-value* false] (c/print-ty (cl "x::f::{closure#0}" [[:uint "u64"]]))) "{closure@x::f<u64>::{closure#0}}")
+        (check "negative: the parent's path with its arguments appended (464's text) is not rustc's"
+               (let [[pp seg] (c/lib-closure-path (cl "alloc::raw_vec::{impl#7}::finish_grow::{closure#0}" g))] (= (str pp "<std::alloc::Global>::" seg) "alloc::raw_vec::RawVecInner::finish_grow::{closure#0}"))
+               false)))
+    ;; queue 503: a library closure's aggregate as the instance writes it (closure-aggregates): the built `(closure TEXT []
+    ;; NAMES SPAN)` the struct of its local's type
+    (let [st '(closure "a::f::{closure#0}" [(ty "i32" (int "i32"))])
+          b (fn [lty] {:locals [{:ty '(ty "()" (tuple))} {:ty lty}]
+                       :blocks [{:stmts ['(assign (place 1) (aggregate (closure "{closure@a.rs:1:2: 1:5}" [] ["n"] "a.rs:1:2: 1:5") [(move (place 2))]))] :term '(return)}]})]
+      (check "a library closure's aggregate takes its local's struct"
+             (first (:stmts (first (:blocks (br/closure-aggregates (b (list 'ty "{closure@a::f::{closure#0}}" st)))))))
+             (list 'assign '(place 1) (list 'aggregate (list 'closure (second st) (nth st 2) nil "a.rs:1:2: 1:5") '[(move (place 2))])))
+      (check "negative: a program's closure (typeck's text in the local's struct) stays"
+             (let [x (b '(ty "{closure@a.rs:1:2: 1:5}" (closure "{closure@a.rs:1:2: 1:5}" [] ["n"] "a.rs:1:2: 1:5")))] (= x (br/closure-aggregates x))) true))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)

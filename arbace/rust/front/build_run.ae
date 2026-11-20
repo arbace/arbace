@@ -1101,6 +1101,25 @@
                                                               :else b))
                                               blocks)))))))
 
+(defn closure-aggregates
+  "queue 503: a library closure's aggregate as rustc's MIR of the instance writes it: the built body's `(closure TEXT []
+  UPVAR-NAMES SPAN)` (typeck's `{closure@FILE:L:C: L:C}`, the generic body's) made the struct of its destination local's
+  type at the instance, `(closure DEF-PATH [PARENT-ARGS.. KIND SIG UPVARS] nil SPAN)` (build's lib-closure-form, the record's
+  aggregate, the span the built one's); one whose local's type is no library closure's struct stays"
+  [b]
+  (let [st (fn [p] (when (and (seq? p) (= 'place (first p)) (= 2 (count p)))
+                     (let [t (:ty (nth (:locals b) (second p) nil)) s (when (seq? t) (nth t 2 nil))]
+                       (when (and (seq? s) (= 'closure (first s)) (= 3 (count s)) (string? (second s)) (not (str/starts-with? (second s) "{closure@")))
+                         s))))
+        fix (fn [x] (if (and (seq? x) (= 'assign (first x)))
+                      (let [[_ p rv] x]
+                        (if-let [s (and (seq? rv) (= 'aggregate (first rv)) (seq? (second rv)) (= 'closure (first (second rv)))
+                                        (= 5 (count (second rv))) (st p))]
+                          (with-meta (list 'assign p (apply list 'aggregate (list 'closure (second s) (nth s 2) nil (nth (second rv) 4)) (drop 2 rv))) (meta x))
+                          x))
+                      x))]
+    (update b :blocks (fn [bs] (mapv (fn [blk] (update blk :stmts (fn [ss] (mapv fix ss)))) bs)))))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
@@ -1129,7 +1148,8 @@
     ;; `unchecked_sub`) are neither closed nor emitted
     {:def (:def entry) :args args :body (cond-> (let [lb ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
                                                           (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))]
-                                                  (prune-const-arms (update lb :blocks lower-slice-len-calls)))
+                                                  ;; queue 503: a library closure's aggregate as the instance writes it
+                                                  (closure-aggregates (prune-const-arms (update lb :blocks lower-slice-len-calls))))
                                           (seq zst) (assoc :zst-locals zst))})))
 
 (defn- drop-shim-body
