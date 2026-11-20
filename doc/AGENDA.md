@@ -52,6 +52,14 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
   `night` (crops deferred), 1 absent, 1 none; the essential memory lane's simulated wall 0:59, serial sum 1:10.
   The essential tier is the core plus the crops' subsets deferred to the night when their paths did not change (the crops
   tier, 2026-11-17). Tonight: `bin/gate --full` on next (the merges' builds: gate_key and javac's key moved).
+- **cpp-rt-own** (2026-11-20, mac/cpp-rt-own-1120 from next `939037429`; doc/cpp/CPP-SURVEY.md, "As built: cpp-rt-own"): the C++
+  code generator's coverage of the lowered runtime's pack units and of GCC's libcpp (CP413 (a)): rt_ours_glob 166 to 177 of 198
+  (future, thread, ios_errcat, system_error, random, cxx11- and cow-shim_facets, ext-inst, locale_facets, complex_io, cow-fs_dir),
+  `test/cpp/runtime/inputs-linux-amd64.edn` re-recorded (eval and AOT 0.960 to 0.973, independence 0.9138 to 0.9190: 91; 92 at 179); libcpp's 14 units all generated, their names clang's (the build in .tmp
+  only), and pp-ref-1120's two blockers fixed: constant arrays written as LLVM arrays (charset's 218,382-member struct, c1c2badd8),
+  a macro's goto reaching its label (expr.cc, 8faf78756). Left (the survey's table): the fs and exp/filesystem units (internal linkage by signature, relocation's noexcept, clang's
+  first-emission naming), C++20 constraint mangling (sstream-inst, print, text_encoding), a VLA (floating_to_chars), valarray,
+  memory_resource, floating_from_chars, tzdb and format; cp-demangle.c is DECISION cpp-rt-own-1 (recommended (a)).
 - **Next**:
   - lanes 2 and 4: Haskell's own records (17 packages) and Python's records (`bin/pyi` check and `check --aot`, both records
     together; then Python's fragment spliced, F1 (a));
