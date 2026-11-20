@@ -112,6 +112,8 @@
 (def ^:dynamic *level* 0)
 (def ^:dynamic *counter* nil) ; atom
 (def ^:dynamic *errors* nil)  ; atom []
+(def ^:dynamic *inline-prags* {}) ; {NAME true}: the module's top-level INLINE pragmas active at -O0 (AlwaysActive, ActiveAfter n)
+(def ^:dynamic *inline-arities* nil) ; atom {NAME arity}: their bindings' dictionaries and the LHS's patterns (makeCorePair's real_arity)
 (def ^:dynamic *strict-binds* nil) ; {:atom (atom [[pn pattern]...]) :level n}: a let's banged pattern bindings, which its body forces (HsLet)
 (def ^:dynamic *control* false) ; the negative control: defaulting's order reversed, superclass-implied constraints kept
 
@@ -4132,6 +4134,21 @@
       (w p))
     @out))
 
+(defn- lhs-arity
+  "GHC.Tc.Gen.Bind's addInlinePragArity: a function binding's patterns (its first match's: matchGroupArity), else 0"
+  [b]
+  (let [v (lval b)
+        ms (when (= 'FunBind (con v)) (lval (arg (arg v 3) 2)))
+        m (when (seq ms) (lval (first ms)))
+        ps (when m (lval (arg m 3)))]
+    (if (sequential? ps) (count ps) 0)))
+
+(defn- note-inline-arity!
+  "An INLINE pragma's binder: its real arity, the dictionaries' and its LHS's (makeCorePair's inline_pair)"
+  [n b ndicts]
+  (when (and *inline-arities* (get *inline-prags* n))
+    (swap! *inline-arities* assoc n (+ ndicts (lhs-arity b)))))
+
 (defn- bind-name [b]
   (let [v (lval b)]
     (case (con v)
@@ -4543,6 +4560,7 @@
                     (doseq [[n t] all :when (and (vector? n) (= "main" (occ n)) (= "Main" *module*))]
                       (unify t [:tc io-tc [(fresh-meta)]])))
                 [tvs preds params] (generalize (mapv second all) @ws (restricted? unsigned))
+                _ (when top? (doseq [b unsigned :let [n (bind-name b)] :when n] (note-inline-arity! n b (count params))))
                 env' (reduce (fn [e [n t]] (assoc e n {:poly [:forall tvs preds (zonk t)] :core (if top? (list 'v n) (lv n))}))
                              env all)
                 self-rec? (fn [[n c]] (let [me (lv n)] ((fn occ? [x] (cond (= x me) true (coll? x) (boolean (some occ? x)) :else false)) c)))
@@ -4598,6 +4616,7 @@
                               (assume-eqs! (map first givens))
                               (let [[t c] (bind-rhs env b body)] (unify t body) (retry-implications! false) c))]
                       (solve-with-givens! @ws givens wb)
+                      (when top? (note-inline-arity! n b (count params)))
                       ;; HF10-P32: a signed local binder's type, as an unsigned one's
                       (when-not top? (note-type! (lv n) s))
                       (list 'bind (bind-core top? n) (if (empty? params)
@@ -6171,6 +6190,13 @@
               *defer* defer? *defer-log* (when defer? (atom []))
               ;; round 54: the module's role annotations (type role T nominal ...), for Coercible's improvement
               *coercibles* (atom [])
+              ;; the top-level INLINE pragmas active in the -O0 Simplifier's phase (FinalPhase: AlwaysActive, ActiveAfter n)
+              *inline-prags* (into {} (for [s sigs :let [sv (lval s)] :when (= 'InlineSig (con sv))
+                                            :let [ip (arg sv 3) n (nm (arg sv 2))]
+                                            :when (and n (seq? ip) (= 'InlinePragma (first ip)) (seq? (nth ip 2 nil)) (= 'Inline (first (nth ip 2)))
+                                                       (let [act (nth ip 4 nil)] (or (= 'AlwaysActive act) (and (seq? act) (= 'ActiveAfter (first act))))))]
+                                        [n true]))
+              *inline-arities* (atom {})
               *roles* (atom (into {} (for [d decls :let [v (lval d)] :when (= 'RoleAnnotD (con v))
                                            :let [ra (arg v 2) n (nm (arg ra 2))] :when n]
                                        [n (mapv (fn [r] (let [r (lval r)] (if (and (seq? r) (= 'Just (first r))) (str/lower-case (name (second r))) "infer"))) (arg ra 3))])))
@@ -6404,6 +6430,9 @@
                            (w decls false) @acc)
          ;; the module's NOINLINE (and OPAQUE) pragmas' binders: never inlined, never inlined unconditionally (their
          ;; inline activation never active)
+         ;; the INLINE pragmas' binders and their real arities (makeCorePair: an INLINE unfolding of that arity, the binding
+         ;; eta-expanded to it)
+         :inline-arities @*inline-arities*
          :noinline (let [acc (atom #{})
                          w (fn w [x] (cond (and (seq? x) (= 'InlineSig (first x)))
                                            (let [n (nm (arg x 2))
