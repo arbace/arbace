@@ -78,6 +78,16 @@
 #                          contexts set aside, per item; a negative control (EXPAND_VERBOSE=1: the first differences; EXPAND_SPANS=1:
 #                          the root file's spans at context 0 kept; EXPAND_DUMP=DIR: our crates written there; EXPAND_TRACE=1)
 #   bin/rust-front pack-compare-test   queue 443: the instance judge's pure cases (test/rust/front/pack_compare_test.ae)
+#   bin/rust-front lib-unit census|keys CRATE|export CRATE|build CRATE|compare CRATE [NAME...]
+#                          C6, RUST-90 S5 (doc/rust/FRONTEND-SURVEY.md, "C6: the library lowered by Arbace, the plan (write-ahead)",
+#                          "As built: C6's first slice"; arbace.rust.front.lib-unit): census: the closure of std's IR (rsi's std build
+#                          at test/rust/runtime/ir.sha256: RSI_STD_DIR's, the checkout's or the main checkout's .tmp/rsi/std/ir, else
+#                          the oracle store's rust-std-ir) from the samples' IR (test/rust/ir/samples.tar.xz; NAME... of intrinsics
+#                          panics std unwind vectors, the eval cell's five), by crate and kind; keys: CRATE's items in it as export keys;
+#                          export: their bodies built from source (lib-export --keys); build: each item at its identity as CRATE's own
+#                          unit compiles it (build-run's lib-unit: mono's facts with CRATE the local crate, named by the IR's crate
+#                          identities); compare: codegen's define of each against std's IR's of its symbol, after RF3's normalizer, a
+#                          crossed control; all in .tmp/rust-front/lib-unit/, light (each step under 2.5 GiB)
 #   bin/rust-front rind-test   RIND5: collect's `[..].len()` constant and simd_swizzle!'s block (test/rust/front/swizzle1.rs, main
 #                          built), test/rust/front/rind_test.ae
 #   bin/rust-front resolve-check [--ours] [NAME...]
@@ -468,6 +478,60 @@ case ${1:-} in
       if cmp -s "$out" "$root/test/rust/front/$base.edn"; then echo "std-crates: the sysroot's crates as test/rust/front/$base.edn records them"
       else diff "$root/test/rust/front/$base.edn" "$out"; echo "std-crates: FAIL: the sysroot's crates differ"; exit 1; fi
     else echo "std-crates: wrote $out"; fi ;;
+  lib-unit)
+    shift; sub=${1:-}; shift || true
+    lu=$work/lib-unit; mkdir -p "$lu"
+    # std's IR at the pin: rsi's std build, here or in the main checkout, else the oracle store's pack rust-std-ir
+    lib_std_ir() {
+      local m d; m=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)
+      for d in ${RSI_STD_DIR:+"$RSI_STD_DIR/ir"} "$root/.tmp/rsi/std/ir" "$m/.tmp/rsi/std/ir" \
+               $(. "$root/test/oracle-records/oracle.bash" && ls -d "$(oracle_store)"/unpacked/*/rust-std-ir 2>/dev/null); do
+        [ -d "$d" ] && (cd "$d" && sha256sum -c --quiet "$root/test/rust/runtime/ir.sha256" > /dev/null 2>&1) && { echo "$d"; return 0; }
+      done
+      echo "lib-unit: no std IR at test/rust/runtime/ir.sha256 (bin/rsi std-build, or the oracle store's rust-std-ir)" >&2; return 1
+    }
+    lib_samples() { # the samples' IR (rustc's, the pack test/rust/ir/samples.tar.xz) as NAME=x.ll,shim.ll specs
+      local s=$lu/samples n
+      if ! (cd "$s" 2>/dev/null && sha256sum -c --quiet "$root/test/rust/ir/samples.sha256" > /dev/null 2>&1); then
+        rm -rf "$s"; mkdir -p "$s"; tar -xJf "$root/test/rust/ir/samples.tar.xz" -C "$s" || return 1
+      fi
+      [ $# -gt 0 ] || set -- intrinsics panics std unwind vectors
+      for n in "$@"; do echo "$n=$s/test%rust%eval%$n.rs/x.ll,$s/test%rust%eval%$n.rs/shim.ll"; done
+    }
+    filt='^Reflection warning|recur arg|^Auto-boxing'
+    case $sub in
+      census)
+        std=$(lib_std_ir) || exit 1; mapfile -t specs < <(lib_samples "$@") || exit 1
+        cd "$root" && LIB_UNIT_TSV=$lu/census.tsv GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit census "$std" "${specs[@]}" 2>&1 | grep -v -E "$filt" | tee "$lu/census.txt" ;;
+      keys)
+        c=${1:?lib-unit keys CRATE}; shift; std=$(lib_std_ir) || exit 1; mapfile -t specs < <(lib_samples "$@") || exit 1
+        cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit keys "$std" "$c" "$lu/$c-keys.txt" "${specs[@]}" 2>&1 | grep -v -E "$filt" | tail -1 ;;
+      export)
+        c=${1:?lib-unit export CRATE}; [ -s "$lu/$c-keys.txt" ] || { echo "lib-unit: no $lu/$c-keys.txt (bin/rust-front lib-unit keys $c)" >&2; exit 1; }
+        . "$root/bin/lib/repr-rust/core-build.bash"; libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
+        lib_export --keys "$lu/$c-keys.txt" "$c" "$lu/native-$c-items.edn"; exit $? ;;
+      build)
+        c=${1:?lib-unit build CRATE}; std=$(lib_std_ir) || exit 1
+        [ -s "$lu/native-$c-items.edn" ] || { echo "lib-unit: no $lu/native-$c-items.edn (bin/rust-front lib-unit export $c)" >&2; exit 1; }
+        # the crates' identities the compare's IR names them by (each unit's codegen unit name: CRATE.STABLE-CRATE-ID-cgu.N), the
+        # compiler's version and triple std-crates-rsi.edn's
+        cd "$root" && arbace_tool -e "(let [b (read-string (slurp \"test/rust/front/std-crates-rsi.edn\"))
+              ids (into {} (for [d [\"core\" \"alloc\" \"std\"] :let [f (first (sort (.list (java.io.File. (str \"$std/\" d)))))]]
+                             [d {:stable-crate-id (second (re-find #\"\\.([0-9a-f]{16})-cgu\" f)) :unit f}]))]
+          (spit \"$lu/crates.edn\" (pr-str (assoc b :crates ids))))" || exit 1
+        sed "s/^/$c-/; s/-/::/g" "$lu/$c-keys.txt" > "$lu/$c-defs.txt"
+        fd=$(records_front) || exit 1
+        libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
+        # the environment: a synthetic program (its pipeline sets std's interface and names up), at rsi's plan's edition
+        cd "$root" && RF_CORE_NATIVE=$lu/native-$c-items.edn RF_MONO_LIB=$libsrc RF_EDITION=2021 RF_OVERFLOW_CHECKS=1 BUILD_PASS=SimplifyCfg-pre-optimizations \
+          GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} GOMAXPROCS=${GOMAXPROCS:-3} \
+          arbace_tool -m arbace.rust.front.build-run lib-unit "$lu/crates.edn" "$fd" abort "$c" "$lu/$c-defs.txt" "$lu/$c-unit.edn" 2>&1 | grep -v -E "$filt" | tee "$lu/$c-build.log" | tail -3 ;;
+      compare)
+        c=${1:?lib-unit compare CRATE}; std=$(lib_std_ir) || exit 1
+        [ -s "$lu/$c-unit.edn" ] || { echo "lib-unit: no $lu/$c-unit.edn (bin/rust-front lib-unit build $c)" >&2; exit 1; }
+        cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit compare "$std" "$c" "$lu/$c-unit.edn" 2>&1 | grep -a -v -E "$filt" | tee "$lu/$c-compare.log" | grep -a -v '^lib-unit equal ' ;;
+      *) echo "usage: bin/rust-front lib-unit census|keys CRATE|export CRATE|build CRATE|compare CRATE [NAME...]" >&2; exit 2 ;;
+    esac ;;
   pack-compare-test)
     # queue 443: build-run's pack-compare (the instance judge of alloc's and std's bodies), pure cases, light (no pack, no library)
     cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-500MiB} arbace_tool -p "$root/test" -m rust.front.pack-compare-test 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;

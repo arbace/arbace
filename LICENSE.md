@@ -1282,6 +1282,10 @@ covers what.
   `compiler/rustc_middle/src/mir/mono.rs` and `compiler/rustc_data_structures/src/base_n.rs`, held to rustc's recorded shims (the
   IR packs of `test/rust/ir/`); the check (`check`, `emit-list`) and `bin/rsi shim-check` are Arbace's own, under the Eclipse Public
   License 1.0.
+- `arbace/rust/front/lib_unit.ae` (C6's first slice, 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C6's first slice"): its v0
+  decoder written after rustc 1.99.1, the same revision and under the same terms (MIT): the grammar `compiler/rustc_symbol_mangling/
+  src/v0.rs` prints (paths, impl paths, types, constants, back-references, identifiers, disambiguators). The census, the keys and the
+  judge, build-run's `lib-unit-run` and `bin/rust-front lib-unit` are Arbace's own, under the Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the
