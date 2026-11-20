@@ -2648,6 +2648,126 @@ Queue 435's 79 left were reviewed again, one by one.
   failures are the host's), and the 13 queue 435 left for timing, host, limits or size.
 - Eval 830 to 838 of 909 by their own verdict; the judge (6,660 + 0.5 x 1,133) / 7,793 = 0.927 (0.9268 to 0.9273).
 
+## As built: hs-judge-1120: the judge's 267 recorded cases, two more own
+
+The judge's 267 cases on a record (the facts of 2026-11-19, n-all5) are eval's 71 programs of `golden/left.tsv`, bin/repr-haskell
+test's 20 comparisons with the helper's committed records, and the interface level's 176: 88 units in two layouts, 71 of them
+queue 425's (binary 9, text 54, process 8: in `roundtrip-ghc-9.14.1-iface-own-units.edn`, predicted, not run on the main host yet;
+`haskell-iface-own` has never passed a gate run) and 17 without an own interface check (filepath's 11 modules and
+`System/OsPath.hs-boot`, ghc-internal's `GHC.Internal.Bignum.Backend.GMP`, the four `Setup.lhs` of exceptions, binary, terminfo and
+text). The 71 programs were read again, one by one; two more are judged by their own verdict:
+- FMA_ConstantFold by a golden file derived from GHC's compile-time folding, not the host's (queue 444's reason was wrong). At
+  record-ref's -O0 the INLINE methods' fused multiply-add primops on literals meet `GHC.Core.Opt.ConstantFold`'s `fmaRules`
+  (GHC 9.14.1's tarball, `compiler/`), tried in order: `fmaLit` (three literals, computed on Rationals, the literals rounded to
+  Float or Double first), `fmaZero_z` (a literal 0 for z: `x * y`, the sign of z unchecked, its TODO), `fmaOne` (a literal ±1:
+  `y + z`, `z - y`, `y - z` or `negate (y + z)`). Under LexicalNegation `-0` is `negate 0`, which `negOp` leaves unfolded (-0.0 is
+  no Rational). So `fmadd 1 0 -0` becomes `plusFloat# 0.0# (negate 0.0#)` and FloatAddOp's `identity zerof` drops the 0: -0.0
+  (IEEE: +0.0); `fmadd 1 -0 0` becomes `timesFloat# 1.0# (negate 0.0#)` and `identity onef` drops the 1: -0.0 (IEEE: +0.0);
+  `fnmsub 1 0 0` folds by fmaLit to the Rational 0, +0.0 (IEEE: -0.0); each at Float and Double, six failures, and the other 42
+  checks hold. The 461 bytes written from this are GHC's recorded run (sha256 a4958c05...), status 1. The review's rows name a
+  new basis, `:ghc` (`test/haskell/eval/review.ae`: the compiler's source at the pin, a decision record-ref's -O0 build makes at
+  compile time), as the synthetic corpus's `gen.ae` models the same folding.
+- nofib's awards by the file its own boot.sh writes: `awards.stdout` is `awards.out_template` concatenated REPS times, 1 in the fast
+  mode record-ref runs (FAST_OPTS 2000), so the shipped template itself (604,360 bytes, sha256 00f0c6fd..., GHC's record). Read: main
+  prints `findallawards (competitors (i mod 100))` for i in 1..2000, the template's 2,000 lines; line 1 checked by hand (Simon's
+  first Gold the smallest sum of three at least 70, 35 + 1 + 34, then 27 + 40 + 21 = 88). `bin/lib/hsi/own-verdicts`' nofib rule
+  takes a boot-made file where none is shipped (awards alone).
+- Proofs, no new run of a program: `bin/hsi golden --oracle --control` (74 golden files, 755 rows, 67 equal to GHC's record, 7
+  :no-run, 74 of 74 controls fail, 69 left), `bin/hsi own-verdicts --check` (840 of 909, current), and the judge's own path
+  (`bin/lib/hsi/check`'s `own_ref`) on both programs against hsi's recorded runs (check-hsi.edn's passes on GHC's record: the
+  same status and digests, so `:pass :judge :own`), each with a control (one byte of the golden file, of the template) that fails.
+- Left (69, `golden/left.tsv`): nofib's 29 NofibUtils programs (HF10-P64 (a)), 28 nothing runs (D435-3), the five `ignore_stdout`
+  tests (D435-2), T4262 (the host's thread count), fannkuch-redux and spectral/minimax (killed at record-ref's 10 s CPU limit;
+  hsi's runs, killed too, match the killed record, so check-hsi.edn's two passes are no evidence), k-nucleotide (a segfault on an
+  empty stdin), fasta (7.6 MB: its own expected output is boot.sh's run of the shipped `fasta-c.c` at FAST_OPTS 750000, and
+  `bin/ci run fasta-c.c -- 750000` makes it byte for byte GHC's record in 9 s and 0.9 GB, but it is too large to commit), gc's
+  cacheprof (57 KB of annotated assembly; its shipped `cacheprof.stdout` is another input's, 1.67 MB, its first 56,927 bytes not
+  the record's) and T7861 (GHC's typechecker's deferred error text).
+- Eval 838 to 840 of 909 by their own verdict; the judge (7,528 + 0.5 x 265) / 7,793 = 0.98300 (0.98287 before); Haskell's
+  independence 79.66 (79.657 to 79.660).
+
+Rounds 2 and 3, on the main session's decisions (D-HSJ-1 (a), D-HSJ-2 (a), D-HSJ-3 (a), D435-2 (a), D435-3 (a)) and the user's of
+2026-11-20 (a case whose output is undefined, unspecified or host-dependent leaves the judge's cases, its reason per case):
+- D435-2 (a): a test all.T gives `ignore_stdout` is judged as GHC's driver judges it, by status and stderr; `own-verdicts.tsv`'s
+  STDOUT column `ignore` (`own_ref` passes it on, the check's `ign` leaves the stdout uncompared): T15892, T23071, conc065,
+  conc066, conc067.
+- D-HSJ-2 (a): `test/haskell/eval/boot.edn` keeps the digest and size of an expected output a nofib boot.sh makes by running its
+  shipped generator, made by Arbace: `bin/hsi boot` (`bin/lib/hsi/boot`) runs the generator's C by ci and pipes it through
+  `tr -d '\r'` as boot.sh does, then compares; fasta's `fasta-c.c` at FAST_OPTS 750000 gives 7,625,077 bytes, e275cebf..., GHC's
+  record. `own-verdicts.tsv` lists it as `boot:fasta.stdout`, `own_ref` reads the digest, `bin/hsi golden` checks the entry
+  (`--oracle` against the record, `--control` a changed digest).
+- D435-3 (a) and the user's decision: `test/haskell/eval/golden/na.tsv` (ID, KIND, reason) lists the programs out of the judge's
+  cases, their runs still counted in completeness. Kind `no-run`: the 28 GHC did not build that nothing runs (the record's
+  `:no-build`, check-hsi.edn's `:no-dump`, no own plan, no AOT run). Kind `undefined`: T4262 (`/proc/PID/task`'s count, the host's
+  and the RTS's threads; GHC's record 11, the shipped file 8; all.T skips it) and k-nucleotide (status 139: an empty stdin, its
+  ByteString read past the input). `bin/hsi golden` requires an undefined case's evidence: the record's run ended on a signal
+  other than the check's limit kills (137, 152), or all.T skips the test; so a defined output cannot be counted out (the
+  controls: fannkuch-redux and minimax at 137, cacheprof and fasta at 0, conc064 at 1, each listed undefined, fail it). Kept
+  judged after review: the 29 NofibUtils programs (a hash, defined), T7861 (GHC's deferred error, its text GHC's: defined, not
+  derived), cacheprof, fannkuch-redux and minimax.
+- D-HSJ-3 (a): `bin/lib/hsi/check` never passes a run killed at the check's limits (137, 152), even against a reference killed the
+  same way; its status counts as differing, the reason `:limit`. fannkuch-redux and spectral/minimax, which passed by matching
+  GHC's killed record, are `:speed` (`test/haskell/divergences.edn`): their rows of check-hsi.edn re-judged from the recorded
+  runs (a pass against the killed record meant status 137 and empty outputs: now `:fail :status 137 :differs [:status] :reason
+  :limit`; a fresh run waited behind ten heavy jobs on the big lock, so the night's hsi-check reruns them), eval 817 to 815 pass
+  (completeness 97.26 to 97.21); the control: without their class, bin/hsi divergences finds them in none.
+- Proofs, with no program run beyond the two killed ones' rerun: the judge's own path (`own_ref`, extracted) on the six new own
+  verdicts against hsi's recorded runs, `:pass :judge :own` each; controls that fail: conc065 with status 1, conc064 (no
+  `ignore_stdout`) listed `ignore`, fasta's digest with a digit changed (`own_ref` and `bin/hsi boot`), the n/a list's two
+  (a program GHC ran as `no-run`, an n/a program also left) and the five defined outputs listed `undefined`.
+- Eval 846 of 879 judged programs by their own verdict, 33 by the record; the judge (7,534 + 0.5 x 229) / 7,763 = 0.98525.
+
+Round 4, the interface level (with the Mac's 488, 488-1 (a)): the round trip's own interface level over binary, text, process
+(queue 425's 71 units, predicted and never run before) and filepath (12, never judged: haskell-iface-own's package lists and
+`--only` lacked it) run on the main host: `lib-check --ifaces own` of ghc-internal and the 21 packages below, one at a time (peaks
+1.65-1.79 GiB), then `roundtrip --layout --iface-own` over the four: the tree level 83 of 83 in both layouts, the own interfaces 83 of
+83 equal in braces and in the layout, the controls differing (peak 1.73 GiB). filepath's 12 units merged into
+`roundtrip-ghc-9.14.1-iface-own-units.edn` (1,340), the step's lists and regex gaining filepath. 488-2: GHC.Internal.Bignum.Backend.GMP
+is no part of Arbace's target, whose ghc-internal is built with the native bignum backend (HES7 (a), HF10-P6 (a)): its two
+interface cases leave the judge's cases by the user's rule (its tree and text cases stay own). The own interface level now covers
+1,340 of the 1,345 units; the four `Setup.lhs` scripts stay on GHC's recorded interfaces (8 cases). The judge (7,700 + 0.5 x 61) /
+7,761 = 0.99607; Haskell's independence 79.92.
+
+Round 5, the last 61 (the main session's ruling of 2026-11-20):
+- T7861 leaves the judge's cases as implementation-defined, as Java's HotSpot listings did. Its expected text is GHC's typechecker's
+  deferred error. `na.tsv` gains the kind `implementation-defined`. Its evidence, which `bin/hsi golden` checks, is all.T's
+  `expect_broken` together with GHC's recorded run differing from the shipped files. Controls: conc064, FMA_ConstantFold and
+  cacheprof, each listed as implementation-defined, fail it.
+- The 29 NofibUtils programs, fannkuch-redux and minimax are judged by nofib's own expected output, as its driver takes it
+  (`mk/target.mk`, `runstdtest`): NAME.faststdout, else NAME.stdout, else an empty stdout (-o1's default `/dev/null`); the stderr
+  likewise; status 0.
+  - 23 of them ship a .faststdout. The six that ship none print nothing: fem, fluid, mkhprog, pic and mandel2 evaluate a
+    benchmark's hash or `seq` it, and hidden writes its prompts to stderr, the shipped hidden.stderr.
+  - fannkuch-redux's faststdout is the benchmark's N=10 result (73196, Pfannkuchen(10) = 38). minimax's main forces `length
+    (prog s)` and prints nothing.
+  - own-verdicts lists these by nofib's files alone: a nofib program whose GHC record holds no completed run (`:no-build`, or
+    killed at 137 or 152) and that is not n/a. The 28 n/a programs are not listed.
+- `bin/repr-haskell test`'s cases. The step haskell-read-essential runs 18 checks. Each is judged by its own reference:
+  - the spec's samples, 328 (`reader-samples.out`);
+  - the hand-written worked example (`sample/Shape.ae`, 20 forms at their lines);
+  - the stated interface outcomes (equal under `:lines`, not `:full`; a changed value differs);
+  - the originals' bytes (mode `:full`: Shape.hs and Space.hs, R6's seven, HR26's module view);
+  - `layout/expected/`'s texts (Shape.hs and Layout.hs);
+  - the stated facts of the forms (Incl's `:hs/file`, R6's kinds, no `:view-markers`).
+  Its inputs are the helper's recorded dumps of the originals, which belong to the read stage, not the judge's. Its 22 GHC-judged
+  checks (GHC reading the print, class D) are the oracle tier's `haskell-test-oracle`. The 20 recorded cases are these 18, own.
+- The four Setup scripts get the own interface level. arbace.repr.haskell.target's `package-deps` takes a `PKG-Setup` through its
+  corpus entry's `-package` flags (base, Cabal, and theirs below). lib-check compiles a Setup's literate `Setup.lhs` as the module
+  `Main` of the unit `main`, as cabal-install compiles it. A Setup's Main has no GHC interface to judge, so lib-check runs no
+  control for it. libcheck's `boot-dump` gives a literate module no boot file.
+  - Cabal's own pools came first: parsec 202 s, Cabal-syntax 727 s, Cabal 1,024 s, each peaking at 1.72-1.74 GiB.
+  - Then the four Setups: 111-181 s each, every one `main :: IO ()`, byte-identical to each other.
+  - The round trip: the tree level 4 of 4 in both layouts, and the own interfaces 4 of 4 equal in braces and in the layout.
+  - Because the four interfaces are identical, the old control (the first unit's printed interface against the second's
+    original) was blind among them. `iface_own.ae` now pairs the run's last printed unit with the first unit whose original
+    differs under the normalization; a run with no such pair is a problem. The Setups were rerun beside process, so the control
+    compares text-Setup's printed interface with process's.
+  - The units file gains the four (1,344). haskell-iface-own's lists, loop and `--only` gain them.
+- Left recorded: gc's cacheprof, one case. Its shipped cacheprof.stdout (1.67 MB) is no output of the shipped program on the
+  shipped cacheprof.stdin: GHC's run of it, with the hard-coded `--level2`, prints 56,927 bytes. None of nofib's three cacheprof
+  inputs (1.1, 8.3 and 41 KB) scales to it. An own verdict needs the input that file was made from, or a golden file for the 8.3
+  KB input written from cacheprof's annotator (57 KB of assembly): neither is light.
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the

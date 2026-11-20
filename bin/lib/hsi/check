@@ -530,11 +530,18 @@ own_ref() {
   esac ;;
   esac
   e=$(printf '' | sha256sum | cut -c1-64)
+  # D435-2 (a): "ignore", all.T's ignore_stdout: no digest, the check does not compare the stdout (ign). D-HSJ-2 (a): boot:NAME, the
+  # digest test/haskell/eval/boot.edn keeps of the output the program's boot.sh makes (Arbace made it: bin/hsi boot)
+  local sod=""
+  case $so in
+    ignore) sod=ignore ;;
+    boot:*) sod=$(grep -F " \"$id\" {" "$root/test/haskell/eval/boot.edn" | sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p'); [ -n "$sod" ] || return 0 ;;
+  esac
   if [ -n "$pending" ]; then
     # (an expected stdout of "-": none shipped, an empty one, as for stderr; gate B1's unpack_sums_3)
-    echo "$ex $(if [ "$so" = - ]; then echo "$e"; else awk 1 "$d/$so" | sha256sum | cut -c1-64; fi) $(if [ "$se" = - ]; then echo "$e"; else awk 1 "$d/$se" | sha256sum | cut -c1-64; fi) pending"
+    echo "$ex $(if [ "$so" = - ]; then echo "$e"; elif [ -n "$sod" ]; then echo "$sod"; else awk 1 "$d/$so" | sha256sum | cut -c1-64; fi) $(if [ "$se" = - ]; then echo "$e"; else awk 1 "$d/$se" | sha256sum | cut -c1-64; fi) pending"
   else
-    echo "$ex $(if [ "$so" = - ]; then echo "$e"; else sha256sum < "$d/$so" | cut -c1-64; fi) $(if [ "$se" = - ]; then echo "$e"; else sha256sum < "$d/$se" | cut -c1-64; fi)"
+    echo "$ex $(if [ "$so" = - ]; then echo "$e"; elif [ -n "$sod" ]; then echo "$sod"; else sha256sum < "$d/$so" | cut -c1-64; fi) $(if [ "$se" = - ]; then echo "$e"; else sha256sum < "$d/$se" | cut -c1-64; fi)"
   fi
 }
 export -f own_ref
@@ -815,12 +822,16 @@ one() {
   rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   fi
+  # D-HSJ-3 (a) (the main session, 2026-11-20): a run killed at the check's limits (SIGKILL at the wall cap, 137; SIGXCPU at the
+  # CPU limit, 152) never passes, even against a reference killed the same way (GHC's record of fannkuch-redux and minimax at
+  # record-ref's 10 s limit): no program's verdict is a kill. Its status counts as differing; the reason :limit
+  local killed=""; case $st in 137|152) killed=1 ;; esac
   if grep -q '^hsi: ' "$o.stderr"; then
     local msg rsn; msg=$(grep -m1 '^hsi: ' "$o.stderr" | cut -c1-200 | sed 's/\\/\\\\/g; s/"/\\"/g')
     # why hsi stopped, as hsi words it (HES43 (b)): its hsi-reason line
     rsn=$(sed -n 's/^hsi-reason: \([a-z-]*\)$/\1/p' "$o.stderr" | head -1)
     echo "{:id \"$id\" :result :hsi :status $st :message \"$msg\"${rsn:+ :reason :$rsn} $tm}" > "$res"
-  elif [ "$st" = "$rst" ] && { [ "$so" = "$rso" ] || [ -n "$ign" ]; } && [ "$se" = "$rse" ]; then
+  elif [ -z "$killed" ] && [ "$st" = "$rst" ] && { [ "$so" = "$rso" ] || [ -n "$ign" ]; } && [ "$se" = "$rse" ]; then
     # HES87 (a): a test all.T runs only in the threaded ways whose recorded normal-way run is not its own verdict (the
     # non-threaded RTS's refusal: test/haskell/threaded-way.tsv, bin/hsi own-verdicts) is no evidence of the test's
     # behaviour: matching it is :threaded-way (deferred, until HES84 (a)'s threaded references), not a pass
@@ -831,7 +842,7 @@ one() {
     fi
   else
     local why=""
-    [ "$st" = "$rst" ] || why="$why :status"
+    { [ "$st" = "$rst" ] && [ -z "$killed" ]; } || why="$why :status"
     [ "$so" = "$rso" ] || [ -n "$ign" ] || why="$why :stdout"
     [ "$se" = "$rse" ] || why="$why :stderr"
     # killed at the check's limits (SIGKILL at the wall cap, SIGXCPU at the CPU limit): the reason :limit
