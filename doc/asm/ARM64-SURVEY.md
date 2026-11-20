@@ -3085,3 +3085,33 @@ move to the oracle tier). arm64's judge held one recorded part: the AOT cell's o
   originals pass.
 - Judge 0.9973 -> 0.9993 ((23,032 + 0.5 x 31) / 23,063); independence 0.99945 -> 0.99987. Completeness 99.9 -> 99.7 (the 28 deferred
   lines now seen).
+- **The object's own round trip** (branch `judge-rest-rt`). For the files that state nothing about their object (musl's 13, the 3
+  synthetic tests), `bin/repr-asm --arch arm64 object-roundtrip [CORPUS|CORPUS/NAME...]` (`arbace.asm.arm64.objrt`; `make
+  repr-asm-object-roundtrip-arm64`) judges the object by its source: the file assembled by Arbace (the object object-check judges)
+  is linked alone with a generated stub that defines its undefined symbols (16 zero bytes each, 16-aligned, in .text; .tbss for a TLS
+  one), at lld's default layout, else a low one (image base 0x1000, 4 KiB pages) when a relocation does not fit (relocs.s's ABS16 beside
+  its tbz; elf-reloc-movw.s's SABS_G0); the eval lays the same file out at the same layout (`NAME.forms`, each instruction's form at
+  its address, its symbols' values there), and `a64i forms-check` lowers each form (a64i's forms.go, no encoder) against the image's
+  word at its address decoded by `a64i/Decode` (no encoder): the two Insts' keys equal for every instruction, and the image outside
+  the instructions' words equal to the eval layout's byte for byte (no code word the source does not account for). A relocation's
+  field is judged through the link (the linker fills it from the type, symbol and addend, the form's operand is the symbol's value
+  at the same layout); a MOVW group above the value's bits is zero at either layout, judged as zero. Rows `WORK/CORPUS/objrt.tsv`
+  (`NAME<TAB>RESULT<TAB>DETAIL`, RESULT `pass` or a class: failing `differs`, `image-differs`, `undecoded`, `no-check`; gaps
+  `unlowered`, `eval-*`, `link-*`, `assemble-*`, `stub-error`, and `no-code`, a source with no instruction, nothing judged) and
+  `WORK/objrt.tsv` (`CORPUS/NAME ...`), WORK `.tmp/repr-asm/objrt` (`--work DIR`); `arbace.asm.arm64.objrt/rows WORK CORPUS` reads them
+  as `{NAME [RESULT DETAIL]}`. The controls `test/asm/controls-object-roundtrip-arm64.txt` (9: four objects held to another file's
+  forms at the same layout, five to a mutant of their own source: an immediate, a register, a branch's symbol, a :lo12: addend, a
+  GOT load's type) must differ, their subjects passing by themselves. Results: 16 of 16 pass, 9 of 9 controls fail as they must; by
+  hand setjmp.s with `str x2, [x0,#104]` made `#112` fails against the original object (`DIFF 21013c f9003402 ... imm=104`), and the
+  original image with that word patched fails against the original forms. Of the 15 MC/AArch64 files of the recorded list, 10 pass
+  (ELF_ARM64_large-relocations, cfi_val_offset, elf-reloc-addsubimm, fixup-absolute, fixup-absolute-signed, macro-hex-int,
+  mapping-within-section, mov-expr-as-immediate, mov-expression-as-immediate, prfum); elf-objdump and large-eh-encoding are
+  `no-code`, optional-hash (fcmeq #0.0) and rprfm `unlowered`, armv9.7a-mpamv2 `eval-link-error` (the eval reads MPAMCTL_EL1 as a
+  symbol); over all 110 of mc-aarch64-obj 29 pass, none failing. What the round trip needed: the linker's MOVW_PREL_G0..G3, its
+  writeSMovWImm testing bit 29 (MOVK) as lld does, not bit 30 (a MOVZ never turned MOVN for a negative value) and SABS/TPREL G0's
+  range 17 bits as lld's checkInt (it was 33), and a load of headers alone (an empty object) no longer crashing on `_end`; the eval's
+  constants that name a symbol folded again after the layout (`mov x0, 1b - 0b` across a .skip was folded to 0 from the fragments'
+  provisional offsets) and its :prel_gN: groups resolved PC-relative; a64i's forms front end taking `uxtw`, the signed groups
+  (:abs_gN_s:, :prel_gN:) as the ABI's MOV[NZ] by the value's sign, and a constant PC-relative operand (`adr x0, 100`, `b #8`) as an
+  offset from pc; `a64i forms-check` reading a word outside the code sections or at an address not a multiple of 4 (align-code.s,
+  mapping-across-sections.s). a64i-check's essential subset still passes (113 of 113, forms 113 of 113).
