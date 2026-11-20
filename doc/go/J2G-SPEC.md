@@ -323,7 +323,10 @@ translation each, small beside the world. So:
   the same, a file's text depends on its forms and the renames of its own classes' literals alone.
 - **GOMEMLIMIT** is `J2G_GOMEMLIMIT`, else 20 GiB, an inherited `GOMEMLIMIT` only when lower, capped by
   the gate's admission (`bin/gate-policy mem`).
-- Not cut: the world. Its 17.7 GiB is the floor of one process; batches in separate processes
+- Not cut: the world. Measured on javac's world (2026-11-20): 16.73 GiB in use after a forced collection at
+  the end of the load under a 16 GiB limit (18.44 GiB under 20 GiB, so about 1.7 GiB of slack), the load 604 s
+  against 140 s; so 20 GiB stays the limit for javac's tool too, and the streamed run peaks near 21 GiB resident
+  (26.7 GiB for the whole run). That is the floor of one process; batches in separate processes
   would each load and analyze it (the closed world: every translation asks any class), so they
   were not made. What it is made of (a heap profile of the world of `jdk/forms` and the runtime,
   7,946 classes, `ARBACE_MEMPROFILE` with `J2G_MEM_EXIT=load`; 2.2 GB of objects sampled in use):
