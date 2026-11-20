@@ -262,13 +262,49 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The compare: our defines (codegen's forms of the exported items) against std's IR, after RF3's normalizer
 
+(defn- unit-fragment
+  "The text of FILE's defines of the symbols WANTED, the globals they name (transitively) and the unit's types: a module
+  repr/llvm reads in place of the whole unit (std's 19 MB of IR), nil when the unit defines none of them"
+  [^String file wanted]
+  (let [lines (vec (str/split-lines (slurp file)))
+        n (count lines)
+        ;; each top-level define's and global's line range, by name
+        spans (loop [i 0 acc (transient {})]
+                (if (>= i n) (persistent! acc)
+                    (let [^String l (nth lines i)]
+                      (if-let [[_ _ nm] (re-find def-re l)]
+                        (let [j (loop [j i] (if (or (>= j n) (str/starts-with? (nth lines j) "}")) j (recur (inc j))))]
+                          (recur (inc j) (assoc! acc nm [i j])))
+                        (if-let [[_ nm] (re-find glb-re l)] (recur (inc i) (assoc! acc nm [i i])) (recur (inc i) acc))))))
+        hit (filter #(contains? spans %) wanted)]
+    (when (seq hit)
+      (let [take-names (loop [todo (vec hit) seen #{}]
+                         (if-let [nm (peek todo)]
+                           (if (contains? seen nm) (recur (pop todo) seen)
+                               (let [[a b] (get spans nm)
+                                     rs (mapcat #(map second (re-seq ref-re (nth lines %))) (range a (inc b)))
+                                     ;; a global's references (a constant naming another); a define's only through its globals
+                                     more (filter #(and (contains? spans %) (= (first (get spans %)) (second (get spans %)))) rs)]
+                                 (recur (into (pop todo) more) (conj seen nm))))
+                           seen))
+            types (filter #(re-find #"^%[^ ]+ = type " %) lines)]
+        (str (str/join "\n" types) "\n"
+             (str/join "\n" (for [nm (sort-by #(first (get spans %)) take-names) :let [[a b] (get spans nm)]]
+                               (str/join "\n" (subvec lines a (inc b)))))
+             "\n")))))
+
 (defn- ir-forms
-  "CRATE's units of STD-DIR read by repr/llvm: {symbol [define-form unit-global-map]}"
-  [std-dir crate]
-  (into {} (for [^File f (sort-by #(.getName ^File %) (.listFiles (File. (str std-dir "/" crate)))) :when (str/ends-with? (.getName f) ".ll")
-                 :let [forms (llvm/read-ll (.getPath f)) gm (chk/global-map forms)]
-                 x forms :when (= 'llvm/define (first x))]
-             [(name (second x)) [x gm]])))
+  "CRATE's defines in STD-DIR of the symbols WANTED, read by repr/llvm from each unit's fragment (unit-fragment): {symbol
+  [define-form unit-global-map]}"
+  [std-dir crate wanted]
+  (let [ws (set (map str wanted)) tmp (File/createTempFile "lib-unit" ".ll")]
+    (try
+      (into {} (for [^File f (sort-by #(.getName ^File %) (.listFiles (File. (str std-dir "/" crate)))) :when (str/ends-with? (.getName f) ".ll")
+                     :let [t (unit-fragment (.getPath f) ws)] :when t
+                     :let [_ (spit tmp t) forms (llvm/read-ll (.getPath tmp)) gm (chk/global-map forms)]
+                     x forms :when (= 'llvm/define (first x))]
+                 [(name (second x)) [x gm]]))
+      (finally (.delete tmp)))))
 
 (defn entry-unlabeled
   "A define form F with its entry block's label taken away: std's IR is printed from bitcode without value names (rustc's
@@ -316,7 +352,7 @@
              (println (format "lib-unit keys: %s: %d items of the closure, %d keys, into %s" crate (count its) (count ks) out)))
     "compare" (let [[std crate uf] args
                     m (read-string (slurp uf))
-                    theirs (ir-forms std crate)
+                    theirs (ir-forms std crate (keep (fn [[_ b]] (:symbol b)) (:bodies m)))
                     gl (cg/new-globals (:langsyms m))
                     lt (into {} (:layouts m))
                     _ (cg/set-def-symbols! gl (for [[_ b] (:bodies m) :when b] (assoc b :form :body)))
