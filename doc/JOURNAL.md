@@ -13822,3 +13822,94 @@ list is the repository's, shared by every worktree, and `git stash pop` took ano
 `2629086e9`, 15:43) into this worktree. It was put back unchanged at once (`git stash store` of the same commit, this
 worktree's files restored, this branch's own entry applied from its patch and dropped by its commit): the other worktree's
 `git stash pop` gets its own entry as before. Alternative for next time: a patch file, never the shared stash.
+
+## 2026-11-20: hs-own-stg, second round (the coordinator's items: the record gap, the derived generators, the error modules, the ranked causes)
+
+Branch `hs-own-stg-1120`, after the morning's entry. The coordinator took DECISION hs-own-stg-1 (a) and set the order.
+
+**hs-own-stg-1 (a), the -O0 reference with base on ghc-internal's -O0 interfaces.** The host's GHC is the pinned 9.14.1. The
+mechanism is committed (`898adc051`, `998a4a617`): `bin/hsi pkgdb-O0` makes a package database whose ghc-internal entry (the
+installed one's, the same unit id) has the dumps' own build directory as its import-dirs, and `HSI_DUMP_PKGDB` passes it after the
+installation's to every package's one-shot compile (GHC -v2 on a scratch compile: "package ghc-internal-9.1401.0-6d86 overrides a
+previously defined package"). The packs' keys stay next's (hsi_lib_keys hashes dump_package's text: the first commit moved every
+haskell-stg-libs key and hsi read them STALE; the second normalises the hook away and keys a dump with it apart). Not run: the
+heavy lock's queue held ten jobs at 16:56, so not within the hour the coordinator allowed. The commands, for the oracle tier by
+hand (GHC live):
+
+    export TMPDIR=$PWD/.tmp/tmp
+    db=$(bin/hsi pkgdb-O0)
+    bin/heavy-lock env HSI_DUMP_OPT=-O0 HSI_DUMP_PKGDB="$db" HSI_JOBS=2 bin/hsi dumps --record --packages ghc-internal,base,ghc-prim,ghc-bignum
+
+(the dump plan compiles ghc-internal first, so its -O0 interfaces exist when base's turn comes; then lib-stg's two records judged
+against the new reference and re-recorded).
+
+**1. The record gap.** next's own-check outputs of 05:07 (`.tmp/worktrees/next/.tmp/hsi/check-own.*`) are gone with next's
+`.tmp/hsi` (cleared at 16:45). No copy survives: n-hs-rec's `check-own` holds only its fetch log, the gate's store has no
+hsi-check pass after 11-18 (its passes keep a log, not the results), and bin/hsi check has no mode that records from saved
+outputs (`--record` is part of a run; java-check's `--judge --latest-saved` has no counterpart). The interim record stays as it is
+until lane 2's run. What was read of that run before it went (this morning's report): 725 of 777 programs own, 712 passing.
+
+**2. The derived generators**, each after GHC 9.14's (the pinned tarball's `compiler/GHC/Tc/Deriv/`), each a commit:
+- `80eb6c5e5` derived Data (gen_Data_binds): gfoldl, gunfold (constrIndex's I# tags), toConstr, dataTypeOf, dataCast1/2 by the
+  type constructor's kind, and the auxiliary bindings `$tT = mkDataType "M.T" [$cC..]`, `$cC = mkConstrTag $tT "C" tag [labels]
+  Prefix|Infix` (genAuxBindSpecOriginal) as one recursive group of the module's top-level bindings with their signatures,
+  internal (typecheck.ae's `*deriv-aux*`, desugar.ae's program-exported). GHC.Internal.Data.Data 92 -> 96 of 156 and none of its
+  141 noMethodBindingError left; Functor.ZipList 5 -> 6, none left; base's Data.Complex and Data.Fixed none left (their `$fData`'s
+  other differences are the -O2 default-method unfoldings of the reference, hs-own-stg-1).
+- `60313c00a` derived Functor over function types and foralls (Functor.hs's ft_fun, ft_forall): `\b -> h (x (g b))`, the
+  argument traversed in the other position, a variable only covariant (twice contravariant is covariant). Control.Arrow's Kleisli
+  and ReadP's fmap exist (Arrow 46 -> 47 of 61, ReadP 29 -> 31 of 50).
+- `4f277e174` derived Lift (gen_Lift_binds): lift (C a..) = appE (.. (conE 'C) (lift a)..), liftTyped under unsafeCodeCoerce;
+  Data and Lift in non_coercible_class's set. GHC.Internal.TH.Lift's 77 noMethodBindingError gone; TH.Syntax 520 -> 549 (compared
+  631 -> 687).
+- `2c8f5874d` (with `f6762c7bb` below) GeneralizedNewtypeDeriving of a standalone declaration for a class of type constructors:
+  GHC.Internal.Generics' Applicative, Alternative, Monad, MonadPlus of Rec1 and M1 lacked pure, empty, <|>, >>= (7
+  noMethodBindingError); Generics 161 -> 169 of 256, none left.
+
+**3. The error modules:**
+- base's Data.Functor.Compose (`43bc62baa`): a derived Data context has its superclass's Typeable of the head's type variables
+  (sc_constraints, decomposed as the Typeable solver does; a Typeable x a Data x of the context implies left out). errors -> ok,
+  10 -> 15 of 27. Not modelled: Typeable of the kind variables a poly-kinded head also asks.
+- ghc-internal's GHC.Internal.Bignum.Integer and base's Data.Char (`97bb62528`): tcShortCutLit tested RebindableSyntax by an
+  implicit name the renamer attaches to every literal, so the short cut never applied (Word literals were fromInteger's, the
+  Integer literals of Bignum.Integer wanted the Num Integer it cannot have). Bignum.Integer errors -> ok; Enum 52 -> 53, Data.Char
+  4 -> 5 of 5.
+- base's Data.Functor.Contravariant (`f6762c7bb`): a standalone declaration whose head's type is applied to fewer arguments than
+  it has is a class of type constructors (deriving newtype instance Contravariant f => Contravariant (Alt f)). errors -> ok, 17 ->
+  20 of 44.
+- ghc-internal's GHC.Internal.TH.Lift and base's Data.Array.Byte (`ee24d0650`): expression quotes take a nested splice (the
+  splice's expression, an m Exp), a record construction (recConE, fieldExp) and an integral literal (litE (integerL n)), as
+  repE does. Both errors -> ok.
+- Left at errors: GHC.Internal.Data.Typeable.Internal (kind equalities of its GADTs, TYPE LiftedRep against a kind variable:
+  type-in-type unification the elaborator does not do).
+
+**4. The ranked causes:**
+- The HasCallStack push's placement, with the arity fix: the push bound as an evidence binding of the binding's implication and
+  GHC.Core.Opt.Arity's myExprIsCheap ported (isCallStackPredTy, isCallStackTy: a let of a CallStack does not stop eta expansion).
+  The Simplifier's renamed binders carry no type (their meta has none, *ltypes* is keyed by the elaborator's binder), so the
+  analysis recognised the binding by its right-hand side (pushCallStack, emptyCallStack, freezeCallStack through C:IP). Measured
+  on GHC.Internal.List, Data.Maybe, Data.OldList, Show, Data.Foldable, Arr, Enum and base's Data.List.NonEmpty, Data.Bifoldable,
+  Text.Printf, Data.Foldable1, Data.Semigroup: every count as before, none better, none worse. Not committed (the patch kept in
+  the worktree's `.tmp/ana/wip-callstack-conpap.patch`): the classes.ae bucket's 175 bindings are mostly another cause (below).
+- case versus let and update flags, two diagnosed: (1) a data constructor partially applied as an argument (Show's `(:) ')'`):
+  CorePrep's maybeSaturate makes `\x -> (:) c x` with c's floats outside, ours a thunk of the application. Tried as pap-eta's
+  constructor case (con-pap-eta): the front end's memory ran away on GHC.Internal.Show (36 GB before it was stopped by hand; a
+  watchdog over the worktree's processes, 3.5 GiB, from then on); reverted, in the same patch, to be bounded before it is retried.
+  (2) IO's methods: GHC eta-expands through the IO newtype (the State# argument: $fSemigroupIO's methods of arity 4 and 3), ours
+  keep the arity the source gives: the Simplifier's eta expansion through newtypes (typeArity, mkEtaWW).
+- Binding order: not attempted.
+
+**Results** (the own pools and the whole passes at the head, `ee24d0650`, one process at a time, under 2 GB, the watchdog on):
+- ghc-internal: `lib-check --ifaces own --judge` 265 modules, 0 worse, 2 better (Bignum.Integer and TH.Lift errors -> ok), the
+  control differs; `lib-stg --ifaces own --judge` **8,394 of 10,007** bindings equal (the morning's 8,284 of 9,950; n-hs-libs'
+  record 7,982 of 9,932), 101 modules better, 0 worse or missing, the control 0 of 171; one module at errors (Typeable.Internal,
+  three before). Its own STG names noMethodBindingError once, in its own definition (231 uses at the morning's pass).
+- base: `lib-check --package base --ifaces own --judge` 241 modules, 0 worse, 4 better (Data.Functor.Compose,
+  Data.Functor.Contravariant, Data.Array.Byte, GHC.RTS.Flags errors -> ok), the control differs. The whole `lib-stg --package base`
+  pass at the head is queued under the heavy lock (tenth at 18:20): `.tmp/run/r3-base-stg.log` and `.tmp/ana/base-results-r3.edn`
+  of the worktree when it runs.
+- classes.ae over ghc-internal's 1,613 differing bindings: unclassified 492, closures or fields 387, case for let 196, the call
+  stack's placement 168, update flags 123, binding order 103, a type's name 56, a static constructor 29, arity 27, given
+  equalities' selectors 21, call stacks 9, derived Show 2 (99 at the morning's pass).
+
+Not run: the own programs (lane 2), the gate, any record.
