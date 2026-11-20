@@ -163,8 +163,12 @@ core_export() {
     [ -n "$files" ] || { echo "core-export --rsi-outside: no module file matches $fre" >&2; return 1; }
     awk -F'\t' -v re="$fre" '$2 ~ re {print $1}' "$keys" > "$keys.sel"
     echo "core-export --rsi-outside: $(wc -l < "$keys.sel") keys in $(printf '%s\n' "$files" | wc -l) files"
+    # queue 472: the crate-private functions of rust-core-built's modules that the outside bodies call (ub_checks'
+    # check_language_ub, maybe_is_aligned_and_not_null, is_valid_allocation_size: assert_unsafe_precondition!'s), whose
+    # signatures std's interface lacks, collected with the extra interface files (test/rust/front/core-outside-iface-extra.txt)
+    cat "${CORE_IFACE_EXTRA:-$root/test/rust/front/core-iface-extra.txt}" "$root/test/rust/front/core-outside-iface-extra.txt" > "$work/core/native-core-rsi-outside.iface-extra"
     # shellcheck disable=SC2086
-    CORE_EXPORT_KEYS=$keys.sel CORE_EXPORT=$out core_check --records $files
+    CORE_IFACE_EXTRA=$work/core/native-core-rsi-outside.iface-extra CORE_EXPORT_KEYS=$keys.sel CORE_EXPORT=$out core_check --records $files
     [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out ($(grep -c ':judge :instance' "$out") judged at the instance)"
     return 0
   fi
