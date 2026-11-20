@@ -3119,3 +3119,30 @@ test/llvm/aot-heavy.txt --record` (3 h 43 min wall, about half of it in the lock
 its 2026-11-05 `:refused` row: the `:personality` class holds none now). `bin/reap --record`: LLVM AOT 554 / 7 / 1 to 555 / 7 / 0.
 **Final:** the judge's cases 5,432, every one by its own verdict (45 out with their reasons, test/llvm/judge-out.tsv): the stage 1.0000,
 LLVM's independence 1.0000 (100); completeness 0.9899 (98: D1120-3's 62 sections), meant 0.9962, maturity 1.0000.
+
+## Decided (the main session for the user, 2026-11-20): D1120-3 (a)
+
+## As built: D1120-3 (a), the 62 sections' rules (2026-11-20, branch `llvm-sections-1120` from a5e100f56)
+
+Every rule from llvm-project 23.1.5 (the pinned tarball), its lines cited where it is ported (arbace/repr/llvm/verify.ae, read.ae), each
+group proven on its sections (verify-llvmtest `--only` the test's sections, the valid ones beside; every first message compared with
+the test's CHECK line where it carries none of `error:`), in five commits (they move `gate_key`):
+- batch 1 (29): visitIntrinsicCall's convert_to/from_arbitrary_fp (Verifier.cpp:6124-6211; APFloat.cpp:6020-6038, FPEnv.cpp:25-36) 8;
+  visitProfMetadata's `unknown` and VP rules, verifyUnknownProfileMetadata and verifyFunctionMetadata's `unknown` (Verifier.cpp:2621-2644;
+  ProfDataUtils.cpp:50/132, InstrProfData.inc:259-281) 7, one of them a false error gone; target extension types' properties at globals,
+  allocas and byval (Type.cpp:74-104, 1050-1140; Verifier.cpp:810-813, 4670-4673, 2172-2175) 7; LLParser's forward block addresses
+  (LLParser.cpp:276-279, 4383-4440, 7298-7349, 1861) 7.
+- batch 2 (12): reqd_work_group_size (Verifier.cpp:2678-2704) and verifyAMDGPUReqdWorkGroupSize (VerifierAMDGPU.cpp:60-113) 6;
+  parseOptionalAddrSpace's symbolic address spaces (LLParser.cpp:2041-2060; DataLayout.cpp:828-835), the reader keeping the data layout
+  it has read, 6, positions LLVM's columns.
+- batch 3 (9): AutoUpgrade's upgradePtrauthInitFiniArrays decided as the parser does (AutoUpgrade.cpp:6389-6486) and the Verifier's
+  rule on a ptrauth structor it leaves 7; checkValueID at numbered globals, aliases and functions (LLParser.cpp:875, 7124, 3595-3600) 2.
+- batch 4 (5): checkPtrToAddr's address width (Verifier.cpp:3709-3724; DataLayout.h:518-520) at the instruction and through
+  visitConstantExprsRecursively (2709-2744, 2755; 830, 5775) 3; visitModuleFlags' ptrauth and PAuth ABI flags (1839-1886) 2.
+- batch 5 (7): a splat's types (LLParser.cpp:4725-4737, 6949-6957) 4; atomicrmw's store size (9250-9254) 1; the dialect field's integer
+  (5351-5360, 5219; Dwarf.h:212) 1; module asm's property value (666, 1958-1963) 1.
+Checks at the end, on the last commit's code: verify-llvmtest 1,009 of 1,009 pass (629 of 629 rejections with the stated message),
+verify-probes 478, roundtrip-llvmtest and text-llvmtest 304 each (the reader changed), verify-rt 905 and verify-rt-heldout 1,101
+(rerun on the final code beside this note). `:llvmtest-section-rules` is gone (62 to 0); LLVM read 3,987 / 0 / 62 to 4,049 / 0 / 0;
+completeness 0.9899 (D1120-2's sections) to 0.9938, meant 1.0000 (the 7 by-design cases of eval and of AOT are what remain), independence
+1.0000, maturity 1.0000; crops-score --judge --strict, records-check, reap: 0 problems. No gate (the user).
