@@ -5110,3 +5110,24 @@ run): `bin/java-check golden --oracle --control` per batch (164 golden files, 11
 pass, 11 mutants differ; a review without `:masked` over a file with `@HASH` fails the review; `verdicts --verify` as written.
 **Independence:** the judge's mixed fact 14,386 own and 108 the JDK's (0.996) to 14,446 and 48 (0.998); Java's independence
 59.92 to 59.96.
+
+## As built: judge-rest, three more golden files (2026-11-20; branch `judge-rest-1120`, from next `939037429`)
+
+The user's goal of 2026-11-20: the judges' recorded cases own wherever an accepted precedent applies (JCS361 (a)'s reviewed golden
+files). Of the 24 `:stdout` tests `test/java/golden/left.tsv` held after queue 451, each was read again:
+
+- **t03912** (TestOptimizeStringConcat), left for its size (1,020,005 bytes): its output is fixed by its source (10,000 turns, each
+  printing the null value's one line, then `true`). Its golden file holds them; its review in `hotspot-compiler.edn` is one range row
+  (lines 1-10,000, the text as the pattern, the generator named) and the last line. git stores the file compressed (a few KB).
+- **t05050** (GetURLsTest) and **t05278** (CheckInputStream), left for test.src's path in their output: their output is fixed by
+  their source but for where the jdk26u checkout lies. `judge_golden` masks stdout's test.src (`$dir`, jtreg's test.src) as
+  `@TESTSRC` before the run's directories (mask_dirs), when the golden file holds `@TESTSRC`, as JCS70 (a) masks the working
+  directories; their reviews say `:testsrc true` (`java.check/golden-jtreg` holds the two together) and `golden --oracle` puts
+  the JDK's directory back (`--jdktest`): both meet the JDK's recorded digests, as t03912's does.
+- `bin/java-check golden --oracle --control`: 167 jtreg golden files, each action the JDK's recorded stdout, 167 controls fail.
+  `judge_golden` itself, by hand with the JDK's stdout (the golden file with the directories put back): both pass; a corrupted
+  golden file and another directory than test.src each give `differ`.
+- `bin/java-check verdicts`: 3,122 `:status`, 182 run tests `:golden`, 21 `:stdout` (interp and compiled: 3,304 of 3,325 own).
+  The 21 left keep their reasons in left.tsv; t05322's corrected: its action 0 varies too (DSA 512's q, ParameterCache's `q512`, has
+  its top bit set, so r and s take 20 or 21 bytes in DER by k's draw: 44, 45 or 46; the JDK's two runs agreed by chance).
+- Judge 0.9983 -> 0.9986 ((14,452 + 0.5 x 42) / 14,494).
