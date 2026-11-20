@@ -37,7 +37,8 @@ cmd_suite_corpus() {
       units = units (units == "" ? "" : " ") $1 ".ml"
       printf "%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $3, $4, $5, $6, "'"$TESTS"'", units
     }' "$OI_DIR/corpus.tsv" "$S/actions.tsv" > "$out.ts"
-  # the packages' programs (test/ocaml/opam-programs.tsv: PKG ID FLAGS ARGS UNITS), a package whose sources are not fetched out
+  # the packages' programs (test/ocaml/opam-programs.tsv: PKG ID FLAGS ARGS UNITS [ENV]; ENV since 2026-11-20, judge-rest: the
+  # environment a reviewed golden file's output depends on, test/ocaml/opam/golden.edn's :env), a package whose sources are not fetched out
   : > "$out.opam"
   # every package of the set extracted, else the 33 opam rows would leave the corpus unseen (review 008's finding 4)
   local pkg
@@ -45,7 +46,7 @@ cmd_suite_corpus() {
     [ -f "$OPAM/$pkg/.extracted" ] || die "suite corpus: the opam package $pkg is not fetched out (bin/repr-ocaml corpus fetch)"
   done
   if [ -d "$OPAM" ]; then
-    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t\t%s\t\t%s\t%s\n", $1, $2, $3, $4, "'"$OPAM"'/" $1, $5 }
+    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $6, "'"$OPAM"'/" $1, $5 }
       NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
   fi
   cat "$out.ts" "$out.opam" | LC_ALL=C sort > "$out"; rm -f "$out.ts" "$out.opam"
@@ -237,7 +238,8 @@ cmd_suite_check() {
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
   local res; res=$(suite_results "$SUITE_OI" check-suite-oi)
-  OI_OWN=$(own_verdicts oi "$S/corpus.tsv" suite) "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$res" "$SUITE_OI_CLASSES" || return $?
+  local own; own=$(own_verdicts oi "$S/corpus.tsv" suite) || exit $?
+  OI_OWN=$own "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$res" "$SUITE_OI_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
     suite_header "$res" ';; oi'"'"'s results over the suite corpus (bin/oi suite check --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7 (write-ahead)"):
 ;; [PROGRAM RESULT REASON] as test/ocaml/check-oi.edn; the programs: the testsuite'"'"'s run tests O5'"'"'s corpus does not hold and the
@@ -328,7 +330,8 @@ cmd_suite_check_aot() {
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   { [ -n "$ONLY" ] || [ -n "$ONLY_LIST" ]; } && mode=$mode-only
   local res; res=$(suite_results "$SUITE_AOT" check-suite-aot)
-  OI_OWN=$(own_verdicts aot "$S/corpus.tsv" suite) "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" "$res" "$SUITE_AOT_CLASSES" || return $?
+  local own; own=$(own_verdicts aot "$S/corpus.tsv" suite) || exit $?
+  OI_OWN=$own "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" "$res" "$SUITE_AOT_CLASSES" || return $?
   if [ "$RECORD" = 1 ]; then
     suite_header "$res" ';; The AOT level'"'"'s results over the suite corpus (bin/oi suite check --aot --record; doc/ocaml/OCAML-SURVEY.md, "As built: O7
 ;; (write-ahead)"): [PROGRAM RESULT REASON OI] as test/ocaml/check-aot.edn, at the light level (OC87); judged against ocamlopt'"'"'s runs in
