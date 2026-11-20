@@ -360,11 +360,14 @@
                            (let [its (vec (map-indexed (fn [i [n id c]] [:exn n id (assoc c :ext-first (zero? i))]) cs))]
                              (recur more (reduce add-item env its) (into items its) substs))
                            (recur more env (into items (repeat (count (:ptyext_constructors (d 1))) [:hole])) substs)))
-          :Psig_class (if env/*lenient*
-                        (recur more env (into items (repeat (count (d 1)) [:hole])) substs)
-                        (let [[infos env'] (*class-declarations* env (d 1) true)
-                              its (vec (map-indexed (fn [i c] [:class (:name c) (:id c) (:decl c) (:obj-id c) (:ty-id c) (if (pos? i) :next :first)]) infos))]
-                          (recur more env' (into items its) substs)))
+          ;; a unit's interface read leniently (find-unit, --intf) types its classes too (ocamldoc's odoc_scan.mli: `class scanner`,
+          ;; inherited by odoc_cross and the plugins; queue 480); one the typer refuses is a hole, as before
+          :Psig_class (if-let [[infos env'] (try (*class-declarations* env (d 1) true)
+                                                 (catch arbace.lang.ExceptionInfo e
+                                                   (if (and env/*lenient* (:ocaml-type-error (ex-data e))) nil (throw e))))]
+                        (let [its (vec (map-indexed (fn [i c] [:class (:name c) (:id c) (:decl c) (:obj-id c) (:ty-id c) (if (pos? i) :next :first)]) infos))]
+                          (recur more env' (into items its) substs))
+                        (recur more env (into items (repeat (count (d 1)) [:hole])) substs))
           ;; Typemod's Psig_recmodule (transl_recmodule_modtypes), as the structure's: the module types translated
           ;; in order, each seeing the earlier ones
           :Psig_recmodule (let [[env' its]
@@ -395,6 +398,12 @@
                             (recur more env items substs)
                             (let [item [:modtype n (ty/ident-create n) mty]]
                               (recur more (add-item env item) (conj items item) substs))))
+          ;; Typemod's Psig_modtypesubst (a local module type substitution, `module type S := sig ... end`, compiler-libs'
+          ;; printtyp.mli, queue 480): bound for the later items, no item of its own; a later `S` names it through the
+          ;; module types' registry (add-modtype!), so its expansion is S's definition, as Subst's substitution gives
+          :Psig_modtypesubst (let [mtd (d 1) n (:txt (:pmtd_name mtd))
+                                   mty (some->> (:pmtd_type mtd) (transl-modtype env))]
+                               (recur more (add-item env [:modtype n (ty/ident-create n) mty]) items substs))
           :Psig_include (let [mty (env/scrape (transl-modtype env (:pincl_mod (d 1))))
                               _ (when-not (= :Mty_signature (mty 0)) (type-error "include of a functor type"))
                               its (env/rename-items (mty 1))]
@@ -498,7 +507,11 @@
                                 (= :absent (get impl 4))
                                 (let [p ((impl 3) 1)]
                                   [[-1 [:alias p (include-mty env (:mty (env/find-module p)) (item 3))]]])
-                                :else [[(get pos1 [:module (item 1)]) (include-mty env (impl 3) (item 3))]]))
+                                ;; Includemod.module_declarations' strengthened_modtypes: the implementation's module type strengthened by its path,
+                                ;; aliasable (a type of it equal to M.t, a submodule an alias of M.N), so a specification naming M.t
+                                ;; through an outer type (gprinttyp's `type decoration = Decoration.r`, Decoration.make's `-> decoration`)
+                                ;; matches the module's own r (queue 480)
+                                :else [[(get pos1 [:module (item 1)]) (include-mty env (env/strengthen true (impl 3) [:Pident (impl 2)]) (item 3))]]))
                     :type (do (doseq [[n _ _] (item 1)]
                                 (when-not (get by1 [:type n]) (type-error (str "The type " n " is required but not provided"))))
                               [])

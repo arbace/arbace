@@ -130,6 +130,32 @@ END {
     if (s !~ /^((readonly_files|subdirectories|commandline|compiler_reference) *= *"|(setup-ocamlc\.byte-build-env|ocamlc\.byte|check-ocamlc\.byte-output)$)/) { dpmode = 0; break }
   }
   if (dpmode) helper = 0
+  # ocamldoc mode (queue 480, DECISION 478-2 (a): ocamltest's tools as Arbace's own, judged by the test's own .reference): a test whose
+  # header is ocamltest's ocamldoc test alone (`ocamldoc;`, no backend: the custom generators of `plugins = "FILE.ml"`, built by ocamlc
+  # against ocamldoc's interfaces, `flags = "-I ${ocamlsrcdir}/ocamldoc"` their compiler's) runs `ocamldoc -nostdlib -I STDLIB -g
+  # FILE.cmo TEST.ml -o TEST.result` and compares TEST.result with TEST.reference and ocamldoc's output with TEST.ocamldoc.reference
+  # (none: no output). The run is bin/oi's ocamldoc (OCaml 5.5.0's ocamldoc/ on compiler-libs' units, its plugins by oi's Dynlink): the
+  # row's environment @ocamldoc=1 and @plugins=FILE,...; bin/oi's oi_one gives the row TEST.result as its
+  # output, ocamldoc's own output against TEST.ocamldoc.reference its note; no libraries of the header's (the program's units are
+  # ocamldoc's own list, bin/oi's ocamldoc_build). At oi's level alone: at the light AOT level (bin/oi's o2j_dump and translate loop have
+  # the mode) t01 did not finish in 600 s of CPU with 7 GB resident (queue 480; DECISION 480-1), so the AOT levels keep the class
+  odmode = 0; odplugins = ""
+  if (aot == 0) {
+    odmode = 1
+    for (j = 1; j <= m; j++) {
+      s = trim(st[j]); if (s == "") continue
+      if (s == "ocamldoc") { odmode = (odmode == 1) ? 2 : 0; continue }
+      if (s ~ /^plugins *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] !~ /^[A-Za-z0-9_]+\.ml$/) odmode = 0; odplugins = odplugins (odplugins == "" ? "" : ",") hm[q] }
+        continue
+      }
+      if (s ~ /^flags *= *"-I @OCAMLSRCDIR@\/ocamldoc"$/) continue
+      odmode = 0
+    }
+    odmode = (odmode == 2 && odplugins != "")
+  }
+  if (odmode) { helper = 0; env = env " @ocamldoc=1 @plugins=" odplugins; m = 0 }
   psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
