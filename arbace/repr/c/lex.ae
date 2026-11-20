@@ -403,6 +403,28 @@
 (defn- digit? [^long c]
   (if (< c 0x80) (and (>= c 48) (<= c 57)) (Character/isDigit (int c))))
 
+;; Arbace (queue 496; CS63 (a)): C23's identifier characters beyond ASCII (6.4.2.1, annex D): XID_Start first, XID_Continue
+;; after (UAX #31). Java's Unicode identifier tables are UAX #31's ID_Start and ID_Continue (plus U+2E2F and the ignorable
+;; characters); XID_* takes out the characters NFKC does not close (DerivedCoreProperties.txt's notes).
+(defn- nfkc-unstable? [^long c]
+  (or (= c 0x037A) (= c 0x309B) (= c 0x309C) (= c 0xFDFA) (= c 0xFDFB) (= c 0x2E2F)
+      (and (>= c 0xFC5E) (<= c 0xFC63))
+      (and (>= c 0xFE70) (<= c 0xFE7E) (even? c))))
+
+(defn xid-start?
+  "Whether the character `c` (from 0x80) is XID_Start, an identifier's first character in C23 (6.4.2.1)."
+  [^long c]
+  (and (>= c 0x80) (<= c 0x10FFFF) (Character/isUnicodeIdentifierStart (int c)) (not (nfkc-unstable? c))
+       (not (contains? #{0x0E33 0x0EB3 0xFF9E 0xFF9F} c))))
+
+(defn xid-continue?
+  "Whether the character `c` (from 0x80) is XID_Continue, an identifier's later character in C23 (6.4.2.1)."
+  [^long c]
+  (and (>= c 0x80) (<= c 0x10FFFF)
+       (or (= c 0x200C) (= c 0x200D)
+           (and (Character/isUnicodeIdentifierPart (int c)) (not (Character/isIdentifierIgnorable (int c)))
+                (not (nfkc-unstable? c))))))
+
 (defn- block-comment
   "scanner.comment: to the end of a /* comment, its / consumed."
   [^Scanner s ^long start]
@@ -547,6 +569,28 @@
 
 (defn- skip-ucn [^Scanner s ^long n] (dotimes [_ n] (shift s)))
 
+(defn- ucn-value
+  "Arbace (queue 496): the code point the universal character name at the offset names (its length `n`, ucn-length's)."
+  ^long [^Scanner s ^long n]
+  (Long/parseLong (apply str (map #(char (peek-byte s (+ 2 (long %)))) (range (- n 2)))) 16))
+
+(defn- c-ident-char?
+  "Arbace (queue 496): whether C reads the character `c` as an identifier's character, `start` its first (6.4.2.1: a
+  nondigit or XID_Start, then a digit, a nondigit or XID_Continue; `$` as gcc's -fdollars-in-identifiers, the default), its
+  universal character name and its UTF-8 alike."
+  [^long c start]
+  (if (< c 0x80)
+    (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (= c 95) (= c 36) (and (not start) (>= c 48) (<= c 57)))
+    (if start (xid-start? c) (xid-continue? c))))
+
+(defn- ident-ucn
+  "Arbace (CS50 (a); queue 496): the length of a universal character name at the offset that an identifier (or a pp-number)
+  takes, `start` at its first character, 0 for none: in C one whose character C23 takes there (c-ident-char?), as its UTF-8;
+  in C++ any."
+  ^long [^Scanner s start]
+  (let [n (ucn-length s)]
+    (if (and (pos? n) (not (cxx? s)) (not (c-ident-char? (ucn-value s n) start))) 0 n)))
+
 (defn- ppnumber
   "scanner.ppnumber (A.1.9), with digit separators as libcpp's lex_number takes them (CS326 (a); go-whim's rule was
   a `'` only before an identifier character)."
@@ -570,9 +614,13 @@
             (do (dotimes [_ k] (shift s)) (recur true))
             (new-token s :PPNUMBER)))
         (= c 39) (new-token s :PPNUMBER)
-        (or (digit? c) (letter? c) (= c 95) (cont-mark? s c)) (do (shift s) (recur false))
+        (if (cxx? s)
+          (or (digit? c) (letter? c) (= c 95) (cont-mark? s c))
+          ;; Arbace (queue 496): C23's identifier-continue (6.4.8), its UTF-8 as its universal character names
+          (and (not= c 36) (c-ident-char? c false)))
+        (do (shift s) (recur false))
         ;; Arbace (CS50 (a)): a universal character name is an identifier-nondigit of a pp-number too
-        (and (= c 92) (pos? (ucn-length s))) (do (skip-ucn s (ucn-length s)) (recur false))
+        (and (= c 92) (pos? (ident-ucn s false))) (do (skip-ucn s (ucn-length s)) (recur false))
         :else (new-token s :PPNUMBER)))))
 
 (defn- identifier ^Tok [^Scanner s]
@@ -580,13 +628,22 @@
   (loop []
     (let [c (rune s)]
       (cond
-        (or (letter? c) (= c 95) (digit? c) (= c 36) (cont-mark? s c)
-            ;; Arbace (CS143): XID_Continue's marks, letter numbers and connectors, as C23 (6.4.3) takes them (C;
-            ;; C++ takes cont-mark?'s, CX2)
-            (and (>= c 0x80) (not= c 0xFFFD) (not (cxx? s)) (contains? #{6 8 10 23} (Character/getType (int c)))))
+        (if (cxx? s)
+          (or (letter? c) (= c 95) (digit? c) (= c 36) (cont-mark? s c))
+          ;; Arbace (CS143; queue 496): C23's identifier-continue, XID_Continue beyond ASCII (6.4.2.1; C++ takes
+          ;; cont-mark?'s, CX2)
+          (c-ident-char? c false))
         (do (shift s) (recur))
-        (= c 92) (let [n (ucn-length s)] (if (pos? n) (do (skip-ucn s n) (recur)) (new-token s :IDENTIFIER)))
+        (= c 92) (let [n (ident-ucn s false)] (if (pos? n) (do (skip-ucn s n) (recur)) (new-token s :IDENTIFIER)))
         :else (new-token s :IDENTIFIER)))))
+
+(defn- stray-ucn
+  "Arbace (queue 496): a universal character name C23 takes in no identifier there (6.4.2.1) is one preprocessing token, a
+  character of its own (6.4p3), as the same character in UTF-8 is: its kind the character, its text the name."
+  ^Tok [^Scanner s]
+  (let [n (ucn-length s) v (ucn-value s n)]
+    (skip-ucn s n)
+    (new-token s (ch-of v))))
 
 (defn- op1
   "A one-rune token, or with a following `=` the kind `eq`."
@@ -728,7 +785,10 @@
           ;; and a constant; their kinds the wide ones (the prefix in the text tells them apart)
           (and (or (= c 117) (= c 85)) (= p1 39)) (do (shift s) (quoted s :LONGCHARCONST 39 "character constant"))
           (and (or (= c 117) (= c 85)) (= p1 34)) (do (shift s) (quoted s :LONGSTRINGLITERAL 34 "string literal"))
-          (or (letter? c) (= c 95) (= c 36) (pos? (ucn-length s))) (identifier s) ; Arbace: a UCN begins one too
+          (if (cxx? s) (or (letter? c) (= c 95) (= c 36)) (c-ident-char? c true)) (identifier s)
+          (pos? (ident-ucn s true)) (identifier s) ; Arbace: a UCN begins one too
+          ;; Arbace (queue 496): in C a universal character name of a character no identifier begins with is one token
+          (and (= c 92) (pos? (ucn-length s))) (stray-ucn s)
           (and (>= c 48) (<= c 57)) (ppnumber s)
           :else (do (shift s) (new-token s (ch-of c))))))))
 

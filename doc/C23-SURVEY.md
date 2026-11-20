@@ -6476,3 +6476,32 @@ Proofs: `bin/repr-c roundtrip --only` over the 32: before 16 own-rejects, 16 bot
 0 both-reject, 32 pass, the five `:roundtrip-own` controls differ; an `:at` changed by one column fails as stale. `c.judge-test`'s
 three own-verdict tests, 29 assertions, 0 failures. C's judge `{:self 14883 :recorded 132}`: (14883 + 0.5 x 132) / 15015.
 Main host: `bin/repr-c roundtrip --record` (no gcc) rewrites roundtrip-results.edn's 32 rows' acceptance labels.
+
+## As built: identifiers' UCNs and UTF-8 by one C23 rule (queue 496, 2026-11-20, branch `496-c-lexer-ucn` from `mac/495-c-print-own` `0bcf94a4a`)
+
+495's finding: `arbace.repr.c.lex` took any universal character name into an identifier (`¨`, U+00A8, Sk, an identifier
+to it) but rejected the same character in UTF-8 (a stray character), and a pp-number took a UCN's U+0300 but stopped at its
+UTF-8. CS63 (a) (C23's XID tables, decided 2026-10-29, not built) now holds for C: one predicate, `c-ident-char?`, decides a
+character's place in an identifier whichever its spelling (6.4.2.1, annex D): ASCII letters, `_` and `$` (gcc's default
+-fdollars-in-identifiers), digits after the first, beyond ASCII XID_Start first and XID_Continue after (`xid-start?`,
+`xid-continue?`: Java's Unicode identifier tables, UAX #31's ID_Start and ID_Continue, less U+2E2F, the ignorable characters
+and the characters NFKC does not close; ZWNJ and ZWJ kept). The pp-number's identifier-continue is the same rule (6.4.8). A
+UCN of a character the rule does not place there is a preprocessing token of its own (6.4p3), its kind the character and its
+text the name, as the UTF-8 is (`stray-ucn`); in C23 the pedantic notes give gcc's error for it ("universal character ¨
+is not valid in an identifier", gcc.dg/cpp/c23-ucnid-1.c line 5), and none for the UTF-8, a stray character to gcc too. C++
+keeps its own rules (CX2), any UCN in an identifier included. The rule applies at every C standard (the lexer knows none; it
+was already so for UTF-8 before C23, where gcc's C99/C11 annex D ranges differ).
+
+Rows moved, from the files of the corpora with a UCN or a non-ASCII byte (19 of 4,858; the lexer's dumps of the 19 before and
+after differ in two files only): gcc-cpp-c23's c23-ucnid-1.c (line 5 a `'¨'` token, no identifier) and c23-ucnid-1-utf8.c
+(lines 12 and 13 one pp-number each, `0À` and `.1À`, no stray U+0300). The round trip's c23-ucnid-1.c is rejected at 5:1 as its
+UTF-8 twin is, `test/repr/c/print-own.edn`'s entry moved there (`:dg-line`, the stated line 5). The token check's and the tree
+check's rows of the two files stay known (`:ucn-identifier`, `:xid-identifier`: cc lexes UCNs as `\` and letters and U+00A8
+as a stray character); their dumps move, the records are the main host's (cc runs there). The token check's digest
+(`arbace.repr.c.ppcheck`'s `tok-text`) spells a stray UCN as gcc -E spells it (`\U000000a8`: gcc lexes it into an identifier,
+with its error), so c23-ucnid-1.c's stream keeps gcc's recorded digest (`ecd240bf...`, computed on the VM).
+
+Proofs (the VM, no cc, no gcc): `c.judge-test`'s new `identifier-ucn-and-utf8-alike` and its neighbour, 56 assertions, 0
+failures; on the base's lexer and notes (the control) 14 fail. `bin/ci dg --corpus gcc-cpp-c23 --only` the three ucnid files: 3
+of 3 pass. `bin/repr-c roundtrip --only` the 18 files (sqlite3.c left out: its lexer dump does not move and its read is near
+4 GB): 18 pass, c23-ucnid-1.c own-invalid at 5:1; with the base's print-own.edn entry (9:1) the row fails as stale.

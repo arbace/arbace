@@ -286,7 +286,10 @@ and, once per distinct content, the header unit's file:
 
 - **Identifiers** (6.4.2) are symbols, verbatim: ASCII letters, digits, `_`, `$` (a GNU extension the
   reader accepts), UCNs as the characters they name (`été` and `été` are the same identifier
-  `été`; `:full` keeps the spelling). Every C identifier is a valid Clojure symbol.
+  `été`; `:full` keeps the spelling). Every C identifier is a valid Clojure symbol. Its characters beyond ASCII are
+  C23's (6.4.2.1, annex D): XID_Start first, XID_Continue after, one rule for a character's UCN and its UTF-8 (queue
+  496); a character either spelling cannot place in an identifier there is a preprocessing token of its own (6.4p3),
+  its kind the character, its text the spelling, and the same rule makes a pp-number's identifier-continue.
 - **Identifiers the reader reads otherwise** are `(c/id "...")`: `nil`, `true`, `false` (identifiers
   before C23: `enum { false, true };` is common in old C). `(c/id "true")` means the identifier, `true`
   the C23 constant (§8.5). The converter writes `c/id` wherever such a name stands, a tag included

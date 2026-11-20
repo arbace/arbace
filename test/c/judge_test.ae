@@ -1788,6 +1788,46 @@
       (is (= ["1'Z'Z"] (split mask "1'Z'Z"))))
     (is (= ["1" "'Z"] (split cxx11 "1'Z")) "C++11: no digit separators")))
 
+;; queue 496 (495's finding): C23's identifier characters (6.4.2.1, annex D: XID_Start first, XID_Continue after) are one rule for
+;; a character's universal character name and its UTF-8: both spellings make the same tokens, in identifiers and pp-numbers alike;
+;; a name of a character no identifier takes there is a token of its own, as its UTF-8 is, and gcc's error in C23 (pedantic notes)
+(deftest identifier-ucn-and-utf8-alike
+  (require 'arbace.repr.c.lex 'arbace.repr.c.pedantic 'arbace.repr.cpp.host)
+  (let [tokens (resolve 'arbace.repr.c.lex/tokens)
+        new-file (resolve 'arbace.repr.c.lex/new-file)
+        notes (resolve 'arbace.repr.c.pedantic/notes)
+        feature-mask (resolve 'arbace.repr.cpp.host/feature-mask)
+        lex (fn [mask ^String text]
+              (let [[ts _] (tokens (new-file "<t>" (.getBytes text "UTF-8")) mask)]
+                (vec (for [^arbace.repr.c.lex.Tok t ts :when (not= (.-ch t) \newline)]
+                       [(let [k (.-ch t)] (if (keyword? k) k (long (if (char? k) (int k) k))))
+                        (String. (.getBytes ^String (.-src t) "ISO-8859-1") "UTF-8")]))))
+        kinds (fn [mask text] (mapv first (lex mask text)))
+        cxx (feature-mask "c++23" false false)]
+    (doseq [[ucn utf8 why] [["\\u00A8" "\u00a8" "U+00A8 (Sk) begins no identifier: a token of its own"]
+                            ["x\\u00A8y" "x\u00a8y" "nor continues one"]
+                            ["\\u0300x" "\u0300x" "U+0300 (Mn) continues but does not begin one"]
+                            ["A\\u0300" "A\u0300" "U+0300 continues one"]
+                            ["0A\\u0300" "0A\u0300" "a pp-number's identifier-continue"]
+                            [".1A\\u0300" ".1A\u0300" "a pp-number's identifier-continue"]
+                            ["caf\\u00e9" "caf\u00e9" "U+00E9 (Ll)"]
+                            ["\\u00e9t\\u00e9" "\u00e9t\u00e9" "U+00E9 begins one"]
+                            ["x\\u2E2Fy" "x\u2e2fy" "U+2E2F is Pattern_Syntax, no XID_Continue though Lm"]
+                            ["\\u037A" "\u037a" "U+037A is ID_Start, not XID_Start (NFKC)"]
+                            ["x\\u00B7" "x\u00b7" "U+00B7 is Other_ID_Continue"]]]
+      (is (= (kinds false ucn) (kinds false utf8)) (str why ": " ucn))
+      (is (= (count (lex false ucn)) (count (lex false utf8))) why))
+    (is (= [[0xA8 "\\u00A8"]] (lex false "\\u00A8")) "the name is the token's text, the character its kind")
+    (is (= [[0xA8 "\u00a8"]] (lex false "\u00a8")))
+    (is (= [[:IDENTIFIER "A\\u0300"]] (lex false "A\\u0300")))
+    (is (= [[:PPNUMBER "0A\u0300"]] (lex false "0A\u0300")) "before: 0A and a stray U+0300")
+    (is (= [[:IDENTIFIER "\\u0024"]] (lex false "\\u0024")) "$ as its name: an identifier as $ is (pp.ae's C23 error)")
+    (is (= [[:IDENTIFIER "\\u00A8"]] (lex cxx "\\u00A8")) "C++ keeps its own rule")
+    (let [ns (fn [text] (vec (notes "<t>" (.getBytes ^String text "UTF-8") :c23 false false)))]
+      (is (= [[1 "universal character \\u00A8 is not valid in an identifier"]] (ns "\\u00A8\n")) "gcc's C23 error for the name")
+      (is (= [] (ns "\u00a8\n")) "the UTF-8 is a stray character to gcc, no error in preprocessing")
+      (is (= [] (vec (notes "<t>" (.getBytes "\\u00A8\n" "UTF-8") :c17 false false))) "not before C23"))))
+
 ;; queue 409: the round trip's acceptance takes the test's own verdict before the reference's rejection (a file both reject and
 ;; own-rejects? accepts is "own-rejects"), and the :roundtrip-own control judges the subject's error against another file's
 ;; directives: another line or other words differ, the subject's own file passes (what the control must catch)
