@@ -49,7 +49,12 @@
 #                                  stderr's, the build's and the run's seconds); --only keeps every other line
 #   bin/hsi build                  hsi's light driver built (go/arbace/hs, go/arbace/libm, test/haskell/hsi/cmd.ae and
 #                                  go/arbace/crt printed by repr/go, TamaGo's go) into .tmp/hsi/bin/hsi, its path printed
-#                                  (HSI_EXE names another)
+#                                  (HSI_EXE names another); profile-guided (go build -pgo) by test/haskell/hsi/hsi.pgo when
+#                                  it is there (queue 333; HSI_PGO=0 builds without, into .tmp/hsi/bin-nopgo)
+#   bin/hsi pgo [--record]         the training run of the profile-guided build (queue 333): the programs of
+#                                  test/haskell/hsi/pgo.txt run by bin/hsi check on the build without the profile, each
+#                                  stopped at HSI_TIMEOUT seconds of CPU (default 20) with its CPU profile kept, merged by
+#                                  go tool pprof into .tmp/hsi/pgo/hsi.pgo; --record copies it to test/haskell/hsi/hsi.pgo
 #   bin/hsi runtime print|read|check
 #                                  hsi's runtime as Go forms, mode :full (HES38): print, its Go into .tmp/hsi/runtime (hs,
 #                                  hs/cmd/hsi, libm) to edit; read, that Go read back by repr/go's native reader into the
@@ -538,9 +543,13 @@ stubs_build() {
 # by TamaGo's go into .tmp/hsi/bin/hsi, kept by the forms' digest; HSI_EXE names another); its path on stdout
 build_hsi() {
   if [ -n "${HSI_EXE:-}" ]; then echo "$HSI_EXE"; return; fi
-  local d=$WORK/bin mod=$WORK/bin/mod key exe=$WORK/bin/hsi
-  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/libm" "$root/go/arbace/crt" "$root/go/arbace/ci" "$root/test/haskell/hsi" -type f | LC_ALL=C sort | xargs sha256sum
-           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/libm.ae" "$root/go/arbace/crt.ae" "$root/go/arbace/ci.ae"; } | sha256sum | cut -c1-64)
+  local d=$WORK/bin mod=$WORK/bin/mod key exe=$WORK/bin/hsi pgo=$root/test/haskell/hsi/hsi.pgo pf=()
+  # queue 333: the profile-guided build (gc's devirtualization and inlining of the machine's hot calls; the same code)
+  if [ "${HSI_PGO:-1}" = 0 ]; then d=$WORK/bin-nopgo mod=$WORK/bin-nopgo/mod exe=$WORK/bin-nopgo/hsi
+  elif [ -f "$pgo" ]; then pf=(-pgo="$pgo"); fi
+  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/libm" "$root/go/arbace/crt" "$root/go/arbace/ci" "$root/test/haskell/hsi" -type f ! -name hsi.pgo | LC_ALL=C sort | xargs sha256sum
+           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/libm.ae" "$root/go/arbace/crt.ae" "$root/go/arbace/ci.ae"
+           if [ ${#pf[@]} -gt 0 ]; then sha256sum "$pgo"; else echo "no pgo"; fi; } | sha256sum | cut -c1-64)
   if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then echo "$exe"; return; fi
   mkdir -p "$d"
   # one build at a time, the key read again under the lock (review 419: since n-gate-parts the gate's hsi-check and
@@ -552,11 +561,28 @@ build_hsi() {
     if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then exit 0; fi
     runtime_print "$mod"
     (cd "$mod" && GOCACHE=$WORK/bin/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off \
-       "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath -o "$exe.new" ./hs/cmd/hsi) >&2 || die "build: go build"
+       "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath ${pf[@]+"${pf[@]}"} -o "$exe.new" ./hs/cmd/hsi) >&2 || die "build: go build"
     mv -f "$exe.new" "$exe"
     echo "$key" > "$d/key"
   ) 9> "$d/build-hsi.lock" || die "build: hsi's driver not built"
   echo "$exe"
+}
+
+# pgo [--record]: the profile-guided build's training (queue 333): test/haskell/hsi/pgo.txt's programs (ID lines, # comments) run by
+# bin/hsi check on the build without the profile (HSI_PGO=0), each stopped at HSI_TIMEOUT seconds of CPU (default 20: the training
+# needs the hot paths, not the end) with its CPU profile (HSI_CPUPROFILE_DIR), the profiles merged by go tool pprof -proto into
+# .tmp/hsi/pgo/hsi.pgo; --record copies it to test/haskell/hsi/hsi.pgo, which bin/hsi build then builds with
+pgo_cmd() {
+  local out=$WORK/pgo ids
+  rm -rf "$out"; mkdir -p "$out/prof"
+  ids=$(grep -v '^#' "$root/test/haskell/hsi/pgo.txt" | grep . | paste -sd, -)
+  HSI_PGO=0 HSI_EXE=$(HSI_PGO=0 build_hsi) HSI_CPUPROFILE_DIR=$out/prof HSI_TIMEOUT=${HSI_TIMEOUT:-20} HSI_JOBS=${HSI_JOBS:-2} \
+    "$root/bin/hsi" check --corpus nofib,samples,synthetic,testsuite-core --only "$ids" > "$out/check.log" 2>&1 || true
+  ls "$out"/prof/*.prof > /dev/null 2>&1 || { tail -5 "$out/check.log" >&2; die "pgo: no profile written ($out/check.log)"; }
+  "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" tool pprof -proto "$out"/prof/*.prof > "$out/hsi.pgo" 2> "$out/merge.log" \
+    || { cat "$out/merge.log" >&2; die "pgo: go tool pprof -proto"; }
+  echo "hsi pgo: $(ls "$out"/prof/*.prof | wc -l) profiles merged into $out/hsi.pgo ($(wc -c < "$out/hsi.pgo") bytes)"
+  if [ "${1:-}" = --record ]; then cp "$out/hsi.pgo" "$root/test/haskell/hsi/hsi.pgo"; echo "hsi pgo: recorded test/haskell/hsi/hsi.pgo"; fi
 }
 
 # hsi's runtime as Go forms (HES38, mode :full, as pyi's): the packages arbace/hs, arbace/hs/cmd/hsi (the driver,
@@ -795,6 +821,7 @@ case $cmd in
   tests) exec "$root/bin/lib/hsi/tests" "$@" ;;
   record-ref) exec "$root/bin/lib/hsi/record-ref" "$@" ;;
   build) build_hsi ;;
+  pgo) pgo_cmd "$@" ;;
   stubs-build) stubs_build ;;
   runtime) runtime_cmd "$@" ;;
   run) run_hsi "$@" ;;

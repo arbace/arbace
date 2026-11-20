@@ -38,7 +38,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-golden hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base pyi-universe pyi-universe-check
+  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-golden hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-pgo-record hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base pyi-universe pyi-universe-check
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -367,8 +367,10 @@ hsi-generate: ## the synthetic corpus test/haskell/eval/synthetic/ against its g
 	bin/hsi generate --check
 hsi-record-ref: ## GHC 9.14.1's -O0 runs of the run corpora into test/haskell/ref-ghc914.edn (bin/hsi record-ref)
 	bin/hsi record-ref
-hsi-build: ## hsi's light driver: go/arbace/hs printed by repr/go and built by TamaGo's go into .tmp/hsi/bin/hsi (bin/hsi build)
+hsi-build: ## hsi's light driver: go/arbace/hs printed by repr/go and built by TamaGo's go into .tmp/hsi/bin/hsi, profile-guided by test/haskell/hsi/hsi.pgo (bin/hsi build)
 	bin/hsi build
+hsi-pgo-record: ## the profile of hsi's profile-guided build recorded: test/haskell/hsi/pgo.txt's programs run with CPU profiles, merged into test/haskell/hsi/hsi.pgo (bin/hsi pgo --record)
+	bin/hsi pgo --record
 hsi-check: ## the samples and the synthetic corpus on hsi against test/haskell/ref-ghc914.edn, every non-pass in a class (bin/hsi check)
 	bin/hsi check
 
