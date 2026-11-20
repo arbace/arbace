@@ -1390,6 +1390,48 @@
         b (update body :blocks (fn [bs] (mapv #(update % :term fold) bs)))]
     [b (not= (:blocks b) (:blocks body))]))
 
+(def ^:dynamic *switch-variants*
+  "queue 493: within pack-compare, the discriminants of an enum's inhabited variants (#{n}) for a discriminant's place, by
+  its local's type form and whether the place derefs it ([TY-FORM DEREF?]); nil where not known"
+  nil)
+
+(defn- o0-unreachable-enum-branching
+  "UnreachableEnumBranching (unreachable_enum_branching.rs, -O0's run_optimization_passes after RemoveZsts): a switch on
+  `_d = discriminant(P)` (the block's last statement, P a local or its deref) whose enum's inhabited variants are known: each
+  target of a value no variant has made unreachable, and an otherwise reached by at most one variant (and not already an
+  empty unreachable block) made the last variant's explicit target, then unreachable (one new block `unreachable`, the
+  patch's, appended); [body changed?]"
+  [body]
+  (if-not *switch-variants*
+    [body false]
+    (let [blocks (:blocks body) lt (fn [l] (:ty (nth (:locals body) l nil)))
+          unr (count blocks) used (atom false)
+          empty-unreachable? (fn [i] (let [b (nth blocks i nil)] (and b (empty? (:stmts b)) (= '(unreachable) (:term b)))))
+          patch (fn [b]
+                  (let [st (peek (vec (:stmts b))) t (:term b)]
+                    (or (when (and (not (:cleanup b)) (seq? st) (= 'assign (first st)) (seq? t) (= 'switch (first t))
+                                   (= (list 'move (second st)) (second t)))
+                          (let [rv (nth st 2 nil) pl (when (and (seq? rv) (= 'discriminant (first rv))) (second rv))
+                                l (when (and (seq? pl) (= 'place (first pl)) (number? (second pl))) (second pl))
+                                proj (when l (drop 2 pl))
+                                allowed (when (and l (or (empty? proj) (= ['(deref)] (vec proj))))
+                                          (try (*switch-variants* [(lt l) (boolean (seq proj))]) (catch Throwable _ nil)))]
+                            (when (set? allowed)
+                              (let [[_ op targets otherwise] t
+                                    left (reduce (fn [a [v _]] (disj a (bigint v))) (set (map bigint allowed)) targets)
+                                    dead (vec (keep-indexed (fn [i [v _]] (when-not (contains? (set (map bigint allowed)) (bigint v)) i)) targets))
+                                    repl (and (<= (count left) 1) (not (empty-unreachable? otherwise)))]
+                                (when (or (seq dead) repl)
+                                  (reset! used true)
+                                  (let [targets (cond-> (vec targets) (and repl (= 1 (count left))) (conj [(first left) otherwise]))
+                                        targets (reduce (fn [ts i] (assoc-in ts [i 1] unr)) targets dead)]
+                                    (assoc b :term (list 'switch op targets (if repl unr otherwise)))))))))
+                        b)))
+          bs (mapv patch blocks)]
+      (if @used
+        [(assoc body :blocks (conj bs {:stmts [] :term '(unreachable) :cleanup false})) true]
+        [body false]))))
+
 (defn o0-normalize
   "BODY as rustc's -O0 optimizations would leave it for the passes our runtime MIR stops before (RemoveStorageMarkers,
   RemoveZsts' unit assignments, SimplifyCfg-final, InstSimplify's reborrow, SingleUseConsts (OURS? alone: our body, not the
@@ -1403,6 +1445,9 @@
         _ (when (not= (:blocks b) (:blocks body)) (swap! kinds conj :storage))
         [b cz] (o0-remove-zsts b zst)
         _ (when cz (swap! kinds conj :zsts))
+        ;; queue 493: UnreachableEnumBranching, after RemoveZsts and before SimplifyCfg (rustc's order)
+        [b cu] (o0-unreachable-enum-branching b)
+        _ (when cu (swap! kinds conj :enum-branching))
         b2 ((requiring-resolve 'arbace.rust.front.passes/simplify-cfg) b {:preserve-switch-reads false})
         _ (when (not= (count (:blocks b2)) (count (:blocks b))) (swap! kinds conj :cfg))
         [b2 c2] (o0-inst-simplify b2)
@@ -1491,6 +1536,19 @@
         ;; queue 493: the instance's local types Freeze or not (CopyProp's SSA of a shared-borrowed local), by their :tc
         fz (into {} (for [l (:locals ours) :let [t (:tc (meta (:ty l)))] :when t]
                       [(norm (:ty l)) (try (boolean ((requiring-resolve 'arbace.rust.front.passes/freeze?) t)) (catch Throwable _ false))]))
+        ;; queue 493: the enums' inhabited variants' discriminants (UnreachableEnumBranching), by the run's layouts of the
+        ;; instance's local types (and their pointees)
+        sv (when *type-layout*
+             (into {} (for [l (:locals ours) :let [t (:tc (meta (:ty l)))] :when (vector? t)
+                            [deref? et] [[false t] [true (when (#{:ref :ptr} (first t)) (last t))]] :when (vector? et)
+                            :let [lf (try (*type-layout* et) (catch Throwable _ nil)) ds (:discrs lf) vs (:variants lf)]
+                            :when (and (seq ds) (seq? vs))]
+                        [[(norm (:ty l)) deref?]
+                         (case (first vs)
+                           single (let [i (second vs)] #{(nth ds i i)})
+                           empty #{}
+                           multiple (set (keep-indexed (fn [i v] (when-not (:uninhabited v) (nth ds i))) (:variants (second vs))))
+                           nil)])))
         bl (fn [b f] (mapv (fn [x] (update x :stmts f)) (:blocks b)))
         lt (fn [b] (mapv :ty (:locals b)))
         cut (fn [x] (let [t (pr-str x)] (subs t 0 (min 160 (count t)))))]
@@ -1500,8 +1558,10 @@
       :else
       (let [outer *freeze-ty?*
             fz? (fn [t] (if (contains? fz t) (fz t) (boolean (and outer (outer t)))))
-            [no ko] (binding [*freeze-ty?* fz?] (o0-normalize po true (:zst-locals ours)))
-            [nr _] (binding [*freeze-ty?* fz?] (o0-normalize pr))
+            outer-sv *switch-variants*
+            sv? (when (or (seq sv) outer-sv) (fn [k] (or (get sv k) (when outer-sv (outer-sv k)))))
+            [no ko] (binding [*freeze-ty?* fz? *switch-variants* sv?] (o0-normalize po true (:zst-locals ours)))
+            [nr _] (binding [*freeze-ty?* fz? *switch-variants* sv?] (o0-normalize pr))
             _ (when-let [d (System/getenv "RF_PACK_DUMP")]
                 (.mkdirs (File. ^String d))
                 (spit (str d "/" (Math/abs (hash [no nr])) ".edn") (with-out-str (prn :ours) (prn no) (prn :record) (prn nr))))]
