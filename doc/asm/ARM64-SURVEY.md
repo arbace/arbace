@@ -3105,3 +3105,29 @@ move to the oracle tier). arm64's judge held one recorded part: the AOT cell's o
   elf-reloc-addsubimm. Controls: `prfum-vs-rprfm-texts`, `inst-vs-mapping-numeric` (objverdict), `optional-hash-vs-rprfm-own`
   (object-check); by hand, fixup-absolute.s with one movk immediate changed, mapping-within-section.s with one symbol's value changed,
   and with `[[#TEXT+1]]` for `[[#TEXT]]`, each fails.
+
+- **The call frames' view and the large EH encoding** (branch `judge-rest-dwarf`). `objcheck/view-dwarfdump-frames` prints
+  llvm-dwarfdump 23's `--debug-frame` (and its alias `-eh-frame`, the run's tool `:dwarfdump-frames`, that option alone) over
+  Arbace's ELF reader, written again from llvm-project 23.1.5's DWARFContext.cpp (both sections headed, the relocations of a DWARF
+  section applied as RelocationResolver.cpp's resolveAArch64), DWARFDebugFrame.cpp (parse, CIE::dump, FDE::dump, createUnwindTable),
+  LowLevel/DWARFDataExtractorSimple.h (getEncodedPointer), LowLevel/DWARFCFIProgram.{h,cpp}, DWARFCFIPrinter.cpp,
+  LowLevel/DWARFUnwindTable.cpp (parseRows), DWARFUnwindTablePrinter.cpp, Dwarf.def/Dwarf.cpp (CallFrameString for AArch64),
+  FormatProviders.h, and the registers named as getLLVMRegNum and getName name them (RegisterInfoEmitter.cpp's Dwarf2L map, built
+  before the DwarfRegAlias registers take their numbers: W0-W30, WSP, VG, FFR, PN0-PN15, B0-B31, Z0-Z31 of AArch64RegisterInfo.td,
+  else `regN`): each CIE's and FDE's header and fields, its program (every DW_CFA_* the parser takes; a parse error leaves the
+  section's header alone, as llvm-dwarfdump's) and its unwind table (none on parseRows' errors). What it does not print makes no
+  view and the run's lines stay `:view-llvm-dwarfdump`: a DWARF expression (`DW_CFA_*expression`), DWARF64, a frame section twice
+  or compressed. llvm-mc's `--large-eh-encoding` and `--large-code-model` (MCObjectFileInfo's FDECFIEncoding for AArch64 ELF:
+  DW_EH_PE_pcrel | DW_EH_PE_sdata8) are the object assembler's `:large-eh` (`arm64.obj/assemble-file`'s options map, from the run's
+  llvm-mc command as `-implicit-mapsyms` and `--defsym` are): the CIE's augmentation data 0x1C, each FDE's pc_begin (R_AARCH64_PREL64)
+  and range in 8 bytes, an FDE not last padded to 8 (EmitFDE's PCSize); x86-64's large personality, LSDA and TType encodings are not
+  built (its checks never pass the option), every default object byte for byte as before (`object-check --oracle` 126 of 126,
+  amd64's `synthetic` 8 of 8). `cfi_val_offset` (9 lines) and `large-eh-encoding` (15) are met, the only rows changed; they leave
+  `test/asm/object-recorded-arm64.tsv` (judged whole by their own words). Controls `frames-vs-val-offset` (basic-pic's frames held to
+  cfi_val_offset's program and rows) and `sdata4-vs-large-eh` (an object assembled without the options held to SDATA8's `1C`) fail
+  as they must; by hand, cfi_val_offset.s with a row changed (`WSP-16` to `WSP-32`) gives `{:fail 1}`, large-eh-encoding.s with
+  SDATA8's `1C` as `1B` gives `{:fail 2}`. By hand only (the oracle's role, never at check time), the host's llvm-mc 23.1.5 and
+  llvm-dwarfdump 23.1.5 gave the same objects and the same dump text, byte for byte, for the 11 MC/AArch64 ELF files with `.cfi_`
+  directives that Arbace assembles, `test/asm/obj-arm64/cfi.s` (also with `--large-code-model`), and two scratch files that use
+  personality and LSDA encodings, `zRS`, `simple` frames, `DW_CFA_advance_loc1/2/4`, `set_loc`, the address-space CFAs,
+  `restore_extended`, `remember_state`/`restore_state`, `negate_ra_state` and a register above 127 (also with `--large-eh-encoding`).
