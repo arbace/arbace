@@ -9189,7 +9189,7 @@ the differences explained). The code generator's gaps go to cpp-rt-own-1120, whi
   read as the digest's lexer reads gcc -E's text, two colons. `class` (the default until the own build exists) as before.
   `ppcheck ref-diff`: the first difference. The recorder keeps the `:ref` marks.
 
-### The gate
+### The gate (written, held: 910cf7a77 reverts it until the own build exists; reverting that commit flips it)
 
 - `cpp-ppref` (`:phase :build`, 8 GiB): `bin/repr-cpp ppref build` (each process capped at 8 GiB of address space, the host's rule of
   2026-11-20 for jobs under 8 GiB: no heavy lock; the builds in the main checkout's `.tmp/ppref`, shared by key), seconds when built; `cpp-essential` and
@@ -9215,3 +9215,22 @@ The own-mode known classes (`:raw-udl-suffix`, `:unterminated-raw-string`, `:non
 against clang's (and the port's): libcpp takes an identifier touching a literal as its suffix unless it names a macro, and its raw
 lexing runs no `#define`; an unterminated raw string ends at its line's end; a run of valid UTF-8 non-identifier characters is one
 identifier. At pp libcpp knows the macros and splits as the port does.
+
+### Blocked: the code generator's constant tables (2026-11-20, after merging mac/cpp-rt-own-1120 76118c206)
+
+With cpp-rt-own-1120's fixes the code generator generates all 15 units (the 14 and the harness, one gen-batch process, 3.3 GB). The
+build then stops at the library's read: the code generator emits a constant array's initializer as a packed literal struct of one
+field an element (LLVM `<{ i8, i8, ... }>` where clang emits `[N x i8]`), lowered to a C struct of as many members:
+charset.cc's `uname2c_tree` (`static const unsigned char uname2c_tree[218382]`, `uname2c.h`) is a struct of 218,382 members, beside
+ones of 61,913 and 11,420 (`uname2c_dict`, `ucnranges`); charset's lowered C is 10.2 MB of the 15.9 MB (332,270 lines, 294,642 of
+them members). repr/c's read of it: past 8 GiB of address space with two threads (out of memory at 6.5 GB in use), and still reading
+after 35 minutes in one thread at GOMEMLIMIT 5GiB (6 GB resident, about 11 cores of GC; stopped). Measured on synthetic structs
+(`bin/ci diagnose`): 4,000 members 17 s and 1.09 GB, 8,000 28 s and 1.27 GB, 16,000 45 s and 1.72 GB: about 50 KB and 2 ms a member,
+so 294,642 members ask some 15 GB, and cf2g's Go and Go's compiler would meet the same struct after it. libcpp's other units' tables
+are small (lex, files, init, directives, expr, macro: 1 to 4 such structs each). Wanted of the code generator (cpp-rt-own's,
+arbace/cpp/codegen, not this branch's): a constant array of scalars as an LLVM array (`[N x i8] c"..."` as clang, or `[N x i32] [...]`),
+lowered to a C array. Then: `bin/repr-cpp ppref build`, the own build's runs against the native build's (the same records, file by
+file), the record run (`--record-results`), the planted bug and the controls again on it, the facts (C++'s judge `:pp-check` 1,931 by
+the reference: (8581 + 1926 + 0.5 x 39) / 10546 = 0.998, the 5 own-known files at 0.5; C's 69 of 72 own: (14936 + 0.5 x 79) / 15015 =
+0.997), and reverting 910cf7a77.
+

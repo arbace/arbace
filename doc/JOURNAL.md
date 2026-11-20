@@ -13744,3 +13744,41 @@ Written as doc/cpp/CPP-SURVEY.md, "Write-ahead: an own judge for the token check
 - Projected when built: C++'s judge 0.907 to 0.998, independence 91.4 to 93.2 (floor 91 to 93); C's judge 0.995 to 0.997,
   independence 99.90 to 99.95 (floor 99 unchanged).
 - Not run: crops-score, records-check and reap (no record or fact changed); no gate.
+
+## 2026-11-20: pp-ref built on the user's CP413 (a) and CP414 (a); the own build waits on the code generator's constant tables
+
+The user accepted CP413 (a) (GCC's libcpp as the token checks' reference at check time, built into `.tmp` and the gate's local
+caches only, never committed, packed or pushed; the harness Arbace's own) and CP414 (a) (the lex level by libcpp's raw lexer,
+measured against clang's record first, the differences explained); the code generator's gaps went to cpp-rt-own-1120. On
+`pp-ref-1120` (doc/cpp/CPP-SURVEY.md, "As built: pp-ref"):
+
+- Sources: gcc-15.2.0.tar.xz (https://ftp.gnu.org/gnu/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz, test/cpp/corpora.edn's `:gcc-15.2.0`, SHA-256
+  438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e, pinned already): `gcc-15.2.0/libcpp/` (14 units), `include/`, 16
+  files of `libiberty/` and its `vprintf-support.h`, `gcc/config/i386/cpuid.h` (the native build's lex.cc), extracted by `bin/repr-cpp
+  ppref prepare` into the main checkout's `.tmp/ppref/src-KEY/`; nothing of them in the tree (git status checked before each commit).
+  Studied, not copied: `gcc/c-family/c-opts.cc` (the options, c_finish_options' order, the precisions, cpp_init_iconv),
+  `c-ppoutput.cc` (the stream, CPP_EMBED, pragmas), `c-lex.cc` (the `__has_` operands), `libcpp/init.cc` (BT_HAS_ATTRIBUTE for both
+  `__has_attribute` and `__has_cpp_attribute`), `lex.cc` (`_cpp_lex_token`'s directives, the tokens' ranges).
+- Built: `tools/ppref/ppref.cc` (the harness, EPL-1.0) and `tools/ppref/shim.c`; `bin/lib/repr-cpp/ppref` (prepare, build, build
+  --native, exe, key, fidelity; each process capped at 8 GiB of address space, the host's rule of the day); `arbace.repr.cpp.ppcheck`'s
+  own mode (`REPR_CPP_PP_JUDGE=own`; ref-lists, the reference's digests, the controls by its runs, `fidelity`, `ref-diff`, `known-add`)
+  and the driver's `--fidelity[-only]`; `arbace.repr.c.ppcheck`'s (`REPR_C_PP_JUDGE=own` for the known file's `:pp` files, `:ref
+  :differs`, the control level `:ref-digest`, `test/c/controls.edn`'s `_control/tokens-ref/va-opt-2-vs-va-opt-3`); `arbace.cpp.run
+  read-lib-opts` (C units with their own options, in threads, outside runtime-ci's key); the known files' sections (C++ `:pp-own`,
+  `:lex-own`, `:ref` with three new classes; C three `:ref :differs`); `test/c/pp-ref.txt`; LICENSE.md's note; two Makefile targets.
+  The gate's steps (cpp-ppref, own-judged cpp-essential, cpp-tokens and c-tokens-ref, cpp-tokens-oracle) are written (e9266d7b6,
+  2c669e30e) and held (910cf7a77) until the own build exists. Merged mac/cpp-rt-own-1120 at 76118c206 (the code generator's libcpp
+  gaps).
+- Measured on the native build (the host's g++: the harness's development build and the oracle tier's, never the judge): no stream
+  differs from g++ -E's records over the 1,934 files (27 g++ rejects and the reference reads: CP261 (a)'s and CP260 (a)'s), 7 raw-token
+  files differ by the raw lexers' conventions; every difference in the known file's `:ref` (fidelity status 0). The check judged by
+  the reference: cpp-lexical 19, libstdcxx-headers 108 and gxx-dg 1,807 pass (5 files by an own-known class), the controls fail as
+  they must. C's 72: 69 judged by the reference's stream, 3 `:ref :differs`. A planted bug in arbace.repr.c.pp (`__LINE__` one more past
+  line 100) failed cpp-lexical (1), libstdcxx-headers (42) and C's (2: c23-digit-separators-1.c, sqlite3.c); a `__VA_OPT__` mutant was
+  not caught: its one file in the token check, cpp-lexical's varargs.cpp, is an error test (both reject). Alternatives weighed: run the
+  read under the heavy lock (9 jobs queued, up to 2.7 h; the rule of the day sends jobs under 8 GiB around it, and this read is above).
+- Blocked: the code generator generates all 15 units since the merge, but emits a constant array as a packed literal struct of one
+  field an element (charset's `uname2c_tree`: 218,382 members in the lowered C, beside 61,913 and 11,420); repr/c's read of it passed
+  8 GiB with two threads and was still reading after 35 minutes in one (stopped); synthetic structs scale at about 50 KB and 2 ms a
+  member (some 15 GB for charset). Asked of cpp-rt-own: a constant array of scalars as an LLVM array, lowered to a C array. No fact,
+  record or score moved: `bin/crops-score --judge --strict` 0 problems, `bin/gate --plan` exit 0 (with the flip, before the hold).
