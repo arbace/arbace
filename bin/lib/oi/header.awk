@@ -124,9 +124,10 @@ END {
   # (none: no output). The run is bin/oi's ocamldoc (OCaml 5.5.0's ocamldoc/ on compiler-libs' units, its plugins by oi's Dynlink): the
   # row's environment @ocamldoc=1 and @plugins=FILE,...; bin/oi's oi_one gives the row TEST.result as its
   # output, ocamldoc's own output against TEST.ocamldoc.reference its note; no libraries of the header's (the program's units are
-  # ocamldoc's own list, bin/oi's ocamldoc_build). At oi's level and the light AOT level, not the compiled one
+  # ocamldoc's own list, bin/oi's ocamldoc_build). At oi's level alone: at the light AOT level (bin/oi's o2j_dump and translate loop have
+  # the mode) t01 did not finish in 600 s of CPU with 7 GB resident (queue 480; DECISION 480-1), so the AOT levels keep the class
   odmode = 0; odplugins = ""
-  if (aot != 2) {
+  if (aot == 0) {
     odmode = 1
     for (j = 1; j <= m; j++) {
       s = trim(st[j]); if (s == "") continue

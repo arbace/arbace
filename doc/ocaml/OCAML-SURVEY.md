@@ -4448,11 +4448,15 @@ ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the ma
   stdlib/Compflags' flags (stdlib.mli and the *Labels.mli through expand_module_aliases.awk, named stdlib__X.cmi), in passes until every
   interface's dependencies are there: 71 .cmi files, no ocamlc.
 - `header.awk`'s ocamldoc mode: a header of ocamltest's `ocamldoc` test alone (no backend; `plugins = "FILE.ml"`, `flags = "-I
-  ${ocamlsrcdir}/ocamldoc"`) is a run row, environment `@ocamldoc=1 @plugins=FILE,...`, at oi's level and the light AOT level. The run
+  ${ocamlsrcdir}/ocamldoc"`) is a run row, environment `@ocamldoc=1 @plugins=FILE,...`, at oi's level alone. The run
   (`oi_ocamldoc_prog`): each plugin typed against ocamldoc's interfaces and written as oi's plugin file (OI-CMO 1, its imports for
   Dynlink's checks; a `.cmxs` copy at the light level), ocamldoc's `odoc.ml` the row's program, its arguments ocamltest's (`-nostdlib -I
   STDLIB -g FILE.cmo TEST.ml -o TEST.result`), the program's interface digests `OI_DYNLINK_IMPORTS`. The row's output (`ocamldoc_output`)
   is TEST.result, judged by the test's own .reference (check-program-output); ocamldoc's own output is held to TEST.ocamldoc.reference
   (none: no output, check-ocamldoc-output), a difference appended so the row fails. `tool-ocamldoc/t01`-`t05` (odoc_test.ml loaded by oi's
-  Dynlink, OC220) leave `:ocamltest-tools`. The other ocamldoc tests (backends html, latex, man, texinfo) are no rows of the run corpus.
+  Dynlink, OC220) pass at oi's level and leave its `:ocamltest-tools`. The light AOT level keeps the class: bin/oi's o2j_dump and translate
+  loop have the mode (the plugin's `.cmxs` copy, ocamldoc's units in dynmains.txt, the arguments in ocamldoc.args), but with the header's
+  mode on there each row timed out at the level's limit, and t01 alone, unbounded, had not finished after 600 s of CPU, 7 GB resident
+  under GOGC off (the 165 units' Java forms, 56 MB of them translated), so header.awk turns the mode on at aot=0 only (DECISION 480-1).
+  The other ocamldoc tests (backends html, latex, man, texinfo) are no rows of the run corpus.
 - Control (`test/ocaml/controls.txt`): t01's run against t04's reference must differ.
