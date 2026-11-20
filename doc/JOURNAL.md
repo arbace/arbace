@@ -14132,3 +14132,45 @@ Checks: ct-sym-own (made, the pin's), ct-sym-own --check, ct-sym-oracle (byte fo
 must), ct-sym-build --check, bin/crops-score --judge --strict and --self-test, test/gate/{chain-needs,caches,crop-tier,crops}-test.bash,
 caches-test --coverage, claude-md-test. No tool build; the 49 rows stay the next gate's (javac's key moves with bin/javac-vendor, the pins
 and ct-sym-build.edn).
+
+## 2026-11-20: Java's interp and compiled levels re-judged from the 11-19/20 night's saved results (java-rejudge-1120)
+
+- Why: decisions 437-1 (a) and 447-1 (a), interp and compiled re-recorded from the night's `--full` saved results, so the
+  records catch up with the code (CoMaIn: Java's completeness). The night's full gate on `42494a700` was stopped at 14:10 UTC by
+  the user; its six java-interp parts finished; of java-compiled-full, jdk-run (10:21) and jdk-other (12:05) finished, and
+  langtools-run saved results at 13:23 whose 514 rows are all `error the shard failed`: both shards' `bin/build-go` stopped on
+  a file of the next worktree's `.tmp/repr-go-print-cache` that had gone (NoSuchFileException), no test to blame.
+  hotspot-compiler was killed mid-run (no saved results); hotspot-runtime and jls never ran.
+- Not `--latest-saved`: it takes the newest `.out` of each part, which for compiled langtools-run is that broken run, and for
+  hotspot-compiler, hotspot-runtime and jls the 11-16 runs of `9da791cd4`. Instead the record is restricted to the finished parts,
+  two judgments each recording its own level, the corpus markers beside the results restricting each to its corpora (GT8: the
+  other corpora's lines kept as recorded): `bin/java-check --judge --record` on the six interp results of the store
+  (`java-interp.{hotspot-compiler,hotspot-runtime,jdk-other,jdk-run,jls,langtools-run}`, 11-20 05:44-06:35), then on
+  `java-compiled-full.jdk-run/2f0004db...` and `java-compiled-full.jdk-other/88b4f5ac...`. The compiled level's
+  hotspot-compiler, hotspot-runtime, jls and langtools-run rows stay as recorded.
+- Before, queue 440's check (`test/java_rejudge/run.bash --latest-saved --no-fail`, 1,132 FLAG lines, most of them the broken
+  langtools-run's 490 rows in no class and 444 "regressions"): interp 3,059 passes against 2,968-2,973 predicted (132 passes
+  the prediction kept failing), compiled lower than predicted only through langtools-run.
+- Passes: interp 2,720 -> 3,059 of 3,325 (334 now passing, 0 regressions); compiled 2,588 -> 3,000 of 3,325 (414 now passing in
+  jdk-run and jdk-other, 2 regressions, 1 flaky). The two regressions, t05452 (Bug5078053) and t05465 (ResolutionTest), are j2g's
+  refusals of jrt's `Calendar.getSetStateFields()`, package-private since n-java-dates (`667665e41`, 2026-11-17), redeclared by
+  the tests' `Koyomi` in another package (`:j2g-pp-override`, JCS122; t05451 likewise left `:jrt-dates` for it).
+- Rows in no class, classed by their reasons in test/java/divergences.edn (no by-design class; each with a comment naming this
+  re-judge): `:serialization` t04308 (ResolveProxyClass), t04444 (SubclassGC), t04706 (StackTraceSerialization, compiled);
+  `:reflection` t04723 (TypeAnnotationReflection, both levels), t04730 (RepeatedUnitTest, both), t04832 (MethodAccessFlagTest);
+  `:interp-clone` t04823 (ReferenceClone: Reference.clone's CloneNotSupportedException not thrown for an interpreted subclass;
+  it passes compiled); `:security` t05304 (DefaultProviderList, both); `:javac-api` t05921 (NoStringToLower, "Cannot find
+  javac"); `:stack` t06329 (NullCheckLineNumberTest: its LineNumberTable read, the NPE's trace without line 29); `:jrt-dates`
+  t08306 (Bug6653944, a Buddhist calendar serialized, both); `:system-properties` t08312-t08322 (jdk/tools/launcher's TestHelper
+  NPEs on `sun.arch.data.model`, which jrt does not set; past it they would run java.home's bin/java, `:jvm-tools`, JCS103 (a),
+  not decided for them here).
+- The judge (test/java/check.ae's `mask-java-home`): the night's runs give java.home as jrt's key directory
+  (`$HOME/.cache/arbace/java-home/KEY`, go/arbace/jrt/javahome.ae), and three rows (t04253, t07657, t08310) wrote it into the
+  records: crops-score's `:pins` item fell to 0.8 (Java's maturity 1.0 -> 0.97). A reason's java.home is now written
+  `JAVA_HOME` (the key changes with the executable too); the records re-recorded, `:pins` 1.0 again.
+- Records: `bin/reap --record` (56 of 56 cells, 0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems),
+  `bin/records-check` (9 pairs, 0 problems). Java (completeness / without by design / maturity / independence, floors):
+  89/91/100/99 -> 94/96/100/99; eval 2,720/165/440 -> 3,059/103/163 (pass/design/deferred), AOT 2,588/201/536 -> 3,000/140/185.
+- Left: the compiled level's hotspot-compiler, hotspot-runtime, jls and langtools-run parts wait for a night's whole run; the
+  `:tests` entries the check's report names stale (classes no longer taking a listed test: speed, design-also, serialization,
+  reflection, ...) not pruned here; queue 440's prediction file not updated.
