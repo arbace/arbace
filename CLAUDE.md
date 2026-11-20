@@ -467,8 +467,10 @@ Prior art:
   mixed) against their runs (`bin/gate` the `mixed` sample and `bad-go`, the one that must not build, `make programs-essential`; `--weekly` all, `programs-full`). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
-  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn`, `jdk/platform/`, `overlay/jdk/javac/`, `arbace_crop_paths` and `arbace_runtime_not`'s embedded crops' Go forms) is the checkout's, one j2g run, started as the host
-  compiles them (SA160), about 2.5 to 3 minutes; else by a first build of the program, two runs, about
+  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn`, `jdk/platform/`, `overlay/jdk/javac/`, `arbace_crop_paths` and `arbace_runtime_not`'s embedded crops' Go forms) is the checkout's, one j2g run, after the host
+  compiles them (since 2026-11-20, doc/go/BUILD.md, "The build in bounded steps": one stage's process at a time, the
+  printer gone before `go build`, which runs under `bin/lib/go-build.bash`'s policy, the print in chunks; until then j2g started
+  as the host compiled them, SA160, `ARBACE_BUILD_CHUNKS=0`), about 2.5 to 3 minutes; else by a first build of the program, two runs, about
   5.5 minutes (after a change to the runtime). The test build reuses the shipped build's compiled namespaces when made from the same sources and
   runtime (`target/arbace-go/aot.key`); `bin/build-go` keeps a cache of printed packages
   (`--print-cache`, `.tmp/repr-go-print-cache`); `--fixpoint` builds G1 by the host, G2 by G1, G3 by G2 into
