@@ -103,7 +103,9 @@
   "The keys whose values differ between the helper's fact H and the native N (round 52: a constant's :value, which std's
   interface never writes and the pass keeps for its own readers, compared only when the helper's fact has one)"
   [h n]
-  (let [n (cond-> (strip n) (not (contains? h :value)) (dissoc :value))] (vec (sort (filter #(not= (get h %) (get n %)) (distinct (concat (keys h) (keys n))))))))
+  ;; C4: likewise a function's :self-param (472's method lookup), which the native pass writes and the helper's interface does not
+  (let [n (cond-> (strip n) (not (contains? h :value)) (dissoc :value) (not (contains? h :self-param)) (dissoc :self-param))]
+    (vec (sort (filter #(not= (get h %) (get n %)) (distinct (concat (keys h) (keys n))))))))
 
 (defn compare-facts
   "Every helper fact against the native one: {kind {:equal N :differs [[path keys]] :missing [path] :extra [path]}}"
@@ -370,28 +372,9 @@
                                  (cc/with-native-std (:std setup) native) (cc/with-native-iface (:si setup) native) lib
                                  (fn [[[nm k] b err detail]]
                                    (let [e (if b
-                                             (let [e (assoc (cc/export-entry b k nil) :judge :instance)
-                                                   ;; the crate's functions the body names that std's interface lacks (crate-private:
-                                                   ;; `box_new_uninit`), their native facts, so that the run prints their items' types
-                                                   fps (set (for [x (tree-seq coll? seq (fndef-types [(:body e) (:promoted e)]))
-                                                                  :when (and (vector? x) (= :fndef (first x)) (string? (second x)))]
-                                                              (second x)))
-                                                   fs (into {} (for [p fps :let [f (get-in native [:fns p])]
-                                                                     :when (and f (not (get-in si-full [:fns p])))]
-                                                                 [p (dissoc f :native)]))
-                                                   ;; queue 462 (448-4 (a) 3): the crate-private impls and traits whose
-                                                   ;; functions the body names (`alloc::raw_vec::{impl#2}`, RawVec's inherent
-                                                   ;; impl; the trait `alloc::string::SpecToString`), their headers, so that
-                                                   ;; the run prints the function constants as rustc does (`RawVec::<u8>::ptr`,
-                                                   ;; `<i32 as SpecToString>::spec_to_string`), not `<impl {}>::ptr`
-                                                   parents (set (keep #(let [i (.lastIndexOf ^String % "::")] (when (pos? i) (subs % 0 i))) fps))
-                                                   is (into {} (for [p parents :let [m (get-in native [:impls p])]
-                                                                     :when (and m (not (get-in si-full [:impls p])))]
-                                                                 [p (dissoc m :native)]))
-                                                   ts (into {} (for [p parents :let [m (get-in native [:traits p])]
-                                                                     :when (and m (not (get-in si-full [:traits p])))]
-                                                                 [p (dissoc m :native)]))]
-                                               (cond-> e (seq fs) (assoc :fns fs) (seq is) (assoc :impls is) (seq ts) (assoc :traits ts)))
+                                             ;; the crate-private facts the body names (cc/with-private-facts: queue 443's
+                                             ;; functions, 462's impls and traits, C6-4's ADTs and enclosing functions)
+                                             (cc/with-private-facts (assoc (cc/export-entry b k nil) :judge :instance) native si-full)
                                              {:key k :refused (str "the build: " err (when (and detail (not= "nil" detail)) (str " " detail)))})]
                                      (swap! entries conj (assoc e :module mp :name nm))
                                      e))))
@@ -409,6 +392,21 @@
       "--deps"
       (let [[lib front cache] args]
         (deps-setup lib (str front "/std-names.edn") (collect/load-std-iface (str front "/std-iface.edn")) cache))
+      ;; C4 (doc/rust/FRONTEND-SURVEY.md, "As built: C4's switch"): --assemble OUT CRATE=FILE...: std's interface made of the
+      ;; crates' native passes alone, each FILE a pass's output (the helper's shape, `(si/..` lines) or its native map (a cache,
+      ;; native-iface.edn), CRATE's facts taken from it; OUT in the helper's std-iface shape, what a run's front directory reads
+      "--assemble"
+      (let [[out & specs] args
+            facts (reduce (fn [acc spec]
+                            (let [[c f] (str/split spec #"=" 2)
+                                  t (slurp f)
+                                  fs (if (str/starts-with? (str/triml t) "(") (read-facts f) (crate-facts (read-string t) c))]
+                              (println (str "alloc-iface: --assemble: " c " from " f ": "
+                                            (str/join ", " (for [[_ k] kinds] (str (count (get fs k)) " " (name k))))))
+                              (merge-with merge acc (crate-facts fs c))))
+                          {} specs)]
+        (spit out (facts-text facts))
+        (println "alloc-iface: --assemble: wrote" out (str "(" (reduce + (map count (vals facts))) " facts)")))
       ;; --compare FRONT NATIVE [MODULES]: the compare of a pass's output alone
       "--compare"
       (let [[front nat modules-file] args

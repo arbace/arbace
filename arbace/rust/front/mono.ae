@@ -140,10 +140,18 @@
 
 (def ^:dynamic *local* nil)   ; {:name "a1" :id LONG}: the crate being compiled
 
+(def ^:dynamic *lib-crate*
+  "C6 (doc/rust/FRONTEND-SURVEY.md, \"As built: C6's first slice\"): a library crate of *crates* (\"alloc\") compiled as its own
+  unit: the local crate then, its StableCrateId the library build's, so that its items' symbols and the copies and instances it
+  makes are named as rustc compiling it names them; nil (the program's crate) otherwise"
+  nil)
+
 (defn local-crate
   "The crate being compiled: rustc's crate name of the file (its stem, `-` made `_`: rustc_session's validated file stem, RF11's
-  synthetic programs `exit-code`, ...) and its StableCrateId"
-  [n] (let [n (str/replace n "-" "_") v (:cfg-version *crates*)] {:name n :id (stable-crate-id n true [] v)}))
+  synthetic programs `exit-code`, ...) and its StableCrateId; C6: *lib-crate*'s when bound"
+  [n] (if-let [lc *lib-crate*]
+        {:name lc :id (crate-id lc)}
+        (let [n (str/replace n "-" "_") v (:cfg-version *crates*)] {:name n :id (stable-crate-id n true [] v)})))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; v0's encodings (v0.rs)
@@ -457,6 +465,13 @@
                        "v" 0 nm)
       (str (:sb m)))))
 
+(defn- instantiating-root
+  "The instantiating crate's root as print-def-path! keys it: the local crate's own (`[:crate NAME :local]`); C6, a library
+  crate compiled as its own unit (*lib-crate*), the root its paths name (`[:crate NAME]`), so that the instantiating crate is a
+  back-reference to it as v0 writes it when the path already printed it (`..4kindB4_`, not `..4kindCs.._5alloc`)"
+  []
+  (if *lib-crate* [:crate (:name *local*)] [:crate (:name *local*) :local]))
+
 (declare v0-mangle)
 (defn reify-mangle
   "A ReifyShim's symbol (a #[track_caller] function as a pointer, Instance::resolve_for_fn_ptr): `::{shim:reify#0}`, then the
@@ -465,7 +480,7 @@
   (let [m (m-new)]
     (binding [*instance-def* d]
       (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "reify"))
-    (print-def-path! m [:crate (:name *local*) :local] [])
+    (print-def-path! m (instantiating-root) [])
     (str (:sb m))))
 
 (defn vtable-shim-mangle
@@ -476,7 +491,7 @@
   (let [m (m-new)]
     (binding [*instance-def* d]
       (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "vtable"))
-    (print-def-path! m [:crate (:name *local*) :local] [])
+    (print-def-path! m (instantiating-root) [])
     (str (:sb m))))
 
 (defn v0-mangle
@@ -485,7 +500,7 @@
   [d args instantiating?]
   (let [m (m-new)]
     (binding [*instance-def* d] (print-def-path! m d (erase-regions args)))
-    (when instantiating? (print-def-path! m [:crate (:name *local*) :local] []))
+    (when instantiating? (print-def-path! m (instantiating-root) []))
     (str (:sb m))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -941,6 +956,12 @@
                      (simd-layout (first (variant-fields adt args)) (first vs))
                      (layout-of-struct-or-enum repr vs enum? cell? (when enum? (tc/discriminant-values adt)) (not maybe-unsized)))]
              (cond-> l enum? (assoc :discrs (vec (tc/discriminant-values adt))))))
+      ;; C6-4 (a): a projection an ADT's field leaves at the instance (Cow<str>'s `<str as ToOwned>::Owned`) normalized by the
+      ;; solver, as layout_of normalizes its type first
+      :proj (let [n (try (erase-regions (tc/normalize-deep t)) (catch Throwable _ t))]
+              (if (and (not= n t) (not= :proj (first n)))
+                (layout-of n)
+                (throw (ex-info (str "mono: no layout for " (pr-str t)) {:fact :layout}))))
       (throw (ex-info (str "mono: no layout for " (pr-str t) (when (= :err (first t)) " (not in std's interface)")) {:fact :layout})))))
 
 (defn layout-of [t]
@@ -2331,6 +2352,32 @@
          :callees (into {} (for [[txt ft] calls] [txt (try-fact #(callee-fact ft))]))
          :fsyms (into {} (for [[txt [_ cd args]] calls :when (not (intrinsic? cd))]
                            [txt (try-fact #(call-fsym cd args))]))})))))
+
+(defn const-fsyms
+  "C6: within build-program's bindings, the symbols of every function constant BODIES name, calls' and operands' (a function
+  reified as a pointer: `custom_owner_from_box`'s drop function), {text symbol-or-error}, as core-facts' :fsyms gives the calls'"
+  [n bodies]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def) (fn []
+      (let [acc (atom {})]
+        (doseq [b bodies]
+          (letfn [(walk [x]
+                    (when (and (seq? x) (= 'const (first x)) (string? (second x)) (not (contains? @acc (second x))))
+                      (let [t (:tc (meta (nth x 2 nil)))]
+                        (when (and (vector? t) (= :fndef (first t)) (not (intrinsic? (second t))))
+                          (swap! acc assoc (second x) (try-fact #(call-fsym (second t) (nth t 2)))))))
+                    (cond (seq? x) (doseq [y x] (walk y)) (vector? x) (doseq [y x] (walk y)) (map? x) (doseq [y (vals x)] (walk y))))]
+            (walk (:blocks b))
+            (doseq [pb (vals (:promoted-bodies b))] (walk (:blocks pb)))))
+        @acc)))))
+
+(defn drop-glue-symbol
+  "C6-4 (a): within build-program's bindings, the symbol of drop_glue::<T> for a type T that needs drop (the drop terminator's
+  callee, as codegen reads `(glue {:symbol ..})`), nil for one that needs none"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (let [t (erase-regions t)] (when (build/needs-drop? t) (instance-symbol {:def (c/lang "drop_glue") :args [t] :shim :drop-glue})))))))
 
 (defn record-slots
   "RFP44 (a): within build-program's bindings, record-virtual-slot over KEYS [[METHOD-PATH DYN-TEXT] ...]: {key slot-or-nil}"

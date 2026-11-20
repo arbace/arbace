@@ -625,7 +625,12 @@
                  assert (let [[_ c e m target u] t
                               t (if-let [sp (get (:assert-spans ours) [c e m])] (vary-meta t assoc :assert-span sp) t)]
                           (list 'assert c e m target (unwind u) (if-let [al (:assert-loc facts)] (al t) loc) 0))
-                 drop (let [[_ p target u r d] t] (list 'drop p target (unwind u) r d nil))
+                 ;; C6-4 (a): the drop's glue, drop_glue::<T> of the dropped local's type when it needs drop (facts' :drop-glue,
+                 ;; mono's drop-glue-symbol); none (nil) codegen reads as no drop at all: a plain branch
+                 drop (let [[_ p target u r d] t
+                            ty (when (and (:drop-glue facts) (seq? p) (= 2 (count p))) (:tc (meta (:ty (nth (:locals ours) (second p) nil)))))
+                            g (when ty (try ((:drop-glue facts) ty) (catch Throwable _ nil)))]
+                        (list 'drop p target (unwind u) r d (when g (list 'glue {:symbol g}))))
                  t))
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
@@ -673,11 +678,13 @@
 (declare native-main pack-main)
 
 (declare batch-main)
+(declare lib-unit-main)
 (defn -main [front-dir record out n & flags]
+  (if (= "lib-unit" front-dir) (apply lib-unit-main record out n flags)
   (if (= "batch" front-dir) (apply batch-main record out n flags)
   (if-let [crates (System/getenv "RF_MONO_CRATES")]
     (apply native-main crates front-dir record out n flags)
-    (apply pack-main front-dir record out n flags))))
+    (apply pack-main front-dir record out n flags)))))
 
 (defn pack-main [front-dir record out n & flags]
   (let [abort? (some #{"--panic-abort"} flags)
@@ -759,20 +766,20 @@
   `alloc::raw_vec::{impl#2}`, the trait `alloc::string::SpecToString`), {:impls {path m} :traits {path m}}, for the run's
   interface, so that the constants print as rustc's MIR of the instance does"
   []
-  (reduce (fn [acc e] (-> acc (update :impls #(merge (:impls e) %)) (update :traits #(merge (:traits e) %))))
-          {:impls {} :traits {}} (vals (native-core-map))))
+  (reduce (fn [acc e] (-> acc (update :impls #(merge (:impls e) %)) (update :traits #(merge (:traits e) %)) (update :adts #(merge (:adts e) %))))
+          {:impls {} :traits {} :adts {}} (vals (native-core-map))))
 
 (defn- with-extra-iface
   "SI (the run's interface) and STD (its names) with the exported bodies' crate-private facts: functions (443), impls and
   traits (462), the traits' kinds and their functions' (`Trait`, `AssocFn`: print-def-path's qualified path of a trait's
   method), each only where the interface has none: [si std]"
   [si std]
-  (let [fs (native-extra-fns) {:keys [impls traits]} (native-extra-iface)
+  (let [fs (native-extra-fns) {:keys [impls traits adts]} (native-extra-iface)
         kinds (merge (into {} (for [p (keys traits)] [p "Trait"]))
                      (into {} (for [p (keys fs) :let [pp (c/path-parent p)]
                                     :when (and pp (or (contains? traits pp) (= "Trait" (get (:kinds std) pp))))]
                                 [p "AssocFn"])))]
-    [(-> si (update :fns #(merge fs %)) (update :impls #(merge impls %)) (update :traits #(merge traits %)))
+    [(-> si (update :fns #(merge fs %)) (update :impls #(merge impls %)) (update :traits #(merge traits %)) (update :adts #(merge adts %)))
      (update std :kinds #(merge kinds %))]))
 
 (defn- builtin-normalize
@@ -1827,6 +1834,10 @@
                                          (if (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
                                              (do (fact! :locs false) (list 'loc "?" 0 0)))))
                     nf {:fsym fsym :statics statics :native-call native-call :header header :assert-loc assert-loc
+                        ;; C6-4 (a): RF_DROP_GLUE=1, a drop's glue symbol (runtime-body's :drop-glue); off by default: without
+                        ;; it the program's and the native library bodies' drops are plain branches (nothing dropped), and
+                        ;; with it unwind.rs's native-std run (rsi-native) faults at its second catch_unwind: the ci leg judges
+                        :drop-glue (when (= "1" (System/getenv "RF_DROP_GLUE")) (fn [t] (mono/drop-glue-symbol n t)))
                         :vtables (:vtables facts) :vtable! (fn [native?] (fact! :vtables native?))
                         :const! (fn [native?] (fact! :consts native?))
                         ;; RF15: a promoted ADT value's bytes (an enum's variant: `&Color::Blue`, `&Some(1.5)`) from mono's layout
@@ -2129,4 +2140,94 @@
       (spit (str work "/mono-control.log")
             (str (str/join "\n" (concat (mapcat second (sort-by #(if (= (first %) ca) 0 1) @ctl-lines))
                                         [(str "mono-check: 2 programs (control): " (tally-line @ctl-total " of "))])) "\n")))
+    (System/exit 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; C6, RUST-90 S5 (doc/rust/FRONTEND-SURVEY.md, "C6: the library lowered by Arbace, the plan (write-ahead)", "As built: C6's
+;; first slice"): a library crate's non-generic items, built from source and lowered by Arbace as that crate's own unit compiles
+;; them, for arbace.rust.front.lib-unit's compare with std's IR item by item
+
+(defn lib-unit-run
+  "The exported bodies of RF_CORE_NATIVE whose definitions DEFS names, each at its identity (a non-generic item: no arguments),
+  made the runtime bodies codegen takes as CRATE's own unit makes them: mono's facts with CRATE the local crate
+  (mono/*lib-crate*: the item's symbol, and the symbols of the copies and instances it calls, CRATE's, as rustc compiling CRATE
+  names them), within the bindings of the program N (its pipeline sets std's interface, names and solver up; its own bodies
+  give the run's lang items and layouts, nothing else). {:bodies [[def body-or-nil why]] :layouts [[text layout]] :langsyms {..}}"
+  [crates front-dir n crate defs]
+  (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")
+            mono/*macro-attrs* (mono/load-macro-attrs (System/getenv "RF_CORE_ATTRS"))
+            ;; the entries' attributes and those of the functions nested in them (rt_error's #[inline])
+            mono/*native-attrs* (into (into {} (for [[_ e] (native-core-map) [p a] (:nested-attrs e)] [p a]))
+                                      (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)]))]
+    (bc/build-program front-dir n
+      (fn [bodies]
+        (when (seq (native-core-map))
+          (let [[si std] (with-extra-iface c/*si* c/*std*)] (set! c/*si* si) (set! c/*std* std)))
+        (let [facts (mono/program-facts n bodies)
+              nc (native-core-map)
+              in-lib (fn [f] (binding [mono/*lib-crate* crate
+                                       *type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))
+                                       *normalize-ty* (fn [t] (mono/normalize-ty n t))
+                                       *resolve-call* (fn [d args] (mono/resolve-call n d args))]
+                               (f)))
+              ;; each item at its identity, printed in the program's crate as a native core instance is (build-run's reprint)
+              insts (vec (for [d defs]
+                           (if-let [e (get nc d)]
+                             (if (pos? (long (or (:generics e) 0)))
+                               [d nil (str "generic (" (:generics e) " parameters): an instance, not an item")]
+                               (try [d (in-lib #(core-instance e [])) nil]
+                                    (catch Throwable x [d nil (str "the instance: " (.getMessage x))])))
+                             [d nil "not exported (no key, or the export refused it)"])))
+              cf (in-lib #(mono/core-facts n (for [[d i] insts :when i] {:def d :args [] :name (str "lib " d) :body (:body i)})))
+              ;; the function constants' symbols, operands' too (a function reified as a pointer), beside the calls'
+              cf (update cf :fsyms #(merge (in-lib (fn [] (mono/const-fsyms n (keep (fn [x] (:body (second x))) insts)))) %))
+              ;; a caller location's file as the library build writes it: Cargo's trimmed path, relative to library/ (std.edn's
+              ;; TRIM_PATHS; the export's :call-loc carries the remap's /rustc/COMMIT/library/ prefix), LIB_UNIT_SRC_PREFIX before
+              ;; it (RFP47 (a)'s remap once std.edn takes it: /rustc/COMMIT/library/)
+              loc-file (fn [^String f] (let [i (.lastIndexOf f "/library/")]
+                                         (str (or (System/getenv "LIB_UNIT_SRC_PREFIX") "") (if (neg? i) f (subs f (+ i 9))))))
+              nf {:native-call (fn [f]
+                                 (let [c (get (:callees cf) (second f)) cl (:call-loc (meta f))]
+                                   (when-not (and c (not (mono/error? c)))
+                                     (throw (ex-info (str "no callee for " (second f) (when (mono/error? c) (str ": " (second c)))) {})))
+                                   [(list 'callee c) (if cl (list 'loc (loc-file (first cl)) (second cl) (nth cl 2)) (list 'loc "?" 0 0))]))
+                  :fsym (into {} (for [[t s] (:fsyms cf) :when (not (mono/error? s))] [t s]))
+                  :statics {}
+                  :header (fn [rec] (let [o (get (:items cf) (:name rec))]
+                                      (if (and (map? o) (not (mono/error? o)))
+                                        (assoc (dissoc o :name) :phase "arbace-lib-unit" :name (:name rec))
+                                        (throw (ex-info (str "no symbol: " (if (mono/error? o) (second o) "no fact")) {})))))
+                  :assert-loc (fn [_] (list 'loc "?" 0 0))
+                  :anon-discr (fn [vp] (try (mono/variant-discriminant n vp) (catch Throwable _ nil)))
+                  :layout-of (fn [tyf] (in-lib #(mono/type-layout-form n tyf)))
+                  :closure-fnptr (fn [tyf] (try (in-lib #(mono/closure-once-symbol n tyf)) (catch Throwable _ nil)))
+                  :unit-variant (fn [tyf vidx fields] (variant-bytes (in-lib #(mono/type-layout-form n tyf)) vidx fields))
+                  :drop-glue (fn [t] (in-lib #(mono/drop-glue-symbol n t)))}
+              out (vec (for [[d i why] insts]
+                         (if-not i
+                           [d nil why]
+                           ;; rustc's codegen takes the item's MIR after -O0's passes, which our runtime MIR stops before
+                           ;; (SimplifyCfg-final, CopyProp, RemoveZsts, ...): o0-normalize, pack-compare's port of them, over the
+                           ;; runtime body (its calls' callees and locations already written: it keeps no metadata); LIB_UNIT_O0=0: not
+                           (try [d (in-lib #(let [rb (runtime-body (assoc (:body i) :name (str "lib " d)) {:name (str "lib " d)} nf false)]
+                                              (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (first (o0-normalize rb))))) nil]
+                                (catch Throwable x [d nil (str "the runtime body: " (.getMessage x))])))))
+              ;; the layouts from the instances' forms, which carry their types (:tc; runtime-body's walk drops it, and form->ty
+              ;; reads a type from the record's DefId texts alone), then from the runtime bodies' for what they add
+              lt ((:layouts-of facts) (concat (mono/ty-forms (for [[_ i] insts :when i] (:body i))) (mono/ty-forms (keep second out))))]
+          {:bodies out
+           :layouts (vec (for [[t l] lt :when (not (mono/error? l))] [t l]))
+           :layout-refusals (vec (for [[t l] lt :when (mono/error? l)] [t (second l)]))
+           :langsyms (into {} (for [[k v] (:langsyms facts) :when (not (mono/error? v))] [k v]))})))))
+
+(defn lib-unit-main
+  "lib-unit CRATES FRONT-DIR N CRATE DEFS-FILE OUT: lib-unit-run over DEFS-FILE's definitions (a def path a line) into OUT"
+  [crates front-dir n crate defs-file out]
+  (let [defs (vec (for [l (str/split-lines (slurp defs-file)) :let [l (str/trim l)] :when (seq l)] l))
+        r (lib-unit-run crates front-dir n crate defs)]
+    (spit out (binding [*print-meta* false] (pr-str r)))
+    (doseq [[d b why] (:bodies r)] (println (if b (str "lib-unit built " d " " (:symbol b)) (str "lib-unit refused " d " (" why ")"))))
+    (println (str "lib-unit: " (count (:layouts r)) " layouts, " (count (:layout-refusals r)) " refused"))
+    (doseq [[t why] (take 12 (:layout-refusals r))] (println (str "lib-unit layout refused " t ": " (subs (str why) 0 (min 200 (count (str why)))))))
+    (println (str "lib-unit: " crate ": " (count (filter second (:bodies r))) " of " (count defs) " items made runtime bodies, into " out))
     (System/exit 0)))

@@ -78,6 +78,16 @@
 #                          contexts set aside, per item; a negative control (EXPAND_VERBOSE=1: the first differences; EXPAND_SPANS=1:
 #                          the root file's spans at context 0 kept; EXPAND_DUMP=DIR: our crates written there; EXPAND_TRACE=1)
 #   bin/rust-front pack-compare-test   queue 443: the instance judge's pure cases (test/rust/front/pack_compare_test.ae)
+#   bin/rust-front lib-unit census|keys CRATE|export CRATE|build CRATE|compare CRATE [NAME...]
+#                          C6, RUST-90 S5 (doc/rust/FRONTEND-SURVEY.md, "C6: the library lowered by Arbace, the plan (write-ahead)",
+#                          "As built: C6's first slice"; arbace.rust.front.lib-unit): census: the closure of std's IR (rsi's std build
+#                          at test/rust/runtime/ir.sha256: RSI_STD_DIR's, the checkout's or the main checkout's .tmp/rsi/std/ir, else
+#                          the oracle store's rust-std-ir) from the samples' IR (test/rust/ir/samples.tar.xz; NAME... of intrinsics
+#                          panics std unwind vectors, the eval cell's five), by crate and kind; keys: CRATE's items in it as export keys;
+#                          export: their bodies built from source (lib-export --keys); build: each item at its identity as CRATE's own
+#                          unit compiles it (build-run's lib-unit: mono's facts with CRATE the local crate, named by the IR's crate
+#                          identities); compare: codegen's define of each against std's IR's of its symbol, after RF3's normalizer, a
+#                          crossed control; all in .tmp/rust-front/lib-unit/, light (each step under 2.5 GiB)
 #   bin/rust-front rind-test   RIND5: collect's `[..].len()` constant and simd_swizzle!'s block (test/rust/front/swizzle1.rs, main
 #                          built), test/rust/front/rind_test.ae
 #   bin/rust-front resolve-check [--ours] [NAME...]
@@ -445,7 +455,46 @@ case ${1:-} in
       mkdir -p "$md/$n"; cp "$rs/$n/$n.record.edn" "$md/$n/$n.record.edn"; names+=("$n")
     done
     cd "$root" && arbace_tool -m arbace.rust.front.mono-check "$fd" "$root/test/rust/front/std-crates.edn" "$libsrc" "$md" $ctl "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  std-iface-native)
+    # C4 (doc/rust/FRONTEND-SURVEY.md, "As built: C4's switch"): std's interface assembled from the crates' native passes alone
+    # (core's whole pass: core-check with CORE_IFACE_FILES=all CORE_IFACE_ONLY=1, its native-iface.edn; alloc's: the pass of
+    # alloc-iface or lib-export, native-iface-nodebug.edn or alloc-iface.edn; std's: bin/rust-front std-iface's std-iface.edn) into
+    # $work/std-iface-native.edn, then each crate's facts compared with the helper's std-iface, fact by fact (alloc-check --compare)
+    shift; filt='^Reflection warning|recur arg|^Auto-boxing'
+    cn=${CORE_NATIVE_IFACE:-$work/core/native-iface.edn}
+    an=${ALLOC_NATIVE_IFACE:-$(ls "$work/alloc/alloc-iface.edn" "$work/alloc/native-iface-nodebug.edn" "$work/alloc/native-iface.edn" 2>/dev/null | head -1)}
+    sn=${STD_NATIVE_IFACE:-$work/std/std-iface.edn}
+    for f in "$cn" "$an" "$sn"; do [ -n "$f" ] && [ -s "$f" ] || { echo "std-iface-native: a crate's native interface is missing ($f): core-check's whole pass, alloc-iface, std-iface" >&2; exit 1; }; done
+    fd=$(records_front) || exit 1
+    cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --assemble "$work/std-iface-native.edn" "core=$cn" "alloc=$an" "std=$sn" 2>&1 | grep -v -E "$filt" || exit 1
+    st=0
+    for c in core alloc std; do
+      cp "$work/std-iface-native.edn" "$work/std-iface-native-$c.edn"
+      GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --crate "$c" --compare "$fd" "$work/std-iface-native-$c.edn" 2>&1 | grep -v -E "$filt" | sed "s/^/$c: /"
+      grep -q -E '(differ|missing)[^0-9]*[1-9]' "$work/std-iface-native-$c.edn.report" 2>/dev/null && st=1
+      rm -f "$work/std-iface-native-$c.edn"
+    done
+    exit $st ;;
   std-crates)
+    # C6-2 (b) (doc/rust/FRONTEND-SURVEY.md, "As built: C6-2"): --native, std's crates' identities computed by Arbace (Cargo's metadata
+    # hash ported, arbace.rust.front.cargo-meta, over the library build's units test/rust/front/std-build-units.edn; no cargo, no
+    # rustc) into .tmp/rust-front/std-crates-native.edn, what rsi-build's runs name std's crates by, held to std-crates-rsi.edn's;
+    # --units, the oracle tier by hand (the pinned cargo and rustc): bin/rsi std-build --units in .tmp/rust-front/std-units, its
+    # unit graph written as test/rust/front/std-build-units.edn and each unit's computed -C metadata held to cargo -v's
+    if [ "${2:-}" = --native ] || [ "${1:-}" = --native ]; then
+      cd "$root" && arbace_tool -m arbace.rust.front.cargo-meta crates test/rust/front/std-build-units.edn "$work/std-crates-native.edn" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' &&
+        arbace_tool -m arbace.rust.front.cargo-meta check-crates test/rust/front/std-build-units.edn test/rust/front/std-crates-rsi.edn 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing'
+      exit "${PIPESTATUS[0]}"
+    fi
+    if [ "${2:-}" = --units ] || [ "${1:-}" = --units ]; then
+      su=$work/std-units; mkdir -p "$work"
+      RSI_STD_DIR=$su "$root/bin/rsi" std-build --units || exit 1
+      # library/Cargo.toml's [profile.release.package.panic_abort] rustflags (the unit graph does not write a profile's rustflags)
+      rustc -vV > "$su/rustc-vv.txt" || exit 1
+      cd "$root" && arbace_tool -m arbace.rust.front.cargo-meta units "$su/unit-graph.json" "$su/rustc-vv.txt" test/rust/front/std-build-units.edn "$su/library" all "panic_abort=-Cpanic=abort" &&
+        arbace_tool -m arbace.rust.front.cargo-meta ids test/rust/front/std-build-units.edn "$su/metadata.txt" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' | tail -5
+      exit "${PIPESTATUS[0]}"
+    fi
     # RFP23 (c): std's crates' identities (each rmeta's CrateRoot: StableCrateId, svh; the compiler's version) read from the sysroot
     # (the oracle tier's, by hand where rustc's sysroot is) into test/rust/front/std-crates.edn; --check compares. RF11: --rsi, rsi's
     # std build's sysroot (bin/rsi std-build, RSI_STD_DIR/sysroot: rlibs, no .rmeta files; the main checkout's when this checkout
@@ -469,6 +518,76 @@ case ${1:-} in
       if cmp -s "$out" "$root/test/rust/front/$base.edn"; then echo "std-crates: the sysroot's crates as test/rust/front/$base.edn records them"
       else diff "$root/test/rust/front/$base.edn" "$out"; echo "std-crates: FAIL: the sysroot's crates differ"; exit 1; fi
     else echo "std-crates: wrote $out"; fi ;;
+  lib-unit)
+    shift; sub=${1:-}; shift || true
+    lu=$work/lib-unit; mkdir -p "$lu"
+    # std's IR at the pin: rsi's std build, here or in the main checkout, else the oracle store's pack rust-std-ir
+    lib_std_ir() {
+      local m d; m=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)
+      for d in ${RSI_STD_DIR:+"$RSI_STD_DIR/ir"} "$root/.tmp/rsi/std/ir" "$m/.tmp/rsi/std/ir" \
+               $(. "$root/test/oracle-records/oracle.bash" && ls -d "$(oracle_store)"/unpacked/*/rust-std-ir 2>/dev/null); do
+        [ -d "$d" ] && (cd "$d" && sha256sum -c --quiet "$root/test/rust/runtime/ir.sha256" > /dev/null 2>&1) && { echo "$d"; return 0; }
+      done
+      echo "lib-unit: no std IR at test/rust/runtime/ir.sha256 (bin/rsi std-build, or the oracle store's rust-std-ir)" >&2; return 1
+    }
+    lib_samples() { # the samples' IR (rustc's, the pack test/rust/ir/samples.tar.xz) as NAME=x.ll,shim.ll specs
+      local s=$lu/samples n
+      if ! (cd "$s" 2>/dev/null && sha256sum -c --quiet "$root/test/rust/ir/samples.sha256" > /dev/null 2>&1); then
+        rm -rf "$s"; mkdir -p "$s"; tar -xJf "$root/test/rust/ir/samples.tar.xz" -C "$s" || return 1
+      fi
+      [ $# -gt 0 ] || set -- intrinsics panics std unwind vectors
+      for n in "$@"; do echo "$n=$s/test%rust%eval%$n.rs/x.ll,$s/test%rust%eval%$n.rs/shim.ll"; done
+    }
+    filt='^Reflection warning|recur arg|^Auto-boxing'
+    case $sub in
+      census)
+        std=$(lib_std_ir) || exit 1; mapfile -t specs < <(lib_samples "$@") || exit 1
+        cd "$root" && LIB_UNIT_TSV=$lu/census.tsv GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit census "$std" "${specs[@]}" 2>&1 | grep -v -E "$filt" | tee "$lu/census.txt" ;;
+      keys)
+        c=${1:?lib-unit keys CRATE}; shift; std=$(lib_std_ir) || exit 1; mapfile -t specs < <(lib_samples "$@") || exit 1
+        cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit keys "$std" "$c" "$lu/$c-keys.txt" "${specs[@]}" 2>&1 | grep -v -E "$filt" | tail -1 ;;
+      export)
+        c=${1:?lib-unit export CRATE}; [ -s "$lu/$c-keys.txt" ] || { echo "lib-unit: no $lu/$c-keys.txt (bin/rust-front lib-unit keys $c)" >&2; exit 1; }
+        . "$root/bin/lib/repr-rust/core-build.bash"; libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
+        if [ "$c" = core ]; then
+          # core's items through core-check's module run at their keys (CORE_EXPORT_KEYS: no oracle, without debug assertions as rsi's
+          # std build; the module files owning the keys, each key's longest module path), its interface over those files and the extras
+          m=$(core_modules) || exit 1; lib=$(core_lib) || exit 1
+          files=$(cd "$root" && arbace_tool -e "(require '[arbace.rust.front.alloc-check :as a] '[arbace.string :as str])
+            (let [ms (a/read-modules \"$m\") by (into {} (for [x ms] [(:path x) (:file x)]))
+                  ks (for [l (str/split-lines (slurp \"$lu/core-keys.txt\")) :when (seq l)] (str \"core::\" (str/replace l \"-\" \"::\")))]
+              (doseq [f (sort (distinct (keep #(get by (a/owner (map :path ms) %)) ks)))] (println f)))" 2>&1 | grep -v -E "$filt")
+          [ -n "$files" ] || { echo "lib-unit export core: no module file owns the keys" >&2; exit 1; }
+          echo "lib-unit export core: $(wc -l < "$lu/core-keys.txt") keys in $(printf '%s\n' "$files" | wc -l) module files"
+          rm -f "$lu/native-core-items.edn"
+          # shellcheck disable=SC2086
+          CORE_EXPORT_KEYS=$lu/core-keys.txt CORE_EXPORT=$lu/native-core-items.edn core_check --records $files | grep -E '^core-check: (the |export|total)|refused' | tail -20
+          [ -s "$lu/native-core-items.edn" ] && echo "lib-unit export core: $(grep -c '^(core/body' "$lu/native-core-items.edn") bodies"
+          exit 0
+        fi
+        lib_export --keys "$lu/$c-keys.txt" "$c" "$lu/native-$c-items.edn"; exit $? ;;
+      build)
+        c=${1:?lib-unit build CRATE}; std=$(lib_std_ir) || exit 1
+        [ -s "$lu/native-$c-items.edn" ] || { echo "lib-unit: no $lu/native-$c-items.edn (bin/rust-front lib-unit export $c)" >&2; exit 1; }
+        # the crates' identities the compare's IR names them by (each unit's codegen unit name: CRATE.STABLE-CRATE-ID-cgu.N), the
+        # compiler's version and triple std-crates-rsi.edn's
+        cd "$root" && arbace_tool -e "(let [b (read-string (slurp \"test/rust/front/std-crates-rsi.edn\"))
+              ids (into {} (for [d [\"core\" \"alloc\" \"std\"] :let [f (first (sort (.list (java.io.File. (str \"$std/\" d)))))]]
+                             [d {:stable-crate-id (second (re-find #\"\\.([0-9a-f]{16})-cgu\" f)) :unit f}]))]
+          (spit \"$lu/crates.edn\" (pr-str (assoc b :crates ids))))" || exit 1
+        sed "s/^/$c-/; s/-/::/g" "$lu/$c-keys.txt" > "$lu/$c-defs.txt"
+        fd=$(records_front) || exit 1
+        libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
+        # the environment: a synthetic program (its pipeline sets std's interface and names up), at rsi's plan's edition
+        cd "$root" && RF_CORE_NATIVE=$lu/native-$c-items.edn RF_MONO_LIB=$libsrc RF_EDITION=2021 RF_OVERFLOW_CHECKS=1 BUILD_PASS=SimplifyCfg-pre-optimizations \
+          GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} GOMAXPROCS=${GOMAXPROCS:-3} \
+          arbace_tool -m arbace.rust.front.build-run lib-unit "$lu/crates.edn" "$fd" abort "$c" "$lu/$c-defs.txt" "$lu/$c-unit.edn" 2>&1 | grep -v -E "$filt" | tee "$lu/$c-build.log" | tail -3 ;;
+      compare)
+        c=${1:?lib-unit compare CRATE}; std=$(lib_std_ir) || exit 1
+        [ -s "$lu/$c-unit.edn" ] || { echo "lib-unit: no $lu/$c-unit.edn (bin/rust-front lib-unit build $c)" >&2; exit 1; }
+        cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit compare "$std" "$c" "$lu/$c-unit.edn" 2>&1 | grep -a -v -E "$filt" | tee "$lu/$c-compare.log" | grep -a -v '^lib-unit equal ' ;;
+      *) echo "usage: bin/rust-front lib-unit census|keys CRATE|export CRATE|build CRATE|compare CRATE [NAME...]" >&2; exit 2 ;;
+    esac ;;
   pack-compare-test)
     # queue 443: build-run's pack-compare (the instance judge of alloc's and std's bodies), pure cases, light (no pack, no library)
     cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-500MiB} arbace_tool -p "$root/test" -m rust.front.pack-compare-test 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
@@ -620,13 +739,27 @@ case ${1:-} in
       # queue 448: core's defs outside rust-core-built's modules (core-export --rsi-outside), judged at the instance
       [ -s "$work/core/native-core-rsi-outside.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/core/native-core-rsi-outside.edn
       for c in alloc std; do [ -s "$work/$c/native-$c-rsi.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/$c/native-$c-rsi.edn; done; fi
-    rw=${RF11_WORK:-$work/rsi}; mkdir -p "$rw"; rm -f "$rw/front.tsv"
+    rw=${RF11_WORK:-$work/rsi}; mkdir -p "$rw"; rm -f "$rw/front.tsv" "$rw/inputs.tsv"
     stubs=$work/stubs; mkdir -p "$stubs"
     for t in rustc rustdoc cargo gcc cc clang; do printf '#!/bin/sh\necho "stub $0 called" >> "%s/stubs.log"\nexit 99\n' "$stubs" > "$stubs/$t"; chmod +x "$stubs/$t"; done
     : > "$stubs/stubs.log"
     plan=$(rfr_rsi_list) || exit 1
     rs=$(rfr_stage rsi) || { echo "rsi-build: the pack rust-front-rsi is not current (bin/rust-front records make rsi, on the host with rustc)"; exit 1; }
     fd=$(records_front) || exit 1
+    # C4 (doc/rust/FRONTEND-SURVEY.md, "As built: C4's switch"): RF_NATIVE_IFACE=1, std's interface and its crates' identities
+    # Arbace's own: the interface assembled from the crates' native passes ($work/std-iface-native.edn, bin/rust-front
+    # std-iface-native) in place of the helper's std-iface.edn, and the StableCrateIds computed (bin/rust-front std-crates --native,
+    # Cargo's metadata hash ported) in place of std-crates-rsi.edn's (the rlibs'); the inputs written to $rw/inputs.tsv
+    crates=$root/test/rust/front/std-crates-rsi.edn c4=""
+    if [ "${RF_NATIVE_IFACE:-0}" = 1 ]; then
+      [ -s "$work/std-iface-native.edn" ] || { echo "rsi-build: no $work/std-iface-native.edn (bin/rust-front std-iface-native)"; exit 1; }
+      "$0" std-crates --native > "$rw/std-crates-native.log" 2>&1 || { cat "$rw/std-crates-native.log"; exit 1; }
+      crates=$work/std-crates-native.edn
+      nfd=$work/records/front-native; rm -rf "$nfd"; mkdir -p "$nfd"
+      for f in "$fd"/*; do [ "$(basename "$f")" = std-iface.edn ] || ln -s "$(readlink -f "$f")" "$nfd/"; done
+      ln -s "$work/std-iface-native.edn" "$nfd/std-iface.edn"; fd=$nfd
+      c4="std's interface from the crates' native passes, the StableCrateIds by Cargo's metadata hash ported (std-names.edn the helper's)"
+    fi
     libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}
     rf_libsrc_take || { echo "rsi-build: no $libsrc (bin/repr-rust src-take)"; exit 1; }
     specs=() ids=() eds=() skipped=0
@@ -653,7 +786,7 @@ case ${1:-} in
     : > "$rw/batch.log"; : > "$rw/mono-all.log"; bsz=${RF11_BATCH:-6}
     for ((i = 0; i < ${#specs[@]}; i += bsz)); do
       (cd "$root" && PATH=$stubs:$PATH BUILD_PASS=SimplifyCfg-pre-optimizations RF_EDITION=$ed RF_OVERFLOW_CHECKS=1 RF_MONO_LIB=$libsrc RF_SRC_ROOT=$srcdir GOMEMLIMIT=${RF11_GOMEMLIMIT:-1800MiB} GOMAXPROCS=${RF11_PROCS:-4} \
-         arbace_tool -m arbace.rust.front.build-run batch "$root/test/rust/front/std-crates-rsi.edn" "$fd" "$rw" --std "${specs[@]:$i:$bsz}" 2>&1 |
+         arbace_tool -m arbace.rust.front.build-run batch "$crates" "$fd" "$rw" --std "${specs[@]:$i:$bsz}" 2>&1 |
          grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >> "$rw/batch.log")
       # RF14: each batch's mono-check of its programs' native facts against their records (the batch rewrites mono.log)
       grep -v '^mono-check: [0-9]* programs: ' "$rw/mono.log" >> "$rw/mono-all.log" 2>&1
@@ -671,6 +804,8 @@ case ${1:-} in
       # the module's forms are the record's size: kept with RF11_KEEP=1
       [ "${RF11_KEEP:-0}" = 1 ] || rm -f "$rw/$n/$n.mono.edn" "$rw/$n/$n.ours.c"
     done > "$rw/front.tsv"
+    # C4: the inputs the run read (the case inputs' writer, arbace.rust.check/write-case-inputs, reads WORK/front/CORPUS/inputs.tsv)
+    for id in "${ids[@]}"; do printf '%s\tc4\t%s\n' "$id" "${c4:-the helper's std-iface.edn and std-crates-rsi.edn (the rlibs')}"; done > "$rw/inputs.tsv"
     cut -f2,3 "$rw/front.tsv" | sed -E 's/ \(.*//; s/^own\t.*/own/' | sort | uniq -c | sort -rn
     # S4: with --native-core, each program's core roots taken natively and judged against the record's instance (pack-compare)
     if [ -n "${RF_CORE_NATIVE:-}" ]; then

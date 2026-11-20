@@ -13708,3 +13708,120 @@ waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on
   8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
   record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
   three steps wait on n-py-rec's check records, now in the tree, to be spliced.
+
+## 2026-11-20: rust-c6-1120: C6 (the library lowered by Arbace) sized and planned; its first slice, alloc's items against std's IR
+
+Branch `rust-c6-1120` from `next` 939037429 (light lane; no gate, by the user's word). RFP53 (a)'s C6, RUST-90's S5: what the
+five eval cases take from std's IR (rsi's std build: Cargo, rustc 1.99.1, clang; `test/rust/runtime/ir.sha256`, the oracle pack
+`rust-std-ir`), the plan, and its first slice. doc/rust/FRONTEND-SURVEY.md, "C6: the library lowered by Arbace, the plan
+(write-ahead)" and "As built: C6's first slice".
+
+- Measured (`bin/rust-front lib-unit census`, new: std's 110 units read as text, the closure from each sample's IR, the pack
+  `test/rust/ir/samples.tar.xz`, each define classed by its v0 symbol): the union of the five cases reaches 8,834 of std's 27,554
+  defines and 3,200 globals, 255,692 IR lines: 709 items (core 275, std 325, alloc 25, rustc_demangle 45, ...), 1,627 copies of
+  `#[inline]` items, 6,496 generic instances; 3,167 definitions by their own crate, 594 of them already in C2's exports.
+  4,647 defines (152,194 lines) are the backtrace's symbolization (gimli, object, addr2line, miniz_oxide, adler2, memchr,
+  rustc_demangle and std's `backtrace_rs`), which the default panic hook reaches and no case runs; without them 4,187 defines,
+  556 items. Cross-checked by an independent scratch scanner (the same 8,834 and 709).
+- Found and sent to the coordinator (14:58): `test/rust/front/std-crates-rsi.edn` and the pack `rust-front-rsi` name an older std
+  build (core `bdd42e15..`, the main checkout's 103-unit `.tmp/rsi/std` of 2026-11-03) than the pinned IR (core `f4c9f032..`,
+  alloc `58bfcc35..`, std `9a0bbe83..`; `bin/rust-front std-crates --rsi --check` on rust-rec's std build at the pin: FAIL), so a
+  `--front own` program's `ours.ll` names std's symbols the pinned runtime does not define.
+- C4 in `next`: the native interface is complete against the helper's (core's essential pass, alloc 3,863 of 3,863, std 4,644 of
+  4,644) but no case's run reads it (rsi-build loads the helper's `std-iface.edn` from `rust-front-std`; the StableCrateIds come from
+  `std-crates-rsi.edn`), and `write-case-inputs` records C4 as rustc's: not own.
+- The plan: L1 the 556 items (or 709) by crate, L2 the copies and instances they reach (3,629 defines over 1,574 definitions, 499
+  exported), L3 (only with C6-1 (a)) the seven backtrace crates, L4 the own lowered library kept by key with a per-define fallback
+  to std's IR, L5 the switch and the records: 14-19 agent days and two nights with C6-1 (b), 20-28 with (a). DECISIONs C6-1 (the
+  backtrace part: (b) std's own feature `backtrace-trace-only`, one re-pin night, recommended), C6-2 (the crate identities as
+  constants of the library build, `std-crates-rsi.edn` made again at the pin, recommended), C6-3 (the slice's judge as a crops-tier
+  step at L1's end), C6-4 (the next slice: the four causes on alloc, then core's items).
+- Built: `arbace/rust/front/lib_unit.ae` (v0 decoded, the census, the keys, the judge: each of our defines against std's IR's of
+  the same symbol after RF3's normalizer, the entry block's label set aside, a crossed control); build-run's `lib-unit-run` (an
+  exported item at its identity as its own crate's unit compiles it: `mono/*lib-crate*`, the instantiating crate as a
+  back-reference to the path's root, operands' function symbols `mono/const-fsyms`, -O0's passes by `o0-normalize` after
+  runtime-body, layouts from the typed instance forms, the library build's trimmed source paths); `bin/rust-front lib-unit
+  census|keys|export|build|compare`, `lib-export --keys`. Fixed on the way: `cfg_attr(PRED, inline(never))` lost its word in
+  expand_derive's `attr-from-items` (lower read `#[inline]`; this reaches C2's exports' `:attrs` too); core-check's `export-entry`
+  writes `:nested-attrs` (a nested function's `#[inline]`, handle_alloc_error's `rt_error`), read by lib-unit-run alone.
+- Result (alloc's 25 items of the closure): exported 25 of 25, runtime bodies 20, **7 of 25 equal to std's IR define for define**
+  (handle_alloc_error, raw_vec's handle_error and min_non_zero_cap, String::try_reserve, FromUtf8Error::into_bytes, String's and
+  TryReserveErrorKind's Clone), 6 differ, 12 refused; the crossed control differs. 19 of the 20 symbols are std's IR's own byte for
+  byte. Without the -O0 passes 6 equal; before the back-reference, attribute and location fixes 2. Left, by cause: fn-local and
+  crate-private types mono does not know (10: their symbols and layouts), a projection left in a layout (2: `Cow<str>`), caller
+  locations inside macro expansions (2: the export's `:call-loc` is the macro definition's place, and its remap prefix is written
+  twice), locals (4). Light throughout: census 76 s / 1.2 GB, alloc's export about 20 minutes / under 2 GB (2 minutes with its
+  interface cached), build 39 s / 2.0 GB, compare 65 s / 1.0 GB. `bin/rust-front pack-compare-test` passes. Not run: the gate,
+  rsi-build, the essential Rust steps (the cfg_attr fix touches C2's exports' attributes; the night's rsi-build shows its effect).
+- Scratch kept in the worktree's `.tmp/c6/` and `.tmp/rust-front/lib-unit/` (the census TSV, the keys, the export, the unit, the
+  logs); core's index cache copied from rust-rec-1120's worktree (its paths rewritten).
+
+## 2026-11-20: rust-c6-1120: C6-2 (b), std's StableCrateIds computed by Arbace (Cargo's metadata hash ported)
+
+The user decided C6-1 (a) (std as pinned, the seven backtrace crates ported) and C6-2 (b) (Cargo's metadata hash ported); the
+coordinator relayed it with the order C6-2, then C4's switch to the native interface, then C6-4/L1. doc/rust/FRONTEND-SURVEY.md,
+"As built: C6-2".
+
+- Cargo's source: the pinned `rustc-1.99.1-src.tar.xz` (SHA-256 `6451598a99e77f07571960f6b21d577399d3a30f33e80cbd2e3a4aae6535d265`,
+  test/rust/corpus-rustc-1.99.1-ui.edn's `:tarball`, https://static.rust-lang.org/dist/rustc-1.99.1-src.tar.xz) was not on this
+  host; fetched by that pin into the worktree's `.tmp/repr-rust/src/` (no new pin), its `src/tools/cargo` (cargo 1.99.1, git
+  5f94df4789f005f9a352888e8355ffc645b7ed0e, crate version 0.100.0) and `vendor/{rustc-stable-hash-0.1.2,semver-1.0.28}` read.
+- Built: `arbace/rust/front/cargo_meta.ae` (compute_metadata and the Hash impls it reaches, as bytes into rustc-stable-hash's
+  StableSipHasher128 over mono's SipHasher128; a small JSON reader for Cargo's unit graph), `test/rust/front/std-build-units.edn`
+  (the 36 units of `bin/rsi std-build`'s build, from Cargo's `--unit-graph`, with the trim-paths and panic_abort's profile rustflags
+  the graph does not write), `bin/rsi std-build --units` and `bin/rust-front std-crates --units` (the oracle, by hand: cargo -v's
+  `-C metadata`), `bin/rust-front std-crates --native` (no cargo or rustc: the identities computed, held to std-crates-rsi.edn's).
+- Proven: 31 of 31 units' `-C metadata` equal to the pinned cargo's (core `ffe947da80e854e5`, alloc `94a1e9115eaca776`, std
+  `a2511a1c84299cbe`), and the StableCrateIds of the pinned build, core `f4c9f03271ecd18b`, alloc `58bfcc358ad62d5f`, std
+  `9a0bbe83fa8f68b1` (1 min 19 s, 1.2 GB with cargo's build; the native computation seconds). Two inputs found missing from the
+  unit graph on the way (build scripts' trim-paths, panic_abort's profile rustflags), each with its wrong units named.
+- `test/rust/front/std-crates-rsi.edn` and `test/rust/records/rust-front-rsi.{sha256,tsv}`: rust-rec-1120's uncommitted rewrite (the
+  pinned build's rmeta, and the pack re-recorded at that file's key, `4159566a..` in the shared store) taken byte for byte, so the
+  merge is clean in either order; rust-rec-1120's commit wins if they differ. `std-crates --native` FAILs on next's stale file and
+  passes on this one.
+- DECISION C6-5 (the user's): the 36 units as the library build's description, data (recommended), or Cargo's workspace resolution
+  ported too (5-8 days). C4's own count waits on it.
+
+## 2026-11-20: rust-c6-1120: C6-4 (a), alloc's causes: 9 of 25 items equal to std's IR (7 before)
+
+doc/rust/FRONTEND-SURVEY.md, "As built: C6-4 (a), alloc's causes". Projections in layouts normalized by the solver (mono's
+layout-of*), caller locations at the expansion's root call site or the call's own place in the body's file (expand's
+virtual-cause and root-span?, core-check's externalize; the double remap prefix gone), crate-private ADTs carried by the export
+(`:adts`) into the run's interface: 7 -> 9 equal, the crossed control differing; 6 differ structurally, 10 refused (fn-local
+items' symbols and layouts, one constant). The location and export changes reach C2's exports too (not rerun here). Also in this
+commit, off by default and not measured yet: C4's switch (`RF_NATIVE_IFACE=1` for rsi-build: the interface assembled from the
+crates' native passes, `bin/rust-front std-iface-native`, `alloc-check --assemble`, and the computed StableCrateIds; rsi-build's
+`inputs.tsv`, read by the case inputs' writer, C4 own only when nothing of std's interface is the helper's).
+
+## 2026-11-20: rust-c6-1120: C6-4 (a), items defined inside a function: 16 of 25 alloc items equal to std's IR
+
+core-check's native-iface writes an ADT defined inside a function's body by its def path (as it wrote their impls), and
+alloc-check --export carries the entry's own impl and the functions enclosing its definition and its ADTs: BufWriter::flush_buf's
+BufGuard, btree::mem::replace's PanicGuard and Box<dyn Error>::from's StringError build and compare equal. lib-unit compare alloc:
+16 equal (9 before), 7 differ (structure: four first allocas, three a block earlier), 2 refused (a fn-local trait's impl symbol,
+a fn-local &str constant), the crossed control differing. alloc's interface pass made again for it (about 20 minutes, 2 GB).
+
+## 2026-11-20: rust-c6-1120: native bodies dropped nothing; a drop's glue, 18 of 25 alloc items equal to std's IR
+
+Found while comparing alloc's items: build-run's runtime-body wrote every drop terminator without its glue, and codegen takes a
+drop without glue for a plain branch, so Arbace's bodies (the programs' own, C1, and the native library bodies, C2) called no
+drop_glue and ran no Drop impl (rsi-build's unwind.ours.ll: `deep` never drops its `Noisy` guard; `bin/rust-front rsi-native`
+on the pinned std's rlibs: stdout without the "drop odd/even" lines). Sent to the coordinator for rust-rec-1120's --front own
+record. runtime-body now writes `(glue {:symbol drop_glue::<T>})` from a facts function (`mono/drop-glue-symbol`): lib-unit's always
+(alloc: 16 -> 18 equal, `_from_vec_unchecked` and `format_inner` with their invokes and landing pads), the programs' run only with
+`RF_DROP_GLUE=1` (unwind.rs stays own and drops its guard, but its native-std run faults at the second catch_unwind: the ci leg must
+judge before it is the default).
+
+## 2026-11-20: rust-c6-1120: core's 275 items, first measure: 95 equal to std's IR
+
+bin/rust-front lib-unit export core (core-check at the items' keys over their 49 module files, 28 min, 2.8 GB: 245 exported),
+build (202 runtime bodies) and compare: 95 of 275 equal, 79 differ, 100 refused, 1 symbol absent, the control differing. The
+refusals lead with what alloc-check's export carries and core-check's does not (crate-private functions, impls, traits and ADTs),
+then named constants and a static.
+
+## 2026-11-20: rust-c6-1120: core's items with their crate-private facts: 109 of 275 equal to std's IR
+
+cc/with-private-facts (alloc-check's export's carriage moved into core-check and shared): core's CORE_EXPORT_KEYS export carries
+the crate-private functions, impls, traits and ADTs its bodies name. lib-unit compare core: 109 equal (95 before), 85 differ, 78
+refused (30 not exported, 14 at the instance, 12 layouts, 10 constants, 5 callees, 2 a static), 3 symbols absent; alloc's 18 of
+25 unchanged.
