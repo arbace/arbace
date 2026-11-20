@@ -5,7 +5,8 @@
   copy, as rustc's optimized MIR writes it), SimplifyLocals' unused local and renumbering, each named in :equal-o0; the negative
   cases (an operand, a local's type, a block's cleanup flag, a borrowed temporary not propagated) differ. `bin/rust-front
   pack-compare-test`."
-  (:require [arbace.rust.front.build-run :as br] [arbace.rust.front.passes :as passes] [arbace.rust.front.mono :as mono]))
+  (:require [arbace.rust.front.build-run :as br] [arbace.rust.front.passes :as passes] [arbace.rust.front.mono :as mono]
+            [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc]))
 
 (def i8 '(ty "i8" (int "i8")))
 (def u8 '(ty "u8" (uint "u8")))
@@ -104,6 +105,15 @@
     (check "generic-zst?: a tuple of PhantomData<T>" (#'br/generic-zst? [:tuple [[:adt "core::marker::PhantomData" [[:param 0 "T"]]]]]) true)
     (check "negative: generic-zst? of another ADT of T" (#'br/generic-zst? [:adt "core::mem::manually_drop::ManuallyDrop" [[:param 0 "T"]]]) false)
     (check "negative: generic-zst? of [T; 0] (its alignment T's)" (#'br/generic-zst? [:array [:param 0 "T"] [:cval "0"]]) false)
+    ;; queue 493: a fn pointer type's elided lifetimes its own binder's (Argument's `formatter: unsafe fn(NonNull<()>, &mut
+    ;; Formatter<'_>)`, the record's `for<'a, 'b> unsafe fn(..)`), kept by the body's erasure
+    (let [r {:kind :ref :lifetime nil :mt {:mutbl true :ty {:kind :tup :elts []}}}
+          fp (c/lower-ty {:kind :fnptr :inputs [r r]})
+          pr (fn [t] (binding [c/*in-value* false c/*erased-regions* true] (c/print-ty t)))]
+      (check "a fn pointer's elided lifetimes bound, erasure keeps them" (pr (tc/erase-ty fp)) "for<'a, 'b> fn(&'a mut (), &'b mut ())")
+      (check "negative: a reference's elided lifetime outside a fn pointer erased" (pr (tc/erase-ty (c/lower-ty r))) "&mut ()")
+      (check "negative: the binder's variables as a free region (before 493) erased"
+             (pr (tc/erase-ty [:fnptr {:inputs [[:ref [:re-bound nil 1] true [:tuple []]]] :output [:tuple []]}])) "fn(&mut ())"))
     (let [unit '(ty "()" (tuple))
           callu (list 'const "g" '(ty "fn() {g}" (fndef "g" [])) '(zst))
           r {:args 0 :locals [{:ty unit}] :debug [] :blocks [{:cleanup false :stmts [] :term (list 'call callu [] '(place 1) 1 '(continue))} {:cleanup false :stmts [] :term '(return)}]}
