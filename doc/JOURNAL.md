@@ -13913,3 +13913,116 @@ until lane 2's run. What was read of that run before it went (this morning's rep
   equalities' selectors 21, call stacks 9, derived Show 2 (99 at the morning's pass).
 
 Not run: the own programs (lane 2), the gate, any record.
+
+## 2026-11-20: hs-judge-1120: Haskell's judge, the 267 recorded cases read again; FMA_ConstantFold and awards own
+
+Branch `hs-judge-1120` from next `939037429`. The judge's 267 cases on a record (the facts of n-all5) are: eval's 71 programs of
+`test/haskell/eval/golden/left.tsv`; `bin/repr-haskell test`'s 20 comparisons with the helper's committed records; the interface
+level's 176, 88 units x 2 layouts. Of the 88, 71 are queue 425's binary (9), text (54) and process (8), listed in
+`test/haskell/roundtrip-ghc-9.14.1-iface-own-units.edn` but predicted, not run on the main host (the step `haskell-iface-own` has no
+pass in the store; the night plans of 2026-11-19 say "never passed"). The other 17 have no own interface check: filepath's 11
+modules and `System/OsPath.hs-boot` (queue 452's lane), ghc-internal's `GHC.Internal.Bignum.Backend.GMP`, and the `Setup.lhs` of
+exceptions, binary, terminfo and text. These are lever 5 of the comain plan; not done here.
+
+The 71 programs by kind: nofib's 29 NofibUtils programs (GHC did not build them; the own front end runs them; HF10-P64 (a) waits on
+GHC's run); 28 GHC did not build and nothing runs (D435-3, pending); five `ignore_stdout` tests (T15892, T23071, conc065, conc066,
+conc067: D435-2, pending); T4262 (the host's thread count); fannkuch-redux and spectral/minimax (killed at record-ref's 10 s CPU
+limit); k-nucleotide (a segfault on an empty stdin); fasta, awards and gc's cacheprof (7.6 MB, 604 KB, 57 KB); T7861 (GHC's
+deferred type error text); FMA_ConstantFold.
+
+What changed:
+- FMA_ConstantFold judged by a reviewed golden file: `test/haskell/eval/golden/testsuite/primops/should_run/FMA_ConstantFold.stdout`
+  (461 bytes) and `.exit` (1), reviewed row by row in `golden/testsuite-primops.edn`. Queue 444 left it as "the host's libm's or code
+  generator's behaviour". It is GHC's compile-time folding instead, read in GHC 9.14.1's tarball (`compiler/GHC/Core/Opt/ConstantFold.hs`:
+  `fmaRules` = `fmaLit`, `fmaZero_z`, `fmaOne` under `msum`; `negOp`'s refusal to fold -0.0; FloatAddOp's `identity zerof`;
+  FloatMulOp's `identity onef`; `convFloating`). Under LexicalNegation `-0` is `negate 0`, which stays unfolded. So
+  `fmadd 1 0 -0` and `fmadd 1 -0 0` give -0.0, and `fnmsub 1 0 0` gives +0.0. Each is wrong by IEEE, at Float and at Double: six FAIL
+  blocks. The derived file is GHC's recorded run byte for byte (sha256 a4958c05..., 461 bytes, status 1). The review names a new
+  basis `:ghc` (`test/haskell/eval/review.ae`: the compiler's source at the pin), as 325g's synthetic model (`gen.ae`) already used
+  GHC's -O0 constant folding.
+- nofib's awards judged by the expected file its own `boot.sh` writes: `awards.out_template` concatenated REPS = 1 times in the fast
+  mode record-ref runs. The program was read (2,000 prints of `findallawards (competitors (i mod 100))`, line 1 checked by hand).
+  `bin/lib/hsi/own-verdicts`' nofib rule takes that file when nothing else is shipped; awards is the only such program. The template
+  equals GHC's record (sha256 00f0c6fd..., 604,360 bytes).
+- `left.tsv` (69): fasta's, fannkuch-redux's and minimax's reasons restated (below).
+
+Proofs, no program run: `bin/hsi golden --oracle --control` (74 golden files, 755 rows, 67 equal to GHC's record, 7 :no-run, 74 of 74
+controls fail, 69 left). `bin/hsi own-verdicts --record` then `--check` (840 of 909). The judge's own path (`bin/lib/hsi/check`'s
+`own_ref`, extracted and run) on both programs against hsi's recorded runs: check-hsi.edn's passes on GHC's record give the same
+status and digests, so `:pass :judge :own`. A control for each: one byte of the golden file or the template changed, and the judge
+fails. `test/crops/independence.edn` :haskell :judge {:self 7526 :recorded 267} -> {:self 7528 :recorded 265}: judge 0.98287 ->
+0.98300, independence 79.657 -> 79.660 (floor 79; `test/crops/scores.edn` unchanged at four places). `bin/crops-score --record`,
+`--judge --strict` (0 problems), `bin/records-check` (9 pairs, 0 problems).
+
+Found:
+- fasta: ci reproduces nofib's expected output. `bin/ci run fasta-c.c -- 750000` runs the shipped C reference, as boot.sh does, in
+  9 s and 0.9 GB and gives GHC's record byte for byte (7,625,077 bytes, e275cebf...). The file is too large to commit, so it waits
+  on a DECISION about how to keep it.
+- fannkuch-redux and spectral/minimax are `:pass` in check-hsi.edn because hsi's run was killed too (status 137, empty outputs),
+  matching GHC's killed record. These two passes are no evidence; a DECISION.
+- gc's cacheprof: its shipped `cacheprof.stdout` (1.67 MB) is another input's output; its first 56,927 bytes are not the record's.
+
+Alternatives considered:
+- A golden file for T15892 (961,750 bytes, deterministic): not written, since D435-2 is the user's to answer.
+- T7861's text found by trying layouts against the digest: not done, since that is GHC's typechecker's message, not a review.
+
+## 2026-11-20: hs-judge-1120, rounds 2-4: the main session's and the user's decisions on Haskell's judge; the own interface level over binary, text, process and filepath
+
+On the main session's decisions about this branch's first report (D-HSJ-1 (a), D-HSJ-2 (a), D-HSJ-3 (a), D435-2 (a), D435-3 (a)), the
+user's decision of 2026-11-20 (a case whose expected output is undefined, unspecified or host-dependent leaves the judge's cases,
+its reason recorded per case, its run still counted in completeness), and the Mac's 488 (488-1 (a), 488-2).
+
+Round 2 (`625276117`):
+- D435-2 (a): bin/hsi own-verdicts lists a test all.T gives ignore_stdout by its status and stderr. The STDOUT column is `ignore`,
+  which own_ref passes on; the check's ign leaves the stdout uncompared. This covers T15892, T23071, conc065, conc066 and conc067.
+- D-HSJ-2 (a): `test/haskell/eval/boot.edn` keeps the digest and size of the expected output that a nofib boot.sh makes from its
+  shipped generator. `bin/hsi boot` (`bin/lib/hsi/boot`) remakes it: the generator's C runs on ci, then `tr -d '\r'`. For fasta,
+  fasta-c.c at 750000 gives 7,625,077 bytes, e275cebf..., which is GHC's record. own-verdicts lists it as `boot:fasta.stdout`,
+  own_ref reads the digest, and bin/hsi golden checks the entry (`--oracle`, `--control`).
+- D435-3 (a): `test/haskell/eval/golden/na.tsv` lists the 28 programs GHC did not build and nothing runs. They leave the judge's
+  cases.
+- D-HSJ-3 (a): bin/lib/hsi/check never passes a run killed at the check's limits (137, 152), even against a reference killed the
+  same way. fannkuch-redux and spectral/minimax are classed `:speed`.
+
+Round 3 (`e2499b48e`), the user's rule:
+- na.tsv's KIND column: `no-run` (the 28) and `undefined`. The undefined cases are T4262 (/proc's thread count: GHC's record 11,
+  the shipped file 8; all.T skips it) and k-nucleotide (status 139, a segmentation fault on an empty stdin).
+- bin/hsi golden requires an undefined case's evidence: the record's run ended on a signal other than the limit kills, or all.T
+  skips the test. Controls: fannkuch-redux and minimax (137), cacheprof and fasta (0), and conc064 (1), each listed as undefined,
+  fail it.
+- Reviewed and kept judged: the 29 NofibUtils programs (their output is a hash, so defined), T7861 (GHC's deferred error text:
+  defined, not derived), cacheprof, fannkuch-redux and minimax.
+
+Round 4 (`602fd7971`), the interface level:
+- `bin/repr-haskell lib-check --ifaces own` ran on ghc-internal and the 21 packages below binary, text, process and filepath, one
+  at a time, without the big lock. Its queue held ten heavy jobs. The peaks measured here were 1.65-1.79 GiB, and 488 had measured
+  0.94-1.15 GB on arm64.
+- `roundtrip --layout --iface-own --only '(^|/)(binary|text|process|filepath)/'` (967 s, peak 1.73 GiB): 83 of 83 at the tree level
+  in both layouts, and 83 of 83 own interfaces equal in braces and in the layout. The controls differ.
+- filepath's 12 units were merged into the units file (1,340). haskell-iface-own's package lists and its `--only` gained filepath.
+- 488-2: GHC.Internal.Bignum.Backend.GMP is no part of Arbace's target, which builds ghc-internal with the native bignum backend
+  (HES7 (a), HF10-P6 (a)). Its 2 interface cases leave the judge's cases.
+
+Scores, in independence.edn's :haskell :judge:
+- {:self 7526 :recorded 267} -> 7528/265 -> 7534/231 -> 7534/229 -> 7700/61 (7,761).
+- Judge: 0.98287 -> 0.98300 -> 0.98513 -> 0.98525 -> 0.99607.
+- Haskell's independence: 79.66 -> 79.92 (floor 79 throughout; eval and AOT at 0.5 hold it).
+- Left recorded: eval's 33 (29 NofibUtils, T7861, cacheprof, fannkuch-redux, minimax), bin/repr-haskell test's 20, and the four
+  Setup scripts' 8 interface cases.
+
+D-HSJ-3's records (this entry's commit):
+- check-hsi.edn's rows for fannkuch-redux and spectral/minimax were re-judged from the recorded runs. Their pass against GHC's
+  killed record meant status 137 and empty outputs; they now read `:fail :status 137 :differs [:status] :reason :limit`.
+- A fresh `bin/hsi check --only` waited 2.5 hours behind the big lock's ten heavy jobs and was withdrawn. The night's hsi-check
+  reruns them.
+- `bin/hsi divergences`: 909 programs, 815 pass, 94 classed, 0 not. The control (the two without their class) finds 2 in none.
+- `bin/reap --record`: Haskell's eval cell 817 -> 815 pass, deferred 30 -> 32.
+- `bin/crops-score --record`: Haskell 97.26/99.09/100/79.66 -> 97.21/99.03/100/79.92 (judge 0.9830 -> 0.9960).
+- `--judge --strict` and `bin/records-check`: 0 problems.
+
+Alternatives considered:
+- Holding the big lock for the whole interface chain, as 425's command does: not done. It would have blocked the host's heavy
+  jobs for 2 hours for a 1.8 GiB process.
+- A hand-written golden file for T15892 (961 KB): not needed under D435-2 (a).
+- Counting T7861 out as unspecified: not done. Its text is GHC's implementation's and deterministic, a defined output not derived,
+  as the user's rule keeps such cases.
