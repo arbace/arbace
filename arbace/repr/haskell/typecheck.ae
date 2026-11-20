@@ -2932,6 +2932,30 @@
           (= :forall (first t)) (let [[t2 ps] (instantiate t)] (doseq [p ps] (want! p)) (split-fun t2))
           :else (let [a (fresh-meta) r (fresh-meta)] (unify t (fn-ty a r)) [a r]))))
 
+;; GHC's ConLikeTc (GHC.Tc.Gen.Head's tcInferDataCon, Note [Typechecking data constructors]): a data constructor's
+;; occurrence is desugared to its eta lambda (\ds .. -> K ds ..) applied to the arguments it has (GHC.HsToCore.Expr's
+;; ds_app of ConLikeTc, newSysLocalsDs: one binder a field, fresh at each occurrence), which the simple optimiser
+;; beta-reduces: a saturated application is K's again, an unsaturated one keeps a lambda over the rest, its arguments
+;; let-bound outside it (showChar = (:) is \ds ds1 -> ds : ds1; showChar ')' inlined, let ds = C# ')' in \ds1 -> ds :
+;; ds1). Only the unsaturated occurrences are wrapped here (the saturated ones beta-reduce to themselves)
+(def ^:dynamic *app-head* false) ; tc-app's head is being inferred: its constructor is wrapped by tc-app, which knows the arguments
+
+(defn- con-eta
+  "A data constructor n's occurrence core (its type t) applied to nargs value arguments: its eta lambda when it takes more
+  (ConLikeTc's), else core. Not a newtype's constructor (its wrapper is a cast), an unboxed tuple's or sum's, a pattern
+  synonym's builder, or a constructor with a context (its evidence applied already)"
+  [n t core nargs]
+  (let [i (when (and n (= "data" (nth n 1))) (get @*cons* n))
+        ar (:arity i)]
+    (if (and ar (> ar nargs) (seq? core) (= 'v (first core))
+             (not (some-> *patsyns* deref (get n)))
+             (not= 'newtype (:flavour (get @*tycons* (:tycon i))))
+             (not (str/starts-with? (occ n) "(#")))
+      (let [ts (first (reduce (fn [[ts t] _] (let [[a r] (split-fun t)] [(conj ts a) r])) [[] t] (range ar)))
+            ds (mapv (fn [a] (let [x (fresh-lv "ds")] (note-type! x a) x)) ts)]
+        (list 'lam ds (list 'app core ds)))
+      core)))
+
 ;; HF9 (second slice): an application as GHC.Tc.Gen.App's tcApp makes it: the spine's head inferred and instantiated,
 ;; its argument types split off, the result unified with the expected type first (Note [Unify with expected type
 ;; before typechecking arguments]), then each argument checked against its type, so a lambda argument's GADT pattern
@@ -2940,7 +2964,9 @@
   "An application spine f a1 .. an (HsApp, or OpApp: the operator applied to its two operands): [type core]; expected
   the type to check against or nil"
   [env head args expected]
-  (let [[tf cf] (binding [*ectx-nc* (boolean *defer-log*)] (infer env head)) ; (queue 369: tcInferAppHead adds no context)
+  (let [hn (let [h (lval head)] (when (= 'HsVar (con h)) (nm (arg h 2))))
+        [tf cf] (binding [*ectx-nc* (boolean *defer-log*) *app-head* (some? hn)] (infer env head)) ; (queue 369: tcInferAppHead adds no context)
+        cf (con-eta hn tf cf (count args))
         ;; HF10-P50 (a): a head of a rank-n binder's polytype (higherRank's f :: forall a. (Num a, Bounded a) => a -> a,
         ;; T17594e) instantiated with its constraints' evidence applied (tcInstFun); split-fun's instantiation dropped
         ;; the evidence
@@ -3150,7 +3176,8 @@
               ;; HF10-P54 (a): [] is an ExplicitList (GHC.Rename.Expr's rnExpr of nilDataConName, Note [Empty lists])
               (if (and (= n (ext-name "data" "GHC.Internal.Types" "[]")) (ovl-lists?))
                 (ovl-list env [(list-ty (fresh-meta)) (list 'v n)] 0)
-                (var-occ env n (lsp (arg v 2))))
+                (let [app-head? *app-head* [t c] (binding [*app-head* false] (var-occ env n (lsp (arg v 2))))]
+                  [t (if app-head? c (con-eta n t c 0))]))
               (do (error! "unrenamed variable: " (pr-str (lval (arg v 2)))) [(fresh-meta) (list 'lit "?")]))
       HsApp (let [[h args] (app-spine v)] (tc-app env h args nil))
       OpApp (tc-app env (arg v 3) [(arg v 2) (arg v 4)] nil)
