@@ -14033,3 +14033,102 @@ CPython's own C tokenizer compiled from source by Arbace's C, since Lib/tokenize
   --no-mutants; 489-3 (a) parse-check the same way, task 494.
 - Alternatives: the recorded tokens kept (0.5); tokenize.py on pyi (circular, rejected by py-own-judge-1120); the
   harness interpreted by cirun (12x slower, not used for runs).
+
+## 2026-11-20: JCS50 (b), javac on Arbace's `--release N` (branch `jcs50-release`, from next 9f322d9a4); the proof on Arbace deferred
+
+The user's decision of 2026-11-20 (JCS50 (a) with (b) first; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-25):
+JCS50-JCS55"): `--release N` failed for every N ("release version N not supported": no ct.sym in the platform, and javac's
+tool world's ServiceLoader finds no PlatformProvider). Studied: jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259,
+`src/jdk.compiler/share/classes/com/sun/tools/javac/platform/{JDKPlatformProvider,PlatformUtils,PlatformDescription,PlatformProvider}.java`,
+`main/Arguments.java` (handleReleaseOptions), `main/DelegatingJavaFileManager.java`, `file/Locations.java`, and
+`make/modules/jdk.compiler/Gendata.gmk` (CreateSymbols, which makes ct.sym). Finding: JDK 26's javac serves its own release
+from ct.sym too (the `Q` sections), so with a ct.sym step (1) and step (2) are one mechanism; step (1) (26 as -source/-target 26
+with the platform's modules) is kept as the fallback when the platform has no ct.sym.
+
+Built: `overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/ReleasePlatforms.java` (the PlatformProvider: releases from
+ct.sym's section names as JDKPlatformProvider computes them, 8 to 26; descriptions as PlatformDescriptionImpl's; without
+ct.sym the own release with the platform's modules) and `CtSymFileManager.java` (JDKPlatformProvider's release file manager
+over ct.sym read by jrt's java.util.zip.ZipFile, no zip file system: SYSTEM_MODULES per module, or PLATFORM_CLASS_PATH for
+8, `.sig` as class files, file objects with the zip file system's jar: URIs), both Arbace's (EPL); `FileManager.addPlatform`
+registers the platform's directories; the tool world's `ServiceLoader` variant returns ReleasePlatforms for
+`com.sun.tools.javac.platform.PlatformProvider`. The pin `jdk/javac/ct-sym.sha256`: the JDK build's
+`build/linux-x86_64-server-release/images/jdk/lib/ct.sym` of jdk26u at baf63fb, SHA-256
+642d31ba38e4b2222b1992206863983e87fdc529d99ee4fe2d6b77c7d31ba6f4 (11,076,142 bytes, 21,054 entries, sections 8 to Q), kept
+apart from `platform.sha256` (whose digest keys the own platform's cache: a line there would rebuild it); `bin/javac-vendor
+platform DIR` links it into the platform as `DIR/ct.sym` after checking it (`ct_sym`; the verb `ct-sym DIR`), and `bin/javac-vendor
+tool` (hit or miss, `--check` too) into the checkout's `.tmp/repr-java-platform`, which `bin/repr-java` remakes only when
+platform.sha256 changes; a file beside the module directories, which neither FileManager nor repr/java's `dir-platform` takes for
+a module. First done in `bin/repr-java` (relinked when the pin changed), then moved out: `bin/repr-java` is in repr/java's reader
+hash, so the edit made the essential `provenance` step fail on all four provenance files (835e66a3... at the base, ddd88dcb...
+with it). The 27 gate steps that pin `platform.sha256` pin it too.
+javac's forms: the package read by `bin/repr-java read-jdk --no-javac` on the night's tool (javac-60886b4973e7356caf1b,
+`REPR_JAVA_STALE_OK=1`) with the vendoring's origins, the three unchanged files byte for byte the committed forms, the two
+new ones and FileManager's call taken; `jdk/javac/sources.txt` (+2) and the provenance's counts (814, 374, 901) by hand as
+convert writes them (the provenance's :host left the tree's); `bin/javac-vendor edge` on the frozen JVM: `jdk/javac/edge.edn`
+unchanged. CLAUDE.md names the pin.
+
+Proven on the JDK (jdk26u's image; the overlay compiled with `--patch-module jdk.compiler`, PlatformUtils patched to ask
+ReleasePlatforms, `jdk.internal.jrt.javac.Main --platform` over the platform's modules and the pinned ct.sym): `--release 8`,
+`11`, `17`, `21`, `26` give the JDK javac's raw diagnostics line for line and its class files byte for byte where both compile;
+without ct.sym `--release 26` compiles to the same class file and `--release 17` is refused; `--release 7` and `27` are refused
+as by the JDK's javac (the negative control). `bin/javac-vendor ct-sym` with a wrong pin fails naming both digests.
+
+Not proven on Arbace, by the user's decision: javac's key moves (1a2277a0fecc75f9e2e8 at the head; 36fbf6b1399462aeb97b before
+bin/javac-vendor's tool hook, the key the builds below were for). The tool build was run twice by
+hand under bin/heavy-lock after the night's full gate was stopped (14:10 UTC) and the essential gate after it: the first, at
+GOMEMLIMIT=40GiB, was killed by the OOM killer in its bin/build-go step (the build.go driver at 27 GiB RSS beside its compile at
+29 GiB, other agents' processes beside them; the orphaned go build killed, the partial target/ removed); the second, at 20 GiB,
+was stopped while waiting for the big lock: after this branch merges onto today's next javac's key differs again, so the next
+gate builds the tool anyway. No record is touched: the 49 rows (diagnostics 44, classes 2, print 2, interp 1, all "release
+version N not supported") and the source sets of t04718, t06345, t06352, t06401 are for that gate's tool and a Java re-judge
+(the survey's "As built: JCS50 (b)" lists what they must show), then :diag-release emptied or narrowed. Checks here: bin/reap
+(54 of 56, 0 problems), bin/crops-score --judge --strict (0 problems), bin/records-check (9 pairs, 0), test/docs/claude-md-test.bash
+(all ok), bin/provenance-check, bash -n bin/javac-vendor; test/gate/javac-platform-test.bash fails one case ("own-pin?" expects the checkout's pin
+to be a build pin; the checkout's is the own pin since 39806d6a7): not this change's. Java's CoMaIn unchanged (89/100/99).
+
+DECISION JCS50-1 (the survey, "As built: JCS50 (b)"): the link into the build tree's image makes an audited Java step that uses
+`--release` need the host `:jdk`; options (a) ct.sym made by Arbace with CreateSymbols on javac's tool from jdk26u's
+`src/jdk.compiler/share/data/symbols` and the own platform, (b) the build's ct.sym committed as a 6.3 MB xz record, (c) the
+audit taught the pin; recommended (a), (b) as its bridge.
+
+## 2026-11-20: JCS50-1 (a), the own ct.sym (branch `jcs50-release`)
+
+The user decided JCS50-1 (a): ct.sym made by Arbace, so that Java's independence never drops; jcs50-release waits for it. The
+constraints: no javac tool rebuild for it if another way serves, a bounded run (about 8 GiB a process, chunks if need be, the heavy
+lock above 4 GiB), made once and cached by its inputs, pinned, out of every gate step but a weekly and an oracle one.
+
+Studied: jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259, `make/modules/jdk.compiler/Gendata.gmk` (CreateSymbols' build-ctsym
+and its arguments), `make/langtools/src/classes/build/tools/symbolgenerator/CreateSymbols.java` (run, not vendored: read by repr/java
+at make time from the jdk26u checkout at the pin, nothing of it committed), `src/jdk.compiler/share/data/symbols/` (its input), the
+build tree's `spec.gmk` (SOURCE_DATE 1787576400, JDK_SOURCE_TARGET_VERSION 26, VERSION_PRE internal, USE_EXTERNAL_LIBZ true) and
+`support/symbols/included-modules`. Nothing copied into the tree: no doc/ARBACE.md or LICENSE.md entry (the made ct.sym is kept in a
+cache, not committed; its digest is).
+
+Done: CreateSymbols read on last night's javac tool (`javac-60886b4973e7356caf1b`, REPR_JAVA_STALE_OK=1) and interpreted there by
+`test/javac-platform/ctsym-run.ae` (gensrc-run.ae, the own platform's way for interpreted build tools); the JN7 alternative (compiled
+into javac's world's buildtools) rejected: a tool build each time, 4,400 more lines in every build, for a minute's run. First run:
+ExceptionInInitializerError in java.lang.constant (ConstantDescs and PrimitiveClassDescImpl initialize each other; entered from
+PrimitiveClassDescImpl the cycle leaves ConstantDescs' CD_int null): the runner initializes ConstantDescs first, as a JDK's boot has it
+(a jrt follow-up noted in the survey). Second run, over the own platform's cache's modules: 21,054 entries, all but 58 equal to the
+build's; the 58 are Q/*/module-info.sig with a ModuleTarget attribute, from the jmods' descriptors the cache's modules carry where the
+build passes its exploded image. Third run, over an exploded view (the cache's modules with its descriptors/MODULE/exploded.class, the
+own build's exploded descriptors): byte for byte the build's ct.sym, 642d31ba38e4b2222b1992206863983e87fdc529d99ee4fe2d6b77c7d31ba6f4.
+One process, 50 to 106 s, 1.75 to 1.8 GiB peak in five runs: not chunked (well under 8 GiB; per-module chunks would change the output,
+CreateSymbols strips annotations whose class no module holds and maps packages to modules across modules), no heavy lock (under 4 GiB).
+
+Built: `test/javac-platform/ctsym.bash` (sourced by bin/javac-vendor: ct_sym_make, ct_sym_own, ct_sym, ct_sym_build_make), the verbs
+`ct-sym-own [--check]`, `ct-sym-rebuild`, `ct-sym-oracle`, `ct-sym-build [--check]`; `jdk/javac/ct-sym-build.edn` (the build's arguments,
+derived from the build tree, checked by the oracle tier); `jdk/javac/ct-sym.sha256` now `# kind: own` (the digest unchanged, the own
+file's); the cache in the own platform's directory, `ct-sym-KEY20/ct.sym` (KEY over the platform pin, ct-sym-build.edn, CreateSymbols.java,
+the symbols data and the scripts), made on a miss by the javac-tool step (`tool_platform`, hit or built; `tool --check` needs it made)
+and by `ct-sym-own`, never by a check; gate steps `javac-ctsym-rebuild` (weekly: made afresh, the pin's, with a negative control: one
+byte changed must differ) and `javac-ctsym-oracle` (the cache's file the build tree's byte for byte, ct-sym-build --check), javac-tool's
+:pins and :inputs; crops-score's `:requires-line` takes a vector, Java's read, eval, AOT and print facts require both pins' `# kind: own`
+(self-test and control in test/crops/score.ae; on the tree, the ct.sym pin without the marker holds the four stages at 0.5, checked and
+restored). The cache made: ARBACE_GATE_EXES/platform-f78bf8a60472ee97bef0/ct-sym-5bb408863f540bb96133. CLAUDE.md updated (and the weekly
+step named, claude-md-test).
+
+Checks: ct-sym-own (made, the pin's), ct-sym-own --check, ct-sym-oracle (byte for byte), ct-sym-rebuild (the pin's; control fails as it
+must), ct-sym-build --check, bin/crops-score --judge --strict and --self-test, test/gate/{chain-needs,caches,crop-tier,crops}-test.bash,
+caches-test --coverage, claude-md-test. No tool build; the 49 rows stay the next gate's (javac's key moves with bin/javac-vendor, the pins
+and ct-sym-build.edn).

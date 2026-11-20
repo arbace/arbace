@@ -1,0 +1,149 @@
+;; Converted from overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/ReleasePlatforms.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.jrt.javac)
+
+(import '(com.sun.source.util Plugin)
+        '(com.sun.tools.javac.code Source Source$Feature)
+        '(com.sun.tools.javac.jvm Target)
+        '(com.sun.tools.javac.platform PlatformDescription
+                                       PlatformDescription$PluginInfo
+                                       PlatformProvider
+                                       PlatformProvider$PlatformNotSupported)
+        '(java.io File IOException)
+        '(java.util ArrayList Collections Comparator Enumeration List Locale Set TreeSet)
+        '(java.util.zip ZipEntry ZipFile)
+        '(javax.annotation.processing Processor)
+        '(javax.tools ForwardingJavaFileManager
+                      JavaFileManager
+                      JavaFileManager$Location
+                      StandardLocation))
+
+(defclass ^:public ^:final ReleasePlatforms
+  :implements [PlatformProvider]
+
+  (field ^:static ^:final ^{:tag (List File)} PLATFORMS (ArrayList.))
+
+  (method ^:static ^:synchronized platform ^void [^File dir]
+    (let [d (.getAbsoluteFile dir)] (when-not (.contains PLATFORMS d) (.add PLATFORMS d))))
+
+  (method ^:static ^:synchronized ctSym ^File []
+    (for-each [^File d PLATFORMS] (let [f (File. d "ct.sym")] (when (.isFile f) (return f))))
+    nil)
+
+  (field ^:static ^:final ^{:tag (Comparator String)} NUMERICAL
+    (lambda Comparator ^int [^String s1 ^String s2]
+      (let [^:mutable ^int i1 0]
+        (try
+          (set! i1 (Integer/parseInt s1))
+          (catch NumberFormatException ex (set! i1 Integer/MAX_VALUE)))
+        (let [^:mutable ^int i2 0]
+          (try
+            (set! i2 (Integer/parseInt s2))
+            (catch NumberFormatException ex (set! i2 Integer/MAX_VALUE)))
+          (if (not (== i1 i2)) (unchecked-subtract-int i1 i2) (.compareTo s1 s2))))))
+
+  (method ^:static targetNumericVersion ^String [^Target target]
+    (Integer/toString
+      (unchecked-add-int (unchecked-subtract-int (.ordinal target) (.ordinal Target/JDK1_1)) 1)))
+
+  (method ^:static current ^String []
+    (ReleasePlatforms/targetNumericVersion Target/DEFAULT))
+
+  (method ^:static supported ^{:tag (Set String)} [^File ctSym]
+    (let [^{:tag (Set String)} vs (TreeSet. NUMERICAL)]
+      (if (nil? ctSym)
+          (do (.add vs (ReleasePlatforms/current)) vs)
+          (let [^{:tag (Set String)} sections (TreeSet.)]
+            (try
+              (with-resources [z (ZipFile. ctSym)]
+                (loop [^{:tag (Enumeration (? extends ZipEntry))} es (.entries z)]
+                  (when (.hasMoreElements es)
+                    (let [n (.getName (cast ZipEntry (.nextElement es)))
+                          s (.indexOf n \/)]
+                      (if (> s 0) (do (.add sections (.substring n 0 s)) (recur es)) (recur es))))))
+              (catch IOException ex (return vs)))
+            (for-each [^String section sections]
+              (when-not (.contains section "-")
+                (for-each [^char ver (.toCharArray section)]
+                  (let [t (Target/lookup
+                            (java-str ""
+                                      (Integer/parseInt
+                                        (Character/toString ver)
+                                        Character/MAX_RADIX)))]
+                    (when (some? t) (.add vs (ReleasePlatforms/targetNumericVersion t)))))))
+            vs))))
+
+  (method ^:public getSupportedPlatformNames ^{:tag (Iterable String)} [this]
+    (ReleasePlatforms/supported (ReleasePlatforms/ctSym)))
+
+  (method ^:public getPlatform :throws [PlatformProvider$PlatformNotSupported] ^PlatformDescription [this
+                                                                                                     ^String platformName
+                                                                                                     ^String options]
+    (let [ctSym (ReleasePlatforms/ctSym)]
+      (when-not (.contains (ReleasePlatforms/supported ctSym) platformName)
+        (throw (PlatformProvider$PlatformNotSupported.)))
+      (Description. platformName ctSym)))
+
+  (defclass ^:static ^:final Description
+    :implements [PlatformDescription]
+
+    (field ^:final ^String sourceVersion)
+
+    (field ^:final ^File ctSym)
+
+    (field ^:final ^{:tag (List JavaFileManager)} opened (ArrayList.))
+
+    (constructor [this ^String sourceVersion ^File ctSym]
+      (set! (.-sourceVersion this) sourceVersion)
+      (set! (.-ctSym this) ctSym))
+
+    (method ^:public getFileManager ^JavaFileManager [this]
+      (let [^:mutable ^JavaFileManager fm nil]
+        (try
+          (cond
+            (some? ctSym)
+              (let [ctSymVersion (.toUpperCase (Integer/toString
+                                                 (Integer/parseInt sourceVersion)
+                                                 Character/MAX_RADIX)
+                                               Locale/ROOT)
+                    hasModules (.allowedInSource
+                                 Source$Feature/MODULES
+                                 (Source/lookup sourceVersion))]
+                (set! fm (CtSymFileManager. ctSym ctSymVersion hasModules)))
+            (.equals sourceVersion (ReleasePlatforms/current)) (set! fm (OwnModules.))
+            :else (throw (IllegalStateException. "Cannot find ct.sym!")))
+          (catch IOException ex (throw (IllegalStateException. ex))))
+        (.add opened fm)
+        fm))
+
+    (method ^:public getSourceVersion ^String [this] sourceVersion)
+
+    (method ^:public getTargetVersion ^String [this] sourceVersion)
+
+    (method ^:public getAnnotationProcessors ^{:tag (List (PlatformDescription$PluginInfo Processor))} [this]
+      (Collections/emptyList))
+
+    (method ^:public getPlugins ^{:tag (List (PlatformDescription$PluginInfo Plugin))} [this]
+      (Collections/emptyList))
+
+    (method ^:public getAdditionalOptions ^{:tag (List String)} [this]
+      (Collections/emptyList))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (for-each [^JavaFileManager fm opened] (.close fm))
+      (.clear opened)))
+
+  (defclass ^:static ^:final OwnModules
+    :extends (ForwardingJavaFileManager FileManager)
+
+    (constructor :throws [IOException] [this]
+      (super. (FileManager. nil (List/of) nil))
+      (let [^:mutable ^{:tag (List File)} ps nil]
+        (locking ReleasePlatforms (set! ps (ArrayList. PLATFORMS)))
+        (for-each [^File p ps] (.addPlatform (cast FileManager (.-fileManager this)) p))))
+
+    (method ^:public hasLocation ^boolean [this ^JavaFileManager$Location location]
+      (or (identical? location StandardLocation/SYSTEM_MODULES)
+          (if-instance [^FileManager$ModuleLoc m location]
+            (identical? (.get (.-system (cast FileManager (.-fileManager this))) (.-module m)) m)
+            false)))))

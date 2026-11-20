@@ -442,7 +442,10 @@ Prior art:
   manager (jrt's own Java in `overlay/jdk/javac/jdk.compiler`), against the platform: the JDK build
   tree's exploded modules with their jmods' module descriptors (since JN6 all 68 of the image, as
   the JVM's javac sees them; the provenance files' `:jdk` names the platform by its pin), pinned by
-  `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`); `bin/javac-vendor classes`
+  `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`), and `--release N` served from the platform's own ct.sym (JCS50 (b),
+  `jdk.internal.jrt.javac.ReleasePlatforms`): made by the JDK build's CreateSymbols interpreted on javac's tool over jdk26u's symbols data
+  and the own platform, byte for byte the build's (`bin/javac-vendor ct-sym-own`, `test/javac-platform/ctsym.bash`), pinned by
+  `jdk/javac/ct-sym.sha256` (`# kind: own`), kept in the own platform's cache and linked into the platform; `bin/javac-vendor classes`
   compiles the baseline, the samples and java.base's closure (`-g:none`) by javac on Arbace and by
   the JVM's javac and compares the class files byte for byte (`java.base`: java.base as the JDK
   build compiles it, against the build's classes). repr/java's reader runs on the tool (JN4; the
@@ -694,7 +697,7 @@ Prior art:
   and verify-rt-heldout, c-dg, si-aot's check, wasm-roundtrip (`bin/repr-wasm roundtrip --only-list`) and haskell-lib-stg, every case once in
   seven nights, the subset every night), on the
   night that starts on Saturday `bin/gate --weekly` (since GD3 `--full` with the `:phase :weekly` steps and parts: the jdk corpora
-  of repr/java's front and nojavac checks, cpp-roundtrip's libstdcxx-testsuite-every-40, rsi-aot's samples, javac-platform-rebuild,
+  of repr/java's front and nojavac checks, cpp-roundtrip's libstdcxx-testsuite-every-40, rsi-aot's samples, javac-platform-rebuild, javac-ctsym-rebuild,
   rsi-check, si-ecraven-aot, haskell-target-probe, llvmi-aot, the fixpoint and programs-full, these two also
   on a night whose changes touch their `:also-changed` files; the parked `:clean-only` parts the clean run's alone); since GD3
   every key holds the epoch `test/gate/epoch` in place of the runner's and planner's text, and an audited step's arbace/ files are
