@@ -13708,3 +13708,41 @@ waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on
   8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
   record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
   three steps wait on n-py-rec's check records, now in the tree, to be spliced.
+
+## 2026-11-20: llvm-judge-1120, llvmi's last lli-judged modules by their IR's reviewed outcome (branch `llvm-judge-1120` from next `939037429`)
+
+Goal: LLVM's independence (judge 0.948: 4,727 own, 547 recorded). The recorded cases measured first, no run: `arbace.llvm.check/own-verdict`
+over llvmi's 562 modules (`bin/llvmi modules`, the packs) and `bin/repr-llvm`'s `own_verdicts` over verify-llvmtest's 806. The brief's
+"lli's records for 177 llvmi modules at each level" is history: LLS49 (c) (n-llvm-indep, 2026-11-18) moved 176, queue 358 the ee one;
+lli's record still judged only c-O0's and c-O2's `.synth.pp-has-attribute` (left to it by n-hasattr, 2026-11-19) at eval and AOT, and
+aot-heavy.txt's 3 kept AOT rows. The 547: probes 478, verify-llvmtest 49, verify-rt-heldout 9, verify-rt 4, llvmi 4, AOT kept rows 3.
+
+Done. (1) The two pp-has-attribute modules' outcome worked out from their IR (test/llvm/selfref-derived.edn, `:from :ir`, `:ir` the
+reviewed module's SHA-256, a `:review` row a printed line): clang 23.1.4 answered `__has_c_attribute` with the C2x drafts' dates, so
+the IR holds a0-a8 = 0 (unlike the C source's `.expect`, C23's 202311); -O0's 13 printf calls load internal globals never stored, -O2's
+pass the folded constants; status 0, 96 bytes. Written from the IR, then compared: lli's recorded digest (4200f37f..., 96 bytes) for
+both. `arbace.llvm.check`'s own verdict reads a module's entry first (`derived-verdict`; an entry of another IR gives none: lli's record).
+Precedent: the golden files of Java's JCS361 (a) and Haskell's queue 325g, in LLS49 (c)'s form (the user, 2026-11-18), so no new
+ruling was needed. (2) `bin/llvmi derived-check` (`make llvmi-derived-check`): every reviewed outcome judged by `own-result` against
+the recorded run (lli's; an abort's stderr g++'s), nothing run; controls: each outcome changed, a crossed pair, controls.edn's pairs on
+recorded runs. 16 of 16 met, 36 controls, 0 pass. Its first version passed all 16 changed outcomes (it reread the entry by id): its
+own controls found it, fixed. A new llvmi control, c-O2.synth.pp-define against pp-has-attribute's outcome. (3) `own_verdicts`:
+`-allow-incomplete-ir` only relaxes LLParser (llvm-project 23.1.5, llvm/lib/AsmParser/LLParser.cpp:334, 406, 461, all in
+validateEndOfModule), so a `not llvm-as -allow-incomplete-ir` rejection holds without it, the verdict without its fragment:
+Assembler-incomplete-ir-metadata-unsupported `invalid` (`check verify-llvmtest --only`: 7 of 7 own, pass; record unchanged);
+control `_control/relaxed-vs-valid` fails as it must.
+
+Scores (`bin/crops-score --record`): 4,732 own, 542 recorded, (4732 + 0.5 x 542) / 5274 = 0.94862, the stage 0.948 to 0.949, LLVM's
+independence 0.9896 to 0.9898 (floor 98); `--judge --strict` and `bin/records-check` 0 problems; no record changed. Sources read:
+llvm-project-23.1.5.src.tar.xz (the pinned tarball, main checkout's .tmp/llvm): LLParser.cpp, Verifier.cpp, VerifierAMDGPU.cpp,
+Intrinsics.cpp, tools/opt/optdriver.cpp.
+
+Left, with causes (doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvm-judge-1120"): the probes (LLS30); verify-llvmtest's 48 (32 whole
+split-file tests, 6 sections only `cat` or llvm-diff reads, 2 XFAIL, lds-reject's verdict depends on the triple's datalayout,
+GCOVProfiling/version is read concatenated, 6 stated under an option that leaves the rule alone); the 13 mutants of unknown kinds (rule
+ports, then the pack's mutants made again); AOT's 3 heavy rows (own verdicts exist; `LLVMI_AOT_HEAVY=1` under the lock judges them).
+Proposed: D1120-1 (a reviewed table for the 6, recommended), D1120-2 (the 32 whole split-file tests replaced by their 215 sections
+judged by their parent's `not` lines, recommended). The floor 99 needs 10 more cases: D1120-1 + the heavy rows + one mutant rule, or
+D1120-2 alone. Alternatives not taken: copying lli's or opt's output into a golden file (never: each outcome is read from the module);
+a run of the heavy AOT modules here (a run to move a score, the night's by hand); deriving the DirectX tests' verdict from the tools'
+order alone (my first reading, `valid`, was wrong: the message is the verifier's, before the pass).
