@@ -2617,6 +2617,26 @@
                                    (map-indexed vector pn)))]
         (< (count args) req)))))
 
+(defn- cx-sure-undeduced?
+  "Queue 463 (the checker): whether the function template `t` surely fails deduction for the call's typed arguments
+  `args`, no template argument written, by the algorithm alone: more arguments than parameters and no ellipsis
+  ([over.match.viable]/2, [temp.deduct.call]/1), or a template parameter with no default argument that no function
+  parameter with an argument names outside a non-deduced context ([temp.deduct.type]/4-5, [temp.deduct]/5: not deduced,
+  deduction fails; a parameter with no argument takes no part, [temp.deduct.call]/1). Not judged: a template with a
+  pack, an explicit object parameter, or a parameter type the slice keeps as an expression or dependent text."
+  [t args]
+  (boolean
+    (try
+      (let [sig (sym-sig t) all (vec (:ps sig)) tid (:id t) ps-t (vec (:params t))
+            opaque? (fn [P] (some #(and (map? %) (#{:texpr :ttdep :dep :auto} (:k %))) (tree-seq coll? seq P)))
+            xobj (:isExplicitObjectParameter (first (filter #(= "ParmVarDecl" (:kind %)) (:inner (:pattern t)))))]
+        (and (not xobj) (not-any? :pack ps-t) (not-any? #(and (map? %) (= :pack-exp (:k %))) all)
+             (or (and (> (count args) (count all)) (not (:va sig)))
+                 (and (<= (count args) (count all)) (not-any? opaque? all)
+                      (let [ded (set (mapcat #(deducible-tparams % tid) (take (count args) all)))]
+                        (some (fn [i] (and (not (ded i)) (not (:default (nth ps-t i))))) (range (count ps-t))))))))
+      (catch arbace.lang.ExceptionInfo _ false))))
+
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
@@ -2641,8 +2661,13 @@
                                       (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
                                              (if-let [a (deduce-call t ex args)]
                                                (instantiate-fn tid a)
-                                               (when (System/getenv "CPP_TMPL_TRACE")
-                                                 (binding [*out* *err*] (println "template" (:name t) "does not deduce from" (pr-str (map :ty args)) "explicit" (pr-str ex))))))
+                                               (do
+                                                 ;; (queue 463, the checker: a deduction that fails surely by the algorithm,
+                                                 ;; cx-sure-undeduced?, no template argument written)
+                                                 (when (and (sema/checking?) (not @u) (nil? (:targs-text callee)) (cx-sure-undeduced? t args))
+                                                   (reset! sr true))
+                                                 (when (System/getenv "CPP_TMPL_TRACE")
+                                                   (binding [*out* *err*] (println "template" (:name t) "does not deduce from" (pr-str (map :ty args)) "explicit" (pr-str ex)))))))
                                            (catch arbace.lang.ExceptionInfo e
                                              (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
                                              ;; (CP281 (a): a constraint surely false is the program's, a sure drop)
