@@ -1696,8 +1696,14 @@
   resolve-assoc-fn), any other function itself: [DEF ARGS]; a builtin candidate (closures' Fn traits, Clone's shims) and what
   the resolution leaves refused"
   [d args]
-  (if-not (trait-method? d)
+  (cond
+    ;; queue 483: the lang item drop_glue (core::ptr::drop_in_place's `drop_glue(&mut *to_drop)`) resolves to its shim,
+    ;; InstanceKind::DropGlue(_, Some(T)) when T needs drop, else the empty glue (DropGlue(_, None), a no-op at codegen)
+    (and (= d "core::ptr::drop_glue") (= 1 (count args)) (vector? (first args)))
+    [d args (if (build/needs-drop? (first args)) "drop-glue" "drop-glue-empty")]
+    (not (trait-method? d))
     [d args]
+    :else
     (let [tr (if (number? d) (:parent (c/def-of d)) (c/path-parent d))
           self (first (filter type-arg? args))
           fk (get fn-trait-kind tr)]
@@ -1731,7 +1737,7 @@
   (let [[cd args] (resolve-instance cd (erase-regions args))]
     (when (and *unknown-refused* (string? cd) (str/starts-with? cd "core::") (not (intrinsic? cd)) (not (:known (attrs-of cd))))
       (throw (ex-info (str "mono: " cd "'s attributes are not in core's sources (a macro-made item)") {:fact :callee})))
-    (if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args args}))))
+    (if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args args :shim (when (= cd "core::ptr::drop_glue") :drop-glue)}))))
 
 (defn callee-fact
   "Instance::try_resolve's callee as the helper writes it: {:kind :symbol :def :can-unwind :track-caller [:intrinsic] [:external]}
@@ -2350,8 +2356,18 @@
                                                      :symbol (instance-symbol {:def def :args (erase-regions args)}) :name name :kind :fn}
                                               ((:names (attrs-of def)) "track_caller") (assoc :track-caller true)))]))
          :callees (into {} (for [[txt ft] calls] [txt (try-fact #(callee-fact ft))]))
-         :fsyms (into {} (for [[txt [_ cd args]] calls :when (not (intrinsic? cd))]
-                           [txt (try-fact #(call-fsym cd args))]))})))))
+         :fsyms (into (into {} (for [[txt [_ cd args]] calls :when (not (intrinsic? cd))]
+                                 [txt (try-fact #(call-fsym cd args))]))
+                      ;; queue 493: a function item reified to a function pointer (Argument::new_display's `<T as Display>::fmt
+                      ;; as for<'a, 'b, 'c> fn(..)`): its instance's symbol by the constant's text, as build-program's facts do
+                      (for [{:keys [body]} bodies blk (:blocks body) st (:stmts blk)
+                            :when (and (seq? st) (= 'assign (first st)))
+                            :let [rv (nth st 2 nil)]
+                            :when (and (seq? rv) (= 'cast (first rv)) (str/starts-with? (str (second rv)) "PointerCoercion(ReifyFnPointer"))
+                            :let [o (nth rv 2) ft (when (and (seq? o) (= 'const (first o))) (:tc (meta (nth o 2 nil))))]
+                            :when (and (vector? ft) (= :fndef (first ft)) (not (intrinsic? (second ft))))
+                            :let [[_ cd args] ft]]
+                        [(second o) (try-fact #(call-fsym cd args))]))})))))
 
 (defn const-fsyms
   "C6: within build-program's bindings, the symbols of every function constant BODIES name, calls' and operands' (a function
@@ -2394,6 +2410,15 @@
     (tc/with-solver (solver-def)
       (fn [] (when (and (= :adt (first t)) (number? (second t)) (= [t] (vec (drop-glues t))))
                (local-drop-impl t))))))
+
+(defn drop-glue-info
+  "queue 483: drop_glue::<T>'s shim as a native library instance calls it (core::ptr::drop_in_place's body): {:needs-drop
+  :symbol} (the shim's symbol, as the vtables' drop entries and the collector's glue items name it)"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (let [t (erase-regions t)]
+               {:needs-drop (boolean (build/needs-drop? t)) :symbol (instance-symbol {:def (c/lang "drop_glue") :args [t] :shim :drop-glue})})))))
 
 (defn resolve-const
   "RF17: a local trait's associated constant D at ARGS (`<i32 as Zero>::ZERO`) resolved to the impl's constant, as

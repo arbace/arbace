@@ -428,6 +428,8 @@
 
 (defn- slice-len-fn? [d]
   (or (= d "core::slice::<impl [T]>::len")
+      ;; queue 483: a native library instance's callee, by its def path (std-names' slice_len_fn, also outside a run)
+      (= d "core::slice::{impl#0}::len")
       (= d (try (c/lang "slice_len_fn") (catch Throwable _ ::none)))))
 
 (defn lower-slice-len-calls
@@ -840,8 +842,16 @@
         rest-text (when (and adt (string? text) (str/starts-with? text path)) (skip-generics (subs text (count path))))
         vname (when (and rest-text (str/starts-with? rest-text "::")) (subs rest-text 2))
         args (when (vector? targs) (mapv (fn [a] (if (and (seq? a) (= 'lt (first a))) [:re-erased] (:tc (meta a)))) targs))]
-    (if-not (and adt rest-text (or (= "" rest-text) (and vname (re-matches #"[A-Za-z_][A-Za-z0-9_]*" vname))) (every? some? args))
+    (cond
+      ;; queue 493: a crate-private ADT the interface does not know (alloc's `raw_vec::AllocInit`, core's
+      ;; `slice::sort::stable::drift::DriftsortRun`), without arguments: its def path, the export crate's name first, as
+      ;; rustc prints an item no public path reaches (`alloc::raw_vec::AllocInit::Uninitialized`)
+      (and (nil? adt) *export-crate* (string? path) (string? text) (str/starts-with? text path) (empty? targs)
+           (not (#{"core" "alloc" "std"} (first (str/split path #"::")))))
+      (with-meta (list 'adt (str *export-crate* "::" text) kind fields (str *export-crate* "::" path) variant targs) (meta y))
+      (not (and adt rest-text (or (= "" rest-text) (and vname (re-matches #"[A-Za-z_][A-Za-z0-9_]*" vname))) (every? some? args)))
       y
+      :else
       (try
         (let [vid (if vname (str adt "::" vname) adt)
               t (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path vid args))
@@ -1059,6 +1069,15 @@
              (if val (with-meta (apply list (concat (take 3 x) [val])) (meta x)) x)))))
      body)))
 
+(defn- generic-zst?
+  "queue 493: a generic body's local type zero-sized whatever its parameters (rustc's layout_of on the generic type: PhantomData<T>
+  and tuples of such), for RemoveZsts' locals"
+  [g]
+  (case (first g)
+    :adt (= "core::marker::PhantomData" (second g))
+    :tuple (every? generic-zst? (second g))
+    false))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
@@ -1072,12 +1091,19 @@
               (set (for [i (range (count gt))
                          :let [g (nth gt i) t (nth it i nil)]
                          :when (and t (vector? g) (#{:adt :array :closure :tuple} (first g))
-                                    (not-any? #(and (vector? %) (= :param (first %))) (tree-seq coll? seq g)))
+                                    ;; queue 493: a parameter's type whose layout needs no parameter's (PhantomData<T>, layout_of
+                                    ;; generic: RawVec::new_in's and Unique::cast's `_marker`, the record's `const <zst>`)
+                                    (or (not-any? #(and (vector? %) (= :param (first %))) (tree-seq coll? seq g))
+                                        (generic-zst? g)))
                          :when (= 0 (:size (try (*type-layout* t) (catch Throwable _ nil))))]
                      i)))]
-    ;; LowerIntrinsics again at the instance (its own port may have grown since the export)
-    {:def (:def entry) :args args :body (cond-> ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
-                                                 (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))
+    ;; LowerIntrinsics again at the instance (its own port may have grown since the export); queue 483: then LowerSliceLenCalls,
+    ;; rustc's optimized_mir's (the record's: `_n = PtrMetadata(copy _s)` where the built body calls `<[T]>::len`, str::len's and
+    ;; every slice method's), as runtime-body lowers the program's own bodies: the instance is our lowering of what codegen
+    ;; takes, so the call is gone before the compare and before its callees are closed (slice_len_fn has no native body)
+    {:def (:def entry) :args args :body (cond-> (let [lb ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
+                                                          (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))]
+                                                  (update lb :blocks lower-slice-len-calls))
                                           (seq zst) (assoc :zst-locals zst))})))
 
 (defn- drop-shim-body
@@ -1151,33 +1177,61 @@
 
 (defn- plain-place [p] (when (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p)))
 
+(def ^:dynamic *freeze-ty?*
+  "queue 493: within pack-compare, whether a local's type form is Freeze (the instance's types, by passes/freeze? on their :tc):
+  SsaLocals keeps a shared-borrowed local SSA only then; nil (not known Freeze) elsewhere"
+  nil)
+
+(defn- o0-ssa
+  "queue 493: SsaLocals' facts (ssa.rs) over BODY's forms, in the MIR visitor's places (passes' stmt-places, term-places): a
+  place through a deref a use of its local; a plain store or call destination a definition; any other mutating use, a raw
+  borrow, a mutable borrow, a drop: not SSA; a shared or mutable borrow not through a deref observes the address (borrowed),
+  and a borrowed local not Freeze is not SSA: {:ssa? (fn [local]) :borrowed #{local}}"
+  [body]
+  (let [sp @(requiring-resolve 'arbace.rust.front.passes/stmt-places)
+        tp @(requiring-resolve 'arbace.rust.front.passes/term-places)
+        pls (concat (for [b (:blocks body) s (:stmts b) pc (sp s)] pc)
+                    (for [b (:blocks body) :when (:term b) pc (tp (:term b))] pc))
+        defs (java.util.HashMap.) many (java.util.HashSet.) borrowed (java.util.HashSet.)]
+    (doseq [[p ctx] pls :when (and (seq? p) (= 'place (first p)) (number? (second p)))
+            :let [l (second p) proj (drop 2 p)]
+            :when (not= '(deref) (first proj))]
+      (cond (and (empty? proj) (#{[:mut :store] [:mut :call]} ctx)) (.put defs l (inc (long (or (.get defs l) 0))))
+            (#{[:nonmut :shared-borrow]} ctx) (.add borrowed l)
+            (#{[:mut :borrow] [:nonmut :raw-borrow] [:mut :raw-borrow]} ctx) (do (.add borrowed l) (.add many l))
+            (= :mut (first ctx)) (.add many l)
+            :else nil))
+    (let [nargs (long (or (:args body) 0))
+          ty (fn [l] (:ty (nth (:locals body) l nil)))]
+      {:borrowed (set borrowed)
+       :ssa? (fn [l] (and (not (.contains many l))
+                          (if (<= 1 (long l) nargs) (nil? (.get defs l)) (= 1 (.get defs l)))
+                          (or (not (.contains borrowed l)) (boolean (and *freeze-ty?* (*freeze-ty?* (ty l)))))))})))
+
 (defn- o0-copy-prop
-  "CopyProp's case at -O0 (copy_prop.rs): a temporary defined once by `_t = move|copy _s` (S a local, neither borrowed, S
-  never assigned after its definition) is S: its uses renamed (a move of it a copy of S, as rustc's optimized MIR writes it)
-  and its definition dropped; [body changed?]"
+  "CopyProp's case at -O0 (copy_prop.rs, ssa.rs' compute_copy_classes): a local defined once by `_t = move|copy _s`, both SSA,
+  of one type, _t not borrowed (queue 493: _s may be, a shared borrow of a Freeze type keeping it SSA: alloc_impl_runtime's
+  `alloc(copy _1)` with `&_1` taken for `size()`; a borrow through a deref is a use), is S: its uses renamed, a move of either a
+  copy (Replacer's unified locals; a move through a deref kept) and its definition dropped; [body changed?]"
   [body]
   (let [blocks (:blocks body)
         stmts (for [b blocks s (:stmts b)] s)
-        defs (frequencies (concat (keep #(when (and (seq? %) (= 'assign (first %))) (plain-place (second %))) stmts)
-                                  (keep #(let [t (:term %)] (when (and (seq? t) (= 'call (first t))) (plain-place (nth t 3 nil)))) blocks)))
-        borrowed (set (for [f (tree-seq coll? seq blocks) :when (and (seq? f) (#{'ref 'rawptr} (first f)))
-                            :let [p (last f)] :when (and (seq? p) (= 'place (first p)))]
-                        (second p)))
-        nargs (long (or (:args body) 0))
+        {:keys [ssa? borrowed]} (o0-ssa body)
+        lt (fn [l] (:ty (nth (:locals body) l nil)))
         cand (first (for [s stmts
                           :when (and (seq? s) (= 'assign (first s)))
                           :let [t (plain-place (second s)) rv (nth s 2 nil)]
-                          :when (and t (> (long t) nargs) (= 1 (get defs t)) (not (borrowed t))
+                          :when (and t (not= 0 t) (ssa? t) (not (borrowed t))
                                      (seq? rv) (= 'use (first rv)) (seq? (second rv)) (#{'move 'copy} (first (second rv))))
                           :let [src (plain-place (second (second rv)))]
-                          :when (and src (not= src t) (not (borrowed src)) (not= 0 src)
-                                     (if (<= (long src) nargs) (zero? (get defs src 0)) (= 1 (get defs src))))]
+                          :when (and src (not= src t) (not= 0 src) (ssa? src) (some? (lt t)) (= (lt t) (lt src)))]
                       [s t src]))]
     (if-not cand
       [body false]
       (let [[s t src] cand
-            ren (fn ren [x] (cond (and (seq? x) (= 'move (first x)) (seq? (second x)) (= t (second (second x))))
-                                  (list 'copy (map-locals (second x) #(if (= % t) src %)))
+            ren (fn ren [x] (cond (and (seq? x) (= 'move (first x)) (seq? (second x)) (#{t src} (second (second x)))
+                                       (not= '(deref) (nth (second x) 2 nil)))
+                                  (list 'copy (second x))
                                   (seq? x) (apply list (map ren x))
                                   (vector? x) (mapv ren x)
                                   :else x))
@@ -1216,12 +1270,22 @@
   whose type is _b's is `_d = copy _b`; [body changed?]"
   [body]
   (let [lt (mapv :ty (:locals body)) changed (atom false)
+        ;; queue 493: simplify_cast: a cast to its operand's own type a use of the operand (cast_const's `self as _`:
+        ;; `_2 = copy _1 as *const () (PtrToPtr); _0 = move _2 as *const () (PtrToPtr)`, the record's one cast)
+        op-ty (fn [o] (when (seq? o)
+                        (case (first o)
+                          (copy move) (when-let [l (plain-place (second o))] (get lt l))
+                          const (nth o 2 nil)
+                          nil)))
         f (fn [st]
             (if-let [[d rv] (and (seq? st) (= 'assign (first st)) (plain-place (second st)) [(plain-place (second st)) (nth st 2 nil)])]
               (let [pl (when (and (seq? rv) (#{'ref 'rawptr} (first rv))) (last rv))]
-                (if (and (seq? pl) (= 'place (first pl)) (= 3 (count pl)) (= '(deref) (nth pl 2)) (= (get lt d) (get lt (second pl))))
+                (cond
+                  (and (seq? pl) (= 'place (first pl)) (= 3 (count pl)) (= '(deref) (nth pl 2)) (= (get lt d) (get lt (second pl))))
                   (do (reset! changed true) (list 'assign (second st) (list 'use (list 'copy (list 'place (second pl))))))
-                  st))
+                  (and (seq? rv) (= 'cast (first rv)) (= 4 (count rv)) (some? (op-ty (nth rv 2))) (= (op-ty (nth rv 2)) (nth rv 3)))
+                  (do (reset! changed true) (list 'assign (second st) (list 'use (nth rv 2))))
+                  :else st))
               st))
         b (update body :blocks (fn [bs] (mapv (fn [x] (update x :stmts #(mapv f %))) bs)))]
     [b @changed]))
@@ -1333,6 +1397,48 @@
         b (update body :blocks (fn [bs] (mapv #(update % :term fold) bs)))]
     [b (not= (:blocks b) (:blocks body))]))
 
+(def ^:dynamic *switch-variants*
+  "queue 493: within pack-compare, the discriminants of an enum's inhabited variants (#{n}) for a discriminant's place, by
+  its local's type form and whether the place derefs it ([TY-FORM DEREF?]); nil where not known"
+  nil)
+
+(defn- o0-unreachable-enum-branching
+  "UnreachableEnumBranching (unreachable_enum_branching.rs, -O0's run_optimization_passes after RemoveZsts): a switch on
+  `_d = discriminant(P)` (the block's last statement, P a local or its deref) whose enum's inhabited variants are known: each
+  target of a value no variant has made unreachable, and an otherwise reached by at most one variant (and not already an
+  empty unreachable block) made the last variant's explicit target, then unreachable (one new block `unreachable`, the
+  patch's, appended); [body changed?]"
+  [body]
+  (if-not *switch-variants*
+    [body false]
+    (let [blocks (:blocks body) lt (fn [l] (:ty (nth (:locals body) l nil)))
+          unr (count blocks) used (atom false)
+          empty-unreachable? (fn [i] (let [b (nth blocks i nil)] (and b (empty? (:stmts b)) (= '(unreachable) (:term b)))))
+          patch (fn [b]
+                  (let [st (peek (vec (:stmts b))) t (:term b)]
+                    (or (when (and (not (:cleanup b)) (seq? st) (= 'assign (first st)) (seq? t) (= 'switch (first t))
+                                   (= (list 'move (second st)) (second t)))
+                          (let [rv (nth st 2 nil) pl (when (and (seq? rv) (= 'discriminant (first rv))) (second rv))
+                                l (when (and (seq? pl) (= 'place (first pl)) (number? (second pl))) (second pl))
+                                proj (when l (drop 2 pl))
+                                allowed (when (and l (or (empty? proj) (= ['(deref)] (vec proj))))
+                                          (try (*switch-variants* [(lt l) (boolean (seq proj))]) (catch Throwable _ nil)))]
+                            (when (set? allowed)
+                              (let [[_ op targets otherwise] t
+                                    left (reduce (fn [a [v _]] (disj a (bigint v))) (set (map bigint allowed)) targets)
+                                    dead (vec (keep-indexed (fn [i [v _]] (when-not (contains? (set (map bigint allowed)) (bigint v)) i)) targets))
+                                    repl (and (<= (count left) 1) (not (empty-unreachable? otherwise)))]
+                                (when (or (seq dead) repl)
+                                  (reset! used true)
+                                  (let [targets (cond-> (vec targets) (and repl (= 1 (count left))) (conj [(first left) otherwise]))
+                                        targets (reduce (fn [ts i] (assoc-in ts [i 1] unr)) targets dead)]
+                                    (assoc b :term (list 'switch op targets (if repl unr otherwise)))))))))
+                        b)))
+          bs (mapv patch blocks)]
+      (if @used
+        [(assoc body :blocks (conj bs {:stmts [] :term '(unreachable) :cleanup false})) true]
+        [body false]))))
+
 (defn o0-normalize
   "BODY as rustc's -O0 optimizations would leave it for the passes our runtime MIR stops before (RemoveStorageMarkers,
   RemoveZsts' unit assignments, SimplifyCfg-final, InstSimplify's reborrow, SingleUseConsts (OURS? alone: our body, not the
@@ -1346,6 +1452,9 @@
         _ (when (not= (:blocks b) (:blocks body)) (swap! kinds conj :storage))
         [b cz] (o0-remove-zsts b zst)
         _ (when cz (swap! kinds conj :zsts))
+        ;; queue 493: UnreachableEnumBranching, after RemoveZsts and before SimplifyCfg (rustc's order)
+        [b cu] (o0-unreachable-enum-branching b)
+        _ (when cu (swap! kinds conj :enum-branching))
         b2 ((requiring-resolve 'arbace.rust.front.passes/simplify-cfg) b {:preserve-switch-reads false})
         _ (when (not= (count (:blocks b2)) (count (:blocks b))) (swap! kinds conj :cfg))
         [b2 c2] (o0-inst-simplify b2)
@@ -1431,6 +1540,22 @@
                                                      :else x)))
                ours)
         po (prep ours) pr (prep rec)
+        ;; queue 493: the instance's local types Freeze or not (CopyProp's SSA of a shared-borrowed local), by their :tc
+        fz (into {} (for [l (:locals ours) :let [t (:tc (meta (:ty l)))] :when t]
+                      [(norm (:ty l)) (try (boolean ((requiring-resolve 'arbace.rust.front.passes/freeze?) t)) (catch Throwable _ false))]))
+        ;; queue 493: the enums' inhabited variants' discriminants (UnreachableEnumBranching), by the run's layouts of the
+        ;; instance's local types (and their pointees)
+        sv (when *type-layout*
+             (into {} (for [l (:locals ours) :let [t (:tc (meta (:ty l)))] :when (vector? t)
+                            [deref? et] [[false t] [true (when (#{:ref :ptr} (first t)) (last t))]] :when (vector? et)
+                            :let [lf (try (*type-layout* et) (catch Throwable _ nil)) ds (:discrs lf) vs (:variants lf)]
+                            :when (and (seq ds) (seq? vs))]
+                        [[(norm (:ty l)) deref?]
+                         (case (first vs)
+                           single (let [i (second vs)] #{(nth ds i i)})
+                           empty #{}
+                           multiple (set (keep-indexed (fn [i v] (when-not (:uninhabited v) (nth ds i))) (:variants (second vs))))
+                           nil)])))
         bl (fn [b f] (mapv (fn [x] (update x :stmts f)) (:blocks b)))
         lt (fn [b] (mapv :ty (:locals b)))
         cut (fn [x] (let [t (pr-str x)] (subs t 0 (min 160 (count t)))))]
@@ -1438,7 +1563,12 @@
       (and (= (bl po identity) (bl pr identity)) (= (lt po) (lt pr))) [:equal]
       (and (= (bl po strip-storage) (bl pr strip-storage)) (= (lt po) (lt pr))) [:equal-but-storage]
       :else
-      (let [[no ko] (o0-normalize po true (:zst-locals ours)) [nr _] (o0-normalize pr)
+      (let [outer *freeze-ty?*
+            fz? (fn [t] (if (contains? fz t) (fz t) (boolean (and outer (outer t)))))
+            outer-sv *switch-variants*
+            sv? (when (or (seq sv) outer-sv) (fn [k] (or (get sv k) (when outer-sv (outer-sv k)))))
+            [no ko] (binding [*freeze-ty?* fz? *switch-variants* sv?] (o0-normalize po true (:zst-locals ours)))
+            [nr _] (binding [*freeze-ty?* fz? *switch-variants* sv?] (o0-normalize pr))
             _ (when-let [d (System/getenv "RF_PACK_DUMP")]
                 (.mkdirs (File. ^String d))
                 (spit (str d "/" (Math/abs (hash [no nr])) ".edn") (with-out-str (prn :ours) (prn no) (prn :record) (prn nr))))]
@@ -1469,6 +1599,32 @@
             own (first (filter #(str/includes? (str %) "rust") fs))
             _ (when (System/getenv "RF_WHY_TRACE") (binding [*out* *err*] (println "why-trace:" (str e)) (doseq [f (take 40 fs)] (println "  at" (str f)))))]
         (str (.getName (class e)) (when-let [f (first fs)] (str " at " f)) (when (and own (not= own (first fs))) (str " from " own)))))))
+
+(def ^:dynamic *drop-glue-ok?*
+  "queue 483: within a run, whether a native library instance may call drop_glue::<T> (T concrete): the run's (native-run),
+  nil elsewhere (such a body stays the record's)"
+  nil)
+
+(defn- drop-glue-ok-fn
+  "queue 483: *drop-glue-ok?* for the run of N over the record's bodies: T's shim as the record has it, by mono's needs_drop
+  and symbol: a type that needs drop only when the record has its shim (`Shim(DropGlue(.., Some(T)))`) at mono's symbol, one
+  that needs none only when the record has no shim of it (its call the empty glue, a no-op); else the disagreement, a string
+  (queue 493: the refusal names it; the record's shim found by mono's symbol, as glue-shims finds it, the instance's text
+  printing T rustc's way, `[MaybeUninit<f64>; 10_usize]`, `Vec<i32, Global>`, a second key only)"
+  [n rec-bodies]
+  (let [glue (filter #(str/starts-with? (str (:instance %)) "Shim(DropGlue(") rec-bodies)
+        by-sym (into {} (for [b glue :when (string? (:symbol b))] [(:symbol b) b]))
+        by-text (into {} (for [b glue :let [[_ tt] (re-find #", Some\((.*)\)\)\)$" (str (:instance b)))] :when tt] [tt b]))]
+    (fn [t]
+      (let [{:keys [needs-drop symbol]} (try (mono/drop-glue-info n t) (catch Throwable _ nil))
+            tt (binding [c/*in-value* false] (c/print-ty t))
+            r (or (get by-sym symbol) (get by-text tt))]
+        (cond (nil? symbol) "mono refuses T"
+              needs-drop (cond (nil? r) "T needs drop, the record has no shim of it"
+                               (= symbol (:symbol r)) true
+                               :else (str "T needs drop, the record's shim is " (:symbol r) ", mono's " symbol))
+              r "T needs no drop, the record has its shim"
+              :else true)))))
 
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
@@ -1507,8 +1663,14 @@
                           ;; queue 448: a body calling drop glue (core::ptr::drop_in_place's `drop_glue::<T>()`, a shim rustc
                           ;; builds per type and leaves out when the type needs none) stays the record's: its callee is no item
                           ;; the module defines
-                          _ (when (some (fn [blk] (= "core::ptr::drop_glue" (second (call-of (:term blk))))) (:blocks (:body inst)))
-                              (throw (ex-info "a call of drop glue (a shim, the record's)" {})))
+                          ;; queue 483: unless the run's *drop-glue-ok?* finds the shim the call resolves to: the empty glue
+                          ;; (a no-op) where the record has no shim of the type, or the record's shim by mono's symbol
+                          _ (doseq [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when (= "core::ptr::drop_glue" (second ft))]
+                              (let [ok (if (and *drop-glue-ok?* (= 1 (count (nth ft 2 nil)))) (*drop-glue-ok?* (first (nth ft 2))) "no run's answer")]
+                                (when-not (true? ok)
+                                  (throw (ex-info (str "a call of drop glue (a shim, the record's): T "
+                                                       (try (binding [c/*in-value* false] (c/print-ty (first (nth ft 2)))) (catch Throwable _ "?"))
+                                                       ", " ok) {})))))
                           ;; queue 443: an instance-judged callee taken only when equal to one of the record's bodies of its def
                           _ (when (and (= :instance (:judge e)) (seq seen))
                               (let [rs (get rec-by-path def)
@@ -1530,7 +1692,8 @@
                                                           [cd0 cargs0])]
                                      ;; an intrinsic is codegen's; a function core's export has is built; one that is MIR-available
                                      ;; without a native body stops the root; any other is an external symbol (core's own object)
-                                     :when (and (string? cd) (not (mono/intrinsic? cd))
+                                     ;; (queue 483: drop glue is a shim, no body of its def's: *drop-glue-ok?*'s above)
+                                     :when (and (string? cd) (not (mono/intrinsic? cd)) (not= cd "core::ptr::drop_glue")
                                                 (or (get nc cd) (mono/mir-available? cd)))]
                                  [cd (vec cargs)])]
                       ;; a callee without an equal native body that the record has a body of: the record's (the pack's fallback)
@@ -1685,6 +1848,7 @@
                     ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))
+                                         *drop-glue-ok?* (drop-glue-ok-fn n rec-bodies)
                                          *normalize-ty* (fn [t] (mono/normalize-ty n t))
                                          *resolve-call* (fn [d args] (mono/resolve-call n d args))
                                          ;; queue 464: the program's closures as the instances' arguments, written and laid out
