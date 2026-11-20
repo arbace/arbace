@@ -9234,3 +9234,16 @@ file), the record run (`--record-results`), the planted bug and the controls aga
 the reference: (8581 + 1926 + 0.5 x 39) / 10546 = 0.998, the 5 own-known files at 0.5; C's 69 of 72 own: (14936 + 0.5 x 79) / 15015 =
 0.997), and reverting 910cf7a77.
 
+Update (2026-11-20, evening; mac/cpp-rt-own-1120 c1c2badd8 merged: a constant array an LLVM array): the 15 units generate afresh
+(one process, 3.2 GB; charset's lowered C 1.6 MB), the library's read takes 15 minutes at a 3.7 GB peak under the 8 GiB cap, and 31
+of its 32 units read. expr.cc's does not: `label undefined: b$lbl$_119`, 14 `goto`s of cpp_classify_number to a label its IR never
+defines (`br label %lbl.119`, the function's label being `lbl.syntax_error1305`). Reduced: a `goto` whose label name a macro's
+expansion writes gets a label of no name (`lbl.11`), the same `goto` written in place the function's (`lbl.bad18`):
+
+    void f (int);
+    #define ERR(x) do { f (x); goto bad; } while (0)
+    int g (int a) { if (a == 1) ERR (1); if (a == 2) goto bad; return 0; bad: return 1; }
+
+(`arbace.cpp.codegen gen-batch`, c++17: `br label %lbl.11` and `br label %lbl.bad18`, only `lbl.bad18:` defined; without the macro
+the `do ... while (0)` is right). libcpp's SYNTAX_ERROR macros are such gotos. The code generator's (cpp-rt-own's) to fix.
+

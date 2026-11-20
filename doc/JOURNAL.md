@@ -13782,3 +13782,13 @@ measured against clang's record first, the differences explained); the code gene
   8 GiB with two threads and was still reading after 35 minutes in one (stopped); synthetic structs scale at about 50 KB and 2 ms a
   member (some 15 GB for charset). Asked of cpp-rt-own: a constant array of scalars as an LLVM array, lowered to a C array. No fact,
   record or score moved: `bin/crops-score --judge --strict` 0 problems, `bin/gate --plan` exit 0 (with the flip, before the hold).
+
+## 2026-11-20: pp-ref's own build, after cpp-rt-own-1120's array fix: expr.cc's macro-written gotos (pp-ref-1120)
+
+Merged mac/cpp-rt-own-1120 at c1c2badd8 (a constant array an LLVM array). `bin/repr-cpp ppref build` under the 8 GiB cap generated
+the 15 units afresh (all of them, not charset alone: the merged code generator and parser changed the other units' output too, and a
+build at its key must be what a fresh build makes; 3.2 GB, charset's lowered C 1.6 MB from 10.2), read 31 of 32 library units in 15
+minutes at a 3.7 GB peak, and stopped at expr.cc's: `label undefined: b$lbl$_119`. The IR's 14 `goto syntax_error`s of
+cpp_classify_number branch to `lbl.119`, which no block defines (the label is `lbl.syntax_error1305`). Reduced to three lines
+(doc/cpp/CPP-SURVEY.md, "Blocked", its update): a `goto` whose label name a macro's expansion writes gets a label of no name. Reported
+to the main session for cpp-rt-own; nothing else changed (no record, fact or score; the gate's flip still held by 910cf7a77).
