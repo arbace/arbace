@@ -204,6 +204,76 @@
                (syntax-error (:msg (ex-data e)) (let [d (ex-data e)] (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)]))))
                (str "SystemError: pyi's compiler: " (str/replace (str (.getMessage e)) #"\n" " ")))))))))))
 
+;; ---- _symtable (queue 465): the symbol table of a source, from the compiler's own scope analysis (arbace.python.scope)
+
+(defn- json-str [^StringBuilder sb ^String s]
+  (.append sb \")
+  (dotimes [i (.length s)]
+    (let [c (.charAt s i)]
+      (case c
+        \" (.append sb "\\\"")
+        \\ (.append sb "\\\\")
+        (if (or (< (int c) 0x20) (> (int c) 0x7e))
+          (.append sb (format "\\u%04x" (int c)))
+          (.append sb c)))))
+  (.append sb \"))
+
+(def ^:private block-types
+  "_Py_block_ty (Include/internal/pycore_symtable.h): the scope table's block types"
+  {:function 0 :class 1 :module 2 :annotation 3 :type-alias 4 :type-parameters 5 :type-variable 6})
+
+(defn- block-json [^StringBuilder sb b]
+  (let [m @b
+        syms (:symbols m)
+        names (concat (:order m) (remove (set (:order m)) (sort (keys syms))))]
+    (.append sb "{\"type\":") (.append sb (str (block-types (:type m))))
+    (.append sb ",\"name\":") (json-str sb (str (:name m)))
+    (.append sb ",\"lineno\":") (.append sb (str (or (:lineno m) 0)))
+    (.append sb ",\"nested\":") (.append sb (if (:nested m) "1" "0"))
+    (.append sb ",\"symbols\":[")
+    (doseq [[i k] (map-indexed vector (filter #(contains? syms %) names))]
+      (when (pos? i) (.append sb ","))
+      (.append sb "[") (json-str sb (str k)) (.append sb ",") (.append sb (str (get syms k))) (.append sb "]"))
+    (.append sb "],\"varnames\":[")
+    (doseq [[i v] (map-indexed vector (:varnames m))]
+      (when (pos? i) (.append sb ","))
+      (json-str sb (str v)))
+    (.append sb "],\"children\":[")
+    (doseq [[i c] (map-indexed vector (:children m))]
+      (when (pos? i) (.append sb ","))
+      (block-json sb c))
+    (.append sb "]}")))
+
+(defn- symtable-answer
+  "_symtable.symtable's answer (mode \"symtable:START\", START exec, eval or single): \"SYMTABLE:\" and the top block as
+  JSON (each block's type, name, lineno, nested, symbols in their order with their final flags, varnames, children), as
+  Python/symtable.c's _Py_SymtableStringObjectFlags builds it: the source parsed by START's rule, then the two passes;
+  else the parser's or the table's SyntaxError, as compile-uncached answers it"
+  [start source]
+  (with-reader-warnings
+   (fn [_]
+     (let [form (read-dump source)
+           lex-warnings (requiring-resolve 'arbace.repr.python.lex/*warnings*)
+           start-err (case start
+                       "eval" (when (or (cv/error-form? form)
+                                        (not (and (= 1 (count (second form))) (= 'expr (node-head (first (second form)))))))
+                                (with-bindings {lex-warnings nil} (eval-error source)))
+                       "single" (with-bindings {lex-warnings nil} (single-error source))
+                       nil)]
+       (cond
+         start-err start-err
+         (cv/error-form? form) (syntax-error (str (second form)) (nth form 2) (reader-loc form) (reader-kind form) (reader-text form))
+         :else
+         (try (let [sb (StringBuilder. "SYMTABLE:")]
+                (block-json sb (:top (sc/analyze form)))
+                (str sb))
+              (catch StackOverflowError _ too-deep-to-compile)
+              (catch Throwable e
+                (if (= 'SyntaxError (:class (ex-data e)))
+                  (let [d (ex-data e)]
+                    (syntax-error (:msg d) (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)])))
+                  (str "SystemError: pyi's symtable: " (str/replace (str (.getMessage e)) #"\n" " "))))))))))
+
 (defn main-answer
   "The main module's answer (bin/pyi run): the reader's warnings of TEXT-OF's reading, then its answer (queue 228);
   READ gives the dump, ANSWER the answer of its forms"
@@ -217,9 +287,11 @@
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
     (if (.exists cf)
       (slurp cf)
-      (let [r (try (if (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:") (= mode "source-error"))
+      (let [r (try (cond
+                     (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:") (= mode "source-error"))
                      (native-answer mode file source)
-                     (compile-uncached mode source))
+                     (str/starts-with? mode "symtable:") (symtable-answer (subs mode 9) source)
+                     :else (compile-uncached mode source))
                    (catch StackOverflowError _ too-deep-to-parse))]
         (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
                   (str/starts-with? r "SyntaxError: ") (str/starts-with? r "\u0001"))
