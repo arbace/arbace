@@ -2680,9 +2680,13 @@
 (defn- infer-stmts
   "A do block's statements in a monad: [type core]; mc a monad comprehension's (HF10-P43 (a): GHC.HsToCore.ListComp's
   dsMonadComp, as its statements desugar: the result return e, a guard qualifier guard b >> rest)"
-  [env stmts & [mc]]
+  [env stmts & [mc et]]
   (let [s (first stmts) v (lval s) more (rest stmts)
-        infer-stmts (fn [env stmts] (infer-stmts env stmts mc))]
+        ;; queue 395: et, the do block's expected type (checking mode, a plain do alone): the statements after a bind or a
+        ;; body statement have it (>>= and >> of GHC.Internal.Base: m b both), the last body statement is checked against
+        ;; it (GHC.Tc.Gen.Match's tcDoStmt pushes res_ty in), so a pattern's givens scope over the result's unification
+        ;; (binary's instance Binary (TypeRep a): `SomeTypeRep rep <- ...; case .. of Just HRefl -> pure rep`)
+        infer-stmts (fn [env stmts] (infer-stmts env stmts mc (when-not mc et)))]
     (case (con v)
       ;; HF10-P49 (a): a transform's or a parallel block's end (mc-inner): return of its binders' tuple, the binders and
       ;; the by expression typed here, where the inner statements bound them
@@ -2719,7 +2723,7 @@
                    (unify tb (fn-ty g (fn-ty tr r)))
                    [r (app* cb [(app* cg [ce]) cr])])
                (if (empty? more)
-                 (infer env (arg v 2))
+                 (if (and et (not mc)) [et (check-expr env (arg v 2) et)] (infer env (arg v 2)))
                  (let [[te ce] (infer env (arg v 2))
                        [tr cr] (infer-stmts env more)
                        [tb cb] (global-occ env ">>" "GHC.Internal.Base")
@@ -3417,7 +3421,9 @@
                (let [et (fresh-meta)]
                  (unify (list-ty et) t)
                  (second (infer-listcomp env (lval (arg v 3)) et)))
-               (let [[t1 c] (infer env e)] (unify t1 t) c)))
+               (if (= 'DoExpr (if (seq? fl) (first fl) fl))
+                 (let [[t1 c] (infer-stmts env (lval (arg v 3)) nil t)] (unify t1 t) c)
+                 (let [[t1 c] (infer env e)] (unify t1 t) c))))
       (let [[t1 c] (infer env e)] (unify-ea t1 t (when (= 'HsVar (con v)) e)) c)))))
 
 ;; a polytype expected (an argument of type KnownNat n => r, forall s. ST s a): GHC.Tc.Utils.Unify's tcSkolemise, the

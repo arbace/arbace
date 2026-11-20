@@ -2778,3 +2778,114 @@ haskell-stg-libs); a first `hsi image` crashed once on the compiler's parallel j
 NaN sign in no class (queue 325's arm64 reference is not on next), the same as before the branch. The classes stay as recorded
 (`:test-cmm`'s `:results` take `:fail` for the four whose references predate their sources) until the main host's records
 (HES95 (a)); `bin/hsi divergences` over the committed record: 909 programs, 812 pass, 0 unclassed.
+
+## As built: queue 333, hsi's speed for the `:speed` class (2026-11-17, branch `333-haskell-speed`, the Mac VM)
+
+Light work on linux/arm64 (the VM shared by up to 8 agents, its load 10 to 30 on 8 cores): no gate, no record. The goal was about
+twice hsi's speed on the `:speed` rows (kahan at 119 s of CPU against the 60 s limit). **Not met: 1.10 to 1.15 times** on the task's programs (1.27 on
+pidigits; the table below); what the profiles show and why the rest needs a change of representation, below.
+
+### The profile first
+
+Go's pprof (`hsi run --cpuprofile`) on kahan, n-body, queens, pidigits and spectral-norm, run to their end with no limit, and
+counts from an instrumented build (nodes evaluated by type, closures entered, allocations by site):
+- **The time is spread over the evaluator** and the allocator: on kahan `runSlice` 7 %, `fill` 7 %, `CaseE.cont` 6 %, `App.eval`
+  5 %, `CaseE.eval` 4 %, `Atom.get` 4 %, Go's allocation 15 %, the small slices' clears and copies (`memclrHasPointers`,
+  `typedslicecopy`, their bulk barrier) 8 %, Go's collector about 5 % (mark 2 %, sweep 3 %); no function above 8 %.
+- **kahan's inner iteration** (`-O0` code over `STUArray Double` and `Num Double` dictionaries, `fromIntegral` through
+  `Integer`): 225 nodes, 119 of them cases (94 on a value already evaluated), 30 closures entered, 19 thunks allocated and
+  updated, 8 partial applications made and 8 saturated, 52 returns through a frame, about 57 heap objects and 3.5 KB. At about
+  33 ns a node all in (the dispatch alone measures 2.6 ns on this host), the cost is each node's own work.
+- **Experiments that did not move the CPU time** (paired runs, within 1 to 2 %): GOGC 800 (2 to 3 %), the collector off (8 %:
+  the collector is not the cost), GOMAXPROCS 2 (queens, none), async preemption off (none), the updatable thunk's frame in the
+  arena instead of its own allocation (7 % fewer bytes, none), direct calls of the frequent nodes in `runSlice`'s loop (1 % slower:
+  PGO does it better), a fast path for an indexed algebraic case in `cont` (mixed, -1 % and +2 %).
+
+### What is in the tree
+
+- **The evaluator's allocations and copies** (`go/arbace/hs`): a generic call's arguments are read into a scratch buffer and
+  copied only where they outlive the call (`applyTmp`): a partial application is one object with its arguments (`newPAPN`, up to
+  four inline), a partial application saturated goes straight into the callee's frame (no combined slice); a binary primop of the
+  `Int#`, `Word#`, `Double#` and `Float#` families is computed from its two arguments as they are (`Primop.f2`: no argument buffer,
+  the same function of the same values, the generic conversions when a value is of another representation); a frame's, a
+  closure's and an update's few slots are copied and cleared one by one (`copyV`, `clearV`; `copy` and `clear` past 16); an update
+  looks the blackhole waiters' map up only when it has entries. 2 to 4 % alone.
+- **The profile-guided build** (`bin/hsi build`; `make hsi-pgo-record`): `go build -pgo=test/haskell/hsi/hsi.pgo` when the profile
+  is there (`HSI_PGO=0`: without, `.tmp/hsi/bin-nopgo`), the build's key with the profile's digest. `bin/hsi pgo [--record]` trains
+  it: `test/haskell/hsi/pgo.txt`'s 17 programs (the `:speed` rows and a few near the limit) run by `bin/hsi check` on the build
+  without the profile, each to 20 s of CPU with its profile (`bin/lib/hsi/check`'s `HSI_CPUPROFILE_DIR`: the soft CPU limit alone,
+  so SIGXCPU stops the run with its profile written, and ten times its wall time), merged by `go tool pprof -proto` (80,905 bytes,
+  recorded on linux/arm64). gc devirtualizes the nodes' `eval` and inlines `cont`, `fill`, the allocators. 7 to 10 % alone.
+- Not changed: the representation (a `Value` is Go's `any`, a scalar boxed, a constructor and its fields one object), the
+  scheduler's slices (the bounce count is the same, so preemption falls where it fell), the AOT level (`aot.go` untouched).
+
+### Results
+
+The rows run to their end on the base (next 498d7296f with 325's ppoll fix, `hsi-base`) and on this branch (`hsi-head`) side by
+side, CPU seconds (user + system, every thread), stdout and stderr against GHC's record:
+
+The task's four programs, three rounds, the base and the branch side by side in each (the one starting first alternating), every
+run to its end with no limit (the medians of user + system seconds, every thread, and of the head/base ratio per round):
+
+| program | base | branch | branch/base (3 rounds) | stdout | GHC's `-O0` run |
+|---|---|---|---|---|---|
+| nofib/imaginary/kahan | 101.35 | 88.85 | 0.878 (0.877, 0.878, 0.889) | GHC's (empty) | 7.19 |
+| testsuite/concurrent/should_run/setnumcapabilities001 | 55.72 | 47.93 | 0.866 (0.860, 0.866, 0.869) | GHC's (`14200`) | |
+| nofib/shootout/n-body | 111.54 | 102.22 | 0.908 (0.906, 0.908, 0.916) | GHC's | 9.85 |
+| nofib/imaginary/queens | 58.19 | 50.79 | 0.873 (0.863, 0.873, 0.874) | GHC's | 3.77 |
+
+One run each, side by side, before the batch's rule of three rounds (no further rows run): x2n1 70.67 to 60.65, spectral-norm 169.33
+to 152.97, pidigits 48.40 to 38.11, T22671 236.97 to 203.74, all printing GHC's stdout and stderr; k-nucleotide 409.63 to 374.57, status
+139 and an empty stdout as GHC's own run (GHC's program faults too), its stderr hsi's "C fault" message where GHC's is empty, on both.
+setnumcapabilities001's stderr is empty where GHC's non-threaded RTS writes 128,547 bytes of "setNumCapabilities: not supported in the
+non-threaded RTS": its `:rts` class, not its speed, keeps it failing (48 s now, under the limit on this host).
+
+The parts apart (paired short runs, the median ratio): the evaluator's changes alone 0.97 on kahan 5000 and 0.96 on queens 11;
+the profile-guided build alone (of the base, an earlier profile) 0.93 on kahan 5000; both 0.87.
+
+**Correctness**: `bin/hsi check --only @test/haskell/hsi/essential.txt` (123 programs) and `--corpus samples,synthetic` (63), on
+the base and on the branch: the same verdicts, and every program's stdout, stderr and status byte for byte the same (the check's
+`out/` directories compared); the controls fail as they must (four of five run; conc065's does not run in this selection). The rows
+above: the base's and the branch's outputs equal in every round. `bin/hsi divergences` 909 programs, 812 pass, 97 in a class, 0 not;
+`bin/hsi own-verdicts --check` current; `go vet` of the printed `arbace/hs` clean. On arm64 the five
+synthetic floating-point programs fail on both (arm64's NaN sign, 325g's arm64 reference not on this base).
+
+### Why not twice, and what would be
+
+hsi is about 15 times GHC's `-O0` code on kahan (GHC 7.2 s) and 1.6 times GHCi: twice would make it faster than GHCi's bytecode.
+What costs is the representation each node touches: a boxed `Value` for every primop's result, two words of interface per slot,
+the `Con` with its slice, the frames and their arena. The proposals below; the rows' outputs are already GHC's (every one run to
+its end above).
+
+### Proposed (HES97 onward)
+
+- **HES97 The `:speed` rows' limit.** Every row run to its end above but k-nucleotide and setnumcapabilities001 prints GHC's stdout
+  and stderr with its status: slow, not wrong. (a) a per-program CPU limit for the `:speed` rows, `HSI_CPU_CAPS` (ID=SECONDS, as
+  `HSI_MEM_CAPS`), about 1.5 times each row's CPU measured on the main host (here up to about 240 s, T22671; foundation, AtomicPrimops,
+  threads001 and threads007 not measured to their end here), judged as any program: those whose output is GHC's pass, `:speed` keeps
+  the rest; the night's hsi-check grows by the rows' CPU beyond 60 s each (here about 900 s of CPU, 5 minutes at 3 jobs); as GHC's
+  testsuite's own `run_timeout_multiplier` for its slow tests; (b) keep 60 s and the class until the representation changes
+  (HES99); (c) caps only within twice the limit (queens, x2n1, pidigits, kahan, n-body). **Recommended: (a)**. Whichever is chosen,
+  k-nucleotide's row is also its stderr (hsi's "C fault" message where GHC's faulting run writes none), and setnumcapabilities001
+  is `:rts`'s already (the non-threaded RTS's message).
+- **HES98 The profile.** (a) the profile committed (`test/haskell/hsi/hsi.pgo`, as built; 81 KB, re-recorded by `bin/hsi pgo
+  --record` on the main host, amd64, when the evaluator changes; a stale profile still builds, it only guides less); (b) trained at
+  each build, as `bin/arbace-go --pgo` (no binary in the tree; a build needs the packs and about 3 minutes); (c) no profile-guided
+  build. **Recommended: (a)**.
+- **HES99 The representation** (HES74 (b), widened): `I#`, `W#`, `D#`, `C#` as constructors of their own Go types holding the
+  scalar, and typed slots for a frame's unlifted binders (no boxing between primops in the interpreter, as AOT's typed locals);
+  every reader of `Con.F`, the marker, the FFI and `show` taught them. Estimate 1.3 to 1.6 times on these rows, 4 to 6 days, the
+  whole machine touched. (a) after HES97 (a), for the speed itself; (b) not now. **Recommended: (b)**, unless HES97 is (b).
+
+## As built: queue 482, queue 333 on next (2026-11-20, branch `482-hs-parked`, the Mac VM)
+
+333's three commits cherry-picked onto next 939037429 (after 430's and 446's changes to hsi), its ppoll fix left out (on next
+already). The evaluator's commit merged at the Go level (the three versions printed, `git merge-file`, `bin/hsi runtime read`):
+one conflict, `nodes.go`'s generic call, 446's dead tail frame given back (`arena.release`) kept and 333's `clearV` in its else
+branch. Decided 2026-11-17 (round 52): HES97 (a), HES98 (a), HES99 (b), not now. Measured on linux/arm64 (CPU seconds, user and
+system, every thread; next's hsi against this branch's with the committed profile, side by side, three interleaved rounds,
+medians; every run GHC's stdout, empty stderr, status 0, byte for byte the same on both): x2n1 67.43 to 59.40 (0.883), kahan
+101.27 to 91.07 (0.902), n-body 106.21 to 98.53 (0.928), spectral-norm 140.99 to 125.17 (0.889); the control queens 51.85 to
+45.71 (0.882); AtomicPrimops 49.39 to 44.53 and T21651 56.82 to 48.55 in one round. x2n1 under the 60 s limit in all three
+rounds (57.35 to 59.69), too near it to call; kahan, n-body and spectral-norm stay above (HES97 (a)'s caps). `bin/hsi runtime
+check`: every merged file a fixed point of print and read (fdwait.ae differs as on next, queue 333's finding).
