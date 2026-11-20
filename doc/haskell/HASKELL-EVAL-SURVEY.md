@@ -2707,12 +2707,26 @@ Rounds 2 and 3, on the main session's decisions (D-HSJ-1 (a), D-HSJ-2 (a), D-HSJ
   derived), cacheprof, fannkuch-redux and minimax.
 - D-HSJ-3 (a): `bin/lib/hsi/check` never passes a run killed at the check's limits (137, 152), even against a reference killed the
   same way; its status counts as differing, the reason `:limit`. fannkuch-redux and spectral/minimax, which passed by matching
-  GHC's killed record, are `:speed` (`test/haskell/divergences.edn`).
+  GHC's killed record, are `:speed` (`test/haskell/divergences.edn`): their rows of check-hsi.edn re-judged from the recorded
+  runs (a pass against the killed record meant status 137 and empty outputs: now `:fail :status 137 :differs [:status] :reason
+  :limit`; a fresh run waited behind ten heavy jobs on the big lock, so the night's hsi-check reruns them), eval 817 to 815 pass
+  (completeness 97.26 to 97.21); the control: without their class, bin/hsi divergences finds them in none.
 - Proofs, with no program run beyond the two killed ones' rerun: the judge's own path (`own_ref`, extracted) on the six new own
   verdicts against hsi's recorded runs, `:pass :judge :own` each; controls that fail: conc065 with status 1, conc064 (no
   `ignore_stdout`) listed `ignore`, fasta's digest with a digit changed (`own_ref` and `bin/hsi boot`), the n/a list's two
   (a program GHC ran as `no-run`, an n/a program also left) and the five defined outputs listed `undefined`.
 - Eval 846 of 879 judged programs by their own verdict, 33 by the record; the judge (7,534 + 0.5 x 229) / 7,763 = 0.98525.
+
+Round 4, the interface level (with the Mac's 488, 488-1 (a)): the round trip's own interface level over binary, text, process
+(queue 425's 71 units, predicted and never run before) and filepath (12, never judged: haskell-iface-own's package lists and
+`--only` lacked it) run on the main host: `lib-check --ifaces own` of ghc-internal and the 21 packages below, one at a time (peaks
+1.65-1.79 GiB), then `roundtrip --layout --iface-own` over the four: the tree level 83 of 83 in both layouts, the own interfaces 83 of
+83 equal in braces and in the layout, the controls differing (peak 1.73 GiB). filepath's 12 units merged into
+`roundtrip-ghc-9.14.1-iface-own-units.edn` (1,340), the step's lists and regex gaining filepath. 488-2: GHC.Internal.Bignum.Backend.GMP
+is no part of Arbace's target, whose ghc-internal is built with the native bignum backend (HES7 (a), HF10-P6 (a)): its two
+interface cases leave the judge's cases by the user's rule (its tree and text cases stay own). The own interface level now covers
+1,340 of the 1,345 units; the four `Setup.lhs` scripts stay on GHC's recorded interfaces (8 cases). The judge (7,700 + 0.5 x 61) /
+7,761 = 0.99607; Haskell's independence 79.92.
 
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
