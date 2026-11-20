@@ -2,7 +2,8 @@
   "AR4's object verdict (doc/asm/ARM64-SURVEY.md §4.4, ARS9 (c)'s own-verdict half): MC/AArch64's object tests judged by their
   own CHECK lines, no LLVM tool. Each test's RUN lines (continuations joined) that assemble with -filetype=obj for an ELF
   triple and pipe the object to a viewer give a run: the object is Arbace's (arbace.asm.arm64.obj), the viewer's text is
-  Arbace's view of it in that tool's format (llvm-objdump -d and -r, llvm-readobj -r: the stated bytes and relocations), and
+  Arbace's view of it in that tool's format (llvm-objdump -d and -r, llvm-readobj -r: the stated bytes and relocations; judge-rest:
+  llvm-dwarfdump --debug-frame's call frames, view-dwarfdump-frames), and
   the run's CHECK lines (its prefixes) are held to the view as FileCheck holds them (arbace.asm.amd64.decode-check's
   FileCheck subset). A disassembly's line is held to its stated bytes alone (offset and word, or the data's bytes): its text
   is the decoder's, AR3's (the class :decoder-text). A run that states an error (`not llvm-mc`) is met when the object
@@ -60,6 +61,8 @@
    ;; the values' text, read by arbace.asm.obj/defsyms when the run is assembled, inside its try (review 1111 (8): one
    ;; parser, llvm-mc's radix sensing)
    :defsym (o/defsym-of mc)
+   ;; judge-rest: --large-eh-encoding, --large-code-model: the FDEs' pointers in sdata8 (arbace.asm.obj/emit-frames!)
+   :large-eh (boolean (re-find #"(^|\s)--?large-(eh-encoding|code-model)\b" mc))
    :tool (cond (nil? viewer) :no-viewer
                (and (re-find #"^llvm-objdump" viewer) (= #{"-t" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :objdump-t
                (and (re-find #"^llvm-readelf" viewer) (= #{"-s" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :readelf-s
@@ -77,6 +80,8 @@
                     (every? #{"-S" "--sections" "--section-headers" "-r" "--relocs" "--relocations" "--symbols" "--syms" "-" "--elf-output-style=LLVM"
                               "--sd" "--section-data"}
                             (rest (str/split (str/trim viewer) #"\s+")))) :readobj
+               ;; judge-rest: llvm-dwarfdump's call frame dump (--debug-frame, its alias -eh-frame), nothing else
+               (re-matches #"llvm-dwarfdump\s+--?(debug-frame|eh-frame)\s+-" (str/trim viewer)) :dwarfdump-frames
                :else (keyword (str "view-" (first (str/split viewer #"\s+")))))})
 
 (defn runs
@@ -430,6 +435,306 @@
       (filter #(and (pos? (bit-and (long (:flags %)) elf/SHF_EXECINSTR)) (pos? (alength ^bytes (:data %)))) secs)))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
+;; llvm-dwarfdump's call frame view (judge-rest: --debug-frame and its alias -eh-frame), written again from llvm-project 23.1.5
+;; (Apache-2.0 WITH LLVM-exception): DWARFContext.cpp (dump's section headers, a section's relocations applied by
+;; RelocationResolver.cpp's resolveAArch64), DWARFDebugFrame.cpp (parse, CIE::dump, FDE::dump, createUnwindTable),
+;; LowLevel/DWARFDataExtractorSimple.h (getEncodedPointer), LowLevel/DWARFCFIProgram.{h,cpp} (the program's parse and its operands'
+;; types), DWARFCFIPrinter.cpp, LowLevel/DWARFUnwindTable.cpp (parseRows), DWARFUnwindTablePrinter.cpp, Dwarf.def and Dwarf.cpp
+;; (CallFrameString for AArch64), FormatProviders.h (formatv's styles); the registers named as llvm-dwarfdump names them
+;; (MCRegisterInfo's getLLVMRegNum and getName: TableGen's RegisterInfoEmitter maps a DWARF number back to the register that
+;; states it in AArch64RegisterInfo.td's DwarfRegNum, before the DwarfRegAlias ones take theirs)
+
+(def ^:private dwarf-reg-names
+  (merge (into {} (for [i (range 31)] [i (str "W" i)])) {31 "WSP" 46 "VG" 47 "FFR"}
+         (into {} (for [i (range 16)] [(+ 48 i) (str "PN" i)]))
+         (into {} (for [i (range 32)] [(+ 64 i) (str "B" i)]))
+         (into {} (for [i (range 32)] [(+ 96 i) (str "Z" i)]))))
+
+(defn- dwarf-reg-name ^String [^long r] (get dwarf-reg-names r (str "reg" r)))
+
+(defn- hex-min
+  "formatv's `{0:x-N}` (and fmt_align's right-aligned zeros): lower hex, no prefix, N digits at least."
+  ^String [^long v ^long w]
+  (let [s (Long/toHexString v)] (if (< (count s) w) (str (apply str (repeat (- w (count s)) \0)) s) s)))
+
+;; CallFrameString for AArch64 (Dwarf.def's DW_CFA_*: 0x2d is DW_CFA_AARCH64_negate_ra_state there, 0x2e's name is x86's alone)
+(def ^:private cfa-names
+  {0x00 "nop" 0x40 "advance_loc" 0x80 "offset" 0xc0 "restore" 0x01 "set_loc" 0x02 "advance_loc1" 0x03 "advance_loc2"
+   0x04 "advance_loc4" 0x05 "offset_extended" 0x06 "restore_extended" 0x07 "undefined" 0x08 "same_value" 0x09 "register"
+   0x0a "remember_state" 0x0b "restore_state" 0x0c "def_cfa" 0x0d "def_cfa_register" 0x0e "def_cfa_offset"
+   0x0f "def_cfa_expression" 0x10 "expression" 0x11 "offset_extended_sf" 0x12 "def_cfa_sf" 0x13 "def_cfa_offset_sf"
+   0x14 "val_offset" 0x15 "val_offset_sf" 0x16 "val_expression" 0x2c "AARCH64_negate_ra_state_with_pc"
+   0x2d "AARCH64_negate_ra_state" 0x30 "LLVM_def_aspace_cfa" 0x31 "LLVM_def_aspace_cfa_sf"})
+
+;; CFIProgram::getOperandTypes: :address OT_Address, :code OT_FactoredCodeOffset, :offset OT_Offset, :sdata OT_SignedFactDataOffset,
+;; :udata OT_UnsignedFactDataOffset, :reg OT_Register, :as OT_AddressSpace
+(def ^:private cfa-operands
+  {0x01 [:address] 0x40 [:code] 0x02 [:code] 0x03 [:code] 0x04 [:code] 0x0c [:reg :offset] 0x12 [:reg :sdata] 0x0d [:reg]
+   0x30 [:reg :offset :as] 0x31 [:reg :sdata :as] 0x0e [:offset] 0x13 [:sdata] 0x07 [:reg] 0x08 [:reg] 0x80 [:reg :udata]
+   0x05 [:reg :udata] 0x11 [:reg :sdata] 0x14 [:reg :udata] 0x15 [:reg :sdata] 0x09 [:reg :reg] 0xc0 [:reg] 0x06 [:reg]
+   0x2e [:offset]})
+
+(defn- frame-relocs
+  "The relocations of the section at index `i` as DWARFContext records them for a DWARF section: offset -> its value
+  (resolveAArch64 over the symbol's value, the addend and the place; a type it does not support left out, the data as it is;
+  the last at an offset its value, AArch64's resolver ignoring the data)."
+  [o ^long i]
+  (into {} (for [r (:relocs o) :when (= i (long (:target r)))
+                 :let [y (when (pos? (long (:sym r))) (nth (:symbols o) (:sym r) nil))
+                       s (long (if y (:value y) 0)) a (long (:addend r)) p (long (:offset r)) sa (unchecked-add s a)
+                       v (case (long (:type r))
+                           (257 1029) sa
+                           258 (bit-and sa 0xffffffff)
+                           260 (unchecked-subtract sa p)
+                           261 (bit-and (unchecked-subtract sa p) 0xffffffff)
+                           262 (bit-and (unchecked-subtract sa p) 0xffff)
+                           nil)]
+                 :when v]
+             [p v])))
+
+(defn- parse-frames
+  "DWARFDebugFrame::parse over the section's bytes `d` (`rel` its relocations, `eh?` .eh_frame's format): its entries ({:cie? ...}),
+  or :error when the parse fails (llvm-dwarfdump reports it and dumps no entry). Throws ::unbuilt on what this view does not
+  print (DWARF64, a DWARF expression)."
+  [^bytes d rel eh?]
+  (let [n (alength d)
+        pos (volatile! 0)
+        bad (fn [] (throw (ex-info "frame parse" {::parse true})))
+        u (fn [^long off ^long size]
+            (when (> (+ off size) n) (bad))
+            (loop [i 0 v 0] (if (= i size) v (recur (inc i) (bit-or v (bit-shift-left (bit-and (long (aget d (+ off i))) 0xff) (* 8 i)))))))
+        take! (fn [^long size] (let [p (long @pos) v (u p size)] (vreset! pos (+ p size)) v))
+        ;; getRelocatedValue: the data, or the relocation's value at its offset
+        rtake! (fn [^long size] (let [p (long @pos) v (u p size)] (vreset! pos (+ p size)) (long (get rel p v))))
+        uleb! (fn [] (loop [v 0 sh 0] (let [b (take! 1) v (if (< sh 64) (bit-or v (bit-shift-left (bit-and b 0x7f) sh)) v)]
+                                             (if (bit-test b 7) (recur v (+ sh 7)) v))))
+        sleb! (fn [] (loop [v 0 sh 0] (let [b (take! 1) v (if (< sh 64) (bit-or v (bit-shift-left (bit-and b 0x7f) sh)) v) sh (+ sh 7)]
+                                             (cond (bit-test b 7) (recur v sh)
+                                                   (and (< sh 64) (bit-test b 6)) (bit-or v (bit-shift-left -1 sh))
+                                                   :else v))))
+        cstr! (fn [] (let [p (long @pos) e (loop [j p] (cond (>= j n) (bad) (zero? (aget d j)) j :else (recur (inc j))))]
+                       (vreset! pos (inc e)) (String. d (int p) (int (- e p)) "ISO-8859-1")))
+        ;; getEncodedPointer: the value by the encoding's low nibble, PC-relative ones plus `base`; nil when not decoded
+        enc-ptr! (fn [^long enc ^long base]
+                   (when-not (= enc 0xff)
+                     (let [old @pos
+                           v (case (bit-and enc 0x0f)
+                               0x00 (take! 8) 0x01 (uleb!) 0x09 (sleb!) 0x02 (take! 2) 0x03 (take! 4) 0x04 (take! 8)
+                               0x0a (let [x (take! 2)] (if (bit-test x 15) (- x 0x10000) x))
+                               0x0b (long (unchecked-int (rtake! 4)))
+                               0x0c (rtake! 8)
+                               nil)]
+                       (when v (case (bit-and enc 0x70) 0x00 v 0x10 (unchecked-add (long v) base) (do (vreset! pos old) nil))))))
+        cfis! (fn [^long end]
+                (loop [out []]
+                  (if (>= (long @pos) end)
+                    out
+                    (let [op (rtake! 1) prim (bit-and op 0xc0)]
+                      (if (pos? prim)
+                        (recur (conj out {:op prim :ops (if (= prim 0x80) [(bit-and op 0x3f) (uleb!)] [(bit-and op 0x3f)])}))
+                        (recur (conj out {:op op
+                                          :ops (case (int op)
+                                                 (0x00 0x0a 0x0b 0x2d 0x2c) []
+                                                 0x01 [(rtake! 8)]
+                                                 0x02 [(rtake! 1)] 0x03 [(rtake! 2)] 0x04 [(rtake! 4)]
+                                                 (0x06 0x07 0x08 0x0d 0x0e 0x2e) [(uleb!)]
+                                                 0x13 [(sleb!)]
+                                                 0x30 [(uleb!) (uleb!) (uleb!)]
+                                                 0x31 [(uleb!) (sleb!) (uleb!)]
+                                                 (0x05 0x09 0x0c 0x14) [(uleb!) (uleb!)]
+                                                 (0x11 0x12 0x15) [(uleb!) (sleb!)]
+                                                 ;; a DWARF expression's operations (DWARFExpressionPrinter): not printed by this view
+                                                 (0x0f 0x10 0x16) (throw (ex-info "DWARF expression" {::unbuilt true}))
+                                                 (bad))})))))))]
+    (try
+      (loop [entries [] cies {}]
+        (if (>= (long @pos) n)
+          entries
+          (let [start (long @pos)
+                ;; getInitialLength: too short or reserved, {0, DWARF32} and the offset left: a terminator
+                len (if (> (+ start 4) n) 0 (let [l (u start 4)] (if (>= l 0xfffffff0) (if (= l 0xffffffff) (throw (ex-info "DWARF64" {::unbuilt true})) 0) (do (vreset! pos (+ start 4)) (long (get rel start l))))))]
+            (if (zero? len)
+              (conj entries {:cie? true :offset start :length 0 :version 0 :aug "" :code 0 :data 0 :ra 0 :aug-data [] :cfis []})
+              (let [sstart (long @pos) end (+ sstart len)
+                    id (rtake! 4)
+                    e (if (= id (if eh? 0 0xffffffff))
+                        (let [version (take! 1) aug (cstr!) asize (if (< version 4) 8 (take! 1)) seg (if (< version 4) 0 (take! 1))
+                              code (uleb!) data (sleb!) ra (if (= version 1) (take! 1) (uleb!))
+                              st (volatile! {:fde-enc 0 :lsda-enc 0xff})]
+                          (when eh?
+                            (doseq [[i ch] (map-indexed vector aug)]
+                              (case ch
+                                \L (vswap! st assoc :lsda-enc (take! 1))
+                                \P (do (when (:personality @st) (bad))
+                                       (let [pe (take! 1)] (vswap! st assoc :personality (enc-ptr! pe 0))))
+                                \R (vswap! st assoc :fde-enc (take! 1))
+                                (\S \B \G) nil
+                                \z (do (when (pos? (long i)) (bad))
+                                       (let [l (uleb!)] (vswap! st assoc :aug-start (long @pos) :aug-end (+ (long @pos) l))))
+                                (bad)))
+                            (when-let [ae (:aug-end @st)] (when-not (= ae @pos) (bad))))
+                          (merge {:cie? true :offset start :length len :version version :aug aug :addr-size asize :seg-size seg
+                                  :code code :data data :ra ra
+                                  :aug-data (if-let [as (:aug-start @st)] (vec (for [j (range as (min n (long (:aug-end @st))))] (bit-and (long (aget d j)) 0xff))) [])}
+                                 @st))
+                        (let [cie (get cies (if eh? (unchecked-subtract sstart id) id))]
+                          (if eh?
+                            (do (when-not cie (bad))
+                                (let [init (or (enc-ptr! (:fde-enc cie) (long @pos)) 0) rng (or (enc-ptr! (:fde-enc cie) 0) 0)
+                                      lsda (when (seq (:aug cie))
+                                             (let [l (uleb!) ae (+ (long @pos) l)
+                                                   x (when-not (= 0xff (long (:lsda-enc cie))) (enc-ptr! (:lsda-enc cie) 0))]
+                                               (when-not (= ae @pos) (bad))
+                                               x))]
+                                  {:offset start :length len :cie-ptr id :init init :range rng :cie cie :lsda lsda}))
+                            (let [init (rtake! 8) rng (rtake! 8)] {:offset start :length len :cie-ptr id :init init :range rng :cie cie}))))
+                    e (assoc e :cfis (cfis! end))]
+                (when-not (= end @pos) (bad))
+                (recur (conj entries e) (if (:cie? e) (assoc cies start e) cies)))))))
+      (catch arbace.lang.ExceptionInfo ex (if (::parse (ex-data ex)) :error (throw ex))))))
+
+(defn- cfi-program-lines
+  "printCFIProgram: each instruction's name and operands (the advances' addresses from `addr`, an FDE's initial location)."
+  [cfis ^long code ^long data addr]
+  (let [at (volatile! addr)]
+    (mapv (fn [{:keys [op ops]}]
+            (str "  " (if-let [nm (cfa-names op)] (str "DW_CFA_" nm) "") ":"
+                 (apply str (map (fn [t v]
+                                   (let [v (long v)]
+                                   (case t
+                                     :address (do (vreset! at v) (str " " (Long/toHexString v)))
+                                     :offset (if (neg? v) (str " " v) (str " +" v))
+                                     :code (if (zero? code)
+                                             (str " " v "*code_alignment_factor")
+                                             (let [x (unchecked-multiply v code)]
+                                               (str " " x (when @at (str " to 0x" (Long/toHexString (vswap! at #(unchecked-add (long %) x))))))))
+                                     (:sdata :udata) (if (zero? data) (str " " v "*data_alignment_factor") (str " " (unchecked-multiply v data)))
+                                     :reg (str " " (dwarf-reg-name v))
+                                     :as (str " in addrspace" (Long/toUnsignedString v)))))
+                                 (cfa-operands op) ops))))
+          cfis)))
+
+(defn- unwind-rows
+  "parseRows: the rows the program `cfis` makes from `row` ({:addr :cfa LOC :regs {REG LOC}}, a LOC {:kind :reg :off :as :deref}),
+  [ROWS ROW]; throws ::rows on the errors createUnwindTable reports (no row printed then). `init` the CIE's register rules (nil
+  for a CIE's own program)."
+  [cfis code data row init]
+  (let [code (long code) data (long data)
+        err (fn [] (throw (ex-info "rows" {::rows true})))
+        fact (fn [v] (if (zero? data) (err) (long (unchecked-int (unchecked-multiply (long v) data)))))]
+    (loop [is cfis row row rows [] states []]
+      (if (empty? is)
+        [rows row]
+        (let [{:keys [op ops]} (first is) [a b c] ops
+              reg! (fn [r l] (assoc-in row [:regs r] l))
+              [row rows states]
+              (case (int op)
+                0x01 (do (when (<= (Long/compareUnsigned (long a) (long (or (:addr row) 0))) 0) (err))
+                         [(assoc row :addr a) (conj rows row) states])
+                ;; (a CIE's row has no address: LLVM's slideAddress leaves it so)
+                (0x40 0x02 0x03 0x04) (let [x (if (zero? code) (err) (unchecked-multiply (long a) code))]
+                                        [(if (:addr row) (update row :addr #(unchecked-add (long %) (long x))) row) (conj rows row) states])
+                (0xc0 0x06) (do (when (nil? init) (err))
+                                [(if-let [l (get init a)] (reg! a l) (update row :regs dissoc a)) rows states])
+                (0x80 0x05 0x11) [(reg! a {:kind :cfa :off (fact b) :deref true}) rows states]
+                (0x00 0x2e) [row rows states]
+                0x0a [row rows (conj states [(:cfa row) (:regs row)])]
+                0x0b (if (empty? states) (err) (let [[cfa regs] (peek states)] [(assoc row :cfa cfa :regs regs) rows (pop states)]))
+                0x2d (let [l (get-in row [:regs 34])]
+                       (cond (nil? l) [(reg! 34 {:kind :const :off 1}) rows states]
+                             (= :const (:kind l)) [(reg! 34 (update l :off #(bit-xor (long %) 1))) rows states]
+                             :else (err)))
+                ;; (the toggled rule is a copy LLVM does not store back: the row keeps its rule)
+                0x2c (let [l (get-in row [:regs 34])]
+                       (cond (nil? l) [(reg! 34 {:kind :const :off 3}) rows states]
+                             (= :const (:kind l)) [row rows states]
+                             :else (err)))
+                0x07 [(reg! a {:kind :undefined}) rows states]
+                0x08 [(reg! a {:kind :same}) rows states]
+                0x09 [(reg! a {:kind :reg :reg b :off 0}) rows states]
+                (0x14 0x15) [(reg! a {:kind :cfa :off (fact b)}) rows states]
+                0x0d [(assoc row :cfa (if (= :reg (:kind (:cfa row))) (assoc (:cfa row) :reg a) {:kind :reg :reg a :off 0})) rows states]
+                0x0e (if (= :reg (:kind (:cfa row))) [(assoc-in row [:cfa :off] (long (unchecked-int (long a)))) rows states] (err))
+                0x13 (if (= :reg (:kind (:cfa row))) [(assoc-in row [:cfa :off] (fact a)) rows states] (err))
+                0x0c [(assoc row :cfa {:kind :reg :reg a :off (long (unchecked-int (long b)))}) rows states]
+                0x12 [(assoc row :cfa {:kind :reg :reg a :off (fact b)}) rows states]
+                0x30 [(assoc row :cfa {:kind :reg :reg a :off (long (unchecked-int (long b))) :as c}) rows states]
+                0x31 [(assoc row :cfa {:kind :reg :reg a :off (fact b) :as c}) rows states])]
+          (recur (rest is) row rows states))))))
+
+(defn- loc-text
+  "printUnwindLocation."
+  ^String [{:keys [kind reg off as deref]}]
+  (let [off (long (or off 0))
+        s (case kind
+            :unspecified "unspecified" :undefined "undefined" :same "same"
+            :cfa (str "CFA" (cond (zero? off) "" (pos? off) (str "+" off) :else off))
+            :reg (str (dwarf-reg-name reg) (when-not (and (zero? off) (nil? as)) (str (when (>= off 0) "+") off (when as (str " in addrspace" as)))))
+            :const (str off))]
+    (if deref (str "[" s "]") s)))
+
+(defn- unwind-table-lines
+  "createUnwindTable (an FDE's when `fde` is given, else the CIE's) printed by printUnwindTable; none on its errors."
+  [cie fde]
+  (let [{:keys [code data]} cie]
+    (try
+      (let [rows (cond
+                   (nil? cie) (throw (ex-info "no CIE" {::rows true}))
+                   (and (empty? (:cfis cie)) (or (nil? fde) (empty? (:cfis fde)))) []
+                   :else (let [[crows row] (unwind-rows (:cfis cie) code data {:addr (:init fde) :cfa {:kind :unspecified} :regs (sorted-map)} nil)
+                               [frows row] (if fde (unwind-rows (:cfis fde) code data row (:regs row)) [[] row])]
+                           (cond-> (into crows frows)
+                             (or (seq (:regs row)) (not= :unspecified (:kind (:cfa row)))) (conj row))))]
+        (vec (for [r rows]
+               (str "  " (when (:addr r) (str "0x" (Long/toHexString (:addr r)) ": ")) "CFA=" (loc-text (:cfa r))
+                    (when (seq (:regs r)) (str ": " (str/join ", " (for [[g l] (:regs r)] (str (dwarf-reg-name g) "=" (loc-text l))))))))))
+      (catch arbace.lang.ExceptionInfo ex (if (::rows (ex-data ex)) [] (throw ex))))))
+
+(defn- frame-entry-lines
+  "CIE::dump and FDE::dump."
+  [e eh?]
+  (if (:cie? e)
+    (if (and eh? (zero? (long (:length e))))
+      [(str (hex-min (:offset e) 8) " ZERO terminator")]
+      (concat
+       [(str (hex-min (:offset e) 8) " " (hex-min (:length e) 8) " " (hex-min (if eh? 0 0xffffffff) 8) " CIE")
+        "  Format:                DWARF32"]
+       (when (and eh? (not= 1 (long (:version e)))) ["WARNING: unsupported CIE version"])
+       [(str "  Version:               " (:version e)) (str "  Augmentation:          \"" (:aug e) "\"")]
+       (when (>= (long (:version e)) 4) [(str "  Address size:          " (:addr-size e)) (str "  Segment desc size:     " (:seg-size e))])
+       [(str "  Code alignment factor: " (bit-and (long (:code e)) 0xffffffff)) (str "  Data alignment factor: " (unchecked-int (:data e)))
+        (str "  Return address column: " (unchecked-int (:ra e)))]
+       (when (:personality e) [(str "  Personality Address: " (hex-min (:personality e) 16))])
+       (when (seq (:aug-data e)) [(str "  Augmentation data:    " (apply str (map #(format " %02X" %) (:aug-data e))))])
+       [""] (cfi-program-lines (:cfis e) (:code e) (:data e) nil) [""] (unwind-table-lines e nil) [""]))
+    (let [cie (:cie e) code (long (or (:code cie) 0)) data (long (or (:data cie) 0))]
+      (concat
+       [(str (hex-min (:offset e) 8) " " (hex-min (:length e) 8) " " (hex-min (:cie-ptr e) 8) " FDE cie="
+             (if cie (hex-min (:offset cie) 8) "<invalid offset>")
+             " pc=" (hex-min (:init e) 8) "..." (hex-min (unchecked-add (long (:init e)) (long (:range e))) 8))
+        "  Format:       DWARF32"]
+       (when (:lsda e) [(str "  LSDA Address: " (hex-min (:lsda e) 16))])
+       (cfi-program-lines (:cfis e) code data (:init e)) [""] (unwind-table-lines cie e) [""]))))
+
+(defn view-dwarfdump-frames
+  "llvm-dwarfdump --debug-frame (-eh-frame, its alias) of an AArch64 object: the file's line, then .debug_frame's and .eh_frame's
+  dumps (each requested, so each headed even when absent), every CIE and FDE with its fields, its program and its unwind table.
+  nil when the object holds what this view does not print (a DWARF expression, DWARF64, a frame section twice or compressed)."
+  [o]
+  (try
+    (let [frame (fn [nm eh?]
+                  (let [ss (filter #(and (= nm (str/replace (:name %) #"^[._]+" "")) (not= elf/SHT_NOBITS (:type %))) (:sections o))]
+                    (when (or (> (count ss) 1) (some #(pos? (bit-and (long (:flags %)) 0x800)) ss))
+                      (throw (ex-info "frame section" {::unbuilt true})))
+                    (let [s (first ss)
+                          es (if s (parse-frames (:data s) (frame-relocs o (:index s)) eh?) [])]
+                      (concat ["" (str "." nm " contents:")]
+                              (when-not (= :error es) (cons "" (mapcat #(frame-entry-lines % eh?) es)))))))]
+      (when (= "aarch64" (:arch *target*))
+        (vec (concat [(str "-:\tfile format " (:format *target*))] (frame "debug_frame" false) (frame "eh_frame" true)))))
+    (catch arbace.lang.ExceptionInfo ex (if (::unbuilt (ex-data ex)) nil (throw ex)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
 ;; the CHECK lines
 
 (defn check-lines
@@ -573,7 +878,10 @@
       (and (= :no-viewer (:tool run)) (:stderr? run) (every? #(= "-NOT" (second %)) cs))
       (let [res (into {} (map (fn [[l rr]] [l rr]) (binding [dc/*vars* true] (dc/filecheck cs [] (:implicit-not run)))))]
         (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :not-found :fail :fail)]) cs))
-      (#{:objdump-d :objdump-r :readobj-r :readobj :objdump-t :readelf-s :readelf-arch :readelf-x :readelf} (:tool run))
+      ;; judge-rest: an object holding what the frame view does not print (a DWARF expression...): the view not built
+      (and (= :dwarfdump-frames (:tool run)) (nil? (view-dwarfdump-frames (elf/read-object (:bytes r)))))
+      (mapv (fn [[l]] [l :view-llvm-dwarfdump]) cs)
+      (#{:objdump-d :objdump-r :readobj-r :readobj :objdump-t :readelf-s :readelf-arch :readelf-x :readelf :dwarfdump-frames} (:tool run))
       (let [o (elf/read-object (:bytes r))
             view (case (:tool run)
                    :objdump-d (view-objdump-d o (boolean (re-find #"(^|\s)-[a-zA-Z]*r" (:viewer run))))
@@ -584,7 +892,8 @@
                    :readelf-s (view-readelf-s o)
                    :readelf-x (view-readelf-x o (second (re-find #"--hex-dump=(\S+)" (:viewer run))))
                    :readelf-arch (view-readelf-arch o)
-                   :readelf (view-readelf o (:viewer run)))
+                   :readelf (view-readelf o (:viewer run))
+                   :dwarfdump-frames (view-dwarfdump-frames o))
             ;; a disassembly's lines held to their bytes; the text alone is the decoder's
             cs2 (if (= :objdump-d (:tool run))
                   ;; a line dropped for its text: a -SAME after it is dropped with it, a -NEXT after it is held as a CHECK (its
@@ -609,12 +918,12 @@
   [^String path]
   (let [src (asm/latin1 path)
         rs (mapv #(assoc % :path path) (runs src))
-        asm (memoize (fn [implicit defsym] (try (obj/assemble-file path implicit (o/defsyms defsym))
+        asm (memoize (fn [implicit defsym large-eh] (try (obj/assemble-file path {:implicit implicit :defsym (o/defsyms defsym) :large-eh large-eh})
                                                 (catch arbace.lang.ExceptionInfo e
                                                   (if-let [c (:obj/unsupported (ex-data e))] {:unsupported c :what (.getMessage e)}
                                                     {:unsupported :crash :what (str e)}))
                                                 (catch Throwable e {:unsupported :crash :what (str e)}))))
-        res (mapcat #(try (judge-run src % (asm (boolean (:implicit-mapsyms %)) (:defsym %)))
+        res (mapcat #(try (judge-run src % (asm (boolean (:implicit-mapsyms %)) (:defsym %) (:large-eh %)))
                           (catch Throwable e (binding [*out* *err*] (println (str "repr-asm object-verdict: " path ": " e)))
                             (mapv (fn [[l]] [l :view-crash]) (check-lines src (:prefixes %)))))
                     rs)
@@ -622,7 +931,7 @@
         ;; a disassembly's text is the decoder's (AR3): beside the object's cases, not one of them
         text (get f :decoder-text 0)
         ;; judge-rest: the stated encodings of its -show-encoding runs, held to the object assembled without options
-        enc (try (judge-encodings src (asm false nil))
+        enc (try (judge-encodings src (asm false nil false))
                  (catch Throwable e (binding [*out* *err*] (println (str "repr-asm object-verdict: " path ": encodings: " e)))
                    [[0 :view-crash]]))
         fe (frequencies (map second enc))]
@@ -710,7 +1019,7 @@
   (str ";; repr/asm's arm64 object verdict (bin/repr-asm --arch arm64 object-verdict; doc/asm/ARM64-SURVEY.md, AR4): MC/AArch64's object\n"
        ";; tests (the corpus mc-aarch64-obj) assembled by Arbace (arbace.asm.arm64.obj), each object run's CHECK lines held to Arbace's\n"
        ";; view of the object in the run's viewer's format (llvm-objdump -d's bytes and relocations, -r, -t, llvm-readobj -r, -S, --symbols,\n"
-       ";; llvm-readelf -s, --hex-dump, --arch-specific; FileCheck's string variables, AR6), no LLVM tool:\n"
+       ";; llvm-readelf -s, --hex-dump, --arch-specific, llvm-dwarfdump --debug-frame; FileCheck's string variables, AR6), no LLVM tool:\n"
        ";; [CORPUS/NAME {:stated :met :by}], :by the unmet lines by class (test/asm/divergences-object-arm64.edn). Written by\n"
        ";; `bin/repr-asm --arch arm64 object-verdict --record`. Read with the Clojure reader.\n"))
 
@@ -751,7 +1060,7 @@
     "diagnostics" (let [src (asm/latin1 (first args)) r (obj/assemble-file (first args))]
                     (doseq [l (diagnostics src r)] (println l)))
     "lines" (let [src (asm/latin1 (first args))]
-              (doseq [run (runs src) [l res] (judge-run src (assoc run :path (first args)) (obj/assemble-file (first args) (boolean (:implicit-mapsyms run)) (o/defsyms (:defsym run))))
+              (doseq [run (runs src) [l res] (judge-run src (assoc run :path (first args)) (obj/assemble-file (first args) {:implicit (boolean (:implicit-mapsyms run)) :defsym (o/defsyms (:defsym run)) :large-eh (:large-eh run)}))
                       :when (not= res :pass)]
                 (println l res (nth (str/split-lines src) (dec (long l)))))
               (doseq [[l res] (judge-encodings src (obj/assemble-file (first args))) :when (not= res :pass)]
