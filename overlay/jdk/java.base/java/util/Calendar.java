@@ -94,7 +94,11 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
 
     transient boolean areAllFieldsSet;
     transient int[] stamp;
-    private transient int nextStamp = MINIMUM_USER_STAMP;
+    // serialized as jdk26u's (queue 466, JCS167): nextStamp not transient, serialVersionOnStream, the UID
+    private int nextStamp = MINIMUM_USER_STAMP;
+    static final int currentSerialVersion = 1;
+    private int serialVersionOnStream = currentSerialVersion;
+    static final long serialVersionUID = -1807547505821590642L;
 
     private boolean lenient = true;
     private TimeZone zone;
@@ -1044,6 +1048,67 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
 
     public int getActualMaximum(int field) {
         return getMaximum(field);
+    }
+
+    // jdk26u's serial form (queue 466, JCS167; transcribed from its writeObject and readObject): the time
+    // computed first; the zone written as it is, then a null where the JDK writes its ZoneInfo after a
+    // SimpleTimeZone stand-in (jrt's zones serialize themselves), so that a JDK reader finds its object; read
+    // back, the stamps from isSet, and a ZoneInfo following the fields taken as the zone
+    @java.io.Serial
+    private synchronized void writeObject(java.io.ObjectOutputStream stream) throws java.io.IOException {
+        if (!isTimeSet) {
+            try {
+                updateTime();
+            } catch (IllegalArgumentException e) {
+            }
+        }
+        stream.defaultWriteObject();
+        stream.writeObject(null);
+    }
+
+    @java.io.Serial
+    private void readObject(java.io.ObjectInputStream stream) throws java.io.IOException, ClassNotFoundException {
+        stream.defaultReadObject();
+        stamp = new int[FIELD_COUNT];
+        if (serialVersionOnStream >= 2) {
+            isTimeSet = true;
+            if (fields == null) {
+                fields = new int[FIELD_COUNT];
+            }
+            if (isSet == null) {
+                isSet = new boolean[FIELD_COUNT];
+            }
+        } else if (serialVersionOnStream >= 0) {
+            for (int i = 0; i < FIELD_COUNT; ++i) {
+                stamp[i] = isSet[i] ? COMPUTED : UNSET;
+            }
+        }
+        serialVersionOnStream = currentSerialVersion;
+        Object zi = null;
+        try {
+            zi = stream.readObject();
+        } catch (Exception e) {
+            if (!(e instanceof java.io.OptionalDataException)) {
+                if (e instanceof RuntimeException) {
+                    throw (RuntimeException) e;
+                } else if (e instanceof java.io.IOException) {
+                    throw (java.io.IOException) e;
+                } else if (e instanceof ClassNotFoundException) {
+                    throw (ClassNotFoundException) e;
+                }
+                throw new RuntimeException(e);
+            }
+        }
+        if (zi instanceof TimeZone) {
+            zone = (TimeZone) zi;
+        }
+        if (zone instanceof SimpleTimeZone) {
+            String id = zone.getID();
+            TimeZone tz = TimeZone.getTimeZone(id);
+            if (tz != null && tz.hasSameRules(zone) && tz.getID().equals(id)) {
+                zone = tz;
+            }
+        }
     }
 
     @Override
