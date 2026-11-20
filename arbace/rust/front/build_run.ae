@@ -1474,7 +1474,7 @@
     (if-let [[x y] (first (remove (fn [[x y]] (= x y)) (map vector a b)))] (first-diff x y) [a b])
     [a b]))
 
-(defn pack-compare
+(defn- pack-compare*
   "OURS (an instance's runtime MIR) against REC (the record's optimized body at -O0): [:equal], [:equal-but-storage] (equal once
   StorageLive, StorageDead and Nop are dropped: -O0's RemoveStorageMarkers), [:equal-o0 KINDS] (queue 443: equal once both are
   through o0-normalize: the -O0 passes our runtime MIR stops before, named), else [:differs WHERE] (after the normalization).
@@ -1581,6 +1581,38 @@
 
 (def ^:private pack-equal? #{:equal :equal-but-storage :equal-o0})
 
+(def ^:dynamic *drop-glue-at-run?*
+  "queue 498 (493-1 (b)): whether the run's runtime-body writes a drop of place P with its glue (drop_glue::<T>), a function of
+  the place form: rust-c6-1120's C6-4 (a) writes it with RF_DROP_GLUE=1, for a plain local's drop alone; without it every drop
+  of a native body is a plain branch, nothing dropped"
+  (fn [p] (and (= "1" (System/getenv "RF_DROP_GLUE")) (seq? p) (= 2 (count p)))))
+
+(defn- glue-of [t] (let [g (nth t 6 nil)] (when (and (seq? g) (= 'glue (first g))) g)))
+
+(defn drop-glue-missing
+  "queue 498 (493-1 (b)): the first of REC's drop terminators that runs drop glue (`(glue {:symbol ..})`, T needing drop) where
+  OURS runs none (our forms carry no glue, and *drop-glue-at-run?* says the run's runtime-body will not write it), as a
+  refusal's reason; else nil. A body equal to the record's but for that would drop nothing where rustc drops T"
+  [ours rec]
+  (let [drops (fn [b] (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'drop (first t)))] t))
+        rg (filter glue-of (drops rec))]
+    (when (seq rg)
+      (let [og (count (filter glue-of (drops ours)))
+            miss (remove #(*drop-glue-at-run?* (second %)) rg)]
+        (when (and (seq miss) (< og (count rg)))
+          (let [t (first miss)]
+            (str "the record's drop of " (pr-str (second t)) " runs drop glue " (:symbol (second (glue-of t)))
+                 ", ours none (the record's drops with glue: " (count rg) "; waiting on rust-c6-1120's drop glue)")))))))
+
+(defn pack-compare
+  "pack-compare* (below), and (queue 498, 493-1 (b)) a body equal to the record's but whose drops run no glue where the
+  record's do (drop-glue-missing) refused: [:differs WHY :drop]"
+  [ours rec]
+  (let [r (pack-compare* ours rec)]
+    (if-let [w (and (pack-equal? (first r)) (drop-glue-missing ours rec))]
+      [:differs w :drop]
+      r)))
+
 (defn- why
   "queue 474: a refusal's reason, its message, else (an exception without one: std::panicking::catch_unwind's root was kept
   with `()`) its class and first frame (queue 479: RF_WHY_TRACE=1 prints its first 40 frames to stderr, the batch's log)"
@@ -1596,6 +1628,10 @@
 (def ^:dynamic *drop-glue-ok?*
   "queue 483: within a run, whether a native library instance may call drop_glue::<T> (T concrete): the run's (native-run),
   nil elsewhere (such a body stays the record's)"
+  nil)
+
+(def ^:dynamic *drop-needs?*
+  "queue 498 (493-1 (b)): within a run, whether a concrete type needs drop (mono's needs_drop), nil elsewhere"
   nil)
 
 (defn- drop-glue-ok-fn
@@ -1664,6 +1700,22 @@
                                   (throw (ex-info (str "a call of drop glue (a shim, the record's): T "
                                                        (try (binding [c/*in-value* false] (c/print-ty (first (nth ft 2)))) (catch Throwable _ "?"))
                                                        ", " ok) {})))))
+                          ;; queue 498 (493-1 (b)): a core-judged callee (no record's body it is compared with) whose drop drops a
+                          ;; type that needs drop: ours runs no glue there (*drop-glue-at-run?*), so it stays the record's, waiting
+                          ;; on rust-c6-1120's drop glue (a place whose type is not known is refused too)
+                          _ (when (and *drop-needs?* (seq seen) (not= :instance (:judge e)))
+                              (doseq [blk (:blocks (:body inst)) :let [t (:term blk)]
+                                      :when (and (seq? t) (= 'drop (first t)) (nil? (glue-of t)) (not (*drop-glue-at-run?* (second t))))]
+                                (let [p (second t)
+                                      ty (try (if (= 2 (count p))
+                                                (:tc (meta (:ty (nth (:locals (:body inst)) (second p)))))
+                                                (mono/form->ty ((requiring-resolve 'arbace.rust.front.passes/place-ty-form) (:body inst) p)))
+                                              (catch Throwable _ nil))
+                                      nd (when ty (try (*drop-needs?* ty) (catch Throwable _ nil)))]
+                                  (when-not (false? nd)
+                                    (throw (ex-info (str "a drop of " (if ty (try (binding [c/*in-value* false] (c/print-ty ty)) (catch Throwable _ (pr-str p))) (pr-str p))
+                                                         (if (nil? nd) ", its need of drop not known" ", which needs drop")
+                                                         ": ours runs no drop glue (waiting on rust-c6-1120's)") {}))))))
                           ;; queue 443: an instance-judged callee taken only when equal to one of the record's bodies of its def
                           _ (when (and (= :instance (:judge e)) (seq seen))
                               (let [rs (get rec-by-path def)
@@ -1702,12 +1754,16 @@
               (let [crate (first (str/split (str def) #"::"))
                     inst? (= :instance (:judge (get nc def)))]
               (try (let [[root & extra] (close def (vec args) #{})
-                         [k w] (try (pack-compare (:body root) rec) (catch Throwable e [:differs (str "the compare: " (.getMessage e))]))]
+                         [k w drop?] (try (pack-compare (:body root) rec) (catch Throwable e [:differs (str "the compare: " (.getMessage e))]))]
                      (swap! lines conj (str (if inst? (str "pack-compare-" crate) "pack-compare") " " (name k) " " (:name rec) (when w (str " (" w ")"))))
                      (swap! pairs conj [root rec inst?])
                      ;; queue 443: an instance-judged body is taken only when it equals the record's instance (up to -O0's passes)
                      (when (and inst? (not (pack-equal? k)))
                        (throw (ex-info (str "differs from the record's instance: " w) {})))
+                     ;; queue 498 (493-1 (b)): a core-judged root (taken whatever the compare says) too, when the record's
+                     ;; body drops with glue where ours drops nothing
+                     (when-let [dw (and (not inst?) (or (when (= :drop drop?) w) (drop-glue-missing (:body root) rec)))]
+                       (throw (ex-info dw {})))
                      (swap! lines conj (str "native " (:name rec) (if inst?
                                                                     (str " (" crate "'s body built by Arbace, equal to the record's instance")
                                                                     " (core's body built by Arbace, equal to rustc's built MIR")
@@ -1842,6 +1898,7 @@
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))
                                          *drop-glue-ok?* (drop-glue-ok-fn n rec-bodies)
+                                         *drop-needs?* (fn [t] (mono/needs-drop n t))
                                          *normalize-ty* (fn [t] (mono/normalize-ty n t))
                                          *resolve-call* (fn [d args] (mono/resolve-call n d args))
                                          ;; queue 464: the program's closures as the instances' arguments, written and laid out

@@ -357,6 +357,30 @@
              "T needs drop, the record has no shim of it")
       (check "negative: T needs no drop by mono, but the record has its shim" (ok? {:needs-drop false :symbol "_RS"} [(shim "u8" "_RS")]) false)
       (check "negative: mono refuses T (no symbol)" (ok? nil []) false))
+    ;; queue 498 (493-1 (b)): a body equal to the record's but whose drop runs no glue where the record's does (T needing drop)
+    ;; refused, [:differs WHY :drop], until rust-c6-1120's runtime-body writes the glue (*drop-glue-at-run?*: a plain local's)
+    (let [st '(ty "std::string::String" (adt "std::string::String" "DefId(5:1 ~ alloc[1234]::string::String)" []))
+          unit '(ty "()" (tuple))
+          dropb (fn [p g] {:args 1 :locals [{:ty unit} {:ty st}] :debug []
+                           :blocks [{:cleanup false :stmts [] :term (apply list (concat (list 'drop p 1 '(continue) false nil) (when (some? g) [g])))}
+                                    {:cleanup false :stmts [] :term '(return)}]})
+          glue '(glue {:symbol "_RINvNtCs_4core3ptr9drop_glueNtNtCs_5alloc6string6StringE"})
+          o (dropb '(place 1) nil) r (dropb '(place 1) glue)
+          no-run (fn [_] false)]
+      (check "drop glue: the record's drop runs glue, ours none: refused, waiting on rust-c6-1120"
+             (let [[k w d] (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare o r))] [k (boolean (re-find #"waiting on rust-c6-1120" w)) d])
+             [:differs true :drop])
+      (check "negative: the record's drop without glue (T needs no drop: the empty glue)"
+             (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare o (dropb '(place 1) nil))) [:equal])
+      (check "negative: the run writes a plain local's glue (rust-c6-1120's RF_DROP_GLUE=1)"
+             (binding [br/*drop-glue-at-run?* (fn [p] (= 2 (count p)))] (br/pack-compare o r)) [:equal])
+      (check "negative: ours carries the glue" (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare (dropb '(place 1) glue) r)) [:equal])
+      (check "drop glue: a projected place's drop stays refused under the run's plain-local glue"
+             (nth (binding [br/*drop-glue-at-run?* (fn [p] (= 2 (count p)))]
+                    (br/pack-compare (dropb '(place 1 (deref)) nil) (dropb '(place 1 (deref)) glue))) 2 nil)
+             :drop)
+      (check "negative: a body that differs otherwise keeps its own reason"
+             (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare (assoc-in o [:locals 1 :ty] unit) r)) :differs))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)
