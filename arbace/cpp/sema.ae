@@ -747,7 +747,16 @@
       (wrap (resolve-type scope et)))
   (let [s (strip-type-attrs s0)]
   (if (re-find #"\((unnamed|anonymous) (union|struct|class|enum) at " s)
-    (let [t @*last-anon*] (cond-> t (re-find #"^const " s) (assoc :c true)))
+    (let [t @*last-anon*
+          ;; (cpp-rt-own: with a declarator after it, `struct (unnamed struct at f.cc:2:8)[NUM]`, the unnamed class in its place:
+          ;; libcpp's directives.cc `static struct { int len; const char *name; } embed_params[NUM_EMBED_PARAMS] = {...}`, a
+          ;; struct before, "several values for a scalar" or "conversion from a class to long" at embed_params[i])
+          rest (str/trim (str/replace s #"^(?:const\s+)?(?:(?:struct|class|union|enum)\s+)?\((?:unnamed|anonymous) (?:union|struct|class|enum) at [^)]*\)" ""))]
+      (if (and t (seq rest) (re-find #"^[\[*&(]" rest))
+        (let [sc (new-scope :block scope)]
+          (enter! sc "__arbace_unnamed" {:e :type :ty (cond-> t (re-find #"^const " s) (assoc :c true)) :pos -1})
+          (resolve-type-form sc (ct/parse-type (str "__arbace_unnamed " rest))))
+        (cond-> t (re-find #"^const " s) (assoc :c true))))
   (try (resolve-type-form scope (ct/parse-type s))
        (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e)))))))))
 
@@ -3954,7 +3963,11 @@
             derived (assoc :d2b [(class-id at) (class-id pt)])
             ;; (CX12, the checker: [over.ics.rank]/3.2.6 orders two such bindings by their cv-qualifiers' inclusion)
             (checking?) (assoc :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))))
-          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) (cond-> {:rank (if derived 2 0) :sub -1} derived (assoc :d2b [(class-id at) (class-id pt)]))
+          ;; (cpp-rt-own: with the cv-qualifiers it binds, [over.ics.rank]/3.2.6: std::get<0>(std::move(p)) of a pair, get(pair&&)
+          ;; before get(const pair&&), memory_resource.cc's, the latter taken before)
+          (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) (cond-> {:rank (if derived 2 0) :sub -1
+                                                                                       :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))}
+                                                                                derived (assoc :d2b [(class-id at) (class-id pt)]))
           ;; (cpp-s14: a class's conversion function binding the reference directly, [over.ics.ref]/1, [dcl.init.ref]/5.1.2)
           (and (not *no-user*) (class-id at) (not (or same derived)) (ref-conv-for (class-id at) p (:c at))) {:rank 3}
           ;; (CX12, the checker: a reference-related type losing a qualifier binds neither directly nor to a temporary,
@@ -5293,7 +5306,9 @@
                         (let [r (rv r)]
                           ;; (queue 460: [expr.assign]/3, the right operand implicitly converted, the checker's)
                           (when-not (abi/class? (abi/unq (:ty r))) (cx-implicit-scalar! r t :copy))
-                          (convert-scalar r t false)))]
+                          ;; (cpp-rt-own: a class's by its conversion function, [expr.assign]/3 with [over.match.conv]: a captureless
+                          ;; lambda assigned to a pointer to function, libcpp's errors.cc `m_pfile->cb.diagnostic = [] (...) { ... };`)
+                          (convert-scalar (if (and (abi/class? (abi/unq (:ty r))) (not (abi/class? t))) (user-conv ctx r t false) r) t false)))]
                 {:op :assign :l l :r r :ty (:ty l) :cat :lv}))))
 
 (defn- compound-node [o l r]
