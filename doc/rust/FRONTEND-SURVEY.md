@@ -5460,6 +5460,62 @@ again 28 min): **109 of 275 equal**, 85 differ, 78 refused (30 not exported, 14 
 unevaluated, 5 a callee, 2 the static `POW10`, 5 others), 3 symbols absent; the v0 refusals of crate-private impls and ADTs are gone
 (223 runtime bodies, 202 before), the control differing.
 
+The 85 that differ lead with one cause: **rustc 1.99's -O0 inlines `#[inline(always)]` callees in MIR** (std's IR has no call of
+`cast_unsigned`, `MaybeUninit::assume_init_ref` or `CStr::from_bytes_with_nul_unchecked`, each `#[inline(always)]`: their bodies
+are in the caller; ours calls them), which also moves the callers' locals (the first `alloca`s that differ); then
+`const_eval_select`'s runtime function (`cell::panic_already_borrowed::do_panic`'s `runtime`, where ours calls the wrapper). The next
+port is rustc_mir_transform's Inline as -O0 runs it, `#[inline(always)]` callees alone. (A float constant written as its double's
+bits against LLVM's decimal is now compared by value, `canon-fp`: none of the 85 moves by it alone.)
+
 Before it, the largest refusals were alloc's causes not yet carried to core's export: core-check's `export-entry` carries `:nested-attrs` but not
 alloc-check's crate-private `:fns`, `:impls`, `:traits` and `:adts` (a `<impl {}>` path, v0 of the type `[:err]`, a missing layout);
 then the named constants core's export leaves unevaluated (`U128_MAX_DEC_N`, `char::MAX_LEN_UTF8`) and the static `POW10`.
+
+### std's 325 items, first measure
+
+`lib-unit keys std` (325), `export std` (std's interface pass, two rounds, then the bodies: 1 h 6 min, 2.7 GB; 266 bodies exported),
+`build std` (2 min 32 s, 2.3 GB: 172 runtime bodies), `compare std` (1 min 17 s, 1.1 GB, std's units read as fragments): **61 of 325
+equal**, 51 differ, 213 refused (120 not exported: the export's build refusals, "a method call without its callee" 33, "a static's
+value" 19, inference left open 18, and the 10 `__rustc` items, whose keys the census names by their `__rustc` symbol path; 45 a layout;
+14 a callee; 17 constants; 7 an unsizing cast's vtable), the control differing.
+
+| crate | items | equal | differ | refused |
+|---|---|---|---|---|
+| alloc | 25 | 18 | 5 | 2 |
+| core | 275 | 109 | 85 | 78 |
+| std | 325 | 61 | 51 | 213 |
+| **total** | **625** | **188** | 141 | 293 |
+
+## As built: C4's switch, std's interface from the crates' native passes (2026-11-20, branch `rust-c6-1120`)
+
+- **`alloc-check --assemble OUT CRATE=FILE...`**: std's interface made of the crates' native passes alone, each crate's facts from
+  its pass (the helper's shape, or a pass's native map), written in the helper's std-iface shape. **`bin/rust-front
+  std-iface-native`**: core's, alloc's and std's passes assembled into `.tmp/rust-front/std-iface-native.edn`, then each crate's
+  facts compared with the helper's, fact by fact. **rsi-build `RF_NATIVE_IFACE=1`**: a front directory whose `std-iface.edn` is the
+  assembled one and the crates' identities computed (`std-crates --native`); `inputs.tsv` beside `front.tsv` says what the run read,
+  and `write-case-inputs` reads it (C4 `:own` only when it begins `own`: none yet, std's names being the helper's).
+- **The passes** (each with the crate's own facts taken out of the helper's interface, RIND9 (a)'s pass): std (two rounds, 50 min,
+  2.4 GB): **4,644 of 4,644 equal** once the compare ignores `:self-param`, which the native pass writes since 472 and the helper does
+  not (331 functions differed by it alone); alloc (two rounds, 20 min, 2 GB; 3,863 of 3,863 at RIND9); core
+  (`alloc-check --crate core --pass` over core's 378 module files with core's facts taken out, never run before for the whole
+  crate): round 1 alone takes 65 min and 2.4 GB (17,036 functions, 430 ADTs, 258 traits, 10,194 impls, 264 consts collected), its
+  second round ran four times slower (about 4 h) and was stopped; the one-round pass is running (`.tmp/c6/core-pass.log`), and
+  after it `std-iface-native` and the five samples' rsi-build on the native interface (`.tmp/c6/chains2.sh`): **not measured
+  yet**. RF12-P7's core-check pass (`CORE_IFACE_FILES=all CORE_IFACE_ONLY=1`, 53 min) writes only what the helper's interface
+  lacks (1,083 functions, 46 ADTs, 69 traits): a supplement, not core's interface, so core's facts had no native replacement
+  before this pass.
+- **The baseline** (the helper's interface, std-crates-rsi.edn at the pin, `RF_CORE_ATTRS=none`): `RF11_BATCH=1 bin/rust-front
+  rsi-build intrinsics panics std unwind vectors` gives 5 of 5 own, 0 stub calls (17 min, 2.25 GB; `.tmp/rust-front/rsi-helper`),
+  the run the native interface's is to equal.
+
+### DECISION C4-1 (for the user): std's names
+
+A run reads two files of std's from the helper: `std-iface.edn` (the interface, now assembled natively) and `std-names.edn` (std's
+names and macros for expansion and resolution: 532 modules, 97 macros' definitions, 215 lang items, 1,078 generics lists, 215
+aliases, 228 traits' supertraits, 77 hidden items). RFP53 (a) counts a case own when it consumes no product of a toolchain.
+- (a) **std's names assembled natively too (the crates' indexes give the modules and the macros, the native passes the generics,
+  aliases and traits, the lowered `#[lang]` attributes the lang items), compared fact by fact with the helper's, then the run's
+  switch: C4 own only then**. About 1-2 days.
+- (b) Count C4 own on the interface and the identities alone (C4's words name std-iface and std-crates-rsi.edn), std's names left
+  the helper's.
+*Recommended: (a)*: the run's resolution and expansion read std-names as much as typeck reads std-iface.
