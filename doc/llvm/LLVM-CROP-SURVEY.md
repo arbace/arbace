@@ -3111,3 +3111,11 @@ AOT's kept rows of aot-heavy.txt until `LLVMI_AOT_HEAVY=1`'s run), (5429 + 1.5) 
 0.9910 to 1.0000 (100); completeness 0.9895 (99 to 98 since D1120-2 (a): D1120-3); `--judge --strict`, `bin/records-check`, `bin/reap`
 (LLVM read 3,987 / 0 / 62), `make check-makefile`: 0 problems. Makefile: repr-llvm-probes-check, -probes-oracle, -reviewed-check,
 -judge-out-check.
+
+**The heavy AOT rows (the coordinator's step 2).** `LLVMI_AOT_HEAVY=1 bin/heavy-lock bin/llvmi check --aot --only
+test/llvm/aot-heavy.txt --record` (3 h 43 min wall, about half of it in the lock's queue; a fresh worktree builds C++'s lowered runtime,
+`cppi runtime-build` 35 min, and ci reads its 199 units, `read-lib` 52 min at up to 8.6 GB; then two Go builds, the eh one 3.8 GB): 3 of
+3 pass by their own verdicts (the two lib-musl-tables modules by synth-c23's `.expect`, cpp.runtime.library by C++'s golden files, from
+its 2026-11-05 `:refused` row: the `:personality` class holds none now). `bin/reap --record`: LLVM AOT 554 / 7 / 1 to 555 / 7 / 0.
+**Final:** the judge's cases 5,432, every one by its own verdict (45 out with their reasons, test/llvm/judge-out.tsv): the stage 1.0000,
+LLVM's independence 1.0000 (100); completeness 0.9899 (98: D1120-3's 62 sections), meant 0.9962, maturity 1.0000.

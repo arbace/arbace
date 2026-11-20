@@ -13798,3 +13798,7 @@ outcome is undefined, unspecified or left unstated leaves the judge's cases with
 - Scores: 5,429 own and 3 recorded of 5,432: the judge stage 0.955 to 1.000, LLVM's independence 0.9910 to 1.0000 (100). Completeness
   0.9895 (98; D1120-3 proposes the 62 sections' rules). Not run: bin/gate (the user). For the night: llvm-essential, llvm-read
   (verify-probes, verify-llvmtest), llvm-controls-test.
+- (later the same day) The three heavy AOT modules run by hand under the lock (`LLVMI_AOT_HEAVY=1 bin/heavy-lock bin/llvmi check --aot
+  --only test/llvm/aot-heavy.txt --record`, 3 h 43 min with the queue; C++'s runtime built and read by ci, peak 8.6 GB): 3 of 3 by their
+  own verdicts, cpp.runtime.library from :refused to a pass. LLVM: 5,432 judge cases all own, the stage 1.0000, independence 1.0000,
+  completeness 0.9899. crops-score --judge --strict, records-check, reap: 0 problems.
