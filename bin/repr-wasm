@@ -17,7 +17,7 @@
 #                                                    /root/tamago-go) for each :corpora GOOS into MAIN/.tmp/wasm/go/GOOS/NAME.wasm,
 #                                                    once per toolchain VERSION and sources' digest (a stamp beside them), under a lock
 #   bin/repr-wasm corpus lists [CORPUS...]           each corpus's list (NAME<tab>PATH) into .tmp/repr-wasm/lists/CORPUS.list
-#   bin/repr-wasm roundtrip [--record] [CORPUS...]   each module of each corpus (default: go-wasip1 go-js): decoded in :full, validated, its
+#   bin/repr-wasm roundtrip [--record | --only-list FILE] [CORPUS...]   each module of each corpus (default: go-wasip1 go-js): decoded in :full, validated, its
 #                                                    .ae text read back (forms and layer equal), printed back byte for byte, the
 #                                                    canonical print decoded again to the same forms with no layer; rows against
 #                                                    test/wasm/roundtrip-results.edn (every recorded :pass passes, every module
@@ -147,8 +147,16 @@ case ${1:-} in
       *) echo "repr-wasm corpus fetch|check|build|lists" >&2; exit 2 ;;
     esac ;;
   roundtrip)
-    shift; record=; ids=()
-    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    # GDS31 (a) (the user, 2026-11-20; doc/GATE-DIET-SURVEY.md, "As built: the 11-20 audit"): --only-list FILE, the gate's rotation: the
+    # modules FILE names (CORPUS/NAME a line, as the record writes them) alone, judged on what ran (a recorded module not listed is
+    # neither run nor missing); the corpora's whole lists kept for the controls' references
+    shift; record=; ids=(); only=
+    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only-list) only=${2:-}; shift 2 ;; *) ids+=("$1"); shift ;; esac; done
+    if [ -n "$only" ]; then
+      [ -f "$only" ] || { echo "repr-wasm roundtrip: --only-list $only: no such file" >&2; exit 2; }
+      [ -z "$record" ] || { echo "repr-wasm roundtrip: --only-list with --record would drop the rows it did not run" >&2; exit 2; }
+      only=$(cd "$(dirname "$only")" && pwd)/$(basename "$only")
+    fi
     [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(corpus_ids)
     go_build
     all=$root/.tmp/repr-wasm/rt/rows.edn; mkdir -p "${all%/*}"; : > "$all"
@@ -156,7 +164,13 @@ case ${1:-} in
     for id in "${ids[@]}"; do
       make_list "$id"
       work=$root/.tmp/repr-wasm/rt/$id; rm -rf "$work"; mkdir -p "$work"
-      arbace_tool -m arbace.repr.wasm check "$lists/$id.list" "$work"
+      l=$lists/$id.list
+      if [ -n "$only" ]; then
+        awk -F'\t' -v c="$id" 'FILENAME == ARGV[1] { if ($0 != "" && $0 !~ /^#/) O[$0] = 1; next } ((c "/" $1) in O)' "$only" "$l" > "$lists/$id.only.list"
+        l=$lists/$id.only.list
+        [ -s "$l" ] || continue
+      fi
+      arbace_tool -m arbace.repr.wasm check "$l" "$work"
       awk -F'\t' -v c="$id" '{ r = ($2 == "ok") ? ":pass" : ":fail"; why = ($2 == "ok") ? "" : $2 ($5 == "" ? "" : ": " $5);
         gsub(/"/, "'"'"'", why); printf "[\"%s/%s\" %s \"%s\"]\n", c, $1, r, why }' "$work/check.tsv" >> "$all"
       awk -F'\t' -v c="$id" '{ print c "/" $0 }' "$work/ops.tsv" >> "$root/.tmp/repr-wasm/rt/ops.tsv"
@@ -178,7 +192,7 @@ case ${1:-} in
     done < "$controls"
     n=$(cut -f2 "$root/.tmp/repr-wasm/rt/ops.tsv" | sort -u | wc -l)
     echo "repr-wasm roundtrip: $n distinct instructions in the modules (.tmp/repr-wasm/rt/ops.tsv)"
-    judge roundtrip "$results" "$all" "$classes" "${record:-}" "${ids[*]}" || fails=$((fails + 1))
+    REPR_WASM_ONLY_IDS=$only judge roundtrip "$results" "$all" "$classes" "${record:-}" "${ids[*]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
   wast)
     shift; record=; only=

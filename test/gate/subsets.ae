@@ -23,10 +23,12 @@
   corpus (\".\" a top-level file); repr/go the dump key's first directory, a directory test's `X.dir` dropped (\".\" a
   top-level package or file); C++ the name's corpus and first directory (gxx-dg/cpp0x, gxx-old-deja/g++.abi).
 
-  -main ROOT SET [--check]     SET java, c, go, cpp or all: the subsets written into their files (test/java/corpora.edn's
+  -main ROOT SET [--check]     SET java, c, go, cpp, crops or all: the subsets written into their files (test/java/corpora.edn's
                                :subset-interp, :subset-compiled and :subset; test/c/corpora.edn's :subset-tokens,
                                :subset-parse, :subset-annot, :subset-roundtrip; test/repr/go/native-check-subsets.edn;
-                               test/cpp/subsets.edn's :subset-roundtrip of cpp-roundtrip's parts and :subset-dg), and a
+                               test/cpp/subsets.edn's :subset-roundtrip of cpp-roundtrip's parts and :subset-dg; crops, the 11-20
+                               audit's: test/llvm/subsets.edn, test/c/dg-subsets.edn, test/scheme/subsets.edn's :subset-aot,
+                               test/wasm/subsets.edn, test/haskell/subsets.edn), and a
                                table of the parts (U, K and its parts, the subset, its fraction); --check: written
                                nowhere, exit 1 when a file differs from what the rule makes
   -main ROOT snapshot STORE    test/gate/failed-ever.tsv: its lines and every \"fail\" event of STORE/_rotation/*.failed
@@ -275,6 +277,43 @@
                    (derive-part u {:always (set (map str (:always r))) :failed (set (get fe (str "cpp-dg." part)))}
                                 cpp-area)))))))
 
+;; ---- the crops' records (GDS31 (a), the user 2026-11-20; doc/GATE-DIET-SURVEY.md, "As built: the 11-20 audit"): the big nightly
+;; checks rotated since, one part each whose universe is a record of the check's own rows (:rotate's :id-re, one group: bare ids). K:
+;; the controls' subjects (:always), every non-pass row of the record (NONPASS: a regex whose group 1 is the id of a row that does not
+;; pass), the ids that ever failed in the rotation, and the essential subsets the full tier covers (KEEP: their files' ids, one a line:
+;; a rotated subsumer's subset must hold them, gate.plan's :subsumes-cases); areas by the id's shape (AREA)
+
+(defn- first-of [^String sep n] (fn [^String id] (str/join sep (take n (str/split id (re-pattern (java.util.regex.Pattern/quote sep)))))))
+(defn- rt-area [^String id] (let [ps (str/split id #"\.")] (if (> (count ps) 2) (nth ps 2) "base")))
+
+(def ^:private crop-rotations
+  [{:step "llvmi-check" :nonpass #"^\s*\[\"([^\"]+)\" :(?!pass\b)" :keep ["test/llvm/essential-check.txt"] :area (first-of "." 1)}
+   {:step "llvm-read" :nonpass #"^\s*\[\"([^\"]+)\" :(?!pass\b)" :area rt-area}
+   {:step "c-dg" :nonpass #"^\s*\[\"([^\"]+)\" :(?!pass\b)" :keep ["test/c/essential-dg.txt"] :area (first-of "/" 2)}
+   {:step "si-aot" :nonpass #"^\{:id \"([^\"]+)\", :verdict :(?!pass\b)" :keep ["test/scheme/essential-aot.txt"] :area (first-of "/" 1)}
+   {:step "wasm-roundtrip" :nonpass #"^\s*\[\"([^\"]+)\" :(?!pass\b)" :area (first-of "/" 1)}
+   {:step "haskell-lib-stg" :nonpass #":name \"([^\"]+)\", :stage :(?!ok\b)" :area (first-of "." 2)}])
+
+(defn- list-ids [root ^String f]
+  (vec (for [l (str/split-lines (slurp (str root "/" f)))
+             :let [t (first (str/split (str/trim l) #"\s+"))]
+             :when (and (seq t) (not (str/starts-with? t "#")))]
+         t)))
+
+(defn- crops-plan [root]
+  (let [steps (table-steps root)
+        fe (failed-ever root)]
+    (vec (for [{:keys [step nonpass keep area]} crop-rotations
+               {:keys [part rotate]} (step-parts steps step)
+               :let [r rotate f (str root "/" (:universe r))
+                     u (record-ids f part (:id-re r) (:id-as r))
+                     np (set (for [l (str/split-lines (slurp f)) :let [m (re-find nonpass l)] :when m] (second m)))]]
+           (merge {:file (:subset r) :key (or (:subset-key r) :subset) :part part :steps [step]}
+                  (derive-part u {:always (set (map str (:always r))) :classed np
+                                  :failed (set (get fe (str step "." part)))
+                                  :essential (set (mapcat #(list-ids root %) keep))}
+                               area))))))
+
 ;; ---- writing: a key's vector replaced in place in the corpus's map (its text elsewhere kept byte for byte)
 
 (defn- scan-end
@@ -391,8 +430,9 @@
     "c" (c-plan root)
     "go" (go-plan root)
     "cpp" (cpp-plan root)
-    "all" (vec (concat (java-plan root) (c-plan root) (go-plan root) (cpp-plan root)))
-    (throw (ex-info (str "gate.subsets: SET is java, c, go, cpp or all, not " set) {}))))
+    "crops" (crops-plan root)
+    "all" (vec (concat (java-plan root) (c-plan root) (go-plan root) (cpp-plan root) (crops-plan root)))
+    (throw (ex-info (str "gate.subsets: SET is java, c, go, cpp, crops or all, not " set) {}))))
 
 (defn run [root set check?]
   (let [rows (plan-of root set)
@@ -434,5 +474,5 @@
     (cond
       (= verb "snapshot") (snapshot root (first more))
       (and root verb) (run root verb (some #{"--check"} more))
-      :else (do (println "usage: gate.subsets ROOT java|c|go|cpp|all [--check] | gate.subsets ROOT snapshot STORE")
+      :else (do (println "usage: gate.subsets ROOT java|c|go|cpp|crops|all [--check] | gate.subsets ROOT snapshot STORE")
                 (System/exit 2)))))

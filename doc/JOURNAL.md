@@ -13792,3 +13792,42 @@ and the decisions in doc/GATE-DIET-SURVEY.md, "The long single steps split" (wri
   hours ahead of the whole night) or `:always` (it would build or fail every night, rust changed or not); more threads for
   cpp-dg's own read (one process, memory unmeasured).
 - Checks: `gate.crops check` 0 problems, crops-test, claude-md-test, the fragments' steps equal steps.edn's, the plans. No gate run.
+
+## 2026-11-20: the 11-20 audit, round 2: the user's GDS28-GDS32 (branch `gate-audit-1120`, after merging `gate-split-1120`)
+
+The user decided GDS28 (a) crop by crop, GDS29 (a), GDS30 (a), GDS31 (a) (rotate the big nightlies) and GDS32 (a) (keep the
+clean-only parts). Built (doc/GATE-DIET-SURVEY.md, "As built: the 11-20 audit, round 2"):
+- Merged `mac/gate-split-1120` (`a017d971c`) first, its `:parts` kept and the cover's `:subsumes` added to cpp-check and rsi-check
+  (the rsi cover holds over rsi-check's slices: they partition the corpus, a control needs only its subject in the run). Its
+  chain-needs-test failure (rsi-aot needing rsi-runtime of another chain, started after nothing) fixed: `:start-after rsi-runtime`.
+- The planner: `:subsumes-cases {STEP FILE-or-[ID ...]}`, a rotated subsumer covering when its run's lists hold the subsumed step's
+  cases; the rotation subsets keep the essential lists. subsume-test 20 of 20.
+- GDS28: si-essential (`test --si`, `unit` into si-check; `r7rs`, `srfi`, `corpora controls-test` into si-corpora),
+  scheme-read-essential (its corpora one part `corpora` of scheme-read with `spec-check`, and of scheme-roundtrip; `corpora files`
+  back in si-corpora), ocaml-read-essential (the new step ocaml-read: the stdlib's and samples' round trips moved from
+  ocaml-roundtrip, and a part of its other checks), oi-essential (the new step oi-unit; `:subset-oi` holds its 60 programs) and
+  llvm-essential (its controls test a part of llvmi-check) moved into the full tier and covered there, every night. Not moved, with
+  the numbers: cpp-essential (no full copy of its checks but the samples round trip, which cpp-roundtrip dropped instead, with
+  cpp-dg's vacuous dg-error, as asked) and c-check-essential (its CI_LINK_CHECK=1 builds each program twice; in c-check it would
+  multiply the run). The first round's estimate of about 40 minutes was too high: moving a check saves nothing; only the work the
+  essential step repeated is spared.
+- GDS29: measured on deepseq (`lib-check --package deepseq --ifaces own` with and without REPR_HASKELL_BIGNUM=native): the pools
+  equal byte for byte and equal to the gate's own (main `42494a700`); lib-check reads with bignum native whatever the caller says.
+  haskell-iface-own `:uses` base's and 19 packages' pools (`bin/repr-haskell own-pools-take`, a pool equal to what is there kept with
+  its closures, else plan and closures removed); ghc-internal and filepath still made there (their boot files' interfaces).
+- GDS30: repr-java-front's samples, baseline and javac parts dropped; `judge_front_implied` (bin/lib/repr-java/judge.bash) makes
+  attr-check refuse to run when its known file admits a differing fact or forms file front-check's does not; judge-front-test 19 of
+  19. For java-split-1120's merge: keep its jdk part(s) of repr-java-front, drop the other three.
+- GDS31: rotated by GT8.4's mechanism, subsets by `bin/gate-subsets crops` (test/gate/subsets.ae's new family): llvmi-check's eval
+  part (116 of 562), llvm-read's verify-rt and verify-rt-heldout (203 of 905, 259 of 1101), c-dg as one part over its groups (142 of
+  627; its control crosses two groups), si-aot's check (18 of 53; the suites a part run whole), wasm-roundtrip (4 of 20; new
+  `bin/repr-wasm roundtrip --only-list`, the judge partial under REPR_WASM_ONLY_IDS) and haskell-lib-stg (53 of 265). The cycle:
+  seven slices by SHA-256, one a night, the weekly whole: every case once in seven nights. Not rotated: haskell-lib-stg-own (a
+  producer of hsi's library), cpp-codegen-gen (two records as universe, partial judgment unverified), c-judge-test (no cases).
+- GDS32: kept; haskell-roundtrip.all and rust-roundtrip's five parts never passed: the next clean run fails on them until fixed.
+- Pre-existing on next and the merge, not changed here: rotation-controls-test (16 C control subjects not in `:always`),
+  lanes-test's mem-check, costs-test (17 haskell lib steps in no crop of `:crops`), `bin/gate-subsets --check` (java's and C's
+  subsets differ from the rule's).
+Alternatives considered: rotating without `:subsumes-cases` (the covers would lapse on every rotated night, the subsets running
+the essential cases twice); a cpp move into an unrotated new step (the same work under another name); per-group c-dg parts (its
+negative control crosses two groups and would be left in both).

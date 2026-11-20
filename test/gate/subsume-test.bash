@@ -11,6 +11,8 @@
 #  6. the checkout's table: its :subsumes valid (the planner's check), each naming a check of a lower tier
 #  7. (the 11-20 audit) a :full check a :weekly step subsumes: covered in --weekly, run in --full (the subsumer not in its plan); a
 #     parted essential check: each part covered
+#  8. (the 11-20 audit) :subsumes-cases: a rotated subsumer covers in --nightly when its subset holds the cases it names (a file or a
+#     vector), not when one is out of it; the rule refuses a key that is not one of its :subsumes
 # Seconds, no build, no gate run. Usage: test/gate/subsume-test.bash
 # needs: exe (the planner on stage 0)
 set -u
@@ -30,6 +32,7 @@ echo 1 > "$r/test/gate/epoch"; echo c > "$r/core/z"
 # the rotated subsumer's record (its universe: part p's files a, b, c) and corpora (p's subset: a)
 printf '[\n ["p/a" :pass]\n ["p/b" :pass]\n ["p/c" :pass]\n]\n' > "$r/rec/u.edn"
 printf '[{:id :p :subset ["a"]}]\n' > "$r/rec/corpora.edn"
+printf '# the cases\np/a\n' > "$r/rec/in.txt"
 table() {
 cat > "$r/test/gate/steps.edn" <<EOT
 {:groups {:core ["core/" "bin/tool"]}
@@ -47,6 +50,12 @@ cat > "$r/test/gate/steps.edn" <<EOT
   {:name f5 :mem-gib 1 :phase :full :cmd "bin/tool" :inputs [:core] :hosts [:stage0] :subsumes [e5]}
   {:name g1 :mem-gib 1 :phase :full :cmd "bin/tool" :inputs [:core] :hosts [:stage0]}
   {:name w1 :mem-gib 1 :phase :weekly :cmd "bin/tool" :inputs [:core] :hosts [:stage0] :subsumes [g1]}
+  {:name e6 :mem-gib 1 :phase :essential :cmd "bin/tool" :inputs [:core] :hosts [:stage0]}
+  {:name e7 :mem-gib 1 :phase :essential :cmd "bin/tool" :inputs [:core] :hosts [:stage0]}
+  {:name f6 :mem-gib 1 :phase :full :cmd "bin/tool {part}" :inputs [:core] :hosts [:stage0] :subsumes [e6] :subsumes-cases {e6 "rec/in.txt"} :parts [{:part p}]
+   :rotate {:only "--only {list}" :universe "rec/u.edn" :subset "rec/corpora.edn" :failed-re "^FAIL (.+)$"}}
+  {:name f7 :mem-gib 1 :phase :full :cmd "bin/tool {part}" :inputs [:core] :hosts [:stage0] :subsumes [e7] :subsumes-cases {e7 ["p/b"]} :parts [{:part p}]
+   :rotate {:only "--only {list}" :universe "rec/u.edn" :subset "rec/corpora.edn" :failed-re "^FAIL (.+)$"}}
   ${1:-}]}
 EOT
 }
@@ -70,7 +79,7 @@ plan "$t/p1" full || no "the full plan: $(head -5 "$t/p1.out")"
 grep -q "covered *e1 *covered by f1: its run in this gate checks every case of this one" "$t/p1.out" \
   && grep -q "covered *e2 *covered by f2 (2 checks)" "$t/p1.out" && ok "the plan says by what (a parted subsumer's checks counted)" \
   || no "the why: $(grep -E ' e[12] ' "$t/p1.out")"
-grep -q '5 covered' "$t/p1.out" && ok "the summary counts the covered checks" || no "the summary: $(sed -n 1p "$t/p1.out")"
+grep -q '7 covered' "$t/p1.out" && ok "the summary counts the covered checks" || no "the summary: $(sed -n 1p "$t/p1.out")"
 
 # ---- 2. :subsumes is in no key
 grep '^decl ' "$t/p1/plan/f1.inputs" | grep -q subsumes && no "f1's decl line holds :subsumes" || ok ":subsumes is in no key (f1's decl line leaves it out)"
@@ -147,6 +156,17 @@ export GATE_STEPS=$r/test/gate/steps.edn
 plan "$t/p8" full --weekly || no "the weekly plan: $(head -5 "$t/p8.out")"
 [ "$(dec "$t/p8" g1 w1 e1)" = "g1=covered w1=run e1=covered" ] && grep -q "covered *g1 *covered by w1" "$t/p8.out" \
   && ok "--weekly: g1 (a :full check) covered by w1 (a :weekly one), which runs" || no "--weekly: $(dec "$t/p8" g1 w1 e1)"
+
+# ---- 8. (the 11-20 audit) :subsumes-cases
+[ "$(dec "$t/p1" e6 e7)" = "e6=covered e7=covered" ] && ok "--full: both covered (their subsumers whole)" || no "--full: $(dec "$t/p1" e6 e7)"
+[ "$(dec "$t/p6" e6 e7)" = "e6=covered e7=run" ] && grep -q "covered *e6 *covered by f6 (2 checks), its subset holding the cases" "$t/p6.out" \
+  && ok "--nightly: e6 covered (f6's subset holds p/a), e7 runs (p/b is in no subset)" || no "--nightly: $(dec "$t/p6" e6 e7) ($(grep -E ' e[67] ' "$t/p6.out"))"
+cp "$r/test/gate/steps.edn" "$t/good2.edn"
+sed -e 's/:subsumes-cases {e7 \["p\/b"\]}/:subsumes-cases {e1 ["p\/b"]}/' "$t/good2.edn" > "$r/test/gate/steps.edn"
+plan "$t/p9" full; st=$?
+[ $st != 0 ] && grep -q 'f7.p: :subsumes-cases names e1, not one of its :subsumes' "$t/p9.out" && ok "the rule refuses a :subsumes-cases key not among its :subsumes" \
+  || no "the :subsumes-cases rule (status $st): $(head -4 "$t/p9.out")"
+cp "$t/good2.edn" "$r/test/gate/steps.edn"
 
 echo "subsume-test: $((n - bad)) of $n ok"
 exit $((bad > 0))

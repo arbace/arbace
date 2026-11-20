@@ -1519,3 +1519,87 @@ admit one or two at a time; with memory unbounded the weekly's critical path is 
   non-concurrent night's serial run, python-read in, within `:max-gib` once wasm-full left); the fragments' steps equal
   `steps.edn`'s (cpp, llvm-rust, wasm); `test/docs/claude-md-test.bash` passes (CLAUDE.md's rust-full sentence names rsi-runtime).
   No gate run.
+
+## As built: the 11-20 audit, round 2 (branch `gate-audit-1120`, after `gate-split-1120`'s merge; the user's GDS28-GDS32, 2026-11-20)
+
+The user decided GDS28 (a), GDS29 (a), GDS30 (a), GDS31 (a) (rotate the big nightlies) and GDS32 (a) (keep the clean-only parts).
+Built on `gate-audit-1120` after merging `mac/gate-split-1120` (`a017d971c`: cpp-check and cpp-aot with CPPI_GEN_JOBS, rsi-runtime,
+rsi-check in six `--sample`/`--offset` slices, wai-go-aot's slices; its `:parts` kept, the cover's `:subsumes` added to cpp-check
+and rsi-check). The rsi cover holds over the slices: they partition the corpus, and a control needs only its subject in the run
+(its reference is the recorded rustc run), so each control is judged in the slice that holds its subject.
+
+**The planner: `:subsumes-cases`.** GDS28 and GDS31 meet in si-aot, llvmi-check, c-dg and oi-check: a subsumer rotated by night
+covered nothing (its subset and slice may leave the essential cases out). A subsumer may now name, for a subsumed step, the cases
+of it that its rotated checks must run (`:subsumes-cases {STEP FILE-or-[ID ...]}`, ids as the rotation names them); the cover
+holds on a rotated night when every case is in the lists those checks run. The rotation subsets keep the essential lists (the
+subset rule's new `:essential` part), so the cover holds every night. The rule's check: each key one of its `:subsumes`, each
+value a file of the checkout or a vector. `test/gate/subsume-test.bash` 20 of 20 (three new: the cases in the subset, a case out of
+it, the rule).
+
+**GDS28 (a), crop by crop.** Each essential subset's other checks moved into the full tier, the subset then covered there:
+- si-essential: `bin/si test --si` into si-check (programs) and `bin/si unit` into si-check (unicode); `bin/si r7rs`, `bin/si srfi`
+  and `bin/si corpora controls-test` into si-corpora (r7rs and srfi back from the first commit's drop); subsumed by si-check,
+  si-aot (its subset holding `test/scheme/essential-aot.txt`) and si-corpora.
+- scheme-read-essential: its five corpora as one part `corpora` of scheme-read (with `bin/repr-scheme spec-check`) and of
+  scheme-roundtrip (one process, as the essential step: 84 s where the five parts took 104 s and 95 s), `bin/si corpora files`
+  back in si-corpora; subsumed by the three.
+- ocaml-read-essential: a new step ocaml-read (chain ocaml-full) of the stdlib's and samples' round trips (moved from
+  ocaml-roundtrip, `--text --types`: the essential's `--text` levels and the typed one) and a part `checks` (corpus check, menhir,
+  embed, ocamllex, ocamlyacc, own-read); no part rotates, so the cover holds every night.
+- oi-essential: a new step oi-unit (oi's tests, `repl-check --native`, `own-verdicts --check`, the four judgments of the records);
+  oi-check's `:subset-oi` (by hand, `test/ocaml/subsets.edn`) holds `test/ocaml/essential-check.txt`'s 60 programs (37 added);
+  subsumed by oi-check (its cases) and oi-unit.
+- llvm-essential: its controls' wiring test a part `controls` of llvmi-check; subsumed by llvm-read (its rotated rt families hold
+  no essential case: cases `[]`), llvm-print and llvmi-check (its eval subset holding `test/llvm/essential-check.txt`).
+- cpp-essential: not moved. Its checks but the samples round trip have no copy in the full tier (pp-check's essential list,
+  gxx-dg-essential's round trip, the essential lowering, target verify), so moving them would only rename the same work, and
+  cpp-roundtrip and cpp-lower rotate by night, so a moved check would run twice six nights a week to save 1.3 minutes on the
+  seventh. The duplicate itself is gone: cpp-roundtrip's samples part dropped (cpp-essential's round trip, every tier), and
+  cpp-dg's dg-error (its log "no record yet; skipped": no verdict until its record), as the user asked.
+- c-check-essential: not moved. Its extra is CI_LINK_CHECK=1, each program built a second time the old way (49 programs in 320 s
+  on stage 0 against about 0.8 s a program in c-check): in c-check it would multiply the whole run's cost, and a part repeating
+  the 49 programs would spare nothing.
+
+**GDS29 (a).** Measured: `bin/repr-haskell lib-check --package deepseq --ifaces own` with and without REPR_HASKELL_BIGNUM=native
+(on the store's ghc-internal and base pools, 1.5 minutes and 1.6 GB each): the two `deepseq-pool.tar` equal byte for byte, and
+equal to the gate's own (haskell-lib-own-deepseq's output, main `42494a700`). By the code it cannot differ: lib-check reads with
+`bignum=native` and `REPR_HASKELL_ONLY_PACKAGES=PKG` whatever the caller exports (bin/lib/repr-haskell/lib-check). haskell-iface-own
+now `:uses` base's and 19 packages' `PKG-pool.tar` and puts them where lib-check leaves its pools (`bin/repr-haskell
+own-pools-take`: a pool already there and equal kept with its closures, else the package's plan and closures removed with it, since
+lib-stg's own_pool_same reads them as the pool's); ghc-internal and filepath are still made there (their boot files' interfaces,
+units of the round trip's own level, are no part of a PKG-pool.tar). Spared: those 20 packages' lib-check, up to about 40 of the
+95 minutes the lib steps take a full night (their lib-stg halves stay theirs).
+
+**At the merge.** chain-needs-test failed on gate-split's table already (rsi-aot, chain rust-aot, needs rsi-runtime of chain
+rust-full, and its chain started after nothing): rsi-aot now `:start-after rsi-runtime`.
+
+**GDS30 (a).** repr-java-front's samples, baseline and javac parts dropped (its jdk part, weekly, stays); attr-check refuses to run
+when its known file admits a differing fact or a differing forms file front-check's does not (`judge_front_implied`,
+bin/lib/repr-java/judge.bash; `test/repr/java/judge-front-test.bash` 19 of 19, eight new: the guard's six cases, the committed known files, front-check's call). How it merges with
+java-split-1120: the `:parts` vector of repr-java-front conflicts if java-split touched it; keep its jdk part(s) as java-split made
+them and drop samples, baseline and javac; the guard is in bin/lib/repr-java, which java-split does not edit.
+
+**GDS31 (a).** Rotated (GT8.4's mechanism; their subsets written by `bin/gate-subsets crops`, test/gate/subsets.ae's new family:
+the controls' subjects, the record's non-passes, the ids that ever failed, the essential lists the cover needs, then each area to
+a fifth by SHA-256):
+
+| check (part) | whole, min | universe | subset | the tool's partial run |
+|---|---|---|---|---|
+| llvmi-check (eval) | 17 | 562 modules (check-eval) | 116 (20.6%) | `bin/llvmi check --only LIST` (subset? judged on what ran) |
+| llvm-read (verify-rt, verify-rt-heldout) | 10, 11 | 905, 1101 | 203, 259 | `bin/repr-llvm check FAM --only ID,...` (the family's controls added by the tool) |
+| c-dg (dg) | 12 | 627 files | 142 (22.6%) | `bin/ci dg --only LIST` (one part over the seven groups: its control crosses two) |
+| si-aot (check; the suites a part run whole) | about 7 of 11 | 53 programs | 18 (34%: the essential 14) | `bin/si check --aot --only LIST` |
+| wasm-roundtrip (modules) | 26 | 20 modules | 4 (the controls' subjects) | `bin/repr-wasm roundtrip --only-list LIST` (new: judged on what ran, REPR_WASM_ONLY_IDS) |
+| haskell-lib-stg (ghc-internal) | 34 | 265 modules | 53 (20%) | `bin/repr-haskell lib-stg --only LIST` (rows of what ran; --run on the modules it compiled) |
+
+The cycle: the ids outside a subset fall in seven slices by their SHA-256 (gate.plan's slice-of); each `--nightly` runs the subset
+and the slice least recently covered, so six nights run six slices and the Saturday's `--weekly` (and `--full`) runs every part
+whole: every case at least once in seven nights, the subset (controls, non-passes, essential cases) every night. Not rotated, with
+why: haskell-lib-stg-own (a producer: hsi-check and hsi-check-aot run on its `ghc-internal-own.tar`, which a rotated run would leave
+partial), cpp-codegen-gen (its universe is two records, refusals.edn and forms.sha256, and gen-judge's partial run is unverified),
+c-judge-test (the judges' unit tests: no cases to rotate).
+
+**GDS32 (a).** Kept as decided on 2026-11-12. Never passed: haskell-roundtrip.all (night 12: 2 tree-level differences, the
+OsPath pragma printed as TypeApplications for TemplateHaskellQuotes, and 14 stale known entries at the text level; 86 minutes,
+14.4 GiB) and rust-roundtrip's five parts (the lines level's ModSpans.inner_span count, 92 files over three corpora; 6.4-14.9
+GiB): the next clean run plans them (GATE_ALL_PARTS=1) and fails on them until they are fixed; the user queues their tasks.

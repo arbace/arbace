@@ -218,7 +218,9 @@
     :closure :also-changed :weekly-why :weekly :keyed :universe-n :essential-when-changed :crop-rules
     ;; :subsumes (the full tier's cover, doc/GATE-DIET-SURVEY.md, "The cover and unit keys"): which essential step a full run need not run, not
     ;; what this step checks
-    :subsumes})
+    :subsumes
+    ;; :subsumes-cases (the 11-20 audit, GDS28 with GDS31): which of a subsumed step's cases a rotated subsumer's subset must hold
+    :subsumes-cases})
 
 ;; ---- GD3 (doc/GATE-DIET-SURVEY.md, GDS9 (a), GDS11 (a), GDS4 (b), "As built: GD3"): the epoch, the load closures, the
 ;; weekly phase
@@ -448,7 +450,16 @@
                                      (every? (fn [d] (and (< (tier-rank (:phase d)) (tier-rank (:phase s))) (contains? #{nil :check} (:kind d))
                                                           (not (:outputs d))))
                                              ds)))]
-                 (str nm ": :subsumes " x ", which is not a check of a lower tier (essential, or full under a weekly step) without :outputs"))))
+                 (str nm ": :subsumes " x ", which is not a check of a lower tier (essential, or full under a weekly step) without :outputs"))
+               ;; :subsumes-cases {SUBSUMED FILE-or-[ID ...]}: each key one of its :subsumes, each file one of the checkout's
+               (when-let [m (:subsumes-cases s)]
+                 (if-not (map? m)
+                   [(str nm ": :subsumes-cases is not a map")]
+                   (for [[k v] m
+                         p (concat (when-not (some #(= (str k) (str %)) xs) [(str ":subsumes-cases names " k ", not one of its :subsumes")])
+                                   (when-not (or (vector? v) (and (string? v) (contains? files v)))
+                                     [(str ":subsumes-cases " k ": " (pr-str v) " is no file of the checkout nor a vector of ids")]))]
+                     (str nm ": " p))))))
             (for [x (:needs s) :when (not (known (str x)))] (str nm ": :needs names no step: " x))
             ;; night 7 (crops-score ran beside reap and found no status): the essential phase runs its chains at once and
             ;; a step's :needs is only read, never waited on, so an essential step needs an essential one of its own chain
@@ -815,9 +826,24 @@
        (str/blank? (System/getenv "GATE_CLEAN_INNER"))))
 
 (defn subsumers
-  "the table's :subsumes as {SUBSUMED [SUBSUMER ...]}, names as strings, the subsumers in the table's order"
+  "the table's :subsumes as {SUBSUMED [SUBSUMER ...]}, names as strings, the subsumers in the table's order; each subsumer a string,
+  or (the 11-20 audit) [NAME CASES] when its :subsumes-cases names the subsumed step's cases a rotated check of it must hold"
   [steps]
-  (reduce (fn [m s] (reduce (fn [m x] (update m (str x) (fnil conj []) (str (:name s)))) m (:subsumes s))) {} steps))
+  (reduce (fn [m s] (reduce (fn [m x] (let [c (get (:subsumes-cases s) x (get (:subsumes-cases s) (str x)))]
+                                        (update m (str x) (fnil conj []) (if (some? c) [(str (:name s)) c] (str (:name s))))))
+                            m (:subsumes s)))
+          {} steps))
+
+(defn- case-ids
+  "a :subsumes-cases value's ids: a vector's strings, or a file's lines (ROOT-relative; # comments, blank lines and anything after a
+  line's first blank left out)"
+  [root c]
+  (if (string? c)
+    (vec (for [l (str/split-lines (slurp (str root "/" c)))
+               :let [t (first (str/split (str/trim l) #"\s+"))]
+               :when (and (seq t) (not (str/starts-with? t "#")))]
+           t))
+    (mapv str c)))
 
 (defn- subsumers-of
   "the subsumers of the decided check D: its table step's (the 11-20 audit: a part of a parted subsumed step, NAME.PART, is the step's)"
@@ -836,19 +862,26 @@
   its outputs, and each of its subsumers SS has checks in this plan, every one of which runs (run or after) whole: not a rotated subset
   or slice (the night's, which may leave the essential cases out), not skipped (a subsumer's pass does not hold the essential step's own
   inputs: its list, its records)"
-  [decided d ss used]
+  [root decided d ss used]
   ;; (the 11-20 audit: a :full check too, which only a :weekly subsumer names, the planner's rule: in --full and --nightly that
   ;; subsumer is not in the plan, so nothing covers it there)
   (when (and (seq ss) (= "run" (:decision d)) (#{:essential :full} (:phase (:step d))) (not (used (:name d))))
-    (let [per (for [b ss] [b (checks-of decided b)])]
-      (when (every? (fn [[_ cs]] (and (seq cs) (every? #(and (#{"run" "after"} (:decision %)) (not (:rotation (:step %)))) cs))) per)
-        (str "covered by " (str/join ", " (for [[b cs] per] (if (= 1 (count cs)) b (str b " (" (count cs) " checks)"))))
+    (let [per (for [x ss :let [[b c] (if (string? x) [x nil] x)]] [b (checks-of decided b) c])
+          ;; the 11-20 audit (GDS28 with GDS31): a subsumer with rotated checks covers when its :subsumes-cases names the subsumed
+          ;; step's cases in it and every one is in a list those checks run (its subset holds them: a slice need not)
+          whole? (fn [cs c] (let [rot (filter #(:rotation (:step %)) cs)]
+                              (or (empty? rot)
+                                  (and (some? c) (let [have (set (mapcat #(map str (:list (:step %))) rot))]
+                                                   (every? have (case-ids root c)))))))]
+      (when (every? (fn [[_ cs c]] (and (seq cs) (every? #(#{"run" "after"} (:decision %)) cs) (whole? cs c))) per)
+        (str "covered by " (str/join ", " (for [[b cs] per] (str (if (= 1 (count cs)) b (str b " (" (count cs) " checks)"))
+                                                               (when (some #(:rotation (:step %)) cs) ", its subset holding the cases"))))
              ": its run in this gate checks every case of this one (:subsumes; GATE_SUBSUME=0: not)")))))
 
 (defn cover
   "the decisions with the covered essential checks decided covered (COVERS: subsumers' output; USED: the steps whose outputs others use)"
-  [decided covers used]
-  (mapv (fn [d] (if-let [w (cover-of decided d (subsumers-of covers d) used)]
+  [root decided covers used]
+  (mapv (fn [d] (if-let [w (cover-of root decided d (subsumers-of covers d) used)]
                   (assoc d :decision "covered" :why w :key nil)
                   d))
         decided))
@@ -1088,7 +1121,7 @@
         ;; is covered (no run, no failure, no pass) when every step that :subsumes it runs whole in this run (each of its checks run
         ;; or after, none a rotated subset or slice); a need of a step that runs is satisfied by it (the runner's ok_status)
         decided (if (cover-tier? mode rerun?)
-                  (cover decided covers used)
+                  (cover root decided covers used)
                   decided)
         by-name (into {} (map (juxt :name identity) decided))
         ;; the builds: needed by a check that runs (or may: after), or by a needed build
