@@ -153,6 +153,47 @@
       (check "a string constant: our allocation's bytes against the record's" (br/pack-compare o r) [:equal])
       (check "negative: other bytes" (br/pack-compare (assoc o :alloc-texts {1 "\nalloc1 (size: 2, align: 1) {\n    61 63                                           │ ac\n}\n"}) r) :differs)
       (check "negative: the record's slice of another length" (br/pack-compare o (assoc-in r [:blocks 0 :stmts 0] '(assign (place 0) (use (const "const \"ab\"" (ty "&str" (ref (ty "str" str) false)) (slice alloc7 1)))))) :differs))
+    ;; queue 479: SimplifyConstCondition after SingleUseConsts (assert_unsafe_precondition!'s `if !false`: unreachable_unchecked's
+    ;; and NonZero::new_unchecked's precondition_check, `_1 = const false; switchInt(move _1)`: the record's arm alone, merged)
+    (let [unit '(ty "()" (tuple)) bool '(ty "bool" bool) never '(ty "!" never) u8t '(ty "u8" (uint "u8"))
+          cg (list 'const "g" '(ty "fn() -> u8 {g}" (fndef "g" [])) '(zst))
+          cp (list 'const "p" '(ty "fn(u8) -> ! {p}" (fndef "p" [])) '(zst))
+          cf '(const "const false" (ty "bool" bool) (scalar 0 1))
+          r {:args 0 :locals [{:ty unit} {:ty never} {:ty u8t}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call cg [] '(place 2) 1 '(unreachable))}
+                      {:cleanup false :stmts [] :term (list 'call cp '[(move (place 2))] '(place 1) nil '(unreachable))}]}
+          o {:args 0 :locals [{:ty unit} {:ty bool} {:ty never} {:ty u8t}] :debug []
+             :blocks [{:cleanup false :stmts ['(storage-live 1) (list 'assign '(place 1) (list 'use cf))] :term '(switch (move (place 1)) [[0 1]] 3)}
+                      {:cleanup false :stmts ['(storage-live 3)] :term (list 'call cg [] '(place 3) 2 '(unreachable))}
+                      {:cleanup false :stmts [] :term (list 'call cp '[(move (place 3))] '(place 2) nil '(unreachable))}
+                      {:cleanup false :stmts ['(assign (place 0) (use (const "const ()" (ty "()" (tuple)) (zst)))) '(storage-dead 1)] :term '(return)}]}]
+      (check "SimplifyConstCondition: a switch on a single-use constant made the goto its value selects, the dead arm gone"
+             (br/pack-compare o r) [:equal-o0 "const-condition,locals,single-use-consts,storage,zsts"])
+      (check "the record (through the pass already) is left as it is" (second (#'br/o0-simplify-const-condition r)) false)
+      (check "negative: the constant selects the other arm (`const true`: the return)"
+             (br/pack-compare (assoc-in o [:blocks 0 :stmts 1] (list 'assign '(place 1) (list 'use '(const "const true" (ty "bool" bool) (scalar 1 1))))) r) :differs)
+      (check "negative: a switch on a local no constant is assigned to stays a switch"
+             (br/pack-compare (assoc-in o [:blocks 0 :stmts] ['(storage-live 1)]) r) :differs))
+    ;; queue 479: RemoveZsts on the locals zero-sized in the generic body (`?`'s residual in Box::try_new_uninit_in: rustc's
+    ;; `from_residual(const Result::<Infallible, AllocError>::Err(AllocError))`, ours `_8 = copy ((_4 as Break).0);
+    ;; from_residual(copy _8)`)
+    (let [unit '(ty "()" (tuple)) rz '(ty "R" (adt "R" [])) cft '(ty "CF" (adt "CF" []))
+          cf (list 'const "f" '(ty "fn(R) {f}" (fndef "f" [])) '(zst))
+          r {:args 1 :locals [{:ty unit} {:ty cft}] :debug [{:name "r" :value (list 'const "const R::Err(E)" rz '(zst))}]
+             :blocks [{:cleanup false :stmts [] :term (list 'call cf [(list 'const "const R::Err(E)" rz '(zst))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 1 :zst-locals #{2} :locals [{:ty unit} {:ty cft} {:ty rz}] :debug [{:name "r" :value '(place 2)}]
+             :blocks [{:cleanup false :stmts ['(storage-live 2) (list 'assign '(place 2) (list 'use (list 'copy (list 'place 1 '(downcast "Break" 1) (list 'field 0 rz)))))]
+                       :term (list 'call cf '[(copy (place 2))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts ['(storage-dead 2)] :term '(return)}]}]
+      (check "RemoveZsts: a zero-sized local's assignment dropped, its operand the type's constant (compared by its type)"
+             (br/pack-compare o r) [:equal-o0 "locals,storage,zsts"])
+      (check "negative: a local not zero-sized in the generic body stays" (br/pack-compare (dissoc o :zst-locals) r) :differs)
+      (check "negative: the record's constant of another type"
+             (br/pack-compare o (assoc-in r [:blocks 0 :term] (list 'call cf [(list 'const "const R::Err(E)" cft '(zst))] '(place 0) 1 '(continue)))) :differs)
+      (check "negative: a non-zero-sized constant's text is still compared"
+             (br/pack-compare (assoc-in r [:blocks 0 :term] (list 'call cf ['(const "const 1_u8" (ty "u8" (uint "u8")) (scalar 1 1))] '(place 0) 1 '(continue)))
+                              (assoc-in r [:blocks 0 :term] (list 'call cf ['(const "const 1" (ty "u8" (uint "u8")) (scalar 1 1))] '(place 0) 1 '(continue)))) :differs))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)
