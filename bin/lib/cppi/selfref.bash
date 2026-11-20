@@ -10,7 +10,7 @@ cppi_run_ref() {
   if [ "${CPPI_JUDGE:-self}" = gxx ]; then echo test/cpp/ref-gxx15.edn; return 0; fi
   local k out ex
   ex=test/cpp/selfref-exceptions.edn; [ -f "$root/$ex" ] || ex=
-  k=$( (cd "$root" && sha256sum test/cpp/ref-gxx15.edn test/cpp/selfref.ae $ex test/cpp/corpora.edn test/cpp/selfref-golden.edn \
+  k=$( (cd "$root" && sha256sum test/cpp/ref-gxx15.edn test/cpp/selfref.ae $ex test/cpp/corpora.edn test/cpp/selfref-golden.edn test/cpp/selfref-out.edn \
           test/cpp/samples/*.expect* test/cpp/runtime/samples/*.expect*) | sha256sum | cut -c1-16)
   out=$root/.tmp/cppi-selfref/$k.edn
   if [ ! -s "$out" ]; then

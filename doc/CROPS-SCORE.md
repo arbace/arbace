@@ -110,6 +110,13 @@ fragment and `steps.edn` both have a step, `steps.edn`'s wins: the fragment is a
 - *Refinement.* Installed headers read in place (C's gcc include directory and musl-dev, C++'s libstdc++) count as the
   toolchain (0). doc/ORACLE-RECORDS-SURVEY.md's class E: "the goal excludes the package all the same".
 - *Refinement.* Go's judge is gc, run live, but gc is TamaGo's pinned go. It scores 1 (Proposed CSP2).
+- *Refinement (the user, 2026-11-20).* A case whose expected output is undefined, unspecified or host-dependent, or that is
+  refused by design, leaves the judge's cases, as the n/a cases and Haskell's D435-3 (a) do; its run still counts in completeness.
+  The fact's `:out-of-cases {:file F :cases N}` names the crop judge's list of them, `{ID {:kind K :levels [L ...] :why W}}`
+  (C's `test/c/selfref-out.edn`, C++'s `test/cpp/selfref-out.edn`), and N the cases its stated `:cases` leave out. An entry
+  without a kind (`:undefined :unspecified :constraint :implementation-defined :host :by-design`), its levels or a written reason,
+  or levels that do not sum to N, refute the claim and hold the stage at 0.5: nothing leaves without a reason. The crop's own
+  judge refuses an entry with a verdict of its own (a defined output cannot be counted out), with a control on every run.
 - *What the cross-check found.* The first run refuted six claims at `mac/oracle-records-cpp2`. Four were the survey's: OCaml's
   read, eval, AOT and judge at 0.5. That branch's scripts read OCaml's packs, but its `steps.edn` still plans every OCaml step
   on `:ocaml`. Only the fragment `test/gate/crops/ocaml.edn` drops it, and that "on merge". OCaml scores 0 there, and the data

@@ -6465,3 +6465,16 @@ a pointer, 7.13.1.1), non-pedantic-macro-redef (a constraint violation); tcc-tes
 implementation-defined, 6.7.3.2, for which doc/c/SPEC.md states no choice of its own; 95 also prints size_t by %d); dfp-8 (refused by
 design, its verdict needs fenv_exceptions_dfp). No file under test/c/ changed (every C step keys test/c/): the reasons are the judge's
 fact in test/crops/independence.edn, the 9 exceptions' also in selfref-exceptions.edn. C's judge stays (14867 + 0.5 x 148) / 15015.
+
+## As built: c-cpp-golden, the cases out of the judge's cases (2026-11-20; the user's decision of that day)
+
+A case whose expected output is undefined, unspecified or host-dependent leaves the judge's cases (as the n/a cases and Haskell's
+D435-3 (a)), its run still counted in completeness as before, its reason written per case; dfp-8 leaves on the ground of its design.
+`test/c/selfref-out.edn`: the 30 programs above, `{ID {:kind K :levels [:eval :aot] :why W}}` (25 `:undefined`: the 16 benchmarks
+run with no argument, reverse-complement-2 and -5, the two 20031003-1, the four gnu23-tag-alias, setjmp2; 1 `:unspecified`
+union-bitfield, 1 `:constraint` non-pedantic-macro-redef, 2 `:implementation-defined` tcc 93 and 95, 1 `:by-design`
+dfp-8). `c.selfref`'s `ref` (every check's reference) refuses an entry with a verdict of its own (a defined output cannot be counted
+out), with no kind, levels or reason, or no case of the reference, and runs its control each time: the first case with a verdict of
+its own put in the list must be refused. The file is the run level's record (`:c-records-run`, out of `:c`), keyed into the
+reference's cache; `test/c/selfref.ae`'s change reruns every C step at the next night. The judge fact counts it by
+`:out-of-cases` (doc/CROPS-SCORE.md): C's judge (14867 + 0.5 x 148) / 15015 = 0.995 to (14867 + 0.5 x 88) / 14955 = 0.997.
