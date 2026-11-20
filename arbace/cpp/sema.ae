@@ -168,7 +168,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Types from clang's qualType strings
 
-(declare resolve-type-form resolve-type lookup-qualified const-int)
+(declare resolve-type-form resolve-type lookup-qualified const-int cx-typedef-redecl! cx-incomplete-cls cx-type-key)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The headers' declarations: the native parser skims them into its scopes (arbace.repr.cpp.scope); a C function
@@ -1462,6 +1462,12 @@
                 (let [c (abi/cls (:id r))]
                   (when (and c (not (:tmpl c)) (not (:lambda c)) (not (:defining c)) (not (:complete c)))
                     (*on-refusal* (ex-info (str "codegen: incomplete result type '" (:name c) "' in function definition") {:codegen/refused :incomplete}) n))))))
+        ;; (queue 484, the checker: and a parameter's type, the same paragraph, other/crash-2.C's `void foo(A a) {}` before A's
+        ;; definition; not a function template's specialization, nor a deleted function)
+        _ (when (and (checking?) body (not (:explicitlyDeleted n)) (nil? *instantiating*) (not (header-node? n))
+                     (not (when cid (let [c (abi/cls cid)] (or (:tmpl c) (:targs c))))))
+            (when-let [c (some cx-incomplete-cls (:ps (:ty f)))]
+              (*on-refusal* (ex-info (str "codegen: parameter has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))
         old (find-redecl home f)
         ;; (queue 445: a block-scope declaration made before it, kept under its hidden key)
         hidden (when-not old (find-block-redecl home f))
@@ -1518,6 +1524,16 @@
     id))))
 
 (declare ctad-var)
+
+(defn- cx-incomplete-cls
+  "Queue 484: the class `t` names (cv-qualified) when the checker knows it incomplete here: declared, not defined yet,
+  not being defined, not a class template's specialization, a lambda's nor a header's; else nil."
+  [t]
+  (let [u (when (map? t) (abi/unq t))]
+    (when (abi/class? u)
+      (let [c (abi/cls (:id u))]
+        (when (and c (not (:complete c)) (not (:defining c)) (not (:tmpl c)) (not (:targs c)) (not (:lambda c)) (not (:header c)))
+          c)))))
 
 (defn- incomplete-var!
   "Round 54, the checker: [basic.def]/5, [dcl.init.general]/7: a variable's definition `n` of a class type `ty` incomplete at that
@@ -1592,7 +1608,13 @@
       ;; `terminate_handler __cxxabiv1::__terminate_handler = ...`): the definition, no longer extern ([basic.def]/2)
       ;; (cpp-s12: a redeclaration without an initializer keeps the in-class one, `constexpr int A::n;` of a constexpr
       ;; static data member, [class.static.data]/4, deprecated since C++17, [depr.static.constexpr]; it had been zero)
-      (do (when (and init (checking?) (or (:cx-constexpr (var* old)) (:cx-constinit (var* old)) (:constexpr n) (:_constinit n)))
+      (do ;; (queue 484, the checker: [basic.link]/11, the definition's type another than the declaration's, `static float x;`
+          ;; then `double A::x = ...;`, torture/pr70621.C; both known whole, their top-level cv-qualifiers left out)
+          (when (and (checking?) (not (header-node? n)))
+            (let [ok (cx-type-key (abi/unq (:ty (var* old)))) nk (cx-type-key (abi/unq ty))]
+              (when (and ok nk (not= ok nk))
+                (*on-refusal* (ex-info (str "codegen: conflicting declaration of '" (:name n) "'") {:codegen/refused :redecl}) n))))
+          (when (and init (checking?) (or (:cx-constexpr (var* old)) (:cx-constinit (var* old)) (:constexpr n) (:_constinit n)))
             ;; (h-cpp-consteval, the checker: the initializer's errors at the definition)
             (upd-var! old assoc :cx-range (:range n)
                       :cx-constinit (boolean (or (:cx-constinit (var* old)) (and (not (:constexpr n)) (:_constinit n))))))
@@ -1680,6 +1702,10 @@
           (let [v (if-let [x (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids c)))] (const-int bs x) v)
                 e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
             (when (neg? (long v)) (reset! neg true))
+            ;; (queue 484, the checker: [basic.scope.declarative]/5, [dcl.enum]: two enumerators of one name in an enumeration,
+            ;; `enum E { e, e };`, DRs/dr2530.C; g++'s "redefinition of", at the second)
+            (when (and (checking?) (seq (.get ^java.util.HashMap (:names es) (ucn-name (:name c)))))
+              (*on-refusal* (ex-info (str "codegen: redefinition of enumerator '" (:name c) "'") {:codegen/refused :redecl}) c))
             (enter! bs (:name c) (assoc e :ty under))
             (enter! es (:name c) e)
             (when-not scoped (enter! scope (:name c) e))
@@ -1810,7 +1836,15 @@
                                        ;; S, template/instantiate1.C's Z<int> through Y<Z<int>> and X<Z<int>>: the class had
                                        ;; contained itself, and trivial-copy? and the layout recursed without end. The checker
                                        ;; reports it and leaves the member out; the code generator refuses)
-                                       (when (and (abi/class? et) (:defining (abi/cls (:id et))))
+                                       ;; (queue 484, the checker: also a class declared and never or not yet defined,
+                                       ;; [class.mem.general]/7, [basic.def]/5 -- `struct A; struct B { A a; };`,
+                                       ;; init/array26.C; a member of the main file's, not a class template's or a
+                                       ;; lambda's, as incomplete-var!'s)
+                                       (when (and (abi/class? et)
+                                                  (let [c (abi/cls (:id et))]
+                                                    (or (:defining c)
+                                                        (and (checking?) c (not (:complete c)) (not (:tmpl c)) (not (:lambda c))
+                                                             (not (header-node? k))))))
                                          (ex-info (str "codegen: field has incomplete type '" (:name (abi/cls (:id et))) "'")
                                                   {:codegen/refused :incomplete :cx/node k})))]
                           (if (checking?) (swap! *order* conj [:cx-error bad]) (throw bad))
@@ -2068,7 +2102,8 @@
                                                          (throw x))))))))
                        :pos (long (or (:_b n) 0))}
                 ;; (CX12, the checker: a member typedef's access)
-                (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*)))))
+                (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
+      (cx-typedef-redecl! scope n))
     "NamespaceAliasDecl" (let [t (node-text n)
                                [_ target] (re-find #"=\s*([^;]+);?\s*$" (or t ""))
                                parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
@@ -3475,6 +3510,34 @@
 ;; complete, an undeduced or dependent type) is left as before.
 
 (def ^:dynamic *cx-union-init* false) ; queue 460: inside a union's aggregate initialization (its member as the slice takes it)
+
+(defn- cx-type-key
+  "Queue 484: a type's identity when the checker knows it whole (a builtin type, an enumeration, a class not a template's,
+  pointers to them, each with its cv-qualifiers), else nil."
+  [t]
+  (when (map? t)
+    (let [cv [(boolean (:c t)) (boolean (:v t))]]
+      (case (:k t)
+        :b (when (keyword? (:n t)) [:b (:n t) cv])
+        :enum (when (abi/enm (:id t)) [:enum (:id t) cv])
+        :class (let [c (abi/cls (:id t))] (when (and c (not (:tmpl c)) (not (:lambda c))) [:class (:id t) cv]))
+        :ptr (when-let [k (cx-type-key (:to t))] [:ptr k cv])
+        nil))))
+
+(defn- cx-typedef-redecl!
+  "Queue 484, the checker: [dcl.typedef]/6 with [basic.scope.declarative]: a typedef or alias name redeclared in the same
+  namespace or block scope that names another type than the earlier typedef, class or enumeration of the name
+  (`using I = int; using I = float;`, cpp0x/alias-decl-56.C; `struct B; typedef int B;`, warn/pr81119.C): g++'s
+  \"conflicting declaration\", clang's err_redefinition_different_typedef. Both types known whole (cx-type-key)."
+  [scope n]
+  (when (and (checking?) (#{:ns :block :fn} (:kind scope)) (not (header-node? n)))
+    (let [es (filter #(= :type (:e %)) (.get ^java.util.HashMap (:names scope) (ucn-name (:name n))))]
+      (when (> (count es) 1)
+        (let [nk (cx-type-key (:ty (last es)))]
+          ;; (against the first declaration, which a conflicting one leaves in force, as GCC: diagnostic/local1.C's third
+          ;; `using type = void;` agrees with the first)
+          (when (and nk (let [k (cx-type-key (:ty (first es)))] (and k (not= k nk))))
+            (*on-refusal* (ex-info (str "codegen: conflicting declaration of '" (:name n) "'") {:codegen/refused :redecl}) n)))))))
 
 (defn- cx-sure-scalar?
   "A scalar type whose conversions the checker judges: arithmetic, an enumeration, a pointer to object of such a type or
@@ -4972,12 +5035,24 @@
     (when (and (empty? es) (or g (seq q)))
       ;; (n-cpp-concepts: a qualified name a complete class without bases does not declare, T::is_pettable for a T bound to
       ;; such a class: said so, the constraints' sure substitution failure, sure-failure?)
-      (let [cid (when (and (checking?) (seq q))
-                  (try (class-id (:ty (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q g))))) (catch arbace.lang.ExceptionInfo _ nil)))
-            c (when cid (abi/cls cid))]
-        (if (and c (:complete c) (not (:defining c)) (empty? (:bases c)) (not (dt-dependent? (:targs c))))
+      (let [qt (when (and (checking?) (seq q))
+                 (try (:ty (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q g)))) (catch arbace.lang.ExceptionInfo _ nil)))
+            cid (when qt (try (class-id qt) (catch arbace.lang.ExceptionInfo _ nil)))
+            c (when cid (abi/cls cid))
+            ;; (queue 484: an enumeration with its enumerators declared, scoped or not, names no other member,
+            ;; [basic.lookup.qual]/1 with [dcl.enum]/2: `E::TURNUP`, lookup/suggestions-scoped-enums.C; g++'s "is not a member
+            ;; of", clang's err_no_member)
+            en (when (and (map? qt) (abi/enum? qt)) (abi/enm (:id qt)))]
+        (cond
+          (and c (:complete c) (not (:defining c)) (empty? (:bases c)) (not (dt-dependent? (:targs c))))
           (fail :name "unknown name " nm ": no member of the complete class " (:name c))
-          (fail :name "unknown name " nm))))
+          ;; (queue 484: a qualifier naming a class not defined, [basic.lookup.qual]/1's complete-class requirement,
+          ;; [expr.prim.id.qual]: `A::g()` with A only declared, expr/member-of-incomplete-type-1.C)
+          (and c (cx-incomplete-cls qt))
+          (fail :incomplete "incomplete type '" (:name c) "' used in nested name specifier")
+          (and en (:name en) (pos? (.size ^java.util.HashMap (:names (:scope en)))))
+          (fail :name "unknown name " nm ": no member of the complete class " (:name en))
+          :else (fail :name "unknown name " nm))))
     (let [e (entity-expr ctx es n)]
       ;; (an unqualified name that finds nothing, with explicit template arguments: argument-dependent lookup's templates
       ;; take them, [temp.names]/3's P0846; get<i>(e) of a structured binding, [dcl.struct.bind]/4)
@@ -6916,7 +6991,13 @@
           t (cond at (resolve-type (:scope ctx) at)
                   nt nt
                   :else (:ty (binding [*unevaluated* true] (analyze ctx (first (kids n))))))
-          t (abi/non-ref t)]
+          t (abi/non-ref t)
+          ;; (queue 484, the checker: [expr.sizeof]/1, [expr.alignof]/1: sizeof or alignof of an incomplete class, or an array
+          ;; of one, expr/sizeof3.C; not in a function template's specialization, whose point of instantiation may follow
+          ;; the class's definition)
+          _ (when (and (checking?) (not (some-> (:fn-id ctx) fnd :tinst)))
+              (when-let [c (cx-incomplete-cls (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))]
+                (fail :incomplete "invalid application of " (:name n) " to incomplete type '" (:name c) "'")))]
       (case (:name n)
         "sizeof" {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr}
         "alignof" {:op :int :v (abi/align-of t) :ty abi/ulong* :cat :pr}

@@ -532,6 +532,53 @@
                        :else [(sema/resolve-type-form scope f)]))
                forms)))
 
+(defn- cx-incomplete-class
+  "Queue 484: the class `t` names when it is incomplete for the checker: declared in the main file and not defined (not a
+  template's specialization, a lambda's, a header's, nor one being defined), else nil."
+  [t]
+  (let [u (abi/unq t)]
+    (when (abi/class? u)
+      (let [c (abi/cls (:id u))]
+        (when (and c (not (:complete c)) (not (:defining c)) (not (:tmpl c)) (not (:targs c)) (not (:lambda c)) (not (:header c)))
+          c)))))
+
+(def ^:private cx-trait-kinds
+  "Queue 484: the value traits' preconditions on their arguments' completeness, as GCC's finish_trait_expr checks them
+  ([meta.unary.prop], [meta.rel]; check_trait_type's kinds): :k1 a complete type, cv void or an array of unknown bound
+  (else its element type complete), every argument; :k2 the type with all its array extents removed complete or void;
+  :nonunion a non-union class complete, the type itself; :class a class or union complete, the type itself; :base-of the
+  second argument complete when both are distinct non-union classes."
+  (merge (zipmap ["__has_nothrow_assign" "__has_trivial_assign" "__has_nothrow_constructor" "__has_trivial_constructor"
+                  "__has_nothrow_copy" "__has_trivial_copy" "__has_trivial_destructor"
+                  "__is_constructible" "__is_nothrow_constructible" "__is_trivially_constructible"
+                  "__is_assignable" "__is_nothrow_assignable" "__is_trivially_assignable"]
+                 (repeat :k1))
+         (zipmap ["__is_pod" "__is_trivial" "__is_standard_layout" "__is_trivially_copyable" "__is_literal_type"
+                  "__has_unique_object_representations"]
+                 (repeat :k2))
+         (zipmap ["__has_virtual_destructor" "__is_abstract" "__is_empty" "__is_polymorphic"] (repeat :nonunion))
+         (zipmap ["__is_aggregate" "__is_final"] (repeat :class))
+         {"__is_base_of" :base-of}))
+
+(defn- cx-trait-incomplete!
+  "Queue 484, the checker: a value trait applied to an incomplete class its precondition excludes (cx-trait-kinds),
+  ext/unary_trait_incomplete.C, ext/is_assignable1.C: g++'s \"invalid use of incomplete type\", clang's
+  err_incomplete_type_used_in_type_trait_expr."
+  [^String nm ts]
+  (when-let [k (and (sema/checking?) (cx-trait-kinds nm))]
+    (let [strip (fn [t] (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))
+          bad (case k
+                :k1 (some (fn [t] (when-not (and (abi/arr? t) (nil? (:n t))) (cx-incomplete-class (strip t)))) ts)
+                :k2 (cx-incomplete-class (strip (first ts)))
+                :nonunion (when-let [c (cx-incomplete-class (first ts))] (when-not (:union c) c))
+                :class (cx-incomplete-class (first ts))
+                :base-of (let [[b d] (map abi/unq ts)]
+                           (when (and (abi/class? b) (abi/class? d) (not= (:id b) (:id d))
+                                      (not (:union (abi/cls (:id b)))) (not (:union (abi/cls (:id d)))))
+                             (cx-incomplete-class d))))]
+      (when bad
+        (throw (ex-info (str "codegen: incomplete type '" (:name bad) "' in the type trait " nm) {:codegen/refused :incomplete}))))))
+
 (defn trait-value
   "A value trait's constant (0 or 1) of its type arguments' forms, or a dependent {:k :texpr :o :trait} in a template's
   signature."
@@ -539,7 +586,8 @@
   (let [ts (trait-args scope forms)]
     (if (some dependent? ts)
       {:k :texpr :o :trait :name nm :types ts}
-      (if ((value-traits nm) scope ts) 1 0))))
+      (do (cx-trait-incomplete! nm ts)
+          (if ((value-traits nm) scope ts) 1 0)))))
 
 (defn trait-type
   "A transform trait's type of its type arguments' forms (__remove_cv(T), __decay(T), ...), dependent in a signature."
@@ -687,6 +735,13 @@
                   (let [_ (next!)
                         ty (abi/non-ref (sema/resolve-type scope (str/trim (run "(" ")"))))]
                     (if (dependent? ty) (fail :template "a dependent alignof in a constant") (abi/align-of ty)))
+                  ;; (queue 484, the checker: GNU's older traits the slice does not evaluate, __has_nothrow_assign(T) and the
+                  ;; rest of cx-trait-kinds, their preconditions judged before the refusal)
+                  (and (= k :id) (= "(" (peek)) (not (contains? value-traits t)) (cx-trait-kinds t) (sema/checking?))
+                  (let [_ (next!) txt (run "(" ")")
+                        ts (try (trait-args scope (mapv #(list 'cpp/text %) (split-top-commas txt))) (catch arbace.lang.ExceptionInfo _ nil))]
+                    (when (and ts (not-any? dependent? ts)) (cx-trait-incomplete! t ts))
+                    (fail :template "not a constant: " t))
                   ;; a value trait (G4): __is_same(T, U), its arguments types
                   (and (= k :id) (= "(" (peek)) (contains? value-traits t))
                   (let [_ (next!) txt (run "(" ")")]
@@ -2688,6 +2743,7 @@
   (let [ts (filter #(and (= :tmpl (:e %)) (= :fn (:tk %)))
                    (if cid (.get ^java.util.HashMap (:names scope) (:name n)) (sema/lookup scope (:name n))))
         targs (filter #(= "TemplateArgument" (:kind %)) (kids n))
+        doubt (atom false)
         try1 (fn [e]
                (let [t (tmpl (:id e))]
                  (try
@@ -2696,12 +2752,28 @@
                          b (atom (into {} (map-indexed vector ex)))]
                      (when (deduce-type b (:id t) (sym-sig t) ty)
                        (when-let [args (finish-deduction t @b)] [t args])))
-                   (catch arbace.lang.ExceptionInfo _ nil))))
+                   (catch arbace.lang.ExceptionInfo _ (reset! doubt true) nil))))
         ;; of the templates it could specialize, the most specialized ([temp.deduct.decl]/1, [temp.func.order])
         found (keep try1 ts)
         np (count (:ps (dissoc (sema/resolve-type scope (get-in n [:type :qualType])) :cq)))
         best (filter (fn [[t _]] (every? (fn [[u _]] (or (= (:id t) (:id u)) (more-specialized-fn? (:id t) (:id u) np))) found)) found)
-        [t args] (or (first best) (first found) (fail :template "no template for the explicit specialization " (:name n)))
+        [t args] (or (first best) (first found)
+                     (do
+                       ;; (queue 484, the checker: [temp.expl.spec]/12 with [temp.deduct.decl]/1, an explicit specialization
+                       ;; that no function template of its name matches -- none declared, or each deduction failing by the
+                       ;; algorithm alone, no type deduced from a placeholder and no pack; g++'s "template-id ... does not match
+                       ;; any template declaration", template/spec39.C; reported at the declaration, then the refusal as before)
+                       (when (and (sema/checking?) (not @doubt)
+                                  (not (re-find #"\b(auto|decltype)\b" (str (get-in n [:type :qualType]))))
+                                  (every? (fn [e] (let [t (tmpl (:id e))]
+                                                    (and (not-any? :pack (:params t))
+                                                         (not (re-find #"\b(auto|decltype)\b" (str (get-in (:pattern t) [:type :qualType])))))))
+                                          ts))
+                         (sema/*on-refusal* (ex-info (str "codegen: explicit specialization of '" (:name n) "' matches no template declaration")
+                                                     {:codegen/refused :template})
+                                            ;; (at the declarator's name, as GCC: template/crash9.C's `template<>` on the line before)
+                                            (let [l (:loc n)] (if (and (:offset l) (:file l)) (assoc n :range {:begin l}) n))))
+                       (fail :template "no template for the explicit specialization " (:name n))))
         ps (if cid
              (new-scope :tparams scope :cls cid :path (:path scope) :internal (:internal scope))
              (new-scope :tparams scope :internal (:internal scope)))
