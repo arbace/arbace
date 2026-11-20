@@ -1744,6 +1744,13 @@
                                  (assoc v :pending-def true :linkonce true :internal-l false)
                                  :else v))
         (when (= (:name n) (System/getenv "CPP_LOOKUP_TRACE")) (binding [*out* *err*] (println "declare" (:name n) (:path home) (System/identityHashCode (:names home)) (:pos v))))
+        ;; (cpp-rt-own: a redeclaration of a namespace-scope variable declared `extern` before keeps its linkage and language
+        ;; linkage, [basic.link]/? and [dcl.link]/6: libcpp's init.cc `constexpr _cpp_trigraph_map_s _cpp_trigraph_map_d;` of
+        ;; internal.h's `extern const struct _cpp_trigraph_map_s { ... } _cpp_trigraph_map_d;` in an extern "C" block, clang's
+        ;; @_cpp_trigraph_map_d; an internal _ZL19_cpp_trigraph_map_d before)
+        (when-let [pv (when (and old (= st :global) (not (:cls home))) (var* old))]
+          (when (and (:extern pv) (not (:internal pv)) (not (:internal-l pv)))
+            (swap! *vars* update id assoc :linkage (:linkage pv) :internal false :internal-l false)))
         (enter! home (:name n) {:e :var :id id :pos (:pos v)})
         (when (:cls home) (abi/update-cls! (:cls home) update :statics (fnil conj []) id))
         (swap! *order* conj [:var id])
@@ -3499,6 +3506,23 @@
         (let [env (assoc (into {} (map (fn [pid a] [pid (atom (ce-wrap (:ty (var* pid)) a))]) (:params f) args)) ::ret (:ret (:ty f)))
               r (ce-exec (:tbody f) env)]
           (if (and (= :ret (first r)) (not (ce-ptr? (second r))) (not (map? (second r)))) (ce-wrap (:ret (:ty f)) (second r)) (not-constant "no return")))))))
+
+(defn ce-object
+  "cpp-rt-own: the value the initializer `i` (init-for's) gives an object of class type `t` by the evaluator -- a constexpr
+  constructor's mem-initializers and body -- as ce-construct makes it ({::cls id, a field's index its value, [:b base] a base's},
+  arrays vectors), or nil when it is no constant: the constant initialization clang's ConstantEmitter makes of `constexpr
+  _cpp_trigraph_map_s _cpp_trigraph_map_d;` (libcpp's init.cc), whose constructor's body assigns the map's elements."
+  [t i]
+  (try (binding [*ce-steps* (atom 0) *ce-const* (or *ce-const* (atom #{})) *ce-pos* (or *ce-pos* (atom nil)) *ce-dead* (or *ce-dead* (atom #{}))
+                 *ce-temps* (or *ce-temps* (atom [])) *ce-manifest* true]
+         (let [v (ce-init t i {})] (when (map? v) v)))
+       (catch arbace.lang.ExceptionInfo x (when-not (or (:codegen/not-constant (ex-data x)) (:codegen/refused (ex-data x))) (throw x)) nil)))
+
+(defn ce-field-value
+  "cpp-rt-own: a member's value in an object value of ce-object's: the field of index `i`, or the base `cid`'s ([:b cid]); nil when
+  unset."
+  [o k]
+  (get o k))
 
 (defn ce-try
   "The constant `e` folds to (a typed literal of its type), or nil. A fold of code that runs (fold-mark's): not manifestly

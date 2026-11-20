@@ -3298,6 +3298,31 @@
 
 (def ^:dynamic *const-top* true) ; the complete object's constant (its vptrs written), not a base's
 
+(defn- object-leaves
+  "cpp-rt-own: the constant leaves [[offset llvm-type value] ...] of an object value of sema's ce-object (a class's fields and bases
+  by its layout, arrays element by element, integers and floats), at `off`; nil for what it cannot write (a pointer, a bit-field, a
+  dynamic class, a union, an unset member)."
+  [t v ^long off]
+  (let [u (abi/unq t)]
+    (cond
+      (or (abi/integral? u) (abi/enum? u)) (when (number? v) [[off (abi/llvm-type u) (if (= :bool (abi/bn u)) (if (zero? (long v)) 0 1) (long (sema/ce-wrap u v)))]])
+      (abi/floating? u) (when (number? v) [[off (abi/llvm-type u) (fp-const u (double v))]])
+      (abi/arr? u) (when (vector? v)
+                     (let [et (:of u) es (abi/size-of et)
+                           ls (map-indexed (fn [i x] (object-leaves et x (+ off (* (long i) (long es))))) v)]
+                       (when (every? some? ls) (vec (apply concat ls)))))
+      (abi/class? u) (let [cid (:id u) c (abi/cls cid) l (abi/layout cid)]
+                       (when (and (map? v) (not (abi/dynamic? cid)) (not (:union c)) (not-any? :bits (:fields c)) (not (vb-class? cid)))
+                         (let [bl (map-indexed (fn [i b] (object-leaves {:k :class :id (:cls b)} (sema/ce-field-value v [:b (:cls b)]) (+ off (long (nth (:bases l) i)))))
+                                               (:bases c))
+                               fl (map (fn [fd] (let [x (sema/ce-field-value v (:i fd))]
+                                                  (if (and (nil? x) (abi/class? (abi/unq (:ty fd))) (abi/empty-class? (:id (abi/unq (:ty fd)))))
+                                                    []
+                                                    (object-leaves (:ty fd) x (+ off (long (nth (:fields l) (:i fd))))))))
+                                       (:fields c))]
+                           (when (and (every? some? bl) (every? some? fl)) (vec (concat (apply concat bl) (apply concat fl)))))))
+      :else nil)))
+
 (defn- const-leaves
   "The initializer as constant leaves [[offset llvm-type value] ...] of an object of type `t` at `off`, or nil when it
   is not a constant (a dynamic initialization then)."
@@ -3370,6 +3395,7 @@
       ;; a polymorphic category, which clang constant-initializes (its vptr) and whose base's constructor it then never emits)
       :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)
                   body (:tbody f)]
+              (or
               (when (and (or (:implicit f) (:defaulted f)
                              (and (:constexpr f) (= :block (:s body)) (empty? (:items body))))
                          (empty? (:ps (:ty f))) (empty? (:args init)) (not (vb-class? cid)) ti (not (:delegate ti)))
@@ -3381,7 +3407,11 @@
                       vl (when (and *const-top* (abi/dynamic? cid))
                            (for [{c :cls o :off} (vptr-list cid)] [(+ off (long o)) 'ptr (address-point [cid cid 0] [c o])]))]
                   (when (and (every? some? bl) (every? some? fl))
-                    (vec (concat (apply concat bl) (apply concat fl) vl))))))
+                    (vec (concat (apply concat bl) (apply concat fl) vl)))))
+              ;; (cpp-rt-own: else a constexpr constructor's object by the evaluator, its body's assignments too, when the object
+              ;; is a constant: libcpp's init.cc `constexpr _cpp_trigraph_map_s _cpp_trigraph_map_d;`)
+              (when (and (:constexpr f) *const-top* (not (abi/dynamic? cid)))
+                (when-let [v (sema/ce-object t init)] (object-leaves t v off)))))
       nil)))
 
 (defn- leaves-constant
