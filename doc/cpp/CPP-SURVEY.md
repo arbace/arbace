@@ -9169,8 +9169,8 @@ the differences explained). The code generator's gaps go to cpp-rt-own-1120, whi
 - **`bin/repr-cpp ppref prepare|build|exe|key [--native]`** (`bin/lib/repr-cpp/ppref`): the pinned tarball checked and its libcpp,
   include/ and 16 libiberty files extracted into `.tmp/ppref/src-KEY/`; `build`, Arbace's own: libcpp's 14 units and the harness by
   `arbace.cpp.codegen gen-batch` (`-U__GNUC__ -fno-exceptions`), their lowered C read by repr/c with libiberty's C units (their own
-  options: `arbace.cpp.run read-lib-opts`, outside runtime-ci's key), the exceptions' layer and the shim, linked and translated by cf2g
-  (`compile-list`), built by TamaGo's go into `.tmp/ppref/own-KEY/ppref` (KEY: the sources, the harness, the code generator, the
+  options: `arbace.cpp.run read-lib-opts`, in threads, outside runtime-ci's key), the exceptions' layer and the shim, linked and translated by cf2g
+  (`compile-list`), built by TamaGo's go into the main checkout's `.tmp/ppref/own-KEY/ppref` (KEY: the sources, the harness, the code generator, the
   lowering, repr/c, ci and its back end, the targets, this script); a refused unit stops it (exit 3, the refusals listed); `--native`:
   the same sources by the host's g++ and gcc into `.tmp/ppref/native-KEY/ppref`, the oracle tier's and the harness's development
   build, never the check's judge.
@@ -9191,7 +9191,8 @@ the differences explained). The code generator's gaps go to cpp-rt-own-1120, whi
 
 ### The gate
 
-- `cpp-ppref` (`:phase :build`, `:heavy :inner`): `bin/repr-cpp ppref build`, seconds when built at its key; `cpp-essential` and
+- `cpp-ppref` (`:phase :build`, 8 GiB): `bin/repr-cpp ppref build` (each process capped at 8 GiB of address space, the host's rule of
+  2026-11-20 for jobs under 8 GiB: no heavy lock; the builds in the main checkout's `.tmp/ppref`, shared by key), seconds when built; `cpp-essential` and
   `cpp-tokens` need it and run `REPR_CPP_PP_JUDGE=own`; `c-tokens-ref` (`--full`, chain c-full): the known file's 72 `:pp` files
   (`test/c/pp-ref.txt`) under `REPR_C_PP_JUDGE=own`, c-tokens judging the rest by cc as before; the oracle tier's `cpp-tokens-oracle`
   (`:cxx :gcc`): `bin/repr-cpp ppref fidelity` (the native build's runs against the records, every difference in `:ref`) and the check
@@ -9206,7 +9207,8 @@ the differences explained). The code generator's gaps go to cpp-rt-own-1120, whi
 | fidelity, C++ (`--fidelity-only`, the recorded samplings) | pp: 1,735 equal and 46 both-reject of gxx-dg's 1,807, 103 + 5 of libstdcxx-headers' 108, 14 + 4 of cpp-lexical's 19; the 27 others g++ -E rejects and the reference reads (CP261 (a)'s and CP260 (a)'s: 22 modules, 5 options or a header unit): no stream differs. lex: 1,927 of 1,934 equal; 7 differ by the raw lexers' conventions. All 34 in the known file's `:ref` (fidelity status 0) |
 | C++'s check, `REPR_CPP_PP_JUDGE=own` (the native build) | cpp-lexical 19 of 19 (lex 16 agree, 3 known; pp 14 agree, 4 both reject, 1 by the reference's raw tokens); libstdcxx-headers 108 of 108 (lex and pp all agree or both reject: Makefile.am's clang convention gone); gxx-dg 1,807 of 1,807 (lex 1,805 agree, 2 known; pp 1,761 agree, 44 both reject, 1 by raw tokens, 1 known); the controls fail as they must (the `:pp-clang` one taken as CP261's path, its subject's record `:rejected`) |
 | C's 72, `REPR_C_PP_JUDGE=own` (`--only` the 72) | 69 judged by the reference's stream (gcc-c23 5, gcc-cpp-c23 9, gcc-embed 44, gcc-va-opt 9, mir, sqlite); 3 `:ref :differs`: c23-digit-separators-2.c (the reference, as gcc, rejects adjacent digit separators, the port reads them), c23-ucnid-1-utf8.c (the port's stream is gcc's neither), tcc-pp/13.S (gcc -E keeps an assembler's `#` comment line, which the digest drops) |
-| the own route (`gen-batch`, the probe's options) | the harness generates; the native parser reads all 14 units; the code generator generated 3 of 14 at next (lex, line-map, mkdeps) |
+| the own route (`gen-batch`, the probe's options) | the harness generates; the native parser reads all 14 units; the code generator generated 3 of 14 at next (lex, line-map, mkdeps), 15 of 15 (the 14 and the harness) once cpp-rt-own-1120's gap fixes were merged (mac/cpp-rt-own-1120 76118c206): 15.9 MB of lowered C, charset's 10.2 MB (its tables `ucnid.h` and `uname2c.h`) |
+| the planted bug (the native build; arbace.repr.c.pp's `__LINE__` one more past line 100, in a scratch checkout) | C++: cpp-lexical fails (includenext.cpp's libstdc++ assertion), libstdcxx-headers 42 of 108 fail; C (the 72): c23-digit-separators-1.c and sqlite3.c fail; each check exit 1. C's control `_control/tokens-ref/va-opt-2-vs-va-opt-3` differs as it must |
 | repr/c's read of the library (`read-lib-opts`) | the 3 units' and the harness's lowered C, libiberty's 16 units, the exceptions' layer and the shim: 21 of 22 at first (xvasprintf.c needed `vprintf-support.h`, now extracted) |
 
 The own-mode known classes (`:raw-udl-suffix`, `:unterminated-raw-string`, `:non-xid-utf8`) are conventions of libcpp's raw lexing
