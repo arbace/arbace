@@ -13708,3 +13708,44 @@ waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on
   8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
   record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
   three steps wait on n-py-rec's check records, now in the tree, to be spliced.
+
+## 2026-11-20: the long single steps split (branch `gate-split-1120`, from next `939037429`)
+
+The user: "identify the resource hogging bottleneck steps in the gate and split the behemoth jobs". From the store of passes
+(`.tmp/gate-pass/STEP/*.edn`: `:secs`, `:maxrss-kib`) and the plans of `939037429` (`bin/gate --nightly|--weekly --concurrent
+--plan`), the steps light in memory that take an hour or more: rsi-essential, hsi-check-aot, gate-tests, rsi-check.synthetic,
+cpp-dg.dg-error-own, cpp-aot.samples-runtime, cpp-check.samples-runtime, oi-check.run,
+cpp-roundtrip.libstdcxx-testsuite-every-40, wai-go-aot, hsi-check. Each one's cause read from its tool and its work directory's
+file times (next's `.tmp/cppi-check`, `.tmp/cppi-aot`, `.tmp/wai/go-aot`, rust-rec's `.tmp/rsi/runtime`); the plan, the table
+and the decisions in doc/GATE-DIET-SURVEY.md, "The long single steps split" (write-ahead, then the plan's view and the checks).
+
+- cpp-check and cpp-aot (52 and 48-65 min): the `ours` route's code generation, one `arbace.cpp.codegen gen-batch` process over a
+  corpus's programs one after another (the runtime corpus's 8 programs 36.5 of cpp-check's 52 minutes on 11-20, 05:10:45 to
+  05:47:12; 28 of cpp-aot's). `bin/lib/cppi/route.bash`: `CPPI_GEN_JOBS` (default 1, as before) processes at once, one a program;
+  the steps set 3 and declare 9 GiB (a generator up to 2.8 GB). Proof: four samples' IR byte for byte the same either way (52 s
+  serial, 25 s at two). Expected 25 and 30 minutes.
+- rsi-essential (27-32 min, or 3.3-5.5 h): its 13 programs are the half hour; the hours are the lowered std rebuilt inside it when
+  its key moves (runtime-build --ci, then repr/c's read of 95 units, evaluated at 2 jobs). A step of its own now, `rsi-runtime`
+  (`bin/rsi runtime-ci` in the same environment, a minute when current), which rsi-essential, rsi-check's parts and rsi-aot need;
+  `bin/rsi runtime-ci` holds `.tmp/rsi/runtime.lock` (parts side by side never build it twice; shown waiting on a held lock). The
+  hours themselves stay (DECISION 3: more jobs once measured, or the re-seed that drops `ARBACE_NO_AOT`).
+- rsi-check (weekly; synthetic 92 min, samples 36, one builder process each): parts by the tool's own `--sample N --offset K`
+  (synthetic in 4, samples in 2), each with its own work directory and chain; the slices partition each corpus (checked through
+  the check's own selection: 17+17+17+16 of 67, 3+3 of 6), each a subset run as the rotation's are.
+- wai-go-aot (53 min): `WAI_AOT_SLICE_JOBS=3` (n-gate-parts' option, run light there), 7 GiB: past `:night-concurrent`'s 4, so
+  wasm-full leaves the chains a non-concurrent night runs beside its serial run (python-read joins them within `:max-gib`);
+  crops-test's expectation follows. DECISION 2.
+- Found: next's `.tmp/rsi/` has no std IR and no lowered std (only `shim-check`), and the main checkout's `.tmp/rsi/std` is the
+  11-03 pin's: the rsi steps fail in next at `runtime-build --ci` until one is put there (rust-rec's is at the pin). `bin/rsi` now
+  takes the main checkout's std IR when the checkout's is not at the pin and the main checkout's is (DECISION 4).
+- Unchanged, with reasons: gate-tests and hsi-check(-aot) (n-gate-parts' fixes of 11-19, not yet measured as parts);
+  cpp-dg.dg-error-own and oi-check.run (rotated nightly: their subsets and slices are minutes; whole only in `--weekly`/`--full`);
+  cpp-roundtrip.libstdcxx-testsuite-every-40 (weekly, not on the tail). DECISION 5.
+- The schedule at one memory (48 GiB, `gate.lanes view` on the saved plans, the changed checks' expectations as estimates): the
+  nightly 10:11 → 9:35, the weekly 17:47 → 16:28; the rest of the wall is the core's big steps in lane 1.
+- Alternatives considered: a planner rule that runs a rotated part's subset and seven slices as eight checks in `--weekly` (the
+  nightly's keys reused; loses the whole run's absent-row check; DECISION 5 (b)); static id lists per part (stale when a corpus
+  grows; the tools' own `--sample/--offset` partition by construction); rsi-runtime as a `:build` (builds run before every check:
+  hours ahead of the whole night) or `:always` (it would build or fail every night, rust changed or not); more threads for
+  cpp-dg's own read (one process, memory unmeasured).
+- Checks: `gate.crops check` 0 problems, crops-test, claude-md-test, the fragments' steps equal steps.edn's, the plans. No gate run.

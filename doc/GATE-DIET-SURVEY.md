@@ -1117,3 +1117,93 @@ steps never passed), and the passes before hold no crop file the rules add; from
 vector controls' rules), `costs-test`, `lanes-test`, `chain-needs-test`, `arm64-host-test`, `plan-logic-test`,
 `needs-wait-test`, `weekly-test`, `bin/gate-tests`, `gate.crops check` (0 problems), `bin/crops-score --judge --strict`,
 `test/docs/claude-md-test.bash`, `bin/gate --plan` (51 steps), `bin/gate --full --plan` (338 steps, 358 before less the 20 merged away; no `night` decision: the full tier keys every subset as before). No build, no gate run.
+
+## The long single steps split (write-ahead; branch `gate-split-1120`, from `next` `939037429`, 2026-11-20)
+
+The user (2026-11-20): "identify the resource hogging bottleneck steps in the gate and split the behemoth jobs". The steps light
+in memory that take an hour or more each and so hold the night's tail, from the store of passes (`:secs`, `:maxrss-kib`) and the
+plans' simulations of 2026-11-20 on `939037429` (`bin/gate --nightly --concurrent --plan`: wall 13:45, its tail cpp-aot's 65
+minutes ending at 13:41, wai-go-aot's and cpp-check's before it; `--weekly --concurrent --plan`: wall 18:55, its tail
+rsi-check.synthetic's 92 minutes after cpp-aot's 65). The night runs `--concurrent` (11-20's lane lines: hsi-check's two parts,
+programs-full's and c-annotations' running at once), where a step's parts run side by side only in chains of their own (a part
+inherits its step's `:chain`; a step without one gives each part its own). Each step: what holds it, the fix, the time a part.
+
+| step | measured | what holds it | fix | after (expected, a part) |
+|---|---|---|---|---|
+| cpp-check.samples-runtime | 52 min, 2.8 GiB | the `ours` route's code generation, one `gen-batch` process over the corpus's programs one after another: the runtime corpus's 8 programs 36.5 of the 52 minutes (05:10:45 to 05:47:12 on 11-20), the samples' 5.3 | internal jobs: `CPPI_GEN_JOBS` processes, one a program (`bin/lib/cppi/route.bash`), 3 in the step | about 25 min (the runtime's generation about 13: library.cpp's 8.2 the longest), up to about 8.5 GiB (three generators of up to 2.8 GB, the step's measured peak): `:mem-gib` 9 (6) |
+| cpp-aot.samples-runtime | 48-65 min, 4.3 GiB | the same generation (the runtime's 28 minutes on 11-20), then the shards' cf2g and go builds (13 min) | the same, `CPPI_GEN_JOBS=3` | about 30 min, `:mem-gib` 9 (7) |
+| rsi-essential | 27-32 min when the lowered std is at its key, 3.3-5.5 h (11958-19767 s) when not | the lowered std rebuilt inside the step (`runtime-build --ci` 926 s, then repr/c's read of the 95 units into ci's library, about 2.4 h, all evaluated: `ARBACE_NO_AOT=1`, 2 jobs), whenever its key moves (the lowering's, repr/llvm's and repr/c's sources, the tools' host) | the build its own keyed step `rsi-runtime` (`bin/rsi runtime-ci`, the same environment), which rsi-essential, rsi-check's parts and rsi-aot need; `bin/rsi runtime-ci` under a lock (`.tmp/rsi/runtime.lock`): parts side by side never build it twice | rsi-essential its 13 programs (27-32 min); rsi-runtime a minute when current, its hours on a key's move unchanged (DECISION 3) |
+| rsi-check.synthetic | 92 min, 3.9 GiB (weekly) | one builder process (`RSI_THREADS=1`, `RSI_BATCH` 0) over the 67 programs, evaluated | parts: `--sample 4 --offset K`, K 0-3, each its own chain and work directory (`RSI_CHECK_WORK`) | about 25 min each, at most the whole's 3.9 GiB |
+| rsi-check.samples | 36 min, 3.0 GiB (weekly) | the same over the 6 samples (std.rs and vectors.rs the longest) | `--sample 2 --offset K`, K 0-1 | about 22 and 14 min |
+| wai-go-aot | 53 min, 2.1 GiB | its three slices' shared programs translated and built one after another (745, 1011 and 916 s on 11-20) | `WAI_AOT_SLICE_JOBS=3` (n-gate-parts' option): the slices side by side; `:mem-gib` 7 | about 21 min (the longest slice's 1011 s, the runs, the collection's minute), about 6.3 GiB |
+| gate-tests | 128 min (11-18) | its 45 tests one after another, gate-reads-test's nested run under a full trace | done by n-gate-parts (2026-11-19): `GATE_TESTS_JOBS=4`, `--seccomp-bpf` | 18-22 min (17 min 51 s by hand): no change |
+| hsi-check, hsi-check-aot | 43 min, 139 min whole | the own front end and the runs over 4 corpora | done by n-gate-parts: two parts each, side by side, not yet measured | no change until the night measures the parts |
+| cpp-dg.dg-error-own | 56-72 min whole, 4.9 GiB | one reader at 4 threads over 4,564 files | none: the nightly tier rotates it (GD2: `.sub` 932 files, about 12 min, and a slice, about 7); only `--weekly` and `--full` run it whole | DECISION 5 |
+| cpp-roundtrip.libstdcxx-testsuite-every-40 | 54 min (weekly part) | the round trip at 4 threads | none (weekly; not on the tail) | DECISION 5 |
+| oi-check.run | 49-53 min whole | `bin/oi check` at 3 jobs and `bin/oi suite check` | none: rotated nightly (`.sub` 29 programs, `.s1` 71, minutes) | DECISION 5 |
+
+The verdicts and records stay the same: every part is the tool's own subset run (`--sample`/`--offset`: `CI_SUBSET`, the
+record's absent rows not failing a part, its regressions and controls judged as before) and the parts partition the whole by
+construction (every Nth program from the Kth, N parts: each program in exactly one), so their union is the whole run; a control
+runs in the part that holds its subject (rsi's controls' references are the judge's recorded runs, not the run's). No record is
+written by the gate (it never `--record`s), so no merge of rows: the records stay whole-run files written by hand. The internal
+jobs change no program's input: `gen-batch` makes each program's IR alone (`gen-one`), so one process a program gives the same
+IR as one process for the list (proved on the samples below).
+
+Found on the way: the next worktree's `.tmp/rsi/` holds no std IR (`.tmp/rsi/std`, pinned by `test/rust/runtime/ir.sha256`, made
+by `bin/rsi std-build` on the oracle tier's rustc) and no lowered std: its rsi steps fail at `runtime-build --ci` ("std's IR in
+.tmp/rsi/std is not at ...") until one is put there. `bin/rsi` now reads the main checkout's `.tmp/rsi/std` when the checkout's is
+not at the pin and the main checkout's is (as the UI pack and the AOT library are shared); the main checkout's is the 11-03 pin's,
+so the main session puts a current one there (rust-rec's is at the pin).
+
+Decisions for the user:
+- DECISION 1 (CPPI_GEN_JOBS's default): (a) 1, as before, the gate's two steps 3 (this branch); (b) the default 3 for every
+  caller (cpp-check-essential's 17 minutes and `bin/cppi runtime-build`'s generation too).
+- DECISION 2 (wai-go-aot at 7 GiB): (a) `WAI_AOT_SLICE_JOBS=3` (this branch): past `:night-concurrent`'s `:max-step-gib` 4, so
+  wasm-full leaves the chains a non-concurrent night runs beside its serial run (crops-test's expectation follows); (b) as
+  before, 53 minutes, wasm-full beside.
+- DECISION 3 (the lowered std's hours): (a) as is, the build its own step (this branch); (b) the build at more jobs once a run
+  measures its memory (RSI_JOBS 2 now, 7.1 GiB at the step's peak); (c) the re-seed that lets the rsi steps drop
+  `ARBACE_NO_AOT=1` (the build compiled: 273 s and about 6 minutes on rust-rec's run of 2026-11-20 against about 2.6 h).
+- DECISION 4 (the std IR's place): (a) the main checkout's as the fallback (this branch); (b) a copy kept by pin in the main
+  checkout's `.tmp/shared`, as musl's forms.
+- DECISION 5 (the weekly's whole parts): cpp-dg.dg-error-own (56-72 min), cpp-roundtrip.libstdcxx-testsuite-every-40 (54) and
+  oi-check.run (49-53) stay whole in `--weekly` and `--full` (rotated nightly, or weekly-only, none on the tail): (a) as is; (b)
+  a planner rule that runs a rotated part's subset and its seven slices as eight checks in `--weekly` in place of the whole (the
+  nightly's keys, so a slice that passed at its key is skipped), which also loses the whole run's absent-row check; (c) more
+  threads for the part (REPR_CPP_THREADS, OI_JOBS) once measured.
+
+### The plan's view and the checks run on the branch
+
+The plans (`bin/gate --nightly|--weekly --concurrent --plan`, plan only) on the branch: the new checks keyed and planned, `run`
+where their keys moved: rsi-runtime (never passed), rsi-essential (its `:needs`), the six rsi-check parts in the weekly tier
+(`rsi-check.samples-0`, `-1`, `rsi-check.synthetic-0` to `-3`, each never passed), cpp-check.samples-runtime,
+cpp-aot.samples-runtime and wai-go-aot (`decl`: their commands). The schedule `gate.lanes view` simulates for the same saved plans
+at one memory for all (48 GiB, the free rule as `--concurrent` runs it), next `939037429`'s plans against the branch's, the
+durations the store's medians and, for the changed and new checks, the expectations above (a store of passes with one estimate
+each for them, `.tmp/split/est-store`):
+
+| plan | before | after | the target steps (end of their chain, before → after) |
+|---|---|---|---|
+| `--nightly --concurrent` | 10:11 | 9:35 | cpp-full 5:40 → 5:04 (cpp-check 41 → 25 min, cpp-aot 65 → 30); wai-go-aot 37 → 21 min |
+| `--weekly --concurrent` | 17:47 | 16:28 | rust-full 8:34 → 7:27 (rsi-check's 128 minutes in one chain → six parts of 14-25 min side by side); cpp-full 13:54 → 11:21 |
+
+The rest of the night's wall is the core's big steps in lane 1 (java-compiled-full, programs-full, the C levels), which the lanes
+admit one or two at a time; with memory unbounded the weekly's critical path is 7:32 either way (its chains' longest).
+
+- The generation's internal jobs (`.tmp/split/gen-proof.bash`): `cppi_ir_route` with `CPPI_ROUTE=ours` over four samples (auto,
+  classes, vexing, bitfields; `REPR_CPP_SKIM_CACHE=off` for both), once with `CPPI_GEN_JOBS=1` (one gen-batch for the list, as
+  before: 52 s) and once with `CPPI_GEN_JOBS=2` (25 s): every program's `gen.ll`, `x.ll`, `route` and `ir.status` byte for byte the
+  same; a generator's peak 2.6 GB. (The skim cache keys each run by its main file, so two generators never write one entry.)
+- rsi's slices partition the corpora (`bin/rsi list --set samples|synthetic` through the check's own selection, `--sample N --offset
+  K` and the judge's no-build ids): samples 6 programs, slices 3 and 3; synthetic 67, slices 17, 17, 17 and 16; the union each
+  corpus's whole, no program in two; the synthetic controls' subjects in one slice each (int-ops-i32 in synthetic-3, panic-index and
+  trap in synthetic-2), the samples' std.rs in samples-0. Not run: a slice itself (the lowered std's build first, hours here).
+- `std_ir_dir` (the std IR's place) on fabricated trees: the checkout's at the pin, else the main checkout's at the pin, else the
+  checkout's; `RSI_STD_DIR` first. The lock: a `bin/rsi runtime-ci` started while another process held `.tmp/rsi/runtime.lock`
+  waited the 7 seconds left, then went on (and stopped where tonight's next would: no std IR at the pin here, none in the main
+  checkout).
+- `gate.crops check` 0 problems; `test/gate/crops-test.bash` passes (its expectation: wasm-full out of the chains beside a
+  non-concurrent night's serial run, python-read in, within `:max-gib` once wasm-full left); the fragments' steps equal
+  `steps.edn`'s (cpp, llvm-rust, wasm); `test/docs/claude-md-test.bash` passes (CLAUDE.md's rust-full sentence names rsi-runtime).
+  No gate run.
