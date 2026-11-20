@@ -863,9 +863,43 @@
       (builtin-normalize (try (*normalize-ty* t) (catch Throwable _ t)))
       t)))
 
+(def ^:dynamic *type-layout*
+  "queue 448: within a run, a type's layout (mono's type-layout-form: {:size :align :fields ..}), for the SizedTypeProperties
+  constants a native instance names; nil outside a run"
+  nil)
+
+(def ^:dynamic *instance-def*
+  "queue 479: the def path of the exported body core-instance reprints (an inline const's parent: build's *body-def*)"
+  nil)
+
+(defn- inline-const
+  "queue 479: an exported body's inline const (build's `:const-block`: `(unevaluated \"mem::needs_drop::<T>::{constant#0}\" [] nil)`,
+  :nc [nil []], printed in the export's crate at the parent's identity arguments) at the instance: its text as rustc prints the
+  instance's (`const std::mem::needs_drop::<f64>::{constant#0}`, the parent's def path at ARGS: an inline const's arguments are
+  its parent's) and its value where it follows from the instance alone, else nil: a zero-sized type's (`const { assert!(..) }`,
+  `()`: RemoveZsts drops it at -O0; the assertion itself is CTFE's and not checked here, rustc's build of the same program held
+  it), and core::mem::needs_drop's `const { intrinsics::needs_drop::<T>() }` by needs_drop at T; another (TypeId::of's
+  type_id, a SIMD index array) stays unevaluated, and the body refused at codegen as before. [TEXT VALUE-OR-NIL], or nil
+  when the form is not an inline const of the reprinted body"
+  [tyf v args]
+  (let [nc (:nc (meta v))
+        sfx (when (and (seq? v) (= 'unevaluated (first v)) nc (nil? (first nc)) (string? (second v)))
+              (first (re-find #"(::\{constant#\d+\})+$" (second v))))]
+    (when (and sfx *instance-def*)
+      (let [text (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path *instance-def* args)) sfx)
+            t (:tc (meta tyf))
+            lay (when (and t *type-layout*) (try (*type-layout* t) (catch Throwable _ nil)))
+            val (cond (= [:tuple []] t) '(zst)
+                      (and lay (= 0 (:size lay))) '(zst)
+                      (and (= "core::mem::needs_drop" *instance-def*) (= "::{constant#0}" sfx) (= [:bool] t)
+                           (= 1 (count args)) (vector? (first args)) (not (#{:param :proj :infer} (ffirst args))))
+                      (list 'scalar (if (build/needs-drop? (first args)) 1 0) 1))]
+        [text val]))))
+
 (defn- reprint
   "Native core forms printed in the program's crate at ARGS: each type form from its :tc, a function constant's text from its
-  type, a named constant's from its :nc, an aggregate's ADT text and path from its path and arguments (queue 448b)"
+  type, a named constant's from its :nc, an aggregate's ADT text and path from its path and arguments (queue 448b), an inline
+  const's from the reprinted body's def (queue 479, inline-const)"
   [x args]
   (cond
     (seq? x)
@@ -879,10 +913,13 @@
         (and (= 'unevaluated (first y)) (:nc m)) (with-meta y (update m :nc (fn [[d as]] [d (mapv #(c/subst % args) as)])))
         (= 'const (first y))
         (let [tyf (nth y 2 nil) t (:tc (meta tyf)) v (nth y 3 nil) nc (:nc (meta v))
+              [itext ival] (when (and nc (nil? (first nc))) (inline-const tyf v args))
               text (cond (and t (= :fndef (first t))) (build/fn-const-text t)
+                         itext itext
+                         (and nc (nil? (first nc))) (throw (ex-info (str "an inline const outside the reprinted body (" (pr-str (second v)) ")") {}))
                          nc (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (first nc) (second nc))))
                          :else (second y))]
-          (with-meta (apply list 'const text (drop 2 y)) m))
+          (with-meta (apply list 'const text (concat (take 1 (drop 2 y)) (if ival [ival] (drop 3 y)))) m))
         :else (if m (with-meta y m) y)))
     (vector? x) (let [y (mapv #(reprint % args) x)] (if (meta x) (with-meta y (meta x)) y))
     (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(instance-normalize (c/subst % args)) v) (reprint v args))]))
@@ -913,11 +950,6 @@
                                              (if (empty? fields) [] (throw (ex-info "const_eval_select with a constant tuple" {}))))]
                               (assoc b :term (apply list 'call g new-args more))))))))
                   bs))))
-
-(def ^:dynamic *type-layout*
-  "queue 448: within a run, a type's layout (mono's type-layout-form: {:size :align :fields ..}), for the SizedTypeProperties
-  constants a native instance names; nil outside a run"
-  nil)
 
 (defn- walk-meta
   "F over X's forms bottom-up, each list's and vector's metadata kept (the native forms' :tc and :nc)"
@@ -1023,7 +1055,7 @@
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
-  (binding [*export-crate* (first (str/split (str (:def entry)) #"::"))]
+  (binding [*export-crate* (first (str/split (str (:def entry)) #"::")) *instance-def* (:def entry)]
   (let [b (sized-const-eval (reprint (:body entry) args))]
     ;; LowerIntrinsics again at the instance (its own port may have grown since the export)
     {:def (:def entry) :args args :body ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
@@ -1364,13 +1396,14 @@
 
 (defn- why
   "queue 474: a refusal's reason, its message, else (an exception without one: std::panicking::catch_unwind's root was kept
-  with `()`) its class and first frame"
+  with `()`) its class and first frame (queue 479: RF_WHY_TRACE=1 prints its first 40 frames to stderr, the batch's log)"
   [^Throwable e]
   (let [m (.getMessage e)]
     (if (seq m)
       m
       (let [fs (seq (.getStackTrace e))
-            own (first (filter #(str/includes? (str %) "rust") fs))]
+            own (first (filter #(str/includes? (str %) "rust") fs))
+            _ (when (System/getenv "RF_WHY_TRACE") (binding [*out* *err*] (println "why-trace:" (str e)) (doseq [f (take 40 fs)] (println "  at" (str f)))))]
         (str (.getName (class e)) (when-let [f (first fs)] (str " at " f)) (when (and own (not= own (first fs))) (str " from " own)))))))
 
 (defn native-core-plan
