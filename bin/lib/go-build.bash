@@ -4,9 +4,9 @@
 #
 #   go_build_policy   sets go_policy_env (VAR=VALUE words for env) and go_policy_flags (go build's
 #                     flags, put after "build"): go's processes at most ARBACE_GO_BUILD_PROCS (default
-#                     8: GOMAXPROCS of the go command, its -p and the compilers' -c), and each compile run
-#                     by bin/lib/go-toolexec, which admits it by the Go bytes compiling beside it and runs a
-#                     big package with less back-end concurrency (its header). Neither changes the
+#                     16: GOMAXPROCS of the go command and of the tools, go's -p), and each compile run by
+#                     bin/lib/go-toolexec, which admits it by the Go bytes compiling beside it and holds
+#                     its back end's concurrency to 4 (its header). Neither changes the
 #                     executable's bytes (doc/go/BUILD.md). With ARBACE_BUILD_CHUNKS=0 none of it (go as
 #                     before), but bin/lib/go-toolexec for its times when ARBACE_GO_BUILD_TIMES is set.
 #                     Removes the admission's state of a previous call (go_build_done)
@@ -25,7 +25,7 @@ go_build_policy() {
   fi
   mkdir -p "${TMPDIR:-$root/.tmp/tmp}"
   go_policy_state=$(mktemp "${TMPDIR:-$root/.tmp/tmp}/go-toolexec.XXXXXX") || return 1
-  go_policy_env=(GOMAXPROCS="${ARBACE_GO_BUILD_PROCS:-8}" ARBACE_GO_TOOLEXEC_STATE="$go_policy_state")
+  go_policy_env=(GOMAXPROCS="${ARBACE_GO_BUILD_PROCS:-16}" ARBACE_GO_TOOLEXEC_STATE="$go_policy_state")
   go_policy_flags=(-toolexec "$root/bin/lib/go-toolexec")
 }
 

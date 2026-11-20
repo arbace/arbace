@@ -225,10 +225,11 @@ and in `--build` the two architectures' prints and compiles at once.
   collected again must equal its first collection, as the collect index's must). A file is read
   twice when its package is printed (once light): about twice the reading time of a cold print.
 - **The compile bounded** (`bin/lib/go-build.bash`, `bin/lib/go-toolexec`): `go build` under
-  `GOMAXPROCS=ARBACE_GO_BUILD_PROCS` (8: go's `-p` and the compiles' `-c` at most 8) and
-  `-toolexec bin/lib/go-toolexec`, which admits each compile by the Go bytes compiling beside it
-  (`ARBACE_GO_BUDGET_MB`, 48 MiB, or alone) and runs a package of `ARBACE_GO_BIG_MB` (16 MiB) or
-  more with `-c` at most `ARBACE_GO_BIG_C` (4) and `GOGC=ARBACE_GO_BIG_GOGC` (50). None of it
+  `GOMAXPROCS=ARBACE_GO_BUILD_PROCS` (16: go's `-p`) and `-toolexec bin/lib/go-toolexec`, which
+  admits each compile by the Go bytes compiling beside it (`ARBACE_GO_BUDGET_MB`, 48 MiB, or alone),
+  holds every compile's back end to `-c` at most `ARBACE_GO_C` (4), so that its memory follows its
+  bytes, and runs a package of `ARBACE_GO_BIG_MB` (16 MiB) or more with `-c` at most
+  `ARBACE_GO_BIG_C` (4) and `GOGC=ARBACE_GO_BIG_GOGC` (50). None of it
   changes the executable: `-p`, `-c`, GOGC and GOMAXPROCS are not in go's action IDs nor in the
   build info, and go asks a tool for its ID through the wrapper (`-V=full`, passed through), so the
   build IDs are the same (checked: `test/build/go/hello` byte for byte with and without, its
