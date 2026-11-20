@@ -318,8 +318,8 @@ Prior art:
     `llvm-essential` and `llvm-full`, on `:stage0` and `:go` alone: no LLVM tool at check time, each module judged by its own verdict, else
     opt's and lli's records; clang, llvm-as, opt and lli only by hand, `REPR_LLVM_JUDGE=live`, `LLVMI_JUDGE=lli`), llvmi (`bin/llvmi`,
     `arbace/llvm/`, in `arbace_crop_paths`) on C's own target; Rust's from `crops/llvm-rust.edn` and `natives.edn` (`rust-read-essential`,
-    `rust-front-essential`, `rust-core-essential`, `rsi-shim-essential` in the crops tier; `--full` the chains `rust-full`, `rsi-essential` its first,
-    and `rust-aot`, on stage 0 and Go; the host `:rustc` only the oracle tier's, `rust-native-essential` among its steps).
+    `rust-front-essential`, `rust-core-essential`, `rsi-shim-essential` in the crops tier; `--full` the chains `rust-full`, `rsi-runtime` (the lowered std, since gate-split
+    2026-11-20) then `rsi-essential` its first, `rsi-check`'s weekly slices each a chain of its own, and `rust-aot`, on stage 0 and Go; the host `:rustc` only the oracle tier's, `rust-native-essential` among its steps).
     The fragments of later batches not spliced yet wait in `test/gate/crops/`: cpp-native's, `python-night.edn`'s three (Python's steps that name the records night's check records, queue 436; `python-packs.edn`'s three,
     those that read its pydump packs, spliced since n-py-packs recorded the packs, and `python.edn`'s pyi-wheels and pyi-runtime since it
     recorded their outcomes; the rest of `python.edn` and `python-oracle.edn` spliced, queue 428), `natives.edn`'s
@@ -646,7 +646,17 @@ Prior art:
   nothing; `--nightly`, `--weekly`, `--full` and the clean run key them as before), the crops' small subsets one step a crop's chain
   where their keys agree (`asm-amd64-essential`, `asm-arm64-essential`, `a64i-essential`, `wasm-essential`, `llvm-essential`,
   `cpp-essential`, `si-essential`, `oi-essential`, `rust-read-essential`; a merged step's `:controls` a vector, one entry a check;
-  `gate.crops check`: a new crop's essential check in the tier). `bin/gate --full` adds, one after another (concurrently by chain with
+  `gate.crops check`: a new crop's essential check in the tier). Since the cover (GDS21-GDS26 (a), the user 2026-11-17; on next since the 11-20 audit;
+  doc/GATE-DIET-SURVEY.md, "The cover and unit keys", "As built: the 11-20 audit") a full-tier check's `:subsumes [STEP ...]` (unkeyed) names
+  checks of a lower tier it checks every case of (the essential goi-check, goi-aot-essential, suite-aot-essential, programs, java-compiled,
+  cpp-check-essential, c-aot-essential and c-dg-essential; the `:full` rsi-essential under the `:weekly` rsi-check; since GDS28 (a), the
+  user 2026-11-20, the crops' subsets whose other checks moved into the full tier: si-essential, scheme-read-essential,
+  ocaml-read-essential (the step ocaml-read), oi-essential (oi-unit) and llvm-essential): in
+  `--full`, `--nightly` and `--weekly` such a check (each part of a parted one) is `covered` (no run, no failure, no pass; a need that
+  holds) when every subsumer runs whole in that run (not skipped; a rotated subsumer only when its `:subsumes-cases` names the
+  subsumed step's cases and its run's lists hold them all, the rotation's subsets keeping the essential lists); the essential gate,
+  `--rerun`, the clean run and `GATE_SUBSUME=0` run it; `bin/gate-unit-keys`
+  measures which checks of a finished gate unit-level keys would have rerun (`test/gate/unitkeys.ae`, GDS26, GDS27). `bin/gate --full` adds, one after another (concurrently by chain with
   `GATE_FULL_PARALLEL=1`): javac's tool (`bin/javac-vendor tool`, built once per `arbace_javac_key`
   and kept by that key in `ARBACE_GATE_EXES/javac-KEY`, j2g on the gate's executable) and javac on Arbace (`bin/javac-vendor
   check --from`: the tool build's own j2g run, javac's world translated once; `verify`:
@@ -667,7 +677,7 @@ Prior art:
   `bin/arbace-go --fixpoint --g1 "$GATE_CACHE"` (G1 the gate's build, `ARBACE_GATE_EXES/KEY20`, G2 and G3 built; `GATE_FRESH_G1=1`: G1 built afresh; a `--g1` directory not at the checkout's `gate_key` builds G1 too, three Go-hosted builds), then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b; this and the fixpoint `--weekly`'s since GD3, below); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`, each again with `--dirs`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), `bin/x509roots-vendor verify`, `check` (in the `repr-go` step); goi (`bin/goi
   annotations`, `test --gc`, `check --jobs 8`, then `check --aot --jobs 8`, after repr/go's round trips); then repr/clojure's
-  (`bin/repr-clojure check`, `--suite`, `--roundtrip`); and last C's: `bin/ci judge-test`, then since 2026-11-02 its full checks as heavy steps, a part a corpus, judged against the records and never `--record` (`bin/ci check` on the gate's executable, `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`; doc/C23-SURVEY.md, "As built: C's full checks in the gate"; C's pins, gcc's and musl's tarballs and `test/c/host/`, in `bin/gate --pins`); then Scheme's (SM9, light, about 25 minutes nightly and 55 whole): `scheme-read`, `scheme-roundtrip` a part a corpus (the probes, the scans, the SRFIs as one), `si-check` (with `bin/si test`, `fixpoint`, `check-suite`, `vendor verify`, `boot --check` on Chez), `si-aot` (with `srfi --aot`), `si-corpora` (R7RS's, the SRFIs, Chibi's tests on Chibi, `corpora files|divergences`), `si-ecraven` (`SI_TIMEOUT=300`) and `si-mats`, these two with GT8.4's `:rotate` over `test/scheme/subsets.edn`. Then OCaml's (O8, light, the chain `ocaml-full`): `ocaml-roundtrip` a part a corpus (`--text`: the trees and `:full` byte for byte, natively; the opam set one part), `oi-check` (with `suite check`, `suite rollup`), `oi-aot` and `oi-suite-aot` (the light level, GT8.4's `:rotate` over `test/ocaml/subsets.edn`), `ocaml-judges` (`bin/oi judges-test`: OC120 (b)'s tests, OC130 (b), OC112 (b)'s expect check). Parked by the user, 2026-10-26, and out
+  (`bin/repr-clojure check`, `--suite`, `--roundtrip`); and last C's: `bin/ci judge-test`, then since 2026-11-02 its full checks as heavy steps, a part a corpus, judged against the records and never `--record` (`bin/ci check` on the gate's executable, `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`; doc/C23-SURVEY.md, "As built: C's full checks in the gate"; C's pins, gcc's and musl's tarballs and `test/c/host/`, in `bin/gate --pins`); then Scheme's (SM9, light, about 25 minutes nightly and 55 whole): `scheme-read`, `scheme-roundtrip` a part a corpus (the scans and whimsical; the probes, the R6RS, R7RS and SRFI corpora one part `corpora`, with `spec-check`), `si-check` (with `bin/si test`, `test --si`, `unit`, `fixpoint`, `check-suite`, `vendor verify`, `boot --check` on Chez), `si-aot` (`check --aot` rotated, `srfi --aot` and `r7rs --aot` whole), `si-corpora` (R7RS's, the SRFIs, Chibi's tests on Chibi, `corpora files|controls-test|divergences`), `si-ecraven` (`SI_TIMEOUT=300`) and `si-mats`, these two with GT8.4's `:rotate` over `test/scheme/subsets.edn`. Then OCaml's (O8, light, the chain `ocaml-full`): `ocaml-read` (the stdlib's and samples' round trips, `--text --types`, and ocaml-read-essential's other checks), `ocaml-roundtrip` a part a corpus (`--text`: the trees and `:full` byte for byte, natively; the opam set one part), `oi-check` (with `suite check`, `suite rollup`), `oi-unit` (oi-essential's tests, REPL check and judgments), `oi-aot` and `oi-suite-aot` (the light level, GT8.4's `:rotate` over `test/ocaml/subsets.edn`), `ocaml-judges` (`bin/oi judges-test`: OC120 (b)'s tests, OC130 (b), OC112 (b)'s expect check). Parked by the user, 2026-10-26, and out
   of `--full` (kept as they are, run by hand with their scripts and Makefile targets, revisited later
   piece by piece): the box (`bin/arbace-go --build --box` with `bin/tamago-vendor check`, the box's smoke test, oracle
   subset, `bin/box-suite`, `bin/goi check --box`, `bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
@@ -679,7 +689,10 @@ Prior art:
   `bin/j2g-edge update`). `--full` is serial by default since GT3 (GTS13 (a); at once its chains overload a 62 GB host:
   REAP9's runs, 2026-10-26). Since GD1 (doc/GATE-DIET-SURVEY.md, GDS1-GDS20 decided 2026-11-13, "As built: GD1") the night
   runs `bin/night` (its header the contract: a clean checkout at its upstream, the disk at most 85%, one gate, a pass
-  fast-forwarding `--ff DIR`): `bin/gate --nightly` (GT8.4's subsets and slices; since GD2 every rotated subset by one rule, `bin/gate-subsets`), on the
+  fast-forwarding `--ff DIR`): `bin/gate --nightly` (GT8.4's subsets and slices; since GD2 every rotated subset by one rule, `bin/gate-subsets`; since
+  GDS31 (a), the user 2026-11-20, also the big nightly checks with records by case, `bin/gate-subsets crops`: llvmi-check, llvm-read's verify-rt
+  and verify-rt-heldout, c-dg, si-aot's check, wasm-roundtrip (`bin/repr-wasm roundtrip --only-list`) and haskell-lib-stg, every case once in
+  seven nights, the subset every night), on the
   night that starts on Saturday `bin/gate --weekly` (since GD3 `--full` with the `:phase :weekly` steps and parts: the jdk corpora
   of repr/java's front and nojavac checks, cpp-roundtrip's libstdcxx-testsuite-every-40, rsi-aot's samples, javac-platform-rebuild,
   rsi-check, si-ecraven-aot, haskell-target-probe, llvmi-aot, the fixpoint and programs-full, these two also

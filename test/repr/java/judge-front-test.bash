@@ -32,4 +32,22 @@ judge_bridges_empty "$t/k2.edn" 2> "$t/stderr"; expect_rc "several, over lines: 
 judge_bridges_empty "$t/k3.edn" 2> "$t/stderr"; expect_rc "no :bridges key" 0 $?
 judge_bridges_empty "$root/test/repr/java/attr-check-known.edn" 2> "$t/stderr"; expect_rc "the committed attr-check known file" 0 $?
 grep -q 'judge_bridges_empty "\$known"' "$root/bin/lib/repr-java/front-check" && ok "front-check's attr mode calls it" || bad "front-check's attr mode calls it"
+
+# GDS30 (a), the 11-20 audit: attr-check's pass implies front-check's while its known file admits no differing fact and no
+# differing forms file front-check's does not (repr-java-front's samples, baseline and javac parts dropped on that condition)
+. "$root/bin/lib/tools.bash"
+printf '{}\n' > "$t/f0.edn"
+printf '{:javac {:forms #{"a/B.ae"}}}\n' > "$t/f1.edn"
+printf '{:bridges #{}\n :samples {:declined 3}}\n' > "$t/a0.edn"
+printf '{:samples {:declined 3 :facts {:expr/type 2}}}\n' > "$t/a1.edn"
+printf '{:samples {:facts {:expr/type 0}}}\n' > "$t/a2.edn"
+printf '{:javac {:forms #{"a/B.ae"}}}\n' > "$t/a3.edn"
+judge_front_implied "$t/a0.edn" "$t/f0.edn" 2> "$t/stderr"; expect_rc "declines alone: implied" 0 $?
+judge_front_implied "$t/a1.edn" "$t/f0.edn" 2> "$t/stderr"; expect_rc "a differing fact admitted: refused" 1 $?
+grep -q 'no longer implies' "$t/stderr" && ok "the refusal says why" || bad "the refusal: $(cat "$t/stderr")"
+judge_front_implied "$t/a2.edn" "$t/f0.edn" 2> "$t/stderr"; expect_rc "a fact at count 0: implied" 0 $?
+judge_front_implied "$t/a3.edn" "$t/f0.edn" 2> "$t/stderr"; expect_rc "a differing forms file front-check's known file lacks: refused" 1 $?
+judge_front_implied "$t/a3.edn" "$t/f1.edn" 2> "$t/stderr"; expect_rc "a differing forms file both known files admit: implied" 0 $?
+judge_front_implied "$root/test/repr/java/attr-check-known.edn" "$root/test/repr/java/front-check-known.edn" 2> "$t/stderr"; expect_rc "the committed known files" 0 $?
+grep -q 'judge_front_implied "\$known"' "$root/bin/lib/repr-java/front-check" && ok "front-check's attr mode calls it" || bad "front-check's attr mode calls judge_front_implied"
 finish
