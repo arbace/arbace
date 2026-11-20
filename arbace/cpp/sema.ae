@@ -2040,7 +2040,7 @@
         (swap! abi/*enums* assoc-in [id :nonneg] true)))
     t))
 
-(declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access!)
+(declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-friend-fn-ident!)
 
 (defn- declare-class! [scope0 n]
   (let [nm (:name n)
@@ -2199,7 +2199,9 @@
                     ;; (queue 502: an unqualified elaborated friend class's namespace, cx-friend-class-ns!)
                     (cx-friend-class-ns! cs id k fd)
                     ;; (queue 499: a friend declaration naming another class's inaccessible member function)
-                    (cx-friend-member-access! cs id k fd)))
+                    (cx-friend-member-access! cs id k fd)
+                    ;; (queue 505: a friend function's identity, cx-friend-fn-ident!)
+                    (cx-friend-fn-ident! cs id k fd)))
                 (binding [*member-access* @access] (declare-node! cs k))))))
         (finally (abi/update-cls! id dissoc :defining))))
       ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
@@ -4673,14 +4675,36 @@
                                          (.get ^java.util.HashMap (:names s) nm))))))
                        ss))))))
 
+(defn- cx-friend-fn-miss?
+  "Queue 505 (the checker; 502-1 (a)): whether the function `f`, of the name of a friend function of the class `cl`, is
+  surely none of the functions its friend declarations name, by the identities cx-friend-fn-ident! recorded under that
+  name (none :any): an unqualified non-template friend, a non-template non-member function of the innermost enclosing
+  namespace with the declaration's parameter types ([namespace.memdef]/3; template/friend79.C's friend of A<int> is not
+  A<void>'s); an unqualified friend function template, the specializations of a template of that namespace
+  ([temp.friend]/1.3); a friend template-id, the specialization of a template its name finds with those parameter types
+  ([temp.friend]/1.2; tc1/dr166.C's N::f<int>, not M::f<int> nor N::f<long>)."
+  [cl f]
+  (let [es (get (:friend-fn-ids cl) (:name f))]
+    (boolean
+      (and (seq es) (not-any? #{:any} es)
+           (let [p (vec (:path f)) ti (:tinst f) ps (some->> (:ty f) :ps (mapv abi/unq))]
+             (not-any? (fn [e]
+                         (case (:k e)
+                           :plain (and (nil? (:cls f)) (nil? ti) (= (:ns e) p) (= (:ps e) ps))
+                           :tmpl (and (nil? (:cls f)) (some? ti) (= (:ns e) p))
+                           :spec (and (some? ti) (contains? (:tids e) (:tid ti)) (= (:ps e) ps))
+                           true))
+                       es))))))
+
 (defn- cx-friend-of?
-  "GetFriendKind: whether class `c` may befriend the context `cx`: a friend function of its function's name, a friend
+  "GetFriendKind: whether class `c` may befriend the context `cx`: a friend function of its function's name (queue 505:
+  not one whose identity the friend declarations surely do not name, cx-friend-fn-miss?), a friend
   class among its classes by name (queue 502: not one an unqualified friend declaration surely does not name,
   cx-friend-ns-miss?), or a friend the slice did not classify."
   [c cx]
   (let [cl (abi/cls c)]
     (boolean (or (:friend-unknown cl)
-                 (and (:fn cx) (contains? (:friend-fns cl) (:name (:fn cx))))
+                 (and (:fn cx) (contains? (:friend-fns cl) (:name (:fn cx))) (not (cx-friend-fn-miss? cl (:fn cx))))
                  (and (:friend-classes cl)
                       (or (contains? (:friend-class-names cl) "")
                           (some #(and (contains? (:friend-class-names cl) (:name (abi/cls %))) (not (cx-friend-ns-miss? cl %))) (:records cx))))))))
@@ -4756,6 +4780,40 @@
           ns (loop [s cs] (cond (nil? s) nil (= :ns (:kind s)) s (#{:class :tparams} (:kind s)) (recur (:parent s)) :else nil))]
       (when (and nm (seq nm))
         (abi/update-cls! id update-in [:friend-class-nss nm] (fnil conj []) (if (and elab? ns (not (str/includes? qt "::"))) (vec (:path ns)) :any))))))
+
+(defn- cx-dependent-type?
+  "Queue 505: whether the type `t` names a template parameter or a dependent or undeduced type anywhere."
+  [t]
+  (boolean (some #(and (map? %) (#{:tparam :tdep :dep :auto} (:k %))) (tree-seq coll? seq t))))
+
+(defn- cx-friend-fn-ident!
+  "Queue 505 (the checker; 502-1 (a)): the identity of the friend function declaration `k` (its function `fd`) of class
+  `id` (its scope `cs`), recorded under the function's name in :friend-fn-ids for cx-friend-fn-miss?: {:k :plain :ns
+  :ps} an unqualified non-template friend, {:k :tmpl :ns} an unqualified friend function template, {:k :spec :tids :ps}
+  a template-id (the templates its name finds from the class); :any (never judged) for a qualified friend, a member, a
+  class of the headers, a local class's friend, parameter types not known or dependent, or a plain friend whose name
+  finds a function template (`friend void t<>(int);`, whose `<>` the tree does not keep)."
+  [cs id k fd]
+  (when (and (checking?) fd (string? (:name fd)) (seq (:name fd)))
+    (let [nm (:name fd)
+          ns (loop [s cs] (cond (nil? s) nil (= :ns (:kind s)) s (#{:class :tparams} (:kind s)) (recur (:parent s)) :else nil))
+          ps (fn [] (try (let [t (resolve-type cs (get-in fd [:type :qualType]))]
+                           (when (and (abi/fn? t) (not (cx-dependent-type? t))) (mapv abi/unq (:ps t))))
+                         (catch arbace.lang.ExceptionInfo _ nil)))
+          qual? (or (and (string? (:_qual fd)) (seq (str/trim (:_qual fd))))
+                    (some #(and (string? (:_qual %)) (seq (str/trim (:_qual %)))) (:inner fd)))
+          ent (cond
+                (or (nil? ns) qual? (:header (abi/cls id)) (header-node? k)) :any
+                (= "FunctionTemplateDecl" (:kind fd)) {:k :tmpl :ns (vec (:path ns))}
+                (not= "FunctionDecl" (:kind fd)) :any
+                (some #(= "TemplateArgument" (:kind %)) (:inner fd))
+                (let [tids (try (set (keep #(when (= :tmpl (:e %)) (:id %)) (lookup cs nm))) (catch arbace.lang.ExceptionInfo _ nil))
+                      p (ps)]
+                  (if (and (seq tids) p) {:k :spec :tids tids :ps p} :any))
+                ;; (a template of the name visible: `friend void t<>(int);`, a template-id the tree does not mark, may be meant)
+                (try (some #(= :tmpl (:e %)) (lookup cs nm)) (catch arbace.lang.ExceptionInfo _ true)) :any
+                :else (if-let [p (ps)] {:k :plain :ns (vec (:path ns)) :ps p} :any))]
+      (abi/update-cls! id update-in [:friend-fn-ids nm] (fnil conj []) ent))))
 
 (defn- cx-friend-member-access!
   "Queue 499 (the checker): a friend declaration `k` of the class `id` (its scope `cs`) whose function `fd` is a member
