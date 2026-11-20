@@ -148,7 +148,7 @@
 ;; namespace; and two of them differ. A namespace-scope directive at or after *cutoff* is not in force yet.
 (def ^:dynamic *cx-udir-pos* nil) ; IdentityHashMap: a scope's :usings list -> IdentityHashMap {nominee's :names -> the directive's position}
 
-(declare cx-type-key lookup-qualified)
+(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls)
 
 (defn- cx-udir-visible? [s u]
   (or (not= :ns (:kind s))
@@ -220,6 +220,50 @@
         (let [seen (java.util.IdentityHashMap.)]
           (and (empty? (cx-qualified-set x nm seen))
                (not-any? #(.containsKey ^java.util.IdentityHashMap *cx-hdr-ns* %) (.keySet seen))))))))
+
+;; queue 492 (the checker): the names any declaration of the headers names (the native parser's nodes of the headers, in
+;; full), so a name none of them names is not one the analysis could have missed in a part of a header it skipped.
+(def ^:dynamic *cx-copy-list* false)
+(def ^:dynamic *cx-hdr-names* nil) ; a delay of a HashSet of names
+
+(declare header-node?)
+
+(defn- cx-hdr-names [nodes]
+  (delay (let [hs (java.util.HashSet.) bad (atom false)]
+           (letfn [(w [x] (cond (map? x) (do (when (= "NativeDecline" (:kind x)) (reset! bad true))
+                                            (when (and (string? (:name x)) (string? (:kind x)) (str/ends-with? (:kind x) "Decl")) (.add hs (:name x)))
+                                            (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (w v)))
+                                (sequential? x) (doseq [y x] (w y))
+                                :else nil))]
+             (doseq [n nodes :when (header-node? n)] (w n)))
+           (when-not @bad hs))))
+
+(def ^:dynamic *cx-all-names* nil) ; a delay of a HashSet: the names any declaration of the unit names, the main file's too
+
+(defn- cx-all-names [nodes]
+  (delay (let [hs (java.util.HashSet.) bad (atom false)]
+           (letfn [(w [x] (cond (map? x) (do (when (= "NativeDecline" (:kind x)) (reset! bad true))
+                                            (when (and (string? (:name x)) (string? (:kind x)) (str/ends-with? (:kind x) "Decl")) (.add hs (:name x)))
+                                            (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (w v)))
+                                (sequential? x) (doseq [y x] (w y))
+                                :else nil))]
+             (w nodes))
+           (when-not @bad hs))))
+
+(defn- cx-declared-nowhere?
+  "Queue 492: no declaration of the unit, a header's or the main file's, a member, a hidden friend or a local, names `nm`: no
+  lookup, unqualified, qualified or argument-dependent, at any point, can find it ([basic.lookup.argdep]/4)."
+  [^String nm]
+  (and (checking?) *cx-all-names* @*cx-all-names* (string? nm) (re-matches #"(?:operator\"\")?[A-Za-z_][A-Za-z_0-9]*" nm) (not (str/starts-with? nm "__"))
+       (not (.contains ^java.util.HashSet @*cx-all-names* nm))))
+
+(defn- cx-undeclared?
+  "Queue 492: `nm`, an identifier, is surely undeclared from `scope`: unqualified lookup finds nothing there wherever the
+  main file's declaration (no position cut-off), and no declaration of the headers has that name."
+  [scope ^String nm]
+  (and (checking?) *cx-hdr-names* @*cx-hdr-names* (string? nm) (re-matches #"(?:operator\"\")?[A-Za-z_][A-Za-z_0-9]*" nm) (not (str/starts-with? nm "__"))
+       (not (.contains ^java.util.HashSet @*cx-hdr-names* nm))
+       (empty? (binding [*cutoff* Long/MAX_VALUE] (try (lookup scope nm) (catch arbace.lang.ExceptionInfo _ [:x]))))))
 
 (defn- cx-qualified-ambiguous!
   [x ^String nm]
@@ -1428,6 +1472,41 @@
         ps)
       rs)))
 
+(declare cx-type-friend?)
+
+(defn- cx-member-type-access!
+  "Queue 492 (the checker): [class.access]/1, a member declaration `k` of the class `cid` (scope `cs`) whose written type
+  names a private member type of another class: unqualified, found in a base class (the class itself declaring no such
+  name), or qualified by a class that is neither `cid` nor one enclosing it; that class declaring no friend (cx-type-friend?).
+  GCC's \"'typedef int A::mytype' is private within this context\", at the member."
+  [cs cid k]
+  (when (and (checking?) (not (header-node? k)))
+    (let [t (-> (str (get-in k [:type :qualType])) (str/replace #"^\s*(?:(?:const|volatile|typename|struct|class|enum|union)\s+)+" ""))
+          priv (fn [c nm] (let [es (.get ^java.util.HashMap (:names (:scope c)) nm)]
+                            (when (seq es) [(some #(when (= :type (:e %)) (:access %)) es)])))
+          bad (fn [c nm] (throw (ex-info (str "codegen: '" nm "' is a private member of '" (:name c) "'") {:codegen/refused :access :cx/node k})))
+          enclosing (loop [c (abi/cls cid) out #{}] (if c (recur (when (= :class (:kind (:outer c))) (abi/cls (:cls (:outer c)))) (conj out (:id c))) out))]
+      (try
+        (if-let [[_ nm] (re-find #"^([A-Za-z_]\w*)(?![\w:<])" t)]
+          ;; unqualified: the first base, breadth first, that declares it
+          (when (empty? (.get ^java.util.HashMap (:names cs) nm))
+            (loop [todo (map :cls (remove :dependent (:bases (abi/cls cid)))) seen #{}]
+              (when-let [b (first todo)]
+                (let [c (abi/cls b)]
+                  (cond (or (nil? b) (nil? c) (seen b)) (recur (rest todo) (conj seen b))
+                        :else (if-let [[acc] (priv c nm)]
+                                (when (and (= :private acc) (not (cx-type-friend? b acc))) (bad c nm))
+                                (recur (concat (rest todo) (map :cls (remove :dependent (:bases c)))) (conj seen b))))))))
+          (when-let [[_ q nm] (re-find #"^((?:[A-Za-z_]\w*::)+)([A-Za-z_]\w*)(?![\w:<])" t)]
+            (let [parts (vec (remove str/blank? (str/split q #"::")))
+                  ce (try (first (filter #(= :type (:e %)) (lookup-qualified cs parts))) (catch arbace.lang.ExceptionInfo _ nil))
+                  qc (when ce (try (class-id (:ty ce)) (catch arbace.lang.ExceptionInfo _ nil)))]
+              (when (and qc (not (enclosing qc)) (abi/cls qc))
+                (when-let [[acc] (priv (abi/cls qc) nm)]
+                  (when (and (= :private acc) (not (cx-type-friend? qc acc))) (bad (abi/cls qc) nm)))))))
+        (catch arbace.lang.ExceptionInfo x
+          (if (= :access (:codegen/refused (ex-data x))) (*on-refusal* x k) (throw x)))))))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -1463,7 +1542,14 @@
                 (qualifier-before n) (qualifier-tid-before n)))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
-                 (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
+                 (cond (= :ns (:e e)) (:scope e)
+                       ;; (queue 492, the checker: a member defined outside a class the checker knows incomplete, [basic.def]/5
+                       ;; with [class.mfct]: `A::~A() {}` after `struct A;`; GCC's "invalid use of incomplete type", reported at
+                       ;; the definition and the declaration dropped, declare-node!)
+                       (and (checking?) (abi/class? (:ty e)) (cx-incomplete-cls (:ty e)))
+                       (throw (ex-info (str "codegen: invalid use of incomplete type '" (:name (abi/cls (:id (abi/unq (:ty e))))) "'")
+                                       {:codegen/refused :incomplete :cx/node n}))
+                       (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
                scope)
         ;; (queue 445: a block-scope declaration's home is its innermost enclosing namespace, its types resolved in its block)
         bns (when (and *block-fn* (empty? q)) (loop [s scope] (if (or (nil? (:parent s)) (= :ns (:kind s))) s (recur (:parent s)))))
@@ -1562,6 +1648,12 @@
                      (not (when cid (let [c (abi/cls cid)] (or (:tmpl c) (:targs c))))))
             (when-let [c (some cx-incomplete-cls (:ps (:ty f)))]
               (*on-refusal* (ex-info (str "codegen: parameter has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))
+        ;; (queue 492, the checker: a non-member function definition's written return and parameter types, their member
+        ;; types' access as a namespace-scope variable's, check-type-access!; [class.access]/1-2)
+        _ (when (and (checking?) body (nil? cid) (nil? *instantiating*) (not (header-node? n)) (= :ns (:kind scope)) (not (:friend f)))
+            (try (check-type-access! scope (get-in n [:type :qualType]) n)
+                 (catch arbace.lang.ExceptionInfo x
+                   (if (:codegen/refused (ex-data x)) (*on-refusal* x n) (throw x)))))
         old (find-redecl home f)
         ;; (queue 445: a block-scope declaration made before it, kept under its hidden key)
         hidden (when-not old (find-block-redecl home f))
@@ -1777,15 +1869,29 @@
         id))))
 
 (defn- declare-enum! [scope n]
-  (let [id (next-id)
+  (let [;; (queue 492, the checker: an enumeration defined by a qualified name is the named class's or namespace's member,
+        ;; its enumerators too, [dcl.enum]/1, [class.mem]: `enum A::B : int { x };` then A::x)
+        scope (or (when-let [q (and (checking?) (seq (:_equal n)))]
+                    (let [e (try (first (lookup-qualified scope (vec q))) (catch arbace.lang.ExceptionInfo _ nil))]
+                      (cond (= :ns (:e e)) (:scope e)
+                            (= :type (:e e)) (when-let [cid (try (class-id (:ty e)) (catch arbace.lang.ExceptionInfo _ nil))] (:scope (abi/cls cid)))
+                            :else nil)))
+                  scope)
+        id (next-id)
         nm (:name n)
         scoped (boolean (:scopedEnumTag n))
         under (if-let [ft (get-in n [:fixedUnderlyingType :qualType])] (resolve-type scope ft) abi/int*)
         es (new-scope :enum scope :path (conj (:path scope) [:enum id]))
-        t {:k :enum :id id}]
+        t {:k :enum :id id}
+        ;; (queue 492, the checker: a member enumeration's access, its own or an earlier declaration's in the class: an opaque
+        ;; `enum D : int;` under private:, defined by `enum C::D : int { y };` at namespace scope)
+        eacc (when (and (checking?) (= :class (:kind scope)) (:cls scope))
+               (or *member-access* (when nm (some #(when (= :type (:e %)) (:access %)) (.get ^java.util.HashMap (:names scope) nm)))))]
     (when-not nm (reset! *last-anon* t))
     (swap! abi/*enums* assoc id {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped})
-    (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))}))
+    (when nm (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
+                                ;; (queue 492, the checker: a member enumeration's access, check-type-access!)
+                                (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
     ;; (cpp-s4: an enumerator's initializer sees the earlier enumerators, of the underlying type before the closing brace,
     ;; [dcl.enum]/5 and [basic.scope.enum]: a scoped enumeration's too, <charconv>'s `general = fixed | scientific`)
     (let [neg (atom false)]
@@ -1802,7 +1908,7 @@
               (*on-refusal* (ex-info (str "codegen: redefinition of enumerator '" (:name c) "'") {:codegen/refused :redecl}) c))
             (enter! bs (:name c) (assoc e :ty under))
             (enter! es (:name c) e)
-            (when-not scoped (enter! scope (:name c) e))
+            (when-not scoped (enter! scope (:name c) (cond-> e (#{:private :protected} eacc) (assoc :cx-access eacc :cx-cls (:cls scope)))))
             ;; (round 54: the next enumerator's implicit value past the last one; LONG_MAX's successor, underlying_type7.C's
             ;; `enum class E6 : long { c = __LONG_MAX__ }`, is never read: unchecked, not an overflow's crash)
             ;; (queue 368, the checker: [dcl.enum]/5, a next enumerator with no initializer takes the previous value plus one,
@@ -1862,7 +1968,9 @@
     (when-not old
       (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
                                      :union (= "union" (:tagUsed n)) :header (header-node? n)})
-      (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))})))
+      (when nm (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
+                                  ;; (queue 492, the checker: a member class's access, as a member typedef's, check-type-access!)
+                                  (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*)))))
     ;; (cpp-s13: GNU's abi_tag on a class, Itanium 5.1.2's <abi-tags> after its name wherever it is mangled: <ios_base.h>'s
     ;; `class _GLIBCXX_ABI_TAG_CXX11 failure`, std::ios_base::failure[abi:cxx11], _ZTINSt8ios_base7failureB5cxx11E; without it
     ;; a program's catch named the old ABI's failure, whose type_info no __ios_failure the library throws reaches)
@@ -1914,6 +2022,8 @@
         (try
         (binding [*last-anon* (atom nil)]
         (doseq [k (kids n)]
+          (when (and (checking?) (#{"FieldDecl" "TypedefDecl" "TypeAliasDecl"} (:kind k)))
+            (cx-member-type-access! cs id k))
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
             "FieldDecl" (if (and (nil? @*last-anon*) (header-node? k)
@@ -2055,7 +2165,7 @@
         (try (declare-node*! scope n)
              (catch arbace.lang.ExceptionInfo e
                ;; (queue 487: and one that names an ambiguous name, cx-unqualified-ambiguous!, cx-qualified-ambiguous!)
-               (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous)" (str (.getMessage e)))
+               (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type)" (str (.getMessage e)))
                  (do (*on-refusal* e n) nil)
                  (throw e))))
         (declare-node*! scope n)))))
@@ -3731,6 +3841,9 @@
       (and (abi/floating? from) (abi/floating? to)) (cast-node e :fp to)
       (and (abi/ptr? to) (null-constant? e)) {:op :null :ty to :cat :pr}
       (and (abi/mptr? to) (null-constant? e)) {:op :null :ty to :cat :pr}
+      ;; (queue 492: [conv.ptr]/1, a null pointer constant of integral type converts to std::nullptr_t,
+      ;; `decltype(nullptr) n = 0;`)
+      (and (= :nullptr (abi/bn to)) (abi/integral? from) (null-constant? e)) {:op :null :ty to :cat :pr}
       (and (abi/mptr? to) (abi/mptr? from) (abi/derived-from? (:cls to) (:cls from)))
       {:op :mptr-adj :e e :off (second (abi/base-path (:cls to) (:cls from))) :ty to :cat :pr}
       (and (abi/ptr? to) (abi/ptr? from))
@@ -4174,7 +4287,10 @@
   [f args ctx]
   (let [ps (:ps (:ty f))]
     (vec (concat
-          (map-indexed (fn [i a] (if (< i (count ps)) (init-for (nth ps i) a ctx :copy) (let [a (rv a)]
+          (map-indexed (fn [i a] (if (< i (count ps))
+                                   ;; (queue 492, the checker: a braced argument copy-list-initializes its parameter, cx-explicit-list!)
+                                   (binding [*cx-copy-list* (or *cx-copy-list* (and (checking?) (= :init-list (:op a))))] (init-for (nth ps i) a ctx :copy))
+                                   (let [a (rv a)]
                                                                                            ;; [expr.call]/12: a class argument through the ellipsis is
                                                                                            ;; conditionally-supported; clang passes a trivially copyable and
                                                                                            ;; destructible one by value as a parameter of its type (the psABI's
@@ -4505,9 +4621,30 @@
               (fail :access "'" (:name d) "' is a " (name (:access d)) " member of '" (:name (abi/cls (:cls d))) "'")
               (cx-access! ctx (:cls d) (:name d) (:access d) nil nil))))))))
 
+;; queue 492 (the checker): a variable's copy-list-initialization (`T t = {...};`) in progress, [over.match.list]/1: in
+;; copy-list-initialization an explicit constructor chosen makes the program ill-formed.
+
+(defn- cx-explicit-list!
+  "Queue 492: the constructor a list-initialization `r` of class type `t` chose, when explicit in a copy-list-initialization
+  (*cx-copy-list*): GCC's \"converting to 'A' from initializer list would use explicit constructor\"; else `r`."
+  [t r]
+  (when (and (checking?) *cx-copy-list* (map? r) (= :ctor (:i r)))
+    (when-let [f (some-> (:fn r) fnd)]
+      ;; (a conditional explicit-specifier, explicit(e), and a template's specialization not judged: a value the slice
+      ;; cannot evaluate counts as explicit, explicit-spec)
+      (when (and (:explicit f) (:node f) (not (re-find #"\bexplicit\s*\(" (str (node-text (:node f))))))
+        (throw (ex-info (str "codegen: converting to '" (:name (abi/cls (:id (abi/unq t)))) "' from initializer list would use explicit constructor")
+                        (cond-> {:codegen/refused :init} (map? *cx-copy-list*) (assoc :cx/node *cx-copy-list*)))))))
+  r)
+
 (defn- class-init
   "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
   [t args ctx style]
+  ;; (queue 492, the checker: an object of a class type the checker knows incomplete here initialized, a cast's, an
+  ;; argument's or a variable's, [basic.def]/5, [dcl.init.general]/7, [expr.type.conv]/1; GCC's "invalid use of incomplete
+  ;; type")
+  (when-let [c (and (checking?) (cx-incomplete-cls t))]
+    (fail :incomplete "invalid use of incomplete type '" (:name c) "'"))
   (let [id (:id (abi/unq t))]
     (cx-ctor-access! ctx
     (cond
@@ -4519,6 +4656,7 @@
       ;; with [over.ics.list]; it had initialized U from the list's elements, <format>'s _Utf32_view<subrange<iterator>>
       ;; __uv({__first, __last}) "no viable function among 2 for 2 arguments")
       (and (= 1 (count args)) (= :init-list (:op (first args))) (not= style :direct))
+      (cx-explicit-list! t
       (let [l (first args)]
         (if (aggregate? (abi/unq t))
           (init-for t l ctx :list)
@@ -4538,7 +4676,7 @@
                       (when (= 1 (count viable)) (narrow-list-check! a l))
                       {:i :ctor :fn fid :args (call-args (fnd fid) [a] ctx)})))
                 ;; 1.2: all the constructors with the list's elements (each an argument, a list among them too)
-                (narrow-ctor-check! (ctor-init id (:items l) ctx (and (= 1 (count (:items l))) (= :init-list (:op (first (:items l)))))) (:items l))))))
+                (narrow-ctor-check! (ctor-init id (:items l) ctx (and (= 1 (count (:items l))) (= :init-list (:op (first (:items l)))))) (:items l)))))))
       (and (empty? args)) (default-ctor-init id (= style :value))
       ;; from another class with a conversion function to this one: the conversion's prvalue ([dcl.init]/17.6.3,
       ;; [over.match.copy]; G5: strong_ordering to partial_ordering; else the copy constructor's reference would bind
@@ -5060,7 +5198,12 @@
                                 (or (cx-naming-class ctx n) tc) tc))
                (field-node (cx-via (deref-node (this-expr ctx)) (cx-naming-class ctx n)) (:cls e) (:i e)))
       :indirect (reduce (fn [o [c i]] (field-node o c i)) (cx-via (deref-node (this-expr ctx)) (cx-naming-class ctx n)) (:chain e))
-      :enumerator (do (when (:ucls e)
+      :enumerator (do ;; (queue 492, the checker: an enumerator of a private or protected member enumeration, unscoped, a member
+                      ;; of the class with the enumeration's access, [class.access]/1, [dcl.enum]/11)
+                      (when (and (checking?) (:cx-access e) (not (:ucls e)))
+                        (cx-static-access! ctx (:cx-cls e) (get-in n [:referencedDecl :name]) (:cx-access e)
+                                           (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls))))
+                      (when (:ucls e)
                         ;; (the rest of CP313 (a): an enumerator a class's using-declaration names, its access there; the naming
                         ;; class the qualifier's, else the class the name is looked up from when derived from it)
                         (let [nc (or (cx-naming-class ctx n) (:cls (:scope ctx)) (some-> (:fn-id ctx) fnd :cls))]
@@ -5139,6 +5282,11 @@
              (do (implicit-alloc! nm) (lk)) es)
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
+    ;; (queue 492, the checker: an unqualified name no lookup finds, the parser's own lookup found nothing either (:_ent),
+    ;; and no declaration of the unit has its name, so argument-dependent lookup cannot find it either, [basic.lookup.argdep]/4,
+    ;; [temp.names]/3; GCC's "'x' was not declared in this scope", at the name)
+    (when (and (checking?) (empty? es) (not g) (empty? q) (:_wn n) (nil? (:_ent n)) (cx-declared-nowhere? nm))
+      (throw (ex-info (str "codegen: use of undeclared identifier '" nm "'") {:codegen/refused :undecl :cx/node n})))
     ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
     (when (and (empty? es) (or g (seq q)))
       ;; (n-cpp-concepts: a qualified name a complete class without bases does not declare, T::is_pettable for a T bound to
@@ -5374,9 +5522,24 @@
         (when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))
           (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
                           {:codegen/refused :access :cx/node node}))))))
+  ;; (queue 492: a member class template named by a qualified template-id, X::Y<int>, its access as a member type's)
+  (when (and (checking?) text (str/includes? text "<"))
+    (doseq [[_ q0 nm] (re-seq #"(?<![\w:<,>])((?:[A-Za-z_][A-Za-z_0-9]*::)+)([A-Za-z_][A-Za-z_0-9]*)\s*<" text)
+            :let [parts (vec (remove str/blank? (str/split q0 #"::")))
+                  ce (try (first (filter #(= :type (:e %)) (lookup-qualified scope parts))) (catch arbace.lang.ExceptionInfo _ nil))
+                  cid (when ce (class-id (:ty ce)))]
+            :when cid
+            :let [es (.get ^java.util.HashMap (:names (:scope (abi/cls cid))) nm)
+                  acc (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:access %)) es)]
+            :when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))]
+      (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
+                      {:codegen/refused :access :cx/node node}))))
   (when (and (checking?) text (str/includes? text "::") (not (str/includes? text "<")))
-    (doseq [[_ q nm] (re-seq #"((?:[A-Za-z_][A-Za-z_0-9]*::)+)([A-Za-z_][A-Za-z_0-9]*)" text)
-            :let [parts (vec (remove str/blank? (str/split q #"::")))
+    (doseq [[_ q0 nm0] (re-seq #"((?:[A-Za-z_][A-Za-z_0-9]*::)+)([A-Za-z_][A-Za-z_0-9]*)" text)
+            ;; (queue 492: each step of the qualifier too, Bar::type2::type1's type2 in Bar)
+            :let [all (conj (vec (remove str/blank? (str/split q0 #"::"))) nm0)]
+            j (range 1 (count all))
+            :let [parts (subvec all 0 j) nm (nth all j)
                   ce (try (first (filter #(= :type (:e %)) (lookup-qualified scope parts))) (catch arbace.lang.ExceptionInfo _ nil))
                   cid (when ce (class-id (:ty ce)))]
             :when cid
@@ -5837,7 +6000,21 @@
                  cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
-                 _ (when (and (empty? cands) (empty? (:tmpls callee))) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args) (fail :name "unknown name " (:name callee)))
+                 _ (when (and (empty? cands) (empty? (:tmpls callee))) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args)
+                      ;; (queue 492, the checker: a literal operator's name no lookup finds, called or a user-defined
+                      ;; literal's, [over.literal], [lex.ext]/2-8, its arguments of no class type (no ADL candidate either);
+                      ;; GCC's "'operator\"\"_X' was not declared in this scope", "unable to find ... literal operator")
+                      (when (and (checking?) (not (:qualified callee)) (not (:obj callee))
+                                 (str/starts-with? (str (:name callee)) "operator\"\"")
+                                 (not-any? #(let [t (abi/unq (abi/non-ref (:ty %)))] (or (abi/class? t) (abi/enum? t) (nil? t))) args)
+                                 (cx-undeclared? (:scope ctx) (:name callee)))
+                        (fail :undecl "use of undeclared identifier '" (:name callee) "'"))
+                      ;; (queue 492, the checker: an unqualified call, in a template's specialization or a member function
+                      ;; too, of a name no declaration of the unit has, so neither unqualified lookup nor argument-dependent
+                      ;; lookup finds a candidate; with explicit template arguments ([temp.names]/3, P0846) too)
+                      (when (and (checking?) (not (:qualified callee)) (not (:obj callee)) (cx-declared-nowhere? (:name callee)))
+                        (fail :undecl "use of undeclared identifier '" (:name callee) "'"))
+                      (fail :name "unknown name " (:name callee)))
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
                  fid (binding [*drops* (meta tcands)] (resolve-overload (distinct cands) args obj))
                  f (fnd fid)
@@ -6246,6 +6423,11 @@
                             (cond (= nm "this") [:this :copy]
                                   (= nm "*this") (fail :lambda "a capture of *this")
                                   :else (let [e (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))]
+                                          ;; (queue 492, the checker: a simple capture names an entity unqualified lookup
+                                          ;; finds, [expr.prim.lambda.capture]/5; GCC's "'i' was not declared in this scope";
+                                          ;; judged only for a name no declaration of the unit has: a variable whose own
+                                          ;; initializer names it is in scope there, [basic.scope.pdecl]/1)
+                                          (when (and (not e) (cx-declared-nowhere? nm) (cx-undeclared? (:scope ctx) nm)) (fail :undecl "use of undeclared identifier '" nm "'"))
                                           (when-not e (fail :lambda "capture of " nm))
                                           [(:id e) (if byref :ref :copy)]))))
         lam (assoc lam :explicit explicit)
@@ -6383,6 +6565,11 @@
                             (cond (= nm "this") [:this :copy]
                                   (= nm "*this") (fail :lambda "a capture of *this")
                                   :else (let [e (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))]
+                                          ;; (queue 492, the checker: a simple capture names an entity unqualified lookup
+                                          ;; finds, [expr.prim.lambda.capture]/5; GCC's "'i' was not declared in this scope";
+                                          ;; judged only for a name no declaration of the unit has: a variable whose own
+                                          ;; initializer names it is in scope there, [basic.scope.pdecl]/1)
+                                          (when (and (not e) (cx-declared-nowhere? nm) (cx-undeclared? (:scope ctx) nm)) (fail :undecl "use of undeclared identifier '" nm "'"))
                                           (when-not e (fail :lambda "capture of " nm))
                                           [(:id e) (if byref :ref :copy)]))))
         lam (assoc lam :explicit explicit)
@@ -7335,7 +7522,9 @@
                                              (analyze-args ctx (kids init))
                                              :else [(analyze ctx init)]) ctx :direct)
       (= "list" (:init n)) (init-for t (analyze ctx init) ctx :list)
-      :else (let [a (analyze ctx init)] (init-for t a ctx (if (= :init-list (:op a)) :list :copy))))))
+      ;; (queue 492, the checker: `T t = {...};`, a copy-list-initialization, cx-explicit-list!)
+      :else (let [a (analyze ctx init)] (binding [*cx-copy-list* (and (checking?) (= :init-list (:op a)) (or (when (:range init) init) true))]
+                                          (init-for t a ctx (if (= :init-list (:op a)) :list :copy)))))))
 
 
 (defn- decomposition!
@@ -7494,9 +7683,16 @@
                                (enter! (:scope ctx) (or (:name d) "") {:e :var :id id})
                                (upd-var! id assoc :sinit init)
                                (cond-> {:s :static-local :var id} (checking?) (assoc :cx-at (:range d)))))
-                         (let [init (decl-init ctx id d)
-                               _ (cx-dtor-access! ctx (:ty (var* id)))
-                               _ (cx-check-constant! (var* id) init)
+                         (let [;; (queue 492, the checker: a variable whose initialization is refused is declared all the
+                               ;; same, as GCC declares it, so the block's later statements find it: `A a2 (a); a2 = a;`)
+                               init (try (let [init (decl-init ctx id d)]
+                                           (cx-dtor-access! ctx (:ty (var* id)))
+                                           (cx-check-constant! (var* id) init)
+                                           init)
+                                         (catch arbace.lang.ExceptionInfo x
+                                           (when (and (checking?) (:codegen/refused (ex-data x)) (:name d) (not (has-auto? (:ty (var* id)))))
+                                             (enter! (:scope ctx) (:name d) {:e :var :id id}))
+                                           (throw x)))
                                t (:ty (var* id))
                                ;; a constexpr local, or a const integral one, initialized by a constant: folded (clang
                                ;; emits the value)
@@ -7739,6 +7935,21 @@
       (if (and (not (abi/arr? (abi/unq at))) (class-id at))
         (range-for-class c range-e loopd body)
       (do
+      ;; (queue 492, the checker: a range of arithmetic or pointer type: begin-expr is begin(__range) found by
+      ;; argument-dependent lookup alone, [stmt.ranged]/1.3 with [basic.lookup.argdep]/3 (a fundamental type, or a pointer
+      ;; to one, has no associated namespace or class), so nothing; GCC's "'begin' was not declared in this scope" at the range)
+      ;; (queue 492, the checker: a range that is a name unqualified lookup does not find, the loop's own variable not yet
+      ;; declared there, [stmt.ranged]/1's __range declared first; GCC's "'v' was not declared in this scope")
+      (let [rn (first (kids (first (kids rangen))))
+            rn (loop [k rn] (if (and (map? k) (#{"ImplicitCastExpr" "ParenExpr"} (:kind k)) (= 1 (count (kids k)))) (recur (first (kids k))) k))
+            nm (get-in rn [:referencedDecl :name])]
+        (when (and (checking?) (= "DeclRefExpr" (:kind rn)) (= :fnset (:op range-e)) (empty? (:fns range-e)) (empty? (:tmpls range-e))
+                   (nil? (ref-qualifier rn)) (cx-undeclared? (:scope c) nm))
+          (throw (ex-info (str "codegen: use of undeclared identifier '" nm "'") {:codegen/refused :undecl :cx/node rn}))))
+      (when (and (checking?) (let [u (abi/unq (abi/non-ref at))]
+                               (or (abi/arith? u) (and (abi/ptr? u) (let [p (abi/unq (:to u))] (or (abi/arith? p) (abi/void? p)))))))
+        (throw (ex-info "codegen: use of undeclared identifier 'begin' (a range of fundamental type)"
+                        {:codegen/refused :undecl :cx/node (first (kids (first (kids rangen))))})))
       (when-not (abi/arr? (abi/unq at)) (fail :range-for "a range for over a non-array"))
       ;; for (T x : a) as { T* b = a; T* e = a + N; for (; b != e; ++b) { T x = *b; body } }
       (let [et (:of at)
@@ -8162,6 +8373,28 @@
         (binding [*cutoff* Long/MAX_VALUE]
           (upd-fn! fid assoc :tinits (ctor-inits ctx (assoc f :inits [] :pre-inits {(:inh-base f) bi})))))
     (do
+    ;; (queue 492, the checker: a defaulted default, copy or move constructor is deleted when a potentially constructed
+    ;; subobject's destructor is deleted, [class.default.ctor]/2.7, [class.copy.ctor]/10.4: the subobject's deleted
+    ;; destructor, as a deleted call, the member's deletion)
+    (when (and (checking?) (= :ctor (:kind f)) (:implicit f))
+      (let [c (abi/cls cls)
+            subs (concat (map :cls (:bases c))
+                         (keep (fn [fl] (let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))] (when (abi/class? t) (:id t))))
+                               (remove :static (:fields c))))]
+        (doseq [sc subs :when sc
+                :let [d (some-> (abi/cls sc) :dtor fnd)]
+                :when (and d (:deleted d) (:deleted-sure d))]
+          (fail :overload "call to a deleted function ~" (:name (abi/cls sc))))
+        ;; (a union's default constructor, deleted when a variant member's default constructor is, no member having a
+        ;; default member initializer, [class.default.ctor]/2.1-2.4: the union's members are not initialized by the
+        ;; analysis below)
+        (when (and (:union c) (empty? (:ps (:ty f))) (not-any? :init (:fields c)))
+          (doseq [fl (remove :static (:fields c))
+                  :let [t (abi/unq (:ty fl))]
+                  :when (abi/class? t)
+                  :let [dc (some (fn [cid] (let [g (fnd cid)] (when (and (empty? (:ps (:ty g))) (:deleted g) (:deleted-sure g)) g))) (:ctors (abi/cls (:id t))))]
+                  :when dc]
+            (fail :overload "call to a deleted function " (:name (abi/cls (:id t))))))))
     (when (and (= :ctor (:kind f)) (empty? (:ps (:ty f))))
       (binding [*cutoff* Long/MAX_VALUE] (upd-fn! fid assoc :tinits (ctor-inits ctx (assoc f :inits [])))))
     (when (= :ctor (:kind f))
@@ -8463,7 +8696,9 @@ protected:
   (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
             abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})
             *conv-tmpl-cache* (atom {}) *cx-udir-pos* (when (checking?) (java.util.IdentityHashMap.))
-            *cx-hdr-ns* (when (checking?) (java.util.IdentityHashMap.))]
+            *cx-hdr-ns* (when (checking?) (java.util.IdentityHashMap.))
+            *cx-hdr-names* (when (checking?) (cx-hdr-names nodes))
+            *cx-all-names* (when (checking?) (cx-all-names nodes))]
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
        (fn []
