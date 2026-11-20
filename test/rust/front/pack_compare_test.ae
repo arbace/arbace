@@ -103,6 +103,56 @@
           norm (fn [t] (if (= t [:ref [:re-erased] false proj]) [:ref [:re-erased] false [:char]] t))]
       (check "a library projection normalized by the run's solver" (binding [br/*normalize-ty* norm] (#'br/instance-normalize [:ref [:re-erased] false proj])) [:ref [:re-erased] false [:char]])
       (check "negative: without the run's solver the projection stays" (#'br/instance-normalize [:ref [:re-erased] false proj]) [:ref [:re-erased] false proj]))
+    ;; queue 474: SingleUseConsts on our body alone (assert_unsafe_precondition!'s `let msg = ".."` passed by a reborrow:
+    ;; rustc's -O0 MIR writes `_t = const ".."` and msg's debug info the constant)
+    (let [rs '(ty "&str" (ref (ty "str" str) false))
+          unit '(ty "()" (tuple))
+          msg '(const "const \"m\"" (ty "&str" (ref (ty "str" str) false)) (slice alloc1 1))
+          fs (list 'const "f" '(ty "fn(&str) {f}" (fndef "f" [])) '(zst))
+          r {:args 0 :locals [{:ty unit} {:ty rs}] :debug [{:name "msg" :value msg}]
+             :blocks [{:cleanup false :stmts [(list 'assign '(place 1) (list 'use msg))] :term (list 'call fs '[(move (place 1))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 0 :locals [{:ty unit} {:ty rs} {:ty rs}] :debug [{:name "msg" :value '(place 1)}]
+             :blocks [{:cleanup false :stmts ['(storage-live 1) (list 'assign '(place 1) (list 'use msg)) '(storage-live 2) '(assign (place 2) (ref :shared (place 1 (deref))))]
+                       :term (list 'call fs '[(move (place 2))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts ['(storage-dead 2) '(storage-dead 1)] :term '(return)}]}]
+      (check "SingleUseConsts: a const local used once (by a reborrow made a copy) becomes the operand, its debug info the constant"
+             (br/pack-compare o r) [:equal-o0 "inst-simplify,locals,single-use-consts,storage"])
+      (check "the pass is not idempotent (the record's `_1 = const` would go), so the record is not taken through it"
+             (second (#'br/o0-single-use-consts r)) true)
+      (check "negative: a const local used twice stays a local"
+             (br/pack-compare (update-in o [:blocks 0 :stmts] conj '(assign (place 0) (use (copy (place 1))))) r) :differs)
+      (check "negative: another constant" (br/pack-compare (assoc-in o [:blocks 0 :stmts 1] '(assign (place 1) (use (const "const \"n\"" (ty "&str" (ref (ty "str" str) false)) (slice alloc1 1))))) r) :differs))
+    ;; queue 474: RemoveZsts before SimplifyCfg (unchecked_mul's `if ub_checks() { precondition_check(..) }`: both arms'
+    ;; `_3 = const ()` gone, their goto blocks bypassed)
+    (let [unit '(ty "()" (tuple)) bool '(ty "bool" bool)
+          cz1 '(assign (place 1) (use (const "const ()" (ty "()" (tuple)) (zst))))
+          cb (list 'const "c" '(ty "fn() -> bool {c}" (fndef "c" [])) '(zst))
+          cp (list 'const "p" '(ty "fn() {p}" (fndef "p" [])) '(zst))
+          r {:args 0 :locals [{:ty unit} {:ty bool} {:ty unit}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call cb [] '(place 1) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(switch (move (place 1)) [[0 3]] 2)}
+                      {:cleanup false :stmts [] :term (list 'call cp [] '(place 2) 3 '(unreachable))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 0 :locals [{:ty unit} {:ty unit} {:ty bool} {:ty unit}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call cb [] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(switch (move (place 2)) [[0 4]] 2)}
+                      {:cleanup false :stmts [] :term (list 'call cp [] '(place 3) 3 '(unreachable))}
+                      {:cleanup false :stmts ['(storage-dead 3) cz1] :term '(goto 5)}
+                      {:cleanup false :stmts [cz1] :term '(goto 5)}
+                      {:cleanup false :stmts [] :term '(return)}]}]
+      (check "RemoveZsts before SimplifyCfg: the arms' unit assignments gone, their gotos bypassed" (br/pack-compare o r) [:equal-o0 "cfg,locals,storage,zsts"])
+      (check "negative: an arm that assigns a value of a sized type stays a block"
+             (br/pack-compare (-> o (assoc-in [:locals 1 :ty] bool) (assoc-in [:blocks 4 :stmts] ['(assign (place 1) (use (const "const true" (ty "bool" bool) (scalar 1 1))))])) r) :differs)
+      (check "negative: the unwind action of a nounwind callee" (br/pack-compare (assoc-in o [:blocks 2 :term] (list 'call cp [] '(place 3) 3 '(continue))) r) :differs))
+    ;; queue 474: a string constant by its bytes, ours `(raw-str N)` (our allocation's text) against the record's `(slice allocX LEN)`
+    (let [rs '(ty "&str" (ref (ty "str" str) false))
+          body (fn [v] {:args 0 :locals [{:ty rs}] :debug [] :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'use (list 'const "const \"ab\"" rs v)))] :term '(return)}]})
+          r (assoc (body '(slice alloc7 2)) :alloc-data [["alloc7" {:kind :memory :align 1 :mutable false :bytes "6162" :init "11" :relocs []}]])
+          o (assoc (body '(raw-str 1)) :alloc-texts {1 "\nalloc1 (size: 2, align: 1) {\n    61 62                                           │ ab\n}\n"})]
+      (check "a string constant: our allocation's bytes against the record's" (br/pack-compare o r) [:equal])
+      (check "negative: other bytes" (br/pack-compare (assoc o :alloc-texts {1 "\nalloc1 (size: 2, align: 1) {\n    61 63                                           │ ac\n}\n"}) r) :differs)
+      (check "negative: the record's slice of another length" (br/pack-compare o (assoc-in r [:blocks 0 :stmts 0] '(assign (place 0) (use (const "const \"ab\"" (ty "&str" (ref (ty "str" str) false)) (slice alloc7 1)))))) :differs))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)

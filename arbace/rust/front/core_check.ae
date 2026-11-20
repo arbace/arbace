@@ -1082,6 +1082,9 @@
   closure of the exported body's typeck root as data (ext-closure)"
   [t]
   (cond
+    ;; queue 474: a fn pointer's signature map ([:fnptr {:inputs .. :output ..}]) in core's paths too (catch_unwind's
+    ;; `unsafe fn(*mut Data<F, R>)` kept the fn-local struct's id, `[:adt 50 ..]`: def-of 50 at the run)
+    (map? t) (into {} (for [[k v] t] [k (ext-ty v)]))
     (not (vector? t)) t
     (and (= :closure (first t)) *export-closures*) (ext-closure t)
     (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t))) (throw (ex-info "a closure or opaque type" {:carry false}))
@@ -1152,6 +1155,15 @@
                (into acc (for [[_ p body] built] [p body]))
                (inc depth)))))
   (catch Throwable _ nil)))
+
+(defn- fndef-types
+  "The types (the :tc metadata) of a body's forms, a vector of them (alloc-check's)"
+  [body]
+  (let [acc (transient [])]
+    (letfn [(w [x] (when-let [t (:tc (meta x))] (conj! acc t))
+                   (cond (map? x) (doseq [v (vals x)] (w v)) (coll? x) (doseq [y x] (w y))))]
+      (w body))
+    (persistent! acc)))
 
 (defn export-entry
   "The exported body of a built body B (its last stage after the passes, its promoted bodies); queue 462: with K, the bodies
@@ -1333,7 +1345,23 @@
                       (let [r (java.io.PushbackReader. (java.io.StringReader. (slurp ef)))]
                         (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc (second x))))))))
                 new-keys (set (map :key @exported))
-                all (concat (remove #(new-keys (:key %)) old) @exported)]
+                ;; queue 474: core's crate-private functions an exported body names (ub_checks' check_language_ub, a macro-made
+                ;; precondition_check), and the crate-private impls and traits they belong to (core_simd's PrivateMethods), their
+                ;; native facts, as lib-export's entries carry alloc's: the run prints their function constants' types and paths
+                ;; from them (`fn() -> bool {core::ub_checks::check_language_ub}`, not `{no sig ..}`)
+                nat @native-all
+                with-facts (fn [e]
+                             (if-not (:body e)
+                               e
+                               (let [fps (set (for [x (tree-seq coll? seq (fndef-types [(:body e) (:promoted e)]))
+                                                    :when (and (vector? x) (= :fndef (first x)) (string? (second x)))]
+                                                (second x)))
+                                     fs (into {} (for [p fps :let [f (get-in nat [:fns p])] :when (and f (not (get-in si [:fns p])))] [p (dissoc f :native)]))
+                                     parents (set (keep #(let [i (.lastIndexOf ^String % "::")] (when (pos? i) (subs % 0 i))) fps))
+                                     is (into {} (for [p parents :let [m (get-in nat [:impls p])] :when (and m (not (get-in si [:impls p])))] [p (dissoc m :native)]))
+                                     ts (into {} (for [p parents :let [m (get-in nat [:traits p])] :when (and m (not (get-in si [:traits p])))] [p (dissoc m :native)]))]
+                                 (cond-> e (seq fs) (assoc :fns fs) (seq is) (assoc :impls is) (seq ts) (assoc :traits ts)))))
+                all (concat (remove #(new-keys (:key %)) old) (map with-facts @exported))]
             (spit ef (binding [*print-meta* true] (with-out-str (doseq [e all] (prn (list 'core/body e)))))))
           (println "core-check: exported" (count @exported) "bodies," (count (filter :equal @exported)) "equal to rustc's built MIR, to" ef))
         (spit native-file (pr-str @native-all))

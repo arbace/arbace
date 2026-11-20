@@ -739,6 +739,15 @@
           m))
     {}))
 
+(defn- native-sigs
+  "queue 474: {def-path {:inputs [T..] :output T}} of the exported native bodies of functions without generic parameters (the
+  types their bodies' locals 1..args and 0 have), collect/fndef-sig's last resort"
+  []
+  (into {} (for [[d e] (native-core-map)
+                 :let [b (:body e) lt (:local-tys b) n (long (or (:args b) 0))]
+                 :when (and (= :fn (:kind b)) (= 0 (:generics e)) (vector? lt) (> (count lt) n))]
+             [d {:inputs (subvec lt 1 (inc n)) :output (first lt)}])))
+
 (defn- native-extra-fns
   "queue 443: the native facts of the library functions the exported bodies name that std's interface lacks (alloc's
   crate-private `box_new_uninit`), {path fact}, which the run's interface takes so that their items' types print"
@@ -1175,6 +1184,45 @@
         b (update body :blocks (fn [bs] (mapv (fn [x] (update x :stmts #(vec (remove zst-assign? %)))) bs)))]
     [b (not= (:blocks b) (:blocks body))]))
 
+(defn- o0-single-use-consts
+  "SingleUseConsts (single_use_consts.rs, -O0, before CopyProp): a local (not an argument) assigned once by `_l = const C`
+  (a plain place) whose every other mention is at most one operand `copy|move _l` and the debug info's plain `_l`: that
+  operand and the debug info's value made C, the assignment dropped (SimplifyLocals drops the local after). One pass, as
+  rustc's: it is not idempotent (the operand it rewrites may be another temporary's `_t = const C`), so only our body goes
+  through it, the record's optimized body already has; [body changed?]"
+  [body]
+  (let [blocks (:blocks body) nargs (long (or (:args body) 0))
+        live? (fn [s] (not (and (seq? s) (#{'storage-live 'storage-dead 'nop} (first s)))))
+        const-init (fn [s] (when (and (seq? s) (= 'assign (first s)))
+                             (let [l (plain-place (second s)) rv (nth s 2 nil)]
+                               (when (and l (seq? rv) (= 'use (first rv)) (seq? (second rv)) (= 'const (first (second rv)))) [l (second rv)]))))
+        operand-of (fn [x] (when (and (seq? x) (#{'copy 'move} (first x)) (= 2 (count x))) (plain-place (second x))))
+        forms (for [b blocks f (concat (filter live? (:stmts b)) [(:term b)])] f)
+        mentions (frequencies (for [f forms g (tree-seq coll? seq f) :when (seq? g)
+                                    :let [l (case (first g) place (second g) index (when (= 2 (count g)) (second g)) nil)]
+                                    :when (number? l)]
+                                l))
+        inits (frequencies (keep (comp first const-init) forms))
+        uses (frequencies (for [f forms g (tree-seq coll? seq f) :let [l (operand-of g)] :when l] l))
+        dbg-mentions (frequencies (for [d (:debug body) g (tree-seq coll? seq d) :when (and (seq? g) (= 'place (first g)) (number? (second g)))] (second g)))
+        dbg-plain (frequencies (for [d (:debug body) :let [l (plain-place (second d))] :when l] l))
+        cands (into {} (for [f forms :let [[l c] (const-init f)]
+                             :when (and l (> (long l) nargs) (= 1 (get inits l)) (<= (long (get uses l 0)) 1)
+                                        (= (get mentions l) (+ 1 (long (get uses l 0))))
+                                        (= (get dbg-mentions l 0) (get dbg-plain l 0)))]
+                         [l c]))]
+    (if (empty? cands)
+      [body false]
+      (let [rep (fn rep [x] (cond (and (seq? x) (cands (operand-of x))) (cands (operand-of x))
+                                  (seq? x) (apply list (map rep x))
+                                  (vector? x) (mapv rep x)
+                                  :else x))
+            init? (fn [s] (when-let [[l] (const-init s)] (contains? cands l)))]
+        [(assoc body
+                :blocks (mapv (fn [b] (-> b (update :stmts (fn [ss] (mapv rep (remove init? ss)))) (update :term rep))) blocks)
+                :debug (mapv (fn [d] (if-let [l (plain-place (second d))] (if (cands l) (list (first d) (cands l)) d) d)) (:debug body)))
+         true]))))
+
 (defn- o0-rename-return
   "RenameReturnPlace (nrvo.rs, -O0): the return place's one assignment `_0 = copy|move _l` (_l a local neither an argument nor
   borrowed, of _0's type) gone, _l renamed _0; [body changed?]"
@@ -1198,19 +1246,23 @@
 
 (defn o0-normalize
   "BODY as rustc's -O0 optimizations would leave it for the passes our runtime MIR stops before (RemoveStorageMarkers,
-  SimplifyCfg-final, InstSimplify's reborrow, CopyProp's copies of locals, RemoveZsts' unit assignments, RenameReturnPlace,
-  SimplifyLocals), the kinds that changed it: [body #{kind}]"
-  [body]
+  RemoveZsts' unit assignments, SimplifyCfg-final, InstSimplify's reborrow, SingleUseConsts (OURS? alone: our body, not the
+  record's), CopyProp's copies of locals, RenameReturnPlace, SimplifyLocals), in rustc's order (queue 474: RemoveZsts before
+  SimplifyCfg, run_optimization_passes' order: a branch's `_t = const ()` gone before the arms' goto blocks merge), the kinds
+  that changed it: [body #{kind}]"
+  [body & [ours?]]
   (let [kinds (atom #{})
         b (update body :blocks (fn [bs] (mapv #(update % :stmts strip-storage) bs)))
         _ (when (not= (:blocks b) (:blocks body)) (swap! kinds conj :storage))
+        [b cz] (o0-remove-zsts b)
+        _ (when cz (swap! kinds conj :zsts))
         b2 ((requiring-resolve 'arbace.rust.front.passes/simplify-cfg) b {:preserve-switch-reads false})
         _ (when (not= (count (:blocks b2)) (count (:blocks b))) (swap! kinds conj :cfg))
         [b2 c2] (o0-inst-simplify b2)
         _ (when c2 (swap! kinds conj :inst-simplify))
+        [b2 cs] (if ours? (o0-single-use-consts b2) [b2 false])
+        _ (when cs (swap! kinds conj :single-use-consts))
         b3 (loop [x b2] (let [[y c] (o0-copy-prop x)] (if c (do (swap! kinds conj :copy-prop) (recur y)) x)))
-        [b3 cz] (o0-remove-zsts b3)
-        _ (when cz (swap! kinds conj :zsts))
         [b3 cr] (o0-rename-return b3)
         _ (when cr (swap! kinds conj :nrvo))
         [b4 c4] (o0-simplify-locals b3)
@@ -1259,6 +1311,29 @@
                                         (map? x) (into {} (for [[k v] x] [k (by-bytes v)]))
                                         :else x))
         rec (if (seq rallocs) (update rec :blocks by-bytes) rec)
+        ;; queue 474: a string constant by its bytes: the record's `(slice allocX LEN)` (an immutable memory allocation of LEN
+        ;; bytes, no pointers), ours `(raw-str N)` (our allocation N's bytes, which codegen emits as that allocation): both
+        ;; `(str-bytes HEX)`, the bytes compared
+        hex (fn [bs] (apply str (map #(format "%02x" %) bs)))
+        rec (if (seq rallocs)
+              (update rec :blocks (fn rs [x] (cond (and (seq? x) (= 'slice (first x)) (= 3 (count x)) (symbol? (second x)) (number? (nth x 2)))
+                                                   (let [a (get rallocs (str (second x)))]
+                                                     (if (and (= :memory (:kind a)) (empty? (:relocs a)) (string? (:bytes a)) (= (* 2 (long (nth x 2))) (count (:bytes a))))
+                                                       (list 'str-bytes (:bytes a))
+                                                       x))
+                                                   (seq? x) (apply list (map rs x))
+                                                   (vector? x) (mapv rs x)
+                                                   (map? x) (into {} (for [[k v] x] [k (rs v)]))
+                                                   :else x)))
+              rec)
+        ours (if (:alloc-texts ours)
+               (update ours :blocks (fn rs [x] (cond (and (seq? x) (= 'raw-str (first x)) (number? (second x)))
+                                                     (if-let [bs (try (alloc-bytes ours (second x)) (catch Throwable _ nil))] (list 'str-bytes (hex bs)) x)
+                                                     (seq? x) (apply list (map rs x))
+                                                     (vector? x) (mapv rs x)
+                                                     (map? x) (into {} (for [[k v] x] [k (rs v)]))
+                                                     :else x)))
+               ours)
         po (prep ours) pr (prep rec)
         bl (fn [b f] (mapv (fn [x] (update x :stmts f)) (:blocks b)))
         lt (fn [b] (mapv :ty (:locals b)))
@@ -1267,7 +1342,7 @@
       (and (= (bl po identity) (bl pr identity)) (= (lt po) (lt pr))) [:equal]
       (and (= (bl po strip-storage) (bl pr strip-storage)) (= (lt po) (lt pr))) [:equal-but-storage]
       :else
-      (let [[no ko] (o0-normalize po) [nr _] (o0-normalize pr)
+      (let [[no ko] (o0-normalize po true) [nr _] (o0-normalize pr)
             _ (when-let [d (System/getenv "RF_PACK_DUMP")]
                 (.mkdirs (File. ^String d))
                 (spit (str d "/" (Math/abs (hash [no nr])) ".edn") (with-out-str (prn :ours) (prn no) (prn :record) (prn nr))))]
@@ -1286,6 +1361,17 @@
                                   :else (str "statements " (count sa) " against " (count sb)))]))))))
 
 (def ^:private pack-equal? #{:equal :equal-but-storage :equal-o0})
+
+(defn- why
+  "queue 474: a refusal's reason, its message, else (an exception without one: std::panicking::catch_unwind's root was kept
+  with `()`) its class and first frame"
+  [^Throwable e]
+  (let [m (.getMessage e)]
+    (if (seq m)
+      m
+      (let [fs (seq (.getStackTrace e))
+            own (first (filter #(str/includes? (str %) "rust") fs))]
+        (str (.getName (class e)) (when-let [f (first fs)] (str " at " f)) (when (and own (not= own (first fs))) (str " from " own)))))))
 
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
@@ -1340,8 +1426,10 @@
                           more (for [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when ft
                                      :let [[_ cd0 cargs0] ft
                                            ;; queue n-rust-dyn: a trait method's call (its arguments concrete at the instance) by
-                                           ;; the impl's method it resolves to, as the collector reaches it
-                                           [cd cargs] (or (when (and *resolve-call* (string? cd0) (not (get nc cd0))) (*resolve-call* cd0 cargs0))
+                                           ;; the impl's method it resolves to, as the collector reaches it (queue 474: also when the
+                                           ;; trait's default has a native body: an impl that overrides it is the callee, Iterator::collect's
+                                           ;; `size_hint` is `<Split<..> as Iterator>::size_hint`; resolve-call is nil when the default stays)
+                                           [cd cargs] (or (when (and *resolve-call* (string? cd0)) (*resolve-call* cd0 cargs0))
                                                           [cd0 cargs0])]
                                      ;; an intrinsic is codegen's; a function core's export has is built; one that is MIR-available
                                      ;; without a native body stops the root; any other is an external symbol (core's own object)
@@ -1353,7 +1441,7 @@
                                              (if (and (rec-has? cd) (not (:equal (get nc cd))) (not= :instance (:judge (get nc cd)))) [] (try (close cd cargs seen)
                                                                                                          (catch Throwable e
                                                                                                            (if (rec-has? cd)
-                                                                                                             (do (swap! lines conj (str "record-kept " cd " (" (.getMessage e) ")")) [])
+                                                                                                             (do (swap! lines conj (str "record-kept " cd " (" (why e) ")")) [])
                                                                                                              (throw e))))))
                                            (distinct more)))))))]
     (assoc
@@ -1373,7 +1461,7 @@
                                             (when (seq extra) (str "; with " (count extra) " more: " (str/join ", " (map :def extra)))) ")"))
                      (-> acc (assoc-in [:taken (:symbol rec)] root) (update :extra into extra)))
                    (catch Throwable e
-                     (swap! lines conj (str "record " (:name rec) " (" (if (#{"alloc" "std" "hashbrown"} crate) crate "core") "'s body: " (.getMessage e) ")"))
+                     (swap! lines conj (str "record " (:name rec) " (" (if (#{"alloc" "std" "hashbrown"} crate) crate "core") "'s body: " (why e) ")"))
                      acc))))
             {:taken {} :extra [] :lines []} roots)
     :lines (let [control (fn [tag ps]
@@ -1448,7 +1536,10 @@
                   mono/*upstream* (mono/load-upstream (System/getenv "RF_STD_EXPORTS"))
                   ;; RF19: core's macro-made functions' attributes (bin/rust-front core-attrs; rsi-build's RF_CORE_ATTRS)
                   mono/*macro-attrs* (mono/load-macro-attrs (System/getenv "RF_CORE_ATTRS"))
-                  mono/*native-attrs* (if (System/getenv "RF_CORE_PACK") {} (into {} (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)])))]
+                  mono/*native-attrs* (if (System/getenv "RF_CORE_PACK") {} (into {} (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)])))
+                  ;; queue 474: a non-generic function's signature from its exported body, for one no interface lists (a macro-made
+                  ;; nested precondition_check): its arguments' and return place's types
+                  c/*native-sigs* (if (System/getenv "RF_CORE_PACK") {} (native-sigs))]
           (bc/build-program front-dir n
             (fn [bodies]
               (mem-mark (str n " bodies built"))
