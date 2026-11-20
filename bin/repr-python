@@ -65,7 +65,10 @@
 #                                  that ends one) and by the port (arbace.repr.python.lexcheck), line for line equal or
 #                                  known (test/python/lex-check-known.edn); a negative control; then N mutants' files
 #                                  (default 2,000, two mutants of 3 edits each, seed 26: the error paths) the same way.
-#                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/)
+#                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/). The reference
+#                                  (queue 489): REPR_PYTHON_LEX_REF=own (records mode's default) CPython 3.14.10's C
+#                                  tokenizer itself on Arbace's C (bin/pyi-clib exe pytokenizer: tokdump.py's dumps, no
+#                                  CPython), recorded (CPython's recorded dumps, as live, record and verify: the oracle tier's)
 #   bin/repr-python pegen [--check]  PY9b: arbace/repr/python/parser.ae generated from the tarball's Grammar/python.gram
 #                                  (arbace.repr.python.pegen, pegen's analyses and an Arbace back end; the actions
 #                                  translated from C over Parser/Python.asdl's fields), or generated again and compared
@@ -682,12 +685,42 @@ tokdump() {
 # the records' corpus of a check's corpus: the mutants of each check are its own
 rec_corpus() { if [ "$1" = mutants ]; then echo "mutants-$2"; else echo "$1"; fi; }
 
+# queue 489 (py-own-judge-1 (a), the user, 2026-11-20): lex-check's reference. own (3.14's default in records mode): CPython
+# 3.14.10's C tokenizer itself, Parser/lexer/ and Parser/tokenizer/ with Python-tokenize.c's iterator rules from the pinned
+# tarball, unmodified, built by ci's builder behind Arbace's harness (tools/pyi/clib/pytokenizer, go/arbace/clib/pytokenizer)
+# and compiled by cf2g (bin/pyi-clib exe pytokenizer), writing tokdump.py's format: no CPython and not the native lexer, the
+# judge independent of the subject (Lib/tokenize.py on pyi is the native lexer itself, py-own-judge-1120). recorded: CPython's
+# recorded tokens (the pydump packs), the oracle tier's, as are live, record and verify (REPR_PYTHON_ORACLE), which run
+# tokdump.py on python3; 3.15 always the 3.15.2 oracle's.
+lex_ref_mode() {
+  local m=${REPR_PYTHON_LEX_REF:-}
+  if [ -z "$m" ]; then
+    if [ "$PYV" = 3.14 ] && [ "$PYREC_MODE" = records ]; then m=own; else m=recorded; fi
+  fi
+  case $m in own|recorded) ;; *) die "REPR_PYTHON_LEX_REF: own or recorded (not $m)" ;; esac
+  [ "$m" = own ] && [ "$PYV" != 3.14 ] && die "REPR_PYTHON_LEX_REF=own: the harness is 3.14.10's tokenizer (REPR_PYTHON_VERSION=$PYV)"
+  echo "$m"
+}
+# own_tokdump BASE LIST OUT: the harness's dumps of LIST's files under BASE into OUT (OUT.tsv its rows)
+own_tokdump() {
+  local exe
+  exe=$("$root/bin/pyi-clib" exe pytokenizer) || { echo "lex-check: the C tokenizer's harness did not build (bin/pyi-clib exe pytokenizer)" >&2; return 1; }
+  mkdir -p "$3"
+  "$exe" --base "$1" --list "$2" --out "$3" --tsv "$3.tsv" --encodings "$(TOP)/Lib/encodings"
+}
+
 lex_one() { # ID BASE LIST
-  local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0
+  local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0 mode
+  mode=$(lex_ref_mode) || exit 2
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
   if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "lex-check $id: no file of --only-list"; return 0; }; fi
-  tokdump "$(rec_corpus "$id" lex)" "$base" "$list" "$d/ref" \
-    || { echo "lex-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  echo "lex-check $id: the reference: $([ "$mode" = own ] && echo "CPython's C tokenizer on Arbace's C (own)" || echo "CPython's tokens ($PYREC_MODE)")"
+  if [ "$mode" = own ]; then
+    own_tokdump "$base" "$list" "$d/ref" || { echo "lex-check $id: FAILED: no reference (the C tokenizer's harness, above)"; return 1; }
+  else
+    tokdump "$(rec_corpus "$id" lex)" "$base" "$list" "$d/ref" \
+      || { echo "lex-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  fi
   lexcheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$LEX_KNOWN" --controls "$CONTROLS_READ" \
     --jobs "$JOBS" ${record:+--record} ${ONLY:+--partial} ${record:+--results-file "$root/test/python/lex-check-results$PYSFX.edn"} || rc=$?
   return $rc
