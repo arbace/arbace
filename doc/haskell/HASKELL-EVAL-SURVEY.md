@@ -2648,6 +2648,44 @@ Queue 435's 79 left were reviewed again, one by one.
   failures are the host's), and the 13 queue 435 left for timing, host, limits or size.
 - Eval 830 to 838 of 909 by their own verdict; the judge (6,660 + 0.5 x 1,133) / 7,793 = 0.927 (0.9268 to 0.9273).
 
+## As built: hs-judge-1120: the judge's 267 recorded cases, two more own
+
+The judge's 267 cases on a record (the facts of 2026-11-19, n-all5) are eval's 71 programs of `golden/left.tsv`, bin/repr-haskell
+test's 20 comparisons with the helper's committed records, and the interface level's 176: 88 units in two layouts, 71 of them
+queue 425's (binary 9, text 54, process 8: in `roundtrip-ghc-9.14.1-iface-own-units.edn`, predicted, not run on the main host yet;
+`haskell-iface-own` has never passed a gate run) and 17 without an own interface check (filepath's 11 modules and
+`System/OsPath.hs-boot`, ghc-internal's `GHC.Internal.Bignum.Backend.GMP`, the four `Setup.lhs` of exceptions, binary, terminfo and
+text). The 71 programs were read again, one by one; two more are judged by their own verdict:
+- FMA_ConstantFold by a golden file derived from GHC's compile-time folding, not the host's (queue 444's reason was wrong). At
+  record-ref's -O0 the INLINE methods' fused multiply-add primops on literals meet `GHC.Core.Opt.ConstantFold`'s `fmaRules`
+  (GHC 9.14.1's tarball, `compiler/`), tried in order: `fmaLit` (three literals, computed on Rationals, the literals rounded to
+  Float or Double first), `fmaZero_z` (a literal 0 for z: `x * y`, the sign of z unchecked, its TODO), `fmaOne` (a literal ±1:
+  `y + z`, `z - y`, `y - z` or `negate (y + z)`). Under LexicalNegation `-0` is `negate 0`, which `negOp` leaves unfolded (-0.0 is
+  no Rational). So `fmadd 1 0 -0` becomes `plusFloat# 0.0# (negate 0.0#)` and FloatAddOp's `identity zerof` drops the 0: -0.0
+  (IEEE: +0.0); `fmadd 1 -0 0` becomes `timesFloat# 1.0# (negate 0.0#)` and `identity onef` drops the 1: -0.0 (IEEE: +0.0);
+  `fnmsub 1 0 0` folds by fmaLit to the Rational 0, +0.0 (IEEE: -0.0); each at Float and Double, six failures, and the other 42
+  checks hold. The 461 bytes written from this are GHC's recorded run (sha256 a4958c05...), status 1. The review's rows name a
+  new basis, `:ghc` (`test/haskell/eval/review.ae`: the compiler's source at the pin, a decision record-ref's -O0 build makes at
+  compile time), as the synthetic corpus's `gen.ae` models the same folding.
+- nofib's awards by the file its own boot.sh writes: `awards.stdout` is `awards.out_template` concatenated REPS times, 1 in the fast
+  mode record-ref runs (FAST_OPTS 2000), so the shipped template itself (604,360 bytes, sha256 00f0c6fd..., GHC's record). Read: main
+  prints `findallawards (competitors (i mod 100))` for i in 1..2000, the template's 2,000 lines; line 1 checked by hand (Simon's
+  first Gold the smallest sum of three at least 70, 35 + 1 + 34, then 27 + 40 + 21 = 88). `bin/lib/hsi/own-verdicts`' nofib rule
+  takes a boot-made file where none is shipped (awards alone).
+- Proofs, no new run of a program: `bin/hsi golden --oracle --control` (74 golden files, 755 rows, 67 equal to GHC's record, 7
+  :no-run, 74 of 74 controls fail, 69 left), `bin/hsi own-verdicts --check` (840 of 909, current), and the judge's own path
+  (`bin/lib/hsi/check`'s `own_ref`) on both programs against hsi's recorded runs (check-hsi.edn's passes on GHC's record: the
+  same status and digests, so `:pass :judge :own`), each with a control (one byte of the golden file, of the template) that fails.
+- Left (69, `golden/left.tsv`): nofib's 29 NofibUtils programs (HF10-P64 (a)), 28 nothing runs (D435-3), the five `ignore_stdout`
+  tests (D435-2), T4262 (the host's thread count), fannkuch-redux and spectral/minimax (killed at record-ref's 10 s CPU limit;
+  hsi's runs, killed too, match the killed record, so check-hsi.edn's two passes are no evidence), k-nucleotide (a segfault on an
+  empty stdin), fasta (7.6 MB: its own expected output is boot.sh's run of the shipped `fasta-c.c` at FAST_OPTS 750000, and
+  `bin/ci run fasta-c.c -- 750000` makes it byte for byte GHC's record in 9 s and 0.9 GB, but it is too large to commit), gc's
+  cacheprof (57 KB of annotated assembly; its shipped `cacheprof.stdout` is another input's, 1.67 MB, its first 56,927 bytes not
+  the record's) and T7861 (GHC's typechecker's deferred error text).
+- Eval 838 to 840 of 909 by their own verdict; the judge (7,528 + 0.5 x 265) / 7,793 = 0.98300 (0.98287 before); Haskell's
+  independence 79.66 (79.657 to 79.660).
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
