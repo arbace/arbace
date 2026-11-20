@@ -511,6 +511,17 @@
   (load-sema!)
   ((resolve 'arbace.cpp.sema/cxx-year) std))
 
+;; queue 499: a quoted include from the main file's own directory (arbace.cpp.sema/local-include-file) is checked as the
+;; main file's text, its errors at its own line numbers, as DejaGnu matches them (by line, whatever the file)
+(defn- sema-starts
+  "The line starts an error at a node of the file `file` is located by: the main file's `starts`, a local include's own,
+  else nil (the error is dropped)."
+  [^String main starts file]
+  (if (= main file)
+    starts
+    (when-let [f ((resolve 'arbace.cpp.sema/local-include-file) file)]
+      (line-starts (latin1 (.getPath ^java.io.File f))))))
+
 (defn sema-errors
   "The code generator's Sema's errors over the unit `u` (parsed with the headers in full) of the text `src`."
   [u starts ^String src ^String main]
@@ -552,8 +563,8 @@
                   n (or (:cx/node (ex-data e)) n)
                   off (get-in n [:range :begin :offset])]
               (when *sema-log* (swap! *sema-log* conj [cls (subs m 0 (min 120 (count m))) (boolean rule)]))
-              (when (and rule off (= main (get-in n [:range :begin :file])))
-                (let [[l c] (line-col starts (long off))]
+              (when-let [st (when (and rule off) (sema-starts main starts (get-in n [:range :begin :file])))]
+                (let [[l c] (line-col st (long off))]
                   (when-not (and (= :narrowing cls) (contains? nw-off l))
                     (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")}))))))]
     ;; CP325 (a): a unit's refusal (the slice's, :codegen/refused or a type's :cpp/gap, or a constant the evaluation does not reach) leaves the
@@ -1748,6 +1759,84 @@
     (vec out)))
 
 (def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs]))
+
+;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
+;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
+;; -pedantic-errors (GCC's pedwarn) one after which no statement is executed in its switch, DR 2406: the last statement of
+;; the switch's body, or of an iteration statement's body inside it ("attribute 'fallthrough' not preceding a case label or
+;; default label"). GCC checks both as it gimplifies a function, so only a function g++ -fsyntax-only does not need but a
+;; compilation surely emits is judged: a non-member function definition at namespace scope (a named namespace or none),
+;; neither inline, constexpr, consteval, static nor a template's; a statement whose next one the walk below does not
+;; determine (a statement after it that is no case label, a try block, a lambda between) is not judged.
+
+(defn- fallthrough-stmt?
+  "Queue 499: whether the node `n` is a fallthrough statement: an AttributedStmt of a null statement whose attribute's text
+  names fallthrough."
+  [n ^String src]
+  (and (= "AttributedStmt" (:kind n))
+       (let [ks (:inner n)]
+         (and (vector? ks) (= "NullStmt" (:kind (peek ks)))
+              (some (fn [a] (when (= "NativeAttr" (:kind a))
+                              (let [b (get-in a [:range :begin :offset]) e (get-in a [:range :end :offset]) l (get-in a [:range :end :tokLen])]
+                                (when (and b e l (<= (long b) (+ (long e) (long l)) (count src)))
+                                  (re-find #"\b(?:__)?fallthrough(?:__)?\b" (subs src (long b) (+ (long e) (long l))))))))
+                    (pop ks))))))
+
+(defn fallthroughs
+  [u starts ^String src main]
+  (let [out (java.util.ArrayList.)
+        pe? (let [args (:args u)] (and (some #{"-pedantic-errors"} args) (not (some #{"-Wno-pedantic"} (drop-while #(not= "-pedantic-errors" %) args)))))
+        at! (fn [n msg]
+              (let [o (get-in n [:range :begin :offset])]
+                (when (and o (= main (get-in n [:range :begin :file])))
+                  (let [[l c] (line-col starts (long o))]
+                    (.add out {:line l :col c :kind :error :rule :fallthrough :msg msg})))))
+        loops #{"DoStmt" "WhileStmt" "ForStmt" "CXXForRangeStmt"}
+        ;; the fallthrough statement `x` with its ancestors `anc` (innermost first) up to the function's body
+        judge (fn [x anc]
+                (if-not (some #(= "SwitchStmt" (:kind %)) anc)
+                  (when-not (some #(= "LambdaExpr" (:kind %)) anc)
+                    (at! x "invalid use of attribute 'fallthrough' (no enclosing switch statement)"))
+                  (when (and pe? (not (some #(#{"LambdaExpr" "CXXTryStmt" "CXXCatchStmt" "StmtExpr"} (:kind %)) (take-while #(not= "SwitchStmt" (:kind %)) anc))))
+                    (loop [cur x [p & more] anc]
+                      (when p
+                        (case (:kind p)
+                          "CompoundStmt" (let [ks (:inner p)
+                                               i (long (or (first (keep-indexed (fn [i k] (when (identical? k cur) i)) ks)) -1))
+                                               nxt (when (>= i 0) (get ks (inc i)))]
+                                           (cond (neg? i) nil
+                                                 nxt nil ; a statement after it: a case label is the right one, another not judged
+                                                 (= "SwitchStmt" (:kind (first more))) (at! x "attribute 'fallthrough' not preceding a case label or default label (the switch's last statement)")
+                                                 :else (recur p more)))
+                          ("IfStmt" "CaseStmt" "DefaultStmt" "LabelStmt" "AttributedStmt") (recur p more)
+                          ("DoStmt" "WhileStmt" "ForStmt" "CXXForRangeStmt")
+                          (at! x "attribute 'fallthrough' not preceding a case label or default label (an iteration statement's last statement)")
+                          nil))))))
+        walk (fn w [x anc]
+               (cond
+                 (sequential? x) (doseq [y x] (w y anc))
+                 (not (map? x)) nil
+                 (fallthrough-stmt? x src) (judge x anc)
+                 (#{"CXXRecordDecl" "FunctionDecl" "CXXMethodDecl" "FunctionTemplateDecl" "ClassTemplateDecl"} (:kind x)) nil
+                 :else (when (vector? (:inner x)) (doseq [y (:inner x)] (w y (cons x anc))))))
+        fn! (fn [f]
+              (when (and (= "FunctionDecl" (:kind f)) (not (:inline f)) (not (:constexpr f)) (not (:consteval f))
+                         (nil? (:storageClass f)) (= main (get-in f [:range :begin :file])))
+                (when-let [b (last (filter #(= "CompoundStmt" (:kind %)) (:inner f)))]
+                  ;; (a body with a construct the parser declined is not judged)
+                  (when-not (some #(and (map? %) (= "NativeDecline" (:kind %))) (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (:inner %) (seq %)) b))
+                    (doseq [y (:inner b)] (walk y (list b)))))))
+        top (fn t [ns]
+              (doseq [n ns]
+                (case (and (= main (get-in n [:range :begin :file])) (:kind n))
+                  "FunctionDecl" (fn! n)
+                  "LinkageSpecDecl" (t (:inner n))
+                  "NamespaceDecl" (when (seq (str (:name n))) (t (:inner n)))
+                  nil)))]
+    (top (:nodes u))
+    (vec out)))
+
+(swap! checks conj fallthroughs)
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
