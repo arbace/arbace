@@ -178,13 +178,13 @@
         (switch (.-Atom (aget (.-List o) 1))
           (case ["lo12"]
             (return (bit-and v 0xfff)))
-          (case ["abs_g0" "abs_g0_nc"]
+          (case ["abs_g0" "abs_g0_nc" "abs_g0_s" "prel_g0" "prel_g0_nc"]
             (return (bit-and v 0xffff)))
-          (case ["abs_g1" "abs_g1_nc"]
+          (case ["abs_g1" "abs_g1_nc" "abs_g1_s" "prel_g1" "prel_g1_nc"]
             (return (bit-and (>> v 16) 0xffff)))
-          (case ["abs_g2" "abs_g2_nc"]
+          (case ["abs_g2" "abs_g2_nc" "abs_g2_s" "prel_g2" "prel_g2_nc"]
             (return (bit-and (>> v 32) 0xffff)))
-          (case ["abs_g3"]
+          (case ["abs_g3" "prel_g3"]
             (return (bit-and (>> v 48) 0xffff)))
           (case ["tprel_hi12"]
             (return (bit-and (>> v 12) 0xfff)))
@@ -214,10 +214,34 @@
         (return (* 16 (conv int (- (aget s 5) \0)))))
 
       (when (strings/HasPrefix s "tprel_g")
-        (return (* 16 (conv int (- (aget s 7) \0)))))))
+        (return (* 16 (conv int (- (aget s 7) \0)))))
+
+      (when (strings/HasPrefix s "prel_g")
+        (return (* 16 (conv int (- (aget s 6) \0)))))))
 
 
   -1)
+
+
+(go/func pcTarget "pcTarget is a PC-relative operand's target (adr, adrp, the branches; judge-rest): `(addr V)` the address V at the layout,\na constant (`adr x0, 100`, `b #8`) the offset from pc, as LLVM's assembler reads an immediate there.\n" ^uint64 [^{:tag (* Sx)} o ^uint64 pc]
+  (let [x o]
+    (when (== (.head x) "imm")
+      (set! x (aget (.-List x) 1)))
+
+    (when (.-IsList x)
+      (return (conv uint64 (value o))))
+
+    (+ pc (conv uint64 (value x)))))
+
+
+(go/func signedGroup "signedGroup is a MOVZ or MOVN operand's signed group (:abs_gN_s:, :prel_gN:, judge-rest), the whole value: the ABI's MOV[NZ],\na MOVN of the inverted group when it is negative, else a MOVZ (LLVM's fixup, lld's writeSMovWImm); ok false for any other operand.\n" [^{:tag (* Sx)} o] :results [int64 bool]
+  (when (== (.head o) "imm")
+    (set! o (aget (.-List o) 1)))
+
+  (when (and (== (.head o) "spec") ^:go/paren (or (strings/HasSuffix (.-Atom (aget (.-List o) 1)) "_s") (strings/HasPrefix (.-Atom (aget (.-List o) 1)) "prel_g")))
+    (return (value (aget (.-List o) 2)) true))
+
+  (return 0 false))
 
 
 ^{:go/end 229} (go/func isImm ^bool [^{:tag (* Sx)} o]
@@ -374,6 +398,11 @@
 
             (set! amt a)))
 
+        (when [(values whole ok) (signedGroup (aget ops 1))] (and ok (!= m "movk"))
+          (if (< whole 0)
+            (set! (values m v) (values "movn" (bit-and (bit-xor v 0xffff) 0xffff)))
+            (set! m "movz")))
+
         (when (or (< v 0) (> v 0xffff) (!= (% amt 16) 0) (>= amt (conv int64 (size64 (.-x d)))))
           (ferr "movw immediate"))
 
@@ -426,7 +455,7 @@
       (nargs ops 4)
       (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))]
         (return (lit Inst :Op OpEXTR :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Imm (value (aget ops 3))))))
-    (case ["sxtb" "sxth" "sxtw" "uxtb" "uxth"]
+    (case ["sxtb" "sxth" "sxtw" "uxtb" "uxth" "uxtw"]
       (nargs ops 2)
       (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))
           ^{:line 429} top (aget (lit (map byte int64) [\b 7] [\h 15] [\w 31]) (aget m 3))
@@ -439,16 +468,16 @@
       (nargs ops 2)
       (let [d (mustReg (aget ops 0))]
         (when (== m "adr")
-          (return (lit Inst :Op OpADR :Sf true :Rd (.-n d) :Target (conv uint64 (value (aget ops 1))))))
+          (return (lit Inst :Op OpADR :Sf true :Rd (.-n d) :Target (pcTarget (aget ops 1) pc))))
 
-        (return (lit Inst :Op OpADRP :Sf true :Rd (.-n d) :Target (bit-and-not (conv uint64 (value (aget ops 1))) 0xfff)))))
+        (return (lit Inst :Op OpADRP :Sf true :Rd (.-n d) :Target (bit-and-not (pcTarget (aget ops 1) pc) 0xfff)))))
     (case ["b" "bl"]
       (nargs ops 1)
       (let [op OpB]
         (when (== m "bl")
           (set! op OpBL))
 
-        (return (lit Inst :Op op :Target (conv uint64 (value (aget ops 0)))))))
+        (return (lit Inst :Op op :Target (pcTarget (aget ops 0) pc)))))
     (case ["cbz" "cbnz"]
       (nargs ops 2)
       (let [r (mustReg (aget ops 0))
@@ -456,7 +485,7 @@
         (when (== m "cbnz")
           (set! op OpCBNZ))
 
-        (return (lit Inst :Op op :Sf (.-x r) :Rd (.-n r) :Target (conv uint64 (value (aget ops 1)))))))
+        (return (lit Inst :Op op :Sf (.-x r) :Rd (.-n r) :Target (pcTarget (aget ops 1) pc)))))
     (case ["tbz" "tbnz"]
       (nargs ops 3)
       (let [r (mustReg (aget ops 0))
@@ -465,7 +494,7 @@
         (when (== m "tbnz")
           (set! op OpTBNZ))
 
-        (return (lit Inst :Op op :Sf (>= b 32) :Rd (.-n r) :Imm b :Target (conv uint64 (value (aget ops 2)))))))
+        (return (lit Inst :Op op :Sf (>= b 32) :Rd (.-n r) :Imm b :Target (pcTarget (aget ops 2) pc)))))
     (case ["br" "blr" "ret"]
       (let [n (conv uint8 30)]
         (cond (== (len ops) 1)
@@ -604,7 +633,7 @@
 
   (when (strings/HasPrefix m "b.")
     (nargs ops 1)
-    (return (lit Inst :Op OpBCOND :Cond (condOf (addr (lit Sx :Atom (subslice m 2)))) :Target (conv uint64 (value (aget ops 0))))))
+    (return (lit Inst :Op OpBCOND :Cond (condOf (addr (lit Sx :Atom (subslice m 2)))) :Target (pcTarget (aget ops 0) pc))))
 
   (when [(values in ok) (lowerFP m ops)] ok
     (return in))
