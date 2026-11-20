@@ -772,7 +772,8 @@
     (eq-pred? pred)
     (do (unify (last (butlast (second pred))) (last (second pred))) (list 'co))
     ;; (round 54: its pair kept for the improvement once the arguments' types are known, improve-coercibles!)
-    (coercible-pred? pred) (let [ts (second pred)] (when (and *coercibles* (>= (count ts) 2)) (swap! *coercibles* conj [(last (butlast ts)) (last ts)])) (list 'co))
+    ;; (its evidence the class Coercible's MkCoercible, not (~)'s Eq#: (co :coercible), tostg's)
+    (coercible-pred? pred) (let [ts (second pred)] (when (and *coercibles* (>= (count ts) 2)) (swap! *coercibles* conj [(last (butlast ts)) (last ts)])) (list 'co :coercible))
     ;; an implicit parameter a let ?x = e binds (the innermost): its type unified, its dictionary the evidence
     (and (= cls-ip (first pred)) (seq *ip-givens*) (= :lit (first (prune (first (second pred)))))
          (some #(= (second (prune (first (second pred)))) (first %)) *ip-givens*))
@@ -1109,7 +1110,8 @@
   [cls t]
   (case (first t)
     :lit (let [x (second t)]
-           (cond (and (string? x) (not= "KnownChar" cls))
+           (cond (and (string? x) (not= "KnownChar" cls) (empty? x)) (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+                 (and (string? x) (not= "KnownChar" cls))
                  (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
                        [(list 'lit (str (pr-str x) "#"))])
                  (and (integer? x) (<= 0 x) (< x 18446744073709551616N))
@@ -1281,7 +1283,7 @@
                    ;; (a coercion's or an equality's head: erased, as a wanted Coercible's evidence; GHC.Internal.TypeNats'
                    ;; unsafeWithSNatCo's forall n. Coercible (SNat n) Natural)
                    (if (or (coercible-pred? [(second hd) (nth hd 2)]) (eq-pred? [(second hd) (nth hd 2)]))
-                     (list 'co)
+                     (if (coercible-pred? [(second hd) (nth hd 2)]) (list 'co :coercible) (list 'co))
                    (solve-pred [(second hd) (nth hd 2)] (into (vec givens) (super-closure (mapv vector preds params))) (inc depth))))]
         (when term (if (seq params) (list 'lam params term) term)))
       :else
@@ -2247,11 +2249,14 @@
 (defn- hslit [v]
   (let [l (arg v 2)]
     (case (con l)
-      ;; GHC.Core.Make.mkStringExprFS: ASCII without NUL unpackCString#, else the modified UTF-8 of unpackCStringUtf8#
+      ;; GHC.Core.Make.mkStringExprFS: ASCII without NUL unpackCString#, else the modified UTF-8 of unpackCStringUtf8#; the
+      ;; empty string the list's [] (nullFS: mkNilExpr; show's default method's "" among them)
       HsString [(list-ty (con-ty tc-char))
-                (list 'app (list 'v (ext-name "var" "GHC.Internal.CString"
-                                              (if (every? #(< 0 (int %) 128) (arg l 2)) "unpackCString#" "unpackCStringUtf8#")))
-                      [(list 'lit (str (pr-str (arg l 2)) "#"))])]
+                (if (empty? (arg l 2))
+                  (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+                  (list 'app (list 'v (ext-name "var" "GHC.Internal.CString"
+                                                (if (every? #(< 0 (int %) 128) (arg l 2)) "unpackCString#" "unpackCStringUtf8#")))
+                        [(list 'lit (str (pr-str (arg l 2)) "#"))]))]
       HsChar [(con-ty tc-char) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "C#")) [(list 'lit (str "'" (arg l 2) "'#"))])]
       HsInt [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str (arg l 2) "#"))])]
       ;; MagicHash's primitive literals: their types of GHC.Internal.Prim, the literal's text as tostg reads it
@@ -3002,8 +3007,10 @@
   "A string literal's core as GHC.HsToCore.Quote's coreStringLit gives it (mkStringExprFS): unpackCString# of the literal,
   unpackCStringUtf8# when it is not ASCII"
   [^String x]
-  (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
-        [(list 'lit (str (pr-str x) "#"))]))
+  (if (empty? x)
+    (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+    (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
+          [(list 'lit (str (pr-str x) "#"))])))
 
 (defn- th-name-core
   "round 54: GHC.HsToCore.Quote's globalVar: an external Name as TH's mkNameG_d, mkNameG_v or mkNameG_tc of its unit, module
@@ -4240,11 +4247,39 @@
 
 (declare invert-families! interact-deferred!)
 
+(defn- dfun-app?
+  "An evidence term that applies an instance's dictionary function to dictionaries ($fShowList $fShowInt)"
+  [t]
+  (and (seq? t) (= 'app (first t)) (seq? (second t)) (= 'v (first (second t))) (vector? (second (second t)))
+       (str/starts-with? (str (nth (second (second t)) 3)) "$f") (seq (nth t 2))))
+
+(defn- bind-wanted!
+  "GHC's evidence bindings of an implication (the binding's abs_ev_binds, dsEvBinds): a wanted solved by an instance's
+  dictionary function applied to dictionaries is bound once, at the binding's level after its dictionary lambdas, to an
+  evidence variable ($dFractional = $fFractionalRatio $fIntegralInteger), a wanted of the same predicate solved by the
+  same variable (the inert solved dictionaries); wb the binding's atom [[lv term pred]...]. The variable, or term"
+  [wb pred term & [givens]]
+  (if (and wb (dfun-app? term)
+           ;; (its dictionaries the binding's own: no dictionary a pattern or an inner implication binds, which the
+           ;; binding's level does not have in scope)
+           (let [lvs (fn [x] (filter #(and (seq? %) (= 'lv (first %))) (tree-seq coll? seq x)))
+                 ok (into (set (lvs (map second givens))) (map first @wb))]
+             (and (every? ok (lvs term)) (not-any? #(and (seq? %) (= 'ev (first %))) (tree-seq coll? seq term)))))
+    (let [zp (zonk-pred pred)]
+      (or (some (fn [[x _ p]] (when (= p zp) x)) @wb)
+          (let [x (list 'lv (str "$d" (occ (first zp))) (str "ev" (swap! *counter* inc)))]
+            (swap! wb conj [x term zp])
+            (swap! ev-binders conj x)
+            (when *ltypes* (swap! *ltypes* assoc x [:tc (first zp) (second zp)]))
+            x)))
+    term))
+
 (defn- solve-with-givens!
   "Solve the wanteds of a checked binding with its givens; the unsolved are deferred. In an instance's method a
   constraint the instances solve to a dictionary variable is solved so, else by the instance's own dictionary's
-  superclasses when they give it (as GHC's solver chose on the corpora)"
-  [wanteds givens]
+  superclasses when they give it (as GHC's solver chose on the corpora). wb: bind-wanted!'s atom, the binding's evidence
+  bindings (nil: each term in place)"
+  [wanteds givens & [wb]]
   (improve-coercibles!)
   ;; HF10-P54 (a): in rounds, until one solves nothing: a wanted solved later in the list may improve an earlier one
   ;; (P54fd's Integral ?e before Coll c ?e, whose given's functional dependency gives ?e := e); the left deferred in
@@ -4263,7 +4298,7 @@
                         (when (and *deferred-eqs* (some #(= :mv (first (prune %))) (second (zonk-pred (:pred w0))))
                                    (loop [k 0 any false] (if (and (< k 4) (invert-families! [(:pred w0)])) (recur (inc k) true) any)))
                           (solve))))]
-      (do (swap! *evidence* assoc (:ev w0) term) false)
+      (do (swap! *evidence* assoc (:ev w0) (bind-wanted! wb (:pred w0) term givens)) false)
       true))
                       ws)]
     ;; (again only when the round unified a meta: solving one cannot help another otherwise)
@@ -4554,6 +4589,7 @@
                           preds (into (mapv (fn [[c ts]] [c (mapv #(subst skol %) ts)]) (nth s 2)) inner-preds)
                           params (mapv dict-param preds)
                           evb (atom [])
+                          wb (atom [])
                           givens (binding [*ev-binds* evb] (super-closure (mapv vector preds params)))
                           ws (atom [])
                           c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* skol)
@@ -4561,10 +4597,12 @@
                               ;; (HF10-P50 (a): the superclasses' equalities too, ClassDecode a's Share a ~ a)
                               (assume-eqs! (map first givens))
                               (let [[t c] (bind-rhs env b body)] (unify t body) (retry-implications! false) c))]
-                      (solve-with-givens! @ws givens)
+                      (solve-with-givens! @ws givens wb)
                       ;; HF10-P32: a signed local binder's type, as an unsigned one's
                       (when-not top? (note-type! (lv n) s))
-                      (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params (wrap-ev-binds @evb c)))))))]
+                      (list 'bind (bind-core top? n) (if (empty? params)
+                                                       (wrap-ev-binds (mapv (fn [[x t]] [x t]) @wb) c)
+                                                       (list 'lam params (wrap-ev-binds (into @evb (map (fn [[x t]] [x t])) @wb) c)))))))]
     [env (-> psbs (into out1) (into out2))]))
 
 (defn- rename-mono
@@ -5362,6 +5400,7 @@
         ;; the method's superclass evidence bound once after its dictionaries (GHC's evidence bindings of the method's
         ;; implication): the givens' superclasses again from the dictionary parameters, each selection a variable
         evb (atom [])
+        wb (atom [])
         givens (if (seq params)
                  (binding [*ev-binds* evb] (super-closure (vec (filter (fn [[_ t]] (some #(= t %) params)) givens))))
                  givens)
@@ -5381,7 +5420,7 @@
             ;; the instance's context's equalities and the method's own (instance (a ~ Char) => IsString [a])
             (assume-eqs! (concat (map first givens) inner))
             (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) (retry-implications! false) c))]
-    (solve-with-givens! @ws givens)
+    (solve-with-givens! @ws givens wb)
     ;; (queue 385: an instance signature with HasCallStack: its given is the class method's stack, pushed)
     (let [push-sp (when (and isig (some #(= cls-callstack %) (tree-seq coll? seq isig))) (lsp isig))
           k (when push-sp (first (keep-indexed (fn [i p] (when (or (= cls-callstack (first p)) (callstack-ip p)) i)) inner)))
@@ -5390,8 +5429,9 @@
                           [(assoc iparams k q)
                            (list 'let [(list 'bind p (push-given-callstack "a type signature in an instance" push-sp q))] c)])
                         [iparams c])
-          ps (into params iparams)]
-      (if (empty? ps) c (list 'lam ps (wrap-ev-binds @evb c))))))
+          ps (into params iparams)
+          wbs (mapv (fn [[x t]] [x t]) @wb)]
+      (if (empty? ps) (wrap-ev-binds wbs c) (list 'lam ps (wrap-ev-binds (into @evb wbs) c))))))
 
 (defn- default-methods
   "A class's default methods: (bind $dmop (lam [$dCls] core))"
