@@ -24,7 +24,17 @@
    :hosts [:stage0] :never-loads [arbace.j2g] :pins ["tools/rsdump/apks.sha256"]
    :inputs [:lib-tools :tools :rust]
    :summary ["^repr-rust roundtrip|^DIFFERS|^judge-test|^FAIL" 10]}
-  {:name rsi-essential :mem-gib 8 :phase :full :chain rust-full :needs [rust-read-essential]
+  ;; gate-split (2026-11-20; doc/GATE-DIET-SURVEY.md, "The long single steps split"): the lowered std (bin/rsi runtime-ci: runtime-build
+  ;; --ci, then repr/c's read of its 95 units into ci's library) built by a step of its own, in rsi-essential's environment (evaluated,
+  ;; 2 jobs), which rsi-essential, rsi-check's parts and rsi-aot need: a minute when it is at its key, 2.5 to 3 hours when its key moves
+  ;; (the lowering's, repr/llvm's and repr/c's sources, the tools' host), hours that were rsi-essential's (its passes 11958-19767 s
+  ;; against 1612-1924 s); bin/rsi runtime-ci takes .tmp/rsi/runtime.lock, so the parts never build it twice
+  {:name rsi-runtime :mem-gib 8 :phase :full :chain rust-full
+   :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB bin/rsi runtime-ci"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["tools/rsdump/apks.sha256" "test/c/corpora.edn"]
+   :inputs [:lib-tools :tools :rust :c :c-run :c2j-runtime]
+   :summary ["^runtime-|^rsi: not read|/ci$|FAIL" 4]}
+  {:name rsi-essential :mem-gib 8 :phase :full :chain rust-full :needs [rust-read-essential rsi-runtime]
    :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_BATCH=3 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --essential"
    :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["tools/rsdump/apks.sha256" "test/c/corpora.edn"]
    :inputs [:lib-tools :tools :rust :c :c-run :c2j-runtime]
@@ -47,18 +57,27 @@
    :parts [{:part run :cmd "bin/repr-rust roundtrip --run rustc-1.99.1-ui"} {:part std :cmd "bin/repr-rust roundtrip --std rustc-1.99.1-ui"}
            {:part code-std :cmd "bin/repr-rust roundtrip --code rustc-1.99.1"}]
    :summary ["same|differ|known|FAIL" 4]}
-  {:name rsi-check :mem-gib 4 :phase :weekly :chain rust-full
+  ;; gate-split (2026-11-20; doc/GATE-DIET-SURVEY.md, "The long single steps split"): the two corpora in slices (bin/rsi check's --sample N
+  ;; --offset K: every Nth program from the Kth, so the slices partition the corpus; each a subset run, CI_SUBSET), each part a chain of
+  ;; its own (no :chain: side by side in --concurrent's lanes) and a work directory of its own; synthetic's one builder process over 67
+  ;; programs (5523 s) in four (about 25 min each), the samples' (2183 s) in two; after rsi-runtime (the lowered std at its key)
+  {:name rsi-check :mem-gib 4 :phase :weekly :needs [rsi-runtime]
    ;; the cover (doc/GATE-DIET-SURVEY.md, "As built: the 11-20 audit"): in the weekly tier, where it runs whole, rsi-essential (a :full
    ;; check) is covered: `bin/rsi check --essential` is test/rust/essential.txt's 13 synthetic programs, a subset of the synthetic part,
    ;; judged by the same run judge and controls (RSI_BATCH only groups the builder's programs)
    :subsumes [rsi-essential]
-   :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --corpus {part}"
+   :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_CHECK_WORK=.tmp/rsi-check.{part} bin/rsi check --corpus {part}"
    :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["tools/rsdump/apks.sha256" "test/c/corpora.edn"]
    :inputs [:lib-tools :tools :rust :c :c-run :c2j-runtime]
-   ;; GDS4 (a), GD1: weekly (2 h 08 min a night); GD3 (GDS4 (b), doc/GATE-DIET-SURVEY.md, "As built: GD3"): :phase :weekly (the step's, both parts)
-   :parts [{:part samples} {:part synthetic}]
+   ;; GDS4 (a), GD1: weekly (2 h 08 min a night); GD3 (GDS4 (b), doc/GATE-DIET-SURVEY.md, "As built: GD3"): :phase :weekly (the step's, its parts)
+   :parts [{:part samples-0 :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_CHECK_WORK=.tmp/rsi-check.{part} bin/rsi check --corpus samples --sample 2 --offset 0"}
+           {:part samples-1 :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_CHECK_WORK=.tmp/rsi-check.{part} bin/rsi check --corpus samples --sample 2 --offset 1"}
+           {:part synthetic-0 :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_CHECK_WORK=.tmp/rsi-check.{part} bin/rsi check --corpus synthetic --sample 4 --offset 0"}
+           {:part synthetic-1 :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_CHECK_WORK=.tmp/rsi-check.{part} bin/rsi check --corpus synthetic --sample 4 --offset 1"}
+           {:part synthetic-2 :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_CHECK_WORK=.tmp/rsi-check.{part} bin/rsi check --corpus synthetic --sample 4 --offset 2"}
+           {:part synthetic-3 :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=2 RSI_THREADS=1 RSI_CI_MEMLIMIT=1400MiB RSI_CHECK_WORK=.tmp/rsi-check.{part} bin/rsi check --corpus synthetic --sample 4 --offset 3"}]
    :summary ["^(samples|synthetic) |^rsi judge: control|^FAIL" 8]}
-  {:name rsi-aot :mem-gib 6 :phase :full :chain rust-aot
+  {:name rsi-aot :mem-gib 6 :phase :full :chain rust-aot :needs [rsi-runtime]
    :cmd "env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 RSI_JOBS=1 RSI_THREADS=1 RSI_SHARD=1 RSI_GO_P=1 RSI_CI_MEMLIMIT=1400MiB bin/rsi check --aot --corpus samples"
    :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["tools/rsdump/apks.sha256" "test/c/corpora.edn" "seed/goroot.sha256"]
    :inputs [:lib-tools :tools :rust :rsi :c :c-run :c2j-runtime]
@@ -71,11 +90,12 @@
    :hosts [:stage0 :cxx :llvm] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"] :inputs [:lib-tools :tools :llvm]
    :summary ["same|differ|control|FAIL" 3]}
 ;;@ crops
-         :rust [rust-read-essential rsi-essential rust-roundtrip rust-iface rust-behaviour rsi-check rsi-aot]
+         :rust [rust-read-essential rsi-runtime rsi-essential rust-roundtrip rust-iface rust-behaviour rsi-check rsi-aot]
          :llvm [llvm-roundtrip]
 ;;@ controls
   rust-read-essential ["test/rust/roundtrip-edit-controls.edn" {:waived "the judges' own tests: each a negative case (rust-90)"}]
   rsi-essential "test/rust/controls.edn"
+  rsi-runtime {:waived "a build (gate-split): the lowered std read as ci's library, no verdict; rsi-essential's and rsi-check's controls judge what runs on it"}
   rust-roundtrip "test/rust/roundtrip-controls.edn"
   rust-iface "test/rust/roundtrip-controls.edn"
   rust-behaviour {:waived "no crossed pair: each program built on both sides (GT9.8 \"Not covered\"; GTS242)"}

@@ -318,8 +318,8 @@ Prior art:
     `llvm-essential` and `llvm-full`, on `:stage0` and `:go` alone: no LLVM tool at check time, each module judged by its own verdict, else
     opt's and lli's records; clang, llvm-as, opt and lli only by hand, `REPR_LLVM_JUDGE=live`, `LLVMI_JUDGE=lli`), llvmi (`bin/llvmi`,
     `arbace/llvm/`, in `arbace_crop_paths`) on C's own target; Rust's from `crops/llvm-rust.edn` and `natives.edn` (`rust-read-essential`,
-    `rust-front-essential`, `rust-core-essential`, `rsi-shim-essential` in the crops tier; `--full` the chains `rust-full`, `rsi-essential` its first,
-    and `rust-aot`, on stage 0 and Go; the host `:rustc` only the oracle tier's, `rust-native-essential` among its steps).
+    `rust-front-essential`, `rust-core-essential`, `rsi-shim-essential` in the crops tier; `--full` the chains `rust-full`, `rsi-runtime` (the lowered std, since gate-split
+    2026-11-20) then `rsi-essential` its first, `rsi-check`'s weekly slices each a chain of its own, and `rust-aot`, on stage 0 and Go; the host `:rustc` only the oracle tier's, `rust-native-essential` among its steps).
     The fragments of later batches not spliced yet wait in `test/gate/crops/`: cpp-native's, `python-night.edn`'s three (Python's steps that name the records night's check records, queue 436; `python-packs.edn`'s three,
     those that read its pydump packs, spliced since n-py-packs recorded the packs, and `python.edn`'s pyi-wheels and pyi-runtime since it
     recorded their outcomes; the rest of `python.edn` and `python-oracle.edn` spliced, queue 428), `natives.edn`'s
