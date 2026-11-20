@@ -558,7 +558,9 @@
                  (repeat :k2))
          (zipmap ["__has_virtual_destructor" "__is_abstract" "__is_empty" "__is_polymorphic"] (repeat :nonunion))
          (zipmap ["__is_aggregate" "__is_final"] (repeat :class))
-         {"__is_base_of" :base-of}))
+         {"__is_base_of" :base-of
+          ;; (queue 497: GCC 15's __builtin_is_virtual_base_of, [meta.rel]'s is_virtual_base_of: the same precondition)
+          "__builtin_is_virtual_base_of" :base-of}))
 
 (defn- cx-trait-incomplete!
   "Queue 484, the checker: a value trait applied to an incomplete class its precondition excludes (cx-trait-kinds),
@@ -1220,11 +1222,29 @@
 (defn- unsure! [] (when-let [u *unsure*] (reset! u true)) false)
 (defn- sure! [] (when-let [u *sure*] (reset! u true)) false)
 
+(declare cx-whole-type? unspelled)
+
+(defn- cx-sure-conflict?
+  "Queue 497 (the checker): two deductions of one parameter that surely differ ([temp.deduct.type]/2, checkDeducedTemplateArguments'
+  inconsistent deduction): two values both numbers, or two types both whole (cx-whole-type?) that differ but for their
+  top-level qualifiers and spellings."
+  [x y]
+  (boolean
+    (and (sema/checking?) (map? x) (map? y)
+         (if (or (contains? x :val) (contains? y :val))
+           (and (number? (:val x)) (number? (:val y)) (not= (:val x) (:val y)))
+           (and (cx-whole-type? x) (cx-whole-type? y)
+                (not= (unspelled (abi/unq x)) (unspelled (abi/unq y))))))))
+
 (defn- bind-arg!
   "checkDeducedTemplateArguments: the parameter i deduced as `a`, consistent with an earlier deduction."
   [b i a]
   (let [old (get @b i)]
-    (if (some? old) (same-arg? old a) (do (swap! b assoc i a) true))))
+    (if (some? old)
+      (or (same-arg? old a)
+          ;; (queue 497: an inconsistent deduction the checker is sure of)
+          (do (when (cx-sure-conflict? old a) (sure!)) false))
+      (do (swap! b assoc i a) true))))
 
 (defn- subst-value
   "A dependent value with the parameters of `tid` the bindings give substituted (an operator over numbers folded)."
@@ -1247,7 +1267,9 @@
   (cond
     ;; (a cv-qualified parameter, `const T` of allocator<const T>, is matched by type: [temp.deduct.type]/8; G4)
     (and (tparam-of? p tid) (not (:c p)) (not (:v p))) (bind-arg! b (:i p) a)
-    (and (map? p) (contains? p :val)) (= (:val p) (:val a))
+    (and (map? p) (contains? p :val)) (or (= (:val p) (:val a))
+                                          ;; (queue 497: two values, both numbers, that differ: a sure mismatch)
+                                          (do (when (and (sema/checking?) (map? a) (number? (:val p)) (number? (:val a))) (sure!)) false))
     ;; a non-deduced expression (HoldInt<-N>): consistent with what the others deduced
     (= :texpr (:k p)) (let [v (subst-value p @b tid)]
                         (or (dependent-on? v tid) (same-arg? (if (number? v) {:val v} v) a)))
@@ -1306,6 +1328,8 @@
                                           (recur (concat (rest todo) (map :cls (:bases (abi/cls c)))) (conj seen c) hits))))
                                   hits))]
                     (reset! b snap)
+                    ;; (queue 497, the checker: bases that deduce differently, [temp.deduct.call]/5, a sure failure)
+                    (when (and (< 1 (count (distinct (map second found)))) (cx-whole-type? A)) (sure!))
                     (when (= 1 (count (distinct (map second found))))
                       (reset! b (second (first found)))
                       true)))))))
@@ -1566,7 +1590,9 @@
                                           ;; undeduced by it, nondeduced's sure failure below when nothing else deduces it)
                                           (do (when-let [i (and (sema/checking?) (nil? (:targs-text e)) (bare-tparam P))] (swap! nondeduced conj i)) true)))]
                       (if-let [[P A tdf] (when-not (and (sema/checking?) (= :mptr-fnset (:op e))) (adjust-for-deduction P e tid))]
-                        (deduce-by-type-match b tid P A tdf :none)
+                        ;; (queue 497: an overload set's address, typed by one of its members, deduces nothing surely)
+                        (binding [*sure* (when-not (or (:set e) (#{:fnset :mptr-fnset :fnaddr} (:op e))) *sure*)]
+                          (deduce-by-type-match b tid P A tdf :none))
                         (cond
                           ;; (CX12, the checker) [temp.deduct.call]/6.2: an overload set of member functions tried
                           ;; member by member, the one that deduces used, none or several a non-deduced context
@@ -2751,6 +2777,41 @@
              (> (count args) (count all))))
       (catch arbace.lang.ExceptionInfo _ false))))
 
+(defn- cx-pack-blocked?
+  "Queue 497 (the checker): a template parameter after a template parameter pack ([temp.param]/14) with no default
+  argument that no function parameter names outside a non-deduced context: explicit template arguments all go to the
+  pack ([temp.arg.explicit]/4), so it is never deduced, and deduction fails ([temp.deduct]/5) whatever the call."
+  [t]
+  (boolean
+    (try
+      (let [sig (sym-sig t) all (vec (:ps sig)) tid (:id t) ps-t (vec (:params t))
+            opaque? (fn [P] (some #(and (map? %) (#{:texpr :ttdep :dep :auto} (:k %))) (tree-seq coll? seq P)))
+            xobj (:isExplicitObjectParameter (first (filter #(= "ParmVarDecl" (:kind %)) (:inner (:pattern t)))))
+            k (first (keep-indexed (fn [i p] (when (:pack p) i)) ps-t))]
+        (and (not xobj) k (not-any? opaque? all)
+             (let [ded (set (mapcat #(deducible-tparams % tid) all))]
+               (some (fn [i] (let [p (nth ps-t i)] (and (not (:pack p)) (not (ded i)) (not (:default p)))))
+                     (range (inc (long k)) (count ps-t))))))
+      (catch arbace.lang.ExceptionInfo _ false))))
+
+(defn- cx-nontrailing-pack-too-many?
+  "Queue 497 (the checker): a function parameter pack not at the end of the parameter list is a non-deduced context
+  ([temp.deduct.type]/5.7, [temp.deduct.call]/1): with no template argument written and its packs named by no other
+  parameter, it is empty, so a call with more arguments than the other parameters (no ellipsis) has no viable
+  specialization ([over.match.viable]/2)."
+  [t args]
+  (boolean
+    (try
+      (let [sig (sym-sig t) all (vec (:ps sig)) tid (:id t)
+            opaque? (fn [P] (some #(and (map? %) (#{:texpr :ttdep :dep :auto} (:k %))) (tree-seq coll? seq P)))
+            xobj (:isExplicitObjectParameter (first (filter #(= "ParmVarDecl" (:kind %)) (:inner (:pattern t)))))
+            pk? #(and (map? %) (= :pack-exp (:k %)))
+            pks (filter pk? all) others (remove pk? all)]
+        (and (not xobj) (not (:va sig)) (seq pks) (not (pk? (peek all))) (not-any? opaque? all)
+             (empty? (filter (set (mapcat #(deducible-tparams % tid) others)) (mapcat #(deducible-tparams (:of %) tid) pks)))
+             (> (count args) (count others))))
+      (catch arbace.lang.ExceptionInfo _ false))))
+
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
@@ -2782,7 +2843,11 @@
                                                             (or (and (nil? (:targs-text callee)) (cx-sure-undeduced? t args))
                                                                 ;; (queue 492: more arguments than parameters, explicit template
                                                                 ;; arguments written or not, [over.match.viable]/2)
-                                                                (cx-too-many-args? t args)))
+                                                                (cx-too-many-args? t args)
+                                                                ;; (queue 497: a parameter after a pack never deduced; a
+                                                                ;; non-trailing function parameter pack left empty)
+                                                                (cx-pack-blocked? t)
+                                                                (and (nil? (:targs-text callee)) (cx-nontrailing-pack-too-many? t args))))
                                                    (reset! sr true))
                                                  (when (System/getenv "CPP_TMPL_TRACE")
                                                    (binding [*out* *err*] (println "template" (:name t) "does not deduce from" (pr-str (map :ty args)) "explicit" (pr-str ex)))))))
@@ -3164,6 +3229,7 @@
                                                  ;; basic_string<char>::data() noexcept;`, not data() const)
                                                  (or ctor? (= (boolean (:cq g)) (boolean (re-find #"\)\s*const\b[^()]*$" (str fts))))))))
                                  (concat (:ctors qc) (:methods qc))))))
+        doubt (atom false)
         found (when (and ft (abi/fn? ft) (not (and (not targs) (= 1 (count ms)) (not (sema/checking?)))))
                 (keep (fn [e]
                         (when (and (= :tmpl (:e e)) (= :fn (:tk e)))
@@ -3172,8 +3238,22 @@
                                        b (atom (into {} (map-indexed vector ex)))]
                                    (when (deduce-type b (:id t) (sym-sig t) ft)
                                      (when-let [args (finish-deduction t @b)] [t args])))
-                                 (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_EXPLICIT_TRACE") (binding [*out* *err*] (println "explicit instantiation" fname targs (.getMessage x)))) nil)))))
-                      es))]
+                                 (catch arbace.lang.ExceptionInfo x (reset! doubt true) (when (System/getenv "CPP_EXPLICIT_TRACE") (binding [*out* *err*] (println "explicit instantiation" fname targs (.getMessage x)))) nil)))))
+                      es))
+        ;; (queue 497, the checker: [temp.explicit]/7 with [temp.deduct.decl]/1, an explicit instantiation of an unqualified
+        ;; name that no function template of that name matches -- each deduction failing by the algorithm alone, no
+        ;; placeholder, decltype or pack, nothing else of that name: GCC's "template-id ... does not match any template
+        ;; declaration", as queue 484's rule for an explicit specialization)
+        _ (when (and (sema/checking?) ft (abi/fn? ft) (empty? found) (not @doubt) (not (re-find #"::" text))
+                     (seq es) (every? #(and (= :tmpl (:e %)) (= :fn (:tk %))) es)
+                     (not (re-find #"\b(auto|decltype)\b" (str fts)))
+                     (every? (fn [e] (let [t (tmpl (:id e))]
+                                       (and t (not-any? :pack (:params t))
+                                            (not (re-find #"\b(auto|decltype)\b" (str (get-in (:pattern t) [:type :qualType])))))))
+                             es))
+            (sema/*on-refusal* (ex-info (str "codegen: explicit instantiation of '" fname "' matches no template declaration")
+                                        {:codegen/refused :template})
+                               n))]
     ;; (queue 367, the code generator: of several, the most specialized, as an explicit specialization's ([temp.deduct.decl]/2,
     ;; [temp.func.order]): <ostream>'s operator<<(basic_ostream<char, _Traits>&, char) over the primary's for `template
     ;; ostream& operator<<(ostream&, char);`)
