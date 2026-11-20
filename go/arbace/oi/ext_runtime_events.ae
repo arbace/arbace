@@ -379,6 +379,77 @@ written, a unit, int or span event's directly; nothing when the ring is not acti
             (reWrite dom 5 id 0 3 nil 0)))))
     Unit))
 
+(go/func RuntimeEventsControl "RuntimeEventsControl is the C API's caml_runtime_events_start (op 0), pause (1), resume (2) and are_active (3,
+its result 1 or 0) on the process's ring (go/arbace/oicapi, test/ocaml/capi/runtime.c).
+" ^int [^int op]
+  (switch op
+    (case [0] (reStart))
+    (case [1]
+      (.Lock reMu)
+      (let [ok (and reEnabled (not rePaused))]
+        (.Unlock reMu)
+        (when ok
+          (reLifecycle 2 0)
+          (.Lock reMu)
+          (set! rePaused true)
+          (.Unlock reMu))))
+    (case [2]
+      (.Lock reMu)
+      (let [ok (and reEnabled rePaused)]
+        (when ok
+          (set! rePaused false))
+        (.Unlock reMu)
+        (when ok
+          (reLifecycle 3 0))))
+    (case [3]
+      (when (reActive)
+        (return 1))))
+  0)
+
+(go/func RuntimeEventsCursor "RuntimeEventsCursor is the C consumer's caml_runtime_events_create_cursor's check (runtime_events_consumer.h): 0
+(E_SUCCESS) for the process's own ring (own: a NULL path and a negative pid), -6 (E_NO_CURRENT_RING) when it is not started,
+-5 (E_OPEN_FAILURE) when DIR/PID.events cannot be opened, -7 (E_MAP_FAILURE) when that file is not this process's ring (another
+process's ring is not mapped, OC219's divergence).
+" ^int [^bool own ^string dir ^int pid]
+  (.Lock reMu)
+  (let [en reEnabled loc reLoc]
+    (.Unlock reMu)
+    (when own
+      (if en (return 0) (return -6)))
+    (let [path (+ dir "/" (strconv/Itoa pid) ".events")
+          (values f err) (os/Open path)]
+      (when (!= err nil)
+        (return -5))
+      (.Close f)
+      (when (not en)
+        (return -7))
+      (let [(values a e1) (os/Stat path)
+            (values b e2) (os/Stat loc)]
+        (when (or (!= e1 nil) (!= e2 nil) (not (os/SameFile a b)))
+          (return -7))))
+    0))
+
+(go/func RuntimeEventsNext "RuntimeEventsNext is the C consumer's read of the ring at position pos (in words, from the ring's start): status 0
+when nothing is left, 1 an event (next its end; kind 0 runtime_begin, 1 runtime_end, 2 runtime_counter, 4 lifecycle, 5 a user
+event; its domain, timestamp, id and data as reEvent's), 2 lost events (next the ring's head, data the words lost), -1 a
+position no message starts at (E_CORRUPT_STREAM). Padding is skipped.
+" [^int pos] :results [^int status ^int next ^int kind ^int dom ^int64 ts ^int id ^int64 data]
+  (.Lock reMu)
+  (defer (.Unlock reMu))
+  (while true
+    (when (> reHead pos)
+      (return 2 reHead 0 0 0 0 (conv int64 (- reHead pos))))
+    (when (>= pos reTail)
+      (return 0 pos 0 0 0 0 0))
+    (let [p pos
+          i (sort/Search (len reRing) (fn ^bool [^int k] (>= (.-pos (aget reRing k)) p)))]
+      (when (or (>= i (len reRing)) (!= (.-pos (aget reRing i)) p))
+        (return -1 pos 0 0 0 0 0))
+      (let [ev (aget reRing i)]
+        (set! pos (+ p (.-words ev)))
+        (when (!= (.-kind ev) -1)
+          (return 1 pos (.-kind ev) (.-dom ev) (.-ts ev) (.-id ev) (.-data ev)))))))
+
 (go/func init []
   (let [r RegisterExt]
     (r "caml_ml_runtime_events_start" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (reStart) Unit))

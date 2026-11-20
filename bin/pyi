@@ -272,7 +272,12 @@ arbace_exe() {
 # arbace/py, with arbace/libm when libm differs: arbace.go.repl/from-source, arbace.python.run/require-runtime!), about
 # 50 s more a start. An executable of no commit of this repository or built dirty: the checkout's. The namespaces
 # (arbace/python, arbace/repr/python, goi's arbace/go) need none of this: RT.toolSource loads a changed one from the
-# checkout. Decided once by the outermost bin/pyi and exported, so its children (sys.executable, the checks' runs)
+# checkout. Since queue 473 (456-3 (a), the main session 2026-11-20) the C back end the runtime's C modules run on,
+# go/arbace/ci and go/arbace/crt (compiled into the executable too; ci imports crt, pyctypes and the C glue import ci), is
+# compared likewise: crt differing interprets crt and ci, ci differing ci, beside py's decision (with an executable of
+# no commit here or built dirty, both too), so a targeted bin/pyi check runs on a base whose ci or crt moved since stage 0
+# (the gate's PYI_RUNTIME_REQUIRE=compiled is unchanged: interpreted is not compiled). Decided once by the outermost
+# bin/pyi and exported, so its children (sys.executable, the checks' runs)
 # inherit it; PYI_RUNTIME=compiled|checkout overrides; the decision is printed once on stderr (PYI_RUNTIME_NOTED), but not
 # by bin/pyi python (sys.executable) nor, when the compiled runtime runs, by run and repl (the program's stderr).
 pyi_runtime_paths=(go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm)
@@ -286,6 +291,18 @@ exe_version() {
     mv -f "$f.$$" "$f"; rm -f "$f.$$.err"
   fi
   cat "$f"
+}
+# runtime_c_from_source EXE: ci and crt's part of ARBACE_GOI_FROM_SOURCE (queue 473): arbace/crt,arbace/ci when crt differs
+# from EXE's commit (ci imports crt, so a listed ci would keep the compiled crt), arbace/ci when ci alone differs, both
+# for an executable of no commit here or built dirty, else nothing
+runtime_c_from_source() {
+  local v commit
+  v=$(exe_version "$1"); commit=$(sed -n 's/.*:commit "\([0-9a-f]*\)".*/\1/p' <<< "$v")
+  if [ -z "$commit" ] || grep -q ':dirty true' <<< "$v" || ! git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    echo arbace/crt,arbace/ci
+  elif ! git -C "$root" diff --quiet "$commit" -- go/arbace/crt.ae go/arbace/crt; then echo arbace/crt,arbace/ci
+  elif ! git -C "$root" diff --quiet "$commit" -- go/arbace/ci.ae go/arbace/ci; then echo arbace/ci
+  fi
 }
 runtime_from_source() {
   local verb=${1:-} exe v commit set="" why
@@ -308,6 +325,16 @@ runtime_from_source() {
         else why="go/arbace/py and libm are the executable's ${commit:0:12}"; fi ;;
       *) die "PYI_RUNTIME: compiled, checkout or auto, not ${PYI_RUNTIME}" ;;
     esac
+    # the C back end (queue 473, 456-3 (a)): ci and crt from source when they differ from the executable's commit
+    # (py interpreted with them, also when py is the executable's: runtime_state's compiled means nothing from source)
+    if [ "${PYI_RUNTIME:-auto}" != compiled ]; then
+      local cset
+      cset=$(runtime_c_from_source "$exe")
+      if [ -n "$cset" ]; then
+        if [ -z "$set" ]; then set=arbace/py; why="go/arbace/py is the executable's ${commit:0:12}, interpreted with the C back end"; fi
+        set="$cset,$set"; why="$why; go/${cset//,/ and go\/} differ from the executable's"
+      fi
+    fi
     export ARBACE_GOI_FROM_SOURCE=$set
     if [ -z "${PYI_RUNTIME_NOTED:-}" ] && [ "$verb" != python ] && { [ -n "$set" ] || { [ "$verb" != run ] && [ "$verb" != repl ]; }; }; then
       if [ -n "$set" ]; then echo "pyi: the checkout's runtime (${set//,/ and }) interpreted by goi: $why" >&2
@@ -323,8 +350,8 @@ runtime_from_source() {
 #   checkout COMMIT   listed at COMMIT, the checkout's go/arbace/py (and libm) interpreted from source (runtime_from_source):
 #                     the checkout's runtime, at goi's speed and with goi's own divergences
 #   stale COMMIT N    what runs compiled is not the checkout's: N files of the packages not loaded from source differ from
-#                     COMMIT's (PYI_RUNTIME=compiled on an older executable, or ci and crt, which runtime_from_source leaves
-#                     compiled), or N "?": an executable of no commit here or built dirty
+#                     COMMIT's (PYI_RUNTIME=compiled on an older executable; since queue 473 runtime_from_source interprets ci and
+#                     crt too when they differ), or N "?": an executable of no commit here or built dirty
 RUNTIME_PKGS=(go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/ci.ae go/arbace/ci go/arbace/crt.ae go/arbace/crt)
 runtime_state() {
   local out listed v commit n src=",${ARBACE_GOI_FROM_SOURCE:-}," p pkgs=()
@@ -722,15 +749,15 @@ stdlib_lib() { echo "$(pytop)/Lib"; }
 
 # pytop: the pinned CPython tree whose Lib pyi runs and whose Lib/test lib-test reads: 3.14.10's, or 3.15.2's under
 # REPR_PYTHON_VERSION=3.15 (queue 252, PY315-SURVEY P7: the standard library moves with the language, 1.1; 3.14's
-# unchanged), extracted when missing
+# unchanged), extracted when missing or not whole (no .extracted: queue 481)
 pytop() {
   local top
   if [ "${REPR_PYTHON_VERSION:-}" = 3.15 ]; then
     top="$root/.tmp/repr-python/Python-3.15.2"
-    [ -d "$top/Lib/test" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+    [ -f "$top/.extracted" ] && [ -d "$top/Lib/test" ] || "$root/bin/repr-python" pins --fetch >/dev/null
   else
     top="$root/.tmp/repr-python/Python-3.14.10"
-    [ -d "$top/Lib/test" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
+    [ -f "$top/.extracted" ] && [ -d "$top/Lib/test" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
   fi
   echo "$top"
 }
@@ -1074,13 +1101,34 @@ aot_shared() {
 # (queue 329: PYI_AOT_BINARY_IR=0, the packages' IR as text, is a generator of its own)
 aot_gen() { { cat "$root/arbace/python/aot.ae"; [ "${PYI_AOT_BINARY_IR:-}" != 0 ] || echo "PYI_AOT_BINARY_IR=0"; } | sha256sum | cut -c1-16; }
 # aot_module: the module the compiled programs build in: the runtime (go/arbace/py, go/arbace/libm and go/arbace/expat printed,
-# kept by their forms' digest), the packages of arbace/pyaot
+# kept by their forms' digest), the packages of arbace/pyaot. Its rebuild one at a time (queue 481, 475-3 (a); as
+# 9f322d9a4's cirun-build): two pyi runs of one checkout that both see a stale key no longer rebuild it at once (one's
+# rm -rf took the other's files: "cf2g's Main not found"); the run that waited finds the key the checkout's and keeps the
+# build. The lock is AOT/mod.lock, taken only when the key is stale (a fresh module is read under no lock).
+# For test/python/aot-lock-test.bash: PYI_AOT_MODULE_HOLD=S holds the lock S seconds after the rebuild, and
+# PYI_AOT_MODULE_LOCK=0 takes none (its negative control: such a run rebuilds while another holds the lock).
 aot_module() {
   mkdir -p "$AOT/mod/pyaot"
   printf 'module arbace\n\ngo 1.27\n' > "$AOT/mod/go.mod"
   local key; key=$( (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat go/arbace/pyexpat.ae go/arbace/pyexpat \
                        go/arbace/ci.ae go/arbace/ci go/arbace/crt.ae go/arbace/crt go/arbace/clib.ae go/arbace/clib go/arbace/pybz2.ae go/arbace/pybz2 go/arbace/pylzma.ae go/arbace/pylzma go/arbace/pyzstd.ae go/arbace/pyzstd go/arbace/pysqlite3.ae go/arbace/pysqlite3 go/arbace/pyctypes.ae go/arbace/pyctypes go/arbace/pyssl.ae go/arbace/pyssl x509roots/go bin/pyi-clib tools/pyi/clib/aot_text.ae -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
   if [ "$(cat "$AOT/mod/runtime.key" 2>/dev/null)" != "$key" ]; then
+    local lk; exec {lk}>"$AOT/mod.lock"; [ "${PYI_AOT_MODULE_LOCK:-1}" = 0 ] || flock "$lk"
+    if [ "$(cat "$AOT/mod/runtime.key" 2>/dev/null)" != "$key" ]; then
+      echo "pyi: rebuilding the AOT module (runtime key $key)" >&2
+      aot_module_rebuild "$key"
+      echo "pyi: the AOT module rebuilt (runtime key $key)" >&2
+    fi
+    [ -z "${PYI_AOT_MODULE_HOLD:-}" ] || sleep "$PYI_AOT_MODULE_HOLD"
+    flock -u "$lk"; exec {lk}>&-
+  fi
+  aot_compiler_sh "$key"
+}
+# aot_module_rebuild KEY: the module's runtime printed and copied, the C libraries compiled by cf2g, KEY written last
+# (under aot_module's lock)
+aot_module_rebuild() {
+  local key=$1
+  {
     # queue 321: the key goes first, so a rebuild cut short (killed) is not taken for done by the next run
     rm -f "$AOT/mod/runtime.key"
     runtime_print "$AOT/rt"
@@ -1106,7 +1154,11 @@ aot_module() {
     for f in "$AOT/rt"/pyssl/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/pyssl/" ;; esac; done
     for f in "$AOT/rt"/x509roots/fallback/bundle/*; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/x509roots/fallback/bundle/" ;; esac; done
     echo "$key" > "$AOT/mod/runtime.key"
-  fi
+  }
+}
+# aot_compiler_sh KEY: AOT/compiler.sh
+aot_compiler_sh() {
+  local key=$1
   # the host's compiler for what a compiled program compiles at run time (arbace.python.aot compile-server); its IR
   # cache and compiler digest on the "# ir-cache:" line, read by the compiled program first (aot.go's irCacheRead, 202b);
   # the runtime's key on the "# ir-bin:" line, the stamp of the binary IR the compiled programs keep beside the cache's

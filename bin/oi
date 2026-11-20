@@ -24,6 +24,10 @@
 #                                  the native front end (doc/ocaml/TYPER.md; bin/lib/oi/typer.bash): test/ocaml/typer/'s samples
 #                                  typed and translated to Lambda by Arbace, their signatures and Lambda against the oracle's,
 #                                  then run on oi against the toplevel's outputs
+#   bin/oi depend [-depend] ARG... `ocamlc -depend ARG...` (ocamldep's ARG...) on oi in the current directory (queue 478): OCaml's
+#                                  driver/makedepend.ml (test/ocaml/depend/ocamldep.ml: no -pp, no -ppx) typed natively and run on
+#                                  compiler-libs' units; the run corpus's tests of `commandline = "-depend ..."` run it (header.awk's
+#                                  depend mode), judged by their own .reference
 #   bin/oi run-native FILE.ml [ARG...]
 #                                  FILE typed and translated by Arbace (no ocamlc, no ocdump: TY18), run on oi with the native library
 #   bin/oi stdlib-check [UNIT...]  the native library (bin/oi stdlib) against the oracle's (bin/oi stdlib --ocamlc, built if missing):
@@ -240,6 +244,9 @@ run_redirected() {
     11) ( for kv in "${v[@]}"; do export "$kv"; done; "$@" ) < "$sin" > "$out" 2> "$out.stderr" ;;
   esac
 }
+# depend_of ENV: 1 when ENV is a row of header.awk's depend mode (@depend=1, queue 478), else nothing
+depend_of() { case " $1 " in *" @depend=1 "*) echo 1 ;; esac; }
+export -f depend_of
 # env_vars ENV: ENV less its @ redirections
 env_vars() { local kv; for kv in $1; do case $kv in @*) ;; *) printf '%s ' "$kv" ;; esac; done; }
 # dump_required DUMP: the units a Lambda dump requires (its lambda-program's list, ocamlc's required globals), one a line
@@ -755,6 +762,24 @@ cmd_run() {
   exit $st
 }
 
+# depend (queue 478, DECISION 476-1 (a)): `ocamlc -depend ARGS` (or ocamldep's ARGS) run on oi in the current directory: the depend program
+# (test/ocaml/depend/ocamldep.ml, OCaml's driver/makedepend.ml on compiler-libs' units) typed natively once a library and source (kept in
+# .tmp/oi/depend by their key), run with the native library and the compiler-libs units it links (complib_need); its status oi's
+cmd_depend() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
+  local w=$OI_DIR/depend key
+  key=$({ native_key; sha256sum < "$root/test/ocaml/depend/ocamldep.ml"; } | sha256sum | cut -d' ' -f1)
+  if [ ! -f "$w/Ocamldep.ae" ] || [ "$(cat "$w/key" 2>/dev/null)" != "$key" ]; then
+    rm -rf "$w"; mkdir -p "$w"; cp "$root/test/ocaml/depend/ocamldep.ml" "$w/"
+    local why; why=$(NATIVE=1 oi_dump "$w" ocamldep "" complib) || { rm -f "$w/Ocamldep.ae"; die "depend: $why"; }
+    echo "$key" > "$w/key"
+  fi
+  local units; units=$(inc_units complib "$w/Ocamldep.ae" | tr '\n' ' ')
+  local miss; miss=$(lib_missing $units); [ -z "$miss" ] || die "depend: $miss"
+  # shellcheck disable=SC2086
+  exec "$EXE" run "$LIB" $units "$w/Ocamldep.ae" -- "$@"
+}
+
 # the recorded session: test/ocaml/oi/session.ml through the toplevel, its output against the ocaml
 # toplevel's (test/ocaml/oi/session.ref, recorded by ocaml -noprompt -nopromptcont, the banner left out)
 cmd_repl_check() {
@@ -953,6 +978,21 @@ oi_helper() {
 }
 export -f oi_dump oi_helper
 
+# oi_depend_prog ID D COPY (queue 478, DECISION 476-1 (a); header.awk's depend mode): the test's readonly files and subdirectories (COPY,
+# comma-separated) copied into the run's directory D, and the depend program (test/ocaml/depend/ocamldep.ml: OCaml's driver/makedepend.ml
+# as `ocamlc -depend` runs it, on compiler-libs' units) dumped as a program of the row's path is (oi_dump: natively, or by ocdump on the
+# oracle's path) in D/_depend, its Lambda the row's program D/U.ae (U the test's unit: the dump names its own, Ocamldep). Status 0, else 1
+# with the row's reason
+oi_depend_prog() {
+  local id=$1 d=$2 copy=$3 src f u why
+  src=$(dirname "$TESTS/$id"); u=$(basename "$id"); u=$(echo "${u:0:1}" | tr a-z A-Z)${u:1}
+  for f in $(echo "$copy" | tr ',' ' '); do cp -r "$src/$f" "$d/"; done
+  mkdir -p "$d/_depend"; cp "$root/test/ocaml/depend/ocamldep.ml" "$d/_depend/"
+  why=$(oi_dump "$d/_depend" ocamldep "" complib) || { echo "depend: $why"; return 1; }
+  mv "$d/_depend/Ocamldep.ae" "$d/$u.ae"
+}
+export -f oi_depend_prog
+
 # oi_dynlink ID D FLAGS INCS STEPS MAIN COPY (OC220 (a)'s loader, doc/ocaml/OCAML-SURVEY.md "As built: OC220's loader"; header.awk's dynlink
 # mode): the test's readonly files and subdirectories (COPY) copied into the run's directory D, then its ocamlc steps (STEPS, DIR/FILE in
 # order): each .ml typed and translated natively in its directory (the earlier units' interfaces there: its .mli, coerced to it, else the
@@ -1008,6 +1048,9 @@ oi_one() {
     mains=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$mains"; return; }
     mains=$(echo "$mains" | tr '\n' ' ')
     env="$env OI_DYNLINK_IMPORTS=$d/dynlink.imports"
+  elif [ -n "$(depend_of "$env")" ]; then
+    # (header.awk's depend mode, queue 478: the row's program is the depend program, the test's files its input)
+    why=$(oi_depend_prog "$id" "$d" "$dyncopy") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   else
     why=$(oi_dump "$d" "$base" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   fi
@@ -1429,6 +1472,14 @@ o2j_dump() {
       case $mains in *" $(dirname "$f")/$b "*) continue ;; esac
       echo "$d/$(dirname "$f")/$(echo "${b:0:1}" | tr a-z A-Z)${b:1}.ae" >> "$d/dynplugins.txt"
     done
+    return 0
+  fi
+  # header.awk's depend mode (queue 478): the depend program translated as the row's program (oi_depend_prog's, at this level's dump)
+  if [ -n "$(depend_of "$env")" ]; then
+    local f; for f in $(echo "$dyncopy" | tr ',' ' '); do cp -r "$(dirname "$src")/$f" "$d/"; done
+    mkdir -p "$d/_depend"; cp "$root/test/ocaml/depend/ocamldep.ml" "$d/_depend/"
+    o2j_dump_file "$d/_depend" ocamldep "" complib
+    mv "$d/_depend/Ocamldep.ae" "$d/$u.ae"
     return 0
   fi
   o2j_dump_file "$d" "$base" "$flags" "$incs"
@@ -2015,6 +2066,7 @@ case $cmd in
   test) cmd_test ;;
   run) if [ "${1:-}" = --ocdump ]; then shift; cmd_run "$@"; else cmd_run_native "$@"; fi ;;
   run-native) cmd_run_native "$@" ;;
+  depend) cmd_depend "$@" ;;
   typer-check) cmd_typer_check "$@" ;;
   objinfo-check) cmd_objinfo_check "$@" ;;
   stdlib-check) cmd_stdlib_check "$@" ;;

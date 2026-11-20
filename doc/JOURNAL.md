@@ -13934,3 +13934,58 @@ per case; and asked for the rest of Java's 21 and arm64's 31 to be made own. Two
 - Records: `bin/reap --record` (56 of 56, 0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check`
   (9 pairs, 0 problems), `gate.crops check` (0 problems). Scores (recorded): Java independence 0.9998 -> 1.0000 (judge 0.99965), arm64
   assembly 0.9998 -> 1.0000 (judge 1.0), completeness 0.9966 -> 0.9997; OCaml 1.0000 as in the first round.
+
+## 2026-11-20: merge-oc-py-1120, OCaml's 476 and 478 and Python's 473, 475 and 481 in one branch for next, with this host's records
+
+- What: branch `merge-oc-py-1120` from next `939037429`, merging `--no-ff` from the remote mac: OCaml `478-ocaml-depend` `2ab36fb26`
+  (one commit on `476-ocaml-deferred` `8fd90035c`, both on 467/470's `983f2425b`, which next has; merge `89c6c512e`): oi's Marshal
+  counted and sampled by Gc.Memprof and the C API's `Caml_state_opt` (476); `bin/oi depend` (OCaml 5.5.0's makedepend on
+  compiler-libs, header.awk's depend mode), the runtime-events C consumer over oi's ring and oicapi's unit result for a stub's 0 (478).
+  Then Python `481-py-capi-data` `a8f898637` in place of `475-py-buffer` `9778eb1f2` (481 carries 475 and `473-py-memoryview`
+  `5cd6055bd`, which carries 456's two commits re-picked; next has 456's own through `456-py-testc`; merge `cabd63dd4`): memoryobject.c's
+  view model and the Py_buffer natives (473), `_PyRuntime` in the C world with its static one-character strings and PEP 688's
+  slot_bf_* (475), no undefined C API data symbol, `_PyRuntime`'s small ints bound and aot_module's lock (481). A first merge of 475
+  (`a98a0c496`, never pushed) gave way to 481's when the Mac finished it: the merge's tree is that resolution with 481's two commits
+  applied (cleanly; the files next does not touch byte for byte 481's).
+- Conflicts, each resolved keeping both sides:
+  - 478: `test/ocaml/controls.txt`, next's controls of queues 373-1, 413 and 461 and 478's four; `doc/ocaml/OCAML-SURVEY.md`, next's
+    "As built: queue 413" then 476's and 478's sections.
+  - 473/475: `go/arbace/clib/ctypestest/nodes.ae` and `go/arbace/pyctypes/capi_clinic.ae` (add/add): next's are 456's own
+    (`09e0eb0cd`), byte for byte what 473 re-picked (`c1a2aff9e`), so the branch's later ones; `go/arbace/py.ae`'s `:init-order` holds
+    459's `functoolsNames`, `jsonScannerType` and `jsonEncoderType` (next) and 473's `memoryIterType` after `MemoryViewType` (without
+    next's three names the list is 475's exactly); `test/python/divergences{,-315}.edn`: `:c-modules-deferred` with n-merge-1120's
+    `_symtable` and 473's text, `:buffer-protocol-python` 475's.
+- Fixed after the merges (`a0258ca58`):
+  - `bin/reap` found 8 rows of the records night's Lib/test record (n-py-rec, `30b132126`, older than 456's modules and 473/475's
+    ports) in no class: test_clinic's 6 not-run methods, test_buffer's test_multiple_inheritance_buffer_last and
+    test_release_saves_reference. As n-merge-1120 did for `_symtable`, `:c-modules-deferred` keeps `_testclinic`'s match and its 6
+    tests and `:buffer-protocol-python` the two, each with a note, until a compiled record after queues 473, 475 and 481.
+  - `bin/pyi-clib verify ctypestest` at the merge (33.5 min, 4.9 GB peak, 10 minutes of it stopped for the host's memory): the node
+    program byte for byte 481's, the Key alone differing (next's `arbace/repr/c/{lex,parsecheck,rtcheck}.ae` are among its inputs):
+    `5035f5a32e53` here, not `00cb21925960`; nodes.ae is the verify's build. `bin/pyi-clib undefined ctypestest`: the linker's five
+    alone, status 0.
+- Records (amd64 stage 0, `--record --only-list`, each run with its negative controls' pairs; `1fa34b21d` and this commit):
+  - OCaml eval, native path (`bin/oi check`, after `bin/oi stdlib`): statmemprof/intern, c-api/test_c_thread_has_lock and `_systhread`,
+    tool-ocamldep-shadowing/a, lib-runtime-events/test, with test_caml, test_caml_exception, asmcomp/compare and evaluation_order: 9 of 9
+    pass, the controls compare-vs-evaluation-order, re-caml-vs-exception, depend-shadowing-vs-re-test and re-test-vs-caml differing;
+    check-oi-native.edn unchanged (the VM's rows, the same here). ocamlc's path (`--ocdump`, the same 9, the same controls): check-oi.edn's
+    7 rows class or fail -> pass.
+  - OCaml light AOT, native path (`bin/oi check --aot`, two at a time, load 34 to 43 on 64 CPUs): tak 135.8 s of CPU and
+    backtraces_and_finalizers 105.1 slow -> pass, pr7798 43.5 (passing already), the depend row 141.5 (slow, as 478 recorded), the
+    control depend-shadowing-vs-compare differing. intern_final timed out at 140.7 (the VM's 76.0), and the suite's lib-dynarray/test and
+    lib-floatarray/floatarray (`bin/oi suite check --aot`, the control main-vs-usemultdef differing) at 140.6 and 140.9; measured again
+    each alone under `bin/heavy-lock` (`O2J_JOBS=1`, load about 18): 140.6, 140.7 and 140.8, timeouts. The three are listed in
+    `test/ocaml/aot-slow.edn` again and their records stay slow. (The host ran out of memory twice during these runs, a javac tool
+    build's j2g at 41 GB; the main session stopped my runs, and the stopped ones' timings were not used.)
+  - Python: none. `bin/pyi check --record` takes only the checkout's runtime compiled, the gate's build at this tree's key
+    (`199225c421253405d17e`: two Go-hosted builds, about 31 GiB at their peak), outside this task's memory bound (about 8 GiB a process,
+    the host shared with the next worktree's gate and other builds). The rows of 473, 475 and 481 (test_buffer, test_memoryview,
+    test_clinic, test_picklebuffer, test_array, test_struct, test_capi's test_immortal_small_ints) and 473-2 (a)'s three test_gc rows
+    are the main host's, after that build; then the held rows above leave their classes.
+  - `bin/reap --record`: 56 of 56 cells, 0 problems; OCaml eval 544/58/38 -> 549/54/37, AOT 490/60/90 -> 492/59/89; Python's cells
+    unchanged but for its classes' counts (`:buffer-exports` +1, `:capi-port` -1). `bin/crops-score --record`, `--judge --strict` (0
+    problems), `bin/records-check` (9 pairs, 0 problems).
+- Scores (completeness / without by design / maturity / independence, floors): OCaml 90/94/100/99 -> 90/94/100/99 (completeness
+  0.9024 -> 0.9051), Python 94/97/100/98 unchanged.
+- Not run (the gate's, or the Mac's at those heads): the whole OCaml suite and corpora, `bin/oi test`, `table-check`, `pins`,
+  `bin/pyi runtime check`, `test/python/aot-lock-test.bash`, `bin/gate`.

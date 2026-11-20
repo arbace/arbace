@@ -294,7 +294,16 @@ covers what.
   `cnodes.ae`) are Arbace's own, under the Eclipse Public License 1.0: clean-room, written from OCaml's manual (chapter 22,
   "Interfacing C with OCaml": the value layout, the macros' and functions' names and meanings) without OCaml's runtime headers
   or sources; `runtime.c`'s BLAKE2b is written from RFC 7693's specification (the initialization vector and the message schedule
-  are the RFC's constants).
+  are the RFC's constants). Two exceptions (queue 478, doc/ocaml/OCAML-SURVEY.md "As built: queue 478"): the headers
+  `test/ocaml/capi/include/caml/runtime_events.h` and `runtime_events_consumer.h` take their enumerations (the ring's numbering)
+  and their functions' declarations from OCaml 5.5.0's `runtime/caml/runtime_events.h` and
+  `otherlibs/runtime_events/caml/runtime_events_consumer.h` (the tarball above), under the GNU Lesser General Public License
+  version 2.1 with the OCaml LGPL linking exception (below); `runtime.c`'s consumer over oi's ring is Arbace's own.
+- `bin/oi depend`'s program `test/ocaml/depend/ocamldep.ml` (queue 478, doc/ocaml/OCAML-SURVEY.md "As built: queue 478") is OCaml
+  5.5.0's `driver/makedepend.ml` (the tarball above, Copyright INRIA; its notice kept) with its reading of a source and its
+  arguments' parsing put in place of `driver/pparse.ml`'s and `driver/compenv.ml`'s: under the GNU Lesser General Public License
+  version 2.1 with the OCaml LGPL linking exception (below). `go/arbace/oi/ext_runtime_events.ae` (OC219) follows the behaviour of
+  `runtime/runtime_events.c` and `otherlibs/runtime_events/runtime_events_consumer.c` of the same tarball, under the same license.
 - repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"): `arbace/repr/ocaml/lex.ae`
   (parsing/lexer.mll, the parts of stdlib/lexing.ml that update the positions, utils/misc.ml's Utf8_lexeme),
   `docstrings.ae` (parsing/docstrings.ml), `ast.ae`'s constructors and docstring attributes (parsing/ast_helper.ml,
@@ -542,7 +551,7 @@ covers what.
   License Agreement for Python 3.14" below), built by ci's builder with the part of musl 1.2.6 it reaches (under the
   MIT License, section "musl: MIT License" below) and `tools/pyi/clib/ctypestest/pyctypes_test.c` and `pycapi.c`
   (Arbace's own; `testcapi_parts.c`, the stubs of the parts not built, removed by queue 274b once all 38 were; `pycapi.c`'s `_Py_ctype_table`, `_Py_ctype_tolower` and `_Py_ctype_toupper` since
-  queue 270 the tables of CPython 3.14.10's `Python/pyctype.c`, under the PSF License Agreement). `tools/pyi/capi/include/pyconfig.h`: Arbace's own configuration for CPython's `Include/` (the clean-room
+  queue 270 the tables of CPython 3.14.10's `Python/pyctype.c`, and its `_Py_ascii_whitespace` since queue 481 the table of `Objects/unicodeobject.c`, under the PSF License Agreement). `tools/pyi/capi/include/pyconfig.h`: Arbace's own configuration for CPython's `Include/` (the clean-room
   `Python.h` of queue 244 was removed by queue 262), under the Eclipse Public License 1.0. `go/arbace/pyctypes.ae` and
   `go/arbace/pyctypes/` (package `arbace/pyctypes`): libffi's part over ci, Arbace's own (written from libffi's
   documented interface, `ffi_prep_cif`, `ffi_call`, `ffi_prep_closure_loc`; no libffi code), under the Eclipse Public
