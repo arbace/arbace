@@ -1,0 +1,292 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; typing/shape.ml (Uid, Sig_component_kind, Item, the shapes, their constructors, of_path and print) and
+;; typing/shape_reduce.ml (the strong call-by-need reducer, Local_reduce, reduce_for_uid, local_reduce_for_uid and
+;; print_result), whose notices follow (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;                Ulysse Gérard, Thomas Refis, Tarides
+;;                    Nathanaëlle Courant, OCamlPro
+;;              Gabriel Scherer, projet Picube, INRIA Paris
+;;
+;;   Copyright 2021 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.shape
+  "Shapes (queue 450, doc/ocaml/TYPER.md section 31): what Shape and Shape_reduce compute for the occurrence index of a .cmt.
+  A uid is [:item unit n intf?] [:local unit n] [:cu name] [:predef name] or [:internal]; an identifier {:name s :stamp n};
+  an item [name ns], ns one of :value :type :constructor :label :module :module-type :extension-constructor :class
+  :class-type; a shape {:uid uid-or-nil :desc d :approx bool}, d one of [:var id] [:abs id t] [:app t t] [:struct items]
+  [:pack id] [:alias t] [:leaf] [:proj t item] [:cu name] [:error s] (items a map sorted as Item.Map). `reduce-for-uid`
+  is Local_reduce.reduce_for_uid (fuel 10, no unit shapes read); the results [:resolved uid] [:alias uid r]
+  [:local-use uid] [:unresolved t] [:approx uid-or-nil] [:missing t] [:internal-missing]. The printers give Format
+  documents (arbace.repr.ocaml.typer.format)."
+  (:refer-clojure :exclude [abs alias])
+  (:require [arbace.repr.ocaml.typer.format :as f]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Uid
+
+(defn uid-text [u]
+  (case (u 0)
+    :item (str (when (u 3) "[intf]") (u 1) "." (u 2))
+    :local (str "[L]" (u 1) "." (u 2))
+    :cu (u 1)
+    :predef (str "<predef:" (u 1) ">")
+    :internal "<internal>"))
+
+(def ^:private uid-rank {:cu 0 :item 1 :local 2 :internal 3 :predef 4})
+
+(defn uid-compare
+  "Shape.Uid.compare (OCaml's polymorphic compare: the constructors in order, then their fields; Intf before Impl)"
+  [a b]
+  (let [c (compare (uid-rank (a 0)) (uid-rank (b 0)))]
+    (if (not= 0 c)
+      c
+      (case (a 0)
+        :item (let [c (compare (a 1) (b 1))]
+                (if (not= 0 c) c
+                    (let [c (compare (a 2) (b 2))]
+                      (if (not= 0 c) c (compare (if (a 3) 0 1) (if (b 3) 0 1))))))
+        :local (let [c (compare (a 1) (b 1))] (if (not= 0 c) c (compare (a 2) (b 2))))
+        (:cu :predef) (compare (a 1) (b 1))
+        0))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Sig_component_kind and Item
+
+(def ns-text {:value "value" :type "type" :constructor "constructor" :label "label" :module "module"
+              :module-type "module type" :extension-constructor "extension constructor" :class "class"
+              :class-type "class type"})
+
+(def ^:private ns-rank {:value 0 :type 1 :constructor 2 :label 3 :module 4 :module-type 5 :extension-constructor 6
+                        :class 7 :class-type 8})
+
+(defn item-compare [[n1 k1] [n2 k2]]
+  (let [c (compare n1 n2)] (if (not= 0 c) c (compare (ns-rank k1) (ns-rank k2)))))
+
+(def empty-items (sorted-map-by item-compare))
+
+;; ---------------------------------------------------------------------------------------------
+;; Shapes
+
+(defn mk [uid desc] {:uid uid :desc desc :approx false})
+(defn var-shape [uid id] (mk uid [:var id]))
+(defn abs [id body] (mk nil [:abs id body]))
+(defn struct-shape ([items] (mk nil [:struct items])) ([uid items] (mk uid [:struct items])))
+(defn alias [t] (mk nil [:alias t]))
+(defn leaf [uid] (mk uid [:leaf]))
+(defn approx [t] (assoc t :approx true))
+(defn app [f arg] (mk nil [:app f arg]))
+(defn set-uid-if-none [t uid] (if (:uid t) t (assoc t :uid uid)))
+(def dummy-mod (mk nil [:struct empty-items]))
+
+(defn proj
+  "Shape.proj: a projection out of a structure taken at once, a leaf's propagated as an approximation"
+  [t item]
+  (case ((:desc t) 0)
+    :leaf (approx t)
+    :struct (or (get ((:desc t) 1) item) (approx t))
+    (mk nil [:proj t item])))
+
+(defn for-persistent-unit [s] (mk [:cu s] [:cu s]))
+
+(defn of-path
+  "Shape.of_path: FIND-SHAPE (ns id) gives an identifier's shape or nil (Not_found, which this returns as nil too)"
+  [find-shape ns path]
+  (letfn [(aux [ns p]
+            (case (p 0)
+              :Pident (or (find-shape ns (p 1)) (throw (ex-info "not found" {::not-found true})))
+              :Pdot (proj (aux :module (p 1)) [(p 2) ns])
+              :Papply (app (aux :module (p 1)) (aux :module (p 2)))
+              :Pextra_ty (let [[_ q extra] p]
+                           (cond (= :ext extra) (aux :extension-constructor q)
+                                 (and (= ns :label) (= :Pextra_ty (q 0))) (proj (aux :constructor q) [(second extra) ns])
+                                 :else (proj (aux :type q) [(second extra) ns])))))]
+    (try (aux ns path)
+         (catch arbace.lang.ExceptionInfo e (if (::not-found (ex-data e)) nil (throw e))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Printing (Shape.print, Shape_reduce.print_result)
+
+(defn- string-literal "Format's %S of a plain name" [s]
+  (str "\"" (-> s (str/replace "\\" "\\\\") (str/replace "\"" "\\\"")) "\""))
+
+(defn item-doc [[n k]] (f/text (str (string-literal n) "[" (ns-text k) "]")))
+
+(defn- uid-opt-doc [u] (if u (f/text (str "<" (uid-text u) ">")) []))
+
+(defn- ident-text [id] (:name id))
+
+(defn- shape-aux [t]
+  (let [{:keys [uid desc]} t]
+    (case (desc 0)
+      :var (f/docs (f/text (ident-text (desc 1))) (uid-opt-doc uid))
+      :abs (let [[ids body] (loop [ids [(desc 1)] b (desc 2)]
+                              (if (and (nil? (:uid b)) (= :abs ((:desc b) 0)))
+                                (recur (conj ids ((:desc b) 1)) ((:desc b) 2))
+                                [ids b]))]
+             (f/docs (f/text "Abs")
+                     (f/box :b 0 (uid-opt-doc uid) f/cut (f/text "(")
+                            (f/box :b 0 (f/join (f/docs (f/text ",") f/sp) (map #(f/text (ident-text %)) ids))
+                                   (f/text ",") f/sp (f/box :b 0 (shape-aux body)))
+                            (f/text ")"))))
+      :app (f/box :b 0 (shape-aux (desc 1)) (f/text "(") f/cut (shape-aux (desc 2)) (f/text ")") (uid-opt-doc uid))
+      :leaf (f/text (str "<" (when uid (uid-text uid)) ">"))
+      :proj (if uid
+              (f/box :b 0 (f/text "(") (shape-aux (desc 1)) f/sp (f/text ".") f/sp (item-doc (desc 2)) (f/text ")")
+                     (f/text (str "<" (uid-text uid) ">")))
+              (f/box :b 0 (shape-aux (desc 1)) f/sp (f/text ".") f/sp (item-doc (desc 2))))
+      :cu (f/text (str "CU " (desc 1)))
+      :struct (let [m (desc 1)]
+                (if (empty? m)
+                  (f/box :hv 0 (f/text "{") (uid-opt-doc uid) (f/text "}"))
+                  (f/docs (f/text "{")
+                          (f/box :v 0 (uid-opt-doc uid) f/cut
+                                 (apply f/docs (for [[item s] m]
+                                                 (f/docs (f/box :hv 2 (item-doc item) (f/text " ->") f/sp (shape-aux s) (f/text ";"))
+                                                         f/cut))))
+                          (f/text "}"))))
+      :pack (f/box :hv 0 (f/text (str "{Pack:" (ident-text (desc 1)) "}")))
+      :alias (f/docs (f/text "Alias") (f/box :b 0 (f/text "(") (f/box :v 0 (uid-opt-doc uid) f/cut (shape-aux (desc 1))) (f/text ")")))
+      :error (f/text (str "Error " (desc 1))))))
+
+(defn shape-doc
+  "Shape.print: the shape and its trailing break (@;)"
+  [t]
+  (if (:approx t)
+    (f/docs (f/box :b 0 (f/text "(approx)") f/sp (shape-aux t)) f/sp)
+    (f/docs (f/box :b 0 (shape-aux t)) f/sp)))
+
+(defn result-doc [r]
+  (case (r 0)
+    :resolved (f/box :b 0 (f/text "Resolved:") f/sp (f/text (uid-text (r 1))))
+    :alias (f/docs (f/box :b 0 (f/text "Alias:") f/sp (f/text (uid-text (r 1)))) (f/text " ->") f/sp (result-doc (r 2)))
+    :local-use (f/box :b 0 (f/text "Local opaque:") f/sp (f/text (uid-text (r 1))))
+    :unresolved (f/box :b 0 (f/text "Unresolved:") f/sp (shape-doc (r 1)))
+    :approx (if (r 1) (f/box :b 0 (f/text "Approximated:") f/sp (f/text (uid-text (r 1)))) (f/text "Approximated: No uid"))
+    :missing (f/docs (f/text "Missing uid: ") (shape-doc (r 1)))
+    :internal-missing (f/text "Missing uid")))
+
+;; ---------------------------------------------------------------------------------------------
+;; The reducer (Shape_reduce.Make with fuel 10 and no unit shapes: Local_reduce)
+
+(def ^:dynamic *memo*
+  "The memo tables of a compilation unit (Local_store's reduce_memo_table and read_back_memo_table): an atom"
+  nil)
+
+(defn new-memo [] (atom {:reduce {} :read-back {}}))
+
+(defn- ret [t desc] {:uid (:uid t) :desc desc :approx (:approx t)})
+
+(declare reduce*)
+
+(defn- force* [env [_ lenv t]] (reduce* (assoc env :local lenv) t))
+
+(defn- reduce** [env t]
+  (let [{:keys [fuel find-shape local]} env
+        delay* (fn [t] [:thunk local t])
+        force-aliases (fn [nf] (loop [nf nf] (if (= :NAlias ((:desc nf) 0)) (recur (force* env ((:desc nf) 1))) nf)))
+        reset-uid (fn [nf] (if (:uid t) (assoc nf :uid (:uid t)) nf))
+        d (:desc t)]
+    (if (neg? @fuel)
+      (assoc (ret t [:NError "NoFuelLeft"]) :approx true)
+      (case (d 0)
+        :cu (ret t [:NComp_unit (d 1)])
+        :app (let [fv (force-aliases (reduce* env (d 1)))]
+               (if (= :NAbs ((:desc fv) 0))
+                 (let [[_ clos var body _] (:desc fv)
+                       arg (delay* (d 2))]
+                   (reset-uid (reduce* (assoc env :local (assoc clos var arg)) body)))
+                 (ret t [:NApp fv (reduce* env (d 2))])))
+        :proj (let [s (force-aliases (reduce* env (d 1)))]
+                (if (and (= :NStruct ((:desc s) 0)) (contains? ((:desc s) 1) (d 2)))
+                  (reset-uid (force* env (get ((:desc s) 1) (d 2))))
+                  (ret t [:NProj s (d 2)])))
+        :abs (ret t [:NAbs local (d 1) (d 2) [:thunk (assoc local (d 1) nil) (d 2)]])
+        :var (let [id (d 1)]
+               (if (contains? local id)
+                 (if-let [def (get local id)]
+                   (let [nf (force* env def)] (if (:uid nf) nf (assoc nf :uid (:uid t))))
+                   (ret t [:NVar id]))
+                 (let [res (find-shape :module id)]
+                   (cond (nil? res) (ret t [:NVar id])
+                         (= res t) (ret t [:NVar id])
+                         :else (do (swap! fuel dec) (reduce* env res))))))
+        :leaf (ret t [:NLeaf])
+        :pack (ret t [:NPack (d 1)])
+        :struct (ret t [:NStruct (into empty-items (map (fn [[k v]] [k (delay* v)]) (d 1)))])
+        :alias (ret t [:NAlias (delay* (d 1))])
+        :error (assoc (ret t [:NError (d 1)]) :approx true)))))
+
+(defn- reduce* [env t]
+  (let [k [(:local env) t]]
+    (if-let [[_ r] (find (:reduce @*memo*) k)]
+      r
+      (let [r (reduce** env t)] (swap! *memo* assoc-in [:reduce k] r) r))))
+
+(defn- read-back [env nf]
+  (let [d (:desc nf)
+        rb (fn [x] (read-back env x))
+        rbf (fn [x] (rb (force* env x)))]
+    {:uid (:uid nf) :approx (:approx nf)
+     :desc (case (d 0)
+             :NVar [:var (d 1)]
+             :NApp [:app (rb (d 1)) (rb (d 2))]
+             :NAbs [:abs (d 2) (rbf (d 4))]
+             :NStruct [:struct (into empty-items (map (fn [[k v]] [k (rbf v)]) (d 1)))]
+             :NAlias [:alias (rbf (d 1))]
+             :NProj [:proj (rb (d 1)) (d 2)]
+             :NLeaf [:leaf]
+             :NPack [:pack (d 1)]
+             :NComp_unit [:cu (d 1)]
+             :NError [:error (d 1)])}))
+
+(defn- stuck-on-comp-unit? [nf]
+  (case ((:desc nf) 0)
+    (:NApp :NProj) (stuck-on-comp-unit? ((:desc nf) 1))
+    :NComp_unit true
+    false))
+
+(defn- reduce-aliases-for-uid [env nf]
+  (cond (and (:uid nf) (= :NAlias ((:desc nf) 0)) (not (:approx nf)))
+        [:alias (:uid nf) (reduce-aliases-for-uid env (force* env ((:desc nf) 1)))]
+        (and (:uid nf) (not (:approx nf))) [:resolved (:uid nf)]
+        (:approx nf) [:approx (:uid nf)]
+        :else [:missing (read-back env nf)]))
+
+(defn reduce-for-uid
+  "Local_reduce.reduce_for_uid: FIND-SHAPE (ns id) the global environment's shapes (Env.shape_of_path of an identifier)"
+  [find-shape t]
+  (let [env {:fuel (atom 10) :find-shape find-shape :local {}}
+        nf (reduce* env t)]
+    (if (stuck-on-comp-unit? nf)
+      [:unresolved (read-back env nf)]
+      (reduce-aliases-for-uid env nf))))
+
+(defn- stuck-on-var-or-pack [t]
+  (case ((:desc t) 0)
+    (:var :pack) ((:desc t) 1)
+    (:app :proj) (stuck-on-var-or-pack ((:desc t) 1))
+    nil))
+
+(defn local-reduce-for-uid
+  "Shape_reduce.local_reduce_for_uid: a missing uid of an item reached through a functor's parameter or an unpacked
+  module resolved to a local opaque uid, DEFINITION-UID (parent-id decl-uid) -> uid (make_definition_uid), from the
+  item's declaration uid FIND-UID () -> uid or nil (Env.find_uid)"
+  [find-shape t find-uid definition-uid]
+  (letfn [(aux [r]
+            (case (r 0)
+              :alias [:alias (r 1) (aux (r 2))]
+              :missing (if-let [parent (stuck-on-var-or-pack (r 1))]
+                         (if-let [u (find-uid)] [:local-use (definition-uid parent u)] [:internal-missing])
+                         [:internal-missing])
+              r))]
+    (aux (reduce-for-uid find-shape t))))
