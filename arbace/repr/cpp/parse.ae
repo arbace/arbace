@@ -1863,7 +1863,10 @@
                                                                (main-tok? p b)
                                                                (not (dep-this? p)))
                                                       [(.-o (tok-at p b)) (:s lp) (boolean (in-template? p))])
-                                           :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp)))) "")}}))))
+                                           :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp))))
+                                                                ;; (queue 492: a literal operator's id, [over.literal]/1, as clang
+                                                                ;; names it)
+                                                                (when (:lit lp) (str "operator\"\"" (:lit lp))) "")}}))))
       :else (perr p "an expression"))))
 
 (defn- member-node [^P p base arrow]
@@ -3426,6 +3429,10 @@
               post (when (and body? (or (is? p "__attribute__") (is? p "__attribute"))) (attr-nodes p))
               n (node p "EnumDecl" kb e (cond-> {:inner (vec (concat attrs post cs)) :loc (loc p (if qn (long (:i (peek (:parts qn)))) kb))}
                                          nm (assoc :name nm)
+                                         ;; (queue 492: a qualified enum-head-name's qualifier, `enum C::D : int { y };`, the
+                                         ;; class or namespace whose member it defines, [dcl.enum]/1)
+                                         (and qn (> (count (:parts qn)) 1) (every? :s (pop (:parts qn))) (not-any? :args (pop (:parts qn))))
+                                         (assoc :_equal (mapv :s (pop (:parts qn))))
                                          scoped (assoc :scopedEnumTag scoped)
                                          fixed (assoc :fixedUnderlyingType {:qualType (qt fixed)})
                                          (and scoped (not fixed)) (assoc :fixedUnderlyingType {:qualType "int"})))]
@@ -3976,6 +3983,10 @@
                       (-> n (dissoc :_args) (update :inner (fn [xs] (vec (concat (targ-nodes p (:args lp)) xs)))))
                       n)
                   n (if (:friend ds) (node p "FriendDecl" (:b ds) e {:loc (loc p ni) :inner [n]}) n)]
+              ;; (queue 492: [over.literal]/2, a literal operator is a namespace-scope function, a friend allowed: a class's
+              ;; member, declared in it or defined by a qualified name, is GCC's "... must be a non-member function")
+              (when (and (:lit lp) (not (skim? p)) (not (:friend ds)) (or (= ctx :member) cls))
+                (soft-diag! p (long (or (:b qn) ni)) (str "'operator\"\"" (:lit lp) "' must be a non-member function")))
               (when (:lit lp) (declare! p {:k :fn :name (str "operator\"\"" (:lit lp))}))
               (when pre
                 (let [^java.util.HashMap m (sc/names-of (sc/decl-scope (scope p)))]
@@ -4208,6 +4219,17 @@
                                                                  (let [en (sc/lookup (scope p) (.-s t))] (and (:tparam en) (:pack en))))))
                                                   (range b e)))]
                         (soft-diag! p i (str "non-type template parameter type contains unexpanded parameter pack '" (ts (tok-at p i)) "'"))))))
+                ;; (queue 492: [temp.param]/6, a non-type template parameter's type is structural -- an lvalue reference,
+                ;; an integral, enumeration, pointer, pointer-to-member or std::nullptr_t type, from C++20 a floating-point
+                ;; type or a literal class -- so void, an rvalue reference, a complex type, or before C++20 a floating type
+                ;; written as the parameter's own type is GCC's "'void' is not a valid type for a template non-type
+                ;; parameter")
+                (when-not (skim? p)
+                  (let [w (when (= :b (:t ty)) (set (:w ty)))]
+                    (when (or (= :rr (:t ty))
+                              (and w (or (w "void") (w "_Complex") (w "__complex__")
+                                         (and (< (.-year p) 2020) (or (w "float") (w "double"))))))
+                      (soft-diag! p (long (:b ds)) "the type is not a valid type for a template non-type parameter"))))
                 (when nm (sc/declare! (scope p) {:k :var :name nm :tparam true :ty ty}))
                 [(node p "NonTypeTemplateParmDecl" (:b ds) (last-ix p)
                        (cond-> {:loc (loc p ni) :type {:qualType (qt (param-type (if (and (= :pk (:t ty)) (not (:pack (:ent base))) (not (:pack (:q (:qn base))))) (:of ty) ty)))}
