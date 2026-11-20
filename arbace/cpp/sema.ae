@@ -668,6 +668,8 @@
         (= :xv (:cat x)) (abi/rref (:ty x))
         :else (:ty x)))))
 
+(declare cx-elab-declare!)
+
 (defn resolve-type-form [scope f]
   (cond
     (symbol? f)
@@ -724,7 +726,7 @@
       ;; hidden the class, "unknown type block")
       cpp/elaborated (let [x (nth f 2)
                            simple (when (and (symbol? x) (not (builtin-syms x)) (= 1 (count (name-parts x)))) (first (name-parts x)))]
-                       (or (when simple
+                       (or (when (and simple (not (checking?)))
                              (some-> (loop [s scope] (when s (or (type-entity (find-here s simple true)) (recur (:parent s))))) :ty))
                            (if (and simple (#{'struct 'class 'union "struct" "class" "union"} (second f)))
                              ;; (cpp-rt-own: a class key and a name no declaration names declare an incomplete class in the smallest
@@ -732,7 +734,7 @@
                              ;; (struct cpp_reader *, hashnode, const void *);` before any cpp_reader, the typedef dropped before)
                              (try (resolve-type-form scope x)
                                   (catch arbace.lang.ExceptionInfo e
-                                    (if (= :type (:codegen/refused (ex-data e)))
+                                    (if (and (= :type (:codegen/refused (ex-data e))) (not (checking?)))
                                       (let [home (loop [s scope] (if (and s (#{:class :tparams} (:kind s)) (:parent s)) (recur (:parent s)) s))]
                                         (if (identical? home *root*)
                                           (opaque-class simple)
@@ -741,8 +743,13 @@
                                                                            :fields [] :bases [] :outer home})
                                             (enter! home simple {:e :type :ty t :pos -1})
                                             t)))
-                                      (throw e))))
-                             (resolve-type-form scope x))))
+                                      ;; (queue 505, the checker: a class first named by an elaborated-type-specifier the parser did not
+                                      ;; leave a node for, a parameter's, cx-elab-declare!; n-merge-1120b: cpp-rt-own's declaration above
+                                      ;; is the code generator's, 505's the checker's, each as its records were made)
+                                      (if-let [t (cx-elab-declare! scope f e)] t (throw e)))))
+                             (try (resolve-type-form scope x)
+                                  (catch arbace.lang.ExceptionInfo e
+                                    (if-let [t (cx-elab-declare! scope f e)] t (throw e)))))))
       ;; (n-cpp-concepts, the checker: a constrained placeholder, `C auto` ([dcl.spec.auto.general]/1), an auto with its
       ;; type-constraint's text, checked once deduced: placeholder-check!; the code generator refuses it as before)
       constrained (if (and (checking?) (:tc-text (meta f)) (#{'auto 'decltype-auto} (nth f 2 nil)))
@@ -2139,15 +2146,19 @@
         (swap! abi/*enums* assoc-in [id :nonneg] true)))
     t))
 
-(declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access!)
+(declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-elab-decl-scope cx-friend-fn-ident!)
+(declare cx-tinst-member-type-access! cx-alias-member-access! cx-base-type-access! cx-member-tparam-access!) ; queue 506
 
 (defn- declare-class! [scope0 n]
   (let [;; (cpp-rt-own: an elaborated-type-specifier's class, `struct P *p;` a member of S, is declared in the smallest namespace or
         ;; block scope holding it, [basic.scope.pdecl]/7.2 (the parser's :_elab): libcpp's cpp_reader `struct cpp_savedstate
         ;; *savedstate;` and pch.cc's `struct cpp_savedstate { ... }` one class, two before, "no member definedhash")
-        scope0 (if (and (:_elab n) (not (:completeDefinition n)))
-                 (loop [s scope0] (if (and s (#{:class :tparams} (:kind s)) (:parent s)) (recur (:parent s)) s))
-                 scope0)
+        ;; (queue 505, the checker: the same rule by the parser's :_elab-decl, cx-elab-decl-scope; n-merge-1120b: each where its
+        ;; records were made)
+        scope0 (cond (checking?) (cx-elab-decl-scope scope0 n)
+                     (and (:_elab n) (not (:completeDefinition n)))
+                     (loop [s scope0] (if (and s (#{:class :tparams} (:kind s)) (:parent s)) (recur (:parent s)) s))
+                     :else scope0)
         nm (:name n)
         ;; a nested class defined outside its class (class L::F { ... }, [class.nest]/3): in the enclosing class's
         ;; scope (G5: <locale_classes.h>'s class locale::facet)
@@ -2226,6 +2237,7 @@
                                          (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true)))))
       ;; (queue 463, the checker: the class's definition, where an implicitly deleted special member's reason is reported)
       (when (and (checking?) (:range n)) (abi/update-cls! id assoc :cx-node {:range (:range n)}))
+      (cx-base-type-access! scope id n) ; (queue 506: a base-specifier's names in the derived class's context)
       ;; (round 54, the checker: [class.mi]/3, a class named twice as a direct base: reported at the class, the later one dropped)
       (when (checking?)
         (let [bs (:bases (abi/cls id))
@@ -2254,7 +2266,9 @@
         (binding [*last-anon* (atom nil)]
         (doseq [k (kids n)]
           (when (and (checking?) (#{"FieldDecl" "TypedefDecl" "TypeAliasDecl"} (:kind k)))
-            (cx-member-type-access! cs id k))
+            (cx-member-type-access! cs id k)
+            (cx-tinst-member-type-access! cs id k) ; (queue 506: T::X's access in a class template's specialization)
+            (cx-alias-member-access! cs k))        ; (queue 506: an alias template's T::X in its own context)
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
             "FieldDecl" (if (and (nil? @*last-anon*) (header-node? k)
@@ -2326,7 +2340,9 @@
                     ;; (queue 502: an unqualified elaborated friend class's namespace, cx-friend-class-ns!)
                     (cx-friend-class-ns! cs id k fd)
                     ;; (queue 499: a friend declaration naming another class's inaccessible member function)
-                    (cx-friend-member-access! cs id k fd)))
+                    (cx-friend-member-access! cs id k fd)
+                    ;; (queue 505: a friend function's identity, cx-friend-fn-ident!)
+                    (cx-friend-fn-ident! cs id k fd)))
                 (binding [*member-access* @access] (declare-node! cs k))))))
         (finally (abi/update-cls! id dissoc :defining))))
       ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
@@ -2398,6 +2414,7 @@
       ;; constraint, is reported at the declaration and dropped, the unit going on, as a statement's refusal is)
       (if (checking?)
         (try (cx-tparam-access! scope n) ; (queue 502: a namespace-scope template's parameters' access)
+             (cx-member-tparam-access! scope n) ; (queue 506: a member template's parameters' access)
              (declare-node*! scope n)
              (catch arbace.lang.ExceptionInfo e
                (if-let [r (when-not (:cls scope) (cx-sure-incomplete-refusal n nil e))]
@@ -2412,6 +2429,42 @@
                  (do (*on-refusal* e n) nil)
                  (throw e))))))
         (declare-node*! scope n)))))
+
+;; queue 505 (500-2 (a), the checker): a class first declared by an elaborated-type-specifier `class-key identifier` that
+;; is not a declaration of its own (`struct T { struct S *a; };`, `void f(struct S *p);`) is declared in the smallest
+;; namespace or block scope that contains the declaration ([basic.scope.pdecl]/7.2, [dcl.type.elab]/3; a function
+;; prototype's parameters and a class's members are neither), as GCC and clang declare it: opt/pr69483.C's `struct S b;`
+;; then names the incomplete ::S. Before, the class's node, which the parser leaves among the members, declared T::S, and a
+;; parameter's class was no class at all: the unit refused on "unknown type S".
+(defn- cx-elab-target
+  "Queue 505: the smallest namespace or block scope enclosing the scope `s` (a class's, template parameters', an
+  enumeration's or a function type's parameters' scopes passed by)."
+  [s]
+  (loop [s s] (cond (nil? s) nil
+                    (or (#{:class :tparams :enum} (:kind s)) (:fn-type s)) (recur (:parent s))
+                    :else s)))
+
+(defn- cx-elab-decl-scope
+  "Queue 505 (the checker): the scope declare-class! enters the class node `n` in: for a node the parser marks :_elab-decl
+  (a class first named by an elaborated-type-specifier of a declaration with declarators) declared in a class's scope,
+  the smallest enclosing namespace or block scope (cx-elab-target); else `scope`."
+  [scope n]
+  (or (when (and (checking?) (:_elab-decl n) (not (:completeDefinition n)) (#{:class :tparams} (:kind scope)))
+        (cx-elab-target scope))
+      scope))
+
+(defn- cx-elab-declare!
+  "Queue 505 (the checker): the type of the elaborated-type-specifier form `f` ((cpp/elaborated KEY NAME)) whose name
+  lookup in `scope` found nothing (`e`, the refusal): with `struct`, `class` or `union` and a plain identifier, while the
+  main file's declarations are entered (*main-retry*), the class declared in the smallest enclosing namespace or block
+  scope ([basic.scope.pdecl]/7.2), incomplete, and its type; else nil."
+  [scope f e]
+  (let [[_ kw nm] f]
+    (when (and (checking?) *main-retry* (= :type (:codegen/refused (ex-data e)))
+               (#{'struct 'class 'union} kw) (symbol? nm) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" (str nm)))
+      (when-let [s (cx-elab-target scope)]
+        (declare-class! s {:kind "CXXRecordDecl" :tagUsed (str kw) :name (str nm)})
+        (resolve-type-form scope nm)))))
 
 (defn- placeholder-split
   "cpp-s11: a parameter's type as written with a placeholder ([dcl.spec.auto]: `auto`, `C auto`, `C<A...> auto`, cv and
@@ -4884,14 +4937,36 @@
                                          (.get ^java.util.HashMap (:names s) nm))))))
                        ss))))))
 
+(defn- cx-friend-fn-miss?
+  "Queue 505 (the checker; 502-1 (a)): whether the function `f`, of the name of a friend function of the class `cl`, is
+  surely none of the functions its friend declarations name, by the identities cx-friend-fn-ident! recorded under that
+  name (none :any): an unqualified non-template friend, a non-template non-member function of the innermost enclosing
+  namespace with the declaration's parameter types ([namespace.memdef]/3; template/friend79.C's friend of A<int> is not
+  A<void>'s); an unqualified friend function template, the specializations of a template of that namespace
+  ([temp.friend]/1.3); a friend template-id, the specialization of a template its name finds with those parameter types
+  ([temp.friend]/1.2; tc1/dr166.C's N::f<int>, not M::f<int> nor N::f<long>)."
+  [cl f]
+  (let [es (get (:friend-fn-ids cl) (:name f))]
+    (boolean
+      (and (seq es) (not-any? #{:any} es)
+           (let [p (vec (:path f)) ti (:tinst f) ps (some->> (:ty f) :ps (mapv abi/unq))]
+             (not-any? (fn [e]
+                         (case (:k e)
+                           :plain (and (nil? (:cls f)) (nil? ti) (= (:ns e) p) (= (:ps e) ps))
+                           :tmpl (and (nil? (:cls f)) (some? ti) (= (:ns e) p))
+                           :spec (and (some? ti) (contains? (:tids e) (:tid ti)) (= (:ps e) ps))
+                           true))
+                       es))))))
+
 (defn- cx-friend-of?
-  "GetFriendKind: whether class `c` may befriend the context `cx`: a friend function of its function's name, a friend
+  "GetFriendKind: whether class `c` may befriend the context `cx`: a friend function of its function's name (queue 505:
+  not one whose identity the friend declarations surely do not name, cx-friend-fn-miss?), a friend
   class among its classes by name (queue 502: not one an unqualified friend declaration surely does not name,
   cx-friend-ns-miss?), or a friend the slice did not classify."
   [c cx]
   (let [cl (abi/cls c)]
     (boolean (or (:friend-unknown cl)
-                 (and (:fn cx) (contains? (:friend-fns cl) (:name (:fn cx))))
+                 (and (:fn cx) (contains? (:friend-fns cl) (:name (:fn cx))) (not (cx-friend-fn-miss? cl (:fn cx))))
                  (and (:friend-classes cl)
                       (or (contains? (:friend-class-names cl) "")
                           (some #(and (contains? (:friend-class-names cl) (:name (abi/cls %))) (not (cx-friend-ns-miss? cl %))) (:records cx))))))))
@@ -4967,6 +5042,40 @@
           ns (loop [s cs] (cond (nil? s) nil (= :ns (:kind s)) s (#{:class :tparams} (:kind s)) (recur (:parent s)) :else nil))]
       (when (and nm (seq nm))
         (abi/update-cls! id update-in [:friend-class-nss nm] (fnil conj []) (if (and elab? ns (not (str/includes? qt "::"))) (vec (:path ns)) :any))))))
+
+(defn- cx-dependent-type?
+  "Queue 505: whether the type `t` names a template parameter or a dependent or undeduced type anywhere."
+  [t]
+  (boolean (some #(and (map? %) (#{:tparam :tdep :dep :auto} (:k %))) (tree-seq coll? seq t))))
+
+(defn- cx-friend-fn-ident!
+  "Queue 505 (the checker; 502-1 (a)): the identity of the friend function declaration `k` (its function `fd`) of class
+  `id` (its scope `cs`), recorded under the function's name in :friend-fn-ids for cx-friend-fn-miss?: {:k :plain :ns
+  :ps} an unqualified non-template friend, {:k :tmpl :ns} an unqualified friend function template, {:k :spec :tids :ps}
+  a template-id (the templates its name finds from the class); :any (never judged) for a qualified friend, a member, a
+  class of the headers, a local class's friend, parameter types not known or dependent, or a plain friend whose name
+  finds a function template (`friend void t<>(int);`, whose `<>` the tree does not keep)."
+  [cs id k fd]
+  (when (and (checking?) fd (string? (:name fd)) (seq (:name fd)))
+    (let [nm (:name fd)
+          ns (loop [s cs] (cond (nil? s) nil (= :ns (:kind s)) s (#{:class :tparams} (:kind s)) (recur (:parent s)) :else nil))
+          ps (fn [] (try (let [t (resolve-type cs (get-in fd [:type :qualType]))]
+                           (when (and (abi/fn? t) (not (cx-dependent-type? t))) (mapv abi/unq (:ps t))))
+                         (catch arbace.lang.ExceptionInfo _ nil)))
+          qual? (or (and (string? (:_qual fd)) (seq (str/trim (:_qual fd))))
+                    (some #(and (string? (:_qual %)) (seq (str/trim (:_qual %)))) (:inner fd)))
+          ent (cond
+                (or (nil? ns) qual? (:header (abi/cls id)) (header-node? k)) :any
+                (= "FunctionTemplateDecl" (:kind fd)) {:k :tmpl :ns (vec (:path ns))}
+                (not= "FunctionDecl" (:kind fd)) :any
+                (some #(= "TemplateArgument" (:kind %)) (:inner fd))
+                (let [tids (try (set (keep #(when (= :tmpl (:e %)) (:id %)) (lookup cs nm))) (catch arbace.lang.ExceptionInfo _ nil))
+                      p (ps)]
+                  (if (and (seq tids) p) {:k :spec :tids tids :ps p} :any))
+                ;; (a template of the name visible: `friend void t<>(int);`, a template-id the tree does not mark, may be meant)
+                (try (some #(= :tmpl (:e %)) (lookup cs nm)) (catch arbace.lang.ExceptionInfo _ true)) :any
+                :else (if-let [p (ps)] {:k :plain :ns (vec (:path ns)) :ps p} :any))]
+      (abi/update-cls! id update-in [:friend-fn-ids nm] (fnil conj []) ent))))
 
 (defn- cx-friend-member-access!
   "Queue 499 (the checker): a friend declaration `k` of the class `id` (its scope `cs`) whose function `fd` is a member
@@ -5152,6 +5261,39 @@
                                                                     *cx-copy-list*)))))))))
   r)
 
+(defn- cx-closure-members!
+  "Queue 508 (the checker): a closure type's special members ([expr.prim.lambda.closure]/13 of C++20; /20 of C++17):
+  before C++20 it has a deleted default constructor and a deleted copy assignment operator (so no implicit move
+  assignment, its move assignment deleted alike); from C++20 the same for a lambda with a lambda-capture (`[&]` and `[=]`
+  among them), which has no default constructor at all, a captureless one's both defaulted. GCC's \"use of deleted
+  function\" at the default-initialization or the assignment (cpp2a/lambda1.C, cpp0x/lambda/lambda-ctor-neg.C)."
+  [id capture?]
+  (when (and (checking?) (or (< (long *cxx-year*) 20) capture?))
+    (let [c (abi/cls id)
+          del {:deleted true :deleted-sure true :deleted-why "a lambda closure type has a deleted default constructor or copy assignment operator"}]
+      (doseq [x (:ctors c) :let [g (fnd x)] :when (and (:implicit g) (empty? (:ps (:ty g))))]
+        (if (< (long *cxx-year*) 20)
+          (upd-fn! x merge del)
+          (abi/update-cls! id update :ctors (fn [cs] (vec (remove #{x} cs))))))
+      (doseq [x (:methods c) :let [g (fnd x)] :when (and (:implicit g) (= "=" (:op g)))]
+        (upd-fn! x merge del)))))
+
+(defn- cx-elided-copy!
+  "Queue 508 (the checker): before C++17 an object of class `id` initialized from a prvalue of its own class -- the
+  converted prvalue of a copy-initialization ([dcl.init]/17.6.3 of C++14: \"the result of the call ... is then used to
+  direct-initialize\"), a variable, return value, argument or member initialized from one, a mem-initializer's
+  `b(f())` -- is initialized by a copy or move constructor that may be elided, and still [class.copy]/31 of C++14 requires
+  it ([class.temporary]/1: \"even if the copy/move constructor is not called, all the semantic restrictions, such as
+  accessibility, shall be satisfied\"): a deleted one chosen is GCC's \"use of deleted function\". Judged as CX12's rule
+  judges any call (resolve-overload*: the deleted one chosen surely); any other refusal of that choice is not judged.
+  `e` the prvalue (or nil: a prvalue of the class made by the copy-initialization's converting constructor)."
+  [id e]
+  (when (and (checking?) (< (long *cxx-year*) 17))
+    (let [a (or e {:op :temp :init {:i :none} :ty {:k :class :id id} :cat :pr})]
+      (try (resolve-overload (ctor-candidates id) [a] nil)
+           (catch arbace.lang.ExceptionInfo x
+             (when (re-find #"call to a deleted function" (str (.getMessage x))) (throw x)))))))
+
 (defn- class-init
   "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
   [t args ctx style]
@@ -5165,7 +5307,7 @@
     (cond
       ;; copy-initialization from a prvalue of the class: in place ([dcl.init]/17.6.1)
       (and (= 1 (count args)) (not= :init-list (:op (first args))) (= (class-id (:ty (first args))) id) (= :pr (:cat (first args))))
-      {:i :expr :e (first args)}
+      (do (cx-elided-copy! id (first args)) {:i :expr :e (first args)})
       ;; (cpp-s11: a braced list as the one argument of a parenthesized direct-initialization, `U u({3, 4})`, is no
       ;; list-initialization of U: the constructors are chosen for the list as their argument, [dcl.init.general]/16.6.2.1
       ;; with [over.ics.list]; it had initialized U from the list's elements, <format>'s _Utf32_view<subrange<iterator>>
@@ -5213,6 +5355,11 @@
                  (when (> (count args) (count subs)) (throw x))
                  (init-for t {:op :init-list :items (vec args) :paren true} ctx :list))
                (throw x))))
+      ;; (queue 508, the checker: a copy-initialization from another type, by a converting constructor, before C++17
+      ;; then copies the prvalue it made, cx-elided-copy!)
+      (and (= style :copy) (= 1 (count args)) (not= :init-list (:op (first args)))
+           (let [c (class-id (:ty (first args)))] (not (and c (or (= c id) (abi/derived-from? c id))))))
+      (let [r (ctor-init id args ctx)] (cx-elided-copy! id nil) r)
       :else (ctor-init id args ctx)))))
 
 (defn- inheriting-ctor!
@@ -6161,6 +6308,118 @@
           (if (= :access (:codegen/refused (ex-data e)))
             (*on-refusal* e p)
             (throw e)))))))
+
+;; queue 506 (the checker; 502-3 (a)): type access on instantiation. A member type named through a template parameter,
+;; T::X, has its access checked in the specialization, in the context the name appears in ([temp.inst], [class.access]/2
+;; with [temp.res.general]): a class template's member declaration in the instantiated class's (template/access3.C's
+;; `typename T::template X<int> x;`, template/qualttp8.C's `C<T::template B> c;` with T a class whose X or B is private),
+;; an alias template's defining-type-id in the alias template's (cpp0x/alias-decl-22.C's `using foo = typename T::bar;`,
+;; foo<B> named by B's member, EDG's and GCC's reading); and, in or out of templates, a base-specifier's names in the
+;; derived class's ([class.access]/7, CWG 372: template/access31.C's `struct exploit2 : C::Private`) and a member
+;; template's parameters' in the class's ([class.access]/8, as cx-tparam-access! at namespace scope: access31.C's
+;; `template<class U = C::Private>`). Judged only where sure: a member declared in the qualifier's class itself (no base's),
+;; cx-access-ok? false (a friend by name grants), no header's declaration, and an alias template's specialization only
+;; when a declaration's own type names it (a substitution in a deduction is SFINAE, not judged).
+
+(def ^:dynamic *cx-alias-check* nil) ; queue 506: the template-id form whose alias template's specialization is checked
+
+(defn- cx-qual-type-names
+  "Queue 506: the [qualifier-parts name] steps of the qualified names the type spelling `text` writes, `typename` and the
+  `template` disambiguator dropped: T::X and T::X::Y of T::X::Y."
+  [text]
+  (let [t (-> (str text) (str/replace #"\btypename\s+" "") (str/replace #"::\s*template\s+" "::") (str/replace #"\s*::\s*" "::"))]
+    (for [[_ q0 nm0] (re-seq #"(?<![\w:])((?:[A-Za-z_]\w*::)+)([A-Za-z_]\w*)" t)
+          :let [all (conj (vec (remove str/blank? (str/split q0 #"::"))) nm0)]
+          j (range 1 (count all))]
+      [(subvec all 0 j) (nth all j)])))
+
+(defn- cx-qual-type-access!
+  "Queue 506: the first qualified name the type spelling `text` writes (cx-qual-type-names, its qualifier's parts chosen by
+  `pred`, resolved in `scope` to a class) whose member type or member class template, declared in that class, is private or
+  protected and surely inaccessible in the context `cx` (cx-access-ok? false): reported at `node` (*on-refusal*), true."
+  [scope text node cx pred]
+  (when (and (checking?) *on-refusal* cx (string? text) (str/includes? text "::"))
+    (when-let [[nm acc qc]
+               (some (fn [[parts nm]]
+                       (when (pred parts)
+                         (let [ce (try (first (filter #(= :type (:e %)) (lookup-qualified scope parts))) (catch arbace.lang.ExceptionInfo _ nil))
+                               qc (when ce (class-id (:ty ce)))
+                               c (when qc (abi/cls qc))
+                               acc (when (:scope c)
+                                     (some #(when (or (= :type (:e %)) (and (= :tmpl (:e %)) (= :class (:tk %)))) (:access %))
+                                           (.get ^java.util.HashMap (:names (:scope c)) nm)))]
+                           (when (and (#{:private :protected} acc) (false? (cx-access-ok? cx qc acc qc nil)))
+                             [nm acc qc]))))
+                     (cx-qual-type-names text))]
+      (*on-refusal* (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls qc)) "'")
+                             {:codegen/refused :access :cx/node node})
+                    node)
+      true)))
+
+(defn- cx-tparam-qualifier
+  "Queue 506: a predicate over a qualifier's parts: one name, a parameter the scope `bs` (a :tparams scope) binds."
+  [bs]
+  (fn [parts] (and (= 1 (count parts)) (boolean (seq (.get ^java.util.HashMap (:names bs) (first parts)))))))
+
+(defn- cx-tinst-member-type-access!
+  "Queue 506: a member declaration `k` (a field, typedef or alias) of the class `cid` (its scope `cs`) declared in a scope
+  binding template parameters (a class template's specialization, or a member class of one): its type's T::X with T a
+  parameter bound to a class, X's access checked in the class's context (cx-qual-type-access!). In a template's pattern T
+  stands for itself, no class: not judged."
+  [cs cid k]
+  (when (and (checking?) (not (header-node? k)))
+    (when-let [bs (loop [s (:parent cs)] (case (:kind s) :tparams s :class (recur (:parent s)) nil))]
+      (when-let [rs (cx-enclosing-classes cid)]
+        (cx-qual-type-access! cs (str (get-in k [:type :qualType])) k {:records rs} (cx-tparam-qualifier bs))))))
+
+(defn cx-alias-access!
+  "Queue 506: the alias template `t`'s specialization, its parameters bound by the scope `bs`, named by a declaration's own
+  type (template-id's alias branch, when *cx-alias-check* is its form): its defining-type-id's T::X with T a parameter
+  checked in the alias template's context, a namespace's (cx-qual-type-access!), reported at the alias's declaration."
+  [t bs]
+  (let [p (:pattern t)]
+    (when (and (checking?) p (:range p) (not (header-node? p)) (= :ns (:kind (:scope t))))
+      (cx-qual-type-access! bs (str (get-in p [:type :qualType])) p {:records #{}} (cx-tparam-qualifier bs)))))
+
+(defn- cx-alias-member-access!
+  "Queue 506: a member declaration `k` of a class (its scope `cs`) whose type is an unqualified alias template's
+  specialization, foo<B>: the template-id resolved once more with *cx-alias-check* its form, so that cx-alias-access!
+  judges that specialization alone (not the template-ids inside it, nor a deduction's)."
+  [cs k]
+  (when (and (checking?) *on-refusal* (not (header-node? k)) (:template-id @hooks))
+    (let [qt (str (get-in k [:type :qualType]))]
+      (when (str/includes? qt "<")
+        (let [f (try (ct/parse-type (strip-type-attrs qt)) (catch Exception _ nil))]
+          (when (and (seq? f) (= '<> (first f)) (symbol? (second f)) (nil? (namespace (second f)))
+                     (some #(and (= :tmpl (:e %)) (= :alias (:tk %))) (lookup cs (name (second f)))))
+            (binding [*cx-alias-check* f]
+              (try ((:template-id @hooks) cs f) (catch Exception _ nil)))))))))
+
+(defn- cx-base-type-access!
+  "Queue 506: the base-specifiers of the class `id` (its node `n`, declared in `scope`): a qualified name's member type
+  checked in the derived class's context ([class.access]/7, CWG 372), cx-qual-type-access!."
+  [scope id n]
+  (when (and (checking?) *on-refusal* (not (header-node? n)))
+    (when-let [rs (cx-enclosing-classes id)]
+      (doseq [bs (:bases n)
+              :let [qt (str (get-in bs [:type :qualType]))]
+              :when (and (not (:isPackExpansion bs)) (str/includes? qt "::"))]
+        (cx-qual-type-access! scope qt (if (:range bs) bs n) {:records rs} (constantly true))))))
+
+(defn- cx-member-tparam-access!
+  "Queue 506: a member template `n` of the class whose scope is `scope`: a type parameter's default and a non-type
+  parameter's type naming a member type, checked in the class's context ([class.access]/8), cx-qual-type-access!."
+  [scope n]
+  (when (and (checking?) *on-refusal* (= :class (:kind scope)) (:cls scope) (not (header-node? n))
+             (#{"ClassTemplateDecl" "FunctionTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind n)))
+    (when-let [rs (cx-enclosing-classes (:cls scope))]
+      (doseq [p (:inner n)
+              :let [qt (case (:kind p)
+                         "TemplateTypeParmDecl" (some #(when (= "TemplateArgument" (:kind %)) (get-in % [:type :qualType])) (:inner p))
+                         "NonTypeTemplateParmDecl" (get-in p [:type :qualType])
+                         nil)]
+              :when qt]
+        (cx-qual-type-access! scope (str qt) p {:records rs} (constantly true))))))
 
 (defn- friend-may-grant?
   "CP313 (a), clang's SemaAccess.cpp (llvmorg-23.1.5) EffectiveContext and GetFriendKind for a non-member function `f`
@@ -7114,6 +7373,7 @@
         ret (if (= :auto (:k ret)) abi/void ret)
         _ (upd-fn! fid #(-> % (assoc-in [:ty :ret] ret) (assoc :params pids :tbody body-s :nrvo (nrvo-var body-s) :statics @(:statics lctx))))
         _ (finish-class! id)
+        _ (cx-closure-members! id (not (str/blank? intro)))
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
             (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
         inits (sort-by first @(:inits lam))]
@@ -7272,6 +7532,7 @@
             (abi/update-cls! id assoc :glam-conv {:tid tid :base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id])
                                                                     :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}}))
         _ (finish-class! id)
+        _ (cx-closure-members! id (not (str/blank? intro)))
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
             (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
         inits (sort-by first @(:inits lam))]
@@ -8393,7 +8654,13 @@
                                          (catch arbace.lang.ExceptionInfo x
                                            (when (and (checking?) (:codegen/refused (ex-data x)) (:name d) (not (has-auto? (:ty (var* id)))))
                                              (enter! (:scope ctx) (:name d) {:e :var :id id}))
-                                           (throw x)))
+                                           ;; (queue 508, the checker: a default-initialization's refusal, no initializer
+                                           ;; analyzed to locate it, at the declaration, as GCC: it had taken the stale last
+                                           ;; node, a later function's line)
+                                           (if (and (checking?) (:codegen/refused (ex-data x)) (nil? (:cx/node (ex-data x)))
+                                                    (nil? (init-kid d)) (:range d))
+                                             (throw (ex-info (.getMessage x) (assoc (ex-data x) :cx/node d) x))
+                                             (throw x))))
                                t (:ty (var* id))
                                ;; a constexpr local, or a const integral one, initialized by a constant: folded (clang
                                ;; emits the value)
