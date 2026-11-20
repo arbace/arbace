@@ -299,6 +299,50 @@ the same as the sequential translation's:
   order, all before the analysis). Entering and analyzing the classes stay sequential
   (`arbace.classes.analyze` numbers anonymous classes and ids in order), as does the reach.
 
+**The run in bounded memory** (2026-11-20, the user: javac's tool's rebuild slim; branch
+`j2g-chunks-1120`). What j2g's heap holds, measured on javac's tool's world (the first tool build's
+j2g, 41,352 classes analyzed, 41,230 translated, 5,589 files; `J2G_MEM=1` prints the heap after a
+collection at each phase): the executable's own 0.7 GiB; the world, the Java forms as read and
+their analysis, 17.7 GiB, all of it before any translation (the analysis is complete first) and
+kept to the end (the translation asks any class's declarations and some bodies of others); the
+classes' Go forms 2.7 GiB, the registrations 0.9 GiB, the files' texts 1.9 GiB, held together
+until the writing: 23.9 GiB live. GOGC 400 lets the heap grow to `GOMEMLIMIT` (20 GiB by default:
+the collector then runs without pause, 14.7 minutes and 25,757 CPU seconds, 26.7 GiB resident; a
+build's `GOMEMLIMIT=40GiB`, inherited, gave 40.8 GB). The parallel jobs' own memory is a class's
+translation each, small beside the world. So:
+- **Streamed** (`stream-window`; a `--program` run of 10,000 classes or more, `J2G_STREAM` unset;
+  `J2G_STREAM=1` any run, `0` the whole run as before): the classes, in their order, are translated
+  `J2G_WINDOW` (2,048) at a time, each window in parallel as before and merged in class order before
+  the next starts (`translate-classes` `:window`); after each window every file whose classes are
+  all merged is written (`streamer`: its text as the whole run computes it, with the renames of the
+  literals so far, which name a class's literals once it is merged) and its forms dropped, with the
+  Go names it declares kept for the collisions' check (`checks/collisions`' third argument). The
+  files the later steps write (`j2g_*.go`, `reflect_tables_j2g.go`) are written at the end as before;
+  a class file of such a name would be written twice, which the run refuses. The program root's
+  copies are copied from `gen/`. The output is the whole run's byte for byte: the merge's order is
+  the same, a file's text depends on its forms and the renames of its own classes' literals alone.
+- **GOMEMLIMIT** is `J2G_GOMEMLIMIT`, else 20 GiB, an inherited `GOMEMLIMIT` only when lower, capped by
+  the gate's admission (`bin/gate-policy mem`).
+- Not cut: the world. Measured on javac's world (2026-11-20): 16.73 GiB in use after a forced collection at
+  the end of the load under a 16 GiB limit (18.44 GiB under 20 GiB, so about 1.7 GiB of slack), the load 604 s
+  against 140 s; so 20 GiB stays the limit for javac's tool too, and the streamed run peaks near 21 GiB resident
+  (26.7 GiB for the whole run). That is the floor of one process; batches in separate processes
+  would each load and analyze it (the closed world: every translation asks any class), so they
+  were not made. What it is made of (a heap profile of the world of `jdk/forms` and the runtime,
+  7,946 classes, `ARBACE_MEMPROFILE` with `J2G_MEM_EXIT=load`; 2.2 GB of objects sampled in use):
+  - the vectors built through transients (`mapv`, `vec`, `into`), each keeping the transient's copy
+    of the empty root, 32 slots (512 bytes in Go's interface words) and its node: 0.44 GB, a fifth.
+    The runtime keeps `EMPTY_NODE` since (doc/VENDOR-NOTES.md, hand change 36): in j2g's runs on an
+    executable built from that runtime (the gate's, whose `j2g` javac's tool and the programs' builds
+    run on; stage 0 after the next re-seed);
+  - the Java forms as read (the reader's lists, symbols, their position maps): about 0.5 GB, a
+    fifth, still in use after the analysis. Dropping the members' forms once analyzed (the
+    methods' and fields' `:member` bare, the class's `:members` bare after `analyze-class!`) freed
+    none of them (the same objects in use, measured): they are held elsewhere, and were left;
+  - the analysis's maps and the strings (UTF-16 in jrt) for the rest.
+  The heap in use after a collection was 1.6 to 2 times the objects sampled, by when the collector
+  last ran (the spans the world's objects share with the garbage of their analysis).
+
 **jrt's own Java and the JDK's variants** (amendment K1, accepted 2026-10-09). The JDK input is
 `bin/jrt-convert`'s output (committed as `jdk/forms` since standalone S1, 2026-10-12; `--jdk`'s
 default, or `JRT_CONV`): the closure's jdk26u files, the jdk26u files added to it (the

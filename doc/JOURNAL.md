@@ -14568,3 +14568,26 @@ Records:
 - independence.edn's :haskell :judge {:self 7757 :recorded 1} (7,758): judge 0.99607 -> 0.99994.
 - `bin/crops-score --record`: Haskell's independence 79.92 -> 79.999 (floor 79; eval and AOT at 0.5 hold it).
 - `--judge --strict` and `bin/records-check`: 0 problems.
+
+## 2026-11-20: j2g in bounded memory (j2g-chunks-1120's streaming, javac's tool's rebuild slimmer)
+
+The user (2026-11-20): "important: seriously work on making the javac tool rebuild reasonably slim asap". javac's tool's
+j2g reached 40.8 GB that day under an inherited `GOMEMLIMIT=40GiB`; the gate's whole-program j2g runs have the same shape.
+Measured from `next` 939037429 (worktree `.tmp/worktrees/j2g-chunks`, javac's world as the first tool build's j2g sees it,
+41,352 classes analyzed, 41,230 translated, 5,589 files): the heap in use after a forced collection 18.44 GiB after the
+load, 21.07 after the classes' translation, 23.88 after the texts; the whole run 14 min 40 s, 26.7 GiB resident at 20 GiB.
+The analyzed world is needed whole before any class is translated (the closed world), so batches in separate processes
+were not made (each would reload it). Made (j2g-chunks-1120): 9fabed2e8 the streamed run (`--program` runs of 10,000
+classes or more: windows of `J2G_WINDOW` 2,048 classes merged in class order, each file written as soon as its classes
+are merged and its forms dropped; `J2G_STREAM=0` the old path), `bin/j2g`'s memory policy (`J2G_GOMEMLIMIT`, else 20 GiB;
+an inherited `GOMEMLIMIT` only when lower) and the phase probes (`J2G_MEM`, `J2G_MEM_EXIT`); ade865e69 the reach's state
+released after the reach; c87b0e064 J2G-SPEC §4.1. Proof: one streamed run of javac's world (code at ade865e69, 16 GiB
+limit, 33 min 55 s, 21.7 GB peak resident, the collector near constant: the world is 16.73 GiB in use) against the whole
+run: `gen/` identical (`diff -r`), `prog/` identical but the two embedded resources of j2g's own changed sources
+(`res/arbace/j2g/{main,checks}.ae.z`), `report.edn` equal but its `:times`. At the translation's end the heap was 17.51 GiB
+against 21.07 for the whole run. Decided (the main session): 20 GiB stays the limit, javac's tool included (16 GiB is too
+low for its world); 282cdf320 (the runtime's small vectors sharing the empty root, about a fifth of the world's objects)
+held until a gate can test the runtime; the two-pass analysis of the compiled namespaces (the route to 12-16 GiB) deferred,
+j2g being no longer the build's largest stage (build-chunks-1120's measure: the host compile 29.9 GiB, the jrt and lang
+compiles 24 GiB each). Alternatives: batches in processes (each reloads the world), dropping members' forms after the
+analysis (freed nothing, reverted), a lower global limit (diffcheck's 66k-class world would collect constantly).

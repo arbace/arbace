@@ -16,7 +16,15 @@
 # analysis (arbace.classes.*) is the executable's own. GOGC is
 # 400 unless set (j2g allocates much and keeps little of it), GOMEMLIMIT 20GiB (12GiB until S6's
 # compiled namespaces; the JVM's heap
-# was 12 GB).
+# was 12 GB): J2G_GOMEMLIMIT, else 20GiB, an inherited GOMEMLIMIT only when lower, capped by the gate's
+# admission (bin/gate-policy mem). An inherited one no longer raises it (2026-11-20, J2G-SPEC §4.1, "The run
+# in bounded memory": javac's tool's j2g under a build's GOMEMLIMIT=40GiB grew to 40.8 GB, its live data
+# 18.4 GiB, GOGC 400 letting the heap reach the limit).
+# J2G_STREAM, J2G_WINDOW: the run in bounded memory (J2G-SPEC §4.1): a --program run of 10,000 classes or
+# more (J2G_STREAM unset; 1 any run, 0 none, the whole run as before) translates its classes J2G_WINDOW at a
+# time (2048) and writes each file once its classes are merged, its forms dropped: the same output.
+# J2G_MEM=1 prints the heap after a collection at each phase (j2g: mem ...); J2G_MEM_EXIT=PHASE ends the
+# run there (with ARBACE_MEMPROFILE=FILE, the heap profile of that point).
 # --analyze-only (JCS265 (b), J2G-SPEC §4.1, "The analysis alone"): the world loaded and analyzed,
 # OUT/report.edn its failures, nothing translated; GOMEMLIMIT 1800MiB unless set (jdk/forms with a
 # batch of 30 tests stays within the day's 2 GiB a process).
@@ -59,11 +67,23 @@ if [ -n "${J2G_LOCK:-}" ]; then exec 8> "$J2G_LOCK"; flock 8; fi
 memlimit=20GiB
 # --analyze-only is light: no heavy lock around it either
 for a in "$@"; do [ "$a" = --analyze-only ] && { memlimit=1800MiB; export ARBACE_HEAVY_HELD=${ARBACE_HEAVY_HELD:-1}; }; done
+# a Go memory size (40GiB, 1800MiB, bytes) in MiB, or -1
+mib() { awk -v d="$1" 'BEGIN { v = d; u = d; sub(/[A-Za-z]+$/, "", v); sub(/^[0-9.]+/, "", u)
+  print (u == "GiB") ? v * 1024 : (u == "MiB") ? v : (u == "KiB") ? v / 1024 : (u == "" || u == "B") ? v / 1048576 : -1 }'; }
+if [ -n "${J2G_GOMEMLIMIT:-}" ]; then
+  memlimit=$J2G_GOMEMLIMIT
+else
+  memlimit=$("$root/bin/gate-policy" mem "$memlimit")
+  # an inherited GOMEMLIMIT (a build's, for its other tools) only when lower than j2g's own
+  if [ -n "${GOMEMLIMIT:-}" ] && awk -v a="$(mib "$GOMEMLIMIT")" -v b="$(mib "$memlimit")" 'BEGIN { exit !(a >= 0 && a < b) }'; then
+    memlimit=$GOMEMLIMIT
+  fi
+fi
 init=()
 for n in ${J2G_SOURCES:-}; do
   f=$root/$(echo "$n" | tr .- /_).ae
   [ -f "$f" ] || { echo "bin/j2g: no $f for $n (J2G_SOURCES)" >&2; exit 1; }
   init+=(-e "(do (load-file \"$f\") (dosync (commute @#'arbace.core/*loaded-libs* conj '$n)) nil)")
 done
-ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} GOGC=${GOGC:-400} GOMEMLIMIT=${GOMEMLIMIT:-$memlimit} \
+ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} GOGC=${GOGC:-400} GOMEMLIMIT=$memlimit \
   heavy_exec "$host/arbace" ${init[@]+"${init[@]}"} -m arbace.j2g.main "$@"
