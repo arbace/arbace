@@ -3055,3 +3055,13 @@ their own verdict, 252 opt's (exactly the pack's modules, out of the judge's cas
 13 cases from recorded to own, the facts corrected (4,954 own, 491 recorded: the probes 478, verify-llvmtest's 10, AOT's 3 kept rows),
 the stage 0.954 to 0.955, independence 0.9908 to 0.9910. `test/gate/steps.edn`: llvm-essential's inputs gain
 `test/cpp/selfref-golden.edn` (llvmi's judge reads it now: the audit's rule).
+
+### Proposed (llvm-judge-1120, after D1120-2 (a))
+
+- **D1120-3 The 62 sections' rules** (completeness 0.9894: ten of them bring it back to 0.990, all 62 to about 0.9988).
+  - (a) *Recommended.* Port them into repr/llvm's reader and `verify.ae` by group, the largest first (llvm.convert.to/from.arbitrary.fp
+    8, the ptrauth global_ctors autoupgrade 7, blockaddress across address spaces 7, target extension types' properties 7, AMDGPU's
+    work-group-size attributes 6, symbolic address spaces 6, value-profile 5, then the small ones), each group a commit with its
+    sections passing and `:llvmtest-section-rules` shrinking. `arbace/repr/llvm` is embedded since W2, so each change moves `gate_key`
+    (the night's builds run again): batch them in one or two nights.
+  - (b) Leave them deferred: the read cell holds them as found gaps.

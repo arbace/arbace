@@ -13746,3 +13746,35 @@ judged by their parent's `not` lines, recommended). The floor 99 needs 10 more c
 D1120-2 alone. Alternatives not taken: copying lli's or opt's output into a golden file (never: each outcome is read from the module);
 a run of the heavy AOT modules here (a run to move a score, the night's by hand); deriving the DirectX tests' verdict from the tools'
 order alone (my first reading, `valid`, was wrong: the message is the verifier's, before the pass).
+
+## 2026-11-20: llvm-judge-1120 continued: D1120-2 (a), D1120-1 (a), C++'s golden files in llvmi, the 13 mutants measured
+
+The main session took D1120-1 (a) and D1120-2 (a) on their precedents and asked, in order: both decisions with controls, the heavy AOT
+rows by hand under the lock, the 13 mutants' rules and one remake; then C++'s golden files for llvmi (mac/c-cpp-golden-1120 3dbf9f3a6).
+- D1120-2 (a) (`aefd41de6`): `section_verdict` (bin/repr-llvm) gives `invalid` to a section every command naming which is a plain `not
+  llvm-as` or `not opt` (verify only) reading it as its input, the fragment from that line's FileCheck prefix in its check file; a read
+  with --disable-verify claims nothing (no valid, a rejection stands); the 60 earlier sections' verdicts unchanged. `bin/llvm-corpus
+  split-tests` (scan runs it) splits test/llvm/llvm-test-split-reject.list's 30 parents by the pin's split-file with their own options
+  into the main checkout's .tmp/llvm/split; the list's 203 sections are those with an own verdict (182 invalid, 21 valid) of the 32
+  whole split-file tests, which leave the judge's cases (their rows kept, LLS57 (b)'s way). verify-llvmtest: 1,009 modules, 967 own,
+  42 opt's; 141 of the 203 pass, 62 are rules repr/llvm lacks (class :llvmtest-section-rules, deferred: target-type properties,
+  blockaddress address spaces, AMDGPU attributes, arbitrary-fp converts, value profiles, ptrauth autoupgrade and others), hidden until
+  now behind each whole file's first error. Controls: _control/section-reject-vs-valid; controls-test.bash's fake tree (b now invalid;
+  i, j invalid with their fragments from the parent and from the section; k `not --crash`, l a pass: none): all 17 ok.
+- D1120-1 (a): test/llvm/llvmtest-reviewed.tsv, six verdicts written from the tests' RUN and CHECK lines and llvm-project 23.1.5's
+  source (DirectX x4: LLParser.cpp:377-389 rejects an undeclared intrinsic's call by Intrinsics.cpp:975-976's message while parsing,
+  before optdriver.cpp:614-616 sets -mtriple; cooperative.atomic: VerifierAMDGPU.cpp:371-380 by the intrinsic's ID; noalias_scope_decl:
+  Verifier.cpp:7586-7599 before the option's guard at 7605), read by own_verdicts where the RUN lines give none; one reason corrected
+  in review (saturate_errors' undefined attribute group is no error: LLParser.cpp:217-227); `bin/repr-llvm reviewed-check` (6 rows, 0
+  refused; three bad rows refused); the six met; _control/reviewed-vs-valid fails as it must.
+- C++'s golden files (`5f0e30f37`): c-cpp-golden-1120's 26 golden files and test/cpp/selfref-golden.edn checked out into this branch,
+  nothing else of it; llvmi's 14 C++ modules were own already (LLS49 (c)), so no case moves; the two reviews agree but runtime/hello's
+  stderr, which only C++'s records; arbace.llvm.check reads the golden files (a file a verdict only with its review: checked) and
+  selfref-derived.edn keeps the two IR entries; derived-check 16 of 16, 36 controls fail; llvm-essential's inputs gain the review file.
+- The 13 mutants (`85ec7ad08`): queue 407 (2026-11-19, 61c565059) had ported their rules and made the mutants again, independence.edn
+  not updated; measured: verify-rt 905 (653 own, 252 opt's: the pack's modules) and verify-rt-heldout 1,101 own; no port or remake left.
+- Scores: the judge's cases 4,732 own and 542 recorded to 4,954 and 491 of 5,445 (the probes 478, verify-llvmtest's 10, AOT's 3 kept
+  rows), the stage 0.949 to 0.955, LLVM's independence 0.9898 to 0.9910 (floor 98 to 99); completeness 0.9933 to 0.9894 (floor 99 to 98:
+  the 62 deferred sections). crops-score --judge --strict, records-check, bin/reap: 0 problems.
+Alternatives not taken: adding only the sections that pass (a selection, not the tests); porting the 62 sections' rules here (verify.ae
+and the reader are embedded since W2, so in gate_key: proposed apart, D1120-3).
