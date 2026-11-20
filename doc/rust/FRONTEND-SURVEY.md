@@ -5440,3 +5440,21 @@ rustc's -O0 CFG a block shorter), 5 refused for a fn-local type's symbol (`BufWr
 `SpecNewImpl`), 4 for a fn-local ADT's layout (`StringError` twice, `PanicGuard`, `BufGuard`'s Drop), 1 a constant unevaluated. The
 fn-local items (an item inside a function body) need the interface pass to collect them and v0 to print their parent function in
 the value namespace (`Nv`, the `PanicGuard` symbol's `Nt` above): the next cause, then core's 275 items (C6-4 (a)).
+
+### core's 275 items, first measure (C6-4 (a)'s next part)
+
+`bin/rust-front lib-unit keys core` (275 keys), `lib-unit export core` (new: core-check's module run at those keys, `CORE_EXPORT_KEYS`,
+over the 49 module files that own them, without debug assertions; 28 min, 2.8 GB: 272 bodies built, 245 exported), `build core`
+(2 min 22 s, 2.2 GB: 202 runtime bodies), `compare core` (1 min 41 s, 1.2 GB; core's 16 units, 5 MB of IR):
+
+| | items |
+|---|---|
+| **equal to std's IR, define for define** | **95 of 275** |
+| differ | 79 |
+| refused | 100 (30 not exported, 14 at the instance, 13 a crate-private impl's or ADT's v0 path, 13 a callee, 13 a layout, 10 a constant unevaluated, 2 a static, 5 others) |
+| our symbol absent from std's IR | 1 |
+| the crossed control | differs, as it must |
+
+The largest refusals are alloc's causes not yet carried to core's export: core-check's `export-entry` carries `:nested-attrs` but not
+alloc-check's crate-private `:fns`, `:impls`, `:traits` and `:adts` (a `<impl {}>` path, v0 of the type `[:err]`, a missing layout);
+then the named constants core's export leaves unevaluated (`U128_MAX_DEC_N`, `char::MAX_LEN_UTF8`) and the static `POW10`.

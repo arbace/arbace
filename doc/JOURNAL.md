@@ -13811,3 +13811,10 @@ record. runtime-body now writes `(glue {:symbol drop_glue::<T>})` from a facts f
 (alloc: 16 -> 18 equal, `_from_vec_unchecked` and `format_inner` with their invokes and landing pads), the programs' run only with
 `RF_DROP_GLUE=1` (unwind.rs stays own and drops its guard, but its native-std run faults at the second catch_unwind: the ci leg must
 judge before it is the default).
+
+## 2026-11-20: rust-c6-1120: core's 275 items, first measure: 95 equal to std's IR
+
+bin/rust-front lib-unit export core (core-check at the items' keys over their 49 module files, 28 min, 2.8 GB: 245 exported),
+build (202 runtime bodies) and compare: 95 of 275 equal, 79 differ, 100 refused, 1 symbol absent, the control differing. The
+refusals lead with what alloc-check's export carries and core-check's does not (crate-private functions, impls, traits and ADTs),
+then named constants and a static.
