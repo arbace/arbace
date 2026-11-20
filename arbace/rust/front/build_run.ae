@@ -1353,6 +1353,33 @@
 
 ;; RFP23 (c): the run's facts from arbace.rust.front.mono (no record but core's bodies and, per fact, what mono refuses)
 
+(defn- record-closure-forms
+  "queue 464: the record's closure type forms by their text, {TEXT #{STRUCT}} (`(closure DEF-PATH [PARENT-ARGS.. KIND SIG
+  UPVARS])`, rustc's ClosureArgs)"
+  [rec-bodies]
+  (let [acc (java.util.HashMap.)]
+    (doseq [b rec-bodies]
+      (walk (fn [x]
+              (when (and (seq? x) (= 'ty (first x)) (string? (second x)) (seq? (nth x 2 nil)) (= 'closure (first (nth x 2))))
+                (.put acc (second x) (conj (or (.get acc (second x)) #{}) (nth x 2))))
+              x)
+            (dissoc b :alloc-data)))
+    (into {} acc)))
+
+(defn- closure-form-fn
+  "queue 464 (462-3 (a)): build/*closure-form* for a run: a closure type T a native library instance names (the program's
+  closure as a generic argument, form->ty's `[:closure TEXT {} PARENT-ARGS?]`) written as the record writes that type, the
+  one form of its text, else the one whose parent arguments are T's; nil when the record has none (the body refused)"
+  [rec-bodies]
+  (let [m (record-closure-forms rec-bodies)]
+    (fn [t]
+      (let [s (get m (second t))]
+        (cond (= 1 (count s)) (first s)
+              (seq s) (let [want (nth t 3 nil)]
+                        (when (vector? want)
+                          (first (filter (fn [st] (= want (nth (try (mono/form->ty (list 'ty (second t) st)) (catch Throwable _ nil)) 3 nil))) s))))
+              :else nil)))))
+
 (defn native-run
   "The run's module from Arbace's own facts: the mono items, symbols, callees and caller locations, the function constants',
   statics' and lang items' symbols, the layouts; a fact mono refuses taken from the record (counted); core's bodies the
@@ -1426,6 +1453,7 @@
                                         (.add acc [(second st) (nth st 2) d sym]))))
                                   (vec acc)))
                     facts (mono/program-facts n bodies std-calls std-fn-syms rec-targets)
+                    closure-form (closure-form-fn rec-bodies)
                     _ (mem-mark (str n " facts"))
                     _ (when (seq rec-targets)
                         (swap! lines conj (str "rec-items: " (count (:rec-items facts)) " instances collected through the record's library bodies, of "
@@ -1434,7 +1462,12 @@
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))
                                          *normalize-ty* (fn [t] (mono/normalize-ty n t))
-                                         *resolve-call* (fn [d args] (mono/resolve-call n d args))]
+                                         *resolve-call* (fn [d args] (mono/resolve-call n d args))
+                                         ;; queue 464: the program's closures as the instances' arguments, written and laid out
+                                         build/*closure-form* closure-form
+                                         mono/*closure-upvars* (merge mono/*closure-upvars* (:closure-upvars facts))
+                                         mono/*closure-kinds* (atom (merge (some-> mono/*closure-kinds* deref) (:closure-kinds facts)))
+                                         build/*closure-tys* (merge build/*closure-tys* (:closure-upvars facts))]
                                 ;; queue 448, 433-1 (a): the collector's items, then the instances mono collected through the record's
                                 ;; library bodies (:rec-items), each record body a root once
                                 (native-core-plan (let [rec-by-sym (into {} (for [r rec-bodies] [(:symbol r) r])) seen (java.util.HashSet.)]
@@ -1472,7 +1505,10 @@
                                        :when dfn]
                                    {:rec rec :def "core::ptr::drop_glue" :args [t] :body (drop-shim-body t dfn) :shim true}))
                     core-f (when (or (seq core-insts) (seq glue-shims))
-                             (mono/core-facts n (for [i (concat core-insts glue-shims)] {:def (:def i) :args (:args i) :name (str "native " (:def i) (pr-str (:args i))) :body (:body i)})))
+                             (binding [mono/*closure-upvars* (merge mono/*closure-upvars* (:closure-upvars facts))
+                                       mono/*closure-kinds* (atom (merge (some-> mono/*closure-kinds* deref) (:closure-kinds facts)))
+                                       build/*closure-tys* (merge build/*closure-tys* (:closure-upvars facts))]
+                             (mono/core-facts n (for [i (concat core-insts glue-shims)] {:def (:def i) :args (:args i) :name (str "native " (:def i) (pr-str (:args i))) :body (:body i)}))))
                     core-items (for [i core-insts :let [h (get (:items core-f) (str "native " (:def i) (pr-str (:args i))))] :when (and (map? h) (not (mono/error? h)))]
                                  [h i])
                     native-syms (into (set (map (comp :symbol first) core-items)) (map (comp :symbol :rec) glue-shims))
