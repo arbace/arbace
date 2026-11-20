@@ -13457,3 +13457,32 @@ On branch n-rust-400 (from mac/400-rust-vendor), with the host stage 0: `bin/rus
 The 82 cases were judged by those two record runs (no separate `check --only`). Then `bin/reap --record` and `bin/crops-score --record`:
 C++ completeness 96, without by design 97, maturity 100, independence 91 (from 75); `--judge --strict` and `bin/records-check` pass.
 Four recorded failures of the sampling now pass (vbase8-10, embed-26, vector1, vshuf-v16hi): their classes are to be cleared.
+
+## 2026-11-19: n-rust-dyn: S4's trait objects and projections at the instance (448-4 (a) items 2 and 4)
+
+On 448's tip (mac/448-rust-mono ce1b754ed), split from the Mac VM's items 1 and (b) (num/mod.rs's export, drop glue's shims,
+core_simd, fmt::Arguments::new's path text): the native library bodies' instances can now write trait objects and normalize
+library projections. doc/rust/FRONTEND-SURVEY.md, "As built: S4's trait objects and projections at the instance".
+
+- `arbace/rust/front/build.ae`'s ty-form writes `[:dyn ..]` as the helper does, `(dyn)` with the text, not `(other ":dyn")`;
+  mono's form->ty reads it by its :tc.
+- `arbace/rust/front/build_run.ae`: reprint's types through `instance-normalize` (the builtin projections, then the run's
+  solver, `*normalize-ty*` = `mono/normalize-ty`); native-core-plan's closure follows a trait method's call to the impl's method
+  (`*resolve-call*` = `mono/resolve-call`, resolve-instance); runtime-body's fix-cast gives a native unsizing cast mono does not
+  name the record's vtable of the same target type (its allocations copied; never from a trait object); pack-compare's
+  rec-extras drops a cast's `:vtable`.
+- The resolve-call step was not in the brief: with the projections normalized, the same bodies stopped at "no native body of
+  core::slice::index::SliceIndex::get_unchecked" (intrinsics 303 -> 303 without it, 314 with it).
+
+Run (main host, both at the same exports and core-attrs file; before at ce1b754ed reproduces 448's numbers): `RF11_BATCH=1
+RF11_KEEP=1 bin/rust-front rsi-build --native-core intrinsics panics std unwind vectors`, 5 of 5 own in both, 0 stub calls,
+every control differing. Library bodies built natively 303/175/976/154/639 = 2,247 -> 314/202/1,113/179/698 = 2,506; codegen's
+fallbacks 53 -> 62. `(other ":dyn")` refusals 141 lines -> 0, `(other ":proj")` 142 -> 1 (`<&mut F as FnOnce<A>>::call_once`,
+a closure's Output). core's core-check-equal roots equal-o0 1,018 -> 1,069. `bin/rust-front pack-compare-test`: 28 of 28 (4 new).
+Exports remade here: core-export --rsi-outside (231 bodies, 10 min), lib-export --rsi alloc (290, 15 min) and std (53, 40 min);
+core's native-core-rsi.edn and core-attrs.edn reused from n-rust-433's run (core-attrs' key written for this checkout: the files it
+hashes that changed since 433, core_check.ae and mono.ae, do not touch the attributes pass). Not run: rust-front essential,
+core-essential, rind-test (ty-form's `(dyn)` reaches our own programs' bodies too), the gate.
+
+Coordination with the VM's item 1: native-core-plan's closure (`close`, build_run.ae) is touched here (the callees' `more`
+list), next to 448's drop-glue refusal in the same function; the drop glue itself and the export are not.

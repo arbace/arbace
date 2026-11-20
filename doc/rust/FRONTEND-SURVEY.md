@@ -4978,3 +4978,154 @@ The six named natives:
 - **fmt::Arguments::new**: built, but differs from the record at its aggregate's text, `fmt::Arguments::<'_>` against
   `std::fmt::Arguments::<'_>` (the export prints core's paths relative to core).
 - **Iterator::collect**: refused at the export (a closure type).
+
+## As built: aggregates' paths at the instance, drop glue no root, num and core_simd exported (2026-11-19, queue 448b, branch `448b-rust-fmt`)
+
+448-4 (b), then 448-4's item 1, on 448's tip (ce1b754ed).
+
+- **An aggregate's ADT text and path at the instance** (build-run's `reprint-agg-adt`). The export prints an aggregate's
+  `(adt TEXT KIND FIELDS PATH VARIANT ARGS)` in its own crate: core's own ADTs relative to core (`fmt::Arguments::<'_>`,
+  `option::Option::<usize>::Some`), another crate's by its visible path there (alloc's `core::option::Option`). The record
+  prints them in the program's crate (`std::fmt::Arguments::<'_>`, `core::fmt::rt::Argument::<'_>`). At the instance the path is
+  resolved to its def (the export crate's own first, then as written, by std's names or the interface's ADTs, then through std's
+  modules; `*export-crate*` from the entry's def), and TEXT is printed again as the variant's value path at the instance's
+  arguments (regions erased) and PATH as the ADT's. A path the interface does not know is left as written.
+- **Drop glue is no native-core-plan root.** The collector's drop glue shims and those mono collects through the record's bodies
+  (448's `:rec-items` whose def is drop_glue) were roots with no native body (33 in std.rs). They go to `glue-shims` instead (the
+  record's shim by its symbol), built natively when the glue is the type's Drop::drop alone; a shim that fails at run time keeps
+  the record's.
+- **`core-export --rsi-outside` takes a vendored module's file** (portable-simd's core_simd, outside core/src) at its absolute
+  path. num/mod.rs: 99 keys, 97 exported (about 6 minutes). core_simd: 43 keys, 40 exported. core_arch (sse2) stops at expansion
+  ("no macro static_assert_uimm_bits"). The three exports (448's 42 files, num/mod.rs, core_simd and core_arch) were put in one
+  `native-core-rsi-outside.edn`, 368 bodies.
+
+### Results (run)
+
+`RF11_BATCH=1 bin/rust-front rsi-build --native-core intrinsics panics std unwind vectors` (one run at e6f717317, 0 stub calls):
+5 of 5 own. Before is 448's run (603b387b6).
+
+| sample | library bodies built natively | core roots native / from the pack | roots with no native body | core judged at the instance: equal-o0 / differs |
+|---|---|---|---|---|
+| intrinsics | 303 → 359 | 287 / 516 → 342 / 403 | 105 → 44 | 14 / 35 → 69 / 37 |
+| panics | 175 → 194 | 158 / 399 → 172 / 353 | 49 → 23 | 8 / 16 → 22 / 14 |
+| std | 976 → 1,046 | 914 / 2,187 → 975 / 2,026 | 332 → 242 | 57 / 71 → 114 / 66 |
+| unwind | 154 → 175 | 134 / 357 → 152 / 308 | 47 → 23 | 7 / 21 → 25 / 16 |
+| vectors | 639 → 724 | 603 / 1,511 → 684 / 1,336 | 282 → 162 | 42 / 38 → 113 / 48 |
+
+- fmt::Arguments::new: its 38 roots in the five programs differed at the aggregate's text; all 38 are now equal-o0 and native.
+- core::num's methods built natively: 47, 9, 39, 9 and 27. core_simd's: 128 in vectors (11 roots still lack a body:
+  SimdPartialEq::simd_eq, Mask::resize).
+- Drop glue: no root lacks a body any more. Only unwind's shim is simple enough to build natively; the rest stay the record's
+  shims.
+- Every `control` and `control-instance` differs, in all five programs. A scratch probe of `reprint` in swizzle1's interface
+  printed core's, alloc's and the hidden `fmt::rt` paths as the record does, and its negative control (an unknown path) was left
+  as written.
+
+## As built: S4's trait objects and projections at the instance (2026-11-19, branch `n-rust-dyn`)
+
+448-4 (a)'s items 2 and 4, on 448's tip (ce1b754ed), split from the Mac VM's items 1 and (b): the instance's forms write a trait
+object, a library projection is normalized at the instance, and a trait method's call in a native body is followed to the impl's
+method.
+
+- **Trait objects** (`build/ty-form`): `[:dyn ...]` is written `(ty "dyn std::fmt::Debug" (dyn))`, the helper's form (its
+  principal, projections and auto traits in the text alone), no longer `(other ":dyn")`, which native-core-plan refused. mono's
+  `form->ty` reads a native `(dyn)` by its `:tc`. An unsizing cast in a native body that mono's vtable facts do not name takes
+  the record's cast of the same target type in the record's body of its symbol, with its vtable's allocations
+  (`runtime-body`'s `fix-cast`; never from a trait object: a coercion between trait objects keeps its metadata, codegen's).
+  pack-compare does not compare a cast's `:vtable` (`rec-extras`).
+- **Projections** (`reprint`'s `instance-normalize`): after the builtin ones (`Pointee::Metadata`), a projection left in an
+  instance's type is normalized by the run's solver (`mono/normalize-ty`: typeck's deep-normalize over std's interface, as
+  `instantiate_mir_and_normalize_erasing_regions` normalizes), bound in the run as `*normalize-ty*`; one it leaves stays
+  `(other ":proj")` and is refused.
+- **Trait-method callees** (native-core-plan's closure): a native body's call of a trait method, concrete at the instance
+  (`<[T] as SliceIndex<..>>::get_unchecked`), is followed to the impl's method (`mono/resolve-call`, the collector's
+  `resolve-instance`; `*resolve-call*`), so the closure reaches its native body; before, "no native body of
+  core::slice::index::SliceIndex::get_unchecked" stopped the root once its projection was normalized.
+- `bin/rust-front pack-compare-test`: 28 cases, 4 new (a cast's record `:vtable` not compared; a library projection normalized by
+  the run's solver; negatives: a cast to another trait object, the projection left without the solver).
+
+### Results (run)
+
+Both runs on the main host, the same exports (core's `native-core-rsi.edn` of 433's run, `--rsi-outside` over 448's 42 files: 231
+bodies, `lib-export --rsi alloc`: 290, `std`: 53) and the same core-attrs file: before at ce1b754ed (448's numbers reproduced
+exactly), after at this branch. `RF11_BATCH=1 RF11_KEEP=1 bin/rust-front rsi-build --native-core intrinsics panics std unwind
+vectors`: 5 of 5 own in both, 0 stub calls, every `control` and `control-instance` differing.
+
+| sample | library bodies built natively, before | after | codegen's fallbacks, before / after | `native` lines, before / after |
+|---|---|---|---|---|
+| intrinsics | 303 | 314 | 9 / 12 | 607 / 626 |
+| panics | 175 | 202 | 0 / 4 | 347 / 398 |
+| std | 976 | 1,113 | 22 / 23 | 1,960 / 2,227 |
+| unwind | 154 | 179 | 0 / 1 | 303 / 349 |
+| vectors | 639 | 698 | 22 / 22 | 1,283 / 1,395 |
+| **total** | **2,247** | **2,506** | 53 / 62 | |
+
+core's core-check-equal roots by pack-compare kind, before -> after (equal-o0; equal; equal-but-storage): intrinsics 156 -> 156,
+13, 10; panics 78 -> 83, 8, 8; std 430 -> 468, 48 -> 49, 34 -> 38; unwind 68 -> 74, 7, 5; vectors 286 -> 288, 38, 20. The roots
+that differ grow too (std 320 -> 377): bodies that stopped at the type before now reach the compare.
+
+Refusals left (`a type its forms do not write`, lines of the build-run logs, before -> after): `(other ":dyn")` 0/38/74/26/3 ->
+0 in every sample; `(other ":proj")` 12/2/73/2/53 -> 0/0/1/0/0, the one `<&mut F as FnOnce<A>>::call_once` in std.rs (a
+closure's FnOnce::Output: item 7's closure types). Now in view: `(other ":closure")` (panics 51, unwind 41, std 18, vectors 6),
+whose bodies stopped at the trait object before. codegen's new fallbacks: three unsizing casts with no vtable (a core-check-equal
+root taken while its instance differs from the record, so the record's body has no cast of that target: Option::fmt, Result::
+unwrap at Box<dyn Any + Send>) and `<dyn Any as Any>::type_id`'s call of `TypeId::of::<dyn Any>`, which no body defines; each
+falls back to the record's body.
+
+## As built: crate-private paths, constants and the niche types at the instance (2026-11-19, queue 462, branch `462-rust-items`)
+
+448-4 (a)'s items 3 and 5, on 448b's tip merged with `n-rust-dyn` (4f02371da). Item 7 (closure types in the export) is not done:
+see the report's DECISION 462-3.
+
+- **alloc's crate-private impls and traits** (`alloc-check --export`, build-run's `with-extra-iface`). An exported alloc body
+  names functions of impls and traits std's interface lacks (`alloc::raw_vec::{impl#2}::ptr`, RawVec's inherent impl;
+  `alloc::string::SpecToString::spec_to_string`). The run printed their constants `alloc::raw_vec::<impl {}>::ptr`, where the
+  record has `alloc::raw_vec::RawVec::<u8>::ptr`. Each entry now carries the native interface's `:impls` and `:traits` of the
+  parents of the functions its body and promoted bodies name, beside 443's `:fns`. The run adds them to its interface where it
+  has none, and gives the traits the kind `Trait` and their functions `AssocFn` in std's names, so print-def-path takes the
+  qualified path (`<i32 as std::string::SpecToString>::spec_to_string`).
+- **No debug assertions where the record has none.** rsi's std build is `test/rust/runtime/std.edn`'s profile,
+  `DEBUG_ASSERTIONS false`: the record's alloc and core instances have no `debug_assert!` blocks (VecDeque's `wrap_index`: 4
+  blocks against our 12). core-check keeps core's cfg (rust-core-built's flags) by default; `*debug-assertions*` false drops
+  `debug_assertions` and `ub_checks` from the cfg for `alloc-check --export` (alloc's and std's rsi exports) and for
+  `core-export --rsi-outside` (CORE_EXPORT_KEYS: no oracle, judged at the instance). Their interface caches are kept apart
+  (`native-iface-nodebug.edn`).
+- **Local constants evaluated at the instance** (DECISION 448-3 (a)). core-check's `export-entry` adds `:consts`: the bodies of
+  the crate's constants a body names by its local def id (three levels), built by construct_const and exported. build-run's
+  `eval-local-const` reprints such a body at no arguments and evaluates it with `eval-promoted` (a constant's own body; size_of
+  and align_of by mono's layout; the constants it names in turn), and `sized-const-eval` writes the value. CONT_MASK,
+  USIZE_SIZE, USIZE_BYTES, an integer's MAX, NonZero's BITS and the sort thresholds are now evaluated. A constant whose body
+  calls a function (alloc's `ZERO_CAP = unsafe { Cap::new_unchecked(0) }`) stays unevaluated and its body refused, as before.
+- **The niche types' range pattern types** (mono's `pattern-field`, `:pat-range`). std's interface writes
+  `UsizeNoHighBit(usize is 0..=core::::num::niche_types::UsizeNoHighBit::0::{constant#1})`. mono had no layout for it, so the
+  layout of `String`, `Vec` and `RawVec` failed, and with it `size_of::<String>()`, SizedTypeProperties' constants at String
+  and their bodies (`core::mem::size_of`, `align_of`). An integer's range pattern type is now laid out as the integer's scalar
+  with the pattern's valid range and its niche there. A literal end is read as written. The three anonymous ends std writes come
+  from a table read from `library/core/src/num/niche_types.rs` (DECISION 462-2).
+
+### Results (run)
+
+The exports were made afresh at this branch: `lib-export --rsi alloc` (290 bodies, about 25 minutes) and one `core-export
+--rsi-outside` over 448b-1's combined regex (415 keys in 56 files, 368 bodies, about 37 minutes). core's `native-core-rsi.edn`
+(443's run 2) and std's export are unchanged.
+
+`RF11_BATCH=1 bin/rust-front rsi-build --native-core vectors` (one program, by the coordinator's direction): own, 0 stub calls,
+`control` and `control-instance` differing. Before is the five-program run at the merge, 4f02371da, with 448b's exports.
+
+| vectors | before (4f02371da) | after |
+|---|---|---|
+| library bodies built natively | 787 | 843 |
+| alloc roots: differs / equal-o0 / equal-but-storage | 50 / 49 / 2 | 38 / 65 / 33 |
+| alloc differs at a function constant's text | 24 | 2 |
+| pack-compare lines with `<impl {}>` | 39 | 4 |
+| refused at plan time for an unevaluated constant | 32 | 3 |
+| core roots native / from the pack | 727 / 1,235 | 735 / 1,172 |
+| alloc roots native / from the pack | 51 / 58 | 98 / 51 |
+
+- The before run (all five programs, 5 of 5 own, every control differing) gives the merge's numbers for the main host's
+  comparison: library bodies built natively 370, 221, 1,190, 200 and 787; alloc roots differing 12, 25, 141, 21 and 50; refused
+  for an unevaluated constant 5, 1, 44, 2 and 32.
+- vectors' refusals left: `RawVecInner::new_in` and `{impl#4}::new_in` (ZERO_CAP, a call) and std's `<() as
+  Termination>::report` (std's export, not re-made).
+- alloc's differences left in vectors are structural (blocks or locals: Vec::set_len 6 blocks against 4, with_capacity_in,
+  RawVec::new); the next item.

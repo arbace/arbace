@@ -302,7 +302,9 @@
 (defn -main [& argv]
   ;; round 54 (RIND9 (a), std): `--crate C` first names the crate (alloc by default; std over the linux `sys`)
   (let [[crate cmd & args] (if (= "--crate" (first argv)) (rest argv) (cons "alloc" argv))]
-  (binding [cc/*crate* crate *tag* (str crate "-iface")]
+  (binding [cc/*crate* crate *tag* (str crate "-iface")
+            ;; queue 462: --export's bodies are judged against rsi's records, whose std is built without debug assertions
+            cc/*debug-assertions* (not= "--export" cmd)]
     (case cmd
       ;; --list LIB: alloc's module files (core-check --list's lines)
       "--list" (doseq [m (cc/module-files (first args))] (println (:path m) (:file m) (if (:vendored m) "vendored" "")))
@@ -341,7 +343,7 @@
             mod-paths (map :path mods)
             by-path (into {} (for [m mods] [(:path m) m]))
             si-full (collect/load-std-iface (str front "/std-iface.edn"))
-            nf (File. (str cache "/native-iface.edn"))
+            nf (File. (str cache "/native-iface-nodebug.edn"))   ; queue 462: the pass without debug assertions
             native (if (.exists nf)
                      (read-string (slurp nf))
                      (let [n (pass crate lib setup mods mod-paths (Long/parseLong (or (System/getenv "ALLOC_IFACE_ROUNDS") "2")))]
@@ -371,12 +373,25 @@
                                              (let [e (assoc (cc/export-entry b k nil) :judge :instance)
                                                    ;; the crate's functions the body names that std's interface lacks (crate-private:
                                                    ;; `box_new_uninit`), their native facts, so that the run prints their items' types
-                                                   fs (into {} (for [x (tree-seq coll? seq (fndef-types (:body e)))
-                                                                     :when (and (vector? x) (= :fndef (first x)) (string? (second x)))
-                                                                     :let [p (second x) f (get-in native [:fns p])]
+                                                   fps (set (for [x (tree-seq coll? seq (fndef-types [(:body e) (:promoted e)]))
+                                                                  :when (and (vector? x) (= :fndef (first x)) (string? (second x)))]
+                                                              (second x)))
+                                                   fs (into {} (for [p fps :let [f (get-in native [:fns p])]
                                                                      :when (and f (not (get-in si-full [:fns p])))]
-                                                                 [p (dissoc f :native)]))]
-                                               (cond-> e (seq fs) (assoc :fns fs)))
+                                                                 [p (dissoc f :native)]))
+                                                   ;; queue 462 (448-4 (a) 3): the crate-private impls and traits whose
+                                                   ;; functions the body names (`alloc::raw_vec::{impl#2}`, RawVec's inherent
+                                                   ;; impl; the trait `alloc::string::SpecToString`), their headers, so that
+                                                   ;; the run prints the function constants as rustc does (`RawVec::<u8>::ptr`,
+                                                   ;; `<i32 as SpecToString>::spec_to_string`), not `<impl {}>::ptr`
+                                                   parents (set (keep #(let [i (.lastIndexOf ^String % "::")] (when (pos? i) (subs % 0 i))) fps))
+                                                   is (into {} (for [p parents :let [m (get-in native [:impls p])]
+                                                                     :when (and m (not (get-in si-full [:impls p])))]
+                                                                 [p (dissoc m :native)]))
+                                                   ts (into {} (for [p parents :let [m (get-in native [:traits p])]
+                                                                     :when (and m (not (get-in si-full [:traits p])))]
+                                                                 [p (dissoc m :native)]))]
+                                               (cond-> e (seq fs) (assoc :fns fs) (seq is) (assoc :impls is) (seq ts) (assoc :traits ts)))
                                              {:key k :refused (str "the build: " err (when (and detail (not= "nil" detail)) (str " " detail)))})]
                                      (swap! entries conj (assoc e :module mp :name nm))
                                      e))))

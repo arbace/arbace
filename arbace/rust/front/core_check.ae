@@ -221,10 +221,25 @@
                    :when arm]
                [(second (nth mk 1)) {:text text :b (first arm) :e (second arm)}]))))
 
+(def ^:dynamic *debug-assertions*
+  "queue 462 (448-4 (a) 3): whether the crate is built with debug assertions (core-cfg's `debug_assertions` and `ub_checks`):
+  true for core-check (rust-core-built's flags); false for the bodies judged against rsi's records, whose std build is
+  test/rust/runtime/std.edn's :profile, DEBUG_ASSERTIONS false (alloc-check --export: `debug_assert!`'s blocks absent from the
+  record's instances, wrap_index's 4 blocks against our 12)"
+  true)
+
+(declare crate-cfg*)
+
 (defn crate-cfg
   "The cfg of the crate being built: core's (core-cfg), std's with the features the distributed std is built with
   (round 54: library/sysroot's default `std/backtrace` and `std/panic-unwind`; backtrace's `cfg(feature = \"std\")` is
-  std's feature names, none of them `std`)"
+  std's feature names, none of them `std`); without debug assertions (*debug-assertions*) neither `debug_assertions` nor
+  `ub_checks` (rustc's ub_checks follows -C debug-assertions)"
+  []
+  (cond-> (crate-cfg*)
+    (not *debug-assertions*) (dissoc "debug_assertions" "ub_checks")))
+
+(defn- crate-cfg*
   []
   (case *crate*
     "std" (assoc core-cfg "feature" #{"backtrace" "panic-unwind"})
@@ -755,11 +770,14 @@
                                                 [ins out] (sig-sty (:id k) sig path-of)]
                                           :when (and (every? some? ins) out (not (get (:fns si) (str ip "::" (second (:data k))))))]
                                       [(str ip "::" (second (:data k)))
-                                       {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
+                                       (cond-> {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
                                         :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
                                         :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d)))) :promotable false
-                                        :nounwind false :native true}]))]
+                                        ;; queue 472: an associated function without a self parameter (fn_has_self_parameter
+                                        ;; false: `Box::as_mut_ptr(b: &mut Self)`), which method lookup must not take
+                                        :nounwind false :native true}
+                                       (and (contains? (:node k) :params) (not (collect/fn-self-param? (:node k)))) (assoc :self-param false))]))]
                    (if (and self (or (nil? tr) trs))
                      (-> acc
                          (assoc-in [:impls ip] {:trait trs :negative (boolean (get-in (:node d) [:of-trait :negative])) :self self :generics (generics-sty g) :parent-count 0
@@ -1028,11 +1046,44 @@
                    (recur (collect/def-of (:parent d)) acc))))]
     (str/join "::" (concat (str/split resolve/*crate-path* #"::") segs))))
 
+(def ^:dynamic *export-closures*
+  "queue 464 (462-3 (a) 1): within export-entry, the typeck root's closures by their type's text: {TEXT {:id DEF :kind K
+  :upvars [TYPE] :args IDENTITY}} (build-body's :root-closures, each closure's definition found by its HIR id)"
+  nil)
+
+(defn- root-closures-of
+  "queue 464: a built body's :root-closures with each closure's definition and its typeck root's identity arguments, for
+  *export-closures*"
+  [b]
+  (when-let [rc (not-empty (:root-closures b))]
+    (let [by-hid (into {} (for [d (collect/defs) :when (= "Closure" (:kind d))] [(:hir-id (:node d)) (:id d)]))]
+      (into {} (for [[text ci] rc :let [id (get by-hid (:hir-id ci))] :when id]
+                 [text (assoc ci :id id
+                              :args (collect/identity-args (collect/generics-of (loop [x id] (let [d (collect/def-of x)] (if (= "Closure" (:kind d)) (recur (:parent d)) x))))))])))))
+
+(declare ext-ty)
+(defn- ext-closure
+  "queue 464 (462-3 (a) 1): a closure type of the crate's own as data, `[:closure DEF-PATH [:fnsig INPUTS OUTPUT] ARGS [:upvars
+  TYPE..] KIND]`: its definition's path, its signature, its parent's arguments (the typeck root's identity, substituted at the
+  instance with the body's), its upvars' types (closure_analyze's captures) and its kind (:fn :fn-mut :fn-once), each type in
+  the crate's paths; a closure not among the root's (another body's) is not carried"
+  [t]
+  (let [[_ text sig args] t
+        ci (get *export-closures* text)]
+    (when-not (and ci (map? sig)) (throw (ex-info "a closure or opaque type" {:carry false})))
+    [:closure (def-path-string (:id ci))
+     [:fnsig (mapv ext-ty (:inputs sig)) (ext-ty (:output sig))]
+     (mapv ext-ty (or args (:args ci)))
+     (into [:upvars] (map ext-ty (:upvars ci)))
+     (:kind ci)]))
+
 (defn- ext-ty
-  "A type with each local definition its path in core; nil for a closure's or an opaque type's (not carried)"
+  "A type with each local definition its path in core; nil for a closure's or an opaque type's (not carried); queue 464: a
+  closure of the exported body's typeck root as data (ext-closure)"
   [t]
   (cond
     (not (vector? t)) t
+    (and (= :closure (first t)) *export-closures*) (ext-closure t)
     (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t))) (throw (ex-info "a closure or opaque type" {:carry false}))
     (and (keyword? (first t)) (#{:adt :fndef :proj} (first t)) (number? (second t)))
     (into [(first t) (def-path-string (second t))] (map ext-ty (drop 2 t)))
@@ -1064,8 +1115,47 @@
                         [k (if (#{:local-tys} k) (mapv ext-ty v) (externalize v))]))
     :else x))
 
+(defn- local-const-ids
+  "queue 462 (448-4 (a) 5): the crate's own constants FORMS name by their local def id, with no arguments (`(unevaluated \"14\"
+  ..)`, :nc [14 []]: core::str::validations::CONT_MASK)"
+  [forms]
+  (set (for [x (tree-seq coll? seq forms)
+             :when (and (seq? x) (= 'unevaluated (first x)))
+             :let [[d as] (:nc (meta x))]
+             :when (and (number? d) (empty? as))]
+         d)))
+
+(defn- export-consts
+  "queue 462 (448-4 (a) 5, DECISION 448-3 (a)): the bodies of the crate's constants a built body R names by a local def id,
+  each built (construct_const) and exported as a body is, with the constants they name in turn (three levels), {def-path
+  body}; the run evaluates them as CTFE does (build-run's eval-promoted on a constant's body), so that a native instance names
+  their values (CONT_MASK, count_chars' UNROLL_INNER and USIZE_SIZE, an integer's MAX) and is not refused at plan time. A
+  constant that does not build is left out (the body stays refused, as before)"
+  [r]
+  (try
+  (loop [todo (local-const-ids [r]) seen #{} acc {} depth 0]
+    (if (or (empty? todo) (> depth 2))
+      acc
+      (let [built (for [id todo
+                        :let [d (try (collect/def-of id) (catch Throwable _ nil))]
+                        :when (and d (const-kind? d))
+                        :let [b (try (build/build-const d {:overflow-checks false :edition 2024}) (catch Throwable _ nil))
+                              r (when b (try (let [st (:stages b) lp (last (filter #(contains? st %) passes/pass-names))]
+                                               (get-in st [lp (passes/body-key b)]))
+                                             (catch Throwable _ nil)))
+                              body (when (and r (not (:error r))) (try (externalize (dissoc r :stages)) (catch Throwable _ nil)))]
+                        :when body]
+                    [id (def-path-string id) body r])
+            seen (into seen todo)]
+        (recur (remove seen (local-const-ids (keep #(nth % 3) built)))
+               seen
+               (into acc (for [[_ p body] built] [p body]))
+               (inc depth)))))
+  (catch Throwable _ nil)))
+
 (defn export-entry
-  "The exported body of a built body B (its last stage after the passes, its promoted bodies)"
+  "The exported body of a built body B (its last stage after the passes, its promoted bodies); queue 462: with K, the bodies
+  of the crate's constants it names by a local def id (:consts, export-consts)"
   [b k equal?]
   (let [st (:stages b)
         last-pass (last (filter #(contains? st %) passes/pass-names))
@@ -1075,10 +1165,15 @@
         pbs (into {} (for [[kk pb] (get st last-pass) :when (and (str/starts-with? kk pre) (not (:error pb)))] [(:promoted pb) pb]))]
     (if (or (nil? r) (:error r))
       {:key k :refused (str "the passes: " (or (:error r) (str "no body after " last-pass)))}
-      (try {:key k :def (def-path-string (:id (:def b))) :equal equal? :pass last-pass
+      (try (binding [*export-closures* (root-closures-of b)]
+            (cond-> {:key k :def (def-path-string (:id (:def b))) :equal equal? :pass last-pass
             :attrs ((requiring-resolve 'arbace.rust.front.mono/local-attrs) (:id (:def b)))
-            :body (externalize (dissoc r :stages)) :promoted (into {} (for [[i pb] pbs] [i (externalize pb)]))
+            :body (externalize (dissoc r :stages :root-closures :upvar-tys)) :promoted (into {} (for [[i pb] pbs] [i (externalize (dissoc pb :root-closures :upvar-tys))]))
             :generics (count (:params (collect/generics-of (:id (:def b)))))}
+             ;; queue 464 (462-3 (a) 2): a closure's own body, with its upvars' types and kind (the run lays its type out
+             ;; from the type's data; these are the body's own, for a check)
+             (:upvar-tys b) (assoc :upvar-tys (mapv ext-ty (:upvar-tys b)))
+             k (as-> e (if-let [cs (not-empty (export-consts [r (vals pbs)]))] (assoc e :consts cs) e))))
            (catch Throwable e {:key k :refused (str (or (.getMessage e) e))})))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1105,6 +1200,9 @@
     (if (str/starts-with? body "\n") (subs body 1) body)))
 
 (defn -main [lib-dir & args]
+  ;; queue 462: core-export --rsi-outside's bodies (CORE_EXPORT_KEYS: no oracle, each judged against rsi's record at the
+  ;; instance) are built as rsi's std build builds core, without debug assertions
+  (binding [*debug-assertions* (nil? (System/getenv "CORE_EXPORT_KEYS"))]
   (binding [ex/*cfg-names* (crate-cfg)]
     (case (first args)
       ;; RF19: --attrs FRONT-DIR CACHE-DIR MODULES-FILE OUT FILE...: the interface pass over FILEs (core's index from CACHE-DIR,
@@ -1167,7 +1265,7 @@
                           (set (for [l (str/split-lines (slurp f)) :let [l (str/trim l)] :when (seq l)] l)))
             exported (atom [])
             ;; core's native interface so far (this run's modules, and the last run's: native-iface.edn)
-            native-file (File. (str cache-dir "/native-iface.edn"))
+            native-file (File. (str cache-dir (if *debug-assertions* "/native-iface.edn" "/native-iface-nodebug.edn")))
             ;; RF12-P2 (b): core's interface in one collection pass over the files (CORE_IFACE_FILES: a file listing others,
             ;; one a line, as core-modules.txt names them) before any body; CORE_IFACE=cache: the last run's native-iface.edn instead
             native-all (atom (if (and (= "cache" (System/getenv "CORE_IFACE")) (.exists native-file)) (read-string (slurp native-file)) {:fns {} :adts {}}))
@@ -1241,4 +1339,4 @@
         (spit native-file (pr-str @native-all))
         (println "core-check: native interface" (count (:fns @native-all)) "functions," (count (:adts @native-all)) "ADTs")
         (println "core-check: total" (pr-str @totals))))
-    (System/exit 0)))
+    (System/exit 0))))

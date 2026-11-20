@@ -63,13 +63,36 @@
 (defn ty-text [t] (binding [c/*in-value* false c/*erased-regions* true] (c/print-ty t)))
 
 (declare ty-form)
-(defn- arg-form
+(def ^:dynamic *closure-form*
+  "queue 464 (462-3 (a)): within a run, a closure type's MIR form struct, `(closure DEF-PATH [PARENT-ARGS.. KIND SIG UPVARS])`
+  as the records write it, for a closure type a native library instance names (a program's closure as a generic argument:
+  Option::map's F; a library closure, the export's data); nil, or a function returning nil, leaves it `(other \":closure\")`"
+  nil)
+(defn arg-form
   "A generic argument as MIR forms write it: a region `(lt)`, a constant value `(cst V)` (RIND5: `Simd<T, 4>`'s 4, as the
   records write it and mono's form->ty reads it), else a type"
   [a]
   (cond (c/region? a) '(lt)
-        (and (vector? a) (= :cval (first a))) (list 'cst (c/print-const a))
+        ;; queue 472: a const parameter too (`Mask<T, N>`'s N in an exported generic body), its :tc the argument, so that a
+        ;; native body printed at an instance writes the value (build-run's reprint)
+        (and (vector? a) (#{:cval :cparam} (first a))) (with-meta (list 'cst (c/print-const a)) {:tc a})
         :else (ty-form a)))
+
+(defn- lib-closure-form
+  "queue 464 (462-3 (a)): a library closure type's data (core-check's export, c/lib-closure-path) as the records write its
+  struct, rustc's ClosureArgs: `(closure PATH [PARENT-ARGS.. KIND SIG UPVARS])`, the kind's type i8 (Fn), i16 (FnMut) or i32
+  (FnOnce), the signature `extern \"rust-call\" fn((INPUTS)) -> OUTPUT` (no arrow for ()), the upvars a tuple; nil for a
+  local closure"
+  [t]
+  (when-let [[pp seg] (c/lib-closure-path t)]
+    (let [[_ _ [_ ins out] pargs [_ & ups] kind] t
+          tup [:tuple (vec ins)]
+          sig-text (str "extern \"rust-call\" fn(" (ty-text tup) ")" (when-not (= out [:tuple []]) (str " -> " (ty-text out))))]
+      (list 'closure (str pp "::" seg)
+            (vec (concat (map arg-form pargs)
+                         [(ty-form [:int (case kind :fn "i8" :fn-mut "i16" "i32")])
+                          (with-meta (list 'ty sig-text '(fnptr)) {:tc [:fnptr {:inputs [tup] :output out :abi "rust-call"}]})
+                          (ty-form [:tuple (vec ups)])]))))))
 
 (defn ty-form
   "A type as MIR forms write it: (ty TEXT STRUCT)"
@@ -90,6 +113,12 @@
                        (vec (for [a (nth t 2)] (arg-form a))))
           :fnptr '(fnptr)
           :param (list 'param (nth t 2))
+          ;; queue n-rust-dyn (448-4 (a) 2): a trait object as the helper writes it, `(dyn)` (its principal, projections and
+          ;; auto traits in the text alone; the metadata keeps the type)
+          :dyn '(dyn)
+          ;; queue 464: a closure type as the records write it: a library closure from its data (lib-closure-form), a program's
+          ;; by the record (*closure-form*), else refused at the instance as before
+          :closure (or (lib-closure-form t) (when *closure-form* (*closure-form* t)) (list 'other ":closure"))
           (list 'other (str (first t)))))
    {:tc t}))
 
@@ -104,9 +133,14 @@
 (def ^:dynamic *closure-tys* {})
 (def ^:dynamic *closure-kinds* {})   ; a closure type's text -> its kind   ; a closure type's text -> its upvars' types (the root's closure_analyze)
 
+(defn closure-upvar-tys
+  "A closure type's upvars' types: a library closure's from its data (queue 464), a local one's by its text (*closure-tys*)"
+  [t]
+  (if (c/lib-closure? t) (vec (rest (nth t 4))) (get *closure-tys* (second t))))
+
 (defn- copy? [t]
   (case (first t)
-    :closure (every? copy? (get *closure-tys* (second t)))
+    :closure (every? copy? (closure-upvar-tys t))
     (:tuple) (every? copy? (second t))
     :array (copy? (second t))
     (tc/copy-type? t)))
@@ -122,7 +156,7 @@
   (cond (copy? t) false
         :else (case (first t)
                 (:bool :char :int :uint :float :ptr :fndef :fnptr :never :str) false
-                :closure (boolean (some needs-drop? (get *closure-tys* (second t))))
+                :closure (boolean (some needs-drop? (closure-upvar-tys t)))
                 :ref false
                 ;; a projection (a std field's `<I::Item as IntoIterator>::IntoIter`): its normal form's
                 :proj (let [n (try (tc/normalize-deep t) (catch Throwable _ t))] (if (= n t) true (needs-drop? n)))
@@ -1851,8 +1885,10 @@
         nm (binding [c/*in-value* true] (c/print-def-path vid args))
         kind (tc/variant-ctor-kind vid)]
     ;; a union's aggregate prints its fields' names zipped with its one operand (the first field's name, as rustc's Debug)
+    ;; (its arguments as generic arguments: queue 472, a const one `(cst "16")` as the records write `Mask::<i8, 16>(..)`'s,
+    ;; where ty-form wrote `(other ":cparam")`, `(other ":cval")` at the instance)
     (list 'adt nm kind (mapv (comp str first) (tc/all-fields-of-variant vid))
-          (binding [c/*in-value* false] (c/print-def-path adt [])) (:variant x) (vec (for [a args] (if (c/region? a) '(lt) (ty-form a)))))))
+          (binding [c/*in-value* false] (c/print-def-path adt [])) (:variant x) (mapv arg-form args))))
 
 (defn expr-into-dest [dest bb x]
   (let [scope? (#{:block :scope} (:k x))]
@@ -3539,7 +3575,11 @@
             ;; RF18 (RFP62 (a)): a closure's body carries its upvars' types (closure_analyze's captures, the closure type's
             ;; fields: rustc's upvar_tys), which mono's layout of the closure type and its drop glue read
             (cond-> (finish d name :fn (count params) ret)
-              closure? (assoc :upvar-tys (mapv :ty (:captures info)))))))))))
+              closure? (assoc :upvar-tys (mapv :ty (:captures info)))
+              ;; queue 464 (462-3 (a) 1): the typeck root's closures by their type's text (their HIR id, kind and upvars'
+              ;; types), which core-check's export writes a closure type's data from
+              (seq closures) (assoc :root-closures (into {} (for [[hid ci] closures :when (= :closure (first (:ty ci)))]
+                                                              [(second (:ty ci)) {:hir-id hid :kind (:kind ci) :upvars (mapv :ty (:captures ci))}])))))))))))
 
 (defn- upvar-symbol-fields
   "CapturedPlace::to_symbol's field names (`x__field`), derefs ignored"
