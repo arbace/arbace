@@ -1072,11 +1072,42 @@
               t)
             *src*)))))
 
+;; queue 499 (the checker): a file the main file includes by a quoted name from its own directory, itself a test or a
+;; header marked as a system header (deleted16a.C's
+;; `#include "deleted16.C"`, error6a.C's error6.C, sys-narrow1.C's sys-narrow.h) is checked as the main file's own text, its
+;; errors at its own lines: DejaGnu's dg-error matches a diagnostic by its line alone, whatever file it names, so such a test
+;; states the included file's errors by their line numbers (`{ dg-error "deleted" "" { target *-*-* } 21 }`)
+(def ^:private local-includes (atom {}))
+
+(defn local-include-file
+  "Queue 499: the file a location's name `file` is when it is no main file's but a file in the main file's own directory (a
+  quoted #include beside it), checked as the main file's text; else nil."
+  ^java.io.File [file]
+  (when (and (string? file) *main-name* *main-dir* (not= file *main-name*) (not (str/starts-with? file "/")))
+    (let [k [*main-dir* file]]
+      (if (contains? @local-includes k)
+        (get @local-includes k)
+        (let [f (located-file file)
+              r (when (and (.isFile f)
+                           (= (.getCanonicalPath (.getParentFile (.getAbsoluteFile f)))
+                              (.getCanonicalPath (java.io.File. ^String *main-dir*)))
+                           ;; (a test of its own, its dg directives restated by line in the includer, or a header marked
+                           ;; `#pragma GCC system_header`, where a test checks the errors GCC still gives in a system header;
+                           ;; a helper header (coroutines/coro.h's) is not judged: its definitions are the slice's to analyze
+                           ;; lazily, as before)
+                           (let [t (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1")]
+                             (or (re-find #"\{\s*dg-" t) (re-find #"(?m)^\s*#\s*pragma\s+GCC\s+system_header\b" t))))
+                  f)]
+          (swap! local-includes assoc k r)
+          r)))))
+
 (defn header-node?
   "Whether a node is a header's (G4: its location's file a header's path, not the main file's)."
   [n]
   (let [f (:file (loc-of (get-in n [:range :begin])))]
     (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))
+                  ;; (queue 499: a quoted include from the main file's own directory is the checker's main text)
+                  (not (and (checking?) (local-include-file f)))
                   ;; (queue 351: for the code generator a source file the unit includes, `#include <hashtable-aux.cc>` in
                   ;; hashtable_tr1.cc, a shim's `#include <assert_fail.cc>`, is the unit's own text, its definitions emitted as
                   ;; clang emits every definition of the translation unit; the checker's reading unchanged)
@@ -1837,6 +1868,15 @@
         (when (and c (not (:complete c)) (not (:defining c)) (not (:tmpl c)) (not (:targs c)) (not (:lambda c)) (not (:header c)))
           c)))))
 
+(defn- cx-subscript-incomplete!
+  "Queue 499 (the checker): a subscript E1[E2] whose pointer operand `p` (typed) points to a class the checker knows
+  incomplete ([expr.sub]/2 with [expr.add]/1: the pointer arithmetic needs a completely-defined object type): GCC's
+  \"invalid use of incomplete type\", parse/crash49.C."
+  [p]
+  (when (checking?)
+    (when-let [c (and (abi/ptr? (:ty p)) (cx-incomplete-cls (:to (:ty p))))]
+      (fail :incomplete "invalid use of incomplete type '" (:name c) "'"))))
+
 (defn- incomplete-var!
   "Round 54, the checker: [basic.def]/5, [dcl.init.general]/7: a variable's definition `n` of a class type `ty` incomplete at that
   point (declared and not yet or never defined, or still being defined; not an extern declaration nor a class template's instance):
@@ -2078,6 +2118,8 @@
         (swap! abi/*enums* assoc-in [id :nonneg] true)))
     t))
 
+(declare cx-friend-member-access!)
+
 (defn- declare-class! [scope0 n]
   (let [;; (cpp-rt-own: an elaborated-type-specifier's class, `struct P *p;` a member of S, is declared in the smallest namespace or
         ;; block scope holding it, [basic.scope.pdecl]/7.2 (the parser's :_elab): libcpp's cpp_reader `struct cpp_savedstate
@@ -2259,7 +2301,9 @@
                                                                (str/split #"::") last str/trim)
                                                        ""))
                                            (and (nil? fd) (nil? (get-in k [:type :qualType])) (not-any? (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k)))
-                                           (assoc :friend-unknown true)))))
+                                           (assoc :friend-unknown true)))
+                    ;; (queue 499: a friend declaration naming another class's inaccessible member function)
+                    (cx-friend-member-access! cs id k fd)))
                 (binding [*member-access* @access] (declare-node! cs k))))))
         (finally (abi/update-cls! id dissoc :defining))))
       ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
@@ -4759,7 +4803,10 @@
   [ctx]
   (let [f (some-> (:fn-id ctx) fnd)]
     (cond
-      (:lambda ctx) nil
+      ;; (queue 499: a lambda's body is in the context of the lambda-expression, [expr.prim.lambda.closure]/12 with
+      ;; [class.access]/2's members and friends: the enclosing analysis's context, a generic lambda's specialization not
+      ;; judged)
+      (:lambda ctx) (when-let [e (:encl (:lambda ctx))] (cx-context e))
       (and f (:tinst f)) nil
       f (if-let [cid (:cls f)] (when-let [rs (cx-enclosing-classes cid)] {:records rs :fn f}) {:records #{} :fn f})
       :else (if-let [cid (or (:cx-member-of ctx) (:cls (:scope ctx)))] (when-let [rs (cx-enclosing-classes cid)] {:records rs}) {:records #{}}))))
@@ -4792,6 +4839,8 @@
 (defn- cx-paths [from to]
   (if (= from to) [[]] (mapcat (fn [b] (map #(cons [from b] %) (cx-paths (:cls b) to))) (:bases (abi/cls from)))))
 
+(declare cx-access-ok-path?)
+
 (defn cx-access-ok?
   "Whether a member of class `dc` with access `a` named through the class `nc` (dc or a class derived from it) is
   accessible in the context `cx` ([class.access.base]/5): true, false, or nil when the slice does not know (two paths)."
@@ -4799,8 +4848,18 @@
   (if (= nc dc)
     (cx-member-ok? cx dc a obj)
     (let [ps (cx-paths nc dc)]
+      (if (< 1 (count ps) 9)
+        ;; (queue 499: several paths, [class.access.base]/6: the path that gives most access; true when one path does,
+        ;; false when every path is sure to give none, else not known: lookup/scoped12.C's d.a through B and C)
+        (let [vs (mapv #(cx-access-ok-path? cx dc a % obj) ps)]
+          (cond (some true? vs) true (every? false? vs) false :else nil))
       (when (= 1 (count ps))
-        (let [steps (vec (first ps))
+        (cx-access-ok-path? cx dc a (first ps) obj))))))
+
+(defn- cx-access-ok-path?
+  "cx-access-ok?'s judgment along one path `p` of base steps from the naming class to `dc` ([class.access.base]/5)."
+  [cx dc a p obj]
+        (let [steps (vec p)
               cs (conj (mapv first steps) dc)
               sp (mapv #(:access (second %)) steps)
               rank {:public 0 :protected 1 :private 2}
@@ -4816,7 +4875,32 @@
               ok? (fn ok? [i j a0]
                     (or (direct i j a0)
                         (boolean (some (fn [k] (and (ok? k j a0) (base-ok? i k))) (range (inc i) (inc j))))))]
-          (ok? 0 (dec (count cs)) a))))))
+          (ok? 0 (dec (count cs)) a)))
+
+(defn- cx-friend-member-access!
+  "Queue 499 (the checker): a friend declaration `k` of the class `id` (its scope `cs`) whose function `fd` is a member
+  of another class named by a qualified name (`friend void A::f();`), [class.friend]/7 with [class.access]/4: the name is
+  looked up and its access checked in the befriending class; every member function of that name in the named class
+  private or protected and inaccessible from `id` (any one the declaration matches is): GCC's \"'void A::f()' is private
+  within this context\" at the friend declaration. The befriending class neither a template nor a specialization of one,
+  nor local nor a closure."
+  [cs id k fd]
+  (when (and (checking?) *on-refusal* fd (= "FunctionDecl" (:kind fd)) (string? (:_qual fd)) (string? (:name fd)) (seq (:name fd))
+             (not (:tmpl (abi/cls id))) (not (:targs (abi/cls id))))
+    (when-let [rs (cx-enclosing-classes id)]
+      (let [q (vec (remove str/blank? (map str/trim (str/split (str/replace (:_qual fd) #"::\s*$" "") #"::"))))
+            cid (when (and (seq q) (not-any? #(str/includes? % "<") (butlast q)))
+                  (try (some-> (first (filter #(= :type (:e %)) (lookup-qualified cs q))) :ty class-id)
+                       (catch arbace.lang.ExceptionInfo _ nil)))
+            fs (when (and cid (not (contains? rs cid)) (:complete (abi/cls cid)))
+                 (keep (fn [[_ e]] (when (= :fn (:e e)) (fnd (:id e)))) (class-lookup cid (:name fd))))]
+        (when (and (seq fs)
+                   (every? (fn [f] (and (#{:private :protected} (:access f)) (:cls f)
+                                        (false? (cx-access-ok? {:records rs} (:cls f) (:access f) cid nil))))
+                           fs))
+          (*on-refusal* (ex-info (str "codegen: '" (:name fd) "' is a " (name (:access (first fs))) " member of '" (:name (abi/cls cid)) "'")
+                                 {:codegen/refused :access :cx/node k})
+                        k))))))
 
 (defn- cx-access!
   "The checker: a member `nm` of class `dc` with access `a`, named through class `nc` (nil: dc) with the object of class
@@ -4856,6 +4940,70 @@
             (cx-access! ctx (:cls f) (:name f) (:access f) nil nil))))))
   r)
 
+;; queue 499 (the checker): a subobject's destructor that is deleted or inaccessible deletes the implicit destructor
+;; ([class.dtor]/7.2), and an inaccessible one the implicit default, copy and move constructors too ([class.default.ctor]/2.7,
+;; [class.copy.ctor]/10.4; a deleted one is queue 492's); GCC reports the inaccessible destructor at the class ("'A::~A()'
+;; is private within this context"), as cx-deleted-implicit! reports a subobject's deleted member. Judged only where sure:
+;; a private destructor declared by the user, the class neither a union nor nested in a class nor local, no friend the
+;; slice cannot classify; an abstract class's virtual bases (no potentially constructed subobjects since C++14, DR 1658,
+;; GCC from C++14 on: cpp0x/pr66443-cxx11-2.C, cpp1y/pr79393-2.C) not judged.
+
+(declare cx-deleted-implicit!)
+
+(defn- cx-sub-classes
+  "Queue 499: the classes of class `cid`'s potentially constructed subobjects ([special]/7): its direct non-virtual
+  bases, its non-static data members of class type (or arrays of it), its virtual bases unless (from C++14) it may be
+  abstract; nil for a union or a class the slice does not judge."
+  [cid]
+  (let [c (abi/cls cid)]
+    (when (and c (not (:union c)) (not (:lambda c)) (cx-enclosing-classes cid) (= #{cid} (cx-enclosing-classes cid)))
+      (let [vb (abi/vbases cid)
+            abstract? (fn [] (some (fn [k] (some #(:pure (fnd %)) (:methods (abi/cls k)))) (cons cid (map :cls (:bases c)))))]
+        (distinct
+          (concat (keep #(when-not (:virtual %) (:cls %)) (:bases c))
+                  (keep (fn [fl] (let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))]
+                                   (when (and (abi/class? t) (not (abi/ref? (:ty fl)))) (:id t))))
+                        (remove :static (:fields c)))
+                  (when (and (seq vb) (or (< (long *cxx-year*) 2014) (not (abstract?)))) vb)))))))
+
+(defn- cx-sub-dtor!
+  "Queue 499: the implicit special member `f` (a destructor, or a default, copy or move constructor) of class `cls`,
+  deleted for a potentially constructed subobject's destructor: a private user-declared one inaccessible from `cls`'s
+  members (cx-access-ok?), or for a destructor a deleted one; the deletion thrown as a deleted call, the subobject's
+  destructor (:cx-q499-sub) for cx-deleted-implicit!'s chain."
+  [f cls]
+  (when (and (checking?) (:implicit f) (#{:ctor :dtor} (:kind f)) (not (:inh-from f)))
+    (doseq [sc (cx-sub-classes cls)
+            :let [d (some-> (abi/cls sc) :dtor fnd)]
+            :when d]
+      (when (and (= :dtor (:kind f)) (:deleted d) (:deleted-sure d))
+        (throw (ex-info (str "codegen: call to a deleted function ~" (:name (abi/cls sc)))
+                        {:codegen/refused :overload :cx-q499-sub (when (:implicit d) (:id d))})))
+      (when (and (= :private (:access d)) (not (:implicit d)) (not= sc cls)
+                 (false? (cx-access-ok? {:records #{cls}} sc :private sc nil)))
+        (throw (ex-info (str "codegen: call to a deleted function ~" (:name (abi/cls sc)) " (a private destructor)")
+                        {:codegen/refused :overload}))))))
+
+(defn- cx-user-dtor-subs!
+  "Queue 499: a user-provided destructor `f` of class `cls` destroys its potentially constructed subobjects
+  ([class.dtor]/13): one whose destructor is deleted (cx-sub-dtor!'s, the checker sure of it) is a use of a deleted
+  function, reported at the body's end (GCC's place) after the deleted destructor's reason at its class."
+  [f cls]
+  (when (and (checking?) *on-refusal* (= :dtor (:kind f)) (not (:implicit f)) (not (:defaulted f)) (:body f))
+    (when-let [d (some (fn [sc] (let [d (some-> (abi/cls sc) :dtor fnd)] (when (and d (:deleted d) (:deleted-sure d) (:implicit d) (:cx-sub-deleted d)) d)))
+                       (cx-sub-classes cls))]
+      (when-let [e (get-in (:body f) [:range :end])]
+        (cx-deleted-implicit! d)
+        (let [n {:range {:begin e :end e}}]
+          (*on-refusal* (ex-info (str "codegen: call to a deleted function " (:name d) " (implicitly deleted)") {:codegen/refused :overload :cx/node n}) n))))))
+
+(defn- cx-sub-dtor-chain!
+  "Queue 499: after cx-deleted-implicit! reported the implicit member `f` at its class, the subobject's implicitly
+  deleted destructor it was deleted for (cx-sub-dtor!'s :cx-q499-sub), reported at its own class."
+  [f]
+  (when-let [g (some-> (:cx-q499-sub f) fnd)]
+    (cx-deleted-implicit! g)))
+
 ;; (queue 463, the checker: an implicitly declared special member deleted because a subobject's corresponding member is
 ;; deleted ([class.default.ctor]/2, [class.copy.ctor]/10, [class.copy.assign]/7, [class.dtor]/7), at its first use: GCC
 ;; reports the subobject's deleted call again at the class, where it implicitly defines the member ("use of deleted
@@ -4867,7 +5015,9 @@
       (upd-fn! (:id f) assoc :cx-class-reported true)
       (*on-refusal* (ex-info (str "codegen: call to a deleted function " (:cx-sub-deleted f) " (implicitly defining " (:name f) ")")
                              {:codegen/refused :overload :cx/node cn})
-                    cn))))
+                    cn)
+      ;; (queue 499: the subobject's member, implicitly deleted for queue 499's reasons, its own reason at its class too)
+      (cx-sub-dtor-chain! f))))
 
 ;; (queue 463, the checker: the destructor a variable's definition makes potentially invoked, [class.dtor]/15: "a program
 ;; is ill-formed if a destructor that is potentially invoked is deleted or not accessible from the context of the
@@ -5903,6 +6053,17 @@
   ([ctx cid nm access nc obj]
    (cx-access! ctx cid nm access nc obj)))
 
+(defn- cx-anon-union-access!
+  "Queue 499 (the checker): a member of an anonymous union (`e` the name's :indirect entry, its chain of [class field]
+  steps) named by a class member access, o.m: a member of the class the union is declared in ([class.union.anon]/1),
+  with the access of the anonymous union's own member there (an anonymous union has no private or protected members);
+  judged when every step after the first is an anonymous union's member (a GNU anonymous struct's not)."
+  [ctx e nm nc obj]
+  (when (checking?)
+    (let [[[c0 i0] & more] (:chain e)]
+      (when (and c0 (every? (fn [[c _]] (:union (abi/cls c))) more) (seq more))
+        (check-access! ctx c0 nm (:access (nth (:fields (abi/cls c0)) i0 nil)) nc obj)))))
+
 (defn- member-expr [ctx n]
   (let [[objn] (kids n)
         o (analyze ctx objn)
@@ -5948,7 +6109,8 @@
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))) " " (pr-str (:targs (abi/cls (or qcid cid)))) " fields " (pr-str (mapv :name (:fields (abi/cls (or qcid cid))))))))
         (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
                               (field-node (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) (:cls e) (:i e)))
-        (= :indirect (:e e)) (reduce (fn [o [c i]] (field-node o c i)) (if (= :pr (:cat obj)) (materialize obj) obj) (:chain e))
+        (= :indirect (:e e)) (do (cx-anon-union-access! ctx e nm (or qcid cid) cid)
+                                 (reduce (fn [o [c i]] (field-node o c i)) (if (= :pr (:cat obj)) (materialize obj) obj) (:chain e)))
         (= :var (:e e)) (let [v (var* (:id e))]
                           ;; (queue 463, the checker: a static data member named by a class member access, o.m, [expr.ref]/7.1)
                           (when (and (checking?) (:cx-access v)) (cx-static-access! ctx (:cx-cls v) nm (:cx-access v) (or qcid cid)))
@@ -7504,6 +7666,7 @@
       (or (when (class-operand? a) (operator-call ctx "[]" [a i]))
           (let [i (class->scalar ctx i)]
           (let [[p ix] (if (abi/ptr? (:ty (rv a))) [(rv a) (rv i)] [(rv i) (rv a)])]
+            (cx-subscript-incomplete! p)
             {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv})))))
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
     (if-let [ct (when (= "CXXFunctionalCastExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
@@ -8694,6 +8857,8 @@
                                        ;; (queue 393, W4: a coroutine's body, by the code generator; the checker's analysis as before)
                                        (and (not (checking?)) (coroutine-node? (:body f))) (trace #(coroutine-body ctx fid pids (:body f)))
                                        :else (trace #(stmt ctx (:body f)))))
+            ;; (queue 499: a user-provided destructor destroying a subobject whose destructor is deleted, cx-user-dtor-subs!)
+            _ (when body (cx-user-dtor-subs! f cls))
             ;; a constructor's or destructor's function-try-block: control reaching a handler's end rethrows the exception
             ;; ([except.handle]/15; clang's ExitCXXTryStmt, doImplicitRethrow); another function's handler falls through to its end
             ;; ([except.handle]/16). The mem-initializers stay before the try (cpp-90: an exception of theirs is not caught by the
@@ -8781,6 +8946,8 @@
         (binding [*cutoff* Long/MAX_VALUE]
           (upd-fn! fid assoc :tinits (ctor-inits ctx (assoc f :inits [] :pre-inits {(:inh-base f) bi})))))
     (do
+    ;; (queue 499: a subobject's deleted or inaccessible destructor, cx-sub-dtor!)
+    (cx-sub-dtor! f cls)
     ;; (queue 492, the checker: a defaulted default, copy or move constructor is deleted when a potentially constructed
     ;; subobject's destructor is deleted, [class.default.ctor]/2.7, [class.copy.ctor]/10.4: the subobject's deleted
     ;; destructor, as a deleted call, the member's deletion)
@@ -9183,7 +9350,9 @@ protected:
                                                                                      ;; GCC names no subobject's member at the class: inherit/pr97268.C)
                                                                                      (not (and (= "operator=" (:name (fnd id)))
                                                                                                (some #(or (abi/ref? (:ty %)) (:c (:ty %))) (:fields (abi/cls (:cls (fnd id))))))))
-                                                                            (second (re-find #"call to a deleted function (\S+)" (str (.getMessage e))))))
+                                                                            (second (re-find #"call to a deleted function (\S+)" (str (.getMessage e)))))
+                                                          ;; (queue 499: the subobject's implicitly deleted destructor, cx-sub-dtor-chain!)
+                                                          :cx-q499-sub (:cx-q499-sub (ex-data e)))
                                                  (throw e)))))
                                     :else nil)))
                           ;; (the rest of CP313 (a): an error found while declaring, reported in order)
