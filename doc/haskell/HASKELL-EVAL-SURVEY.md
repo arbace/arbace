@@ -2876,3 +2876,16 @@ its end above).
   scalar, and typed slots for a frame's unlifted binders (no boxing between primops in the interpreter, as AOT's typed locals);
   every reader of `Con.F`, the marker, the FFI and `show` taught them. Estimate 1.3 to 1.6 times on these rows, 4 to 6 days, the
   whole machine touched. (a) after HES97 (a), for the speed itself; (b) not now. **Recommended: (b)**, unless HES97 is (b).
+
+## As built: queue 482, queue 333 on next (2026-11-20, branch `482-hs-parked`, the Mac VM)
+
+333's three commits cherry-picked onto next 939037429 (after 430's and 446's changes to hsi), its ppoll fix left out (on next
+already). The evaluator's commit merged at the Go level (the three versions printed, `git merge-file`, `bin/hsi runtime read`):
+one conflict, `nodes.go`'s generic call, 446's dead tail frame given back (`arena.release`) kept and 333's `clearV` in its else
+branch. Decided 2026-11-17 (round 52): HES97 (a), HES98 (a), HES99 (b), not now. Measured on linux/arm64 (CPU seconds, user and
+system, every thread; next's hsi against this branch's with the committed profile, side by side, three interleaved rounds,
+medians; every run GHC's stdout, empty stderr, status 0, byte for byte the same on both): x2n1 67.43 to 59.40 (0.883), kahan
+101.27 to 91.07 (0.902), n-body 106.21 to 98.53 (0.928), spectral-norm 140.99 to 125.17 (0.889); the control queens 51.85 to
+45.71 (0.882); AtomicPrimops 49.39 to 44.53 and T21651 56.82 to 48.55 in one round. x2n1 under the 60 s limit in all three
+rounds (57.35 to 59.69), too near it to call; kahan, n-body and spectral-norm stay above (HES97 (a)'s caps). `bin/hsi runtime
+check`: every merged file a fixed point of print and read (fdwait.ae differs as on next, queue 333's finding).
