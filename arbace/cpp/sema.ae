@@ -168,7 +168,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Types from clang's qualType strings
 
-(declare resolve-type-form resolve-type lookup-qualified const-int)
+(declare resolve-type-form resolve-type lookup-qualified const-int cx-typedef-redecl!)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The headers' declarations: the native parser skims them into its scopes (arbace.repr.cpp.scope); a C function
@@ -1680,6 +1680,10 @@
           (let [v (if-let [x (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids c)))] (const-int bs x) v)
                 e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
             (when (neg? (long v)) (reset! neg true))
+            ;; (queue 484, the checker: [basic.scope.declarative]/5, [dcl.enum]: two enumerators of one name in an enumeration,
+            ;; `enum E { e, e };`, DRs/dr2530.C; g++'s "redefinition of", at the second)
+            (when (and (checking?) (seq (.get ^java.util.HashMap (:names es) (ucn-name (:name c)))))
+              (*on-refusal* (ex-info (str "codegen: redefinition of enumerator '" (:name c) "'") {:codegen/refused :redecl}) c))
             (enter! bs (:name c) (assoc e :ty under))
             (enter! es (:name c) e)
             (when-not scoped (enter! scope (:name c) e))
@@ -2076,7 +2080,8 @@
                                                          (throw x))))))))
                        :pos (long (or (:_b n) 0))}
                 ;; (CX12, the checker: a member typedef's access)
-                (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*)))))
+                (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
+      (cx-typedef-redecl! scope n))
     "NamespaceAliasDecl" (let [t (node-text n)
                                [_ target] (re-find #"=\s*([^;]+);?\s*$" (or t ""))
                                parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
@@ -3483,6 +3488,34 @@
 ;; complete, an undeduced or dependent type) is left as before.
 
 (def ^:dynamic *cx-union-init* false) ; queue 460: inside a union's aggregate initialization (its member as the slice takes it)
+
+(defn- cx-type-key
+  "Queue 484: a type's identity when the checker knows it whole (a builtin type, an enumeration, a class not a template's,
+  pointers to them, each with its cv-qualifiers), else nil."
+  [t]
+  (when (map? t)
+    (let [cv [(boolean (:c t)) (boolean (:v t))]]
+      (case (:k t)
+        :b (when (keyword? (:n t)) [:b (:n t) cv])
+        :enum (when (abi/enm (:id t)) [:enum (:id t) cv])
+        :class (let [c (abi/cls (:id t))] (when (and c (not (:tmpl c)) (not (:lambda c))) [:class (:id t) cv]))
+        :ptr (when-let [k (cx-type-key (:to t))] [:ptr k cv])
+        nil))))
+
+(defn- cx-typedef-redecl!
+  "Queue 484, the checker: [dcl.typedef]/6 with [basic.scope.declarative]: a typedef or alias name redeclared in the same
+  namespace or block scope that names another type than the earlier typedef, class or enumeration of the name
+  (`using I = int; using I = float;`, cpp0x/alias-decl-56.C; `struct B; typedef int B;`, warn/pr81119.C): g++'s
+  \"conflicting declaration\", clang's err_redefinition_different_typedef. Both types known whole (cx-type-key)."
+  [scope n]
+  (when (and (checking?) (#{:ns :block :fn} (:kind scope)) (not (header-node? n)))
+    (let [es (filter #(= :type (:e %)) (.get ^java.util.HashMap (:names scope) (ucn-name (:name n))))]
+      (when (> (count es) 1)
+        (let [nk (cx-type-key (:ty (last es)))]
+          ;; (against the first declaration, which a conflicting one leaves in force, as GCC: diagnostic/local1.C's third
+          ;; `using type = void;` agrees with the first)
+          (when (and nk (let [k (cx-type-key (:ty (first es)))] (and k (not= k nk))))
+            (*on-refusal* (ex-info (str "codegen: conflicting declaration of '" (:name n) "'") {:codegen/refused :redecl}) n)))))))
 
 (defn- cx-sure-scalar?
   "A scalar type whose conversions the checker judges: arithmetic, an enumeration, a pointer to object of such a type or
