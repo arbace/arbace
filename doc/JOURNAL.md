@@ -14415,6 +14415,211 @@ outcome is undefined, unspecified or left unstated leaves the judge's cases with
   own verdicts, cpp.runtime.library from :refused to a pass. LLVM: 5,432 judge cases all own, the stage 1.0000, independence 1.0000,
   completeness 0.9899. crops-score --judge --strict, records-check, reap: 0 problems.
 
+## 2026-11-20: hs-own-stg, the own libraries' STG of base and ghc-internal built further (lib-stg --ifaces own)
+
+Branch `hs-own-stg-1120` from next `939037429`, by an agent of the main host (the coordinator's brief: raise Haskell's
+independence, whose eval and AOT stages stay 0.5 while programs run over the boot libraries' STG GHC made; build the coverage
+the own path needs, HF10-P29 (a)'s `bin/hsi check --libs own`; a later run, "lane 2", measures the cell). Light: one front-end
+process at a time, each under 2 GB; targeted lib-stg runs (`--only`, with a few passing modules and the package's negative
+control) after each fix; no gate, no record run.
+
+**Setup.** The worktree's `.tmp/repr-haskell` seeded from n-hs-libs' (corpus, native dumps, the own pools; absolute paths
+rewritten to the worktree), stage 0 of the main checkout (`ARBACE_HOST_EXE`). The baseline, `bin/repr-haskell lib-stg
+--package base --ifaces own --judge test/haskell/lib-stg-own-base-results.edn` at next: 584 of 1,072 bindings equal to GHC's
+-O0 STG, 0 worse (the record's); ghc-internal's, n-hs-libs' run of `ceabce537`: 7,982 of 9,932. The tools: `.tmp/ana/` of the
+worktree (whys.ae: each module's first differences; names.ae: the external names GHC's closure uses more or fewer than ours over
+the differing bindings; classes.ae: each differing binding in one heuristic class; cmp: a binding's two renamed closures; run-only:
+lib-stg --only with the package's judge and its negative control).
+
+**Causes found** (base's 488 differing bindings and ghc-internal's 1,950, by first difference and by the names they use), and
+what this branch did with each:
+- a wanted dictionary solved by an instance (`$fFractionalRatio $fIntegralInteger`) was its term at each use; GHC binds it once
+  after the binding's dictionary lambdas (the implication's evidence bindings): the binding's arity, `:r`/`:u`, `case`/`let`
+  and order differences (Data.Fixed's methods, Data.Bifoldable's default methods);
+- INLINE pragmas were not honoured: GHC's -O0 Simplifier (FinalPhase) inlines a saturated call of an INLINE function of the
+  module (GHC.Internal.Arr's `(!)` with `safeIndex`, `$c/=` with `eqArray`);
+- a quantified superclass (base's Eq1, Ord1, Show1, Read1, Eq2..Read2, Bifunctor) was no field of the dictionary: Data.Functor.Classes
+  154 of 190 bindings, Data.Bifunctor 13 of 16; and Eq1 was a newtype class in its own module but a class of two fields for
+  an importer (`:nsupers` counted it), a layout no run could pass;
+- Coercible's evidence was `Eq#` (`(~)`'s) where GHC's is `MkCoercible` (base 19 bindings, ghc-internal 50);
+- the empty string literal was `unpackCString# ""#` where GHC's mkStringExprFS gives `[]` (show's default method's `""`, in
+  every derived Show instance through its compulsory unfolding);
+- Typeable's application evidence named `mkTrApp` where GHC's ds_ev_typeable names `mkTrAppChecked` (ghc-internal 56);
+- a pattern's `C{..}` bound only the fields in scope unqualified (base's GHC.RTS.Flags, stage `errors`: `Internal.RTSFlags{..}`
+  beside its own unqualified `gcFlags`);
+- a partial application's own argument bindings were put inside its eta lambda (derived `showList = showList__ (showsPrec 0)`:
+  GHC's `I# 0` is outside);
+- `ip (C:IP emptyCallStack)` was not trivial in CorePrep's sense (a thunk where GHC passes the global);
+- a newtype class (one method or one superclass) had neither its data nor its selector in the own STG (GHC's `ip = \v -> v`,
+  `fromString`, `getField`, `natSing`: 17 in ghc-internal); own-fallback.txt's tcrun019, tcrun024 and tcrun025 stop on the
+  missing `ip` (`:own-lib`).
+
+**Fixes** (each with GHC's behaviour it ports; no GHC code ported):
+- `85cc37568`: rename.ae's rn_dotdot (a pattern binds every field whose selector is in scope, lookupGRE_FieldLabel);
+  typecheck.ae's `""` as `[]` (and the pattern `""` the empty list, desugar.ae's lit-pat), Coercible's evidence `(co
+  :coercible)` made `MkCoercible` by tostg, bind-wanted! (a wanted solved by a dictionary function applied to dictionaries
+  let-bound once after a signed binding's or a method's dictionary lambdas, a wanted of the same predicate sharing it, only
+  when its dictionaries are the binding's own); tostg.ae's pap-eta-floated (cpeArg's wantFloatLocal on an HNF) and nested
+  newtype-class wrappers trivial.
+- `2cb904800`: INLINE pragmas: typecheck.ae collects the module's top-level ones active in FinalPhase (AlwaysActive, ActiveAfter
+  n) and each binding's real arity (dictionaries plus addInlinePragArity's matchGroupArity); simplify.ae gives the binder
+  mkInlineUnfoldingWithArity's unfolding (UnfWhen, saturated only, inlineBoringOk) and eta-expands the binding to that arity.
+- `7cc2e413e`: a quantified superclass `[:qc polytype]` among a class's supers, from interfaces and the module's own
+  declarations, written by the own interface; an instance solves it as a quantified wanted (solveForAll), a given's
+  super-closure gives it through `$pN`; spec-eval does not case-bind its selection; a quantified wanted's term that is a
+  dictionary function applied to its parameters alone is that function (the -O0 Simplifier's eta reduction).
+- `473c2745e`: Typeable's application evidence `mkTrAppChecked`; a newtype class's `stg/data` and its selector `\v -> v`.
+- `6f8e79ff2`: derived Show's `showsPrec` composes its parts as GHC 9.14's `nested_compose_Expr` does, `\z -> e1 (e2 (.. (en z)))`
+  (GHC.Tc.Deriv.Generate, read from the corpus's own pinned tarball `ghc-9.14.1-src.tar.xz`: its `compiler/` is whole there,
+  though the extracted corpus keeps only primops.txt.pp of it).
+- `70cc2803e`: own-fallback.txt shrinks by five (below).
+- Tried and dropped (not committed as a change): a HasCallStack push bound at the binding's level as an evidence binding.
+  GHC's placement (the push of a binding without a HasCallStack given floated to the top level, the one onto a given stack at
+  its call site) also needs the -O0 Simplifier's eta expansion through CallStacks (GHC.Core.Opt.Arity's myExprIsCheap,
+  isCallStackPredTy) and its pre-inlining; ported in core's arity-type it did not take on this pass (the binder's type was not
+  where the analysis looks), GHC.Internal.List 42 -> 33, Data.List.NonEmpty 56 -> 45: left as a cause.
+
+**Results.**
+- ghc-internal, the whole passes at `473c2745e` (the own pools remade there, one process at a time, under 2 GB): `lib-check
+  --ifaces own --judge` 265 modules, 0 worse, 0 better, the control differs; `lib-stg --ifaces own --judge` **7,982 -> 8,284** of
+  9,950 bindings equal to GHC's -O0 STG (compared 9,932 -> 9,950: the newtype-class selectors), 85 modules better, 0 worse or
+  missing, the control 0 of 171. After it, `6f8e79ff2` targeted: GHC.Internal.Generics 156 -> 161 of 256, Data.Semigroup.Internal
+  62 -> 68, Data.Monoid 24 -> 27, IO.Exception 69 -> 70, 0 worse.
+- base: `lib-check --package base --ifaces own --judge` at `473c2745e` 241 modules, 0 worse, 1 better (GHC.RTS.Flags errors ->
+  ok); the whole `lib-stg --package base` at `2cb904800` (n-hs-libs' pools) **584 -> 641** of 1,072, 0 worse, 9 better; then
+  targeted on the pools of `473c2745e` and the head: Data.Functor.Classes 31 -> 166 of 202, Data.Bifunctor 3 -> 17 of 17, GHC.RTS.Flags
+  165 -> 192 of 193 (errors -> ok), Data.Semigroup 45 -> 53, Data.List.NonEmpty 46 -> 56 of 63, Data.Bifoldable 27 -> 48 of 50 (on n-hs-libs' pools),
+  Text.Printf 28 -> 34 of 60, Data.Complex 10 -> 11, 0 worse, the control 0 of 24. The whole base pass at the head is queued under
+  the heavy lock (the coordinator's rule for it; nine jobs ahead at 16:49): `.tmp/ana/base-results-final.edn` of the worktree
+  when it runs. Not re-recorded: the records (`lib-stg-own-results.edn`, `-base-results.edn`) stay n-hs-libs' (the brief: no
+  record run; every row only better).
+- Programs (`HSI_OWN_FALLBACK=try bin/hsi check --libs own --corpus testsuite-core --only`, one job, 2 GiB, next's hsi of the same
+  sources, the own ghc-internal STG at `473c2745e`): tcrun019, tcrun024 and tcrun025 (`:own-lib`: no `ip`) pass, tcrun001,
+  IPLocation and IPRun pass beside them; of the list's 17 `:front-run` and `:own-report` testsuite programs conc013 and T25998 pass
+  too, the 15 others fail as their class says; own-fallback.txt 28 -> 23 entries.
+
+**Causes left**, ranked by the whole passes' differing bindings (classes.ae's heuristic classes):
+ghc-internal's 1,666 differing bindings at `473c2745e`: unclassified first differences 476 (GHC.Internal.Types' Mk*Box, ...),
+internal closures or fields 399 (CString's cstringLength#, the bignum primitives), `case` where ours `let`s 193 (speculative
+evaluation and strict lets: CString's unpack*Utf8#), the HasCallStack push's placement 175 (an evidence binding at the binding's
+level plus GHC.Core.Opt.Arity's eta expansion through CallStacks, myExprIsCheap's isCallStackPredTy/isCallStackTy; tried, the
+arity analysis did not see the binder's type: the next port), update flags 115, derived Show 99 (fixed after the pass by
+`6f8e79ff2`), binding order 61, a type's name in an `alg` 55 (a newtype's representation tycon: IORef's STRef), a static
+constructor where ours has a thunk 35 (tcShortCutLit at an argument whose type an earlier argument fixed: Data.Char's `9 ::
+Word`), arity 28 (eta expansion through a case of a variable: Arr's fill, done, adjust), given equalities' `eq_sel`/`heq_sel`/
+`coercible_sel` 21, call stacks 9. Beside them, semantic gaps no equality count shows, every one a runtime error where a program
+reaches it: derived `Data` has no generator in deriv.ae (toConstr, gunfold, dataTypeOf are noMethodBindingError: 47 instances in
+GHC.Internal.Data.Data, base's Data.Fixed's and Data.Complex's), derived `Lift`'s liftTyped (77 in GHC.Internal.TH.Lift), derived
+Functor through a function type (Kleisli's and ReadP's fmap), Generics' Applicative/Alternative/Monad methods of four instances;
+the modules still at `errors`: base's Data.Functor.Compose (Typeable of Compose f g a), Data.Functor.Contravariant (deriving's
+representation dictionary), Data.Array.Byte (a bracket with a splice), ghc-internal's Bignum.Integer, Data.Typeable.Internal and
+TH.Lift. base also inlines the installed -O2 ghc-internal's default-method unfoldings in GHC's reference (`build`,
+`unpackFoldrCString#`, CSE's `breakpoint` for `id`: some 30 bindings): DECISION hs-own-stg-1 below.
+
+**DECISION hs-own-stg-1** (for the user): base's -O0 reference (the pack haskell-stg-libs-O0-ghc-9.14.1) was compiled one-shot
+against the installed -O2 ghc-internal, whose default methods' compulsory unfoldings the -O2 Simplifier had rewritten; the own
+path inlines the own interfaces' -O0 ones. (a) Record the reference again with ghc-internal itself built at -O0 (the oracle tier,
+by hand, GHC live), so both sides inline -O0 unfoldings; (b) a class of the lib-stg judge for a binding whose only differences lie
+in an inlined default-method unfolding; (c) leave them unequal. *Recommended: (a)*: it compares like with like and needs no
+judge rule; (b) needs the inlined unfolding's extent marked, which the STG does not carry.
+
+**Incident, recorded.** To keep the whole passes at one commit, the uncommitted work was set aside with `git stash`; the stash
+list is the repository's, shared by every worktree, and `git stash pop` took another worktree's newer entry (gate-audit-1120's,
+`2629086e9`, 15:43) into this worktree. It was put back unchanged at once (`git stash store` of the same commit, this
+worktree's files restored, this branch's own entry applied from its patch and dropped by its commit): the other worktree's
+`git stash pop` gets its own entry as before. Alternative for next time: a patch file, never the shared stash.
+
+## 2026-11-20: hs-own-stg, second round (the coordinator's items: the record gap, the derived generators, the error modules, the ranked causes)
+
+Branch `hs-own-stg-1120`, after the morning's entry. The coordinator took DECISION hs-own-stg-1 (a) and set the order.
+
+**hs-own-stg-1 (a), the -O0 reference with base on ghc-internal's -O0 interfaces.** The host's GHC is the pinned 9.14.1. The
+mechanism is committed (`898adc051`, `998a4a617`): `bin/hsi pkgdb-O0` makes a package database whose ghc-internal entry (the
+installed one's, the same unit id) has the dumps' own build directory as its import-dirs, and `HSI_DUMP_PKGDB` passes it after the
+installation's to every package's one-shot compile (GHC -v2 on a scratch compile: "package ghc-internal-9.1401.0-6d86 overrides a
+previously defined package"). The packs' keys stay next's (hsi_lib_keys hashes dump_package's text: the first commit moved every
+haskell-stg-libs key and hsi read them STALE; the second normalises the hook away and keys a dump with it apart). Not run: the
+heavy lock's queue held ten jobs at 16:56, so not within the hour the coordinator allowed. The commands, for the oracle tier by
+hand (GHC live):
+
+    export TMPDIR=$PWD/.tmp/tmp
+    db=$(bin/hsi pkgdb-O0)
+    bin/heavy-lock env HSI_DUMP_OPT=-O0 HSI_DUMP_PKGDB="$db" HSI_JOBS=2 bin/hsi dumps --record --packages ghc-internal,base,ghc-prim,ghc-bignum
+
+(the dump plan compiles ghc-internal first, so its -O0 interfaces exist when base's turn comes; then lib-stg's two records judged
+against the new reference and re-recorded).
+
+**1. The record gap.** next's own-check outputs of 05:07 (`.tmp/worktrees/next/.tmp/hsi/check-own.*`) are gone with next's
+`.tmp/hsi` (cleared at 16:45). No copy survives: n-hs-rec's `check-own` holds only its fetch log, the gate's store has no
+hsi-check pass after 11-18 (its passes keep a log, not the results), and bin/hsi check has no mode that records from saved
+outputs (`--record` is part of a run; java-check's `--judge --latest-saved` has no counterpart). The interim record stays as it is
+until lane 2's run. What was read of that run before it went (this morning's report): 725 of 777 programs own, 712 passing.
+
+**2. The derived generators**, each after GHC 9.14's (the pinned tarball's `compiler/GHC/Tc/Deriv/`), each a commit:
+- `80eb6c5e5` derived Data (gen_Data_binds): gfoldl, gunfold (constrIndex's I# tags), toConstr, dataTypeOf, dataCast1/2 by the
+  type constructor's kind, and the auxiliary bindings `$tT = mkDataType "M.T" [$cC..]`, `$cC = mkConstrTag $tT "C" tag [labels]
+  Prefix|Infix` (genAuxBindSpecOriginal) as one recursive group of the module's top-level bindings with their signatures,
+  internal (typecheck.ae's `*deriv-aux*`, desugar.ae's program-exported). GHC.Internal.Data.Data 92 -> 96 of 156 and none of its
+  141 noMethodBindingError left; Functor.ZipList 5 -> 6, none left; base's Data.Complex and Data.Fixed none left (their `$fData`'s
+  other differences are the -O2 default-method unfoldings of the reference, hs-own-stg-1).
+- `60313c00a` derived Functor over function types and foralls (Functor.hs's ft_fun, ft_forall): `\b -> h (x (g b))`, the
+  argument traversed in the other position, a variable only covariant (twice contravariant is covariant). Control.Arrow's Kleisli
+  and ReadP's fmap exist (Arrow 46 -> 47 of 61, ReadP 29 -> 31 of 50).
+- `4f277e174` derived Lift (gen_Lift_binds): lift (C a..) = appE (.. (conE 'C) (lift a)..), liftTyped under unsafeCodeCoerce;
+  Data and Lift in non_coercible_class's set. GHC.Internal.TH.Lift's 77 noMethodBindingError gone; TH.Syntax 520 -> 549 (compared
+  631 -> 687).
+- `2c8f5874d` (with `f6762c7bb` below) GeneralizedNewtypeDeriving of a standalone declaration for a class of type constructors:
+  GHC.Internal.Generics' Applicative, Alternative, Monad, MonadPlus of Rec1 and M1 lacked pure, empty, <|>, >>= (7
+  noMethodBindingError); Generics 161 -> 169 of 256, none left.
+
+**3. The error modules:**
+- base's Data.Functor.Compose (`43bc62baa`): a derived Data context has its superclass's Typeable of the head's type variables
+  (sc_constraints, decomposed as the Typeable solver does; a Typeable x a Data x of the context implies left out). errors -> ok,
+  10 -> 15 of 27. Not modelled: Typeable of the kind variables a poly-kinded head also asks.
+- ghc-internal's GHC.Internal.Bignum.Integer and base's Data.Char (`97bb62528`): tcShortCutLit tested RebindableSyntax by an
+  implicit name the renamer attaches to every literal, so the short cut never applied (Word literals were fromInteger's, the
+  Integer literals of Bignum.Integer wanted the Num Integer it cannot have). Bignum.Integer errors -> ok; Enum 52 -> 53, Data.Char
+  4 -> 5 of 5.
+- base's Data.Functor.Contravariant (`f6762c7bb`): a standalone declaration whose head's type is applied to fewer arguments than
+  it has is a class of type constructors (deriving newtype instance Contravariant f => Contravariant (Alt f)). errors -> ok, 17 ->
+  20 of 44.
+- ghc-internal's GHC.Internal.TH.Lift and base's Data.Array.Byte (`ee24d0650`): expression quotes take a nested splice (the
+  splice's expression, an m Exp), a record construction (recConE, fieldExp) and an integral literal (litE (integerL n)), as
+  repE does. Both errors -> ok.
+- Left at errors: GHC.Internal.Data.Typeable.Internal (kind equalities of its GADTs, TYPE LiftedRep against a kind variable:
+  type-in-type unification the elaborator does not do).
+
+**4. The ranked causes:**
+- The HasCallStack push's placement, with the arity fix: the push bound as an evidence binding of the binding's implication and
+  GHC.Core.Opt.Arity's myExprIsCheap ported (isCallStackPredTy, isCallStackTy: a let of a CallStack does not stop eta expansion).
+  The Simplifier's renamed binders carry no type (their meta has none, *ltypes* is keyed by the elaborator's binder), so the
+  analysis recognised the binding by its right-hand side (pushCallStack, emptyCallStack, freezeCallStack through C:IP). Measured
+  on GHC.Internal.List, Data.Maybe, Data.OldList, Show, Data.Foldable, Arr, Enum and base's Data.List.NonEmpty, Data.Bifoldable,
+  Text.Printf, Data.Foldable1, Data.Semigroup: every count as before, none better, none worse. Not committed (the patch kept in
+  the worktree's `.tmp/ana/wip-callstack-conpap.patch`): the classes.ae bucket's 175 bindings are mostly another cause (below).
+- case versus let and update flags, two diagnosed: (1) a data constructor partially applied as an argument (Show's `(:) ')'`):
+  CorePrep's maybeSaturate makes `\x -> (:) c x` with c's floats outside, ours a thunk of the application. Tried as pap-eta's
+  constructor case (con-pap-eta): the front end's memory ran away on GHC.Internal.Show (36 GB before it was stopped by hand; a
+  watchdog over the worktree's processes, 3.5 GiB, from then on); reverted, in the same patch, to be bounded before it is retried.
+  (2) IO's methods: GHC eta-expands through the IO newtype (the State# argument: $fSemigroupIO's methods of arity 4 and 3), ours
+  keep the arity the source gives: the Simplifier's eta expansion through newtypes (typeArity, mkEtaWW).
+- Binding order: not attempted.
+
+**Results** (the own pools and the whole passes at the head, `ee24d0650`, one process at a time, under 2 GB, the watchdog on):
+- ghc-internal: `lib-check --ifaces own --judge` 265 modules, 0 worse, 2 better (Bignum.Integer and TH.Lift errors -> ok), the
+  control differs; `lib-stg --ifaces own --judge` **8,394 of 10,007** bindings equal (the morning's 8,284 of 9,950; n-hs-libs'
+  record 7,982 of 9,932), 101 modules better, 0 worse or missing, the control 0 of 171; one module at errors (Typeable.Internal,
+  three before). Its own STG names noMethodBindingError once, in its own definition (231 uses at the morning's pass).
+- base: `lib-check --package base --ifaces own --judge` 241 modules, 0 worse, 4 better (Data.Functor.Compose,
+  Data.Functor.Contravariant, Data.Array.Byte, GHC.RTS.Flags errors -> ok), the control differs. The whole `lib-stg --package base`
+  pass at the head is queued under the heavy lock (tenth at 18:20): `.tmp/run/r3-base-stg.log` and `.tmp/ana/base-results-r3.edn`
+  of the worktree when it runs.
+- classes.ae over ghc-internal's 1,613 differing bindings: unclassified 492, closures or fields 387, case for let 196, the call
+  stack's placement 168, update flags 123, binding order 103, a type's name 56, a static constructor 29, arity 27, given
+  equalities' selectors 21, call stacks 9, derived Show 2 (99 at the morning's pass).
+
+Not run: the own programs (lane 2), the gate, any record.
+
 ## 2026-11-20: hs-judge-1120: Haskell's judge, the 267 recorded cases read again; FMA_ConstantFold and awards own
 
 Branch `hs-judge-1120` from next `939037429`. The judge's 267 cases on a record (the facts of n-all5) are: eval's 71 programs of
@@ -14797,3 +15002,92 @@ Alternatives weighed: modelling clang's first-emission naming of a class redefin
 would need the code generator to mangle in emission order; taken as an approximation by entity id (:mangle-path-after), which the
 fs units' other gaps keep from proof yet. Rejected: listing a unit whose names differ (runtime-judge fails the build); running
 three generator processes over all 197 units (the host's memory, the coordinator's rule) in place of the one full runtime build.
+
+## 2026-11-20: hs-lane2-1120: lane 2, Haskell's own-libraries records (bin/hsi check --libs own, eval and AOT, whole)
+
+Branch `hs-lane2-1120` = `62fed300a` (mac/hs-own-stg-1120 `b26839c64` merged with mac/hs-judge-1120 `a83f27150`). HF10-P29 (a)'s
+two records, `test/haskell/check-hsi-own.edn` and `check-hsi-aot-own.edn`, made by runs instead of the INTERIM merge of hs-p22
+(review 1111b, finding 2). They decide Haskell's eval and AOT independence stages (crops.edn's `:own-inputs :haskell`, the stated
+0.5 each while the record was INTERIM or absent).
+
+The preparation (`.tmp/lane2/prep.sh` in the worktree): `bin/hsi pins --fetch`, `bin/repr-haskell corpus fetch`, then the own
+libraries at the branch's head as the gate's producers make them: `lib-check --ifaces own --judge` and `lib-stg --ifaces own` of
+ghc-internal, base and the 20 packages above base (deepseq to process), every process under 1.9 GB. Every judge 0 worse but two:
+bytestring 2 modules and time 17 modules `ok -> errors` (Data.ByteString.Lazy.Internal, Short.Internal; time's Calendar, Clock and
+LocalTime internals), the errors "no type for GHC.Internal.TH.Lib appE/conE" and an unsolved `Quote`: the derived `Lift` instances
+of hs-own-stg's second round reach Template Haskell's library, whose interface the packages' closure lacks. Not fixed here (the
+records were not re-recorded); hs-own-stg's line to look at.
+
+The runs, with `ARBACE_MEM_GIB=16` and `HSI_OWN_PACKAGES` the 20 packages, under the heavy lock: eval `bin/hsi check --libs own
+--corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record` (59 min, tree peak 11.7 GB): 950 programs, 879 own, exit 1 with
+13 programs in no class; AOT `--aot` with `--only` check-hsi-aot.edn's 139 ids, `--jobs 2 --record` (40 min, tree 7.1 GB): exit 0,
+135 own (133 pass), 4 on the pack (4 pass), fibheaps in `:own-speed`, AsyncRerun in `:async-revert`, 0 unclassed.
+
+Eval's 13, by cause:
+- Four bugs of the front end, fixed:
+  - T9533b, T10246 and mul2 stopped hsi with "no STG for the module main::": an Int literal outside Int#'s range checked against
+    Int (`case 0x10000000000000001 :: Int of`, `g 0xFD94E3B7FE36FB18 49`) took typecheck.ae's short cut, `lit-core` with no
+    fromInteger and no evidence, an STG call of `"main:/"`. GHC's `shortCutLit` (GHC.Tc.Utils.TcMType's go_integral) takes Int only
+    in `platformInIntRange` and Word only in `platformInWordRange`; outside, the literal is `fromInteger` of the Integer with Num's
+    evidence, which wraps. `check-expr`'s HsOverLit does so now (both ranges).
+  - T24818 stopped hsi with "not a word: (##){..}": `cmm_number (# #)`, the foreign import's wrapper inlined at its call, passed
+    `(##)` itself to the primcall. tostg.ae's foreign call makes a `(# #)` argument void#, as Unarise's unariseFunArg makes a
+    MultiVal [] argument voidArg (the wrapper already passed void#).
+  The four STG files after the fix differ from the run's only there (`fromInteger $fNumInt` of the Integer; void# for `(##)`). No
+  other STG of either run has the patterns (no `"main:/"`, no `(##)` in an ffi or primcall argument, no Word literal of 20 digits
+  or negative, in the 891 eval and 136 AOT programs' STG and the 882 own library modules'), and the AOT programs with foreign calls,
+  primcalls or Integer literals of several chunks (synthetic primops-int and primops-word, T24893, ffi003, ffi004, ffi014, ffi017,
+  ffi021, ffi022) compiled again with the fixes give their STG byte for byte. So the fixes change these four programs alone.
+- Nine at the check's 60 s of CPU (status 137, `:reason :limit`) on the own -O0 libraries: hash, mutstore2, dom-lt, T22798,
+  T21969 and unpack_sums_6 (on the pack within the limit: 14 to 35 s; unpack_sums_6 has no pack line, its GHC record pending, a
+  timing test, fragile(22504) in all.T, -O in GHC's run), and bspt, fulsom and pic (no reference: the NofibUtils programs of
+  `:no-reference-own`, whose outcome had been status 0).
+
+A targeted rerun of the 13 (`--only`, `--jobs 2`, `HSI_FRONT_SHARDS=2`, the same `ARBACE_MEM_GIB=16` and packages; 12 min, tree peak
+6.2 GB; not under the heavy lock, which had three live tickets waiting since 18:40, and not under `ulimit -v 8388608`, which the
+check's own `ulimit -v` of 16 GiB per program cannot raise): the four pass, the nine are killed at the limit again (54 to 85 s of wall
+on a loaded host). `--record` replaced the 13 lines and kept the other 937.
+
+Classes (the check's rules: classed by what fails):
+- `divergences-own.edn` `:own-speed`: hash, mutstore2, dom-lt, T22798, T21969 and unpack_sums_6 (none passed in either run: further
+  over the limit than gate B1's members, the same cause, HF10's -O1 line). T21969 leaves `:light-cap-stdout-ok`: at 16 GiB it is no
+  longer Go's out-of-memory at the light cap but the CPU limit, its stderr equal (`:differs [:status]`).
+- `:no-reference-own` takes the killed outcome too (`:outcomes`, status 0 or 137): bspt, fulsom, pic, judged against the missing
+  reference either way; HF10-P64 (a) still takes them out.
+- `divergences.edn` `:oracle-pending` (deferred): T5462Yes1, T13688 and unboxedsums_unit_tests, HF10-P35 (a)'s `:oracle-pending`
+  (no GHC record, and they need GHC's STG: the front end's typecheck errors, or the ghc package). The check leaves the result out of
+  its judging (the user's decision of 2026-11-13: in no class, not failing); bin/reap reads every non-pass of a record as a case and
+  reported them as 3 problems once it read the own record. The class is for the matrix; the check is unchanged.
+The check's own judge (bin/lib/hsi/check's lines from `unclassed=0` to the loop's end, run on the record): 0 unclassed over the whole
+record; on the first run's record with the committed classes 13, with the new classes 4 (the front end's four), as it must.
+
+Checks of the records: every run line is `:libs :own` (879) or `:libs :pack` with its `:front` (40: 23 `:fallback`, 7
+`:typecheck-errors`, 8 `:ineligible` with `:why`, 1 `:timeout`, 1 `:stg`); the 31 lines without `:libs` are never run (28
+`:no-dump`, 2 `:skipped`, T17920's Cmm main, which passes with no STG); 27 lines of status 137, none a pass (D-HSJ-3 (a)); the first
+line is the check's header, not ";; INTERIM"; the eleven negative controls failed as they must in the whole run (the rerun ran none).
+The AOT record: 139 lines, 135 own, 4 pack, 1 of status 137 (fibheaps), not a pass.
+
+The 71 programs not own: never run (31): 19 import the parallel package (Control.Parallel, its Strategies, Parallel, Control.Seq),
+2 System.Random, 2 System.Time, 1 Data.STRef.Unboxed, 3 have no main file, nofib/smp/threads004 stops the front end (forkOnIO), and
+GHC built none of these 28 (`:no-dump`); T24809 and T4262 skipped by all.T; T17920 a Cmm main. On the pack (40): 23 of
+own-fallback.txt (21 pass; compareByteArrays and T23071 at the limit), 7 stopped by the front end's typecheck (5 pass; T5462Yes1 and
+T13688 oracle-pending), ManyUbxSums's front end timeout, quotRem2Large's StackOverflowError in tostg, and 8 ineligible: the ghc
+package (T13825-unit; unboxedsums_unit_tests, oracle-pending), IOExts (nofib/gc/happy), GHCi.TH.Binary, GHC.Utils.Encoding,
+GHC.TypeLits.Experimental, GHC.Internal.PrimopWrappers, and tcrun022's RULES pragma.
+
+crops-score counted 841 of 950 eval cases own, not 879: `cell-ids` took the cell's ids from the source's `:file`, the pack's
+check-hsi.edn (909 programs), while bin/reap's hsi-pick reads the `:own-file` (950), so the 38 own programs only the own record holds
+(own verdicts pending, own-verdicts-pending.tsv) counted 0.5. `test/crops/score.ae`'s `source-file` reads a source's `:own-file`
+once it is there and not INTERIM, as hsi-pick does, for the cell's ids; a self-test with its control (an own file not there keeps
+the source's file). No other crop has an `:own-file`; `scores.edn` changed in Haskell's block alone.
+
+Results: `bin/reap --record`: Haskell eval 859 / 61 / 30 (was the pack's 815 / 62 / 32, 909 cases), AOT 137 / 1 / 1 (was 138 / 1 /
+0); 56 of 56 cells, 0 problems. `bin/crops-score --record`: Haskell's eval stage 0.5 -> 0.963 (879 of 950 own), AOT 0.5 -> 0.986
+(135 of 139), independence 79.92 -> 98.90 (floor 79 -> 98), completeness 97.21 -> 97.22 (meant 99.03 -> 98.95), maturity 100.
+`--judge --strict` 0 problems; `bin/records-check` 9 pairs, 0 problems; `bin/reap --self-test` and `bin/crops-score --self-test`
+pass. `bin/hsi divergences` on the pack's record: 909 programs, 0 not (the new class's three members not in it, a note).
+
+Alternatives not taken: classing the four front-end programs in a new own class instead of fixing them (the fixes are GHC's rules
+and change nothing else); dropping `:oracle-pending` rows from reap's reader (the user's decision counts them); a whole second run
+for one record state (the fixes provably touch the four programs alone; `--only --record` is the check's way to replace lines).
+Not done: doc/AGENDA.md (the main session's), the gate.

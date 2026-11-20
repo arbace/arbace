@@ -624,6 +624,24 @@
             (doseq [[x t2] (map vector xs (concat tys (repeat nil)))] (swap! *lreps* assoc x (if t2 (type-reps t2) [:L])))
             (list 'lam xs (list 'app f (into (vec args) xs)))))))))
 
+(declare atom-of binders)
+
+(defn- pap-eta-floated
+  "CorePrep's cpeArg on pap-eta's partial application (a value: exprIsHNF): its own arguments' bindings are floats of the
+  argument that wantFloatLocal floats out of it (lazy floats and an HNF: FloatAll) before cpeEtaExpand, so the eta
+  lambda applies the function to their atoms (derived Show's showList = showList__ (showsPrec 0): I# 0 bound outside
+  \\x -> $cshowsPrec sat x). [closure bindings], the bindings outermost first; nil when a binding is a case (a strict
+  float stays in) or an eta binder is not lifted"
+  [lam]
+  (let [[_ xs body] lam
+        f (second body) args (vec (drop-last (count xs) (nth body 2)))]
+    (when (every? #(= [:L] (local-reps %)) xs)
+      (let [rs (mapv atom-of args)]
+        (when-not (some (fn [[_ bs]] (some #(= :case (first %)) bs)) rs)
+          [(list 'closure :r :fvs (binders xs)
+                 (list 'app (if (lv? f) (local-name f) (gname (second f))) (into (mapv first rs) (map local-name xs))))
+           (vec (mapcat second (reverse rs)))])))))
+
 (defn- spec-eval
   "CorePrep's speculative evaluation (Note [Speculative evaluation], mkNonRecFloat's exprOkForSpecEval with
   -fspec-eval and -fspec-eval-dictfun on, their defaults): a binding of a superclass selection from a dictionary (a
@@ -647,7 +665,8 @@
             alg (fn [] (if (vector? cls) (list 'alg (ext-str (nth cls 2) (nth cls 3))) '(poly)))]
         (cond
           (contains? *rec-ids* (gname g)) nil
-          (and (re-find #"^\$p[0-9]+" o) (= 1 (count args)) (atomic-args? args)) (alg)
+          ;; (not a quantified superclass's selection: its result a dictionary function, not a dictionary)
+          (and (re-find #"^\$p[0-9]+" o) (= 1 (count args)) (atomic-args? args) (not= :qc sel)) (alg)
           (and (str/starts-with? o "$f") (pos? npreds) (= npreds (count args)) cls
                (every? #(or (atomic-args? [%]) (spec-eval %)) args)
                (contains? (:all-classes *r*) cls) (not (newtype-class? cls)))
@@ -661,7 +680,8 @@
   (cond
     (and (lv? a) (contains? @*joins* (local-name a))) (let [n (fresh "sat")] [n [[n (list 'closure :u :fvs [] (list 'app (local-name a) [(void-atom)]))]]])
     ;; an equality constraint's evidence: the boxed (~)'s Eq# (its coercion field void)
-    (head? a 'co) (let [n (fresh "$d~")] [n [[n (list 'rcon (ext-str "GHC.Internal.Types" "Eq#") [])]]])
+    ;; (Coercible's: the class's MkCoercible, its field void too)
+    (head? a 'co) (let [n (fresh "$d~")] [n [[n (list 'rcon (ext-str "GHC.Internal.Types" (if (= :coercible (second a)) "MkCoercible" "Eq#")) [])]]])
     (and (lv? a) (empty? (local-reps a))) [(void-atom) []]
     (lv? a) [(local-name a) []]
     ;; Unarise's unariseFunArg: a global is no binder of rho, kept (realWorld#: dsFCall's and runRW#'s token); void# itself
@@ -677,10 +697,14 @@
       [n [[n (rhs (list 'lam xs (list 'app a xs)))]]])
     ;; a newtype class's selector on an atom (ip d): d |> co, trivial (CorePrep: the selector has no binding, its
     ;; unfolding \d -> d |> co); HF10-P48 (a): its dictionary constructor on an atom too (C:IP x: x |> co)
-    (let [a (flatten-app a)]
-      (and (head? a 'app) (head? (second a) 'v) (= 1 (count (nth a 2))) (atomic-args? (nth a 2))
-           (or (newtype-selector? (second (second a)))
-               (and (class-of-dcon (second (second a))) (newtype-class? (class-of-dcon (second (second a))))))))
+    ;; (and nested: HasCallStack's defaulted ip (C:IP emptyCallStack), the casts of a variable exprIsTrivial looks through)
+    ((fn nt-wrap? [a]
+       (let [a (flatten-app a)]
+         (and (head? a 'app) (head? (second a) 'v) (= 1 (count (nth a 2)))
+              (or (atomic-args? (nth a 2)) (nt-wrap? (first (nth a 2))))
+              (or (newtype-selector? (second (second a)))
+                  (and (class-of-dcon (second (second a))) (newtype-class? (class-of-dcon (second (second a)))))))))
+     a)
     (atom-of (first (nth (flatten-app a) 2)))
     ;; a newtype class's dictionary constructor on an expression (C:IP e): its unfolding \x -> x |> co applied, a
     ;; thunk of let x = e in x
@@ -720,7 +744,10 @@
         (let [[at bs] (atom-of inner)]
           [at (into (vec (for [[b r] binds] [(local-name b) (rhs r)])) bs)])
         (let [n (fresh "sat")] [n [[n (rhs a)]]])))
-    :else (let [n (fresh "sat")] [n [[n (rhs (or (pap-eta a) a))]]])))
+    :else (let [n (fresh "sat") pe (pap-eta a)]
+            (if-let [[clo bs] (when pe (pap-eta-floated pe))]
+              [n (conj bs [n clo])]
+              [n [[n (rhs (or pe a))]]]))))
 
 (declare float-scrut)
 
@@ -866,6 +893,12 @@
     ;; foreign import prim's (primcall LABEL UNIT ATOMS REPS); REPS the unboxed result tuple's but the State# token's
     (and (head? f 'v) (vector? (second f)) (= "ffi" (nth (second f) 1)) (get (:fcalls *r*) (second f)))
     (let [g (second f) sp (get (:fcalls *r*) g) t (global-type g) ar (count (arg-types t))
+          ;; (lane 2, 2026-11-20: a (# #) argument is void#, as Unarise's unariseFunArg makes a MultiVal [] argument voidArg:
+          ;; T24818's cmm_number (# #), the wrapper inlined at its call, passed (##) itself to the primcall)
+          args (mapv (fn [a] (if (and (head? a 'v) (unboxed-con? (second a)) (= "(##)" (nth (second a) 3)))
+                               (list 'v ["ext" "var" "GHC.Internal.Prim" "void#"])
+                               a))
+                     args)
           reps (type-reps (result-type t ar))
           rep (case (count reps) 0 :v 1 (first reps) (vec reps))
           mk (fn [as] (if (= :prim (:conv sp))
@@ -1223,7 +1256,7 @@
               (if (zero? (or (:arity (con-info c)) 0)) (list 'con (gname c) []) (list 'app (gname g) [])))
             :else (list 'app (gname g) [])))
       lit (first (lit-form (second e)))
-      co (list 'con (ext-str "GHC.Internal.Types" "Eq#") [])
+      co (list 'con (ext-str "GHC.Internal.Types" (if (= :coercible (second e)) "MkCoercible" "Eq#")) [])
       app (app-expr (second e) (nth e 2))
       lam (let [n (fresh "sat")] (list 'let (list 'bind [n :L] (rhs e)) (list 'app n [])))
       ;; (queue 374: a join point only when its calls' arity, the occurrence analyser's :join, is its right-hand side's lambda
@@ -1497,12 +1530,17 @@
 ;;; The module
 
 (defn- selectors
-  "The module's classes that are not newtypes: their data and their selectors (MkId.mkDictSelId)"
+  "The module's classes: their data and their selectors (MkId.mkDictSelId); a newtype class (one method or one
+  superclass) its data too and its one selector the identity, \\v -> v (the cast erased: GHC.Internal.Classes' ip,
+  IsString's fromString, HasField's getField), no binding of its constructor"
   []
-  (for [[cls info] (:all-classes *r*) :when (and (= (module) (nth cls 2)) (not (newtype-class? cls)))]
+  (for [[cls info] (:all-classes *r*) :when (= (module) (nth cls 2))]
     (let [fields (concat (map-indexed (fn [i _] (str "$p" (+ i (sc-base cls)) (nth cls 3))) (:supers info)) (map #(nth % 3) (:methods info)))
           dc (ext-str (module) (dcon-occ cls))
           k (count fields)]
+      (if (newtype-class? cls)
+        {:data (list 'stg/data (ext-str (module) (nth cls 3)) [(list 'dc dc 1 [:L] [:lazy])])
+         :binds (let [v (fresh "v")] [(list 'bind [(ext-str (module) (first fields)) :L] (list 'closure :r [] [[v :L]] (list 'app v [])))])}
       {:data (list 'stg/data (ext-str (module) (nth cls 3)) [(list 'dc dc 1 (vec (repeat k :L)) (vec (repeat k :lazy)))])
        :binds (cons (list 'bind [dc :L] (let [xs (mapv (fn [_] (fresh "eta")) fields)]
                                          (list 'closure :r [] (mapv (fn [x] [x :L]) xs) (list 'con dc xs))))
@@ -1511,7 +1549,7 @@
                         (list 'bind [(ext-str (module) f) :L]
                               (list 'closure :r [] [[d :L]]
                                     (list 'case (list 'app d []) [w :L] (list 'alg (ext-str (module) (nth cls 3)))
-                                          [(list 'alt dc (mapv (fn [x] [x :L]) xs) (list 'app (nth xs i) []))]))))))})))
+                                          [(list 'alt dc (mapv (fn [x] [x :L]) xs) (list 'app (nth xs i) []))]))))))}))))
 
 (defn- data-forms
   "The module's data types (not newtypes): stg/data and the constructors' workers (Prep's mkDataConWorkers)"

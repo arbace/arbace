@@ -38,7 +38,12 @@
 #                                  aot read the libraries from the pack unless HSI_LIBS names others or HSI_LIVE=1 (run --live, check --live)
 #                                  reads .tmp/hsi/dumps*/stg
 #                                  HSI_DUMP_OPT=-O0 bin/hsi dumps --record --packages ghc-internal,base,ghc-prim,ghc-bignum: the -O0
-#                                  reference into haskell-stg-libs-O0-ghc-9.14.1 (HF10-P1 (a), lib-stg's reference; keyed with the level)
+#                                  reference into haskell-stg-libs-O0-ghc-9.14.1 (HF10-P1 (a), lib-stg's reference; keyed with the level);
+#                                  hs-own-stg-1 (a): with HSI_DUMP_PKGDB=$(bin/hsi pkgdb-O0) base and the others compiled against
+#                                  ghc-internal's -O0 interfaces of the same run (its default methods' unfoldings -O0's, as the own
+#                                  path inlines them), not the installed -O2 ones
+#   bin/hsi pkgdb-O0 [DB]          that package database (default .tmp/hsi/pkgdb-O0): the installed ghc-internal's entry, its
+#                                  import-dirs the dumps' build directory of ghc-internal; its path on stdout
 #   bin/hsi libs-pack [-O0|-O2]    the level's pack unpacked and its keys checked; prints its directory of PKG/M.stg.ae
 #   bin/hsi record-libs DIR [P,...]   the same packing from an existing dumps directory DIR (its stg/) without dumping
 #   bin/hsi verify-libs --packages P,...|--sample N   the packages (the N smallest of the pack) dumped again by the helper into .tmp/hsi/verify-libs and compared with the pack's
@@ -328,6 +333,27 @@ strip_srcdir() {
   echo "$f"
 }
 
+# pkgdb_o0 [DB]: hs-own-stg-1 (a)'s package database (default .tmp/hsi/pkgdb-O0): the installed ghc-internal's entry with its
+# import-dirs this checkout's dump build directory of ghc-internal (.tmp/hsi/root/_build/stage1/libraries/ghc-internal/build, where
+# HSI_DUMP_OPT=-O0 bin/hsi dumps writes its -O0 interfaces before base's turn); its path on stdout, for HSI_DUMP_PKGDB
+pkgdb_o0() {
+  local db=${1:-$WORK/pkgdb-O0} conf
+  ghc_check
+  conf=$(ls "$libdir"/package.conf.d/ghc-internal-*.conf | head -1)
+  [ -f "$conf" ] || die "pkgdb-O0: no installed ghc-internal entry in $libdir/package.conf.d"
+  rm -rf "$db"; mkdir -p "$db"
+  awk -v d="$WORK/root/_build/stage1/libraries/ghc-internal/build" '
+    /^import-dirs:/ {print "import-dirs: " d; skip = 1; next}
+    skip && /^ / {next}
+    {skip = 0; print}' "$conf" > "$db/$(basename "$conf")"
+  ghc-pkg --package-db "$db" recache >&2 || die "pkgdb-O0: ghc-pkg recache"
+  echo "$db"
+}
+
+# (hs-own-stg-1 (a): HSI_DUMP_PKGDB=DB, a package database dump_package passes after the installation's, whose entries shadow the
+# installed units of the same id: ghc-internal's entry with this run's own -O0 build directory as its import-dirs, so that base
+# and the packages after it are compiled against ghc-internal's -O0 interfaces, not the installed -O2 ones; bin/hsi pkgdb-O0
+# makes it. The packs' keys read dump_package without it, and with it set key the level apart, records.bash's hsi_lib_keys)
 dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
   local name=$1 dir=$2 unitf=$3 flags=$4 mods=$5 hscs=$6 hflags=$7 gens=$8 gfiles=$9 out=${10}
   local r=$WORK/root unit b srcdirs=() f t0 t1 rc=0
@@ -355,7 +381,7 @@ dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
     cp "$root/${f#*=}" "$r/$b/$m"
   done
   # shellcheck disable=SC2046,SC2086
-  local gf=(-this-unit-id "$unit" $(prefix_rel "$dir" $(echo "$flags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g"))
+  local gf=(-this-unit-id "$unit" ${HSI_DUMP_PKGDB:+-package-db "$HSI_DUMP_PKGDB"} $(prefix_rel "$dir" $(echo "$flags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g"))
             "-i$b" "-I$b" "${HSI_DUMP_OPT:--O2}" -haddock -outputdir "$b" -j"$jobs")
   t0=$(date +%s.%N)
   # shellcheck disable=SC2086
@@ -812,6 +838,7 @@ case $cmd in
   pins) pins "$@" ;;
   spec-check) spec_check ;;
   dumps) dumps "$@" ;;
+  pkgdb-O0) pkgdb_o0 "$@" ;;
   verify-libs) verify_libs "$@" ;;
   libs-pack)
     # bin/hsi libs-pack [-O0|-O2]: a libraries' pack unpacked into the store, its keys checked at the level; prints its directory
