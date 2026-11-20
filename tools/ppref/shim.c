@@ -27,6 +27,16 @@ void _ZdaPv (void *p) { free (p); }
 void _ZdlPvm (void *p, unsigned long n) { (void) n; free (p); }
 void _ZdaPvm (void *p, unsigned long n) { (void) n; free (p); }
 
+/* the guards of a function's static with a dynamic initializer (the Itanium ABI's __cxa_guard_*): one thread, so the guard's
+   first byte alone, as libsupc++'s guard.cc without threads */
+int __cxa_guard_acquire (unsigned long long *g) { return *(unsigned char *) g == 0; }
+void __cxa_guard_release (unsigned long long *g) { *(unsigned char *) g = 1; }
+void __cxa_guard_abort (unsigned long long *g) { (void) g; }
+
+/* libiberty's alloca without a compiler's (libiberty.h maps alloca to C_alloca when __GNUC__ is not defined, as the build reads
+   libcpp: -U__GNUC__): heap blocks never freed (a file's preprocessing allocates little this way), C_alloca (0) nothing */
+void *C_alloca (unsigned long n) { return n ? shim_alloc (n) : 0; }
+
 /* a pure virtual function called: libsupc++'s message and abort */
 void
 __cxa_pure_virtual (void)

@@ -9164,7 +9164,8 @@ the differences explained). The code generator's gaps go to cpp-rt-own-1120, whi
   expanded), each token's place from its source range, placed at the splices that touch it from the left, its text without splices.
   `--list FILE` runs many files in one process (no `cpp_destroy`: cc1 never calls it, and its file cleanup frees the names
   `__has_include` gave). `tools/ppref/shim.c`: operator new and delete, `__cxa_pure_virtual` (libcpp built `-fno-exceptions` as GCC
-  builds it). libcpp's `config.h` (with `ENABLE_CANONICAL_SYSTEM_HEADERS`, Alpine's gcc's: a system header's `__FILE__` the shorter
+  builds it), `__cxa_guard_*` (one thread: charset's template's local static) and `C_alloca` (libiberty.h's alloca without
+  `__GNUC__`; heap blocks never freed). libcpp's `config.h` (with `ENABLE_CANONICAL_SYSTEM_HEADERS`, Alpine's gcc's: a system header's `__FILE__` the shorter
   real path), `localedir.h` and libiberty's `config.h` are written by the build script.
 - **`bin/repr-cpp ppref prepare|build|exe|key [--native]`** (`bin/lib/repr-cpp/ppref`): the pinned tarball checked and its libcpp,
   include/ and 16 libiberty files extracted into `.tmp/ppref/src-KEY/`; `build`, Arbace's own: libcpp's 14 units and the harness by
