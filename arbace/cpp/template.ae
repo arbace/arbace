@@ -1310,6 +1310,34 @@
                       (reset! b (second (first found)))
                       true)))))))
 
+;; queue 492 (the checker): an argument type the deduction sees whole -- a fundamental type, an enumeration, a class, or a
+;; compound of them, no dependent, undeduced or expression part -- so a P of another kind surely does not match it
+;; ([temp.deduct.type]/1-2: P's form must be A's; [temp.deduct.call]/4 allows only the listed conversions, none of them
+;; changing a type's kind but the derived-to-base one of a class).
+(defn- cx-whole-type? [A]
+  (and (sema/checking?) (map? A) (#{:b :ptr :ref :rref :arr :fn :mptr :class :enum} (:k A))
+       (not-any? #(and (map? %) (#{:dep :tparam :tparam-v :ttp :auto :texpr :tdep :ttdep :overload :pack-exp :tspec} (:k %)))
+                 (tree-seq coll? seq A))))
+
+(defn- cx-kind-mismatch!
+  "Queue 492: P's kind (a pointer, reference, array, function, pointer to member or template-id) is not A's, A whole: a sure
+  failure (false)."
+  [A]
+  (if (cx-whole-type? A) (sure!) false))
+
+(defn- cx-no-spec-base?
+  "Queue 492: the class A, complete and not dependent, neither is a specialization of the class template `tmpl-id` nor has a
+  base, direct or indirect, that is one ([temp.deduct.call]/4.3), every base known."
+  [A tmpl-id]
+  (and (sema/checking?) (abi/class? A) (some? tmpl-id)
+       (loop [todo [(:id A)] seen #{}]
+         (if-let [c (first todo)]
+           (let [k (abi/cls c)]
+             (cond (seen c) (recur (rest todo) seen)
+                   (or (nil? k) (not (:complete k)) (:defining k) (= tmpl-id (:tmpl k)) (some #(nil? (:cls %)) (:bases k))) false
+                   :else (recur (concat (rest todo) (map :cls (:bases k))) (conj seen c))))
+           true))))
+
 (defn deduce-by-type-match
   "DeduceTemplateArgumentsByTypeMatch (SemaTemplateDeduction.cpp at llvmorg-23.1.4), ported for the types of the
   slice: P (a type with the parameters of the template `tid`) matched against A, the deductions bound in the atom `b`
@@ -1354,10 +1382,10 @@
           :else
           (let [down (if (= pok :call) :none pok)]
             (case (:k P)
-              :ptr (and (abi/ptr? A) (deduce-by-type-match b tid (:to P) (:to A) (set (filter #{:ignore-qualifiers :derived-class} tdf)) down))
-              :ref (and (= :ref (:k A)) (deduce-by-type-match b tid (:to P) (:to A) #{} down))
-              :rref (and (= :rref (:k A)) (deduce-by-type-match b tid (:to P) (:to A) #{} down))
-              :arr (and (abi/arr? A)
+              :ptr (if (abi/ptr? A) (deduce-by-type-match b tid (:to P) (:to A) (set (filter #{:ignore-qualifiers :derived-class} tdf)) down) (cx-kind-mismatch! A))
+              :ref (if (= :ref (:k A)) (deduce-by-type-match b tid (:to P) (:to A) #{} down) (cx-kind-mismatch! A))
+              :rref (if (= :rref (:k A)) (deduce-by-type-match b tid (:to P) (:to A) #{} down) (cx-kind-mismatch! A))
+              :arr (and (or (abi/arr? A) (cx-kind-mismatch! A))
                         (deduce-by-type-match b tid (:of P) (:of A) (set (filter #{:ignore-qualifiers} tdf)) down)
                         (let [n (:n P)]
                           ;; a dependent bound: the array's size deduces the non-type parameter (DeducedFromArrayBound)
@@ -1383,12 +1411,18 @@
                          (match-args b tid (:ps P) (:ps A)) ; R(Args...): the trailing pack takes the rest
                          (and (= (count (:ps P)) (count (:ps A)))
                               (every? true? (map #(deduce-by-type-match b tid %1 %2 #{} pok) (:ps P) (:ps A))))))
-              :tspec (deduce-template-spec b tid P A tdf)
+              :tspec (or (deduce-template-spec b tid P A tdf)
+                         ;; (queue 492, the checker: A no class, or a class no specialization of P's template nor derived
+                         ;; from one, P's template not a template template parameter)
+                         (cond (and (not (abi/class? A)) (not= :tspec (:k A))) (cx-kind-mismatch! A)
+                               (and (abi/class? A) (nil? (:ttp P)) (cx-whole-type? A) (cx-no-spec-base? A (:tmpl P))) (sure!)
+                               :else false))
               ;; T::name: a non-deduced context ([temp.deduct.type]/5.1)
               :tdep true
               :texpr true ; an expression: non-deduced ([temp.deduct.type]/5.3)
               ;; a pack expansion's pattern against the type (partial ordering, [temp.deduct.partial]/8)
-              :pack-exp (deduce-by-type-match b tid (:of P) (if (= :pack-exp (:k A)) (:of A) A) tdf down)
+              :pack-exp (binding [*sure* nil] ; (queue 492: no sure kind mismatch inside a pack expansion: one not trailing is a non-deduced context)
+                          (deduce-by-type-match b tid (:of P) (if (= :pack-exp (:k A)) (:of A) A) tdf down))
               :tparam true ; another template's parameter at another depth: skipped
               (unsure!))))))))
 
@@ -1527,7 +1561,10 @@
                           :when (seq (deducible-tparams P tid))
                           ;; an overload set holding a function template: a non-deduced context ([temp.deduct.call]/6;
                           ;; G5: std::endl given to a stream's operator<< templates)
-                          :when (not (and (= :fnset (:op e)) (seq (:tmpls e))))]
+                          :when (not (and (= :fnset (:op e)) (seq (:tmpls e))
+                                          ;; (queue 492, the checker: a parameter that is a template parameter alone, left
+                                          ;; undeduced by it, nondeduced's sure failure below when nothing else deduces it)
+                                          (do (when-let [i (and (sema/checking?) (nil? (:targs-text e)) (bare-tparam P))] (swap! nondeduced conj i)) true)))]
                       (if-let [[P A tdf] (when-not (and (sema/checking?) (= :mptr-fnset (:op e))) (adjust-for-deduction P e tid))]
                         (deduce-by-type-match b tid P A tdf :none)
                         (cond
@@ -1557,7 +1594,9 @@
                         elems (for [e rest-args]
                                 (let [b2 (atom (apply dissoc @b packs))]
                                   (when-let [[P A tdf] (adjust-for-deduction (:of pk) e tid)]
-                                    (when (deduce-by-type-match b2 tid P A tdf :none) @b2))))]
+                                    ;; (queue 492: no sure kind mismatch for a pack's pattern, whose parameter types the slice
+                                    ;; may leave unadjusted: `T... ptr[1]`, cpp26/pack-indexing11.C)
+                                    (when (binding [*sure* nil] (deduce-by-type-match b2 tid P A tdf :none)) @b2))))]
                     (when (every? some? elems)
                       (doseq [i packs :when (not (contains? @b i))] (swap! b assoc i {:pack (mapv #(get % i) elems)}))
                       true)))
@@ -2699,6 +2738,19 @@
                         (some (fn [i] (and (not (ded i)) (not (:default (nth ps-t i))))) (range (count ps-t))))))))
       (catch arbace.lang.ExceptionInfo _ false))))
 
+(defn- cx-too-many-args?
+  "Queue 492 (the checker): the call has more arguments than the function template `t` has parameters, none of them a pack
+  and no ellipsis ([over.match.viable]/2.1), so no specialization is viable whatever its template arguments."
+  [t args]
+  (boolean
+    (try
+      (let [sig (sym-sig t) all (vec (:ps sig))
+            xobj (:isExplicitObjectParameter (first (filter #(= "ParmVarDecl" (:kind %)) (:inner (:pattern t)))))]
+        (and (not xobj) (not (:va sig)) (not-any? :pack (:params t))
+             (not-any? #(and (map? %) (= :pack-exp (:k %))) all)
+             (> (count args) (count all))))
+      (catch arbace.lang.ExceptionInfo _ false))))
+
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
@@ -2726,7 +2778,11 @@
                                                (do
                                                  ;; (queue 463, the checker: a deduction that fails surely by the algorithm,
                                                  ;; cx-sure-undeduced?, no template argument written)
-                                                 (when (and (sema/checking?) (not @u) (nil? (:targs-text callee)) (cx-sure-undeduced? t args))
+                                                 (when (and (sema/checking?) (not @u)
+                                                            (or (and (nil? (:targs-text callee)) (cx-sure-undeduced? t args))
+                                                                ;; (queue 492: more arguments than parameters, explicit template
+                                                                ;; arguments written or not, [over.match.viable]/2)
+                                                                (cx-too-many-args? t args)))
                                                    (reset! sr true))
                                                  (when (System/getenv "CPP_TMPL_TRACE")
                                                    (binding [*out* *err*] (println "template" (:name t) "does not deduce from" (pr-str (map :ty args)) "explicit" (pr-str ex)))))))
@@ -3218,7 +3274,9 @@
         (do (swap! *tmpls* assoc tid {:id tid :tk :class :name (:name n) :scope scope :path (:path scope) :params (tparams n)
                                       :class-constraint (:requiresClause n) :head-text (when (sema/checking?) (node-text n))
                                       :pattern (when (:completeDefinition pattern) pattern) :pos (:_b n) :insts {} :specs {} :partials [] :ool []})
-            (enter! scope (:name n) {:e :tmpl :tk :class :id tid :pos (long (or (:_b n) 0))})))
+            (enter! scope (:name n) (cond-> {:e :tmpl :tk :class :id tid :pos (long (or (:_b n) 0))}
+                                      ;; (queue 492, the checker: a member class template's access, sema's check-type-access!)
+                                      (and (sema/checking?) (:cls scope) sema/*member-access*) (assoc :access sema/*member-access*)))))
       :template))
     "FunctionTemplateDecl"
     (if-let [gd (first (filter #(= "CXXDeductionGuideDecl" (:kind %)) (kids n)))]
