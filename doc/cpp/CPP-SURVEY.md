@@ -9248,3 +9248,16 @@ expansion writes gets a label of no name (`lbl.11`), the same `goto` written in 
 (`arbace.cpp.codegen gen-batch`, c++17: `br label %lbl.11` and `br label %lbl.bad18`, only `lbl.bad18:` defined; without the macro
 the `do ... while (0)` is right). libcpp's SYNTAX_ERROR macros are such gotos. The code generator's (cpp-rt-own's) to fix.
 
+### Built by Arbace (2026-11-20, night; mac/cpp-rt-own-1120 8faf78756 merged: a macro's goto reaches its label)
+
+| step | result |
+|---|---|
+| the own build (`bin/repr-cpp ppref build`, every process capped at 8 GiB) | the 15 units afresh (only expr's lowered C changed by the goto fix), the library's 32 units read (3.8 GB peak), linked and translated by cf2g, built by TamaGo's go: 17.6 minutes, then 11.8 with the shim's `__cxa_guard_*` and `C_alloca` (the first run faulted in cpp_init_iconv's alloca); `.tmp/ppref/own-54afa0a5a8d3029c/ppref`, about 30 times the native build's time a file |
+| against the native stand-in, file by file | byte for byte: 76 output files of cpp-lexical, 72,264 of gxx-dg every 10th, 3,448 of libstdcxx-headers every 8th (the streams, raw tokens and statuses); its fidelity against the records the native's (status 0 in each corpus) |
+| the record run (`REPR_CPP_PP_JUDGE=own --record-results`) | cpp-lexical 19 (16 pass, 3 known), libstdcxx-headers 108 pass, gxx-dg 1,807 (1,805 pass, 2 known); the controls fail as they must; test/repr/cpp/pp-check-results.edn rewritten: 1,929 pass, 5 known (the own sections' classes), CP260 (a)'s three n/a files (pr60969.C, vect/pr99149.cc, Makefile.am) passes now, the reference reading them; reap's C++ read source takes `:pp-own :lex-own`, the three classes in test/cpp/divergences-read.edn (`:design`): the read cell 5,541 / 327 / 630, 33 n/a |
+| C's 72 (`REPR_C_PP_JUDGE=own`) | 69 by the reference's stream, 3 `:ref :differs`; the control `_control/tokens-ref/va-opt-2-vs-va-opt-3` differs |
+| the planted bug on the own build (a scratch checkout; `__LINE__` one more past line 100) | cpp-lexical 1 fails (includenext.cpp), libstdcxx-headers 42, C's 2 (c23-digit-separators-1.c, sqlite3.c); each exit 1 |
+| the stub run (gcc, g++, cc, c++, cpp, cc1, cc1plus, clang, clang++, clang-23, ld, as exiting 99 first on PATH) | the own-judged `pp-check --essential` (53 files) and C's gcc-va-opt (9) pass, the stubs' log empty |
+| the facts | C++'s judge `:pp-check-own [1929 1] :pp-check-class [5 0.5]`, the read's tokens 1,934: judge 0.907 to 0.998, independence 91.38 to 93.20 (floor 91 to 93), completeness 95.63 to 95.61; C's judge `{:self 14936 :recorded 79}`: 0.995 to 0.997, independence 99.90 to 99.94 (floor 99); `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (0), `bin/reap --record` (0), `bin/gate --plan` (exit 0) |
+| the gate | 910cf7a77 reverted (3898cd60b): cpp-ppref, the own-judged cpp-essential, cpp-tokens and c-tokens-ref, cpp-tokens-oracle |
+

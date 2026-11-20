@@ -13792,3 +13792,21 @@ minutes at a 3.7 GB peak, and stopped at expr.cc's: `label undefined: b$lbl$_119
 cpp_classify_number branch to `lbl.119`, which no block defines (the label is `lbl.syntax_error1305`). Reduced to three lines
 (doc/cpp/CPP-SURVEY.md, "Blocked", its update): a `goto` whose label name a macro's expansion writes gets a label of no name. Reported
 to the main session for cpp-rt-own; nothing else changed (no record, fact or score; the gate's flip still held by 910cf7a77).
+
+## 2026-11-20: pp-ref's reference built by Arbace; the token checks judged by it (pp-ref-1120)
+
+Merged mac/cpp-rt-own-1120 at c1c2badd8 (a constant array an LLVM array) and 8faf78756 (a goto's label kept on the parser's node:
+a macro's goto reaches its label). `bin/repr-cpp ppref build`, every process capped at 8 GiB, built libcpp and the harness by
+Arbace alone; its first run faulted on `C_alloca` (libiberty.h's alloca without `__GNUC__`), and charset's template local static
+needs `__cxa_guard_*`: both added to tools/ppref/shim.c, the build again (11.8 min). Its runs are the native stand-in's byte for
+byte over the token check's corpora (76, 72,264 and 3,448 output files). The record run under `REPR_CPP_PP_JUDGE=own` rewrote
+test/repr/cpp/pp-check-results.edn (1,929 pass, 5 known by the own sections' classes, CP260 (a)'s three n/a files now passes: the
+reference reads them); reap reads the own sections (test/reap/cells.edn, three `:design` classes in test/cpp/divergences-read.edn;
+the read cell 5,541 / 327 / 630, 33 n/a). C's 72 under `REPR_C_PP_JUDGE=own`: 69 by the reference, 3 `:ref :differs`, the control
+differs. The planted `__LINE__` bug on the own build: cpp-lexical 1, libstdcxx-headers 42 and C's 2 files fail. The stub run (the
+host's compilers exiting 99 first on PATH): the own-judged essential token check and C's gcc-va-opt pass, the stubs' log empty.
+independence.edn: C++'s judge 0.907 to 0.998 (independence 91.38 to 93.20), C's 0.995 to 0.997 (99.90 to 99.94); crops-score
+recorded, `--judge --strict`, records-check and reap 0 problems; 910cf7a77 reverted (3898cd60b), the gate's own-judged steps on.
+Alternative weighed: regenerating charset alone after the array fix, as asked; all 15 were regenerated, the merged code generator
+and parser changing the others' output (the goto fix, expr alone: confirmed unit by unit), so that the build at its key is what a
+fresh build makes.
