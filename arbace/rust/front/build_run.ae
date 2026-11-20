@@ -1054,6 +1054,15 @@
              (if val (with-meta (apply list (concat (take 3 x) [val])) (meta x)) x)))))
      body)))
 
+(defn- generic-zst?
+  "queue 493: a generic body's local type zero-sized whatever its parameters (rustc's layout_of on the generic type: PhantomData<T>
+  and tuples of such), for RemoveZsts' locals"
+  [g]
+  (case (first g)
+    :adt (= "core::marker::PhantomData" (second g))
+    :tuple (every? generic-zst? (second g))
+    false))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
@@ -1067,7 +1076,10 @@
               (set (for [i (range (count gt))
                          :let [g (nth gt i) t (nth it i nil)]
                          :when (and t (vector? g) (#{:adt :array :closure :tuple} (first g))
-                                    (not-any? #(and (vector? %) (= :param (first %))) (tree-seq coll? seq g)))
+                                    ;; queue 493: a parameter's type whose layout needs no parameter's (PhantomData<T>, layout_of
+                                    ;; generic: RawVec::new_in's and Unique::cast's `_marker`, the record's `const <zst>`)
+                                    (or (not-any? #(and (vector? %) (= :param (first %))) (tree-seq coll? seq g))
+                                        (generic-zst? g)))
                          :when (= 0 (:size (try (*type-layout* t) (catch Throwable _ nil))))]
                      i)))]
     ;; LowerIntrinsics again at the instance (its own port may have grown since the export); queue 483: then LowerSliceLenCalls,
@@ -1243,12 +1255,22 @@
   whose type is _b's is `_d = copy _b`; [body changed?]"
   [body]
   (let [lt (mapv :ty (:locals body)) changed (atom false)
+        ;; queue 493: simplify_cast: a cast to its operand's own type a use of the operand (cast_const's `self as _`:
+        ;; `_2 = copy _1 as *const () (PtrToPtr); _0 = move _2 as *const () (PtrToPtr)`, the record's one cast)
+        op-ty (fn [o] (when (seq? o)
+                        (case (first o)
+                          (copy move) (when-let [l (plain-place (second o))] (get lt l))
+                          const (nth o 2 nil)
+                          nil)))
         f (fn [st]
             (if-let [[d rv] (and (seq? st) (= 'assign (first st)) (plain-place (second st)) [(plain-place (second st)) (nth st 2 nil)])]
               (let [pl (when (and (seq? rv) (#{'ref 'rawptr} (first rv))) (last rv))]
-                (if (and (seq? pl) (= 'place (first pl)) (= 3 (count pl)) (= '(deref) (nth pl 2)) (= (get lt d) (get lt (second pl))))
+                (cond
+                  (and (seq? pl) (= 'place (first pl)) (= 3 (count pl)) (= '(deref) (nth pl 2)) (= (get lt d) (get lt (second pl))))
                   (do (reset! changed true) (list 'assign (second st) (list 'use (list 'copy (list 'place (second pl))))))
-                  st))
+                  (and (seq? rv) (= 'cast (first rv)) (= 4 (count rv)) (some? (op-ty (nth rv 2))) (= (op-ty (nth rv 2)) (nth rv 3)))
+                  (do (reset! changed true) (list 'assign (second st) (list 'use (nth rv 2))))
+                  :else st))
               st))
         b (update body :blocks (fn [bs] (mapv (fn [x] (update x :stmts #(mapv f %))) bs)))]
     [b @changed]))
