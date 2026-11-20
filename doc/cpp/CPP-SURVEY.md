@@ -9141,3 +9141,66 @@ mcpp leaves a fifth of the files and every lex level on the records, and needs a
 
 Scratch: `.tmp/ppref/` in the worktree (libcpp and libiberty extracted, the probe's `config.h`, its lists and logs `probe4/`; the
 corpora scan `files.txt`, `paths.txt`).
+
+## As built: pp-ref, the token checks' own reference (2026-11-20; the user's CP413 (a) and CP414 (a); branch `pp-ref-1120`)
+
+The user accepted CP413 (a) (libcpp at check time, built into `.tmp` and the gate's local caches only, never committed, packed or
+pushed, the harness Arbace's own) and CP414 (a) (the lex level judged by libcpp's raw lexer, measured against clang's record first,
+the differences explained). The code generator's gaps go to cpp-rt-own-1120, which owns arbace/cpp/codegen.
+
+### Built
+
+- **The harness, `tools/ppref/ppref.cc`** (Arbace's own, EPL-1.0; LICENSE.md says what it is linked with, where, and that the result
+  is never conveyed). What cc1plus (cc1) does around libcpp for `g++ -E -P`: c-opts.cc's options (the standards, `-x
+  assembler-with-cpp` and `.S`, `-I`/`-iquote`/`-isystem`/`-idirafter`, `--embed-dir`, `-include`, `-nostdinc[++]`, `-trigraphs`,
+  `-pedantic[-errors]`, `-w`, `-Werror[=]`, the preprocessor's `-W` options, the identifiers' and literals' `-f` options, the
+  charsets), c-family's precisions and `cpp_init_iconv`, c_finish_options' order (`<built-in>`: libcpp's builtins then the target's
+  predefined macros, the check's per configuration, `--predef`; `<command-line>`; `-include`), c-family's `__has_` operands' parse
+  answered from the target's table (`--has`; libcpp gives `__has_cpp_attribute` and `__has_attribute` one hook, BT_HAS_ATTRIBUTE,
+  so either spelling's row answers), `remap_filename` (a header under the sysroot named as g++ names it), `SOURCE_DATE_EPOCH`, and
+  c_cpp_diagnostic's severities (a pedwarn an error under `-pedantic-errors`, a warning under `-Werror`; none in a system header).
+  `pp`: the stream's tokens (identifiers apart, a user-defined literal as literal and suffix, an `#embed`'s bytes as numbers and
+  commas, pragmas left out), status 1 on an error; `lex`: `_cpp_lex_token` with `parsing_args` 1 (no directive run, no macro
+  expanded), each token's place from its source range, placed at the splices that touch it from the left, its text without splices.
+  `--list FILE` runs many files in one process (no `cpp_destroy`: cc1 never calls it, and its file cleanup frees the names
+  `__has_include` gave). `tools/ppref/shim.c`: operator new and delete, `__cxa_pure_virtual` (libcpp built `-fno-exceptions` as GCC
+  builds it). libcpp's `config.h` (with `ENABLE_CANONICAL_SYSTEM_HEADERS`, Alpine's gcc's: a system header's `__FILE__` the shorter
+  real path), `localedir.h` and libiberty's `config.h` are written by the build script.
+- **`bin/repr-cpp ppref prepare|build|exe|key [--native]`** (`bin/lib/repr-cpp/ppref`): the pinned tarball checked and its libcpp,
+  include/ and 16 libiberty files extracted into `.tmp/ppref/src-KEY/`; `build`, Arbace's own: libcpp's 14 units and the harness by
+  `arbace.cpp.codegen gen-batch` (`-U__GNUC__ -fno-exceptions`), their lowered C read by repr/c with libiberty's C units (their own
+  options: `arbace.cpp.run read-lib-opts`, outside runtime-ci's key), the exceptions' layer and the shim, linked and translated by cf2g
+  (`compile-list`), built by TamaGo's go into `.tmp/ppref/own-KEY/ppref` (KEY: the sources, the harness, the code generator, the
+  lowering, repr/c, ci and its back end, the targets, this script); a refused unit stops it (exit 3, the refusals listed); `--native`:
+  the same sources by the host's g++ and gcc into `.tmp/ppref/native-KEY/ppref`, the oracle tier's and the harness's development
+  build, never the check's judge.
+- **The judge mode, C++** (`arbace.repr.cpp.ppcheck`, `bin/lib/repr-cpp/pp-check`): `REPR_CPP_PP_JUDGE=own` runs the reference over
+  the corpus (`ref-lists`: a predefined file per configuration, the port's; the table; the search list under the sysroot; chunks of
+  20 files a process, in the corpus's directory) and judges each file by its runs in place of the records: the stream against its
+  stream (agree, both-reject), CP261 (a)'s case (g++ -E no reference) against its raw tokens (`ref-tokens`), the raw tokens against
+  its raw tokens; the known file's own sections `:pp-own` and `:lex-own` (the files whose answers are not the reference's, each with
+  its class); the controls judged by the reference's runs of their references. `records` (the default until the own build exists)
+  as before. `--fidelity` / `--fidelity-only`: the reference's runs against pp-gxx.sha256 and lex-clang.sha256 file by file
+  (`WORK/ID/fidelity.tsv`), every difference in the known file's `:ref` (its level and class), else exit 1: the oracle tier's.
+  `bin/repr-cpp pp-diff-ref CORPUS NAME`: the first difference between the reference's stream and the port's.
+- **C** (`arbace.repr.c.ppcheck`, `bin/lib/repr-c/check`): `REPR_C_PP_JUDGE=own` runs the reference (`--lang c`, c/target's answers,
+  C's sysroot) over the known file's `:pp` files and judges each by its stream (pp status `ref`, still `:known` in the results: cc
+  is wrong there, the class stands); an entry the reference does not judge says `:ref :differs` and keeps its class; C23's `::`
+  read as the digest's lexer reads gcc -E's text, two colons. `class` (the default until the own build exists) as before.
+  `ppcheck ref-diff`: the first difference. The recorder keeps the `:ref` marks.
+
+### Measured (the native build, `REPR_CPP_PPREF`: the harness's fidelity before the own build exists; the own build's runs must give
+### the same records)
+
+| check | result |
+|---|---|
+| fidelity, C++ (`--fidelity-only`, the recorded samplings) | pp: 1,735 equal and 46 both-reject of gxx-dg's 1,807, 103 + 5 of libstdcxx-headers' 108, 14 + 4 of cpp-lexical's 19; the 27 others g++ -E rejects and the reference reads (CP261 (a)'s and CP260 (a)'s: 22 modules, 5 options or a header unit): no stream differs. lex: 1,927 of 1,934 equal; 7 differ by the raw lexers' conventions. All 34 in the known file's `:ref` (fidelity status 0) |
+| C++'s check, `REPR_CPP_PP_JUDGE=own` | cpp-lexical 19 of 19 (3 lex known); libstdcxx-headers 108 of 108; gxx-dg (below); the controls fail as they must (the `:pp-clang` one taken as CP261's path, its subject's record `:rejected`) |
+| C's 72, `REPR_C_PP_JUDGE=own` (`--only` the 72) | 69 judged by the reference's stream (gcc-c23 5, gcc-cpp-c23 9, gcc-embed 44, gcc-va-opt 9, mir, sqlite); 3 `:ref :differs`: c23-digit-separators-2.c (the reference, as gcc, rejects adjacent digit separators, the port reads them), c23-ucnid-1-utf8.c (the port's stream is gcc's neither), tcc-pp/13.S (gcc -E keeps an assembler's `#` comment line, which the digest drops) |
+| the own route (`gen-batch`, the probe's options) | the harness generates; the native parser reads all 14 units; the code generator generated 3 of 14 at next (lex, line-map, mkdeps) |
+| repr/c's read of the library (`read-lib-opts`) | the 3 units' and the harness's lowered C, libiberty's 16 units, the exceptions' layer and the shim: 21 of 22 at first (xvasprintf.c needed `vprintf-support.h`, now extracted) |
+
+The own-mode known classes (`:raw-udl-suffix`, `:unterminated-raw-string`, `:non-xid-utf8`) are conventions of libcpp's raw lexing
+against clang's (and the port's): libcpp takes an identifier touching a literal as its suffix unless it names a macro, and its raw
+lexing runs no `#define`; an unterminated raw string ends at its line's end; a run of valid UTF-8 non-identifier characters is one
+identifier. At pp libcpp knows the macros and splits as the port does.

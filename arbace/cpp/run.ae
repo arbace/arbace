@@ -138,6 +138,39 @@
 
 ;; runtime-ci-key end
 
+(defn read-lib-opts
+  "read-lib-opts DIR LIST: read-lib's for C units with their own options (pp-ref's libiberty, doc/cpp/CPP-SURVEY.md, \"As built:
+  pp-ref\"): each line of LIST NAME PATH OPTIONS (the options' words separated by spaces, after the lowered C's) read into DIR,
+  DIR/read.tsv and DIR/index.edn written as read-lib's. Outside runtime-ci's key: the runtime's read is read-lib's alone."
+  [h ^String dir ^String list]
+  (let [lines (mapv #(str/split % #"\t") (remove str/blank? (str/split-lines (slurp list))))
+        rows (doall (for [[n p o] lines]
+                      (let [f (File. ^String p)
+                            fc (host/file-config (into opts (when (seq o) (str/split (str/trim o) #"\s+"))) "gnu23")
+                            rd (try (rc/read-c (host/config h fc (.getParent f)) fc (.getName f) false) (catch Throwable e {:error [(str e)]}))
+                            e (cond
+                                (:error rd) (str "read-error: " (str/join "; " (take 2 (:error rd))))
+                                (:refused rd) (str "read-refused: " (name (:refused rd)) ": " (:message rd))
+                                :else (do (doseq [[pp t] (rc/unit-texts rd (.getName f))]
+                                            (let [out (if (str/starts-with? pp "c/h/") (str dir "/forms/" pp) (str dir "/forms/" n ".ae"))]
+                                              (when-not (and (str/starts-with? pp "c/h/") (.exists (File. out)))
+                                                (spit-mk out t))))
+                                          (spit-mk (str dir "/forms/" n ".units") (pr-str (vec (map str (keys (:units rd))))))
+                                          nil))]
+                        (str/join "\t" [n (if e "error" "ok") (clean (or e "")) "0"]))))]
+    (spit (str dir "/read.tsv") (str (str/join "\n" rows) "\n"))
+    (let [ok (for [[n st] (tsv (str dir "/read.tsv")) :when (= st "ok")] n)
+          ix (into (sorted-map)
+                   (for [n ok]
+                     (let [u (load-unit dir n)
+                           all (concat (:forms u) (mapcat :forms (vals (:units u))))]
+                       [n {:defs (musl/unit-defs (:forms u)) :refs (set (musl/refs all))}])))]
+      (spit (str dir "/index.edn") (pr-str ix))
+      (let [bad (for [[n st e] (tsv (str dir "/read.tsv")) :when (not= st "ok")] [n e])]
+        (doseq [[n e] bad] (println "cppi: not read:" n e))
+        (println "cppi: read" (count ok) "units of" (count lines) "into" dir)
+        (empty? bad)))))
+
 (defn library
   "A library of read units: {:dir :index :by-name {name [[unit weak] ...]} :checked (atom {unit checked})}."
   [^String dir]
@@ -552,6 +585,7 @@
         th #(Long/parseLong (or % "3"))]
     (case verb
       "read-lib" (let [[dir list t] args] (System/exit (if (read-lib h dir list (th t)) 0 1)))
+      "read-lib-opts" (let [[dir list] args] (System/exit (if (read-lib-opts h dir list) 0 1)))
       ;; lower-lib DIR LIST THREADS: each line of LIST (NAME LL) lowered beside its IR, then read as read-lib does
       "lower-lib" (let [[dir list t] args
                         rows (mapv #(str/split % #"\t") (remove str/blank? (str/split-lines (slurp list))))

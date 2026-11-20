@@ -253,6 +253,92 @@
           :else (lines-digest (clang-lines g)))))
 
 ;; ---------------------------------------------------------------------------------------------
+;; The reference (doc/cpp/CPP-SURVEY.md, "As built: pp-ref"; CP413 (a), CP414 (a), the user's of 2026-11-20): GCC 15.2.0's
+;; libcpp, unmodified from the pinned gcc-15.2.0 tarball, behind Arbace's own harness tools/ppref (bin/repr-cpp ppref build),
+;; run over the corpus at check time with the target the port reads (the predefined macros of each file's configuration, the
+;; __has_ table, the search list under the sysroot). REPR_CPP_PP_JUDGE=own judges each file by its runs; records (the default
+;; until the reference is built by Arbace alone) by g++ -E's and clang's recorded digests, then the oracle tier's.
+
+(defn judge-mode
+  "The token check's judge: \"own\" (the reference run at check time) or \"records\" (pp-gxx.sha256, lex-clang.sha256)."
+  ^String []
+  (let [m (or (System/getenv "REPR_CPP_PP_JUDGE") "records")]
+    (when-not (#{"own" "records"} m) (throw (ex-info (str "REPR_CPP_PP_JUDGE is own or records, not " m) {})))
+    m))
+
+(defn- sha256-hex ^String [^String s]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md (.getBytes s "ISO-8859-1"))))))
+
+(defn ref-lists
+  "The reference's runs of the corpora `ids` under WORK: WORK/ref.args (the options every run shares: the __has_ table
+  WORK/ref/has.tsv, the search list, the sysroot, the epoch, a word a line), WORK/ID/ref.pp.list and ref.lex.list (OUT, then the
+  run's words: --predef FILE, -std=STD, the options the reference is given, the file as g++ reads it; tab-separated), the
+  predefined macros of each configuration in WORK/ref/predef/SHA.h (the port's: host/config's :predefined)."
+  [^String work ids]
+  (let [h (host/load-host (host/gxx-dir) "gxx")
+        sysroot (System/getenv "ARBACE_C_SYSROOT")
+        rd (str work "/ref")]
+    (.mkdirs (java.io.File. (str rd "/predef")))
+    (spit (str rd "/has.tsv") (str/join (for [[[op nm] v] (sort-by (comp str key) (:has h))] (str op "\t" nm "\t" v "\n"))))
+    (spit (str work "/ref.args")
+          (str/join "\n" (concat ["--has" (str rd "/has.tsv") "--epoch" (str (:epoch h))]
+                                 (when (and sysroot (not= sysroot "") (not= sysroot "/")) ["--sysroot" sysroot])
+                                 (mapcat (fn [d] ["--sys" d]) (:search h))
+                                 [""])))
+    (doseq [id ids]
+      (let [d (str work "/" id)
+            base (str/trim (slurp (str d "/base.txt")))
+            entries (read-string (slurp (str d "/files.edn")))
+            lines (for [e entries]
+                    (let [cfg (host/config h (:fc e) base)
+                          pre (:predefined cfg)
+                          pf (str rd "/predef/" (subs (sha256-hex pre) 0 16) ".h")
+                          _ (when-not (.exists (java.io.File. pf)) (spit pf pre))
+                          words (concat ["--predef" pf (str "-std=" (:std (:fc e)))] (:all-args (:fc e)) [(:read e)])]
+                      [(:name e) words]))
+            out (fn [kind] (str/join (for [[nm words] lines]
+                                       (let [o (str d "/ref/" nm "." kind)]
+                                         (.mkdirs (.getParentFile (java.io.File. o)))
+                                         (str (str/join "\t" (cons o words)) "\n")))))]
+        (spit (str d "/ref.pp.list") (out "pp"))
+        (spit (str d "/ref.lex.list") (out "lex"))
+        (println (str id ": the reference's lists, " (count lines) " files"))))))
+
+(defn ref-records
+  "A reference output's records (tools/ppref's `KLEN TEXT` lines): [[kind text] ...], nil when the file is absent."
+  [^String path]
+  (when-let [s (read-or-nil path)]
+    (let [n (.length ^String s)]
+      (loop [i 0 acc (transient [])]
+        (if (>= i n)
+          (persistent! acc)
+          (let [k (.charAt ^String s i)
+                sp (.indexOf ^String s " " (int (inc i)))
+                len (Long/parseLong (subs s (inc i) sp))
+                t (subs s (inc sp) (+ (inc sp) len))]
+            (recur (+ (inc sp) len 1) (conj! acc [k t]))))))))
+
+(defn ref-pp-digest
+  "The reference's digest of a file's stream (WORK/ID/ref/NAME.pp and .pp.status): :rejected when it reported an error, nil
+  when it did not run (or crashed: no status), else the digest of its tokens' texts as the port's (identifiers in gcc -E's
+  spelling, the corpus's directory written {base})."
+  [^String d ^String nm ^String base]
+  (let [st (str/trim (or (read-or-nil (str d "/ref/" nm ".pp.status")) ""))]
+    (cond (= st "") nil
+          (not= st "0") (if (#{"1"} st) :rejected nil)
+          :else (when-let [rs (ref-records (str d "/ref/" nm ".pp"))]
+                  (tokens-digest (unplaced (map (fn [[k t]] (if (= k \i) (cpc/norm-ident t) t)) rs) base))))))
+
+(defn ref-lex-digest
+  "The reference's raw tokens' digest of a file (WORK/ID/ref/NAME.lex), as raw-lines' (LINE:COL<tab>TEXT), nil when absent."
+  [^String d ^String nm]
+  (let [st (str/trim (or (read-or-nil (str d "/ref/" nm ".lex.status")) ""))]
+    (when (= st "0")
+      (when-let [rs (ref-records (str d "/ref/" nm ".lex"))]
+        (lines-digest (map second rs))))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; The check
 
 (defn- judge
@@ -286,13 +372,18 @@
   [crec lex-dg] (boolean (and (string? crec) lex-dg (= crec lex-dg))))
 
 (defn check-file
-  "One file: [name lex-status pp-status port-digest detail]."
+  "One file: [name lex-status pp-status port-digest detail]. In the own mode (judge-mode) the reference's runs (WORK/ID/ref/)
+  stand where the records' digests stood: the stream against the reference's (agree, both-reject), and where g++ -E is no reference
+  (CP261 (a)) against its raw tokens (ref-tokens)."
   [^String work ^String id host ^String base levels e gxx-db clang-db known-pp known-lex]
   (let [nm (:name e)
         d (str work "/" id)
+        own? (= "own" (judge-mode))
         cfg (assoc (host/config host (:fc e) base) :missing (:missing host))
         mask (long (:trigraphs cfg))
         key (str id "/" nm)
+        gxx-db (if own? {key (ref-pp-digest d nm base)} gxx-db)
+        clang-db (if own? {key (ref-lex-digest d nm)} clang-db)
         lex-dg (when (levels "lex")
                  (lines-digest (try (raw-lines (lex/read-bytes (str base "/" nm)) mask) (catch Throwable x [(str "#panic " x)]))))
         lex-st (when lex-dg (judge (get clang-db key) lex-dg (contains? known-lex nm) false))
@@ -313,7 +404,7 @@
                 st (if (:crash r)
                      "crash"
                      (judge rec dg (contains? known-pp nm) (seq (:errors r)) by-clang))]
-            [st dg (boolean (seq (:errors r)))]))]
+            [(if (and own? (= st "clang-tokens")) "ref-tokens" st) dg (boolean (seq (:errors r)))]))]
     ;; the fifth and sixth: the lex digest and whether the port gave errors, for the negative controls (not in files.tsv)
     [nm (or lex-st "-") (or pp-st "-") (or dg "-") (or lex-dg "-") pp-err]))
 
@@ -324,8 +415,17 @@
   :subject's port, judged by the level's own judgment against the :reference's recorded answer (g++ -E's digest at :pp, clang's raw tokens'
   at :lex), must not agree. A control whose subject is not a file of this run of the corpus `id`, or whose reference has no recorded
   answer, is left (said); one that agrees is printed and returned (the check fails). The names are CORPUS/NAME."
-  [^String id rs gxx-db clang-db levels]
+  [^String id rs gxx-db clang-db levels & [^String work]]
   (let [cs (filter #(contains? #{:pp :lex :pp-clang} (:level %)) (if (.exists (java.io.File. ^String controls-file)) (read-string (slurp controls-file)) []))
+        ;; the own mode: the reference's answers are its runs of the reference file (when that file's corpus ran)
+        [gxx-db clang-db] (if (and work (= "own" (judge-mode)))
+                            (let [ks (distinct (mapcat (juxt :subject :reference) cs))
+                                  at (fn [k] (let [i (.indexOf ^String k "/") c (subs k 0 i) n (subs k (inc i)) d (str work "/" c)
+                                                   b (str/trim (or (read-or-nil (str d "/base.txt")) ""))]
+                                               [d n b]))]
+                              [(into {} (for [k ks :let [[d n b] (at k) v (ref-pp-digest d n b)] :when v] [k v]))
+                               (into {} (for [k ks :let [[d n _] (at k) v (ref-lex-digest d n)] :when v] [k v]))])
+                            [gxx-db clang-db])
         by (into {} (map (juxt first identity) rs))
         pre (str id "/")]
     (vec (for [{cid :id :keys [level subject reference]} cs
@@ -337,7 +437,10 @@
                          (case level
                            :pp (judge rec (nth row 3) false (nth row 5))
                            ;; CP261 (a)'s rule: the subject's stream judged by clang's tokens, the reference's raw tokens in its place
-                           :pp-clang (judge (get gxx-db subject) (nth row 3) false (nth row 5) (clang-tokens? rec (nth row 4)))
+                           ;; the own mode: the reference reads the subject (its stream agrees), so the path is taken as where g++ -E
+                           ;; is no reference, the subject's record :rejected (pp-ref)
+                           :pp-clang (judge (if (and work (= "own" (judge-mode))) :rejected (get gxx-db subject)) (nth row 3) false (nth row 5)
+                                            (clang-tokens? rec (nth row 4)))
                            (judge rec (nth row 4) false false)))]
                :when (cond (nil? row) false
                            (nil? v) (do (println (str "control " cid " left: " (if rec "the level not run" (str "no recorded answer for " reference)))) false)
@@ -353,8 +456,10 @@
         base (str/trim (slurp (str d "/base.txt")))
         entries (read-string (slurp (str d "/files.edn")))
         known-all (read-string (slurp known-file))
-        known-pp (get-in known-all [:pp (keyword id)] {})
-        known-lex (get-in known-all [:lex (keyword id)] {})
+        own? (= "own" (judge-mode))
+        ;; the own mode's known entries (pp-ref): the files whose port's answers are not the reference's, each with its class
+        known-pp (get-in known-all [(if own? :pp-own :pp) (keyword id)] {})
+        known-lex (get-in known-all [(if own? :lex-own :lex) (keyword id)] {})
         missing (java.util.concurrent.ConcurrentHashMap/newKeySet)
         h (assoc (host/load-host (host/gxx-dir) "gxx") :missing missing)
         gxx-db (load-db gxx-file)
@@ -385,7 +490,7 @@
     (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" (take 4 %)) "\n") rs)))
     (spit (str d "/differ.txt") (str/join (map #(str (first %) "\tlex " (nth % 1) "\tpp " (nth % 2) "\n") (distinct (concat lex-fail pp-fail)))))
     (spit (str d "/missing.tsv") (str/join (map #(str (first %) "\t" (second %) "\n") (sort missing))))
-    (let [cfail (controls id rs gxx-db clang-db levels)
+    (let [cfail (controls id rs gxx-db clang-db levels work)
           report {:corpus id :files (count rs) :bytes bytes :seconds (Math/round (double secs)) :threads threads
                   :lex (by 1) :pp (by 2) :lex-failing (count lex-fail) :pp-failing (count pp-fail)
                   :stale-known (vec stale) :missing-has (count missing) :vanished (count vanished)}]
@@ -470,6 +575,8 @@
       (re-find #"\bGCC (poison|pch)" s) :pragma
       :else :unclassified)))
 
+(declare write-known)
+
 (defn record-known
   "Rewrites the known file's entries of the corpora `ids` from WORK/ID/files.tsv: each file whose lex or pp status is
   differ or unrecorded-with-a-recorded-peer is listed with its class (the old class kept, else `classify`'s)."
@@ -487,24 +594,103 @@
                                                           [(first r) {:class (or (:class (get old (first r)))
                                                                                  (classify (str base "/" (first r)) (name level) d (first r)))}])))
                                           rows)))]
-                    (-> known
-                        (assoc-in [:pp (keyword id)] (entries :pp 2))
-                        (assoc-in [:lex (keyword id)] (entries :lex 1)))))
+                    (if (= "own" (judge-mode))
+                      (-> known
+                          (assoc-in [:pp-own (keyword id)] (entries :pp-own 2))
+                          (assoc-in [:lex-own (keyword id)] (entries :lex-own 1)))
+                      (-> known
+                          (assoc-in [:pp (keyword id)] (entries :pp 2))
+                          (assoc-in [:lex (keyword id)] (entries :lex 1))))))
                 known ids)]
+    (write-known known)
+    (println "recorded" known-file)))
+
+(defn write-known
+  "The known file written from `known` (its sections in order, the classes first)."
+  [known]
     (spit known-file
           (str ";; The files of the C++ token check (bin/repr-cpp pp-check; doc/cpp/CPP-SURVEY.md, \"As built: CX2\") whose answers\n"
                ";; are not the compilers': at :pp the stream's tokens are not g++ -E -P's (test/repr/cpp/pp-gxx.sha256), at :lex the\n"
                ";; raw tokens are not clang's (test/repr/cpp/lex-clang.sha256), each with its class. Written by\n"
                ";; bin/repr-cpp pp-check --record-known, the classes kept. Read with the Clojure reader.\n"
-               "{:classes\n " (pr-str (:classes known)) "\n"
-               (str/join
-                 (for [level [:pp :lex]]
+               ";; Since pp-ref (doc/cpp/CPP-SURVEY.md, \"As built: pp-ref\"): :pp-own and :lex-own, the files whose answers are not the own\n"
+               ";; reference's (REPR_CPP_PP_JUDGE=own: GCC 15.2.0's libcpp behind tools/ppref), each with its class; :ref, the reference's\n"
+               ";; answers that are not the records' (bin/repr-cpp pp-check --fidelity, the oracle tier's), each with its level and class.\n"
+               "{:classes\n {" (str/join "\n  " (for [[k v] (sort-by key (:classes known))] (str k " " (pr-str v)))) "}\n"
+               (str/join "\n"
+                 (for [level [:pp :lex :pp-own :lex-own :ref] :when (or (#{:pp :lex} level) (contains? known level))]
                    (str " " level "\n {"
                         (str/join "\n  "
                                   (for [[k v] (sort (get known level)) :when (seq v)]
                                     (str k "\n  {" (str/join "\n   " (map (fn [[f e]] (str (pr-str f) " " (pr-str e))) v)) "}")))
-                        "}" (if (= level :lex) "}" "") "\n")))))
-    (println "recorded" known-file)))
+                        "}")))
+               "}\n")))
+
+(defn known-add
+  "bin/repr-cpp pp-known-add FILE: the sections and classes of FILE (a map read with the Clojure reader: {:classes {...} LEVEL
+  {CORPUS {NAME ENTRY}}}) merged into the known file, entry by entry."
+  [^String f]
+  (let [add (read-string (slurp f))
+        known (read-string (slurp known-file))
+        known (reduce-kv (fn [k level m]
+                           (if (= level :classes)
+                             (update k :classes merge m)
+                             (reduce-kv (fn [k c es] (update-in k [level c] merge es)) k m)))
+                         known add)]
+    (write-known known)
+    (println "merged" f "into" known-file)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The reference's fidelity (the oracle tier's): its runs against g++ -E's and clang's recorded digests
+
+(defn fidelity
+  "The reference's runs of the corpora `ids` under WORK against the recorded digests (pp-gxx.sha256, lex-clang.sha256), file by
+  file: WORK/ID/fidelity.tsv (NAME, pp: equal, both-reject, differ, unrecorded or no-run, lex likewise), a summary line a corpus.
+  A difference is accounted for by the known file's :ref section ({CORPUS {NAME {:level :pp|:lex :class K}}}); 1 when one is not."
+  [^String work ids]
+  (let [gxx-db (load-db gxx-file)
+        clang-db (load-db clang-file)
+        known (get (read-string (slurp known-file)) :ref {})
+        bad (atom 0)]
+    (doseq [id ids]
+      (let [d (str work "/" id)
+            base (str/trim (slurp (str d "/base.txt")))
+            entries (read-string (slurp (str d "/files.edn")))
+            kn (get known (keyword id) {})
+            v (fn [rec mine] (cond (nil? mine) "no-run" (nil? rec) "unrecorded" (= rec mine) (if (= rec :rejected) "both-reject" "equal")
+                                   (= rec :rejected) "gxx-rejects" (= mine :rejected) "ref-rejects" :else "differ"))
+            rows (vec (for [e entries
+                            :let [nm (:name e) k (str id "/" nm)]]
+                        [nm (v (get gxx-db k) (ref-pp-digest d nm base)) (v (get clang-db k) (ref-lex-digest d nm))]))
+            off (fn [[nm pp lx]] (let [c (get kn nm)]
+                                   (or (and (not (#{"equal" "both-reject"} pp)) (not= :pp (:level c)) (not= :both (:level c)))
+                                       (and (not= "equal" lx) (not= :lex (:level c)) (not= :both (:level c))))))
+            unexplained (filter off rows)]
+        (spit (str d "/fidelity.tsv") (str/join (map #(str (str/join "\t" %) "\n") rows)))
+        (swap! bad + (count unexplained))
+        (println (str id ": the reference against the records, " (count rows) " files: pp " (pr-str (frequencies (map second rows)))
+                      ", lex " (pr-str (frequencies (map #(nth % 2) rows)))
+                      (when (seq unexplained) (str "; " (count unexplained) " not in the known file's :ref: "
+                                                   (str/join " " (map first (take 8 unexplained)))))))))
+    (if (pos? (long @bad)) 1 0)))
+
+(defn ref-diff-main
+  "bin/repr-cpp pp-diff --ref: the first difference between the reference's stream and the port's of a file of WORK/ID."
+  [work id nm]
+  (let [d (str work "/" id)
+        e (first (filter #(= (:name %) nm) (read-string (slurp (str d "/files.edn")))))
+        base (str/trim (slurp (str d "/base.txt")))
+        g (vec (unplaced (map (fn [[k t]] (if (= k \i) (cpc/norm-ident t) t)) (ref-records (str d "/ref/" nm ".pp"))) base))
+        r (pp/preprocess (host/config (host/load-host (host/gxx-dir) "gxx") (:fc e) base) (:read e))
+        p (vec (unplaced (port-texts r) base))
+        i (first (for [i (range (max (count g) (count p))) :when (not= (get g i) (get p i))] i))]
+    (println (str nm ": reference " (count g) " tokens (status " (str/trim (or (read-or-nil (str d "/ref/" nm ".pp.status")) "?"))
+                  "), port " (count p) " tokens, " (count (:errors r)) " errors"))
+    (doseq [x (take 3 (:errors r))] (println "  #error" x))
+    (when i
+      (println "first difference at" i)
+      (println " ref :" (pr-str (mapv lex/esc (subvec g (max 0 (- i 6)) (min (count g) (+ i 6))))))
+      (println " port:" (pr-str (mapv lex/esc (subvec p (max 0 (- i 6)) (min (count p) (+ i 6)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/repr-cpp pp, lex
@@ -576,13 +762,13 @@
   record must hold already (a file outside the recorded sampling refused)."
   [^String work ^String file ids]
   (let [subset? (fn [id] (.exists (java.io.File. (str work "/" id "/subset.txt"))))
-        ok #{"agree" "both-reject" "clang-tokens" "-"}
+        ok #{"agree" "both-reject" "clang-tokens" "ref-tokens" "-"}
         rows (vec (for [id ids
                         l (str/split-lines (slurp (str work "/" id "/files.tsv"))) :when (seq l)
                         :let [[nm lx pp] (str/split l #"\t")]]
                     [(str id "/" nm)
                      (cond (and (ok lx) (ok pp)) :pass
-                           (and (#{"known" "agree" "both-reject" "-"} lx) (#{"known" "agree" "both-reject" "clang-tokens" "-"} pp)) :known
+                           (and (#{"known" "agree" "both-reject" "-"} lx) (#{"known" "agree" "both-reject" "clang-tokens" "ref-tokens" "-"} pp)) :known
                            :else :fail)
                      (str "lex " lx ", pp " pp)]))
         bad (filter #(= :fail (second %)) rows)
@@ -607,6 +793,7 @@
   (case cmd
     "lexdiff" (apply lexdiff-main args)
     "diff" (apply diff-main args)
+    "ref-diff" (apply ref-diff-main args)
     "pp" (pp-main args)
     "lex" (lex-main args)
     "lists" (let [[work roots sample & ids] args] (lists work (read-string roots) (read-string sample) ids))
@@ -616,5 +803,8 @@
               (System/exit st))
     "record" (let [[work & ids] args] (record work ids))
     "record-known" (let [[work & ids] args] (record-known work ids))
+    "known-add" (let [[f] args] (known-add f))
     "record-results" (let [[work file & ids] args] (record-results work file ids))
+    "ref-lists" (let [[work & ids] args] (ref-lists work ids))
+    "fidelity" (let [[work & ids] args] (System/exit (fidelity work ids)))
     (do (println "ppcheck: pp, lex, lists, check, record or record-known") (System/exit 2))))
