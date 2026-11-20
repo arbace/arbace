@@ -5594,6 +5594,10 @@ equal**, none extra:
 - The 13 traits: the auto traits' and the sizedness traits' implied `MetaSized` supertrait, from the interface's predicates (core's
   pass writes it where rustc's `explicit_super_clauses_of` does not; RangePattern the other way): core's interface's to fix.
 - The 10 macros: std_detect's macros for other architectures, made by its `features!` macro, whose tokens' contexts differ.
+- **The run on the native names alone** (the helper's interface; `RF_NATIVE_NAMES=... RF11_BATCH=1 bin/rust-front rsi-build intrinsics
+  panics std unwind vectors`, 15 min, 2.1 GB): **3 of 5 own** (intrinsics, panics, unwind), each program's facts the same as the
+  helper-names run's; std's facts the same too but codegen refuses "no layout for `{alias core::fmt::Result}`", and vectors' main
+  names `i32x4`: the two missing aliases (std's batch was first lost to the host's out-of-memory kill of 23:00 and rerun alone).
 - The first assembly, before the fixes of the narrower import visibility (a re-exported constructor of a private field), the
   textual macro_rules! re-exports (`pub use assert_unsafe_precondition;`), the builtin derives `CoerceShared` and `Reborrow`,
   `#[panic_handler]` and the vendored macros: 14,852.
@@ -5618,8 +5622,12 @@ The port (the llvm-project in rustc-1.99.1-src.tar.xz, LLVM 23, Apache-2.0 WITH 
   merged), the callee's used static allocas moved to the caller's entry block's start (unused ones dropped), one block ending in a
   return spliced into the calling block, else the calling block split at the call (the rest to `<callee>.exit`), the returns
   joined (one: its block's code at the exit's head; more: a phi there, of one value that value), the cloned entry block's code
-  into the calling block. Not yet: an invoke's call site (`HandleInlinedLandingPad`: the inlined calls made invokes to the
-  invoke's landing pad, the callee's `resume`s branches to it), InstSimplify's other rules, the attributes' propagation
+  into the calling block; at an invoke's call site `HandleInlinedLandingPad` (each inlined landingpad given the outer one's clauses
+  and cleanup, each inlined call that may unwind made an invoke to the outer landing pad with the rest of its block split off,
+  `changeToInvokeAndSplitBasicBlock`; each `resume` a branch to the outer landing pad's body, split once after its landingpad with
+  phis for its values and the exception, `LandingPadInliningInfo`; the invoke's edge removed from the landing pad's phis) and a
+  branch to the invoke's normal destination after the inlined code; whether a call may unwind from the callees' facts
+  (`:can-unwind`; `*nounwind?*`, LLVM's intrinsics never). Not yet: InstSimplify's other rules, the attributes' propagation
   (`AddReturnAttributes`, `AddParamAndFnBasicAttributes`).
 - The callees: `mono/inline-always-callees` (each call's resolved instance whose codegen attributes hold `inline(always)`);
   lib-unit-run builds them beside the items, each at its arguments, from any crate's export (`RF_CORE_NATIVE` takes the other
@@ -5628,6 +5636,12 @@ The port (the llvm-project in rustc-1.99.1-src.tar.xz, LLVM 23, Apache-2.0 WITH 
   codegens them and inlines them into the items before the judge (`LIB_UNIT_INLINE=0`: not), an item calling one not built
   refused by that cause.
 - **The pure cases** (`bin/rust-front inline-test`, `test/rust/front/inline_test.ae`): a callee of one block with its alloca, of
-  several blocks with one return, a constant argument pruning a branch, two returns joined, the inlined functions dropped, and a
-  crossed control: 6 of 6, each against what the host's `opt -passes='default<O0>'` (LLVM 23.1.5, by hand) writes for the same
-  functions as text.
+  several blocks with one return, a constant argument pruning a branch, two returns joined, two invoke call sites (the callee's
+  calls made invokes; the callee's own landing pad resuming into the caller's), the inlined functions dropped, and a crossed
+  control: 8 of 8, each against what the host's `opt -passes='default<O0>'` (LLVM 23.1.5, by hand) writes for the same functions
+  as text.
+- **First measure**: alloc 18 of 25 equal as before (custom_owner_from_box refused for its one wanted callee, `Box::<Custom>::new`);
+  core 109 of 275 equal as before, 85 differing become 66 and 20 of them are refused for an `#[inline(always)]` callee core's export
+  lacks (32 call sites, 25 keys: `Option::unwrap`, `Result::unwrap`, `NonNull::as_ref`, `MaybeUninit`'s constructors and
+  `assume_init*`, `max_size_for_alignment`, the `const_eval_select` runtimes `do_panic`...). core's export runs again with them
+  (`lib-unit inline-keys core`), then the build and the compare.

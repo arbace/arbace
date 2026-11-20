@@ -12,6 +12,7 @@
 
     (inline-module DEFINES ALWAYS)   DEFINES the module's define forms in order, ALWAYS the set of `alwaysinline` symbols:
                                      the defines after inlining, the inlined ones that nothing calls any more left out"
+  (:refer-clojure :exclude [label])
   (:require [arbace.string :as str]))
 
 (defn- local? [x] (and (symbol? x) (nil? (namespace x)) (str/starts-with? (name x) "%")))
@@ -33,7 +34,7 @@
 (defn- with-op [i op] (if (res-of i) (list '= (res-of i) op) op))
 (defn- opname [i] (let [o (op-of i)] (when (seq? o) (first o))))
 
-(defn- kv-after
+(defn kv-after
   "The value after keyword K in the form X's elements"
   [x k]
   (let [v (vec x) i (.indexOf ^java.util.List v k)] (when (pos? i) (nth v (inc i) nil))))
@@ -251,6 +252,90 @@
       [blocks @vm])))
 
 ;; ---------------------------------------------------------------------------------------------
+;; HandleInlinedLandingPad: an invoke's call site
+
+(def ^:dynamic *nounwind?*
+  "Whether a call of a symbol cannot unwind (CallBase::doesNotThrow): LLVM's intrinsics by default; lib-unit's compare binds the
+  callees' facts (:can-unwind)"
+  (fn [sym] (and (symbol? sym) (str/starts-with? (name sym) "llvm."))))
+
+(defn- lp-of "A block's landingpad instruction (its first non-phi)" [b] (first (remove #(= 'phi (opname %)) (insts b))))
+
+(defn- lp-clauses "A landingpad op's clauses and its cleanup flag" [o] [(vec (filter seq? (drop 2 o))) (boolean (some #{:cleanup} o))])
+
+(defn- through-invoke
+  "The cloned BLOCKS of a callee inlined at an invoke (unwinding to LP, whose block in the caller is LPB): each inlined landingpad
+  given the outer one's clauses (and its cleanup), each call that may unwind made an invoke to LP with the rest of its block split
+  off (changeToInvokeAndSplitBasicBlock), each `resume` a branch to LP's body (LandingPadInliningInfo::forwardResume, the outer
+  landing pad split after its landingpad once): [blocks new-lp-block body-block-or-nil], the new predecessors' incoming values
+  added to LP's phis (and its body's)"
+  [blocks lp lpb invoke-label fresh]
+  (let [outer-lp (lp-of lpb) [oclauses ocleanup] (lp-clauses (op-of outer-lp))
+        lp-phis (filterv #(= 'phi (opname %)) (insts lpb))
+        ;; the phis' values for the invoke's edge (UnwindDestPHIValues)
+        uvals (mapv (fn [i] (some (fn [[v l]] (when (= l invoke-label) v)) (drop 2 (op-of i)))) lp-phis)
+        inner-lps (set (keep #(let [t (op-of (peek (insts %)))] (when (= 'invoke (first t)) (kv-after t :unwind))) blocks))
+        ;; the inlined landingpads: the outer clauses after their own, the cleanup flag joined
+        blocks (mapv (fn [b] (if (inner-lps (label b))
+                               (let [l (lp-of b) o (op-of l) [cl cu] (lp-clauses o)]
+                                 (block (label b) (map #(if (identical? % l)
+                                                          (with-op l (apply list (concat [(first o) (second o)] (when (or cu ocleanup) [:cleanup]) cl oclauses)))
+                                                          %)
+                                                       (insts b))))
+                               b))
+                     blocks)
+        ;; the calls that may unwind: invokes, each block split after its first one (the split block named after the call)
+        new-preds (volatile! [])
+        split-block (fn split-block [b]
+                      (let [is (insts b)
+                            j (first (keep-indexed (fn [j i] (let [o (op-of i)]
+                                                               (when (and (= 'call (first o)) (not (*nounwind?* (nth o 2 nil)))) j)))
+                                                   (pop is)))]
+                        (if (nil? j)
+                          [b]
+                          (let [i (nth is j) o (op-of i) nl (fresh (symbol (str (if (res-of i) (name (res-of i)) "%") ".noexc")))
+                                inv (with-op i (apply list (concat ['invoke] (rest o) [:to nl :unwind lp])))]
+                            (vswap! new-preds conj (label b))
+                            (into [(block (label b) (conj (subvec is 0 j) inv))]
+                                  (split-block (block nl (subvec is (inc j)))))))))
+        blocks (vec (mapcat split-block blocks))
+        ;; the resumes: branches to the outer landing pad's body
+        resumes (filterv #(= 'resume (opname (peek (insts %)))) blocks)
+        body-l (when (seq resumes) (fresh (symbol (str (name lp) ".body"))))
+        phi-names (mapv #(fresh (symbol (str (name (res-of %)) ".lpad-body"))) lp-phis)
+        eh (when body-l (fresh (symbol "%eh.lpad-body")))
+        blocks (mapv (fn [b] (if (some #(= (label b) (label %)) resumes)
+                               (block (label b) (conj (pop (insts b)) (list 'br body-l)))
+                               b))
+                     blocks)
+        add-incoming (fn [phi-i v l] (with-op phi-i (concat (op-of phi-i) [[v l]])))
+        ;; the outer landing pad's phis: the split calls' edges
+        lpb2 (block (label lpb) (map (fn [i] (if-let [k (first (keep-indexed (fn [k p] (when (identical? p i) k)) lp-phis))]
+                                               (reduce (fn [i src] (add-incoming i (nth uvals k) src)) i @new-preds)
+                                               i))
+                                     (insts lpb)))
+        [lpb3 body]
+        (if-not body-l
+          [lpb2 nil]
+          (let [is (insts lpb2) j (inc (.indexOf ^java.util.List (vec is) (lp-of lpb2)))
+                ren (merge (zipmap (map res-of lp-phis) phi-names) {(res-of outer-lp) eh})
+                body-phis (concat (map (fn [nm p v0] (apply list '= nm [(apply list 'phi (second (op-of p)) [[(res-of p) (label lpb2)]])]))
+                                       phi-names lp-phis uvals)
+                                  [(list '= eh (list 'phi (second (op-of outer-lp)) [(res-of outer-lp) (label lpb2)]))])
+                ;; each resume's edge: the invoke's phi values, its exception value
+                body-phis (map (fn [i] (let [k (.indexOf ^java.util.List (vec phi-names) (res-of i))]
+                                         (reduce (fn [i rb] (let [v (if (neg? k)
+                                                                     (let [o (op-of (peek (insts (some #(when (= (label %) (label rb)) %) resumes))))] (nth o 2))
+                                                                     (nth uvals k))]
+                                                              (add-incoming i v (label rb))))
+                                                 i resumes)))
+                               body-phis)]
+            [(block (label lpb2) (concat (subvec (vec is) 0 j) [(list 'br body-l)]))
+             (block body-l (concat body-phis (map #(subst % ren) (subvec (vec is) j))))]))
+        ren (when body-l (merge (zipmap (map res-of lp-phis) phi-names) {(res-of outer-lp) eh}))]
+    [blocks lpb3 body ren]))
+
+;; ---------------------------------------------------------------------------------------------
 ;; InlineFunctionImpl (a call; an invoke's unwinding: HandleInlinedLandingPad)
 
 (def ^:private counter (atom 0))
@@ -276,13 +361,24 @@
         allocas (filterv #(and (static-alloca? %) (uses? blocks (res-of %))) (insts entry))
         dead (filterv #(and (static-alloca? %) (not (uses? blocks (res-of %)))) (insts entry))
         blocks (assoc blocks 0 (block (label entry) (remove (set (concat allocas dead)) (insts entry))))
+        ;; an invoke's call site: its unwinding given to the inlined code (HandleInlinedLandingPad), the original edge to the
+        ;; landing pad gone (removePredecessor)
+        lp (when invoke? (kv-after co :unwind))
+        lpb (when invoke? (some #(when (= lp (label %)) %) caller-blocks))
+        _ (when (and invoke? (nil? lpb)) (throw (ex-info "inline: the invoke's landing pad is not in the caller" {:callee csym})))
+        [blocks lpb3 lp-body ren] (if invoke? (through-invoke blocks lp lpb (label b) fresh) [blocks nil nil nil])
+        lpb3 (when lpb3 (block (label lpb3) (map (fn [i] (if (= 'phi (opname i))
+                                                           (let [o (op-of i)] (with-op i (apply list 'phi (second o) (remove #(= (label b) (second %)) (drop 2 o)))))
+                                                           i))
+                                                 (insts lpb3))))
         rets (filterv #(= 'ret (opname (peek (insts %)))) blocks)
         r (res-of call)
         ret-val (fn [rb] (let [o (op-of (peek (insts rb)))] (when (= 3 (count o)) (nth o 2))))
         exit (symbol (str "%" (name csym) ".exit" k))
-        before (subvec is 0 ii) after (subvec is (inc ii))
+        before (subvec is 0 ii)
+        ;; an invoke: a branch to its normal destination after the inlined code (InlineFunction's CreatedBranchToNormalDest)
+        after (if invoke? [(list 'br (kv-after co :to))] (subvec is (inc ii)))
         caller (vec caller-blocks)]
-    (when invoke? (throw (ex-info "inline: an invoke's call site (HandleInlinedLandingPad) is not ported yet" {:callee csym})))
     (let [[out val]
           (if (and (= 1 (count blocks)) (= 1 (count rets)))
             ;; one block ending in a return: the callee's body spliced into the calling block
@@ -321,6 +417,12 @@
                     (mapv (fn [x] (if (some #(= (label x) (label %)) out) x (phi-relabel x (label b) last-label))) caller2)
                     caller2)
           caller2 (mapv #(subst % sub) caller2)
+          ;; the landing pad split (its body after it), the uses of its phis and landingpad value elsewhere renamed
+          caller2 (if-not lpb3
+                    caller2
+                    (vec (mapcat (fn [x] (cond (= (label x) (label lpb3)) (cons lpb3 (when lp-body [lp-body]))
+                                               :else [(if ren (subst x ren) x)]))
+                                 caller2)))
           e0 (first caller2)]
       ;; the allocas at the very start of the caller's entry block
       (assoc caller2 0 (block (label e0) (concat allocas (insts e0)))))))

@@ -388,7 +388,17 @@
                            (let [inl-defs (vec (keep #(try (cg/codegen-fn (assoc % :form :body) lt gl) (catch Throwable _ nil)) inl-bodies))
                                  always (set (map second inl-defs))
                                  missing (set (for [[d args sym b] (:inline-bodies m) :when (and sym (not (contains? always (symbol "g" sym))))] (symbol "g" sym)))
-                                 module (inl/inline-module (concat (keep #(nth % 2) ours) inl-defs) always)
+                                 ;; the callees that cannot unwind (the calls' facts, :can-unwind false): an inlined call of one
+                                 ;; stays a call at an invoke's site (CallBase::doesNotThrow)
+                                 nounwind (let [acc (volatile! {})]
+                                            (letfn [(walk [x] (cond (and (seq? x) (= 'callee (first x)) (map? (second x)))
+                                                                    (let [c (second x)] (when (:symbol c) (vswap! acc assoc (:symbol c) (:can-unwind c))))
+                                                                    (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                                                                    (map? x) (doseq [y (vals x)] (walk y))))]
+                                              (doseq [b (concat (keep second (:bodies m)) inl-bodies)] (walk b)))
+                                            @acc)
+                                 module (binding [inl/*nounwind?* (fn [sym] (or (str/starts-with? (name sym) "llvm.") (false? (get nounwind (name sym)))))]
+                                          (inl/inline-module (concat (keep #(nth % 2) ours) inl-defs) always))
                                  by (into {} (map (juxt second identity) module))]
                              (vec (for [[d sym f why :as o] ours]
                                     (cond (nil? f) o

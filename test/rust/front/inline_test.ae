@@ -4,7 +4,8 @@
   over the same functions as text, its output read into these forms):
   a callee of one block spliced into the calling block, its static alloca at the caller's entry; a callee of several blocks
   whose one return is spliced into the exit block; two returns joined by a phi; a branch on a constant argument pruned and the
-  blocks merged; the inlined function dropped. Compared after RF3's normalizer (names by first occurrence). `bin/rust-front
+  blocks merged; an invoke's call site (the callee's calls made invokes, its resume a branch to the landing pad's body); the
+  inlined function dropped. Compared after RF3's normalizer (names by first occurrence). `bin/rust-front
   inline-test`."
   (:require [arbace.rust.back.inline :as inl]
             [arbace.rust.back.check :as chk]))
@@ -50,19 +51,61 @@
   '(llvm/define g/c4 i64 [[i1 %b]] :body [(block %start (br i1 %b %bb1 %bb2)) (block %bb1 (br %exit)) (block %bb2 (br %exit))
                                          (block %exit (= %m (phi i64 [1 %bb1] [2 %bb2])) (ret i64 %m))]))
 
+;; an invoke's call site: the callee's calls made invokes to the caller's landing pad, each block split after one
+(def ^:private callee5
+  '(llvm/define g/f5 i64 [[i64 %a]] :personality [ptr g/rust_eh_personality]
+     :body [(block %start (= %x (call i64 g/h [[i64 %a]])) (= %y (call i64 g/h [[i64 %x]])) (ret i64 %y))]))
+(def ^:private caller5
+  '(llvm/define g/c5 i64 [[i64 %p]] :personality [ptr g/rust_eh_personality]
+     :body [(block %start (= %r (invoke i64 g/f5 [[i64 %p]] :to %bb1 :unwind %lp)))
+            (block %bb1 (ret i64 %r))
+            (block %lp (= %e (landingpad (struct ptr i32) :cleanup)) (call void g/drop [[ptr null]]) (resume (struct ptr i32) %e))]))
+(def ^:private want5
+  '(llvm/define g/c5 i64 [[i64 %p]] :personality [ptr g/rust_eh_personality]
+     :body [(block %start (= %x (invoke i64 g/h [[i64 %p]] :to %n1 :unwind %lp)))
+            (block %n1 (= %y (invoke i64 g/h [[i64 %x]] :to %exit :unwind %lp)))
+            (block %exit (br %bb1))
+            (block %bb1 (ret i64 %y))
+            (block %lp (= %e (landingpad (struct ptr i32) :cleanup)) (call void g/drop [[ptr null]]) (resume (struct ptr i32) %e))]))
+
+;; the callee's own landing pad: its resume a branch to the caller's landing pad's body, the exception value a phi there
+(def ^:private callee6
+  '(llvm/define g/f6 i64 [[i64 %a]] :personality [ptr g/rust_eh_personality]
+     :body [(block %start (= %x (invoke i64 g/h [[i64 %a]] :to %ok :unwind %cl)))
+            (block %ok (ret i64 %x))
+            (block %cl (= %l (landingpad (struct ptr i32) :cleanup)) (call void g/drop [[ptr null]]) (resume (struct ptr i32) %l))]))
+(def ^:private caller6
+  '(llvm/define g/c6 i64 [[i64 %p]] :personality [ptr g/rust_eh_personality]
+     :body [(block %start (= %r (invoke i64 g/f6 [[i64 %p]] :to %bb1 :unwind %lp)))
+            (block %bb1 (ret i64 %r))
+            (block %lp (= %e (landingpad (struct ptr i32) :cleanup)) (call void g/drop [[ptr null]]) (resume (struct ptr i32) %e))]))
+(def ^:private want6
+  '(llvm/define g/c6 i64 [[i64 %p]] :personality [ptr g/rust_eh_personality]
+     :body [(block %start (= %x (invoke i64 g/h [[i64 %p]] :to %exit :unwind %cl)))
+            (block %cl (= %l (landingpad (struct ptr i32) :cleanup)) (invoke void g/drop [[ptr null]] :to %n1 :unwind %lp))
+            (block %n1 (br %lpbody))
+            (block %exit (br %bb1))
+            (block %bb1 (ret i64 %x))
+            (block %lp (= %e (landingpad (struct ptr i32) :cleanup)) (br %lpbody))
+            (block %lpbody (= %eh (phi (struct ptr i32) [%e %lp] [%l %n1])) (call void g/drop [[ptr null]]) (resume (struct ptr i32) %eh))]))
+
 (defn- case! [nm got want]
   (let [ok (= (norm got) (norm want))]
     (println (str "inline-test: " nm ": " (if ok "equal" (str "DIFFERS: " (chk/diff-text (norm got) (norm want))))))
     ok))
 
 (defn -main [& _]
-  (let [m (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4] #{'g/f1 'g/f2 'g/f4})
+  (let [m (binding [inl/*nounwind?* (fn [s] (= s 'g/never))]
+            (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4 callee5 caller5 callee6 caller6]
+                               #{'g/f1 'g/f2 'g/f4 'g/f5 'g/f6}))
         by (into {} (map (juxt second identity) m))
         oks [(case! "one block, its alloca at the entry" (by 'g/c1) want1)
              (case! "several blocks, one return" (by 'g/c2) want2)
              (case! "a constant argument's branch pruned" (by 'g/c3) want3)
              (case! "two returns joined" (by 'g/c4) want4)
-             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c2" "g/c3" "g/c4"])
+             (case! "an invoke's call site, the callee's calls made invokes" (by 'g/c5) want5)
+             (case! "an invoke's call site, the callee's resume to the landing pad's body" (by 'g/c6) want6)
+             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c2" "g/c3" "g/c4" "g/c5" "g/c6"])
              ;; the negative control: a case's result against another case's IR differs
              (not (= (norm (by 'g/c2)) (norm want4)))]]
     (println (str "inline-test: " (count (filter true? oks)) " of " (count oks) (if (every? true? oks) " passed" " FAILED")))
