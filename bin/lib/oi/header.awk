@@ -65,6 +65,18 @@ END {
   gsub(/\$\{ocamlsrcdir\}/, "@OCAMLSRCDIR@", body)
   gsub(/\$\{test_source_directory\}/, "@TSD@", body)
   gsub(/\$\{[a-z_]*\}/, "$VAR", body)
+  # an alternative that requires flambda (its `flambda` action) and names its own reference is one ocamltest skips on the pinned
+  # configuration (no flambda, test/ocaml/ocamltest-config.edn): dropped before the statements are read, so its reference
+  # (backtrace/lazy's and backtrace_effects_nested's .flambda.reference) does not class the test, whose other alternatives run with
+  # the plain one (OC217 (a); queue 461); a flambda alternative without a reference keeps its class (flambda/gpr2239: :config-skipped)
+  nbody = ""; rest = body
+  while (match(rest, /\{[^{}]*\}/)) {
+    blk = substr(rest, RSTART, RLENGTH)
+    nbody = nbody substr(rest, 1, RSTART - 1)
+    if (blk !~ /[{; ]flambda *;/ || blk !~ /reference *=/) nbody = nbody blk
+    rest = substr(rest, RSTART + RLENGTH)
+  }
+  body = nbody rest
   gsub(/[{}]/, ";", body)
   m = split(body, st, ";")
   flags = ""; incs = ""; args = ""; env = ""

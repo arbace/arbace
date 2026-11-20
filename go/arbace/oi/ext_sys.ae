@@ -128,6 +128,7 @@
     (set! gcMajorAsked + majors)
     (set! gcCompactions + compactions)
     (set! forcedMajorCount + forced)
+    (youngClear)
     (.fullMajor th)
     (set! gcAbsorbed + (- (conv int (.-NumGC (memStats))) (conv int before)))
     ;; OC218 (a)'s heap model: an asked collection empties the simulated minor heap (its tracked values promoted or dead), a major one
@@ -578,6 +579,7 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
                 ;; a new minor heap size empties the simulated minor heap (gc_ctrl.c's caml_set_minor_heap_wsz: a minor collection)
                 (when (and (> (len (.-F b)) 0) (!= (AsInt (aget (.-F b) 0)) (AsInt (aget gcControl 0))))
                   (set! minorUsed 0)
+                  (youngClear)
                   (set! minorDue true))
                 (range [i gcControl]
                   (when (< i (len (.-F b)))
@@ -857,6 +859,39 @@ closures, the boxed numbers of arithmetic or the runtime's own blocks.\n"} minor
 (go/var ^{:tag int :doc "minorUsed is the words the simulated minor heap holds since its last collection.\n"} minorUsed)
 (go/var ^{:tag bool :doc "minorDue is a minor collection the simulated heap made while a callback ran: its promotions wait for the callbacks' end.\n"} minorDue)
 
+;; the young values (queue 461, lazy/minor_major_force): Obj.is_shared (caml_obj_is_shared) is false for a block in the minor heap. The
+;; model keeps no heap per block, so once a program asks (its first is_shared, which finds every value made before it old) the counted
+;; minor allocations are kept in youngSet until the simulated minor heap's next collection empties it; a program that never asks pays
+;; one test of youngTrack an allocation
+(go/var ^bool youngTrack)
+(go/var ^{:tag (map Value bool)} youngSet)
+(go/var ^{:tag sync/Mutex} youngMu)
+
+(go/func youngClear "youngClear empties the young values: a minor collection promoted them.\n" []
+  (when youngTrack
+    (.Lock youngMu)
+    (set! youngSet nil)
+    (.Unlock youngMu)))
+
+(go/func youngAdd "youngAdd notes v, a counted minor allocation of wosize words, young.\n" [^int wosize ^Value v]
+  (when (and youngTrack (!= v nil) (> wosize 0) (<= wosize 256))
+    (.Lock youngMu)
+    (when (== youngSet nil)
+      (set! youngSet (lit (map Value bool))))
+    (aset youngSet v true)
+    (.Unlock youngMu)))
+
+(go/func isShared "isShared is caml_obj_is_shared: an immediate or a value outside the minor heap (any value made before the first ask).\n" ^bool [^Value v]
+  (when (not youngTrack)
+    (set! youngTrack true)
+    (return true))
+  (when [(values _ ok) (assert int v)] ok
+    (return true))
+  (.Lock youngMu)
+  (let [y (aget youngSet v)]
+    (.Unlock youngMu)
+    (not y)))
+
 (go/func countWords "countWords counts an allocation of wosize words (and its header; an atom, wosize 0, is static); it reports whether the
 allocation overflowed the simulated minor heap, which a minor collection empties before the block is made.\n" ^bool [^int wosize]
   (when (> wosize 256)
@@ -868,6 +903,7 @@ allocation overflowed the simulated minor heap, which a minor collection empties
   (set! minorUsed + (+ wosize 1))
   (when (> minorUsed (AsInt (aget gcControl 0)))
     (set! minorUsed (+ wosize 1))
+    (youngClear)
     (return true))
   false)
 
@@ -879,6 +915,7 @@ simulated minor heap collected first when the allocation overflows it, then v sa
 allocation callback run at once, as the bytecode runtime runs it at the allocation, unless th is in a callback (whose allocations are
 not sampled). It returns v.\n" ^Value [^{:tag (* Thread)} th ^int wosize ^Value v]
   (let [full (countWords wosize)]
+    (youngAdd wosize v)
     (when (or (== th nil) (.-mpInCb th))
       (when full (set! minorDue true))
       (return v))
