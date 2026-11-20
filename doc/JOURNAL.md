@@ -13708,3 +13708,39 @@ waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on
   8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
   record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
   three steps wait on n-py-rec's check records, now in the tree, to be spliced.
+
+## 2026-11-20: an own judge for the token checks: libcpp chosen, stopped at the user's ruling (pp-ref-1120)
+
+The brief (the main session, toward the CoMaIn goal, on py-own-judge-1 (a)): judge C++'s token check (`bin/repr-cpp pp-check`'s
+1,931 files, half own today: g++ -E's and clang's recorded digests, `test/repr/cpp/pp-gxx.sha256`, `lex-clang.sha256`) and C's 72
+known preprocessor differences (`test/repr/c/pp-check-known.edn`'s `:pp` entries, gcc -E's digests) by an independent reference
+preprocessor, unmodified from a pinned tarball, compiled by Arbace's own C or C++ behind a harness; the records to the oracle tier.
+Written as doc/cpp/CPP-SURVEY.md, "Write-ahead: an own judge for the token checks", with CP413 and CP414; nothing built, no fact moved.
+
+- Studied: the check's comparison (`arbace/repr/cpp/ppcheck.ae`: the pp level's token texts against `gxx-texts` of g++ -E -P, both
+  rejecting, CP261 (a)'s clang tokens; the lex level's `raw-lines` against `clang-lines`); C's (`arbace/repr/c/ppcheck.ae`
+  `check-file`: cc's dumps, the known file's reviewed class where cc is wrong). Candidates: GCC 15.2.0's libcpp from the pinned
+  gcc-15.2.0 tarball (test/cpp/corpora.edn's `:gcc-15.2.0`, sha256 438fd996...; `gcc-15.2.0/libcpp/`, 14 units, 35,318 lines of code;
+  libiberty's pieces about 3,500 lines; GPL-3.0-or-later, libiberty LGPL-2.0+), clang 23.1.5's Lex from the pinned
+  llvm-project-23.1.5.src.tar.xz (sha256 fb50b1ea...; `clang/lib/Lex` and `clang/include/clang/Lex` 44,798 lines, Basic 71,917,
+  LLVM Support 162,966, ADT 45,037; Apache-2.0 WITH LLVM-exception), mcpp 2.7.2 (BSD-2-Clause, not pinned, not fetched). Both
+  tarballs extracted in part into the worktree's `.tmp/ppref/` for the counts and the probe.
+- Measured, the corpora (the record's 1,934 rows, files from the pinned tarball): 405 use in their own text a feature mcpp predates
+  (raw strings, `u8`/`u`/`U` literals, user-defined literals, digit separators, `__VA_OPT__`, `__has_*`, `<=>`, `#elifdef`/`#embed`,
+  modules, a system header whose `c++config.h` asks `__has_builtin`): a grep, an upper bound.
+- Probed: libcpp's 14 units through `arbace.cpp.codegen gen-batch` (the native route, no clang or g++), `c++17`, a `config.h` by hand
+  from `libcpp/config.in` for x86_64-linux-musl (no `HAVE_UCHAR`), `localedir.h`, `-U__GNUC__` (libcpp's portable paths; with
+  `__GNUC__` the native parser declines obstack.h's statement expressions). The parser reads all 14; the code generator generates 3
+  (lex, line-map, mkdeps) and refuses 11 at 10 distinct gaps (decltype of a member as a type, `struct stat` and `stat()`, `this`
+  outside a method, a call of a non-function, overload sets, a function type with an incomplete struct parameter, ...; the survey lists
+  them). 3 min, peak 3.3 GB, one process.
+- Chosen: libcpp (exact at the pp level for both crops: it is g++ -E's and gcc -E's preprocessor, the target's answers fed through
+  its own hooks). Not built, by the brief's rule: (1) its license needs the user's ruling (CP413: running it is unrestricted by GPLv3
+  §2, its build never conveyed, the harness Arbace's own; (a) accepted, recommended), (2) Arbace's C++ compiles 3 of its 14 units
+  today; the 11 refusals are the code generator's (arbace/cpp/codegen, the cpp-rt-own line's, not touched here). CP414: the lex
+  level's judge, libcpp's raw lexer (`_cpp_lex_direct`) measured against clang's record first (recommended), or kept on clang's
+  record, or moved to the oracle tier. Alternatives: clang's Lex (exact at lex, clang's own `__has_` answers at pp, beyond Arbace's
+  C++), mcpp (at most 1,529 files' pp level, none of C's 72, a fetch), the records as they are.
+- Projected when built: C++'s judge 0.907 to 0.998, independence 91.4 to 93.2 (floor 91 to 93); C's judge 0.995 to 0.997,
+  independence 99.90 to 99.95 (floor 99 unchanged).
+- Not run: crops-score, records-check and reap (no record or fact changed); no gate.
