@@ -484,6 +484,26 @@
           (vector? k) (ok? var (nth k 2))
           :else true)))
 
+(defn- fun-parts
+  "A function type's argument and result [arg res] (FUN's last two arguments), nil for another type"
+  [t]
+  (when (and (vector? t) (= :tc (first t)) (= "FUN" (occ-of (second t))) (>= (count (nth t 2)) 2))
+    [(nth (nth t 2) (- (count (nth t 2)) 2)) (last (nth t 2))]))
+
+(defn- functor-ok?
+  "GHC.Tc.Deriv.Functor's functorLikeTraverse for Functor: a field type whose variable occurs only covariantly (a function's
+  argument flips the position, ft_fun: twice is covariant again), through applications whose last argument holds it, tuples
+  and foralls (ft_forall); co, the position"
+  [var t co]
+  (cond (not (ty-contains? var t)) true
+        (= t [:tv var]) co
+        (= :forall (first t)) (functor-ok? var (nth t 3) co)
+        (fun-parts t) (let [[a r] (fun-parts t)] (and (functor-ok? var a (not co)) (functor-ok? var r co)))
+        :else (let [k (classify var t)]
+                (cond (= k :bad) false
+                      (= :tup (first k)) (every? #(functor-ok? var % co) (second k))
+                      :else (and co (functor-ok? var (nth k 2) true))))))
+
 (defn- supply [] (let [n (atom 0)] (fn [] (lname (str "y" (swap! n inc))))))
 
 (defn- tup-names [fresh n] (vec (repeatedly n fresh)))
@@ -495,7 +515,7 @@
   (let [fmap (gv base "fmap") repl (gv base "<$")
         f (v* (lname "f")) z (v* (lname "z"))
         kinds (fn [c] (mapv #(classify var %) (:tys c)))]
-    (when (every? (fn [c] (every? #(ok? var %) (:tys c))) cons)
+    (when (every? (fn [c] (every? #(functor-ok? var % true) (:tys c))) cons)
       (let [mk (fn [replace?]
                  (fn [c]
                    (let [fresh (supply)
@@ -503,6 +523,11 @@
                               (let [k (classify var t)]
                                 (cond (= k :triv) x
                                       (= k :var) (if replace? z (ap* f x))
+                                      ;; ft_forall: the body's; ft_fun: \b -> h (x (g b)), g the argument's traversal in the
+                                      ;; other position (its variable's occurrences covariant there again, functor-ok?)
+                                      (= :forall (first t)) (go (nth t 3) x)
+                                      (fun-parts t) (let [[a r] (fun-parts t) b (fresh)]
+                                                      (lam* [(vp (nth b 2))] (go r (ap* x (go a (v* b))))))
                                       (= :tup (first k)) (let [ns (tup-names fresh (count (second k)))]
                                                            (hcase x [[(tup-pat ns) (tuple* (map (fn [t n] (go t (v* n))) (second k) ns))]]))
                                       :else (let [[_ _ a] k]
