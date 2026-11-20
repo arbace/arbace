@@ -48,14 +48,17 @@
 
 (defn- git [& args] (apply sh "git" "-C" *root* args))
 
+(def ^:private trees (atom {}))
+
 (defn- tree
-  "A ref's tree (its files by git ls-tree), or the checkout's (nil: its files asked one by one, so that the gate's
-  audit sees only the files the scores read)."
+  "A ref's tree (its files by git ls-tree, once a ref), or the checkout's (nil: its files asked one by one, so that the
+  gate's audit sees only the files the scores read)."
   [ref]
   (if ref
-    (let [r (git "ls-tree" "-r" "--name-only" ref)]
-      (when-not (zero? (:exit r)) (throw (ex-info (str "crops-score: no ref " ref) {})))
-      {:ref ref :files (set (remove str/blank? (str/split-lines (:out r))))})
+    (or (@trees ref)
+        (let [r (git "ls-tree" "-r" "--name-only" ref)]
+          (when-not (zero? (:exit r)) (throw (ex-info (str "crops-score: no ref " ref) {})))
+          ((swap! trees assoc ref {:ref ref :files (set (remove str/blank? (str/split-lines (:out r))))}) ref)))
     {:ref nil}))
 
 (defn- has? [t f]
@@ -82,7 +85,13 @@
             (swap! cache assoc k s)
             s)))))
 
-(defn- edn [t f] (when-let [s (text t f)] (read-string s)))
+;; queue 507: the control of --self-test-ref, a reader that hands a ref's tree one input as the working tree has it (nil: none)
+(def ^:dynamic *leak* nil)
+
+(defn- edn [t f]
+  (if-let [x (and (:ref t) *leak* (*leak* f))]
+    x
+    (when-let [s (text t f)] (read-string s))))
 
 (defn- edn-forms
   "Every form of F's text in tree T (a file of one form a line, bin/hsi check's), or nil."
@@ -520,8 +529,10 @@
 
 (defn- independence [t cfg config ind steps m]
   (let [crop (:id cfg)
-        facts (get ind crop)
-        at (get-in facts [:at (or (:ref t) "checkout")])
+        facts (get (:facts ind) crop)
+        ;; the tree's own :at for its name, and (a ref) the checkout's: its reviewed facts of a held ref, by the ref's name
+        at (merge (get-in facts [:at (or (:ref t) "checkout")])
+                  (when (:ref t) (get-in (:checkout ind) [crop :at (:ref t)])))
         tool-hosts (set (:toolchain-hosts config))
         ;; a host use that is not the toolchain's (crops.edn's :host-uses: a step's java -version alone, the frozen jar's JVM)
         exempt? (fn [s h] (some (fn [u] (and (= h (:host u))
@@ -539,8 +550,9 @@
                          named (mapcat #(by-name (str %)) (:steps f))
                          live (remove #(= :oracle (:phase %)) named)
                          hosted (for [s live h (:hosts s) :when (and (tool-hosts h) (not (exempt? s h)))] [(:name s) h])
-                         reads (when (nil? (:ref t)) (toolchain-reads t config live))
-                         helped (when (and (nil? (:ref t)) (some #{st} levels)) (helper-records t config crop st))
+                         ;; (queue 507: on a ref too, read through git, so --ref REF scores as the checkout at REF does)
+                         reads (toolchain-reads t config live)
+                         helped (when (some #{st} levels) (helper-records t config crop st))
                          [mixed nmixed] (mixed-score f)
                          part (when (and mixed (:mean-with f)) (mean-with-part t (:mean-with f)))
                          [mixed nmixed part-note part-score] (if part (with-part mixed nmixed part) [mixed nmixed])
@@ -597,7 +609,11 @@
                                  check)]]
                {:stage st :score score :fact f :check check :unverified (boolean (and unverified (not (str/starts-with? check "CLAIM REFUTED"))))})]
     {:stages rows :score (/ (reduce + (map :score rows)) (count rows))
-     :facts-of (cond (nil? (:ref t)) "the checkout" at (:ref t) :else (str "the checkout (no :at for " (:ref t) ")"))
+     :facts-of (cond (nil? (:ref t)) "the checkout"
+                     (:fallback ind) (str "the checkout's test/crops/independence.edn (" (:ref t) " has none)"
+                                          (when at (str ", its :at for " (:ref t))))
+                     (seq (get-in (:checkout ind) [crop :at (:ref t)])) (str (:ref t) ", with the checkout's :at for " (:ref t))
+                     :else (:ref t))
      :refuted (filter #(str/starts-with? (:check %) "CLAIM REFUTED") rows)
      :unverified (filter :unverified rows)}))
 
@@ -614,8 +630,21 @@
 
 (defn- pct [x] (format "%.1f%%" (* 100.0 (double x))))
 
+(def ^:private crops-file "test/crops/crops.edn")
+(def ^:private independence-file "test/crops/independence.edn")
+
+(defn- tree-inputs
+  "Queue 507: tree T's test/crops/crops.edn and independence.edn, read through T (git show for a ref, as every other input),
+  each the checkout's (CONFIG, IND) only when T has none (a held ref older than the file, said in :facts-of):
+  {:config C :ind {:facts I :checkout IND :fallback B}}."
+  [t config ind]
+  (let [c (edn t crops-file) i (edn t independence-file)]
+    {:config (or c config) :ind {:facts (or i ind) :checkout ind :fallback (nil? i)}}))
+
 (defn- score-crop [cfg config ind ref inputs]
   (let [t (tree ref)
+        {config :config ind :ind} (tree-inputs t config ind)
+        cfg (or (first (filter #(= (:id cfg) (:id %)) (:crops config))) cfg)
         m (matrix t inputs)
         steps (steps-of t)]
     {:crop cfg :ref (or ref "checkout")
@@ -893,6 +922,68 @@
      (when-not (and (= "82.5" (compl before)) (= "84.2" (compl after)))
        [(str "OC222: completeness " (compl before) " to " (compl after) ", expected 82.5 to 84.2 (+1.7)")]))))
 
+;; ---- queue 507 (2026-11-20): --self-test-ref, the checkout's table against --ref HEAD's at the same commit, stage by stage. A
+;; ref's every input is read through git (ls-tree, show), crops.edn and independence.edn among them since 507 (before, both were the
+;; invoking checkout's working tree: --ref 6f2292ab8 from a checkout at 54f42ca70 gave C++'s independence 91.9, the checkout 93.7);
+;; the control hands the ref's tree independence.edn as a working tree behind its commit has it, and the tables must then differ
+
+(defn- stage-table
+  "A crop's scores as --self-test-ref compares them: each cell, each maturity item, each independence stage, its OC222 problems."
+  [s]
+  (concat
+   (for [c (get-in s [:completeness :cells]) :let [r (:record c)]]
+     [:completeness (:level c) (:score c) (:meant c) (:flag c) (select-keys r [:checked :pass :design :deferred :pending :na])])
+   (for [i (get-in s [:maturity :items])] [:maturity (:id i) (:value i) (:evidence i)])
+   (for [r (get-in s [:independence :stages])] [:independence (:stage r) (:score r) (:check r)])
+   [[:oc222 :problems (vec (:na-problems s))]]))
+
+(defn table-diffs
+  "The differences of two runs' scores AS and BS (a crop's line each, crops in order), row by row of stage-table."
+  [as bs]
+  (let [ids (fn [ss] (map #(get-in % [:crop :id]) ss))]
+    (if (not= (ids as) (ids bs))
+      [(str "the crops " (pr-str (ids as)) " against " (pr-str (ids bs)))]
+      (for [[a b] (map vector as bs) [x y] (map vector (stage-table a) (stage-table b)) :when (not= x y)]
+        (str (name (get-in a [:crop :id])) " " (name (first x)) " " (name (second x)) ": " (pr-str (vec (drop 2 x)))
+             " against " (pr-str (vec (drop 2 y))))))))
+
+(defn- leaked-independence
+  "The control's input: the working tree's independence.edn (read-file, as the reader before queue 507 read it for a ref), as a
+  working tree behind its commit has it: the first stage (crops.edn's order) stated above 0 with no counted cases, stated 0.
+  [[CROP STAGE] facts]."
+  [config]
+  (let [ind (read-file independence-file)
+        counted [:cases :mixed :count-from :case-inputs :mean-with]
+        cs (for [c (map :id (:crops config)) st stages :let [f (get-in ind [c :stages st])]
+                 :when (and (number? (:score f)) (pos? (:score f)) (not-any? #(contains? f %) counted))]
+             [c st])]
+    (when-let [[c st] (first cs)] [[c st] (assoc-in ind [c :stages st :score] 0)])))
+
+(defn self-test-ref
+  "Queue 507: the failures of --ref HEAD against the checkout (empty when the tree is clean, every crop's every row is equal and
+  the control, independence.edn read from a working tree behind the commit, differs as it must)."
+  []
+  (let [dirty (:out (git "status" "--porcelain"))]
+    (if-not (str/blank? dirty)
+      [(str "the tree is not clean (git status --porcelain, " (count (str/split-lines dirty)) " lines): --ref HEAD scores the commit, the checkout its working tree")]
+      (let [config (read-file crops-file)
+            ind (read-file independence-file)
+            run (fn [ref] (let [listed (if ref (:config (tree-inputs (tree ref) config ind)) config)]
+                            (doall (for [c (:crops listed)] (score-crop c config ind ref [])))))
+            here (run nil)
+            at-head (run "HEAD")
+            [[crop st] leaked] (leaked-independence config)
+            ctl (binding [*leak* (fn [f] (when (= f independence-file) leaked))] (run "HEAD"))
+            d (table-diffs here at-head)
+            dc (table-diffs here ctl)]
+        (println (str "crops-score: --self-test-ref: " (count here) " crops, " (count (mapcat stage-table here)) " rows; --ref HEAD "
+                      (if (empty? d) "equal to the checkout, row by row" (str (count d) " rows differ"))
+                      "; the control (" independence-file " from a working tree behind HEAD, " (name crop) " " (name st)
+                      " stated 0): " (count dc) " rows differ" (when (seq dc) (str ", " (first dc)))))
+        (concat (map #(str "--ref HEAD differs: " %) d)
+                (when (nil? crop) ["control: no stage stated above 0 to change"])
+                (when (empty? dc) [(str "control (" independence-file " from the working tree, " (name crop) " " (name st) " stated 0) passed: the tables equal")]))))))
+
 (defn- parse-args [args]
   (loop [o {:inputs []} [a & r] args]
     (case a
@@ -910,6 +1001,12 @@
 
 (defn -main [& args]
   (binding [*root* (or (System/getenv "CROPS_ROOT") ".")]
+    (when (some #{"--self-test-ref"} args)
+      (let [fails (self-test-ref)]
+        (doseq [x fails] (println (str "   FAIL " x)))
+        (println (str "crops-score: self-test-ref (queue 507): " (if (empty? fails) "--ref HEAD equals the checkout, the control fails as it must" (str (count fails) " failures"))))
+        (shutdown-agents)
+        (System/exit (if (empty? fails) 0 1))))
     (when (some #{"--self-test"} args)
       (let [fails (self-test)]
         (doseq [x fails] (println (str "   FAIL " x)))
@@ -917,10 +1014,12 @@
         (shutdown-agents)
         (System/exit (if (empty? fails) 0 1))))
     (let [o (parse-args args)
-          config (read-file "test/crops/crops.edn")
-          ind (read-file "test/crops/independence.edn")
+          config (read-file crops-file)
+          ind (read-file independence-file)
           inputs (for [f (:inputs o) :let [x (read-file f)]] [f (if (map? x) (:cells x) x)])
-          cfgs (filter #(or (nil? (:crop o)) (= (:crop o) (:id %))) (:crops config))
+          ;; (queue 507: --ref REF's crops are REF's crops.edn's, read through git; --newest's the checkout's, each on its ref)
+          listed (if (and (:ref o) (not (:newest o))) (:config (tree-inputs (tree (:ref o)) config ind)) config)
+          cfgs (filter #(or (nil? (:crop o)) (= (:crop o) (:id %))) (:crops listed))
           _ (when (empty? cfgs) (throw (ex-info (str "crops-score: no crop " (:crop o)) {})))
           scores (doall (for [c cfgs]
                           (score-crop c config ind (if (:newest o) (or (newest-ref c) (:ref o)) (:ref o)) inputs)))
