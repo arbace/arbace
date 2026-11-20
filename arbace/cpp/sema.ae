@@ -180,12 +180,19 @@
 (def ^:dynamic *header-cache* nil) ; atom {parts entities}
 
 (defn- opaque-class
-  "A class the headers declare and the program uses only through pointers (FILE's struct _IO_FILE): incomplete."
+  "A class the headers declare and the program uses only through pointers (FILE's struct _IO_FILE): incomplete. (cpp-rt-own: the
+  class of that name the global namespace declares when it does, and else one entered there, as an elaborated-type-specifier's
+  `struct X` declares X in the namespace that holds it, [basic.scope.pdecl]/7 and [dcl.type.elab]/3, so that its definition later
+  completes it: libcpp's symtab.h `typedef int (*ht_cb) (struct cpp_reader *, hashnode, const void *);` before internal.h's
+  `struct cpp_reader { ... }`, two classes before, `no member hash_ob of cpp_reader`)"
   [^String nm]
   (or (get @*header-cache* [:opaque nm])
+      (when-let [e (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) %) (.get ^java.util.HashMap (:names *root*) nm))]
+        (:ty e))
       (let [id (next-id) t {:k :class :id id}]
         (swap! abi/*classes* assoc id {:id id :name nm :path [] :scope (new-scope :class *root* :cls id :path [[:cls id]]) :fields [] :bases [] :outer *root*})
         (swap! *header-cache* assoc [:opaque nm] t)
+        (when-not (seq (.get ^java.util.HashMap (:names *root*) nm)) (enter! *root* nm {:e :type :ty t :pos -1}))
         t)))
 
 (declare finish-class!)
@@ -217,6 +224,11 @@
                        (and (:tag e) (#{"struct" "class" "union"} (:tag e))) (opaque-class (:name e))
                        :else (fail :header-type "header type " (:s t))))
             :elab (if (#{"struct" "class" "union"} (:kw t)) (opaque-class (:s t)) (fail :header-type "header type " (:s t)))
+            ;; (cpp-rt-own: a function type, a header's pointer to function: libcpp's symtab.h ht_cb)
+            :f {:k :fn :ret (ptype->type (:r t))
+                :ps (mapv (fn [p] (let [u (ptype->type p)] (cond (abi/arr? u) (abi/ptr (:of u)) (abi/fn? u) (abi/ptr u) :else u)))
+                          (if (and (= 1 (count (:ps t))) (= :b (:t (first (:ps t)))) (= ["void"] (vec (:w (first (:ps t)))))) [] (:ps t)))
+                :va (boolean (:va t))}
             (fail :header-type "header type " (pr-str (dissoc t :ent))))]
     (cond-> r (:c t) (assoc :c true) (:v t) (assoc :v true))))
 
@@ -570,7 +582,30 @@
                                  [(resolve-type-form scope %)])
                               ps))
             :va (boolean va)}))
-      cpp/elaborated (resolve-type-form scope (nth f 2))
+      ;; (cpp-rt-own: an elaborated-type-specifier's name is looked up ignoring the names that are no types, [basic.lookup.elab]/1:
+      ;; libcpp's traditional.cc, `struct block *block;` then `block = (struct block *) (exp + macro->count);`, the variable had
+      ;; hidden the class, "unknown type block")
+      cpp/elaborated (let [x (nth f 2)
+                           simple (when (and (symbol? x) (not (builtin-syms x)) (= 1 (count (name-parts x)))) (first (name-parts x)))]
+                       (or (when simple
+                             (some-> (loop [s scope] (when s (or (type-entity (find-here s simple true)) (recur (:parent s))))) :ty))
+                           (if (and simple (#{'struct 'class 'union "struct" "class" "union"} (second f)))
+                             ;; (cpp-rt-own: a class key and a name no declaration names declare an incomplete class in the smallest
+                             ;; namespace or block scope holding it, [basic.scope.pdecl]/7.2: libcpp's symtab.h `typedef int (*ht_cb)
+                             ;; (struct cpp_reader *, hashnode, const void *);` before any cpp_reader, the typedef dropped before)
+                             (try (resolve-type-form scope x)
+                                  (catch arbace.lang.ExceptionInfo e
+                                    (if (= :type (:codegen/refused (ex-data e)))
+                                      (let [home (loop [s scope] (if (and s (#{:class :tparams} (:kind s)) (:parent s)) (recur (:parent s)) s))]
+                                        (if (identical? home *root*)
+                                          (opaque-class simple)
+                                          (let [id (next-id) t {:k :class :id id}]
+                                            (swap! abi/*classes* assoc id {:id id :name simple :path (:path home) :scope (new-scope :class home :cls id :path (conj (vec (:path home)) [:cls id]))
+                                                                           :fields [] :bases [] :outer home})
+                                            (enter! home simple {:e :type :ty t :pos -1})
+                                            t)))
+                                      (throw e))))
+                             (resolve-type-form scope x))))
       ;; (n-cpp-concepts, the checker: a constrained placeholder, `C auto` ([dcl.spec.auto.general]/1), an auto with its
       ;; type-constraint's text, checked once deduced: placeholder-check!; the code generator refuses it as before)
       constrained (if (and (checking?) (:tc-text (meta f)) (#{'auto 'decltype-auto} (nth f 2 nil)))
@@ -1392,7 +1427,11 @@
     nil
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n))
             (or (when-let [q (expanded-qualifier n)] (when (some #(str/includes? % "<") q) q))
-                (qualifier-before n) (qualifier-tid-before n)))
+                (qualifier-before n) (qualifier-tid-before n)
+                ;; (cpp-rt-own: a declaration a macro writes has no source text before its name, so the parser's tokens:
+                ;; libcpp's init.cc `TRIGRAPH_MAP`, `constexpr _cpp_trigraph_map_s::_cpp_trigraph_map_s () : map {} {`, a
+                ;; constructor taken for a function of the global namespace, "this outside a method")
+                (expanded-qualifier n)))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
@@ -1756,7 +1795,13 @@
     t))
 
 (defn- declare-class! [scope0 n]
-  (let [nm (:name n)
+  (let [;; (cpp-rt-own: an elaborated-type-specifier's class, `struct P *p;` a member of S, is declared in the smallest namespace or
+        ;; block scope holding it, [basic.scope.pdecl]/7.2 (the parser's :_elab): libcpp's cpp_reader `struct cpp_savedstate
+        ;; *savedstate;` and pch.cc's `struct cpp_savedstate { ... }` one class, two before, "no member definedhash")
+        scope0 (if (and (:_elab n) (not (:completeDefinition n)))
+                 (loop [s scope0] (if (and s (#{:class :tparams} (:kind s)) (:parent s)) (recur (:parent s)) s))
+                 scope0)
+        nm (:name n)
         ;; a nested class defined outside its class (class L::F { ... }, [class.nest]/3): in the enclosing class's
         ;; scope (G5: <locale_classes.h>'s class locale::facet)
         ;; (not a class template's specialization's, declared in its parameters' scope: `template<...> class
@@ -1787,7 +1832,9 @@
                   scope)
         ^java.util.HashMap m (:names scope)
         old (when nm (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:id (:ty %))) (.get m nm)))
-        _ (when (and old qns (not (identical? qns scope))) (abi/update-cls! old update :scope assoc :path (conj (vec (:path qns)) [:cls old])))
+        _ (when (and old qns (not (identical? qns scope)))
+            (abi/update-cls! old #(-> % (update :scope assoc :path (conj (vec (:path qns)) [:cls old]))
+                                       (assoc :mangle-path-after [(vec (:path qns)) (inc (long @*ids*))]))))
         id (or old (next-id))
         ;; (a class of an unnamed namespace, or local to an internal function, has internal linkage and so have its
         ;; members, [basic.link]/4; G5c: libsupc++'s vec.cc's uncatch_exception, atexit_thread.cc's key_s)
@@ -2393,7 +2440,9 @@
       ;; (cpp-rt-own: a move constructor defaulted on its first declaration likewise, [class.copy.ctor]/11, as the implicit one:
       ;; <tuple>'s `constexpr _Head_base(_Head_base&&) = default;` of a pointer or an empty deleter, a copy of bytes in clang's
       ;; IR, no _ZNSt10_Head_base...C2EOS_ written; fs_path.cc's and cow-fs_dir.cc's unique_ptr<_Impl, _Impl_deleter> moved)
-      (let [g (fnd x)] (when (and (:defaulted g) (not (:ool-defaulted g)) (move-ctor? g id)) (upd-fn! x assoc :trivial true) (upd-fn! x assoc :trivial (trivial-copy? id)))))
+      ;; (the bases' and members' moves judged, members-move-trivial?: <tuple>'s `_Tuple_impl(_Tuple_impl&&) = default` over a base
+      ;; whose move constructor is user-provided is not trivial, clang's _ZNSt11_Tuple_impl...C2EOS6_ defined)
+      (let [g (fnd x)] (when (and (:defaulted g) (not (:ool-defaulted g)) (move-ctor? g id)) (upd-fn! x assoc :trivial (members-move-trivial? id)))))
     (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
       (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (trivial-assign? id))]
         (when del (upd-fn! fid merge del)))))
@@ -3961,14 +4010,31 @@
               ;; (cpp-rt-own: and behind the same conversion without it, /3.2.5: char* to void* before char* to const void*,
               ;; <cstring>'s void* memchr(void*, int, size_t) over ::memchr(const void*, ...) for a char*, floating_from_chars.cc's,
               ;; "ambiguous call (2 viable)" before)
-              (when r {:rank r :sub (if (and (abi/ptr? ft) (abi/ptr? tt)
-                                             (or (and (:c (:to tt)) (not (:c (:to ft)))) (and (:v (:to tt)) (not (:v (:to ft))))))
-                                      1 0)})))))
+              (when r (cond-> {:rank r :sub (if (and (abi/ptr? ft) (abi/ptr? tt)
+                                                     (or (and (:c (:to tt)) (not (:c (:to ft)))) (and (:v (:to tt)) (not (:v (:to ft))))))
+                                              1 0)}
+                        ;; (cpp-rt-own: what [over.ics.rank]/4 orders among conversions of one rank, better-ics?'s: a pointer's to bool,
+                        ;; to cv void*, to a base class's pointer)
+                        (and (or (abi/ptr? ft) (abi/mptr? ft)) (= :bool (abi/bn tt))) (assoc :ptr-bool true)
+                        (and (abi/ptr? ft) (abi/ptr? tt) (abi/void? (:to tt)) (not (abi/void? (:to ft)))) (assoc :ptr-void true)
+                        (and (abi/ptr? ft) (abi/ptr? tt) (class-id (:to ft)) (class-id (:to tt))
+                             (abi/derived-from? (class-id (:to ft)) (class-id (:to tt))))
+                        (assoc :ptr-d2b [(class-id (:to ft)) (class-id (:to tt))])))))))
 
 (defn- better-ics? [a b]
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
            (cond
+             ;; (cpp-rt-own: [over.ics.rank]/4.1, a conversion that does not convert a pointer to bool before one that does;
+             ;; /4.4.2-4.4.3, a pointer's conversion to its base's before its conversion to void*, and to a nearer base's before
+             ;; a farther's: fs_ops.cc's `__os << __x` of a basic_filebuf*, operator<<(bool), (const void*) and
+             ;; (basic_streambuf*) ambiguous before)
+             (and (:ptr-bool b) (not (:ptr-bool a))) true
+             (and (:ptr-bool a) (not (:ptr-bool b))) false
+             (and (:ptr-d2b a) (:ptr-void b)) true
+             (and (:ptr-void a) (:ptr-d2b b)) false
+             (and (:ptr-d2b a) (:ptr-d2b b) (= (first (:ptr-d2b a)) (first (:ptr-d2b b))) (not= (second (:ptr-d2b a)) (second (:ptr-d2b b))))
+             (boolean (abi/derived-from? (second (:ptr-d2b a)) (second (:ptr-d2b b))))
              (and (:d2b a) (:d2b b) (= (first (:d2b a)) (first (:d2b b))) (not= (second (:d2b a)) (second (:d2b b))))
              (boolean (abi/derived-from? (second (:d2b a)) (second (:d2b b))))
              (and (:cvq a) (:cvq b))
@@ -5287,7 +5353,12 @@
 (defn- method-set-of
   "[class-id fn-ids] of the members named `nm` of the class of object `obj`."
   [cid nm]
-  (let [es (class-lookup cid nm)]
+  (let [es (class-lookup cid nm)
+        ;; (cpp-rt-own: a data member of the class's own name hides its injected-class-name, [basic.scope.hiding]/2 and [class.mem]/22:
+        ;; libcpp's expr.cc `struct op { ...; enum cpp_ttype op; }`, `top->op = CPP_EOF`, "member op" before)
+        es (if (and (= :type (:e (second (first es)))) (some #(#{:field :indirect :var :fn} (:e (second %))) es))
+             (vec (remove #(= :type (:e (second %))) es))
+             es)]
     (when (seq es) [(first (first es)) (mapv (comp :id second) (filter #(= :fn (:e (second %))) es)) (second (first es))])))
 
 (defn- cx-type-friend?
@@ -6733,7 +6804,12 @@
           (when (or (class-operand? l) (class-operand? r)) (no-operator! ctx o [l r]))
           (compound-node (subs o 0 (dec (count o))) l (class->scalar ctx r))))
     "ConditionalOperator"
-    (let [[c a b] (kids n)] (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (analyze ctx a) (analyze ctx b)))
+    ;; (cpp-rt-own: an operand naming one function, an overload set of one, is its address, [expr.cond]/7 after the
+    ;; function-to-pointer conversion: libcpp's macro.cc `(kind == CPP_time_kind::FIXED ? gmtime : localtime) (&tt)`, "call
+    ;; of a non-function" before)
+    (let [[c a b] (kids n)
+          fa (fn [x] (if (and (= :fnset (:op x)) (= 1 (count (:fns x))) (empty? (:tmpls x)) (not (:obj x))) (rv x) x))]
+      (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (fa (analyze ctx a)) (fa (analyze ctx b))))
     ;; GNU's `x ?: y` ([GCC manual, Conditionals with Omitted Operands]; clang's BinaryConditionalOperator): x evaluated once,
     ;; bound as an opaque value (a glvalue's address, a class prvalue materialized, else its value), the condition and the
     ;; true operand both that value (clang's OpaqueValueExpr, CodeGenFunction::OpaqueValueMapping)
