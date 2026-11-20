@@ -46,8 +46,10 @@ hsi_lib_keys() {
   # HF10's HSI_DUMP_OPT (dump_package's "${HSI_DUMP_OPT:--O2}", -O2 by default) read as the -O2 it was, so the default level's
   # keys stay those of the record; another level (HF10's -O0 reference) keys apart, its level in the key
   dt=$(sed -n '/^unit_of() {/,/^}/p;/^prefix_rel() {/,/^}/p;/^strip_srcdir() {/,/^}/p;/^dump_package() {/,/^}/p' "$root/bin/hsi" \
-    | sed 's/"\${HSI_DUMP_OPT:--O2}"/-O2/' | sha256sum | cut -c1-64)
+    | sed 's/"\${HSI_DUMP_OPT:--O2}"/-O2/; s/ \${HSI_DUMP_PKGDB:+-package-db "\$HSI_DUMP_PKGDB"}//' | sha256sum | cut -c1-64)
   [ "${HSI_DUMP_OPT:--O2}" = -O2 ] || dt="$dt opt ${HSI_DUMP_OPT}"
+  # (hs-own-stg-1 (a): base compiled against ghc-internal's -O0 interfaces, HSI_DUMP_PKGDB, keys apart too)
+  [ -z "${HSI_DUMP_PKGDB:-}" ] || dt="$dt pkgdb-O0"
   plan=$TMPDIR/hsi-libplan.$$
   hsi_ae "$root/test/haskell/eval/dump_plan.ae" "$hsi_corpora_edn" "$bn" > "$plan"
   while IFS= read -r line; do
