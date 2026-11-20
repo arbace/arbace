@@ -615,6 +615,19 @@
 
 (declare static-call-value packs-named const-form)
 
+(defn- sizeof-member-operand
+  "Queue 500: the type of sizeof's expression operand `v.m` written in a type's text ([expr.sizeof]/1, [expr.ref]: a variable of
+  a complete class named alone, then a non-static data member of that class named alone: template/partial18.C's
+  `B<y, sizeof(a.x)>`), or nil when the text is not that."
+  [scope ^String r]
+  (when-let [[_ v m] (re-matches #"([A-Za-z_][A-Za-z_0-9]*)\s*\.\s*([A-Za-z_][A-Za-z_0-9]*)" r)]
+    (when-let [x (first (filter #(= :var (:e %)) (sema/lookup scope v)))]
+      (let [u (abi/unq (abi/non-ref (:ty (sema/var* (:id x)))))]
+        (when (abi/class? u)
+          (let [c (abi/cls (:id u))]
+            (when (:complete c)
+              (some #(when (= m (:name %)) (:ty %)) (:fields c)))))))))
+
 (defn eval-text
   "The value of a constant expression's text in `scope` (integers, the operators, parentheses, the conditional
   operator, names of constants and of non-type parameters, members of classes (X<T>::value), sizeof(type), true and
@@ -728,7 +741,7 @@
                                        ty (abi/non-ref (case (:e e)
                                                          :field (:ty (nth (:fields (abi/cls (:cls e))) (:i e)))
                                                          :var (:ty (sema/var* (:id e)))
-                                                         (sema/resolve-type scope r)))]
+                                                         (or (sizeof-member-operand scope r) (sema/resolve-type scope r))))]
                                    (if (dependent? ty) {:k :texpr :o "sizeof" :type ty} (abi/size-of ty)))
                   ;; (queue 380, W3d: alignof(T), C's _Alignof(T) and GNU's __alignof(T) of a type, as the analysis's
                   ;; UnaryExprOrTypeTraitExpr: ios_failure.cc's `typedef char A[1 / (__alignof(ios::failure) <=
@@ -1978,6 +1991,73 @@
                              (and (or (not @failed) (dependent? ded)) (= (canonical sub) (canonical args)))))))
             ded))))))
 
+(defn- cx-partial-sure-miss?
+  "Queue 500 (the checker; 497-2 (a)): the partial specialization `pt` surely does not match `args` ([temp.spec.partial.match]/2):
+  its arguments' deduction failed for a reason match-args marks sure (*sure*: two numbers that differ, a kind mismatch against a
+  whole type, a template-id against a class that is no specialization of it) with nothing marked unsure, or every parameter
+  deduced, none dependent, and the arguments substituted -- none dependent, no decltype failing -- differ from `args`. Nil when
+  the partial matches or the miss may be the slice's (a parameter not deduced, a constraint, a substitution that refuses)."
+  [pt args]
+  (when (and (sema/checking?) (not (dependent? args)))
+    (let [b (atom {}) tid (:id pt) u (atom false) sr (atom false)
+          ok (binding [*unsure* u *sure* sr] (match-args b tid (:args pt) args))]
+      (when (System/getenv "CPP_TMPL_TRACE")
+        (binding [*out* *err*] (println "partial sure-miss?" (pr-str (:forms pt)) (pr-str (:args pt)) "for" (pr-str args) "match" ok "sure" @sr "unsure" @u (pr-str @b))))
+      (if-not ok
+        (and @sr (not @u))
+        (when (and (not @u) (empty? (:nx pt)) (= (count @b) (count (:params pt))) (seq (:forms pt)))
+          (let [ded (mapv #(get @b %) (range (count (:params pt))))
+                failed (atom false)
+                sub (when-not (dependent? ded)
+                      (try (binding [sema/*decltype-failed* failed]
+                             (partial-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt)))
+                           (catch arbace.lang.ExceptionInfo _ nil)))]
+            (boolean (and sub (not @failed) (not (dependent? sub)) (= (count sub) (count args))
+                          (not= (canonical sub) (canonical args))))))))))
+
+(defn- cx-unexpanded-pack-partial?
+  "Queue 500 (the checker): the partial specialization `pt`'s arguments as written name one of its parameter packs outside a pack
+  expansion ([temp.variadic]/5: cpp0x/pr32126.C's `A<T>`, cpp0x/variadic81.C's `A<T*>`, T a pack): the declaration is ill-formed,
+  reported at it (arbace.repr.cpp.diag's pack rule), and GCC then ignores it in matching. A text form counts when it names the
+  pack and holds no `...`."
+  [pt]
+  (when (sema/checking?)
+    (let [packs (set (keep #(when (:pack %) (:name %)) (:params pt)))
+          names? (fn names? [f]
+                   (cond (and (seq? f) (= 'pack-expand (first f))) false
+                         (symbol? f) (contains? packs (name f))
+                         (string? f) (and (not (str/includes? f "..."))
+                                          (some #(re-find (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote %) "(?![A-Za-z0-9_])")) f) packs))
+                         (coll? f) (boolean (some names? f))
+                         :else false))]
+      (boolean (and (seq packs) (some names? (:forms pt)))))))
+
+(defn- cx-valid-matches
+  "Queue 500 (the checker): the matched partial specializations `ms` ([pt bindings] pairs) less those cx-unexpanded-pack-partial?
+  finds ill-formed; `ms` itself outside the checker."
+  [ms]
+  (if (sema/checking?) (vec (remove (comp cx-unexpanded-pack-partial? first) ms)) ms))
+
+(defn- cx-sure-incomplete-instance
+  "Queue 500 (the checker): the template `t`'s specialization for `args` surely has no definition here ([temp.spec.partial.match],
+  [temp.inst]/2): no explicit specialization of `args`, every partial specialization but the ones of `matched` surely missing
+  (cx-partial-sure-miss?) and, of `matched`, the one chosen with no definition, or none and the primary not defined (the
+  choice among several is partial ordering's, [temp.spec.partial.order]). The ex-data
+  to mark the refusal with ({:cx/sure-incomplete NAME}), or nil. `chosen`: the most specialized of `matched`."
+  [t args matched chosen]
+  (when (and (sema/checking?) (not (contains? (:specs t) args))
+             (if (seq matched) (and chosen (not (:completeDefinition (:node chosen)))) (nil? (:pattern t)))
+             (every? (fn [pt] (or (some #(identical? pt %) matched) (cx-unexpanded-pack-partial? pt) (cx-partial-sure-miss? pt args))) (:partials t)))
+    {:cx/sure-incomplete (:name t)}))
+
+(defn- cx-mark-sure-incomplete!
+  "Queue 500 (the checker): the instance `c` ({:k :class :id}) marked :cx-sure-incomplete when `mark` (cx-sure-incomplete-instance's
+  ex-data) says its definition surely is none here and the class is not complete; `c`."
+  [c mark]
+  (when (and mark (sema/checking?) (not (:complete (abi/cls (:id c)))))
+    (abi/update-cls! (:id c) assoc :cx-sure-incomplete true))
+  c)
+
 (defn- partial-constraints
   "A class template partial specialization's associated constraints ([temp.constr.decl]/3) as one normal form or nil: its
   parameters' type-constraints, then its requires-clause, as associated-constraints's for a function template."
@@ -2046,11 +2126,31 @@
       (nil? q) true
       :else (and (subsumes? p q) (not (subsumes? q p))))))
 
+(defn- cx-ordering-texpr-mismatch?
+  "Queue 500 (the checker): in partial ordering ([temp.spec.partial.order], [temp.deduct.partial]), the arguments `ps` of the
+  partial specialization `tid` hold, where the other's `as` hold a value parameter of their own (or a number), an expression of
+  tid's parameters: a non-deduced context ([temp.deduct.type]/5.3) that the deduced arguments substituted cannot make that
+  unique parameter, so the deduction fails (clang's FinishTemplateArgumentDeduction: template/partial-specialization13.C's
+  A<T, when<T(2) == 1>> is more specialized than A<T, when<K>>). Pairs walked through template-ids and packs alone."
+  [tid ps as]
+  (and (sema/checking?) (sequential? ps) (sequential? as) (= (count ps) (count as))
+       (boolean
+         (some (fn [[p a]]
+                 (cond (and (map? p) (= :texpr (:k p)) (dependent-on? p tid))
+                       (and (map? a) (or (= :tparam-v (:k a)) (number? (:val a))))
+                       (and (map? p) (= :tspec (:k p)) (map? a) (= :tspec (:k a)) (= (:tmpl p) (:tmpl a)))
+                       (cx-ordering-texpr-mismatch? tid (:args p) (:args a))
+                       (and (map? p) (contains? p :pack) (not (:k p)) (map? a) (contains? a :pack) (not (:k a)))
+                       (cx-ordering-texpr-mismatch? tid (:pack p) (:pack a))
+                       :else false))
+               (map vector ps as)))))
+
 (defn- more-specialized-partial?
   "[temp.class.order]: the partial specialization p1 more specialized than p2 (p2's arguments deduced from p1's, not
   the reverse)."
   [p1 p2]
-  (let [ded (fn [pa pb] (match-args (atom {}) (:id pa) (:args pa) (:args pb)))
+  (let [ded (fn [pa pb] (and (match-args (atom {}) (:id pa) (:args pa) (:args pb))
+                             (not (cx-ordering-texpr-mismatch? (:id pa) (:args pa) (:args pb)))))
         a (ded p2 p1)]
     (or (and a (not (ded p1 p2)))
         ;; (cpp-s8: of two whose arguments deduce each other, the more constrained, [temp.spec.partial.order]/1 with
@@ -2127,8 +2227,8 @@
   id to make it under (CP372 (a): an incomplete instance completed in place), else a new one."
   [t args cid0]
   (if-let [node (get (:specs t) args)]
-    (declare-instance! t args node [] [] true cid0)
-    (let [ms (vec (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t)))
+    (cx-mark-sure-incomplete! (declare-instance! t args node [] [] true cid0) (when-not (:completeDefinition node) {:cx/sure-incomplete (:name t)}))
+    (let [ms (cx-valid-matches (vec (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t))))
           best (vec (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms))
           ;; (cpp-s8: the partial specializations' constraints, evaluated just now, may have instantiated this very
           ;; specialization (std::span's __iterator_traits<span<char>, void>: __cpp17_iterator<span> through
@@ -2138,10 +2238,14 @@
           made (when-not cid0 (get-in @*tmpls* [(:id t) :insts args]))]
       (cond
         made {:k :class :id made}
-        (empty? ms) (do (when-not (:pattern t) (fail :template "an incomplete class template " (:name t)))
+        (empty? ms) (do (when-not (:pattern t)
+                          ;; (queue 500, the checker: one surely without a definition marked, cx-sure-incomplete-instance)
+                          (throw (ex-info (str "codegen: an incomplete class template " (:name t))
+                                          (merge {:codegen/refused :template} (cx-sure-incomplete-instance t args [] nil)))))
                         (declare-instance! t args (:pattern t) (:params t) args false cid0))
         (= 1 (count best)) (let [[pt b] (first best)
-                                 c (declare-instance! t args (:node pt) (:params pt) b false cid0)]
+                                 c (cx-mark-sure-incomplete! (declare-instance! t args (:node pt) (:params pt) b false cid0)
+                                                             (cx-sure-incomplete-instance t args (mapv first ms) pt))]
                              ;; its out-of-line members
                              (abi/update-cls! (:id c) assoc :from-partial [(:id pt) (:params pt) b])
                              (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
@@ -2864,6 +2968,22 @@
       ;; the drops' counts for the checker's diagnostic (sema's resolve-overload*)
       (with-meta fids {:sure-drops @sure :unsure-drops @doubt}))))
 
+(defn- cx-spec-type-differs?
+  "Queue 500 (the checker): [temp.deduct.decl]/1 with [temp.deduct.type]/1: the function template `t`'s specialization for the
+  deduced arguments `args` has another type than the explicit specialization's declared `ty` (a parameter the deduction did not
+  see, a non-deduced context: template/fnspec1.C's `typename ref<T>::result`, ref<double>::result being double, against
+  S<double>): no match. Only when both types are whole (no dependent part, no placeholder) and resolve; their parameters and
+  return types compared without spellings and top-level qualifiers."
+  [t args ty]
+  (boolean
+    (when (and (sema/checking?) (abi/fn? ty) (not (dependent? ty)) (not (dependent? args))
+               (not (re-find #"\b(auto|decltype)\b" (str (get-in (:pattern t) [:type :qualType])))))
+      (when-let [st (try (dissoc (sema/resolve-type (bind-scope (:scope t) (:params t) args nil) (get-in (:pattern t) [:type :qualType])) :cq)
+                         (catch arbace.lang.ExceptionInfo _ nil))]
+        (and (abi/fn? st) (not (dependent? st))
+             (let [norm (fn [f] [(mapv #(unspelled (abi/unq %)) (:ps f)) (unspelled (abi/unq (:ret f))) (boolean (:va f))])]
+               (not= (norm st) (norm ty))))))))
+
 (defn- explicit-fn-spec!
   "An explicit specialization of a function template (template <> R f<args>(...) {...}): its template found by name
   and its arguments from the TemplateArgument kids and deduction from its type ([temp.deduct.decl])."
@@ -2879,7 +2999,8 @@
                          ty (dissoc (sema/resolve-type scope (get-in n [:type :qualType])) :cq)
                          b (atom (into {} (map-indexed vector ex)))]
                      (when (deduce-type b (:id t) (sym-sig t) ty)
-                       (when-let [args (finish-deduction t @b)] [t args])))
+                       (when-let [args (finish-deduction t @b)]
+                         (when-not (cx-spec-type-differs? t args ty) [t args]))))
                    (catch arbace.lang.ExceptionInfo _ (reset! doubt true) nil))))
         ;; of the templates it could specialize, the most specialized ([temp.deduct.decl]/1, [temp.func.order])
         found (keep try1 ts)
@@ -2891,7 +3012,7 @@
                        ;; that no function template of its name matches -- none declared, or each deduction failing by the
                        ;; algorithm alone, no type deduced from a placeholder and no pack; g++'s "template-id ... does not match
                        ;; any template declaration", template/spec39.C; reported at the declaration, then the refusal as before)
-                       (when (and (sema/checking?) (not @doubt)
+                       (let [rep (when (and (sema/checking?) (not @doubt)
                                   (not (re-find #"\b(auto|decltype)\b" (str (get-in n [:type :qualType]))))
                                   (every? (fn [e] (let [t (tmpl (:id e))]
                                                     (and (not-any? :pack (:params t))
@@ -2900,8 +3021,12 @@
                          (sema/*on-refusal* (ex-info (str "codegen: explicit specialization of '" (:name n) "' matches no template declaration")
                                                      {:codegen/refused :template})
                                             ;; (at the declarator's name, as GCC: template/crash9.C's `template<>` on the line before)
-                                            (let [l (:loc n)] (if (and (:offset l) (:file l)) (assoc n :range {:begin l}) n))))
-                       (fail :template "no template for the explicit specialization " (:name n))))
+                                            (let [l (:loc n)] (if (and (:offset l) (:file l)) (assoc n :range {:begin l}) n)))
+                         true)]
+                         ;; (queue 500: reported, the refusal marked so that the checker drops the declaration and goes on,
+                         ;; sema's declare-node!)
+                         (throw (ex-info (str "codegen: no template for the explicit specialization " (:name n))
+                                         (cond-> {:codegen/refused :template} rep (assoc :cx/reported true)))))))
         ps (if cid
              (new-scope :tparams scope :cls cid :path (:path scope) :internal (:internal scope))
              (new-scope :tparams scope :internal (:internal scope)))
@@ -3044,6 +3169,23 @@
       nil)
     :template))
 
+(defn- cx-member-spec-no-match!
+  "Queue 500 (the checker): [temp.expl.spec]/14 with [temp.deduct.decl]: an explicit specialization `n` of a member function of
+  the class template specialization `c` that no member of `c` matches -- `c` complete and its members all declared (no
+  instantiation refused), the declared type `ty` whole (no dependent part, no placeholder), and `c` without a member function
+  template of that name (whose specialization it might be): GCC's \"template-id ... does not match any template
+  declaration\" (template/mem-spec2.C's `foo<int>::bar(int&)` of `bar(T&) const`), reported at the declarator's name as
+  queue 484's explicit specialization rule; true when reported."
+  [c n ty]
+  (when (and (sema/checking?) c (:complete c) (not (:defining c)) (not (:cx-inst-refused c)) (:tmpl c)
+             (map? ty) (not (dependent? ty))
+             (not (re-find #"\b(auto|decltype)\b" (str (get-in n [:type :qualType]))))
+             (not-any? #(= :tmpl (:e %)) (sema/lookup (:scope c) (:name n))))
+    (sema/*on-refusal* (ex-info (str "codegen: explicit specialization of '" (:name n) "' matches no template declaration")
+                                {:codegen/refused :template})
+                       (let [l (:loc n)] (if (and (:offset l) (:file l)) (assoc n :range {:begin l}) n)))
+    true))
+
 (defn- explicit-member-spec!
   "An explicit specialization of a member of an implicitly instantiated class template specialization
   ([temp.expl.spec]/14): the specialization's member given this definition, an ordinary (not inline) one."
@@ -3070,7 +3212,9 @@
                                                 (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps ty))))
                                        id)))
                           (:methods c))
-                    (fail :template "no member " (:name n) " to specialize"))
+                    (let [rep (cx-member-spec-no-match! c n ty)]
+                      (throw (ex-info (str "codegen: no member " (:name n) " to specialize")
+                                      (cond-> {:codegen/refused :template} rep (assoc :cx/reported true))))))
             pn (filter #(= "ParmVarDecl" (:kind %)) (kids n))]
         (upd-fn! fid #(-> % (assoc :body (sema/body-of n) :node n :def-scope scope
                                    :inits (filter (fn [k] (= "CXXCtorInitializer" (:kind k))) (kids n)) :param-names (mapv :name pn)

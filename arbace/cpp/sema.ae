@@ -1769,6 +1769,24 @@
       (when (and c (not (:tmpl c)) (not (:lambda c)) (or (:defining c) (not (:complete c))))
         (*on-refusal* (ex-info (str "codegen: variable has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))))
 
+(defn- cx-sure-incomplete-refusal
+  "Queue 500 (the checker; 497-2 (a)): [basic.def]/5, [dcl.init.general]/7 for a class template's specialization: the refusal
+  to report for the variable definition `n` whose type, as written, is the specialization itself (a template-id, no declarator
+  operator after it) that the templates found surely without a definition here (`e` thrown by its instantiation with
+  :cx/sure-incomplete, or `ty` an instance marked :cx-sure-incomplete and not complete); GCC's \"aggregate ... has incomplete
+  type and cannot be defined\", reported at the declaration as clang's err_typecheck_decl_incomplete_type. Nil otherwise."
+  [n ty e]
+  (let [qt (str (get-in n [:type :qualType]))
+        c (when (and (map? ty) (abi/class? ty)) (abi/cls (:id ty)))
+        tn (or (:cx/sure-incomplete (ex-data e)) (when (and c (:cx-sure-incomplete c) (not (:complete c))) (:name c)))]
+    (when (and tn (checking?) (= "VarDecl" (:kind n)) (not= "extern" (:storageClass n)) (not (:extern n))
+               (re-find #">\s*$" qt)
+               ;; (an enumeration's underlying type without a fixed one is implementation-defined, [dcl.enum]/7: the slice's
+               ;; answer may not be GCC's, cpp0x/enum37.C's same<unsigned int, __underlying_type(E)>)
+               (not (re-find #"underlying_type" qt))
+               (re-find (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote (str tn)) "\\s*<")) qt))
+      (ex-info (str "codegen: variable has incomplete type '" qt "'") {:codegen/refused :incomplete}))))
+
 (defn- declare-var!
   [scope n storage]
   (let [qt (get-in n [:type :qualType])
@@ -1826,7 +1844,10 @@
         ;; (round 54, the checker: [basic.def]/5, [dcl.init.general]/7: a variable's definition of a class type incomplete at that point,
         ;; one declared and not yet or never defined or still being defined -- not a static data member's declaration in its class, nor
         ;; an extern declaration, nor a class template's instance; clang's err_typecheck_decl_incomplete_type)
-        _ (when (and (not= st :member-static) (empty? q)) (incomplete-var! n ty))]
+        _ (when (and (not= st :member-static) (empty? q)) (incomplete-var! n ty))
+        ;; (queue 500: a specialization surely without a definition)
+        _ (when (and (not= st :member-static) (empty? q))
+            (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n)))]
     (if (and old (seq q))
       ;; a qualified definition of a namespace member declared `extern` (libsupc++'s `const nothrow_t std::nothrow = ...`,
       ;; `terminate_handler __cxxabiv1::__terminate_handler = ...`): the definition, no longer extern ([basic.def]/2)
@@ -2205,11 +2226,17 @@
       (if (checking?)
         (try (declare-node*! scope n)
              (catch arbace.lang.ExceptionInfo e
+               (if-let [r (when-not (:cls scope) (cx-sure-incomplete-refusal n nil e))]
+                 ;; (queue 500: a variable of a specialization surely without a definition, reported and dropped; and a
+                 ;; declaration whose refusal the templates reported already, :cx/reported, dropped)
+                 (do (*on-refusal* r n) nil)
+               (if (:cx/reported (ex-data e))
+                 nil
                ;; (queue 487: and one that names an ambiguous name, cx-unqualified-ambiguous!, cx-qualified-ambiguous!)
                ;; (queue 497: and an out-of-line member declaration no member of its class matches)
                (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches ')" (str (.getMessage e)))
                  (do (*on-refusal* e n) nil)
-                 (throw e))))
+                 (throw e))))))
         (declare-node*! scope n)))))
 
 (defn- placeholder-split
@@ -7519,8 +7546,10 @@
                   ;; succeeds with the template's default arguments alone -- the slice tries T<>, every parameter defaulted)
                   (if (and (checking?) (nil? (init-kid n)) (re-matches #"[A-Za-z_]\w*" (str qt)))
                     (try (resolve-type (:scope ctx) (str qt "<>")) (catch arbace.lang.ExceptionInfo _ (throw x)))
-                    (throw x)))))
+                    ;; (queue 500: a specialization surely without a definition, the variable's refusal)
+                    (throw (or (cx-sure-incomplete-refusal n nil x) x))))))
         _ (incomplete-var! n ty)
+        _ (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n))
         id (next-id)
         ;; (thread_local at block scope implies static, [dcl.stc]/4)
         st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
