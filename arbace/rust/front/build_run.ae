@@ -218,6 +218,14 @@
                 :else (throw (ex-info (str "allocation " id ": " b) {})))
           {:bytes bytes :relocs relocs})))))
 
+(def ^:dynamic *const-call*
+  "queue 464 (462-4 (a)): within eval-local-const, a call of a const fn evaluated as CTFE does: (fn [DEF TYPE-ARGS ARG-VALUES])
+  its value ({:bytes ..}), else nil (the call refused, as before)"
+  nil)
+(def ^:dynamic *arg-values*
+  "queue 464: the argument values a callee's body is evaluated with (_1, _2, ..), within *const-call*"
+  nil)
+
 (defn eval-promoted
   "RF11 (RF10's slice 5's first part): a promoted constant's body evaluated as rustc's CTFE evaluates it into its allocation, for
   the promoted bodies of straight-line assignments of scalar constants (std's integer constants by std-const-value), copies of
@@ -231,7 +239,7 @@
   ;; RF17: LOCAL-CONST, a local constant's value by its text ((scalar BITS SIZE), else nil); VALUE?: PB is a constant's own body
   ;; (construct_const's: _0 holds the value, not a borrow), its result _0's value
   ([pb raw-alloc nest-alloc unit-variant anon-discr vt-alloc layout-of local-const value?]
-  (let [env (atom {}) result (atom nil)
+  (let [env (atom (into {} (map-indexed (fn [i v] [(inc i) v]) *arg-values*))) result (atom nil)
         no (fn [what x] (throw (ex-info (str "promoted: " what (when (System/getenv "RF_PROMOTED_TRACE") (str " " (pr-str x)))) {:x x})))
         loc-of (fn [p] (if (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p) (no "a projected place" p)))
         local-ty (fn [l] (:ty (nth (:locals pb) l nil)))
@@ -313,6 +321,12 @@
                        vt (or (when vt-alloc (vt-alloc (second tyf) (second (:ty va)))) (no "an unsizing cast without its vtable" rv))]
                    (when-not (= 8 (count (:bytes va))) (no "an unsizing cast of a fat pointer" rv))
                    {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (repeat 8 0))) :relocs (conj (vec (:relocs va)) [8 vt])})
+               (if (= "Transmute" (str (second rv)))
+                 ;; queue 464: a transmute (the niche types' new_unchecked): the same bytes at the target type, sizes equal
+                 (let [[_ _ a tyf] rv va (operand a)
+                       l (when layout-of (layout-or-nil tyf))]
+                   (when (and l (not= (:size l) (count (:bytes va)))) (no "a transmute between sizes" rv))
+                   {:ty tyf :align (or (:align l) (:align va)) :bytes (:bytes va) :relocs (:relocs va)})
                (let [[_ kind a tyf] rv va (operand a) ks (sk rv (:ty va)) kd (sk rv tyf) x (scalar-val ks (:bytes va))]
                  {:ty tyf :align (scalar-align (quot (second kd) 8))
                   :bytes (case kind
@@ -320,7 +334,7 @@
                            "IntToFloat" (val-bytes kd (if (= 32 (second kd)) (float (.doubleValue (biginteger x))) (.doubleValue (biginteger x))))
                            "FloatToFloat" (val-bytes kd (if (= 32 (second kd)) (float x) (double x)))
                            "FloatToInt" (val-bytes kd (f->int kd x))
-                           (no (str "a cast " kind) rv))})))]
+                           (no (str "a cast " kind) rv))}))))]
     (loop [bi 0 seen #{}]
       (when (seen bi) (no "a loop" bi))
       (let [blk (nth (:blocks pb) bi)]
@@ -389,7 +403,7 @@
                        (no "an assertion that fails" t)))
             ;; RF16: a call of core's `ptr::null::<T>()` or `ptr::null_mut::<T>()` (a thin T: library/core/src/ptr/mod.rs,
             ;; `without_provenance(0)`, the null pointer's 8 zero bytes), then its target; another call is the CTFE's
-            call (let [[_ f _ dest target] t
+            call (let [[_ f cargs dest target] t
                        txt (str (when (seq? f) (second f)))]
                    ;; (nested ifs: the tools' host refused this loop's recurs inside a cond as not in tail position)
                    (if (and target (re-matches #"(std|core)::ptr::null(_mut)?::<[^\[]*>" txt) (not (re-find #"dyn |\[|\bstr\b" txt)))
@@ -402,7 +416,14 @@
                              l (or (when ta (layout-or-nil ta)) (no "a call of size_of without its type's layout" t))]
                          (swap! env assoc (loc-of dest) {:bytes (le-bytes (if (str/includes? txt "size_of") (:size l) (:align l)) 8) :align 8 :ty (local-ty (loc-of dest))})
                          (recur target (conj seen bi)))
-                       (no "a call" t))))
+                       ;; queue 464 (462-4 (a)): a const fn whose exported body evaluates straight through (*const-call*)
+                       (let [ft (when (seq? f) (:tc (meta (nth f 2 nil))))
+                             cv (when (and target *const-call* (vector? ft) (= :fndef (first ft)) (string? (second ft)))
+                                  (*const-call* (second ft) (nth ft 2) (mapv operand cargs)))]
+                         (if cv
+                           (do (swap! env assoc (loc-of dest) (assoc cv :ty (local-ty (loc-of dest))))
+                               (recur target (conj seen bi)))
+                           (no "a call" t))))))
             (no "a terminator" t))))))))
 
 (defn- slice-len-fn? [d]
@@ -906,6 +927,7 @@
           (swap! const-bodies-cache assoc (System/identityHashCode m) cs)
           cs))))
 
+(declare core-instance)
 (defn- eval-local-const
   "queue 462 (448-4 (a) 5, DECISION 448-3 (a)): the value of a library crate's constant D (its def path, no arguments) as CTFE
   evaluates it: its exported body (const-bodies) reprinted in the program's crate and evaluated by eval-promoted (a constant's
@@ -917,7 +939,19 @@
       (let [b (reprint cb [])
             lc (fn [_ _ v] (let [[d2 as] (:nc (meta v))] (when (empty? as) (eval-local-const d2 (conj seen d)))))
             lay (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
-            r (eval-promoted b nil nil nil nil nil lay lc true)
+            ;; queue 464 (462-4 (a)): a call of a const fn (alloc's ZERO_CAP = Cap::new_unchecked(0)): its exported body at
+            ;; the call's arguments, evaluated with the arguments' values (three calls deep at most)
+            depth (atom 0)
+            call (fn call [cd targs vals]
+                   (when-let [e (and (< @depth 3) (get (native-core-map) cd))]
+                     (swap! depth inc)
+                     (try (binding [*arg-values* vals]
+                            (eval-promoted (:body (core-instance e (vec targs))) nil nil nil nil nil lay lc true))
+                          (catch Throwable x
+                            (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-local-const: the call of" cd (.getMessage x))))
+                            nil)
+                          (finally (swap! depth dec)))))
+            r (binding [*const-call* call *arg-values* nil] (eval-promoted b nil nil nil nil nil lay lc true))
             bs (:bytes r)]
         (when (and (vector? bs) (empty? (:relocs r)) (#{1 2 4 8 16} (count bs)))
           (list 'scalar (bytes->int bs) (count bs))))
