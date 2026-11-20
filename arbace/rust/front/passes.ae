@@ -880,6 +880,12 @@
   and it is not a foreign item, or its ABI is one that cannot (extern \"C\" and the like without -unwind)"
   [def-id abi foreign?]
   (cond (and def-id (string? def-id) (std-fn-attr def-id :nounwind)) false
+        ;; queue 474: a local definition's own #[rustc_nounwind] (codegen_fn_attrs' NEVER_UNWIND): the macro-made
+        ;; precondition_check of assert_unsafe_precondition!, which no interface lists (its calls unwind to unreachable, its own
+        ;; calls that can unwind terminate, as rustc's)
+        (and (number? def-id) (some #(when-let [u (:unparsed %)] (= "rustc_nounwind" (first (str/split u #"[ (=]"))))
+                                    (:attrs (:node (c/def-of def-id)))))
+        false
         ;; an intrinsic std's interface does not list (RFP32 (a): the interface records NEVER_UNWIND for those it lists)
         (and def-id (string? def-id) (not (contains? (:fns c/*si*) def-id)) (re-find #"^core::intrinsics::" def-id)) false
         (and def-id *panic-abort* (not foreign?)) false
@@ -970,11 +976,14 @@
    "unchecked_sub" "SubUnchecked" "unchecked_mul" "MulUnchecked" "unchecked_div" "Div" "unchecked_rem" "Rem"
    "unchecked_shl" "ShlUnchecked" "unchecked_shr" "ShrUnchecked"
    ;; queue 448: offset as BinOp::Offset (lower_intrinsics.rs' sym::offset), which codegen takes and not the intrinsic
-   "offset" "Offset"})
+   "offset" "Offset"
+   ;; queue 483: the overflowing operators as their checked BinOps (lower_intrinsics.rs: `_d = AddWithOverflow(lhs, rhs)`, a
+   ;; goto to the target), the record's in overflowing_add's and overflowing_mul's instances (`(T, bool)`, codegen's overflow!)
+   "add_with_overflow" "AddWithOverflow" "sub_with_overflow" "SubWithOverflow" "mul_with_overflow" "MulWithOverflow"})
 
 (defn lower-intrinsics
   "LowerIntrinsics: calls of the intrinsics MIR has a statement or terminator for (discriminant_value, unreachable,
-  forget, assume, the wrapping and unchecked operators)"
+  forget, assume, the wrapping, unchecked and overflowing operators)"
   [body]
   (update body :blocks
           (fn [bs]
@@ -1172,7 +1181,10 @@
    ["StateTransform" identity]
    ["LowerIntrinsics" lower-intrinsics]
    ["RemovePlaceMention" remove-place-mention]
-   ["SimplifyCfg-pre-optimizations" #(simplify-cfg % {:preserve-switch-reads false})]])
+   ;; queue 474: run_runtime_lowering_passes' second list, RemoveNoopLandingPads again then SimplifyCfg-pre-optimizations (one
+   ;; dump, the latter's): a landing pad drop elaboration emptied (std::panic::catch_unwind's, `f` moved into the call) unwinds
+   ;; `continue`, as rustc's runtime MIR
+   ["SimplifyCfg-pre-optimizations" #(simplify-cfg (if *panic-abort* % (remove-noop-landing-pads %)) {:preserve-switch-reads false})]])
 
 (def pass-names (mapv first pipeline))
 

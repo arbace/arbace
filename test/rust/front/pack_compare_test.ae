@@ -5,7 +5,8 @@
   copy, as rustc's optimized MIR writes it), SimplifyLocals' unused local and renumbering, each named in :equal-o0; the negative
   cases (an operand, a local's type, a block's cleanup flag, a borrowed temporary not propagated) differ. `bin/rust-front
   pack-compare-test`."
-  (:require [arbace.rust.front.build-run :as br]))
+  (:require [arbace.rust.front.build-run :as br] [arbace.rust.front.passes :as passes] [arbace.rust.front.mono :as mono]
+            [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.resolve :as resolve]))
 
 (def i8 '(ty "i8" (int "i8")))
 (def u8 '(ty "u8" (uint "u8")))
@@ -50,6 +51,107 @@
       (check "a reborrow: InstSimplify's &(*_1), then CopyProp" (br/pack-compare o r) [:equal-o0 "copy-prop,inst-simplify,locals,storage"])
       (check "negative: a reborrow of another type is not simplified"
              (br/pack-compare (assoc-in o [:locals 2 :ty] '(ty "&mut i8" (ref (ty "i8" (int "i8")) true))) r) :differs))
+    ;; queue 493: CopyProp of a copy of a shared-borrowed argument (alloc_impl_runtime's `_9 = copy _1; alloc(move _9)` with
+    ;; `_4 = &_1` for `layout.size()`: rustc's `alloc(copy _1)`), the borrowed local SSA when its type is Freeze
+    (let [lay '(ty "std::alloc::Layout" (adt "std::alloc::Layout" []))
+          rl '(ty "&std::alloc::Layout" (ref (ty "std::alloc::Layout" (adt "std::alloc::Layout" [])) false))
+          size (list 'const "size" '(ty "fn(&Layout) -> usize {size}" (fndef "size" [])) '(zst))
+          alloc (list 'const "alloc" '(ty "unsafe fn(Layout) -> *mut u8 {alloc}" (fndef "alloc" [])) '(zst))
+          us '(ty "usize" (uint "usize")) pu '(ty "*mut u8" (ptr (ty "u8" (uint "u8")) true))
+          o {:args 1 :locals [{:ty pu} {:ty lay} {:ty us} {:ty rl} {:ty lay}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 3) (ref :shared (place 1)))] :term (list 'call size '[(move (place 3))] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts ['(assign (place 4) (use (copy (place 1))))] :term (list 'call alloc '[(move (place 4))] '(place 0) 2 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          r (-> o (update :locals pop) (assoc-in [:blocks 1] {:cleanup false :stmts [] :term (list 'call alloc '[(copy (place 1))] '(place 0) 2 '(continue))}))
+          fz (fn [f] (binding [br/*freeze-ty?* (fn [t] (and f (= (second t) "std::alloc::Layout")))] (br/pack-compare o r)))]
+      (check "CopyProp: a copy of a shared-borrowed Freeze argument" (fz true) [:equal-o0 "copy-prop,locals"])
+      (check "negative: the argument's type not known Freeze (a shared borrow makes it not SSA)" (fz false) :differs)
+      (check "negative: the argument mutably borrowed"
+             (binding [br/*freeze-ty?* (constantly true)]
+                      (br/pack-compare (-> o (assoc-in [:blocks 0 :stmts 0] '(assign (place 3) (ref :mut (place 1))))) (assoc-in r [:blocks 0 :stmts 0] '(assign (place 3) (ref :mut (place 1)))))) :differs)
+      (check "negative: the copy itself borrowed"
+             (binding [br/*freeze-ty?* (constantly true)]
+                      (br/pack-compare (update-in o [:blocks 1 :stmts] conj '(assign (place 3) (ref :shared (place 4)))) r)) :differs)
+      (check "negative: a copy of another type"
+             (binding [br/*freeze-ty?* (constantly true)] (br/pack-compare (assoc-in o [:locals 4 :ty] us) r)) :differs))
+    ;; queue 493: a borrow through a deref is a use, not a borrow of the local (as_mut_ptr_range's `_3 = copy _1` with `&(*_1)`)
+    (let [ms '(ty "&mut [i32]" (ref (ty "[i32]" (slice (ty "i32" (int "i32")))) true))
+          ss '(ty "&[i32]" (ref (ty "[i32]" (slice (ty "i32" (int "i32")))) false))
+          us '(ty "usize" (uint "usize"))
+          f (list 'const "f" '(ty "fn(&mut [i32]) -> usize {f}" (fndef "f" [])) '(zst))
+          o {:args 1 :locals [{:ty us} {:ty ms} {:ty ms} {:ty ss}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 3) (ref :shared (place 1 (deref)))) '(assign (place 2) (use (copy (place 1))))]
+                       :term (list 'call f '[(move (place 2))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          r {:args 1 :locals [{:ty us} {:ty ms} {:ty ss}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 2) (ref :shared (place 1 (deref))))] :term (list 'call f '[(copy (place 1))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}]
+      (check "CopyProp: an argument borrowed through a deref" (br/pack-compare o r) [:equal-o0 "copy-prop,locals"])
+      (check "negative: the argument itself borrowed mutably"
+             (br/pack-compare (assoc-in o [:blocks 0 :stmts 0] '(assign (place 3) (ref :mut (place 1)))) (assoc-in r [:blocks 0 :stmts 0] '(assign (place 2) (ref :mut (place 1))))) :differs))
+    ;; queue 493: InstSimplify's simplify_cast (cast_const's `self as _`: a second PtrToPtr cast to the type it has), then
+    ;; RenameReturnPlace
+    (let [pc '(ty "*const ()" (ptr (ty "()" (tuple)) false)) pm '(ty "*mut ()" (ptr (ty "()" (tuple)) true))
+          o {:args 1 :locals [{:ty pc} {:ty pm} {:ty pc}] :debug []
+             :blocks [{:cleanup false :stmts [(list 'assign '(place 2) (list 'cast "PtrToPtr" '(copy (place 1)) pc))
+                                              (list 'assign '(place 0) (list 'cast "PtrToPtr" '(move (place 2)) pc))] :term '(return)}]}
+          r {:args 1 :locals [{:ty pc} {:ty pm}] :debug []
+             :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'cast "PtrToPtr" '(copy (place 1)) pc))] :term '(return)}]}]
+      (check "InstSimplify: a cast to its operand's type a use" (br/pack-compare o r) [:equal-o0 "inst-simplify,locals,nrvo"])
+      (check "negative: a cast to another type kept"
+             (br/pack-compare (assoc-in o [:blocks 0 :stmts 1] (list 'assign '(place 0) (list 'cast "PtrToPtr" '(move (place 2)) pm))) r) :differs))
+    ;; queue 493: RemoveZsts' locals of a generic body: PhantomData<T> is zero-sized whatever T (RawVec::new_in's `_marker`)
+    (check "generic-zst?: PhantomData<T>" (#'br/generic-zst? [:adt "core::marker::PhantomData" [[:param 0 "T"]]]) true)
+    (check "generic-zst?: a tuple of PhantomData<T>" (#'br/generic-zst? [:tuple [[:adt "core::marker::PhantomData" [[:param 0 "T"]]]]]) true)
+    (check "negative: generic-zst? of another ADT of T" (#'br/generic-zst? [:adt "core::mem::manually_drop::ManuallyDrop" [[:param 0 "T"]]]) false)
+    (check "negative: generic-zst? of [T; 0] (its alignment T's)" (#'br/generic-zst? [:array [:param 0 "T"] [:cval "0"]]) false)
+    ;; queue 493: a fn pointer type's elided lifetimes its own binder's (Argument's `formatter: unsafe fn(NonNull<()>, &mut
+    ;; Formatter<'_>)`, the record's `for<'a, 'b> unsafe fn(..)`), kept by the body's erasure
+    (let [r {:kind :ref :lifetime nil :mt {:mutbl true :ty {:kind :tup :elts []}}}
+          fp (c/lower-ty {:kind :fnptr :inputs [r r]})
+          pr (fn [t] (binding [c/*in-value* false c/*erased-regions* true] (c/print-ty t)))]
+      (check "a fn pointer's elided lifetimes bound, erasure keeps them" (pr (tc/erase-ty fp)) "for<'a, 'b> fn(&'a mut (), &'b mut ())")
+      (check "negative: a reference's elided lifetime outside a fn pointer erased" (pr (tc/erase-ty (c/lower-ty r))) "&mut ()")
+      (check "negative: the binder's variables as a free region (before 493) erased"
+             (pr (tc/erase-ty [:fnptr {:inputs [[:ref [:re-bound nil 1] true [:tuple []]]] :output [:tuple []]}])) "fn(&mut ())"))
+    ;; queue 493: an explicit glob import's name before the prelude's (rt.rs' `use super::*`: fmt's trait Debug, where the 2024
+    ;; prelude has only the derive macro; new_debug's `<T as Debug>::fmt` was the macro's, 'a qualified path')
+    (let [glob (fn [segs prelude?] {:kind :use :use :glob :path (mapv (fn [i] {:ident i}) segs) :attrs (if prelude? [{:parsed "PreludeImport"}] [])})
+          std {:mods {"core" {:children [{:ns :type :name "fmt" :path "core::fmt"} {:ns :type :name "prelude" :path "core::prelude"}]}
+                      "core::prelude" {:children [{:ns :type :name "rust_2024" :path "core::prelude::rust_2024"}]}
+                      "core::prelude::rust_2024" {:children [{:ns :macro :name "Debug" :path "core::fmt::macros::Debug"}]}
+                      "core::fmt" {:children [{:ns :type :name "Debug" :path "core::fmt::Debug"} {:ns :macro :name "Debug" :path "core::fmt::macros::Debug"}]}}}
+          look (fn [uses] (binding [c/*defs* (atom [{:id 0 :data [:crate] :uses uses}]) c/*std* std resolve/*crate-path* "core::fmt::rt"]
+                            (c/lookup-name "Debug" 0 false)))]
+      (check "lookup: the explicit glob's trait before the prelude's macro" (look [(glob ["core" "prelude" "rust_2024"] true) (glob ["super"] false)]) [:ext "core::fmt::Debug"])
+      (check "negative: the prelude alone gives the macro" (look [(glob ["core" "prelude" "rust_2024"] true)]) [:ext "core::fmt::macros::Debug"]))
+    ;; queue 493: a crate-private ADT's aggregate (alloc's `raw_vec::AllocInit::Uninitialized`) printed with its crate's name
+    (let [agg (fn [text path targs] (binding [br/*export-crate* "alloc"] (#'br/reprint-agg-adt (list 'adt text :kind [] path 0 targs))))]
+      (check "an export crate's private ADT, no arguments: its crate's name first"
+             (agg "raw_vec::AllocInit::Uninitialized" "raw_vec::AllocInit" [])
+             '(adt "alloc::raw_vec::AllocInit::Uninitialized" :kind [] "alloc::raw_vec::AllocInit" 0 []))
+      (check "negative: with arguments, left as it is" (agg "raw_vec::Foo::<T>::A" "raw_vec::Foo" ['(ty "u8" (uint "u8"))])
+             (list 'adt "raw_vec::Foo::<T>::A" :kind [] "raw_vec::Foo" 0 ['(ty "u8" (uint "u8"))]))
+      (check "negative: a crate's path already, left as it is" (agg "core::x::Y" "core::x::Y" []) '(adt "core::x::Y" :kind [] "core::x::Y" 0 [])))
+    ;; queue 493: UnreachableEnumBranching (is_size_align_valid's `let Some(alignment) = Alignment::new(align) else { return
+    ;; false }`: the record's `switchInt(move _5) -> [1: bb2, 0: bb3, otherwise: bb5]`, bb5 unreachable)
+    (let [opt '(ty "std::option::Option<usize>" (adt "std::option::Option" [(ty "usize" (uint "usize"))]))
+          us '(ty "usize" (uint "usize")) bl '(ty "bool" bool) is '(ty "isize" (int "isize"))
+          f (list 'const "f" '(ty "fn() -> std::option::Option<usize> {f}" (fndef [])) '(zst))
+          o {:args 0 :locals [{:ty bl} {:ty opt} {:ty is}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call f [] '(place 1) 1 '(continue))}
+                      {:cleanup false :stmts ['(assign (place 2) (discriminant (place 1)))] :term '(switch (move (place 2)) [[1 2]] 3)}
+                      {:cleanup false :stmts ['(assign (place 0) (use (const "const true" (ty "bool" bool) (scalar 1 1))))] :term '(goto 4)}
+                      {:cleanup false :stmts ['(assign (place 0) (use (const "const false" (ty "bool" bool) (scalar 0 1))))] :term '(goto 4)}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          r (-> o (assoc-in [:blocks 1 :term] '(switch (move (place 2)) [[1 2] [0 3]] 5))
+                (update :blocks conj {:cleanup false :stmts [] :term '(unreachable)}))
+          sv (fn [vs] (fn [[t d]] (when (and (= (second t) "std::option::Option<usize>") (not d)) vs)))]
+      (check "UnreachableEnumBranching: the otherwise's one variant explicit, the otherwise unreachable"
+             (binding [br/*switch-variants* (sv #{0 1})] (br/pack-compare o r)) [:equal-o0 "enum-branching"])
+      (check "negative: the enum's variants not known" (br/pack-compare o r) :differs)
+      (check "negative: two variants left for the otherwise" (binding [br/*switch-variants* (sv #{0 1 2})] (br/pack-compare o r)) :differs)
+      (check "the record (through the pass already) unchanged by it" (binding [br/*switch-variants* (sv #{0 1})] (br/pack-compare r r)) [:equal]))
     (let [unit '(ty "()" (tuple))
           callu (list 'const "g" '(ty "fn() {g}" (fndef "g" [])) '(zst))
           r {:args 0 :locals [{:ty unit}] :debug [] :blocks [{:cleanup false :stmts [] :term (list 'call callu [] '(place 1) 1 '(continue))} {:cleanup false :stmts [] :term '(return)}]}
@@ -103,6 +205,158 @@
           norm (fn [t] (if (= t [:ref [:re-erased] false proj]) [:ref [:re-erased] false [:char]] t))]
       (check "a library projection normalized by the run's solver" (binding [br/*normalize-ty* norm] (#'br/instance-normalize [:ref [:re-erased] false proj])) [:ref [:re-erased] false [:char]])
       (check "negative: without the run's solver the projection stays" (#'br/instance-normalize [:ref [:re-erased] false proj]) [:ref [:re-erased] false proj]))
+    ;; queue 474: SingleUseConsts on our body alone (assert_unsafe_precondition!'s `let msg = ".."` passed by a reborrow:
+    ;; rustc's -O0 MIR writes `_t = const ".."` and msg's debug info the constant)
+    (let [rs '(ty "&str" (ref (ty "str" str) false))
+          unit '(ty "()" (tuple))
+          msg '(const "const \"m\"" (ty "&str" (ref (ty "str" str) false)) (slice alloc1 1))
+          fs (list 'const "f" '(ty "fn(&str) {f}" (fndef "f" [])) '(zst))
+          r {:args 0 :locals [{:ty unit} {:ty rs}] :debug [{:name "msg" :value msg}]
+             :blocks [{:cleanup false :stmts [(list 'assign '(place 1) (list 'use msg))] :term (list 'call fs '[(move (place 1))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 0 :locals [{:ty unit} {:ty rs} {:ty rs}] :debug [{:name "msg" :value '(place 1)}]
+             :blocks [{:cleanup false :stmts ['(storage-live 1) (list 'assign '(place 1) (list 'use msg)) '(storage-live 2) '(assign (place 2) (ref :shared (place 1 (deref))))]
+                       :term (list 'call fs '[(move (place 2))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts ['(storage-dead 2) '(storage-dead 1)] :term '(return)}]}]
+      (check "SingleUseConsts: a const local used once (by a reborrow made a copy) becomes the operand, its debug info the constant"
+             (br/pack-compare o r) [:equal-o0 "inst-simplify,locals,single-use-consts,storage"])
+      (check "the pass is not idempotent (the record's `_1 = const` would go), so the record is not taken through it"
+             (second (#'br/o0-single-use-consts r)) true)
+      (check "negative: a const local used twice stays a local"
+             (br/pack-compare (update-in o [:blocks 0 :stmts] conj '(assign (place 0) (use (copy (place 1))))) r) :differs)
+      (check "negative: another constant" (br/pack-compare (assoc-in o [:blocks 0 :stmts 1] '(assign (place 1) (use (const "const \"n\"" (ty "&str" (ref (ty "str" str) false)) (slice alloc1 1))))) r) :differs))
+    ;; queue 474: RemoveZsts before SimplifyCfg (unchecked_mul's `if ub_checks() { precondition_check(..) }`: both arms'
+    ;; `_3 = const ()` gone, their goto blocks bypassed)
+    (let [unit '(ty "()" (tuple)) bool '(ty "bool" bool)
+          cz1 '(assign (place 1) (use (const "const ()" (ty "()" (tuple)) (zst))))
+          cb (list 'const "c" '(ty "fn() -> bool {c}" (fndef "c" [])) '(zst))
+          cp (list 'const "p" '(ty "fn() {p}" (fndef "p" [])) '(zst))
+          r {:args 0 :locals [{:ty unit} {:ty bool} {:ty unit}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call cb [] '(place 1) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(switch (move (place 1)) [[0 3]] 2)}
+                      {:cleanup false :stmts [] :term (list 'call cp [] '(place 2) 3 '(unreachable))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 0 :locals [{:ty unit} {:ty unit} {:ty bool} {:ty unit}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call cb [] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(switch (move (place 2)) [[0 4]] 2)}
+                      {:cleanup false :stmts [] :term (list 'call cp [] '(place 3) 3 '(unreachable))}
+                      {:cleanup false :stmts ['(storage-dead 3) cz1] :term '(goto 5)}
+                      {:cleanup false :stmts [cz1] :term '(goto 5)}
+                      {:cleanup false :stmts [] :term '(return)}]}]
+      (check "RemoveZsts before SimplifyCfg: the arms' unit assignments gone, their gotos bypassed" (br/pack-compare o r) [:equal-o0 "cfg,locals,storage,zsts"])
+      (check "negative: an arm that assigns a value of a sized type stays a block"
+             (br/pack-compare (-> o (assoc-in [:locals 1 :ty] bool) (assoc-in [:blocks 4 :stmts] ['(assign (place 1) (use (const "const true" (ty "bool" bool) (scalar 1 1))))])) r) :differs)
+      (check "negative: the unwind action of a nounwind callee" (br/pack-compare (assoc-in o [:blocks 2 :term] (list 'call cp [] '(place 3) 3 '(continue))) r) :differs))
+    ;; queue 474: a string constant by its bytes, ours `(raw-str N)` (our allocation's text) against the record's `(slice allocX LEN)`
+    (let [rs '(ty "&str" (ref (ty "str" str) false))
+          body (fn [v] {:args 0 :locals [{:ty rs}] :debug [] :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'use (list 'const "const \"ab\"" rs v)))] :term '(return)}]})
+          r (assoc (body '(slice alloc7 2)) :alloc-data [["alloc7" {:kind :memory :align 1 :mutable false :bytes "6162" :init "11" :relocs []}]])
+          o (assoc (body '(raw-str 1)) :alloc-texts {1 "\nalloc1 (size: 2, align: 1) {\n    61 62                                           │ ab\n}\n"})]
+      (check "a string constant: our allocation's bytes against the record's" (br/pack-compare o r) [:equal])
+      (check "negative: other bytes" (br/pack-compare (assoc o :alloc-texts {1 "\nalloc1 (size: 2, align: 1) {\n    61 63                                           │ ac\n}\n"}) r) :differs)
+      (check "negative: the record's slice of another length" (br/pack-compare o (assoc-in r [:blocks 0 :stmts 0] '(assign (place 0) (use (const "const \"ab\"" (ty "&str" (ref (ty "str" str) false)) (slice alloc7 1)))))) :differs))
+    ;; queue 479: SimplifyConstCondition after SingleUseConsts (assert_unsafe_precondition!'s `if !false`: unreachable_unchecked's
+    ;; and NonZero::new_unchecked's precondition_check, `_1 = const false; switchInt(move _1)`: the record's arm alone, merged)
+    (let [unit '(ty "()" (tuple)) bool '(ty "bool" bool) never '(ty "!" never) u8t '(ty "u8" (uint "u8"))
+          cg (list 'const "g" '(ty "fn() -> u8 {g}" (fndef "g" [])) '(zst))
+          cp (list 'const "p" '(ty "fn(u8) -> ! {p}" (fndef "p" [])) '(zst))
+          cf '(const "const false" (ty "bool" bool) (scalar 0 1))
+          r {:args 0 :locals [{:ty unit} {:ty never} {:ty u8t}] :debug []
+             :blocks [{:cleanup false :stmts [] :term (list 'call cg [] '(place 2) 1 '(unreachable))}
+                      {:cleanup false :stmts [] :term (list 'call cp '[(move (place 2))] '(place 1) nil '(unreachable))}]}
+          o {:args 0 :locals [{:ty unit} {:ty bool} {:ty never} {:ty u8t}] :debug []
+             :blocks [{:cleanup false :stmts ['(storage-live 1) (list 'assign '(place 1) (list 'use cf))] :term '(switch (move (place 1)) [[0 1]] 3)}
+                      {:cleanup false :stmts ['(storage-live 3)] :term (list 'call cg [] '(place 3) 2 '(unreachable))}
+                      {:cleanup false :stmts [] :term (list 'call cp '[(move (place 3))] '(place 2) nil '(unreachable))}
+                      {:cleanup false :stmts ['(assign (place 0) (use (const "const ()" (ty "()" (tuple)) (zst)))) '(storage-dead 1)] :term '(return)}]}]
+      (check "SimplifyConstCondition: a switch on a single-use constant made the goto its value selects, the dead arm gone"
+             (br/pack-compare o r) [:equal-o0 "const-condition,locals,single-use-consts,storage,zsts"])
+      (check "the record (through the pass already) is left as it is" (second (#'br/o0-simplify-const-condition r)) false)
+      (check "negative: the constant selects the other arm (`const true`: the return)"
+             (br/pack-compare (assoc-in o [:blocks 0 :stmts 1] (list 'assign '(place 1) (list 'use '(const "const true" (ty "bool" bool) (scalar 1 1))))) r) :differs)
+      (check "negative: a switch on a local no constant is assigned to stays a switch"
+             (br/pack-compare (assoc-in o [:blocks 0 :stmts] ['(storage-live 1)]) r) :differs))
+    ;; queue 479: RemoveZsts on the locals zero-sized in the generic body (`?`'s residual in Box::try_new_uninit_in: rustc's
+    ;; `from_residual(const Result::<Infallible, AllocError>::Err(AllocError))`, ours `_8 = copy ((_4 as Break).0);
+    ;; from_residual(copy _8)`)
+    (let [unit '(ty "()" (tuple)) rz '(ty "R" (adt "R" [])) cft '(ty "CF" (adt "CF" []))
+          cf (list 'const "f" '(ty "fn(R) {f}" (fndef "f" [])) '(zst))
+          r {:args 1 :locals [{:ty unit} {:ty cft}] :debug [{:name "r" :value (list 'const "const R::Err(E)" rz '(zst))}]
+             :blocks [{:cleanup false :stmts [] :term (list 'call cf [(list 'const "const R::Err(E)" rz '(zst))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts [] :term '(return)}]}
+          o {:args 1 :zst-locals #{2} :locals [{:ty unit} {:ty cft} {:ty rz}] :debug [{:name "r" :value '(place 2)}]
+             :blocks [{:cleanup false :stmts ['(storage-live 2) (list 'assign '(place 2) (list 'use (list 'copy (list 'place 1 '(downcast "Break" 1) (list 'field 0 rz)))))]
+                       :term (list 'call cf '[(copy (place 2))] '(place 0) 1 '(continue))}
+                      {:cleanup false :stmts ['(storage-dead 2)] :term '(return)}]}]
+      (check "RemoveZsts: a zero-sized local's assignment dropped, its operand the type's constant (compared by its type)"
+             (br/pack-compare o r) [:equal-o0 "locals,storage,zsts"])
+      (check "negative: a local not zero-sized in the generic body stays" (br/pack-compare (dissoc o :zst-locals) r) :differs)
+      (check "negative: the record's constant of another type"
+             (br/pack-compare o (assoc-in r [:blocks 0 :term] (list 'call cf [(list 'const "const R::Err(E)" cft '(zst))] '(place 0) 1 '(continue)))) :differs)
+      (check "negative: a non-zero-sized constant's text is still compared"
+             (br/pack-compare (assoc-in r [:blocks 0 :term] (list 'call cf ['(const "const 1_u8" (ty "u8" (uint "u8")) (scalar 1 1))] '(place 0) 1 '(continue)))
+                              (assoc-in r [:blocks 0 :term] (list 'call cf ['(const "const 1" (ty "u8" (uint "u8")) (scalar 1 1))] '(place 0) 1 '(continue)))) :differs))
+    ;; queue 483: LowerSliceLenCalls at the instance (core-instance): str::len's `<[u8]>::len(move _2)`, the record's
+    ;; `_0 = PtrMetadata(move _2)` merged into the block of as_bytes' return
+    (let [usz '(ty "usize" (uint "usize")) sr '(ty "&str" (ref (ty "str" str) false)) br8 '(ty "&[u8]" (ref (ty "[u8]" (slice (ty "u8" (uint "u8")))) false))
+          fc (fn [txt d] (list 'const txt (with-meta (list 'ty (str "fn {" txt "}") (list 'fndef d [])) {:tc [:fndef d [[:uint "u8"]]]}) '(zst)))
+          ab (fc "core::str::<impl str>::as_bytes" "core::str::{impl#0}::as_bytes")
+          ln (fc "core::slice::<impl [u8]>::len" "core::slice::{impl#0}::len")
+          o {:args 1 :locals [{:ty usz} {:ty sr} {:ty br8}] :debug [{:name "self" :value '(place 1)}]
+             :blocks [{:cleanup false :stmts ['(storage-live 2)] :term (list 'call ab '[(copy (place 1))] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts [] :term (list 'call ln '[(move (place 2))] '(place 0) 2 '(continue))}
+                      {:cleanup false :stmts ['(storage-dead 2)] :term '(return)}]}
+          r {:args 1 :locals [{:ty usz} {:ty sr} {:ty br8}] :debug [{:name "self" :value '(place 1)}]
+             :blocks [{:cleanup false :stmts [] :term (list 'call ab '[(copy (place 1))] '(place 2) 1 '(continue))}
+                      {:cleanup false :stmts ['(assign (place 0) (unop "PtrMetadata" (move (place 2))))] :term '(return)}]}
+          lo (update o :blocks br/lower-slice-len-calls)]
+      (check "LowerSliceLenCalls at the instance: `<[u8]>::len` by its def path made PtrMetadata, the goto merged"
+             (br/pack-compare lo r) [:equal-o0 "cfg,storage"])
+      (check "negative: the instance without the pass (the call kept)" (br/pack-compare o r) :differs)
+      (check "negative: another callee is not lowered"
+             (br/pack-compare (update (assoc-in o [:blocks 1 :term] (list 'call (fc "core::slice::<impl [u8]>::is_empty" "core::slice::{impl#0}::is_empty") '[(move (place 2))] '(place 0) 2 '(continue)))
+                                      :blocks br/lower-slice-len-calls) r) :differs))
+    ;; queue 483: LowerIntrinsics' overflowing operators (overflowing_mul at usize: `mul_with_overflow::<u64>(move _6, move _7)`,
+    ;; the record's `_5 = MulWithOverflow(move _6, move _7)`, as the pack records it)
+    (let [u64t '(ty "u64" (uint "u64")) usz '(ty "usize" (uint "usize")) bool '(ty "bool" bool)
+          pair (fn [a] (list 'ty (str "(" (second a) ", bool)") (list 'tuple a bool)))
+          mwo (list 'const "std::intrinsics::mul_with_overflow::<u64>"
+                    (with-meta (list 'ty "fn(u64, u64) -> (u64, bool) {std::intrinsics::mul_with_overflow::<u64>}" (list 'fndef [u64t]))
+                      {:tc [:fndef "core::intrinsics::mul_with_overflow" [[:uint "u64"]]]})
+                    '(zst))
+          tail ['(assign (place 3) (use (copy (place 5 (field 0 (ty "u64" (uint "u64")))))))
+                '(assign (place 4) (use (copy (place 5 (field 1 (ty "bool" bool))))))
+                '(assign (place 8) (cast "IntToInt" (copy (place 3)) (ty "usize" (uint "usize"))))
+                '(assign (place 0) (aggregate (tuple) [(move (place 8)) (copy (place 4))]))]
+          head ['(assign (place 6) (cast "IntToInt" (copy (place 1)) (ty "u64" (uint "u64"))))
+                '(assign (place 7) (cast "IntToInt" (copy (place 2)) (ty "u64" (uint "u64"))))]
+          locals (mapv (fn [t] {:ty t}) [(pair usz) usz usz u64t bool (pair u64t) u64t u64t usz])
+          dbg (vec (for [i [1 2 3 4]] {:name "x" :value (list 'place i)}))
+          o {:args 2 :locals locals :debug dbg
+             :blocks [{:cleanup false :stmts head :term (list 'call mwo '[(move (place 6)) (move (place 7))] '(place 5) 1 '(unreachable))}
+                      {:cleanup false :stmts tail :term '(return)}]}
+          r {:args 2 :locals locals :debug dbg
+             :blocks [{:cleanup false :stmts (vec (concat head ['(assign (place 5) (binop "MulWithOverflow" (move (place 6)) (move (place 7))))] tail)) :term '(return)}]}]
+      (check "LowerIntrinsics: mul_with_overflow made MulWithOverflow, the goto merged" (br/pack-compare (passes/lower-intrinsics o) r) [:equal-o0 "cfg"])
+      (check "negative: the instance without the pass (the intrinsic's call kept)" (br/pack-compare o r) :differs)
+      (check "negative: the record's AddWithOverflow"
+             (br/pack-compare (passes/lower-intrinsics o) (assoc-in r [:blocks 0 :stmts 2] '(assign (place 5) (binop "AddWithOverflow" (move (place 6)) (move (place 7)))))) :differs))
+    ;; queue 483: drop_in_place's call of drop_glue::<T> taken natively only where the shim it resolves to is the record's
+    ;; (drop-glue-ok-fn, mono's needs_drop and symbol stubbed)
+    (let [shim (fn [tt sym] {:instance (str "Shim(DropGlue(DefId(2:3 ~ core[bdd4]::ptr::drop_glue), Some(" tt ")))") :symbol sym})
+          ok? (fn [info recs] (with-redefs [mono/drop-glue-info (fn [_ _] info)] (true? ((#'br/drop-glue-ok-fn nil recs) [:uint "u8"]))))]
+      (check "drop glue: T needs drop, the record's shim of T at mono's symbol" (ok? {:needs-drop true :symbol "_RS"} [(shim "u8" "_RS")]) true)
+      (check "drop glue: T needs no drop, the record has no shim of T (the empty glue)" (ok? {:needs-drop false :symbol "_RS"} [(shim "u16" "_RT")]) true)
+      (check "negative: the record's shim of T at another symbol" (ok? {:needs-drop true :symbol "_RS"} [(shim "u8" "_RX")]) false)
+      (check "negative: T needs drop and the record has no shim of it" (ok? {:needs-drop true :symbol "_RS"} [(shim "u16" "_RT")]) false)
+      ;; queue 493: the record's shim found by mono's symbol, its instance printing T rustc's way (`[MaybeUninit<f64>; 10_usize]`)
+      (check "drop glue: T needs drop, the record's shim at mono's symbol under another text" (ok? {:needs-drop true :symbol "_RS"} [(shim "[u8; 5_usize]" "_RS")]) true)
+      (check "negative: T needs no drop by mono, but the record has a shim at its symbol (another text)" (ok? {:needs-drop false :symbol "_RS"} [(shim "[u8; 5_usize]" "_RS")]) false)
+      (check "negative: the refusal names the disagreement"
+             (with-redefs [mono/drop-glue-info (fn [_ _] {:needs-drop true :symbol "_RS"})] ((#'br/drop-glue-ok-fn nil [(shim "u16" "_RT")]) [:uint "u8"]))
+             "T needs drop, the record has no shim of it")
+      (check "negative: T needs no drop by mono, but the record has its shim" (ok? {:needs-drop false :symbol "_RS"} [(shim "u8" "_RS")]) false)
+      (check "negative: mono refuses T (no symbol)" (ok? nil []) false))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)

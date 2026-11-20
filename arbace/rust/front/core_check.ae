@@ -1084,6 +1084,9 @@
   closure of the exported body's typeck root as data (ext-closure)"
   [t]
   (cond
+    ;; queue 474: a fn pointer's signature map ([:fnptr {:inputs .. :output ..}]) in core's paths too (catch_unwind's
+    ;; `unsafe fn(*mut Data<F, R>)` kept the fn-local struct's id, `[:adt 50 ..]`: def-of 50 at the run)
+    (map? t) (into {} (for [[k v] t] [k (ext-ty v)]))
     (not (vector? t)) t
     (and (= :closure (first t)) *export-closures*) (ext-closure t)
     (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t))) (throw (ex-info "a closure or opaque type" {:carry false}))
@@ -1165,7 +1168,7 @@
   (catch Throwable _ nil)))
 
 (defn- body-types
-  "The types (the :tc metadata) of a body's forms"
+  "The types (the :tc metadata) of a body's forms (alloc-check's fndef-types)"
   [body]
   (let [acc (transient [])]
     (letfn [(w [x] (when-let [t (:tc (meta x))] (conj! acc t))
@@ -1248,8 +1251,9 @@
 
 (defn -main [lib-dir & args]
   ;; queue 462: core-export --rsi-outside's bodies (CORE_EXPORT_KEYS: no oracle, each judged against rsi's record at the
-  ;; instance) are built as rsi's std build builds core, without debug assertions
-  (binding [*debug-assertions* (nil? (System/getenv "CORE_EXPORT_KEYS"))]
+  ;; instance) are built as rsi's std build builds core, without debug assertions; 479-2 (a): core-export --rsi's too
+  ;; (CORE_DEBUG_ASSERTIONS=0, bin/lib/repr-rust/core-build.bash's core_export)
+  (binding [*debug-assertions* (and (nil? (System/getenv "CORE_EXPORT_KEYS")) (not= "0" (System/getenv "CORE_DEBUG_ASSERTIONS")))]
   (binding [ex/*cfg-names* (crate-cfg)]
     (case (first args)
       ;; RF19: --attrs FRONT-DIR CACHE-DIR MODULES-FILE OUT FILE...: the interface pass over FILEs (core's index from CACHE-DIR,
@@ -1360,7 +1364,11 @@
                                 (when-let [e (cond-> (export-entry b k (contains? #{:equal :equal-alloc-ids :equal-allocs} (first row)))
                                                ;; C6-4 (a): core's crate-private facts the body names, as alloc's export carries them
                                                export-keys (with-private-facts @native-all si-full))]
-                                  (swap! exported conj (if (= :no-oracle (first row)) (assoc e :judge :instance) e))))
+                                  ;; 479-2 (a): a body built without debug assertions that differs from rust-core-built's (whose
+                                  ;; flags keep them: -C opt-level=0) is judged at the instance as an outside body is, against
+                                  ;; rsi's record, whose std is built without them
+                                  (swap! exported conj (if (or (= :no-oracle (first row)) (and (not *debug-assertions*) (not (:equal e))))
+                                                         (assoc e :judge :instance) e))))
                               row)))
                 {:keys [stages bodies native]} (binding [*only-key?* (or *only-key?* export-keys)]
                                                  (run-module m table (with-native-names names @native-all) std-file (with-native-std std @native-all) si lib-dir on-body))
@@ -1383,7 +1391,14 @@
                       (let [r (java.io.PushbackReader. (java.io.StringReader. (slurp ef)))]
                         (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc (second x))))))))
                 new-keys (set (map :key @exported))
-                all (concat (remove #(new-keys (:key %)) old) @exported)]
+                ;; queue 474: core's crate-private functions an exported body names (ub_checks' check_language_ub, a macro-made
+                ;; precondition_check), and the crate-private impls and traits they belong to (core_simd's PrivateMethods), their
+                ;; native facts, as lib-export's entries carry alloc's: the run prints their function constants' types and paths
+                ;; from them (`fn() -> bool {core::ub_checks::check_language_ub}`, not `{no sig ..}`)
+                nat @native-all
+                ;; (rust-rec-1120: with-private-facts, C6-4 (a)'s, which carries these and the ADTs and enclosing functions too)
+                with-facts (fn [e] (if-not (:body e) e (with-private-facts e nat si-full)))
+                all (concat (remove #(new-keys (:key %)) old) (map with-facts @exported))]
             (spit ef (binding [*print-meta* true] (with-out-str (doseq [e all] (prn (list 'core/body e)))))))
           (println "core-check: exported" (count @exported) "bodies," (count (filter :equal @exported)) "equal to rustc's built MIR, to" ef))
         (spit native-file (pr-str @native-all))

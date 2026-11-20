@@ -13886,3 +13886,61 @@ not yet. Its pure cases (bin/rust-front inline-test): 6 of 6, each checked by ha
 export: RF_CORE_NATIVE takes the others'), names the ones the export lacks (bin/rust-front lib-unit inline-keys CRATE for the next
 export), and lib-unit's compare inlines them before the judge. alloc: 18 of 25 equal still; custom_owner_from_box now refused for
 its one wanted callee, Box::<Custom>::new, until alloc's next export.
+
+## 2026-11-20: rust-rec-1120: Rust's eval and AOT inputs re-recorded from runs on the own path (RFP53 (a))
+
+Branch `rust-rec-1120` from next `939037429`, merging mac/474-rust-instances (`088b2039c`), mac/479-rust-rest (`373738d11`),
+mac/rust-c6-1120 (`62f76a83b`, then `2284b3a06`) and mac/493-rust-causes2 (`c4215a23a`, which holds 483's `bbece736d`); 498 had
+not landed. The case inputs test/rust/{eval,aot}-inputs-linux-amd64.edn were hand-written (2026-11-10) or written from pack runs
+(2026-11-18); now they are written by the runs, at `decd090ad`'s code.
+
+- **The stale std.** test/rust/front/std-crates-rsi.edn and the pack rust-front-rsi named the main checkout's std build of
+  2026-11-03 (core `bdd42e1572d1d028`, `CsgisaHMJzJ8a_4core`), not the pinned build that runtime-ci lowers (test/rust/runtime/
+  ir.sha256: core `f4c9f03271ecd18b`, alloc `58bfcc358ad62d5f`, std `9a0bbe83fa8f68b1`, `Csl10jNU3mE6R_4core`). An own unit
+  therefore called symbols that std's lowered library does not define. Only rsi-native hid this, because rustc links it against the
+  stale sysroot. Fixed:
+  - std built at the pin in the worktree (`bin/rsi std-build`, 110 units);
+  - std-crates-rsi.edn read again (`bin/rust-front std-crates --rsi`, which now also takes the unsuffixed libstd.rlib); C6's ported
+    Cargo hash (`std-crates --native`) computes the same three ids;
+  - the helper built (`bin/repr-rust helper`) and the pack re-made: `bin/rust-front records make rsi`, 73 members, `4159566a...`,
+    mirrored to the Mac's oracle-packs (`4eebafc9f`).
+  The export key sets from the new records equal the old ones.
+- **479-2 (a).** core-export --rsi builds core without debug assertions (CORE_DEBUG_ASSERTIONS=0, as --rsi-outside since 462-1 (a)).
+  A body that then differs from rust-core-built's (built with debug assertions) is `:judge :instance`.
+- **Merge conflicts.** core_check: the end-of-run facts are C6-4 (a)'s with-private-facts for every entry (474's fns, impls and
+  traits, plus ADTs and enclosing functions). check.ae: my C2 and C3 beside C6's C4 from inputs.tsv.
+- **The exports at the merged head** (fresh caches):
+  - core: 511 bodies, 452 equal, 59 judged at the instance;
+  - outside: 377 bodies (368 before 493's mem/mod.rs);
+  - alloc: 317 bodies, 9 refused;
+  - std: 62 bodies, 2 refused.
+- **rsi-build** `--native-core` with RF_DROP_GLUE=1 (RF11_BATCH=1, RF11_KEEP=1; 167 min). Library bodies built natively: intrinsics
+  529, panics 341, std 1868, threads 1555, unwind 308, vectors 1148. Three of six build own. std and vectors are refused at the
+  lowering ("unknown global drop_glue::<str::iter::SplitWhitespace>", "<hash_map::Iter<String, u64>>"), threads at codegen
+  ("unsupported callee of kind other").
+- **The own path on ci** (bin/rsi check --front own, RSI_FRONT_DIR: rsi-build's units reused, a new knob of bin/lib/rsi/check):
+  - intrinsics passes;
+  - unwind prints its drop lines, then crashes at its second catch_unwind: status 139, a stack overflow in
+    `drop_glue::<dyn Any + Send>`, which calls itself;
+  - panics crashes the same way.
+  Earlier, without the glue (at `7dd5032c0`): intrinsics and vectors passed. unwind printed no drop line and empty hook messages,
+  and panics' payload downcasts came back None. std faulted on the undefined `core::char::convert::from_u32_unchecked`.
+- **The records** (front.tsv with the failing own cases marked pack, each with its reason in .tmp/rust-front/rsi-rec2):
+  - `bin/rsi check --record --corpus samples`: 6 of 6 pass. The eval cell gains threads.rs.
+  - `bin/rsi check --aot --front own --record`: 6 of 6 pass.
+  arbace.rust.check/write-case-inputs now writes C2 and C3 from rsi-build's why: C2 own when no library body is the record's, C3
+  when every mono fact is native, else the counts. For intrinsics, at both stages:
+  - C1 own;
+  - C2: 109 of std's bodies the record's (529 native);
+  - C3: callees 840/843, entry 0/1, fn-symbols 487/492, layouts 1183/1233, locs 727/855;
+  - C4: the helper's std-iface.edn and std-crates-rsi.edn;
+  - C5 own;
+  - C6: std's IR;
+  - C7 own.
+  The other five cases are C5 and C7 own, the rest rustc's.
+- `bin/reap --record`; `bin/crops-score --record`. Rust: eval 0.5, AOT 0.5, independence 80, unchanged: 0 of 6 cases are own in all
+  seven inputs. Completeness 100.0, maturity 100.0. `--judge --strict` reports 0 problems; `bin/records-check` 9 pairs, 0 problems.
+  The eval runs used `ulimit -v 8388608` without the heavy lock (the coordinator's rule). The OOM killer took one eval batch (std.rs,
+  another job's 54 GB read), so that run was discarded and redone from the start.
+- Not run, at the user's word: `bin/rust-front essential`, `core-essential`, `rind-test`, `pack-compare-test` (the gate's) and
+  `bin/gate`.

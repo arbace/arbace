@@ -145,7 +145,9 @@ core_essential() {
 #   bin/rust-front core-export --rsi [NAME...]
 #                                   RUST-90 S4 (C2, doc/rust/FRONTEND-SURVEY.md, "As built: S4's first slice"): the spec from rsi's
 #                                   programs (their stems; default the samples' five eval cases) by core_rsi_spec, the bodies into
-#                                   .tmp/rust-front/core/native-core-rsi.edn, which `rsi-build --native-core` takes
+#                                   .tmp/rust-front/core/native-core-rsi.edn, which `rsi-build --native-core` takes; since 479-2 (a)
+#                                   built without debug assertions, as rsi's std is, an entry not equal to rust-core-built's
+#                                   (built with them) judged at the instance at the run
 #   bin/rust-front core-export --rsi-outside FILE-REGEX [NAME...]
 #                                   queue 448: the programs' core defs outside rust-core-built's modules (no oracle) in the module
 #                                   files FILE-REGEX matches (`^fmt/|^iter/traits/`), by their keys (CORE_EXPORT_KEYS), each
@@ -172,8 +174,11 @@ core_export() {
     [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out ($(grep -c ':judge :instance' "$out") judged at the instance)"
     return 0
   fi
+  local dbg=1
   if [ "${1:-}" = --rsi ]; then
-    shift; spec=$work/core/native-core-rsi.txt out=$work/core/native-core-rsi.edn
+    # 479-2 (a): rsi's bodies built as rsi's std build builds core, without debug assertions (core_check.ae's -main); a body that
+    # then differs from rust-core-built's (built with them) is judged at the instance at the run, as --rsi-outside's are
+    shift; spec=$work/core/native-core-rsi.txt out=$work/core/native-core-rsi.edn dbg=0
     core_rsi_spec "$@" > "$spec.tmp" || { rm -f "$spec.tmp"; return 1; }
     mv "$spec.tmp" "$spec"
   fi
@@ -181,8 +186,8 @@ core_export() {
   files=$(grep -v '^#' "$spec" | tail -n +2 | sed "s|^|$lib/core/src/|")
   rm -f "$out"
   # shellcheck disable=SC2086
-  CORE_ONLY="$re" CORE_EXPORT_NAMES="$re" CORE_EXPORT=$out core_check --records $files
-  [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out"
+  CORE_DEBUG_ASSERTIONS=$dbg CORE_ONLY="$re" CORE_EXPORT_NAMES="$re" CORE_EXPORT=$out core_check --records $files
+  [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out ($(grep -c ':judge :instance' "$out") judged at the instance)"
 }
 
 # RUST-90 S4 (C2): the core bodies rsi's programs NAME... (default the eval cell's five samples) instantiate, as a core-export spec:
