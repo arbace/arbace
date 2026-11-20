@@ -1056,10 +1056,22 @@
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
   (binding [*export-crate* (first (str/split (str (:def entry)) #"::")) *instance-def* (:def entry)]
-  (let [b (sized-const-eval (reprint (:body entry) args))]
+  (let [b (sized-const-eval (reprint (:body entry) args))
+        ;; queue 479: the locals RemoveZsts takes as zero-sized: rustc's optimized_mir is the generic body's, so a local whose
+        ;; type is concrete there (no parameter) and zero-sized by mono's layout (remove_zsts.rs' maybe_zst kinds but fn items
+        ;; and `!`, whose constants print otherwise); the instance's arguments make no others ZST
+        gt (:local-tys (:body entry)) it (:local-tys b)
+        zst (when *type-layout*
+              (set (for [i (range (count gt))
+                         :let [g (nth gt i) t (nth it i nil)]
+                         :when (and t (vector? g) (#{:adt :array :closure :tuple} (first g))
+                                    (not-any? #(and (vector? %) (= :param (first %))) (tree-seq coll? seq g)))
+                         :when (= 0 (:size (try (*type-layout* t) (catch Throwable _ nil))))]
+                     i)))]
     ;; LowerIntrinsics again at the instance (its own port may have grown since the export)
-    {:def (:def entry) :args args :body ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
-                                         (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))})))
+    {:def (:def entry) :args args :body (cond-> ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
+                                                 (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))
+                                          (seq zst) (assoc :zst-locals zst))})))
 
 (defn- drop-shim-body
   "RF12-P6: drop_glue::<T>'s shim body (shim.rs' build_drop_shim, the drop elaborated: `_2 = copy _1; <T as Drop>::drop(move
@@ -1208,12 +1220,33 @@
     [b @changed]))
 
 (defn- o0-remove-zsts
-  "RemoveZsts (remove_zsts.rs, -O0): an assignment of a zero-sized constant (`_0 = const ()`) dropped; [body changed?]"
-  [body]
-  (let [zst-assign? #(and (seq? %) (= 'assign (first %)) (plain-place (second %))
-                          (let [rv (nth % 2 nil)] (and (seq? rv) (= 'use (first rv)) (seq? (second rv)) (= 'const (first (second rv)))
-                                                       (= '(zst) (last (second rv))))))
-        b (update body :blocks (fn [bs] (mapv (fn [x] (update x :stmts #(vec (remove zst-assign? %)))) bs)))]
+  "RemoveZsts (remove_zsts.rs, -O0): an assignment of a zero-sized constant (`_0 = const ()`) dropped; queue 479: and, for the
+  locals ZST (#{local}: the ones whose type is zero-sized in the generic body, which is what rustc's optimized_mir runs on:
+  core-instance's :zst-locals), an assignment to one dropped, a `move|copy` of one made the type's constant and the debug info's
+  place too (`?`'s residual `Result<Infallible, AllocError>` in Box::try_new_uninit_in: `from_residual(const ..)`); a
+  zero-sized constant of an ADT, a tuple, an array or a closure compared by its type alone, in both bodies (a ZST has one
+  value: rustc prints it by its variant and fields, `Result::<Infallible, AllocError>::Err(AllocError)`, our operand writes
+  the type); [body changed?]"
+  [body & [zst]]
+  (let [zst (set zst)
+        ty-of (fn [l] (:ty (nth (:locals body) l nil)))
+        zst-assign? #(and (seq? %) (= 'assign (first %)) (plain-place (second %))
+                          (or (contains? zst (plain-place (second %)))
+                              (let [rv (nth % 2 nil)] (and (seq? rv) (= 'use (first rv)) (seq? (second rv)) (= 'const (first (second rv)))
+                                                           (= '(zst) (last (second rv)))))))
+        adt-ty? (fn [t] (and (seq? t) (= 'ty (first t)) (seq? (nth t 2 nil)) (#{'adt 'tuple 'array 'closure} (first (nth t 2)))))
+        op (fn op [x] (cond (and (seq? x) (#{'move 'copy} (first x)) (= 2 (count x)) (contains? zst (plain-place (second x))) (ty-of (plain-place (second x))))
+                            (list 'const "const <zst>" (ty-of (plain-place (second x))) '(zst))
+                            (and (seq? x) (= 'const (first x)) (= 4 (count x)) (= '(zst) (nth x 3)) (adt-ty? (nth x 2)))
+                            (list 'const "const <zst>" (nth x 2) '(zst))
+                            (seq? x) (apply list (map op x))
+                            (vector? x) (mapv op x)
+                            :else x))
+        dbg (fn [d] (if-let [l (and (seq? d) (= 'debug (first d)) (plain-place (second d)))]
+                      (if (and (contains? zst l) (ty-of l)) (list 'debug (list 'const "const <zst>" (ty-of l) '(zst))) d)
+                      d))
+        b (update body :blocks (fn [bs] (mapv (fn [x] (-> x (update :stmts #(mapv op (remove zst-assign? %))) (update :term op))) bs)))
+        b (if (seq zst) (update b :debug #(mapv dbg %)) b)]
     [b (not= (:blocks b) (:blocks body))]))
 
 (defn- o0-single-use-consts
@@ -1299,12 +1332,12 @@
   record's), SimplifyConstCondition (queue 479) with SimplifyCfg-final again, CopyProp's copies of locals, RenameReturnPlace,
   SimplifyLocals), in rustc's order (queue 474: RemoveZsts before
   SimplifyCfg, run_optimization_passes' order: a branch's `_t = const ()` gone before the arms' goto blocks merge), the kinds
-  that changed it: [body #{kind}]"
-  [body & [ours?]]
+  that changed it: [body #{kind}]; ZST: the locals RemoveZsts takes as zero-sized (queue 479, o0-remove-zsts)"
+  [body & [ours? zst]]
   (let [kinds (atom #{})
         b (update body :blocks (fn [bs] (mapv #(update % :stmts strip-storage) bs)))
         _ (when (not= (:blocks b) (:blocks body)) (swap! kinds conj :storage))
-        [b cz] (o0-remove-zsts b)
+        [b cz] (o0-remove-zsts b zst)
         _ (when cz (swap! kinds conj :zsts))
         b2 ((requiring-resolve 'arbace.rust.front.passes/simplify-cfg) b {:preserve-switch-reads false})
         _ (when (not= (count (:blocks b2)) (count (:blocks b))) (swap! kinds conj :cfg))
@@ -1398,7 +1431,7 @@
       (and (= (bl po identity) (bl pr identity)) (= (lt po) (lt pr))) [:equal]
       (and (= (bl po strip-storage) (bl pr strip-storage)) (= (lt po) (lt pr))) [:equal-but-storage]
       :else
-      (let [[no ko] (o0-normalize po true) [nr _] (o0-normalize pr)
+      (let [[no ko] (o0-normalize po true (:zst-locals ours)) [nr _] (o0-normalize pr)
             _ (when-let [d (System/getenv "RF_PACK_DUMP")]
                 (.mkdirs (File. ^String d))
                 (spit (str d "/" (Math/abs (hash [no nr])) ".edn") (with-out-str (prn :ours) (prn no) (prn :record) (prn nr))))]
