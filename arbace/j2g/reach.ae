@@ -55,12 +55,12 @@
   [^java.util.HashMap supers ^java.util.HashMap supersOf ^java.util.HashMap iface
    ^java.util.HashMap subcls ^java.util.HashMap superOf ^java.util.HashMap methods
    ^java.util.HashMap superImpl ^java.util.HashMap extKeys ^java.util.HashMap descClasses
-   ^java.util.HashMap hwYes ^java.util.HashMap supersSet])
+   ^java.util.HashMap hwYes ^java.util.HashMap supersSet ^java.util.HashMap ppHidden])
 
 (defn- new-cx []
   (Cx. (java.util.HashMap.) (java.util.HashMap.) (java.util.HashMap.) (java.util.HashMap.)
        (java.util.HashMap.) (java.util.HashMap.) (java.util.HashMap.) (java.util.HashMap.)
-       (java.util.HashMap.) (java.util.HashMap.) (java.util.HashMap.)))
+       (java.util.HashMap.) (java.util.HashMap.) (java.util.HashMap.) (java.util.HashMap.)))
 
 (deftype State
   ;; A run's state, in Java's mutable collections (the sets in insertion order, from which run
@@ -221,6 +221,31 @@
     [n (nth k 0) (nth k 1)]
     (or (super-impl cx (super-of cx n) k)
         (default-impl cx n k))))
+
+(defn- java-pkg [^String n] (let [i (.lastIndexOf n "/")] (if (neg? i) "" (subs n 0 i))))
+
+(defn- pp-hidden
+  "JCS122: the package-private implementations of k ([name desc]) in the superclass chain above
+  class c (an impl-of's class) that are in a Java package other than c's: c's k does not override
+  them (JVMS 5.4.5), so a call resolved to one of them dispatches to it on c's objects
+  (m/pp-families' renamed family) and it is reached too (overriding through a class between them
+  not followed: an over-approximation). jrt's classes left out (j2g does not rename them). Cached
+  per class and key; nil for none (every world without such a pair, the shipped program's)."
+  [^Cx cx c k]
+  (let [^java.util.HashMap h (.-ppHidden cx)
+        ^java.util.HashMap hs (or (.get h c) (let [x (java.util.HashMap.)] (.put h c x) x))]
+    (memo hs k
+          (let [p (java-pkg c)]
+            (loop [s (super-of cx c) acc nil]
+              (if (or (nil? s) (= s "java/lang/Object"))
+                acc
+                (let [mm (find-method-of cx s k)]
+                  (recur (super-of cx s)
+                         (if (and (body? mm) (not (private? mm))
+                                  (zero? (bit-and (long (or (:flags mm) 0)) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED)))
+                                  (not= p (java-pkg s)) (not (m/hand-written? s)))
+                           (conj (or acc []) [s (nth k 0) (nth k 1)])
+                           acc)))))))))
 
 (defn java-impl-of
   "The [class name desc] implementing virtual method [name desc] for class n (a body in n or a
@@ -439,6 +464,19 @@
   [^Cx cx d]
   (memo (.-supersSet cx) d (java.util.HashSet. ^java.util.Collection (supertypes-of cx d))))
 
+(defmacro ^:private reach-impl!
+  "Reaches the implementation of virtual method k ([name desc]) for class d (impl-of), and the
+  package-private ones it does not override (pp-hidden, JCS122)."
+  [st cx d k]
+  `(let [^State st# ~st
+         ^Cx cx# ~cx
+         d# ~d
+         k# ~k]
+     (when-let [impl# (impl-of cx# d# k#)]
+       (reach* st# impl#)
+       (when-let [h# (pp-hidden cx# (nth impl# 0) k#)]
+         (doseq [x# h#] (reach* st# x#))))))
+
 (defn- reach-impls!
   "Reaches the implementations for class d of the virtual calls whose receiver's static type is
   a supertype of d (indexed by receiver type: the roots of --program are each a virtual call,
@@ -449,10 +487,10 @@
     (doseq [s (supertypes-of cx d)]
       (when-let [^java.util.ArrayList l (.get by s)]
         (dotimes [i (.size l)]
-          (when-let [k (impl-of cx d (.get l i))] (reach* st k)))))
+          (reach-impl! st cx d (.get l i)))))
     (let [^java.util.ArrayList ks (external-keys cx d)]
       (dotimes [i (.size ks)]
-        (when-let [impl (impl-of cx d (.get ks i))] (reach* st impl))))))
+        (reach-impl! st cx d (.get ks i))))))
 
 (defn- serial-reach!
   "JCS167 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS167 (write-ahead)\"): what
@@ -506,7 +544,7 @@
       (add-to! (.-vcallsBy st) o nd)
       (when-let [^java.util.ArrayList ds (.get ^java.util.HashMap (.-instBy st) o)]
         (dotimes [i (.size ds)]
-          (when-let [impl (impl-of cx (.get ds i) nd)] (reach* st impl))))
+          (reach-impl! st cx (.get ds i) nd)))
       ;; the lambdas' interfaces that are subtypes of o, in fis' order (kept per o while fis is
       ;; the same set)
       (let [^java.util.HashMap fb (.-fisBy st)
@@ -517,7 +555,7 @@
                    (.put fb o [fis ds])
                    ds))]
         (doseq [d ds]
-          (when-let [impl (impl-of cx d nd)] (reach* st impl)))))))
+          (reach-impl! st cx d nd))))))
 
 (defmacro ^:private vcall*
   "vcall-st, at once (inline) for a call already seen."

@@ -900,7 +900,24 @@ the rename table below, is added when one is found. The first pair found
 (`TimeZone.getOffsets(long, int[])`, package-private in java.util, and `ZoneInfo`'s public one in
 sun.util.calendar, with java.time; amendment TM7, accepted 2026-10-10) is resolved by a variant
 that cuts `TimeZone`'s method, which nothing in the world calls on a `TimeZone`: j2g has no
-member renaming (a renamed method's callers and overrides would have to follow).
+member renaming (a renamed method's callers and overrides would have to follow). **As built
+(JCS122 (a), 2026-11-20; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS122 (a)")**: j2g
+renames such a family where the world has a pair, and only there (`arbace.j2g.model/pp-families`):
+among the declarations of one name and descriptor, the translated classes' and their supertypes',
+a family is a component of JVMS 5.4.5's overriding (an interface's method, a public or protected
+one, or one of the same Java package is overridden); the family holding the overridden side of a
+pair (a package-private method in a superclass that the subclass's does not override) is renamed
+`NAME-pp-PKG` (the Java package's slashes as dashes; Go's `Name_pp_pkg__R...`, as
+`GetSetStateFields_pp_java_util__I`) in its definitions, the class interfaces, the dispatch keys
+(`vmethods`, `impl-of`: the forwarders of every concrete subclass, the DynSub types), the calls
+resolved to it (`vbase`: the declaration in the receiver class's superclass chain) and the member
+tables and frame table; the other side keeps its name, so a subclass in another package has both
+methods and each call dispatches by Java's rule. RTA reaches, for an instantiated class, the
+package-private implementations above its own that it does not override (`reach/pp-hidden`). A
+family j2g cannot rename stays the error: one holding an interface's method or a jrt class's
+(their Go names are fixed), or a declaration that overrides both sides (`p.T extends q.S extends
+p.A`, T's method overriding A's package-private one and S's public one). A world without a pair,
+the shipped program's, names everything as before.
 
 **Locals, parameters, labels.** Local and parameter names are kept, munged as Clojure's
 `munge` does for the characters Go does not allow (hand-written Java forms use Clojure names:
