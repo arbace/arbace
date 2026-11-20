@@ -107,6 +107,7 @@
 (def ^:dynamic *varargs-fn* false)      ; parsing a varargs function's body
 (def ^:dynamic *ellipsis* nil)          ; a volatile: the call's arguments end with ...
 (declare di-names)
+(def ^:dynamic *dl* nil)        ; D1120-3: a volatile, the data layout string read so far (LLParser reads M's data layout as it goes)
 (def ^:dynamic *pending* nil)   ; when bound (a volatile), an LLParser error inside a function body ends the reading there
 (def ^:dynamic ^"[J" *top* nil)
 
@@ -217,12 +218,25 @@
 
 (declare parse-type)
 
+(defn- dl-named-as?
+  "Whether a data layout string names an address space `nm` (DataLayout::getNamedAddressSpace, llvm-project 23.1.5
+  llvm/lib/IR/DataLayout.cpp:828-835: a pointer spec p<N>(<name>), parseAddrSpaceAndName 272-294)."
+  [^String dl ^String nm]
+  (boolean (some #(when-let [[_ n] (re-find #"^p[0-9]*\(([^)]*)\)" %)] (= n nm)) (str/split (or dl "") #"-"))))
+
 (defn- parse-addrspace
-  "addrspace(N), or a symbolic one, addrspace(\"A\") (the data layout's name): N or \"A\"."
+  "addrspace(N), or a symbolic one, addrspace(\"A\") (the data layout's name): N or \"A\". D1120-3 (llvm-sections-1120):
+  LLParser::parseOptionalAddrSpace's checks (llvm/lib/AsmParser/LLParser.cpp:2041-2060): a string is A, G, P or a name the data
+  layout read so far gives, else `invalid symbolic addrspace`; neither a string nor an integer: `expected integer or string constant`."
   []
   (expect! "addrspace") (expect! "(")
+  (when-not (#{:str :int} (kind)) (llerr "expected integer or string constant"))
   (when (and (= (kind) :int) (>= (bigint (text)) 16777216)) (llerr "invalid address space, must be a 24-bit integer"))
-  (let [n (if (= (kind) :str) (take-str!) (take-num!))] (expect! ")") n))
+  (let [off (aget ^ints (.starts *t*) (p))
+        n (if (= (kind) :str) (take-str!) (take-num!))]
+    (when (and (string? n) *dl* (not (#{"A" "G" "P"} n)) (not (dl-named-as? @*dl* n)))
+      (llerr (str "invalid symbolic addrspace '" n "'") off))
+    (expect! ")") n))
 
 (defn- parse-base-type []
   (when (and (= (kind) :word) (re-matches #"[ib][0-9]+" (text)) (let [n (bigint (subs (text) 1))] (or (< n 1) (> n 8388608))))
@@ -1278,7 +1292,8 @@
   (case (kind)
     :word (case (text)
             "source_filename" (do (adv!) (expect! "=") (list 'llvm/source-filename (take-str!)))
-            "target" (do (adv!) (let [w (take-word!)] (expect! "=") (list (symbol "llvm" w) (take-str!))))
+            "target" (do (adv!) (let [w (take-word!)] (expect! "=")
+                                  (let [v (take-str!)] (when (and *dl* (= w "datalayout")) (vreset! *dl* v)) (list (symbol "llvm" w) v))))
             "declare" (do (adv!) (let [md (parse-fn-md)] (parse-function false md)))
             "define" (do (adv!) (parse-function true nil))
             "attributes" (do (adv!) (let [n (if (= (kind) :attrgrp) (Long/parseLong (text)) (llerr "expected attribute group id"))] (adv!) (expect! "=") (expect! "{")
@@ -1341,7 +1356,8 @@
   ([^String src partial?]
   ;; partial?: [forms spans error], an LLParser error (llerr) ending the reading with the forms read before it (a function
   ;; cut at the failing instruction), so that the checks of what LLParser parsed before the error can run first
-  (binding [*t* (lex src) *items* (java.util.ArrayList.) *top* (long-array 1) *pending* (when partial? (volatile! nil)) *past-header* (volatile! false)]
+  (binding [*t* (lex src) *items* (java.util.ArrayList.) *top* (long-array 1) *pending* (when partial? (volatile! nil)) *past-header* (volatile! false)
+            *dl* (volatile! "")]
     (loop [out [] spans []]
       (if (= (kind) :eof)
         [out spans nil]

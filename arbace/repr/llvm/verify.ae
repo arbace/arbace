@@ -2744,14 +2744,70 @@
         (when-not (and (md-int-op? (first ops)) (= 'i32 (norm-type (first (first ops)))))
           (verr :verifier/md-misc "!amdgpu.expected.active.lanes operand must be an i32 constant" :inst [:mdv x]))))))
 
+(defn- amdgpu-triple?
+  "Triple::isAMDGPU: amdgcn or r600 (D1120-3)."
+  []
+  (once :amdgpu-triple
+        (fn [] (boolean (some (fn [x] (when (= (first x) 'llvm/triple) (re-find #"^(amdgcn|r600)" (str (second x))))) *all-forms*)))))
+
+(defn- md-zext
+  "An integer metadata operand's value zero-extended from its type's width (APInt's unsigned value)."
+  [op]
+  (let [w (long (or (int-bits (norm-type (first op))) 64))]
+    (.mod ^java.math.BigInteger (md-int-val op) (.shiftLeft java.math.BigInteger/ONE (int w)))))
+
+(defn- reqd-wgs-product
+  "The product of a !reqd_work_group_size node's three integer operands, or nil where the Verifier stops (D1120-3)."
+  [ops]
+  (when (= 3 (count ops))
+    (loop [os ops p (biginteger 1)]
+      (if-let [o (first os)]
+        (when (md-int-op? o)
+          (let [d (md-zext o)]
+            (when (<= (.bitLength ^java.math.BigInteger d) 64)
+              (let [q (.multiply p d)] (when (<= (.bitLength ^java.math.BigInteger q) 64) (recur (rest os) q))))))
+        p))))
+
+(defn- check-amdgpu-wgs
+  "verifyAMDGPUReqdWorkGroupSize (llvm-project 23.1.5 llvm/lib/IR/VerifierAMDGPU.cpp:60-113, after verifyFunctionMetadata,
+  Verifier.cpp:3180-3181; D1120-3, llvm-sections-1120): on an AMDGPU triple a function with a well-formed !reqd_work_group_size needs
+  amdgpu-flat-work-group-size \"MIN,MAX\" equal to the operands' product."
+  [md attrs]
+  (when (amdgpu-triple?)
+    (when-let [x (some (fn [[k x]] (when (= '!reqd_work_group_size k) x)) (partition 2 md))]
+      (when-let [p (reqd-wgs-product (md-ops x))]
+        (let [a (str-attr (group-items attrs) "amdgpu-flat-work-group-size")
+              v (when a (second a))
+              [lo hi] (when (string? v) (let [i (.indexOf ^String v ",")] (if (neg? i) [v ""] [(subs v 0 i) (subs v (inc i))])))
+              num (fn [^String t] (let [t (str/trim t)] (when (re-matches #"[0-9]+" t) (biginteger t))))]
+          (cond
+            (nil? a) (verr :verifier/amdgpu "reqd_work_group_size requires amdgpu-flat-work-group-size" :fn [:mdv x])
+            (not (string? v)) (verr :verifier/amdgpu "amdgpu-flat-work-group-size must be a string attribute" :fn)
+            (or (str/includes? hi ",") (nil? (num lo)) (nil? (num hi)))
+            (verr :verifier/amdgpu "amdgpu-flat-work-group-size must be a pair of unsigned integers" :fn)
+            (not (and (= (num lo) p) (= (num hi) p)))
+            (verr :verifier/amdgpu "amdgpu-flat-work-group-size must equal the product of reqd_work_group_size operands" :fn [:mdv x])))))))
+
 (defn- check-function-md
-  "visitFunction's metadata: verifyFunctionMetadata over the attachments (!prof, !kcfi_type; its failure ends it alone),
-  then a declaration's !prof, a definition's single !prof and !kcfi_type."
+  "visitFunction's metadata: verifyFunctionMetadata over the attachments (!prof, !kcfi_type, !reqd_work_group_size; its failure ends
+  it alone), then a declaration's !prof, a definition's single !prof and !kcfi_type."
   [md decl?]
   (let [pairs (partition 2 md)]
     (visiting
      (doseq [[k x] pairs]
        (case (str k)
+         ;; D1120-3: verifyFunctionMetadata's reqd_work_group_size (Verifier.cpp:2678-2704), on any target
+         "!reqd_work_group_size"
+         (let [ops (md-ops x)]
+           (when-not (= 3 (count ops)) (verr :verifier/md-misc "reqd_work_group_size must have exactly three operands" [:mdv x]))
+           (loop [os ops p (biginteger 1)]
+             (when-let [o (first os)]
+               (when-not (md-int-op? o) (verr :verifier/md-misc "reqd_work_group_size operands must be integer constants" [:mdv x]))
+               (let [d (md-zext o)]
+                 (when (> (.bitLength ^java.math.BigInteger d) 64) (verr :verifier/md-misc "reqd_work_group_size operands must fit in 64 bits" [:mdv x]))
+                 (let [q (.multiply p d)]
+                   (when (> (.bitLength ^java.math.BigInteger q) 64) (verr :verifier/md-misc "reqd_work_group_size product must fit in 64 bits" [:mdv x]))
+                   (recur (rest os) q))))))
          "!prof" (when-let [ops (md-ops x)]
                    (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
                    ;; D1120-3: an 'unknown' marker by verifyUnknownProfileMetadata (Verifier.cpp:2641-2644)
@@ -3654,7 +3710,8 @@
           (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:global g])))
       (check-intrinsic-signature k (:fty (.get *gdefs* k))))
 
-    (check-function-md (:md o) (= h 'llvm/declare))))
+    (check-function-md (:md o) (= h 'llvm/declare))
+    (visiting (check-amdgpu-wgs (:md o) (:attrs o)))))
     (when (= h 'llvm/define)
       (let [blocks (numbered-blocks f)
             g (cfg blocks)
