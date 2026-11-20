@@ -1477,17 +1477,23 @@
 (defn- drop-glue-ok-fn
   "queue 483: *drop-glue-ok?* for the run of N over the record's bodies: T's shim as the record has it, by mono's needs_drop
   and symbol: a type that needs drop only when the record has its shim (`Shim(DropGlue(.., Some(T)))`) at mono's symbol, one
-  that needs none only when the record has no shim of it (its call the empty glue, a no-op); else nil (the record's body kept)"
+  that needs none only when the record has no shim of it (its call the empty glue, a no-op); else the disagreement, a string
+  (queue 493: the refusal names it; the record's shim found by mono's symbol, as glue-shims finds it, the instance's text
+  printing T rustc's way, `[MaybeUninit<f64>; 10_usize]`, `Vec<i32, Global>`, a second key only)"
   [n rec-bodies]
-  (let [shims (into {} (for [b rec-bodies :let [i (str (:instance b))] :when (str/starts-with? i "Shim(DropGlue(")
-                             :let [[_ tt] (re-find #", Some\((.*)\)\)\)$" i)] :when tt]
-                         [tt b]))]
+  (let [glue (filter #(str/starts-with? (str (:instance %)) "Shim(DropGlue(") rec-bodies)
+        by-sym (into {} (for [b glue :when (string? (:symbol b))] [(:symbol b) b]))
+        by-text (into {} (for [b glue :let [[_ tt] (re-find #", Some\((.*)\)\)\)$" (str (:instance b)))] :when tt] [tt b]))]
     (fn [t]
       (let [{:keys [needs-drop symbol]} (try (mono/drop-glue-info n t) (catch Throwable _ nil))
-            r (get shims (binding [c/*in-value* false] (c/print-ty t)))]
-        (if needs-drop
-          (boolean (and r (= symbol (:symbol r))))
-          (and (some? symbol) (nil? r)))))))
+            tt (binding [c/*in-value* false] (c/print-ty t))
+            r (or (get by-sym symbol) (get by-text tt))]
+        (cond (nil? symbol) "mono refuses T"
+              needs-drop (cond (nil? r) "T needs drop, the record has no shim of it"
+                               (= symbol (:symbol r)) true
+                               :else (str "T needs drop, the record's shim is " (:symbol r) ", mono's " symbol))
+              r "T needs no drop, the record has its shim"
+              :else true)))))
 
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
@@ -1529,8 +1535,11 @@
                           ;; queue 483: unless the run's *drop-glue-ok?* finds the shim the call resolves to: the empty glue
                           ;; (a no-op) where the record has no shim of the type, or the record's shim by mono's symbol
                           _ (doseq [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when (= "core::ptr::drop_glue" (second ft))]
-                              (when-not (and *drop-glue-ok?* (= 1 (count (nth ft 2 nil))) (*drop-glue-ok?* (first (nth ft 2))))
-                                (throw (ex-info "a call of drop glue (a shim, the record's)" {}))))
+                              (let [ok (if (and *drop-glue-ok?* (= 1 (count (nth ft 2 nil)))) (*drop-glue-ok?* (first (nth ft 2))) "no run's answer")]
+                                (when-not (true? ok)
+                                  (throw (ex-info (str "a call of drop glue (a shim, the record's): T "
+                                                       (try (binding [c/*in-value* false] (c/print-ty (first (nth ft 2)))) (catch Throwable _ "?"))
+                                                       ", " ok) {})))))
                           ;; queue 443: an instance-judged callee taken only when equal to one of the record's bodies of its def
                           _ (when (and (= :instance (:judge e)) (seq seen))
                               (let [rs (get rec-by-path def)
