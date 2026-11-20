@@ -48,7 +48,7 @@
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
-(declare verr require-logical-pointer-scan)
+(declare verr require-logical-pointer-scan ptrtoaddr-ok? check-constexprs)
 
 (defn- soft!
   "CheckFailed: the failure recorded, the check goes on."
@@ -77,6 +77,7 @@
 (def ^:dynamic ^java.util.Map *gdefs* nil)   ; global name -> {:kind :type}
 (def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
 (def ^:dynamic ^"[J" *gnext* nil)        ; D1120-3: the module NumberedVals' next id (LLParser.cpp:3595-3600)
+(def ^:dynamic ^java.util.Set *ce-seen* nil)   ; D1120-3: the Verifier's ConstantExprVisited (Verifier.cpp:2709-2744)
 (def ^:dynamic ^java.util.Map *bafwd* nil)   ; D1120-3: LLParser's ForwardRefBlockAddresses: function name -> [[label addrspace] ...]
 (def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
 (def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
@@ -2894,6 +2895,26 @@
               (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)" [:mdv id]))
             (when (not= bv 3) (.putIfAbsent ids (md-str id) v))))))
       (when (> (.size *errs*) n) (.add bad f))))
+    ;; D1120-3 (llvm-sections-1120): visitModuleFlags' ptrauth and AArch64 PAuth ABI flags (llvm-project 23.1.5
+    ;; llvm/lib/IR/Verifier.cpp:1839-1886): a non-integer value of one of the four reported as the scan meets it; then ptrauth-init-fini
+    ;; 0 or 1, its address discrimination 0 or 1 and only with it (a failure ends the visit: no requirement checked), and both PAuth
+    ;; ABI flags or neither (its failure does not)
+    (let [names #{"aarch64-elf-pauthabi-platform" "aarch64-elf-pauthabi-version" "ptrauth-init-fini" "ptrauth-init-fini-address-discrimination"}
+          vals (java.util.HashMap.)
+          n0 (.size *errs*)]
+      (doseq [f flags :let [ops (md-ops f)] :when (and (= 3 (count ops)) (names (md-str (second ops))))]
+        (if (md-int-op? (nth ops 2))
+          (.put vals (md-str (second ops)) (str (md-zext (nth ops 2))))
+          (visiting (verr :verifier/md-flags (str (md-str (second ops)) ": module flag expects integer value")))))
+      (let [pf (or (.get vals "ptrauth-init-fini") "0") pa (or (.get vals "ptrauth-init-fini-address-discrimination") "0")
+            n1 (.size *errs*)]
+        (visiting
+         (when-not (#{"0" "1"} pf) (verr :verifier/md-flags "ptrauth-init-fini must be 0 or 1"))
+         (when-not (#{"0" "1"} pa) (verr :verifier/md-flags "ptrauth-init-fini-address-discrimination must be 0 or 1, if set"))
+         (when (and (not= pa "0") (= pf "0")) (verr :verifier/md-flags "ptrauth-init-fini-address-discrimination module flag requires ptrauth-init-fini")))
+        (when (> (.size *errs*) n1) (doseq [f flags] (.add bad f)))   ; the visit ended: the requirements are not checked
+        (when-not (= (.containsKey vals "aarch64-elf-pauthabi-platform") (.containsKey vals "aarch64-elf-pauthabi-version"))
+          (visiting (verr :verifier/md-flags "either both or no 'aarch64-elf-pauthabi-platform' and 'aarch64-elf-pauthabi-version' module flags must be present")))))
     (doseq [f flags :when (not (.contains bad f))]
      (visiting
       (let [[b _ v] (md-ops f)]
@@ -3810,6 +3831,11 @@
                         (verr :verifier/alloca "Alloca has illegal target extension type" :inst))
                       (when (and (= hd 'alloca) (amdgcn-triple?) (not= 5 (addrspace (result-type b))))
                         (verr :verifier/alloca "alloca on amdgpu must be in addrspace(5)" :inst))
+                      ;; D1120-3: visitPtrToAddrInst, then visitInstruction's constant operands
+                      (when (= hd 'ptrtoaddr)
+                        (let [[st _ dt] (strip-flags (rest b))]
+                          (when-not (ptrtoaddr-ok? st dt) (verr :verifier/ptrtoaddr "PtrToAddr result must be address width" :inst))))
+                      (check-constexprs (vec (rest b)))
                       (when ('#{load store} hd) (check-load-store hd b))
                       ;; visitCallBase
                       (when-let [c (callee-of b)]
@@ -4089,6 +4115,28 @@
                                                (rest init)))))
                         gs))))))
 
+;; D1120-3 (llvm-sections-1120): checkPtrToAddr's last rule (llvm-project 23.1.5 llvm/lib/IR/Verifier.cpp:3709-3724): a ptrtoaddr's
+;; result is DataLayout::getAddressType of its source, an integer (or a vector of them) of the address space's index size
+;; (DataLayout.h:518-520, getAddressSizeInBits = getIndexSizeInBits); at the instruction (3727) and in constant expressions
+;; (visitConstantExpr 2755, by visitConstantExprsRecursively 2709-2744: a global's initializer 830, an instruction's operands 5775,
+;; each constant once in the module)
+(defn- ptrtoaddr-ok? [srct dstt]
+  (let [s (norm-type srct)
+        a (fn [t] (symbol (str "i" (dl-index-bits (addrspace t)))))]
+    (= (norm-type dstt) (if (vec-type? s) (list (first s) (nth s 1) (a (elem s))) (a s)))))
+
+(defn- check-constexprs [v]
+  (letfn [(walk [x]
+            (cond (vector? x) (doseq [y x] (walk y))
+                  (and (seq? x) (symbol? (first x)))
+                  (when (or (nil? *ce-seen*) (.add *ce-seen* x))
+                    (when (= 'ptrtoaddr (first x))
+                      (let [[st _ dt] (strip-flags (rest x))]
+                        (when-not (ptrtoaddr-ok? st dt) (verr :verifier/ptrtoaddr "PtrToAddr result must be address width"))))
+                    (doseq [y (rest x)] (walk y)))
+                  :else nil))]
+    (walk v)))
+
 (defn- check-global-variable
   "Verifier::visitGlobalVariable, then visitGlobalValue."
   [forms f]
@@ -4145,6 +4193,7 @@
       (verr :verifier/global (str "Global " (pr/value-str (second f)) " has illegal target extension type") (tstr t)))
     (when (and (sized? t) (>= (biginteger (alloc-bytes t)) (.shiftLeft java.math.BigInteger/ONE (int (dl-ptr-bits (or (:addrspace o) 0))))))
       (verr :verifier/global "Global variable is too large to fit into the address space" :global [:raw (str " " (tstr t))]))
+    (when (some? init) (check-constexprs init))
     (check-global-value f o)))
 
 (defn- strip-casts
@@ -4259,7 +4308,7 @@
             *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
-            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *ce-seen* (java.util.HashSet.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)
             *errs2* (java.util.ArrayList.)
             *renames* {}]
@@ -4285,7 +4334,7 @@
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
             *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
-            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *ce-seen* (java.util.HashSet.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)]
     (try (phase-parser forms) [nil]
          (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) [e] (throw e))))))
