@@ -3031,7 +3031,9 @@
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
         ;; (queue 367: and for a weak_odr one, an explicit instantiation's, the alias weak_odr: clang's getCodegenToUse, Alias)
-        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (:explicit-inst f)) (not vbc))
+        ;; (cpp-rt-own: not for an internal one, an explicit instantiation of a class template of an unnamed namespace: clang writes
+        ;; no complete-object alias of an internal constructor; cxx11-shim_facets.cc's collate_shim<char>, a weak_odr C1 before)
+        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (and (:explicit-inst f) (not (:internal f)))) (not vbc))
           ;; written where the complete object's constructor or destructor is called, as clang emits it
           (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (apply list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)]
                                                                        (when (:explicit-inst f) [:linkage :weak_odr]))))
@@ -3357,8 +3359,14 @@
              (when (every? some? ls) (vec (apply concat ls))))
       ;; an implicit or defaulted default constructor that only stores constants (constexpr: clang initializes the
       ;; object as a constant, its vptrs included)
-      :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)]
-              (when (and (or (:implicit f) (:defaulted f)) (empty? (:ps (:ty f))) (empty? (:args init)) (not (vb-class? cid)) ti (not (:delegate ti)))
+      ;; (cpp-rt-own: and a constexpr one whose body is empty, its mem-initializers constants: ios_errcat.cc's and system_error.cc's
+      ;; `__constinit constant_init io_category_instance{}`, `constexpr constant_init() : cat() { }` of an anonymous union holding
+      ;; a polymorphic category, which clang constant-initializes (its vptr) and whose base's constructor it then never emits)
+      :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)
+                  body (:tbody f)]
+              (when (and (or (:implicit f) (:defaulted f)
+                             (and (:constexpr f) (= :block (:s body)) (empty? (:items body))))
+                         (empty? (:ps (:ty f))) (empty? (:args init)) (not (vb-class? cid)) ti (not (:delegate ti)))
                 (let [l (abi/layout cid)
                       bl (binding [*const-top* false] (mapv (fn [b] (const-leaves {:k :class :id (:base b)} (:init b) (+ off (long (nth (:bases l) (:idx b)))))) (:bases ti)))
                       fl (binding [*const-top* true] (mapv (fn [fi] (let [fd (nth (:fields (abi/cls cid)) (:field fi))]
