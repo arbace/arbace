@@ -13788,3 +13788,16 @@ store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 
   out of memory ... 6558318592 in use").
 - test/gate/steps.edn: repr-java-front's jdk part `:mem-gib 14` (two processes at once with that chunk: 15 at most), the
   step's default 48 -> 14.
+
+## 2026-11-20: java-split-1120, part 4: attr-check's jdk corpus, proven
+
+- `bin/repr-java attr-check --corpus jdk` (the gate's part command; the part is `:clean-only`, run by hand under bin/heavy-lock,
+  javac's tool `javac-60886b4973e7`, `next` 939037429 with this branch): "jdk: 3630 forms files from javac's trees, the native
+  trees' equal", 3,421 files converted on both sides, 0 failed, "native attribution: {:equal 3536330, :declined 809}; the
+  model's reads: {:native 22949915, :javac 1807}", no fact differing, "attr-check: the native provider's facts equal javac's,
+  and the forms, in every corpus", status 0. Peak 13.1 GiB of the tree, 1,804 s: a chunk's process 3.0 to 4.2 GiB (the native
+  provider's registry on top of front-check's), the IndicConjunctBreak chunk 11.6. Before: 41.6 GiB (2026-11-05), 61.4 GiB and
+  OOM-killed on night 13.
+- test/gate/steps.edn: repr-java-attr's jdk part `:mem-gib` 62 -> 15 (16.5 at most if that chunk's spike met a 4.2 GiB chunk),
+  the step's default 49 -> 15. DECISION left to the user: the part is `:clean-only` "until cut" (2026-11-13); it is cut, and
+  `:clean-only` stays until the user lifts it (as a `:phase :weekly` part, like front's and nojavac's).
