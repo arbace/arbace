@@ -193,6 +193,7 @@ go_env() { # go_env ARCH [GOOS]
 . "$root/bin/lib/box-overlay.bash"
 . "$root/bin/lib/program.bash" # the base, the linker's flags, j2g and build-go calls (RPS97 (b))
 . "$root/bin/lib/gate-cache.bash" # arbace_gate_cache: the gate's builds, ARBACE_GATE_EXES/KEY20
+. "$root/bin/lib/go-build.bash" # the compile's memory policy (go_build_policy; doc/go/BUILD.md, "The build in bounded steps")
 
 # the seconds since $1 (date +%s)
 since() { echo "$(( $(date +%s) - $1 )) s"; }
@@ -221,17 +222,26 @@ build() {
   # standalone S6, one j2g run (SA144): a host of the checkout's runtime (its version's
   # :runtime, bin/lib/version.bash) compiles the checkout's namespaces itself, as the program
   # built from them would
-  local saved1=("${j2g_args[@]}") onepass= j2g_pid= aot_base=${ARBACE_AOT_BASE:-$dir}
+  local saved1=("${j2g_args[@]}") onepass= j2g_pid= aot_base=${ARBACE_AOT_BASE:-$dir} aot_tree=aot
   if [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && [ -n "$variant" ] && aot_reusable "$hostexe"; then
     # the test build: the shipped build's compiled namespaces, when made from the same
     # namespaces and runtime (SA157)
-    echo "== the namespaces compiled: the shipped build's ($aot_base/aot, key ${aot_key:0:12})" >&2
+    echo "== the namespaces compiled: the shipped build's ($aot_base/$aot_tree, key ${aot_key:0:12})" >&2
     onepass=1
-    j2g_args+=(--input "$aot_base/aot")
+    j2g_args+=(--input "$aot_base/$aot_tree")
+  elif [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && host_compiles "$hostexe" && [ "${ARBACE_BUILD_CHUNKS:-1}" != 0 ]; then
+    # the build in bounded steps (doc/go/BUILD.md, 2026-11-20): the host compiles the namespaces, then
+    # j2g runs on its own, the compiled tree an input as --await would have read it (its packages.edn:
+    # a late input, the same rounds), so that the two processes' heaps are never resident at once
+    onepass=1
+    rm -rf "$dir/aot$variant" "$dir/aot$variant.key"
+    host_compile "$hostexe" "$dir/aot$variant" || return 1
+    aot_key_write "$dir/aot$variant"
+    j2g_args+=(--input "$dir/aot$variant")
   elif [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && host_compiles "$hostexe"; then
     # j2g started at once: it loads the runtime and analyzes it while the host compiles the
     # namespaces, and reads them when they are there (--await: DIR/aot.edn, the compiling's
-    # last file)
+    # last file); ARBACE_BUILD_CHUNKS=0 (until 2026-11-20 the default, SA160)
     onepass=1
     rm -rf "$dir/aot$variant" "$dir/aot$variant.key"
     echo "== bin/j2g --program ${j2g_args[*]} --await $dir/aot$variant (on $hostexe), at the same time" >&2
@@ -256,8 +266,9 @@ build() {
   overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
   host=$(host_arch)
   # the architectures at once (each its own work module and log; the print cache's entries are
-  # written atomically, and Go's build cache is shared safely)
-  local pids=() archs=() st=0 i
+  # written atomically, and Go's build cache is shared safely); in bounded steps (doc/go/BUILD.md,
+  # 2026-11-20) one after another: the second's print is the print cache's, its compile alone
+  local pids=() archs=() sts=() st=0 i
   t0=$(date +%s)
   for a in $(build_order); do
     echo "== bin/build-go $a" >&2
@@ -265,11 +276,15 @@ build() {
     (cd "$root" && bin/build-go --line-file --arch "$a" --work "$dir/work$variant-$a" -o "$dir/$a/$exe" \
        --print-cache "$root/.tmp/repr-go-print-cache" \
        --overlay "$overlay" --root "$root/x509roots" "$dir/j2g$variant/prog") > "$dir/build$variant-$a.log" 2>&1 &
-    pids+=($!); archs+=("$a")
+    pids+=($!); archs+=("$a") sts+=("")
+    if [ "${ARBACE_BUILD_CHUNKS:-1}" != 0 ]; then
+      i=$(( ${#pids[@]} - 1 )); sts[$i]=0; wait "${pids[$i]}" || sts[$i]=$?
+    fi
   done
   for i in "${!pids[@]}"; do
     a=${archs[$i]}
-    if wait "${pids[$i]}"; then
+    [ -n "${sts[$i]}" ] || { sts[$i]=0; wait "${pids[$i]}" || sts[$i]=$?; }
+    if [ "${sts[$i]}" = 0 ]; then
       echo "   build-go $a: $(since "$t0")" >&2
     else
       grep -v '^==' "$dir/build$variant-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; st=1
@@ -309,13 +324,18 @@ build() {
 }
 
 # aot_reusable HOST: does the shipped build's tree ($aot_base/aot: ARBACE_AOT_BASE, a directory
-# holding aot/ and aot.key such as the gate's ARBACE_GATE_EXES/KEY20/amd64, else $dir) hold what the test build would
-# compile (its key the checkout's)? Not when HOST has no id spaces (a program older than S6:
+# holding aot/ and aot.key such as the gate's ARBACE_GATE_EXES/KEY20/amd64, else $dir), or else this
+# variant's own of an earlier build ($dir/aot$variant, as javac's tool build's first build leaves it; sets
+# aot_base and aot_tree), hold what the test build would compile (its key the checkout's)? Not when HOST has no id spaces (a program older than S6:
 # the test build then compiles as before, SA151); sets aot_key
 aot_reusable() {
-  [ -f "$aot_base/aot/packages.edn" ] && [ -f "$aot_base/aot.key" ] || return 1
   aot_key=$(aot_key)
-  [ "$(cat "$aot_base/aot.key")" = "$aot_key" ] || return 1
+  # the build's own tree of this variant (a first build's, javac's tool build's second build) when the
+  # base's is not current
+  if ! { [ -f "$aot_base/aot/packages.edn" ] && [ "$(cat "$aot_base/aot.key" 2>"$discard")" = "$aot_key" ]; }; then
+    [ -f "$dir/aot$variant/packages.edn" ] && [ "$(cat "$dir/aot$variant.key" 2>"$discard")" = "$aot_key" ] || return 1
+    aot_base=$dir aot_tree=aot$variant
+  fi
   [ "$(env -u ARBACE_NO_AOT "$1" -e '(print (some? (try (.getField arbace.lang.RT "ID_SPACE") (catch Throwable _ nil))))' 2>"$discard")" = true ]
 }
 
@@ -334,9 +354,12 @@ pgo_build() {
   echo "   training: $(since "$t0")" >&2
   for a in $(build_order); do
     t0=$(date +%s)
-    (cd "$dir/work-$a/mod" && env $(go_env "$a") "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
+    go_build_policy || return 1
+    (cd "$dir/work-$a/mod" && env $(go_env "$a") ${go_policy_env[@]+"${go_policy_env[@]}"} "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build \
+       ${go_policy_flags[@]+"${go_policy_flags[@]}"} -trimpath \
        -buildvcs=false "${ldflags[@]}" -overlay "$overlay" -pgo "$dir/pgo.pprof" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
-      || { tail -20 "$dir/build-$a.log" >&2; echo "arbace-go: $a: the profile-guided build failed" >&2; return 1; }
+      || { go_build_done; tail -20 "$dir/build-$a.log" >&2; echo "arbace-go: $a: the profile-guided build failed" >&2; return 1; }
+    go_build_done
     echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes, profile-guided; built in $(since "$t0"))" >&2
   done
 }
@@ -365,9 +388,14 @@ image() {
     t0=$(date +%s)
     [ -d "$dir/work$variant-$a/mod" ] || { echo "arbace-go: $a: not built" >&2; return 1; }
     cp "$main/image.bin" "$dir/work$variant-$a/mod/cmd/arbace/image.bin"
-    (cd "$dir/work$variant-$a/mod" && env $(go_env "$a") "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
+    # the compile's memory policy (bin/lib/go-build.bash): the packages are the first link's, in Go's
+    # build cache; a cache that lost them compiles them again within it
+    go_build_policy || return 1
+    (cd "$dir/work$variant-$a/mod" && env $(go_env "$a") ${go_policy_env[@]+"${go_policy_env[@]}"} "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build \
+       ${go_policy_flags[@]+"${go_policy_flags[@]}"} -trimpath \
        -buildvcs=false "${ldflags[@]}" -overlay "$overlay" -o "$dir/$a/$exe" arbace/cmd/arbace) >> "$dir/build$variant-$a.log" 2>&1 \
-      || { tail -20 "$dir/build$variant-$a.log" >&2; echo "arbace-go: $a: link with the image failed" >&2; return 1; }
+      || { go_build_done; tail -20 "$dir/build$variant-$a.log" >&2; echo "arbace-go: $a: link with the image failed" >&2; return 1; }
+    go_build_done
     echo "arbace-go: $dir/$a/$exe ($(stat -c %s "$dir/$a/$exe") bytes; linked in $(since "$t0"))" >&2
   done
 }

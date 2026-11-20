@@ -58,6 +58,9 @@
     --goos-dir DIR  with --goos tamago: TamaGo's goos module is DIR (go.mod replaces it by
                   DIR), not Go's module cache: the module printed from its Go forms
                   (bin/tamago-vendor print)
+    --go-cmd FILE print the module, write go build's command into FILE and exit (bin/build-go
+                  runs it once this process has exited: doc/go/BUILD.md, \"The build in bounded
+                  steps\")
     --mutant FILE a program's sensitivity control (doc/go/BUILD.md, \"A mutant\"): one function's
                   body rewritten in the forms before printing by the named rewrite FILE records
                   (read-mutant), the package printed past the print cache; what was done
@@ -700,9 +703,27 @@
     (doseq [c (.listFiles f)] (delete-tree c)))
   (.delete f))
 
+(defn- write-go-cmd!
+  "The go build command (cmd, run in dir with env added to this process's environment) written
+  into f for bin/build-go to run once this process has exited (doc/go/BUILD.md, \"The build in
+  bounded steps\"): a line per item, `dir DIR`, `rm DIR` (a temporary work directory to remove
+  after the build), `env KEY=VALUE`, `arg ARG` in order. A newline in any of them is an error."
+  [^File f cmd ^File dir env ^File rm]
+  (let [line (fn [k v]
+               (when (str/includes? (str v) "\n")
+                 (fail (str "--go-cmd: a newline in the build's " k ": " (pr-str v))))
+               (str k " " v "\n"))]
+    (spit f (str (line "dir" (.getPath (.getAbsoluteFile dir)))
+                 (when rm (line "rm" (.getPath (.getAbsoluteFile rm))))
+                 (str/join (for [[k v] (sort env)] (line "env" (str k "=" v))))
+                 (str/join (for [a cmd] (line "arg" a)))))))
+
 (defn build
   "Builds the program in dir for linux/arch into out (a File); returns go build's exit
-  status, its output on the JVM's."
+  status, its output on the JVM's. With opts' :go-cmd (a file), the module is printed and go
+  build's command written there (write-go-cmd!), not run: bin/build-go runs it once this
+  process has exited, so that the printer's memory and the compiler's are never resident at
+  once; the status is 0."
   [^File dir arch ^File out {:keys [work goroot] :as opts}]
   (let [prog (with-mutant (program dir goroot opts) dir opts (File. (str (.getPath out) ".mutant.edn")))
         main (:main prog)
@@ -727,15 +748,17 @@
                           (:go-flags opts)
                           ["-o" (.getPath (.getAbsoluteFile out)) (:path main)])
               env (cond-> (go-env goroot arch (or (:goos opts) "linux"))
-                    (seq (:goexperiment config)) (assoc "GOEXPERIMENT" (:goexperiment config)))
-              [status] (run cmd mod env true)]
-          status))
+                    (seq (:goexperiment config)) (assoc "GOEXPERIMENT" (:goexperiment config)))]
+          (if-let [f (:go-cmd opts)]
+            (do (write-go-cmd! (File. (str f)) cmd mod env (when tmp? work))
+                0)
+            (first (run cmd mod env true)))))
       (finally
-        (when tmp? (delete-tree work))))))
+        (when (and tmp? (not (:go-cmd opts))) (delete-tree work))))))
 
 (defn -main [& argv]
   (let [goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
-        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines|full] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--go-flag FLAG]... [--root ROOT]... [--goos-dir DIR] [--main PATH] [--mutant FILE] DIR\n"
+        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines|full] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--go-flag FLAG]... [--root ROOT]... [--goos-dir DIR] [--main PATH] [--mutant FILE] [--go-cmd FILE] DIR\n"
                    "       bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines|full] [--line-file] [--mutant FILE] SRC")]
     (loop [as argv opts {:arch "amd64" :goroot goroot}]
       (case (first as)
@@ -756,6 +779,7 @@
         "--goos-dir" (recur (nnext as) (assoc opts :goos-dir (second as)))
         "--print-cache" (recur (nnext as) (assoc opts :print-cache (second as)))
         "--mutant" (recur (nnext as) (assoc opts :mutant (second as)))
+        "--go-cmd" (recur (nnext as) (assoc opts :go-cmd (second as)))
         (do
           (when-not (and (= 1 (count as)) (not (str/starts-with? (first as) "-"))
                          (#{"amd64" "arm64"} (:arch opts))

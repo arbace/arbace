@@ -1,0 +1,79 @@
+#!/bin/bash
+# go build's -toolexec under the build's memory policy (doc/go/BUILD.md, "The build in bounded steps",
+# 2026-11-20; bin/lib/go-build.bash adds it): go runs each tool as `go-toolexec TOOL ARG...`.
+#
+# A compile holds memory in proportion to its package's Go files (gc's live heap is most of its peak:
+# doc/STANDALONE-NOTES.md, "What gc needs"), so each compile is admitted by the Go bytes of the
+# compiles running beside it: it starts when they and its own are at most ARBACE_GO_BUDGET_MB MiB
+# (default 48), or when none runs; a package over ARBACE_GO_BIG_MB MiB (default 16) also runs with its
+# back end's concurrency at most ARBACE_GO_BIG_C (go's -c=N, default 4; go gives a compile up to
+# GOMAXPROCS) and GOGC=ARBACE_GO_BIG_GOGC (default 50; the compiler's own heap boost is off when GOGC is
+# set). Neither changes the compiler's output nor go's action IDs: go asks the tool for its ID through
+# this wrapper (-V=full, passed through as it is), and the -c it adds is not hashed (cmd/go's gc.go:
+# compilerConcurrency decides it at run time). The admission's state is ARBACE_GO_TOOLEXEC_STATE, a
+# file of the compiles admitted and their bytes, under an flock of STATE.lock (bin/lib/go-build.bash
+# makes one per go build); without it, no admission.
+#
+# ARBACE_GO_BUILD_TIMES=FILE appends a line per compile and link: the package (or "link"), its Go
+# bytes, big or not, seconds and peak RSS in KiB (busybox time). Every other tool runs as it is.
+tool=$1
+shift
+case ${tool##*/} in
+  compile) ;;
+  link)
+    [ -n "${ARBACE_GO_BUILD_TIMES:-}" ] || exec "$tool" "$@"
+    for a in "$@"; do [ "$a" = -V=full ] && exec "$tool" "$@"; done
+    exec /usr/bin/time -a -o "$ARBACE_GO_BUILD_TIMES" -f "link 0 - %e %M" "$tool" "$@" ;;
+  *) exec "$tool" "$@" ;;
+esac
+gofiles=() pkg= prev=
+for a in "$@"; do
+  case $a in *.go) gofiles+=("$a") ;; esac
+  [ "$prev" = -p ] && pkg=$a
+  prev=$a
+done
+# -V=full and the like: no Go files
+[ ${#gofiles[@]} -gt 0 ] || exec "$tool" "$@"
+bytes=$(stat -c %s -- "${gofiles[@]}" | awk '{ s += $1 } END { print s + 0 }')
+big=0
+[ "$bytes" -lt $(( ${ARBACE_GO_BIG_MB:-16} * 1048576 )) ] || big=1
+args=("$@")
+if [ $big = 1 ]; then
+  c=${ARBACE_GO_BIG_C:-4}
+  for i in "${!args[@]}"; do
+    case ${args[$i]} in -c=*) [ "${args[$i]#-c=}" -le "$c" ] || args[$i]=-c=$c ;; esac
+  done
+  [ -z "${ARBACE_GO_BIG_GOGC-50}" ] || export GOGC=${ARBACE_GO_BIG_GOGC-50}
+fi
+state=${ARBACE_GO_TOOLEXEC_STATE:-}
+if [ -n "$state" ]; then
+  budget=$(( ${ARBACE_GO_BUDGET_MB:-48} * 1048576 ))
+  # admitted when the bytes running and its own fit the budget, or when none runs; the state a line
+  # "PID BYTES" per compile admitted, a line whose process is gone dropped (a compile killed with its
+  # wrapper leaves no bytes behind)
+  while :; do
+    ok=$(flock -x "$state.lock" awk -v me=$$ -v b="$bytes" -v cap="$budget" -v f="$state" '
+      BEGIN { n = 0; u = 0
+              while ((getline l < f) > 0) { split(l, a, " "); if (system("test -d /proc/" a[1]) == 0) { keep[++n] = l; u += a[2] } }
+              close(f)
+              ok = (u == 0 || u + b <= cap)
+              if (ok) keep[++n] = me " " b
+              printf "" > f; for (i = 1; i <= n; i++) print keep[i] > f; close(f)
+              print ok ? 1 : 0 }')
+    [ "$ok" = 1 ] && break
+    sleep 0.2
+  done
+  release() {
+    flock -x "$state.lock" awk -v me=$$ -v f="$state" '
+      BEGIN { n = 0; while ((getline l < f) > 0) { split(l, a, " "); if (a[1] != me) keep[++n] = l }
+              close(f); printf "" > f; for (i = 1; i <= n; i++) print keep[i] > f; close(f) }'
+  }
+  trap release EXIT
+fi
+st=0
+if [ -n "${ARBACE_GO_BUILD_TIMES:-}" ]; then
+  /usr/bin/time -a -o "$ARBACE_GO_BUILD_TIMES" -f "${pkg:-?} $bytes $big %e %M" "$tool" "${args[@]}" || st=$?
+else
+  "$tool" "${args[@]}" || st=$?
+fi
+exit $st

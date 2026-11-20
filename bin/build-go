@@ -29,6 +29,13 @@
 #
 # Environment: ARBACE_GOROOT, the TamaGo Go tree (default /root/tamago-go); REPR_GO_EXE, the Go
 # executable that runs arbace.build.go (bin/lib/repr-go-host.bash: default the tools' host).
+# The build in bounded steps (doc/go/BUILD.md, "The build in bounded steps"): the printer exits before
+# go build starts (arbace.build.go --go-cmd); the printer under GOMEMLIMIT ARBACE_PRINT_GOMEMLIMIT
+# (default 10GiB, bin/gate-policy mem), its forms read package by package within ARBACE_PRINT_BUDGET_MB
+# (ARBACE_PRINT_JOBS threads); go build under bin/lib/go-build.bash's policy (ARBACE_GO_BUILD_PROCS,
+# bin/lib/go-toolexec's ARBACE_GO_BUDGET_MB, ARBACE_GO_BIG_MB, ARBACE_GO_BIG_C, ARBACE_GO_BIG_GOGC;
+# ARBACE_GO_BUILD_TIMES=FILE: each compile's seconds and peak). ARBACE_BUILD_CHUNKS=0: the print and
+# go build as before 2026-11-20 (but the printer still exits before go build).
 set -euo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -40,4 +47,21 @@ case ${1:-} in
   ""|-h|--help) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 . "$root/bin/lib/repr-go-host.bash"
-repr_go_exec arbace.build.go "$@"
+# the build in bounded steps (doc/go/BUILD.md, 2026-11-20): the printer (arbace.build.go) prints the
+# module and writes go build's command (--go-cmd), then exits; go build runs after it, under the
+# compile's memory policy (bin/lib/go-build.bash), so that the printer's heap and the compilers' are
+# never resident at once. --print-only builds nothing: as before
+for a in "$@"; do [ "$a" = --print-only ] && repr_go_exec arbace.build.go "$@"; done
+. "$root/bin/lib/go-build.bash"
+plan=$(mktemp "$TMPDIR/build-go-plan.XXXXXX") || exit 1
+trap 'rm -f "$plan"' EXIT
+st=0
+if [ "${ARBACE_BUILD_CHUNKS:-1}" = 0 ]; then
+  repr_go_run arbace.build.go --go-cmd "$plan" "$@" || st=$?
+else
+  # the printer's collector held to ARBACE_PRINT_GOMEMLIMIT (default 10GiB, capped by the gate's admission:
+  # bin/gate-policy mem), not to a GOMEMLIMIT the caller set for another stage
+  GOMEMLIMIT=${ARBACE_PRINT_GOMEMLIMIT:-$("$root/bin/gate-policy" mem 10GiB)} repr_go_run arbace.build.go --go-cmd "$plan" "$@" || st=$?
+fi
+[ $st = 0 ] || exit $st
+go_build_plan "$plan"
