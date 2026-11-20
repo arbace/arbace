@@ -13708,3 +13708,43 @@ waits on test/python/roundtrip-own-known.edn, pyi-check-aot-goi and pyi-check on
   8 in `:venv-and-build` that `:c-modules-deferred` takes first, "No module named '_testinternalcapi'" / "'_sysconfig'"): the
   record predates 465's stand-in and _sysconfig; they settle with the next Lib/test record (not a reap problem). python-night.edn's
   three steps wait on n-py-rec's check records, now in the tree, to be spliced.
+
+## 2026-11-20: java-split-1120: repr/java's jdk reads in chunk processes (the gate's behemoths, part 1: the mechanism)
+
+The user: "identify the resource hogging bottleneck steps in the gate and split the behemoth jobs". repr/java's share of the
+store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 48.3, `repr-java-attr.jdk` 41.6 (61.4 on night
+13, OOM-killed), `jrt-convert` 40.1 GiB in 2,119 s (its convert 1,758 s), `repr-java-roundtrip.jdk` 28.8 (the whole steps'
+`repr-java-attr` 40.1 and `repr-java-front` 28.8 are passes of 2026-10-27, before GT5's parts). Goal: no step above about
+16 GiB, the same checks, verdicts, records and outputs byte for byte.
+
+- What grows: all five are one `read-jdk` of java.base's closure (3,421 files at `next` 939037429, 3,372 at 42494a700) in one
+  process: `arbace.repr.java/jdk` packs the files into chunks of about 150 (whole packages; 23 chunks), converts
+  REPR_JAVA_THREADS (4) at once, a javac context each over its chunk with every other chunk's sources visible
+  (REPR_JAVA_PATCH_ALL), and holds every chunk's units, their forms, until one `finish` writes them all (`(mapv deref
+  futures)`): every unit's forms (about 0.85 MB a file and front, "As built: the jdk parts' memory") plus four javacs, at GOGC
+  200. Under GOMEMLIMIT 26 or 28 GiB the live heap near the limit made the collector thrash: jrt-convert's read took 1,660 s
+  and its step 41,672 CPU seconds (`.tmp/gate-pass/jrt-convert/a3ca8d99...log`, `conv/repr-java-nojavac.edn` :peak-rss 32.0 GB).
+- Split: `test/repr/java/chunks.ae` (`repr.java.chunks`), `ARBACE_PATH=ROOT/test bin/repr-java main -m repr.java.chunks
+  read-jdk ...`, read-jdk's arguments and output: with REPR_JAVA_PROCS=N and more than one chunk, jdk's chunks (the same
+  files, patch directories, javac options and patch path: what each javac sees is what it saw) each read by a process of its
+  own, N at once, the tool again (`/proc/self/exe`, REPR_JAVA_CHUNK naming the chunk, GOMEMLIMIT REPR_JAVA_PROC_GOMEMLIMIT's);
+  the chunk's process converts it as jdk's thread does, writes its units' forms (write-output a package at a time: a package
+  is in one chunk alone) and a summary, data alone, checked to read back as itself (the split's facts, sorted sets, sorted
+  again); the first process copies the chunks, runs the others and merges the summaries in the chunks' order into finish's
+  reports and lines (the written files in write-output's group-by order: the same keys inserted in the same order; the
+  unreadable list, the edn errors' frequencies, repr-java-report/-split/-attr/-nojavac.edn); a failed chunk's process fails
+  its files, its log shown. Without REPR_JAVA_PROCS, or with one chunk, `arbace.repr.java/jdk` itself.
+- DECISION (reader untouched): the driver lives outside the reader, in test/repr/java (as jrt-convert's own namespaces live in
+  test/jrt), not in `arbace/repr/java.ae`. A first version put it into `jdk` and `finish` (`report!` over summaries, finish one
+  summary) with `REPR_JAVA_TOOL` exported by bin/repr-java; it gave the same outputs, but java.ae and bin/repr-java are in
+  `repr_java_reader_hash`, which the four provenance files record (`bin/provenance-check`, an essential step): the change
+  would have needed `bin/jrt-convert update`, `bin/javac-vendor convert`, `--java-fixtures update` and `--forms update` in the
+  same commit (GTS36 (b)), the first of them the behemoth itself and jdk/ stale at `next` for other reasons (overlay changes
+  of 416 and queue 398 since 42494a700, no update yet). Outside the reader: the provenance files, the reader hash, the javac
+  key and gate_key stay; the price is that the driver repeats `jdk`'s plan (files, chunks, patch path, javac options) and
+  `finish`'s report; the slice proofs below compare them with the reader's own.
+- Proofs on a slice (java/util/stream, function, concurrent of jdk26u's java.base: 181 files, 2 chunks; javac's tool
+  `javac-60886b4973e7`, the original code in a worktree at 42494a700): `--check --front both --split --attr native` (forms,
+  repr-java-report, -split, -attr equal byte for byte; the logs equal but the times), `--check --no-javac` (forms and report
+  equal; repr-java-nojavac.edn but its times and :peak-rss), `--full --origins` (forms equal); a failing chunk's process
+  (a tool that exits 3): 181 FAILED, the summary line "0 converted, 181 failed".
