@@ -4385,3 +4385,14 @@ exception_comballoc's deallocations. discard_in_callback: the native backend's c
 Marshal's and custom blocks' sources. thread_exit_in_callback. ephetest's test6 and test7 (a key reachable from its data: Go has no
 ephemerons), ephetest3 at eval (oi's int64 is not boxed). darkening_work (the major collector's own work). struct_include_optimisation
 (the bytecode's Translmod blocks).
+
+## As built: queue 476 (2026-11-20, the VM): Marshal's objects for Gc.Memprof, Caml_state_opt
+
+- oi's Marshal (`go/arbace/oi/marshal.ae`, `UnmarshalBy`) keeps the objects it reads back (intern.c's `intern_alloc_obj`: blocks,
+  strings, float arrays, boxed floats and integers) and `allocInterned` (`ext_sys.ae`) counts them as intern.c allocates them: data of at
+  most Max_young_wosize words one minor block, counted once; more, a major block each. Each object is sampled by Gc.Memprof with the source
+  `Marshal` (the allocation record's third field) in its heap, its callbacks run once the value is read (`intern_end`). The light runtime
+  is unchanged (`statmemprof/intern` is a speed row there). `statmemprof/intern` passes at eval; `alloc_counts`' marshalling case agrees.
+- The C API on ci: `<caml/domain_state.h>`'s `Caml_state_opt`, NULL inside a stub's blocking section (`test/ocaml/capi/runtime.c`):
+  `c-api/test_c_thread_has_lock` and `_systhread` pass at eval and leave `:c-runtime-internals` there (the AOT levels keep them: the
+  light level runs no C stubs).

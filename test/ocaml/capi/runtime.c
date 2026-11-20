@@ -23,6 +23,7 @@
 #include "caml/blake2.h"
 #include "caml/misc.h"
 #include "caml/domain.h"
+#include "caml/domain_state.h"
 
 /* the natives (go/arbace/oicapi) */
 extern value __oi_alloc(mlsize_t wosize, tag_t tag);
@@ -236,10 +237,15 @@ void caml_fatal_error(const char *msg, ...)
   abort();
 }
 
-/* the runtime lock: oi's threads run one at a time already */
-void caml_enter_blocking_section(void) {}
-void caml_enter_blocking_section_no_pending(void) {}
-void caml_leave_blocking_section(void) {}
+/* the runtime lock: oi's threads run one at a time already, and a stub's blocking section releases nothing; it only marks the
+   thread outside the runtime, where Caml_state_opt is NULL (signals.c's caml_enter_blocking_section clears the domain's state) */
+static int blocking;
+struct caml_domain_state { int unused; };
+static struct caml_domain_state domain_state;
+caml_domain_state *caml_state_opt(void) { return blocking ? NULL : &domain_state; }
+void caml_enter_blocking_section(void) { blocking = 1; }
+void caml_enter_blocking_section_no_pending(void) { blocking = 1; }
+void caml_leave_blocking_section(void) { blocking = 0; }
 void caml_process_pending_actions(void) {}
 value caml_process_pending_actions_exn(void) { return Val_unit; }
 int caml_check_pending_actions(void) { return 0; }

@@ -418,7 +418,23 @@
     ^{:line 364 :tag (slice Value)} objs
     ^{:line 365 :tag int} nobjs
     ^{:line 366 :tag int} counter
-    ^bool closures))
+    ^bool closures
+    ^bool count
+    ^{:tag (slice internObj)} allocs))
+
+(go/type internObj "internObj is an object the reading made (intern.c's intern_alloc_obj): its wosize and its value.\n" (struct
+    ^int wosize
+    ^Value v))
+
+(go/func internWosize "internWosize is the wosize of an object read back as intern.c allocates it: a block's fields, a string's words
+with its padding, a float array's floats, a boxed float's word, a boxed integer's custom block (its operations and one word).\n" ^int [^Value v]
+  (type-switch [x v]
+    (case [(* Block)] (return (len (.-F x))))
+    (case [(* FloatArray)] (return (len (.-F x))))
+    (case [(* Bytes)] (return (+ (/ (len (.-B x)) 8) 1)))
+    (case [float64] (return 1))
+    (case [int32 int64 Nativeint] (return 2)))
+  0)
 
 
 ^{:go/end 373} (go/method check [^{:tag (* internState)} s ^int n]
@@ -473,6 +489,9 @@
 
 
 ^{:go/end 428} (go/method record [^{:tag (* internState)} s ^Value v]
+  (when (.-count s)
+    (when [w (internWosize v)] (> w 0)
+      (set! (.-allocs s) (append (.-allocs s) (lit internObj :wosize w :v v)))))
   (when (!= (.-objs s) nil)
     (when (>= (.-counter s) (.-nobjs s))
       (Failwith "input_value: too many objects"))
@@ -529,7 +548,11 @@
 
 
 ^{:go/end 496} (go/func UnmarshalValue "UnmarshalValue is caml_input_value_from_bytes b ofs: the value at ofs and the number of\nbytes it took (header and data).\n" [^{:tag (slice byte)} b ^int ofs] :results [Value int]
-  (let [s (addr (lit internState :src (subslice b ofs) :fun "input_val_from_string"))
+  (UnmarshalBy nil b ofs))
+
+(go/func UnmarshalBy "UnmarshalBy is UnmarshalValue read by the thread th: the objects it makes counted in Gc's words and sampled by
+Gc.Memprof with the source Marshal (allocInterned); a nil th counts nothing.\n" [^{:tag (* Thread)} th ^{:tag (slice byte)} b ^int ofs] :results [Value int]
+  (let [s (addr (lit internState :src (subslice b ofs) :fun "input_val_from_string" :count (!= th nil)))
       ^{:line 478} h (.parseHeader s)]
     (when (or (< (.-headerLen h) 0) (< (.-dataLen h) 0) (> (+ (.-headerLen h) (.-dataLen h)) (len (.-src s))))
       (Failwith "input_val_from_string: bad length"))
@@ -547,7 +570,10 @@
 
       (set! (.-objs s) (make (slice Value) (.-nobjs s))))
 
-    (return (.rec s) (+ (.-headerLen h) (.-dataLen h)))))
+    (let [v (.rec s)]
+      (when (!= th nil)
+        (allocInterned th (.-allocs s)))
+      (return v (+ (.-headerLen h) (.-dataLen h))))))
 
 
 (go/type internFrame (struct
@@ -915,8 +941,8 @@
           (len out))))
 
     ;; intern.c
-    (let [fromBytes ^{:go/end 721} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-          (let [(values v _) (UnmarshalValue (.-B (AsBytes (aget a 0))) (AsInt (aget a 1)))]
+    (let [fromBytes ^{:go/end 721} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+          (let [(values v _) (UnmarshalBy th (.-B (AsBytes (aget a 0))) (AsInt (aget a 1)))]
             ^{:line 720} v))]
 
       (r "caml_input_value_from_bytes" fromBytes)
