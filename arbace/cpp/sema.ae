@@ -1980,7 +1980,7 @@
         (swap! abi/*enums* assoc-in [id :nonneg] true)))
     t))
 
-(declare cx-friend-member-access!)
+(declare cx-friend-member-access! cx-friend-class-ns!)
 
 (defn- declare-class! [scope0 n]
   (let [nm (:name n)
@@ -2134,6 +2134,8 @@
                                                        ""))
                                            (and (nil? fd) (nil? (get-in k [:type :qualType])) (not-any? (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k)))
                                            (assoc :friend-unknown true)))
+                    ;; (queue 502: an unqualified elaborated friend class's namespace, cx-friend-class-ns!)
+                    (cx-friend-class-ns! cs id k fd)
                     ;; (queue 499: a friend declaration naming another class's inaccessible member function)
                     (cx-friend-member-access! cs id k fd)))
                 (binding [*member-access* @access] (declare-node! cs k))))))
@@ -4528,6 +4530,18 @@
                 (and (= :class (:kind s)) (:cls s)) (recur (:cls s) out)
                 :else nil))))))
 
+(defn- cx-tinst-context
+  "Queue 502 (the checker; 499-3 (a)): EffectiveContext of the body of a function template's specialization `f`
+  ([temp.inst]: its names are looked up and their access checked in the instantiation as in the template's definition,
+  [class.access]/2 with [temp.res.general]): the specialization's class and its enclosing classes, the function itself
+  for the friends that name it; nil (not judged) for a closure's or a local class's member, or a specialization a
+  deduction guide or an invented function stands for."
+  [f]
+  (when (and (not (:guide f)) (not (vector? (:tid (:tinst f)))))
+    (if-let [cid (:cls f)]
+      (when-let [rs (cx-enclosing-classes cid)] {:records rs :fn f})
+      {:records #{} :fn f})))
+
 (defn cx-context
   "EffectiveContext of the analysis context `ctx`: {:records :fn}, the classes the use is a member of (the function's
   class, or the class a member's initializer is analyzed in, with their enclosing classes) and the function; nil when
@@ -4539,20 +4553,52 @@
       ;; [class.access]/2's members and friends: the enclosing analysis's context, a generic lambda's specialization not
       ;; judged)
       (:lambda ctx) (when-let [e (:encl (:lambda ctx))] (cx-context e))
-      (and f (:tinst f)) nil
+      (and f (:tinst f)) (cx-tinst-context f)
       f (if-let [cid (:cls f)] (when-let [rs (cx-enclosing-classes cid)] {:records rs :fn f}) {:records #{} :fn f})
       :else (if-let [cid (or (:cx-member-of ctx) (:cls (:scope ctx)))] (when-let [rs (cx-enclosing-classes cid)] {:records rs}) {:records #{}}))))
 
+(defn- cx-ns-by-path
+  "Queue 502: the namespace scope of the path `p` ([:ns NAME] and [:anon] steps from the global scope), or nil."
+  [p]
+  (reduce (fn [s st] (if-let [m (and s (:names s))]
+                       (:scope (first (filter #(= :ns (:e %)) (.get ^java.util.HashMap m (str " ns " (if (= [:anon] st) "" (second st)))))))
+                       (reduced nil)))
+          *root* p))
+
+(defn- cx-friend-ns-miss?
+  "Queue 502 (the checker): whether the class `r`, named as the friend classes of `cl` are by name, is surely none of
+  them: every friend of that name an unqualified elaborated-type-specifier (cx-friend-class-ns! recorded its innermost
+  enclosing namespace's path), `r` a member of a namespace, and for each such scope neither that namespace (or one
+  nested in it, an inline namespace's member found there) nor a class or template of that name the namespace's own names
+  hold being `r`'s."
+  [cl r]
+  (let [nm (:name (abi/cls r))
+        ss (get (:friend-class-nss cl) nm)
+        rc (abi/cls r)
+        rs (loop [s (:outer rc)] (if (and s (= :tparams (:kind s))) (recur (:parent s)) s))]
+    (boolean
+      (and (seq ss) (not-any? #{:any} ss) rs (= :ns (:kind rs))
+           (let [rp (vec (:path rs))]
+             (not-any? (fn [sp]
+                         (or (= sp (vec (take (count sp) rp)))
+                             (let [s (cx-ns-by-path sp)]
+                               (or (nil? s)
+                                   (some (fn [e] (or (and (= :type (:e e)) (= r (class-id (:ty e))))
+                                                     (and (= :tmpl (:e e)) (:tmpl rc) (= (:id e) (:tmpl rc)))))
+                                         (.get ^java.util.HashMap (:names s) nm))))))
+                       ss))))))
+
 (defn- cx-friend-of?
   "GetFriendKind: whether class `c` may befriend the context `cx`: a friend function of its function's name, a friend
-  class among its classes by name, or a friend the slice did not classify."
+  class among its classes by name (queue 502: not one an unqualified friend declaration surely does not name,
+  cx-friend-ns-miss?), or a friend the slice did not classify."
   [c cx]
   (let [cl (abi/cls c)]
     (boolean (or (:friend-unknown cl)
                  (and (:fn cx) (contains? (:friend-fns cl) (:name (:fn cx))))
                  (and (:friend-classes cl)
                       (or (contains? (:friend-class-names cl) "")
-                          (some #(contains? (:friend-class-names cl) (:name (abi/cls %))) (:records cx))))))))
+                          (some #(and (contains? (:friend-class-names cl) (:name (abi/cls %))) (not (cx-friend-ns-miss? cl %))) (:records cx))))))))
 
 (defn- cx-member-ok?
   "HasAccess ([class.access]/2, [class.protected]): a member of class `nc` with access `a` (as a member of nc) named in
@@ -4608,6 +4654,23 @@
                     (or (direct i j a0)
                         (boolean (some (fn [k] (and (ok? k j a0) (base-ok? i k))) (range (inc i) (inc j))))))]
           (ok? 0 (dec (count cs)) a)))
+
+(defn- cx-friend-class-ns!
+  "Queue 502 (the checker): a friend class declaration `k` of class `id` (its scope `cs`; `fd` nil): an unqualified
+  elaborated-type-specifier (`friend struct B;`, `template<class U> friend struct B;`) names the class B of the innermost
+  enclosing namespace, declared there when not yet ([namespace.memdef]/3, [dcl.type.elab]/4: no scope outside that
+  namespace is considered; template/pr59930-1.C's N::B, not ::B): that namespace's path recorded under the name in
+  :friend-class-nss; any other friend class (qualified, a simple-type-specifier `friend B;`, a local befriending class)
+  records :any, which cx-friend-ns-miss? never judges."
+  [cs id k fd]
+  (when (and (checking?) (nil? fd))
+    (let [ct (some (fn [x] (when (= "ClassTemplateDecl" (:kind x)) x)) (:inner k))
+          qt (str (get-in k [:type :qualType]))
+          nm (or (:name ct) (some-> qt (str/replace #"<.*$" "") (str/replace #"^\s*(?:class|struct|union)\s+" "") (str/split #"::") last str/trim))
+          elab? (or ct (re-find #"^\s*(?:class|struct|union)\s+[A-Za-z_][A-Za-z_0-9]*\s*(?:<.*>)?\s*$" qt))
+          ns (loop [s cs] (cond (nil? s) nil (= :ns (:kind s)) s (#{:class :tparams} (:kind s)) (recur (:parent s)) :else nil))]
+      (when (and nm (seq nm))
+        (abi/update-cls! id update-in [:friend-class-nss nm] (fnil conj []) (if (and elab? ns (not (str/includes? qt "::"))) (vec (:path ns)) :any))))))
 
 (defn- cx-friend-member-access!
   "Queue 499 (the checker): a friend declaration `k` of the class `id` (its scope `cs`) whose function `fd` is a member
@@ -5743,6 +5806,36 @@
       (when (and c0 (every? (fn [[c _]] (:union (abi/cls c))) more) (seq more))
         (check-access! ctx c0 nm (:access (nth (:fields (abi/cls c0)) i0 nil)) nc obj)))))
 
+(defn- cx-mptr-access!
+  "Queue 502 (the checker): &C::m, a pointer to member ([expr.unary.op]/4), names the member m through the naming class C
+  (the qualifier's), so its access is checked there as any qualified name's ([class.access]/1-2, [class.access.base]/5):
+  a non-static data member inaccessible as a member of C; a member function when every member function of that name
+  the lookup `es` finds is inaccessible (overload resolution picks among them later, [over.over]); a protected member's
+  object rule ([class.protected]) not applied, so no false error. GCC's \"'void base::foo()' is private within this
+  context\" (template/access34.C, in a class template's member, a member template's specialization and an out-of-line
+  member alike)."
+  [ctx es q g nm]
+  (when (and (checking?) (seq es))
+    (when-let [qc (try (class-id (:ty (type-entity (lookup-qualified (:scope ctx) q g)))) (catch arbace.lang.ExceptionInfo _ nil))]
+      (let [e (first es)]
+        (case (:e e)
+          :field (let [a (:access (nth (:fields (abi/cls (:cls e))) (:i e) nil))]
+                   (when (#{:private :protected} a) (cx-access! ctx (:cls e) nm a qc nil)))
+          :fn (let [fs (keep #(when (= :fn (:e %)) (fnd (:id %))) es)]
+                (when (and (seq fs) (every? #(and (:cls %) (not (:static %)) (#{:private :protected} (:access %))) fs))
+                  (when-let [cx (cx-context ctx)]
+                    (when (every? #(false? (cx-access-ok? cx (:cls %) (:access %) (if (or (= qc (:cls %)) (abi/derived-from? qc (:cls %))) qc (:cls %)) nil)) fs)
+                      (fail :access "'" nm "' is a " (name (:access (first fs))) " member of '" (:name (abi/cls (:cls (first fs)))) "'")))))
+          nil)))))
+
+(defn- cx-injected-qualifier?
+  "Queue 502 (the checker): whether the one-name qualifier `q` of o.Q::m may name the class `qcid` by its
+  injected-class-name, found as a member of o's class ([basic.lookup.qual]/1, [class.access.base]/5): its name is the
+  class's own. A template parameter (lookup/scoped15.C's `D{}.T::a` in g<A>, judged since specializations are) or a
+  typedef name names the class directly, with no base's access to check."
+  [q qcid]
+  (= (str (first q)) (str (:name (abi/cls qcid)))))
+
 (defn- member-expr [ctx n]
   (let [[objn] (kids n)
         o (analyze ctx objn)
@@ -5768,6 +5861,7 @@
     ;; (the rest of CP313 (a): o.B::m names B by its injected-class-name found in o's class, a member of it through the
     ;; bases, [basic.lookup.qual]/1 and [class.access.base]/5: inaccessible through a private base; ::B::m does not)
     (when (and (checking?) qcid (not= qcid cid) (= 1 (count q)) (abi/derived-from? cid qcid)
+               (cx-injected-qualifier? q qcid)
                (not (re-find #"(?:\.|->)\s*::" (or (node-text n) ""))))
       (cx-access! ctx qcid (first q) :public cid nil))
     (let [[fcid fids e] (if (str/starts-with? (str nm) "~")
@@ -7079,6 +7173,8 @@
          (when (seq q)
            (let [es (lookup-qualified (:scope ctx) (conj q (get-in k [:referencedDecl :name])) g)
                  e (first es)]
+             ;; (queue 502: the member's access through the qualifier's class, cx-mptr-access!)
+             (cx-mptr-access! ctx es q g (get-in k [:referencedDecl :name]))
              (case (:e e)
                :field (let [qc (class-id (:ty (type-entity (lookup-qualified (:scope ctx) q g))))
                             f (nth (:fields (abi/cls (:cls e))) (:i e))]
