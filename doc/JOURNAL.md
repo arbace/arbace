@@ -13821,3 +13821,44 @@ Alternatives considered:
 - A hand-written golden file for T15892 (961 KB): not needed under D435-2 (a).
 - Counting T7861 out as unspecified: not done. Its text is GHC's implementation's and deterministic, a defined output not derived,
   as the user's rule keeps such cases.
+
+## 2026-11-20: hs-judge-1120, round 5: Haskell's last 61 recorded judge cases
+
+On the main session's ruling (T7861 implementation-defined, as Java's HotSpot listings were) and its five items:
+
+1. T7861 is out of the judge's cases. `na.tsv` gains the kind `implementation-defined`. Its evidence, checked by `bin/hsi golden`,
+   is all.T's `expect_broken` together with GHC's record differing from the shipped files. Controls: conc064, FMA_ConstantFold and
+   cacheprof, each listed as implementation-defined, fail.
+2. The four Setup scripts get the own interface level:
+   - `arbace/repr/haskell/target.ae`: `package-deps` of a `PKG-Setup` by its corpus entry's `-package` flags.
+   - `bin/lib/repr-haskell/lib-check`: a Setup's `Setup.lhs` is compiled as `Main` of the unit `main`, as cabal-install compiles
+     it. It has no GHC interface to judge, so no lib-check control.
+   - `arbace/repr/haskell/libcheck.ae`: `boot-dump` gives a literate module no boot file.
+   - Run, one process at a time, each under 1.75 GiB: Cabal's own pools (parsec 202 s, Cabal-syntax 727 s, Cabal 1,024 s), then the
+     four Setups (111-181 s), then the round trip beside process. The tree level is 12 of 12 and the own interfaces 12 of 12 in
+     both layouts.
+   - The four Setup interfaces are byte-identical (`main :: IO ()`), which made the old control blind among them.
+     `test/haskell/iface_own.ae` now pairs the last printed unit with the first unit whose original differs. A Setup-only run
+     reports "no unit's original differs" as a problem (the control, run).
+   - The units file is now 1,344. haskell-iface-own's lists, loop and `--only` gain the four.
+3. `bin/repr-haskell test`: haskell-read-essential runs 18 checks, each judged by its own reference: the spec's samples, the
+   hand-written `Shape.ae`, the stated interface outcomes, the originals' bytes, `layout/expected/`, and the forms' stated facts.
+   Its inputs are the helper's recorded dumps, which belong to the read stage. Its 22 GHC-judged checks are the oracle tier's. The
+   20 recorded cases become 18 own.
+4. The 29 NofibUtils programs: 23 ship a .faststdout. Six ship none and print nothing on stdout (fem, fluid, mkhprog, pic and
+   mandel2 force a hash; hidden writes prompts to stderr, the shipped hidden.stderr). nofib's driver takes a missing expected file
+   as an empty one (runstdtest's `-o1` default). own-verdicts lists a nofib program whose GHC record holds no completed run
+   (`:no-build`, 137, 152) and that is not n/a by nofib's own expected output alone.
+5. That rule also covers fannkuch-redux (the shipped faststdout, the benchmark's N=10 result) and minimax (it prints nothing:
+   `length (prog s)` forced). cacheprof stays recorded. Its shipped 1.67 MB stdout is no output of the program on its shipped stdin
+   (GHC's run: 56,927 bytes), and none of nofib's three inputs fits. An own verdict needs that file's input, or a 57 KB golden file
+   from the annotator's logic: not light.
+
+Records:
+- `bin/hsi own-verdicts --record`: 877 of 909. `--check` is current.
+- `bin/hsi golden --oracle --control`: 1 left, 31 n/a, 75 of 75 controls fail.
+- `bin/hsi divergences`: 815 pass, 94 classed, 0 not.
+- `bin/reap --record`: unchanged.
+- independence.edn's :haskell :judge {:self 7757 :recorded 1} (7,758): judge 0.99607 -> 0.99994.
+- `bin/crops-score --record`: Haskell's independence 79.92 -> 79.999 (floor 79; eval and AOT at 0.5 hold it).
+- `--judge --strict` and `bin/records-check`: 0 problems.

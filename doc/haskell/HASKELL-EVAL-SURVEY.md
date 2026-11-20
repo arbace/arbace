@@ -2728,6 +2728,46 @@ interface cases leave the judge's cases by the user's rule (its tree and text ca
 1,340 of the 1,345 units; the four `Setup.lhs` scripts stay on GHC's recorded interfaces (8 cases). The judge (7,700 + 0.5 x 61) /
 7,761 = 0.99607; Haskell's independence 79.92.
 
+Round 5, the last 61 (the main session's ruling of 2026-11-20):
+- T7861 leaves the judge's cases as implementation-defined, as Java's HotSpot listings did. Its expected text is GHC's typechecker's
+  deferred error. `na.tsv` gains the kind `implementation-defined`. Its evidence, which `bin/hsi golden` checks, is all.T's
+  `expect_broken` together with GHC's recorded run differing from the shipped files. Controls: conc064, FMA_ConstantFold and
+  cacheprof, each listed as implementation-defined, fail it.
+- The 29 NofibUtils programs, fannkuch-redux and minimax are judged by nofib's own expected output, as its driver takes it
+  (`mk/target.mk`, `runstdtest`): NAME.faststdout, else NAME.stdout, else an empty stdout (-o1's default `/dev/null`); the stderr
+  likewise; status 0.
+  - 23 of them ship a .faststdout. The six that ship none print nothing: fem, fluid, mkhprog, pic and mandel2 evaluate a
+    benchmark's hash or `seq` it, and hidden writes its prompts to stderr, the shipped hidden.stderr.
+  - fannkuch-redux's faststdout is the benchmark's N=10 result (73196, Pfannkuchen(10) = 38). minimax's main forces `length
+    (prog s)` and prints nothing.
+  - own-verdicts lists these by nofib's files alone: a nofib program whose GHC record holds no completed run (`:no-build`, or
+    killed at 137 or 152) and that is not n/a. The 28 n/a programs are not listed.
+- `bin/repr-haskell test`'s cases. The step haskell-read-essential runs 18 checks. Each is judged by its own reference:
+  - the spec's samples, 328 (`reader-samples.out`);
+  - the hand-written worked example (`sample/Shape.ae`, 20 forms at their lines);
+  - the stated interface outcomes (equal under `:lines`, not `:full`; a changed value differs);
+  - the originals' bytes (mode `:full`: Shape.hs and Space.hs, R6's seven, HR26's module view);
+  - `layout/expected/`'s texts (Shape.hs and Layout.hs);
+  - the stated facts of the forms (Incl's `:hs/file`, R6's kinds, no `:view-markers`).
+  Its inputs are the helper's recorded dumps of the originals, which belong to the read stage, not the judge's. Its 22 GHC-judged
+  checks (GHC reading the print, class D) are the oracle tier's `haskell-test-oracle`. The 20 recorded cases are these 18, own.
+- The four Setup scripts get the own interface level. arbace.repr.haskell.target's `package-deps` takes a `PKG-Setup` through its
+  corpus entry's `-package` flags (base, Cabal, and theirs below). lib-check compiles a Setup's literate `Setup.lhs` as the module
+  `Main` of the unit `main`, as cabal-install compiles it. A Setup's Main has no GHC interface to judge, so lib-check runs no
+  control for it. libcheck's `boot-dump` gives a literate module no boot file.
+  - Cabal's own pools came first: parsec 202 s, Cabal-syntax 727 s, Cabal 1,024 s, each peaking at 1.72-1.74 GiB.
+  - Then the four Setups: 111-181 s each, every one `main :: IO ()`, byte-identical to each other.
+  - The round trip: the tree level 4 of 4 in both layouts, and the own interfaces 4 of 4 equal in braces and in the layout.
+  - Because the four interfaces are identical, the old control (the first unit's printed interface against the second's
+    original) was blind among them. `iface_own.ae` now pairs the run's last printed unit with the first unit whose original
+    differs under the normalization; a run with no such pair is a problem. The Setups were rerun beside process, so the control
+    compares text-Setup's printed interface with process's.
+  - The units file gains the four (1,344). haskell-iface-own's lists, loop and `--only` gain them.
+- Left recorded: gc's cacheprof, one case. Its shipped cacheprof.stdout (1.67 MB) is no output of the shipped program on the
+  shipped cacheprof.stdin: GHC's run of it, with the hard-coded `--level2`, prints 56,927 bytes. None of nofib's three cacheprof
+  inputs (1.1, 8.3 and 41 KB) scales to it. An own verdict needs the input that file was made from, or a golden file for the 8.3
+  KB input written from cacheprof's annotator (57 KB of assembly): neither is light.
+
 ## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
 
 (The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
