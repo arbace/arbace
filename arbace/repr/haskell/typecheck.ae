@@ -524,7 +524,12 @@
       class (let [n (strs (nth t 1)) info (nth t 5 {})
                   ;; the class's kind variables erased as its predicates' kind arguments are (HF9)
                   tvs (vec (drop (or (some-> *kind-arity* deref (get n)) 0) (:tvs info)))
-                  supers (vec (keep (fn [f] (let [p (conv-type f)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (nth t 4)))]
+                  ;; (a quantified superclass too, [:qc [polytype]]: a field of the dictionary, its selector $pN; base's
+                  ;; Eq1's forall a. Eq a => Eq (f a), Bifunctor's forall a. Functor (p a))
+                  supers (vec (keep (fn [f] (let [p (conv-type f)]
+                                              (cond (= :tc (first p)) [(second p) (nth p 2)]
+                                                    (and (= :forall (first p)) (= :tc (first (nth p 3)))) [:qc [p]])))
+                                    (nth t 4)))]
               (doseq [[mn _ mty] (nth t 3)] (swap! *genv* assoc (strs mn) (conv-type mty)))
               (swap! *classes* assoc n {:tvs tvs :supers supers :methods (mapv (comp strs first) (nth t 3))
                                         ;; every superclass, a quantified one too (MonadTrans's): the dictionary's fields
@@ -903,7 +908,7 @@
                           hc (when (= :tc (first h)) (second h))
                           hi (when hc (get @*classes* hc))]
                       (keep-indexed (fn [i [sc sts]]
-                                     (when-not (= :cvar sc)
+                                     (when-not (#{:cvar :qc} sc)
                                      (let [sh [:tc sc (mapv #(subst (zipmap (:tvs hi) (nth h 2)) %) sts)]
                                            sel (fn [d] (list 'app (list 'v (ext-name "var" (nmod hc) (str "$p" (+ i (sc-base hc)) (occ hc)))) [d]))
                                            ps (mapv dict-param ctx)]
@@ -923,7 +928,7 @@
                                     (let [x (list 'lv (str "$d" (occ sc)) (str "ev" (swap! *counter* inc)))]
                                       (swap! *ev-binds* conj [x sel])
                                       (swap! ev-binders conj x)
-                                      (when *ltypes* (swap! *ltypes* assoc x (if (= :cvar sc) (first (second p)) [:tc sc (second p)])))
+                                      (when *ltypes* (swap! *ltypes* assoc x (if (#{:cvar :qc} sc) (first (second p)) [:tc sc (second p)])))
                                       [p x])
                                     [p sel])))
                               (:supers info)))]
@@ -1287,7 +1292,14 @@
                    (if (or (coercible-pred? [(second hd) (nth hd 2)]) (eq-pred? [(second hd) (nth hd 2)]))
                      (if (coercible-pred? [(second hd) (nth hd 2)]) (list 'co :coercible) (list 'co))
                    (solve-pred [(second hd) (nth hd 2)] (into (vec givens) (super-closure (mapv vector preds params))) (inc depth))))]
-        (when term (if (seq params) (list 'lam params term) term)))
+        ;; (eta-reduced when its head is a dictionary function applied to the parameters alone: Eq1 Complex's superclass
+        ;; \d -> $fEqComplex d is $fEqComplex, as the -O0 Simplifier's eta reduction leaves GHC's evidence)
+        (when term
+          (cond (empty? params) term
+                (and (seq? term) (= 'app (first term)) (= params (vec (nth term 2)))
+                     (not-any? (set params) (tree-seq coll? seq (second term))))
+                (second term)
+                :else (list 'lam params term))))
       :else
     (if (= :cvar c)
       ;; a variable constraint known by now (cls := KnownNat n): its class's
@@ -4873,7 +4885,7 @@
       (swap! *classes* assoc-in [cn :kind] (reduce (fn [acc k] (fn-ty k acc)) constraint-kind (reverse (get ckinds cn)))))
     (doseq [[cn ci] classes]
       (binding [*kind-env* (atom (zipmap (:tvs ci) (get ckinds cn)))]
-        (doseq [[c ts] (:supers ci)] (soft-unify (kind-of (if (= :cvar c) (first ts) [:tc c ts])) constraint-kind))
+        (doseq [[c ts] (:supers ci) :when (not= :qc c)] (soft-unify (kind-of (if (= :cvar c) (first ts) [:tc c ts])) constraint-kind))
         (doseq [mn (:methods ci) :let [t (get @*genv* mn)] :when (and (vector? t) (= :forall (first t)))]
           (soft-unify (kind-of (nth t 3)) [:tc type-tc [(fresh-meta)]]))))
     (doseq [[n info] own c (:cons info) :let [t (get @*genv* c)] :when t]
@@ -5323,8 +5335,12 @@
         tvs (zipmap tvn (map (fn [x] [:tv x]) names))
         ;; HF10-P48 (a): a variable superclass (UndecidableSuperClasses' class c => IdCt c; the constraint tuples'
         ;; class (c1, c2) => CTuple2 c1 c2) is [:cvar [t]], a field of the dictionary as GHC's (its selector $p1IdCt)
+        ;; (GHC's quantified superclass, QuantifiedConstraints' class (forall a. Eq a => Eq (f a)) => Eq1 f: [:qc [polytype]],
+        ;; a field of the dictionary as any superclass, $p1Eq1 its selector)
         supers (vec (keep (fn [c] (let [p (hs-type tvs c)]
-                                    (case (first p) :tc [(second p) (nth p 2)] :tv [:cvar [p]] nil)))
+                                    (case (first p) :tc [(second p) (nth p 2)] :tv [:cvar [p]]
+                                      :forall (when (qc-head p) [:qc [p]])
+                                      nil)))
                           (let [c (arg d 2)] (when (and (seq? c) (= 'Just (first c))) (lval (second c))))))
         methods (atom []) dsigs (atom {})
         ;; the functional dependencies by parameter position, as an interface's are read (add-things!)
@@ -6507,7 +6523,7 @@
                           (for [[n info] cl]
                             (str "(class " (name-str n) " [] ["
                                  (str/join " " (for [mn (:methods info)] (str "(" (name-str mn) " \"\" " (type-form (get (:types r) mn)) ")")))
-                                 "] [" (str/join " " (for [[c ts] (:supers info)] (str "(tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "])")))
+                                 "] [" (str/join " " (for [[c ts] (:supers info)] (if (= :qc c) (type-form (first ts)) (str "(tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "])"))))
                                  "] {:tvs " (pr-str (:tvs info)) " :defaults ["
                                  (str/join " " (for [[mn d] (:defaults info)] (str "[" (name-str mn) " " (name-str d) "]"))) "]"
                                  ;; HF10-P33 (a): the default signatures, as the own interfaces carry them
