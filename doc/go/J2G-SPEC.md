@@ -332,7 +332,8 @@ translation each, small beside the world. So:
   7,946 classes, `ARBACE_MEMPROFILE` with `J2G_MEM_EXIT=load`; 2.2 GB of objects sampled in use):
   - the vectors built through transients (`mapv`, `vec`, `into`), each keeping the transient's copy
     of the empty root, 32 slots (512 bytes in Go's interface words) and its node: 0.44 GB, a fifth.
-    The runtime keeps `EMPTY_NODE` since (doc/VENDOR-NOTES.md, hand change 36): in j2g's runs on an
+    The runtime keeps `EMPTY_NODE` since (doc/VENDOR-NOTES.md, hand change 36; 282cdf320, held for a gate, not
+    merged with this section in n-merge-1120b): in j2g's runs on an
     executable built from that runtime (the gate's, whose `j2g` javac's tool and the programs' builds
     run on; stage 0 after the next re-seed);
   - the Java forms as read (the reader's lists, symbols, their position maps): about 0.5 GB, a

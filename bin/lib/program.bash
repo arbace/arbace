@@ -96,7 +96,8 @@ host_compile() {
   (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
   (when (seq (:failed r)) (shutdown-agents) (System/exit 1)))
 ' "$nss" "$out"     > "$dir/host-compile$variant.ae"
-  (cd "$root" && GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 \
+  local mem; mem=$(compile_memlimit)
+  (cd "$root" && { [ -z "$mem" ] || export "$mem"; } && GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 \
      ARBACE_PATH=${HOST_COMPILE_PATH:+$HOST_COMPILE_PATH:}$root ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$dir/host-compile$variant.image \
      "$host" "$dir/host-compile$variant.ae") > "$dir/host-compile$variant.log" 2>&1 \
     || { tail -20 "$dir/host-compile$variant.log" >&2; echo "arbace-go: the host's compilation failed" >&2; return 2; }
@@ -106,6 +107,18 @@ host_compile() {
   fi
   [ -f "$out/packages.edn" ] || { echo "arbace-go: the host compiled nothing ($dir/host-compile$variant.log)" >&2; return 2; }
   echo "   compiled: $(since "$t0")" >&2
+}
+
+# compile_memlimit: GOMEMLIMIT=... for the build's Arbace processes that prepare and compile the namespaces
+# (host_compile, bin/arbace-go's prepare and reader_compile): under GOGC 400 alone the host's compilation of
+# javac's tool's namespaces reached 29.9 GiB (2026-11-20), whose live heap is at most about a fifth of that
+# (GOGC 400: a heap goal five times the live heap; not measured apart). In bounded steps (doc/go/BUILD.md,
+# "The build in bounded steps") ARBACE_COMPILE_GOMEMLIMIT, default 16GiB capped by the gate's admission
+# (bin/gate-policy mem); nothing with ARBACE_BUILD_CHUNKS=0 (the environment's, as before). Printed as an env
+# word (empty: none)
+compile_memlimit() {
+  [ "${ARBACE_BUILD_CHUNKS:-1}" != 0 ] || return 0
+  echo "GOMEMLIMIT=${ARBACE_COMPILE_GOMEMLIMIT:-$("$root/bin/gate-policy" mem 16GiB)}"
 }
 
 host_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac; }

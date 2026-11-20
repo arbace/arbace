@@ -162,7 +162,12 @@ F=$T/fake; mkdir -p "$F/bin/lib"; cp "$R/bin/build-go" "$F/bin/build-go"
 : > "$F/bin/lib/tmpdir.bash"; : > "$F/bin/lib/renamed-env.bash"
 cat > "$F/bin/lib/repr-go-host.bash" <<'EOF'
 repr_go_exec() { if flock -n -x "$PC/.lock" true; then echo free; else echo held; fi; exit 0; }
+# build-chunks-1120: the printer runs as a child (repr_go_run) and go build after it (go_build_plan, bin/gate-policy)
+repr_go_run() { repr_go_exec "$@"; }
 EOF
+echo 'go_build_plan() { :; }' > "$F/bin/lib/go-build.bash"
+printf '#!/bin/sh\necho "$2"\n' > "$F/bin/gate-policy"; chmod +x "$F/bin/gate-policy"
+export TMPDIR=${TMPDIR:-$T}
 check "bin/build-go --print-cache DIR: DIR/.lock held while it builds" "$(PC=$T/pc bash "$F/bin/build-go" --print-cache "$T/pc" x 2>&1)" held
 check "control: bin/build-go without --print-cache holds no lock" "$(mkdir -p "$T/pc2"; PC=$T/pc2 bash "$F/bin/build-go" x 2>&1)" free
 
