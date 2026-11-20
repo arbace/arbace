@@ -24,6 +24,7 @@
   (:require [arbace.repr.llvm :as llvm]
             [arbace.rust.back.check :as chk]
             [arbace.rust.back.codegen :as cg]
+            [arbace.rust.back.inline :as inl]
             [arbace.string :as str])
   (:import [java.io File BufferedReader FileReader]))
 
@@ -373,12 +374,27 @@
                     theirs (ir-forms std crate (keep (fn [[_ b]] (:symbol b)) (:bodies m)))
                     gl (cg/new-globals (:langsyms m))
                     lt (into {} (:layouts m))
-                    _ (cg/set-def-symbols! gl (for [[_ b] (:bodies m) :when b] (assoc b :form :body)))
+                    inl-bodies (vec (keep #(nth % 3) (:inline-bodies m)))
+                    _ (cg/set-def-symbols! gl (for [b (concat (keep second (:bodies m)) inl-bodies)] (assoc b :form :body)))
                     ours (vec (for [[d b why] (:bodies m)]
                                 (if b
                                   (try [d (:symbol b) (cg/codegen-fn (assoc b :form :body) lt gl) nil]
                                        (catch Throwable e [d (:symbol b) nil (str "codegen: " (or (:codegen/unsupported (ex-data e)) (.getMessage e)))]))
                                   [d nil nil why])))
+                    ;; C6-4: LLVM's -O0 pipeline, the always-inliner (arbace.rust.back.inline): the `#[inline(always)]` callees
+                    ;; codegen'd and inlined into the items (LIB_UNIT_INLINE=0: not); an item calling one the build lacks refused
+                    ours (if (= "0" (System/getenv "LIB_UNIT_INLINE"))
+                           ours
+                           (let [inl-defs (vec (keep #(try (cg/codegen-fn (assoc % :form :body) lt gl) (catch Throwable _ nil)) inl-bodies))
+                                 always (set (map second inl-defs))
+                                 missing (set (for [[d args sym b] (:inline-bodies m) :when (and sym (not (contains? always (symbol "g" sym))))] (symbol "g" sym)))
+                                 module (inl/inline-module (concat (keep #(nth % 2) ours) inl-defs) always)
+                                 by (into {} (map (juxt second identity) module))]
+                             (vec (for [[d sym f why :as o] ours]
+                                    (cond (nil? f) o
+                                          (some missing (inl/callees f)) [d sym nil (str "an #[inline(always)] callee not built: "
+                                                                                       (first (filter missing (inl/callees f))))]
+                                          :else [d sym (get by (second f) f) why])))))
                     our-gm (chk/global-map (cg/module-extras gl))
                     rows (judge ours our-gm theirs)
                     ctl (control ours our-gm theirs)]

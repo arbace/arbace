@@ -1,0 +1,489 @@
+;; C4-1 (a) (doc/rust/FRONTEND-SURVEY.md, "As built: C4-1, std's names assembled natively"): std's, core's and alloc's names
+;; as the helper's --std-names writes them (tools/rsdump/front.rs' std_names: rustc's module_children of every public module
+;; reached from the three crates' roots, the bang macros' definitions, the reached types' generics, the aliases' types, the
+;; traits' supertraits, the lang items, the doc(hidden) modules and re-exports), made from the crates' own sources: each
+;; module file expanded by the native expansion, its items and imports read from the expanded tree (rustc_resolve's
+;; build_reduced_graph), the imports resolved across the crates to a fixpoint (rustc_resolve/src/imports.rs, single and glob
+;; imports, visibility), the generics, aliases and supertraits from the crates' native interface passes. rustc is
+;; dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.std-names
+  "std's names natively (C4-1 (a)):
+
+    scan CRATE LIB MODULES INDEX OUT [NAMES-FILE]   each module file of CRATE expanded (its macros the crate's own, its
+                                                   dependencies' from NAMES-FILE's names/macro), its items, imports, macros,
+                                                   lang items written to OUT
+    assemble OUT IFACE NATIVE-MAPS SCAN...         the scans' imports resolved, the reached modules written as std-names
+                                                   forms (generics and supertraits from IFACE, aliases from the native maps,
+                                                   a comma-separated list)
+    compare HELPER NATIVE                          fact by fact, per kind of form"
+  (:require [arbace.rust.front.core-check :as cc]
+            [arbace.rust.front.expand :as ex]
+            [arbace.rust.front.resolve :as resolve]
+            [arbace.rust.front.collect :as collect]
+            [arbace.rust.front.lower :as lower]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+(defn- head [x] (when (seq? x) (first x)))
+;; a raw identifier's name without its `r#` (rustc's Symbol: `macro_rules! r#try` is core::macros::try)
+(defn- id-name [x] (when (and (seq? x) (= 'id (first x))) (let [^String n (second x)] (if (str/starts-with? n "r#") (subs n 2) n))))
+(defn- id-ctxt [x] (if (and (seq? x) (= 'id (first x))) (nth x 2 0) 0))
+(defn- some-val [x] (when (and (seq? x) (= 'Some (first x))) (second x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Attributes (the expanded tree's)
+
+(defn- attr-name [a] (let [k (fget a :kind)] (when (= 'Normal (head k)) (#'lower/attr-path a))))
+(defn- attr-str [attrs nm] (some #(when (= nm (attr-name %)) (#'lower/attr-eq-str %)) attrs))
+(defn- attr? [attrs nm] (some #(= nm (attr-name %)) attrs))
+(defn- doc-hidden? [attrs] (boolean (some #(and (= "doc" (attr-name %)) (some #{"hidden"} (#'lower/attr-arg-words %))) attrs)))
+
+(defn- vis-of
+  "rustc's visibility of an item: :pub, :restricted (pub(crate), pub(super), pub(in ..)), nil (private)"
+  [it]
+  (let [k (fget (fget it :vis) :kind)] (cond (= 'Public k) :pub (= 'Restricted (head k)) :restricted :else nil)))
+
+;; rustc_builtin_macros/src/lib.rs' register_attr! and register_derive!: a builtin macro's kind (MacroKinds' ATTR 2, DERIVE 4;
+;; the rest bang, 1)
+(def ^:private builtin-attrs
+  #{"alloc_error_handler" "autodiff_forward" "autodiff_reverse" "bench" "cfg_accessible" "cfg_eval" "contracts_ensures"
+    "contracts_requires" "core_contract" "define_opaque" "derive" "derive_const" "eii" "eii_declaration" "unsafe_eii"
+    "global_allocator" "test" "test_case" "offload_kernel"})
+(def ^:private builtin-derives
+  #{"Clone" "ConstParamTy" "CoercePointee" "Copy" "Debug" "Default" "Eq" "Hash" "Ord" "PartialEq" "PartialOrd"
+    "UnsizedConstParamTy" "From" "CoerceShared" "Reborrow"})
+
+(defn- macro-kind [nm builtin?]
+  (str "Macro(MacroKinds(" (cond (and builtin? (builtin-derives nm)) 4 (and builtin? (builtin-attrs nm)) 2 :else 1) "))"))
+
+;; ---------------------------------------------------------------------------------------------
+;; The scan: a module file's expanded items
+
+(defn- use-leaves
+  "A use tree's leaves: [{:segs [[name crate-of-$crate] ...] :rename R :glob B :self-only B}]"
+  [tree prefix dollar]
+  (let [segs (into prefix (map (fn [s] (let [i (fget s :ident) nm (id-name i)] [nm (when (= "$crate" nm) (dollar (id-ctxt i)))]))
+                               (fget (fget tree :prefix) :segments)))
+        k (fget tree :kind)]
+    (case (head k)
+      Simple (let [rn (id-name (some-val (second k)))
+                   self? (= "self" (first (peek segs)))]
+               [{:segs (if self? (pop segs) segs) :rename rn :self-only self?}])
+      Glob [{:segs segs :glob true}]
+      Nested (vec (mapcat (fn [t] (use-leaves (if (= 'tuple (head t)) (second t) t) segs dollar)) (fget k :items)))
+      [])))
+
+(defn- ctor-of [data] (case (head data) Tuple "Fn" Unit "Const" nil))
+
+(defn- fields-pub? [data]
+  (case (head data)
+    Tuple (every? #(= 'Public (fget (fget % :vis) :kind)) (second data))
+    Struct (every? #(= 'Public (fget (fget % :vis) :kind)) (fget data :fields))
+    true))
+
+(def ^:dynamic *raw*
+  "true while a module file is scanned unexpanded (its expansion failed): its items' #[cfg] evaluated here, as the expansion
+  would have"
+  false)
+
+(defn- scan-items
+  "The items of module M (path), its inline modules' too, into ACC (atom): {:mods {path {:kind :defs [..] :imports [..]
+  :hidden B :crate C}} :lang {name path} :traits {path {:paren-sugar :auto}} :macros [{:path :name :info :body}]}"
+  [acc m items crate dollar rel-file]
+  (let [add-def! (fn [mp kind d] (swap! acc update-in [:mods mp] (fn [e] (update (or e {:kind kind :defs [] :imports [] :crate crate}) :defs conj d))))
+        ensure! (fn [mp kind hidden] (swap! acc update-in [:mods mp] (fn [e] (cond-> (or e {:kind kind :defs [] :imports [] :crate crate})
+                                                                                hidden (assoc :hidden true)))))
+        lang! (fn [attrs p]
+                (when-let [l (attr-str attrs "lang")] (swap! acc assoc-in [:lang l] p))
+                ;; #[panic_handler] is the lang item panic_impl (rustc_passes' lang items: the attribute's own symbol)
+                (when (attr? attrs "panic_handler") (swap! acc assoc-in [:lang "panic_impl"] p)))
+        impls (atom [])]
+    (ensure! m "Mod" false)
+    (doseq [[i it] (map-indexed vector items)
+            :let [k (fget it :kind) attrs (fget it :attrs) vis (vis-of it)]
+            :when (and (seq? k) (or (not *raw*) (#'cc/cfg-on? it)))]
+      (let [nm (case (head k)
+                 (Fn Const Static TyAlias Trait TraitAlias) (id-name (fget (second k) :ident))
+                 (Struct Union Enum) (id-name (nth k 1))
+                 Mod (id-name (nth k 2))
+                 nil)
+            p (when nm (str m "::" nm))]
+        (case (head k)
+          Fn (do (add-def! m "Mod" {:ns :value :name nm :kind "Fn" :path p :vis vis}) (lang! attrs p))
+          Const (when (not= "_" nm) (add-def! m "Mod" {:ns :value :name nm :kind "Const { is_type_const: false }" :path p :vis vis}) (lang! attrs p))
+          Static (add-def! m "Mod" {:ns :value :name nm :path p :vis vis
+                                    :kind (str "Static { safety: Safe, mutability: " (if (= 'Mut (fget (second k) :mutability)) "Mut" "Not") ", nested: false }")})
+          TyAlias (do (add-def! m "Mod" {:ns :type :name nm :kind "TyAlias" :path p :vis vis}) (lang! attrs p)
+                      ;; the alias's own generic parameters (generics_of: kind and name; a default left to the passes' facts)
+                      (let [ps (fget (fget (second k) :generics) :params)]
+                        (when (every? #(let [pk (fget % :kind)] (or (= 'Lifetime pk) (nil? (some-val (fget pk :default))))) ps)
+                          (swap! acc assoc-in [:alias-generics p]
+                                 (vec (for [gp ps :let [pk (fget gp :kind)]]
+                                        (list (cond (= 'Lifetime pk) 'lifetime (= 'Const (head pk)) 'const :else 'type)
+                                              (id-name (fget gp :ident)))))))))
+          TraitAlias (add-def! m "Mod" {:ns :type :name nm :kind "TraitAlias" :path p :vis vis})
+          (Struct Union)
+          (do (add-def! m "Mod" {:ns :type :name nm :kind (str (head k)) :path p :vis vis})
+              (lang! attrs p)
+              ;; the constructor's visibility: the struct's, lowered to the crate's when a field is not public or the struct
+              ;; is #[non_exhaustive] (rustc_resolve's build_reduced_graph_for_item, ctor_vis)
+              (when-let [ck (and (= 'Struct (head k)) (ctor-of (nth k 3)))]
+                (add-def! m "Mod" {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")
+                                   :vis (if (and (= :pub vis) (fields-pub? (nth k 3)) (not (attr? attrs "non_exhaustive"))) :pub (when vis :restricted))})))
+          Enum
+          (do (add-def! m "Mod" {:ns :type :name nm :kind "Enum" :path p :vis vis})
+              (lang! attrs p)
+              (ensure! p "Enum" (doc-hidden? attrs))
+              (doseq [v (fget (nth k 3) :variants)]
+                (let [vn (id-name (fget v :ident)) vp (str p "::" vn) va (fget v :attrs)]
+                  (add-def! p "Enum" {:ns :type :name vn :kind "Variant" :path vp :vis :pub})
+                  (lang! va vp)
+                  (when-let [ck (ctor-of (fget v :data))]
+                    (add-def! p "Enum" {:ns :value :name vn :kind (str "Ctor(Variant, " ck ")") :path (str vp "::{constructor#0}")
+                                        :vis (if (attr? va "non_exhaustive") :restricted :pub)})))))
+          Trait
+          (let [t (second k)]
+            (add-def! m "Mod" {:ns :type :name nm :kind "Trait" :path p :vis vis})
+            (lang! attrs p)
+            (ensure! p "Trait" (doc-hidden? attrs))
+            (swap! acc assoc-in [:traits p] {:paren-sugar (boolean (attr? attrs "rustc_paren_sugar"))
+                                             :auto (= 'Yes (fget t :is_auto))})
+            (doseq [a (fget t :items) :let [ak (fget a :kind)] :when (seq? ak)]
+              (let [an (id-name (fget (second ak) :ident)) ap (str p "::" an)]
+                (case (head ak)
+                  Fn (add-def! p "Trait" {:ns :value :name an :kind "AssocFn" :path ap :vis :pub})
+                  Const (add-def! p "Trait" {:ns :value :name an :kind "AssocConst { is_type_const: false }" :path ap :vis :pub})
+                  Type (add-def! p "Trait" {:ns :type :name an :kind "AssocTy" :path ap :vis :pub})
+                  nil)
+                (when an (lang! (fget a :attrs) ap)))))
+          Impl (swap! impls conj [(or (fget it :rf-order) i) it])
+          Mod (let [mk (nth k 3) hidden (doc-hidden? attrs)]
+                (add-def! m "Mod" {:ns :type :name nm :kind "Mod" :path p :vis vis})
+                (ensure! p "Mod" hidden)
+                (when (= 'Loaded (head mk)) (scan-items acc p (second mk) crate dollar rel-file)))
+          ExternCrate (let [[_ orig ident] k an (id-name ident) c (or (some-> (some-val orig) (#(if (string? %) % (id-name %)))) an)]
+                        (add-def! m "Mod" {:ns :type :name an :kind "ExternCrate" :path c :vis vis :extern c}))
+          ForeignMod (doseq [fi (fget (second k) :items) :let [fk (fget fi :kind) fv (vis-of fi)]]
+                       (case (head fk)
+                         Fn (let [fnm (id-name (fget (second fk) :ident))] (add-def! m "Mod" {:ns :value :name fnm :kind "Fn" :path (str m "::" fnm) :vis fv})
+                              (lang! (fget fi :attrs) (str m "::" fnm)))
+                         TyAlias (let [fnm (id-name (fget (second fk) :ident))] (add-def! m "Mod" {:ns :type :name fnm :kind "ForeignTy" :path (str m "::" fnm) :vis fv}))
+                         Static (let [st (second fk) fnm (id-name (fget st :ident))]
+                                  (add-def! m "Mod" {:ns :value :name fnm :path (str m "::" fnm) :vis fv
+                                                     :kind (str "Static { safety: Unsafe, mutability: " (if (= 'Mut (fget st :mutability)) "Mut" "Not") ", nested: false }")}))
+                         nil))
+          MacroDef (let [[_ idf md] k mn (id-name idf) mr (= 'true (fget md :macro_rules))
+                         mr (or mr (true? (fget md :macro_rules)))
+                         builtin (boolean (attr? attrs "rustc_builtin_macro"))
+                         tr (attr-str attrs "rustc_macro_transparency")
+                         exported (and mr (attr? attrs "macro_export"))
+                         mp (str m "::" mn)
+                         d {:ns :macro :name mn :kind (macro-kind mn builtin) :path mp :vis (if mr (when exported :pub) vis)}]
+                     (swap! acc update :macros conj
+                            {:path mp :name mn
+                             :info {:builtin builtin :edition "2024" :macro-rules mr
+                                    :transparency (cond (#{"semiopaque" "semitransparent"} tr) :semiopaque (= "transparent" tr) :transparent
+                                                        mr :semiopaque :else :opaque)}
+                             :body (#'cc/foreign-spans md (str cc/rustc-src-prefix rel-file))})
+                     ;; a #[macro_export] macro_rules! is the crate root's child (rustc_resolve's define_macro); a macro 2.0 its
+                     ;; module's
+                     (cond exported (add-def! crate "Mod" d)
+                           (not mr) (add-def! m "Mod" d))
+                     ;; a macro_rules! is also in its module's textual scope, which a `use` of its name re-exports (`pub use
+                     ;; assert_unsafe_precondition;`: core::ub_checks' child), the module's private binding
+                     (when mr (add-def! m "Mod" (assoc d :vis nil :textual true))))
+          Use (when-not (attr? attrs "prelude_import")
+                (doseq [l (use-leaves (second k) [] dollar)]
+                  (swap! acc update-in [:mods m :imports] conj (assoc l :vis vis :hidden (doc-hidden? attrs)))))
+          nil)))
+    ;; the impls' disambiguators in the order rustc creates their definitions (the expansion's :rf-order): an impl item's lang
+    ;; item `M::{impl#N}::name`
+    (doseq [[n [_ it]] (map-indexed vector (sort-by first @impls))]
+      (doseq [a (fget (second (fget it :kind)) :items) :let [ak (fget a :kind)] :when (seq? ak)]
+        (when-let [an (id-name (fget (second ak) :ident))]
+          (lang! (fget a :attrs) (str m "::{impl#" n "}::" an)))))))
+
+(defn scan-module
+  "A module file expanded and scanned into ACC; the expansion's failure scans the file unexpanded (its :unexpanded noted)"
+  [acc {:keys [path file]} table dep-macros]
+  (binding [ex/*cfg-names* (cc/crate-cfg) ex/*virtual* (atom nil) ex/*prelude-crate* (cc/prelude-crate) ex/*def-order* (atom 0)
+            ex/*raw-block-frags* (boolean (some #{cc/*crate*} cc/dep-crates))
+            resolve/*crate-path* path collect/*root-crate-override* (cc/prelude-crate)]
+    (let [mc (atom {}) sites (atom {})
+          crate (try (binding [ex/*mark-crates* mc ex/*sites* sites]
+                       (ex/expand-file file 2024 (merge dep-macros (cc/macros-for table file))))
+                     (catch Throwable e
+                       (swap! acc update :unexpanded (fnil conj []) [path (str (or (.getMessage e) e))])
+                       nil))
+          dollar (fn [ctxt] (let [k (get @mc ctxt)] (if (and (string? k) (contains? (get resolve/crate-deps cc/*crate*) k)) k cc/*crate*)))]
+      (let [tree (or crate (cc/parse-file file))]
+        (binding [*raw* (nil? crate)]
+          (scan-items acc path (fget tree :items) cc/*crate* dollar (cc/rel-path file)))
+        (when (doc-hidden? (fget tree :attrs)) (swap! acc assoc-in [:mods path :hidden] true))))))
+
+(defn read-modules [f]
+  (vec (for [l (str/split-lines (slurp f)) :let [[p file v] (str/split (str/trim l) #"\s+")] :when (seq p)]
+         {:path p :file file :vendored (= "vendored" v)})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The resolution (imports.rs to a fixpoint over the crates' modules)
+
+(def ^:private extern-names
+  "a crate's extern prelude: the crates its modules name by their first segment (resolve's crate-deps, the roots' aliases)"
+  {"core" {"core" "core"}
+   "alloc" {"core" "core" "alloc" "alloc"}
+   "std" {"core" "core" "alloc" "alloc" "std" "std" "alloc_crate" "alloc" "std_detect" "std_detect" "libc" "libc" "hashbrown" "hashbrown"}
+   "std_detect" {"core" "core" "alloc" "alloc" "std_detect" "std_detect"}})
+
+(defn- parent-of [^String p] (let [i (.lastIndexOf p "::")] (when (pos? i) (subs p 0 i))))
+
+(defn- visible? [child from-mod target crate-of]
+  (case (:vis child)
+    :pub true
+    :restricted (= (crate-of from-mod) (crate-of target))
+    (or (= from-mod target) (str/starts-with? from-mod (str target "::")))))
+
+(defn- min-vis "The narrower of two visibilities (rustc_resolve's import binding: the import's, unless the item's is narrower)"
+  [a b]
+  (cond (or (nil? a) (nil? b)) nil (or (= :restricted a) (= :restricted b)) :restricted :else :pub))
+
+(defn resolve-all
+  "The modules' children ({path {:order [[ns name] ..] :by {[ns name] child}}}) with every import resolved as far as the
+  modules allow, rounds to a fixpoint (at most 40)"
+  [mods]
+  (let [crate-of (fn [m] (or (:crate (get mods m)) (first (str/split m #"::"))))
+        init (into {} (for [[p e] mods]
+                        [p (reduce (fn [r d] (let [k [(:ns d) (:name d)]]
+                                               (if (get-in r [:by k]) r (-> r (update :order conj k) (assoc-in [:by k] (assoc d :src :def))))))
+                                   {:order [] :by {}} (:defs e))]))
+        R (atom init)
+        lookup (fn [m ns nm] (get-in @R [m :by [ns nm]]))
+        mod-of (fn [c] (cond (nil? c) nil
+                             (:extern c) (:extern c)
+                             (#{"Mod" "Enum" "Trait"} (:kind c)) (:path c)
+                             :else nil))
+        resolve-mod (fn [m segs]
+                      (loop [i 0 cur nil]
+                        (if (>= i (count segs))
+                          cur
+                          (let [[nm dc] (nth segs i)
+                                r (if (zero? i)
+                                    (case nm
+                                      "crate" (crate-of m)
+                                      "$crate" (or dc (crate-of m))
+                                      "self" m
+                                      "super" (parent-of m)
+                                      ("{{root}}" "") :root
+                                      (or (mod-of (lookup m :type nm)) (get (get extern-names (crate-of m)) nm)))
+                                    (cond (= "super" nm) (parent-of cur)
+                                          (= :root cur) (get (get extern-names (crate-of m)) nm)
+                                          :else (mod-of (lookup cur :type nm))))]
+                            (when r (recur (inc i) r))))))
+        put! (fn [m k c glob?]
+               (let [old (lookup m (first k) (second k))]
+                 (when (or (nil? old) (and (= :glob (:src old)) (not glob?)) (and (:textual old) (not glob?)))
+                   (swap! R (fn [r] (cond-> (assoc-in r [m :by k] c) (nil? old) (update-in [m :order] (fnil conj []) k))))
+                   true)))]
+    (loop [round 0]
+      (let [changed (atom false)]
+        (doseq [[m e] mods imp (:imports e)]
+          (let [segs (:segs imp)]
+            (if (:glob imp)
+              (when-let [t (resolve-mod m segs)]
+                (when (string? t)
+                  (doseq [k (get-in @R [t :order]) :let [c (get-in @R [t :by k])]
+                          :when (and c (visible? c m t crate-of))]
+                    (when (put! m k (assoc c :vis (min-vis (:vis imp) (:vis c)) :src :glob :hidden-re (:hidden imp) :textual nil) true) (reset! changed true)))))
+              (let [[nm _] (peek segs)
+                    rn (or (:rename imp) nm)
+                    base (if (= 1 (count segs)) :single (resolve-mod m (pop segs)))]
+                (when base
+                  (doseq [ns (if (:self-only imp) [:type] [:type :value :macro])]
+                    (let [c (cond (= :single base) (or (when (= ns :type) (when-let [x (get (get extern-names (crate-of m)) nm)]
+                                                                            {:ns :type :name nm :kind "Mod" :path x}))
+                                                       ;; a macro_rules! of the module's textual scope (`pub use mac;`)
+                                                       (let [c (lookup m ns nm)] (when (:textual c) c)))
+                                  (= :root base) (when (= ns :type) (when-let [x (get (get extern-names (crate-of m)) nm)]
+                                                                      {:ns :type :name nm :kind "Mod" :path x}))
+                                  :else (let [c (lookup base ns nm)] (when (and c (visible? c m base crate-of)) c)))]
+                      (when c
+                        (when (put! m [ns rn] (assoc c :name rn :vis (if (:textual c) (:vis imp) (min-vis (:vis imp) (:vis c)))
+                                                     :src :import :hidden-re (:hidden imp) :textual nil) false)
+                          (reset! changed true))))))))))
+        (if (and @changed (< round 40)) (recur (inc round)) @R)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The forms
+
+(defn- q [s] (pr-str s))
+
+(defn- sty-text [x] (pr-str x))
+
+(defn assemble
+  "std-names' forms (text) from the scans, the interface facts (si/adt, si/trait forms of IFACE) and the native maps'
+  aliases: the helper's traversal (std_names: roots alloc, core, std; depth first; each module once)"
+  [scans iface-file native-maps]
+  (let [;; a crate scanned in parts (module files split, in order): a module's entries joined (the root's macro_export'd macros
+        ;; from the later parts after its own items)
+        mods (apply merge-with (fn [a b] (-> a (update :defs into (:defs b)) (update :imports into (:imports b))
+                                             (cond-> (:hidden b) (assoc :hidden true))))
+                    (map :mods scans))
+        R (resolve-all mods)
+        facts (with-open [r (java.io.PushbackReader. (java.io.FileReader. ^String iface-file))]
+                (loop [acc {}]
+                  (let [x (read {:eof ::eof} r)]
+                    (if (= x ::eof) acc
+                        (recur (case (head x)
+                                 (si/adt si/trait) (assoc acc (second x) (nth x 2))
+                                 acc))))))
+        aliases (apply merge (map :aliases native-maps))
+        alias-gens (merge (apply merge (map :alias-generics scans)) (apply merge (map :alias-generics native-maps)))
+        traits (apply merge (map :traits scans))
+        macros (into {} (for [s scans m (:macros s)] [(:path m) m]))
+        out (StringBuilder.)
+        gens (atom []) extra (atom [])
+        seen (atom #{}) gen-seen (atom #{}) macro-order (atom [])
+        missing (atom {:generics [] :alias [] :macro []})]
+    (loop [todo (vec (reverse (sort ["alloc" "core" "std"])))]
+      (when (seq todo)
+        (let [m (peek todo) todo (pop todo)]
+          (if (or (@seen m) (nil? (get R m)))
+            (recur todo)
+            (let [_ (swap! seen conj m)
+                  r (get R m)
+                  kids (for [k (:order r) :let [c (get (:by r) k)] :when (and (= :pub (:vis c)) (not= "ExternCrate" (:kind c)))] c)
+                  next (atom [])]
+              (doseq [c kids]
+                (when (:hidden-re c) (swap! extra conj (str "(names/hidden-reexport " (q m) " " (q (:name c)) ")")))
+                (let [d (:path c) k (:kind c)]
+                  (when (and (#{"Struct" "Enum" "Union" "TyAlias" "Trait"} k) (not (@gen-seen d)))
+                    (swap! gen-seen conj d)
+                    (if-let [g (if (= "TyAlias" k) (get alias-gens d) (:generics (get facts d)))]
+                      (swap! gens conj (str "(names/generics " (q d) " [" (str/join " " (map sty-text g)) "])"))
+                      (swap! missing update :generics conj d))
+                    (when (= "TyAlias" k)
+                      (if-let [t (get aliases d)]
+                        (swap! gens conj (str "(names/alias " (q d) " " (sty-text t) ")"))
+                        (swap! missing update :alias conj d)))
+                    (when (= "Trait" k)
+                      (let [f (get facts d) t (get traits d)
+                            sups (filter #(and (= 'trait (head %)) (= '(param 0 "Self") (first (nth % 2)))) (:predicates f))]
+                        (swap! gens conj (str "(names/trait " (q d) " {:supertraits [" (str/join " " (map sty-text sups)) "] :paren-sugar "
+                                              (boolean (:paren-sugar t)) " :auto " (boolean (:auto t)) "})")))))
+                  (cond (#{"Mod" "Enum" "Trait"} k) (swap! next conj d)
+                        (str/starts-with? k "Macro(") (when-not (some #{d} @macro-order) (swap! macro-order conj d)))))
+              (.append out (str "(names/mod " (q m) " " (q (:kind (get mods m) "Mod")) " ["
+                                (str/join " " (for [c kids] (str "(" (name (:ns c)) " " (q (:name c)) " " (q (:kind c)) " " (q (:path c)) ")")))
+                                "])\n"))
+              (when (:hidden (get mods m)) (swap! extra conj (str "(names/hidden " (q m) ")")))
+              (recur (into todo (reverse @next))))))))
+    (doseq [g (sort @gens)] (.append out g) (.append out "\n"))
+    (let [langs (apply merge (map :lang scans))]
+      (doseq [[l p] (sort-by key langs)] (.append out (str "(names/lang " (q l) " " (q p) ")\n"))))
+    (doseq [e @extra] (.append out e) (.append out "\n"))
+    (doseq [d @macro-order :let [m (get macros d)]]
+      (if (nil? m)
+        (swap! missing update :macro conj d)
+        (when (= (macro-kind (:name m) (:builtin (:info m))) "Macro(MacroKinds(1))")
+          (let [i (:info m)]
+            (.append out (str "(names/macro " (q d) " {:builtin " (:builtin i) " :edition " (q (:edition i)) " :macro-rules " (:macro-rules i)
+                              " :transparency " (:transparency i) "} " (pr-str (:body m)) ")\n"))))))
+    {:text (str out) :missing @missing}))
+
+;; ---------------------------------------------------------------------------------------------
+;; The compare
+
+(defn read-names
+  "A std-names file's facts: {kind {key value}}"
+  [file]
+  (with-open [r (java.io.PushbackReader. (java.io.FileReader. ^String file))]
+    (loop [acc {}]
+      (let [x (read {:eof ::eof} r)]
+        (if (= x ::eof)
+          acc
+          (recur
+           (case (head x)
+             names/mod (let [[_ p k kids] x]
+                         (reduce (fn [a [ns nm kind path]] (assoc-in a [:children [p (str ns) nm]] [kind path]))
+                                 (assoc-in acc [:mod p] k) kids))
+             names/generics (assoc-in acc [:generics (second x)] (nth x 2))
+             names/alias (assoc-in acc [:alias (second x)] (nth x 2))
+             names/trait (assoc-in acc [:trait (second x)] (nth x 2))
+             names/lang (assoc-in acc [:lang (second x)] (nth x 2))
+             names/hidden (assoc-in acc [:hidden (second x)] true)
+             names/hidden-reexport (assoc-in acc [:hidden-reexport [(second x) (nth x 2)]] true)
+             names/macro (let [[_ p info body] x
+                               strip (fn strip [y] (cond (and (seq? y) (= 'span (first y))) 'S
+                                                         (seq? y) (apply list (map strip y))
+                                                         (vector? y) (mapv strip y)
+                                                         :else y))]
+                           (-> acc (assoc-in [:macro-info p] info) (assoc-in [:macro-body p] (strip body))))
+             acc)))))))
+
+(defn compare-names
+  "Each kind's facts: [kind total equal differ missing extra [example keys]]"
+  [h n]
+  (for [k [:mod :children :generics :alias :trait :lang :hidden :hidden-reexport :macro-info :macro-body]]
+    (let [hm (get h k {}) nm (get n k {})
+          eq (filter #(= (get hm %) (get nm %)) (keys hm))
+          df (filter #(and (contains? nm %) (not= (get hm %) (get nm %))) (keys hm))
+          ms (remove #(contains? nm %) (keys hm))
+          ex (remove #(contains? hm %) (keys nm))]
+      [k (count hm) (count eq) (count df) (count ms) (count ex) (take 6 (sort-by pr-str df)) (take 6 (sort-by pr-str ms)) (take 6 (sort-by pr-str ex))])))
+
+(defn -main [verb & args]
+  (case verb
+    "scan"
+    (let [[crate lib modules index-file out names-file] args
+          ;; a crate no pass reads (std_detect): its module files and its index made here
+          mods (if (.exists (File. ^String modules))
+                 (read-modules modules)
+                 (let [ms (binding [cc/*crate* crate] (cc/module-files lib))]
+                   (spit modules (apply str (for [m ms] (str (:path m) " " (:file m) (when (:vendored m) " vendored") "\n"))))
+                   ms))
+          index (if (.exists (File. ^String index-file))
+                  (read-string (slurp index-file))
+                  (let [t (binding [cc/*crate* crate] (cc/crate-index (remove :vendored mods)))] (spit index-file (pr-str t)) t))
+          dep-macros (if (and names-file (.exists (File. ^String names-file))) (ex/load-std-macros names-file) {})
+          ;; the vendored modules' own macro_rules! (stdarch's core_arch: types!, static_assert_uimm_bits!), which the crate's
+          ;; index leaves out (vendored-macros' file, SCAN_EXTRA_MACROS)
+          extra (when-let [f (System/getenv "SCAN_EXTRA_MACROS")] (when (.exists (File. ^String f)) (read-string (slurp f))))
+          index (update index :macros #(merge-with into % extra))
+          acc (atom {:mods {} :lang {} :traits {} :macros []})
+          t0 (System/nanoTime)]
+      (binding [cc/*crate* crate cc/*debug-assertions* false]
+        (doseq [[i m] (map-indexed vector mods)]
+          (scan-module acc m (:macros index) dep-macros)
+          (when (zero? (mod (inc i) 25)) (println (str "std-names: " crate ": " (inc i) "/" (count mods) " (" (quot (- (System/nanoTime) t0) 1000000000) " s)")))))
+      (spit out (pr-str @acc))
+      (println (str "std-names: " crate ": " (count mods) " module files, " (count (:mods @acc)) " modules, " (count (:macros @acc)) " macros, "
+                    (count (:lang @acc)) " lang items, " (count (:unexpanded @acc)) " unexpanded ("
+                    (quot (- (System/nanoTime) t0) 1000000000) " s)"))
+      (doseq [[p e] (:unexpanded @acc)] (println "std-names: unexpanded" p (subs e 0 (min 160 (count e))))))
+    "vendored-macros"
+    (let [[crate modules out] args
+          mods (read-modules modules)
+          t (binding [cc/*crate* crate] (cc/macro-table (filter :vendored mods)))]
+      (spit out (pr-str t))
+      (println (str "std-names: " crate ": " (count t) " macro names in " (count (filter :vendored mods)) " vendored module files, into " out)))
+    "assemble"
+    (let [[out iface maps & scan-files] args
+          scans (mapv #(read-string (slurp %)) scan-files)
+          native-maps (vec (for [f (str/split maps #",") :when (.exists (File. ^String f))] (read-string (slurp f))))
+          {:keys [text missing]} (assemble scans iface native-maps)]
+      (spit out text)
+      (println (str "std-names: wrote " out ": " (count (str/split-lines text)) " forms; missing generics " (count (:generics missing))
+                    ", aliases " (count (:alias missing)) ", macros " (count (:macro missing))))
+      (doseq [[k v] missing :when (seq v)] (println "std-names: missing" (name k) (take 8 v))))
+    "compare"
+    (let [[helper native] args
+          rows (compare-names (read-names helper) (read-names native))]
+      (doseq [[k t e d m x dfs mss exs] rows]
+        (println (format "std-names: %-16s %5d facts: %5d equal, %4d differ, %4d missing (native extras %d)" (name k) t e d m x))
+        (when (seq dfs) (println "  differ:" (pr-str dfs)))
+        (when (seq mss) (println "  missing:" (pr-str mss)))
+        (when (seq exs) (println "  extra:" (pr-str exs))))
+      (let [tot (reduce (fn [[a b] [_ t e]] [(+ a t) (+ b e)]) [0 0] rows)]
+        (println (format "std-names: total %d facts: %d equal" (first tot) (second tot)))))))

@@ -13854,3 +13854,35 @@ failure; trait methods' :const, :predicates, :output, :promotable); alloc's and 
 interface with the computed StableCrateIds, rsi-build gives 0 of 5 own (fmt::Arguments::new's inputs, one of core's differing
 facts, leave a type variable in each main; then a Transmute between differing layouts), against 5 of 5 on the helper's. C4 waits
 on core's interface (RIND9's work for core) and on C6-5 (the user's, in the morning).
+
+## 2026-11-20: rust-c6-1120: C4-1 (a): std's names assembled from the crates' sources, 14,874 of 15,162 facts equal
+
+The user's C4-1 (a): arbace.rust.front.std-names (bin/rust-front std-names-native) makes the helper's std-names.edn from core's,
+alloc's, std_detect's and std's sources (rust-src 1.99.1): each module file expanded natively and its items, imports, macros and
+lang items read as rustc_resolve's build_reduced_graph does (rustc 1.99.1, compiler/rustc_resolve/src/{build_reduced_graph,
+imports}.rs: namespaces, visibilities, a constructor narrowed by a private field or #[non_exhaustive], macro_rules! bindings), the
+imports resolved across the crates to a fixpoint (single and glob imports, an import binding's visibility the narrower of the
+import's and the item's), the reached modules walked as tools/rsdump/front.rs' std_names does; generics and supertraits from the
+native interface, aliases from the passes' native maps. Compared with the helper's: all 532 modules, all 12,623 children, all 215
+lang items, all hidden facts and macro kinds equal; 14,874 of 15,162 facts in all. Missing: the 215 aliases (the passes compute an
+alias only when the names they read lack it; they now rerun on the native names, one at a time), 49 generics (core_arch's macro-made
+SIMD types in modules the expansion cannot expand yet: asm!, a non-literal format_args!), 13 traits' supertraits (core's interface's
+implied MetaSized), 10 std_detect macros for other architectures. rsi-build takes RF_NATIVE_NAMES=FILE (with or without
+RF_NATIVE_IFACE=1); C4's words stay without "own" until the user rules on C6-5. The scans ran five at a time until the coordinator's
+memory rule (at most two light jobs at a time, each under ulimit -v 8388608), then two at a time.
+
+## 2026-11-20: rust-c6-1120: C6-4: LLVM's AlwaysInliner over our forms (first slice); correction of the inlining's cause
+
+Correction of this day's entry "std's 325 items, first measure" and of the survey's core's 275 items: the `#[inline(always)]`
+callees in std's IR are inlined by LLVM's AlwaysInliner, not by MIR inlining: rustc 1.99's rustc_mir_transform Inline is off at
+mir-opt-level 1 (ForceInline takes #[rustc_force_inline] alone; compiler/rustc_mir_transform/src/inline.rs), rustc_codegen_llvm's
+inline_attr writes alwaysinline, and LLVM's buildO0DefaultPipeline (src/llvm-project/llvm/lib/Passes/PassBuilderPipelines.cpp in
+rustc-1.99.1-src.tar.xz) runs AlwaysInlinerPass(InsertLifetimeIntrinsics=false); std's IR holds no alwaysinline function.
+arbace.rust.back.inline ports llvm/lib/Transforms/IPO/AlwaysInliner.cpp, Utils/InlineFunction.cpp (InlineFunctionImpl for calls) and
+Utils/CloneFunction.cpp (CloneAndPruneIntoFromInst: constant folding of integer operations, branches on constants pruned, phis
+pruned, InstSimplify's phi rule, one-predecessor blocks merged) over our LLVM forms; an invoke's call site (HandleInlinedLandingPad)
+not yet. Its pure cases (bin/rust-front inline-test): 6 of 6, each checked by hand against the host's opt -passes='default<O0>'
+(LLVM 23.1.5). mono/inline-always-callees finds each item's #[inline(always)] callees; lib-unit-run builds them (from any crate's
+export: RF_CORE_NATIVE takes the others'), names the ones the export lacks (bin/rust-front lib-unit inline-keys CRATE for the next
+export), and lib-unit's compare inlines them before the judge. alloc: 18 of 25 equal still; custom_owner_from_box now refused for
+its one wanted callee, Box::<Custom>::new, until alloc's next export.

@@ -1,0 +1,69 @@
+(ns rust.front.inline-test
+  "C6-4 (doc/rust/FRONTEND-SURVEY.md, \"C6-4's next slice: LLVM's AlwaysInliner over our forms\"): arbace.rust.back.inline's pure
+  cases, each against the IR LLVM's -O0 pipeline writes for it (the host's `opt -passes='default<O0>'`, LLVM 23.1.5, run by hand
+  over the same functions as text, its output read into these forms):
+  a callee of one block spliced into the calling block, its static alloca at the caller's entry; a callee of several blocks
+  whose one return is spliced into the exit block; two returns joined by a phi; a branch on a constant argument pruned and the
+  blocks merged; the inlined function dropped. Compared after RF3's normalizer (names by first occurrence). `bin/rust-front
+  inline-test`."
+  (:require [arbace.rust.back.inline :as inl]
+            [arbace.rust.back.check :as chk]))
+
+(defn- norm [f] (chk/normalize f {}))
+
+(def ^:private callee1
+  '(llvm/define g/f1 i64 [[i64 %a]] :body [(block %start (= %x (alloca i64 :align 8)) (store [i64 %a] [ptr %x] :align 8)
+                                                  (= %y (load i64 [ptr %x] :align 8)) (= %z (sub :nuw i64 -9223372036854775808 %y)) (ret i64 %z))]))
+(def ^:private caller1
+  '(llvm/define g/c1 i1 [[i64 %p] [i64 %q]] :body [(block %start (= %r (call i64 g/f1 [[i64 %q]])) (= %s (icmp :ule i64 %p %r)) (ret i1 %s))]))
+(def ^:private want1
+  '(llvm/define g/c1 i1 [[i64 %p] [i64 %q]] :body [(block %start (= %x (alloca i64 :align 8)) (store [i64 %q] [ptr %x] :align 8)
+                                                         (= %y (load i64 [ptr %x] :align 8)) (= %z (sub :nuw i64 -9223372036854775808 %y))
+                                                         (= %s (icmp :ule i64 %p %z)) (ret i1 %s))]))
+
+;; several blocks, one return; the call's block split, the return's code at the exit block's head
+(def ^:private callee2
+  '(llvm/define g/f2 i64 [[i64 %a] [i1 %c]] :body [(block %start (br i1 %c %bb1 %bb2))
+                                                   (block %bb1 (= %u (call i64 g/h [[i64 %a]])) (br %bb3))
+                                                   (block %bb2 (call void g/k []) (br %bb3))
+                                                   (block %bb3 (= %m (phi i64 [%u %bb1] [0 %bb2])) (ret i64 %m))]))
+(def ^:private caller2
+  '(llvm/define g/c2 i64 [[i64 %p] [i1 %b]] :body [(block %start (call void g/before []) (= %r (call i64 g/f2 [[i64 %p] [i1 %b]])) (= %s (add i64 %r 1)) (ret i64 %s))]))
+(def ^:private want2
+  '(llvm/define g/c2 i64 [[i64 %p] [i1 %b]] :body [(block %start (call void g/before []) (br i1 %b %bb1 %bb2))
+                                                   (block %bb1 (= %u (call i64 g/h [[i64 %p]])) (br %exit))
+                                                   (block %bb2 (call void g/k []) (br %exit))
+                                                   (block %exit (= %m (phi i64 [%u %bb1] [0 %bb2])) (= %s (add i64 %m 1)) (ret i64 %s))]))
+
+;; a constant argument: the branch pruned, the blocks merged into one, spliced into the call's block
+(def ^:private caller3
+  '(llvm/define g/c3 i64 [[i64 %p]] :body [(block %start (= %r (call i64 g/f2 [[i64 %p] [i1 true]])) (ret i64 %r))]))
+(def ^:private want3
+  '(llvm/define g/c3 i64 [[i64 %p]] :body [(block %start (= %u (call i64 g/h [[i64 %p]])) (ret i64 %u))]))
+
+;; two returns: a phi in the exit block
+(def ^:private callee4
+  '(llvm/define g/f4 i64 [[i1 %c]] :body [(block %start (br i1 %c %bb1 %bb2)) (block %bb1 (ret i64 1)) (block %bb2 (ret i64 2))]))
+(def ^:private caller4
+  '(llvm/define g/c4 i64 [[i1 %b]] :body [(block %start (= %r (call i64 g/f4 [[i1 %b]])) (ret i64 %r))]))
+(def ^:private want4
+  '(llvm/define g/c4 i64 [[i1 %b]] :body [(block %start (br i1 %b %bb1 %bb2)) (block %bb1 (br %exit)) (block %bb2 (br %exit))
+                                         (block %exit (= %m (phi i64 [1 %bb1] [2 %bb2])) (ret i64 %m))]))
+
+(defn- case! [nm got want]
+  (let [ok (= (norm got) (norm want))]
+    (println (str "inline-test: " nm ": " (if ok "equal" (str "DIFFERS: " (chk/diff-text (norm got) (norm want))))))
+    ok))
+
+(defn -main [& _]
+  (let [m (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4] #{'g/f1 'g/f2 'g/f4})
+        by (into {} (map (juxt second identity) m))
+        oks [(case! "one block, its alloca at the entry" (by 'g/c1) want1)
+             (case! "several blocks, one return" (by 'g/c2) want2)
+             (case! "a constant argument's branch pruned" (by 'g/c3) want3)
+             (case! "two returns joined" (by 'g/c4) want4)
+             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c2" "g/c3" "g/c4"])
+             ;; the negative control: a case's result against another case's IR differs
+             (not (= (norm (by 'g/c2)) (norm want4)))]]
+    (println (str "inline-test: " (count (filter true? oks)) " of " (count oks) (if (every? true? oks) " passed" " FAILED")))
+    (System/exit (if (every? true? oks) 0 1))))

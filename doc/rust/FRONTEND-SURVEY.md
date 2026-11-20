@@ -5460,11 +5460,17 @@ again 28 min): **109 of 275 equal**, 85 differ, 78 refused (30 not exported, 14 
 unevaluated, 5 a callee, 2 the static `POW10`, 5 others), 3 symbols absent; the v0 refusals of crate-private impls and ADTs are gone
 (223 runtime bodies, 202 before), the control differing.
 
-The 85 that differ lead with one cause: **rustc 1.99's -O0 inlines `#[inline(always)]` callees in MIR** (std's IR has no call of
+The 85 that differ lead with one cause: **at -O0 `#[inline(always)]` callees are inlined** (corrected 2026-11-20: by LLVM's
+AlwaysInliner, not in MIR. rustc 1.99's rustc_mir_transform `Inline` is off at mir-opt-level 1, `ForceInline` takes
+`#[rustc_force_inline]` alone, while rustc_codegen_llvm's `inline_attr` writes `alwaysinline` and LLVM's O0 pipeline,
+`buildO0DefaultPipeline`, runs `AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false)`, as RF3's oracle found: its `-C
+no-prepopulate-passes` keeps it away. std's IR holds no `alwaysinline` function and no `llvm.experimental.noalias.scope.decl`) (std's IR has no call of
 `cast_unsigned`, `MaybeUninit::assume_init_ref` or `CStr::from_bytes_with_nul_unchecked`, each `#[inline(always)]`: their bodies
 are in the caller; ours calls them), which also moves the callers' locals (the first `alloca`s that differ); then
 `const_eval_select`'s runtime function (`cell::panic_already_borrowed::do_panic`'s `runtime`, where ours calls the wrapper). The next
-port is rustc_mir_transform's Inline as -O0 runs it, `#[inline(always)]` callees alone. (A float constant written as its double's
+port is LLVM's AlwaysInliner over our LLVM forms (llvm/lib/Transforms/IPO/AlwaysInliner.cpp and Utils/InlineFunction.cpp of the
+llvm-project in rustc-1.99.1-src.tar.xz: the callee's static allocas to the caller's entry, the arguments substituted, the
+returns joined, an invoke's unwinding given to the inlined calls, the inlined functions removed). (A float constant written as its double's
 bits against LLVM's decimal is now compared by value, `canon-fp`: none of the 85 moves by it alone.)
 
 Before it, the largest refusals were alloc's causes not yet carried to core's export: core-check's `export-entry` carries `:nested-attrs` but not
@@ -5537,3 +5543,91 @@ aliases, 228 traits' supertraits, 77 hidden items). RFP53 (a) counts a case own 
 - (b) Count C4 own on the interface and the identities alone (C4's words name std-iface and std-crates-rsi.edn), std's names left
   the helper's.
 *Recommended: (a)*: the run's resolution and expansion read std-names as much as typeck reads std-iface.
+
+## As built: C4-1 (a), std's names assembled from the crates' sources (2026-11-20, branch `rust-c6-1120`)
+
+The user's C4-1 (a): std's names (the helper's `--std-names` file: rustc's `module_children` of every public module reached from
+core's, alloc's and std's roots, the bang macros' definitions, the reached types' generics, the aliases' types, the traits'
+supertraits, the lang items, the `#[doc(hidden)]` modules and re-exports; tools/rsdump/front.rs' `std_names`) made by Arbace.
+
+- **`arbace.rust.front.std-names`** (`bin/rust-front std-names-native`): `scan` expands each module file of a crate with the native
+  expansion (the crate's own macros, its dependencies' from the names assembled before it, a vendored module's own:
+  `vendored-macros`, stdarch's core_arch) and reads the expanded tree as rustc_resolve's build_reduced_graph does: each item with its
+  namespace, def path, kind and visibility (a struct's constructor narrowed by a private field or `#[non_exhaustive]`), the imports
+  with their visibility, a `#[macro_export]` macro_rules! the crate root's child and every macro_rules! its module's textual
+  binding, the macros' definitions (their tokens with the remapped spans), the lang items (an impl item's `{impl#N}` by the
+  expansion's definition order, `:rf-order`; `#[panic_handler]` the lang item panic_impl), the traits' `#[rustc_paren_sugar]` and
+  `auto`, the aliases' generic parameters; a module whose expansion fails is read unexpanded with its `#[cfg]`s evaluated.
+  `assemble` resolves the imports of every crate to a fixpoint (imports.rs: single imports per namespace, globs below explicit
+  names, the binding's visibility the narrower of the import's and the item's), walks the reached modules in the helper's order
+  (roots alloc, core, std; depth first; each module once) and writes the forms, the generics and supertraits from the native
+  interface (`std-iface-native.edn`), the aliases from the passes' native maps. `compare` sets each kind's facts against the
+  helper's. A crate is scanned in parts (its module files split in order), at most two at a time on this host.
+- **rsi-build `RF_NATIVE_NAMES=FILE`**: with or without `RF_NATIVE_IFACE=1`, the run's front directory takes FILE as its
+  `std-names.edn`; `inputs.tsv`'s C4 words say what the run read, without "own" until the user rules on C6-5.
+
+### The measure (2026-11-20, night)
+
+The four crates scanned (core in five parts: 23 to 25 min each, 2.2 to 2.8 GB; alloc 1 min, std_detect 22 s, std 2 parts of 1.5
+min), assembled (1 min) and compared with the helper's (the pack rust-front-std's `std-names.edn`): **14,874 of 15,162 facts
+equal**, none extra:
+
+| kind | facts | equal | differ | missing |
+|---|---|---|---|---|
+| modules | 532 | 532 | 0 | 0 |
+| modules' children | 12,623 | 12,623 | 0 | 0 |
+| generics | 1,078 | 1,028 | 1 | 49 |
+| aliases | 215 | 0 | 0 | 215 |
+| traits' supertraits | 228 | 215 | 13 | 0 |
+| lang items | 215 | 215 | 0 | 0 |
+| hidden, hidden re-exports | 77 | 77 | 0 | 0 |
+| macros' kinds and editions | 97 | 97 | 0 | 0 |
+| macros' tokens (spans aside) | 97 | 87 | 10 | 0 |
+
+- The 215 aliases: the native interface passes compute an alias's type only when the names they read lack it (core-check's
+  `native-iface`), and the passes so far read the helper's names, which have every public alias. The passes are running again on
+  the native names (core one round, then alloc and std two rounds, one at a time; `.tmp/c6/np-chain.sh`), whose native maps then
+  give the aliases, and core's, alloc's and std's interfaces made with no helper names at all.
+- The 49 generics: core_arch's `__m128`..`__m512*` (made by its `types!` macro in modules the native expansion does not expand yet:
+  `asm!`, a `format_args!` of a non-literal format; read unexpanded, their macro-made types are absent) and the niche types core's
+  interface lacks; `TransmuteFrom`'s const default is the interface's.
+- The 13 traits: the auto traits' and the sizedness traits' implied `MetaSized` supertrait, from the interface's predicates (core's
+  pass writes it where rustc's `explicit_super_clauses_of` does not; RangePattern the other way): core's interface's to fix.
+- The 10 macros: std_detect's macros for other architectures, made by its `features!` macro, whose tokens' contexts differ.
+- The first assembly, before the fixes of the narrower import visibility (a re-exported constructor of a private field), the
+  textual macro_rules! re-exports (`pub use assert_unsafe_precondition;`), the builtin derives `CoerceShared` and `Reborrow`,
+  `#[panic_handler]` and the vendored macros: 14,852.
+
+## C6-4's next slice: LLVM's AlwaysInliner over our forms (write-ahead, 2026-11-20, branch `rust-c6-1120`)
+
+What std's IR is: rustc 1.99's `-O0` codegen, then LLVM's O0 pipeline (`buildO0DefaultPipeline`), whose one transformation of the
+code is `AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false)`: every call of an `alwaysinline` function with a body in the
+module is inlined (rustc_codegen_llvm's `inline_attr`: `#[inline(always)]` and `#[rustc_force_inline]`), and the inlined
+function removed when nothing else uses it. Our codegen writes rustc's `-O0` IR before that pipeline (RF3's oracle took `-C
+no-prepopulate-passes` for this reason), so every caller of an `#[inline(always)]` callee differs (core's 85 items' lead cause).
+
+The port (the llvm-project in rustc-1.99.1-src.tar.xz, LLVM 23, Apache-2.0 WITH LLVM-exception; LICENSE.md, "LLVM"),
+**`arbace.rust.back.inline`**:
+- `IPO/AlwaysInliner.cpp`'s `AlwaysInlineImpl`: the module's functions in order, each `alwaysinline` one's call sites inlined
+  (the latest first: a use list's order), the function removed when nothing calls it.
+- `Utils/InlineFunction.cpp`'s `InlineFunctionImpl`: the callee cloned by `Utils/CloneFunction.cpp`'s `CloneAndPruneIntoFromInst`
+  (the arguments mapped to the call's operands, every other name fresh; an instruction of constant operands folded away,
+  `ConstantFoldInstruction`'s integer cases; a branch or a switch on a constant cloned as a branch to its one successor; the
+  blocks reached alone, in the callee's order; the phis pruned to their predecessors, none: poison; `simplifyInstruction`'s phi
+  rule; `ConstantFoldTerminator`'s one-target branch; dead blocks deleted; each unconditional branch to a block of one predecessor
+  merged), the callee's used static allocas moved to the caller's entry block's start (unused ones dropped), one block ending in a
+  return spliced into the calling block, else the calling block split at the call (the rest to `<callee>.exit`), the returns
+  joined (one: its block's code at the exit's head; more: a phi there, of one value that value), the cloned entry block's code
+  into the calling block. Not yet: an invoke's call site (`HandleInlinedLandingPad`: the inlined calls made invokes to the
+  invoke's landing pad, the callee's `resume`s branches to it), InstSimplify's other rules, the attributes' propagation
+  (`AddReturnAttributes`, `AddParamAndFnBasicAttributes`).
+- The callees: `mono/inline-always-callees` (each call's resolved instance whose codegen attributes hold `inline(always)`);
+  lib-unit-run builds them beside the items, each at its arguments, from any crate's export (`RF_CORE_NATIVE` takes the other
+  crates' exports too: core's `#[inline(always)]` items inline into alloc's), and names the ones the export lacks (`lib-unit
+  inline wanted DEF`; `bin/rust-front lib-unit inline-keys CRATE` adds their keys for the next export); lib-unit's compare
+  codegens them and inlines them into the items before the judge (`LIB_UNIT_INLINE=0`: not), an item calling one not built
+  refused by that cause.
+- **The pure cases** (`bin/rust-front inline-test`, `test/rust/front/inline_test.ae`): a callee of one block with its alloca, of
+  several blocks with one return, a constant argument pruning a branch, two returns joined, the inlined functions dropped, and a
+  crossed control: 6 of 6, each against what the host's `opt -passes='default<O0>'` (LLVM 23.1.5, by hand) writes for the same
+  functions as text.

@@ -88,6 +88,12 @@
 #                          unit compiles it (build-run's lib-unit: mono's facts with CRATE the local crate, named by the IR's crate
 #                          identities); compare: codegen's define of each against std's IR's of its symbol, after RF3's normalizer, a
 #                          crossed control; all in .tmp/rust-front/lib-unit/, light (each step under 2.5 GiB)
+#   bin/rust-front std-names-native
+#                          C4-1 (a) (doc/rust/FRONTEND-SURVEY.md, "As built: C4-1"; arbace.rust.front.std-names): std's names (the
+#                          helper's std-names.edn's forms) from the crates' sources: core's, alloc's, std_detect's and std's module
+#                          files expanded and scanned (items, imports, macros, lang items; .tmp/rust-front/names/), the imports resolved
+#                          across the crates, the reached modules written as std-names forms, compared fact by fact with the helper's
+#   bin/rust-front inline-test   C6-4: the always-inliner's pure cases (test/rust/front/inline_test.ae)
 #   bin/rust-front rind-test   RIND5: collect's `[..].len()` constant and simd_swizzle!'s block (test/rust/front/swizzle1.rs, main
 #                          built), test/rust/front/rind_test.ae
 #   bin/rust-front resolve-check [--ours] [NAME...]
@@ -475,6 +481,38 @@ case ${1:-} in
       rm -f "$work/std-iface-native-$c.edn"
     done
     exit $st ;;
+  std-names-native)
+    # C4-1 (a) (doc/rust/FRONTEND-SURVEY.md, "As built: C4-1"): std's names assembled from the crates' own sources
+    # (arbace.rust.front.std-names): core's, alloc's, std_detect's and std's module files expanded by the native expansion, each
+    # crate with its dependencies' macros from the names assembled before it, their items and imports scanned into $work/names/,
+    # the imports resolved across the crates, the reached modules written as std-names forms ($work/names/std-names.edn; the
+    # generics and supertraits from std-iface-native.edn, the aliases from the passes' native maps, NAMES_NATIVE_MAPS, a comma
+    # list), then compared fact by fact with the helper's std-names (the pack rust-front-std); a crate's scan kept until removed
+    shift; filt='^Reflection warning|recur arg|^Auto-boxing'
+    nw=$work/names; mkdir -p "$nw"
+    libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}
+    rf_libsrc_take || { echo "std-names-native: no $libsrc (bin/repr-rust src-take)"; exit 1; }
+    fd=$(records_front) || exit 1
+    iface=${NAMES_IFACE:-$work/std-iface-native.edn}
+    maps=${NAMES_NATIVE_MAPS:-$work/core/native-iface.edn,$work/alloc/native-iface-nodebug.edn,$work/std/native-iface-nodebug.edn}
+    [ -s "$iface" ] || { echo "std-names-native: no $iface (bin/rust-front std-iface-native)"; exit 1; }
+    sn() { (cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-3000MiB} arbace_tool -m arbace.rust.front.std-names "$@" 2>&1 | grep --line-buffered -v -E "$filt"); }
+    prev=() names=""
+    for c in core alloc std_detect std; do
+      case $c in
+        core) cl=$work/core/lib; cm=$work/core/modules.txt; ci=$work/core/index.edn ;;
+        std_detect) cl=$libsrc; cm=$nw/std_detect-modules.txt; ci=$nw/std_detect-index.edn ;;
+        *) cl=$libsrc; cm=$work/$c/modules.txt; ci=$work/$c/index.edn ;;
+      esac
+      [ "$c" = std_detect ] || [ -s "$cm" ] || { echo "std-names-native: no $cm (the crate's interface pass lists it)"; exit 1; }
+      [ -s "$nw/$c.edn" ] || sn scan "$c" "$cl" "$cm" "$ci" "$nw/$c.edn" $names || exit 1
+      prev+=("$nw/$c.edn")
+      [ "$c" = std ] && break
+      sn assemble "$nw/names-to-$c.edn" "$iface" "$maps" "${prev[@]}" || exit 1
+      names=$nw/names-to-$c.edn
+    done
+    sn assemble "$nw/std-names.edn" "$iface" "$maps" "${prev[@]}" || exit 1
+    sn compare "$fd/std-names.edn" "$nw/std-names.edn" ;;
   std-crates)
     # C6-2 (b) (doc/rust/FRONTEND-SURVEY.md, "As built: C6-2"): --native, std's crates' identities computed by Arbace (Cargo's metadata
     # hash ported, arbace.rust.front.cargo-meta, over the library build's units test/rust/front/std-build-units.edn; no cargo, no
@@ -548,23 +586,32 @@ case ${1:-} in
       export)
         c=${1:?lib-unit export CRATE}; [ -s "$lu/$c-keys.txt" ] || { echo "lib-unit: no $lu/$c-keys.txt (bin/rust-front lib-unit keys $c)" >&2; exit 1; }
         . "$root/bin/lib/repr-rust/core-build.bash"; libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
+        sort -u "$lu/$c-keys.txt" $( [ -s "$lu/$c-inline-keys.txt" ] && echo "$lu/$c-inline-keys.txt") > "$lu/$c-export-keys.txt"
         if [ "$c" = core ]; then
           # core's items through core-check's module run at their keys (CORE_EXPORT_KEYS: no oracle, without debug assertions as rsi's
           # std build; the module files owning the keys, each key's longest module path), its interface over those files and the extras
           m=$(core_modules) || exit 1; lib=$(core_lib) || exit 1
           files=$(cd "$root" && arbace_tool -e "(require '[arbace.rust.front.alloc-check :as a] '[arbace.string :as str])
             (let [ms (a/read-modules \"$m\") by (into {} (for [x ms] [(:path x) (:file x)]))
-                  ks (for [l (str/split-lines (slurp \"$lu/core-keys.txt\")) :when (seq l)] (str \"core::\" (str/replace l \"-\" \"::\")))]
+                  ks (for [l (str/split-lines (slurp \"$lu/core-export-keys.txt\")) :when (seq l)] (str \"core::\" (str/replace l \"-\" \"::\")))]
               (doseq [f (sort (distinct (keep #(get by (a/owner (map :path ms) %)) ks)))] (println f)))" 2>&1 | grep -v -E "$filt")
           [ -n "$files" ] || { echo "lib-unit export core: no module file owns the keys" >&2; exit 1; }
-          echo "lib-unit export core: $(wc -l < "$lu/core-keys.txt") keys in $(printf '%s\n' "$files" | wc -l) module files"
+          echo "lib-unit export core: $(wc -l < "$lu/core-export-keys.txt") keys in $(printf '%s\n' "$files" | wc -l) module files"
           rm -f "$lu/native-core-items.edn"
           # shellcheck disable=SC2086
-          CORE_EXPORT_KEYS=$lu/core-keys.txt CORE_EXPORT=$lu/native-core-items.edn core_check --records $files | grep -E '^core-check: (the |export|total)|refused' | tail -20
+          CORE_EXPORT_KEYS=$lu/core-export-keys.txt CORE_EXPORT=$lu/native-core-items.edn core_check --records $files | grep -E '^core-check: (the |export|total)|refused' | tail -20
           [ -s "$lu/native-core-items.edn" ] && echo "lib-unit export core: $(grep -c '^(core/body' "$lu/native-core-items.edn") bodies"
           exit 0
         fi
-        lib_export --keys "$lu/$c-keys.txt" "$c" "$lu/native-$c-items.edn"; exit $? ;;
+        lib_export --keys "$lu/$c-export-keys.txt" "$c" "$lu/native-$c-items.edn"; exit $? ;;
+      inline-keys)
+        # C6-4: the keys of CRATE's `#[inline(always)]` callees the builds wanted (each build's log: `lib-unit inline wanted DEF`,
+        # any crate's build: an item of alloc inlines core's), added to CRATE's keys for its next export
+        # ($lu/CRATE-inline-keys.txt, which the export reads beside CRATE-keys.txt; the build's items stay CRATE-keys.txt's)
+        c=${1:?lib-unit inline-keys CRATE}; touch "$lu/$c-inline-keys.txt"
+        { cat "$lu/$c-inline-keys.txt"; cat "$lu"/*-build.log 2>/dev/null | sed -n "s/^lib-unit inline wanted \($c::[^ ]*\).*/\1/p" | sed "s/^$c:://; s/::/-/g"; } | sort -u > "$lu/$c-inline-keys.txt.new"
+        mv "$lu/$c-inline-keys.txt.new" "$lu/$c-inline-keys.txt"
+        echo "lib-unit inline-keys: $c: $(wc -l < "$lu/$c-inline-keys.txt") keys of #[inline(always)] callees wanted" ;;
       build)
         c=${1:?lib-unit build CRATE}; std=$(lib_std_ir) || exit 1
         [ -s "$lu/native-$c-items.edn" ] || { echo "lib-unit: no $lu/native-$c-items.edn (bin/rust-front lib-unit export $c)" >&2; exit 1; }
@@ -578,18 +625,25 @@ case ${1:-} in
         fd=$(records_front) || exit 1
         libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
         # the environment: a synthetic program (its pipeline sets std's interface and names up), at rsi's plan's edition
-        cd "$root" && RF_CORE_NATIVE=$lu/native-$c-items.edn RF_MONO_LIB=$libsrc RF_EDITION=2021 RF_OVERFLOW_CHECKS=1 BUILD_PASS=SimplifyCfg-pre-optimizations \
+        # C6-4: the other crates' exports beside CRATE's, whose `#[inline(always)]` items CRATE's inline (core's into alloc's)
+        nat=$lu/native-$c-items.edn
+        for o in core alloc std; do [ "$o" != "$c" ] && [ -s "$lu/native-$o-items.edn" ] && nat=$nat:$lu/native-$o-items.edn; done
+        cd "$root" && RF_CORE_NATIVE=$nat RF_MONO_LIB=$libsrc RF_EDITION=2021 RF_OVERFLOW_CHECKS=1 BUILD_PASS=SimplifyCfg-pre-optimizations \
           GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} GOMAXPROCS=${GOMAXPROCS:-3} \
           arbace_tool -m arbace.rust.front.build-run lib-unit "$lu/crates.edn" "$fd" abort "$c" "$lu/$c-defs.txt" "$lu/$c-unit.edn" 2>&1 | grep -v -E "$filt" | tee "$lu/$c-build.log" | tail -3 ;;
       compare)
         c=${1:?lib-unit compare CRATE}; std=$(lib_std_ir) || exit 1
         [ -s "$lu/$c-unit.edn" ] || { echo "lib-unit: no $lu/$c-unit.edn (bin/rust-front lib-unit build $c)" >&2; exit 1; }
         cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit compare "$std" "$c" "$lu/$c-unit.edn" 2>&1 | grep -a -v -E "$filt" | tee "$lu/$c-compare.log" | grep -a -v '^lib-unit equal ' ;;
-      *) echo "usage: bin/rust-front lib-unit census|keys CRATE|export CRATE|build CRATE|compare CRATE [NAME...]" >&2; exit 2 ;;
+      *) echo "usage: bin/rust-front lib-unit census|keys CRATE|inline-keys CRATE|export CRATE|build CRATE|compare CRATE [NAME...]" >&2; exit 2 ;;
     esac ;;
   pack-compare-test)
     # queue 443: build-run's pack-compare (the instance judge of alloc's and std's bodies), pure cases, light (no pack, no library)
     cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-500MiB} arbace_tool -p "$root/test" -m rust.front.pack-compare-test 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
+  inline-test)
+    # C6-4 (doc/rust/FRONTEND-SURVEY.md, "C6-4's next slice: LLVM's AlwaysInliner over our forms"): arbace.rust.back.inline's pure
+    # cases (test/rust/front/inline_test.ae), light
+    cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-500MiB} arbace_tool -p "$root/test" -m rust.front.inline-test 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   rind-test)
     # RIND5 (doc/rust/FRONTEND-SURVEY.md, "As built: RIND5's swizzle"): test/rust/front/rind_test.ae over the pack rust-front-std's
     # names and interface: lower-const-arg's `[..].len()` and its negative case, then test/rust/front/swizzle1.rs's main built
@@ -750,14 +804,30 @@ case ${1:-} in
     # std-iface-native) in place of the helper's std-iface.edn, and the StableCrateIds computed (bin/rust-front std-crates --native,
     # Cargo's metadata hash ported) in place of std-crates-rsi.edn's (the rlibs'); the inputs written to $rw/inputs.tsv
     crates=$root/test/rust/front/std-crates-rsi.edn c4=""
-    if [ "${RF_NATIVE_IFACE:-0}" = 1 ]; then
-      [ -s "$work/std-iface-native.edn" ] || { echo "rsi-build: no $work/std-iface-native.edn (bin/rust-front std-iface-native)"; exit 1; }
-      "$0" std-crates --native > "$rw/std-crates-native.log" 2>&1 || { cat "$rw/std-crates-native.log"; exit 1; }
-      crates=$work/std-crates-native.edn
+    # C4-1 (a): RF_NATIVE_NAMES=FILE, std's names assembled natively (arbace.rust.front.std-names: the crates' sources scanned, their
+    # imports resolved; bin/rust-front std-names-native) in place of the helper's std-names.edn, with or without RF_NATIVE_IFACE;
+    # C4 counted own only once the user rules on C6-5 (the library build's units), so the words do not begin "own"
+    if [ "${RF_NATIVE_IFACE:-0}" = 1 ] || [ -n "${RF_NATIVE_NAMES:-}" ]; then
       nfd=$work/records/front-native; rm -rf "$nfd"; mkdir -p "$nfd"
-      for f in "$fd"/*; do [ "$(basename "$f")" = std-iface.edn ] || ln -s "$(readlink -f "$f")" "$nfd/"; done
-      ln -s "$work/std-iface-native.edn" "$nfd/std-iface.edn"; fd=$nfd
-      c4="std's interface from the crates' native passes, the StableCrateIds by Cargo's metadata hash ported (std-names.edn the helper's)"
+      for f in "$fd"/*; do ln -s "$(readlink -f "$f")" "$nfd/"; done
+      words=()
+      if [ "${RF_NATIVE_IFACE:-0}" = 1 ]; then
+        [ -s "$work/std-iface-native.edn" ] || { echo "rsi-build: no $work/std-iface-native.edn (bin/rust-front std-iface-native)"; exit 1; }
+        "$0" std-crates --native > "$rw/std-crates-native.log" 2>&1 || { cat "$rw/std-crates-native.log"; exit 1; }
+        crates=$work/std-crates-native.edn
+        rm -f "$nfd/std-iface.edn"; ln -s "$work/std-iface-native.edn" "$nfd/std-iface.edn"
+        words+=("std's interface from the crates' native passes" "the StableCrateIds by Cargo's metadata hash ported")
+      fi
+      if [ -n "${RF_NATIVE_NAMES:-}" ]; then
+        [ -s "$RF_NATIVE_NAMES" ] || { echo "rsi-build: no $RF_NATIVE_NAMES (bin/rust-front std-names-native)"; exit 1; }
+        rm -f "$nfd/std-names.edn"; ln -s "$(readlink -f "$RF_NATIVE_NAMES")" "$nfd/std-names.edn"
+        words+=("std's names from the crates' sources")
+      fi
+      [ "${RF_NATIVE_IFACE:-0}" = 1 ] || words+=("std's interface the helper's")
+      [ -n "${RF_NATIVE_NAMES:-}" ] || words+=("std-names.edn the helper's")
+      fd=$nfd
+      c4=$(IFS=,; printf '%s' "${words[*]}" | sed 's/,/, /g')
+      c4="$c4 (C6-5 pending)"
     fi
     libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}
     rf_libsrc_take || { echo "rsi-build: no $libsrc (bin/repr-rust src-take)"; exit 1; }

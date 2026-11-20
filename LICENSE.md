@@ -1286,6 +1286,19 @@ covers what.
   decoder written after rustc 1.99.1, the same revision and under the same terms (MIT): the grammar `compiler/rustc_symbol_mangling/
   src/v0.rs` prints (paths, impl paths, types, constants, back-references, identifiers, disambiguators). The census, the keys and the
   judge, build-run's `lib-unit-run` and `bin/rust-front lib-unit` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/std_names.ae` (C4-1 (a), 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C4-1 (a)"): its scan and
+  import resolution written after rustc 1.99.1, the same revision and under the same terms (MIT): `compiler/rustc_resolve/src/
+  {build_reduced_graph,imports}.rs` (the definitions' namespaces and visibilities, a constructor's narrowed visibility, macro_rules!
+  bindings, single and glob imports, an import binding's visibility) and `tools/rsdump/front.rs`' traversal (Arbace's own); the
+  builtin macros' kinds after `compiler/rustc_builtin_macros/src/lib.rs`. The assembly, the compare and `bin/rust-front
+  std-names-native` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/back/inline.ae` (C6-4, 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "C6-4's next slice: LLVM's AlwaysInliner over our
+  forms"): Arbace forms porting LLVM 23's always-inliner, the llvm-project of the pinned rustc-1.99.1-src.tar.xz
+  (`src/llvm-project`): `llvm/lib/Transforms/IPO/AlwaysInliner.cpp` (AlwaysInlineImpl), `llvm/lib/Transforms/Utils/
+  InlineFunction.cpp` (InlineFunctionImpl) and `llvm/lib/Transforms/Utils/CloneFunction.cpp` (CloneAndPruneIntoFromInst,
+  PruningFunctionCloner::CloneBlock), with InstSimplify's phi rule: copyright the LLVM Project contributors, under the Apache
+  License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below). Its pure cases (`test/rust/front/inline_test.ae`) are
+  Arbace's own, under the Eclipse Public License 1.0.
 - `arbace/rust/front/cargo_meta.ae` (C6-2 (b), 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C6-2"): Arbace forms porting
   Cargo 0.100.0 (cargo 1.99.1, https://github.com/rust-lang/cargo at 5f94df478, the pinned rustc-1.99.1-src.tar.xz's
   `src/tools/cargo`): `src/compiler/build_runner/compilation_files.rs` (compute_metadata, hash_rustc_version),
