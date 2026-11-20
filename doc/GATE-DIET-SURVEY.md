@@ -1117,3 +1117,148 @@ steps never passed), and the passes before hold no crop file the rules add; from
 vector controls' rules), `costs-test`, `lanes-test`, `chain-needs-test`, `arm64-host-test`, `plan-logic-test`,
 `needs-wait-test`, `weekly-test`, `bin/gate-tests`, `gate.crops check` (0 problems), `bin/crops-score --judge --strict`,
 `test/docs/claude-md-test.bash`, `bin/gate --plan` (51 steps), `bin/gate --full --plan` (338 steps, 358 before less the 20 merged away; no `night` decision: the full tier keys every subset as before). No build, no gate run.
+
+## The cover and unit keys (branch `h-keys-design`, from `next` `e4a7a30f3`, 2026-11-17; decisions GDS21-GDS27)
+
+Two questions of the user's (2026-11-17, `.tmp/goal/keys-measurement-brief.md`): in a `--full` run, which essential steps check
+nothing their full-tier counterparts do not check in the same run (Part 2, "the cover", built here and off by `GATE_SUBSUME=0`);
+and how many of a full gate's checks would rerun under keys by the compiled units each loads, not by its hosts' whole identities
+(Part 1, "unit keys": the method and its script built and tested here; the measurement waits for tonight's full gate, whose
+first try on stack-w2 `f1969748f` failed at javac-tool after 59 minutes, `.tmp/goal/g-full.log`).
+
+### Part 2: the pairs, verified on next's table (the crops tier's merged steps)
+
+Each pair read from the commands, the lists and the corpora (`test/gate/steps.edn`, the tools' `--essential`/`--only` paths);
+seconds the latest pass's (the store, 2026-11-16/17). "Whole" is the subsumer's form in `--full` and `--weekly`; `--nightly`
+rotates some (a subset and a slice, which may leave the essential cases out).
+
+| essential (s) | subsumer | why it covers | only the essential has | `--nightly` |
+|---|---|---|---|---|
+| goi-check (184) | goi-check-full.linux-amd64 | `bin/goi check` whole on the same executable: every program, the controls, and goi.divergences (not `--partial`) holds `test/goi/essential.txt` to the record | nothing | rotated: runs |
+| goi-aot-essential (347) | goi-aot.linux-amd64 | the same for `--aot` and `essential-aot.txt` (goi.divergences --aot checks the list in the whole check too) | nothing | whole (no `:subset`): covered |
+| suite-aot-essential (964) | suite-aot | the whole compiled suite holds `essential-aot.txt`'s namespaces (fewer skipped: `essential-aot-skipped.edn`) and the controls | its namespaces compiled alone (a smaller program) | covered |
+| programs (1616) | programs-full (weekly, `:also-changed`) | every sample of `test/programs/` and `test/programs-fail/`, `mixed` and `bad-go` among them | nothing | covered when programs-full is in the plan |
+| java-compiled (1805) | java-compiled-full (6 parts) | every corpus's compiled level holds `essential.txt`'s tests that pass compiled; java-judge judges them against the record, java-forms-verify the committed forms it builds from | the tests in one program (the full level shards them); judged by itself ("every one must pass") | rotated: runs |
+| cpp-check-essential (619) | cpp-check.samples-runtime | `bin/cppi check`, the run corpora samples and runtime whole, the same environment | nothing | covered |
+| c-aot-essential (221) | c-aot (15 parts) | `essential-aot.txt`'s programs are in six of the parts; `CI_AOT_NODES=1` beside | its programs in one shard | rotated: runs |
+| c-dg-essential (40) | c-dg | `bin/ci dg` whole: `essential-dg.txt` is a subset of its files | nothing | covered |
+
+Not covered, with what holds them back:
+- **c-check-essential** (191): `CI_LINK_CHECK=1` (each program also built the old way, the prebuilt runtime's link compared) and
+  the builder on stage 0; c-check runs on the gate's executable without the link check.
+- **oi-essential** (777): `bin/oi test`, `repl-check --native`, `own-verdicts --check` and the four judgments of the records
+  besides `check --only-list`, which oi-check's run covers.
+- **si-essential** (397 with the merged si-aot-essential): `bin/si unit`, `test --si` (si-check runs `si test`, the expander's
+  cases on stage 0, not on si) and `corpora controls-test`; the rest is si-check's, si-aot's and si-corpora's.
+- **rust-front-essential, rust-core-essential** (390, 377): no full-tier step runs `bin/rust-front essential` or
+  `core-essential` (rust-full and rust-aot are rsi's, the evaluator's); not candidates.
+- **cpp-essential** (about 2.6 min): cpp-tokens' gxx-dg and libstdcxx-headers parts are samples (`--sample 10`, `--sample 8`),
+  which need not hold the essential files.
+- **asm-amd64-essential, asm-arm64-essential, a64i-essential, wasm-essential, llvm-essential** (about 3, 4.4, 2.4, 2.7 and 1.5
+  min): merged steps whose ops checks, controls tests and object checks need a crop-by-crop reading; together about 14 min.
+- **hsi-essential** (75): hsi-check runs `--libs own` (another library set). **haskell-read-essential**: haskell-roundtrip is
+  `:clean-only`. **java-check**: its `:outputs` feed java-check-judge (the rule refuses a producer).
+- **haskell-lib-stg-own and haskell-lib-stg** (33 and 31 min): different checks (the native ifaces against GHC's), each with its
+  own judge; their shared work is reading ghc-internal's modules. A content-keyed cache of that read would serve both (not a
+  `:subsumes`; not measured here).
+
+### Part 2: the mechanism (built)
+
+- `:subsumes [STEP ...]` on a `:full` or `:weekly` check (unkeyed: in no key; the planner refuses it elsewhere, and a STEP that is
+  not an essential check without `:outputs`).
+- `gate.plan/cover` (`cover-tier?`: modes `full`, `nightly`, `full-oracle`; not `--rerun`, not the clean run's inner gate, not
+  `GATE_SUBSUME=0`): an essential check decided `run` becomes `covered` when every step that subsumes it has checks in this plan
+  and every one of them runs (`run` or `after`) whole: none a rotated subset or slice, none skipped (a subsumer's pass does not
+  hold the essential step's own inputs, its list and records: a change to `essential-aot.txt` alone moves the essential step's
+  key, not the full one's, and must run it), and no step uses its outputs. The plan says "covered by STEP (N checks): its run in
+  this gate checks every case of this one".
+- The runner: status `covered` (no run, no failure, no pass; a need that holds, as `night`), reported `covered NAME (why)`, the
+  clean record's `:covered`, the summary's "N essential checks covered by the full tier's". The lanes' simulation counts it as
+  not run.
+- Declared on the eight pairs above (`test/gate/steps.edn`, and C++'s `test/gate/crops/cpp.edn`). No key moves by the
+  attribute; the files changed move gate-tests', crops-score's, caches-table's, cpp-essential's and cpp-c2j's keys, and repr-go's
+  and repr-go-native's, whose `:lib` held the runner: `:lib` now leaves `bin/lib/gate-run.bash` out (GDS11 (a): the runner's
+  logic is the epoch), once.
+- Tests: `test/gate/subsume-test.bash` (15 of 15: the essential gate, `--full`, a parted subsumer, no key, `--rerun`,
+  `GATE_SUBSUME=0`, the clean run, a skipped subsumer, `--nightly`'s rotated one, the rules, the runner, the checkout's table).
+
+**Before and after** (`bin/gate --full --plan` on `e4a7a30f3`, the shared store, 2026-11-17 14:00; durations the store's):
+
+| plan | decisions | serial sum | simulated wall |
+|---|---|---|---|
+| before | 300 run, 15 after, 16 skip | 25:57 | 19:23 |
+| after | 296 run, 15 after, 16 skip, 4 covered (java-compiled, c-dg-essential, c-aot-essential, cpp-check-essential) | 25:25 | 19:11 |
+
+`bin/gate --nightly --plan` (the same store): 2 covered (c-dg-essential, cpp-check-essential); java-compiled and c-aot-essential
+run, their subsumers rotated, as designed.
+
+Today goi-check, goi-aot-essential, suite-aot-essential and programs were `skip` (passed at their keys), so not covered. On a
+night whose keys all move (a re-seed, a runtime change) the cover spares, serially: `--weekly` 97 min (all eight), `--full`
+70 min (programs-full not in the plan), `--nightly` 33 min (goi-aot-essential, suite-aot-essential, cpp-check-essential,
+c-dg-essential; 27 more on a night programs-full's `:also-changed` files changed). suite-aot-essential, java-compiled and
+programs are lane-1 steps (32-34 GiB) on the run's critical path, so most of their 73 minutes is wall too.
+
+### Part 1: unit keys, the method (built; the measurement tomorrow)
+
+`bin/gate-unit-keys measure LOG` (`test/gate/unitkeys.ae`, `gate.unitkeys`): for each check a finished gate's log names as
+run (`ok`, `FAILED`), its pass of the gate's commit (the `KEY.inputs` its key hashes) against its latest pass before (or, with
+`--then-commit SHA`, its latest pass up to that commit's: a change set's start), the subjects that differ, and for each host line
+among them whether the step's units moved: `:gate` by the two builds' `units.tsv` (`ARBACE_GATE_EXES/KEY20/amd64`), `:javac` by
+the tool's, `:stage0` by the two seeds' (`bin/gate-unit-keys seed-units REV...`: the seed's printed program split as
+`bin/lib/prog-units.bash` splits a build, about 10 s a seed), `:prog`/`:javac-prog` already unit keys. A step's units: those of
+the namespaces it loaded (`NAME.loaded` of the clean runs' and audits' logs, `.tmp/gate-clean/*.logs/gate`, the newest first)
+and `-core` (the runtime, jrt, goi's table, the main package); without a list, every unit less its `:never-loads` and
+loads.edn's `:never` families. Classes: `host-only` and `unloaded-files` (a changed `arbace/` source of a namespace it never
+loaded) are spared; `file`, `decl`, `logic`, `pin`, `env`, `uses`, `list`, `host-units`, `host-unknown`, `never-passed`,
+`failed` rerun; `build-scripts` (only `:build`'s scripts besides hosts whose units are the same) reruns, counted apart: spared
+if the step does not run the build itself. A table a family (the name before its first dot) and the totals, wall from the passes'
+seconds. Tested by `test/gate/unitkeys-test.bash` (9 of 9). Runs in under a minute on the store.
+
+Tried on what is kept:
+- **B1's full gate** (`.tmp/night13/b1-logs/g-full.log`, `9da791cd4`, 2026-11-16): 285 checks ran, 285 rerun under unit keys
+  (file 191, decl 66, failed 16, never passed 11, logic 1). Not a fair sample: B1 crossed GD3's epoch (every check's logic line
+  moved, `bin/lib/gate-run.bash` to `test/gate/epoch`) and its table's declarations; its builds' `units.tsv` are pruned.
+- **stack-w2's essential gate** (no log: `measure - --commit f1969748f`, the store's 62 checks of that commit), against the
+  pass just before (the last increment, the two fixes and R): 2 spared (generated, host-only; reap, an unloaded source), 4 more
+  if the build's scripts were keyed through the units: diffcheck (38 min), programs (27), suite-aot-essential (16), go-smoke
+  (3), 84 min in all: `gate_key` moved (bin/arbace-go) but the units they load, -core among them, did not. The rest moved by
+  files they read (arbace/classes/annot.ae under every crop's `:tools`, bin/ci, repr/scheme's reader) or by `:prog`.
+- **The whole change set** (`--then-commit b1f27d8b3`, stack-w1 to stack-w2: W2, the re-seed, the fixes, R): 62 of 62 rerun.
+  The re-seed moved stage 0's units (146 of the 202 a step loads, -core among them), and W2's files reached every step.
+
+Tomorrow (after tonight's full gate): `bin/gate-unit-keys seed-units b1f27d8b3 f1969748f` (kept in `.tmp/unit-keys/seeds`), then
+`bin/gate-unit-keys measure LOG --seed-units .tmp/unit-keys/seeds --tsv OUT` and `--then-commit b1f27d8b3`: the table a
+family, the total and the wall it would have saved. The night's builds' `units.tsv` must still be in `.tmp/gate-exe` (the
+newest 3 are kept: run it before another two builds).
+
+### Decisions for the user (GDS21-GDS27)
+
+- **GDS21 The cover.** (a) As built: `:subsumes` on full-tier checks, the subsumed essential check `covered` in `--full`,
+  `--nightly` and `--weekly` when its subsumers run whole; the essential gate unchanged. (b) No cover: every essential check
+  runs in every tier (today's 33-97 minutes a moved night). (c) Take the essential checks out of the full tiers altogether
+  (a `:phase :essential-only`): simpler, but a night whose rotation leaves a subsumer out would check the cases nowhere.
+  Recommended: (a).
+- **GDS22 Which pairs.** (a) The eight verified ones (table above). (b) Also the partial ones after moving their extras into
+  the full step: oi-essential's test, repl-check, own-verdicts and judgments into oi-check; si-essential's unit, `test --si` and
+  controls-test into si-check; `CI_LINK_CHECK=1` into c-check's ci-run part; each moves that full step's key once (about 23
+  minutes more a moved night). (c) Fewer: leave java-compiled out (its one-program build is a different composition than the
+  full level's shards). Recommended: (a) now, (b) crop by crop with the crops' owners.
+- **GDS23 A covered check's pass.** (a) As built: none; the next essential gate at the same key runs it (a crop's is deferred by
+  the crops tier anyway; the core's keys usually move by day). (b) The runner records a pass for it, marked `:covered-by`, once
+  its subsumers pass, so that a day gate at the same key skips it. Recommended: (a) until a night shows the day's cost.
+- **GDS24 Where the cover applies.** (a) As built: `--full`, `--nightly`, `--weekly`; not the clean run (its record holds every
+  step's own run), not `--rerun`. (b) The clean run too (saves the same 97 minutes at a tag; its record then holds `:covered`
+  rows). Recommended: (a).
+- **GDS25 The extras' home** (with GDS22 (b)): (a) moved into the full step's command; (b) kept as a tiny essential step of their
+  own (one more step per crop, no key moved). Recommended: (a) where the full step's runtime grows by under a minute.
+- **GDS26 Part 1's method.** (a) As built: per check, the pass of the run against the pass before (or the change set's start),
+  host lines judged by the units of the namespaces the step loaded (the clean runs' `NAME.loaded`) and -core. (b) A whole-plan
+  replay (the planner run with unit identities on the two commits): exact, but needs the plan's inputs of both commits kept.
+  Recommended: (a); (b) if (a)'s numbers justify building unit keys.
+- **GDS27 The keying change, provisional** (to confirm on tonight's data): (a) the `:gate` host by the build's units
+  (`units.tsv` less the step's `:never-loads` and never-loaded families), as `:prog` already is, and the `:build` group's scripts
+  out of the keys of the steps that only run the built executables (diffcheck, go-smoke, suite-aot-essential; not programs and
+  programs-full, which run `bin/arbace-go --build-program`): today's increment would have spared 84 minutes; (b) also `:stage0`
+  by the seed's units: helps no re-seed (-core moves), only a seed whose runtime is unchanged; (c) per-step loaded units instead
+  of all-but-never (the clean runs' `NAME.loaded`, refreshed by each clean run, the audit holding them honest as GD3's closures
+  are). Recommended: (a) first (the `:prog` machinery exists), measured on tonight's gate; then (c); (b) not.

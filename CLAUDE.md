@@ -646,7 +646,12 @@ Prior art:
   nothing; `--nightly`, `--weekly`, `--full` and the clean run key them as before), the crops' small subsets one step a crop's chain
   where their keys agree (`asm-amd64-essential`, `asm-arm64-essential`, `a64i-essential`, `wasm-essential`, `llvm-essential`,
   `cpp-essential`, `si-essential`, `oi-essential`, `rust-read-essential`; a merged step's `:controls` a vector, one entry a check;
-  `gate.crops check`: a new crop's essential check in the tier). `bin/gate --full` adds, one after another (concurrently by chain with
+  `gate.crops check`: a new crop's essential check in the tier). Since the cover (2026-11-17, write-ahead; doc/GATE-DIET-SURVEY.md,
+  "The cover and unit keys", GDS21-GDS24) a full-tier check's `:subsumes [STEP ...]` (unkeyed) names essential checks it checks every case of
+  (goi-check, goi-aot-essential, suite-aot-essential, programs, java-compiled, cpp-check-essential, c-aot-essential, c-dg-essential): in
+  `--full`, `--nightly` and `--weekly` such a check is `covered` (no run, no failure, no pass; a need that holds) when every subsumer runs
+  whole in that run (not rotated, not skipped); the essential gate, `--rerun`, the clean run and `GATE_SUBSUME=0` run it; `bin/gate-unit-keys`
+  measures which checks of a finished gate unit-level keys would have rerun (`test/gate/unitkeys.ae`, GDS26, GDS27). `bin/gate --full` adds, one after another (concurrently by chain with
   `GATE_FULL_PARALLEL=1`): javac's tool (`bin/javac-vendor tool`, built once per `arbace_javac_key`
   and kept by that key in `ARBACE_GATE_EXES/javac-KEY`, j2g on the gate's executable) and javac on Arbace (`bin/javac-vendor
   check --from`: the tool build's own j2g run, javac's world translated once; `verify`:

@@ -1,0 +1,62 @@
+#!/bin/bash
+# The unit keys' measurement (doc/GATE-DIET-SURVEY.md, "The cover and unit keys", GDS26, GDS27): of the checks a finished gate
+# ran, which would have rerun had each been keyed by the compiled units it loads instead of its hosts' whole identities
+# (gate_key's :gate, the seed's :stage0, javac's tool's :javac). Light: reads the gate's log, the store of passes and the kept
+# builds' units.tsv; no build, no run (the seeds' units: one tar extraction each).
+#
+#   bin/gate-unit-keys measure LOG [--loaded DIR]... [--seed-units DIR] [--tsv OUT]
+#       LOG a finished gate's log (bin/gate's output: its "ok NAME (..." and "FAILED NAME (..." lines); the store
+#       ARBACE_GATE_STORE (default the main checkout's .tmp/gate-pass), the builds ARBACE_GATE_EXES (.tmp/gate-exe).
+#       --loaded DIR: a clean or audited run's logs (.tmp/gate-clean/SHA.logs/gate, .tmp/gate-audit), each step's NAME.loaded
+#       (its namespaces; a later DIR's first); default every .tmp/gate-clean/*.logs/gate, oldest first. --seed-units DIR: the
+#       seeds' units (seed-units' output), else a stage0 move counts as unknown (a rerun). LOG - with --commit SHA: no log, the
+#       store's checks with a pass of that commit (an essential gate's, whose log is gone). --then-commit SHA: compare with each
+#       step's latest pass up to that commit's last pass (a change set's start), not its pass just before
+#   bin/gate-unit-keys seed-units REV... [--out DIR]
+#       the units of the seed at each git REV (its seed/arbace-seed-go.tar.xz, the printed program's packages and -core, as
+#       bin/lib/prog-units.bash splits a build), DIR/STAGE0-ID.tsv (STAGE0-ID the :stage0 host's identity at REV, as
+#       bin/lib/gate-run.bash's plan_inputs computes it); DIR default .tmp/unit-keys/seeds
+#
+# Usage: bin/gate-unit-keys measure LOG [...] | bin/gate-unit-keys seed-units REV... [--out DIR]
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/prog-units.bash"
+. "$root/bin/lib/gate-cache.bash"
+main=$(arbace_main_checkout "$root")
+store=${ARBACE_GATE_STORE:-$main/.tmp/gate-pass}
+exes=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
+usage() { sed -n '/^# Usage:/s/^# //p' "$0" >&2; exit 2; }
+
+case ${1:-} in
+  measure)
+    shift; [ $# -ge 1 ] || usage
+    log=$1; shift
+    args=("$@")
+    if ! printf '%s\n' "$@" | grep -qx -- --loaded; then
+      for d in $(ls -dtr "$main"/.tmp/gate-clean/*.logs/gate 2>"$TMPDIR/unit-keys.ls.err"); do args+=(--loaded "$d"); done
+    fi
+    arbace_tool -p "$root/test" -m gate.unitkeys measure "$root" "$log" "$store" "$exes" ${args[@]+"${args[@]}"} ;;
+  seed-units)
+    shift; out=$root/.tmp/unit-keys/seeds revs=()
+    while [ $# -gt 0 ]; do case $1 in --out) out=$2; shift 2 ;; *) revs+=("$1"); shift ;; esac; done
+    [ ${#revs[@]} -gt 0 ] || usage
+    mkdir -p "$out"
+    for rev in "${revs[@]}"; do
+      # the :stage0 identity at REV (bin/lib/gate-run.bash's plan_inputs: the seed's pin, Go's pin, bin/seed, bin/lib/seed-go.bash)
+      id=$( { git -C "$root" show "$rev:seed/arbace-seed-go.tar.xz.sha256"; git -C "$root" show "$rev:seed/goroot.sha256"
+              git -C "$root" show "$rev:bin/seed"; git -C "$root" show "$rev:bin/lib/seed-go.bash"; } | sha256sum | cut -c1-64)
+      if [ -s "$out/$id.tsv" ]; then echo "seed-units: $rev: $out/$id.tsv (kept)"; continue; fi
+      w=$(mktemp -d "$TMPDIR/seed-units.XXXXXX")
+      git -C "$root" show "$rev:seed/arbace-seed-go.tar.xz" > "$w/seed.tar.xz"
+      # the printed program's tree in a build's layout (go/arbace/..., namespaces.txt), for prog_units
+      mkdir -p "$w/t"
+      tar -xJf "$w/seed.tar.xz" -C "$w/t" --transform 's|^arbace-seed-go/mod/|go/arbace/|;s|^arbace-seed-go/||'
+      rm -f "$w/seed.tar.xz"
+      prog_units "$w/t:seed" > "$out/$id.tsv.new" && mv "$out/$id.tsv.new" "$out/$id.tsv"
+      rm -rf "$w"
+      echo "seed-units: $rev: $(wc -l < "$out/$id.tsv") units, $out/$id.tsv"
+    done ;;
+  *) usage ;;
+esac
