@@ -125,11 +125,20 @@
                    (= :one (:k o)) (assoc :occ {:k :many :tail nil})
                    (some? u) (assoc :unf (when (c/evald-unf? u) {:k :other :cons []}))))))
 
+(defn- tv-free? [t] (not (some (fn [x] (and (vector? x) (= :tv (first x)))) (tree-seq coll? seq t))))
+
 (defn- subst-id-bndr
-  "substIdBndr: the binder renamed when in scope already (uniqAway), its fragile info zapped: [env out-bndr]"
+  "substIdBndr: the binder renamed when in scope already (uniqAway), its fragile info zapped: [env out-bndr]; hs-own-stg-2
+  (a): under a type substitution (:tsubst, the beta reductions' type matches) a binder whose type it changes is cloned with
+  the substituted type (GHC's substIdType: a default method's local worker inlined at IO typed at IO a)"
   [env b]
   (let [k (c/vkey b)
-        b1 (if (and (c/lv? b) (contains? (:in-scope env) k)) (c/clone b) b)
+        ts (:tsubst env)
+        t0 (when (and (seq ts) (c/lv? b)) (c/id-type b))
+        t1 (when t0 (c/subst-type ts t0))
+        retype? (and t1 (not= t1 t0))
+        b1 (if (and (c/lv? b) (or retype? (contains? (:in-scope env) k))) (c/clone b) b)
+        _ (when (and retype? c/*new-types*) (swap! c/*new-types* assoc b1 t1))
         b2 (zap-fragile b1)
         env2 (-> env (assoc-in [:in-scope (c/vkey b2)] b2)
                  (assoc :subst (if (= (c/vkey b2) k) (dissoc (:subst env) k) (assoc (:subst env) k [:done-id (c/occ-form b2)]))))]
@@ -948,6 +957,20 @@
           body (if (seq bs) (list 'lam (vec bs) (nth e 2)) (nth e 2))]
       (if (= :apply (:k k))
         (let [{:keys [arg dup cont] se :env} k
+              ;; hs-own-stg-2 (a): the binder's type matched against the argument's (GHC's type application, done here
+              ;; by matching: a default method's dictionary binder Semigroup a at $fSemigroupIO d, a := IO a'), the
+              ;; substitution applied to the body's binders as they are cloned
+              bt (c/id-type b)
+              env (if (and bt (not (tv-free? bt)) (not (c/head? arg 'lit)))
+                    (let [ts0 (:tsubst env)
+                          ;; (the argument's type under the substitution so far: an in-expression's binders keep the
+                          ;; template's types)
+                          at (try (c/infer-type! arg nil) (catch Throwable _ nil))
+                          at (if (and at (seq ts0)) (c/subst-type ts0 at) at)
+                          th (when at (c/type-match {} bt at))
+                          th (into {} (remove (fn [[x t]] (= t [:tv x])) th))]
+                      (if (seq th) (update env :tsubst (fn [m] (merge (into {} (map (fn [[x t]] [x (c/subst-type th t)]) m)) th))) env))
+                    env)
               lev (lam-arg-levity b arg)
               from [:beta lev]]
           (tick!)
@@ -1474,7 +1497,7 @@
   (binding [c/*uniq* (atom 0)
             c/*new-types* (atom {})
             c/*ltypes* (:ltypes r)
-            c/*genv* (merge (:genv r) (:types r))
+            c/*genv* (merge (:dfun-types r) (:genv r) (:types r))
             c/*tycons* (:tycons r)
             c/*unlifted-type?* (:unlifted-type? hooks)
             c/*unlifted-expr?* (let [ue (:unlifted-expr? hooks) ut (:unlifted-type? hooks)]
