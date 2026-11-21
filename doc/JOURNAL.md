@@ -16062,3 +16062,63 @@ queued behind three heavy jobs; StrictPats' last case by treating an unboxed 1-t
 hook (it would move every (# a #) binder's levity, the libraries' STG with it; left for a narrower rule); generating
 GHC.Internal.PrimopWrappers and adding ghc-experimental or ghc-boot to the own packages (not small: lib-check's plan, gate producers,
 records). Not done: doc/AGENDA.md (the main session's), the gate.
+## 2026-11-21: java-read-1122: Java's print cell, the printer reading back its shapes, erasures and type arguments
+
+The burst's stream J1 (Java's read and print cells), its first round, on branch `java-read-1122` from next `863bdaea1`, ended
+by the coordinator's throttle. The work is repr/java's printer, `arbace/repr/java/print.ae` (outside the reader's hash: no
+forms, provenance or converted tree moves; inside `arbace_javac_key`, as all of arbace/ is), and one function of
+bin/java-check. Light proofs on javac's tool of the night, `javac-60886b4973e7356caf1b` (REPR_JAVA_STALE_OK=1), the tools'
+host stage 0, the main checkout's forms cache; no gate.
+
+**Ranked by cause** (next's records): print 3,258 pass / 29 by design / 38 deferred, its 67 rows :print-type-arguments 31,
+:print-shapes 18 (design), :print-erasure 11 (design), :print-classes-unnamed 3, :print-release 2, :print-overload-cast 1,
+:read-failed 1; read 7,748 / 0 / 96, its 96 rows :diag-release 44, :diag-processors 25, :diag-doclint 8, :diag-file-manager 8,
+:diag-closed-world 4, :diag-command-line 4, :read-platform 3.
+
+**The printer** (each rule a comment at its place in print.ae; every row looked at against its jtreg source):
+- the shapes (17 of :print-shapes' 18): a let the converter merged from a local and the next statement's temporaries split
+  back (`float f = 0f; --q().x;`, `int y = x; return y++;`); a for's update found by its temporaries' numbers (the converter
+  converts the update before the body: o-117 before o-118); `continue;` written after a last statement the converter would
+  push the loop's tail into (an if, a block, a switch), for a source's `if (c) a; continue;` or a case's `break;`, and the
+  loop bodies of `for` and `while (true)` printed through loop-tail's do; an assigning if chain whose branches end in the
+  loop's recur keeps its local's initializer; `(when (some? x) (if ...))` as `x == null ? null : ...` (convert's simplify);
+  a doubled label (the labeled statement's and the switch's own) printed once, a switch's label by its keyword; a pattern
+  test's value as an if's condition printed `x instanceof P p ? a : false`; a hoisted increment (x-2) as a block lambda's
+  `return x++;`; a switch of postfix arms returned whole (`return switch`); a static field incremented through an expression
+  keeps its qualifier (`iBar(b).si++`); an integer literal printed long only where Arbace's resolution would see longs
+  (phase 4 narrows them all: verify("", 0, i0[0], 0)); an inherited field of this by its simple name (this.f of a constant
+  field makes javac check this for null).
+- the erasures (10 of :print-erasure's 11, 4 more stale): an untagged for-each binding as Object, an anonymous class's local
+  as var, a switch of references' local as Object, an untagged conditional over a parameter written as the if chain, the
+  selector's erasure cast left to javac, a record pattern's selector cast with its type arguments (^:unconditional), nested
+  switches' intersection casts left out.
+- the type arguments (28 of :print-type-arguments' 31): raw unchecked casts where a parameterized one is refused (List<Date>
+  to List<Foo>) or a call's wildcard result or inference clashes with the target; a lambda cast to its interface with its
+  instantiated types in a raw array, as another lambda's value and for an Object; a generic interface's cast for overloads
+  (doAs) and explicit parameter types for overloads by generic interfaces; varargs spread where the explicit raw array
+  loses the call's inference (Arrays.asList(fooRef, barRef), Stream.of(new A(), new B())); a method reference's
+  `new E<Short>()` receiver; (T) for a bounded type variable's argument; a field's type variable by its receiver's type
+  argument; java.base's generic signatures and an interface's static methods from the platform's declarations pack
+  (jdk/platform/java.base.decls, read with arbace.repr.java.platform and classfile).
+- t03216 (:print-overload-cast): the converter does pin `(^[Object] v "s")`; a pinned call's reference argument now gets
+  its widening cast. t05973 (TextBlockLang, `-encoding utf8`): bin/java-check's read_opts leaves out `-encoding utf-8/utf8`
+  (the reader reads UTF-8; javac's API would hand the option to a file manager that serves none); a change in repr/java's
+  javac.ae would have moved the reader's hash and the four provenance files, so the harness takes it.
+
+**Proof and record**: the 67 rows run at read and print (`--save .tmp/rec`): 56 of 67 print rows pass, t05973 reads;
+recorded alone, `bin/java-check --judge --partial --record` (0 regressions). A regression sample of 300 of the 3,258 passing
+print rows (3 chunks of 100, GOMEMLIMIT 3GiB: the printer's process peaked 6.5 GB on 67 tests unlimited and ran out of
+memory under `ulimit -v 8G` on 667 at once): every row passes. Not run: the print level whole (the night's).
+Java print 3,258 / 29 / 38 → **3,314 / 2 / 9**; read 7,748 / 0 / 96 → **7,749 / 0 / 95**; Java's completeness 0.9493 →
+**0.9535** (meant 0.9688 → 0.9710); `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`:
+0 problems. The sample found one row failing that is next's own, not this branch's: t04738 (TestReceiverTypeOwner) fails
+with next's printer too (main's checkout, the same tool): n-java-conv (92eabf1b7) puts a receiver's type annotation on the
+receiver and on its type's outer class, and the printer writes it twice (not a repeatable annotation); its print row still
+says pass until the print level runs whole.
+
+**Left, ranked**: :diag-release 44 + :print-release 2 + :read-platform 2 (`--release N`, JCS50 (b) built on next but its
+javac tool not proved: this branch's tool build, `bin/javac-vendor tool` under heavy-lock, still running at the round's
+end); :diag-processors 25 (JCS51 (a): processors from sources on the tool, a tool rebuild); :diag-doclint 8 (JCS52 (a));
+:diag-file-manager 8 and :diag-command-line 4 (JCS53 (a)); :diag-closed-world 4; :print-classes-unnamed 4 (t03567, t05125
+a switch's locals' slots, t06072, t06244 now reading back its forms); :print-type-arguments 3 (t05474, t05503, t05691: the
+forms keep no explicit type arguments, no raw `new ArrayList()`, no `var`'s instantiation); by design t05905 and t07835.
