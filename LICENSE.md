@@ -307,6 +307,10 @@ covers what.
   arguments' parsing put in place of `driver/pparse.ml`'s and `driver/compenv.ml`'s: under the GNU Lesser General Public License
   version 2.1 with the OCaml LGPL linking exception (below). `go/arbace/oi/ext_runtime_events.ae` (OC219) follows the behaviour of
   `runtime/runtime_events.c` and `otherlibs/runtime_events/runtime_events_consumer.c` of the same tarball, under the same license.
+- `test/ocaml/objinfo/oiobjinfo.ml` (queue 511, doc/ocaml/OCAML-SURVEY.md "As built: queue 511"), ocamltest's `ocamlc -c` and
+  `ocamlobjinfo` on oi, is modified from OCaml 5.5.0's `tools/objinfo.ml` (the tarball above, Copyright INRIA and Mehdi Dogguy; its
+  notice kept; the .cmi and .cmt printing kept, the other kinds left out) and `driver/compile_common.ml`'s steps up to typing: under
+  the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
 - `test/ocaml/ocamldoc/oicmi.ml` (queue 480, doc/ocaml/OCAML-SURVEY.md "As built: queue 480"), `ocamlc -c FILE.mli` on oi over
   compiler-libs' units (the standard library's .cmi files ocamldoc types against), is Arbace's own, under the Eclipse Public
   License 1.0, written against the interfaces of OCaml 5.5.0's compiler-libs (driver/compile_common.ml's interface step read for
