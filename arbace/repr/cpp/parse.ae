@@ -173,6 +173,11 @@
   statements): a label there labels a statement, P2324R2's label at the end applies to a compound statement alone."
   false)
 
+(def ^:dynamic *fn-names*
+  "cpp-read (2026-11-22): the names of the functions whose bodies are parsed: [basic.scope.pdecl]/1 puts a function's point of
+  declaration after its declarator, so its body names it (a recursive call), which the parser declares after the body."
+  #{})
+
 (def ^:dynamic *this-ok*
   "cpp-read (2026-11-22): the function whose body is parsed, for `this` ([expr.prim.this]/2-3): :member a non-static member
   function's (or an out-of-class member's), :static a static member function's, :nonmember another function's; nil outside a
@@ -1974,7 +1979,7 @@
                                            ;; ADL decided by arbace.repr.cpp.check over the final tree; a __ name judged there by
                                            ;; clang's identifier table, CP270 (a)): the name token's offset
                                            :_undecl (when (and (nil? en) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (not (:args lp))
-                                                               (main-tok? p b)
+                                                               (main-tok? p b) (not (contains? *fn-names* (:s lp)))
                                                                (not (dep-this? p)))
                                                       [(.-o (tok-at p b)) (:s lp) (boolean (in-template? p))])
                                            :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp))))
@@ -2582,6 +2587,11 @@
                     (soft-diag! p (ix p) "expected statement before '}' token"))
                 s (if (is? p "}") (node p "NullStmt" (last-ix p) (last-ix p) {}) (statement-or-decline p))]
             (node p "LabelStmt" b (ne s) {:name (.-s t) :inner [s]})))
+      ;; (cpp-read, 2026-11-22: `__extension__ [[...]] asm (...)`, GNU's keyword and the statement's attributes before an asm
+      ;; statement, which GCC takes; gen-attrs-76.C)
+      (and (t= t "__extension__") (is-at? p 1 "[") (is-at? p 2 "[")
+           (let [save (ix p)] (adv! p) (attr-nodes p) (let [r (or (is? p "asm") (is? p "__asm__") (is? p "__asm"))] (seek! p save) r)))
+      (do (adv! p) (attr-nodes p) (parse-statement p))
       (or (t= t "asm") (t= t "__asm__") (t= t "__asm"))
       ;; (CP338 (a): GNU's asm statement's parts for the code generator, clang's GCCAsmStmt: the qualifiers, the template,
       ;; the outputs' and inputs' constraints and operands, the clobbers and goto labels; in a header skimmed, or past
@@ -2906,6 +2916,21 @@
                  (ts (nxt p 1)))
       :else true)))
 
+(defn- unclosed-paren!
+  "cpp-read (2026-11-22): at a decltype's or typeof's (, a ; or } of its level before its ) is the operand's end, GCC's \"expected
+  primary-expression before ';' token\" there (the declaration declined at it; skip-balanced! ran to the file's end)."
+  [^P p]
+  (let [n (.-cnt p)]
+    (loop [j (inc (ix p)) d 1]
+      (when (< j n)
+        (let [^T t (tok-at p j)]
+          (cond (identical? :eof (.-k t)) nil
+                (or (t= t "(") (t= t "[") (t= t "{")) (recur (inc j) (inc d))
+                (or (t= t ")") (t= t "]")) (when (> d 1) (recur (inc j) (dec d)))
+                (and (= d 1) (or (t= t ";") (t= t "}"))) (do (seek! p j) (perr p (str "expected primary-expression before '" (.-s t) "' token")))
+                (t= t "}") (recur (inc j) (dec d))
+                :else (recur (inc j) d)))))))
+
 (defn parse-decl-specs
   "A decl-specifier-seq: {:b :e :type :storage :typedef :friend :inline :virtual :explicit :constexpr :consteval
   :constinit :mutable :tls :attrs :tag-node}, :b its first token after the leading attribute-specifier-seq (clang's
@@ -2962,6 +2987,7 @@
                 (if (and qn (> (count (:parts qn)) 1))
                   (do (seek! p save) (let [qn (parse-name p :parse)] (recur (assoc ds :type {:t :n :s (name-str p qn)}) words)))
                   (do (seek! p save) (adv! p)
+                      (unclosed-paren! p)
                       (let [ob (ix p)]
                         ;; (h-cpp-read: decltype's operand is an expression, [dcl.type.decltype]/1: none, or a keyword that
                         ;; begins none, is GCC's "expected primary-expression")
@@ -2977,7 +3003,7 @@
                         (skip-balanced! p)
                         (recur (assoc ds :type {:t :dt :s (tok-text p (inc ob) (- (ix p) 2))}) words))))))
             (and (#{"__typeof__" "__typeof" "typeof"} s) (not has-type) (is-at? p 1 "("))
-            (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
+            (do (adv! p) (unclosed-paren! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
             (and (= s "_Atomic") (is-at? p 1 "(") (not has-type))
             (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str "_Atomic(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
             (and (#{"class" "struct" "union"} s) (not has-type))
@@ -2995,7 +3021,10 @@
             (and (= s "enum") (not has-type))
             (let [{:keys [type node]} (parse-enum-specifier p ds ctx)] (recur (cond-> (assoc ds :type type) node (assoc :tag-node node)) words))
             (and (= s "typename") (not has-type))
-            (do (adv! p) (let [qn (or (parse-name p :parse) (perr p "a typename's name"))]
+            (do (adv! p) (let [qn (or (parse-name p :parse)
+                                      ;; (cpp-read, 2026-11-22: `typename ::` with no name after it, GCC's error at the token after
+                                      ;; the ::, parse/crash10.C)
+                                      (do (when (and (is? p "::") (not (is-at? p 1 "::"))) (adv! p)) (perr p "a typename's name")))]
                            ;; cpp-read (2026-11-22): a typename-specifier's nested-name-specifier names nothing declared, or a
                            ;; namespace without the member ([temp.res.general]/5 with [basic.lookup.qual]): GCC's "'X' has not been
                            ;; declared", "'Y' in namespace 'N' does not name a type", at the name
@@ -3958,12 +3987,22 @@
                       (is? p "...") (do (adv! p) (recur out))
                       (id? p) (let [nm (ts (cur p)) i (ix p)] (adv! p) (attr-nodes p) (recur (conj out [nm i])))
                       :else (perr p "a structured binding")))
+        ib (ix p)
         [x init] (cond
                    (= ctx :for-range) [nil nil]
                    (accept! p "=") [(if (skim? p) (do (skip-init! p) nil) (parse-init-clause p)) "c"]
                    (is? p "{") [(if (skim? p) (do (skip-balanced! p) nil) (parse-braced-init p)) "list"]
                    (is? p "(") (let [ab (ix p) as (paren-args p)] [(if (= 1 (count as)) (first as) (node p "ParenListExpr" ab (last-ix p) {:inner as})) "call"])
                    :else [nil nil])
+        ;; (cpp-read, 2026-11-22: [dcl.struct.bind]/1 with [basic.scope.pdecl]: a binding is declared before its initializer, so a
+        ;; use of its name there is of a binding whose type is not deduced yet, GCC's "use of 'x' before deduction of 'auto'")
+        _ (when (and x (not (skim? p)) (main-tok? p ib))
+            (let [nms (set (map first names))]
+              (when-let [i (first (filter (fn [i] (let [^T t (tok-at p i) ^T pv (tok-at p (dec i))]
+                                                    (and (identical? :id (.-k t)) (nms (.-s t))
+                                                         (not (or (t= pv ".") (t= pv "->") (t= pv "::"))))))
+                                          (range ib (ix p))))]
+                (soft-diag! p i (str "use of '" (ts (tok-at p i)) "' before deduction of 'auto'")))))
         ty (cond-> base ref (#(hash-map :t ref :of %)))
         bs (mapv (fn [[nm i]] (declare! p {:k :var :name nm}) {:kind "BindingDecl" :name nm :loc (loc p i)}) names)]
     (node p "DecompositionDecl" (:b ds) (last-ix p)
@@ -4034,6 +4073,11 @@
           ;; specified for objects and functions", at the qualifier; a class or enumeration declared with none)
           (when (and (:cv-i ds) (or pre (= :elab (:t base0))) (not (:typedef ds)) (not (:friend ds)))
             (soft-diag! p (long (:cv-i ds)) (str "'" (ts (tok-at p (long (:cv-i ds)))) "' can only be specified for objects and functions")))
+          ;; (cpp-read, 2026-11-22: an alignment-specifier alone before ; in a block, no declaration it appertains to ([dcl.align]/1;
+          ;; a block-declaration is no attribute-declaration): GCC's "expected unqualified-id before ';' token", parse/error58.C)
+          (when (and (nil? base0) (nil? pre) (= ctx :block) (not (skim? p))
+                     (some #(contains? #{"alignas" "_Alignas"} (ts (tok-at p %))) (range (long (:gb ds)) (ix p))))
+            (soft-diag! p (ix p) "expected unqualified-id before ';' token"))
           ;; (cpp-read: a class definition whose ; GCC inserts, want-semicolon?: the declaration ends at its })
           (when-not (:semi-missing ds) (adv! p))
           (cond (and (nil? base0) (nil? pre) (not (:friend ds)) (= ctx :top) (> (long (:b ds)) b0)) [(node p "EmptyDecl" (last-ix p) (last-ix p) {})]
@@ -4265,7 +4309,8 @@
                                           (binding [*this-ok* (cond (or cls (:friend ds)) :member
                                                                     (= ctx :member) (if (= "static" (:storage ds)) :static :member)
                                                                     (:q qn) :member
-                                                                    :else :nonmember)]
+                                                                    :else :nonmember)
+                                                    *fn-names* (if nm (conj *fn-names* nm) *fn-names*)]
                                             (fn-body p (:names fs) cls ctor (:types fs))))
                                         (finally (st! p RET old)))))
                   _ (when (and ctor body? (not (skim? p)))
@@ -4361,6 +4406,10 @@
                       (when-let [^java.util.HashMap ft (:ftypes (:ent (class-ctx p)))] (.put ft nm ty))
                       (when-let [^HashMap i (sema/info (:ent (class-ctx p)))] (when-not (= "public" (.get i :acc)) (.put i :nonpublic-field true))))
                   bits (when (and (= ctx :member) (is? p ":")) (adv! p) (if (skim? p) (do (skip-until! p #{"," ";" "=" "{"}) nil) (parse-cond-expr p)))
+                  ;; (cpp-read, 2026-11-22: a [[ after a bit-field's width, which the width's constant-expression reads as a
+                  ;; subscript: [dcl.attr.grammar]/7's "two consecutive '[' shall only introduce an attribute", GCC's error)
+                  _ (when (and bits (is? p "[") (is-at? p 1 "[") (not (skim? p)) (main-tok? p (ix p)))
+                      (soft-diag! p (ix p) "two consecutive '[' shall only introduce an attribute before '[' token"))
                   as1 (attr-nodes p)
                   _ (skip-asm-label! p)
                   as1 (into as1 (attr-nodes p))
@@ -4613,6 +4662,18 @@
                 ;; type stays `auto`, as clang's pattern has it)
                 (when (zero? (.size ^java.util.HashMap (sc/names-of (scope p))))
                   (.put ^java.util.HashMap (sc/names-of (scope p)) " unnamed" {:k :type :name " unnamed" :tparam true}))
+                ;; (cpp-read, 2026-11-22: [temp.param]/14, a primary class or alias template's (or a template template
+                ;; parameter's) parameter pack is its last parameter: GCC's "parameter pack 'T' must be at the end of the
+                ;; template parameter list", at the pack; a function template's and a partial specialization's aside)
+                (when (and (is? p ">") (not (skim? p)) (> (count ns) 1))
+                  (let [^T a (nxt p 1) ^T b (nxt p 2) ^T c (nxt p 3)]
+                    (when (or (t= a "using") (t= a "concept")
+                              (and (or (t= a "class") (t= a "struct") (t= a "union") (t= a "typename"))
+                                   (or (not (identical? :id (.-k b))) (not (t= c "<")))))
+                      (doseq [n (butlast ns) :when (:isParameterPack n)]
+                        (let [i (first (filter #(main-tok? p %) [(long (or (:_b n) -1))]))]
+                          (when (and i (>= (long i) 0))
+                            (soft-diag! p (long i) (str "parameter pack '" (or (:name n) "") "' must be at the end of the template parameter list"))))))))
                 [(with-meta ns {:nreq (or nreq (count ns))}) names])))))))
 
 (defn- fold-const
@@ -4943,6 +5004,10 @@
       (is? p "namespace")
       (do (adv! p)
           (let [qn (or (parse-name p :parse) (perr p "a namespace's name")) e (last-ix p)]
+            ;; (cpp-read, 2026-11-22: a standard attribute-specifier after the namespace-name, which [namespace.udir]/1 places
+            ;; before `using` alone: GCC's "expected ';' before '[' token"; GNU's __attribute__ taken, as clang and GCC take it)
+            (when (and (is? p "[") (is-at? p 1 "[") (not (skim? p)) (main-tok? p (ix p)))
+              (soft-diag! p (ix p) "expected ';' before '[' token"))
             (attr-nodes p)
             (expect! p ";")
             (when-let [s (ent-scope (:ent qn))] (sc/add-using! (sc/decl-scope (scope p)) s))
