@@ -47,6 +47,8 @@
           zst (and (zero? (:size e)) (= ak "memory"))]
       (cond-> {:size (:size e) :align (:align e) :ty t
                :offsets (let [f (:fields e)] (cond (vector? f) f (and (seq? f) (= "union" (name (first f)))) (vec (repeat (second f) 0))))
+               ;; FieldsShape::Arbitrary (a struct's, a tuple's, an enum's tag), not a union's, an array's or a primitive's
+               :arbitrary (vector? (:fields e))
                :array (let [f (:fields e)] (when (and (seq? f) (= "array" (name (first f)))) {:stride (second f) :count (nth f 2)}))
                :kind (cond zst :zst
                            (= ak "scalar") :scalar
@@ -135,13 +137,21 @@
   (let [u (cond (>= align 8) 8 (>= align 4) 4 (>= align 2) 2 :else 1)]
     (list 'array (quot size u) (symbol (str "i" (* 8 u))))))
 
+(def ^:dynamic *fewer-names*
+  "C6-4: true where the IR to match was written with -Z fewer-names (std's build): an ADT's or a closure's LLVM type is the
+  literal struct of its fields (the layout table's :llty, mono's llvm-type-of), not a named one"
+  false)
+
 (defn backend-type
   "The LLVM type form of a type's layout, as rustc's `backend_type` makes it: scalars as their memory type, scalar pairs as
   anonymous structs, arrays as arrays, tuples as anonymous structs with rustc's padding fillers, other aggregates as named
-  structs (their body here a filler of the right size: the judge compares the types' names, not their bodies; `gl` keeps them)."
+  structs (their body here a filler of the right size: the judge compares the types' names, not their bodies; `gl` keeps them);
+  with *fewer-names* an ADT or a closure as the literal struct its layout's :llty gives."
   [lt gl t]
   (let [ly (layout lt t) st (ty-struct t)
-        kind (if (seq? st) (name (first st)) (name st))]
+        kind (if (seq? st) (name (first st)) (name st))
+        lit (when (and *fewer-names* (#{"adt" "closure"} kind)) (:llty (get lt (second t))))]
+    (if lit lit
     (case (:kind ly)
       :scalar (symbol (:mem (:scalar ly)))
       :pair (if (#{"adt" "closure"} kind)
@@ -165,7 +175,7 @@
         (let [n (llvm-type-name t) r (llvm-name-ref n)]
           (when gl (vswap! gl assoc-in [:types r] (list 'llvm/type r (list 'struct (list 'array (:size ly) 'i8)))))
           r)
-        :else (unsupported (str "llvm type of " kind))))))
+        :else (unsupported (str "llvm type of " kind)))))))
 
 ;; ---------------------------------------------------------------- the CFG
 
@@ -427,7 +437,9 @@
           big (fn [x] (biginteger x))   ; an i128 constant does not fit a long
           u (fn [x] (.mod (big x) M))
           sg (fn [x] (let [x (u x)] (if (>= (.compareTo x (.pow two (dec bits))) 0) (.subtract x M) x)))
-          wrap (fn [x] (as-num (if (:signed sc) (sg x) (u x))))
+          ;; LLVM prints a ConstantInt as signed whatever the operation's signedness (`i64 -9223372036854775808`, `i32 -2097152`),
+          ;; as const-val writes a constant operand (sext-const)
+          wrap (fn [x] (as-num (sg x)))
           key (fn [x] (if (:signed sc) (sg x) (u x)))
           c (fn [x y] (.compareTo ^java.math.BigInteger x ^java.math.BigInteger y))]
       (case op
@@ -455,21 +467,88 @@
         "Ge" ["i1" (>= (c (key a) (key b)) 0)]
         nil))))
 
+(defn- fold-un
+  "LLVM's IRBuilder folds `not` (xor with all ones) and the integer negation (sub 0) of a constant: the value, or nil."
+  [op a sc]
+  (cond
+    (and (= "Not" op) (:bool sc) (boolean? a)) (not a)
+    (and (= "Not" op) (:bool sc) (#{'true 'false} a)) (if (= 'true a) 'false 'true)
+    (and (#{"Not" "Neg"} op) (number? a) (= :int (:prim sc)) (not (:bool sc)))
+    (let [bits (:ibits sc) two (java.math.BigInteger/valueOf 2) M (.pow two bits)
+          x (.mod (if (= "Not" op) (.not (biginteger a)) (.negate (biginteger a))) M)]
+      (as-num (if (>= (.compareTo x (.pow two (dec bits))) 0) (.subtract x M) x)))
+    :else nil))
+
+(defn- apfloat-text
+  "LLVM's APFloat::toString(Str, 6, 0, false) (llvm/lib/Support/APFloat.cpp, toStringImpl and its two AdjustToPrecision) of a
+  finite IEEE value: the significand's decimal digits, first truncated to about six digits' bits (udiv by a power of ten), then
+  rounded to six, written d.dddddde+XX; its double truncation is why `float 1e-4` reads back otherwise and is written in hex"
+  [f32 ^java.math.BigInteger pattern]
+  (let [prec (if f32 24 53) ebits (if f32 8 11) mbits (dec prec) bias (if f32 127 1023)
+        neg (.testBit pattern (+ mbits ebits))
+        be (.longValue (.and (.shiftRight pattern mbits) (java.math.BigInteger/valueOf (dec (bit-shift-left 1 ebits)))))
+        frac (.and pattern (.subtract (.shiftLeft java.math.BigInteger/ONE mbits) java.math.BigInteger/ONE))]
+    (if (and (zero? be) (zero? (.signum frac)))
+      (str (when neg "-") "0.000000e+00")
+      (let [[sig exponent] (if (zero? be) [frac (- 1 bias)] [(.setBit frac mbits) (- be bias)])
+            exp0 (- exponent mbits)
+            tz (.getLowestSetBit ^java.math.BigInteger sig)
+            sig (.shiftRight ^java.math.BigInteger sig tz) exp0 (+ exp0 tz)
+            [sig exp0] (cond (pos? exp0) [(.shiftLeft sig (int exp0)) 0]
+                             (neg? exp0) [(.multiply sig (.pow (java.math.BigInteger/valueOf 5) (int (- exp0)))) exp0]
+                             :else [sig 0])
+            fp 6
+            bits (.bitLength ^java.math.BigInteger sig)
+            req (quot (+ (* fp 196) 58) 59)
+            [sig exp0] (if (<= bits req) [sig exp0]
+                           (let [tr (quot (* (- bits req) 59) 196)]
+                             (if (zero? tr) [sig exp0] [(.divide sig (.pow java.math.BigInteger/TEN (int tr))) (+ exp0 tr)])))
+            ;; the digits, least significant first, the trailing zeros counted into the exponent
+            [buf exp0] (loop [s sig e exp0 buf [] trail true]
+                         (if (zero? (.signum ^java.math.BigInteger s)) [buf e]
+                             (let [[q r] (.divideAndRemainder ^java.math.BigInteger s java.math.BigInteger/TEN) d (.intValue ^java.math.BigInteger r)]
+                               (if (and trail (zero? d)) (recur q (inc e) buf true) (recur q e (conj buf d) false)))))
+            n (count buf)
+            [buf exp0] (if (<= n fp) [buf exp0]
+                           (let [first-sig (- n fp)]
+                             (if (< (nth buf (dec first-sig)) 5)
+                               (let [fs (loop [f first-sig] (if (and (< f n) (zero? (nth buf f))) (recur (inc f)) f))]
+                                 [(subvec buf fs) (+ exp0 fs)])
+                               (let [[buf fs] (loop [i first-sig fs first-sig buf buf]
+                                                (cond (= i n) [buf fs]
+                                                      (= 9 (nth buf i)) (recur (inc i) (inc fs) buf)
+                                                      :else [(assoc buf i (inc (nth buf i))) fs]))]
+                                 (if (= fs n) [[1] (+ exp0 fs)] [(subvec buf fs) (+ exp0 fs)])))))
+            nd (count buf)
+            e (+ exp0 (dec nd))
+            ds (apply str (map #(nth buf (- nd 1 %)) (range nd)))
+            ae (Math/abs (long e))]
+        (str (when neg "-") (subs ds 0 1) "." (subs ds 1) (apply str (repeat (max 0 (- fp (dec nd))) "0"))
+             "e" (if (neg? e) "-" "+") (when (< ae 10) "0") ae)))))
+
 (defn- fp-form
-  "LLVM's text of a floating constant: `%e` when that reads back as the same double, else the double's bits in hex (a float
-  is written as the double it widens to); +inf, -inf."
+  "LLVM 23's text of a floating constant (AsmWriter.cpp's writeAPFloatInternal): +inf, -inf; a NaN `+qnan` (the preferred quiet
+  NaN) or `+nan(0xPAYLOAD)`, `+snan(0x..)`; else APFloat::toString at precision 6 (apfloat-text) when it reads back as the same
+  value in the constant's own semantics (a float as a float), else `f0x` and the bits in the constant's own width (`f0x00800000`,
+  `f0x0010000000000000`)."
   [bits pattern]
   (let [pattern (java.math.BigInteger. (str pattern))
-        d (if (= 32 bits)
-            (double (Float/intBitsToFloat (.intValue pattern)))
-            (Double/longBitsToDouble (.longValue pattern)))]
+        f32 (= 32 bits)
+        d (if f32 (double (Float/intBitsToFloat (.intValue pattern))) (Double/longBitsToDouble (.longValue pattern)))
+        hex (fn [] (let [h (.toUpperCase (.toString pattern 16)) w (if f32 8 16)]
+                     (str "f0x" (apply str (repeat (- w (count h)) "0")) h)))]
     (list 'fp
           (cond
-            (Double/isNaN d) (str "0x" (.toUpperCase (Long/toHexString (Double/doubleToRawLongBits d))))
+            (Double/isNaN d) (let [mb (if f32 23 52) payload (.and pattern (.subtract (.shiftLeft java.math.BigInteger/ONE mb) java.math.BigInteger/ONE))
+                                   sign (if (.testBit pattern (dec (long bits))) "-" "+") quiet (.testBit pattern (dec mb))
+                                   rest (.clearBit payload (dec mb))]
+                               (cond (and quiet (zero? (.signum rest))) (str sign "qnan")
+                                     :else (str sign (when-not quiet "s") "nan(0x" (.toUpperCase (.toString rest 16)) ")")))
             (Double/isInfinite d) (if (pos? d) "+inf" "-inf")
-            :else (let [t (String/format java.util.Locale/ROOT "%.6e" (object-array [d]))]
-                    (if (= d (Double/parseDouble t)) t
-                        (str "0x" (.toUpperCase (Long/toHexString (Double/doubleToRawLongBits d))))))))))
+            :else (let [t (apfloat-text f32 pattern)]
+                    (if (if f32 (= (Float/floatToRawIntBits (float d)) (Float/floatToRawIntBits (Float/parseFloat t)))
+                            (= (Double/doubleToRawLongBits d) (Double/doubleToRawLongBits (Double/parseDouble t))))
+                      t (hex)))))))
 
 (defn- const-val
   "A constant operand's value: {:ty :v} or {:pair [...]}, or nil for a zero-sized one; `ag` gives the global of an allocation,
@@ -555,8 +634,11 @@
   "The align attribute a pointer scalar of type `t` gets: a reference's pointee alignment, and for an enum or struct
   around a reference (Option<&T>) that reference's (found among its generic arguments: a heuristic, PointeeInfo's job)."
   [lt t]
-  (let [k (ty-kind t)]
+  (let [k (ty-kind t)
+        ;; C6-4: the layout table's pointee_info_at answer for an ADT (mono's :pointee-aligns, lib-unit's), when it has one
+        tpa (when (= k "adt") (:pointee-aligns (get lt (second t))))]
     (cond
+      tpa (let [a (first tpa)] (when (and a (> (long a) 1)) a))
       (= k "ref") (let [pt (pointee-type t) pk (ty-kind pt)]
                     (cond
                       (= pk "slice") (let [el (layout lt (second (ty-struct pt)))] (when (and (not (zst? el)) (> (:align el) 1)) (:align el)))
@@ -595,6 +677,8 @@
   "The align attribute of component `i` of a fat reference's pair: a slice reference's data pointer (its element's alignment),
   a trait object reference's vtable pointer (8); likewise for Box<[T]> and Box<dyn Trait>."
   [lt t i]
+  (if-let [tpa (when (= "adt" (ty-kind t)) (:pointee-aligns (get lt (second t))))]
+    (let [a (nth tpa i nil)] (when (and a (> (long a) 1)) a))
   (if (= "tuple" (ty-kind t))
     (let [offs (:offsets (layout lt t))
           order (map first (sort-by second (map-indexed vector offs)))
@@ -609,7 +693,7 @@
         ;; a struct with an unsized tail behind a fat pointer: the struct's own alignment, when the table has its layout
         (and (= i 0) (= pk "adt") (get lt (second pt)))
         (let [pl (layout lt pt)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))
-        :else nil)))))
+        :else nil))))))
 
 (defn ret-attrs-of
   "The attributes of a returned value: zeroext for bool, align for a reference."
@@ -704,8 +788,12 @@
         lay (mapv #(layout lt (:ty %)) locs)
         spread (:spread-arg body)
         mem (cond-> (non-ssa-locals body lt order-all idom-all) spread (conj spread) (indirect? (layout lt (:ty (first (:locals body))))) (conj 0))
-        preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (successors (:term (nth blocks b))))) {} (range (count blocks)))
-        mergeable (fn [t] (let [ss (successors t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
+        ;; C6-4: an edge into a landing pad that does nothing is no edge (RemoveNoopLandingPads made it `unwind continue` in
+        ;; rustc's MIR before codegen): a call whose cleanup is one has its return target alone, which MergingSucc merges
+        ;; (CustomOwner::into_raw's `forget` then `return`, one LLVM block)
+        real-succs (fn [t] (vec (remove nops (successors t))))
+        preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (real-succs (:term (nth blocks b))))) {} (range (count blocks)))
+        mergeable (fn [t] (let [ss (real-succs t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
         alloc-sym! (fn alloc-sym! [id]
                      (if (and (vector? id) (= :str (first id)))
@@ -755,6 +843,10 @@
                                      (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :align 1)))
                                    sy)
                          :memory
+                         (if (and (string? (:bytes a)) (zero? (count (:bytes a))) (not (:mutable a)))
+                           ;; C6-4: a zero-sized allocation is no global but its alignment as a pointer (rustc_codegen_llvm's
+                           ;; scalar_to_backend: "For ZSTs directly codegen an aligned pointer", `inttoptr (i64 1 to ptr)`)
+                           (list 'inttoptr 'i64 (or (:align a) 1) 'ptr)
                          (do
                            (when (:mutable a) (unsupported "mutable allocation"))
                            (let [bs (:bytes a)
@@ -790,7 +882,7 @@
                                                              (-> out (into (runs pos off)) (conj [:ptr tid]))))))
                                      tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
                                      vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
-                                 (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))
+                                 (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a)))))))
                          (unsupported "allocation of this kind")))))
         ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
         alloc-const! (fn [id off l]
@@ -1073,11 +1165,12 @@
                        M (.pow two bits)]
                    (if (and (number? (:v a)) (number? masked))
                      ;; the builder folds a shift of constants
-                     (let [ua (.mod (java.math.BigInteger/valueOf (long (:v a))) M)
+                     (let [ua (.mod (biginteger (:v a)) M)
                            res (cond (#{"Shl" "ShlUnchecked"} op) (.mod (.shiftLeft ua (long masked)) M)
                                      (:signed sc) (.mod (.shiftRight (let [x ua] (if (>= (.compareTo x (.pow two (dec bits))) 0) (.subtract x M) x)) (long masked)) M)
                                      :else (.shiftRight ua (long masked)))]
-                       {:ty (:imm sc) :v (as-num (if (:signed sc) (sext-const bits res) res))})
+                       ;; (printed signed as LLVM prints a ConstantInt: `u32::MAX << 21` is `i32 -2097152`)
+                       {:ty (:imm sc) :v (as-num (sext-const bits res))})
                      (let [r (fresh!)]
                        (emit! bb (list '= r (list (if (#{"Shl" "ShlUnchecked"} op) 'shl (if (:signed sc) 'ashr 'lshr)) t (:v a) masked)))
                        {:ty (:imm sc) :v r}))))
@@ -1111,14 +1204,14 @@
                                       m (.mod (java.math.BigInteger. (str (:v v))) (.pow two fb))
                                       x (if (and (:signed from-sc) (not (:bool from-sc))) (sext-const fb m) m)
                                       x (.mod (biginteger x) (.pow two tb))]
-                                  {:ty (:imm to-sc) :v (as-num (if (and (:signed to-sc) (not (:bool to-sc))) (sext-const tb x) x))})
+                                  {:ty (:imm to-sc) :v (as-num (if (not (:bool to-sc)) (sext-const tb x) x))})
                                 (let [r (fresh!)]
                                   (emit! bb (list '= r (list (if (and (:signed from-sc) (not (:bool from-sc))) 'sext 'zext) (symbol (:imm from-sc)) (:v v) (symbol (:imm to-sc)))))
                                   {:ty (:imm to-sc) :v r}))
                     (number? (:v v))
                     (let [two (java.math.BigInteger/valueOf 2)
                           m (.mod (java.math.BigInteger. (str (:v v))) (.pow two tb))]
-                      {:ty (:imm to-sc) :v (as-num (if (and (:signed to-sc) (not (:bool to-sc))) (sext-const tb m) m))})
+                      {:ty (:imm to-sc) :v (as-num (if (not (:bool to-sc)) (sext-const tb m) m))})
                     :else (let [r (fresh!)]
                             (emit! bb (list '= r (list 'trunc (symbol (:imm from-sc)) (:v v) (symbol (:imm to-sc)))))
                             {:ty (:imm to-sc) :v r}))))
@@ -1189,6 +1282,29 @@
                                       (when (and (= :pair (:kind fl)) (not (:pair v))) (unsupported (str "aggregate of a pair field from " (pr-str v) (second ft))))
                                       (store-val! bb {:ptr (gep! bb (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl} v))))
                                 (set-discr! bb pl variant)))))
+        ;; C6-4: rvalue.rs' try_codegen_const_aggregate_as_immediate (rustc 1.99): a tuple's or a non-union ADT's aggregate into
+        ;; memory, its layout's fields Arbitrary and its one variant the aggregate's, 1, 2, 4, 8 or 16 bytes, every operand of a
+        ;; field not zero-sized a constant with bits: one store of the integer of those bits at their offsets (padding zero),
+        ;; `store i64 4294967296000000009` for `(9_u8, 1000000000_u32)`; true when it stored
+        const-aggregate! (fn [bb pl kind ops variant]
+                           (let [ly (:ly pl) vr (:variants ly) size (:size ly)
+                                 kk (name (first kind))]
+                             (when (and (#{"tuple" "adt"} kk) (:arbitrary ly) (#{1 2 4 8 16} size)
+                                        (= :single (:kind vr)) (= (:index vr) variant))
+                               (let [fields (for [[i o] (map-indexed vector ops)
+                                                  :let [fl (layout lt (ty-of o))]
+                                                  :when (not (zst? fl))]
+                                              (let [v (when (= "const" (name (first o))) (nth o 3 nil))
+                                                    off (nth (:offsets ly) i nil)]
+                                                (when (and off (seq? v) (= "scalar" (name (first v))) (integer? (second v))
+                                                           (= (:size fl) (nth v 2 nil)) (#{:scalar} (:kind fl)))
+                                                  [off (biginteger (second v))])))]
+                                 (when (every? some? fields)
+                                   (let [value (reduce (fn [acc [off bits]] (.or ^java.math.BigInteger acc (.shiftLeft ^java.math.BigInteger bits (int (* 8 off)))))
+                                                       java.math.BigInteger/ZERO fields)
+                                         ity (symbol (str "i" (* 8 size)))]
+                                     (emit! bb (list 'store [ity (as-num (sext-const (* 8 size) value))] ['ptr (:ptr pl)] :align (:align pl)))
+                                     true))))))
         ;; codegen_get_discr: the discriminant of the enum at a place or in an operand, cast to the scalar `dsc`
         get-discr! (fn [bb pl-or-val ly dsc]
                      (let [vr (:variants ly)]
@@ -1228,7 +1344,7 @@
                                        (let [rel (fresh!)
                                              _ (emit! bb (list '= rel (list 'sub (symbol tag-ty) (:v tagv) niche-start)))
                                              cast (intcast {:v rel} tag-bits db false tag-ty (:imm dsc))
-                                             niche-end (as-num (.and (.add (java.math.BigInteger/valueOf (long relative-max)) (java.math.BigInteger. (str niche-start))) (.subtract (.pow (java.math.BigInteger/valueOf 2) tag-bits) java.math.BigInteger/ONE)))
+                                             niche-end (as-num (sext-const tag-bits (.and (.add (java.math.BigInteger/valueOf (long relative-max)) (java.math.BigInteger. (str niche-start))) (.subtract (.pow (java.math.BigInteger/valueOf 2) tag-bits) java.math.BigInteger/ONE))))
                                              lo (if (= :ptr (:prim tag)) (:lo tag) (:lo tag))
                                              isn (cond (= niche-start lo) (cmp :ule (:v tagv) niche-end)
                                                        :else (cmp :uge (:v tagv) niche-start))]
@@ -1268,14 +1384,17 @@
                     "unop" (if (= "PtrMetadata" (second r))
                              (let [v (operand! bb (nth r 2))]
                                (if (:pair v) (second (:pair v)) nil))
-                             (let [[_ op a] r sc (scalar-of-op a) v (operand! bb a) x (fresh!)]
+                             (let [[_ op a] r sc (scalar-of-op a) v (operand! bb a)]
+                             (if-let [fv (fold-un op (:v v) sc)]
+                               {:ty (:imm sc) :v fv}
+                             (let [x (fresh!)]
                              (case op
                                "Not" (do (emit! bb (list '= x (list 'xor (symbol (:imm sc)) (:v v) (if (:bool sc) 'true -1))))
                                          {:ty (:imm sc) :v x})
                                "Neg" (if (= :float (:prim sc))
                                        (do (emit! bb (list '= x (list 'fneg (symbol (:imm sc)) (:v v)))) {:ty (:imm sc) :v x})
                                        (do (emit! bb (list '= x (list 'sub (symbol (:imm sc)) 0 (:v v)))) {:ty (:imm sc) :v x}))
-                               (unsupported (str "unop " op)))))
+                               (unsupported (str "unop " op)))))))
                     "cast" (let [[_ kind o t] r]
                              (cond
                                (= kind "IntToInt") (cast! bb o (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) (scalar-of-op o))
@@ -1422,7 +1541,10 @@
                                           variant (if (= "adt" (name (first kind))) (nth kind 5) 0)]
                                       (if ssa-dest
                                         (when-let [v (aggregate-value bb dly ops variant)] (assign! bb p v))
-                                        (when-not (zst? dly) (aggregate-into! bb (place-of! bb p) ops variant))))
+                                        (when-not (zst? dly)
+                                          (let [pl (place-of! bb p)]
+                                            (when-not (const-aggregate! bb pl kind ops variant)
+                                              (aggregate-into! bb pl ops variant))))))
                                     ;; a transmute of a scalar or a pair into a memory place: stored with the place's alignment
                                     (and (= "cast" (name (first r))) (#{"Transmute" "BoxDerefTransmute"} (second r)) (not ssa-dest) (= :memory (:kind dly))
                                          (#{:scalar :pair} (:kind (layout lt (ty-of (nth r 2))))))

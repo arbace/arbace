@@ -1578,6 +1578,34 @@
         _ (when c4 (swap! kinds conj :locals))]
     [b4 @kinds]))
 
+(defn- o0-instance-normalize
+  "C6-4: o0-normalize of the runtime body RB made from the instance's body IB (its locals' types carrying their :tc), with
+  pack-compare's facts, which lib-unit's bodies had gone without: the locals' types Freeze or not (CopyProp's SSA), the enums'
+  inhabited variants (UnreachableEnumBranching: `if let Some(w) = w`'s switch [0, 1, otherwise unreachable], which codegen
+  writes `trunc nuw`), and our body's own passes (SingleUseConsts, RemoveZsts' locals)"
+  [rb ib]
+  (let [knorm (fn knorm [x] (cond (and (seq? x) (= 'adt (first x))) (apply list 'adt (second x) (map knorm (drop 3 x)))
+                                  (seq? x) (apply list (map knorm x))
+                                  (vector? x) (mapv knorm x)
+                                  :else x))
+        locs (:locals ib)
+        fz (into {} (for [l locs :let [t (:tc (meta (:ty l)))] :when t]
+                      [(knorm (:ty l)) (try (boolean ((requiring-resolve 'arbace.rust.front.passes/freeze?) t)) (catch Throwable _ false))]))
+        sv (when *type-layout*
+             (into {} (for [l locs :let [t (:tc (meta (:ty l)))] :when (vector? t)
+                            [deref? et] [[false t] [true (when (#{:ref :ptr} (first t)) (last t))]] :when (vector? et)
+                            :let [lf (try (*type-layout* et) (catch Throwable _ nil)) ds (:discrs lf) vs (:variants lf)]
+                            :when (and (seq ds) (seq? vs))]
+                        [[(knorm (:ty l)) deref?]
+                         (case (first vs)
+                           single (let [i (second vs)] #{(nth ds i i)})
+                           empty #{}
+                           multiple (set (keep-indexed (fn [i v] (when-not (:uninhabited v) (nth ds i))) (:variants (second vs))))
+                           nil)])))]
+    (binding [*freeze-ty?* (fn [t] (boolean (get fz (knorm t))))
+              *switch-variants* (when (seq sv) (fn [[t d]] (get sv [(knorm t) d])))]
+      (first (o0-normalize rb true (:zst-locals ib))))))
+
 (defn- first-diff
   "The first differing subforms of A and B (descending while both are lists or vectors of one length)"
   [a b]
@@ -2574,7 +2602,8 @@
                                       (if (and (map? o) (not (mono/error? o)))
                                         (assoc (dissoc o :name) :phase "arbace-lib-unit" :name (:name rec))
                                         (throw (ex-info (str "no symbol: " (if (mono/error? o) (second o) "no fact")) {})))))
-                  :assert-loc (fn [_] (list 'loc "?" 0 0))
+                  ;; C6-4: an Assert's panic location, the export's (its span made a caller location, :call-loc), as a call's
+                  :assert-loc (fn [t] (if-let [cl (:call-loc (meta t))] (list 'loc (loc-file (first cl)) (second cl) (nth cl 2)) (list 'loc "?" 0 0)))
                   :anon-discr (fn [vp] (try (mono/variant-discriminant n vp) (catch Throwable _ nil)))
                   :layout-of (fn [tyf] (in-lib #(mono/type-layout-form n tyf)))
                   :closure-fnptr (fn [tyf] (try (in-lib #(mono/closure-once-symbol n tyf)) (catch Throwable _ nil)))
@@ -2587,19 +2616,21 @@
                            ;; (SimplifyCfg-final, CopyProp, RemoveZsts, ...): o0-normalize, pack-compare's port of them, over the
                            ;; runtime body (its calls' callees and locations already written: it keeps no metadata); LIB_UNIT_O0=0: not
                            (try [d (in-lib #(let [rb (runtime-body (assoc (:body i) :name (str "lib " d)) {:name (str "lib " d)} nf false)]
-                                              (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (first (o0-normalize rb))))) nil]
+                                              (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i))))) nil]
                                 (catch Throwable x [d nil (str "the runtime body: " (.getMessage x))])))))
               inl-out (vec (for [[d args sym i why] inl]
                              (if-not i
                                [d args sym nil why]
                                (try [d args sym (in-lib #(let [nm (inl-name d args)
                                                                rb (runtime-body (assoc (:body i) :name nm) {:name nm} nf false)]
-                                                           (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (first (o0-normalize rb))))) nil]
+                                                           (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i))))) nil]
                                     (catch Throwable x [d args sym nil (str "the runtime body: " (.getMessage x))])))))
               ;; the layouts from the instances' forms, which carry their types (:tc; runtime-body's walk drops it, and form->ty
               ;; reads a type from the record's DefId texts alone), then from the runtime bodies' for what they add
-              lt ((:layouts-of facts) (concat (mono/ty-forms (concat (for [[_ i] insts :when i] (:body i)) (keep #(nth % 3) inl)))
-                                              (mono/ty-forms (concat (keep second out) (keep #(nth % 3) inl-out)))))]
+              ;; C6-4: each layout with its LLVM type without names (std's IR's -Z fewer-names: mono/*llty*)
+              lt (binding [mono/*llty* true]
+                   ((:layouts-of facts) (concat (mono/ty-forms (concat (for [[_ i] insts :when i] (:body i)) (keep #(nth % 3) inl)))
+                                                (mono/ty-forms (concat (keep second out) (keep #(nth % 3) inl-out))))))]
           {:bodies out
            :inline-bodies (vec (for [[d args sym b why] inl-out] [d args sym b why]))
            :layouts (vec (for [[t l] lt :when (not (mono/error? l))] [t l]))
