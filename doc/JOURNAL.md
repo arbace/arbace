@@ -15840,3 +15840,150 @@ On a branch `hs-lane2-fix-1120` (59dea8370 + the two, `d2700be27`): time's own l
 them re-run (eval and the four AOT rows): outcomes as recorded, timings only; reap, crops-score, records-check unchanged.
 
 Not run: the gate, any record.
+
+## 2026-11-21: hs-r5-1121: Haskell's eval and AOT programs not own, fifth round (the front end's causes; lane 2's records again)
+
+Branch `hs-r5-1121` from mac/next `863bdaea1`, by an agent of the main host (the coordinator's brief: bring Haskell's eval and AOT
+independence stages toward 1.0, making own as many as the causes allow of the 40 eval programs lane 2 left on GHC's recorded STG,
+0.5 each, and of AOT's 4; then lane 2's two records once more at the branch's head). mac/hs-own-stg-1120 `094d7a5a0` merged first
+(`e780b92fc`: rounds 3 and 4, Typeable.Internal from errors and typed inlining; its 759a9597e and 872d7aea3 were next's already as
+12bb439e1 and 645fd36d7; the journal's two appends kept, next's first), held until now because it moves the programs' STG and this
+round ends with a re-record. Light: targeted `HSI_OWN_FALLBACK=try bin/hsi check --libs own --only` runs (6 to 8 GiB a program, one or
+two jobs) on own libraries made at the branch while it changed (`.tmp/r5/prep.sh`, lane 2's prep), the front end alone on single
+programs (`.tmp/r5/front.sh`); no gate.
+
+**The 40 before** (check-hsi-own.edn at next): 23 of own-fallback.txt (15 runnable, 8 :untried-cap), 7 stopped by the front end's
+typecheck (T5462Yes1, T13688, T15598, T4809, T9497a-run, T9497b-run, T9497c-run), ManyUbxSums (no line from the front end in 600 s),
+quotRem2Large (a StackOverflowError in the front end), 8 :ineligible. AOT's 4 on the pack: runtime-deep (:untried-cap), T19289 and
+StrictPats (the list), T15598 (typecheck).
+
+**The front end's typecheck stops** (`8099038bb`; each after GHC 9.14.1's own rule, no GHC code ported):
+- T15598 and T22086, RebindableSyntax's do: the renamer took no operator under RebindableSyntax, the elaborator always GHC.Internal.Base's
+  (>>=), so `_ <- show 42; prog` with a local `(>>=) = InfDo` unified [Char]'s list with InfDo. Now the renamer attaches the (>>=) and
+  (>>) in scope (GHC.Rename.Env's lookupSyntaxName: the unqualified name's lookupOccRn), and the elaborator types a bind statement as
+  tcSyntaxOp does (the operator's type first, the continuation checked against its second argument, skolemised when that is a polytype:
+  InfDo's `forall a. a -> InfDo`), its HasCallStack frame "a do statement" at the statement (T22086's expected stack). Only under
+  RebindableSyntax; the standard path is byte for byte as before (its wanteds' order kept).
+- T5462Yes1 and T4809, derived instances of imported classes of type constructors: DeriveAnyClass' GFunctor and GND's MonadIO, MonadCont,
+  MonadWriter w, MonadState s... kept the head at the type's every argument (GFunctor (B a), Monad (XMLGenT m a) wanted as a
+  superclass). derive-all! knew the class's kind only for the module's own classes; class-last-arity now reads an imported class's
+  last parameter's kind from its methods' types (ctx-kinds' rule; else a superclass whose last argument is that parameter), and a
+  request of arity 1 drops the type's last argument (GHC.Tc.Deriv's deriveTyData), anyclass and multi-parameter requests included.
+- T9497a-run, T9497b-run, T9497c-run, typed holes: `main = _main` under -fdefer-typed-holes (or -fdefer-type-errors) is GHC's deferred
+  hole, a typeError of GHC.Tc.Errors' message at run time. The elaborator makes an unbound `_x` a hole (HsUnboundVar), its evidence a
+  placeholder typeError filled once the binding group is solved (hole-text): Found hole with its type and the hint of a named hole,
+  the contexts (the hole's own expression none: addExprCtxt skips HsUnboundVar), the relevant bindings (the group's binders, unfiltered
+  for a hole) and the valid hole fits (GHC.Tc.Errors.Hole: the binders first, "bound at", then the imports' names, the renamer's GREs
+  with their ImportSpec, "imported from ‘Prelude’ at FILE:1:1 (and originally defined in ‘M’)"; GHC.Internal.Err's left out,
+  not_trivial; each candidate checked by tcCheckHoleFit's rule in a sandbox: instantiated, unified with the hole's type, every
+  constraint solved by the instances or a defaulted call stack; sorted by the size of its type applications, at most 6). The text of all
+  three is GHC's byte for byte (readLn @() and mempty @(IO ()) found among Prelude's 250 names). bin/lib/hsi/check passes
+  -fdefer-typed-holes to the front end as it passed -fdefer-type-errors.
+- quotRem2Large: the Simplifier recursed 7 interpreted calls a cons of its 1,080-element literal list, past the evaluator's 10,000
+  (MAX_DEPTH, fixed in stage 0's runtime); rebuild-go recurs for its own continuations and simpl-in-id calls it directly (5 a cons).
+- ManyUbxSums: the generated module (1,331 functions and 1,331 tests, 10,663 lines) took 177 s in a 3 GiB heap but ran past 600 s in
+  the check's 1.5 GiB (HSI_FRONT_MEM), collecting. The renamed tree was held twice through the elaboration and the STG (rename-file's
+  result keeps it as :tree, nothing reads it after; the copy read from its file stayed in compile-module's frame: the interpreter
+  clears no locals); now it is held once and let go before the STG (dissoc, and a volatile emptied in a function of its own): 438 s
+  at 1.5 GiB alone (tc :binds 194 -> 46 s), 176 s in the check's front shard.
+
+**own-fallback.txt's 15 runnable entries** (tried on the own libraries; the reason each was listed, then what happened):
+- T8726 (:own-report): passes (the light runs' 2 GiB had been its limit; 33.5 s).
+- T22086 (runs differently): RebindableSyntax's (>>) above; passes.
+- T16449_2 (runs differently, printed 1099511627776): GHC's -O0 Simplifier folds `uncheckedIShiftL# 1# 1000#` to 0 (ConstantFold's
+  shiftRule, Note [Guarding against silly shifts], read in the pinned tarball's compiler/GHC/Core/Opt/ConstantFold.hs); hsi computed
+  the masked shift. constfold.ae ports shiftRule for the native Int and Word shifts (`2f4024507`); passes.
+- T19289 (runs differently, a frame missing): a pattern synonym's required HasCallStack is pushed at its occurrence (GHC's OccurrenceOf
+  origin, "Annotated, called at T19289.hs:24:26"); tc-patsyn-pat took it as a plain wanted. Passes.
+- T246 (stopped by undefined): a record pattern's fields are matched in the order the pattern writes them (matchOneConLike's
+  select_arg_vars, Note [Record patterns]); tc-rec-pat made the positional pattern in declaration order. It notes the written order on
+  the pcon, and the desugarer's match-cons matches those columns in it, consecutive equations of one order a group (compatible_pats);
+  a pattern in declaration order is matched as before. Passes.
+- dsrun007 (case on a function): `C{}` of a constructor without labels was C itself; dsExpr's RecordCon gives each argument
+  recConError "SPAN|" (unlabelled_bottom), a missing labelled field "SPAN|f" (mkErrorAppDs; it was the bare label). Passes.
+- T9858c (runs differently, (True,False)): `() :: Constraint` is GHC.Classes' CUnit, a type constructor of its own; the kind
+  signature was erased. Passes.
+- StrictPats (runs differently, 5 of 19 cases): GHC's isUnliftedHsBind makes a binding of an unlifted binder strict (dsUnliftedBind's
+  case); a where-binding of Int# whose right-hand side is representation-polymorphic (undefined :: Int#, I# _x = undefined) was dropped
+  dead by the simple optimiser, which judged its expression lifted. simpleopt keeps a local binder of an unlifted type from inlining or
+  dropping by the binder's noted type too: 18 of 19 cases now; n's `_x = undefined :: (# () #)` (an unboxed 1-tuple of a lifted type,
+  whose representation is a lifted one's) still dropped. Stays listed.
+- T14236 (was a stop, now runs differently): Type.Reflection's App over the own Typeable.Internal prints FUN 'Many 'IntRep ('BoxedRep
+  'Lifted) Int# [Char] where GHC's mkTrApp rebuilds the TrFun. Stays.
+- T10481 and UnliftedNewtypesDependentFamilyRun (not an integer: a thunk): `I# (raise# e)` floated with raise# at Int# a lifted thunk
+  (the untyped Core does not carry raise#'s representation; GHC's STG drops the I#, a bottom). Tried case-binding such a field in tostg:
+  the Simplifier floats it to the top level before, no change; reverted. Stay.
+- UnliftedNewtypesIdentityRun (no (#_|#)): an unlifted newtype over an unboxed sum, its match and construction not seen through. Stays.
+- FMA_ConstantFold (runs differently): an -O test, expect_broken(21227), whose reviewed golden output is GHC's -O constant folding of fma
+  losing the signed zeros; the -O0 front end computes IEEE results (no FAIL line). Stays.
+- T16650b, T7861: as listed (an unlifted array through unsafeCoerce#; GHC's deferred impredicative error). Stay.
+
+**The 8 :untried-cap entries**, one at a time at 8 GiB (the check's 60 s of CPU): last-piece, Loop, runtime-deep, readMVar1, fptr02 and
+CarryOverflow pass (4.96 to 34.66 s); compareByteArrays and T23071 are killed at the CPU limit as their lines of lane 2's record are on
+the pack (so 16 GiB would change nothing), in divergences-own.edn's :own-speed already; all eight left the list (`cefa9cc5a`).
+own-fallback.txt 23 -> 8 entries.
+
+**The 8 :ineligible:** nofib/gc/happy's IOExts is imported only under `#ifdef DEBUG` (its Makefile's -cpp): bin/lib/hsi/check's scan now
+leaves an import found only under a CPP conditional to the front end, which preprocesses first as GHC does; happy compiles (15 modules)
+and passes own. The other seven cannot be own by a small addition: T13825-unit and unboxedsums_unit_tests import GHC (the ghc package,
+the compiler itself); TestTypeableBinary GHCi.TH.Binary (ghci, over ghc-boot and ghc-platform); T25364 GHC.Utils.Encoding (ghc-boot,
+with ghc-platform); T24245 GHC.TypeLits.Experimental (ghc-experimental: one package over base and ghc-internal, but a new own package is
+its lib-check and lib-stg producers, a gate step haskell-lib-own-ghc-experimental and their records); foundation
+GHC.Internal.PrimopWrappers (ghc-internal's generated module, genprimopcode --make-haskell-wrappers: primiface.ae parses primops.txt.pp
+already, but lib-check's plan, the native read and lib-stg take a package's modules from the tarball's sources, and the module enters
+ghc-internal's records); tcrun022's RULES pragma (an -O test whose rule fires; the -O0 front end applies no user rule). T13688 needs
+Template Haskell's quasi-quote splices run at compile time, which the front end does not do.
+
+**The re-record** at `cefa9cc5a` (the code commits `8099038bb`, `2f4024507`, `cefa9cc5a`), lane 2's scripts adapted (`.tmp/r5/final.sh`:
+prep.sh, then run.sh eval and aot):
+- The own libraries rebuilt from empty (19:11-21:01, every process under 8 GiB and 1.9 GB of RSS): lib-check --ifaces own --judge of
+  ghc-internal 265 modules, 0 worse, 3 better; base 241, 0 worse, 4 better; the 20 packages above base each 0 worse (bytestring's and
+  time's lane-2 errors gone with 759a9597e); the controls differ as they must. lib-stg --ifaces own --judge: ghc-internal **8,471 of
+  10,007** bindings equal (round 4's 8,468; the shift rule and the record field order), 0 worse, control 0 of 171; base 850 of 1,097 on the
+  pack's reference, 0 worse, control 0 of 25.
+- Eval, lane 2's command and environment under the heavy lock (`bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core
+  --jobs 4 --record`, ARBACE_MEM_GIB=16, HSI_OWN_PACKAGES the 20 packages; 52 min, tree peak 13.8 GB): 950 programs, 902 own (876 pass),
+  17 pack, 31 never run; the eleven negative controls fail as they must; 3 in no class: bspt, fulsom and pic, NofibUtils programs judged by
+  their own verdicts since hs-judge's round 5 (a9509572b, after lane 2's run) and killed at the CPU limit, their stderr now equal, so their
+  outcome is :differs [:status :stdout] or [:status] where :no-reference-own named [:status :stdout :stderr]: the class takes those
+  outcomes too (divergences-own.edn), the record judged again with the check's own judge (lane 2's judge.sh): 0 unclassed.
+  ManyUbxSums's front end gave no line in 600 s on the loaded host (load 70 to 90: the host's other agents' jobs beside the run's four
+  shards; 176 s in the targeted try): rerun alone as lane 2 reran its thirteen (`--only`, `--record` replacing its line, HSI_FRONT_SHARDS=1,
+  the per-program cap 8 GiB under the 8 GiB process limit, not the heavy lock, which the AOT run's queue held): the front end 440 s, the
+  program passes own. Final record: **903 own** (877 pass), 16 pack (14 pass), 31 never run; 21 lines of status 137, none a pass; against
+  lane 2's record no program passes less (59 lines changed in the run: 23 of the 24 below, 26 NofibUtils programs passing by their new own
+  verdicts, bspt, fulsom, pic and fannkuch-redux killed at the limit with other differences, hash, mutstore2, pidigits, threads007, T16846
+  and T22798 within the CPU limit now).
+- AOT, lane 2's command (`--aot --libs own ... --only @aot-ids.txt --jobs 2 --record`, its 139 ids): not under the heavy lock (its queue held
+  three other agents' jobs, javac's tool among them; the brief names the lock for the eval run), so under the 8 GiB process limit with the
+  per-program cap 8 GiB (lane 2's 16; tree peak 7.0 GB, 38 min): **138 own** (136 pass), 1 pack (StrictPats, passes); fibheaps in
+  :own-speed and AsyncRerun in :async-revert as before, 0 unclassed; the six controls whose subjects ran fail as they must.
+
+**Made own, by cause (eval 879 -> 903 of the 919 cases, AOT 135 -> 138 of 139):**
+- front-end typecheck stops (6): T15598 (RebindableSyntax), T5462Yes1 and T4809 (derived heads of imported constructor classes; T5462Yes1
+  by its pending own verdict, so out of divergences.edn's :oracle-pending), T9497a-run, T9497b-run, T9497c-run (typed holes);
+- the front end's limits (2): quotRem2Large (the Simplifier's depth), ManyUbxSums (the heap; on the rerun);
+- own-fallback.txt's runnable entries (7): T8726, T22086, T16449_2, T19289, T246, dsrun007, T9858c;
+- its :untried-cap entries (8): last-piece, Loop, runtime-deep, readMVar1, fptr02, CarryOverflow (pass), compareByteArrays, T23071 (the CPU
+  limit, as on the pack);
+- :ineligible (1): nofib/gc/happy (an import under #ifdef DEBUG);
+- AOT (3): runtime-deep, T19289, T15598.
+Side effect, no change to the records: the CPP-conditional rule lets nofib/parallel/transclos, warshall and matmult reach the front end
+(their Control.Parallel imports are under `#if defined(STRATEGIES)`), which stops on their #else branch's names; GHC's record has them
+:no-dump (the Makefiles' -package parallel), their lines unchanged, out of the cases as before (eval-out.edn).
+
+**Left (16 eval cases at 0.5, AOT 1):** own-fallback.txt's 8 (StrictPats, T14236, T10481, UnliftedNewtypesDependentFamilyRun,
+UnliftedNewtypesIdentityRun, FMA_ConstantFold, T16650b, T7861: the causes above), T13688 (quasi-quote splices), the 7 ineligible
+(packages outside the own set or a generated ghc-internal module, tcrun022's RULES); AOT StrictPats.
+
+**Scores** (`bin/reap --record`, `bin/crops-score --record`): Haskell eval 892 / 35 / 23 (was 859 / 61 / 30), AOT 137 / 1 / 1 (as before);
+Haskell's eval stage 0.978 -> 0.991, AOT 0.986 -> 0.996, independence **0.9928 -> 0.9974** (floor 99, unchanged), completeness 0.9722 ->
+0.9809 (meant 0.9895 -> 0.9916), maturity 1. `bin/crops-score --judge --strict` 0 problems, `--self-test` and `bin/reap --self-test` pass,
+`bin/reap` 56 of 56 cells, 0 problems, `bin/records-check` 9 pairs, 0 problems.
+
+Alternatives not taken: the front end's memory for ManyUbxSums by raising HSI_FRONT_MEM (an environment change for one program; the
+held tree was the cause); classing bspt, fulsom and pic in :own-speed (their class is lane 2's, its outcomes only widened); the AOT run
+queued behind three heavy jobs; StrictPats' last case by treating an unboxed 1-tuple of a lifted type as unlifted in the Simplifier's
+hook (it would move every (# a #) binder's levity, the libraries' STG with it; left for a narrower rule); generating
+GHC.Internal.PrimopWrappers and adding ghc-experimental or ghc-boot to the own packages (not small: lib-check's plan, gate producers,
+records). Not done: doc/AGENDA.md (the main session's), the gate.
