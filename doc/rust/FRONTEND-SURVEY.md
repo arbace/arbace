@@ -5679,7 +5679,12 @@ rust-rec-1120's runs with `RF_DROP_GLUE=1` (the native bodies' drops calling the
    because its signature was missing (`{no sig ..}`: crate-private, and char/convert.rs outside rust-rec's outside export).
    `RF_EXTRA_IFACE` gives the signature; the outside export now takes every core file and portable-simd (stdarch aside).
 
-The runs at the merged head (503-rust-causes4 merged, `d4268b54b`): the exports re-made (core's own with 479-2, the outside one,
-alloc's, std's), then std, vectors, unwind and panics built with `RF_DROP_GLUE=1` and run on ci (`bin/rsi check --front own`,
-`RSI_FRONT_DIR`). 503-rust-causes4's open findings, taken only if they block C1: 503-1 (the `[const] BytewiseEq<B>` where clause
+The runs at the merged head (503-rust-causes4 merged, `d4268b54b`): the exports re-made (core's own with 479-2: 511 bodies, 452
+equal to rustc's built MIR, 18 min; the outside one over every core file and portable-simd: 396 bodies, 57 min; alloc's 317, 4
+min; std's 62, 2 min), then `RF_EXTRA_IFACE=core-pass/core-iface.edn:hashbrown:libc RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front
+rsi-build --native-core std vectors unwind panics` (1 h 42 min): **all four build own** (front.tsv's `own`; std's 1,942 library
+bodies built natively, vectors' unit naming 140 drops' glues, each defined). std's unit names no `drop_glue::<SplitWhitespace>`
+and calls `core::char::convert::from_u32_unchecked` by its local copy's symbol, which it defines. Their run on ci
+(`bin/rsi check --front own --corpus samples`, `RSI_FRONT_DIR`, std's pinned IR from rust-rec-1120's build): the lowered std's
+read into ci at four jobs exceeded the 8 GiB cap (6.6 GB in use: out of memory), rerun at one job. 503-rust-causes4's open findings, taken only if they block C1: 503-1 (the `[const] BytewiseEq<B>` where clause
 exported with no arguments, the collector picking `{impl#4}` for u8), 503-2 (a `btree::mem::replace` instance not collected).
