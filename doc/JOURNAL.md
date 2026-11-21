@@ -13801,3 +13801,24 @@ store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 
 - test/gate/steps.edn: repr-java-attr's jdk part `:mem-gib` 62 -> 15 (16.5 at most if that chunk's spike met a 4.2 GiB chunk),
   the step's default 49 -> 15. DECISION left to the user: the part is `:clean-only` "until cut" (2026-11-13); it is cut, and
   `:clean-only` stays until the user lifts it (as a `:phase :weekly` part, like front's and nojavac's).
+
+## 2026-11-20: java-split-1120, part 5: nojavac-check's jdk corpus, the chunked jrt-convert update for the night
+
+- `bin/repr-java nojavac-check --corpus jdk` (the gate's part command, under bin/heavy-lock, `next` 939037429 with this
+  branch): "jdk: 3630 forms files from javac's trees, the native trees' (read without javac) equal", both reads 3,421 files, 0
+  failed; the verdict FAILED on "nojavac: jdk: 93 fallbacks to javac, beyond the known 0" ("declined :names/hoist: no symbol"
+  93; 3,328 of 3,421 read natively). Not the split's: test/repr/java/nojavac-check-known.edn allows the jdk corpus none (its
+  last pass, 2026-11-12, had 2,277 files and none); the closure grew since, and the whole read of jrt-convert's pass of
+  2026-11-20 at 42494a700 fell back on 91 files for the same reason, the chunked read there on the same 91 in the same order.
+  The known file's jdk entry, or the names/hoist declines, are the reader's to settle (left). Peak 12.7 GiB of the tree,
+  2,992 s (the javac trees' read 1,373 s, the read without javac 1,615 s): a chunk's process 2.1 to 4.2 GiB, the
+  IndicConjunctBreak chunk 11.2 (javac's read) and 11.8. Before: 53.4 GiB, 431 s (2,277 files, 2026-11-12).
+- test/gate/steps.edn: repr-java-nojavac's jdk part `:mem-gib` 59 -> 14, the step's default 34 -> 14. repr-java-roundtrip
+  unchanged (its jdk part `:clean-only`, its references stale since 2026-11-13; not run: its reads take the same driver,
+  proven by the slices and jrt-convert; its print and judgment on stage 0 not measured).
+- The night's merge (the coordinator): its `jrt-convert update`, a whole read on the gate's javac tool, was OOM-killed at
+  54.4 GB at 23:00. Handed over: `git checkout mac/java-split-1120 -- bin/jrt-convert test/repr/java/chunks.ae` on
+  n-merge-1120b (its bin/jrt-convert is next's), about 23 minutes, 12.4 GiB of the tree (no process under 8 GiB can hold the
+  IndicConjunctBreak chunk, 11.8), byte-equality shown by verify at 42494a700 (part 2).
+- The survey: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk reads in chunk processes" (the proofs, the cost in
+  time, the layout's proposal).
