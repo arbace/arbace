@@ -3534,6 +3534,21 @@
                 _ (when has-dflt
                     (when-let [i (first (filter #(#{"co_await" "co_yield"} (ts (tok-at p %))) (range (inc db) (ix p))))]
                       (soft-diag! p (long i) (str "'" (ts (tok-at p (long i))) "' cannot be used in default arguments"))))
+                ;; (cpp-read, 2026-11-22: [dcl.fct.default]/7-9, an enclosing function's local variable or parameter in a default
+                ;; argument (a lambda's or a local declaration's): GCC's "local variable 'x' may not appear in this context", at the
+                ;; name; an unevaluated operand's aside)
+                _ (when (and has-dflt (not (skim? p)) (main-tok? p db)
+                             (not-any? #(#{"sizeof" "decltype" "alignof" "noexcept" "typeid" "__typeof__" "__decltype"} (ts (tok-at p %))) (range (inc db) (ix p))))
+                    (when-let [i (first (filter (fn [i]
+                                                  (let [^T t (tok-at p i) ^T pv (tok-at p (dec i))]
+                                                    (and (identical? :id (.-k t)) (not (or (t= pv ".") (t= pv "->") (t= pv "::"))) (not (t= (tok-at p (inc i)) "::"))
+                                                         (let [en (loop [^Scope s (scope p)]
+                                                                    (when s (if-let [e (.get ^java.util.HashMap (sc/names-of s) (.-s t))] [e (sc/kind-of s)] (recur (sc/parent-of s)))))]
+                                                           (and en (#{:block :fparams} (second en)) (= :var (:k (first en)))
+                                                                (not (:enumerator (first en))) (not (:static (first en))) (not (:constexpr (first en)))
+                                                                (not (:tparam (first en))))))))
+                                                (range (inc db) (ix p))))]
+                      (soft-diag! p (long i) (str "local variable '" (ts (tok-at p (long i))) "' may not appear in this context"))))
                 _ (when (and (skim? p) (t= (tok-at p (dec (ix p))) "=")) nil)
                 e (if cva (dec (last-ix p)) (last-ix p))
                 pv (node p "ParmVarDecl" (:b ds) (max (:b ds) e)
@@ -3897,8 +3912,19 @@
     (when (is? p "typename")
       (soft-diag! p (ix p) "keyword 'typename' not allowed in this context (the base class is implicitly a type)")
       (adv! p))
-    (let [qn (or (parse-name p :parse) (if (is? p "decltype") (do (parse-decl-specs p :type-id) nil) (perr p "a mem-initializer")))
+    (let [mb (ix p)
+          qn (or (parse-name p :parse) (if (is? p "decltype") (do (parse-decl-specs p :type-id) nil) (perr p "a mem-initializer")))
           ib (ix p)
+          ;; (cpp-read, 2026-11-22: [temp.variadic]/5, a function parameter pack named in a mem-initializer-id's decltype is
+          ;; expanded only by the mem-initializer's ...: GCC's "parameter packs not expanded with '...'", at the decltype)
+          _ (when (and (nil? qn) (not (skim? p)) (main-tok? p mb)
+                       (some (fn [i] (let [^T t (tok-at p i)]
+                                       (and (identical? :id (.-k t)) (= :pk (:t (:ty (lookup (scope p) (.-s t))))))))
+                             (range mb ib))
+                       (let [c (when (is? p "(") (let [s0 (ix p)] (skip-balanced! p) (let [r (is? p "...")] (seek! p s0) r)))
+                             b (when (is? p "{") (let [s0 (ix p)] (skip-balanced! p) (let [r (is? p "...")] (seek! p s0) r)))]
+                         (not (or c b))))
+              (soft-diag! p mb "parameter packs not expanded with '...'"))
           mt (when qn
                (if (and (name-plain qn) (nil? (:args (peek (:parts qn)))) (not (type-ent? (:ent qn))))
                  (some-> ^java.util.Map (:ftypes ce) (.get (name-plain qn)))
@@ -4319,6 +4345,15 @@
                   e1 (if (or pure dflt del) (last-ix p) ev)
                   body? (or (is? p "{") (is? p "try") (and (is? p ":") (not pure) (not dflt) (not del)))
                   cls (class-of-qualifier p qn)
+                  ;; (cpp-read, 2026-11-22: [class.ctor.general]/1 with [temp.res.general]/?, a constructor's declarator-id `X::X`
+                  ;; whose X is a class template's member typedef (a dependent type, `typedef typename T::X X;`), no class it
+                  ;; could name: GCC's "invalid use of dependent type", at the name; template/crash48.C)
+                  _ (let [parts (:parts qn) q (:q qn)]
+                      (when (and body? (>= (count parts) 3) (not (skim? p)) (main-tok? p ni)
+                                 (= (:s (peek parts)) (:s (nth parts (- (count parts) 2))))
+                                 (type-ent? q) (not (:class q)) (not (:tag q)) (not (:tmpl q)) (not (:tparam q)) (not (:inj q)) (:ty q)
+                                 (some :args (butlast (butlast parts))))
+                        (soft-diag! p ni (str "invalid use of dependent type '" (name-str p qn) "'"))))
                   ;; (round 54, sixth pass: [class.friend]/6, a function is defined in a friend declaration of a non-local class
                   ;; alone: GCC's "cannot define friend function 'c' in a local class definition", at the name)
                   _ (when (and body? (:friend ds) (= ctx :member) (not (skim? p)) nn
