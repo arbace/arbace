@@ -15688,3 +15688,155 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-20: hs-own-stg, third round (memory caps, the coordinator's five causes, hs-own-stg-1 (a)'s reference run)
+
+Branch `hs-own-stg-1120`, after the second round's entry. The coordinator's order: cap every experimental run at 6 GiB; the
+constructor saturation, eta expansion through IO, binding order, Typeable.Internal's kinds, update flags; base's whole number;
+hs-own-stg-1 (a)'s -O0 reference when the heavy lock's queue is short. Mid-round (the coordinator's rule, the queue at nine jobs
+for up to 2.7 h with 41 GB free): a job under 8 GiB runs directly under `ulimit -v 8388608`, no heavy lock.
+
+**Memory.** Every targeted run (`.tmp/ana/run-only`) under `ulimit -v 6291456`; the whole passes under 8 GiB, no heavy lock (the
+queued `rebuild3.sh` and its heavy-lock wrapper killed at 18:38, its ticket gone with it). Peaks: ghc-internal's whole lib-stg
+3.1-3.2 GB, base's 1.7 GB, GHC's -O0 reference dump 0.8 GB. The cap caught round 2's runaway at once: the Go runtime's "out of
+memory" at 4.5 GB in use, the allocation a `vec` in evaluated code; con-pap-eta's `(vec (concat (con-reps c) (repeat :L)))`, a
+vector of an infinite sequence.
+
+**hs-own-stg-1 (a), the coherent -O0 reference.** Run directly (18:40, 8 GiB cap): ghc-internal compiled at -O0, base failed
+(`HsBase.h: No such file or directory`): `bin/hsi pkgdb-O0` copied the installed ghc-internal entry, whose include, library and
+data dirs are `${pkgroot}`-relative, into another database (`8cc9adafa` writes `$libdir` in their place). Second run 18:52-18:59:
+510 dumps of ghc-internal, base, ghc-prim and ghc-bignum into `.tmp/hsi/dumps-O0` (not recorded): ghc-internal's 267 bodies
+byte-equal to the pack's (their headers name the database flag), base's 23 of 241 different (the default methods' unfoldings,
+and SrcLoc's fields: ghc-internal's UNPACKed strict Ints are boxed at -O0). Re-judged without re-recording (LIB_STG_REF): ghc-
+internal's counts are the pack's by construction (equal bodies). base needs every unit's constructors at -O0
+(`673fa1b8b`, `LIB_STG_O0_LAYOUT=all`; with lib-stg's --o0-layout 1 Data.List.NonEmpty, Data.Bifoldable and
+System.CPUTime.Unsupported lose 11, 4 and 2 against the coherent reference: they held ghc-internal's SrcLoc unpacked).
+
+**1. The constructor partially applied (`b49c40b37`).** Round 2's diagnosis (CorePrep's maybeSaturate) was the wrong mechanism:
+the con-pap-eta retry, its runaway fixed, gave no binding (every eta binder CorePrep's one name a position, `eta_E1`, where GHC's
+binders are fresh: ds1_366, ds1_369). GHC's is the typechecker's and desugarer's ConLikeTc (GHC.Tc.Gen.Head's tcInferDataCon,
+GHC.HsToCore.Expr's ds_app, Note [Typechecking data constructors]): every data constructor occurrence is \ds .. -> K ds .. applied
+to its arguments, the simple optimiser beta-reducing (showChar = (:) is \ds ds1 -> ds : ds1). typecheck.ae's con-eta wraps the
+unsaturated occurrences. ghc-internal 8,394 -> 8,430 (10 modules better, 0 worse).
+
+**2. Eta expansion through IO (`d9811d65d`, part).** The instance method binders had no type (fresh locals), so findRhsArity had
+no typeArity and mkEtaWW no type: they are noted now. IO's $c<> is GHC's $c<>10 binder for binder (\d a b (s :: State#) -> case a
+void# of ..). ghc-internal +3 (Conc.Sync, ReadPrec 18 -> 20). $fSemigroupIO itself still differs; DECISION hs-own-stg-2 below.
+
+**3. Binding order (`448e539a4`).** rename.ae's scc is containers' Data.Graph.scc as GHC.Data.Graph.Directed uses it (Kosaraju's,
+edges sorted by node order, the transpose's lists as accumArray (flip (:)) builds them, a cycle in preorder); Tarjan's matched
+independent nodes only. bigNatAnd's banged where bindings are forced szB first as GHC does. BigNat 95 -> 101, Backend.Native
+18 -> 21 (correction: the commit message also credits Conc.Sync 56 -> 57, which is `d9811d65d`'s; that measurement ran with it).
+`bin/repr-haskell rename-check` (GHC's renamer live): every module still equal, group order equal in 33 of 80 modules (26).
+
+**4. Typeable.Internal (`fa37c9289`, part).** add-given! expands each side's synonym at the head (canEqNC's coreView):
+getRuntimeRep's TrType alternative, TYPE r ~ Type, now gives r ~ BoxedRep Lifted. 16 -> 15 errors, no binding changes. The rest
+is the kind equalities of its GADT matches; DECISION hs-own-stg-3 below.
+
+**5. Update flags (`3a7932d8c`, one cause).** leftSection's compulsory unfolding was one lambda of two binders without occurrence
+information, so a left section's application (op e) was substituted into the lambda, a function closure where GHC let-binds it,
+a thunk (elemIndex x = findIndex (x==)); the template is rightSection's now. OldList, Show, ReadP, Bits, Text.Read.Lex, Exts,
+Stack, Stack.CCS, Data.Version, Control.Arrow one or two each (correction: the commit message's ReadPrec 18 -> 20 is
+`d9811d65d`'s).
+
+**Two more** found on the way: `c2a60711f` a strict field's argument that is a value (exprIsHNF: a Rational literal's IS 1#, IS 2#)
+is let-bound, not case-bound, and the application floats as a static constructor (Real's $dmround, Float: +2); `1d5ae3d4f`
+tools/hsprimops/primops.awk ports genprimopcode's bytearray_access_ops and addr_access_ops (AccessOps.hs): 180 ByteArray# and
+Addr# primops the table lacked, which the Simplifier took for functions of arity 0 (wordWriteAddrLE#'s arity 2, GHC's 3):
+primops.ae regenerated from the pinned tarball, 582 -> 762 entries (Bignum.Primitives 37 -> 40, BigNat +1).
+
+**Results** (each whole pass in a detached worktree `.tmp/worktrees/hs-own-stg-b` at the commit, judged, no record):
+- ghc-internal, `lib-stg --ifaces own --judge` over all 265 modules (the pack's reference, the coherent one's bodies equal):
+  `b49c40b37` 8,430; `d9811d65d` 8,433; `3a7932d8c` 8,453; the head `1d5ae3d4f` on the own pools rebuilt there **8,467 of 10,007**
+  (the round's start 8,394; n-hs-libs' record 7,982), 0 worse or missing at each, the control 0 of 171, 79 modules with every
+  binding equal (77); Typeable.Internal the one module at errors (15). The passes before the head read the own pools of
+  `ee24d0650` (the detached worktree's copy of lib-check's work names the branch worktree's absolute paths); the head's rebuilt
+  them: `lib-check --ifaces own --judge` 265 modules, 0 worse, 3 better (Bignum.Integer and TH.Lift errors -> ok, Typeable.Internal
+  16 -> 15 errors), base's 241, 0 worse, 4 better.
+- base, `lib-stg --package base --ifaces own --judge`, 1,097 bindings (recorded 584; round 2's pass 641 at `2cb904800`): at
+  `b26839c64` with ConLikeTc 845 on the pack, 864 on the coherent reference (LIB_STG_O0_LAYOUT=all); at `3a7932d8c` 847 and 867;
+  at the head on the rebuilt pools **850 on the pack, 876 on the coherent reference**; 0 worse at each, the control (Data.Complex)
+  0 of 25. The coherent reference's gains over the pack are Control.Applicative, Data.Complex, Data.Fixed, Data.Functor.Compose,
+  Product and Sum, Data.Semigroup, GHC.Stats and System.Timeout (the default methods' -O0 unfoldings).
+- classes.ae at `b49c40b37` (1,577 differing): unclassified 489, closures or fields 381, case for let 221, the call stack's
+  placement 172, update flags 117 (57 of them instance dictionaries), a type's name 57, binding order 48, a static constructor
+  34, arity 26, given equalities' selectors 21.
+
+**DECISION hs-own-stg-2: the default methods inlined at IO** ($fSemigroupIO's sconcat and stimes; the class's defaults at a known
+dictionary of a newtype over a function: IO, ST, ReadP). GHC instantiates the inlined default's local workers (sconcat's go,
+stimes's f and g) at IO a by type application, so the Simplifier eta-expands them through IO and the class-op rule resolves <> on
+the known dictionary, its AbsBinds wrapper inlined at its dictionary arguments. Our Core has no type arguments: the workers keep
+the class method's polymorphic types. Options: (a, recommended) typed inlining: at a beta-reduction whose binder's type has type
+variables and whose argument's type is known (core's exprType), the one-way match's substitution applied to the types of the
+template's binders as the Simplifier clones them (a clone forced where the substitution changes a type), and the AbsBinds
+wrapper inlined at known dictionaries (its arguments' discount); about a day, the sizes: $fSemigroupIO and $fMonoidIO, ST's,
+ReadP's and ReadPrec's instances, part of the update-flag class's 57 instance dictionaries (not measured which); (b) type arguments in
+Core (the desugarer's and Simplifier's applications carry types): faithful, weeks; (c) leave them.
+
+**DECISION hs-own-stg-3: Typeable.Internal's kind equalities** (15 errors in one module, 38 of 74 bindings equal; typeRepKind's
+TrType, TrTyCon and TrApp alternatives, the Fun pattern synonym's provided k ~ Type, TrFun's FUN m a b). A GADT match on
+TypeRep (a :: k) gives (a :: k) ~ (Type :: Type), hence k ~ Type; our [:tc TypeRep [a]] has no invisible kind argument.
+Options: (a, recommended) kinds of the skolems from the signatures' and constructors' kind annotations (*tv-kinds*), and add-given!
+adding the kinds' equality when it binds a kinded skolem (kind-of of the other side: Type's, an application's result kind), the
+pattern synonym's builder checked under its provided equalities; about half a day, the module from errors to ok; (b) invisible
+kind arguments in type constructor applications (TypeRep @k a): faithful, a change to every poly-kinded type; (c) leave it at
+errors (its own STG judged as now).
+
+**Lane 2's expectation.** next's 05:07 run (this morning's report): 725 of 777 eligible programs own, 712 passing. Round 2 removed
+five own-fallback entries (tcrun019, tcrun024, tcrun025, conc013, T25998) that pass on the own libraries. Expected when lane 2
+runs: about 730 of 777 own (717 passing), more only if round 3's STG changes turn some of the 23 remaining fallback programs
+(:front-run, :own-report, :own-lib, :untried-cap); not measured here (lane 2's run).
+
+Not run: the gate, any record, the own programs.
+
+## 2026-11-20: hs-own-stg, fourth round (hs-own-stg-3 (a), hs-own-stg-2 (a))
+
+Branch `hs-own-stg-1120`, after the third round's entry. The coordinator took both decisions: hs-own-stg-3 (a) first, then
+hs-own-stg-2 (a); the same caps (6 GiB experiments, 8 GiB whole passes); each commit with whole-pass counts; the fallback
+programs rounds 3-4 would flip for lane 2 (measuring at `b26839c64`).
+
+**hs-own-stg-3 (a) (`f8e51f7b0`): GHC.Internal.Data.Typeable.Internal from 15 errors to none.** Traced unification by
+unification (REPR_HASKELL_TC_TRACE): typeRepKind's TrType, TrTyCon, TrApp and TrFun alternatives, the Fun pattern synonym's
+matcher and builder, the (->) against FUN 'Many, typeLitTypeRep's Typeable k at its uses, splitApp's NotApplication a. The
+pieces: the kind annotations of the signatures', pattern synonyms' and GADT constructors' variables kept by name (a
+signature's skolem sk_X X's; a constructor's existential skolem its own) and a signature's class constraints giving kinds
+(KnownNat a: a :: Nat, an imported class's parameter kinds from its methods' types); a given equality binding a kinded skolem
+gives its kinds' equality, a GADT pattern's universal its instance's kind (TrTyCon's (a :: k')); an annotated variable's
+instantiation links its kind to its instance's (unified before the last solving); GHC.Internal.Prim's FUN m a b unifies with
+the arrow at m := Many, its kind Type; a constraint family's stuck application rewritten by the given equalities.
+
+**hs-own-stg-2 (a) (`c2333a4a2`, `eee23a833`): typed beta reduction.** A dictionary parameter's type is its class applied,
+every dictionary function's type is in the Simplifier's genv, and a beta reduction matches the binder's type against the
+argument's (core's exprType under the substitution so far): the Simplifier clones the body's binders the match retypes
+(GHC's substIdType), the simple optimiser retypes them in place (desugar's retypes, merged into :ltypes); a partial
+application's eta binders take its type's parameters through newtypes. Then simplify.ae's preInlineUnconditionally lost a
+join-point exclusion GHC does not have (GHC 9.14's excludes only Exitify's exit join points): stimes's g wrapper, a join point
+called once from f's recursive join point, is inlined at its dictionaries. $fMonoidIO is GHC's; $fSemigroupIO's <>, sconcat
+and stimes have GHC's arities and void binders, the rest of it the superclass selections' placement (GHC's cases before the
+join point, ours lets inside it).
+
+**Results.** Each whole pass in a detached worktree at the commit with its own pools (lib-check and lib-stg --ifaces own of
+ghc-internal and base, judged, no record; 8 GiB). At `f8e51f7b0`: ghc-internal lib-check 265 modules, 0 worse; lib-stg
+**8,467 of 10,007**, all 265 modules ok (Typeable.Internal from errors), control 0 of 171; base lib-check 241, 0 worse;
+base lib-stg 876 of 1,097 on the coherent reference, 0 worse, control 0 of 25. At `eee23a833` (with both parts of
+hs-own-stg-2): ghc-internal **8,468** (Base 161 -> 162: $fMonoidIO), all ok, 0 worse; base **876** on the coherent reference,
+850 on the pack, 0 worse. `759a9597e` and `872d7aea3` (below) leave both unchanged.
+
+**The fallback programs (lane 2).** Tried on the own libraries (HSI_OWN_FALLBACK=try, 6 GiB a program) at `eee23a833` and, for attribution, at lane 2's
+`59dea8370` with its own libraries: the 15 entries of own-fallback.txt that can run (the :front-run and :own-report ones; the
+8 :untried-cap ones need more than the cap) end the same at both heads. Rounds 3-4 flip none of them; testsuite/numeric/
+should_run/T8726 passes at both (the light run's 2 GiB was its limit), so it can leave the list at the next lane-2 run.
+
+**The night's merge (interrupting the round).** Lane 2 found bytestring's 2 and time's 17 modules from ok to errors in
+lib-check at `b26839c64`: round 2's derived Lift names Template Haskell's library (GHC's known-key names, loaded on demand),
+and 3 of time's modules' derived Data wanted base's Data (Fixed (a :: k)), whose kind variable our types do not carry.
+`759a9597e`: GHC.Internal.TH.Lib's interface in the grown closure of a module that names Lift; an instance's lone free variable
+used only in Typeable takes the head variable's instance's kind. bytestring 31 and time 47 modules 0 worse again. The
+coordinator's proof: the rule fires (trace) only for base's Data (Fixed) in time's DiffTime, NominalDiffTime and TimeOfDay
+(applied) and for Show (TypeRep (a :: k)) in binary's Data.Binary.Class (not applied), but its kind computation took fresh ids
+and renumbered that interface's unfolding binders: `872d7aea3` gives them back. With both, on lane 2's pools: binary's pool and
+STG byte-identical to lane 2's, time's pool byte-identical, its STG different exactly in the 17 modules lane 2 had at errors.
+On a branch `hs-lane2-fix-1120` (59dea8370 + the two, `d2700be27`): time's own libraries rebuilt, the ten programs that load
+them re-run (eval and the four AOT rows): outcomes as recorded, timings only; reap, crops-score, records-check unchanged.
+
+Not run: the gate, any record.

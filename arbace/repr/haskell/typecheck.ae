@@ -69,6 +69,16 @@
     (str "(loc " (nth n 1) " " (pr-str (nth n 2)) (apply str (map #(str " " %) (drop 3 n))) ")")))
 
 (def fun-tc (ext-name "tc" "GHC.Internal.Types" "FUN"))
+;; hs-own-stg-3 (a): GHC.Internal.Prim's FUN m a b, the arrow at its multiplicity, as TrFun's TypeRep (FUN m a b) and
+;; mkTrFun's type write it; fun-tc's a -> b is FUN 'Many a b ((->) = FUN 'Many, GHC.Internal.Types' type synonym)
+(def prim-fun-tc (ext-name "tc" "GHC.Internal.Prim" "FUN"))
+(def many-ty [:tc (ext-name "data" "GHC.Internal.Types" "Many") []])
+(defn- fun-vs-prim?
+  "An arrow (fun-tc) against GHC.Internal.Prim's FUN"
+  [a b]
+  (and (vector? a) (vector? b) (= :tc (first a)) (= :tc (first b))
+       (or (and (= fun-tc (second a)) (= prim-fun-tc (second b))) (and (= prim-fun-tc (second a)) (= fun-tc (second b))))))
+(defn- as-prim-fun [t] (if (= fun-tc (second t)) [:tc prim-fun-tc (into [many-ty] (nth t 2))] t))
 (def list-tc (ext-name "tc" "GHC.Internal.Types" "List"))
 (defn tuple-tc [n] (if (zero? n) (ext-name "tc" "GHC.Internal.Tuple" "Unit") (ext-name "tc" "GHC.Internal.Tuple" (str "Tuple" n))))
 (defn unboxed-con [n]
@@ -300,6 +310,7 @@
       (unify b a)
       ;; a stuck family application: the equality deferred (GHC's wanted F ts ~ t, solved once the arguments are known)
       (or (stuck-family? a) (stuck-family? b)) (do (when *deferred-eqs* (swap! *deferred-eqs* conj [a b])) true)
+      (fun-vs-prim? a b) (unify (as-prim-fun a) (as-prim-fun b))
       (and (= :tc (first a)) (= :tc (first b)) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
       (every? true? (doall (map unify (nth a 2) (nth b 2))))
       (and (= :app (first a)) (= :tc (first b)) (seq (nth b 2)))
@@ -318,6 +329,18 @@
                     (println "tc-trace: cannot unify" (pr-str (zonk a)) (pr-str (zonk b)) "givens" (pr-str (some-> *given-eqs* deref)))
                     (when (= "stack" trace?) (.printStackTrace (Exception. "tc-trace")))))
                 false))))
+
+(declare note-kind-links! instantiate)
+
+(defn- instantiate-linked
+  "instantiate, the outer quantifier's annotated variables' kinds linked to their instances' (hs-own-stg-3 (a))"
+  [t]
+  (if (and (= :forall (first t)) (seq (nth t 1)))
+    (let [m (into {} (map (fn [v] [v (fresh-meta)]) (nth t 1)))
+          _ (note-kind-links! m)
+          [t2 ps] (instantiate (subst m (nth t 3)))]
+      [t2 (into (mapv (fn [[c ts]] [c (mapv #(subst m %) ts)]) (nth t 2)) ps)])
+    (instantiate t)))
 
 (defn instantiate
   "A type's foralls instantiated with fresh metas (deeply: a forall under the constraints too): [type [pred...]]"
@@ -1031,6 +1054,8 @@
             (cond
               ;; a function's argument and result: of kinds TYPE r (Type once the representation is defaulted)
               (and (= fun-tc n) (= 2 (count as))) (do (doseq [a as] (soft-unify (kind-of a) [:tc type-tc [(fresh-meta)]])) star-kind)
+              ;; GHC.Internal.Prim's FUN m a b (its multiplicity a visible dependent argument): Type, as the arrow's
+              (and (= prim-fun-tc n) (= 3 (count as))) (do (doseq [a (rest as)] (soft-unify (kind-of a) [:tc type-tc [(fresh-meta)]])) star-kind)
               ;; an unboxed tuple's or sum's components: each of a kind TYPE r (its representation, defaulted to
               ;; LiftedRep by the inference when nothing fixes it), the whole of TYPE of their TupleRep (left open)
               (and (vector? n) (= "GHC.Internal.Types" (nmod n)) (re-matches #"(Tuple|Sum)[0-9]+#" (str (occ n))))
@@ -1337,7 +1362,9 @@
         ;; innermost first); the evidence theirs (GHC's cast by the family's coercion, erased), a tuple's the constraint
         ;; tuple's constructor applied
         (when (and (vector? c) (some-> *families* deref (get c)) (not (some-> *classes* deref (get c))) (< depth 30))
-          (let [t [:tc c ts] r (expand t)]
+          ;; (a stuck application rewritten by the given equalities too: splitApp's NotApplication a, given
+          ;; NotApplication a ~ () by its match on unsafeCoerce Refl :: NotApplication a :~: (), is solved by CUnit)
+          (let [t [:tc c ts] r (expand t) r (if (and (= r t) *given-eqs*) (expand (rewrite-by-givens t)) r)]
             (when (not= r t)
               (let [ipg (vec (for [[n it d] (reverse *ip-givens*)] [[cls-ip [[:lit n] it]] d]))
                     subs (mapv #(solve-pred % (into ipg givens) (inc depth)) (ctx-preds r))]
@@ -1606,6 +1633,102 @@
                  :let [k (try (hs-type {} (arg kb 2)) (catch Throwable _ nil))]
                  :when (rep-kind? k)]
              [(tv-key (nm (arg bb 2))) k])))
+
+(def ^:dynamic *tv-kind-anns* nil) ; atom {TV kind}: the kind annotations of the signatures' and GADT constructors' type
+                                  ; variables (forall (a :: k1 -> k2), (a :: k)), by their names in the types; a skolem
+                                  ; of a constructor's its own entry (tc-gadt-pat), a signature's skolem sk_X X's renamed
+
+(defn- kind-anns
+  "hs-own-stg-3 (a): the kind annotations in a type's tree, its binders' (HsTvb's HsBndrKind) and its kind signatures' on a
+  variable ((a :: k), HsKindSig): {TV-NAME kind-type}, the names tvs gives (else tv-key's)"
+  [ast tvs]
+  (let [tvs (merge (into {} (map (fn [n] [n [:tv (tv-key n)]]) (tv-names-of ast))) tvs)
+        conv (fn [k] (binding [*errors* nil] (try (hs-type tvs k) (catch Throwable _ nil))))]
+    (into {} (for [x (tree-seq coll? seq ast)
+                   :let [v (when (seq? x) (lval x))]
+                   :when (seq? v)
+                   [n k] (case (con v)
+                           HsTvb (let [bb (arg v 3) kb (arg v 4)]
+                                   (when (and (seq? bb) (= 'HsBndrVar (con bb)) (seq? kb) (= 'HsBndrKind (con kb)))
+                                     [[(nm (arg bb 2)) (arg kb 2)]]))
+                           HsKindSig (let [tv (lval (arg v 2))]
+                                       (when (and (seq? tv) (= 'HsTyVar (con tv)))
+                                         [[(nm (arg tv 3)) (arg v 3)]]))
+                           nil)
+                   :let [t (when n (get tvs n)) k (when t (conv k))]
+                   :when (and t (= :tv (first t)) k)]
+               [(second t) k]))))
+
+(defn- note-kind-anns! [m] (when (and *tv-kind-anns* (seq m)) (swap! *tv-kind-anns* merge m)))
+
+(def ^:dynamic *kind-links* nil) ; atom [[KIND-TYPE TYPE]...]: an annotated variable's instance and its kind's (typeLitTypeRep's
+                                 ; (a :: k) at a := Symbol: k := Type), unified once the instance is known (default!)
+
+(defn- note-kind-links!
+  "hs-own-stg-3 (a): a polytype's instantiation m (its variables to their metas): each annotated variable's kind, at m, is its
+  instance's kind (GHC's kind arguments instantiated with the type's)"
+  [m]
+  (when (and *kind-links* *tv-kind-anns*)
+    (doseq [[x mv] m :let [k (get @*tv-kind-anns* x)] :when k]
+      (swap! *kind-links* conj [(subst m k) mv]))))
+
+(declare known-kind)
+
+(defn- settle-kind-links!
+  "The kind links whose instance's kind is known by now unified (soft: a kind the annotations cannot give is left)"
+  []
+  (when *kind-links*
+    (doseq [[k t] @*kind-links*]
+      (when-let [tk (known-kind t)] (soft-unify k tk)))))
+
+(declare tycon-kind)
+
+(defn- ctx-kinds
+  "A signature's type variables' kinds from its context's classes (KnownNat a: a :: Nat, the class's parameter's kind), for
+  a variable without an annotation: {TV kind}"
+  [st]
+  (if-not (and *tv-kind-anns* (= :forall (first st)))
+    {}
+    (into {} (for [[c ts] (nth st 2) :when (vector? c)
+                   :let [ck (binding [*errors* nil] (try (second (tycon-kind c)) (catch Throwable _ nil)))]
+                   :when ck
+                   :let [pks (loop [k (expand (prune ck)) out []]
+                               (if (and (= :tc (first k)) (= fun-tc (second k)) (= 2 (count (nth k 2))))
+                                 (recur (expand (prune (second (nth k 2)))) (conj out (first (nth k 2))))
+                                 out))
+                         ;; an imported class's parameters' kinds (metas): its methods' types say them (KnownNat's natSing
+                         ;; :: SNat n, SNat :: Nat -> Type)
+                         ci (some-> *classes* deref (get c))
+                         _ (when (and ci (= (count pks) (count (:tvs ci))))
+                             (binding [*kind-env* (atom (zipmap (:tvs ci) pks))]
+                               (doseq [mn (:methods ci) :let [mt (some-> *genv* deref (get mn))] :when (vector? mt)]
+                                 (soft-unify (kind-of (if (= :forall (first mt)) (nth mt 3) mt)) star-kind))))]
+                   [t pk] (map vector ts pks)
+                   :let [t (prune t) pk (zonk pk)]
+                   :when (and (= :tv (first t)) (not (get @*tv-kind-anns* (second t)))
+                              (not (some (fn [x] (and (vector? x) (= :mv (first x)))) (tree-seq coll? seq pk))))]
+               [(second t) pk]))))
+
+(defn- sk-rename [k]
+  (cond (and (vector? k) (= :tv (first k))) [:tv (str "sk_" (second k))]
+        (vector? k) (mapv sk-rename k)
+        :else k))
+
+(defn- tv-kind
+  "A type variable's annotated kind (a signature's skolem sk_X, X's with its variables skolems too), or nil"
+  [x]
+  (when *tv-kind-anns*
+    (or (get @*tv-kind-anns* x)
+        (when (str/starts-with? x "sk_") (some-> (get @*tv-kind-anns* (subs x 3)) sk-rename)))))
+
+(defn- known-kind
+  "A type's kind from the annotations (kind-of over the annotated variables), or nil when it is not known (an open meta)"
+  [t]
+  (when *tv-kind-anns*
+    (let [vs (keep (fn [x] (when (and (vector? x) (= :tv (first x))) (second x))) (tree-seq coll? seq (zonk t)))
+          env (into {} (keep (fn [x] (when-let [k (tv-kind x)] [x k])) vs))
+          k (binding [*kind-env* (atom env)] (zonk (kind-of t)))]
+      (when-not (= :mv (first (prune k))) k))))
 
 (defn sig-type
   "A signature (HsSig ext outer body) as a closed type: [:forall [tv...] [pred...] body]"
@@ -2187,11 +2310,11 @@
           (let [[t ps] (instantiate mt)]
             [t (app* (or (:core e) (lv n)) (mapv #(want-at! % n sp label) ps))])
           [(:mono e) (or (:core e) (lv n))]))
-      (let [[t preds] (instantiate (:poly e))]
+      (let [[t preds] (instantiate-linked (:poly e))]
         ;; a binding of the module itself (or a local one) with HasCallStack pushes its call site too (EvCsPushCall)
         [t (app* (:core e) (mapv #(want-at! % n sp label) preds))]))
     (if-let [t (get @*genv* (if (= "data" (nth n 1)) n n))]
-      (let [[t preds] (instantiate t)
+      (let [[t preds] (instantiate-linked t)
             ps (when (= "data" (nth n 1)) (some-> *patsyns* deref (get n)))
             ;; HF10-P36 (a): a pattern synonym as an expression is its builder $bP (applied to (# #) when it takes the
             ;; dummy argument)
@@ -2952,6 +3075,30 @@
           (= :forall (first t)) (let [[t2 ps] (instantiate t)] (doseq [p ps] (want! p)) (split-fun t2))
           :else (let [a (fresh-meta) r (fresh-meta)] (unify t (fn-ty a r)) [a r]))))
 
+;; GHC's ConLikeTc (GHC.Tc.Gen.Head's tcInferDataCon, Note [Typechecking data constructors]): a data constructor's
+;; occurrence is desugared to its eta lambda (\ds .. -> K ds ..) applied to the arguments it has (GHC.HsToCore.Expr's
+;; ds_app of ConLikeTc, newSysLocalsDs: one binder a field, fresh at each occurrence), which the simple optimiser
+;; beta-reduces: a saturated application is K's again, an unsaturated one keeps a lambda over the rest, its arguments
+;; let-bound outside it (showChar = (:) is \ds ds1 -> ds : ds1; showChar ')' inlined, let ds = C# ')' in \ds1 -> ds :
+;; ds1). Only the unsaturated occurrences are wrapped here (the saturated ones beta-reduce to themselves)
+(def ^:dynamic *app-head* false) ; tc-app's head is being inferred: its constructor is wrapped by tc-app, which knows the arguments
+
+(defn- con-eta
+  "A data constructor n's occurrence core (its type t) applied to nargs value arguments: its eta lambda when it takes more
+  (ConLikeTc's), else core. Not a newtype's constructor (its wrapper is a cast), an unboxed tuple's or sum's, a pattern
+  synonym's builder, or a constructor with a context (its evidence applied already)"
+  [n t core nargs]
+  (let [i (when (and n (= "data" (nth n 1))) (get @*cons* n))
+        ar (:arity i)]
+    (if (and ar (> ar nargs) (seq? core) (= 'v (first core))
+             (not (some-> *patsyns* deref (get n)))
+             (not= 'newtype (:flavour (get @*tycons* (:tycon i))))
+             (not (str/starts-with? (occ n) "(#")))
+      (let [ts (first (reduce (fn [[ts t] _] (let [[a r] (split-fun t)] [(conj ts a) r])) [[] t] (range ar)))
+            ds (mapv (fn [a] (let [x (fresh-lv "ds")] (note-type! x a) x)) ts)]
+        (list 'lam ds (list 'app core ds)))
+      core)))
+
 ;; HF9 (second slice): an application as GHC.Tc.Gen.App's tcApp makes it: the spine's head inferred and instantiated,
 ;; its argument types split off, the result unified with the expected type first (Note [Unify with expected type
 ;; before typechecking arguments]), then each argument checked against its type, so a lambda argument's GADT pattern
@@ -2960,7 +3107,9 @@
   "An application spine f a1 .. an (HsApp, or OpApp: the operator applied to its two operands): [type core]; expected
   the type to check against or nil"
   [env head args expected]
-  (let [[tf cf] (binding [*ectx-nc* (boolean *defer-log*)] (infer env head)) ; (queue 369: tcInferAppHead adds no context)
+  (let [hn (let [h (lval head)] (when (= 'HsVar (con h)) (nm (arg h 2))))
+        [tf cf] (binding [*ectx-nc* (boolean *defer-log*) *app-head* (some? hn)] (infer env head)) ; (queue 369: tcInferAppHead adds no context)
+        cf (con-eta hn tf cf (count args))
         ;; HF10-P50 (a): a head of a rank-n binder's polytype (higherRank's f :: forall a. (Num a, Bounded a) => a -> a,
         ;; T17594e) instantiated with its constraints' evidence applied (tcInstFun); split-fun's instantiation dropped
         ;; the evidence
@@ -3170,7 +3319,8 @@
               ;; HF10-P54 (a): [] is an ExplicitList (GHC.Rename.Expr's rnExpr of nilDataConName, Note [Empty lists])
               (if (and (= n (ext-name "data" "GHC.Internal.Types" "[]")) (ovl-lists?))
                 (ovl-list env [(list-ty (fresh-meta)) (list 'v n)] 0)
-                (var-occ env n (lsp (arg v 2))))
+                (let [app-head? *app-head* [t c] (binding [*app-head* false] (var-occ env n (lsp (arg v 2))))]
+                  [t (if app-head? c (con-eta n t c 0))]))
               (do (error! "unrenamed variable: " (pr-str (lval (arg v 2)))) [(fresh-meta) (list 'lit "?")]))
       HsApp (let [[h args] (app-spine v)] (tc-app env h args nil))
       OpApp (tc-app env (arg v 3) [(arg v 2) (arg v 4)] nil)
@@ -3599,6 +3749,16 @@
 
 (declare tc-con-pat* rewrite-by-givens assume-eqs! scope-givens dict-param solve-with-givens! retry-implications!)
 
+(declare add-given!)
+
+(defn- given-kinds!
+  "hs-own-stg-3 (a): a given a ~ b binding the skolem a of an annotated kind: the kinds' equality given too (GHC's
+  heterogeneous equality decomposed: typeRepKind's TrType alternative, (a :: k) ~ (Type :: Type), gives k ~ Type)"
+  [a b]
+  (when-let [ka (tv-kind (second a))]
+    (when-let [kb (known-kind b)]
+      (add-given! ka kb))))
+
 (defn- add-given!
   "A given equality a ~ b canonicalised as GHC.Tc.Solver.Equality's canEqNC does for givens: both sides rewritten by
   the givens so far, a type constructor application decomposed (its injectivity), an application decomposed
@@ -3606,7 +3766,9 @@
   elaborator trusts the program: GHC would leave it untouchable); a family application or apart types left (an
   inaccessible alternative)"
   [a b]
-  (let [a (rewrite-by-givens a) b (rewrite-by-givens b)]
+  ;; (each side's synonym at the head expanded, canEqNC's coreView: getRuntimeRep's TrType alternative gives TYPE r ~
+  ;; Type, Type = TYPE LiftedRep, LiftedRep = BoxedRep Lifted, so r ~ BoxedRep Lifted)
+  (let [a (expand (rewrite-by-givens a)) b (expand (rewrite-by-givens b))]
     (when trace? (binding [*out* *err*] (println "tc-trace: given" (pr-str a) (pr-str b))))
     (cond
       (= a b) nil
@@ -3614,14 +3776,17 @@
       ;; there if still unknown (the elaborator trusts the program: GHC would leave it untouchable)
       (or (= :mv (first a)) (= :mv (first b)))
       (if (and *implic-eqs* *given-eqs*) (swap! *given-eqs* update :pending (fnil conj []) [a b]) (unify a b))
-      (and (= :tv (first a)) *given-eqs* (not (some #{a} (tree-seq coll? seq b)))) (swap! *given-eqs* assoc (second a) b)
-      (and (= :tv (first b)) *given-eqs* (not (some #{b} (tree-seq coll? seq a)))) (swap! *given-eqs* assoc (second b) a)
+      (and (= :tv (first a)) *given-eqs* (not (some #{a} (tree-seq coll? seq b))))
+      (do (swap! *given-eqs* assoc (second a) b) (given-kinds! a b))
+      (and (= :tv (first b)) *given-eqs* (not (some #{b} (tree-seq coll? seq a))))
+      (do (swap! *given-eqs* assoc (second b) a) (given-kinds! b a))
       ;; HF10-P50 (a): a family application on one side bound to the other (given-of)
       (and (stuck-family? a) (not (stuck-family? b)) *given-eqs* (not (some #{a} (tree-seq coll? seq b))))
       (swap! *given-eqs* assoc [:fam a] b ::fams true)
       (and (stuck-family? b) (not (stuck-family? a)) *given-eqs* (not (some #{b} (tree-seq coll? seq a))))
       (swap! *given-eqs* assoc [:fam b] a ::fams true)
       (or (stuck-family? a) (stuck-family? b)) nil
+      (fun-vs-prim? a b) (add-given! (as-prim-fun a) (as-prim-fun b))
       (and (= :tc (first a)) (= :tc (first b)) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
       (doseq [[x y] (map vector (nth a 2) (nth b 2))] (add-given! x y))
       (and (#{:tc :app} (first a)) (#{:tc :app} (first b)) (or (= :app (first a)) (= :app (first b))))
@@ -3656,6 +3821,14 @@
         m (into {} (for [x tvs] [x (if-let [i (some (fn [[i u]] (when (= u x) i)) univ)]
                                      (nth us i)
                                      [:tv (str x "_sk" (fresh-id))])]))
+        ;; hs-own-stg-3 (a): an existential's skolem has its annotated kind; a universal's annotated kind is its
+        ;; instance's (GHC's universal kind arguments: TrTyCon's (a :: k) at TypeRep (a' :: k') is k ~ k')
+        kinds (:kinds (:gadt info))
+        _ (doseq [[x k] kinds :let [sx (get m x)] :when (and sx (= :tv (first sx)))]
+            (note-kind-anns! {(second sx) (subst m k)}))
+        _ (doseq [[i u] univ :let [k (get kinds u)] :when k
+                  :let [ik (known-kind (nth us i))] :when ik]
+            (add-given! (subst m k) ik))
         _ (doseq [[i tau] (sort-by key eqs)]
             (add-given! (nth us i) (subst m tau)))
         dpreds (mapv (fn [[c ts]] [c (mapv #(subst m %) ts)]) ctx)
@@ -3747,6 +3920,7 @@
   outer quantifier and the first context, ex and prov from what follows; implicitly quantified, a variable the result
   does not mention is existential"
   [sig]
+  (note-kind-anns! (kind-anns sig {}))
   (let [st (sig-type sig)
         outer (arg (lval sig) 2)
         explicit? (= 'HsOuterExplicit (con (if (L? outer) (lval outer) outer)))
@@ -4250,7 +4424,13 @@
                     false)))
         binds))
 
-(defn- dict-param [[c _]] (fresh-lv (str "$d" (occ c))))
+(defn- dict-param
+  "A dictionary parameter for a predicate; hs-own-stg-2 (a): its type the class applied ([:tc CLASS ARGS]), so the Simplifier
+  can match it against a dictionary argument's (a default method inlined at an instance)"
+  [[c ts]]
+  (let [x (fresh-lv (str "$d" (occ c)))]
+    (when (and (vector? c) (vector? ts) (not= :cvar c) (not= :qc c)) (note-type! x [:tc c ts]))
+    x))
 
 (declare interact-deferred!)
 
@@ -4712,7 +4892,10 @@
                  nl (arg v 2)]
              (do (when *tv-kinds*
                    (let [ks (sig-tv-kinds (arg (arg v 3) 2))] (when (seq ks) (swap! *tv-kinds* assoc (nm nl) ks))))
-                 [(nm nl) (sig-type (arg (arg v 3) 2))]))))
+                 (note-kind-anns! (kind-anns (arg (arg v 3) 2) {}))
+                 (let [st (sig-type (arg (arg v 3) 2))]
+                   (note-kind-anns! (ctx-kinds st))
+                   [(nm nl) st])))))
 
 (defn tc-local-binds
   "(HsValBinds ext (ValBindsRn [groups] sigs)) or empty: [env' [(bind ...)...]]"
@@ -4863,6 +5046,8 @@
                                                                      k (binding [*errors* nil] (try (hs-type tvs (arg kb 2)) (catch Throwable _ nil)))]
                                                                :when (and n k (get tvs n))]
                                                            [(second (get tvs n)) k]))))
+                                   ;; hs-own-stg-3 (a): every annotated variable's kind, (a :: k) in the result too
+                                   :kinds (kind-anns [(arg cv 3) (arg cv 4) (arg cv 5) (arg cv 6) (arg cv 7)] tvs)
                                    ;; the result's tycon: a data instance's family (its constructors build the family's
                                    ;; application, as dataConOrigResTy), else the type's own
                                    :tycon (when (= :tc (first res)) (second res))}
@@ -5611,6 +5796,10 @@
         defined (into {} (keep (fn [b] (when-let [n (bind-name b)] [(occ n) b])) binds))
         methods (for [mn (:methods info)]
                   (let [cm (fresh-lv (str "$c" (occ mn)))
+                        ;; its type (the instance's context, then the method's at the head) for the Simplifier's arity:
+                        ;; typeArity through the newtypes, mkEtaWW's binders and casts (instance Semigroup (IO a)'s
+                        ;; $c<> eta-expanded through IO to its State# argument, \d a b s -> .., a void binder)
+                        _ (note-type! cm (let [mty (method-type mn cls ts)] (if (seq ctx) [:forall [] ctx mty] mty)))
                         b (get defined (occ mn))
                         ;; a coerced method whose representation dictionary is one of the instance's own parameters is
                         ;; trivial: GHC's simple optimiser inlines it into the dictionary function
@@ -5855,6 +6044,7 @@
   "Haskell 2010 §4.3.4: each ambiguous meta of the wanteds whose classes are standard, one numeric, defaulted to the
   first of (Integer, Double) that satisfies them all; then every wanted solved"
   [wanteds]
+  (settle-kind-links!)
   (loop [k 0] (when (and (< k 6) *deferred-eqs* (invert-families!)) (recur (inc k))))
   (loop [k 0] (when (and (< k 4) (improve! wanteds)) (recur (inc k))))
   (let [wanteds (map #(under-givens % identity) wanteds)]
@@ -6297,7 +6487,7 @@
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *wrapper-num* (atom (count fexps)) *fstubs* (atom [])
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
-              *tv-kinds* (atom {}) *tc-kinds* (atom {})
+              *tv-kinds* (atom {}) *tc-kinds* (atom {}) *tv-kind-anns* (atom {}) *kind-links* (atom [])
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *deriv-aux* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
@@ -6523,6 +6713,10 @@
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
+         ;; hs-own-stg-2 (a): every dictionary function's type (the module's and the interfaces'), for the Simplifier's
+         ;; exprType of a dictionary argument
+         :dfun-types (into {} (for [{:keys [dfun tvs ctx head]} @*insts* :when (and dfun head)]
+                                [dfun [:forall (vec tvs) (vec ctx) [:tc (first head) (vec (second head))]]]))
          :core (phase :resolve-core (mapv (comp drop-unused-ev resolve-core) (concat fimports core (remove nil? @*static-binds*) dms ibs sels (typeable-binds m)
                                                                                       (when main-def [(second main-def)]))))
          :main-deferred (first main-def)
