@@ -15554,3 +15554,24 @@ digests), and this entry's commit (the records and the documents). Pushed to mac
 cpp-check-essential's command on this runtime (`bin/cppi check --only test/cpp/essential-check.txt`, ARBACE_NO_AOT=1): samples 4 of 4
 and runtime 4 of 4 pass (runtime/uncaught.cpp runs cp-demangle.c's own C on ci, the terminate handler's demangling), the run controls
 differing as they must; 36 min, 2.6 GB.
+
+## 2026-11-21: n-merge-1121's essential gate: five failures fixed
+
+The essential gate on n-merge-1121 76cf4c97f (next 1e8ee0196 with 509, java-split-1120, cc1plus-survey-1120 and cpp-rt-own2-1120)
+FAILED in 281 min (.tmp/worktrees/merge-1121/.tmp/gate-1121.log); every build and the other checks passed. The five, each checked by
+its own step's command:
+- java-check-judge: test/java/check.ae's golden reviews globbed test/java/golden/*.edn and so read judge-rest's out.edn (the 16 cases
+  out of the judge's, not reviews) as reviews without golden files. The glob leaves out.edn out. `bin/java-check golden --control`:
+  167 golden files, every control failing.
+- caches-table: .tmp/ppref (pp-ref's own libcpp build) had no row in test/gate/caches.edn; a row added (:keep).
+- cpp-c2j: four reflection warnings in arbace/cpp/sema.ae's narrowing checks (412's fp-exact over narrow-int-value's result);
+  narrow-int-value's argument vector tagged ^java.math.BigInteger. `bin/repr-cpp c2j-check`: 33 of 33, no warning.
+- oi-essential: `bin/oi divergences --aot`'s pins: callback/test3, lib-marshal/intext and parallel/mctest had pins in
+  test/ocaml/aot-known.edn but no attested digest since queue 413 (the gate deferred oi-essential until now). Their runs alone
+  (`bin/oi check --aot --only-list`, status 2 each) attested in test/ocaml/pins-attested.tsv as queue 397's was; lib-marshal/intext's
+  output had grown (Tests 606 to 800 pass) before the same known cause (output_value: abstract value (Custom)), its pin moved
+  893ed328a82f -> 4703afb3d418. `bin/oi pins`: 12 pins attested; `divergences --aot`: 326 pass, 0 failing.
+- pyi-runtime-tables (a step that never passed before, spliced by queue 428): tools/pyi/header-apks.sha256's ncurses-dev
+  6.6_p20261017-r0 left Alpine edge (aarch64's 404). Re-pinned both architectures to 6.6_p20261114-r0 (sha256 0e08fe4c... x86_64,
+  06b4170e... aarch64, from the corpora's mirror); `bin/pyi runtime gen-tables`: every table byte for byte the pinned sources', its
+  controls differing. The apks also put in the main checkout's .tmp/repr-python/pyi/header-apks, where worktrees look first.
