@@ -5686,5 +5686,23 @@ rsi-build --native-core std vectors unwind panics` (1 h 42 min): **all four buil
 bodies built natively, vectors' unit naming 140 drops' glues, each defined). std's unit names no `drop_glue::<SplitWhitespace>`
 and calls `core::char::convert::from_u32_unchecked` by its local copy's symbol, which it defines. Their run on ci
 (`bin/rsi check --front own --corpus samples`, `RSI_FRONT_DIR`, std's pinned IR from rust-rec-1120's build): the lowered std's
-read into ci at four jobs exceeded the 8 GiB cap (6.6 GB in use: out of memory), rerun at one job. 503-rust-causes4's open findings, taken only if they block C1: 503-1 (the `[const] BytewiseEq<B>` where clause
+read into ci at four jobs exceeded the 8 GiB cap (6.6 GB in use: out of memory), rerun at one job (`RSI_JOBS=1
+RSI_CI_MEMLIMIT=5GiB`; the runtime lowered again at the checkout's key, 94 units, 198 s). **The four run on ci** (no status 139:
+the first bug gone; the outputs `.tmp/c6/runs/NAME/{out,err,st}`, each program's node program run on cirun as run-program runs
+it), judged against rustc's recorded run:
+  - **vectors passes** (status 0, its 498 bytes of stdout rustc's).
+  - **unwind**: status 101 and stderr rustc's ("thread 'main' panicked at test/rust/eval/unwind.rs:45:50: overflow of 200"), every
+    drop line printed in rustc's order (`drop even`/`drop odd`, `drop a`, `drop v1`, `drop v2`, `drop b`, `drop c`, `drop last`:
+    the glue runs), but the hook's lines print `hook: ` empty (187 bytes against 329).
+  - **panics**: status 3 (rustc's), the same empty `hook: ` lines and `overflow: Err(None)`, `custom: Err(None)` where rustc
+    prints the messages; `any: Err(Some(7))` (a u64 payload) and the rest rustc's (115 bytes against 254).
+  - **std**: built, lowered and read, then a stack overflow in the interpreted program (the 60 s budget's `timeout` in the
+    check; alone: `fatal error: stack overflow` after the goroutine stack's 1 GB): the unit's call cycles are core's stable sort's
+    own (drift sort and quicksort over `String`, over `char`), so a native sort body recursing without end.
+- **What the empty hooks and the `None`s are**: `<dyn Any>::downcast_ref::<&str>` and `::<String>` are instantiated in the
+  program's unit (rustc's program links std's shared instances instead), and their `TypeId::of::<T>` instances are core's native
+  body with its constant `any::TypeId::of::<T>::{constant#0}` left unevaluated (pack-compare: against the record's `(indirect
+  allocN 0)`), evaluated at codegen to bytes that are not rustc's type id hash for `&str` or `String` (u64's, the record's, is),
+  so the payload's type never matches. Not one of C1's three faults (rust-rec-1120 saw both without the glue, at `7dd5032c0`);
+  the next items: TypeId::of's constant evaluated as rustc's `type_id` (the hash of the erased type) and the sort's recursion. 503-rust-causes4's open findings, taken only if they block C1: 503-1 (the `[const] BytewiseEq<B>` where clause
 exported with no arguments, the collector picking `{impl#4}` for u8), 503-2 (a `btree::mem::replace` instance not collected).

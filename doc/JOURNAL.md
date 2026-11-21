@@ -13957,3 +13957,24 @@ with a control. C6-4: core's export again with the wanted #[inline(always)] call
 std's IR (109 before), 34 callees inlined. The passes on the native names: core's (one round, 64 min) 25,396 of 27,498 facts
 equal (25,812 on the helper's names); alloc's and std's running. The C1 runs (std, vectors, unwind, panics on rust-rec's exports
 with RF_DROP_GLUE=1, needs_drop's unknowns traced) running.
+
+## 2026-11-21: rust-c6-1120: C1's three drop glue faults fixed; std, vectors, unwind and panics build own at the merged head; vectors passes on ci
+
+At the coordinator's order (after merging mac/rust-rec-1120 and mac/503-rust-causes4, `d4268b54b`; core_check's, alloc_check's
+and build_run's conflicts kept both sides): (1) a trait object's drop is virtual (rustc_codegen_ssa's codegen_drop_terminator for
+ty::Dynamic: the vtable's slot 0, called when not null), equal to std's IR's drop_glue::<dyn Error + Sync + Send> in
+pack-compare-test with a control; (2) the glues named but never emitted came from needs_drop's unknowns (a projection over a
+private type's FnMut impl, hashbrown's ADTs): RF_EXTRA_IFACE gives the run the crates' native facts where its interface has none
+(core's whole interface pass, std's dependencies' hashbrown and libc passes: functions, ADTs, impls indexed under their traits,
+traits); (3) char::from_u32_unchecked's callee was named by the upstream symbol for want of its signature: the same facts, and the
+outside export now takes every core file and portable-simd (char/convert.rs among them). pack-compare-test's cases: the extra
+facts taken, a private impl indexed, an interface fact never replaced (the control). The exports re-made at the merged head
+(core's own with 479-2: 511 bodies; outside 396; alloc 317; std 62); rsi-build --native-core with RF_DROP_GLUE=1 and
+RF_EXTRA_IFACE: all four own (1 h 42 min). On ci (bin/rsi check --front own, RSI_FRONT_DIR, std's pinned IR from rust-rec-1120's
+build; the ci read at one job, four exceeding the 8 GiB cap): vectors passes; unwind and panics run to rustc's status with every
+drop line, but their panic hooks print empty messages and the &str and String payload downcasts give None (TypeId::of's native
+constant for those types is not rustc's type id hash: a C2/C3 fact, seen by rust-rec-1120 before the glue); std overflows the stack
+in core's stable sort (a native body recursing without end). Also: collect keeps an unknown external definition's written generic
+arguments (core's pass lost fmt::Arguments::new's rt::Argument<'a>: the C4 switch's "no callee for Arguments::new"), and a trait's
+default MetaSized supertrait follows rustc 1.99 (none for PointeeSized nor an auto trait; core's own lang items by their local
+definitions): core's pass on the native names 25,879 of 27,498 facts equal (25,396 before them; 25,812 on the helper's names).
