@@ -15308,3 +15308,21 @@ result with `jrt/StackTraceElement_Cast`, and jrt's hand-written StackTraceEleme
 program names is defined (521 used, a static comparison of the printed program with jrt's functions: only this one missing). Fix:
 StackTraceElement_Cast in go/arbace/jrt/throwable.ae, as AtomicInteger_Cast and kin are written. (j2g's dyn slots could instead fall
 back to Go's assertion for a hand-written class without a cast, as code.ae's casts do; left as it is, one function in jrt.)
+
+## 2026-11-21: Python's AOT record on next's build; the eval run regressed and is not recorded
+
+The gate executable at next 1e8ee0196 (KEY20 6aae87f093d10041e7ed, built after the two jrt fixes above; 1 h 08 min, 22.3 GB peak,
+the bounded build) is the build the user allowed for Python's records.
+- AOT: `bin/pyi check --aot --record` ran every program, then its record step ended silently with status 1: the guard that refuses a
+  record when a program lacks its runs, `miss=$(aot_list | grep -vxF -f ... | wc -l)`, ends the script under `set -euo pipefail`
+  when nothing is missing (grep -v keeps no line and exits 1). Fixed (`{ grep ... || true; }`); `check --aot --judge --record` on
+  the saved runs: 151 programs, 150 pass, 1 classed (synth/datamodel/del.py, as-pyi), 0 failing; the negative control fails as it
+  must. test/python/check-aot-linux-amd64.edn re-recorded.
+- Eval: `bin/pyi check --fresh --record` (4 h 27 min) found 529 modules, 54,043 methods: 33,063 pass, 11,347 classed, 9,633 failing,
+  6,902 of them regressions against the record (912 now pass). Its controls failed as they must. The failures are imports: 8,092
+  lines "import SystemError: pyi: Go panic: &{...}" (a raw struct with a stack of PCs, a Java throwable pyi's recovery does not
+  name) and 883 "UnboundLocalError: cannot access local variable 'module'", across Lib/test (multiprocessing's most). A direct
+  `bin/pyi run` of `import test.test_class` does not reproduce it (a ModuleNotFoundError for _testinternalcapi instead), so the
+  compiled runner's import path is the place to look. Candidates: tonight's Python merges (481 with 475 and 473, 489, 494, 501) and
+  the runtime's (jdk/ regenerated, the two jrt fixes). The record it wrote is not committed (the old record stays); the run's judge
+  log was .tmp/repr-python/pyi/check/run/judge.log in the next worktree.
