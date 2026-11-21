@@ -5588,6 +5588,13 @@ equal**, none extra:
   `native-iface`), and the passes so far read the helper's names, which have every public alias. The passes are running again on
   the native names (core one round, then alloc and std two rounds, one at a time; `.tmp/c6/np-chain.sh`), whose native maps then
   give the aliases, and core's, alloc's and std's interfaces made with no helper names at all.
+- **The passes on the native names** (no helper names in any pass: each crate's pass on the names the scans give, its
+  dependencies' aliases from their passes' native maps assembled in before it; `.tmp/c6/np-chain2.sh`): core (one round, 64 min)
+  **25,396 of 27,498** facts equal to the helper's interface (25,812 on the helper's names), alloc (two rounds, 10 min) **3,745 of
+  3,863** (all on the helper's names), std (two rounds with libc and hashbrown, 25 min) **4,570 of 4,644**; their aliases then
+  in the names: **14,953 of 15,162 facts equal**, aliases 81 of 215 (the 134 missing core_simd's `alias!` ones and core_arch's,
+  in modules the expansion does not finish: `asm!`, a non-literal `format_args!`, `the derive ConstParamTy is not taken`).
+  The first alloc pass on names with no alias at all lost 386 functions (`fmt::Result` and the like unresolved): hence the order.
 - The 49 generics: core_arch's `__m128`..`__m512*` (made by its `types!` macro in modules the native expansion does not expand yet:
   `asm!`, a `format_args!` of a non-literal format; read unexpanded, their macro-made types are absent) and the niche types core's
   interface lacks; `TransmuteFrom`'s const default is the interface's.
