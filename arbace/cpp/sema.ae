@@ -2541,12 +2541,15 @@
                   (when (and (:cls scope) (>= (count parts) 2)
                              (= (last parts) (str/trim (str/replace (nth parts (- (count parts) 2)) #"<.*$" ""))))
                     (abi/update-cls! (:cls scope) update :inherits-ctors (fnil conj #{}) (last parts))
+                    ;; (queue 509, the checker: the using-declaration's node, where cx-inherited-deleted! reports)
+                    (when (checking?) (abi/update-cls! (:cls scope) assoc-in [:cx-inh-nodes (last parts)] n))
                     ;; (cpp-s4: the base named through a typedef or an alias, `using _Base::_Base;` of variant's
                     ;; _Move_assign_base and the rest, [class.qual]/2: the constructors of the class it names)
                     (when-let [bn (try (let [t (resolve-type scope (str/join "::" (butlast parts)))]
                                          (when (abi/class? t) (:name (abi/cls (:id t)))))
                                        (catch arbace.lang.ExceptionInfo _ nil))]
-                      (abi/update-cls! (:cls scope) update :inherits-ctors conj bn)))
+                      (abi/update-cls! (:cls scope) update :inherits-ctors conj bn)
+                      (when (checking?) (abi/update-cls! (:cls scope) assoc-in [:cx-inh-nodes bn] n))))
                   (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                                              (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
@@ -5188,6 +5191,41 @@
       (let [b (or (first (filter below? bs)) (fail :overload "an inherited constructor's base"))]
         (inheriting-ctor! id (inherit-through! b g))))))
 
+(defn- cx-inh-report!
+  "Queue 509 (the checker): the refusal `x` reported again at the using-declaration of class `id` that names the class
+  `bname` (GCC's place for the inheriting constructor's own error, [class.inhctor.init]/1), when one is known."
+  [id bname x]
+  (when-let [n (and *on-refusal* (get (:cx-inh-nodes (abi/cls id)) bname))]
+    (when-not (header-node? n)
+      (*on-refusal* (ex-info (.getMessage ^Throwable x) (assoc (ex-data x) :cx/node n)) n))))
+
+(defn- cx-inherited-deleted!
+  "Queue 509 (the checker): the base constructor `fid` inherited and chosen for an initialization of class `id`. The
+  inheriting constructor initializes the other subobjects as an implicit default constructor would ([class.inhctor.init]/1),
+  so one whose default-initialization chooses a deleted constructor surely (CX12, default-ctor-init) deletes it
+  ([class.default.ctor]/2.4 by [namespace.udecl]/3): GCC's \"use of deleted function 'C::C()'\" at the using-declaration and
+  \"use of deleted function 'B::B(T) [inherited from A]'\" at the use. Judged only where sure: `fid`'s class a direct
+  non-virtual base of `id`, no virtual base, `id` no union; the other direct bases and the non-static members of class type
+  (or arrays of it) without a default member initializer, no reference, no anonymous member."
+  [id fid]
+  (let [c (abi/cls id)
+        bc (:cls (fnd fid))]
+    (when (and (checking?) bc (not (:union c)) (empty? (abi/vbases id)) (not (:tmpl c))
+               (some #(and (= bc (:cls %)) (not (:virtual %))) (:bases c)))
+      (let [subs (concat (keep #(when (not= bc (:cls %)) (:cls %)) (:bases c))
+                         (keep (fn [fl]
+                                 (when (and (not (:static fl)) (not (:init fl)) (not (:anon fl)) (:ty fl) (not (abi/ref? (:ty fl))))
+                                   (let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))]
+                                     (when (abi/class? t) (:id t)))))
+                               (:fields c)))
+            x (some (fn [sc] (try (default-ctor-init sc false) nil
+                                  (catch arbace.lang.ExceptionInfo x
+                                    (when (re-find #"call to a deleted function" (str (.getMessage x))) x))))
+                    subs)]
+        (when x
+          (cx-inh-report! id (:name (abi/cls bc)) x)
+          (fail :overload "call to a deleted function " (:name c) " (inherited from " (:name (abi/cls bc)) ")"))))))
+
 (defn- ctor-init
   "A constructor of class `id` chosen for the arguments `args` by overload resolution, its call's initializer. `nested`:
   the second phase of [over.match.list] with one element itself a list, where a conversion to X by a user-defined
@@ -5239,11 +5277,18 @@
                          ::inherited
                          (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
                          (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
-                         :else (throw e))))
+                         ;; (queue 509, the checker: an inherited base constructor chosen that is deleted, reported at the
+                         ;; using-declaration too, GCC's place: cpp0x/inh-ctor31.C)
+                         :else (do (when (checking?)
+                                     (when-let [[_ bn] (re-find #"^codegen: call to a deleted function (\S+)$" (str (.getMessage e)))]
+                                       (when (and (not= bn (:name (abi/cls id)))
+                                                  (some #(and (:deleted-sure (fnd %)) (= bn (:name (fnd %)))) inh))
+                                         (cx-inh-report! id bn e))))
+                                   (throw e)))))
             f (when-not (= ::inherited fid) (fnd fid))]
         (cond
           (= ::inherited fid) {:i :none}
-          (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) {:i :none})
+          (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) (cx-inherited-deleted! id fid) {:i :none})
           ;; (CP330 (a), the code generator: the class's inheriting constructor for the chosen base constructor, called
           ;; with the arguments as that constructor's own would be, [class.inhctor.init]/1)
           ;; (a constructor inherited through a base that inherits it: that base's inheriting constructor first, cpp-s4)
