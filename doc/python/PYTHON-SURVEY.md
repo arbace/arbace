@@ -4963,6 +4963,18 @@ against the golden text as against the record (queue 241's ground). Nothing else
 DECISION 1 (the other 24 ops tables): (a) leave them at 0.5, 72 cases (recommended: the gain is 0.2% of the judge); (b) a model
 in Chez Scheme for exact integers, flonums and complexes, run at review time only (days).
 
+## As built: the ops models, DECISION 1 decided (2026-11-21, the main host, py-ops-models-1121)
+
+DECISION 1 above, decided by the user on 2026-11-21: the other 24 ops tables get a model of their own. `test/python/golden/models/ops.ae`
+(Arbace on stage 0, not Chez: no Scheme host in the check) computes all 24 (5,400 cells) from the Reference and the library's numeric
+rules, CPython 3.14.10's stated algorithms where neither fixes a digit or an object's identity (longobject.c's small ints,
+floatobject.c's `_float_div_mod` and `float_pow`, complexobject.c's 3.14 mixed-mode operations and `_Py_c_pow`, pystrtod.c's `'r'`
+repr, unicodeobject.c's `%` with a mapping argument): exact ints, IEEE doubles, int to float and int / int and each libm call rounded
+once from exact values. Its 24 tables equalled CPython's recorded digests at the first run; they are the golden texts
+(`test/python/golden/synth/ops/*.out`), reviewed per left operand in review-ops.edn; `bin/pyi golden` runs the model (models.tsv's
+`ops.ae` rows) with a negative control per program (a changed rule). The judge: 151 of 151 programs by their own golden text (453
+cases), none by the record; Python's independence 1 (doc/JOURNAL.md, 2026-11-21).
+
 ## As built: 248, the compiler's view: codegen.c's shapes and locations, the line table, line events (2026-11-09/10, the Mac VM, queue 248)
 
 Route (a)'s tail (229's DECISION), ported from 3.14.10's Python/codegen.c, flowgraph.c and instrumentation.c where pyi's

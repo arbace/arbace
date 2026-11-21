@@ -15615,3 +15615,53 @@ Asked after main's consolidation (d0cdf3d7f; independence C++ 0.9482, Haskell 0.
 - Python: the 24 synth/ops programs queue 247 left on CPython's recorded runs (the arithmetic, bitwise and comparison tables over 15
   operands) get models computing their tables exactly, reviewed against the Reference, so their verdicts are their own.
 - Resume now, lightly: one or two agents on this host, the Mac holding until the allowance resets.
+
+## 2026-11-21: Python's 24 arithmetic and bitwise tables computed by a model of their own (py-ops-models-1121)
+
+The user's decision of today (the entry above): the 24 synth/ops programs queue 247 left on CPython's recorded runs get
+models computing their tables exactly, so their verdicts are their own. Done on branch py-ops-models-1121 (from next c19738ada):
+- `test/python/golden/models/ops.ae`, an Arbace script on stage 0 (awk's doubles cannot hold 10**20's arithmetic, Python's
+  float `//` and `%`, two's-complement bit operations or the shortest float repr; DECISION 1 of "As built: 247" had a Chez model
+  as its option (b), which would have tied the check to a Scheme host): `arbace ops.ae OP` prints OP's 225 lines for add, sub,
+  mul, truediv, floordiv, mod, pow, lshift, rshift, and, or, xor and the twelve aug- forms. Its rules: the Reference
+  (reference/expressions.rst: Binary arithmetic operations, The power operator, Shifting operations, Binary bitwise operations;
+  simple_stmts.rst: Augmented assignment statements; datamodel.rst: Objects, values and types, Emulating numeric types) and the
+  library (builtins/stdtypes.rst: Numeric Types with 3.14's mixed arithmetic, x + complex(u, v) = complex(x + u, v); Bitwise
+  Operations on Integer Types; Common and Mutable Sequence Operations; Set and Mapping Types; printf-style String and Bytes
+  Formatting; functions.rst: pow), read in CPython 3.14.10's Doc/ (the pinned tarball, test/python/corpora.edn's
+  :cpython-3.14.10). Where neither fixes a digit or an object's identity, CPython 3.14.10's stated algorithm, read as prior art
+  in the same tarball (no code vendored, the model is written in Arbace): Objects/longobject.c (the small-int cache:
+  maybe_small_long, _PyLong_FromSTwoDigits, long_long returning a itself when |a| < |b|, k_mul's zero, long_true_divide's
+  correctly rounded quotient and its signed zero for 0 / a negative int), floatobject.c (_float_div_mod, float_rem, float_pow's
+  special cases), complexobject.c (_Py_cr_sum/_diff/_prod/_quot, _Py_rc_diff, _Py_rc_quot, Smith's _Py_c_quot, c_powi,
+  _Py_c_pow's polar form with `len *= exp(-at*b.imag)`, complex_repr), Python/pystrtod.c (format_float_short's 'r': fixed
+  notation for -4 < decpt <= 16, a two-digit signed exponent), unicodeobject.c (unicode_repeat's count 1, PyUnicode_Format with a
+  mapping argument writing the format string whole, readonly: 'ab' % [1, 2] is 'ab' itself), bytesobject.c (bytes_repeat,
+  _PyBytes_FormatEx's mapping test), tupleobject.c (tuple_repeat), dictobject.c (dict_ior's dict_update_arg: {'k': 1} |= 'ab'
+  is ValueError), abstract.c (PyNumber_InPlaceAdd/Multiply's sequence fallbacks, sequence_repeat's OverflowError).
+  Arithmetic: ints as BigIntegers; floats as the host's IEEE 754 doubles (+ - * / correctly rounded); an int converted to
+  float, int / int and every libm call (pow, hypot, atan2, exp, log, cos, sin) computed exactly or to 90 digits (Machin's pi,
+  Taylor and atanh series) and rounded once to the nearest double, i.e. musl's libm modelled as correctly rounded for these
+  arguments; float repr as the shortest round-trip digits found from the exact value.
+- Agreement: all 24 tables equal CPython 3.14.10's recorded stdout digests (test/python/ref-cpython314.edn, the oracle's
+  record, compared only) at the model's first run, so no rule had to be revisited; the golden texts
+  `test/python/golden/synth/ops/OP.out` are the model's output.
+- Controls: each program's negative control is one changed rule that must change its table (bool not an int for + and +=,
+  ints as floats for - and -=, a negative repetition count a ValueError for * and *=, int / int floored, // truncated, % with
+  the dividend's sign, a negative base to a fractional power a ValueError, a negative shift reversed, >> truncating, two bools
+  giving an int for &, |, ^): 24 of 24 differ (1 to 25 cells each); add's first control (an int added to a float exactly)
+  changed no cell, 2.5 + 10**20 rounding to 1e20 either way, and sub's (no small-int cache) touches only the aug- forms, so both
+  were replaced.
+- Review: review-ops.edn's 24 entries, one per left operand (15 lines), each cell grouped under the rule it follows with the
+  sections and basis (`:impl` where CPython's algorithm decides: signed zeros, libm digits, set order, object identity), written
+  by `ops.ae --review` from the rules the model computes by and read; the header now covers all 38 ops programs.
+- bin/pyi golden runs a models.tsv row whose script is .ae on stage 0, once for all its programs (`ops.ae --check DIR OP...`):
+  151 programs, 9,023 lines reviewed, 0 problems; the awk models' 13 as before; ops.ae 24 of 24 tables, 24 controls differing.
+- Proof on saved runs: next's AOT run of 02:40 (the run test/python/check-aot-linux-amd64.edn was recorded from, its runs.tsv
+  copied into the worktree) judged again, `bin/pyi check --aot --judge`: 151 programs, 150 pass, 1 classed (del.py, :as-pyi),
+  "151 programs by their own golden text (453 cases), 0 by CPython's recorded run"; re-recorded with `--record`, the record's
+  only change the 24 rows' :verdict :ref -> :golden.
+- test/crops/independence.edn (a commit of its own): Python's :pyi-loop and :pyi-aot [151 1]; bin/crops-score --record:
+  Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
+  bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
+Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
