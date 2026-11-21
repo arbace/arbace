@@ -2071,3 +2071,38 @@ triples). Queue 337 judges them by the tests' own verdicts, as AR4's arm64 verdi
   `:x32` 7, `:options` 1 (gnux32-dwarf-gen's -g), `:stats` 1; its seven controls failing as they must. Unchanged: object-check musl
   32 of 32, synthetic 8 of 8 with obj-err 3 of 3, mc-x86-obj 49 of 49; arm64's a64-synthetic 3 of 3 with obj-err-arm64 2 of 2 and
   object-verdict ok (2,819 of 2,832); `backend check` byte for byte.
+
+## As built: x86-print (2026-11-22; branch `x86-print-1122`, from `mac/next` `863bdaea1`)
+
+The burst's stream X1: the x86-64 print cell's deferred and by-design rows ranked by cause (at `863bdaea1`: print 194,796 pass /
+1,187 by design / 531 deferred; read 25,253 / 1 / 1; eval 136 / 2 / 0), the largest fixed first, each proven on its own files with
+the controls, the rows re-recorded alone (`encode-check --record --only`), no host assembler.
+
+Round 1:
+
+- **The object verdict's main-host record (queue 337's `:until`).** `bin/repr-asm object-verdict --record`: 68 files, 1,243 CHECK
+  lines, 864 met, `:other-format` 338, `:elf32` 32, `:x32` 7, `:options` 1, `:stats` 1 (queue 372's numbers), its seven controls
+  failing; `test/reap/cells.edn`'s `:until` dropped (the source shown beside the AOT cell, AXS100 (a)). The 36 files of the print
+  level's 406 `:object-unjudged` texts re-recorded: 362 met (and the 5 streamer's lines beside them), 43 `:other-format`, 1 `--stats`
+  `:debug-trace`.
+- **The other tools' texts by their own words (AXS95 (a)'s `:other-tool`).** `arbace.asm.amd64.check/other-tool-class` holds every
+  other tool's CHECK text to the object verdict's view of Arbace's object, also for the files whose object object-check holds to
+  llvm-mc's recorded one (AXS95 (a) had them by design: "judged at the AOT level"), as arm64's judge-rest does: of the 366 texts
+  332 met, 32 `:other-format` (compact-unwind-cfi_def_cfa, fp-setup-macho, hex-immediates, the Mach-O runs of no-elf-compact-unwind
+  and reloc-undef-global), 2 `:elf32` (abs8's i386 run), LFI's note 1 (below). The verdict's llvm-readobj view takes `--sd` (arm64's
+  section data). The object check's comparison with llvm-mc's records stays the AOT cell's.
+- **The triple as Triple::normalize reads it.** x86-evenDirective's `-triple -x86_64-unknown-unknown` (an empty first component)
+  was `:other-target` at the print level and `:options` at the verdict (its value taken for a flag): `check/norm-triple` moves the
+  architecture first, objcheck's `backend-opts` skips a flag's value; its 7 `llvm-readobj -S --sd` texts met (`.even`'s NOP fill).
+- **The LFI rewriter** (`arbace.asm.amd64.lfi`, after X86MCLFIRewriter.cpp, MCLFI.cpp, MCLFIRewriter.cpp of the pinned tarball):
+  `syscall` to `leaq .Ltmp(%rip), %r11; jmpq *-8(%r14); .Ltmp:` (createTempSymbol, the streamer's count), the %fs accesses through
+  16(%r15) (the TP destination operand 0 when written and not read, else %r11; a lea when base and index are both taken), its three
+  errors, and the ABI note at the end (`.section .note.LFI.ABI.x86_64,"aG",@note,...,comdat` with its data), in the print level's
+  assemble-file (`*lfi*`) and the object assembler (`:lfi`, the note assembled by `:finish`). What the table does not hold is read
+  from the operands (mayLoad/mayStore: a memory operand that is not an address, LEA's and the NOPs'; the explicit defs and uses),
+  as the namespace says. LFI-abi-note 11, LFI-syscall 3, LFI-thread-pointer 48 texts met; LFI-thread-pointer-errors 6 of 6 error
+  lines.
+
+Proof: encode-check `--only` over the 67 files of the moved rows: 767 of 845 texts met, the rest `:other-format` 75, `:elf32` 2,
+`:debug-trace` 1; the cross judge 565 of 567 (abs8's 2 `:dollar-name`, as recorded); 6 of 6 error lines; every control of the slice
+failing as it must. After: print 195,558 pass / 890 by design / 66 deferred (completeness 99.5%, 100.0% without by design).

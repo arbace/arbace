@@ -12,6 +12,7 @@
   (:require [arbace.repr.asm :as asm]
             [arbace.asm.amd64.asm :as x]
             [arbace.asm.amd64.print :as p]
+            [arbace.asm.amd64.lfi :as lfi]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable Future]))
 
@@ -35,8 +36,20 @@
   (let [ps (concat (map second (re-seq #"--?check-prefix(?:es)?[= ]([A-Za-z0-9_,-]+)" r)))]
     (if (seq ps) (vec (mapcat #(str/split % #",") ps)) ["CHECK"])))
 
+(defn norm-triple
+  "A triple as Triple::normalize reads its architecture (llvm-project 23.1.5's TargetParser/Triple.cpp): an empty first
+  component (`-x86_64-unknown-unknown`, x86-evenDirective's) is no architecture, and normalize finds the architecture among
+  the later components and moves it first."
+  [^String t]
+  (when t
+    (if (str/starts-with? t "-")
+      (let [cs (vec (str/split t #"-" -1))
+            a (first (filter #(re-find #"^(x86_64|amd64|i[3-6]86)$" %) cs))]
+        (if a (str/join "-" (cons a (remove #{a} (rest cs)))) t))
+      t)))
+
 (defn- mode-of [^String r]
-  (let [t (second (re-find #"-m?triple[= ]+(\S+)" r))]
+  (let [t (norm-triple (second (re-find #"-m?triple[= ]+(\S+)" r)))]
     (cond (nil? t) (if (re-find #"\s-(16)\b" r) 16 64)
           (re-find #"code16" t) 16
           (re-find #"^(x86_64|amd64)" t) 64
@@ -59,7 +72,7 @@
                      out (or (last (filter #(re-find #"llvm-mc\b" %) (str/split r #"\|"))) r)]
                :when fc]
            {:mode (mode-of r) :prefixes (prefixes-of fc) :error? err?
-            :triple (second (re-find #"-m?triple[= ]+(\S+)" own))
+            :triple (norm-triple (second (re-find #"-m?triple[= ]+(\S+)" own)))
             :intel? (boolean (re-find #"x86-asm-syntax[= ]intel" own))
             ;; llvm-mc's lexer options the reader takes (the dialect's :masm-integers, :motorola-integers)
             :lexer (cond-> {}
@@ -74,8 +87,8 @@
             ;; the output read again by another llvm-mc (`llvm-mc -output-asm-variant=1 %s | llvm-mc -x86-asm-syntax=intel`)
             :piped? (boolean (re-find #"llvm-mc[^|]*%s[^|]*\|\s*(not\s+)?llvm-mc" r))
             :imm-hex? (boolean (re-find #"print-imm-hex" r))
-            ;; a triple whose rewriter changes the instructions (X86MCLFIRewriter's x86_64_lfi)
-            :lfi? (boolean (re-find #"-m?triple[= ]+\S*lfi" r))
+            ;; a triple whose rewriter changes the instructions (X86MCLFIRewriter's x86_64_lfi: arbace.asm.amd64.lfi)
+            :lfi? (lfi/lfi-triple? (second (re-find #"-m?triple[= ]+(\S+)" r)))
             :other-tool? (boolean (or (re-find #"filetype[= ]obj" r) (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" fc)
                                       (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" r)))
             ;; AXS97 (a): a run that prints LLVM's debug trace (-debug-only=..., an assertions build's)
@@ -131,6 +144,10 @@
        (catch arbace.lang.ExceptionInfo e
          (if-let [c (:print/unsupported (ex-data e))] {:punsup c :pwhat (.getMessage e)} (throw e)))))
 
+;; a run whose triple is LFI's (x86_64_lfi): each matched instruction through the LFI rewriter (arbace.asm.amd64.lfi), the ABI
+;; note at the file's end (x86-print, 2026-11-22)
+(def ^:dynamic *lfi* false)
+
 (def ^:dynamic *streamer*
   ;; the print level's: the statements that are no instruction given as the asm streamer's lines too
   ;; (arbace.asm.amd64.print/stream-statement), {:asm LINE :directive true}, or {:directive true :unported NAME}
@@ -165,7 +182,8 @@
         dir-entries (fn [ls] (mapv (fn [l] {:asm l :directive true}) ls))]
   (loop [items items mode mode syms {} out (if *streamer* [[0 (dir-entries ["\t.text"])]] []) gcc false intel x/*intel* conds ()]
     (if (empty? items)
-      out
+      ;; the streamer's finishImpl: an LFI run's ABI note (emitLFINoteSection)
+      (if (and *lfi* *streamer*) (conj out [(.size ^java.util.ArrayList starts) (dir-entries lfi/note-lines)]) out)
       (let [[f s _] (first items)
             h (when (and (seq? f) (symbol? (first f)) (= "asm" (namespace (first f)))) (name (first f)))
             active? (every? second conds)]
@@ -201,8 +219,20 @@
                                                             (:wait r) (cons (merge {:text "encoding: [0x9b]" :inst "WAIT" :mi [] :pflags #{} :mode mode}
                                                                                    (print-of "WAIT" [] #{} mode))))
                                                :else [r]))
-                                (try (binding [x/*gcc* gcc x/*intel* intel] (x/assemble-insn f mode syms))
-                                     (catch Throwable e [{:unsupported :crash :what (str (pr-str f) ": " e)}]))))
+                                (let [rs (try (binding [x/*gcc* gcc x/*intel* intel] (x/assemble-insn f mode syms))
+                                              (catch Throwable e [{:unsupported :crash :what (str (pr-str f) ": " e)}]))]
+                                  ;; the LFI rewriter's emissions in each matched instruction's place: instructions, labels
+                                  ;; (the temporaries of the streamer's count), errors
+                                  (if *lfi*
+                                    (vec (mapcat (fn [r]
+                                                   (if (:bytes r)
+                                                     (for [[k v] (binding [x/*t* (or x/*t* (x/table))]
+                                                                   (lfi/rewrite r (fn [] (let [[st s] (p/new-temp @stv)] (vreset! stv st) s))))]
+                                                       (case k :insn v :label {:lfi-label v} :error {:error v}))
+                                                     [r]))
+                                                 rs))
+                                    rs))))
+                es (vec (mapcat (fn [e] (if-let [l (:lfi-label e)] [{:asm (str l ":") :directive true}] [e])) es))
                 es (if (and *streamer* (seq labels)) (into (dir-entries (map #(str % ":") labels)) es) es)
                 ;; -show-encoding's fixup lines after each encoding (print/fixup-lines), the print level's
                 es (if *streamer*
@@ -468,39 +498,26 @@
                (if-let [c (:print/unsupported (ex-data ex))] [l c (.getMessage ex)] [l :crash (str ex)]))
              (catch Throwable ex [l :crash (str ex)]))))))
 
-(def ^:private obj-judged
-  ;; AXS95 (a): the files whose objects object-check holds to llvm-mc's recorded ones, their mc-x86-obj rows passing
-  ;; (test/asm/object-results-amd64.edn, beside the table: REPR_ASM_TABLE's checkout, else the working directory's)
-  (delay
-    (let [t (System/getenv "REPR_ASM_TABLE")
-          f (or (System/getenv "REPR_ASM_OBJ_RESULTS")
-                (if t (str (.getParentFile (.getParentFile (.getParentFile (.getAbsoluteFile (java.io.File. ^String t))))) "/test/asm/object-results-amd64.edn")
-                    "test/asm/object-results-amd64.edn"))]
-      (set (for [[id r] (read-string (slurp f)) :when (and (= r :pass) (.startsWith ^String id "mc-x86-obj/"))]
-             (first (str/split (subs id (count "mc-x86-obj/")) #"@")))))))
-
 (def ^:private verdict-lines
   ;; queue 337: the object verdict's result for each CHECK line of a file (arbace.asm.amd64.objcheck/line-results), once a file
   (memoize (fn [^String path] (try (:lines ((requiring-resolve 'arbace.asm.amd64.objcheck/line-results) path))
                                    (catch Throwable e (binding [*out* *err*] (println (str "repr-asm encode-check: object verdict: " path ": " e))) {})))))
 
 (defn- other-tool-class
-  "The class of another tool's CHECK text at line L: :other-tool when object-check judges the file's object (AXS95 (a)), else
-  the object verdict's (queue 337): :pass when it meets the line (the object's view, its disassembly Arbace's decoder's and
-  printer's text), :other-format for a Mach-O or COFF object, :elf32 for an i386 object's view Arbace's ELF64 does not hold,
-  :mismatch when it fails the line, else :object-unjudged."
+  "The class of another tool's CHECK text at line L, the object verdict's (queue 337; since x86-print, 2026-11-22, for every
+  file, also those whose object object-check holds to llvm-mc's recorded one, AXS95 (a)'s :other-tool before: the text
+  judged by its own words, as arm64's judge-rest does): :pass when it meets the line (the object's view, its disassembly
+  Arbace's decoder's and printer's text), :other-format for a Mach-O or COFF object, :elf32 for an i386 object's view
+  Arbace's ELF64 does not hold, :mismatch when it fails the line, else :object-unjudged."
   [^String path l]
-  (let [n (.getName (java.io.File. path))]
-    (if (contains? @obj-judged (subs n 0 (max 0 (- (count n) 2))))
-      :other-tool
-      (case (get (verdict-lines path) l)
-        :pass :pass
-        :other-format :other-format
-        ;; llvm-mc --stats' counters: LLVM's own trace, as -debug-only's
-        :stats :debug-trace
-        (:elf32 :x32) :elf32
-        (:fail :view-crash :object-error) :mismatch
-        :object-unjudged))))
+  (case (get (verdict-lines path) l)
+    :pass :pass
+    :other-format :other-format
+    ;; llvm-mc --stats' counters: LLVM's own trace, as -debug-only's
+    :stats :debug-trace
+    (:elf32 :x32) :elf32
+    (:fail :view-crash :object-error) :mismatch
+    :object-unjudged))
 
 (defn check-file
   "One file's row: {:stated N :met N :by {CLASS N} :errors [MET STATED] :fails [[LINE CLASS DETAIL] ...]}."
@@ -532,7 +549,7 @@
                          (nil? (:mode r))
                          {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l :other-target])) :txt (txt-as :other-target)}
                          :else
-                         (let [stmts (binding [p/*imm-hex* (:imm-hex? r) p/*intel* (:out-intel? r) x/*intel* (:intel? r) *streamer* true p/*obj* (p/obj-of (:triple r)) p/*x86-64* (x86-64? r) p/*mai-intel* (:intel? r)]
+                         (let [stmts (binding [p/*imm-hex* (:imm-hex? r) p/*intel* (:out-intel? r) x/*intel* (:intel? r) *streamer* true p/*obj* (p/obj-of (:triple r)) p/*x86-64* (x86-64? r) p/*mai-intel* (:intel? r) *lfi* (:lfi? r)]
                                        (assemble-file (:items read) starts (:mode r)))]
                            ;; the cross-syntax judge on the first AT&T run that is no error test
                            (when (and (nil? @cross) (not (:intel? r)) (not (:error? r)) (not (:lfi? r)))
@@ -541,9 +558,8 @@
                             :txt (cond (:debug? r) (txt-as :debug-trace)
                                        (:other-tool? r) (vec (for [[l] txt-cs] [l (other-tool-class path l)]))
                                        (:options? r) (txt-as :options)
-                                       (:lfi? r) (txt-as :lfi)
                                        ;; the statements the run's --defsym selects
-                                       (:defsym r) (judge-text txt-cs (binding [p/*imm-hex* (:imm-hex? r) p/*intel* (:out-intel? r) x/*intel* (:intel? r) *streamer* true p/*obj* (p/obj-of (:triple r)) p/*x86-64* (x86-64? r) p/*mai-intel* (:intel? r)]
+                                       (:defsym r) (judge-text txt-cs (binding [p/*imm-hex* (:imm-hex? r) p/*intel* (:out-intel? r) x/*intel* (:intel? r) *streamer* true p/*obj* (p/obj-of (:triple r)) p/*x86-64* (x86-64? r) p/*mai-intel* (:intel? r) *lfi* (:lfi? r)]
                                                                         (assemble-file (:items read) starts (:mode r) (:defsym r)))
                                                                (:encoding? r))
                                        :else (judge-text txt-cs stmts (:encoding? r)))

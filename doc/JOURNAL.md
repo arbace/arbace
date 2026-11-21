@@ -15688,3 +15688,30 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-22: x86-print round 1: the x86-64 print cell's object texts by their own words, the LFI rewriter
+
+The burst's stream X1 (branch `x86-print-1122` from `mac/next` `863bdaea1`): x86-64 assembly's print cell at 194,796 pass /
+1,187 by design / 531 deferred, ranked by cause: the cross judge's `:ambiguous` 566 (by design), `:object-unjudged` 406 (deferred),
+`:other-tool` 366 (by design), `:pcrel-imm` 118, `:unread` 63, `:lfi` 61, `:debug-trace` 57, `:mask-operand` 33,
+`:other-instruction` 21, `:disassemble-only` 12, `:other-target` 7, `:diagnostic` 4, `:dollar-name` 2, the round trip's 1 + 1.
+- `:object-unjudged` (406 deferred): queue 337's object verdict was never recorded on the main host (its cells.edn source `:until`);
+  recorded (`bin/repr-asm object-verdict --record`, 68 files, 864 of 1,243 lines, controls failing) and the 36 files re-recorded:
+  362 met, 43 `:other-format`, 1 `:debug-trace` (--stats).
+- `:other-tool` (366 by design, AXS95 (a)'s "the object is judged at the AOT level"): re-examined; the texts are the tests' own
+  words over the object, so `arbace.asm.amd64.check/other-tool-class` now holds them to the verdict's view for every file (arm64's
+  judge-rest's rule): 332 met, 32 `:other-format`, 2 `:elf32`, 1 LFI. Alternative kept: leave them by design (rejected: a check
+  Arbace can make).
+- `:other-target` (7): not another target; x86-evenDirective's `-x86_64-unknown-unknown` is Triple::normalize's x86-64
+  (`check/norm-triple`; objcheck no longer takes a flag's value for a flag); its 7 readobj --sd texts met (the view takes --sd).
+- `:lfi` (61 deferred, "no source in the corpora to port"): the pinned llvm-project 23.1.5 tarball holds
+  `llvm/lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp` and `llvm/lib/MC/MCLFI.cpp`; ported as `arbace/asm/amd64/lfi.ae`
+  (LICENSE.md, doc/ARBACE.md), used by the print level and the object assembler: 61 texts and the note's readelf line met,
+  thread-pointer-errors' 6 error lines met. mayLoad/mayStore (pattern-inferred in X86, not in the table) is read as "a memory
+  operand that is not an address", documented in the namespace; adding them to the table (regenerating asm/amd64/table.edn with
+  pattern inference) was weighed and left: no test tells the two apart.
+- Proof: encode-check `--only` over the 67 files: 767 of 845 texts, the rest `:other-format` 75, `:elf32` 2, `:debug-trace` 1;
+  cross 565 of 567; controls failing; recorded with `--record --only`. bin/reap --record: print 194,796 / 1,187 / 531 ->
+  195,558 / 890 / 66; bin/crops-score --record (x86-64 assembly's completeness 99.4% -> 99.5%), --judge --strict and
+  bin/records-check: 0 problems. doc/asm/AMD64-SURVEY.md, "As built: x86-print".
+Light: no gate; stage 0 /root/arbace/target/seed/amd64/arbace.
