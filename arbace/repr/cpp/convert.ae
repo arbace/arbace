@@ -877,7 +877,12 @@
             (mk 'set! (ex l) (or (binops (subs op 0 (dec (count op)))) (gap :operator op)) (ex r)))
           "ConditionalOperator" (let [[c a b] (kids n)] (mk '? (ex c) (ex a) (ex b)))
           "ArraySubscriptExpr" (let [[a i] (kids n)] (mk 'aget (ex a) (ex i)))
-          "CStyleCastExpr" (mk 'conv (cast-type n) (ex (first (kids n))))
+          "CStyleCastExpr" (if (when-let [[b e] (and (not (macro-node? n)) (rng n))]
+                                 (re-find #"^\(\s*(?:enum|struct|union|class)\b[^()]*\{" (text-at b e)))
+                             ;; (cpp-read, 2026-11-22: a cast whose type-id defines a class or enumeration, an error ([dcl.type.general]/3)
+                             ;; the forms have no type for: its text, g++.old-deja's g++.bugs/900405_01.C; before, the type's name alone)
+                             (text-form n "CStyleCastExpr/definition")
+                             (mk 'conv (cast-type n) (ex (first (kids n)))))
           ("CXXStaticCastExpr" "CXXDynamicCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr")
           (mk ({"CXXStaticCastExpr" 'cpp/static-cast "CXXDynamicCastExpr" 'cpp/dynamic-cast
                 "CXXReinterpretCastExpr" 'cpp/reinterpret-cast "CXXConstCastExpr" 'cpp/const-cast} k)
@@ -1000,7 +1005,13 @@
   "A condition, or its declaration (if (T x = e))."
   [n var]
   (if var
-    (let [[d] (decl-forms (first (kids var)) :local)] (apply list 'cpp/decl (rest d)))
+    ;; (cpp-read, 2026-11-22: a condition's declaration defining a class or enumeration, an error ([stmt.pre]/5, [dcl.type.general]/3)
+    ;; the declaration's form drops: a gap, the statement written as its text (g++.old-deja's g++.jason/cond.C))
+    (let [d0 (first (kids var))]
+      (when-let [[b e] (and (not (macro-node? d0)) (rng d0))]
+        (when (re-find #"^\s*(?:const\s+|volatile\s+)*(?:enum|struct|union|class)\b[^;()=]*\{" (text-at b e))
+          (gap :condition-definition "a class defined in a condition")))
+      (let [[d] (decl-forms d0 :local)] (apply list 'cpp/decl (rest d))))
     (ex n)))
 
 (defn- attr-arg [^String a]
@@ -1874,7 +1885,11 @@
   [names n ctx]
   (try (binding [*grp* (grp-pattern names)]
          (let [fs (vec (decl-forms n ctx))]
-           (when (and (seq fs) (every? #(and (seq? %) (#{'c/var 'c/typedef} (first %)) (not (:cpp/macro (meta %)))) fs) (some has-base? fs))
+           (when (and (seq fs) (every? #(and (seq? %) (#{'c/var 'c/typedef} (first %)) (not (:cpp/macro (meta %)))) fs) (some has-base? fs)
+                      ;; (cpp-read, 2026-11-22: the class's spelling replaced in the declarator's type alone: one in its
+                      ;; initializer, `struct OK2 { int a; } &s6 = *(new OK2());` (g++.dg's parse/semicolon3.C), stays written,
+                      ;; the declaration its text; before, the initializer's c/base printed as `c::base`)
+                      (not-any? #(some has-base? (nnext %)) fs))
              fs)))
        (catch arbace.lang.ExceptionInfo e (if (:cpp/gap (ex-data e)) nil (throw e)))))
 
