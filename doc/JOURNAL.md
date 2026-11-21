@@ -14115,3 +14115,17 @@ Alternatives not taken: classing the four front-end programs in a new own class 
 and change nothing else); dropping `:oracle-pending` rows from reap's reader (the user's decision counts them); a whole second run
 for one record state (the fixes provably touch the four programs alone; `--only --record` is the check's way to replace lines).
 Not done: doc/AGENDA.md (the main session's), the gate.
+
+## 2026-11-21: lane 2's records with 759a9597e and 872d7aea3 (branch hs-lane2-fix-1120)
+
+On hs-lane2-1120 59dea8370 with hs-own-stg's two fix commits cherry-picked (derived Lift's TH library interface in
+lib-check's closures; an instance's kind variable from its head, taking no fresh ids): time's own pool and STG rebuilt at the
+fix (lib-check --package time --ifaces own: 47 modules, 0 worse, the pool byte-identical to lane 2's; lib-stg: 47 of 47 ok,
+the 17 modules lane 2 had at errors now ok, their STG the only difference), every other package's pool and STG lane 2's as
+they are. The ten programs that load those time modules re-run with lane 2's environment (8 GiB a program): bin/hsi check
+--libs own --only (samples/LibIO, LibMisc, LibPosix, LibSystem, codeGen cgrun059, concurrent T21651, T21969,
+setnumcapabilities001, lib/base executablePath, unboxedsums unpack_sums_6) --record, and --aot over the four of them in
+check-hsi-aot-own.edn: every row's outcome as recorded (6 pass and 4 :limit failures in their classes; the 4 AOT rows pass),
+only the timings changed, no killed pass, 0 unclassed. bin/reap --record (matrix unchanged), bin/crops-score --record
+(unchanged), --judge --strict and bin/records-check: 0 problems. Not rebuilt: bytestring, whose 2 modules the fix also takes
+from errors to ok (its pool and STG are lane 2's here).
