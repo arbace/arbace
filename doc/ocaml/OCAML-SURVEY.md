@@ -4572,3 +4572,26 @@ its B0.ml; pprint's PPrintTest), and at oi's level the 5 of `test/ocaml/own-verd
   under GOGC off (the 165 units' Java forms, 56 MB of them translated), so header.awk turns the mode on at aot=0 only (DECISION 480-1).
   The other ocamldoc tests (backends html, latex, man, texinfo) are no rows of the run corpus.
 - Control (`test/ocaml/controls.txt`): t01's run against t04's reference must differ.
+
+## As built: queue 511 (2026-11-21, the VM): ocamlc's .cmt and ocamlobjinfo on oi, the shape-index tests
+
+- The third of ocamltest's tools as Arbace's own (after 478's depend and 480's ocamldoc): `test/ocaml/objinfo/oiobjinfo.ml`, from OCaml
+  5.5.0's `tools/objinfo.ml` (its .cmi and .cmt printing verbatim) and `driver/compile_common.ml`'s steps up to typing, runs on oi over
+  compiler-libs' units: `ocamlc -c FLAGS FILE...` (`-bin-annot`, `-bin-annot-occurrences`: Typemod writes the .cmi, .cmt and .cmti,
+  Cmt_format's index_occurrences reduces each occurrence's shape by Shape_reduce), its messages into `ocamlc.out`, then `ocamlobjinfo
+  ARGS` over the .cmt and .cmti files (`-quiet`, `-index`, `-decls`, `-uid-deps`, `-shape`, `-null-crc`). No .cmo: oi has no bytecode
+  back end, so the compile stops after typing (the .cmt is written by typing).
+- `bin/lib/oi/tools.bash` (sourced by bin/oi, outside native_key as ocamldoc.bash): header.awk's tool mode, `@tool=NAME` in a row's
+  environment, `oi_tool_prog NAME` its program (objinfo: the test's files, the standard library's .cmi files made on oi by oicmi as
+  ocamldoc_build makes them, in `.tmp/oi/objinfo`, linked as `_stdlib`, oiobjinfo dumped natively as the row's program) and
+  `tool_output NAME` its side output (objinfo: the compiler's output against TEST.compilers.reference, none: no output, as
+  check-ocamlc.byte-output; a difference appended so the row fails). bin/oi's oi_one calls them (its one edit).
+- `header.awk`'s objinfo mode, at oi's level alone: a header of `flags`, `compile_only = "true"`, `readonly_files`/`modules`,
+  `setup-ocamlc.byte-build-env`, `all_modules`, `ocamlc.byte`, `check-ocamlc.byte-output`, `program`, `output = "out_objinfo"`,
+  `ocamlobjinfo`, `check-program-output` is a run row (arguments `-c FLAGS -nostdlib -I _stdlib FILES -objinfo ARGS`, libraries
+  compiler-libs'). Over every header of the testsuite at levels 0, 1 and 2 only the 14 such tests change, at level 0: the 12 shape-index
+  tests, uid-deps/link_intf_impl and uids/intf_uids_test. All 14 pass by their own .reference (`bin/oi check --record --only-list`);
+  `:compiler-output-index` lists none at oi's level, `:compiler-output` keeps tool-dumpobj/test. The light AOT level keeps the classes
+  (compiler-libs' typing units do not load in its limit, DECISION 480-1). `bin/oi objinfo-check` (the native typer's own printing)
+  reads its programs from divergences-aot.edn's classes now.
+- Control (`test/ocaml/controls.txt`): index_labels' run against index_vb's reference must differ.
