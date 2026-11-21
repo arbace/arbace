@@ -608,7 +608,11 @@
   (case (first r)
     :re-static "'static"
     :re-early (nth r 2)
-    :re-bound (cond (and *inner-depth* (nil? (second r)) (number? (nth r 2 nil)))
+    :re-bound (cond ;; C4 (2026-11-22): a fn pointer type's own anonymous variable (collect's :fn-binder, queue 493: [:re-bound nil
+                    ;; :inner N]), bound by the fn pointer's binder: `'^^#N` in a struct field (ArgumentType's formatter, OsFunctions)
+                    (and (nil? (second r)) (= :inner (nth r 2 nil)) (number? (nth r 3 nil)))
+                    (str "'" (apply str (repeat (long (or *inner-depth* 2)) "^")) "#" (nth r 3))
+                    (and *inner-depth* (nil? (second r)) (number? (nth r 2 nil)))
                     (str "'" (apply str (repeat *inner-depth* "^")) "#" (dec (long (nth r 2))))
                     (and *inner-depth* (= :for (nth r 2 nil)) (string? (second r))) (str "'" (apply str (repeat *inner-depth* "^")) (second r))
                     (and *clause-binder* (nil? (second r)) (number? (nth r 2 nil))) (str "'^#" (+ (long *clause-binder*) (dec (long (nth r 2)))))
@@ -629,6 +633,53 @@
     (let [ins (mapv #(ty->sty % path-of) (:inputs sig))]
       [ins (ty->sty (:output sig) path-of)])))
 
+;; C4 (2026-11-22): a pattern type (`pattern_type!(u8 is 1..)`, collect's [:pat TY TEXT]) as the helper writes it, rustc's Display of
+;; ty::Pat: (text "(u8) is 1..=core::::num::niche_types::NonZeroU8Inner::{constant#0}"). rustc_ast_lowering makes each written end
+;; of a range an anonymous constant of the field (`STRUCT::FIELD::{constant#K}`, in order) and each missing end one of the struct
+;; (`STRUCT::{constant#K}`: the type's MIN or MAX); an exclusive end is its constant's body `sub_one(END)`. Printed: a literal end
+;; written inclusive by its value (an end at the type's MAX as an open `..`), any other end by its constant's path; an or-pattern in
+;; parentheses; `!null` as written. *pat-owner* is [ADT-PATH FIELD] while a struct field's type is written.
+(def ^:dynamic *pat-owner* nil)
+
+(defn- pat-text [inner pat]
+  (let [ty-name (collect/print-ty inner)
+        alts (str/split (str/replace (str pat) #"\s+" "") #"\|")
+        [adt field] *pat-owner*
+        root (fn [p] (let [[c r] (str/split (str p) #"::" 2)] (str c "::::" r)))
+        sk (atom -1) fk (atom -1)
+        sconst (fn [] (str (root adt) "::{constant#" (swap! sk inc) "}"))
+        fconst (fn [] (str (root adt) "::" field "::{constant#" (swap! fk inc) "}"))
+        int-lit (fn [x] (when-let [[_ neg body] (re-matches #"(-?)((?:0x[0-9a-fA-F_]+)|(?:[0-9][0-9_]*))(?:[iu](?:8|16|32|64|128|size))?" x)]
+                          (let [b (str/replace body "_" "")
+                                v (if (str/starts-with? b "0x") (bigint (java.math.BigInteger. (subs b 2) 16)) (bigint b))]
+                            (if (= "-" neg) (- v) v))))
+        char-lit (fn [x] (when-let [[_ c] (re-matches #"'(.*)'" x)]
+                           (if-let [[_ h] (re-matches #"\\u\{([0-9a-fA-F]+)\}" c)] (Long/parseLong h 16) (when (= 1 (count c)) (long (int (first c)))))))
+        lit (fn [x] (or (int-lit x) (char-lit x)))
+        show (fn [v] (if (= [:char] inner)
+                       (let [c (long v)] (if (and (<= 0x20 c 0x7e) (not (#{0x27 0x5c} c))) (str "'" (char c) "'") (str "'\\u{" (Long/toHexString c) "}'")))
+                       (str v)))
+        tmax (case (first inner)
+               :char 0x10FFFF
+               (:int :uint) (let [t (second inner) n (if (str/ends-with? t "size") 64 (parse-long (subs t 1)))]
+                              (dec (reduce * 1N (repeat (if (= :int (first inner)) (dec n) n) 2N))))
+               nil)
+        one (fn [a]
+              (if (= a "!null")
+                "!null"
+                (let [i (str/index-of a "..")
+                      incl (and i (= \= (get a (+ i 2))))
+                      st (when i (subs a 0 i)) en (when i (subs a (+ i (if incl 3 2))))]
+                  (when-not i (throw (ex-info "pattern" {})))
+                  (let [s-txt (if (str/blank? st) (sconst) (let [v (lit st)] (do (fconst) (if v (show v) (throw (ex-info "pattern start" {}))))))
+                        e-txt (cond (str/blank? en) (str "..=" (sconst))
+                                    (and incl (lit en)) (do (fconst) (if (and tmax (= (bigint (lit en)) (bigint tmax))) ".." (str "..=" (show (lit en)))))
+                                    :else (str "..=" (fconst)))]
+                    (str s-txt e-txt)))))
+        body (if (= 1 (count alts)) (one (first alts)) (str "(" (str/join " | " (map one alts)) ")"))]
+    (when (and (some #(not= % "!null") alts) (nil? adt)) (throw (ex-info "pattern without its owner" {})))
+    (str "(" ty-name ") is " body)))
+
 (defn ty->sty
   "A type as the helper's structural form (sty->ty's inverse); PATH-OF gives a local definition's interface path; nil
   when the type has a part the interface does not write (a closure, an opaque type, an inference variable)"
@@ -641,12 +692,21 @@
               :param (list 'param (nth t 1) (nth t 2))
               ;; round 52: a const parameter as a generic argument (`BoxedArrayIntoIter<T, N, A>`), as the helper writes it
               :cparam (list 'cparam (nth t 1) (nth t 2))
-              :adt (list 'adt (d (second t)) (mapv s (nth t 2)))
+              ;; C4 (2026-11-22): a const generic argument's value (char's `EscapeIterInner<10, AlwaysEscaped>`), as the helper writes
+              ;; it: (const "10")
+              :cval (list 'const (str (second t)))
+              ;; C4 (2026-11-22): an extern type (`extern "Rust" { type VTable; }`) as the helper prints it, by its visible path
+              ;; through std (DynMetadata's `NonNull<VTable>`: (text "std::ptr::metadata::VTable"))
+              :adt (if (and (number? (second t)) (= "ForeignTy" (:kind (collect/def-of (second t)))))
+                     (list 'text (str/replace-first (d (second t)) #"^core::" "std::"))
+                     (list 'adt (d (second t)) (mapv s (nth t 2))))
               :ref (list 'ref (region-name (nth t 1)) (boolean (nth t 2)) (s (nth t 3)))
               :ptr (list 'ptr (boolean (nth t 1)) (s (nth t 2)))
               :slice (list 'slice (s (second t)))
               :array (list 'array (s (nth t 1)) (let [c (nth t 2)] (case (first c) :cval (second c) :cparam (list 'cparam (nth c 1) (nth c 2)) (throw (ex-info "const" {})))))
               :tuple (list 'tuple (mapv s (second t)))
+              ;; C4: a pattern type, its text (pat-text)
+              :pat (list 'text (pat-text (nth t 1) (nth t 2)))
               :proj (list 'projection (d (nth t 1)) (mapv s (nth t 2)))
               :fnptr (binding [*inner-depth* (inc (long (or *inner-depth* 1)))] (list 'fnptr (mapv s (:inputs (second t))) (s (:output (second t)))))
               ;; RIND9 (a): a trait object as the helper writes it: (dyn (trait P ARGS) [(proj ITEM ARGS TERM)] [AUTOS] REGION),
@@ -705,7 +765,12 @@
     ;; RIND9 (a): `E: 'a` as the helper writes it; `'b: 'a` and a const parameter's type (ConstArgHasType) as its (other TEXT)
     :type-outlives (when-let [t (ty->sty (second c) path-of)] (list 'type-outlives t (region-name (nth c 2))))
     :region-outlives (list 'other (str (region-name (second c)) ": " (region-name (nth c 2))))
-    :const-has-type (list 'other (#'collect/print-clause c))
+    ;; C4 (2026-11-22): core's own type there by its visible path through std, as the helper prints it ("the constant `ORD` has
+    ;; type `std::intrinsics::AtomicOrdering`", the atomic intrinsics)
+    :const-has-type (let [t (nth c 2)]
+                      (list 'other (if (and (= "core" *crate*) (vector? t) (= :adt (first t)) (number? (second t)))
+                                     (str "the constant `" (collect/print-const (second c)) "` has type `std::" (collect/print-ty t) "`")
+                                     (#'collect/print-clause c))))
     nil))
 
 (defn- generics-sty
@@ -889,7 +954,8 @@
              (let [g (collect/generics-of (:id d))
                    n (:node d)
                    field-tys (fn [owner data] (vec (map-indexed (fn [i f] [(or (:ident f) (str i))
-                                                                           (ty->sty (collect/type-of (some #(when (and (= owner (:parent %)) (= "Field" (:kind %)) (= (or (:ident f) (str i)) (second (:data %)))) (:id %)) (collect/defs))) path-of)])
+                                                                           (binding [*pat-owner* [p (or (:ident f) (str i))]]
+                                                                             (ty->sty (collect/type-of (some #(when (and (= owner (:parent %)) (= "Field" (:kind %)) (= (or (:ident f) (str i)) (second (:data %)))) (:id %)) (collect/defs))) path-of))])
                                                                 (:fields data))))
                    variants (if (= "Enum" (:kind d))
                               (vec (for [v (collect/defs) :when (and (= (:id d) (:parent v)) (= "Variant" (:kind v)))]
