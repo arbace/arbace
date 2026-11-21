@@ -2673,12 +2673,15 @@
                   (when (and (:cls scope) (>= (count parts) 2)
                              (= (last parts) (str/trim (str/replace (nth parts (- (count parts) 2)) #"<.*$" ""))))
                     (abi/update-cls! (:cls scope) update :inherits-ctors (fnil conj #{}) (last parts))
+                    ;; (queue 509, the checker: the using-declaration's node, where cx-inherited-deleted! reports)
+                    (when (checking?) (abi/update-cls! (:cls scope) assoc-in [:cx-inh-nodes (last parts)] n))
                     ;; (cpp-s4: the base named through a typedef or an alias, `using _Base::_Base;` of variant's
                     ;; _Move_assign_base and the rest, [class.qual]/2: the constructors of the class it names)
                     (when-let [bn (try (let [t (resolve-type scope (str/join "::" (butlast parts)))]
                                          (when (abi/class? t) (:name (abi/cls (:id t)))))
                                        (catch arbace.lang.ExceptionInfo _ nil))]
-                      (abi/update-cls! (:cls scope) update :inherits-ctors conj bn)))
+                      (abi/update-cls! (:cls scope) update :inherits-ctors conj bn)
+                      (when (checking?) (abi/update-cls! (:cls scope) assoc-in [:cx-inh-nodes bn] n))))
                   (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                                              (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
@@ -4644,6 +4647,7 @@
 ;;  {:i :bind :e glvalue}  a reference bound to an object   {:i :bind-temp :init init :ty T}  to a temporary
 
 (declare init-for args-for default-ctor-init method-call materialize ctor-init)
+(declare cx-movable-var cx-implicit-move-init)
 
 (defn user-conv
   "The class object `e` converted to the non-class type `t` by a conversion function: the call's value."
@@ -5164,7 +5168,7 @@
                   (keep (fn [fl] (let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))]
                                    (when (and (abi/class? t) (not (abi/ref? (:ty fl)))) (:id t))))
                         (remove :static (:fields c)))
-                  (when (and (seq vb) (or (< (long *cxx-year*) 2014) (not (abstract?)))) vb)))))))
+                  (when (and (seq vb) (or (< (long *cxx-year*) 14) (not (abstract?)))) vb)))))))
 
 (defn- cx-sub-dtor!
   "Queue 499: the implicit special member `f` (a destructor, or a default, copy or move constructor) of class `cls`,
@@ -5401,6 +5405,41 @@
       (let [b (or (first (filter below? bs)) (fail :overload "an inherited constructor's base"))]
         (inheriting-ctor! id (inherit-through! b g))))))
 
+(defn- cx-inh-report!
+  "Queue 509 (the checker): the refusal `x` reported again at the using-declaration of class `id` that names the class
+  `bname` (GCC's place for the inheriting constructor's own error, [class.inhctor.init]/1), when one is known."
+  [id bname x]
+  (when-let [n (and *on-refusal* (get (:cx-inh-nodes (abi/cls id)) bname))]
+    (when-not (header-node? n)
+      (*on-refusal* (ex-info (.getMessage ^Throwable x) (assoc (ex-data x) :cx/node n)) n))))
+
+(defn- cx-inherited-deleted!
+  "Queue 509 (the checker): the base constructor `fid` inherited and chosen for an initialization of class `id`. The
+  inheriting constructor initializes the other subobjects as an implicit default constructor would ([class.inhctor.init]/1),
+  so one whose default-initialization chooses a deleted constructor surely (CX12, default-ctor-init) deletes it
+  ([class.default.ctor]/2.4 by [namespace.udecl]/3): GCC's \"use of deleted function 'C::C()'\" at the using-declaration and
+  \"use of deleted function 'B::B(T) [inherited from A]'\" at the use. Judged only where sure: `fid`'s class a direct
+  non-virtual base of `id`, no virtual base, `id` no union; the other direct bases and the non-static members of class type
+  (or arrays of it) without a default member initializer, no reference, no anonymous member."
+  [id fid]
+  (let [c (abi/cls id)
+        bc (:cls (fnd fid))]
+    (when (and (checking?) bc (not (:union c)) (empty? (abi/vbases id)) (not (:tmpl c))
+               (some #(and (= bc (:cls %)) (not (:virtual %))) (:bases c)))
+      (let [subs (concat (keep #(when (not= bc (:cls %)) (:cls %)) (:bases c))
+                         (keep (fn [fl]
+                                 (when (and (not (:static fl)) (not (:init fl)) (not (:anon fl)) (:ty fl) (not (abi/ref? (:ty fl))))
+                                   (let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))]
+                                     (when (abi/class? t) (:id t)))))
+                               (:fields c)))
+            x (some (fn [sc] (try (default-ctor-init sc false) nil
+                                  (catch arbace.lang.ExceptionInfo x
+                                    (when (re-find #"call to a deleted function" (str (.getMessage x))) x))))
+                    subs)]
+        (when x
+          (cx-inh-report! id (:name (abi/cls bc)) x)
+          (fail :overload "call to a deleted function " (:name c) " (inherited from " (:name (abi/cls bc)) ")"))))))
+
 (defn- ctor-init
   "A constructor of class `id` chosen for the arguments `args` by overload resolution, its call's initializer. `nested`:
   the second phase of [over.match.list] with one element itself a list, where a conversion to X by a user-defined
@@ -5452,11 +5491,18 @@
                          ::inherited
                          (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
                          (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
-                         :else (throw e))))
+                         ;; (queue 509, the checker: an inherited base constructor chosen that is deleted, reported at the
+                         ;; using-declaration too, GCC's place: cpp0x/inh-ctor31.C)
+                         :else (do (when (checking?)
+                                     (when-let [[_ bn] (re-find #"^codegen: call to a deleted function (\S+)$" (str (.getMessage e)))]
+                                       (when (and (not= bn (:name (abi/cls id)))
+                                                  (some #(and (:deleted-sure (fnd %)) (= bn (:name (fnd %)))) inh))
+                                         (cx-inh-report! id bn e))))
+                                   (throw e)))))
             f (when-not (= ::inherited fid) (fnd fid))]
         (cond
           (= ::inherited fid) {:i :none}
-          (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) {:i :none})
+          (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) (cx-inherited-deleted! id fid) {:i :none})
           ;; (CP330 (a), the code generator: the class's inheriting constructor for the chosen base constructor, called
           ;; with the arguments as that constructor's own would be, [class.inhctor.init]/1)
           ;; (a constructor inherited through a base that inherits it: that base's inheriting constructor first, cpp-s4)
@@ -8309,7 +8355,10 @@
                            r (if (abi/class? (abi/unq (:ty e))) e (rv e))
                            t (abi/unq (:ty r))]
                        ;; (queue 463, the checker: the exception object's destructor potentially invoked, [except.throw]/5)
-                       (let [i (init-for t e ctx :copy)]
+                       ;; (queue 509, the checker: an implicitly movable entity's implicit move, [class.copy.elision]/3)
+                       (let [i (if (and (checking?) (abi/class? (abi/unq (:ty e))) (cx-movable-var ctx e))
+                                 (cx-implicit-move-init t e ctx)
+                                 (init-for t e ctx :copy))]
                          (cx-dtor-access! ctx t)
                          {:op :throw :ety t :init i :ty abi/void :cat :pr}))
                      {:op :throw :ty abi/void :cat :pr})
@@ -8338,6 +8387,67 @@
         (assoc a :cat :xv)
         a))
     a))
+
+;; (queue 509, the checker: implicit move, [class.copy.elision]/3. An implicitly movable entity -- before C++20 an automatic
+;; local object (no parameter in a throw, no handler's parameter), from C++20 (P1825) also a parameter, a handler's
+;; parameter and an rvalue reference to an object; not volatile, not static -- named alone by a return statement or by a
+;; throw-expression's operand (a throw's only when its scope does not extend beyond the innermost enclosing try-block or
+;; function-try-block: the entity declared within the same try-block's compound statement, or outside every try-block of
+;; its function when the throw is in none) is first an rvalue. Until C++23 the initialization is done again with it as an
+;; lvalue when the first overload resolution fails, or when the constructor it chooses does not take an rvalue reference
+;; (before C++20: to the entity's own class; GCC's LOOKUP_PREFER_RVALUE keeps that from C++20 too for a first parameter
+;; that is not an rvalue reference at all, cpp23/elision2.C's twelve); from C++23 (P2266) it is an xvalue alone.)
+
+(defn- cx-movable-var
+  "Queue 509 (the checker): the id of the implicitly movable entity the typed operand `a` of a throw-expression names (the
+  expression context `ctx`), or nil."
+  [ctx a]
+  (let [y (long *cxx-year*)
+        vid (case (:op a)
+              :var (:id a)
+              :deref (when (and (>= y 20) (= :load (get-in a [:e :op])) (= :var (get-in a [:e :e :op])) (get-in a [:e :e :raw]))
+                       (get-in a [:e :e :id]))
+              nil)
+        v (when vid (var* vid))
+        vt (:ty v)]
+    (when (and v (>= y 11) (some? (:fn-id ctx)) (= (:fn v) (:fn-id ctx)) (not (:static v)) (not (:v (abi/unq (abi/non-ref vt))))
+               (or (and (= :var (:op a)) (not (abi/ref? vt)))
+                   (and (= :deref (:op a)) (= :rref (:k vt)) (not (abi/fn? (:to vt)))))
+               (if (>= y 20)
+                 (#{:local :param} (:storage v))
+                 (and (= :local (:storage v)) (not (:cx-handler v))))
+               (= (:cx-try v) (:cx-try ctx)))
+      vid)))
+
+(defn- cx-implicit-move-init
+  "Queue 509 (the checker): the copy-initialization of an object of type `t` from the typed operand `a` naming an
+  implicitly movable entity (see above), as [class.copy.elision]/3 makes it by the standard's year."
+  [t a ctx]
+  (let [y (long *cxx-year*)
+        axv (assoc a :cat :xv)
+        alv (assoc a :cat :lv)]
+    (if (>= y 23)
+      (init-for t axv ctx :copy)
+      (let [id (class-id (abi/unq t))
+            sid (class-id (:ty a))
+            cands (when id (remove #(:explicit (fnd %)) (ctor-candidates id)))
+            rref? (fn [fid] (let [p (first (:ps (:ty (fnd fid))))]
+                              (boolean (and p (= :rref (:k p)) (or (>= y 20) (and sid (= sid (class-id (:to p)))))))))
+            ;; (the first overload resolution's choice among the constructors: :lv when it chose one that takes no rvalue
+            ;; reference, :rv when it did, or a deleted one that does is chosen, nil when it failed or was not done)
+            pre (when (seq cands)
+                  (try (if (rref? (resolve-overload cands [axv] nil)) :rv :lv)
+                       (catch arbace.lang.ExceptionInfo x
+                         (when (re-find #"call to a deleted function" (str (.getMessage x)))
+                           (if (some #(and (:deleted (fnd %)) (rref? %)) cands) :rv :lv)))))]
+        (if (= :lv pre)
+          (init-for t alv ctx :copy)
+          (try (init-for t axv ctx :copy)
+               (catch arbace.lang.ExceptionInfo x
+                 (if (and (= :overload (:codegen/refused (ex-data x)))
+                          (re-find #"ambiguous|no viable" (str (.getMessage x))))
+                   (init-for t alv ctx :copy)
+                   (throw x)))))))))
 
 (declare stmt)
 
@@ -8398,6 +8508,8 @@
         v (cond-> {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n)) :tls (boolean (:tls n))}
             cv (assoc :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv))
             (and (checking?) (unavailable-node? n)) (assoc :unavailable true)
+            ;; (queue 509: the innermost try-block it is declared in, for cx-movable-var)
+            (and (checking?) (:cx-try ctx)) (assoc :cx-try (:cx-try ctx))
             (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n))
             (and (checking?) (not (:constexpr n)) (or (:_constinit n) (some #(= "ConstInitAttr" (:kind %)) (:inner n)))) (assoc :cx-constinit true :cx-range (:range n)))
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
@@ -8844,13 +8956,10 @@
                              {:s :return :init (if (and (checking?) (:nrvo-var a) (< (long *cxx-year*) 23))
                                                  ;; (CX12, the checker: before C++23, [class.copy.elision]/3 -- an overload
                                                  ;; resolution as an rvalue that fails, no viable or ambiguous, is done
-                                                 ;; again with the local as an lvalue; C++23's P2266 makes it an xvalue alone)
-                                                 (try (init-for rt a ctx :copy)
-                                                      (catch arbace.lang.ExceptionInfo x
-                                                        (if (and (= :overload (:codegen/refused (ex-data x)))
-                                                                 (re-find #"ambiguous|no viable" (str (.getMessage x))))
-                                                          (init-for rt (assoc a :cat :lv) ctx :copy)
-                                                          (throw x))))
+                                                 ;; again with the local as an lvalue, and since queue 509 one that chooses
+                                                 ;; a constructor taking no rvalue reference; C++23's P2266 makes it an
+                                                 ;; xvalue alone)
+                                                 (cx-implicit-move-init rt a ctx)
                                                  (init-for rt a ctx (if (= :init-list (:op a)) :list :copy)))
                               :nrvo-var (:nrvo-var a)})))
     "IfStmt" (if (:isConsteval n)
@@ -9017,7 +9126,8 @@
     "GotoStmt" (let [t (when-not (:label n) (node-text n)) [_ l] (re-find #"goto\s+([A-Za-z_][A-Za-z_0-9]*)" (or t ""))] {:s :goto :name (or (:label n) l)})
     "AttributedStmt" (stmt ctx (last (kids n)))
     "CXXTryStmt" (let [[body & hs] (kids n)]
-                   {:s :try :body (stmt ctx body)
+                   ;; (queue 509: the try-block's compound statement marked, cx-movable-var; its handlers are not in it)
+                   {:s :try :body (stmt (if (checking?) (assoc ctx :cx-try (Object.)) ctx) body)
                     :handlers (vec (for [h hs]
                                      (let [c (block-ctx ctx)
                                            ks (kids h)
@@ -9038,6 +9148,7 @@
                                                           (abi/ptr? ct) {:i :expr :e {:op :exn-ptr :ty ct :cat :pr}}
                                                           :else (init-for t src c :copy))]
                                            (enter! (:scope c) (:name vd) {:e :var :id id})
+                                           (when (checking?) (swap! *vars* assoc-in [id :cx-handler] true))
                                            {:ty ct :var id :init init :body (stmt c b)})
                                          {:body (stmt c b)}))))})
     (if (or (str/ends-with? (str (:kind n)) "Expr") (str/ends-with? (str (:kind n)) "Operator") (str/ends-with? (str (:kind n)) "Literal"))
@@ -9781,6 +9892,13 @@ protected:
                                                             ;; constructor deletes the implicit one; CX12)
                                                             (and (= :init (:codegen/refused (ex-data e))) (= :ctor (:kind (fnd id)))
                                                                  (re-find #"^codegen: no default constructor for " (str (.getMessage e))))
+                                                            ;; (queue 509, the checker: a subobject's constructor or assignment
+                                                            ;; inaccessible from the class deletes the implicit one,
+                                                            ;; [class.copy.ctor]/10.2, [class.default.ctor]/2.7,
+                                                            ;; [class.copy.assign]/7.4; deleted unsure, so no use of it is judged,
+                                                            ;; the unit no longer refused: cpp2a/implicit-move1.C's derived)
+                                                            (and (checking?) (= :access (:codegen/refused (ex-data e)))
+                                                                 (or (= :ctor (:kind (fnd id))) (= "operator=" (:name (fnd id)))))
                                                             (and (:codegen/refused (ex-data e)) (:header (abi/cls (:cls (fnd id)))))))
                                                  ;; (CX12: deleted for a subobject's deleted member, the checker sure of it)
                                                  (upd-fn! id assoc :deleted true :tinits nil
