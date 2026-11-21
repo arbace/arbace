@@ -15301,3 +15301,10 @@ Fix: the interface's three methods on *ReentrantReadWriteLock, ReadLock__Lock an
 locks (jrt's Lock) and the marker Is_ReadWriteLock. Its ClassInfo's :Interfaces still list only Serializable (getInterfaces() omits
 ReadWriteLock); the interface's class is j2g's, not jrt's, so naming it there would tie jrt's own tests to the translated closure.
 Proof: the gate build at this commit's key (below, in the next entry or the Python records' entry).
+
+The gate build at 4e7f94757 then compiled jrt and failed in arbace/lang: `undefined: jrt.StackTraceElement_Cast` (lang/j2g_dyn.ae).
+The regenerated jdk/ brings java.lang.StackWalker$StackFrame into j2g's dyn interfaces; its slot for toStackTraceElement() casts the
+result with `jrt/StackTraceElement_Cast`, and jrt's hand-written StackTraceElement had none. Every other jrt cast the generated
+program names is defined (521 used, a static comparison of the printed program with jrt's functions: only this one missing). Fix:
+StackTraceElement_Cast in go/arbace/jrt/throwable.ae, as AtomicInteger_Cast and kin are written. (j2g's dyn slots could instead fall
+back to Go's assertion for a hand-written class without a cast, as code.ae's casts do; left as it is, one function in jrt.)
