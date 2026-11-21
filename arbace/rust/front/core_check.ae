@@ -330,7 +330,7 @@
 ;; core's macro_rules! from its sources
 
 (defn rel-path "A file of the copy of library/ as rustc's remapped path names it" [^String file]
-  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|std|backtrace|stdarch|portable-simd|vendor)/.*)$" file)] (str "library/" (second m)) file))
+  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|std|std_detect|backtrace|stdarch|portable-simd|vendor)/.*)$" file)] (str "library/" (second m)) file))
 
 (defn- foreign-spans
   "A macro definition's tokens with their spans written as places in FILE ((span FILE l1 c1 l2 c2 0)): the expansion
@@ -737,13 +737,21 @@
                             nil))))
         ;; a body's ADT named by its def path (an impl's self type); its traits, functions and the ADT's own fact not
         path-of (fn [id] (or (get rev id)
-                             (when (and (number? id) (#{"Struct" "Enum" "Union"} (:kind (collect/def-of id)))) (body-path id))
+                             ;; queue 498: and a body's trait (to_vec_in's `ConvertVec`, its impls' trait)
+                             (when (and (number? id) (#{"Struct" "Enum" "Union" "Trait"} (str (:kind (collect/def-of id))))) (body-path id))
                              ;; queue 417: a return-position impl Trait by its def path, `FN::{opaque#N}`
                              (when (and (number? id) (= "OpaqueTy" (:kind (collect/def-of id))))
                                (let [od (collect/def-of id)] (some-> (body-path (:parent od)) (str "::{opaque#" (:disamb od) "}"))))))]
     (reduce
      (fn [acc d]
-       (let [p (get rev (:id d))]
+       ;; C6-4 (a): an ADT defined inside a function's body (btree::mem::replace's `PanicGuard`, flush_buf's `BufGuard`) by its
+       ;; def path, as rustc's interface names it; local-paths names module items alone
+       (let [p (or (get rev (:id d))
+                   ;; queue 498: a function defined inside a body (raw_vec's `RawVecInner::reserve`'s `do_reserve_and_handle`) by
+                   ;; its def path, as an impl inside a body is: its signature written, so that a call of it prints as rustc's
+                   ;; (`for<'a> unsafe fn(..) {..::reserve::do_reserve_and_handle::<Global>}`, not `{no sig ..}`)
+                   ;; and a trait defined inside a body (to_vec_in's `ConvertVec`), its items and signatures
+                   (when (#{"Struct" "Enum" "Union" "Fn" "Trait"} (str (:kind d))) (body-path (:id d))))]
          (try
            (cond
              ;; RFP52 (a): an impl the interface lacks (an inherent impl of crate-private methods: `IndexRange`'s `start`,
@@ -1082,6 +1090,9 @@
   closure of the exported body's typeck root as data (ext-closure)"
   [t]
   (cond
+    ;; queue 474: a fn pointer's signature map ([:fnptr {:inputs .. :output ..}]) in core's paths too (catch_unwind's
+    ;; `unsafe fn(*mut Data<F, R>)` kept the fn-local struct's id, `[:adt 50 ..]`: def-of 50 at the run)
+    (map? t) (into {} (for [[k v] t] [k (ext-ty v)]))
     (not (vector? t)) t
     (and (= :closure (first t)) *export-closures*) (ext-closure t)
     (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t))) (throw (ex-info "a closure or opaque type" {:carry false}))
@@ -1106,9 +1117,18 @@
                    m (cond-> m
                        (:tc m) (update :tc ext-ty)
                        (:nc m) (update :nc (fn [[d as]] [(if (number? d) (def-path-string d) d) (mapv ext-ty as)]))
-                       (:call-span m) (#(let [o (ex/virtual-origin (:call-span %))]
+                       ;; C6-4 (a): a call made by an expansion takes its place at the expansion's root call site, the body's own
+                       ;; file (span_as_caller_location's topmost: ExpnId::expansion_cause), not the macro definition's; a path
+                       ;; already remapped (a macro's file, /rustc/COMMIT/library/..) is not prefixed again
+                       (:call-span m) (#(let [cs (:call-span %)
+                                              site (ex/virtual-cause cs)
+                                              o (ex/virtual-origin cs)
+                                              src (fn [^String f] (if (str/starts-with? f "/") f (str rustc-src-prefix f)))]
                                           (cond-> (dissoc % :call-span)
-                                            (= 5 (count o)) (assoc :call-loc [(str rustc-src-prefix (str/replace (o 0) #"^library/" "library/")) (o 1) (o 2)])))))]
+                                            (and site tc/*root-file*) (assoc :call-loc [(src tc/*root-file*) (site 0) (site 1)])
+                                            ;; a call written in the body's own file: its own place there
+                                            (and (not site) tc/*root-file* (ex/root-span? cs)) (assoc :call-loc [(src tc/*root-file*) (cs 0) (cs 1)])
+                                            (and (not site) (= 5 (count o))) (assoc :call-loc [(src (o 0)) (o 1) (o 2)])))))]
                (if m (with-meta y m) y))
     (vector? x) (let [y (mapv externalize x)] (if (meta x) (with-meta y (cond-> (meta x) (:tc (meta x)) (update :tc ext-ty))) y))
     (map? x) (into {} (for [[k v] x :when (not (#{:def :stages :alloc-data} k))]
@@ -1153,6 +1173,35 @@
                (inc depth)))))
   (catch Throwable _ nil)))
 
+(defn- body-types
+  "The types (the :tc metadata) of a body's forms (alloc-check's fndef-types)"
+  [body]
+  (let [acc (transient [])]
+    (letfn [(w [x] (when-let [t (:tc (meta x))] (conj! acc t))
+                   (cond (map? x) (doseq [v (vals x)] (w v)) (coll? x) (doseq [y x] (w y))))]
+      (w body))
+    (persistent! acc)))
+
+(defn with-private-facts
+  "An export's entry E with the native facts (NATIVE, the crate's interface pass) of the crate-private items its body names that
+  std's interface SI-FULL lacks, which the run's interface takes (build-run's with-extra-iface): queue 443's functions it calls
+  (`box_new_uninit`), 462's impls and traits of those (`RawVec`'s inherent impl, `SpecToString`), so that the run prints the
+  function constants as rustc does (`RawVec::<u8>::ptr`, not `<impl {}>::ptr`); C6-4 (a)'s ADTs its types name (`btree::node::
+  LeftOrRight`), its own impl (a fn-local struct's inherent impl) and the functions enclosing its definition and those ADTs (a
+  fn-local item's parent, in the value namespace of its v0 path)"
+  [e native si-full]
+  (let [ts0 (tree-seq coll? seq (body-types [(:body e) (:promoted e)]))
+        fps (set (for [x ts0 :when (and (vector? x) (= :fndef (first x)) (string? (second x)))] (second x)))
+        adt-ps (set (for [x ts0 :when (and (vector? x) (= :adt (first x)) (string? (second x)))] (second x)))
+        ancestors (fn [^String p] (let [segs (str/split p #"::")] (for [i (range 2 (count segs))] (str/join "::" (take i segs)))))
+        pick (fn [k ps] (into {} (for [p ps :let [f (get-in native [k p])] :when (and f (not (get-in si-full [k p])))] [p (dissoc f :native)])))
+        fs (pick :fns (concat fps (ancestors (str (:def e))) (mapcat ancestors adt-ps)))
+        parents (set (keep #(let [i (.lastIndexOf ^String % "::")] (when (pos? i) (subs % 0 i))) (conj fps (str (:def e)))))
+        is (pick :impls parents)
+        ts (pick :traits parents)
+        as (pick :adts adt-ps)]
+    (cond-> e (seq fs) (assoc :fns fs) (seq is) (assoc :impls is) (seq ts) (assoc :traits ts) (seq as) (assoc :adts as))))
+
 (defn export-entry
   "The exported body of a built body B (its last stage after the passes, its promoted bodies); queue 462: with K, the bodies
   of the crate's constants it names by a local def id (:consts, export-consts)"
@@ -1168,6 +1217,13 @@
       (try (binding [*export-closures* (root-closures-of b)]
             (cond-> {:key k :def (def-path-string (:id (:def b))) :equal equal? :pass last-pass
             :attrs ((requiring-resolve 'arbace.rust.front.mono/local-attrs) (:id (:def b)))
+            ;; C6: the attributes of the functions nested in it (handle_alloc_error's `#[inline] fn rt_error`), which its body
+            ;; calls and no entry of their own carries (build-run's lib-unit takes them)
+            :nested-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs) pre (str (def-path-string (:id (:def b))) "::")]
+                            (into {} (for [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))
+                                           :let [p (try (def-path-string (:id d)) (catch Throwable _ nil))]
+                                           :when (and p (str/starts-with? p pre))]
+                                       [p (la (:id d))])))
             :body (externalize (dissoc r :stages :root-closures :upvar-tys)) :promoted (into {} (for [[i pb] pbs] [i (externalize (dissoc pb :root-closures :upvar-tys))]))
             :generics (count (:params (collect/generics-of (:id (:def b)))))}
              ;; queue 464 (462-3 (a) 2): a closure's own body, with its upvars' types and kind (the run lays its type out
@@ -1201,8 +1257,9 @@
 
 (defn -main [lib-dir & args]
   ;; queue 462: core-export --rsi-outside's bodies (CORE_EXPORT_KEYS: no oracle, each judged against rsi's record at the
-  ;; instance) are built as rsi's std build builds core, without debug assertions
-  (binding [*debug-assertions* (nil? (System/getenv "CORE_EXPORT_KEYS"))]
+  ;; instance) are built as rsi's std build builds core, without debug assertions; 479-2 (a): core-export --rsi's too
+  ;; (CORE_DEBUG_ASSERTIONS=0, bin/lib/repr-rust/core-build.bash's core_export)
+  (binding [*debug-assertions* (and (nil? (System/getenv "CORE_EXPORT_KEYS")) (not= "0" (System/getenv "CORE_DEBUG_ASSERTIONS")))]
   (binding [ex/*cfg-names* (crate-cfg)]
     (case (first args)
       ;; RF19: --attrs FRONT-DIR CACHE-DIR MODULES-FILE OUT FILE...: the interface pass over FILEs (core's index from CACHE-DIR,
@@ -1239,6 +1296,7 @@
             std-file (str front-dir "/std-names.edn")
             std (collect/load-std std-file)
             si (collect/load-std-iface (str front-dir "/std-iface.edn"))
+            si-full si   ; C6-4 (a): the helper's interface, before core's native facts are layered over it
             oracle (load-oracle oracle-dir)
             judge @(requiring-resolve 'arbace.rust.front.build-check/judge-row)
             print-text (fn [b] (try (build/print-built b) (catch Throwable e (str "print failed: " e))))
@@ -1309,8 +1367,14 @@
                             (when-let [rd (System/getenv "CORE_RAW")] (when b (.mkdirs (File. ^String rd)) (spit (str rd "/" k ".edn") (binding [*print-meta* true] (pr-str b)))))
                             (let [row (if (nil? w) [:no-oracle nm k] (judge nm (oracle-text w) t err detail))]
                               (when (and b (or (and export-re (re-find export-re (str nm))) (and export-keys (export-keys k))))
-                                (when-let [e (export-entry b k (contains? #{:equal :equal-alloc-ids :equal-allocs} (first row)))]
-                                  (swap! exported conj (if (= :no-oracle (first row)) (assoc e :judge :instance) e))))
+                                (when-let [e (cond-> (export-entry b k (contains? #{:equal :equal-alloc-ids :equal-allocs} (first row)))
+                                               ;; C6-4 (a): core's crate-private facts the body names, as alloc's export carries them
+                                               export-keys (with-private-facts @native-all si-full))]
+                                  ;; 479-2 (a): a body built without debug assertions that differs from rust-core-built's (whose
+                                  ;; flags keep them: -C opt-level=0) is judged at the instance as an outside body is, against
+                                  ;; rsi's record, whose std is built without them
+                                  (swap! exported conj (if (or (= :no-oracle (first row)) (and (not *debug-assertions*) (not (:equal e))))
+                                                         (assoc e :judge :instance) e))))
                               row)))
                 {:keys [stages bodies native]} (binding [*only-key?* (or *only-key?* export-keys)]
                                                  (run-module m table (with-native-names names @native-all) std-file (with-native-std std @native-all) si lib-dir on-body))
@@ -1333,7 +1397,42 @@
                       (let [r (java.io.PushbackReader. (java.io.StringReader. (slurp ef)))]
                         (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc (second x))))))))
                 new-keys (set (map :key @exported))
-                all (concat (remove #(new-keys (:key %)) old) @exported)]
+                ;; queue 474: core's crate-private functions an exported body names (ub_checks' check_language_ub, a macro-made
+                ;; precondition_check), and the crate-private impls and traits they belong to (core_simd's PrivateMethods), their
+                ;; native facts, as lib-export's entries carry alloc's: the run prints their function constants' types and paths
+                ;; from them (`fn() -> bool {core::ub_checks::check_language_ub}`, not `{no sig ..}`)
+                nat @native-all
+                ;; (rust-rec-1120: with-private-facts, C6-4 (a)'s, which carries these and the ADTs and enclosing functions too)
+                with-facts (fn [e]
+                             (if-not (:body e)
+                               e
+                               (let [e (with-private-facts e nat si-full)
+                                     si si-full
+                                     ts (or (:traits e) {})
+                                     ;; queue 503: such a trait's impls (slice::cmp's SlicePartialEq: the PartialEq one and its
+                                     ;; BytewiseEq specialization) with their methods' facts, so that the run selects the impl a
+                                     ;; call resolves to (as lib-export's entries, alloc-check)
+                                     impls-of (fn [trs] (into {} (for [[p m] (:impls nat)
+                                                                       :when (and (sequential? (:trait m)) (contains? trs (nth (:trait m) 1)) (not (get-in si [:impls p])))]
+                                                                   [p (dissoc m :native)])))
+                                     tis (impls-of ts)
+                                     ;; and the crate-private traits their where clauses name (the specialization's
+                                     ;; `A: BytewiseEq<B>`), with those traits' impls, so that selection proves them
+                                     pts (into {} (for [[_ m] tis pr (:predicates m)
+                                                        :when (and (seq? pr) (= 'trait (first pr)))
+                                                        :let [tp (second pr) tm (get-in nat [:traits tp])]
+                                                        :when (and tm (not (get-in si [:traits tp])) (not (contains? ts tp)))]
+                                                    [tp (dissoc tm :native)]))
+                                     tis (merge (impls-of pts) tis)
+                                     ts (merge pts ts)
+                                     is (merge tis (:impls e))
+                                     fs (merge (into {} (for [[_ m] tis [_ k fp] (:items m)
+                                                              :let [f (when (= "AssocFn" k) (get-in nat [:fns fp]))]
+                                                              :when (and f (not (get-in si [:fns fp])))]
+                                                          [fp (dissoc f :native)]))
+                                               (:fns e))]
+                                 (cond-> e (seq fs) (assoc :fns fs) (seq is) (assoc :impls is) (seq ts) (assoc :traits ts)))))
+                all (concat (remove #(new-keys (:key %)) old) (map with-facts @exported))]
             (spit ef (binding [*print-meta* true] (with-out-str (doseq [e all] (prn (list 'core/body e)))))))
           (println "core-check: exported" (count @exported) "bodies," (count (filter :equal @exported)) "equal to rustc's built MIR, to" ef))
         (spit native-file (pr-str @native-all))
