@@ -1746,7 +1746,14 @@
             (upd-var! old assoc :init init :init-style (:init n) :defined true :extern false :def-scope (if (and (:cls home) (not (identical? scope home)) (not= :tparams (:kind scope))
                                                                                                      (not (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s))))))
                                                                                               home scope))
-            (upd-var! old assoc :defined true :extern false))
+            (do (upd-var! old assoc :defined true :extern false)
+                ;; (cpp-rt-own2, the code generator: since C++17 the redundant out-of-line definition of an inline (constexpr)
+                ;; static data member, [depr.static.constexpr], is a definition clang writes whether used or not, weak_odr
+                ;; (GVA_StrongODR), as an explicit instantiation's: exp/filesystem/path.cc's `constexpr path::value_type
+                ;; path::preferred_separator [[gnu::used]];`, dropped as unused before)
+                (when (and (not (checking?)) (not (header-node? n)) (>= (long *cxx-year*) 17)
+                           (= :member-static (:storage (var* old))) (:linkonce (var* old)) (not (:internal (var* old))))
+                  (upd-var! old assoc :explicit-inst true))))
           ;; (cpp-rt-own: and among the definitions emit-globals writes, a static data member of a template's instance not
           ;; there before: locale_facets.cc's `template<> const char* __timepunct_cache<char>::_S_timezones[14] = {...};`)
           (when (and init (not (some #{[:var old]} @*order*))) (swap! *order* conj [:var old]))
@@ -3098,7 +3105,11 @@
          t (:ty e)]
      (case (:op e)
        ;; (CP378 (a): `__builtin_is_constant_evaluated()`, an :int 0 marked :ice, true when manifestly constant-evaluated)
-       :int (if (and (:ice e) *ce-manifest*) 1 (if (and (:ty e) (wide? (:ty e))) (ce-wrap (:ty e) (:v e)) (:v e)))
+       :int (cond (and (:ice e) *ce-manifest*) 1
+                  ;; (cpp-rt-own2: __builtin_constant_p of a value that is no constant: false when manifestly constant-evaluated, else
+                  ;; no constant, clang's EvaluateBuiltinConstantP)
+                  (:no-fold e) (if *ce-manifest* 0 (not-constant "__builtin_constant_p of a value"))
+                  :else (if (and (:ty e) (wide? (:ty e))) (ce-wrap (:ty e) (:v e)) (:v e)))
        :float (:v e)
        ;; (h-cpp-consteval, the checker: a null pointer, the value 0 of a pointer type -- not in the code generator's folds)
        :null (if (checking?) 0 (not-constant "a null pointer"))
@@ -7078,7 +7089,16 @@
                     {:op :float :v Double/POSITIVE_INFINITY :ty t :cat :pr}))
         :fmath (let [nm (get-in (first (kids n)) [:referencedDecl :name]) [stem t] (fp-builtin nm)]
                  {:op :fmath :fn stem :e (convert-scalar (rv (analyze ctx (second (kids n)))) t false) :ty t :cat :pr})
-        :constant-p {:op :int :v (if (ce-try (rv (analyze ctx (second (kids n))))) 1 0) :ty abi/int* :cat :pr}
+        ;; (cpp-rt-own2: of an integral, enumeration or floating operand that is no constant and has no side effects, not a
+        ;; constant the code generator folds, as clang (ExprConstant fails it outside a constant context, CodeGen calls
+        ;; llvm.is.constant, false at -O0): <stl_iterator_base_funcs.h>'s __advance keeps its `if (__builtin_constant_p(__n) &&
+        ;; __n == -1) --__i;`, fs_path.cc's move_iterator<path::_Cmpt*>::operator--() written as clang writes it; 0 run time)
+        :constant-p (let [x (rv (analyze ctx (second (kids n))))
+                          t (abi/unq (:ty x))
+                          pure? (fn pure? [e] (and (map? e) (case (:op e) (:int :float :var :null) true (:load :cast :field) (pure? (or (:e e) (:obj e))) false)))]
+                      (cond (ce-try x) {:op :int :v 1 :ty abi/int* :cat :pr}
+                            (and (or (abi/integral? t) (abi/enum? t) (abi/floating? t)) (pure? x)) {:op :int :v 0 :ty abi/int* :cat :pr :no-fold true}
+                            :else {:op :int :v 0 :ty abi/int* :cat :pr}))
         ;; (CP378 (a): 0 in code that runs, marked :ice: the evaluator's 1 when manifestly constant-evaluated)
         :is-constant-evaluated {:op :int :v 0 :ice true :ty abi/bool* :cat :pr}
         ;; (cpp-s8: __builtin_signbit(x), the sign bit of a floating x, -0 and a NaN's too: copysign(1, x) < 0 by libm's
