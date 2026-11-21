@@ -13822,3 +13822,7 @@ store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 
   IndicConjunctBreak chunk, 11.8), byte-equality shown by verify at 42494a700 (part 2).
 - The survey: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk reads in chunk processes" (the proofs, the cost in
   time, the layout's proposal).
+
+## 2026-11-20: java-split-1120: a correction to part 1
+
+Part 1 says java.base's closure packs into 23 chunks: it is 28 (java.base-0 to java.base-27, at `next` and at 42494a700).
