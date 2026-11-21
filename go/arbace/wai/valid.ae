@@ -27,6 +27,21 @@
 
 ^{:go/end 28} (go/func invalid [^string f & ^{:tag (slice any)} a] (panic (addr (lit Invalid (fmt/Sprintf f (spread a))))))
 
+;; The profiles (doc/wasm/SPEC.md §9.1, as arbace.wasm.valid's *profile*): the rules a testsuite script was written against, set by
+;; the driver from the script's path (ProfileOf) before its modules are validated: "" Wasm 3.0's with the proposals built,
+;; "threads" proposals/threads/'s (Wasm 1.0's core: one memory, one table, the older size message), "custom-descriptors"
+;; proposals/custom-descriptors/'s (br_on_cast's and br_on_cast_fail's relaxed rule). A program's run validates by "".
+(go/var ^{:tag string :doc "Profile is the rules the modules are validated by: \"\", \"threads\" or \"custom-descriptors\".\n"} Profile)
+
+(go/func ProfileOf "ProfileOf is the profile of a testsuite script's path (a plan's or a module's path too, its slashes as \"__\").\n" ^string [^string path]
+  (let [p (strings/ReplaceAll path "__" "/")]
+    (switch
+      (case [(strings/Contains p "proposals/threads/")]
+        (return "threads"))
+      (case [(strings/Contains p "proposals/custom-descriptors/")]
+        (return "custom-descriptors")))
+    (return "")))
+
 (go/type vframe (struct
     ^{:line 31 :tag byte} op ; 0x02 block, 0x03 loop, 0x04 if, 0x05 else, 0x1f try_table, 0x06 a legacy try, 0x07 and 0x19 its catch and catch_all, 0 the function
     ^{:line 32 :tag (slice ValType)} start ^{:tag (slice ValType)} end
@@ -128,7 +143,8 @@
                               (.importDesc v k)
                               (set! (.-p sub) p)))))
 
-                      (.importDesc v 1)))))
+                      (.importDesc v 1)))
+                  (.checkCounts v)))
 
 
               (case [3]
@@ -152,13 +168,15 @@
                         (when (not (.-Null (.-Elem t)))
                           (invalid "type mismatch: instruction requires %s but stack has %s" (.-Elem t) (lit ValType :K tRef :Null true :H (.-H (.-Elem t)))))
 
-                        (set! (.-tables v) (append (.-tables v) t)))))))
+                        (set! (.-tables v) (append (.-tables v) t)))))
+                  (.checkCounts v)))
 
 
               (case [5]
                 (let [n (conv int (.u32 sub))]
                   (for [i 0] (< i n) (inc! i)
-                    (set! (.-mems v) (append (.-mems v) (.memType v))))))
+                    (set! (.-mems v) (append (.-mems v) (.memType v))))
+                  (.checkCounts v)))
 
               (case [13]
                 (let [n (conv int (.u32 sub))]
@@ -336,6 +354,13 @@
     ^{:line 313} l))
 
 
+(go/method checkCounts "checkCounts is Wasm 1.0's one table and one memory under the profile \"threads\" (valid.ml's check_module at 1.0).\n" [^{:tag (* validator)} v]
+  (when (== Profile "threads")
+    (when (> (len (.-tables v)) 1)
+      (invalid "multiple tables"))
+    (when (> (len (.-mems v)) 1)
+      (invalid "multiple memories"))))
+
 (go/method importDesc "importDesc reads an import's description at the reader and adds it n times to its index space.\n" [^{:tag (* validator)} v ^int n]
   (let [r (.-r v)]
     (switch [k (.u8 r)] k
@@ -391,6 +416,9 @@
         (checkLimits l 0xffffffff "memory size must be at most 2^32-1 pages (4 GiB) for i32 with a page size of 1"))
       (case [(.-Addr64 l)]
         (checkLimits l (<< 1 48) "memory size must be at most 2^48 pages (256 TiB) for i64"))
+      ;; proposals/threads/'s scripts (Wasm 1.0's message)
+      (case [(== Profile "threads")]
+        (checkLimits l (<< 1 16) "memory size must be at most 65536 pages (4GiB)"))
       (default
         (checkLimits l (<< 1 16) "memory size must be at most 2^16 pages (4 GiB) for i32")))
 
@@ -1424,8 +1452,9 @@
               ^{:line 1274} (values h2 e2) (.heapE v)
               rt1 (lit ValType :K tRef :Null (!= (bit-and f 1) 0) :H h1 :Exact e1)
               rt2 (lit ValType :K tRef :Null (!= (bit-and f 2) 0) :H h2 :Exact e2)]
-            ;; the descriptor casts (custom descriptors, queue 327): the target in the source's hierarchy, a descriptor operand
-            (if desc
+            ;; the descriptor casts (custom descriptors, queue 327): the target in the source's hierarchy, a descriptor operand;
+            ;; br_on_cast's and br_on_cast_fail's rule too under the profile "custom-descriptors" (the proposal's relaxation)
+            (if (or desc (== Profile "custom-descriptors"))
               (when (!= (topOf (.-H rt2)) (topOf (.-H rt1)))
                 (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1))
 
