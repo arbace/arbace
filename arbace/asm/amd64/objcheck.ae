@@ -27,8 +27,11 @@
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the runs
 
-(defn- triple-of [^String mc]
-  (or (second (re-find #"(?:^|\s)--?m?triple[= ]+(\S+)" mc)) "x86_64-unknown-linux"))
+(defn- triple-of
+  "The run's triple; a leading `-` (an empty first component, x86-evenDirective's `-x86_64-unknown-unknown`) dropped, as
+  Triple::normalize moves the architecture first."
+  [^String mc]
+  (str/replace (or (second (re-find #"(?:^|\s)--?m?triple[= ]+(\S+)" mc)) "x86_64-unknown-linux") #"^-+" ""))
 
 (defn- target-of
   "{:mode 16|32|64 :format :elf|:macho|:coff :x32 BOOL :ptr 4|8} of an llvm-mc command line (its -triple, -arch)."
@@ -41,7 +44,9 @@
      :format (cond (re-find #"darwin|apple|macos|ios" t) :macho
                    (re-find #"win|msvc|mingw|cygwin|coff|uefi" t) :coff
                    :else :elf)
-     :x32 (boolean (re-find #"gnux32" t))}))
+     :x32 (boolean (re-find #"gnux32" t))
+     ;; Triple::isLFI (x86_64_lfi): the LFI rewriter and its note (x86-print)
+     :lfi (boolean (re-find #"^x86_64_lfi(-|$)" t))}))
 
 ;; llvm-mc's options a run may give, and what each sets of X86AsmBackend's (the rest are an :options class)
 (def ^:private known-mc-flags
@@ -54,7 +59,10 @@
   "The run's X86AsmBackend options, or [:options FLAG] for one this check does not take."
   [^String mc]
   (let [ws (vec (str/split (str/trim mc) #"\s+"))
-        flags (for [w ws :when (re-find #"^-." w)] (first (str/split w #"=")))
+        ;; a value given after its flag (`-triple -x86_64-unknown-unknown`, `-o -`) is no flag
+        valued #{"-triple" "--triple" "-mtriple" "-arch" "--arch" "-o" "-mcpu" "--mcpu" "-filetype" "--filetype"}
+        flags (for [[i w] (map-indexed vector ws) :when (and (re-find #"^-." w) (not (valued (get ws (dec (long i))))))]
+                (first (str/split w #"=")))
         unknown (first (remove known-mc-flags flags))
         val (fn [re] (second (re-find re mc)))
         within (re-find #"-x86-branches-within-32B-boundaries" mc)
@@ -90,7 +98,9 @@
           (and (re-find #"^llvm-readobj" viewer) (re-find #"(^|\s)(-r|--relocs|--relocations)\b" viewer)
                (not (re-find #"(^|\s)(-S|--sections|-s|--symbols|--section-data|--sd)\b" viewer))) :readobj-r
           (and (re-find #"^llvm-readobj" viewer)
-               (every? #{"-S" "--sections" "--section-headers" "-r" "--relocs" "--relocations" "--symbols" "--syms" "-" "--elf-output-style=LLVM"}
+               ;; the sections' data too (--sd; x86-print, as arm64's judge-rest)
+               (every? #{"-S" "--sections" "--section-headers" "-r" "--relocs" "--relocations" "--symbols" "--syms" "-" "--elf-output-style=LLVM"
+                         "--sd" "--section-data"}
                        (remove #(re-find #"^%t" %) ws))) :readobj
           (and (re-find #"^llvm-readelf" viewer) (= #{"-s"} (set (remove #(re-find #"^%t|^-$" %) ws)))) :readelf-s
           (and (re-find #"^llvm-readelf" viewer) (re-matches #"llvm-readelf(\s+(-S|-r|-x\s+\S+|--hex-dump=\S+))+\s+(-|%t\S*)" (str/trim viewer))) :readelf
@@ -168,7 +178,7 @@
   (try
     (let [{:keys [mode]} (:target run)]
       (obj/assemble (asm/read-items (or (first (:part run)) (asm/latin1 path)) asm/amd64)
-                    {:mode mode :defsym (o/defsyms (:defsym run)) :backend (:backend run) :rel? (not= 64 mode)}))
+                    {:mode mode :defsym (o/defsyms (:defsym run)) :backend (:backend run) :rel? (not= 64 mode) :lfi (:lfi (:target run))}))
     (catch arbace.lang.ExceptionInfo e
       (if-let [c (:obj/unsupported (ex-data e))] {:unsupported c :what (.getMessage e)} {:unsupported :crash :what (str e)}))
     (catch Throwable e {:unsupported :crash :what (str e)})))
@@ -302,6 +312,12 @@
       (not= :elf (:format tgt)) (all :other-format)
       (:x32 tgt) (all :x32)
       (vector? (:backend run)) (all :options)
+      ;; llvm-mc --stats (x86-print): MCAssembler's RelaxationSteps, the one statistic the object assembler counts as LLVM's
+      ;; relaxOnce does (arbace.asm.obj/layout!); its line in PrintStatistics' format (FileCheck's blanks collapsed)
+      (and (= :stats (:tool run)) (:bytes r))
+      (let [view [(str (:relax-steps r) " assembler - Number of assembler layout and relaxation steps")]
+            res (into {} (map (fn [[l rr]] [l rr]) (binding [dc/*vars* true dc/*full-lines* (:full-lines run)] (dc/filecheck cs (canon-lines view) (:implicit-not run)))))]
+        (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :stats)]) cs))
       (= :stats (:tool run)) (all :stats)
       (:split? run) (all :split-file)
       (:error? run)

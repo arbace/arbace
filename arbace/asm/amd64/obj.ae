@@ -11,6 +11,7 @@
   directive, an instruction's class) or {:error MESSAGE}."
   (:require [arbace.repr.asm :as asm]
             [arbace.asm.amd64.asm :as x]
+            [arbace.asm.amd64.lfi :as lfi]
             [arbace.asm.obj :as o]
             [arbace.asm.elf :as elf]
             [arbace.string :as str]))
@@ -227,13 +228,26 @@
 
 (declare relax-enc)
 
+;; an LFI triple's run (x86_64_lfi; x86-print): each matched instruction through the LFI rewriter, its ABI note at the end
+(def ^:dynamic *lfi* false)
+
 (defn- emit-insn! [ctx f]
   (let [f (o/resolve-expr ctx f)
         mode @(:mode ctx)
         rs (binding [x/*intel* @(:intel ctx) x/*gcc* (boolean (:gcc @*st*))] (x/assemble-insn f mode @(:syms ctx)))
+        ;; MCObjectStreamer::emitInstruction: the LFI rewriter's emissions in the instruction's place (instructions, its
+        ;; temporary label, its error)
+        rs (if *lfi*
+             (vec (mapcat (fn [r] (if (:bytes r)
+                                    (for [[k v] (lfi/rewrite r (fn [] (symbol (o/tmp! ctx))))]
+                                      (case k :insn v :label {:lfi-label (name v)} :error {:error v}))
+                                    [r]))
+                          rs))
+             rs)
         hooks (or (auto-padding?) (:pad-for-align *opts*))]
     (doseq [r rs]
       (cond
+        (:lfi-label r) (o/label! ctx (:lfi-label r))
         (:error r) (o/fail (:error r))
         (:unsupported r) (o/unsupported (:unsupported r) (str (:what r)))
         :else
@@ -520,12 +534,17 @@
 (defn assemble
   "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
   {:unsupported CLASS :what TEXT}, or {:error MESSAGE}. OPTIONS beside arbace.asm.obj/assemble's (:mode, :defsym): :backend,
-  the run's X86AsmBackend options (*opts*), and :rel? (i386's REL relocations: each addend kept in its field) (queue 337)."
+  the run's X86AsmBackend options (*opts*), :rel? (i386's REL relocations: each addend kept in its field) (queue 337), and
+  :lfi (an LFI triple's run: the LFI rewriter, arbace.asm.amd64.lfi, and its ABI note; x86-print)."
   [items & [opts]]
-  (binding [o/*arch* (cond-> arch (:rel? opts) (assoc :rel? true))
+  (binding [o/*arch* (cond-> arch
+                       (:rel? opts) (assoc :rel? true)
+                       ;; the streamer's finishImpl: the LFI ABI note (emitLFINoteSection)
+                       (:lfi opts) (assoc :finish (fn [ctx] (o/run-items! ctx (asm/read-items lfi/note-text asm/amd64)))))
             *opts* (or (:backend opts) {})
+            *lfi* (boolean (:lfi opts))
             *st* (atom {:allow #{}})]
-    (o/assemble items (dissoc opts :backend :rel?))))
+    (o/assemble items (dissoc opts :backend :rel? :lfi))))
 
 (defn assemble-file
   "The object of the file at PATH; OPTIONS {:defsym [[SYM VALUE]...]}: llvm-mc's --defsym (AXS94 (a)), by keyword as arm64's

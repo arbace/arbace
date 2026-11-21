@@ -98,7 +98,8 @@
     ^{:line 95 :tag bool} stepping
     ^{:line 96 :tag uint64} sinceMem
     ^{:line 97 :tag uint64} lastSys ; the step mode's last system call's number
-    ^{:tag (slice (array 2 uint64))} shared)) ; queue 310: the shared file mappings' base and size (refreshShared)
+    ^{:tag (slice (array 2 uint64))} shared ; queue 310: the shared file mappings' base and size (refreshShared)
+    ^{:tag (map uint64 (array 2 uint64))} cpuidAt)) ; x86-print: the sys mode's patched cpuid sites: address -> its length, its first byte
 
 
 
@@ -112,7 +113,7 @@
       (return nil err))
 
     (defer (os/Remove (.Name in)))
-    (let [l (addr (lit lockstep :res (addr (lit LockstepResult)) :opts opts))]
+    (let [l (addr (lit lockstep :res (addr (lit LockstepResult)) :opts opts :cpuidAt (make (map uint64 (array 2 uint64)))))]
       (set! (values (.-nout l) _) (os/CreateTemp tmp "x86i-out"))
       (set! (values (.-nerr l) _) (os/CreateTemp tmp "x86i-err"))
       (defer (os/Remove (.Name (.-nout l))))
@@ -284,11 +285,13 @@ back at msync, munmap and the end; the bytes taken here go back as they are in t
   (let [(values t c) (values (.-t l) (.-c l))
       ^{:line 219} native (addr (.-Regs t))]
     (while true
-      (let [(values ns err) (.Resume t 0)]
+      ;; x86i first, to its system call: each cpuid it runs is patched in the native before the native runs (x86-print)
+      (let [xs0 (.sysRun l)
+          (values ns err) (.sysResume l)]
         (when (!= err nil)
           (return nil err))
 
-        (let [xs (.RunUntilSyscall c)]
+        (let [xs xs0]
           (set! (.-Steps (.-res l)) (.-Steps c))
           (switch
             (case [(and (== ns emu/StopSyscall) (== xs stopAtSyscall))])
@@ -379,7 +382,77 @@ back at msync, munmap and the end; the bytes taken here go back as they are in t
                         (return (.fail l "system call %d%v: result native %#x, x86i %#x" n args nret (aget (.-R c) 0))))
 
                       (when (and (>= (.-StepFrom (.-opts l)) 0) (>= (.-Syscalls (.-res l)) (.-StepFrom (.-opts l))) (.-Step (.-opts l)))
+                        ;; the step mode runs the native's own cpuid (its answer overwritten): the patched bytes put back
+                        (when [err (.unpatchCpuid l)] (!= err nil)
+                          (return nil err))
                         (return (.stepLoop l))))))))))))))
+
+
+(go/method sysRun "sysRun runs x86i to its next system call as RunUntilSyscall does (stopAtSyscall, a signal, the end), each cpuid it is
+about to run first patched in the native (x86-print): an int3 at its address, which sysResume answers with x86i's model.
+" ^int [^{:tag (* lockstep)} l]
+  (let [c (.-c l)]
+    (while true
+      (when (and (.-Manual c) (!= (.PendingSignal c) 0))
+        (return stopSignal))
+
+      (let [(values in r) (.Inst c)]
+        (when (== in nil)
+          (return r))
+
+        (when (and (== (.-fam in) famMisc) (== (.-Mnem in) "syscall"))
+          (return stopAtSyscall))
+
+        (when (== (.-Mnem in) "cpuid")
+          (.patchCpuid l (.-RIP c) (conv uint64 (.-Len in))))
+
+        (when [r (.Step c)] (!= r stepOK)
+          (return r))))))
+
+
+(go/method patchCpuid "patchCpuid puts an int3 at the native's cpuid at addr (n bytes), once; its first byte kept for unpatchCpuid.
+" [^{:tag (* lockstep)} l ^uint64 addr ^uint64 n]
+  (when [(values _ ok) (aget (.-cpuidAt l) addr)] ok
+    (return))
+
+  (let [(values b err) (.Read (.-t l) addr 1)]
+    (when (or (!= err nil) (!= (len b) 1))
+      (return))
+
+    (when [err (.Write (.-t l) addr (lit (slice byte) 0xcc))] (== err nil)
+      (aset (.-cpuidAt l) addr (lit (array 2 uint64) n (conv uint64 (aget b 0)))))))
+
+
+(go/method unpatchCpuid "unpatchCpuid puts back the first byte of each patched cpuid.
+" ^error [^{:tag (* lockstep)} l]
+  (range [a p (.-cpuidAt l)]
+    (when [err (.Write (.-t l) a (lit (slice byte) (conv byte (aget p 1))))] (!= err nil)
+      (return err))
+
+    (delete (.-cpuidAt l) a))
+
+  nil)
+
+
+(go/method sysResume "sysResume resumes the native to its next stop (Resume), each patched cpuid's int3 answered with x86i's model
+(CpuidModel: EAX, EBX, ECX and EDX set, RIP past the instruction) and the native resumed (x86-print).
+" [^{:tag (* lockstep)} l] :results [int error]
+  (let [t (.-t l)]
+    (while true
+      (let [(values ns err) (.Resume t 0)]
+        (when (or (!= err nil) (!= ns emu/StopSignal) (!= (.-Sig t) (conv int sys/SIGTRAP)))
+          (return ns err))
+
+        (let [a (- (.-Rip (.-Regs t)) 1)
+            (values p ok) (aget (.-cpuidAt l) a)]
+          (when (not ok)
+            (return ns err))
+
+          (let [(values ea eb ec ed) (CpuidModel (conv uint32 (.-Rax (.-Regs t))) (conv uint32 (.-Rcx (.-Regs t))))]
+            (set! (values (.-Rax (.-Regs t)) (.-Rbx (.-Regs t)) (.-Rcx (.-Regs t)) (.-Rdx (.-Regs t))) (values (conv uint64 ea) (conv uint64 eb) (conv uint64 ec) (conv uint64 ed)))
+            (set! (.-Rip (.-Regs t)) (+ a (aget p 0)))
+            (when [err (.SetRegs t)] (!= err nil)
+              (return 0 err))))))))
 
 
 

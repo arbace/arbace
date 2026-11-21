@@ -47,6 +47,9 @@
 (defn- in-class? [r ^String cls] (contains? (get (:classes *t*) (str "reg:" cls)) r))
 
 (defn fail [msg] (throw (ex-info msg {:asm/error msg})))
+;; the parser's warnings (X86AsmParser's Warning: CheckDispOverflow's; x86-print), collected when a volatile vector
+(def ^:dynamic *warnings* nil)
+(defn- warn! [msg] (when *warnings* (vswap! *warnings* conj msg)))
 (defn unsupported [cls msg] (throw (ex-info msg {:asm/unsupported cls})))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
@@ -213,6 +216,19 @@
                                    (= 0 (const-value disp syms)))
                       (check-base-index base index (= mode 64)))
                     (when-not (#{1 2 4 8} scale) (fail "scale factor in address must be 1, 2, 4 or 8"))
+                    ;; CheckDispOverflow (x86-print): a constant displacement with a base or index, 64-bit addressing's out of
+                    ;; isInt<32> an error, 32-bit's out of [-0xffffffff, 0xffffffff] and 16-bit's out of [-0xffff, 0xffff]
+                    ;; a warning, the value shortened
+                    (let [v (const-value disp syms)]
+                      (when (and (or base index) (integer? v))
+                        (let [v (long v) mag (Math/abs v)]
+                          (cond (or (in-class? base "GR64") (in-class? index "GR64"))
+                                (when-not (<= -2147483648 v 2147483647)
+                                  (fail (str "displacement " v " is not within [-2147483648, 2147483647]")))
+                                (not (in-class? base "GR16"))
+                                (when-not (< mag 4294967296) (warn! (str "displacement " v " shortened to 32-bit signed " (unchecked-int v))))
+                                :else
+                                (when-not (< mag 65536) (warn! (str "displacement " v " shortened to 16-bit signed " (unchecked-short v))))))))
                     (concat [(cond-> {:k :mem :seg seg :base base :index index :scale scale :disp disp :dv (const-value disp syms)
                                       :size (or (:size m) 0) :mode mode}
                                ;; Intel's jmp and call: MaybeDirectBranchDest false with ptr or brackets
@@ -371,8 +387,79 @@
       (= "ExplicitVEX" (:explicit info)) false
       :else true)))
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; llvm-mc -debug-only=asm-matcher (x86-print): the trace MatchInstructionImpl writes (AsmMatcherEmitter.cpp's
+;; DEBUG_WITH_TYPE("asm-matcher") lines) with X86Operand::print's operands, collected when *trace* is a volatile vector
+
+(def ^:dynamic *trace* nil)
+
+(defmacro ^:private trace! [l] `(when *trace* (vswap! *trace* conj ~l)))
+
+(defn- token-enum
+  "AsmMatcherEmitter's getEnumNameForToken."
+  ^String [^String s]
+  (apply str (for [c s] (case c \* "_STAR_" \% "_PCT_" \: "_COLON_" \! "_EXCLAIM_" \. "_DOT_" \< "_LT_" \> "_GT_" \- "_MINUS_" \# "_HASH_"
+                          (if (re-matches #"[A-Za-z0-9]" (str c)) (str c) (str "_" (int c) "_"))))))
+
+(defn- class-name
+  "getMatchClassName: MCK_ and the register class's, the operand class's or the token's name."
+  ^String [^String k]
+  (let [i (.indexOf k ":") kind (subs k 0 i) n (subs k (inc i))]
+    (str "MCK_" (if (= kind "tok") (token-enum n) n))))
+
+(defn- reg-asm ^String [r] (first (get (:regs *t*) r)))
+
+(defn- operand-print
+  "X86Operand::print: Reg:NAME, Imm:VALUE (a constant other than 0, a symbol's name), the token, or the memory operand's
+  ModeSize, Size, BaseReg, IndexReg, Scale, Disp, SegReg."
+  ^String [o]
+  (let [value (fn [v e vname]
+                (cond (and (integer? v) (not (zero? (long v)))) (str vname v)
+                      (integer? v) ""
+                      (symbol? e) (str vname (name e))
+                      (and (seq? e) (= 'sym (first e)) (string? (second e))) (str vname (second e))
+                      :else ""))]
+    (case (:k o)
+      :reg (str "Reg:" (reg-asm (:reg o)))
+      :imm (value (:v o) (:e o) "Imm:")
+      :tok (str (:t o))
+      :mem (str "Memory: ModeSize=" (:mode o)
+                (when (pos? (long (or (:size o) 0))) (str ",Size=" (:size o)))
+                (when (:base o) (str ",BaseReg=" (reg-asm (:base o))))
+                (when (:index o) (str ",IndexReg=" (reg-asm (:index o))))
+                (when (and (:scale o) (pos? (long (:scale o)))) (str ",Scale=" (:scale o)))
+                (value (:dv o) (:disp o) ",Disp=")
+                (when (:seg o) (str ",SegReg=" (reg-asm (:seg o)))))
+      (str o))))
+
+(def ^:private max-operands
+  ;; MaxNumOperands: the most operands of a matchable, both variants'
+  (memoize (fn [t] (reduce max 0 (map (comp count second) (concat (:match t) (:match-intel t)))))))
+
+(def ^:private feature-index
+  ;; SubtargetFeatureInfo::getAll's index: the assembler's predicates by name (the record map's order); the table keeps no
+  ;; CondString, so an always-true predicate getAll skips is counted (no test reads these numbers)
+  (memoize (fn [t] (into {} (map-indexed (fn [i k] [k i]) (sort (keys (:preds t))))))))
+
+(defn- trace-entry!
+  "The trace of one matchable E against OPS: its operands up to the first that fails (BAD, a formal's index, nil when every
+  one matches), then the result."
+  [e ops bad]
+  (let [classes (second e) n (count ops) m (count classes)
+        formal (fn [^long i] (if (< i m) (class-name (nth classes i)) "InvalidMatchClass"))
+        head (fn [^long i] (str "  Matching formal operand class " (formal i) " against actual operand at index " (inc i)
+                                (if (< i n) (str " (" (operand-print (nth ops i)) "): ") ": ")))]
+    (trace! (str "Trying to match opcode " (nth e 2)))
+    (doseq [i (range (or bad m))] (trace! (str (head i) "match success using generic matcher")))
+    (cond
+      (and bad (>= (long bad) n)) (do (trace! (str (head bad) "actual operand index out of range"))
+                                      (trace! "Opcode result: multiple operand mismatches, ignoring this opcode"))
+      bad (trace! (str (head bad) "Opcode result: multiple operand mismatches, ignoring this opcode"))
+      (< m (long (max-operands *t*))) (trace! (str (head m) "actual operand index out of range")))))
+
 (defn- match-impl
-  "[:ok ENTRY MI] or [:fail KIND DATA] for the mnemonic `mn` and the operands."
+  "[:ok ENTRY MI] or [:fail KIND DATA] for the mnemonic `mn` and the operands (MatchInstructionImpl; with *trace* its
+  -debug-only=asm-matcher lines)."
   [^String mn ops mode opts]
   (let [opts (assoc opts :mode mode
                     :egpr (boolean (some (fn [o] (or (egpr? (:reg o)) (egpr? (:base o)) (egpr? (:index o)))) ops)))
@@ -380,6 +467,7 @@
                  feats (features mode)]
              (or (some (fn [[ps to]] (when (every? #(pred-holds? % feats) ps) to)) as) mn))
         es (get (if (= 1 *variant*) (:by-mn-intel *t*) (:by-mn *t*)) mn)]
+    (trace! (str "AsmMatcher: found " (count es) " encodings with mnemonic '" mn "'"))
     (if (empty? es)
       [:fail :mnemonic nil]
       (let [feats (features mode)]
@@ -387,16 +475,25 @@
           (if (empty? es)
             ret
             (let [e (first es)
-                  classes (second e)]
-              (if (or (not= (count classes) (count ops)) (not (every? true? (map valid? ops classes))))
+                  classes (second e)
+                  ;; the operand loop's first formal that fails: an operand of another class, a formal with no operand
+                  ;; left, or an operand beyond the formals (InvalidMatchClass)
+                  bad (first (filter (fn [i] (not (and (< i (count ops)) (< i (count classes)) (valid? (nth ops i) (nth classes i)))))
+                                     (range (max (count ops) (count classes)))))]
+              (when *trace* (trace-entry! e ops bad))
+              (if bad
                 (recur (rest es) ret)
                 (let [missing (remove #(pred-holds? % feats) (nth e 4))]
                   (if (seq missing)
-                    (recur (rest es) [:fail :feature missing])
+                    (do (trace! (apply str "Missing target features:" (map #(str " " %) (sort (keep (feature-index *t*) missing)))))
+                        (recur (rest es) [:fail :feature missing]))
                     (let [info (get (:insns *t*) (nth e 2))]
                       (if (target-ok? (nth e 2) info opts)
-                        [:ok e (convert e ops)]
-                        (recur (rest es) [:fail :unsupported nil])))))))))))))
+                        (do (trace! "Opcode result: complete match, selecting this opcode")
+                            [:ok e (convert e ops)])
+                        ;; checkTargetMatchPredicate's Match_Unsupported (FIRST_TARGET_MATCH_RESULT_TY, 6)
+                        (do (trace! "Target match predicate failed with diag code 6")
+                            (recur (rest es) [:fail :unsupported nil]))))))))))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; processInstruction's rewrites
@@ -945,9 +1042,12 @@
             vec? (some #(and (= :reg (:k %)) (re-matches #"[XYZ]MM\d+" (:reg %))) ops)
             mi (first (keep-indexed (fn [i o] (when (= :mem (:k o)) i)) ops))
             rs (mapv (fn [s sz]
-                       (if (and s (or mi (not vec?)))
-                         (match-impl (str n s) (if (and mi vec? sz) (assoc-in ops [mi :size] sz) ops) mode opts)
-                         [:fail :mnemonic nil]))
+                       (cond (and s (or mi (not vec?)))
+                             (match-impl (str n s) (if (and mi vec? sz) (assoc-in ops [mi :size] sz) ops) mode opts)
+                             ;; x87's fourth suffix is a NUL (Suffixes "slt" and its terminator), which no mnemonic has: MatchInstruction finds none
+                             (and (nil? s) (or mi (not vec?))) (do (trace! (str "AsmMatcher: found 0 encodings with mnemonic '" n "\u0000'"))
+                                                                   [:fail :mnemonic nil])
+                             :else [:fail :mnemonic nil]))
                      sufs sizes)
             oks (filter #(= :ok (first (second %))) (map vector sufs rs))]
         (cond

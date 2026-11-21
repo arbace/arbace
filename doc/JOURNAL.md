@@ -15696,3 +15696,71 @@ ab8999fea, which ran RemoveNoopLandingPads again just before SimplifyCfg-pre-opt
 continue]` where rustc keeps `unwind: bb4`, a bare cleanup resume; rustc runs that pass again only among run_optimization_passes, before
 SimplifyCfg-final). The runtime pipeline's last pass is SimplifyCfg alone again, and build-run's o0-normalize runs RemoveNoopLandingPads in
 rustc's place. The revert d0cdf3d7f is reverted (bbe3c5eec) and 512 merged; the 2026-11-21 entry that blamed 498 is corrected by this one.
+## 2026-11-22: x86-print round 1: the x86-64 print cell's object texts by their own words, the LFI rewriter
+
+The burst's stream X1 (branch `x86-print-1122` from `mac/next` `863bdaea1`): x86-64 assembly's print cell at 194,796 pass /
+1,187 by design / 531 deferred, ranked by cause: the cross judge's `:ambiguous` 566 (by design), `:object-unjudged` 406 (deferred),
+`:other-tool` 366 (by design), `:pcrel-imm` 118, `:unread` 63, `:lfi` 61, `:debug-trace` 57, `:mask-operand` 33,
+`:other-instruction` 21, `:disassemble-only` 12, `:other-target` 7, `:diagnostic` 4, `:dollar-name` 2, the round trip's 1 + 1.
+- `:object-unjudged` (406 deferred): queue 337's object verdict was never recorded on the main host (its cells.edn source `:until`);
+  recorded (`bin/repr-asm object-verdict --record`, 68 files, 864 of 1,243 lines, controls failing) and the 36 files re-recorded:
+  362 met, 43 `:other-format`, 1 `:debug-trace` (--stats).
+- `:other-tool` (366 by design, AXS95 (a)'s "the object is judged at the AOT level"): re-examined; the texts are the tests' own
+  words over the object, so `arbace.asm.amd64.check/other-tool-class` now holds them to the verdict's view for every file (arm64's
+  judge-rest's rule): 332 met, 32 `:other-format`, 2 `:elf32`, 1 LFI. Alternative kept: leave them by design (rejected: a check
+  Arbace can make).
+- `:other-target` (7): not another target; x86-evenDirective's `-x86_64-unknown-unknown` is Triple::normalize's x86-64
+  (`check/norm-triple`; objcheck no longer takes a flag's value for a flag); its 7 readobj --sd texts met (the view takes --sd).
+- `:lfi` (61 deferred, "no source in the corpora to port"): the pinned llvm-project 23.1.5 tarball holds
+  `llvm/lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp` and `llvm/lib/MC/MCLFI.cpp`; ported as `arbace/asm/amd64/lfi.ae`
+  (LICENSE.md, doc/ARBACE.md), used by the print level and the object assembler: 61 texts and the note's readelf line met,
+  thread-pointer-errors' 6 error lines met. mayLoad/mayStore (pattern-inferred in X86, not in the table) is read as "a memory
+  operand that is not an address", documented in the namespace; adding them to the table (regenerating asm/amd64/table.edn with
+  pattern inference) was weighed and left: no test tells the two apart.
+- Proof: encode-check `--only` over the 67 files: 767 of 845 texts, the rest `:other-format` 75, `:elf32` 2, `:debug-trace` 1;
+  cross 565 of 567; controls failing; recorded with `--record --only`. bin/reap --record: print 194,796 / 1,187 / 531 ->
+  195,558 / 890 / 66; bin/crops-score --record (x86-64 assembly's completeness 99.4% -> 99.5%), --judge --strict and
+  bin/records-check: 0 problems. doc/asm/AMD64-SURVEY.md, "As built: x86-print".
+Light: no gate; stage 0 /root/arbace/target/seed/amd64/arbace.
+
+## 2026-11-22: x86-print round 2: the by-design classes re-examined (the matcher's trace, warnings, --stats, cpuid, the read's two)
+
+Stream X1's second round (branch `x86-print-1122`), each by-design class of x86-64 assembly re-examined as the burst's rules ask
+(implement what can pass; what truly cannot goes to the user with its rows):
+- The cross judge's `:ambiguous` (566): 29 are the same instruction with the same encoding (an imm8 printU8Imm masks, `bt eax,
+  255` for $-1; a scale without an index the encoder ignores): `arbace.asm.amd64.check/same-machine-insn?` takes instruction and
+  encoding byte for byte as the same machine instruction (control-cross uses it too): they pass. 537 are llvm-mc's own (471 `_REV`,
+  66 operand-size variants): no Intel text of llvm-mc's tells them apart (X86AsmParser.cpp of the pinned tarball has no `{load}` or
+  `{store}`; the `.s` aliases are EmitPriority 0); left for the user with `:pcrel-imm` 118, `:mask-operand` 33, `:other-instruction`
+  21, `:disassemble-only` 12, `:dollar-name` 2. Alternative weighed: compare encodings alone (AXS34 (b)): rejected, it hides the
+  `_REV` forms' different opcode.
+- `:debug-trace` (58): x86_64-asm-match's 57 lines are MatchInstructionImpl's -debug-only=asm-matcher trace, which the matcher can
+  write as LLVM's does (llvm/utils/TableGen/AsmMatcherEmitter.cpp's emitted lines, X86Operand.h's print, read from the pinned
+  tarball): `arbace.asm.amd64.asm/*trace*`, 57 of 57 met; align-branch-convergence's --stats line is MCAssembler's RelaxationSteps:
+  `arbace.asm.obj/layout!` now follows relaxOnce's loop (FirstStable, the last moved section; a chunk's size change counts when it
+  moves the next chunk) and counts it, met (3); object-check, the verdict and arm64's object checks unchanged.
+- `:diagnostic` (4): CheckDispOverflow ported into the operands (the 64-bit displacement error, the 32/16-bit warnings, the value
+  shortened); the print level holds warning texts to the parser's warnings with their line and column: 4 met, the error runs' 4 error
+  lines met.
+- The read cell's `:error-input` and `:not-input` (1 + 1, also the print cell's round-trip source): the Inputs/ file another test
+  gives to `not llvm-mc` is read as an error test is and passes on a refusal; the not-input test file is read with its statements kept,
+  judged by the round trip's own levels (its refusals by nothing: no RUN line gives it to llvm-mc). A judgment call reported to the
+  user: the second relies on the round trip alone.
+- `:unread` (63, deferred): pad-for-align-debug's runs read `%S/Inputs/pad-align-*.s`; a run reading another file is now held to the
+  object verdict: Mach-O's `:other-format` (by design, AXS99 pending).
+- The eval cell's `:cpuid` (2, AXS58 (a)): the native's cpuid answered with x86i's model in the CPU's run and the sys mode, as the
+  step mode already does: `x86i.CpuidModel` factored from x86i's cpuid; the lockstep's sys mode runs x86i first and puts an int3 at
+  each cpuid it is about to run before the native runs (`sysRun`, `sysResume`; put back before a switch to the step mode); the
+  driver's `x86i cpu EXE` is the CPU's run of a `# cpu: cpuid` program (an int3 at each cpuid of decode-text's sweep). Controls
+  inject-cpuid-model and lockstep-cpuid-model (X86I_INJECT=cpuid:model alters x86i's answer only) fail as they must.
+- Found and fixed: two `grep -q` at a pipe's end under pipefail in bin/repr-asm (the objverdict list let large-eh-encoding in at
+  random, 68 or 69 files; the new error-input flag never set).
+- Proof: the whole encode-check (12.5 minutes): 106,074 of 106,075 encodings, 108,461 of 108,601 texts, cross 86,380 of 87,103,
+  every control failing, the judge ok against the record (no row worse); then `--record --only` over the 14 files moved; object-verdict
+  `--record` (68 files, 865 of 1,243); the round trip of mc-asmparser and mc-x86 `--record` (157 and 621 pass); x86i-check `--record`
+  whole (9 minutes: 46 of 46 at every level, lockstep/cpuid and x86i/cpuid pass, its controls failing).
+- bin/reap --record: read 25,253 / 1 / 1 -> 25,255 / 0 / 0; eval 136 / 2 / 0 -> 138 / 0 / 0; print 195,558 / 890 / 66 ->
+  195,651 / 861 / 2. bin/crops-score --record: x86-64 assembly's completeness 99.5% -> 99.9% (100.0% without by design);
+  --judge --strict and bin/records-check: 0 problems. The coordinator stopped the burst here (allowance): ELF32 (the 2 deferred) not
+  started; the by-design classes left are listed for the user in doc/asm/AMD64-SURVEY.md, "As built: x86-print".
+Light: no gate; stage 0 /root/arbace/target/seed/amd64/arbace.
