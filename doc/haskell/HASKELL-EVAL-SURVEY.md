@@ -3009,3 +3009,26 @@ medians; every run GHC's stdout, empty stderr, status 0, byte for byte the same 
 45.71 (0.882); AtomicPrimops 49.39 to 44.53 and T21651 56.82 to 48.55 in one round. x2n1 under the 60 s limit in all three
 rounds (57.35 to 59.69), too near it to call; kahan, n-body and spectral-norm stay above (HES97 (a)'s caps). `bin/hsi runtime
 check`: every merged file a fixed point of print and read (fdwait.ae differs as on next, queue 333's finding).
+
+## As built: HES56 (b), interrupted thunks frozen (2026-11-22, branch `small-tails-ochs-1122`, from next `863bdaea1`)
+
+The burst's small tails (100 completeness): `:async-revert` (`:design`, HES56 (a) "until a test needs (b)") held samples/AsyncRerun at
+eval and AOT, on both library sets. Built (b), GHC's raiseAsync and AP_STACK, in hsi's machine (go/arbace/hs/machine.ae, rts.ae; the
+Go edited as `bin/hsi runtime print|read` makes it, HES38):
+
+- `raiseAsyncFrozen` is `raiseIn`'s path for a runnable thread other than the running one, not blocked and not in a transaction (its
+  control is its resumption, t.e and t.env, or a return of t.r and t.rs): from the top of its stack, each update frame above the nearest
+  catch frame takes the frames above it (their case frames' slots copied, `copyFramesEnv`, as control0#'s capture copies them) and the
+  control as a `Frozen` value, its thunk's code `frozenLam` over it, unevaluated again and its waiters woken; the thunks squeezed into
+  the same frame become `frozenIndLam`, a demand of the frozen one; the next segment's control is the demand of that thunk. A segment
+  that holds a transaction's frame (atomically, catchRetry, catchSTM) is not frozen: from it on, `unwind`'s reverting as before. Every
+  other path (an exception raised in the running thread, a blocked thread, StackOverflow, the allocation limit) reverts as before.
+- `resumeFrozenE`: entered under its own update frame, the frozen thunk pushes the frames back (their slots copied again, their marks
+  the arena's top) and resumes the expression, or the return. The collector's reachability (`marker`) walks a `Frozen` value's frames,
+  slots, expression and return.
+
+AsyncRerun prints GHC's `42` and `1` (the unsafePerformIO inside v runs once) at eval and AOT, on the pack's libraries and on the own
+ones (after `bin/repr-haskell lib-check --ifaces own` and `lib-stg --ifaces own` of ghc-internal and base); the four records' rows by
+`bin/hsi check [--aot] [--libs own] --corpus samples --only samples/AsyncRerun --record`; 40 passing programs of
+testsuite/concurrent/should_run (conc0NN, throwto, T-numbered) and samples Conc, Deadlock, MVarOrder, Stm still pass. The class is
+removed at both levels: eval 859 / 61 / 30 to 860 / 60 / 30, AOT 137 / 1 / 1 to 138 / 0 / 1.
