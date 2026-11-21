@@ -54,6 +54,7 @@
 
 (def ^:dynamic *classes* nil) ; atom {id class}
 (def ^:dynamic *enums* nil)   ; atom {id enum}
+(def ^:dynamic *ns-tags* nil) ; atom {namespace path [abi tag ...]} (cpp-rt-own2: GNU's abi_tag on a namespace, used by implicit tags)
 
 (defn cls [id] (get @*classes* id))
 (defn cls-of [t] (cls (:id (unq t))))
@@ -478,11 +479,17 @@
         k (+ (count (unnamed @*classes*)) (count (unnamed @*enums*)))]
     (str "Ut" (if (zero? k) "" (dec k)) "_")))
 
+(declare bare-params)
+
 (defn- part-name ^String [p]
   (case (first p)
     :ns (source-name (second p))
     :anon "12_GLOBAL__N_1"
-    :cls (let [c (cls (second p))] (or (:mname c) (when (:dollar-key c) (dollar-name! c))
+    ;; (cpp-rt-own2: a closure's Ul <parameters> E [n] _ mangled in the enclosing name's substitutions, its parameters' types
+    ;; candidates as any (clang's mangleLambda): text_encoding.cc's __charset_alias_match's `[](char, bool&)`,
+    ;; ...ENKUlcRbE_clEcS4_, the call operator's bool& the closure name's S4_; a fresh table had written clEcRb)
+    :cls (let [c (cls (second p))] (or (when-let [[ps k] (and *subs* (:ul c))] (str "Ul" (bare-params ps false) "E" (if (zero? (long k)) "" (dec (long k))) "_"))
+                                       (:mname c) (when (:dollar-key c) (dollar-name! c))
                                        (if (and (nil? (:name c)) (not (:lambda c))) (unnamed-type-name (:path c) (second p)) (source-name (:name c)))))
     :enum (let [e (enm (second p))] (if (nil? (:name e)) (unnamed-type-name (:path e) (second p)) (source-name (:name e))))))
 
@@ -797,11 +804,62 @@
 
 (declare unqualified-name*)
 
+(defn- type-abi-tags
+  "cpp-rt-own2: the ABI tags a type's mangling uses (clang's AbiTagState's used tags): a class's own (GNU's abi_tag) and those of
+  the namespaces and classes enclosing it (a namespace's abi_tag is used, never written: `inline namespace __cxx11
+  __attribute__((__abi_tag__ (\"cxx11\")))`), its template arguments', through pointers, references, arrays, member pointers and
+  function types; a set."
+  [t]
+  (let [seen (java.util.HashSet.) acc (java.util.TreeSet.)]
+    (letfn [(path! [path]
+              (let [path (vec path)]
+                (dotimes [i (count path)]
+                  (let [el (nth path i)]
+                    (when (vector? el)
+                      (case (first el)
+                        :ns (doseq [x (get (some-> *ns-tags* deref) (subvec path 0 (inc i)))] (.add acc x))
+                        :cls (ty! {:k :class :id (second el)})
+                        nil))))))
+            (ty! [t]
+              (when (map? t)
+                (cond
+                  (and (contains? t :pack) (nil? (:k t))) (run! ty! (:pack t))
+                  (= :class (:k t)) (when (.add seen (:id t))
+                                      (let [c (cls (:id t))] (doseq [x (:abi-tags c)] (.add acc x)) (path! (:path c)) (run! ty! (:targs c))))
+                  (= :enum (:k t)) (path! (:path (enm (:id t))))
+                  (#{:ptr :ref :rref :arr} (:k t)) (ty! (or (:to t) (:of t)))
+                  (= :mptr (:k t)) (do (ty! (:to t)) (ty! (if (map? (:cls t)) (:cls t) {:k :class :id (:cls t)})))
+                  (= :fn (:k t)) (do (ty! (:ret t)) (run! ty! (:ps t)))
+                  :else nil)))]
+      (ty! t)
+      (set acc))))
+
+(defn- fn-abi-tags
+  "cpp-rt-own2: a function's ABI tags, its own (GNU's abi_tag) and, for one whose return type is not mangled (no template's
+  specialization, constructor, destructor or conversion function), the tags its return type uses that its name and parameters
+  do not, Itanium 5.1.2's implicit tags (clang's makeFunctionReturnTypeTags): <fs_ops.cc>'s `path current_path()` returning
+  std::filesystem::__cxx11::path, _ZNSt10filesystem12current_pathB5cxx11Ev; sorted."
+  [f]
+  (let [own (:abi-tags f)]
+    (if (or (:tinst f) (#{:ctor :dtor :conv} (:kind f)) (nil? *ns-tags*) (not (map? (:ty f))))
+      own
+      (let [ret (type-abi-tags (:ret (:ty f)))]
+        (if (empty? ret)
+          own
+          (let [used (into (set own) (concat (type-abi-tags {:k :fn :ret nil :ps (vec (:ps (:ty f)))})
+                                             (let [pc (some (fn [el] (when (and (vector? el) (= :cls (first el))) el)) (reverse (:path f)))]
+                                               (type-abi-tags (if pc {:k :class :id (second pc)} {:k :fn :ret nil :ps []})))
+                                             (let [nss (vec (take-while (fn [el] (and (vector? el) (= :ns (first el)))) (:path f)))]
+                                               (mapcat (fn [i] (get (some-> *ns-tags* deref) (subvec nss 0 (inc i)))) (range (count nss))))))
+                extra (remove used ret)]
+            (if (seq extra) (vec (sort (distinct (concat own extra)))) own)))))))
+
 (defn- unqualified-name
   "A function's unqualified name: its source name, an operator's code, C1/C2/D0/D1/D2 for the special members; its ABI
-  tags after it (Itanium 5.1.2: <abi-tags> ::= B <source-name>..., GNU's abi_tag; cpp-s3)."
+  tags after it (Itanium 5.1.2: <abi-tags> ::= B <source-name>..., GNU's abi_tag; cpp-s3; cpp-rt-own2: the implicit ones of its
+  return type, fn-abi-tags)."
   ^String [f variant]
-  (str (unqualified-name* f variant) (apply str (map #(str "B" (count %) %) (:abi-tags f)))))
+  (str (unqualified-name* f variant) (apply str (map #(str "B" (count %) %) (fn-abi-tags f)))))
 
 (defn- unqualified-name*
   ^String [f variant]

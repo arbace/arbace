@@ -480,8 +480,12 @@
                                 (or (abi/scalar? u) (and (abi/class? u) (sema/trivial-copy? (:id u)) (sema/trivial-dtor? (:id u)) (trivially-default? (:id u))))))
    "__is_standard_layout" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
                                         (or (abi/scalar? u) (and (abi/class? u) (not (abi/dynamic? (:id u)))))))
+   ;; (cpp-rt-own2: a POD class is trivial, [class.prop]/9, so its default constructor too, as __is_trivial's: memory_resource.cc's
+   ;; __pool_resource::_BigBlock, whose base big_block has a default member initializer, is no POD, std::__rotate's
+   ;; `if (__is_pod(_ValueType) && __k == 1)` folded false as clang folds it, its move_backward and advance never emitted)
    "__is_pod" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
-                            (or (abi/scalar? u) (and (abi/class? u) (not (abi/dynamic? (:id u))) (sema/trivial-copy? (:id u)) (sema/trivial-dtor? (:id u))))))
+                            (or (abi/scalar? u) (and (abi/class? u) (not (abi/dynamic? (:id u))) (sema/trivial-copy? (:id u)) (sema/trivial-dtor? (:id u))
+                                                     (trivially-default? (:id u))))))
    "__is_literal_type" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/scalar? u) (abi/ref? a) (abi/void? u) (and (abi/class? u) (sema/trivial-dtor? (:id u))))))
    "__has_unique_object_representations" (fn [_ [a]] (let [u (abi/unq a)] (or (contains? abi/int-ranks (abi/bn u)) (abi/ptr? u) (abi/enum? u))))
    "__reference_binds_to_temporary" (fn [_ _] false)
@@ -1852,7 +1856,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Class templates: instantiation, explicit and partial specializations
 
-(declare attach-ool! attach-one! instantiate-fn)
+(declare attach-ool! attach-one! instantiate-fn internal-args?)
 
 (declare name-pack-params!)
 
@@ -1866,8 +1870,9 @@
         ps (bind-scope (:scope t) params bargs nil)
         ;; (queue 411: a specialization of a template of an unnamed namespace has internal linkage and so have its members,
         ;; [basic.link]/4, as the class's own (sema's declare-class!): codecvt.cc's std::(anonymous)::range<char32_t, true>'s,
-        ;; linkonce_odr before)
-        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]) :internal (boolean (:internal ps)))
+        ;; linkonce_odr before; cpp-rt-own2: and one whose arguments name a type of internal linkage, clang's mergeTemplateLV:
+        ;; memory_resource.cc's polymorphic_allocator<(anonymous)::chunk>, fs_ops' unique_ptr<char[], (anonymous)::free_as_in_malloc>)
+        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]) :internal (boolean (or (:internal ps) (internal-args? args))))
         first-fn (inc (long @sema/*ids*))
         ;; (CP365 (a): the argument classes not complete yet, declared only or still being defined)
         waits (set (for [a args :when (map? a) :let [u (abi/unq a)] :when (abi/class? u) :let [c (abi/cls (:id u))]
@@ -2288,7 +2293,7 @@
   [t args]
   (let [tid (:id t) cid (next-id)
         ps (bind-scope (:scope t) (:params t) args nil)
-        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]) :internal (boolean (:internal ps)))]
+        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]) :internal (boolean (or (:internal ps) (internal-args? args))))]
     (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
                                     :tmpl tid :targs args})
     (upd-tmpl! tid assoc-in [:insts args] cid)
@@ -2649,7 +2654,8 @@
                (when (and (abi/arr? (:ty v)) (nil? (:n (:ty v))))
                  (when-let [dt (try (sema/resolve-type s (get-in n [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
                    (when (and (abi/arr? dt) (number? (:n dt))) (upd-var! vid assoc :ty dt)))))
-             (upd-var! vid assoc :pending-def true :linkonce true :internal (boolean (:internal (:outer c))) :internal-l false :of-cls icid)))))
+             ;; (cpp-rt-own2: internal with its class, an instance's over a type of internal linkage too)
+             (upd-var! vid assoc :pending-def true :linkonce true :internal (boolean (or (:internal (:outer c)) (:internal (:scope c)))) :internal-l false :of-cls icid)))))
 
 (declare attach-member-template!)
 
@@ -2783,22 +2789,11 @@
   "cpp-rt-own: whether template arguments name a type of internal linkage: a class of an unnamed namespace or local to an
   internal function (its scope's :internal, sema's declare-class!), a closure named $_N (sema's: in a function neither inline
   nor a template's instance, internal as its call operator), a specialization of a class with such arguments, through
-  pointers, references, arrays, function types and packs."
+  pointers, references, arrays, function types and packs (cpp-rt-own2: sema's internal-type?, member pointers and
+  enumerations too)."
   [args]
   (let [seen (java.util.HashSet.)]
-    (letfn [(ty? [t]
-              (cond
-                (not (map? t)) false
-                (and (contains? t :pack) (nil? (:k t)) (sequential? (:pack t))) (boolean (some ty? (:pack t)))
-                (= :class (:k t)) (let [id (:id t)]
-                                    (and (.add seen id)
-                                         (let [c (abi/cls id)]
-                                           (boolean (or (:internal (:scope c)) (and (:lambda c) (:dollar-key c))
-                                                        (some ty? (:targs c)))))))
-                (#{:ptr :ref :rref :arr} (:k t)) (ty? (or (:to t) (:of t)))
-                (= :fn (:k t)) (boolean (or (ty? (:ret t)) (some ty? (:ps t))))
-                :else false))]
-      (boolean (some ty? args)))))
+    (boolean (some #(sema/internal-type? % seen) args))))
 
 (defn instantiate-fn
   "The specialization of the function template `tid` for the complete arguments `args`: its declaration (the pattern
@@ -3629,7 +3624,12 @@
                         (some #(when (= (unspelled (canonical sig)) (unspelled (canonical (try (sym-sig (tmpl (:id %))) (catch arbace.lang.ExceptionInfo _ nil))))) (:id %)) cands)))))]
       (if old
         ;; the definition replaces the declaration; the declarations' default arguments are kept ([dcl.fct.default]/4)
-        (when body? (upd-tmpl! old #(assoc % :pattern pattern :params (tparams n) :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
+        ;; (cpp-rt-own2: `static` the declaration's, which the definition outside the class does not repeat ([class.static]/1),
+        ;; kept as queue 392 keeps it for a class template's member template: <bits/fs_path.h>'s `template<typename _EcharT> auto
+        ;; path::_S_convert(const _EcharT*, const _EcharT*)`, called from the static _S_convert(_Tp) on no object, "codegen:
+        ;; lvalue": fs_path.cc's and cow-fs_path.cc's path from a std::wstring)
+        (when body? (upd-tmpl! old #(assoc % :pattern (cond-> pattern (and (= "static" (:storageClass (:pattern %))) (not (:storageClass pattern))) (assoc :storageClass "static"))
+                                           :params (tparams n) :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
         (let [tid (next-id)]
           (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
                                     :pos (:_b n) :insts {} :constraint (:requiresClause n)
