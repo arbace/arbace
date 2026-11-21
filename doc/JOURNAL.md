@@ -15719,3 +15719,10 @@ doc/asm/ARM64-SURVEY.md, "As built: small-tails, the last non-passes". Before: r
   12,227, input and reject unchanged; 18 controls fail), `bin/repr-asm --arch arm64 object-verdict` (2,890 of 2,890; 12 controls
   fail), each then `--record` (whole runs); bin/reap --record, bin/crops-score --record.
 After: read 6,656 / 0 / 0, AOT 3,173 / 0 / 0, print 12,671 / 0 / 0; arm64's completeness 1.0.
+
+## 2026-11-22: small-tails-arm64-1122's checks after the record
+
+After the records (the entry above): bin/reap and bin/crops-score --judge --strict 0 problems, bin/records-check 9 pairs, 0
+problems; arm64's scores line in test/crops/scores.edn completeness 0.9997 -> 1.0000 (maturity and independence 1.0000).
+asm-arm64-essential's controls (test/gate/crops/asm.edn and the spliced test/gate/steps.edn) name test/asm/controls-error-arm64.txt
+(gate.crops check: 0 problems; the step's inputs already hold test/asm/).
