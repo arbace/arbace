@@ -534,5 +534,22 @@
              (let [sized (body-forms (glue-body (list 'ty "*mut std::string::String" (list 'ptr '(ty "std::string::String" (adt "std::string::String" [])) true)) "glue_string"))]
                (if (= sized dyn-forms) [:equal] [:differs sized]))
              :differs))
+    ;; C1's second and third bugs: the run's interface takes the crates' native facts where it has none (RF_EXTRA_IFACE): a
+    ;; crate-private callee's signature (core::char::convert::from_u32_unchecked: else `{no sig ..}` and the upstream symbol), a
+    ;; dependency's ADT (hashbrown's: needs_drop by its fields), a private type's trait impl (indexed under its trait)
+    (let [f (str (or (System/getenv "TMPDIR") ".tmp") "/c1-extra-iface.edn")
+          sig '{:generics [] :parent-count 0 :has-self false :predicates [] :inputs [(prim "u32")] :output (prim "char") :variadic false :safety "Unsafe" :abi "\"Rust\"" :const true :promotable false :nounwind false}
+          raw '{:kind "Struct" :generics [(type "T")] :variants [{:fields [["ptr" (ptr false (param 0 "T"))] ["end" (ptr false (param 0 "T"))]]}]}
+          fnmut '{:generics [] :parent-count 0 :predicates [] :self (adt "core::str::IsWhitespace" []) :trait (trait "core::ops::function::FnMut" [(adt "core::str::IsWhitespace" []) (tuple [(prim "char")])]) :items []}
+          _ (spit f (pr-str {:fns {"core::char::convert::from_u32_unchecked" sig "core::mem::drop" (assoc sig :output '(prim "u8"))}
+                             :adts {"hashbrown::raw::RawIterRange" raw} :impls {"core::str::{impl#9}" fnmut}}))
+          si {:fns {"core::mem::drop" sig} :adts {} :impls {} :traits {} :inherent {} :trait-impls {}}
+          [si2 _] (binding [br/*extra-iface* f] (br/with-extra-iface si {:kinds {} :generics {}}))]
+      (check "C1: a crate-private callee's signature and a dependency's ADT from the crates' native facts"
+             (if (and (= sig (get-in si2 [:fns "core::char::convert::from_u32_unchecked"])) (= raw (get-in si2 [:adts "hashbrown::raw::RawIterRange"]))) :equal [:differs (keys (:fns si2))]) :equal)
+      (check "C1: a private type's trait impl indexed under its trait"
+             (if (some #(= "core::str::{impl#9}" (if (map? %) (:path %) %)) (get-in si2 [:trait-impls "core::ops::function::FnMut"])) :equal [:differs (get-in si2 [:trait-impls])]) :equal)
+      (check "C1 control: the interface's own fact is kept (an extra fact never replaces one)"
+             (if (= (get-in si2 [:fns "core::mem::drop" :output]) '(prim "u8")) [:equal] [:differs (get-in si2 [:fns "core::mem::drop" :output])]) :differs))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))
