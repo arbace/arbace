@@ -13978,3 +13978,15 @@ in core's stable sort (a native body recursing without end). Also: collect keeps
 arguments (core's pass lost fmt::Arguments::new's rt::Argument<'a>: the C4 switch's "no callee for Arguments::new"), and a trait's
 default MetaSized supertrait follows rustc 1.99 (none for PointeeSized nor an auto trait; core's own lang items by their local
 definitions): core's pass on the native names 25,879 of 27,498 facts equal (25,396 before them; 25,812 on the helper's names).
+
+## 2026-11-21: rust-c6-1120: consolidating: the last runs recorded, the next items
+
+The passes run again after the two fixes (np-chain3): core 25,879 of 27,498 facts equal to the helper's interface (traits 182 of
+188), but alloc 3,532 of 3,863 and std 3,789 of 4,644, and std-names' aliases 18 of 215 (14,893 of 15,162): the chain gave core's
+pass names already holding core's aliases, and a pass writes an alias only when the names it reads lack it, so the later passes ran
+without them (the first chain's order is the one that works; the lasting fix, a pass writing every alias it computes). C4's switch
+run on that interface and names: 0 of 5 own (four Transmutes refused at codegen, std's `fmt::Result` alias). Consolidating at the
+coordinator's word (the weekly allowance at its mark): nothing new started. Next, in the survey ("C1's drop glue", "Next") and the
+agenda: TypeId::of's constant as rustc's type_id hash and core's sort recursion (unwind, panics and std on ci), C6-4's next export
+(8 callees), core's interface differences and the aliases' order for C4. crops-score --judge --strict 0 problems, records-check 9
+pairs 0 problems; Rust's scores unchanged (independence 0.8000).

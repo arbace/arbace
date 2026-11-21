@@ -5706,6 +5706,18 @@ it), judged against rustc's recorded run:
   so the payload's type never matches. Not one of C1's three faults (rust-rec-1120 saw both without the glue, at `7dd5032c0`);
   the next items: TypeId::of's constant evaluated as rustc's `type_id` (the hash of the erased type) and the sort's recursion.
 
+### The passes again after the two fixes (2026-11-21, `.tmp/c6/np-chain3.sh`)
+
+core (one round, 61 min) **25,879 of 27,498** facts equal (traits 182 of 188: the default MetaSized supertrait; fmt::Arguments::new's
+input now `rt::Argument<'a>`), better than on the helper's names (25,812). But alloc fell to 3,532 of 3,863 (327 functions
+missing), std to 3,789 of 4,644 and the names' aliases to 18 of 215 (14,893 of 15,162 facts): this chain fed core's pass the
+names of the chain before, which already held core's aliases, and a pass writes an alias only when the names it reads lack it
+(core-check's `native-iface`), so core's map came out without them and alloc's and std's passes ran without `fmt::Result` and the
+rest. The order that works is the first chain's (names without the crate's own aliases into its pass); the lasting fix is a pass
+writing every alias it computes. The switch run on this chain's interface and names (`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=...
+rsi-build intrinsics panics std unwind vectors`, 12 min): **0 of 5 own** as before, four refused at codegen ("unsupported Transmute
+between these layouts": a layout the native interface gives otherwise) and std for `{alias core::fmt::Result}` (the lost alias).
+
 ### Next (2026-11-21, consolidating)
 
 1. **TypeId::of's constant as rustc's `type_id`** (rustc_middle's `type_id_hash`: the stable hash of the erased type, with the
