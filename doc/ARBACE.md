@@ -267,6 +267,10 @@ code. Three kinds of things live here:
   as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
   (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
   rest (the converter, the printer, the checks, `native.ae`) is Arbace's own.
+  The build's own reads (2026-11-22, "As built: the build's own reads"): `repr/ocaml/prep.ae` (`arbace.repr.ocaml.prep`) ports
+  mucppo (yojson 3.0.0's vendored `lib/mucppo/mucppo.ml`, https://github.com/Leonidas-from-XIV/mucppo, CC0 1.0) statement for
+  statement and the perl substitutions of the same tarball's `tools/sync_stdlib_docs` that make `stdlib/float.mli` and
+  `stdlib/moreLabels.mli` (LICENSE.md); the toplevel's script read and the judge are Arbace's own.
   ocamllex (2026-11-08, OC186 (a), "As built: ocamllex ported (OC186)"): `repr/ocaml/ocamllex.ae`
   (`arbace.repr.ocaml.ocamllex`) ports the same tarball's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml,
   common.ml, output.ml, main.ml; outputbis.ml's -ml mode not, Proposed OC191) with stdlib/set.ml's AVL trees, by hand, the file
