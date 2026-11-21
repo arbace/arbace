@@ -361,6 +361,23 @@
                                                                          (when a (cons a (filter #(not= (norm-t (first %)) (norm-t (first a))) more)))))))]
       (when s2 [s1 s2 (if (= (chk/normalize (entry-unlabeled f1) our-gm) (norm-t s2)) :passed :differs)]))))
 
+(defn callees-first
+  "C6-4: the `#[inline(always)]` callees' defines in the order LLVM's AlwaysInliner meets them in rustc's module: rustc predefines a
+  codegen unit's items in items_in_deterministic_order (rustc_middle/src/mono.rs: a local item by its definition's span), and a
+  helper is mostly defined before the function that calls it, so here each callee before the callees that call it (a post-order
+  over their calls, the discovery order between unrelated ones): NonNull::as_ptr and cast_const inlined into as_ref first, then
+  as_ref into Location::file, which leaves the pair as_ref rebuilds from its own loads (std's IR), not the caller's halves"
+  [defs always]
+  (let [by (into {} (map (juxt second identity) defs))
+        out (volatile! []) seen (volatile! #{})]
+    (letfn [(visit [sym]
+              (when-not (@seen sym)
+                (vswap! seen conj sym)
+                (doseq [c (sort-by str (filter #(and (contains? always %) (by %)) (inl/callees (by sym))))] (visit c))
+                (vswap! out conj (by sym))))]
+      (doseq [d defs] (visit (second d))))
+    @out))
+
 (defn -main [cmd & args]
   (case cmd
     "census" (let [[std & specs] args] (census std specs))
@@ -401,7 +418,7 @@
                                               (doseq [b (concat (keep second (:bodies m)) inl-bodies)] (walk b)))
                                             @acc)
                                  module (binding [inl/*nounwind?* (fn [sym] (or (str/starts-with? (name sym) "llvm.") (false? (get nounwind (name sym)))))]
-                                          (inl/inline-module (concat (keep #(nth % 2) ours) inl-defs) always))
+                                          (inl/inline-module (concat (keep #(nth % 2) ours) (callees-first inl-defs always)) always))
                                  by (into {} (map (juxt second identity) module))]
                              (vec (for [[d sym f why :as o] ours]
                                     (cond (nil? f) o
