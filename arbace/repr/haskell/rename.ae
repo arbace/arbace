@@ -755,8 +755,15 @@
     (let [s (first stmts) v (lval s) env (assoc env :sp (lsp s))
           more (rest stmts)
           mdo? (and (:mdo env) (seq? fl) (= 'MDoExpr (first fl)))
-          sys (fn [m occ] (when (and fl (not (contains? *exts* "RebindableSyntax")))
-                            (emit-on! v nil (ext-name "var" m occ))))]
+          ;; RebindableSyntax (hs-r5): a do block's operator is the occurrence in scope, GHC.Rename.Env's lookupSyntaxName
+          ;; (the unqualified name's lookupOccRn): a local (>>=) or (>>) the elaborator then types (T15598, T22086)
+          sys (fn [m occ] (when fl
+                            (if (contains? *exts* "RebindableSyntax")
+                              (when (and (seq? fl) (= 'DoExpr (first fl))
+                                         (not (and (seq? (second fl)) (= 'Just (first (second fl))))))
+                                (when-let [n (resolve-rdr env (list 'unqual 'var occ))]
+                                  (use! n) (emit-on! v nil n)))
+                              (emit-on! v nil (ext-name "var" m occ)))))]
       (case (con v)
         BindStmt (do (sys "GHC.Internal.Base" ">>=")
                      (when mdo?
@@ -1442,7 +1449,10 @@
       (doseq [[n p] included] (bring-in! n #{q} (not qual?) p))
       {:span (lsp imp) :module m :qualified qual? :as as :hiding hiding?
        :items (vec (keep :emit (concat sel hid)))
-       :implicit (nth (arg v 1) 3)})))
+       :implicit (nth (arg v 1) 3)
+       ;; hs-r5: the names the import brings into scope, the elaborator's valid hole fits' global candidates (their
+       ;; ImportSpec's provenance)
+       :names (mapv first included)})))
 
 (defn- import-text [{:keys [span module qualified as hiding implicit]}]
   (str "(import " (span-str span) " " (esc module) " " (if qualified "true" "false") " "
@@ -1568,6 +1578,13 @@
        v#)
      ~e))
 
+(defn holes-deferred?
+  "hs-r5: the -f flags in order defer typed holes (-fdefer-typed-holes, implied by -fdefer-type-errors; GHC.Driver.Session's
+  impliedGFlags and impliedOffGFlags)"
+  [ff]
+  (reduce (fn [on f] (case f ("-fdefer-typed-holes" "-fdefer-type-errors") true ("-fno-defer-typed-holes" "-fno-defer-type-errors") false on))
+          false ff))
+
 (defn rename-module
   "Rename a module's parse tree (the dump's forms): the output as a map of strings"
   [forms]
@@ -1646,20 +1663,25 @@
             sorted (fn [xs] (vec (sort xs)))]
         {:module m
          :tree (list 'rn/module
-                     {:module m
+                     (cond-> {:module m
                       :decls (phase :rtree-decls (vec (for [d decls :when (not (contains? '#{ValD SigD} (con (lval d))))] (rtree d))))
                       :binds (mapv (fn [[r bs]] (list 'rn/group r (mapv rtree bs))) (:groups (.get ^java.util.IdentityHashMap *rnodes* val-binds)))
                       :sigs (mapv rtree top-sigs)
                       :export-list (when export-l (rtree export-l))
                       :exports avails
-                      :imports imp-infos
+                      :imports (mapv #(dissoc % :names) imp-infos)
                       :exts (vec (sort exts))
                       ;; queue 369: the -f flags of the command line and of the OPTIONS_GHC pragmas, in order (the elaborator's
                       ;; -fdefer-type-errors)
                       :fflags (vec (filter #(and (string? %) (str/starts-with? % "-f"))
                                            (concat (:flags cfg) (mapcat (fn [p] (when (= 'options (first p)) (nth p 2))) prag))))
                       ;; HF10-P41 (a): the language the module is compiled in (PolyKinds is GHC2021's)
-                      :language (some-> (:language cfg) str)})
+                      :language (some-> (:language cfg) str)}
+                       ;; hs-r5: under -fdefer-typed-holes (or -fdefer-type-errors) the imports' names, for the valid hole
+                       ;; fits of a deferred hole (GHC.Tc.Errors.Hole's global candidates, globalRdrEnvElts); no key otherwise
+                       (holes-deferred? (filter #(and (string? %) (str/starts-with? % "-f"))
+                                                (concat (:flags cfg) (mapcat (fn [p] (when (= 'options (first p)) (nth p 2))) prag))))
+                       (assoc :gres (vec (for [i imp-infos] (select-keys i [:span :module :qualified :as :implicit :names]))))))
          :imports (mapv import-text imp-infos)
          :occs (mapv second (sort @*occs*))
          :ops (mapv second (sort @*ops*))
