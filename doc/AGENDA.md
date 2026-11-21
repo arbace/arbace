@@ -60,6 +60,13 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
   a macro's goto reaching its label (expr.cc, 8faf78756). Left (the survey's table): the fs and exp/filesystem units (internal linkage by signature, relocation's noexcept, clang's
   first-emission naming), C++20 constraint mangling (sstream-inst, print, text_encoding), a VLA (floating_to_chars), valarray,
   memory_resource, floating_from_chars, tzdb and format; cp-demangle.c is DECISION cpp-rt-own-1 (recommended (a)).
+- **cpp-rt-own2** (2026-11-20, mac/cpp-rt-own2-1120 from mac/cpp-rt-own-1120 `9dcc02f78`; doc/cpp/CPP-SURVEY.md, "As built:
+  cpp-rt-own2"): the lowered runtime's own units 177 to 187 of 198: cp-demangle.c read from its own C by repr/c and ci (DECISION
+  cpp-rt-own-1 (a)), memory_resource, fs_ops, cow-fs_ops, fs_path, cow-fs_path and exp/filesystem's ops, cow-ops, path, cow-path by
+  clang's linkage over unnamed namespaces' types, implicit ABI tags, relocation's noexcept and a dozen smaller rules (each against
+  clang's IR on a reduced case); the inliner's suffix counter per module; DECISION 505-2 (a) (505's parser mark, the code generator's
+  rule, test/cpp/codegen/elab-decl.cpp). Left (11): text_encoding, sstream-inst, print, format, fs_dir, exp dir and cow-dir,
+  floating_to_chars, valarray, floating_from_chars, tzdb; DECISIONS cpp-rt-own2-1 to -3 open.
 - **Next**:
   - lanes 2 and 4: Haskell's own records (17 packages) and Python's records (`bin/pyi` check and `check --aot`, both records
     together; then Python's fragment spliced, F1 (a));

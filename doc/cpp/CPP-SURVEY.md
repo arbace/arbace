@@ -9142,3 +9142,159 @@ DECISION cpp-rt-own-1 (libsupc++/cp-demangle.c, the lowered runtime's one C unit
     tentative definitions), its IR lowered as the others'.
 (c) Leave it on the pack (1 of 198 units).
 ```
+
+## As built: cpp-rt-own2, the C unit, clang's linkage over unnamed namespaces and the fs units' gaps (2026-11-20; branch `cpp-rt-own2-1120` from mac/cpp-rt-own-1120 9dcc02f78)
+
+The brief (the main session, toward the CoMaIn goal): as many of the lowered runtime's 21 pack units own as the causes allow, in
+the order DECISION cpp-rt-own-1 (a), the unnamed namespace's internal linkage, C++20's constraint mangling, then floating_to_chars,
+the path and dir units and text_encoding; with the inliner's suffix counter reset per unit; DECISION 505-2 (a) added by the
+coordinator. Light and targeted: no gate; one generator process at a time but for two probes side by side (the host had 39 GB free
+once the 35 GB heavy-lock job ended).
+
+### DECISION cpp-rt-own-1 (a): libsupc++/cp-demangle.c read by Arbace's own C
+
+`bin/cppi`'s `runtime_ours_c` (from runtime_ours, for a unit of `rt_ours_glob` whose standard is `c`; `libsupc++/` names it): the
+unit's lowered C is its own source, the macros of rt_ir's clang command line for a C unit (`HAVE_STDLIB_H`, `HAVE_STRING_H`,
+`IN_GLIBCPP_V3`; its `-Iinclude` by the quoted headers copied beside it: cp-demangle.h, ansidecl.h, libiberty.h, demangle.h) then
+the tarball's file; `arbace.cpp.run`'s new `c-unit` reads it as read-lib's read-one reads a library unit (repr/c on the C target,
+gnu23, ci's atomics macros) and checks it as check-lib-unit does (ci's checker), writing `rt.status` (the forms level of a C unit)
+and `c-defs.txt` (the external names its forms define, arbace.c.musl/unit-defs, the linker's), which runtime-judge's names level
+holds to the pack's IR kept as `clang.ll`. No IR, no lowering: `rt_two`'s object level `skipped`. A unit repr/c or the checker
+refuses keeps the pack's IR under auto (fails under ours). runtime_key adds runtime_ours_c's text, arbace/cpp/run.ae,
+arbace/c/run.ae, arbace/c/check.ae and c/target (the route's deciders). The inputs record's header says what `:ir :own` means for a
+C unit. The read: 12 s, the check 2 s, 1.2 GB; its names `__cxa_demangle` and `__gcclibcxx_demangle_callback`, the pack's.
+runtime/uncaught.cpp (cpp-check-essential) runs it on ci: the verbose terminate handler demangles the exception's type.
+
+### The unnamed namespace's internal linkage and the units' other gaps (each checked on a reduced case against clang 23.1.5's IR,
+by hand, the oracle tier's tool, then on the units by `arbace.cpp.codegen gen-batch` with runtime_ours' options)
+
+- **clang's LinkageComputer.** A class template's specialization whose arguments name a type of internal linkage is internal, and
+  so are its members and static data members (mergeTemplateLV; template's declare-instance! and incomplete-instance! give its scope
+  `:internal`, an instantiated static member takes its class's): memory_resource's `polymorphic_allocator<(anonymous)::chunk>`,
+  fs_ops' `unique_ptr<char[], (anonymous)::free_as_in_malloc>` with its tuple and __uniq_ptr_impl. A member function whose type as
+  written names one is internal (getLVForClassMember's UniqueExternalLinkage): `__pool_resource::_Pool::vector::begin()` returning
+  `chunk*`. One predicate, sema's `internal-type?` (classes of an unnamed namespace or local to an internal function, `$_N` closures,
+  specializations over them, enumerations of an unnamed namespace, through pointers, references, arrays, member pointers, function
+  types and packs), template's internal-args? over it.
+- **An address constant.** The evaluator takes the address of an object of static storage duration (a namespace-scope or static
+  data member variable, a member or non-virtual base subobject of one) as a value, `{::gaddr VAR ::off BYTES}`, only under
+  ce-object (a namespace-scope object's constexpr constructor), passed, stored and returned, never read through (ce-num refuses a
+  map as a number, any host exception with one made is no constant); the code generator writes it as a pointer leaf (the symbol, or
+  a getelementptr of i8), the variable's definition written when first used; a union by its active member. memory_resource's
+  `__constinit constant_init<atomic_mem_res> default_res{&newdel_res.obj}`: constant, atomic<memory_resource*>'s constructors
+  never emitted, as clang.
+- `__is_pod` requires a trivial default constructor ([class.prop]/9, as __is_trivial): `_BigBlock` (its base big_block has a default
+  member initializer) is no POD, rotate's `if (__is_pod(_ValueType) && __k == 1)` folded false, its move_backward and advance unwritten.
+- A decltype operand's non-static data member named alone is the implicit this's member access, `dtdefpT` (clang): _Mem_fn_base's
+  `decltype(std::__invoke(_M_pm, ...))`.
+- **Implicit ABI tags** (Itanium 5.1.2, clang's makeFunctionReturnTypeTags): a function whose return type is not mangled (no template
+  specialization, constructor, destructor or conversion) gets the tags its return type uses and its name and parameters do not; a
+  namespace's abi_tag (`inline namespace __cxx11 __attribute__((__abi_tag__ ("cxx11")))`) kept by the native parser as `:_abi-tags`,
+  sema's `abi/*ns-tags*`, used and never written: fs_ops' `current_path[abi:cxx11]()`, `temp_directory_path[abi:cxx11]()`.
+- An implicit default constructor when a base's default constructor is inherited by a using-declaration and the class declares none
+  (clang's HasInheritedDefaultConstructor): __uniq_ptr_data's `C2Ev`, not the inheriting constructor `CI2...Ev`; and a default
+  constructor is trivial only when the class has one that is no template (clang's hasTrivialDefaultConstructor): __uniq_ptr_impl()
+  = default over its tuple is not, so unique_ptr() : _M_t() zeroes then calls it, _Head_base<0, char*>() written.
+- A move assignment defaulted on its first declaration is trivial as the copy one (file_status' operator=(file_status&&), a memcpy);
+  a header's out-of-line inline `= default` definition is user-provided and defined where used (experimental path's copy
+  constructor, destructor and copy assignment, declared alone before: their calls undefined in exp ops' IR).
+- A closure's `Ul <parameters> E` mangled in the enclosing name's substitutions (clang's mangleLambda): text_encoding's
+  `__charset_alias_match`'s `...ENKUlcRbE_clEcS4_` (a fresh table had written `clEcRb`).
+- A class object initialized by a prvalue a constant expression gives is folded by the evaluator (<charconv>'s
+  `static constexpr type value = (_DecOnly, _S_make_table());`, its 256 bytes those of clang's IR), the evaluator taking an array of
+  characters from a string literal and an implicit or first-declaration-defaulted constructor as constexpr when it can be.
+- A function parameter pack in a function type's `noexcept(e)` scope (fn-type-scope: its parameters from the expanded function type,
+  its name a `:varpack`): alloc_traits' `construct` noexcept as clang computes it, so vector's `_S_use_relocate()` true and its
+  reallocation a relocation, not copies through move_if_noexcept (the path units' relocation).
+- `static` kept on an out-of-class definition of a non-template class's member template (as queue 392 keeps it for a class template's):
+  fs_path.h's `path::_S_convert<_EcharT>(const _EcharT*, const _EcharT*)`, called on no object from the static `_S_convert(_Tp)`,
+  "codegen: lvalue" (a path from a std::wstring; fs_path.cc and cow-fs_path.cc refused once more of their code was reached).
+- A returned local of class type is an rvalue in a function whose return type is deduced too ([class.copy.elision]/3): _S_convert's
+  `return __str;` moves, as clang.
+- Since C++17 the redundant out-of-line definition of an inline static data member ([depr.static.constexpr]) is written whether used or
+  not, weak_odr, as an explicit instantiation's (clang's GVA_StrongODR): exp path's `constexpr path::value_type path::preferred_separator;`.
+
+### The units made own (rt_ours_glob, bin/cppi), each one's names by gen-batch the pack's IR's
+
+c++17/memory_resource.cc (the linkage rules, the address constant, __is_pod), c++17/fs_ops.cc and cow-fs_ops.cc (the linkage rules,
+implicit ABI tags, the inherited default constructor and the default constructor template's triviality, the move assignment, dtdefpT),
+c++17/fs_path.cc and cow-fs_path.cc (relocation, `static` on _S_convert, the returned local, __builtin_constant_p), exp/filesystem's
+ops.cc and cow-ops.cc (with the header's out-of-line defaults) and path.cc and cow-path.cc (relocation, preferred_separator), with
+libsupc++/cp-demangle.c by the C route: 177 to **187 of 198**.
+
+### Hygiene: the inliner's suffix counter one module's
+
+`arbace.cpp.inline`'s counter (the `.iN` suffixes of inlined values) is a dynamic var bound by `always-inline` for each module, not a
+process-wide atom never reset: a unit's IR no longer depends on the units its process generated before it. The digests that moved
+(test/cpp/codegen/forms.sha256, codegen-gen's whole run re-recorded): hdr-vector and stmt-expr, their forms now their own (the base's
+code gives hdr-vector 061449033... after its 55 predecessors in one process, the recorded digest, and 54081b239... alone, the new one;
+stmt-expr likewise); lambda-namespace, by the evaluator's class prvalue fallback (its closure globals constant-initialized, no
+dynamic initialization, as clang writes them); elab-decl new (DECISION 505-2 (a)'s probe). The runtime's own units' IR moved too (68
+units' lowered C read again by runtime-ci), no unit's names.
+
+### DECISION 505-2 (a): the elaborated-type-specifier's class, queue 505's mark
+
+cpp-rt-own had given the code generator's sema [basic.scope.pdecl]/7.2's rule (an elaborated-type-specifier's class first named in a
+member's or parameter's declaration declared in the smallest enclosing namespace or block scope) under the parser's `:_elab`. Queue
+505 (mac/505-cpp-dg-own10) gives the checker the same rule under `:_elab-decl`. Taken: 8c2fa2b4d's parse.ae hunk alone (cherry-pick
+-n, the mark; cpp-rt-own's `:_elab` on a CXXRecordDecl dropped, a FriendDecl's `:_elab` map unchanged), sema's conflicts resolved to
+this branch's declare-class! reading `:_elab-decl` in both modes; 505's checker functions (cx-elab-target, cx-elab-decl-scope,
+cx-elab-declare!) not taken, the main session's merge of 505 brings them. Probe: test/cpp/codegen/elab-decl.cpp (a member's
+`struct S *a`, a parameter's `struct U *u` and `struct V *v`, a global class's `struct X *p`, then their definitions): its defined
+names `_ZN1N1T1fEPNS_1UE`, `_ZNK1N1S3getEv`, `_ZN1N1gEPNS_1VE`, `_ZN1N2mkERNS_1TE`, `_Z3useR1W`, `_ZN1X1hEv` and main, clang
+23.1.5's exactly (by hand); no runtime unit has such a declaration, and no own unit's names moved (the final runtime-build).
+
+### Checked (the brief's proofs, and only these; no gate)
+
+| check | result |
+|---|---|
+| `bin/cppi runtime-build` (the default route auto, at 0f6375692 with 83065c349's code, under `ulimit -v 8388608`) | **198 units, 198 pass, 187 by our route** (the summary line counts 183: its glob misses exp/filesystem's four), the names level equal for each own unit, the C unit's c-defs.txt included; IR 5,386 s (one generator process beside codegen-gen's), read, print and lower 172 s; 1 h 33 min wall, peak 2.3 GB |
+| `bin/cppi runtime-ci` (`CPPI_CI_CHUNK=8 CPPI_CI_MEMLIMIT=2GiB`, under `ulimit -v 8388608`, ci's library seeded from cpp-rt-own's: the same reader) | 199 of 199 read, the 68 units whose lowered C changed read again (the 10 new, the inliner's suffixes, the rules' IR); 34 min, peak 3.9 GB |
+| `bin/cppi runtime-inputs --record` | own 187, pack 11: test/cpp/runtime/inputs-linux-amd64.edn's 10 rows `{:ir :own, :ci-target :own}` (cp-demangle.c among them) |
+| `bin/cppi lower-essential` (`ARBACE_NO_AOT=1`) | 6 files, 6 pass, 0 failing (the control's lowered run the oracle tier's); 3 min 42 s, 2.2 GB |
+| `bin/cppi check --only test/cpp/essential-check.txt` (cpp-check-essential's command, `ARBACE_NO_AOT=1 CPPI_THREADS=2 CPPI_CI_MEMLIMIT=3GiB`, on this runtime) | (pending at this commit: the next commit records it) |
+| `bin/cppi codegen-gen` (`--record`, a whole run, then its judge with the controls) | 156 of 156 (elab-decl new), both controls failing as they must; the digests moved: hdr-vector, stmt-expr, lambda-namespace (above) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | the matrix unchanged (56 of 56 cells, 0 problems); C++'s eval and AOT stages 0.973 to 0.986 each (the runtime's half 0.947 to 0.972: (187 + 11 x 0.5) / 198), its independence 0.9190 to 0.9242, **91 to 92** (floored); test/crops/scores.edn re-recorded, `--judge --strict` 0 problems, records-check 9 pairs, 0 problems |
+
+Keys: the runtime's key moves (the code generator, the parser, rt_ours_glob, runtime_ours_c and the C route's deciders): the gate's
+cpp-runtime builds once (about 1 h 30 min on this host with another generator beside it; 1 h alone); `gate_key` and the javac keys move
+(arbace/cpp and repr/cpp embedded); runtime-ci's key moves (68 units read again).
+
+### The units left on the pack (11 of 198), by the size of their next step
+
+| unit | cause | next decision |
+|---|---|---|
+| c++26/text_encoding.cc | 1 missing, 1 more: a local of a POD class whose initializer is a constant expression is constant-initialized (clang's EmitAutoVarAlloca IsConstantAggregate: the range-for's `auto __end = __range.end();`, a memcpy from `@__const...__end3`, aliases_view::end() never emitted), and basic_string::max_size() calls `_M_get_allocator() const` where ours folds it | DECISION cpp-rt-own2-1: (a) the code generator constant-initializes a POD local whose initializer the evaluator folds, a member call on an object the evaluation never reads allowed (an opaque `this`); (b) leave it |
+| c++20/sstream-inst.cc, c++23/print.cc, c++20/format.cc | C++20's constraint mangling: a type-constraint with arguments (`TkSt18sized_sentinel_forITL0__E`), a requires-clause `Q <expr>` over alias templates expanded (iter_value_t), a trailing requires-clause on a non-template member (`...C2EvQ26is_default_constructible_vIT1_E`); print also `_M_get_allocator() const` | DECISION cpp-rt-own2-2: (a) mangle the template heads' constraints as clang 23 (Itanium's `Tk`, `Q`, with `TL<level>_<index>_` parameters), the requires-clause's expression through mangle-dt-expr with its alias templates expanded; (b) one unit at a time, sstream-inst's string_view constructor first |
+| c++17/fs_dir.cc, exp/filesystem/dir.cc, exp/filesystem/cow-dir.cc | clang's first-emission naming of `_Dir`, declared in `__cxx11` by the header and defined in `filesystem` by the unit (two classes), modelled by entity id (:mangle-path-after) | DECISION cpp-rt-own2-3: (a) mangle in emission order as clang (a name is fixed at the first use the code generator writes); (b) leave them |
+| c++17/floating_to_chars.cc | GNU's variable-length array (`char buffer[n + 1]`) | (a) VLAs in sema and the code generator (llvm.stacksave, a dynamic alloca, the lowering's C VLA) |
+| c++98/valarray.cc | valarray<size_t>'s instantiation through gslice (recursion depth, header drops) | probe again on this branch |
+| c++17/floating_from_chars.cc | a pool resource's vector of an incomplete _BigBlock instantiated | probe again on this branch |
+| c++20/tzdb.cc | not probed to the end (the largest) | a probe |
+
+Found and left (not a runtime unit's): a `constinit` object of a union wrapper over a dynamic class whose member's constructor is
+reached through an empty pack (`template<typename... U> explicit constexpr CI(U&&... a) : obj(static_cast<U&&>(a)...) {}` over a
+`struct D : R` with a virtual function) is written zero, its vptr lost (clang writes the address point); the base 9dcc02f78 does
+the same, memory_resource's `newdel_res` (its class's constexpr default constructor) is right. A reduced case:
+`.tmp/t1/ci.cpp` of the branch's worktree (scratch).
+
+```
+DECISION cpp-rt-own2-1 (c++26/text_encoding.cc, 1 missing and 1 more)
+(a) The code generator constant-initializes a local of POD class type whose initializer the evaluator folds, as clang's
+    EmitAutoVarAlloca (IsConstantAggregate: a memcpy from a private constant), the evaluator taking a member call on an object it
+    never reads (an opaque `this`); with basic_string::max_size()'s `_M_get_allocator() const` called as clang calls it. Recommended:
+    one unit (0.05 of a point), but the rule is clang's for every POD local and moves other units' IR toward clang's.
+(b) Leave it on the pack.
+
+DECISION cpp-rt-own2-2 (C++20's constraint mangling: sstream-inst, print, format)
+(a) Mangle the constraints clang 23 mangles: a template parameter's type-constraint with its arguments (`Tk <name> <args>`, the
+    template's own parameters as `TL<level>_<index>_`), a template head's and a trailing requires-clause (`Q <expression>`) through
+    mangle-dt-expr, alias templates in it expanded as clang expands them (iter_value_t's __iter_traits_impl). Recommended: three units,
+    and the hdr-vector sample's known :trailing-requires.
+(b) sstream-inst first (string_view's iterator-pair constructor alone), then print, then format.
+
+DECISION cpp-rt-own2-3 (c++17/fs_dir.cc, exp/filesystem/dir.cc and cow-dir.cc: `_Dir`'s two classes)
+(a) Mangle in emission order as clang does (a class's name fixed at the first use the code generator writes, cpp-rt-own's
+    :mangle-path-after replaced). Recommended: three units, cow-fs_dir's model kept as its special case.
+(b) Leave them on the pack.
+```

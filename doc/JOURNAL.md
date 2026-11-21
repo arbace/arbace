@@ -13783,3 +13783,69 @@ Alternatives weighed: modelling clang's first-emission naming of a class redefin
 would need the code generator to mangle in emission order; taken as an approximation by entity id (:mangle-path-after), which the
 fs units' other gaps keep from proof yet. Rejected: listing a unit whose names differ (runtime-judge fails the build); running
 three generator processes over all 197 units (the host's memory, the coordinator's rule) in place of the one full runtime build.
+
+## 2026-11-20: cpp-rt-own2: the C unit by Arbace's own C, clang's linkage over unnamed namespaces, and 10 more runtime units own
+
+Branch `cpp-rt-own2-1120` from mac/cpp-rt-own-1120 9dcc02f78 (the brief: the main session, toward the CoMaIn goal, C++'s
+independence; the lowered runtime 177 of 198 units own, eval and AOT 0.973 each). Light and targeted, no gate; probes by
+`arbace.cpp.codegen gen-batch` with runtime_ours' options in `.tmp`, each unit's defined external names against the pack
+cpp-runtime-ir's IR (n-all5's runtime build, the names level runtime-judge applies), reduced cases against clang 23.1.5's IR recorded
+by hand (the oracle tier's tool, as cpp-rt-own's libcpp check).
+
+What was done, in the brief's order:
+
+1. DECISION cpp-rt-own-1 (a), libsupc++/cp-demangle.c (28a8bb008): `bin/cppi`'s runtime_ours_c makes a C unit of rt_ours_glob its
+   own lowered C (rt_ir's macros for a C unit, then the tarball's libiberty/cp-demangle.c; its quoted headers beside it, ci's quoted
+   search), read and checked by `arbace.cpp.run c-unit` as ci's library reads and checks a unit (rt.status, c-defs.txt: the linker's
+   external names), runtime-judge's names level holding c-defs.txt to the pack's IR. Probed alone (CPPI_RUNTIME_OURS): 198 of 198
+   pass, the C unit `ours`, names the pack's (__cxa_demangle, __gcclibcxx_demangle_callback). Alternatives the decision weighed: a C
+   mode of the C++ front end, or the pack.
+2. The unnamed namespace's internal linkage (d1765ba36): clang's LinkageComputer, a class template specialization over a type of
+   internal linkage internal with its members (mergeTemplateLV), a member function whose type names one internal
+   (getLVForClassMember), sema's internal-type? one predicate; with the units' other gaps it showed: the address of an object of
+   static storage duration as a constant in a namespace-scope object's constexpr constructor (memory_resource's constinit
+   default_res), __is_pod requiring a trivial default constructor, dtdefpT for decltype's implicit this, implicit ABI tags from a
+   function's return type (the parser keeping a namespace's abi_tag), an implicit default constructor when a base's is inherited, a
+   defaulted move assignment trivial, a header's out-of-line `= default` defined where used. Then (768210a29, 83065c349) a closure's
+   parameters in the enclosing substitutions, a class object's constant prvalue initializer folded, a default constructor template
+   making its owner's non-trivial, a parameter pack in a noexcept(e)'s scope (vector's relocation), `static` kept on a non-template
+   class's out-of-class member template definition, a returned local moved in a deduced-return function, __builtin_constant_p of a
+   value not folded, C++17's redundant constexpr member definitions written. Each rule checked on a reduced case against clang's IR.
+3. C++20's constraint mangling: not reached (sstream-inst's string_view constructor needs a type-constraint with arguments, `Tk ...
+   ITL0__E`, and a requires-clause `Q` over alias templates expanded; print adds a trailing requires-clause on a non-template member).
+4. The path units' relocation noexcept: done (item 2's pack scope); fs_dir's and exp dir's first-emission naming, floating_to_chars'
+   VLA, text_encoding's local constant aggregate: left (below).
+5. Hygiene: arbace.cpp.inline's suffix counter bound per module by always-inline (d1765ba36).
+
+DECISION 505-2 (a) (the coordinator, during the work): the code generator follows queue 505's rule for an elaborated-type-specifier's
+class first named in a member's or parameter's declaration. cpp-rt-own had given the code generator's sema that rule under the
+parser's `:_elab`; e5482a3fb takes 505's parser hunk alone from mac/505-cpp-dg-own10 8c2fa2b4d (the mark `:_elab-decl`, cherry-pick
+-n, sema's conflicts resolved to this branch's code reading the new mark; 505's checker functions cx-elab-* not taken) and adds the
+probe test/cpp/codegen/elab-decl.cpp: its defined names clang 23.1.5's (N::S, N::U, N::V, ::X).
+
+Results. `bin/cppi runtime-build` (auto, at 0f6375692, under `ulimit -v 8388608`): 198 units, 198 pass, **187 by our route** (from
+177): libsupc++/cp-demangle.c (the C route), c++17's memory_resource, fs_ops, cow-fs_ops, fs_path, cow-fs_path, exp/filesystem's ops,
+cow-ops, path, cow-path; every own unit's names the pack's (the 177 earlier ones unmoved: the rules move their IR toward clang's,
+never a name). runtime-ci 199 of 199 (68 units read again: the 10 new, the inliner's per-module suffixes, the rules' IR; 34 min,
+3.9 GB). `bin/cppi runtime-inputs --record`: own 187, pack 11. lower-essential 6 of 6. codegen-gen 156 of 156, its controls failing;
+four digests recorded: elab-decl new, hdr-vector and stmt-expr (their forms their own once the inliner's counter is the module's:
+the base's code gives hdr-vector the recorded digest after its 55 predecessors in one process and the new one alone), lambda-namespace
+(closure globals constant-initialized, as clang). Scores: the REAP matrix unchanged; C++'s eval and AOT stages 0.973
+to 0.986 each (the runtime's half 0.947 to 0.972), its independence 0.9190 to 0.9242, **91 to 92**; crops-score `--judge --strict` and
+records-check 0 problems.
+
+Left (11 units): text_encoding (a POD local's constant initializer, max_size's `_M_get_allocator() const`), sstream-inst, print and
+format (C++20's constraint mangling), fs_dir and exp's dir and cow-dir (clang's first-emission naming), floating_to_chars (a VLA),
+valarray, floating_from_chars, tzdb. DECISIONS cpp-rt-own2-1 (text_encoding: constant POD locals, recommended (a)), -2 (constraint
+mangling, recommended (a)), -3 (emission-order mangling, recommended (a)); the survey's section has them. Found and left: a constinit
+union wrapper over a dynamic class reached through an empty pack is written zero (vptr lost), the base's behaviour too.
+
+Alternatives weighed: the C unit through a C mode of the C++ front end (DECISION cpp-rt-own-1 (b)), rejected by the decision; the
+implicit ABI tags limited to the libstdc++ functions that lack an explicit one (rejected: clang's rule is general, and the headers'
+explicit tags make it agree); the inherited default constructor kept as the inheriting constructor CI2 (cpp-rt-own's), rejected:
+clang declares the class's own C2. Rejected: a gate run (the brief's), listing a unit whose names differ, and two of the C++20
+constraint forms on a guess without clang's IR of them.
+
+Commits: 28a8bb008 (the C unit), d1765ba36 (the linkage rules and the fs ops units' gaps), e5482a3fb (505's mark, the elab-decl
+probe), 768210a29 and 83065c349 (text_encoding's and the path units' gaps), 0f6375692 (rt_ours_glob), ddbf7b142 (codegen-gen's
+digests), and this entry's commit (the records and the documents). Pushed to mac.
