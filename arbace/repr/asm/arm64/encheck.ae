@@ -58,17 +58,52 @@
 (defn- encoding-only? [^String l] (boolean (re-matches alone-re l)))
 (defn- blank-or-comment? [^String l] (boolean (re-matches #"\s*(?:(?://|;|#|@).*)?" l)))
 
+(defn- block-pair
+  "The n-th line of the block of statements beside the block of lines `start`..`end` (its n-th line `i`): the statements
+  just before it, else just after it (a block of CHECK lines written before the instructions they state), when that block
+  has as many lines; else nil."
+  [lines ^long start ^long end ^long i]
+  (let [k (inc (- end start))
+        before (loop [j (dec start)] (if (and (>= j 0) (blank-or-comment? (lines j))) (recur (dec j)) j))
+        block (loop [j before acc ()] (if (and (>= j 0) (not (blank-or-comment? (lines j)))) (recur (dec j) (cons (lines j) acc)) (vec acc)))
+        after (loop [j (inc end)] (if (and (< j (count lines)) (blank-or-comment? (lines j))) (recur (inc j)) j))
+        block2 (loop [j after acc []] (if (and (< j (count lines)) (not (blank-or-comment? (lines j)))) (recur (inc j) (conj acc (lines j))) acc))]
+    (cond (= k (count block)) (str/trim (block (- i start)))
+          (= k (count block2)) (str/trim (block2 (- i start))))))
+
 (defn paired-input
   "The input line a text-less encoding line states (a block of `CHECK: encoding: [...]` lines after the block of instructions
-  they encode, the n-th line the n-th instruction, as FileCheck matches them in order), or nil when the blocks' sizes differ."
+  they encode, the n-th line the n-th instruction, as FileCheck matches them in order; small-tails, 2026-11-22: else the
+  block after them, a block of CHECK lines written before its instructions), or nil when the blocks' sizes differ."
   [lines ^long i]
   (let [lines (vec lines)
         start (loop [j i] (if (and (pos? j) (encoding-only? (lines (dec j)))) (recur (dec j)) j))
-        end (loop [j i] (if (and (< (inc j) (count lines)) (encoding-only? (lines (inc j)))) (recur (inc j)) j))
-        k (inc (- end start))
-        before (loop [j (dec start)] (if (and (>= j 0) (blank-or-comment? (lines j))) (recur (dec j)) j))
-        block (loop [j before acc ()] (if (and (>= j 0) (not (blank-or-comment? (lines j)))) (recur (dec j) (cons (lines j) acc)) (vec acc)))]
-    (when (= k (count block)) (str/trim (block (- i start))))))
+        end (loop [j i] (if (and (< (inc j) (count lines)) (encoding-only? (lines (inc j)))) (recur (inc j)) j))]
+    (block-pair lines start end i)))
+
+(defn paired-statement
+  "small-tails (2026-11-22): the input line a CHECK line with an encoding pairs with by its place, as paired-input's but its
+  block every adjacent line that states an encoding (with a text or not): for a CHECK text that is not an instruction's (a
+  part of the printed line, a FileCheck regular expression beyond fc-texts'), which FileCheck finds within the printed line."
+  [lines ^long i]
+  (let [lines (vec lines)
+        enc? (fn [^String l] (boolean (re-find #"encoding:\s*\[" l)))
+        start (loop [j i] (if (and (pos? j) (enc? (lines (dec j)))) (recur (dec j)) j))
+        end (loop [j i] (if (and (< (inc j) (count lines)) (enc? (lines (inc j)))) (recur (inc j)) j))]
+    (block-pair lines start end i)))
+
+(defn fc-pattern
+  "A CHECK text as FileCheck matches it, a regular expression found within the printed line: its literal parts quoted, its
+  `{{...}}` parts as they are, white space collapsed (FileCheck's canonical horizontal space); nil with a `[[...]]` variable."
+  [^String t]
+  (when-not (re-find #"\[\[" t)
+    (let [t (str/replace (str/trim t) #"\s+" " ")
+          parts (loop [t t out []]
+                  (if-let [m (re-find #"\{\{(.*?)\}\}" t)]
+                    (let [i (.indexOf t ^String (first m))]
+                      (recur (subs t (+ i (count (first m)))) (conj out (java.util.regex.Pattern/quote (subs t 0 i)) (str "(?:" (second m) ")"))))
+                    (conj out (java.util.regex.Pattern/quote t))))]
+      (re-pattern (apply str parts)))))
 
 (defn- ws ^String [^String s] (str/trim (str/replace s #"\s+" " ")))
 
@@ -114,6 +149,22 @@
                        (if (= (ws out) (ws text)) [:pass ""] [:fail (str "print: " (ws out) " (stated: " (ws text) ")")]))
                      (catch Exception x [:fail (str "print: crash " x)]))})))))
 
+(defn judge-input
+  "small-tails (2026-11-22): a CHECK text that does not read (judge-text's every candidate a `read:` failure) judged by the
+  input line its place pairs with (paired-statement), as llvm-mc's output meets it: the input's encoding against the stated
+  bytes, and the input printed (its immediates by its row's kinds, ARS25) holding the CHECK text's pattern (fc-pattern) as
+  FileCheck finds it within the line."
+  [^String text ^String input d bytes imm-hex?]
+  (let [pat (fc-pattern text)
+        r (judge-text input d bytes imm-hex?)]
+    {:encode (:encode r)
+     :print (if-not pat
+              [:fail (str "read: a CHECK variable in " (ws text))]
+              (try (let [forms (asm/read-text input d)
+                         out (ws (printed forms d imm-hex?))]
+                     (if (re-find pat out) [:pass ""] [:fail (str "print: " out " (stated: " (ws text) ")")]))
+                   (catch Exception x [:fail (str "print: crash " x)])))}))
+
 (defn stated
   "The text and bytes line `i` of `lines` states: [_ TEXT BYTES INPUT?] (TEXT nil when it states none; INPUT? when TEXT is the
   input line a text-less block pairs with)."
@@ -152,6 +203,12 @@
               [[id :encode :fail "read: no CHECK text before the encoding"]]
               (let [hx (imm-hex? l)
                     res (map #(judge-text % d bytes hx) (fc-texts text))
+                    ;; small-tails: a text no candidate of which reads, judged by the input its place pairs with
+                    res (if-let [in (and (not input?)
+                                         (every? #(str/starts-with? (second (:encode %)) "read: ") res)
+                                         (paired-statement lines i))]
+                          [(judge-input text in d bytes hx)]
+                          res)
                     pick (fn [k] (or (first (filter #(= :pass (first (k %))) res)) (first res)))
                     e (:encode (pick :encode))
                     p (:print (pick :print))]
@@ -375,6 +432,41 @@
         (cond (nil? out) "left" (= (ws out) (ws (first (fc-texts rtext)))) "same" :else "differs"))
       "left")))
 
+(defn control-pattern
+  "A negative control of the paired judge (`_control/pattern-...`, small-tails 2026-11-22): SUBJECT's CHECK text (a text that
+  does not read: a part of the line, a regular expression) as FileCheck's pattern (fc-pattern), held to the input REFERENCE's
+  place pairs with (paired-statement), printed as the print level prints it: `differs` (as it must), `same`, or `left`."
+  [items subject reference]
+  (let [paths (into {} (map (fn [[n p fl]] [n [p fl]]) items))
+        at (fn [^String id] (let [k (.lastIndexOf id ":") [p fl] (paths (subs id 0 k))]
+                              (when p [(vec (str/split-lines (asm/latin1 p))) (dec (Long/parseLong (subs id (inc k)))) fl])))
+        [ls i fl] (at subject)
+        [rls ri] (at reference)
+        [_ text] (when ls (stated ls i))
+        in (when rls (paired-statement rls ri))
+        pat (when text (fc-pattern text))]
+    (if (and pat in)
+      (let [d {:arch :arm64 :syntax (if (fl "apple") :apple :gnu)}
+            out (try (ws (printed (asm/read-text in d) d false)) (catch Exception _ nil))]
+        (cond (nil? out) "left" (re-find pat out) "same" :else "differs"))
+      "left")))
+
+(defn control-paired
+  "A negative control of the pairing by place (`_control/paired-...`, small-tails 2026-11-22): the input SUBJECT's place pairs
+  with (paired-input for a text-less line, else paired-statement) encoded against REFERENCE's stated bytes: `differs` (as it
+  must), `same`, or `left`."
+  [items subject reference]
+  (let [paths (into {} (map (fn [[n p fl]] [n [p fl]]) items))
+        at (fn [^String id] (let [k (.lastIndexOf id ":") [p fl] (paths (subs id 0 k))]
+                              (when p [(vec (str/split-lines (asm/latin1 p))) (dec (Long/parseLong (subs id (inc k)))) fl])))
+        [ls i fl] (at subject)
+        [rls ri] (at reference)
+        in (when ls (or (paired-input ls i) (paired-statement ls i)))
+        [_ _ bytes] (when rls (stated rls ri))]
+    (if (and in bytes)
+      (if (= :pass (first (:encode (judge-text in {:arch :arm64 :syntax (if (fl "apple") :apple :gnu)} bytes)))) "same" "differs")
+      "left")))
+
 (defn control-message
   "A negative control of the reject level (`_control/msg-...`): SUBJECT's error line's instruction refused, under its run's
   features, and its message judged against REFERENCE's error fragment: `differs` (as it must), `same`, or `left`."
@@ -416,6 +508,8 @@
     (doseq [l (str/split-lines (slurp controls)) :when (and (seq l) (not (str/starts-with? l "#")))
             :let [[cid subj ref] (str/split l #"\s+")
                   v (cond (str/starts-with? cid "_control/msg-") (control-message items subj ref)
+                    (str/starts-with? cid "_control/pattern-") (control-pattern items subj ref)
+                    (str/starts-with? cid "_control/paired-") (control-paired items subj ref)
                     (str/starts-with? cid "_control/print-") (control-print items subj ref)
                     :else (control items subj ref))]]
       (if (= v "differs")
