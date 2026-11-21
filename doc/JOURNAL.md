@@ -15688,3 +15688,21 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-22: OCaml's read cell judged whole: the build's own reads (small-tails-ochs-1122)
+
+The burst's small tails (the user's goal: 100 completeness): OCaml's read cell had 19 by-design rows, files OCaml's parser rejects that
+no test reads (`:oracle-rejects` 17: topkg's pkg/pkg.ml, cmdliner's build.ml, astring's toplevel init file, yojson's cppo inputs;
+`:templates` 2: the stdlib's sed/perl templates). Re-examined as the rules ask: each is read by its package's own build, so each is now
+judged as that build reads it, OC213 (a)'s own verdict carried from the testsuite to the opam set and the stdlib (doc/ocaml/OCAML-SURVEY.md,
+"As built: the build's own reads"). New namespace `arbace.repr.ocaml.prep`: the toplevel's read of an ocaml script or
+Toploop.use_file's input (skip_hash_bang, Parse.use_file), mucppo ported from yojson 3.0.0's vendored `lib/mucppo/mucppo.ml` (the opam
+tarball `yojson-3.0.0.tbz` pinned in test/ocaml/corpora.edn; mucppo by Marek Kubica, https://github.com/Leonidas-from-XIV/mucppo, CC0
+1.0; held to the file's SHA-256 8a56c3b1...) with dune's rules read from the package's `lib/dune`, and the perl chain of OCaml 5.5.0's
+`tools/sync_stdlib_docs` (the release tarball, LGPL 2.1 with the linking exception) for `stdlib/float.mli` and `stdlib/moreLabels.mli`.
+Alternatives: keeping the classes by design (the read level reads what OCaml's parser reads), or classing them :na (not OCaml): both
+leave files a build reads unjudged; a cppo or perl run on the host is a host tool. Checked once by hand against the host (mucppo built
+by ocamlc 5.5.0, ocamllex, perl): byte for byte. Controls: 5 of 5 fail. `bin/repr-ocaml roundtrip --record-results opam stdlib`
+(9.5 minutes, every corpus passing): 19 rows `reject` -> `pass`; `own-read --check` 0 rows changed over the testsuite, the stdlib and the
+ten opam corpora; the read classes file empty. bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check: 0
+problems. OCaml read 3,143 / 19 / 0 -> 3,162 / 0 / 0; completeness 0.9071 -> 0.9086. Light: no gate.
