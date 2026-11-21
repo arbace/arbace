@@ -15688,3 +15688,34 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-21: WebAssembly's proposals judged by their own rules: the threads' and custom descriptors' by-design rows pass (small-tails-wasm-1122)
+
+The burst's stream S1 (small tails), WebAssembly's part: the crop's last by-design rows, read 13 (`threads-before-wasm-3.0` 11,
+`custom-descriptors-br-on-cast-relaxed` 2), eval and AOT 2 each (`custom-descriptors-br-on-cast-relaxed`). Cause: the scripts of
+`proposals/threads/` were written against Wasm 1.0's core (one memory, one table, nat32 limits, "memory size must be at most 65536
+pages (4GiB)") and those of `proposals/custom-descriptors/` against the proposal's relaxed `br_on_cast` rule, while repr/wasm and wai
+judged every script by Wasm 3.0's. D326-2 (a) and D327-1 (a) chose between global rules ((b) of D327-1, the proposal's rule
+everywhere, would have broken Wasm 3.0's own br_on_cast.wast); a third way, each script by the rules of its own directory as each
+proposal's repository runs its scripts, was not among the options, and it contradicts neither decision: the root scripts keep Wasm
+3.0's rules, their br_on_cast.wast still rejects the relaxed casts.
+
+Built (doc/wasm/SPEC.md §9.1, doc/wasm/WASM-SURVEY.md "As built: small-tails"): profiles by the script's directory,
+`arbace.wasm.valid/*profile*` and `profile-of` (`:threads`, `:custom-descriptors`, else nil), `arbace.repr.wasm.text/*limits32*`,
+bound by `arbace.repr.wasm.wast/with-profile` (the read level and its controls, the eval planner arbace.wasm.check); wai's `Profile`,
+`ProfileOf` and `checkCounts` (`go/arbace/wai/valid.ae`, hand-edited forms in the converter's style: the printed module drops the
+forms' comment lines, so a re-conversion would have rewritten every file), set by the light driver's `runScript`, `control` and `w2g`.
+Controls added: the read level's three (`as-valid` on a threads script's second memory and table, `as-invalid` on the relaxed cast:
+each must differ, the profile deciding), the eval level's valid flip and two checks, the AOT level's check.
+
+Checks (each under 2 GiB, the forks' shared lock for the AOT build): `bin/repr-wasm wast --only` the 18 scripts of the two
+directories with test/wasm/essential-wast.txt (testsuite 3,109 of 3,109, print 1,272 of 1,272, msg 1,835 of 1,837: the two of
+`custom-page-sizes-flag-message`, beside; 13 controls fail as they must); `bin/wai check --only` the 18 with essential-eval.txt (testsuite
+19,685, msg 2,787, valid 2,248: all pass; controls and checks 24 of 24); `bin/wai check --aot --only` the 18 with essential-aot.txt
+(2,709 of 2,709 functions translated; testsuite 17,318, msg 2,038: all pass; 19 of 19). `--only` does not `--record`: each record's rows
+of the runs' scripts replaced by the runs' rows (wast-results 16,535 -> 16,548 rows: 13 rows now pass, 13 new print and msg rows, all
+passing, the 6 older-message rows pass; eval-results and aot-results 2 rows each). The classes are removed from divergences-wast,
+-eval and -aot. Cells: read 8,281/13/0 -> 8,294/0/0, eval 63,057/2/0 -> 63,059/0/0, AOT 63,060/2/0 -> 63,062/0/0, print 2,935 ->
+2,937; completeness 0.9996 -> 1.0000 (meant 1.0000). Left: `custom-page-sizes-flag-message` (2 msg rows, beside, D326-1 (a)) and
+eval's `go-speed` (3 `:budget`, out of crops-score's cases). `bin/reap --record`, `bin/crops-score --record`, then `bin/reap`,
+`bin/crops-score --judge --strict` and `bin/records-check`: 0 problems. No gate.

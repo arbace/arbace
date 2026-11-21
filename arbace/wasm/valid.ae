@@ -14,6 +14,22 @@
 
 (set! *warn-on-reflection* true)
 
+(def ^:dynamic *profile*
+  "The rules a testsuite script was written against (doc/wasm/SPEC.md §9.1, the profiles): nil, Wasm 3.0's with the proposals
+  built (the root scripts, legacy/, custom/ and the other proposals' directories); :threads, proposals/threads/'s, whose scripts
+  were written against Wasm 1.0's core (one memory, one table, the limits nat32, the older size message); :custom-descriptors,
+  proposals/custom-descriptors/'s, whose br_on_cast and br_on_cast_fail take the proposal's relaxed rule (the target in the
+  source's hierarchy). Bound by arbace.repr.wasm.wast/with-profile from the script's path (profile-of)."
+  nil)
+
+(defn profile-of
+  "The profile of a testsuite script's path or id (a plan's or a module directory's name too, its slashes as \"__\"): its
+  directory under the testsuite, proposals/threads/ :threads, proposals/custom-descriptors/ :custom-descriptors, else nil."
+  [path]
+  (let [p (.replace (str path) "__" "/")]
+    (cond (.contains p "proposals/threads/") :threads
+          (.contains p "proposals/custom-descriptors/") :custom-descriptors)))
+
 (defn- invalid [^String msg] (throw (ex-info msg {:wasm/invalid msg})))
 (defn- require! [b msg] (when-not b (invalid (if (fn? msg) (msg) msg))))
 
@@ -219,6 +235,8 @@
     (= 0 (:page m)) (check-limits m 0xffffffff "memory size must be at most 2^32-1 pages (4 GiB) for i32 with a page size of 1")
     (:i64 m)
     (check-limits m 0x1000000000000 "memory size must be at most 2^48 pages (256 TiB) for i64")
+    ;; proposals/threads/'s scripts (Wasm 1.0's message)
+    (= :threads *profile*) (check-limits m 0x10000 "memory size must be at most 65536 pages (4GiB)")
     :else (check-limits m 0x10000 "memory size must be at most 2^16 pages (4 GiB) for i32")))
 
 (defn- check-tabletype [c m]
@@ -463,8 +481,9 @@
             desc? ('#{br_on_cast_desc_eq br_on_cast_desc_eq_fail} nm)
             nm (case nm br_on_cast_desc_eq 'br_on_cast br_on_cast_desc_eq_fail 'br_on_cast_fail nm)]
         (check-val c rt1) (check-val c rt2)
-        ;; the descriptor casts' rule (custom descriptors, queue 327): the target in the source's hierarchy
-        (require! (if desc?
+        ;; the descriptor casts' rule (custom descriptors, queue 327): the target in the source's hierarchy; br_on_cast's and
+        ;; br_on_cast_fail's too under the profile :custom-descriptors (the proposal's relaxation, its scripts' rule)
+        (require! (if (or desc? (= :custom-descriptors *profile*))
                     (match-heap c (nth rt2 2) (top-of-heap c (nth rt1 2)))
                     (match-ref c rt2 rt1))
                   #(str "type mismatch on cast: type " (rt-str rt2) " does not match " (rt-str rt1)))
@@ -767,6 +786,10 @@
                       (check-const c (or (:init d) [(list 'ref.null (nth (:rt tb) 2))]) (:rt tb))
                       (update c :tables conj tb)))
                   c (by 'wasm/table))
+        ;; proposals/threads/'s scripts: Wasm 1.0's one table and one memory (valid.ml's check_module at 1.0)
+        _ (when (= :threads *profile*)
+            (require! (<= (count (:tables c)) 1) "multiple tables")
+            (require! (<= (count (:mems c)) 1) "multiple memories"))
         c (reduce (fn [c [_ _ d e]]
                     (let [t (vt (:type d))]
                       (check-val c t)
