@@ -13849,3 +13849,6 @@ constraint forms on a guess without clang's IR of them.
 Commits: 28a8bb008 (the C unit), d1765ba36 (the linkage rules and the fs ops units' gaps), e5482a3fb (505's mark, the elab-decl
 probe), 768210a29 and 83065c349 (text_encoding's and the path units' gaps), 0f6375692 (rt_ours_glob), ddbf7b142 (codegen-gen's
 digests), and this entry's commit (the records and the documents). Pushed to mac.
+cpp-check-essential's command on this runtime (`bin/cppi check --only test/cpp/essential-check.txt`, ARBACE_NO_AOT=1): samples 4 of 4
+and runtime 4 of 4 pass (runtime/uncaught.cpp runs cp-demangle.c's own C on ci, the terminate handler's demangling), the run controls
+differing as they must; 36 min, 2.6 GB.
