@@ -5704,5 +5704,16 @@ it), judged against rustc's recorded run:
   body with its constant `any::TypeId::of::<T>::{constant#0}` left unevaluated (pack-compare: against the record's `(indirect
   allocN 0)`), evaluated at codegen to bytes that are not rustc's type id hash for `&str` or `String` (u64's, the record's, is),
   so the payload's type never matches. Not one of C1's three faults (rust-rec-1120 saw both without the glue, at `7dd5032c0`);
-  the next items: TypeId::of's constant evaluated as rustc's `type_id` (the hash of the erased type) and the sort's recursion. 503-rust-causes4's open findings, taken only if they block C1: 503-1 (the `[const] BytewiseEq<B>` where clause
+  the next items: TypeId::of's constant evaluated as rustc's `type_id` (the hash of the erased type) and the sort's recursion.
+
+### Next (2026-11-21, consolidating)
+
+1. **TypeId::of's constant as rustc's `type_id`** (rustc_middle's `type_id_hash`: the stable hash of the erased type, with the
+   ADTs' DefPathHashes over the computed StableCrateIds): unwind's and panics' hooks and downcasts on ci.
+2. **core's stable sort recursing without end** in std.rs's unit (drift sort and quicksort over `String` and `char`): find the
+   native body that differs (a pivot, a length, a comparison) against the record's instance.
+3. **C6-4's next export**: core's 8 wanted `#[inline(always)]` callees (`cast_const`, `ManuallyDrop::new`, `MaybeUninit::write`,
+   `intrinsics::unlikely`...), then alloc's and std's items with the inliner.
+4. **C4: core's interface differences** (25,879 of 27,498 on the native names: core_simd's and core_arch's modules unexpanded, the
+   functions' `:const`, `:predicates`), then the switch run on the interface and names with no helper input. 503-rust-causes4's open findings, taken only if they block C1: 503-1 (the `[const] BytewiseEq<B>` where clause
 exported with no arguments, the collector picking `{impl#4}` for u8), 503-2 (a `btree::mem::replace` instance not collected).
