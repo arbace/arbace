@@ -15285,3 +15285,19 @@ record's 14 rows with stale reason texts; the cpp-ppref, pyparser and pytokenize
 D496-2 (a) (the five limits-* files and tcc-pp/13.S out of C's judge) not yet applied; the print cache to clear once (485-2 (a)) and
 the saved results 485's `saved-errors` lists to rerun (485-1 (a)); the Java rows of 466/471, 477, 486, 490 and 469 on amd64 (the next
 gate's java steps and a re-judge); java-split-1120's chunked jrt-convert as the step's (it is declared 56 GiB until then).
+
+## 2026-11-21: jrt's ReentrantReadWriteLock implements ReadWriteLock (next's build fixed)
+
+The night's merge (n-merge-1120b, next 09114f806) regenerated jdk/ with java-split-1120's chunked driver. Among its 54 new forms
+are sun.nio.ch's AsynchronousFileChannelImpl, AsynchronousServerSocketChannelImpl, AsynchronousSocketChannelImpl and Port, which
+keep a `new ReentrantReadWriteLock()` in a field typed `ReadWriteLock`. jrt's ReentrantReadWriteLock is hand-written Go
+(go/arbace/jrt/locks.ae), a leaf that never implemented the interface j2g translates from
+jdk/forms/java/util/concurrent/locks/ReadWriteLock.ae: no earlier class assigned one to the interface. So next's gate build failed at
+go build (amd64): "*ReentrantReadWriteLock does not implement ReadWriteLock (missing method Is_ReadWriteLock)", five sites
+(the Python records' build, .tmp/worktrees/next/.tmp/gate-build.log). No gate ran on the merge, by the user's decision, so the merge's
+light checks (plan, reap, scores, records) could not see it.
+
+Fix: the interface's three methods on *ReentrantReadWriteLock, ReadLock__Lock and WriteLock__Lock returning its read and write
+locks (jrt's Lock) and the marker Is_ReadWriteLock. Its ClassInfo's :Interfaces still list only Serializable (getInterfaces() omits
+ReadWriteLock); the interface's class is j2g's, not jrt's, so naming it there would tie jrt's own tests to the translated closure.
+Proof: the gate build at this commit's key (below, in the next entry or the Python records' entry).
