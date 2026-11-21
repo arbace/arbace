@@ -779,12 +779,36 @@
   (reduce (fn [acc e] (-> acc (update :impls #(merge (:impls e) %)) (update :traits #(merge (:traits e) %)) (update :adts #(merge (:adts e) %))))
           {:impls {} :traits {} :adts {}} (vals (native-core-map))))
 
+(def ^:private extra-iface-cache (atom {}))
+
+(defn- extra-iface-files
+  "C1 (the drop glue's third bug): RF_EXTRA_IFACE, `:`-separated files of the crates' native facts (an interface pass's output in
+  std-iface's forms, or a pass's native map: core's whole pass, std's dependencies' hashbrown and libc), whose functions and ADTs
+  the run's interface takes where it has none: a crate-private callee's signature (`core::char::convert::from_u32_unchecked`, which
+  a native body calls: without it the call is named by the upstream symbol no unit defines), a private ADT's fields (needs_drop)"
+  []
+  (if-let [v (System/getenv "RF_EXTRA_IFACE")]
+    (or (get @extra-iface-cache v)
+        (let [m (reduce (fn [acc ^String f]
+                          (if-not (.exists (File. f))
+                            acc
+                            (let [x (if (str/starts-with? (str/trim (subs (slurp f) 0 (min 64 (.length (File. f))))) "{")
+                                      (read-string (slurp f))
+                                      (c/load-std-iface f))]
+                              (-> acc (update :fns #(merge (:fns x) %)) (update :adts #(merge (:adts x) %))))))
+                        {:fns {} :adts {}} (str/split v #":"))]
+          (swap! extra-iface-cache assoc v m)
+          m))
+    {:fns {} :adts {}}))
+
 (defn- with-extra-iface
   "SI (the run's interface) and STD (its names) with the exported bodies' crate-private facts: functions (443), impls and
   traits (462), the traits' kinds and their functions' (`Trait`, `AssocFn`: print-def-path's qualified path of a trait's
-  method), each only where the interface has none: [si std]"
+  method), each only where the interface has none: [si std]; C1: then RF_EXTRA_IFACE's functions and ADTs where neither has one"
   [si std]
-  (let [fs (native-extra-fns) {:keys [impls traits adts]} (native-extra-iface)
+  (let [xf (extra-iface-files)
+        fs (merge (into {} (for [[p f] (:fns xf)] [p (dissoc f :native)])) (native-extra-fns))
+        {:keys [impls traits adts]} (update (native-extra-iface) :adts #(merge (into {} (for [[p a] (:adts xf)] [p (dissoc a :native)])) %))
         kinds (merge (into {} (for [p (keys traits)] [p "Trait"]))
                      (into {} (for [p (keys fs) :let [pp (c/path-parent p)]
                                     :when (and pp (or (contains? traits pp) (= "Trait" (get (:kinds std) pp))))]
