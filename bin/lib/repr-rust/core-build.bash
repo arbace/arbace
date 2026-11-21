@@ -145,9 +145,7 @@ core_essential() {
 #   bin/rust-front core-export --rsi [NAME...]
 #                                   RUST-90 S4 (C2, doc/rust/FRONTEND-SURVEY.md, "As built: S4's first slice"): the spec from rsi's
 #                                   programs (their stems; default the samples' five eval cases) by core_rsi_spec, the bodies into
-#                                   .tmp/rust-front/core/native-core-rsi.edn, which `rsi-build --native-core` takes; since 479-2 (a)
-#                                   built without debug assertions, as rsi's std is, an entry not equal to rust-core-built's
-#                                   (built with them) judged at the instance at the run
+#                                   .tmp/rust-front/core/native-core-rsi.edn, which `rsi-build --native-core` takes
 #   bin/rust-front core-export --rsi-outside FILE-REGEX [NAME...]
 #                                   queue 448: the programs' core defs outside rust-core-built's modules (no oracle) in the module
 #                                   files FILE-REGEX matches (`^fmt/|^iter/traits/`), by their keys (CORE_EXPORT_KEYS), each
@@ -174,11 +172,8 @@ core_export() {
     [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out ($(grep -c ':judge :instance' "$out") judged at the instance)"
     return 0
   fi
-  local dbg=1
   if [ "${1:-}" = --rsi ]; then
-    # 479-2 (a): rsi's bodies built as rsi's std build builds core, without debug assertions (core_check.ae's -main); a body that
-    # then differs from rust-core-built's (built with them) is judged at the instance at the run, as --rsi-outside's are
-    shift; spec=$work/core/native-core-rsi.txt out=$work/core/native-core-rsi.edn dbg=0
+    shift; spec=$work/core/native-core-rsi.txt out=$work/core/native-core-rsi.edn
     core_rsi_spec "$@" > "$spec.tmp" || { rm -f "$spec.tmp"; return 1; }
     mv "$spec.tmp" "$spec"
   fi
@@ -186,8 +181,8 @@ core_export() {
   files=$(grep -v '^#' "$spec" | tail -n +2 | sed "s|^|$lib/core/src/|")
   rm -f "$out"
   # shellcheck disable=SC2086
-  CORE_DEBUG_ASSERTIONS=$dbg CORE_ONLY="$re" CORE_EXPORT_NAMES="$re" CORE_EXPORT=$out core_check --records $files
-  [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out ($(grep -c ':judge :instance' "$out") judged at the instance)"
+  CORE_ONLY="$re" CORE_EXPORT_NAMES="$re" CORE_EXPORT=$out core_check --records $files
+  [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out"
 }
 
 # RUST-90 S4 (C2): the core bodies rsi's programs NAME... (default the eval cell's five samples) instantiate, as a core-export spec:
@@ -415,28 +410,19 @@ lib_rsi_keys() {
   done | sed 's/::/-/g' | LC_ALL=C sort -u
 }
 
-# C6 (doc/rust/FRONTEND-SURVEY.md, "As built: C6's first slice"): `lib-export --keys KEYS CRATE OUT` exports the bodies of KEYS (a
-# key a line, body-key's: bin/rust-front lib-unit keys) into OUT in place of the records' instances, the same build
 lib_export() {
-  local c m fd keys out kf="" filt='^Reflection warning|recur arg|^Auto-boxing'
-  if [ "${1:-}" = --keys ]; then kf=$2; c=${3:-}; out=${4:-}; [ -s "$kf" ] && [ -n "$out" ] || { echo "usage: bin/rust-front lib-export --keys KEYS alloc|std OUT" >&2; return 2; }
-    kf=$(cd "$(dirname "$kf")" && pwd)/$(basename "$kf"); mkdir -p "$(dirname "$out")"; out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out"); shift 4
-  else
-  [ "${1:-}" = --rsi ] || { echo "usage: bin/rust-front lib-export --rsi alloc|std [NAME...] | --keys KEYS alloc|std OUT" >&2; return 2; }
+  local c m fd keys out filt='^Reflection warning|recur arg|^Auto-boxing'
+  [ "${1:-}" = --rsi ] || { echo "usage: bin/rust-front lib-export --rsi alloc|std [NAME...]" >&2; return 2; }
   c=${2:-}; shift 2 || true
-  fi
   case $c in
     alloc) m=$(alloc_modules) || return 1 ;;
     std) m=$(std_modules) || return 1 ;;
     *) echo "lib-export: alloc or std, not '$c'" >&2; return 2 ;;
   esac
   fd=$(records_front) || return 1
-  if [ -n "$kf" ]; then keys=$kf
-  else
   keys=$work/$c/rsi-keys.txt out=$work/$c/native-$c-rsi.edn
   lib_rsi_keys "$c" "$@" > "$keys.tmp" || { rm -f "$keys.tmp"; return 1; }
   mv "$keys.tmp" "$keys"
-  fi
   rm -f "$out"
   # queue 443: core's traits' associated constants the bodies name, from core's own sources (std's interface writes none)
   LIB_CORE_DIR=$(core_lib) || return 1; core_modules > /dev/null || return 1

@@ -1323,33 +1323,6 @@ covers what.
   `compiler/rustc_middle/src/mir/mono.rs` and `compiler/rustc_data_structures/src/base_n.rs`, held to rustc's recorded shims (the
   IR packs of `test/rust/ir/`); the check (`check`, `emit-list`) and `bin/rsi shim-check` are Arbace's own, under the Eclipse Public
   License 1.0.
-- `arbace/rust/front/lib_unit.ae` (C6's first slice, 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C6's first slice"): its v0
-  decoder written after rustc 1.99.1, the same revision and under the same terms (MIT): the grammar `compiler/rustc_symbol_mangling/
-  src/v0.rs` prints (paths, impl paths, types, constants, back-references, identifiers, disambiguators). The census, the keys and the
-  judge, build-run's `lib-unit-run` and `bin/rust-front lib-unit` are Arbace's own, under the Eclipse Public License 1.0.
-- `arbace/rust/front/std_names.ae` (C4-1 (a), 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C4-1 (a)"): its scan and
-  import resolution written after rustc 1.99.1, the same revision and under the same terms (MIT): `compiler/rustc_resolve/src/
-  {build_reduced_graph,imports}.rs` (the definitions' namespaces and visibilities, a constructor's narrowed visibility, macro_rules!
-  bindings, single and glob imports, an import binding's visibility) and `tools/rsdump/front.rs`' traversal (Arbace's own); the
-  builtin macros' kinds after `compiler/rustc_builtin_macros/src/lib.rs`. The assembly, the compare and `bin/rust-front
-  std-names-native` are Arbace's own, under the Eclipse Public License 1.0.
-- `arbace/rust/back/inline.ae` (C6-4, 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "C6-4's next slice: LLVM's AlwaysInliner over our
-  forms"): Arbace forms porting LLVM 23's always-inliner, the llvm-project of the pinned rustc-1.99.1-src.tar.xz
-  (`src/llvm-project`): `llvm/lib/Transforms/IPO/AlwaysInliner.cpp` (AlwaysInlineImpl), `llvm/lib/Transforms/Utils/
-  InlineFunction.cpp` (InlineFunctionImpl) and `llvm/lib/Transforms/Utils/CloneFunction.cpp` (CloneAndPruneIntoFromInst,
-  PruningFunctionCloner::CloneBlock), with InstSimplify's phi rule: copyright the LLVM Project contributors, under the Apache
-  License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below). Its pure cases (`test/rust/front/inline_test.ae`) are
-  Arbace's own, under the Eclipse Public License 1.0.
-- `arbace/rust/front/cargo_meta.ae` (C6-2 (b), 2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C6-2"): Arbace forms porting
-  Cargo 0.100.0 (cargo 1.99.1, https://github.com/rust-lang/cargo at 5f94df478, the pinned rustc-1.99.1-src.tar.xz's
-  `src/tools/cargo`): `src/compiler/build_runner/compilation_files.rs` (compute_metadata, hash_rustc_version),
-  `src/workspace/{package_id,source_id,profiles,manifest}.rs`, `src/compiler/{build_config,lto,compile_kind,crate_type}.rs`,
-  `crates/cargo-util-schemas` (SourceKind, TomlDebugInfo, TomlTrimPaths); semver 1.0.28's `Version` hash and rustc-stable-hash
-  0.1.2's `StableSipHasher128` writes (the same tarball's `vendor/`): copyright the Cargo, semver and Rust project contributors,
-  dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust
-  (rustc 1.99.1): MIT License or Apache License 2.0" below). Its JSON reader, `test/rust/front/std-build-units.edn` (the library
-  build's units as data), `bin/rsi std-build --units` and `bin/rust-front std-crates --native|--units` are Arbace's own, under the
-  Eclipse Public License 1.0.
 - The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
   doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
   `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the

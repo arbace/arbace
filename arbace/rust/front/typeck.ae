@@ -2121,7 +2121,7 @@
                      ;; place), the operand autoref'd
                      "*" (cond (#{:ref :ptr} (first s)) (if (= :ref (first s)) (nth s 3) (nth s 2))
                                ;; a Box's deref is builtin (no Deref call, no autoref)
-                               (and (= :adt (first s)) (c/box-adt? (second s))) (first (nth s 2))
+                               (and (= :adt (first s)) (= "alloc::boxed::Box" (second s))) (first (nth s 2))
                                (= :adt (first s)) (if-let [tgt (deref-target s)]
                                                     (do (adjust! (:expr e) [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) s]]]) tgt)
                                                     [:unknown])
@@ -2795,50 +2795,15 @@
       [args (erase (c/subst self args)) (erase (c/subst (vec (second tr)) args))])
     (let [[_ args self tr] (std-impl-instance ip)] [args self (second tr)])))
 
-(defn- header-specializes?
-  "Impl A's header at least as specific as impl B's: B's header with fresh variables unifies with A's at A's own parameters
-  (each a rigid type)"
+(defn- specializes?
+  "Impl A at least as specific as impl B (specialize/mod.rs' specializes, its header part): B's header with fresh variables
+  unifies with A's at A's own parameters (each a rigid type); the where clauses are not compared (both impls apply to the
+  goal, so they overlap: the program's crates passed coherence's overlap check by specialization)"
   [a b]
   (let [[sa ta] (impl-identity-header a) [_ sb tb] (impl-fresh-header b) s (snapshot)
         ok (and (unify sb sa) (unify-all (vec tb) (vec ta)))]
     (rollback! s)
     (boolean ok)))
-
-(defn- sty-param-subst
-  "An interface's clause form with its (param I NAME) the I-th of ARGS (forms), a name dropped from an unreplaced one"
-  [x args]
-  (cond (and (seq? x) (= 'param (first x)) (number? (second x)))
-        (if (< (long (second x)) (count args)) (nth args (second x)) (list 'param (second x)))
-        (seq? x) (apply list (map #(sty-param-subst % args) x))
-        (vector? x) (mapv #(sty-param-subst % args) x)
-        :else x))
-
-(defn- clauses-entail?
-  "queue 503: std impls A and B (equal headers, at the same parameters): every trait clause of B is one of A's, A's elaborated
-  by their traits' supertrait clauses (BytewiseEq<B>'s PartialEq<B>), Sized and MetaSized aside"
-  [a b]
-  (let [trait-cl (fn [ps] (for [pr ps :when (and (seq? pr) (= 'trait (first pr))
-                                                 (not (#{"core::marker::Sized" "core::marker::MetaSized"} (second pr))))]
-                            (sty-param-subst pr [])))
-        elab (fn elab [cl depth]
-               (cons cl (when (pos? depth)
-                          (let [[_ tp targs] cl]
-                            (mapcat #(elab % (dec depth))
-                                    (trait-cl (map #(sty-param-subst % (vec targs)) (:predicates (get (:traits c/*si*) tp)))))))))
-        ea (set (mapcat #(elab % 3) (trait-cl (:predicates (get (:impls c/*si*) a)))))]
-    (every? ea (trait-cl (:predicates (get (:impls c/*si*) b))))))
-
-(defn- specializes?
-  "Impl A at least as specific as impl B (specialize/mod.rs' specializes): its header at least as specific (header-specializes?);
-  when the headers are the same both ways (queue 503: slice::cmp's SlicePartialEq, `impl<A, B> .. for A where A: PartialEq<B>`
-  and its specialization `where A: BytewiseEq<B>`, std's impls) not when B's where clauses entail A's and A's do not entail
-  B's; else (where clauses not compared) both impls apply to the goal, so they overlap: the program's crates passed coherence's
-  overlap check by specialization"
-  [a b]
-  (and (header-specializes? a b)
-       (or (not (and (string? a) (string? b) (header-specializes? b a)))
-           (clauses-entail? a b)
-           (not (clauses-entail? b a)))))
 
 (defn- concrete-impls
   "The impls of TRAIT that apply to the concrete goal TARGS (Self first): [[impl args] ...], each impl's arguments resolved,

@@ -56,10 +56,6 @@
                            ;; ABI passes and returns it indirectly (rustc_target's adjust_for_rust_abi: make_indirect), as a
                            ;; memory aggregate larger than a pointer
                            (= ak "vector") :memory
-                           ;; queue 479: the record's layout of one (rustc's helper prints BackendRepr::SimdVector `(other)`,
-                           ;; mono's own `(vector ..)`): in memory as well, its element and lanes unknown (a SIMD intrinsic on
-                           ;; it is refused, vty's "of a non-vector"); transmute_neo at `MaybeUninit<Simd<f32, 4>>`
-                           (= ak "other") :memory
                            :else (unsupported (str "abi " ak)))}
         (= ak "scalar") (assoc :scalar (scalar-of (second abi)))
         (= ak "pair") (assoc :pair [(scalar-of (second abi)) (scalar-of (nth abi 2)) (nth abi 3)])
@@ -1653,37 +1649,9 @@
                                    (emit! bb (list '= i1 (list 'insertvalue [ty i0] ['i32 c] 1)))
                                    (emit! bb (list 'resume ty i1)))
                         "terminate" (emit! bb (list 'br (terminate-block! (second t))))
-                        "drop" (let [[_ p target unwind _ _ glue] t
-                                     ;; C1 (the drop glue's first bug): a trait object's drop is virtual (rustc_codegen_ssa's
-                                     ;; codegen_drop_terminator, ty::Dynamic: the vtable's drop_in_place slot, VirtualIndex 0's
-                                     ;; get_optional_fn, called when not null), never drop_glue::<dyn Trait> itself (whose shim
-                                     ;; drops `*_1` so: a call of itself)
-                                     l (place-local p) projs (place-projs p)
-                                     fat (when (and (= 1 (count projs)) (= "deref" (proj-kind (first projs)))
-                                                    (#{"ref" "ptr"} (ty-kind (:ty (nth locs l))))
-                                                    (= "dyn" (ty-kind (pointee-type (:ty (nth locs l))))))
-                                           (let [v (if (contains? mem l)
-                                                     (load-place! bb {:ptr (get-in @st [:allocas l]) :align (:align (nth lay l)) :ly (nth lay l)})
-                                                     (get-in @st [:vals l]))]
-                                             (when (:pair v) [(:v (first (:pair v))) (:v (second (:pair v)))])))]
-                                 (cond
-                                   fat
-                                   (let [[dv vv] fat g (fresh!) f (fresh!) c (fresh!)
-                                         nn (new-block! "is_not_null")
-                                         unw (unwind-block! b unwind)
-                                         tl (if unw (llbb-wc! b target) (llbb! target))]
-                                     (emit! bb (list '= g (list 'getelementptr :inbounds 'i8 ['ptr vv] ['i64 0])))
-                                     (emit! bb (list '= f (list 'load 'ptr ['ptr g] :align 8)))
-                                     (emit! bb (list '= c (list 'icmp :ne 'ptr f 'null)))
-                                     (emit! bb (list 'br 'i1 c (symbol (str "%" nn)) tl))
-                                     (if unw
-                                       (emit! nn (list 'invoke 'void f [['ptr dv]] :to tl :unwind unw))
-                                       (do (emit! nn (list 'call 'void f [['ptr dv]]))
-                                           (emit! nn (list 'br tl))))
-                                     nil)
-                                   (nil? glue)
+                        "drop" (let [[_ p target unwind _ _ glue] t]
+                                 (if (nil? glue)
                                    (br-or-merge bb t target)
-                                   :else
                                    (let [pl (place-of! bb p)
                                          callee (symbol "g" (:symbol (second glue)))
                                          argv [(vec (concat ['ptr] (when (> (:align (:ly pl)) 1) [(list :align (:align (:ly pl)))]) [(:ptr pl)]))]
