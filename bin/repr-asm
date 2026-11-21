@@ -160,6 +160,10 @@
 #                                                    its status, or 128 + the signal; an instruction no family claims raises
 #                                                    SIGILL, named on stderr (:unimplemented); X86I_INJECT=FAMILY:FLAG flips the
 #                                                    flag after each instruction of the family (the negative controls' fault)
+#   bin/repr-asm x86i cpu EXE [ARG...]               x86-print: EXE run by this CPU under ptrace, each cpuid of its code sections
+#                                                    (decode-text's sweep) answered with x86i's model (x86i-check's CPU run of a
+#                                                    `# cpu: cpuid` program: this CPU cannot fault cpuid); X86I_INJECT=cpuid:model
+#                                                    alters x86i's own answer (the controls')
 #   bin/repr-asm x86i decode-text EXE                its code sections as x86i's decoder decodes them, an instruction a line
 #   bin/repr-asm x86i decode-hex FILE                each line's bytes (ID<tab>HEX) decoded alone (x86i-decode-check's)
 #   bin/repr-asm x86i claimed                        the decode tables' instructions a family claims (the coverage's)
@@ -611,6 +615,17 @@ make_list() {
                  if (r != "" && r !~ /llvm-mc[^|]*%s/ && r !~ /split-file/) f = f " not-input"; print f }' "$p")
     fi
     [ "$syn" = plan9 ] && flags="$flags plan9"
+    # x86-print: a file of Inputs/ that a test of the directory above gives to `not llvm-mc` (its RUN lines' continuations
+    # joined) is an error test's input: read as an error test is, at least one statement refused (the last grep reads its input
+    # whole: `grep -q`'s early exit would break the pipe under pipefail)
+    case $f in
+      Inputs/*|*/Inputs/*)
+        if awk '/RUN:/ { l = $0; sub(/.*RUN:[ \t]*/, "", l); cur = cont ? cur " " l : l
+                         if (cur ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", cur); cont = 1 } else { print cur; cont = 0 } }' \
+             "${p%/Inputs/*}"/*.s 2>"$asm_tmp/asm-inputs.err" | grep -e 'not llvm-mc' | grep -F "Inputs/${f##*/}" > "$asm_tmp/asm-inputs.hit"; then
+          flags="$flags error-input"
+        fi ;;
+    esac
     if grep -qE '^(#|//)--- ' "$p"; then
       # a split-file test (`split-file %s %t`): its parts are the files llvm-mc reads, each listed as NAME.PART
       mkdir -p "$sn/$n"
@@ -693,7 +708,9 @@ obj_list() {
       # (a file mc-x86-obj takes whose object runs are all for Mach-O or COFF is the verdict's too: object-check assembles it at
       # x86_64-linux-musl, the tests' CHECK lines read the other format's dump)
       if awk -F'\t' -v f="$f" '$2 == f { found = 1 } END { exit found ? 0 : 1 }' "$lists/mc-x86-obj.list"; then
-        grep 'RUN:' "$f" | grep -e 'filetype[= ]obj' | grep -o -e '-m\?triple[= ]*[^ ]*' | grep -q -v -i -e darwin -e apple -e macos -e win -e msvc -e coff && continue
+        # (the last grep reads its input whole: `grep -q`'s early exit broke the pipe under pipefail and let a file in at random,
+        # large-eh-encoding, x86-print)
+        grep 'RUN:' "$f" | grep -e 'filetype[= ]obj' | grep -o -e '-m\?triple[= ]*[^ ]*' | grep -v -i -e darwin -e apple -e macos -e win -e msvc -e coff > "$asm_tmp/asm-elf-runs" && continue
       fi
       printf '%s\t%s\t\n' "$n" "$f" >> "$lists/mc-x86-objverdict.list"
     done
@@ -1531,6 +1548,7 @@ case ${1:-} in
       decode-text) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" decode-text "$@" ;;
       decode-hex) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" decode-hex "$@" ;;
       claimed) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" claimed ;;
+      cpu) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" cpu "$@" ;;
       trace) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" trace "$@" ;;
       gen) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen gen "$root/go/arbace/x86i/dectab.ae" ;;
       gen-check) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen check "$root/go/arbace/x86i/dectab.ae" ;;
@@ -1576,7 +1594,10 @@ case ${1:-} in
       t_prog=$SECONDS
       chmod +x "$work/$n"
       # (x86-64's programs run by this CPU: `$runner` is run-check's, unset here under set -u since AR4's merge; fixed alike by AR7 and AX11)
-      st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" ${runner:-} "./$n" > "$n.out" 2> "$n.err") || st=$?
+      # x86-print: a program whose output follows cpuid (`# cpu: cpuid`) run by this CPU under ptrace, its cpuid answered with x86i's
+      # model as the lockstep answers it (x86i cpu): this CPU cannot fault cpuid
+      cpuw=; grep -qE '^#[[:space:]]*cpu:[[:space:]]*cpuid[[:space:]]*$' "$(awk -F'\t' -v n="$n" '$1==n{print $2}' "$lists/x86i.list")" && cpuw="$x86i_exe cpu"
+      st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" ${runner:-} $cpuw "./$n" > "$n.out" 2> "$n.err") || st=$?
       echo "$st" > "$work/$n.status"
       st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$x86i_exe" run --coverage "$n.cov" "./$n" > "$n.x86i.out" 2> "$n.x86i.err") || st=$?
       echo "$st" > "$work/$n.x86i.status"
