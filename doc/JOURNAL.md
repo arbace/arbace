@@ -15425,3 +15425,64 @@ store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 
 ## 2026-11-20: java-split-1120: a correction to part 1
 
 Part 1 says java.base's closure packs into 23 chunks: it is 28 (java.base-0 to java.base-27, at `next` and at 42494a700).
+## 2026-11-20: cc1plus-survey: GCC's C++ front end built by Arbace, as the dg check's reader or reference (branch `cc1plus-survey-1120`)
+
+The brief (the main session, toward the CoMaIn goal): survey whether GCC 15.2's C++ front end, cc1plus `-fsyntax-only` built by
+Arbace's C++ from the pinned gcc tarball as pp-ref built libcpp (CP413 (a)), can close C++'s read stage. The read stage is 0.767:
+the dg check's dg-error part reads clang's recorded dumps for the 3,028 of 4,564 files the own front end does not pass. Written:
+doc/cpp/CC1PLUS-SURVEY.md, with decidables CC1P1-CC1P10. Nothing of the check, the records, the facts or the gate changed. The
+branch is from mac/n-merge-1120b 3c908a0cb, fast-forwarded to 412ec79dc before the reductions.
+
+- **Sources.** gcc-15.2.0.tar.xz, test/cpp/corpora.edn's `:gcc-15.2.0` (SHA-256 438fd996...): gcc/ without testsuite, po and the
+  other languages, plus libcpp, libiberty, libdecnumber, include, libbacktrace, libcody, zlib and config, extracted into the
+  worktree's `.tmp/cc1plus/src`.
+  - `gcc/configure` was run alone for x86_64-alpine-linux-musl (Alpine's options, C and C++ only), and the Makefile's
+    `generated_files` and insn-*.cc were made by native generators: the host's g++ built the 28 gen programs, a scaffold for the
+    probe. The build-side libiberty and libcpp were built natively too.
+  - mpfr.h and mpc.h were read from mpfr-4.1.0.tar.gz and mpc-1.2.1.tar.gz in Go's module cache
+    (/root/go/pkg/mod/modernc.org/ccorpus2@v1.6.0/assets). The mpc tarball's SHA-512 equals GCC's own
+    contrib/prerequisites.sha512 pin. gmp.h was the host's gmp-dev.
+- **Measured** with g++ 15.2 as the dg check's reader, its errors judged by the check's own verdict (arbace.repr.cpp.dg's
+  `verdict`):
+  - the recorded `-S` (test/cpp/ref-dg-gxx15.edn) passes 4,558 of 4,564;
+  - `-fsyntax-only` run afresh passes 4,505 (59 s at 4 jobs). It loses 25 gomp/ and tm/ files (`:gcc-dialect` already) and 28
+    others whose errors come from the middle end: musttail, `-Wimplicit-fallthrough`, asm constraints, va_arg_pack and 12
+    single files;
+  - for comparison, clang's record passes 3,369 and the own front end 1,536 (both 3,709).
+- **The closure.**
+  - cc1plus as GCC links it is 683 gcc units, 4.19 M lines (2.57 M generated), with libcpp, libiberty, libdecnumber,
+    libbacktrace, libcody and zlib.
+  - `-fsyntax-only` still runs the pass manager's constructor (301 make_pass_* in 159 units), backend_init, init_optabs and the x86
+    builtins. Its least closure is estimated by reading (not linked) at about 230 units and 860 kLOC, with a generated glue for
+    453 units.
+  - gmp, mpfr and mpc are needed (real_from_string's `mpfr_strtofr` for every decimal floating literal) and are not in the
+    tarball.
+  - Every generated file can come from the tarball's own generators, built by Arbace's C++, and from busybox awk; auto-host.h is
+    written, as ppref's config.h is.
+- **The probe.** cp/ptree, friend, lex, pt and parser through `arbace.cpp.codegen gen-batch`, one process a unit under the 8 GiB
+  cap. The native parser read all five; none generated.
+  - Each spent 220 to 600 s of CPU and 4.1 to 4.35 GB on its headers (100,000 to 161,000 preprocessed lines) before its first
+    refusal.
+  - The refusals have four reduced causes in gcc's core headers (`.tmp/cc1plus/red/`, quoted in the survey): a class named like an
+    enumerator (tree-core.h's lang_decl and lang_type), a defaulted template template parameter (hash-table.h), `inline::`
+    (wide-int.h) and a nested class naming its concrete base's typedef (mem-stats.h). A fifth, unreduced, is parser.cc's "not a
+    constant: enum". These are the C++ line's (arbace/cpp/codegen).
+- **Estimate.** About 40 h of CPU and 14 h of wall at 3 processes for the least closure (ppref: 11.8 minutes), dominated by the
+  header floor; a shared-prefix analysis in the code generator would bring it to a night. The Go output must be split into
+  packages (about 290 MB of Go). The dg check's run on the build: 20 to 30 minutes at 4 jobs.
+- **The counting question, for the user (CC1P1).** Independence is 94.3 today (read 0.767, eval and AOT 0.973, print 1, judge 1).
+  - As a reference (recommended, following py-own-judge-1 (a)) it moves no independence: the dg judge is already 1, and the
+    stand-in rows stay 0.5. It lifts completeness, the read cell about 85.9% to 99.2%.
+  - As the crop's reader (Java's model) the read stage goes to 1.000 and independence to 98.9.
+  - Dropping the stand-in altogether gives the same 98.9 with the read cell at about 53%. That shows the 0.233 is the price of
+    crediting completeness to a reader that is not Arbace's.
+- **Slips.**
+  - The first ptree.cc run was killed by the host's global OOM killer (3.2 GB; the host at 59 of 62 GB under a 47 GB heavy job).
+    The probe then waited for 14 GiB free, and the coordinator paused it with SIGSTOP during a later peak.
+  - A native build of cc1plus's objects for an exact closure measure was started and refused by the session's permission check as
+    beyond the brief. Nothing of it was built. Five host libraries (libiberty, libcpp, libdecnumber, libbacktrace, libcody, at
+    -O0) had been built for it in the worktree's `.tmp`.
+- **Alternatives weighed**: the whole cc1plus (`-S`, 53 more files for about three times the build); a harness that bypasses toplev
+  (fidelity risk); stubs for mpfr (decimal floating literals need it); generated files from native generators (a host's output in
+  the reference's build).
+- **Not done**: doc/AGENDA.md (the main session's), the gate, any build of the reference.
