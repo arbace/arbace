@@ -751,6 +751,9 @@
             :static? (boolean (or (:static m) (not= kind :class)))
             :nested (set (member-classes members))
             :tparams (mapv tparam-name tps)
+            ;; a record's components' declared types (a record pattern's types by its type
+            ;; variables, selector-text)
+            :comps (mapv tag-of comps)
             :super (cond
                      (#{:interface :annotation} kind) nil
                      (= kind :enum) "java.lang.Enum"
@@ -921,6 +924,16 @@
   "A converter temporary: a local whose name Java cannot write (a-1, old-6)."
   [s]
   (and (symbol? s) (nil? (namespace s)) (re-matches #".*-\d+" (name s))))
+
+(defn- when-branches
+  "[c a b] of value form (when c a) as Java's c ? a : b: the converter simplifies (if c a nil) to
+  (when c a) unless a is an if, and (if (nil? x) nil a) to (when (some? x) a) whatever a is
+  (arbace.repr.java.convert/simplify), so a when over an if is the second, x == null ? null : a."
+  [[_ c a]]
+  (if (and (is? a 'if) (= 4 (count a)) (seq? c) (= 2 (count c)) (symbol? (head c))
+           (#{"some?" "nil?"} (name (head c))))
+    [(list (if (= "some?" (name (head c))) 'nil? 'some?) (second c)) nil a]
+    [c a nil]))
 
 (defn- add-local [env s & {:as info}]
   (assoc-in env [:locals (name s)] (merge {:tag (tag-of s)} info)))
@@ -1178,8 +1191,19 @@
    (let [ok (filter (fn [m] (every? (fn [j] (or (= j i) (assignable-jtype? (nth ats j nil) (param-at m j))))
                                     (range (count ats))))
                     cands)
-         ps (keep #(param-at % i) ok)]
-     (and (seq ps) (some long-accepting ps)))))
+         ps (keep #(param-at % i) ok)
+         ;; Arbace's literals are longs only in its resolution's first phases: where no candidate
+         ;; takes every literal argument as a long (another literal for an int parameter), its
+         ;; last phase narrows them all to int as javac does (verify("", 0, i0[0], 0) over
+         ;; (int, int) and (float, float): javac's int overload, no long to write)
+         long-phase? (or (nil? ats)
+                         (some (fn [m] (every? (fn [j] (let [p (param-at m j)]
+                                                         (if (= :int-literal (nth ats j))
+                                                           (long-accepting p)
+                                                           (assignable-jtype? (nth ats j) p))))
+                                               (range (count ats))))
+                               cands))]
+     (and (seq ps) long-phase? (some long-accepting ps)))))
 
 (defn- conditional-form? [x]
   (and (seq? x) (#{"if" "if-not" "when" "when-not" "cond" "if-instance" "when-instance" "switch"} (str (head x)))))
@@ -1253,6 +1277,19 @@
                                                     a)]
                                             (cond
                                               (and (integer? a) (long-literal-arg? cands i ats)) (int-literal a true)
+                                              ;; ^W (W/valueOf x): javac's boxing of a primitive argument,
+                                              ;; hinted with its box (a type variable's parameter); written
+                                              ;; out, valueOf reads back unhinted (the source's own call)
+                                              (and (seq? a) (= 2 (count a)) (symbol? (first a)) (= "valueOf" (name (first a)))
+                                                   (namespace (first a))
+                                                   (wrappers (str/replace (namespace (first a)) #"^java\.lang\." ""))
+                                                   (some-> (meta-tag a) str (str/replace #"^java\.lang\." ""))
+                                                   (= (str/replace (namespace (first a)) #"^java\.lang\." "")
+                                                      (str/replace (str (meta-tag a)) #"^java\.lang\." ""))
+                                                   ;; the converter hints its own boxing alone, of a primitive
+                                                   (not (string? (second a)))
+                                                   (let [pt (type-of env (second a))] (or (nil? pt) (prim-names pt))))
+                                              (ex-text env (second a) P-ASSIGN)
                                               (vector? (tvar-arg-cast env a cands i))
                                               (str "(" (second (tvar-arg-cast env a cands i)) ") " (ex-text env (nth a 2) P-UNARY))
                                               (tvar-arg-cast env a cands i) (str (tvar-arg-cast env a cands i) (ex-text env a P-UNARY))
@@ -1394,7 +1431,11 @@
                 ;; interface (Object[]): Java's cast to it
                 (if (and (seq? x) (nil? (meta-tag x)) (#{"lambda" "method-ref"} (str (head x)))
                          (not (is? (second x) '&))
-                         (not= (erase sc (second x)) (erase sc (if (array-sym? t) (let [n (parse-long (name t))] (if (= 1 n) (symbol (namespace t)) (symbol (namespace t) (str (dec n))))) (second t)))))
+                         (or (not= (erase sc (second x)) (erase sc (if (array-sym? t) (let [n (parse-long (name t))] (if (= 1 n) (symbol (namespace t)) (symbol (namespace t) (str (dec n))))) (second t))))
+                             ;; or of a generic interface its types instantiate (new Function[]{s ->
+                             ;; s.length()} over a Function<String, Integer>: a raw element would
+                             ;; type s Object; the source's varargs had the call's type arguments)
+                             (str/includes? (fi-instance-text env x) "<")))
                   (str "(" (fi-instance-text env x) ") " (second (ex env x)))
                   (ex-text env x P-ASSIGN)))
               ;; a nested initializer; not the expression printer's pseudo-forms ([:postfix-of
@@ -1530,6 +1571,32 @@
             (and (box-prims vt) (or (box-prims jt) (not widens?))) (str "(" jp ") (" vp ") ")
             :else nil))))))
 
+(defn- unchecked-cast-text
+  "Java's cast to declared type form `tform` that the forms do not show (the value's erasure is
+  the target's): raw for a parameterized class (List<Foo> x = (List) dates;, an unchecked
+  conversion javac takes from any value of that erasure, where the parameterized cast is refused
+  between provably distinct types, List<Date> to List<Foo>, or a type inferred without its target,
+  C<Object> to C<String>); a type variable's or an array's as written."
+  [env tform]
+  (let [sc (:scope env)]
+    (if (and (seq? tform) (symbol? (first tform)) (class-binary sc (first tform)))
+      (str "(" (type-text sc (first tform)) ") ")
+      (str "(" (type-text sc tform) ") "))))
+
+(defn- wildcard-ret-call?
+  "Is form `x` a call of a method declared to return a parameterized type with a wildcard of the
+  target's erasure but not the target's form `tform` (Class<?> for a Class<? extends A>, a
+  Reference<? extends T> for a Reference<Object>): javac's capture makes it unassignable without
+  the cast the source wrote, which the converter drops (the same erasure)."
+  [env x tform]
+  (and (seq? tform) (seq? x) (nil? (meta-tag x))
+       (let [ms (call-decls env x)
+             rfs (distinct (map :rform ms))
+             r (first rfs)]
+         (and (= 1 (count rfs)) (seq? r) (not= r tform)
+              (some #(and (symbol? %) (= "?" (name %))) (tree-seq coll? seq r))
+              (= (erase (:scope env) r) (erase (:scope env) tform))))))
+
 (defn target-text
   "Form `x` where Java converts it to jtype `jt` (of declared type form `tform`, when known): an
   integer literal there that the forms left unboxed is a long (the converter boxes an int
@@ -1570,18 +1637,22 @@
           (let [tj (erase (:scope env) tform) vj (type-of env x)]
             (or (= tj vj)
                 (and (symbol? x) (namespace x) vj (some #{tj} (supertypes vj))))))
-     (str "(" (type-text (:scope env) tform) ") " (ex-text env x P-UNARY))
+     (str (unchecked-cast-text env tform) (ex-text env x P-UNARY))
      ;; a cast to a generic type (T[], List<T>) the converter wrote erased: Java's own
      (and tform (is? x 'cast) (generic-form? env tform) (nil? (meta-tag x))
           (= (erase (:scope env) tform) (erase (:scope env) (second x))))
-     (str "(" (type-text (:scope env) tform) ") " (ex-text env (nth x 2) P-UNARY))
+     (str (unchecked-cast-text env tform) (ex-text env (nth x 2) P-UNARY))
+     ;; a call declared to return a wildcard type of the target's erasure (cl.loadClass(n) for a
+     ;; Class<? extends A>): the source's cast, raw
+     (and tform (wildcard-ret-call? env x tform))
+     (str (unchecked-cast-text env tform) (ex-text env x P-UNARY))
      ;; a value of a generic method's own type (Predicate<T> negate()) for a parameterized
      ;; type: Java's unchecked cast, which the forms do not show
      (and tform (seq? tform) (generic-ret-call? env x) (nil? (meta-tag x))
           (= (erase (:scope env) tform) (type-of env x)))
      (str "(" (type-text (:scope env) tform) ") " (ex-text env x P-UNARY))
      (and tform (conditional-form? x) (#{"if" "when" "when-not"} (str (head x))) (nil? (meta-tag x)))
-     (let [[_ c a b] (case (str (head x)) "if" x "when" (list 'if (nth x 1) (nth x 2) nil) "when-not" (list 'if (nth x 1) nil (nth x 2)))
+     (let [[_ c a b] (case (str (head x)) "if" x "when" (cons 'if (when-branches x)) "when-not" (list 'if (nth x 1) nil (nth x 2)))
            [a b] (unbox-branches env a b)]
        (str (ex-text env c P-OR) " ? " (target-text env a jt tform) " : "
             ;; the false branch is a conditional expression (or a lambda): an assignment there
@@ -1717,7 +1788,13 @@
           (and (= 2 (count body)) (= last-f (first (last pairs))) (str/starts-with? (name last-f) "old-"))
           (let [g (second (last pairs))
                 setf (first body)
-                m (into {} (map vec (butlast pairs)))]
+                m (into {} (map vec (butlast pairs)))
+                ;; a static field incremented through an expression, (let [_-17 (iBar b) old-18 Bar/si]
+                ;; ...): Java's iBar(b).si++, whose qualifier is evaluated and dropped (AccessMethodsLHS)
+                q (when (and (= 1 (count m)) (re-matches #"_-\d+" (name (ffirst m)))
+                             (symbol? g) (namespace g) (not (mentions-sym? setf (ffirst m))))
+                    (second (first m)))
+                m (if q {g (list (symbol (str ".-" (name g))) q)} m)]
             [:postfix (subst m g) (subst m setf)])
           ;; (let [o-1 q] (set! (.-f o-1) (op (.-f o-1) v))) and the array forms: a compound
           ;; assignment (or a prefix increment) on a place with an impure part
@@ -1730,7 +1807,10 @@
                              (not (mentions-sym? (nth last-f 2) (ffirst pairs))))
                     (second (first pairs)))]
             (if q
-              [:assign (list 'set! (list (symbol (str ".-" (name (second last-f)))) q) (nth last-f 2))]
+              (let [place (list (symbol (str ".-" (name (second last-f)))) q)]
+                ;; the field's reads in the value through the same qualifier, so that a compound
+                ;; assignment or an increment is Java's again (iBar(b).si++, not = Bar.si + 1)
+                [:assign (list 'set! place (subst {(second last-f) place} (nth last-f 2)))])
               [:assign (subst tm last-f)]))
           ;; hoisted postfix increments before a return value: (let [i-1 i] (set! i ..) form)
           (and (seq effects) (every? #(or (is? % 'set!) (is? % 'aset)) effects)
@@ -1739,6 +1819,20 @@
                                 [t [:postfix-of g setf]]))]
             [:before (subst repl last-f)])
           :else nil)))))
+
+(defn- split-temp-let
+  "A let whose leading bindings are locals and whose trailing ones are converter temporaries that
+  expand-temps knows: the converter merged a declaration with the let of the statement after it
+  (int y = x; return y++;, float f = 0f; --q().x;: SPEC §5.3's merge of nested lets), as
+  (let [locals] (let [temporaries] body...)); else nil."
+  [env [_ bv & body]]
+  (when (and (vector? bv) (seq bv) (not (let-temps bv)))
+    (let [pairs (partition 2 bv)
+          n (count (take-while (comp temp? first) (reverse pairs)))]
+      (when (< 0 n (count pairs))
+        (let [inner (apply list 'let (vec (mapcat identity (take-last n pairs))) body)]
+          (when (expand-temps env inner)
+            (list 'let (vec (mapcat identity (drop-last n pairs))) inner)))))))
 
 (defn- postfix-text [env place setf]
   (let [v (if (is? setf 'set!) (nth setf 2) (nth setf 3))
@@ -1849,7 +1943,16 @@
       (cond
         ;; a switch expression's values (switch sel k v ... default), untagged
         (and (seq ts) (every? some? ts) (is? y 'switch) (odd? (count y)) (> (count y) 3))
-        (let [vs (concat (take-nth 2 (drop 3 y)) [(last y)])]
+        (let [;; a value that is itself an untagged switch expression gives its values (nested
+              ;; switches of the same lub); a throw (MatchException's default) gives none
+              leaves (fn leaves [z]
+                       (cond
+                         (is? z 'throw) []
+                         (and (is? z 'switch) (odd? (count z)) (> (count z) 3)
+                              (not (and (instance? arbace.lang.IMeta z) (meta-tag z))))
+                         (mapcat leaves (concat (take-nth 2 (drop 3 z)) [(last z)]))
+                         :else [z]))
+              vs (leaves y)]
           (when (every? (fn [z] (and (not (and (instance? arbace.lang.IMeta z) (meta-tag z)))
                                      (let [zt (type-of env z)]
                                        (and zt (decl-of zt) (not-any? #{zt} ts)
@@ -2054,7 +2157,15 @@
           (and (namespace h) (= "." hn)) (new-text env (symbol (namespace h)) args)
           (str/starts-with? hn ".-")
           (let [r (first args)
-                rt (receiver-text (assoc env :field? true) r)]
+                f (subs hn 2)
+                ;; an inherited field of this instance (the converter writes (.-f this) for one,
+                ;; the forms seeing declared members only): Java's simple name, as the source most
+                ;; often wrote it (this.f of a constant field makes javac check this for null)
+                rt (if (and (symbol? r) (nil? (namespace r)) (= (name r) (:recv env))
+                            (not (local? env (symbol f))) (not (contains? (:fields env) f))
+                            (:bin env) (find-field (:bin env) f))
+                     nil
+                     (receiver-text (assoc env :field? true) r))]
             (e P-POSTFIX (str (when rt (str rt ".")) (ident (subs hn 2)))))
           (and (str/starts-with? hn ".") (> (count hn) 1) (not (#{".." ".new" ".super"} hn)))
           (let [[r & more] args]
@@ -2076,7 +2187,7 @@
           (let [[c a b] args
                 [a b] (if (= hn "if-not") [b a] [a b])]
             (cond-text env c a b))
-          (= hn "when") (if (= 2 (count args)) (cond-text env (first args) (second args) nil) (fallback-expr env x))
+          (= hn "when") (if (= 2 (count args)) (apply cond-text env (when-branches x)) (fallback-expr env x))
           (= hn "when-not") (if (= 2 (count args)) (cond-text env (first args) nil (second args)) (fallback-expr env x))
           (= hn "cond")
           (let [pairs (partition 2 args)]
@@ -2301,14 +2412,23 @@
   "Is form `f` an if chain whose every branch is just (set! x e), with a final else (which the
   converter folds into x's initializer when x is declared without one, SPEC §5.3)?"
   [x f]
-  (letfn [(single [b] (let [b (if (and (is? b 'do) (= 2 (count b))) (second b) b)]
-                        (and (is? b 'set!) (= x (second b)))))]
-    (cond
-      (is? f 'if) (let [[_ _ a b] f] (and (= 4 (count f)) (single a) (or (single b) (assigning-chain? x b))))
-      (is? f 'cond) (let [pairs (partition 2 (rest f))]
-                      (and (= :else (first (last pairs))) (every? (comp single second) pairs)))
-      (is? f 'if-instance) (let [[_ _ a b] f] (and (single a) (or (single b) (assigning-chain? x b))))
-      :else false)))
+  ;; a branch may end in the loop's tail the converter pushed into the if after the assignment,
+  ;; (do (set! x e) (recur ...)), the same recur in every branch
+  (let [tails (atom #{})]
+    (letfn [(single [b] (let [b (cond
+                                  (and (is? b 'do) (= 2 (count b))) (do (swap! tails conj nil) (second b))
+                                  (and (is? b 'do) (= 3 (count b)) (is? (nth b 2) 'recur))
+                                  (do (swap! tails conj (nth b 2)) (second b))
+                                  :else (do (swap! tails conj nil) b))]
+                          (and (is? b 'set!) (= x (second b)))))
+            (chain? [f]
+              (cond
+                (is? f 'if) (let [[_ _ a b] f] (and (= 4 (count f)) (single a) (or (single b) (chain? b))))
+                (is? f 'cond) (let [pairs (partition 2 (rest f))]
+                                (and (= :else (first (last pairs))) (every? (comp single second) pairs)))
+                (is? f 'if-instance) (let [[_ _ a b] f] (and (single a) (or (single b) (chain? b))))
+                :else false))]
+      (and (chain? f) (>= 1 (count @tails))))))
 
 (defn- definitely-assigned?
   "Is local `x` assigned before every read in forms `body` (so that Java may declare it without
@@ -2345,6 +2465,18 @@
   (cond
     (int-literalish? init) "long"
     (is? init 'cast) (when-not (is? (second init) '&) (erase (:scope env) (second init)))
+    ;; a switch expression of references: Object's (the converter tags a conditional's or a
+    ;; switch's local with its type unless Object, long, double or boolean), where var would take
+    ;; javac's type of the switch (Boolean, or boolean unboxed: Object o = switch (s) { default ->
+    ;; s != null; })
+    (and (is? init 'switch)
+         (let [[arms default] (switch-parts (nnext init))
+               vs (cond-> (map second arms) (not= default ::none) (conj default))]
+           (and (some #(not (is? % 'throw)) vs)
+                (every? (fn [v] (or (is? v 'throw)
+                                    (let [t (type-of env v)] (and t (not (prim-names t)) (not (integer? v))))))
+                        vs))))
+    "java.lang.Object"
     :else (type-of env init)))
 
 (defn- local-type-text
@@ -2357,6 +2489,9 @@
        ;; an anonymous class's type: Java's var
        (anonymous-class? t) "var"
        t (decl-type-text (:scope env) t)
+       ;; an untagged local of an anonymous class instance: the source's var (a declared
+       ;; supertype differs from the initializer's type, which the converter tags)
+       (is? init 'anon) "var"
        :else
        (let [jt (untagged-jtype env init)]
          (cond
@@ -2567,7 +2702,13 @@
                 ;; untagged: Object, when the branches are references of different types
                 ;; (a ?: would be typed by them)
                 (nil? t)
-                (let [ts (set (keep (fn [l] (when (and (some? l) (nil? (meta-tag l))) (type-of env l))) ls))]
+                (let [ts (set (keep (fn [l] (when (and (some? l) (nil? (meta-tag l)))
+                                              ;; an untagged parameter is Object's (a local's :jt its
+                                              ;; initializer's, nil when unknown)
+                                              (or (type-of env l)
+                                                  (when (and (local? env l) (not (contains? (get (:locals env) (name l)) :jt)))
+                                                    "java.lang.Object"))))
+                                    ls))]
                   (and (> (count ts) 1) (not-any? prim-names ts)))
                 :else (some (fn [l] (and (some? l) (nil? (meta-tag l))
                                          (let [lt (type-of env l)] (and lt (not= lt tj)))))
@@ -2629,6 +2770,7 @@
 
 (defn- let-lines [env [_ bv & body :as x] ctx]
   (cond
+    (split-temp-let env x) (let-lines env (split-temp-let env x) ctx)
     (= :before (first (expand-temps env x))) (st env (second (expand-temps env x)) ctx)
     (expand-temps env x) (value-stmt env x ctx)
     ;; the converter's rebinding of captured locals
@@ -2745,7 +2887,17 @@
     (if-lines env (list 'nil? (second c)) nil a ctx)
     (let [[texts env' a' pat?] (and-chain env a b)
           fold? (and (seq texts) pat?)
-          head (str "if (" (if fold? (str/join " && " (cons (ex-text env c P-AND) texts)) (ex-text env c P-ASSIGN)) ")")
+          ;; a pattern test's value as the condition (when (if-instance [p x] a false) ...): the
+          ;; source's x instanceof P p ? a : false, which the converter keeps a value; && or a bare
+          ;; instanceof it would read as a when-instance over the then branch (convert's cond-form)
+          ctext (fn [p] (if (is? c 'if-instance)
+                          (let [[_ [pat y] ia ib] c
+                                {:keys [text] penv :env} (pattern-text env pat)]
+                            (wrap (e P-COND (str (ex-text env y P-REL) " instanceof " text " ? " (ex-text penv ia P-ASSIGN)
+                                                 " : " (ex-text env ib P-COND)))
+                                  p))
+                          (ex-text env c p)))
+          head (str "if (" (if fold? (str/join " && " (cons (ctext P-AND) texts)) (ctext P-ASSIGN)) ")")
           b? (or (some? b) (#{:return :yield} ctx))]
       (if fold?
         (if-else-lines head (st env' a' ctx) (when b? (st env b ctx)))
@@ -2773,7 +2925,7 @@
   [env frame]
   (if (identical? frame (first (:jstack env)))
     "break;"
-    (str "break " (or @(:label frame) (reset! (:label frame) (fresh-label env))) ";")))
+    (str "break " (or @(:label frame) (reset! (:label frame) (if (:kw frame) (java-label (:kw frame)) (fresh-label env)))) ";")))
 
 (defn- break-lines
   "(break), (break :L), (break :L v)."
@@ -2908,6 +3060,11 @@
         ("while" "loop" "for-each") (loop-lines env x nil ctx)
         "label" (let [[_ kw & body] x]
                   (cond
+                    ;; the converter's doubled label of a labeled switch or loop whose label a break
+                    ;; uses (the labeled statement's and the switch's own, convert's switch-stmt-1):
+                    ;; one Java label, which it doubles again
+                    (and (= 1 (count body)) (is? (first body) 'label) (= kw (second (first body))))
+                    (st env (first body) ctx)
                     (and (= 1 (count body)) (#{"while" "loop" "for-each"} (str (head (first body)))))
                     (loop-lines env (first body) kw ctx)
                     ;; a switch whose breaks give the label's value, as a method's or a switch
@@ -2936,7 +3093,15 @@
                     (block (str "synchronized (" (ex-text env o P-ASSIGN) ")") (body-lines env body ctx)))
         "java-assert" (let [[_ c m] x]
                         [(str "assert " (ex-text env c P-ASSIGN) (when (= 3 (count x)) (str " : " (ex-text env m P-ASSIGN))) ";")])
-        "switch" (switch-lines env x nil ctx)
+        "switch" (if (and (#{:return :yield} ctx)
+                          ;; an arm's value a postfix increment (yield a++, old-1): return switch,
+                          ;; as return a++ in an arm would have its increment hoisted (a-1)
+                          (let [[arms default] (switch-parts (nnext x))]
+                            (some #(and (is? % 'let) (= :postfix (first (expand-temps env %))))
+                                  (cond-> (map second arms) (not= default ::none) (conj default))))
+                          (expr-form? env x))
+                   (value-stmt env x ctx)
+                   (switch-lines env x nil ctx))
         ("this." "super." ".super") (ctor-call-lines env x)
         (value-stmt env x ctx)))))
 
@@ -2968,6 +3133,19 @@
 (defn- jump-form? [x]
   (and (seq? x) (#{"return" "throw" "break" "continue" "recur"} (str (head x)))))
 
+(defn- absorbs-tail?
+  "Is statement form `s`, printed as the last statement of a loop's body, one the converter
+  converts with the loop's tail pushed into it (arbace.repr.java.convert/stmt's :fall: an if's
+  branches, a block's or a labeled statement's end, a switch's arms; not a loop, a try or a
+  synchronized, after which it goes)?"
+  [env s]
+  (and (seq? s)
+       (case (str (head s))
+         ("if" "if-not" "when" "when-not" "cond" "if-instance" "when-instance" "switch" "letclass") true
+         "let" (not (or (expand-temps env s) (rebinding? (second s))))
+         "label" (not (and (= 3 (count s)) (#{"while" "loop" "for-each"} (str (head (nth s 2))))))
+         false)))
+
 (defn- loop-tail
   "Form `x` at a tail position of a loop/recur body: (recur ...) falls to the update, a path
   without one leaves the loop."
@@ -2975,7 +3153,17 @@
   (let [hn (when (seq? x) (str (head x)))]
     (case hn
       "recur" []
-      "do" (if (next x) (into (body-lines env (butlast (rest x)) :stmt true) (loop-tail env (last x))) (break-lines env '(break) :stmt))
+      "do" (if (next x)
+             (let [pre (butlast (rest x))]
+               (into (body-lines env pre :stmt true)
+                     ;; (do (when c a) (recur)): the source's jump after the if (if (c) a;
+                     ;; continue;, a switch's break), which the converter keeps out of the if; a
+                     ;; last statement the converter pushes the loop's tail into (an if, a block,
+                     ;; a switch) would read back with the recur in its branches
+                     (if (and (is? (last x) 'recur) (absorbs-tail? env (last pre)))
+                       ["continue;"]
+                       (loop-tail env (last x)))))
+             (break-lines env '(break) :stmt))
       ("if" "if-not") (let [[_ c a b] x
                             [c a b] (if (= hn "if-not") [(list 'not c) b a] [c a b])]
                         (if-else-lines (str "if (" (ex-text env c P-ASSIGN) ")") (loop-tail env a) (loop-tail env b)))
@@ -2991,6 +3179,7 @@
         (if-else-lines (str "if (" (ex-text env y P-REL) " instanceof " text ")") (loop-tail env' a) (loop-tail env b)))
       "let" (let [[_ bv & body] x]
               (cond
+                (split-temp-let env x) (loop-tail env (split-temp-let env x))
                 (expand-temps env x) (into (st env x :stmt) (break-lines env '(break) :stmt))
                 (rebinding? bv) (loop-tail env (apply list 'do body))
                 :else (let [[lines env'] (let-decls env bv body)]
@@ -3077,7 +3266,7 @@
             env' (push-loop env-b frame)
             inner (vec inner)
             bl (if (seq inner)
-                 (into (body-lines env' (butlast inner) :stmt true) (loop-tail env' (last inner)))
+                 (vec (loop-tail env' (apply list 'do inner)))
                  [])
             ;; a body ending in (recur ...) falls to the update: no trailing break needed
             head (str "for (" init "; " (when c (ex-text env-b c P-ASSIGN)) "; " upd ")")
@@ -3118,7 +3307,7 @@
                               (vec (loop-tail env' else)))))
       :else
       (let [env' (push-loop env frame)
-            bl (into (body-lines env' (butlast body) :stmt true) (loop-tail env' lastf))]
+            bl (vec (loop-tail env' (apply list 'do body)))]
         (labeled frame (block "while (true)" bl))))))
 
 (defn- for-each-coll-text
@@ -3146,9 +3335,24 @@
                       (or (and (is? (second coll) 'cast) (symbol? (second (second coll))))
                           (and (symbol? (second coll))
                                (let [df (decl-form-of env (second coll))] (and df (not (seq? df)))))))
-                 (and (symbol? coll) (let [lt (or (:tag (get (:locals env) (name coll))) (tag-of coll))]
+                 ;; a local's or a field's declared type (a List<Flaky> field is no raw collection)
+                 (and (symbol? coll) (let [lt (or (:tag (get (:locals env) (name coll))) (tag-of coll)
+                                                  (when-not (local? env coll) (decl-form-of env coll)))]
                                        (or (nil? lt) (symbol? lt)))))]
     (cond
+      ;; a new collection of a generic class of one type parameter for a typed binding: its type
+      ;; argument the binding's (for (int x : new ArrayList<Integer>()), where the diamond would
+      ;; infer Object)
+      (and t (seq? coll) (nil? (meta-tag coll)) (symbol? (head coll)) (nil? (namespace (head coll)))
+           (str/ends-with? (name (head coll)) ".") (> (count (name (head coll))) 1)
+           (not= "java.lang.Object" (erase sc t))
+           (let [c (symbol (subs (name (head coll)) 0 (dec (count (name (head coll))))))
+                 b (class-binary sc c)]
+             (and b (generic1? b))))
+      (let [c (symbol (subs (name (head coll)) 0 (dec (count (name (head coll))))))
+            b (class-binary sc c)]
+        (str "new " (type-text sc c) "<" (type-text sc (get boxes (str t) t)) ">"
+             (args-text env (rest coll) (ctor-cands b (count (rest coll))))))
       ;; a lambda or method reference as the Iterable: Java's cast to it,
       ;; (Iterable<T>) s::iterator, the binding's type its argument
       fn-coll?
@@ -3175,6 +3379,20 @@
                     ;; without hoisting)
                     nupd (count (take-while #(and (simple-statement? %) (not (is? % 'let)) (has-postfix-temp? %))
                                             (rseq body)))
+                    ;; else trailing statement expressions whose temporaries the converter made
+                    ;; before the rest of the body's: a for's update, which it converts before the
+                    ;; body and appends to it (((C) a[i]).f -= x, o-117 before the body's o-118)
+                    nupd (if (pos? nupd)
+                           nupd
+                           (let [stmt-expr? (fn [s] (or (is? s 'set!) (is? s 'aset)
+                                                        (and (is? s 'let) (= :assign (first (expand-temps env s))))))
+                                 n (count (take-while stmt-expr? (rseq body)))]
+                             (or (first (for [k (range 1 (inc n))
+                                              :let [ut (mapcat temp-numbers (subvec body (- (count body) k)))
+                                                    rt (mapcat temp-numbers (subvec body 0 (- (count body) k)))]
+                                              :when (and (seq ut) (seq rt) (< (apply max ut) (apply min rt)))]
+                                          k))
+                                 0)))
                     [body upd] [(subvec body 0 (- (count body) nupd)) (subvec body (- (count body) nupd))]
                     env' (push-loop env frame)
                     bl (body-lines env' body :stmt)
@@ -3189,7 +3407,10 @@
                        t (tag-of b)
                        env' (push-loop (add-local env b :jt (when-not t "java.lang.Object")) frame)
                        bl (body-lines env' body :stmt)]
-                   (labeled frame (block (str "for (" (binding-mods env b) (if t (decl-type-text (:scope env) t) "var")
+                   ;; an untagged binding is Object's (the converter tags every other type, the
+                   ;; erasure of a var's): var would take the element's type (for (Object o : a)
+                   ;; over an Integer[], read back as ^Integer o)
+                   (labeled frame (block (str "for (" (binding-mods env b) (if t (decl-type-text (:scope env) t) "Object")
                                               " " (ident b) " : " (for-each-coll-text env coll t) ")")
                                          bl)))
       "loop" (if (empty? (second x))
@@ -3257,13 +3478,60 @@
     [(str head " -> " (first lines))]
     (into [(str head " -> {")] (conj (indent lines) "}"))))
 
+(defn- selector-text
+  "A switch's selector: without javac's erasure cast of a call whose declared result is a type
+  variable of its receiver's class, the receiver a local declared with the type arguments that give
+  the cast's type (switch (boxi.get()) over a Box<Integer>, (cast Integer (.get boxi))): written, the
+  cast would read back as a value unboxed explicitly, (.intValue (cast Integer ...))."
+  ([env sel] (selector-text env sel nil))
+  ([env sel clauses]
+  (let [y (when (and (is? sel 'cast) (= 3 (count sel)) (symbol? (second sel))) (nth sel 2))
+        ;; a cast to a generic record whose pattern's components are unconditional for its type
+        ;; arguments (case Pair(String s, Integer i), ^:unconditional, JCS114 (a)): the source's
+        ;; (Pair<String, Integer>) cast, raw (Pair) the pattern would test its components again
+        targs (when y
+                (let [b (class-binary (:scope env) (second sel))
+                      d (get *decls* b)
+                      tps (mapv str (:tparams d))
+                      cts (:comps d)
+                      pats (for [c clauses :when (vector? c)
+                                 :let [p (first c)]
+                                 :when (and (seq? p) (symbol? (first p)) (= b (class-binary (:scope env) (first p)))
+                                            (= (count (rest p)) (count cts))
+                                            (some #(and (symbol? %) (:unconditional (meta %))) (rest p)))]
+                             p)]
+                  (when-let [p (first pats)]
+                    (let [m (into {} (for [[ct v] (map vector cts (rest p))
+                                           :when (and (symbol? ct) (some #{(str ct)} tps) (symbol? v)
+                                                      (:unconditional (meta v)) (tag-of v))]
+                                       [(str ct) (tag-of v)]))]
+                      (when (and (seq tps) (every? #(contains? m %) tps))
+                        (mapv m tps))))))
+        drop? (and (seq? y) (symbol? (head y)) (nil? (namespace (head y)))
+                   (str/starts-with? (name (head y)) ".") (not (str/starts-with? (name (head y)) ".-"))
+                   (local? env (second y))
+                   (let [lt (:tag (get (:locals env) (name (second y))))]
+                     (and (seq? lt) (symbol? (first lt))
+                          (let [b (class-binary (:scope env) (first lt))
+                                tps (mapv str (:tparams (get *decls* b)))
+                                ms (filter #(= b (:owner %)) (find-methods b (subs (name (head y)) 1) (count (nnext y))))
+                                r (:rform (first ms))
+                                i (when (and (= 1 (count ms)) (symbol? r)) (.indexOf tps (str r)))]
+                            (and i (<= 0 i) (< i (count (rest lt)))
+                                 (= (erase (:scope env) (second sel)) (erase (:scope env) (nth (rest lt) i))))))))]
+    (cond
+      targs (str "(" (type-text (:scope env) (second sel)) "<" (str/join ", " (map #(type-text (:scope env) %) targs)) ">) "
+                 (ex-text env y P-UNARY))
+      drop? (ex-text env y P-ASSIGN)
+      :else (ex-text env sel P-ASSIGN)))))
+
 (defn switch-lines
   "A switch statement in ctx (:stmt, :return or :loop: arms at a loop/recur body's tail)."
   [env [_ sel & clauses] kw ctx]
   (let [[arms default] (switch-parts clauses)
         patterns? (some (comp pattern-label? first) arms)
         default (if (and (not= default ::none) (match-exception-default? default) patterns?) ::none default)
-        frame {:label (atom nil) :switch true}
+        frame {:label (atom nil) :switch true :kw kw}
         env' (-> env (update :jstack conj frame) (cond-> kw (assoc-in [:labels kw] frame)))
         body (fn [env x] (if (= ctx :loop) (loop-tail env x) (st env x ctx)))
         lines (vec (concat
@@ -3276,7 +3544,7 @@
                     ;; at a loop's tail a missing default leaves the loop too
                     (when (and (= ctx :loop) (= default ::none) (not patterns?))
                       (arm-lines "default" (break-lines env' '(break) :stmt)))))]
-    (labeled frame (block (str "switch (" (ex-text env sel P-ASSIGN) ")") lines))))
+    (labeled frame (block (str "switch (" (selector-text env sel clauses) ")") lines))))
 
 (defn switch-expr-text
   "A switch expression; `kw` the label (break :kw v) yields from."
@@ -3299,7 +3567,7 @@
                     (when (not= default ::none) (arm "default" env' default))))]
     ;; a unary expression (JLS 15.15): a receiver's or an operand of a postfix operator needs
     ;; parentheses
-    (e P-UNARY (str/join "\n" (block (str "switch (" (ex-text env sel P-ASSIGN) ")") lines)))))
+    (e P-UNARY (str/join "\n" (block (str "switch (" (selector-text env sel clauses) ")") lines)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Lambdas, method references, anonymous classes (SPEC §5.12, §4.8)
@@ -3359,8 +3627,19 @@
             body-t (cond
                      (and (= 1 (count body)) void? (simple-statement? b) (not (is? b 'let)))
                      (stmt-expr-text env' b)
+                     ;; a lambda as a lambda's value: cast to its interface, its types instantiated
+                     ;; (i -> (Callable<Void>) () -> ...), which javac cannot infer when the outer
+                     ;; lambda's result types a generic call (mapToObj's U)
+                     (and (= 1 (count body)) (not void?) (seq? b) (nil? (meta-tag b))
+                          (#{"lambda" "method-ref"} (str (head b))) (not (is? (second b) '&))
+                          (str/includes? (fi-instance-text env' b) "<"))
+                     (str "(" (fi-instance-text env' b) ") " (second (ex env' b)))
                      (and (= 1 (count body)) (not void?) (expr-form? env' b) (not (is? b 'switch))
-                          (not (conditional-form? b)))
+                          (not (conditional-form? b))
+                          ;; a postfix increment the converter hoisted before a return (its
+                          ;; temporary named after the place, x-2): the source's { return x++; },
+                          ;; which an expression body (x -> x++, old-2) would not give back
+                          (not (and (is? b 'let) (= :before (first (expand-temps env' b))))))
                      (ex-text env' b P-ASSIGN)
                      :else (str/join "\n" (block "" (body-lines env' body (if void? :stmt :return)))))]
         (e P-ASSIGN (str (fi-cast-text env fi) ptext " -> " body-t))))))
