@@ -1,0 +1,323 @@
+(ns repr.java.chunks
+  "read-jdk with its chunks in processes of their own (java-split-1120; doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built:
+  the jdk reads in chunk processes\"): the reads of java.base's closure (front-check's, attr-check's and nojavac-check's
+  jdk corpus, bin/jrt-convert's convert step, the round trip's) held every chunk's forms and REPR_JAVA_THREADS javacs in
+  one process, 28 to 53 GiB.
+
+    ARBACE_PATH=ROOT/test bin/repr-java main -m repr.java.chunks read-jdk [OPTIONS] OUT MODULE SRC [PATH...]
+
+  The arguments and options are arbace.repr.java's read-jdk's, and so is the output, file for file: the forms under OUT
+  (and --native-out), repr-java-report.edn, -split.edn, -attr.edn, -nojavac.edn, and the lines. With REPR_JAVA_PROCS=N
+  and more than one chunk, arbace.repr.java/jdk's chunks (the same files, patch directories, javac options and patch
+  path) are each read by a process of its own, N at once: the tool again (/proc/self/exe, the same arguments,
+  REPR_JAVA_CHUNK naming the chunk and REPR_JAVA_CHUNK_OUT its summary's file; GOMEMLIMIT REPR_JAVA_PROC_GOMEMLIMIT's when
+  set), which converts its chunk as jdk's thread does (arbace.repr.java/convert-units, convert-units-nojavac), writes its
+  units' forms itself (write-output, a package at a time: a package is in one chunk alone) and a summary of them, data
+  alone, checked to read back as itself. This process copies the chunks, runs the others, and merges their summaries in
+  the chunks' order into what arbace.repr.java/finish gives of all the units: the written files in write-output's
+  order (the packages as its group-by orders them, the same keys inserted in the same order), the unreadable files,
+  the edn errors' frequencies, the reports and the lines (finish's and nojavac-report's code, below, over the
+  summaries). A chunk whose process fails has its files failed, its log shown, as a chunk whose javac threw. What
+  differs is measured: the times, and repr-java-nojavac.edn's :peak-rss, the largest process's. Without
+  REPR_JAVA_PROCS (or with one chunk) arbace.repr.java/jdk itself. The reader (arbace.repr.java, whose sources the
+  provenance files hash) is not changed: this namespace drives it."
+  (:require [arbace.repr.java :as rj]
+            [arbace.repr.java.javac-hook :as hook]
+            [arbace.java.io :as io]
+            [arbace.pprint :as pp]
+            [arbace.string :as str])
+  (:import [java.io File PushbackReader]))
+
+;;; The summaries
+
+(defn- write-packages
+  "rj/write-output of `units` a package at a time, in the order write-output takes them (its group-by): its entries,
+  each with its :package."
+  [out units]
+  (vec (for [[pkg us] (group-by :package units)
+             w (rj/write-output out us)]
+         (assoc w :package pkg))))
+
+(defn- split-sums
+  "The split of the measured `units` (attr/split-of's), summed as rj/split-report sums them."
+  [units]
+  (let [sum (fn [k] (apply merge-with + (map #(get-in % [:split k]) units)))]
+    {:lists (sum :lists) :frames (sum :frames)}))
+
+(defn- summarize
+  "The converted `units` written under `out` (with `check` read back), and what rj/finish reports of them (with their
+  `failures`, javac's `errors`, the `stats`, with `split` the split's sums, the native provider's check `attr`,
+  {:check :diffs}): a chunk's summary, data alone."
+  [out units failures errors stats check split attr]
+  (let [written (write-packages out units)
+        reads (when check (vec (pmap (fn [{:keys [path text]}] (assoc (rj/readable text) :path path)) written)))]
+    {:units (count units)
+     ;; the units' packages in their order (write-output's group-by order), each written file's
+     :packages (vec (distinct (map :package units)))
+     :written (mapv :package written)
+     :reads reads
+     :slowest (vec (for [u (take 5 (sort-by :ms > units))] [(:ms u) (:source u)]))
+     :failures (mapv #(select-keys % [:failure :source :error :trace :javac-needed]) failures)
+     :errors (count errors)
+     :first-errors (vec (take 20 errors))
+     :stats stats
+     :heads (when check (rj/head-symbols units))
+     :split (when split (split-sums units))
+     :attr-check (:check attr)
+     :attr-diffs (vec (take 2000 (:diffs attr)))}))
+
+(defn- resort-keys
+  "Map `m` with each set in its keys (a key, or a key vector's element) a sorted set again: the split's facts
+  (attr/split-of's sorted sets), which read back as hash sets."
+  [m]
+  (when m
+    (let [re (fn re [k] (cond (set? k) (into (sorted-set) k) (vector? k) (mapv re k) :else k))]
+      (into {} (map (fn [[k v]] [(re k) v])) m))))
+
+(defn- restore
+  "A chunk's summary as read back (read-string of its pr-str): its split's keys sorted sets again."
+  [s]
+  (let [side (fn [x] (cond-> x (:split x) (update :split #(-> % (update :lists resort-keys) (update :frames resort-keys)))))]
+    (cond-> s (:javac s) (update :javac side) (:native s) (update :native side))))
+
+(defn- summary-text
+  "Chunk summary `s` as text that reads back (restore) as the same data, or an exception."
+  [s]
+  (binding [*print-length* nil *print-level* nil *print-meta* false *print-namespace-maps* false
+            *print-dup* false *print-readably* true]
+    (let [t (pr-str s)
+          again (binding [*read-eval* false] (restore (read-string t)))]
+      (when-not (= (pr-str (restore s)) (pr-str again))
+        (throw (ex-info "repr.java.chunks: a chunk's summary does not read back as itself" {})))
+      t)))
+
+;;; The report: rj/finish's, over the summaries
+
+(defn- report!
+  "rj/finish's report of the summaries `ss` (in the chunks' order) of the `n` Java files: the split (with `split`)
+  and the native provider's check (with `attr?`) written, the lines printed, and with `check`
+  OUT/repr-java-report.edn. Returns {:failures :unreadable :errors}."
+  [out n ss check t0 split attr?]
+  (let [stats (apply merge-with + (map :stats ss))
+        nunits (reduce + 0 (map :units ss))
+        failures (vec (mapcat :failures ss))
+        nerrors (reduce + 0 (map :errors ss))
+        errors (vec (take 20 (mapcat :first-errors ss)))]
+    (when split
+      ;; rj/split-report over nunits units, the first carrying the summed split
+      (let [sums {:lists (apply merge-with + (map (comp :lists :split) ss))
+                  :frames (apply merge-with + (map (comp :frames :split) ss))}
+            units (cons {:split sums} (repeat (dec nunits) {}))]
+        (io/make-parents (io/file out "repr-java-split.edn"))
+        (spit (io/file out "repr-java-split.edn") (with-out-str (pp/pprint (#'rj/split-report (if (pos? nunits) units ()) stats))))))
+    (when attr?
+      (let [r (#'rj/attr-report (or (apply merge-with (partial merge-with +) (keep :attr-check ss)) {})
+                                (vec (mapcat :attr-diffs ss)))]
+        (io/make-parents (io/file out "repr-java-attr.edn"))
+        (spit (io/file out "repr-java-attr.edn") (with-out-str (pp/pprint r)))
+        (println (format "native attribution: %s; the model's reads: %s" (pr-str (:totals r)) (pr-str (:model-totals r))))))
+    (let [;; the written files in write-output's order over all the units: the packages as its group-by orders them
+          ;; (the same keys inserted in the same order), a package's files in their order
+          order (keys (group-by identity (mapcat :packages ss)))
+          by-pkg (group-by first (mapcat (fn [s] (map vector (:written s) (or (:reads s) (repeat nil)))) ss))
+          nwritten (reduce + 0 (map (comp count :written) ss))
+          reads (when check (vec (for [p order [_ r] (get by-pkg p)] r)))
+          unreadable (vec (filter :core reads))
+          edn-errors (frequencies (keep :edn reads))
+          secs (/ (- (System/nanoTime) t0) 1e9)]
+      (doseq [e errors] (println "javac:" e))
+      (doseq [[ms source] (take 5 (sort-by first > (mapcat :slowest ss)))] (println "slowest:" ms "ms" source))
+      (doseq [f failures] (println "FAILED" (:source f) (:error f)) (run! #(println "   " %) (:trace f)))
+      (doseq [u unreadable] (println "UNREADABLE" (:path u) (:core u)))
+      (when (seq edn-errors)
+        (println "arbace.edn/read errors by kind:"
+                 (frequencies (map #(cond (re-find #"Invalid token: .*/[0-9]+$" %) "array class symbol"
+                                          (re-find #"Metadata must be" %) "param-tags metadata"
+                                          :else %)
+                                   (keep :edn reads)))))
+      (println (format "%d Java files, %d converted, %d failed, %d javac errors, %d files written to %s%s in %.1fs"
+                       n nunits (count failures) nerrors nwritten out
+                       (if check (format ", %d unreadable" (count unreadable)) "")
+                       secs))
+      (when check
+        (let [report {:files n :converted nunits
+                      :failures (mapv #(select-keys % [:source :error]) failures)
+                      :javac-errors nerrors :unreadable unreadable
+                      :edn-errors edn-errors
+                      :stats (into (sorted-map) stats)
+                      :heads (into (sorted-map) (apply merge-with + (map :heads ss)))}]
+          ;; OUT made when nothing was written (a module of module-info.java alone: java.se)
+          (io/make-parents (io/file out "repr-java-report.edn"))
+          (spit (io/file out "repr-java-report.edn") (with-out-str (pp/pprint report)))))
+      {:failures failures :unreadable unreadable :errors errors})))
+
+(defn- nojavac-report
+  "rj/nojavac-report's OUT/repr-java-nojavac.edn and line, its :peak-rss `peak` (the largest process's)."
+  [out nj peak]
+  (let [by (frequencies (map :fallback (:fallbacks nj)))
+        r (assoc nj :by-reason (into (sorted-map) by) :peak-rss peak)]
+    (io/make-parents (io/file out "repr-java-nojavac.edn"))
+    (spit (io/file out "repr-java-nojavac.edn") (with-out-str (pp/pprint r)))
+    (println (format "no javac: %d files, %d native, %d fallbacks to javac; %s"
+                     (:files nj) (:native nj) (count (:fallbacks nj)) (pr-str by)))))
+
+;;; The chunks' processes
+
+(defn- run-chunk-process
+  "Chunk `i` of module `module` read by a process of its own: this program again with the read-jdk arguments `args`,
+  REPR_JAVA_CHUNK=i (and GOMEMLIMIT=REPR_JAVA_PROC_GOMEMLIMIT when set). Returns [its summary, restored (nil when it
+  exited non-zero or wrote none), its exit status, its log]."
+  [module i args]
+  (let [dir (io/file ".tmp/repr-java-patch")
+        sfile (io/file dir (str module "-" i ".summary.edn"))
+        log (io/file dir (str module "-" i ".log"))
+        pb (ProcessBuilder. ^java.util.List (into ["/proc/self/exe" "-m" "repr.java.chunks" "read-jdk"] args))
+        env (.environment pb)]
+    (.delete sfile)
+    (.put env "REPR_JAVA_CHUNK" (str i))
+    (.put env "REPR_JAVA_CHUNK_OUT" (.getPath sfile))
+    (.remove env "REPR_JAVA_PROCS")
+    (when-let [m (not-empty (System/getenv "REPR_JAVA_PROC_GOMEMLIMIT"))] (.put env "GOMEMLIMIT" m))
+    (.redirectErrorStream pb true)
+    (.redirectOutput pb (java.lang.ProcessBuilder$Redirect/to log))
+    (let [st (.waitFor (.start pb))
+          s (when (and (zero? st) (.isFile sfile))
+              (binding [*read-eval* false] (restore (read-string (slurp sfile)))))]
+      [s st log])))
+
+(defn jdk
+  "arbace.repr.java/jdk, its chunks each in a process of its own (REPR_JAVA_PROCS at once), or in this process
+  REPR_JAVA_CHUNK's alone (a chunk's process); without REPR_JAVA_PROCS, or with one chunk, arbace.repr.java/jdk.
+  `args`: the read-jdk arguments, which a chunk's process is given again."
+  [args out module module-src paths {:keys [javac-opts check origins front native-out split attr no-javac] :as opts}]
+  (let [;; arbace.repr.java/jdk's plan, the same: the files, the chunks, the patch directories, the origins
+        src (.getCanonicalPath (io/file module-src))
+        origin-names (when origins (with-open [r (PushbackReader. (io/reader origins))] (binding [*read-eval* false] (read r))))
+        origin-of (fn [rel] (or (get origin-names rel) (str src "/" rel)))
+        files (remove #(re-find #"/snippet-files/" %)
+                      (rj/java-files (map #(str src "/" %) (or (seq paths) ["."]))))
+        t0 (System/nanoTime)
+        child (some-> (System/getenv "REPR_JAVA_CHUNK") not-empty Integer/parseInt)
+        [mi others] ((juxt filter remove) #(str/ends-with? % "/module-info.java") files)
+        files others
+        work (vec (map-indexed vector (#'rj/chunks others 150)))
+        procs (when-not child
+                (some-> (System/getenv "REPR_JAVA_PROCS") not-empty Integer/parseInt (#(when (and (pos? %) (> (count work) 1)) %))))]
+    (if-not (or child procs)
+      (rj/jdk out module module-src paths opts)
+      (let [_ (when (and (seq mi) (not child)) (println "skipped (a module-info cannot be patched):" (str/join " " mi)))
+            patch-of (fn [i] (io/file ".tmp/repr-java-patch" (str module "-" i)))
+            ;; the chunks' copies, made before any chunk is attributed (a chunk's process finds them made)
+            copies-of (into {} (for [[i fs] work]
+                                 (let [patch (patch-of i)]
+                                   (when (and (not child) (.exists patch))
+                                     (doseq [^File f (reverse (file-seq patch))] (.delete f)))
+                                   [i (vec (for [f fs]
+                                             (let [rel (subs f (inc (count src)))
+                                                   c (io/file patch rel)]
+                                               (when-not child
+                                                 (io/make-parents c)
+                                                 (io/copy (io/file f) c))
+                                               (.getPath c))))])))
+            origin-by-copy (into {} (for [[i fs] work f fs
+                                          :let [rel (subs f (inc (count src)))
+                                                rel (if (str/starts-with? rel "./") (subs rel 2) rel)]]
+                                      [(.getCanonicalPath (io/file (patch-of i) rel)) (origin-of rel)]))
+            all? (some? (System/getenv "REPR_JAVA_PATCH_ALL"))
+            full? rj/*full*
+            front (keyword (or front "javac"))
+            threads (Integer/parseInt (or (System/getenv "REPR_JAVA_THREADS") "12"))
+            task (fn [[i fs]]
+                   (let [patch (patch-of i)
+                         ppath (str/join File/pathSeparator
+                                         (cons (.getCanonicalPath patch)
+                                               (when all?
+                                                 (for [[j _] work :when (not= j i)] (.getCanonicalPath (patch-of j))))))
+                         copies (get copies-of i)]
+                     (try
+                       (let [jopts (into ["--patch-module" (str module "=" ppath)
+                                          "-implicit:none" "--enable-preview" "-source" "26"]
+                                         javac-opts)]
+                         (if no-javac
+                           (rj/convert-units-nojavac copies jopts (:rename opts) full? split)
+                           (rj/convert-units copies jopts (:rename opts) full? front split (= attr "native"))))
+                       (catch Throwable e
+                         {:failures (mapv (fn [f] {:failure true :source f :error (str "javac: " e)}) copies)}))))
+            nojavac-of (fn [results]
+                         (let [njs (keep :nojavac results)]
+                           {:files (reduce + (map :files njs)) :native (reduce + (map :native njs))
+                            :fallbacks (vec (for [nj njs f (:fallbacks nj)]
+                                              (update f :source #(get origin-by-copy (.getCanonicalPath (io/file %)) %))))
+                            :native-ms (reduce + (map :native-ms njs)) :ms (reduce + (map :ms njs))}))
+            gather (fn [results]
+                     {:units (vec (for [u (mapcat :units results)]
+                                    (assoc u :origin (get origin-by-copy (.getCanonicalPath (io/file (:source u))) (:source u)))))
+                      :failures (vec (mapcat :failures results))
+                      :errors (vec (mapcat :errors results))
+                      :stats (apply merge-with + (map :stats results))
+                      :attr-check (apply merge-with (partial merge-with +) (keep :attr-check results))
+                      :attr-diffs (vec (mapcat :attr-diffs results))})
+            ;; jdk's finish calls: the javac trees' side's split and native provider's check, the native trees' side's
+            split-javac (and split (not= front :both))
+            attr-javac? (and (= front :native) (= attr "native"))
+            attr-native? (= attr "native")
+            native-out (or native-out (str out ".native"))]
+        (if child
+          ;; a chunk's process: its units written, their summaries (the read without javac's counts, the process's
+          ;; peak) into REPR_JAVA_CHUNK_OUT
+          (let [r (task (nth work child))
+                g (gather [r])
+                side (fn [dir g split? attr?]
+                       (summarize dir (:units g) (:failures g) (:errors g) (:stats g) check split?
+                                  (when attr? {:check (:attr-check g) :diffs (:attr-diffs g)})))
+                s {:javac (side out g split-javac attr-javac?)
+                   :native (when (= front :both)
+                             (side native-out (gather [(or (:native r) (select-keys r [:failures]))]) split attr-native?))
+                   :nojavac (when no-javac (nojavac-of [r]))
+                   :peak-rss (#'rj/peak-rss)}]
+            (spit (System/getenv "REPR_JAVA_CHUNK_OUT") (summary-text s))
+            nil)
+          (let [pool (java.util.concurrent.Executors/newFixedThreadPool procs)
+                futures (mapv (fn [[i _]] (.submit pool ^java.util.concurrent.Callable (fn [] (run-chunk-process module i args)))) work)
+                runs (mapv deref futures)
+                _ (.shutdown pool)
+                ;; a chunk whose process failed: its files failed, as a chunk whose javac threw
+                failed (fn [i st ^File log]
+                         (let [fs (mapv (fn [f] {:failure true :source f
+                                                 :error (str "javac: the chunk's process exited " st " (" (.getPath log) ")")})
+                                        (get copies-of i))
+                               e {:units 0 :packages [] :written [] :reads (when check []) :slowest [] :failures fs
+                                  :errors 0 :first-errors [] :stats nil :heads nil :split nil :attr-check nil :attr-diffs []}]
+                           {:javac e :native e}))
+                ss (vec (for [[[i _] [s st ^File log]] (map vector work runs)]
+                          (do
+                            ;; what a chunk's process printed (nothing when it read its chunk)
+                            (let [t (try (slurp log) (catch Throwable _ ""))]
+                              (when (or (seq t) (nil? s))
+                                (binding [*out* *err*]
+                                  (println (str "read-jdk: chunk " i "'s process (" (.getPath log) "), exit " st ":"))
+                                  (print t) (flush))))
+                            (or s (failed i st log)))))
+                peak (let [ps (keep identity (cons (#'rj/peak-rss) (map :peak-rss ss)))] (when (seq ps) (apply max ps)))
+                _ (when no-javac
+                    (let [njs (keep :nojavac ss)]
+                      (nojavac-report out {:files (reduce + (map :files njs)) :native (reduce + (map :native njs))
+                                           :fallbacks (vec (mapcat :fallbacks njs))
+                                           :native-ms (reduce + (map :native-ms njs)) :ms (reduce + (map :ms njs))
+                                           :wall-ms (quot (- (System/nanoTime) t0) 1000000)
+                                           :threads threads}
+                                      peak)))
+                res (report! out (count files) (mapv :javac ss) check t0 split-javac attr-javac?)]
+            (when (= front :both)
+              (println "native trees:")
+              (report! native-out (count files) (mapv :native ss) check t0 split attr-native?))
+            res))))))
+
+(defn -main [cmd & args]
+  ;; javac's half (JN10, JFS130 (a)) where javac's classes are: loaded once, before any thread reads
+  (hook/try-load-javac-half!)
+  (#'rj/javac-needed-exit
+   (case cmd
+     "read-jdk" (let [[opts [out module src & paths]] (#'rj/parse-opts args)]
+                  (binding [rj/*full* (boolean (:full opts))] (jdk (vec args) out module src paths opts)))))
+  (shutdown-agents))

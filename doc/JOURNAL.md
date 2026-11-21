@@ -15308,3 +15308,120 @@ result with `jrt/StackTraceElement_Cast`, and jrt's hand-written StackTraceEleme
 program names is defined (521 used, a static comparison of the printed program with jrt's functions: only this one missing). Fix:
 StackTraceElement_Cast in go/arbace/jrt/throwable.ae, as AtomicInteger_Cast and kin are written. (j2g's dyn slots could instead fall
 back to Go's assertion for a hand-written class without a cast, as code.ae's casts do; left as it is, one function in jrt.)
+## 2026-11-20: java-split-1120: repr/java's jdk reads in chunk processes (the gate's behemoths, part 1: the mechanism)
+
+The user: "identify the resource hogging bottleneck steps in the gate and split the behemoth jobs". repr/java's share of the
+store of passes' peaks: `repr-java-nojavac.jdk` 53.4 GiB, `repr-java-front.jdk` 48.3, `repr-java-attr.jdk` 41.6 (61.4 on night
+13, OOM-killed), `jrt-convert` 40.1 GiB in 2,119 s (its convert 1,758 s), `repr-java-roundtrip.jdk` 28.8 (the whole steps'
+`repr-java-attr` 40.1 and `repr-java-front` 28.8 are passes of 2026-10-27, before GT5's parts). Goal: no step above about
+16 GiB, the same checks, verdicts, records and outputs byte for byte.
+
+- What grows: all five are one `read-jdk` of java.base's closure (3,421 files at `next` 939037429, 3,372 at 42494a700) in one
+  process: `arbace.repr.java/jdk` packs the files into chunks of about 150 (whole packages; 23 chunks), converts
+  REPR_JAVA_THREADS (4) at once, a javac context each over its chunk with every other chunk's sources visible
+  (REPR_JAVA_PATCH_ALL), and holds every chunk's units, their forms, until one `finish` writes them all (`(mapv deref
+  futures)`): every unit's forms (about 0.85 MB a file and front, "As built: the jdk parts' memory") plus four javacs, at GOGC
+  200. Under GOMEMLIMIT 26 or 28 GiB the live heap near the limit made the collector thrash: jrt-convert's read took 1,660 s
+  and its step 41,672 CPU seconds (`.tmp/gate-pass/jrt-convert/a3ca8d99...log`, `conv/repr-java-nojavac.edn` :peak-rss 32.0 GB).
+- Split: `test/repr/java/chunks.ae` (`repr.java.chunks`), `ARBACE_PATH=ROOT/test bin/repr-java main -m repr.java.chunks
+  read-jdk ...`, read-jdk's arguments and output: with REPR_JAVA_PROCS=N and more than one chunk, jdk's chunks (the same
+  files, patch directories, javac options and patch path: what each javac sees is what it saw) each read by a process of its
+  own, N at once, the tool again (`/proc/self/exe`, REPR_JAVA_CHUNK naming the chunk, GOMEMLIMIT REPR_JAVA_PROC_GOMEMLIMIT's);
+  the chunk's process converts it as jdk's thread does, writes its units' forms (write-output a package at a time: a package
+  is in one chunk alone) and a summary, data alone, checked to read back as itself (the split's facts, sorted sets, sorted
+  again); the first process copies the chunks, runs the others and merges the summaries in the chunks' order into finish's
+  reports and lines (the written files in write-output's group-by order: the same keys inserted in the same order; the
+  unreadable list, the edn errors' frequencies, repr-java-report/-split/-attr/-nojavac.edn); a failed chunk's process fails
+  its files, its log shown. Without REPR_JAVA_PROCS, or with one chunk, `arbace.repr.java/jdk` itself.
+- DECISION (reader untouched): the driver lives outside the reader, in test/repr/java (as jrt-convert's own namespaces live in
+  test/jrt), not in `arbace/repr/java.ae`. A first version put it into `jdk` and `finish` (`report!` over summaries, finish one
+  summary) with `REPR_JAVA_TOOL` exported by bin/repr-java; it gave the same outputs, but java.ae and bin/repr-java are in
+  `repr_java_reader_hash`, which the four provenance files record (`bin/provenance-check`, an essential step): the change
+  would have needed `bin/jrt-convert update`, `bin/javac-vendor convert`, `--java-fixtures update` and `--forms update` in the
+  same commit (GTS36 (b)), the first of them the behemoth itself and jdk/ stale at `next` for other reasons (overlay changes
+  of 416 and queue 398 since 42494a700, no update yet). Outside the reader: the provenance files, the reader hash, the javac
+  key and gate_key stay; the price is that the driver repeats `jdk`'s plan (files, chunks, patch path, javac options) and
+  `finish`'s report; the slice proofs below compare them with the reader's own.
+- Proofs on a slice (java/util/stream, function, concurrent of jdk26u's java.base: 181 files, 2 chunks; javac's tool
+  `javac-60886b4973e7`, the original code in a worktree at 42494a700): `--check --front both --split --attr native` (forms,
+  repr-java-report, -split, -attr equal byte for byte; the logs equal but the times), `--check --no-javac` (forms and report
+  equal; repr-java-nojavac.edn but its times and :peak-rss), `--full --origins` (forms equal); a failing chunk's process
+  (a tool that exits 3): 181 FAILED, the summary line "0 converted, 181 failed".
+
+## 2026-11-20: java-split-1120, part 2: jrt-convert's convert step in chunk processes, proven by verify
+
+- Measured first (under bin/heavy-lock): jrt-convert's javac step (java.base's closure compiled twice by javac on Arbace, one
+  context, GOMEMLIMIT 28GiB) peaks at 3.4 GiB in 145 s: not a hog; the step's 40.1 GiB is its convert read alone. A chunk's
+  process of front-check's jdk read takes 2.2 to 3.5 GiB (27 of 28 chunks, run under `ulimit -v 8 GiB`, the coordinator's
+  rule for jobs under 8 GiB), but the chunk holding `jdk/internal/util/regex/IndicConjunctBreak.java` overran 8 GiB: its
+  forms (1.19 MB, `(or (or (or ...)))` some 600 deep: a generated `||` chain) take the layout (arbace.repr.java.layout, at
+  write-output) 9.0 GiB and 210 s a side, read alone (the regex package's two files, GOMEMLIMIT 4GiB, 7 minutes for both
+  fronts). So two chunk processes at once, not three: the step's peak is that chunk's and one other's.
+- `bin/jrt-convert`'s convert: `bin/repr-java main -m repr.java.chunks read-jdk` (ARBACE_PATH ROOT/test), REPR_JAVA_PROCS 2,
+  REPR_JAVA_PROC_GOMEMLIMIT 4GiB (the environment's win). The round trip's two jdk reads the same (`bin/lib/repr-java/roundtrip`).
+- Proof: `GOMEMLIMIT=28GiB bin/jrt-convert verify` (the gate's command) at 42494a700, where jdk/ verified on 2026-11-20 with
+  the same javac tool (`javac-60886b4973e7`, its key the checkout's), with this branch's bin/jrt-convert, front-check,
+  roundtrip and test/repr/java/chunks.ae laid over (worktree `.tmp/worktrees/java-split-ref`): "verify: jdk is the conversion,
+  byte for byte (3579 forms files, 22 data files)", status 0; its lines as the gate's pass of 2026-11-20 (3,372 files, 3,281
+  native, 91 fallbacks "declined :names/hoist: no symbol", 0 failed, 3,579 of 3,579 equal, 7,032 classes, edge 168 classes and
+  1,356 members), the fallbacks' list in the same order. Peak 12.4 GiB of the process tree (the IndicConjunctBreak chunk's
+  process 11.8 GiB), 1,367 s (convert 1,040 s), against 40.1 GiB and 2,119 s (convert 1,758 s, 41,672 CPU s: the collector's
+  thrash under one process's limit gone; the read's native-ms 929,523 against 2,571,474).
+- test/gate/steps.edn: jrt-convert `:mem-gib` 34 -> 14 (1.1 x 12.4); its command unchanged (GOMEMLIMIT 28GiB now bounds only
+  the light steps; the chunk processes take 4GiB each). The admission is the larger of `:mem-gib` and 1.1 x the largest kept
+  pass's peak, so the old passes (42 GiB) keep it high until they age out of the store (plan.ae's `admission`).
+
+## 2026-11-20: java-split-1120, part 3: front-check's jdk corpus in chunk processes
+
+- `bin/lib/repr-java/front-check`'s `jdk_read`: for the jdk and jdk26u corpora (`jdk_procs`, `jdk_proc_mem`) read-jdk through
+  `repr.java.chunks`, two processes at once, GOMEMLIMIT 4GiB each (REPR_JAVA_PROCS, REPR_JAVA_PROC_GOMEMLIMIT win); the javac
+  corpus's modules (at most 9.5 GiB, four chunks) keep the threads. One script for front-check, attr-check and nojavac-check.
+- Proof (`bin/repr-java front-check --corpus jdk`, the gate's part command, under bin/heavy-lock, javac's tool
+  `javac-60886b4973e7`, at `next` 939037429 with this branch): "jdk: 3630 forms files from javac's trees, the native trees'
+  equal", both sides "3421 Java files, 3421 converted, 0 failed, 0 javac errors, 3630 files written, 0 unreadable", the
+  differing files none (test/repr/java/front-check-known.edn: none), status 0; the split summed (split.md). Peak 11.5 GiB of
+  the tree, 1,401 s (with the originals made again, 2.5 minutes): the chunks' processes 2.2 to 3.6 GiB each (their summaries'
+  :peak-rss), the one with IndicConjunctBreak.java 10.4 GiB (the last chunk, alone at the end). Before: 48.3 GiB, 340 s for
+  2,277 files (2026-11-12; the corpus is 3,421 files since). An earlier run with each process under `ulimit -v 8 GiB` (the
+  coordinator's rule for light jobs) failed that chunk alone: 27 of 28 chunks converted, 74 files FAILED (its log: "runtime:
+  out of memory ... 6558318592 in use").
+- test/gate/steps.edn: repr-java-front's jdk part `:mem-gib 14` (two processes at once with that chunk: 15 at most), the
+  step's default 48 -> 14.
+
+## 2026-11-20: java-split-1120, part 4: attr-check's jdk corpus, proven
+
+- `bin/repr-java attr-check --corpus jdk` (the gate's part command; the part is `:clean-only`, run by hand under bin/heavy-lock,
+  javac's tool `javac-60886b4973e7`, `next` 939037429 with this branch): "jdk: 3630 forms files from javac's trees, the native
+  trees' equal", 3,421 files converted on both sides, 0 failed, "native attribution: {:equal 3536330, :declined 809}; the
+  model's reads: {:native 22949915, :javac 1807}", no fact differing, "attr-check: the native provider's facts equal javac's,
+  and the forms, in every corpus", status 0. Peak 13.1 GiB of the tree, 1,804 s: a chunk's process 3.0 to 4.2 GiB (the native
+  provider's registry on top of front-check's), the IndicConjunctBreak chunk 11.6. Before: 41.6 GiB (2026-11-05), 61.4 GiB and
+  OOM-killed on night 13.
+- test/gate/steps.edn: repr-java-attr's jdk part `:mem-gib` 62 -> 15 (16.5 at most if that chunk's spike met a 4.2 GiB chunk),
+  the step's default 49 -> 15. DECISION left to the user: the part is `:clean-only` "until cut" (2026-11-13); it is cut, and
+  `:clean-only` stays until the user lifts it (as a `:phase :weekly` part, like front's and nojavac's).
+
+## 2026-11-20: java-split-1120, part 5: nojavac-check's jdk corpus, the chunked jrt-convert update for the night
+
+- `bin/repr-java nojavac-check --corpus jdk` (the gate's part command, under bin/heavy-lock, `next` 939037429 with this
+  branch): "jdk: 3630 forms files from javac's trees, the native trees' (read without javac) equal", both reads 3,421 files, 0
+  failed; the verdict FAILED on "nojavac: jdk: 93 fallbacks to javac, beyond the known 0" ("declined :names/hoist: no symbol"
+  93; 3,328 of 3,421 read natively). Not the split's: test/repr/java/nojavac-check-known.edn allows the jdk corpus none (its
+  last pass, 2026-11-12, had 2,277 files and none); the closure grew since, and the whole read of jrt-convert's pass of
+  2026-11-20 at 42494a700 fell back on 91 files for the same reason, the chunked read there on the same 91 in the same order.
+  The known file's jdk entry, or the names/hoist declines, are the reader's to settle (left). Peak 12.7 GiB of the tree,
+  2,992 s (the javac trees' read 1,373 s, the read without javac 1,615 s): a chunk's process 2.1 to 4.2 GiB, the
+  IndicConjunctBreak chunk 11.2 (javac's read) and 11.8. Before: 53.4 GiB, 431 s (2,277 files, 2026-11-12).
+- test/gate/steps.edn: repr-java-nojavac's jdk part `:mem-gib` 59 -> 14, the step's default 34 -> 14. repr-java-roundtrip
+  unchanged (its jdk part `:clean-only`, its references stale since 2026-11-13; not run: its reads take the same driver,
+  proven by the slices and jrt-convert; its print and judgment on stage 0 not measured).
+- The night's merge (the coordinator): its `jrt-convert update`, a whole read on the gate's javac tool, was OOM-killed at
+  54.4 GB at 23:00. Handed over: `git checkout mac/java-split-1120 -- bin/jrt-convert test/repr/java/chunks.ae` on
+  n-merge-1120b (its bin/jrt-convert is next's), about 23 minutes, 12.4 GiB of the tree (no process under 8 GiB can hold the
+  IndicConjunctBreak chunk, 11.8), byte-equality shown by verify at 42494a700 (part 2).
+- The survey: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk reads in chunk processes" (the proofs, the cost in
+  time, the layout's proposal).
+
+## 2026-11-20: java-split-1120: a correction to part 1
+
+Part 1 says java.base's closure packs into 23 chunks: it is 28 (java.base-0 to java.base-27, at `next` and at 42494a700).
