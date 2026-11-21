@@ -1423,12 +1423,34 @@
   [rs n]
   (let [qt (get-in n [:type :qualType])]
     (if (and qt (or (str/includes? qt "decltype") (str/includes? qt "noexcept(")))
-      (let [ps (new-scope :block rs :fn-type true)]
-        (doseq [[i pn] (map-indexed vector (param-nodes n)) :when (:name pn)]
-          (when-let [t (try (resolve-type rs (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
-            (let [id (next-id)]
-              (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param :fpi i})
-              (enter! ps (:name pn) {:e :var :id id}))))
+      (let [ps (new-scope :block rs :fn-type true)
+            pns (vec (param-nodes n))
+            packed (mapv #(boolean (re-find #"\.\.\.\s*$" (or (get-in % [:type :qualType]) ""))) pns)
+            ;; (cpp-rt-own2: a function parameter pack, `_Args&&... __args`, its parameters from the function type's (the pack
+            ;; expanded) and its name standing for them, as a body's (analyze-fn!'s :varpack): <alloc_traits.h>'s construct,
+            ;; `noexcept(noexcept(__a.construct(__p, std::forward<_Args>(__args)...)))`, not noexcept before (__args unbound),
+            ;; so vector's _S_use_relocate() false and its reallocation a copy where clang relocates)
+            fty (when (some true? packed) (try (resolve-type rs qt) (catch arbace.lang.ExceptionInfo _ nil)))
+            n-pack (when (= :fn (:k fty)) (- (count (:ps fty)) (dec (count pns))))]
+        (if (and n-pack (= 1 (count (filter true? packed))) (>= (long n-pack) 0))
+          (loop [i 0 j 0]
+            (when (< i (count pns))
+              (let [pn (nth pns i)]
+                (if (nth packed i)
+                  (let [ids (vec (for [k (range j (+ j (long n-pack)))]
+                                   (let [id (next-id)] (swap! *vars* assoc id {:id id :name nil :ty (nth (:ps fty) k) :storage :param :fpi i}) id)))]
+                    (when (:name pn) (enter! ps (:name pn) {:e :varpack :ids ids}))
+                    (recur (inc i) (+ j (long n-pack))))
+                  (do (when (:name pn)
+                        (let [id (next-id)]
+                          (swap! *vars* assoc id {:id id :name (:name pn) :ty (nth (:ps fty) j) :storage :param :fpi i})
+                          (enter! ps (:name pn) {:e :var :id id})))
+                      (recur (inc i) (inc j)))))))
+          (doseq [[i pn] (map-indexed vector pns) :when (:name pn)]
+            (when-let [t (try (resolve-type rs (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+              (let [id (next-id)]
+                (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param :fpi i})
+                (enter! ps (:name pn) {:e :var :id id})))))
         ps)
       rs)))
 
@@ -2438,6 +2460,16 @@
 
 (defn- has-ctor-of? [id pred] (some #(pred (fnd %) id) (:ctors (abi/cls id))))
 
+(defn- default-ctor-nontrivial?
+  "Whether a base's or member's class `bid` makes its owner's default constructor non-trivial ([class.default.ctor]/3): its own
+  default constructor not trivial, or (cpp-rt-own2) none that is no template, as clang's hasTrivialDefaultConstructor (a class
+  whose default constructor is a template's specialization, <tuple>'s tuple(), has none: user-provided): unique_ptr's
+  __uniq_ptr_impl() = default over its tuple<pointer, _Dp> _M_t, non-trivial, clang's __uniq_ptr_data<...>::__uniq_ptr_data()
+  called after the zeroing of unique_ptr() : _M_t()."
+  [bid]
+  (let [zs (filter #(empty? (:ps (:ty (fnd %)))) (:ctors (abi/cls bid)))]
+    (or (empty? zs) (some #(not (:trivial (fnd %))) zs))))
+
 (defn finish-class!
   "A complete class: its virtual functions (declared or overriding), its implicit special members, its vtable."
   [id]
@@ -2468,7 +2500,7 @@
     ;; the default constructor
     (when (empty? (:ctors (abi/cls id)))
       (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
-                        (some #(let [b (abi/cls %)] (some (fn [x] (let [g (fnd x)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b))) (class-like-members id)))]
+                        (some default-ctor-nontrivial? (class-like-members id)))]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
     ;; (cpp-rt-own2: and when a base's default constructor is inherited by a using-declaration and the class declares none of its
     ;; own, as clang's needsImplicitDefaultConstructor declares it (HasInheritedDefaultConstructor): unique_ptr's __uniq_ptr_data,
@@ -2481,15 +2513,14 @@
                                   (some #(let [g (fnd %)] (and (empty? (:ps (:ty g))) (not (:deleted g)))) (:ctors (abi/cls (:cls b))))))
                      (:bases c)))
       (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
-                        (some #(let [b (abi/cls %)] (some (fn [x] (let [g (fnd x)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b))) (class-like-members id)))]
+                        (some default-ctor-nontrivial? (class-like-members id)))]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
     (doseq [x (:ctors (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (empty? (:ps (:ty g))))
                          ;; (trivial only when its bases' and members' default constructors are: [class.default.ctor]/3;
                          ;; G4: std::vector() = default over _Vector_impl's user-provided one)
                          (upd-fn! x assoc :trivial (not (or (abi/dynamic? id) (some :init (:fields c))
-                                                            (some #(let [b (abi/cls %)] (some (fn [y] (let [g (fnd y)] (and (empty? (:ps (:ty g))) (not (:trivial g))))) (:ctors b)))
-                                                                  (class-like-members id))))))))
+                                                            (some default-ctor-nontrivial? (class-like-members id))))))))
     ;; the copy constructor and the copy assignment
     ;; CX12 (the checker): [class.copy.ctor]/6, [class.copy.assign]/2: a class that declares a move constructor or a move
     ;; assignment operator has its implicit copy constructor and copy assignment defined as deleted
@@ -3353,6 +3384,7 @@
                                  emp? ::empty
                                  arr? (let [xs (mapv el (:items init))]
                                         (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill init)))))
+                                 (and (abi/arr? at) (= :string (:i init))) (ce-init (:ty v) init @env)
                                  (#{:expr :zero :none} (:i init)) (if (and (abi/class? at) (not= :expr (:i init)))
                                                                     (ce-init (:ty v) init @env)
                                                                     ;; (h-cpp-consteval, the checker: a scalar default-initialized,
@@ -3537,7 +3569,11 @@
   before (a zero-initialized one for :zero-then), else uninitialized."
   [cid fid args env start]
   (let [f (fnd fid)]
-    (when-not (:constexpr f)
+    ;; (cpp-rt-own2, the code generator: an implicit or first-declaration-defaulted constructor is constexpr when it can be,
+    ;; [class.default.ctor]/4, [dcl.constexpr]/7: evaluated, a member's or base's that is not failing the evaluation in turn;
+    ;; <charconv>'s _S_make_table()'s `type __table;` over `unsigned char __data[256] = {};`)
+    (when-not (or (:constexpr f) (and (not (checking?)) (not (:body f)) (not (:out-of-line-default f)) (not (:ool-defaulted f))
+                                      (or (:implicit f) (:defaulted f))))
       (if (ce-not-constexpr? f)
         (ce-sure! "call to non-'constexpr' function '" (:name f) "'")
         (not-constant "a call of the constructor " (:name f))))
@@ -3585,6 +3621,12 @@
       :copy (ce-glvalue (:e i) env)
       :zero (if u (ce-zero-of u) 0)
       :none (if cls? {::cls (:id u)} 0)
+      ;; (cpp-rt-own2: an array of characters from a string literal, its code units and zeros to its bound, [dcl.init.string]:
+      ;; <charconv>'s `constexpr unsigned char __lower_letters[27] = "abcdefghijklmnopqrstuvwxyz";` in _S_make_table())
+      :string (if (and u (abi/arr? u))
+                (let [n (long (or (:n u) (:n i) (inc (count (str-units (:e i))))))]
+                  (mapv #(ce-wrap (:of u) %) (take n (concat (str-units (:e i)) (repeat 0)))))
+                (not-constant "a string literal's initializer for " (pr-str t)))
       :list (cond
               (:cls i) (let [cid (:cls i) c (abi/cls cid) items (:items i) fu (:fields-used i)
                              nb (- (count items) (count fu))
@@ -6417,7 +6459,9 @@
         id (next-id)
         cs (new-scope :class (:scope ctx) :cls id :path (conj path [:cls id]))
         t {:k :class :id id}
-        _ (swap! abi/*classes* assoc id {:id id :name nil :mname mname :dollar-key (when-not ul? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true})
+        _ (swap! abi/*classes* assoc id (cond-> {:id id :name nil :mname mname :dollar-key (when-not ul? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true}
+                                          ;; (cpp-rt-own2: the parameters, mangled in the enclosing name's substitutions, abi's part-name)
+                                          ul? (assoc :ul [ps k])))
         fid (next-id)
         base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id]) :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}
         _ (swap! *fns* assoc fid (merge base-f {:id fid :name "operator()" :kind :method :op "()" :ty {:k :fn :ret ret :ps ps :va false}
@@ -6567,7 +6611,7 @@
         ckey [(:fn-id ctx) (if ul? (abi/mangle-params sps) :dollar)]
         k (long (or (get @*lambda-counts* ckey) 0))
         _ (swap! *lambda-counts* assoc ckey (inc k))
-        _ (when ul? (abi/update-cls! id assoc :mname (str "Ul" (abi/mangle-params sps) "E" (if (zero? k) "" (dec k)) "_")))
+        _ (when ul? (abi/update-cls! id assoc :mname (str "Ul" (abi/mangle-params sps) "E" (if (zero? k) "" (dec k)) "_") :ul [sps k]))
         items (if (str/blank? intro) [] (split-top intro))
         default (some #(case % "=" :copy "&" :ref nil) items)
         fs (new-scope :fn (:scope ctx))
@@ -7850,7 +7894,14 @@
                    (cond
                      (nil? e) {:s :return}
                      pre (if (abi/void? rt) {:s :return :void-e pre}
-                             {:s :return :init (init-for rt pre ctx (if (= :init-list (:op pre)) :list :copy))})
+                             ;; (cpp-rt-own2, the code generator: [class.copy.elision]/3 in a function whose return type was deduced
+                             ;; too, a returned local of class type an rvalue first: <bits/fs_path.h>'s auto path::_S_convert's
+                             ;; `return __str;` of its std::string, clang's move constructor, a copy before)
+                             (let [a (if (and (not (checking?)) (= :var (:op pre)) (not (abi/ref? rt)) (abi/class? (abi/unq rt))
+                                              (#{:local :param} (:storage (var* (:id pre)))) (abi/class? (abi/unq (:ty pre))))
+                                       (assoc pre :cat :xv)
+                                       pre)]
+                               {:s :return :init (init-for rt a ctx (if (= :init-list (:op a)) :list :copy))}))
                      (abi/void? rt) {:s :return :void-e (analyze ctx e)}
                      :else (let [a (analyze ctx e)
                                  ;; [class.copy.elision]/3: a returned local is an rvalue first
