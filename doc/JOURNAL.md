@@ -15615,3 +15615,27 @@ Asked after main's consolidation (d0cdf3d7f; independence C++ 0.9482, Haskell 0.
 - Python: the 24 synth/ops programs queue 247 left on CPython's recorded runs (the arithmetic, bitwise and comparison tables over 15
   operands) get models computing their tables exactly, reviewed against the Reference, so their verdicts are their own.
 - Resume now, lightly: one or two agents on this host, the Mac holding until the allowance resets.
+
+## 2026-11-21: indep-out-1121: Haskell's 31 programs that run on neither side count out; Python's 151 programs split into 127 own and 24 recorded
+
+The user's decisions of 2026-11-21 (the entry above), the two that are records changes (branch `indep-out-1121`, from mac/next c19738ada).
+
+Haskell: `test/haskell/eval-out.edn` lists the 31 eval programs that run on neither side, each with a kind, its level `:eval` and its
+reason: the 28 GHC did not build (check-hsi-own.edn `:no-dump`: 19 nofib/parallel programs importing parallel or random, plus
+nofib/gc/gc_bench, real/ben-raytrace, real/smallpt, smp/sieve, spectral/secretary (packages outside the boot libraries), real/eff,
+smp/stm001 and spectral/hartel (no main file), smp/threads004), `:host`; T24809 and T4262 (all.T skips them), `:host`; T17920 (a Cmm
+main, run with no STG), `:by-design`. independence.edn's Haskell eval fact names it by `:out-of-cases {:file ... :cases 31}`, whose
+claim the score already checked (kinds, levels, reasons, the sum); test/crops/score.ae's `case-inputs` now also takes those ids out of
+the cell's ids and total (`rfp53-counts-out`, with a `--self-test` case and its control: no case out counts them again), so eval counts
+919 cases: 879 own, 40 at 0.5 (was 950: 879 and 71). None of the 31 is among AOT's 139, so AOT stays 135 of 139. The 28 and T4262 were
+already n/a in bin/reap's na.tsv; completeness is unchanged (0.9722).
+
+Python: the eval-and-AOT facts' `:cases` held `:pyi-loop [151 0.5] :pyi-aot [151 0.5]`, which queue 247's golden texts made stale: the
+AOT record (test/python/check-aot-linux-amd64.edn, 7fd453120) has 126 rows `:verdict :golden` and del.py, classed `:as-pyi` against
+the golden text (127 judged by their own golden texts, test/python/golden) and 24 `:verdict :ref` (CPython's recorded run, synth/ops).
+The judge's cases are now `:pyi-loop-own [127 1] :pyi-loop-recorded [24 0.5] :pyi-aot-own [127 1] :pyi-aot-recorded [24 0.5]` and its
+`:tool` text says so. Counts from the record, no run.
+
+Scores (exact, floored): Haskell independence 0.9898 (98) -> 0.9928 (99), eval 0.9630 -> 0.9780; Python 0.9996 (99) -> 1.0000 (100),
+judge 0.9980 -> 1.0000. Alternatives not taken: a new `:no-run` kind in score.ae (the existing kinds cover them); counting the 31 in
+AOT (none there).
