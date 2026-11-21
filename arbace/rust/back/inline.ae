@@ -1,0 +1,461 @@
+;; C6-4 (doc/rust/FRONTEND-SURVEY.md, "C6-4's next slice: LLVM's AlwaysInliner over our forms"): the one transformation of
+;; LLVM's -O0 pipeline (llvm/lib/Passes/PassBuilderPipelines.cpp's buildO0DefaultPipeline: AlwaysInlinerPass, no lifetime
+;; intrinsics) over the LLVM forms our codegen writes, after llvm/lib/Transforms/IPO/AlwaysInliner.cpp (AlwaysInlineImpl),
+;; llvm/lib/Transforms/Utils/InlineFunction.cpp (InlineFunctionImpl, HandleInlinedLandingPad) and
+;; llvm/lib/Transforms/Utils/CloneFunction.cpp (CloneAndPruneIntoFromInst, PruningFunctionCloner::CloneBlock), of the
+;; llvm-project in rustc-1.99.1-src.tar.xz (LLVM 23; Apache-2.0 WITH LLVM-exception, LICENSE.md, "LLVM (clang)").
+
+(ns arbace.rust.back.inline
+  "LLVM's AlwaysInliner over define forms (arbace.repr.llvm's): each call of an `alwaysinline` function the module defines
+  replaced by the function's body, as InlineFunction clones it (arguments mapped, constants folded, branches on constants
+  pruned, blocks merged), the inlined functions dropped.
+
+    (inline-module DEFINES ALWAYS)   DEFINES the module's define forms in order, ALWAYS the set of `alwaysinline` symbols:
+                                     the defines after inlining, the inlined ones that nothing calls any more left out"
+  (:refer-clojure :exclude [label])
+  (:require [arbace.string :as str]))
+
+(defn- local? [x] (and (symbol? x) (nil? (namespace x)) (str/starts-with? (name x) "%")))
+
+(defn- def-parts
+  "[sym ret params opts-vector body] of a define form"
+  [f]
+  (let [v (vec f) i (.indexOf ^java.util.List v :body)]
+    [(nth v 1) (nth v 2) (nth v 3) (vec (concat (subvec v 4 i) (subvec v (+ i 2)))) (vec (nth v (inc i)))]))
+
+(defn- make-def [sym ret params opts body] (apply list 'llvm/define sym ret params (concat opts [:body (vec body)])))
+
+(defn- label [b] (second b))
+(defn- insts [b] (vec (drop 2 b)))
+(defn- block [l is] (list* 'block l is))
+
+(defn- res-of [i] (when (and (seq? i) (= '= (first i))) (second i)))
+(defn- op-of [i] (if (and (seq? i) (= '= (first i))) (nth i 2) i))
+(defn- with-op [i op] (if (res-of i) (list '= (res-of i) op) op))
+(defn- opname [i] (let [o (op-of i)] (when (seq? o) (first o))))
+
+(defn kv-after
+  "The value after keyword K in the form X's elements"
+  [x k]
+  (let [v (vec x) i (.indexOf ^java.util.List v k)] (when (pos? i) (nth v (inc i) nil))))
+
+(defn successors
+  "A terminator's successor labels, in its order"
+  [t]
+  (let [o (op-of t)]
+    (case (opname t)
+      br (if (= 2 (count o)) [(second o)] [(nth o 3) (nth o 4)])
+      switch (into [(nth o 3)] (map #(nth % 2) (nth o 4)))
+      invoke [(kv-after o :to) (kv-after o :unwind)]
+      [])))
+
+(defn- subst [x m]
+  (cond (symbol? x) (get m x x)
+        (seq? x) (apply list (map #(subst % m) x))
+        (vector? x) (mapv #(subst % m) x)
+        :else x))
+
+(defn- relabel-term
+  "A terminator with successor label FROM replaced by TO"
+  [t from to]
+  (let [o (op-of t)
+        r (fn [l] (if (= l from) to l))
+        o2 (case (first o)
+             br (if (= 2 (count o)) (list 'br (r (second o))) (list 'br (nth o 1) (nth o 2) (r (nth o 3)) (r (nth o 4))))
+             switch (list 'switch (nth o 1) (nth o 2) (r (nth o 3)) (mapv (fn [[t c l]] [t c (r l)]) (nth o 4)))
+             invoke (apply list (map (fn [x] (if (= x from) to x)) o))
+             o)]
+    (with-op t o2)))
+
+(defn- phi-relabel
+  "Each phi of block B whose incoming label is FROM given TO"
+  [b from to]
+  (block (label b) (map (fn [i] (if (= 'phi (opname i))
+                                  (let [o (op-of i)] (with-op i (apply list 'phi (second o) (map (fn [[v l]] [v (if (= l from) to l)]) (drop 2 o)))))
+                                  i))
+                        (insts b))))
+
+;; ---------------------------------------------------------------------------------------------
+;; ConstantFoldInstruction: an integer operation of constant operands (the cases rustc's -O0 code reaches)
+
+(defn- int-bits [t] (when (symbol? t) (when-let [[_ n] (re-matches #"i(\d+)" (name t))] (Long/parseLong n))))
+
+(defn- const-int [x] (cond (integer? x) (biginteger x) (= 'true x) BigInteger/ONE (= 'false x) BigInteger/ZERO :else nil))
+
+(defn- wrap [^BigInteger v bits] (.and v (.subtract (.shiftLeft BigInteger/ONE (int bits)) BigInteger/ONE)))
+(defn- signed [^BigInteger v bits] (let [u (wrap v bits)] (if (.testBit u (int (dec bits))) (.subtract u (.shiftLeft BigInteger/ONE (int bits))) u)))
+
+(defn- out-int
+  "An integer of BITS as the forms write it: i1 as true/false, the rest signed (LLVM's printing)"
+  [^BigInteger v bits]
+  (if (= 1 bits) (if (.testBit v 0) 'true 'false)
+      (let [s (signed v bits)] (if (< (.bitLength s) 64) (.longValue s) s))))
+
+(defn- fold
+  "The constant an instruction folds to, or nil"
+  [i]
+  (let [o (op-of i)]
+    (when (seq? o)
+      (let [nm (first o) xs (vec (rest o))
+            flags (set (take-while keyword? xs)) ys (vec (drop-while keyword? xs))]
+        (case nm
+          (add sub mul and or xor shl lshr ashr udiv sdiv urem srem)
+          (let [[t a b] ys bits (int-bits t) a (const-int a) b (const-int b)]
+            (when (and bits a b)
+              (let [ua (wrap a bits) ub (wrap b bits) sa (signed a bits) sb (signed b bits)
+                    r (case nm
+                        add (.add ua ub) sub (.subtract ua ub) mul (.multiply ua ub)
+                        and (.and ua ub) or (.or ua ub) xor (.xor ua ub)
+                        shl (when (< (.longValue ub) bits) (.shiftLeft ua (int (.longValue ub))))
+                        lshr (when (< (.longValue ub) bits) (.shiftRight ua (int (.longValue ub))))
+                        ashr (when (< (.longValue ub) bits) (.shiftRight sa (int (.longValue ub))))
+                        udiv (when (pos? (.signum ub)) (.divide ua ub))
+                        sdiv (when (pos? (.signum (.abs sb))) (.divide sa sb))
+                        urem (when (pos? (.signum ub)) (.mod ua ub))
+                        srem (when (pos? (.signum (.abs sb))) (.remainder sa sb)))
+                    ;; a flagged overflow is poison (left unfolded: LLVM folds it to poison, which rustc's -O0 code does not reach)
+                    over (and r (or (and (:nuw flags) (#{'add 'mul 'shl} nm) (not= r (wrap r bits)))
+                                    (and (:nuw flags) (= 'sub nm) (neg? (.signum ^BigInteger r)))
+                                    (and (:nsw flags) (#{'add 'sub 'mul} nm)
+                                         (not= (signed (case nm add (.add sa sb) sub (.subtract sa sb) mul (.multiply sa sb)) bits)
+                                               (case nm add (.add sa sb) sub (.subtract sa sb) mul (.multiply sa sb))))))]
+                (when (and r (not over)) (out-int (wrap r bits) bits)))))
+          icmp (let [[pred] (filter #{:eq :ne :ult :ule :ugt :uge :slt :sle :sgt :sge} xs)
+                     [t a b] ys bits (int-bits t) a (const-int a) b (const-int b)]
+                 (when (and pred bits a b)
+                   (let [ua (wrap a bits) ub (wrap b bits) sa (signed a bits) sb (signed b bits)
+                         c (case pred :eq (= ua ub) :ne (not= ua ub) :ult (neg? (compare ua ub)) :ule (<= (compare ua ub) 0)
+                                 :ugt (pos? (compare ua ub)) :uge (>= (compare ua ub) 0) :slt (neg? (compare sa sb))
+                                 :sle (<= (compare sa sb) 0) :sgt (pos? (compare sa sb)) :sge (>= (compare sa sb) 0))]
+                     (if c 'true 'false))))
+          (zext sext trunc)
+          (let [[t a t2] ys b1 (int-bits t) b2 (int-bits t2) a (const-int a)]
+            (when (and b1 b2 a)
+              (out-int (wrap (if (= nm 'sext) (signed a b1) (wrap a b1)) b2) b2)))
+          select (let [[[_ c] [_ a] [_ b]] ys] (case c true a false b nil))
+          nil)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; CloneAndPruneIntoFromInst
+
+(defn- preds-of [blocks] (frequencies (mapcat #(successors (peek (insts %))) blocks)))
+
+(defn simplify-phis
+  "BLOCKS with each phi whose incoming values are one value (the phi itself aside) replaced by that value (InstSimplify's
+  simplifyPHINode), in order"
+  [blocks]
+  (loop [bs blocks]
+    (let [hit (first (for [b bs i (insts b) :when (= 'phi (opname i))
+                           :let [r (res-of i) vs (distinct (remove #{r} (map first (drop 2 (op-of i)))))]
+                           :when (= 1 (count vs))]
+                       [i r (first vs)]))]
+      (if-let [[i r v] hit]
+        (recur (mapv (fn [b] (subst (block (label b) (remove #(identical? % i) (insts b))) {r v})) bs))
+        bs))))
+
+(defn clone-prune
+  "The callee's blocks (BODY) cloned with VMAP (its parameters -> the call's operands), every other name of its own FRESH:
+  [blocks vmap] after CloneBlock's folding (an instruction of constant operands folded away, a branch or a switch on a constant
+  cloned as a branch to its one successor), the blocks reached alone in the callee's order, the phis pruned to their
+  predecessors (none: poison), ConstantFoldTerminator's one-target branch, dead blocks deleted, and each unconditional branch to
+  a block of one predecessor merged"
+  [body vmap fresh]
+  (let [locals (distinct (concat (map label body) (keep res-of (mapcat insts body))))
+        vm (volatile! (merge (into {} (for [x locals] [x (fresh x)])) vmap))
+        by (into {} (map (juxt label identity) body))
+        cloned (volatile! {})
+        clone-block
+        (fn [old]
+          (let [is (insts (by old)) term (peek is) out (volatile! [])]
+            (doseq [i (pop is)]
+              (if (= 'phi (opname i))
+                (vswap! out conj [:phi i])
+                (let [i2 (subst i @vm) c (fold i2)]
+                  (if (and c (res-of i))
+                    (vswap! vm assoc (res-of i) c)
+                    (vswap! out conj i2)))))
+            (let [o (op-of term) t2 (subst term @vm) o2 (op-of t2)
+                  [t3 succ] (case (first o)
+                              br (if (and (= 5 (count o)) (#{'true 'false} (nth o2 2)))
+                                   (let [l (if (= 'true (nth o2 2)) (nth o 3) (nth o 4))] [(list 'br (get @vm l)) [l]])
+                                   [t2 (successors term)])
+                              switch (if-let [c (const-int (nth o2 2))]
+                                       (let [l (or (some (fn [[_ k l]] (when (= (const-int k) c) l)) (nth o 4)) (nth o 3))]
+                                         [(list 'br (get @vm l)) [l]])
+                                       [t2 (successors term)])
+                              [t2 (successors term)])]
+              (vswap! out conj t3)
+              (vswap! cloned assoc old @out)
+              succ)))]
+    ;; CloneWorklist: a stack from the entry (each block's successors pushed, the last popped first)
+    (loop [todo [(label (first body))]]
+      (when-let [old (peek todo)]
+        (if (contains? @cloned old)
+          (recur (pop todo))
+          (recur (into (pop todo) (clone-block old))))))
+    (let [order (filter #(contains? @cloned %) (map label body))
+          blocks (vec (for [old order] (block (get @vm old) (get @cloned old))))
+          preds (preds-of blocks)
+          ;; the phis: each incoming edge of a cloned predecessor that still branches here (as often as it does); none: poison
+          blocks (mapv (fn [old b]
+                         (let [n-of (frequencies (for [ob order :when (some #{(get @vm old)} (successors (peek (insts (block nil (get @cloned ob))))))
+                                                       x (successors (peek (insts (block nil (get @cloned ob)))))
+                                                       :when (= x (get @vm old))] (get @vm ob)))]
+                           (block (label b)
+                                  (keep (fn [x]
+                                          (if (and (vector? x) (= :phi (first x)))
+                                            (let [i (second x) o (op-of i)
+                                                  seen (volatile! {})
+                                                  ins (keep (fn [[v l]]
+                                                              (let [nl (get @vm l) c (get @seen nl 0)]
+                                                                (when (and (contains? @cloned l) (< c (get n-of nl 0)))
+                                                                  (vswap! seen assoc nl (inc c))
+                                                                  [(subst v @vm) nl])))
+                                                            (drop 2 o))]
+                                              (if (empty? ins)
+                                                (do (vswap! vm assoc (res-of i) 'poison) nil)
+                                                (list '= (get @vm (res-of i)) (apply list 'phi (subst (second o) @vm) ins))))
+                                            x))
+                                        (insts b)))))
+                       order blocks)
+          ;; the phis' poison in the code after them
+          blocks (mapv #(subst % (into {} (filter (fn [[_ v]] (= 'poison v)) @vm))) blocks)
+          ;; simplifyInstruction over the clone, its phi rule: a phi whose incoming values are one value (itself aside) is it
+          blocks (simplify-phis blocks)
+          ;; ConstantFoldTerminator: a conditional branch of one target unconditional
+          blocks (mapv (fn [b] (let [t (peek (insts b)) o (op-of t)]
+                                 (if (and (= 'br (first o)) (= 5 (count o)) (= (nth o 3) (nth o 4)))
+                                   (block (label b) (conj (pop (insts b)) (list 'br (nth o 3))))
+                                   b)))
+                       blocks)
+          ;; dead blocks deleted, then each unconditional branch to a block of one predecessor merged
+          by-l (fn [bs l] (some #(when (= l (label %)) %) bs))
+          reach (loop [todo [(label (first blocks))] seen #{}]
+                  (if-let [l (peek todo)]
+                    (if (seen l) (recur (pop todo) seen)
+                        (recur (into (pop todo) (successors (peek (insts (by-l blocks l))))) (conj seen l)))
+                    seen))
+          blocks (filterv #(reach (label %)) blocks)
+          blocks (loop [bs blocks i 0]
+                   (if (>= i (count bs))
+                     bs
+                     (let [b (nth bs i) o (op-of (peek (insts b)))]
+                       (if (and (= 'br (first o)) (= 2 (count o)))
+                         (let [d (second o)]
+                           (if (and (= 1 (get (preds-of bs) d)) (not= d (label (first bs))) (not= d (label b)))
+                             (let [db (by-l bs d)
+                                   merged (block (label b) (concat (pop (insts b)) (insts db)))
+                                   bs (vec (keep (fn [x] (cond (= (label x) (label b)) merged (= (label x) d) nil :else x)) bs))]
+                               (recur (mapv #(phi-relabel % d (label b)) bs) i))
+                             (recur bs (inc i))))
+                         (recur bs (inc i))))))]
+      [blocks @vm])))
+
+;; ---------------------------------------------------------------------------------------------
+;; HandleInlinedLandingPad: an invoke's call site
+
+(def ^:dynamic *nounwind?*
+  "Whether a call of a symbol cannot unwind (CallBase::doesNotThrow): LLVM's intrinsics by default; lib-unit's compare binds the
+  callees' facts (:can-unwind)"
+  (fn [sym] (and (symbol? sym) (str/starts-with? (name sym) "llvm."))))
+
+(defn- lp-of "A block's landingpad instruction (its first non-phi)" [b] (first (remove #(= 'phi (opname %)) (insts b))))
+
+(defn- lp-clauses "A landingpad op's clauses and its cleanup flag" [o] [(vec (filter seq? (drop 2 o))) (boolean (some #{:cleanup} o))])
+
+(defn- through-invoke
+  "The cloned BLOCKS of a callee inlined at an invoke (unwinding to LP, whose block in the caller is LPB): each inlined landingpad
+  given the outer one's clauses (and its cleanup), each call that may unwind made an invoke to LP with the rest of its block split
+  off (changeToInvokeAndSplitBasicBlock), each `resume` a branch to LP's body (LandingPadInliningInfo::forwardResume, the outer
+  landing pad split after its landingpad once): [blocks new-lp-block body-block-or-nil], the new predecessors' incoming values
+  added to LP's phis (and its body's)"
+  [blocks lp lpb invoke-label fresh]
+  (let [outer-lp (lp-of lpb) [oclauses ocleanup] (lp-clauses (op-of outer-lp))
+        lp-phis (filterv #(= 'phi (opname %)) (insts lpb))
+        ;; the phis' values for the invoke's edge (UnwindDestPHIValues)
+        uvals (mapv (fn [i] (some (fn [[v l]] (when (= l invoke-label) v)) (drop 2 (op-of i)))) lp-phis)
+        inner-lps (set (keep #(let [t (op-of (peek (insts %)))] (when (= 'invoke (first t)) (kv-after t :unwind))) blocks))
+        ;; the inlined landingpads: the outer clauses after their own, the cleanup flag joined
+        blocks (mapv (fn [b] (if (inner-lps (label b))
+                               (let [l (lp-of b) o (op-of l) [cl cu] (lp-clauses o)]
+                                 (block (label b) (map #(if (identical? % l)
+                                                          (with-op l (apply list (concat [(first o) (second o)] (when (or cu ocleanup) [:cleanup]) cl oclauses)))
+                                                          %)
+                                                       (insts b))))
+                               b))
+                     blocks)
+        ;; the calls that may unwind: invokes, each block split after its first one (the split block named after the call)
+        new-preds (volatile! [])
+        split-block (fn split-block [b]
+                      (let [is (insts b)
+                            j (first (keep-indexed (fn [j i] (let [o (op-of i)]
+                                                               (when (and (= 'call (first o)) (not (*nounwind?* (nth o 2 nil)))) j)))
+                                                   (pop is)))]
+                        (if (nil? j)
+                          [b]
+                          (let [i (nth is j) o (op-of i) nl (fresh (symbol (str (if (res-of i) (name (res-of i)) "%") ".noexc")))
+                                inv (with-op i (apply list (concat ['invoke] (rest o) [:to nl :unwind lp])))]
+                            (vswap! new-preds conj (label b))
+                            (into [(block (label b) (conj (subvec is 0 j) inv))]
+                                  (split-block (block nl (subvec is (inc j)))))))))
+        blocks (vec (mapcat split-block blocks))
+        ;; the resumes: branches to the outer landing pad's body
+        resumes (filterv #(= 'resume (opname (peek (insts %)))) blocks)
+        body-l (when (seq resumes) (fresh (symbol (str (name lp) ".body"))))
+        phi-names (mapv #(fresh (symbol (str (name (res-of %)) ".lpad-body"))) lp-phis)
+        eh (when body-l (fresh (symbol "%eh.lpad-body")))
+        blocks (mapv (fn [b] (if (some #(= (label b) (label %)) resumes)
+                               (block (label b) (conj (pop (insts b)) (list 'br body-l)))
+                               b))
+                     blocks)
+        add-incoming (fn [phi-i v l] (with-op phi-i (concat (op-of phi-i) [[v l]])))
+        ;; the outer landing pad's phis: the split calls' edges
+        lpb2 (block (label lpb) (map (fn [i] (if-let [k (first (keep-indexed (fn [k p] (when (identical? p i) k)) lp-phis))]
+                                               (reduce (fn [i src] (add-incoming i (nth uvals k) src)) i @new-preds)
+                                               i))
+                                     (insts lpb)))
+        [lpb3 body]
+        (if-not body-l
+          [lpb2 nil]
+          (let [is (insts lpb2) j (inc (.indexOf ^java.util.List (vec is) (lp-of lpb2)))
+                ren (merge (zipmap (map res-of lp-phis) phi-names) {(res-of outer-lp) eh})
+                body-phis (concat (map (fn [nm p v0] (apply list '= nm [(apply list 'phi (second (op-of p)) [[(res-of p) (label lpb2)]])]))
+                                       phi-names lp-phis uvals)
+                                  [(list '= eh (list 'phi (second (op-of outer-lp)) [(res-of outer-lp) (label lpb2)]))])
+                ;; each resume's edge: the invoke's phi values, its exception value
+                body-phis (map (fn [i] (let [k (.indexOf ^java.util.List (vec phi-names) (res-of i))]
+                                         (reduce (fn [i rb] (let [v (if (neg? k)
+                                                                     (let [o (op-of (peek (insts (some #(when (= (label %) (label rb)) %) resumes))))] (nth o 2))
+                                                                     (nth uvals k))]
+                                                              (add-incoming i v (label rb))))
+                                                 i resumes)))
+                               body-phis)]
+            [(block (label lpb2) (concat (subvec (vec is) 0 j) [(list 'br body-l)]))
+             (block body-l (concat body-phis (map #(subst % ren) (subvec (vec is) j))))]))
+        ren (when body-l (merge (zipmap (map res-of lp-phis) phi-names) {(res-of outer-lp) eh}))]
+    [blocks lpb3 body ren]))
+
+;; ---------------------------------------------------------------------------------------------
+;; InlineFunctionImpl (a call; an invoke's unwinding: HandleInlinedLandingPad)
+
+(def ^:private counter (atom 0))
+
+(defn- static-alloca? [i] (and (= 'alloca (opname i)) (not (some #{:inalloca} (op-of i)))))
+
+(defn- uses? [blocks x]
+  (some (fn [b] (some (fn [i] (let [f (op-of i)] (boolean (some #{x} (tree-seq coll? seq f))))) (insts b))) blocks))
+
+(defn inline-call
+  "The caller's blocks with the call at [block-index inst-index] inlined from the callee define form"
+  [caller-blocks bi ii callee]
+  (let [[csym _ params _ cbody] (def-parts callee)
+        k (swap! counter inc)
+        b (nth caller-blocks bi) is (insts b) call (nth is ii) co (op-of call)
+        invoke? (= 'invoke (first co))
+        args (first (filter vector? (drop 2 co)))
+        vmap (into {} (map (fn [p a] [(peek p) (peek a)]) params args))
+        fresh (fn [x] (symbol (str (name x) ".i" k)))
+        [blocks _] (clone-prune cbody vmap fresh)
+        ;; the static allocas of the cloned entry block, used, to the caller's entry block's start
+        entry (first blocks)
+        allocas (filterv #(and (static-alloca? %) (uses? blocks (res-of %))) (insts entry))
+        dead (filterv #(and (static-alloca? %) (not (uses? blocks (res-of %)))) (insts entry))
+        blocks (assoc blocks 0 (block (label entry) (remove (set (concat allocas dead)) (insts entry))))
+        ;; an invoke's call site: its unwinding given to the inlined code (HandleInlinedLandingPad), the original edge to the
+        ;; landing pad gone (removePredecessor)
+        lp (when invoke? (kv-after co :unwind))
+        lpb (when invoke? (some #(when (= lp (label %)) %) caller-blocks))
+        _ (when (and invoke? (nil? lpb)) (throw (ex-info "inline: the invoke's landing pad is not in the caller" {:callee csym})))
+        [blocks lpb3 lp-body ren] (if invoke? (through-invoke blocks lp lpb (label b) fresh) [blocks nil nil nil])
+        lpb3 (when lpb3 (block (label lpb3) (map (fn [i] (if (= 'phi (opname i))
+                                                           (let [o (op-of i)] (with-op i (apply list 'phi (second o) (remove #(= (label b) (second %)) (drop 2 o)))))
+                                                           i))
+                                                 (insts lpb3))))
+        rets (filterv #(= 'ret (opname (peek (insts %)))) blocks)
+        r (res-of call)
+        ret-val (fn [rb] (let [o (op-of (peek (insts rb)))] (when (= 3 (count o)) (nth o 2))))
+        exit (symbol (str "%" (name csym) ".exit" k))
+        before (subvec is 0 ii)
+        ;; an invoke: a branch to its normal destination after the inlined code (InlineFunction's CreatedBranchToNormalDest)
+        after (if invoke? [(list 'br (kv-after co :to))] (subvec is (inc ii)))
+        caller (vec caller-blocks)]
+    (let [[out val]
+          (if (and (= 1 (count blocks)) (= 1 (count rets)))
+            ;; one block ending in a return: the callee's body spliced into the calling block
+            [[(block (label b) (concat before (pop (insts (first blocks))) after))] (ret-val (first blocks))]
+            (let [n (count rets)
+                  phi-val (when (and r (> n 1)) (symbol (str (name r) ".phi" k)))
+                  ;; each return a branch to the exit block; one return: its block's code spliced into the exit block
+                  one (when (= 1 n) (first rets))
+                  blocks (vec (keep (fn [x]
+                                      (cond (and one (= (label x) (label one))) nil
+                                            (some #(= (label x) (label %)) rets) (block (label x) (conj (pop (insts x)) (list 'br exit)))
+                                            :else x))
+                                    blocks))
+                  blocks (if one (mapv #(block (label %) (map (fn [i] (if (= (peek (insts %)) i) (relabel-term i (label one) exit) i)) (insts %))) blocks) blocks)
+                  ;; the exit's phi of one value is that value (InlineFunction's last simplifyInstruction)
+                  rvals (distinct (map ret-val rets))
+                  phi-val (when (and phi-val (> (count rvals) 1)) phi-val)
+                  exit-code (concat (when one (pop (insts one)))
+                                    (when phi-val [(list '= phi-val (apply list 'phi (second co) (map (fn [rb] [(ret-val rb) (label rb)]) rets)))])
+                                    after)
+                  ;; the cloned entry block's code into the calling block (InlineFunction's last splice), its label then the
+                  ;; calling block's
+                  e (first blocks) ent (label e)
+                  ;; the inlined entry spliced in: when the one return was in the entry block, the exit code follows
+                  head (block (label b) (concat before (if e (insts e) [(list 'br exit)])))
+                  rest-blocks (mapv #(phi-relabel % ent (label b)) (rest blocks))
+                  exit-block (phi-relabel (block exit exit-code) ent (label b))]
+              [(vec (concat [head] rest-blocks [exit-block])) (cond phi-val phi-val one (ret-val one) (seq rets) (first rvals))]))
+          ;; the call's users take the returned value (no return: poison)
+          sub (if r {r (or val 'poison)} {})
+          out (mapv #(subst % sub) out)
+          ;; the calling block's successors' phis: the block's terminator now ends the last of OUT
+          last-label (label (peek out))
+          caller2 (vec (concat (subvec caller 0 bi) out (subvec caller (inc bi))))
+          caller2 (if (not= last-label (label b))
+                    (mapv (fn [x] (if (some #(= (label x) (label %)) out) x (phi-relabel x (label b) last-label))) caller2)
+                    caller2)
+          caller2 (mapv #(subst % sub) caller2)
+          ;; the landing pad split (its body after it), the uses of its phis and landingpad value elsewhere renamed
+          caller2 (if-not lpb3
+                    caller2
+                    (vec (mapcat (fn [x] (cond (= (label x) (label lpb3)) (cons lpb3 (when lp-body [lp-body]))
+                                               :else [(if ren (subst x ren) x)]))
+                                 caller2)))
+          e0 (first caller2)]
+      ;; the allocas at the very start of the caller's entry block
+      (assoc caller2 0 (block (label e0) (concat allocas (insts e0)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; AlwaysInlineImpl
+
+(declare callee-of)
+
+(defn callees "The symbols a define form calls" [f] (let [[_ _ _ _ body] (def-parts f)] (set (keep callee-of (mapcat insts body)))))
+
+(defn- callee-of [i] (let [o (op-of i)] (when (#{'call 'invoke} (first o)) (let [c (nth o 2 nil)] (when (and (symbol? c) (= "g" (namespace c))) c)))))
+
+(defn inline-module
+  "DEFINES after the always-inliner: each function of ALWAYS (a set of symbols) the module defines, in the module's order,
+  inlined at each of its call sites (the latest first: a use list's order), then dropped when nothing calls it"
+  [defines always]
+  (let [fs (volatile! (vec defines))
+        idx (fn [s] (first (keep-indexed (fn [i f] (when (= s (second f)) i)) @fs)))]
+    (doseq [s (map second defines) :when (contains? always s)]
+      (when-let [ci (idx s)]
+        (let [callee (nth @fs ci)]
+          ;; the call sites: every define's calls of S, the latest (module order, then block and instruction order) first
+          (loop []
+            (let [sites (for [[fi f] (map-indexed vector @fs) :when (not= fi ci)
+                              :let [[_ _ _ _ body] (def-parts f)]
+                              [bi b] (map-indexed vector body) [ii i] (map-indexed vector (insts b))
+                              :when (= s (callee-of i))]
+                          [fi bi ii])]
+              (when-let [[fi bi ii] (last sites)]
+                (let [[sym ret params opts body] (def-parts (nth @fs fi))]
+                  (vswap! fs assoc fi (make-def sym ret params opts (inline-call body bi ii callee))))
+                (recur)))))))
+    ;; the inlined functions nothing calls any more removed (isDefTriviallyDead)
+    (let [called (set (for [f @fs :let [[_ _ _ _ body] (def-parts f)] b body i (insts b) :let [c (callee-of i)] :when c] c))]
+      (vec (remove #(and (contains? always (second %)) (not (called (second %)))) @fs)))))

@@ -368,6 +368,14 @@ code. Three kinds of things live here:
   `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,wrapping_range.rs}` and `rustc_ty_utils/src/layout.rs`; with rustc-stable-hash
   0.1.2's `src/{sip128,stable_hasher}.rs` (https://github.com/rust-lang/rustc-stable-hash, as rustc's Cargo.lock pins it); LICENSE.md
   names the files (MIT OR Apache-2.0); `mono_check.ae` is Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
+  C6 and C4-1 (2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C6's first slice", "As built: C6-2", "As built: C4-1 (a)",
+  "C6-4's next slice"): `arbace/rust/front/lib_unit.ae`'s v0 decoder after rustc 1.99.1's `rustc_symbol_mangling/src/v0.rs`;
+  `arbace/rust/front/cargo_meta.ae` after Cargo 0.100.0 (the pinned rustc-1.99.1-src.tar.xz's `src/tools/cargo`, at 5f94df478:
+  `compute_metadata` and the inputs it hashes) with semver 1.0.28 and rustc-stable-hash 0.1.2 from its `vendor/`;
+  `arbace/rust/front/std_names.ae` after `rustc_resolve/src/{build_reduced_graph,imports}.rs` and `rustc_builtin_macros/src/lib.rs`;
+  `arbace/rust/back/inline.ae` after LLVM 23's `llvm/lib/Transforms/IPO/AlwaysInliner.cpp` and `Utils/{InlineFunction,CloneFunction}.cpp`
+  (the same tarball's `src/llvm-project`, Apache-2.0 WITH LLVM-exception); LICENSE.md names the files; evaluated from the checkout,
+  out of `gate_key` (RFS13).
   `arbace/rust/front/core_check.ae` (RF12's first slice, 2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF12 (first slice)": the
   front end over core's own module files) ports rustc 1.99.1, the same revision and sources: `rustc_expand/src/module.rs` (the module
   tree, `#[path]`, directory ownership), and with it in `expand.ae` `rustc_expand/src/mbe/{metavar_expr,transcribe}.rs` (metavariable
