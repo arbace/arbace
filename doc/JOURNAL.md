@@ -15752,3 +15752,9 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   test_fstring's debug text prints CPython's '(\n    1,  \n    "\"#")=(1, \'"#\')'; a class body's cmp_to_key and reduce do
   not bind ([1, 2, 3], 16; builtin_function_or_method, _functools, (mycmp)); `python -m json --json-lines` from a pipe exits
   0; a program printing into `head -1` catches BrokenPipeError 32, dup2s /dev/null and exits 32; `for l in sys.stdin` works.
+- Then, before the build took the lock: test_regrtest's 57 failing methods (:regrtest-children) start regrtest in a child,
+  whose setup_process asserts isinstance(sys.stdout, io.TextIOWrapper): pyi's standard streams are the runtime's own type
+  (named _io.TextIOWrapper), not _pyio's class. _io's making (makeIoModule) registers them as virtual subclasses of _pyio's
+  TextIOWrapper, BufferedWriter and BufferedReader (ABCMeta's register; CPython's create_stdio makes those classes). Proof:
+  `bin/pyi python -X faulthandler -I -m test --testdir=DIR test_regrtest_noop1` ends "Result: SUCCESS" (was the
+  AssertionError).
