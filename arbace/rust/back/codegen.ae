@@ -526,6 +526,21 @@
         (str (when neg "-") (subs ds 0 1) "." (subs ds 1) (apply str (repeat (max 0 (- fp (dec nd))) "0"))
              "e" (if (neg? e) "-" "+") (when (< ae 10) "0") ae)))))
 
+(defn- const-operand?
+  "An operand value that is an LLVM constant (a number, true, false, null, poison, undef, a global, a constant expression or
+  struct), which the IRBuilder's ConstantFolder folds with"
+  [v]
+  (or (number? v) (contains? #{'true 'false 'null 'poison 'undef 'zeroinitializer} v)
+      (and (symbol? v) (= "g" (namespace v)))
+      (and (seq? v) (contains? #{'inttoptr 'struct 'fp 'getelementptr 'ptrtoint} (first v)))))
+
+(defn- const-struct
+  "ConstantStruct::get of the [type value] elements: zeroinitializer when every one is zero, poison when every one is poison"
+  [elts]
+  (cond (every? #(or (contains? #{0 'false 'null 'zeroinitializer} (second %)) (= '(fp "0.000000e+00") (second %))) elts) 'zeroinitializer
+        (every? #(= 'poison (second %)) elts) 'poison
+        :else (apply list 'struct elts)))
+
 (defn- fp-form
   "LLVM 23's text of a floating constant (AsmWriter.cpp's writeAPFloatInternal): +inf, -inf; a NaN `+qnan` (the preferred quiet
   NaN) or `+nan(0xPAYLOAD)`, `+snan(0x..)`; else APFloat::toString at precision 6 (apfloat-text) when it reads back as the same
@@ -1314,13 +1329,16 @@
                          :empty {:ty (:imm dsc) :v 'poison}
                          :multiple
                          (let [tag (:tag vr) tf (:tag-field vr)
+                               ;; a pair's tag is its component at the tag's offset (extract_field: `Option<(usize, &u32)>`'s
+                               ;; niche is the reference, at 8)
+                               pick (fn [v] (if (= :pair (:kind ly)) (if (zero? (long (nth (:offsets ly) tf 0))) (first (:pair v)) (second (:pair v))) v))
                                tv (if (:ptr pl-or-val)
                                     (let [off (nth (:offsets ly) tf)
                                           pl pl-or-val]
                                       (case (:kind ly)
                                         :memory (load-scalar! bb tag (gep! bb (:ptr pl) off) (restrict-align (:align pl) off))
-                                        (let [v (load-place! bb pl)] (if (= :pair (:kind ly)) (first (:pair v)) v))))
-                                    (if (= :pair (:kind ly)) (first (:pair pl-or-val)) pl-or-val))
+                                        (pick (load-place! bb pl))))
+                                    (pick pl-or-val))
                                tb (:ibits tag) db (:ibits dsc)
                                intcast (fn [v from-bits to-bits signed from-ty to-ty]
                                          (cond (= from-bits to-bits) (:v v)
@@ -1620,9 +1638,15 @@
                          :scalar (if (:ty v) (emit! bb (list 'ret (symbol (:ty v)) (:v v))) (emit! bb (list 'ret (symbol (:imm (:scalar ly))) 'undef)))
                          :pair (let [ty (llvm-type ly)
                                      [a b] (:pair v)
-                                     r0 (fresh!) r1 (fresh!)]
-                                 (emit! bb (list '= r0 (list 'insertvalue [ty 'poison] [(symbol (:ty a)) (:v a)] 0)))
-                                 (emit! bb (list '= r1 (list 'insertvalue [ty r0] [(symbol (:ty b)) (:v b)] 1)))
+                                     ;; immediate_or_packed_pair's two insert_value through LLVM's IRBuilder, whose ConstantFolder
+                                     ;; folds an insertvalue of constants into a constant struct (`{i64 1, i64 poison}`, a whole
+                                     ;; constant pair returned as `ret {ptr, i64} {ptr @alloc, i64 17}`)
+                                     ta (symbol (:ty a)) tb (symbol (:ty b))
+                                     ca (const-operand? (:v a))
+                                     r0 (if ca (const-struct [[ta (:v a)] [tb 'poison]])
+                                            (let [r (fresh!)] (emit! bb (list '= r (list 'insertvalue [ty 'poison] [ta (:v a)] 0))) r))
+                                     r1 (if (and ca (const-operand? (:v b))) (const-struct [[ta (:v a)] [tb (:v b)]])
+                                            (let [r (fresh!)] (emit! bb (list '= r (list 'insertvalue [ty r0] [tb (:v b)] 1))) r))]
                                  (emit! bb (list 'ret ty r1)))
                          :memory (if (indirect? ly)
                                    (emit! bb '(ret void))
