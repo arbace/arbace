@@ -1,0 +1,789 @@
+;; An independent model of the synthetic corpus's 24 arithmetic and bitwise operator tables (test/python/synth/ops/: add, sub, mul,
+;; truediv, floordiv, mod, pow, lshift, rshift, and, or, xor and their augmented forms aug-*) over the 15 operands
+;;   7, -3, 0, 2.5, -0.5, True, (1+2j), 'ab', b'xy', [1, 2], (3,), {1, 2}, {'k': 1}, None, 10**20
+;; written from the Python 3.14 Language Reference (reference/expressions.rst: Binary arithmetic operations, The power operator,
+;; Shifting operations, Binary bitwise operations; simple_stmts.rst: Augmented assignment statements; datamodel.rst: Objects,
+;; values and types, Emulating numeric types) and the library's numeric rules (builtins/stdtypes.rst: Numeric Types and their
+;; mixed arithmetic, Bitwise Operations on Integer Types, Common and Mutable Sequence Operations, Set Types, Mapping Types,
+;; printf-style String and Bytes Formatting; functions.rst: pow, repr; float.__repr__'s shortest repr), and where neither
+;; document fixes a digit or an object's identity, from CPython 3.14.10's stated algorithm (Objects/longobject.c,
+;; floatobject.c, complexobject.c, unicodeobject.c, bytesobject.c, tupleobject.c, setobject.c, dictobject.c, abstract.c,
+;; Python/pystrtod.c: read as prior art, the rules named below), never from its output. Queue 247's last 24 programs
+;; (doc/python/PYTHON-SURVEY.md, "As built: 247"; the user's decision of 2026-11-21).
+;;
+;; The arithmetic is exact: ints are BigIntegers; a float is an IEEE 754 binary64 value and + - * / on floats are the
+;; host's binary64 operations (correctly rounded, round half to even, as IEEE 754 requires); an int converted to float,
+;; int / int and every libm call are computed exactly (rationals, or 80-digit decimals for the transcendental functions) and
+;; rounded once to the nearest double (half to even). The libm calls (pow, hypot, atan2, exp, log, cos, sin; C99, musl
+;; 1.2.6 on the platform the references were recorded on) are modelled as correctly rounded: musl's pow, exp and log
+;; (Arm's, within 0.52 ULP) and sin, cos, atan2 (FreeBSD msun's, within 1 ULP) round these arguments correctly, the
+;; agreement with the record checked by bin/pyi golden.
+;;
+;; usage (bin/pyi golden runs the check on stage 0):
+;;   arbace ops.ae OP                     OP's table (add ... aug-xor) on stdout, the golden text test/python/golden/synth/ops/OP.out
+;;   arbace ops.ae --control OP           OP's table under its negative control's changed rule (it must differ)
+;;   arbace ops.ae --check DIR OP...      each OP's table against DIR/synth/ops/OP.out byte for byte, each control differing
+;;   arbace ops.ae --review OP...         review-ops.edn's entries of OP: per left operand, its 15 cells and the rule of each
+(require '[arbace.string :as str])
+(import '[java.math BigDecimal BigInteger MathContext RoundingMode]
+        '[java.io File])
+
+;;; ---------------------------------------------------------------------------------------------------------------------
+;;; Exact numbers: rationals as [num den] of BigIntegers (den > 0), doubles to and from them, rounding half to even
+
+(declare lm-pow-or-one merge-pairs name-of complex-pow)
+
+(def ^:dynamic *mutation* nil)   ; the negative control's changed rule (a keyword), nil for the model itself
+
+(defn- big ^BigInteger [x] (biginteger x))
+(def ^BigInteger ZERO BigInteger/ZERO)
+(def ^BigInteger ONE BigInteger/ONE)
+(def ^BigInteger TWO (big 2))
+
+(defn- neg-zero? [^double d] (and (zero? d) (neg? (Math/copySign 1.0 d))))
+
+(defn- dbl->rat
+  "The exact value of a finite double as [num den]"
+  [^double d]
+  (let [bd (BigDecimal. d) s (.scale bd) u (.unscaledValue bd)]
+    (if (pos? s) [u (.pow (big 10) s)] [(.multiply u (.pow (big 10) (- s))) ONE])))
+
+(defn- rat-reduce [[^BigInteger n ^BigInteger d]]
+  (let [g (.gcd n d) g (if (zero? (.signum g)) ONE g) [n d] [(.divide n g) (.divide d g)]]
+    (if (neg? (.signum d)) [(.negate n) (.negate d)] [n d])))
+
+(defn- rat+ [[a b] [c d]] (rat-reduce [(.add (.multiply ^BigInteger a ^BigInteger d) (.multiply ^BigInteger c ^BigInteger b)) (.multiply ^BigInteger b ^BigInteger d)]))
+(defn- rat- [[a b] [c d]] (rat-reduce [(.subtract (.multiply ^BigInteger a ^BigInteger d) (.multiply ^BigInteger c ^BigInteger b)) (.multiply ^BigInteger b ^BigInteger d)]))
+(defn- rat* [[a b] [c d]] (rat-reduce [(.multiply ^BigInteger a ^BigInteger c) (.multiply ^BigInteger b ^BigInteger d)]))
+(defn- rat-div [[a b] [c d]] (rat-reduce [(.multiply ^BigInteger a ^BigInteger d) (.multiply ^BigInteger b ^BigInteger c)]))
+
+(defn- pos-rat->double
+  "The double nearest the positive rational n/d (ties to an even significand), or ##Inf past the largest finite double"
+  [^BigInteger n ^BigInteger d]
+  (loop [e (- (.bitLength n) (.bitLength d) 53)]
+    (let [e (max e -1074)
+          [num den] (if (neg? e) [(.shiftLeft n (- e)) d] [n (.shiftLeft d e)])
+          qr (.divideAndRemainder ^BigInteger num ^BigInteger den)
+          q ^BigInteger (aget qr 0) r ^BigInteger (aget qr 1)]
+      (cond
+        (and (>= (.bitLength q) 54)) (recur (inc e))
+        (and (< (.bitLength q) 53) (> e -1074)) (recur (dec e))
+        :else
+        (let [c (.compareTo (.shiftLeft r 1) den)
+              q (if (or (pos? c) (and (zero? c) (.testBit q 0))) (.add q ONE) q)
+              [q e] (if (= (.bitLength q) 54) [(.shiftRight q 1) (inc e)] [q e])]
+          (if (> (+ e 52) 1023) Double/POSITIVE_INFINITY (Math/scalb (double (.longValue ^BigInteger q)) (int e))))))))
+
+(defn- rat->double
+  "The double nearest the rational [n d]; a zero is +0.0 (callers that need -0.0 say so)"
+  [[^BigInteger n ^BigInteger d]]
+  (case (.signum n)
+    0 0.0
+    1 (pos-rat->double n d)
+    -1 (- (pos-rat->double (.negate n) d))))
+
+(defn- int->float
+  "int.__float__ (and the conversion of an int operand to float): the nearest double, half to even (PyLong_AsDouble);
+  OverflowError when it does not fit"
+  [^BigInteger v]
+  (let [d (rat->double [v ONE])]
+    (if (Double/isInfinite d) {:err "OverflowError"} d)))
+
+;;; ---------------------------------------------------------------------------------------------------------------------
+;;; float.__repr__ and complex.__repr__ (Python/pystrtod.c's format_float_short, mode 'r'; Objects/complexobject.c's
+;;; complex_repr): the shortest decimal string that rounds back to the double (when two, the nearer one), in fixed notation
+;;; when its decimal point position decpt satisfies -4 < decpt <= 16, else with an exponent of at least two digits
+
+(defn- shortest-digits
+  "[DIGITS DECPT] for a positive finite double: DIGITS without trailing zeros, the value 0.DIGITS x 10^DECPT"
+  [^double x]
+  (let [X (BigDecimal. x)
+        even? (not (bit-test (Double/doubleToRawLongBits x) 0))
+        lo (.divide (.add (BigDecimal. (Math/nextDown x)) X) (BigDecimal. 2))
+        hi (if (Double/isInfinite (Math/nextUp x)) (.add X (.subtract X lo)) (.divide (.add X (BigDecimal. (Math/nextUp x))) (BigDecimal. 2)))
+        in? (fn [^BigDecimal c] (if even? (and (<= (.compareTo lo c) 0) (<= (.compareTo c hi) 0))
+                                    (and (neg? (.compareTo lo c)) (neg? (.compareTo c hi)))))]
+    (loop [p 1]
+      (let [dn (.round X (MathContext. p RoundingMode/FLOOR)) up (.round X (MathContext. p RoundingMode/CEILING))
+            cands (filter in? (if (zero? (.compareTo dn up)) [dn] [dn up]))]
+        (if (empty? cands)
+          (recur (inc p))
+          (let [dist (fn [^BigDecimal c] (.abs (.subtract c X)))
+                ^BigDecimal c (first (sort-by identity (fn [a b] (let [k (.compareTo ^BigDecimal (dist a) ^BigDecimal (dist b))] (if (zero? k) (compare (str a) (str b)) k))) cands))
+                s (.stripTrailingZeros c) digits (str (.unscaledValue s))]
+            [digits (- (count digits) (.scale s))]))))))
+
+(defn- format-short
+  "PyOS_double_to_string(d, 'r', 0, flags): DOT0 adds '.0' to an integral fixed-notation value (float.__repr__), SIGN
+  always writes the sign (complex's imaginary part)"
+  [^double d dot0 sign]
+  (cond
+    (Double/isNaN d) (str (if sign "+" "") "nan")
+    (Double/isInfinite d) (str (if (pos? d) (if sign "+" "") "-") "inf")
+    :else
+    (let [neg (neg? (Math/copySign 1.0 d))
+          [digits decpt] (if (zero? d) ["0" 1] (shortest-digits (Math/abs d)))
+          n (count digits)
+          use-exp (or (<= decpt -4) (> decpt 16))
+          zeros (fn [k] (apply str (repeat k \0)))
+          body (if use-exp
+                 (let [e (dec decpt) ae (Math/abs (long e))]
+                   (str (subs digits 0 1) (if (> n 1) (str "." (subs digits 1)) "") "e" (if (neg? e) "-" "+") (if (< ae 10) "0" "") ae))
+                 (cond (<= decpt 0) (str "0." (zeros (- decpt)) digits)
+                       (>= decpt n) (str digits (zeros (- decpt n)) (if dot0 ".0" ""))
+                       :else (str (subs digits 0 decpt) "." (subs digits decpt))))]
+      (str (cond neg "-" sign "+" :else "") body))))
+
+(defn- float-repr [^double d] (format-short d true false))
+
+(defn- complex-repr
+  "complex_repr: a +0.0 real part prints the imaginary part alone, 'j' after it; else '(' real, the signed imaginary part, 'j)'"
+  [^double re ^double im]
+  (if (and (zero? re) (not (neg-zero? re)))
+    (str (format-short im false false) "j")
+    (str "(" (format-short re false false) (format-short im false true) "j)")))
+
+;;; ---------------------------------------------------------------------------------------------------------------------
+;;; libm, correctly rounded: the functions' values to 80 significant digits (BigDecimal series), rounded once
+
+(def ^MathContext MC (MathContext. 90 RoundingMode/HALF_EVEN))
+(defn- bd ^BigDecimal [x] (if (instance? BigDecimal x) x (BigDecimal. (str x))))
+(defn- bdd ^BigDecimal [^double d] (BigDecimal. d))
+(defn- hp->double
+  "The double nearest the 90-digit value V (a BigDecimal); V's error is far below a double's half ULP"
+  [^BigDecimal v]
+  (rat->double (rat-reduce (let [s (.scale v) u (.unscaledValue v)]
+                             (if (pos? s) [u (.pow (big 10) s)] [(.multiply u (.pow (big 10) (- s))) ONE])))))
+
+(defn- fact "n! as a BigDecimal" ^BigDecimal [n]
+  (BigDecimal. ^BigInteger (reduce (fn [^BigInteger acc k] (.multiply acc (big k))) ONE (range 1 (inc n)))))
+
+(defn- series
+  "The sum of TERM-FN k for k = 0, 1, ... until a term falls below 1e-95"
+  [term-fn]
+  (let [eps (BigDecimal. "1e-95")]
+    (loop [k 0 acc BigDecimal/ZERO]
+      (let [^BigDecimal t (term-fn k)]
+        (if (neg? (.compareTo (.abs t) eps)) (.add acc t MC) (recur (inc k) (.add acc t MC)))))))
+
+(defn- atan-small
+  "atan(x) for |x| <= 0.2 by its Taylor series"
+  ^BigDecimal [^BigDecimal x]
+  (let [x2 (.multiply x x MC)]
+    (series (fn [k] (let [p (.multiply x (.pow x2 (int k) MC) MC) t (.divide p (BigDecimal. (inc (* 2 k))) MC)] (if (odd? k) (.negate t) t))))))
+
+(def ^BigDecimal PI
+  ;; Machin: pi = 16 atan(1/5) - 4 atan(1/239)
+  (.subtract (.multiply (BigDecimal. 16) (atan-small (.divide BigDecimal/ONE (BigDecimal. 5) MC)) MC)
+             (.multiply (BigDecimal. 4) (atan-small (.divide BigDecimal/ONE (BigDecimal. 239) MC)) MC) MC))
+
+(defn- atan-hp
+  "atan(x) for any x: halved by atan(x) = 2 atan(x / (1 + sqrt(1 + x^2))) until |x| <= 0.2"
+  ^BigDecimal [^BigDecimal x]
+  (loop [x x k 0]
+    (if (<= (.compareTo (.abs x) (BigDecimal. "0.2")) 0)
+      (.multiply (atan-small x) (.pow (BigDecimal. 2) (int k)) MC)
+      (recur (.divide x (.add BigDecimal/ONE (.sqrt (.add BigDecimal/ONE (.multiply x x MC) MC) MC) MC) MC) (inc k)))))
+
+(defn- exp-hp
+  "exp(x): x halved until |x| <= 1/2, the Taylor series, squared back"
+  ^BigDecimal [^BigDecimal x]
+  (loop [x x k 0]
+    (if (> (.compareTo (.abs x) (BigDecimal. "0.5")) 0)
+      (recur (.divide x (BigDecimal. 2) MC) (inc k))
+      (let [s (series (fn [k] (.divide (.pow x (int k) MC) (fact k) MC)))]
+        (loop [s s k k] (if (zero? k) s (recur (.multiply s s MC) (dec k))))))))
+
+(defn- atanh-small ^BigDecimal [^BigDecimal t]
+  (let [t2 (.multiply t t MC)]
+    (series (fn [k] (.divide (.multiply t (.pow t2 (int k) MC) MC) (BigDecimal. (inc (* 2 k))) MC)))))
+
+(def ^BigDecimal LN2 (.multiply (BigDecimal. 2) (atanh-small (.divide BigDecimal/ONE (BigDecimal. 3) MC)) MC))
+
+(defn- ln-hp
+  "log(x), x > 0: x = m 2^k with 1 <= m < 2, log x = k log 2 + 2 atanh((m - 1)/(m + 1))"
+  ^BigDecimal [^BigDecimal x]
+  (loop [m x k 0]
+    (cond (>= (.compareTo m (BigDecimal. 2)) 0) (recur (.divide m (BigDecimal. 2) MC) (inc k))
+          (neg? (.compareTo m BigDecimal/ONE)) (recur (.multiply m (BigDecimal. 2) MC) (dec k))
+          :else (.add (.multiply LN2 (BigDecimal. (long k)) MC)
+                      (.multiply (BigDecimal. 2) (atanh-small (.divide (.subtract m BigDecimal/ONE) (.add m BigDecimal/ONE) MC)) MC) MC))))
+
+(defn- sin-cos-hp
+  "[sin x, cos x]: x reduced by the nearest multiple q of pi/2, the Taylor series of the rest, the quadrant q mod 4"
+  [^BigDecimal x]
+  (let [half-pi (.divide PI (BigDecimal. 2) MC)
+        q (.toBigInteger (.setScale (.divide x half-pi MC) 0 RoundingMode/HALF_EVEN))
+        r (.subtract x (.multiply half-pi (BigDecimal. q) MC) MC)
+        r2 (.multiply r r MC)
+        s (series (fn [k] (let [t (.divide (.multiply r (.pow r2 (int k) MC) MC) (fact (inc (* 2 k))) MC)] (if (odd? k) (.negate t) t))))
+        c (series (fn [k] (let [t (.divide (.pow r2 (int k) MC) (fact (* 2 k)) MC)] (if (odd? k) (.negate t) t))))]
+    (case (int (.mod q (big 4)))
+      0 [s c] 1 [c (.negate s)] 2 [(.negate s) (.negate c)] 3 [(.negate c) s])))
+
+(defn- lm-sqrt ^double [^double x] (if (zero? x) x (hp->double (.sqrt (bdd x) MC))))
+(defn- lm-hypot
+  "hypot(x, y): sqrt(x^2 + y^2) of the exact squares, rounded once (a zero y gives |x| exactly)"
+  ^double [^double x ^double y]
+  (if (zero? y) (Math/abs x) (if (zero? x) (Math/abs y) (hp->double (.sqrt (.add (.multiply (bdd x) (bdd x)) (.multiply (bdd y) (bdd y))) MC)))))
+(defn- lm-atan2
+  "atan2(y, x): of a zero y, y itself for x >= +0 and pi with y's sign for x < 0 (C99 F.9.1.4); else the angle of (x, y)"
+  ^double [^double y ^double x]
+  (cond
+    (zero? y) (if (or (pos? x) (and (zero? x) (not (neg-zero? x)))) y (Math/copySign (hp->double PI) y))
+    (pos? x) (hp->double (atan-hp (.divide (bdd y) (bdd x) MC)))
+    (neg? x) (hp->double ((if (pos? y) #(.add ^BigDecimal % PI MC) #(.subtract ^BigDecimal % PI MC)) (atan-hp (.divide (bdd y) (bdd x) MC))))
+    :else (Math/copySign (hp->double (.divide PI (BigDecimal. 2) MC)) y)))
+(defn- lm-exp ^double [^double x] (hp->double (exp-hp (bdd x))))
+(defn- lm-log ^double [^double x] (if (== x 1.0) 0.0 (hp->double (ln-hp (bdd x)))))
+(defn- lm-cos ^double [^double x] (if (zero? x) 1.0 (hp->double (second (sin-cos-hp (bdd x))))))
+(defn- lm-sin ^double [^double x] (if (zero? x) x (hp->double (first (sin-cos-hp (bdd x))))))
+(defn- lm-pow
+  "pow(x, y) for a finite positive x and a finite nonzero y (float_pow sorts out the other cases first): an integral y
+  exactly (x^y a rational), else exp(y log x) to 90 digits; rounded once"
+  ^double [^double x ^double y]
+  (if (and (== y (Math/floor y)) (< (Math/abs y) 1e6))
+    (let [n (long y) p (.pow (bdd x) (int (Math/abs n)))
+          [u v] (dbl->rat 1.0)
+          pr (rat-reduce (let [s (.scale p) uv (.unscaledValue p)] (if (pos? s) [uv (.pow (big 10) s)] [(.multiply uv (.pow (big 10) (- s))) ONE])))]
+      (rat->double (if (neg? n) (rat-div [u v] pr) pr)))
+    (hp->double (exp-hp (.multiply (bdd y) (ln-hp (bdd x)) MC)))))
+
+;;; ---------------------------------------------------------------------------------------------------------------------
+;;; Python values: {:t :int|:bool|:float|:complex|:str|:bytes|:list|:tuple|:set|:dict|:none ...}; an error {:err NAME};
+;;; :same true marks a result that is the left operand's own object; :rule names the rule a cell follows (the review's)
+
+(defn- I [v] {:t :int :v (big v)})
+(defn- F [d] {:t :float :v (double d)})
+(defn- C [re im] {:t :complex :re (double re) :im (double im)})
+(defn- S [s] {:t :str :v s})
+(defn- B [bs] {:t :bytes :v (vec bs)})
+(defn- err [name rule] {:err name :rule rule})
+
+(def operands
+  [(I 7) (I -3) (I 0) (F 2.5) (F -0.5) {:t :bool :v true} (C 1.0 2.0) (S "ab") (B [120 121])
+   {:t :list :v [(I 1) (I 2)]} {:t :tuple :v [(I 3)]} {:t :set :v [(I 1) (I 2)]} {:t :dict :v [[(S "k") (I 1)]]} {:t :none}
+   (I (.pow (big 10) 20))])
+
+(def operand-text ["7" "-3" "0" "2.5" "-0.5" "True" "(1+2j)" "'ab'" "b'xy'" "[1, 2]" "(3,)" "{1, 2}" "{'k': 1}" "None" "10**20"])
+
+(defn- intlike? [x] (if (= *mutation* :bool-not-int) (= :int (:t x)) (#{:int :bool} (:t x))))
+(defn- real? [x] (or (intlike? x) (= :float (:t x))))
+(defn- num? [x] (or (real? x) (= :complex (:t x))))
+(defn- seq-kind? [x] (#{:str :bytes :list :tuple} (:t x)))
+(defn- ival ^BigInteger [x] (case (:t x) :int (:v x) :bool (if (:v x) ONE ZERO)))
+(defn- to-float
+  "A real operand as a double (an int converted, int.__float__), or the conversion's error"
+  [x]
+  (if (= :float (:t x)) (:v x) (int->float (ival x))))
+(defn- to-complex [x] (if (= :complex (:t x)) [(:re x) (:im x)] (let [d (to-float x)] (if (map? d) d [d 0.0]))))
+
+(defn- pyrepr [x]
+  (case (:t x)
+    :int (str (:v x))
+    :bool (if (:v x) "True" "False")
+    :float (float-repr (:v x))
+    :complex (complex-repr (:re x) (:im x))
+    :str (str "'" (:v x) "'")
+    :bytes (str "b'" (apply str (map char (:v x))) "'")
+    :list (str "[" (str/join ", " (map pyrepr (:v x))) "]")
+    :tuple (if (= 1 (count (:v x))) (str "(" (pyrepr (first (:v x))) ",)") (str "(" (str/join ", " (map pyrepr (:v x))) ")"))
+    :set (if (empty? (:v x)) "set()" (str "{" (str/join ", " (map pyrepr (:v x))) "}"))
+    :dict (str "{" (str/join ", " (map (fn [[k v]] (str (pyrepr k) ": " (pyrepr v))) (:v x))) "}")
+    :none "None"))
+
+;;; ---- the numeric rules
+
+(def SSIZE-MAX (.subtract (.shiftLeft ONE 63) ONE))
+
+(defn- floor-divmod
+  "[a // b, a % b] of ints: the floor of the exact quotient, the remainder with b's sign (Reference: Binary arithmetic
+  operations; stdtypes note (1))"
+  [^BigInteger a ^BigInteger b]
+  (let [qr (.divideAndRemainder a b) q ^BigInteger (aget qr 0) r ^BigInteger (aget qr 1)]
+    (if (and (not (zero? (.signum r))) (not= (.signum r) (.signum b)))
+      (if (= *mutation* :truncate-division) [q r] [(.subtract q ONE) (.add r b)])
+      [q r])))
+
+(defn- fmod
+  "C's fmod: x - trunc(x/y) y, exact (always representable), a zero result with x's sign"
+  ^double [^double x ^double y]
+  (let [X (dbl->rat x) Y (dbl->rat y) [qn qd] (rat-div X Y) q (.divide ^BigInteger qn ^BigInteger qd)
+        R (rat- X (rat* [q ONE] Y)) r (rat->double R)]
+    (if (zero? r) (Math/copySign 0.0 x) r)))
+
+(defn- float-divmod
+  "floatobject.c's _float_div_mod (the Reference's x == (x//y)*y + (x%y) and its footnote: the remainder takes y's sign,
+  rounded when |x % y| would not fit, the quotient snapped to the nearest integral value): [floordiv mod]"
+  [^double vx ^double wx]
+  (let [m (fmod vx wx)
+        div (/ (- vx m) wx)
+        [m div] (if (not (zero? m))
+                  (if (and (not= (neg? wx) (neg? m)) (not= *mutation* :dividend-sign)) [(+ m wx) (- div 1.0)] [m div])
+                  [(Math/copySign 0.0 wx) div])
+        fd (if (not (zero? div))
+             (let [f (Math/floor div)] (if (> (- div f) 0.5) (+ f 1.0) f))
+             (Math/copySign 0.0 (/ vx wx)))]
+    [fd m]))
+
+(defn- float-pow
+  "floatobject.c's float_pow: v**0 is 1.0; 0.0 to a negative power ZeroDivisionError (Reference: The power operator); a
+  negative base to a non-integral power the complex power; a negative base to an integral power |v|**w negated when w is
+  odd; 1.0 ** w is 1.0; else libm's pow"
+  [^double iv ^double iw complex-pow]
+  (cond
+    (zero? iw) [(F 1.0) :pow-float-special]
+    (zero? iv) (if (neg? iw) [(err "ZeroDivisionError" :zero-negative-power) nil]
+                   [(F (if (== (Math/abs (fmod iw 2.0)) 1.0) iv 0.0)) :pow-float-special])
+    (and (neg? iv) (not= iw (Math/floor iw)))
+    (if (= *mutation* :negative-fractional-error) [(err "ValueError" :negative-fractional) nil] (complex-pow [iv 0.0] [iw 0.0]))
+    :else
+    (let [negate (and (neg? iv) (== (fmod (Math/abs iw) 2.0) 1.0)) v (Math/abs iv)]
+      (if (== v 1.0)
+        [(F (if negate -1.0 1.0)) :pow-float-special]
+        (let [x (lm-pow v iw)] [(F (if negate (- x) x)) :pow-float-libm])))))
+
+(defn- c-prod
+  "_Py_c_prod: (ac - bd, ad + bc), each product rounded"
+  [[a b] [c d]] [(- (* a c) (* b d)) (+ (* a d) (* b c))])
+
+(defn- c-quot
+  "_Py_c_quot (Smith's algorithm, CACM 116): the larger of |b.real|, |b.imag| divided out; a zero divisor EDOM"
+  [[ar ai] [br bi]]
+  (let [abr (Math/abs br) abi (Math/abs bi)]
+    (if (>= abr abi)
+      (if (zero? abr) :edom
+          (let [ratio (/ bi br) denom (+ br (* bi ratio))]
+            [(/ (+ ar (* ai ratio)) denom) (/ (- ai (* ar ratio)) denom)]))
+      (let [ratio (/ br bi) denom (+ (* br ratio) bi)]
+        [(/ (+ (* ar ratio) ai) denom) (/ (- (* ai ratio) ar) denom)]))))
+
+(defn- rc-quot
+  "_Py_rc_quot, a real divided by a complex (3.14): as _Py_c_quot with a zero imaginary dividend, its terms dropped"
+  [a [br bi]]
+  (let [abr (Math/abs br) abi (Math/abs bi)]
+    (if (>= abr abi)
+      (if (zero? abr) :edom
+          (let [ratio (/ bi br) denom (+ br (* bi ratio))] [(/ a denom) (/ (* (- a) ratio) denom)]))
+      (let [ratio (/ br bi) denom (+ (* br ratio) bi)] [(/ (* a ratio) denom) (/ (- a) denom)]))))
+
+(defn- c-powu [x n]
+  (loop [r [1.0 0.0] p x mask 1]
+    (if (and (pos? mask) (>= n mask))
+      (recur (if (pos? (bit-and n mask)) (c-prod r p) r) (c-prod p p) (bit-shift-left mask 1))
+      r)))
+
+(defn- c-powi [x n] (if (pos? n) (c-powu x n) (c-quot [1.0 0.0] (c-powu x (- n)))))
+
+(defn- c-pow
+  "_Py_c_pow (the polar form): |a|**b.real by hypot and pow, the angle by atan2, exp and log for an imaginary exponent,
+  the result by cos and sin; a zero base EDOM for a negative or complex exponent"
+  [[ar ai] [br bi]]
+  (cond
+    (and (zero? br) (zero? bi)) [1.0 0.0]
+    (and (zero? ar) (zero? ai)) (if (or (not (zero? bi)) (neg? br)) :edom [0.0 0.0])
+    :else
+    (let [vabs (lm-hypot ar ai)
+          len (lm-pow-or-one vabs br)
+          at (lm-atan2 ai ar)
+          phase (* at br)
+          [len phase] (if (not (zero? bi)) [(* len (lm-exp (* (- at) bi))) (+ phase (* bi (lm-log vabs)))] [len phase])]
+      [(* len (lm-cos phase)) (* len (lm-sin phase))])))
+
+(defn- lm-pow-or-one ^double [^double x ^double y]
+  ;; pow(x, y) as C99 F.9.4.4 for the cases c_pow meets: pow(1, y) is 1, pow(x, 1) is x
+  (cond (== x 1.0) 1.0 (== y 1.0) x :else (lm-pow x y)))
+
+(defn- complex-pow
+  "complexobject.c's complex_pow: an exponent of a small integral value (b.imag 0, |b.real| <= 100) by c_powi's repeated
+  products, else c_pow; EDOM ZeroDivisionError, an overflow OverflowError. [VALUE RULE]"
+  [a b]
+  (let [[br bi] b
+        small (and (zero? bi) (== br (Math/floor br)) (<= (Math/abs br) 100.0))
+        r (if small (c-powi a (long br)) (c-pow a b))]
+    (cond (= r :edom) [(err "ZeroDivisionError" :zero-complex-power) nil]
+          (or (Double/isInfinite (first r)) (Double/isInfinite (second r))) [(err "OverflowError" :complex-overflow) nil]
+          :else [(C (first r) (second r)) (if small :pow-complex-int :pow-complex-polar)])))
+
+;;; ---- the binary operators: [VALUE RULE] (VALUE an error map or a value; RULE the review's rule key)
+
+(defn- type-error [] [(err "TypeError" :unsupported) nil])
+
+(defn- num-op
+  "An arithmetic operator on two numbers by the mixed-arithmetic rules (stdtypes: Numeric Types): two ints (bools are
+  ints) exactly; else a float the other converted to float; a complex with a real by the usual formula on the parts
+  (3.14), two complexes part by part. INT-F, FLOAT-F and COMPLEX-F return [VALUE RULE]"
+  [a b int-f float-f complex-f]
+  (cond
+    (and (intlike? a) (intlike? b)) (int-f (ival a) (ival b))
+    (and (real? a) (real? b))
+    (let [x (to-float a) y (to-float b)]
+      (cond (map? x) [x :int-to-float-overflow] (map? y) [y :int-to-float-overflow] :else (float-f x y)))
+    :else
+    (let [ca (if (= :complex (:t a)) [(:re a) (:im a)] (to-float a))
+          cb (if (= :complex (:t b)) [(:re b) (:im b)] (to-float b))]
+      (cond (map? ca) [ca :int-to-float-overflow] (map? cb) [cb :int-to-float-overflow] :else (complex-f ca cb)))))
+
+(defn- repeat-seq
+  "Common Sequence Operations, s * n: n copies of s, an empty sequence for n <= 0; n must fit an index
+  (PyNumber_AsSsize_t: OverflowError past sys.maxsize); a count of 1 gives the same object for str, bytes and tuple
+  (unicode_repeat, bytes_repeat, tuple_repeat)"
+  [s n-obj]
+  (let [n (ival n-obj)]
+    (cond
+      (> (.compareTo (.abs n) SSIZE-MAX) 0) [(err "OverflowError" :repeat-overflow) nil]
+      (and (neg? (.signum n)) (= *mutation* :negative-repeat-error)) [(err "ValueError" :negative-repeat) nil]
+      :else
+      (let [k (max 0 (.longValue n))
+            v (if (= :str (:t s)) (apply str (repeat k (:v s))) (vec (apply concat (repeat k (:v s)))))
+            r (assoc s :v v)]
+        [(if (and (= k 1) (#{:str :bytes :tuple} (:t s))) (assoc r :same true) r) (if (<= k 0) :repeat-empty :repeat)]))))
+
+(defn- mapping-arg?
+  "printf-style formatting's mapping test (PyUnicode_Format, _PyBytes_FormatEx): an argument with __getitem__ (a type with
+  mp_subscript: bytes, list, dict) that is no tuple and no str (for bytes formatting also no bytes or bytearray)"
+  [x bytes-fmt]
+  (and (#{:bytes :list :dict :tuple :str} (:t x))
+       (not (#{:tuple :str} (:t x)))
+       (not (and bytes-fmt (= :bytes (:t x))))))
+
+(defn- binop
+  "a OP b for the 12 operators (Reference, Expressions: Binary arithmetic operations, The power operator, Shifting
+  operations, Binary bitwise operations): [VALUE RULE]"
+  [op a b]
+  (case op
+    :add
+    (cond
+      (num? a) (if (num? b)
+                 (num-op a b (fn [x y] [{:t :int :v (.add x y)} :int-arith])
+                         (fn [x y] [(F (+ x y)) :float-arith])
+                         (fn [x y] [(cond (and (vector? x) (vector? y)) (C (+ (x 0) (y 0)) (+ (x 1) (y 1)))
+                                          (vector? x) (C (+ (x 0) y) (x 1))
+                                          :else (C (+ x (y 0)) (y 1)))
+                                    :complex-arith]))
+                 (type-error))
+      (and (seq-kind? a) (= (:t a) (:t b))) [(update a :v #(if (string? %) (str % (:v b)) (into % (:v b)))) :concat]
+      :else (type-error))
+    :sub
+    (cond
+      (and (num? a) (num? b))
+      (num-op a b (fn [x y] (if (= *mutation* :ints-as-floats) [(F (- (rat->double [x ONE]) (rat->double [y ONE]))) :int-arith] [{:t :int :v (.subtract x y)} :int-arith]))
+              (fn [x y] [(F (- x y)) :float-arith])
+              (fn [x y] [(cond (and (vector? x) (vector? y)) (C (- (x 0) (y 0)) (- (x 1) (y 1)))
+                               (vector? x) (C (- (x 0) y) (x 1))
+                               :else (C (- x (y 0)) (- (y 1))))
+                         :complex-arith]))
+      (and (= :set (:t a)) (= :set (:t b))) [(assoc a :v (vec (remove (set (:v b)) (:v a)))) :set-op]
+      :else (type-error))
+    :mul
+    (cond
+      (and (num? a) (num? b))
+      (num-op a b (fn [x y] [{:t :int :v (.multiply x y)} :int-arith])
+              (fn [x y] [(F (* x y)) :float-arith])
+              (fn [x y] [(cond (and (vector? x) (vector? y)) (apply C (c-prod x y))
+                               (vector? x) (C (* (x 0) y) (* (x 1) y))
+                               :else (C (* x (y 0)) (* x (y 1))))
+                         :complex-arith]))
+      (and (seq-kind? a) (intlike? b)) (repeat-seq a b)
+      (and (intlike? a) (seq-kind? b)) (update (repeat-seq b a) 0 dissoc :same)
+      :else (type-error))
+    :truediv
+    (if (and (num? a) (num? b))
+      (num-op a b
+              (fn [x y] (cond (zero? (.signum y)) [(err "ZeroDivisionError" :division-by-zero) nil]
+                              (= *mutation* :int-division-floors) [(F (rat->double [(first (floor-divmod x y)) ONE])) :int-truediv]
+                              (zero? (.signum x)) [(F (if (neg? (.signum y)) -0.0 0.0)) :int-truediv]
+                              :else (let [d (rat->double (rat-reduce [x y]))]
+                                      (if (Double/isInfinite d) [(err "OverflowError" :truediv-overflow) nil] [(F d) :int-truediv]))))
+              (fn [x y] (if (zero? y) [(err "ZeroDivisionError" :division-by-zero) nil] [(F (/ x y)) :float-arith]))
+              (fn [x y] (let [r (cond (and (vector? x) (vector? y)) (c-quot x y)
+                                      (vector? x) (if (zero? y) :edom [(/ (x 0) y) (/ (x 1) y)])
+                                      :else (rc-quot x y))]
+                          (if (= r :edom) [(err "ZeroDivisionError" :division-by-zero) nil] [(apply C r) :complex-div]))))
+      (type-error))
+    (:floordiv :mod)
+    (cond
+      (and (num? a) (num? b) (or (= :complex (:t a)) (= :complex (:t b)))) [(err "TypeError" :complex-no-floordiv) nil]
+      (and (num? a) (num? b))
+      (num-op a b
+              (fn [x y] (if (zero? (.signum y)) [(err "ZeroDivisionError" :division-by-zero) nil]
+                            (let [[q r] (floor-divmod x y)
+                                  v (if (= op :floordiv) q r)
+                                  ;; long_divrem and long_rem: |a| < |b| gives a itself as the remainder (long_long)
+                                  same (and (= op :mod) (= :int (:t a)) (< (.compareTo (.abs x) (.abs y)) 0) (= (.signum x) (.signum y)))]
+                              [(cond-> {:t :int :v v} same (assoc :same true)) :int-floordiv])))
+              (fn [x y] (if (zero? y) [(err "ZeroDivisionError" :division-by-zero) nil]
+                            (let [[fd m] (float-divmod x y)] [(F (if (= op :floordiv) fd m)) :float-floordiv])))
+              nil)
+      (and (= op :mod) (= :str (:t a)))
+      (if (mapping-arg? b false) [(assoc a :same true) :str-format-mapping] [(err "TypeError" :format-not-all-converted) nil])
+      (and (= op :mod) (= :bytes (:t a)))
+      (if (mapping-arg? b true) [a :bytes-format-mapping] [(err "TypeError" :format-not-all-converted) nil])
+      :else (type-error))
+    :pow
+    (cond
+      (and (intlike? a) (intlike? b))
+      (let [x (ival a) y (ival b)]
+        (if (neg? (.signum y))
+          (float-pow (rat->double [x ONE]) (rat->double [y ONE]) complex-pow)
+          [{:t :int :v (.pow x (.intValue y))} :int-pow]))
+      (and (real? a) (real? b))
+      (let [x (to-float a) y (to-float b)] (float-pow x y complex-pow))
+      (and (num? a) (num? b)) (complex-pow (to-complex a) (to-complex b))
+      :else (type-error))
+    (:lshift :rshift)
+    (if (and (intlike? a) (intlike? b))
+      (let [x (ival a) y (ival b)]
+        (cond
+          (and (neg? (.signum y)) (not= *mutation* :negative-shift-reverses)) [(err "ValueError" :negative-shift) nil]
+          :else
+          (let [lshift? (= (= op :lshift) (not (neg? (.signum y)))) n (.intValue (.abs y))]
+            (if lshift?
+              [{:t :int :v (.shiftLeft x n)} :shift]
+              [{:t :int :v (if (and (= *mutation* :truncating-rshift) (neg? (.signum x))) (.negate (.shiftRight (.negate x) n)) (.shiftRight x n))} :shift]))))
+      (type-error))
+    (:and :or :xor)
+    (cond
+      (and (= :bool (:t a)) (= :bool (:t b)) (not= *mutation* :bool-op-int))
+      [{:t :bool :v (case op :and (and (:v a) (:v b)) :or (or (:v a) (:v b)) :xor (not= (:v a) (:v b)))} :bool-bitwise]
+      (and (intlike? a) (intlike? b))
+      (let [x (ival a) y (ival b)] [{:t :int :v (case op :and (.and x y) :or (.or x y) :xor (.xor x y))} :int-bitwise])
+      (and (= :set (:t a)) (= :set (:t b)))
+      (let [in-b (set (:v b)) in-a (set (:v a))]
+        [(assoc a :v (case op :and (vec (filter in-b (:v a))) :or (vec (concat (:v a) (remove in-a (:v b))))
+                               :xor (vec (concat (remove in-b (:v a)) (remove in-a (:v b))))))
+         :set-op])
+      (and (= op :or) (= :dict (:t a)) (= :dict (:t b))) [(assoc a :v (merge-pairs (:v a) (:v b))) :dict-merge]
+      :else (type-error))))
+
+(defn- merge-pairs [ps qs]
+  (reduce (fn [acc [k v]] (if-let [i (first (keep-indexed (fn [i [k2 _]] (when (= k2 k) i)) acc))] (assoc-in acc [i 1] v) (conj acc [k v]))) (vec ps) qs))
+
+;;; ---- the augmented assignments (Reference, simple_stmts: Augmented assignment statements; datamodel: Emulating numeric
+;;; types, __iadd__ and the rest): a list, a set or a dict updates itself in place where its type has the in-place
+;;; method, else a op= b is a = a op b
+
+(defn- iterable-items
+  "The items an iteration of x yields (str: its characters, bytes: its ints, set: its elements in iteration order (small ints
+  by their hash), dict: its keys), or nil when x is not iterable"
+  [x]
+  (case (:t x)
+    :str (mapv #(S (str %)) (:v x))
+    :bytes (mapv I (:v x))
+    (:list :tuple :set) (:v x)
+    :dict (mapv first (:v x))
+    nil))
+
+(defn- augop
+  "a OP= b: [VALUE RULE]; VALUE's :same says the name is bound to the same object afterwards"
+  [op a b]
+  (cond
+    ;; Mutable Sequence Types: s += t extends s by t's items (any iterable), s *= n updates s with its contents n times
+    (and (= :list (:t a)) (= op :add))
+    (if-let [items (iterable-items b)] [(assoc a :v (into (:v a) items) :same true :same-why :in-place) :list-iadd] [(err "TypeError" :not-iterable) nil])
+    (and (= :list (:t a)) (= op :mul))
+    (if (intlike? b) (let [[r rule] (repeat-seq a b)] [(if (:err r) r (assoc r :same true :same-why :in-place)) (if (:err r) rule :list-imul)]) (type-error))
+    ;; Set Types: update |=, intersection_update &=, symmetric_difference_update ^=, difference_update -= with a set
+    (and (= :set (:t a)) (#{:or :and :xor :sub} op) (= :set (:t b)))
+    (let [[r] (binop op a b)] [(assoc r :same true :same-why :in-place) :set-iop])
+    ;; Mapping Types: d |= other updates d from a mapping or an iterable of key/value pairs
+    (and (= :dict (:t a)) (= op :or))
+    (cond
+      (= :dict (:t b)) [(assoc a :v (merge-pairs (:v a) (:v b)) :same true :same-why :in-place) :dict-ior]
+      (nil? (iterable-items b)) [(err "TypeError" :not-iterable) nil]
+      :else (let [e (first (iterable-items b))]
+              (if (= :str (:t e)) [(err "ValueError" :dict-update-length) nil] [(err "TypeError" :dict-update-sequence) nil])))
+    :else
+    (let [[r rule] (binop op a b)]
+      (if (:err r)
+        [r rule]
+        (let [why (cond
+                    ;; the operation returns its left operand itself (a repeat count of 1, a format string written whole)
+                    (and (:same r) (= (:t r) (:t a))) :returns-operand
+                    ;; Objects, values and types: an immutable result may be an existing object of the same value;
+                    ;; CPython's small ints (-5 to 256) are one object each, and every int result in that range is
+                    ;; that object (maybe_small_long, _PyLong_FromSTwoDigits, long_long)
+                    (and (= :int (:t a) (:t r)) (= (:v a) (:v r)) (< (.bitLength ^BigInteger (:v r)) 63)
+                         (<= -5 (.longValue ^BigInteger (:v r)) 256)) :small-int
+                    ;; True and False are singletons (bool_and, bool_or return them)
+                    (and (= :bool (:t a) (:t r)) (= (:v a) (:v r))) :bool-singleton)]
+          [(assoc r :same (boolean why) :same-why (or why :new)) rule])))))
+
+;;; ---------------------------------------------------------------------------------------------------------------------
+;;; The tables
+
+(def ops {"add" :add "sub" :sub "mul" :mul "truediv" :truediv "floordiv" :floordiv "mod" :mod "pow" :pow
+          "lshift" :lshift "rshift" :rshift "and" :and "or" :or "xor" :xor})
+
+(def controls
+  ;; each program's negative control: one rule changed, which must change its table
+  {:add :bool-not-int :sub :ints-as-floats :mul :negative-repeat-error :truediv :int-division-floors
+   :floordiv :truncate-division :mod :dividend-sign :pow :negative-fractional-error :lshift :negative-shift-reverses
+   :rshift :truncating-rshift :and :bool-op-int :or :bool-op-int :xor :bool-op-int})
+
+(defn- parse-op [name]
+  (let [aug (str/starts-with? name "aug-") base (if aug (subs name 4) name)]
+    (when-let [op (ops base)] [aug op])))
+
+(defn- skipped? [op b]
+  ;; the program's own guard: an int exponent or shift count (not a bool) with abs(b) > 64 is printed as skipped
+  (and (#{:pow :lshift :rshift} op) (= :int (:t b)) (> (.compareTo (.abs ^BigInteger (:v b)) (big 64)) 0)))
+
+(defn- cell
+  "[TEXT RULE SAME-WHY] of cell (i, j); SAME-WHY (augmented forms) why `alias is a` is what it is"
+  [aug op i j]
+  (let [b (operands j)]
+    (if (skipped? op b)
+      ["skipped" :skipped nil]
+      (if aug
+        (let [a (operands i) [r rule] (augop op a b)]
+          (if (:err r) [(:err r) (:rule r) nil] [(str "(" (pyrepr r) ", " (if (:same r) "True" "False") ")") rule (:same-why r)]))
+        (let [[r rule] (binop op (operands i) b)]
+          (if (:err r) [(:err r) (:rule r) nil] [(pyrepr r) rule nil]))))))
+
+(defn table-lines [name]
+  (let [[aug op] (or (parse-op name) (throw (IllegalArgumentException. (str "no such table: " name))))]
+    (vec (for [i (range 15) j (range 15)] (str "(" i ", " j ") -> " (first (cell aug op i j)))))))
+
+(defn table [name] (str (str/join "\n" (table-lines name)) "\n"))
+
+(defn control-table [name]
+  (let [[_ op] (parse-op name)] (binding [*mutation* (controls op)] (table name))))
+
+;;; ---------------------------------------------------------------------------------------------------------------------
+;;; The review entries (review-ops.edn): one per left operand, the 15 cells with the rule each follows
+
+(def rule-text
+  ;; each rule: [the reading, short; its basis; the library sections it rests on beside the operator's own section]
+  {:int-arith ["ints, exact at any size; True is 1" #{:ref :lib} ["stdtypes: Numeric Types"]]
+   :int-pow ["int ** int >= 0: an exact int" #{:ref} ["functions: pow"]]
+   :int-truediv ["int / int: the exact quotient rounded once to a float; 0 / a negative int is -0.0" #{:ref :lib :impl} ["stdtypes: Numeric Types"]]
+   :int-floordiv ["ints: the floored quotient, the remainder with the divisor's sign" #{:ref :lib} ["stdtypes: Numeric Types"]]
+   :float-arith ["the int converted to float, IEEE 754 double arithmetic (round half to even), repr the shortest round-trip string" #{:ref :lib} ["stdtypes: Numeric Types (mixed arithmetic)" "functions: repr (float)"]]
+   :float-floordiv ["floats: fmod moved to the divisor's sign by adding it (rounded, the Reference's footnote), the quotient (x - x%y)/y snapped to an integral value, zeros signed as _float_div_mod's" #{:ref :lib :impl} ["stdtypes: Numeric Types (mixed arithmetic)"]]
+   :complex-arith ["3.14's mixed complex arithmetic: a real combined with the parts (x + complex(u, v) = complex(x + u, v), x * complex(u, v) = complex(x * u, x * v)), two complexes part by part, (ac - bd) + (ad + bc)j; repr drops '.0' and a +0.0 real part" #{:ref :lib :impl} ["stdtypes: Numeric Types (mixed arithmetic)"]]
+   :complex-div ["complex division: by a real part by part, else Smith's algorithm (_Py_rc_quot, _Py_c_quot: the larger of |c|, |d| divided out first), its signed zeros" #{:lib :impl} ["stdtypes: Numeric Types (mixed arithmetic)"]]
+   :pow-float-special ["float_pow's exact cases: x ** 0 is 1.0, 0.0 ** y > 0 is 0.0, 1.0 ** y is 1.0, a negative base to an integral power |x| ** y negated for odd y" #{:ref :lib :impl} ["functions: pow"]]
+   :pow-float-libm ["as floats (an int to a negative int power too): libm's pow(|x|, y) correctly rounded, negated for a negative base and odd y" #{:ref :lib :impl} ["functions: pow"]]
+   :pow-complex-int ["complex ** a small integral exponent (|n| <= 100): binary powering by complex products, a negative n as 1 / x**|n|" #{:ref :lib :impl} ["functions: pow"]]
+   :pow-complex-polar ["complex power in polar form (a negative base to a fractional power is complex): |a| ** b.real by hypot and pow, the angle atan2(a.imag, a.real) * b.real; an imaginary exponent multiplies the length by exp(-angle * b.imag) and adds b.imag * log|a| to the angle; the result length * (cos, sin) of the angle, each libm call correctly rounded" #{:ref :lib :impl} ["functions: pow"]]
+   :zero-negative-power ["0 to a negative power" #{:ref} []]
+   :zero-complex-power ["0 to a complex power" #{:ref :impl} []]
+   :division-by-zero ["a zero divisor" #{:ref} []]
+   :complex-no-floordiv ["no // or % for complex numbers" #{:ref :lib} ["stdtypes: Numeric Types note (2)"]]
+   :concat ["two sequences of one type concatenated" #{:ref :lib} ["stdtypes: Common Sequence Operations"]]
+   :repeat ["sequence repetition; a count of 1 returns str, bytes and tuple themselves" #{:ref :lib :impl} ["stdtypes: Common Sequence Operations"]]
+   :repeat-empty ["a repetition count <= 0: the empty sequence" #{:ref :lib} ["stdtypes: Common Sequence Operations"]]
+   :repeat-overflow ["a repetition count past sys.maxsize" #{:lib :impl} ["stdtypes: Common Sequence Operations"]]
+   :set-op ["the set operators (difference, intersection, union, symmetric difference), small ints in hash order" #{:lib :impl} ["stdtypes: Set Types"]]
+   :dict-merge ["dict | dict: a new dict, the right operand's values winning" #{:lib} ["stdtypes: Mapping Types"]]
+   :str-format-mapping ["str % a mapping (bytes, list, dict: __getitem__, not a tuple or str), no specifier: the format string itself, written whole" #{:lib :impl} ["stdtypes: printf-style String Formatting"]]
+   :bytes-format-mapping ["bytes % a mapping (list, dict), no specifier: the format bytes copied" #{:lib :impl} ["stdtypes: printf-style Bytes Formatting"]]
+   :format-not-all-converted ["% a non-mapping argument, no specifier: not all arguments converted" #{:lib} ["stdtypes: printf-style String Formatting"]]
+   :shift ["a << n is a * 2**n, a >> n is a // 2**n" #{:ref :lib} ["stdtypes: Bitwise Operations on Integer Types"]]
+   :negative-shift ["a negative shift count" #{:lib} ["stdtypes: Bitwise Operations on Integer Types"]]
+   :int-bitwise ["two's complement with infinitely many sign bits; a bool with an int gives an int" #{:ref :lib} ["stdtypes: Bitwise Operations on Integer Types"]]
+   :bool-bitwise ["two bools give a bool" #{:lib} ["stdtypes: Boolean Type"]]
+   :unsupported ["the operator is not defined for the pair" #{:ref} []]
+   :skipped ["the program's guard: an int exponent or count with abs > 64 is skipped" #{:ref} []]
+   :list-iadd ["list += iterable extends it in place (a str by characters, bytes by ints, a set in hash order, a dict by keys)" #{:ref :lib :impl} ["stdtypes: Mutable Sequence Types"]]
+   :list-imul ["list *= int updates it in place" #{:ref :lib} ["stdtypes: Mutable Sequence Types"]]
+   :not-iterable ["a non-iterable to extend or update from" #{:lib} ["stdtypes: Mutable Sequence Types"]]
+   :set-iop ["set |=, &=, ^=, -= set update it in place" #{:ref :lib} ["stdtypes: Set Types"]]
+   :dict-ior ["dict |= dict updates it in place" #{:lib} ["stdtypes: Mapping Types"]]
+   :dict-update-length ["dict |= 'ab': items must be pairs, 'a' has length 1" #{:lib} ["stdtypes: Mapping Types (update)"]]
+   :dict-update-sequence ["dict |= an iterable of non-sequences" #{:lib} ["stdtypes: Mapping Types (update)"]]
+   :int-to-float-overflow ["an int too large for a float" #{:lib} []]
+   :truediv-overflow ["a quotient too large for a float" #{:lib} []]
+   :complex-overflow ["a complex power that overflows" #{:impl} []]})
+
+(def identity-text
+  ;; why `alias is a` holds after a op= b
+  {:in-place ["updated in place" #{:ref :lib}]
+   :returns-operand ["the operation returns a itself" #{:impl}]
+   :small-int ["the result is a's small int (one object per int in -5..256)" #{:impl}]
+   :bool-singleton ["the result is a's bool (True and False are singletons)" #{:impl}]})
+
+(def sections-of
+  {:add "expressions: Binary arithmetic operations (+)" :sub "expressions: Binary arithmetic operations (-)"
+   :mul "expressions: Binary arithmetic operations (*)" :truediv "expressions: Binary arithmetic operations (/)"
+   :floordiv "expressions: Binary arithmetic operations (//)" :mod "expressions: Binary arithmetic operations (%)"
+   :pow "expressions: The power operator" :lshift "expressions: Shifting operations" :rshift "expressions: Shifting operations"
+   :and "expressions: Binary bitwise operations (&)" :or "expressions: Binary bitwise operations (|)" :xor "expressions: Binary bitwise operations (^)"})
+
+(defn- name-of [op] ({:add "+" :sub "-" :mul "*" :truediv "/" :floordiv "//" :mod "%" :pow "**" :lshift "<<" :rshift ">>" :and "&" :or "|" :xor "^"} op))
+
+(defn- sha256 [^String s]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md (.getBytes s "UTF-8"))))))
+
+(defn- group-text
+  "One rule's cells of a row: 'b -> value, ...' or, when every value is the same, 'b, b, ... -> value'"
+  [cells]
+  (let [vs (distinct (map second cells))]
+    (if (and (= 1 (count vs)) (> (count cells) 1))
+      (str (str/join ", " (map #(operand-text (first %)) cells)) " -> " (first vs))
+      (str/join ", " (map (fn [[j t]] (str (operand-text j) " -> " t)) cells)))))
+
+(defn review-entry
+  "NAME's review: {:sha :lines}, an entry per left operand (15 lines), its cells grouped by the rule each follows"
+  [nm]
+  (let [[aug op] (parse-op nm)
+        rows (for [i (range 15)]
+               (let [cells (for [j (range 15)] (let [[t rule why] (cell aug op i j)] [j t rule why]))
+                     rules (distinct (map #(nth % 2) cells))
+                     whys (distinct (remove #(or (nil? %) (= :new %)) (map #(nth % 3) cells)))
+                     basis (into (sorted-set) (concat (mapcat #(second (rule-text %)) rules) (mapcat #(second (identity-text %)) whys)))
+                     secs (distinct (concat [(sections-of op)]
+                                            (when aug ["simple_stmts: Augmented assignment statements"
+                                                       "datamodel: Emulating numeric types (the in-place methods)"])
+                                            (when (some #{:small-int :bool-singleton :returns-operand} whys)
+                                              ["datamodel: Objects, values and types (an immutable result may be an existing object)"])
+                                            (mapcat #(nth (rule-text %) 2) rules)))
+                     text (str/join "; " (for [r rules]
+                                           (str (group-text (filter #(= r (nth % 2)) cells)) " (" (first (rule-text r)) ")")))
+                     same (when (some #(nth % 3) cells)
+                            (str "; is a afterwards: "
+                                 (str/join "; " (concat
+                                                 (for [w whys]
+                                                   (str "True for " (str/join ", " (for [c cells :when (= w (nth c 3))] (operand-text (first c))))
+                                                        " (" (first (identity-text w)) ")"))
+                                                 (when (some #(= :new (nth % 3)) cells) [(if (seq whys) "False for the rest (a new object)" "False for each (a new object)")])))))]
+                 [[(inc (* 15 i)) (* 15 (inc i))] (str/join "; " secs) basis
+                  (str "a = " (operand-text i) (when (and aug (#{9 11} i)) " (a fresh copy)") ", a " (name-of op) (if aug "= b" " b") ": " text same)]))]
+    {:sha (sha256 (table nm)) :lines (vec rows)}))
+
+(defn- print-review [names]
+  (doseq [n names]
+    (let [{:keys [sha lines]} (review-entry n)]
+      (println (str " \"synth/ops/" n ".py\""))
+      (println (str " {:sha \"" sha "\" :lines"))
+      (println (str "  [" (str/join "\n   " (for [[ls sec basis why] lines]
+                                             (str "[" (pr-str ls) " " (pr-str sec) " " (pr-str (into (sorted-set) basis)) "\n    " (pr-str why) "]")))
+                    "]}"))
+      (println))))
+
+;;; ---------------------------------------------------------------------------------------------------------------------
+;;; Main
+
+(defn- check [dir names]
+  (let [bad (atom 0) ctl (atom 0)]
+    (doseq [n names]
+      (let [f (File. (str dir "/synth/ops/" n ".out"))
+            t (table n) c (control-table n)]
+        (cond (not (.exists f)) (do (swap! bad inc) (println (str "  FAIL synth/ops/" n ".py: no golden text " f)))
+              (not= t (slurp f)) (do (swap! bad inc) (println (str "  FAIL synth/ops/" n ".py: model ops.ae differs from the golden text"))))
+        (when (= c t) (swap! ctl inc) (println (str "  FAIL control passed: synth/ops/" n ".py's control (" (name (controls (second (parse-op n)))) ") gives the same table")))))
+    (println (str "golden models: ops.ae computes " (- (count names) @bad) " of " (count names) " tables as their golden texts; "
+                  (- (count names) @ctl) " of " (count names) " negative controls ("
+                  (str/join ", " (distinct (map #(name (controls (second (parse-op %)))) names))) ") differ, as they must"))
+    (if (pos? (+ @bad @ctl)) 1 0)))
+
+(let [[a1 & more] *command-line-args*]
+  (cond
+    (= a1 "--control") (print (control-table (first more)))
+    (= a1 "--check") (let [rc (check (first more) (rest more))] (flush) (System/exit rc))
+    (= a1 "--review") (print-review more)
+    a1 (print (table a1))
+    :else (do (println "usage: arbace ops.ae OP | --control OP | --check DIR OP... | --review OP...") (System/exit 2))))
+(flush)
