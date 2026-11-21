@@ -5650,3 +5650,29 @@ The port (the llvm-project in rustc-1.99.1-src.tar.xz, LLVM 23, Apache-2.0 WITH 
   `MaybeUninit::write`, `intrinsics::unlikely`, wanted for the next export; `dec2flt` and `run_utf8_validation` refused at their
   runtime bodies). The rest of the refusals as before (30 not exported, 21 `[MaybeUninit<u8>; N]` layouts of a named constant's
   length, 10 constants unevaluated).
+
+## C1's drop glue (2026-11-21, branch `rust-c6-1120`; the coordinator's order after rust-rec-1120)
+
+rust-rec-1120's runs with `RF_DROP_GLUE=1` (the native bodies' drops calling their glue, C6-4 (a)) left three faults:
+
+1. **`drop_glue::<dyn Any + Send>` called itself** (unwind's second `catch_unwind`, panics: status 139, a stack overflow).
+   Codegen called the glue named for a trait object's place, whose shim drops `*_1`, so itself. **Fixed**: the drop of a trait
+   object is virtual as rustc_codegen_ssa's `codegen_drop_terminator` writes it for `ty::Dynamic` (VirtualIndex 0's
+   `get_optional_fn`: the vtable's slot 0 loaded, called when not null, an invoke with the drop's unwind). pack-compare-test: the
+   glue's forms against std's IR's `drop_glue::<dyn Error + Sync + Send>` (alloc's unit 3), equal; the control, a sized pointee's
+   drop calling its glue, differs.
+2. **Units name glues they never emit** (`drop_glue::<str::iter::SplitWhitespace>` in std, `<hash_map::Iter<String, u64>>` in
+   vectors): rustc's `needs_drop` is false for both (references and zero-sized predicates), ours true by what it could not see: a
+   projection left unnormalized (`<IsWhitespace as Pattern>::Searcher`, whose `FnMut` impl for the private `IsWhitespace` the
+   helper's interface lacks) and hashbrown's ADTs (no interface holds them). `RF_DROP_GLUE_TRACE=1` prints each glue's unknowns;
+   `RF_EXTRA_IFACE` gives the run the crates' native facts where its interface has none (core's whole interface pass: functions,
+   ADTs, impls, traits; std's dependencies' hashbrown and libc passes).
+3. **A native body's `#[inline]` callee never put in the unit** (`core::char::convert::from_u32_unchecked`): the native
+   `char::from_u32_unchecked` named it by the upstream symbol (no unit defines one: an `#[inline]` function is a local copy)
+   because its signature was missing (`{no sig ..}`: crate-private, and char/convert.rs outside rust-rec's outside export).
+   `RF_EXTRA_IFACE` gives the signature; the outside export now takes every core file and portable-simd (stdarch aside).
+
+The runs at the merged head (503-rust-causes4 merged, `d4268b54b`): the exports re-made (core's own with 479-2, the outside one,
+alloc's, std's), then std, vectors, unwind and panics built with `RF_DROP_GLUE=1` and run on ci (`bin/rsi check --front own`,
+`RSI_FRONT_DIR`). 503-rust-causes4's open findings, taken only if they block C1: 503-1 (the `[const] BytewiseEq<B>` where clause
+exported with no arguments, the collector picking `{impl#4}` for u8), 503-2 (a `btree::mem::replace` instance not collected).
