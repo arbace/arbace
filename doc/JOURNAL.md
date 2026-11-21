@@ -15688,3 +15688,11 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-21: the Rust line back in next
+
+The Mac's 512 (mac/512-rust-causes5 a5cfe536f) found rust-front-essential's one differing body: not 498's constant-switch arm but 474's
+ab8999fea, which ran RemoveNoopLandingPads again just before SimplifyCfg-pre-optimizations (a6's `f`: `drop(_2) -> [return: bb2, unwind
+continue]` where rustc keeps `unwind: bb4`, a bare cleanup resume; rustc runs that pass again only among run_optimization_passes, before
+SimplifyCfg-final). The runtime pipeline's last pass is SimplifyCfg alone again, and build-run's o0-normalize runs RemoveNoopLandingPads in
+rustc's place. The revert d0cdf3d7f is reverted (bbe3c5eec) and 512 merged; the 2026-11-21 entry that blamed 498 is corrected by this one.
