@@ -1920,6 +1920,11 @@
                      (not (some #(= :fn (:e %)) (.get ^java.util.HashMap (:names home) "operator=="))))
             (declare-fn! scope (assoc n :name "operator==" :type {:qualType (str/replace (str qt) #"^\s*auto\b" "bool")})))))
     (when defer (upd-fn! id assoc :trailing-defer [rps rc]))
+    ;; (cpp-rt-own3, DECISION cpp-rt-own2-2 (a): a templated member function's trailing requires-clause mangled after its
+    ;; parameters, as clang 23 does, its types resolved in its class's constraint scope: :tq; a function template's is its
+    ;; instantiation's, arbace.cpp.template/instantiate-fn)
+    (when (and rc id (nil? *instantiating*) (not (checking?)) (:cls scope))
+      (when-let [q ((requiring-resolve 'arbace.cpp.template/member-tq) scope rc)] (upd-fn! id assoc :tq q)))
     id))))
 
 (declare ctad-var)
@@ -2088,11 +2093,13 @@
                ;; unsigned long __prime_list[] = {...}`, external though const, [basic.link]/3)
                :defined (not (or (= st :member-static) (and (= "extern" (:storageClass n)) (not init))))
                :extern (and (= "extern" (:storageClass n)) (not init))
-               :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and cq (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
+               ;; (cpp-rt-own3: an inline const variable is not internal, [basic.link]/3.2: <ranges>' customization point objects,
+               ;; `inline constexpr __access::_Data data{};`, linkonce_odr as clang writes them, print.cc's _ZNSt6ranges4_Cpo4dataE)
+               :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and cq (not (:extern n)) (not= "extern" (:storageClass n)) (not (:inline n)))) (not (:internal home))))
                ;; (CP369 (a): `static` on a static data member is not its linkage, [basic.link]/4: internal only by an unnamed
                ;; namespace on its class's path, its home's; clang's dso_local external global for `int A::y = f();`)
                :internal (boolean (or (:internal home) (and (not= st :member-static) (= "static" (:storageClass n)))
-                                      (and (= st :global) cq (not= "extern" (:storageClass n)))))
+                                      (and (= st :global) cq (not= "extern" (:storageClass n)) (not (:inline n)))))
                :def-scope scope
                :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv)
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
@@ -2116,7 +2123,8 @@
                 (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl {:range (:range n)}))]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
         (swap! *vars* assoc id (cond
-                                 (and (header-node? n) (:defined v) (= st :global))
+                                 ;; (cpp-rt-own3: and an inline variable anywhere, [dcl.inline]/6, defined when odr-used, linkonce_odr)
+                                 (and (or (header-node? n) (and (:inline n) (not (checking?)))) (:defined v) (= st :global))
                                  (cond-> (assoc v :defined false :pending-def true) (not (:internal v)) (assoc :linkonce true))
                                  ;; (cpp-s7: an inline static data member, its in-class declaration a definition ([class.static.data]/4,
                                  ;; [dcl.inline]/6): defined when used, linkonce_odr as clang emits an inline variable; member_kinds.C's
@@ -2257,7 +2265,9 @@
         old (when nm (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:id (:ty %))) (.get m nm)))
         _ (when (and old qns (not (identical? qns scope)))
             (abi/update-cls! old #(-> % (update :scope assoc :path (conj (vec (:path qns)) [:cls old]))
-                                       (assoc :mangle-path-after [(vec (:path qns)) (inc (long @*ids*))]))))
+                                       ;; (cpp-rt-own3, DECISION cpp-rt-own2-3 (a): and the definition's position, the code
+                                       ;; generator's emission-order naming, arbace.cpp.codegen's redef-name)
+                                       (assoc :mangle-path-after [(vec (:path qns)) (inc (long @*ids*)) (long (or (:_b n) 0))]))))
         id (or old (next-id))
         ;; (a class of an unnamed namespace, or local to an internal function, has internal linkage and so have its
         ;; members, [basic.link]/4; G5c: libsupc++'s vec.cc's uncatch_exception, atexit_thread.cc's key_s)
@@ -2924,7 +2934,8 @@
         (:defaulted (fnd d)) (upd-fn! d assoc :trivial (not (or nontriv (:virtual (fnd d)))))
         :else nil))
     ;; the default constructor
-    (when (empty? (:ctors (abi/cls id)))
+    ;; (cpp-rt-own3: none when the class declares a constructor template, a user-declared constructor, [class.default.ctor]/1)
+    (when (and (empty? (:ctors (abi/cls id))) (empty? (:ctor-tmpls (abi/cls id))))
       (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
                         (some default-ctor-nontrivial? (class-like-members id)))]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
@@ -3040,7 +3051,10 @@
   (or (abi/arr? t)
       (and (abi/class? t)
            (let [id (:id t) c (abi/cls id)]
-             (and (not (:user-ctor c)) (not (abi/dynamic? id))
+             ;; (cpp-rt-own3: a constructor template is a user-declared constructor too, [class.ctor.general]/1: `template<typename... U>
+             ;; explicit constexpr CI(U&&... a)` over a union's member, `constinit CI<D> dr{};` value-initialized by it, its vptr
+             ;; written, not zeroed as an aggregate's member)
+             (and (not (:user-ctor c)) (empty? (:ctor-tmpls c)) (not (abi/dynamic? id))
                   (every? #(= :public (:access %)) (:fields c))
                   (every? #(= :public (:access %)) (:bases c)))))))
 
@@ -3298,6 +3312,7 @@
   a member never initialized ([expr.const]/5.9: GCC's \"accessing uninitialized member\")."
   [l]
   (when (and *ce-dead* (contains? @*ce-dead* (::cell l))) (ce-sure! "accessing an object outside its lifetime"))
+  (when (= ::unknown @(::cell l)) (not-constant "a read of an object of unknown value"))
   (let [p (::path l) v @(::cell l)
         x (loop [x v ks (seq p)]
             (if-let [[k & more] ks]
@@ -3382,7 +3397,20 @@
           :else nil)))
 
 (defn- ce-put! [l x]
+  (when (= ::unknown @(::cell l)) (not-constant "a write to an object of unknown value"))
   (let [p (::path l)] (if (seq p) (swap! (::cell l) assoc-in p x) (reset! (::cell l) x)) x))
+
+;; cpp-rt-own3 (DECISION cpp-rt-own2-1 (a)): the objects an evaluation names but never reads, clang's ExprConstant: an automatic or
+;; static variable's object outside the evaluation, whose lvalue is formed without a read (T::ms(a) of a local `a` folds in every
+;; dialect), and since C++23 the object a reference variable outside the evaluation refers to (P2280R4, unknown references:
+;; text_encoding.cc's range-for `auto __end = __range.end();`); a read or a write of one is no constant. One cell a variable in an
+;; evaluation, so that two lvalues of one object are one location. The code generator's alone, not the checker's.
+(def ^:dynamic *ce-unknown* nil) ; atom {key cell}
+
+(defn- ce-unknown-loc [k]
+  (if-let [a *ce-unknown*]
+    {::cell (or (get @a k) (let [c (atom ::unknown)] (swap! a assoc k c) c)) ::path []}
+    {::cell (atom ::unknown) ::path []}))
 
 ;; h-cpp-consteval: the cells of the complete const objects of an evaluation (an atom of a set of cells, compared by identity):
 ;; a const or constexpr local once its initialization is complete ([dcl.type.cv]/4, [expr.const]/5.16: a modification of a const
@@ -3513,7 +3541,8 @@
   ;; (CP374 (a): a pointer is a value inside an evaluation only: as its result, not a constant -- the callers fold integers
   ;; and floats; codegen-gen's globals.cpp, a pointer global's initializer folded to a long, had crashed)
   ;; (CP378 (a): likewise an object's value or a location)
-  ([e] (binding [*ce-steps* (atom 0) *ce-const* (or *ce-const* (atom #{})) *ce-pos* (or *ce-pos* (atom nil)) *ce-dead* (or *ce-dead* (atom #{})) *ce-temps* (or *ce-temps* (atom []))]
+  ([e] (binding [*ce-steps* (atom 0) *ce-const* (or *ce-const* (atom #{})) *ce-pos* (or *ce-pos* (atom nil)) *ce-dead* (or *ce-dead* (atom #{})) *ce-temps* (or *ce-temps* (atom []))
+                 *ce-unknown* (or *ce-unknown* (atom {}))]
         (let [w *ce-wide* v (binding [*ce-wide* true] (ce-eval e {}))]
           (if (or (ce-ptr? v) (map? v)) (not-constant (if (ce-ptr? v) "a pointer's value" "an object's value")) (if w v (narrow-out v))))))
   ([e env]
@@ -3635,6 +3664,11 @@
                  ;; (CP378 (a): a member of an object, a base subobject, a temporary, a call's or a conditional's lvalue)
                  (#{:field :base-lv :temp :call :cond} (:op x))
                  (ce-get (ce-lv x env))
+                 ;; (cpp-rt-own3: since C++23 a reference variable outside the evaluation refers to an unknown object, P2280R4,
+                 ;; *ce-unknown*'s: the code generator's alone)
+                 (and (= :var (:op x)) (:raw x) (abi/ref? (:ty x)) (not (checking?)) (>= (long *cxx-year*) 23)
+                      (#{:local :param :global :static-local :member-static} (:storage (var* (:id x)))))
+                 (ce-unknown-loc [:ref (:id x)])
                  ;; (h-cpp-consteval: an assignment's lvalue read, `return (u.i = 42);`: the value stored)
                  (and (#{:assign :cassign} (:op x)) (not (abi/class? (abi/unq (:ty x)))))
                  (ev x)
@@ -3919,6 +3953,9 @@
                (let [c (atom (binding [*ce-in-call* true] (ce-init (:ty v) (:ginit v) {})))]
                  (when *ce-const* (swap! *ce-const* conj c))
                  {::cell c ::path []})
+               ;; (cpp-rt-own3: an object of a variable outside the evaluation, its lvalue alone, *ce-unknown*'s)
+               (and (not (checking?)) (not (abi/ref? (:ty v))) (#{:local :param :global :static-local :member-static} (:storage v)))
+               (ce-unknown-loc [:var (:id e)])
                :else (not-constant "a variable's object"))))
     :deref (let [p (ce-eval (:e e) env)]
              (cond (ce-loc? p) p
@@ -3978,8 +4015,12 @@
   (into {} (map (fn [i pid]
                   ;; (by value or by reference, as before CP378: allocator_traits::max_size(const allocator_type&)'s object, its
                   ;; member call evaluated without it)
+                  ;; (cpp-rt-own3, DECISION cpp-rt-own2-1 (a): a reference parameter's argument evaluated as clang evaluates every
+                  ;; argument, its object an unknown one when outside the evaluation, so that one which is no constant fails the call:
+                  ;; basic_string::max_size()'s `_Alloc_traits::max_size(_M_get_allocator())`, `this` outside a member's evaluation,
+                  ;; clang's call of _M_get_allocator() const, folded before; by value, an empty argument nothing reads, as before)
                   (let [pt (:ty (var* pid)) u (abi/unq (abi/non-ref pt))]
-                    [pid (atom (if (and (abi/class? u) (abi/empty-class? (:id u)))
+                    [pid (atom (if (and (abi/class? u) (abi/empty-class? (:id u)) (or (checking?) (not (abi/ref? pt))))
                                  ::empty
                                  (ce-store pt (ce-init pt i env))))]))
                 inits (:params f))))
@@ -4096,6 +4137,8 @@
               r (ce-exec (:tbody f) env)]
           (if (and (= :ret (first r)) (not (ce-ptr? (second r))) (not (map? (second r)))) (ce-wrap (:ret (:ty f)) (second r)) (not-constant "no return")))))))
 
+(def ^:dynamic *ce-object-manifest* true)
+
 (defn ce-object
   "cpp-rt-own: the value the initializer `i` (init-for's) gives an object of class type `t` by the evaluator -- a constexpr
   constructor's mem-initializers and body -- as ce-construct makes it ({::cls id, a field's index its value, [:b base] a base's},
@@ -4104,9 +4147,11 @@
   [t i]
   ;; (cpp-rt-own2: with the addresses of objects of static storage duration, ce-static-addr; an unforeseen use of one in a
   ;; computation, a host exception, is no constant rather than a crash)
+  ;; (cpp-rt-own3: manifestly constant-evaluated unless *ce-object-manifest* says not, a local's initializer, the code generator's
+  ;; const-local!)
   (let [ga (atom false)]
   (try (binding [*ce-steps* (atom 0) *ce-const* (or *ce-const* (atom #{})) *ce-pos* (or *ce-pos* (atom nil)) *ce-dead* (or *ce-dead* (atom #{}))
-                 *ce-temps* (or *ce-temps* (atom [])) *ce-manifest* true *ce-gaddr* ga]
+                 *ce-temps* (or *ce-temps* (atom [])) *ce-manifest* *ce-object-manifest* *ce-gaddr* ga *ce-unknown* (or *ce-unknown* (atom {}))]
          (let [v (ce-init t i {})] (when (map? v) v)))
        (catch arbace.lang.ExceptionInfo x (when-not (or (:codegen/not-constant (ex-data x)) (:codegen/refused (ex-data x))) (throw x)) nil)
        (catch RuntimeException x (if @ga nil (throw x))))))
