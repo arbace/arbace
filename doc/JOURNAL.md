@@ -15105,3 +15105,183 @@ check-hsi-aot-own.edn: every row's outcome as recorded (6 pass and 4 :limit fail
 only the timings changed, no killed pass, 0 unclassed. bin/reap --record (matrix unchanged), bin/crops-score --record
 (unchanged), --judge --strict and bin/records-check: 0 problems. Not rebuilt: bytestring, whose 2 modules the fix also takes
 from errors to ok (its pool and STG are lane 2's here).
+
+## 2026-11-20: n-merge-1120b, today's finished branches merged for next (from next `939037429`)
+
+The user, 19:30: "merge today's branches into next". Branch `n-merge-1120b` (worktree `.tmp/worktrees/merge-1120b`) from next
+`939037429`; every branch merged `--no-ff` from mac/, each report read first (the Mac's `.tmp/mac-queue/reports/NNN-*.md`, the
+decisions of `tasks/ANSWERS.md`, this host's notes). No gate (the user: none until the splitting branches land); after each group
+`bin/gate --plan`, `bin/crops-score --judge --strict` and `bin/records-check` held (0 problems), the matrix and the scores re-recorded
+where the merged records moved them.
+
+Merged, in order:
+1. Gate: `gate-audit-1120` e8929f130 (with `gate-split-1120` a017d971c): the 11-20 audit, the cover (`:subsumes`), GDS28-GDS32, the
+   long single steps split.
+2. Judges: `judge-rest-1120` b9ecc46f2 (Java's, OCaml's and arm64's judges; out-of-cases support in `test/crops/score.ae`).
+3. OCaml and Python: `merge-oc-py-1120` a49d1b00b (476+478, 473+475+481), `480-ocaml-ocamldoc` aeefee2d2 (its report's journal entry
+   committed as its own entry above), `489-py-c-tokenizer` c87121d0f (its report's journal entry committed too: it records the
+   vendored CPython sources' origin). `py-own-judge-1120` 48f9f5037 not merged: 489 supersedes its lex-check comment, the rest is
+   its finding (the tokenize.py lever circular), recorded in its report and the journal of 489.
+4. Java: `jcs50-release` ee1e99830 (6239b9fd9: `--release N`; the own ct.sym), `466-java-serialization` 79b84ede9 (f6d5d27b9 and
+   471's), `469-java-j2g-unresolved` a59edcfcf, `477-java-refl` 0c3eb2ad8, `486-java-proxies` e6824713f, `490-j2g-jcs122` 9013dd054
+   (its 5e3e59e46 is 466's prog_arch hunks byte for byte: git folds it, no duplicate in bin/java-check; DECISION 490-2 (a)),
+   `485-java-false-passes` 4c4dbe858, `java-rejudge-1120` 5cb435beb.
+5. C: `495-c-print-own` 0bcf94a4a, `496-c-lexer-ucn` 2eab381a7.
+6. C++: `484-cpp-dg-own3` 0515e7376, `487-cpp-dg-own4` 12fd8bf3b, `492-cpp-dg-own5` b0247cdc3.
+7. Haskell: `482-hs-parked` d3f3df9c4.
+8. Landed during the merge (the user's merge-as-they-land rule, each named by the main session): `c-cpp-golden-1120` e0c84f8dc
+   (3dbf9f3a6, c87a84622: C++'s samples' reviewed golden files, C's 30 and C++'s two ubsan programs out of the judge's cases);
+   `pp-ref-1120` b719822b1 (tools/ppref's harness around GCC 15.2.0's libcpp, built only in .tmp, its gate steps held by 910cf7a77;
+   with `cpp-rt-own-1120` 76118c206, the code generator's gap fixes; `git ls-files` holds no file of the gcc tarball: the new files
+   are tools/ppref/ppref.cc and shim.c, Arbace's own, bin/lib/repr-cpp/ppref and test/c/pp-ref.txt); `llvm-judge-1120` a5e100f56
+   (LLVM's judge own; its C++ golden files byte for byte c-cpp-golden's) and right after it `llvm-sections-1120` c4fd78c5d (the 62
+   split-file section rules ported, :llvmtest-section-rules retired, LLVM completeness 0.9899 -> 0.9938); `hs-judge-1120` a9509572b (Haskell's judge 0.99994); `j2g-stream-1120`
+   e92a026f7 (j2g-chunks-1120's 9fabed2e8, ade865e69, c87b0e064 and the proof's entry: j2g's streamed run in bounded memory; not
+   282cdf320, the runtime vector change held for a gate, so not mac/j2g-chunks-1120's tip).
+   `pp-ref-1120`'s increment to ee3412ee5 (with cpp-rt-own-1120 8faf78756: the own libcpp build's shims, the record run on the own
+   reference, 910cf7a77 reverted so its gate steps are live; the C++ read cell's n/a 36 -> 33, accepted; `git ls-files` again holds
+   only tools/ppref's harness and shim of it).
+   Then `494-py-c-parser` adc26b094 (after 489: CPython 3.14.10's parser on Arbace's C as parse-check's own reference; its report's
+   journal entry committed as its own entry), `497-cpp-dg-own6` fe5c4f8b9 and `499-cpp-dg-own7` 63c9e6296 (C++'s own dg rounds 6
+   and 7, both on 492's b0247cdc3; their dg-own record's rows merged apart without conflict).
+   Then `504-cpp-dg-int` 903e02282 (499's tip with 502 and 500, in place of those two: C++'s own dg passes 1,536, its record and
+   divergences-dg.edn 504's byte for byte; template/nontype10.C counted out by `:count-from :out`) and `507-score-ref` 171eba1d1
+   (crops-score --ref reads crops.edn and independence.edn through git, `--self-test-ref`: both self-tests pass on the merged tree).
+   Then `build-chunks-1120` 274406817 (javac's tool build and the gate's build in bounded steps: one stage at a time, the print in
+   chunks, every compile's back end at most -c=4; javac-tool and go-build declared 33 GiB; its byte proof: the chunked and unchunked
+   builds the same executable, sha256 01b16a8d..., and module, 6,637 files), before tonight's gate-executable build.
+   Then cpp-rt-own-1120's increment 9dcc02f78 (C++'s runtime 177 of 198 units by Arbace's own code generator, inputs re-recorded;
+   C++'s eval and AOT 0.960 -> 0.973), `hs-lane2-1120` 59dea8370 (with `hs-own-stg-1120` b26839c64: Haskell's own-libraries records
+   whole, eval 879 of 950 own, AOT 135 of 139; the cells' cases read from the :own-file, through git for --ref as 507 reads its tables:
+   --self-test-ref equal row by row; a deferred :oracle-pending class for the matrix; Haskell independence 0.80 -> 0.9898) and
+   hs-own-stg-1120's 759a9597e cherry-picked alone (derived Lift's TH library interface, an instance's kind variable from its head:
+   bytestring's and time's lib-check, which failed fresh at hs-lane2's head; the rest of that round waits for its report), and its 872d7aea3
+   (the kind rule takes no fresh ids: binary's pool and STG byte-identical to lane 2's).
+   Then `508-cpp-dg-own12` 39a48fe3c (505, 506 and 508 on 504's tip: own passes 1,554, its record's diff against 504's 18 rows to
+   :pass; its inner merge 3ceaea77f kept as pushed; the 18 rows run again on the merged tree, 18 own passes; cpp-essential's read
+   subset passes).
+   Then `hs-lane2-fix-1120` d2700be27 (lane 2 with those two as 12bb439e1 and 645fd36d7: the ten programs on time's rebuilt own
+   libraries re-run, outcomes as recorded).
+
+Conflicts and their resolutions:
+- `doc/JOURNAL.md`, `doc/ocaml/OCAML-SURVEY.md`, `doc/classes/JAVA-CONFORMANCE-SURVEY.md`, `doc/C23-SURVEY.md`, `test/ocaml/controls.txt`:
+  appends on both sides, both kept (ours first).
+- `arbace/j2g/model.ae` (466 against next's 415): `class-supers` holds both SCTP's Association and the object streams' GetField and
+  PutField.
+- `bin/oi` (480 against next's 413): the program's C stubs' block and ocamldoc's arguments, both.
+- `arbace/cpp/sema.ae` (pp-ref's cpp-rt-own against 484/487/492): a function definition's checks (484's incomplete parameter, 492's
+  written types' access) before cpp-rt-own's lookup of a qualified definition through inline namespaces; the default constructor's
+  candidates take cpp-rt-own's inherited ones and its `inherit-through!`, then 487's refused instance (`{:i :none}`).
+- 504 against the merged tree: `test/crops/score.ae`'s self-test bindings and label hold c-cpp-golden's, JCS50's, 497-3's and
+  502-2's cases; C++'s read fact takes 504's `:out` with pp-ref's `:tokens [1934 1]`.
+- `bin/build-go` (build-chunks against 485): 485's shared lock on the print cache taken first, then build-chunks' bounded steps (the
+  printer as a child, go build after it), so the lock covers both; 485's test (`test/gate/java-false-passes-test.bash`) fakes the new
+  steps too (`repr_go_run`, `go_build_plan`, `bin/gate-policy`): 39 of 39; `test/gate/gate-build-test.bash` 28 ok. doc/go/BUILD.md's
+  contract between j2g and the print names j2g-stream's windowed writing (the tree byte for byte, the contract holding), and
+  J2G-SPEC §4.1's sentence on hand change 36 says 282cdf320 is held, not merged.
+- `test/docs/claude-md-test.bash`: cpp-ppref (pp-ref's increment made it a `:build` step) left out of the essential core as
+  cpp-runtime and pyi-aot-runtime are.
+- 508 against cpp-rt-own (via pp-ref): both implement [basic.scope.pdecl]/7.2 for a class an elaborated-type-specifier first names,
+  cpp-rt-own for the code generator (the parser's :_elab, a lookup ignoring non-types, a class declared in the enclosing namespace or
+  block) and 505 for the checker (:_elab-decl, cx-elab-decl-scope, cx-elab-declare!): the parser sets both marks, sema takes 505's rules
+  when checking and cpp-rt-own's otherwise, each where its records were made (the dg own record, the runtime units).
+- `arbace/cpp/template.ae` (497 against 499): both add `__builtin_is_virtual_base_of` as `:base-of`; 497's map entry kept, the comment
+  naming both queues.
+- 494 against 489 and next's 431/436, as 489's: Python's `:judge` takes the parser as parse-check's reference (`:parse-check [5724 1]`,
+  `:syntax-errors-harness [256 1]`) over the merged fact; the `:pyparser` group and input added to the fragments and to
+  `test/gate/steps.edn`'s spliced python-read-essential and python-native.
+- `test/gate/steps.edn`'s haskell-iface-own (hs-judge against the audit's GDS29): the audit's `:uses` and `own-pools-take` kept, hs-judge's
+  filepath and the four Setup packages added to the packages, the lib-check loop and the round trip's `--only`.
+- `bin/java-check` (485 against judge-rest): `golden` keeps judge-rest's `--jdktest`, 485's `saved-errors` verb added.
+- `test/crops/score.ae`: jcs50's vector `:requires-line` with judge-rest's out-of-cases support (the self-test's line names both);
+  c-cpp-golden's out-of-cases hunk is judge-rest's byte for byte: kept once.
+- `test/crops/independence.edn`: Python's `:judge` takes 489's lex-check by the C tokenizer (`:lex-check [2862 1]`) over next's
+  431 levels (pyi's own ast and code objects kept, `:roundtrip-ast-code [2800 1]`); Java's `:print` takes jcs50's two pins
+  (platform and ct.sym) with judge-rest's `:judge` (0.9997); C's `:judge` takes 495 and c-cpp-golden together: `{:self 14883
+  :recorded 72}` with `:out-of-cases {:file "test/c/selfref-out.edn" :cases 60}` (495's 16 print files own, c-cpp-golden's 30
+  programs x 2 levels out; left by gcc's record the 72 preprocessor entries), both reasonings kept.
+- `test/crops/independence.edn` again (pp-ref's increment): C's `:judge` with pp-ref's 69 preprocessor entries by the own reference too,
+  `{:self 14952 :recorded 3}` and the 60 out (0.9999); C++'s `:judge` takes pp-ref's token check (`:pp-check-own [1929 1]
+  :pp-check-class [5 0.5]`, the step cpp-tokens) with c-cpp-golden's golden files (`:check-golden`, `:aot-golden`) and its 4 out:
+  (8611 + 1929 + 0.5 x 5) / 10545 = 0.9998; `test/gate/steps.edn`'s `:crop-steps`: the audit's haskell lib steps and pp-ref's
+  c-tokens-ref.
+- `test/gate/crops/python.edn` (489 against next's 436 split): python-front, python-roundtrip and python-native stay where 436 moved
+  them (python-packs.edn, python-night.edn); 489's `:pytokenizer` group, python-read-essential's 3 GiB and `:go` host and both
+  steps' `:pytokenizer` input applied to the fragments and to their spliced copies in `test/gate/steps.edn`.
+- `test/java/check-interp.edn`, `check-compiled.edn`: merged row by row (3-way by test id). 466/471's 150 + 121 :serialization rows
+  (re-recorded from arm64 runs with the fixes), 477's three interp rows, 486's four compiled rows and 490's seven compiled ids win
+  over java-rejudge-1120's (26 rows where the rejudge differed: interp t04308 t04443 t04706 t04724 t04738 t04836 t05520 t08306;
+  compiled t04706 t04724 t04738 t04740 t04741 t04829 t05451 t05452 t05465 t05520 t05964 t06159 t06200 t06256 t06257 t06258 t07703
+  t08306: each the newest evidence, the rejudge's from the 11-19/20 night before those fixes); every other row java-rejudge's.
+  next's rows that only reworded a reason ("the JDK's 0" -> "expected 0") lost to 466's passes (t04775, t07959, t07989).
+- `test/java/divergences.edn`: the :serialization and :reflection `:tests` keep the merged lists; java-rejudge's t04308 kept in
+  :serialization (it still fails compiled), its t04706 and t08306 dropped (they pass at both levels with 466's fixes).
+- `test/crops/scores.edn`, `test/reap/matrix.edn`: re-recorded (`bin/reap --record`, `bin/crops-score --record`), not hand-merged.
+
+Records and generated files made at the merge:
+- D495-3 (a): `bin/repr-c roundtrip --corpus gcc-c23,gcc-cpp-c23,gcc-embed,gcc-va-opt --record` (no gcc): the 32 print files'
+  labels own-rejects / own-invalid, c23-ucnid-1 at 5:1; c23-binary-constants-1's read timed out under the host's load (its known
+  entry :eval-limits, :time-dependent): its pass row kept.
+- 496: gcc-cpp-c23's token (`check --tokens --record`: no row moved), tree (`parse-check --no-mutants --record`: c23-ucnid-1 3 errors)
+  and annotation rows (`bin/ci annotations --record`: c23-ucnid-1 at 5:1), ccdump on this host; the known files' order-only rewrites
+  not kept.
+- 494-4 (a), with 501: `bin/pyi-clib verify pyparser` (the node program byte for byte the committed one but its hand-set Key line,
+  whose :val and literal disagreed: the Key committed as this tree builds it, c8b38b8b), `bin/pyi-clib exe pyparser` (14 min), then
+  `bin/repr-python parse-check --no-mutants --record` and `--full --no-mutants --record` in own mode: 3,736 files in each mode, every
+  corpus equal (syntax-errors 593 by their own verdict, 30 known); 501's debug f-string text makes test_fstring and test_tstring pass,
+  their known entries out.
+- 482: `test/haskell/lib-check-own-binary.edn` re-recorded (`lib-check --package binary --ifaces own --record` on the 11-20 night's
+  dependency pools from the gate's store): Data.Binary.Class :errors -> :ok, the 8 other rows unchanged.
+- jdk/ regenerated (466's provenance and 469's closure, and with them the closure changes already on next since jdk/ was last
+  written, 39806d6a7: queue 398's asynchronous channels, 415's three slices, 437's, 416's StackWalker overlay): `bin/jrt-convert
+  update` on this tree with java-split-1120 7f8bb5858's chunked read (bin/jrt-convert and test/repr/java/chunks.ae checked out for
+  the run, then restored: java-split merges later as its own branch), byte-equal to the whole read by its own run at 42494a700
+  (jrt-convert verify, 3,579 forms files, the same fallback list); 3,423 files converted, 0 failed, 54 forms added and 16 changed,
+  each traced to those inputs; 1,643 s without the heavy lock (the main session's go-ahead). The whole read had been OOM-killed at
+  23:00, arbace-javac at 54.4 GB anon RSS in read-jdk --check --no-javac (it was run without the step's GOMEMLIMIT=28GiB; the
+  rerun was cancelled), so the jrt-convert step is declared 56 GiB until java-split's chunked read is the step's. Then `bin/jrt
+  modules` and `bin/jrt provides` (the module table and the world's provides from the new sources list).
+- j2g's edge: `bin/j2g-edge verify` on the new jdk/ found sun.nio.ch's Cancellable (398's) and sun.nio.fs's both named Cancellable in
+  package jrt; renamed Ch_Cancellable (`arbace/j2g/names.ae`'s table, the side new to the world, as before), then `bin/j2g-edge update`
+  (the classes jdk/ now holds left jdk/edge.edn; javac's edge's :jdk-edge rewritten).
+
+Not run (the gate's steps, or proved by the branches' authors at their heads; the user, 2026-11-20: no redundant tests): the C++ own
+round trips (cpp-essential runs them; 492 proved its families), 489's `lex-check --no-mutants --record` (the Mac's run gave rows
+byte-identical to next's record; DECISION 489-2 (a) left to the next record), the Java rows' amd64 re-runs (466/471, 477, 486, 490:
+the next gate's java steps and a re-judge), the jrt unit tests, `bin/pyi check --record` (Python's rows wait for the gate build at the
+new key).
+
+Left out, still being worked on: hs-own-stg-1120, hs-lane2-1120, java-split-1120,
+build-chunks-1120, j2g-chunks-1120's 282cdf320 (held for a gate), rust-rec-1120, rust-c6-1120, 483/493/498 (Rust waits for its own integration), 491;
+442-hs-cmm (needs a record-ref by hand); py-own-judge-1120 (superseded by 489).
+
+Scores (bin/crops-score, completeness / without by design / maturity / independence, floor), next -> n-merge-1120b:
+  clojure    99/99/100/100 -> 99/99/100/100
+  java       89/91/100/99 -> 94/96/100/100
+  go         98/99/100/100 -> 98/99/100/100
+  c          98/99/100/99 -> 98/99/100/100
+  cpp        95/97/100/91 -> 95/97/100/94
+  ocaml      90/94/100/99 -> 90/94/100/100
+  scheme     99/99/100/100 -> 99/99/100/100
+  haskell    97/99/100/79 -> 97/98/100/98
+  rust       99/100/100/80 -> 99/100/100/80
+  llvm       99/99/100/98 -> 99/100/100/100
+  python     94/97/100/98 -> 94/97/100/99
+  asm-amd64  99/99/100/100 -> 99/99/100/100
+  asm-arm64  99/99/100/99 -> 99/99/100/100
+  wasm       99/100/100/100 -> 99/100/100/100
+  (exact, 4 decimals: Java 0.8910/0.9164/1/0.9996 -> 0.9493/0.9688/1/1.0000; C independence 0.9990 -> 1.0000; C++ 0.9563/0.9735/1/0.9138
+  -> 0.9578/0.9750/1/0.9430, its read stage 0.742 -> 0.769, eval and AOT 0.96 -> 0.973, judge 0.907 -> 1.0; OCaml 0.9024 -> 0.9071, independence
+  1.0000; Haskell independence 0.7966 -> 0.9898; LLVM 0.9933/0.9995/1/0.9896 -> 0.9938/1.0000/1/1.0000; Python independence 0.9862 -> 0.9996;
+  arm64 0.9987 -> 0.9997, independence 1.0000).
+
+gate_key (`bin/arbace-go --gate-key`, ARBACE_HOST_EXE unset): 1f679c7b0b36759025a4a5b19072e58876633f25c7e72e6e3b43a818002e7b35
+(KEY20 1f679c7b0b36759025a4; next's was ab36afadd0b14aa89697): a new gate build. Checks run: after every group `bin/gate --plan`,
+`bin/crops-score --judge --strict`, `bin/records-check`; at the end also `bin/reap --record`, `bin/crops-score --record`,
+`--self-test`, `--self-test-ref`, `bin/provenance-check`, `test/docs/claude-md-test.bash` (0 problems). No gate run (the user).
+
+Left for the main session: Python's eval and AOT records (`bin/pyi check --record`, the gate build at the new key); the C++ dg own
+record's 14 rows with stale reason texts; the cpp-ppref, pyparser and pytokenizer executables' build steps (494-2 (a)); D496-1 (a) and
+D496-2 (a) (the five limits-* files and tcc-pp/13.S out of C's judge) not yet applied; the print cache to clear once (485-2 (a)) and
+the saved results 485's `saved-errors` lists to rerun (485-1 (a)); the Java rows of 466/471, 477, 486, 490 and 469 on amd64 (the next
+gate's java steps and a re-judge); java-split-1120's chunked jrt-convert as the step's (it is declared 56 GiB until then).
