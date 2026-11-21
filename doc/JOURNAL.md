@@ -14013,3 +14013,55 @@ runs: about 730 of 777 own (717 passing), more only if round 3's STG changes tur
 (:front-run, :own-report, :own-lib, :untried-cap); not measured here (lane 2's run).
 
 Not run: the gate, any record, the own programs.
+
+## 2026-11-20: hs-own-stg, fourth round (hs-own-stg-3 (a), hs-own-stg-2 (a))
+
+Branch `hs-own-stg-1120`, after the third round's entry. The coordinator took both decisions: hs-own-stg-3 (a) first, then
+hs-own-stg-2 (a); the same caps (6 GiB experiments, 8 GiB whole passes); each commit with whole-pass counts; the fallback
+programs rounds 3-4 would flip for lane 2 (measuring at `b26839c64`).
+
+**hs-own-stg-3 (a) (`f8e51f7b0`): GHC.Internal.Data.Typeable.Internal from 15 errors to none.** Traced unification by
+unification (REPR_HASKELL_TC_TRACE): typeRepKind's TrType, TrTyCon, TrApp and TrFun alternatives, the Fun pattern synonym's
+matcher and builder, the (->) against FUN 'Many, typeLitTypeRep's Typeable k at its uses, splitApp's NotApplication a. The
+pieces: the kind annotations of the signatures', pattern synonyms' and GADT constructors' variables kept by name (a
+signature's skolem sk_X X's; a constructor's existential skolem its own) and a signature's class constraints giving kinds
+(KnownNat a: a :: Nat, an imported class's parameter kinds from its methods' types); a given equality binding a kinded skolem
+gives its kinds' equality, a GADT pattern's universal its instance's kind (TrTyCon's (a :: k')); an annotated variable's
+instantiation links its kind to its instance's (unified before the last solving); GHC.Internal.Prim's FUN m a b unifies with
+the arrow at m := Many, its kind Type; a constraint family's stuck application rewritten by the given equalities.
+
+**hs-own-stg-2 (a) (`c2333a4a2`, `eee23a833`): typed beta reduction.** A dictionary parameter's type is its class applied,
+every dictionary function's type is in the Simplifier's genv, and a beta reduction matches the binder's type against the
+argument's (core's exprType under the substitution so far): the Simplifier clones the body's binders the match retypes
+(GHC's substIdType), the simple optimiser retypes them in place (desugar's retypes, merged into :ltypes); a partial
+application's eta binders take its type's parameters through newtypes. Then simplify.ae's preInlineUnconditionally lost a
+join-point exclusion GHC does not have (GHC 9.14's excludes only Exitify's exit join points): stimes's g wrapper, a join point
+called once from f's recursive join point, is inlined at its dictionaries. $fMonoidIO is GHC's; $fSemigroupIO's <>, sconcat
+and stimes have GHC's arities and void binders, the rest of it the superclass selections' placement (GHC's cases before the
+join point, ours lets inside it).
+
+**Results.** Each whole pass in a detached worktree at the commit with its own pools (lib-check and lib-stg --ifaces own of
+ghc-internal and base, judged, no record; 8 GiB). At `f8e51f7b0`: ghc-internal lib-check 265 modules, 0 worse; lib-stg
+**8,467 of 10,007**, all 265 modules ok (Typeable.Internal from errors), control 0 of 171; base lib-check 241, 0 worse;
+base lib-stg 876 of 1,097 on the coherent reference, 0 worse, control 0 of 25. At `eee23a833` (with both parts of
+hs-own-stg-2): ghc-internal **8,468** (Base 161 -> 162: $fMonoidIO), all ok, 0 worse; base **876** on the coherent reference,
+850 on the pack, 0 worse. `759a9597e` and `872d7aea3` (below) leave both unchanged.
+
+**The fallback programs (lane 2).** Tried on the own libraries (HSI_OWN_FALLBACK=try, 6 GiB a program) at `eee23a833` and, for attribution, at lane 2's
+`59dea8370` with its own libraries: the 15 entries of own-fallback.txt that can run (the :front-run and :own-report ones; the
+8 :untried-cap ones need more than the cap) end the same at both heads. Rounds 3-4 flip none of them; testsuite/numeric/
+should_run/T8726 passes at both (the light run's 2 GiB was its limit), so it can leave the list at the next lane-2 run.
+
+**The night's merge (interrupting the round).** Lane 2 found bytestring's 2 and time's 17 modules from ok to errors in
+lib-check at `b26839c64`: round 2's derived Lift names Template Haskell's library (GHC's known-key names, loaded on demand),
+and 3 of time's modules' derived Data wanted base's Data (Fixed (a :: k)), whose kind variable our types do not carry.
+`759a9597e`: GHC.Internal.TH.Lib's interface in the grown closure of a module that names Lift; an instance's lone free variable
+used only in Typeable takes the head variable's instance's kind. bytestring 31 and time 47 modules 0 worse again. The
+coordinator's proof: the rule fires (trace) only for base's Data (Fixed) in time's DiffTime, NominalDiffTime and TimeOfDay
+(applied) and for Show (TypeRep (a :: k)) in binary's Data.Binary.Class (not applied), but its kind computation took fresh ids
+and renumbered that interface's unfolding binders: `872d7aea3` gives them back. With both, on lane 2's pools: binary's pool and
+STG byte-identical to lane 2's, time's pool byte-identical, its STG different exactly in the 17 modules lane 2 had at errors.
+On a branch `hs-lane2-fix-1120` (59dea8370 + the two, `d2700be27`): time's own libraries rebuilt, the ten programs that load
+them re-run (eval and the four AOT rows): outcomes as recorded, timings only; reap, crops-score, records-check unchanged.
+
+Not run: the gate, any record.
