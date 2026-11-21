@@ -868,9 +868,16 @@
                                  init (:init a)
                                  byte (fn [i] (Integer/parseInt (subs bs (* 2 i) (+ 2 (* 2 i))) 16))
                                  n (quot (count bs) 2)
-                                 ;; RF13: a relocation to a TypeId's allocation (GlobalAlloc::TypeId, :other) keeps its bytes as an
-                                 ;; integer (consts.rs: the provenance dropped, the offset's bytes the hash)
-                                 relocs (sort-by first (remove #(= :other (:kind (get allocs (str (second %))))) (:relocs a)))
+                                 ;; RF13, C1 (2026-11-22): a relocation to a TypeId's allocation (GlobalAlloc::TypeId, :other) is
+                                 ;; the pointer `inttoptr (i64 OFFSET to ptr)`, the offset's bytes the hash (rustc_codegen_llvm's
+                                 ;; common.rs scalar_to_backend: alloc_to_backend's Err(0) base, the offset added, LLVMConstIntToPtr),
+                                 ;; as std's IR writes TypeId::of's constants: one form on both sides of a TypeId comparison
+                                 relocs (sort-by first (:relocs a))
+                                 type-id? (fn [tid] (= :other (:kind (get allocs (str tid)))))
+                                 int-ptr (fn [off] (list 'inttoptr 'i64
+                                                         (as-num (sext-const 64 (reduce (fn [acc i] (.add (.shiftLeft acc 8) (java.math.BigInteger/valueOf (byte (+ off (- 7 i))))))
+                                                                                        java.math.BigInteger/ZERO (range 8))))
+                                                         'ptr))
                                  ;; a run of bytes [from to): undef when uninitialized, zeroinitializer when all zero, else the bytes
                                  run (fn [from to]
                                        (let [ty (list 'array (- to from) 'i8)]
@@ -894,9 +901,13 @@
                                               (empty? rs) (into out (runs pos n))
                                               :else (let [[off tid] (first rs)]
                                                       (recur (+ off 8) (rest rs)
-                                                             (-> out (into (runs pos off)) (conj [:ptr tid]))))))
-                                     tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
-                                     vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
+                                                             (-> out (into (runs pos off)) (conj (if (type-id? tid) [:int-ptr off] [:ptr tid])))))))
+                                     tys (mapv (fn [x] (if (#{:ptr :int-ptr} (first x)) 'ptr (first x))) segs)
+                                     vals (mapv (fn [x] (case (first x)
+                                                          :ptr ['ptr (alloc-sym! (second x))]
+                                                          :int-ptr ['ptr (int-ptr (second x))]
+                                                          [(first x) (second x)]))
+                                                segs)]
                                  (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a)))))))
                          (unsupported "allocation of this kind")))))
         ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
@@ -1490,7 +1501,9 @@
                                        (if (number? (:v v))
                                          (unsupported "transmute of a constant between int and float")
                                          (let [r (fresh!)] (emit! bb (list '= r (list 'bitcast (symbol (:imm (:scalar fl))) (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r}))
-                                       :else (unsupported "Transmute between these layouts")))
+                                       ;; C4 (2026-11-22): the types and layout kinds named, for the switch run's refusals
+                                       :else (unsupported (str "Transmute between these layouts (" (pr-str (ty-of o)) " " (name (:kind fl)) " "
+                                                               (:size fl) " to " (pr-str t) " " (name (:kind tl)) " " (:size tl) ")"))))
                                ;; rustc_codegen_ssa's codegen_rvalue_operand: PointerExposeProvenance is ptrtoint of the (thin) address,
                                ;; PointerWithExposedProvenance inttoptr (a constant folded as LLVM's builder folds it)
                                (= kind "PointerExposeProvenance")

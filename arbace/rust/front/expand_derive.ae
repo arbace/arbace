@@ -92,7 +92,7 @@
 
 (defn- derive-text
   "One derive's impls as text, the fields' types as fragments (frags: an atom of N -> {:frag :ty :ast})"
-  [trait {:keys [kind name tparams ptoks gparams shape variants copy? ord? default-variant field-spans const-traits]} frags]
+  [trait {:keys [kind name tparams ptoks gparams shape variants copy? ord? default-variant field-spans const-traits union?]} frags]
   (let [fr (fn [ty] (let [n (count @frags)] (swap! frags assoc n {:frag :ty :ast ty}) (str "__rf_frag_" n)))
         ;; the type parameters' names are the item's own tokens (generic/mod.rs copies the parameters with their spans)
         tparams (map (fn [nm t] (if t (let [n (count @frags)] (swap! frags assoc n (titem t 0)) (str "__rf_frag_" n)) nm))
@@ -190,10 +190,19 @@
         (head "" false "$crate::fmt::Debug" "$crate::fmt::Debug"
               (str "#[inline] fn fmt(&self, f: &mut $crate::fmt::Formatter) -> $crate::fmt::Result { " body " }")))
       "Clone"
-      (if (and copy? (empty? tparams))
+      (cond
+        ;; C4 (2026-11-22): a union's Clone (clone.rs: is_simple, the additional bound marker::Copy, cs_clone_simple's one
+        ;; `AssertParamIsCopy<Self>`), its TrivialClone first: escape.rs' MaybeEscapedCharacter (the impls after it numbered as
+        ;; rustc's)
+        union?
+        (str (head "#[doc(hidden)] " true "$crate::clone::TrivialClone" "$crate::marker::Copy + $crate::clone::TrivialClone" " ")
+             (head "" false "$crate::clone::Clone" "$crate::marker::Copy + $crate::clone::Clone"
+                   (str "#[inline] fn clone(&self) -> " self-ty " { let _: $crate::clone::AssertParamIsCopy<Self>; *self }")))
+        (and copy? (empty? tparams))
         (str (head "#[doc(hidden)] " true "$crate::clone::TrivialClone" "$crate::clone::Clone" " ")
              (head "" false "$crate::clone::Clone" "$crate::clone::Clone"
                    (str "#[inline] fn clone(&self) -> " self-ty " { " (asserts "$crate::clone::AssertParamIsClone" all-tys) "*self }")))
+        :else
         (let [cl (fn [ctor [k fs :as sh] vals]
                    (case k
                      :unit ctor
@@ -209,6 +218,10 @@
           (head "" false "$crate::clone::Clone" "$crate::clone::Clone"
                 (str "#[inline] fn clone(&self) -> " self-ty " { " body " }"))))
       "Copy" (head "" false "$crate::marker::Copy" "$crate::marker::Copy" " ")
+      ;; C4 (2026-11-22): rustc_builtin_macros' deriving/bounds.rs expand_deriving_const_param_ty: `marker::ConstParamTy_`, its
+      ;; additional bound `cmp::Eq` before the trait's on each type parameter (generic/mod.rs' bounds order); core::intrinsics'
+      ;; AtomicOrdering and intrinsics::simd's SimdAlign derive it (their modules unexpanded before: 395 intrinsics missing)
+      "ConstParamTy" (head "" false "$crate::marker::ConstParamTy_" "$crate::cmp::Eq + $crate::marker::ConstParamTy_" " ")
       "PartialEq"
       (let [;; partial_eq.rs: the fields of scalar types (Ty::maybe_scalar, through references) first
             eqs (fn [as bs tys]
@@ -410,7 +423,8 @@
   (let [attrs (fget it :attrs)
         k (fget it :kind)
         ;; RF13c: a union's `#[derive(Copy)]` (MaybeUninit's): its Copy impl, as a struct's (the union's other derives not yet)
-        names (if (and (seq? k) (= 'Union (first k))) (filterv #{"Copy"} (derive-names attrs)) (derive-names attrs))]
+        ;; C4: and its Clone (clone.rs' union case)
+        names (if (and (seq? k) (= 'Union (first k))) (filterv #{"Copy" "Clone"} (derive-names attrs)) (derive-names attrs))]
     (if (or (empty? names) (not (seq? k)) (not (#{'Struct 'Enum 'Union} (first k))))
       [it []]
       (let [[kw idf gens data] k
@@ -437,7 +451,8 @@
                                      (some (fn [v] (when (some #(= "default" (attr-name %)) (fget v :attrs)) (second (fget v :ident))))
                                            (fget data :variants)))
                   :field-spans (if (= 'Struct kw) (field-spans-of data) (vec (mapcat #(field-spans-of (fget % :data)) (fget data :variants))))
-                  :copy? (some #{"Copy"} names) :ord? (some #{"Ord"} names) :const-traits (const-derive-names attrs)}
+                  :copy? (some #{"Copy"} names) :ord? (some #{"Ord"} names) :const-traits (const-derive-names attrs)
+                  :union? (= 'Union (first k))}
             it' (fset it :attrs (vec (remove #(derive-attr? (attr-name %)) attrs)))
             spans (into {} (derive-names attrs true))
             derived (vec (mapcat (fn [trait]

@@ -719,12 +719,55 @@
               :const (list 'const (:name p))
               (if-let [t (some-> (get ds (:name p)) (ty->sty path-of))] (list 'type (:name p) t) (list 'type (:name p)))))))))
 
-(defn- nounwind?
-  "C6-4: codegen_fn_attrs' NEVER_UNWIND (codegen_attrs.rs: AttributeKind::RustcNounwind alone) of a local function: its
-  `#[rustc_nounwind]`, which AbortUnwindingCalls reads through the interface's :nounwind (fn_can_unwind: a call of
-  panic_nounwind_fmt unwinds to unreachable, panic_nounwind's own calls terminate)"
-  [id]
-  (boolean (some #{"rustc_nounwind"} ((requiring-resolve 'arbace.rust.front.mono/local-attrs) id))))
+;; C4 (2026-11-22): `#[unstable_feature_bound(f128)]`'s predicate as the helper prints it (rustc 1.99's ClauseKind::UnstableFeature,
+;; "feature(f128) is enabled"), after the written ones: convert::num's 17 f16/f128 From impls and their kin
+(defn- feature-bound-preds [node]
+  (vec (for [a (:attrs node) :let [u (:unparsed a)] :when (and u (str/starts-with? u "unstable_feature_bound"))
+             f (some-> (re-find #"\((.*)\)" u) second (str/split #","))]
+         (list 'other (str "feature(" (str/trim f) ") is enabled")))))
+
+;; C4 (2026-11-22): a function's own attribute (`#[rustc_nounwind]`, `#[rustc_promotable]`), as lowered (:unparsed's text)
+(defn- own-attr? [node nm]
+  (boolean (some #(when-let [u (:unparsed %)] (= nm (first (str/split u #"[ (=]")))) (:attrs node))))
+
+;; C4 (2026-11-22): an enum's discriminant type and its variants' discriminants, as the helper writes them (tools/rsdump/front.rs:
+;; `a.repr().int`'s type, else nil; `a.discriminants(tcx)`'s Display): rustc_middle's AdtDef::discriminants, an explicit
+;; discriminant's value (its anonymous constant evaluated: literals, `-`, `<<`, `|`, the crate's integer constants), else the
+;; previous one's plus one, from 0; each wrapped to the discriminant type (`repr(int)`, else isize) and printed signed for a
+;; signed type (Discr's Display). Before, every native enum was `:repr nil :discrs [0 1 ..]`: Ordering's `#[repr(i8)]` -1 0 1 and
+;; AlignmentEnum's `#[repr(usize)]` 1 2 4 .. lost (Alignment a byte, the switch run's Transmute from usize refused)
+(defn- disr-value [x]
+  (case (:kind x)
+    :unary (when (= "-" (:op x)) (some-> (disr-value (:expr x)) -))
+    :binary (let [a (disr-value (:lhs x)) b (disr-value (:rhs x))]
+              (when (and a b)
+                (case (:op x) "+" (+ a b) "-" (- a b) "*" (* a b) "<<" (.shiftLeft (biginteger a) (int b)) ">>" (.shiftRight (biginteger a) (int b))
+                      "|" (.or (biginteger a) (biginteger b)) "&" (.and (biginteger a) (biginteger b)) "^" (.xor (biginteger a) (biginteger b))
+                      "/" (when-not (zero? b) (quot a b)) "%" (when-not (zero? b) (rem a b)) nil)))
+    (:paren :group) (some-> (:expr x) disr-value)
+    (collect/const-int-value x)))
+
+(defn- enum-repr-discrs
+  "C4: {:repr INT-OR-NIL :discrs [D ...]} of an enum's node and its variants' nodes in order (the helper's front.rs facts)"
+  [node variant-nodes]
+  (let [ints #"[iu](?:8|16|32|64|128|size)"
+        repr (some #(re-matches ints %) (mapcat (fn [a] (filter string? (:toks a))) (:attrs node)))
+        t (or repr "isize")
+        bits (if (str/ends-with? t "size") 64 (parse-long (subs t 1)))
+        signed? (str/starts-with? t "i")
+        m (.shiftLeft java.math.BigInteger/ONE (int bits))
+        wrap (fn [v] (let [r (.mod (biginteger v) m)]
+                       (bigint (if (and signed? (.testBit r (int (dec bits)))) (.subtract r m) r))))
+        ds (loop [vs variant-nodes prev nil acc []]
+             (if-let [v (first vs)]
+               (let [x (:disr v)
+                     d (if x
+                         (or (try (disr-value x) (catch Throwable _ nil)) (reduced nil))
+                         (if prev (inc prev) 0))]
+                 (if (reduced? d) nil (recur (rest vs) (wrap d) (conj acc (wrap d)))))
+               acc))]
+    ;; an explicit discriminant not evaluated here: nil, and the enum is not written (a missing fact, not a wrong one)
+    (when ds {:repr repr :discrs (mapv #(if (<= Long/MIN_VALUE % Long/MAX_VALUE) (long %) %) ds)})))
 
 (defn native-iface
   "The module's functions and ADTs (not impls' items) as {:fns {path form} :adts {path form}}, those std's interface lacks"
@@ -788,15 +831,20 @@
                                        (cond-> {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
                                         :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                        :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d)))) :promotable false
+                                        :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d))))
+                                        ;; C4: rustc's is_promotable_const_fn (a const fn's #[rustc_promotable])
+                                        :promotable (and (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d))))
+                                                         (own-attr? (:node k) "rustc_promotable"))
                                         ;; queue 472: an associated function without a self parameter (fn_has_self_parameter
                                         ;; false: `Box::as_mut_ptr(b: &mut Self)`), which method lookup must not take
-                                        :nounwind (nounwind? (:id k)) :native true}
+                                        ;; C4: NEVER_UNWIND, `#[rustc_nounwind]` (codegen_fn_attrs, the helper's :nounwind)
+                                        :nounwind (own-attr? (:node k) "rustc_nounwind") :native true}
                                        (and (contains? (:node k) :params) (not (collect/fn-self-param? (:node k)))) (assoc :self-param false))]))]
                    (if (and self (or (nil? tr) trs))
                      (-> acc
                          (assoc-in [:impls ip] {:trait trs :negative (boolean (get-in (:node d) [:of-trait :negative])) :self self :generics (generics-sty g) :parent-count 0
-                                                :has-self false :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))
+                                                :has-self false :predicates (into (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))
+                                                                                  (feature-bound-preds (:node d)))
                                                 :items items :native true})
                          (update :fns merge fns))
                      ;; round 52: CORE_TRACE=1 names an impl left out and its parts (a part nil: what the writer refused)
@@ -808,9 +856,12 @@
              ;; its type and generics as the helper's --std-names writes an alias, which collect expands at its arguments
              ;; queue 417: std's type alias of an impl Trait (collect/tait-alias?) as the alias itself, (free-alias), which
              ;; a path to it in a module after reads as [:free-alias ALIAS ARGS] (collect/*free-aliases*)
-             (and (= "TyAlias" (:kind d)) (not (get (:aliases collect/*std*) p)) collect/*free-aliases* (collect/tait-alias? (:id d)))
+             ;; C4 (2026-11-22): every alias the pass computes is written, whether or not the names it reads hold it already: a
+             ;; pass on names that carry the crate's own aliases (a chain's second run) wrote none, and the passes after it (alloc's,
+             ;; std's) ran without `fmt::Result` and the rest; the names still win in with-native-std's merge
+             (and (= "TyAlias" (:kind d)) collect/*free-aliases* (collect/tait-alias? (:id d)))
              (-> acc (assoc-in [:aliases p] (list 'free-alias)) (assoc-in [:alias-generics p] (generics-sty (collect/generics-of (:id d)))))
-             (and (= "TyAlias" (:kind d)) (not (get (:aliases collect/*std*) p)))
+             (= "TyAlias" (:kind d))
              (let [t (ty->sty (collect/type-of (:id d)) path-of)]
                (if t
                  (-> acc (assoc-in [:aliases p] t) (assoc-in [:alias-generics p] (generics-sty (collect/generics-of (:id d)))))
@@ -828,8 +879,11 @@
                (if (and (every? some? ins) out)
                  (assoc-in acc [:fns p] {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
                                          :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                         :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (= :const (get-in (:node d) [:header :constness]))
-                                         :promotable false :nounwind (nounwind? (:id d)) :native true})
+                                         ;; C4: `#[rustc_comptime]` (the intrinsics align_of, field_offset ..) a const fn too (is_const_fn)
+                                         :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_comptime"))
+                                         ;; C4: is_promotable_const_fn and NEVER_UNWIND from the function's own attributes
+                                         :promotable (and (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_promotable"))
+                                         :nounwind (own-attr? (:node d) "rustc_nounwind") :native true})
                  acc))
              (and (#{"Struct" "Enum" "Union"} (:kind d)) (not (get (:adts si) p)))
              (let [g (collect/generics-of (:id d))
@@ -844,8 +898,11 @@
                                       :fields (field-tys (:id v) (:data (:node v)))}))
                               [{:name (:ident n) :path p :ctor (case (:kind (:data n)) :tuple "Fn" :unit "Const" nil) :fields (field-tys (:id d) (:data n))}])]
                (if (every? (fn [v] (every? (comp some? second) (:fields v))) variants)
-                 (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self false :variants variants :native true}
-                                           (= "Enum" (:kind d)) (assoc :repr nil :discrs (vec (range (count variants))))))
+                 (let [rd (when (= "Enum" (:kind d)) (enum-repr-discrs n (for [v (collect/defs) :when (and (= (:id d) (:parent v)) (= "Variant" (:kind v)))] (:node v))))]
+                   (if (and (= "Enum" (:kind d)) (nil? rd))
+                     acc
+                     (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self false :variants variants :native true}
+                                               rd (merge rd)))))
                  (do (when (System/getenv "CORE_TRACE")
                        (println "native-iface: ADT" p "not written:"
                                 (pr-str (for [f (:fields (:data n))] [(:ident f) (collect/type-of (some #(when (and (= (:id d) (:parent %)) (= "Field" (:kind %)) (= (:ident f) (second (:data %)))) (:id %)) (collect/defs)))]))
@@ -861,8 +918,9 @@
              ;; a trait the interface lacks (`clone::uninit::CopySpec`): its items, and its functions' signatures
              (and (= "Trait" (:kind d)) (not (get (:traits si) p)))
              (let [g (collect/generics-of (:id d))
-                   kids (filter #(and (= (:id d) (:parent %)) (#{"AssocFn" "AssocTy"} (:kind %)) ) (collect/defs))
-                   kids (concat kids (filter #(and (= (:id d) (:parent %)) (str/starts-with? (str (:kind %)) "AssocConst")) (collect/defs)))
+                   ;; C4 (2026-11-22): the associated items in their definition order, constants among them (the helper's
+                   ;; associated_items: NumBufferTrait's DEFAULT before Buf), not the constants after the rest
+                   kids (filter #(and (= (:id d) (:parent %)) (or (#{"AssocFn" "AssocTy"} (:kind %)) (str/starts-with? (str (:kind %)) "AssocConst"))) (collect/defs))
                    items (vec (for [k kids] (let [n (second (:data k)) kp (str p "::" n)]
                                               ;; RIND9 (a): an associated type's bounds as the helper writes them (explicit_item_bounds:
                                               ;; the implicit Sized or ?Sized's MetaSized, the written bounds, the trait's where clauses
@@ -878,7 +936,8 @@
                                    {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self true
                                     :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                     :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                    :abi (str "\"" (or (:abi sig) "Rust") "\"") :const false :promotable false :nounwind (nounwind? (:id k)) :native true}]))]
+                                    :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (= :const (:constness (:node d))) :promotable false
+                                    :nounwind (own-attr? (:node k) "rustc_nounwind") :native true}]))]
                (-> acc
                    (assoc-in [:traits p] {:generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self true
                                           :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))

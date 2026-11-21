@@ -882,7 +882,13 @@
                 (let [t (first tys)
                       prim {"u8" 1 "i8" 1 "bool" 1 "u16" 2 "i16" 2 "u32" 4 "i32" 4 "f32" 4 "char" 4 "u64" 8 "i64" 8 "f64" 8
                             "usize" 8 "isize" 8 "u128" 16 "i128" 16}
-                      prim-of (fn [t] (when (and (= :path (:kind t)) (= 1 (count (:segs (:path t))))) (get prim (:ident (first (:segs (:path t)))))))
+                      ;; C4 (2026-11-22): `Self` in an inherent impl of a primitive (num's `to_be_bytes(self) -> [u8; size_of::<Self>()]`,
+                      ;; the helper's `(array (prim "u8") "1")` for i8): the impl's self type
+                      prim-of (fn [t] (when (and (= :path (:kind t)) (= 1 (count (:segs (:path t)))))
+                                        (let [nm (:ident (first (:segs (:path t))))]
+                                          (or (get prim nm)
+                                              (when (and (= "Self" nm) (vector? *self-ty*) (#{:int :uint :float :bool :char} (first *self-ty*)))
+                                                (get prim (if (#{:bool :char} (first *self-ty*)) (name (first *self-ty*)) (second *self-ty*))))))))
                       thin? (fn [t] (or (and (= :tup (:kind t)) (empty? (:elts t))) (prim-of t)))]
                   (some-> (cond (and (= :tup (:kind t)) (empty? (:elts t))) 0
                                 (prim-of t) (prim-of t)
@@ -894,13 +900,30 @@
                 (case (:op x) "+" (+ a b) "-" (when (>= a b) (- a b)) "*" (* a b)
                       "/" (when (pos? b) (quot a b)) "%" (when (pos? b) (rem a b)) nil)))
     (:paren :group) (some-> (:expr x) eval-int-expr)
+    ;; C4 (2026-11-22): num_buffer's `$signed::MAX.ilog10() as usize + 2` (the helper's Buf `[MaybeUninit<u8>; 20]` for isize):
+    ;; a cast to an integer type of a non-negative value, `.ilog10()` of a positive one, and an integer type's MAX and MIN
+    :cast (let [v (eval-int-expr (:expr x)) t (:ty x)]
+            (when (and v (not (neg? v)) (= :path (:kind t)) (= 1 (count (:segs (:path t))))
+                       (re-matches #"[iu](8|16|32|64|128|size)" (str (:ident (first (:segs (:path t)))))))
+              v))
+    :method (when (and (= "ilog10" (str (:ident (:seg x)))) (empty? (:args x)))
+              (when-let [v (eval-int-expr (:receiver x))]
+                (when (pos? v) (bigint (dec (count (str (biginteger v))))))))
     ;; round 52: a path to a constant of the crate, its own expression's value (btree's `[MaybeUninit<K>; CAPACITY]`,
     ;; `CAPACITY = 2 * B - 1`, `B = 6`: rustc's type_of writes the length evaluated, 11)
-    :path (when (< (long *const-depth*) 16)
+    :path (or
+           ;; C4: an integer type's MAX and MIN (`i64::MAX`), as num's int_macros and uint_macros define them
+           (let [segs (:segs (:path x))]
+             (when (and (= 2 (count segs)) (#{"MAX" "MIN"} (str (:ident (second segs))))
+                        (re-matches #"[iu](8|16|32|64|128|size)" (str (:ident (first segs)))))
+               (let [t (str (:ident (first segs))) n (if (str/ends-with? t "size") 64 (parse-long (subs t 1)))
+                     signed? (str/starts-with? t "i") m (reduce * 1N (repeat (if signed? (dec n) n) 2N))]
+                 (if (= "MAX" (str (:ident (second segs)))) (dec m) (if signed? (- m) 0N)))))
+          (when (< (long *const-depth*) 16)
             (when-let [r (try (res-def (:path x)) (catch Throwable _ nil))]
               (when (and (= :local (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
                 (binding [*const-depth* (inc (long *const-depth*))]
-                  (some-> (:expr (:node (def-of (second r)))) eval-int-expr)))))
+                  (some-> (:expr (:node (def-of (second r)))) eval-int-expr))))))
     nil))
 
 (defn const-int-value
@@ -948,12 +971,16 @@
         ;; C4: another crate's (or, in an interface pass, another module's) definition whose generics nothing knows yet: its
         ;; written arguments as written (lifetimes, then types and constants), not dropped (core's pass reaches fmt/mod.rs'
         ;; `&'a [rt::Argument<'a>; M]` before rt.rs: Arguments::new's input lost its 'a)
-        unknown? (and (string? def) (empty? params) (seq provided)
+        ;; C4 (2026-11-22): a trait's (SELF-TY given: a bound, a qualified path) whose generics nothing knows yet keeps its
+        ;; Self too, a trait's first parameter (core's one-round pass: `P: bounds::BuiltinDeref` in intrinsics/mod.rs before
+        ;; intrinsics/bounds.rs wrote `(trait BuiltinDeref [])`, `Self: traits::TruncateTarget<Target>` lost the i8)
+        unknown? (and (string? def) (empty? params) (or (seq provided) (some? self-ty))
                       (not (or (contains? (:generics *std*) def) (get-in *si* [:adts def]) (get-in *si* [:fns def])
                                (get-in *si* [:impls def]) (get-in *si* [:traits def]))))]
     (if unknown?
       (into (vec (or parent-args []))
-            (concat (map #(lower-region (:lifetime %)) lts)
+            (concat (when (some? self-ty) [self-ty])
+                    (map #(lower-region (:lifetime %)) lts)
                     (map #(cond (:ty %) (lower-ty (:ty %)) (:const %) (lower-const-arg (:const %)) :else [:err "arg"]) others)))
     (loop [ps params lts lts others others args (vec (or parent-args []))]
       (if-let [p (first ps)]
