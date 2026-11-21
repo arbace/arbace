@@ -5643,5 +5643,10 @@ The port (the llvm-project in rustc-1.99.1-src.tar.xz, LLVM 23, Apache-2.0 WITH 
 - **First measure**: alloc 18 of 25 equal as before (custom_owner_from_box refused for its one wanted callee, `Box::<Custom>::new`);
   core 109 of 275 equal as before, 85 differing become 66 and 20 of them are refused for an `#[inline(always)]` callee core's export
   lacks (32 call sites, 25 keys: `Option::unwrap`, `Result::unwrap`, `NonNull::as_ref`, `MaybeUninit`'s constructors and
-  `assume_init*`, `max_size_for_alignment`, the `const_eval_select` runtimes `do_panic`...). core's export runs again with them
-  (`lib-unit inline-keys core`), then the build and the compare.
+  `assume_init*`, `max_size_for_alignment`, the `const_eval_select` runtimes `do_panic`...).
+- **core with them** (`lib-unit inline-keys core`, core's export again over 300 keys in 55 module files, 56 min; build; compare):
+  **114 of 275 equal** (109 before), 78 differ, 80 refused, 3 symbols absent, the control differing; 34 callees built and inlined,
+  3 items refused for a callee still missing (the callees' own `#[inline(always)]` callees: `cast_const`, `ManuallyDrop::new`,
+  `MaybeUninit::write`, `intrinsics::unlikely`, wanted for the next export; `dec2flt` and `run_utf8_validation` refused at their
+  runtime bodies). The rest of the refusals as before (30 not exported, 21 `[MaybeUninit<u8>; N]` layouts of a named constant's
+  length, 10 constants unevaluated).
