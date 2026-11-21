@@ -53,7 +53,9 @@
     "__complex" "__complex__" "_Complex" "__real" "__real__" "__imag" "__imag__" "__int128" "__thread" "_Alignas" "_Alignof"
     "_Atomic" "_Bool" "_Noreturn" "_Static_assert" "_Thread_local" "__label__" "__builtin_va_arg" "__builtin_offsetof" "__null"
     "__func__" "__FUNCTION__" "__PRETTY_FUNCTION__" "__float128" "__bf16" "_Float16" "__fp16" "__auto_type"
-    "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr" "__declspec"})
+    "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr" "__declspec"
+    ;; (cpp-read, 2026-11-22: GCC's __constinit, constinit's spelling in every mode)
+    "__constinit"})
 
 (defn keywords
   "The keywords of the standard of year `year` (`gnu`: a GNU mode, `typeof` a keyword; `concepts`: -fconcepts, which makes
@@ -710,7 +712,7 @@
 
 (def ^:private storage-kws
   #{"static" "extern" "inline" "virtual" "explicit" "typedef" "friend" "mutable" "register" "thread_local" "constexpr"
-    "consteval" "constinit" "_Thread_local" "__thread" "__inline" "__inline__" "_Noreturn" "__extension__" "export"})
+    "consteval" "constinit" "__constinit" "_Thread_local" "__thread" "__inline" "__inline__" "_Noreturn" "__extension__" "export"})
 (def ^:private cv-kws #{"const" "volatile" "__restrict" "__restrict__" "__const" "__volatile" "__volatile__"})
 (def ^:private builtin-kws
   #{"char" "char8_t" "char16_t" "char32_t" "wchar_t" "bool" "short" "int" "long" "signed" "unsigned" "float" "double" "void"
@@ -2971,7 +2973,7 @@
                      (let [^T pv (tok-at p (dec i)) ^T nx (tok-at p (inc i))]
                        (or (and (t= pv "using") (t= nx "="))
                            (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
-                           (and (or (t= nx ";") (t= nx "[") (t= nx ","))
+                           (and (or (t= nx ";") (t= nx "[") (t= nx ",") (t= nx ")") (t= nx "("))
                                 (loop [j (dec i)] (cond (< j (max 0 (- i 64))) false
                                                         (or (t= (tok-at p j) ";") (t= (tok-at p j) "{") (t= (tok-at p j) "}")) false
                                                         (t= (tok-at p j) "typedef") true
@@ -3011,7 +3013,7 @@
             (= s "explicit") (do (adv! p) (when (is? p "(") (skip-balanced! p)) (recur (assoc ds :explicit true) words))
             (= s "constexpr") (do (adv! p) (recur (assoc ds :constexpr true :constexpr-i (last-ix p)) words))
             (= s "consteval") (do (adv! p) (recur (assoc ds :consteval true) words))
-            (= s "constinit") (do (adv! p) (recur (assoc ds :constinit true) words))
+            (#{"constinit" "__constinit"} s) (do (adv! p) (recur (assoc ds :constinit true) words))
             ;; (cpp-s5b: the TLS kind as clang's VarDecl::getTLSKind gives it: thread_local's is dynamic, __thread's and
             ;; _Thread_local's static)
             (#{"thread_local" "_Thread_local" "__thread"} s) (do (when (:tls ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :tls (if (= s "thread_local") "dynamic" "static")) words))
@@ -3087,6 +3089,11 @@
                                  (soft-diag! p (long (:i f)) (str "'" (:s f) "' has not been declared"))
                                  (and (= :ns (:k (:q qn))) (nil? (:ent qn)) (:s l) (:i l) (main-tok? p (long (:i l))))
                                  (soft-diag! p (long (:i l)) (str "'" (:s l) "' in namespace '" (:name (:q qn)) "' does not name a type"))
+                                 ;; (the class being defined named by its injected-class-name, no dependent base, without the member:
+                                 ;; [temp.dep.type]/1's current instantiation, looked up at the definition: template/crash7.C)
+                                 (and (= 2 (count parts)) (:inj (:q qn)) (nil? (:ent qn)) (:s l) (:i l) (main-tok? p (long (:i l)))
+                                      (not (dep-bases? p)) (<= (count (stv p CLS)) 1))
+                                 (soft-diag! p (long (:i l)) (str "'" (:s l) "' in '" (:s f) "' does not name a type"))
                                  :else nil)))
                            (recur (assoc ds :type {:t :tn :s (name-str p qn) :qn qn}) words)))
             (contains? attr-kws s) (let [as (attr-nodes p)] (recur (update ds :attrs into as) words))
@@ -3137,7 +3144,9 @@
                        (and (:friend ds) (or (is? p "...") (is? p ",") (is? p ";")))))
               (do ;; (h-cpp-read: before C++20 a dependent qualified name names a type only after typename, [temp.res]/3: GCC's
                   ;; "need 'typename' before 'T::type' because 'T' is a dependent scope", for a declarator's name after it)
-                  (when (and (< (.-year p) 2020) (not (:friend ds)) (not= ctx :alias) (id? p)
+                  (when (and (< (.-year p) 2020) (not (:friend ds)) (not= ctx :alias)
+                             ;; (cpp-read: a parameter's abstract declarator too, `void func(A<T>::B*)`, parse/crash13.C)
+                             (or (id? p) (and (= ctx :param) (or (is? p "*") (is? p "&") (is? p "&&") (is? p ")") (is? p ","))))
                              (let [f (first (:parts qn))]
                                (or (some-> (lookup (scope p) (:s f)) :tparam)
                                    ;; (cpp-read, 2026-11-22: a template-id first whose arguments name a template parameter, a
@@ -3151,10 +3160,12 @@
               (do ;; (cpp-read, 2026-11-22: an unqualified name no lookup finds where a declaration's type stands, a declarator's
                   ;; name after it ([dcl.type.simple]/1 with [basic.lookup.unqual]): GCC's "'B' does not name a type", at the name;
                   ;; the declaration taken)
-                  (when (and *full-headers* (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (not (:args lp))
-                             (main-tok? p save) (nil? (lookup (scope p) (:s lp))) (not (declared-in-main? p (:s lp))))
-                    (soft-diag! p save (str "'" (:s lp) "' does not name a type")))
-                  (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn :unknown true}) words))
+                  (let [bad (and *full-headers* (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (not (:args lp))
+                                 (main-tok? p save) (nil? (lookup (scope p) (:s lp))) (not (declared-in-main? p (:s lp))))]
+                    (when bad (soft-diag! p save (str "'" (:s lp) "' does not name a type")))
+                    ;; (:undeclared-type: in a block GCC reads the statement as an expression, its declarator declaring nothing,
+                    ;; so a later use of the name is undeclared too: ext/builtin11.C)
+                    (recur (cond-> (assoc ds :type {:t :n :s (name-str p qn) :qn qn :unknown true}) bad (assoc :undeclared-type true)) words)))
               :else (do ;; (cpp-read, 2026-11-22: an unqualified name no lookup finds before a <, where a declaration's type
                         ;; stands: GCC's "'A' does not name a type", at the name)
                         (when (and *full-headers* decl-ctx (nil? e) (is? p "<") (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn))
@@ -4176,9 +4187,18 @@
                           [])
                 :else []))
       (and base0 (= :auto (:t (:type ds))) (or (and (is? p "[") (not (is-at? p 1 "["))) (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "["))))
-      (let [n (parse-decomposition p ds ctx base0)]
-        (expect! p ";")
-        [n])
+      (do ;; (cpp-read, 2026-11-22: [dcl.pre]/6 and [dcl.struct.bind]/1, a structured binding declaration is a block's or a
+          ;; namespace's simple-declaration of its own: in a class or under a template header GCC's "expected unqualified-id before
+          ;; '[' token", at the [)
+          (when (and (or (= ctx :member) tmpl) (not (skim? p)) (main-tok? p (ix p)))
+            (soft-diag! p (ix p) "expected unqualified-id before '[' token"))
+          (let [n (parse-decomposition p ds ctx base0)]
+            ;; (another declarator after it, `auto [a, b] = x, c;`, is none of a structured binding declaration's)
+            (when (and (is? p ",") (not (skim? p)) (main-tok? p (ix p)))
+              (soft-diag! p (ix p) "expected ';' before ',' token")
+              (skip-until! p #{";"}))
+            (expect! p ";")
+            [n]))
       :else
       (loop [out (if pre [pre] [])]
         (let [ctor (and (nil? base0) (ctor-name-here? p (if (= ctx :member) :member :top)))
@@ -4571,11 +4591,15 @@
                               (and *full-headers* (:q qn) (> (count (:parts qn)) 1) (:i (first (:parts qn))))
                               (assoc :_qual (tok-text p (long (:i (first (:parts qn)))) (dec (long ni))))
                               (seq ga) (assoc :_gattrs ga))))]
-              (when (and nm (nil? (:args lp))) (declare! p (cond-> {:k :var :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :ty ty :vat ni}
+              (when (and nm (nil? (:args lp)) (not (and (:undeclared-type ds) (= ctx :block)))) (declare! p (cond-> {:k :var :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :ty ty :vat ni}
                                                              (and (= :auto (:t ty)) (= "LambdaExpr" (:kind x))) (assoc :closure true)
                                                              (= "static" (:storage ds)) (assoc :static true)
                                                              (= "C" *linkage*) (assoc :clink true))))
               (cond
+                ;; (cpp-read, 2026-11-22: a structured binding after another declarator, `auto m = x, [a, b] = y;`: GCC's
+                ;; "expected unqualified-id before '[' token", the declaration ended)
+                (and (is? p ",") (is-at? p 1 "[") (not (is-at? p 2 "[")) (= :auto (:t (:type ds))) (not (skim? p)) (main-tok? p (ix p)))
+                (do (soft-diag! p (inc (ix p)) "expected unqualified-id before '[' token") (skip-until! p #{";"}) (expect! p ";") (conj out n))
                 (decl-comma! p) (recur (conj out n))
                 (accept! p ";") (conj out n)
                 ;; cpp-read (2026-11-22): a member declarator followed by neither , nor ;: GCC's "expected ';' at end of member
@@ -5013,6 +5037,15 @@
                           (adv! p)
                           (if (accept! p "::") (recur (conj out x)) (conj out x)))
                         out)))
+            ;; (cpp-read, 2026-11-22: [namespace.def.general]/1, a nested-namespace-definition `namespace A::B` takes `inline`
+            ;; only before a name after the first (C++20's `A::inline B`): GCC's "a nested namespace definition cannot be inline"
+            ;; for `inline namespace A::B`, "expected" for `namespace inline A::B` and an `inline` after the names)
+            _ (when (and (seq parts) (not (skim? p)) (main-tok? p b))
+                (cond (:inline (first parts)) (soft-diag! p (long (:i (first parts))) "expected identifier before 'inline'")
+                      (and inline (> (count parts) 1)) (soft-diag! p b "a nested namespace definition cannot be inline")))
+            _ (when (and (is? p "inline") (seq parts) (not (skim? p)) (main-tok? p (ix p)))
+                (soft-diag! p (ix p) "expected '{' before 'inline'")
+                (adv! p))
             a2 (attr-nodes p)
             ;; (cpp-rt-own2: GNU's abi_tag on a namespace kept as :_abi-tags, the tags it names, for the code generator's implicit
             ;; tags: <c++config.h>'s `inline namespace __cxx11 __attribute__((__abi_tag__ ("cxx11")))`; the nodes are no children)
@@ -5343,7 +5376,11 @@
         base (or (ds-type ds) (perr p "a condition's type"))]
     (if (or (is? p "[") (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "[")))
       ;; a structured binding declaration as a condition (C++26's P0963, an extension before)
-      {:kind "DeclStmt" :inner [(parse-decomposition p ds :block base)]}
+      (do ;; (cpp-read, 2026-11-22: GCC's pedwarn before C++26, "structured bindings in conditions only available with
+          ;; -std=c++2c or -std=gnu++2c", at the [)
+          (when (and (< (.-year p) 2026) (not (skim? p)) (main-tok? p (ix p)))
+            (pedantic-diag! p (ix p) "structured bindings in conditions only available with -std=c++2c or -std=gnu++2c"))
+          {:kind "DeclStmt" :inner [(parse-decomposition p ds :block base)]})
       (parse-condition-var p ds base))))
 
 (defn- parse-condition-var [^P p ds base]
