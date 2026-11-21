@@ -15719,3 +15719,41 @@ passing, the 6 older-message rows pass; eval-results and aot-results 2 rows each
 2,937; completeness 0.9996 -> 1.0000 (meant 1.0000). Left: `custom-page-sizes-flag-message` (2 msg rows, beside, D326-1 (a)) and
 eval's `go-speed` (3 `:budget`, out of crops-score's cases). `bin/reap --record`, `bin/crops-score --record`, then `bin/reap`,
 `bin/crops-score --judge --strict` and `bin/records-check`: 0 problems. No gate.
+
+## 2026-11-22: arm64 assembly's last non-passes built (small-tails-arm64-1122)
+
+The burst's stream S1 (100 completeness), its arm64 part, on branch small-tails-arm64-1122 from next 863bdaea1; details in
+doc/asm/ARM64-SURVEY.md, "As built: small-tails, the last non-passes". Before: read 6,654 / 0 / 2 (`:error-misplaced`), AOT 3,172 /
+0 / 1 (`:unsupported-literal-pool`), print 12,664 / 5 (`:check-text`) / 2 (`:error-misplaced`).
+- The error tests' judge (arbace/repr/asm.ae, AXS96 (a)'s, shared with amd64): a CHECK line that echoes a statement's text is that
+  statement's place (neon-diagnostics' `ld1 v0.8b, v1.8b}` and `st1`'s, stated in a block of errors after a block of statements);
+  on arm64 a refusal the test states no error at passes when the statement is three or more bare words (the second no register,
+  not `mul`), which AArch64AsmParser::parseInstruction refuses by its own rule ('unexpected token in argument list': read from
+  llvm-project 23.1.5's AArch64AsmParser.cpp in the pinned tarball), and no chain of -NEXT lines spans it and no -NOT line exists
+  (FileCheck's own verdict skips the extra error): basic-a64-diagnostics' four `;;` lines, statements in AArch64's ELF syntax.
+  Alternatives weighed: FileCheck's tolerance alone (looser: any refusal outside a chain would pass, hiding a reader that refuses a
+  valid statement), llvm-mc's recorded stderr as a pack (the oracle's record in the judge), keeping the class. arm64 error controls
+  added (test/asm/controls-error-arm64.txt, 3, each fails); amd64's 4 still fail; a fabricated test checked by hand (a words
+  statement inside a chain not tolerated, after it tolerated).
+- The encode check's judge (arbace/repr/asm/arm64/encheck.ae): a CHECK text that does not read (a part of the printed line, a
+  regular expression beyond the alternatives) judged by the input its place pairs with, its encoding against the stated bytes and
+  its print holding the text as a FileCheck pattern; a text-less block also paired with the statements after it. Controls 3 added
+  to test/asm/controls-encode-arm64.txt, each fails.
+- The literal pool (arbace/asm/arm64/obj.ae; ARS50 (a), "later", the user's of 2026-11-11): `ldr Rt, =EXPR` a MOVZ when the
+  constant fits, else an entry of the section's pool (deduplicated as ConstantPool's caches), emitted at `.ltorg`/`.pool` and at
+  the end before the streamer's finish; the eval (arbace/asm/arm64/eval.ae) takes the same form. Two samples assembled by hand by
+  clang 23.1.5 (the oracle tier's) and by Arbace: the same bytes.
+- Classes removed: divergences-read-arm64's `:error-misplaced`, divergences-encode-arm64's `:check-text`, divergences-object-arm64's
+  `:unsupported-literal-pool`.
+- Proofs (light, each under 1.3 GB): `bin/repr-asm --arch arm64 roundtrip` (444 of 444, 9 controls fail), `bin/repr-asm roundtrip`
+  (amd64, unchanged, its 7 controls fail), `bin/repr-asm --arch arm64 encode-check` (encode 12,297 / 1 directive, print 12,227 of
+  12,227, input and reject unchanged; 18 controls fail), `bin/repr-asm --arch arm64 object-verdict` (2,890 of 2,890; 12 controls
+  fail), each then `--record` (whole runs); bin/reap --record, bin/crops-score --record.
+After: read 6,656 / 0 / 0, AOT 3,173 / 0 / 0, print 12,671 / 0 / 0; arm64's completeness 1.0.
+
+## 2026-11-22: small-tails-arm64-1122's checks after the record
+
+After the records (the entry above): bin/reap and bin/crops-score --judge --strict 0 problems, bin/records-check 9 pairs, 0
+problems; arm64's scores line in test/crops/scores.edn completeness 0.9997 -> 1.0000 (maturity and independence 1.0000).
+asm-arm64-essential's controls (test/gate/crops/asm.edn and the spliced test/gate/steps.edn) name test/asm/controls-error-arm64.txt
+(gate.crops check: 0 problems; the step's inputs already hold test/asm/).

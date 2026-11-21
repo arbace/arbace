@@ -131,10 +131,17 @@
 
 (defn- check-line? [^String l] (boolean (check-prefix l)))
 
-(defn error-lines
-  "AXS96 (a): the lines of the file (a split-file part when `part`, its name) where the test's CHECK lines state an error, from
-  the test's text `main`: a `[[#@LINE+N]]` place, a `NAME.s:N:C:` place, else the statements just before and just after the
-  CHECK line (a CHECK written beside its statement)."
+(defn- norm-text ^String [^String s] (str/trim (str/replace s #"\s+" " ")))
+
+(defn error-checks
+  "AXS96 (a): the test's error CHECK lines (a split-file part when `part`, its name) with the lines of the file where each
+  states an error, from the test's text `main`: {:checks [{:at LINE :kind :plain|:next :stated #{LINE...} :echo LINE?} ...]
+  :not? BOOL :texts {LINE TEXT}}, the lines counted from the part's start. A CHECK line states an error at a `[[#@LINE+N]]`
+  place, a `NAME.s:N:C:` place, else at the statements just before and just after it (a CHECK written beside its
+  statement); and (small-tails, 2026-11-22) a CHECK line whose text is a statement's own text, llvm-mc's echo of the
+  refused line after its `error:` line, at that statement (the nearest before it, else after it): the place of a block of
+  errors stated after a block of statements. :kind :next for a -NEXT, -SAME or -EMPTY line (FileCheck holds it to the line
+  after the previous match); :not? when a -NOT line of an error prefix is in the part."
   [^String main part]
   (let [ls (vec (str/split-lines main))
         hdr (if part
@@ -154,20 +161,89 @@
                (loop [j (+ i step) out []]
                  (if (<= 1 j (count ls))
                    (case (stmt j) :stmt (conj out j) :label (recur (+ j step) (conj out j)) (recur (+ j step) out))
-                   out)))]
-    (set (for [[i l] (map-indexed (fn [i l] [(inc i) l]) ls)
-               :let [pre (check-prefix l)]
-               ;; an error's line: `error:` in it, a prefix of the errors' (ERR...), or any CHECK line of a test whose every
-               ;; llvm-mc run is rejected (`not llvm-mc`); never a -NOT
-               :when (and pre (not (re-find #"-NOT:" l))
-                          (or (re-find #"error:" l) (re-find #"ERR" pre) all-err?))
-               :let [at (re-find #"\[\[#?@LINE([+-]\d+)?\]\]" l)
-                     abs (re-find #"(?:\.[sS]|<stdin>)?:(\d+):\d+: error" l)]
-               x (cond at [(+ (long i) (long (if (second at) (Long/parseLong (str/replace (second at) "+" "")) 0)) (- hdr))]
-                       abs [(Long/parseLong (second abs))]
-                       :else (map #(- (long %) hdr) (concat (near i -1) (near i 1))))
-               :when (and (pos? (long x)) (< (+ (long x) hdr) part-end))]
-           (long x)))))
+                   out)))
+        ;; the statements' texts in the part (a trailing `//` comment left out), for the echo rule
+        texts (into {} (for [j (range (inc hdr) (min part-end (inc (count ls))))
+                             :when (= :stmt (stmt j))
+                             :let [t (norm-text (str/replace (nth ls (dec j)) #"\s*//.*$" ""))]
+                             :when (seq t)]
+                         [j t]))
+        by-text (group-by val texts)
+        echo (fn [^long i ^String t]
+               (when-let [js (seq (sort (map key (by-text (norm-text t)))))]
+                 (or (last (filter #(< (long %) i) js)) (first js))))
+        err? (fn [^String l pre] (and pre (or (re-find #"error:" l) (re-find #"ERR" pre) all-err?)))
+        in-part? (fn [^long x] (and (pos? x) (< (+ x hdr) part-end)))
+        checks (vec (for [[i l] (map-indexed (fn [i l] [(inc i) l]) ls)
+                          :let [pre (check-prefix l)]
+                          ;; an error's line: `error:` in it, a prefix of the errors' (ERR...), or any CHECK line of a test whose every
+                          ;; llvm-mc run is rejected (`not llvm-mc`); never a -NOT
+                          :when (and (err? l pre) (not (re-find #"-NOT:" l)))
+                          :let [at (re-find #"\[\[#?@LINE([+-]\d+)?\]\]" l)
+                                abs (re-find #"(?:\.[sS]|<stdin>)?:(\d+):\d+: error" l)
+                                body (second (re-find #"^.*?[A-Z][A-Za-z0-9_-]*:\s?(.*)$" l))
+                                e (when (and body (not (re-find #"error:" body)) (not (re-matches #"\s*\^?\s*" body)))
+                                    (echo i body))
+                                xs (cond at [(+ (long i) (long (if (second at) (Long/parseLong (str/replace (second at) "+" "")) 0)) (- hdr))]
+                                         abs [(Long/parseLong (second abs))]
+                                         :else (concat (map #(- (long %) hdr) (concat (near i -1) (near i 1)))
+                                                       (when e [(- (long e) hdr)])))]]
+                      {:at (- i hdr)
+                       :kind (if (re-find #"-(NEXT|SAME|EMPTY):" l) :next :plain)
+                       :error? (boolean (re-find #"error:" l))
+                       :echo (when e (- (long e) hdr))
+                       :stated (set (filter in-part? (map long xs)))}))]
+    {:checks checks
+     :not? (boolean (some (fn [[i l]] (and (< hdr (inc i) part-end) (re-find #"-NOT:" l) (err? l (check-prefix l))))
+                          (map-indexed vector ls)))
+     :texts (into {} (map (fn [[j t]] [(- (long j) hdr) t]) texts))}))
+
+(defn error-lines
+  "AXS96 (a): the lines of the file (a split-file part when `part`, its name) where the test's CHECK lines state an error
+  (error-checks' places)."
+  [^String main part]
+  (set (mapcat :stated (:checks (error-checks main part)))))
+
+(defn- chains
+  "The error CHECK lines' FileCheck chains: a plain line and the -NEXT, -SAME and -EMPTY lines after it, each chain the
+  statements its errors are (the echoed statements when every `error:` line of the chain has its echo, else every line
+  the chain states)."
+  [checks]
+  (let [cs (reduce (fn [acc c] (if (and (= :next (:kind c)) (seq acc)) (conj (pop acc) (conj (peek acc) c)) (conj acc [c]))) [] checks)]
+    (for [ch cs
+          :let [errs (count (filter :error? ch))
+                echoes (keep :echo ch)
+                ss (if (and (pos? errs) (>= (count echoes) errs)) echoes (mapcat :stated ch))]
+          :when (seq ss)]
+      [(apply min ss) (apply max ss)])))
+
+(defn- words-statement?
+  "arm64 (small-tails, 2026-11-22): a statement of three or more bare words, the second and third apart by white space alone
+  and the second neither a register's name nor `mul`: AArch64AsmParser::parseInstruction (llvm-project 23.1.5,
+  AArch64AsmParser.cpp) parses the second as an operand (an expression: no operand parser takes two bare words but
+  parseOptionalMulOperand's `mul vl`) and refuses the third ('unexpected token in argument list'), as AArch64's ELF syntax
+  reads `;; Exponent too large` (`;` its separator, `//` its comment)."
+  [^String t]
+  (when-let [[_ _ w2] (re-matches #"([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s+[A-Za-z_][A-Za-z0-9_]*(?:\s+.*)?" (str/trim t))]
+    (and (not= "mul" (str/lower-case w2)) (nil? (a64/register w2)))))
+
+(defn- statement-text
+  "The text of the statement at `line` of `src` that a refusal names: the last `;`-separated part of the line (the reader
+  goes on after the separators)."
+  ^String [^String src ^long line]
+  (let [l (nth (str/split-lines src) (dec line) "")]
+    (last (str/split (str/replace l #"\s*//.*$" "") #";"))))
+
+(defn tolerated?
+  "arm64 (small-tails, 2026-11-22): a refusal at `line`, where the test states no error, that the test's own verdict holds
+  anyway: the statement is one llvm-mc refuses by its parser's own rule (words-statement?), and FileCheck's matching of
+  the test's error lines lets its error through: no -NOT line of an error prefix, and no chain (a plain CHECK line with
+  its -NEXT lines) whose statements lie on both sides of it (its error printed inside the chain)."
+  [d ^String src ^long line ec]
+  (and (= :arm64 (:arch d))
+       (boolean (words-statement? (statement-text src line)))
+       (not (:not? ec))
+       (not-any? (fn [[lo hi]] (< (long lo) line (long hi))) (chains (:checks ec)))))
 
 (defn- refusals
   "The (asm/unread ...) items outside a conditional block of the items [FORM START END]: [[LINE MESSAGE] ...]."
@@ -213,12 +289,17 @@
                    :else "ok")
           ;; AXS96 (a): an error test's refusals, each held to a line the test states an error at
           rs (when (and (:error-test opts) (= status "ok")) (refusals src (read-items src d)))
-          stated (when (seq rs) (error-lines (latin1 (or (:main opts) path)) (:part opts)))
-          off (first (remove (fn [[l]] (contains? stated l)) rs))]
+          ec (when (seq rs) (error-checks (latin1 (or (:main opts) path)) (:part opts)))
+          stated (set (mapcat :stated (:checks ec)))
+          off (first (remove (fn [[l]] (or (contains? stated l) (tolerated? d src l ec))) rs))]
       (if off
         ["misplaced" (str "a refusal where the test states no error (line " (first off) "): "
                            (-> (str (second off)) (str/replace #"[\t\n\r]" " ") (str/replace "\"" "'") (str/replace "\\" "(backslash)") (str/replace #"[^ -~]" "?"))) (count forms) (:gaps st) (:texts st)]
-        [status (if (seq rs) (str (count rs) " refusals at the test's errors") "") (count forms) (:gaps st) (:texts st)])))
+        (let [tol (count (remove (fn [[l]] (contains? stated l)) rs))]
+          [status (if (seq rs) (str (count rs) " refusals at the test's errors"
+                                    (when (pos? tol) (str " (" tol " of statements llvm-mc's parser refuses, unstated)")))
+                      "")
+           (count forms) (:gaps st) (:texts st)]))))
     (catch Throwable e
       [(if (:asm/refused (ex-data e)) "refused" "crash") (reason e) 0 0 0]))))
 
@@ -235,8 +316,9 @@
   [^String subject ^String reference d]
   (let [src (latin1 subject)
         rs (binding [gnu/*recover* true] (refusals src (read-items src d)))
-        stated (error-lines (latin1 reference) nil)]
-    (if (and (seq rs) (every? #(contains? stated (first %)) rs)) "same" "differs")))
+        ec (error-checks (latin1 reference) nil)
+        stated (set (mapcat :stated (:checks ec)))]
+    (if (and (seq rs) (every? #(or (contains? stated (first %)) (tolerated? d src (first %) ec)) rs)) "same" "differs")))
 
 (defn- pool-map [f rows]
   (let [threads (Integer/parseInt (or (System/getenv "REPR_ASM_THREADS") "4"))
