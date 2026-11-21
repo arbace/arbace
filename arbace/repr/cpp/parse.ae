@@ -168,6 +168,12 @@
   statement's body and a lambda's resets it): a compound statement there ends at an `else`."
   false)
 
+(def ^:dynamic *exec-latin1*
+  "cpp-read (2026-11-22): the ordinary literals' encoding is ISO-8859-1 (-fexec-charset=ISO-8859-1, the dg check's own front end
+  given the test's option, arbace.repr.cpp.native): a character past U+00FF has no code unit, [lex.ccon]/3, [lex.string]/10
+  (C++26's P1854R4: ill-formed), GCC's \"converting to execution character set\"."
+  false)
+
 (def ^:dynamic *sub-stmt*
   "cpp-read (2026-11-22): true while a selection or iteration statement's sub-statement is parsed (not a compound statement's
   statements): a label there labels a statement, P2324R2's label at the end applies to a compound statement alone."
@@ -1665,6 +1671,23 @@
       (loop [^Scope s (scope p)]
         (when s (if (and (= :lookup (sc/kind-of s)) (let [e (sc/ent-of s)] (or (:tmpl e) (:dep e)))) true (recur (sc/parent-of s)))))))
 
+(defn- dep-bases?
+  "cpp-read (2026-11-22): whether a class template whose member is parsed (being defined, or the class of an out-of-class
+  member's qualifier) has a base that may depend on a template parameter: a template parameter, a template-id, a name no
+  lookup found or a dependent class. Without one, [temp.res.general]/? binds an unqualified name at the definition ([temp.dep]/3:
+  a dependent base is never looked in), so a name no lookup finds is undeclared there too."
+  [^P p]
+  (let [ents (concat (map :ent (stv p CLS))
+                     (loop [^Scope s (scope p) out []]
+                       (if s (recur (sc/parent-of s) (if (= :lookup (sc/kind-of s)) (conj out (sc/ent-of s)) out)) out)))]
+    (boolean
+      (some (fn [e]
+              (when-let [^HashMap i (and (map? e) (sema/info e))]
+                (some (fn [b] (let [t (:ty b) en (:ent t)]
+                                (or (nil? en) (:tparam en) (:dep en) (some :args (:parts (:qn t))))))
+                      (.get i :bases))))
+            ents))))
+
 (defn- class-member?
   "Whether unqualified lookup of `nm` finds it in a class's scope (a member, the implicit object's)."
   [^P p nm]
@@ -1980,7 +2003,11 @@
                                            ;; clang's identifier table, CP270 (a)): the name token's offset
                                            :_undecl (when (and (nil? en) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (not (:args lp))
                                                                (main-tok? p b) (not (contains? *fn-names* (:s lp)))
-                                                               (not (dep-this? p)))
+                                                               ;; (cpp-read, 2026-11-22: in a class template's member too, when
+                                                               ;; no base may be dependent, dep-bases?;
+                                                               ;; a nested class's member aside: its enclosing class's later members,
+                                                               ;; which [class.mem.general]/7 shows it, are not in the parser's scopes)
+                                                               (or (not (dep-this? p)) (and (not (dep-bases? p)) (<= (count (stv p CLS)) 1))))
                                                       [(.-o (tok-at p b)) (:s lp) (boolean (in-template? p))])
                                            :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp))))
                                                                 ;; (queue 492: a literal operator's id, [over.literal]/1, as clang
@@ -2931,6 +2958,26 @@
                 (t= t "}") (recur (inc j) (dec d))
                 :else (recur (inc j) d)))))))
 
+(defn- declared-in-main?
+  "cpp-read (2026-11-22): whether the main file declares a type named `nm` somewhere (`using NM =`, a class-key or enum before
+  it, `typedef ... NM;`, `concept NM`): a later use no lookup finds is then a declaration's failure's cascade (GCC declares the
+  failed name as erroneous and says nothing more), not \"does not name a type\"."
+  [^P p ^String nm]
+  (let [n (.-cnt p)]
+    (boolean
+      (some (fn [i]
+              (let [^T t (tok-at p i)]
+                (and (identical? :id (.-k t)) (.equals nm (.-s t)) (main-tok? p i)
+                     (let [^T pv (tok-at p (dec i)) ^T nx (tok-at p (inc i))]
+                       (or (and (t= pv "using") (t= nx "="))
+                           (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
+                           (and (or (t= nx ";") (t= nx "[") (t= nx ","))
+                                (loop [j (dec i)] (cond (< j (max 0 (- i 64))) false
+                                                        (or (t= (tok-at p j) ";") (t= (tok-at p j) "{") (t= (tok-at p j) "}")) false
+                                                        (t= (tok-at p j) "typedef") true
+                                                        :else (recur (dec j))))))))))
+            (range 1 n)))))
+
 (defn parse-decl-specs
   "A decl-specifier-seq: {:b :e :type :storage :typedef :friend :inline :virtual :explicit :constexpr :consteval
   :constinit :mutable :tls :attrs :tag-node}, :b its first token after the leading attribute-specifier-seq (clang's
@@ -3105,13 +3152,13 @@
                   ;; name after it ([dcl.type.simple]/1 with [basic.lookup.unqual]): GCC's "'B' does not name a type", at the name;
                   ;; the declaration taken)
                   (when (and *full-headers* (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (not (:args lp))
-                             (main-tok? p save) (nil? (lookup (scope p) (:s lp))))
+                             (main-tok? p save) (nil? (lookup (scope p) (:s lp))) (not (declared-in-main? p (:s lp))))
                     (soft-diag! p save (str "'" (:s lp) "' does not name a type")))
                   (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn :unknown true}) words))
               :else (do ;; (cpp-read, 2026-11-22: an unqualified name no lookup finds before a <, where a declaration's type
                         ;; stands: GCC's "'A' does not name a type", at the name)
                         (when (and *full-headers* decl-ctx (nil? e) (is? p "<") (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn))
-                                   (:s lp) (main-tok? p save) (nil? (lookup (scope p) (:s lp))))
+                                   (:s lp) (main-tok? p save) (nil? (lookup (scope p) (:s lp))) (not (declared-in-main? p (:s lp))))
                           (soft-diag! p save (str "'" (:s lp) "' does not name a type")))
                         (seek! p save) (assoc ds :e (last-ix p)))))
           :else (cond-> (assoc ds :e (last-ix p)) (seq words) (assoc :type (words-type p ds words))))))))
@@ -5764,6 +5811,9 @@
       (nil? prefix) nil
       (and (= prefix "u") (some (fn [[k v]] (and (= k :cp) (> (long v) 0x10FFFF))) cs))
       "converting UCN to execution character set: Illegal byte sequence"
+      ;; (cpp-read: an ordinary string's character past U+00FF under an ISO-8859-1 execution character set)
+      (and str? (= prefix "") *exec-latin1* (some (fn [[k v]] (and (not= k :unit) (> (long v) 0xFF))) cs))
+      "converting to execution character set: Invalid or incomplete multibyte or wide character"
       str? nil
       (and (> (count cs) 1) (or (and (#{"u" "U"} prefix) (>= year 2011)) (and (= prefix "u8") (>= year 2017)) (and (= prefix "L") (>= year 2023))))
       "multi-character literal cannot have an encoding prefix"
@@ -5771,6 +5821,11 @@
            (or (and (= prefix "u8") (>= year 2017) (> (long (second (first cs))) 0x7F))
                (and (= prefix "u") (>= year 2011) (> (long (second (first cs))) 0xFFFF))))
       "character not encodable in a single code unit"
+      ;; (cpp-read: an ISO-8859-1 execution character set, *exec-latin1*: a character past U+00FF converts to no code unit, an error;
+      ;; one up to it is one)
+      (and (= prefix "") *exec-latin1* (some (fn [[k v]] (and (not= k :unit) (> (long v) 0xFF))) cs))
+      "converting to execution character set: Invalid or incomplete multibyte or wide character"
+      (and (= prefix "") *exec-latin1*) nil
       (and (= prefix "") (= 1 (count cs)) (wide? (first cs))) "pedantic: character not encodable in a single execution character code unit"
       (and (= prefix "") (> (count cs) 1) (some wide? cs))
       "pedantic: at least one character in a multi-character literal not encodable in a single execution character code unit")))
@@ -5817,7 +5872,8 @@
                          :id (when (str/includes? (.-s t) "\\") (ucn-error (.-s t) (.-year p)))
                          ;; (round 54, fifth pass: [lex.ccon]'s encodable literals)
                          :chr (or (escape-error (.-s t) (.-year p)) (char-literal-error (.-s t) (.-year p) false))
-                         :str (or (escape-error (.-s t) (.-year p)) (when (str/starts-with? (.-s t) "u\"") (char-literal-error (.-s t) (.-year p) true)))
+                         :str (or (escape-error (.-s t) (.-year p)) (when (or (str/starts-with? (.-s t) "u\"") (and *exec-latin1* (str/starts-with? (.-s t) "\"")))
+                                                                      (char-literal-error (.-s t) (.-year p) true)))
                          ;; (a user-defined literal's ud-suffix is an identifier too, [lex.ext]/1)
                          :udls (let [^String s (.-s t) x (subs s (inc (.lastIndexOf s "\"")))] (when (str/includes? x "\\") (ucn-error x (.-year p))))
                          :udlc (let [^String s (.-s t) x (subs s (inc (.lastIndexOf s "'")))] (when (str/includes? x "\\") (ucn-error x (.-year p))))
