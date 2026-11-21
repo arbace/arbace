@@ -1858,7 +1858,22 @@
     (doseq [n (:nodes u) :when (mine? n)] (walk n #{} nil nil))
     (vec out)))
 
-(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs]))
+(defn type-exprs
+  "cpp-read (2026-11-22): a type's name the parser met where an expression's primary stands, with no ( or { after it for a
+  functional cast (the parser's :_typex: [expr.prim.id]/1, an id-expression names no type), GCC's \"expected
+  primary-expression before X\" (cp_parser_primary_expression), at the name; once a line."
+  [u starts _ _]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when-let [[off nx] (:_typex n)]
+                    (let [[l c] (line-col starts (long off))]
+                      (.add out {:line l :col c :kind :error :rule :type-expr
+                                 :msg (str "expected primary-expression before '" nx "' token")}))))
+                ;; (a decltype's operand the parser kept beside the tree, :decltypes)
+                [(:nodes u) (vec (vals (:decltypes u)))] nil)
+    (vec (vals (into (sorted-map) (map (juxt :line identity) out))))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
@@ -1967,7 +1982,17 @@
                     :let [[l c] (line-col starts (long off))]]
                 {:line l :col c :kind :error :rule :syntax
                  :msg (str (str/replace (str why) #"^(statement|declaration|pedantic|pedantic-w): " "") " (at '" tok "')")})
-          sema (concat (mapcat (fn [f] (f u starts src main)) @checks)
+          ;; cpp-read (2026-11-22): a GNU line marker (`# 1 "f" 1`, [cpp.line]'s directive without its `line`) the preprocessor ran
+          ;; in the main file, libcpp's pedwarn "style of line directive is a GCC extension" (directives.cc's do_linemarker), an
+          ;; error under -pedantic-errors
+          lms (when pe?
+                (for [l (sort (:executed u))
+                      :let [l (long l)
+                            a (long (.get starts (dec l)))
+                            z (if (< l (.size starts)) (long (.get starts l)) (.length src))]
+                      :when (re-find #"^[ \t]*#[ \t]*[0-9]" (subs src a z))]
+                  {:line l :col 1 :kind :error :rule :pp :msg "style of line directive is a GCC extension"}))
+          sema (concat lms (mapcat (fn [f] (f u starts src main)) @checks)
                        ;; (a unit the parser declined a construct of is not analyzed: the code generator's refusal)
                        (when (and sema? (zero? (long (:declines u 0)))) (sema-errors u starts src main)))
           ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)]
