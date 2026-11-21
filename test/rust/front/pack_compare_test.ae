@@ -6,7 +6,39 @@
   cases (an operand, a local's type, a block's cleanup flag, a borrowed temporary not propagated) differ. `bin/rust-front
   pack-compare-test`."
   (:require [arbace.rust.front.build-run :as br] [arbace.rust.front.passes :as passes] [arbace.rust.front.mono :as mono]
-            [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.resolve :as resolve]))
+            [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.resolve :as resolve]
+            [arbace.rust.back.codegen :as cg] [arbace.rust.back.check :as chk] [arbace.rust.front.lib-unit :as lu]))
+
+;; C1's drop glue (doc/rust/FRONTEND-SURVEY.md, "C1's drop glue"): codegen's drop terminators as rustc writes them, each body's
+;; LLVM forms against std's IR's (the pinned build, test/rust/runtime/ir.sha256), after RF3's normalizer
+(def ^:private dyn-any '(ty "dyn std::any::Any + std::marker::Send" (dyn "std::any::Any")))
+(def ^:private ptr-dyn (list 'ty "*mut dyn std::any::Any + std::marker::Send" (list 'ptr dyn-any true)))
+(def ^:private unit '(ty "()" (tuple [])))
+(def ^:private glue-lt
+  {"()" '{:size 0, :align 1, :abi (memory true), :fields [], :variants (single 0), :uninhabited false}
+   "*mut dyn std::any::Any + std::marker::Send" '{:size 16, :align 8, :abi (pair (ptr [0N 18446744073709551615N]) (ptr [1N 18446744073709551615N]) 8), :fields [0 8], :variants (single 0), :uninhabited false}
+   "*mut std::string::String" '{:size 8, :align 8, :abi (scalar (ptr [0N 18446744073709551615N])), :fields [], :variants (single 0), :uninhabited false}
+   "std::string::String" '{:size 24, :align 8, :abi (memory false), :fields [0], :variants (single 0), :uninhabited false}})
+
+(defn- glue-body
+  "drop_glue::<T>'s shim for a pointer type PT: `drop((*_1)) -> bb1` (the glue named SELF for the drop of `*_1`)"
+  [pt self]
+  {:form :body :symbol "glue" :args 1 :ret unit
+   :locals [{:mut true :ty unit} {:mut false :ty pt}] :debug []
+   :blocks [{:cleanup false :stmts [] :term (list 'drop '(place 1 (deref)) 1 '(continue) false nil (list 'glue {:symbol self}))}
+            {:cleanup false :stmts [] :term '(return)}]})
+
+(defn- body-forms [b]
+  ;; the entry block unlabeled, as std's IR prints it (lib-unit's entry-unlabeled)
+  (let [gl (cg/new-globals {})] (nth (chk/normalize (lu/entry-unlabeled (cg/codegen-fn b glue-lt gl)) {}) 4)))
+
+;; std's IR of drop_glue::<dyn Error + Sync + Send> (alloc's unit 3), read by hand into forms: the vtable's slot 0 loaded,
+;; called when not null
+(def ^:private rustc-dyn-drop
+  '[(block nil (= %3 (getelementptr :inbounds i8 [ptr %1] [i64 0])) (= %4 (load ptr [ptr %3] :align 8)) (= %5 (icmp :ne ptr %4 null))
+           (br i1 %5 %6 %7))
+    (block %6 (call void %4 [[ptr %0]]) (br %7))
+    (block %7 (ret void))])
 
 (def i8 '(ty "i8" (int "i8")))
 (def u8 '(ty "u8" (uint "u8")))
@@ -364,5 +396,14 @@
     (check "negative: a borrowed temporary is not propagated"
            (br/pack-compare (update-in ours [:blocks 0 :stmts] conj '(assign (place 0) (ref :shared (place 2)))) rec) :differs)
     (check "negative: the unwind action" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(move (place 2))] '(place 0) 1 '(continue))) rec) :differs)
+    ;; C1's first drop glue bug: drop_glue::<dyn Any + Send> called itself (its shim's `drop((*_1))` given its own glue)
+    (let [norm-r (nth (chk/normalize (list 'llvm/define 'g/glue 'void '[[ptr %0] [ptr %1]] :body rustc-dyn-drop) {}) 4)
+          dyn-forms (body-forms (glue-body ptr-dyn "glue"))]
+      (check "C1: a trait object's drop is virtual (the vtable's drop_in_place, when not null), as std's IR"
+             (if (= norm-r dyn-forms) :equal [:differs dyn-forms]) :equal)
+      (check "C1 control: a sized pointee's drop calls its glue, not the vtable"
+             (let [sized (body-forms (glue-body (list 'ty "*mut std::string::String" (list 'ptr '(ty "std::string::String" (adt "std::string::String" [])) true)) "glue_string"))]
+               (if (= sized dyn-forms) [:equal] [:differs sized]))
+             :differs))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))
