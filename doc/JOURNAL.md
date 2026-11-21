@@ -13944,3 +13944,16 @@ not landed. The case inputs test/rust/{eval,aot}-inputs-linux-amd64.edn were han
   another job's 54 GB read), so that run was discarded and redone from the start.
 - Not run, at the user's word: `bin/rust-front essential`, `core-essential`, `rind-test`, `pack-compare-test` (the gate's) and
   `bin/gate`.
+
+## 2026-11-21: rust-c6-1120: merged rust-rec-1120; C1's first drop glue bug fixed; C6-4's core measure 114 of 275
+
+Merged mac/rust-rec-1120 (`cb959b09f`, the coordinator's instruction: std rebuilt at the pin, the pack rust-front-rsi re-made,
+`RSI_FRONT_DIR`, write-case-inputs per case; journal conflict kept both sides) as `a7ed67869`; test/crops/independence.edn's Rust
+eval text brought to its measured state (6 cases recorded by the runs, 0 of 6 own in all seven inputs; scores unchanged).
+C1's first bug: codegen called drop_glue::<dyn Any + Send> for a trait object's drop, whose shim drops `*_1`, so itself (unwind's
+and panics' stack overflows); now the drop is virtual as rustc_codegen_ssa's codegen_drop_terminator writes it for ty::Dynamic
+(the vtable's slot 0 loaded, called when not null), equal to std's IR's drop_glue::<dyn Error + Sync + Send> in pack-compare-test,
+with a control. C6-4: core's export again with the wanted #[inline(always)] callees (300 keys, 56 min): 114 of 275 items equal to
+std's IR (109 before), 34 callees inlined. The passes on the native names: core's (one round, 64 min) 25,396 of 27,498 facts
+equal (25,812 on the helper's names); alloc's and std's running. The C1 runs (std, vectors, unwind, panics on rust-rec's exports
+with RF_DROP_GLUE=1, needs_drop's unknowns traced) running.
