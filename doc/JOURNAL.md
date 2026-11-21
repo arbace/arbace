@@ -15604,3 +15604,14 @@ not among them; the likely cause is 498's constant-switch arm taken at the insta
 too), which rustc does not do before that pass. Every other step passed. The Rust line's merge is reverted here (its scores were
 unchanged, its paths are crops' and move no build key); it comes back by reverting this revert once rust-front-essential's body is
 fixed on the line (mac/rust-c6-1120).
+
+## 2026-11-21: the user's decisions on the last independence gaps
+
+Asked after main's consolidation (d0cdf3d7f; independence C++ 0.9482, Haskell 0.9898, Python 0.9996, Rust 0.8000, every other crop 1):
+- CC1P1 (a) (doc/cpp/CC1PLUS-SURVEY.md): a GCC C++ front end built and hosted by Arbace would be a reference only, the dg check's
+  judge, not C++'s own reader; C++'s read stage moves only by Arbace's own front end. No cc1plus build for independence.
+- Haskell: the 31 eval programs that run on neither side (28 GHC did not build: packages outside the boot libraries; 2 the testsuite
+  skips; T17920's Cmm main) count out of the judged cases, as the undefined and host-dependent cases do (the user's earlier rule).
+- Python: the 24 synth/ops programs queue 247 left on CPython's recorded runs (the arithmetic, bitwise and comparison tables over 15
+  operands) get models computing their tables exactly, reviewed against the Reference, so their verdicts are their own.
+- Resume now, lightly: one or two agents on this host, the Mac holding until the allowance resets.
