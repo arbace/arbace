@@ -15688,3 +15688,43 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-21: py-design-1122, round 1: the read cell's by-design classes own-mode, own-traceback and charset emptied
+
+Branch `py-design-1122` from mac/next 863bdaea1 (stream P2 of the burst: the by-design part of Python's cells). The read cell's
+64 by-design files were :code-lines 30 and :rejected 4 (the :lines round trip), and parse-check's :own-traceback 24, :own-mode 5
+and :charset 1 (the syntax-errors corpus, judged by each case's own verdict since queue 240). The last three could pass:
+- :own-mode (test_fstring's assertAllRaise, mode eval): arbace.repr.python.parsecheck's own verdict judged every expectation on
+  the file's exec-mode read. Now each expectation is judged on the error of its own mode: "eval" parses the source by the eval
+  rule after stripping its leading spaces and tabs (bltinmodule.c's builtin_eval_impl), "single" by the interactive rule (a
+  doctest's compile), exec and none by the file's read as before (arbace.repr.python.native/parse-source's modes).
+- :own-traceback (test_syntax's doctests expecting "invalid syntax. Did you mean 'for'?"): a doctest's expected line is
+  traceback.format_exception_only's, which runs TracebackException._find_keyword_typos (Lib/traceback.py of CPython 3.14.10,
+  the pinned tarball) over a SyntaxError whose message is "invalid syntax" or names a forgotten comma. Ported into the judge,
+  no code vendored: the failing statement's lines from the parser's _metadata (peg.ae's last statement), textwrap.dedent of
+  3.14.10, tokenize's NAME tokens (lex/stream with extra tokens), at most 10 non-keyword names, for each the candidates
+  _suggestions._generate_suggestions gives (Python/suggestions.c's _Py_CalculateSuggestions and levenshtein_distance over UTF-8,
+  MOVE_COST 2, CASE_COST 1) then difflib.get_close_matches(name, keyword.kwlist, 3, 0.5) (SequenceMatcher's matching blocks
+  without junk, the n largest (ratio, word) pairs), the first replacement that codeop.compile_command(code, symbol="exec",
+  flags=PyCF_ONLY_AST) accepts. Its _maybe_compile was read closely: when the code parses (ONLY_AST, incomplete-input flags),
+  the final compile without the caller's flags decides, so a symtable or code generation error refuses the candidate; that
+  final compile is pyi's own compiler (arbace.python.run's compile-uncached "exec"). The first try without it took
+  test_syntax-0082's "(mat x)" for "(await x)" ("Did you mean 'await'?"), which CPython refuses ("'await' outside function"):
+  with the final compile all 623 own-judged cases pass. keyword.kwlist is the reader's grammar's keywords sorted.
+- :charset (test_exceptions' case b'# -*- coding: iso8859-7 -*-\n\xe1 = 0xI'): jrt has ISO-8859-7 (overlay JrtCharsets);
+  the reader's codec table (lex/codec) did not name it. arbace.repr.python.native now adds iso8859_7 and its aliases of
+  encodings.aliases (more-codecs, consulted after lex/codec: a change to lex.ae makes stage 0 reload lex from the checkout
+  while the compiled peg keeps the old Lx type, a ClassCastException), and decode-error-text refuses its three undefined
+  bytes (0xAE, 0xD2, 0xFF, Lib/encodings/iso8859_7.py) with the charmap codec's message. The case decodes, its error is
+  "invalid hexadecimal literal" at 2:6, the position its test expects.
+A negative control for the typo port: test/python/controls-read.edn's syntax-errors-typo, test_syntax-0296 ("fur a in b",
+Did you mean 'for'?) judged against test_syntax-0297's expected "Did you mean 'else'?": fails as it must.
+Runs (gate executable 710e90e4771a10548878 as the host): bin/repr-python parse-check --no-mutants syntax-errors and --full:
+874 files, by their own verdict 623 (pass 623, fail 0), by the record 251 equal, both controls failing as they must; recorded
+with --record (both sections of the corpus, whole): parse-check-known.edn's syntax-errors section empty, 30 rows of
+parse-check-results.edn :known -> :pass. bin/reap --record: Python read 3,672 / 64 -> 3,702 / 34; bin/crops-score --record:
+Python completeness 0.9465 -> 0.9485; --judge --strict and bin/records-check: 0 problems. The emptied classes stay in
+test/python/divergences-read.edn with a note. Left in the read cell, decisions for the user: :code-lines 30 (the :lines
+print carries no lines, and CPython's code generation depends on them: level 3 can only pass by compiling a position-free
+ast, which is level 2 again) and :rejected 4 (deliberately bad files CPython rejects; the read gives CPython's class and
+message, which is each file's own test's verdict: they could count as passes, as parse-check's own-judged errors do).
