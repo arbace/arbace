@@ -106,6 +106,16 @@
                       (br/pack-compare (update-in o [:blocks 1 :stmts] conj '(assign (place 3) (ref :shared (place 4)))) r)) :differs)
       (check "negative: a copy of another type"
              (binding [br/*freeze-ty?* (constantly true)] (br/pack-compare (assoc-in o [:locals 4 :ty] us) r)) :differs))
+    ;; queue 498: NonNull<T> Freeze, its field a pattern type std's interface writes as text (slice::iter's next: `_10 = copy _2`
+    ;; propagated though `&_2` is taken)
+    (let [adt (fn [f] {:kind "Struct" :generics '[(type "T")] :variants [{:name "S" :path "S" :fields [["pointer" f]]}]})
+          fr (fn [f] (binding [c/*si* {:adts {"core::ptr::non_null::NonNull" (adt f)}}]
+                       (passes/freeze? [:adt "core::ptr::non_null::NonNull" [[:int "i32"]]])))]
+      (check "Freeze: NonNull's field `(*const T) is !null`, a raw pointer's pattern type" (fr '(text "(*const T) is !null")) true)
+      (check "Freeze: an integer's pattern type" (fr '(text "(u32) is 1..=4294967295")) true)
+      (check "Freeze: a pattern type's form, as its base" (passes/freeze? [:pat [:ptr false [:int "i32"]] "!null"]) true)
+      (check "negative: a field the interface writes as other text" (fr '(text "impl Fn()")) false)
+      (check "negative: a pattern over an UnsafeCell's text" (fr '(text "(UnsafeCell<u32>) is 0..")) false))
     ;; queue 493: a borrow through a deref is a use, not a borrow of the local (as_mut_ptr_range's `_3 = copy _1` with `&(*_1)`)
     (let [ms '(ty "&mut [i32]" (ref (ty "[i32]" (slice (ty "i32" (int "i32")))) true))
           ss '(ty "&[i32]" (ref (ty "[i32]" (slice (ty "i32" (int "i32")))) false))
@@ -389,6 +399,125 @@
              "T needs drop, the record has no shim of it")
       (check "negative: T needs no drop by mono, but the record has its shim" (ok? {:needs-drop false :symbol "_RS"} [(shim "u8" "_RS")]) false)
       (check "negative: mono refuses T (no symbol)" (ok? nil []) false))
+    ;; queue 498 (493-1 (b)): a body equal to the record's but whose drop runs no glue where the record's does (T needing drop)
+    ;; refused, [:differs WHY :drop], until rust-c6-1120's runtime-body writes the glue (*drop-glue-at-run?*: a plain local's)
+    (let [st '(ty "std::string::String" (adt "std::string::String" "DefId(5:1 ~ alloc[1234]::string::String)" []))
+          unit '(ty "()" (tuple))
+          dropb (fn [p g] {:args 1 :locals [{:ty unit} {:ty st}] :debug []
+                           :blocks [{:cleanup false :stmts [] :term (apply list (concat (list 'drop p 1 '(continue) false nil) (when (some? g) [g])))}
+                                    {:cleanup false :stmts [] :term '(return)}]})
+          glue '(glue {:symbol "_RINvNtCs_4core3ptr9drop_glueNtNtCs_5alloc6string6StringE"})
+          o (dropb '(place 1) nil) r (dropb '(place 1) glue)
+          no-run (fn [_] false)]
+      (check "drop glue: the record's drop runs glue, ours none: refused, waiting on rust-c6-1120"
+             (let [[k w d] (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare o r))] [k (boolean (re-find #"waiting on rust-c6-1120" w)) d])
+             [:differs true :drop])
+      (check "negative: the record's drop without glue (T needs no drop: the empty glue)"
+             (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare o (dropb '(place 1) nil))) [:equal])
+      (check "negative: the run writes a plain local's glue (rust-c6-1120's RF_DROP_GLUE=1)"
+             (binding [br/*drop-glue-at-run?* (fn [p] (= 2 (count p)))] (br/pack-compare o r)) [:equal])
+      (check "negative: ours carries the glue" (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare (dropb '(place 1) glue) r)) [:equal])
+      (check "drop glue: a projected place's drop stays refused under the run's plain-local glue"
+             (nth (binding [br/*drop-glue-at-run?* (fn [p] (= 2 (count p)))]
+                    (br/pack-compare (dropb '(place 1 (deref)) nil) (dropb '(place 1 (deref)) glue))) 2 nil)
+             :drop)
+      (check "negative: a body that differs otherwise keeps its own reason"
+             (binding [br/*drop-glue-at-run?* no-run] (br/pack-compare (assoc-in o [:locals 1 :ty] unit) r)) :differs))
+    ;; queue 498: SimplifyConstCondition's arms at the instance (prune-const-arms): slice::iter's `if T::IS_ZST` takes one arm, the
+    ;; dead arm's call (zst_shrink!'s unchecked_sub) neither closed nor emitted
+    (let [bt '(ty "bool" (bool))
+          k (fn [v] (list 'const (str "const " v) bt (list 'scalar (if v 1 0) 1)))
+          f (list 'const "dead" '(ty "fn() {dead}" (fndef "dead" [])) '(zst))
+          b (fn [op] {:args 0 :locals [{:ty '(ty "()" (tuple))} {:ty bt}] :debug []
+                      :blocks [{:cleanup false :stmts [(list 'assign '(place 1) (list 'use (k true)))] :term (list 'switch op [[0 2]] 1)}
+                               {:cleanup false :stmts [] :term '(return)}
+                               {:cleanup false :stmts [] :term (list 'call f [] '(place 0) 3 '(continue))}
+                               {:cleanup false :stmts [] :term '(return)}]})
+          pr (br/prune-const-arms (b '(move (place 1))))]
+      (check "SimplifyConstCondition at the instance: a one-use constant local's switch a goto, the dead arm unreachable"
+             (mapv :term (:blocks pr)) ['(goto 1) '(return) '(unreachable) '(unreachable)])
+      (check "the switch on the constant itself" (mapv :term (:blocks (br/prune-const-arms (b (k false))))) ['(goto 2) '(unreachable) (:term (nth (:blocks (b nil)) 2)) '(return)])
+      (check "the pruned body still equal to the record's after -O0's passes"
+             (first (br/pack-compare pr {:args 0 :locals [{:ty '(ty "()" (tuple))}] :debug [] :blocks [{:cleanup false :stmts [] :term '(return)}]}))
+             :equal-o0)
+      (check "negative: a switch on a local not constant unchanged" (let [x (assoc-in (b '(move (place 1))) [:blocks 0 :stmts] [])] (= x (br/prune-const-arms x))) true)
+      (check "negative: a local read twice is no one-use constant"
+             (let [x (update-in (b '(move (place 1))) [:blocks 1 :stmts] conj '(assign (place 0) (use (copy (place 1)))))] (= x (br/prune-const-arms x))) true))
+    ;; queue 503 (498-2 (a)): the run-time fallback per body. X (no record's twin) fails at run time: X left out, Y (no twin)
+    ;; naming X left out in turn, A (a twin) naming Y the record's; E (a twin) fails and is the record's alone, F naming E stays
+    ;; native, as do B and D (unrelated), G naming X by a function pointer's symbol left out
+    (let [body (fn [& syms] {:blocks (vec (for [s syms] {:stmts [] :term (list 'call '(const "f") [] '(place 0) 1 '(continue) (list 'callee {:kind "item" :symbol s}))}))})
+          es [{:symbol "a" :name "A" :twin? true :body (body "y")}
+              {:symbol "b" :name "B" :twin? true :body (body "core-ext")}
+              {:symbol "x" :name "X" :twin? false :body nil :error "no callee for p::precondition_check"}
+              {:symbol "y" :name "Y" :twin? false :body (body "x" "b")}
+              {:symbol "d" :name "D" :twin? false :body (body "b")}
+              {:symbol "e" :name "E" :twin? true :body nil :error "boom"}
+              {:symbol "f" :name "F" :twin? false :body (body "e")}
+              {:symbol "g" :name "G" :twin? true :body {:blocks [{:stmts ['(assign (place 1) (use (const "x" (ty "fn()") (zst) :fn-symbol "x")))] :term '(return)}]}}]
+          r (br/native-fallback es)]
+      (check "one failing body without a twin leaves the rest native: B, D, F kept" (mapv :name (:kept r)) ["B" "D" "F"])
+      (check "the lines: X and Y left out, A and G the record's (naming them), E the record's"
+             (sort (:lines r))
+             (sort ["native-dropped X (a native body failed at run time: no callee for p::precondition_check)"
+                    "record-kept E (a native body failed at run time: boom)"
+                    "native-dropped Y (names x, a native body left out (the record has no body of it))"
+                    "record-kept G (names x, a native body left out (the record has no body of it))"
+                    "record-kept A (names y, a native body left out (the record has no body of it))"]))
+      (check "negative: X with a record's twin drops nobody but X and E" (mapv :name (:kept (br/native-fallback (assoc-in es [2 :twin?] true)))) ["A" "B" "Y" "D" "F" "G"])
+      (check "negative: nothing failing keeps every body" (count (:kept (br/native-fallback (remove #(nil? (:body %)) es)))) 6))
+    ;; queue 503: a library closure as rustc prints another crate's closure (finish_grow's, an impl's method: print_def_path at
+    ;; the impl's arguments, A = Global a default left out; the struct's path def_path_str in value form), in a small interface
+    (let [si {:fns {"alloc::raw_vec::{impl#7}::finish_grow" {:generics [] :parent-count 1 :has-self false}
+                    "x::f" {:generics '[(type "M")] :parent-count 0 :has-self false}}
+              :impls {"alloc::raw_vec::{impl#7}" {:trait nil :self '(adt "alloc::raw_vec::RawVecInner" [(param 0 "A")]) :generics '[(type "A")] :parent-count 0}}
+              :adts {"alloc::raw_vec::RawVecInner" {:generics '[(type "A" (adt "alloc::alloc::Global" []))]}}}
+          sd {:generics {"alloc::raw_vec::RawVecInner" '[(type "A" (adt "alloc::alloc::Global" []))]}
+              :kinds {"alloc::raw_vec::RawVecInner" "Struct" "alloc::raw_vec" "Mod" "alloc::alloc::Global" "Struct" "x" "Mod" "x::f" "Fn"}}
+          cl (fn [p args] [:closure p [:fnsig [] [:tuple []]] args [:upvars] :fn-once])
+          g [[:adt "alloc::alloc::Global" []]]]
+      (binding [c/*si* si c/*std* sd]
+        (check "a library closure inside an impl's method: rustc's text and struct path"
+               (c/lib-closure-print (cl "alloc::raw_vec::{impl#7}::finish_grow::{closure#0}" g))
+               ["alloc::raw_vec::RawVecInner::finish_grow" "alloc::raw_vec::RawVecInner::<A>::finish_grow" "{closure#0}"])
+        (check "its type's text, the record's" (binding [c/*in-value* false] (c/print-ty (cl "alloc::raw_vec::{impl#7}::finish_grow::{closure#0}" g)))
+               "{closure@alloc::raw_vec::RawVecInner::finish_grow::{closure#0}}")
+        (check "a free function's closure keeps its parent's arguments (begin_panic<u64>'s)"
+               (binding [c/*in-value* false] (c/print-ty (cl "x::f::{closure#0}" [[:uint "u64"]]))) "{closure@x::f<u64>::{closure#0}}")
+        (check "negative: the parent's path with its arguments appended (464's text) is not rustc's"
+               (let [[pp seg] (c/lib-closure-path (cl "alloc::raw_vec::{impl#7}::finish_grow::{closure#0}" g))] (= (str pp "<std::alloc::Global>::" seg) "alloc::raw_vec::RawVecInner::finish_grow::{closure#0}"))
+               false)))
+    ;; queue 503: a library closure's aggregate as the instance writes it (closure-aggregates): the built `(closure TEXT []
+    ;; NAMES SPAN)` the struct of its local's type
+    (let [st '(closure "a::f::{closure#0}" [(ty "i32" (int "i32"))])
+          b (fn [lty] {:locals [{:ty '(ty "()" (tuple))} {:ty lty}]
+                       :blocks [{:stmts ['(assign (place 1) (aggregate (closure "{closure@a.rs:1:2: 1:5}" [] ["n"] "a.rs:1:2: 1:5") [(move (place 2))]))] :term '(return)}]})]
+      (check "a library closure's aggregate takes its local's struct"
+             (first (:stmts (first (:blocks (br/closure-aggregates (b (list 'ty "{closure@a::f::{closure#0}}" st)))))))
+             (list 'assign '(place 1) (list 'aggregate (list 'closure (second st) (nth st 2) nil "a.rs:1:2: 1:5") '[(move (place 2))])))
+      (check "negative: a program's closure (typeck's text in the local's struct) stays"
+             (let [x (b '(ty "{closure@a.rs:1:2: 1:5}" (closure "{closure@a.rs:1:2: 1:5}" [] ["n"] "a.rs:1:2: 1:5")))] (= x (br/closure-aggregates x))) true))
+    ;; queue 503: alloc's own Box (a local def id while alloc's bodies are built for its export) is Box: its deref builtin
+    (check "std's Box is Box" (c/box-adt? "alloc::boxed::Box") true)
+    (check "negative: another ADT is not" (c/box-adt? "alloc::vec::Vec") false)
+    (check "negative: a local def id outside a crate's definitions is not" (c/box-adt? 4) false)
+    ;; queue 503: a crate-private trait impl the run's interface takes, indexed under its trait for selection
+    (let [si (c/add-iface-impl {} "a::f::{impl#1}" {:trait '(trait "a::f::ConvertVec" [(param 0 "T")]) :self '(param 0 "T") :generics '[(type "T")]})]
+      (check "a body's trait impl indexed under its trait (a blanket impl)" [(get (:trait-impls si) "a::f::ConvertVec") (get-in si [:trait-impls-by "a::f::ConvertVec" :blanket])]
+             [["a::f::{impl#1}"] ["a::f::{impl#1}"]])
+      (check "negative: an inherent impl is no trait's candidate"
+             (let [s (c/add-iface-impl {} "a::{impl#0}" {:trait nil :self '(adt "a::S" [])})] [(:trait-impls s) (get-in s [:inherent "a::S"])])
+             [nil ["a::{impl#0}"]]))
+    ;; queue 503: specialization between impls of the same header by their where clauses (slice::cmp's SlicePartialEq: the
+    ;; BytewiseEq<B> impl's clause entails the PartialEq<B> one's through BytewiseEq's supertrait, not the other way)
+    (let [si {:impls {"c::{impl#4}" {:predicates '[(trait "core::marker::Sized" [(param 0 "A")]) (trait "core::cmp::PartialEq" [(param 0 "A") (param 1 "B")])]}
+                      "c::{impl#5}" {:predicates '[(trait "core::marker::Sized" [(param 0 "A")]) (trait "c::BytewiseEq" [(param 0 "A") (param 1 "B")])]}
+                      "c::{impl#6}" {:predicates '[(trait "c::Other" [(param 0 "A") (param 1 "B")])]}}
+              :traits {"c::BytewiseEq" {:predicates '[(trait "core::marker::Sized" [(param 0 "Self")]) (trait "core::cmp::PartialEq" [(param 0 "Self") (param 1 "Rhs")])]}}}
+          ent? (fn [a b] (binding [c/*si* si] (#'tc/clauses-entail? a b)))]
+      (check "the BytewiseEq impl's clauses entail the PartialEq impl's (its supertrait)" (ent? "c::{impl#5}" "c::{impl#4}") true)
+      (check "negative: the PartialEq impl's do not entail the BytewiseEq impl's" (ent? "c::{impl#4}" "c::{impl#5}") false)
+      (check "negative: an unrelated trait's clause entails neither" [(ent? "c::{impl#6}" "c::{impl#4}") (ent? "c::{impl#4}" "c::{impl#6}")] [false false]))
     ;; the negative cases: what -O0's passes do not explain
     (check "negative: another operand" (br/pack-compare (assoc-in ours [:blocks 0 :term] (list 'call callee '[(const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))] '(place 0) 1 '(unreachable))) rec) :differs)
     (check "negative: a local's type" (br/pack-compare (assoc-in ours [:locals 1 :ty] u8) rec) :differs)

@@ -87,6 +87,25 @@
            :vpm {"std" (visible-parent-map (:mods acc) (:hidden acc) (:hidden-re acc) ["std"])
                  "core" (visible-parent-map (:mods acc) (:hidden acc) (:hidden-re acc) ["core"])})))
 
+(defn add-iface-impl
+  "SI (an interface, load-std-iface's) with the impl P (its facts M) and its indices: by its self type's key, inherent or
+  under its trait (queue 503: also the run's crate-private impls, build-run's with-extra-iface)"
+  [acc p m]
+  (let [self (:self m)
+        k (case (head self) adt (nth self 1) prim (str "prim:" (second self)) slice "prim:slice" array "prim:array"
+                ref "prim:ref" ptr "prim:ptr" param "param" tuple "prim:tuple"
+                ;; RF9b: a trait object's inherent impls by its principal
+                dyn (str "dyn:" (let [pr (nth self 1)] (when (seq? pr) (nth pr 1))))
+                (str "other:" (head self)))
+        acc (assoc-in acc [:impls p] m)]
+    ;; a negative impl (`impl !Iterator for [T]`) is no candidate
+    (cond (:negative m) acc
+          ;; the trait's impls by their self type's key (a parameter's: :blanket), for selection
+          (:trait m) (-> acc
+                         (update-in [:trait-impls (nth (:trait m) 1)] (fnil conj []) p)
+                         (update-in [:trait-impls-by (nth (:trait m) 1) (if (= k "param") :blanket k)] (fnil conj []) p))
+          :else (update-in acc [:inherent k] (fnil conj []) p))))
+
 (defn load-std-iface
   "std's interface for type checking from the helper's --std-iface (RF9): {:adts {PATH m} :traits {PATH m} :impls {PATH m}
   :fns {PATH m} :inherent {ADT-or-prim-key [impl ...]} :trait-impls {TRAIT [impl ...]}}"
@@ -102,21 +121,7 @@
              si/trait (assoc-in acc [:traits (second x)] (nth x 2))
              si/fn (assoc-in acc [:fns (second x)] (nth x 2))
              si/const (assoc-in acc [:consts (second x)] (nth x 2))
-             si/impl (let [[_ p m] x
-                           self (:self m)
-                           k (case (head self) adt (nth self 1) prim (str "prim:" (second self)) slice "prim:slice" array "prim:array"
-                                   ref "prim:ref" ptr "prim:ptr" param "param" tuple "prim:tuple"
-                                   ;; RF9b: a trait object's inherent impls by its principal
-                                   dyn (str "dyn:" (let [pr (nth self 1)] (when (seq? pr) (nth pr 1))))
-                                   (str "other:" (head self)))
-                           acc (assoc-in acc [:impls p] m)]
-                       ;; a negative impl (`impl !Iterator for [T]`) is no candidate
-                       (cond (:negative m) acc
-                             ;; the trait's impls by their self type's key (a parameter's: :blanket), for selection
-                             (:trait m) (-> acc
-                                            (update-in [:trait-impls (nth (:trait m) 1)] (fnil conj []) p)
-                                            (update-in [:trait-impls-by (nth (:trait m) 1) (if (= k "param") :blanket k)] (fnil conj []) p))
-                             :else (update-in acc [:inherent k] (fnil conj []) p)))
+             si/impl (let [[_ p m] x] (add-iface-impl acc p m))
              acc)))))))
 
 (def ^:dynamic *std* {})
@@ -129,6 +134,14 @@
 (defn path-name [^String p] (let [i (.lastIndexOf p "::")] (if (neg? i) p (subs p (+ i 2)))))
 (defn- ext-kind [p] (get (:kinds *std*) p))
 (defn lang [nm] (get (:lang *std*) nm))
+
+(declare def-of)
+(defn box-adt?
+  "queue 503: D (an ADT's def) is Box: std's `alloc::boxed::Box`, or the crate's own `#[lang = \"owned_box\"]` (alloc's Box
+  while alloc's bodies are built for its export: a local def id), whose deref is builtin (no Deref call)"
+  [d]
+  (or (= "alloc::boxed::Box" d)
+      (boolean (and (number? d) (try (some #(= "Lang(OwnedBox)" (:parsed %)) (:attrs (:node (def-of d)))) (catch Throwable _ nil))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types (rustc_middle::ty as data)
@@ -1437,6 +1450,24 @@
       (let [i (.lastIndexOf ^String p "::") parent (subs p 0 i) seg (subs p (+ i 2))]
         [(or (try (binding [*in-value* false] (print-def-path parent [])) (catch Throwable _ nil)) parent) seg]))))
 
+(declare print-def-path)
+
+(defn lib-closure-print
+  "queue 503: a library closure type's data (lib-closure-path's) printed as rustc prints another crate's closure: its text's
+  parent `print_def_path(PARENT, PARENT-ARGS)` (an impl's method at its self type's arguments, defaults left out:
+  `{closure@alloc::raw_vec::RawVecInner::finish_grow::{closure#0}}`, `{closure@std::vec::Vec<i32>::extend_trusted<I>::..}`), its
+  struct's path `def_path_str` in value form (`alloc::raw_vec::RawVecInner::<A>::finish_grow::{closure#0}`); [TEXT-PARENT
+  STRUCT-PARENT SEG], each falling back to lib-closure-path's parent (the text's with the arguments appended)"
+  [t]
+  (when-let [[pp seg] (lib-closure-path t)]
+    (let [p (second t) parent (subs p 0 (.lastIndexOf ^String p "::"))
+          args (vec (nth t 3))
+          targs (remove region? args)
+          old (str pp (when (seq targs) (str "<" (str/join ", " (map print-ty targs)) ">")))]
+      [(or (try (binding [*in-value* false] (print-def-path parent args)) (catch Throwable _ nil)) old)
+       (or (try (binding [*in-value* true] (print-def-path parent [])) (catch Throwable _ nil)) pp)
+       seg])))
+
 (defn print-def-path
   "print_def_path DEF ARGS"
   [def args]
@@ -1571,11 +1602,11 @@
              ;; `for<'a> fn(&'a (dyn Any + 'static)) -> bool {<(dyn Any + 'static)>::is::<u32>}`)
              (str pre (binding [*sig-static* true] (print-sig sig)) " {" (binding [*in-value* true *sig-static* false] (print-def-path d args)) "}"))
     :infer (case (second t) :int "{integer}" :float "{float}" "_")
-    :closure (if-let [[pp seg] (lib-closure-path t)]
+    :closure (if-let [[tp _ seg] (lib-closure-print t)]
                ;; queue 464: a library closure (the export's data) as rustc prints another crate's closure: its path at its
-               ;; parent's type arguments, `{closure@std::rt::begin_panic<u64>::{closure#0}}`
-               (let [targs (remove region? (nth t 3))]
-                 (str "{closure@" pp (when (seq targs) (str "<" (str/join ", " (map print-ty targs)) ">")) "::" seg "}"))
+               ;; parent's type arguments, `{closure@std::rt::begin_panic<u64>::{closure#0}}` (queue 503: print_def_path's, an
+               ;; impl's method at its self type's arguments, lib-closure-print)
+               (str "{closure@" tp "::" seg "}")
                (second t))
     :unknown "{unknown}"
     :err (str "{" (second t) "}")

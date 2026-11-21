@@ -737,7 +737,8 @@
                             nil))))
         ;; a body's ADT named by its def path (an impl's self type); its traits, functions and the ADT's own fact not
         path-of (fn [id] (or (get rev id)
-                             (when (and (number? id) (#{"Struct" "Enum" "Union"} (:kind (collect/def-of id)))) (body-path id))
+                             ;; queue 498: and a body's trait (to_vec_in's `ConvertVec`, its impls' trait)
+                             (when (and (number? id) (#{"Struct" "Enum" "Union" "Trait"} (str (:kind (collect/def-of id))))) (body-path id))
                              ;; queue 417: a return-position impl Trait by its def path, `FN::{opaque#N}`
                              (when (and (number? id) (= "OpaqueTy" (:kind (collect/def-of id))))
                                (let [od (collect/def-of id)] (some-> (body-path (:parent od)) (str "::{opaque#" (:disamb od) "}"))))))]
@@ -745,7 +746,12 @@
      (fn [acc d]
        ;; C6-4 (a): an ADT defined inside a function's body (btree::mem::replace's `PanicGuard`, flush_buf's `BufGuard`) by its
        ;; def path, as rustc's interface names it; local-paths names module items alone
-       (let [p (or (get rev (:id d)) (when (#{"Struct" "Enum" "Union"} (str (:kind d))) (body-path (:id d))))]
+       (let [p (or (get rev (:id d))
+                   ;; queue 498: a function defined inside a body (raw_vec's `RawVecInner::reserve`'s `do_reserve_and_handle`) by
+                   ;; its def path, as an impl inside a body is: its signature written, so that a call of it prints as rustc's
+                   ;; (`for<'a> unsafe fn(..) {..::reserve::do_reserve_and_handle::<Global>}`, not `{no sig ..}`)
+                   ;; and a trait defined inside a body (to_vec_in's `ConvertVec`), its items and signatures
+                   (when (#{"Struct" "Enum" "Union" "Fn" "Trait"} (str (:kind d))) (body-path (:id d))))]
          (try
            (cond
              ;; RFP52 (a): an impl the interface lacks (an inherent impl of crate-private methods: `IndexRange`'s `start`,
@@ -1397,7 +1403,35 @@
                 ;; from them (`fn() -> bool {core::ub_checks::check_language_ub}`, not `{no sig ..}`)
                 nat @native-all
                 ;; (rust-rec-1120: with-private-facts, C6-4 (a)'s, which carries these and the ADTs and enclosing functions too)
-                with-facts (fn [e] (if-not (:body e) e (with-private-facts e nat si-full)))
+                with-facts (fn [e]
+                             (if-not (:body e)
+                               e
+                               (let [e (with-private-facts e nat si-full)
+                                     si si-full
+                                     ts (or (:traits e) {})
+                                     ;; queue 503: such a trait's impls (slice::cmp's SlicePartialEq: the PartialEq one and its
+                                     ;; BytewiseEq specialization) with their methods' facts, so that the run selects the impl a
+                                     ;; call resolves to (as lib-export's entries, alloc-check)
+                                     impls-of (fn [trs] (into {} (for [[p m] (:impls nat)
+                                                                       :when (and (sequential? (:trait m)) (contains? trs (nth (:trait m) 1)) (not (get-in si [:impls p])))]
+                                                                   [p (dissoc m :native)])))
+                                     tis (impls-of ts)
+                                     ;; and the crate-private traits their where clauses name (the specialization's
+                                     ;; `A: BytewiseEq<B>`), with those traits' impls, so that selection proves them
+                                     pts (into {} (for [[_ m] tis pr (:predicates m)
+                                                        :when (and (seq? pr) (= 'trait (first pr)))
+                                                        :let [tp (second pr) tm (get-in nat [:traits tp])]
+                                                        :when (and tm (not (get-in si [:traits tp])) (not (contains? ts tp)))]
+                                                    [tp (dissoc tm :native)]))
+                                     tis (merge (impls-of pts) tis)
+                                     ts (merge pts ts)
+                                     is (merge tis (:impls e))
+                                     fs (merge (into {} (for [[_ m] tis [_ k fp] (:items m)
+                                                              :let [f (when (= "AssocFn" k) (get-in nat [:fns fp]))]
+                                                              :when (and f (not (get-in si [:fns fp])))]
+                                                          [fp (dissoc f :native)]))
+                                               (:fns e))]
+                                 (cond-> e (seq fs) (assoc :fns fs) (seq is) (assoc :impls is) (seq ts) (assoc :traits ts)))))
                 all (concat (remove #(new-keys (:key %)) old) (map with-facts @exported))]
             (spit ef (binding [*print-meta* true] (with-out-str (doseq [e all] (prn (list 'core/body e)))))))
           (println "core-check: exported" (count @exported) "bodies," (count (filter :equal @exported)) "equal to rustc's built MIR, to" ef))

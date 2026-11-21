@@ -813,8 +813,15 @@
                      (into {} (for [p (keys fs) :let [pp (c/path-parent p)]
                                     :when (and pp (or (contains? traits pp) (= "Trait" (get (:kinds std) pp))))]
                                 [p "AssocFn"])))]
-    [(-> si (update :fns #(merge fs %)) (update :impls #(merge impls %)) (update :traits #(merge traits %)) (update :adts #(merge adts %)))
-     (update std :kinds #(merge kinds %))]))
+    [(as-> si si (update si :fns #(merge fs %)) (update si :traits #(merge traits %)) (update si :adts #(merge adts %))
+       ;; queue 503: a crate-private trait impl (to_vec_in's ConvertVec impls) indexed under its trait too, so that selection
+       ;; (resolve-call) finds it; the other impls for their printing alone, as before
+       (reduce (fn [si [p m]] (if (sequential? (:trait m)) (c/add-iface-impl si p m) (assoc-in si [:impls p] m)))
+               si (remove (fn [[p _]] (contains? (:impls si) p)) impls)))
+     ;; queue 503: and the traits' generics, which a trait's own path prints its arguments by (ext-generics: `<u8 as
+     ;; core::slice::cmp::SlicePartialEq<u8>>::equal_same_length`, the crate-private trait's B)
+     (-> std (update :kinds #(merge kinds %))
+         (update :generics #(merge (into {} (for [[p m] traits :when (seq (:generics m))] [p (vec (:generics m))])) %)))]))
 
 (defn- builtin-normalize
   "The builtin projections an instance's types name once their parameters are known: <T as Pointee>::Metadata (the
@@ -1110,6 +1117,55 @@
     :tuple (every? generic-zst? (second g))
     false))
 
+(declare o0-single-use-consts o0-simplify-const-condition strip-storage)
+
+(defn prune-const-arms
+  "queue 498: BODY with SimplifyConstCondition's folds (simplify_branches.rs, -O0): a switch whose operand is a constant scalar,
+  directly or through SingleUseConsts' one-use local (`_t = const C; switchInt(move _t)`), made a goto to the arm its value
+  selects, and every block no longer reachable from the start made `unreachable` with no statements (the block indices kept,
+  SimplifyCfg's remove_dead_blocks left to the compare's o0-normalize); BODY itself when no switch folds"
+  [body]
+  (let [blocks (:blocks body)
+        [sb _] (o0-single-use-consts (update body :blocks (fn [bs] (mapv #(update % :stmts strip-storage) bs))))
+        [cb _] (o0-simplify-const-condition sb)
+        folded (set (for [i (range (count blocks))
+                          :let [t (:term (nth blocks i)) t2 (:term (nth (:blocks cb) i))]
+                          :when (and (seq? t) (= 'switch (first t)) (seq? t2) (= 'goto (first t2)))]
+                      i))]
+    (if (empty? folded)
+      body
+      (let [succ @(requiring-resolve 'arbace.rust.front.passes/successors)
+            term (fn [i] (if (folded i) (:term (nth (:blocks cb) i)) (:term (nth blocks i))))
+            live (loop [stack [0] seen #{}]
+                   (if-let [i (peek stack)]
+                     (if (or (seen i) (not (< -1 i (count blocks))))
+                       (recur (pop stack) seen)
+                       (recur (into (pop stack) (succ (term i))) (conj seen i)))
+                     seen))]
+        (assoc body :blocks (vec (map-indexed (fn [i b] (cond (not (live i)) (assoc b :stmts [] :term '(unreachable))
+                                                              (folded i) (assoc b :term (term i))
+                                                              :else b))
+                                              blocks)))))))
+
+(defn closure-aggregates
+  "queue 503: a library closure's aggregate as rustc's MIR of the instance writes it: the built body's `(closure TEXT []
+  UPVAR-NAMES SPAN)` (typeck's `{closure@FILE:L:C: L:C}`, the generic body's) made the struct of its destination local's
+  type at the instance, `(closure DEF-PATH [PARENT-ARGS.. KIND SIG UPVARS] nil SPAN)` (build's lib-closure-form, the record's
+  aggregate, the span the built one's); one whose local's type is no library closure's struct stays"
+  [b]
+  (let [st (fn [p] (when (and (seq? p) (= 'place (first p)) (= 2 (count p)))
+                     (let [t (:ty (nth (:locals b) (second p) nil)) s (when (seq? t) (nth t 2 nil))]
+                       (when (and (seq? s) (= 'closure (first s)) (= 3 (count s)) (string? (second s)) (not (str/starts-with? (second s) "{closure@")))
+                         s))))
+        fix (fn [x] (if (and (seq? x) (= 'assign (first x)))
+                      (let [[_ p rv] x]
+                        (if-let [s (and (seq? rv) (= 'aggregate (first rv)) (seq? (second rv)) (= 'closure (first (second rv)))
+                                        (= 5 (count (second rv))) (st p))]
+                          (with-meta (list 'assign p (apply list 'aggregate (list 'closure (second s) (nth s 2) nil (nth (second rv) 4)) (drop 2 rv))) (meta x))
+                          x))
+                      x))]
+    (update b :blocks (fn [bs] (mapv (fn [blk] (update blk :stmts (fn [ss] (mapv fix ss)))) bs)))))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
@@ -1133,9 +1189,13 @@
     ;; rustc's optimized_mir's (the record's: `_n = PtrMetadata(copy _s)` where the built body calls `<[T]>::len`, str::len's and
     ;; every slice method's), as runtime-body lowers the program's own bodies: the instance is our lowering of what codegen
     ;; takes, so the call is gone before the compare and before its callees are closed (slice_len_fn has no native body)
+    ;; queue 498: then SimplifyConstCondition's arms (prune-const-arms): a switch on a constant the instance knows (`T::IS_ZST`)
+    ;; takes its one arm, as rustc's -O0 MIR of the instance does, so the dead arm's callees (slice::iter's zst_shrink!'s
+    ;; `unchecked_sub`) are neither closed nor emitted
     {:def (:def entry) :args args :body (cond-> (let [lb ((requiring-resolve 'arbace.rust.front.passes/lower-intrinsics)
                                                           (remap-const-eval-select (assoc b :promoted-bodies (into {} (for [[i pb] (:promoted entry)] [i (reprint pb args)])))))]
-                                                  (update lb :blocks lower-slice-len-calls))
+                                                  ;; queue 503: a library closure's aggregate as the instance writes it
+                                                  (closure-aggregates (prune-const-arms (update lb :blocks lower-slice-len-calls))))
                                           (seq zst) (assoc :zst-locals zst))})))
 
 (defn- drop-shim-body
@@ -1513,7 +1573,7 @@
     (if-let [[x y] (first (remove (fn [[x y]] (= x y)) (map vector a b)))] (first-diff x y) [a b])
     [a b]))
 
-(defn pack-compare
+(defn- pack-compare*
   "OURS (an instance's runtime MIR) against REC (the record's optimized body at -O0): [:equal], [:equal-but-storage] (equal once
   StorageLive, StorageDead and Nop are dropped: -O0's RemoveStorageMarkers), [:equal-o0 KINDS] (queue 443: equal once both are
   through o0-normalize: the -O0 passes our runtime MIR stops before, named), else [:differs WHERE] (after the normalization).
@@ -1620,6 +1680,38 @@
 
 (def ^:private pack-equal? #{:equal :equal-but-storage :equal-o0})
 
+(def ^:dynamic *drop-glue-at-run?*
+  "queue 498 (493-1 (b)): whether the run's runtime-body writes a drop of place P with its glue (drop_glue::<T>), a function of
+  the place form: rust-c6-1120's C6-4 (a) writes it with RF_DROP_GLUE=1, for a plain local's drop alone; without it every drop
+  of a native body is a plain branch, nothing dropped"
+  (fn [p] (and (= "1" (System/getenv "RF_DROP_GLUE")) (seq? p) (= 2 (count p)))))
+
+(defn- glue-of [t] (let [g (nth t 6 nil)] (when (and (seq? g) (= 'glue (first g))) g)))
+
+(defn drop-glue-missing
+  "queue 498 (493-1 (b)): the first of REC's drop terminators that runs drop glue (`(glue {:symbol ..})`, T needing drop) where
+  OURS runs none (our forms carry no glue, and *drop-glue-at-run?* says the run's runtime-body will not write it), as a
+  refusal's reason; else nil. A body equal to the record's but for that would drop nothing where rustc drops T"
+  [ours rec]
+  (let [drops (fn [b] (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'drop (first t)))] t))
+        rg (filter glue-of (drops rec))]
+    (when (seq rg)
+      (let [og (count (filter glue-of (drops ours)))
+            miss (remove #(*drop-glue-at-run?* (second %)) rg)]
+        (when (and (seq miss) (< og (count rg)))
+          (let [t (first miss)]
+            (str "the record's drop of " (pr-str (second t)) " runs drop glue " (:symbol (second (glue-of t)))
+                 ", ours none (the record's drops with glue: " (count rg) "; waiting on rust-c6-1120's drop glue)")))))))
+
+(defn pack-compare
+  "pack-compare* (below), and (queue 498, 493-1 (b)) a body equal to the record's but whose drops run no glue where the
+  record's do (drop-glue-missing) refused: [:differs WHY :drop]"
+  [ours rec]
+  (let [r (pack-compare* ours rec)]
+    (if-let [w (and (pack-equal? (first r)) (drop-glue-missing ours rec))]
+      [:differs w :drop]
+      r)))
+
 (defn- why
   "queue 474: a refusal's reason, its message, else (an exception without one: std::panicking::catch_unwind's root was kept
   with `()`) its class and first frame (queue 479: RF_WHY_TRACE=1 prints its first 40 frames to stderr, the batch's log)"
@@ -1635,6 +1727,10 @@
 (def ^:dynamic *drop-glue-ok?*
   "queue 483: within a run, whether a native library instance may call drop_glue::<T> (T concrete): the run's (native-run),
   nil elsewhere (such a body stays the record's)"
+  nil)
+
+(def ^:dynamic *drop-needs?*
+  "queue 498 (493-1 (b)): within a run, whether a concrete type needs drop (mono's needs_drop), nil elsewhere"
   nil)
 
 (defn- drop-glue-ok-fn
@@ -1657,6 +1753,36 @@
                                :else (str "T needs drop, the record's shim is " (:symbol r) ", mono's " symbol))
               r "T needs no drop, the record has its shim"
               :else true)))))
+
+(defn native-fallback
+  "queue 503 (498-2 (a)): the run-time fallback per body. ENTRIES [{:symbol :name :twin? :body :error :what}], each native body
+  made a runtime body (:body) or not (:body nil, :error why; :what the failure's words); :twin? when the record has a body of
+  its symbol. A failing body with a twin is the record's (`record-kept`); one without (an instance the closure reached that the
+  record lacks) is left out (`native-dropped`), and every native body naming its symbol (a call's callee, a function pointer)
+  left out in turn, the record's when it has a twin, else left out and its namers in turn (as codegen's fallback, back/check.ae).
+  The program's own and the record's bodies name no such symbol: rustc calls only an instance it defines (a twin) or an
+  upstream one, which the module does not define either way. {:kept [entry] :lines [..]}, the kept in ENTRIES' order"
+  [entries]
+  (let [lines (atom [])
+        line (fn [e why] (swap! lines conj (str (if (:twin? e) "record-kept " "native-dropped ") (:name e) " (" why ")")))
+        failed (filter #(nil? (:body %)) entries)
+        _ (doseq [e failed] (line e (str (or (:what e) "a native body failed at run time") ": " (:error e))))
+        missing (set (keep #(when-not (:twin? %) (:symbol %)) failed))
+        ok (remove #(nil? (:body %)) entries)
+        dropped (if (empty? missing)
+                  #{}
+                  (let [cands (set (keep #(when-not (:twin? %) (:symbol %)) entries))
+                        refs (into {} (for [e ok] [(:symbol e) (set (filter #(and (string? %) (cands %)) (tree-seq coll? seq (:body e))))]))]
+                    (loop [missing missing dropped #{}]
+                      (let [more (for [e ok :when (not (dropped (:symbol e)))
+                                       :let [u (first (filter missing (sort (disj (get refs (:symbol e)) (:symbol e)))))] :when u]
+                                   [e u])]
+                        (if (empty? more)
+                          dropped
+                          (do (doseq [[e u] more] (line e (str "names " u ", a native body left out (the record has no body of it)")))
+                              (recur (into missing (keep (fn [[e _]] (when-not (:twin? e) (:symbol e))) more))
+                                     (into dropped (map (comp :symbol first) more)))))))))]
+    {:kept (vec (remove #(dropped (:symbol %)) ok)) :lines @lines}))
 
 (defn native-core-plan
   "Within the run's bindings: for the record's core bodies ROOTS ([[record-body def args]]), each taken natively with the
@@ -1703,6 +1829,22 @@
                                   (throw (ex-info (str "a call of drop glue (a shim, the record's): T "
                                                        (try (binding [c/*in-value* false] (c/print-ty (first (nth ft 2)))) (catch Throwable _ "?"))
                                                        ", " ok) {})))))
+                          ;; queue 498 (493-1 (b)): a core-judged callee (no record's body it is compared with) whose drop drops a
+                          ;; type that needs drop: ours runs no glue there (*drop-glue-at-run?*), so it stays the record's, waiting
+                          ;; on rust-c6-1120's drop glue (a place whose type is not known is refused too)
+                          _ (when (and *drop-needs?* (seq seen) (not= :instance (:judge e)))
+                              (doseq [blk (:blocks (:body inst)) :let [t (:term blk)]
+                                      :when (and (seq? t) (= 'drop (first t)) (nil? (glue-of t)) (not (*drop-glue-at-run?* (second t))))]
+                                (let [p (second t)
+                                      ty (try (if (= 2 (count p))
+                                                (:tc (meta (:ty (nth (:locals (:body inst)) (second p)))))
+                                                (mono/form->ty ((requiring-resolve 'arbace.rust.front.passes/place-ty-form) (:body inst) p)))
+                                              (catch Throwable _ nil))
+                                      nd (when ty (try (*drop-needs?* ty) (catch Throwable _ nil)))]
+                                  (when-not (false? nd)
+                                    (throw (ex-info (str "a drop of " (if ty (try (binding [c/*in-value* false] (c/print-ty ty)) (catch Throwable _ (pr-str p))) (pr-str p))
+                                                         (if (nil? nd) ", its need of drop not known" ", which needs drop")
+                                                         ": ours runs no drop glue (waiting on rust-c6-1120's)") {}))))))
                           ;; queue 443: an instance-judged callee taken only when equal to one of the record's bodies of its def
                           _ (when (and (= :instance (:judge e)) (seq seen))
                               (let [rs (get rec-by-path def)
@@ -1713,6 +1855,16 @@
                                                        (when-let [w (second (or hit (first ks)))] (str " (" w ")"))))
                                 (when-not hit (throw (ex-info (str def " differs from the record's instance: " (second (first ks))) {})))))
                           rec-has? (fn [cd] (or (contains? rec-defs (mono/print-path cd)) (contains? rec-by-path cd)))
+                          ;; queue 498: a call of a crate-private `precondition_check` (assert_unsafe_precondition!'s, inside
+                          ;; ptr::read, ptr::write, <*mut T>::add) that no export has a body of and the record has none of
+                          ;; either: the run finds no callee for it (runtime-body's failure, which for an instance without a
+                          ;; record's twin drops every native body of the program), so the instance stays the record's, waiting on
+                          ;; 479-2's core export
+                          _ (doseq [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when ft
+                                    :let [cd (second ft)]
+                                    :when (and (string? cd) (str/ends-with? cd "::precondition_check") (not (get nc cd))
+                                               (not (mono/intrinsic? cd)) (not (rec-has? cd)))]
+                              (throw (ex-info (str "no callee for " cd " (a crate-private precondition check no export has a body of; waiting on 479-2's core export)") {})))
                           seen (conj seen [def args])
                           more (for [blk (:blocks (:body inst)) :let [ft (call-of (:term blk))] :when ft
                                      :let [[_ cd0 cargs0] ft
@@ -1741,12 +1893,16 @@
               (let [crate (first (str/split (str def) #"::"))
                     inst? (= :instance (:judge (get nc def)))]
               (try (let [[root & extra] (close def (vec args) #{})
-                         [k w] (try (pack-compare (:body root) rec) (catch Throwable e [:differs (str "the compare: " (.getMessage e))]))]
+                         [k w drop?] (try (pack-compare (:body root) rec) (catch Throwable e [:differs (str "the compare: " (.getMessage e))]))]
                      (swap! lines conj (str (if inst? (str "pack-compare-" crate) "pack-compare") " " (name k) " " (:name rec) (when w (str " (" w ")"))))
                      (swap! pairs conj [root rec inst?])
                      ;; queue 443: an instance-judged body is taken only when it equals the record's instance (up to -O0's passes)
                      (when (and inst? (not (pack-equal? k)))
                        (throw (ex-info (str "differs from the record's instance: " w) {})))
+                     ;; queue 498 (493-1 (b)): a core-judged root (taken whatever the compare says) too, when the record's
+                     ;; body drops with glue where ours drops nothing
+                     (when-let [dw (and (not inst?) (or (when (= :drop drop?) w) (drop-glue-missing (:body root) rec)))]
+                       (throw (ex-info dw {})))
                      (swap! lines conj (str "native " (:name rec) (if inst?
                                                                     (str " (" crate "'s body built by Arbace, equal to the record's instance")
                                                                     " (core's body built by Arbace, equal to rustc's built MIR")
@@ -1881,6 +2037,7 @@
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                (binding [*type-layout* (fn [t] (mono/type-layout-form n (with-meta (list 'ty "?") {:tc t})))
                                          *drop-glue-ok?* (drop-glue-ok-fn n rec-bodies)
+                                         *drop-needs?* (fn [t] (mono/needs-drop n t))
                                          *normalize-ty* (fn [t] (mono/normalize-ty n t))
                                          *resolve-call* (fn [d args] (mono/resolve-call n d args))
                                          ;; queue 464: the program's closures as the instances' arguments, written and laid out
@@ -2070,29 +2227,25 @@
                                     (do (swap! lines conj (str "record " nm " (" err ")")) (fact! :bodies false)
                                         (list 'mir/body (or (get rec-by-name nm) (throw (ex-info (str "no body for " nm) {}))))))))
                     ;; RF12-P6: the native core bodies made runtime bodies; S4: one by one, a body that fails at run time keeps the
-                    ;; record's body of its symbol (`record-kept`), all or none only when the record has no body of a failing one
+                    ;; record's body of its symbol (`record-kept`); queue 503 (498-2 (a)): one the record has no body of is left
+                    ;; out with the native bodies naming it, the rest native (native-fallback), no longer all or none
                     rec-syms (set (map :symbol rec-bodies))
                     native-done (when (or (seq core-items) (seq glue-shims))
-                                  (try (doall (concat
-                                               (for [[h i] core-items
-                                                     :let [r (try (runtime-body (assoc (:body i) :name (:name h)) h nf abort?)
-                                                                  (catch Throwable e
-                                                                    (if (rec-syms (:symbol h))
-                                                                      (do (swap! lines conj (str "record-kept " (:name h) " (a native body failed at run time: " (.getMessage e) ")")) nil)
-                                                                      (throw e))))]
-                                                     :when r]
-                                                 [(:symbol h) (list 'mir/body (assoc r :phase "arbace-native-core"))])
-                                               ;; queue 448b: a shim that fails at run time keeps the record's (std's types' glue now
-                                               ;; among them), as a core body does
-                                               (for [g glue-shims
-                                                     :let [r (try (runtime-body (assoc (:body g) :name (:name (:rec g))) (:rec g) nf abort?)
-                                                                  (catch Throwable e
-                                                                    (swap! lines conj (str "record-kept " (:name (:rec g)) " (drop glue's shim failed at run time: " (.getMessage e) ")"))
-                                                                    nil))]
-                                                     :when r]
-                                                 (do (swap! lines conj (str "native " (:name (:rec g)) " (drop glue's shim, built natively)"))
-                                                     (fact! :core-bodies true)
-                                                     [(:symbol (:rec g)) (list 'mir/body (assoc r :phase "arbace-native-core"))]))))
+                                  (try (let [entry (fn [h b what]
+                                                     (let [base {:symbol (:symbol h) :name (:name h) :twin? (boolean (rec-syms (:symbol h))) :what what}]
+                                                       (try (assoc base :body (runtime-body (assoc b :name (:name h)) h nf abort?))
+                                                            (catch Throwable e (assoc base :body nil :error (.getMessage e))))))
+                                             core-es (doall (for [[h i] core-items] (assoc (entry h (:body i) "a native body failed at run time") :core true)))
+                                             ;; queue 448b: a shim that fails at run time keeps the record's (std's types' glue now
+                                             ;; among them), as a core body does
+                                             glue-es (doall (for [g glue-shims] (entry (:rec g) (:body g) "drop glue's shim failed at run time")))
+                                             {:keys [kept] fl :lines} (native-fallback (concat core-es glue-es))]
+                                         (doseq [l fl] (swap! lines conj l))
+                                         (doall (for [e kept]
+                                                  (do (when-not (:core e)
+                                                        (swap! lines conj (str "native " (:name e) " (drop glue's shim, built natively)"))
+                                                        (fact! :core-bodies true))
+                                                      [(:symbol e) (list 'mir/body (assoc (:body e) :phase "arbace-native-core"))]))))
                                        (catch Throwable e
                                          (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
                                          nil)))
