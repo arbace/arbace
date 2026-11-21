@@ -15757,3 +15757,34 @@ After the records (the entry above): bin/reap and bin/crops-score --judge --stri
 problems; arm64's scores line in test/crops/scores.edn completeness 0.9997 -> 1.0000 (maturity and independence 1.0000).
 asm-arm64-essential's controls (test/gate/crops/asm.edn and the spliced test/gate/steps.edn) name test/asm/controls-error-arm64.txt
 (gate.crops check: 0 problems; the step's inputs already hold test/asm/).
+
+## 2026-11-21: LLVM IR's eval and AOT: the last 7 by-design rows built (small-tails-1122)
+
+The burst's stream S1, LLVM IR's part: eval and AOT each 555 / 7 by design (`:datalayout` 1, `:target-type` 1, `:envp` 1,
+`:lli-reference` 1, `:long-double` 3). Re-examined, none is a divergence the user decided: each is the lowering's or the runner's to
+build. All for ci alone (`arbace.cpp.lower/*ci*`, which only llvmi binds; C++'s lowering for gcc untouched), doc/llvm/LOWER.md "LL6",
+doc/llvm/LLVM-CROP-SURVEY.md "As built: small-tails":
+- test-interp-variable-arguments: an alloca that llvm.va_start or llvm.va_copy takes is at least x86-64's va_list (24 bytes, aligned 8);
+  the module (no target, written for lli's interpreter) used `alloca ptr`, which ci's va_start overran. `result is 6`.
+- test-interp-target-ext-type: a target extension type lowered as its layout type, from llvm/lib/IR/Type.cpp's getTargetTypeInfo
+  (llvm-project-23.1.5's tarball, .tmp/llvm/llvm-project-23.1.5.src.tar.xz, lines 1052-1141).
+- 2003-08-21-EnvironmentTest: a module whose main takes envp runs with ci's existing `--env` (RES29 (a)) under `env -i` and a fixed
+  environment of bin/llvmi's (`llvmi_env`), no change to C's runtime: LLS58 (proposed 2026-11-18, not decided) as its proposal read,
+  host-independent and never empty.
+- 2008-06-05-APInt-OverAShr (i686's data layout): a module of another layout runs when it observes nothing the two lay out otherwise
+  (every named aggregate's size and offsets, every GEP stride, no pointer in memory or converted when the widths differ), by
+  DataLayout.cpp's rules (same tarball); three hand-made modules that do observe the difference stay refused (`bin/llvmi lower`, exit 3).
+- 20080502-1 at -O0 and -O2: `bitcast x86_fp80 to i80` (clang's signbit) is the x87 encoding of ci's binary64 value, the other way
+  rounded. ieee/copysign2 at -O2: an x86_fp80 store writes the IR's 10 bytes (binary64, then two zero bytes) and a scalar x86_fp80
+  global is its 16-byte slot union, so the inlined memcmp of 10 bytes compares equal values equal. What is left of ci's binary64 long
+  double (the 80-bit arithmetic, the encoding read from memory) has no row now.
+Alternatives weighed: x87 encodings in memory throughout (rejected: musl on ci writes long doubles through pointers as binary64, CS35,
+so memory shared with C would disagree), changing ci's RunMain to a default environment (rejected: C's runtime and C's crop).
+
+Checks (light, under 2 GiB a process; AOT's Go build under the forks' lock): `bin/llvmi check --only` the 24 modules the change can
+reach (an x86_fp80 store or global, the i80 bitcast, va_start or va_copy, a target type, main's envp) and the datalayout one, with four
+control subjects: 28 of 28 pass, 3 negative controls judged, none passes (cpp.runtime.library, the 25th reached, takes C++'s route,
+not *ci*: left out); `--aot --only` the same 28 of 28, controls 3 of 3; both recorded from those runs (`--judge --record`, the
+subset's rows alone). A control added: the environment module's run against the va_list module's CHECK line. The five classes,
+left with no row, removed. Cells: eval 555/7/0 -> 562/0/0, AOT 555/7/0 -> 562/0/0; LLVM completeness 0.9938 -> 1.0000. `bin/reap
+--record`, `bin/crops-score --record`, then `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`. No gate.

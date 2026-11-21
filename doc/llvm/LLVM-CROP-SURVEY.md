@@ -3146,3 +3146,34 @@ verify-probes 478, roundtrip-llvmtest and text-llvmtest 304 each (the reader cha
 (rerun on the final code beside this note). `:llvmtest-section-rules` is gone (62 to 0); LLVM read 3,987 / 0 / 62 to 4,049 / 0 / 0;
 completeness 0.9899 (D1120-2's sections) to 0.9938, meant 1.0000 (the 7 by-design cases of eval and of AOT are what remain), independence
 1.0000, maturity 1.0000; crops-score --judge --strict, records-check, reap: 0 problems. No gate (the user).
+
+## As built: small-tails, the eval and AOT cells' last 7 by-design rows (2026-11-21, branch `small-tails-1122` from mac/next 863bdaea1)
+
+The burst's stream S1. Each of the seven rows llvmi did not pass at eval and AOT (classes `:datalayout`, `:target-type`, `:envp`,
+`:lli-reference`, `:long-double` 3) re-examined; each is the lowering's or the runner's to build, not a divergence anyone decided, and
+every change is for ci alone (`arbace.cpp.lower/*ci*`, llvmi's; C++'s lowering for gcc unchanged; doc/llvm/LOWER.md, "LL6", the
+small-tails paragraph):
+- **ee.Interpreter.test-interp-variable-arguments** (`:lli-reference`): IR with no target written for lli's interpreter, its va_list
+  an `alloca ptr`, which ci's `va_start` (24 bytes, LL6) overran. An alloca whose address `llvm.va_start` or `llvm.va_copy` takes is now
+  at least x86-64's va_list (lower-define's `:va-areas`): `result is 6`, the CHECK line.
+- **ee.Interpreter.test-interp-target-ext-type** (`:target-type`): a target extension type is its layout type, as llvm/lib/IR/Type.cpp's
+  getTargetTypeInfo (llvm-project-23.1.5, lines 1052-1141) gives it (`target-layout`, `target-types-out`): `spirv.Event` a pointer.
+- **ee.MCJIT.2003-08-21-EnvironmentTest** (`:envp`): LLS58's fixed environment, without a change to C's runtime: a module whose main
+  takes the environment (`arbace.llvm.check/main-envp?`, args.tsv's third column) runs with RES29 (a)'s `--env` (cirun before the
+  node program, an AOT shard's after its package) under `env -i` and bin/llvmi's `llvmi_env` (PATH, HOME, LANG and Go's two
+  settings): never the host's variables, never empty, as lit's runs.
+- **ee.MCJIT.2008-06-05-APInt-OverAShr** (`:datalayout`): an i686 module (32-bit pointers, i64 aligned 4) whose meaning its layout does
+  not touch. A module of another data layout runs when the two layouts lay out alike every aggregate type it names (size and members'
+  offsets), every getelementptr's stride, and, when the pointer widths differ, it neither loads nor stores a pointer nor converts one
+  (`layout-neutral?` over `dl-layout`, DataLayout.cpp's rules: the defaults of lines 180-199, getIntegerAlignment 780-794); else
+  `:datalayout` as before. Three hand-made negative modules (a `{ i32, i64 }` member, a stored pointer, an `[4 x i64]` aligned 4)
+  are refused.
+- **tx-O0.20080502-1, tx-O2.20080502-1** (`:long-double`): `__builtin_signbit` on a long double is clang's `bitcast x86_fp80 to i80`,
+  which copied ci's 8-byte binary64 into the i80: now the x87 encoding of the value (`f80-bits`; `bits-f80` the other way, rounded).
+- **tx-O2.ieee.copysign2** (`:long-double`): the inlined memcmp compares 10 bytes of each stored long double with the constant's; ci's
+  store wrote 8 and left two bytes of the slot stale. A store of x86_fp80 now writes the IR's store size (the 8, then two zero bytes),
+  and a scalar x86_fp80 global is its slot union (16 bytes) so that store stays inside it. The bytes are ci's representation, not
+  x87's (musl on ci shares that memory as binary64, CS35): a program reading the x87 encoding from memory would still differ.
+
+The five classes, left with no row, are removed from test/llvm/divergences-eval.edn (AOT shares them). A negative control added
+(test/llvm/controls.edn: the environment module's run against the va_list module's CHECK line).

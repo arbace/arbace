@@ -15,7 +15,8 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
 `gcc -std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off`.
 
 - **One target** (x86-64 SysV): the IR's data layout must be clang's for it
-  (`e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128`), else `:datalayout`.
+  (`e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128`), else `:datalayout` (for ci, since
+  small-tails, unless the module observes nothing the two layouts lay out otherwise: "LL6" below).
 - **Types.** `iN` is its container's unsigned type (`unsigned-char`, `unsigned-short`, `unsigned`, `unsigned-long`,
   `unsigned-__int128`; `i1` an `unsigned-char` 0 or 1; widths between masked: loaded masked to the width, and a width whose
   store size is smaller than its container's (`i24`, `i40`, `i48`, `i56`: bit-field access units clang does not widen over the
@@ -245,6 +246,25 @@ llvmi binds it true, `arbace.llvm.run`) writes the two places where the C for ci
   allocas from the heap on a chain of its own (`cx$dyn_alloc`), `stacksave` returns the chain's head, `stackrestore` frees back to it
   and every `ret` frees the rest (`cx$dyn_restore`, in llvmi's layer `arbace/llvm/rt/none.c.ae`), so a loop's VLAs do not exhaust
   ci's C stack (gcc's `vla-dealloc-1`).
+
+Since small-tails (2026-11-21; doc/llvm/LLVM-CROP-SURVEY.md, "As built: small-tails") five more places, for ci alone:
+
+- **The va_list's place.** An alloca whose address `llvm.va_start` or `llvm.va_copy` takes is at least x86-64's va_list, 24 bytes
+  aligned 8 (lower-define's `:va-areas`), which ci's `va_start` above writes whole: IR written for lli's interpreter, with no target
+  and `alloca ptr` as its va_list, runs as its frontend would have written it for x86-64.
+- **x86_fp80's bits.** `bitcast x86_fp80 to i80` is the x87 encoding of the value ci holds (binary64, exact in the extended format:
+  `f80-bits`), `bitcast i80 to x86_fp80` the encoding's value rounded to binary64 (`bits-f80`): a signbit, isnan or exponent test
+  clang writes as such a bitcast reads the IR's bits.
+- **x86_fp80's store** writes the IR's store size, 10 bytes: ci's long double's 8 and two zero bytes, so two stores of one value are
+  equal byte for byte (a memcmp of the 10 bytes); a scalar x86_fp80 global is its slot union, the IR's 16 bytes. The bytes are not the
+  x87 encoding (ci's C code shares that memory as binary64, CS35): a program that reads the encoding from memory stays `long-double`.
+- **Target extension types** are their layout types, as llvm/lib/IR/Type.cpp's `getTargetTypeInfo` gives them (`spirv.*` and `dx.*` a
+  pointer, `spirv.Type` its array, the paddings their bytes, `amdgcn.named.barrier` `<4 x i32>`, `wasm.funcref` a pointer); a void or
+  scalable layout is refused `:type` as before.
+- **Another data layout.** A module whose data layout is not x86-64's runs when it observes nothing the two lay out otherwise: every
+  aggregate type it names the same size and offsets, every `getelementptr`'s stride the same, and, when the pointer widths differ, no
+  pointer loaded or stored and no `ptrtoint` or `inttoptr` (`layout-neutral?` over `dl-layout`, LLVM 23's DataLayout rules); else
+  `:datalayout`.
 
 For both: **blockaddress** is a token, `(void *)(unsigned long)N` with N distinct for each (function, block) of the module, and
 **indirectbr** a `switch` over its destinations' tokens (`default` traps): LangRef lets a block's address only be compared, stored
