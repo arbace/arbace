@@ -15788,3 +15788,25 @@ not *ci*: left out); `--aot --only` the same 28 of 28, controls 3 of 3; both rec
 subset's rows alone). A control added: the environment module's run against the va_list module's CHECK line. The five classes,
 left with no row, removed. Cells: eval 555/7/0 -> 562/0/0, AOT 555/7/0 -> 562/0/0; LLVM completeness 0.9938 -> 1.0000. `bin/reap
 --record`, `bin/crops-score --record`, then `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`. No gate.
+
+## 2026-11-21: Scheme's ecraven record made whole on the main host; Scheme's and Python's tails that only a decision moves (small-tails-1122)
+
+The burst's stream S1. **Scheme, eval's 3 deferred** (`ecraven-too-slow`: takl, ntakl, earley): queue 334's speed (2026-11-17) let them
+finish in the VM's runs, but the record predated it and `bin/si ecraven --record` refuses a partial run. The whole run on the main host,
+`SI_TIMEOUT=600 bin/si ecraven --record` (the gate step's limit, under the forks' lock, MemAvailable checked: earley takes 3 GiB): 57 of
+58 pass (takl 248 s, ntakl 196, earley 125), read0 :na as before, no regression, the controls fail as they must. Eval 2,832/3/3 ->
+2,835/3/0. The class keeps no row; it stays, :volatile, for a run on a loaded host (doc/scheme/SCHEME-SURVEY.md, "As built: small-tails").
+
+**Scheme, eval's and AOT's 3 by design** (`chez-exact-zero`, `chez-console-port`, `chez-condition-message`, Racket's suite's five
+tests): SCS4 (a), the user's decision of 2026-11-08 (si keeps Chez's tower and ports; Chez fails the same tests). Nothing built: passing
+them means leaving Chez's semantics. Passed to the user as a decision: (a) keep; (b) SCS4 (b), R6RS's own examples ((/ 1.0 0) +inf.0,
+(/ 0 3.5) 0.0, (angle +inf.0) 0.0) and separate console ports, Chez's mats then classed; (d) new, R6RS's answers for programs that import
+(rnrs) and Chez's for (chezscheme), so both the suite and the mats pass; the condition message (Racket's own words, which R6RS does not
+specify) is the suite's expectation alone.
+
+**Python, AOT's 1 deferred** (synth/datamodel/del.py, `:finalization-goi`): the golden text prints `del 1` before `0 -> None`, CPython
+freeing the comprehension's list at the `and`; pyi's compiled run prints it at exit. Reference counting's moment is by design (PYS9 (a),
+2026-11-04) and only `del`'s moment is built (queue 222's DECISION 1 (a), the user's): nothing built. Passed to the user: the gated moment
+at a frame's return (222's (b): one global load a frame while no tracked object with work lives; here the lambda's return would collect
+the list before show prints), measured against the 3% budget on the bench sample, would pass it; else the row stays (deferred until W2's
+goi runs `__del__` as the compiled run does, then `:finalization`, by design).

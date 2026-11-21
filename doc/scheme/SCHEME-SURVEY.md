@@ -4865,3 +4865,17 @@ rule that every code point it does not list is its own normal form), with a nega
   rc 1.
 - **norm-chez.tsv** (Chez 10.3.0's recorded results, `tools/scheme/normtests.ss`) is the oracle tier's: `TestNormalizeChez` skips
   unless `SI_NORM_ORACLE=1` (by hand: 1,088 blocks, 3,500 strings, 0 bad). `TestNormalizeExamples` stays.
+
+## As built: small-tails, ecraven's whole record on the main host (2026-11-21, branch `small-tails-1122`)
+
+The burst's stream S1. Queue 334's speed left takl, ntakl and earley finishing in the VM's runs, but the record
+(`test/scheme/check-ecraven-linux-amd64.edn`) was older and `--record` refuses a partial run. The main host's whole run, `SI_TIMEOUT=600
+bin/si ecraven --record` (the gate step's limit; load about 40, 28 minutes): 57 of 58 pass, read0 in `ecraven-reader-corners` (:na), no
+regression, the four controls as they must; takl 248 s, ntakl 196, earley 125 (3 GiB), ack 119, cpstak 149, tak 169. The eval cell 2,832
+/ 3 / 3 -> 2,835 / 3 / 0. `ecraven-too-slow` keeps no row and stays (:volatile, a loaded host's run).
+
+Left: the three by-design classes at eval and AOT (`chez-exact-zero`, `chez-console-port`, `chez-condition-message`: Racket's suite's
+five tests that Chez fails too), SCS4 (a), the user's decision of 2026-11-08: si's tower and ports are Chez's. They pass only by leaving
+Chez's semantics (SCS4 (b): R6RS's own examples for the exact-zero division and angle, separate console ports; or a narrower variant
+not proposed before, R6RS's answers for a program that imports `(rnrs)` and Chez's for one that imports `(chezscheme)`, which the mats
+use), the user's to decide again.
