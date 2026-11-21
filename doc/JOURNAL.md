@@ -15828,3 +15828,16 @@ by ocamlc 5.5.0, ocamllex, perl): byte for byte. Controls: 5 of 5 fail. `bin/rep
 (9.5 minutes, every corpus passing): 19 rows `reject` -> `pass`; `own-read --check` 0 rows changed over the testsuite, the stdlib and the
 ten opam corpora; the read classes file empty. bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check: 0
 problems. OCaml read 3,143 / 19 / 0 -> 3,162 / 0 / 0; completeness 0.9071 -> 0.9086. Light: no gate.
+
+## 2026-11-22: hsi freezes an interrupted thunk as GHC does (HES56 (b)); Haskell's :async-revert gone (small-tails-ochs-1122)
+
+The burst's small tails: Haskell's AOT cell had one by-design row, samples/AsyncRerun (`:async-revert`, also eval's), HES56 (a)'s
+"reverted until a test needs (b)". Built (b) (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES56 (b)"): an asynchronous exception
+thrown to a runnable thread freezes each update frame's segment and the thread's control into its thunk (GHC's rts/RaiseAsync.c
+raiseAsync and AP_STACK, studied for the rule, not ported), resumed by the next demand; transactions and the other raise paths revert as
+before. Alternatives: keep the class (a), or freeze in every path (the running thread's control at a primop's delivery is no resumable
+expression in hsi's machine). Proof: AsyncRerun passes at eval and AOT on the pack's and the own libraries (the own pools and STG of
+ghc-internal and base made for it), its four rows recorded with --only --record; 40 concurrent testsuite programs and four samples
+still pass. The eval cell 859 / 61 / 30 -> 860 / 60 / 30, AOT 137 / 1 / 1 -> 138 / 0 / 1. Left at AOT: nofib/spectral/fibheaps,
+`:own-speed` (deferred), the own -O0 libraries' code at the 60 s CPU limit (57 s when it passed), HF10's -O1 line. bin/reap --record,
+bin/crops-score --record, --judge --strict, bin/records-check, bin/hsi divergences: 0 problems. Light: no gate.
