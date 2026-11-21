@@ -15688,3 +15688,67 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-21: py-eval-1122: the eval run's regression was a stale goi table (bin/goi table's key missed go/arbace/py)
+
+Stream P1 of the burst (Python's eval cell, 39,204 pass / 5,492 by design / 3,625 deferred), branch py-eval-1122 from mac/next
+863bdaea1. The entry "Python's AOT record on next's build; the eval run regressed and is not recorded" left 6,902 regressions
+of `bin/pyi check --fresh --record` on the gate executable 6aae87f093d10041e7ed (next 1e8ee0196): 8,092 lines "import
+SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access local variable 'module'".
+- Reproduced in seconds without the check: `bin/pyi run` of `import _testlimitedcapi` on that executable panics, on
+  710e90e4771a10548878 (74d009af0, the same go/ tree and runtime key) it prints 1 0 None. `bin/pyi check --only` of test_class
+  likewise (testHasAttrString: a Go panic on 6aae87, ok on 710e90). The journal's "a direct run does not reproduce" was
+  `import test.test_class`, whose module-level imports never reach the C world; the check's driver installs the
+  _testinternalcapi stand-in and runs testHasAttrString, which imports _testlimitedcapi.
+- The panic's value: its PCs symbolized by `go tool addr2line` on the executable are arbace.lang.ExceptionInfo's constructor
+  under arbace.core/ex-info under arbace.go.repl/complete! under after-load under arbace.core/load: the host's require of
+  go.arbace.pyctypes (go.arbace.py's packageLoader, arbace.python.run/install!'s SetPackageLoader, on the first import of
+  _ctypes, _ctypes_test, _testcapi, _testlimitedcapi, _testclinic, _testclinic_limited or _testbuffer) threw. Its message, by
+  `(try (require 'go.arbace.pyctypes) (catch Throwable e ...))` on 6aae87: "Go check errors in package arbace/pyctypes:
+  capi_clinic.go:659: undefined: Buffer ... NewBufferView ... GetContiguous ... cannot use func literal (value of type
+  func(py.Object, int) ...) as func(py.Object) ... capi_getargs.go:119: undefined: MemoryViewFromObject": goi's checker
+  read the compiled arbace/py's API from the executable's goi table and digest, and that table was go/arbace/py's API before
+  queues 473, 475 and 481 (merged as cabd63dd4, 2026-11-20 17:28), while pyctypes (a lazy module, interpreted from the
+  checkout) is after them.
+- Cause: `bin/goi table` keeps its output when its key is unchanged, and the key (the list, arbace/go/table.ae, go/arbace.ae,
+  api.ae, std.ae, go/arbace/repr/, the checker, tamago's forms, the linux std forms' cache key) held none of the other listed
+  packages of go/: arbace/py, arbace/libm, arbace/ci, arbace/crt, arbace/oi (W2's and C9's). The next worktree's
+  target/arbace-go/gotable was made 2026-11-20 14:10; the night's --gate-build at 01:49 found it "unchanged (key
+  4a1e961f6233)" (target/arbace-go/gotable.log) and embedded it: the j2g output's gotable/arbace_py_s15.ae and the digests of
+  6aae87 differ from 710e90's (built in another worktree, its table fresh), NewBufferView absent. gate_key moved (go/arbace/py
+  is in it), so the build ran; only the table's own cache was stale. The test build's table (bin/arbace-go:1404) is the same
+  function.
+- The second symptom: after the panic the next import of the same module ran the require again, which this time returned
+  without registering the module, and _imp.create_builtin returned a null object (importBuiltin's ok ignored), which
+  importlib's module_from_spec stored into `module`: "cannot access local variable 'module'". Every later import of a C
+  world module in that process failed so (test_capi's 37 submodules after the first, test_monitoring's state, pydoc's walk).
+- Fixes (one commit): bin/goi's table key holds the listed packages of go/ (table_go_forms: for each "arbace" or "arbace/..."
+  of go/arbace/gotable.edn's list, go/P.ae and the files its (load ...) lines name: 285 files, arbace/py's 202 among them).
+  pyi names the throwable: go.arbace.py's SetPanicText, set by arbace.python.run/install! (resolved, so a runtime without it
+  is left alone), gives a Go panic's value its class and message and its causes' (panicText; "" leaves %v's text, so every
+  recorded "Go panic: ..." reason of a Go value is unchanged: the record holds no "&{" one); guardedStep's and xiProtect's
+  SystemErrors use it. loadLazyModule recovers a panic of the load into a SystemError "pyi: the package NS of the module M
+  did not load: CLASS: MESSAGE" and keeps it (lazyFailed), raised again by every later import (no second require);
+  importBuiltin returns it; _imp.create_builtin never returns a null module (an ImportError "no built-in module named M").
+- Found on the way, in the night's other failures, fixed in the same round: (1) test_fstring's test_debug_conversion, a
+  regression of queue 501 (54f42ca70): the native reader's :debug text now keeps a comment inside the expression, as
+  pydump's dump writes it, and pyi's compiler used that text as the runtime's value; arbace.python.compile's debug-text
+  removes set_ftstring_expr's comments (lexer.c's rule, the reader's before 501) from it, the reader and parse-check
+  untouched. (2) The thin _functools (queue 459) served cmp_to_key and reduce as the pure functions, which bind as methods in
+  test_functools' C classes' bodies (cmp_to_key = c_functools.cmp_to_key): they are built-ins over the pure functions now
+  (one object each, kept in the module's dict, __module__ _functools, the text signature "(mycmp)"). (3) sys.stdin's
+  TextIOWrapper had no readlines and no iteration (python -m json --json-lines: "'TextIOWrapper' object has no attribute
+  'readlines'"): readlines(hint), __iter__, __next__ over readline. (4) SIGPIPE was ignored only once _signal was imported:
+  RunModule and Repl ignore SIGPIPE and SIGXFSZ at the start as CPython's init_signals does, and the standard streams'
+  write, flush and close raise the write's OSError (BrokenPipeError), the buffered bytes dropped (bufio keeps an error for
+  every later write: json.tool dup2s /dev/null over stdout and exits 32, which a failing shutdown flush would make 120).
+  (5) bin/pyi python's sweep of ended interpreters' directories raced with another one's ("cat: .../python.XXXXXX/pid: No
+  such file or directory" on a child's stderr: test_sys's test_c_locale_surrogateescape): read quietly.
+- Proofs (light, the 710e90 executable with the checkout's go/arbace/py interpreted by goi, bin/pyi's runtime_from_source; one
+  run at a time): `import _testlimitedcapi` and object_hasattrstring print 1 0 None; a broken stand-in of go/arbace/pyctypes
+  first on ARBACE_PATH (its one file an undefined name) makes `import _testcapi` twice raise the same SystemError "pyi: the
+  package go.arbace.pyctypes of the module _testcapi did not load: arbace.lang.ExceptionInfo: Go check errors in package
+  arbace/pyctypes: broken.go:3: undefined: undefinedName" (the throwable named; no UnboundLocalError the second time);
+  test_fstring's debug text prints CPython's '(\n    1,  \n    "\"#")=(1, \'"#\')'; a class body's cmp_to_key and reduce do
+  not bind ([1, 2, 3], 16; builtin_function_or_method, _functools, (mycmp)); `python -m json --json-lines` from a pipe exits
+  0; a program printing into `head -1` catches BrokenPipeError 32, dup2s /dev/null and exits 32; `for l in sys.stdin` works.
