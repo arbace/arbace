@@ -2128,7 +2128,27 @@
           sema (concat lms (mapcat (fn [f] (f u starts src main)) @checks)
                        ;; (a unit the parser declined a construct of is not analyzed: the code generator's refusal)
                        (when (and sema? (zero? (long (:declines u 0)))) (sema-errors u starts src main)))
-          ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)]
+          ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)
+          ;; cpp-read (2026-11-22): an undeclared name is GCC's error once in a block: unqualified_name_lookup_error declares it in
+          ;; the innermost local scope, error_mark_node its type, so its later uses there and in the blocks nested in it are silent
+          ;; (cp/lex.cc); the parser's and Sema's errors for such a later use on another line dropped (conversion/const3.C)
+          blocks (let [out (java.util.ArrayList.)]
+                   (walk-nodes (fn [x _] (when (= "CompoundStmt" (:kind x))
+                                           (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset])]
+                                             (when (and b e (= main (or (get-in x [:range :begin :file]) main))) (.add out [(long b) (long e)])))))
+                               (:nodes u) nil)
+                   (vec out))
+          given (java.util.ArrayList.)
+          ds (vec (remove (fn [d]
+                            (when-let [[_ nm] (and (#{:undeclared :sema} (:rule d))
+                                                   (re-find #"use of undeclared identifier '([^']+)'" (str (:msg d))))]
+                              (let [o (+ (long (.get starts (dec (long (:line d))))) (dec (long (:col d))))
+                                    inner (reduce (fn [best [b e :as r]] (if (and (<= b o e) (or (nil? best) (> b (long (first best))))) r best)) nil blocks)]
+                                (when inner
+                                  (if (some (fn [[n l [b e]]] (and (= n nm) (not= l (:line d)) (<= (long b) o (long e)))) given)
+                                    true
+                                    (do (.add given [nm (:line d) inner]) false))))))
+                          ds))]
       {:diags ds :other other :declines (:declines u)})
     (catch arbace.lang.ExceptionInfo e
       (if-let [g (or (:cpp/gap (ex-data e)) (when (:cpp/parse (ex-data e)) :parse))]
