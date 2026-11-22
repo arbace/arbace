@@ -1007,7 +1007,7 @@
               (let [r (fresh-meta)] (soft-unify k (fn-ty ak r)) r)))
           k aks))
 
-(declare kind-of)
+(declare kind-of note-kind-sig!)
 
 (defn- tycon-kind
   "A type constructor's kind instantiated: [kind-args kind], kind-args the fresh metas of its invisible binders in order,
@@ -1137,6 +1137,73 @@
           [(list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [(con "BoxedRep") (con "Lifted")])])))
 (defn- typeable-fun [m a b] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrFun")) [m a b]))
 
+;;; T14236 (hs-r7): the arrow's kind arguments where Typeable's evidence names them. (->) applied to fewer than two arguments
+;;; is FUN 'Many @q @r (GHC.Tc.Instance.Class's doTyApp splits off the arguments, doTyConApp gives mkTrCon $tcFUN [m, q, r]):
+;;; q the representation of the first argument's kind (TYPE q), r the result's (the type's kind signature, (->) x :: TYPE r
+;;; -> Type, a type application's in mkTrAppChecked), each one's evidence solved like any Typeable (a closed one's mkTrCon, a
+;;; variable's a given: withTypeable rx); LiftedRep where a kind is not known (GHC's defaulting of a kind variable). HF9-P4
+;;; erased the kinds; this alone keeps them, as the kind links (typeRepKind x's TypeRep k at a := x) and the kind signatures say
+
+(defn- some-type-rep [e] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep")) [e]))
+
+(defn- kind-rep
+  "The representation r of a kind TYPE r (Type's LiftedRep, through the synonym), or nil"
+  [k]
+  (when k
+    (let [k (deep-expand (zonk k))]
+      (when (and (= :tc (first k)) (vector? (second k)) (= "TYPE" (str (occ (second k)))) (= 1 (count (nth k 2))))
+        (first (nth k 2))))))
+
+(defn- lifted-rep?
+  "LiftedRep, or 'BoxedRep 'Lifted"
+  [r]
+  (let [r (deep-expand (zonk r))]
+    (and (= :tc (first r)) (vector? (second r))
+         (or (= "LiftedRep" (str (occ (second r))))
+             (and (= "BoxedRep" (str (occ (second r)))) (= 1 (count (nth r 2)))
+                  (let [l (deep-expand (zonk (first (nth r 2))))] (and (= :tc (first l)) (vector? (second l)) (= "Lifted" (str (occ (second l)))))))))))
+
+(declare known-kind typeable-term ^:dynamic *kind-links* ^:dynamic *kind-sigs*)
+
+(declare rewrite-by-givens)
+
+(defn- linked-kind
+  "A type's kind of the form TYPE r: its annotated kind (known-kind: TrApp's (b :: k1)) rewritten by the given equalities in
+  force (an IsTYPE match's k1 ~ TYPE rx), else a kind link's (typeRepKind's, mkTrFun's (a :: TYPE r1) at a := x); nil when
+  none is known"
+  [x]
+  (let [x (zonk x)
+        ok (fn [k] (when k (let [k (rewrite-by-givens (zonk k))] (when (kind-rep k) k))))]
+    (or (ok (known-kind x))
+        (some (fn [[k t]] (when (= (zonk t) x) (ok k))) (some-> *kind-links* deref)))))
+
+(defn- sig-kind
+  "The kind signature written on type t (the latest of the same type), or nil"
+  [t]
+  (let [t (zonk t)] (some (fn [[t' k]] (when (= (zonk t') t) k)) (some-> *kind-sigs* deref rseq))))
+
+(defn- arrow-tycon-ev
+  "mkTrCon $tcFUN at the kind arguments of the arrow t applied to fewer than two arguments ('Many, q, r), each kind
+  argument's evidence a closed one's or (solve, when given) the solver's; nil when one is not had"
+  [t solve]
+  (let [as (nth t 2)
+        k (sig-kind t)
+        ;; the kind of t's first missing argument, then its result's (TYPE q -> TYPE r -> Type less the given arguments)
+        k-args (loop [k k out []] (if-let [[p r] (and k (arrow-kind k))] (recur r (conj out p)) out))
+        q (if (seq as) (kind-rep (linked-kind (first as))) (kind-rep (first k-args)))
+        r (kind-rep (if (seq as) (first k-args) (second k-args)))
+        kev (fn [x] (if (or (nil? x) (lifted-rep? x))
+                      lifted-rep-typeable
+                      (when-let [e (or (typeable-term x) (when solve (solve x)))] (some-type-rep e))))
+        qe (kev q) re (kev r)]
+    (when trace? (binding [*out* *err*] (println "tc-trace: arrow-tycon-ev" (pr-str (zonk t)) "kind" (pr-str (some-> k zonk)) "q" (pr-str (some-> q zonk)) "r" (pr-str (some-> r zonk)))))
+    (when (and qe re)
+      (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
+            [(list 'v (typeable-tycon-ref fun-tc))
+             (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
+                     (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+                     [re qe (some-type-rep many-typeable)])]))))
+
 (declare promote-kind-names)
 
 (defn- known-lit-dict
@@ -1189,14 +1256,16 @@
           (when (and a b) (typeable-fun many-typeable a b)))
       (let [[_ n args] t
             [kargs pks] (tycon-kind-info n args ek)
-            con (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
+            ;; T14236 (hs-r7): the arrow applied to fewer than two arguments, its kind arguments its argument's and kind
+            ;; signature's (arrow-tycon-ev); nil when one is not closed (the solver's then)
+            fun-con (when (= fun-tc n) (arrow-tycon-ev [:tc fun-tc (vec args)] nil))
+            con (when (or (not= fun-tc n) fun-con)
+                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
                       [(list 'v (typeable-tycon-ref n))
                        (if (= fun-tc n)
                          ;; HF10-P39 (a): the arrow unapplied ((->) = FUN 'Many, funTyCon's typeRep @(->)): $tcFUN's three
                          ;; kind arguments (splitForAllForAllTyBinders: m, q, r), 'Many and the defaulted LiftedRep twice
-                         (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
-                                 (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
-                                 [lifted-rep-typeable lifted-rep-typeable (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep")) [many-typeable])])
+                         (second (nth fun-con 2))
                          ;; HF10-P41 (a): its kind arguments (doTyConApp's kind_args), each a SomeTypeRep of its own
                          ;; evidence
                          (let [ks (mapv (fn [k] (when-let [e (typeable-term k)]
@@ -1204,9 +1273,9 @@
                                         kargs)]
                            (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
                                    (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
-                                   (reverse (if (every? some? ks) ks [])))))])
+                                   (reverse (if (every? some? ks) ks [])))))]))
             subs (mapv (fn [a i] (typeable-term a (get pks i))) args (range))]
-        (when (every? some? subs)
+        (when (and con (every? some? subs))
           (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])) con subs))))))))
 
 (declare cls-callstack fresh-lv solve-pred ctx-preds rewrite-by-givens dict-param)
@@ -1434,12 +1503,19 @@
                     :app (let [f (part (nth t 1)) x (part (nth t 2))]
                            (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])))
                     :tc (when (seq (nth t 2))
-                          (if (and (= fun-tc (second t)) (= 2 (count (nth t 2))))
+                          (cond
+                            (and (= fun-tc (second t)) (= 2 (count (nth t 2))))
                             ;; HF10-P39 (a): doFunTy with variables
                             (let [a (part (first (nth t 2))) b (part (second (nth t 2)))]
                               (when (and a b) (typeable-fun many-typeable a b)))
-                          (let [f (part [:tc (second t) (vec (butlast (nth t 2)))]) x (part (last (nth t 2)))]
-                            (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])))))
+                            ;; T14236 (hs-r7): (->) x, doTyApp's (FUN 'Many @q @r) x, the arrow's kind arguments solved too
+                            ;; (mkTrAppChecked's typeRep @((->) x :: TYPE ry -> Type): [Many, rx, ry] from the givens)
+                            (= fun-tc (second t))
+                            (let [f (arrow-tycon-ev t part) x (part (first (nth t 2)))]
+                              (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])))
+                            :else
+                            (let [f (part [:tc (second t) (vec (butlast (nth t 2)))]) x (part (last (nth t 2)))]
+                              (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])))))
                     nil)))))
 ;; GHC.Tc.Instance.Class's matchDataToTag (HF9's second slice): DataToTag T for an algebraic data type T
         ;; (not a newtype), its dictionary the primop dataToTagSmall# (a family of fewer constructors than the pointer tag
@@ -1589,7 +1665,8 @@
                   (if (and (= [:tc (ext-name "tc" "GHC.Internal.Tuple" "Unit") []] t) (= 'HsTyVar (con k))
                            (= (ext-name "tc" "GHC.Internal.Types" "Constraint") (nm (arg k 3))))
                     [:tc (ext-name "tc" "GHC.Internal.Classes" "CUnit") []]
-                    t))
+                    (do (note-kind-sig! t (binding [*errors* nil] (try (hs-type tvs (arg v 3)) (catch Throwable _ nil))))
+                        t)))
       HsAppKindTy (hs-type tvs (arg v 2))
       ;; type-level literals, as the interfaces write them (tools/hsdump: (lit N), (lit "s"), (lit-char C))
       ;; DataKinds' promoted list '[t1, t2]: (':) t1 ((':) t2 '[]), the kind arguments erased as an interface's are
@@ -1671,6 +1748,11 @@
                [(second t) k]))))
 
 (defn- note-kind-anns! [m] (when (and *tv-kind-anns* (seq m)) (swap! *tv-kind-anns* merge m)))
+
+;; T14236 (hs-r7): the kind signatures of types ((->) x :: TYPE ry -> Type, a type application's), kept beside the type
+;; for Typeable's kind arguments (the erased kinds of HF9-P4 undone there alone): [[TYPE KIND]...]
+(def ^:dynamic *kind-sigs* nil)
+(defn- note-kind-sig! [t k] (when (and *kind-sigs* k) (swap! *kind-sigs* conj [t k])))
 
 (def ^:dynamic *kind-links* nil) ; atom [[KIND-TYPE TYPE]...]: an annotated variable's instance and its kind's (typeLitTypeRep's
                                  ; (a :: k) at a := Symbol: k := Type), unified once the instance is known (default!)
@@ -6810,7 +6892,7 @@
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *wrapper-num* (atom (count fexps)) *fstubs* (atom [])
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
-              *tv-kinds* (atom {}) *tc-kinds* (atom {}) *tv-kind-anns* (atom {}) *kind-links* (atom [])
+              *tv-kinds* (atom {}) *tc-kinds* (atom {}) *tv-kind-anns* (atom {}) *kind-links* (atom []) *kind-sigs* (atom [])
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *deriv-aux* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
