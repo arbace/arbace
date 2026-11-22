@@ -4578,7 +4578,7 @@
                         cls (:name (class-ctx p))
                         ctor? (and fs (:s lp) (not (:args lp))
                                    (or (and (= ctx :member) (= 1 np) (not (:g qn)) (= (:s lp) cls) (not (:friend ds)))
-                                       (and (>= np 2) (= (:s lp) (:s (nth parts (- np 2)))) (= :class (some-> (:q qn) :k)))))
+                                       (and (>= np 2) (= (:s lp) (:s (nth parts (- np 2)))) (:class (:q qn)))))
                         what (cond ctor? "constructor" (:dtor lp) "destructor" (:conv lp) "conv" :else nil)
                         ptrs? (some #(seq (:ptrs %)) chain)]
                     (cond
@@ -4598,6 +4598,14 @@
                       (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "' as member of '" (:s (nth parts (- np 2))) "'"))
                       (and fs (#{"constructor" "destructor"} what) (= ctx :member) (= "static" (:storage ds)))
                       (soft-diag! p (long (:b ds)) (str what " cannot be static member function"))
+                      ;; ([class.mfct]/2, [class.static.data]/? , [namespace.memdef]/2: a member declared out of its class by a
+                      ;; qualified name, in a namespace that encloses the class: else GCC's "definition of 'void foo::f()' is not
+                      ;; in namespace enclosing 'foo'")
+                      (and (= ctx :top) (>= np 2) (:class (:q qn)) (:scope (:q qn)) (not (:friend ds))
+                           (let [cur (sc/enclosing (scope p) #{:ns})]
+                             (and cur (not (loop [s (sc/parent-of (:scope (:q qn)))]
+                                             (cond (nil? s) false (identical? s cur) true :else (recur (sc/parent-of s))))))))
+                      (soft-diag! p (long (:i lp)) (str "definition of '" (name-str p qn) "' is not in namespace enclosing '" (:s (nth parts (- np 2))) "'"))
                       (and (:dtor lp) (string? (:dtor lp)) (not fs))
                       (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "' as non-function"))
                       (and (:dtor lp) (string? (:dtor lp)) (= 1 np) (not (:g qn)) (= ctx :member) cls (not= (:dtor lp) cls) (not (:friend ds)))
@@ -5501,7 +5509,16 @@
         (let [ms (with-gt p true (decl-seq p :top))]
           (expect! p "}")
           [(node p "LinkageSpecDecl" b (last-ix p) {:language lang :hasBraces true :inner ms})])
-        (let [ns (parse-external-decl p :top)]
+        (let [;; (cpp-diag-b, 2026-11-22: [dcl.link]/8, a declaration directly contained in a linkage-specification is taken as
+              ;; extern and specifies no storage class: GCC's "invalid use of 'static' in linkage specification", at the specifier)
+              _ (when (and (not (skim? p)) (main-tok? p (ix p)))
+                  (loop [j (ix p) k 0]
+                    (let [^T t (tok-at p j)]
+                      (when (and (< k 12) (identical? :kw (.-k t)))
+                        (if (or (contains? #{"static" "extern" "register" "mutable"} (.-s t)) (and (t= t "auto") (< (.-year p) 2011)))
+                          (soft-diag! p j (str "invalid use of '" (.-s t) "' in linkage specification"))
+                          (recur (inc j) (inc k)))))))
+              ns (parse-external-decl p :top)]
           [(node p "LinkageSpecDecl" b (if (seq ns) (ne (peek ns)) (last-ix p)) {:language lang :inner ns})]))))))
 
 (defn- dependent-type? [t]

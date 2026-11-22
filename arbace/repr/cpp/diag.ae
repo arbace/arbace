@@ -4370,6 +4370,123 @@
 
 (swap! checks conj union-bases)
 
+;; [class.virtual]/8: an overrider's return type is the overridden function's, or both are pointers (or lvalue, or rvalue,
+;; references) to classes, the overridden's class an unambiguous and accessible base of the overrider's (complete), the
+;; overrider's no more cv-qualified: GCC's "invalid covariant return type for 'virtual C* C::foo()'" (class pointers or references
+;; that are not), "conflicting return type specified for ..." (the rest), at the overrider. Judged on the file's own classes by
+;; name (a class defined once, out of a template), a type whose names are no class of the file nor a fundamental type (a typedef,
+;; a dependent type) not judged.
+
+(def ^:private fund-words #{"void" "bool" "char" "signed" "unsigned" "short" "int" "long" "float" "double" "wchar_t" "char8_t" "char16_t" "char32_t" "__int128"})
+
+(defn covariant-returns
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        recs (java.util.HashMap.)
+        dup (java.util.HashSet.)
+        _ (letfn [(w [x in-tmpl]
+                    (cond (map? x) (let [k (:kind x)
+                                         in-tmpl (or in-tmpl (#{"ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl"} k))]
+                                     (when (and (= "CXXRecordDecl" k) (string? (:name x)) (seq (:name x)))
+                                       (if (or (.containsKey recs (:name x)) in-tmpl)
+                                         (when (or in-tmpl (:completeDefinition x) (:completeDefinition (.get recs (:name x)))) (.add dup (:name x)))
+                                         (.put recs (:name x) x)))
+                                     (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v in-tmpl)))
+                          (vector? x) (doseq [y x] (w y in-tmpl))
+                          :else nil))]
+            (w (:nodes u) false))
+        rec (fn [nm] (let [r (.get recs nm)] (when (and r (:completeDefinition r) (not (.contains dup nm))) r)))
+        known-rec (fn [nm] (and (.containsKey recs nm) (not (.contains dup nm))))
+        strip-key (fn [^String s] (str/trim (str/replace (str s) #"^(struct|class|union|enum)\s+" "")))
+        ;; the bases of a class: [name public? virtual?]
+        bases (fn [r] (for [b (:bases r)]
+                        [(strip-key (get-in b [:type :qualType]))
+                         (= "public" (let [a (:writtenAccess b)] (if (or (nil? a) (= a "none")) (if (= "class" (:tagUsed r)) "private" "public") a)))
+                         (boolean (:isVirtual b))]))
+        ;; the paths from class `d` up to `b`: each a vector of publicness, nil when `b` is no base
+        paths (fn paths [d b depth]
+                (when (< (long depth) 16)
+                  (when-let [r (rec d)]
+                    (vec (mapcat (fn [[bn pub _]] (if (= bn b) [[pub]] (map #(conj % pub) (paths bn b (inc (long depth)))))) (bases r))))))
+        virt-bases (fn [d b] (when-let [r (rec d)] (some (fn [[bn _ v]] (and v (= bn b))) (bases r))))
+        split (fn [^String qt] (let [i (.indexOf qt "(")] (when (pos? i) (let [r (str/trim (subs qt 0 i))] (when-not (str/includes? r ")") [r (str/replace (subs qt i) #"\s+" "")])))))
+        ;; a return type: {:cls name :k "*"/"&"/"&&"/nil :cv #{} :fund bool} or nil when not judged
+        rtype (fn [^String r]
+                (let [k (cond (str/ends-with? r "&&") "&&" (str/ends-with? r "&") "&" (str/ends-with? r "*") "*" :else nil)
+                      core (str/trim (if k (subs r 0 (- (count r) (count k))) r))
+                      ws (remove #{""} (str/split core #"\s+"))
+                      cv (set (filter #{"const" "volatile"} ws))
+                      nm (remove #{"const" "volatile" "struct" "class" "union" "enum"} ws)]
+                  (cond (and (seq nm) (every? fund-words nm)) {:fund (str/join " " nm) :k k :cv cv}
+                        (and (= 1 (count nm)) (known-rec (first nm))) {:cls (first nm) :k k :cv cv}
+                        :else nil)))
+        methods (fn [r] (filter #(and (= "CXXMethodDecl" (:kind %)) (string? (:name %)) (not (str/starts-with? (:name %) "operator ")))
+                                (:inner r)))
+        ;; the virtual function of the bases `nm` with the signature `sig` overrides, [the base's method] or nil
+        overridden (fn ov [cls nm sig depth]
+                     (when (< (long depth) 16)
+                       (when-let [r (rec cls)]
+                         (some (fn [[bn]]
+                                 (or (when-let [br (rec bn)]
+                                       (some (fn [m] (when (and (= nm (:name m)) (= sig (second (split (str (get-in m [:type :qualType])))))
+                                                                (or (:virtual m) (ov bn nm sig (inc (long depth)))))
+                                                       m))
+                                             (methods br)))
+                                     (ov bn nm sig (inc (long depth)))))
+                               (bases r)))))]
+    (doseq [[cn r] recs :when (and (rec cn) (seq (:bases r)))
+            m (methods r)
+            :let [[rt sig] (split (str (get-in m [:type :qualType])))]
+            :when sig
+            :let [bm (overridden cn (:name m) sig 0)]
+            :when bm
+            :let [[brt _] (split (str (get-in bm [:type :qualType])))]
+            :when (and brt (not= (str/replace rt #"\s+" "") (str/replace brt #"\s+" "")))
+            :let [a (rtype rt) b (rtype brt) o (mine-at m main)]
+            :when (and a b o)]
+      (let [cls-ptr? (and (:cls a) (:cls b) (:k a) (= (:k a) (:k b)))
+            ok? (and cls-ptr?
+                     (every? (:cv b) (:cv a))
+                     (or (= (:cls a) (:cls b))
+                         (let [ps (paths (:cls a) (:cls b) 0)]
+                           (and (rec (:cls a)) (= 1 (count ps)) (every? true? (first ps))))))
+            ;; (two paths through one virtual base, the base reached once: not judged)
+            unsure? (and cls-ptr? (not ok?) (> (count (paths (:cls a) (:cls b) 0)) 1))]
+        (when-not (or ok? unsure?)
+          (let [[l c] (line-col starts o)]
+            (.add out {:line l :col c :kind :error :rule :covariant
+                       :msg (if cls-ptr?
+                              (str "invalid covariant return type for '" (:name m) "'")
+                              (str "conflicting return type specified for '" (:name m) "'"))})))))
+    (vec out)))
+
+(swap! checks conj covariant-returns)
+
+;; [basic.start.main]/3: main is not declared with a linkage-specification, and nothing named main of a namespace has C language
+;; linkage: GCC's "cannot declare '::main' with a linkage specification", at the declaration (a class's member main aside).
+
+(defn main-linkage
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (letfn [(w [x lang]
+              (cond (map? x)
+                    (let [k (:kind x)]
+                      (when (and lang (= "main" (:name x))
+                                 (or (= "FunctionDecl" k) (and (= "VarDecl" k) (= "C" lang))))
+                        (when-let [o (mine-at x main)]
+                          (let [[l c] (line-col starts o)]
+                            (.add out {:line l :col c :kind :error :rule :main-linkage :msg "cannot declare '::main' with a linkage specification"}))))
+                      (cond (= k "LinkageSpecDecl") (doseq [y (:inner x)] (w y (:language x)))
+                            (= k "NamespaceDecl") (doseq [y (:inner x)] (w y lang))
+                            (nil? k) (doseq [y (if (vector? x) x [])] (w y lang))
+                            :else nil))
+                    (vector? x) (doseq [y x] (w y lang))
+                    :else nil))]
+      (w (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj main-linkage)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
