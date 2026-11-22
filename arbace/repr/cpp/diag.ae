@@ -3596,7 +3596,81 @@
       (w (:nodes u) {}))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify]))
+;; GCC's constant evaluation options (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Options Controlling C++ Dialect"):
+;; - -fconstexpr-loop-limit=n, "the maximum number of iterations for a loop in C++14 constexpr functions" (default 262144): a loop of a
+;;   constexpr function a constexpr variable's initializer calls that never ends -- its condition the constant true, or none, and no
+;;   break, return or goto in its body -- exceeds any limit, "constexpr loop iteration count exceeds limit of N", at the loop
+;;   (cpp1y/constexpr-loop6.C);
+;; - -fimplicit-constexpr, "make inline functions implicitly constexpr": an inline function a constexpr variable's initializer calls is
+;;   evaluated, and a call in it of a function neither constexpr nor inline is "call to non-'constexpr' function", at that call
+;;   (ext/fimplicit-constexpr1.C);
+;; - -fno-immediate-escalation, which turns off P2564R3's escalation of a constexpr function calling a consteval one: such a call with
+;;   an argument that names one of the caller's parameters is no constant expression, "'id(i)' is not a constant expression", at the
+;;   call, in a function template when the unit names it outside its definition (cpp2a/consteval-prop17.C).
+
+(defn constexpr-options
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        dargs (concat (:args u) *driver-args*)
+        report! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                              (when (= main (or (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :constexpr-option :msg msg})))))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr" "ExprWithCleanups"} (:kind x)) (strip (first (:inner x))) x))
+        tops (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:nodes u))
+        fns (into {} (for [n tops
+                           :let [f (if (= "FunctionTemplateDecl" (:kind n)) (some #(when (= "FunctionDecl" (:kind %)) %) (:inner n)) n)]
+                           :when (and (= "FunctionDecl" (:kind f)) (string? (:name f)))]
+                       [(:name f) f]))
+        called (fn [v] (some (fn [x] (let [x (strip x)] (when (= "CallExpr" (:kind x)) (get fns (get-in (some-> (first (:inner x)) strip) [:referencedDecl :name]))))) (:inner v)))
+        cvars (for [v (:nodes u) :when (and (= "VarDecl" (:kind v)) (:constexpr v))] v)
+        limit (or (some #(second (re-matches #"-fconstexpr-loop-limit=(\d+)" %)) dargs) "262144")]
+    ;; loops that never end
+    (doseq [v cvars :let [f (called v)] :when (and f (:constexpr f))]
+      (walk-nodes (fn [n _]
+                    (when (#{"WhileStmt" "DoStmt" "ForStmt"} (:kind n))
+                      (let [c (case (:kind n) "WhileStmt" (first (:inner n)) "DoStmt" (second (:inner n)) nil)
+                            forever (case (:kind n)
+                                      "ForStmt" (not-any? #(and (map? %) (not (#{"CompoundStmt" "NullStmt" "DeclStmt"} (:kind %)))) (butlast (:inner n)))
+                                      (let [c (some-> c strip)] (or (and (= "CXXBoolLiteralExpr" (:kind c)) (true? (:value c)))
+                                                                    (and (= "IntegerLiteral" (:kind c)) (not= "0" (str (:value c)))))))
+                            exits (let [r (atom false)] (walk-nodes (fn [x _] (when (#{"BreakStmt" "ReturnStmt" "GotoStmt" "CXXThrowExpr"} (:kind x)) (reset! r true))) (:inner n) nil) @r)]
+                        (when (and forever (not exits))
+                          (report! n (str "constexpr loop iteration count exceeds limit of " limit " (use '-fconstexpr-loop-limit=' to increase the limit)"))))))
+                  (:inner f) nil))
+    ;; -fimplicit-constexpr
+    (when (some #{"-fimplicit-constexpr"} dargs)
+      (doseq [v cvars :let [g (called v)] :when (and g (:inline g) (not (:constexpr g)))]
+        (walk-nodes (fn [n _]
+                      (when (= "CallExpr" (:kind n))
+                        (when-let [h (get fns (get-in (some-> (first (:inner n)) strip) [:referencedDecl :name]))]
+                          (when (and (not (:constexpr h)) (not (:inline h)) (not (:_consteval h)))
+                            (report! n (str "call to non-'constexpr' function '" (:name h) "'"))))))
+                    (:inner g) nil)))
+    ;; -fno-immediate-escalation
+    (when (some #{"-fno-immediate-escalation"} dargs)
+      (let [refs (let [acc (java.util.ArrayList.)]
+                   (walk-nodes (fn [x _] (when (= "DeclRefExpr" (:kind x)) (when-let [o (get-in x [:range :begin :offset])] (.add acc [(get-in x [:referencedDecl :name]) (long o)])))) (:nodes u) nil)
+                   acc)]
+        (doseq [n tops
+                :let [tmpl? (= "FunctionTemplateDecl" (:kind n))
+                      f (if tmpl? (some #(when (= "FunctionDecl" (:kind %)) %) (:inner n)) n)
+                      b (long (or (get-in n [:range :begin :offset]) -1)) e (long (or (get-in n [:range :end :offset]) -1))
+                      ;; (an abbreviated function template, auto among its parameters' types, is a template too)
+                      tmpl? (or tmpl? (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner f)))]
+                :when (and (= "FunctionDecl" (:kind f)) (not (:_consteval f))
+                           (or (not tmpl?) (some (fn [[nm o]] (and (= nm (:name f)) (or (< (long o) b) (> (long o) e)))) refs)))
+                :let [params (set (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (:inner f)))]]
+          (walk-nodes (fn [c _]
+                        (when (= "CallExpr" (:kind c))
+                          (when-let [h (get fns (get-in (some-> (first (:inner c)) strip) [:referencedDecl :name]))]
+                            (when (and (:_consteval h)
+                                       (some #(let [a (strip %)] (and (= "DeclRefExpr" (:kind a)) (contains? params (get-in a [:referencedDecl :name])))) (rest (:inner c))))
+                              (report! c (str "'" (:name h) "(...)' is not a constant expression"))))))
+                      (:inner f) nil))))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
