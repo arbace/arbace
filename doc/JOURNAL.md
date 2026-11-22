@@ -17241,3 +17241,21 @@ Checked on stage 0 (target/seed) and on b2a5b50d4819: native/parse-text of a sam
 no warning. Measured on b2a5b50d4819 with repr/python evaluated from the checkout: `eval("[" + "2," * N + "]")` at N=16,000
 peaks at 0.76 GB (3.1 GB before round 5), at N=65,580 (test_longexp's) 1.2 GB in 85 s (killed past 8 GB before); compiled,
 the gate's build at this key will time it.
+
+## 2026-11-22: py-mods-1122, round 5's proof: the compile rows of :host-memory move
+
+`bin/pyi check --fresh --only` (PYI_RUNTIME=compiled, PYI_RUNNER=python3) on b2a5b50d4819's compiled runtime with this
+branch's repr/python evaluated from the checkout (c058a80c4): every target passes. :host-memory's compile rows (7):
+test_longexp LongExpText.test_longexp, test_fstring TestCase.test_many_expressions, test_code_module
+TestInteractiveConsole.test_compile_error, test_pdb PdbTestCase.test_compile_error_message, test_pyrepl
+TestMoreLines.test_compile_error_single_line, test_modulefinder ModuleFinderTest.test_extended_opargs, test_cmd_line
+CmdLineTest.test_relativedir_bug46421; and two :runner-limits rows of the same run, test_concurrent_futures.test_deadlock's
+ProcessPoolSpawnExecutorDeadlockTest.test_shutdown_deadlock_pickle and test_ssl ThreadedTests.test_recv_send. The three
+compile_error rows were never the parser's depth (pyi answers MemoryError "Parser stack overflowed" by 10,000 levels) but
+lex's stream copying the 100,002-character line for each of its 100,001 tokens. Controls of the reader: test_tokenize 132 of
+132, test_grammar 75 of 75, test_syntax 40 and 8 cpython-only, test_fstring 93 and one skipped by the test, the one failing
+test_expression_in_interactive_after_buffer_resize a 30 s subprocess timeout of `python3 -i` on this executable, which
+evaluates the reader from the checkout in every process (about 40 s): it waits for the build at this branch's key. The
+read checks on stage 0 from this checkout: lex-check samples 6 of 6 and lex-errors 62 of 62, parse-check --full samples 6
+of 6 and lex-errors 62 of 62 (4 with non-ASCII lines), their controls failing as they must. Runs in
+.tmp/repr-python/pyi/check/only-6e52ccff8b34 and only-680ec2972e63 of the py-mods worktree.
