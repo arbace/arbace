@@ -3224,7 +3224,147 @@
                 (:nodes u) nil)
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface]))
+;; GCC's maximum object size (cpp-gnu, 2026-11-22; [intro.compliance.general]/2's resource limits, [dcl.array]/1's bound a
+;; converted constant expression of type size_t: GCC refuses an object larger than PTRDIFF_MAX, 2^63-1 on x86-64, so that pointer
+;; differences within it are defined, [expr.add]/5): an array variable, or an array member of a class template's specialization the
+;; unit names by its arguments, whose size in bytes passes it: "size of array 'a' exceeds maximum object size '9223372036854775807'",
+;; at the declarator; the variable then declares nothing, its later uses in the block "'a' was not declared in this scope"
+;; (other/large-size-array.C, template/array32.C). The bounds read here: integer literals, their arithmetic, a template's
+;; non-type parameters; the elements fundamental types or pointers.
+
+(defn- int-eval
+  "The value of an integer constant expression's text (literals with their suffixes, + - * / % << >> & | ^ ~, parentheses, names
+  `env` maps to numbers) as a BigInteger, or nil."
+  [^String text env]
+  (let [toks (vec (re-seq #"0[xX][0-9a-fA-F]+[uUlL]*|\d+[uUlL]*|[A-Za-z_]\w*|<<|>>|[-+*/%&|^~()]" (str text)))
+        pos (atom 0)
+        pk (fn [] (get toks @pos))
+        nx (fn [] (let [t (pk)] (swap! pos inc) t))
+        prec {"|" 1 "^" 2 "&" 3 "<<" 4 ">>" 4 "+" 5 "-" 5 "*" 6 "/" 6 "%" 6}]
+    (try
+      (letfn [(prim []
+                (let [t (nx)]
+                  (cond (nil? t) (throw (ex-info "end" {}))
+                        (= t "(") (let [v (expr 0)] (when-not (= ")" (nx)) (throw (ex-info ")" {}))) v)
+                        (= t "-") (.negate ^java.math.BigInteger (prim))
+                        (= t "+") (prim)
+                        (= t "~") (.not ^java.math.BigInteger (prim))
+                        (re-find #"^0[xX]" t) (java.math.BigInteger. (str/replace (subs t 2) #"[uUlL]+$" "") 16)
+                        (re-find #"^0\d" t) (java.math.BigInteger. (str/replace (subs t 1) #"[uUlL]+$" "") 8)
+                        (re-find #"^\d" t) (java.math.BigInteger. (str/replace t #"[uUlL]+$" ""))
+                        (contains? env t) (java.math.BigInteger. (str (get env t)))
+                        :else (throw (ex-info "name" {})))))
+              (expr [mp]
+                (loop [l (prim)]
+                  (let [op (pk) pr (get prec op)]
+                    (if (and pr (> (long pr) (long mp)))
+                      (do (nx)
+                          (let [r (expr pr) ^java.math.BigInteger l l ^java.math.BigInteger r r]
+                            (recur (case op "+" (.add l r) "-" (.subtract l r) "*" (.multiply l r) "/" (.divide l r) "%" (.mod l r)
+                                         "<<" (.shiftLeft l (.intValue r)) ">>" (.shiftRight l (.intValue r))
+                                         "&" (.and l r) "|" (.or l r) "^" (.xor l r)))))
+                      l))))]
+        (let [v (expr 0)] (when (nil? (pk)) v)))
+      (catch Exception _ nil))))
+
+(defn object-sizes
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        max-size (java.math.BigInteger. "9223372036854775807")
+        report! (fn [n msg] (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :object-size :msg msg})))))
+        size-of (fn [^String qt env]
+                  ;; the array type's size in bytes, or nil
+                  (when-let [[_ el dims] (re-matches #"(.*?)\s*((?:\[[^\[\]]+\])+)" (str/trim qt))]
+                    (let [es (or (int-type-size el) (float-type-size el))
+                          ds (map #(int-eval % env) (map second (re-seq #"\[([^\[\]]+)\]" dims)))]
+                      (when (and es (every? some? ds))
+                        (reduce #(.multiply ^java.math.BigInteger %1 ^java.math.BigInteger %2) (java.math.BigInteger/valueOf (long es)) ds)))))
+        too-big? (fn [v] (and v (pos? (.compareTo ^java.math.BigInteger v max-size))))
+        tmpls (into {} (for [t (:nodes u) :when (= "ClassTemplateDecl" (:kind t))] [(:name t) t]))]
+    ;; variables (a failed one's later uses in its block)
+    (letfn [(w [x]
+              (cond (map? x) (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v))
+                    (vector? x) (loop [ys x failed #{}]
+                                  (when-let [y (first ys)]
+                                    (when (seq failed)
+                                      (walk-nodes (fn [d _] (when (and (= "DeclRefExpr" (:kind d)) (contains? failed (get-in d [:referencedDecl :name])))
+                                                              (report! d (str "'" (get-in d [:referencedDecl :name]) "' was not declared in this scope"))))
+                                                  y nil))
+                                    (w y)
+                                    (let [bad (when (map? y)
+                                                (for [v (if (= "DeclStmt" (:kind y)) (:inner y) [y])
+                                                      :when (and (= "VarDecl" (:kind v)) (string? (:name v)) (too-big? (size-of (str (get-in v [:type :qualType])) {})))]
+                                                  (do (report! v (str "size of array '" (:name v) "' exceeds maximum object size '9223372036854775807'")) (:name v))))]
+                                      (recur (rest ys) (into failed bad)))))
+                    :else nil))]
+      (w (:nodes u)))
+    ;; a class template's array members at the specializations the unit's variables name
+    (walk-nodes (fn [v _]
+                  (when (= "VarDecl" (:kind v))
+                    (when-let [[_ nm as] (re-matches #"(?:struct |class )?(\w+)<(.*)>" (str/trim (str (get-in v [:type :qualType]))))]
+                      (when-let [t (get tmpls nm)]
+                        (let [ps (vec (keep #(when (= "NonTypeTemplateParmDecl" (:kind %)) (:name %)) (:inner t)))
+                              args (map str/trim (str/split as #","))
+                              env (into {} (keep (fn [[p a]] (when-let [v (int-eval a {})] [p v])) (map vector ps args)))
+                              r (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner t))]
+                          (when (= (count ps) (count args) (count env))
+                            (doseq [f (:inner r) :when (= "FieldDecl" (:kind f))]
+                              (when (too-big? (size-of (str (get-in f [:type :qualType])) env))
+                                (report! f (str "size of array '" (:name f) "' exceeds maximum object size '9223372036854775807'"))))))))))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+;; GNU's variable-length arrays in C++ (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Arrays of Variable Length": an automatic array
+;; whose bound is no constant, its type variably modified, as C's 6.7.6.2): such a type for a data member or a parameter (a local
+;; class's, through a typedef of the block; "data member may not have variably modified type", "parameter may not have variably
+;; modified type", diagnostic/variably-modified-type-1.C), or as a function template's explicit template argument ("'int [n]' is a
+;; variably modified type", at the template whose specialization it would make, template/pr65390.C). A bound is variable when it
+;; names a variable or parameter of the function that is neither const nor constexpr.
+
+(defn vla-types
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :vla :msg msg})))))
+        tmpl-fns (into {} (for [t (:nodes u) :when (= "FunctionTemplateDecl" (:kind t))] [(:name t) (or (some #(when (= "FunctionDecl" (:kind %)) %) (:inner t)) t)]))
+        ;; (a name inside sizeof, alignof or decltype is no evaluation: such a bound is constant)
+        vla? (fn [^String qt runtime]
+               (some (fn [[_ b]] (some #(contains? runtime %)
+                                       (re-seq #"[A-Za-z_]\w*" (-> b (str/replace #"\b(?:sizeof|alignof|__alignof__|_Alignof|decltype|__typeof__|typeof)\s*\([^()]*\)" "")
+                                                                    (str/replace #"\bsizeof\s+\w+" "")))))
+                     (re-seq #"\[([^\[\]]+)\]" qt)))]
+    (doseq [f (:nodes u) :when (#{"FunctionDecl" "CXXMethodDecl"} (:kind f))]
+      (let [runtime (java.util.HashSet.)
+            vtypes (java.util.HashSet.)]
+        (doseq [pv (:inner f) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)) (not (re-find #"\bconst\b" (str (get-in pv [:type :qualType])))))]
+          (.add runtime (:name pv)))
+        (walk-nodes (fn [n _]
+                      (case (:kind n)
+                        "VarDecl" (when (and (string? (:name n)) (not (:constexpr n)) (not (re-find #"^\s*const\b|\bconst\s*$" (str (get-in n [:type :qualType])))))
+                                    (.add runtime (:name n)))
+                        ("TypedefDecl" "TypeAliasDecl") (when (vla? (str (get-in n [:type :qualType])) runtime) (.add vtypes (:name n)))
+                        "CXXRecordDecl" (doseq [m (:inner n)]
+                                          (let [uses? (fn [x] (let [qt (str (get-in x [:type :qualType]))]
+                                                                (or (vla? qt runtime) (some #(re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote %) "\\b")) qt) vtypes))))]
+                                            (case (:kind m)
+                                              "FieldDecl" (when (uses? m) (report! m "data member may not have variably modified type"))
+                                              ("CXXMethodDecl" "CXXConstructorDecl") (doseq [pv (:inner m) :when (and (= "ParmVarDecl" (:kind pv)) (uses? pv))]
+                                                                                       (report! pv "parameter may not have variably modified type"))
+                                              nil)))
+                        "DeclRefExpr" (when-let [as (:explicitTemplateArgs n)]
+                                        (when-let [t (get tmpl-fns (get-in n [:referencedDecl :name]))]
+                                          (when-let [a (some #(when (vla? (str %) runtime) %) as)]
+                                            (report! t (str "'" a "' is a variably modified type")))))
+                        nil))
+                    (:inner f) nil)))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
