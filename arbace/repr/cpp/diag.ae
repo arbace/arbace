@@ -5389,6 +5389,32 @@
 
 (swap! checks conj defaulted-comparisons)
 
+;; [dcl.struct.bind]/1 with [dcl.spec.auto.general]/2 (P1141): a structured binding declaration's decl-specifier-seq has the
+;; placeholder `auto` alone, no type-constraint ("structured binding declaration cannot have constrained 'auto' type", at the
+;; declaration; templates' too, GCC diagnosing their definitions).
+
+(defn constrained-bindings
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        ;; (GCC accepts it as an extension with a pedwarn, which -pedantic-errors makes an error: concepts-placeholder10.C)
+        args (:args u)
+        pe? (and (some #{"-pedantic-errors"} args) (not (some #{"-Wno-pedantic"} (drop-while #(not= "-pedantic-errors" %) args))))]
+    (walk-nodes (fn [n _]
+                  (when (and pe? (= "DecompositionDecl" (:kind n)))
+                    (let [b (get-in n [:range :begin :offset])]
+                      (when (and b (= main (get-in n [:range :begin :file])))
+                        (let [t (subs src (long b) (min n-src (+ (long b) 300)))
+                              head (let [i (.indexOf ^String t "[")] (when (pos? i) (subs t 0 i)))]
+                          (when (and head (re-find #"[A-Za-z_][\w:]*\s*(?:<[^\[]*>)?\s+auto\b" (str/replace head #"\b(?:const|volatile|static|thread_local|inline|constexpr|constinit|extern)\b" "")))
+                            (let [[l c] (line-col starts (long b))]
+                              (.add out {:line l :col c :kind :error :rule :structured-binding
+                                         :msg "structured binding declaration cannot have constrained 'auto' type"}))))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj constrained-bindings)
+
 ;; The built-in three-way comparison ([expr.spaceship]/2-8): with operands the check can type (literals, variables, enumerators, the
 ;; address of a function or member, a call's declared type), none of type std::nullptr_t ("ordered comparison of pointer with
 ;; 'std::nullptr_t'"), not a bool with another type, no array operand (no array-to-pointer conversion), no unscoped enumeration with a
@@ -5482,6 +5508,267 @@
     (vec (distinct out))))
 
 (swap! checks conj builtin-spaceship)
+
+;; Concepts' and placeholders' declarations ([temp.concept]/2-5, [dcl.spec.auto.general]/5, [temp.param]/14, [temp.friend]/9,
+;; [expr.prim.req.general]/5, [basic.scope.scope]/4): a concept is declared at namespace scope ("concept 'C' not in namespace scope"),
+;; with one template-head and no constraint on its parameters ("a concept cannot be constrained", "concept 'C' has multiple template
+;; parameter lists"), once ("redefinition of concept 'b'"), and not with a class of its name in its scope ("'E' redeclared as different
+;; kind of entity"); a requires-expression's parameters have distinct names ("conflicting declaration"); an alias-declaration or typedef
+;; has no placeholder type ("'auto' not allowed in alias declaration", "typedef declared 'auto'"); a template parameter pack has no
+;; default argument ("template parameter pack cannot have a default argument"); a non-template friend function declaration with a
+;; requires-clause, or a friend function template whose requires-clause names its enclosing template's parameters, is a definition
+;; ("non-template friend 'foo' with a requires-clause must be a definition", "friend 'bar' with a requires-clause that depends on an
+;; enclosing template parameter must be a definition").
+
+(defn concept-decl-rules
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg] (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :concept :msg msg}))))
+        names-in (fn [x] (let [acc (java.util.HashSet.)]
+                           (walk-nodes (fn [d _] (when (= "DeclRefExpr" (:kind d)) (.add acc (str (get-in d [:referencedDecl :name]))))) x nil)
+                           acc))
+        tparam-names (fn [t] (set (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner t))))
+        has-body? (fn [f] (some #(#{"CompoundStmt" "CXXTryStmt"} (:kind %)) (:inner f)))
+        tparams! (fn [t]
+                   (doseq [p (:inner t) :when (and (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind p)) (:isParameterPack p))]
+                     (when (or (some #(= "TemplateArgument" (:kind %)) (:inner p))
+                               (and (= "NonTypeTemplateParmDecl" (:kind p)) (seq (remove #(#{"ConceptSpecializationExpr" "NativeAttr"} (:kind %)) (:inner p)))))
+                       (at! p "template parameter pack cannot have a default argument"))))]
+    (letfn [(scope! [nodes cls? enclosing]
+              (let [seen (java.util.HashMap.)]
+                (doseq [n nodes :when (map? n)]
+                  (case (:kind n)
+                    "ConceptDecl"
+                    (do (when cls? (at! n (str "concept '" (:name n) "' not in namespace scope")))
+                        (when (some :_tc (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl"} (:kind %)) (:inner n)))
+                          (at! n "a concept cannot be constrained"))
+                        (let [b (get-in n [:range :begin :offset])]
+                          (when (and b (mine? n) (or (re-find #"^template\s*<[^{};]*?>\s*template\s*<" (subs src (long b) (min n-src (+ (long b) 300))))
+                                                     (re-find #"template\s*<[^{};]*>\s*$" (last (str/split (subs src (max 0 (- (long b) 300)) (long b)) #"[;{}]" -1)))))
+                            (at! n (str "concept '" (:name n) "' has multiple template parameter lists"))))
+                        (case (.get seen (:name n))
+                          :concept (at! n (str "redefinition of concept '" (:name n) "'"))
+                          :class (at! n (str "'" (:name n) "' redeclared as different kind of entity"))
+                          nil)
+                        (.put seen (:name n) :concept))
+                    "CXXRecordDecl" (do (when (and (:name n) (:completeDefinition n) (not (:isImplicit n)))
+                                          (when (= :concept (.get seen (:name n))) (at! n (str "'" (:name n) "' redeclared as different kind of entity")))
+                                          (when-not (.containsKey seen (:name n)) (.put seen (:name n) :class)))
+                                        (scope! (:inner n) true enclosing))
+                    ("NamespaceDecl" "LinkageSpecDecl") (scope! (:inner n) false enclosing)
+                    "ClassTemplateDecl" (do (tparams! n)
+                                            (scope! (filter #(= "CXXRecordDecl" (:kind %)) (:inner n)) cls? (into enclosing (tparam-names n))))
+                    ("FunctionTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl") (tparams! n)
+                    "TypeAliasDecl" (when (re-matches #"(?:(?:const|volatile)\s+)*auto" (str/trim (str (get-in n [:type :qualType]))))
+                                      (at! n "'auto' not allowed in alias declaration"))
+                    "TypedefDecl" (when (re-matches #"(?:(?:const|volatile)\s+)*auto" (str/trim (str (get-in n [:type :qualType]))))
+                                    (at! n "typedef declared 'auto'"))
+                    "FriendDecl" (doseq [f (:inner n)]
+                                   (case (:kind f)
+                                     "FunctionDecl" (when (and (:trailingRequiresClause f) (not (has-body? f)))
+                                                      (at! f (str "non-template friend '" (:name f) "' with a requires-clause must be a definition")))
+                                     "FunctionTemplateDecl" (when-let [fd (some #(when (= "FunctionDecl" (:kind %)) %) (:inner f))]
+                                                              (when (and (:trailingRequiresClause fd) (not (has-body? fd))
+                                                                         (some (set enclosing) (names-in (:trailingRequiresClause fd))))
+                                                                (at! fd (str "friend '" (:name fd) "' with a requires-clause that depends on an enclosing template parameter must be a definition"))))
+                                     nil))
+                    nil))))]
+      (scope! (:nodes u) false #{}))
+    (walk-nodes (fn [n _]
+                  (when (= "RequiresExpr" (:kind n))
+                    (let [seen (java.util.HashSet.)]
+                      (doseq [p (:params n) :when (:name p)]
+                        (when-not (.add seen (:name p)) (at! p (str "conflicting declaration '" (get-in p [:type :qualType]) " " (:name p) "'")))))))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj concept-decl-rules)
+
+;; Abbreviated function templates and constrained placeholders ([dcl.fct]/22, [temp.mem]/4, [over.literal]/5, [dcl.spec.auto.general]/4):
+;; a function with a placeholder parameter is a template, so not virtual ("templates may not be 'virtual'") nor a literal operator
+;; (whose template has an empty parameter-declaration-clause: "literal operator template has invalid parameter list"); a function
+;; declarator with a trailing return type has plain auto ("'f' function with trailing return type has constrained 'auto' type
+;; specifier rather than plain 'auto'"), and a type-id no constrained placeholder ("invalid use of constrained 'auto' type").
+
+(defn abbreviated-templates
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg] (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :placeholder :msg msg}))))
+        auto-param? (fn [f] (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner f)))
+        head (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:loc :offset])]
+                       (when (and b e (mine? n) (< (long b) (long e) n-src)) (subs src (long b) (long e)))))]
+    (walk-nodes
+     (fn [n parent]
+       (case (:kind n)
+         ("CXXMethodDecl" "FunctionDecl")
+         (do (when (and (:virtual n) (auto-param? n)) (at! n "templates may not be 'virtual'"))
+             (when (and (re-find #"^operator\s*\"\"" (str (:name n))) (auto-param? n))
+               (at! n "literal operator template has invalid parameter list"))
+             (when (re-find #"\)\s*(?:const\s*|noexcept\s*)*->" (str (get-in n [:type :qualType])))
+               (when-let [h (head n)]
+                 (when (re-find #"[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\s*$" (str/replace h #"\b(?:static|inline|constexpr|consteval|virtual|explicit|friend|extern|const|volatile)\b" ""))
+                   (at! n (str "'" (:name n) "' function with trailing return type has constrained 'auto' type specifier rather than plain 'auto'"))))))
+         ("TypeAliasDecl" "TypedefDecl")
+         (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
+           (when (and b e (mine? n) (< (long b) (long e) n-src))
+             (let [t (subs src (long b) (inc (long e)))
+                   ty (if (= "TypeAliasDecl" (:kind n)) (second (re-find #"(?s)=(.*)$" t)) t)]
+               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
+                 (at! n "invalid use of constrained 'auto' type")))))
+         nil))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj abbreviated-templates)
+
+;; Prospective destructors (C++20, [class.dtor]/4, P0848): of a class's prospective destructors with constraints the check can
+;; evaluate (true, false, !, &&, || and parentheses), the destructor is the one whose constraints are satisfied; two satisfied, none
+;; more constrained, is "destructor for 'A<int>' is ambiguous", none satisfied "no viable destructor for 'B<int>'", at the class, when
+;; the unit names a specialization of it (a class template's are judged at its specialization's name, here its first written one).
+
+(defn- const-bool
+  "The value of a constraint's text made only of true, false, !, &&, ||, not, and, or and parentheses, nil otherwise."
+  [^String t]
+  (let [t (-> t (str/replace #"\bnot\b" "!") (str/replace #"\band\b" "&&") (str/replace #"\bor\b" "||") str/trim)]
+    (when (re-matches #"[\s()!&|]*(?:(?:true|false)[\s()!&|]*)+" t)
+      (let [toks (re-seq #"true|false|&&|\|\||!|\(|\)" t)
+            pos (volatile! 0)
+            peek* (fn [] (nth toks @pos nil))
+            next* (fn [] (let [x (peek* )] (vswap! pos inc) x))]
+        (letfn [(prim [] (let [x (next*)]
+                           (case x
+                             "true" true "false" false
+                             "!" (not (prim))
+                             "(" (let [v (orx)] (next*) v)
+                             (throw (ex-info "bad" {})))))
+                (andx [] (loop [v (prim)] (if (= "&&" (peek*)) (do (next*) (let [w (prim)] (recur (and v w)))) v)))
+                (orx [] (loop [v (andx)] (if (= "||" (peek*)) (do (next*) (let [w (andx)] (recur (or v w)))) v)))]
+          (try (let [v (orx)] (when (= @pos (count toks)) (boolean v))) (catch Throwable _ nil)))))))
+
+(defn prospective-destructors
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        text (fn [x] (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset]) l (get-in x [:range :end :tokLen])]
+                       (when (and b e l (<= (long b) (+ (long e) (long l)) n-src)) (subs src (long b) (+ (long e) (long l))))))]
+    (walk-nodes
+     (fn [n parent]
+       (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n) (= main (get-in n [:range :begin :file])))
+         (let [ds (filter #(= "CXXDestructorDecl" (:kind %)) (:inner n))
+               vals (map #(when-let [rc (:trailingRequiresClause %)] (when-let [t (text rc)] (const-bool t))) ds)]
+           (when (and (>= (count ds) 2) (every? some? vals))
+             (let [tmpl? (= "ClassTemplateDecl" (:kind parent))
+                   spec (when tmpl? (second (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote (:name n)) "\\s*(<[^<>;]*>)")) src)))
+                   cn (str (:name n) (or spec ""))
+                   sat (count (filter true? vals))
+                   o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+               (when (and o (or (not tmpl?) spec))
+                 (let [[l c] (line-col starts (long o))]
+                   (cond (>= sat 2) (.add out {:line l :col c :kind :error :rule :destructor :msg (str "destructor for '" cn "' is ambiguous")})
+                         (zero? sat) (.add out {:line l :col c :kind :error :rule :destructor :msg (str "no viable destructor for '" cn "'")})
+                         :else nil))))))))
+     (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj prospective-destructors)
+
+;; A friend class template's declaration redeclares the class template of its name, so its template-head is equivalent to the
+;; earlier one's ([temp.over.link]/6-7, [temp.friend]): the same type-constraints on its parameters and an equivalent
+;; requires-clause, its tokens the same ("redeclaration of 'template<class T> struct A' with different constraints", at the friend).
+
+(defn friend-template-constraints
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        text (fn [x] (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset]) l (get-in x [:range :end :tokLen])]
+                       (when (and b e l (<= (long b) (+ (long e) (long l)) n-src)) (str/replace (subs src (long b) (+ (long e) (long l))) #"\s+" ""))))
+        sig (fn [t rc] [(mapv #(vec (:_tc %)) (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl"} (:kind %)) (:inner t)))
+                        (when rc (or (text rc) :unknown))])
+        originals (java.util.HashMap.)]
+    ((fn top [nodes]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (top (:inner n))
+           "ClassTemplateDecl" (when-not (.containsKey originals (:name n)) (.put originals (:name n) (sig n (:requiresClause n))))
+           nil)))
+     (:nodes u))
+    (walk-nodes (fn [fd _]
+                  (when (and (= "FriendDecl" (:kind fd)) (= main (get-in fd [:range :begin :file])))
+                    (when-let [t (some #(when (= "ClassTemplateDecl" (:kind %)) %) (:inner fd))]
+                      (when-let [orig (.get originals (:name t))]
+                        (let [mine (sig t (or (:requiresClause fd) (:requiresClause t)))]
+                          (when (and (not (some #{:unknown} [(second orig) (second mine)])) (not= orig mine))
+                            (when-let [o (or (get-in t [:loc :offset]) (get-in (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner t)) [:loc :offset]) (get-in fd [:range :begin :offset]))]
+                              (let [[l c] (line-col starts (long o))]
+                                (.add out {:line l :col c :kind :error :rule :friend
+                                           :msg (str "redeclaration of class template '" (:name t) "' with different constraints")})))))))))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj friend-template-constraints)
+
+;; [temp.names]/8 with [expr.prim.id.qual]/1: a concept-id names no type or namespace, so it is no nested-name-specifier
+;; ("concept-id 'foo<T>' in nested-name-specifier", at the qualified name).
+
+(defn concept-qualifiers
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        concepts (java.util.HashSet.)
+        ;; (cpp-diag-a: a concept-id in an expression names every template parameter of its concept, [temp.arg.general]/4-5:
+        ;; "wrong number of template arguments (1, should be 2)"; a concept with a pack or a default argument not judged)
+        arity (java.util.HashMap.)]
+    (walk-nodes (fn [n _] (when (and (= "ConceptDecl" (:kind n)) (:name n))
+                            (.add concepts (:name n))
+                            (let [ps (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:inner n))]
+                              (.put arity (:name n) (if (or (.containsKey arity (:name n)) (some :isParameterPack ps) (some #(seq (:inner %)) ps)) :unknown (count ps))))))
+                (:nodes u) nil)
+    (when (pos? (.size concepts))
+      (walk-nodes (fn [n _]
+                    (when (and (= "DeclRefExpr" (:kind n)) (:explicitTemplateArgs n) (empty? (:qualifier n)))
+                      (let [k (.get arity (str (get-in n [:referencedDecl :name])))]
+                        (when (and (number? k) (not= (long k) (count (:explicitTemplateArgs n))) (not-any? #(str/includes? (str %) "...") (:explicitTemplateArgs n)))
+                          (when-let [o (when (= main (get-in n [:range :begin :file])) (get-in n [:range :begin :offset]))]
+                            (let [[l col] (line-col starts (long o))]
+                              (.add out {:line l :col col :kind :error :rule :concept
+                                         :msg (str "wrong number of template arguments (" (count (:explicitTemplateArgs n)) ", should be " k ")")})))))))
+                    (:nodes u) nil)
+      (walk-nodes (fn [n _]
+                    (when-let [q (seq (:qualifier n))]
+                      (when-let [c (some #(let [b (str/trim (str/replace (str %) #"<.*$" ""))] (when (and (str/includes? (str %) "<") (.contains concepts b)) %)) q)]
+                        (when-let [o (when (= main (get-in n [:range :begin :file])) (get-in n [:range :begin :offset]))]
+                          (let [[l col] (line-col starts (long o))]
+                            (.add out {:line l :col col :kind :error :rule :concept :msg (str "concept-id '" c "' in nested-name-specifier")}))))))
+                  (:nodes u) nil))
+    (vec (distinct out))))
+
+(swap! checks conj concept-qualifiers)
+
+;; A placeholder type in a template argument ([dcl.spec.auto.general]/5 lists where auto may appear: no template-argument; the
+;; Concepts TS's `tuple<auto>` is gone from C++20): a declared variable's type with `auto` inside a template argument list is
+;; "invalid use of 'auto' in template argument" (decltype(auto) and a class template's deduction aside).
+
+(defn auto-template-args
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (and (#{"VarDecl" "FieldDecl"} (:kind n)) (= main (get-in n [:range :begin :file])))
+                    (let [t (str/replace (str (get-in n [:type :qualType])) #"decltype\(auto\)" "")]
+                      (when (re-find #"[A-Za-z_]\w*\s*<[^<>;=]*\bauto\b[^<>;=]*>" t)
+                        (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :placeholder :msg "invalid use of 'auto' in template argument"})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj auto-template-args)
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
