@@ -15739,6 +15739,9 @@ by design). doc/CLOJURE-DESIGN-REVIEW.md, "As built (2026-11-21)" and "Proposed 
   plus `:swing` and `:fn-code-type`, `:xml-stream` matching its run. Cells: eval 21,119 / 13 / 2, AOT 831 / 5 / 2, read and print
   unchanged; Clojure 99.7 complete (99.9 without by design). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
   `bin/records-check`: 0 problems.
+- `bin/clojure-tests --aot --essential` on the same build (the essential gate's subset, compilation and java-interop in it; its
+  compiling under compile_memlimit, 109 s): 15 namespaces, 342 tests, 7,308 assertions, 7,307 pass, java-interop's Swing error
+  expected, clj-1208 passing in the subset's program; no regressions, the control as a control must.
 - Checked besides: `bin/jrt build --package jrt`; `bin/j2g-unit` 222 pass and the 7 known with the own platform given
   (J2G_UNIT_PLATFORM: the "outside" failure without it is the main checkout's old platform pin, the same on the base).
 - Decisions for the user (doc/CLOJURE-DESIGN-REVIEW.md): CDR12 Swing's table model slice, CDR13 the reader conditionals' rule
