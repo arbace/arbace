@@ -476,6 +476,15 @@
                        (let [[_ hx al] x a (str "allocL" hx)]
                          (swap! static-data conj [a {:kind :memory :align al :mutable false :bytes hx :init (apply str (repeat (quot (count hx) 2) "1")) :relocs []}])
                          (list 'indirect (symbol a) 0))
+                       ;; 524-1 (a) (rust-c3x): a TypeId::of constant (inline-const's): its 16 bytes, each 8-byte half a pointer
+                       ;; into the type's GlobalAlloc::TypeId (:other) at the half as its offset, as rustc's CTFE writes it
+                       (and (seq? x) (= 'indirect-type-id (first x)))
+                       (let [[_ hx] x a (str "allocI" hx) t (str "allocT" hx)]
+                         (when-let [f (:const! facts)] (f true))
+                         (swap! static-data conj [t {:kind :other}])
+                         (swap! static-data conj [a {:kind :memory :align 8 :mutable false :bytes hx :init (apply str (repeat 16 "1"))
+                                                     :relocs [[0 t] [8 t]]}])
+                         (list 'indirect (symbol a) 0))
                        :else
                      (if (and (seq? x) (= 'static-ptr (first x)))
                        (let [id (second x) nm (static-name ours id)
@@ -976,7 +985,13 @@
                       (and lay (= 0 (:size lay))) '(zst)
                       (and (= "core::mem::needs_drop" *instance-def*) (= "::{constant#0}" sfx) (= [:bool] t)
                            (= 1 (count args)) (vector? (first args)) (not (#{:param :proj :infer} (ffirst args))))
-                      (list 'scalar (if (build/needs-drop? (first args)) 1 0) 1))]
+                      (list 'scalar (if (build/needs-drop? (first args)) 1 0) 1)
+                      ;; 524-1 (a) (rust-c3x): TypeId::of's `const { intrinsics::type_id::<T>() }` at T, rustc's type_id_hash
+                      ;; ported (mono/type-id-hash), an allocation of its 16 bytes whose two halves point into T's TypeId
+                      ;; allocation (runtime-body's fix-static); nil for a type it refuses
+                      (and (re-matches #"core::any::\{impl#\d+\}::of" (str *instance-def*)) (= "::{constant#0}" sfx)
+                           (= 1 (count args)) (vector? (first args)) (not (some #(and (vector? %) (#{:param :proj :infer} (first %))) (tree-seq coll? seq (first args)))))
+                      (when-let [hx (mono/type-id-hash (first args))] (list 'indirect-type-id hx)))]
         [text val]))))
 
 (defn- promoted-text

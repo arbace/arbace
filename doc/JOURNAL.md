@@ -18365,3 +18365,35 @@ which is out of every key and interpreted from the checkout. The resumed modules
 - bin/reap --record: Python eval 39,204 / 5,490 / 3,627 -> 40,552 / 5,300 / 2,472 (1,363 rows now pass against the
   record). bin/crops-score --record: Python completeness 0.9485 -> 0.9555 (meant 0.9772 -> 0.9840), maturity 1.0. The
   strict judge: 0 problems. records-check: 0 problems.
+
+## 2026-11-22: rust-c3x-1122: 524-1 (a), TypeId::of's constants computed natively (rustc's type_id_hash ported)
+
+From `mac/next` (`169119776`, the merged Rust line). rustc 1.99.1's TyCtxt::type_id_hash ported into arbace.rust.front.mono
+(`type-id-hash`), read in the pinned `rustc-1.99.1-src.tar.xz`: compiler/rustc_middle/src/ty/util.rs (type_id_hash: the type with
+its regions erased, StableHash into a StableHasher, Hash128), rustc_const_eval's write_type_id (the u128's little-endian bytes, each
+8-byte half a pointer into the type's GlobalAlloc::TypeId at the half as offset), rustc_data_structures/src/stable_hash.rs and
+vendor/rustc-stable-hash-0.1.2 (the writes: an isize one byte under 0xFF, usize 8 bytes, a str's Hash its bytes and 0xFF, a [u8]'s
+StableHash its length first), rustc_macros' stable_hash derive (an enum's mem::discriminant first), rustc_type_ir's ty_kind.rs,
+ty_info.rs (in 1.99 a Ty hashes its internee directly: no nested fingerprint), region_kind.rs (ReErased 6), rustc_middle's
+impls_ty.rs (a &List hashed as the Fingerprint of its own hash), adt.rs (AdtDefData likewise: did, variants, AdtFlags as u16,
+ReprOptions), ty/mod.rs (VariantDef, FieldDef with 1.99's mut_restriction, repr_options_of_def's field_shuffle_seed: the
+DefPathHash's to_smaller_hash), rustc_hir_id's definitions.rs (DefPathHash: the root's local hash the StableCrateId, a child's the
+Hash64 of parent local hash, DefPathData's discriminant, the name, the u32 disambiguator), rustc_hir_analysis' collect.rs (adt_def,
+lower_variant: VariantDiscr::Relative's distance from the last explicit one), rustc_resolve's try_resolve_visibility (an inherited
+field visibility the nearest module, a variant's field its enum's). A library ADT's facts come from its sources (mono's module-items):
+attributes (repr, non_exhaustive, fundamental, lang items, pin_v2), variants, fields, their visibility.
+
+Checked by `bin/rust-front type-id-check` (new, test/rust/front/type_id_check.ae): every TypeId::of constant the pack rust-front-rsi
+records (the type from a call's fndef form, the bytes from the instance's allocation): 6 of 10 equal (String, &str, u64, u32, i32,
+core's ParseIntError), 0 differ, 4 refused (the synthetic programs' own ADTs Noisy, AppError, Failure, and alloc's StringError local
+to an impl's method: program-local and impl-local ADTs are not read), the crossed control (each computed constant against the next
+case's recorded bytes) 6 of 6 differing. build_run's inline-const evaluates TypeId::of's `const { type_id::<T>() }` with it
+(`(indirect-type-id HEX)`, runtime-body's fix-static making the allocation and its two relocations into the type's :other
+allocation, counted a native const). The eval cases' TypeId constants are String, &str, u64 and u32 (panics 4, unwind 4, intrinsics'
+u32): all equal. pack-compare-test passed at the change. The program-level proof is item 1's RF_FACT_TRACE rsi-build (below).
+- `bin/rust-front essential` at the change (`996298710`): passed, its known summary, every control differing, 0 stub calls (18 min).
+- Share-generics (item 4 of the brief, not built): rustc 1.99.1's upstream_monomorphizations_provider read
+  (compiler/rustc_codegen_ssa/src/back/symbol_export.rs:500-560 of the pinned tarball): an instance several upstream crates export is
+  taken from the lowest StableCrateId, and a crate exports under share-generics the generic instances of its whole collection. The
+  question for the user, DECISION C3X-1, with options (whole collections natively, 8-12 days; std's reference without shared
+  generics, one re-pin night, recommended; the rlibs' exported symbols read, a record) in doc/rust/FRONTEND-SURVEY.md, "rust-c3x".
