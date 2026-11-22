@@ -17448,3 +17448,20 @@ which was 07:30 UTC: the session's clock notes ran two hours ahead that morning)
 - Haskell's fannkuch-redux and minimax (GHC's own -O0 run does not finish within the reference's 10 s; HES101) and T21305 (writeByteArray#
   past a 3-element array, undefined behaviour; HES96): n/a. Alternatives not taken: an optimizer for the own libraries' STG (HES100 (b)) so
   the two run like nofib's -O; by design.
+
+## 2026-11-22: the user's decisions on OCaml's by-design rows (queue 528's list, 528-1 to 528-15)
+
+Asked by the main session from the Mac's 528 report (reports/528-design-list.md on the queue, 88d2a7d92; about 12:00 UTC); answered by the user:
+- n/a: the 3 files with no TEST header (528-1); the 6 eval rows ocamltest runs only through ocamlopt (528-2; at AOT they stay and are
+  built, 528-3); bigarrfml, which ocamltest itself skips without gfortran (528-4; this host has none: :config-skipped by OC222 (a)'s
+  rule); fmt's styled_perf_bug, an endless timing benchmark (528-15); ocamlopt's own assembly and DWARF tests, func_sections, gdb and
+  lldb (528-10), and optargs (ocamlopt's inlining changing an allocation count, 528-14). Alternatives not taken: ocamlopt's rows kept by
+  design; all by design.
+- Built, each as its own task: the toplevel on oi through Dynlink (528-7), C threads registering with the runtime (528-12), compiler-libs'
+  bytecode tools on oi (528-13), testyield's lock hand-off and the suite's C stubs at AOT (528-14), cppo for yojson and containers
+  (528-15), and the 19 AOT rows of compile-only and tool tests by running the tools AOT-compiled (528-8 (a); at the compiled level if
+  compiler-libs does not fit the light one); with 528-3, 528-5 and 528-6 as 528 recommended. Alternatives not taken: the tool rows n/a at
+  AOT; only the cheap ones.
+- ocamldebug's tests (528-9, 7 eval + 7 AOT): n/a. Alternatives not taken: build it (2-3 weeks); by design.
+- fork (528-11, 7 + 7): n/a, as Python's fork; the opam tests that need packages outside the corpus's set (Base, ppx_expect, alcotest+bos,
+  b0; 528-15, 5 + 5): the packages vendored (pinned, fetched, built), as Haskell's. Alternatives not taken: both n/a; both by design.
