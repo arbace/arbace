@@ -506,3 +506,17 @@ Expected: 11 programs from known or unsupported to pass, no other change; then `
 ## Decided (2026-11-05, the user: Proposed 8)
 
 Proposed 8 (c): the AOT level uses :full forms only for programs whose source names runtime.Caller/Callers or holds a /*line directive.
+
+## Decided (2026-11-22, the user: Proposed 1 (b))
+
+Proposed 1 (b), reversing 1 (a) of 2026-11-05: gc's own compiler runs inside the executable, for the errorcheck programs
+whose flags or errors need gc's own passes (`:gc-flags` 28, `:gc-phases` 7; the rest of `-+`, `nowritebarrier`), the
+only route for them; built as compiled into the executable through goi's table rather than interpreted by goi (doc/go/GOI-SPEC.md,
+"Since v1: gc in the executable", which weighs the two).
+
+## As built: Proposed 1 (b) (2026-11-22, branch `go-gc-1122`)
+
+doc/go/GOI-SPEC.md, "Since v1: gc in the executable", holds the design: gc's closure as a renamed copy of tamago/cmd's and
+tamago/goroot's forms (`go/arbace/repr/go/internal/gc/`, `arbace.go.gc`, `bin/generated-check`), the driver
+`arbace/repr/go/gccompile` listed in goi's table, `bin/goi`'s `check_err_gc` (the forms of mode `:full` printed back and
+compiled by gc in the executable, judged as gc's reference), three controls.

@@ -5657,3 +5657,72 @@ go-build-complete 1, no-forms 137 and gc-reference 4 (n/a). The corpora were not
 linux-errtest-full and std need more than the 8 GiB a process may take outside the heavy lock; this branch changes nothing a
 read of a checked program gives): the copies read at main's key, re-keyed. Not built (next round): `escape_unique` and
 `nowritebarrier`'s write barrier checks.
+
+## Since v1: gc in the executable (2026-11-22, branch `go-gc-1122`)
+
+The user's decision of 2026-11-22: GOI-DESIGN-REVIEW.md's Proposed 1 (b), reversing 1 (a) of 2026-11-05: gc's own
+compiler runs inside the executable for the errorcheck programs whose flags or errors need gc's own passes, the only
+route for `:gc-flags` (28: `-live` 8, the SSA passes' `-d` 12, `-d=wb` 4, `-d=nil` 3, `-d=tailcall` 1), `:gc-phases`
+(7: "stack frame too large") and `:gc-std`'s last (`nowritebarrier`: gc's write barrier checks under `-+`).
+
+**Interpreted or compiled.** gc's compile package can run in the executable two ways: interpreted by goi from
+tamago/cmd's forms, or compiled into the program through goi's table, as go/parser, the dumper and gc's syntax are since
+GP7. Measured first (stage 0, light): goi's checker alone over cmd/compile's closure (tamago/cmd's forms of
+`cmd/compile/internal/gc` with its imports, 217 packages with the standard library's) takes 117 s and 6 GB resident,
+0 errors. Interpreting gc would pay that in every errorcheck process before goi built and ran gc's code, at goi's 10
+to 100 times gc's speed, through gc's SSA back end; compiled, gc compiles a test in well under a second (the
+standalone build below: 0.1 to 0.5 s) at a few hundred MB. Compiled is the lighter by orders of magnitude, and the
+truer: Go's compiler compiles gc's forms as `bin/toolchain-vendor check` already proves byte-identical to the
+originals, where goi interpreting gc would put goi's own divergences (§1.1: unsafe layout, finalizers, the collector)
+under gc's messages. Its costs: the executable grows by gc (a standalone build of the driver with the copy is 36 MB;
+the executable is 552 MB), goi's table checks the closure in each of its four configurations at each build whose key
+changed (about 2 minutes and 6 GB a configuration, measured above), and the copy is 696 committed files (27.9 MB).
+The checker accepting the whole closure (0 errors) is what made the table route possible at all.
+
+**The copy.** The program cannot import `cmd/compile`'s packages (cmd's internal packages, and the standard library's
+internal ones they import, are not importable from the module `arbace`), so they are held as a renamed copy,
+`go/arbace/repr/go/internal/gc/`, made by `arbace.go.gc`'s `copy-texts` from tamago/cmd's and tamago/goroot's forms
+and kept by `bin/generated-check` (its fourth section, `arbace -m arbace.go.gc generate OUT`), as gc's syntax is held as
+`arbace/repr/go/internal/syntax` since GP7 (shared: gc's copy imports that one): `cmd/compile/internal/X` as
+`arbace/repr/go/internal/gc/compile/X`, `cmd/internal/X` as `.../gc/cmd/X`, `golang.org/x/telemetry/...` (cmd's vendored
+copy; a path with a `vendor` element is refused by go build) as `.../gc/x/telemetry/...`, the standard library's
+`internal/X` as `.../gc/std/X`: 91 packages (49 of `cmd/compile/internal`, 21 of `cmd/internal`, 4 of telemetry, 17
+of `internal/`), every package `cmd/compile`'s main reaches for the program's four configurations (tamago/cmd's forms
+are one tree for linux and tamago, amd64 and arm64), each file's namespace, import paths and lines as they were but
+three changes: `:other-files` dropped (`ssa`'s and `obj/arm64`'s test assembly, `internal/abi`'s `stub.s`) and with
+it `internal/abi`'s `funcpc.go` (the runtime's two bodiless intrinsics, which gc names as strings and never calls);
+the two standard library files whose forms differ by configuration (tamago/goroot/arch/ARCH: `internal/goarch`'s
+`goarch.go`, `internal/buildcfg`'s `zbootstrap.go`) taken from amd64's with the `:val` annotations that differ, or
+that follow `runtime.GOOS`, removed, and their two package files without `:positions` (goi's checker computes those
+values per configuration; an annotation that disagrees, or one missing from a package of converted forms, which
+`:positions` marks, is an error). Checked by goi's checker (stage 0, the way the table's generator checks a listed
+package: the session's `ensure-package`): the copy's `gc` for linux/amd64 (230 packages, 123 s, 6 GB) and the driver for
+tamago/arm64 (240 packages, 151 s, 6 GB), 0 errors each. A standalone build of the driver and the copy (a main calling
+`Compile`, `bin/build-go`, 49 s) gives byte for byte the messages of the toolchain's gc on `prove.go`, `live2.go` and
+`fixedbugs/issue20529.go`, and through `check_err_gc` (that build standing in for the executable's `Compile`) all 36
+programs pass, the three controls failing as they must.
+
+**The driver.** `arbace/repr/go/gccompile` (`go/arbace/repr/go/gccompile.ae`, hand-written forms, listed in
+`go/arbace/gotable.edn`): `Compile(args string) int` is `cmd/compile`'s `main` (its `archInits`, `buildcfg.Check`,
+`gc.Main`, `base.Exit(0)`) with `args` (one a line) as `os.Args`; gc ends the process with its status (0, or 2 when
+it reports errors), its messages on standard output. gc's configuration is the environment's when the program started
+(`internal/buildcfg`'s initialization reads `GOOS`, `GOARCH`, `GOAMD64`, `GOEXPERIMENT`, `GOROOT`).
+
+**goi's errorcheck path.** `bin/goi`'s `check_err` judges a program's flags as before; a flag of gc's own passes
+(`-live`, `-l=N`, `-wb=N`, a `-d=` goi has not, `-+` with `go:nowritebarrier` and its kin) no longer makes the program
+unsupported but sends it, after gc's reference has passed (else skipped, as before), to `check_err_gc`; so does a
+program whose errors goi's checker does not report and go/types does not either (godump's `:errors` empty: gc's
+phases after type checking). `check_err_gc` runs `arbace -m arbace.go.gc FORMS ARG...` in a directory of its own:
+the program's forms of mode `:full` (the corpus linux-errtest-full) printed back to their text
+(`arbace.repr.go.print/print-package`, byte for byte), then compiled by `Compile` with the arguments gc's reference
+has (`-p=p -d=panic -C -e -importcfg=... -o a.o FLAGS -d=ssa/check/on` and the printed file; the standard library's
+export data of the reference's importcfg, gc's own format), under `gc_env` and `TEST_TELEMETRY_DIR` (gc's telemetry
+counters into the check's work, not the user's configuration directory). gc's messages and status are judged as the
+reference's are (`err_aot_verdict`: `gocmp errorcheck`, compilation failing or succeeding as wanted). An executable
+whose table does not list the driver (`arbace.go.gc` refuses with goi's unsupported, 125) leaves the program
+unsupported for its old reason, so the records do not move on an older executable; so does the box (parked).
+`corpus_key` leaves the copy and the driver out (no read runs them). Three interp controls in
+`test/goi/controls.txt`, one a family: `prove.go` (`-d=ssa/prove/debug=1`) against `loopbce.go`'s `// ERROR` lines,
+`live2.go` (`-live`) against `live_regabi.go`'s, `fixedbugs/issue52697.go` (a stack frame too large) against
+`fixedbugs/issue22200b.go`'s, each judged from its subject's own run, each failing as it must. The essential list takes
+26 of the 36 by its rule (every one outside fixedbugs/, every fourth of fixedbugs/).
