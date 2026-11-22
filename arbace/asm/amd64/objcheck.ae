@@ -53,14 +53,18 @@
   #{"-filetype" "--filetype" "-triple" "--triple" "-mtriple" "-arch" "--arch" "-o" "-show-encoding" "--show-encoding"
     "-mcpu" "--mcpu" "--x86-align-branch-boundary" "-x86-align-branch-boundary" "--x86-align-branch" "-x86-align-branch"
     "-x86-pad-max-prefix-size" "--x86-pad-max-prefix-size" "-x86-pad-for-align" "--x86-pad-for-align" "--mc-relax-all"
-    "-mc-relax-all" "-defsym" "--defsym" "--stats" "-stats" "-x86-relax-relocations" "--x86-relax-relocations" "--x86-branches-within-32B-boundaries" "-x86-branches-within-32B-boundaries"})
+    "-mc-relax-all" "-defsym" "--defsym" "--stats" "-stats" "-x86-relax-relocations" "--x86-relax-relocations" "--x86-branches-within-32B-boundaries" "-x86-branches-within-32B-boundaries"
+    ;; the compact unwind's (x86-objs): MCTargetOptions' EmitDwarfUnwind and EmitCompactUnwindNonCanonical
+    "--emit-dwarf-unwind" "-emit-dwarf-unwind" "-emit-compact-unwind-non-canonical" "--emit-compact-unwind-non-canonical"})
 
 (defn- backend-opts
   "The run's X86AsmBackend options, or [:options FLAG] for one this check does not take."
   [^String mc]
-  (let [ws (vec (str/split (str/trim mc) #"\s+"))
+  (let [;; (x86-objs: a run that states an error or a crash, `not [--crash] llvm-mc ...`, its llvm-mc's flags alone)
+        mc (str/replace mc #"^\s*not\s+(?:--crash\s+)?" "")
+        ws (vec (str/split (str/trim mc) #"\s+"))
         ;; a value given after its flag (`-triple -x86_64-unknown-unknown`, `-o -`) is no flag
-        valued #{"-triple" "--triple" "-mtriple" "-arch" "--arch" "-o" "-mcpu" "--mcpu" "-filetype" "--filetype"}
+        valued #{"-triple" "--triple" "-mtriple" "-arch" "--arch" "-o" "-mcpu" "--mcpu" "-filetype" "--filetype" "--emit-dwarf-unwind" "-emit-dwarf-unwind"}
         flags (for [[i w] (map-indexed vector ws) :when (and (re-find #"^-." w) (not (valued (get ws (dec (long i))))))]
                 (first (str/split w #"=")))
         unknown (first (remove known-mc-flags flags))
@@ -77,7 +81,10 @@
        :pad-for-align (boolean (re-find #"-x86-pad-for-align(?:=(?:1|true))?(?:\s|$)" mc))
        :relax-all (boolean (re-find #"(?:^|\s)--?mc-relax-all(?:\s|$)" mc))
        ;; -x86-relax-relocations=false: GOTPCREL without its relaxable forms (queue 372)
-       :relax-relocations (not (re-find #"-x86-relax-relocations=(?:false|0)" mc))})))
+       :relax-relocations (not (re-find #"-x86-relax-relocations=(?:false|0)" mc))
+       ;; the compact unwind's options (x86-objs: arbace.asm.amd64.macho/*unwind*)
+       :unwind {:dwarf (keyword (or (val #"-emit-dwarf-unwind[= ](\S+)") "default"))
+                :non-canonical (boolean (re-find #"-emit-compact-unwind-non-canonical(?:=(?:1|true))?(?:\s|$)" mc))}})))
 
 (defn- fc-opts [^String fc]
   {:prefixes (let [ps (mapcat #(str/split % #",") (map second (re-seq #"--?check-prefix(?:es)?[= ]+(\S+)" fc)))] (if (seq ps) (vec ps) ["CHECK"]))
@@ -93,6 +100,11 @@
                (not (re-find #"(^|\s)-D(\s|$)|--disassemble-all|--section[= ]|-j\s|--no-addresses|--unwind|--fault" viewer)))
           :objdump-d
           (and (re-find #"^llvm-objdump" viewer) (some #{"--headers" "-h" "--section-headers"} ws)) :objdump-h
+          ;; x86-objs: the unwind information (with --dwarf=frames the call frames after it) and the fault maps
+          (and (re-find #"^llvm-objdump" viewer) (some #{"--unwind-info" "-u"} ws)
+               (every? #{"--unwind-info" "-u" "--macho" "-m" "--dwarf=frames" "-"} (remove #(re-find #"^%t" %) ws))) :objdump-unwind
+          (and (re-find #"^llvm-objdump" viewer) (= #{"--fault-map-section"} (set (remove #(re-find #"^%t|^-$" %) ws)))) :objdump-faultmap
+          (and (re-find #"^llvm-nm" viewer) (empty? (remove #(re-find #"^%t|^-$" %) ws))) :nm
           (and (re-find #"^llvm-objdump" viewer) (some #{"-t" "--syms"} ws)) :objdump-t
           (and (re-find #"^llvm-objdump" viewer) (some #{"-r" "--reloc"} ws) (not (re-find #"-D|--section" viewer))) :objdump-r
           (and (re-find #"^llvm-readobj" viewer) (re-find #"(^|\s)(-r|--relocs|--relocations)\b" viewer)
@@ -143,7 +155,10 @@
         mk (fn [mc viewer fc extra]
              (merge {:mc mc :error? (boolean (re-find #"^\s*not\s" mc))
                      :stdin? (boolean (re-find #"<\s*%s" mc))
-                     :split? (boolean (and (not (part-in mc)) (or (re-find #"%t/|%S/|split-file" mc) (not (re-find #"%s" mc)))))
+                     ;; a run that assembles another file of the test's directory (`%S/Inputs/NAME`; x86-objs): that file
+                     :input (second (re-find #"(?:^|\s)%S/(\S+)" mc))
+                     :split? (boolean (and (not (part-in mc)) (not (re-find #"(?:^|\s)%S/\S+" mc))
+                                           (or (re-find #"%t/|%S/|split-file" mc) (not (re-find #"%s" mc)))))
                      :part (part-in mc) :check-src (part-fc fc)
                      :target (target-of mc) :backend (backend-opts mc)
                      :defsym (o/defsym-of mc)
@@ -176,9 +191,15 @@
   "The run's object: arbace.asm.amd64.obj/assemble's result for the file at PATH in the run's mode, with its backend options."
   [^String path run]
   (try
-    (let [{:keys [mode]} (:target run)]
+    (let [{:keys [mode format ptr]} (:target run)
+          ;; a run's input of the test's directory (x86-objs)
+          path (if-let [in (:input run)] (str (.getParent (java.io.File. path)) "/" in) path)]
       (obj/assemble (asm/read-items (or (first (:part run)) (asm/latin1 path)) asm/amd64)
-                    {:mode mode :defsym (o/defsyms (:defsym run)) :backend (:backend run) :rel? (not= 64 mode) :lfi (:lfi (:target run))}))
+                    {:mode mode :defsym (o/defsyms (:defsym run)) :backend (:backend run) :rel? (and (= :elf format) (not= 64 mode))
+                     :lfi (:lfi (:target run))
+                     ;; the triple's object format (x86-objs, AXS99 (b)): Mach-O's or COFF's writer
+                     :format (when-not (= :elf format) format) :ptr-mode (if (= 4 (long ptr)) 32 64)
+                     :unwind (:unwind (:backend run))}))
     (catch arbace.lang.ExceptionInfo e
       (if-let [c (:obj/unsupported (ex-data e))] {:unsupported c :what (.getMessage e)} {:unsupported :crash :what (str e)}))
     (catch Throwable e {:unsupported :crash :what (str e)})))
@@ -213,67 +234,81 @@
    :intel (boolean (re-find #"-M\s*intel|--x86-asm-syntax=intel|--disassembler-options=intel" viewer))
    :mode (when-let [t (second (re-find #"--triple[= ](\S+)" viewer))] (:mode (target-of (str "-triple " t))))})
 
-(defn view-objdump-d
-  "llvm-objdump -d's lines of the object `o` for the run: the file's header, each code section's labels, each instruction
-  with its address, bytes (unless --no-show-raw-insn), text, branch target and RIP-relative operand's address, and with -r
-  each relocation after its instruction."
-  [o run]
+(defn disasm-lines
+  "llvm-objdump -d's lines (disassembleObject) of the code sections `secs` ({:name :addr :data BYTES :syms [{:addr :name :type}],
+  each section's symbols at their addresses, :relocs [{:offset :line}] for -r), the file's header line FILE-LINE: each section's
+  labels, each instruction with its address, bytes (unless --no-show-raw-insn), text, branch target and RIP-relative operand's
+  address, and with -r each relocation after its instruction. Shared by the formats' views (x86-objs)."
+  [file-line secs run]
   (let [{:keys [raw imm-hex relocs intel mode]} (objdump-flags (:viewer run))
         tgt (:target run)
         mode (long (or mode (:mode tgt)))
-        ptr (long (:ptr tgt))
-        file (if (:file-input run) (:file-input run) "<stdin>")]
+        ptr (long (:ptr tgt))]
     (binding [x/*t* (x/table) p/*t* (x/table) p/*imm-hex* imm-hex p/*intel* intel]
       (concat
-       ["" (str file ":\tfile format " (if (= 4 ptr) "elf32-i386" "elf64-x86-64"))]
+       ["" file-line]
        (mapcat
         (fn [sec]
-          (let [^bytes data (:data sec) n (alength data)
+          (let [^bytes data (:data sec) n (alength data) base (long (:addr sec 0))
                 bs (mapv #(bit-and (long %) 0xff) data)
-                syms (section-symbols o sec)
+                syms (vec (sort-by (juxt :addr :name :type) (fn [a b] (compare a b)) (:syms sec)))
                 groups (partition-by :addr syms)
-                rs (sort-by :offset (filter #(= (:target %) (:index sec)) (:relocs o)))
+                rs (sort-by :offset (:relocs sec))
                 body (vec (mapcat
                            (fn [[g nxt]]
-                             (let [start (long (:addr (first g))) end (long (if nxt (:addr (first nxt)) n)) end (min end n)]
+                             (let [start (- (long (:addr (first g))) base) end (long (if nxt (- (long (:addr (first nxt))) base) n)) end (min end n)]
                                (when (< start end)
                                  (let [code (filterv #(not (#{1 5} (long (:type %)))) g)
                                        shown (if (seq code) (last code) (last g))]
                                    (concat
-                                    ["" (str (format (if (= 4 ptr) "%08x" "%016x") start) " <" (:name shown) ">:")]
+                                    ["" (str (format (if (= 4 ptr) "%08x" "%016x") (+ base start)) " <" (:name shown) ">:")]
                                     (loop [i start out []]
                                       (if (>= i end)
                                         out
                                         (let [e (d/decode bs i mode)
                                               size (long (max 1 (long (:size e 1))))
                                               ibs (subvec bs i (min n (+ i size)))
-                                              lead (str (format "%8x:" i) (when raw (str " " (str/join " " (map hex2 ibs)))))
+                                              pc (+ base i)
+                                              lead (str (format "%8x:" pc) (when raw (str " " (str/join " " (map hex2 ibs)))))
                                               text (if (:fail e)
                                                      "\t<unknown>"
                                                      (let [info (get-in x/*t* [:insns (:inst e)])
                                                            pc? (re-find #"brtarget" (str (second (first (:ops info)))))]
-                                                       (str (binding [p/*branch-address* (when pc? [(+ i size) ptr])]
+                                                       (str (binding [p/*branch-address* (when pc? [(+ pc size) ptr])]
                                                               (p/print-inst (:inst e) (:mi e) (:flags e) mode))
                                                             (when pc?
-                                                              (let [t (+ i size (long (:imm (first (:mi e)) 0)))]
+                                                              (let [t (+ pc size (long (:imm (first (:mi e)) 0)))]
                                                                 (target-label syms (if (= 4 ptr) (bit-and t 0xffffffff) t))))
                                                             ;; a RIP-relative memory operand's address, a comment
                                                             (when-let [m (#'obj/mem-operand (:inst e))]
                                                               (let [mi (:mi e) [base scale index disp seg] (subvec (vec mi) m (+ (long m) 5))]
                                                                 (when (and (= "RIP" (:reg base)) (nil? (:reg index)) (nil? (:reg seg)) (= 1 (:imm scale)) (contains? disp :imm))
-                                                                  (let [t (+ i size (long (:imm disp)))]
+                                                                  (let [t (+ pc size (long (:imm disp)))]
                                                                     (str " # 0x" (Long/toHexString t) (target-label syms t)))))))))
                                               rl (when relocs
-                                                   (for [r rs :when (and (<= i (long (:offset r))) (< (long (:offset r)) (+ i size)))
-                                                         :let [[nm ad] (#'a/value-text o r)]]
-                                                     (str (format "%016x:  " (:offset r)) "\t" (get elf/reloc-names (:type r) (:type r)) "\t"
-                                                          nm (cond (pos? (long ad)) (str "+0x" (Long/toHexString ad))
-                                                                   (neg? (long ad)) (str "-0x" (Long/toHexString (- (long ad))))
-                                                                   :else ""))))]
+                                                   (for [r rs :when (and (<= pc (long (:offset r))) (< (long (:offset r)) (+ pc size)))] (:line r)))]
                                           (recur (+ i size) (-> out (conj (str lead " " text)) (into rl)))))))))))
                            (partition 2 1 [nil] groups)))]
             (when (seq body) (concat ["" (str "Disassembly of section " (:name sec) ":")] body))))
-        (filter #(pos? (bit-and (long (:flags %)) elf/SHF_EXECINSTR)) (:sections o)))))))
+        secs)))))
+
+(defn view-objdump-d
+  "llvm-objdump -d's lines of the ELF object `o` for the run (disasm-lines over its code sections, the symbols as SymbolInfoTy
+  holds them, -r's relocations in llvm-objdump's format)."
+  [o run]
+  (let [tgt (:target run) ptr (long (:ptr tgt))
+        file (if (:file-input run) (:file-input run) "<stdin>")]
+    (disasm-lines
+     (str file ":\tfile format " (if (= 4 ptr) "elf32-i386" "elf64-x86-64"))
+     (for [sec (:sections o) :when (pos? (bit-and (long (:flags sec)) elf/SHF_EXECINSTR))]
+       {:name (:name sec) :addr 0 :data (:data sec) :syms (section-symbols o sec)
+        :relocs (for [r (filter #(= (:target %) (:index sec)) (:relocs o)) :let [[nm ad] (#'a/value-text o r)]]
+                  {:offset (:offset r)
+                   :line (str (format "%016x:  " (:offset r)) "\t" (get elf/reloc-names (:type r) (:type r)) "\t"
+                              nm (cond (pos? (long ad)) (str "+0x" (Long/toHexString ad))
+                                       (neg? (long ad)) (str "-0x" (Long/toHexString (- (long ad))))
+                                       :else ""))})})
+     run)))
 
 ;; llvm-objdump --headers (printSectionHeaders): the sections but the null one, their index, name, size, address and kind
 (defn view-objdump-h [o run]
@@ -300,6 +335,32 @@
 
 (defn- canon-lines [ls] (mapv (fn [l] {:text l}) ls))
 
+(defn format-view
+  "The run's viewer's text of a Mach-O or COFF object's bytes (x86-objs: arbace.asm.amd64.objview), or the class of a view not
+  made (the tool's keyword)."
+  [fmt ^bytes b run]
+  (let [opts (rest (str/split (str/trim (:viewer run)) #"\s+"))
+        tool (:tool run)
+        f (fn [s] @(requiring-resolve (symbol "arbace.asm.amd64.objview" s)))]
+    (case fmt
+      :macho (let [o ((requiring-resolve 'arbace.asm.macho/read-object) b)]
+               (case tool
+                 :objdump-d (doall ((f "view-objdump-d") o run))
+                 :readobj (doall ((f "view-readobj") o opts))
+                 :readobj-r (doall ((f "view-readobj") o ["-r"]))
+                 :objdump-unwind (doall (concat ((f "view-unwind-info") o)
+                                                (when (some #{"--dwarf=frames"} opts) (or ((f "view-dwarf-frames") o) []))))
+                 :objdump-faultmap (doall ((f "view-fault-map") o))
+                 tool))
+      :coff (let [o ((requiring-resolve 'arbace.asm.coff/read-object) b)]
+              (case tool
+                :objdump-d (doall ((f "coff-objdump-d") o run))
+                :objdump-r (doall ((f "coff-objdump-r") o run))
+                :readobj (doall ((f "coff-readobj") o opts))
+                :readobj-r (doall ((f "coff-readobj") o ["-r"]))
+                :nm (doall ((f "coff-nm") o))
+                tool)))))
+
 (defn judge-run
   "One run's CHECK lines against its object `r`: [[LINE RESULT]], RESULT :pass, :fail or a class."
   [^String src run r]
@@ -309,7 +370,8 @@
         all (fn [cls] (mapv (fn [[l]] [l cls]) cs))]
     (cond
       (empty? cs) []
-      (not= :elf (:format tgt)) (all :other-format)
+      ;; a format whose writer is not built (x86-objs: Mach-O's and COFF's are)
+      (not (#{:elf :macho} (:format tgt))) (all :other-format)
       (:x32 tgt) (all :x32)
       (vector? (:backend run)) (all :options)
       ;; llvm-mc --stats (x86-print): MCAssembler's RelaxationSteps, the one statistic the object assembler counts as LLVM's
@@ -328,8 +390,15 @@
           (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :message)]) cs))
         (all (cond (:bytes r) :error-accepted (:unsupported r) (unsup) :else :message)))
       ;; an i386 run's .reloc naming an R_386_* type: i386's relocations, which Arbace's ELF64 writer does not write
-      (and (not (:bytes r)) (:error r) (not= 64 (long (:mode tgt))) (re-find #"relocation" (str (:error r)))) (all :elf32)
+      (and (= :elf (:format tgt)) (not (:bytes r)) (:error r) (not= 64 (long (:mode tgt))) (re-find #"relocation" (str (:error r)))) (all :elf32)
       (not (:bytes r)) (all (if (:error r) :object-error (unsup)))
+      ;; the formats' views (x86-objs, AXS99 (b): Arbace's Mach-O and COFF objects, arbace.asm.amd64.objview)
+      (not= :elf (:format tgt))
+      (let [view (format-view (:format tgt) (:bytes r) run)]
+        (if (keyword? view)
+          (all view)
+          (let [res (into {} (map (fn [[l rr]] [l rr]) (binding [dc/*vars* true dc/*full-lines* (:full-lines run)] (dc/filecheck cs (canon-lines view) (:implicit-not run)))))]
+            (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :not-found :fail :fail)]) cs))))
       (and (not= 64 (long (:mode tgt))) (not (#{:objdump-d :objdump-h} (:tool run)))) (all :elf32)
       (and (not= 64 (long (:mode tgt))) (:relocs (objdump-flags (:viewer run)))) (all :elf32)
       (#{:objdump-d :objdump-h :objdump-r :readobj-r :readobj :objdump-t :readelf-s :readelf} (:tool run))
@@ -356,7 +425,7 @@
   (let [src (asm/latin1 path)
         rs (mapv #(assoc % :path path) (runs src))
         asm (memoize (fn [run] (assemble-run path run)))
-        res (mapcat #(try (judge-run (or (:check-src %) src) % (asm (select-keys % [:target :backend :defsym :part])))
+        res (mapcat #(try (judge-run (or (:check-src %) src) % (asm (select-keys % [:target :backend :defsym :part :input])))
                           (catch Throwable e (binding [*out* *err*] (println (str "repr-asm object-verdict: " path ": " e)))
                             (mapv (fn [[l]] [l :view-crash]) (a/check-lines src (:prefixes %)))))
                     rs)]

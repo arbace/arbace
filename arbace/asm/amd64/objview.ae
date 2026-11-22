@@ -1,0 +1,220 @@
+(ns arbace.asm.amd64.objview
+  "The object verdict's views of Mach-O and COFF objects (x86-objs, AXS99 (b)): the text llvm-objdump and llvm-readobj print
+  for them, the tests' CHECK lines held to it as to the ELF views (arbace.asm.amd64.objcheck), written again from llvm-project
+  23.1.5 (Apache-2.0 WITH LLVM-exception): llvm-objdump.cpp (disassembleObject's symbols for Mach-O, printFaultMaps),
+  MachODump.cpp (printMachOUnwindInfo, printMachOCompactUnwindSection, findUnwindRelocNameAddend), llvm-readobj's
+  MachODumper.cpp (printSectionHeaders, printRelocations, the tables of section types and attributes) and ObjDumper's file
+  summary, lib/Object/MachOObjectFile.cpp (getRelocationTypeName, getFileFormatName, the symbols' sections),
+  lib/Object/FaultMapParser.cpp, DWARFContext.cpp with lib/Object/RelocationResolver.cpp's resolveMachOX86_64 (the frames,
+  through arbace.asm.arm64.objcheck's call frame view)."
+  (:require [arbace.asm.macho :as mo]
+            [arbace.asm.amd64.objcheck :as oc]
+            [arbace.asm.arm64.objcheck :as a]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- hexu [^long v] (str "0x" (str/upper-case (Long/toHexString v))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; Mach-O
+
+(defn macho-format
+  "MachOObjectFile::getFileFormatName (llvm-objdump prints it lower case)."
+  [o]
+  (if (:is64 o) "Mach-O 64-bit x86-64" "Mach-O 32-bit i386"))
+
+(def ^:private reloc-names-64
+  ["X86_64_RELOC_UNSIGNED" "X86_64_RELOC_SIGNED" "X86_64_RELOC_BRANCH" "X86_64_RELOC_GOT_LOAD" "X86_64_RELOC_GOT"
+   "X86_64_RELOC_SUBTRACTOR" "X86_64_RELOC_SIGNED_1" "X86_64_RELOC_SIGNED_2" "X86_64_RELOC_SIGNED_4" "X86_64_RELOC_TLV"])
+(def ^:private reloc-names-32
+  ["GENERIC_RELOC_VANILLA" "GENERIC_RELOC_PAIR" "GENERIC_RELOC_SECTDIFF" "GENERIC_RELOC_PB_LA_PTR"
+   "GENERIC_RELOC_LOCAL_SECTDIFF" "GENERIC_RELOC_TLV"])
+
+(defn macho-reloc-name [o r] (get (if (:is64 o) reloc-names-64 reloc-names-32) (:type r) "Unknown"))
+
+(defn- macho-text? [s] (pos? (bit-and (long (:flags s)) mo/S_ATTR_PURE_INSTRUCTIONS)))
+(defn- macho-virtual? [s] (mo/virtual-type? (bit-and (long (:flags s)) 0xff)))
+
+(defn- sym-section
+  "The section index of a symbol in a section (n_type's N_SECT, n_sect from 1), or nil."
+  [y]
+  (when (and (= mo/N_SECT (bit-and (long (:type y)) 0x0e)) (zero? (bit-and (long (:type y)) 0xe0)) (pos? (long (:sect y))))
+    (dec (long (:sect y)))))
+
+(defn view-objdump-d
+  "llvm-objdump -d of a Mach-O object: its text sections (S_ATTR_PURE_INSTRUCTIONS) of contents, each `SEGMENT,SECTION`, the
+  symbols in them (no STAB, no `__mh_*_header`, a name) at their addresses, the section's name at its start when none is."
+  [o run]
+  (oc/disasm-lines
+   (str (or (:file-input run) "<stdin>") ":\tfile format " (str/lower-case (macho-format o)))
+   (for [s (:sections o) :when (and (macho-text? s) (not (macho-virtual? s)) (pos? (long (:size s))))]
+     (let [ys (for [y (:symbols o) :when (and (= (:index s) (sym-section y)) (seq (:name y))
+                                              (not (and (str/starts-with? (:name y) "__mh_") (str/ends-with? (:name y) "_header"))))]
+                {:addr (:value y) :name (:name y) :type 0})
+           ys (if (some #(= (long (:addr %)) (long (:addr s))) ys) ys (conj ys {:addr (:addr s) :name (:name s) :type 2}))]
+       {:name (str (:seg s) "," (:name s)) :addr (:addr s) :data (:data s) :syms ys}))
+   run))
+
+(def ^:private section-types
+  {0 "Regular" 1 "ZeroFill" 2 "CStringLiterals" 3 "4ByteLiterals" 4 "8ByteLiterals" 5 "LiteralPointers"
+   6 "NonLazySymbolPointers" 7 "LazySymbolPointers" 8 "SymbolStubs" 9 "ModInitFuncPointers" 0xa "ModTermFuncPointers"
+   0xb "Coalesced" 0xc "GBZeroFill" 0xd "Interposing" 0xe "16ByteLiterals" 0xf "DTraceDOF" 0x10 "LazyDylibSymbolPointers"
+   0x11 "ThreadLocalRegular" 0x12 "ThreadLocalZerofill" 0x13 "ThreadLocalVariables" 0x14 "ThreadLocalVariablePointers"
+   0x15 "ThreadLocalInitFunctionPointers"})
+
+(def ^:private section-attrs
+  [["LocReloc" 1] ["ExtReloc" 2] ["SomeInstructions" 4] ["Debug" 0x20000] ["SelfModifyingCode" 0x40000] ["LiveSupport" 0x80000]
+   ["NoDeadStrip" 0x100000] ["StripStaticSyms" 0x200000] ["NoTOC" 0x400000] ["PureInstructions" 0x800000]])
+
+(defn- binary-text
+  "ScopedPrinter's printBinary of up to 16 bytes: `LABEL: TEXT (HH HH ...)`."
+  [label text bs]
+  (str label ": " text " (" (str/join " " (map #(format "%02X" (bit-and (long %) 0xff)) bs)) ")"))
+
+(defn- macho-reloc-lines
+  "MachODumper::printRelocation, the short form: offset, PC-relative, length, extern (n/a when scattered), type, scattered, the
+  symbol's or section's name (a scattered one's value)."
+  [o r]
+  (let [secs (:sections o)
+        target (cond (:scattered r) (hexu (:value r))
+                     (= 1 (long (:extern r))) (or (:name (nth (:symbols o) (:symnum r) nil)) "-")
+                     :else (or (:name (nth secs (dec (long (:symnum r))) nil)) "-"))]
+    (str (hexu (:offset r)) " " (:pcrel r) " " (:length r) " " (if (:scattered r) "n/a" (:extern r)) " "
+         (macho-reloc-name o r) " " (if (:scattered r) 1 0) " " (if (= "" target) "-" target))))
+
+(defn view-readobj
+  "llvm-readobj (LLVM style) of a Mach-O object: the file's summary, then as the options ask the sections (-S, with --sd their
+  data) and the relocations (-r)."
+  [o opts]
+  (let [has (fn [& ks] (some (set opts) ks))]
+    (concat
+     ["" "File: <stdin>" (str "Format: " (macho-format o)) (str "Arch: " (if (:is64 o) "x86_64" "i386"))
+      (str "AddressSize: " (if (:is64 o) "64" "32") "bit")]
+     (when (has "-S" "--sections" "--section-headers")
+       (concat ["Sections ["]
+               (mapcat (fn [s]
+                         (let [fl (long (:flags s)) at (bit-shift-right fl 8)]
+                           (concat ["  Section {" (str "    Index: " (:index s))
+                                    (str "    " (binary-text "Name" (:name s) (:raw-name s)))
+                                    (str "    " (binary-text "Segment" (:seg s) (:raw-seg s)))
+                                    (str "    Address: " (hexu (:addr s))) (str "    Size: " (hexu (:size s)))
+                                    (str "    Offset: " (:offset s)) (str "    Alignment: " (:align s))
+                                    (str "    RelocationOffset: " (hexu (:reloff s))) (str "    RelocationCount: " (:nreloc s))
+                                    (if-let [t (section-types (bit-and fl 0xff))]
+                                      (str "    Type: " t " (" (hexu (bit-and fl 0xff)) ")")
+                                      (str "    Type: " (hexu (bit-and fl 0xff))))
+                                    (str "    Attributes [ (" (hexu at) ")")]
+                                   (for [[nm v] (sort-by first (filter (fn [[_ v]] (= v (bit-and at (long v)))) section-attrs))]
+                                     (str "      " nm " (" (hexu v) ")"))
+                                   ["    ]" (str "    Reserved1: " (hexu (:reserved1 s))) (str "    Reserved2: " (hexu (:reserved2 s)))]
+                                   (when (:is64 o) [(str "    Reserved3: " (hexu (:reserved3 s)))])
+                                   (when (and (has "--sd" "--section-data") (not (macho-virtual? s)))
+                                     (concat ["    SectionData (" ] (#'a/section-data-lines (:data s) 6) ["    )"]))
+                                   ["  }"])))
+                       (:sections o))
+               ["]"]))
+     (when (has "-r" "--relocs" "--relocations")
+       (concat ["Relocations ["]
+               (mapcat (fn [s] (when (seq (:relocs s))
+                                 (concat [(str "  Section " (:name s) " {")]
+                                         (for [r (:relocs s)] (str "    " (macho-reloc-lines o r)))
+                                         ["  }"])))
+                       (:sections o))
+               ["]"])))))
+
+(defn view-unwind-info
+  "llvm-objdump --unwind-info of a Mach-O object (printMachOUnwindInfo): __compact_unwind's entries (the start, its symbol and
+  addend as findUnwindRelocNameAddend finds them, the length, the encoding, the personality and LSDA when relocated)."
+  [o]
+  (let [syms (reduce (fn [m y] (if (and (sym-section y) (not (contains? m (:value y)))) (assoc m (:value y) y) m))
+                     (sorted-map) (:symbols o))
+        p (if (:is64 o) 8 4) esize (+ (* 3 p) 8)]
+    (mapcat
+     (fn [s]
+       (when (= "__compact_unwind" (:name s))
+         (let [^bytes d (:data s) n (alength d)
+               u (fn [^long at ^long k] (loop [i (dec k) v 0] (if (neg? i) v (recur (dec i) (bit-or (bit-shift-left v 8) (bit-and (long (aget d (+ at i))) 0xff))))))
+               entries (vec (for [off (range 0 (- n (dec esize)) esize)]
+                              {:off off :fn (u off p) :len (u (+ off p) 4) :enc (u (+ off p 4) 4) :pers (u (+ off p 8) p) :lsda (u (+ off p 8 p) p)}))
+               by-entry (group-by #(quot (long (:offset %)) esize) (:relocs s))
+               dest (fn [r ^long addr]
+                      (let [[nm ad] (if (and (not (:scattered r)) (= 1 (long (:extern r))))
+                                      [(:name (nth (:symbols o) (:symnum r))) addr]
+                                      (let [rs (nth (:sections o) (dec (long (:symnum r))) nil)
+                                            below (rsubseq syms <= addr)]
+                                        (if-let [[sa y] (first below)]
+                                          (if (= (sym-section y) (:index rs)) [(:name y) (- addr (long sa))] [(:name rs) (- addr (long (:addr rs)))])
+                                          [(:name rs) (- addr (long (:addr rs 0)))])))]
+                        (str nm (when-not (zero? (long ad)) (str " + 0x" (Long/toHexString ad))))))
+               bad (some (fn [r] (let [k (mod (long (:offset r)) esize)] (not (#{0 (+ p 8) (+ p 8 p)} k)))) (:relocs s))]
+           (if bad
+             ["Invalid relocation in __compact_unwind section"]
+             (concat
+              ["Contents of __compact_unwind section:"]
+              (mapcat (fn [e]
+                        (let [rs (get by-entry (quot (long (:off e)) esize))
+                              at (fn [k] (first (filter #(= k (mod (long (:offset %)) esize)) rs)))
+                              fr (at 0) pr (at (+ p 8)) lr (at (+ p 8 p))]
+                          (concat
+                           [(str "  Entry at offset 0x" (Long/toHexString (:off e)) ":")
+                            (str "    start:                0x" (Long/toHexString (:fn e)) " " (if fr (dest fr (:fn e)) ""))
+                            (str "    length:               0x" (Long/toHexString (:len e)))
+                            (str "    compact encoding:     " (format "0x%08x" (:enc e)))]
+                           (when pr [(str "    personality function: 0x" (Long/toHexString (:pers e)) " " (dest pr (:pers e)))])
+                           (when lr [(str "    LSDA:                 0x" (Long/toHexString (:lsda e)) " " (dest lr (:lsda e)))]))))
+                      entries))))))
+     (:sections o))))
+
+(defn- frame-relocs
+  "DWARFObjInMemory's relocations of a Mach-O frame section: each X86_64_RELOC_UNSIGNED (the one type resolveMachOX86_64
+  supports) its symbol's address, or its section's (a local one); the first at an offset kept."
+  [o s]
+  (if-not (:is64 o)
+    {}
+    (reduce (fn [m r]
+              (if (or (:scattered r) (not= 0 (long (:type r))) (contains? m (:offset r)))
+                m
+                (assoc m (:offset r) (if (= 1 (long (:extern r)))
+                                       (long (:value (nth (:symbols o) (:symnum r))))
+                                       (long (:addr (nth (:sections o) (dec (long (:symnum r))) {:addr 0})))))))
+            {} (:relocs s))))
+
+(defn view-dwarf-frames
+  "llvm-objdump --dwarf=frames of an x86 Mach-O object: .debug_frame's and .eh_frame's dumps (arm64's call frame view, x86's
+  CallFrameString, the registers as llvm-objdump names them: regN), the sections at their addresses."
+  [o]
+  (binding [a/*frame-target* {:reg-name (fn [r] (str "reg" r))
+                              :cfa-names (fn [op] (or ({0x2e "GNU_args_size"} op)
+                                                      (get {0x00 "nop" 0x40 "advance_loc" 0x80 "offset" 0xc0 "restore" 0x01 "set_loc"
+                                                            0x02 "advance_loc1" 0x03 "advance_loc2" 0x04 "advance_loc4"
+                                                            0x05 "offset_extended" 0x06 "restore_extended" 0x07 "undefined"
+                                                            0x08 "same_value" 0x09 "register" 0x0a "remember_state" 0x0b "restore_state"
+                                                            0x0c "def_cfa" 0x0d "def_cfa_register" 0x0e "def_cfa_offset"
+                                                            0x0f "def_cfa_expression" 0x10 "expression" 0x11 "offset_extended_sf"
+                                                            0x12 "def_cfa_sf" 0x13 "def_cfa_offset_sf" 0x14 "val_offset"
+                                                            0x15 "val_offset_sf" 0x16 "val_expression" 0x30 "LLVM_def_aspace_cfa"
+                                                            0x31 "LLVM_def_aspace_cfa_sf"} op)))}]
+    (a/dwarf-frames-lines (for [s (:sections o) :when (not (macho-virtual? s))]
+                            {:name (:name s) :data (:data s) :rel (frame-relocs o s) :addr (:addr s)}))))
+
+(defn view-fault-map
+  "llvm-objdump --fault-map-section (printFaultMaps, FaultMapParser's printing) of a Mach-O object's __llvm_faultmaps."
+  [o]
+  (let [s (first (filter #(= "__llvm_faultmaps" (:name %)) (:sections o)))]
+    (if-not s
+      ["FaultMap table:" "<not found>"]
+      (let [^bytes d (:data s)
+            u (fn [^long at ^long k] (loop [i (dec k) v 0] (if (neg? i) v (recur (dec i) (bit-or (bit-shift-left v 8) (bit-and (long (aget d (+ at i))) 0xff))))))
+            hexw (fn [^long v ^long w] (let [h (Long/toHexString v)] (str "0x" (apply str (repeat (max 0 (- w 2 (count h))) \0)) h)))
+            nf (u 4 4)]
+        (concat ["FaultMap table:" (str "Version: " (hexw (u 0 1) 2)) (str "NumFunctions: " nf)]
+                (loop [i 0 at 8 out []]
+                  (if (= i nf)
+                    out
+                    (let [npc (u (+ at 8) 4)]
+                      (recur (inc i) (+ at 16 (* 12 npc))
+                             (into (conj out (str "FunctionAddress: " (hexw (u at 8) 8) ", NumFaultingPCs: " npc))
+                                   (for [k (range npc) :let [f (+ at 16 (* 12 k))]]
+                                     (str "Fault kind: " (get {1 "FaultingLoad" 2 "FaultingLoadStore" 3 "FaultingStore"} (u f 4))
+                                          ", faulting PC offset: " (u (+ f 4) 4) ", handling PC offset: " (u (+ f 8) 4)))))))))))))
