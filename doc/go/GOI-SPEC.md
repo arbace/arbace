@@ -5647,3 +5647,13 @@ byte for byte, `test/empty.go` and both `issue49611.go` among them, so `test/rep
 The tags' cache version (`tag-version`) moves to `escape-10`: the inliner's GetCallerPC rule,
 deadlocals and the copied locals' definitions change the standard library's tags made with the inliner, so the next
 `bin/goi check` makes them again (its warm-up, about 22 minutes from an empty cache).
+
+**Results** (whole runs, recorded: `bin/goi check --record --jobs 6`, `check --aot --record --jobs 6`, the gate's executable at
+next's key with the checkout's namespaces): 1,781 of 1,838 pass (1,764 of 1,837 before; `typeparam/dictionaryCapture-noinline`
+new in the list), 0 fail, 0 error; `fixedbugs/issue15281` passes too (the memory class's `ReadMemStats` after an allocation, three
+runs of three: dead slots cleared since queue 420's day), its known line removed. AOT 1,696 pass (1,691). `bin/goi divergences`:
+foreign code 8, memory 6, unsafe layout 2, gc-m 1 (deferred), gc-flags 28, gc-std 1, gc-phases 7, gc-reference 4 (n/a); AOT:
+go-build-complete 1, no-forms 137 and gc-reference 4 (n/a). The corpora were not read again for these runs (the reads of
+linux-errtest-full and std need more than the 8 GiB a process may take outside the heavy lock; this branch changes nothing a
+read of a checked program gives): the copies read at main's key, re-keyed. Not built (next round): `escape_unique` and
+`nowritebarrier`'s write barrier checks.

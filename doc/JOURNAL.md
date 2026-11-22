@@ -15688,3 +15688,62 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-22: Go's by-design classes re-examined, round 1 (go-rows-1122)
+
+The burst of 2026-11-21/22 (the user's goal: 100 completeness), stream G1: every by-design class of Go's four cells
+re-examined for what goi, repr/go or the build would need; what could pass was built, largest first; branch
+`go-rows-1122` from mac/next 863bdaea1. doc/go/GOI-SPEC.md, "Since v1: gc's -std, -+, -complete and -p, walk's print
+check, extra receivers, internal imports" holds the details. Built:
+- goi's eval: gc's `-std`, `-+`, `-complete`, `-p` (gcsyntax driver Revision 6 with `SetFlags`; arbace.go.run `--gc-mode`;
+  arbace.go.escape's runtime-lines and the inliner's GetCallerPC rule): uintptrkeepalive, fixedbugs/issue48097, issue14999,
+  internal/runtime/sys/inlinegcpc pass, issue18331 reaches gc's reference, which fails its own comments (n/a); walk's
+  print check (issue79258); gc's `-d=escapedebug=1` (walk's dataWord after order's addrTemp, with gc's deadlocals pass and
+  the copied locals' single definitions in inlined bodies: escape_iface_data); the extra receivers gc's syntax drops
+  (bug217); internal std packages imported from std's forms in errorcheck (escape_runtime_atomic); queue 420's and 426's
+  rows (assertinline, defererrcheck, sliceopt, issue35073b, issue9608, peano) and fixedbugs/issue68415 (unique) recorded.
+- AOT: GOI-DESIGN-REVIEW.md's Proposed 8 (c) (decided 2026-11-05, not built until now): the three positions programs pass;
+  return.go's final expression statement printed as written in mode :full.
+- print: empty declaration groups kept in mode :full as go/file's :go/empties (the text level byte for byte, 1,708 files of
+  the test corpus); roundtrip-text-known.edn empty.
+- Proofs (light, no gate; the gate's executable at next's key 710e90e4771a10548878 with the checkout's namespaces by
+  ARBACE_PATH, stage 0 the tools' host): `bin/goi check --only` of each class's programs with the three interp controls'
+  subjects (the controls fail as they must), `check --aot --only` of the 25 run programs Proposed 8 (c) selects and return.go
+  with the three AOT controls' subjects (27 of 27 pass); every errorcheck program (`--list`, 659) after each escape change:
+  617, then 618 pass, 0 fail, 0 error, no regression; `bin/repr-go read --full --corpus test --text`: 1,708 files byte for byte.
+- The records from one whole run each (`bin/goi check --record --jobs 6`, `check --aot --record --jobs 6`), the escape tags
+  made afresh (tag-version escape-10). The corpora were not read again for them: the read of linux-errtest-full and of std
+  (linux-amd64) needs more than the 8 GiB a process may take outside bin/heavy-lock, whose queue held a javac tool build for
+  hours; this branch changes nothing a read of the checked programs gives (convert.ae's :go/empties touches only the three
+  compile-only files of the empty groups, outside goi's lists), so the corpora read at main's key (merge-1121's copies; std's
+  of 2026-11-05) were re-keyed to the checkout's corpus_key. A failed std read under the cap removes the corpus first (repr-go's
+  convert: rm -rf before converting): it did once, broke a first whole run (stopped, std's forms restored, run again).
+- The records: test/goi/check-linux-amd64.edn 1,838 programs, 1,781 pass (1,764), 0 fail, 0 error, 44 unsupported, 9 known,
+  4 skipped; the rows moved: assertinline, defererrcheck, sliceopt, issue35073b, escape_iface_data (gc-flags 33 -> 28),
+  issue9608 (foreign-code 9 -> 8), peano (call-depth, gone), issue68415 (std-weak-unique, deferred, gone),
+  escape_runtime_atomic (std-out-of-scope, gone), bug217 (spellings, gone), uintptrkeepalive, issue48097, issue79258,
+  issue14999, inlinegcpc (gc-std 7 -> 1, issue18331 to :gc-reference n/a), issue15281 (memory 7 -> 6: it passes now, three
+  runs of three by --only; its known line removed), typeparam/dictionaryCapture-noinline new in the list and passing.
+  test/goi/check-aot-linux-amd64.edn 1,696 pass (1,691): devirtualization_nil_panics, issue22662, issue29504, return.go and
+  dictionaryCapture-noinline; classes :positions and :spellings gone; the no-forms rows' reasons are the native read's.
+  Print: test/repr/go/roundtrip-text-known.edn empty, :empty-decl-group gone. bin/goi divergences and --aot: every program in a
+  class, the essential subsets 0 not passing.
+- REAP (bin/reap --record): Go read 12,158 / 137 / 0 (unchanged), eval 1,764 / 68 / 2 -> 1,781 / 52 / 1 (n/a 3 -> 4), AOT
+  1,691 / 5 -> 1,696 / 1, print 2,584 / 12 -> 2,584 / 9. bin/crops-score --record: Go's completeness 98.6 -> 98.9 (eval 96.2 ->
+  97.1, AOT 99.7 -> 99.9, print 99.5 -> 99.7; 100.0 without by design), maturity and independence 100; --judge --strict, bin/reap
+  and bin/records-check: 0 problems.
+- Left, ranked by rows, each a decision for the user (GOI-SPEC.md's section and GOI-DESIGN-REVIEW.md hold the reasons):
+  read's 137 (invalid-programs 64, parser-rejects 73: the native reader agrees with the helper on every one, E-tree equal and
+  the same conversion failure for the 64, both go/parsers rejecting the 73; options: count that agreement as the read's pass,
+  with an E-errors comparison of the 73's messages added; or n/a as AOT's no-forms; or GC47 (b), forms for invalid code);
+  gc in the executable (GOI-DESIGN-REVIEW.md Proposed 1 (b), decided (a) on 2026-11-05: gc-flags 28 (-live 8, the SSA passes'
+  -d 15, -d=wb 4, -d=nil 3, tailcall), gc-phases 7 (stack frame too large), the rest of -+ (nowritebarrier, drafted below));
+  print's 9 tests-embed-sources (TamaGo's tests embed their package's own .go files: an identity candidate passes the code
+  level, so only mode :lines' layout differs; options: print those packages in mode :full for the code level, or mask the
+  embedded data in gocmp's comparison, or keep); goi's foreign-code 8 (assembly and linkname, §1.1) and memory 6 (allocation
+  counts and profiles); unsafe-layout 2 (issue8606b: gc's comparison order, a back-end change and a build; nilptr by design);
+  AOT's issue9608 (RPS31 (a): go build's -complete; (b) an empty .s file, rejected then as testing the harness).
+- Not done this round (the coordinator's throttle): escape_unique (gc-m, deferred: other packages' generic instances, 1-2
+  days, unique.Make's closure over internal/sync, sync/atomic and internal/abi) and nowritebarrier (ssagen/nowb.go's checks
+  over the port's post-inline bodies with an approximate needwb; drafted unapplied in the worktree's .tmp/patches/nowb.py).
+Light: no gate; the gate's executable 710e90e4771a10548878, stage 0 the tools' host, ARBACE_PATH the worktree.
