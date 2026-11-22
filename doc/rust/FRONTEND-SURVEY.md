@@ -6078,3 +6078,30 @@ The targeted checks at the head: `bin/rust-front essential` passed (its known su
 first failed on records staged from rust-c6b's worktree, `.tmp/rust-front/records/stage` copied with its paths, removed and staged
 again), `core-essential` its known summary (566 equal, the control differing), inline-test 15 of 15, pack-compare-test passed
 (R3's cases and this branch's); reap 56 of 56 cells, crops-score 0 problems, records-check 9 pairs 0 problems.
+
+### At the merged head: the Mac's 524 merged, C6-5 (a)'s record tried
+
+The Mac's 524 (`mac/524-rust-c3` at `26c7532a2`: every mono fact native that needs no new export, the entry made by mono, a source
+ADT's repr, a ReifyShim's instantiating crate) merged at the coordinator's word (collect's unknown trait Self R3's again; core-attrs.txt
+both sides' files; the docs' and pack-compare-test's blocks each once), so one Rust line holds R3, 524 and this branch. Two more back
+end fixes there: lib-unit's core exports collect `ub_checks.rs` beside core-iface-extra.txt's (test/rust/front/lib-unit-iface-extra.txt:
+check_language_ub's signature, which copy_nonoverlapping's and offset's precondition tests name; their two entries exported again by
+`export core --add`, 6 min), and codegen takes a function item's type zero-sized when the table lacks its text; an inlined call made
+an invoke takes its destinations right after its arguments, as codegen writes an invoke. At the merged head (the three builds again):
+**core 191 of 275** (core::fmt's `pad` too; bstr's Display now compared, an alloca of MIR's), **alloc 21 of 25**, **std 101 of 325**
+(rt::init, interpret_cs_action, ThreadId::as_u64; 25 differ: 21 share-generics' upstream instances, realloc_fallback's and args' alloc
+instances among them, two write_fmt, trace_fn, hashmap_random_keys; 199 refused), every crossed control differing;
+`bin/rust-front essential` and `core-essential` their known summaries, inline-test 15 of 15, pack-compare-test passed (524's cases
+with R3's and this branch's).
+
+R3's own path before the 524 merge (`69683177b`: `RF_EXTRA_IFACE=core-pass:hashbrown:libc RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front
+rsi-build --native-core panics std unwind`, 1 h 40 min; then `bin/rsi check --front own --corpus samples --only` the three, std's
+runtime lowered at this checkout's lowering key first, 12 min, its ci read 55 min): **3 of 3 pass**, the std-vs-panics control
+differing (1 h 41 min, 6.2 GB).
+
+C6-5 (a)'s record: R3's switch run (`rsi-native5`, built before R3's C1 fixes: RF_CORE_ATTRS=none, no RF_DROP_GLUE) recorded by `bin/rsi
+check --record --front own --corpus samples` with its inputs.tsv's C4 words own: **4 of 6 pass** (intrinsics, panics, vectors; threads
+from the pack), std.rs (`cirun: undefined function <alloc::string::String as Ord>::cmp`) and unwind.rs (stdout) not, so rsi refused the
+record (nothing written). C4 is recorded own by the first native-interface build with C1's configuration that passes
+(`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=.. RF_EXTRA_IFACE=.. RF_DROP_GLUE=1 bin/rust-front rsi-build --native-core` over the six, then the
+record): the next host stream's rsi-build at the merged head can be that one.

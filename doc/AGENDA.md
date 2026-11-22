@@ -414,10 +414,11 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   the burst's round"). Branch `rust-c6c-1122` (2026-11-22, R2b, R3's `7bd7b001d` merged): the always-inliner as LLVM 23's (the
   callees in their symbols' order, rustc 1.99.1's codegen unit order; the call sites newest first in their use lists; the zero GEP
   and the constant inttoptr folded), unsized struct tails' references, closure pairs' alignments, builtin derives `#[inline]`, the
-  library parsed as edition 2024, repr(C) enums, rustc's #[path] file names, lib-unit's vtables: core 190 of 275 items equal to std's
-  IR (183), alloc 21 of 25, std 98 of 325 (83); std's differing items now mostly share-generics' upstream instances (18 of 22: every
-  upstream crate's whole collection, L2); C6-5 (a) taken (rsi-build's C4 own with both native; the switch run's record pending its
-  runtime) (FRONTEND-SURVEY, "As built: C6-4, round three").
+  library parsed as edition 2024, repr(C) enums, rustc's #[path] file names, lib-unit's vtables; then the Mac's 524 (C3) merged, one
+  Rust line: core 191 of 275 items equal to std's IR (183), alloc 21 of 25, std 101 of 325 (83); std's differing items now mostly
+  share-generics' upstream instances (21 of 25: every upstream crate's whole collection, L2); R3's own path 3 of 3 on ci; C6-5 (a)
+  taken (rsi-build's C4 own with both native), not recorded yet: R3's switch run 4 of 6 on ci (built before its C1 fixes), the next
+  native-interface build with C1's configuration records it (FRONTEND-SURVEY, "As built: C6-4, round three").
 - **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred
   17 -> 15, eval 15 -> 3), LLS54 (a) (the tx pack with dg-options), `h-judges`' split-file section, the Mac's 335 (Verifier rules:
   read deferred 15 -> 1; D335-1 (a), D335-2 (a)). Held: 335's `ir-make rt --mutants` and `verify-rt-heldout --record`; the 13 eh
