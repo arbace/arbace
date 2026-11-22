@@ -115,6 +115,21 @@
                                           (= %u (extractvalue [(struct ptr i64) %t] 0)) (= %v (extractvalue [(struct ptr i64) %s] 1))
                                           (= %q (insertvalue [(struct ptr i64) %t] [i64 %v] 1)) (= %x (extractvalue [(struct ptr i64) %q] 1)) (ret i64 %x))]))
 
+;; C6-4 (rust-c6c): simplifyGEPInst's `getelementptr P, 0 -> P` over the clone: an inlined `ptr.add(start)` at start 0 is the
+;; pointer (opt -passes='default<O0>', LLVM 23.1.5: c9's GEP gone, the caller's own zero GEP in c10 kept, as here)
+(def ^:private callee9
+  '(llvm/define g/f9 ptr [[ptr %p] [i64 %n]] :body [(block %start (= %q (getelementptr :inbounds :nuw i8 [ptr %p] [i64 %n])) (ret ptr %q))]))
+(def ^:private caller9
+  '(llvm/define g/c9 (struct ptr i64) [[ptr %a] [i64 %l]]
+     :body [(block %start (= %x (call ptr g/f9 [[ptr %a] [i64 0]])) (= %s (insertvalue [(struct ptr i64) poison] [ptr %x] 0))
+                   (= %t (insertvalue [(struct ptr i64) %s] [i64 %l] 1)) (ret (struct ptr i64) %t))]))
+(def ^:private want9
+  '(llvm/define g/c9 (struct ptr i64) [[ptr %a] [i64 %l]]
+     :body [(block %start (= %s (insertvalue [(struct ptr i64) poison] [ptr %a] 0)) (= %t (insertvalue [(struct ptr i64) %s] [i64 %l] 1))
+                   (ret (struct ptr i64) %t))]))
+(def ^:private caller10
+  '(llvm/define g/c10 void [[ptr %a]] :body [(block %start (= %x (getelementptr :inbounds :nuw i8 [ptr %a] [i64 0])) (call void g/use [[ptr %x]]) (ret void))]))
+
 (defn- case! [nm got want]
   (let [ok (= (norm got) (norm want))]
     (println (str "inline-test: " nm ": " (if ok "equal" (str "DIFFERS: " (chk/diff-text (norm got) (norm want))))))
@@ -122,8 +137,8 @@
 
 (defn -main [& _]
   (let [m (binding [inl/*nounwind?* (fn [s] (= s 'g/never))]
-            (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4 callee5 caller5 callee6 caller6 callee7 caller7 caller8]
-                               #{'g/f1 'g/f2 'g/f4 'g/f5 'g/f6 'g/f7}))
+            (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4 callee5 caller5 callee6 caller6 callee7 caller7 caller8 callee9 caller9 caller10]
+                               #{'g/f1 'g/f2 'g/f4 'g/f5 'g/f6 'g/f7 'g/f9}))
         by (into {} (map (juxt second identity) m))
         oks [(case! "one block, its alloca at the entry" (by 'g/c1) want1)
              (case! "several blocks, one return" (by 'g/c2) want2)
@@ -131,9 +146,12 @@
              (case! "two returns joined" (by 'g/c4) want4)
              (case! "an invoke's call site, the callee's calls made invokes" (by 'g/c5) want5)
              (case! "an invoke's call site, the callee's resume to the landing pad's body" (by 'g/c6) want6)
-             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c2" "g/c3" "g/c4" "g/c5" "g/c6" "g/c7" "g/c8"])
+             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c10" "g/c2" "g/c3" "g/c4" "g/c5" "g/c6" "g/c7" "g/c8" "g/c9"])
              (case! "C6-4: a pair rebuilt from the caller's halves is the caller's pair (InstSimplify)" (by 'g/c7) want7)
              (case! "C6-4: a pair rebuilt from two aggregates' halves, its second insertvalue kept" (by 'g/c8) want8)
+             (case! "C6-4: an inlined pointer offset by zero is the pointer (simplifyGEPInst)" (by 'g/c9) want9)
+             ;; its control: the caller's own zero GEP is no clone's, kept
+             (case! "C6-4 control: the caller's own zero GEP kept" (by 'g/c10) caller10)
              ;; the aggregate rule's control: c8's result against c7's IR differs
              (not (= (norm (by 'g/c8)) (norm want7)))
              ;; the negative control: a case's result against another case's IR differs

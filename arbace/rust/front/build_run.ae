@@ -1476,10 +1476,13 @@
          true]))))
 
 (defn- o0-rename-return
-  "RenameReturnPlace (nrvo.rs, -O0): the return place's one assignment `_0 = copy|move _l` (_l a local neither an argument nor
-  borrowed, of _0's type) gone, _l renamed _0; [body changed?]"
+  "CopyProp's return-place rule (copy_prop.rs, ssa.rs' compute_copy_classes: `_0` cannot be renamed, so the class of `rhs` is
+  renamed `_0`; rustc 1.99 has no RenameReturnPlace, nrvo.rs gone): the return place's one assignment `_0 = copy|move _l` (_l a
+  temporary, SSA, not borrowed, of _0's type) gone, _l renamed _0; [body changed?]. rust-c6c: _l must be SSA (assigned once):
+  read_uleb128's `result |= ..` stays its own local, as std's IR allocates it"
   [body]
   (let [blocks (:blocks body) nargs (long (or (:args body) 0)) lt (mapv :ty (:locals body))
+        {:keys [ssa?]} (o0-ssa body)
         defs0 (for [b blocks s (:stmts b) :when (and (seq? s) (= 'assign (first s)) (= 0 (plain-place (second s))))] s)
         calls0 (for [b blocks :let [t (:term b)] :when (and (seq? t) (= 'call (first t)) (= 0 (plain-place (nth t 3 nil))))] t)
         borrowed (set (for [f (tree-seq coll? seq blocks) :when (and (seq? f) (#{'ref 'rawptr} (first f)))
@@ -1488,7 +1491,7 @@
         s (first defs0)
         rv (when s (nth s 2 nil))
         l (when (and (seq? rv) (= 'use (first rv)) (seq? (second rv)) (#{'copy 'move} (first (second rv)))) (plain-place (second (second rv))))]
-    (if (and (= 1 (count defs0)) (empty? calls0) l (> (long l) nargs) (not (borrowed l)) (= (get lt l) (get lt 0)))
+    (if (and (= 1 (count defs0)) (empty? calls0) l (> (long l) nargs) (not (borrowed l)) (ssa? l) (= (get lt l) (get lt 0)))
       [(assoc body :blocks (mapv (fn [b] (-> b (update :stmts (fn [ss] (mapv #(map-locals % (fn [x] (if (= x l) 0 x))) (remove #(identical? % s) ss))))
                                              (update :term #(map-locals % (fn [x] (if (= x l) 0 x))))))
                                  blocks)
@@ -2564,6 +2567,10 @@
   [crates front-dir n crate defs]
   (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")
             mono/*macro-attrs* (mono/load-macro-attrs (System/getenv "RF_CORE_ATTRS"))
+            ;; rust-c6c: the crates' module paths (their module lists' first column), each in the type namespace
+            mono/*lib-modules* (set (for [^String f (str/split (or (System/getenv "RF_LIB_MODULES") "") #":") :when (and (seq f) (.exists (File. f)))
+                                          l (str/split-lines (slurp f)) :let [p (first (str/split (str/trim l) #"\s+"))] :when (seq p)]
+                                      p))
             ;; the entries' attributes and those of the functions nested in them (rt_error's #[inline])
             mono/*native-attrs* (into (into (into {} (for [[_ e] (native-core-map) [p a] (:callee-attrs e)] [p a]))
                                             (for [[_ e] (native-core-map) [p a] (:nested-attrs e)] [p a]))
@@ -2611,7 +2618,15 @@
               ;; it (RFP47 (a)'s remap once std.edn takes it: /rustc/COMMIT/library/)
               loc-file (fn [^String f] (let [i (.lastIndexOf f "/library/")]
                                          (str (or (System/getenv "LIB_UNIT_SRC_PREFIX") "") (if (neg? i) f (subs f (+ i 9))))))
-              nf {:native-call (fn [f]
+              ;; rust-c6c: each body's unsizing casts to a trait object with their vtables (mono's vtable-alloc, as program-facts
+              ;; gives a program's), by the runtime body's name, which runtime-body's casts take in turn
+              vts (into {} (for [[nm b] (concat (for [[d i] insts :when i] [(str "lib " d) (:body i)])
+                                                (for [[d args _ i] inl :when i] [(inl-name d args) (:body i)]))
+                                 :let [cs (try (mono/dyn-casts b) (catch Throwable _ nil))] :when (seq cs)]
+                             [nm (vec (for [[st tt c tr targs] cs]
+                                        [tt (try (in-lib #(mono/vtable-alloc c tr targs)) (catch Throwable x [:error (or (.getMessage x) (str x))])) st]))]))
+              nf {:vtables vts
+                  :native-call (fn [f]
                                  (let [c (get (:callees cf) (second f)) cl (:call-loc (meta f))]
                                    ;; C6-4: a call through a function pointer (the operand a local): no instance, codegen calls the
                                    ;; operand's value (as the programs' native-call)

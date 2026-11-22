@@ -213,7 +213,14 @@
 (def ^:dynamic *instance-def* nil)   ; the definition being mangled as an instance: its own segment is a value
 (declare ^:dynamic *native-attrs*)
 
+(def ^:dynamic *lib-modules*
+  "C6-4 (rust-c6c): the library crates' module paths (their module lists, lib-unit's RF_LIB_MODULES): a path that is a module
+  is in the type namespace though a function of its name exists beside it (backtrace's gimli: `fn mmap` and `mod mmap`, whose
+  `Mmap` std's IR names `..5gimli4mmap4Mmap` under `Nt`, not under the function's `Nv`)"
+  #{})
+
 (defn- ext-value-ns? [^String p]
+  (and (not (contains? *lib-modules* p))
   (or (= p *instance-def*) (contains? (:fns c/*si*) p) (contains? (:consts c/*si*) p)
       ;; C6-4: a function the export built, or one nested in an exported body (`panic_already_borrowed::do_panic`, const_panic!'s
       ;; fn-local function, the parent of const_eval_select's `runtime`): rustc's v0 prints it in the value namespace
@@ -221,7 +228,7 @@
       (some? (re-find #"^(Fn|AssocFn|Static|Const)" (str (get (:kinds c/*std*) p))))
       ;; RF16: an item std's names do not list (one nested in a function's body: thread_local!'s `const KEYS` in
       ;; RandomState::new) named in upper case is a const or a static (rustc's non_upper_case_globals): the value namespace
-      (and (nil? (get (:kinds c/*std*) p)) (some? (re-matches #"_*[A-Z][A-Z0-9_]*" (peek (str/split p #"::")))))))
+      (and (nil? (get (:kinds c/*std*) p)) (some? (re-matches #"_*[A-Z][A-Z0-9_]*" (peek (str/split p #"::"))))))))
 
 (declare rustc-def-index)
 (def ^:dynamic *def-order* nil)   ; atom: {id rustc-index}
@@ -775,6 +782,7 @@
 
 ;; the types' layouts (layout_of_uncached) over the type checker's types, regions erased
 
+(declare src-enum-repr-c?)
 (defn- adt-repr
   "ReprOptions of an ADT: :c, :transparent, :int (\"u8\" ...), :packed, :align (the samples' and std's interfaces carry
   repr(C), repr(transparent) and repr(int); std's structs' reprs are not in its interface: repr(Rust))"
@@ -789,6 +797,10 @@
     (let [r (:repr (get (:adts c/*si*) adt))]
       (cond-> {} (and (string? r) (re-matches #"[iu](8|16|32|64|128|size)" r)) (assoc :int r)
                  (= "C" r) (assoc :c true)
+                 ;; C6-4 (rust-c6c): an enum the sources declare `#[repr(C)]` without an integer (the interface's :repr, the
+                 ;; helper's `repr().int`, is nil for it): its tag c_int as rustc lays it out (backtrace's uw::_Unwind_Reason_Code,
+                 ;; trace_fn's `ret i32`), not the smallest integer
+                 (and (nil? r) (= "Enum" (str (:kind (get (:adts c/*si*) adt)))) (src-enum-repr-c? adt)) (assoc :c true)
                  ;; RFP58 (a): repr(simd), read from the sources of an ADT the interface lacks; RIND5: also of a known one in a
                  ;; SIMD module (core::simd's `Simd<T, N>`, `#[repr(simd, packed)]`: the interface writes no repr(simd))
                  (and (or (not (tc/std-adt-known? adt)) (str/includes? (str adt) "simd")) (:simd (src-adt adt))) (assoc :simd true)))))
@@ -1181,6 +1193,47 @@
             nil)))
       (set acc))))
 
+(declare attr-cfg-ok?)
+;; C6-4 (rust-c6c): rustc_builtin_macros' deriving gives each method it writes `#[inline]` (clone, eq, partial_cmp, cmp, hash,
+;; fmt, default, Eq's assertion), which a derive's impl holds and no source item shows
+(def ^:private derive-methods
+  {"Clone" #{"clone"} "PartialEq" #{"eq"} "Eq" #{"assert_receiver_is_total_eq" "assert_fields_are_eq"} "PartialOrd" #{"partial_cmp"}
+   "Ord" #{"cmp"} "Hash" #{"hash"} "Debug" #{"fmt"} "Default" #{"default"}})
+
+(defn- derives-of
+  "The traits an item's `#[derive(..)]` names, each path's last segment"
+  [attrs]
+  (set (mapcat (fn [a]
+                 (let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
+                       nm (when item (second (fget (last (fget (fget item :path) :segments)) :ident)))
+                       args (when item (fget item :args))
+                       ts (when (and (seq? args) (= 'Delimited (first args))) (fget (second args) :tokens))
+                       ts (vec (if (and (seq? ts) (= 'TokenStream (first ts))) (second ts) ts))
+                       ;; each comma-separated path's last identifier
+                       lasts (fn [ts] (loop [i 0 cur nil acc []]
+                                        (if (>= i (count ts)) (if cur (conj acc cur) acc)
+                                            (let [t (nth ts i) k (tok-kind t)]
+                                              (cond (= 'Comma k) (recur (inc i) nil (if cur (conj acc cur) acc))
+                                                    (and (seq? k) (= 'Ident (first k))) (recur (inc i) (second k) acc)
+                                                    :else (recur (inc i) cur acc))))))]
+                   (when (= nm "derive") (lasts ts))))
+               attrs)))
+
+(defn- derive-attrs
+  "C6-4 (rust-c6c): the attributes of a builtin derive's method MNAME of the impl IP, which the file's ITEMS do not hold as an
+  item: the impl's trait (std's interface) derived on its self type's definition in ITEMS (`#[derive(Clone)] pub struct
+  Components`: `<Components as Clone>::clone` an `#[inline]` copy with std's instantiating crate, as std's IR names it); nil
+  otherwise"
+  [items ip mname]
+  (when-let [m (get (:impls c/*si*) ip)]
+    (let [tr (:trait m) tn (when (and (seq? tr) (string? (second tr))) (c/path-name (second tr)))
+          self (:self m) sn (when (and (seq? self) (= 'adt (first self)) (string? (second self))) (c/path-name (second self)))]
+      (when (and tn sn (contains? (get derive-methods tn) mname)
+                 (some (fn [it] (and (#{'Struct 'Enum 'Union} (item-kind it)) (= sn (item-name it)) (attr-cfg-ok? it)
+                                     (contains? (derives-of (fget it :attrs)) tn)))
+                       items))
+        ["inline"]))))
+
 (defn ext-attrs
   "core's (or alloc's) item at the def path P: its attribute names, or nil when the sources do not hold it as an item"
   [^String p]
@@ -1220,6 +1273,8 @@
                             (or (when (and impl (fits? impl)) (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) its))
                                 (when by-header (attr-strings (fget by-header :attrs)))
                                 (when-not want (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) its))
+                                ;; C6-4 (rust-c6c): a builtin derive's impl (no source item): its method's `#[inline]`
+                                (when want (derive-attrs items (str/join "::" (butlast (str/split p #"::"))) (second segs)))
                                 ;; RF13: the impls' order in the file is not rustc's disambiguators' everywhere (alloc's vec/mod.rs
                                 ;; counts a `const impl` that rustc's {impl#1} does not): a function the file's impls name once
                                 (when *once-fallback*
@@ -1288,6 +1343,32 @@
           (let [own-dir (if (re-find #"/(lib|mod)\.rs$" file) dir (str dir "/" (str/replace (.getName (File. ^String file)) #"\.rs$" "")))
                 f (some #(when (.exists (File. ^String %)) %) [(str own-dir "/" s ".rs") (str own-dir "/" s "/mod.rs")])]
             (when f (recur (parse-rs f) (.getParent (File. ^String f)) f (rest segs)))))))))
+
+(def ^:private repr-c-cache (atom {}))
+(defn- src-enum-repr-c?
+  "C6-4 (rust-c6c): whether the library's sources declare the enum at the def path P `#[repr(C)]` (its module's items from the
+  crate's root, as module-items finds them, the enum by name, its repr's meta items naming C)"
+  [^String p]
+  (if (contains? @repr-c-cache p)
+    (get @repr-c-cache p)
+    (let [r (try
+              (let [[crate & segs] (str/split p #"::")]
+                (when-let [root (lib-crate-root crate)]
+                  (when-let [[items _ _] (module-items root (vec (butlast segs)))]
+                    (boolean
+                      (some (fn [it]
+                              (and (= 'Enum (item-kind it)) (= (last segs) (item-name it)) (attr-cfg-ok? it)
+                                   (some (fn [a]
+                                           (let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
+                                                 nm (when item (second (fget (last (fget (fget item :path) :segments)) :ident)))
+                                                 args (when item (fget item :args))]
+                                             (and (= nm "repr") (seq? args) (= 'Delimited (first args))
+                                                  (some #(= "C" (first %)) (meta-items (fget (second args) :tokens))))))
+                                         (fget it :attrs))))
+                            items)))))
+              (catch Throwable _ nil))]
+      (swap! repr-c-cache assoc p r)
+      r)))
 
 (defn- path-segs [p] (mapv #(second (fget % :ident)) (fget p :segments)))
 
@@ -1506,7 +1587,11 @@
   "symbol_name: the attributes' names (a weak lang item's link name, rustc_std_internal_symbol's, export_name, no_mangle),
   else v0 at the instance's arguments, with the instantiating crate when generic or globally shared with conflicts"
   [{:keys [def args shim] :as inst}]
-  (let [{:keys [names]} (attrs-of def)]
+  (let [{:keys [names] :as a} (attrs-of def)]
+    ;; rust-c6c: MONO_SYM_TRACE=REGEX prints the attributes a matching definition's symbol is made from
+    (when-let [re (System/getenv "MONO_SYM_TRACE")]
+      (when (re-find (re-pattern re) (str def))
+        (binding [*out* *err*] (println "mono sym-trace" (pr-str def) (pr-str (erase-regions args)) (pr-str a) (def-kind def)))))
     (cond (and (not shim) (upstream-symbol def args)) (upstream-symbol def args)
           (weak-link names) (mangle-internal (weak-link names))
           (names "rustc_std_internal_symbol") (mangle-internal (item-name-of def))
@@ -2083,7 +2168,7 @@
     :adt (when (and (or (= (c/lang "owned_box") (second t)) (= "alloc::boxed::Box" (second t))) (seq (nth t 2))) (first (filter type-arg? (nth t 2))))
     nil))
 
-(defn- dyn-casts
+(defn dyn-casts
   "RFP44 (a): a body's unsizing casts to a trait object, in the body's order: [[SOURCE-TEXT TARGET-TEXT C TRAIT] ...] (C the
   concrete pointee, TRAIT the object's principal), the source a plain local's type"
   [b]

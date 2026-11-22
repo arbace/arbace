@@ -286,6 +286,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The module tree (rustc_expand/src/module.rs: mod_dir_path, default_submod_path)
 
+(declare rel-path)
 (defn module-files
   "core's out-of-line modules: [{:path \"core::num::wrapping\" :file F :dir D}] in the order the crate's expansion loads
   them (depth first); the arch modules of stdarch and portable-simd marked :vendored"
@@ -318,7 +319,10 @@
                           fd (if (and pa (not (re-find #"/mod\.rs$" f))) (.getParent (File. ^String f)) fd)
                           canon (.getCanonicalPath (File. ^String f))]
                       (when (.exists (File. ^String f))
-                        (swap! out conj {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))})
+                        ;; rust-c6c: the file as rustc names it (module.rs joins the #[path] to the declaring file's directory and
+                        ;; never resolves `..`: std's backtrace_rs `std/src/../../backtrace/src/..`), its spans' file (run-module)
+                        (swap! out conj (cond-> {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))}
+                                          (not= (rel-path f) (rel-path canon)) (assoc :src f)))
                         (walk p canon fd (fget (parse-file canon) :items) nil)))))))]
       (let [lib (crate-lib-file lib-dir *crate*)]
         (binding [*item-macros* (if (some #{*crate*} dep-crates) (crate-item-macros lib) *item-macros*)]
@@ -1077,11 +1081,11 @@
 (defn run-module
   "A module file's bodies, each [[name key] body-or-nil error-or-nil detail] handed to ON-BODY as it is built (its value
   kept): {:stages {stage :ok|message} :bodies [value ...]}"
-  [{:keys [path file]} table names std-file std si ^String lib-dir on-body]
+  [{:keys [path file] :as m} table names std-file std si ^String lib-dir on-body]
   (let [stages (atom {})
         native (atom nil)
         only (some-> (System/getenv "CORE_ONLY") re-pattern)
-        rel-file (rel-path file)
+        rel-file (rel-path (or (:src m) file))
         out (atom [])]
     (try
       ;; round 54 (RIND9 (a), std): std's modules take std's own prelude (lib.rs' `#[prelude_import] use
@@ -1331,7 +1335,9 @@
         adt-ps (set (for [x ts0 :when (and (vector? x) (= :adt (first x)) (string? (second x)))] (second x)))
         ancestors (fn [^String p] (let [segs (str/split p #"::")] (for [i (range 2 (count segs))] (str/join "::" (take i segs)))))
         pick (fn [k ps] (into {} (for [p ps :let [f (get-in native [k p])] :when (and f (not (get-in si-full [k p])))] [p (dissoc f :native)])))
-        fs (pick :fns (concat fps (ancestors (str (:def e))) (mapcat ancestors adt-ps)))
+        ;; rust-c6c: and the functions nested in its body (:nested-attrs' paths: custom_owner_from_box's generic
+        ;; `drop_box_raw<T: ?Sized>`, reified at `dyn Error + Send + Sync`, whose symbol carries its argument as std's IR's)
+        fs (pick :fns (concat fps (ancestors (str (:def e))) (mapcat ancestors adt-ps) (keys (:nested-attrs e))))
         parents (set (keep #(let [i (.lastIndexOf ^String % "::")] (when (pos? i) (subs % 0 i))) (conj fps (str (:def e)))))
         is (pick :impls parents)
         ts (pick :traits parents)
@@ -1421,7 +1427,7 @@
       ;; RF_CORE_ATTRS: the macro-made items core's sources do not show)
       "--attrs"
       (let [[_ front-dir cache-dir modules-file out & files] args
-            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v] (str/split l #" ")]] [f {:path p :file f :vendored (= v "vendored")}]))
+            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v src] (str/split l #" ")]] [f (cond-> {:path p :file f :vendored (= v "vendored")} (seq src) (assoc :src src))]))
             std-file (str front-dir "/std-names.edn")
             std (collect/load-std std-file)
             si (collect/load-std-iface (str front-dir "/std-iface.edn"))
@@ -1443,10 +1449,10 @@
             (println "core-attrs: not a module file:" f)))
         (spit out (pr-str (into (sorted-map) @acc)))
         (println "core-attrs:" (count @acc) "functions' attributes to" out))
-      "--list" (doseq [m (module-files lib-dir)] (println (:path m) (:file m) (if (:vendored m) "vendored" "")))
+      "--list" (doseq [m (module-files lib-dir)] (println (str/trimr (str (:path m) " " (:file m) " " (if (:vendored m) "vendored" "") (when (:src m) (str " " (:src m)))))))
       "--check"
       (let [[_ front-dir oracle-dir cache-dir modules-file & files] args
-            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v] (str/split l #" ")]] [f {:path p :file f :vendored (= v "vendored")}]))
+            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v src] (str/split l #" ")]] [f (cond-> {:path p :file f :vendored (= v "vendored")} (seq src) (assoc :src src))]))
             std-file (str front-dir "/std-names.edn")
             std (collect/load-std std-file)
             si (collect/load-std-iface (str front-dir "/std-iface.edn"))
