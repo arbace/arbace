@@ -1929,7 +1929,12 @@
       (or (try (adv! p) (adv! p)
                (let [x (with-gt p true (parse-assign-expr p))]
                  (when (accept! p ",")
-                   (let [ty (parse-type-id p :paren)]
+                   (let [ti (ix p)
+                         ty (parse-type-id p :paren)]
+                     ;; (cpp-diag-b, 2026-11-22: [cstdarg.syn]/1 with C's va_arg: an argument through ... is a prvalue, no reference
+                     ;; type is received: GCC's "cannot receive reference type 'int&' through '...'")
+                     (when (and (#{:lr :rr} (:t ty)) (main-tok? p ti))
+                       (soft-diag! p ti (str "cannot receive reference type '" (qt ty) "' through '...'")))
                      (when (is? p ")") (adv! p)
                        (assoc (node p "BuiltinExpr" b (last-ix p) {}) :_vaarg x :_vatype (qt ty))))))
                (catch arbace.lang.ExceptionInfo _ nil))
@@ -2410,6 +2415,9 @@
   string-literal\", \"a wide string is invalid in this context\", \"expected ')'\"); past an error the tokens to the `)` or
   the `;` skipped, the deletion taken."
   [^P p]
+  ;; (cpp-diag-b, round 2: before C++26 GCC's pedwarn "'delete' reason only available with -std=c++2c or -std=gnu++2c", at the `(`)
+  (when (and (< (.-year p) 2026) (not (skim? p)) (main-tok? p (ix p)))
+    (pedantic-diag! p (ix p) "'delete' reason only available with -std=c++2c or -std=gnu++2c"))
   (adv! p)
   (if (identical? :str (tk (cur p)))
     (do (when (re-find #"^(u8|u|U|L)" (ts (cur p))) (soft-diag! p (ix p) "a wide string is invalid in this context"))
@@ -2456,7 +2464,12 @@
                           :else false))
         section (fn [one] (if (or (is? p ")") (is? p ":") (is? p "::") (pos? (long @colons))) []
                             (loop [out [(one)]] (if (accept! p ",") (recur (conj out (one))) out))))
-        operand (fn [] (let [nm (when (accept! p "[") (let [s (ts (cur p))] (adv! p) (expect! p "]") s))
+        operand (fn [] (let [nm (when (accept! p "[")
+                                  ;; (cpp-diag-b, round 2: an asm operand's symbolic name is an identifier, its constraint a
+                                  ;; string-literal: GCC's "expected identifier before numeric constant", "expected string-literal")
+                                  (when-not (identical? :id (tk (cur p))) (soft-diag! p (ix p) (str "expected identifier before '" (ts (cur p)) "'")))
+                                  (let [s (ts (cur p))] (adv! p) (expect! p "]") s))
+                             _ (when-not (identical? :str (tk (cur p))) (soft-diag! p (ix p) (str "expected string-literal before '" (ts (cur p)) "'")))
                              c (lit)
                              _ (expect! p "(")
                              x (parse-expr p)]
@@ -3207,7 +3220,10 @@
             (and (#{"__typeof__" "__typeof" "typeof"} s) (not has-type) (is-at? p 1 "("))
             (do (adv! p) (unclosed-paren! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
             (and (= s "_Atomic") (is-at? p 1 "(") (not has-type))
-            (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str "_Atomic(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
+            (do ;; (cpp-diag-b, 2026-11-22: C's _Atomic type specifier is no C++ keyword (C++23's <stdatomic.h> defines it as a
+                ;; macro): GCC's "'_Atomic' does not name a type", at the keyword)
+                (when (and (main-tok? p (ix p)) (not (skim? p)) (nil? (.-mac ^T (cur p)))) (soft-diag! p (ix p) "'_Atomic' does not name a type"))
+                (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str "_Atomic(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
             (and (#{"class" "struct" "union"} s) (not has-type))
             (let [{:keys [type node]} (parse-class-specifier p ds ctx)
                   ds (cond-> (assoc ds :type type) node (assoc :tag-node node))]
@@ -3392,7 +3408,7 @@
     (when-let [[i _] (first (filter #(#{"static" "extern" "register" "mutable" "__thread" "thread_local" "_Thread_local"} (second %))
                                     (spec-tokens p (long (:b ds)) (long (:e ds)))))]
       (soft-diag! p (long i) "storage class specified for template parameter")))
-  (when (and (:b ds) (:e ds) (contains? #{:top :member :block :param} ctx) (not (skim? p)) (main-tok? p (long (:b ds))))
+  (when (and (:b ds) (:e ds) (contains? #{:top :member :block :param :tparam} ctx) (not (skim? p)) (main-tok? p (long (:b ds))))
     (let [ks (spec-tokens p (long (:b ds)) (long (:e ds)))
           first-of (fn [pred] (first (filter #(pred (second %)) ks)))
           words (filter #(builtin-kws (second %)) ks)
@@ -3455,6 +3471,10 @@
       (when (and (= ctx :param) (or tls (and sto (not= "register" (second sto)))))
         (soft-diag! p (long (first (or tls sto))) "storage class specified for parameter"))
       (when (and frnd (#{:top :block} ctx) (not virt)) (soft-diag! p (long (first frnd)) "'friend' used outside of class"))
+      ;; ([class.mem.general]/3: a member-declaration without a declarator declares a class, an enumeration or a friend: storage
+      ;; classes or cv-qualifiers alone declare nothing, GCC's "declaration does not declare anything")
+      (when (and (= ctx :member) (nil? (:type ds)) (nil? (:tag-node ds)) (not frnd) (is? p ";") (or sto (:c ds) (:v ds)))
+        (soft-diag! p (ix p) "declaration does not declare anything"))
       ;; ([class.friend]/3: a friend declaration of a class is an elaborated-type-specifier, no class definition)
       (when (and frnd (= ctx :member) (:tag-node ds) (:completeDefinition (:tag-node ds)))
         (soft-diag! p (long (first frnd)) "class definition may not be declared a friend"))
@@ -3906,6 +3926,10 @@
                            nm (assoc :name nm)
                            xo (assoc :isExplicitObjectParameter true)
                            (or dflt has-dflt) (assoc :init "c")))
+                ;; (cpp-diag-b, round 2: [dcl.fct]/? with [basic.scope.param]: two parameters of one clause named alike, GCC's
+                ;; "redefinition of 'int x'", at the second)
+                _ (when (and nm (some #{nm} nms) (not (skim? p)) (main-tok? p ni))
+                    (soft-diag! p ni (str "redefinition of parameter '" nm "'")))
                 ps (conj ps pv) tys (conj tys ty) nms (conj nms nm)]
             (cond
               cva (do (expect! p ")") {:params ps :types tys :names nms :va true})
@@ -4787,6 +4811,23 @@
                       (soft-diag! p (long (:i lp)) (cond (= ctx :member) (str "'constexpr' static data member '" (:s lp) "' must have an initializer")
                                                          (= "extern" (:storage ds)) (str "declaration of 'constexpr' variable '" (:s lp) "' is not a definition")
                                                          :else (str "uninitialized 'const " (:s lp) "'")))
+                      ;; ([dcl.typedef]/1 with [dcl.meaning.general]/1: a typedef-name is declared unqualified, and an operator
+                      ;; function's name is no typedef-name: GCC's "typedef name may not be a nested-name-specifier", "declaration
+                      ;; of 'operator!' as non-function")
+                      (and (:typedef ds) (or (>= np 2) (:g qn)))
+                      (soft-diag! p (long (:i lp)) "typedef name may not be a nested-name-specifier")
+                      (and (:typedef ds) (or (:op lp) (:conv lp)))
+                      (soft-diag! p (long (:i lp)) "declaration of an operator function as a typedef")
+                      ;; ([dcl.stc]/5 (C++23 /5): a block-scope extern declaration has no initializer: GCC's "'i' has both 'extern'
+                      ;; and initializer")
+                      (and (= ctx :block) (= "extern" (:storage ds)) (nil? fs) (or (is? p "=") (is? p "{") (is? p "(")))
+                      (soft-diag! p (long (:i lp)) (str "'" (:s lp) "' has both 'extern' and initializer"))
+                      ;; ([class.mem.general]/? : a member of a typedef'd function type declares a member function, whose only
+                      ;; initializer is a pure-specifier `= 0`: GCC's "invalid pure specifier (only '= 0' is allowed)")
+                      (and (= ctx :member) (nil? fs) base0 (= :n (:t base0)) (= :f (:t (:ty (:ent base0)))) (empty? (mapcat :ptrs chain))
+                           (empty? (mapcat :sufs chain)) (is? p "=")
+                           (not (and (= "0" (ts (nxt p 1))) (is-at? p 2 ";"))))
+                      (soft-diag! p (inc (ix p)) "invalid pure specifier (only '= 0' is allowed)")
                       ;; (C++11 [except.spec]/2, before C++17's P0012: an exception-specification appears in no typedef
                       ;; declaration)
                       (and (:typedef ds) (< (.-year p) 2017) (some (fn [x] (some #(get-in % [:m :throw]) (:sufs x))) chain))
@@ -6556,13 +6597,22 @@
             n (count body)]
         (loop [j 0 named nil hex nil]
           (if (>= j (dec n))
-            (cond named "pedantic: named universal character escapes are only valid in C++23"
+            (cond named (if (string? named) named "pedantic: named universal character escapes are only valid in C++23")
                   hex "pedantic: hex escape sequence out of range"
                   :else nil)
             (if (= \\ (.charAt body (int j)))
               (let [c (.charAt body (int (inc j)))]
                 (cond
-                  (and (= c \N) (< year 2023) (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2))))) (recur (+ j 3) true hex)
+                  ;; (cpp-diag-b, 2026-11-22: [lex.ccon]'s simple, octal, hexadecimal and universal escapes alone, GNU's \e and \E
+                  ;; beside: another is cpplib's pedwarn "unknown escape sequence"; C++23's delimited escapes \x{...} \o{...} \u{...}
+                  ;; (P2290R3) before C++23 "delimited escape sequences are only valid in C++23")
+                  (not (or (contains? #{\' \" \? \\ \a \b \f \n \r \t \v \x \u \U \N \o \e \E} c) (Character/isDigit c)))
+                  (recur (+ j 2) "pedantic: unknown escape sequence" hex)
+                  (and (contains? #{\x \u \o} c) (< year 2023) (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2)))) (not (string? named)))
+                  (recur (+ j 3) "pedantic: delimited escape sequences are only valid in C++23" hex)
+                  (and (= c \o) (not (and (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2)))))))
+                  (recur (+ j 2) "pedantic: unknown escape sequence" hex)
+                  (and (= c \N) (< year 2023) (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2))))) (recur (+ j 3) (or named true) hex)
                   (and (= c \x) bits (< (+ j 2) n) (not= \{ (.charAt body (int (+ j 2)))))
                   (let [k (loop [k (+ j 2)] (if (and (< k n) (>= (Character/digit (.charAt body (int k)) 16) 0)) (recur (inc k)) k))
                         big (when (> k (+ j 2)) (.bitLength (BigInteger. (subs body (+ j 2) k) 16)))]
@@ -6585,7 +6635,10 @@
                                   (when-let [[_ d] (re-matches #"0[0-7']*([89])[0-9']*(?:[uUlLzZ]*)" (.-s t))]
                                     (str "invalid digit \"" d "\" in octal constant"))
                                   (when-let [[_ d] (re-matches #"0[bB][01']*([2-9])[0-9']*(?:[uUlLzZ]*)" (.-s t))]
-                                    (str "invalid digit \"" d "\" in binary constant")))
+                                    (str "invalid digit \"" d "\" in binary constant"))
+                                  ;; ([lex.fcon]: hexadecimal floating literals are C++17's; before, GCC's pedwarn)
+                                  (when (and (< (.-year p) 2017) (re-matches #"0[xX][0-9a-fA-F'.]*[pP][-+]?[0-9']+[fFlL]?" (.-s t)))
+                                    "pedantic: use of C++17 hexadecimal floating constant"))
                          :id (when (str/includes? (.-s t) "\\") (ucn-error (.-s t) (.-year p)))
                          ;; (round 54, fifth pass: [lex.ccon]'s encodable literals)
                          :chr (or (escape-error (.-s t) (.-year p)) (char-literal-error (.-s t) (.-year p) false))
