@@ -16313,3 +16313,110 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   Loop all with an error printed and the next run; a non-str filename object a TypeError printed, -1; the prompts not
   written). `--only` on the 710e90 executable, go/arbace/py interpreted, PYI_RUNNER=python3, controls failing as they must:
   test_file 9 of 9 but test_py_universalnewlinefgets (classed, ungetc), 5 now pass; test_run's interactive tests 5 of 5.
+## 2026-11-21: py-design-1122, round 1: the read cell's by-design classes own-mode, own-traceback and charset emptied
+
+Branch `py-design-1122` from mac/next 863bdaea1 (stream P2 of the burst: the by-design part of Python's cells). The read cell's
+64 by-design files were :code-lines 30 and :rejected 4 (the :lines round trip), and parse-check's :own-traceback 24, :own-mode 5
+and :charset 1 (the syntax-errors corpus, judged by each case's own verdict since queue 240). The last three could pass:
+- :own-mode (test_fstring's assertAllRaise, mode eval): arbace.repr.python.parsecheck's own verdict judged every expectation on
+  the file's exec-mode read. Now each expectation is judged on the error of its own mode: "eval" parses the source by the eval
+  rule after stripping its leading spaces and tabs (bltinmodule.c's builtin_eval_impl), "single" by the interactive rule (a
+  doctest's compile), exec and none by the file's read as before (arbace.repr.python.native/parse-source's modes).
+- :own-traceback (test_syntax's doctests expecting "invalid syntax. Did you mean 'for'?"): a doctest's expected line is
+  traceback.format_exception_only's, which runs TracebackException._find_keyword_typos (Lib/traceback.py of CPython 3.14.10,
+  the pinned tarball) over a SyntaxError whose message is "invalid syntax" or names a forgotten comma. Ported into the judge,
+  no code vendored: the failing statement's lines from the parser's _metadata (peg.ae's last statement), textwrap.dedent of
+  3.14.10, tokenize's NAME tokens (lex/stream with extra tokens), at most 10 non-keyword names, for each the candidates
+  _suggestions._generate_suggestions gives (Python/suggestions.c's _Py_CalculateSuggestions and levenshtein_distance over UTF-8,
+  MOVE_COST 2, CASE_COST 1) then difflib.get_close_matches(name, keyword.kwlist, 3, 0.5) (SequenceMatcher's matching blocks
+  without junk, the n largest (ratio, word) pairs), the first replacement that codeop.compile_command(code, symbol="exec",
+  flags=PyCF_ONLY_AST) accepts. Its _maybe_compile was read closely: when the code parses (ONLY_AST, incomplete-input flags),
+  the final compile without the caller's flags decides, so a symtable or code generation error refuses the candidate; that
+  final compile is pyi's own compiler (arbace.python.run's compile-uncached "exec"). The first try without it took
+  test_syntax-0082's "(mat x)" for "(await x)" ("Did you mean 'await'?"), which CPython refuses ("'await' outside function"):
+  with the final compile all 623 own-judged cases pass. keyword.kwlist is the reader's grammar's keywords sorted.
+- :charset (test_exceptions' case b'# -*- coding: iso8859-7 -*-\n\xe1 = 0xI'): jrt has ISO-8859-7 (overlay JrtCharsets);
+  the reader's codec table (lex/codec) did not name it. arbace.repr.python.native now adds iso8859_7 and its aliases of
+  encodings.aliases (more-codecs, consulted after lex/codec: a change to lex.ae makes stage 0 reload lex from the checkout
+  while the compiled peg keeps the old Lx type, a ClassCastException), and decode-error-text refuses its three undefined
+  bytes (0xAE, 0xD2, 0xFF, Lib/encodings/iso8859_7.py) with the charmap codec's message. The case decodes, its error is
+  "invalid hexadecimal literal" at 2:6, the position its test expects.
+A negative control for the typo port: test/python/controls-read.edn's syntax-errors-typo, test_syntax-0296 ("fur a in b",
+Did you mean 'for'?) judged against test_syntax-0297's expected "Did you mean 'else'?": fails as it must.
+Runs (gate executable 710e90e4771a10548878 as the host): bin/repr-python parse-check --no-mutants syntax-errors and --full:
+874 files, by their own verdict 623 (pass 623, fail 0), by the record 251 equal, both controls failing as they must; recorded
+with --record (both sections of the corpus, whole): parse-check-known.edn's syntax-errors section empty, 30 rows of
+parse-check-results.edn :known -> :pass. bin/reap --record: Python read 3,672 / 64 -> 3,702 / 34; bin/crops-score --record:
+Python completeness 0.9465 -> 0.9485; --judge --strict and bin/records-check: 0 problems. The emptied classes stay in
+test/python/divergences-read.edn with a note. Left in the read cell, decisions for the user: :code-lines 30 (the :lines
+print carries no lines, and CPython's code generation depends on them: level 3 can only pass by compiling a position-free
+ast, which is level 2 again) and :rejected 4 (deliberately bad files CPython rejects; the read gives CPython's class and
+message, which is each file's own test's verdict: they could count as passes, as parse-check's own-judged errors do).
+
+## 2026-11-22: py-design-1122, round 2: _functools' reduce and cmp_to_key, _hmac and _uuid in pyi's runtime; stopped at the coordinator's throttle
+
+The eval cell's by-design rows (test/python/divergences.edn's :kind :design classes over the committed record, 2026-11-19's) were
+ranked by count: skipped-by-test 2,535, c-accelerators 1,311, cpython-only 617, fork 557, testinternalcapi 132,
+extension-modules 75, finalization 57, venv-and-build 49, finalization-cycle 24, coroutines 20, ssl-go-tls 19, gc-collector 17
+and 19 smaller ones (5,491 rows, 5,492 with the loop's del.py). Cross-read with CPython 3.14.10's recorded outcomes
+(ref-cpython314-lib-test*.edn): of skipped-by-test's 2,535, CPython's own run skipped 1,917 too (the platform 765, regrtest's
+-u none 191, the root account 91, CPython's run flags -B and -P or its build 266, the host's kernel 61, absent third-party
+packages 50, multiprocessing variants 123, the rest 370), ran 477 (the C variants of _functools 119, _hmac 28, _hashlib 27,
+OpenSSL's digests 20, _elementtree 18; UDP-Lite 113, which this host's kernel 7.3 no longer has, CPython having recorded on an
+older one; test_opcache 73 and tuple reuse 6, CPython's implementation details; test_remote_pdb 45 behind
+sys.is_remote_debug_enabled()). Done (branch py-design-1122; the runtime's Go printed, edited and read back with bin/pyi runtime
+print and read; Modules/ of the pinned CPython 3.14.10 tarball read as prior art, nothing vendored):
+- _functools: reduce and cmp_to_key are Modules/_functoolsmodule.c's, built-in functions (queue 459's thin module gave
+  functools.py's pure functions, which bind as methods in test_functools' C classes: TestReduceC 3 and TestCmpToKeyC 8 failed
+  on next's build): _functools_reduce_impl's iteration and messages, clinic's argument messages, functools.KeyWrapper
+  (keyobject: tp_call, tp_richcompare calling cmp and comparing with 0, "other argument must be K instance", unhashable,
+  DISALLOW_INSTANTIATION, the obj member, __text_signature__ "(obj)"). partial, Placeholder and _lru_cache_wrapper stay thin.
+- _json: the thin encoder's negative _current_indent_level indents as 0, as create_indent_cache does
+  (test_speedups.test_current_indent_level).
+- sys.stdin and the other standard text streams: readlines(hint) and iteration (json.tool --json-lines reads
+  sys.stdin.readlines()).
+- SIGPIPE and SIGXFSZ ignored at the start (an atStartHook), as CPython's _PySignal_Init does; before, only once _signal
+  was imported, so json.tool's child died of the signal (-13).
+- _uuid: Modules/_uuidmodule.c as built with libuuid: generate_time_safe() is libuuid's time-based version 1 UUID (the
+  Gregorian 100-ns clock, a random 14-bit clock sequence advanced when the clock goes back, up to 10 per tick, the variant,
+  the first interface's hardware address or a random multicast node), status -1 (no uuidd, no state file);
+  has_uuid_generate_time_safe 1; has_stable_extractable_node 1 when the node is an interface's address.
+- _hmac: Modules/hmacmodule.c over Go's crypto and hashlib_blake2.go: new, compute_digest, the twelve compute_*, _hmac.HMAC
+  (copy, update, digest, hexdigest, name, digest_size, block_size, its repr), UnknownHashError, _GIL_MINSIZE; the
+  py_hmac_static_hinfo names and hashlib names, the lower() fallback; RFC 2104 over builtins_hashlib.go's pyHash states
+  (their copyHash for copy() and digest()). Two first tries failed under goi (the checkout's runtime interpreted): a blake2
+  adapter implementing hash.Hash made goi print "no stub left for methods of type func() int (go/arbace/gotable.edn :stubs)"
+  at every start (failing every test that reads a child's stderr), and a hash interface of the runtime's own over Go's
+  hashes panicked ("goi cannot call Write on *sha256.Digest: the type is not in the table"); pyHash, whose Go hashes goi's
+  table already serves, has neither problem.
+- Classes: the C twins test_functools runs since queue 459 that fail for the thin module's reasons named in their Py twins'
+  classes (TestPartialC/CSubclass's repr_safety in :functools-core, TestLRUC's weakrefable in :finalization-cycle) or in
+  :c-accelerators (TestPartialC/CSubclass's test_attributes_unwritable: the pure partial's slots are writable);
+  test_tool's two test_broken_pipe_error in :os-and-files-misc (deferred: exit status 120, the flush at exit failing again).
+  Named by :tests, the five rows already in the record (skipped there for "requires the C _functools module") move out of
+  skipped-by-test: bin/reap --record, Python eval 39,204 / 5,492 / 3,625 -> 39,204 / 5,490 / 3,627 (design -2: TestPartialC's
+  and TestPartialCSubclass's repr_safety into the deferred :functools-core); bin/crops-score --record (Python completeness
+  unchanged at 0.9485). The eval record itself is P1's: the passes above wait for its next whole run.
+Runs (bin/pyi check --only, the gate's executable 710e90e4771a10548878, the checkout's runtime interpreted by goi,
+PYI_CHECK_RECORD a scratch copy of the record; the eval record is P1's): test_functools 309 of 325 pass (the record 197,
+next's build 299), test_hmac 91 of 148 (the record 63: the 28 "requires _hmac" pass), test_uuid 105 of 120 (the record 49:
+the C classes' 56), test_hashlib 70 (unchanged), test_imaplib 229, test_smtplib 85, no failures in these; test_json 150 pass
+before the module's 3,600 s limit on the interpreted runtime (its other failures that run were the stub warning above) and
+test_pickle 174 before the limit: neither conclusive there; the three controls failed as they must. After the pyHash rework,
+test_hmac again: 91 of 148 pass, 0 failing, the 28 now passing (and the controls failing as they must); test_uuid 105 of
+120, 0 failing (the run before it). Not committed, kept in the worktree for the next round (.tmp/stage): _hashlib (_hashopenssl.c over Go's
+crypto: HASH, HASHXOF, HMAC, pbkdf2_hmac, scrypt RFC 7914 with EVP_PBE_scrypt's checks, unit-tested against RFC 7914's and
+CPython's vectors; its HMAC still on the first try's hash adapters, to be moved onto the pyHash states) and _pickle's dump/dumps/load/loads as built-in functions (unverified: test_pickle times out interpreted).
+Left for the user (with rows, in the report): skipped-by-test's 1,917 that CPython's run skips too (a :na kind?), UDP-Lite
+113 (the kernel), the decided c-accelerators (_datetime 553 plus test_types' 129 import, _decimal 346) under queue 459's
+thin pattern or not, cpython-only 617 (PYS15 (a)), fork 557, testinternalcapi 132, extension-modules 75 and the
+finalization family (PYS9 (a)); test_remote_pdb 45 needs sys.remote_exec between pyi processes (a design).
+- Merged mac/py-design-1122 at 87c30d972 (P2's round 1: _functools' reduce and cmp_to_key ported, _hmac, _uuid, SIGPIPE
+  ignored at the start, stdin's readlines and iteration, the thin json encoder's negative indent level, C twins classed) so
+  the record measures both lines. The overlaps resolved: builtins_functools and the readlines/iteration of sys.go are P2's
+  (they supersede this branch's built-in wrappers and its readlines); this branch's sys.go parts re-applied on P2's (the
+  standard streams' write errors with writeErr and the raw writers, -X cpu_count, -X int_max_str_digits); go/arbace/py.ae
+  P2's with builtins_syslog.go added back (taking P2's package file had dropped it from :files). Both SIGPIPE ignores stay
+  (idempotent). P2's os-and-files-misc rows for test_json's broken-pipe tests (exit status 120) should pass now (writeErr
+  drops the buffered bytes, so the shutdown flush succeeds after json.tool's dup2): to be confirmed by the record.
+  Coordination: the record (P1's alone) is made at this merge; P2's later commits are measured at the next record.
