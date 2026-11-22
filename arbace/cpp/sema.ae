@@ -701,8 +701,10 @@
       complex {:k :complex :of (abi/unq (resolve-type-form scope (second f)))}
       ;; (cpp-s4: cv on an array type is on its elements, [basic.type.qualifier]/3: `const T&` of T = char[4], std::format's
       ;; basic_format_string(const _Tp&) under convertible_to)
-      const (let [cv (fn cv [t] (if (abi/arr? t) (assoc t :of (cv (:of t))) (assoc t :c true)))] (cv (resolve-type-form scope (second f))))
-      volatile (let [cv (fn cv [t] (if (abi/arr? t) (assoc t :of (cv (:of t))) (assoc t :v true)))] (cv (resolve-type-form scope (second f))))
+      ;; (queue 514, the checker: cv on a function type, a substituted `const T` of T a function type, is ignored, [dcl.fct]/9:
+      ;; template/unify7.C's Foo(const T &) for `int &f ()`)
+      const (let [cv (fn cv [t] (cond (abi/arr? t) (assoc t :of (cv (:of t))) (and (checking?) (abi/fn? t)) t :else (assoc t :c true)))] (cv (resolve-type-form scope (second f))))
+      volatile (let [cv (fn cv [t] (cond (abi/arr? t) (assoc t :of (cv (:of t))) (and (checking?) (abi/fn? t)) t :else (assoc t :v true)))] (cv (resolve-type-form scope (second f))))
       restrict (resolve-type-form scope (second f))
       cpp/attributed (resolve-type-form scope (last f))
       array (if (= 2 (count f))
@@ -4571,12 +4573,19 @@
         (when m (swap! m assoc k r))
         r))))
 
+(defn- unspelled-fn [t] (when (map? t) (dissoc t :written :qual)))
+
 (defn ics
   "The implicit conversion sequence of the argument `e` (a typed expression or {:op :init-list}) to the parameter type `p`."
   [e p]
   (let [pt (abi/non-ref p)
         at (:ty e)]
     (cond
+      ;; (queue 514, the checker: a name that is functions, no template, binds an lvalue reference to a function type one of
+      ;; them has exactly, [over.ics.ref]/1 with [over.over]/1: template/unify7.C's Foo(f) for Foo<int &()>(int &(&)()))
+      (and (checking?) (= :fnset (:op e)) (empty? (:tmpls e)) (= :ref (:k p)) (abi/fn? (abi/unq pt))
+           (some #(= (unspelled-fn (abi/unq pt)) (unspelled-fn (:ty (fnd %)))) (:fns e)))
+      {:rank 0}
       ;; an overload set converts to a pointer to function only ([over.over]; G5: std::endl among operator<<'s candidates)
       (and (= :fnset (:op e)) (not (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt)))))) nil
       ;; (queue 423: a braced list for a reference to a class, [over.ics.list]/9 with [dcl.init.list]/3.10: one element of a
@@ -6332,7 +6341,11 @@
     (let [e (entity-expr ctx es n)]
       ;; (an unqualified name that finds nothing, with explicit template arguments: argument-dependent lookup's templates
       ;; take them, [temp.names]/3's P0846; get<i>(e) of a structured binding, [dcl.struct.bind]/4)
-      (if-let [tt (when (or (seq (:tmpls e)) (and (= :fnset (:op e)) (empty? (:fns e)) (empty? es))) (written-targs n nm))]
+      ;; (queue 514, the checker: a name finding functions that are no templates, written with template arguments (the tree's
+      ;; own, :explicitTemplateArgs), keeps them: a template-id still, [temp.names]/3 with P0846, analyze-call's nontmpl)
+      (if-let [tt (when (or (seq (:tmpls e)) (and (= :fnset (:op e)) (empty? (:fns e)) (empty? es))
+                            (and (checking?) (= :fnset (:op e)) (seq (:fns e)) (:_wn n) (seq (:explicitTemplateArgs n))))
+                    (written-targs n nm))]
         (assoc e :targs-text tt :targs-scope (:scope ctx))
         e))))
 
@@ -7245,10 +7258,16 @@
                  ;; type made `_M_construct<true>(...)` ambiguous with `_M_construct<false>`)
                  tset (set (:tmpls callee))
                  own-fns (if (checking?) (:fns callee) (remove #(contains? tset (:tid (:tinst (fnd %)))) (:fns callee)))
+                 ;; (queue 514, the checker: a template-id names the specializations of the templates its name finds, never a
+                 ;; function that is no template ([temp.names]/3 with P0846, [over.call.func]): those found are no candidates,
+                 ;; sure drops, cpp2a/fn-template17.C's `f<T> ()` of a using-declaration's `void f ()`)
+                 nontmpl (when (and (checking?) (:targs-text callee))
+                           (filter #(let [f (fnd %)] (and (not (:tinst f)) (not (:tid f)))) own-fns))
+                 own-fns (if (seq nontmpl) (remove (set nontmpl) own-fns) own-fns)
                  cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
-                 _ (when (and (empty? cands) (empty? (:tmpls callee))) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args)
+                 _ (when (and (empty? cands) (empty? (:tmpls callee)) (empty? nontmpl)) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args)
                       ;; (queue 492, the checker: a literal operator's name no lookup finds, called or a user-defined
                       ;; literal's, [over.literal], [lex.ext]/2-8, its arguments of no class type (no ADL candidate either);
                       ;; GCC's "'operator\"\"_X' was not declared in this scope", "unable to find ... literal operator")
@@ -7264,7 +7283,8 @@
                         (fail :undecl "use of undeclared identifier '" (:name callee) "'"))
                       (fail :name "unknown name " (:name callee)))
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
-                 fid (binding [*drops* (meta tcands)] (resolve-overload (distinct cands) args obj))
+                 fid (binding [*drops* (cond-> (meta tcands) (seq nontmpl) (update :sure-drops (fnil + 0) (count (distinct nontmpl))))]
+                       (resolve-overload (distinct cands) args obj))
                  f (fnd fid)
                  ;; (CP324 (a): a function found through a class's using-declaration has that declaration's access as a
                  ;; member of its class)
@@ -8214,8 +8234,11 @@
                                            ;; (queue 380, W3d: the address of an overloaded name keeps its set, :set, for the
                                            ;; target type to choose from, [over.over]/1: debug.cc's `pretty_print(ctx, s,
                                            ;; &print_string)` of print_string's two overloads; the first stands alone)
+                                           ;; (queue 514, the checker: the address of a name that is one function and no template
+                                           ;; is typed by it exactly, :one, so a deduction from it may fail surely)
                                            (cond-> {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr}
-                                             (and (empty? (:tmpls e)) (< 1 (count (distinct (:fns e))))) (assoc :set e)))
+                                             (and (empty? (:tmpls e)) (< 1 (count (distinct (:fns e))))) (assoc :set e)
+                                             (and (checking?) (empty? (:tmpls e)) (= 1 (count (distinct (:fns e))))) (assoc :one true)))
                       (lv? e) {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr}
                       :else (fail :addr "& of an rvalue"))
             "*" (deref-node e)
