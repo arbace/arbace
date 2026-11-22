@@ -72,7 +72,9 @@
                    :else (refuse :complex "the complex type " (chk/tstr t) " (deferred)")))
       ;; queue 522 (CR3 (a)): _Float128 a wide value of binary128's bits (crt's WType Float, wty q128), its arithmetic in software
       :float128 :w
-      (:float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
+      ;; and the decimal types in BID (crt's WType Dec, wty dN)
+      (:dec32 :dec64 :dec128 :dec64x) :w
+      (:float128x :bf16) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
       ;; GNU vector types (CS320 (a)): lanes in memory, an aggregate's address
       :vector :m
       :fn :i
@@ -99,7 +101,7 @@
 (defn wty [t]
   (let [t (under t)]
     (case (:k t)
-      :int128 "s128" :uint128 "u128" :float128 "q128"
+      :int128 "s128" :uint128 "u128" :float128 "q128" :dec32 "d32" :dec64 "d64" (:dec128 :dec64x) "d128"
       :bitint (str (if (:u t) "u" "s") (:n t)))))
 
 (defn- f32? [t] (#{:float :float32} (:k (under t))))
@@ -352,11 +354,49 @@
 
 (defn- q128? [t] (= :float128 (:k (under t))))
 
+(defn- dec? [t] (contains? #{:dec32 :dec64 :dec128 :dec64x} (:k (under t))))
+
+(defn- dec-hex
+  "A decimal constant's BID encoding as wty dN's hex text: its exact value (the checker's :dec, a BigDecimal), else v, rounded
+  half to even to the format's digits, its exponent clamped (queue 522; crt's dpk)."
+  ^String [t v ld]
+  (let [[n p bias ebits emaxb] (case (:k (under t)) :dec32 [32 7 101 8 191] :dec64 [64 16 398 10 767] [128 34 6176 14 12287])
+        d (when (instance? Double v) (double v))
+        neg-bit (and d (neg? (Double/doubleToRawLongBits d)))
+        hex (fn [^BigInteger b] (str "0x" (.toString b 16)))
+        special (fn [neg code] (hex (cond-> (.shiftLeft (biginteger code) (int (- n 8))) neg (.setBit (int (dec n))))))]
+    (cond
+      (and (nil? ld) d (Double/isNaN d)) (special neg-bit 0x7c)
+      (and (nil? ld) d (Double/isInfinite d)) (special neg-bit 0x78)
+      :else
+      (let [^java.math.BigDecimal x (cond (instance? java.math.BigDecimal ld) ld
+                                          (instance? java.math.BigDecimal v) v
+                                          d (java.math.BigDecimal. d)
+                                          (ratio? v) (.divide (java.math.BigDecimal. (biginteger (numerator v))) (java.math.BigDecimal. (biginteger (denominator v)))
+                                                              (java.math.MathContext. (int (+ p 2)) java.math.RoundingMode/HALF_EVEN))
+                                          :else (java.math.BigDecimal. (biginteger v)))
+            neg (or (neg? (.signum x)) (and (zero? (.signum x)) neg-bit))
+            qmin (- bias) qmax (- emaxb bias)
+            r (.round (.abs x) (java.math.MathContext. (int p) java.math.RoundingMode/HALF_EVEN))
+            r (if (< (- (.scale r)) qmin) (.setScale (.abs x) (int (- qmin)) java.math.RoundingMode/HALF_EVEN) r)
+            ^BigInteger c (.unscaledValue r) q (- (.scale r))
+            [^BigInteger c q] (cond (zero? (.signum c)) [c (min qmax (max qmin q))]
+                                    (> q qmax) (let [k (- q qmax)] [(.multiply c (.pow BigInteger/TEN (int k))) qmax])
+                                    :else [c q])]
+        (if (or (> (count (str c)) p) (> q qmax))
+          (special neg 0x78)
+          (let [e (biginteger (+ q bias)) cw (- n 1 ebits) cw2 (- n 3 ebits)
+                b (if (<= (.bitLength c) cw)
+                    (.or (.shiftLeft e (int cw)) c)
+                    (-> (.shiftLeft e (int cw2)) (.or (.and c (.subtract (.shiftLeft BigInteger/ONE (int cw2)) BigInteger/ONE)))
+                        (.setBit (int (- n 2))) (.setBit (int (- n 3)))))]
+            (hex (if neg (.setBit b (int (dec n))) b))))))))
+
 (defn- int-const
   "The node of the integer constant v at type t."
   [v t]
   (case (kind t)
-    :w (list 'w (wty t) (if (q128? t) (q128-hex v nil) (str v)))
+    :w (list 'w (wty t) (cond (q128? t) (q128-hex v nil) (dec? t) (dec-hex t v nil) :else (str v)))
     :f (list 'f (fbits v))
     ;; a pointer's constant wrapped to 64 bits as unsigned long (int-bits' default is 32 signed bits: (void *)0x123456789abcdef0
     ;; read ffffffff9abcdef0 before; the Rust agent's finding, queue 522)
@@ -367,7 +407,7 @@
   [v t & [ld]]
   (case (kind t)
     :f (list 'f (fbits (if (f32? t) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) (double v))))
-    :w (list 'w (wty t) (if (q128? t) (q128-hex v ld) (str (chk/wrap (if (integer? v) v (bigint (long v))) (under t)))))
+    :w (list 'w (wty t) (cond (q128? t) (q128-hex v ld) (dec? t) (dec-hex t v ld) :else (str (chk/wrap (if (integer? v) v (bigint (long v))) (under t)))))
     :i (if (integer? v)
          (int-const v t)
          (list 'i (long (double v))))
@@ -1489,7 +1529,7 @@
       (cond
         (some? (:v r)) (if (and e (= :obj (:kind e)) (not (:constexpr (:m e))))
                          (place-load (place f))
-                         {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r) (:ld r))})
+                         {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r) (or (:ld r) (:dec r)))})
         (and e (= :fn (:kind e))) (let [x {:k :i :t (chk/ptr (:t r)) :n (list 'fa (fn-ref e))}]
                                     (if-let [nf (nested-of e)] (seq-node [(chain-store nf)] x) x))
         (and (nil? e) (:builtin r)) (refuse :builtin "the builtin " (:builtin r) " as a value")
@@ -1505,7 +1545,7 @@
                (not (and (= h 'conv) (vm? t))) ; a cast to a variably modified type evaluates its sizes (queue 165)
                (#{:i :f :w} (try (kind t) (catch Exception _ nil)))
                (not (and (symbol? h) (#{'and 'or} h) false)))
-        {:k (kind t) :t t :n (const-node (:v r) t (:ld r))}
+        {:k (kind t) :t t :n (const-node (:v r) t (or (:ld r) (:dec r)))}
         (if-not (symbol? h)
           (call-node f h args r)
           (case h
@@ -1637,7 +1677,7 @@
                     (and (seq? v) (= 'imaginary (first v)))
                     (cmake t {:k :f :t chk/t-double :n '(f 0)} {:k :f :t chk/t-double :n (list 'f (fbits (double (second v))))} [])
                     :else
-                    {:k (kind t) :t t :n (const-node (:v r) t (:ld r))}))
+                    {:k (kind t) :t t :n (const-node (:v r) t (or (:ld r) (:dec r)))}))
             byte-string (string-node f t)
             va-arg (let [[ap tf] args
                          apl (place ap)
@@ -1685,7 +1725,7 @@
                 (if (= :array (:k (unq t))) (assoc x :k :i :t (chk/decay (unq t))) x))
               (call-node f h args r))))))
     (string? f) (string-node f (chk/arr chk/t-char (inc (alength (utf8 f)))))
-    (number? f) (let [r (lit-res f)] {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r) (:ld r))})
+    (number? f) (let [r (lit-res f)] {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r) (or (:ld r) (:dec r)))})
     (char? f) {:k :i :t chk/t-int :n (list 'i (long (int (char f))))}
     (instance? Boolean f) {:k :i :t chk/t-bool :n (list 'i (if f 1 0))}
     (nil? f) {:k :i :t chk/t-nullptr :n '(i 0)}
@@ -1845,9 +1885,33 @@
   "A call of a builtin by name, or nil when it is an ordinary call."
   [^String nm args r]
   (let [t (:t r)]
-    (if-let [[_ w] (re-matches #"__builtin_(inf|huge_val|nan|nans)f(?:16|32|64|128|32x|64x)" nm)]
-      ;; queue 522: the _FloatN builtins' infinity and NaN, at the call's type (_Float128's a q128 constant)
-      {:k (kind t) :t t :n (const-node (if (#{"inf" "huge_val"} w) Double/POSITIVE_INFINITY Double/NaN) t)}
+    (if-let [[_ w] (re-matches #"__builtin_(inf|huge_val|nan|nans)(?:f16|f32|f64|f128|f32x|f64x|d32|d64|d128|d64x)" nm)]
+      ;; queue 522: the _FloatN and decimal builtins' infinity and NaN, at the call's type (a q128 or dN constant)
+      {:k (kind t) :t t :n (cond (#{"inf" "huge_val"} w) (const-node Double/POSITIVE_INFINITY t)
+                                 (not= w "nans") (const-node Double/NaN t)
+                                 (q128? t) (list 'w (wty t) "0x7fff4000000000000000000000000000")
+                                 (dec? t) (list 'w (wty t) (str "0x7e" (apply str (repeat (quot (- (case (wty t) "d32" 32 "d64" 64 128) 8) 4) "0"))))
+                                 :else (list 'f 0x7ff4000000000000))}
+    (if-let [wt (and (seq args) (re-matches #"__builtin_(fabs(f128|d32|d64|d128|d64x)|isnan|isinf|isfinite|signbit)" nm)
+                     (= :w (kind (:t (res-of (first args))))) (let [at (:t (res-of (first args)))] (when (or (q128? at) (dec? at)) at)))]
+      ;; queue 522: fabs and the classification builtins of a _Float128 or decimal operand, inline (the natives take doubles)
+      (let [[es x] (held (ex (first args)))
+            w (wty wt)
+            n (:n x)
+            nan (list 'wcmp "ne" w n n)
+            zero (int-const 0 wt)
+            inf (list 'and (list 'wcmp "eq" w n n) (list 'wcmp "ne" w (list 'wbin "sub" w n n) (list 'wbin "sub" w n n)))
+            ;; the sign bit: negative, or a zero or NaN whose 1/x or copy is: x < 0, or x == 0 and 1/x < 0
+            neg (list 'or (list 'wcmp "lt" w n zero)
+                      (list 'and (list 'wcmp "eq" w n zero) (list 'wcmp "lt" w (list 'wbin "div" w (int-const 1 wt) n) zero)))]
+        (if (str/starts-with? nm "__builtin_fabs")
+          {:k :w :t wt :n (list 'wseq es (list 'wif (list 'wcmp "lt" w n zero) (list 'wneg w n) n))}
+          {:k :i :t chk/t-int
+           :n (list 'seq es (case nm
+                              "__builtin_isnan" nan
+                              "__builtin_isinf" inf
+                              "__builtin_isfinite" (list 'and (list 'lnot nan) (list 'lnot inf))
+                              "__builtin_signbit" neg))}))
     (case nm
       ("__builtin_expect" "__builtin_expect_with_probability")
       ;; its other arguments evaluated too (pr85156: __builtin_expect(c, z++))
@@ -1877,7 +1941,8 @@
       ("__builtin_inf" "__builtin_huge_val" "__builtin_infl" "__builtin_huge_vall") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
       ("__builtin_inff" "__builtin_huge_valf") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
       ("__builtin_nan" "__builtin_nanl" "__builtin_nanf") {:k :f :t t :n (list 'f (fbits Double/NaN))}
-      ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") {:k :f :t t :n (list 'f (fbits Double/NaN))}
+      ;; a signaling NaN (queue 522: kept signaling by crt's float conversions, FE_INVALID when an operand)
+      ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") {:k :f :t t :n (list 'f 0x7ff4000000000000)}
       ;; queue 126: its operand's value at its operand's type (the checker's); reassociation is not the builder's
       "__builtin_assoc_barrier" (conv (ex (first args)) t)
       ("__builtin_shuffle" "__builtin_shufflevector") (vec-shuffle nm args t)
@@ -1908,7 +1973,7 @@
               "__builtin_isless" (list 'fcmp "lt" fa fb)
               "__builtin_islessequal" (list 'fcmp "le" fa fb)
               (list 'or (list 'fcmp "lt" fa fb) (list 'fcmp "gt" fa fb)))})
-      nil))))
+      nil)))))
 
 (defn- seq-node-eff [es e] (if (empty? es) e (list 'ei (list 'seq (vec (conj es e)) '(i 0)))))
 
@@ -2168,6 +2233,13 @@
       ;; the number of the calling frame's variadic arguments (CS277)
       (= nm "__builtin_va_arg_pack_len") {:k :i :t t :n '(vplen)}
       b b
+      ;; queue 522: abs, labs, llabs and imaxabs expanded as gcc's builtins are, even at -O0 and even where the program
+      ;; defines the function (20021127-1.c), unless the unit is built with -fno-builtin or -ffreestanding
+      (and nm e (= :fn (:kind e)) (not (:no-builtin *cfg*)) (= 1 (count args))
+           (= (get {"abs" :int "labs" :long "llabs" :llong "imaxabs" :long} nm) (:k (under t))))
+      (let [[es x] (held (conv (ex (first args)) t))
+            it (ity t)]
+        {:k :i :t t :n (list 'seq es (list 'if (list 'cmp "lt" it (:n x) '(i 0)) (list 'neg it (:n x)) (:n x)))})
       (and nm (or (nil? e) (str/starts-with? nm "__atomic_")) (atomic-name nm)) (atomic-call nm args r)
       (and nm (overflow-builtins nm)) (overflow-call nm args)
       (and nm (bitg-builtins nm)) (bitg-call nm args r)
@@ -2648,9 +2720,15 @@
                                             :else (recur (rest ts) depth (conj cur x) out))
                                       (conj out cur)))))
               ops (fn [sec] (let [xs (mapv operand (split sec))] (when (every? some? xs) xs)))]
-          (when (and secs (seq tmpl) (every? #(= "\"\"" %) tmpl) (<= (count more) 1))
-            (let [o (ops (or outs [])) i (ops (or ins []))]
-              (when (and o i) {:outputs o :inputs i}))))))))
+          (when (and secs (seq tmpl) (<= (count more) 1))
+            (let [o (ops (or outs [])) i (ops (or ins []))
+                  t (apply str (map #(subs % 1 (dec (count %))) tmpl))]
+              (cond
+                (and o i (every? #(= "\"\"" %) tmpl)) {:outputs o :inputs i}
+                ;; queue 522: an x87 instruction of glibc's old inline math on the register stack's top ("=t", "0", "u"),
+                ;; its meaning on ci's long double (double): fsqrt, fpatan
+                (and o i (#{"fsqrt" "fpatan"} (str/trim (str/replace t #"\\[nt]" " "))))
+                {:outputs o :inputs i :x87 (str/trim (str/replace t #"\\[nt]" " "))}))))))))
 
 (defn lower-asm
   "The statement an empty-template asm statement f (c/asm TEXT) is (see above): (do (c/asm TEXT) STMT...), the c/asm
@@ -2658,7 +2736,20 @@
   [f]
   (let [text (second f)]
     (when (and (string? text) (re-find #"\"=|\"\+" text))
-      (when-let [{:keys [outputs inputs]} (asm-operands text)]
+      (when-let [{:keys [outputs inputs x87]} (asm-operands text)]
+       (if x87
+        (let [[out] (asm-expr (:ts (first outputs)))
+              [out2] (asm-expr (:ts (first outputs)))
+              args (mapv #(first (asm-expr (:ts %))) inputs)
+              cs (mapv :c inputs)]
+          (when (and out (= 1 (count outputs)) (= "=t" (:c (first outputs))) (every? some? args)
+                     (case x87 "fsqrt" (= cs ["0"]) "fpatan" (= cs ["0" "u"])))
+            (with-meta (list 'do (vary-meta f assoc :ci/lowered true)
+                             (list 'set! out (list 'conv (list 'typeof out2)
+                                                   (case x87
+                                                     "fsqrt" (list '__builtin_sqrt (first args))
+                                                     "fpatan" (list '__builtin_atan2 (second args) (first args))))))
+              (meta f))))
         (let [parse (fn [op] (asm-expr (:ts op)))
               tie (fn [{:keys [c]}]
                     (cond (re-matches #"\d+" c) (Long/parseLong c)
@@ -2684,7 +2775,7 @@
                                   (list 'set! out (list 'conv (list 'typeof out2) in))))))]
               ;; a read-write operand's barrier with nothing to evaluate stays the barrier it was (musl's __libc_start_main)
               (when (or (seq stmts) (re-find #"\"=" text))
-                (with-meta (apply list 'do (vary-meta f assoc :ci/lowered true) stmts) (meta f))))))))))
+                (with-meta (apply list 'do (vary-meta f assoc :ci/lowered true) stmts) (meta f)))))))))))
 
 (defn lower-asms
   "The forms with each statement-level empty-template asm lowered (lower-asm); a file-scope c/asm is left. Forms that
@@ -3190,7 +3281,7 @@
   [u]
   (binding [*p* (new-frag)]
     (let [u (assoc u :idx :self :forms (unit-forms (:rd u)))
-          ucfg (assoc *cfg* :unsigned-char (:unsigned-char u))
+          ucfg (assoc *cfg* :unsigned-char (:unsigned-char u) :no-builtin (:no-builtin u))
           decls (fn [] (for [f (:forms u)
                              :when (seq? f)
                              d (if (= 'c/group (first f)) (drop 2 f) [f])
@@ -3432,7 +3523,7 @@
                 (when (or (nil? old) (= 'c/defn (first d))) (.put ^HashMap (:entries *p*) k e)))))))
       ;; the objects: each external one's defining declaration (its complete type), allocated first
       (doseq [u units]
-        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u) :no-builtin (:no-builtin u))]
           (doseq [[f e] (file-objects (:forms u))]
             (when (and e (= :obj (:kind e)) (#{:x :i} (:linkage e)) (not (second (decl-attrs (meta (second f))))))
               (let [k (global-key e)
@@ -3444,13 +3535,13 @@
                           (and (not (:init old)) (tentative-or-def? f e) (not (:def old)))))
                   (.put defs k {:e e :f f :init has-init :def (tentative-or-def? f e) :u u})))))))
       (doseq [[k {:keys [e f init def u]}] defs]
-        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u) :no-builtin (:no-builtin u))]
           (let [t (:t e)
                 ro (let [c (and (contains? (chk/quals t) :const) init)]
                      (if (and (:thread_local (meta (second f))) (not c)) :tls c))]
             (static-idx [:obj k] (max 1 (+ (size-of t) (flex-extra t (when init (nth f 2))))) (obj-align e t) ro))))
       (doseq [[k {:keys [e f init def u]}] defs]
-        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u) :no-builtin (:no-builtin u))]
           (let [t (:t e)
                 idx (.get ^HashMap (:statics *p*) [:obj k])]
             (when init
@@ -3475,7 +3566,7 @@
                   (when (or (nil? old) (and (:weak old) (not weak)))
                     (.put chosen k cand)))))))
         (doseq [[k {:keys [u f alias e]}] chosen]
-          (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+          (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u) :no-builtin (:no-builtin u))]
             (if alias
               (let [te (ex-res-name u alias)]
                 (if (= :fn (:kind e))
