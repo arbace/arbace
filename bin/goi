@@ -996,7 +996,7 @@ dir_verdict() {
 # PROGRAM<TAB>RESULT<TAB>REASON.
 check_err() {
   local p=$1 g=$goroot/test/$1 f act fl tmo=10 want=1 auto="" lang="" maxerr="" goflags=() why="" ns key ref st r types dump reason syn rejected froot=$eforms raw=""
-  local mlev=0 nolinl="" escdebug="" gcmode="" d
+  local mlev=0 nolinl="" escdebug="" gcmode="" d gcwhy=""
   act=$(action_of "$g")
   set -- $act
   [ "$1" = errorcheckwithauto ] && auto=-auto
@@ -1018,7 +1018,9 @@ check_err() {
       -l) nolinl=1; goflags+=("$fl") ;;
       -N) goflags+=("$fl"); escdebug="$escdebug :N true" ;;
       -smallframes) escdebug="$escdebug :smallframes true"; goflags+=("$fl") ;;
-      -l=*|-live|-wb=*) why=${why:-"$fl: gc's liveness and write barriers (-l=N: its inliner's debugging), which goi does not have"} ;;
+      # gc's own passes (GOI-SPEC.md, "Since v1: gc in the executable"): the program compiled by gc's compile
+      # package compiled into the executable (check_err_gc), its messages judged; gcwhy the reason goi has not
+      -l=*|-live|-wb=*) gcwhy=${gcwhy:-"$fl: gc's liveness and write barriers (-l=N: its inliner's debugging), which goi does not have"}; goflags+=("$fl") ;;
       -d=*) for d in $(echo "${fl#-d=}" | tr ',' ' '); do
               case $d in
                 # typeassert: ssagen's type assertions, inlined or not (arbace.go.run's typeassert-lines); defer: each
@@ -1028,7 +1030,7 @@ check_err() {
                 # escapedebug: walk's dataWord, how a conversion to an interface avoids an allocation (arbace.go.escape/dataword-lines)
                 escapemutationscalls|escapemutationscalls=*|zerocopy|zerocopy=*|inlfuncswithclosures|inlfuncswithclosures=*|typeassert|typeassert=*|defer|defer=*|checkptr|checkptr=*|append|append=*|slice|slice=*|escapedebug|escapedebug=*)
                   case $d in *=*) escdebug="$escdebug :${d%%=*} ${d#*=}" ;; *) escdebug="$escdebug :$d 1" ;; esac ;;
-                *) why=${why:-"-d=$d: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
+                *) gcwhy=${gcwhy:-"-d=$d: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
               esac
             done
             goflags+=("$fl") ;;
@@ -1041,7 +1043,7 @@ check_err() {
       -complete) goflags+=("$fl"); gcmode="$gcmode :complete true" ;;
       -+) goflags+=("$fl"); gcmode="$gcmode :runtime true"
           grep -qE '^//go:(nowritebarrier|nowritebarrierrec|yeswritebarrierrec)$' "$g" \
-            && why=${why:-"-+: gc's write barrier checks (go:nowritebarrier, its SSA back end's write barriers), which goi does not have"} ;;
+            && gcwhy=${gcwhy:-"-+: gc's write barrier checks (go:nowritebarrier, its SSA back end's write barriers), which goi does not have"} ;;
       -p=*) goflags+=("$fl"); gcmode="$gcmode :pkgpath \"${fl#-p=}\"" ;;
       -asmhdr*|-spectre*) why=${why:-"$fl: gc compiling the standard library or the runtime, out of goi's scope"} ;;
       -goexperiment) why=${why:-"-goexperiment: another GOEXPERIMENT"}; shift ;;
@@ -1070,6 +1072,8 @@ check_err() {
   if [ "$(head -1 "$ref/judge")" != pass ]; then
     printf '%s\tskip\tgc'"'"'s own errorcheck does not pass here: %s\n' "$p" "$(sed -n 2,3p "$ref/judge" | tr '\t\n' '  ' | cut -c1-200)"; return
   fi
+  # gc's own passes: gc in the executable
+  [ -z "$gcwhy" ] || { check_err_gc "$p" "$g" "$gcwhy"; return; }
   f=$eforms/go/test/$(forms_rel "$p").ae
   r=$cwork/erun/$p
   mkdir -p "$(dirname "$r")"
@@ -1118,7 +1122,7 @@ check_err() {
     ${escdebug:+--escape-debug "{$escdebug}"} ${gcmode:+--gc-mode "{$gcmode}"} --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
   cover_settle goi "$p"
   if { [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; } && [ "$types" = 0 ] && [ -n "$want" ]; then
-    printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none; goi'"'"'s check over %s s)\n' "$p" "$tmo"; return
+    check_err_gc "$p" "$g" "errors of gc's phases after type checking (go/types reports none; goi's check over $tmo s)"; return
   fi
   case $st in
     125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err" | head -1)"; return ;;
@@ -1127,6 +1131,11 @@ check_err() {
     0|1) ;;
     *) printf '%s\terror\tstatus %s: %s\n' "$p" "$st" "$(head -1 "$r.err" | cut -c1-200)"; return ;;
   esac
+  # errors gc reports and go/types does not (godump's :errors empty), goi's checker none: gc's phases after
+  # type checking (a stack frame too large), gc in the executable
+  if [ "$types" = 0 ] && [ "$st" = 0 ] && [ "$mlev" = 0 ] && ! err_verdict "$g" "$r.out" "$st" "$r.judge"; then
+    check_err_gc "$p" "$g" "errors of gc's phases after type checking (go/types reports none)"; return
+  fi
   # GTS85 (b): the controls whose subject this test is: goi's errors against the reference's // ERROR comments,
   # by err_verdict as the test's own
   controls_of "$p" | while read -r c x; do
@@ -1136,10 +1145,44 @@ check_err() {
   err_verdict "$g" "$r.out" "$st" "$r.judge" && { printf '%s\tpass\t\n' "$p"; return; }
   # gc's -m: goi's port's diagnostics are the program's errors (a difference is a fail, a known one
   # test/goi/check-known.edn's)
-  if [ "$types" = 0 ] && [ "$st" = 0 ] && [ "$mlev" = 0 ]; then
-    printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none)\n' "$p"; return
-  fi
   printf '%s\tfail\t%s\n' "$p" "$(sed -n 2,3p "$r.judge" | tr '\t\n' '  ' | cut -c1-240)"
+}
+
+# check_err_gc PROGRAM G WHY: gc in the executable (GOI-SPEC.md, "Since v1: gc in the executable";
+# GOI-DESIGN-REVIEW.md Proposed 1 (b), the user's decision of 2026-11-22), for an errorcheck program whose
+# flags or errors need gc's own passes (WHY, the reason goi's checker has not them: liveness, the write
+# barriers, the SSA back end's passes and their -d output, a stack frame too large): the program's forms of
+# mode :full (the corpus linux-errtest-full) printed back to their text and compiled, in the executable, by
+# gc's compile package compiled into it from tamago/cmd's forms (arbace -m arbace.go.gc: the driver
+# arbace/repr/go/gccompile, goi's table lists it), with the arguments gc's reference has (check_err's
+# goflags, the std export data of its importcfg); gc's messages and status judged as the reference's
+# (err_aot_verdict: gocmp errorcheck, compilation failing or succeeding as wanted). An executable whose table
+# does not list the driver (goi: unsupported, 125) leaves the program unsupported for WHY, as before; so
+# does a program without forms of mode :full. In check_err's scope (goflags, tmo, want, auto). Prints
+# PROGRAM<TAB>RESULT<TAB>REASON.
+check_err_gc() {
+  local p=$1 g=$2 why=$3 ff st=0 r=$cwork/erun/$1
+  # the box's guest runs arbace.go.run alone (box_run): unsupported there, as before
+  [ -z "${box:-}" ] || { printf '%s\tunsupported\t%s\n' "$p" "$why"; return; }
+  ff=$efull/go/test/$(forms_rel "$p").ae
+  [ -f "$ff" ] || { printf '%s\tunsupported\t%s\n' "$p" "$why"; return; }
+  mkdir -p "$(dirname "$r")" "$cwork/telemetry"
+  rm -rf "$r.gc"; mkdir -p "$r.gc"
+  # gc's telemetry counters (counter.Open) into the check's work, not the user's configuration directory
+  (cd "$r.gc" && export $(gc_env) TEST_TELEMETRY_DIR="$cwork/telemetry" && limited $((tmo * 3)) "$rexe" -m arbace.go.gc "$ff" \
+     -p=p -d=panic -C -e -importcfg="$gcwork/importcfg" -o a.o ${goflags[@]+"${goflags[@]}"} -d=ssa/check/on > "$r.out" 2>&1 < "$empty") || st=$?
+  rm -rf "$r.gc"
+  case $st in
+    125) grep -q '^goi: unsupported: ' "$r.out" && { printf '%s\tunsupported\t%s\n' "$p" "$why"; return; } ;;
+    124|137|152) printf '%s\terror\tgc in the executable: timeout (%s s)\n' "$p" "$((tmo * 3))"; return ;;
+  esac
+  # GTS85 (b): the controls whose subject this test is: gc's messages against the reference's // ERROR comments
+  controls_of "$p" | while read -r c x; do
+    if err_aot_verdict "$goroot/test/$x" "$r.out" "$st" "$r.${c//\//_}.judge"; then printf '%s\tpass\t\n' "$c"
+    else printf '%s\tfail\t%s\n' "$c" "$(sed -n 1,3p "$r.${c//\//_}.judge" | tr '\t\n' '  ' | cut -c1-240)"; fi
+  done
+  err_aot_verdict "$g" "$r.out" "$st" "$r.judge" && { printf '%s\tpass\t\n' "$p"; return; }
+  printf '%s\tfail\tgc in the executable: %s\n' "$p" "$(sed -n 1,3p "$r.judge" | tr '\t\n' '  ' | cut -c1-240)"
 }
 
 # syn_verdict ID G SYN JUDGE: gc's syntax errors SYN judged against G's // ERROR comments (gocmp errorcheck,
@@ -1328,11 +1371,14 @@ corpus_key() {
        bin/repr-go bin/lib/repr-go bin/lib/repr-go-host.bash tools/godump tools/gocmp go/arbace/repr \
        arbace/go.ae arbace/go/repl.ae arbace/go/run.ae arbace/go/build.ae arbace/go/generic.ae arbace/go/table.ae arbace/go/embed.ae \
        tamago/goroot/go/go/parser tamago/goroot/go/go/scanner tamago/goroot/go/go/ast tamago/goroot/go/go/token -type f \
+       ! -path 'go/arbace/repr/go/internal/gc/*' ! -path 'go/arbace/repr/go/gccompile*' \
        | LC_ALL=C sort | xargs sha256sum)
     # not the tools' host: goi's interp-level and AOT steps run on different hosts over the same corpora,
     # so a key naming the executable made each re-read them (report 069, finding A); the reader's
     # sources above are what the read depends on, and the reader chosen
     # the reader as bin/repr-go read chooses it (reader=${REPR_GO_READER:-native}): unset and native are one reader
+    # (not gc in the executable's Go packages, its compiler's renamed copy and driver under go/arbace/repr: no read
+    # runs them)
     echo "reader: ${REPR_GO_READER:-native}"; } | sha256sum | cut -c1-24
 }
 
@@ -1632,7 +1678,7 @@ check() {
     fi
   fi
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f cover_env cover_settle forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
+  export -f cover_env cover_settle forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_gc check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
   export root goroot rexe hexe cforms cfull dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
   local t0=$SECONDS
   rm -rf "$cwork"/fail-once.*
@@ -1928,7 +1974,8 @@ check_nethttp() {
   hexe=$(arbace_host_exe) || return 1
   local key
   key=$( { cat "$goroot/VERSION"; (cd "$nd" && find . \( -name '*.go' -o -name go.mod \) | LC_ALL=C sort | xargs cat);
-           (cd "$root" && find arbace/repr/go.ae arbace/repr/go arbace/go/check.ae arbace/go/check arbace/box/plan.ae tools/godump go/arbace/repr -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -c1-24)
+           (cd "$root" && find arbace/repr/go.ae arbace/repr/go arbace/go/check.ae arbace/go/check arbace/box/plan.ae tools/godump go/arbace/repr -type f \
+              ! -path 'go/arbace/repr/go/internal/gc/*' ! -path 'go/arbace/repr/go/gccompile*' | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -c1-24)
   nforms=$nwork/forms
   if [ ! -f "$nforms.key" ] || [ "$(cat "$nforms.key")" != "$key" ] || [ ! -d "$nforms/go" ]; then
     echo "== bin/repr-go read --goos linux --goarch amd64 ./... in test/nethttp (.tmp/goi-check/nethttp/read.log)" >&2
