@@ -4595,9 +4595,3 @@ its B0.ml; pprint's PPrintTest), and at oi's level the 5 of `test/ocaml/own-verd
   (compiler-libs' typing units do not load in its limit, DECISION 480-1). `bin/oi objinfo-check` (the native typer's own printing)
   reads its programs from divergences-aot.edn's classes now.
 - Control (`test/ocaml/controls.txt`): index_labels' run against index_vb's reference must differ.
-- Round 2: oi's frames reused (go/arbace/oi apply.ae: newFrame takes a frame from its thread's pool, freeFrame gives back a finished
-  call's frame cleared; call frees its frame, applyLoop the frames it made, never its caller's). A frame a call was a third of oi's
-  allocations and of Go's collector's work in ast-invariants' profile: that row went from 115 to 71 s of CPU (the check's whole run on the
-  VM), and ast-invariants/test and weak-ephe-final/weak_array_par pass within OI_TIMEOUT (out of oi-slow.edn). `bin/oi test` ok; the
-  essential list's 60 programs run beside them (lib-threads/signal left: its C helper needs musl's forms read, not run) equal their own
-  verdicts.

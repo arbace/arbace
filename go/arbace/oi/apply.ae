@@ -67,17 +67,6 @@
     (when (> (.-depth th) DepthLimit)
       (set! (.-depth th) 0)
       (.overflow th)))
-  ;; a frame of the thread's finished calls (freeFrame), its slots zero (queue 511: a frame a call was a third of the allocations
-  ;; and of the collector's work, ast-invariants' profile)
-  (let [n (len (.-fpool th))]
-    (when (> n 0)
-      (let [fr (aget (.-fpool th) (- n 1))]
-        (set! (.-fpool th) (subslice (.-fpool th) _ (- n 1)))
-        (set! (.-Env fr) env)
-        (if (<= (.-NSlots code) (cap (.-S fr)))
-          (set! (.-S fr) (subslice (.-S fr) _ (.-NSlots code)))
-          (set! (.-S fr) (make (slice Value) (.-NSlots code))))
-        (return fr))))
   (let [fr (addr (lit Frame :Env env :Th th))]
     (if (<= (.-NSlots code) (len (.-buf fr)))
       (set! (.-S fr) (subslice (.-buf fr) _ (.-NSlots code)))
@@ -85,17 +74,6 @@
       (set! (.-S fr) (make (slice Value) (.-NSlots code))))
 
     ^{:line 69} fr))
-
-
-(go/method freeFrame "freeFrame gives back the frame of a finished call (nothing outlives a call in its frame: closures copy what they\ncapture, a tail call's arguments are copied out of it), cleared so it keeps no value alive, for newFrame to reuse.\n" [^{:tag (* Thread)} th ^{:tag (* Frame)} fr]
-  (clear (.-S fr))
-  (set! (.-Env fr) nil)
-  (set! (.-tcF fr) nil)
-  (set! (.-tcA fr) nil)
-  (set! (.-exN fr) 0)
-  (clear (subslice (.-tbuf fr) 0))
-  (when (< (len (.-fpool th)) 256)
-    (set! (.-fpool th) (append (.-fpool th) fr))))
 
 
 (go/type mark (struct ^string name))
@@ -144,7 +122,6 @@
       (let [v ((.-Body (.-Code c)) fr)]
         (when (== v tailMark)
           (set! v (.applyLoop th (.-tcF fr) (.-tcA fr) fr)))
-        (.freeFrame th fr)
 
         ;; the depth on entry (a frame's words under OCAMLRUNPARAM's l are counted by newFrame: OC216 (a))
         (set! (.-depth th) d0)
@@ -158,9 +135,7 @@
 ^{:go/end 215} (go/method applyLoop "applyLoop applies f to args, the tail calls of the callee made in its loop; from is the frame\nwhose tbuf args may borrow (it is free to reuse: its call is over).\n" ^Value [^{:tag (* Thread)} th ^Value f ^{:tag (slice Value)} args ^{:tag (* Frame)} from]
   (let [^{:tag (slice Value)} pending (zero (slice Value))
       ^{:line 128} d (.-depth th)
-      ^{:line 129} borrowed (!= from nil)
-      ;; the frame this loop made last (its own: freed once superseded or the loop is done; from, the caller's, is never freed here)
-      ^{:tag (* Frame)} own (zero (* Frame))]
+      ^{:line 129} borrowed (!= from nil)]
     (while true
       (let [(values c ok) (assert (* Closure) f)]
         (when (not ok)
@@ -183,11 +158,7 @@
                   (copy (.-S fr) args))
                 (do
                   (set! fr (newFrame code (.-Env c) th))
-                  (copy (.-S fr) args)
-                  ;; (the arguments copied: the frame they were borrowed from, when it is this loop's, is done)
-                  (when (!= own nil)
-                    (.freeFrame th own))
-                  (set! own fr)))
+                  (copy (.-S fr) args)))
 
               (let [v ((.-Body code) fr)]
                 (set! (.-depth th) d)
@@ -196,9 +167,6 @@
                   (.tick th)
                   (continue))
 
-                (when (!= own nil)
-                  (.freeFrame th own)
-                  (set! own nil))
                 (when (== (len pending) 0)
                   (return v))
 
@@ -209,9 +177,6 @@
           (set! args (append (conv (slice Value) nil) (spread args)))
           (set! borrowed false))
 
-        (when (!= own nil)
-          (.freeFrame th own)
-          (set! own nil))
         (set! from nil)
         (while (!= (.-Base c) nil)
           (set! args (append (append (make (slice Value) 0 (+ (len (.-Args c)) (len args))) (spread (.-Args c))) (spread args)))
@@ -246,9 +211,8 @@
                     (set! v ((.-Body code) fr))
                     (set! (.-depth th) d)
                     (when (== v tailMark)
-                      (set! (values f args from borrowed own) (values (.-tcF fr) (.-tcA fr) fr true fr))
-                      (continue))
-                    (.freeFrame th fr))))))
+                      (set! (values f args from borrowed) (values (.-tcF fr) (.-tcA fr) fr true))
+                      (continue)))))))
 
 
 
