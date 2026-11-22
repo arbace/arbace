@@ -46,7 +46,8 @@ cmd_suite_corpus() {
     [ -f "$OPAM/$pkg/.extracted" ] || die "suite corpus: the opam package $pkg is not fetched out (bin/repr-ocaml corpus fetch)"
   done
   if [ -d "$OPAM" ]; then
-    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $6, "'"$OPAM"'/" $1, $5 }
+    # (a seventh column INCS, queue 528: the libraries the program links, as header.awk's include names them: unix)
+    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $7, $4, $6, "'"$OPAM"'/" $1, $5 }
       NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
   fi
   cat "$out.ts" "$out.opam" | LC_ALL=C sort > "$out"; rm -f "$out.ts" "$out.opam"

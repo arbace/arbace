@@ -2,8 +2,11 @@
 #ifndef CAML_CONFIG_H
 #define CAML_CONFIG_H
 #include "mlvalues.h"
+#include <inttypes.h>
 #define ARCH_SIXTYFOUR
 #define SIZEOF_PTR 8
 #define SIZEOF_LONG 8
 #define SIZEOF_INT 4
+/* printf's conversion of a uintnat (queue 530) */
+#define CAML_PRIuNAT PRIuPTR
 #endif

@@ -1908,6 +1908,84 @@
     (vec-build t (vec (concat copies pm))
                (fn [i] (place-load {:mode :mem :t et :a (list 'adds both (idx i) es)})))))
 
+;; gcc's untyped calls (queue 522c; builtins.cc's expand_builtin_apply_args and expand_builtin_apply) over ci's own arguments:
+;; __builtin_apply_args () is a block in the frame laid out as gcc's x86-64 one (apply_args_size: the incoming argument pointer at 0,
+;; then the argument registers by gcc's register number, rax 8, rdx 16, rcx 24, rsi 32, rdi 40, xmm0 to xmm7 from 48, 16 bytes each,
+;; r8 176, r9 184), each parameter stored where the psABI passes it (§3.2.3: INTEGER in rdi rsi rdx rcx r8 r9, SSE in xmm0 to xmm7,
+;; the rest in the stack area the argument pointer names), as gcc saves the registers at the function's entry; __builtin_apply
+;; (f, args, size) loads each of f's parameters from the same places and calls f, its result stored in a block laid out as gcc's
+;; apply_result (rax at 0, xmm0 at 16), whose address it gives. The program holds no instruction, so no machine runs it: the
+;; registers are the psABI's mapping of ci's arguments (doc/c/SPEC.md §14). Not built: aggregate, wide, long double and _Float16
+;; parameters or results, a variadic or unprototyped callee or caller, __builtin_return.
+
+(def ^:private apply-int-offs [40 32 16 24 176 184])
+
+(defn- apply-at [a off] (if (zero? (long off)) a (list 'adds a '(i 1) (long off))))
+
+(defn- apply-class
+  "A parameter or result type's register class in an apply block: :i (INTEGER) or :f (SSE); else refused."
+  [t why]
+  (case (kind t)
+    :i :i
+    :f (if (f16? t) (refuse :builder why ": a _Float16 (not built)") :f)
+    (refuse :builder why ": an aggregate, wide or long double (not built)")))
+
+(defn- apply-layout
+  "Each type of ts with its address: in the block b (a node) by its class while registers last, else in the stack area s."
+  [ts b s why]
+  (loop [ts (seq ts) ni 0 nf 0 ns 0 out []]
+    (if-let [[t & more] ts]
+      (case (apply-class t why)
+        :i (if (< ni 6)
+             (recur more (inc ni) nf ns (conj out [t (apply-at b (apply-int-offs ni))]))
+             (recur more ni nf (inc ns) (conj out [t (apply-at s (* 8 ns))])))
+        :f (if (< nf 8)
+             (recur more ni (inc nf) ns (conj out [t (apply-at b (+ 48 (* 16 nf)))]))
+             (recur more ni nf (inc ns) (conj out [t (apply-at s (* 8 ns))]))))
+      out)))
+
+(defn- apply-args-prologue
+  "The statements that fill the function's apply block at its entry (none when it has none)."
+  []
+  (when-let [off (:apply-args @*f*)]
+    (let [pes (:apply-params @*f*)
+          b (list 'fp off)
+          s (list 'fp (+ (long off) 192))
+          place (fn [pe]
+                  (let [loc (or (local-of pe) (refuse :builder "__builtin_apply_args: a parameter without a place"))
+                        t (:t pe)]
+                    (case (:loc loc)
+                      :slot-i {:mode :slot-i :k (:k loc) :t t}
+                      :slot-f {:mode :slot-f :k (:k loc) :t t}
+                      :mem {:mode :mem :a (mem-loc-addr loc) :t t}
+                      (refuse :builder "__builtin_apply_args: a parameter's place"))))]
+      (into [(list 'x (list 'ei (list 'st "u64" b s)))]
+            (for [[[t a] pe] (map vector (apply-layout (map :t pes) b s "__builtin_apply_args") pes)]
+              (list 'x (effect (place-store {:mode :mem :a a :t t} (place-load (place pe))))))))))
+
+(defn- builtin-apply
+  "__builtin_apply (f, args, size): f called on its parameters loaded from the apply block args, its result's block."
+  [args t]
+  (let [[fa ba] args
+        ft (let [u (under (:t (res-of fa)))] (unq (if (= :ptr (:k u)) (:to u) u)))
+        _ (when-not (and (= :fn (:k (under ft))) (:proto ft) (not (:variadic ft)))
+            (refuse :builder "__builtin_apply of a function without a prototype, or variadic (not built)"))
+        rt (:ret ft)
+        [fes fx] (held (ex-as fa :i))
+        [bes bx] (held (ex-as ba :i))
+        b (:n bx)
+        argns (vec (for [[pt a] (apply-layout (:params ft) b (list 'ld "u64" b) "__builtin_apply")
+                         :let [v (place-load {:mode :mem :a a :t pt})]]
+                     (case (:k v) :i (list 'ai (:n v)) :f (list 'af (:n v)))))
+        res (frame-alloc! 80 16)
+        callee (:n fx)
+        call (case (kind rt)
+               :v (list 'ecall callee argns)
+               (case (apply-class rt "__builtin_apply's result")
+                 :i (list 'ei (list 'st (ity rt) (list 'fp res) (list 'call callee argns)))
+                 :f (list 'ef (list 'fst (fty rt) (list 'fp (+ res 16)) (list 'fcall callee argns)))))]
+    (seq-node (vec (concat fes bes [call])) {:k :i :t t :n (list 'fp res)})))
+
 (defn- builtin-call
   "A call of a builtin by name, or nil when it is an ordinary call."
   [^String nm args r]
@@ -1965,6 +2043,16 @@
       ("__builtin_prefetch") {:k :v :t chk/t-void :n (seq-node-eff (mapv #(effect (ex %)) args) (list 'nop))}
       "__builtin_frame_address" {:k :i :t t :n (if *f* '(fp 0) '(i 0))}
       "__builtin_return_address" {:k :i :t t :n '(i 0)}
+      ;; queue 522c: gcc's untyped calls (apply-layout above)
+      "__builtin_apply_args"
+      (do (when (or (nil? *f*) *static-init*) (refuse :builder "__builtin_apply_args outside a function"))
+          (when (:apply-variadic @*f*) (refuse :builder "__builtin_apply_args in a variadic function (not built)"))
+          (when-not (:apply-params @*f*) (refuse :builder "__builtin_apply_args in a function with an unnamed or K&R parameter (not built)"))
+          {:k :i :t t :n (list 'fp (or (:apply-args @*f*)
+                                       (let [o (frame-alloc! (+ 192 (* 8 (count (:apply-params @*f*)))) 16)]
+                                         (swap! *f* assoc :apply-args o)
+                                         o)))})
+      "__builtin_apply" (if *f* (builtin-apply args t) (refuse :builder "__builtin_apply outside a function"))
       ;; (long double's a q80 constant since queue 522: const-node at the call's type)
       ("__builtin_inf" "__builtin_huge_val" "__builtin_infl" "__builtin_huge_vall") {:k (kind t) :t t :n (const-node Double/POSITIVE_INFINITY t)}
       ("__builtin_inff" "__builtin_huge_valf") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
@@ -3183,6 +3271,10 @@
             ;; the parameters' array sizes evaluated at entry, in order (gcc: `int b[a++]` increments a), and the rtts of
             ;; the pointers to variably modified types (queue 165)
             _ (swap! *f* assoc :param-names (into {} (for [p ps :let [pe (ex-res p)] :when (and pe (:id pe))] [(:name pe) pe])))
+            ;; queue 522c: __builtin_apply_args's parameters, in order (nil when one is unnamed or the definition K&R's)
+            _ (let [named (vec (for [p (remove #{'& 'void} ps) :let [pe (ex-res p)] :when (and pe (:id pe))] pe))]
+                (swap! *f* assoc :apply-variadic (boolean (:variadic ft))
+                       :apply-params (when (and (not kr) (= (count named) (count (remove #{'& 'void} ps)))) named)))
             pvla (when-not kr
                    (vec (mapcat (fn [p]
                                   (let [pe (ex-res p)
@@ -3195,10 +3287,12 @@
                                 (remove #{'& 'void} ps))))
             b (stmts body)
             b (if (= "main" (:name e)) (conj b '(ret (reti (i 0)))) b)
+            ;; queue 522c: the apply block filled at entry, after the K&R conversions
+            apply-pro (apply-args-prologue)
             st @*f*]
         (list 'code id (:ni st) (:nf st) (:frame st) (if (:variadic ft) 1 0) (if (f32? rt) 1 0)
               (vec (if sret (cons (list 'pi sret) pspecs) pspecs))
-              (let [body (list 'do (-> (vec chain-pro) (into nl-pro) (into kr-convs) (into pvla) (into b)))]
+              (let [body (list 'do (-> (vec chain-pro) (into nl-pro) (into kr-convs) (into apply-pro) (into pvla) (into b)))]
                 (if (or (calls-setjmp? body*) (seq nl)) (list 'sjbody body) body)))))
       (catch arbace.lang.ExceptionInfo x
         (throw (ex-info (str (:name e) ": " (.getMessage x)) (ex-data x))))))))
@@ -3316,6 +3410,94 @@
           {:ev (vec ev) :text text})
         (catch Exception x {:ex (ex-of x)})))))
 
+;; File-scope asm (queue 522c; the user's decision of 2026-11-22, journal ead97197e: assembled by repr/asm and run on x86i, as
+;; Haskell's CallConv runs its .s): a unit's basic asm statements at file scope, their templates joined in order, read by repr/asm's
+;; GNU reader and assembled by arbace.asm's amd64 object assembler (AX4) into an ELF64 object; each label of its .text (not a .L
+;; local) a function of machine code, an (mcode ID NAME HEX OFF RET PARAMS) command (go/arbace/ci's mcode.go) bound to the unit's
+;; declaration of that name (its result's type and its parameters' classes), run by go/arbace/cix86 on x86i. repr/asm and the
+;; assembler are crops' namespaces, required here only when a unit holds such an asm (REPR_ASM_TABLE names the table, bin/ci sets
+;; it). Not built: relocations (a reference to a C symbol or between sections) and data sections.
+
+(defn- asm-template
+  "A basic asm statement's template from its text (`__asm__(\"...\" \"...\")`): its string literals' contents joined, C's
+  escapes read; nil when the text holds anything else (operands)."
+  [^String text]
+  (when-let [[_ ^String body] (re-matches #"(?s)\s*(?:__asm__|__asm|asm)\s*(?:(?:__volatile__|volatile|__volatile)\s*)?\((.*)\)\s*;?\s*" text)]
+    (let [sb (StringBuilder.) n (.length body)
+          hexd? (fn [c] (or (Character/isDigit (char c)) (<= (int \a) (int (Character/toLowerCase (char c))) (int \f))))]
+      (loop [i 0 in false]
+        (cond
+          (>= i n) (when-not in (str sb))
+          (not in) (let [c (.charAt body i)]
+                     (cond (Character/isWhitespace c) (recur (inc i) false)
+                           (= c \") (recur (inc i) true)
+                           :else nil))
+          :else (let [c (.charAt body i)]
+                  (cond
+                    (= c \") (recur (inc i) false)
+                    (and (= c \\) (< (inc i) n))
+                    (let [d (.charAt body (inc i))]
+                      (case d
+                        \n (do (.append sb \newline) (recur (+ i 2) true))
+                        \t (do (.append sb \tab) (recur (+ i 2) true))
+                        \r (do (.append sb (char 13)) (recur (+ i 2) true))
+                        \a (do (.append sb (char 7)) (recur (+ i 2) true))
+                        \b (do (.append sb (char 8)) (recur (+ i 2) true))
+                        \f (do (.append sb (char 12)) (recur (+ i 2) true))
+                        \v (do (.append sb (char 11)) (recur (+ i 2) true))
+                        \x (let [j (loop [j (+ i 2)] (if (and (< j n) (hexd? (.charAt body j))) (recur (inc j)) j))]
+                             (.append sb (char (bit-and 0xff (Long/parseLong (subs body (+ i 2) j) 16))))
+                             (recur j true))
+                        (if (<= (int \0) (int d) (int \7))
+                          (let [j (loop [j (inc i)] (if (and (< j n) (< j (+ i 4)) (<= (int \0) (int (.charAt body j)) (int \7))) (recur (inc j)) j))]
+                            (.append sb (char (bit-and 0xff (Long/parseLong (subs body (inc i) j) 8))))
+                            (recur j true))
+                          (do (.append sb d) (recur (+ i 2) true)))))
+                    :else (do (.append sb c) (recur (inc i) true)))))))))
+
+(defn- file-asm-funcs
+  "The functions a unit's file-scope asm statements define: [{:name :off :hex :weak} ...] (the object's whole .text in :hex),
+  nil when the unit holds none. Throws the builder's refusal when the text does not assemble or needs what is not built."
+  [forms]
+  (let [texts (vec (for [f forms :when (and (seq? f) (= 'c/asm (first f)))]
+                     (or (asm-template (second f)) (refuse :builder "a file-scope asm that is not a template: " (second f)))))]
+    (when (seq texts)
+      (let [read-items (requiring-resolve 'arbace.repr.asm/read-items)
+            amd64 @(requiring-resolve 'arbace.repr.asm/amd64)
+            assemble (requiring-resolve 'arbace.asm.amd64.obj/assemble)
+            read-object (requiring-resolve 'arbace.asm.elf/read-object)
+            r (assemble (read-items (str (str/join "\n" texts) "\n") amd64))
+            _ (when-not (:bytes r) (refuse :builder "file-scope asm: " (or (:error r) (:what r) (pr-str r))))
+            o (read-object (:bytes r))
+            secs (:sections o)
+            text (first (filter #(= ".text" (:name %)) secs))
+            _ (when (some #(pos? (bit-and (long (:flags (nth secs (:target %)))) 2)) (:relocs o))
+                (refuse :builder "file-scope asm with relocations (not built)"))
+            _ (when (some #(and (not= ".text" (:name %)) (pos? (bit-and (long (:flags %)) 2)) (pos? (long (:size %)))) secs)
+                (refuse :builder "file-scope asm with data sections (not built)"))
+            hx (hex-of (:data text))]
+        (vec (for [y (:symbols o)
+                   :when (and (= (:shndx y) (:index text)) (seq (:name y)) (not (str/starts-with? (:name y) ".L"))
+                              (#{0 1 2} (long (:type y))))]
+               {:name (:name y) :off (:value y) :hex hx :weak (= 2 (long (:bind y)))}))))))
+
+(defn- mcode-cmd
+  "A file-scope asm function's (mcode ...) command, its signature the unit's declaration e of its name (nil: none, a long's
+  result and the arguments by their kinds)."
+  [{:keys [name off hex]} e]
+  (let [ft (when e (let [t (unq (:t e))] (when (= :fn (:k (under t))) t)))
+        rt (if ft (:ret ft) chk/t-long)
+        why (str name ", a function of a file-scope asm")
+        ret (case (kind rt)
+              :v "v"
+              :i (ity rt)
+              :f (if (f16? rt) (refuse :builder why ": a _Float16 result (not built)") (fty rt))
+              (refuse :builder why ": an aggregate, wide or long double result (not built)"))
+        params (if (and ft (:proto ft))
+                 (apply str (for [pt (:params ft)] (case (apply-class pt why) :i "i" :f (if (f32? pt) "f" "d"))))
+                 "")]
+    (list 'mcode (if e (fn-id (global-key e) (:name e)) (fn-id name name)) name hex off ret params)))
+
 (defn unit-fragment
   "A checked unit {:rd :results :std :unsigned-char} built alone: {:fns [[KEY NAME] ...] :sts [SPEC ...] :objs [CANDIDATE ...]
   :fcands [CANDIDATE ...]}, plain data (printed and read back by arbace.c.musl's cache). A key of internal linkage is
@@ -3369,8 +3551,13 @@
                                     ent (fn [x] (cond-> {:k (global-key x) :name (:name x)}
                                                   (not fn?) (into (zipmap [:size :align :err] (obj-size x)))))]
                                 {:k (global-key e) :weak (boolean weak) :alias alias :fn fn? :e (ent e) :te (when te (ent te))})
-                              {:k (global-key e) :weak (boolean weak) :item (frag-item #(build-fn d))}))))]
-        {:fns (vec (:fns *p*)) :sts (vec (:sts *p*)) :objs objs :fcands fcands}))))
+                              {:k (global-key e) :weak (boolean weak) :item (frag-item #(build-fn d))}))))
+            ;; queue 522c: the functions of the unit's file-scope asm, after its C ones
+            acands (binding [*u* u *cfg* ucfg]
+                     (vec (for [af (file-asm-funcs (:forms u))
+                                :let [e (let [x (.get entries [:self (:name af)])] (when (= :fn (:kind x)) x))]]
+                            {:k (if e (global-key e) (:name af)) :weak (:weak af) :item (frag-item #(mcode-cmd af e))})))]
+        {:fns (vec (:fns *p*)) :sts (vec (:sts *p*)) :objs objs :fcands (into fcands acands)}))))
 
 (defn- reached
   "The keys a program reaches (a linker's --gc-sections at link-text's level): from the names `roots` and every candidate of
@@ -3607,8 +3794,19 @@
                       cand {:u u :f d :weak weak :alias alias :e e}]
                   (when (or (nil? old) (and (:weak old) (not weak)))
                     (.put chosen k cand)))))))
-        (doseq [[k {:keys [u f alias e]}] chosen]
+        ;; queue 522c: the functions of each unit's file-scope asm, after its C ones (unit-fragment's order)
+        (doseq [u units]
           (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u) :no-builtin (:no-builtin u))]
+            (doseq [af (file-asm-funcs (:forms u))]
+              (let [e (let [x (.get ^HashMap (:entries *p*) [(:idx u) (:name af)])] (when (= :fn (:kind x)) x))
+                    k (if e (global-key e) (:name af))
+                    old (.get chosen k)]
+                (when (or (nil? old) (and (:weak old) (not (:weak af))))
+                  (.put chosen k {:u u :asm af :weak (:weak af) :e e}))))))
+        (doseq [[k {:keys [u f alias e asm]}] chosen]
+          (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u) :no-builtin (:no-builtin u))]
+            (if asm
+              (emit! (mcode-cmd asm e))
             (if alias
               (let [te (ex-res-name u alias)]
                 (if (= :fn (:kind e))
@@ -3618,7 +3816,7 @@
                     (.add ^ArrayList (:aliases *p*) (list 'alias (global-obj-idx e) (global-obj-idx te) 0)))))
               (let [cmd (build-fn f)]
                 (emit! cmd)
-                (doseq [x (:ci/extra (meta cmd))] (emit! x)))))))
+                (doseq [x (:ci/extra (meta cmd))] (emit! x))))))))
       ;; the undefined weak objects are at address 0
       (doseq [a (:undefined *p*)] (emit! a))
       (doseq [a (:aliases *p*)] (emit! a))

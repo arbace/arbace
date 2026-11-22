@@ -17,11 +17,12 @@
 
 (* oiobjinfo (Arbace, queue 511): ocamltest's `ocamlc -c FLAGS FILE...` then `ocamlobjinfo ARGS` on oi, over compiler-libs' units.
    Modified from OCaml 5.5.0's tools/objinfo.ml (its .cmi and .cmt printing kept verbatim: print_name_crc, print_cmi_infos,
-   print_cmt_infos; since queue 532 its .cmo printing too, print_cmo_infos, for the .cmo files ocamlc on oi writes (bin/oi's
-   bytecomp tool); the .cma, .cmx, .cmxa, .cmxs and executable parts left out) and driver/compile_common.ml (the interface and
-   implementation steps up to typing, which writes the .cmi, .cmt and .cmti; the .cmo is ocamlc on oi's, not this program's).
+   print_cmt_infos; since queue 528 print_general_infos and print_cmxs_infos for Arbace's own .cmxs, below; since queue 532 its .cmo
+   printing too, print_cmo_infos, for the .cmo files ocamlc on oi writes (bin/oi's bytecomp tool); the .cma, .cmx, .cmxa and
+   executable parts left out) and driver/compile_common.ml (the interface and implementation steps up to typing, which writes the
+   .cmi, .cmt and .cmti; the .cmo is ocamlc on oi's, not this program's).
 
-   oiobjinfo [-c] [-bin-annot] [-bin-annot-occurrences] [-I DIR]... [-nostdlib] FILE.ml|FILE.mli... -objinfo [OBJINFO-ARG]...
+   oiobjinfo [-c | -shared -o NAME.cmxs] [-bin-annot] [-bin-annot-occurrences] [-I DIR]... [-nostdlib] FILE.ml|FILE.mli... -objinfo [OBJINFO-ARG]...
    The compiler's messages (warnings and errors, as ocamlc prints them) go to ocamlc.out in the current directory, ocamltest's
    compiler output (check-ocamlc.byte-output); ocamlobjinfo's output to the standard output (check-program-output). A compile
    error: status 2 after the message, before ocamlobjinfo. *)
@@ -182,6 +183,42 @@ let print_cmt_infos cmt =
     Format.print_flush ()
   end
 
+(* objinfo's print_general_infos and print_cmxs_infos, verbatim (its print_line above, with print_cmo_infos); dynunit and dynheader
+   are file_formats/cmxs_format.mli's (queue 528: Arbace's .cmxs, below) *)
+let print_general_infos name crc defines cmi cmx =
+  printf "Name: %s\n" name;
+  printf "CRC of implementation: %s\n" (string_of_crc crc);
+  printf "Globals defined:\n";
+  List.iter print_line defines;
+  printf "Interfaces imported:\n";
+  List.iter print_name_crc cmi;
+  printf "Implementations imported:\n";
+  List.iter print_name_crc cmx
+
+type dynunit = {
+  dynu_name: string;
+  dynu_crc: Digest.BLAKE128.t;
+  dynu_imports_cmi: (string * Digest.BLAKE128.t option) list;
+  dynu_imports_cmx: (string * Digest.BLAKE128.t option) list;
+  dynu_defines: string list;
+}
+
+type dynheader = {
+  dynu_magic: string;
+  dynu_units: dynunit list;
+}
+
+let print_cmxs_infos header =
+  List.iter
+    (fun ui ->
+       print_general_infos
+         ui.dynu_name
+         ui.dynu_crc
+         ui.dynu_defines
+         ui.dynu_imports_cmi
+         ui.dynu_imports_cmx)
+    header.dynu_units
+
 let exit_err msg = print_endline msg; exit 2
 let exit_errf fmt = Printf.ksprintf exit_err fmt
 
@@ -190,6 +227,17 @@ let dump_obj filename =
   let open Magic_number in
   if not !quiet then printf "File %s\n" filename;
   let ic = open_in_bin filename in
+  (* Arbace's .cmxs (queue 528): the plugin header written by `-shared` below, read as objinfo's dump_cmxs reads the
+     caml_plugin_header symbol's value *)
+  if Filename.check_suffix filename ".cmxs" then begin
+    let m = String.length Config.cmxs_magic_number in
+    let magic = try really_input_string ic m with End_of_file -> "" in
+    if magic <> Config.cmxs_magic_number then exit_errf "Unable to read info on %s %s." (human_name_of_kind Cmxs) filename;
+    let header = (input_value ic : dynheader) in
+    close_in ic;
+    if header.dynu_magic <> Config.cmxs_magic_number then exit_errf "Unable to read info on %s %s." (human_name_of_kind Cmxs) filename;
+    print_cmxs_infos header
+  end else
   match read_current_info ~expected_kind:None ic with
   | Ok { kind = Cmo; version = _ } ->
      let cu_pos = input_binary_int ic in
@@ -225,6 +273,10 @@ let objinfo_args = [
   "-null-crc", Arg.Set no_crc, "";
 ]
 
+let last_impl = ref None
+let shared = ref false
+let output = ref ""
+
 (* compile_common.ml's steps for one source file, as Compenv.process_action and Compile's with_info run them *)
 let compile_file file =
   let kind = if Filename.check_suffix file ".mli" then Unit_info.Intf else Unit_info.Impl in
@@ -246,9 +298,44 @@ let compile_file file =
       Typemod.save_signature target tsg env sg
   | Unit_info.Impl ->
       let ast = Pparse.parse_implementation ~tool_name:"ocamlc" file in
-      ignore (Typemod.type_implementation target env ast);
+      let impl = Typemod.type_implementation target env ast in
       Builtin_attributes.warn_unused ();
-      Warnings.check_fatal ()
+      Warnings.check_fatal ();
+      last_impl := Some (Unit_info.modname target, file, impl.Typedtree.structure)
+
+(* `ocamlopt -shared FILE.ml -o NAME.cmxs` (queue 528): the plugin header Cmm_helpers.plugin_header gives the unit (dynu_name and
+   dynu_defines the unit's module, Compilenv's ui_defines; dynu_imports_cmi Env.imports (), Compilenv.save_unit_info's), written as
+   Arbace's .cmxs: Config.cmxs_magic_number then the header as output_value writes it (ocamlopt's is an ELF shared object whose
+   caml_plugin_header symbol holds the same externed record). Arbace writes no .cmx: dynu_imports_cmx is the persistent units whose
+   values the typed tree names (Closure's global_approx asks their .cmx), each with its interface's digest, and dynu_crc the
+   source's digest, where ocamlopt digests the .cmx (ocamltest prints both with -null-crc). *)
+let write_cmxs out =
+  match !last_impl with
+  | None -> exit_err "oiobjinfo: -shared: no implementation compiled"
+  | Some (name, file, str) ->
+      let used = ref [] in
+      let rec head = function Path.Pident id -> Some id | Path.Pdot (p, _) -> head p | Path.Papply (p, _) -> head p | Path.Pextra_ty (p, _) -> head p in
+      let it = { Tast_iterator.default_iterator with
+                 expr = (fun sub e ->
+                   (match e.Typedtree.exp_desc with
+                    | Typedtree.Texp_ident (p, _, _) ->
+                        (match head p with
+                         | Some id when Ident.global id && Ident.name id <> name && not (List.mem (Ident.name id) !used) ->
+                             used := Ident.name id :: !used
+                         | _ -> ())
+                    | _ -> ());
+                   Tast_iterator.default_iterator.expr sub e) } in
+      it.structure it str;
+      let cmi = Env.imports () in
+      let crc_of n = try List.assoc n cmi with Not_found -> None in
+      let cmx = List.map (fun n -> (n, crc_of n)) (List.sort compare !used) in
+      let header = { dynu_magic = Config.cmxs_magic_number;
+                     dynu_units = [ { dynu_name = name; dynu_crc = Digest.BLAKE128.file file;
+                                      dynu_imports_cmi = cmi; dynu_imports_cmx = cmx; dynu_defines = [name] } ] } in
+      let oc = open_out_bin out in
+      output_string oc Config.cmxs_magic_number;
+      output_value oc header;
+      close_out oc
 
 let () =
   let argv = Sys.argv in
@@ -264,6 +351,8 @@ let () =
     "-nostdlib", Arg.Set Clflags.no_std_include, "";
     "-principal", Arg.Set Clflags.principal, "";
     "-strict-sequence", Arg.Set Clflags.strict_sequence, "";
+    "-shared", Arg.Set shared, "";
+    "-o", Arg.Set_string output, "FILE";
   ] in
   let usage = "oiobjinfo [OPTION]... FILE... -objinfo [OBJINFO-ARG]..." in
   (try Arg.parse_argv ~current:(ref 0) (Array.sub argv 0 k) compile_args (fun f -> files := f :: !files) usage
@@ -278,6 +367,7 @@ let () =
   in
   Format.pp_print_flush ppf (); close_out oc;
   if not ok then exit 2;
+  if !shared then write_cmxs (if !output = "" then "a.cmxs" else !output);
   let objs = ref [] in
   (try Arg.parse_argv ~current:(ref 0) (Array.append [| "ocamlobjinfo" |] (Array.sub argv (k + 1) (max 0 (n - k - 1))))
          objinfo_args (fun f -> objs := f :: !objs) "ocamlobjinfo [OPTIONS] FILES"

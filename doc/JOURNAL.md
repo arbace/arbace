@@ -16180,6 +16180,139 @@ check, extra receivers, internal imports" holds the details. Built:
   days, unique.Make's closure over internal/sync, sync/atomic and internal/abi) and nowritebarrier (ssagen/nowb.go's checks
   over the port's post-inline bodies with an approximate needwb; drafted unapplied in the worktree's .tmp/patches/nowb.py).
 Light: no gate; the gate's executable 710e90e4771a10548878, stage 0 the tools' host, ARBACE_PATH the worktree.
+## 2026-11-21: py-eval-1122: the eval run's regression was a stale goi table (bin/goi table's key missed go/arbace/py)
+
+Stream P1 of the burst (Python's eval cell, 39,204 pass / 5,492 by design / 3,625 deferred), branch py-eval-1122 from mac/next
+863bdaea1. The entry "Python's AOT record on next's build; the eval run regressed and is not recorded" left 6,902 regressions
+of `bin/pyi check --fresh --record` on the gate executable 6aae87f093d10041e7ed (next 1e8ee0196): 8,092 lines "import
+SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access local variable 'module'".
+- Reproduced in seconds without the check: `bin/pyi run` of `import _testlimitedcapi` on that executable panics, on
+  710e90e4771a10548878 (74d009af0, the same go/ tree and runtime key) it prints 1 0 None. `bin/pyi check --only` of test_class
+  likewise (testHasAttrString: a Go panic on 6aae87, ok on 710e90). The journal's "a direct run does not reproduce" was
+  `import test.test_class`, whose module-level imports never reach the C world; the check's driver installs the
+  _testinternalcapi stand-in and runs testHasAttrString, which imports _testlimitedcapi.
+- The panic's value: its PCs symbolized by `go tool addr2line` on the executable are arbace.lang.ExceptionInfo's constructor
+  under arbace.core/ex-info under arbace.go.repl/complete! under after-load under arbace.core/load: the host's require of
+  go.arbace.pyctypes (go.arbace.py's packageLoader, arbace.python.run/install!'s SetPackageLoader, on the first import of
+  _ctypes, _ctypes_test, _testcapi, _testlimitedcapi, _testclinic, _testclinic_limited or _testbuffer) threw. Its message, by
+  `(try (require 'go.arbace.pyctypes) (catch Throwable e ...))` on 6aae87: "Go check errors in package arbace/pyctypes:
+  capi_clinic.go:659: undefined: Buffer ... NewBufferView ... GetContiguous ... cannot use func literal (value of type
+  func(py.Object, int) ...) as func(py.Object) ... capi_getargs.go:119: undefined: MemoryViewFromObject": goi's checker
+  read the compiled arbace/py's API from the executable's goi table and digest, and that table was go/arbace/py's API before
+  queues 473, 475 and 481 (merged as cabd63dd4, 2026-11-20 17:28), while pyctypes (a lazy module, interpreted from the
+  checkout) is after them.
+- Cause: `bin/goi table` keeps its output when its key is unchanged, and the key (the list, arbace/go/table.ae, go/arbace.ae,
+  api.ae, std.ae, go/arbace/repr/, the checker, tamago's forms, the linux std forms' cache key) held none of the other listed
+  packages of go/: arbace/py, arbace/libm, arbace/ci, arbace/crt, arbace/oi (W2's and C9's). The next worktree's
+  target/arbace-go/gotable was made 2026-11-20 14:10; the night's --gate-build at 01:49 found it "unchanged (key
+  4a1e961f6233)" (target/arbace-go/gotable.log) and embedded it: the j2g output's gotable/arbace_py_s15.ae and the digests of
+  6aae87 differ from 710e90's (built in another worktree, its table fresh), NewBufferView absent. gate_key moved (go/arbace/py
+  is in it), so the build ran; only the table's own cache was stale. The test build's table (bin/arbace-go:1404) is the same
+  function.
+- The second symptom: after the panic the next import of the same module ran the require again, which this time returned
+  without registering the module, and _imp.create_builtin returned a null object (importBuiltin's ok ignored), which
+  importlib's module_from_spec stored into `module`: "cannot access local variable 'module'". Every later import of a C
+  world module in that process failed so (test_capi's 37 submodules after the first, test_monitoring's state, pydoc's walk).
+- Fixes (one commit): bin/goi's table key holds the listed packages of go/ (table_go_forms: for each "arbace" or "arbace/..."
+  of go/arbace/gotable.edn's list, go/P.ae and the files its (load ...) lines name: 285 files, arbace/py's 202 among them).
+  pyi names the throwable: go.arbace.py's SetPanicText, set by arbace.python.run/install! (resolved, so a runtime without it
+  is left alone), gives a Go panic's value its class and message and its causes' (panicText; "" leaves %v's text, so every
+  recorded "Go panic: ..." reason of a Go value is unchanged: the record holds no "&{" one); guardedStep's and xiProtect's
+  SystemErrors use it. loadLazyModule recovers a panic of the load into a SystemError "pyi: the package NS of the module M
+  did not load: CLASS: MESSAGE" and keeps it (lazyFailed), raised again by every later import (no second require);
+  importBuiltin returns it; _imp.create_builtin never returns a null module (an ImportError "no built-in module named M").
+- Found on the way, in the night's other failures, fixed in the same round: (1) test_fstring's test_debug_conversion, a
+  regression of queue 501 (54f42ca70): the native reader's :debug text now keeps a comment inside the expression, as
+  pydump's dump writes it, and pyi's compiler used that text as the runtime's value; arbace.python.compile's debug-text
+  removes set_ftstring_expr's comments (lexer.c's rule, the reader's before 501) from it, the reader and parse-check
+  untouched. (2) The thin _functools (queue 459) served cmp_to_key and reduce as the pure functions, which bind as methods in
+  test_functools' C classes' bodies (cmp_to_key = c_functools.cmp_to_key): they are built-ins over the pure functions now
+  (one object each, kept in the module's dict, __module__ _functools, the text signature "(mycmp)"). (3) sys.stdin's
+  TextIOWrapper had no readlines and no iteration (python -m json --json-lines: "'TextIOWrapper' object has no attribute
+  'readlines'"): readlines(hint), __iter__, __next__ over readline. (4) SIGPIPE was ignored only once _signal was imported:
+  RunModule and Repl ignore SIGPIPE and SIGXFSZ at the start as CPython's init_signals does, and the standard streams'
+  write, flush and close raise the write's OSError (BrokenPipeError), the buffered bytes dropped (bufio keeps an error for
+  every later write: json.tool dup2s /dev/null over stdout and exits 32, which a failing shutdown flush would make 120).
+  (5) bin/pyi python's sweep of ended interpreters' directories raced with another one's ("cat: .../python.XXXXXX/pid: No
+  such file or directory" on a child's stderr: test_sys's test_c_locale_surrogateescape): read quietly.
+- Proofs (light, the 710e90 executable with the checkout's go/arbace/py interpreted by goi, bin/pyi's runtime_from_source; one
+  run at a time): `import _testlimitedcapi` and object_hasattrstring print 1 0 None; a broken stand-in of go/arbace/pyctypes
+  first on ARBACE_PATH (its one file an undefined name) makes `import _testcapi` twice raise the same SystemError "pyi: the
+  package go.arbace.pyctypes of the module _testcapi did not load: arbace.lang.ExceptionInfo: Go check errors in package
+  arbace/pyctypes: broken.go:3: undefined: undefinedName" (the throwable named; no UnboundLocalError the second time);
+  test_fstring's debug text prints CPython's '(\n    1,  \n    "\"#")=(1, \'"#\')'; a class body's cmp_to_key and reduce do
+  not bind ([1, 2, 3], 16; builtin_function_or_method, _functools, (mycmp)); `python -m json --json-lines` from a pipe exits
+  0; a program printing into `head -1` catches BrokenPipeError 32, dup2s /dev/null and exits 32; `for l in sys.stdin` works.
+- Then, before the build took the lock: test_regrtest's 57 failing methods (:regrtest-children) start regrtest in a child,
+  whose setup_process asserts isinstance(sys.stdout, io.TextIOWrapper): pyi's standard streams are the runtime's own type
+  (named _io.TextIOWrapper), not _pyio's class. _io's making (makeIoModule) registers them as virtual subclasses of _pyio's
+  TextIOWrapper, BufferedWriter and BufferedReader (ABCMeta's register; CPython's create_stdio makes those classes). Proof:
+  `bin/pyi python -X faulthandler -I -m test --testdir=DIR test_regrtest_noop1` ends "Result: SUCCESS" (was the
+  AssertionError).
+- And two modules of :c-modules-deferred: syslog (test_syslog's 13 and test_audit's one did not import: "No module named
+  'syslog'"), a module of pyi's own over musl's syslog as src/misc/syslog.c makes it (go/arbace/py/builtins_syslog: openlog,
+  syslog, closelog, setlogmask, LOG_MASK, LOG_UPTO and Linux's constants; a datagram "<PRI>Mmm dd hh:mm:ss IDENT[PID]: MSG"
+  to /dev/log, dropped with no daemon; the module's state the process's, a subinterpreter's openlog and closelog a
+  RuntimeError and its syslog one until the main interpreter opened the log, as syslogmodule.c). Proof: openlog, the
+  ident's UnicodeEncodeError, syslog with and without a priority, closelog twice, setlogmask's old and current masks,
+  LOG_MASK/LOG_UPTO, the implicit open. And xxlimited and xxlimited_35 (test_xxlimited's 16): lazy modules of pyctypes,
+  CPython's Modules/xxlimited.c and xxlimited_35.c built into the C world (lib.conf); a lazy module whose package
+  registers no such module is now _imp.create_builtin's ModuleNotFoundError "No module named 'NAME'" (as an absent
+  module), so a world without them changes nothing.
+- And two configuration options of :pyi-command-line: -X cpu_count=N and PYTHON_CPU_COUNT (os.cpu_count() and, through
+  sys._get_cpu_count_config(), os.process_cpu_count() answer N; test_cmd_line's test_cpu_count), and -X
+  int_max_str_digits=N and PYTHONINTMAXSTRDIGITS (the limit and sys.flags.int_max_str_digits N; no value, not a number
+  or 0 < N < 640 the start's error "... invalid limit; must be >= 640 or 0 for unlimited.", status 1; the option over the
+  variable; test_int_max_str_digits). Proof: `-X cpu_count=4321 -X int_max_str_digits=6000` prints 4321 4321 6000 6000,
+  the variables 1234 1234 0 0, `-X int_max_str_digits=100` the error and status 1.
+- pyctypes for xxlimited (a crop path, interpreted from the checkout: no build): the two modules registered as the
+  world's; multi-phase initialization with execution slots (moduleFromDefAndSpec: the module made as PyModule_Create2
+  makes one, md_state and its functions bound to it, then each Py_mod_exec slot run; until now only m_methods were taken,
+  self NULL, no slot run: xxlimited had no Xxo); PyType_FromSpec of a spec that adds nothing (basicsize and itemsize 0, no
+  slot but doc and bases) over a built-in base pyi's C side cannot lay out is the plain heap subclass (xxlimited's Str
+  over str); _PyObject_GC_New is _PyObject_New (xxlimited_35's new()). Probe: Xxo's attribute, foo(1, 2), Str("abcd").upper(),
+  demo, Error.
+- Then xxlimited_35's last two: its Xxo sets attributes through tp_setattr (the name a char *, slot 68), now taken when a
+  spec gives no tp_setattro; roj's "O#" leaves a unit no unit starts, which vgetargs1_impl refuses with SystemError "bad
+  format string: ..." (pyctypes' vgetargs had no such check; the test modules' formats all pass it). Proof (`bin/pyi check
+  --fresh --only` on the 710e90 executable, go/arbace/py interpreted, PYI_RUNNER=python3 as the runner, its three controls
+  failing as they must): test_xxlimited 16 of 16 pass and test_syslog 10 of 13 (its three subinterpreter tests reach
+  run_in_subinterp's PyThreadState_Swap, :capi-port's), 24 of them and then the last 2 "now pass" against the record.
+- pyctypes, the C API's file functions test_capi's test_run and test_file reach (:capi-port's Py_fopen rows, 16 in the
+  record): PyErr_SetFromErrno and its filename forms (the world's errno, os.strerror's text, OSError's constructor choosing
+  the subclass), Py_fopen (os.fsencode's path, musl's fopen in the world with "e" for O_CLOEXEC, EINTR retried, the OSError
+  with the path) and Py_fclose, _Py_IsValidFD (fcntl F_GETFD asked of crt's system calls), PyRun_File, FileEx, FileFlags,
+  FileExFlags and PyRun_SimpleFile, SimpleFileEx, SimpleFileExFlags, AnyFile, AnyFileEx, AnyFileFlags, AnyFileExFlags (the
+  FILE read whole by the world's fread, closeit fclose'd, run as the string functions run theirs; __main__'s __file__ and
+  __cached__ for the run, its __loader__ a SourceFileLoader but for "<stdin>"; the interactive functions and
+  Py_UniversalNewlineFgets, which wants ungetc, not given). Probe: run_file and run_fileexflags give None, a missing name
+  NameError, run_simplefile and run_anyfileex 0 with the script's own output, py_fopen's first bytes and FileNotFoundError 2.
+- Legacy subinterpreters through the C API (_testcapi's run_in_subinterp: test_syslog's three, test_threading's,
+  test_int's, test_atexit's, test_capi's test_misc and test_getargs' and others that reached "pyi's C API does not provide
+  PyThreadState_Swap"): go.arbace.py's ExtNewInterpreter and ExtEndInterpreter (newSubInterp with the "legacy" config,
+  whenceLegacyCAPI, entered by the calling thread with xiEnter; the session left and the interpreter ended), pyctypes'
+  Py_NewInterpreter, Py_EndInterpreter and PyThreadState_Swap over them (the calling thread runs in the subinterpreter
+  between the two, so PyRun_SimpleStringFlags runs in its __main__), PyThreadState_Get the current state. Both halves in
+  one commit, before the build that compiles go/arbace/py: a pyctypes naming ExtNewInterpreter against an executable
+  without it would be the night's failure again. Probe: run_in_subinterp("x = 1") 0; the subinterpreter's
+  syslog.openlog() a RuntimeError; its syslog.syslog after the main interpreter's openlog 0; an uncaught ValueError printed
+  and -1; the subinterpreter's own sys.modules (no syslog) while the main one keeps its.
+- `bin/pyi check --fresh --only` of test_capi's test_run and test_file, test_syslog, test_threading's subinterpreter tests
+  and test_int's per-interpreter tests (the 710e90 executable, go/arbace/py interpreted, its controls failing as they must):
+  25 now pass against the record (test_syslog 13 of 13; test_threading's test_threads_join and _2; test_run's file tests;
+  test_file's test_py_fopen, test_pyfile_fromfd, test_pyfile_getline, test_pyfile_writestring), 4 failing, fixed then: the C
+  API's compiler takes cf_flags as given while compile() refuses bits outside PyCF_MASK, PyCF_MASK_OBSOLETE and
+  PyCF_COMPILE_MASK (run_anyfileflags passes its closeit as cf_flags): compileC keeps those bits alone; and
+  sys.set_int_max_str_digits' limit is each interpreter's (interpRegs.maxStrDigits, saved and restored by interpSwitch, a
+  new subinterpreter's the configured limit): test_int's test_int_max_str_digits_is_per_interpreter.
+- pyctypes again, test_capi's test_file and test_run (crop paths, no build): PyFile_NewStdPrinter (Objects/fileobject.c's
+  "stderrprinter": fd 1 or 2, closed False, encoding None, mode "w", fileno, isatty by os.isatty, flush and close no-ops,
+  write encoding UTF-8 with backslashreplace by os.write, instantiation refused), PyFile_WriteObject of NULL "<NULL>" (a Go
+  panic before), PyObject_AsFileDescriptor's RuntimeWarning for a bool; PyRun_InteractiveOne, OneFlags, OneObject, Loop and
+  LoopFlags (the text parsed by ast.parse, each statement compiled alone in 'single' mode and run in __main__, One the first,
+  Loop all with an error printed and the next run; a non-str filename object a TypeError printed, -1; the prompts not
+  written). `--only` on the 710e90 executable, go/arbace/py interpreted, PYI_RUNNER=python3, controls failing as they must:
+  test_file 9 of 9 but test_py_universalnewlinefgets (classed, ungetc), 5 now pass; test_run's interactive tests 5 of 5.
 ## 2026-11-21: py-design-1122, round 1: the read cell's by-design classes own-mode, own-traceback and charset emptied
 
 Branch `py-design-1122` from mac/next 863bdaea1 (stream P2 of the burst: the by-design part of Python's cells). The read cell's
@@ -16827,6 +16960,78 @@ no-op landing pad for no block and no reason for a personality, as rustc's MIR a
 `unreachable` blocks fall from 85 to 40 (panics), 68 to 31 (unwind), 548 to 343 (vectors), the functions with a personality from 53
 to 33, 46 to 32, 141 to 70.
 
+## 2026-11-22: rust-c4-1122: C1's TypeId and pair-tag faults; C4's interface pass, round 1 (burst, stream R3)
+
+Branch `rust-c4-1122` from `mac/rust-c6-1120` (`fceea7b4a`), the caches of rust-c6's worktree copied (exports, passes, scans);
+512-rust-causes5 merged (`a5cfe536f`) at the coordinator's word.
+
+- **C1, unwind's and panics' empty hooks.** Our `TypeId::of::<&str>`/`::<String>` constants held rustc's hash byte for byte; std's
+  IR writes them as two pointers `inttoptr (i64 N to ptr)` (rustc_codegen_llvm common.rs `scalar_to_backend`, `GlobalAlloc::TypeId`:
+  the offset cast to a pointer), ours as `[16 x i8]`. ci folds a constant cast of an integer to a pointer to 32 bits sign-extended
+  (arbace/c/build.ae `int-const`: `chk/wrap` of a pointer type takes `int-bits`' default, 32 signed; a run-time cast keeps 64:
+  probe `.tmp/c4/citest/t2.c`), so std's lowered TypeId constants lost their high halves and never equalled ours. Codegen now writes
+  a TypeId relocation as rustc does (both sides fold alike); finding for C's crop: `int-const` should wrap a pointer as `t-ulong`.
+- **C1, std.rs.** Not core's sort: a call trace (CI_CALLTRACE, the last 20,000 calls) shows depth about 30 and
+  `MultiCharEqSearcher::next` looping past the haystack (the BTreeMap's `split_whitespace`): codegen read a scalar pair's niche tag
+  from the pair's first value; `Option<(usize, char)>`'s tag is the char at offset 8. Fixed in get-discr! (the component at the tag
+  field's offset, codegen_get_discr's extract_field). pack-compare-test: two cases (the TypeId constant against std's IR's @anon
+  for u32, the pair's discriminant), a control.
+- **C1 on ci.** rust-c6-1120's C1 units made again through codegen and the lowering with the two fixes (`.tmp/c4/c1q`), run by
+  `bin/rsi check --front own --corpus samples --only` std, unwind, panics (`RSI_FRONT_DIR`, RSI_JOBS=1, RSI_CI_MEMLIMIT=5GiB, the main
+  checkout's std at the pin: rust-rec's worktree is gone): **3 of 3 pass** by rustc's recorded runs (2 h on a loaded host, 6.4 GB);
+  vectors passed before. The six programs are built again at this branch's code next, then recorded.
+- **C4, core's interface pass** (survey, "C1 and C4: the burst's round"): every alias written; enums' `#[repr(int)]` and
+  discriminants as AdtDef::discriminants; a const trait's methods const, `#[rustc_comptime]`, `#[rustc_nounwind]`,
+  `#[rustc_promotable]`; `#[derive(ConstParamTy)]`, a union's `#[derive(Clone)]`; an expression fragment continued by its next
+  tokens; a `#[rustc_builtin_macro]` macro_rules! left to the builtin; portable-simd's macros in core's table; pattern types as the
+  helper's text (rustc_ast_lowering's anonymous constants); a not-yet-known trait's Self kept; `size_of::<Self>()` and `ilog10`
+  lengths; const generic values; fn pointer binder regions; extern types and const-has-type text through std; feature-bound
+  predicates; a trait's items in definition order. Module runs against the helper (cmp, mem::alignment, char, ascii_char, ffi,
+  intrinsics, intrinsics::simd, hash::sip, alloc, ptr, num, escape, convert::num, fmt::num_buffer, dec2flt, niche_types,
+  ptr::non_null, pat, fmt::rt, ptr::metadata, core_simd::to_bytes): every fact equal but the leftovers the survey lists. The first
+  chain (np4) was stopped at core's module 169 to take the pattern types (NonNull was missing from core's native interface: alloc's
+  and std's `NonNull<u8>` facts lost their arguments in chain 2); np5 runs now, then the switch run.
+- Finding for C's crop (not changed here): arbace/c/build.ae `int-const` folds a pointer constant through `chk/wrap` with the
+  pointer type, whose `int-bits` default is 32 signed bits; `(chk/wrap v (if (ptr? t) chk/t-ulong (under t)))` would keep 64.
+- No gate (the user's rule); pack-compare-test passed (its new cases and control); no record re-recorded this round.
+
+## 2026-11-22: rust-c4-1122: C4's passes again (np5) and the switch run: 5 of 5 own on the native interface and names
+
+The passes with round 1's fixes (`.tmp/c4/np5-chain.sh`; core one round, alloc and std two; 3 h 05 min on a host at load 70-140):
+core's interface 27,062 of 27,498 facts equal to the helper's (25,879 before), alloc's 3,863 of 3,863 (3,532), std's 4,644 of 4,644
+(3,789), std's names 15,120 of 15,162 (14,893; aliases 207 of 215, 18 before). The switch run on that interface and those names
+(`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=... RF_CORE_ATTRS=none RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind
+vectors`, 17 min, 2.2 GB): **5 of 5 own** (0 of 5 before). C4 stays not own in the case inputs: inputs.tsv's words end "(C6-5
+pending)", and no ruling on C6-5 is in the line's facts (the survey's DECISION C6-5; C4-1 (a) was taken, 2026-11-20). Fixed after
+np5 in the module runs' code (not yet in a chain): a const trait's `#[rustc_non_const_trait_method]` methods not const,
+`#[rustc_comptime]` impl methods const, an object type's named late-bound region by its name, a fn pointer's binder region `'_` in a
+signature. C1's six programs are being built again at this branch's code (`.tmp/c4/c1build2.sh`), then run on ci and recorded.
+
+## 2026-11-22: rust-c4-1122: C1's six programs built again and recorded: 5 of 6 own on ci, threads from the pack
+
+The six programs of the eval cell built at this branch's code (`9f4c29693`'s, with 512-1 merged: `RF_EXTRA_IFACE=core-pass and std's
+deps' passes RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core intrinsics panics std threads unwind vectors`, about
+2 h on a loaded host): intrinsics, panics, std, unwind and vectors own; threads refused at codegen (`atomic_xadd`, then).
+`RSI_JOBS=1 RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin> RSI_FRONT_DIR=.tmp/rust-front/c1b bin/rsi check
+--record --front own --corpus samples` (11 min, 6.4 GB; the runtime read into ci at the checkout's key reused): **6 of 6 pass**, the
+std-vs-panics control differing; written: test/rust/check-times-linux-amd64.edn and test/rust/eval-inputs-linux-amd64.edn
+(check-linux-amd64.edn unchanged: every row passed before, from the packs). The case inputs: intrinsics, panics, std, unwind and
+vectors C1, C5 and C7 own (C2: 83, 109, 705, 88 and 547 of std's bodies the record's; C3 partial; C4 the helper's; C6 std's IR);
+threads C5 and C7 own. 0 of 6 own in all seven inputs: Rust's scores unchanged (eval and AOT 0.5, independence 80).
+test/crops/independence.edn's eval text says so. Merged 512-2 (`f8f7ff401`; collect's unknown trait Self is the same fix as
+round 1's, theirs kept). After the build (`d55d8a47a`, unit cases in pack-compare-test only): the atomic intrinsics in codegen
+(threads.rs' row not rebuilt: the user's rule of 2026-11-22, "avoid redundancy and unnecessary tests"; threads is not in this
+stream's list), and the post-np5 interface fixes (their module runs next). reap --record, crops-score --record, --judge --strict
+0 problems, records-check 9 pairs 0 problems.
+
+## 2026-11-22: rust-c4-1122: the post-np5 interface fixes proved by module runs
+
+core's pass over the modules the fixes touch (no chain, the user's rule): double_ended, any, fmt, fmt::rt, io::error 456 of 465 facts
+equal, 0 differ (9 missing: io::error's cfg_select #[path] modules); num 1,917 of 1,917 after collect's lower-const-arg evaluates a
+call (`[u8; size_of::<Self>()]`, eval-int-expr's size_of with a primitive impl's Self). Left in core, for the report: io's
+cfg_select modules (module-files reads no macro's arms), core_simd ops' glob of a private import, to_bytes' anonymous-constant
+args, shift_scalar's impl-fresh `'_`, the Thin trait alias bound (a clause the solver would have to expand), legacy_int_modules'
+consts, the [const] clauses (512's).
 ## 2026-11-22: the user's decisions on the burst's by-design and counting questions
 
 Asked in the morning of 2026-11-22 (.tmp/goal/decisions-1122.md collects the streams' evidence); the goal: 100 completeness and
@@ -17833,3 +18038,464 @@ Applied from mac/next d85da9174, the pattern of counting-1122 and counting2-1122
   `REPR_C_PP_JUDGE=own` (a check run, not made here) moves read 5,460 / 5 / 10 to 5,462 / 3 / 10.
 - Self-test `counting-1122c-tests` with controls. Alternatives not taken: listing the cases; n/a for the C files.
 - mac/py-capi-1122 is not merged into next; its record will move rows between these classes (PyConfig_Get imports).
+
+## 2026-11-22: gc in the executable, round 1 (go-gc-1122)
+
+The user's decision of 2026-11-22: doc/go/GOI-DESIGN-REVIEW.md's Proposed 1 (b), reversing 1 (a) of 2026-11-05, gc's
+own compiler run inside the executable, the only route for 35 Go eval rows (`:gc-flags` 28: -live 8, the SSA passes'
+-d 12, -d=wb 4, -d=nil 3, tailcall 1; `:gc-phases` 7: "stack frame too large") and `:gc-std`'s last (nowritebarrier).
+Branch `go-gc-1122` from mac/next 3e8dfe109; doc/go/GOI-SPEC.md, "Since v1: gc in the executable", holds the design.
+
+Weighed (measured on stage 0 first): interpreting cmd/compile on goi or compiling it into the executable through goi's
+table. goi's checker alone over cmd/compile's closure (tamago/cmd's forms, 217 packages with std's) takes 117 s and
+6 GB, 0 errors: an interpreted gc would pay that in every errorcheck process before goi built and ran gc's SSA back end
+at goi's speed; compiled, gc compiles a test in under a second. Compiled is lighter by orders of magnitude and truer
+(Go's compiler compiling forms bin/toolchain-vendor check proves byte-identical, none of goi's own divergences under
+gc's messages); its costs: the executable grows by gc, goi's table checks the closure in its four configurations at a
+build whose key changed (about 2 minutes and 6 GB each), 696 committed files of forms (27.9 MB).
+
+Built:
+- go/arbace/repr/go/internal/gc/: the renamed copy (cmd's and std's internal packages are not importable from the
+  module arbace) of cmd/compile's closure, 91 packages, by arbace.go.gc's copy-texts from tamago/cmd's and
+  tamago/goroot's forms (TamaGo's go1.27.1, /root/tamago-go, pinned by seed/goroot.sha256 and bin/toolchain-vendor):
+  cmd/compile/internal/X -> .../gc/compile/X, cmd/internal/X -> .../gc/cmd/X, golang.org/x/telemetry -> .../gc/x/telemetry
+  (go build refuses a path with a vendor element), internal/X -> .../gc/std/X, cmd/compile/internal/syntax the existing
+  copy arbace/repr/go/internal/syntax; nothing else changed but :other-files (test assembly; internal/abi's stub.s with
+  funcpc.go's two bodiless runtime intrinsics) and the two std files whose forms differ by configuration
+  (internal/goarch's goarch.go, internal/buildcfg's zbootstrap.go: amd64's, the differing :val annotations removed,
+  their package files without :positions, since goi's checker requires every annotation of a :positions package and
+  computes these per configuration). bin/generated-check's fourth section keeps it (arbace -m arbace.go.gc generate);
+  test/gate/generated-check-test.bash's cases for it (and the fabricated tree's gate-cache.bash, missing since that
+  library came: the test failed 11 of 14 before).
+- go/arbace/repr/go/gccompile: the driver, cmd/compile/main.go's main as forms, Compile(args string) int, listed in
+  go/arbace/gotable.edn (program-path? and j2g's copy of go/arbace/repr/ already cover it).
+- arbace.go.gc (arbace/go/gc.ae): the generator and -main FORMS ARG...: the :full forms printed back
+  (arbace.repr.go.print/print-package) in the working directory, then gc's Compile in the process; an executable
+  whose table does not list the driver ends with goi's unsupported (125).
+- bin/goi's check_err: a flag of gc's own passes (-live, -l=N, -wb=N, a -d= goi has not, -+ with go:nowritebarrier)
+  or errors goi's checker and go/types both miss (gc's phases) send the program, after gc's reference passed, to
+  check_err_gc: arbace -m arbace.go.gc with the reference's arguments (-p=p -d=panic -C -e -importcfg -o a.o FLAGS
+  -d=ssa/check/on, the reference's importcfg), gc_env, TEST_TELEMETRY_DIR in the check's work; judged by
+  err_aot_verdict as the reference is; an older executable or the box: unsupported for the old reason (checked on the
+  gate executable 710e90e4771a10548878: prove.go and issue20529 unsupported as recorded). corpus_key and the nethttp
+  forms' key leave the copy and the driver out (the key unchanged: b5bff2d93447f869a9bf9764 with and without them).
+- Controls (test/goi/controls.txt): prove-vs-loopbce, live2-vs-live_regabi, issue52697-vs-issue22200b, one a family;
+  test/goi/essential.txt takes 26 of the 36 by its rule.
+- The build: one bin/arbace-go --gate-build under bin/heavy-lock (stage 0 the host; waited about 3 h 45 min in the
+  lock's queue behind an OCaml record, clj-cdr's jrt-convert and java-batch's build), 2 h 25 min on a loaded host, key
+  92a96093a59c (/root/arbace/.tmp/gate-exe/92a96093a59cb6e9edb9): goi's table 111 packages, its generator 556 s and 13.6 GB
+  peak for the four configurations; the executable 657,551,520 bytes, the test build 667,222,176; the build's peak 22.5 GB
+  (the test build's j2g). In it, arbace -m arbace.go.gc on prove.go gives the toolchain gc's 500 lines byte for byte.
+- Proofs (light, no gate): before the build, a standalone build of the driver and the copy (bin/build-go, 49 s, 36 MB)
+  standing in for the executable's Compile through check_err_gc: all 36 pass, the three controls fail as they must; the
+  generator's copy checked by goi's checker (linux/amd64 the copy's gc: 230 packages, 123 s, 0 errors; tamago/arm64 the
+  driver: 240 packages, 151 s, 0 errors); bin/generated-check (the existing gate executable, 19 s: every section as
+  written, gc's 696 files) and test/gate/generated-check-test.bash (16 of 16); test/gate/caches-test.bash --coverage. On
+  the new executable: one program of each family (bin/goi check --only, 8 programs: live2, prove, writebarrier, nilcheck,
+  tailcall, issue20529, issue52697, nowritebarrier) pass with the three controls failing as they must; then the record.
+- The record from one whole run (bin/goi check --record --jobs 6, the new executable, its own namespaces, 745 s; the corpora
+  and gc's references hard-linked from go-rows-1122's worktree, whose corpus_key b5bff2d93447f869a9bf9764 is this
+  checkout's, and the table's linux std forms from py-eval-1122's at the table's key 74ea0a0ed12d41e7): 1,838 programs,
+  1,818 pass, 8 unsupported, 8 known, 4 skipped, 0 fail, 0 error. The 36 rows moved to pass (gc-flags 28 -> 0, gc-phases
+  7 -> 0, gc-std 1 -> 0); gc2.go passed in that run but is flaky (--only: 1 pass, 2 known), so its row was put back to
+  known by hand (the record otherwise the run's). bin/goi divergences: 1,817 pass, 21 in 5 classes, the essential subset
+  (827) 0 not passing.
+- REAP (bin/reap --record): Go eval 1,781 / 52 / 1 (n/a 4) -> 1,817 / 16 / 1; bin/crops-score --record: Go's
+  completeness 0.9890 -> 0.9939 (eval 97.1 -> 99.0), maturity and independence 1.0; --judge --strict, bin/reap and
+  bin/records-check: 0 problems.
+- Left in Go's eval cell, each a decision for the user: foreign-code 8 (assembly, cgo, go:linkname: no forms to
+  interpret, section 1.1), memory 6 (allocation counts, finalizer timing through goi's registries, heap profiles, gc2's
+  ReadMemStats), unsafe-layout 2 (issue8606b: gc's comparison order; nilptr: gc's data segment layout), gc-m 1 deferred
+  (escape_unique: goi's -m port lacks other packages' generic instances; gc in the executable could judge it as it judges
+  -live, if the user wants -m judged by gc rather than by goi's port of 2026-11-06), gc-reference 4 n/a.
+Light: no gate; the new gate executable for the proofs and the record, stage 0 the tools' host.
+Merged with mac/next 19b1d84aa (its counting decisions of 2026-11-22: :foreign-code and :memory are n/a, Go AOT's issue9608
+passes): the journal kept both, the matrix and the scores recorded again on the merge: Go eval 1,817 / 2 / 1 (18 n/a),
+completeness 0.9910 (next) -> 0.9959; what is left in Go's eval cell is unsafe-layout 2 (by design) and gc-m 1 (deferred).
+bin/goi divergences, bin/reap, bin/crops-score --judge --strict and bin/records-check: 0 problems.
+
+## 2026-11-22: the user's decisions on java-design's questions (JD1-JD9) and Go's last three eval rows
+
+Asked by the main session after java-design's and go-gc's reports (about 15:00 UTC); answered by the user:
+- Java n/a: HotSpot's `java` launcher tests (JD1, :jvm-tools, 24 rows), HotSpot's diagnostic MXBean and commands (JD5, 12), the tests
+  that rely on an optimizing JIT (JD6, the speed-hang loops, about 18) and t07649, which prints until the heap runs out (JD2). t05291 gets
+  a wall-clock limit (its CPU time is its busy threads times the wall); t04683 and t05126 stay deferred as jrt bugs. Alternatives not
+  taken: an Arbace launcher imitating HotSpot's; by design.
+- Java JD3, classes defined from class-file bytes (:define-bytes, :classloading's defineClass rows, about 24): built in full, a
+  class-file loader with a bytecode interpreter and verifier. Alternatives not taken: a reflection-only loader; n/a; by design.
+- Java JD4, javac's API at the compiled level (about 43 rows): built, one compiled program with javac's world, cached by key. JD8 (the
+  rest of :xml) and JD9 (JDI) were not chosen: they stay as they are. JD7 (517-1's synthetic lambdas) was not asked: by design.
+- Go: escape_unique (gc-m) is judged by the in-executable gc, reversing 2026-11-06's own-port choice for this row; the 2 unsafe-layout
+  programs (issue8606b, nilptr) are n/a. Alternatives not taken: keep -m goi's own port; keep all three.
+
+## 2026-11-22 (go-tail): Go's last three eval rows, the user's decisions applied
+
+The user's decisions of 2026-11-22 on Go's last three eval rows (the entry before this one):
+
+- escape_unique.go (class :gc-m, deferred) is judged by gc in the executable: `bin/goi`'s `check_err`, when a -m program's
+  own verdict by goi's port fails (the instances of another package's generic functions, which gc stencils in the importing
+  package), sends it to `check_err_gc` as -live is. Proved on the gate executable
+  `.tmp/gate-exe/92a96093a59cb6e9edb9/amd64/arbace` (this worktree's `bin/arbace-go --gate-key` reads 94cc3f1e9022..., not 92a96093...,
+  so the key did not match; the executable holds the driver: the row passes): `bin/goi check --only '^escape_unique\.go$'`, 1 pass, 0 known,
+  with a new control `_control/escape_unique-vs-escape_iface` (escape_unique.go against escape_iface.go's // ERROR comments, fail as it
+  must), and escape_unique.go joins test/goi/essential.txt so the control has its subject in every essential run. `check --record` records
+  only whole, so that one row of test/goi/check-linux-amd64.edn was edited from the passing --only run (:known -> :pass), as go-gc did
+  for gc2.go, and its entry removed from test/goi/check-known.edn. The corpora of a fresh worktree (linux-errtest's read) were copied
+  from the main checkout's .tmp/repr-go/forms (the read does not fit under 8 GiB).
+- fixedbugs/issue8606b.go and nilptr.go (class :unsafe-layout, by design) become n/a: the class's :kind :na, its reason kept, in the
+  counting pattern of mac/counting-1122 (:memory).
+
+bin/reap --record: Go eval 1,818 pass, 0 design, 0 deferred, 20 n/a (was 1,817 / 2 / 1 / 18); crops-score --record: Go completeness
+0.9959 -> 0.9963 (the cells read, aot and print keep their by-design rows). crops-score --judge --strict 0 problems; records-check 0 problems.
+
+
+## 2026-11-22: rust-c6c-1122: C6-4's third round (the back end's next causes), R3 merged, C6-5 (a) recorded
+
+Branch `rust-c6c-1122` from `mac/next` (`5f59be57d`), the burst's stream R2b (C6: std's IR made by Arbace). No gate (the user's
+word); light runs, each process under `ulimit -v 8 GiB`, one big process at a time, the host at load 30 to 150; the user's rule of
+the day ("avoid redundancy and unnecessary tests"): std's and alloc's exports made again only for the keys a change moves
+(`lib-export --keys`, merged into the export by key), core's by `export core --add`. Merged: R3's `rust-c4-1122` at `152a26cb7`,
+then its last head `7bd7b001d` at the coordinator's word (collect's unknown trait Self the same fix on both sides, R3's kept;
+codegen's pair tag the same fix, ours kept; pack-compare-test's cases of both, the 512 cases once; R3's stray
+`arbace/rust/front/core_check.ae.orig` removed). doc/rust/FRONTEND-SURVEY.md, "As built: C6-4, round three".
+
+- The always-inliner (arbace.rust.back.inline) as LLVM 23's: InstSimplify's `getelementptr P, 0 -> P` and ConstantFoldCastInstruction's
+  `inttoptr` of a constant over the clone; the callees in
+  their symbols' order, read in rustc 1.99.1's compiler/rustc_middle/src/mono.rs (items_in_deterministic_order sorts a codegen unit
+  by symbol name unless -Z codegen-source-order, rust-lang/rust#145358; rust-c6b's callees-first stand-in retired); a callee's call
+  sites newest first in its use list (codegen numbers the calls as it creates them, rustc's reverse postorder, `:cseq`; a clone's
+  calls newer than the caller's own). Each rule checked against the host's `opt -passes='default<O0>'` (LLVM 23.1.5; a text
+  module's forward references reverse a use list, `uselistorder` restores rustc's): inline-test 15 of 15 (c9-c13 new).
+- Codegen: a reference to an unsized struct tail keeps the base's metadata (`(memory false)` layouts: Path, OsStr, Slice); a closure
+  passed as a scalar pair takes its upvars' pointee alignments. build-run's o0-normalize: CopyProp's return-place rule only for an
+  SSA local (rustc 1.99 has no nrvo.rs: read_uleb128 keeps `result`'s alloca). pack-compare-test's cases with their controls.
+- mono: builtin derives' methods `#[inline]` (ext-attrs, the impl's trait derived on its self type); the library's sources parsed as
+  edition 2024 (std's path.rs' let chains had made every path.rs attribute unknown); repr(C) enums from the sources (c_int tags);
+  a module path in the type namespace beside a function of its name (RF_LIB_MODULES); lib-unit's vtables (vtable-alloc-in, the
+  program's bindings). core-attrs takes num/niche_types.rs and num/imp/fmt.rs.
+- The front end's facts the back end reads: the module lists carry rustc's file names (module.rs joins a #[path] to the declaring
+  file's directory, `..` kept: std's backtrace_rs `std/src/../../backtrace/..`, core's stdarch `core/src/../../stdarch/..`); an
+  export's assert spans matched by message kind and order where two built asserts share a key; an entry's nested functions' facts.
+- Exports: `export core --add` of the wanted callees (without_provenance, without_provenance_mut, wrapping_offset, ptr::read,
+  align_of) and of digits_to_dec_str and digits_to_exp_str again (7 bodies, 5 min 51 s); std's 69 backtrace_rs keys and
+  sys::args::unix::imp::init by `lib-export --keys` (53 bodies, merged by key); alloc's and std's module caches copied from
+  rust-c6b's worktree repointed to this one (alloc's had kept the old paths: its partial export read nothing).
+- Results (items equal to std's IR at the pin, define for define, the crossed control differing each time): core 190 of 275 (183
+  before: r1 185, the symbols' order 187, the use lists' order 189, the --add round and vtables 190), alloc 21 of 25 (21), std 98 of
+  325 (83: r1 91, 92, the edition 2024 parse 94, the exports and vtables 97, the inttoptr fold 98; refused 214 -> 205).
+- Left: std's 22 differing items are 18 share-generics' upstream instances (each differs by an instantiating crate alone; rustc's
+  symbol_export.rs takes an instance from the exporting crate of the lowest StableCrateId, core's the highest of std's 25 crates:
+  every upstream crate's whole collection, C6's L2 with L3 unless C6-1 (b)), two `write_fmt` (the futex ReentrantLock std's interface
+  lacks), trace_fn (the FnMut call's typeck), hashmap_random_keys (MIR); alloc's 2 (share-generics, a nested generic fn's facts in
+  alloc's 2026-11-20 pass cache); core's 6 (a bounds check's THIR span, mul_pow2's `stringify!`, slice_index_fail's fn-local
+  disambiguator, two MIR-level). The front end's (R3's line): std's 116 items not exported, 48 layouts, 23 constants, 13 callees
+  (panic_output's opaque hidden type among them).
+- Checks at the head: `bin/rust-front essential` passed (its known summary, every control differing, 0 stub calls; it first failed
+  on records staged from rust-c6b's worktree with their paths, staged again), `core-essential` its known summary (566 equal),
+  pack-compare-test passed, inline-test 15 of 15; reap 56 of 56, crops-score 0 problems, records-check 0 problems.
+- C6-5 (a), the user's ruling of the day: rsi-build's C4 words begin "own" when std's interface and names are both native
+  (`bin/rust-front`'s rsi-build). R3's switch run (`rsi-native5`, RF_NATIVE_IFACE=1 and RF_NATIVE_NAMES, 5 of 5 own) is not run
+  again (the merge leaves the interface pass unchanged): its inputs.tsv's five rows say so, and its programs are recorded by `bin/rsi
+  check --record --front own --corpus samples` with R3's own path at this head (std, unwind, panics) checked first; std's lowered
+  runtime is built at this checkout's key for it (none at next's lowering key on the host: cpp/lower, repr/llvm and repr/c moved
+  since R3's base). Their outcome is the next entry.
+
+## 2026-11-22: rust-c6c-1122: R3's own path checked, C6-5 (a)'s record tried, the Mac's 524 merged (one Rust line)
+
+Follows this branch's round-three entry. doc/rust/FRONTEND-SURVEY.md, "As built: C6-4, round three", "At the merged head".
+
+- R3's own path at `69683177b` (before 524): std, unwind and panics built by `RF_EXTRA_IFACE=core-pass/core-iface.edn:std/deps/
+  hashbrown-iface.edn:std/deps/libc-iface.edn RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core panics std unwind`
+  (1 h 40 min, 3.1 GB; 3 of 3 own), then `RSI_JOBS=1 RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin>
+  RSI_FRONT_DIR=.tmp/rust-front/c1p bin/rsi check --front own --corpus samples --only` the three: 3 of 3 pass, the std-vs-panics
+  control differing (1 h 41 min, 6.2 GB: std's runtime lowered at this checkout's lowering key first, 94 units in 12 min, none on the
+  host at next's key since cpp/lower, repr/llvm and repr/c moved after R3's base; its ci read 55 min).
+- C6-5 (a)'s record: R3's switch run `rsi-native5` (RF_NATIVE_IFACE=1, RF_NATIVE_NAMES, RF_CORE_ATTRS=none; built before R3's C1
+  fixes, no RF_DROP_GLUE) copied, its inputs.tsv's five C4 rows rewritten as the writer now words them (`own: std's interface from the
+  crates' native passes, the StableCrateIds by Cargo's metadata hash ported, std's names from the crates' sources (the library build's
+  units its description, C6-5 (a))`), then `bin/rsi check --record --front own --corpus samples` from it: 4 of 6 pass (intrinsics,
+  panics, vectors; threads from the pack), std.rs (an undefined `<String as Ord>::cmp`) and unwind.rs (stdout) not; rsi refused the
+  record, nothing written. C4 is recorded own by the first native-interface build with C1's configuration that passes; the next host
+  stream's rsi-build at the merged head can be it. test/crops/independence.edn's eval text says so.
+- The Mac's 524 merged (`mac/524-rust-c3` at `26c7532a2`, its base R3 with next; the coordinator's word): collect's unknown trait Self
+  R3's again, core-attrs.txt both sides' files, the docs' and pack-compare-test's blocks each kept once (prepared in a side worktree
+  while the ci check ran, then this branch fast-forwarded to it). Then: lib-unit's core exports collect ub_checks.rs
+  (test/rust/front/lib-unit-iface-extra.txt; copy_nonoverlapping's and offset's entries exported again, 2 bodies, 6 min), codegen
+  takes a function item's type zero-sized when the table lacks its text, an inlined call made an invoke takes its destinations after
+  its arguments.
+- At the merged head: core 191 of 275 items equal to std's IR, alloc 21 of 25, std 101 of 325 (the three builds again; every crossed
+  control differing); `bin/rust-front essential` and `core-essential` their known summaries; inline-test 15 of 15, pack-compare-test
+  passed. R3's own path at the merged head (the same build and check over `.tmp/rust-front/c1m`) runs; its outcome follows.
+
+## 2026-11-22: rust-c6c-1122: R3's own path at the merged head, built; its ci check left running at hand-back
+
+At the merged head (`df4946d10`: R3 and the Mac's 524 merged) the three programs built again with C1's configuration (`RF_EXTRA_IFACE
+RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core panics std unwind`, `.tmp/rust-front/c1m`; core-attrs made again
+first, its key moved with mono.ae): 3 of 3 own, with 524's facts (std: callees 2870/2880, entry 1/1, layouts 4703/4703, symbols
+1955/1955; unwind: callees 430/430, layouts 815/815; panics: callees 471/471, layouts 910/910). Its `bin/rsi check --front own --only`
+needs std's runtime at the merged head's lowering key (524's base carries next's newer arbace/repr/c/lex.ae and pp.ae, so the
+runtime of `69683177b` is stale): lowered again and read into ci (about 70 minutes), then the check; running when this branch was
+handed back (the worktree's .tmp/c6c/p5/status and rsi-check.out). The 524-2 host stream's rsi-build at the merged head covers
+the same programs.
+## 2026-11-22: Go's print cell: the 9 tests-embed-sources packages printed in mode :full (go-read2-1122, part 1)
+
+The user's decision of 2026-11-22 (the entry above, "To build": text-preserving print for the 9 tests-embed-sources
+packages). Branch `go-read2-1122` from mac/next `3e8dfe109` (with go-rows-1122). TamaGo's testdata_tamago_test.go files
+embed what a package's tests read, the package's own Go files among them; the code level compiles the candidate in the
+original's place through the go command's -overlay, which //go:embed reads, so the test binary embedded the candidate's
+(flattened) text and nine packages were known at the code level (test/repr/go/roundtrip-tests-known.edn: crypto,
+go/format, go/parser, go/printer, internal/trace, io/ioutil, net/http, os, sync).
+- `bin/repr-go roundtrip --tests` (`roundtrip_tests_embedded`): after the corpus is converted and printed (mode :lines),
+  the Go files a package embeds from its own directory (`go list -test`'s EmbedFiles; only a package's own files are
+  compiled in the original's place, gocmp's overlay) that the candidate holds are replaced by their print from mode
+  :full (`bin/repr-go read --full --tests` of the packages holding them), each compared with its original byte for
+  byte, a difference failing the round trip; their list `cand-tests.embedded.txt`. 153 files of 12 packages (the nine,
+  and internal/types/errors, path/filepath and runtime/metrics, whose :lines prints already flattened as their
+  originals do), 153 byte for byte. The rule is keyed on go list's embeds, not on a copied list of packages.
+- The negative controls `embed PACKAGE` (test/repr/go/roundtrip-controls.txt, one for each of the nine; bin/lib/repr-go/check,
+  judged with --with-tests): one embedded file of the package altered in its text alone (an empty declaration group
+  appended, which the tree level identifies away): tree pass, code fail, 9 of 9 held. A first form of the control
+  restored the files' :lines prints (the state before): it failed the code level for seven, but go/format's
+  format_test.go and sync's example_test.go print from mode :lines with their originals' tokens today, so their code
+  passed either way (the known entries dated from an earlier printer). The same run showed that the package controls
+  (container/list vs ring) erred under --with-tests (the staged files are the package's own, gocmp -tests wants its
+  tests'): the controls file says they are left there, and the check now leaves them.
+- Runs: the conversion of the corpus tests (`bin/repr-go roundtrip --tests --record`, REPR_GO_JOBS=4, GOMEMLIMIT=6GiB
+  under the 8 GiB cap: 554 dumps, 0 failed, 528 s; the 12 packages in mode :full, 24 dumps, 148 s). Its check at the
+  default `-j` (the host's 64 cores) took the host's MemAvailable from 28 to 8 GiB within a minute, 192 gocmp processes:
+  stopped (this worktree's processes alone), and run again as the round trip runs it with `-j 8` on the same candidate
+  (`bin/repr-go check --with-tests --no-tests --known ... --controls ... --record test/repr/go/roundtrip-tests.edn`):
+  379 packages, tree 379, export and code 378 (unsafe skip), the nine rows :fail -> :pass and nothing else changed; the
+  known file empty. test/repr/go/divergences-print.edn's :tests-embed-sources gone.
+- Go's print cell 2,584 / 9 / 0 -> 2,593 / 0 / 0 (129 n/a); Go's completeness 0.988974 -> 0.989842 (floored 98.8 ->
+  98.9; the read cell's round is part 2). bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0
+  problems), bin/records-check (0 problems). doc/go/ROUNDTRIP.md, "Tests that embed their own sources".
+
+## 2026-11-22: Go's read cell: the readers' agreement counted, the 73 rejected files' messages compared (go-read2-1122, part 2)
+
+The user's decision of 2026-11-22 (the entry above, "Counting"): Go's read cell's 137 by-design rows (linux-errtest's 64
+invalid programs, `:invalid-programs`, and 73 files go/parser rejects, `:parser-rejects`) count as passes where Arbace's
+own reader agrees with the reference reader: the same trees and the same conversion failure for the 64; for the 73, both
+reject, and their error messages compared. doc/go/GO-PARSER-SURVEY.md, "As built: the rejected files' messages and the
+readers' agreement (2026-11-22)", holds the details; in short:
+- native-check (arbace.repr.go.annotate): a file both readers reject is judged by gc's syntax errors from the native reader
+  (arbace.repr.go.syntax, bin/repr-go syntax-errors' path) against gc itself over the original (`go tool compile -p=p -C -e`
+  with std's export data, no action's flags; bin/repr-go's corpus_gc_errors, .tmp/godump/corpus/NAME.gc/KEY.txt, made with
+  the helper's dumps of a corpus of files), line for line; a line's file read as its base name on both sides when it names
+  the file by its path (a //line directive's resolved name: issue15611, issue18393, issue32133 differed by that spelling
+  alone in a first run); a difference fails (SYNTAX). A raw-only row records `:same` when the native conversion fails with
+  the helper's message (E-tree before it). Control control/bombad-one-message-altered (level :syntax): bombad.go's errors
+  with one message altered must differ: held.
+- bin/reap: record-native-check writes `:rejected-agree` and a raw-only row's `:same`, and reads several reports (native-check's
+  runs of some corpora each, as the gate's parts run it: none partial, no corpus twice, every corpus in one; the guard of
+  report 021's finding 3 kept); the reader gives such entries `:agree` and the rule `agreement` counts them as passes in a
+  class marked `:agreement` (test/repr/go/divergences-read.edn's two; `:goos-other-boards` stays n/a, DECISION B); bin/reap
+  --self-test's three new cases hold it. The gate's rotation: SYNTAX in repr-go-native's :failed-re, bombad.go in :always,
+  the rejected files in native-check-ids.edn's universe (`native-check --record-ids`).
+- Runs (light, the burst's rules; no gate): the 73 checked first alone (`--only`), then linux-errtest whole (586 of 586
+  E-tree, 64 raw-only `:same`, 73 of 73 equal, the control held), then the record from native-check over every corpus in
+  three runs, as its tool requires every corpus: the twelve light corpora (REPR_GO_JOBS=8, GOMEMLIMIT=6GiB, under the 8 GiB
+  cap, 11 min), linux-errtest with box (jobs 3, 20 min), the std, tests and cmd corpora (32 jobs, the check under
+  bin/heavy-lock: 7 h 53 min of which most the queue, 31 GB at the peak): 22 corpora, 12,275 dumps, 0 not known, every
+  control held in one of the runs; the other corpora's counts those of 2026-10-24's record (the raw-only and extra rows
+  the same, linux-errtest's with `:same`). The helper's dumps of linux-errtest were go-rows-1122's (the same helper,
+  toolchain and pins, keyed to this checkout's dumps_key), the others made afresh. bin/gate-subsets go rewrote
+  linux-errtest's subset alone (the universe's 73 rejected files, bombad.go kept).
+- Go's read cell 12,158 / 137 / 0 -> 12,295 / 0 / 0 (67 n/a, goos-other-boards); with part 1's print 2,593 / 0 / 0 Go's
+  completeness 0.988974 -> 0.992628 (floored 98.8 -> 99.2; the mean of the cells: read 1, eval 1,781/1,834, AOT
+  1,696/1,697, print 1). Left in Go's row: eval 52 by design and 1 deferred (counting-1122 makes foreign-code 8 and memory 6
+  n/a; the gc-flags and gc-phases rows wait for gc inside the executable, another stream) and AOT 1 by design (issue9608). bin/reap --record (0 problems), --self-test (8),
+  bin/crops-score --record, --judge --strict (0 problems), bin/records-check (0 problems).
+- Merged mac/py-design-1122 at 87c30d972 (P2's round 1: _functools' reduce and cmp_to_key ported, _hmac, _uuid, SIGPIPE
+  ignored at the start, stdin's readlines and iteration, the thin json encoder's negative indent level, C twins classed) so
+  the record measures both lines. The overlaps resolved: builtins_functools and the readlines/iteration of sys.go are P2's
+  (they supersede this branch's built-in wrappers and its readlines); this branch's sys.go parts re-applied on P2's (the
+  standard streams' write errors with writeErr and the raw writers, -X cpu_count, -X int_max_str_digits); go/arbace/py.ae
+  P2's with builtins_syslog.go added back (taking P2's package file had dropped it from :files). Both SIGPIPE ignores stay
+  (idempotent). P2's os-and-files-misc rows for test_json's broken-pipe tests (exit status 120) should pass now (writeErr
+  drops the buffered bytes, so the shutdown flush succeeds after json.tool's dup2): to be confirmed by the record.
+  Coordination: the record (P1's alone) is made at this merge; P2's later commits are measured at the next record.
+
+## 2026-11-22: py-eval-1122: the eval record re-recorded, the 6,902 regressions gone (Python eval 39,204 / 5,490 / 3,627 -> 40,552 / 5,300 / 2,472)
+The whole run of `bin/pyi check --fresh --record` used the gate executable b2a5b50d48192fabce24, built at 9a2b7842a. Its
+runtime was the branch's (runtime_guard: compiled). The run had 2 jobs, under the agent's `ulimit -v 8388608` (the burst's
+rule), and started at 05:32 UTC. Of its 529 modules, 479 ran at 9a2b7842a. The other 50 ran at 3ee81c30f when the run was
+resumed (`bin/pyi check --record` without `--fresh` keeps a module that has a `.status`). 3ee81c30f changes only pyctypes,
+which is out of every key and interpreted from the checkout. The resumed modules are test_capi and the 49 not yet run.
+- The regression is gone. Next's run at 1e8ee0196 had 8,092 rows "import SystemError: pyi: Go panic: &{...}" and 883 rows
+  "UnboundLocalError: cannot access local variable 'module'". This run has neither. Its 9 Go panic rows are the record's
+  kinds: test_ctypes' three from_address segmentation faults and test_capi's six signal panics. The cause was a stale goi
+  table: bin/goi's table key did not hash the table's own Go forms (go/arbace/py and its loaded files), so the gate
+  executable carried a table older than its runtime, and every lazy package's import panicked. The table key now hashes
+  them (this branch's first round). pyi now names the throwable of a Go panic (`panicText`, arbace.python.run's
+  SetPanicText hook: class, message, up to four causes).
+- A new regression of this branch, fixed at 3ee81c30f: test_capi's test_misc.Test_testcapi.test_atexit calls
+  Py_NewInterpreter, then reaches PyInterpreterState_Get, which pyi does not provide. The unwinding skipped its
+  Py_EndInterpreter, so the thread stayed in the subinterpreter, and later tests saw that interpreter's stdout, warnings
+  and ast (test_run_simplestring '', test_number's DeprecationWarning, test_compilestringflags). capiLeave of the
+  outermost C entry now ends the subinterpreters left alive, and PyGILState_GetThisThreadState is provided. Proof
+  (`bin/pyi check --only`, eight rows): seven pass, and test_atexit still errors on PyInterpreterState_Get. The resumed
+  run's test_capi shows the same.
+- 18 modules keep their previous record rows. They are left out of the final judge's modules.tsv (`--judge DIR --record`:
+  the judged modules' rows are written again and the others are kept). This is the coordinator's instruction for the
+  rows that crashed only on the agent's 8 GB cap. 13 modules are in that group: test_buffer, test_capi, test_cmd_line
+  (test_relativedir_bug46421's child runs test_longexp), test_code_module, test_compile, test_ctypes, test_fstring,
+  test_longexp, test_mmap, test_modulefinder, test_pdb, test_pickle and test_pyrepl. Go reported "fatal error: out of
+  memory", or mmap ENOMEM. The coordinator reruns them under the big lock at the consolidation; the lock's queue was 11
+  jobs deep today. Four modules fail in the whole-module run on timing or gc, and those rows are in no class: test_xml_etree
+  and test_xml_etree_c (BasicElementTest.test_cyclic_gc; it passes alone), test.test_multiprocessing_spawn.test_misc
+  (TestCloseFds.test_closefd: "failed to join the thread in 30.0 seconds") and test_processes (16 memory-cap crashes and
+  test_notify; the module reached its 3,600 s limit). Last, test_crossinterp: it imports now, and its 4,612 subtest ids
+  hold object reprs with addresses and the checkout's path. Ids like these cannot be recorded until the driver
+  normalises them.
+- 15 regressions are recorded as classed non-passes. All were confirmed by a targeted `--only` rerun. Thirteen are spawn
+  pools past the runner's own 8192 MB cap (:host-memory): test_process_pool 4, test_shutdown 5, test_manager 3 and
+  test_multiprocessing_main_handling's test_package_compiled. A spawn worker is 1.44 GB resident (RssAnon 1,072 MB)
+  beside a parent's 0.8 GB (RssAnon 468 MB). Five workers, the parent and the resource tracker come to 9.2 GB. The
+  records night passed these tests under the same cap, so the workers grew; the cause is not known yet. The other two
+  are test_io's CSignalsTest.test_reentrant_write_text (a hang, :runner-limits) and test_sqlite3's
+  test_table_lock_cursor_non_readonly_select ("database table is locked").
+- Classes: :audit-hooks takes test_audit's test_syslog. The syslog module is new, and audit hooks are never called in
+  pyi; also, its implicit openlog passes facility 0 where CPython passes LOG_USER, a fix for the next py change.
+  :functools-core takes test_traceback's two PurePythonTracebackErrorCaretTests rows (partial's pure `__call__` frame).
+- Mistakes of this round, for the record. I took the first run for stalled and stopped it at 480 of 529 modules, but it
+  was test_tarfile running slowly (the resume ran it in 900 s). A concurrent `--only` run in the same worktree shared
+  `.tmp/t6i` and removed test_tarfile's working directory while it ran, so test_tarfile was run again. Two checks in one
+  worktree must not run at once.
+- bin/reap --record: Python eval 39,204 / 5,490 / 3,627 -> 40,552 / 5,300 / 2,472 (1,363 rows now pass against the
+  record). bin/crops-score --record: Python completeness 0.9485 -> 0.9555 (meant 0.9772 -> 0.9840), maturity 1.0. The
+  strict judge: 0 problems. records-check: 0 problems.
+
+## 2026-11-22: rust-c3x-1122: 524-1 (a), TypeId::of's constants computed natively (rustc's type_id_hash ported)
+
+From `mac/next` (`169119776`, the merged Rust line). rustc 1.99.1's TyCtxt::type_id_hash ported into arbace.rust.front.mono
+(`type-id-hash`), read in the pinned `rustc-1.99.1-src.tar.xz`: compiler/rustc_middle/src/ty/util.rs (type_id_hash: the type with
+its regions erased, StableHash into a StableHasher, Hash128), rustc_const_eval's write_type_id (the u128's little-endian bytes, each
+8-byte half a pointer into the type's GlobalAlloc::TypeId at the half as offset), rustc_data_structures/src/stable_hash.rs and
+vendor/rustc-stable-hash-0.1.2 (the writes: an isize one byte under 0xFF, usize 8 bytes, a str's Hash its bytes and 0xFF, a [u8]'s
+StableHash its length first), rustc_macros' stable_hash derive (an enum's mem::discriminant first), rustc_type_ir's ty_kind.rs,
+ty_info.rs (in 1.99 a Ty hashes its internee directly: no nested fingerprint), region_kind.rs (ReErased 6), rustc_middle's
+impls_ty.rs (a &List hashed as the Fingerprint of its own hash), adt.rs (AdtDefData likewise: did, variants, AdtFlags as u16,
+ReprOptions), ty/mod.rs (VariantDef, FieldDef with 1.99's mut_restriction, repr_options_of_def's field_shuffle_seed: the
+DefPathHash's to_smaller_hash), rustc_hir_id's definitions.rs (DefPathHash: the root's local hash the StableCrateId, a child's the
+Hash64 of parent local hash, DefPathData's discriminant, the name, the u32 disambiguator), rustc_hir_analysis' collect.rs (adt_def,
+lower_variant: VariantDiscr::Relative's distance from the last explicit one), rustc_resolve's try_resolve_visibility (an inherited
+field visibility the nearest module, a variant's field its enum's). A library ADT's facts come from its sources (mono's module-items):
+attributes (repr, non_exhaustive, fundamental, lang items, pin_v2), variants, fields, their visibility.
+
+Checked by `bin/rust-front type-id-check` (new, test/rust/front/type_id_check.ae): every TypeId::of constant the pack rust-front-rsi
+records (the type from a call's fndef form, the bytes from the instance's allocation): 6 of 10 equal (String, &str, u64, u32, i32,
+core's ParseIntError), 0 differ, 4 refused (the synthetic programs' own ADTs Noisy, AppError, Failure, and alloc's StringError local
+to an impl's method: program-local and impl-local ADTs are not read), the crossed control (each computed constant against the next
+case's recorded bytes) 6 of 6 differing. build_run's inline-const evaluates TypeId::of's `const { type_id::<T>() }` with it
+(`(indirect-type-id HEX)`, runtime-body's fix-static making the allocation and its two relocations into the type's :other
+allocation, counted a native const). The eval cases' TypeId constants are String, &str, u64 and u32 (panics 4, unwind 4, intrinsics'
+u32): all equal. pack-compare-test passed at the change. The program-level proof is item 1's RF_FACT_TRACE rsi-build (below).
+- `bin/rust-front essential` at the change (`996298710`): passed, its known summary, every control differing, 0 stub calls (18 min).
+- Share-generics (item 4 of the brief, not built): rustc 1.99.1's upstream_monomorphizations_provider read
+  (compiler/rustc_codegen_ssa/src/back/symbol_export.rs:500-560 of the pinned tarball): an instance several upstream crates export is
+  taken from the lowest StableCrateId, and a crate exports under share-generics the generic instances of its whole collection. The
+  question for the user, DECISION C3X-1, with options (whole collections natively, 8-12 days; std's reference without shared
+  generics, one re-pin night, recommended; the rlibs' exported symbols read, a record) in doc/rust/FRONTEND-SURVEY.md, "rust-c3x".
+
+## 2026-11-22: cpp-rt-own4: GNU's VLAs, late destructor calls, lazily named specializations; the runtime's last pack units
+
+Branch `cpp-rt-own4-1122` from mac/next 3e8dfe109 (cpp-rt-own3 in it; the lowered runtime 194 of 198 units own, C++'s eval and AOT
+0.995 each, independence 95). The brief (the main session, toward the CoMaIn goal): the last 4 pack units, cpp-rt-own3's causes-left
+table the list; DECISION cpp-rt-own3-1 (a) and cpp-rt-own3-2 (a) taken as recommended; tzdb's and valarray's drops probed first.
+Light and targeted, no gate; each rule on a reduced case against clang 23.1.5's IR recorded by hand with the host's clang++ (the oracle
+tier's tool), each unit by `arbace.cpp.codegen gen-batch` with runtime_ours' options, its names against the pack cpp-runtime-ir's IR.
+
+What was done (7a8b8de1f, c6c1ef6eb, 4c013f6df, the code; doc/cpp/CPP-SURVEY.md, "As built: cpp-rt-own4", the details):
+
+1. DECISION cpp-rt-own3-1 (a), GNU's VLAs: the parser keeps a VarDecl's array bounds (`:_vla`, a `:_` key); sema's vla-local types a
+   block-scope array whose outermost bound is no constant `{:k :arr :n nil :vla true}` with the bound analyzed in the block; codegen's
+   vla-decl! writes clang's shape: the bound zext'ed to i64, llvm.stacksave at the scope's first VLA into a slot, a dynamic alloca
+   aligned to 16, the bound in an i64 slot, llvm.stackrestore as a normal cleanup (no landing pad for it). Unit:
+   c++17/floating_to_chars.cc (with the gaps below).
+2. DECISION cpp-rt-own3-2 (a): an explicit destructor call of a class not complete where analyzed is `:late-dtor-call`, its destructor
+   taken when written. The probe: floating_from_chars' `__p->~_Up()` comes from vector<_BigBlock>'s destructor, made eager by the lazy
+   round's variable rule (a parameter of that type), never written; _BigBlock is never defined in the unit.
+3. valarray's drops probed first: valarray<size_t> cached empty after the analysis instantiated `_Expr<_UnClos<__unary_plus, _Expr,
+   _Clos>, value_type>`'s chain (451 nested) until its stack ended; a specialization named in a member function's type while its
+   template is instantiated twice up the stack is now named lazily (incomplete, :lazy-inst, layout refused, instantiated where named
+   again outside any instantiation). Unit: c++98/valarray.cc (and a destructor's explicit instantiation, below).
+4. tzdb probed first: the header drop of `typename invoke_result<_Fn, _Args...>::type` is projected<It, Proj> for a Proj that is an
+   overload set's type (a candidate's constraint), not the call's (projected over a pointer to member function or to a data member
+   of class type generates as clang's); the "no operator()" stays (Left, below).
+5. On the way, each on a reduced case against clang 23.1.5's IR: the parser's member-initializer lookup (no mode's: a block's
+   declaration in a member function had found a shadowed member), no ADL for a qualified call, the built-in enum comparison over a
+   converted user operator, __builtin_fpclassify, member templates differing by cv- and ref-qualifiers kept apart, a destructor's
+   explicit instantiation, exact 128-bit constants in the template text evaluator, a parameter's top-level const on its variable (the
+   parser's `:_const`), a variable template's pack arguments as written, a non-type parameter no pack for a pack in its type's
+   arguments, a linkonce_odr variable whose address is taken written, an explicit specialization of a static template internal.
+
+Results. `bin/cppi runtime-build` (auto, at 8eab9eb73, under `ulimit -v 8388608`, CPPI_DISK_MAX=94: the disk at 91% from other
+lines): 198 units, 198 pass, **197 by our route** (from 194), every own unit's names the pack's (also checked unit by unit while the
+IR was made); IR 6,971 s, read, print and lower 299 s. runtime-ci 199 of 199 (every unit read again: the reader's key another than
+any kept library's; 6,020 s). `bin/cppi runtime-inputs --record`: own 197, pack 1. lower-essential 6 of 6 (499 s). cpp-check-essential's
+command: samples 4 of 4, runtime 4 of 4, the run controls differing as they must, selfref 220 of 225 (3,449 s). codegen-gen 156 of 156,
+the record written again byte for byte (no digest moved), its judge with both controls failing as they must. `bin/repr-cpp c2j-check`:
+33 of 33, 0 reflection warnings, on the gate's executable 92a96093a59cb6e9edb9 (stage 0 refuses the path-first load of the checkout's
+arbace/core since b4ab3ebfc's runtime, `Compiler$Dyn/hideMethod`: the environment's). Scores: the REAP matrix unchanged; C++'s eval
+and AOT stages 0.9950 to 0.9990 each, its independence 0.9522 to 0.9538, **95** (floored, unchanged); crops-score `--judge --strict`
+and records-check 0 problems.
+
+Left (1 unit): c++20/tzdb.cc, "no operator() of __upper_bound_fn" at `ranges::upper_bound(infos, tp, ranges::less{}, &ZoneInfo::until)`
+(23 minutes into the unit; a reduced case with <chrono> did not finish in 20): DECISION cpp-rt-own4-1 in the survey's section. Found and
+left: `*opt` of a prvalue optional ambiguous among operator*() const&, && and const&& (the rvalue object's ranking); a subnormal long
+double literal's x86_fp80 constant malformed.
+
+Alternatives weighed: VLAs by a heap allocation (rejected: clang's IR is the stack save and the dynamic alloca, and the lowering takes
+them already); the late destructor call by declaring a placeholder destructor on the incomplete class (rejected: finish-class! would
+keep it when the class is completed with its own); valarray's chain cut at one instantiation up the stack (rejected: a class template
+naming another specialization of itself in a member's type, span's first(), would then need completion on demand everywhere) or
+instantiated on any later access through abi's cls (rejected: a completion inside another's would chain again, and no template state
+exists at code generation); 128-bit casts folded into the 64-bit representation (rejected: `~(_Value)0` of unsigned __int128 would be
+silently wrong); the parameter's const read from its qualType (rejected: the parser prints the parameter as the function's type does,
+so a `:_const` key). Rejected: a gate run (the brief's).
+
+Commits: 7a8b8de1f, c6c1ef6eb, 4c013f6df, 4e1a13298 (the code), 8eab9eb73 (rt_ours_glob), 6aa1269ec (the records: runtime inputs,
+scores), and this entry's commit (the survey's section, the journal). Pushed to mac.
+
+## 2026-11-22: cpp-rt-own4: tzdb's second round, parked on a WIP branch
+
+After the proofs and the push (455e8b7df), tzdb again with a lighter reduction (`.tmp/tz/t9.cc`, <bits/chrono.h> for <chrono>: 79
+seconds a probe, against 25 minutes for the unit): `&ZoneInfo::until` had been deduced as the overload set's own type, so ranges'
+projected had no value_type. Four code generator rules, each on a reduced case against clang 23.1.5's IR (deduction from a member
+function pointer of one function, a noexcept member function type's Do, the rewritten `<=>` candidate of a more specialized template
+over operator@, type-constraints with arguments in subsumption) take the unit past the upper_bound call to its next refusal,
+`year::min()/January/1` (a friend declared in month and defined in year_month, not found). Not landed: no runtime-build covers them,
+and the unit has 2,000 lines more at 25 minutes a probe; they wait on the branch `cpp-rt-own4-tzdb-wip-1122` (one commit on
+cpp-rt-own4-1122, pushed to mac, marked not for merge). DECISION cpp-rt-own4-1 (a) in the survey's section now names that branch.
+
+## 2026-11-22: cpp-rt-own4: next merged into the branch (169119776), both sides kept; consolidation
+
+Next had taken four C++ streams since the branch's base (cpp-read, cpp-gnu, cpp-diag-b and the Mac's 518), and its merge of
+cpp-rt-own4-1122 conflicted. Merged next into the branch (446f22a4e), both sides kept: sema's redeclaration of a function takes
+queue 518's deleted-definition check (the checker's) and this branch's `:param-const` beside `:param-names`; parse.ae's parameter
+list takes this branch's `:_const` key and cpp-diag-b's redefinition of a parameter; this branch's one change in the checker's
+mode (a member's initializer alone looks up the class's complete scope, `late*`) sits beside cpp-read's recovery, unchanged; the
+journal's and the survey's sections next's first, then this branch's; the scores recorded again: C++'s eval and AOT 0.9950 to 0.9990,
+its independence 0.9614 to 0.9630, **96** floored (REAP matrix unchanged, crops-score `--judge --strict` and records-check 0 problems).
+
+Proofs at the merge, targeted: `bin/cppi codegen-gen` 156 of 156 pass, the forms' digests unchanged (the merge leaves the code
+generator's output alone, so no runtime-build of its own); `bin/repr-cpp c2j-check` 33 of 33 compiled, 0 failed, and 0 reflection
+warnings once diag.ae's three are fixed: next's cpp-diag-b had left `(.indexOf src "\n" i)` and `(.indexOf src "*/" (+ i 2))` on a
+boxed index and `(.rem ^BigInteger lv rv)`, a method BigInteger lacks (`remainder`: a constant `%` in the checker's evaluator would
+have failed by reflection), fixed in this entry's commit. Not finished at the hand-back (the consolidation): the dg rerun of the
+2,072 own passes of next's record (`bin/repr-cpp dg --corpus dg-error --front native --only`, no --record; log
+`.tmp/dg-merge.log` of the worktree) and cpp-check-essential's command (its runtime-ci rebuilding the runtime at the merge's key,
+log `.tmp/chk-merge.log`) were running; lower-essential, started beside it, raced that rebuild in the same runtime directory and
+failed reading a unit's gen.refused (no verdict: to run again once the runtime is at the key). No gate (the user's rule).
+
+tzdb's third round on the WIP branch (`cpp-rt-own4-tzdb-wip-1122`, next merged in at 1dd00c37a, stopped at a5c0aaa90 by the
+consolidation): seven code generator rules on reduced cases against clang 23.1.5's IR, none proven by a runtime-build (the survey's
+section, "tzdb's third round"): a friend declared alone in an associated class visible to ADL ([basic.lookup.argdep]/4.3, <chrono>'s
+`year::min()/January`); noexcept on a member function pointer's type from its text; a namespace function template's call on tag
+objects in a constant's text (__call_is_nt); a throwing member pointer call in noexcept(...); const&& ranked between && and const&;
+constexpr class objects read by the evaluator; constructor direct-initialized POD locals folded. Alternatives weighed: entering a
+body-less friend declaration into the namespace as a hidden function (rejected: a class template's friend then defined at namespace
+scope would stay hidden from ordinary lookup) against keeping it on its class and declaring it on demand (taken); `:constexpr` on
+global variables in the code generator's mode (rejected: global-init's folding and three more readers would change) against a key of
+the evaluator's alone (`:cg-constexpr`, taken).

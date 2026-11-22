@@ -11,7 +11,7 @@
 ;; The wire form of a value (big-endian): 'i' i64 an integer; 'd' f64 a float; 'l' i32 an int32; 'j' i64 an int64; 'n' i64 a nativeint;
 ;; 'r' u32 a node already known (the session's id); a new node, given the next id before its contents: 'b' u32 tag, u32 n, n values (a
 ;; block); 's' u32 n, n bytes; 'f' u32 n, n f64 (a float array); 'B' u32 kind, u32 layout, u32 nd, nd u32 dims, u32 n, n values (a
-;; bigarray's elements); 'k' a closure; 'h' another Java object; and, no node: 'c' u32 len, the identifier, u64 the address (a custom
+;; bigarray's elements); 'k' u32 a closure's handle (queue 530: one a closure for the run, the runtime's); 'h' another Java object; and, no node: 'c' u32 len, the identifier, u64 the address (a custom
 ;; block the C allocated, kept for the run); 'p' u32 i (Go to Java: fail.h's predefined exception i). A session is an outermost call:
 ;; the ids of both sides start again with it. The updates: u32 count, then the contents of each node of id below it in order (a
 ;; block's fields, a string's bytes, a float array's floats, a bigarray's elements; nothing for the others): the node's state as the
@@ -23,10 +23,15 @@
 ;; 'E' value (it raised), 'X' i32 (the C called exit), 'F' str (a fatal error), 'N' (no stub of that name, or no stubs: OI_CSTUBS
 ;; unset), 'T' (the call unwound for the runtime's throwable), 'K' value, u32 n, n values (a callback: apply the closure), 'Q' str
 ;; (caml_named_value); 'G' u32 n, n u64 (queue 523: the C's custom blocks an asked collection found unreachable, at no call's depth),
-;; answered 'N' once their finalize ran. The servers frame the messages (capi.go: a write a message, its reply u32 its length then it).
+;; answered 'N' once their finalize ran; (queue 527, Marshal of the C's custom blocks: extern_custom and intern's CODE_CUSTOM_LEN, as
+;; ocamlopt's runtime calls the operations') 'S' u64 the address (its operations' serialize: 'R', no updates, u32 n, n bytes, u64 the
+;; 32-bit size, u64 the 64-bit size), 'D' str the identifier, str the data from the identifier's sizes to the message's end, u64 the
+;; size expected (the registered operations' deserialize: 'R', no updates, the block, u64 the size deserialize returned, u64 the bytes
+;; it read), each answered 'N' when there are none, 'E' value when the C raised, 'F' str at a fault; at any depth, as an answer is (a
+;; callback may marshal). The servers frame the messages (capi.go: a write a message, its reply u32 its length then it).
 (in-ns 'go.arbace.oicapi)
 
-(go/file "wire.go" :imports [[binary "encoding/binary"] [fmt "fmt"] [math "math"] [os "os"] [oi "arbace/oi"]])
+(go/file "wire.go" :imports [[binary "encoding/binary"] [fmt "fmt"] [math "math"] [os "os"] [sync "sync"] [oi "arbace/oi"]])
 
 ;; ---- the session: the mirrors' ids, the workers
 
@@ -34,6 +39,12 @@
   (struct ^{:tag (slice oi/Value)} nodes ^{:tag (map any int)} ids ^{:tag (slice (* worker))} workers))
 
 (go/var ^{:tag (* session)} sess)
+
+;; (queue 530) the closures that crossed, one mirror a handle for the run: the runtime gives each of its closures a handle at its first
+;; crossing ('k' u32), so a closure the C keeps past the outermost call (a root, a C thread's) is the same mirror in a later session and
+;; goes back to the runtime as its handle
+(go/var ^{:tag (map int (* oi/Closure))} closureMirrors (make (map int (* oi/Closure))))
+(go/var ^{:tag (map (* oi/Closure) int)} closureHandles (make (map (* oi/Closure) int)))
 (go/var ^bool loaded)
 (go/var ^string loadErr)
 
@@ -171,6 +182,14 @@
         (.u64 w (.-Addr cb))
         (return))
       (oi/Internalf "the C API: a custom block %q the runtime does not know" (.-Name x)))
+    (case [(* oi/Closure)]
+      ;; a closure of an earlier session (queue 530): its handle
+      (when [(values h ok) (aget closureHandles x)] ok
+        (.add s v)
+        (.u8 w \k)
+        (.u32 w h)
+        (return))
+      (oi/Internalf "the C API: a closure the runtime did not give"))
     (default
       (oi/Internalf "the C API: a value %T the runtime does not know" v))))
 
@@ -220,7 +239,12 @@
               (aset data i (.get s r)))
             (return v))))
       (case [\k]
-        (let [v (addr (lit oi/Closure))]
+        (let [h (.u32 r)
+              v (aget closureMirrors h)]
+          (when (== v nil)
+            (set! v (addr (lit oi/Closure)))
+            (aset closureMirrors h v)
+            (aset closureHandles v h))
           (.add s v)
           (return v)))
       (case [\h]
@@ -373,6 +397,22 @@
       (case [\A]
         (set! wk (aget (.-workers sess) (- (len (.-workers sess)) 1)))
         (>! (.-in wk) msg))
+      ;; (queue 530) 'P': the runtime's agent asks, at no call's depth, for a C thread's conversation ('D' or 'L', u32 the domain), or
+      ;; nothing ('N')
+      (case [\P]
+        (.Lock asyncMu)
+        (when (or (!= sess nil) (== (len asyncQ) 0))
+          (.Unlock asyncMu)
+          (return (lit (slice byte) \N)))
+        (let [q (aget asyncQ 0)]
+          (set! asyncQ (subslice asyncQ 1))
+          (.Unlock asyncMu)
+          (set! sess (addr (lit session :ids (lit (map any int)) :workers (lit (slice (* worker)) (.-wk q)))))
+          (let [w (addr (lit wbuf))]
+            (.u8 w (.-op q))
+            (.putUpdates sess w)
+            (.u32 w (.-dom q))
+            (return (.-b w)))))
       ;; (queue 523) 'G' u32 n, n u64: the C's custom blocks the runtime's asked collection found unreachable (no call runs), finalized
       (case [\G]
         (let [n (.u32 r)
@@ -382,6 +422,9 @@
           (when (and loaded (== loadErr ""))
             (Collected addrs))
           (return (lit (slice byte) \N))))
+      ;; (queue 527) 'S', 'D': a C custom block serialized, or one deserialized, for the runtime's Marshal (customOp)
+      (case [\S \D]
+        (return (customOp op r)))
       (default
         (let [w (addr (lit wbuf))]
           (.u8 w \F)
@@ -396,6 +439,102 @@
           (when (== (len (.-workers sess)) 0)
             (set! sess nil))))
       out)))
+
+;; ---- the C's threads at the AOT levels (queue 530; threads.go): a thread the C started speaks to the runtime only when the runtime
+;; asks ('P', its agent's poll, at no call's depth, once the server told it the C started a thread: the light level's 't' chunk). Its
+;; conversation is the session's one worker: 'D' u32 dom (does the domain run? the answer 'R' 1 or 0), or 'L' u32 dom (the runtime
+;; taken for a thread of that domain, answered 'R'; then the thread's callbacks, 'K' as a call's, until its release, 'N').
+
+(go/type asyncReq "asyncReq is a C thread's conversation waiting for the runtime's poll.\n" (struct ^byte op ^int dom ^{:tag (* worker)} wk))
+
+(go/var ^sync/Mutex asyncMu)
+(go/var ^{:tag (slice (* asyncReq))} asyncQ)
+
+(go/func asyncStart "asyncStart queues a C thread's conversation op about the domain dom and waits for the runtime's answer: its reader after\nthe updates, and the worker the conversation goes on with.\n"
+  [^byte op ^int dom] :results [(* rbuf) (* worker)]
+  (let [wk (addr (lit worker :in (make (chan (slice byte))) :out (make (chan (slice byte)))))]
+    (.Lock asyncMu)
+    (set! asyncQ (append asyncQ (addr (lit asyncReq :op op :dom dom :wk wk))))
+    (.Unlock asyncMu)
+    (let [r (addr (lit rbuf :b (<! (.-in wk))))]
+      (.u8 r)
+      (.getUpdates sess r)
+      (return r wk))))
+
+(go/func asyncEnd "asyncEnd ends a C thread's conversation ('N').\n" [^{:tag (* worker)} wk]
+  (>! (.-out wk) (lit (slice byte) \N)))
+
+(go/func wireDomain "wireDomain asks the runtime whether the domain dom runs (a C thread's registration).\n" ^bool [^int dom]
+  (let [(values r wk) (asyncStart \D dom)
+        ok false]
+    (when (== (.u8 r) \R)
+      (set! ok (== (.get sess r) 1)))
+    (asyncEnd wk)
+    ok))
+
+(go/func wireAcquire "wireAcquire takes the runtime for a C thread of the domain dom: the conversation its callbacks and its release go on.\n"
+  ^{:tag (* worker)} [^int dom]
+  (let [(values _ wk) (asyncStart \L dom)]
+    wk))
+
+(go/func ThreadsStarted "ThreadsStarted tells whether the loaded stubs started a thread (the light level's server tells the runtime once: 't').\n" ^bool []
+  (and (!= the nil) (!= (.-Sched (.-Sys (.-p the))) nil)))
+(go/func customOp "customOp is the reply to 'S' or 'D' (queue 527): the C custom block at an address serialized by its operations' serialize\n(its bytes and sizes), or a block of the operations registered under an identifier deserialized from the data (the block, the size\nits deserialize returned, the bytes it read): oicapi's serialize and deserialize, which oi's Marshal calls (ext_capi.go's\nCustomSerialize, CustomDeserialize); 'N' when there are none, 'E' when the C raised, 'X' when it called exit, 'F' at a fault. A\nreply's new nodes are the session's, or a session of its own outside a call.\n"
+  ^{:tag (slice byte)} [^byte op ^{:tag (* rbuf)} r]
+  (let [s sess
+        w (addr (lit wbuf))]
+    (when (== s nil)
+      (set! s (addr (lit session :ids (lit (map any int))))))
+    ((fn []
+       (defer ((fn []
+                 (when [x (recover)] (!= x nil)
+                   (set! (.-b w) nil)
+                   (type-switch [e x]
+                     (case [(* oi/Exn)]
+                       (.u8 w \E)
+                       (.u32 w 0)
+                       (.put s w (.-V e)))
+                     (case [(* oi/ExitSignal)]
+                       (Flush)
+                       (.u8 w \X)
+                       (.u32 w 0)
+                       (.u32 w (.-Code e)))
+                     (case [(* oi/InternalError)]
+                       (.u8 w \F)
+                       (.u32 w 0)
+                       (.str w (+ "o2j: " (.-Msg e))))
+                     (default
+                       (.u8 w \F)
+                       (.u32 w 0)
+                       (.str w (fmt/Sprintf "o2j: the C API: %v" x))))))))
+       (when (or (not (wireLoad)) (== the nil))
+         (.u8 w \N)
+         (return))
+       (if (== op \S)
+         (let [a (.u64 r)
+               (values data sz32 sz64 ok) (.serialize the (addr (lit oi/Custom :V (addr (lit CBlock :Addr a)))))]
+           (when (not ok)
+             (.u8 w \N)
+             (return))
+           (.u8 w \R)
+           (.u32 w 0)
+           (.u32 w (len data))
+           (set! (.-b w) (append (.-b w) (spread data)))
+           (.u64 w sz32)
+           (.u64 w sz64))
+         (let [name (.str r)
+               data (conv (slice byte) (.str r))
+               expected (.u64 r)
+               (values v size used ok) (.deserialize the name data expected)]
+           (when (not ok)
+             (.u8 w \N)
+             (return))
+           (.u8 w \R)
+           (.u32 w 0)
+           (.put s w v)
+           (.u64 w (conv uint64 size))
+           (.u64 w (conv uint64 used))))))
+    (.-b w)))
 
 (go/func FlushStubs "FlushStubs flushes the C's stdio at the program's end (Flush), when the stubs were loaded.\n" []
   (when (and loaded (== loadErr ""))
