@@ -3108,7 +3108,7 @@
                                                         :else (recur (dec j))))))))))
             (range 1 n)))))
 
-(defn parse-decl-specs
+(defn- parse-decl-specs*
   "A decl-specifier-seq: {:b :e :type :storage :typedef :friend :inline :virtual :explicit :constexpr :consteval
   :constinit :mutable :tls :attrs :tag-node}, :b its first token after the leading attribute-specifier-seq (clang's
   range starts there), :tag-node a class or enumeration declared in it."
@@ -3337,6 +3337,102 @@
                           (soft-diag! p save (str "'" (:s lp) "' does not name a type")))
                         (seek! p save) (assoc ds :e (last-ix p)))))
           :else (cond-> (assoc ds :e (last-ix p)) (seq words) (assoc :type (words-type p ds words))))))))
+
+(defn- spec-tokens
+  "cpp-diag-b (2026-11-22): the decl-specifier-seq's keyword tokens at its own level, [index spelling] in order: what a
+  parenthesized operand (decltype, typeof, an attribute's, alignas), a class or enumeration body and a template argument
+  list hold left out."
+  [^P p ^long b ^long e]
+  (loop [i b d 0 out []]
+    (if (> i e)
+      out
+      (let [^T t (tok-at p i) s (.-s t)]
+        (cond
+          (or (t= t "(") (t= t "[") (t= t "{") (t= t "<")) (recur (inc i) (inc d) out)
+          (or (t= t ")") (t= t "]") (t= t "}") (t= t ">")) (recur (inc i) (max 0 (dec d)) out)
+          (t= t ">>") (recur (inc i) (max 0 (- d 2)) out)
+          (and (zero? d) (identical? :kw (.-k t))) (recur (inc i) d (conj out [i s]))
+          :else (recur (inc i) d out))))))
+
+(def ^:private spec-word-norm {"__signed" "signed" "__signed__" "signed" "__complex" "_Complex" "__complex__" "_Complex" "_Bool" "bool"})
+
+(defn- spec-checks!
+  "cpp-diag-b (2026-11-22): the rules of a decl-specifier-seq's combination GCC diagnoses at the specifiers, from the standard's
+  [dcl.spec.general]/2 (one storage class, typedef with none), [dcl.type.simple]/3's table of the simple-type-specifiers' valid
+  combinations, [dcl.stc]/1 (thread_local only with static or extern; register removed in C++17, [diff.cpp14.dcl.dcl]),
+  [dcl.fct.spec]/2 (virtual only in a member function's declaration in its class, [class.friend]/... no virtual friend,
+  [class.static.mfct]/2 no virtual static), [class.friend]/... (friend only in a class), [dcl.stc]/9 (mutable only on a class's
+  non-static data member); GCC's words (the manual's -Wpedantic for register)."
+  [^P p ds ctx]
+  (when (and (:b ds) (:e ds) (contains? #{:top :member :block :param} ctx) (not (skim? p)) (main-tok? p (long (:b ds))))
+    (let [ks (spec-tokens p (long (:b ds)) (long (:e ds)))
+          first-of (fn [pred] (first (filter #(pred (second %)) ks)))
+          words (filter #(builtin-kws (second %)) ks)
+          wn (map (fn [[i s]] [i (get spec-word-norm s s)]) words)
+          wf (frequencies (map second wn))
+          at (fn [w] (first (first (filter #(= w (second %)) wn))))
+          cores (remove #(#{"unsigned" "signed" "long" "short" "_Complex"} (second %)) wn)
+          core (second (first cores))
+          nl (long (get wf "long" 0))
+          sto (first-of #{"static" "extern" "register"})
+          tdf (first-of #{"typedef"})
+          tls (first-of #{"__thread" "thread_local" "_Thread_local"})
+          virt (first-of #{"virtual"})
+          frnd (first-of #{"friend"})
+          mut (first-of #{"mutable"})]
+      ;; storage classes, typedef and the thread storage
+      (cond
+        (and sto tdf) (let [[a b] (sort-by first [sto tdf])] (soft-diag! p (long (first b)) (str "'" (second b) "' specifier conflicts with '" (second a) "'")))
+        (and tls (or tdf (and sto (= "register" (second sto)))))
+        (soft-diag! p (long (if tdf (first tls) (min (long (first tls)) (long (first sto))))) "multiple storage classes in declaration")
+        (and tls (= "__thread" (second tls)) sto (< (long (first tls)) (long (first sto))))
+        (soft-diag! p (long (first tls)) (str "'__thread' before '" (second sto) "'"))
+        :else nil)
+      ;; [diff.cpp14.dcl.dcl]: register is no storage class in C++17 (an explicit register variable's asm label aside, checked
+      ;; at its declarator: :_reg-spec)
+      ;; the simple-type-specifiers
+      (cond
+        (> (count cores) 1) (soft-diag! p (long (first (first cores))) "two or more data types in declaration")
+        (> nl 2) (soft-diag! p (long (at "long")) "'long long long' is too long for GCC")
+        (and (wf "signed") (wf "unsigned")) (soft-diag! p (long (at "signed")) "'signed' and 'unsigned' specified together")
+        (and (pos? nl) (wf "short")) (soft-diag! p (long (at "long")) "'long' and 'short' specified together")
+        (and (wf "_Complex") (#{"bool" "void" "wchar_t" "char8_t" "char16_t" "char32_t"} core))
+        (soft-diag! p (long (at "_Complex")) "complex invalid for this declaration")
+        ;; (a character type of its own or bool: words-type's)
+        (#{"bool" "wchar_t" "char8_t" "char16_t" "char32_t"} core) nil
+        (and (pos? nl) core (not (or (= core "int") (and (= core "double") (= nl 1)))))
+        (soft-diag! p (long (at "long")) (str "'long" (when (= nl 2) " long") "' invalid for this declaration"))
+        (and (wf "short") core (not= core "int")) (soft-diag! p (long (at "short")) "'short' invalid for this declaration")
+        (and (or (wf "signed") (wf "unsigned")) core (not (#{"int" "char" "__int128"} core)))
+        (soft-diag! p (long (or (at "signed") (at "unsigned"))) "'signed' or 'unsigned' invalid for this declaration")
+        :else nil)
+      ;; the function specifier virtual, friend and mutable
+      (when virt
+        (cond
+          frnd (soft-diag! p (long (first virt)) "virtual functions cannot be friends")
+          (and (= ctx :member) sto (= "static" (second sto))) (soft-diag! p (long (first virt)) "member cannot be declared both 'virtual' and 'static'")
+          ;; ([temp.mem]/3: a member function template is not virtual)
+          (and (= ctx :member) (pos? (long (or (:n (stv p THDR)) 0)))) (soft-diag! p (long (first virt)) "templates may not be 'virtual'")
+          (#{:top :block} ctx) (soft-diag! p (long (first virt)) "'virtual' outside class declaration")
+          :else nil))
+      ;; ([dcl.stc]/4: thread_local at block scope with static or extern only as GNU __thread wants them spelled, on a static data
+      ;; member, on no parameter; [dcl.stc]/2: a parameter's storage class register alone)
+      (when (and tls (not tdf) (not (and sto (= "register" (second sto)))))
+        (cond
+          (and (= ctx :block) (not sto) (= "__thread" (second tls))) (soft-diag! p (long (first tls)) "function-scope variable implicitly auto and declared '__thread'")
+          (and (= ctx :member) (not sto) (not frnd)) (soft-diag! p (long (first tls)) "storage class specified for a non-static data member")
+          :else nil))
+      (when (and (= ctx :param) (or tls (and sto (not= "register" (second sto)))))
+        (soft-diag! p (long (first (or tls sto))) "storage class specified for parameter"))
+      (when (and frnd (#{:top :block} ctx) (not virt)) (soft-diag! p (long (first frnd)) "'friend' used outside of class"))
+      (when (and mut (#{:top :block} ctx)) (soft-diag! p (long (first mut)) "non-member cannot be declared 'mutable'")))))
+
+(defn parse-decl-specs
+  "A decl-specifier-seq (parse-decl-specs*), its combination's rules checked (spec-checks!)."
+  [^P p ctx]
+  (let [ds (parse-decl-specs* p ctx)]
+    (spec-checks! p ds ctx)
+    ds))
 
 (defn- ds-type
   "The decl-specifiers' type with their cv-qualifiers."
@@ -3699,6 +3795,9 @@
           (let [;; C++23's explicit object parameter (P0847R7, [dcl.fct]/3): `this` before its declaration
                 xo (accept! p "this")
                 ds (parse-decl-specs p :param)
+                ;; (cpp-diag-b, 2026-11-22: a register parameter in C++17, [diff.cpp14.dcl.dcl]: GCC's pedwarn, as for a variable)
+                _ (when (and (= "register" (:storage ds)) (>= (.-year p) 2017) (not (skim? p)) (main-tok? p (long (:b ds))))
+                    (pedantic-diag! p (long (:b ds)) "ISO C++17 does not allow 'register' storage class specifier"))
                 ;; (queue 376: [dcl.fct]/17 (C++23 [dcl.fct]/16), a class or enumeration defined in a parameter's type: GCC's
                 ;; "types may not be defined in parameter types", at the definition's opening brace)
                 _ (when-let [tn (:tag-node ds)]
@@ -4448,6 +4547,10 @@
               ;; (round 54: [dcl.stc]/2 (C++14), the register specifier applies to variables alone; GCC's error at every standard)
               _ (when (and fs (not (:a fs)) (= "register" (:storage ds)))
                   (soft-diag! p (long (:b ds)) (str "storage class 'register' invalid for function" (when nm (str " '" nm "'")))))
+              ;; (cpp-diag-b, 2026-11-22: [dcl.stc]/4, thread_local applies to variables alone: GCC's "storage class '__thread' invalid
+              ;; for function", at the decl-specifiers)
+              _ (when (and fs (not (:a fs)) (:tls ds) (not (skim? p)) (not (:typedef ds)))
+                  (soft-diag! p (long (:b ds)) (str "storage class 'thread_local' invalid for function" (when nm (str " '" nm "'")))))
               ;; (queue 377: [dcl.fct]/17 (C++23 /16), a function's return type defines no class or enumeration: GCC's "new types may not
               ;; be defined in a return type", at the decl-specifiers; a typedef's function type too, and a pointer to function's
               ;; (`struct W {} (*p) ();`), as GCC: any function suffix in the declarator)
@@ -4734,6 +4837,11 @@
                   al (when (and (or (is? p "asm") (is? p "__asm__") (is? p "__asm")) (is-at? p 1 "(")) (ix p))
                   _ (when (and al field (not (skim? p)))
                       (soft-diag! p al "asm-specifiers are not permitted on non-static data members"))
+                  ;; (cpp-diag-b, 2026-11-22: [diff.cpp14.dcl.dcl], C++17 removed the register storage class; GCC's pedwarn "ISO C++17
+                  ;; does not allow 'register' storage class specifier" (an error under -pedantic-errors), none on an explicit register
+                  ;; variable, which names its register by an asm label)
+                  _ (when (and (= "register" (:storage ds)) (>= (.-year p) 2017) (not al) (not (skim? p)) (main-tok? p (long (:b ds))))
+                      (pedantic-diag! p (long (:b ds)) "ISO C++17 does not allow 'register' storage class specifier"))
                   _ (skip-asm-label! p)
                   as1 (into as1 (attr-nodes p))
                   [x init] (cond
@@ -4765,6 +4873,19 @@
                           (soft-diag! p (dec (long (nb bits))) (str "expected ';' after " (:tagUsed (:tag-node ds)) " definition"))
                           (and nm (or (= :f (:t tt)) (and (= :b (:t tt)) (some #{"float" "double" "void"} (:w tt)))))
                           (soft-diag! p ni (str "bit-field '" nm "' with non-integral type '" (qt ty) "'"))
+                          ;; (cpp-diag-b, 2026-11-22: [class.bit]/1, a bit-field is a non-static data member: GCC's "static member
+                          ;; 'a' cannot be a bit-field", and a friend's "unnamed field is neither function nor member function;
+                          ;; cannot be declared friend")
+                          (= "static" (:storage ds))
+                          (soft-diag! p (if nm ni (dec (long (nb bits)))) (str "static member '" (or nm "<anonymous>") "' cannot be a bit-field"))
+                          (:friend ds)
+                          (soft-diag! p (if nm ni (dec (long (nb bits)))) "unnamed field is neither function nor member function; cannot be declared friend")
+                          ;; ([class.bit]/3: of integral or enumeration type, so no pointer, reference, array, member pointer,
+                          ;; function or class type; a dependent type checked at its instantiation)
+                          (let [e (:ent tt) ce (or (:target e) e)]
+                            (or (#{:f :p :lr :rr :a :mp} (:t tt))
+                                (and (= :n (:t tt)) (:class ce) (not (:tparam ce)) (not (:tmpl ce)))))
+                          (soft-diag! p (if nm ni (dec (long (nb bits)))) (str "bit-field '" (or nm "<anonymous>") "' with non-integral type '" (qt ty) "'"))
                           :else nil)))
                   ;; (round 54, sixth pass: [class.mem.general]/? (C++23 /12), a non-static data member has no incomplete type, and a
                   ;; class is incomplete in its own member-specification: a member of the class's own type (its injected
