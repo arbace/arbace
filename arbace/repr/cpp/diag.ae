@@ -91,7 +91,7 @@
 (def ^:private gcc-only-builtins
   "cpp-gnu (2026-11-22): GCC's builtins clang's table does not hold (the GCC 15.2 manual's \"Constructing Function Calls\":
   __builtin_va_arg_pack, __builtin_va_arg_pack_len), never undeclared."
-  #{"__builtin_va_arg_pack" "__builtin_va_arg_pack_len"})
+  #{"__builtin_va_arg_pack" "__builtin_va_arg_pack_len" "__integer_pack"})
 
 (defn- dunder-ok?
   "Whether the unqualified name `nm` no lookup found may be undeclared: any name not starting with __; a __ name only when
@@ -4165,7 +4165,55 @@
           (.add out {:line l :col c :kind :error :rule :coroutine :msg (str "'std::coroutine_handle<" p ">::from_address' must be a non-overloaded static function")}))))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface]))
+;; GCC's __integer_pack (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Other Built-in Functions": `__integer_pack (length)` is a pack of
+;; the integers 0 to length-1, "only valid within a pack expansion" of a template argument list, libstdc++'s make_integer_sequence's):
+;; one in an alias template's argument list without its `...` ("parameter packs not expanded with '...'"), or named without its call
+;; (no constant), at the alias; one whose length at a specialization the unit names is negative or past GCC's limit 268435452 ("argument
+;; to '__integer_pack' must be between 0 and 268435452"), at the alias; a call of it outside a template's arguments ("use of built-in
+;; parameter pack '__integer_pack' outside of a template"); and an object of such an alias's class type copy-initialized from an
+;; integer, a class with no constructor ("conversion from 'int' to non-scalar type"), at the object (ext/integer-pack1.C).
+
+(defn integer-pack
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        off (fn [n] (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))
+        report! (fn [n msg] (when-let [o (off n)]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :integer-pack :msg msg})))))
+        aliases (for [t (:nodes u) :when (= "TypeAliasTemplateDecl" (:kind t))
+                      :let [a (some #(when (= "TypeAliasDecl" (:kind %)) %) (:inner t))
+                            qt (str (get-in a [:type :qualType]))]
+                      :when (str/includes? qt "__integer_pack")]
+                  [t a qt])
+        classes (into {} (for [t (:nodes u) :when (= "ClassTemplateDecl" (:kind t))] [(:name t) (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner t))]))]
+    (doseq [[t a qt] aliases]
+      (cond (re-find #"__integer_pack\s*(?![\s(])" qt) (report! a "'__integer_pack' used without its argument")
+            (re-find #"__integer_pack\s*\([^()]*\)\s*(?!\s*\.\.\.)" qt) (report! a "parameter packs not expanded with '...'")
+            :else nil))
+    (walk-nodes (fn [v _]
+                  (when (= "VarDecl" (:kind v))
+                    (when-let [[_ nm as] (re-matches #"(\w+)<(.*)>" (str/trim (str (get-in v [:type :qualType]))))]
+                      (when-let [[t a qt] (last (filter (fn [[t]] (and (= nm (:name t)) (< (long (or (off t) 0)) (long (or (off v) 0))))) aliases))]
+                        (let [ps (vec (keep #(when (= "NonTypeTemplateParmDecl" (:kind %)) (:name %)) (:inner t)))
+                              env (into {} (keep (fn [[p x]] (when-let [n (int-eval (str/replace x #"\s+" "") {})] [p n])) (map vector ps (map str/trim (str/split as #",")))))]
+                          (when-let [[_ arg] (re-find #"__integer_pack\s*\(([^()]*)\)" qt)]
+                            (when-let [n (int-eval arg env)]
+                              (when (or (neg? (.signum ^java.math.BigInteger n)) (> (.compareTo ^java.math.BigInteger n (java.math.BigInteger/valueOf 268435452)) 0))
+                                (report! a "argument to '__integer_pack' must be between 0 and 268435452"))))
+                          ;; a class with no constructor copy-initialized from an integer
+                          (when-let [[_ cn] (re-find #"^(\w+)<" qt)]
+                            (when-let [r (get classes cn)]
+                              (when (and (= "c" (:init v)) (= "IntegerLiteral" (:kind (first (:inner v))))
+                                         (not-any? #(= "CXXConstructorDecl" (:kind %)) (:inner r)))
+                                (report! v (str "conversion from 'int' to non-scalar type '" nm "<" as ">' requested"))))))))))
+                (:nodes u) nil)
+    (walk-nodes (fn [c _]
+                  (when (and (= "CallExpr" (:kind c)) (= "__integer_pack" (get-in (first (:inner c)) [:referencedDecl :name])))
+                    (report! c "use of built-in parameter pack '__integer_pack' outside of a template")))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface integer-pack]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
