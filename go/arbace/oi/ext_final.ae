@@ -146,8 +146,34 @@
   (defer ((fn [] (set! (.-infinal th) false))))
   (.Apply th (.-fn d) (.-arg d)))
 
-(go/method fullMajor "fullMajor is a forced collection (Gc.full_major, Gc.major, Gc.compact, Gc.minor) and the finalisers it fires.\n" [^{:tag (* Thread)} th]
+(go/var ^{:tag (slice (func [])) :doc "cFinFired is the finalize calls of the C's custom blocks found unreachable, not yet run (under finMu; queue 516).\n"} cFinFired)
+
+(go/func CFinaliser "CFinaliser gives v, the value of a custom block the C allocated whose operations have a finalize (go/arbace/oicapi), a Go
+finaliser that queues f, the block's finalize, once v is unreachable (queue 516, DECISION 511-3 (a)); the asked collections run the queue
+(cFinRun), as the C runtime's sweep calls a dead custom block's finalize. Counted in finCount, so that the asked collections run Go's
+collector and wait for its finalisers.\n" [^{:tag (* Custom)} v ^{:tag (func [])} f]
+  (.Add finCount 1)
+  (runtime/SetFinalizer v (fn [^{:tag (* Custom)} _]
+    (.Lock finMu)
+    (set! cFinFired (append cFinFired f))
+    (.Unlock finMu)
+    (.Add finCount -1))))
+
+(go/func cFinRun "cFinRun runs the queued finalize calls of the C's custom blocks, in the order their values were found unreachable.\n" []
+  (while true
+    (.Lock finMu)
+    (let [q cFinFired]
+      (set! cFinFired nil)
+      (.Unlock finMu)
+      (when (== (len q) 0)
+        (return))
+      (range [_ f q]
+        (f)))))
+
+(go/method fullMajor "fullMajor is a forced collection (Gc.full_major, Gc.major, Gc.compact, Gc.minor) and the finalisers it fires (the C's
+custom blocks' finalize first, as the collector's sweep calls them, then Gc.finalise's functions).\n" [^{:tag (* Thread)} th]
   (weakCollect)
   (finCollect)
+  (cFinRun)
   (when (!= (.Load finPending) 0)
     (.runFinalisers th)))
