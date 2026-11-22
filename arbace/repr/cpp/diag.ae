@@ -4233,6 +4233,556 @@
 
 (def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface integer-pack]))
 
+;; ---------------------------------------------------------------------------------------------
+;; cpp-diag-b (2026-11-22): the checks of the burst's stream cpp-diag-b, appended to `checks` (each rule from the standard, GCC's
+;; manual for its words; no GCC code read)
+
+(defn- mine-at
+  "A node's main-file offset (its location's, its range's begin, through a macro expansion), or nil outside the main file."
+  [n ^String main]
+  (let [f (or (get-in n [:loc :file]) (get-in n [:loc :expansionLoc :file]) (get-in n [:range :begin :file]))
+        o (or (get-in n [:loc :offset]) (get-in n [:loc :expansionLoc :offset]) (get-in n [:range :begin :offset]))]
+    (when (and o (or (nil? f) (= f main))) (long o))))
+
+;; [basic.scope.block]/2: a declaration binding a name in the block scope of a function body's, a function-try-block's or its
+;; handlers', a lambda's compound-statement, or of a selection or iteration statement's substatement (not itself one) conflicts
+;; with a declaration of the parent scope: the function's parameters, the statement's init-statement, condition or
+;; for-range-declaration, a handler's exception-declaration. GCC's "declaration of 'int x' shadows a parameter", "redeclaration
+;; of 'int x'", at the inner declaration. A class or enumeration name hides rather than conflicts; C++26's `_` is name-independent.
+
+(def ^:private conflicting-kinds #{"VarDecl" "FunctionDecl" "TypedefDecl" "TypeAliasDecl" "DecompositionDecl"})
+
+(defn block-redeclarations
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        year (cxx-year (:std u))
+        names-of (fn [decls] (into {} (for [d decls :let [nm (:name d)] :when (and (string? nm) (seq nm) (or (conflicting-kinds (:kind d)) (#{"ParmVarDecl" "BindingDecl"} (:kind d)))
+                                                                                  (not (and (= nm "_") (>= (long year) 2026))))]
+                                        [nm d])))
+        stmt-decls (fn [s] (case (:kind s)
+                             "DeclStmt" (mapcat #(cond (= "DecompositionDecl" (:kind %)) (filter (fn [b] (= "BindingDecl" (:kind b))) (:inner %))
+                                                       ;; (an anonymous union's members are the block's names, [class.union.anon]/1)
+                                                       (and (= "CXXRecordDecl" (:kind %)) (nil? (:name %)) (= "union" (:tagUsed %)))
+                                                       (filter (fn [f] (= "FieldDecl" (:kind f))) (:inner %))
+                                                       :else [%])
+                                                (:inner s))
+                             nil))
+        block-decls (fn [s] (case (:kind s)
+                              "CompoundStmt" (mapcat stmt-decls (:inner s))
+                              "DeclStmt" (stmt-decls s)
+                              nil))
+        judge (fn [outer s param?]
+                (when (seq outer)
+                  (doseq [d (block-decls s)
+                          :let [nm (:name d) prev (get outer nm)]
+                          :when (and prev (string? nm) (or (conflicting-kinds (:kind d)) (#{"BindingDecl" "FieldDecl"} (:kind d))))
+                          :let [o (mine-at d main)]
+                          :when o]
+                    (let [[l c] (line-col starts o)
+                          ty (get-in d [:type :qualType])
+                          what (str "'" (when ty (str ty " ")) nm "'")]
+                      (.add out {:line l :col c :kind :error :rule :block-redeclaration
+                                 :msg (if param? (str "declaration of " what " shadows a parameter") (str "redeclaration of " what))})))))
+        header (fn [s] (let [in (vec (:inner s))]
+                         (case (:kind s)
+                           ("IfStmt" "SwitchStmt") (concat (when (:hasInit s) (stmt-decls (first in)))
+                                                           (when (:hasVar s) (stmt-decls (nth in (if (:hasInit s) 1 0)))))
+                           "WhileStmt" (when (:hasVar s) (stmt-decls (first in)))
+                           "ForStmt" (concat (stmt-decls (nth in 0 nil)) (stmt-decls (nth in 1 nil)))
+                           "CXXForRangeStmt" (concat (stmt-decls (nth in 0 nil)) (stmt-decls (nth in 6 nil)))
+                           nil)))
+        subs* (fn [s] (let [in (vec (:inner s))]
+                        (case (:kind s)
+                          "IfStmt" (let [k (+ (if (:hasInit s) 1 0) (if (:hasVar s) 1 0) 1)] (subvec in (min k (count in))))
+                          ("SwitchStmt" "WhileStmt" "ForStmt" "CXXForRangeStmt") [(peek in)]
+                          nil)))
+        loop-kinds #{"IfStmt" "SwitchStmt" "WhileStmt" "ForStmt" "CXXForRangeStmt" "DoStmt"}
+        fn-body (fn [f params]
+                  (let [ps (names-of params)
+                        body (last (:inner f))]
+                    (case (:kind body)
+                      "CompoundStmt" (judge ps body true)
+                      "CXXTryStmt" (do (judge ps (first (:inner body)) true)
+                                       (doseq [h (rest (:inner body)) :when (= "CXXCatchStmt" (:kind h))]
+                                         ;; (a handler's exception-declaration too, [except.pre]/? : at the handler)
+                                         (let [v (first (:inner h)) nm (:name v)]
+                                           (when-let [o (and (string? nm) (get ps nm) (or (mine-at v main) (mine-at h main)))]
+                                             (let [[l c] (line-col starts o)]
+                                               (.add out {:line l :col c :kind :error :rule :block-redeclaration
+                                                          :msg (str "declaration of '" (get-in v [:type :qualType]) " " nm "' shadows a parameter")}))))
+                                         (judge ps (second (:inner h)) true)))
+                      nil)))]
+    (walk-nodes (fn [n _]
+                  (let [k (:kind n)]
+                    (cond
+                      (fn-kinds k) (fn-body n (filter #(= "ParmVarDecl" (:kind %)) (:inner n)))
+                      (= k "LambdaExpr")
+                      (let [m (some (fn [r] (when (= "CXXRecordDecl" (:kind r))
+                                              (some (fn [x] (cond (= "CXXMethodDecl" (:kind x)) x
+                                                                  (= "FunctionTemplateDecl" (:kind x)) (some #(when (= "CXXMethodDecl" (:kind %)) %) (:inner x))
+                                                                  :else nil))
+                                                    (:inner r))))
+                                    (:inner n))
+                            body (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                        (when (and m body) (judge (names-of (filter #(= "ParmVarDecl" (:kind %)) (:inner m))) body true)))
+                      (= k "CXXCatchStmt")
+                      (let [[v c] (:inner n)] (when (and (map? v) (string? (:name v))) (judge {(:name v) v} c false)))
+                      (contains? loop-kinds k)
+                      (let [h (names-of (header n))]
+                        (doseq [s (subs* n) :when (and (map? s) (not (loop-kinds (:kind s))))] (judge h s false)))
+                      :else nil)))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj block-redeclarations)
+
+;; [basic.def]/2 with [dcl.array]/5-ish ([basic.types.general]/5: an object's type is complete at its definition): a variable
+;; defined (not extern, not a static data member's declaration in its class) with an array type of unknown bound and no
+;; initializer to deduce the bound from: GCC's "storage size of 'a' isn't known", "array size missing in 'x'", at the name.
+
+(defn unsized-arrays
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n parent]
+                  (when (and (= "VarDecl" (:kind n)) (string? (:name n))
+                             (re-find #"\[\]$" (str (get-in n [:type :qualType])))
+                             (not (:init n)) (empty? (remove #(not (map? %)) (:inner n)))
+                             (not (#{"extern"} (:storageClass n)))
+                             (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "LinkageSpecDecl" "VarTemplateDecl" "ClassTemplatePartialSpecializationDecl"} (:kind parent))))
+                    (when-let [o (mine-at n main)]
+                      (let [[l c] (line-col starts o)]
+                        (.add out {:line l :col c :kind :error :rule :unsized-array :msg (str "storage size of '" (:name n) "' isn't known")})))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj unsized-arrays)
+
+;; [class.union.general]/? : a union has no base classes and is no base class: GCC's "derived union 'U' invalid", at the union, and
+;; "base type 'U' fails to be a struct or class type", at the derived class; a base named by a union's name the file defines once
+;; (no class of that name beside it).
+
+(defn union-bases
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        recs (java.util.ArrayList.)
+        _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (string? (:name n))) (.add recs n))) (:nodes u) nil)
+        by-name (group-by :name recs)
+        union? (fn [nm] (let [rs (get by-name nm)] (and (seq rs) (every? #(= "union" (:tagUsed %)) rs) (some :completeDefinition rs))))
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :union-base :msg msg}))))]
+    (doseq [n recs :when (and (:completeDefinition n) (seq (:bases n)))]
+      (if (= "union" (:tagUsed n))
+        (report! n (str "derived union '" (:name n) "' invalid"))
+        (when-let [b (first (filter #(union? (str/replace (str (get-in % [:type :qualType])) #"^union " "")) (:bases n)))]
+          (report! n (str "base type '" (str/replace (str (get-in b [:type :qualType])) #"^union " "") "' fails to be a struct or class type")))))
+    (vec out)))
+
+(swap! checks conj union-bases)
+
+;; [class.virtual]/8: an overrider's return type is the overridden function's, or both are pointers (or lvalue, or rvalue,
+;; references) to classes, the overridden's class an unambiguous and accessible base of the overrider's (complete), the
+;; overrider's no more cv-qualified: GCC's "invalid covariant return type for 'virtual C* C::foo()'" (class pointers or references
+;; that are not), "conflicting return type specified for ..." (the rest), at the overrider. Judged on the file's own classes by
+;; name (a class defined once, out of a template), a type whose names are no class of the file nor a fundamental type (a typedef,
+;; a dependent type) not judged.
+
+(def ^:private fund-words #{"void" "bool" "char" "signed" "unsigned" "short" "int" "long" "float" "double" "wchar_t" "char8_t" "char16_t" "char32_t" "__int128"})
+
+(defn covariant-returns
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        recs (java.util.HashMap.)
+        dup (java.util.HashSet.)
+        _ (letfn [(w [x in-tmpl]
+                    (cond (map? x) (let [k (:kind x)
+                                         in-tmpl (or in-tmpl (#{"ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl"} k))]
+                                     (when (and (= "CXXRecordDecl" k) (string? (:name x)) (seq (:name x)))
+                                       (if (or (.containsKey recs (:name x)) in-tmpl)
+                                         (when (or in-tmpl (:completeDefinition x) (:completeDefinition (.get recs (:name x)))) (.add dup (:name x)))
+                                         (.put recs (:name x) x)))
+                                     (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v in-tmpl)))
+                          (vector? x) (doseq [y x] (w y in-tmpl))
+                          :else nil))]
+            (w (:nodes u) false))
+        rec (fn [nm] (let [r (.get recs nm)] (when (and r (:completeDefinition r) (not (.contains dup nm))) r)))
+        known-rec (fn [nm] (and (.containsKey recs nm) (not (.contains dup nm))))
+        strip-key (fn [^String s] (str/trim (str/replace (str s) #"^(struct|class|union|enum)\s+" "")))
+        ;; the bases of a class: [name public? virtual?]
+        bases (fn [r] (for [b (:bases r)]
+                        [(strip-key (get-in b [:type :qualType]))
+                         (= "public" (let [a (:writtenAccess b)] (if (or (nil? a) (= a "none")) (if (= "class" (:tagUsed r)) "private" "public") a)))
+                         (boolean (:isVirtual b))]))
+        ;; the paths from class `d` up to `b`: each a vector of publicness, nil when `b` is no base
+        paths (fn paths [d b depth]
+                (when (< (long depth) 16)
+                  (when-let [r (rec d)]
+                    (vec (mapcat (fn [[bn pub _]] (if (= bn b) [[pub]] (map #(conj % pub) (paths bn b (inc (long depth)))))) (bases r))))))
+        virt-bases (fn [d b] (when-let [r (rec d)] (some (fn [[bn _ v]] (and v (= bn b))) (bases r))))
+        split (fn [^String qt] (let [i (.indexOf qt "(")] (when (pos? i) (let [r (str/trim (subs qt 0 i))] (when-not (str/includes? r ")") [r (str/replace (subs qt i) #"\s+" "")])))))
+        ;; a return type: {:cls name :k "*"/"&"/"&&"/nil :cv #{} :fund bool} or nil when not judged
+        rtype (fn [^String r]
+                (let [k (cond (str/ends-with? r "&&") "&&" (str/ends-with? r "&") "&" (str/ends-with? r "*") "*" :else nil)
+                      core (str/trim (if k (subs r 0 (- (count r) (count k))) r))
+                      ws (remove #{""} (str/split core #"\s+"))
+                      cv (set (filter #{"const" "volatile"} ws))
+                      nm (remove #{"const" "volatile" "struct" "class" "union" "enum"} ws)]
+                  (cond (and (seq nm) (every? fund-words nm)) {:fund (str/join " " nm) :k k :cv cv}
+                        (and (= 1 (count nm)) (known-rec (first nm))) {:cls (first nm) :k k :cv cv}
+                        :else nil)))
+        methods (fn [r] (filter #(and (= "CXXMethodDecl" (:kind %)) (string? (:name %)) (not (str/starts-with? (:name %) "operator ")))
+                                (:inner r)))
+        ;; the virtual function of the bases `nm` with the signature `sig` overrides, [the base's method] or nil
+        overridden (fn ov [cls nm sig depth]
+                     (when (< (long depth) 16)
+                       (when-let [r (rec cls)]
+                         (some (fn [[bn]]
+                                 (or (when-let [br (rec bn)]
+                                       (some (fn [m] (when (and (= nm (:name m)) (= sig (second (split (str (get-in m [:type :qualType])))))
+                                                                (or (:virtual m) (ov bn nm sig (inc (long depth)))))
+                                                       m))
+                                             (methods br)))
+                                     (ov bn nm sig (inc (long depth)))))
+                               (bases r)))))]
+    (doseq [[cn r] recs :when (and (rec cn) (seq (:bases r)))
+            m (methods r)
+            :let [[rt sig] (split (str (get-in m [:type :qualType])))]
+            :when sig
+            :let [bm (overridden cn (:name m) sig 0)]
+            :when bm
+            :let [[brt _] (split (str (get-in bm [:type :qualType])))]
+            :when (and brt (not= (str/replace rt #"\s+" "") (str/replace brt #"\s+" "")))
+            :let [a (rtype rt) b (rtype brt) o (mine-at m main)]
+            :when (and a b o)]
+      (let [cls-ptr? (and (:cls a) (:cls b) (:k a) (= (:k a) (:k b)))
+            ok? (and cls-ptr?
+                     (every? (:cv b) (:cv a))
+                     (or (= (:cls a) (:cls b))
+                         (let [ps (paths (:cls a) (:cls b) 0)]
+                           (and (rec (:cls a)) (= 1 (count ps)) (every? true? (first ps))))))
+            ;; (two paths through one virtual base, the base reached once: not judged)
+            unsure? (and cls-ptr? (not ok?) (> (count (paths (:cls a) (:cls b) 0)) 1))]
+        (when-not (or ok? unsure?)
+          (let [[l c] (line-col starts o)]
+            (.add out {:line l :col c :kind :error :rule :covariant
+                       :msg (if cls-ptr?
+                              (str "invalid covariant return type for '" (:name m) "'")
+                              (str "conflicting return type specified for '" (:name m) "'"))})))))
+    (vec out)))
+
+(swap! checks conj covariant-returns)
+
+;; [basic.start.main]/3: main is not declared with a linkage-specification, and nothing named main of a namespace has C language
+;; linkage: GCC's "cannot declare '::main' with a linkage specification", at the declaration (a class's member main aside).
+
+(defn main-linkage
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (letfn [(w [x lang]
+              (cond (map? x)
+                    (let [k (:kind x)]
+                      (when (and lang (= "main" (:name x))
+                                 (or (= "FunctionDecl" k) (and (= "VarDecl" k) (= "C" lang))))
+                        (when-let [o (mine-at x main)]
+                          (let [[l c] (line-col starts o)]
+                            (.add out {:line l :col c :kind :error :rule :main-linkage :msg "cannot declare '::main' with a linkage specification"}))))
+                      (cond (= k "LinkageSpecDecl") (doseq [y (:inner x)] (w y (:language x)))
+                            (= k "NamespaceDecl") (doseq [y (:inner x)] (w y lang))
+                            (nil? k) (doseq [y (if (vector? x) x [])] (w y lang))
+                            :else nil))
+                    (vector? x) (doseq [y x] (w y lang))
+                    :else nil))]
+      (w (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj main-linkage)
+
+;; [class.mem.general]/? (C++23 /21-22): a class T's static data members, member types and templates, enumerators of its unscoped
+;; enumerations, an anonymous union's members are named otherwise than T, and its non-static data members too when it has a
+;; user-declared constructor: GCC's "'int B::B' has the same name as the class in which it is declared", at the member.
+
+(defn same-name-members
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n cls] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)]
+                                (.add out {:line l :col c :kind :error :rule :same-name :msg (str "'" (:name n) "' has the same name as the class '" cls "' in which it is declared")}))))]
+    (walk-nodes (fn [n _]
+                  (when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n) (string? (:name n)) (seq (:name n)))
+                    (let [cls (:name n)
+                          ms (:inner n)
+                          ctor? (some #(and (= "CXXConstructorDecl" (:kind %)) (not (:isImplicit %))) ms)]
+                      (doseq [m ms :when (= cls (:name m))]
+                        (case (:kind m)
+                          "VarDecl" (report! m cls)
+                          "FieldDecl" (when ctor? (report! m cls))
+                          ("TypedefDecl" "TypeAliasDecl" "ClassTemplateDecl" "EnumDecl") (report! m cls)
+                          "CXXRecordDecl" (when-not (:isImplicit m) (report! m cls))
+                          nil))
+                      (doseq [m ms :when (and (= "EnumDecl" (:kind m)) (not (:scopedEnumTag m)))
+                              e (:inner m) :when (and (= "EnumConstantDecl" (:kind e)) (= cls (:name e)))]
+                        (report! e cls)))))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj same-name-members)
+
+;; [basic.start.main]/2-3: the global namespace's main is a function returning int, not a template, not static, inline or constexpr,
+;; and no variable of the global namespace is named main; GCC's -Wmain under -pedantic-errors (its parameters: none, or int and
+;; char**, GNU's third char** too). GCC's "'::main' must return 'int'", "cannot declare '::main' to be a template", "cannot declare
+;; '::main' to be a global variable", "first argument of 'int main(char)' should be 'int'", at the declaration.
+
+(defn main-rules
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        pe (some #{"-pedantic-errors"} (:args u))
+        report! (fn [n msg] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :main :msg msg}))))
+        fn-main (fn [n]
+                  (let [qt (str (get-in n [:type :qualType]))
+                        i (.indexOf qt "(")
+                        ret (when (pos? i) (str/trim (subs qt 0 i)))
+                        ps (filter #(= "ParmVarDecl" (:kind %)) (:inner n))]
+                    (cond
+                      (and ret (not (re-find #"^(auto|decltype)" ret)) (not (re-matches #"(signed )?int|signed" ret)))
+                      (report! (dissoc n :loc) "'::main' must return 'int'")
+                      (= "static" (:storageClass n)) (report! n "cannot declare '::main' to be static")
+                      (:inline n) (report! n "cannot declare '::main' to be inline")
+                      (:constexpr n) (report! n "cannot declare '::main' to be 'constexpr'")
+                      (and pe (seq ps) (not (re-matches #"(const )?int|int const" (str (get-in (first ps) [:type :qualType])))))
+                      (report! n "first argument of 'main' should be 'int'")
+                      (and pe (not (#{0 2 3} (count ps)))) (report! n "'main' takes only zero or two arguments")
+                      :else nil)))]
+    (letfn [(top [xs in-class]
+              (doseq [x xs :when (map? x)]
+                (case (:kind x)
+                  "FunctionDecl" (when (and (= "main" (:name x)) (not in-class)) (fn-main x))
+                  "VarDecl" (when (and (= "main" (:name x)) (not in-class) (not= "extern" (:storageClass x)))
+                              (report! x "cannot declare '::main' to be a global variable"))
+                  "FunctionTemplateDecl" (when (some #(and (= "FunctionDecl" (:kind %)) (= "main" (:name %))) (:inner x))
+                                           (report! x "cannot declare '::main' to be a template"))
+                  "LinkageSpecDecl" (top (:inner x) in-class)
+                  ("CXXRecordDecl" "ClassTemplateDecl") (top (:inner x) true)
+                  ;; (a friend declaration's main is the global namespace's)
+                  "FriendDecl" (doseq [y (:inner x) :when (and (= "FunctionTemplateDecl" (:kind y))
+                                                                (some #(and (= "FunctionDecl" (:kind %)) (= "main" (:name %)) (not (str/includes? (str (:name %)) "::"))) (:inner y)))]
+                                 (report! x "cannot declare '::main' to be a template"))
+                  nil)))]
+      (top (:nodes u) false))
+    (vec (distinct out))))
+
+(swap! checks conj main-rules)
+
+;; GNU's __thread (the GCC 15.2 manual's "Thread-Local Storage": a __thread variable of static storage duration has a constant
+;; initializer, no dynamic initialization or destruction, unlike C++11's thread_local): a namespace-scope or static member __thread
+;; variable initialized by a call of a function the file declares without constexpr, by the address of another thread-local
+;; variable, or default-initialized by a class's user-declared constructor that is not constexpr: GCC's "non-local variable 'j'
+;; declared '__thread' needs dynamic initialization", at the variable.
+
+(defn thread-dynamic-init
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        fns (java.util.HashMap.)
+        tls (java.util.HashSet.)
+        recs (java.util.HashMap.)
+        _ (walk-nodes (fn [n _]
+                        (case (:kind n)
+                          "FunctionDecl" (when (string? (:name n)) (.put fns (:name n) (boolean (or (:constexpr n) (:consteval n) (.get fns (:name n))))))
+                          "VarDecl" (when (:tls n) (.add tls (:name n)))
+                          "CXXRecordDecl" (when (and (:completeDefinition n) (string? (:name n))) (.put recs (:name n) n))
+                          nil))
+                      (:nodes u) nil)
+        dynamic? (fn [x]
+                   (let [hit (atom false)]
+                     (walk-nodes (fn [m _]
+                                   (case (:kind m)
+                                     "CallExpr" (let [c (first (:inner m))
+                                                      nm (when (= "DeclRefExpr" (:kind c)) (get-in c [:referencedDecl :name]))]
+                                                  (when (and nm (false? (.get fns nm))) (reset! hit true)))
+                                     "UnaryOperator" (when (= "&" (:opcode m))
+                                                       (let [c (first (:inner m))]
+                                                         (when (and (= "DeclRefExpr" (:kind c)) (.contains tls (get-in c [:referencedDecl :name])))
+                                                           (reset! hit true))))
+                                     nil))
+                                 x nil)
+                     @hit))
+        ctor-dynamic? (fn [qt] (when-let [r (.get recs (str/trim (str/replace (str qt) #"^(const |volatile )*(struct |class )?" "")))]
+                                 (some #(and (= "CXXConstructorDecl" (:kind %)) (not (:constexpr %)) (not (:isImplicit %))
+                                             (not (:explicitlyDefaulted %)) (re-find #"^void \(\s*\)" (str (get-in % [:type :qualType]))))
+                                       (:inner r))))]
+    (letfn [(top [xs]
+              (doseq [x xs :when (map? x)]
+                (case (:kind x)
+                  "VarDecl" (when (and (= "static" (:tls x)) (not= "extern" (:storageClass x))
+                                       (or (and (:init x) (dynamic? (:inner x)))
+                                           (and (not (:init x)) (ctor-dynamic? (get-in x [:type :qualType])))
+                                           ;; (a class with a user-provided destructor: its dynamic destruction)
+                                           (when-let [r (.get recs (str/trim (str/replace (str (get-in x [:type :qualType])) #"^(const |volatile )*(struct |class )?" "")))]
+                                             (some #(and (= "CXXDestructorDecl" (:kind %)) (not (:isImplicit %)) (not (:explicitlyDefaulted %))) (:inner r)))))
+                              (when-let [o (mine-at x main)]
+                                (let [[l c] (line-col starts o)]
+                                  (.add out {:line l :col c :kind :error :rule :tls-init
+                                             :msg (str "non-local variable '" (:name x) "' declared '__thread' needs dynamic initialization")}))))
+                  ("NamespaceDecl" "LinkageSpecDecl") (top (:inner x))
+                  nil)))]
+      (top (:nodes u)))
+    (vec out)))
+
+(swap! checks conj thread-dynamic-init)
+
+;; [stmt.break]/1, [stmt.cont]/1: a break statement appears only in an iteration or switch statement, a continue statement only in an
+;; iteration statement, of its own function (a lambda's body a function of its own): GCC's "break statement not within loop or
+;; switch", "continue statement not within a loop", at the statement.
+
+(defn stray-jumps
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        loops #{"ForStmt" "WhileStmt" "DoStmt" "CXXForRangeStmt"}
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :jump :msg msg}))))]
+    (letfn [(w [x in-loop in-switch in-fn]
+              (cond (map? x)
+                    (let [k (:kind x)]
+                      (cond
+                        (= k "BreakStmt") (when (and in-fn (not in-loop) (not in-switch)) (report! x "break statement not within loop or switch"))
+                        (= k "ContinueStmt") (when (and in-fn (not in-loop)) (report! x "continue statement not within a loop"))
+                        :else
+                        (let [[l s f] (cond (contains? fn-kinds k) [false false true]
+                                            (= k "LambdaExpr") [false false true]
+                                            (#{"CXXRecordDecl" "ClassTemplateDecl"} k) [false false false]
+                                            (contains? loops k) [true in-switch in-fn]
+                                            (= k "SwitchStmt") [in-loop true in-fn]
+                                            :else [in-loop in-switch in-fn])]
+                          (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v l s f)))))
+                    (vector? x) (doseq [y x] (w y in-loop in-switch in-fn))
+                    :else nil))]
+      (w (:nodes u) false false false))
+    (vec out)))
+
+(swap! checks conj stray-jumps)
+
+;; [dcl.init.general]/8 (C++23 /8): a const object default-initialized (no initializer, not extern, not a static data member's
+;; declaration in its class) is of a const-default-constructible class type: a user-provided default constructor, or every direct
+;; non-static data member with a default member initializer or of such a class type, every base such a class. A scalar const
+;; object has an initializer. GCC's "uninitialized 'const b'", at the variable. Classes judged by name (defined once, outside a
+;; template); a type the file does not define, a template's, not judged.
+
+(defn uninit-consts
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        recs (java.util.HashMap.)
+        dup (java.util.HashSet.)
+        _ (letfn [(w [x tm]
+                    (cond (map? x) (let [k (:kind x) tm (or tm (#{"ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl" "ClassTemplateSpecializationDecl"} k))]
+                                     (when (and (= "CXXRecordDecl" k) (string? (:name x)) (seq (:name x)) (:completeDefinition x))
+                                       (if (or tm (.containsKey recs (:name x))) (.add dup (:name x)) (.put recs (:name x) x)))
+                                     (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v tm)))
+                          (vector? x) (doseq [y x] (w y tm))
+                          :else nil))]
+            (w (:nodes u) false))
+        strip (fn [^String t] (-> t (str/replace #"\[[^\]]*\]" "") (str/replace #"\b(const|volatile|struct|class)\b" "") str/trim))
+        ;; :yes, :no or nil (not judged)
+        cdc (fn cdc [nm depth]
+              (cond (> (long depth) 8) nil
+                    (.contains dup nm) nil
+                    :else
+                    (when-let [r (.get recs nm)]
+                      (let [ms (:inner r)
+                            ctors (filter #(= "CXXConstructorDecl" (:kind %)) ms)
+                            dflt (some #(and (not (:isImplicit %)) (not (:explicitlyDefaulted %)) (not (:explicitlyDeleted %))
+                                             (re-find #"^void \(\s*\)" (str (get-in % [:type :qualType]))))
+                                       ctors)]
+                        (cond
+                          dflt :yes
+                          (= "union" (:tagUsed r)) nil
+                          (some #(or (#{"CXXRecordDecl"} (:kind %)) (= "IndirectFieldDecl" (:kind %))) (filter #(and (= "CXXRecordDecl" (:kind %)) (nil? (:name %))) ms)) nil
+                          :else
+                          (let [fields (filter #(= "FieldDecl" (:kind %)) ms)
+                                fs (for [f fields]
+                                     (cond (:hasInClassInitializer f) :yes
+                                           (nil? (:name f)) nil
+                                           :else (let [t (str (get-in f [:type :qualType]))
+                                                       b (strip t)]
+                                                   (cond (re-find #"[*&(]" t) :no
+                                                         (re-matches #"(unsigned |signed )?(char|short|int|long|long long|bool|float|double|wchar_t)( int)?" b) :no
+                                                         (.containsKey recs b) (cdc b (inc (long depth)))
+                                                         :else nil))))
+                                bs (for [b (:bases r)] (cdc (strip (str (get-in b [:type :qualType]))) (inc (long depth))))
+                                all (concat fs bs)]
+                            (cond (some #(= :no %) all) (if (some nil? all) nil :no)
+                                  (every? #(= :yes %) all) :yes
+                                  :else nil)))))))]
+    (walk-nodes (fn [n parent]
+                  (when (and (= "VarDecl" (:kind n)) (string? (:name n)) (not (:init n))
+                             (not (#{"extern"} (:storageClass n)))
+                             (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl" "LinkageSpecDecl" "VarTemplateDecl"} (:kind parent)))
+                             (empty? (filter map? (:inner n))))
+                    (let [t (str (get-in n [:type :qualType]))
+                          b (strip t)]
+                      ;; (a static data member's definition out of its class, `const int A::size;`, its initializer in the class)
+                      (when (and (re-find #"(^|\s)const(\s|$)" t) (not (re-find #"[*&(]" t))
+                                 (not (some-> (mine-at n main) (#(qualified-name? src (long %))))))
+                        (when (or (re-matches #"(unsigned |signed )?(char|short|int|long|long long|bool|float|double|wchar_t)( int)?" b)
+                                  (= :no (cdc b 0)))
+                          (when-let [o (mine-at n main)]
+                            (let [[l c] (line-col starts o)]
+                              (.add out {:line l :col c :kind :error :rule :uninit-const :msg (str "uninitialized 'const " (:name n) "'")}))))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj uninit-consts)
+
+;; In a class's member-specification: [namespace.udecl]/10, a member using-declarator is not repeated ("redeclaration of 'using
+;; Base::f'"); [over.load]/2, member functions of one name and parameter-type-list differ in more than their return type ("cannot
+;; be overloaded"); [basic.scope.scope]/4 with [dcl.typedef]/? , a typedef-name and a class name of the class conflict unless the
+;; typedef names that class ("conflicts with a previous declaration"); each at the later member.
+
+(defn class-member-conflicts
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :member-conflict :msg msg}))))
+        split (fn [^String qt] (let [i (.indexOf qt "(")] (when (pos? i) [(str/replace (subs qt 0 i) #"\s+" "") (str/replace (subs qt i) #"\s+" "")])))]
+    (walk-nodes (fn [n _]
+                  (when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n))
+                    (let [ms (:inner n)
+                          seen-u (java.util.HashSet.)
+                          seen-f (java.util.HashMap.)
+                          tags (set (keep #(when (and (= "CXXRecordDecl" (:kind %)) (not (:isImplicit %)) (string? (:name %))) (:name %)) ms))]
+                      (doseq [m ms]
+                        (case (:kind m)
+                          "UsingDecl" (when-let [t (some-> (:_text m) (str/replace #"\s+" ""))]
+                                        (when-not (.add seen-u t) (report! m (str "redeclaration of '" (:_text m) "'"))))
+                          "CXXMethodDecl" (when-let [[r sg] (and (string? (:name m)) (split (str (get-in m [:type :qualType]))))]
+                                            (let [k [(:name m) sg]]
+                                              (if-let [r0 (.get seen-f k)]
+                                                (when (and (not= r0 r) (not (re-find #"auto|decltype" (str r0 r))))
+                                                  (report! m (str "'" (:name m) "' cannot be overloaded with a function differing only in its return type")))
+                                                (.put seen-f k r))))
+                          ("TypedefDecl" "TypeAliasDecl")
+                          (when (and (contains? tags (:name m))
+                                     (not (#{(:name m) (str "struct " (:name m)) (str "class " (:name m)) (str "union " (:name m))}
+                                           (str/trim (str (get-in m [:type :qualType]))))))
+                            (report! m (str "'" (:name m) "' conflicts with a previous declaration")))
+                          nil)))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj class-member-conflicts)
+
+;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
+(alter-var-root #'sema-rules into
+  [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
+   [:ordered-cmp #"^codegen: ordered comparison of pointer with integer zero" "ordered comparison of pointer with integer zero"]
+   [:array-init #"^codegen: array must be initialized" "array must be initialized with a brace-enclosed initializer"]
+   [:scalar-braces #"^codegen: braces around scalar initializer" "braces around scalar initializer"]
+   [:uninit-ref #"^codegen: uninitialized reference member" "uninitialized reference member"]
+   [:write-strings #"^codegen: ISO C\+\+ forbids converting a string constant" "ISO C++ forbids converting a string constant"]
+   [:return-value #"^codegen: return-statement with" "return-statement with or without a value"]
+   [:void-value #"^codegen: void value not ignored" "void value not ignored as it ought to be"]
+   [:unary-type #"^codegen: wrong type argument to unary" "wrong type argument to unary operator"]
+   [:string-long #"^codegen: initializer-string for" "initializer-string is too long"]
+   [:named-cast #"^codegen: invalid ('const_cast' from|cast from) type" "invalid cast"]
+   [:fn-arith #"^codegen: pointer to a function used in arithmetic" "pointer to a function used in arithmetic"]
+   [:delete-arg #"^codegen: (type of the argument given to 'delete'|cannot delete a function)" "invalid argument to delete"]
+   [:init #"^codegen: a reference from arguments" "invalid value-initialization of reference type"]])
+
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
 ;; -pedantic-errors (GCC's pedwarn) one after which no statement is executed in its switch, DR 2406: the last statement of

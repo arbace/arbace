@@ -17465,3 +17465,25 @@ Asked by the main session from the Mac's 528 report (reports/528-design-list.md 
 - ocamldebug's tests (528-9, 7 eval + 7 AOT): n/a. Alternatives not taken: build it (2-3 weeks); by design.
 - fork (528-11, 7 + 7): n/a, as Python's fork; the opam tests that need packages outside the corpus's set (Base, ppx_expect, alcotest+bos,
   b0; 528-15, 5 + 5): the packages vendored (pinned, fetched, built), as Haskell's. Alternatives not taken: both n/a; both by design.
+## 2026-11-22: cpp-diag-b, the own front end's diagnostics for C++'s parse, lookup, diagnostic, init and smaller dg directories (branch `cpp-diag-b-1122` from mac/next `171f82078`)
+
+The burst's stream beside queue 518 and cpp-diag-a: the 602 gxx-dg files of parse, lookup, diagnostic, init, expr, conversion, inherit,
+overload, warn, DRs, tc1, eh, cpp, tls and ubsan that failed their own dg-error lines on Arbace's own front end, grouped by expected message
+and given rules restated from the C++ standard (GCC 15.2's manual for its extensions and words; no GCC code read): the decl-specifiers'
+combinations, constructors' and destructors' declarators, operator and allocation functions, members out of class and in namespaces,
+friends, bit-fields, default arguments, block redeclarations of parameters, covariant returns, main's rules, __thread's initialization,
+const objects' initialization, break and continue, class member conflicts, and the checker's initializers, references, qualification
+conversions, returns, casts and operators (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-b", lists every rule and every shared function
+touched). Proofs: the directories' 1,111 files run whole with `--record` on the merged tree (own passes of the directories 512 -> 690 of 1,114, none lost, the control
+failing as it must), the other directories' 1,333 own passes run without a record (four regressions found, fixed and rerun), next's 11
+changed rows run on the merged tree, the slow missing-header-pr110164.C with a 2,400 s cap. An interrupted run's own step had recorded "no
+read row" for the stream's rows; the next whole run recorded them again and the three slow files' rows came back from the base.
+
+**Scores**: C++ read 5,786 / 0 / 532 -> 5,799 / 0 / 520 (212 n/a); own passes 1,846 -> 2,029; completeness 0.972210 -> 0.972688 (floored
+97); independence 0.957770 -> 0.960667 (floored 95 -> 96; read stage 0.799193 -> 0.813677). The matrix's C++ read cell written by hand
+to reap's judgment: reap does not write the matrix while next's merge of 523-ocaml-capi leaves 3 problems in OCaml's rows (c-api/alloc_async,
+statmemprof/bigarray, regression/pr11865/mkroot in no class of the native divergences), outside this stream.
+
+Alternatives not taken: rules per test's message (each rule is the standard's and judged on every file it reaches and on valid programs);
+the namespace-scope declaration loop of sema.ae, where function templates refuse whole units (queue 518's ground); a whole dg-error run
+(the stream's directories and the other directories' passes were run instead).
