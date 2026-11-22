@@ -30,7 +30,9 @@
   -main record-native-check REPORT OUT CORPORA
                              test/repr/go/native-check-results.edn written from bin/repr-go
                              native-check's report (.tmp/repr-go/native-check.report.edn), which
-                             must have every corpus of CORPORA (bin/repr-go's native_corpora)"
+                             must have every corpus of CORPORA (bin/repr-go's native_corpora); REPORT
+                             may be several, separated by commas, each a run of some corpora (none
+                             partial, no corpus twice)"
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
   (:import (java.io File PushbackReader)))
@@ -166,11 +168,19 @@
   (let [r (read-edn (:file src))
         cs (:corpora r)]
     {:pass (reduce + (map :equal cs))
+     ;; the user, 2026-11-22: an entry carries :agree, the readers' agreement the record holds (a raw-only row's :same: the
+     ;; native conversion fails with the helper's message, the trees equal; a corpus's :rejected-agree files: gc's errors from
+     ;; the native reader equal to gc's own), which a class marked :agreement counts as a pass (agreement)
      :entries (vec (concat
-                    (for [c cs [k why] (:raw-only c)] (entry (str (:corpus c) " " k) :raw-only (str (:corpus c) ": " why)))
+                    (for [c cs [k why same] (:raw-only c)]
+                      (cond-> (entry (str (:corpus c) " " k) :raw-only (str (:corpus c) ": " why))
+                        (= :same same) (assoc :agree "the native reader's conversion fails with the helper's message, their trees equal")))
                     (for [c cs [k why] (:extra c)] (entry (str (:corpus c) " " k) :extra (str (:corpus c) ": the helper's failure: " why)))
-                    (for [c cs :when (pos? (:rejected c))]
-                      (entry (:corpus c) :rejected (str (:corpus c) ": " (:rejected c) " files go/parser rejects") (:rejected c)))
+                    (for [c cs :let [a (or (:rejected-agree c) 0) n (- (:rejected c) a)] :when (pos? a)]
+                      (assoc (entry (str (:corpus c) " (gc's errors equal)") :rejected (str (:corpus c) ": " a " files go/parser rejects") a)
+                             :agree "go/parser rejects them on both sides, gc's errors from the native reader equal to gc's own"))
+                    (for [c cs :let [a (or (:rejected-agree c) 0) n (- (:rejected c) a)] :when (pos? n)]
+                      (entry (:corpus c) :rejected (str (:corpus c) ": " n " files go/parser rejects") n))
                     ;; what is neither equal nor raw-only, a dump that differs, and the report's
                     ;; unknown ones: no class takes them (report 021's finding 6: they vanished as a
                     ;; smaller :equal)
@@ -816,6 +826,32 @@
   (when-let [f (get-in src [:own-file :file])]
     (when (exists? f) (with-open [r (io/reader (path f))] (or (.readLine ^java.io.BufferedReader r) "")))))
 
+;; The user's decision of 2026-11-22 (doc/JOURNAL.md, "the user's decisions on the burst's by-design and counting questions"):
+;; Go's read cell counts a case where Arbace's own reader agrees with the reference reader as a pass, keyed on the verdict
+;; the record holds (the reader's :agree), never on a copied list
+
+(defn agreement-pick
+  "Of the classed entries ES, those whose record holds the readers' agreement (:agree, the reader's reason: Go's
+  native-check, the same trees and conversion failure, or both rejecting a file with gc's errors equal) in a class marked
+  :agreement (the user, 2026-11-22): they count as passes."
+  [es]
+  (vec (filter #(and (:agree %) (:agreement (:class %))) es)))
+
+(defn agreement
+  "The entries agreement-pick takes out of ES counted in R's :pass (their :n), the detail naming them by class and reason;
+  [R ES]."
+  [r es]
+  (let [picked (agreement-pick es)]
+    (if (empty? picked)
+      [r es]
+      (let [p (set picked)
+            n (reduce + (map :n picked))]
+        [(cond-> (update r :detail #(str % (when % "; ") n " pass where the readers agree (the user, 2026-11-22): "
+                                         (str/join ", " (for [[[c why] g] (sort-by (comp str first) (group-by (juxt (comp :id :class) :agree) picked))]
+                                                          (str (reduce + (map :n g)) " of the class " (name c) ", " why)))))
+           (:pass r) (update :pass + n))
+         (vec (remove p es))]))))
+
 (defn- judge-source
   "A source read and judged: its entries with their classes. Every file it names must be there,
   but the :file of a source with :until (a check not recorded yet: then its cell prints \"no check
@@ -839,7 +875,9 @@
             es (for [e (:entries r)] (let [c (classify-entry classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
             ;; :per-file (the token check's three sections, queue 122 finding 4): a file the known file lists at several levels
             ;; is one non-pass, of its deferred class when any is (the worst kind), else of its first; an entry in no class stays
-            es (if (:per-file src) (per-file es) es)]
+            es (if (:per-file src) (per-file es) es)
+            ;; the user, 2026-11-22: an entry of a class marked :agreement whose record holds the readers' agreement passes
+            [r es] (agreement r es)]
         (merge src r
                {:present true :classes-file cf :entries (vec es)
                 :problems (vec (concat
@@ -1067,30 +1105,41 @@
 (defn- record-native-check
   "The summary of bin/repr-go native-check's report, the read level's reference, written only when
   the report has every corpus of CORPORA (bin/repr-go's native_corpora, space-separated; report
-  021's finding 3: a report of native-check --corpus X made a record of one corpus)."
+  021's finding 3: a report of native-check --corpus X made a record of one corpus). Several reports
+  (REPORT a list separated by commas: native-check's runs of some corpora each, as the gate's parts
+  run it, REPR_GO_NATIVE_REPORT) are read as one: none partial, no corpus in two of them, every corpus
+  of CORPORA in one."
   [report out corpora]
-  (let [r (with-open [rd (PushbackReader. (io/reader report))] (read rd))
+  (let [files (remove str/blank? (str/split (str report) #","))
+        rs (for [f files] (with-open [rd (PushbackReader. (io/reader ^String f))] (read rd)))
+        dup (for [[c n] (frequencies (mapcat #(map :corpus (:corpora %)) rs)) :when (> n 1)] c)
+        r {:corpora (vec (mapcat :corpora rs)) :partial (some :partial rs)}
         want (remove str/blank? (str/split (str/trim (or corpora "")) #"\s+"))
         miss (remove (set (map :corpus (:corpora r))) want)
-        at (str (java.time.Instant/ofEpochMilli (.lastModified (File. ^String report))))
+        times (sort (for [f files] (java.time.Instant/ofEpochMilli (.lastModified (File. ^String f)))))
+        at (if (= 1 (count times)) (str (first times)) (str (first times) " to " (last times) " (" (count times) " reports)"))
         lines (concat
                [";; bin/repr-go native-check's numbers (doc/FULL-SUPPORT-SURVEY.md, REAP1): per corpus its dumps, those"
                 ";; equal at every level (E-tree, the raw forms resolved, E-ann, E-forms), the raw-only ones (the"
-                ";; final conversion's failure), those dumped natively and not by the helper (its failure), the"
-                ";; files go/parser rejects; written from the check's report by bin/reap record-native-check,"
-                ";; after a run of bin/repr-go native-check (--fresh) over every corpus. Read with the Clojure reader."
-                (str "{:recorded " (pr-str (str "native-check's report of " at)))
+                ";; final conversion's failure; :same when the native conversion fails with the helper's message),"
+                ";; those dumped natively and not by the helper (its failure), the files go/parser rejects (with"
+                ";; :rejected-agree, those whose gc errors from the native reader equal gc's own: the user, 2026-11-22);"
+                ";; written from the check's report by bin/reap record-native-check, after a run of bin/repr-go"
+                ";; native-check (--fresh) over every corpus. Read with the Clojure reader."
+                (str "{:recorded " (pr-str (str "native-check's report" (when (next files) "s") " of " at)))
                 " :corpora"
                 " ["]
                (for [c (:corpora r)]
                  (str "  {:corpus " (pr-str (:corpus c)) " :dumps " (:dumps c) " :equal " (:forms-equal c)
-                      " :rejected " (:rejected c) " :unknown " (:unknown c)
-                      "\n   :raw-only [" (str/join "\n              " (map #(pr-str [(str (first %)) (str (second %))]) (:raw-only c))) "]"
+                      " :rejected " (:rejected c) " :rejected-agree " (or (:rejected-agree c) 0) " :unknown " (:unknown c)
+                      "\n   :raw-only [" (str/join "\n              " (map #(pr-str (cond-> [(str (first %)) (str (second %))] (= :same (nth % 2 nil)) (conj :same)))
+                                                                         (:raw-only c))) "]"
                       "\n   :extra [" (str/join "\n           " (map #(pr-str [(str (first %)) (str/join " | " (take 2 (str/split (str (second %)) #" \| ")))]) (:extra c))) "]}"))
                ["  ]}"])]
-    (if (or (empty? want) (seq miss) (:partial r))
+    (if (or (empty? want) (seq miss) (:partial r) (seq dup))
       (do (println (str "reap: " report (cond (empty? want) " not judged: no list of corpora"
                                                 (:partial r) " is a partial check's (native-check --only, GT8)"
+                                                (seq dup) (str " has the corpora " (str/join " " dup) " in two reports")
                                                 :else (str " lacks the corpora " (str/join " " miss)))
                         " (a run of bin/repr-go native-check over every corpus); " out " not written"))
           false)
@@ -1099,7 +1148,7 @@
           true))))
 
 (defn self-test
-  "HF10-P31 (a)'s guard: the own record is read only when whole."
+  "HF10-P31 (a)'s guard: the own record is read only when whole; the agreement rule (the user, 2026-11-22)."
   []
   (let [src {:name "pack" :file "p.edn" :own-file {:file "o.edn" :name "own" :classes ["a.edn" "b.edn"]}}
         st (fn [fl] (hsi-own-state fl))
@@ -1108,9 +1157,17 @@
              (when-not (= (hsi-pick src :interim) (assoc src :own-state :interim)) ["interim must keep the pack's record"])
              (when-not (= (hsi-pick src :absent) (assoc src :own-state :absent)) ["absent must keep the pack's record"])
              (when-not (= [:own "o.edn" "own" ["a.edn" "b.edn"]] ((juxt :own-state :file :name :classes) (hsi-pick src :whole))) ["whole must read the own record"])
-             (when-not (= {:name "x" :file "f"} (hsi-pick {:name "x" :file "f"} :whole)) ["a source without :own-file is unchanged"]))]
+             (when-not (= {:name "x" :file "f"} (hsi-pick {:name "x" :file "f"} :whole)) ["a source without :own-file is unchanged"])
+             ;; the user, 2026-11-22: the readers' agreement passes only in a class marked :agreement, only where the record holds it
+             (let [ca {:id :ca :kind :design :agreement "agree"} cb {:id :cb :kind :design}
+                   es [{:id "a" :n 2 :agree "same" :class ca} {:id "b" :n 1 :class ca} {:id "c" :n 3 :agree "same" :class cb}]
+                   [r left] (agreement {:pass 10} es)]
+               (concat
+                (when-not (= 12 (:pass r)) ["agreement: the agreeing entry of a marked class must count as passes"])
+                (when-not (= ["b" "c"] (mapv :id left)) ["agreement: an entry without :agree, or of an unmarked class, must stay"])
+                (when-not (= [{:pass 10} (vec (rest es))] (agreement {:pass 10} (vec (rest es)))) ["agreement: nothing to pick leaves the source as it is"]))))]
     (doseq [b bad] (println "reap self-test: FAIL" b))
-    (when (empty? bad) (println "reap self-test: ok (5 cases)"))
+    (when (empty? bad) (println "reap self-test: ok (8 cases)"))
     (empty? bad)))
 
 (defn -main [& args]
