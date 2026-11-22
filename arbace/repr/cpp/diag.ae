@@ -4724,6 +4724,43 @@
 
 (swap! checks conj uninit-consts)
 
+;; In a class's member-specification: [namespace.udecl]/10, a member using-declarator is not repeated ("redeclaration of 'using
+;; Base::f'"); [over.load]/2, member functions of one name and parameter-type-list differ in more than their return type ("cannot
+;; be overloaded"); [basic.scope.scope]/4 with [dcl.typedef]/? , a typedef-name and a class name of the class conflict unless the
+;; typedef names that class ("conflicts with a previous declaration"); each at the later member.
+
+(defn class-member-conflicts
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :member-conflict :msg msg}))))
+        split (fn [^String qt] (let [i (.indexOf qt "(")] (when (pos? i) [(str/replace (subs qt 0 i) #"\s+" "") (str/replace (subs qt i) #"\s+" "")])))]
+    (walk-nodes (fn [n _]
+                  (when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n))
+                    (let [ms (:inner n)
+                          seen-u (java.util.HashSet.)
+                          seen-f (java.util.HashMap.)
+                          tags (set (keep #(when (and (= "CXXRecordDecl" (:kind %)) (not (:isImplicit %)) (string? (:name %))) (:name %)) ms))]
+                      (doseq [m ms]
+                        (case (:kind m)
+                          "UsingDecl" (when-let [t (some-> (:_text m) (str/replace #"\s+" ""))]
+                                        (when-not (.add seen-u t) (report! m (str "redeclaration of '" (:_text m) "'"))))
+                          "CXXMethodDecl" (when-let [[r sg] (and (string? (:name m)) (split (str (get-in m [:type :qualType]))))]
+                                            (let [k [(:name m) sg]]
+                                              (if-let [r0 (.get seen-f k)]
+                                                (when (and (not= r0 r) (not (re-find #"auto|decltype" (str r0 r))))
+                                                  (report! m (str "'" (:name m) "' cannot be overloaded with a function differing only in its return type")))
+                                                (.put seen-f k r))))
+                          ("TypedefDecl" "TypeAliasDecl")
+                          (when (and (contains? tags (:name m))
+                                     (not (#{(:name m) (str "struct " (:name m)) (str "class " (:name m)) (str "union " (:name m))}
+                                           (str/trim (str (get-in m [:type :qualType]))))))
+                            (report! m (str "'" (:name m) "' conflicts with a previous declaration")))
+                          nil)))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj class-member-conflicts)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
@@ -4736,7 +4773,8 @@
    [:void-value #"^codegen: void value not ignored" "void value not ignored as it ought to be"]
    [:unary-type #"^codegen: wrong type argument to unary" "wrong type argument to unary operator"]
    [:string-long #"^codegen: initializer-string for" "initializer-string is too long"]
-   [:named-cast #"^codegen: invalid ('const_cast' from|cast from) type" "invalid cast"]])
+   [:named-cast #"^codegen: invalid ('const_cast' from|cast from) type" "invalid cast"]
+   [:fn-arith #"^codegen: pointer to a function used in arithmetic" "pointer to a function used in arithmetic"]])
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
