@@ -618,7 +618,8 @@
     :re-early (nth r 2)
     :re-bound (cond ;; C4 (2026-11-22): a fn pointer type's own anonymous variable (collect's :fn-binder, queue 493: [:re-bound nil
                     ;; :inner N]), bound by the fn pointer's binder: `'^^#N` in a struct field (ArgumentType's formatter, OsFunctions)
-                    (and (nil? (second r)) (= :inner (nth r 2 nil)) (number? (nth r 3 nil)))
+                    ;; (in a signature, sig-sty's *late-sig*, the helper writes such a region `'_`: alloc's convert_while_ascii)
+                    (and (nil? (second r)) (= :inner (nth r 2 nil)) (number? (nth r 3 nil)) (nil? *late-sig*))
                     (str "'" (apply str (repeat (long (or *inner-depth* 2)) "^")) "#" (nth r 3))
                     (and *inner-depth* (nil? (second r)) (number? (nth r 2 nil)))
                     (str "'" (apply str (repeat *inner-depth* "^")) "#" (dec (long (nth r 2))))
@@ -725,7 +726,11 @@
                                   (vec (for [[ad args term] projections] (list 'proj (d ad) (mapv s args) (s term))))])]
                      (list 'dyn (first inner) (second inner)
                            (vec (sort-by (fn [p] [(get {"core::marker::Sync" 0 "core::marker::Send" 1} p 2) p]) (map d autos)))
-                           (if (and (= :re-bound (first r)) (= :anon (nth r 2 nil))) "'_" (region-name r))))
+                           ;; C4 (2026-11-22): a named late-bound region by its name (the helper prints the object's region by
+                           ;; Display: create_formatter's `&'a mut (dyn Write + 'a)`, (dyn .. "'a") in a `'^'a` reference)
+                           (cond (and (= :re-bound (first r)) (= :anon (nth r 2 nil))) "'_"
+                                 (and (= :re-bound (first r)) (string? (second r)) (not= "'_" (second r)) (not= :for (nth r 2 nil))) (second r)
+                                 :else (region-name r))))
               ;; queue 417: std's return-position impl Trait (io/stdio.rs' `fn as_mut_buf(&mut self) -> &mut BufReader<impl
               ;; Read>`) as the helper writes it: (opaque "FN::{opaque#N}" ARGS), ARGS the function's generics at their
               ;; identity, then the lifetimes the opaque type captures (edition 2024: every one in scope), the early ones
@@ -904,7 +909,9 @@
                                        (cond-> {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
                                         :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                        :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d))))
+                                        :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d)))
+                                                                                   ;; C4: `#[rustc_comptime]` (TypeId's trait_info_of)
+                                                                                   (own-attr? (:node k) "rustc_comptime"))
                                         ;; C4: rustc's is_promotable_const_fn (a const fn's #[rustc_promotable])
                                         :promotable (and (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d))))
                                                          (own-attr? (:node k) "rustc_promotable"))
@@ -1010,7 +1017,10 @@
                                    {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self true
                                     :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                     :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                    :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (= :const (:constness (:node d))) :promotable false
+                                    :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (and (= :const (:constness (:node d)))
+                                                                          ;; C4: a const trait's method marked #[rustc_non_const_trait_method]
+                                                                          (not (own-attr? (:node k) "rustc_non_const_trait_method")))
+                                    :promotable false
                                     :nounwind (own-attr? (:node k) "rustc_nounwind") :native true}]))]
                (-> acc
                    (assoc-in [:traits p] {:generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self true

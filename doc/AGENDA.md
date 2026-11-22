@@ -407,7 +407,13 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   aggregate rules in the inliner, the asserts' locations, :nounwind): core 183 of 275 items equal to std's IR (114 before),
   alloc 21 of 25 (18), std 83 of 325 (61); DECISION 512-1 (a) taken (std's rsi export made again: catch_unwind's lines
   unchanged, their root the helper's fnptr types without `unsafe`) (FRONTEND-SURVEY, "As built: C6-4's next export, core's
-  lowering as std's IR writes it").
+  lowering as std's IR writes it"). Branch
+  `rust-c4-1122` (2026-11-22, R3): C1's TypeId constants as rustc's inttoptr pointers and a pair's niche tag at its offset (std,
+  unwind, panics pass own on ci; ci's 32-bit pointer constants a finding for C), C4's passes with every alias, enum reprs, pattern
+  types, const traits and the builtin derives (core 27,062 of 27,498 facts, alloc and std all equal, names 15,120 of 15,162) and the
+  switch run 5 of 5 own on the native interface and names (C4 counted own only after C6-5's ruling). Next: C1's six programs built
+  again and recorded, core's 436 facts left, C6-4's next export ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1 and C4:
+  the burst's round").
 - **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred
   17 -> 15, eval 15 -> 3), LLS54 (a) (the tx pack with dg-options), `h-judges`' split-file section, the Mac's 335 (Verifier rules:
   read deferred 15 -> 1; D335-1 (a), D335-2 (a)). Held: 335's `ir-make rt --mutants` and `verify-rt-heldout --record`; the 13 eh

@@ -669,5 +669,30 @@
           cmp (first (filter #(and (seq? %) (= 'icmp (first %))) (tree-seq coll? seq f)))]
       (check "C1: Option<(usize, char)>'s discriminant reads the char (the pair's second value) against -1"
              (if (and cmp (= '[i32 %_1.1 -1] [(nth cmp 2) (nth cmp 3) (nth cmp 4)])) :equal [:differs cmp]) :equal))
+    ;; C1 (threads.rs): the atomic intrinsics as rustc_codegen_ssa lowers them, the ordering from the AtomicOrdering argument:
+    ;; atomic_xadd::<usize, usize, SeqCst> an `atomicrmw add .. seq_cst`, atomic_cxchg::<usize, AcqRel, Acquire> a cmpxchg pair
+    (let [us '(ty "usize" (uint "usize")) pu '(ty "*mut usize" (ptr (ty "usize" (uint "usize")) true)) bl '(ty "bool" (bool))
+          pr '(ty "(usize, bool)" (tuple [(ty "usize" (uint "usize")) (ty "bool" (bool))]))
+          lt {"usize" '{:size 8 :align 8 :abi (scalar (int 64 false [0 18446744073709551615])) :fields (primitive) :variants (single 0) :uninhabited false}
+              "*mut usize" '{:size 8 :align 8 :abi (scalar (ptr [0N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}
+              "(usize, bool)" '{:size 16 :align 8 :abi (pair (int 64 false [0 18446744073709551615]) (int 8 false [0 1]) 8) :fields [0 8] :variants (single 0) :uninhabited false}}
+          call (fn [nm ords n ret]
+                 (list 'call (list 'const (str "std::intrinsics::" nm "::<usize, " (apply str (map #(str "std::intrinsics::AtomicOrdering::" % ", ") ords)) ">")
+                                   (list 'ty "unsafe fn()" (list 'fndef (str "std::intrinsics::" nm) [])) '(zst))
+                       (vec (for [i (range 1 (inc n))] (list 'copy (list 'place i)))) '(place 0) 1 '(unreachable)
+                       (list 'callee {:kind "intrinsic" :symbol "" :def (str "std::intrinsics::" nm) :intrinsic nm}) nil 0))
+          body (fn [nm ords locals ret]
+                 {:form :body :symbol nm :args (dec (count locals)) :ret ret :locals (vec (for [t locals] {:ty t})) :debug []
+                  :blocks [{:cleanup false :stmts [] :term (call nm ords (dec (count locals)) ret)} {:cleanup false :stmts [] :term '(return)}]})
+          forms (fn [b] (let [gl (cg/new-globals {})] (vec (filter seq? (tree-seq coll? seq (cg/codegen-fn b lt gl))))))
+          has (fn [fs h] (first (filter #(and (seq? %) (= h (first %))) fs)))
+          rmw (has (forms (body "atomic_xadd" ["SeqCst"] [us pu us] us)) 'atomicrmw)
+          cx (has (forms (body "atomic_cxchg" ["AcqRel" "Acquire"] [pr pu us us] pr)) 'cmpxchg)]
+      (check "C1: atomic_xadd::<usize, usize, SeqCst> is an atomicrmw add seq_cst"
+             (if (and rmw (= [:add :seq_cst] [(nth rmw 1) (nth rmw 4)])) :equal [:differs rmw]) :equal)
+      (check "C1: atomic_cxchg::<usize, AcqRel, Acquire> a cmpxchg acq_rel acquire"
+             (if (and cx (= [:acq_rel :acquire] [(nth cx 4) (nth cx 5)])) :equal [:differs cx]) :equal)
+      (check "C1 control: the orderings are the call's (Relaxed is monotonic, not seq_cst)"
+             (let [r (has (forms (body "atomic_xadd" ["Relaxed"] [us pu us] us)) 'atomicrmw)] (if (= :seq_cst (nth r 4 nil)) [:equal] [:differs r])) :differs))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))
