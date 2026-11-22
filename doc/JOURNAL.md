@@ -16272,3 +16272,9 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   slot but doc and bases) over a built-in base pyi's C side cannot lay out is the plain heap subclass (xxlimited's Str
   over str); _PyObject_GC_New is _PyObject_New (xxlimited_35's new()). Probe: Xxo's attribute, foo(1, 2), Str("abcd").upper(),
   demo, Error.
+- Then xxlimited_35's last two: its Xxo sets attributes through tp_setattr (the name a char *, slot 68), now taken when a
+  spec gives no tp_setattro; roj's "O#" leaves a unit no unit starts, which vgetargs1_impl refuses with SystemError "bad
+  format string: ..." (pyctypes' vgetargs had no such check; the test modules' formats all pass it). Proof (`bin/pyi check
+  --fresh --only` on the 710e90 executable, go/arbace/py interpreted, PYI_RUNNER=python3 as the runner, its three controls
+  failing as they must): test_xxlimited 16 of 16 pass and test_syslog 10 of 13 (its three subinterpreter tests reach
+  run_in_subinterp's PyThreadState_Swap, :capi-port's), 24 of them and then the last 2 "now pass" against the record.
