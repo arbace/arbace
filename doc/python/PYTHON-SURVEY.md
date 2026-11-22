@@ -7992,3 +7992,36 @@ layout (PyWeakref_GET_OBJECT); the exception state natives (PyErr_SetExcInfo, Se
 thread natives (PyThread_allocate_lock and C threads); the bytes and str singletons a C result is compared with by `is`; the
 invalid-string checks of release builds; test_getargs' str subclass keywords; the macro PySlice_GetIndicesEx's Py_SIZE read
 after Python code ran in PySlice_Unpack.
+
+### py-capi-1122, round 2: extension modules through the import system, and more of test_capi's natives
+
+The user's decision of 2026-11-22: C extension modules are built by ci into pyi's C world and loaded through the import
+system (`:extension-modules`, 75 methods in the records night's record, by design before).
+
+- **The import system**: `_imp.extension_suffixes()` is `['.arbace-314.so']` (PEP 3149's `.CACHE_TAG.so` with pyi's cache tag
+  `arbace-314`, so no other implementation's extension file is taken for one of the world's); `_imp.create_dynamic` and
+  `exec_dynamic` are the C world's loader's, registered by go/arbace/pyctypes (`SetDynamicLoader`; core
+  go/arbace/py/builtins_capi_api) and loaded with it on the first use. An extension file is an export table: its first line
+  `pyi-c-world ctypestest`, then the world's `PyInit_` (`PyInitU_` and punycode for a non-ASCII name) functions it exports
+  (go/arbace/pyctypes/capi_dynamic: "dynamic module does not define module export function (PyInit_X)" with name and path
+  otherwise, as dlsym's miss). `tools/pyi/lib-dynload/` holds `_testsinglephase.arbace-314.so` and
+  `_testmultiphase.arbace-314.so`; bin/pyi puts the directory on sys.path after the stdlib (CPython's lib-dynload). CPython
+  3.14.10's `Modules/_testsinglephase.c` and `Modules/_testmultiphase.c` (with its clinic header) are built into the world
+  (lib.conf; key ba0de8fa, 27 min 48 s). Single-phase: the init function's module, its `__file__`, m_size -1's dictionary
+  copied for a later load (import_find_extension's m_copy); multi-phase: PyModule_FromDefAndSpec2's create part (the slots
+  checked: unknown IDs, two create slots, two multiple-interpreters or gil slots; Py_mod_create's object, a non-module that
+  asks for state or execution slots refused), PyModule_ExecDef by exec_dynamic once; an unreported exception is the
+  SystemError's `__cause__` (_PyErr_FormatFromCause); an uninitialized definition (PyModuleDef_Init never ran:
+  `ob_type` NULL, PyModuleDef_Init now sets it and m_index) refused; PyState_FindModule/AddModule/RemoveModule by m_index.
+  The empty built-in `_testmultiphase` of PY6b is removed: the module is the world's.
+- **test_capi's natives** (capi_tail and the files they supersede): PyErr_SetString/SetObject/Restore as errors.c's
+  (`_PyErr_SetObject`'s issubclass check through `__subclasscheck__`, the "Normalization failed: type=T args=..." note,
+  PyErr_Restore's traceback), PyErr_WriteUnraisable and FormatUnraisable with err_msg None and the default hook's header on
+  sys.stderr (core: `ExtWriteUnraisableMsg`), PyUnicode_FromFormatV ported whole (flags, width, precision, `*`, the size
+  modifiers, `%c %d %i %o %u %x %X %p %s %ls %U %V %S %R %A %T %#T %N`; PyErr_Format and FormatUnraisable use it),
+  PyUnstable_Exc_PrepReraiseStar (`_PyExc_PrepReraiseStar` over BaseExceptionGroup.split by leaf identity), PyErr_SetExcInfo
+  and SetHandledException (the thread's handled exception), PyConfig_Set of sys.flags' members (a new flags object, core
+  `ExtSetSysFlag`), int_max_str_digits and cpu_count (core `ExtSetCPUCount`), the allocator domains with
+  PyMem_GetAllocator/SetAllocator (a C allocator's functions called for its domain), PyInterpreterState_Get/GetDict,
+  PyUnstable_AtExit (run by Py_EndInterpreter), PyGILState_GetThisThreadState, the code extra, `_PyObject_New(Var)` of a
+  built-in type, a set mirror for PySet_GET_SIZE (fill and used), `__ipow__` with the optional modulo on a C type.

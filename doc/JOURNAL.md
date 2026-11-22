@@ -17124,3 +17124,44 @@ from the checkout, edited as Go in bin/pyi runtime print's tree and read back by
   stream makes n/a; whether they follow it is the user's (the reclassification was not made here). The record's :testcapi
   "ndarray object required" rows (test_buffer, 75) predate queue 456's _testbuffer.
 Light: no gate; the executable b2a5b50d4819, the tools' host stage 0.
+
+## 2026-11-22: py-capi-1122, round 2: the C world's extension modules through the import system; 27 more of test_capi's natives
+
+The user's decision of 2026-11-22 (relayed by the coordinator): Python's :extension-modules are built, C extension modules
+loaded through ci's C world. Branch py-capi-1122 (round 1: 403cdaa4d).
+- The import system (doc/python/PYTHON-SURVEY.md, "py-capi-1122, round 2"): _imp.extension_suffixes() ['.arbace-314.so'],
+  create_dynamic and exec_dynamic delegated to go/arbace/pyctypes' loader (core go/arbace/py/builtins_capi_api.ae:
+  SetDynamicLoader), an extension file an export table of the world's PyInit_ functions (tools/pyi/lib-dynload, on sys.path
+  after the stdlib by bin/pyi), single-phase and multi-phase loading as Python/importdl.c, import.c and moduleobject.c
+  (slots checked, Py_mod_create, the unreported exceptions chained, an uninitialized definition refused, PyState_*). CPython
+  3.14.10's Modules/_testsinglephase.c and _testmultiphase.c (with its clinic header) built into the world: lib.conf, key
+  ba0de8fa, 27 min 48 s on the P1 executable b2a5b50d4819 in a scratch worktree at bab3c7283 whose arbace/core_proxy.ae was
+  9a2b7842a's (next's b4ab3ebfc calls Compiler$Dyn/hideMethod, which no executable here has; the builder's key does not
+  read core_proxy.ae, and `bin/pyi-clib key ctypestest` on this branch gives the same ba0de8fa). The empty built-in
+  _testmultiphase of PY6b removed (the user's decision on PY6b superseded by this one): the module is the world's.
+- More natives (pyctypes; the core's new ExtWriteUnraisableMsg, ExtSetSysFlag, ExtSetCPUCount): PyErr_SetString, SetObject
+  and Restore as errors.c's, the unraisable reports' err_msg None, PyUnicode_FromFormatV ported whole, PyErr_Format and
+  FormatUnraisable on it, PyUnstable_Exc_PrepReraiseStar, PyErr_SetExcInfo and SetHandledException, PyConfig_Set of
+  sys.flags' members, int_max_str_digits and cpu_count, the allocator domains, PyInterpreterState_Get/GetDict,
+  PyUnstable_AtExit, PyGILState_GetThisThreadState, the code extra, _PyObject_NewVar, a set mirror for PySet_GET_SIZE,
+  __ipow__'s optional modulo, Py_AddPendingCall (run when C returns to Python), PyNamespace_New.
+- An executable of this tree (2d8f9f6b9, the core's last change) is queued under the heavy lock in a clean worktree
+  (.tmp/worktrees/py-capi-build); every proof below runs the P1 executable with go/arbace/py interpreted from the
+  checkout (bin/pyi's runtime_from_source), the slow path the coordinator allowed until 521's compiled worlds land.
+- Proofs (`bin/pyi check --only`, PYI_RUNNER=python3, controls 1-3 failing as they must): the round's 103 methods
+  (test_capi's 28, :extension-modules' 75): 115 of 144 pass, 74 now pass against the record; then test_importlib whole
+  (1,383 methods with the controls' subjects): 1,276 pass, 106 classed, 48 now pass, one regression,
+  NonModuleExtensionTests.test_nonmodule_cases (its child loads _testmultiphase_nonmodule*, whose create slot calls
+  _PyNamespace_New), fixed by PyNamespace_New and passing by unittest, with test_bad_modules, test_try_registration and
+  TestPendingCalls (test_max_pending's not-main-only subtest skips on the _testinternalcapi stand-in). test_import whole was
+  stopped: its child processes start pyi on the interpreted runtime (90 s each) past the test timeout; its rows of the
+  round's list ran (test_create_dynamic_null passes; its single-phase tests skip on check_impl_detail(), CPython only).
+- Moved against the record (every method a run of this branch passes that the record does not): :capi-port 85,
+  :testcapi 47 (test_capi's modules that import since queue 465's stand-in), :extension-modules 50 (test_importlib 48,
+  test_import 1, test_ctypes 1). New deferred class :extension-subinterp-check (5): an isolated subinterpreter's
+  multi-interpreter check before loading an extension (_imp._override_multi_interp_extensions_check is a stub); before
+  :extension-modules in the file so the records night's rows of those names stay classed.
+- Coordination: the coordinator's message on the C world's speed (521's compiled worlds in goi's table): this branch's world
+  (_testcapi, _testsinglephase, _testmultiphase) registers the same way once 521 lands; nothing recorded here (P1 owns the
+  Lib/test record).
+Light: no gate; reap, crops-score and records-check before the push.
