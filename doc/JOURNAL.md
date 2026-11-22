@@ -17204,3 +17204,13 @@ pipe is made on first use), so it toggled O_NONBLOCK on every blocking descripto
 a flag of the open file description, which a pipe shared with a parent or children shares. Now only a FIFO takes it, and
 no flag is changed: after a poll that finds it writable a pipe takes PIPE_BUF bytes without blocking, so the write goes
 in chunks of at most 4096 bytes between polls (with the wake pipe, the handlers run on a signal).
+Round 4's interpreted proof (`bin/pyi check --fresh --only` .tmp/only/r4.txt, b2a5b50d4819 with the checkout's
+go/arbace/py interpreted, at 88723340c's forms; controls failing as they must): test_ordered_dict 280 ok, 11 failures, 8
+skipped; against the record 22 of `:ordered-dict-c`'s 31 move (the CPythonOrderedDict*'s issue119004 ten, issue148660 four,
+test_key_change_during_iteration two, test_iterators_pickling two, test_sizeof four, the pure class's two test_sizeof
+counted among them); left the five test_highly_nested_subclass and four test_reference_loop (finalization's). Two
+"regressions" judged: PurePythonOrderedDict{,Subclass}Tests.test_free_after_iterating (the pure class, untouched here: a
+__del__ after gc_collect, which goi's registers delay when the runtime is interpreted; they failed so on round 1's
+interpreted run too and pass in the record's compiled run) -- to be confirmed by the compiled proof. test_io: the FIFO-only
+write keeps test_nonblock_pipe_write_* and test_interrupted_write_buffered/_unbuffered (C, Py) passing; _text (C, Py) still
+idle past 90 s interpreted (the encode before the write outlasts the alarm under goi).
