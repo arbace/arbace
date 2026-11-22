@@ -17090,3 +17090,37 @@ non-passing among them are the rows above (the stale passes at 863bdaea1, conste
 pr69056 as next recorded them). Cells against next's record: C++ read 5,589 / 317 / 587 -> 5,665 / 311 / 517, print 3,880 / 0 / 15 ->
 3,885 / 0 / 10; completeness 95.81 -> 96.14, independence 95.24 -> 95.40 (the earlier entry's 94.84 -> 95.00 was against the first
 merge's tree). reap, crops-score (--record, --judge --strict) and records-check: 0 problems.
+
+## 2026-11-22: py-capi-1122, round 1: 102 of test_capi's 169 :capi-port methods pass (the C API natives)
+
+The burst's py-capi stream (Python eval's deferred :capi-port 939 and :testcapi 859; the main session's brief), branch py-capi-1122
+from mac/next 99b2c942a with mac/py-eval-1122 (9a2b7842a, P1) merged first: P1's branch carries C API natives of test_capi's
+test_run and test_file and its runtime, so this work builds on them and runs on their executable
+(.tmp/gate-exe/b2a5b50d48192fabce24, go/arbace/py the same as 9a2b7842a's; go/arbace/pyctypes is a lazy package interpreted
+from the checkout, edited as Go in bin/pyi runtime print's tree and read back by repr-go read, no build).
+- Found: _testcapi is built by ci into pyi's C world already (all 38 parts since queue 274b, _testbuffer since 456); the record
+  (the records night, 11-19) predates PyConfig_Get (830 of :capi-port's 939 rows are test_traceback, test_compile, test_dis,
+  test_marshal and test_code failing to import at requires_debug_ranges' config_get, given since n-py-eval) and the
+  _testinternalcapi stand-in (queue 465), so the record overstates both classes; P1's next record measures them.
+- Before-run on that head: bin/pyi check --only test_capi (PYI_RUNNER=python3; 35 min): test_capi 746 of 1,328 pass,
+  :capi-port 169, :testinternalcapi 206, :specializing 89, :testcapi-behaviour 23, failing 25.
+- The natives (doc/python/PYTHON-SURVEY.md, "As built: py-capi-1122"): mapping and dict argument checks and messages, the object
+  protocol's Repr/Str/ASCII/Bytes, bytes and bytearray concat, repr and sizes, unicode's ensure_unicode and code-point search
+  (pyi's own str.count counts a lone surrogate of a pair twice; the natives do not use it), wide characters, WriteChar,
+  imports (pyi's magic number, AddModuleObject, Import, ImportModuleLevel, frozen modules), PEP 757's PyLong_Export and
+  PyLongWriter, PyFrame_New, weak references over proxies, the complex natives with the world's errno, PyObject_Print,
+  PyStructSequence_NewType, PyConfig_Set's sys attributes, Py_BuildValue's O&/D/error walk, and test_misc's small ones; a new
+  file go/arbace/pyctypes/capi_tail.ae registered last; a list mirror whose C slots are unchanged keeps Go's value.
+- Proof: bin/pyi check --only of the 188 methods that did not pass (the six out-of-memory crashes left out: the runs' ulimit
+  -v 8 GiB; they pass in the record and passed again in this selection), 129 s: 102 of the 169 :capi-port methods pass, the 21
+  failing are the before-run's (test_run's ten and test_number's three fail only in a whole-module run, P1's area; three
+  subinterpreter and thread-state tests) but test_misc's Test_testcapi.test_weakref_capi, a segmentation fault now that
+  PyWeakref_GetObject exists (the macro PyWeakref_GET_OBJECT reads the weak reference's layout): named in :capi-port's :tests.
+  Controls 1-3 failing as they must. :capi-port's :tests keep the 68 names that pass now: the record still holds their old
+  rows, P1's next record makes them stale.
+- Not done here (decisions or other streams): :testcapi's rows that name _testinternalcapi (in the record about 757 of its
+  859: test_peepholer, test_embed's InitConfigTests, test_context's HamtTest, test_time's TestCPyTime, test_codecs'
+  LocaleCodecTest, test_type_cache, test_interpreters, ...) belong to the user's _testinternalcapi decision, which the counting2
+  stream makes n/a; whether they follow it is the user's (the reclassification was not made here). The record's :testcapi
+  "ndarray object required" rows (test_buffer, 75) predate queue 456's _testbuffer.
+Light: no gate; the executable b2a5b50d4819, the tools' host stage 0.

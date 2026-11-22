@@ -7944,3 +7944,51 @@ tarball by Arbace's C, at check time; CPython's recorded trees moved to the orac
   3,736 of 3,736 files in `:lines` and in `:full` (samples, stdlib, site-packages, lib-test, lex-errors, syntax-errors), the 3,846
   mutants of each mode equal CPython 3.14.10 live; a planted native-parser bug (parser.ae's conjunction an Or) fails control.py
   and fnmatch.py in own mode. independence.edn: parse-check's 5,724 cases and the 256 syntax-errors cases without a stated error 1.
+
+## As built: py-capi-1122, the C API natives test_capi's modules reach (2026-11-22, the burst's py-capi stream)
+
+The deferred `:capi-port` (the C API's natives not provided yet) on P1's py-eval-1122 head (9a2b7842a, its executable
+b2a5b50d4819; `go/arbace/pyctypes` is a lazy package, interpreted from the checkout, so no build). Before-run: `bin/pyi check
+--only test_capi` (`PYI_RUNNER=python3`), test_capi 746 of 1,328 pass, `:capi-port` 169, failing 25 (the six "fatal error: out of
+memory" crashes are the run's `ulimit -v 8 GiB`, passes in the record; test_number's three DeprecationWarnings fail only in the
+module's whole run, as do test_run's ten, P1's natives: not this stream's). Proof: `bin/pyi check --only` of those 188 methods
+(the crashes left out), the three controls failing as they must: 102 of the 169 pass, no new failure but test_misc's
+Test_testcapi.test_weakref_capi (a segmentation fault where the native was missing: classed by name).
+
+- **Mapping and dict** (capi_more): the string-keyed forms decode the key as PyUnicode_FromString (its UnicodeDecodeError
+  propagates) and a NULL is null_error's SystemError; PyMapping_HasKey and the rest take only KeyError for absent, the unraisable
+  forms by their own messages; the dict natives take a subclass's instance (PyDict_Check); PyDict_Update and Merge read a dict
+  whose `__iter__` is dict's in place (dict_merge's fast path: a subclass's `__getitem__` not called); PyDict_GetItem(String)
+  report a hash or decode error as unraisable, the hash's own message.
+- **Objects and bytes**: PyObject_Repr and Str give `__repr__`/`__str__`'s result as it is (a str subclass's instance kept),
+  ASCII the repr itself when it is ASCII; PyObject_Bytes takes `__bytes__` (a bytes subclass kept, anything else a TypeError),
+  PyBytes_FromObject refuses an int and a str; PyBytes_Concat(AndDel) over two C-contiguous buffers (NULL w clears), PyBytes_Repr
+  with smartquotes; PyByteArray_Concat over buffers, its FromStringAndSize and Resize past 2**40 a MemoryError.
+- **Unicode**: ensure_unicode's TypeError for split, partition, replace, splitlines, count, find, findchar, tailmatch, contains
+  and translate; count, find, findchar and tailmatch over the code points with ADJUST_INDICES (pyi's str.count counts a lone
+  surrogate of a pair twice: the natives do not rely on it); GetLength and ReadChar's PyErr_BadArgument and ReadChar's 32-bit
+  `(Py_UCS4)-1`; EqualToUTF8(AndSize) compares the strict UTF-8 only when the sizes agree; FromWideChar, AsWideChar,
+  AsWideCharString; WriteChar on a str C holds alone; FromObject copies a subclass's instance; the AsXString encoders'
+  PyErr_BadArgument, FromEncodedObject over a buffer.
+- **Imports, longs, frames**: PyImport_GetMagicNumber is pyi's own importlib's MAGIC_NUMBER; AddModuleObject takes any hashable
+  name (an unhashable one's TypeError); PyImport_Import is `__import__` then sys.modules; ImportModuleLevel(Object)'s level and
+  globals checks; ImportFrozenModule(Object) over `_imp`; PyLong_Export, FreeExport and PyLongWriter (30-bit digits); PyLong_AsVoidPtr
+  refuses `__index__` and gives NULL on an error, FromVoidPtr keeps the handle it names; PyFrame_New.
+- **New natives** (capi_tail.go, registered last): complex (AsCComplex and Real/ImagAsDouble through `__complex__` with its
+  DeprecationWarning, `_Py_c_sum/diff/neg/prod/quot/pow/abs` with C11 Annex G's recovery and the world's errno), PyObject_Print
+  (fwrite into the FILE, musl's F_ERR flag read and cleared), PyStructSequence_NewType (a tuple subclass with its fields as
+  properties), Py_Is, PyGen_GetCode, PyCode_GetCode/Varnames/Cellvars/Freevars, PyMem_Raw*, PyObject_Calloc/Realloc,
+  PyBuffer_FromContiguous, PyThread_tss_* (one thread), PyThread_get_thread_native_id and _ident, PyUnstable_IsImmortal,
+  Py_FrozenMain (exported, reports no frozen program), PyWeakref_GetObject; PyConfig_Set (capi_config) for the sys attributes,
+  its type checks and read-only refusals.
+- **Py_BuildValue** walks the whole format on an error (every argument consumed, each N's reference stolen, the first error
+  given), O& calls the converter, D reads a Py_complex, C checks the range, a dict of an odd count is "Bad dict format".
+- **Mirrors**: a list's sync from C keeps Go's value when C's slots are as last synchronized (Python code a native ran may have
+  resized it: gh-72054's `__index__`), so the deprecated PySlice_GetIndicesEx sees the shortened list.
+
+Left in `:capi-port` (67 of test_capi's, and the other modules' rows): PyConfig_Set of sys.flags' members and int_max_str_digits
+(a new sys.flags object: pyi's flags type cannot be instantiated from a native) and of cpu_count (start-time); the weak reference
+layout (PyWeakref_GET_OBJECT); the exception state natives (PyErr_SetExcInfo, SetHandledException) and PrepReraiseStar; the
+thread natives (PyThread_allocate_lock and C threads); the bytes and str singletons a C result is compared with by `is`; the
+invalid-string checks of release builds; test_getargs' str subclass keywords; the macro PySlice_GetIndicesEx's Py_SIZE read
+after Python code ran in PySlice_Unpack.
