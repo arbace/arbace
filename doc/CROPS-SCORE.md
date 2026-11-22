@@ -606,3 +606,38 @@ list. Built (branch `counting2-1122`):
 | C++ | read 5,665 / 311 / 517 (38 n/a) | read 5,665 / 135 / 517 (214 n/a) | 0.961380 -> 0.967457 (96.1 -> 96.7) | 0.953940 -> 0.955500 (95.3 -> 95.5; the read stage 0.7798 -> 0.7876) |
 | Python | eval 39,204 / 2,719 / 3,627 (2,771 n/a) | eval 39,204 / 1,981 / 3,627 (3,509 n/a) | 0.961507 -> 0.965050 (96.1 -> 96.5) | 1.0 |
 | Haskell | eval 894 / 34 / 22 | eval 894 / 31 / 22 (3 n/a) | 0.983464 -> 0.984209 (98.3 -> 98.4) | 1.0 (eval 916 of 916 -> 915 of 915) |
+
+## Decided (the user, 2026-11-22): the third questions
+
+The user's decisions of 2026-11-22 on py-capi's and c-tails' questions (doc/JOURNAL.md, "the user's decisions on py-capi's and
+c-tails' questions"), built as the two sections above (branch `counting3-1122`), each keyed on a verdict the record holds:
+
+- **Python, eval** (`test/python/divergences.edn`, the record `test/python/check-lib-test-linux-amd64.edn`):
+  - `:testinternalcapi-absent` (new, `:kind :na`, before `:testcapi`; 762): a `skipped` or `import` row whose message names
+    `_testinternalcapi` ("requires _testinternalcapi", "need the _testinternalcapi module", "_testinternalcapi.hamt() not available",
+    "No module named '_testinternalcapi'", also as a SkipTest). 757 of them were `:testcapi`'s. A row `:capi-port` takes first (50
+    whose message names it) and `:testinternalcapi` (132) stay there.
+  - `:cpython-only` (`:kind :na`) gains the match `^skipped the module 'xxsubtype' is internal$`: test_descr's 4 xxsubtype rows
+    (`support.impl_detail`, CPython-only; they were `:extension-modules`').
+  - `:capi-refcounts` (3) `:kind :na`; `:capi-singletons` (new, 2: test_bytes' `b'' is not b''`) and `:capi-gc-tracked` (new, 2:
+    test_tuple's `gc.is_tracked`) `:kind :na`, matched on the failure messages, their ids removed from `:capi-port`'s and
+    `:gc-collector`'s `:tests`. The other C API rows stay deferred: the "about 40" are not all identifiable from the record's messages
+    (listed in the journal).
+  - bin/pyi's own judge classes by `:tests` and `:match` alone (`bin/pyi divergences` before and after: the same 31 "takes it first"
+    problems as at HEAD, now naming the new class for testcapi-behaviour's 21 `:tests`; no other row changes class).
+- **C, read (CT1)**: `test/reap/cells.edn`'s token and tree sources' `:own-elsewhere` gains a record `{:file
+  "test/repr/c/pp-check-results.edn" :reason-re "pp ref"}` (`own-elsewhere-record`): the token check's own `:known` row whose reason
+  says `pp ref` (judged by the own reference, `REPR_C_PP_JUDGE=own`, tools/ppref's libcpp stream equal to the port's) is the check's
+  own verdict, so a file known only in `:reference-wrong` classes passes (sqlite3.c, tcc-pp's 13.S), the tree check's pp-known rows
+  following (`count-once`). **The record holds no `pp ref` row yet** (its rows say `pp gcc`; recording needs `bin/repr-c check --tokens
+  --only` on those two files under `REPR_C_PP_JUDGE=own`, a run), so the C read cell is unchanged: 5,460 / 5 / 10, to 5,462 / 3 / 10
+  once recorded.
+- **Negative controls**: `crops-score --self-test`'s `counting-1122c-tests`: a skip or import naming `_testinternalcapi` is n/a; a
+  failure naming it, a skip naming only `_testcapi`, another xxsubtype skip, another bytes comparison and another tuple are not; the
+  record's `pp ref` rows pass; a `pp gcc` row, a failing row, a class where the reference is not wrong and a record read without
+  `:reason-re` do not.
+
+| crop | cell before | cell after | completeness exact (floored) |
+|---|---|---|---|
+| Python | eval 39,204 / 1,981 / 3,627 (3,509 n/a) | eval 39,204 / 1,972 / 2,863 (4,282 n/a) | 0.967058 -> 0.970897 (96.7 -> 97.0) |
+| C | read 5,460 / 5 / 10 | unchanged until the ppref rows are recorded | unchanged |

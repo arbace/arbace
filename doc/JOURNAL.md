@@ -17812,3 +17812,24 @@ Asked by the main session after py-capi's and c-tails' reports (about 13:40 UTC)
 - C: sqlite3.c and tcc's 13.S at read (CT1), wrong only where cc is wrong and equal to tools/ppref's reference at check time, count as
   passes, ppref's agreement as the token check's own verdict (C++'s read rule), their tree rows following. Alternatives not taken: n/a;
   by design.
+
+## 2026-11-22: the user's counting decisions on py-capi's and c-tails' questions applied (branch counting3-1122)
+
+Applied from mac/next d85da9174, the pattern of counting-1122 and counting2-1122, each rule keyed on a verdict the record holds
+(doc/CROPS-SCORE.md, "Decided (the user, 2026-11-22): the third questions"). No crop check run: bin/reap --record, bin/crops-score
+(--record, --judge --strict, --self-test), bin/records-check, `bin/pyi divergences` (no run).
+- Python eval: new n/a class `:testinternalcapi-absent` (762: skipped or import rows naming `_testinternalcapi`; 757 were
+  `:testcapi`'s), test_descr's 4 xxsubtype rows into `:cpython-only` by their message, `:capi-refcounts` (3) n/a, new
+  `:capi-singletons` (2) and `:capi-gc-tracked` (2) n/a. Cell 39,204 / 1,981 / 3,627 (3,509 n/a) -> 39,204 / 1,972 / 2,863 (4,282
+  n/a); completeness 0.967058 -> 0.970897.
+- Not derivable from the record's messages (the "about 40" of the decision; py-capi's report, in the main session's notes, names them),
+  left deferred, for confirmation: test_list's two "zombie" rows and test_watchers' six dealloc-event rows (finalizers and DEALLOCATED
+  events when the last reference goes: reference counts or finalization timing?), test_type's test_type_getflags (flag bits, struct
+  layout?), test_long's test_long_asvoidptr and test_getargs' two weird-str-subclass rows (handle model), test_threading's and
+  test_int's PyThreadState_Swap and test_threading_local's PyThread_allocate_lock rows (C threads? the natives are missing, not
+  unmodelled), release-build-only invalid-string rows (none in this record; py-capi's branch is not merged).
+- C read (CT1): `:own-elsewhere` gains the token check's own results as a record (`:reason-re "pp ref"`, reap.main's
+  `own-elsewhere-record`). The record holds no `pp ref` row, so the cell is unchanged: recording sqlite/sqlite3.c and tcc-pp/13.S under
+  `REPR_C_PP_JUDGE=own` (a check run, not made here) moves read 5,460 / 5 / 10 to 5,462 / 3 / 10.
+- Self-test `counting-1122c-tests` with controls. Alternatives not taken: listing the cases; n/a for the C files.
+- mac/py-capi-1122 is not merged into next; its record will move rows between these classes (PyConfig_Get imports).
