@@ -153,15 +153,12 @@
     datum syntax->list syntax->vector $string-ref-check? $vector-ref-check? $fxvector-ref-check? $flvector-ref-check? $bytevector-ref-check?
     current-directory source-directories library-directories command-line-arguments reset-handler abort-handler import-notify)
   ;; SC170 (b): Chez's wider forms of eval (the environment optional), dynamic-wind (a leading critical flag), fx+ fx* fx-
-  ;; (any number of arguments) and the file procedures' options ('replace, 'truncate) replace (rnrs)'s; SCS4 (d): so do Chez's /, angle,
-  ;; current-input-port and current-output-port
+  ;; (any number of arguments) and the file procedures' options ('replace, 'truncate) replace (rnrs)'s; SCS4 (d): so do Chez's / and angle
   (import (except (rnrs) record? make-record-type-descriptor = < > <= >= char=? char<? char>? char<=? char>=? char-ci=? char-ci<? char-ci>? char-ci<=? char-ci>=? string=? string<? string>? string<=? string>=? string-ci=? string-ci<? string-ci>? string-ci<=? string-ci>=? file-options fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file
                   string->number number->string record-constructor hashtable-keys hashtable-entries
-                  / angle current-input-port current-output-port)
-          ;; SCS4 (d), the user 2026-11-22: Chez's / and angle (its exact-zero rules) and its console input/output port, where (rnrs)
-          ;; gives R6RS's answers
-          (rename (only (psyntax system $all) $chez-/ $chez-angle $chez-current-input-port $chez-current-output-port)
-                  ($chez-/ /) ($chez-angle angle) ($chez-current-input-port current-input-port) ($chez-current-output-port current-output-port))
+                  / angle)
+          ;; SCS4 (d), the user 2026-11-22: Chez's / and angle (its exact-zero rules), where (rnrs) gives R6RS's answers
+          (rename (only (psyntax system $all) $chez-/ $chez-angle) ($chez-/ /) ($chez-angle angle))
           (rename (only (rnrs) string->number number->string record-constructor hashtable-keys hashtable-entries) (string->number r6-string->number) (number->string r6-number->string)
                   (record-constructor r6-record-constructor) (hashtable-keys r6-hashtable-keys) (hashtable-entries r6-hashtable-entries))
           (rename (only (rnrs) fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file)
