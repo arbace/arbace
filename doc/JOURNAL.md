@@ -17156,3 +17156,20 @@ every spawn child of the multiprocessing tests waits for it); a cache of goi's c
 the executable, would serve them (the spawn modules' :runner-limits, :host-memory). Round 1's interpreted proof was
 stopped: goi's stub warning made its child-stderr tests fail; the proofs wait for the gate's executables at this branch's
 key (queued under bin/heavy-lock behind six jobs).
+
+## 2026-11-22: py-mods-1122, round 3: the runner's per-module limits (test/python/lib-test-limits.tsv)
+
+Proof of round 1's PSS cap and round 2's GOGC 100 on spawn's test_manager (b2a5b50d4819's compiled runtime, P1's, with
+PYI_RUNTIME=compiled; the runner python3's; `bin/pyi check --only`, controls failing as they must): 49 ok, 20 killed past
+8192 MB, 13 skipped (the record: 43 pass, 24 killed; P1's run of the same module on the same executable today: 40 ok, 29
+killed, 30 driver runs; this one 21). 6 methods move against the record (4 of `:host-memory`: WithManagerTestPool's
+test_apply, test_empty_iterable, test_wrapped_exception, WithManagerTestQueue's test_task_done; 2 of
+`:goi-liveness-fallthrough`: test_rapid_restart, test_remote), 0 regressions. The 20 left are the Barrier class's nine (five
+parties) and the Pool class's ten (a pool of four made by setUpClass, made again after every kill) and
+WithManagerTestCondition.test_notify_all: their children, each a whole pyi process of about 1.5 GB once it has imported its
+test module, pass 8 GB together where CPython's children are tens of MB.
+So the runner takes per-module limits, data: tools/pyi/libtest_all.py's read_limits reads PYI_LIB_TEST_LIMITS (bin/pyi
+passes test/python/lib-test-limits.tsv: MODULE, MEM_MB, MODULE_TIMEOUT_S, WHY), each only raising --mem-max and
+--module-timeout for its module. Listed: spawn's test_manager, test_processes (also 7200 s: 163 tests at about 30 s each,
+P1's run ended at the hour with 61 ok and 33 killed), test_misc, and concurrent_futures' test_process_pool, at 16384 MB.
+The proof of the raised cap passes 8 GB, so it is queued under bin/heavy-lock (behind the gate build of this branch's key).

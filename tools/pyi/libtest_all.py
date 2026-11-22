@@ -23,7 +23,8 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       of one core for S seconds is a hang, killed then: "CASE ID timeout the test idle past S s, a hang ..."; with --mem-max MB
       (queue 321; default 0, off; bin/pyi passes PYI_LIB_TEST_MEM_MAX, 8192) one whose processes' summed memory (each
       process's proportional set size since py-mods-1122: shared pages counted once) passes MB, sampled every 5 s, is killed then: "CASE ID crash the test's processes past MB MB resident ..." (a
-      driver of test_capi reached 29.6 GB on the VM; a night's 4 jobs share the host's memory); each test's
+      driver of test_capi reached 29.6 GB on the VM; a night's 4 jobs share the host's memory); PYI_LIB_TEST_LIMITS (py-mods-1122;
+      test/python/lib-test-limits.tsv, bin/pyi's) raises a listed module's memory cap and module timeout; each test's
       wall and CPU seconds in DIR/MODULE.times (ID, outcome, wall, CPU; "#start N" lines: a driver start's import); a driver that dies in a test (a Go
       panic, a fatal error) is written "CASE ID crash FIRST-CAUSE"; either way the driver starts again on the module's
       other tests (its SKIPFILE the tests already reported), until DONE. A run that makes no progress, or the module's
@@ -536,12 +537,30 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
     return attempts
 
 
+def read_limits(path):
+    """py-mods-1122: the per-module limits (PYI_LIB_TEST_LIMITS, test/python/lib-test-limits.tsv: MODULE<TAB>MEM_MB<TAB>
+    MODULE_TIMEOUT_S<TAB>WHY, # and blank lines ignored): {module: (mem MB, module timeout s)}, each only ever above
+    --mem-max and --module-timeout (a module whose children are each a whole pyi process, the runner's caps sized for
+    one driver: the limits are the runner's, not the tests')"""
+    out = {}
+    if not path or not os.path.exists(path):
+        return out
+    for line in open(path, encoding="utf-8"):
+        if not line.strip() or line.startswith("#"):
+            continue
+        f = line.rstrip("\n").split("\t")
+        if len(f) >= 3:
+            out[f[0]] = (int(f[1]), float(f[2]))
+    return out
+
+
 def cmd_run(args):
     root, mods, d = arg(args, "--root"), read_list(arg(args, "--modules")), os.path.abspath(arg(args, "--dir"))
     jobs = int(arg(args, "--jobs", "1"))
     test_timeout, module_timeout = float(arg(args, "--test-timeout", "300")), float(arg(args, "--module-timeout", "3600"))
     idle_timeout = float(arg(args, "--idle-timeout", "0"))
     mem_max = int(arg(args, "--mem-max", "0"))
+    limits = read_limits(os.environ.get("PYI_LIB_TEST_LIMITS"))
     oracle = arg(args, "--oracle")
     tbase = os.path.abspath(arg(args, "--tmp-base", os.path.join(d, "_tmp")))
     os.makedirs(d, exist_ok=True)
@@ -558,7 +577,10 @@ def cmd_run(args):
                 m = q.pop(0)
             t0 = time.monotonic()
             tmp = short_tmp(tbase, "j%d" % k)
-            n = run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout, mem_max)
+            mm, mt = limits.get(m, (mem_max, module_timeout))
+            if mem_max and mm:
+                mm = max(mm, mem_max)
+            n = run_module(m, root, d, oracle, test_timeout, max(mt, module_timeout), tmp, idle_timeout, mm if mem_max else 0)
             shutil.rmtree(tmp, ignore_errors=True)
             shutil.rmtree(tmp + "c", ignore_errors=True)
             tmp_guard(m, os.path.join(d, "tmp-leftovers.log"))
