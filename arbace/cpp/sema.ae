@@ -278,11 +278,15 @@
   [scope n]
   (when *cx-dropped*
     (let [nm (:name n)
-          own? (and (string? nm) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" nm)
+          op? (and (string? nm) (re-matches #"operator\s*\S.*" nm))
+          own? (and (string? nm) (or op? (re-matches #"[A-Za-z_][A-Za-z_0-9]*" nm))
                     (empty? (try (qualifier-before n) (catch Exception _ nil)))
+                    ;; (an operator function's name always: the implicit global allocation functions stand beside a
+                    ;; dropped placement operator new, warn/Wplacement-new-size-6.C's after its size_t's typedef refused)
+                    (or op?
                     ;; (a class, a class template or an enumeration is entered before its body refuses: its own entity)
                     (or (#{"CXXRecordDecl" "ClassTemplateDecl" "EnumDecl" "ClassTemplatePartialSpecializationDecl"} (:kind n))
-                        (empty? (try (lookup scope nm) (catch Exception _ nil)))))
+                        (empty? (try (lookup scope nm) (catch Exception _ nil))))))
           nms (cond-> #{}
                 own? (conj nm)
                 (:cls scope) (into (keep #(when (and (string? %) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" %)) %)
@@ -302,6 +306,12 @@
      (when-let [nm (some-> (abi/cls cid) :name str)]
        (contains? ds (-> nm (str/replace #"<.*$" "") (str/split #"::") last str/trim))))))
 
+(defn cx-poison-class!
+  "Queue 526: records the class `cid`'s name among the dropped ones (*cx-dropped*): a refusal changed it."
+  [cid]
+  (when-let [nm (and *cx-dropped* (some-> (abi/cls cid) :name str (str/replace #"<.*$" "") (str/split #"::") last str/trim not-empty))]
+    (when (re-matches #"[A-Za-z_][A-Za-z_0-9]*" nm) (swap! *cx-dropped* conj nm))))
+
 (declare node-text)
 (defn- cx-poisoned?
   "Queue 526: whether the refusal `e` at the node `n` follows from a dropped declaration (*cx-dropped*): its message quotes a
@@ -314,8 +324,9 @@
        (let [m (if (instance? Throwable e) (str (ex-message e)) "")
              nd (or (when (instance? Throwable e) (:cx/node (ex-data e))) n)
              t (when (map? nd) (try (node-text nd) (catch Exception _ nil)))]
-         (or (some (fn [nm]
-                     (or (re-find (re-pattern (str "(?:'|\\b(?:no member|unknown name|unknown type|for) )" (java.util.regex.Pattern/quote nm) "(?![A-Za-z0-9_$])")) m)
+         (or (some (fn [^String nm]
+                     (or (and (str/starts-with? nm "operator") (str/includes? m nm))
+                         (re-find (re-pattern (str "(?:'|\\b(?:no member|unknown name|unknown type|for) )" (java.util.regex.Pattern/quote nm) "(?![A-Za-z0-9_$])")) m)
                          (and t (re-find (cx-word-re nm) t))))
                    ds)
              ;; (a type the message spells as data, {:k :class :id N}: a dropped class's)
@@ -7587,6 +7598,11 @@
                (fn-call ctx fid args))))
     (let [p (rv callee)
           ft (let [t (abi/unq (:ty p))] (if (abi/ptr? t) (:to t) t))]
+      ;; (queue 526, the checker: a callee whose type the slice left undeduced or dependent -- a class template's
+      ;; specialization's `static constexpr auto a = [](auto n) { ... };`, cpp2a/concepts-lambda2.C's foo1.a(5.5) -- is the
+      ;; slice's, not "call of a non-function")
+      (when (and (checking?) (not (abi/fn? ft)) (or (nil? ft) (#{:auto :dep :tdep :tparam} (:k ft))))
+        (fail :type "a call of an undeduced callee type"))
       (when-not (abi/fn? ft) (fail :call "call of a non-function"))
       {:op :icall :callee p :fty ft
        :args (vec (map-indexed (fn [i a] (if (< i (count (:ps ft))) (init-for (nth (:ps ft) i) a ctx :copy) {:i :expr :e (rv a)})) args))
@@ -10350,6 +10366,12 @@
     ;; (queue 463, the checker: a refusal with no node of its own -- a default-initialized variable's constructor or
     ;; destructor, cx-ctor-access! and cx-dtor-access! -- at the variable's declaration, not the last node analyzed before)
     (when (and (checking?) *at* (:cx-decl v)) (reset! *at* (:cx-decl v)))
+    ;; (queue 526, the checker: `auto x = { ... };` deduces std::initializer_list<E>, [dcl.type.auto.deduct]/4, which the
+    ;; slice's type does not: unsure, not "several values for a scalar"; cpp0x/initlist-n3922.C's x1, reached once the
+    ;; unit no longer stopped at an earlier refusal)
+    (when (and (checking?) (:cx-decl v) (map? init) (= "InitListExpr" (:kind init)) (not (#{"list" "call"} (:init-style v)))
+               (re-find #"^(?:\s*(?:static|const|constexpr|inline|extern|volatile|thread_local)\b)*\s*auto\b" (or (node-text (:cx-decl v)) "")))
+      (fail :type "auto deduced from a copy-list-initialization (std::initializer_list<E>)"))
     (binding [*cutoff* Long/MAX_VALUE]
       (let [i (cond
                 (nil? init) (init-for (:ty v) nil ctx :value)
@@ -10559,7 +10581,10 @@ protected:
                                                     ;; class's implicit or defaulted member: deleted, unsure, so no use of it
                                                     ;; is judged, the unit no longer refused)
                                                     (and (checking?) *cx-dropped* (cx-recoverable? e)
-                                                         (some-> (abi/cls (:cls (fnd id))) :header not))
+                                                         (some-> (abi/cls (:cls (fnd id))) :header not)
+                                                         ;; (and its class's name recorded, cx-dropped!'s: its uses not judged,
+                                                         ;; cpp0x/decltype37.C's `holder<int> h;` "no default constructor")
+                                                         (do (cx-poison-class! (:cls (fnd id))) true))
                                                     (and (:implicit (fnd id))
                                                         (or (= :overload (:codegen/refused (ex-data e)))
                                                             ;; ([class.default.ctor]/2.5: a member or base with no default
