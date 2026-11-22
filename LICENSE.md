@@ -167,6 +167,16 @@ covers what.
   same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
   `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
   Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
+- `go/arbace/repr/go/internal/gc/` (doc/go/GOI-SPEC.md, "Since v1: gc in the executable", 2026-11-22): a renamed
+  copy of `tamago/cmd/`'s forms of `cmd/compile`'s closure (`cmd/compile/internal/...`, `cmd/internal/...` and
+  `cmd/vendor/golang.org/x/telemetry/...`: above, the same tree's `src/cmd/`) and of `tamago/goroot/`'s forms of
+  the standard library's internal packages it imports (`internal/abi`, `internal/buildcfg` ... : the same tree's
+  `src/internal/`), their namespaces and import paths renamed under `arbace/repr/go/internal/gc/` by
+  `arbace.go.gc/copy-texts` (its docstring lists the few other changes: test assembly and `internal/abi`'s
+  `funcpc.go` left out, two configuration-dependent files' `:val` annotations removed): Copyright The Go Authors,
+  under Go's BSD 3-Clause License (text below); each file's notice kept. `go/arbace/repr/go/gccompile/compile.ae`'s
+  `Compile` is `src/cmd/compile/main.go`'s `main` of the same tree, ported as forms (its notice kept): Copyright
+  2015 The Go Authors, under Go's BSD 3-Clause License (text below).
 - `wasm/web/arbace.js`'s part 1 (the gojs imports and the `Go` class; doc/wasm/WEB.md; doc/wasm/WASM-SURVEY.md, "As built:
   WA11, WA12 (begun)") and wai's headless world `go/arbace/wai/gojs.ae` (the same imports, the reference table and the run
   written in Go after it): derived from TamaGo's go1.27.1 tree's `lib/wasm/wasm_exec.js` and `lib/wasm/wasm_exec_node.js`
