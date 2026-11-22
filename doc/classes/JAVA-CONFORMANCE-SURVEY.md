@@ -5342,3 +5342,33 @@ t07703 (VTableTest: `pkg.A.m` apart from the interface's default and C's) pass; 
 translates and runs, failing 189 of 400 cases, every one "expected denied, actual allowed" (run-time access checks,
 which the Go build leaves out: JCS123's caller-sensitive checks), judged in `:reflection`; the controls t05450 and
 t05466 (Calendar tests of the same program) pass. Recorded with `--judge --partial --record` (0 regressions).
+
+## As built: JCS52 (a), doclint in javac's world; JCS50 (b) proven on a tool (2026-11-22, branch `java-batch-1122`, from next `3e8dfe109`)
+
+The burst's host batch for Java's reader (the main session's "PENDING HOST BATCH", 520-1 (a)): queue 520's two print fixes
+merged (t05905's qualifier kept before a constant variable, which moves repr/java's reader hash `835e66a3` -> `83a29bfb`; t07835's
+printer declarations from the platform), javac's tool built once at the new javac key, the converted trees regenerated once, and
+the rows those changes and JCS50 (b) move recorded. JCS51 (a) and JCS53 (a), decided with JCS52 (a) on 2026-10-25, are not built
+in this round (below).
+
+**JCS52 (a): what javac does** (jdk26u at baf63fb): `-Xdoclint[:...]` and `-Xdoclint/package:...` are kept by `Arguments` as doclint
+options; `BasicJavacTask.initDocLint` (the API's task, `JavacTaskImpl.prepareCompiler`, and javac's `Main.compile` alike) asks
+`com.sun.tools.doclint.DocLint.newDocLint()`, which streams `ServiceLoader.load(DocLint.class, the system class loader)` for a
+provider named `doclint` and falls back to `NoDocLint` (`compiler.warn.doclint.not.available`). jdk.javadoc's module-info provides
+it: `jdk.javadoc.internal.doclint.DocLint` (with `Checker`, `Env`, `Messages`), which needs `jdk.javadoc.internal.html`'s `HtmlTag`
+and `HtmlAttr`, `jdk.javadoc.internal.tool.AccessLevel`, and its resource bundles (`doclint*.properties`, compiled by
+`make/modules/jdk.javadoc/Gensrc.gmk`'s SetupCompileProperties into ListResourceBundle classes).
+
+**Built:**
+- `bin/javac-vendor`: a module `jdk.javadoc` in javac's world, its seven sources (`javadoc_files`: the four of doclint, the two of
+  html, AccessLevel) as `share` lines, its four bundles generated in the generate step by the same CompileProperties run on javac's
+  tool as jdk.compiler's (one more `-compile` per `doclint*.properties` in the @-file) and compared with the build tree's
+  `support/gensrc/jdk.javadoc` (WORK/generated.edn's `"jdk.javadoc/..."` entries; the provenance's `:generated :files` counts them),
+  `gensrc` lines; read by `read-jdk --check --no-javac` against the platform's jdk.javadoc, as the other modules.
+- The tool world's `java.util.ServiceLoader` (jrt's own, overlay/jdk/javac/java.base): `stream()` gives `iterator()`'s providers,
+  each a `Provider` (a private class `Found`), where it gave none; the variant (overlay/jdk/javac/variants/ServiceLoader.ae), which
+  replaces `iterator()` and `findFirst()`, binds `com.sun.tools.doclint.DocLint` to jdk.javadoc's provider, as it binds ToolProvider's
+  and PlatformProvider's. The other services stream nothing, as before (JavacTrees' DocCommentTreeTransformer: the identity, so a
+  Markdown doc comment, `///`, is checked untransformed; jdk.internal.md's transformer is not in the world).
+- Proven before the tool build: the four bundles generated on J1's tool (`javac-8e45bec2...`, key `d906aaf3`) equal to the build's
+  byte for byte; the module's eleven files read by `read-jdk --check --no-javac` on that tool, 11 converted, 0 failed, all native.
