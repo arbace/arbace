@@ -4308,6 +4308,482 @@
 
 (swap! checks conj fallthroughs)
 
+;; ---------------------------------------------------------------------------------------------
+;; cpp-diag-a (2026-11-22; the burst's stream on C++'s independence, doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a"): rules
+;; restated from the C++ standard (N4950 and the C++26 draft's wording where named) and the GCC 15.2 manual for GCC's wording;
+;; no GCC code read.
+
+;; Coroutines ([dcl.fct.def.coroutine], [expr.await], [expr.yield], [stmt.return.coroutine]):
+;; - [expr.await]/2: an await-expression (co_yield's too, [expr.yield]/1 being co_await of yield_value) appears only in a
+;;   function body: one in a namespace-scope variable's initializer is "'co_await' cannot be used outside a function"; nor in a
+;;   handler ("await expressions are not permitted in handlers"), nor in an unevaluated operand (sizeof, decltype: "'co_await'
+;;   cannot be used in an unevaluated context");
+;; - [dcl.spec.auto.general]/4 (a coroutine's return type is never deduced: [dcl.fct.def.coroutine]/1's note): a co_ operator in a
+;;   function or lambda whose declared return type is a placeholder with no trailing return type, "'co_await' cannot be used in a
+;;   function with a deduced return type", at the operator;
+;; - [stmt.return]/1 with [stmt.return.coroutine]: a coroutine has no return statement ("a 'return' statement is not allowed in
+;;   coroutine; did you mean 'co_return'?", at the function's name, as GCC places it);
+;; - [dcl.fct.def.coroutine]/3-/12: the promise type, coroutine_traits<R, P...>::promise_type (an explicit specialization the
+;;   unit gives for R with no other argument, else R::promise_type, [coroutine.traits.primary]), must declare initial_suspend,
+;;   final_suspend and get_return_object (/5, /7), unhandled_exception when exceptions are enabled (/5), return_void for a
+;;   co_return with no operand and return_value for one with a non-void operand ([stmt.return.coroutine]/2), yield_value for a
+;;   co_yield ([expr.yield]/1), and not both return_void and return_value (/6): "no member named 'X' in 'P'" (GCC's places:
+;;   the function's name, final_suspend at the body's closing brace, return_value or return_void at the co_return, yield_value at
+;;   the co_yield), "the coroutine promise type 'P' declares both 'return_value' and 'return_void'". Judged only when the
+;;   promise class is resolved: a complete class of the unit, no bases, no using-declaration, the function no template's and
+;;   no member function (whose traits take the object parameter), no partial specialization of coroutine_traits in the unit.
+
+(defn- co-word ^String [c] (case (:kind c) "CoawaitExpr" "co_await" "CoyieldExpr" "co_yield" "co_return"))
+
+(defn- co-nodes
+  "Every co_ node of a function body `x` with its ancestors' kinds (innermost first), not looking into lambdas, local classes
+  or nested functions."
+  [x]
+  (let [out (java.util.ArrayList.)]
+    ((fn w [x anc]
+       (cond
+         (map? x) (cond (co-kinds (:kind x)) (do (.add out [x anc]) (w (:inner x) (cons x anc)))
+                        (or (= "LambdaExpr" (:kind x)) (#{"CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl"} (:kind x)) (fn-kinds (:kind x))) nil
+                        :else (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w v (if (:kind x) (cons x anc) anc))))
+         (or (vector? x) (seq? x)) (doseq [y x] (w y anc))
+         :else nil))
+     x ())
+    (vec out)))
+
+(defn- returns-in
+  "The return statements of a function body `x`, not looking into lambdas, local classes or nested functions."
+  [x]
+  (let [out (java.util.ArrayList.)]
+    ((fn w [x]
+       (cond
+         (map? x) (cond (= "ReturnStmt" (:kind x)) (.add out x)
+                        (or (= "LambdaExpr" (:kind x)) (#{"CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl"} (:kind x)) (fn-kinds (:kind x))) nil
+                        :else (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w v)))
+         (or (vector? x) (seq? x)) (doseq [y x] (w y))
+         :else nil))
+     x)
+    (vec out)))
+
+(defn- deduced-ret? [^String qt]
+  (boolean (and (re-find #"^(?:const\s+)?(?:auto|decltype\(auto\))\s*\(" qt)
+                (not (re-find #"\)\s*(?:const\s*|volatile\s*|&{1,2}\s*|noexcept(?:\([^()]*\))?\s*)*->" qt)))))
+
+(defn coroutine-rules
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        at! (fn [off msg]
+              (when off
+                (let [[l c] (line-col starts (long off))]
+                  (.add out {:line l :col c :kind :error :rule :coroutine :msg msg}))))
+        mine? (fn [n] (= main (or (get-in n [:range :begin :file]) (get-in n [:range :begin :expansionLoc :file]))))
+        begin (fn [n] (when (mine? n) (get-in n [:range :begin :offset])))
+        classes (java.util.HashMap.)
+        specs (java.util.ArrayList.)
+        partial? (volatile! false)
+        _ ((fn ns-walk [nodes prefix]
+             (doseq [n nodes]
+               (case (:kind n)
+                 "NamespaceDecl" (ns-walk (:inner n) (if (and (= "std" (:name n)) (= "" prefix)) "std::" (str prefix (when (:name n) (str (:name n) "::")))))
+                 "LinkageSpecDecl" (ns-walk (:inner n) prefix)
+                 "CXXRecordDecl" (when (and (:name n) (:completeDefinition n) (not (str/starts-with? prefix "std::")))
+                                   (let [q (str prefix (:name n))]
+                                     (.put classes q (if (.containsKey classes q) :ambiguous n))
+                                     (ns-walk (:inner n) (str q "::"))))
+                 "ClassTemplateSpecializationDecl" (when (= "coroutine_traits" (:name n)) (.add specs n))
+                 "ClassTemplatePartialSpecializationDecl" (when (= "coroutine_traits" (:name n)) (vreset! partial? true))
+                 nil)))
+           (:nodes u) "")
+        cls (fn [^String q] (let [q (str/replace (str/replace q #"^(?:struct|class)\s+" "") #"\s+" "")
+                                  q (str/replace q #"^::" "")
+                                  c (.get classes q)]
+                              (when (map? c) c)))
+        promise-in (fn [c]
+                     (when (and c (empty? (:bases c)))
+                       (some (fn [m] (case (:kind m)
+                                       "CXXRecordDecl" (when (and (= "promise_type" (:name m)) (:completeDefinition m)) m)
+                                       ("TypeAliasDecl" "TypedefDecl") (when (= "promise_type" (:name m)) (or (cls (str (get-in m [:type :qualType]))) :unknown))
+                                       nil))
+                             (:inner c))))
+        promise-of (fn [^String r]
+                     (let [r (str/trim r)
+                           mine (filter (fn [s] (= (str/replace (str (get-in (first (:inner s)) [:type :qualType])) #"^::" "") r)) specs)]
+                       (cond
+                         @partial? nil
+                         (seq mine) (when (= 1 (count mine))
+                                      (let [s (first mine) targs (filter #(= "TemplateArgument" (:kind %)) (:inner s))]
+                                        (when (and (= 2 (count targs)) (:isPack (second targs)))
+                                          (promise-in (assoc s :bases [])))))
+                         :else (promise-in (cls r)))))
+        no-exc? (some #{"-fno-exceptions"} (:args u))
+        names-of (fn [p] (set (keep :name (:inner p))))
+        literal-like #{"IntegerLiteral" "FloatingLiteral" "StringLiteral" "CharacterLiteral" "CXXBoolLiteralExpr" "InitListExpr" "UnaryOperator" "BinaryOperator"}
+        coroutine! (fn [f b lambda?]
+                     (let [cos (co-nodes b)
+                           qt (str (if lambda? (get-in f [:inner 0 :inner 0 :type :qualType]) (get-in f [:type :qualType])))]
+                       (when (seq cos)
+                         (let [[c] (first cos)]
+                           (cond
+                             (deduced-ret? qt)
+                             (at! (begin c) (str "'" (co-word c) "' cannot be used in a function with a deduced return type"))
+                             ;; (no coroutine at all, [dcl.fct.def.coroutine]/4: coroutines' "cannot be used in a constructor", ...)
+                             (and (not lambda?)
+                                  (or (#{"CXXConstructorDecl" "CXXDestructorDecl"} (:kind f)) (and (= "FunctionDecl" (:kind f)) (= "main" (:name f)))
+                                      (:constexpr f) (:consteval f) (re-find #"\.\.\.\)" qt)))
+                             nil
+                             :else
+                             (do
+                               (doseq [r (returns-in b)]
+                                 (at! (or (get-in f [:loc :offset]) (begin f)) "a 'return' statement is not allowed in coroutine; did you mean 'co_return'?")
+                                 r)
+                               (doseq [[c anc] cos]
+                                 (when (and (#{"CoawaitExpr" "CoyieldExpr"} (:kind c)) (some #(= "CXXCatchStmt" (:kind %)) anc))
+                                   (at! (begin c) (str (if (= "CoyieldExpr" (:kind c)) "yield" "await") " expressions are not permitted in handlers")))
+                                 (when (and (#{"CoawaitExpr" "CoyieldExpr"} (:kind c))
+                                            (some #(and (= "UnaryExprOrTypeTraitExpr" (:kind %)) (#{"sizeof" "alignof"} (:name %))) anc))
+                                   (at! (begin c) (str "'" (co-word c) "' cannot be used in an unevaluated context"))))
+                               (when (and (not lambda?) (fn-kinds (:kind f)) (not= "CXXMethodDecl" (:kind f)) (mine? f))
+                                 (when-let [[_ r] (re-find #"^([^()]+?)\s*\(" qt)]
+                                   (let [p (promise-of r)]
+                                     (when (and (map? p) (not (some #(#{"UsingDecl" "UsingShadowDecl"} (:kind %)) (:inner p))))
+                                       (let [ms (names-of p)
+                                             pn (str (:name p))
+                                             name-off (or (get-in f [:loc :offset]) (begin f))
+                                             miss (fn [m] (str "no member named '" m "' in '" pn "'"))]
+                                         (when-not (ms "initial_suspend") (at! name-off (miss "initial_suspend")))
+                                         (when-not (ms "final_suspend") (at! (get-in b [:range :end :offset]) (miss "final_suspend")))
+                                         (when-not (ms "get_return_object") (at! name-off (miss "get_return_object")))
+                                         (when (and (not no-exc?) (not (ms "unhandled_exception"))) (at! name-off (miss "unhandled_exception")))
+                                         (if (and (ms "return_value") (ms "return_void"))
+                                           (at! name-off (str "the coroutine promise type '" pn "' declares both 'return_value' and 'return_void'"))
+                                           (doseq [[c] cos]
+                                             (case (:kind c)
+                                               "CoreturnStmt" (let [e (first (:inner c))]
+                                                                (cond (nil? e) (when-not (ms "return_void") (at! (begin c) (miss "return_void")))
+                                                                      (literal-like (:kind e)) (when-not (ms "return_value") (at! (begin c) (miss "return_value")))
+                                                                      :else nil))
+                                               "CoyieldExpr" (when-not (ms "yield_value") (at! (begin c) (miss "yield_value")))
+                                               nil))))))))))))))
+        walk (fn w [nodes tmpl?]
+               (doseq [n nodes]
+                 (let [k (:kind n)]
+                   (cond
+                     (#{"FunctionTemplateDecl" "ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl" "VarTemplateDecl"} k) (w (:inner n) true)
+                     (fn-kinds k) (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                                    (when (mine? n) (if tmpl? (when-let [[c] (first (co-nodes b))] (when (deduced-ret? (str (get-in n [:type :qualType]))) (at! (begin c) (str "'" (co-word c) "' cannot be used in a function with a deduced return type")))) (coroutine! n b false)))
+                                    (w (:inner b) tmpl?))
+                     (= "LambdaExpr" k) (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                                          (when (mine? n) (when-let [[c] (first (co-nodes b))]
+                                                            (when (deduced-ret? (str (get-in n [:inner 0 :inner 0 :type :qualType])))
+                                                              (at! (begin c) (str "'" (co-word c) "' cannot be used in a function with a deduced return type")))))
+                                          (w (:inner b) tmpl?))
+                     (#{"NamespaceDecl" "LinkageSpecDecl" "CXXRecordDecl" "ClassTemplateSpecializationDecl"} k) (w (:inner n) (or tmpl? (and (= "CXXRecordDecl" k) false)))
+                     (#{"VarDecl" "DeclStmt"} k)
+                     (do (when (and (= "VarDecl" k) (mine? n) (re-find #"decltype\s*\(\s*co_(?:await|yield)\b" (str (get-in n [:type :qualType]))))
+                           (at! (begin n) (str "'" (second (re-find #"(co_await|co_yield)" (str (get-in n [:type :qualType])))) "' cannot be used in an unevaluated context")))
+                         (w (:inner n) tmpl?))
+                     :else (when (vector? (:inner n)) (w (:inner n) tmpl?))))))]
+    ;; namespace-scope initializers
+    ((fn top [nodes]
+       (doseq [n nodes]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (top (:inner n))
+           "VarDecl" (when-let [[c] (first (co-nodes (:inner n)))]
+                       (when (#{"CoawaitExpr" "CoyieldExpr"} (:kind c))
+                         (at! (begin c) (str "'" (co-word c) "' cannot be used outside a function"))))
+           nil)))
+     (:nodes u))
+    (walk (:nodes u) false)
+    (vec (distinct out))))
+
+(swap! checks conj coroutine-rules)
+
+;; GCC's coroutine interface (the GCC 15.2 manual's -fcoroutines with [coroutine.handle]'s members, which a coroutine's lowering
+;; calls: std::coroutine_handle<void>::address, a non-static member function, and std::coroutine_handle<P>::from_address, a static
+;; one, [coroutine.handle.export.import]): a std::coroutine_handle the main file declares itself whose coroutine_handle<void> (its
+;; explicit specialization, else the primary template) has no member address ("'address' is not a member of
+;; 'std::coroutine_handle<void>'") or another kind of one ("'std::coroutine_handle<void>::address' must be a non-overloaded
+;; method"), or whose primary template has no from_address or another kind of one, at a coroutine's first co_ operator
+;; (coroutines/pr105475*.C; an explicit specialization's from_address is coroutine-handle-interface's).
+
+(defn coroutine-handle-members
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        std-items (for [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns)) (= main (get-in ns [:range :begin :file])))
+                        r (:inner ns)] r)
+        primary (some (fn [t] (when (and (= "ClassTemplateDecl" (:kind t)) (= "coroutine_handle" (:name t)))
+                                (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) (:inner t))))
+                      std-items)
+        void-spec (some (fn [r] (when (and (= "ClassTemplateSpecializationDecl" (:kind r)) (= "coroutine_handle" (:name r))
+                                           (= "void" (some #(when (= "TemplateArgument" (:kind %)) (str/trim (str (get-in % [:type :qualType])))) (:inner r))))
+                                  r))
+                        std-items)
+        hv (or void-spec primary)
+        members (fn [r nm] (filter #(= nm (:name %)) (:inner r)))
+        addr (when hv (let [ms (members hv "address")]
+                        (cond (empty? ms) "'address' is not a member of 'std::coroutine_handle<void>'"
+                              (not (and (= 1 (count ms)) (= "CXXMethodDecl" (:kind (first ms))) (not= "static" (:storageClass (first ms)))))
+                              "'std::coroutine_handle<void>::address' must be a non-overloaded method")))
+        from (when primary (let [ms (members primary "from_address")]
+                             (cond (empty? ms) "'from_address' is not a member of 'std::coroutine_handle<promise_type>'"
+                                   (not (and (= 1 (count ms)) (= "CXXMethodDecl" (:kind (first ms))) (= "static" (:storageClass (first ms)))))
+                                   "'std::coroutine_handle<promise_type>::from_address' must be a non-overloaded static function")))]
+    (when (or addr from)
+      (walk-nodes (fn [f _]
+                    (when (and (fn-kinds (:kind f)) (= main (get-in f [:range :begin :file])))
+                      (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner f))]
+                        (when-let [[c] (first (co-nodes b))]
+                          (when-let [o (get-in c [:range :begin :offset])]
+                            (let [[l col] (line-col starts (long o))]
+                              (doseq [m [addr from] :when m]
+                                (.add out {:line l :col col :kind :error :rule :coroutine :msg m}))))))))
+                  (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj coroutine-handle-members)
+
+;; Explicit object parameters (C++23, P0847R7: [dcl.fct]/6, [class.mfct.non.static], [over.match.funcs.general], [class.virtual]/7,
+;; [expr.prim.lambda.closure]/5, [expr.prim.req.general]/4, [expr.prim.this]/2):
+;; - only the first parameter of a member function's (or lambda's) parameter list may be one ("only the first parameter of a member
+;;   function can be declared as an explicit object parameter"), and none of a requires-expression's ("'this' specifier in a
+;;   requires-expression parameter"), of a function type's or of a non-member function ("a function type cannot have an explicit
+;;   object parameter", the parser's error for the latter);
+;; - it has no default argument ("an explicit object parameter may not have a default argument") and is no function parameter pack
+;;   ("an explicit object parameter cannot be a function parameter pack");
+;; - its member function is neither static nor virtual ("an explicit object member function cannot be 'static'", "... 'virtual'"),
+;;   overrides no virtual function of a base ("explicit object member function overrides virtual function"; a base's virtual
+;;   function of that name and the other parameters' count), and has no cv-qualifier or ref-qualifier ("explicit object member
+;;   function 'f' cannot have cv-qualifier", "... ref-qualifier"); a destructor has no parameter ("destructors may not have
+;;   parameters"); a non-virtual one marked override or final ([class.virtual]/5: "marked 'override', but does not override",
+;;   "marked 'final', but is not virtual") when it overrides nothing;
+;; - a lambda with one is neither mutable nor static ("'mutable' lambda specifier with explicit object parameter", "'static' ...");
+;; - its body has no `this` ("'this' is unavailable for explicit object member functions"), local classes' members aside.
+
+(defn- fn-tail-quals
+  "The qualifiers after a function type's parameter list (`void (S) const &` -> \"const &\"), nil when not found."
+  [^String qt]
+  (let [n (count qt)
+        open (loop [i 0 depth 0]
+               (when (< i n)
+                 (let [c (.charAt qt i)]
+                   (cond (and (= c \() (zero? depth)
+                              (not (re-find #"(?:decltype|typeof|__typeof__|noexcept|alignas|sizeof)\s*$" (subs qt 0 i)))) i
+                         (#{\< \(} c) (recur (inc i) (inc depth))
+                         (#{\> \)} c) (recur (inc i) (max 0 (dec depth)))
+                         :else (recur (inc i) depth)))))]
+    (when open
+      (let [close (loop [i (inc open) depth 1]
+                    (when (< i n)
+                      (let [c (.charAt qt i)]
+                        (cond (= c \() (recur (inc i) (inc depth))
+                              (= c \)) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                              :else (recur (inc i) depth)))))]
+        (when close
+          (str/trim (str/replace (subs qt (inc close)) #"(?:noexcept|throw)\b.*$|->.*$" "")))))))
+
+(defn explicit-object-params
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg]
+              (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                (let [[l c] (line-col starts (long o))]
+                  (.add out {:line l :col c :kind :error :rule :explicit-object :msg msg}))))
+        text (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset]) l (get-in n [:range :end :tokLen])]
+                       (when (and b e (mine? n) (<= (long b) (+ (long e) (long (or l 0)))) (<= (+ (long e) (long (or l 0))) (count src)))
+                         (subs src (long b) (+ (long e) (long (or l 0)))))))
+        classes (java.util.HashMap.)
+        _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n))
+                                  (.put classes (:name n) (if (.containsKey classes (:name n)) :ambiguous n))))
+                      (:nodes u) nil)
+        params (fn [m] (filter #(= "ParmVarDecl" (:kind %)) (:inner m)))
+        base-virtual (fn bv [cls nm nparams seen]
+                       (some (fn [b] (let [bn (str/replace (str/trim (str (get-in b [:type :qualType]))) #"^(?:struct|class)\s+" "")
+                                           c (.get classes bn)]
+                                       (when (and (map? c) (not (contains? seen bn)))
+                                         (or (some #(and (= nm (:name %)) (= "CXXMethodDecl" (:kind %)) (:virtual %)
+                                                         (= nparams (count (remove :isExplicitObjectParameter (params %)))))
+                                                   (:inner c))
+                                             (bv c nm nparams (conj seen bn))))))
+                             (:bases cls)))
+        this-in (fn [b] (let [acc (java.util.ArrayList.)]
+                          ((fn w [x] (cond (map? x) (cond (= "CXXThisExpr" (:kind x)) (.add acc x)
+                                                          (#{"CXXRecordDecl" "ClassTemplateDecl"} (:kind x)) nil
+                                                          :else (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w v)))
+                                           (or (vector? x) (seq? x)) (doseq [y x] (w y))))
+                           b)
+                          (vec acc)))
+        method! (fn [cls m]
+                  (let [ps (vec (params m))
+                        xs (filter :isExplicitObjectParameter ps)]
+                    (when (seq xs)
+                      (doseq [p (rest ps) :when (:isExplicitObjectParameter p)]
+                        (at! p "only the first parameter of a member function can be declared as an explicit object parameter"))
+                      (doseq [p xs]
+                        (when (:init p) (at! p "an explicit object parameter may not have a default argument"))
+                        (when (str/ends-with? (str/trim (str (get-in p [:type :qualType]))) "...")
+                          (at! p "an explicit object parameter cannot be a function parameter pack")))
+                      (when (:isExplicitObjectParameter (first ps))
+                        (let [qt (str (get-in m [:type :qualType]))
+                              q (or (fn-tail-quals qt) "")
+                              t (or (text m) "")
+                              ;; the declarator's text after its parameter list, before the body or the end
+                              tail (let [i (.lastIndexOf t ")" (int (let [j (.indexOf t "{")] (if (neg? j) (count t) j))))] (if (neg? i) "" (subs t (inc i))))
+                              ov (re-find #"\boverride\b" (str/replace tail #"\{.*" ""))
+                              fi (re-find #"\bfinal\b" (str/replace tail #"\{.*" ""))]
+                          (case (:kind m)
+                            "CXXDestructorDecl" (at! m "destructors may not have parameters")
+                            nil)
+                          (when (= "static" (:storageClass m)) (at! m "an explicit object member function cannot be 'static'"))
+                          (when (:virtual m) (at! m "an explicit object member function cannot be 'virtual'"))
+                          (when (re-find #"\b(?:const|volatile)\b" q) (at! m (str "explicit object member function '" (:name m) "' cannot have cv-qualifier")))
+                          (when (re-find #"&" q) (at! m (str "explicit object member function '" (:name m) "' cannot have ref-qualifier")))
+                          (when (and (= "CXXMethodDecl" (:kind m)) cls)
+                            (if (base-virtual cls (:name m) (dec (count ps)) #{})
+                              (at! m "explicit object member function overrides virtual function")
+                              (when-not (:virtual m)
+                                (cond ov (at! m (str "'" (:name m) "' marked 'override', but does not override"))
+                                      fi (at! m (str "'" (:name m) "' marked 'final', but is not virtual"))))))
+                          (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner m))]
+                            (doseq [x (take 1 (this-in b))]
+                              (at! x "'this' is unavailable for explicit object member functions"))))))))]
+    (walk-nodes (fn [n parent]
+                  (case (:kind n)
+                    ("CXXMethodDecl" "CXXDestructorDecl" "CXXConstructorDecl" "CXXConversionDecl")
+                    (when (mine? n) (method! (when (= "CXXRecordDecl" (:kind parent)) parent) n))
+                    "FunctionDecl" (when (and (mine? n) (:isExplicitObjectParameter (first (params n))) (not (str/includes? (str (text n)) "::")))
+                                     (at! n "a non-member function cannot have an explicit object parameter"))
+                    "RequiresExpr" (doseq [p (:params n) :when (:isExplicitObjectParameter p)]
+                                     (at! p "'this' specifier in a requires-expression parameter"))
+                    ("TypeAliasDecl" "TypedefDecl" "FieldDecl" "VarDecl")
+                    (when-let [t (text n)]
+                      (when (re-find #"[(,]\s*this\s+[A-Za-z_:]" (if (#{"FieldDecl" "VarDecl"} (:kind n)) (str/replace t #"(?s)[={\[].*" "") (str/replace t #"(?s)[{\[].*" "")))
+                        (at! n "a function type cannot have an explicit object parameter")))
+                    "LambdaExpr" (when-let [t (text n)]
+                                   (let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))
+                                         bo (get-in b [:range :begin :offset])
+                                         head (if (and bo (mine? b)) (subs src (long (get-in n [:range :begin :offset])) (long bo)) t)]
+                                     (when (re-find #"\(\s*this\b" head)
+                                       (when-let [[_ w] (re-find #"\)\s*(?:[^()]*\s)?\b(mutable|static)\b" head)]
+                                         (at! n (str "'" w "' lambda specifier with explicit object parameter"))))))
+                    nil))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj explicit-object-params)
+
+;; [basic.scope.scope]/4 and [over.load]/1 with explicit object parameters (C++23): two member function declarations of a class with
+;; the same name, the same non-object parameter-type-list and both templates or neither correspond, so cannot be overloaded, when
+;; one is static, or when both are non-static with corresponding object parameters: exactly one an implicit object member function
+;; with no ref-qualifier and the object parameters' types the same after removing references, or the types the same (an implicit
+;; object member function's object parameter "cv X&", "cv X&&" with &&). Judged when one of the two has an explicit object parameter,
+;; whose type names the class unless the other is static (GCC's "'g' cannot be overloaded with 'f'", at the later one).
+
+(defn- obj-type-key
+  "A parameter type's [base cv ref] (`S const&` -> [\"S\" #{\"const\"} \"&\"]), the base's spaces dropped."
+  [^String t]
+  (let [t (str/trim t)
+        ref (cond (str/ends-with? t "&&") "&&" (str/ends-with? t "&") "&" :else nil)
+        cv (set (re-seq #"\b(?:const|volatile)\b" t))
+        base (-> t (str/replace #"\b(?:const|volatile|struct|class)\b" "") (str/replace #"[&\s]" ""))]
+    [base cv ref]))
+
+(defn xobj-overloads
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        norm (fn [^String t] (-> t (str/replace #"\s+" " ") str/trim))]
+    (walk-nodes
+     (fn [c _]
+       (when (and (= "CXXRecordDecl" (:kind c)) (:completeDefinition c) (:name c) (mine? c))
+         (let [cn (:name c)
+               ms (vec (keep (fn [m]
+                               (let [[f tmpl] (cond (= "CXXMethodDecl" (:kind m)) [m false]
+                                                    (= "FunctionTemplateDecl" (:kind m)) [(some #(when (= "CXXMethodDecl" (:kind %)) %) (:inner m)) true]
+                                                    :else nil)]
+                                 (when f
+                                   (let [ps (filter #(= "ParmVarDecl" (:kind %)) (:inner f))
+                                         xo (when (:isExplicitObjectParameter (first ps)) (first ps))
+                                         q (or (fn-tail-quals (str (get-in f [:type :qualType]))) "")]
+                                     {:f f :name (:name f) :tmpl tmpl :static (= "static" (:storageClass f))
+                                      :xo xo :others (mapv #(norm (str (get-in % [:type :qualType]))) (if xo (rest ps) ps))
+                                      :obj (cond xo (obj-type-key (str (get-in xo [:type :qualType])))
+                                                 :else [cn (set (re-seq #"\b(?:const|volatile)\b" q)) (if (str/includes? q "&&") "&&" "&")])
+                                      :noref (and (not xo) (not (str/includes? q "&")))}))))
+                             (:inner c)))]
+           (doseq [j (range (count ms)) i (range j)
+                   :let [a (ms i) b (ms j)]
+                   :when (and (= (:name a) (:name b)) (= (:tmpl a) (:tmpl b)) (= (:others a) (:others b))
+                              (or (:xo a) (:xo b))
+                              (or (:static a) (:static b) (some #(= cn (first (:obj %))) (filter :xo [a b]))))]
+             (let [corr (cond (or (:static a) (:static b)) true
+                              (not= (boolean (:noref a)) (boolean (:noref b)))
+                              (= (vec (take 2 (:obj a))) (vec (take 2 (:obj b))))
+                              :else (= (:obj a) (:obj b)))]
+               (when (and corr (mine? (:f b)))
+                 (when-let [o (or (get-in b [:f :loc :offset]) (get-in b [:f :range :begin :offset]))]
+                   (let [[l col] (line-col starts (long o))]
+                     (.add out {:line l :col col :kind :error :rule :explicit-object
+                                :msg (str "'" (:name b) "' cannot be overloaded with '" (:name a) "'")})))))))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj xobj-overloads)
+
+;; GCC's __builtin_source_location (which std::source_location::current calls, [support.srcloc.cons]): it returns a pointer to a
+;; constant std::source_location::__impl, so (as its diagnostics in the dg tests state) the unit must declare std::source_location as
+;; a class ("'source_location' is not a member of 'std'", "'void std::source_location()' is not a type", "'std::source_location' is
+;; not a class type") whose member __impl is a class ("'__impl' is not a member of 'std::source_location'", "... is not a type", "...
+;; is not a class type") with only the non-static data members _M_file_name and _M_function_name of type const char * and _M_line and
+;; _M_column of an integral type ("'std::source_location::__impl' does not contain only non-static data members '_M_file_name',
+;; '_M_function_name', '_M_line' and '_M_column'", "... does not have 'const char *' type", "... does not have integral type"), at
+;; the call (cpp2a/srcloc*.C).
+
+(defn builtin-source-location
+  [u starts ^String src ^String main]
+  (let [calls (let [acc (java.util.ArrayList.)]
+                (walk-nodes (fn [n _] (when (and (#{"CallExpr" "BuiltinExpr"} (:kind n)) (= main (get-in n [:range :begin :file])))
+                                        (let [o (long (or (get-in n [:range :begin :offset]) -1))]
+                                          (when (and (>= o 0) (.startsWith src "__builtin_source_location" (int o)))
+                                            (.add acc n)))))
+                            (:nodes u) nil)
+                (vec acc))]
+    (when (seq calls)
+      (let [std-items (for [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns)))
+                            r ((fn flat [xs] (mapcat #(if (and (= "NamespaceDecl" (:kind %)) (:isInline %)) (flat (:inner %)) [%]) xs)) (:inner ns))] r)
+            sl (filter #(= "source_location" (:name %)) std-items)
+            cls (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) sl)
+            integral #"^(?:(?:unsigned|signed|short|long|int|char|char8_t|char16_t|char32_t|wchar_t|bool|__int128)\s*)+$"
+            msg (cond
+                  cls (let [im (filter #(= "__impl" (:name %)) (:inner cls))
+                            ic (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) im)]
+                        (cond
+                          ic (let [fs (filter #(= "FieldDecl" (:kind %)) (:inner ic))
+                                   nm (set (map :name fs))
+                                   want #{"_M_file_name" "_M_function_name" "_M_line" "_M_column"}
+                                   ty (fn [n] (str/trim (str (get-in (first (filter #(= n (:name %)) fs)) [:type :qualType]))))]
+                               (cond
+                                 (or (not= nm want) (not= (count fs) 4))
+                                 "'std::source_location::__impl' does not contain only non-static data members '_M_file_name', '_M_function_name', '_M_line' and '_M_column'"
+                                 (not (re-matches #"const char\s*\*" (ty "_M_file_name"))) "'std::source_location::__impl::_M_file_name' does not have 'const char *' type"
+                                 (not (re-matches #"const char\s*\*" (ty "_M_function_name"))) "'std::source_location::__impl::_M_function_name' does not have 'const char *' type"
+                                 (not (re-matches integral (ty "_M_line"))) "'std::source_location::__impl::_M_line' does not have integral type"
+                                 (not (re-matches integral (ty "_M_column"))) "'std::source_location::__impl::_M_column' does not have integral type"
+                                 :else nil))
+                          (some #(fn-kinds (:kind %)) im) "'std::source_location::__impl()' is not a type"
+                          (some #(#{"TypedefDecl" "TypeAliasDecl"} (:kind %)) im) "'std::source_location::__impl' is not a class type"
+                          (empty? im) "'__impl' is not a member of 'std::source_location'"
+                          :else nil))
+                  (some #(fn-kinds (:kind %)) sl) "'void std::source_location()' is not a type"
+                  (some #(#{"TypedefDecl" "TypeAliasDecl"} (:kind %)) sl) "'std::source_location' is not a class type"
+                  (empty? sl) "'source_location' is not a member of 'std'"
+                  :else nil)]
+        (when msg
+          (vec (for [c calls :let [o (get-in c [:range :begin :offset])] :when o
+                     :let [[l col] (line-col starts (long o))]]
+                 {:line l :col col :kind :error :rule :source-location :msg msg})))))))
+
+(swap! checks conj builtin-source-location)
+
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
   [^String main ^String e]

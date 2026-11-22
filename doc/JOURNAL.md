@@ -17313,3 +17313,39 @@ reaches); the code generator's Sema (arbace/cpp/sema.ae) for the rules that need
 declarations' types themselves); a whole dg-error run (4,564 files; the own passes and the files whose expected messages name a rule's
 diagnostic were run instead); the template instantiation depth, constexpr evaluation and atomic builtins' families (template.ae's and
 the constant evaluator's ground, left).
+
+## 2026-11-22: cpp-diag-a round 1: coroutines, explicit object parameters, __builtin_source_location in Arbace's own C++ front end
+
+The burst's stream cpp-diag-a (branch `cpp-diag-a-1122` from next `171f82078`; the directories gxx-dg/cpp2a, cpp23, cpp26, concepts
+and coroutines of C++'s dg check; queue 518 and cpp-diag-b hold the others): files of those directories that fail their own dg-error
+lines on Arbace's own front end (`bin/repr-cpp dg --front native`, test/cpp/check-dg-own-linux-amd64.edn), grouped by expected
+message, each rule written from the C++ standard (N4950 and the C++26 draft) with GCC 15.2's wording read off the tests' dg-error
+lines; no GCC code read. New checks appended to arbace/repr/cpp/diag.ae (no shared function edited; `checks` gains them by `swap!`):
+
+- `coroutine-rules`: [expr.await]/2 (no await or yield expression outside a function body, in a handler, or in sizeof/decltype's
+  operand), [dcl.spec.auto.general]/4 (no coroutine with a deduced return type, functions and lambdas without a trailing return type),
+  no return statement in a coroutine, and [dcl.fct.def.coroutine]/3-/12's promise interface (initial_suspend, final_suspend,
+  get_return_object, unhandled_exception unless -fno-exceptions, return_void or return_value for each co_return, yield_value for each
+  co_yield, not both return_value and return_void), judged when the promise class is resolved (coroutine_traits' explicit
+  specialization for R alone, else R::promise_type; no bases, no using-declaration, no member function, no template, no partial
+  specialization of coroutine_traits in the unit); a constructor's, destructor's, main's, constexpr or varargs function's co_ operator
+  left to the existing `coroutines`;
+- `coroutine-handle-members`: GCC's coroutine interface with a std::coroutine_handle the main file declares: coroutine_handle<void>'s
+  address a single non-static member function, the primary's from_address a single static one (coroutines/pr105475*.C);
+- `explicit-object-params`, `xobj-overloads` (C++23, P0847R7): [dcl.fct]/6 (first parameter only, not in a requires-expression, a
+  function type or a non-member function, no default argument, no pack), static and virtual xobj functions, cv- and ref-qualifiers,
+  overriding a base's virtual function, override/final on one that overrides nothing, destructors, mutable and static lambdas, `this`
+  in its body; [basic.scope.scope]/4's corresponding object parameters for an xobj function against a static or implicit object one;
+- `builtin-source-location`: std::source_location and its __impl as __builtin_source_location needs them (the tests' messages state
+  the requirement; the GCC manual is silent on it).
+
+Proof: `bin/repr-cpp dg --corpus dg-error --front native --only` the 127 files of the whole corpus whose source has a co_ operator, an
+explicit object parameter or __builtin_source_location, with the control pair DRs/dr2082.C and DRs/dr1423.C, `--record` (r1, 129
+files, 851 s): own pass 90; 52 files fail -> pass (coroutines 28, cpp23 13, cpp2a 11), no recorded pass lost, no row outside the
+stream's directories changed, the control failing as it must. Three regressions found first on the coroutines' own passes
+(co-*-syntax-05-constexpr*.C: the return-statement rule on a constexpr function) were fixed before the record run.
+
+Scores: C++ read 5,786 / 0 / 532 -> 5,793 / 0 / 528; independence 0.957800 -> 0.958600 (the tool's mean of its rounded stages; the read
+stage 0.799 -> 0.803, 1,898 of 4,387 rows own; floored 95), completeness 0.972210 -> 0.972378 (floored 97). Alternatives: the parser
+for the explicit object rules (its soft diagnostics would need the class context; the tree has every fact), the code generator's Sema
+for the promise interface (its overload resolution not needed for a missing member).
