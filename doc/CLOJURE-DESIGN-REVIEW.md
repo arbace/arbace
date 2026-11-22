@@ -489,3 +489,8 @@ closes (`EntityDeclarationImpl` and its closure added to `java-xml-classes.txt`:
 Truly by design, unchanged: `class-files` (test-proxy-method-order and gen-interface-source-file read class files with ASM;
 clj-1208 at the eval level, CDR8 (b)), `tools-deps`, `runtime-source` (AOT), `identity-hash`, `main-since-v4`,
 `method-invoke-message` (RPS19 (a)), `security-providers` (eight providers, each a module of its own).
+
+## Decided (2026-11-22, the user: CDR12-CDR15)
+
+CDR12 (a), CDR13 (a), CDR14 (a) and CDR15 (a), Q1 (b) in place of Q1 (a) (doc/JOURNAL.md, "the user's decisions on the
+burst's by-design and counting questions"). CDR16 stays open (the eval level's clojure-xml and invoke-checks-accessibility).
