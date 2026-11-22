@@ -14025,3 +14025,15 @@ Branch `rust-c4-1122` from `mac/rust-c6-1120` (`fceea7b4a`), the caches of rust-
 - Finding for C's crop (not changed here): arbace/c/build.ae `int-const` folds a pointer constant through `chk/wrap` with the
   pointer type, whose `int-bits` default is 32 signed bits; `(chk/wrap v (if (ptr? t) chk/t-ulong (under t)))` would keep 64.
 - No gate (the user's rule); pack-compare-test passed (its new cases and control); no record re-recorded this round.
+
+## 2026-11-22: rust-c4-1122: C4's passes again (np5) and the switch run: 5 of 5 own on the native interface and names
+
+The passes with round 1's fixes (`.tmp/c4/np5-chain.sh`; core one round, alloc and std two; 3 h 05 min on a host at load 70-140):
+core's interface 27,062 of 27,498 facts equal to the helper's (25,879 before), alloc's 3,863 of 3,863 (3,532), std's 4,644 of 4,644
+(3,789), std's names 15,120 of 15,162 (14,893; aliases 207 of 215, 18 before). The switch run on that interface and those names
+(`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=... RF_CORE_ATTRS=none RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind
+vectors`, 17 min, 2.2 GB): **5 of 5 own** (0 of 5 before). C4 stays not own in the case inputs: inputs.tsv's words end "(C6-5
+pending)", and no ruling on C6-5 is in the line's facts (the survey's DECISION C6-5; C4-1 (a) was taken, 2026-11-20). Fixed after
+np5 in the module runs' code (not yet in a chain): a const trait's `#[rustc_non_const_trait_method]` methods not const,
+`#[rustc_comptime]` impl methods const, an object type's named late-bound region by its name, a fn pointer's binder region `'_` in a
+signature. C1's six programs are being built again at this branch's code (`.tmp/c4/c1build2.sh`), then run on ci and recorded.

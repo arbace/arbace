@@ -5784,11 +5784,29 @@ each by rustc's recorded run (status, stdout's and stderr's digests, ref-rustc-1
 (rust-c6-1120). The control (std against panics' run)
 differs. The six programs built again at this branch's code and recorded follow (below).
 
-### C4: the passes again (np5, write-ahead)
+### C4: the passes again and the switch run (np5, 2026-11-22)
 
-core's pass (one round) on chain 2's native names, then alloc's and std's on the names carrying core's (and alloc's) aliases, the
-interface assembled and compared with the helper's, std's names assembled and compared, then the switch run on that interface and
-those names (the five samples); the measure is the next entry's. Left in core (the module runs): io::error's and io_slice's
+core's pass (one round, 6,762 s on a host at load 70-140, 3.8 GB) on chain 2's native names, then alloc's and std's (two rounds
+each) on the names carrying core's (and alloc's) aliases, the interface assembled and compared with the helper's, std's names
+assembled and compared (`.tmp/c4/np5-chain.sh`, 3 h 05 min):
+
+| facts equal to the helper's | before (np3, 2026-11-21) | after (np5) |
+|---|---|---|
+| core's interface | 25,879 of 27,498 | **27,062 of 27,498** (229 differ, 207 missing) |
+| alloc's interface | 3,532 of 3,863 | **3,863 of 3,863** |
+| std's interface | 3,789 of 4,644 | **4,644 of 4,644** |
+| std's names | 14,893 of 15,162 (aliases 18 of 215) | **15,120 of 15,162** (aliases 207 of 215, generics 1,054 of 1,078) |
+
+The switch run on that interface and those names (`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=np5/std-names.edn RF_CORE_ATTRS=none
+RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind vectors`, 17 min, 2.2 GB): **5 of 5 own** (0 of 5 before: the
+Transmutes from `usize` to `Alignment`, a byte without AlignmentEnum's `#[repr(usize)]`, and std's `fmt::Result` and vectors'
+`i32x4` aliases are gone), each program's facts as on the helper's interface. `inputs.tsv` writes C4 as "std's interface from the
+crates' native passes, the StableCrateIds by Cargo's metadata hash ported, std's names from the crates' sources (C6-5 pending)":
+C4 is not counted own until the user rules on C6-5 (the 36 units as the build's description), so no case input changes. Left in core's 436 facts: the const trait methods marked `#[rustc_non_const_trait_method]` and `#[rustc_comptime]` impl methods
+(59, fixed after np5 in the module runs' code, not yet in a chain), core_simd shift_scalar's impl-header `'_` printed `'^#0` (42),
+to_bytes' anonymous constant args (66), the Thin trait alias bound (9 + 51), and missing (207): core_simd ops' 40 + 40, num's
+`from_*_bytes` 72 (`[u8; size_of::<Self>()]` inputs), io's 9 ADTs and their impls, legacy_int_modules' 24 consts. Also (the module
+runs): io::error's and io_slice's
 `cfg_select!` `#[path]` modules (module-files reads no macro's arms), core_simd ops' `use super::*` of a private import, to_bytes'
 `{ $size * $elems }` written by rustc as its anonymous constant's path, the `Thin` trait alias bound, the `[const]`/`const` bound
 clauses (512's ranking, not taken here).
