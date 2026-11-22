@@ -17922,3 +17922,23 @@ Asked by the main session after java-design's and go-gc's reports (about 15:00 U
   rest of :xml) and JD9 (JDI) were not chosen: they stay as they are. JD7 (517-1's synthetic lambdas) was not asked: by design.
 - Go: escape_unique (gc-m) is judged by the in-executable gc, reversing 2026-11-06's own-port choice for this row; the 2 unsafe-layout
   programs (issue8606b, nilptr) are n/a. Alternatives not taken: keep -m goi's own port; keep all three.
+
+## 2026-11-22 (go-tail): Go's last three eval rows, the user's decisions applied
+
+The user's decisions of 2026-11-22 on Go's last three eval rows (the entry before this one):
+
+- escape_unique.go (class :gc-m, deferred) is judged by gc in the executable: `bin/goi`'s `check_err`, when a -m program's
+  own verdict by goi's port fails (the instances of another package's generic functions, which gc stencils in the importing
+  package), sends it to `check_err_gc` as -live is. Proved on the gate executable
+  `.tmp/gate-exe/92a96093a59cb6e9edb9/amd64/arbace` (this worktree's `bin/arbace-go --gate-key` reads 94cc3f1e9022..., not 92a96093...,
+  so the key did not match; the executable holds the driver: the row passes): `bin/goi check --only '^escape_unique\.go$'`, 1 pass, 0 known,
+  with a new control `_control/escape_unique-vs-escape_iface` (escape_unique.go against escape_iface.go's // ERROR comments, fail as it
+  must), and escape_unique.go joins test/goi/essential.txt so the control has its subject in every essential run. `check --record` records
+  only whole, so that one row of test/goi/check-linux-amd64.edn was edited from the passing --only run (:known -> :pass), as go-gc did
+  for gc2.go, and its entry removed from test/goi/check-known.edn. The corpora of a fresh worktree (linux-errtest's read) were copied
+  from the main checkout's .tmp/repr-go/forms (the read does not fit under 8 GiB).
+- fixedbugs/issue8606b.go and nilptr.go (class :unsafe-layout, by design) become n/a: the class's :kind :na, its reason kept, in the
+  counting pattern of mac/counting-1122 (:memory).
+
+bin/reap --record: Go eval 1,818 pass, 0 design, 0 deferred, 20 n/a (was 1,817 / 2 / 1 / 18); crops-score --record: Go completeness
+0.9959 -> 0.9963 (the cells read, aot and print keep their by-design rows). crops-score --judge --strict 0 problems; records-check 0 problems.
