@@ -3734,7 +3734,53 @@
         :else nil))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes]))
+;; GCC's -fno-new-inheriting-ctors (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Options Controlling C++ Dialect": the inheriting
+;; constructors of C++11 before P0136R1, as declarations of the derived class's own): a using-declaration of a base's constructors
+;; declares in the class a constructor of each of their parameter lists, so two such of the same parameter list from two bases, which
+;; the class does not declare itself, are one constructor declared twice ("'D1::D1(int)' inherited from 'B2'", at the second using);
+;; and an inherited constructor's ellipsis is not inherited, so a construction with more arguments than its parameters finds no match
+;; ("no matching function for call", at the declaration), cpp0x/inh-ctor3.C, inh-ctor11.C.
+
+(defn old-inheriting-ctors
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (when (some #{"-fno-new-inheriting-ctors"} (concat (:args u) *driver-args*))
+      (let [records (into {} (for [r (:nodes u) :when (and (= "CXXRecordDecl" (:kind r)) (:name r) (:completeDefinition r))] [(:name r) r]))
+            report! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                                  (when (= main (or (get-in n [:range :begin :file]) main))
+                                    (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :inheriting-ctor :msg msg})))))
+            ctors (fn [r] (filter #(and (= "CXXConstructorDecl" (:kind %)) (not (:isImplicit %))) (:inner r)))
+            params (fn [c] (str/replace (str (get-in c [:type :qualType])) #"^void\s*" ""))
+            inherited (fn [r] (for [ud (:inner r) :when (= "UsingDecl" (:kind ud))
+                                    :let [[_ b n] (re-matches #"using\s+(\w+)\s*::\s*(\w+)" (str (:_text ud)))]
+                                    :when (and b (= b n) (get records b))]
+                                [ud (get records b)]))]
+        (doseq [r (vals records)]
+          (let [own (set (map params (ctors r)))
+                seen (java.util.HashMap.)]
+            (doseq [[ud b] (inherited r)
+                    c (ctors b) :let [ps (params c)]
+                    :when (not (contains? own ps))]
+              (if (and (.containsKey seen ps) (not= (.get seen ps) (:name b)))
+                (report! ud (str "'" (:name r) "::" (:name r) ps "' inherited from '" (:name b) "'"))
+                (.put seen ps (:name b))))))
+        ;; ellipses not inherited
+        (walk-nodes (fn [v _]
+                      (when (and (= "VarDecl" (:kind v)) (= "call" (:init v)))
+                        (when-let [r (get records (str/trim (str/replace (str (get-in v [:type :qualType])) #"\b(?:const|struct|class)\b" "")))]
+                          (let [args (let [x (first (:inner v))] (if (= "ParenListExpr" (:kind x)) (:inner x) [x]))
+                                n (count args)
+                                cands (concat (map (fn [c] [c false]) (ctors r)) (for [[_ b] (inherited r) c (ctors b)] [c true]))]
+                            (when (and (seq cands) (some second cands)
+                                       (not-any? (fn [[c inh]] (let [np (count (filter #(= "ParmVarDecl" (:kind %)) (:inner c)))
+                                                                     va (re-find #"\.\.\.\)" (str (get-in c [:type :qualType])))]
+                                                                 (if (and va (not inh)) (>= n np) (= n np))))
+                                                 cands))
+                              (report! v (str "no matching function for call to '" (:name r) "::" (:name r) "(...)'")))))))
+                    (:nodes u) nil)))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
