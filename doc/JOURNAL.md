@@ -16297,3 +16297,11 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   without it would be the night's failure again. Probe: run_in_subinterp("x = 1") 0; the subinterpreter's
   syslog.openlog() a RuntimeError; its syslog.syslog after the main interpreter's openlog 0; an uncaught ValueError printed
   and -1; the subinterpreter's own sys.modules (no syslog) while the main one keeps its.
+- `bin/pyi check --fresh --only` of test_capi's test_run and test_file, test_syslog, test_threading's subinterpreter tests
+  and test_int's per-interpreter tests (the 710e90 executable, go/arbace/py interpreted, its controls failing as they must):
+  25 now pass against the record (test_syslog 13 of 13; test_threading's test_threads_join and _2; test_run's file tests;
+  test_file's test_py_fopen, test_pyfile_fromfd, test_pyfile_getline, test_pyfile_writestring), 4 failing, fixed then: the C
+  API's compiler takes cf_flags as given while compile() refuses bits outside PyCF_MASK, PyCF_MASK_OBSOLETE and
+  PyCF_COMPILE_MASK (run_anyfileflags passes its closeit as cf_flags): compileC keeps those bits alone; and
+  sys.set_int_max_str_digits' limit is each interpreter's (interpRegs.maxStrDigits, saved and restored by interpSwitch, a
+  new subinterpreter's the configured limit): test_int's test_int_max_str_digits_is_per_interpreter.
