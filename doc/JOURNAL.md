@@ -17173,3 +17173,7 @@ passes test/python/lib-test-limits.tsv: MODULE, MEM_MB, MODULE_TIMEOUT_S, WHY), 
 --module-timeout for its module. Listed: spawn's test_manager, test_processes (also 7200 s: 163 tests at about 30 s each,
 P1's run ended at the hour with 61 ok and 33 killed), test_misc, and concurrent_futures' test_process_pool, at 16384 MB.
 The proof of the raised cap passes 8 GB, so it is queued under bin/heavy-lock (behind the gate build of this branch's key).
+- And a test's own timeout: a row MODULE/TEST-ID<TAB>-<TAB>SECONDS raises one test's --test-timeout (the runner's
+  START line's id). test___all__'s test_all: 29 s and a pass alone on b2a5b50d4819 with a warm IR cache, but run early in
+  the check (test___all__ sorts first among the test_ modules) it compiles most of the 329 modules it imports, about 415 s
+  cold (P1's run today: past 300 s, as the record): 900 s.

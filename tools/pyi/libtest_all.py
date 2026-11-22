@@ -380,7 +380,7 @@ def tree_rss_mb(pid):
     return kb // 1024
 
 
-def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0, mem_max=0):
+def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0, mem_max=0, test_timeouts=None):
     skipfile = os.path.join(d, m + ".skip")
     out_lines, err_parts, reported = [], [], set()
     times = []  # queue 275: DIR/MODULE.times, a line a test: ID, outcome, wall and CPU seconds (the driver's processes)
@@ -477,7 +477,7 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
                             times.append("#start\t%d\t%.1f\t%s" % (attempts, now - state["t_start"],
                                                                    "%.1f" % c if c is not None else "?"))
                             state["t_start"] = None
-                        state["current"], state["deadline"] = row[1], now + test_timeout
+                        state["current"], state["deadline"] = row[1], now + max(test_timeout, (test_timeouts or {}).get(row[1], 0))
                         state["t0"], state["cpu0"], state["samples"] = now, c, ([(now, c)] if c is not None else [])
                     elif row[0] == "CASE" and len(row) > 1:
                         if row[1] not in reported and state["t0"] is not None:
@@ -506,7 +506,7 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
             break
         if cur and cur not in reported:
             if state["killed"] == "test":
-                out_lines.append("CASE\t%s\ttimeout\tthe test past %d s (killed; the driver started again)" % (cur, test_timeout))
+                out_lines.append("CASE\t%s\ttimeout\tthe test past %d s (killed; the driver started again)" % (cur, max(test_timeout, (test_timeouts or {}).get(cur, 0))))
             elif state["killed"] == "idle":
                 # queue 275: a hang told from a slow test: its processes idle (under 5% of a core) for idle_timeout s
                 out_lines.append("CASE\t%s\ttimeout\tthe test idle past %d s, a hang (killed; the driver started again)" % (cur, idle_timeout))
@@ -542,16 +542,22 @@ def read_limits(path):
     MODULE_TIMEOUT_S<TAB>WHY, # and blank lines ignored): {module: (mem MB, module timeout s)}, each only ever above
     --mem-max and --module-timeout (a module whose children are each a whole pyi process, the runner's caps sized for
     one driver: the limits are the runner's, not the tests')"""
-    out = {}
+    out, tests = {}, {}
     if not path or not os.path.exists(path):
-        return out
+        return out, tests
     for line in open(path, encoding="utf-8"):
         if not line.strip() or line.startswith("#"):
             continue
         f = line.rstrip("\n").split("\t")
-        if len(f) >= 3:
+        if len(f) < 3:
+            continue
+        if "/" in f[0]:
+            # MODULE/TEST-ID<TAB>-<TAB>TEST_TIMEOUT_S: the test's own timeout (above --test-timeout)
+            mod, tid = f[0].split("/", 1)
+            tests.setdefault(mod, {})[tid] = float(f[2])
+        else:
             out[f[0]] = (int(f[1]), float(f[2]))
-    return out
+    return out, tests
 
 
 def cmd_run(args):
@@ -560,7 +566,7 @@ def cmd_run(args):
     test_timeout, module_timeout = float(arg(args, "--test-timeout", "300")), float(arg(args, "--module-timeout", "3600"))
     idle_timeout = float(arg(args, "--idle-timeout", "0"))
     mem_max = int(arg(args, "--mem-max", "0"))
-    limits = read_limits(os.environ.get("PYI_LIB_TEST_LIMITS"))
+    limits, test_limits = read_limits(os.environ.get("PYI_LIB_TEST_LIMITS"))
     oracle = arg(args, "--oracle")
     tbase = os.path.abspath(arg(args, "--tmp-base", os.path.join(d, "_tmp")))
     os.makedirs(d, exist_ok=True)
@@ -580,7 +586,7 @@ def cmd_run(args):
             mm, mt = limits.get(m, (mem_max, module_timeout))
             if mem_max and mm:
                 mm = max(mm, mem_max)
-            n = run_module(m, root, d, oracle, test_timeout, max(mt, module_timeout), tmp, idle_timeout, mm if mem_max else 0)
+            n = run_module(m, root, d, oracle, test_timeout, max(mt, module_timeout), tmp, idle_timeout, mm if mem_max else 0, test_limits.get(m))
             shutil.rmtree(tmp, ignore_errors=True)
             shutil.rmtree(tmp + "c", ignore_errors=True)
             tmp_guard(m, os.path.join(d, "tmp-leftovers.log"))
