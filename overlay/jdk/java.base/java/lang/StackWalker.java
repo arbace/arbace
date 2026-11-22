@@ -225,9 +225,11 @@ public final class StackWalker {
             return (fs.length - i) / 2;
         }
 
+        // not SIZED, as jdk26u's StackFrameTraverser: Stream.count() of a SIZED spliterator takes its size and
+        // never walks, so a stream used after its walk ended did not throw IllegalStateException (StackStreamState)
         @Override
         public int characteristics() {
-            return ORDERED | IMMUTABLE | NONNULL | SIZED;
+            return ORDERED | IMMUTABLE | NONNULL;
         }
     }
 
