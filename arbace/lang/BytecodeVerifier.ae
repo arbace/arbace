@@ -97,6 +97,9 @@
   (method ^:private ^:static isVerifyError ^boolean [^Throwable e]
     (instance? VerifyError e))
 
+  (method ^:private mname ^String [this]
+    (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)))
+
   (method ^:private fail ^Throwable [this ^int pc ^String why]
     (Bytecode/error 4 (java-str "Bad verification at bci " pc " in method '" (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.))
                                 "': " why)))
@@ -219,8 +222,13 @@
         (loop [^int i 0]
           (when (< i (alength hs))
             (let [s (aget hs i) e (aget hs (unchecked-inc-int i)) h (aget hs (unchecked-add-int i 2))]
-              (when (or (not (aget starts s)) (and (< e n) (not (aget starts e))) (not (aget starts h)))
-                (throw (.fail this h "Illegal exception table range")))
+              ;; HotSpot's ClassFormatErrors (its verifier's classfile_parse_error)
+              (when (not (aget starts s))
+                (throw (Bytecode/error 0 (java-str "Illegal exception table start_pc " s " in method '" (.mname this) "'"))))
+              (when (and (< e n) (not (aget starts e)))
+                (throw (Bytecode/error 0 (java-str "Illegal exception table end_pc " e " in method '" (.mname this) "'"))))
+              (when (not (aget starts h))
+                (throw (Bytecode/error 0 (java-str "Illegal exception table handler_pc " h " in method '" (.mname this) "'"))))
               (let [ct (aget hs (unchecked-add-int i 3))]
                 (when (not (== ct 0))
                   (when (not (.assignable this (java-str "L" (.className cf ct) ";") "Ljava/lang/Throwable;"))
@@ -265,7 +273,8 @@
         7 (let [n (.className cf (bit-and-int (.getShort b) 0xFFFF))]
             (if (== (.charAt n 0) \[) n (java-str "L" n ";")))
         8 (java-str "u" (bit-and-int (.getShort b) 0xFFFF))
-        (throw (.fail this pc (java-str "Bad verification type tag " tag))))))
+        (throw (Bytecode/error 0 (java-str "StackMapTable format error: bad verification type tag " tag " in method '"
+                                           (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)) "'"))))))
 
   ;; the locals of a frame from its listed types (a long or double taking two slots)
   (method ^:private setLocals ^void [this ^BytecodeVFrame f ^java.util.List ts ^int pc]
@@ -275,7 +284,8 @@
         (when (< j (.size ts))
           (let [t (cast String (.get ts j))]
             (when (> (unchecked-add-int i (BytecodeVerifier/size t)) maxLocals)
-              (throw (.fail this pc "StackMapTable error: local variable table overflow")))
+              (throw (Bytecode/error 0 (java-str "StackMapTable format error: bad type array size in method '"
+                                                 (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)) "'"))))
             (aset (.-locals f) i t)
             (set! i (unchecked-add-int i (BytecodeVerifier/size t))))
           (recur (unchecked-inc-int j))))))
@@ -309,7 +319,8 @@
                     delta (cond
                             (< ft 64) ft
                             (< ft 128) (unchecked-subtract-int ft 64)
-                            (< ft 247) (throw (.fail this 0 (java-str "StackMapTable error: reserved frame type " ft)))
+                            (< ft 247) (throw (Bytecode/error 0 (java-str "StackMapTable format error: reserved frame type " ft " in method '"
+                                                                          (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)) "'")))
                             :else (bit-and-int (.getShort b) 0xFFFF))
                     pc (unchecked-add-int off (unchecked-inc-int delta))]
                 (set! (.-thisUninit f) false)
@@ -342,7 +353,7 @@
                 (when (or (>= pc (alength code)) (not (aget starts pc)))
                   (throw (.fail this pc "StackMapTable error: bad offset")))
                 (when (> (.stackSize f) maxStack)
-                  (throw (.fail this pc "StackMapTable error: exceeds max stack")))
+                  (throw (Bytecode/error 0 (java-str "StackMapTable format error: bad type array size in method '" (.mname this) "'"))))
                 (aset frames pc f)
                 (set! prev f)
                 (set! off pc))
@@ -544,6 +555,8 @@
 
   ;; the class of a Class entry as a type
   (method ^:private classType ^String [this ^int i]
+    (when (not (== (.tag cf i) 7))
+      (throw (Bytecode/error 4 (java-str "Illegal type at constant pool entry " i " in class " (.replace (.-thisName cf) \/ \.)))))
     (let [n (.className cf i)]
       (if (== (.charAt n 0) \[) n (java-str "L" n ";"))))
 
@@ -848,6 +861,8 @@
           desc (if (== op 186) (.natDesc cf (aget (.-ib cf) i)) (.refDesc cf i))
           ps (Bytecode/params desc)
           ot (if (nil? owner) nil (if (== (.charAt owner 0) \[) owner (java-str "L" owner ";")))]
+      (when (and (== op 186) (not (== 0 (.u2 v (unchecked-add-int pc 3)))))
+        (throw (.fail v pc "Third and fourth operand bytes of invokedynamic must be zero")))
       (when (and (.startsWith name "<") (not (and (== op 183) (.equals name "<init>"))))
         (throw (.fail v pc (java-str "Illegal call to internal method " name))))
       (when (== op 185)
