@@ -2009,7 +2009,325 @@
                 [(:nodes u) (vec (vals (:decltypes u)))] nil)
     (vec (vals (into (sorted-map) (map (juxt :line identity) out))))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues]))
+;; ---------------------------------------------------------------------------------------------
+;; GNU's extensions' rules (cpp-gnu, the user's decision of 2026-11-22: CP398 (c)'s :gcc-own-rules built): each rule restated from
+;; the GCC 15.2 manual (gcc/doc/extend.texi and invoke.texi of the pinned gcc-15.2.0.tar.xz: "Common Function Attributes",
+;; "Common Type Attributes", "Common Variable Attributes", "C++-Specific Variable, Function, and Type Attributes", "Unnamed
+;; struct/union fields within structs/unions") and the dg-error lines of the g++.dg tests that state it, clean-room: no GCC code
+;; read or ported, the messages Arbace's own in GCC's words where a test names them (the dg verdict compares lines).
+
+(defn- gnu-attr-name ^String [a] (str/replace (str (:_gnu a)) #"^__|__$" ""))
+
+(defn- gnu-attrs-of
+  "The GNU attributes (NativeAttr nodes with :_gnu) among the node's inner nodes, by bare name."
+  [n]
+  (filter #(and (= "NativeAttr" (:kind %)) (:_gnu %)) (:inner n)))
+
+(defn- int-type-size
+  "The size in bytes of a builtin integer, character, boolean or pointer type's spelling on x86-64 (the psABI's), or nil."
+  [^String qt]
+  (let [t (-> qt (str/replace #"\b(?:const|volatile)\b" "") str/trim (str/replace #"\s+" " "))]
+    (cond
+      (re-find #"[*&]$" t) 8
+      (re-matches #"(?:unsigned |signed )?char|bool|char8_t" t) 1
+      (re-matches #"(?:unsigned )?short(?: int)?|char16_t" t) 2
+      (re-matches #"(?:unsigned )?int|unsigned|char32_t|wchar_t" t) 4
+      (re-matches #"(?:unsigned )?long(?: long)?(?: int)?" t) 8
+      (re-matches #"(?:unsigned )?__int128" t) 16
+      :else nil)))
+
+(defn- float-type-size [^String qt]
+  (let [t (-> qt (str/replace #"\b(?:const|volatile)\b" "") str/trim (str/replace #"\s+" " "))]
+    (case t "float" 4 "double" 8 "long double" 16 "_Float16" 2 "__float128" 16 nil)))
+
+(defn gnu-rules
+  "The GNU extensions' rules over the main file's nodes (see above):
+  - abi_tag: each argument a narrow string literal naming an identifier (the manual's \"abi_tag (\\\"tag\\\", ...)\": tags are
+    identifiers mangled into the name), at the attribute (abi/abi-tag13.C);
+  - aligned: not on an enumerator (it applies to variables, fields and types), \"alignment may not be specified for 'e'\"
+    (ext/attrib68.C);
+  - an unnamed struct or union member (an anonymous struct, the manual's unnamed fields) has no base class: \"anonymous struct
+    with base classes\", at its class-key (ext/anon-struct8.C, anon-struct9.C);
+  - transparent_union: the union is passed as its first member, so that member's machine mode is the union's own: the union's
+    mode is the integer mode of its size, so the first member must be an integer, enumeration or pointer type of the union's
+    size (a floating type, a smaller member, a class or an array has another mode): \"type transparent 'union X' cannot be made
+    transparent\", at the union (ext/transparent-union.C);
+  - visibility: a class redeclared with an explicit visibility other than its earlier declaration's, \"'struct B' redeclared
+    with different visibility\", at the later declaration (ext/visibility/redecl1.C; a function's is a warning, not judged);
+  - main: vector_size among a function's decl-specifiers makes its return type a vector ([basic.start.main]/2: main returns
+    int), \"'::main' must return 'int'\" (warn/main-3.C)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        off-of (fn [x] (or (get-in x [:loc :offset]) (get-in x [:range :begin :offset])))
+        mine? (fn [x] (let [f (or (get-in x [:loc :file]) (get-in x [:range :begin :file]))] (or (nil? f) (= main f))))
+        report! (fn [x rule msg] (when-let [o (off-of x)]
+                                   (when (mine? x)
+                                     (let [[l c] (line-col starts (long o))]
+                                       (.add out {:line l :col c :kind :error :rule rule :msg msg})))))
+        args-of (fn [a] (let [t (str/trim (str (:_arg a)))]
+                          (when (seq t) (map str/trim (str/split t #"\s*,\s*(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)")))))
+        vis-of (fn [n] (or (:_vis n)
+                           (some #(when (= "visibility" (gnu-attr-name %)) (some->> (:_arg %) (re-find #"\"([^\"]*)\"") second)) (gnu-attrs-of n))))
+        seen-vis (java.util.HashMap.)]
+    (walk-nodes
+     (fn [n parent]
+       (let [k (:kind n)]
+         ;; abi_tag's arguments
+         (doseq [a (gnu-attrs-of n) :when (= "abi_tag" (gnu-attr-name a))]
+           (let [as (args-of a)]
+             (when-let [bad (some (fn [x] (cond (not (re-matches #"\"(?:[^\"\\]|\\.)*\"" x)) "arguments to the 'abi_tag' attribute must be narrow string literals"
+                                                (not (re-matches #"\"[A-Za-z_][A-Za-z_0-9]*\"" x)) "arguments to the 'abi_tag' attribute must contain valid identifiers"
+                                                :else nil))
+                                  as)]
+               (report! a :gnu-rule bad))))
+         ;; aligned on an enumerator
+         (when (= "EnumConstantDecl" k)
+           (when (some #(= "aligned" (gnu-attr-name %)) (gnu-attrs-of n))
+             (report! n :gnu-rule (str "alignment may not be specified for '" (:name n) "'"))))
+         (when (and (= "CXXRecordDecl" k) (:completeDefinition n))
+           ;; an anonymous struct or union with a base: its parent holds an implicit field of its type right after it
+           (when (and (nil? (:name n)) (seq (:bases n)) parent)
+             (let [sibs (vec (:inner parent))
+                   i (.indexOf ^java.util.List sibs n)]
+               ;; (or, with no member, no declaration of the parent names its type: GCC's anonymous struct is any unnamed
+               ;; class defined in a class with no declarator, anon-struct9.C's `class : virtual a {};`)
+               (when (and (>= i 0) (= "CXXRecordDecl" (:kind parent))
+                          (or (and (< (inc i) (count sibs))
+                                   (let [f (nth sibs (inc i))] (and (= "FieldDecl" (:kind f)) (:isImplicit f) (nil? (:name f)))))
+                              (and (empty? (filter #(not (#{"NativeAttr"} (:kind %))) (:inner n)))
+                                   (when-let [o (off-of n)]
+                                     (let [tag (str " at " main ":" o ")")]
+                                       (not-any? #(str/includes? (str (get-in % [:type :qualType])) tag) sibs))))))
+                 (report! n :gnu-rule (str "anonymous " (:tagUsed n) " with base classes")))))
+           ;; transparent_union
+           (when (and (= "union" (:tagUsed n)) (some #(= "transparent_union" (gnu-attr-name %)) (gnu-attrs-of n)))
+             (let [fs (filter #(and (= "FieldDecl" (:kind %)) (not (:isImplicit %))) (:inner n))
+                   size (fn [f] (let [qt (str (get-in f [:type :qualType]))] (or (int-type-size qt) (float-type-size qt))))
+                   sizes (map size fs)]
+               (when (and (seq fs) (every? some? sizes))
+                 (let [usize (apply max sizes)
+                       qt0 (str (get-in (first fs) [:type :qualType]))]
+                   (when (or (float-type-size qt0) (not= usize (int-type-size qt0)))
+                     (report! n :gnu-rule (str "type transparent 'union " (or (:name n) "<unnamed>") "' cannot be made transparent"))))))))
+         ;; a class's visibility against its earlier declarations' in the same scope (keyed by the parent's identity)
+         (when (and (= "CXXRecordDecl" k) (:name n))
+           (when-let [v (vis-of n)]
+             (let [key [(System/identityHashCode parent) (:name n)]
+                   o (.get seen-vis key)]
+               (if (and o (not= o v))
+                 (report! n :gnu-rule (str "'" (:tagUsed n) " " (:name n) "' redeclared with different visibility"))
+                 (when-not o (.put seen-vis key v))))))
+         ;; main's return type made a vector
+         (when (and (= "FunctionDecl" k) (= "main" (:name n)) (or (nil? parent) (#{"LinkageSpecDecl" "TranslationUnitDecl"} (:kind parent)))
+                    (some #(= "vector_size" (gnu-attr-name %)) (gnu-attrs-of n)))
+           (report! n :gnu-rule "'::main' must return 'int'"))))
+     (:nodes u) nil)
+    (vec out)))
+
+;; [basic.scope.class]/2 of C++20 (C++23 [class.member.lookup]/... "A name N used in a class S shall refer to the same
+;; declaration in its context and when re-evaluated in the completed scope of S. No diagnostic is required."): GCC diagnoses it
+;; (-Wchanges-meaning, an error by default) when a member declared in S has the name of an unqualified name used earlier in S, or
+;; in a class nested in it, outside a complete-class context, whose lookup then found a declaration outside S -- unless the
+;; member is a typedef or alias naming that same type again ("lenient if it has the same meaning", warn/changes-meaning2.C's
+;; `typedef ::Lock Lock;`, a warning). The parser notes the uses (arbace.repr.cpp.parse/note-cm-use!, the class node's
+;; :_cm-uses: the name to its first use's offset); a use at a declaration's own name (a parameter's, a declarator's) is none.
+
+(def ^:private cm-member-kinds
+  #{"FieldDecl" "VarDecl" "TypedefDecl" "TypeAliasDecl" "CXXMethodDecl" "FunctionTemplateDecl" "CXXRecordDecl" "EnumDecl"
+    "ClassTemplateDecl" "TypeAliasTemplateDecl" "VarTemplateDecl" "EnumConstantDecl"})
+
+(defn changes-meaning
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        off-of (fn [x] (get-in x [:loc :offset]))
+        mine? (fn [x] (let [f (or (get-in x [:loc :file]) (get-in x [:range :begin :file]))] (or (nil? f) (= main f))))]
+    (walk-nodes
+     (fn [n _]
+       (when-let [uses (and (= "CXXRecordDecl" (:kind n)) (:_cm-uses n))]
+         (let [decl-offs (let [hs (java.util.HashSet.)]
+                           (walk-nodes (fn [x _] (when (and (:name x) (string? (:name x))) (when-let [o (off-of x)] (.add hs (long o))))) (:inner n) nil)
+                           hs)
+               members (mapcat (fn [m] (if (and (= "EnumDecl" (:kind m)) (not (:scopedEnumTag m)))
+                                         (cons m (filter #(= "EnumConstantDecl" (:kind %)) (:inner m)))
+                                         [m]))
+                               (:inner n))]
+           (doseq [m members
+                   :let [nm (:name m) o (off-of m) u (when (string? nm) (get uses nm))]
+                   :when (and u o (contains? cm-member-kinds (:kind m)) (not (:isImplicit m)) (mine? m)
+                              (< (long u) (long o)) (not (.contains decl-offs (long u))))
+                   ;; (a typedef or alias of that same name's type: the same meaning)
+                   :when (not (and (#{"TypedefDecl" "TypeAliasDecl"} (:kind m))
+                                   (= nm (-> (str (get-in m [:type :qualType])) (str/replace #"\b(?:const|volatile|struct|class|union|enum)\b" "")
+                                             str/trim (str/replace #"^::\s*" "")))))]
+             (let [[l c] (line-col starts (long o))]
+               (.add out {:line l :col c :kind :error :rule :changes-meaning
+                          :msg (str "declaration of '" nm "' changes meaning of '" nm "'")}))))))
+     (:nodes u) nil)
+    (vec out)))
+
+;; GCC's runtime interface for exceptions (cpp-gnu, 2026-11-22): a throw-expression, a handler and a rethrow are lowered to calls
+;; of the Itanium C++ ABI's exception-handling functions (the ABI's 2.4, "Throwing an Exception", and 2.5, "Catching an
+;; Exception": __cxa_allocate_exception(size_t), __cxa_free_exception(void *), __cxa_throw(void *, std::type_info *, void (*)(void
+;; *)), __cxa_get_exception_ptr(void *), __cxa_begin_catch(void *), __cxa_end_catch(), __cxa_rethrow()), which g++ declares
+;; implicitly as extern "C" functions at their first use, the type_info pointer as void *: a declaration of that name at namespace
+;; scope that is not such a function (a variable: "redeclared as different kind of entity") or of another type ("conflicting
+;; declaration of C function"; an exception specification aside) is an error at the construct that first needs it, once a
+;; function (eh/builtin6.C, builtin7.C, builtin9.C, builtin10.C, builtin11.C). A throw-expression needs allocate, free and throw;
+;; a handler begin_catch and end_catch, and get_exception_ptr when its parameter is a class object by value; a rethrow rethrow.
+
+(def ^:private eh-abi
+  {"__cxa_allocate_exception" "void *(unsigned long)" "__cxa_free_exception" "void (void *)"
+   "__cxa_throw" "void (void *, void *, void (*)(void *))" "__cxa_get_exception_ptr" "void *(void *)"
+   "__cxa_begin_catch" "void *(void *)" "__cxa_end_catch" "void ()" "__cxa_rethrow" "void ()"})
+
+(defn eh-runtime
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        decls (into {} (for [n (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:nodes u))
+                             :when (and (#{"FunctionDecl" "VarDecl"} (:kind n)) (contains? eh-abi (:name n)))]
+                         [(:name n) n]))]
+    (when (and (seq decls) (not (some #{"-fno-exceptions"} (:args u))))
+      (let [bad (into {} (for [[nm n] decls
+                               :let [qt (-> (str (get-in n [:type :qualType])) (str/replace #"\s*(?:throw\(\)|noexcept(?:\(true\))?)\s*$" "") str/trim)]
+                               :when (or (= "VarDecl" (:kind n)) (not= qt (get eh-abi nm)))]
+                           [nm (if (= "VarDecl" (:kind n)) "redeclared as different kind of entity" "conflicting declaration of C function")]))
+            done (java.util.HashSet.)
+            uses (java.util.ArrayList.)]
+        (when (seq bad)
+          (walk-nodes (fn [n _]
+                        (case (:kind n)
+                          "CXXThrowExpr" (.add uses [n (if (seq (:inner n)) ["__cxa_allocate_exception" "__cxa_free_exception" "__cxa_throw"] ["__cxa_rethrow"])])
+                          "CXXCatchStmt" (let [v (first (filter #(= "VarDecl" (:kind %)) (:inner n)))
+                                               qt (str/trim (str (get-in v [:type :qualType])))
+                                               byval-class (and v (not (re-find #"[*&]$" qt))
+                                                                (nil? (int-type-size qt)) (nil? (float-type-size qt))
+                                                                (re-matches #"(?:const\s+)?[A-Za-z_][\w:<>, ]*" qt)
+                                                                (not (#{"void" "bool"} qt)))]
+                                           (.add uses [n (cond-> ["__cxa_begin_catch" "__cxa_end_catch"] byval-class (conj "__cxa_get_exception_ptr"))]))
+                          nil))
+                      (:nodes u) nil)
+          (doseq [[n fns] (sort-by #(get-in (first %) [:range :begin :offset] 0) uses)
+                  :let [o (get-in n [:range :begin :offset])
+                        f (or (get-in n [:range :begin :file]) main)
+                        hit (remove #(.contains done %) (filter bad fns))]
+                  :when (and o (= f main) (seq hit))]
+            (doseq [h hit] (.add done h))
+            (let [[l c] (line-col starts (long o))]
+              (.add out {:line l :col c :kind :error :rule :eh-abi
+                         :msg (str "'" (first hit) "' " (get bad (first hit)))}))))))
+    ;; (the destructor of a namespace-scope object is registered by __cxa_atexit(dtor, &object, &__dso_handle), the ABI's 3.3.5.3,
+    ;; g++ declaring `extern "C" void *__dso_handle` then: a declaration of __dso_handle of another type conflicts, at the first such
+    ;; object of a class whose destructor the unit declares, init/dso_handle2.C)
+    (when-let [d (first (for [n (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:nodes u))
+                              :when (and (#{"VarDecl" "FunctionDecl"} (:kind n)) (= "__dso_handle" (:name n))
+                                         (not= "void *" (str/trim (str (get-in n [:type :qualType])))))]
+                          n))]
+      (let [dtor-classes (let [hs (java.util.HashSet.)]
+                           (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n)
+                                                            (some #(and (= "CXXDestructorDecl" (:kind %)) (not (:explicitlyDefaulted %))) (:inner n)))
+                                                   (.add hs (:name n))))
+                                       (:nodes u) nil)
+                           hs)]
+        (when-let [v (first (for [n (mapcat #(if (#{"LinkageSpecDecl" "NamespaceDecl"} (:kind %)) (:inner %) [%]) (:nodes u))
+                                  :when (and (= "VarDecl" (:kind n)) (not= "extern" (:storageClass n))
+                                             (.contains dtor-classes (str/trim (str/replace (str (get-in n [:type :qualType])) #"\b(?:const|volatile|struct|class)\b" ""))))]
+                              n))]
+          (when-let [o (get-in v [:loc :offset])]
+            (let [[l c] (line-col starts (long o))]
+              (.add out {:line l :col c :kind :error :rule :eh-abi :msg "conflicting declaration of '__dso_handle'"}))))))
+    (vec out)))
+
+;; GNU's musttail (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Statement Attributes": musttail on a return statement whose operand is
+;; a call asserts that the call is a tail call -- the caller's frame gone before it -- and "if the compiler cannot generate a musttail
+;; tail call it reports an error"): the call cannot replace the caller's return when (a) the caller is non-throwing and the callee
+;; may throw (the exception would have to stop at the caller: "call may throw exception that does not propagate"), (b) the call's
+;; type is not the caller's return type (a conversion follows the call: "return value type mismatch"), (c) the caller returns a
+;; class with a destructor that does something (the returned temporary outlives the frame), or (d) an automatic variable whose
+;; destructor does something is in scope (it is destroyed after the call: "other reasons"); a destructor with an empty body does
+;; nothing. A function template is judged at each of its specializations the unit names by explicit template arguments
+;; (musttail8.C to musttail11.C, opt/musttail4.C). The parser marks the return statement (:_musttail).
+
+(defn- fn-ret-type ^String [^String qt]
+  (let [d (loop [i 0 depth 0] (when (< i (count qt)) (let [c (.charAt qt i)]
+                                                       (cond (and (= c \() (zero? depth) (pos? i)) i
+                                                             :else (recur (inc i) depth)))))]
+    (str/trim (if d (subs qt 0 d) qt))))
+
+(defn- nothrow-type? [^String qt]
+  (boolean (or (re-find #"\bthrow\(\)\s*$" qt) (re-find #"\bnoexcept(?:\(true\))?\s*$" qt))))
+
+(defn musttail
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        tops (mapcat #(if (#{"LinkageSpecDecl"} (:kind %)) (:inner %) [%]) (:nodes u))
+        fns (into {} (for [n tops
+                           :let [[fd tps] (if (= "FunctionTemplateDecl" (:kind n))
+                                            [(first (filter #(= "FunctionDecl" (:kind %)) (:inner n)))
+                                             (vec (keep #(when (= "TemplateTypeParmDecl" (:kind %)) (:name %)) (:inner n)))]
+                                            [(when (= "FunctionDecl" (:kind n)) n) []])]
+                           :when (and fd (string? (:name fd)))]
+                       [(:name fd) {:node fd :tps tps :qt (str (get-in fd [:type :qualType]))}]))
+        dtor-nontrivial (into #{} (for [n tops :when (and (= "CXXRecordDecl" (:kind n)) (:name n))
+                                        :let [d (first (filter #(= "CXXDestructorDecl" (:kind %)) (:inner n)))
+                                              b (when d (first (filter #(= "CompoundStmt" (:kind %)) (:inner d))))]
+                                        :when (and d (not (:explicitlyDefaulted d)) (or (nil? b) (seq (:inner b))))]
+                                    (:name n)))
+        norm (fn [^String t] (-> t (str/replace #"\s+" " ") (str/replace #"\b(?:class|struct) " "") str/trim))
+        subst (fn [^String t env] (reduce (fn [t [k v]] (str/replace t (re-pattern (str "\\b" (java.util.regex.Pattern/quote k) "\\b")) v)) t env))
+        insts (let [m (java.util.HashMap.)]
+                (walk-nodes (fn [n _] (when (and (= "DeclRefExpr" (:kind n)) (:explicitTemplateArgs n))
+                                        (let [nm (get-in n [:referencedDecl :name])]
+                                          (when (seq (:tps (get fns nm)))
+                                            (.put m nm (conj (or (.get m nm) #{}) (vec (:explicitTemplateArgs n))))))))
+                            (:nodes u) nil)
+                m)
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr" "ExprWithCleanups" "CXXBindTemporaryExpr" "MaterializeTemporaryExpr"} (:kind x))
+                              (strip (first (:inner x))) x))
+        reported (java.util.HashSet.)]
+    (doseq [[fname {fd :node tps :tps fqt :qt}] fns
+            :let [body (first (filter #(= "CompoundStmt" (:kind %)) (:inner fd)))]
+            :when body
+            env (if (seq tps) (for [as (.get ^java.util.HashMap insts fname) :when (= (count as) (count tps))] (zipmap tps as)) [{}])]
+      (letfn [(walk [x locals]
+                (cond
+                  (map? x)
+                  (case (:kind x)
+                    "LambdaExpr" nil
+                    "CompoundStmt" (loop [cs (:inner x) ls locals]
+                                     (when-let [c (first cs)]
+                                       (walk c ls)
+                                       (recur (rest cs) (if (= "DeclStmt" (:kind c))
+                                                          (into ls (filter #(= "VarDecl" (:kind %)) (:inner c)))
+                                                          ls))))
+                    "ReturnStmt" (when (:_musttail x)
+                                   (let [call (some-> (first (:inner x)) strip)
+                                         callee (when (= "CallExpr" (:kind call)) (strip (first (:inner call))))
+                                         cinfo (when (= "DeclRefExpr" (:kind callee)) (get fns (get-in callee [:referencedDecl :name])))]
+                                     (when cinfo
+                                       (let [cenv (zipmap (:tps cinfo) (map #(subst % env) (:explicitTemplateArgs callee)))
+                                             fret (norm (subst (fn-ret-type fqt) env))
+                                             cret (norm (subst (fn-ret-type (:qt cinfo)) cenv))
+                                             why (cond
+                                                   (and (nothrow-type? fqt) (not (nothrow-type? (:qt cinfo)))) "call may throw exception that does not propagate"
+                                                   (not= fret cret) "return value type mismatch"
+                                                   (contains? dtor-nontrivial fret) "the returned class has a non-trivial destructor"
+                                                   :else nil)
+                                             why (or why
+                                                     (when (some (fn [v] (contains? dtor-nontrivial (norm (str/replace (str (get-in v [:type :qualType])) #"\bconst\b" ""))))
+                                                                 (remove #(#{"static" "extern"} (:storageClass %)) locals))
+                                                       "other reasons"))]
+                                         (when why
+                                           (when-let [o (get-in x [:range :begin :offset])]
+                                             (when (and (= main (or (get-in x [:range :begin :file]) main)) (.add reported o))
+                                               (let [[l c] (line-col starts (long o))]
+                                                 (.add out {:line l :col c :kind :error :rule :musttail :msg (str "cannot tail-call: " why)})))))))))
+                    (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v)))] (walk v locals)))
+                  (vector? x) (doseq [y x] (walk y locals))
+                  :else nil))]
+        (walk body [])))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under

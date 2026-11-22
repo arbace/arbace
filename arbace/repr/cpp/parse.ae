@@ -228,6 +228,11 @@
 ;; queue 439: GNU's vector_size among a declaration's specifiers or a cast's type-id makes their type the vector type (as a
 ;; typedef's always does): arbace.cpp.codegen binds it true; the checker (arbace.repr.cpp.diag) refuses vector types, so off there
 (def ^:dynamic *vector-specs* false)
+;; cpp-gnu (2026-11-22): the classes being defined whose member-specification is being parsed (not pre-skimmed): an identity map
+;; of each class's scope to [its complete scope (the pre-skim's) and a map of the names used in it (unqualified names, a qualified
+;; name's first part) whose lookup passed the class without finding a member it declares later, to the first use's offset];
+;; arbace.repr.cpp.diag/changes-meaning reads them off the class's node (:_cm-uses)
+(def ^:dynamic *cm-scopes* nil)
 
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
@@ -526,6 +531,21 @@
         (identical? :punct (tk t)) (do (adv! p) {:op (ts t) :i i})
         :else {:conv (parse-type-id p :conv) :i i}))))
 
+(defn- note-cm-use!
+  "cpp-gnu (2026-11-22): the unqualified name `nm` at token `i`, found by lookup from the cursor's scope: in each class being
+  defined (*cm-scopes*) whose scope the lookup passed without finding `nm` there while the class's complete scope declares it
+  (a member declared later), its first use noted ([basic.scope.class]/2 of C++20, [class.member.lookup]: a name used in a class
+  shall refer to the same declaration when looked up again in the completed class)."
+  [^P p ^String nm ^long i]
+  (when (main-tok? p i)
+    (let [^java.util.IdentityHashMap m *cm-scopes*]
+      (loop [s (scope p)]
+        (when (and s (nil? (sc/find-in s nm)))
+          (when-let [[late ^HashMap uses] (.get m s)]
+            (when (and (.get ^HashMap (sc/names-of late) nm) (not (.containsKey uses nm)))
+              (.put uses nm (.-o ^T (tok-at p i)))))
+          (recur (sc/parent-of s)))))))
+
 (defn parse-name
   "A possibly qualified name at the cursor: the name map with the cursor after it, or nil (the cursor unmoved) when
   none starts there. `mode` :parse parses template arguments, :scan skips them; `member` (a name after . or ->): its
@@ -544,7 +564,9 @@
                  e (cond member (when (or (is-at? p 1 "::")
                                           (and (is-at? p 1 "<") (let [c (angle-close p (inc (ix p)))] (and c (t= (tok-at p (inc (long c))) "::")))))
                                   (lookup (scope p) s))
-                         first? (lookup (scope p) s)
+                         first? (let [e (lookup (scope p) s)]
+                                  (when (and e *cm-scopes*) (note-cm-use! p s i))
+                                  e)
                          :else (find-member qe s))]
              (adv! p)
              ;; cpp-read (2026-11-22): a name after the template keyword followed by no template argument list where a type is
@@ -2682,7 +2704,14 @@
         (if (block-decl-start? p)
           ;; the attributes of a declaration: its declaration-specifiers' (from them again)
           (do (seek! p b) (parse-block-decl p))
-          (let [s (parse-statement p)]
+          (let [sb (ix p)
+                s (parse-statement p)
+                ;; (cpp-gnu, 2026-11-22: GNU's musttail on a return statement, [[gnu::musttail]], [[clang::musttail]] or
+                ;; __attribute__((musttail)): marked for arbace.repr.cpp.diag/musttail's rules)
+                s (if (and (map? s) (= "ReturnStmt" (:kind s))
+                           (some #(contains? #{"musttail" "__musttail__"} (ts (tok-at p %))) (range b sb)))
+                    (assoc s :_musttail true)
+                    s)]
             (if (seq as) (node p "AttributedStmt" b (ne s) {:inner (conj (vec as) s)}) s))))
       (block-decl-start? p) (parse-block-decl p)
       :else (let [x (parse-expr p)] (expect! p ";") x))))
@@ -2837,6 +2866,13 @@
                         (let [b (ix p)
                               ;; format with a kind of gcc's own (__gcc_diag__ ...): clang drops the attribute
                               gcc-kind (and (is-at? p 1 "(") (re-matches #"__gcc_\w+__|gcc_\w+" (ts (tok-at p (+ b 2)))))]
+                          ;; (cpp-gnu, 2026-11-22: GNU's attributes of no argument, as the [[gnu::...]] spelling's above, in the
+                          ;; __attribute__ spelling: GCC's "wrong number of arguments specified for 'noinline' attribute", at the name,
+                          ;; ext/attr-noinline-4.C)
+                          (when (and (is-at? p 1 "(") (not (skim? p))
+                                     (contains? #{"noinline" "always_inline" "noreturn" "cold" "hot" "flatten" "leaf" "noclone" "returns_twice" "artificial" "noipa"}
+                                                (str/replace (ts (tok-at p b)) #"^__|__$" "")))
+                            (soft-diag! p b (str "wrong number of arguments specified for '" (str/replace (ts (tok-at p b)) #"^__|__$" "") "' attribute")))
                           (adv! p) (when (is? p "(") (attr-args-semicolon! p) (skip-balanced! p))
                           (when-not (known-gnu-attr? (ts (tok-at p b))) (unknown-gnu-attr! p b b (t= (tok-at p (inc b)) "(")))
                           (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind))
@@ -3054,13 +3090,19 @@
             ;; (cpp-s5b: the TLS kind as clang's VarDecl::getTLSKind gives it: thread_local's is dynamic, __thread's and
             ;; _Thread_local's static)
             (#{"thread_local" "_Thread_local" "__thread"} s) (do (when (:tls ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :tls (if (= s "thread_local") "dynamic" "static")) words))
-            (#{"_Noreturn" "__extension__" "export"} s) (if (and (= s "export") (not= ctx :top)) (assoc ds :e (last-ix p)) (do (adv! p) (recur ds words)))
+            (#{"_Noreturn" "__extension__" "export"} s) (if (and (= s "export") (not= ctx :top)) (assoc ds :e (last-ix p)) (do (adv! p) (recur (cond-> ds (= s "__extension__") (assoc :ext true)) words)))
             ;; (round 54, fifth pass: [dcl.type.general]/2, const and volatile each at most once in a decl-specifier-seq: GCC's
             ;; "duplicate 'volatile'")
             (#{"const" "__const"} s) (do (when (:c ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :c true :cv-i (or (:cv-i ds) (last-ix p))) words))
             (#{"volatile" "__volatile" "__volatile__"} s) (do (when (:v ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :v true :cv-i (or (:cv-i ds) (last-ix p))) words))
             (#{"__restrict" "__restrict__"} s) (do (adv! p) (recur ds words))
-            (and (contains? builtin-kws s) (nil? (:type ds))) (do (adv! p) (recur ds (conj words s)))
+            (and (contains? builtin-kws s) (nil? (:type ds)))
+            (do ;; (cpp-gnu, 2026-11-22: GNU's __int128 is no type of ISO C++, [basic.fundamental]'s standard integer types:
+                ;; GCC's pedwarn "ISO C++ does not support '__int128' for ...", at the keyword, an error under -pedantic-errors
+                ;; alone; none after __extension__, which GCC's -pedantic spares, ext/int128-1.C, int128-6.C)
+                (when (and (= s "__int128") (not (:ext ds)) (not (skim? p)))
+                  (pedantic-diag! p (ix p) "ISO C++ does not support '__int128'"))
+                (adv! p) (recur ds (conj words s)))
             (and (= s "auto") (not has-type)) (do (adv! p) (recur (assoc ds :type (if (< (.-year p) 2011) {:t :b :w ["int"]} {:t :auto}) :auto-i (last-ix p)) words))
             ;; (n-cpp-concepts: `C const auto`, the placeholder after its cv-qualifier, the error given at C: the auto taken)
             (and (= s "auto") (:bare-concept ds)) (do (adv! p) (recur (dissoc ds :bare-concept) words))
@@ -3373,8 +3415,10 @@
           (if (is? p "(")
             (let [ob (ix p)
                   ;; G5: the operand parsed for the code generator (noexcept(e) evaluated per specialization), keyed by its text
+                  ;; (a noexcept-specifier is a complete-class context, [class.mem.general]/7, cpp-gnu)
                   x (when (and *full-headers* (not (skim? p)))
-                      (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x)))))]
+                      (binding [*cm-scopes* nil]
+                        (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))))]
               (skip-balanced! p)
               (let [txt (tok-text-this p (inc ob) (- (ix p) 2))]
                 (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str "noexcept:" (str/replace txt #"\s+" "")) x))
@@ -3607,7 +3651,9 @@
                 has-dflt (is? p "=")
                 db (ix p)
                 dflt (when (accept! p "=")
-                       (if (skim? p) (do (skip-until! p #{"," ")"}) nil) (with-gt p true (parse-init-clause p))))
+                       ;; (a default argument is a complete-class context, [class.mem.general]/7: no use there changes a name's
+                       ;; meaning, cpp-gnu)
+                       (if (skim? p) (do (skip-until! p #{"," ")"}) nil) (binding [*cm-scopes* nil] (with-gt p true (parse-init-clause p)))))
                 ;; (round 54, second pass: [expr.await]/2 and [expr.yield]/1, no await-expression or yield-expression in a default
                 ;; argument: GCC's "'co_await' cannot be used in default arguments")
                 _ (when has-dflt
@@ -3751,7 +3797,13 @@
                                                        ;; of a declaration with declarators, `struct T { struct S *a; };`: declared in
                                                        ;; the smallest enclosing namespace or block scope, [basic.scope.pdecl]/7.2, as
                                                        ;; the entity is just below; the node stays where it is written, so Sema knows)
-                                                       (and new? (not alone)) (assoc :_elab-decl true))))]
+                                                       (and new? (not alone)) (assoc :_elab-decl true)
+                                                       ;; (cpp-gnu, 2026-11-22: a GNU visibility attribute of the declaration, which
+                                                       ;; arbace.repr.cpp.diag/gnu-rules holds to the class's other declarations)
+                                                       (some #(= "visibility" (str/replace (str (:_gnu %)) #"^__|__$" "")) attrs)
+                                                       (assoc :_vis (some #(when (= "visibility" (str/replace (str (:_gnu %)) #"^__|__$" ""))
+                                                                             (some->> (:_arg %) (re-find #"\"([^\"]*)\"") second))
+                                                                          attrs)))))]
           (when (and new? (not (:friend ds)))
             (let [ent {:k :type :name nm :tag true :class true :scope (sc/new-scope :class (scope p) nil) :incomplete true :at (:i lp)
                        :tps (:params hdr)
@@ -3862,10 +3914,17 @@
                        (seek! p save)
                        (.put ^HashMap (sema/info ent) :done true)
                        late))
+              cm-uses (when late (HashMap.))
               members (in-scope p cs
                         (let [old (stv p CLS)]
                           (st! p CLS (cons {:name nm :ent ent :late late} old))
-                          (try (binding [*this-ok* nil] (with-gt p true (decl-seq p :member))) (finally (st! p CLS old)))))
+                          (try (binding [*this-ok* nil
+                                         *cm-scopes* (if late
+                                                       (let [m (if *cm-scopes* (java.util.IdentityHashMap. ^java.util.Map *cm-scopes*) (java.util.IdentityHashMap.))]
+                                                         (.put m cs [late cm-uses]) m)
+                                                       *cm-scopes*)]
+                                 (with-gt p true (decl-seq p :member)))
+                               (finally (st! p CLS old)))))
               _ (expect! p "}")
               _ (when (skim? p) (.put ^HashMap (sema/info ent) :done true))
               e (last-ix p)
@@ -3875,6 +3934,7 @@
               n (node p "CXXRecordDecl" kb e
                       (cond-> {:tagUsed kw :completeDefinition true :bases bases :inner (vec (concat attrs post fin-n members))
                                :loc (loc p (if lp (long (:i lp)) kb))}
+                        (seq cm-uses) (assoc :_cm-uses (into {} cm-uses))
                         nm (assoc :name nm)
                         (:args lp) (assoc :_args (:args lp) :_qn qn)))]
           {:type (if nm {:t :n :s (if simple nm (name-str p qn)) :ent ent} (assoc (unnamed-type p kw kb) :cs cs :ent ent)) :node n})))))
@@ -4230,6 +4290,16 @@
           (when (and (nil? base0) (nil? pre) (= ctx :block) (not (skim? p))
                      (some #(contains? #{"alignas" "_Alignas"} (ts (tok-at p %))) (range (long (:gb ds)) (ix p))))
             (soft-diag! p (ix p) "expected unqualified-id before ';' token"))
+          ;; (cpp-gnu, 2026-11-22: GNU attributes alone before ; at namespace scope or in a class, no decl-specifier and no
+          ;; declarator: a GNU attribute is a decl-specifier of GCC's grammar, not an attribute-declaration ([dcl.pre]/5, the
+          ;; init-declarator-list omitted only after a class or an enumeration): GCC's "declaration does not declare anything",
+          ;; at the ; -- an error at namespace scope (-fpermissive's), a pedwarn in a class, as ext/attrib45.C)
+          (when (and (nil? base0) (nil? pre) (not (:friend ds)) (#{:top :member} ctx) (not (:semi-missing ds)) (not (skim? p))
+                     (not (:storage ds)) (not (:c ds)) (not (:v ds))
+                     (some #(contains? #{"__attribute__" "__attribute"} (ts (tok-at p %))) (range (long (:gb ds)) (ix p))))
+            (if (= ctx :top)
+              (soft-diag! p (ix p) "declaration does not declare anything")
+              (pedantic-diag! p (long (:gb ds)) "declaration does not declare anything")))
           ;; (cpp-read: a class definition whose ; GCC inserts, want-semicolon?: the declaration ends at its })
           (when-not (:semi-missing ds) (adv! p))
           (cond (and (nil? base0) (nil? pre) (not (:friend ds)) (= ctx :top) (> (long (:b ds)) b0)) [(node p "EmptyDecl" (last-ix p) (last-ix p) {})]
