@@ -710,6 +710,24 @@
       "CmpNat" (when nums (ord (compare (nums 0) (nums 1))))
       "CmpSymbol" (when strs* (ord (compare (strs* 0) (strs* 1))))
       "AppendSymbol" (when strs* [:lit (str (strs* 0) (strs* 1))])
+      ;; hs-r7 (T24245): the rest of GHC.Builtin.Types.Literals' families (typeNatLogTyCon, typeCharCmpTyCon,
+      ;; typeConsSymbolTyCon, typeUnconsSymbolTyCon, typeCharToNatTyCon, typeNatToCharTyCon), their sfMatchFam: Log2 of a
+      ;; positive literal, a character's code point and back (a code point of Unicode's range), a Symbol's first character
+      "Log2" (when (and nums (pos? (nums 0))) [:lit (dec (.bitLength (biginteger (nums 0))))])
+      "CmpChar" (let [cs (mapv (fn [t] (let [t (prune t)] (when (= :lit-char (first t)) (second t)))) args)]
+                  (when (every? some? cs) (ord (compare (long (cs 0)) (long (cs 1))))))
+      "ConsSymbol" (let [c (let [t (prune (first args))] (when (= :lit-char (first t)) (second t)))
+                         x (second lits)]
+                     (when (and c (string? x)) [:lit (str (String. (Character/toChars (int c))) x)]))
+      "UnconsSymbol" (when strs*
+                       (let [x (strs* 0)]
+                         (if (empty? x)
+                           [:tc ["ext" "data" "GHC.Internal.Maybe" "Nothing"] []]
+                           (let [cp (.codePointAt ^String x 0)]
+                             [:tc ["ext" "data" "GHC.Internal.Maybe" "Just"]
+                              [[:tc ["ext" "data" "GHC.Internal.Tuple" "(,)"] [[:lit-char cp] [:lit (subs x (Character/charCount cp))]]]]]))))
+      "CharToNat" (let [c (let [t (prune (first args))] (when (= :lit-char (first t)) (second t)))] (when c [:lit (long c)]))
+      "NatToChar" (when (and nums (<= 0 (nums 0) 0x10FFFF)) [:lit-char (long (nums 0))])
       nil)))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -908,7 +926,8 @@
 
 ;; HF10-P48 (a): the constraint tuples' superclass selectors count from 0 ($p0CTuple2, $p1CTuple2: GHC.Builtin.Types'
 ;; wired-in CTupleN and CSolo, mkConstraintTupleTyCon), every other class's from 1 ($p1Eq)
-(defn- sc-base [cls] (if (and (vector? cls) (= "GHC.Internal.Classes" (nth cls 2 nil)) (re-matches #"CTuple[0-9]+|CSolo" (str (nth cls 3 nil)))) 0 1))
+;; (hs-r7, T24245: CUnit too, the constraint tuple of arity 0, whose dictionary GHC binds as CUnit: Assert 'True _ = ()'s evidence)
+(defn- sc-base [cls] (if (and (vector? cls) (= "GHC.Internal.Classes" (nth cls 2 nil)) (re-matches #"CTuple[0-9]+|CSolo|CUnit" (str (nth cls 3 nil)))) 0 1))
 
 ;; HF10-P48 (a): a constraint tuple's dictionary constructor is named as its class (GHC.Builtin.Types' CTupleN, CSolo),
 ;; every other class's C:Cls
@@ -1229,7 +1248,8 @@
                  (and (integer? x) (<= 0 x) (< x 18446744073709551616N))
                  (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Natural" "NS")) [(list 'lit (str x "##"))])
                  :else (list 'lit (pr-str x))))
-    :lit-char (list 'lit (str "'" (char (second t)) "'"))
+    ;; (hs-r7, T24245: a Char, C# of the literal, as mkCharExpr makes EvChar's: the bare literal was no Core tostg reads)
+    :lit-char (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "C#")) [(list 'lit (str "'" (char (second t)) "'#"))])
     nil))
 
 (defn- typeable-lit
@@ -1687,7 +1707,9 @@
       ;; HF10-P42 (a): StarIsType's * (and its Unicode ★) is Data.Kind's Type (GHC.Tc.Gen.HsType's HsStarTy: liftedTypeKind)
       HsStarTy [:tc (ext-name "tc" "GHC.Internal.Types" "Type") []]
       HsTyLit (let [l (arg v 2)]
-                (case (con l) HsNumTy [:lit (nth l 2)] HsStrTy [:lit (nth l 2)] HsCharTy [:lit-char (int (nth l 2))]
+                (case (con l) HsNumTy [:lit (nth l 2)] HsStrTy [:lit (nth l 2)]
+                      ;; (hs-r7, T24245: the native dump writes a character as (char N), the helper's a character)
+                      HsCharTy [:lit-char (let [c (nth l 2)] (if (seq? c) (long (second c)) (int c)))]
                       (do (error! "type literal not handled: " (con l)) (fresh-meta))))
       HsParTy (hs-type tvs (arg v 2))
       HsBangTy (hs-type tvs (arg v 3))
@@ -3904,8 +3926,12 @@
                                               ps (mapv (fn [[c ts]] [c (mapv #(subst ms %) ts)]) (nth t 2))]
                                           (recur (subst ms (nth t 3)) tas ms (into preds ps)))
                                         (let [[t2 p2] (instantiate t)] [t2 (into preds p2)])))
-                          core (or (:core le) (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n)))]
-                      [t (app* core (mapv #(if le (want! %) (want-at! % n (lsp (arg h 2)))) preds))])
+                          ;; (hs-r7, T24245: a pattern synonym is its builder $bP, applied to (# #) when it takes the
+                          ;; dummy argument, as var-occ's: SNat @62 is $bSNat at KnownNat 62's evidence)
+                          ps (when (and (nil? le) (= "data" (nth n 1))) (some-> *patsyns* deref (get n)))
+                          core (or (:core le) (list 'v (cond ps (builder-name n) (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) :else n)))
+                          c (app* core (mapv #(if le (want! %) (want-at! % n (lsp (arg h 2)))) preds))]
+                      [t (if (and ps (builder-dummy? ps)) (app* c [unit#-core]) c)])
                     (infer env (arg v 2))))
       ;; UnboxedSums (GHC.Tc.Gen.Expr's ExplicitSum): alternative alt of arity n, the other components fresh
       ExplicitSum (let [alt (arg v 2) n (arg v 3) [t c] (infer env (arg v 4))
@@ -5461,9 +5487,15 @@
   [e]
   (let [tvn (tv-names-of [(arg e 3) (arg e 4) (arg e 6)])
         names (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) tvn)
-        tvs (zipmap tvn (map (fn [x] [:tv x]) names))]
-    {:tvs names
-     :lhs (vec (for [a (arg e 4) :when (and (seq? a) (= 'HsValArg (first a)))] (hs-type tvs (arg a 2))))
+        tvs (zipmap tvn (map (fn [x] [:tv x]) names))
+        lhs (vec (for [a (arg e 4) :when (and (seq? a) (= 'HsValArg (first a)))] (hs-type tvs (arg a 2))))
+        ;; (hs-r7, T24245: a wildcard on the left, Assert 'True _ = (), is a variable the equation binds, as GHC's renamer
+        ;; names it; hs-type's meta for it left the branch unmatchable, an argument never equal to a free variable)
+        wild (vec (distinct (mapcat metas-of lhs)))
+        wnames (mapv (fn [i] (str "_w" (inc i))) (range (count wild)))]
+    (doseq [[i w] (map vector wild wnames)] (unify [:mv i] [:tv w]))
+    {:tvs (into names wnames)
+     :lhs (mapv zonk lhs)
      :rhs (hs-type tvs (arg e 6))}))
 
 (defn- fam-decl!
