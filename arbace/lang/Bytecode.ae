@@ -1,0 +1,715 @@
+;; Classes defined from class-file bytes (doc/classes/BYTECODE-SURVEY.md, JD3, the user's decision of 2026-11-22): the
+;; loader and linker. ClassLoader.defineClass (jrt's, go/arbace/jrt/defineclass.ae) hands the bytes to Bytecode.define,
+;; which parses them (BytecodeFile), loads the superclass and interfaces through the defining loader, and makes the
+;; class an interpreted class of the Java forms' interpreter (Compiler$CF$Klass through Compiler$CF$Rt/HOST), its methods
+;; Compiler$CF$Meths whose body runs their bytecode (BytecodeBody, BytecodeCode), verified (BytecodeVerifier) when the
+;; class is linked, before its initialization (JVMS 5.4, 5.5). Written from the JVMS (Java SE 26 edition), chapters 4
+;; and 5.
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+
+(in-ns 'arbace.lang)
+
+(import '(java.lang.reflect Array Constructor Field Method Modifier))
+
+;; a class defined from bytes: its file, defining loader, Klass and Class, and the layout's indices
+(defclass ^:public ^:final BytecodeClass
+  (field ^:public ^BytecodeFile cf)
+  (field ^:public ^ClassLoader loader)
+  (field ^:public ^Compiler$CF$Klass k)
+  (field ^:public ^Class cls)
+  ;; instance fields' indices in the object and statics' in the Klass's statics, by name and descriptor ("x:I")
+  (field ^:public ^:final ^java.util.HashMap fieldIndex (java.util.HashMap.))
+  (field ^:public ^:final ^java.util.HashMap staticIndex (java.util.HashMap.))
+  ;; the methods (Meth) by name and descriptor, constructors by descriptor, as the Klass has them
+  (field ^:public ^:final ^java.util.HashMap codes (java.util.HashMap.))
+  ;; linked: verified (JVMS 5.4.1); a failed verification's error, thrown again at every later attempt
+  (field ^:public ^:volatile ^boolean linked)
+  (field ^:public ^Throwable linkError)
+  ;; the members published with a type not loaded yet (Object in their place), to publish again
+  (field ^:public ^boolean pending)
+  ;; resolved constant pool entries (classes)
+  (field ^:public ^Object/1 resolved)
+  (constructor ^:public [this]))
+
+(defclass ^:public ^:final Bytecode
+  (constructor ^:private [this])
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; errors (jrt's stand-ins have no reflected constructors at the REPL, so they are made here)
+
+  ;; kind: 0 ClassFormatError, 1 NoClassDefFoundError, 2 LinkageError, 3 IncompatibleClassChangeError, 4 VerifyError,
+  ;; 5 NoSuchMethodError, 6 NoSuchFieldError, 7 IllegalAccessError, 8 InstantiationError, 9 AbstractMethodError,
+  ;; 10 BootstrapMethodError, 11 ClassCircularityError, 12 UnsupportedClassVersionError. NoSuchFieldError,
+  ;; BootstrapMethodError, ClassCircularityError and UnsupportedClassVersionError are not in the Go build's world: their
+  ;; superclasses stand for them (doc/classes/BYTECODE-SURVEY.md §7)
+  (method ^:public ^:static error ^Throwable [^int kind ^String msg]
+    ;; @dev-strip-begin
+    (switch kind
+      0 (ClassFormatError. msg)
+      1 (NoClassDefFoundError. msg)
+      3 (IncompatibleClassChangeError. msg)
+      4 (VerifyError. msg)
+      5 (NoSuchMethodError. msg)
+      6 (IncompatibleClassChangeError. msg)
+      7 (IllegalAccessError. msg)
+      8 (InstantiationError. msg)
+      9 (AbstractMethodError. msg)
+      12 (ClassFormatError. msg)
+      (LinkageError. msg))
+    ;; @dev-strip-end
+    ;; @dev-alt (switch kind 4 (VerifyError. msg) 5 (NoSuchMethodError. msg) 7 (IllegalAccessError. msg) 8 (InstantiationError. msg) (RuntimeException. (java-str "E" kind ": " msg)))
+    )
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the classes defined so far
+
+  (field ^:static ^:final ^Object LOCK (Object.))
+  ;; Class -> BytecodeClass
+  (field ^:static ^:final ^java.util.IdentityHashMap CLASSES (java.util.IdentityHashMap.))
+  ;; Klass -> BytecodeClass
+  (field ^:static ^:final ^java.util.IdentityHashMap KLASSES (java.util.IdentityHashMap.))
+  ;; defining loader (BOOT for null) -> binary name -> Class
+  (field ^:static ^:final ^java.util.IdentityHashMap BY_LOADER (java.util.IdentityHashMap.))
+  (field ^:static ^:final ^Object BOOT (Object.))
+  ;; the classes waiting for a class of a loader by name to publish their members again: "loader@name" -> list
+  (field ^:static ^:final ^java.util.HashMap WAITING (java.util.HashMap.))
+  (field ^:static ^int lambdas)
+
+  (method ^:public ^:static ofClass ^BytecodeClass [^Class c]
+    (locking LOCK (cast BytecodeClass (.get CLASSES c))))
+
+  (method ^:public ^:static ofKlass ^BytecodeClass [^Compiler$CF$Klass k]
+    (locking LOCK (cast BytecodeClass (.get KLASSES k))))
+
+  (method ^:static loaderKey [^ClassLoader l] (if (nil? l) BOOT l))
+
+  ;; the class loader l defined by binary name n, or nil
+  (method ^:public ^:static loaded ^Class [^ClassLoader l ^String n]
+    (locking LOCK
+      (let [m (cast java.util.HashMap (.get BY_LOADER (Bytecode/loaderKey l)))]
+        (if (nil? m) nil (cast Class (.get m n))))))
+
+  ;; the interpreted Klass of class c: a class defined from bytes, or a Java forms class the REPL defined
+  ;; (arbace.classes.interp's registry); nil for a class of the world
+  (method ^:public ^:static klassOf ^Compiler$CF$Klass [^Class c]
+    (when (nil? c) (return nil))
+    (let [bc (Bytecode/ofClass c)]
+      (if (some? bc)
+          (.-k bc)
+          (let [v (RT/var "arbace.classes.interp" "klass")]
+            (if (and (some? v) (.isBound v))
+                (let [k (.invoke v (.replace (.getName c) \. \/))]
+                  (if (and (instance? Compiler$CF$Klass k) (identical? (.-cls (cast Compiler$CF$Klass k)) c))
+                      (cast Compiler$CF$Klass k)
+                      nil))
+                nil)))))
+
+  ;; the host (Compiler$CF$Rt/HOST): the Go build's when none is set (a compiled program, where nothing loaded
+  ;; arbace.classes.interp)
+  (method ^:public ^:static host ^Compiler$CF$Host []
+    (when (nil? Compiler$CF$Rt/HOST)
+      ;; @dev-strip-begin
+      (Compiler$CF$Rt/setHost (Compiler$CFGo$GoHost.))
+      ;; @dev-strip-end
+      )
+    Compiler$CF$Rt/HOST)
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; descriptors
+
+  ;; the Class of field descriptor d, its classes loaded through l (ClassNotFoundException as NoClassDefFoundError)
+  (method ^:public ^:static descClass ^Class [^ClassLoader l ^String d]
+    (switch (.charAt d 0)
+      \I Integer/TYPE
+      \J Long/TYPE
+      \F Float/TYPE
+      \D Double/TYPE
+      \Z Boolean/TYPE
+      \B Byte/TYPE
+      \C Character/TYPE
+      \S Short/TYPE
+      \V Void/TYPE
+      \[ (.arrayType (Bytecode/descClass l (.substring d 1)))
+      (Bytecode/loadClass l (.substring d 1 (unchecked-dec-int (.length d))))))
+
+  ;; the class of internal name (or array descriptor) n through loader l: NoClassDefFoundError when it cannot be
+  ;; loaded
+  (method ^:public ^:static loadClass ^Class [^ClassLoader l ^String n]
+    (if (== (.charAt n 0) \[)
+        (Bytecode/descClass l n)
+        (try
+          (Class/forName (.replace n \/ \.) false l)
+          (catch ClassNotFoundException e
+            (let [t (Bytecode/error 1 n)]
+              (.initCause t e)
+              (throw t))))))
+
+  ;; the Class of descriptor d when it can be had without loading a class (a primitive, a class of the world or one
+  ;; l defined already), else nil
+  (method ^:public ^:static descClassNow ^Class [^ClassLoader l ^String d]
+    (switch (.charAt d 0)
+      (\I \J \F \D \Z \B \C \S \V) (Bytecode/descClass l d)
+      \[ (let [e (Bytecode/descClassNow l (.substring d 1))] (if (nil? e) nil (.arrayType e)))
+      (let [n (.replace (.substring d 1 (unchecked-dec-int (.length d))) \/ \.)
+            c (Bytecode/loaded l n)]
+        (if (some? c)
+            c
+            (try (Class/forName n false nil) (catch Throwable _ nil))))))
+
+  ;; the parameter descriptors and the return descriptor of method descriptor d
+  (method ^:public ^:static params ^String/1 [^String d]
+    (let [l (java.util.ArrayList.)]
+      (loop [^int i 1]
+        (when (not (== (.charAt d i) \)))
+          (let [e (BytecodeFile/fieldDescEnd d i)]
+            (.add l (.substring d i e))
+            (recur e))))
+      (cast String/1 (.toArray l (new String/1 0)))))
+
+  (method ^:public ^:static ret ^String [^String d]
+    (.substring d (unchecked-inc-int (.indexOf d ")"))))
+
+  ;; the interpreter's type char of a descriptor (Compiler$CF$Rt/typeOf): I J S B C Z F D V, L for references
+  (method ^:public ^:static tc ^char [^String d]
+    (let [c (.charAt d 0)] (if (or (== c \L) (== c \[)) \L c)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; defining (JVMS 5.3.5)
+
+  ;; ClassLoader.defineClass's work (go/arbace/jrt/defineclass.ae): the class of b[off, off+len) defined by loader l
+  ;; under binary name name (nil: the class file's own), pd its ProtectionDomain (not kept)
+  (method ^:public ^:static define ^Class [^ClassLoader l ^String name ^byte/1 b ^int off ^int len pd]
+    (when (nil? b) (throw (NullPointerException.)))
+    (when (or (< off 0) (< len 0) (> off (unchecked-subtract-int (alength b) len)))
+      (throw (ArrayIndexOutOfBoundsException.)))
+    (let [cf (BytecodeFile/parse b off len)
+          cname (.replace (.-thisName cf) \/ \.)]
+      (when (and (some? name) (not (.equals name cname)))
+        (throw (Bytecode/error 1 (java-str (.-thisName cf) " (wrong name: " (.replace name \. \/) ")"))))
+      (when (.startsWith cname "java.")
+        (throw (SecurityException. (java-str "Prohibited package name: " (.substring cname 0 (.lastIndexOf cname "."))))))
+      (when (some? (Bytecode/loaded l cname))
+        (throw (Bytecode/error 2 (java-str "loader " (Bytecode/loaderName l) " attempted duplicate class definition for "
+                                           cname "."))))
+      (Bytecode/make l cf cname)))
+
+  (method ^:public ^:static loaderName ^String [^ClassLoader l]
+    (if (nil? l)
+        "'bootstrap'"
+        (let [n (.getName l)]
+          (if (some? n)
+              (java-str "'" n "'")
+              (java-str (.getName (.getClass l)) " @" (Integer/toHexString (System/identityHashCode l)))))))
+
+  ;; the class of file cf named cname, defined by l
+  (method ^:static make ^Class [^ClassLoader l ^BytecodeFile cf ^String cname]
+    (let [h (Bytecode/host)
+          iface (not (== 0 (bit-and-int (.-access cf) 0x0200)))
+          ;; the superclass and the interfaces (JVMS 5.3.5 step 3)
+          sc (if (nil? (.-superName cf)) nil (Bytecode/superFor l cf (.-superName cf)))
+          _ (when (some? sc)
+              (cond
+                (.isInterface sc)
+                  (throw (Bytecode/error 3 (java-str "class " cname " has interface " (.getName sc) " as super class")))
+                (and iface (not (identical? sc Object)))
+                  (throw (Bytecode/error 0 (java-str "Interfaces must have java.lang.Object as superclass in class file " cname)))
+                (not (== 0 (bit-and-int (.getModifiers sc) 0x0010)))
+                  (throw (Bytecode/error 3 (java-str "class " cname " cannot inherit from final class " (.getName sc))))))
+          ifcs (new Class/1 (alength (.-interfaces cf)))]
+      (loop [^int i 0]
+        (when (< i (alength ifcs))
+          (let [ic (Bytecode/superFor l cf (aget (.-interfaces cf) i))]
+            (when (not (.isInterface ic))
+              (throw (Bytecode/error 3 (java-str "class " cname " can not implement " (.getName ic)
+                                                 ", because it is not an interface"))))
+            (aset ifcs i ic))
+          (recur (unchecked-inc-int i))))
+      (let [bc (BytecodeClass.)
+            k (Compiler$CF$Klass. cname)
+            sk (Bytecode/klassOf sc)]
+        (set! (.-cf bc) cf)
+        (set! (.-loader bc) l)
+        (set! (.-k bc) k)
+        (set! (.-resolved bc) (new Object/1 (alength (.-tags cf))))
+        (set! (.-iname k) (.-thisName cf))
+        (set! (.-flags k) (.-access cf))
+        (set! (.-iface k) iface)
+        (set! (.-record k) (and (some? (.-recordNames cf)) (.equals "java/lang/Record" (.-superName cf))))
+        (when (and (some? sc) (nil? sk) (not iface) (not (.canExtend h sc)))
+          (throw (UnsupportedOperationException. (java-str "a class extending " (.getName sc) " is not in the Go build"))))
+        (set! (.-sup k) sk)
+        (set! (.-superClass k) (if (or (some? sk) iface) (if iface Object nil) sc))
+        (when (and (nil? sc) (not iface)) (set! (.-superClass k) Object))
+        (let [kl (java.util.ArrayList.) cl (java.util.ArrayList.)]
+          (loop [^int i 0]
+            (when (< i (alength ifcs))
+              (let [ik (Bytecode/klassOf (aget ifcs i))]
+                (if (some? ik) (.add kl ik) (.add cl (aget ifcs i))))
+              (recur (unchecked-inc-int i))))
+          (set! (.-ifaces k) (cast Compiler$CF$Klass/1 (.toArray kl (new Compiler$CF$Klass/1 0))))
+          (set! (.-interfaces k) (cast Class/1 (.toArray cl (new Class/1 0)))))
+        (Bytecode/layout bc)
+        (Bytecode/methods bc)
+        (set! (.-info k) bc)
+        (let [c (.define h k)]
+          (set! (.-cls k) c)
+          (set! (.-cls bc) c)
+          (locking LOCK
+            (.put CLASSES c bc)
+            (.put KLASSES k bc)
+            (let [lk (Bytecode/loaderKey l)
+                  ^:mutable ^java.util.HashMap m (cast java.util.HashMap (.get BY_LOADER lk))]
+              (when (nil? m)
+                (set! m (java.util.HashMap.))
+                (.put BY_LOADER lk m))
+              (.put m cname c)))
+          ;; @dev-strip-begin
+          (set! (.-linker k) (anon Runnable [] (method ^:public run ^void [this] (Bytecode/link bc))))
+          ;; @dev-strip-end
+          (Bytecode/vtable k)
+          (Bytecode/publish bc)
+          (Bytecode/attributes bc)
+          ;; the classes whose members name this one, published again
+          (let [ws (locking LOCK (.remove WAITING (java-str (System/identityHashCode (Bytecode/loaderKey l)) "@" cname)))]
+            (when (some? ws)
+              (let [it (.iterator (cast java.util.ArrayList ws))]
+                (while (.hasNext it)
+                  (let [w (cast BytecodeClass (.next it))]
+                    (.clearMembers h (.-k w))
+                    (Bytecode/publish w))))))
+          c))))
+
+  ;; the superclass or interface named n (internal) of the class of file cf being defined by l: loaded through l;
+  ;; ClassCircularityError when it is the class itself
+  (method ^:static superFor ^Class [^ClassLoader l ^BytecodeFile cf ^String n]
+    (when (.equals n (.-thisName cf))
+      (throw (Bytecode/error 11 (.replace n \/ \.))))
+    (Bytecode/loadClass l n))
+
+  ;; the zero value of a field of descriptor d
+  (method ^:static zero [^String d] (Compiler$CF$Rt/zero (Bytecode/tc d)))
+
+  ;; the field layout: instance fields after the superclass's, statics with their ConstantValue (JVMS 5.4.2: the
+  ;; static fields' initial values; a ConstantValue is set by initialization, JVMS 5.5 step 6, here at once)
+  (method ^:static layout ^void [^BytecodeClass bc]
+    (let [k (.-k bc)
+          cf (.-cf bc)
+          sk (.-sup k)
+          base (if (some? sk) (.-nfields sk) 0)
+          defs (java.util.ArrayList.)
+          stats (java.util.ArrayList.)]
+      (when (some? sk)
+        (loop [^int i 0]
+          (when (< i (alength (.-defaults sk)))
+            (.add defs (aget (.-defaults sk) i))
+            (recur (unchecked-inc-int i)))))
+      (loop [^int i 0]
+        (when (< i (alength (.-fields cf)))
+          (let [f (aget (.-fields cf) i)
+                key (java-str (.-name f) ":" (.-desc f))]
+            (if (.isStatic f)
+                (do (.put (.-staticIndex bc) key (Integer/valueOf (.size stats)))
+                    (.add stats (if (== 0 (.-constIndex f))
+                                    (Bytecode/zero (.-desc f))
+                                    (Bytecode/constantAs (.-desc f) (.constant cf (.-constIndex f))))))
+                (do (.put (.-fieldIndex bc) key (Integer/valueOf (.size defs)))
+                    (.add defs (Bytecode/zero (.-desc f))))))
+          (recur (unchecked-inc-int i))))
+      (set! (.-nfields k) (.size defs))
+      (set! (.-defaults k) (.toArray defs))
+      (set! (.-statics k) (.toArray stats))))
+
+  ;; a ConstantValue as the field's value (an int-like field's an Integer, Short, Byte, Character or Boolean)
+  (method ^:static constantAs [^String d v]
+    (switch (.charAt d 0)
+      (\S \B \C \Z) (Compiler$CF$Rt/box (.charAt d 0) (.longValue (cast Number v)))
+      v))
+
+  ;; the methods and constructors: Meths whose body runs their code
+  (method ^:static methods ^void [^BytecodeClass bc]
+    (let [k (.-k bc)
+          cf (.-cf bc)]
+      (loop [^int i 0]
+        (when (< i (alength (.-methods cf)))
+          (let [mm (aget (.-methods cf) i)
+                init (.equals (.-name mm) "<init>")]
+            (if (.equals (.-name mm) "<clinit>")
+                (when (.-hasCode mm)
+                  (let [code (BytecodeCode. bc mm nil)]
+                    (set! (.-clinit k) (Bytecode/body \V code))
+                    (set! (.-clinitR k) (Math/max (int 1) (.-maxLocals mm)))
+                    (set! (.-clinitP k) (Math/max (int 1) (.-maxLocals mm)))))
+                (let [m (Compiler$CF$Meth. k (.-name mm) (.-desc mm) (bit-and-int (.-access mm) 0xFFFF))
+                      ps (Bytecode/params (.-desc mm))
+                      static (.isStatic mm)
+                      ^:mutable ^int slot (if static 0 1)
+                      pslots (new int/1 (alength ps))
+                      ptypes (new char/1 (alength ps))]
+                  (loop [^int j 0]
+                    (when (< j (alength ps))
+                      (let [t (Bytecode/tc (aget ps j))]
+                        (aset pslots j slot)
+                        (aset ptypes j t)
+                        (set! slot (unchecked-add-int slot (if (or (== t \J) (== t \D)) 2 1))))
+                      (recur (unchecked-inc-int j))))
+                  (set! (.-pslots m) pslots)
+                  (set! (.-ptypes m) ptypes)
+                  (set! (.-self m) (if static -1 0))
+                  (set! (.-ret m) (if init \V (Bytecode/tc (Bytecode/ret (.-desc mm)))))
+                  (set! (.-nr m) (Math/max slot (.-maxLocals mm)))
+                  (set! (.-np m) (Math/max slot (.-maxLocals mm)))
+                  (cond
+                    (.-hasCode mm)
+                      (set! (.-body m) (Bytecode/body (.-ret m) (BytecodeCode. bc mm m)))
+                    (not (== 0 (bit-and-int (.-access mm) 0x0100)))
+                      (set! (.-body m) (Bytecode/body (.-ret m) (BytecodeCode. bc mm m)))
+                    :else nil)
+                  (.put (.-codes bc) (.key mm) m)
+                  (if init
+                      (.put (.-ctors k) (.-desc mm) m)
+                      (.put (.-methods k) (.key mm) m)))))
+          (recur (unchecked-inc-int i))))
+      (set! (.-hasDefaults k)
+            (and (.-iface k)
+                 (loop [^int i 0]
+                   (if (< i (alength (.-methods cf)))
+                       (let [mm (aget (.-methods cf) i)]
+                         (if (and (== 0 (bit-and-int (.-access mm) 0x040A)) (not (.equals (.-name mm) "<clinit>")))
+                             true
+                             (recur (unchecked-inc-int i))))
+                       false))))))
+
+  ;; the body of a method: a node running its code
+  (method ^:public ^:static body ^Compiler$CF$Node [^char t ^BytecodeCode code]
+    ;; @dev-strip-begin
+    (BytecodeBody. t code)
+    ;; @dev-strip-end
+    ;; @dev-alt (BytecodeDev/body t code)
+    )
+
+  ;; the virtual methods (arbace.classes.interp/vtable!): the superclass's, the interfaces' defaults when nothing
+  ;; else gives them (a more specific interface's over a less specific one's), then the class's own non-static,
+  ;; non-private methods
+  (method ^:static vtable ^void [^Compiler$CF$Klass k]
+    (let [vt (.-vtable k)]
+      (when (some? (.-sup k)) (.putAll vt (.-vtable (.-sup k))))
+      (loop [^int i 0]
+        (when (< i (alength (.-ifaces k)))
+          (let [ik (aget (.-ifaces k) i)
+                it (.iterator (.entrySet (.-vtable ik)))]
+            (while (.hasNext it)
+              (let [e (cast java.util.Map$Entry (.next it))
+                    key (.getKey e)
+                    m (cast Compiler$CF$Meth (.getValue e))
+                    old (cast Compiler$CF$Meth (.get vt key))]
+                (when (or (nil? old)
+                          (not (== 0 (bit-and-int (.-flags old) 0x0400)))
+                          (and (.-iface (.-k old)) (== 0 (bit-and-int (.-flags m) 0x0400))
+                               (not (identical? (.-k old) (.-k m)))
+                               (.isSubclassOf (.-k m) (.-k old))))
+                  (.put vt key m)))))
+          (recur (unchecked-inc-int i))))
+      (let [it (.iterator (.entrySet (.-methods k)))]
+        (while (.hasNext it)
+          (let [e (cast java.util.Map$Entry (.next it))
+                m (cast Compiler$CF$Meth (.getValue e))]
+            (when (== 0 (bit-and-int (.-flags m) 0x000A))
+              (.put vt (.getKey e) m)))))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; publishing (arbace.classes.interp/publish!): the members to the host (Dyn's slots, reflection's member tables)
+
+  ;; the Class of descriptor d for a member's type: Object when it cannot be had without loading a class, and the
+  ;; class then waits for it to publish its members again
+  (method ^:static memberClass ^Class [^BytecodeClass bc ^String d]
+    (let [c (Bytecode/descClassNow (.-loader bc) d)]
+      (if (some? c)
+          c
+          (let [^:mutable ^int i 0]
+            (while (== (.charAt d i) \[) (set! i (unchecked-inc-int i)))
+            (when (== (.charAt d i) \L)
+              (let [key (java-str (System/identityHashCode (Bytecode/loaderKey (.-loader bc))) "@"
+                                  (.replace (.substring d (unchecked-inc-int i) (unchecked-dec-int (.length d))) \/ \.))]
+                (locking LOCK
+                  (let [^:mutable ^java.util.ArrayList ws (cast java.util.ArrayList (.get WAITING key))]
+                    (when (nil? ws)
+                      (set! ws (java.util.ArrayList.))
+                      (.put WAITING key ws))
+                    (when (not (.contains ws bc)) (.add ws bc))))))
+            Object))))
+
+  (method ^:static methClasses ^void [^BytecodeClass bc ^Compiler$CF$Meth m]
+    (let [ps (Bytecode/params (.-desc m))
+          a (new Class/1 (alength ps))]
+      (loop [^int i 0]
+        (when (< i (alength ps))
+          (aset a i (Bytecode/memberClass bc (aget ps i)))
+          (recur (unchecked-inc-int i))))
+      (set! (.-params m) a)
+      (set! (.-retClass m) (if (.equals (.-name m) "<init>") Void/TYPE (Bytecode/memberClass bc (Bytecode/ret (.-desc m)))))))
+
+  ;; a copy of an interface's default method m flagged dispatch only (bit 30: no member table entry;
+  ;; arbace.classes.interp/dispatch-only)
+  (method ^:static dispatchOnly ^Compiler$CF$Meth [^Compiler$CF$Meth m]
+    (let [d (Compiler$CF$Meth. (.-k m) (.-name m) (.-desc m) (bit-or-int (.-flags m) 0x40000000))]
+      (set! (.-params d) (.-params m))
+      (set! (.-retClass d) (.-retClass m))
+      (set! (.-self d) (.-self m))
+      (set! (.-ptypes d) (.-ptypes m))
+      (set! (.-pslots d) (.-pslots m))
+      (set! (.-ret d) (.-ret m))
+      (set! (.-nr d) (.-nr m))
+      (set! (.-np d) (.-np m))
+      (set! (.-body d) (.-body m))
+      d))
+
+  (method ^:static publish ^void [^BytecodeClass bc]
+    (let [h (Bytecode/host)
+          k (.-k bc)
+          cf (.-cf bc)
+          seen (java.util.HashSet.)]
+      (let [it (.iterator (.entrySet (.-vtable k)))]
+        (while (.hasNext it)
+          (let [e (cast java.util.Map$Entry (.next it))
+                m (cast Compiler$CF$Meth (.getValue e))]
+            (when (.add seen (.getKey e))
+              (let [ob (Bytecode/ofKlass (.-k m))] (Bytecode/methClasses (if (some? ob) ob bc) m))
+              (if (identical? (.-k m) k)
+                  (.method h k m)
+                  (.method h k (Bytecode/dispatchOnly m)))))))
+      (let [it (.iterator (.entrySet (.-methods k)))]
+        (while (.hasNext it)
+          (let [e (cast java.util.Map$Entry (.next it))
+                m (cast Compiler$CF$Meth (.getValue e))]
+            (when (.add seen (.getKey e))
+              (Bytecode/methClasses bc m)
+              (.method h k m)))))
+      (let [it (.iterator (.values (.-ctors k)))]
+        (while (.hasNext it)
+          (let [m (cast Compiler$CF$Meth (.next it))]
+            (Bytecode/methClasses bc m)
+            (.ctor h k m))))
+      (loop [^int i 0]
+        (when (< i (alength (.-fields cf)))
+          (let [f (aget (.-fields cf) i)
+                key (java-str (.-name f) ":" (.-desc f))
+                st (.isStatic f)
+                idx (cast Integer (.get (if st (.-staticIndex bc) (.-fieldIndex bc)) key))]
+            (.addField h k (.-name f) (Bytecode/memberClass bc (.-desc f)) (bit-and-int (.-access f) 0xFFFF)
+                       (.intValue idx) st))
+          (recur (unchecked-inc-int i))))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the attributes reflection reads, as jrt's data (go/arbace/jrt/classdata.ae, annotation.ae's header): S, K, Q, G,
+  ;; E, R records; W records (new): a method's MethodParameters
+
+  (method ^:public ^:static enc ^String [^String s]
+    (let [sb (StringBuilder. "\"")]
+      (loop [^int i 0]
+        (when (< i (.length s))
+          (let [c (.charAt s i)
+                ci (unchecked-int c)]
+            (cond
+              (== c \") (.append sb "\\\"")
+              (== c \\) (.append sb "\\\\")
+              (and (>= ci 32) (<= ci 126)) (.append sb c)
+              :else (.append sb (java-str "\\u" (.substring (Integer/toHexString (unchecked-add-int 0x10000 ci)) 1)))))
+          (recur (unchecked-inc-int i))))
+      (.append sb "\"")
+      (.toString sb)))
+
+  (method ^:static bin ^String [^String d] (.replace d \/ \.))
+
+  (method ^:static line ^void [^StringBuilder sb ^String s] (.append sb s) (.append sb "\n"))
+
+  (method ^:static attributes ^void [^BytecodeClass bc]
+    (let [cf (.-cf bc)
+          sb (StringBuilder.)]
+      (when (some? (.-signature cf)) (Bytecode/line sb (java-str "S " (.-signature cf))))
+      ;; InnerClasses' entry of this class and EnclosingMethod (JVMS 4.7.6, 4.7.7)
+      (let [^:mutable ^int ent -1
+            ics (.-innerClasses cf)]
+        (when (some? ics)
+          (loop [^int i 0]
+            (when (< i (alength ics))
+              (if (.equals (.className cf (aget ics i)) (.-thisName cf))
+                  (set! ent i)
+                  (recur (unchecked-add-int i 4))))))
+        (let [em (not (== 0 (.-emClass cf)))
+              outer (if (and (>= ent 0) (not (== 0 (aget ics (unchecked-inc-int ent)))))
+                        (.className cf (aget ics (unchecked-inc-int ent))) nil)
+              iname (if (and (>= ent 0) (not (== 0 (aget ics (unchecked-add-int ent 2)))))
+                        (.utf8 cf (aget ics (unchecked-add-int ent 2))) nil)
+              flags (if (>= ent 0) (aget ics (unchecked-add-int ent 3)) 0)]
+          (cond
+            em (Bytecode/line sb (java-str "K " flags " " (if (some? iname) "l" "a") " " (Bytecode/bin (.className cf (.-emClass cf)))
+                                       " " (if (some? iname) iname "-")))
+            (some? outer) (Bytecode/line sb (java-str "K " flags " m " (Bytecode/bin outer) " " (if (some? iname) iname "-")))
+            (>= ent 0) (Bytecode/line sb (java-str "K " flags " " (if (some? iname) "l" "a") " - " (if (some? iname) iname "-")))
+            :else nil)
+          (when (and em (not (== 0 (.-emNat cf))))
+            (Bytecode/line sb (java-str "Q " (.natName cf (.-emNat cf)) " " (Bytecode/bin (.natDesc cf (.-emNat cf))))))))
+      (loop [^int i 0]
+        (when (< i (alength (.-methods cf)))
+          (let [m (aget (.-methods cf) i)
+                head (if (.equals (.-name m) "<init>")
+                         (java-str "C " (Bytecode/bin (.-desc m)))
+                         (java-str "M " (.-name m) " " (Bytecode/bin (.-desc m))))]
+            (when (not (.equals (.-name m) "<clinit>"))
+              (when (some? (.-signature m)) (Bytecode/line sb (java-str "G " head " " (.-signature m))))
+              (when (some? (.-exceptions m))
+                (let [s (StringBuilder. (java-str "E " head))]
+                  (loop [^int j 0]
+                    (when (< j (alength (.-exceptions m)))
+                      (.append s " ")
+                      (.append s (Bytecode/bin (aget (.-exceptions m) j)))
+                      (recur (unchecked-inc-int j))))
+                  (Bytecode/line sb (.toString s))))
+              (when (.-hasParams m)
+                (let [s (StringBuilder. (java-str "W " head " " (alength (.-paramNames m))))]
+                  (loop [^int j 0]
+                    (when (< j (alength (.-paramNames m)))
+                      (let [ni (aget (.-paramNames m) j)]
+                        (.append s " ")
+                        (.append s (cond
+                                     (== ni 0) "-"
+                                     (not (== (.tag cf ni) 1)) "!"
+                                     :else (Bytecode/enc (.utf8 cf ni))))
+                        (.append s " ")
+                        (.append s (aget (.-paramFlags m) j)))
+                      (recur (unchecked-inc-int j))))
+                  (Bytecode/line sb (.toString s))))))
+          (recur (unchecked-inc-int i))))
+      (loop [^int i 0]
+        (when (< i (alength (.-fields cf)))
+          (let [f (aget (.-fields cf) i)]
+            (when (some? (.-signature f)) (Bytecode/line sb (java-str "G F " (.-name f) " " (.-signature f)))))
+          (recur (unchecked-inc-int i))))
+      (when (some? (.-recordNames cf))
+        (loop [^int i 0]
+          (when (< i (alength (.-recordNames cf)))
+            (Bytecode/line sb (java-str "R " (aget (.-recordNames cf) i) " " (Bytecode/bin (aget (.-recordDescs cf) i))
+                                    (if (some? (aget (.-recordSigs cf) i)) (java-str " " (aget (.-recordSigs cf) i)) "")))
+            (recur (unchecked-inc-int i)))))
+      (when (> (.length sb) 0)
+        (.annotations (Bytecode/host) (.-k bc) (.toString sb)))
+      ;; the RuntimeVisible annotations, parsed by jdk26u's AnnotationParser when reflection first asks
+      ;; @dev-strip-begin
+      (Compiler$CFGo/setAnnotationSource (.-cls bc) (BytecodeAnnotations. bc))
+      ;; @dev-strip-end
+      ))
+
+  ;; a method's name in messages: "int Foo.bar(int)" (desc its descriptor, n its name, c its class's name)
+  (method ^:public ^:static bin2 ^String [^String desc ^String n ^String c]
+    (java-str (BytecodeCode/javaRet desc) " " c "." n (BytecodeCode/javaParams desc)))
+
+  ;; a lambda's method's Class parameters and return
+  (method ^:public ^:static lambdaClasses ^void [^ClassLoader l ^Compiler$CF$Meth m]
+    (let [ps (Bytecode/params (.-desc m))
+          a (new Class/1 (alength ps))]
+      (loop [^int i 0]
+        (when (< i (alength ps))
+          (let [c (Bytecode/descClassNow l (aget ps i))]
+            (aset a i (if (some? c) c Object)))
+          (recur (unchecked-inc-int i))))
+      (set! (.-params m) a)
+      (let [rc (Bytecode/descClassNow l (Bytecode/ret (.-desc m)))]
+        (set! (.-retClass m) (if (some? rc) rc Object)))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; linking (JVMS 5.4): the verifier over every method, once, before the class is initialized; a failure is thrown
+  ;; again at every later attempt (5.4.1)
+  (method ^:public ^:static link ^void [^BytecodeClass bc]
+    (when (.-linked bc) (return))
+    (locking bc
+      (when (.-linked bc) (return))
+      (when (some? (.-linkError bc)) (throw (.-linkError bc)))
+      (try
+        ;; the superclass and the superinterfaces first
+        (let [sk (.-sup (.-k bc))]
+          (when (some? sk)
+            (let [sbc (Bytecode/ofKlass sk)]
+              (when (some? sbc) (Bytecode/link sbc)))))
+        (BytecodeVerifier/verifyClass bc)
+        (set! (.-linked bc) true)
+        (catch Throwable e
+          (set! (.-linkError bc) e)
+          (throw e))))))
+
+
+;; the body of a method defined from bytes: the interpreter's node running its code (Compiler$CF$Meth runs it by the
+;; method's return kind; the result comes back as the value of eval, or in the frame's jl or jd)
+;; @dev-strip-begin
+(defclass ^:public ^:final BytecodeBody
+  :extends Compiler$CF$Node
+  (field ^:public ^:final ^BytecodeCode code)
+  (constructor ^:public [this ^char t ^BytecodeCode code]
+    (set! (.-t this) t)
+    (set! (.-code this) code))
+  (method ^:public eval [this ^Compiler$CF$Frame f]
+    (switch (Compiler$CF$Rt/kind (.-t this))
+      \J (do (.run code f) (Compiler$CF$Rt/box (.-t this) (.-jl f)))
+      \D (do (.run code f) (Compiler$CF$Rt/boxD (.-t this) (.-jd f)))
+      (.run code f)))
+  (method ^:public evalJ ^long [this ^Compiler$CF$Frame f] (.run code f) (.-jl f))
+  (method ^:public evalD ^double [this ^Compiler$CF$Frame f] (.run code f) (.-jd f))
+  (method ^:public exec ^void [this ^Compiler$CF$Frame f] (.run code f) nil))
+
+;; the RuntimeVisible annotations of a class defined from bytes as jrt asks for them (Compiler$CFGo/setAnnotationSource:
+;; jrt's annotation.ae), parsed by jdk26u's sun.reflect.annotation.AnnotationParser over the class file's own constant
+;; pool when reflection first asks (JVM_GetClassAnnotations and its kin): the key "T" the class's, "M NAME DESC" a
+;; method's, "C DESC" a constructor's, "F NAME" a field's (an Annotation[] in order), "P NAME DESC" a method's
+;; parameters' (Annotation[][]), "D NAME DESC" an annotation type's element default (Method.getDefaultValue's)
+(defclass ^:public ^:final BytecodeAnnotations
+  :implements [java.util.function.Function]
+  (field ^:public ^:final ^BytecodeClass bc)
+  (field ^jdk.internal.reflect.ConstantPool pool)
+  (constructor ^:public [this ^BytecodeClass bc] (set! (.-bc this) bc))
+
+  (method ^:private constantPool ^jdk.internal.reflect.ConstantPool [this]
+    (when (nil? pool) (set! pool (jdk.internal.reflect.ConstantPool. (.poolEntries (.-cf bc)))))
+    pool)
+
+  (method ^:private member ^BytecodeMember [this ^String name ^String desc ^boolean method]
+    (let [ms (if method (.-methods (.-cf bc)) (.-fields (.-cf bc)))]
+      (loop [^int i 0]
+        (if (< i (alength ms))
+            (let [m (aget ms i)]
+              (if (and (.equals (.-name m) name) (or (nil? desc) (.equals (.replace (.-desc m) \/ \.) desc)))
+                  m
+                  (recur (unchecked-inc-int i))))
+            nil))))
+
+  (method ^:private anns ^Object/1 [this ^byte/1 b]
+    (if (nil? b)
+        (new Object/1 0)
+        (.toArray (.values (sun.reflect.annotation.AnnotationParser/parseAnnotations b (.constantPool this) (.-cls bc))))))
+
+  (method ^:public apply [this key]
+    (let [k (cast String key)
+          sp (.split k " ")
+          kind (aget sp 0)]
+      (switch kind
+        "T" (.anns this (.-annotations (.-cf bc)))
+        "M" (let [m (.member this (aget sp 1) (aget sp 2) true)] (if (nil? m) nil (.anns this (.-annotations m))))
+        "C" (let [m (.member this "<init>" (aget sp 1) true)] (if (nil? m) nil (.anns this (.-annotations m))))
+        "F" (let [m (.member this (aget sp 1) nil false)] (if (nil? m) nil (.anns this (.-annotations m))))
+        "P" (let [m (.member this (aget sp 1) (aget sp 2) true)]
+              (if (or (nil? m) (nil? (.-paramAnnotations m)))
+                  nil
+                  (sun.reflect.annotation.AnnotationParser/parseParameterAnnotations (.-paramAnnotations m) (.constantPool this) (.-cls bc))))
+        "D" (let [m (.member this (aget sp 1) (aget sp 2) true)]
+              (if (or (nil? m) (nil? (.-annotationDefault m)))
+                  nil
+                  (let [rt (Bytecode/descClass (.-loader bc) (Bytecode/ret (.-desc m)))
+                        mt (sun.reflect.annotation.AnnotationType/invocationHandlerReturnType rt)
+                        v (sun.reflect.annotation.AnnotationParser/parseMemberValue mt (java.nio.ByteBuffer/wrap (.-annotationDefault m))
+                                                                                   (.constantPool this) (.-cls bc))]
+                    (if (instance? sun.reflect.annotation.ExceptionProxy v)
+                        (if (instance? sun.reflect.annotation.TypeNotPresentExceptionProxy v)
+                            (let [p (cast sun.reflect.annotation.TypeNotPresentExceptionProxy v)]
+                              (throw (TypeNotPresentException. (.typeName p) (.getCause p))))
+                            (throw (java.lang.annotation.AnnotationFormatError. (java-str "Invalid default: " (aget sp 1)))))
+                        v))))
+        nil))))
+;; @dev-strip-end

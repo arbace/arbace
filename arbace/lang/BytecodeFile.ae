@@ -1,0 +1,717 @@
+;; Classes defined from class-file bytes (doc/classes/BYTECODE-SURVEY.md, JD3, the user's decision of 2026-11-22):
+;; the class file's parser, JVMS chapter 4 (4.1-4.7) with the format checks of 4.8 that raise ClassFormatError and
+;; UnsupportedClassVersionError. Written from the JVMS (Java SE 26 edition); HotSpot's classFileParser.cpp
+;; (openjdk/jdk26u) read for its messages only, no code copied.
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+
+(in-ns 'arbace.lang)
+
+;; a field or method of a class file
+(defclass ^:public ^:final BytecodeMember
+  (field ^:public ^int access)
+  (field ^:public ^String name)
+  (field ^:public ^String desc)
+  (field ^:public ^String signature)
+  ;; a field's ConstantValue index (0: none)
+  (field ^:public ^int constIndex)
+  ;; the Code attribute (hasCode): max_stack, max_locals, the code, the exception table (four ints an entry:
+  ;; start_pc, end_pc, handler_pc, catch_type), the StackMapTable's info (null: none), LineNumberTable (two ints an
+  ;; entry: start_pc, line_number)
+  (field ^:public ^boolean hasCode)
+  (field ^:public ^int maxStack)
+  (field ^:public ^int maxLocals)
+  (field ^:public ^byte/1 code)
+  (field ^:public ^int/1 handlers)
+  (field ^:public ^byte/1 stackMap)
+  (field ^:public ^int/1 lines)
+  ;; Exceptions (internal names)
+  (field ^:public ^String/1 exceptions)
+  ;; MethodParameters: the name indices (0: no name) and flags; hasParams
+  (field ^:public ^boolean hasParams)
+  (field ^:public ^int/1 paramNames)
+  (field ^:public ^int/1 paramFlags)
+  ;; the raw infos of RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations, AnnotationDefault,
+  ;; RuntimeVisibleTypeAnnotations (null: none)
+  (field ^:public ^byte/1 annotations)
+  (field ^:public ^byte/1 paramAnnotations)
+  (field ^:public ^byte/1 annotationDefault)
+  (field ^:public ^byte/1 typeAnnotations)
+  (field ^:public ^boolean synthetic)
+  (field ^:public ^boolean deprecated)
+
+  (constructor ^:public [this])
+
+  (method ^:public key ^String [this] (java-str name desc))
+  (method ^:public isStatic ^boolean [this] (not (== 0 (bit-and-int access 0x0008))))
+  (method ^:public line ^int [this ^int pc]
+    (let [^:mutable ^int best -1]
+      (when (some? lines)
+        (loop [^int i 0 ^int bpc -1]
+          (when (< i (alength lines))
+            (let [s (aget lines i)]
+              (if (and (<= s pc) (>= s bpc))
+                  (do (set! best (aget lines (unchecked-inc-int i)))
+                      (recur (unchecked-add-int i 2) s))
+                  (recur (unchecked-add-int i 2) bpc))))))
+      best)))
+
+;; a parsed class file
+(defclass ^:public ^:final BytecodeFile
+  (field ^:public ^int minor)
+  (field ^:public ^int major)
+  ;; the constant pool: tag, value (Utf8 String; Integer, Float, Long, Double; Class, String, MethodType,
+  ;; Module, Package an Integer index), two indices of the others (refs: class and name-and-type; NameAndType:
+  ;; name and descriptor; MethodHandle: kind and reference; Dynamic, InvokeDynamic: the bootstrap method's
+  ;; index and name-and-type)
+  (field ^:public ^int/1 tags)
+  (field ^:public ^Object/1 vals)
+  (field ^:public ^int/1 ia)
+  (field ^:public ^int/1 ib)
+  (field ^:public ^int access)
+  (field ^:public ^String thisName)
+  (field ^:public ^String superName)
+  (field ^:public ^String/1 interfaces)
+  (field ^:public ^BytecodeMember/1 fields)
+  (field ^:public ^BytecodeMember/1 methods)
+  (field ^:public ^String signature)
+  (field ^:public ^String sourceFile)
+  ;; InnerClasses: four indices an entry (inner, outer, name, flags)
+  (field ^:public ^int/1 innerClasses)
+  ;; EnclosingMethod: the class's and the name-and-type's indices (emClass 0: none)
+  (field ^:public ^int emClass)
+  (field ^:public ^int emNat)
+  (field ^:public ^byte/1 annotations)
+  (field ^:public ^byte/1 typeAnnotations)
+  ;; BootstrapMethods: each the method handle's index then the arguments' indices
+  (field ^:public ^int/2 bootstraps)
+  ;; Record: the components' names, descriptors and signatures (null: not a record)
+  (field ^:public ^String/1 recordNames)
+  (field ^:public ^String/1 recordDescs)
+  (field ^:public ^String/1 recordSigs)
+  (field ^:public ^String nestHost)
+  (field ^:public ^String/1 nestMembers)
+  (field ^:public ^String/1 permitted)
+
+  ;; the reader's state
+  (field ^byte/1 b)
+  (field ^int pos)
+  (field ^int end)
+
+  (constructor ^:private [this ^byte/1 b ^int off ^int len]
+    (set! (.-b this) b)
+    (set! (.-pos this) off)
+    (set! (.-end this) (unchecked-add-int off len)))
+
+  ;; the platform's class file version: Java 26
+  (field ^:public ^:static ^:final ^int MAX_MAJOR 70)
+
+  ;; the errors a class file raises (Bytecode/error: jrt's stand-ins have no reflected constructors at the REPL)
+  (method ^:public ^:static cfe ^Throwable [^String msg] (Bytecode/error 0 msg))
+
+  (method ^:private where ^String [this]
+    (if (some? thisName) (.replace thisName \/ \.) "<Unknown>"))
+
+  (method ^:private need ^void [this ^int n]
+    (when (> (unchecked-add-int pos n) end)
+      (throw (BytecodeFile/cfe (java-str "Truncated class file")))))
+
+  (method ^:private u1 ^int [this]
+    (.need this 1)
+    (let [v (bit-and-int (aget b pos) 0xFF)]
+      (set! pos (unchecked-inc-int pos))
+      v))
+
+  (method ^:private u2 ^int [this]
+    (.need this 2)
+    (let [v (bit-or-int (bit-shift-left-int (bit-and-int (aget b pos) 0xFF) 8)
+                        (bit-and-int (aget b (unchecked-inc-int pos)) 0xFF))]
+      (set! pos (unchecked-add-int pos 2))
+      v))
+
+  (method ^:private u4 ^int [this]
+    (let [h (.u2 this) l (.u2 this)]
+      (bit-or-int (bit-shift-left-int h 16) l)))
+
+  (method ^:private bytes ^byte/1 [this ^int n]
+    (when (< n 0) (throw (BytecodeFile/cfe (java-str "Truncated class file"))))
+    (.need this n)
+    (let [r (java.util.Arrays/copyOfRange b pos (unchecked-add-int pos n))]
+      (set! pos (unchecked-add-int pos n))
+      r))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the constant pool's accessors
+
+  (method ^:public ^:static CONSTANT_Utf8 ^int [] 1)
+
+  (method ^:public tag ^int [this ^int i]
+    (if (and (> i 0) (< i (alength tags))) (aget tags i) 0))
+
+  (method ^:public utf8 ^String [this ^int i]
+    (when (not (== (.tag this i) 1))
+      (throw (BytecodeFile/cfe (java-str "Invalid constant pool index " i " in class file " (.where this)))))
+    (cast String (aget vals i)))
+
+  ;; the internal name of the Class entry i
+  (method ^:public className ^String [this ^int i]
+    (when (not (== (.tag this i) 7))
+      (throw (BytecodeFile/cfe (java-str "Invalid constant pool index " i " in class file " (.where this)))))
+    (.utf8 this (.intValue (cast Integer (aget vals i)))))
+
+  ;; a ref's class, name and descriptor
+  (method ^:public refClass ^String [this ^int i] (.className this (aget ia i)))
+  (method ^:public refName ^String [this ^int i] (.natName this (aget ib i)))
+  (method ^:public refDesc ^String [this ^int i] (.natDesc this (aget ib i)))
+  (method ^:public natName ^String [this ^int i] (.utf8 this (aget ia i)))
+  (method ^:public natDesc ^String [this ^int i] (.utf8 this (aget ib i)))
+
+  ;; the value of a loadable Integer, Float, Long, Double or String entry
+  (method ^:public constant [this ^int i]
+    (switch (.tag this i)
+      (3 4 5 6) (aget vals i)
+      8 (.utf8 this (.intValue (cast Integer (aget vals i))))
+      (throw (BytecodeFile/cfe (java-str "Invalid constant pool index " i " in class file " (.where this))))))
+
+  ;; the pool's entries as jdk.internal.reflect.ConstantPool (the overlay's) takes them: Utf8 a String,
+  ;; Integer an Integer, Float a Float, Long a Long, Double a Double, the others nil
+  (method ^:public poolEntries ^Object/1 [this]
+    (let [n (alength tags)
+          a (new Object/1 n)]
+      (loop [^int i 1]
+        (when (< i n)
+          (switch (aget tags i)
+            (1 3 4 5 6) (aset a i (aget vals i))
+            nil)
+          (recur (unchecked-inc-int i))))
+      a))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; names and descriptors (JVMS 4.2, 4.3)
+
+  ;; a legal unqualified name (4.2.2): non-empty, none of . ; [ /; a method's also no < or > but <init> and <clinit>
+  (method ^:public ^:static legalUnqualified ^boolean [^String s ^boolean method]
+    (if (== 0 (.length s))
+        false
+        (if (and method (or (.equals s "<init>") (.equals s "<clinit>")))
+            true
+            (loop [^int i 0]
+              (if (< i (.length s))
+                  (let [c (.charAt s i)]
+                    (if (or (== c \.) (== c \;) (== c \[) (== c \/) (and method (or (== c \<) (== c \>))))
+                        false
+                        (recur (unchecked-inc-int i))))
+                  true)))))
+
+  ;; a legal binary name in internal form (4.2.1), or an array descriptor (a Class entry may name an array)
+  (method ^:public ^:static legalClassName ^boolean [^String s]
+    (cond
+      (== 0 (.length s)) false
+      (== (.charAt s 0) \[) (let [e (BytecodeFile/fieldDescEnd s 0)] (== e (.length s)))
+      :else (loop [^int i 0 ^int start 0]
+              (if (< i (.length s))
+                  (let [c (.charAt s i)]
+                    (cond
+                      (== c \/) (if (== i start) false (recur (unchecked-inc-int i) (unchecked-inc-int i)))
+                      (or (== c \.) (== c \;) (== c \[)) false
+                      :else (recur (unchecked-inc-int i) start)))
+                  (> i start)))))
+
+  ;; the end of the field descriptor starting at i in s, -1 when there is none
+  (method ^:public ^:static fieldDescEnd ^int [^String s ^int i]
+    (let [n (.length s)]
+      (loop [^int j i ^int dims 0]
+        (if (>= j n)
+            -1
+            (let [c (.charAt s j)]
+              (switch c
+                \[ (if (>= dims 255) -1 (recur (unchecked-inc-int j) (unchecked-inc-int dims)))
+                (\B \C \D \F \I \J \S \Z) (unchecked-inc-int j)
+                \L (let [k (.indexOf s ";" j)]
+                     (if (or (< k 0) (== k (unchecked-inc-int j)))
+                         -1
+                         (let [nm (.substring s (unchecked-inc-int j) k)]
+                           (if (BytecodeFile/legalClassName nm) (unchecked-inc-int k) -1))))
+                -1))))))
+
+  (method ^:public ^:static legalFieldDesc ^boolean [^String s]
+    (== (BytecodeFile/fieldDescEnd s 0) (.length s)))
+
+  ;; the method descriptor's parameter slots (a long or double two), -1 when it is not legal
+  (method ^:public ^:static methodDescSlots ^int [^String s]
+    (if (or (< (.length s) 3) (not (== (.charAt s 0) \()))
+        -1
+        (loop [^int i 1 ^int slots 0]
+          (cond
+            (>= i (.length s)) -1
+            (== (.charAt s i) \))
+              (let [r (unchecked-inc-int i)]
+                (if (and (< r (.length s))
+                         (or (and (== (.charAt s r) \V) (== (unchecked-inc-int r) (.length s)))
+                             (== (BytecodeFile/fieldDescEnd s r) (.length s))))
+                    slots
+                    -1))
+            :else (let [e (BytecodeFile/fieldDescEnd s i)]
+                    (if (< e 0)
+                        -1
+                        (let [c (.charAt s i)]
+                          (recur e (unchecked-add-int slots (if (or (== c \J) (== c \D)) 2 1))))))))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; Modified UTF-8 (4.4.7)
+
+  (method ^:private utf8At ^String [this ^int len]
+    (.need this len)
+    (let [sb (StringBuilder. len)
+          stop (unchecked-add-int pos len)]
+      (loop []
+        (when (< pos stop)
+          (let [x (bit-and-int (aget b pos) 0xFF)]
+            (cond
+              (and (> x 0) (< x 0x80))
+                (do (.append sb (unchecked-char x)) (set! pos (unchecked-inc-int pos)))
+              (== (bit-and-int x 0xE0) 0xC0)
+                (do (when (>= (unchecked-inc-int pos) stop) (.badUtf8 this))
+                    (let [y (bit-and-int (aget b (unchecked-inc-int pos)) 0xFF)]
+                      (when (not (== (bit-and-int y 0xC0) 0x80)) (.badUtf8 this))
+                      (.append sb (unchecked-char (bit-or-int (bit-shift-left-int (bit-and-int x 0x1F) 6) (bit-and-int y 0x3F))))
+                      (set! pos (unchecked-add-int pos 2))))
+              (== (bit-and-int x 0xF0) 0xE0)
+                (do (when (>= (unchecked-add-int pos 2) stop) (.badUtf8 this))
+                    (let [y (bit-and-int (aget b (unchecked-inc-int pos)) 0xFF)
+                          z (bit-and-int (aget b (unchecked-add-int pos 2)) 0xFF)]
+                      (when (or (not (== (bit-and-int y 0xC0) 0x80)) (not (== (bit-and-int z 0xC0) 0x80))) (.badUtf8 this))
+                      (.append sb (unchecked-char (bit-or-int (bit-shift-left-int (bit-and-int x 0x0F) 12)
+                                                              (bit-or-int (bit-shift-left-int (bit-and-int y 0x3F) 6)
+                                                                          (bit-and-int z 0x3F)))))
+                      (set! pos (unchecked-add-int pos 3))))
+              :else (.badUtf8 this))
+            (recur))))
+      (.toString sb)))
+
+  (method ^:private badUtf8 ^void [this]
+    (throw (BytecodeFile/cfe (java-str "Illegal UTF8 string in constant pool in class file " (.where this)))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the file
+
+  ;; parses b[off, off+len): ClassFormatError, UnsupportedClassVersionError (ClassFormatError here: the class is not
+  ;; in the Go build's world, doc/classes/BYTECODE-SURVEY.md §7)
+  (method ^:public ^:static parse ^BytecodeFile [^byte/1 b ^int off ^int len]
+    (let [f (BytecodeFile. b off len)]
+      (.read f)
+      f))
+
+  (method ^:private read ^void [this]
+    (let [magic (.u4 this)]
+      (when (not (== magic (unchecked-int 0xCAFEBABE)))
+        (throw (BytecodeFile/cfe (java-str "Incompatible magic value " (Integer/toUnsignedString magic) " in class file <Unknown>")))))
+    (set! minor (.u2 this))
+    (set! major (.u2 this))
+    (when (or (< major 45) (> major MAX_MAJOR)
+              (and (>= major 56) (not (== minor 0)) (not (== minor 0xFFFF)))
+              (and (== minor 0xFFFF) (>= major 56)))
+      (throw (BytecodeFile/cfe (java-str "Unsupported class file version " major "." minor
+                                          " (the platform's class file versions are up to " MAX_MAJOR ".0)"))))
+    (.readPool this)
+    (set! access (.u2 this))
+    (let [ti (.u2 this)]
+      (when (not (== (.tag this ti) 7))
+        (throw (BytecodeFile/cfe (java-str "Invalid this class index " ti " in constant pool in class file <Unknown>"))))
+      (set! thisName (.className this ti))
+      (when (not (BytecodeFile/legalClassName thisName))
+        (throw (BytecodeFile/cfe (java-str "Illegal class name \"" thisName "\" in class file " (.where this))))))
+    (let [si (.u2 this)]
+      (if (== si 0)
+          (when (not (.equals thisName "java/lang/Object"))
+            (throw (BytecodeFile/cfe (java-str "Invalid superclass index 0 in class file " (.where this)))))
+          (do (when (not (== (.tag this si) 7))
+                (throw (BytecodeFile/cfe (java-str "Invalid superclass index " si " in class file " (.where this)))))
+              (set! superName (.className this si))
+              (when (== (.charAt superName 0) \[)
+                (throw (BytecodeFile/cfe (java-str "Bad superclass name in class file " (.where this))))))))
+    (.checkClassFlags this)
+    (let [n (.u2 this)
+          ifs (new String/1 n)]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [ii (.u2 this)]
+            (when (not (== (.tag this ii) 7))
+              (throw (BytecodeFile/cfe (java-str "Interface name has bad constant pool index " ii " in class file " (.where this)))))
+            (aset ifs i (.className this ii))
+            (loop [^int j 0]
+              (when (< j i)
+                (when (.equals (aget ifs j) (aget ifs i))
+                  (throw (BytecodeFile/cfe (java-str "Duplicate interface name \"" (aget ifs i) "\" in class file " (.where this)))))
+                (recur (unchecked-inc-int j)))))
+          (recur (unchecked-inc-int i))))
+      (set! interfaces ifs))
+    (set! fields (.readMembers this false))
+    (set! methods (.readMembers this true))
+    (.readClassAttributes this)
+    (when (< pos end)
+      (throw (BytecodeFile/cfe (java-str "Extra bytes at the end of class file " (.where this))))))
+
+  (method ^:private readPool ^void [this]
+    (let [n (.u2 this)]
+      (when (== n 0)
+        (throw (BytecodeFile/cfe (java-str "Illegal constant pool size 0 in class file <Unknown>"))))
+      (set! tags (new int/1 n))
+      (set! vals (new Object/1 n))
+      (set! ia (new int/1 n))
+      (set! ib (new int/1 n))
+      (loop [^int i 1]
+        (when (< i n)
+          (let [t (.u1 this)]
+            (aset tags i t)
+            (switch t
+              1 (aset vals i (.utf8At this (.u2 this)))
+              3 (aset vals i (Integer/valueOf (.u4 this)))
+              4 (aset vals i (Float/valueOf (Float/intBitsToFloat (.u4 this))))
+              (5 6) (let [h (.u4 this) l (.u4 this)
+                          v (bit-or (bit-shift-left (unchecked-long h) 32) (bit-and (unchecked-long l) 0xFFFFFFFF))]
+                      (aset vals i (if (== t 5) (Long/valueOf v) (Double/valueOf (Double/longBitsToDouble v))))
+                      (when (>= (unchecked-inc-int i) n)
+                        (throw (BytecodeFile/cfe (java-str "Invalid constant pool entry " i " in class file <Unknown>")))))
+              (7 8 16 19 20) (do (when (and (or (== t 19) (== t 20)) (< major 53))
+                                   (.badTag this t i))
+                                 (when (and (== t 16) (< major 51)) (.badTag this t i))
+                                 (aset vals i (Integer/valueOf (.u2 this))))
+              (9 10 11 12) (do (aset ia i (.u2 this)) (aset ib i (.u2 this)))
+              15 (do (when (< major 51) (.badTag this t i))
+                     (aset ia i (.u1 this)) (aset ib i (.u2 this)))
+              (17 18) (do (when (or (and (== t 18) (< major 51)) (and (== t 17) (< major 55))) (.badTag this t i))
+                          (aset ia i (.u2 this)) (aset ib i (.u2 this)))
+              (.badTag this t i))
+            (recur (if (or (== t 5) (== t 6)) (unchecked-add-int i 2) (unchecked-inc-int i))))))
+      ;; the entries' references (4.4)
+      (loop [^int i 1]
+        (when (< i n)
+          (switch (aget tags i)
+            (7 8 16 19 20) (let [r (.intValue (cast Integer (aget vals i)))]
+                             (when (not (== (.tag this r) 1)) (.badRef this i)))
+            (9 10 11) (do (when (not (== (.tag this (aget ia i)) 7)) (.badRef this i))
+                          (when (not (== (.tag this (aget ib i)) 12)) (.badRef this i)))
+            12 (do (when (not (== (.tag this (aget ia i)) 1)) (.badRef this i))
+                   (when (not (== (.tag this (aget ib i)) 1)) (.badRef this i)))
+            15 (let [k (aget ia i) r (aget ib i) rt (.tag this r)]
+                 (when (or (< k 1) (> k 9)) (.badRef this i))
+                 (cond
+                   (<= k 4) (when (not (== rt 9)) (.badRef this i))
+                   (or (== k 5) (== k 8)) (when (not (== rt 10)) (.badRef this i))
+                   (or (== k 6) (== k 7)) (when (not (or (== rt 10) (and (>= major 52) (== rt 11)))) (.badRef this i))
+                   :else (when (not (== rt 11)) (.badRef this i))))
+            (17 18) (when (not (== (.tag this (aget ib i)) 12)) (.badRef this i))
+            nil)
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:private badTag ^void [this ^int t ^int i]
+    (throw (BytecodeFile/cfe (java-str "Unknown constant tag " t " in class file <Unknown>"))))
+
+  (method ^:private badRef ^void [this ^int i]
+    (throw (BytecodeFile/cfe (java-str "Invalid constant pool index " i " in class file <Unknown>"))))
+
+  ;; 4.1's rules on a class's access flags
+  (method ^:private checkClassFlags ^void [this]
+    (let [f access
+          iface (not (== 0 (bit-and-int f 0x0200)))
+          abst (not (== 0 (bit-and-int f 0x0400)))
+          fin (not (== 0 (bit-and-int f 0x0010)))
+          ann (not (== 0 (bit-and-int f 0x2000)))
+          enm (not (== 0 (bit-and-int f 0x4000)))
+          module (not (== 0 (bit-and-int f 0x8000)))]
+      (when module
+        (throw (Bytecode/error 1 (java-str (.where this) " is not a class because access_flag ACC_MODULE is set"))))
+      (when (or (and iface (or (not abst) fin enm (and (>= major 53) false)))
+                (and (not iface) (or ann (and fin abst))))
+        (throw (BytecodeFile/cfe (java-str "Illegal class modifiers in class " (.where this) ": 0x" (Integer/toHexString f)))))))
+
+  (method ^:private readMembers ^BytecodeMember/1 [this ^boolean method]
+    (let [n (.u2 this)
+          ms (new BytecodeMember/1 n)
+          iface (not (== 0 (bit-and-int access 0x0200)))
+          seen (java.util.HashSet.)]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [m (BytecodeMember.)]
+            (set! (.-access m) (.u2 this))
+            (set! (.-name m) (.utf8 this (.u2 this)))
+            (set! (.-desc m) (.utf8 this (.u2 this)))
+            (if method
+                (do (when (not (BytecodeFile/legalUnqualified (.-name m) true))
+                      (throw (BytecodeFile/cfe (java-str "Illegal method name \"" (.-name m) "\" in class " (.where this)))))
+                    (let [slots (BytecodeFile/methodDescSlots (.-desc m))]
+                      (when (or (< slots 0)
+                                (and (.equals (.-name m) "<init>") (not (.endsWith (.-desc m) ")V")))
+                                (and (.equals (.-name m) "<clinit>") (not (.endsWith (.-desc m) ")V"))))
+                        (throw (BytecodeFile/cfe (java-str "Method \"" (.-name m) "\" in class " (.where this)
+                                                            " has illegal signature \"" (.-desc m) "\""))))
+                      (when (> (unchecked-add-int slots (if (.isStatic m) 0 1)) 255)
+                        (throw (BytecodeFile/cfe (java-str "Too many arguments in method signature in class file " (.where this))))))
+                    (.checkMethodFlags this m iface))
+                (do (when (not (BytecodeFile/legalUnqualified (.-name m) false))
+                      (throw (BytecodeFile/cfe (java-str "Illegal field name \"" (.-name m) "\" in class " (.where this)))))
+                    (when (not (BytecodeFile/legalFieldDesc (.-desc m)))
+                      (throw (BytecodeFile/cfe (java-str "Field \"" (.-name m) "\" in class " (.where this)
+                                                          " has illegal signature \"" (.-desc m) "\""))))
+                    (.checkFieldFlags this m iface)))
+            (when (not (.add seen (java-str (.-name m) " " (.-desc m))))
+              (throw (BytecodeFile/cfe (java-str (if method "Duplicate method name \"" "Duplicate field name \"")
+                                                  (.-name m) "\" with signature \"" (.-desc m) "\" in class file " (.where this)))))
+            (.readMemberAttributes this m method)
+            (when method
+              (let [needs (== 0 (bit-and-int (.-access m) 0x0500))]
+                (when (and needs (not (.-hasCode m)))
+                  (throw (BytecodeFile/cfe (java-str "Absent Code attribute in method that is not native or abstract in class file " (.where this)))))
+                (when (and (not needs) (.-hasCode m))
+                  (throw (BytecodeFile/cfe (java-str "Code attribute in native or abstract methods in class file " (.where this)))))))
+            (aset ms i m))
+          (recur (unchecked-inc-int i))))
+      ms))
+
+  (method ^:private ^:static bits ^int [^int f]
+    (unchecked-add-int (unchecked-add-int (if (== 0 (bit-and-int f 1)) 0 1) (if (== 0 (bit-and-int f 2)) 0 1))
+                       (if (== 0 (bit-and-int f 4)) 0 1)))
+
+  (method ^:private checkMethodFlags ^void [this ^BytecodeMember m ^boolean iface]
+    (let [f (.-access m)
+          ^:mutable bad (> (BytecodeFile/bits f) 1)
+          abst (not (== 0 (bit-and-int f 0x0400)))
+          init (.equals (.-name m) "<init>")
+          clinit (.equals (.-name m) "<clinit>")]
+      (when clinit (return))
+      (when abst
+        (when (not (== 0 (bit-and-int f (bit-or-int (bit-or-int 0x0010 0x0100) (bit-or-int 0x0008 0x0020)))))
+          (set! bad true))
+        (when (and (not (== 0 (bit-and-int f 0x0002))) (not iface)) (set! bad true))
+        (when (and (not (== 0 (bit-and-int f 0x0800))) (< major 46)) nil))
+      (when iface
+        (cond
+          (< major 52) (when (or (not (== (bit-and-int f 0x0401) 0x0401)) (not (== 0 (bit-and-int f 0x001E)))) (set! bad true))
+          :else (do (when (not (== 0 (bit-and-int f 0x0004))) (set! bad true))
+                    (when (and (== 0 (bit-and-int f 0x0001)) (== 0 (bit-and-int f 0x0002))) (set! bad true))
+                    (when (not (== 0 (bit-and-int f (bit-or-int 0x0010 0x0020)))) (set! bad true))))
+        (when init (set! bad true)))
+      (when (and init (not (== 0 (bit-and-int f (bit-or-int (bit-or-int 0x0008 0x0010) (bit-or-int 0x0020 (bit-or-int 0x0100 0x0400)))))))
+        (set! bad true))
+      (when bad
+        (throw (BytecodeFile/cfe (java-str "Method " (.-name m) " in class " (.where this)
+                                            " has illegal modifiers: 0x" (Integer/toHexString f)))))))
+
+  (method ^:private checkFieldFlags ^void [this ^BytecodeMember m ^boolean iface]
+    (let [f (.-access m)]
+      (when (or (> (BytecodeFile/bits f) 1)
+                (and (not (== 0 (bit-and-int f 0x0010))) (not (== 0 (bit-and-int f 0x0040))))
+                (and iface (or (not (== (bit-and-int f 0x0019) 0x0019)) (not (== 0 (bit-and-int f 0x00C6))))))
+        (throw (BytecodeFile/cfe (java-str "Illegal field modifiers in class " (.where this) ": 0x" (Integer/toHexString f)))))))
+
+  (method ^:private attrLength ^void [this ^int expected ^int got ^String what]
+    (when (not (== expected got))
+      (throw (BytecodeFile/cfe (java-str "Invalid " what " attribute length " got " in class file " (.where this))))))
+
+  (method ^:private readMemberAttributes ^void [this ^BytecodeMember m ^boolean method]
+    (let [n (.u2 this)]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [an (.utf8 this (.u2 this))
+                len (.u4 this)
+                start pos]
+            (.need this len)
+            (cond
+              (and method (.equals an "Code"))
+                (do (when (.-hasCode m)
+                      (throw (BytecodeFile/cfe (java-str "Multiple Code attributes in class file " (.where this)))))
+                    (.readCode this m len))
+              (and method (.equals an "Exceptions"))
+                (let [k (.u2 this) es (new String/1 k)]
+                  (.attrLength this (unchecked-add-int 2 (unchecked-multiply-int 2 k)) len "Exceptions")
+                  (loop [^int j 0]
+                    (when (< j k)
+                      (aset es j (.className this (.u2 this)))
+                      (recur (unchecked-inc-int j))))
+                  (set! (.-exceptions m) es))
+              (and method (.equals an "MethodParameters"))
+                (let [k (.u1 this)]
+                  (when (.-hasParams m)
+                    (throw (BytecodeFile/cfe (java-str "Multiple MethodParameters attributes in class file " (.where this)))))
+                  (.attrLength this (unchecked-add-int 1 (unchecked-multiply-int 4 k)) len "MethodParameters")
+                  (set! (.-hasParams m) true)
+                  (set! (.-paramNames m) (new int/1 k))
+                  (set! (.-paramFlags m) (new int/1 k))
+                  (loop [^int j 0]
+                    (when (< j k)
+                      (aset (.-paramNames m) j (.u2 this))
+                      (aset (.-paramFlags m) j (.u2 this))
+                      (recur (unchecked-inc-int j)))))
+              (and method (.equals an "RuntimeVisibleParameterAnnotations")) (set! (.-paramAnnotations m) (.bytes this len))
+              (and method (.equals an "AnnotationDefault")) (set! (.-annotationDefault m) (.bytes this len))
+              (and (not method) (.equals an "ConstantValue"))
+                (do (.attrLength this 2 len "ConstantValue")
+                    (let [ci (.u2 this)]
+                      (when (not (== 0 (bit-and-int (.-access m) 0x0008)))
+                        (let [t (.tag this ci)
+                              d (.charAt (.-desc m) 0)
+                              ok (switch d
+                                   (\I \S \C \B \Z) (== t 3)
+                                   \F (== t 4)
+                                   \J (== t 5)
+                                   \D (== t 6)
+                                   \L (and (.equals (.-desc m) "Ljava/lang/String;") (== t 8))
+                                   false)]
+                          (when (not ok)
+                            (throw (BytecodeFile/cfe (java-str "Inconsistent constant value type in class file " (.where this)))))
+                          (set! (.-constIndex m) ci)))))
+              (.equals an "Signature") (do (.attrLength this 2 len "Signature") (set! (.-signature m) (.utf8 this (.u2 this))))
+              (.equals an "RuntimeVisibleAnnotations") (set! (.-annotations m) (.bytes this len))
+              (.equals an "RuntimeVisibleTypeAnnotations") (set! (.-typeAnnotations m) (.bytes this len))
+              (.equals an "Synthetic") (do (.attrLength this 0 len "Synthetic") (set! (.-synthetic m) true))
+              (.equals an "Deprecated") (set! (.-deprecated m) true)
+              :else nil)
+            (when (> pos (unchecked-add-int start len))
+              (throw (BytecodeFile/cfe (java-str "Invalid " an " attribute length in class file " (.where this)))))
+            (set! pos (unchecked-add-int start len)))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:private readCode ^void [this ^BytecodeMember m ^int len]
+    (let [start pos]
+      (set! (.-hasCode m) true)
+      (if (< major 45)
+          nil
+          (do (set! (.-maxStack m) (.u2 this))
+              (set! (.-maxLocals m) (.u2 this))))
+      (let [cl (.u4 this)]
+        (when (or (<= cl 0) (>= cl 65536))
+          (throw (BytecodeFile/cfe (java-str "Invalid method Code length " cl " in class file " (.where this)))))
+        (set! (.-code m) (.bytes this cl)))
+      (let [k (.u2 this)
+            hs (new int/1 (unchecked-multiply-int 4 k))]
+        (loop [^int j 0]
+          (when (< j k)
+            (let [s (.u2 this) e (.u2 this) h (.u2 this) ct (.u2 this)
+                  cl (alength (.-code m))]
+              (when (or (>= s cl) (> e cl) (>= s e) (>= h cl) (and (not (== ct 0)) (not (== (.tag this ct) 7))))
+                (throw (BytecodeFile/cfe (java-str "Illegal exception table range in class file " (.where this)))))
+              (aset hs (unchecked-multiply-int 4 j) s)
+              (aset hs (unchecked-add-int (unchecked-multiply-int 4 j) 1) e)
+              (aset hs (unchecked-add-int (unchecked-multiply-int 4 j) 2) h)
+              (aset hs (unchecked-add-int (unchecked-multiply-int 4 j) 3) ct))
+            (recur (unchecked-inc-int j))))
+        (set! (.-handlers m) hs))
+      (let [n (.u2 this)
+            lines (java.util.ArrayList.)]
+        (loop [^int i 0]
+          (when (< i n)
+            (let [an (.utf8 this (.u2 this))
+                  al (.u4 this)
+                  s pos]
+              (.need this al)
+              (cond
+                (.equals an "StackMapTable")
+                  (do (when (some? (.-stackMap m))
+                        (throw (BytecodeFile/cfe (java-str "Multiple StackMapTable attributes in method in class file " (.where this)))))
+                      (set! (.-stackMap m) (.bytes this al)))
+                (.equals an "LineNumberTable")
+                  (let [k (.u2 this)]
+                    (loop [^int j 0]
+                      (when (< j k)
+                        (.add lines (Integer/valueOf (.u2 this)))
+                        (.add lines (Integer/valueOf (.u2 this)))
+                        (recur (unchecked-inc-int j)))))
+                :else nil)
+              (set! pos (unchecked-add-int s al)))
+            (recur (unchecked-inc-int i))))
+        (when (> (.size lines) 0)
+          (let [a (new int/1 (.size lines))]
+            (loop [^int i 0]
+              (when (< i (alength a))
+                (aset a i (.intValue (cast Integer (.get lines i))))
+                (recur (unchecked-inc-int i))))
+            (set! (.-lines m) a))))
+      (when (not (== pos (unchecked-add-int start len)))
+        (throw (BytecodeFile/cfe (java-str "Code segment has wrong length in class file " (.where this)))))))
+
+  (method ^:private readClassAttributes ^void [this]
+    (let [n (.u2 this)]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [an (.utf8 this (.u2 this))
+                len (.u4 this)
+                start pos]
+            (.need this len)
+            (cond
+              (.equals an "SourceFile") (do (.attrLength this 2 len "SourceFile") (set! sourceFile (.utf8 this (.u2 this))))
+              (.equals an "Signature") (do (.attrLength this 2 len "Signature") (set! signature (.utf8 this (.u2 this))))
+              (.equals an "InnerClasses")
+                (let [k (.u2 this) a (new int/1 (unchecked-multiply-int 4 k))]
+                  (when (some? innerClasses)
+                    (throw (BytecodeFile/cfe (java-str "Multiple InnerClasses attributes in class file " (.where this)))))
+                  (.attrLength this (unchecked-add-int 2 (unchecked-multiply-int 8 k)) len "InnerClasses")
+                  (loop [^int j 0]
+                    (when (< j k)
+                      (let [ii (.u2 this) oi (.u2 this) ni (.u2 this) fl (.u2 this)]
+                        (when (or (not (== (.tag this ii) 7)) (and (not (== oi 0)) (not (== (.tag this oi) 7)))
+                                  (and (not (== ni 0)) (not (== (.tag this ni) 1))))
+                          (throw (BytecodeFile/cfe (java-str "inner_class_info_index " ii " has bad constant type in class file " (.where this)))))
+                        (aset a (unchecked-multiply-int 4 j) ii)
+                        (aset a (unchecked-add-int (unchecked-multiply-int 4 j) 1) oi)
+                        (aset a (unchecked-add-int (unchecked-multiply-int 4 j) 2) ni)
+                        (aset a (unchecked-add-int (unchecked-multiply-int 4 j) 3) fl))
+                      (recur (unchecked-inc-int j))))
+                  (set! innerClasses a))
+              (.equals an "EnclosingMethod")
+                (do (.attrLength this 4 len "EnclosingMethod")
+                    (set! emClass (.u2 this))
+                    (set! emNat (.u2 this))
+                    (when (or (not (== (.tag this emClass) 7)) (and (not (== emNat 0)) (not (== (.tag this emNat) 12))))
+                      (throw (BytecodeFile/cfe (java-str "Invalid or out-of-bounds method index in EnclosingMethod attribute in class file " (.where this))))))
+              (.equals an "RuntimeVisibleAnnotations") (set! annotations (.bytes this len))
+              (.equals an "RuntimeVisibleTypeAnnotations") (set! typeAnnotations (.bytes this len))
+              (.equals an "BootstrapMethods")
+                (let [k (.u2 this) a (new int/2 k)]
+                  (loop [^int j 0]
+                    (when (< j k)
+                      (let [mh (.u2 this) na (.u2 this) e (new int/1 (unchecked-inc-int na))]
+                        (when (not (== (.tag this mh) 15))
+                          (throw (BytecodeFile/cfe (java-str "bootstrap_method_index " mh " has bad constant type in class file " (.where this)))))
+                        (aset e 0 mh)
+                        (loop [^int q 0]
+                          (when (< q na)
+                            (aset e (unchecked-inc-int q) (.u2 this))
+                            (recur (unchecked-inc-int q))))
+                        (aset a j e))
+                      (recur (unchecked-inc-int j))))
+                  (set! bootstraps a))
+              (.equals an "Record")
+                (let [k (.u2 this)
+                      ns (new String/1 k) ds (new String/1 k) ss (new String/1 k)]
+                  (loop [^int j 0]
+                    (when (< j k)
+                      (aset ns j (.utf8 this (.u2 this)))
+                      (aset ds j (.utf8 this (.u2 this)))
+                      (let [ac (.u2 this)]
+                        (loop [^int q 0]
+                          (when (< q ac)
+                            (let [can (.utf8 this (.u2 this)) cl (.u4 this) cs pos]
+                              (.need this cl)
+                              (when (.equals can "Signature") (aset ss j (.utf8 this (.u2 this))))
+                              (set! pos (unchecked-add-int cs cl)))
+                            (recur (unchecked-inc-int q)))))
+                      (recur (unchecked-inc-int j))))
+                  (set! recordNames ns)
+                  (set! recordDescs ds)
+                  (set! recordSigs ss))
+              (.equals an "NestHost") (do (.attrLength this 2 len "NestHost") (set! nestHost (.className this (.u2 this))))
+              (.equals an "NestMembers") (set! nestMembers (.classList this))
+              (.equals an "PermittedSubclasses") (set! permitted (.classList this))
+              :else nil)
+            (when (> pos (unchecked-add-int start len))
+              (throw (BytecodeFile/cfe (java-str "Invalid " an " attribute length in class file " (.where this)))))
+            (set! pos (unchecked-add-int start len)))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:private classList ^String/1 [this]
+    (let [k (.u2 this) a (new String/1 k)]
+      (loop [^int j 0]
+        (when (< j k)
+          (aset a j (.className this (.u2 this)))
+          (recur (unchecked-inc-int j))))
+      a)))
