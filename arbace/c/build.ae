@@ -14,7 +14,7 @@
   arbace.lang.CInterp."
   (:require [arbace.c.check :as chk]
             [arbace.string :as str])
-  (:import (java.util ArrayList HashMap IdentityHashMap)))
+  (:import (java.util ArrayList HashMap IdentityHashMap) (java.math BigInteger)))
 
 (set! *warn-on-reflection* true)
 
@@ -62,15 +62,17 @@
       (:float :double :ldouble :float32 :float64 :float32x :float64x :float16) :f
       (:struct :union :array) :m
       ;; complex types: their parts floating, or integers of at most 64 bits (GNU's complex integer types, CS105); a part
-      ;; of a type out of eval (_Float16, _Float128, the decimal types: SPEC §14) refused by design as the part is
+      ;; of a type out of eval (_Float128x, __bf16, the decimal types: SPEC §14) refused by design as the part is
       :complex (let [pt (under (:of t))]
                  (cond
-                   (#{:float :double :ldouble :float32 :float64 :float32x :float64x :float16} (:k pt)) :m
-                   (#{:float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x} (:k pt))
+                   (#{:float :double :ldouble :float32 :float64 :float32x :float64x :float16 :float128} (:k pt)) :m
+                   (#{:float128x :bf16 :dec32 :dec64 :dec128 :dec64x} (:k pt))
                    (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
                    (and (chk/int-type? pt) (not (wide? pt))) :m
                    :else (refuse :complex "the complex type " (chk/tstr t) " (deferred)")))
-      (:float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
+      ;; queue 522 (CR3 (a)): _Float128 a wide value of binary128's bits (crt's WType Float, wty q128), its arithmetic in software
+      :float128 :w
+      (:float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
       ;; GNU vector types (CS320 (a)): lanes in memory, an aggregate's address
       :vector :m
       :fn :i
@@ -97,7 +99,7 @@
 (defn wty [t]
   (let [t (under t)]
     (case (:k t)
-      :int128 "s128" :uint128 "u128"
+      :int128 "s128" :uint128 "u128" :float128 "q128"
       :bitint (str (if (:u t) "u" "s") (:n t)))))
 
 (defn- f32? [t] (#{:float :float32} (:k (under t))))
@@ -293,20 +295,77 @@
 
 (defn- fbits [v] (Double/doubleToRawLongBits (double v)))
 
+(defn- bin-pack
+  "(-1)^neg * m * 2^e (m a BigInteger, at least 0) rounded to nearest, ties to even, to the binary format of p significant
+  bits, exponent bias emax and ebits exponent bits: its bits as a BigInteger (crt's fpack; queue 522)."
+  ^BigInteger [neg ^BigInteger m ^long e ^long p ^long emax ^long ebits]
+  (let [sign (fn [^BigInteger r] (if neg (.setBit r (int (+ ebits p -1))) r))]
+    (if (zero? (.signum m))
+      (sign BigInteger/ZERO)
+      (let [ee (+ e (.bitLength m) -1)
+            q (max (inc (- ee p)) (inc (- (- 1 emax) p)))
+            s (- q e)
+            mm (if (pos? s)
+                 (let [t (.shiftRight m (int s))
+                       rem (.subtract m (.shiftLeft t (int s)))
+                       c (.compareTo rem (.shiftLeft BigInteger/ONE (int (dec s))))]
+                   (if (or (pos? c) (and (zero? c) (.testBit t 0))) (.add t BigInteger/ONE) t))
+                 (.shiftLeft m (int (- s))))
+            [^BigInteger mm q] (if (> (.bitLength mm) p) [(.shiftRight mm 1) (inc q)] [mm q])
+            e2 (+ q p -1)]
+        (sign (cond
+                (< (.bitLength mm) p) mm
+                (> e2 emax) (.shiftLeft (biginteger (inc (* 2 emax))) (int (dec p)))
+                :else (.or (.shiftLeft (biginteger (+ e2 emax)) (int (dec p))) (.clearBit mm (int (dec p))))))))))
+
+(defn- q128-hex
+  "A _Float128 constant's bits as wty q128's hex text: its exact value (the checker's :ld, a BigDecimal), else v, rounded once."
+  ^String [v ld]
+  (let [d (when (instance? Double v) (double v))
+        neg-bit (and d (neg? (Double/doubleToRawLongBits d)))
+        hex (fn [^BigInteger b] (str "0x" (.toString b 16)))
+        top (fn [^long hi] (hex (.shiftLeft (BigInteger. (Long/toUnsignedString hi)) 64)))]
+    (cond
+      (and (nil? ld) d (Double/isNaN d)) (top (if neg-bit (unchecked-long 0xffff800000000000) 0x7fff800000000000))
+      (and (nil? ld) d (Double/isInfinite d)) (top (if neg-bit (unchecked-long 0xffff000000000000) 0x7fff000000000000))
+      :else
+      (let [^java.math.BigDecimal x (cond (instance? java.math.BigDecimal ld) ld
+                                          (instance? java.math.BigDecimal v) v
+                                          d (java.math.BigDecimal. d)
+                                          (ratio? v) nil
+                                          :else (java.math.BigDecimal. (biginteger v)))
+            [^BigInteger num ^BigInteger den] (if x
+                                                (let [u (.unscaledValue x) sc (.scale x)]
+                                                  (if (<= sc 0) [(.multiply u (.pow BigInteger/TEN (int (- sc)))) BigInteger/ONE]
+                                                      [u (.pow BigInteger/TEN (int sc))]))
+                                                [(biginteger (numerator v)) (biginteger (denominator v))])
+            neg (or (neg? (.signum num)) (and (zero? (.signum num)) neg-bit))
+            num (.abs num)]
+        (if (zero? (.signum num))
+          (hex (bin-pack neg BigInteger/ZERO 0 113 16383 15))
+          (let [k (max -100000 (- (+ 116 (.bitLength den)) (.bitLength num)))
+                [^BigInteger qq ^BigInteger rr] (if (neg? k)
+                                                  (vec (.divideAndRemainder num (.shiftLeft den (int (- k)))))
+                                                  (vec (.divideAndRemainder (.shiftLeft num (int k)) den)))
+                m (let [m (.shiftLeft qq 1)] (if (zero? (.signum rr)) m (.setBit m 0)))]
+            (hex (bin-pack neg m (- (- k) 1) 113 16383 15))))))))
+
+(defn- q128? [t] (= :float128 (:k (under t))))
+
 (defn- int-const
   "The node of the integer constant v at type t."
   [v t]
   (case (kind t)
-    :w (list 'w (wty t) (str v))
+    :w (list 'w (wty t) (if (q128? t) (q128-hex v nil) (str v)))
     :f (list 'f (fbits v))
     (list 'i (let [v (chk/wrap v (under t))] (long (if (instance? arbace.lang.BigInt v) (.longValue ^arbace.lang.BigInt v) v))))))
 
 (defn- const-node
-  "A constant value v of type t as a node of t's kind."
-  [v t]
+  "A constant value v of type t as a node of t's kind (ld: the checker's exact value of a wider format's constant)."
+  [v t & [ld]]
   (case (kind t)
     :f (list 'f (fbits (if (f32? t) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) (double v))))
-    :w (list 'w (wty t) (str (chk/wrap (if (integer? v) v (bigint (long v))) (under t))))
+    :w (list 'w (wty t) (if (q128? t) (q128-hex v ld) (str (chk/wrap (if (integer? v) v (bigint (long v))) (under t)))))
     :i (if (integer? v)
          (int-const v t)
          (list 'i (long (double v))))
@@ -357,7 +416,8 @@
         [:i :w] {:k :w :t t :n (list 'i2w (wty t) (ity ft) n)}
         [:w :i] {:k :i :t t :n (list 'w2i (ity t) (wty ft) n)}
         [:w :w] {:k :w :t t :n (if (= (wty t) (wty ft)) n (list 'w2w (wty t) (wty ft) n))}
-        [:w :f] {:k :f :t t :n (if (f16? t) (list 'r16 (list 'w2f (wty ft) 0 n)) (list 'w2f (wty ft) (if (f32? t) 1 0) n))}
+        ;; rounded once (queue 522): mode 0 double, 1 float, 2 _Float16
+        [:w :f] {:k :f :t t :n (list 'w2f (wty ft) (cond (f32? t) 1 (f16? t) 2 :else 0) n)}
         [:f :w] {:k :w :t t :n (list 'f2w (wty t) n)}
         ;; a vector cast to a vector or a scalar of its size, or a scalar to a vector: its bits (GNU's rule)
         [:m :m] (assoc x :t t)
@@ -387,24 +447,37 @@
 
 (defn vec-type? [t] (= :vector (:k (unq t))))
 
-(declare temp-i frame-temp seq-node)
+(declare temp-i frame-temp seq-node wcarith)
 
 (defn- part-load
   "A complex part of type ft at the address a."
   [ft a]
-  (if (= :f (kind ft)) {:k :f :t ft :n (list 'fld (fty ft) a)} {:k :i :t ft :n (list 'ld (ity ft) a)}))
+  (case (kind ft)
+    :f {:k :f :t ft :n (list 'fld (fty ft) a)}
+    :w {:k :w :t ft :n (list 'wld (wty ft) a)}
+    {:k :i :t ft :n (list 'ld (ity ft) a)}))
 
 (defn- part-store
   "The store of the part node x (of type ft) at the address a, an effect."
   [ft a x]
-  (if (= :f (kind ft)) (list 'ef (list 'fst (fty ft) a (:n x))) (list 'ei (list 'st (ity ft) a (:n x)))))
+  (case (kind ft)
+    :f (list 'ef (list 'fst (fty ft) a (:n x)))
+    :w (list 'ew (list 'wst (wty ft) a (:n x)))
+    (list 'ei (list 'st (ity ft) a (:n x)))))
 
-(defn- part-neg [x] (if (= :f (:k x)) {:k :f :t (:t x) :n (list 'fneg (:n x))} (ex-neg x)))
+(defn- part-neg [x]
+  (case (:k x)
+    :f {:k :f :t (:t x) :n (list 'fneg (:n x))}
+    :w {:k :w :t (:t x) :n (list 'wneg (wty (:t x)) (:n x))}
+    (ex-neg x)))
 
 (defn- part-eq
   "Whether two parts of one type are equal: an I node."
   [x y]
-  (if (= :f (:k x)) (list 'fcmp "eq" (:n x) (:n y)) (list 'cmp "eq" (ity (:t x)) (:n x) (:n y))))
+  (case (:k x)
+    :f (list 'fcmp "eq" (:n x) (:n y))
+    :w (list 'wcmp "eq" (wty (:t x)) (:n x) (:n y))
+    (list 'cmp "eq" (ity (:t x)) (:n x) (:n y))))
 
 (defn- cparts
   "A complex node's parts: [effects re im], its address evaluated once."
@@ -469,8 +542,9 @@
   "A complex operator at the complex type ot (gcc -O0's formulas; its __muldc3 and __divdc3 handle
   infinities and NaNs more carefully: SPEC §13's class complex-edge when a program shows it)."
   [op a b ot]
-  (if (= :i (kind (under (:of (under ot)))))
-    (icarith op a b ot)
+  (case (kind (under (:of (under ot))))
+    :i (icarith op a b ot)
+    :w (wcarith op a b ot)
   (let [ft (under (:of (under ot)))
         f32 (if (f32? ft) 1 0)
         [pa ar ai] (cparts (conv a ot))
@@ -490,6 +564,27 @@
                        (fb "div" (fb "sub" (fb "mul" B C) (fb "mul" A D)) den)])
                   (refuse :complex "the operator " op " on complex operands"))]
     (cmake ot {:k :f :t ft :n re} {:k :f :t ft :n im} (vec (concat pa pb sets))))))
+
+(defn- wcarith
+  "carith at a complex type of _Float128 parts (queue 522): the same formulas in binary128, the parts in frame temporaries."
+  [op a b ot]
+  (let [ft (under (:of (under ot)))
+        w (wty ft)
+        [pa ar ai] (cparts (conv a ot))
+        [pb br bi] (cparts (conv b ot))
+        [s1 s2 s3 s4] (repeatedly 4 #(frame-temp ft))
+        sets (mapv (fn [s x] (list 'ew (list 'wst w s (:n x)))) [s1 s2 s3 s4] [ar ai br bi])
+        [A B C D] (map #(list 'wld w %) [s1 s2 s3 s4])
+        wb (fn [o x y] (list 'wbin o w x y))
+        [re im] (case op
+                  + [(wb "add" A C) (wb "add" B D)]
+                  - [(wb "sub" A C) (wb "sub" B D)]
+                  * [(wb "sub" (wb "mul" A C) (wb "mul" B D)) (wb "add" (wb "mul" A D) (wb "mul" B C))]
+                  / (let [den (wb "add" (wb "mul" C C) (wb "mul" D D))]
+                      [(wb "div" (wb "add" (wb "mul" A C) (wb "mul" B D)) den)
+                       (wb "div" (wb "sub" (wb "mul" B C) (wb "mul" A D)) den)])
+                  (refuse :complex "the operator " op " on complex operands"))]
+    (cmake ot {:k :w :t ft :n re} {:k :w :t ft :n im} (vec (concat pa pb sets)))))
 
 (defn- effect
   "A node as an effect."
@@ -1392,7 +1487,7 @@
       (cond
         (some? (:v r)) (if (and e (= :obj (:kind e)) (not (:constexpr (:m e))))
                          (place-load (place f))
-                         {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r))})
+                         {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r) (:ld r))})
         (and e (= :fn (:kind e))) (let [x {:k :i :t (chk/ptr (:t r)) :n (list 'fa (fn-ref e))}]
                                     (if-let [nf (nested-of e)] (seq-node [(chain-store nf)] x) x))
         (and (nil? e) (:builtin r)) (refuse :builtin "the builtin " (:builtin r) " as a value")
@@ -1408,7 +1503,7 @@
                (not (and (= h 'conv) (vm? t))) ; a cast to a variably modified type evaluates its sizes (queue 165)
                (#{:i :f :w} (try (kind t) (catch Exception _ nil)))
                (not (and (symbol? h) (#{'and 'or} h) false)))
-        {:k (kind t) :t t :n (const-node (:v r) t)}
+        {:k (kind t) :t t :n (const-node (:v r) t (:ld r))}
         (if-not (symbol? h)
           (call-node f h args r)
           (case h
@@ -1540,7 +1635,7 @@
                     (and (seq? v) (= 'imaginary (first v)))
                     (cmake t {:k :f :t chk/t-double :n '(f 0)} {:k :f :t chk/t-double :n (list 'f (fbits (double (second v))))} [])
                     :else
-                    {:k (kind t) :t t :n (const-node (:v r) t)}))
+                    {:k (kind t) :t t :n (const-node (:v r) t (:ld r))}))
             byte-string (string-node f t)
             va-arg (let [[ap tf] args
                          apl (place ap)
@@ -1588,7 +1683,7 @@
                 (if (= :array (:k (unq t))) (assoc x :k :i :t (chk/decay (unq t))) x))
               (call-node f h args r))))))
     (string? f) (string-node f (chk/arr chk/t-char (inc (alength (utf8 f)))))
-    (number? f) (let [r (lit-res f)] {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r))})
+    (number? f) (let [r (lit-res f)] {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r) (:ld r))})
     (char? f) {:k :i :t chk/t-int :n (list 'i (long (int (char f))))}
     (instance? Boolean f) {:k :i :t chk/t-bool :n (list 'i (if f 1 0))}
     (nil? f) {:k :i :t chk/t-nullptr :n '(i 0)}
@@ -1748,6 +1843,9 @@
   "A call of a builtin by name, or nil when it is an ordinary call."
   [^String nm args r]
   (let [t (:t r)]
+    (if-let [[_ w] (re-matches #"__builtin_(inf|huge_val|nan|nans)f(?:16|32|64|128|32x|64x)" nm)]
+      ;; queue 522: the _FloatN builtins' infinity and NaN, at the call's type (_Float128's a q128 constant)
+      {:k (kind t) :t t :n (const-node (if (#{"inf" "huge_val"} w) Double/POSITIVE_INFINITY Double/NaN) t)}
     (case nm
       ("__builtin_expect" "__builtin_expect_with_probability")
       ;; its other arguments evaluated too (pr85156: __builtin_expect(c, z++))
@@ -1808,7 +1906,7 @@
               "__builtin_isless" (list 'fcmp "lt" fa fb)
               "__builtin_islessequal" (list 'fcmp "le" fa fb)
               (list 'or (list 'fcmp "lt" fa fb) (list 'fcmp "gt" fa fb)))})
-      nil)))
+      nil))))
 
 (defn- seq-node-eff [es e] (if (empty? es) e (list 'ei (list 'seq (vec (conj es e)) '(i 0)))))
 
