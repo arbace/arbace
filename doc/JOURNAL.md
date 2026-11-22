@@ -16827,6 +16827,78 @@ no-op landing pad for no block and no reason for a personality, as rustc's MIR a
 `unreachable` blocks fall from 85 to 40 (panics), 68 to 31 (unwind), 548 to 343 (vectors), the functions with a personality from 53
 to 33, 46 to 32, 141 to 70.
 
+## 2026-11-22: rust-c4-1122: C1's TypeId and pair-tag faults; C4's interface pass, round 1 (burst, stream R3)
+
+Branch `rust-c4-1122` from `mac/rust-c6-1120` (`fceea7b4a`), the caches of rust-c6's worktree copied (exports, passes, scans);
+512-rust-causes5 merged (`a5cfe536f`) at the coordinator's word.
+
+- **C1, unwind's and panics' empty hooks.** Our `TypeId::of::<&str>`/`::<String>` constants held rustc's hash byte for byte; std's
+  IR writes them as two pointers `inttoptr (i64 N to ptr)` (rustc_codegen_llvm common.rs `scalar_to_backend`, `GlobalAlloc::TypeId`:
+  the offset cast to a pointer), ours as `[16 x i8]`. ci folds a constant cast of an integer to a pointer to 32 bits sign-extended
+  (arbace/c/build.ae `int-const`: `chk/wrap` of a pointer type takes `int-bits`' default, 32 signed; a run-time cast keeps 64:
+  probe `.tmp/c4/citest/t2.c`), so std's lowered TypeId constants lost their high halves and never equalled ours. Codegen now writes
+  a TypeId relocation as rustc does (both sides fold alike); finding for C's crop: `int-const` should wrap a pointer as `t-ulong`.
+- **C1, std.rs.** Not core's sort: a call trace (CI_CALLTRACE, the last 20,000 calls) shows depth about 30 and
+  `MultiCharEqSearcher::next` looping past the haystack (the BTreeMap's `split_whitespace`): codegen read a scalar pair's niche tag
+  from the pair's first value; `Option<(usize, char)>`'s tag is the char at offset 8. Fixed in get-discr! (the component at the tag
+  field's offset, codegen_get_discr's extract_field). pack-compare-test: two cases (the TypeId constant against std's IR's @anon
+  for u32, the pair's discriminant), a control.
+- **C1 on ci.** rust-c6-1120's C1 units made again through codegen and the lowering with the two fixes (`.tmp/c4/c1q`), run by
+  `bin/rsi check --front own --corpus samples --only` std, unwind, panics (`RSI_FRONT_DIR`, RSI_JOBS=1, RSI_CI_MEMLIMIT=5GiB, the main
+  checkout's std at the pin: rust-rec's worktree is gone): **3 of 3 pass** by rustc's recorded runs (2 h on a loaded host, 6.4 GB);
+  vectors passed before. The six programs are built again at this branch's code next, then recorded.
+- **C4, core's interface pass** (survey, "C1 and C4: the burst's round"): every alias written; enums' `#[repr(int)]` and
+  discriminants as AdtDef::discriminants; a const trait's methods const, `#[rustc_comptime]`, `#[rustc_nounwind]`,
+  `#[rustc_promotable]`; `#[derive(ConstParamTy)]`, a union's `#[derive(Clone)]`; an expression fragment continued by its next
+  tokens; a `#[rustc_builtin_macro]` macro_rules! left to the builtin; portable-simd's macros in core's table; pattern types as the
+  helper's text (rustc_ast_lowering's anonymous constants); a not-yet-known trait's Self kept; `size_of::<Self>()` and `ilog10`
+  lengths; const generic values; fn pointer binder regions; extern types and const-has-type text through std; feature-bound
+  predicates; a trait's items in definition order. Module runs against the helper (cmp, mem::alignment, char, ascii_char, ffi,
+  intrinsics, intrinsics::simd, hash::sip, alloc, ptr, num, escape, convert::num, fmt::num_buffer, dec2flt, niche_types,
+  ptr::non_null, pat, fmt::rt, ptr::metadata, core_simd::to_bytes): every fact equal but the leftovers the survey lists. The first
+  chain (np4) was stopped at core's module 169 to take the pattern types (NonNull was missing from core's native interface: alloc's
+  and std's `NonNull<u8>` facts lost their arguments in chain 2); np5 runs now, then the switch run.
+- Finding for C's crop (not changed here): arbace/c/build.ae `int-const` folds a pointer constant through `chk/wrap` with the
+  pointer type, whose `int-bits` default is 32 signed bits; `(chk/wrap v (if (ptr? t) chk/t-ulong (under t)))` would keep 64.
+- No gate (the user's rule); pack-compare-test passed (its new cases and control); no record re-recorded this round.
+
+## 2026-11-22: rust-c4-1122: C4's passes again (np5) and the switch run: 5 of 5 own on the native interface and names
+
+The passes with round 1's fixes (`.tmp/c4/np5-chain.sh`; core one round, alloc and std two; 3 h 05 min on a host at load 70-140):
+core's interface 27,062 of 27,498 facts equal to the helper's (25,879 before), alloc's 3,863 of 3,863 (3,532), std's 4,644 of 4,644
+(3,789), std's names 15,120 of 15,162 (14,893; aliases 207 of 215, 18 before). The switch run on that interface and those names
+(`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=... RF_CORE_ATTRS=none RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind
+vectors`, 17 min, 2.2 GB): **5 of 5 own** (0 of 5 before). C4 stays not own in the case inputs: inputs.tsv's words end "(C6-5
+pending)", and no ruling on C6-5 is in the line's facts (the survey's DECISION C6-5; C4-1 (a) was taken, 2026-11-20). Fixed after
+np5 in the module runs' code (not yet in a chain): a const trait's `#[rustc_non_const_trait_method]` methods not const,
+`#[rustc_comptime]` impl methods const, an object type's named late-bound region by its name, a fn pointer's binder region `'_` in a
+signature. C1's six programs are being built again at this branch's code (`.tmp/c4/c1build2.sh`), then run on ci and recorded.
+
+## 2026-11-22: rust-c4-1122: C1's six programs built again and recorded: 5 of 6 own on ci, threads from the pack
+
+The six programs of the eval cell built at this branch's code (`9f4c29693`'s, with 512-1 merged: `RF_EXTRA_IFACE=core-pass and std's
+deps' passes RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core intrinsics panics std threads unwind vectors`, about
+2 h on a loaded host): intrinsics, panics, std, unwind and vectors own; threads refused at codegen (`atomic_xadd`, then).
+`RSI_JOBS=1 RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin> RSI_FRONT_DIR=.tmp/rust-front/c1b bin/rsi check
+--record --front own --corpus samples` (11 min, 6.4 GB; the runtime read into ci at the checkout's key reused): **6 of 6 pass**, the
+std-vs-panics control differing; written: test/rust/check-times-linux-amd64.edn and test/rust/eval-inputs-linux-amd64.edn
+(check-linux-amd64.edn unchanged: every row passed before, from the packs). The case inputs: intrinsics, panics, std, unwind and
+vectors C1, C5 and C7 own (C2: 83, 109, 705, 88 and 547 of std's bodies the record's; C3 partial; C4 the helper's; C6 std's IR);
+threads C5 and C7 own. 0 of 6 own in all seven inputs: Rust's scores unchanged (eval and AOT 0.5, independence 80).
+test/crops/independence.edn's eval text says so. Merged 512-2 (`f8f7ff401`; collect's unknown trait Self is the same fix as
+round 1's, theirs kept). After the build (`d55d8a47a`, unit cases in pack-compare-test only): the atomic intrinsics in codegen
+(threads.rs' row not rebuilt: the user's rule of 2026-11-22, "avoid redundancy and unnecessary tests"; threads is not in this
+stream's list), and the post-np5 interface fixes (their module runs next). reap --record, crops-score --record, --judge --strict
+0 problems, records-check 9 pairs 0 problems.
+
+## 2026-11-22: rust-c4-1122: the post-np5 interface fixes proved by module runs
+
+core's pass over the modules the fixes touch (no chain, the user's rule): double_ended, any, fmt, fmt::rt, io::error 456 of 465 facts
+equal, 0 differ (9 missing: io::error's cfg_select #[path] modules); num 1,917 of 1,917 after collect's lower-const-arg evaluates a
+call (`[u8; size_of::<Self>()]`, eval-int-expr's size_of with a primitive impl's Self). Left in core, for the report: io's
+cfg_select modules (module-files reads no macro's arms), core_simd ops' glob of a private import, to_bytes' anonymous-constant
+args, shift_scalar's impl-fresh `'_`, the Thin trait alias bound (a clause the solver would have to expand), legacy_int_modules'
+consts, the [const] clauses (512's).
 ## 2026-11-22: the user's decisions on the burst's by-design and counting questions
 
 Asked in the morning of 2026-11-22 (.tmp/goal/decisions-1122.md collects the streams' evidence); the goal: 100 completeness and
@@ -17942,3 +18014,93 @@ The user's decisions of 2026-11-22 on Go's last three eval rows (the entry befor
 
 bin/reap --record: Go eval 1,818 pass, 0 design, 0 deferred, 20 n/a (was 1,817 / 2 / 1 / 18); crops-score --record: Go completeness
 0.9959 -> 0.9963 (the cells read, aot and print keep their by-design rows). crops-score --judge --strict 0 problems; records-check 0 problems.
+
+
+## 2026-11-22: rust-c6c-1122: C6-4's third round (the back end's next causes), R3 merged, C6-5 (a) recorded
+
+Branch `rust-c6c-1122` from `mac/next` (`5f59be57d`), the burst's stream R2b (C6: std's IR made by Arbace). No gate (the user's
+word); light runs, each process under `ulimit -v 8 GiB`, one big process at a time, the host at load 30 to 150; the user's rule of
+the day ("avoid redundancy and unnecessary tests"): std's and alloc's exports made again only for the keys a change moves
+(`lib-export --keys`, merged into the export by key), core's by `export core --add`. Merged: R3's `rust-c4-1122` at `152a26cb7`,
+then its last head `7bd7b001d` at the coordinator's word (collect's unknown trait Self the same fix on both sides, R3's kept;
+codegen's pair tag the same fix, ours kept; pack-compare-test's cases of both, the 512 cases once; R3's stray
+`arbace/rust/front/core_check.ae.orig` removed). doc/rust/FRONTEND-SURVEY.md, "As built: C6-4, round three".
+
+- The always-inliner (arbace.rust.back.inline) as LLVM 23's: InstSimplify's `getelementptr P, 0 -> P` and ConstantFoldCastInstruction's
+  `inttoptr` of a constant over the clone; the callees in
+  their symbols' order, read in rustc 1.99.1's compiler/rustc_middle/src/mono.rs (items_in_deterministic_order sorts a codegen unit
+  by symbol name unless -Z codegen-source-order, rust-lang/rust#145358; rust-c6b's callees-first stand-in retired); a callee's call
+  sites newest first in its use list (codegen numbers the calls as it creates them, rustc's reverse postorder, `:cseq`; a clone's
+  calls newer than the caller's own). Each rule checked against the host's `opt -passes='default<O0>'` (LLVM 23.1.5; a text
+  module's forward references reverse a use list, `uselistorder` restores rustc's): inline-test 15 of 15 (c9-c13 new).
+- Codegen: a reference to an unsized struct tail keeps the base's metadata (`(memory false)` layouts: Path, OsStr, Slice); a closure
+  passed as a scalar pair takes its upvars' pointee alignments. build-run's o0-normalize: CopyProp's return-place rule only for an
+  SSA local (rustc 1.99 has no nrvo.rs: read_uleb128 keeps `result`'s alloca). pack-compare-test's cases with their controls.
+- mono: builtin derives' methods `#[inline]` (ext-attrs, the impl's trait derived on its self type); the library's sources parsed as
+  edition 2024 (std's path.rs' let chains had made every path.rs attribute unknown); repr(C) enums from the sources (c_int tags);
+  a module path in the type namespace beside a function of its name (RF_LIB_MODULES); lib-unit's vtables (vtable-alloc-in, the
+  program's bindings). core-attrs takes num/niche_types.rs and num/imp/fmt.rs.
+- The front end's facts the back end reads: the module lists carry rustc's file names (module.rs joins a #[path] to the declaring
+  file's directory, `..` kept: std's backtrace_rs `std/src/../../backtrace/..`, core's stdarch `core/src/../../stdarch/..`); an
+  export's assert spans matched by message kind and order where two built asserts share a key; an entry's nested functions' facts.
+- Exports: `export core --add` of the wanted callees (without_provenance, without_provenance_mut, wrapping_offset, ptr::read,
+  align_of) and of digits_to_dec_str and digits_to_exp_str again (7 bodies, 5 min 51 s); std's 69 backtrace_rs keys and
+  sys::args::unix::imp::init by `lib-export --keys` (53 bodies, merged by key); alloc's and std's module caches copied from
+  rust-c6b's worktree repointed to this one (alloc's had kept the old paths: its partial export read nothing).
+- Results (items equal to std's IR at the pin, define for define, the crossed control differing each time): core 190 of 275 (183
+  before: r1 185, the symbols' order 187, the use lists' order 189, the --add round and vtables 190), alloc 21 of 25 (21), std 98 of
+  325 (83: r1 91, 92, the edition 2024 parse 94, the exports and vtables 97, the inttoptr fold 98; refused 214 -> 205).
+- Left: std's 22 differing items are 18 share-generics' upstream instances (each differs by an instantiating crate alone; rustc's
+  symbol_export.rs takes an instance from the exporting crate of the lowest StableCrateId, core's the highest of std's 25 crates:
+  every upstream crate's whole collection, C6's L2 with L3 unless C6-1 (b)), two `write_fmt` (the futex ReentrantLock std's interface
+  lacks), trace_fn (the FnMut call's typeck), hashmap_random_keys (MIR); alloc's 2 (share-generics, a nested generic fn's facts in
+  alloc's 2026-11-20 pass cache); core's 6 (a bounds check's THIR span, mul_pow2's `stringify!`, slice_index_fail's fn-local
+  disambiguator, two MIR-level). The front end's (R3's line): std's 116 items not exported, 48 layouts, 23 constants, 13 callees
+  (panic_output's opaque hidden type among them).
+- Checks at the head: `bin/rust-front essential` passed (its known summary, every control differing, 0 stub calls; it first failed
+  on records staged from rust-c6b's worktree with their paths, staged again), `core-essential` its known summary (566 equal),
+  pack-compare-test passed, inline-test 15 of 15; reap 56 of 56, crops-score 0 problems, records-check 0 problems.
+- C6-5 (a), the user's ruling of the day: rsi-build's C4 words begin "own" when std's interface and names are both native
+  (`bin/rust-front`'s rsi-build). R3's switch run (`rsi-native5`, RF_NATIVE_IFACE=1 and RF_NATIVE_NAMES, 5 of 5 own) is not run
+  again (the merge leaves the interface pass unchanged): its inputs.tsv's five rows say so, and its programs are recorded by `bin/rsi
+  check --record --front own --corpus samples` with R3's own path at this head (std, unwind, panics) checked first; std's lowered
+  runtime is built at this checkout's key for it (none at next's lowering key on the host: cpp/lower, repr/llvm and repr/c moved
+  since R3's base). Their outcome is the next entry.
+
+## 2026-11-22: rust-c6c-1122: R3's own path checked, C6-5 (a)'s record tried, the Mac's 524 merged (one Rust line)
+
+Follows this branch's round-three entry. doc/rust/FRONTEND-SURVEY.md, "As built: C6-4, round three", "At the merged head".
+
+- R3's own path at `69683177b` (before 524): std, unwind and panics built by `RF_EXTRA_IFACE=core-pass/core-iface.edn:std/deps/
+  hashbrown-iface.edn:std/deps/libc-iface.edn RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core panics std unwind`
+  (1 h 40 min, 3.1 GB; 3 of 3 own), then `RSI_JOBS=1 RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin>
+  RSI_FRONT_DIR=.tmp/rust-front/c1p bin/rsi check --front own --corpus samples --only` the three: 3 of 3 pass, the std-vs-panics
+  control differing (1 h 41 min, 6.2 GB: std's runtime lowered at this checkout's lowering key first, 94 units in 12 min, none on the
+  host at next's key since cpp/lower, repr/llvm and repr/c moved after R3's base; its ci read 55 min).
+- C6-5 (a)'s record: R3's switch run `rsi-native5` (RF_NATIVE_IFACE=1, RF_NATIVE_NAMES, RF_CORE_ATTRS=none; built before R3's C1
+  fixes, no RF_DROP_GLUE) copied, its inputs.tsv's five C4 rows rewritten as the writer now words them (`own: std's interface from the
+  crates' native passes, the StableCrateIds by Cargo's metadata hash ported, std's names from the crates' sources (the library build's
+  units its description, C6-5 (a))`), then `bin/rsi check --record --front own --corpus samples` from it: 4 of 6 pass (intrinsics,
+  panics, vectors; threads from the pack), std.rs (an undefined `<String as Ord>::cmp`) and unwind.rs (stdout) not; rsi refused the
+  record, nothing written. C4 is recorded own by the first native-interface build with C1's configuration that passes; the next host
+  stream's rsi-build at the merged head can be it. test/crops/independence.edn's eval text says so.
+- The Mac's 524 merged (`mac/524-rust-c3` at `26c7532a2`, its base R3 with next; the coordinator's word): collect's unknown trait Self
+  R3's again, core-attrs.txt both sides' files, the docs' and pack-compare-test's blocks each kept once (prepared in a side worktree
+  while the ci check ran, then this branch fast-forwarded to it). Then: lib-unit's core exports collect ub_checks.rs
+  (test/rust/front/lib-unit-iface-extra.txt; copy_nonoverlapping's and offset's entries exported again, 2 bodies, 6 min), codegen
+  takes a function item's type zero-sized when the table lacks its text, an inlined call made an invoke takes its destinations after
+  its arguments.
+- At the merged head: core 191 of 275 items equal to std's IR, alloc 21 of 25, std 101 of 325 (the three builds again; every crossed
+  control differing); `bin/rust-front essential` and `core-essential` their known summaries; inline-test 15 of 15, pack-compare-test
+  passed. R3's own path at the merged head (the same build and check over `.tmp/rust-front/c1m`) runs; its outcome follows.
+
+## 2026-11-22: rust-c6c-1122: R3's own path at the merged head, built; its ci check left running at hand-back
+
+At the merged head (`df4946d10`: R3 and the Mac's 524 merged) the three programs built again with C1's configuration (`RF_EXTRA_IFACE
+RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core panics std unwind`, `.tmp/rust-front/c1m`; core-attrs made again
+first, its key moved with mono.ae): 3 of 3 own, with 524's facts (std: callees 2870/2880, entry 1/1, layouts 4703/4703, symbols
+1955/1955; unwind: callees 430/430, layouts 815/815; panics: callees 471/471, layouts 910/910). Its `bin/rsi check --front own --only`
+needs std's runtime at the merged head's lowering key (524's base carries next's newer arbace/repr/c/lex.ae and pp.ae, so the
+runtime of `69683177b` is stale): lowered again and read into ci (about 70 minutes), then the check; running when this branch was
+handed back (the worktree's .tmp/c6c/p5/status and rsi-check.out). The 524-2 host stream's rsi-build at the merged head covers
+the same programs.

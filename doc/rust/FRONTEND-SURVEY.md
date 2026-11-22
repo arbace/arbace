@@ -5868,3 +5868,240 @@ std::panicking::catch_unwind::Data<{closure@..}, u8>)" (fnptr)) against (ty "uns
 coercion's target is a safe `fn`. The fix belongs to C4's native interface (a fnptr type's safety and ABI written and read,
 then printed `unsafe fn`), R3's line; the re-made export changes no fact of catch_unwind's entries (the 62 entries differ from
 the old ones only by `:callee-attrs` and anonymous regions' numbers).
+
+## C1 and C4: the burst's round (2026-11-22, branch `rust-c4-1122`)
+
+From `rust-c6-1120` (`fceea7b4a`) with 512-rust-causes5 merged (`a5cfe536f`, rust-front-essential's RemoveNoopLandingPads).
+
+### C1: why unwind's and panics' hooks were empty, and std.rs's "recursion"
+
+- **TypeId**: the bytes of our `TypeId::of::<&str>` and `::<String>` constants were rustc's hash, byte for byte (the record's
+  `(indirect alloc 0)`). The difference was the form: std's IR writes each 8 bytes as a pointer, `<{ ptr inttoptr (i64 A to ptr),
+  ptr inttoptr (i64 B to ptr) }>` (rustc_codegen_llvm's `scalar_to_backend` for `GlobalAlloc::TypeId`: the offset as an integer
+  cast to a pointer), our codegen wrote `[16 x i8]` bytes. ci folds the lowered C's `(void *)(unsigned long)N` to 32 bits
+  sign-extended (arbace/c/build.ae `int-const` wraps a constant of pointer type by `chk/wrap`, whose `int-bits` gives a pointer
+  32 signed bits; a run-time cast keeps 64): std's TypeId constants lose their high halves on ci, ours did not, and no payload's
+  type matched. u32's and u64's matched because both sides were the program's. Fixed on our side by writing the TypeId
+  relocation as rustc does (codegen.ae); **finding for C's crop**: `int-const` should wrap a pointer constant as `t-ulong` (a
+  probe `static void *g = (void *)0x123456789abcdef0ul;` reads back `ffffffff9abcdef0` on ci).
+- **std.rs**: not core's sort. A traced run (CI_CALLTRACE, the last 20,000 calls) shows the interpreted depth about 30 and
+  `MultiCharEqSearcher::next` called again and again past the haystack's end (the BTreeMap's `split_whitespace`): our codegen read
+  a scalar pair's niche tag from the pair's first value. `Option<(usize, char)>`'s tag is the char at offset 8; the discriminant
+  compared the index with -1, so `None` read as `Some` and the searcher never returned `Done`; ci's goroutine stack overflowed in
+  the endless loop. Fixed (`get-discr!`: the component at the tag field's offset, codegen_get_discr's extract_field); two
+  functions of std.rs's unit change (`MultiCharEqSearcher::next`, btree's `find_key_index`).
+
+### C4: core's interface pass, the fixes (module runs against the helper's facts)
+
+- **Aliases**: core_check's native-iface writes every alias it computes, not only those the names it reads lack (the chain's
+  second core pass read names holding core's aliases and wrote none; alloc's and std's passes then lost `fmt::Result`).
+- **Enums**: `:repr` from `#[repr(int)]` and `:discrs` as rustc's AdtDef::discriminants (explicit values evaluated, `-`, `<<`,
+  `|`; wrapped to the discriminant type, Display signed); before every native enum was `:repr nil :discrs [0 1 ..]`
+  (`Ordering`'s -1 0 1, `AlignmentEnum`'s `#[repr(usize)]` 1 2 4 ..: Alignment a byte).
+- **Functions**: a `const trait`'s methods const (the trait's constness lowered); `#[rustc_comptime]` const; `:nounwind` from
+  `#[rustc_nounwind]`, `:promotable` from `#[rustc_promotable]` on a const fn.
+- **Expansion**: `#[derive(ConstParamTy)]` (rustc_builtin_macros' bounds.rs; core::intrinsics and intrinsics::simd were
+  unexpanded: 395 intrinsics missing); a union's `#[derive(Clone)]` (clone.rs' union case, TrivialClone first: escape's impl
+  numbers); an expression fragment the next tokens continue (`compress!($state.v0, ..)`, hash::sip); a `#[rustc_builtin_macro]`
+  macro_rules! left to the builtin (pat.rs' own `pattern_type`); portable-simd's own macro_rules! in core's table
+  (`from_transmute!`, vendor::x86).
+- **Types**: pattern types as the helper's text (rustc_ast_lowering's anonymous constants of the field's written ends and of the
+  struct's missing ones: `(u8) is 1..=core::::num::niche_types::NonZeroU8Inner::{constant#0}`; NonNull's `(*const T) is !null`;
+  all of niche_types' 20 texts equal); a not-yet-known trait's Self kept (`P: bounds::BuiltinDeref`, `Self:
+  traits::TruncateTarget<Target>`); `size_of::<Self>()` of a primitive impl, `iN::MAX.ilog10() as usize + 2` lengths; const
+  generic values `(const "10")`; fn pointer binder regions `'^^#N`; extern types by their std path; `#[unstable_feature_bound]`'s
+  "feature(f128) is enabled"; core's types in const-has-type text through std; a trait's items in definition order.
+
+### C1: the three programs on ci (2026-11-22, 00:41)
+
+rust-c6-1120's C1 units (its RF_DROP_GLUE=1, RF_EXTRA_IFACE, --native-core build, `.tmp/rust-front/c1/NAME/NAME.mono.edn`) made
+again through codegen and rsi's lowering with the two fixes (build-run's emit-and-lower alone, `.tmp/c4/c1q`), then `RSI_JOBS=1
+RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin> RSI_FRONT_DIR=.tmp/c4/c1q bin/rsi check --front own --corpus
+samples --only {std,unwind,panics}` (2 h, the runtime read into ci at the checkout's key on a loaded host; 6.4 GB): **3 of 3 pass**,
+each by rustc's recorded run (status, stdout's and stderr's digests, ref-rustc-1.99.1.edn): std.rs 0 and 1,392 bytes, unwind.rs
+101 and 329 bytes, panics.rs 3 and 254 bytes (the hooks' messages and the payloads' downcasts now rustc's). vectors.rs passed before
+(rust-c6-1120). The control (std against panics' run)
+differs. The six programs built again at this branch's code and recorded follow (below).
+
+### C4: the passes again and the switch run (np5, 2026-11-22)
+
+core's pass (one round, 6,762 s on a host at load 70-140, 3.8 GB) on chain 2's native names, then alloc's and std's (two rounds
+each) on the names carrying core's (and alloc's) aliases, the interface assembled and compared with the helper's, std's names
+assembled and compared (`.tmp/c4/np5-chain.sh`, 3 h 05 min):
+
+| facts equal to the helper's | before (np3, 2026-11-21) | after (np5) |
+|---|---|---|
+| core's interface | 25,879 of 27,498 | **27,062 of 27,498** (229 differ, 207 missing) |
+| alloc's interface | 3,532 of 3,863 | **3,863 of 3,863** |
+| std's interface | 3,789 of 4,644 | **4,644 of 4,644** |
+| std's names | 14,893 of 15,162 (aliases 18 of 215) | **15,120 of 15,162** (aliases 207 of 215, generics 1,054 of 1,078) |
+
+The switch run on that interface and those names (`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=np5/std-names.edn RF_CORE_ATTRS=none
+RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind vectors`, 17 min, 2.2 GB): **5 of 5 own** (0 of 5 before: the
+Transmutes from `usize` to `Alignment`, a byte without AlignmentEnum's `#[repr(usize)]`, and std's `fmt::Result` and vectors'
+`i32x4` aliases are gone), each program's facts as on the helper's interface. `inputs.tsv` writes C4 as "std's interface from the
+crates' native passes, the StableCrateIds by Cargo's metadata hash ported, std's names from the crates' sources (C6-5 pending)":
+C4 is not counted own until the user rules on C6-5 (the 36 units as the build's description), so no case input changes. Left in core's 436 facts: the const trait methods marked `#[rustc_non_const_trait_method]` and `#[rustc_comptime]` impl methods
+(59, fixed after np5 in the module runs' code, not yet in a chain), core_simd shift_scalar's impl-header `'_` printed `'^#0` (42),
+to_bytes' anonymous constant args (66), the Thin trait alias bound (9 + 51), and missing (207): core_simd ops' 40 + 40, num's
+`from_*_bytes` 72 (`[u8; size_of::<Self>()]` inputs), io's 9 ADTs and their impls, legacy_int_modules' 24 consts. Also (the module
+runs): io::error's and io_slice's
+`cfg_select!` `#[path]` modules (module-files reads no macro's arms), core_simd ops' `use super::*` of a private import, to_bytes'
+`{ $size * $elems }` written by rustc as its anonymous constant's path, the `Thin` trait alias bound, the `[const]`/`const` bound
+clauses (512's ranking, not taken here).
+
+### After np5 (module runs, no chain)
+
+The fixes made after np5 proved on the modules whose facts they move (core's pass over those files alone against the helper's
+facts, ALLOC_IFACE_ROUNDS=1): iter::traits::double_ended, any, fmt, fmt::rt, io::error: 456 of 465 equal, 0 differ (the 59
+`#[rustc_non_const_trait_method]`/`#[rustc_comptime]` constness facts and create_formatter's object region among them; 9 missing,
+io::error's `cfg_select!` modules); num: 1,917 of 1,917 (its 72 `from_*_bytes`/`to_*_bytes` with `[u8; size_of::<Self>()]`, the call
+now evaluated in collect's lower-const-arg as rustc's type_of writes it). No chain was run again for them (the user's rule of
+2026-11-22): core's count after np5 plus these is at most 27,194 of 27,498 (27,062 + the 59 constness facts + create_formatter + num's 72), not measured whole.
+
+## As built: C6-4, round three: the back end's next causes (2026-11-22, branch `rust-c6c-1122`)
+
+From `mac/next` (`5f59be57d`: rust-c6b-1122 and R3's `e3c56d260`), R3's `rust-c4-1122` merged twice (`152a26cb7`, then its last
+head `7bd7b001d` at the coordinator's word: collect's unknown trait Self the same fix on both sides, R3's kept; codegen's pair tag
+the same fix, ours kept; pack-compare-test's cases of both, the 512 cases once; R3's stray `core_check.ae.orig` removed). The back
+end's lowering against std's IR at the pin, item for item with the crossed control, as rust-c6b's; the user's rule of the day
+("avoid redundancy and unnecessary tests"): std's export made again only for the keys a change moves (the 69 backtrace_rs keys,
+`lib-export --keys`, merged into the export by key), no whole export.
+
+### What was built
+
+- **The inliner's InstSimplify takes `getelementptr P, 0 -> P`** (`arbace.rust.back.inline`, simplifyGEPInst over the clone): an
+  inlined `ptr.add(start)` at a constant 0 is the pointer, so the pair the next callee builds is `insertvalue {ptr, i64} poison,
+  ptr %p, 0` as std's IR writes it (trim_right, memrchr_aligned, possibly_round, TwoWaySearcher::new, parse_next_component).
+  Checked against the host's `opt -passes='default<O0>'` (LLVM 23.1.5): the clone's zero GEP folded, whether the zero is the
+  call's argument or the callee's own constant; the caller's own zero GEP kept (inline-test's c9 and its control c10: 13 of 13).
+- **CopyProp's return rule only for an SSA local** (build-run's o0-normalize): rustc 1.99 has no RenameReturnPlace (nrvo.rs is gone,
+  DestinationPropagation is mir-opt-level 2); `_0` takes a local's name only through copy_prop.rs' rule, whose local is SSA.
+  read_uleb128's `result |= ..` keeps its own alloca, as std's IR (pack-compare-test's case and control).
+- **A reference to an unsized struct tail keeps the base's metadata** (codegen's `ref`): a struct whose layout is
+  `(memory false)` (BackendRepr::Memory { sized: false }: Path, OsStr, Slice, newtypes over `[u8]`) is unsized though the table
+  writes its sized prefix 0; `as_encoded_bytes(&self.inner)` passed nothing where std's IR passes the pair.
+- **A closure passed as a scalar pair** takes each half's pointee alignment by its upvars (codegen's pair-align; DebugMap::finish's
+  `and_then(.., |_| ..)`: `ptr align 8` on the `&mut Formatter` half).
+- **A builtin derive's method is `#[inline]`** (mono's ext-attrs: rustc_builtin_macros' deriving writes `#[inline]` on clone, eq,
+  partial_cmp, cmp, hash, fmt, default and Eq's assertion; the impl the sources do not hold, its trait derived on its self type's
+  definition): `<Components as Clone>::clone` and `<State as PartialEq>::eq` are `#[inline]` copies with std's instantiating crate,
+  as std's IR names them. core-attrs takes `num/niche_types.rs` and `num/imp/fmt.rs` (Nanoseconds' macro-made methods, Formatted's).
+- **A repr(C) enum's tag is c_int** (mono's adt-repr: the sources' `#[repr(C)]` of an enum whose interface :repr, the helper's
+  `repr().int`, is nil): backtrace's `uw::_Unwind_Reason_Code`, trace_fn's `ret i32`.
+- **The module lists carry rustc's file names** (core-check's module-files, `--list`'s fourth column, read-modules): module.rs
+  joins a `#[path]` to the declaring file's directory and never resolves `..`, so std's backtrace_rs files are
+  `std/src/../../backtrace/src/..` in its spans (Bomb::drop's and stash's panic locations), core's stdarch and portable-simd files
+  `core/src/../../stdarch/..`; run-module's root file is that name.
+- **A module path is in the type namespace** beside a function of its name (mono's ext-value-ns?, lib-unit's RF_LIB_MODULES: the
+  crates' module lists): backtrace's `gimli::mmap` is both a function and a module, `Mmap` std's IR's `..5gimli4mmap4Mmap` under `Nt`.
+- **lib-unit's vtables** (build-run's lib-unit-run): each body's unsizing casts to a trait object with mono's vtable-alloc, as
+  program-facts gives a program's, which runtime-body's casts take in turn.
+- An export entry carries the facts of the functions nested in its body when the crate's pass holds them (custom_owner_from_box's
+  generic `drop_box_raw`: alloc's pass cache of 2026-11-20 does not, so the item stays).
+- **The always-inliner's order as rustc 1.99.1 and LLVM 23 give it.** rustc 1.99.1's `items_in_deterministic_order`
+  (compiler/rustc_middle/src/mono.rs:569-590, read in the pinned `rustc-1.99.1-src.tar.xz`) sorts a codegen unit's items by symbol
+  name unless `-Z codegen-source-order` (rust-lang/rust#145358), not by definition span: the callees come to LLVM's AlwaysInliner in
+  their symbols' order (rust-c6b's stand-in, callees before callers, retired; `LIB_UNIT_SYMBOL_ORDER=0` keeps it). The inliner takes
+  a callee's call sites in its use list's order, newest first (`F.users()`: codegen creates a body's calls in rustc's reverse
+  postorder, codegen's `*call-seq*` numbers them `:cseq`; a clone's calls are newer than the caller's own, an invoke made of a cloned
+  call newer still): the host's `opt -passes='default<O0>'` over the same modules, with the use lists rustc's codegen makes (newest
+  first; a forward reference in a text module reverses them, `uselistorder` puts them back), gives inline-test's c11 (two calls:
+  the first site's alloca first) and c12 (through a second callee: the second site's first), both ours (14 of 14). With them std's
+  trim_right and core's memrchr_aligned, possibly_round, dragon's format_exact and TwoWaySearcher::new are equal.
+- **mono's source reader parses the library as edition 2024** (core's, alloc's and std's Cargo.toml; the files their `#[path]`
+  modules take): a 2021 parse refused std's path.rs (`if HAS_PREFIXES && let Some(p) = ..`), so every attribute of path.rs was
+  unknown (PathBuf::deref's and From<OsString>'s `#[inline]`, the derives): `EXT_ATTRS_TRACE=1` names such an item.
+- **The export's assert spans** (core-check's export-entry): a key two built asserts share, or one the passes renumbered, takes the
+  next unused built assert of its message's kind in block order (digits_to_dec_str's first bounds check had no location, `?`).
+- **The inliner folds an inlined `inttoptr` of a constant** (ConstantFoldCastInstruction over the clone: 0 `ptr null`, another the
+  constant expression; opt's own output for the same module): `without_provenance_mut(0)` inlined is `ptr null`, as std's IR
+  (stack_overflow's `null`; inline-test's c13, 15 of 15).
+- `export core --add` of the wanted callees (without_provenance, without_provenance_mut, wrapping_offset, ptr::read, align_of) and of
+  digits_to_dec_str and digits_to_exp_str again (their old entries taken out): 37 keys asked (the refused ones retried), 7 bodies, 18
+  module files, 5 min 51 s, 2.8 GB; std's 69 backtrace_rs keys and `sys::args::unix::imp::init` by `lib-export --keys` (53 bodies,
+  merged by key); alloc's `CString::new`'s nested `spec_new_impl_bytes` none (not a key the export can build).
+
+### Results
+
+`bin/rust-front lib-unit build|compare` at each step against std's IR at the pin (`test/rust/runtime/ir.sha256`), the crossed control
+differing every time; a compare alone where only the compare's code changed (the inliner, codegen), the units built again where the
+build's did:
+
+| core's 275 items | equal | differ | refused | no symbol |
+|---|---|---|---|---|
+| before (`rust-c6b-1122` r8) | 183 | 12 | 77 | 3 |
+| r1 at the merged head: derive attributes, the zero GEP, CopyProp's return rule, closure pairs, repr(C), rustc's file names (core's build 13 min, 3.0 GB) | 185 | 10 | 77 | 3 |
+| the callees in their symbols' order (compare) | 187 | 8 | 77 | 3 |
+| the call sites newest first, codegen's creation order (compare) | 189 | 6 | 77 | 3 |
+| the --add round and vtables in the program's bindings (built again) | **190** | 6 | 76 | 3 |
+
+| std's 325 items | equal | differ | refused | no symbol |
+|---|---|---|---|---|
+| before (`rust-c6b-1122` r8) | 83 | 27 | 214 | 1 |
+| r1 at the merged head | 91 | 20 | 214 | 0 |
+| the callees in their symbols' order (compare) | 92 | 19 | 214 | 0 |
+| the library parsed as edition 2024 (built again), the call sites newest first | 94 | 17 | 214 | 0 |
+| backtrace_rs and init exported again, vtables, built again | 97 | 23 | 205 | 0 |
+| an inlined constant inttoptr folded (compare) | **98** | 22 | 205 | 0 |
+
+alloc's 25 items: **21 equal** throughout (2 differ, 2 refused), as before.
+
+std's 22 differing items by cause: **18 share-generics' upstream instances** (format_symbol_name, gimli::mmap's deref, parse_start,
+stash's allocate, panic_handler's `get` and two `take_box`, resume_unwind's `take_box`, include_cur_dir, parse_next_component and its
+`_back`, trim_left, `_set_extension`, `_print_fmt`, BacktraceLock's `print`, checked_add_duration, find_eh_action,
+read_encoded_pointer: each now differs by an instantiating crate alone), StdoutLock's and StderrLock's `write_fmt` (the returned
+guard's pointee alignment: the futex `ReentrantLock` std's interface lacks), trace_fn (rustc calls `<&mut dyn FnMut(..) as
+FnMut>::call_mut`, our typeck calls through the object; with its repr(C) return now `i32`), hashmap_random_keys (a 9-byte local where
+rustc's MIR has 8, MIR-level). alloc's 2: to_uppercase (share-generics: core's `<Chars as IntoIterator>::into_iter`),
+custom_owner_from_box (the nested generic `drop_box_raw`'s facts: alloc's pass cache of 2026-11-20 predates queue 498's nested
+functions). core's 6: digits_to_dec_str and digits_to_exp_str (the first bounds check's span: the built assert has none, the index
+expression's THIR span, the front end's), mul_pow2 (`assert!`'s 4,093-byte `stringify!`), slice_index_fail (a fn-local item's
+disambiguator), from_bytes_with_nul and lookup (MIR-level). std's refusals (205): 116 not exported (the export's, R3's line), 48
+layouts std's interface lacks (`std::fs::File`, the futex `Mutex`, `RwLock`, `Option<SymbolName>`), 12 promoted and 11 unevaluated
+constants (libc's `S_IFDIR` and `UIO_MAXIOV`, std's `HAS_PREFIXES` and anonymous constants), 13 callees mono refuses (the external
+opaque `panic_output::{opaque#0}` whose hidden type std's interface does not write, addr2line's and rustc_demangle's unresolved
+paths, a builtin Try candidate), 3 `#[inline(always)]` callees not built, 1 symbol, 1 scalar operation; no vtable refused (8 before
+the round: lib-unit's casts now take mono's vtables).
+
+**Share-generics, what Arbace would need** (rustc 1.99.1's compiler/rustc_codegen_ssa/src/back/symbol_export.rs, read in the
+pinned tarball): a crate's exported generic instances are the generic items of its own whole collection
+(`collect_and_partition_mono_items`, external linkage), and an instance several upstream crates export is taken from the one of the
+lowest StableCrateId (lines 544-552). core's id (`f4c9..`) is the highest of std's 25 crates (rustc_demangle `1841..`, gimli,
+compiler_builtins, addr2line, alloc `58bf..`, hashbrown, libc, std_detect, adler2, memchr, std, miniz_oxide, object, unwind, cfg_if
+below it): find_eh_action's `<Result<usize, ()> as Try>::branch` is rustc_demangle's, its `<*const u8>::is_null` alloc's, the rest
+core's. Knowing them without reading std's IR is every upstream crate's whole collection (core's roots: 8,359 non-generic functions in
+its interface, its 2,486 external defines; alloc's; the deps'), C6's L2 with L3 for the seven backtrace crates unless C6-1 (b) drops
+them; not this round.
+
+The targeted checks at the head: `bin/rust-front essential` passed (its known summary, every control differing, 0 stub calls; it
+first failed on records staged from rust-c6b's worktree, `.tmp/rust-front/records/stage` copied with its paths, removed and staged
+again), `core-essential` its known summary (566 equal, the control differing), inline-test 15 of 15, pack-compare-test passed
+(R3's cases and this branch's); reap 56 of 56 cells, crops-score 0 problems, records-check 9 pairs 0 problems.
+
+### At the merged head: the Mac's 524 merged, C6-5 (a)'s record tried
+
+The Mac's 524 (`mac/524-rust-c3` at `26c7532a2`: every mono fact native that needs no new export, the entry made by mono, a source
+ADT's repr, a ReifyShim's instantiating crate) merged at the coordinator's word (collect's unknown trait Self R3's again; core-attrs.txt
+both sides' files; the docs' and pack-compare-test's blocks each once), so one Rust line holds R3, 524 and this branch. Two more back
+end fixes there: lib-unit's core exports collect `ub_checks.rs` beside core-iface-extra.txt's (test/rust/front/lib-unit-iface-extra.txt:
+check_language_ub's signature, which copy_nonoverlapping's and offset's precondition tests name; their two entries exported again by
+`export core --add`, 6 min), and codegen takes a function item's type zero-sized when the table lacks its text; an inlined call made
+an invoke takes its destinations right after its arguments, as codegen writes an invoke. At the merged head (the three builds again):
+**core 191 of 275** (core::fmt's `pad` too; bstr's Display now compared, an alloca of MIR's), **alloc 21 of 25**, **std 101 of 325**
+(rt::init, interpret_cs_action, ThreadId::as_u64; 25 differ: 21 share-generics' upstream instances, realloc_fallback's and args' alloc
+instances among them, two write_fmt, trace_fn, hashmap_random_keys; 199 refused), every crossed control differing;
+`bin/rust-front essential` and `core-essential` their known summaries, inline-test 15 of 15, pack-compare-test passed (524's cases
+with R3's and this branch's).
+
+R3's own path before the 524 merge (`69683177b`: `RF_EXTRA_IFACE=core-pass:hashbrown:libc RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front
+rsi-build --native-core panics std unwind`, 1 h 40 min; then `bin/rsi check --front own --corpus samples --only` the three, std's
+runtime lowered at this checkout's lowering key first, 12 min, its ci read 55 min): **3 of 3 pass**, the std-vs-panics control
+differing (1 h 41 min, 6.2 GB).
+
+C6-5 (a)'s record: R3's switch run (`rsi-native5`, built before R3's C1 fixes: RF_CORE_ATTRS=none, no RF_DROP_GLUE) recorded by `bin/rsi
+check --record --front own --corpus samples` with its inputs.tsv's C4 words own: **4 of 6 pass** (intrinsics, panics, vectors; threads
+from the pack), std.rs (`cirun: undefined function <alloc::string::String as Ord>::cmp`) and unwind.rs (stdout) not, so rsi refused the
+record (nothing written). C4 is recorded own by the first native-interface build with C1's configuration that passes
+(`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=.. RF_EXTRA_IFACE=.. RF_DROP_GLUE=1 bin/rust-front rsi-build --native-core` over the six, then the
+record): the next host stream's rsi-build at the merged head can be that one.

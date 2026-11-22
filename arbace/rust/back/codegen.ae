@@ -37,10 +37,17 @@
                          "niche" (let [[_ u s e n] enc] {:kind :niche :untagged u :start s :end e :niche-start n}))
                   :vs (:variants m)})))
 
+(declare ty-kind)
 (defn layout
   "A type form's layout from the table: {:kind :zst|:scalar|:pair|:memory :size :align :offsets :scalar :pair :ty}."
   [lt t]
-  (let [e (get lt (second t))]
+  (let [e (or (get lt (second t))
+              ;; rust-c6c: a function item's type is zero-sized whatever its text (`{no sig core::ub_checks::check_language_ub}`,
+              ;; a crate-private const fn the interface gives no signature, in assert_unsafe_precondition!'s expansion), which the
+              ;; table may not hold under that text: copy_nonoverlapping's and offset's inlined bodies were refused
+              ;; (collect's fndef-sig without a signature prints the item `{no sig PATH}`, its form `(other ":err")`: still a fn item)
+              (when (or (= "fndef" (ty-kind t)) (str/starts-with? (str (second t)) "{no sig "))
+                '{:size 0 :align 1 :abi (memory true) :fields [] :variants (single 0) :uninhabited false}))]
     (when-not e (unsupported (str "no layout for " (second t))))
     (let [abi (:abi e)
           ak (name (first abi))
@@ -619,6 +626,9 @@
     (let [c (second callee)]
       (case (:kind c)
         ("item" "fnptr-shim" "closure-once-shim" "drop-glue" "vtable-shim" "reify-shim" "clone-shim" "shim") (symbol "g" (:symbol c))
+        ;; C1 (2026-11-22): another instance kind with a symbol (threads.rs' spin loop: `llvm.x86.sse2.pause`, core_arch's
+        ;; `#[link_name]` import of the LLVM intrinsic, the helper's "other"): a call of that symbol, as rustc's IR calls it
+        "other" (if (seq (:symbol c)) (symbol "g" (:symbol c)) (unsupported "callee of kind other without a symbol" {:callee c}))
         (unsupported (str "callee of kind " (:kind c)) {:callee c})))
     :else (callee-symbol (fn-callee f))))
 
@@ -694,6 +704,15 @@
   [lt t i]
   (if-let [a (when (= "adt" (ty-kind t)) (let [a (nth (:pointee-aligns (get lt (second t))) i nil)] (when (and a (> (long a) 1)) a)))]
     a
+  (if-let [ut (when (= "closure" (ty-kind t)) (let [u (last (nth (ty-struct t) 2))] (when (and (seq? u) (= "ty" (name (first u))) (= "tuple" (ty-kind u))) u)))]
+    ;; rust-c6c: a closure passed as a scalar pair (its two upvars): each half's pointee alignment by the upvars' types, in the
+    ;; closure's own field order (DebugMap::finish's `and_then(.., |_| ..)`: the `&mut Formatter` half `align 8`, as std's IR)
+    (let [fts (vec (rest (ty-struct ut)))
+          offs (:offsets (layout lt t))
+          order (map first (sort-by second (map-indexed vector offs)))
+          live (filter #(not (zst? (layout lt (nth fts %)))) order)
+          ft (when-let [f (nth live i nil)] (nth fts f))]
+      (when ft (ref-align lt ft)))
   (if (= "tuple" (ty-kind t))
     (let [offs (:offsets (layout lt t))
           order (map first (sort-by second (map-indexed vector offs)))
@@ -708,7 +727,7 @@
         ;; a struct with an unsized tail behind a fat pointer: the struct's own alignment, when the table has its layout
         (and (= i 0) (= pk "adt") (get lt (second pt)))
         (let [pl (layout lt pt)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))
-        :else nil))))))
+        :else nil)))))))
 
 (defn ret-attrs-of
   "The attributes of a returned value: zeroext for bool, align for a reference."
@@ -789,6 +808,11 @@
 (defn declare!
   [gl name ret params]
   (vswap! gl assoc-in [:decls name] (list 'llvm/declare name ret params)))
+
+(def ^:dynamic *call-seq*
+  "rust-c6c: lib-unit's compare binds it true: every call and invoke carries `:cseq N`, its creation's place in the body (the
+  inliner's use-list order; arbace.rust.back.inline strips it)"
+  false)
 
 (defn codegen-fn
   "One body's LLVM define form; `lt` is the layouts table, `gl` the module's globals (new-globals)."
@@ -940,7 +964,14 @@
         st (volatile! {:n 0 :skip #{} :bbs {} :bb-order [] :vals {} :allocas {} :start []})
         fresh! (fn [] (let [n (:n @st)] (vswap! st assoc :n (inc n)) (symbol (str "%t" n))))
         ;; a MIR block's code continues in the last block a statement made (the repeat loop's repeat_loop_next): :redir
-        emit! (fn [bb f] (let [bb (get (:redir @st) bb bb)] (vswap! st update-in [:bbs bb] (fnil conj []) f)) nil)
+        emit! (fn [bb f] (let [bb (get (:redir @st) bb bb)
+                               ;; rust-c6c: with *call-seq*, each call or invoke numbered as codegen creates it (rustc's blocks in
+                               ;; reverse postorder: the use lists' order the always-inliner reads), `:cseq N`
+                               f (if-let [o (when *call-seq* (let [o (if (and (seq? f) (= '= (first f))) (nth f 2 nil) f)] (when (and (seq? o) (#{'call 'invoke} (first o))) o)))]
+                                   (let [o2 (apply list (concat o [:cseq (:cseq (vswap! st update :cseq (fnil inc 0)))]))]
+                                     (if (= '= (first f)) (list '= (second f) o2) o2))
+                                   f)]
+                           (vswap! st update-in [:bbs bb] (fnil conj []) f)) nil)
         llbb! (fn [b] (let [nm (if (zero? b) "start" (str "bb" b))]
                         (when-not (some #{nm} (:bb-order @st)) (vswap! st update :bb-order conj nm))
                         (symbol (str "%" nm))))
@@ -1524,7 +1555,13 @@
                     "ref" (let [p (nth r 2) projs (place-projs p)]
                             (if (and (= 1 (count projs)) (= "deref" (proj-kind (first projs))))
                               (operand! bb (list 'copy (list 'place (place-local p))))
-                              (if (#{"slice" "str"} (ty-kind (place-type body p)))
+                              (if (let [pt (place-type body p) e (get lt (second pt)) abi (:abi e)]
+                                    ;; C6-4 (rust-c6c): or a struct whose tail is unsized (BackendRepr::Memory { sized: false }: std's
+                                    ;; `&self.inner` of a Path, an OsStr, a Slice, each a newtype over [u8]), whose layout the table
+                                    ;; writes size 0 (its sized prefix); the reference was a thin pointer, so `as_encoded_bytes(&self.inner)`
+                                    ;; passed nothing where std's IR passes the pair
+                                    (or (#{"slice" "str"} (ty-kind pt))
+                                        (and (= "adt" (ty-kind pt)) (seq? abi) (= "memory" (name (first abi))) (false? (second abi)))))
                                 ;; a reference to the unsized tail field of a struct behind a fat pointer: the field's address, the same metadata
                                 (let [meta (second (:pair (operand! bb (list 'copy (list 'place (place-local p))))))
                                       pl (place-of! bb p)
@@ -2326,7 +2363,48 @@
                                              (emit! bb (list '= r (list 'call ft iname [[ft (:v x)] ['i32 (:v y)]])))
                                              (assign! bb dest {:ty (name ft) :v r})
                                              (when target (br-or-merge bb t target)))
-                                           (unsupported (str "intrinsic " intrinsic)))))))
+                                           ;; C1 (2026-11-22): the atomic intrinsics as rustc_codegen_ssa's intrinsic.rs lowers them
+                                           ;; (1.99.1: atomic_load/store/fence, the read-modify-writes, cxchg and cxchgweak), the orderings
+                                           ;; their AtomicOrdering const arguments (Relaxed monotonic, Release, Acquire, AcqRel acq_rel,
+                                           ;; SeqCst seq_cst), read from the call's function constant; a pointer-typed value as rustc's
+                                           ;; (cxchg and the rmws of a pointer on the pointer itself)
+                                           (if-let [[_ op] (re-matches #"atomic_(load|store|fence|singlethreadfence|cxchg|cxchgweak|xchg|xadd|xsub|and|nand|or|xor|max|min|umax|umin)" intrinsic)]
+                                             (let [ords (mapv (fn [[_ o]] (case o "Relaxed" :monotonic "Release" :release "Acquire" :acquire "AcqRel" :acq_rel "SeqCst" :seq_cst
+                                                                            (unsupported (str intrinsic " ordering " o))))
+                                                              (re-seq #"AtomicOrdering::(\w+)" (str (second f))))
+                                                   ord (or (first ords) (unsupported (str intrinsic " without an ordering")))
+                                                   el-of (fn [o] (layout lt (second (ty-struct (ty-of o)))))
+                                                   sc-of (fn [l] (or (:scalar l) (unsupported (str intrinsic " of a non-scalar"))))
+                                                   vty (fn [sc] (symbol (:imm sc)))]
+                                               (case op
+                                                 ("fence" "singlethreadfence")
+                                                 (emit! bb (if (= op "fence") (list 'fence ord) (list 'fence ord :syncscope "singlethread")))
+                                                 "load"
+                                                 (let [p (operand! bb (first args)) el (el-of (first args)) sc (sc-of el) r (fresh!)]
+                                                   (emit! bb (list '= r (list 'load (vty sc) ['ptr (:v p)] :atomic ord :align (:size el))))
+                                                   (assign! bb dest {:ty (:imm sc) :v r}))
+                                                 "store"
+                                                 (let [p (operand! bb (first args)) v (operand! bb (second args)) el (el-of (first args)) sc (sc-of el)]
+                                                   (emit! bb (list 'store [(vty sc) (:v v)] ['ptr (:v p)] :atomic ord :align (:size el))))
+                                                 ("cxchg" "cxchgweak")
+                                                 (let [p (operand! bb (first args)) o (operand! bb (second args)) n (operand! bb (nth args 2))
+                                                       el (el-of (first args)) sc (sc-of el) t (vty sc) rt (list 'struct t 'i1)
+                                                       c (fresh!) v (fresh!) ok (fresh!)
+                                                       fail (or (second ords) (unsupported (str intrinsic " without a failure ordering")))]
+                                                   (emit! bb (list '= c (cond-> (list 'cmpxchg ['ptr (:v p)] [t (:v o)] [t (:v n)] ord fail)
+                                                                          (= op "cxchgweak") (concat [:weak true])
+                                                                          true (concat [:align (:size el)]))))
+                                                   (emit! bb (list '= v (list 'extractvalue [rt c] 0)))
+                                                   (emit! bb (list '= ok (list 'extractvalue [rt c] 1)))
+                                                   (assign! bb dest {:pair [{:ty (:imm sc) :v v} {:ty "i1" :v ok}]}))
+                                                 (let [p (operand! bb (first args)) v (operand! bb (second args)) el (el-of (first args)) sc (sc-of el)
+                                                       r (fresh!)
+                                                       k (case op "xchg" :xchg "xadd" :add "xsub" :sub "and" :and "nand" :nand "or" :or "xor" :xor
+                                                               "max" :max "min" :min "umax" :umax "umin" :umin)]
+                                                   (emit! bb (list '= r (list 'atomicrmw k ['ptr (:v p)] [(vty sc) (:v v)] ord :align (:size el))))
+                                                   (assign! bb dest {:ty (:imm sc) :v r})))
+                                               (when target (br-or-merge bb t target)))
+                                             (unsupported (str "intrinsic " intrinsic))))))))
                                  (let [;; RFP44 (a): a virtual call (InstanceKind::Virtual): the receiver's data pointer is the first argument,
                                        ;; the function its vtable's slot (meth.rs' VirtualIndex::get_fn: a load at slot x 8 bytes)
                                        virt (when (= "virtual" (:kind ci))
