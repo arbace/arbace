@@ -4710,3 +4710,19 @@ printed, so every other caller's stderr stays as it was.
   keeps the class.
 - **Result.** syntactic-arity/max_arity passes at the light AOT level: its output equals max_arity.reference, and the typer's
   warning equals max_arity.compilers.reference byte for byte.
+## As built: queue 527 (2026-11-22, the VM): Marshal of the C's custom blocks at the AOT levels, o2j's shared block constants
+
+- **The wire's 'S' and 'D'** (DECISION 523-2 (a); go/arbace/oicapi/wire.ae's customOp): 'S' u64 the block's address, answered by
+  its operations' serialize (the bytes and the two sizes), 'D' the identifier, the data and the size expected, answered by the
+  registered operations' deserialize (the block as 'c', the size it returned, the bytes it read); 'N' when there are none, 'E', 'X'
+  and 'F' when the C raised, exited or faulted; at any depth, a session of its own outside a call. The server calls oicapi's
+  serialize and deserialize, the ones oi's Marshal calls. The Java runtime's Marshal writes a CBlock Custom as extern_custom does
+  (sharing first, CODE_CUSTOM_LEN, the identifier, the sizes, the bytes; abstract when the operations have no serialize) and reads a
+  CODE_CUSTOM_LEN of an identifier not its own through CApi/deserialize, intern.c's length check after it.
+- **o2j's block constants** (arbace/o2j.ae's const-form, :blocks): one static field a unit for structurally equal block constants,
+  a block's block fields the shared ones, as ocamlopt's Closure labels structured constants (Compilenv.new_structured_constant
+  ~shared:true). const-arg's folding (queue 397) had copied a let-bound constant into each field: lib-marshal/intext's sharing tests
+  (21, 121, 221, 421: `let x = D "sharing" in G(x, x)`) failed.
+- regression/pr3612 and lib-marshal/intext pass at the light AOT level (pr3612 leaves `:c-runtime-decided`, intext aot-known.edn);
+  pr3612's 1,000,001 deserializations, one round trip each, take about 109 CPU seconds on the VM (runtime and server) against the
+  level's 120.

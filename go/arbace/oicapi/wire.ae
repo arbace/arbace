@@ -23,7 +23,12 @@
 ;; 'E' value (it raised), 'X' i32 (the C called exit), 'F' str (a fatal error), 'N' (no stub of that name, or no stubs: OI_CSTUBS
 ;; unset), 'T' (the call unwound for the runtime's throwable), 'K' value, u32 n, n values (a callback: apply the closure), 'Q' str
 ;; (caml_named_value); 'G' u32 n, n u64 (queue 523: the C's custom blocks an asked collection found unreachable, at no call's depth),
-;; answered 'N' once their finalize ran. The servers frame the messages (capi.go: a write a message, its reply u32 its length then it).
+;; answered 'N' once their finalize ran; (queue 527, Marshal of the C's custom blocks: extern_custom and intern's CODE_CUSTOM_LEN, as
+;; ocamlopt's runtime calls the operations') 'S' u64 the address (its operations' serialize: 'R', no updates, u32 n, n bytes, u64 the
+;; 32-bit size, u64 the 64-bit size), 'D' str the identifier, str the data from the identifier's sizes to the message's end, u64 the
+;; size expected (the registered operations' deserialize: 'R', no updates, the block, u64 the size deserialize returned, u64 the bytes
+;; it read), each answered 'N' when there are none, 'E' value when the C raised, 'F' str at a fault; at any depth, as an answer is (a
+;; callback may marshal). The servers frame the messages (capi.go: a write a message, its reply u32 its length then it).
 (in-ns 'go.arbace.oicapi)
 
 (go/file "wire.go" :imports [[binary "encoding/binary"] [fmt "fmt"] [math "math"] [os "os"] [sync "sync"] [oi "arbace/oi"]])
@@ -417,6 +422,9 @@
           (when (and loaded (== loadErr ""))
             (Collected addrs))
           (return (lit (slice byte) \N))))
+      ;; (queue 527) 'S', 'D': a C custom block serialized, or one deserialized, for the runtime's Marshal (customOp)
+      (case [\S \D]
+        (return (customOp op r)))
       (default
         (let [w (addr (lit wbuf))]
           (.u8 w \F)
@@ -471,6 +479,62 @@
 
 (go/func ThreadsStarted "ThreadsStarted tells whether the loaded stubs started a thread (the light level's server tells the runtime once: 't').\n" ^bool []
   (and (!= the nil) (!= (.-Sched (.-Sys (.-p the))) nil)))
+(go/func customOp "customOp is the reply to 'S' or 'D' (queue 527): the C custom block at an address serialized by its operations' serialize\n(its bytes and sizes), or a block of the operations registered under an identifier deserialized from the data (the block, the size\nits deserialize returned, the bytes it read): oicapi's serialize and deserialize, which oi's Marshal calls (ext_capi.go's\nCustomSerialize, CustomDeserialize); 'N' when there are none, 'E' when the C raised, 'X' when it called exit, 'F' at a fault. A\nreply's new nodes are the session's, or a session of its own outside a call.\n"
+  ^{:tag (slice byte)} [^byte op ^{:tag (* rbuf)} r]
+  (let [s sess
+        w (addr (lit wbuf))]
+    (when (== s nil)
+      (set! s (addr (lit session :ids (lit (map any int))))))
+    ((fn []
+       (defer ((fn []
+                 (when [x (recover)] (!= x nil)
+                   (set! (.-b w) nil)
+                   (type-switch [e x]
+                     (case [(* oi/Exn)]
+                       (.u8 w \E)
+                       (.u32 w 0)
+                       (.put s w (.-V e)))
+                     (case [(* oi/ExitSignal)]
+                       (Flush)
+                       (.u8 w \X)
+                       (.u32 w 0)
+                       (.u32 w (.-Code e)))
+                     (case [(* oi/InternalError)]
+                       (.u8 w \F)
+                       (.u32 w 0)
+                       (.str w (+ "o2j: " (.-Msg e))))
+                     (default
+                       (.u8 w \F)
+                       (.u32 w 0)
+                       (.str w (fmt/Sprintf "o2j: the C API: %v" x))))))))
+       (when (or (not (wireLoad)) (== the nil))
+         (.u8 w \N)
+         (return))
+       (if (== op \S)
+         (let [a (.u64 r)
+               (values data sz32 sz64 ok) (.serialize the (addr (lit oi/Custom :V (addr (lit CBlock :Addr a)))))]
+           (when (not ok)
+             (.u8 w \N)
+             (return))
+           (.u8 w \R)
+           (.u32 w 0)
+           (.u32 w (len data))
+           (set! (.-b w) (append (.-b w) (spread data)))
+           (.u64 w sz32)
+           (.u64 w sz64))
+         (let [name (.str r)
+               data (conv (slice byte) (.str r))
+               expected (.u64 r)
+               (values v size used ok) (.deserialize the name data expected)]
+           (when (not ok)
+             (.u8 w \N)
+             (return))
+           (.u8 w \R)
+           (.u32 w 0)
+           (.put s w v)
+           (.u64 w (conv uint64 size))
+           (.u64 w (conv uint64 used))))))
+    (.-b w)))
 
 (go/func FlushStubs "FlushStubs flushes the C's stdio at the program's end (Flush), when the stubs were loaded.\n" []
   (when (and loaded (== loadErr ""))
