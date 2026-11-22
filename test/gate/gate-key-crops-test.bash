@@ -37,7 +37,7 @@ grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources(
   || { echo "FAIL: gate_key, gate_rest_key, arbace_embedded_sources or arbace_embedded_resources not found"; exit 1; }
 
 excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/crops/c2j-check bin/lib/hsi/check bin/lib/si/x bin/lib/pyi/x
-go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae go/arbace/pyctypes.ae go/arbace/pyctypes/x.ae
+go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/pybz2/x.ae go/arbace/pyssl.ae
 jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
 arbace/repr/cpp/ncheck.ae arbace/repr/cpp/tcheck.ae arbace/repr/llvm/mutate.ae arbace/repr/llvm/expect.ae arbace/rust.ae arbace/rust/x.ae arbace/llvm/run.ae
 arbace/repr/ocaml.ae arbace/repr/ocaml/print.ae arbace/repr/haskell.ae arbace/repr/rust/x.ae
@@ -50,6 +50,7 @@ arbace/repr/scheme.ae arbace/repr/scheme/read.ae arbace/scheme/aot.ae arbace/rep
 arbace/python.ae arbace/python/scope.ae
 go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/scminterp.ae go/arbace/scminterp/natives.ae
 go/arbace/py.ae go/arbace/py/frame.ae go/arbace/libm.ae go/arbace/libm/libm.ae
+go/arbace/clib/x.ae go/arbace/clib/worlds/worlds.ae go/arbace/pyctypes/x.ae
 arbace/lang/SchemeInterp.ae arbace/scheme/interp.ae arbace/scheme/resource.ae scheme/psyntax/psyntax.pp.ae
 arbace/core.ae arbace/o2j.ae arbace/http.ae arbace/tls/x.ae arbace/go/check.ae arbace/repr/go.ae
 go/arbace.ae go/arbace/api.ae go/arbace/goi.ae go/arbace/goi/x.ae go/arbace/jrt/x.ae go/arbace/repr/go/godump.ae
@@ -111,8 +112,9 @@ sed -n '/^arbace_javac_key() {/,/^}/p' "$jkb" >> "$d/keys.bash"
 grep -q '^arbace_runtime_key() {' "$d/keys.bash" && grep -q '^arbace_javac_key() {' "$d/keys.bash" \
   || { echo "FAIL: arbace_runtime_key or arbace_javac_key not found"; exit 1; }
 crop_go="go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/scminterp.ae
-go/arbace/scminterp/natives.ae go/arbace/py.ae go/arbace/py/frame.ae go/arbace/libm.ae go/arbace/libm/libm.ae"
-out_go="go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae go/arbace/wai.ae go/arbace/wai/x.ae go/arbace/pyctypes/x.ae"
+go/arbace/scminterp/natives.ae go/arbace/py.ae go/arbace/py/frame.ae go/arbace/libm.ae go/arbace/libm/libm.ae
+go/arbace/clib/x.ae go/arbace/clib/worlds/worlds.ae go/arbace/pyctypes/x.ae"
+out_go="go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/pybz2/x.ae go/arbace/wai.ae go/arbace/wai/x.ae go/arbace/pyssl.ae"
 for f in seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 \
          bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi bin/javac-vendor; do
   mkdir -p "$r/$(dirname "$f")"; echo x > "$r/$f"
