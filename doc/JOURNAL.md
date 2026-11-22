@@ -16326,3 +16326,142 @@ crt, ci and cf2g. Left deferred: eval-depth 5 and eval-limits 10 (the next re-se
 nesting level), decl-diag 3, parse-gap 1, pedantic-diag 1, macro-context 1, objects-macro-body 1.
 Alternatives not taken: classing the read rows n/a (CR1 (b)); a type-based setjmp detection (the builder sees forms, not types,
 at that point); hand-editing the three mutants' result rows (the record run again instead).
+
+## 2026-11-22: hs-r6-1122: Haskell's eval and AOT programs not own, sixth round (own-fallback.txt's causes, foundation's generated module)
+
+Branch `hs-r6-1122` from mac/next `cab8c1e53` (which holds hs-r5-1121 `f86f143e5`), by an agent of the main host (the coordinator's
+brief: bring Haskell's eval and AOT independence stages to 1.0, hs-r5's "left" list its list: own-fallback.txt's 8, T13688, the 7
+ineligible; then one re-record of the programs that change, as lane 2's targeted reruns did). Light: targeted `HSI_OWN_FALLBACK=try
+bin/hsi check --libs own --only` runs (`.tmp/r6/try.sh`), the front end alone on single programs (`.tmp/r6/front1.sh`, `run1.sh`); no gate.
+
+**own-fallback.txt's 8 entries** (each after GHC 9.14.1's own rule, no GHC code ported but where named):
+- StrictPats (eval and AOT's one): `where _x = undefined :: (# () #)`. GHC's isUnliftedHsBind makes a binding of an unlifted binder
+  strict (dsUnliftedBind's case); (# () #) is unlifted (an unboxed tuple) but its representation is ()'s, a lifted one's, so the
+  simple optimiser and tostg, which judge a let by its representations, dropped it dead. The narrow rule (hs-r5's alternative not
+  taken was the Simplifier's hook for every (# a #) binder): the desugarer (desugar.ae's unlifted-let, the hook *solo-binder?* that
+  tostg binds from the binder's noted type) makes a let whose binder is an unboxed 1-tuple of a lifted type a case, its alternative
+  MkSolo# of a fresh binder (Unarise's unariseAlts gives a DEFAULT alternative on a multi-valued scrutinee that tuple's), a right-hand
+  side ok for speculation left a let. 19 of 19 cases as GHC's.
+- T10481 and UnliftedNewtypesDependentFamilyRun: `I# (raise# e)` and `I# (method Proxy |> R:BarIntRep ~ Int#)`: an argument at a
+  constructor's unlifted field whose type the untyped Core leaves open (a representation-polymorphic result; a cast's result type,
+  erased by simplify's strip) became a lazy thunk, read as an integer. tostg now case-binds such an argument with the field's
+  representation (CorePrep's cpeArg for an unlifted argument; unknown-unlifted-arg?, floatable-con and app-expr's constructor branch),
+  the field's representation read from the constructor's declared type (field-src-reps), not the layout: base, compiled over the -O2
+  libraries' layout, sees ghc-internal's SrcLoc with its strict Int fields unpacked while the Core passes them boxed (the first try
+  case-bound the boxed I# 143 as an Int#; caught by the libraries' STG diff, fixed before the records).
+- UnliftedNewtypesIdentityRun (Maybe#, an unlifted newtype over an unboxed sum) and T16650b (MutableArrayArray#, ghc-internal's
+  newtype over MutableArray# s ByteArray#): typePrimRep sees through newtypes (GHC.Types.RepType; Unarise too), tostg's type-reps did
+  not. type-reps now takes a newtype's representation type (newtype-rep: the constructor's result type matched against the
+  application, famenv's match-tys, its field type substituted; a data family's newtype instance through the module's own :fam-insts;
+  at most 8 deep), and sum-type sees through newtypes likewise, so a sum's case and construction under Maybe# are unarised.
+- FMA_ConstantFold: not the expected output's bug. GHC.Rename.Expr's rnOverLit (Note [Negative zero], #13211): a literal -0 lexed as
+  one negative literal (LexicalNegation, NegativeLiterals) is negate applied to the positive literal, because an Integer's or
+  Rational's value has no negative zero. The elaborator read it as the literal 0, so fmaLit folded `fmadd 1 0 -0` to +0.0; now
+  (typecheck.ae's neg-zero-overlit, in infer and in check-expr, negate checked against the literal's type so the short cut applies)
+  GHC's negOp leaves negateFloat# 0.0# unfolded, fmaOne gives 0.0 + z, zerof's identity z, -0.0: the golden output's six FAILs, byte
+  for byte (the golden file's rows derive the same folding). No decision is needed.
+- T14236 (still listed): Type.Reflection's App rebuilt by mkTrAppChecked. The cause: mkTrAppChecked's evidence for `typeRep @((->) x
+  :: TYPE ry -> Type)` is built with FUN's kind arguments 'Many, LiftedRep, LiftedRep (typeable-term's HF10-P39 (a) constants) where
+  GHC's doTyConApp gives 'Many, rx, ry from the givens (the first IsTYPE's TypeRep pattern, the second's), so eqTypeRep fails and the
+  App is printed unrebuilt (a test program of the same expressions: typeRep @((->) Int# :: TYPE LiftedRep -> Type) prints
+  FUN 'Many ('BoxedRep 'Lifted) ('BoxedRep 'Lifted) Int#). What making it own takes: the type application's kind signature kept as
+  the type's kind (hs-type drops HsKindSig's kind), x's kind through typeRepKind's kind link to TrApp's existential k1 and IsTYPE's
+  given equality k1 ~ TYPE rx (hs-own-stg-3 (a)'s kind annotations and links, which settle at the module's end today), and the
+  Typeable solver's FUN case computing [Many, q, r] from them with q's and r's evidence from the givens: HF9-P4 (a)'s erased kinds
+  undone where Typeable's evidence needs them; ghc-internal's Typeable.Internal STG then moves (lib-stg again).
+- T7861 (still listed): GHC 9.14.1 rejects main's `f `seq` print "Hello 2"` (its STG's main is typeError of "Couldn't match expected
+  type ‘a0’ with actual type ‘(forall (b :: k0). a1) -> a1’ / Cannot instantiate unification variable ‘a0’ with a type involving
+  polytypes", with the do block's context), so its run prints nothing before the deferred error; the elaborator fills a meta with a
+  polytype freely (no impredicativity check) and runs main's first statement. What it takes: GHC's checkTyEqRhs rule for a tau
+  variable with Quick Look's exceptions (GHC.Tc.Gen.App's quickLookArg, qlUnify: which instantiation variables a polytype may fill)
+  and the message's text (the tidied names a0, a1, k0; the do block printed as the context); f's own deferred message differs too
+  (polytypes printed as types, the rigid variable, relevant bindings), but the run never reaches it.
+
+**foundation (one of the 7 ineligible): GHC.Internal.PrimopWrappers made by Arbace.** ghc-internal's .cabal lists it among its
+autogen-modules: genprimopcode --make-haskell-wrappers' output from primops.txt, in no tarball. primiface.ae's wrappers ports
+utils/genprimopcode/Main.hs's gen_wrappers (want_wrapper: every primop but tagToEnum# and the vector ones; pprTy, tyconsIn's union
+order, arity, wrapOp) over the primops.txt.pp parse it already has: 734 NOINLINE wrappers, the exported names GHC's interface's
+(haskell-ifaces-ghc-9.14.1) exactly. bin/lib/repr-haskell/lib-check makes it for ghc-internal (LIB_CHECK_WRAPPERS=0 not), reads it
+natively with ghc-internal's flags into the package's dumps, gives it a closure of its imports (GHC.Internal.Prim, GHC.Internal.Tuple)
+grown over the pack's pool as a pack closure is, and judges it against GHC's interface of it from haskell-ifaces-ghc-9.14.1 (the
+lib-check pack names no closure holding it): 734 of 734 types, 1,468 of 1,468 interface facts equal; lib-stg then makes its STG.
+foundation's other imports were own already (mtl's Control.Monad.Reader with -package transformers); its compile met a constfold
+crash, an integral conversion's rule tried on an unapplied primop (`testPrimop "word2Int#" Primop.word2Int# ...`): a conversion's
+rule now needs its one literal.
+
+**The libraries** (own, rebuilt from hs-r5's state by lane 2's prep, `.tmp/r6/prep.sh`, then ghc-internal again with the closure
+fix in a work directory of its own and swapped in): lib-check --ifaces own of ghc-internal 266 modules (PrimopWrappers new), every
+one elaborated, 0 worse; the record re-recorded from that whole run (test/haskell/lib-check-own-ghc-internal.edn: the new row, and
+the 3 better since hs-own-stg's rounds, Bignum.Integer, Data.Typeable.Internal, TH.Lift, with Classes' CTuple0 synonym, hs-r5's
+CUnit); base 0 worse (4 better, as hs-r5 left them), the 20 packages above base 0 worse; every package's pool byte for byte hs-r5's
+but PrimopWrappers' new one. lib-stg --ifaces own of ghc-internal: GHC.Internal.PrimopWrappers joined test/haskell/lib-stg.txt;
+**9,207 of 10,741** bindings equal (hs-r5's 8,471 of 10,007: ArrayArray 4 -> 6 of 18 by the newtype seen through, PrimopWrappers 734
+of 734), 0 worse, control 0 of 171; test/haskell/lib-stg-own-results.edn re-recorded from it (the record was still 7,982's: its 111
+better modules of the rounds since). base 850 of 1,097, 0 worse, control 0 of 25. The STG diff against hs-r5's: ghc-internal's
+ArrayArray and Generics (the URec data instances' derived $cfrom1/$cto1, wrong before and after: the elaborator derives Generic for
+an unlifted field through K1, not URec; their binders' representations now follow those types; no run program uses them),
+PrimopWrappers new; base and the 20 packages byte for byte (the first rebuild's base had 8 modules moved by the SrcLoc case above,
+gone with field-src-reps).
+
+**The programs that change**, found by the front end itself: the head's front end over lane 2's final plan, on hs-r5's interfaces
+and STG (`.tmp/r6/frontcmp2.sh`), diffed against lane 2's front-end outputs kept in hs-r5's work directory, for the 282 programs
+whose sources name an affected feature (MagicHash, unboxed tuples or sums, UnliftedNewtypes, NegativeLiterals, LexicalNegation,
+ArrayArray, a newtype instance, raise#; the 88 others compiled before the cut were byte for byte): arr020, UnliftedNewtypesFamilyRun
+and UnliftedNewtypesRun (ArrayArray#'s and the unlifted newtypes' fields :U and :int where they were :L), ManyUbxSums equal to hs-r5's
+rerun. With the 6 and foundation, 10 programs.
+
+**The re-record**: `bin/hsi check --libs own --only @10 ids --record` (lane 2's environment, `.tmp/r6/rerun.sh`: the 20 own
+packages, 8 GiB a program, one job): 10 of 10 pass own (foundation 4.30 s). AOT `--aot --libs own --only StrictPats --record`:
+passes own (its build 52.83 s, :vs-hsi :same). HSI_OWN_FALLBACK=try over T14236 and T7861: still failing as listed, own-fallback.txt
+0 problems. The negative controls, the subjects run on the own libraries (no record): eval's 11 fail as they must, AOT's 6 whose
+subjects are in its set too. The whole records judged with the check's judge (lane 2's judge.sh): 0 unclassed each; eval 950 lines,
+910 own, 9 pack, 31 out of the cases; 21 lines of status 137, none a pass; AOT 139 own, 1 at status 137 (fibheaps, :own-speed),
+none a pass.
+
+**Made own, by cause (eval 903 -> 910 of the 919 cases, AOT 138 -> 139 of 139):**
+- a let binder of an unboxed 1-tuple of a lifted type case-bound (dsUnliftedBind): StrictPats (eval and AOT);
+- an open-typed argument at an unlifted constructor field case-bound (cpeArg): T10481, UnliftedNewtypesDependentFamilyRun;
+- newtypes seen through for representations and sums (typePrimRep, Unarise): UnliftedNewtypesIdentityRun, T16650b;
+- rnOverLit's negative zero: FMA_ConstantFold;
+- ghc-internal's generated GHC.Internal.PrimopWrappers (genprimopcode's gen_wrappers ported) and constfold's unapplied conversion:
+  foundation.
+
+**Scores** (`bin/reap --record`: the matrix unchanged, Haskell eval 892 / 35 / 23 and AOT 137 / 1 / 1, every one of these programs
+passing on the pack's record as before; `bin/crops-score --record`): Haskell's eval stage 0.9910 -> 0.9950 (914.5 / 919 = 0.99510),
+AOT 0.9960 -> 1.0000 (139 / 139), independence **0.9974 -> 0.9990** (exact 0.99902; floor 99, unchanged), completeness 0.9809 and
+maturity 1 unchanged. `bin/crops-score --judge --strict` 0 problems, `bin/reap` 56 of 56 cells, 0 problems, `bin/records-check` 9
+pairs, 0 problems.
+
+**Left (9 eval cases at 0.5), each a decision for the user:**
+- T14236 and T7861: above (Typeable's kinds; GHC's impredicativity rule with Quick Look and its message).
+- T13688 (oracle-pending: judged by its own verdict once own): Template Haskell quasi-quotes run at compile time, `pattern A =
+  [aQuoter|hello world|]` in a pattern and in an expression (the front end stops on SplicePat and HsUntypedSplice; it has quotes,
+  th-quote, but runs no splice). What it takes: the renamer's untyped splice (GHC.Rename.Splice's runRnSplice) as an external
+  interpreter: each quasi-quote's `quotePat aQuoter "hello world"` (quoteExp in an expression) typed at Q Pat (Q Exp) over the
+  program's modules compiled before it (HF10-P24's order is GHC's stage restriction), a generated module printing `runQ splice`'s
+  value (TH.Syntax's derived Show, through Quasi IO) compiled by the same front end and run by hsi over the own libraries
+  (template-haskell's own STG is there), its text read back and converted into the parsed tree (GHC.ThToHs's cvtPat and cvtExp, the
+  literal, variable, constructor, application, tuple and list subset first; names as mkName or the NameG of the printed module), then
+  renamed and elaborated in place; one hsi run a module, batched. A day or two, with the check's front shard calling hsi.
+- foundation done. The 6 other ineligible:
+  - T24245 (GHC.TypeLits.Experimental): ghc-experimental as an own package (11 modules over base and ghc-internal, its own interfaces
+    already made by the haskell-iface-own step): a producer step haskell-lib-own-ghc-experimental (lib-check --judge and lib-stg), its
+    records lib-check-own-ghc-experimental.edn and lib-stg-controls-ghc-experimental.txt, ghc-experimental-own.tar in hsi-check's and
+    hsi-check-aot's :uses and HSI_OWN_TARS, lane 2's HSI_OWN_PACKAGES.
+  - T25364 (GHC.Utils.Encoding): ghc-platform and ghc-boot as own packages likewise (their other dependencies own already).
+  - TestTypeableBinary (GHCi.TH.Binary): ghc-platform, ghc-boot, ghc-heap and ghci as own packages (ghci's libffi FFI module and heap
+    inspection compiled by lib-stg too).
+  - T13825-unit and unboxedsums_unit_tests (import GHC, the compiler library; the second oracle-pending): the corpus lacks the ghc
+    package itself (test/haskell/corpus-ghc-9.14.1.edn holds the boot libraries alone): its ~600 modules and generated ones (Happy's
+    Parser.hs, Alex's Lexer.hs, genprimopcode's other verbs' tables, configure's Platform constants) read, round-tripped and made own
+    with ghc-heap, ghci, hpc, semaphore-compat; or the user counts these two out of the cases (they test the compiler, not the
+    language, as the 31 out of the cases are counted).
+  - tcrun022 (-O, its RULES "foo/C" fires in GHC's run): the front end is -O0's (no user rule applied, GHC's -O0
+    -fno-enable-rewrite-rules); making it own takes GHC.Core.Rules' matching (lookupRule, match: the rule's binders, its LHS's head and
+    arguments up to the untyped Core) in the Simplifier when the program's flags say -O, rules only (not -O's other passes); or the
+    user counts -O-only tests whose output needs -O out, or keeps it at 0.5.
+
+Alternatives not taken: the Solo# rule in the Simplifier's unlifted-type hook (every (# a #) binder's levity, the libraries' STG with
+it: hs-r5's reason); a full front-end comparison of the 910 programs (the host's load put it at 7 hours; the feature cut with the 88
+already compiled equal instead); the lib-check record left at 265 rows (its new module would fail the gate's judge); T14236, T7861 and
+T13688 not attempted this round (each a day or more, above). Not done: doc/AGENDA.md (the main session's), the gate.

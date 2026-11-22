@@ -71,6 +71,7 @@
 (def ^:dynamic *unboxed-tuple?* (constantly false)) ; an expression of an unboxed tuple type (tostg's: its binder unarised
                                                     ; as a let's, *multi*)
 (def ^:dynamic *where* "")    ; the binding being compiled, for patError's text
+(def ^:dynamic *solo-binder?* (constantly false)) ; hs-r6: a binder of an unboxed 1-tuple of a lifted type (tostg's types)
 
 (defn- ext [ns m o] ["ext" ns m o])
 (def true-c (ext "data" "GHC.Internal.Types" "True"))
@@ -449,6 +450,19 @@
     (list 'case s v [(list 'alt :default [] body)])
     (list 'let [(list 'bind v s)] body)))
 
+(defn- unlifted-let
+  "hs-r6: GHC's dsUnliftedBind for a let binder of an unboxed 1-tuple of a lifted type, (# () #): isUnliftedType holds
+  (an unboxed tuple), but its representation is a lifted one's, so the simple optimiser and tostg, which judge a let by
+  its representations, took it for a lazy let and dropped it dead. The binding is a case here, its right-hand side
+  evaluated first, the alternative MkSolo# of a fresh binder (Unarise's unariseAlts makes a DEFAULT alternative on a
+  multi-valued scrutinee that tuple's); a right-hand side ok for speculation stays a let (StrictPats' `where _x =
+  undefined :: (# () #)`, GHC's run evaluating it). Other unlifted binders are as before (their representations say so)"
+  [bs body]
+  (let [[_ b r] (first bs)]
+    (if (and (= 1 (count bs)) (lv? b) (*solo-binder?* b) (not (ok-for-speculation? r)))
+      (list 'case r b [(list 'alt (ext "data" "GHC.Internal.Types" "MkSolo#") [(fresh "ubx")] body)])
+      (list 'let bs body))))
+
 (defn ds
   "An elaborated expression without matches: core"
   [x]
@@ -462,7 +476,7 @@
               (list 'lam bs (ds (nth x 2)))
               (let [xs (mapv (fn [b] (if (lv? b) b (fresh "ds"))) bs)]
                 (list 'lam xs (match xs [{:pats bs :sub {} :rhs (fn [_] (ds (nth x 2)))}] (pat-error))))))
-      let (list 'let (ds-binds (second x)) (ds (nth x 2)))
+      let (unlifted-let (ds-binds (second x)) (ds (nth x 2)))
       letrec (list 'letrec (ds-binds (second x)) (ds (nth x 2)))
       case (list 'case (ds (nth x 1)) (nth x 2) (mapv (fn [[_ c bs e]] (list 'alt c bs (ds e))) (nth x 3)))
       match (let [ss (mapv ds (second x))
