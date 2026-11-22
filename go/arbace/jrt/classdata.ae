@@ -16,6 +16,9 @@
 ;;   G F NAME SIG
 ;;   E M NAME DESC T...       a method's or constructor's Exceptions attribute (binary names)
 ;;   E C DESC T...
+;;   W M NAME DESC N P...     a method's or constructor's MethodParameters (a class defined from bytes; java-bytecode-1122):
+;;   W C DESC N P...          N parameters, each P a name ("TEXT", - for none, ! for an index that is not a
+;;                            CONSTANT_Utf8) and its flags (decimal)
 ;;   R NAME DESC [SIG]        JCS383 (a): a record class's component (its Record attribute; record.ae), in order
 ;;   A NAME ANN               a component's annotation (decoded with the annotations, annotation.ae)
 ;;   Y T HEX                  JCS271 (b): the class's RuntimeVisibleTypeAnnotations attribute (JVMS 4.7.20) as
@@ -56,7 +59,12 @@
           ^string emDesc
           ^{:tag (map string string) :doc "G records by key: M name desc, C desc, F name\n"} sigs
           ^{:tag (map string (slice string)) :doc "E records by key: M name desc, C desc\n"} throws
-          ^{:tag (slice recordComp) :doc "R records: a record class's components in order (record.ae)\n"} comps))
+          ^{:tag (slice recordComp) :doc "R records: a record class's components in order (record.ae)\n"} comps
+          ^{:tag (map string (* paramRecord)) :doc "W records by key: M name desc, C desc\n"} params))
+
+(go/type paramRecord
+  "paramRecord: a MethodParameters attribute: the names (nil for none), the flags, whether an index was not a Utf8.\n"
+  (struct ^{:tag (slice (* String))} names ^{:tag (slice int32)} flags ^bool bad))
 
 (go/var ^{:tag sync/Map :doc "classAttrsCache: *ClassInfo -> *classAttrs, decoded once.\n"} classAttrsCache)
 (go/var ^{:tag sync/Map :doc "genericRepos: *ClassInfo -> the class's ClassRepository (Class.genericInfo), or a member's by key.\n"} genericRepos)
@@ -97,7 +105,8 @@ Class's TypeDescriptor.OfField and Constable, Enum's Constable).\n"} handSignatu
   (let [info (.-info c)
         (values v ok) (.Load classAttrsCache info)]
     (when ok (return (assert (* classAttrs) v)))
-    (let [d (addr (lit classAttrs :sigs (make (map string string)) :throws (make (map string (slice string)))))]
+    (let [d (addr (lit classAttrs :sigs (make (map string string)) :throws (make (map string (slice string)))
+                       :params (make (map string (* paramRecord)))))]
       (when (!= (.-Annots info) "")
         (range [_ line (strings/Split (.-Annots info) "\n")]
           (when (> (len line) 2)
@@ -123,6 +132,23 @@ Class's TypeDescriptor.OfField and Constable, Enum's Constable).\n"} handSignatu
                       (case ["M"] (let [n (.word p) ds (.word p)] (aset (.-sigs d) (+ "M " n " " ds) (.word p))))
                       (case ["C"] (let [ds (.word p)] (aset (.-sigs d) (+ "C " ds) (.word p))))
                       (case ["F"] (let [n (.word p)] (aset (.-sigs d) (+ "F " n) (.word p)))))))
+                (case [\W]
+                  (let [k (.word p)
+                        key ""]
+                    (if (== k "M")
+                      (let [n (.word p) ds (.word p)] (set! key (+ "M " n " " ds)))
+                      (set! key (+ "C " (.word p))))
+                    (let [(values cnt _) (strconv/Atoi (.word p))
+                          r (addr (lit paramRecord))]
+                      (for [q 0] (< q cnt) (inc! q)
+                        (if (and (< (.-i p) (len (.-s p))) (== (aget (.-s p) (.-i p)) \"))
+                          (set! (.-names r) (append (.-names r) (.stringValue p)))
+                          (let [w (.word p)]
+                            (when (== w "!") (set! (.-bad r) true))
+                            (set! (.-names r) (append (.-names r) nil))))
+                        (let [(values fl _) (strconv/Atoi (.word p))]
+                          (set! (.-flags r) (append (.-flags r) (conv int32 fl)))))
+                      (aset (.-params d) key r))))
                 (case [\R]
                   (let [n (.word p) ds (.word p) sg (.word p)]
                     (set! (.-comps d) (append (.-comps d) (lit recordComp :name n :desc ds :sig sg)))))
@@ -589,3 +615,22 @@ raw bits) or a Long (a Long's value or a Double's raw bits).\n"
     (let [a (NewRefArray Object_class (conv int32 (len es)))]
       (range [i x es] (aset (.-A a) i x))
       a)))
+
+(go/func executableParameters
+  "executableParameters is the MethodParameters of a Method or Constructor of a class defined from bytes (W records;
+java-bytecode-1122): the names (nil for none), the flags, whether an index was not a CONSTANT_Utf8; ok false when it
+has none (the parameters are synthesized).\n"
+  [^any e] :results [^{:tag (slice (* String))} names ^{:tag (slice int32)} flags ^bool bad ^bool ok]
+  (let [^{:tag (* Class)} c nil
+        key ""]
+    (type-switch [x e]
+      (case [(* Method)]
+        (set! c (.-clazz x))
+        (set! key (+ "M " (methodKey (.-Name (.-info x)) (.-params x) (.-Return (.-info x))))))
+      (case [(* Constructor)]
+        (set! c (.-clazz x))
+        (set! key (+ "C " (subslice (methodKey "" (.-params x) nil) 1)))))
+    (when (== c nil) (return nil nil false false))
+    (let [r (aget (.-params (attrsOf c)) key)]
+      (when (== r nil) (return nil nil false false))
+      (return (.-names r) (.-flags r) (.-bad r) true))))

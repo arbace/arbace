@@ -1,0 +1,172 @@
+;; jrt: ClassLoader's loading model and the classes defined from class-file bytes (doc/classes/BYTECODE-SURVEY.md, JD3,
+;; the user's decision of 2026-11-22; J2G-SPEC V9 amended). A loader's loadClass delegates as jdk26u's ClassLoader does
+;; (findLoadedClass, the parent's loadClass or the boot loader's, findClass), its virtual methods called on the loader
+;; object itself (ClassLoader.self: a subclass's override, a translated one's or an interpreted one's through its
+;; DynSub_ClassLoader); the defineClass family hands the bytes to arbace.lang.Bytecode.define (the Java forms of
+;; arbace/lang/Bytecode.ae, translated into the program: jrt cannot name it, so it is found by name in the registry,
+;; and a program without it answers UnsupportedOperationException as before), which makes the class an interpreted
+;; class of the Java forms' interpreter. Such a class is kept by its defining loader: Class.getClassLoader answers it,
+;; findLoadedClass finds it, and the built-in loaders do not see it (it is still in the registry by name, the latest
+;; definition, which jrt's own lookups by name (annotations, InnerClasses) read).
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'go.arbace.jrt)
+
+(go/file "defineclass.go" :imports [[strings "strings"] [sync "sync"]])
+
+(go/var
+  [^{:tag sync/Mutex} loaderMu]
+  [^{:tag (map (* Class) ClassLoader_I) :doc "definingLoaders: the defining loader of each class defined from bytes.\n"}
+   definingLoaders (make (map (* Class) ClassLoader_I))]
+  [^{:tag (map (* ClassLoader) (map string (* Class))) :doc "loaderClasses: the classes each loader defined, by binary name.\n"}
+   loaderClasses (make (map (* ClassLoader) (map string (* Class))))])
+
+(go/func DefiningLoader
+  "DefiningLoader is the loader that defined c from bytes; ok false for a class of the closed world.\n"
+  [^{:tag (* Class)} c] :results [^ClassLoader_I l ^bool ok]
+  (.Lock loaderMu)
+  (defer (.Unlock loaderMu))
+  (let [(values x found) (aget definingLoaders c)]
+    (return x found)))
+
+(go/func elementOf "elementOf is an array class's element class (c itself for another).\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} c]
+  (while (!= (.-comp c) nil)
+    (set! c (.-comp c)))
+  c)
+
+(go/func builtinLoaderKey "builtinLoaderKey: whether l is one of the two built-in loaders (or the boot loader, nil).\n"
+  ^bool [^ClassLoader_I l]
+  (or (== l nil) (== (loaderKey l) (addr (.-ClassLoader appLoader))) (== (loaderKey l) (addr (.-ClassLoader platformLoader)))))
+
+(go/func registryClass
+  "registryClass is the closed world's class named name for the built-in loaders: the registry's, not a class a loader
+defined from bytes; nil when none.\n"
+  ^{:tag (* Class)} [^string name]
+  (let [c (ForName name)]
+    (when (== c nil) (return nil))
+    (let [(values _ defined) (DefiningLoader c)]
+      (when defined (return nil)))
+    c))
+
+(go/var ^{:tag (* MethodInfo) :doc "defineMethod: arbace.lang.Bytecode.define's member table entry, found once.\n"} defineMethod)
+(go/var ^{:tag sync/Once} defineOnce)
+
+(go/func defineClassBytes
+  "defineClassBytes is the defineClass family's work: loader l defines the class of b[off, off+len) named name (nil:
+the class file's own) through arbace.lang.Bytecode.define, and keeps it; UnsupportedOperationException in a program
+without the Java forms' interpreter.\n"
+  ^{:tag (* Class)} [^ClassLoader_I l ^{:tag (* String)} name ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^any pd]
+  (when (== b nil) (panic (NPE)))
+  (when (or (< off 0) (< n 0) (> off (- (conv int32 (len (.-A b))) n)))
+    (panic (IndexOutOfBounds (conv int off) (len (.-A b)))))
+  (when (and (!= name nil) (or (strings/ContainsRune (.String name) \/) (strings/HasPrefix (.String name) "[")))
+    (panic (NoClassDefFoundError_New_String (Concat (Str "IllegalName: ") name))))
+  (.Do defineOnce
+       (fn []
+         (let [c (ForName "arbace.lang.Bytecode")]
+           (when (!= c nil)
+             (EnsureMembers (.-info c))
+             (range [i _ (.-Methods (.-info c))]
+               (let [m (addr (aget (.-Methods (.-info c)) i))]
+                 (when (and (== (.-Name m) "define") (== (len (.-Params m)) 6))
+                   (set! defineMethod m))))))))
+  (when (== defineMethod nil)
+    (panic (UnsupportedOperationException_New_String
+             (Str "ClassLoader.defineClass: this program has no class-file loader (arbace.lang.Bytecode)"))))
+  (let [x ((.-Invoke defineMethod) nil (lit (slice any) l name b off n pd))
+        c (assert (* Class) x)]
+    (.Lock loaderMu)
+    (aset definingLoaders c l)
+    (let [k (loaderKey l)
+          m (aget loaderClasses k)]
+      (when (== m nil)
+        (set! m (make (map string (* Class))))
+        (aset loaderClasses k m))
+      (aset m (.-Name (.-info c)) c))
+    (.Unlock loaderMu)
+    c))
+
+(go/method DefineClass_B1_I_I__Class
+  "DefineClass_B1_I_I__Class is ClassLoader.defineClass(byte[], int, int) (deprecated): the class file's own name.\n"
+  ^{:tag (* Class)} [^{:tag (* ClassLoader)} t ^{:tag (* ByteArray)} b ^int32 off ^int32 n]
+  (defineClassBytes (.loader t) nil b off n nil))
+
+(go/method DefineClass_String_B1_I_I__Class
+  "DefineClass_String_B1_I_I__Class is ClassLoader.defineClass(String, byte[], int, int) (protected final).\n"
+  ^{:tag (* Class)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name ^{:tag (* ByteArray)} b ^int32 off ^int32 n]
+  (defineClassBytes (.loader t) name b off n nil))
+
+(go/method DefineClass_String_B1_I_I_ProtectionDomain__Class
+  "DefineClass_String_B1_I_I_ProtectionDomain__Class is ClassLoader.defineClass(String, byte[], int, int,
+ProtectionDomain) (protected final; the domain, a translated java.security.ProtectionDomain, not kept).\n"
+  ^{:tag (* Class)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^any pd]
+  (defineClassBytes (.loader t) name b off n pd))
+
+(go/method ResolveClass_Class__V
+  "ResolveClass_Class__V is ClassLoader.resolveClass (protected final, a no-op since Java 9 but the null check).\n"
+  [^{:tag (* ClassLoader)} t ^{:tag (* Class)} c]
+  (when (== c nil) (panic (NPE))))
+
+(go/method FindClass_String__Class
+  "FindClass_String__Class is ClassLoader.findClass (protected): ClassNotFoundException; a loader's override finds its
+classes.\n"
+  ^{:tag (* Class)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name]
+  (panic (ClassNotFoundException_New_String name)))
+
+(go/method loader "loader is the loader object t is the ClassLoader part of (its subclass's, for virtual calls).\n"
+  ^ClassLoader_I [^{:tag (* ClassLoader)} t]
+  (when (!= (.-self t) nil) (return (.-self t)))
+  (when (== t (addr (.-ClassLoader platformLoader))) (return platformLoader))
+  appLoader)
+
+(go/method findLoaded
+  "findLoaded is the class t defined from bytes by that binary name, else for a built-in loader the registry's; nil
+when none.\n"
+  ^{:tag (* Class)} [^{:tag (* ClassLoader)} t ^string n]
+  (.Lock loaderMu)
+  (let [c (aget (aget loaderClasses t) n)]
+    (.Unlock loaderMu)
+    (when (!= c nil) (return c)))
+  (when (or (== t (addr (.-ClassLoader appLoader))) (== t (addr (.-ClassLoader platformLoader))))
+    (return (registryClass n)))
+  nil)
+
+(go/method loadClassDelegating
+  "loadClassDelegating is jdk26u's ClassLoader.loadClass(name, resolve): the loaded class, else the parent's loadClass
+(the boot loader's, the registry's, without a parent), else findClass, the loader's own; the built-in loaders the
+registry's.\n"
+  ^{:tag (* Class)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name]
+  (when (== name nil) (panic (NPE)))
+  (let [n (.String name)
+        c (.findLoaded t n)]
+    (when (!= c nil) (return c))
+    (when (or (== t (addr (.-ClassLoader appLoader))) (== t (addr (.-ClassLoader platformLoader))))
+      (panic (ClassNotFoundException_New_String name)))
+    (let [^{:tag (* Class)} found nil]
+      (if (!= (.-parent t) nil)
+        (set! found (loadQuietly (.-parent t) name))
+        (set! found (registryClass n)))
+      (when (!= found nil) (return found))
+      (.FindClass_String__Class (.loader t) name))))
+
+(go/func loadQuietly
+  "loadQuietly is l.loadClass(name, false), nil for its ClassNotFoundException.\n"
+  ^{:tag (* Class)} [^ClassLoader_I l ^{:tag (* String)} name]
+  (let [^Throwable_I exc nil
+        c (loadCatching l name (addr exc))]
+    (when (!= exc nil)
+      (when (not (ClassNotFoundException_InstanceOf exc))
+        (panic exc))
+      (return nil))
+    c))
+
+(go/func loadCatching "loadCatching is l.loadClass(name, false), its exception recovered into *exc.\n"
+  ^{:tag (* Class)} [^ClassLoader_I l ^{:tag (* String)} name ^{:tag (* Throwable_I)} exc]
+  (defer (Catch exc))
+  (.LoadClass_String_Z__Class l name false))
+
+(go/func loaderForName
+  "loaderForName is Class.forName(name, init, loader)'s lookup for a loader that is not a built-in one: its
+loadClass(name).\n"
+  ^{:tag (* Class)} [^ClassLoader_I l ^{:tag (* String)} name]
+  (.LoadClass_String__Class l name))
