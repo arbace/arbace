@@ -17229,3 +17229,15 @@ Measured on b2a5b50d4819 (compiled): `eval("[" + "2," * N + "]")` took 1.7 s / 0
   same bounds. Its output is unchanged (lex/stream of a three-line sample from the checkout: the same tokens, one line
   string per line). Its proof waits for the gate's executables: loaded from the checkout beside the executable's compiled
   peg it redefines lex's deftype (a ClassCastException in peg's fill-token), so the build's compiled namespaces carry it.
+
+## 2026-11-22: py-mods-1122, round 5b: peg reloads with lex (the stale executables' parse), round 5's measure
+
+Round 5's change to arbace/repr/python/lex.ae alone broke every parse on an executable that embeds repr/python compiled
+(stage 0, the seed's, and any gate build of an older key): RT.toolSource reloads lex from the checkout, which redefines
+lex's deftype Lx under the compiled peg, whose fill-token casts to it (a ClassCastException; `bin/repr-python` runs on stage
+0). peg.ae now carries a comment at fill-token naming the dependency (a change to lex.ae comes with one to peg.ae, so the two
+reload together) and bad-single-statement?'s loop unboxed (the reload's one compiler warning, "recur arg for primitive local").
+Checked on stage 0 (target/seed) and on b2a5b50d4819: native/parse-text of a sample from this checkout gives next's answer,
+no warning. Measured on b2a5b50d4819 with repr/python evaluated from the checkout: `eval("[" + "2," * N + "]")` at N=16,000
+peaks at 0.76 GB (3.1 GB before round 5), at N=65,580 (test_longexp's) 1.2 GB in 85 s (killed past 8 GB before); compiled,
+the gate's build at this key will time it.
