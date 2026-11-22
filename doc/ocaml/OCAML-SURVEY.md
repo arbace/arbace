@@ -4595,3 +4595,23 @@ its B0.ml; pprint's PPrintTest), and at oi's level the 5 of `test/ocaml/own-verd
   (compiler-libs' typing units do not load in its limit, DECISION 480-1). `bin/oi objinfo-check` (the native typer's own printing)
   reads its programs from divergences-aot.edn's classes now.
 - Control (`test/ocaml/controls.txt`): index_labels' run against index_vb's reference must differ.
+
+## As built: queue 515 (2026-11-22, the VM): the light AOT level's stale header rows, a reperformed continuation's callstack, ocamlc -warn-help
+
+- **The AOT record's header rows.** Queue 413's C API at the light level (`@cstubs` at aot=1) and queue 461's dropped flambda
+  alternative made header.awk run 14 programs check-aot-native.edn still recorded as `class`. Recorded by list (`bin/oi check --aot
+  --record --only-list`): backtrace/backtrace_c_exn, c-api/test_c_thread_has_lock, test_c_thread_has_lock_systhread and locale/test
+  pass (taken out of `:c-runtime-decided` and `:c-runtime-internals` at AOT); the rest stay in their classes with their reasons
+  (cstubs reads of caml/gc.h, gc_ctrl.h and cmmain.c's declarator; mkroot's timeout; pr3612's Marshal of the C's custom block, the
+  class's `^fail status ` match; lib-runtime-events/test's and statmemprof/bigarray's outputs; backtrace/lazy as at eval).
+- **A reperformed continuation's callstack at the light level** (`Effects/reperform`, `Bt/linked`): the handler's fiber's frames
+  with the forwarded continuation's fiber's above them, as oi's queue 461 (caml_reperform links the stacks): backtrace_effects_nested
+  passes at AOT.
+- **ocamlc -warn-help** (`:compiler-of-the-tree` gone at eval and at the light level; the compiled level's class kept until its
+  record): ocamltest exports its variables to the program's environment, so header.awk gives a program that reads
+  `Sys.getenv "ocamlsrcdir"` or `"ocamlrun"` (warnings/mnemonics alone in the testsuite) ocamlsrcdir as the tarball's root and
+  ocamlrun as `bin/lib/oi/ocamlrun`, which runs only `ocamlc -warn-help`: `test/ocaml/warnhelp/warnhelp.ml`
+  (Warnings.help_warnings, as main_args.ml's option) over compiler-libs' utils/warnings.ml typed by Arbace's typer and run on
+  oi (cached in `.tmp/oi/warnhelp` by the library's key), a tool of the test as `bin/oi depend` is (476-1 (a)). warnings/mnemonics
+  passes at eval and AOT by its own .reference. Over every header at levels 0, 1 and 2 only mnemonics changes.
+- Cells (bin/reap, the matrix not recorded): eval 568 / 48 / 24 -> 569 / 47 / 24, AOT 492 / 59 / 89 -> 498 / 56 / 86.
