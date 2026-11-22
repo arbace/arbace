@@ -4487,6 +4487,36 @@
 
 (swap! checks conj main-linkage)
 
+;; [class.mem.general]/? (C++23 /21-22): a class T's static data members, member types and templates, enumerators of its unscoped
+;; enumerations, an anonymous union's members are named otherwise than T, and its non-static data members too when it has a
+;; user-declared constructor: GCC's "'int B::B' has the same name as the class in which it is declared", at the member.
+
+(defn same-name-members
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n cls] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)]
+                                (.add out {:line l :col c :kind :error :rule :same-name :msg (str "'" (:name n) "' has the same name as the class '" cls "' in which it is declared")}))))]
+    (walk-nodes (fn [n _]
+                  (when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n) (string? (:name n)) (seq (:name n)))
+                    (let [cls (:name n)
+                          ms (:inner n)
+                          ctor? (some #(and (= "CXXConstructorDecl" (:kind %)) (not (:isImplicit %))) ms)]
+                      (doseq [m ms :when (= cls (:name m))]
+                        (case (:kind m)
+                          "VarDecl" (report! m cls)
+                          "FieldDecl" (when ctor? (report! m cls))
+                          ("TypedefDecl" "TypeAliasDecl" "ClassTemplateDecl" "EnumDecl") (report! m cls)
+                          "CXXRecordDecl" (when-not (:isImplicit m) (report! m cls))
+                          nil))
+                      (doseq [m ms :when (and (= "EnumDecl" (:kind m)) (not (:scopedEnumTag m)))
+                              e (:inner m) :when (and (= "EnumConstantDecl" (:kind e)) (= cls (:name e)))]
+                        (report! e cls)))))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj same-name-members)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
