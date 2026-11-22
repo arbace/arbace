@@ -147,16 +147,16 @@
 (defn- code-label [c] (keyword (str "L" c)))
 
 (defn- wtype!
-  "The package variable holding the WType of a node's \"sN\"/\"uN\" word."
+  "The package variable holding the WType of a node's \"sN\"/\"uN\" word (\"q128\": _Float128, \"dN\": a decimal type; queue 522)."
   [x]
   (let [s (nm x) sym (symbol (str "WT" s))]
-    (swap! *pkg* update :wtypes assoc sym [(Long/parseLong (subs s 1)) (= \s (first s))])
+    (swap! *pkg* update :wtypes assoc sym [(Long/parseLong (subs s 1)) (= \s (first s)) (case (first s) \q :Float \d :Dec nil)])
     sym))
 
 (defn- slot? [e] (and (symbol? e) (re-matches #"[if][0-9]+" (name e))))
 
 (def ^:private pure-heads
-  '#{+ - * conv bit-and bit-or bit-xor bit-not << >> == != < <= > >= aget ci/B ci/Bool math/Float64frombits})
+  '#{+ - * conv bit-and bit-or bit-xor bit-not << >> == != < <= > >= aget ci/B ci/Bool math/Float64frombits crt/F32ToF64 crt/F64ToF32})
 
 (defn- stable?
   "Whether e's value cannot change before it is used (no slot, no load, no call)."
@@ -247,8 +247,8 @@
 (defn- cmp-op [op]
   (case op "eq" '== "ne" '!= "lt" '< "le" '<= "gt" '> "ge" '>= (refuse :aot-node "no comparison " op)))
 
-(defn- fround "float64 e, explicitly converted (no fusion, Go's spec), rounded to float when f32." [f32 e]
-  (if f32 (list 'conv 'float64 (list 'conv 'float32 e)) (list 'conv 'float64 e)))
+(defn- fround "float64 e, explicitly converted (no fusion, Go's spec), rounded to float when f32 (a signaling NaN kept, queue 522)." [f32 e]
+  (if f32 (list 'crt/F32ToF64 (list 'crt/F64ToF32 e)) (list 'conv 'float64 e)))
 
 (defn- fconst [bits]
   (list 'math/Float64frombits (let [b (long bits)] (if (neg? b) (+ (bigint b) 18446744073709551616N) b))))
@@ -330,7 +330,10 @@
       "w2i" (let [[s e] (wx (a 2))]
               [s (norm (nm (a 0)) (list 'conv 'int64 (list '.Uint64 (wtype! (a 1)) e)))])
       "wcmp" (let [[s [x y]] (seqx [[:w (wx (a 2))] [:w (wx (a 3))]])]
-               [s (list 'ci/B (list (cmp-op (nm (a 0))) (list '.Cmp (wtype! (a 1)) x y) 0))])
+               ;; a _Float128 comparison by crt's CmpOp (a NaN unordered; queue 522)
+               [s (if (#{\q \d} (first (nm (a 1))))
+                    (list 'ci/B (list '.CmpOp (wtype! (a 1)) (nm (a 0)) x y))
+                    (list 'ci/B (list (cmp-op (nm (a 0))) (list '.Cmp (wtype! (a 1)) x y) 0)))])
       "wtest" (let [[s e] (wx (a 1))] [s (list 'ci/B (list 'not (list '.IsZero (wtype! (a 0)) e)))])
       "call" (let [[s e] (call-expr c)] (bind :i [s (list '.-I e)]))
       "vaarg" (let [[s e] (ix (a 0))] (bind :i [s (list 'ci/VaArgAt 'M e (lng (a 1)))]))
@@ -354,16 +357,24 @@
              (if (stable? e) [(conj (vec s) (list 'set! sl e)) e]
                  (let [[s t] (bind :f [s e])] [(conj s (list 'set! sl t)) t])))
       "fld" (let [[s e] (ix (a 1))]
-              [s (if (= "f32" (nm (a 0))) (list 'conv 'float64 (list '.LoadF32 'M (ua e))) (list '.LoadF64 'M (ua e)))])
-      "fst" (let [f32 (= "f32" (nm (a 0)))
+              [s (case (nm (a 0))
+                   ;; c-rows: _Float16, its binary16 bits as the float64 they are
+                   "f16" (list 'crt/F16ToF64 (list '.Load16 'M (ua e)))
+                   "f32" (list 'crt/F32ToF64 (list '.LoadF32 'M (ua e)))
+                   (list '.LoadF64 'M (ua e)))])
+      "fst" (let [k (nm (a 0)) f32 (= "f32" k) f16 (= "f16" k)
                   [s [ad v]] (seqx [[:i (ix (a 1))] [:f (fx (a 2))]])
-                  [s x] (bind :f [s (if f32 (fround true v) v)])]
-              [(conj s (if f32 (list '.StoreF32 'M (ua ad) (list 'conv 'float32 x)) (list '.StoreF64 'M (ua ad) x))) x])
+                  [s x] (bind :f [s (cond f32 (fround true v) f16 (list 'crt/F16ToF64 (list 'crt/F64ToF16 v)) :else v)])]
+              [(conj s (cond f32 (list '.StoreF32 'M (ua ad) (list 'crt/F64ToF32 x))
+                             f16 (list '.Store16 'M (ua ad) (list 'crt/F64ToF16 x))
+                             :else (list '.StoreF64 'M (ua ad) x))) x])
       "fbin" (let [[s [x y]] (seqx [[:f (fx (a 2))] [:f (fx (a 3))]])
-                   op (case (nm (a 0)) "add" '+ "sub" '- "mul" '* "div" '/ (refuse :aot-node "no floating operator " (nm (a 0))))]
+                   ;; crt's FAdd and the rest: a NaN result raises FE_INVALID when invalid or of a signaling operand (queue 522)
+                   op (case (nm (a 0)) "add" 'crt/FAdd "sub" 'crt/FSub "mul" 'crt/FMul "div" 'crt/FDiv (refuse :aot-node "no floating operator " (nm (a 0))))]
                [s (fround (not= 0 (lng (a 1))) (list op x y))])
       "fneg" (let [[s e] (fx (a 0))] [s (list '- e)])
       "r32" (let [[s e] (fx (a 0))] [s (fround true e)])
+      "r16" (let [[s e] (fx (a 0))] [s (list 'crt/F16ToF64 (list 'crt/F64ToF16 e))])
       "i2f" (let [t (nm (a 0)) f32 (not= 0 (lng (a 1))) [s e] (ix (a 2))
                   e (if (#{"u64" "p"} t) (list 'conv 'uint64 e) e)]
               [s (if f32 (list 'conv 'float64 (list 'conv 'float32 e)) (list 'conv 'float64 e))])
@@ -372,8 +383,12 @@
       "fseq" (let [es (mapcat effect (a 0)) [s e] (fx (a 1))] [(into (vec es) s) e])
       "fsx" (let [ss (stmt (a 0)) [s e] (fx (a 1))] [(into (vec ss) s) e])
       "fcall" (let [[s e] (call-expr c)] (bind :f [s (list '.-F e)]))
-      "w2f" (let [[s e] (wx (a 2)) v (list '.Float64 (wtype! (a 0)) e)]
-              [s (if (not= 0 (lng (a 1))) (fround true v) v)])
+      ;; mode 0 double, 1 float, 2 _Float16, each rounded once (queue 522)
+      "w2f" (let [[s e] (wx (a 2)) wt (wtype! (a 0))]
+              [s (case (long (lng (a 1)))
+                   1 (list 'conv 'float64 (list '.Float32 wt e))
+                   2 (list 'crt/F16ToF64 (list '.Float16 wt e))
+                   (list '.Float64 wt e))])
       (refuse :aot-node "no floating node " k))))
 
 (defn- wconst! [t text]
@@ -798,7 +813,7 @@
           binds (for [[alias r sm] (:binds pre)]
                   (list (symbol (str alias) "Bind") 'p (apply list 'lit '(slice int64) r) (apply list 'lit '(slice int64) sm)))
           st @*pkg*
-          wvars (for [[sym [n s]] (:wtypes st)] (list 'go/var sym (list 'lit 'crt/WType :N n :Signed s)))
+          wvars (for [[sym [n s f]] (:wtypes st)] (list 'go/var sym (if f (list 'lit 'crt/WType :N n :Signed s f true) (list 'lit 'crt/WType :N n :Signed s))))
           wcs (for [[sym t text] (:wconsts st)] (list 'go/var sym (list 'ci/MustWide t text)))
           main? (= "main" (str pkg))
           entry (if main?
@@ -877,7 +892,7 @@
         ;; a refused static function is not called directly (its program translates it under its own id): again without it
         [fdecls idecls st refused] (let [bad (set (for [[[k j]] (nth r1 3) :when (= k :f)] j))]
                                      (if (empty? bad) r1 (pass (into {} (remove (fn [[_ j]] (bad j)) direct0)))))]
-    (let [wvars (for [[sym [n s]] (:wtypes st)] (list 'go/var sym (list 'lit 'crt/WType :N n :Signed s)))
+    (let [wvars (for [[sym [n s f]] (:wtypes st)] (list 'go/var sym (if f (list 'lit 'crt/WType :N n :Signed s f true) (list 'lit 'crt/WType :N n :Signed s))))
             wcs (for [[sym t text] (:wconsts st)] (list 'go/var sym (list 'ci/MustWide t text)))
             ns-sym (symbol (str "go." (str/replace (str path) "/" ".")))
             forms (concat

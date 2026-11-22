@@ -14,7 +14,9 @@
 
 (go/type WType "WType is a wide integer type: __int128 (N=128) or _BitInt(N), with its signedness.\n" (struct
     ^{:line 16 :tag int} N
-    ^{:line 17 :tag bool} Signed))
+    ^{:line 17 :tag bool} Signed
+    ^{:tag bool :doc "Float marks _Float128 (queue 522): N 128, unsigned, the limbs IEEE binary128's bits.\n"} Float
+    ^{:tag bool :doc "Dec marks a decimal floating type (queue 522): N 32, 64 or 128, unsigned, the limbs its BID encoding.\n"} Dec))
 
 
 
@@ -22,6 +24,8 @@
 
 
 ^{:go/end 29} (go/method Size "Size is the bytes a value of t takes in memory: 16 for N<=128, else 8*ceil(N/64).\n" ^uint64 [^WType t]
+  (when (.-Dec t)
+    (return (conv uint64 (/ (.-N t) 8))))
   (when (<= (.-N t) 128)
     (return 16))
 
@@ -56,6 +60,10 @@
 
 
 ^{:go/end 66} (go/func WFromInt64 "WFromInt64 is v converted to t (sign-extended, then wrapped).\n" ^Wide [^WType t ^int64 v]
+  (when (.-Dec t)
+    (return (dOfBig t (big/NewInt v))))
+  (when (.-Float t)
+    (return (qOfBig t (big/NewInt v))))
   (let [r (make Wide (.Limbs t))]
     (aset r 0 (conv uint64 v))
     (for [i 1] (< i (len r)) (inc! i)
@@ -67,6 +75,10 @@
 
 
 ^{:go/end 74} (go/func WFromUint64 "WFromUint64 is v converted to t (zero-extended, then wrapped).\n" ^Wide [^WType t ^uint64 v]
+  (when (.-Dec t)
+    (return (dOfBig t (.SetUint64 (new big/Int) v))))
+  (when (.-Float t)
+    (return (qOfBig t (.SetUint64 (new big/Int) v))))
   (let [r (make Wide (.Limbs t))]
     (aset r 0 v)
     (.fix t r)
@@ -74,10 +86,15 @@
 
 
 
-^{:go/end 77} (go/method Int64 "Int64 is w truncated to 64 bits, as a signed value.\n" ^int64 [^WType t ^Wide w] (conv int64 (aget w 0)))
+^{:go/end 77} (go/method Int64 "Int64 is w truncated to 64 bits, as a signed value.\n" ^int64 [^WType t ^Wide w] (conv int64 (.Uint64 t w)))
 
 
-^{:go/end 80} (go/method Uint64 "Uint64 is w truncated to 64 bits.\n" ^uint64 [^WType t ^Wide w] (aget w 0))
+^{:go/end 80} (go/method Uint64 "Uint64 is w truncated to 64 bits (a binary128 truncated toward zero first).\n" ^uint64 [^WType t ^Wide w]
+  (when (.-Dec t)
+    (return (.Uint64 (.And (new big/Int) (dtrunc t w) (.SetUint64 (new big/Int) (bit-not (conv uint64 0)))))))
+  (when (.-Float t)
+    (return (.Uint64 (.And (new big/Int) (qtrunc t w) (.SetUint64 (new big/Int) (bit-not (conv uint64 0)))))))
+  (aget w 0))
 
 ^{:go/end 94} (go/method toBig ^{:tag (* big/Int)} [^WType t ^Wide w]
   (let [buf (make (slice byte) (* 8 (len w)))]
@@ -112,8 +129,33 @@
 
 
 ^{:go/end 117} (go/method Float64 "Float64 converts w to float64, rounding to nearest even as gcc does.\n" ^float64 [^WType t ^Wide w]
-  (let [(values f _) (.Float64 (.SetInt (new big/Float) (.toBig t w)))]
-    ^{:line 116} f))
+  (when (.-Dec t)
+    (return (math/Float64frombits (.Uint64 (dToBin t w 53 1023 11)))))
+  (when (and (.-Float t) (x87 t) (== RoundMode 0))
+    ;; a normal x87 value within double's normal range: 64 bits rounded to 53, to nearest even
+    (let [(values ok neg m e) (xnorm w)
+          de (+ e 63 1023)]
+      (when (and ok (> de 0) (< de 2046))
+        (let [n (>> m 11)
+              rem (bit-and m 0x7ff)]
+          (when (!= rem 0)
+            (set! FFlags bit-or 32)
+            (when (or (> rem 0x400) (and (== rem 0x400) (== (bit-and n 1) 1)))
+              (set! n (+ n 1))
+              (when (== n 0x20000000000000)
+                (set! n 0x10000000000000)
+                (set! de (+ de 1)))))
+          (when (< de 2047)
+            (let [b (bit-or (<< (conv uint64 de) 52) (bit-and n 0xfffffffffffff))]
+              (when neg
+                (set! b bit-or 0x8000000000000000))
+              (return (math/Float64frombits b))))))))
+  (when (.-Float t)
+    (return (math/Float64frombits (fbits t w 53 1023 11))))
+  ;; rounded once by RoundMode, FE_INEXACT and FE_OVERFLOW raised (queue 522)
+  (let [b (.toBig t w)
+        neg (< (.Sign b) 0)]
+    (math/Float64frombits (.Uint64 (fpack neg (.Abs b b) 0 53 1023 11)))))
 
 
 ^{:go/end 130} (go/method bounds [^WType t] :results [^{:tag (* big/Int)} lo ^{:tag (* big/Int)} hi]
@@ -130,9 +172,29 @@
 
 
 
-^{:go/end 153} (go/func WFromFloat64 "WFromFloat64 converts f to t, truncating toward zero. NaN gives 0; out of range saturates.\n" ^Wide [^WType t ^float64 f]
+^{:go/end 153} (go/func WFromFloat64 "WFromFloat64 converts f to t, truncating toward zero; out of range saturates, a NaN as the infinity of its sign.\n" ^Wide [^WType t ^float64 f]
+  (when (.-Dec t)
+    (let [(values neg cls m e) (funpack (.SetUint64 (new big/Int) (math/Float64bits f)) 53 1023 11)]
+      (return (dOfBin t neg cls m e))))
+  (when (and (.-Float t) (x87 t))
+    ;; a normal double to x87: exact, its fields moved
+    (let [b (math/Float64bits f)
+          ex (conv int (bit-and (>> b 52) 0x7ff))]
+      (when (and (!= ex 0) (!= ex 0x7ff))
+        (let [r (make Wide 2)]
+          (aset r 0 (bit-or 0x8000000000000000 (<< (bit-and b 0xfffffffffffff) 11)))
+          (aset r 1 (bit-or (conv uint64 (+ (- ex 1023) 16383)) (<< (>> b 63) 15)))
+          (return r)))))
+  (when (.-Float t)
+    (return (qOfBits t (math/Float64bits f) 53 1023 11)))
+  ;; a NaN saturates as the infinity of its sign (libgcc's soft-fp _FP_TO_INT, __fix*ti and __fix*bitint; queue 522)
   (when (math/IsNaN f)
-    (return (make Wide (.Limbs t))))
+    (if (math/Signbit f)
+      (set! f (math/Inf -1))
+      (set! f (math/Inf 1))))
+  ;; FE_INVALID for a NaN, an infinity or out of range, else FE_INEXACT when a fraction is dropped (soft-fp's)
+  (when (math/IsInf f 0)
+    (set! FFlags bit-or 1))
 
   (let [(values lo hi) (.bounds t)
       ^{:line 138 :tag (* big/Int)} b (zero (* big/Int))]
@@ -142,11 +204,14 @@
       (case [(math/IsInf f -1)]
         (set! b lo))
       (default
-        (set! (values b _) (.Int (.SetFloat64 (new big/Float) f) nil))
-        (cond (< (.Cmp b lo) 0)
-          (set! b lo)
-          (> (.Cmp b hi) 0)
-          (set! b hi))))
+        (let [(values bb acc) (.Int (.SetFloat64 (new big/Float) f) nil)]
+          (set! b bb)
+          (cond (< (.Cmp b lo) 0)
+            (do (set! b lo) (set! FFlags bit-or 1))
+            (> (.Cmp b hi) 0)
+            (do (set! b hi) (set! FFlags bit-or 1))
+            (!= acc big/Exact)
+            (set! FFlags bit-or 32)))))
 
 
     (.fromBig t b)))
@@ -154,6 +219,67 @@
 
 
 ^{:go/end 168} (go/method Conv "Conv converts w of type from to t: extension by from's signedness, then wrap to t.\n" ^Wide [^WType t ^Wide w ^WType from]
+  (when (and (.-Dec t) (.-Dec from))
+    (let [(values neg cls c q) (dun from w)]
+      (when (!= cls 0)
+        (return (dspecial t neg cls)))
+      (return (dpk t neg c q false))))
+  (when (and (.-Dec t) (.-Float from))
+    (let [(values neg cls m e) (qun from w)]
+      (return (dOfBin t neg cls m e))))
+  (when (.-Dec t)
+    (return (dOfBig t (.toBig from w))))
+  (when (and (.-Dec from) (.-Float t))
+    (let [(values p emax ebits) (qfmt t)]
+      (return (qOfFmt t (dToBin from w p emax ebits)))))
+  (when (.-Dec from)
+    (let [(values neg cls _ _) (dun from w)
+          (values lo hi) (.bounds t)
+          b (new big/Int)]
+      (if (!= cls 0)
+        (if neg (.Set b lo) (.Set b hi))
+        (.Set b (dtrunc from w)))
+      (when (< (.Cmp b lo) 0)
+        (.Set b lo))
+      (when (> (.Cmp b hi) 0)
+        (.Set b hi))
+      (return (.fromBig t b))))
+  (when (and (.-Float t) (.-Float from))
+    (when (== (.-N t) (.-N from))
+      (return (.Norm t w)))
+    ;; binary128 <-> x87's extended: exact one way, rounded once the other
+    (let [(values neg cls m e) (qun from w)]
+      (when (== cls 1)
+        (return (qinf t neg)))
+      (when (== cls 2)
+        (when (qsnan from w)
+          (set! FFlags bit-or 1))
+        (return (qnan t)))
+      (return (qpk t neg m e))))
+  (when (.-Float t)
+    (return (qOfBig t (.toBig from w))))
+  (when (.-Float from)
+    (let [b (qtrunc from w)
+          (values lo hi) (.bounds t)
+          (values neg cls _ _) (qun from w)]
+      ;; out of range saturated, an infinity or a NaN as its sign's end (as WFromFloat64)
+      (when (!= cls 0)
+        (set! FFlags bit-or 1)
+        (if neg
+          (.Set b lo)
+          (.Set b hi)))
+      (when (== cls 0)
+        (cond (< (.Cmp b lo) 0)
+          (set! FFlags bit-or 1)
+          (> (.Cmp b hi) 0)
+          (set! FFlags bit-or 1)
+          (qfrac from w)
+          (set! FFlags bit-or 32)))
+      (when (< (.Cmp b lo) 0)
+        (.Set b lo))
+      (when (> (.Cmp b hi) 0)
+        (.Set b hi))
+      (return (.fromBig t b))))
   (let [r (make Wide (.Limbs t))]
     (copy r w)
     (let [^uint64 fill (zero uint64)]
@@ -169,6 +295,10 @@
 
 
 ^{:go/end 179} (go/method Add "Add is a+b modulo 2^N.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (when (.-Dec t)
+    (return (dAddSub t a b false)))
+  (when (.-Float t)
+    (return (qAddSub t a b false)))
   (let [r (make Wide (len a))
       ^{:line 173 :tag uint64} c (zero uint64)]
     (range [i r]
@@ -180,6 +310,10 @@
 
 
 ^{:go/end 190} (go/method Sub "Sub is a-b modulo 2^N.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (when (.-Dec t)
+    (return (dAddSub t a b true)))
+  (when (.-Float t)
+    (return (qAddSub t a b true)))
   (let [r (make Wide (len a))
       ^{:line 184 :tag uint64} c (zero uint64)]
     (range [i r]
@@ -191,11 +325,28 @@
 
 
 ^{:go/end 195} (go/method Mul "Mul is a*b modulo 2^N.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (when (.-Dec t)
+    (return (dMul t a b)))
+  (when (.-Float t)
+    (return (qMul t a b)))
   (.fromBig t (.Mul (new big/Int) (.toBig t a) (.toBig t b))))
 
 
 
-^{:go/end 198} (go/method Neg "Neg is -a modulo 2^N.\n" ^Wide [^WType t ^Wide a] (.Sub t (make Wide (len a)) a))
+^{:go/end 198} (go/method Neg "Neg is -a modulo 2^N (a binary128's sign flipped).\n" ^Wide [^WType t ^Wide a]
+  (when (.-Dec t)
+    (let [b (dbig t a)]
+      (.SetBit b b (- (.-N t) 1) (bit-xor (.Bit b (- (.-N t) 1)) 1))
+      (return (dwide t b))))
+  (when (and (.-Float t) (x87 t))
+    (let [r (.Norm t a)]
+      (set! (aget r 1) bit-xor 0x8000)
+      (return r)))
+  (when (.-Float t)
+    (let [r (.Norm t a)]
+      (set! (aget r 1) bit-xor 0x8000000000000000)
+      (return r)))
+  (.Sub t (make Wide (len a)) a))
 
 
 ^{:go/end 208} (go/method Not "Not is the bitwise complement of a within N bits.\n" ^Wide [^WType t ^Wide a]
@@ -236,6 +387,10 @@
 
 
 ^{:go/end 243} (go/method Div "Div is the truncating quotient a/b; ok is false on division by zero. Signed MIN/-1 wraps to MIN.\n" [^WType t ^Wide a ^Wide b] :results [Wide bool]
+  (when (.-Dec t)
+    (return (dDiv t a b) true))
+  (when (.-Float t)
+    (return (qDiv t a b) true))
   (when (.IsZero t b)
     (return (make Wide (len a)) false))
 
@@ -298,7 +453,11 @@
 
 
 
-^{:go/breaks [[6 319]] :go/end 320} (go/method Cmp "Cmp compares a and b as t: -1, 0 or 1.\n" ^int [^WType t ^Wide a ^Wide b]
+^{:go/breaks [[6 319]] :go/end 320} (go/method Cmp "Cmp compares a and b as t: -1, 0 or 1 (2 for unordered binary128 values).\n" ^int [^WType t ^Wide a ^Wide b]
+  (when (.-Dec t)
+    (return (dCmp t a b)))
+  (when (.-Float t)
+    (return (qCmp t a b)))
   (when (.-Signed t)
     (let [(values na nb) (values (< (conv int64 (aget a (- (len a) 1))) 0) (< (conv int64 (aget b (- (len b) 1))) 0))]
       (when (!= na nb)
@@ -320,7 +479,14 @@
 
 
 
-^{:go/breaks [[5 329]] :go/end 330} (go/method IsZero "IsZero reports whether a is zero.\n" ^bool [^WType t ^Wide a]
+^{:go/breaks [[5 329]] :go/end 330} (go/method IsZero "IsZero reports whether a is zero (either binary128 zero).\n" ^bool [^WType t ^Wide a]
+  (when (.-Dec t)
+    (let [(values _ cls c _) (dun t a)]
+      (return (and (== cls 0) (== (.Sign c) 0)))))
+  (when (and (.-Float t) (x87 t))
+    (return (and (== (aget a 0) 0) (== (bit-and (aget a 1) 0x7fff) 0))))
+  (when (.-Float t)
+    (return (and (== (aget a 0) 0) (== (bit-and (aget a 1) 0x7fffffffffffffff) 0))))
   (range [_ l a]
     (when (!= l 0)
       (return false)))
@@ -362,7 +528,8 @@
   (let [buf (.R m a (.Size t))
       ^{:line 363} r (make Wide (.Limbs t))]
     (range [i r]
-      (for [j 0] (< j 8) (inc! j)
+      ;; (a _Decimal32's 4 bytes: queue 522)
+      (for [j 0] (and (< j 8) (< (+ (* 8 i) j) (len buf))) (inc! j)
         (set! (aget r i) bit-or (<< (conv uint64 (aget buf (+ (* 8 i) j))) (* 8 j)))))
 
 
@@ -416,3 +583,814 @@
           (set! (aget buf (/ b 8)) bit-or mask)
           (aset buf (/ b 8) (bit-and-not (aget buf (/ b 8)) mask)))))
     (.Conv t x f)))
+
+
+;; ---------------------------------------------------------------------------------------------
+;; _Float128 (queue 522, CR3 (a), the user's decision of 2026-11-22): IEEE binary128 in software. A value is a WType with
+;; Float set (N 128, unsigned): its 128 bits as two limbs, as it lies in memory, so that ci's and AOT's wide machinery
+;; (slots, loads, stores, arguments, results, constants as hex bits) carries it unchanged; the arithmetic, comparisons
+;; and conversions dispatch on Float. Each result is the exact value rounded once (math/big's integers, the exact
+;; sum, product or quotient with a sticky bit), to nearest with ties to even, or by RoundMode, subnormals rounded once at
+;; the format's quantum; the other formats' conversions (binary64, binary32, binary16) share the packing.
+
+(go/var ^{:tag int :doc "FFlags are the floating-point exception flags the software operations raise (x86's bits, <fenv.h>'s: FE_INVALID 1,\nFE_DIVBYZERO 4, FE_OVERFLOW 8, FE_UNDERFLOW 16, FE_INEXACT 32), read and cleared by ci's fenv natives (queue 522).\n"} FFlags)
+
+(go/var ^{:tag int :doc "RoundMode is the rounding direction of the software formats: 0 to nearest (ties to even), 1 downward, 2 upward,\n3 toward zero.\n"} RoundMode)
+
+(go/func fpack "fpack is (-1)^neg * m * 2^e rounded to the binary format of p significant bits, exponent bias emax and ebits exponent\nbits (by RoundMode): its bits, the sign at bit ebits+p-1.\n" ^{:tag (* big/Int)} [^bool neg ^{:tag (* big/Int)} m ^int e ^int p ^int emax ^int ebits]
+  (let [r (new big/Int)
+        one (big/NewInt 1)]
+    (when (== (.Sign m) 0)
+      (when neg
+        (.SetBit r r (+ ebits p -1) 1))
+      (return r))
+    (let [ee (+ e (.BitLen m) -1)
+          q (+ (- ee p) 1)
+          qmin (+ (- (- 1 emax) p) 1)]
+      (when (< q qmin)
+        (set! q qmin))
+      (let [s (- q e)
+            mm (new big/Int)]
+        (if (> s 0)
+          (do
+            (.Rsh mm m (conv uint s))
+            (let [rem (.Sub (new big/Int) m (.Lsh (new big/Int) mm (conv uint s)))]
+              (when (!= (.Sign rem) 0)
+                (set! FFlags bit-or 32)
+                (when (< ee (- 1 emax))
+                  ;; tiny (below the smallest normal before rounding) and inexact
+                  (set! FFlags bit-or 16))
+                (let [c (.Cmp rem (.Lsh (new big/Int) one (conv uint (- s 1))))
+                      up false]
+                  (switch RoundMode
+                    (case [0]
+                      (set! up (or (> c 0) (and (== c 0) (== (.Bit mm 0) 1)))))
+                    (case [1]
+                      (set! up neg))
+                    (case [2]
+                      (set! up (not neg))))
+                  (when up
+                    (.Add mm mm one))))))
+          (.Lsh mm m (conv uint (- s))))
+        (when (> (.BitLen mm) p)
+          (.Rsh mm mm 1)
+          (set! q (+ q 1)))
+        (let [ef 0]
+          (when (== (.BitLen mm) p)
+            (let [e2 (+ q p -1)]
+              (when (> e2 emax)
+                (set! FFlags bit-or 40)
+                (if (or (== RoundMode 0) (and (== RoundMode 1) neg) (and (== RoundMode 2) (not neg)))
+                  (do (.SetInt64 mm 0) (set! ef (+ (* 2 emax) 1)))
+                  (do (.Sub mm (.Lsh mm one (conv uint (- p 1))) one) (set! ef (* 2 emax)))))
+              (when (<= e2 emax)
+                (set! ef (+ e2 emax))
+                (.SetBit mm mm (- p 1) 0))))
+          (.Lsh r (big/NewInt (conv int64 ef)) (conv uint (- p 1)))
+          (.Or r r mm)
+          (when neg
+            (.SetBit r r (+ ebits p -1) 1))
+          r)))))
+
+(go/func funpack "funpack is the binary format's bits b (as fpack's) taken apart: the sign, the class (0 finite, 1 infinite, 2 NaN) and\nthe finite value m * 2^e.\n" [^{:tag (* big/Int)} b ^int p ^int emax ^int ebits] :results [^bool neg ^int cls ^{:tag (* big/Int)} m ^int e]
+  (set! neg (== (.Bit b (+ ebits p -1)) 1))
+  (let [fm (.Sub (new big/Int) (.Lsh (new big/Int) (big/NewInt 1) (conv uint (- p 1))) (big/NewInt 1))
+        f (.And (new big/Int) b fm)
+        x (conv int (.Int64 (.And (new big/Int) (.Rsh (new big/Int) b (conv uint (- p 1))) (big/NewInt (conv int64 (+ (* 2 emax) 1))))))]
+    (when (== x (+ (* 2 emax) 1))
+      (if (== (.Sign f) 0)
+        (return neg 1 f 0)
+        (return neg 2 f 0)))
+    (when (== x 0)
+      (return neg 0 f (+ (- (- 1 emax) p) 1)))
+    (return neg 0 (.SetBit f f (- p 1) 1) (+ (- (- x emax) p) 1))))
+
+(go/func qbig "qbig is a binary128's bits.\n" ^{:tag (* big/Int)} [^Wide w]
+  (let [b (.SetUint64 (new big/Int) (aget w 1))]
+    (.Lsh b b 64)
+    (.Or b b (.SetUint64 (new big/Int) (aget w 0)))))
+
+(go/func qwide "qwide is the binary128 of the bits b.\n" ^Wide [^{:tag (* big/Int)} b]
+  (let [r (make Wide 2)]
+    (aset r 0 (.Uint64 (.And (new big/Int) b (.SetUint64 (new big/Int) (bit-not (conv uint64 0))))))
+    (aset r 1 (.Uint64 (.Rsh (new big/Int) b 64)))
+    r))
+
+(go/func x87 "x87 reports whether the software format t is x87's extended (long double, N 80), else binary128.\n" ^bool [^WType t]
+  (== (.-N t) 80))
+
+(go/func qfmt "qfmt is the software format's fpack parameters: significant bits, bias, exponent bits.\n" [^WType t] :results [^int p ^int emax ^int ebits]
+  (when (x87 t)
+    (return 64 16383 15))
+  (return 113 16383 15))
+
+(go/func qOfFmt "qOfFmt is t's value of fpack's bits b in t's format (x87's: the integer bit explicit, the sign and exponent in the\nsecond limb's low 16 bits).\n" ^Wide [^WType t ^{:tag (* big/Int)} b]
+  (when (not (x87 t))
+    (return (qwide b)))
+  (let [r (make Wide 2)
+        frac (.Uint64 (.And (new big/Int) b (.SetUint64 (new big/Int) 0x7fffffffffffffff)))
+        ex (.Uint64 (.And (new big/Int) (.Rsh (new big/Int) b 63) (big/NewInt 0x7fff)))]
+    (aset r 0 frac)
+    (when (!= ex 0)
+      (set! (aget r 0) bit-or 0x8000000000000000))
+    (aset r 1 (bit-or ex (<< (conv uint64 (.Bit b 78)) 15)))
+    r))
+
+(go/func qun "qun takes a software format's value apart (as funpack).\n" [^WType t ^Wide w] :results [^bool neg ^int cls ^{:tag (* big/Int)} m ^int e]
+  (when (not (x87 t))
+    (return (funpack (qbig w) 113 16383 15)))
+  (let [se (bit-and (aget w 1) 0xffff)
+        mm (aget w 0)
+        ex (conv int (bit-and se 0x7fff))]
+    (set! neg (!= (bit-and se 0x8000) 0))
+    (when (== ex 0x7fff)
+      (when (== (<< mm 1) 0)
+        (return neg 1 (new big/Int) 0))
+      (return neg 2 (.SetUint64 (new big/Int) (bit-and mm 0x7fffffffffffffff)) 0))
+    (when (== ex 0)
+      (return neg 0 (.SetUint64 (new big/Int) mm) (- 1 16383 63)))
+    (return neg 0 (.SetUint64 (new big/Int) mm) (- ex 16383 63))))
+
+(go/func qpk "qpk is fpack to t's format.\n" ^Wide [^WType t ^bool neg ^{:tag (* big/Int)} m ^int e]
+  (let [(values p emax ebits) (qfmt t)]
+    (qOfFmt t (fpack neg m e p emax ebits))))
+
+(go/func qsnan "qsnan reports whether w is a signaling NaN of t's format.\n" ^bool [^WType t ^Wide w]
+  (when (x87 t)
+    (return (and (== (bit-and (aget w 1) 0x7fff) 0x7fff) (== (bit-and (aget w 0) 0x4000000000000000) 0)
+                 (!= (bit-and (aget w 0) 0x3fffffffffffffff) 0))))
+  (and (== (bit-and (aget w 1) 0x7fff000000000000) 0x7fff000000000000) (== (bit-and (aget w 1) 0x0000800000000000) 0)
+       (or (!= (bit-and (aget w 1) 0x00007fffffffffff) 0) (!= (aget w 0) 0))))
+
+(go/func qnan "qnan is the default quiet NaN of t's format (x87's indefinite: negative).\n" ^Wide [^WType t]
+  (let [r (make Wide 2)]
+    (if (x87 t)
+      (do (aset r 0 0xc000000000000000) (aset r 1 0xffff))
+      (aset r 1 0x7fff800000000000))
+    r))
+
+(go/func qinf "qinf is the infinity of binary128 of the sign neg.\n" ^Wide [^WType t ^bool neg]
+  (let [r (make Wide 2)]
+    (when (x87 t)
+      (aset r 0 0x8000000000000000)
+      (aset r 1 0x7fff)
+      (when neg
+        (set! (aget r 1) bit-or 0x8000))
+      (return r))
+    (aset r 1 0x7fff000000000000)
+    (when neg
+      (set! (aget r 1) bit-or 0x8000000000000000))
+    r))
+
+(go/func qAddSub "qAddSub is a+b, or a-b when sub, in binary128.\n" ^Wide [^WType t ^Wide a ^Wide b ^bool sub]
+  (when (x87 t)
+    (let [(values r ok) (xadd a b sub)]
+      (when ok
+        (return r))))
+  (let [(values an ac am ae) (qun t a)
+        (values bn bc bm be) (qun t b)]
+    (when sub
+      (set! bn (not bn)))
+    (when (or (== ac 2) (== bc 2))
+      (when (or (qsnan t a) (qsnan t b))
+        (set! FFlags bit-or 1))
+      (return (qnan t)))
+    (when (== ac 1)
+      (when (and (== bc 1) (!= an bn))
+        (set! FFlags bit-or 1)
+        (return (qnan t)))
+      (return (qinf t an)))
+    (when (== bc 1)
+      (return (qinf t bn)))
+    (let [e ae]
+      (when (< be e)
+        (set! e be))
+      (let [x (.Lsh (new big/Int) am (conv uint (- ae e)))
+            y (.Lsh (new big/Int) bm (conv uint (- be e)))]
+        (when an
+          (.Neg x x))
+        (when bn
+          (.Neg y y))
+        (.Add x x y)
+        (when (== (.Sign x) 0)
+          ;; an exact zero: -0 only from two negative zeros, or downward
+          (return (qpk t (or (and an bn (== (.Sign am) 0) (== (.Sign bm) 0)) (and (== RoundMode 1) (or (!= an bn) (!= (.Sign am) 0)))) x 0)))
+        (let [neg (< (.Sign x) 0)]
+          (return (qpk t neg (.Abs x x) e)))))))
+
+(go/func qMul "qMul is a*b in binary128.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (when (x87 t)
+    (let [(values r ok) (xmul a b)]
+      (when ok
+        (return r))))
+  (let [(values an ac am ae) (qun t a)
+        (values bn bc bm be) (qun t b)
+        neg (!= an bn)]
+    (when (or (== ac 2) (== bc 2))
+      (when (or (qsnan t a) (qsnan t b))
+        (set! FFlags bit-or 1))
+      (return (qnan t)))
+    (when (or (== ac 1) (== bc 1))
+      (when (or (and (== ac 0) (== (.Sign am) 0)) (and (== bc 0) (== (.Sign bm) 0)))
+        (set! FFlags bit-or 1)
+        (return (qnan t)))
+      (return (qinf t neg)))
+    (qpk t neg (.Mul (new big/Int) am bm) (+ ae be))))
+
+(go/func qDiv "qDiv is a/b in binary128 (no trap: an infinity or a NaN).\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (when (x87 t)
+    (let [(values r ok) (xdiv a b)]
+      (when ok
+        (return r))))
+  (let [(values an ac am ae) (qun t a)
+        (values bn bc bm be) (qun t b)
+        neg (!= an bn)]
+    (when (or (== ac 2) (== bc 2))
+      (when (or (qsnan t a) (qsnan t b))
+        (set! FFlags bit-or 1))
+      (return (qnan t)))
+    (when (== ac 1)
+      (when (== bc 1)
+        (set! FFlags bit-or 1)
+        (return (qnan t)))
+      (return (qinf t neg)))
+    (when (== bc 1)
+      (return (qpk t neg (new big/Int) 0)))
+    (when (== (.Sign bm) 0)
+      (when (== (.Sign am) 0)
+        (set! FFlags bit-or 1)
+        (return (qnan t)))
+      (set! FFlags bit-or 4)
+      (return (qinf t neg)))
+    (when (== (.Sign am) 0)
+      (return (qpk t neg am 0)))
+    (let [k (- (+ 116 (.BitLen bm)) (.BitLen am))]
+      (when (< k 0)
+        (set! k 0))
+      (let [(values qq rr) (.QuoRem (new big/Int) (.Lsh (new big/Int) am (conv uint k)) bm (new big/Int))]
+        (.Lsh qq qq 1)
+        (when (!= (.Sign rr) 0)
+          (.SetBit qq qq 0 1))
+        (qpk t neg qq (- (- (- ae be) k) 1))))))
+
+(go/func qmag "qmag is a software format's magnitude bits, ordered as the magnitudes are (the sign dropped).\n" ^{:tag (* big/Int)} [^WType t ^Wide w]
+  (when (x87 t)
+    (let [b (.SetUint64 (new big/Int) (bit-and (aget w 1) 0x7fff))]
+      (.Lsh b b 64)
+      (return (.Or b b (.SetUint64 (new big/Int) (aget w 0))))))
+  (let [b (qbig w)
+        mask (.SetUint64 (new big/Int) 0x7fffffffffffffff)]
+    (.Lsh mask mask 64)
+    (.Or mask mask (.SetUint64 (new big/Int) (bit-not (conv uint64 0))))
+    (.And b b mask)))
+
+(go/func qCmp "qCmp compares binary128 values: -1, 0 or 1, 2 when unordered (a NaN).\n" ^int [^WType t ^Wide a ^Wide b]
+  (let [(values an ac _ _) (qun t a)
+        (values bn bc _ _) (qun t b)]
+    (when (or (== ac 2) (== bc 2))
+      (return 2))
+    (let [x (qmag t a)
+          y (qmag t b)]
+      (when (and (== (.Sign x) 0) (== (.Sign y) 0))
+        (return 0))
+      (when an
+        (.Neg x x))
+      (when bn
+        (.Neg y y))
+      (.Cmp x y))))
+
+(go/method CmpOp "CmpOp is the comparison op (eq ne lt le gt ge) of a and b as t: false for every op but ne when a binary128 is\na NaN.\n" ^bool [^WType t ^string op ^Wide a ^Wide b]
+  (let [c (.Cmp t a b)]
+    (when (== c 2)
+      ;; an ordered comparison of a NaN raises FE_INVALID (==, != only for a signaling one)
+      (when (or (and (!= op "eq") (!= op "ne")) (and (.-Float t) (or (qsnan t a) (qsnan t b))))
+        (set! FFlags bit-or 1))
+      (return (== op "ne")))
+    (switch op
+      (case ["eq"]
+        (return (== c 0)))
+      (case ["ne"]
+        (return (!= c 0)))
+      (case ["lt"]
+        (return (< c 0)))
+      (case ["le"]
+        (return (<= c 0)))
+      (case ["gt"]
+        (return (> c 0))))
+    (>= c 0)))
+
+(go/func qtrunc "qtrunc is a binary128 truncated toward zero to an integer (a NaN or an infinity 0).\n" ^{:tag (* big/Int)} [^WType t ^Wide w]
+  (let [(values neg cls m e) (qun t w)]
+    (when (!= cls 0)
+      (return (new big/Int)))
+    (if (>= e 0)
+      (.Lsh m m (conv uint e))
+      (.Rsh m m (conv uint (- e))))
+    (when neg
+      (.Neg m m))
+    m))
+
+(go/func qfrac "qfrac reports whether a finite binary128 has a nonzero fraction.\n" ^bool [^WType t ^Wide w]
+  (let [(values _ _ m e) (qun t w)]
+    (when (>= e 0)
+      (return false))
+    (let [r (.Lsh (new big/Int) (.Rsh (new big/Int) m (conv uint (- e))) (conv uint (- e)))]
+      (!= (.Cmp r m) 0))))
+
+(go/func qOfBig "qOfBig is the integer b rounded to binary128.\n" ^Wide [^WType t ^{:tag (* big/Int)} b]
+  (let [neg (< (.Sign b) 0)]
+    (qpk t neg (.Abs (new big/Int) b) 0)))
+
+(go/func fbits "fbits is the binary128 w rounded to the format of p bits, bias emax and ebits exponent bits: its bits (a NaN quiet,\nits payload's top bits kept).\n" ^uint64 [^WType t ^Wide w ^int p ^int emax ^int ebits]
+  (let [(values neg cls m e) (qun t w)]
+    (when (== cls 2)
+      (when (qsnan t w)
+        (set! FFlags bit-or 1))
+      (let [r (bit-or (<< (conv uint64 (+ (* 2 emax) 1)) (conv uint (- p 1))) (<< (conv uint64 1) (conv uint (- p 2))))
+            (values sp _ _) (qfmt t)
+            pl (.Uint64 (.Rsh (new big/Int) m (conv uint (- sp p))))]
+        (set! r bit-or pl)
+        (when neg
+          (set! r bit-or (<< (conv uint64 1) (conv uint (+ ebits p -1)))))
+        (return r)))
+    (when (== cls 1)
+      (let [r (<< (conv uint64 (+ (* 2 emax) 1)) (conv uint (- p 1)))]
+        (when neg
+          (set! r bit-or (<< (conv uint64 1) (conv uint (+ ebits p -1)))))
+        (return r)))
+    (.Uint64 (fpack neg m e p emax ebits))))
+
+(go/func qOfBits "qOfBits is the value of the bits b of the format of p bits, bias emax, ebits exponent bits, as binary128 (exact).\n" ^Wide [^WType t ^uint64 b ^int p ^int emax ^int ebits]
+  (let [(values neg cls m e) (funpack (.SetUint64 (new big/Int) b) p emax ebits)]
+    (when (== cls 2)
+      (when (== (.Bit m (- p 2)) 0)
+        (set! FFlags bit-or 1))
+      (let [r (make Wide 2)]
+        (if (x87 t)
+          (do (aset r 0 (bit-or 0xc000000000000000 (<< (.Uint64 m) (conv uint (- 63 (- p 1))))))
+              (aset r 1 0x7fff)
+              (when neg
+                (set! (aget r 1) bit-or 0x8000)))
+          (do (aset r 1 (bit-or 0x7fff800000000000 (<< (.Uint64 m) (conv uint (- 49 (- p 1))))))
+              (when neg
+                (set! (aget r 1) bit-or 0x8000000000000000))))
+        (return r)))
+    (when (== cls 1)
+      (return (qinf t neg)))
+    (qpk t neg m e)))
+
+(go/method Float32 "Float32 converts w to float32, rounded once (to nearest even, or by RoundMode for a binary128).\n" ^float32 [^WType t ^Wide w]
+  (when (.-Dec t)
+    (return (math/Float32frombits (conv uint32 (.Uint64 (dToBin t w 24 127 8))))))
+  (when (.-Float t)
+    (return (math/Float32frombits (conv uint32 (fbits t w 24 127 8)))))
+  (let [b (.toBig t w)
+        neg (< (.Sign b) 0)]
+    (math/Float32frombits (conv uint32 (.Uint64 (fpack neg (.Abs b b) 0 24 127 8))))))
+
+(go/method Float16 "Float16 converts w to IEEE binary16's bits, rounded once.\n" ^uint16 [^WType t ^Wide w]
+  (when (.-Dec t)
+    (return (conv uint16 (.Uint64 (dToBin t w 11 15 5)))))
+  (when (.-Float t)
+    (return (conv uint16 (fbits t w 11 15 5))))
+  (let [b (.toBig t w)
+        neg (< (.Sign b) 0)]
+    (conv uint16 (.Uint64 (fpack neg (.Abs b b) 0 11 15 5)))))
+
+;; The hardware formats' signaling NaNs and invalid operations (queue 522): float and double arithmetic stays Go's; only a
+;; NaN result is looked at (an invalid operation of non-NaN operands, or a signaling operand: FE_INVALID), and float's
+;; conversions keep a signaling NaN signaling (Go's conversions quiet it), so that -fsignaling-nans' tests see FE_INVALID.
+
+(go/func snan64 "snan64 reports whether x is a signaling NaN.\n" ^bool [^float64 x]
+  (let [b (math/Float64bits x)]
+    (and (== (bit-and b 0x7ff0000000000000) 0x7ff0000000000000) (== (bit-and b 0x0008000000000000) 0) (!= (bit-and b 0x000fffffffffffff) 0))))
+
+(go/func fnan "fnan raises FE_INVALID for the NaN result r of operands x and y when it is an invalid operation or an operand is\nsignaling.\n" [^float64 x ^float64 y]
+  (when (or (and (== x x) (== y y)) (snan64 x) (snan64 y))
+    (set! FFlags bit-or 1)))
+
+(go/func FAdd "FAdd is x+y (a NaN result looked at).\n" ^float64 [^float64 x ^float64 y]
+  (let [r (conv float64 (+ x y))]
+    (when (!= r r)
+      (fnan x y))
+    r))
+
+(go/func FSub "FSub is x-y.\n" ^float64 [^float64 x ^float64 y]
+  (let [r (conv float64 (- x y))]
+    (when (!= r r)
+      (fnan x y))
+    r))
+
+(go/func FMul "FMul is x*y.\n" ^float64 [^float64 x ^float64 y]
+  (let [r (conv float64 (* x y))]
+    (when (!= r r)
+      (fnan x y))
+    r))
+
+(go/func FDiv "FDiv is x/y.\n" ^float64 [^float64 x ^float64 y]
+  (let [r (conv float64 (/ x y))]
+    (when (!= r r)
+      (fnan x y))
+    r))
+
+(go/func F32ToF64 "F32ToF64 is f as a double, a signaling NaN kept signaling.\n" ^float64 [^float32 f]
+  (let [v (conv float64 f)]
+    (when (!= v v)
+      (let [b (math/Float32bits f)]
+        (return (math/Float64frombits (bit-or (<< (conv uint64 (>> b 31)) 63) 0x7ff0000000000000 (<< (conv uint64 (bit-and b 0x7fffff)) 29))))))
+    v))
+
+(go/func F64ToF32 "F64ToF32 is x rounded to float, a signaling NaN kept signaling.\n" ^float32 [^float64 x]
+  (when (!= x x)
+    (let [b (math/Float64bits x)
+          m (conv uint32 (bit-and (>> b 29) 0x7fffff))]
+      (when (== m 0)
+        (set! m 0x400000))
+      (return (math/Float32frombits (bit-or (<< (conv uint32 (>> b 63)) 31) 0x7f800000 m)))))
+  (conv float32 x))
+
+;; ---------------------------------------------------------------------------------------------
+;; The decimal floating types (queue 522, CR3 (a)): _Decimal32, _Decimal64 and _Decimal128 (_Decimal64x) in BID, the
+;; encoding gcc uses on x86-64, as a WType with Dec set (N 32, 64 or 128, the limbs the encoding's bits). A value is
+;; (-1)^s * c * 10^q; each result the exact one rounded once to the format's digits (half to even), its exponent clamped
+;; into the format's range (subnormals rounded at the smallest exponent, overflow an infinity).
+
+(go/func decp "decp is the BID format of N bits: its digits, exponent bias, exponent bits and largest biased exponent.\n" [^int n] :results [^int p ^int bias ^int ebits ^int emaxb]
+  (switch n
+    (case [32]
+      (return 7 101 8 191))
+    (case [64]
+      (return 16 398 10 767)))
+  (return 34 6176 14 12287))
+
+(go/func pow10 "pow10 is 10^n.\n" ^{:tag (* big/Int)} [^int n]
+  (.Exp (new big/Int) (big/NewInt 10) (big/NewInt (conv int64 n)) nil))
+
+(go/func ndigits "ndigits is the number of decimal digits of c (1 for 0).\n" ^int [^{:tag (* big/Int)} c]
+  (len (.String c)))
+
+(go/func dbig "dbig is a decimal's encoding bits.\n" ^{:tag (* big/Int)} [^WType t ^Wide w]
+  (let [b (new big/Int)]
+    (for [i (- (len w) 1)] (>= i 0) (dec! i)
+      (.Lsh b b 64)
+      (.Or b b (.SetUint64 (new big/Int) (aget w i))))
+    (when (< (.-N t) 64)
+      (.And b b (.SetUint64 (new big/Int) (- (<< (conv uint64 1) (conv uint (.-N t))) 1))))
+    b))
+
+(go/func dwide "dwide is the decimal of the encoding bits b.\n" ^Wide [^WType t ^{:tag (* big/Int)} b]
+  (let [r (make Wide (.Limbs t))
+        x (new big/Int)
+        m (.SetUint64 (new big/Int) (bit-not (conv uint64 0)))]
+    (.Set x b)
+    (range [i _ r]
+      (aset r i (.Uint64 (.And (new big/Int) x m)))
+      (.Rsh x x 64))
+    r))
+
+(go/func dun "dun takes a decimal apart: its sign, class (0 finite, 1 infinite, 2 NaN, 3 signaling NaN) and value c * 10^q.\n" [^WType t ^Wide w] :results [^bool neg ^int cls ^{:tag (* big/Int)} c ^int q]
+  (let [n (.-N t)
+        (values p bias ebits _) (decp n)
+        b (dbig t w)
+        top (fn ^int [^int k] (conv int (.Bit b (- n k))))]
+    (set! neg (== (top 1) 1))
+    (when (and (== (top 2) 1) (== (top 3) 1) (== (top 4) 1) (== (top 5) 1))
+      (when (== (top 6) 0)
+        (return neg 1 (new big/Int) 0))
+      (when (== (top 7) 1)
+        (return neg 3 (new big/Int) 0))
+      (return neg 2 (new big/Int) 0))
+    (set! c (new big/Int))
+    (let [ex 0]
+      (if (and (== (top 2) 1) (== (top 3) 1))
+        (let [cw (- n 3 ebits)]
+          (set! ex (conv int (.Int64 (.And (new big/Int) (.Rsh (new big/Int) b (conv uint cw)) (big/NewInt (- (<< (conv int64 1) (conv uint ebits)) 1))))))
+          (.And c b (.Sub (new big/Int) (.Lsh (new big/Int) (big/NewInt 1) (conv uint cw)) (big/NewInt 1)))
+          (.SetBit c c (+ cw 2) 1))
+        (let [cw (- n 1 ebits)]
+          (set! ex (conv int (.Int64 (.And (new big/Int) (.Rsh (new big/Int) b (conv uint cw)) (big/NewInt (- (<< (conv int64 1) (conv uint ebits)) 1))))))
+          (.And c b (.Sub (new big/Int) (.Lsh (new big/Int) (big/NewInt 1) (conv uint cw)) (big/NewInt 1)))))
+      ;; a non-canonical coefficient (10^p or more) is zero
+      (when (>= (.Cmp c (pow10 p)) 0)
+        (.SetInt64 c 0))
+      (return neg 0 c (- ex bias)))))
+
+(go/func dspecial "dspecial is a decimal's infinity (cls 1), quiet NaN (2) or signaling NaN (3).\n" ^Wide [^WType t ^bool neg ^int cls]
+  (let [n (.-N t)
+        v (big/NewInt 0x78)]
+    (when (== cls 2)
+      (.SetInt64 v 0x7c))
+    (when (== cls 3)
+      (.SetInt64 v 0x7e))
+    (when neg
+      (.SetBit v v 7 1))
+    (dwide t (.Lsh v v (conv uint (- n 8))))))
+
+(go/func dpk "dpk is (-1)^neg * c * 10^q rounded to t's digits (half to even; sticky: the exact value a little beyond c), its exponent\nclamped into t's range, encoded.\n" ^Wide [^WType t ^bool neg ^{:tag (* big/Int)} c0 ^int q ^bool sticky]
+  (let [n (.-N t)
+        (values p bias ebits emaxb) (decp n)
+        qmin (- bias)
+        qmax (- emaxb bias)
+        c (new big/Int)
+        nd (ndigits c0)
+        drop 0]
+    (.Set c c0)
+    (when (> nd p)
+      (set! drop (- nd p)))
+    (when (< (+ q drop) qmin)
+      (set! drop (- qmin q)))
+    (when (> drop 0)
+      (if (> drop (+ nd 1))
+        (.SetInt64 c 0)
+        (let [(values c2 r) (.QuoRem (new big/Int) c (pow10 drop) (new big/Int))
+              k (.Cmp r (.Mul (new big/Int) (big/NewInt 5) (pow10 (- drop 1))))]
+          (when (or (> k 0) (and (== k 0) (or sticky (== (.Bit c2 0) 1))))
+            (.Add c2 c2 (big/NewInt 1)))
+          (.Set c c2)))
+      (set! q (+ q drop))
+      (when (> (ndigits c) p)
+        (.Quo c c (big/NewInt 10))
+        (set! q (+ q 1))))
+    (when (== (.Sign c) 0)
+      (when (< q qmin)
+        (set! q qmin))
+      (when (> q qmax)
+        (set! q qmax)))
+    (when (> q qmax)
+      (let [k (- q qmax)]
+        (when (> (+ (ndigits c) k) p)
+          (return (dspecial t neg 1)))
+        (.Mul c c (pow10 k))
+        (set! q qmax)))
+    (let [e (big/NewInt (conv int64 (+ q bias)))
+          cw (- n 1 ebits)
+          b (new big/Int)]
+      (if (<= (.BitLen c) cw)
+        (do (.Lsh b e (conv uint cw))
+            (.Or b b c))
+        (let [cw2 (- n 3 ebits)]
+          (.Lsh b e (conv uint cw2))
+          (.Or b b (.And (new big/Int) c (.Sub (new big/Int) (.Lsh (new big/Int) (big/NewInt 1) (conv uint cw2)) (big/NewInt 1))))
+          (.SetBit b b (- n 2) 1)
+          (.SetBit b b (- n 3) 1)))
+      (when neg
+        (.SetBit b b (- n 1) 1))
+      (dwide t b))))
+
+(go/func dnan "dnan is t's quiet NaN as the result of an operation (FE_INVALID raised for a signaling operand or an invalid one).\n" ^Wide [^WType t]
+  (dspecial t false 2))
+
+(go/func dAddSub "dAddSub is a+b, or a-b when sub, in t.\n" ^Wide [^WType t ^Wide a ^Wide b ^bool sub]
+  (let [(values an ac am ae) (dun t a)
+        (values bn bc bm be) (dun t b)]
+    (when sub
+      (set! bn (not bn)))
+    (when (or (>= ac 2) (>= bc 2))
+      (return (dnan t)))
+    (when (== ac 1)
+      (when (and (== bc 1) (!= an bn))
+        (return (dnan t)))
+      (return (dspecial t an 1)))
+    (when (== bc 1)
+      (return (dspecial t bn 1)))
+    (let [e ae]
+      (when (< be e)
+        (set! e be))
+      (let [x (.Mul (new big/Int) am (pow10 (- ae e)))
+            y (.Mul (new big/Int) bm (pow10 (- be e)))]
+        (when an
+          (.Neg x x))
+        (when bn
+          (.Neg y y))
+        (.Add x x y)
+        (when (== (.Sign x) 0)
+          (return (dpk t (and an bn) x e false)))
+        (let [neg (< (.Sign x) 0)]
+          (return (dpk t neg (.Abs x x) e false)))))))
+
+(go/func dMul "dMul is a*b in t.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (let [(values an ac am ae) (dun t a)
+        (values bn bc bm be) (dun t b)
+        neg (!= an bn)]
+    (when (or (>= ac 2) (>= bc 2))
+      (return (dnan t)))
+    (when (or (== ac 1) (== bc 1))
+      (when (or (and (== ac 0) (== (.Sign am) 0)) (and (== bc 0) (== (.Sign bm) 0)))
+        (return (dnan t)))
+      (return (dspecial t neg 1)))
+    (dpk t neg (.Mul (new big/Int) am bm) (+ ae be) false)))
+
+(go/func dDiv "dDiv is a/b in t.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (let [(values an ac am ae) (dun t a)
+        (values bn bc bm be) (dun t b)
+        neg (!= an bn)
+        (values p _ _ _) (decp (.-N t))]
+    (when (or (>= ac 2) (>= bc 2))
+      (return (dnan t)))
+    (when (== ac 1)
+      (when (== bc 1)
+        (return (dnan t)))
+      (return (dspecial t neg 1)))
+    (when (== bc 1)
+      (return (dpk t neg (new big/Int) 0 false)))
+    (when (== (.Sign bm) 0)
+      (when (== (.Sign am) 0)
+        (return (dnan t)))
+      (return (dspecial t neg 1)))
+    (when (== (.Sign am) 0)
+      (return (dpk t neg am (- ae be) false)))
+    ;; the quotient to p + 2 digits at least, a sticky remainder; exact quotients lose their trailing zeros toward ae - be
+    (let [k (+ p 2 (- (ndigits bm) (ndigits am)))]
+      (when (< k 0)
+        (set! k 0))
+      (let [(values qq rr) (.QuoRem (new big/Int) (.Mul (new big/Int) am (pow10 k)) bm (new big/Int))
+            q (- (- ae be) k)]
+        (when (== (.Sign rr) 0)
+          (let [ten (big/NewInt 10)]
+            (while (and (< q (- ae be)) (== (.Sign (.Rem (new big/Int) qq ten)) 0))
+              (.Quo qq qq ten)
+              (set! q (+ q 1)))))
+        (dpk t neg qq q (!= (.Sign rr) 0))))))
+
+(go/func dCmp "dCmp compares decimals: -1, 0 or 1, 2 when unordered.\n" ^int [^WType t ^Wide a ^Wide b]
+  (let [(values an ac am ae) (dun t a)
+        (values bn bc bm be) (dun t b)]
+    (when (or (>= ac 2) (>= bc 2))
+      (return 2))
+    (let [sa 1
+          sb 1]
+      (when an
+        (set! sa -1))
+      (when bn
+        (set! sb -1))
+      (when (== ac 1)
+        (when (and (== bc 1) (== an bn))
+          (return 0))
+        (return sa))
+      (when (== bc 1)
+        (return (- sb)))
+      (let [e ae]
+        (when (< be e)
+          (set! e be))
+        (let [x (.Mul (new big/Int) am (pow10 (- ae e)))
+              y (.Mul (new big/Int) bm (pow10 (- be e)))]
+          (when an
+            (.Neg x x))
+          (when bn
+            (.Neg y y))
+          (.Cmp x y))))))
+
+(go/func dtrunc "dtrunc is a finite decimal truncated toward zero to an integer.\n" ^{:tag (* big/Int)} [^WType t ^Wide w]
+  (let [(values neg _ c q) (dun t w)]
+    (if (>= q 0)
+      (.Mul c c (pow10 q))
+      (.Quo c c (pow10 (- q))))
+    (when neg
+      (.Neg c c))
+    c))
+
+(go/func dOfBig "dOfBig is the integer b rounded to t.\n" ^Wide [^WType t ^{:tag (* big/Int)} b]
+  (let [neg (< (.Sign b) 0)]
+    (dpk t neg (.Abs (new big/Int) b) 0 false)))
+
+(go/func dToBin "dToBin is the decimal w rounded to the binary format of p bits, bias emax and ebits exponent bits: its bits.\n" ^{:tag (* big/Int)} [^WType t ^Wide w ^int p ^int emax ^int ebits]
+  (let [(values neg cls c q) (dun t w)
+        r (new big/Int)]
+    (when (!= cls 0)
+      (.SetInt64 r (conv int64 (+ (* 2 emax) 1)))
+      (.Lsh r r (conv uint (- p 1)))
+      (when (>= cls 2)
+        (.SetBit r r (- p 2) 1))
+      (when neg
+        (.SetBit r r (+ ebits p -1) 1))
+      (return r))
+    (when (>= q 0)
+      (return (fpack neg (.Mul c c (pow10 q)) 0 p emax ebits)))
+    (let [den (pow10 (- q))
+          k (- (+ p 3 (.BitLen den)) (.BitLen c))]
+      (when (< k 0)
+        (set! k 0))
+      (let [(values qq rr) (.QuoRem (new big/Int) (.Lsh (new big/Int) c (conv uint k)) den (new big/Int))]
+        (.Lsh qq qq 1)
+        (when (!= (.Sign rr) 0)
+          (.SetBit qq qq 0 1))
+        (fpack neg qq (- (- k) 1) p emax ebits)))))
+
+(go/func dOfBin "dOfBin is the binary value (-1)^neg * m * 2^e (class cls as funpack's) rounded to t.\n" ^Wide [^WType t ^bool neg ^int cls ^{:tag (* big/Int)} m ^int e]
+  (when (== cls 1)
+    (return (dspecial t neg 1)))
+  (when (== cls 2)
+    (return (dspecial t neg 2)))
+  (when (>= e 0)
+    (return (dpk t neg (.Lsh (new big/Int) m (conv uint e)) 0 false)))
+  (dpk t neg (.Mul (new big/Int) m (.Exp (new big/Int) (big/NewInt 5) (big/NewInt (conv int64 (- e))) nil)) e false))
+
+;; x87's extended, the fast paths (queue 522): finite normal operands and results in 64-bit words (math/bits), to nearest
+;; even only (RoundMode 0), FE_INEXACT raised; anything else (a zero result, a denormal, an overflow, an infinity, a NaN,
+;; another rounding direction) takes the exact path above, whose results these equal (the probe's 100,000 cases).
+
+(go/func xnorm "xnorm reports whether an x87 value is finite and normal (the integer bit set): its significand and unbiased exponent\nof the significand's last bit.\n" [^Wide w] :results [^bool ok ^bool neg ^uint64 m ^int e]
+  (let [se (bit-and (aget w 1) 0xffff)
+        ex (conv int (bit-and se 0x7fff))]
+    (when (or (== ex 0) (== ex 0x7fff) (== (bit-and (aget w 0) 0x8000000000000000) 0))
+      (return false false 0 0))
+    (return true (!= (bit-and se 0x8000) 0) (aget w 0) (- ex 16383 63))))
+
+(go/func xround "xround is (-1)^neg * ((hi:lo) + a sticky part) * 2^e rounded to x87's 64 bits, to nearest even; ok false when the\nresult is zero, denormal or past the normal range.\n" [^bool neg ^uint64 hi ^uint64 lo ^bool sticky ^int e] :results [^Wide r ^bool ok]
+  (when (and (== hi 0) (== lo 0))
+    (return nil false))
+  (let [l (- 63 (bits/LeadingZeros64 lo))]
+    (when (!= hi 0)
+      (set! l (- 127 (bits/LeadingZeros64 hi))))
+    (let [s (- l 63)
+          ^{:tag uint64} n (zero uint64)
+          ^{:tag uint64} rem (zero uint64)
+          ^{:tag uint64} half (zero uint64)]
+      (cond
+        (<= s 0) (set! n (<< lo (conv uint (- s))))
+        (< s 64) (do (set! n (bit-or (<< hi (conv uint (- 64 s))) (>> lo (conv uint s))))
+                     (set! rem (bit-and lo (- (<< (conv uint64 1) (conv uint s)) 1)))
+                     (set! half (<< (conv uint64 1) (conv uint (- s 1)))))
+        :else (do (set! n hi)
+                  (set! rem lo)
+                  (set! half 0x8000000000000000)))
+      (when (< s 0)
+        (set! s 0))
+      (when (or (!= rem 0) sticky)
+        (set! FFlags bit-or 32)
+        (when (or (> rem half) (and (== rem half) (or sticky (== (bit-and n 1) 1))))
+          (set! n (+ n 1))
+          (when (== n 0)
+            (set! n 0x8000000000000000)
+            (set! s (+ s 1)))))
+      (let [ex (+ e s 63 16383)]
+        (when (or (< ex 1) (> ex 0x7ffe))
+          (return nil false))
+        (let [w (make Wide 2)]
+          (aset w 0 n)
+          (aset w 1 (conv uint64 ex))
+          (when neg
+            (set! (aget w 1) bit-or 0x8000))
+          (return w true))))))
+
+(go/func xadd "xadd is a+b (b's sign flipped when sub) on the fast path.\n" [^Wide a ^Wide b ^bool sub] :results [^Wide r ^bool ok]
+  (let [(values oka an am ae) (xnorm a)
+        (values okb bn bm be) (xnorm b)]
+    (when (or (not oka) (not okb) (!= RoundMode 0))
+      (return nil false))
+    (when sub
+      (set! bn (not bn)))
+    ;; |a| >= |b|
+    (when (or (< ae be) (and (== ae be) (< am bm)))
+      (set! (values an am ae bn bm be) (values bn bm be an am ae)))
+    (let [d (- ae be)
+          ahi (>> am 2)
+          alo (<< am 62)
+          bhi (>> bm 2)
+          blo (<< bm 62)
+          sticky false]
+      (cond
+        (> d 126) (do (set! sticky true) (set! bhi 0) (set! blo 0))
+        (>= d 64) (do (set! sticky (!= (bit-or (<< bhi (conv uint (- 128 d))) blo) 0))
+                      (when (== d 64) (set! sticky (!= blo 0)))
+                      (set! blo (>> bhi (conv uint (- d 64))))
+                      (set! bhi 0))
+        (> d 0) (do (set! sticky (!= (<< blo (conv uint (- 64 d))) 0))
+                    (set! blo (bit-or (>> blo (conv uint d)) (<< bhi (conv uint (- 64 d)))))
+                    (set! bhi (>> bhi (conv uint d)))))
+      (if (== an bn)
+        (let [(values lo c) (bits/Add64 alo blo 0)
+              (values hi _) (bits/Add64 ahi bhi c)]
+          (return (xround an hi lo sticky (- ae 62))))
+        (let [(values lo c) (bits/Sub64 alo blo 0)
+              (values hi _) (bits/Sub64 ahi bhi c)]
+          (when sticky
+            (let [(values lo2 c2) (bits/Sub64 lo 1 0)
+                  (values hi2 _) (bits/Sub64 hi 0 c2)]
+              (set! lo lo2)
+              (set! hi hi2)))
+          (return (xround an hi lo sticky (- ae 62))))))))
+
+(go/func xmul "xmul is a*b on the fast path.\n" [^Wide a ^Wide b] :results [^Wide r ^bool ok]
+  (let [(values oka an am ae) (xnorm a)
+        (values okb bn bm be) (xnorm b)]
+    (when (or (not oka) (not okb) (!= RoundMode 0))
+      (return nil false))
+    (let [(values hi lo) (bits/Mul64 am bm)]
+      (return (xround (!= an bn) hi lo false (+ ae be))))))
+
+(go/func xdiv "xdiv is a/b on the fast path.\n" [^Wide a ^Wide b] :results [^Wide r ^bool ok]
+  (let [(values oka an am ae) (xnorm a)
+        (values okb bn bm be) (xnorm b)]
+    (when (or (not oka) (not okb) (!= RoundMode 0))
+      (return nil false))
+    (let [nhi am
+          ^{:tag uint64} nlo (zero uint64)
+          adj 0]
+      (when (>= am bm)
+        (set! nhi (>> am 1))
+        (set! nlo (<< am 63))
+        (set! adj 1))
+      (let [(values q1 r1) (bits/Div64 nhi nlo bm)
+            (values q2 r2) (bits/Div64 r1 0 bm)]
+        (return (xround (!= an bn) q1 q2 (!= r2 0) (+ (- ae be 128) adj)))))))
