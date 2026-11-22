@@ -678,7 +678,7 @@
     (let [es (try (sema/lookup-qualified scope ps) (catch arbace.lang.ExceptionInfo _ nil))]
       (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es))))
 
-(declare static-call-value packs-named const-form)
+(declare static-call-value packs-named const-form ns-call-value)
 
 (defn- sizeof-member-operand
   "Queue 500: the type of sizeof's expression operand `v.m` written in a type's text ([expr.sizeof]/1, [expr.ref]: a variable of
@@ -878,6 +878,13 @@
                       ;; `_PCCP::template _ConstructiblePair<_U1, _U2>() && ...` (libstdc++'s C++17 std::pair)
                       (and (> (count parts) 1) (= "(" (peek)) (= ")" (nth (get ts (inc @pos)) 1 nil)))
                       (do (next!) (next!) (static-call-value scope (ct/parse-name (str/join "::" parts))))
+                      ;; (cpp-rt-own4, the code generator: a call of a namespace's function (template's specialization) on
+                      ;; constants and tag objects: <type_traits>' __call_is_nothrow's base `__bool_constant<std::__call_is_nt<
+                      ;; _Fn, _Args...>(typename _Result::__invoke_type{})>`, its value had been "unknown type std" and the
+                      ;; class without a base, so __is_nothrow_invocable had no value: ns-call-value)
+                      (and (> (count parts) 1) (= "(" (peek)) (not (sema/checking?)))
+                      (let [_ (next!) txt (run "(" ")")]
+                        (ns-call-value scope parts (if (str/blank? txt) [] (split-top-commas txt))))
                       ;; (cpp-s4: a variable template's specialization alone, `__accepted_index<_Tp>` as a template argument in
                       ;; variant's `__to_type<__accepted_index<_Tp>>`: const-form's, its partial specializations matched)
                       (and (= 1 (count parts)) (str/includes? (first parts) "<"))
@@ -960,6 +967,45 @@
           t (when e (tmpl (:id e)))]
       (when (and t (= :alias (:tk t)))
         {:name (name (second cls)) :args (or (resolve-args scope t (vec (nnext cls)) false) (fail :template "the template arguments of " (:name t)))}))))
+
+(defn- ns-call-value
+  "cpp-rt-own4 (the code generator): the value of a call written in a constant's text of a function named by the qualified
+  name `parts` (its last part maybe a template-id), on the arguments' texts `args`: each a value-initialized object of a class,
+  `T{}` (a tag, [dcl.init]/8), or a constant. The function a specialization of a function template whose arguments the
+  template-id gives all (with its defaults and an empty trailing pack), or a function; the one candidate whose parameters take
+  the tags' classes exactly, evaluated as a constexpr call ([expr.const])."
+  [scope parts args]
+  (let [lp (last parts)
+        i (str/index-of lp "<")
+        nm (str/trim (if i (subs lp 0 i) lp))
+        targs (when i (first (ct/template-args (vec (ct/tokens (subs lp i))) 1)))
+        es (sema/lookup-qualified scope (conj (vec (butlast parts)) nm))
+        avs (mapv (fn [^String a]
+                    (if-let [[_ t] (re-matches #"(?s)\s*(?:typename\s+)?(.+?)\s*\{\s*\}\s*" a)]
+                      (let [ty (abi/unq (sema/resolve-type scope t))]
+                        (when-not (abi/class? ty) (fail :template "a constant call's argument " a))
+                        {:obj ty})
+                      (let [v (eval-text scope a)]
+                        (when (map? v) (fail :template "a dependent constant call"))
+                        {:val v})))
+                  args)
+        cands (distinct
+               (for [e es
+                     :let [fid (cond (and (= :tmpl (:e e)) (= :fn (:tk e)) targs)
+                                     (try (let [t (tmpl (:id e))
+                                                as (complete-args t (resolve-args scope t targs false))]
+                                            (when (and as (not-any? dependent? as)) (instantiate-fn (:id e) as)))
+                                          (catch arbace.lang.ExceptionInfo _ nil))
+                                     (and (= :fn (:e e)) (nil? targs)) (:id e))]
+                     :when fid
+                     :let [ps (:ps (:ty (sema/fnd fid)))]
+                     :when (and (= (count ps) (count avs))
+                                (every? true? (map (fn [p a] (let [u (abi/unq (abi/non-ref p))]
+                                                               (if (:obj a) (and (abi/class? u) (= (:id u) (:id (:obj a)))) (not (abi/class? u)))))
+                                                   ps avs)))]
+                 fid))]
+    (when-not (= 1 (count cands)) (fail :template "a constant call of " nm " among " (count cands)))
+    (sema/ce-call-fn (first cands) (mapv #(if (:obj %) {::sema/cls (:id (:obj %))} (:val %)) avs))))
 
 (defn- concept-named
   "The entry of the concept the name `nm` (a symbol, n/C qualified) denotes in `scope`, or nil."
@@ -3669,7 +3715,14 @@
     (case (:kind k)
       "FunctionDecl"
       ;; (a defaulted comparison too, friend auto operator<=>(D, D) = default: G5)
-      (when (or (sema/body-of k) (:explicitlyDefaulted k))
+      (if-not (or (sema/body-of k) (:explicitlyDefaulted k))
+        ;; (cpp-rt-own4, the code generator: a friend function declared alone, kept with its class, its type resolved when an
+        ;; argument-dependent lookup asks, sema's befriended?: [basic.lookup.argdep]/4.3, a namespace-scope friend declared in an
+        ;; associated class is visible though another class defines it; <chrono>'s month declares `friend year_month
+        ;; operator/(const year&, const month&)`, year_month defines it, and tzdb.cc's `year::min()/January` found none)
+        (when (and (not (sema/checking?)) (:cls scope) (string? (:name k)) (seq (:name k)))
+          (abi/update-cls! (:cls scope) update-in [:friend-decls (:name k)] (fnil conj []) {:fs fs :k k}))
+
         ;; declared in the class's names (its type may name the class's parameters), entered in the namespace, or
         ;; defining the namespace's earlier declaration of it
         ;; (cpp-s9: none when its trailing requires-clause is not satisfied, declare-fn!'s nil: cpp23/ext-floating12.C's

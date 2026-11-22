@@ -807,7 +807,11 @@
                        ;; (CX12, the checker: a volatile member function's type)
                        u (if (and (checking?) (abi/fn? u) (or (:v u) (:volatile (meta (nth f 2))))) (-> u (dissoc :v) (assoc :vq true)) u)
                        ;; (and its ref-qualifier, [dcl.fct]/4)
-                       u (if-let [r (when (and (checking?) (abi/fn? u)) (:cpp/ref (meta (nth f 2))))] (assoc u :refq (if (= r :&&) "&&" "&")) u)]
+                       u (if-let [r (when (and (checking?) (abi/fn? u)) (:cpp/ref (meta (nth f 2))))] (assoc u :refq (if (= r :&&) "&&" "&")) u)
+                       ;; (cpp-rt-own4, the code generator: a non-throwing member function's type, noexcept part of the type since
+                       ;; C++17 ([except.spec]/1 with [dcl.fct]/1), as mptr-fn-node's &C::f: <type_traits>' __call_is_nt over `long
+                       ;; (Z::*)() const noexcept`, mangled KDoF..E, abi's)
+                       u (if (and (not (checking?)) (abi/fn? u) (true? (:noexcept (meta (nth f 2)))) (>= (long *cxx-year*) 17)) (assoc u :nx true) u)]
                    ;; (CX12, the checker: a template parameter's class kept, T::* deduced)
                    ;; (cpp-rt-own: the code generator's too, its template signatures' `_Tp _Class::*`: std::mem_fn(&stat_type::st_nlink),
                    ;; fs_ops.cc's hard_link_count, "mem_fn does not deduce"; mangled M <template-param>, abi's)
@@ -4227,7 +4231,7 @@
     (when-not (:tbody f) (when (:body f) (analyze-fn! (:id f))))
     (let [f (fnd fid)]
       (binding [*ce-steps* (atom 0) *ce-manifest* true]
-        (let [env (assoc (into {} (map (fn [pid a] [pid (atom (ce-wrap (:ty (var* pid)) a))]) (:params f) args)) ::ret (:ret (:ty f)))
+        (let [env (assoc (into {} (map (fn [pid a] [pid (atom (if (and (map? a) (contains? a ::cls)) a (ce-wrap (:ty (var* pid)) a)))]) (:params f) args)) ::ret (:ret (:ty f)))
               r (ce-exec (:tbody f) env)]
           (if (and (= :ret (first r)) (not (ce-ptr? (second r))) (not (map? (second r)))) (ce-wrap (:ret (:ty f)) (second r)) (not-constant "no return")))))))
 
@@ -7461,6 +7465,27 @@
   [acls e]
   (let [c (:friend-cls e)] (or (nil? c) (contains? acls c))))
 
+(defn- befriended?
+  "cpp-rt-own4 (the code generator): whether the hidden friend `e` named `nm` is declared a friend by one of the associated
+  classes `acls` ([basic.lookup.argdep]/4.3: a friend declared in an associated class is visible, wherever it is defined);
+  each class's friend declarations alone (template.ae's friend!) declared here once, on the first lookup that asks, and
+  matched by signature."
+  [acls e nm]
+  (and (not (checking?)) (:friend-cls e)
+       (let [g (fnd (:id e))]
+         (some (fn [a]
+                 (let [ds (get (:friend-decls (abi/cls a)) nm)]
+                   (some (fn [i]
+                           (let [d (nth ds i)
+                                 fid (if (contains? d :fid)
+                                       (:fid d)
+                                       (let [fid (try (declare-fn! (:fs d) (:k d)) (catch Exception _ nil))]
+                                         (abi/update-cls! a assoc-in [:friend-decls nm i :fid] fid)
+                                         fid))]
+                             (and fid (same-sig? (fnd fid) g))))
+                         (range (count ds)))))
+               acls))))
+
 (defn- adl-fns
   "The functions named `nm` in the namespaces of the class arguments' classes ([basic.lookup.argdep], for classes)."
   [args nm]
@@ -7475,7 +7500,7 @@
                cid (or (class-id pt) (when (abi/enum? pt) pt))] :when cid
          :let [acls (adl-classes args)]
          ns (adl-class-nss cid)
-         e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (and (= :fn (:e e)) (friend-visible? acls e))]
+         e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (and (= :fn (:e e)) (or (friend-visible? acls e) (befriended? acls e nm)))]
      (:id e))))
 
 (defn- sure-assoc-nss
@@ -8687,13 +8712,19 @@
     ;; defaulted special member counted as not throwing; G4)
     "CXXNoexceptExpr" (let [x (binding [*unevaluated* true] (analyze ctx (first (kids n))))
                             fns (atom #{})
+                            ;; (cpp-rt-own4, the code generator: a call through a pointer to member function of a type not
+                            ;; non-throwing may throw, [except.spec]/6, since C++17 when noexcept is the type's (its :nx):
+                            ;; <type_traits>' __call_is_nt for `long (Z::*)() const`, __is_nothrow_invocable had been true)
+                            thr (atom false)
                             walk (fn walk [x] (cond (map? x) (when-not (:kind x)
                                                                 (when (integer? (:fn x)) (swap! fns conj (:fn x)))
+                                                                (when (and (= :mcall (:op x)) (not (checking?)) (>= (long *cxx-year*) 17) (not (:nx (:fty x))))
+                                                                  (reset! thr true))
                                                                 (doseq [[k v] x :when (not (#{:scope :node :def-scope :parent :names :usings :ty} k))] (walk v)))
                                                     (sequential? x) (doseq [y x] (walk y))
                                                     :else nil))]
                         (walk x)
-                        {:op :int :v (if (every? #(let [f (fnd %)] (or (:noexcept f) (:implicit f) (:defaulted f))) @fns) 1 0) :ty abi/bool* :cat :pr})
+                        {:op :int :v (if (and (not @thr) (every? #(let [f (fnd %)] (or (:noexcept f) (:implicit f) (:defaulted f))) @fns)) 1 0) :ty abi/bool* :cat :pr})
     "CXXNullPtrLiteralExpr" {:op :null :ty abi/nullptr-t :cat :pr}
     "GNUNullExpr" {:op :int :v 0 :ty abi/long* :cat :pr}
     "ParenExpr" (analyze ctx (first (kids n)))
