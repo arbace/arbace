@@ -48,6 +48,8 @@
     ^{:tag (map uint64 oi/Value)} statics
     ;; the custom blocks whose operations have a finalize (queue 516): held weakly; finMu guards the finalisable ones' map
     ^{:tag (map uint64 (weak/Pointer oi/Custom))} wstatics
+    ;; the AOT runtime's dead blocks a global root still reaches (queue 523, Collected), finalized once none does
+    ^{:tag (slice uint64)} later
     ^{:tag sync/Mutex} finMu
     ;; the global roots (queue 516): the registered cells, those registered or modified in the outermost call (rehomed at its
     ;; end), and the static copies made for oi's values (one a value)
@@ -832,26 +834,72 @@ the block's finalize runs (oi.CFinaliser: at the next collection the program ask
   (.Lock (.-finMu c))
   (aset (.-wstatics c) w (^{:inst [oi/Custom]} weak/Make v))
   (.Unlock (.-finMu c))
+  ;; (queue 523) a block that crosses again is alive again: not finalized by an earlier news (Collected's later)
+  (when (> (len (.-later c)) 0)
+    (let [^{:tag (slice uint64)} keep nil]
+      (range [_ x (.-later c)]
+        (when (!= x w)
+          (set! keep (append keep x))))
+      (set! (.-later c) keep)))
   ;; the AOT runtime's server (wireLoad set Apply): the value is the server's own copy, dead once the call returns; the runtime's
   ;; mirror of the block decides, and its collections send the dead ones' addresses (Collected, queue 523)
   (when (== Apply nil)
     (oi/CFinaliser v (fn [] (.finalise c w)))))
 
 (go/func Collected "Collected is the AOT runtime's news of a collection it was asked for (wire.go's 'G', queue 523): the C's custom blocks at
-addrs, whose mirrors the runtime found unreachable, finalized in that order, those whose operations have a finalize (held in wstatics),
-each once, as the C runtime's sweep calls a dead custom block's finalize.
-" [^{:tag (slice uint64)} addrs]
+addrs, whose mirrors the runtime found unreachable, finalized, those whose operations have a finalize (held in wstatics), each once, as
+the C runtime's sweep calls a dead custom block's finalize. A block a registered global root still reaches (through the static copies
+of the values it holds: regression/pr11865/mkroot's boxes, each holding the next one) is alive for the C runtime: it waits (later)
+until a finalize removes that root, and is examined again at each such news; the blocks finalized in turn until none is freed.\n" [^{:tag (slice uint64)} addrs]
   (let [c the]
     (when (== c nil)
       (return))
-    (range [_ w addrs]
+    (let [^{:tag (slice uint64)} pending (.-later c)]
+      (set! (.-later c) nil)
       (.Lock (.-finMu c))
-      (let [(values _ ok) (aget (.-wstatics c) w)]
-        (when ok
-          (delete (.-wstatics c) w))
-        (.Unlock (.-finMu c))
-        (when ok
-          (.ccall c "__oi_custom_finalize" w))))))
+      (range [_ w addrs]
+        (when [(values _ ok) (aget (.-wstatics c) w)] ok
+          (set! pending (append pending w))))
+      (.Unlock (.-finMu c))
+      (let [progress true]
+        (while (and progress (> (len pending) 0))
+          (set! progress false)
+          (let [^{:tag (slice uint64)} rest nil
+                reached (.rootsReach c)]
+            (range [_ w pending]
+              (if (aget reached w)
+                (set! rest (append rest w))
+                (do
+                  (.Lock (.-finMu c))
+                  (let [(values _ ok) (aget (.-wstatics c) w)]
+                    (when ok
+                      (delete (.-wstatics c) w))
+                    (.Unlock (.-finMu c))
+                    (when ok
+                      (.ccall c "__oi_custom_finalize" w)
+                      (set! progress true))))))
+            (set! pending rest))))
+      (set! (.-later c) pending))))
+
+(go/method rootsReach "rootsReach is the words the registered global roots reach (queue 523): each root's word, and through a static copy of
+a scanned block its fields, transitively.\n" ^{:tag (map uint64 bool)} [^{:tag (* capi)} c]
+  (let [seen (lit (map uint64 bool))
+        ^{:tag (slice uint64)} todo nil
+        m (.-m c)]
+    (range [r _ (.-roots c)]
+      (set! todo (append todo (.Load64 m r))))
+    (while (> (len todo) 0)
+      (let [x (aget todo (- (len todo) 1))]
+        (set! todo (subslice todo 0 (- (len todo) 1)))
+        (when (and (!= x 0) (== (bit-and x 1) 0) (not (aget seen x)))
+          (aset seen x true)
+          (when [(values _ ok) (aget (.-statics c) x)] ok
+            (let [hd (.Load64 m (- x 8))
+                  wosize (>> hd 10)]
+              (when (< (conv int (bit-and hd 0xff)) tagAbstract)
+                (for [i (conv uint64 0)] (< i wosize) (inc! i)
+                  (set! todo (append todo (.Load64 m (+ x (* 8 i))))))))))))
+    seen))
 
 (go/method finalise "finalise is the finalize of the custom block at w, its value collected: runtime.c's __oi_custom_finalize on ci's main thread.\n" [^{:tag (* capi)} c ^uint64 w]
   (.Lock (.-finMu c))
