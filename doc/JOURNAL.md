@@ -17458,7 +17458,7 @@ combinations, constructors' and destructors' declarators, operator and allocatio
 friends, bit-fields, default arguments, block redeclarations of parameters, covariant returns, main's rules, __thread's initialization,
 const objects' initialization, break and continue, class member conflicts, and the checker's initializers, references, qualification
 conversions, returns, casts and operators (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-b", lists every rule and every shared function
-touched). Proofs: the directories' 1,111 files run whole with `--record` on the merged tree (own passes 512 -> 689, none lost, the control
+touched). Proofs: the directories' 1,111 files run whole with `--record` on the merged tree (own passes of the directories 512 -> 690 of 1,114, none lost, the control
 failing as it must), the other directories' 1,333 own passes run without a record (four regressions found, fixed and rerun), next's 11
 changed rows run on the merged tree, the slow missing-header-pr110164.C with a 2,400 s cap. An interrupted run's own step had recorded "no
 read row" for the stream's rows; the next whole run recorded them again and the three slow files' rows came back from the base.

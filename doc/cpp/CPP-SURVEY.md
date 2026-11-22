@@ -10057,8 +10057,8 @@ stream's whole directories' own passes.
 - each rule on its files with the REPL's probe and on hand-written valid programs (`ok1.C` to `ok22.C`, no error); a REPL that reloads
   sema.ae must reload template.ae too (its hooks), or the probe refuses function templates' units: the dg runs, fresh processes, decide;
 - the stream's directories whole (1,111 files; the slow diagnostic/missing-header-pr110164.C, lookup/missing-std-include-3.C and
-  parse/limits-initializer1.C apart, their rows kept), `--record`, at ef84e6092 and again on the merged tree (e99575471): own passes 512 ->
-  689 of the 1,111, no own pass lost against the base, the control _control/dg/dr2082-vs-dr1423 failing as it must;
+  parse/limits-initializer1.C apart, their rows kept), `--record`, at ef84e6092 and again on the merged tree (e99575471): own passes of the
+  directories 512 -> 690 of their 1,114 rows, no own pass lost against the base, the control _control/dg/dr2082-vs-dr1423 failing as it must;
 - the other directories' own passes (1,333 of them, cpp0x/udlit-suffix-neg.C apart; no record): four regressions found and fixed
   (constexpr without an initializer on a variable template, an out-of-class redeclaration and class objects), rerun in a fresh process: all
   pass; next's 11 changed rows run on the merged tree, unchanged; missing-header-pr110164.C with a 2,400 s cap on the head (no record).
