@@ -1387,6 +1387,8 @@
 
 (defn- param-nodes [n] (filter #(= "ParmVarDecl" (:kind %)) (kids n)))
 
+
+
 (defn- same-sig? [f g]
   (and (= (:name f) (:name g)) (= (:kind f) (:kind g)) (= (boolean (:cq f)) (boolean (:cq g))) (= (:refq f) (:refq g))
        (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps (:ty g))))))
@@ -1879,10 +1881,13 @@
         _ (when (and old (or bns hidden))
             (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id old :pos (:pos f)}))
         id (or old (next-id))
-        pinfo {:param-names (mapv :name pn)
-               :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}]
+        pinfo (cond-> {:param-names (mapv :name pn)
+                       :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}
+                ;; (cpp-rt-own4, the code generator: each parameter's top-level const, which the function's type leaves out,
+                ;; [dcl.fct]/5, and its variable keeps: analyze-fn!)
+                (not (checking?)) (assoc :param-const (mapv #(boolean (:_const %)) pn)))]
     (if old
-      (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
+      (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names :param-const] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             (:always-inline f) (assoc :always-inline true)
                             (:used f) (assoc :used true)
@@ -9845,7 +9850,14 @@
         ;; a member's body sees the class's members: its scope is the class's for lookups
         fs (if (and cls (not (:keep-def-scope f))) (assoc fs :parent (:scope (abi/cls cls))) fs)
         pids (vec (map-indexed (fn [i t]
-                                 (let [id (next-id) nm (nth (:param-names f) i nil)]
+                                 (let [id (next-id) nm (nth (:param-names f) i nil)
+                                       ;; (cpp-rt-own4, the code generator: the parameter's top-level const, declare-fn!'s
+                                       ;; :param-const, when the parameters are as many as the function's: floating_to_chars.cc's
+                                       ;; `const optional<int> precision`, whose value() is the const& one, and `const int precision`
+                                       ;; given to optional<int>(_Up&&) as const int&)
+                                       t (if (and (= (count (:param-const f)) (count (:ps (:ty f)))) (nth (:param-const f) i false)
+                                                  (not (abi/ref? t)) (not (checking?)))
+                                           (assoc t :c true) t)]
                                    (swap! *vars* assoc id {:id id :name nm :ty t :storage :param :fn fid})
                                    (when nm (enter! fs nm {:e :var :id id}))
                                    id))
