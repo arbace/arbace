@@ -136,3 +136,40 @@ Not ported from HotSpot (a reference only, no code copied): its error message fo
 - Bytecode calling a world method that the program's reachability left out (a compiled program has the methods its
   code reaches, J2G-SPEC §4.1): `NoSuchMethodError`, as a closed world answers.
 - JIT, class unloading, CDS, class redefinition (`java.lang.instrument`).
+
+## As built: stages 1-3 (2026-11-22, write-ahead of the rows' build)
+
+- **Where**: `arbace/lang/BytecodeFile.ae` (the parser: the constant pool's 17 tags, the members, the attributes of §3,
+  JVMS 4.8's format checks with HotSpot's ClassFormatError texts), `arbace/lang/Bytecode.ae` (the loader and linker:
+  `Bytecode.define`, the Klass and its layout, the vtable, publishing to the host, the attributes as jrt's data with W
+  records for MethodParameters, `BytecodeAnnotations` (jdk26u's AnnotationParser over the class file's own constant
+  pool, jrt's `SetAnnotationSource`), `BytecodeBody` (the method body node), linking on the Klass's `linker`, run by
+  `CF$Klass.init`), `arbace/lang/BytecodeCode.ae` (the interpreter: all of JVMS 6.5's instructions, the resolution of
+  classes, fields and methods, the bootstraps of §4, lambdas as Klasses made at run time) and
+  `arbace/lang/BytecodeVerifier.ae` (type checking and inference by one transfer function per instruction, frames as
+  strings, the StackMapTable, the protected check, jsr/ret by the locals a subroutine modifies).
+- **jrt** (`go/arbace/jrt/defineclass.ae`, `classloader.ae`, `reflect.ae`, `annotation.ae`, `classdata.ae`): `loadClass`
+  by delegation on the loader object (`ClassLoader.self`), `findClass`, the three `defineClass`, `resolveClass`,
+  `Unsafe.defineClass`, the defining loaders (`Class.getClassLoader`), `Class.forName(name, init, loader)` through a
+  loader that is not a built-in one, the built-in loaders blind to classes defined from bytes; annotations of a class
+  defined from bytes by its source, an `ExceptionProxy` member value thrown as AnnotationParser's mismatch, a proxy over
+  an `AnnotationInvocationHandler` recognized as an annotation; the W records and `executableParameters` (j2g's
+  `getParameters`: jdk26u's `verifyParameters`). `MethodHandles.Lookup.defineClass` (overlay/jdk) defines through
+  `Unsafe.defineClass` after jdk26u's PACKAGE and same-package checks.
+- **j2g**: `Compiler$CFGo`'s natives `setAnnotationSource` and `setInit` (dyncf.ae); `Class.describeConstable` known to
+  the call sites of a compiled program (main.ae) and its ClassDesc rooted; `getParameters` over the W records and
+  MalformedParametersException rooted (out.ae).
+- **Divergences** (§7, and): NoSuchFieldError, BootstrapMethodError, ClassCircularityError and
+  UnsupportedClassVersionError are not in the world: their superclasses (IncompatibleClassChangeError, LinkageError,
+  ClassFormatError) stand for them; a class defined from bytes stays in the closed world's registry by name (the latest
+  definition), which jrt's own lookups by name read (annotation types, InnerClasses' outer class), while the built-in
+  loaders and `findLoadedClass` see it only through its defining loader.
+- **Tests**: `bin/bytecode-check` (`make bytecode-check`; test/bytecode): javac's programs (Hello, T2: records, enums,
+  sealed types and pattern switches, lambdas and method references, string concatenation, inner and anonymous classes,
+  exceptions, finally, synchronized, arrays) and a version 49 class (inference) and GenJsr's jsr/ret class, run against
+  the JDK's results; the rows' verifier classes (VerifyStackForExceptionHandlers', VerifyProtectedConstructor's at
+  versions 49 and 50, DefaultMethodRegressionTests' I and C); 900 mutants (one byte of a method's code or its
+  max_stack or max_locals) of three class files, every verdict HotSpot's (`-Xverify:all`; the record
+  test/bytecode/expected.edn, `--record-jdk`), with a negative control. On the REPL (the Java forms interpreted,
+  .tmp/dev's harness) before the build: every result the JDK's; GetSimpleNameTest's twelve classes' simple names
+  jdk26u's.
