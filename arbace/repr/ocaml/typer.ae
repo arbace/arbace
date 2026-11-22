@@ -5,11 +5,14 @@
   the signature as `--mode types` prints it. Run as -m arbace.repr.ocaml.typer VERB ...:
 
     types --file NAME FILE              the signature (Printtyp's text), as (ocaml/typed SIG [] {...})
-    lambda --file NAME FILE [--simplify] [--include DIR:DIR...] [--nolabels] [--unsafe] [--safer-matching] [--debug] [--intf] [--sig-out FILE.mli]
+    lambda --file NAME FILE [--simplify] [-w SPEC] [--include DIR:DIR...] [--nolabels] [--unsafe] [--safer-matching] [--debug] [--intf] [--sig-out FILE.mli]
            [--cmi-out FILE.cmi.ae]      (OC184 (a): the signature as data, a native .cmi an --include directory's find-unit reads)
            [--imports-out FILE]         (OC220 (a): the interfaces imported, NAME DIGEST a line, Dynlink's checks)
                                         (--debug: ocamlc -g, the after-events a backtrace reads, OC217 (a))
                                         (--intf: coerced to the unit's .mli, found as the stdlib's or an include's)
+                                        (-w SPEC, queue 533: ocamlc's -w over its default set, Warnings.parse_options; the
+                                        warnings the reader and the typer port printed on stderr as ocamlc prints them, after
+                                        the unit typed; without -w none is printed)
                                         the Lambda program, as (ocaml/lambda (lambda-program ...) {...}); with
                                         --simplify after Simplif's port (what ocamlc -dlambda prints)
     sigs --root DIR --list LIST --out OUT [--stdlib DIR] [--stdlib-units]
@@ -37,6 +40,9 @@
             [arbace.repr.ocaml.typer.cmi :as cmi]
             [arbace.repr.ocaml.typer.objinfo :as oinfo]
             [arbace.repr.ocaml.parser :as parser]
+            [arbace.repr.ocaml.lex :as lex]
+            [arbace.repr.ocaml.native :as native]
+            [arbace.repr.ocaml.report :as report]
             [arbace.string :as str])
   (:import [java.io File]))
 
@@ -65,6 +71,8 @@
           uname (or uname (unit-name fname))
           env0 (env/add-visible-units (if nopervasives (env/initial-predef) (env/initial-env)) uname)
           [items sig env' full] (tm/type-implementation env0 (second r) uname)
+          ;; Typecore.force_delayed_checks (queue 533): the checks delayed until the unit's types are known
+          _ (when-let [d tc/*delayed-checks*] (run! #(%) @d) (reset! d []))
           stext (pt/signature-text sig)]
       (if intf
         (let [isig (:sig (env/find-unit uname))
@@ -100,10 +108,32 @@
     #(let [f (first args) fname (or (get opts "--file") f)]
        (print (typed-text (:sig (compile-file f fname)) fname)) (flush))))
 
-(defn- do-lambda [{:keys [opts args]}]
+(defn- with-warnings
+  "-w SPEC (queue 533, DECISION 528-R1 (a)): (f) with the warnings the reader (lex/*warn*) and the typer (tc/*warn*)
+  raise collected, those SPEC (one or more specs joined by commas, applied in order) makes active over ocamlc's default set
+  (Warnings.parse_options, native/parse-flags) then
+  printed on stderr as ocamlc's batch printer prints them, each report followed by a blank line before the next; a
+  warning SPEC makes an error (@N) printed as one, then status 2 (ocamlc 5.5 -c prints nothing more). Without -w, (f) alone."
+  [{:keys [opts args]} f]
+  (if-let [spec (get opts "-w")]
+    (let [{:keys [warnings errors]} (native/parse-flags (str/join " " (map #(str "-w " %) (str/split spec #","))))
+          fname (or (get opts "--file") (first args))
+          ws (atom [])
+          keep! (fn [k loc] (when (contains? warnings (report/warning-number k)) (swap! ws conj [k loc])))
+          r (binding [lex/*warn* keep! tc/*warn* keep! tc/*delayed-checks* (atom [])] (f))
+          buf (read-bytes (first args))
+          fatal (count (filter (fn [[k _]] (contains? errors (report/warning-number k))) @ws))]
+      (binding [*out* *err*]
+        (print (str/join "\n" (map (fn [[k loc]] (report/warning-report buf fname k loc (contains? errors (report/warning-number k)))) @ws)))
+        (flush))
+      (when (pos? fatal) (System/exit 2))
+      r)
+    (f)))
+
+(defn- do-lambda [{:keys [opts args] :as pa}]
   (with-stdlib opts
     #(let [f (first args) fname (or (get opts "--file") f)
-           r (compile-file f fname :intf (boolean (get opts "--intf")))]
+           r (with-warnings pa (fn [] (compile-file f fname :intf (boolean (get opts "--intf")))))]
        ;; --sig-out FILE: the unit's signature as an interface (Printtyp's text, as the phrase verb keeps top_N.mli), for the
        ;; next units of a program that has no .mli of its own (bin/oi suite check's native path)
        (when-let [o (get opts "--sig-out")] (spit o (str (:sig r) "\n")))
@@ -440,7 +470,7 @@
         pa (fn [wv] (parse-args more wv))]
     (case verb
       "types" (do-types (pa #{"--file" "--stdlib" "--include"}))
-      "lambda" (do-lambda (pa #{"--file" "--stdlib" "--include" "--sig-out" "--cmi-out" "--imports-out"}))  ; --simplify: after Simplif (-dlambda)
+      "lambda" (do-lambda (pa #{"--file" "--stdlib" "--include" "--sig-out" "--cmi-out" "--imports-out" "-w"}))  ; --simplify: after Simplif (-dlambda)
       "check" (do-check (pa #{"--dir" "--oracle" "--report" "--stdlib" "--out" "--include"}))
       "phrase" (do-phrase (pa #{"--dir" "--n" "--stdlib"}))
       "stdlib-check" (do-stdlib-check (pa #{"--dir" "--lib" "--out"}))

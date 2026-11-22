@@ -1,0 +1,56 @@
+(ns rust.front.type-id-check
+  "524-1 (a) (doc/rust/FRONTEND-SURVEY.md, \"rust-c3x: TypeId::of's constants\"): arbace.rust.front.mono/type-id-hash, rustc
+  1.99.1's TyCtxt::type_id_hash ported, held to every TypeId::of constant the pack rust-front-rsi records (each program's
+  `std::any::TypeId::of` instances: the type from a call's fndef form, the bytes from the instance's `(indirect ALLOC 0)`
+  allocation), each computed constant equal to its record's; a program-local ADT's refused (counted, not failed). The crossed
+  control: each computed constant against another type's recorded bytes must differ. `bin/rust-front type-id-check RSI-DIR LIB`."
+  (:require [arbace.rust.front.mono :as mono] [arbace.string :as str])
+  (:import [java.io File PushbackReader]))
+
+(defn- read-at
+  "The form at each index of TEXT where the string NEEDLE starts"
+  [^String text ^String needle]
+  (loop [i (.indexOf text needle) acc []]
+    (if (neg? i)
+      acc
+      (recur (.indexOf text needle (inc i))
+             (conj acc (binding [*read-eval* false] (read (PushbackReader. (java.io.StringReader. (subs text i (min (count text) (+ i 400000))))))))))))
+
+(defn- walk-seq [x] (tree-seq coll? seq x))
+
+(defn- cases
+  "A record's TypeId::of constants: [[TYPE-FORM HEX] ...] (the call site's fndef type by the instance's symbol); only the
+  forms at the needles are read"
+  [f]
+  (let [text (slurp f)
+        sym->ty (into {} (for [x (read-at text "(const \"std::any::TypeId::of::<")
+                               :let [i (.indexOf ^java.util.List (vec x) :fn-symbol) tyf (nth x 2 nil) st (when (seq? tyf) (nth tyf 2 nil))]
+                               :when (and (pos? i) (seq? st) (= 'fndef (first st)) (= "std::any::TypeId::of" (second st)))]
+                           [(nth x (inc i)) (first (nth st 2))]))]
+    (vec (for [b (read-at text "(mir/body {:def \"std::any::TypeId::of\"") :let [m (second b)]
+               :let [ty (get sym->ty (:symbol m))
+                     ind (some #(when (and (seq? %) (= 'indirect (first %))) %) (walk-seq (:blocks m)))
+                     a (get (into {} (:alloc-data m)) (str (second ind)))]
+               :when (and ty a)]
+           [ty (:bytes a)]))))
+
+(defn -main [rsi lib crates]
+  (binding [mono/*lib-dir* lib mono/*crates* (mono/load-crates crates)]
+    (let [all (distinct (mapcat (fn [^File d] (let [f (File. d (str (.getName d) ".record.edn"))] (when (.exists f) (cases (.getPath f)))))
+                                (sort-by #(.getName ^File %) (filter #(.isDirectory ^File %) (.listFiles (File. ^String rsi))))))
+          res (for [[tyf want] all
+                    :let [t (try (mono/form->ty tyf) (catch Throwable _ nil))
+                          got (when t (mono/type-id-hash t))]]
+                [(second tyf) want got])
+          eq (filter (fn [[_ w g]] (= w g)) res)
+          bad (filter (fn [[_ w g]] (and g (not= w g))) res)
+          refused (filter (fn [[_ _ g]] (nil? g)) res)
+          ;; the crossed control: each computed constant against the next case's recorded bytes
+          ws (vec (map second res))
+          ctl (for [[i [_ _ g]] (map-indexed vector res) :when g
+                    :let [other (nth ws (mod (inc i) (count ws)))] :when (not= other (nth ws i))]
+                (= g other))]
+      (doseq [[t w g] res] (println "type-id:" (pr-str t) (cond (= w g) "equal" (nil? g) "refused" :else (str "DIFFERS " g " record " w))))
+      (println (format "type-id-check: %d of %d equal, %d differ, %d refused; control: %d of %d differ"
+                       (count eq) (count res) (count bad) (count refused) (count (remove true? ctl)) (count ctl)))
+      (when (or (seq bad) (some true? ctl) (empty? eq)) (System/exit 1)))))

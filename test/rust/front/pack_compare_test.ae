@@ -218,7 +218,12 @@
              :blocks [{:cleanup false :stmts [] :term (list 'call callr [] '(place 1) 1 '(continue))} {:cleanup false :stmts ['(assign (place 0) (use (copy (place 1))))] :term '(return)}]}]
       (check "RenameReturnPlace: `_0 = copy _1` after the call, _1 renamed _0" (br/pack-compare o r) [:equal-o0 "locals,nrvo"])
       (check "negative: the return place from a local assigned twice is not renamed"
-             (br/pack-compare (update-in o [:blocks 1 :stmts] #(into ['(assign (place 1) (use (copy (place 1))))] %)) r) :differs))
+             (br/pack-compare (update-in o [:blocks 1 :stmts] #(into ['(assign (place 1) (use (copy (place 1))))] %)) r) :differs)
+      ;; rust-c6c: CopyProp's return rule (rustc 1.99 has no RenameReturnPlace) renames only an SSA local: std's read_uleb128
+      ;; (`result |= ..` assigned in a loop, then `_0 = copy result`) keeps its local, as std's IR allocates it
+      (let [o2 (update-in o [:blocks 1 :stmts] #(into ['(assign (place 1) (binop "BitOr" (copy (place 1)) (const "const 1_i8" (ty "i8" (int "i8")) (scalar 1 1))))] %))]
+        (check "rust-c6c: the return rule leaves a local assigned twice" (contains? (second (#'br/o0-normalize o2)) :nrvo) false)
+        (check "rust-c6c control: an SSA local (the call's destination alone) is renamed" (contains? (second (#'br/o0-normalize o)) :nrvo) true)))
     ;; queue 448: SizedTypeProperties' constants evaluated at the instance (sized-const-eval, a stub layout), the record's LAYOUT
     ;; allocation compared by its bytes
     (let [usz '(ty "usize" (uint "usize"))
@@ -634,5 +639,181 @@
       (check "C6-4: a no-op landing pad: no personality, one block" (shape (body [] '(resume))) [false 1])
       (check "C6-4 control: a landing pad that does something keeps the personality and its block"
              (let [[p n] (shape (body [] (list 'call (list 'const "g" fty '(zst)) [] '(place 1) nil '(continue) callee '(loc "?" 0 0) 0)))] (if (and p (> n 1)) [:differs p n] [:equal p n])) :differs))
+    ;; C1 (2026-11-22, rust-c4-1122): TypeId::of's constant as std's IR writes it, each 8 bytes of the hash a pointer
+    ;; `inttoptr (i64 N to ptr)` (rustc_codegen_llvm's scalar_to_backend for GlobalAlloc::TypeId), not bytes: the record's
+    ;; TypeId::of::<u32> (the pack rust-front-rsi's unwind) against std's IR's @anon of the same hash
+    (let [tid '(ty "std::any::TypeId" (adt "std::any::TypeId" "core::any::TypeId" []))
+          lt {"std::any::TypeId" '{:size 16 :align 8 :abi (memory true) :fields [0] :variants (single 0) :uninhabited false}}
+          b (fn [bytes] {:form :body :symbol "tid" :args 0 :ret tid :locals [{:mut true :ty tid}] :debug []
+                         :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'use (list 'const "const std::any::TypeId::of::<u32>::{constant#0}" tid '(indirect alloc168 0))))]
+                                   :term '(return)}]
+                         :alloc-data [["alloc168" {:kind :memory :align 8 :mutable false :bytes bytes :init "1111111111111111" :relocs [[0 "alloc170"] [8 "alloc170"]]}]
+                                      ["alloc170" {:kind :other}]]})
+          consts (fn [bytes] (let [gl (cg/new-globals {})] (cg/codegen-fn (b bytes) lt gl) (vec (keys (:consts @gl)))))
+          std-ir '[(packed ptr ptr) (packed [ptr (inttoptr i64 -8815622259637286671 ptr)] [ptr (inttoptr i64 8786967495329273992 ptr)]) 8]]
+      (check "C1: TypeId::of::<u32>'s constant as std's IR's (two inttoptr pointers)"
+             (if (= [std-ir] (consts "f1084b14439ea885885801b46194f179")) :equal [:differs (consts "f1084b14439ea885885801b46194f179")]) :equal)
+      (check "C1 control: another hash's constant differs" (if (= [std-ir] (consts "f1084b14439ea885885801b46194f17a")) [:equal] [:differs]) :differs))
+    ;; C1: a scalar pair's niche tag is the component at the tag field's offset (codegen_get_discr's extract_field):
+    ;; Option<(usize, char)>'s is the char (offset 8), so the discriminant compares the second value with the niche -1
+    (let [opt '(ty "std::option::Option<(usize, char)>" (adt "std::option::Option" "core::option::Option" [(ty "(usize, char)" (tuple [(ty "usize" (uint "usize")) (ty "char" (char))]))]))
+          isz '(ty "isize" (int "isize"))
+          lt {"std::option::Option<(usize, char)>" '{:size 16 :align 8 :abi (pair (int 64 false nil) (int 32 false [4294967295 1114111]) 8) :fields [8]
+                                                     :variants (multiple {:tag (int 32 false [4294967295 1114111]) :tag-field 0 :encoding (niche 1 0 0 4294967295)
+                                                                          :variants [{:offsets [] :uninhabited false} {:offsets [0] :uninhabited false}]})
+                                                     :discrs [0 1] :uninhabited false}
+              "isize" '{:size 8 :align 8 :abi (scalar (int 64 true [0 18446744073709551615])) :fields (primitive) :variants (single 0) :uninhabited false}}
+          b {:form :body :symbol "discr" :args 1 :ret isz :locals [{:mut true :ty isz} {:mut false :ty opt}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 0) (discriminant (place 1)))] :term '(return)}]}
+          f (let [gl (cg/new-globals {})] (cg/codegen-fn b lt gl))
+          cmp (first (filter #(and (seq? %) (= 'icmp (first %))) (tree-seq coll? seq f)))]
+      (check "C1: Option<(usize, char)>'s discriminant reads the char (the pair's second value) against -1"
+             (if (and cmp (= '[i32 %_1.1 -1] [(nth cmp 2) (nth cmp 3) (nth cmp 4)])) :equal [:differs cmp]) :equal))
+    ;; C1 (threads.rs): the atomic intrinsics as rustc_codegen_ssa lowers them, the ordering from the AtomicOrdering argument:
+    ;; atomic_xadd::<usize, usize, SeqCst> an `atomicrmw add .. seq_cst`, atomic_cxchg::<usize, AcqRel, Acquire> a cmpxchg pair
+    (let [us '(ty "usize" (uint "usize")) pu '(ty "*mut usize" (ptr (ty "usize" (uint "usize")) true)) bl '(ty "bool" (bool))
+          pr '(ty "(usize, bool)" (tuple [(ty "usize" (uint "usize")) (ty "bool" (bool))]))
+          lt {"usize" '{:size 8 :align 8 :abi (scalar (int 64 false [0 18446744073709551615])) :fields (primitive) :variants (single 0) :uninhabited false}
+              "*mut usize" '{:size 8 :align 8 :abi (scalar (ptr [0N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}
+              "(usize, bool)" '{:size 16 :align 8 :abi (pair (int 64 false [0 18446744073709551615]) (int 8 false [0 1]) 8) :fields [0 8] :variants (single 0) :uninhabited false}}
+          call (fn [nm ords n ret]
+                 (list 'call (list 'const (str "std::intrinsics::" nm "::<usize, " (apply str (map #(str "std::intrinsics::AtomicOrdering::" % ", ") ords)) ">")
+                                   (list 'ty "unsafe fn()" (list 'fndef (str "std::intrinsics::" nm) [])) '(zst))
+                       (vec (for [i (range 1 (inc n))] (list 'copy (list 'place i)))) '(place 0) 1 '(unreachable)
+                       (list 'callee {:kind "intrinsic" :symbol "" :def (str "std::intrinsics::" nm) :intrinsic nm}) nil 0))
+          body (fn [nm ords locals ret]
+                 {:form :body :symbol nm :args (dec (count locals)) :ret ret :locals (vec (for [t locals] {:ty t})) :debug []
+                  :blocks [{:cleanup false :stmts [] :term (call nm ords (dec (count locals)) ret)} {:cleanup false :stmts [] :term '(return)}]})
+          forms (fn [b] (let [gl (cg/new-globals {})] (vec (filter seq? (tree-seq coll? seq (cg/codegen-fn b lt gl))))))
+          has (fn [fs h] (first (filter #(and (seq? %) (= h (first %))) fs)))
+          rmw (has (forms (body "atomic_xadd" ["SeqCst"] [us pu us] us)) 'atomicrmw)
+          cx (has (forms (body "atomic_cxchg" ["AcqRel" "Acquire"] [pr pu us us] pr)) 'cmpxchg)]
+      (check "C1: atomic_xadd::<usize, usize, SeqCst> is an atomicrmw add seq_cst"
+             (if (and rmw (= [:add :seq_cst] [(nth rmw 1) (nth rmw 4)])) :equal [:differs rmw]) :equal)
+      (check "C1: atomic_cxchg::<usize, AcqRel, Acquire> a cmpxchg acq_rel acquire"
+             (if (and cx (= [:acq_rel :acquire] [(nth cx 4) (nth cx 5)])) :equal [:differs cx]) :equal)
+      (check "C1 control: the orderings are the call's (Relaxed is monotonic, not seq_cst)"
+             (let [r (has (forms (body "atomic_xadd" ["Relaxed"] [us pu us] us)) 'atomicrmw)] (if (= :seq_cst (nth r 4 nil)) [:equal] [:differs r])) :differs))
+    ;; rust-c6c: a closure passed as a scalar pair takes each half's pointee alignment by its upvars' types (DebugMap::finish's
+    ;; `and_then(.., |_| ..)`: `ptr align 8` for its `&mut u64`-like half, none for a `&mut u8`); the control, the halves swapped
+    (let [u64t '(ty "u64" (uint "u64")) u8t '(ty "u8" (uint "u8"))
+          r64 (list 'ty "&mut u64" (list 'ref u64t true)) r8 (list 'ty "&mut u8" (list 'ref u8t true))
+          clo (fn [a b] (list 'ty "{closure@c}" (list 'closure "c::{closure#0}" [(list 'ty "i8" '(int "i8")) '(ty "fn()" (fnptr))
+                                                                               (list 'ty (str "(" (second a) ", " (second b) ")") (list 'tuple a b))])))
+          pl '{:size 16 :align 8 :abi (pair (ptr [1N 18446744073709551615N]) (ptr [1N 18446744073709551615N]) 8) :fields [0 8] :variants (single 0) :uninhabited false}
+          rl '{:size 8 :align 8 :abi (scalar (ptr [1N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}
+          lt (merge glue-lt {"u64" '{:size 8 :align 8 :abi (scalar (int 64 false [0N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}
+                             "u8" '{:size 1 :align 1 :abi (scalar (int 8 false [0N 255N])) :fields [] :variants (single 0) :uninhabited false}
+                             "&mut u64" rl "&mut u8" rl "{closure@c}" pl})
+          fty '(ty "fn() {g}" (fndef "g" []))
+          body (fn [ct] {:form :body :symbol "cl" :args 1 :ret unit :locals [{:mut true :ty unit} {:mut false :ty ct}] :debug []
+                         :blocks [{:cleanup false :stmts [] :term (list 'call (list 'const "g" fty '(zst)) ['(move (place 1))] '(place 0) 1 '(continue)
+                                                                        '(callee {:kind "item" :symbol "g" :can-unwind false}) '(loc "?" 0 0) 0)}
+                                  {:cleanup false :stmts [] :term '(return)}]})
+          args (fn [ct] (some #(when (and (seq? %) (= 'call (first %))) (vec (nth % 3))) (tree-seq coll? seq (cg/codegen-fn (body ct) lt (cg/new-globals {})))))]
+      (check "rust-c6c: a closure pair's halves aligned as its upvars' pointees" (mapv #(vec (butlast %)) (args (clo r64 r8))) '[[ptr (:align 8)] [ptr]])
+      (check "rust-c6c control: the upvars swapped, the alignment on the second half" (mapv #(vec (butlast %)) (args (clo r8 r64))) '[[ptr] [ptr (:align 8)]]))
+    ;; rust-c6c: `&(*p).0` of a struct whose tail is unsized (BackendRepr::Memory { sized: false }: Path's OsStr) keeps the base's
+    ;; metadata, a pair (std's IR's `as_encoded_bytes(ptr %0, i64 %1)`); the control, a sized field, a thin pointer
+    (let [u8t '(ty "u8" (uint "u8"))
+          os '(ty "OsStr" (adt "OsStr" "OsStr" [])) path '(ty "Path" (adt "Path" "Path" []))
+          ros (list 'ty "&OsStr" (list 'ref os false)) rpath (list 'ty "&Path" (list 'ref path false))
+          fat '{:size 16 :align 8 :abi (pair (ptr [1N 18446744073709551615N]) (int 64 false [0N 18446744073709551615N]) 8) :fields [0 8] :variants (single 0) :uninhabited false}
+          lt (merge glue-lt {"OsStr" '{:size 0 :align 1 :abi (memory false) :fields [0] :variants (single 0) :uninhabited false}
+                             "Path" '{:size 0 :align 1 :abi (memory false) :fields [0] :variants (single 0) :uninhabited false}
+                             "&OsStr" fat "&Path" fat})
+          body {:form :body :symbol "us" :args 1 :ret ros :locals [{:mut true :ty ros} {:mut false :ty rpath}] :debug []
+                :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'ref :shared (list 'place 1 '(deref) (list 'field 0 os))))] :term '(return)}]}
+          ivs (vec (for [x (tree-seq coll? seq (cg/codegen-fn body lt (cg/new-globals {}))) :when (and (seq? x) (= 'insertvalue (first x)))] x))]
+      (check "rust-c6c: a reference to an unsized struct tail is a pair (the base's metadata kept)" (count ivs) 2)
+      (check "rust-c6c control: the struct sized, a thin pointer"
+             (let [lt2 (assoc lt "OsStr" '{:size 0 :align 1 :abi (memory true) :fields [0] :variants (single 0) :uninhabited false})]
+               (let [n (try (count (for [x (tree-seq coll? seq (cg/codegen-fn body lt2 (cg/new-globals {}))) :when (and (seq? x) (= 'insertvalue (first x)))] x))
+                            (catch Throwable _ :refused))]
+                 (if (= n 2) [:equal n] [:differs n])))
+             :differs))
+    ;; queue 524 (C3): a native library body's caller location file as the program's record writes it
+    (check "524: an export's /rustc/COMMIT/library/ location trimmed to the library build's path (a twice-prefixed one too)"
+           [(br/lib-loc-file "/rustc/58cf8f9c/library/core/src/alloc/layout.rs") (br/lib-loc-file "/rustc/58cf8f9c//rustc/58cf8f9c/library/core/src/ub_checks.rs")]
+           ["core/src/alloc/layout.rs" "core/src/ub_checks.rs"])
+    (check "524 control: a program's own file unchanged" (let [f (br/lib-loc-file "test/rust/eval/panics.rs")] (if (= f "core/src/panics.rs") [:equal] [:differs f])) :differs)
+    ;; queue 524 (C3): the layouts a run took from the record
+    ;; a native body's ADT form without its :tc (build/ty-form's def path), read as its path, not `::`
+    (check "524: a native form's ADT by its def path"
+           (mono/form->ty '(ty "std::ptr::NonNull<i32>" (adt "std::ptr::NonNull" "core::ptr::non_null::NonNull" [(ty "i32" (int "i32"))])))
+           [:adt "core::ptr::non_null::NonNull" [[:int "i32"]]])
+    (check "524: a record's ADT form by its DefId, as before"
+           (mono/form->ty '(ty "std::ptr::NonNull<i32>" (adt "std::ptr::NonNull" "DefId(2:5678 ~ core[f4c9]::ptr::non_null::NonNull)" [(ty "i32" (int "i32"))])))
+           [:adt "core::ptr::non_null::NonNull" [[:int "i32"]]])
+    (check "524 control: an ADT form that is neither is refused"
+           (try [:equal (mono/form->ty '(ty "X" (adt "X" "not a path!" [])))] (catch Throwable e [:differs (.getMessage e)])) :differs)
+    ;; a record's trait object (its text alone) in the layout table: a wide pointer's pair, the trait object's unsized memory
+    (let [dbg '(ty "dyn std::fmt::Debug" (dyn))
+          lt (binding [mono/*layouts* (atom {}) c/*defs* (atom [])] (mono/layout-table [(list 'ty "&dyn std::fmt::Debug" (list 'ref dbg false)) dbg]))]
+      (check "524: &dyn std::fmt::Debug's layout from the record's form (a pair of pointers, 16 bytes)"
+             (select-keys (get lt "&dyn std::fmt::Debug") [:size :align]) {:size 16 :align 8})
+      (check "524: dyn std::fmt::Debug's layout (unsized)" (get-in lt ["dyn std::fmt::Debug" :abi]) '(memory false))
+      (check "524 control: the placeholder is the layout table's alone (form->ty still refuses the trait object)"
+             (try [:equal (binding [c/*defs* (atom [])] (mono/form->ty dbg))] (catch Throwable e [:differs (.getMessage e)])) :differs))
+    ;; a record's library closure (`(closure PATH [PARENT-ARGS.. KIND SIG UPVARS])`) laid out over its upvars
+    (let [cl '(ty "{closure@std::array::iter::iter_inner::PolymorphicIter<[std::mem::MaybeUninit<f64>]>::next::{closure#0}}"
+                  (closure "std::array::iter::iter_inner::PolymorphicIter::<[std::mem::MaybeUninit<T>]>::next::{closure#0}"
+                           [(ty "f64" (float "f64")) (ty "i32" (int "i32")) (ty "extern \"rust-call\" fn((usize,)) -> f64" (fnptr))
+                            (ty "(&[f64],)" (tuple (ty "&[f64]" (ref (ty "[f64]" (slice (ty "f64" (float "f64")))) false))))]))
+          lt (binding [mono/*layouts* (atom {})] (mono/layout-table [cl]))]
+      (check "524: a record's library closure laid out over its upvars (one wide reference, 16 bytes)"
+             (select-keys (get lt (second cl)) [:size :align]) {:size 16 :align 8})
+      (check "524 control: a closure with no upvars tuple stays refused"
+             (let [l (binding [mono/*layouts* (atom {})] (get (mono/layout-table [(list 'ty "{closure@x::{closure#0}}" '(closure "x::{closure#0}" []))]) "{closure@x::{closure#0}}"))]
+               (if (mono/error? l) [:differs l] [:equal l])) :differs))
+    ;; a crate-private braced struct read from the library's sources (VariantData::Struct's named fields)
+    (let [dir (str (or (System/getenv "TMPDIR") ".tmp/tmp") "/q524-src-adt-" (System/nanoTime))
+          _ (.mkdirs (java.io.File. (str dir "/core/src")))
+          _ (spit (str dir "/core/src/lib.rs") "pub struct Pair<T> { a: *const T, n: usize }\npub struct Tup<T>(*const T, usize);\n")
+          r (binding [mono/*lib-dir* dir] [(count (:fields (mono/src-adt "core::Pair"))) (count (:fields (mono/src-adt "core::Tup")))])]
+      (check "524: a braced struct's fields from the sources (two), a tuple struct's (two)" r [2 2])
+      (check "524 control: a struct the sources lack" (binding [mono/*lib-dir* dir] (if (mono/src-adt "core::Missing") [:equal] [:differs])) :differs)
+      ;; a library constant's integer literal (core::char's `const TAG_CONT: u8 = 0b1000_0000;`), as CTFE evaluates it
+      ;; a crate-private enum from the sources (alloc::raw_vec::AllocInit's two unit variants, btree's empty markers), laid out
+      (let [dir (str dir "-e")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "enum Two { A, B }\nenum Gap { A, B = 5, C }\nenum Leaf {}\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a source enum's layout (two unit variants: a u8 tag 0..=1), its discriminants with an explicit one (0 5 6)"
+                 [(get-in (lay "core::Two") [:abi]) (:discrs (lay "core::Gap"))] '[(scalar (int 8 false [0N 1N])) [0 5 6]])
+          (check "524: an empty enum's layout (uninhabited, zero-sized)" (select-keys (lay "core::Leaf") [:size :uninhabited]) {:size 0 :uninhabited true})
+          (check "524 control: an enum the sources lack stays refused" (let [l (lay "core::Missing")] (if (mono/error? l) [:differs l] [:equal l])) :differs)))
+      ;; a source struct's #[repr(C)] keeps its fields' order (core's AlignedStorage: `_align: [T; 0]` at 0, as the record's)
+      (let [dir (str dir "-c")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "#[repr(C)]\nstruct S { a: [u32; 0], b: [u8; 64] }\nstruct T { a: [u32; 0], b: [u8; 64] }\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a repr(C) source struct's fields in their order ([u32; 0] at 0, [u8; 64] at 0)" (:fields (lay "core::S")) '[0 0])
+          (check "524 control: repr(Rust) reorders them (the array's alignment group first)" (let [f (:fields (lay "core::T"))] (if (= f '[0 0]) [:equal f] [:differs f])) :differs)))
+      ;; a definition local to a function (catch_unwind's `union Data`, select_unpredictable's `struct DropOnPanic`), a union laid out
+      (let [dir (str dir "-f")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "fn f() { struct L(u8, u16); union U { a: u8, b: u32 } let x = 1; }\nfn g() { let y = 2; }\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a function's local struct and union from the sources (the union 4 bytes, its fields overlaid)"
+                 [(select-keys (lay "core::f::L") [:size :align]) (select-keys (lay "core::f::U") [:size :align])] [{:size 4 :align 2} {:size 4 :align 4}])
+          (check "524 control: a name the function does not declare stays refused" (let [l (lay "core::g::L")] (if (mono/error? l) [:differs l] [:equal l])) :differs)))
+      (let [dir (str dir "-k")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "const K: u8 = 0b1000_0000;\nconst N: i32 = -5;\nconst S: &str = \"x\";\n")
+        (check "524: library constants' integer literals: 0b1000_0000 as u8, -5 as i32"
+               (binding [mono/*lib-dir* dir] [(mono/src-const-value "const core::K") (mono/src-const-value "const core::N")])
+               '[(scalar 128 1) (scalar 4294967291 4)])
+        (check "524 control: a constant that is not an integer literal stays unevaluated"
+               (binding [mono/*lib-dir* dir] (if-let [v (mono/src-const-value "const core::S")] [:equal v] [:differs])) :differs)))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))

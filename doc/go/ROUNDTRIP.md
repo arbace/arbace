@@ -422,6 +422,40 @@ a new configuration takes about a minute (it also finds the test programs that c
 for linux/amd64 and 46 s for linux/arm64 (2026-10-08), 10 to 11 s after. `--make reprint` takes
 2.4 s; `--mutations` 30 to 45 s for its three operations.
 
+## Tests that embed their own sources
+
+TamaGo has no file system at test time, so its `testdata_tamago_test.go` files embed what a
+package's tests read, the package's own Go files among them (`//go:embed *.go`, `*`,
+`example_test.go`, ...). The code level compiles the candidate in the original's place through
+the go command's `-overlay`, which `//go:embed` reads too: the test binary embedded the
+candidate's text, under the canonical layout the flattened text of either side, and a string
+symbol differed whatever the candidate (`symbols only in A: go:string..gostring...`). Nine
+packages were known so at the code level (crypto, go/format, go/parser, go/printer,
+internal/trace, io/ioutil, net/http, os, sync).
+
+Since the user's decision of 2026-11-22, `bin/repr-go roundtrip --tests` prints those files in
+mode `:full` (`bin/repr-go`'s `roundtrip_tests_embedded`): after the corpus is converted and
+printed (mode `:lines`), the Go files a package embeds from its own directory (the `EmbedFiles`
+of `go list -test`'s packages and test variants; only the package's own files are compiled in
+the original's place, gocmp's overlay) that the candidate holds are replaced by their print from
+mode `:full` (`bin/repr-go read --full --tests` of the packages that hold them, printed into
+`cand-tests-full`), each compared with its original byte for byte (a difference fails the round
+trip). The test binary then embeds the original's text, and the code level compares the
+program's code. Twelve packages have such files (the nine, and internal/types/errors,
+path/filepath and runtime/metrics, whose `:lines` prints flattened as their originals do); the
+other files of each package stay printed from mode `:lines`, and the text level (`roundtrip
+--text --tests`) proves mode `:full`'s print of every file of the corpus.
+
+The negative controls `embed PACKAGE` (test/repr/go/roundtrip-controls.txt, one for each of the
+nine; `bin/lib/repr-go/check`'s `--controls`, judged only with `--with-tests`) alter one of the
+package's embedded files in its text alone (the first of `cand-tests.embedded.txt`'s in its
+directory, an empty declaration group appended, which the tree level identifies away) and compare
+the package with its original at the levels tree and code: the tree level passes, the code level
+must fail, or the control fails the run. Restoring the files' `:lines` prints instead, the state
+before the decision, fails the code level for seven of the nine: go/format's `format_test.go` and
+sync's `example_test.go` print from mode `:lines` with their originals' tokens today, so their code
+passed either way (the known entries dated from an earlier printer).
+
 ## Known gaps
 
 - **Line numbers** are not compared (see "Positions").
@@ -438,7 +472,8 @@ for linux/amd64 and 46 s for linux/arm64 (2026-10-08), 10 to 11 s after. `--make
   packages for tamago/amd64). Packages are compared per configuration: files of other
   GOOS/GOARCH or build tags are not. A test that embeds the package's own Go sources (TamaGo's
   `testdata_tamago_test.go`, `//go:embed *.go`) embeds the candidate's text, so its code
-  differs whatever the candidate (9 std packages).
+  differed whatever the candidate (9 std packages) until 2026-11-22: those files are printed in
+  mode `:full` since (below, "Tests that embed their own sources").
 - **Export data** must be Unified IR version 4 with sync markers (go1.27); dictionaries are
   read only for their derived types. Other dictionary lists (runtime types, itabs,
   subdictionaries) are compared by index, which would report a renumbering as a difference.

@@ -265,6 +265,55 @@
 
 (defn mkexp [d t loc] {:desc d :type t :loc loc})
 
+;; ---------------------------------------------------------------------------------------------
+;; Warnings (queue 533, DECISION 528-R1 (a)): Location.prerr_warning for the warnings the typer ports, today 5
+;; (ignored-partial-application); the typer's driver binds *warn* when it is given -w (arbace.repr.ocaml.typer)
+
+(def ^:dynamic *warn* "Location.prerr_warning: (fn [kind loc]) a warning raised at loc, or nil (no warning reported)" nil)
+
+(def ^:dynamic *delayed-checks*
+  "Typecore's delayed checks (add_delayed_check): an atom of thunks the driver runs after the unit's typing, or nil" nil)
+
+(defn- constrained-exp?
+  "exp_extra holds a Texp_constraint: (e : t) typed (type-expect's Pexp_constraint marks the expression)"
+  [e] (boolean (::constraint (meta e))))
+
+(defn check-partial-application
+  "Typecore.check_partial_application's ignored-partial-application part: exp of a function type that is syntactically
+  an application, a send, a new or a let-op (through matches, tries, conditionals, lets, sequences and local items),
+  unless constrained, raises warning 5; a type not known yet (a Tvar) is checked again after the unit's typing.
+  (statement's non-unit-statement, warning 10, is not ported.)"
+  [exp]
+  (when *warn*
+    (let [doit (fn []
+                 (when (#{:Tarrow :Tfunctor} ((ty/desc (ty/expand-head (:type exp))) 0))
+                   ((fn check [e]
+                      (when-not (constrained-exp? e)
+                        (let [d (:desc e)]
+                          (case (d 0)
+                            :Texp_match (do (run! #(check (:rhs %)) (d 2)) (run! #(check (:rhs %)) (get d 4)))
+                            :Texp_try (do (check (d 1)) (run! #(check (:rhs %)) (d 2)) (run! #(check (:rhs %)) (get d 3)))
+                            :Texp_ifthenelse (when (d 3) (check (d 2)) (check (d 3)))
+                            :Texp_let (check (d 3))
+                            :Texp_sequence (check (d 2))
+                            :Texp_struct_item (check (d 2))
+                            (:Texp_apply :Texp_send :Texp_new :Texp_letop) (*warn* :ignored-partial-application (:loc e))
+                            nil))))
+                    exp)))]
+      (if (and *delayed-checks* (= :Tvar ((ty/desc (ty/expand-head (:type exp))) 0)))
+        (swap! *delayed-checks* conj doit)
+        (doit)))))
+
+(defn pattern-needs-partial-application-check?
+  "Typecore.pattern_needs_partial_application_check: _, an exception pattern or an or-pattern of them, unconstrained"
+  [p]
+  (and (empty? (:constraints p))
+       (case ((:desc p) 0)
+         (:Tpat_any :Tpat_exception) true
+         :Tpat_or (and (pattern-needs-partial-application-check? ((:desc p) 1))
+                       (pattern-needs-partial-application-check? ((:desc p) 2)))
+         false)))
+
 (defn annot-type
   "An annotation's type: an instance of its scheme, or in a class the class's own variables (TyVarEnv)"
   [env sty]
@@ -838,7 +887,10 @@
     (if (and (= 1 (count sargs)) (= :Nolabel ((ffirst sargs) 0)) (prim "%ignore"))
       (let [targ (ty/newvar) tret (ty/newvar)]
         (unify! fty (ty/newty [:Tarrow [:Nolabel] targ tret]) "function")
-        [[[[:Nolabel] (type-expect env (second (first sargs)) targ)]] tret])
+        ;; Typecore's special case for ignore: the argument checked for a partial application
+        (let [arg (type-expect env (second (first sargs)) targ)]
+          (check-partial-application arg)
+          [[[[:Nolabel] arg]] tret]))
       (let [[ls tvar] (list-labels fty)
             nonopt (remove ty/is-optional ls)
             ignore-labels (and (not tvar) (= (count nonopt) (count sargs)) (every? #(= :Nolabel ((first %) 0)) sargs)
@@ -910,7 +962,7 @@
                          tret (reverse targs))]
         [(mapv (fn [[l a]] [l (if (and (vector? a) (= :omitted (a 0))) nil a)]) targs) tret]))))
 
-(defn type-statement [env sexp] (type-exp env sexp))
+(defn type-statement [env sexp] (let [e (type-exp env sexp)] (check-partial-application e) e))
 
 (defn- record-repres [l] (:repres l))
 
@@ -1032,6 +1084,7 @@
                             (type-error "None of the patterns in this 'match' expression match values."))
                         cases (type-cases env (:type arg) expected val-cases true)
                         effs (when (seq eff-cases) (type-effect-cases env expected eff-cases conts))]
+                    (when (every? #(pattern-needs-partial-application-check? (:lhs %)) cases) (check-partial-application arg))
                     (mkexp (cond-> [:Texp_match arg cases (partiality cases (:type arg))] effs (conj effs)) expected loc))
       :Pexp_try (let [body (type-expect env (d 1) expected)
                       [exn-cases eff-cases conts] (split-effect-cases (d 2))
@@ -1140,7 +1193,8 @@
       :Pexp_constraint (let [t (annot-type env (d 2))
                              e (type-expect env (d 1) t)]
                          (unify! t expected "expression")
-                         e)
+                         ;; exp_extra's Texp_constraint, read by check-partial-application
+                         (vary-meta e assoc ::constraint true))
       :Pexp_assert (let [e (type-expect env (d 1) (ty/type-bool))
                          false? (let [ed (:desc e)] (and (= :Texp_construct (ed 0)) (= "false" (:name (ed 1)))))]
                      (ret [:Texp_assert e (or (last (:pexp_loc_stack sexp)) (:pexp_loc sexp))] ; innermost_location: the stack's last
@@ -1573,12 +1627,21 @@
               :else false))]
     (boolean (go sp))))
 
-(declare type-let*)
+(declare type-let* type-let**)
 
 (defn type-let
   "[value-bindings env'] for let [rec]: each {:pat :expr}"
   [env rec svbs]
-  (let [svbs (mapv vb-constraint svbs)]
+  (let [svbs (mapv vb-constraint svbs)
+        [vbs _ :as r] (type-let** env rec svbs)]
+    ;; Typecore.type_let: each binding whose pattern is _ (or an exception, or an or-pattern of them) checked for a
+    ;; partial application
+    (doseq [vb vbs] (when (pattern-needs-partial-application-check? (:pat vb)) (check-partial-application (:expr vb))))
+    r))
+
+(defn- type-let**
+  [env rec svbs]
+  (do
     (if (and (= rec :Nonrecursive) (= 1 (count svbs)) *let-equations* (gadt-pattern? env (:pvb_pat (first svbs))))
       ;; let K = e in body with K a GADT constructor: the expression first, then its pattern with equations that
       ;; hold over the body (as match e with K -> body)

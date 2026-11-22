@@ -167,6 +167,16 @@ covers what.
   same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
   `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
   Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
+- `go/arbace/repr/go/internal/gc/` (doc/go/GOI-SPEC.md, "Since v1: gc in the executable", 2026-11-22): a renamed
+  copy of `tamago/cmd/`'s forms of `cmd/compile`'s closure (`cmd/compile/internal/...`, `cmd/internal/...` and
+  `cmd/vendor/golang.org/x/telemetry/...`: above, the same tree's `src/cmd/`) and of `tamago/goroot/`'s forms of
+  the standard library's internal packages it imports (`internal/abi`, `internal/buildcfg` ... : the same tree's
+  `src/internal/`), their namespaces and import paths renamed under `arbace/repr/go/internal/gc/` by
+  `arbace.go.gc/copy-texts` (its docstring lists the few other changes: test assembly and `internal/abi`'s
+  `funcpc.go` left out, two configuration-dependent files' `:val` annotations removed): Copyright The Go Authors,
+  under Go's BSD 3-Clause License (text below); each file's notice kept. `go/arbace/repr/go/gccompile/compile.ae`'s
+  `Compile` is `src/cmd/compile/main.go`'s `main` of the same tree, ported as forms (its notice kept): Copyright
+  2015 The Go Authors, under Go's BSD 3-Clause License (text below).
 - `wasm/web/arbace.js`'s part 1 (the gojs imports and the `Go` class; doc/wasm/WEB.md; doc/wasm/WASM-SURVEY.md, "As built:
   WA11, WA12 (begun)") and wai's headless world `go/arbace/wai/gojs.ae` (the same imports, the reference table and the run
   written in Go after it): derived from TamaGo's go1.27.1 tree's `lib/wasm/wasm_exec.js` and `lib/wasm/wasm_exec_node.js`
@@ -390,6 +400,10 @@ covers what.
   (oi's `ext_unix.ae`, above), `ExtSignal` and `ExtProc` (oi's `ext_signal.ae`'s part Java allows; "As built: OT9's fixes 6-8"),
   `ExtStrRe` and `BaOps` (oi's `ext_str_re.ae` and `ext_bigarray.ae`'s part but the file mapping):
   under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
+- The opam set's library either (test/ocaml/corpora.edn, the pin `:opam-either` of queue 534, the user's decision of
+  2026-11-22 on 528-15): the opam package either 1.0.0 (Craig Ferguson), which containers 3.18's library needs, at the
+  version opam-repository's master 5c9b817c546fcd5cb2be1cb52b08ea5c36320181 pins by checksum, fetched into `.tmp/` and read
+  in place, **not distributed** (it keeps its own license and notices), under the MIT License, as its opam file states.
 - The opam set of the OCaml crop (test/ocaml/corpora.edn, the pins `:opam-NAME`; doc/ocaml/OCAML-SURVEY.md, "As built: O7"):
   sources of ten opam packages, fetched at pinned versions into `.tmp/` and read in place by the checks, **not distributed**
   (nothing of them is in the tree; each keeps its own license and notices): sexplib0 v0.17.0 (MIT), fmt 0.11.0, astring

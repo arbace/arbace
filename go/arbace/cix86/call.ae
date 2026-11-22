@@ -1,0 +1,126 @@
+;; Package cix86 runs ci's functions of machine code (queue 522c; go/arbace/ci's mcode.go) on x86i, Arbace's x86-64 machine
+;; (go/arbace/x86i, AX5), as Haskell's CallConv runs a test's .s (go/arbace/hs/asm.go): its import sets ci.MachineCall. The
+;; machine's address space is ci's own memory (emu's AS over the program's crt.Mem): the read-only data readable, the static
+;; data, the heap, the mappings and the stacks readable and writable, each function's text mapped executable once in a window
+;; of its own below the read-only data. A call follows the System V AMD64 ABI (§3.2.3): the integer and pointer arguments in
+;; rdi, rsi, rdx, rcx, r8, r9, the floating ones in xmm0 to xmm7, the rest on the C stack below ci's stack pointer above the
+;; return address, rax the count of vector registers (a variadic callee's); the return address a sentinel the machine never
+;; maps, so the run ends when the callee's ret fetches it; the result from rax or xmm0, at the callee's result type. Not built:
+;; aggregates and wide integers as arguments or results, and a call from the machine code back into C (a C function's address
+;; is ci's Text + 16 * its index, which the machine cannot fetch: a fault).
+(in-ns 'go.arbace.cix86) (go/file "call.go" :doc "Package cix86 runs ci's functions of machine code on x86i, Arbace's x86-64 machine, over ci's own memory: its import\nsets ci.MachineCall (tools/cirun and the compiled programs').\n" :imports [
+    [fmt "fmt"]
+    [math "math"]
+    [sync "sync"]
+
+    [ci "arbace/ci"]
+    [crt "arbace/crt"]
+    [emu "arbace/emu"]
+    [x86i "arbace/x86i"]])
+
+(go/func init []
+  (set! ci/MachineCall call))
+
+(go/const
+  [^{:tag uint64 :val 10485760} textBase 0xa00000] ; the texts' window, between ci's label addresses and the read-only data
+  [^{:tag uint64 :val 16777216} textEnd 0x1000000]
+  [^{:tag uint64 :val 3735879680} sentinel 0xdead0000] ; the return address: never executable, its fetch ends the run
+  [^{:tag int :val 67108864} maxSteps (<< 1 26)]) ; a call's instructions at most
+
+(go/type machine "machine is a program's x86-64 address space over its memory and the texts mapped in it.\n" (struct
+    ^{:tag (* emu/AS)} as
+    ^{:tag uint64} next
+    ^{:tag (map (* ci/MCode) uint64)} texts))
+
+(go/var ^{:tag sync/Mutex} mu)
+(go/var ^{:tag (map (* crt/Mem) (* machine))} machines (make (map (* crt/Mem) (* machine))))
+
+(go/var ^{:tag (array 6 int)} intRegs (lit (array 6 int) 7 6 2 1 8 9)) ; rdi rsi rdx rcx r8 r9
+
+(go/func fault "fault ends the run as the machine's fault would, its message naming the function.\n" [^{:tag (* ci/MCode)} mc ^int sig ^uint64 a ^string msg]
+  (panic (addr (lit crt/Fault :Sig sig :Addr a :Msg (+ "machine code " (.-Name mc) ": " msg)))))
+
+(go/func machineOf "machineOf is the machine of the memory m, made at its first call.\n" ^{:tag (* machine)} [^{:tag (* crt/Mem)} m]
+  (.Lock mu)
+  (defer (.Unlock mu))
+  (when [x (aget machines m)] (!= x nil)
+    (return x))
+  (let [as (emu/NewAS)]
+    (set! (.-M as) m)
+    (let [x (addr (lit machine :as as :next textBase :texts (make (map (* ci/MCode) uint64))))]
+      (aset machines m x)
+      x)))
+
+(go/method text "text is the address of mc's text, mapped executable at its first call.\n" ^uint64 [^{:tag (* machine)} x ^{:tag (* ci/MCode)} mc]
+  (when [(values b ok) (aget (.-texts x) mc)] ok
+    (return b))
+  (let [size (bit-and-not (+ (conv uint64 (len (.-Text mc))) 0xfff) 0xfff)]
+    (when (== size 0)
+      (set! size 0x1000))
+    (when (> (+ (.-next x) size) textEnd)
+      (fault mc crt/SIGSEGV 0 "the texts' window is full"))
+    (let [b (.-next x)]
+      (when (or (not (.Map (.-as x) b size (bit-or emu/PermR emu/PermX) (+ "machine code " (.-Name mc)))) (not (.WriteBytes (.-as x) b (.-Text mc))))
+        (fault mc crt/SIGSEGV b "its text not mapped"))
+      (set! (.-next x) (+ (.-next x) size))
+      (aset (.-texts x) mc b)
+      b)))
+
+(go/func call "call runs mc on args in the thread t (ci.MachineCall).\n" ^{:tag ci/Arg} [^{:tag (* ci/Thread)} t ^{:tag (* ci/MCode)} mc ^{:tag (slice ci/Arg)} args]
+  (let [x (machineOf (.-M t))
+        entry (+ (.text x mc) (.-Off mc))]
+    ;; ci's memory as the machine sees it now (its slabs may have moved since the last call): the TLB flushed
+    (.Allow (.-as x) crt/Rodata0 (- crt/Data crt/Rodata0) emu/PermR)
+    (.Allow (.-as x) crt/Data (- crt/StackTop crt/Data) (bit-or emu/PermR emu/PermW))
+  (let [c (x86i/New (.-as x) nil entry 0)
+        ^{:tag (slice uint64)} stack nil
+        (values ni nx) (values 0 0)]
+    (range [i a args]
+      (let [k (.-K a)]
+        (when (< i (len (.-Params mc)))
+          (set! k (aget (.-Params mc) i)))
+        (switch k
+          (case [\i]
+            (when (!= (.-K a) \i)
+              (fault mc crt/SIGSEGV 0 (fmt/Sprintf "its argument %d is not an integer (not built)" i)))
+            (if (< ni 6)
+              (do (aset (.-R c) (aget intRegs ni) (conv uint64 (.-I a)))
+                  (inc! ni))
+              (set! stack (append stack (conv uint64 (.-I a))))))
+          (case [\d \f]
+            (let [bits (math/Float64bits (.-F a))]
+              (when (== k \f)
+                (set! bits (conv uint64 (math/Float32bits (conv float32 (.-F a))))))
+              (if (< nx 8)
+                (do (aset (aget (.-X c) nx) 0 bits)
+                    (inc! nx))
+                (set! stack (append stack bits)))))
+          (default
+            (fault mc crt/SIGSEGV 0 (fmt/Sprintf "its argument %d of kind %c (an aggregate or a wide integer: not built)" i k))))))
+    (set! (aget (.-R c) 0) (conv uint64 nx))
+    ;; the stack: below ci's stack pointer (the frames above it are in use), the stack arguments 16-byte aligned, the return address
+    ;; below them
+    (let [sp (bit-and-not (- (.-SP t) 128 (* 8 (conv uint64 (len stack)))) 15)]
+      (when (< (- sp 4096) (.-Lo t))
+        (fault mc crt/SIGSEGV sp "stack overflow"))
+      (range [i v stack]
+        (.Store64 (.-M t) (+ sp (* 8 (conv uint64 i))) v))
+      (set! sp (- sp 8))
+      (.Store64 (.-M t) sp sentinel)
+      (aset (.-R c) 4 sp))
+    (for [n 0] (!= (.-RIP c) sentinel) (inc! n)
+      (when (>= n maxSteps)
+        (fault mc crt/SIGSEGV (.-RIP c) (fmt/Sprintf "%d instructions without returning" n)))
+      (when [r (.Step c)] (!= r x86i/StepOK)
+        (let [sig (.-Signal c)]
+          (when (== sig 0)
+            (set! sig crt/SIGSEGV))
+          (fault mc sig (.-SigAddr c) (fmt/Sprintf "stopped at %#x (%s)" (.-RIP c) (.-Reason c))))))
+    (switch (.-Ret mc)
+      (case ["v"]
+        (return (lit ci/Arg)))
+      (case ["f64"]
+        (return (lit ci/Arg :K \f :F (math/Float64frombits (aget (aget (.-X c) 0) 0)))))
+      (case ["f32"]
+        (return (lit ci/Arg :K \f :F (conv float64 (math/Float32frombits (conv uint32 (aget (aget (.-X c) 0) 0))))))))
+    (return (lit ci/Arg :K \i :I (ci/Norm (.-Ret mc) (conv int64 (aget (.-R c) 0))))))))

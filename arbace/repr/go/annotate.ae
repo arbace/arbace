@@ -697,10 +697,48 @@
 (defn- convert-full [d ctx]
   (cv/convert-package d (assoc ctx :positions :full)))
 
+;; The files go/parser rejects (the user's decision of 2026-11-22; doc/go/GO-PARSER-SURVEY.md, "As built: the rejected files'
+;; messages"): no tree on either side, so the readers are compared by their errors in gc's words: gc's syntax errors from the
+;; native reader (arbace.repr.go.syntax, gc's own parser as Arbace runs it: bin/repr-go syntax-errors) against the reference's,
+;; gc itself over the original (bin/repr-go's corpus_gc_errors, NAME.gc/KEY.txt beside the helper's dumps), line for line.
+
+(defn file-lines
+  "Errors in gc's words of the Go file at path (text: gc's output, or the native reader's), each line's file read as the
+  file's base name on both sides when it names the file by its path: gc prints a line's file as it was given (the path),
+  the native reader by the name given (file-errors: the base name), but a position under a //line directive naming the
+  same file by its resolved path, as gc does (fixedbugs/issue15611.go); a position in a message, or of another file,
+  is compared as printed. Blank lines dropped."
+  [^String text ^String path]
+  (let [base (.getName (File. path))
+        pre (str path ":")]
+    (vec (for [l (str/split-lines text) :when (not (str/blank? l))]
+           (if (str/starts-with? l pre) (str base ":" (subs l (count pre))) l)))))
+
+(defn syntax-diff
+  "The first difference of the native reader's gc errors native from the reference's ref (both vectors of lines): nil when
+  equal, else [index reference-line native-line] (a missing line nil)."
+  [ref native]
+  (when (not= ref native)
+    (let [i (or (first (keep-indexed (fn [i [a b]] (when (not= a b) i)) (map vector ref native)))
+                (min (count ref) (count native)))]
+      [i (get ref i) (get native i)])))
+
+(defn alter-message
+  "The negative control of the rejected files' comparison: lines with one message altered (the first line's message, the
+  text after its FILE:LINE: prefix, its first character changed)."
+  [lines]
+  (if-let [l (first lines)]
+    (let [[_ pre msg] (or (re-matches #"(?s)([^:]*:\d+: )(.+)" l) [nil "" l])
+          c (first msg)]
+      (into [(str pre (if (= c \x) \y \x) (subs msg 1))] (rest lines)))
+    ["x"]))
+
 ;; The negative controls of native-check (doc/GATE-SURVEY.md, GTS81 (a); test/repr/go/native-controls.edn): a control
 ;; crosses two dumps of the run, the native read of the SUBJECT judged by each level's own comparison (E-tree's ps/diff,
-;; E-ann's same-package, E-forms' forms-diff) against the helper's dump of the REFERENCE, which must differ. The run keeps
-;; what a control needs of its two jobs (control-ids), judged after the corpora (control-verdicts).
+;; E-ann's same-package, E-forms' forms-diff) against the helper's dump of the REFERENCE, which must differ; a file go/parser
+;; rejects (level :syntax), the SUBJECT's gc errors with one message altered against the REFERENCE's gc reference (its own
+;; when the two are one), by syntax-diff. The run keeps what a control needs of its two jobs (control-ids), judged after the
+;; corpora (control-verdicts).
 (def ^:private control-ids (atom #{}))
 (def ^:private kept (atom {}))
 
@@ -721,11 +759,12 @@
              [k "a negative control's crossed entry"])))
 
 (defn control-verdicts
-  "The controls [{:id :subject :reference :levels [:tree :ann :forms :known]}] judged over kept (id NAME/KEY -> the parts
-  the run kept of that job: :rec, :n :d :ad :actx :nc :fc :dctx, and :own-tree :own-ann :own-forms when the job's own
-  comparison with the helper passed). The level :known (native-check's known differences) judges the subject's crossed
-  difference (one of the other levels held) by known-difference? against the reference's own entries (reference-entries),
-  which must not excuse it; it is judged only when a control lists it. Per control {:id :held [levels differing, or not
+  "The controls [{:id :subject :reference :levels [:tree :ann :forms :syntax :known]}] judged over kept (id NAME/KEY -> the
+  parts the run kept of that job: :rec, :n :d :ad :actx :nc :fc :dctx, :syn-native :syn-ref, and :own-tree :own-ann
+  :own-forms :own-syntax when the job's own comparison with the helper, or with gc's reference, passed). The level :known
+  (native-check's known differences) judges the subject's crossed difference (one of the other levels held) by
+  known-difference? against the reference's own entries (reference-entries), which must not excuse it; it is judged only
+  when a control lists it. Per control {:id :held [levels differing, or not
   excused] :passed [levels equal, or excused: the control fails] :left [levels not judged: a part missing, the subject's
   own comparison not passed, no crossed difference]}."
   [controls kept]
@@ -739,6 +778,10 @@
                                [(some? (same-package (:nc s) (:fc r)))])
                         :forms (when (and (:own-forms s) (:ad s) (:nc s) (:fc r) (:d r) (:dctx r))
                                  [(some? (forms-diff (:ad s) (:actx s) (:d r) (:dctx r) (:nc s) (:fc r)))])
+                        ;; a file go/parser rejects: the subject's gc errors with one message altered against the
+                        ;; reference's gc errors (its own, when the reference is the subject), by syntax-diff
+                        :syntax (when (and (:own-syntax s) (seq (:syn-native s)) (:syn-ref r))
+                                  [(some? (syntax-diff (:syn-ref r) (alter-message (:syn-native s))))])
                         :known nil))
               levels (:levels c [:tree :ann :forms])
               res0 (for [lv levels :when (not= :known lv)] [lv (judge lv)])
@@ -752,10 +795,29 @@
      :passed (vec (for [[lv v] res :when (= v [false])] lv))
      :left (vec (for [[lv v] res :when (nil? v)] lv))}))
 
+(defn- rejected-check
+  "A job go/parser rejects on both sides, judged by its errors in gc's words against the reference's (gc-dir's KEY.txt; none:
+  {:no-gc-ref true}): {:rejected-agree true} or {:syntax-diff [i ref native]}, the paths of gc's tree in a difference
+  written ${GOROOT}."
+  [cid j gc-dir]
+  (let [^File f (when gc-dir (File. ^File gc-dir (str (:key j) ".txt")))]
+    (if (and f (.isFile f) (= 1 (count (:files j))))
+      (let [path (str (:dir j) "/" (first (:files j)))
+            rl (file-lines (slurp f) path)
+            nl (file-lines (:text (syn/errors-text (:dir j) (:files j))) path)
+            d (syntax-diff rl nl)
+            g (str/replace (str (:goroot j)) #"/+$" "")]
+        (keep! cid {:syn-native nl :syn-ref rl :own-syntax (nil? d)})
+        (if d
+          {:syntax-diff (mapv #(if (and (string? %) (seq g)) (str/replace % g "${GOROOT}") %) d)}
+          {:rejected-agree true}))
+      {:no-gc-ref true})))
+
 (defn- check-job
   "A corpus job's checks against the helper's dump at path (nil: none): E-tree, the raw forms'
-  conformance to the final ones, E-ann."
-  [nm load sess-of j ^String path]
+  conformance to the final ones, E-ann; a job go/parser rejects on both sides by its errors in gc's words
+  (rejected-check, against gc-dir's references)."
+  [nm load sess-of j ^String path gc-dir]
   (let [cid (str nm "/" (:key j))
         base {:key (:key j) :path path :package (get-in j [:header :package]) :files (count (:files j))
               :keys (vec (for [f (:files j)] (str (get-in j [:header :dir]) "/" f)))}
@@ -770,7 +832,7 @@
             times (assoc (:times n) :read-ms (/ (- t1 t0) 1e6) :check-ms (/ (- t2 t1) 1e6))]
         (cond
           (and (:rejected r) d) (assoc base :fail (str "go/parser: " (:rejected r)))
-          (:rejected r) (assoc base :rejected (:rejected r))
+          (:rejected r) (merge (assoc base :rejected (:rejected r)) (rejected-check cid j gc-dir))
           :else
           (let [base (assoc base :nodes (count (mapcat (comp rd/nodes :ast) (:files n))) :times times
                             :open (assoc (cv/open-counts (mapcat :forms (:files (:rc r)))) :init-order 1))
@@ -789,7 +851,9 @@
                   (let [{ad :dump} (annotate n (:answers (:src r)) (when pkg (e/o pkg :result)))
                         nf (try (convert-full ad (:ctx r)) nil
                                 (catch Throwable ex (str (.getName (class ex)) ": " (.getMessage ex))))]
-                    (cond-> (assoc base :final-fail (:final-fail fc))
+                    (cond-> (assoc base :final-fail (:final-fail fc)
+                                   ;; the user, 2026-11-22: the same conversion failure (the trees equal above) is the readers' agreement
+                                   :final-same (= nf (:final-fail fc)))
                       ;; no oracle where go/types could not import a package (one the go command
                       ;; does not build for the configuration: GPS17, GPS32)
                       (some #(str/includes? (str %) "(no export data for ") (:errors d))
@@ -863,6 +927,8 @@
                               :when (sel? k)]
                           [k p]))
         hres (helper-results (:tsv spec))
+        ;; the reference's gc errors of the files the helper rejects (bin/repr-go's corpus_gc_errors), when made
+        gc-dir (let [d (File. (str dumps ".gc"))] (when (.isDirectory d) d))
         ;; each job with its session; the kept keys registered before any job runs
         work (vec (mapcat (fn [[l js]]
                             (let [[sess-of js] (load-sessions l js)]
@@ -875,7 +941,7 @@
         results (vec (mapcat #(nth % 2) loads))
         futs (mapv (fn [[l sess-of j]]
                      (.submit ^java.util.concurrent.ExecutorService pool
-                              ^Callable (fn [] (check-job nm l sess-of j (get helper (:key j))))))
+                              ^Callable (fn [] (check-job nm l sess-of j (get helper (:key j)) gc-dir))))
                    work)
         rs (mapv #(.get ^java.util.concurrent.Future %) futs)
         jkeys (set (map :key js))
@@ -888,7 +954,8 @@
         by (fn [k] (filter k rs))
         extra (by :extra)
         bad-extra (remove helper-failed? extra)
-        unknown (remove known? (concat (by :fail) (by :diff) (by :raw-diff) (by :ann-diff) (by :ann-fail) (by :forms-diff) missing bad-extra))
+        unknown (remove known? (concat (by :fail) (by :diff) (by :raw-diff) (by :ann-diff) (by :ann-fail) (by :forms-diff) (by :syntax-diff)
+                                       missing bad-extra))
         sum (fn [k] (reduce + (keep #(get-in % [:times k]) rs)))]
     (doseq [r (by :fail)] (println (if (known? r) "FAIL known" "FAIL") nm (:key r) (:fail r))
       (doseq [t (:trace r)] (println "    " t)))
@@ -897,11 +964,12 @@
     (doseq [r (by :ann-fail)] (println (if (known? r) "E-ANN FAIL known" "E-ANN FAIL") nm (:key r) (:ann-fail r)))
     (doseq [r (by :ann-diff)] (println (if (known? r) "E-ANN known" "E-ANN") nm (:key r) (pr-str (:ann-diff r))))
     (doseq [r (by :forms-diff)] (println (if (known? r) "E-FORMS known" "E-FORMS") nm (:key r) (pr-str (:forms-diff r))))
+    (doseq [r (by :syntax-diff)] (println (if (known? r) "SYNTAX known" "SYNTAX") nm (:key r) (pr-str (:syntax-diff r))))
     (doseq [r missing] (println (if (known? r) "MISSING known" "MISSING") nm (:key r) (:missing r)))
     (doseq [r rs :when (pos? (or (:errors r) 0))]
       (println "CHECKER" nm (:key r) (:errors r) "errors:" (pr-str (:error-msgs r))))
     (doseq [r bad-extra] (println (if (known? r) "EXTRA known" "EXTRA") nm (:key r) "dumped natively, not by the helper"))
-    (println (format "%s: E-tree %d of %d dumps equal (%d files, %d nodes); raw forms %d resolved by the final ones (%d raw only: the helper's final conversion fails); E-ann %d of %d equal (%d differ, %d failed); E-forms %d of %d equal (:lines and :full), %d without an oracle (the helper's imports not built); %d failed, %d missing, %d extra (%d the helper's failures), %d rejected by both; %d not known; load %.1f s, parse %.1f s, dump %.1f s, read %.1f s, check %.1f s (CPU), %.1f s"
+    (println (format "%s: E-tree %d of %d dumps equal (%d files, %d nodes); raw forms %d resolved by the final ones (%d raw only: the helper's final conversion fails); E-ann %d of %d equal (%d differ, %d failed); E-forms %d of %d equal (:lines and :full), %d without an oracle (the helper's imports not built); %d failed, %d missing, %d extra (%d the helper's failures), %d rejected by both (%d with gc's errors equal to gc's own, %d differ, %d without gc's reference); %d not known; load %.1f s, parse %.1f s, dump %.1f s, read %.1f s, check %.1f s (CPU), %.1f s"
                      nm (- (count (filter :nodes rs)) (count extra) (count (by :diff))) (count helper)
                      (reduce + (map :files (filter :nodes rs))) (reduce + (keep :nodes rs))
                      (- (count (filter :res rs)) (count (by :raw-diff))) (count (by :final-fail))
@@ -909,14 +977,15 @@
                      (count (by :ann-diff)) (count (by :ann-fail))
                      (count (by :forms-equal)) (count (by :equal)) (count (by :no-export))
                      (count (by :fail)) (count missing) (count extra) (- (count extra) (count bad-extra))
-                     (count (by :rejected)) (count unknown)
+                     (count (by :rejected)) (count (by :rejected-agree)) (count (by :syntax-diff)) (count (by :no-gc-ref)) (count unknown)
                      (/ load-ms 1e3) (/ (sum :parse-ms) 1e3) (/ (sum :dump-ms) 1e3) (/ (sum :read-ms) 1e3)
                      (/ (sum :check-ms) 1e3) (/ (- (System/nanoTime) t0) 1e9)))
     {:corpus nm :dumps (count helper) :jobs (count js)
      :tree-equal (- (count (filter :nodes rs)) (count extra) (count (by :diff)))
      :files (reduce + (map :files (filter :nodes rs))) :nodes (reduce + (keep :nodes rs))
      :raw-resolved (- (count (filter :res rs)) (count (by :raw-diff)))
-     :raw-only (vec (for [r (by :final-fail)] [(:key r) (:final-fail r)]))
+     ;; [KEY MESSAGE] or, the native conversion failing with the helper's message (the trees equal), [KEY MESSAGE :same]
+     :raw-only (vec (for [r (by :final-fail)] (cond-> [(:key r) (:final-fail r)] (:final-same r) (conj :same))))
      :ann-equal (count (by :equal))
      :ann-differ (vec (for [r (by :ann-diff)] [(:key r) (:ann-diff r)]))
      :ann-fail (vec (for [r (by :ann-fail)] [(:key r) (:ann-fail r)]))
@@ -929,6 +998,11 @@
      :missing (vec (for [r missing] [(:key r) (:missing r)]))
      :extra (vec (for [r extra] [(:key r) (if (helper-failed? r) (second (get hres (or (:tsv-key (some #(when (= (:key r) (:key %)) %) js)) (:key r)))) "not the helper's failure")]))
      :rejected (count (by :rejected))
+     ;; the rejected files whose gc errors from the native reader equal gc's own (the user, 2026-11-22), those that differ, those
+     ;; without gc's reference
+     :rejected-agree (count (by :rejected-agree))
+     :rejected-differ (vec (for [r (by :syntax-diff)] [(:key r) (:syntax-diff r)]))
+     :rejected-no-ref (count (by :no-gc-ref))
      :open (into (sorted-map) (merge-counts (keep :open rs)))
      :resolutions (into (sorted-map) (merge-counts (keep :res rs)))
      :unplaced (reduce + (keep :unplaced rs))
@@ -1047,7 +1121,9 @@
   check: per dump of each corpus SPEC (arbace.repr.go.parse's specs) against the helper's dumps
   (:dumps): E-tree, the raw forms against the final ones (conform), E-ann (the final forms of the
   annotated native dump equal the helper's), E-forms (their .ae text equal in modes :lines and
-  :full). Exits 1 on a difference or failure that the known differences (a map of dump key,
+  :full), and a file go/parser rejects on both sides by its errors in gc's words, the native reader's
+  (arbace.repr.go.syntax) against gc's own over the original (the dumps' NAME.gc/KEY.txt, bin/repr-go's
+  corpus_gc_errors; the user's decision of 2026-11-22). Exits 1 on a difference or failure that the known differences (a map of dump key,
   package path or file key to the reason) do not list. --only FILE (GT8, the rotation's lists): the
   ids NAME/KEY of FILE (one a line; NAME a spec's :name, KEY a dump's key) alone, a partial check."
   [& args]
@@ -1124,12 +1200,13 @@
     (some-> ^java.util.concurrent.ExecutorService (:pool @prefetch) .shutdownNow)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
     (when (and (= cmd "check") (> (count results) 1))
-      (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; E-forms %d equal, %d differ; %d not known"
+      (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; E-forms %d equal, %d differ; rejected by both %d (gc's errors equal to gc's own %d); %d not known"
                        (count results) (reduce + (map :dumps results)) (reduce + (map :tree-equal results))
                        (reduce + (map :raw-resolved results)) (reduce + (map (comp count :raw-only) results))
                        (reduce + (map :ann-equal results)) (reduce + (map (comp count :ann-differ) results))
                        (reduce + (map (comp count :ann-fail) results))
-                       (reduce + (keep :forms-equal results)) (reduce + (map (comp count :forms-differ) results)) unknown)))
+                       (reduce + (keep :forms-equal results)) (reduce + (map (comp count :forms-differ) results))
+                       (reduce + (keep :rejected results)) (reduce + (keep :rejected-agree results)) unknown)))
     (when-let [rf (when (= cmd "check") (:report opts))]
       (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn (cond-> {:forms fc :corpora results} only (assoc :partial (count only)) (seq verdicts) (assoc :controls verdicts)))))))
     (when only

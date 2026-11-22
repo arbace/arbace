@@ -47,6 +47,7 @@ cmd_suite_corpus() {
     [ -f "$OPAM/$pkg/.extracted" ] || die "suite corpus: the opam package $pkg is not fetched out (bin/repr-ocaml corpus fetch)"
   done
   if [ -d "$OPAM" ]; then
+    # (a seventh column INCS, queue 528 and queue 531 alike: the libraries the program links, as header.awk's include names them: unix)
     grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $7, $4, $6, "'"$OPAM"'/" $1, $5 }
       NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
   fi
@@ -67,14 +68,46 @@ suite_stage() {
     # and the .ml files its header names as readonly_files, data (parsetree/test's source.ml: OT21 (b))
     local ro f; ro=$(sed -n 's/.*readonly_files *= *"\([^"]*\)".*/\1/p' "$base/$id.ml" | head -1)
     for f in $ro; do case $f in *.ml) [ -f "$base/$(dirname "$id")/$f" ] && cp "$base/$(dirname "$id")/$f" "$d/" ;; esac; done ;; esac
+  # queue 534: an opam unit its directory's dune file preprocesses (a library's `(preprocess (action (run ... %{input-file})))`) or
+  # makes by a rule (no .mly or .mll of its stem) is given the text dune's build compiles, by arbace.repr.ocaml.prep's build-into
+  local build=() wbuild=()
   for u in $units; do
     case $u in
       =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
       @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
-      @*) suite_wrap_one "$base" "$u" "$d" ;;
-      *) if [ -f "$base/$u" ]; then cp "$base/$u" "$d/"; else suite_gen "$base/$u" "$d"; fi ;;
+      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u"); else suite_wrap_one "$base" "$u" "$d"; fi ;;
+      *) if suite_needs_build "$id" "$base" "$u"; then build+=("$base/$u")
+         elif [ -f "$base/$u" ]; then cp "$base/$u" "$d/"
+         else suite_gen "$base/$u" "$d"; fi ;;
     esac
   done
+  if [ ${#build[@]} -gt 0 ] || [ ${#wbuild[@]} -gt 0 ]; then
+    local exe; exe=$( (declare -F arbace_exe > /dev/null && arbace_exe) || echo "$ARBACE_HOST_EXE")
+    [ ${#build[@]} -gt 0 ] && { ARBACE_PATH="$root" "$exe" -m arbace.repr.ocaml.prep build-into "$d" "${build[@]}" > "$d/build-into.log" 2>&1 || true; }
+    # (the two queues composed: a wrapped library's unit that dune preprocesses is built first, by library into a directory beside DIR so
+    # that two libraries' modules of one name stay apart, then staged as Lib__M with its open from the build's text)
+    if [ ${#wbuild[@]} -gt 0 ]; then
+      local lib libs="" files w
+      for u in "${wbuild[@]}"; do lib=${u#@}; lib=${lib%%[/!]*}; case " $libs " in *" $lib "*) ;; *) libs="$libs $lib" ;; esac; done
+      for lib in $libs; do
+        w=$d.wbuild/$lib; mkdir -p "$w"; files=()
+        for u in "${wbuild[@]}"; do case $u in @"$lib"/*|@"$lib"!*) files+=("$base/$(suite_wrap_path "$u")") ;; esac; done
+        ARBACE_PATH="$root" "$exe" -m arbace.repr.ocaml.prep build-into "$w" "${files[@]}" >> "$d/build-into.log" 2>&1 || true
+        for u in "${wbuild[@]}"; do case $u in @"$lib"/*|@"$lib"!*)
+          f=$w/$(basename "$(suite_wrap_path "$u")"); [ -f "$f" ] && suite_wrap_one "$base" "$u" "$d" "$f" ;; esac; done
+      done
+      rm -rf "$d.wbuild"
+    fi
+  fi
+}
+
+# suite_needs_build ID BASE PATH (queue 534): an opam unit its directory's dune file preprocesses (`%{input-file}` in an action) or, absent,
+# makes by a rule (no .mly or .mll of its stem), whose text dune's build compiles prep's build-into gives
+suite_needs_build() {
+  local id=$1 base=$2 u=$3
+  case $id in opam/*) ;; *) return 1 ;; esac
+  if [ -f "$base/$u" ]; then grep -qsF '%{input-file}' "$(dirname "$base/$u")/dune"
+  else local s=$base/${u%.*}; [ ! -f "$s.mly" ] && [ ! -f "$s.mll" ] && [ -f "$(dirname "$base/$u")/dune" ]; fi
 }
 
 # A dune-wrapped library's units (queue 531: the opam set's test libraries, alcotest's and re's), as dune compiles them: a module M of
@@ -100,11 +133,16 @@ suite_unit_file() { # UNIT -> the staged file's name
     *) basename "$u" ;;
   esac
 }
-suite_wrap_one() { # BASE UNIT DIR: a wrapped unit staged with its open
-  local base=$1 u=$2 d=$3 lib p
+suite_wrap_path() { # UNIT -> a wrapped unit's PATH, relative to BASE
+  local p=${1#@}; p=${p#*[/!]}; echo "${p%>*}"
+}
+suite_wrap_one() { # BASE UNIT DIR [SRC]: a wrapped unit staged with its open (SRC: its text from prep's build-into, queue 534, else BASE/PATH)
+  local base=$1 u=$2 d=$3 lib src
   [[ $u =~ ^@([a-z0-9_]+)([/!])(.*)$ ]] || return 1
-  lib=${BASH_REMATCH[1]}; p=${BASH_REMATCH[3]}; p=${p%>*}
-  { printf 'open! %s__ ' "$(suite_cap "$lib")"; cat "$base/$p"; } > "$d/$(suite_unit_file "$u")"
+  lib=${BASH_REMATCH[1]}; src=${4:-$base/$(suite_wrap_path "$u")}
+  # the open on the first line, unless that line is a line directive (a build's `# 1 "FILE"`), which then renumbers what follows it
+  if [ "$(head -c1 "$src")" = '#' ]; then { printf 'open! %s__\n' "$(suite_cap "$lib")"; cat "$src"; } > "$d/$(suite_unit_file "$u")"
+  else { printf 'open! %s__ ' "$(suite_cap "$lib")"; cat "$src"; } > "$d/$(suite_unit_file "$u")"; fi
 }
 suite_alias() { # LIB UNITS: the alias module's text
   local lib=$1 u f seen=" "
@@ -168,7 +206,7 @@ suite_ref_one() {
 
 cmd_suite_record_ref() {
   opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_suite_corpus > "$S/corpus.log"
-  export -f suite_ref_one suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT root
+  export -f suite_ref_one suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT root
   local out=$S/ref.tsv
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_ref_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
@@ -288,7 +326,7 @@ cmd_suite_check() {
   if [ "$AOT" = 1 ] && [ "$LEVEL" = compiled ]; then cmd_suite_check_compiled; return; fi
   if [ "$AOT" = 1 ]; then cmd_suite_check_aot; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; suite_native_env
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' "$OI_SELECTED" | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
@@ -311,7 +349,7 @@ cmd_suite_check_compiled() {
   # the native path as the light level's (TY24 (a), OC202): suite_dump types the units by Arbace's typer, the record
   # check-suite-aot-compiled-native.edn (suite_results)
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib; suite_native_env
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   C2=$S/compiled; rm -rf "$C2"; mkdir -p "$C2"
@@ -346,7 +384,7 @@ cmd_suite_check_aot() {
   [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
   mkdir -p "$O2J/tmp"
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   local A=$S/aot; rm -rf "$A"; mkdir -p "$A"
