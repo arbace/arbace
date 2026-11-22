@@ -9736,3 +9736,190 @@ DECISION cpp-rt-own3-2 (c++17/floating_from_chars.cc: a destructor named through
     reaches polymorphic_allocator's destroy incomplete (the pool's vector<_BigBlock>). Recommended: one unit.
 (b) Leave it on the pack.
 ```
+
+## As built: cpp-rt-own4, GNU's VLAs, late destructor calls, lazily named specializations and the last pack units (2026-11-22; branch `cpp-rt-own4-1122` from mac/next 3e8dfe109)
+
+The brief (the main session, toward the CoMaIn goal: C++'s eval and AOT independence, 0.995 each): the lowered runtime's last 4 pack
+units by Arbace's own code generator, cpp-rt-own3's causes-left table the list, its decisions taken as recommended: cpp-rt-own3-1 (a)
+(GNU's variable-length arrays), cpp-rt-own3-2 (a) (a destructor named before its class is complete, resolved late); tzdb and valarray
+probed first. Light: no gate; each rule on a reduced case against clang 23.1.5's IR (the host's clang++, the oracle tier's tool, by
+hand; the worktree's `.tmp/{v1,d1,ff,fc,ec,fp,vo,ei,va,tc,tz}`, scratch), then each unit by `arbace.cpp.codegen gen-batch` with
+runtime_ours' options (`.tmp/where.sh`), its defined external names against the pack cpp-runtime-ir's IR (runtime-judge's names level).
+The C++ read stream (cpp-read-1122) and the Mac's dg tasks edit sema.ae and template.ae in the checker's paths: every rule below is
+the code generator's alone (`(not (checking?))`) but two that are no mode's, named where they are.
+
+### DECISION cpp-rt-own3-1 (a): GNU's variable-length arrays
+
+- **The parser** (parse.ae's parse-simple-decl, no mode's: a `:_` key, the tree compared with clang's unchanged): a VarDecl whose
+  declarator has an array bound that is no literal keeps its bounds as parsed, outermost first, `:_vla`.
+- **sema** (vla-local, from local-var!, the code generator's): a block-scope variable whose type does not resolve because its
+  outermost bound is no constant ("not a constant" anywhere in the refusal, a const local's initializer calling strlen too), no
+  initializer, not static or thread_local, its element type resolving and no class: the type `{:k :arr :n nil :vla true :of T}`, the
+  var's `:vla-n` the bound analyzed in the block's scope as an integer prvalue (clang's VariableArrayType's size expression). abi's
+  size-align refuses a :vla array (sizeof of a VLA is not modelled).
+- **The code generator** (vla-decl!): as clang's EmitAutoVarAlloca at -O0: the bound evaluated and widened to i64 (zext from a
+  narrower type, clang's CreateIntCast unsigned), at the scope's first VLA (`*vla-saved*`, bound per compound statement: clang's
+  DidCallStackSave per RunCleanupsScope) `llvm.stacksave` stored into a `ptr` alloca and a cleanup `{:stackrestore slot}` pushed,
+  then `alloca T, i64 n, align max(16, alignof T)` (ASTContext::getDeclAlign's large-array alignment for a VLA) and the bound
+  stored into an `i64` alloca (clang's __vla_expr); the variable's address the dynamic alloca. The cleanup is a normal one only
+  (clang's pushStackRestore(NormalCleanup, ...)): run-cleanup! loads the slot and calls `llvm.stackrestore`, eh-state leaves it out,
+  so no landing pad for it and none runs it while unwinding. The lowering takes the dynamic allocas and stack saves already (ci's
+  heap chain, cx$dyn_alloc).
+
+Checked: `.tmp/v1/vla.cc` (a VLA in a function, two in a template's block, one of 4 + k, one of long by a short bound): the 5
+defined names clang's, each function's allocas, stack save, dynamic alloca, __vla_expr store and restore in clang's order.
+
+### DECISION cpp-rt-own3-2 (a): an explicit destructor call of a class not complete where it is analyzed
+
+The probe first: floating_from_chars.cc's `__p->~_Up()` is reached through `vector<__pool_resource::_BigBlock,
+polymorphic_allocator<_BigBlock>>::~vector`, made eager by the lazy round's variable rule (template.ae's pending: a parameter of
+vector<_BigBlock> type, the vector's copy and move constructors' `__x` and `__rv`, puts its class's closure's destructors in the
+round), though clang instantiates none of it there; _BigBlock is never defined in the unit (memory_resource.cc defines it). A
+class's implicit destructor is already declared at its completion (finish-class!). So: member-expr (the code generator's), the
+destructor name of a class not complete (or being defined) with no destructor declared yet, is `{:op :late-dtor :cls k :obj o}`;
+analyze-call makes it `{:op :late-dtor-call ...}` (no arguments); codegen's emit-rv takes the class's destructor when it writes the
+call (method-call's node then: virtual unless qualified), and refuses there if it is still missing. The lazy round's walk finds
+the object's class type in it, so a destructor declared later is made eager as before.
+
+Checked: `.tmp/d1/d.cc` (~V<Never> of an incomplete Never, through a parameter V<Never>&, analyzed with the late node and never
+written; kill<Done> and kill<Virt>, and a qualified `v->Virt::~Virt()`): the 6 defined names clang's.
+
+### valarray: specializations named lazily in member functions' types (the drops probed first)
+
+valarray.cc's "no member size": valarray<size_t> was cached with no member, its instantiation through gslice's constructor having
+ended on "recursive template instantiation exceeded maximum depth (the analysis' stack, under valarray)": <valarray>'s
+`_Expr<_Clos, _Tp>` declares `_Expr<_UnClos<__unary_plus, std::_Expr, _Clos>, value_type> operator+() const` (and -, ~, !), each
+specialization naming the next in a member function's type, and the analysis instantiated every class template specialization it
+named (451 nested _Expr instantiations before the stack ended). [temp.inst]/2: naming a specialization in a function declaration does
+not instantiate it; clang instantiates none of them until one is used. The rule (the code generator's; the checker instantiates as
+before): while a member function's type is resolved (sema's `*in-signature*`, bound in declare-fn!, unbound by declare-instance!
+for a class's body), a specialization of a template already being instantiated twice up the stack (template.ae's `*inst-stack*`,
+`lazy-here?`) is named lazily: an incomplete class marked :lazy-inst cached as the template's instance (lazy-instance!), its layout
+refused (abi's layout*: no code is written from a class never defined), instantiated in place when it is named again outside any
+class's instantiation and any member function's type (a use of the unit's own code). Two up the stack, not one, so that a class
+template whose member names another specialization of itself (`span<T, dynamic_extent> first(size_type)` of span<T, N>) is
+instantiated as before; only a chain like _Expr's is cut. The 64 "unknown type _Tp" drops (the out-of-line operators the macros
+of <valarray> define) and the drops of gslice_array's and slice_array's members stay: valarray.cc uses none of them.
+
+Checked: `.tmp/va/v1.cc` (`v.size()` of a valarray<size_t>, gnu++98, valarray.cc's options): generated, 180 specializations named
+lazily, none instantiated; then valarray.cc itself (below).
+
+### Found on the way (each by its reduced case against clang 23.1.5's IR)
+
+- **The parser** (no mode's; parse.ae, shared with the read stream): parse-simple-decl looked a declaration's initializer up with the
+  class's complete scope first (with-late*) in every context, so in a member function's body a block's declaration `size_t shr =
+  limb_bits - shl;` found the member function shl, declared later in the class, before the local `size_t shl` (fast_float.h's
+  bigint::shl_bits; `this->shl` then, "arithmetic on ulong and ptr"); the complete scope is already below the function's
+  parameters (fn-body's with-late*), so now a member's initializer alone takes it ([class.mem]/7). The trees change only where a
+  local or a parameter shadows a member, as clang's (a DeclRefExpr of the local). `.tmp/ff/s.cc`, `s3.cc`, `m.cc` (a default member
+  initializer naming a later member still sees it).
+- **No argument-dependent lookup for a qualified name** ([basic.lookup.argdep]/1; sema's analyze-call, the code generator's):
+  floating_from_chars.cc's `fast_float::from_chars(first, last, value, fmt)` had found std::from_chars through the std::chars_format
+  argument, a better match than the template, so `std::from_chars(double&)` called itself and fast_float's parser was never
+  written. `.tmp/fc/f1.cc`: 82 defined functions as clang's 82.
+- **The built-in candidate for two operands of one enumeration type** ([over.built]/16, [over.match.best]/2.1; sema's operator-call,
+  the code generator's): the built-in comparison is better than a function reached through a user-defined conversion of an operand;
+  floating_from_chars.cc's auto_locale `ec == errc{}` had called operator==(const error_condition&, const error_condition&) through
+  error_condition's converting constructor (7 names more than the pack's). `.tmp/ec/e.cc`.
+- **__builtin_fpclassify** (sema, the code generator's; the checker's records were made without it): zero when x == 0, nan when x is
+  unordered, inf when x - x is a NaN, normal when |x| is at least FLT_MIN, DBL_MIN or LDBL_MIN, else subnormal, an int (floating_to_chars.cc's
+  __handle_special_value). `.tmp/fp/fp.cc` run against clang's (status 203: zero, normal, subnormal, inf and NaN of float, double's
+  zero, subnormal and normal, long double's zero, normal and LDBL_MIN), its names clang's.
+- **Member templates differing by cv- or ref-qualifiers** (template.ae's redeclaration check, the code generator's): the
+  functionally-equivalent check compared the signatures without the member's qualifiers, so <optional>'s `value_or(_Up&&) const&` and
+  `value_or(_Up&&) &&` were one template, the second, and `precision.value_or(0)` of an lvalue had no viable function
+  (floating_to_chars.cc; any optional's value_or). `.tmp/vo/d.cc`, `e.cc`, `g.cc`.
+- **A destructor's explicit instantiation** (template.ae's explicit-qualifier, the code generator's): `template
+  valarray<size_t>::~valarray();` names the destructor by two tokens, `~ valarray`, which the qualifier's search did not take: its
+  member was not marked, ~valarray written linkonce_odr with no D1 alias (valarray.cc's missing _ZNSt8valarrayImED1Ev). `.tmp/ei/e.cc`:
+  C1 and D1 aliases, D2 weak_odr, as clang.
+- **128-bit constants in the template text evaluator** (template.ae's eval-text, the code generator's; the checker refuses them as
+  before, cpp-s5b): a cast to __int128 or unsigned __int128 is an exact `{:k :w128 :v :u}` value modulo 2^128, which the
+  comparisons, the logical operators, ?:, unary - and ~, + - * and the shifts compute (fold-w128) and which never leaves the text
+  (eval-text refuses one as its result), so only what it decides does: <type_traits>' __is_signed_helper's `_Tp(-1) < _Tp(0)`, so
+  is_signed<__int128> and is_signed<unsigned __int128> (floating_to_chars.cc's __to_chars_i of the 128-bit mantissa had found no
+  `value`). `.tmp/tc/w.cc` run against clang's (status 93: is_signed of both, is_unsigned, and a template over `T(1) << 100 > T(0)`,
+  `T(-1) < T(0)`, `~T(0) == T(-1)` of both).
+- **A parameter's top-level const** (the parser's ParmVarDecl `:_const`, a `:_` key, since its qualType prints the parameter as the
+  function's type does, [dcl.fct]/5; sema's declare-fn! `:param-const` and analyze-fn!, the code generator's): the parameter's variable
+  keeps it, so `const optional<int> precision`'s value() is the const& one and `const int precision` given to optional<int>(_Up&&) deduces
+  const int& (floating_to_chars.cc: value() & and optional<int>(int&) before). `.tmp/op/o2.cc`: 31 names clang's.
+- **A variable template's pack arguments as written** (abi's mangle-expr :vt): an unresolved name's arguments a pack's elements one by
+  one, as :sr's and :mcall's already, no J ... E: <optional>'s `enable_if_t<is_constructible_v<_Tp, _Args...>, bool>`,
+  X18is_constructible_vIS0_DpT_EE, and `__and_v<__not_<...>, ...>`, X7__and_vISt6__not_...E. `.tmp/op/o2.cc`.
+- **A non-type template parameter is no pack for a `...` in its type's template arguments** (template.ae's tparams, the code
+  generator's): `enable_if_t<is_constructible_v<_Tp, _Args...>, bool> = false` had been a pack, mangled `TpTn...` with an empty `JE`
+  argument, clang's `Tn...Lb0E`. `.tmp/op/o2.cc`.
+- **A linkonce_odr variable whose address is taken is written** (codegen's var-addr and gen-module's pruning): `return nullopt;` and
+  `optional<int>(in_place, 3)` copy an empty class from the inline variables, a copy no instruction reads, so the pruning of the
+  unreferenced linkonce_odr variables (queue 367) had dropped _ZSt7nullopt and _ZSt8in_place, which clang writes (its EmitLValue of the
+  copy's source). `.tmp/op/o3.cc`: names and globals clang's.
+- **An explicit specialization of a static function template is internal** (template.ae's explicit-fn-spec!, the code generator's;
+  [temp.expl.spec], and an argument of internal linkage, as instantiate-fn's): `template<> optional<to_chars_result>
+  __handle_special_value<floating_type_float16_t>(...)` had been external. `.tmp/hs/h.cc`.
+
+### The units made own (rt_ours_glob, bin/cppi), each one's names by gen-batch the pack's
+
+c++17/floating_to_chars.cc (DECISION 1, with __builtin_fpclassify, optional's value_or, a parameter's top-level const, the variable
+template's pack arguments, the non-type parameter, nullopt and in_place, the 128-bit constants, the explicit specializations'
+linkage), c++17/floating_from_chars.cc (DECISION 2, with the parser's lookup, the qualified call's ADL, the enum comparison) and
+c++98/valarray.cc (the lazily named specializations and the destructor's explicit instantiation): 194 to **197 of 198**.
+
+### c++20/tzdb.cc, probed to the end again (left on the pack)
+
+The header drop of `typename invoke_result<_Fn, _Args...>::type` (projected's value_type and operator*) is
+`projected<__normal_iterator<...>, P>` for a P that is an overload set's type ({:k :overload}: an overloaded function's address taken
+as a candidate's projection, `&Vec::value_type::name` of a generic lambda), not the call's: projected over a pointer to member
+function (`.tmp/tz/t7.cc`) or to a data member of class type (`t8.cc`) and invoke_result of both (`t4.cc`, `t5.cc`) generate as
+clang's. The refusal stays "no operator() of __upper_bound_fn" at `ranges::upper_bound(infos, tp, ranges::less{}, &ZoneInfo::until)`
+(23 minutes into the unit; the reduced case with <chrono>'s sys_seconds, `.tmp/tz/t6.cc`, did not finish in 20 minutes): none of
+__upper_bound_fn's two operator()s is viable, the range one's `indirect_strict_weak_order<const sys_seconds*, projected<iterator_t<R>,
+P>> _Comp = ranges::less` constraint over time_point's three-way comparison the likely one. Next: a probe of that constraint alone,
+with a faster harness (the unit's chrono and format headers make each probe 20 minutes or more).
+
+### Found and left (not on the units' way)
+
+- `*opt` of a prvalue `std::optional<int>` (`*hv(p, w)`): "ambiguous call (3 viable)" among optional's operator*() const&, && and
+  const&&, the base's too (`.tmp/hs/h.cc`'s first form): the implicit object parameter's ranking for an rvalue object
+  ([over.match.funcs]/5, [over.ics.rank]/3.2.3) does not prefer && over const&&.
+- A subnormal long double literal (`1e-4940L`): its x86_fp80 constant written with too many hex digits ("lower-float-format",
+  `.tmp/fp/fp.cc`'s first form): fp80-hex for a subnormal.
+
+### Checked (the brief's proofs, and only these; no gate)
+
+| check | result |
+|---|---|
+| reduced cases against clang 23.1.5's IR (by hand, the host's clang++ -O0) | v1/vla.cc, d1/d.cc, ff/s.cc, ff/s3.cc, ff/m.cc, fc/f1.cc, ec/e.cc, vo/{d,e,g}.cc, ei/e.cc, op/o2.cc, op/o3.cc, hs/h.cc: every defined name clang's (v1: the VLAs' shape clang's); fp/fp.cc and tc/w.cc run as clang's builds (statuses 203 and 93); va/v1.cc generated (180 lazily named, none instantiated) |
+| each unit by gen-batch with runtime_ours' options (`.tmp/where.sh`), names against the pack | floating_to_chars, floating_from_chars, valarray: same; tzdb: "no operator() of __upper_bound_fn" (23 min) |
+| `bin/cppi runtime-build` (auto, at 8eab9eb73, under `ulimit -v 8388608`, CPPI_DISK_MAX=94: the disk at 91% from other lines) | **198 units, 198 pass, 197 by our route** ("ours 197"), the names level equal for each own unit (each of the 196 C++ units' names checked against the pack while the IR was made, then runtime-judge's); IR 6,971 s (one generator process), read, print and lower 299 s; 2 h 2 min wall |
+| `bin/cppi runtime-ci` (`CPPI_CI_CHUNK=8 CPPI_CI_MEMLIMIT=2GiB`, under `ulimit -v 8388608`) | 199 of 199 read (the 198 units and cx-rt; the reader's key another than any kept library's, so every unit read again, in 25 chunks); 6,020 s |
+| `bin/cppi runtime-inputs --record` | own 197, pack 1: test/cpp/runtime/inputs-linux-amd64.edn's 3 rows `{:ir :own, :ci-target :own}` |
+| `bin/cppi lower-essential` (`ARBACE_NO_AOT=1`, on this runtime) | 6 files, 6 pass, 0 failing (the control's lowered run the oracle tier's); 499 s |
+| `bin/cppi check --only test/cpp/essential-check.txt` (cpp-check-essential's command, `ARBACE_NO_AOT=1 CPPI_THREADS=2 CPPI_CI_MEMLIMIT=3GiB`, on this runtime) | samples 4 of 4 and runtime 4 of 4 pass (the programs' IR by our route), the run controls bitfields-vs-io, coroutine-vs-pr106188 and ctor-throw-vs-thread-throw differing as they must, selfref's control refused as it must; selfref 220 of 225 judged by their own verdict; 3,449 s |
+| `bin/cppi codegen-gen` (`--record`, a whole run, then its judge with the controls) | 156 of 156 generated, the record written again byte for byte (no digest moved: no sample meets a rule of this round), then its judge (gen-judge over the same run) 156 pass with both controls failing as they must; 881 s |
+| `bin/repr-cpp c2j-check` | 33 of 33 sources compiled, 0 failed, **0 reflection warnings** (ok, 333 s); on the gate's executable 92a96093a59cb6e9edb9 as the host (ARBACE_HOST_EXE): stage 0 refuses ARBACE_PATH_FIRST's load of the checkout's arbace/core since b4ab3ebfc's runtime (`Compiler$Dyn/hideMethod`, which the seed's runtime lacks), the environment's, not this round's |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | the matrix unchanged (56 of 56 cells, 0 problems); C++'s eval and AOT stages 0.9950 to 0.9990 each, its independence 0.9522 to **0.9538**, 95 (floored, unchanged); test/crops/scores.edn re-recorded, `--judge --strict` 0 problems, records-check 9 pairs, 0 problems |
+
+The runtime-keyed steps (runtime-ci, runtime-inputs, lower-essential, the check) ran on the runtime built at 8eab9eb73, the code
+of that commit in the working tree. Keys: the runtime's key moves (the code generator, sema, template, abi, repr/cpp's parser,
+rt_ours_glob): the gate's cpp-runtime builds once (2 h on this host); `gate_key` and the javac keys move (arbace/cpp and
+arbace/repr/cpp embedded); runtime-ci's key moves (every unit read again). Shared code touched (the read stream's and the dg
+tasks' files): parse.ae (the `:_vla` and `:_const` keys, no tree change; with-late* for a member's initializer alone, which
+changes the trees, the checker's too, only where a block's local or a parameter shadows a member, as clang's), sema.ae and
+template.ae (every change behind `(not (checking?))` or reached only from the code generator's paths); a dry merge with
+mac/cpp-read-1122 (b75bcfe07) has no conflict.
+
+### The unit left on the pack (1 of 198)
+
+| unit | cause | next decision |
+|---|---|---|
+| c++20/tzdb.cc | "no operator() of __upper_bound_fn" at `ranges::upper_bound(infos, tp, ranges::less{}, &ZoneInfo::until)`: neither operator() viable, the range overload's `indirect_strict_weak_order<const sys_seconds*, projected<iterator_t<R>, P>>` over time_point's three-way comparison the likely constraint; each probe 20 minutes or more | DECISION cpp-rt-own4-1 |
+
+```
+DECISION cpp-rt-own4-1 (c++20/tzdb.cc: ranges::upper_bound with a member function projection over chrono's time_point)
+(a) Probe the constraint alone (`indirect_strict_weak_order<ranges::less, const sys_seconds*, projected<vector<Z>::iterator,
+    sys_seconds (Z::*)() const noexcept>>` in a static_assert, the unit's options) with the full parse cache on
+    (CPP_GEN_FULL_CACHE=1) so each probe costs the analysis alone, then fix what it refuses. Recommended: the last unit, the
+    lowered runtime's IR all Arbace's own (eval and AOT 1.0 for the runtime's half).
+(b) Leave it on the pack.
+```
