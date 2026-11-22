@@ -1709,7 +1709,11 @@
         _ (when (and (checking?) @dd *constraint-doubt*) (reset! *constraint-doubt* true))
         defer (or defer (boolean (and (checking?) (not sat) @dd)))]
   (if (and (not sat) (not defer))
-    nil
+    (do ;; (queue 510, the checker: a constructor so dropped is user-declared all the same, [class.default.ctor]/1: no implicit
+        ;; default constructor for its class, finish-class!; cpp2a/concepts-inherit-ctor2.C's S1<int>)
+        (when (and (checking?) (= "CXXConstructorDecl" (:kind n)) (:cls scope))
+          (abi/update-cls! (:cls scope) assoc :cx-ctor-dropped true))
+        nil)
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n))
             (or (when-let [q (expanded-qualifier n)] (when (some #(str/includes? % "<") q) q))
                 (qualifier-before n) (qualifier-tid-before n)
@@ -2928,7 +2932,7 @@
     ;; cpp1z/inh-ctor22.C's `struct B1 { template <class... Ts> B1(int, Ts...) { } };` has no default constructor; the main
     ;; file's classes only, the code generator's as before)
     (when (and (empty? (:ctors (abi/cls id)))
-               (not (and (checking?) (seq (:ctor-tmpls (abi/cls id))) (not (:header (abi/cls id))))))
+               (not (and (checking?) (or (seq (:ctor-tmpls (abi/cls id))) (:cx-ctor-dropped (abi/cls id))) (not (:header (abi/cls id))))))
       (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
                         (some default-ctor-nontrivial? (class-like-members id)))]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
@@ -4750,9 +4754,18 @@
                            ;; a basic_ostringstream, basic_ostream's member operator<<(int) by promotion against the non-member
                            ;; operator<<(basic_ostream<char, _Traits>&, char) by that conversion and an exact match, had been 17 viable
                            ;; and ambiguous with the member taken for an exact match)
-                           oc (let [oid (when (and oc obj (:cls f) (not (:static f)) (not= :ctor (:kind f))) (class-id (:ty obj)))]
-                                (if (and oid (not= oid (:cls f)) (abi/derived-from? oid (:cls f)))
-                                  (assoc oc :rank 2 :d2b [oid (:cls f)])
+                           ;; (queue 510, the checker: a member a using-declaration of class U nominates is U's member for its
+                           ;; implicit object parameter, [over.match.funcs.general]/4: no conversion from an object of U, so
+                           ;; cpp1z/using1.C's B().f(1) between B::f(short) and A::f(short, int = 0) by `using A::f;` is ambiguous
+                           ;; again, as before cpp-rt-own's rule above; :ucls is the checker's)
+                           ucls (when (and (checking?) oc obj (:cls f) (not (:static f)) (not= :ctor (:kind f)))
+                                  (when-let [oid (class-id (:ty obj))]
+                                    (when (and (not= oid (:cls f)) (abi/derived-from? oid (:cls f)))
+                                      (some (fn [[_ e]] (when (and (= :fn (:e e)) (= cid (:id e))) (:ucls e))) (class-lookup oid (:name f))))))
+                           oc (let [oid (when (and oc obj (:cls f) (not (:static f)) (not= :ctor (:kind f))) (class-id (:ty obj)))
+                                    mc (or ucls (:cls f))]
+                                (if (and oid (not= oid mc) (abi/derived-from? oid mc))
+                                  (assoc oc :rank 2 :d2b [oid mc])
                                   oc))]
                      :when (and oc (every? some? convs))]
                  ;; (a member operator's object is the first operand, a non-member's first operand its first argument:
@@ -5739,7 +5752,8 @@
 
 (defn- cx-no-default-sure?
   "Queue 510 (the checker): whether class `id` surely has no default constructor ([class.default.ctor]/1, [over.match.ctor]):
-  a complete class of the main file, no class template, no instance whose definition refused, none inheriting constructors
+  a complete class of the main file (a class template's specialization too, round 2), no instance whose definition refused,
+  none inheriting constructors
   (a base's default constructor inherited, [namespace.udecl]/3), whose every constructor (the deleted ones too, an implicit
   one deleted unsure among them) has a parameter without a default argument, and whose every constructor template has more
   parameters that are no pack and have no default argument than none (template.ae's too-few-args?)."
@@ -5747,7 +5761,7 @@
   (let [c (abi/cls id)
         h (:ctor-tmpls-need-args? @hooks)]
     (boolean
-     (and (checking?) c (:complete c) (not (:tmpl c)) (not (:header c)) (not (:cx-inst-refused c)) (empty? (:inherits-ctors c))
+     (and (checking?) c (:complete c) (not (:defining c)) (not (:header c)) (not (:cx-inst-refused c)) (empty? (:inherits-ctors c))
           (every? (fn [fid] (let [f (fnd fid) ps (:ps (:ty f))]
                               (and (seq ps) (> (count ps) (count (filter some? (:defaults f)))))))
                   (:ctors c))
@@ -5798,6 +5812,22 @@
       (if (cx-no-default-sure? id)
         (throw (ex-info (str "codegen: no default constructor for " (:name (abi/cls id))) {:codegen/refused :init :cx/no-default-sure true}))
         (fail :init "no default constructor for " (:name (abi/cls id)))))
+    ;; (queue 510, the checker: an implicit default constructor not yet defined -- a class template's specialization or a
+    ;; local class made after the declarations' entries -- defined now, so that one deleted surely for a subobject's deleted
+    ;; or missing default constructor is the error of this use, as the entries define the main file's classes' before
+    ;; their uses; any other refusal left to its entry: cpp2a/concepts-inherit-ctor2.C's S2<int>)
+    (let [f (fnd fid)]
+      (when (and (checking?) (:implicit f) (= :ctor (:kind f)) (not (:analyzed f)) (not (:params f)) (not (:deleted f)) (not (:inh-from f))
+                 (not *cx-in-implicit*))
+        (upd-fn! fid assoc :analyzed true)
+        (try (analyze-implicit! fid)
+             (catch arbace.lang.ExceptionInfo e
+               (let [m (str (.getMessage e))
+                     sub (or (second (re-find #"call to a deleted function (\S+)" m))
+                             (when (:cx/no-default-sure (ex-data e)) (second (re-find #"no default constructor for (\S+)" m))))]
+                 (if sub
+                   (upd-fn! fid assoc :deleted true :deleted-sure true :tinits nil :cx-sub-deleted sub)
+                   (upd-fn! fid dissoc :analyzed)))))))
     (when (and (checking?) (:deleted-sure (fnd fid)))
       ;; (queue 492: an implicitly deleted one's reason at its class too, as resolve-overload*'s)
       (cx-deleted-implicit! (fnd fid))
@@ -7438,7 +7468,15 @@
                 (let [f (fnd fid) ps (vec (:ps (:ty f))) k (if aligned 2 1)]
                   {:fn fid :align (when aligned (abi/align-of et))
                    :places (call-args (assoc f :ty (assoc (:ty f) :ps (subvec ps k)) :defaults (vec (drop k (:defaults f)))) place ctx)})
-                (do (when (seq place) (fail :new "a placement new without a declared operator new"))
+                (do (when (seq place)
+                      ;; (queue 510, the checker: none at all, the implicit declarations being only the usual forms
+                      ;; ([basic.stc.dynamic.general]/2: <new>'s placement form is no implicit one), so no candidate for the
+                      ;; placement arguments, GCC's "no matching function for call to 'operator new(sizetype, int*)'": a block
+                      ;; scope's declaration is not found by the new-expression's lookup (lookup/new1.C); not when a header's
+                      ;; declaration of it was dropped)
+                      (when (and (checking?) (not-any? #(= nm (nth % 2 nil)) (some-> *header-drops* deref vals)))
+                        (fail :new "no matching " nm " for " (count place) " placement arguments"))
+                      (fail :new "a placement new without a declared operator new"))
                     {:sym (str (if array? "_Zna" "_Znw") "m" (when aligned "St11align_val_t")) :align (when aligned (abi/align-of et)) :places []}))
         f (when fid (fnd fid))
         reserved (boolean (and f (not (:cls f)) (= 2 (count (:ps (:ty f)))) (void-ptr? (second (:ps (:ty f))))
