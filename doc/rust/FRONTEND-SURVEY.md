@@ -5868,3 +5868,84 @@ std::panicking::catch_unwind::Data<{closure@..}, u8>)" (fnptr)) against (ty "uns
 coercion's target is a safe `fn`. The fix belongs to C4's native interface (a fnptr type's safety and ABI written and read,
 then printed `unsafe fn`), R3's line; the re-made export changes no fact of catch_unwind's entries (the 62 entries differ from
 the old ones only by `:callee-attrs` and anonymous regions' numbers).
+
+## C1 and C4: the burst's round (2026-11-22, branch `rust-c4-1122`)
+
+From `rust-c6-1120` (`fceea7b4a`) with 512-rust-causes5 merged (`a5cfe536f`, rust-front-essential's RemoveNoopLandingPads).
+
+### C1: why unwind's and panics' hooks were empty, and std.rs's "recursion"
+
+- **TypeId**: the bytes of our `TypeId::of::<&str>` and `::<String>` constants were rustc's hash, byte for byte (the record's
+  `(indirect alloc 0)`). The difference was the form: std's IR writes each 8 bytes as a pointer, `<{ ptr inttoptr (i64 A to ptr),
+  ptr inttoptr (i64 B to ptr) }>` (rustc_codegen_llvm's `scalar_to_backend` for `GlobalAlloc::TypeId`: the offset as an integer
+  cast to a pointer), our codegen wrote `[16 x i8]` bytes. ci folds the lowered C's `(void *)(unsigned long)N` to 32 bits
+  sign-extended (arbace/c/build.ae `int-const` wraps a constant of pointer type by `chk/wrap`, whose `int-bits` gives a pointer
+  32 signed bits; a run-time cast keeps 64): std's TypeId constants lose their high halves on ci, ours did not, and no payload's
+  type matched. u32's and u64's matched because both sides were the program's. Fixed on our side by writing the TypeId
+  relocation as rustc does (codegen.ae); **finding for C's crop**: `int-const` should wrap a pointer constant as `t-ulong` (a
+  probe `static void *g = (void *)0x123456789abcdef0ul;` reads back `ffffffff9abcdef0` on ci).
+- **std.rs**: not core's sort. A traced run (CI_CALLTRACE, the last 20,000 calls) shows the interpreted depth about 30 and
+  `MultiCharEqSearcher::next` called again and again past the haystack's end (the BTreeMap's `split_whitespace`): our codegen read
+  a scalar pair's niche tag from the pair's first value. `Option<(usize, char)>`'s tag is the char at offset 8; the discriminant
+  compared the index with -1, so `None` read as `Some` and the searcher never returned `Done`; ci's goroutine stack overflowed in
+  the endless loop. Fixed (`get-discr!`: the component at the tag field's offset, codegen_get_discr's extract_field); two
+  functions of std.rs's unit change (`MultiCharEqSearcher::next`, btree's `find_key_index`).
+
+### C4: core's interface pass, the fixes (module runs against the helper's facts)
+
+- **Aliases**: core_check's native-iface writes every alias it computes, not only those the names it reads lack (the chain's
+  second core pass read names holding core's aliases and wrote none; alloc's and std's passes then lost `fmt::Result`).
+- **Enums**: `:repr` from `#[repr(int)]` and `:discrs` as rustc's AdtDef::discriminants (explicit values evaluated, `-`, `<<`,
+  `|`; wrapped to the discriminant type, Display signed); before every native enum was `:repr nil :discrs [0 1 ..]`
+  (`Ordering`'s -1 0 1, `AlignmentEnum`'s `#[repr(usize)]` 1 2 4 ..: Alignment a byte).
+- **Functions**: a `const trait`'s methods const (the trait's constness lowered); `#[rustc_comptime]` const; `:nounwind` from
+  `#[rustc_nounwind]`, `:promotable` from `#[rustc_promotable]` on a const fn.
+- **Expansion**: `#[derive(ConstParamTy)]` (rustc_builtin_macros' bounds.rs; core::intrinsics and intrinsics::simd were
+  unexpanded: 395 intrinsics missing); a union's `#[derive(Clone)]` (clone.rs' union case, TrivialClone first: escape's impl
+  numbers); an expression fragment the next tokens continue (`compress!($state.v0, ..)`, hash::sip); a `#[rustc_builtin_macro]`
+  macro_rules! left to the builtin (pat.rs' own `pattern_type`); portable-simd's own macro_rules! in core's table
+  (`from_transmute!`, vendor::x86).
+- **Types**: pattern types as the helper's text (rustc_ast_lowering's anonymous constants of the field's written ends and of the
+  struct's missing ones: `(u8) is 1..=core::::num::niche_types::NonZeroU8Inner::{constant#0}`; NonNull's `(*const T) is !null`;
+  all of niche_types' 20 texts equal); a not-yet-known trait's Self kept (`P: bounds::BuiltinDeref`, `Self:
+  traits::TruncateTarget<Target>`); `size_of::<Self>()` of a primitive impl, `iN::MAX.ilog10() as usize + 2` lengths; const
+  generic values `(const "10")`; fn pointer binder regions `'^^#N`; extern types by their std path; `#[unstable_feature_bound]`'s
+  "feature(f128) is enabled"; core's types in const-has-type text through std; a trait's items in definition order.
+
+### C1: the three programs on ci (2026-11-22, 00:41)
+
+rust-c6-1120's C1 units (its RF_DROP_GLUE=1, RF_EXTRA_IFACE, --native-core build, `.tmp/rust-front/c1/NAME/NAME.mono.edn`) made
+again through codegen and rsi's lowering with the two fixes (build-run's emit-and-lower alone, `.tmp/c4/c1q`), then `RSI_JOBS=1
+RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin> RSI_FRONT_DIR=.tmp/c4/c1q bin/rsi check --front own --corpus
+samples --only {std,unwind,panics}` (2 h, the runtime read into ci at the checkout's key on a loaded host; 6.4 GB): **3 of 3 pass**,
+each by rustc's recorded run (status, stdout's and stderr's digests, ref-rustc-1.99.1.edn): std.rs 0 and 1,392 bytes, unwind.rs
+101 and 329 bytes, panics.rs 3 and 254 bytes (the hooks' messages and the payloads' downcasts now rustc's). vectors.rs passed before
+(rust-c6-1120). The control (std against panics' run)
+differs. The six programs built again at this branch's code and recorded follow (below).
+
+### C4: the passes again and the switch run (np5, 2026-11-22)
+
+core's pass (one round, 6,762 s on a host at load 70-140, 3.8 GB) on chain 2's native names, then alloc's and std's (two rounds
+each) on the names carrying core's (and alloc's) aliases, the interface assembled and compared with the helper's, std's names
+assembled and compared (`.tmp/c4/np5-chain.sh`, 3 h 05 min):
+
+| facts equal to the helper's | before (np3, 2026-11-21) | after (np5) |
+|---|---|---|
+| core's interface | 25,879 of 27,498 | **27,062 of 27,498** (229 differ, 207 missing) |
+| alloc's interface | 3,532 of 3,863 | **3,863 of 3,863** |
+| std's interface | 3,789 of 4,644 | **4,644 of 4,644** |
+| std's names | 14,893 of 15,162 (aliases 18 of 215) | **15,120 of 15,162** (aliases 207 of 215, generics 1,054 of 1,078) |
+
+The switch run on that interface and those names (`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=np5/std-names.edn RF_CORE_ATTRS=none
+RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind vectors`, 17 min, 2.2 GB): **5 of 5 own** (0 of 5 before: the
+Transmutes from `usize` to `Alignment`, a byte without AlignmentEnum's `#[repr(usize)]`, and std's `fmt::Result` and vectors'
+`i32x4` aliases are gone), each program's facts as on the helper's interface. `inputs.tsv` writes C4 as "std's interface from the
+crates' native passes, the StableCrateIds by Cargo's metadata hash ported, std's names from the crates' sources (C6-5 pending)":
+C4 is not counted own until the user rules on C6-5 (the 36 units as the build's description), so no case input changes. Left in core's 436 facts: the const trait methods marked `#[rustc_non_const_trait_method]` and `#[rustc_comptime]` impl methods
+(59, fixed after np5 in the module runs' code, not yet in a chain), core_simd shift_scalar's impl-header `'_` printed `'^#0` (42),
+to_bytes' anonymous constant args (66), the Thin trait alias bound (9 + 51), and missing (207): core_simd ops' 40 + 40, num's
+`from_*_bytes` 72 (`[u8; size_of::<Self>()]` inputs), io's 9 ADTs and their impls, legacy_int_modules' 24 consts. Also (the module
+runs): io::error's and io_slice's
+`cfg_select!` `#[path]` modules (module-files reads no macro's arms), core_simd ops' `use super::*` of a private import, to_bytes'
+`{ $size * $elems }` written by rustc as its anonymous constant's path, the `Thin` trait alias bound, the `[const]`/`const` bound
+clauses (512's ranking, not taken here).

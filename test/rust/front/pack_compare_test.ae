@@ -634,5 +634,35 @@
       (check "C6-4: a no-op landing pad: no personality, one block" (shape (body [] '(resume))) [false 1])
       (check "C6-4 control: a landing pad that does something keeps the personality and its block"
              (let [[p n] (shape (body [] (list 'call (list 'const "g" fty '(zst)) [] '(place 1) nil '(continue) callee '(loc "?" 0 0) 0)))] (if (and p (> n 1)) [:differs p n] [:equal p n])) :differs))
+    ;; C1 (2026-11-22, rust-c4-1122): TypeId::of's constant as std's IR writes it, each 8 bytes of the hash a pointer
+    ;; `inttoptr (i64 N to ptr)` (rustc_codegen_llvm's scalar_to_backend for GlobalAlloc::TypeId), not bytes: the record's
+    ;; TypeId::of::<u32> (the pack rust-front-rsi's unwind) against std's IR's @anon of the same hash
+    (let [tid '(ty "std::any::TypeId" (adt "std::any::TypeId" "core::any::TypeId" []))
+          lt {"std::any::TypeId" '{:size 16 :align 8 :abi (memory true) :fields [0] :variants (single 0) :uninhabited false}}
+          b (fn [bytes] {:form :body :symbol "tid" :args 0 :ret tid :locals [{:mut true :ty tid}] :debug []
+                         :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'use (list 'const "const std::any::TypeId::of::<u32>::{constant#0}" tid '(indirect alloc168 0))))]
+                                   :term '(return)}]
+                         :alloc-data [["alloc168" {:kind :memory :align 8 :mutable false :bytes bytes :init "1111111111111111" :relocs [[0 "alloc170"] [8 "alloc170"]]}]
+                                      ["alloc170" {:kind :other}]]})
+          consts (fn [bytes] (let [gl (cg/new-globals {})] (cg/codegen-fn (b bytes) lt gl) (vec (keys (:consts @gl)))))
+          std-ir '[(packed ptr ptr) (packed [ptr (inttoptr i64 -8815622259637286671 ptr)] [ptr (inttoptr i64 8786967495329273992 ptr)]) 8]]
+      (check "C1: TypeId::of::<u32>'s constant as std's IR's (two inttoptr pointers)"
+             (if (= [std-ir] (consts "f1084b14439ea885885801b46194f179")) :equal [:differs (consts "f1084b14439ea885885801b46194f179")]) :equal)
+      (check "C1 control: another hash's constant differs" (if (= [std-ir] (consts "f1084b14439ea885885801b46194f17a")) [:equal] [:differs]) :differs))
+    ;; C1: a scalar pair's niche tag is the component at the tag field's offset (codegen_get_discr's extract_field):
+    ;; Option<(usize, char)>'s is the char (offset 8), so the discriminant compares the second value with the niche -1
+    (let [opt '(ty "std::option::Option<(usize, char)>" (adt "std::option::Option" "core::option::Option" [(ty "(usize, char)" (tuple [(ty "usize" (uint "usize")) (ty "char" (char))]))]))
+          isz '(ty "isize" (int "isize"))
+          lt {"std::option::Option<(usize, char)>" '{:size 16 :align 8 :abi (pair (int 64 false nil) (int 32 false [4294967295 1114111]) 8) :fields [8]
+                                                     :variants (multiple {:tag (int 32 false [4294967295 1114111]) :tag-field 0 :encoding (niche 1 0 0 4294967295)
+                                                                          :variants [{:offsets [] :uninhabited false} {:offsets [0] :uninhabited false}]})
+                                                     :discrs [0 1] :uninhabited false}
+              "isize" '{:size 8 :align 8 :abi (scalar (int 64 true [0 18446744073709551615])) :fields (primitive) :variants (single 0) :uninhabited false}}
+          b {:form :body :symbol "discr" :args 1 :ret isz :locals [{:mut true :ty isz} {:mut false :ty opt}] :debug []
+             :blocks [{:cleanup false :stmts ['(assign (place 0) (discriminant (place 1)))] :term '(return)}]}
+          f (let [gl (cg/new-globals {})] (cg/codegen-fn b lt gl))
+          cmp (first (filter #(and (seq? %) (= 'icmp (first %))) (tree-seq coll? seq f)))]
+      (check "C1: Option<(usize, char)>'s discriminant reads the char (the pair's second value) against -1"
+             (if (and cmp (= '[i32 %_1.1 -1] [(nth cmp 2) (nth cmp 3) (nth cmp 4)])) :equal [:differs cmp]) :equal))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))

@@ -16826,3 +16826,50 @@ no-op landing pad for no block and no reason for a personality, as rustc's MIR a
 (`7f59c9ff7`, pack-compare-test's case and control); the three programs built again on it (38 min): the same log counts, and against the run before the export the dead
 `unreachable` blocks fall from 85 to 40 (panics), 68 to 31 (unwind), 548 to 343 (vectors), the functions with a personality from 53
 to 33, 46 to 32, 141 to 70.
+
+## 2026-11-22: rust-c4-1122: C1's TypeId and pair-tag faults; C4's interface pass, round 1 (burst, stream R3)
+
+Branch `rust-c4-1122` from `mac/rust-c6-1120` (`fceea7b4a`), the caches of rust-c6's worktree copied (exports, passes, scans);
+512-rust-causes5 merged (`a5cfe536f`) at the coordinator's word.
+
+- **C1, unwind's and panics' empty hooks.** Our `TypeId::of::<&str>`/`::<String>` constants held rustc's hash byte for byte; std's
+  IR writes them as two pointers `inttoptr (i64 N to ptr)` (rustc_codegen_llvm common.rs `scalar_to_backend`, `GlobalAlloc::TypeId`:
+  the offset cast to a pointer), ours as `[16 x i8]`. ci folds a constant cast of an integer to a pointer to 32 bits sign-extended
+  (arbace/c/build.ae `int-const`: `chk/wrap` of a pointer type takes `int-bits`' default, 32 signed; a run-time cast keeps 64:
+  probe `.tmp/c4/citest/t2.c`), so std's lowered TypeId constants lost their high halves and never equalled ours. Codegen now writes
+  a TypeId relocation as rustc does (both sides fold alike); finding for C's crop: `int-const` should wrap a pointer as `t-ulong`.
+- **C1, std.rs.** Not core's sort: a call trace (CI_CALLTRACE, the last 20,000 calls) shows depth about 30 and
+  `MultiCharEqSearcher::next` looping past the haystack (the BTreeMap's `split_whitespace`): codegen read a scalar pair's niche tag
+  from the pair's first value; `Option<(usize, char)>`'s tag is the char at offset 8. Fixed in get-discr! (the component at the tag
+  field's offset, codegen_get_discr's extract_field). pack-compare-test: two cases (the TypeId constant against std's IR's @anon
+  for u32, the pair's discriminant), a control.
+- **C1 on ci.** rust-c6-1120's C1 units made again through codegen and the lowering with the two fixes (`.tmp/c4/c1q`), run by
+  `bin/rsi check --front own --corpus samples --only` std, unwind, panics (`RSI_FRONT_DIR`, RSI_JOBS=1, RSI_CI_MEMLIMIT=5GiB, the main
+  checkout's std at the pin: rust-rec's worktree is gone): **3 of 3 pass** by rustc's recorded runs (2 h on a loaded host, 6.4 GB);
+  vectors passed before. The six programs are built again at this branch's code next, then recorded.
+- **C4, core's interface pass** (survey, "C1 and C4: the burst's round"): every alias written; enums' `#[repr(int)]` and
+  discriminants as AdtDef::discriminants; a const trait's methods const, `#[rustc_comptime]`, `#[rustc_nounwind]`,
+  `#[rustc_promotable]`; `#[derive(ConstParamTy)]`, a union's `#[derive(Clone)]`; an expression fragment continued by its next
+  tokens; a `#[rustc_builtin_macro]` macro_rules! left to the builtin; portable-simd's macros in core's table; pattern types as the
+  helper's text (rustc_ast_lowering's anonymous constants); a not-yet-known trait's Self kept; `size_of::<Self>()` and `ilog10`
+  lengths; const generic values; fn pointer binder regions; extern types and const-has-type text through std; feature-bound
+  predicates; a trait's items in definition order. Module runs against the helper (cmp, mem::alignment, char, ascii_char, ffi,
+  intrinsics, intrinsics::simd, hash::sip, alloc, ptr, num, escape, convert::num, fmt::num_buffer, dec2flt, niche_types,
+  ptr::non_null, pat, fmt::rt, ptr::metadata, core_simd::to_bytes): every fact equal but the leftovers the survey lists. The first
+  chain (np4) was stopped at core's module 169 to take the pattern types (NonNull was missing from core's native interface: alloc's
+  and std's `NonNull<u8>` facts lost their arguments in chain 2); np5 runs now, then the switch run.
+- Finding for C's crop (not changed here): arbace/c/build.ae `int-const` folds a pointer constant through `chk/wrap` with the
+  pointer type, whose `int-bits` default is 32 signed bits; `(chk/wrap v (if (ptr? t) chk/t-ulong (under t)))` would keep 64.
+- No gate (the user's rule); pack-compare-test passed (its new cases and control); no record re-recorded this round.
+
+## 2026-11-22: rust-c4-1122: C4's passes again (np5) and the switch run: 5 of 5 own on the native interface and names
+
+The passes with round 1's fixes (`.tmp/c4/np5-chain.sh`; core one round, alloc and std two; 3 h 05 min on a host at load 70-140):
+core's interface 27,062 of 27,498 facts equal to the helper's (25,879 before), alloc's 3,863 of 3,863 (3,532), std's 4,644 of 4,644
+(3,789), std's names 15,120 of 15,162 (14,893; aliases 207 of 215, 18 before). The switch run on that interface and those names
+(`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=... RF_CORE_ATTRS=none RF11_BATCH=1 bin/rust-front rsi-build intrinsics panics std unwind
+vectors`, 17 min, 2.2 GB): **5 of 5 own** (0 of 5 before). C4 stays not own in the case inputs: inputs.tsv's words end "(C6-5
+pending)", and no ruling on C6-5 is in the line's facts (the survey's DECISION C6-5; C4-1 (a) was taken, 2026-11-20). Fixed after
+np5 in the module runs' code (not yet in a chain): a const trait's `#[rustc_non_const_trait_method]` methods not const,
+`#[rustc_comptime]` impl methods const, an object type's named late-bound region by its name, a fn pointer's binder region `'_` in a
+signature. C1's six programs are being built again at this branch's code (`.tmp/c4/c1build2.sh`), then run on ci and recorded.
