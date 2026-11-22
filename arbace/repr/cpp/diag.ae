@@ -4230,6 +4230,104 @@
 
 (def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface integer-pack]))
 
+;; ---------------------------------------------------------------------------------------------
+;; cpp-diag-b (2026-11-22): the checks of the burst's stream cpp-diag-b, appended to `checks` (each rule from the standard, GCC's
+;; manual for its words; no GCC code read)
+
+(defn- mine-at
+  "A node's main-file offset (its location's, its range's begin, through a macro expansion), or nil outside the main file."
+  [n ^String main]
+  (let [f (or (get-in n [:loc :file]) (get-in n [:loc :expansionLoc :file]) (get-in n [:range :begin :file]))
+        o (or (get-in n [:loc :offset]) (get-in n [:loc :expansionLoc :offset]) (get-in n [:range :begin :offset]))]
+    (when (and o (or (nil? f) (= f main))) (long o))))
+
+;; [basic.scope.block]/2: a declaration binding a name in the block scope of a function body's, a function-try-block's or its
+;; handlers', a lambda's compound-statement, or of a selection or iteration statement's substatement (not itself one) conflicts
+;; with a declaration of the parent scope: the function's parameters, the statement's init-statement, condition or
+;; for-range-declaration, a handler's exception-declaration. GCC's "declaration of 'int x' shadows a parameter", "redeclaration
+;; of 'int x'", at the inner declaration. A class or enumeration name hides rather than conflicts; C++26's `_` is name-independent.
+
+(def ^:private conflicting-kinds #{"VarDecl" "FunctionDecl" "TypedefDecl" "TypeAliasDecl" "DecompositionDecl"})
+
+(defn block-redeclarations
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        year (cxx-year (:std u))
+        names-of (fn [decls] (into {} (for [d decls :let [nm (:name d)] :when (and (string? nm) (seq nm) (or (conflicting-kinds (:kind d)) (#{"ParmVarDecl" "BindingDecl"} (:kind d)))
+                                                                                  (not (and (= nm "_") (>= (long year) 2026))))]
+                                        [nm d])))
+        stmt-decls (fn [s] (case (:kind s)
+                             "DeclStmt" (mapcat #(if (= "DecompositionDecl" (:kind %)) (filter (fn [b] (= "BindingDecl" (:kind b))) (:inner %)) [%]) (:inner s))
+                             nil))
+        block-decls (fn [s] (case (:kind s)
+                              "CompoundStmt" (mapcat stmt-decls (:inner s))
+                              "DeclStmt" (stmt-decls s)
+                              nil))
+        judge (fn [outer s param?]
+                (when (seq outer)
+                  (doseq [d (block-decls s)
+                          :let [nm (:name d) prev (get outer nm)]
+                          :when (and prev (string? nm) (or (conflicting-kinds (:kind d)) (= "BindingDecl" (:kind d))))
+                          :let [o (mine-at d main)]
+                          :when o]
+                    (let [[l c] (line-col starts o)
+                          ty (get-in d [:type :qualType])
+                          what (str "'" (when ty (str ty " ")) nm "'")]
+                      (.add out {:line l :col c :kind :error :rule :block-redeclaration
+                                 :msg (if param? (str "declaration of " what " shadows a parameter") (str "redeclaration of " what))})))))
+        header (fn [s] (let [in (vec (:inner s))]
+                         (case (:kind s)
+                           ("IfStmt" "SwitchStmt") (concat (when (:hasInit s) (stmt-decls (first in)))
+                                                           (when (:hasVar s) (stmt-decls (nth in (if (:hasInit s) 1 0)))))
+                           "WhileStmt" (when (:hasVar s) (stmt-decls (first in)))
+                           "ForStmt" (concat (stmt-decls (nth in 0 nil)) (stmt-decls (nth in 1 nil)))
+                           "CXXForRangeStmt" (concat (stmt-decls (nth in 0 nil)) (stmt-decls (nth in 6 nil)))
+                           nil)))
+        subs* (fn [s] (let [in (vec (:inner s))]
+                        (case (:kind s)
+                          "IfStmt" (let [k (+ (if (:hasInit s) 1 0) (if (:hasVar s) 1 0) 1)] (subvec in (min k (count in))))
+                          ("SwitchStmt" "WhileStmt" "ForStmt" "CXXForRangeStmt") [(peek in)]
+                          nil)))
+        loop-kinds #{"IfStmt" "SwitchStmt" "WhileStmt" "ForStmt" "CXXForRangeStmt" "DoStmt"}
+        fn-body (fn [f params]
+                  (let [ps (names-of params)
+                        body (last (:inner f))]
+                    (case (:kind body)
+                      "CompoundStmt" (judge ps body true)
+                      "CXXTryStmt" (do (judge ps (first (:inner body)) true)
+                                       (doseq [h (rest (:inner body)) :when (= "CXXCatchStmt" (:kind h))]
+                                         ;; (a handler's exception-declaration too, [except.pre]/? : at the handler)
+                                         (let [v (first (:inner h)) nm (:name v)]
+                                           (when-let [o (and (string? nm) (get ps nm) (or (mine-at v main) (mine-at h main)))]
+                                             (let [[l c] (line-col starts o)]
+                                               (.add out {:line l :col c :kind :error :rule :block-redeclaration
+                                                          :msg (str "declaration of '" (get-in v [:type :qualType]) " " nm "' shadows a parameter")}))))
+                                         (judge ps (second (:inner h)) true)))
+                      nil)))]
+    (walk-nodes (fn [n _]
+                  (let [k (:kind n)]
+                    (cond
+                      (fn-kinds k) (fn-body n (filter #(= "ParmVarDecl" (:kind %)) (:inner n)))
+                      (= k "LambdaExpr")
+                      (let [m (some (fn [r] (when (= "CXXRecordDecl" (:kind r))
+                                              (some (fn [x] (cond (= "CXXMethodDecl" (:kind x)) x
+                                                                  (= "FunctionTemplateDecl" (:kind x)) (some #(when (= "CXXMethodDecl" (:kind %)) %) (:inner x))
+                                                                  :else nil))
+                                                    (:inner r))))
+                                    (:inner n))
+                            body (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                        (when (and m body) (judge (names-of (filter #(= "ParmVarDecl" (:kind %)) (:inner m))) body true)))
+                      (= k "CXXCatchStmt")
+                      (let [[v c] (:inner n)] (when (and (map? v) (string? (:name v))) (judge {(:name v) v} c false)))
+                      (contains? loop-kinds k)
+                      (let [h (names-of (header n))]
+                        (doseq [s (subs* n) :when (and (map? s) (not (loop-kinds (:kind s))))] (judge h s false)))
+                      :else nil)))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj block-redeclarations)
+
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
 ;; -pedantic-errors (GCC's pedwarn) one after which no statement is executed in its switch, DR 2406: the last statement of
