@@ -5824,3 +5824,31 @@ inline-test` 11 of 11, `pack-compare-test` passed; reap 56 of 56 cells, crops-sc
 - **An indirect call's argument attributes** (io::error's `(self.error_drop)(self.error)`: rustc's `align 8` on the vtable half from
   the function pointer's FnAbi) and a parameter's pointee alignment (`from_raw`, `custom_owner_from_box`): pointee_info_at through
   nested ADTs (mono's `pointee-info-at`) answers none there yet.
+
+### DECISION 512-1 (a): std's rsi export made again on this host (2026-11-22)
+
+The coordinator's order (512-1 (a), from the Mac's 512: catch_unwind's record lines blamed on the fn-local `Data` missing from
+474's export): `mac/512-rust-causes5` (`f8f7ff401`, 512-2) merged first (`842ce3c6a`), then panics, unwind and vectors built
+(`RF_EXTRA_IFACE=core-pass/core-iface.edn:hashbrown:libc RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core
+panics unwind vectors`, 1 h 25 min, 3.2 GB) before and after std's export was made again with its interface cache removed
+(`lib-export --rsi std`, both interface rounds, 62 bodies, 2 refused; 40 min, 2.5 GB), `pack-compare-test` passing between (138
+checks). Lines of each program's build-run.log (catch_unwind's: the record and record-kept lines and the pack-compare differs
+lines naming it):
+
+| program | native | record + record-kept | differs | codegen fallbacks | catch_unwind's record lines | catch_unwind's differs lines |
+|---|---|---|---|---|---|---|
+| panics, before | 682 | 126 + 19 | 71 | 8 | 30 | 24 |
+| unwind, before | 616 | 104 + 17 | 58 | 5 | 25 | 20 |
+| vectors, before | 2377 | 632 + 60 | 194 | 21 | 0 | 0 |
+AFTER-ROWS
+
+On this host the export before already carried `Data`'s ADT facts (rust-c6-1120's exports were made again at its merged head with
+with-private-facts, `d4268b54b`; each of catch_unwind's three entries holds `:adts {"std::panicking::catch_unwind::Data" ..}`),
+and `Data` is printed with its arguments. catch_unwind's lines have another root: the function pointers `do_call` and `do_catch`
+are coerced to `fn(*mut Data<..>)` where rustc's are `unsafe fn(*mut Data<..>)` (`local 5: (ty "fn(*mut
+std::panicking::catch_unwind::Data<{closure@..}, u8>)" (fnptr)) against (ty "unsafe fn(*mut ..)" ..)`): the intrinsic
+`core::intrinsics::catch_unwind<Data>(_try_fn: unsafe fn(*mut Data), ..)` reaches the run through the helper's std-iface.edn
+(the pack rust-front-std), whose function pointer types are written `(fnptr INPUTS OUTPUT)` with no safety and no ABI, so the
+coercion's target is a safe `fn`. The fix belongs to C4's native interface (a fnptr type's safety and ABI written and read,
+then printed `unsafe fn`), R3's line; the re-made export changes no fact of catch_unwind's entries (the 62 entries differ from
+the old ones only by `:callee-attrs` and anonymous regions' numbers).

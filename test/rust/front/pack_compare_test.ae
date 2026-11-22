@@ -620,5 +620,19 @@
              (let [t (pt "core::hint::black_box" '(unevaluated "mem::needs_drop::<T>::{constant#0}" [] nil))] (if t [:equal] [:differs t])) :differs)
       (check "512 control: a closure's body keeps its text (its MIR name is its owner's)"
              (let [t (pt "core::hint::black_box::{closure#0}" v)] (if t [:equal] [:differs t])) :differs))
+    ;; C6-4 after 512-1: a call whose cleanup is a no-op landing pad (a bare resume, kept by the runtime pipeline since 512-1) is
+    ;; codegen'd as rustc's MIR after RemoveNoopLandingPads gives it: no personality, no block for the pad, the return merged
+    ;; (vectors' VacantEntry::insert after std's export was made again); the control, a pad that calls a drop first, keeps both
+    (let [fty '(ty "fn() {g}" (fndef "g" []))
+          callee '(callee {:kind "item" :symbol "g" :can-unwind true})
+          body (fn [pad-stmts pad-term] {:form :body :symbol "np" :args 0 :ret unit :locals [{:mut true :ty unit} {:mut true :ty unit}] :debug []
+                                         :blocks [{:cleanup false :stmts [] :term (list 'call (list 'const "g" fty '(zst)) [] '(place 1) 1 '(cleanup 2) callee '(loc "?" 0 0) 0)}
+                                                  {:cleanup false :stmts [] :term '(return)}
+                                                  {:cleanup true :stmts pad-stmts :term pad-term}]})
+          shape (fn [b] (let [f (vec (cg/codegen-fn b glue-lt (cg/new-globals {}))) i (.indexOf ^java.util.List f :body)]
+                          [(boolean (some #{:personality} f)) (count (nth f (inc i)))]))]
+      (check "C6-4: a no-op landing pad: no personality, one block" (shape (body [] '(resume))) [false 1])
+      (check "C6-4 control: a landing pad that does something keeps the personality and its block"
+             (let [[p n] (shape (body [] (list 'call (list 'const "g" fty '(zst)) [] '(place 1) nil '(continue) callee '(loc "?" 0 0) 0)))] (if (and p (> n 1)) [:differs p n] [:equal p n])) :differs))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))
