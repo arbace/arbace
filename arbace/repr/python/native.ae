@@ -103,22 +103,27 @@
                       (when (seq meta) [(str "{" (str/join " " (map (fn [[k v]] (str k " " v)) meta)) "}")]))]
     (str "(" (str/join " " parts) ")")))
 
-(deftype Src [^ints cs ^ints starts ^String text])
+;; wide: per line, whether it holds a code point past ASCII (py-mods-1122: index's scan from the line's start, a
+;; column's UTF-8 bytes counted, is the column itself on an ASCII line; on a long line of many nodes the scan made the
+;; read quadratic: eval of a list display of 16,000 items took 17 s and 3 GB, test_longexp's 65,580 past 8 GB)
+(deftype Src [^ints cs ^ints starts ^booleans wide ^String text])
 
 (defn- src [^String text]
   (let [n (.codePointCount text 0 (.length text))
         cs (int-array n)
         _ (loop [i 0 j 0] (when (< i (.length text)) (let [c (.codePointAt text i)] (aset cs j c) (recur (+ i (Character/charCount c)) (inc j)))))
-        starts (java.util.ArrayList.)]
+        starts (java.util.ArrayList.)
+        wide (java.util.ArrayList.)]
     (.add starts (int 0))
-    (loop [i 0]
-      (when (< i n)
+    (loop [i 0 w false]
+      (if (< i n)
         (let [c (aget cs i)]
           (cond
-            (and (== c 13) (< (inc i) n) (== (aget cs (inc i)) 10)) (do (.add starts (int (+ i 2))) (recur (+ i 2)))
-            (or (== c 13) (== c 10)) (do (.add starts (int (inc i))) (recur (inc i)))
-            :else (recur (inc i))))))
-    (Src. cs (int-array (map int starts)) text)))
+            (and (== c 13) (< (inc i) n) (== (aget cs (inc i)) 10)) (do (.add wide w) (.add starts (int (+ i 2))) (recur (+ i 2) false))
+            (or (== c 13) (== c 10)) (do (.add wide w) (.add starts (int (inc i))) (recur (inc i) false))
+            :else (recur (inc i) (or w (>= c 0x80)))))
+        (.add wide w)))
+    (Src. cs (int-array (map int starts)) (boolean-array (map boolean wide)) text)))
 
 (defn- ch ^long [^Src s ^long i] (let [^ints cs (.-cs s)] (if (and (>= i 0) (< i (alength cs))) (aget cs i) -1)))
 (defn- sub ^String [^Src s ^long a ^long b]
@@ -129,9 +134,11 @@
 (defn- index
   "The (line, UTF-8 byte column) as an index into the text"
   ^long [^Src s ^long line ^long col]
-  (let [^ints starts (.-starts s) a (aget starts (dec line))]
-    (loop [i a b 0]
-      (if (>= b col) i (let [c (ch s i)] (recur (inc i) (+ b (long (cond (< c 0x80) 1 (< c 0x800) 2 (< c 0x10000) 3 :else 4)))))))))
+  (let [^ints starts (.-starts s) a (aget starts (dec line)) ^booleans wide (.-wide s)]
+    (if (and (< (dec line) (alength wide)) (not (aget wide (dec line))))
+      (+ a col)
+      (loop [i a b 0]
+        (if (>= b col) i (let [c (ch s i)] (recur (inc i) (+ b (long (cond (< c 0x80) 1 (< c 0x800) 2 (< c 0x10000) 3 :else 4))))))))))
 
 (defn- span [^Src s n] [(index s (:lineno n) (:col_offset n)) (index s (:end_lineno n) (:end_col_offset n))])
 (defn- seg [^Src s n] (let [[a b] (span s n)] (sub s a b)))
