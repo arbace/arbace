@@ -17155,3 +17155,23 @@ three of its files (Utils, LayoutPath, AbstractLayout) read only with the whole 
 Not proven yet: the build (j2g's edge recorded afresh, then `bin/arbace-go --build`) and the compiled rows run in one heavy-lock
 session queued at 07:36 behind four sessions; the interp rows run on its executable after it. This checkpoint's records: :synthetic-lambdas
 (6 rows deferred -> design); reap 0 problems; crops-score --judge --strict, records-check 0 problems; Java completeness 0.9612 (next's).
+
+## 2026-11-22: java-design-1122: the first heavy session (14:00-14:45 UTC) built nothing; fixed; the second queued
+
+The session (java-design-b1's .tmp/build.sh under bin/heavy-lock, queued at 07:36, its turn at 13:54) ran:
+- the foreign memory API's forms: the convert step's chunked read of the whole closure (1,595 s) read every file of the slice but
+  three: jdk.internal.foreign's Utils and LayoutPath and layout/AbstractLayout call MethodHandles.filterValue, collectCoordinates
+  and insertCoordinates, which jrt's java.lang.invoke (overlay/jdk, F15) has not: javac's attribution errs and the converter's
+  model asserts (javac_model.ae:155). Fixed on `java-design-ffm-1122`: LayoutPath and AbstractLayout derived overlays and
+  Utils's derivation extended, each such statement a throw (test/jrt/derive.ae; the var handle combinators are not in the Go
+  build); not a reader limit.
+- candidate 4f3abed9f: `bin/j2g-edge update`'s j2g run refused duplicate Go names, three of round 1's XML parser
+  (jdk.internal.org.xml.sax's ContentHandler and Attributes beside java.net's and javax.naming.directory's, jdk.internal.util.xml.impl's
+  Pair beside java.net.http's): the names check of round 2 had looked at the new slices alone. Renamed (arbace/j2g/names.ae:
+  Sax_ContentHandler, Sax_Attributes, Xml_Pair; a96273ac5), and the session's last candidate pointed at that commit.
+- a96273ac5: the edge recorded (184 classes beyond jdk/edge.edn's; jdk/edge.edn, jdk/javac/edge.edn and its provenance's
+  :jdk-edge committed as 8986f75ac), then the build: repr/go's printer refused jrt's setPackageAssertionStatus (`(if ...)` in
+  an expression position). Fixed (956dae9c4); the changed jrt files printed and gofmt'ed by hand since (bin/repr-go print).
+  The build's gocache_trim cut the shared Go cache from 17.5 to 11.5 GB at its start (queue 517's finding 2).
+The session ended with the lock released; the second (the same script: the FFM forms first, then the candidates' edge, build and
+compiled rows; interp rows on its executable after it) is queued behind ten sessions. No row moved; records as at the checkpoint.
