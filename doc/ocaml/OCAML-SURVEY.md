@@ -4651,3 +4651,40 @@ holds no class. The read cell 3,143 / 19 / 0 to 3,162 / 0 / 0; OCaml's completen
   oi (cached in `.tmp/oi/warnhelp` by the library's key), a tool of the test as `bin/oi depend` is (476-1 (a)). warnings/mnemonics
   passes at eval and AOT by its own .reference. Over every header at levels 0, 1 and 2 only mnemonics changes.
 - Cells (bin/reap, the matrix not recorded): eval 568 / 48 / 24 -> 569 / 47 / 24, AOT 492 / 59 / 89 -> 498 / 56 / 86.
+
+## As built: queue 528 (2026-11-22, the VM): the user's decisions on the by-design rows, -output-complete-exe, ocamlobjinfo on a .cmxs, the AOT syntactic-arity, uutf
+
+The list of every by-design row at eval and AOT, put to the user as 528-1 to 528-15 (doc/JOURNAL.md, "the user's decisions on
+OCaml's by-design rows"), and what this task built of the answers:
+- **n/a classes** (`:kind :na`, a written reason per program in `:reasons`, `:decided` naming the user's decision; test/crops/score.ae's
+  na-class-problems takes such a class beside OC222 (a)'s `:skips`, test/crops/crops.edn's `:na-rules` says so): `:na-no-header`
+  (528-1: modrec, print_args, weaklifetime_par), `:na-ocamlopt-only-eval` (528-2, eval only: int64-unboxing, unboxed-primitive-args,
+  the three syntactic-arity programs, the suite's callback_effects_domains_gc), `:na-native-code` (528-10 and 528-14: func_sections,
+  native-debugger's gdb and lldb on amd64, the suite's asmcomp/optargs at AOT), `:na-debugger` (528-9: the five debugger scripts,
+  no_debug_event/noev, dynlink/host), `:na-fork` (528-11, as Python's: the five run programs and the suite's two
+  multicore_fork_domain_alone), `:na-timing` (528-15: fmt's styled_perf_bug), first in each divergences file after `:config-skipped`
+  (the eval and AOT files of the run corpus, the suite's and the compiled level's); lib-bigarray-2/bigarrfml joins `:config-skipped`
+  (528-4: its header's has-gfortran.sh, ocamltest-config.edn's `has_gfortran` false on the pinned host). The classes they came from
+  keep their texts; their rows are the n/a classes' now.
+- **-output-complete-exe** (528-5): header.awk's complete-exe mode, a `use_runtime = "false"` test whose bytecode alternative links
+  the program with `-output-complete-exe [FILE.c]` and runs it, itself or through a script of its directory (`@runscript=FILE:NAME`:
+  bin/oi's oi_one and o2j_alone write ./NAME as the program and run `sh FILE` in its place, its output and status the row's;
+  bin/lib/oi/tools.bash's runscript_of); its C files are the program's stubs (`@cstubs=`). output-complete-obj/github9344
+  (OCAMLRUNPARAM=b=1, `./github9344 || true`: "Fatal error: exception Not_found", no backtrace without -g) and test2 (puts.c, at_exit)
+  at oi's level and the light AOT level; the compiled level keeps the class (its runner has no script).
+- **ocamlobjinfo on a .cmxs** (528-6): the objinfo mode takes ocamltest's plugin test (setup-ocamlopt.byte-build-env; flags =
+  "-shared"; program = "NAME.cmxs"; ocamlopt.byte; ocamlobjinfo): test/ocaml/objinfo/oiobjinfo.ml's `-shared FILE.ml -o NAME.cmxs`
+  writes Arbace's .cmxs, Config.cmxs_magic_number then the plugin header Cmm_helpers.plugin_header gives (dynu_imports_cmi
+  Env.imports (), dynu_defines the unit, dynu_imports_cmx the persistent units whose values the typed tree names, with their
+  interfaces' digests, dynu_crc the source's digest: no .cmx is written), and its objinfo part prints it with objinfo's
+  print_cmxs_infos, -null-crc as ocamltest passes it. tool-ocamlobjinfo/question passes at oi's level by its .reference.
+- **The tool rows at AOT** (528-8 (a), a task of its own): the probe ran shape-index/index_labels at the light level, oiobjinfo
+  translated by o2j over compiler-libs' typing units (bin/oi's o2j_dump and o2j_env_runs take a tool row, kept for that task): killed
+  at its 140 s CPU limit with 3 GB resident. header.awk's objinfo mode stays at oi's level; the 19 rows wait on the compiled level.
+- **The syntactic-arity programs at AOT** (528-3): header.awk's ocamlopt-alone mode runs a header that is only `flags; setup-ocamlopt.byte-build-env;
+  ocamlopt.byte; run; check-program-output` at the AOT levels. alloc passes as it was; measure_runtime_arity needed `Obj.raw_field`
+  of a closure's field 1, its clos_info (jdk/ocaml/ocaml/rt/ExtCore.ae: the arity in the top 8 bits, the environment's start, the low
+  bit). max_arity keeps a class, now deferred: its check-ocamlopt.byte-output (warning 5) needs a compiler output judged at AOT.
+- **uutf's examples and utftrip** (528-15): test/ocaml/opam-programs.tsv takes a seventh column, the libraries (unix);
+  examples is a load program (load.reference), utftrip runs `-g utftrip.ml` with cmdliner's units, its verdict a reviewed golden
+  file (golden.edn: "UTF-8\n" from uutf's r_encoding). Both pass at eval and at the light AOT level.
