@@ -675,10 +675,13 @@ check_one() {
   fi
   # the forms of mode :full when the program has them (GOI-DESIGN-REVIEW.md, "As built: :full forms"):
   # positions within a line (/*line directives, a call split over lines, an index's [); at the AOT
-  # level only with GOI_AOT_LAYOUT=full (printed back to the original text: Proposed 8), else the
-  # forms of mode :lines in the lines layout as before
+  # level (printed back to the original text) for a program that observes positions, its source naming
+  # runtime.Caller or runtime.Callers or holding a /*line directive (GOI-DESIGN-REVIEW.md, Proposed 8
+  # (c), decided 2026-11-05), or every program with GOI_AOT_LAYOUT=full; else the forms of mode :lines
+  # in the lines layout as before
   local froot=$cforms layout=lines
-  if [ -f "$cfull/go/test/$(forms_rel "$p").ae" ] && { [ -z "${aot:-}" ] || [ "${GOI_AOT_LAYOUT:-lines}" = full ]; }; then
+  if [ -f "$cfull/go/test/$(forms_rel "$p").ae" ] \
+     && { [ -z "${aot:-}" ] || [ "${GOI_AOT_LAYOUT:-lines}" = full ] || grep -qE 'runtime\.Caller|/\*line' "$g"; }; then
     froot=$cfull f=$cfull/go/test/$(forms_rel "$p").ae
     [ -n "${aot:-}" ] && layout=full
   fi
@@ -1009,7 +1012,7 @@ dir_verdict() {
 # PROGRAM<TAB>RESULT<TAB>REASON.
 check_err() {
   local p=$1 g=$goroot/test/$1 f act fl tmo=10 want=1 auto="" lang="" maxerr="" goflags=() why="" ns key ref st r types dump reason syn rejected froot=$eforms raw=""
-  local mlev=0 nolinl="" escdebug="" d
+  local mlev=0 nolinl="" escdebug="" gcmode="" d
   act=$(action_of "$g")
   set -- $act
   [ "$1" = errorcheckwithauto ] && auto=-auto
@@ -1038,14 +1041,25 @@ check_err() {
                 # defer open-coded, stack- or heap-allocated (arbace.go.escape/defer-lines); checkptr: the inliner's
                 # refusals under it (arbace.go.escape's checkptr-refused?; its instrumentation reports nothing); append,
                 # slice: x = append(x, ...)'s len-only update, x[:]'s omitted slice (arbace.go.escape/append-slice-lines)
-                escapemutationscalls|escapemutationscalls=*|zerocopy|zerocopy=*|inlfuncswithclosures|inlfuncswithclosures=*|typeassert|typeassert=*|defer|defer=*|checkptr|checkptr=*|append|append=*|slice|slice=*)
+                # escapedebug: walk's dataWord, how a conversion to an interface avoids an allocation (arbace.go.escape/dataword-lines)
+                escapemutationscalls|escapemutationscalls=*|zerocopy|zerocopy=*|inlfuncswithclosures|inlfuncswithclosures=*|typeassert|typeassert=*|defer|defer=*|checkptr|checkptr=*|append|append=*|slice|slice=*|escapedebug|escapedebug=*)
                   case $d in *=*) escdebug="$escdebug :${d%%=*} ${d#*=}" ;; *) escdebug="$escdebug :$d 1" ;; esac ;;
                 *) why=${why:-"-d=$d: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
               esac
             done
             goflags+=("$fl") ;;
       -race) goflags+=("$fl"); escdebug="$escdebug :race true" ;; # gc's race instrumentation adds code, no error: the errorcheck tests under -race expect none (but a -m's, below; the inliner's go:norace)
-      -std|-+|-complete|-asmhdr*|-spectre*) why=${why:-"$fl: gc compiling the standard library or the runtime, out of goi's scope"} ;;
+      # gc's modes for std and the runtime (GOI-SPEC.md, "Since v1: gc's -std, -+, -complete and -p"): noder's
+      # pragma checks under -std and -+, writer's missing function body under -complete, the escape analysis'
+      # and walk's errors of a runtime package under -+ (arbace.go.escape/runtime-lines), -p the package path
+      # the inliner's rules name (GetCallerPC's); gc's write barrier checks (go:nowritebarrier) stay its back end's
+      -std) goflags+=("$fl"); gcmode="$gcmode :std true" ;;
+      -complete) goflags+=("$fl"); gcmode="$gcmode :complete true" ;;
+      -+) goflags+=("$fl"); gcmode="$gcmode :runtime true"
+          grep -qE '^//go:(nowritebarrier|nowritebarrierrec|yeswritebarrierrec)$' "$g" \
+            && why=${why:-"-+: gc's write barrier checks (go:nowritebarrier, its SSA back end's write barriers), which goi does not have"} ;;
+      -p=*) goflags+=("$fl"); gcmode="$gcmode :pkgpath \"${fl#-p=}\"" ;;
+      -asmhdr*|-spectre*) why=${why:-"$fl: gc compiling the standard library or the runtime, out of goi's scope"} ;;
       -goexperiment) why=${why:-"-goexperiment: another GOEXPERIMENT"}; shift ;;
       *) why=${why:-"$fl: a flag of gc's"} ;;
     esac
@@ -1116,8 +1130,8 @@ check_err() {
     types=$(grep -c . "$r.types" || true)
   fi
   st=0; (cd "$goroot/test" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw \
-    $( [ "$mlev" = 0 ] || echo "--escape $mlev --escape-std $root/.tmp/repr-go/forms/linux-amd64 --escape-cache $gcwork/escape-tags"; [ -n "$nolinl" ] || echo --inline ) \
-    ${escdebug:+--escape-debug "{$escdebug}"} --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
+    $( [ "$mlev" = 0 ] || echo "--escape $mlev"; [ "$mlev" = 0 ] && [ -z "$gcmode" ] || echo "--escape-std $root/.tmp/repr-go/forms/linux-amd64 --escape-cache $gcwork/escape-tags"; [ -n "$nolinl" ] || echo --inline ) \
+    ${escdebug:+--escape-debug "{$escdebug}"} ${gcmode:+--gc-mode "{$gcmode}"} --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
   cover_settle goi "$p"
   if { [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; } && [ "$types" = 0 ] && [ -n "$want" ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none; goi'"'"'s check over %s s)\n' "$p" "$tmo"; return

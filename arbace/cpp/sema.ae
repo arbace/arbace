@@ -1709,7 +1709,11 @@
         _ (when (and (checking?) @dd *constraint-doubt*) (reset! *constraint-doubt* true))
         defer (or defer (boolean (and (checking?) (not sat) @dd)))]
   (if (and (not sat) (not defer))
-    nil
+    (do ;; (queue 510, the checker: a constructor so dropped is user-declared all the same, [class.default.ctor]/1: no implicit
+        ;; default constructor for its class, finish-class!; cpp2a/concepts-inherit-ctor2.C's S1<int>)
+        (when (and (checking?) (= "CXXConstructorDecl" (:kind n)) (:cls scope))
+          (abi/update-cls! (:cls scope) assoc :cx-ctor-dropped true))
+        nil)
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n))
             (or (when-let [q (expanded-qualifier n)] (when (some #(str/includes? % "<") q) q))
                 (qualifier-before n) (qualifier-tid-before n)
@@ -2924,7 +2928,11 @@
         (:defaulted (fnd d)) (upd-fn! d assoc :trivial (not (or nontriv (:virtual (fnd d)))))
         :else nil))
     ;; the default constructor
-    (when (empty? (:ctors (abi/cls id)))
+    ;; (queue 510, the checker: a user-declared constructor template is a user-declared constructor too, [class.default.ctor]/1:
+    ;; cpp1z/inh-ctor22.C's `struct B1 { template <class... Ts> B1(int, Ts...) { } };` has no default constructor; the main
+    ;; file's classes only, the code generator's as before)
+    (when (and (empty? (:ctors (abi/cls id)))
+               (not (and (checking?) (or (seq (:ctor-tmpls (abi/cls id))) (:cx-ctor-dropped (abi/cls id))) (not (:header (abi/cls id))))))
       (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
                         (some default-ctor-nontrivial? (class-like-members id)))]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
@@ -4382,7 +4390,7 @@
 
 ;; Implicit conversion sequences: {:rank 0 exact, 1 promotion, 2 conversion, 3 user-defined, 4 ellipsis, :sub n}
 
-(declare ctor-candidates resolve-overload)
+(declare ctor-candidates resolve-overload analyze-implicit!)
 
 (defn- std-rank
   "The rank of the standard conversion from the prvalue type `from` (expression e) to the non-reference type `to`, or nil."
@@ -4746,9 +4754,18 @@
                            ;; a basic_ostringstream, basic_ostream's member operator<<(int) by promotion against the non-member
                            ;; operator<<(basic_ostream<char, _Traits>&, char) by that conversion and an exact match, had been 17 viable
                            ;; and ambiguous with the member taken for an exact match)
-                           oc (let [oid (when (and oc obj (:cls f) (not (:static f)) (not= :ctor (:kind f))) (class-id (:ty obj)))]
-                                (if (and oid (not= oid (:cls f)) (abi/derived-from? oid (:cls f)))
-                                  (assoc oc :rank 2 :d2b [oid (:cls f)])
+                           ;; (queue 510, the checker: a member a using-declaration of class U nominates is U's member for its
+                           ;; implicit object parameter, [over.match.funcs.general]/4: no conversion from an object of U, so
+                           ;; cpp1z/using1.C's B().f(1) between B::f(short) and A::f(short, int = 0) by `using A::f;` is ambiguous
+                           ;; again, as before cpp-rt-own's rule above; :ucls is the checker's)
+                           ucls (when (and (checking?) oc obj (:cls f) (not (:static f)) (not= :ctor (:kind f)))
+                                  (when-let [oid (class-id (:ty obj))]
+                                    (when (and (not= oid (:cls f)) (abi/derived-from? oid (:cls f)))
+                                      (some (fn [[_ e]] (when (and (= :fn (:e e)) (= cid (:id e))) (:ucls e))) (class-lookup oid (:name f))))))
+                           oc (let [oid (when (and oc obj (:cls f) (not (:static f)) (not= :ctor (:kind f))) (class-id (:ty obj)))
+                                    mc (or ucls (:cls f))]
+                                (if (and oid (not= oid mc) (abi/derived-from? oid mc))
+                                  (assoc oc :rank 2 :d2b [oid mc])
                                   oc))]
                      :when (and oc (every? some? convs))]
                  ;; (a member operator's object is the first operand, a non-member's first operand its first argument:
@@ -4785,6 +4802,17 @@
                                          (some #(abi/ref? (:ty %)) (:fields c))
                                          (some #(and (:anon %) (:union (abi/cls-of (:ty %)))) (:fields c)))
                                  (fail :overload "call to a deleted function " (:name f) " (implicitly deleted)"))))
+                           ;; (queue 510, the checker: a defaulted == or <=> not yet defined, defined now (as the declarations'
+                           ;; entries would later), so that one defined as deleted (defaulted-comparison!: a flexible array
+                           ;; member, [class.spaceship]/2's subobject of no comparison category type) is the error of its use;
+                           ;; a definition that refuses is left to its entry)
+                           (when (and (checking?) (:defaulted f) (#{"==" "<=>"} (:op f)) (not (:params f)) (not (:deleted f)) (not (:analyzed f))
+                                      (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
+                             (upd-fn! b assoc :analyzed true)
+                             (try (analyze-implicit! b)
+                                  (catch arbace.lang.ExceptionInfo _ (upd-fn! b dissoc :analyzed)))
+                             (when (and (:deleted (fnd b)) (:deleted-sure (fnd b)))
+                               (fail :overload "call to a deleted function " (:name f) " (implicitly deleted)")))
                            b)
       (empty? viable)
       (let [{:keys [sure-drops unsure-drops]} (when (checking?) *drops*)]
@@ -5604,11 +5632,44 @@
                                (:fields c)))
             x (some (fn [sc] (try (default-ctor-init sc false) nil
                                   (catch arbace.lang.ExceptionInfo x
-                                    (when (re-find #"call to a deleted function" (str (.getMessage x))) x))))
+                                    ;; (queue 510: or no default constructor, surely: cpp1z/inh-ctor22.C's D2's `B1 b;`)
+                                    (when (or (re-find #"call to a deleted function" (str (.getMessage x))) (:cx/no-default-sure (ex-data x))) x))))
                     subs)]
         (when x
           (cx-inh-report! id (:name (abi/cls bc)) x)
           (fail :overload "call to a deleted function " (:name c) " (inherited from " (:name (abi/cls bc)) ")"))))))
+
+(defn- cx-inh-paths
+  "Queue 510 (the checker): the base constructors class `cid` inherits by its using-declarations, transitively through the
+  bases that inherit them in turn ([namespace.udecl]/3, [class.inhctor.init]/1), each as [fid virtual?] once per path,
+  `virtual?` when a virtual base is on the path; copy and move constructors and those without parameters left out."
+  [cid args seen]
+  (let [c (abi/cls cid) nms (:inherits-ctors c)]
+    (when (and (seq nms) (not (contains? seen cid)))
+      (for [b (:bases c)
+            :let [bc (:cls b)]
+            :when (contains? nms (:name (abi/cls bc)))
+            [fid v] (concat (for [fid (concat (ctor-candidates bc) (when-let [h (:ctor-candidates @hooks)] (h bc args)))
+                                  :let [f (fnd fid)]
+                                  :when (and (seq (:ps (:ty f))) (not (copy-ctor? f (:cls f))) (not (move-ctor? f (:cls f))))]
+                              [fid false])
+                            (cx-inh-paths bc args (conj seen cid)))]
+        [fid (boolean (or v (:virtual b)))]))))
+
+(defn- cx-inh-ambiguous!
+  "Queue 510 (the checker): an initialization of class `id` by `args` that chooses, among its own constructors and those it
+  inherits transitively (cx-inh-paths), a base constructor inherited from two base class subobjects -- two paths without a
+  virtual base -- is ill-formed ([namespace.udecl]/3 with [class.inhctor.init]: P0136R1's D1 d1(0), cpp1z/inh-ctor24.C);
+  judged when overload resolution chooses it; a virtual base's (one subobject, D2) is not."
+  [id args own]
+  (let [paths (cx-inh-paths id args #{})
+        by (group-by first paths)]
+    (when (some (fn [[_ ps]] (<= 2 (count (remove second ps)))) by)
+      (let [fid (try (resolve-overload (distinct (concat own (map first paths))) args nil) (catch arbace.lang.ExceptionInfo _ nil))]
+        (when (and fid (<= 2 (count (remove second (get by fid)))))
+          ;; (GCC deletes such an inheriting constructor: "use of deleted function 'D1::D1(int) [inherited from A]'")
+          (fail :overload "call to a deleted function " (:name (abi/cls id)) " (inherited from " (:name (abi/cls (:cls (fnd fid))))
+                " through multiple base class subobjects)"))))))
 
 (defn- ctor-init
   "A constructor of class `id` chosen for the arguments `args` by overload resolution, its call's initializer. `nested`:
@@ -5670,6 +5731,9 @@
                                          (cx-inh-report! id bn e))))
                                    (throw e)))))
             f (when-not (= ::inherited fid) (fnd fid))]
+        ;; (queue 510, the checker: a base constructor inherited from two base class subobjects, cx-inh-ambiguous!)
+        (when (and (checking?) (seq (:inherits-ctors (abi/cls id))) (or (= ::inherited fid) (some #{fid} inh)))
+          (cx-inh-ambiguous! id args cands))
         (cond
           (= ::inherited fid) {:i :none}
           (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) (cx-inherited-deleted! id fid) {:i :none})
@@ -5685,6 +5749,23 @@
           ;; G5: <compare>'s __cmp_cat::__unspec)
           (and (:consteval f) (abi/empty-class? id)) {:i :none}
           :else {:i :ctor :fn fid :args (call-args f args ctx)}))))
+
+(defn- cx-no-default-sure?
+  "Queue 510 (the checker): whether class `id` surely has no default constructor ([class.default.ctor]/1, [over.match.ctor]):
+  a complete class of the main file (a class template's specialization too, round 2), no instance whose definition refused,
+  none inheriting constructors
+  (a base's default constructor inherited, [namespace.udecl]/3), whose every constructor (the deleted ones too, an implicit
+  one deleted unsure among them) has a parameter without a default argument, and whose every constructor template has more
+  parameters that are no pack and have no default argument than none (template.ae's too-few-args?)."
+  [id]
+  (let [c (abi/cls id)
+        h (:ctor-tmpls-need-args? @hooks)]
+    (boolean
+     (and (checking?) c (:complete c) (not (:defining c)) (not (:header c)) (not (:cx-inst-refused c)) (empty? (:inherits-ctors c))
+          (every? (fn [fid] (let [f (fnd fid) ps (:ps (:ty f))]
+                              (and (seq ps) (> (count ps) (count (filter some? (:defaults f)))))))
+                  (:ctors c))
+          (or (empty? (:ctor-tmpls c)) (and h (h id)))))))
 
 (defn default-ctor-init
   "Default- (or with `value?` value-) initialization of a class object."
@@ -5710,12 +5791,43 @@
                              fid)))))
         fid (first cands)
         fid (if (and fid (not= id (:cls (fnd fid)))) (inherit-through! id fid) fid)]
-    (if (and (nil? fid) (checking?) (:cx-inst-refused (abi/cls id)))
+    (if (and (nil? fid) (checking?)
+             (or (:cx-inst-refused (abi/cls id))
+                 ;; (queue 510, the checker: a base's default constructor its using-declaration inherits, as the code
+                 ;; generator's branch above finds it ([namespace.udecl]/3, [over.match.funcs]/8 excludes only the copy and move
+                 ;; constructors' shapes; g++ 15.2 accepts `struct D : B { using B::B; D(double); }; D d;` at C++11 to 20): not
+                 ;; judged, as ctor-init leaves a chosen inherited constructor)
+                 (let [c (abi/cls id) nms (:inherits-ctors c)]
+                   (and (seq nms)
+                        (some (fn [b] (and (not (:virtual b)) (contains? nms (:name (abi/cls (:cls b))))
+                                           (some #(let [g (fnd %)] (and (empty? (:ps (:ty g))) (not (:deleted g)))) (:ctors (abi/cls (:cls b))))))
+                              (:bases c))))))
       ;; (queue 487, the checker: an instance whose definition refused, its implicit members never declared: no error of
       ;; its own, the instantiation's being the one, template.ae's declare-instance!)
       {:i :none}
     (do
-    (when-not fid (fail :init "no default constructor for " (:name (abi/cls id))))
+    (when-not fid
+      ;; (queue 510, the checker: sure when cx-no-default-sure?, so that it deletes an implicit member or an inheriting
+      ;; constructor surely, [class.default.ctor]/2.4)
+      (if (cx-no-default-sure? id)
+        (throw (ex-info (str "codegen: no default constructor for " (:name (abi/cls id))) {:codegen/refused :init :cx/no-default-sure true}))
+        (fail :init "no default constructor for " (:name (abi/cls id)))))
+    ;; (queue 510, the checker: an implicit default constructor not yet defined -- a class template's specialization or a
+    ;; local class made after the declarations' entries -- defined now, so that one deleted surely for a subobject's deleted
+    ;; or missing default constructor is the error of this use, as the entries define the main file's classes' before
+    ;; their uses; any other refusal left to its entry: cpp2a/concepts-inherit-ctor2.C's S2<int>)
+    (let [f (fnd fid)]
+      (when (and (checking?) (:implicit f) (= :ctor (:kind f)) (not (:analyzed f)) (not (:params f)) (not (:deleted f)) (not (:inh-from f))
+                 (not *cx-in-implicit*))
+        (upd-fn! fid assoc :analyzed true)
+        (try (analyze-implicit! fid)
+             (catch arbace.lang.ExceptionInfo e
+               (let [m (str (.getMessage e))
+                     sub (or (second (re-find #"call to a deleted function (\S+)" m))
+                             (when (:cx/no-default-sure (ex-data e)) (second (re-find #"no default constructor for (\S+)" m))))]
+                 (if sub
+                   (upd-fn! fid assoc :deleted true :deleted-sure true :tinits nil :cx-sub-deleted sub)
+                   (upd-fn! fid dissoc :analyzed)))))))
     (when (and (checking?) (:deleted-sure (fnd fid)))
       ;; (queue 492: an implicitly deleted one's reason at its class too, as resolve-overload*'s)
       (cx-deleted-implicit! (fnd fid))
@@ -7247,7 +7359,12 @@
   [ctx o args]
   (let [zero {:op :int :v 0 :ty abi/int* :cat :pr}
         [x y] args
-        three (fn [a b] (or (when (or (class-operand? a) (class-operand? b)) (try (operator-call ctx "<=>" [a b]) (catch arbace.lang.ExceptionInfo _ nil)))
+        ;; (queue 510, the checker: a deleted <=> chosen surely, resolve-overload*'s CX12 rule, is the error, not a rewritten
+        ;; candidate's absence, [over.match.oper]/8 with [dcl.fct.def.delete]/2: cpp2a/spaceship-synth-neg5.C's `c1 > c2`)
+        three (fn [a b] (or (when (or (class-operand? a) (class-operand? b))
+                              (try (operator-call ctx "<=>" [a b])
+                                   (catch arbace.lang.ExceptionInfo e
+                                     (if (and (checking?) (re-find #"^codegen: call to a deleted function" (str (.getMessage e)))) (throw e) nil))))
                             (try (three-way a b) (catch arbace.lang.ExceptionInfo _ nil))))]
     (or (when-let [c (three x y)] (operator-call ctx o [c zero]))
         (when-let [c (three y x)] (operator-call ctx o [zero c])))))
@@ -7351,7 +7468,15 @@
                 (let [f (fnd fid) ps (vec (:ps (:ty f))) k (if aligned 2 1)]
                   {:fn fid :align (when aligned (abi/align-of et))
                    :places (call-args (assoc f :ty (assoc (:ty f) :ps (subvec ps k)) :defaults (vec (drop k (:defaults f)))) place ctx)})
-                (do (when (seq place) (fail :new "a placement new without a declared operator new"))
+                (do (when (seq place)
+                      ;; (queue 510, the checker: none at all, the implicit declarations being only the usual forms
+                      ;; ([basic.stc.dynamic.general]/2: <new>'s placement form is no implicit one), so no candidate for the
+                      ;; placement arguments, GCC's "no matching function for call to 'operator new(sizetype, int*)'": a block
+                      ;; scope's declaration is not found by the new-expression's lookup (lookup/new1.C); not when a header's
+                      ;; declaration of it was dropped)
+                      (when (and (checking?) (not-any? #(= nm (nth % 2 nil)) (some-> *header-drops* deref vals)))
+                        (fail :new "no matching " nm " for " (count place) " placement arguments"))
+                      (fail :new "a placement new without a declared operator new"))
                     {:sym (str (if array? "_Zna" "_Znw") "m" (when aligned "St11align_val_t")) :align (when aligned (abi/align-of et)) :places []}))
         f (when fid (fnd fid))
         reserved (boolean (and f (not (:cls f)) (= 2 (count (:ps (:ty f)))) (void-ptr? (second (:ps (:ty f))))
@@ -9633,8 +9758,17 @@
         c (abi/cls cls)
         subs (concat (for [bb (:bases c)] [(to-base-lv a (:cls bb)) (to-base-lv b (:cls bb))])
                      (for [fl (:fields c)] [(field-node a cls (:i fl)) (field-node b cls (:i fl))]))
-        bin (fn [o x y] (or (when (or (class-operand? x) (class-operand? y)) (operator-call ctx o [x y])) (builtin-binop o (class->scalar ctx x) (class->scalar ctx y))))]
+        bin (fn [o x y] (or (when (or (class-operand? x) (class-operand? y)) (operator-call ctx o [x y])) (builtin-binop o (class->scalar ctx x) (class->scalar ctx y))))
+        ;; (queue 510, the checker: a defaulted == or <=> defined as deleted, not refused, so a use of it is the error,
+        ;; resolve-overload*'s CX12 rule: GCC's "use of deleted function" at the use)
+        deleted! (fn [why] (upd-fn! fid assoc :deleted true :deleted-sure true :deleted-why why) fid)]
     (binding [*cutoff* Long/MAX_VALUE]
+      (cond
+        ;; (a flexible array member, GNU's extension: GCC's "cannot default compare flexible array member";
+        ;; cpp2a/spaceship-synth-neg5.C)
+        (and (checking?) (#{"==" "<=>"} (:op f)) (some #(and (not (:static %)) (abi/arr? (:ty %)) (nil? (:n (:ty %)))) (:fields c)))
+        (deleted! "a flexible array member")
+        :else
       (case (:op f)
         ;; (CP338 (a): a defaulted secondary comparison, [class.compare.secondary]/2: x @ y by its rewritten candidate alone,
         ;; != as !(x == y), a relational as (x <=> y) @ 0, the result converted to bool; it had been emitted unreachable)
@@ -9651,7 +9785,18 @@
         "<=>" (let [cs (vec (for [[x y] subs] (bin "<=>" x y)))
                     nm (fn [t] (:name (abi/cls (class-id t))))
                     declared (:ret (:ty f))
-                    rt (if (= :auto (:k declared))
+                    ;; (queue 510, the checker: an auto return type and a subobject whose three-way comparison's type is no
+                    ;; comparison category type -- a scalar, or a class not <compare>'s -- is defined as deleted,
+                    ;; [class.spaceship]/2 (P2002): cpp2a/spaceship-synth-neg4.C's `bool operator<=>`)
+                    bad (when (and (checking?) (= :auto (:k declared)))
+                          (some (fn [x] (let [t (abi/unq (abi/non-ref (:ty x)))]
+                                          (or (abi/scalar? t)
+                                              (and (abi/class? t)
+                                                   (not (#{"partial_ordering" "weak_ordering" "strong_ordering"} (nm t)))))))
+                                cs))]
+                (if bad
+                  (deleted! "a subobject's three-way comparison of no comparison category type")
+                (let [rt (if (= :auto (:k declared))
                          (ordering-type (cond (some #(= "partial_ordering" (nm (:ty %))) cs) "partial_ordering"
                                               (some #(= "weak_ordering" (nm (:ty %))) cs) "weak_ordering"
                                               :else "strong_ordering"))
@@ -9660,7 +9805,7 @@
                     as-rt (fn [x] (if (= (class-id (:ty x)) (class-id rt)) x {:op :temp-obj :init (init-for rt [x] ctx :copy) :ty rt :cat :pr}))
                     e (reduce (fn [acc x] {:op :cond :c (to-bool (bin "!=" x zero)) :then (as-rt x) :else acc :ty rt :cat :pr})
                               {:op :ord :v 0 :ty rt :cat :pr} (reverse cs))]
-                (upd-fn! fid #(-> % (assoc-in [:ty :ret] rt) (assoc :params pids :tbody {:s :return :init {:i :expr :e e}}))))))
+                (upd-fn! fid #(-> % (assoc-in [:ty :ret] rt) (assoc :params pids :tbody {:s :return :init {:i :expr :e e}})))))))))
     fid))
 
 (defn- analyze-implicit*!
@@ -10074,7 +10219,15 @@ protected:
                                              (catch arbace.lang.ExceptionInfo e
                                                (when (System/getenv "CPP_HDR_TRACE")
                                                  (binding [*out* *err*] (println "implicit member failed:" (:name (fnd id)) (:implicit (fnd id)) (:name (abi/cls (:cls (fnd id)))) (:header (abi/cls (:cls (fnd id)))) (.getMessage e))))
-                                               (if (and (:implicit (fnd id))
+                                               (if (or
+                                                    ;; (queue 510, the checker: a defaulted == or <=> whose definition refuses
+                                                    ;; is defined as deleted, [class.compare.default]/1-2, [class.eq]/2,
+                                                    ;; [class.spaceship]/2 (its subobjects' comparisons not usable), unsure but
+                                                    ;; for a deleted function chosen, no longer the unit's refusal: the == a
+                                                    ;; defaulted <=> declares, cpp2a/spaceship-synth-neg4.C's A without ==)
+                                                    (and (checking?) (:defaulted (fnd id)) (#{"==" "<=>"} (:op (fnd id)))
+                                                         (:codegen/refused (ex-data e)))
+                                                    (and (:implicit (fnd id))
                                                         (or (= :overload (:codegen/refused (ex-data e)))
                                                             ;; ([class.default.ctor]/2.5: a member or base with no default
                                                             ;; constructor deletes the implicit one; CX12)
@@ -10087,17 +10240,23 @@ protected:
                                                             ;; the unit no longer refused: cpp2a/implicit-move1.C's derived)
                                                             (and (checking?) (= :access (:codegen/refused (ex-data e)))
                                                                  (or (= :ctor (:kind (fnd id))) (= "operator=" (:name (fnd id)))))
-                                                            (and (:codegen/refused (ex-data e)) (:header (abi/cls (:cls (fnd id)))))))
+                                                            (and (:codegen/refused (ex-data e)) (:header (abi/cls (:cls (fnd id))))))))
                                                  ;; (CX12: deleted for a subobject's deleted member, the checker sure of it)
                                                  (upd-fn! id assoc :deleted true :tinits nil
-                                                          :deleted-sure (boolean (and (checking?) (re-find #"call to a deleted function" (str (.getMessage e)))))
+                                                          :deleted-sure (boolean (and (checking?) (or (re-find #"call to a deleted function" (str (.getMessage e)))
+                                                                                                      ;; (queue 510: a subobject surely without a default constructor)
+                                                                                                      (and (= :ctor (:kind (fnd id))) (:cx/no-default-sure (ex-data e))))))
                                                           ;; (queue 463: the subobject's deleted member, for cx-deleted-implicit!)
                                                           :cx-sub-deleted (when (and (checking?)
                                                                                      ;; (an assignment deleted for a reference or const member, [class.copy.assign]/7.2-3:
                                                                                      ;; GCC names no subobject's member at the class: inherit/pr97268.C)
                                                                                      (not (and (= "operator=" (:name (fnd id)))
                                                                                                (some #(or (abi/ref? (:ty %)) (:c (:ty %))) (:fields (abi/cls (:cls (fnd id))))))))
-                                                                            (second (re-find #"call to a deleted function (\S+)" (str (.getMessage e)))))
+                                                                            (or (second (re-find #"call to a deleted function (\S+)" (str (.getMessage e))))
+                                                                                ;; (queue 510: the subobject surely without a default constructor,
+                                                                                ;; GCC's "no matching function for call to 'B1::B1()'" at the class)
+                                                                                (when (and (= :ctor (:kind (fnd id))) (:cx/no-default-sure (ex-data e)))
+                                                                                  (second (re-find #"no default constructor for (\S+)" (str (.getMessage e)))))))
                                                           ;; (queue 499: the subobject's implicitly deleted destructor, cx-sub-dtor-chain!)
                                                           :cx-q499-sub (:cx-q499-sub (ex-data e)))
                                                  (throw e)))))

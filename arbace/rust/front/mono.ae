@@ -140,10 +140,18 @@
 
 (def ^:dynamic *local* nil)   ; {:name "a1" :id LONG}: the crate being compiled
 
+(def ^:dynamic *lib-crate*
+  "C6 (doc/rust/FRONTEND-SURVEY.md, \"As built: C6's first slice\"): a library crate of *crates* (\"alloc\") compiled as its own
+  unit: the local crate then, its StableCrateId the library build's, so that its items' symbols and the copies and instances it
+  makes are named as rustc compiling it names them; nil (the program's crate) otherwise"
+  nil)
+
 (defn local-crate
   "The crate being compiled: rustc's crate name of the file (its stem, `-` made `_`: rustc_session's validated file stem, RF11's
-  synthetic programs `exit-code`, ...) and its StableCrateId"
-  [n] (let [n (str/replace n "-" "_") v (:cfg-version *crates*)] {:name n :id (stable-crate-id n true [] v)}))
+  synthetic programs `exit-code`, ...) and its StableCrateId; C6: *lib-crate*'s when bound"
+  [n] (if-let [lc *lib-crate*]
+        {:name lc :id (crate-id lc)}
+        (let [n (str/replace n "-" "_") v (:cfg-version *crates*)] {:name n :id (stable-crate-id n true [] v)})))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; v0's encodings (v0.rs)
@@ -240,6 +248,7 @@
 
 (defn- def-local? [d] (or (number? d) (and (vector? d) (= :local (nth d 2 nil)))))
 
+(declare src-adt)
 (defn- generics [d]
   (cond (vector? d) nil
         ;; RF15: core::ptr::drop_glue (`pub(crate) const unsafe fn drop_glue<T: PointeeSized>`, the lang item drop_glue) is not
@@ -250,7 +259,15 @@
         (and (string? d) (re-find #"::\{closure#\d+\}$" d))
         (let [pg (generics (subs d 0 (.lastIndexOf ^String d "::")))]
           {:parent-count (+ (long (:parent-count pg 0)) (count (:params pg))) :params []})
-        :else (c/generics-any d)))
+        :else (let [g (c/generics-any d)]
+                ;; queue 479: a crate-private struct std's interface lacks (core::ptr::Unaligned<T>, read_unaligned's and
+                ;; write_unaligned's): its parameters from the library's source (src-adt), so that the symbols of the instances
+                ;; it is an argument of carry its arguments (`ptr::read::<Unaligned<[bool; 4]>>`, not `ptr::read::<Unaligned>`)
+                (if-let [s (and (string? d) (empty? (:params g)) (zero? (long (:parent-count g 0))) (src-adt d))]
+                  (if (seq (:params s))
+                    {:parent-count 0 :params (vec (map-indexed (fn [i nm] {:name nm :kind (if (str/starts-with? (str nm) "'") :lifetime :type) :index i}) (:params s)))}
+                    g)
+                  g))))
 
 (defn- impl-of
   "An impl's self type and trait reference (tc types over its parameters): [self [trait-def args]-or-nil]"
@@ -448,6 +465,13 @@
                        "v" 0 nm)
       (str (:sb m)))))
 
+(defn- instantiating-root
+  "The instantiating crate's root as print-def-path! keys it: the local crate's own (`[:crate NAME :local]`); C6, a library
+  crate compiled as its own unit (*lib-crate*), the root its paths name (`[:crate NAME]`), so that the instantiating crate is a
+  back-reference to it as v0 writes it when the path already printed it (`..4kindB4_`, not `..4kindCs.._5alloc`)"
+  []
+  (if *lib-crate* [:crate (:name *local*)] [:crate (:name *local*) :local]))
+
 (declare v0-mangle)
 (defn reify-mangle
   "A ReifyShim's symbol (a #[track_caller] function as a pointer, Instance::resolve_for_fn_ptr): `::{shim:reify#0}`, then the
@@ -456,7 +480,7 @@
   (let [m (m-new)]
     (binding [*instance-def* d]
       (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "reify"))
-    (print-def-path! m [:crate (:name *local*) :local] [])
+    (print-def-path! m (instantiating-root) [])
     (str (:sb m))))
 
 (defn vtable-shim-mangle
@@ -467,7 +491,7 @@
   (let [m (m-new)]
     (binding [*instance-def* d]
       (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "vtable"))
-    (print-def-path! m [:crate (:name *local*) :local] [])
+    (print-def-path! m (instantiating-root) [])
     (str (:sb m))))
 
 (defn v0-mangle
@@ -476,7 +500,7 @@
   [d args instantiating?]
   (let [m (m-new)]
     (binding [*instance-def* d] (print-def-path! m d (erase-regions args)))
-    (when instantiating? (print-def-path! m [:crate (:name *local*) :local] []))
+    (when instantiating? (print-def-path! m (instantiating-root) []))
     (str (:sb m))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -932,6 +956,12 @@
                      (simd-layout (first (variant-fields adt args)) (first vs))
                      (layout-of-struct-or-enum repr vs enum? cell? (when enum? (tc/discriminant-values adt)) (not maybe-unsized)))]
              (cond-> l enum? (assoc :discrs (vec (tc/discriminant-values adt))))))
+      ;; C6-4 (a): a projection an ADT's field leaves at the instance (Cow<str>'s `<str as ToOwned>::Owned`) normalized by the
+      ;; solver, as layout_of normalizes its type first
+      :proj (let [n (try (erase-regions (tc/normalize-deep t)) (catch Throwable _ t))]
+              (if (and (not= n t) (not= :proj (first n)))
+                (layout-of n)
+                (throw (ex-info (str "mono: no layout for " (pr-str t)) {:fact :layout}))))
       (throw (ex-info (str "mono: no layout for " (pr-str t) (when (= :err (first t)) " (not in std's interface)")) {:fact :layout})))))
 
 (defn layout-of [t]
@@ -1666,8 +1696,14 @@
   resolve-assoc-fn), any other function itself: [DEF ARGS]; a builtin candidate (closures' Fn traits, Clone's shims) and what
   the resolution leaves refused"
   [d args]
-  (if-not (trait-method? d)
+  (cond
+    ;; queue 483: the lang item drop_glue (core::ptr::drop_in_place's `drop_glue(&mut *to_drop)`) resolves to its shim,
+    ;; InstanceKind::DropGlue(_, Some(T)) when T needs drop, else the empty glue (DropGlue(_, None), a no-op at codegen)
+    (and (= d "core::ptr::drop_glue") (= 1 (count args)) (vector? (first args)))
+    [d args (if (build/needs-drop? (first args)) "drop-glue" "drop-glue-empty")]
+    (not (trait-method? d))
     [d args]
+    :else
     (let [tr (if (number? d) (:parent (c/def-of d)) (c/path-parent d))
           self (first (filter type-arg? args))
           fk (get fn-trait-kind tr)]
@@ -1701,7 +1737,7 @@
   (let [[cd args] (resolve-instance cd (erase-regions args))]
     (when (and *unknown-refused* (string? cd) (str/starts-with? cd "core::") (not (intrinsic? cd)) (not (:known (attrs-of cd))))
       (throw (ex-info (str "mono: " cd "'s attributes are not in core's sources (a macro-made item)") {:fact :callee})))
-    (if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args args}))))
+    (if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args args :shim (when (= cd "core::ptr::drop_glue") :drop-glue)}))))
 
 (defn callee-fact
   "Instance::try_resolve's callee as the helper writes it: {:kind :symbol :def :can-unwind :track-caller [:intrinsic] [:external]}
@@ -2320,8 +2356,59 @@
                                                      :symbol (instance-symbol {:def def :args (erase-regions args)}) :name name :kind :fn}
                                               ((:names (attrs-of def)) "track_caller") (assoc :track-caller true)))]))
          :callees (into {} (for [[txt ft] calls] [txt (try-fact #(callee-fact ft))]))
-         :fsyms (into {} (for [[txt [_ cd args]] calls :when (not (intrinsic? cd))]
-                           [txt (try-fact #(call-fsym cd args))]))})))))
+         :fsyms (into (into {} (for [[txt [_ cd args]] calls :when (not (intrinsic? cd))]
+                                 [txt (try-fact #(call-fsym cd args))]))
+                      ;; queue 493: a function item reified to a function pointer (Argument::new_display's `<T as Display>::fmt
+                      ;; as for<'a, 'b, 'c> fn(..)`): its instance's symbol by the constant's text, as build-program's facts do
+                      (for [{:keys [body]} bodies blk (:blocks body) st (:stmts blk)
+                            :when (and (seq? st) (= 'assign (first st)))
+                            :let [rv (nth st 2 nil)]
+                            :when (and (seq? rv) (= 'cast (first rv)) (str/starts-with? (str (second rv)) "PointerCoercion(ReifyFnPointer"))
+                            :let [o (nth rv 2) ft (when (and (seq? o) (= 'const (first o))) (:tc (meta (nth o 2 nil))))]
+                            :when (and (vector? ft) (= :fndef (first ft)) (not (intrinsic? (second ft))))
+                            :let [[_ cd args] ft]]
+                        [(second o) (try-fact #(call-fsym cd args))]))})))))
+
+(defn inline-always-callees
+  "C6-4 (the always-inliner): within build-program's bindings, the callees of BODIES' calls that are `#[inline(always)]`
+  (rustc_codegen_llvm's `alwaysinline`, which LLVM's -O0 pipeline inlines): [[def args symbol]], each once, in order"
+  [n bodies]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def) (fn []
+      (vec (distinct
+            (for [b bodies blk (:blocks b) :let [ft (call-fndef (:term blk))] :when ft
+                  :let [[_ d0 args0] ft
+                        r (try (resolve-instance d0 (erase-regions args0)) (catch Throwable _ nil))]
+                  :when r
+                  :let [[d args shim] r]
+                  :when (and (nil? shim) (not (intrinsic? d)) ((:names (attrs-of d)) "inline(always)"))]
+              [d (erase-regions args) (try (instance-symbol {:def d :args (erase-regions args)}) (catch Throwable _ nil))])))))))
+
+(defn const-fsyms
+  "C6: within build-program's bindings, the symbols of every function constant BODIES name, calls' and operands' (a function
+  reified as a pointer: `custom_owner_from_box`'s drop function), {text symbol-or-error}, as core-facts' :fsyms gives the calls'"
+  [n bodies]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def) (fn []
+      (let [acc (atom {})]
+        (doseq [b bodies]
+          (letfn [(walk [x]
+                    (when (and (seq? x) (= 'const (first x)) (string? (second x)) (not (contains? @acc (second x))))
+                      (let [t (:tc (meta (nth x 2 nil)))]
+                        (when (and (vector? t) (= :fndef (first t)) (not (intrinsic? (second t))))
+                          (swap! acc assoc (second x) (try-fact #(call-fsym (second t) (nth t 2)))))))
+                    (cond (seq? x) (doseq [y x] (walk y)) (vector? x) (doseq [y x] (walk y)) (map? x) (doseq [y (vals x)] (walk y))))]
+            (walk (:blocks b))
+            (doseq [pb (vals (:promoted-bodies b))] (walk (:blocks pb)))))
+        @acc)))))
+
+(defn drop-glue-symbol
+  "C6-4 (a): within build-program's bindings, the symbol of drop_glue::<T> for a type T that needs drop (the drop terminator's
+  callee, as codegen reads `(glue {:symbol ..})`), nil for one that needs none"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (let [t (erase-regions t)] (when (build/needs-drop? t) (instance-symbol {:def (c/lang "drop_glue") :args [t] :shim :drop-glue})))))))
 
 (defn record-slots
   "RFP44 (a): within build-program's bindings, record-virtual-slot over KEYS [[METHOD-PATH DYN-TEXT] ...]: {key slot-or-nil}"
@@ -2338,6 +2425,21 @@
     (tc/with-solver (solver-def)
       (fn [] (when (and (= :adt (first t)) (number? (second t)) (= [t] (vec (drop-glues t))))
                (local-drop-impl t))))))
+
+(defn needs-drop
+  "queue 498: Ty::needs_drop of a concrete type T, as drop-glue-info's :needs-drop, without the shim's symbol"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def) (fn [] (boolean (build/needs-drop? (erase-regions t)))))))
+
+(defn drop-glue-info
+  "queue 483: drop_glue::<T>'s shim as a native library instance calls it (core::ptr::drop_in_place's body): {:needs-drop
+  :symbol} (the shim's symbol, as the vtables' drop entries and the collector's glue items name it)"
+  [n t]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (let [t (erase-regions t)]
+               {:needs-drop (boolean (build/needs-drop? t)) :symbol (instance-symbol {:def (c/lang "drop_glue") :args [t] :shim :drop-glue})})))))
 
 (defn resolve-const
   "RF17: a local trait's associated constant D at ARGS (`<i32 as Zero>::ZERO`) resolved to the impl's constant, as

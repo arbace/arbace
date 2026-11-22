@@ -56,6 +56,7 @@
    :cur (volatile! nil) :prev (volatile! nil) :stack (volatile! [])
    :locals (java.util.HashMap.)           ; local label N -> instances defined
    :tmp (volatile! 0)
+   :relax-steps (volatile! 0)             ; MCAssembler's RelaxationSteps statistic (llvm-mc --stats; x86-print)
    :syms (volatile! {})                   ; assignments for the matcher (name -> expression)
    :files (java.util.ArrayList.) :sec-names (java.util.HashMap.)
    :frames (java.util.ArrayList.) :frame (volatile! nil)
@@ -911,14 +912,15 @@
                                               (recur (+ o (chunk-size c)) (inc i)))))))
 
 (defn- relax-section!
-  "relaxOnce's pass over one section until no offset moves: whether any chunk's offset or size moved."
+  "relaxOnce's passes over one section until no chunk's offset moves (MCAssembler::relaxOnce's Changed: an offset, a size
+  change moving the next chunk): [MOVED ITERS], whether a pass moved one and the passes made, the last unmoved one counted."
   [ctx sec]
   (let [^java.util.ArrayList cs (:chunks @sec)]
     (loop [iters 0 any false]
       (let [changed (volatile! false)]
         (loop [o 0 i 0]
           (when (< i (.size cs))
-            (let [c (.get cs i) old (long (:offset @c)) stretch (- o old) old-size (chunk-size c)]
+            (let [c (.get cs i) old (long (:offset @c)) stretch (- o old)]
               (when-not (= o old) (vreset! changed true))
               (swap! c assoc :offset o)
               (case (:kind @c)
@@ -928,19 +930,26 @@
                 :fill (relax-fill! ctx c)
                 :org (relax-org! ctx c o)
                 nil)
-              (when-not (= old-size (chunk-size c)) (vreset! changed true))
               (recur (+ o (chunk-size c)) (inc i)))))
         (if (and @changed (< iters (+ 2 (.size cs))))
           (recur (inc iters) true)
-          (or any @changed))))))
+          [(or any @changed) (inc iters)])))))
 
 (defn layout! [ctx]
-  ;; layoutSection, then relaxOnce until no offset moves; a section that moved has every section relaxed again, as its symbols'
-  ;; offsets may size another section's fill or org (MCAssembler::relaxOnce's FirstStable; queue 337: MC/X86's relax-offset)
+  ;; layoutSection, then relaxOnce until no section moves (MCAssembler::layout): a pass over the sections before FirstStable,
+  ;; a section that moved making every section after it visited too and the next pass visit those before it, as its symbols'
+  ;; offsets may size another section's fill or org (queue 337: MC/X86's relax-offset); each pass adds its sections' most
+  ;; iterations to RelaxationSteps (x86-print: llvm-mc --stats)
   (doseq [sec (:sections ctx)] (layout-section! ctx sec))
-  (loop [passes 0]
-    (let [moved (reduce (fn [m sec] (or (relax-section! ctx sec) m)) false (:sections ctx))]
-      (when (and moved (< passes (+ 2 (count (:sections ctx))))) (recur (inc passes))))))
+  (let [secs (vec (:sections ctx)) n (count secs)]
+    (loop [first-stable n passes 0]
+      (let [[res mx] (loop [i 0 fs first-stable res 0 mx 0]
+                       (if (< i fs)
+                         (let [[moved iters] (relax-section! ctx (nth secs i))]
+                           (if moved (recur (inc i) n i (max mx (long iters))) (recur (inc i) fs res (max mx (long iters)))))
+                         [res mx]))]
+        (vswap! (:relax-steps ctx) + (long mx))
+        (when (and (pos? (long res)) (< passes (+ 2 n))) (recur (long res) (inc passes)))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the relocations (X86ELFObjectWriter::getRelocType, ELFObjectWriter::recordRelocation); REX2's fixups give the CODE_4
@@ -1419,7 +1428,8 @@
                              :value (cond (:common m) (second (:common m)) o (second o) :else 0)
                              :size (or size 0)})))]
           ;; a group's signature symbol keyed for the group's sh_info
-          {:bytes (elf/write-object {:machine (:machine *arch*) :osabi 0 :sections sec-out
+          {:relax-steps @(:relax-steps ctx)
+           :bytes (elf/write-object {:machine (:machine *arch*) :osabi 0 :sections sec-out
                                      :symbols (mapv #(cond-> % true (assoc :key (:key %))) syms)
                                      ;; each STT_FILE before the local symbols registered after its .file (the first before all)
                                      :files (let [reg (into {} (map-indexed (fn [i n] [n i]) (:order ctx)))]

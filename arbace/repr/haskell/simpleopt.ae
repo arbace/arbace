@@ -174,7 +174,14 @@
       ;; the elaborator passes the evidence; HF10-P20: Utils' (#.) _f = coerce returned the evidence, Eq#)
       ["GHC.Internal.Prim" "coerce"] (let [d (fresh "d") x (fresh "x")] (list 'lam [d x] x))
       ["GHC.Internal.Prim" "nullAddr#"] (list 'lit "__NULL")
-      ["GHC.Internal.Types" "leftSection"] (let [f (fresh "f") x (fresh "x")] (list 'lam [f x] (list 'app f [x])))
+      ["GHC.Internal.Types" "leftSection"]
+      (let [f (fresh "f") x (fresh "x")]
+        (if *newtype-co*
+          ;; as rightSection's: the template's occurrences analysed, f under x's lambda, so the section's partial
+          ;; application is let-bound around it, a thunk (elemIndex x = findIndex (x==): GHC's let sat = (==) d x in
+          ;; \y -> sat y), not substituted into the lambda
+          (let [u (list 'lam [f] (list 'lam [x] (list 'app f [x])))] (occ-expr u 0) u)
+          (list 'lam [f x] (list 'app f [x]))))
       ["GHC.Internal.Types" "rightSection"]
       (let [f (fresh "f") y (fresh "y") x (fresh "x")]
         (if *newtype-co*
@@ -214,13 +221,18 @@
     [env [b out-rhs]]))
 
 (def ^:dynamic *unlifted?* (constantly false)) ; an expression of an unlifted type (tostg's representations)
+;; hs-r5: a local binder of an unlifted type (its noted type's representation): the binding is case-bound in GHC's Core
+;; whatever its right-hand side, a representation-polymorphic one's too (undefined :: Int#, whose expression's
+;; representation the untyped Core does not say), so neither inlined nor dropped when dead (StrictPats' `where _x =
+;; undefined :: Int#`: GHC's dsUnliftedBind evaluates it)
+(def ^:dynamic *unlifted-binder?* (constantly false))
 
 (defn- so-bind-pair
   "simple_bind_pair: a binder and its (unoptimised) closure: inlined unconditionally, substituted, or bound; a binder
   of an unlifted type is case-bound in GHC's Core (needsCaseBinding, the desugarer's bindNonRec), so never inlined
   unoptimised (tostg makes its let a case)"
   [env b [cenv ce]]
-  (if (and (not (exported? b)) (safe-to-inline? b) (not (*unlifted?* ce)))
+  (if (and (not (exported? b)) (safe-to-inline? b) (not (*unlifted?* ce)) (not (*unlifted-binder?* b)))
     [(assoc-in env [:inl (key-of b)] [cenv ce]) nil]
     (so-out-bind env b (so-expr cenv ce))))
 
@@ -300,6 +312,12 @@
           (head? f 'app) (list 'app (second f) (into (vec (nth f 2)) as))
           :else (list 'app f as))))
 
+(def ^:dynamic *retype*
+  "hs-own-stg-2 (a): nil, or (fn [binder arg body]) called at each beta reduction (simple_app's), which retypes the body's
+  binders by the match of the binder's type against the argument's (GHC's type application: an AbsBinds wrapper applied to
+  the default method's dictionary, go's t := IO a)"
+  nil)
+
 (defn so-app
   "simple_app: a head and its argument closures"
   [env f args]
@@ -315,7 +333,8 @@
     (let [[_ bs body] f]
       (loop [env env bs (seq bs) args (seq args) prs []]
         (if (and bs args)
-          (let [[env2 pr] (so-bind-pair env (first bs) (first args))]
+          (let [_ (when *retype* (*retype* (first bs) (second (first args)) (list 'lam (vec (next bs)) body)))
+                [env2 pr] (so-bind-pair env (first bs) (first args))]
             (recur env2 (next bs) (next args) (if pr (conj prs pr) prs)))
           (let [inner (cond bs (so-expr env (list 'lam (vec bs) body))
                             args (so-app env body (vec args))
