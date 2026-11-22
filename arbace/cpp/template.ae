@@ -3871,6 +3871,16 @@
               at (or (some-> pn pos) (when-let [r (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))] (pos r)) n)]
           (h (ex-info (str "codegen: redeclaration of '" (:name t) "' with different constraints") {:codegen/refused :template :cx/node at}) n))))))
 
+(defn- cx-bad-member-template?
+  "Queue 526 (the checker): whether the FunctionTemplateDecl `n`, a member of a main file's class template's specialization
+  (the class scope `scope`), has a template parameter list that does not resolve there (a non-type parameter's type refused)."
+  [scope n]
+  (boolean
+   (and (sema/checking?) sema/*cx-dropped* (:cls scope) (not (sema/header-node? n))
+        (let [c (abi/cls (:cls scope))] (and c (or (:tmpl c) (:targs c)) (not (:header c))))
+        (try (bind-scope scope (tparams n) nil -1) false
+             (catch arbace.lang.ExceptionInfo e (sema/cx-recoverable? e))))))
+
 (defn declare-template
   "The :declare hook: a template's declaration node entered (nil when the node is not one of a template's)."
   [scope n]
@@ -3920,6 +3930,12 @@
                                       (and (sema/checking?) (:cls scope) sema/*member-access*) (assoc :access sema/*member-access*)))))
       :template))
     "FunctionTemplateDecl"
+    (if (cx-bad-member-template? scope n)
+      ;; (queue 526, 518-1 (a), the checker: a class template's specialization's member template whose template parameters
+      ;; do not resolve there -- cpp0x/vt-34753.C's `template<T> B();` in B<int>, a non-type parameter of the unexpanded
+      ;; pack T -- dropped, as GCC drops it after its error, its name recorded (sema's cx-dropped!): the class keeps its
+      ;; implicit default constructor, `B<int> c;` is well-formed; the class's name not recorded: it was no refusal before)
+      (do (sema/cx-dropped! (dissoc scope :cls) n) :template)
     (if-let [gd (first (filter #(= "CXXDeductionGuideDecl" (:kind %)) (kids n)))]
       ;; CP311 (a): a deduction guide template, recorded on its class template
       (or (user-guide! scope n (tparams n) gd) :template)
@@ -3999,7 +4015,7 @@
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
             (do (when conv? (abi/update-cls! (:cls scope) update :conv-tmpls (fnil conj []) tid))
                 (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))})))))
-      :template)))
+      :template))))
     "CXXDeductionGuideDecl" (or (user-guide! scope n [] n) :template)
     ;; a concept ([temp.concept]): its parameters and constraint expression; a concept-id is its satisfaction (G4)
     "ConceptDecl"
@@ -4532,12 +4548,25 @@
         elems (concat (map (fn [b] [(get-in b [:type :qualType]) :base]) (:bases pat))
                       (keep (fn [k] (when (and (= "FieldDecl" (:kind k)) (not (and (:isBitfield k) (nil? (:name k))))) [(get-in k [:type :qualType]) (:name k)]))
                             (kids pat)))
-        n (count items)]
+        n (count items)
+        ss (delay (guide-scope (:scope t) (vec (:params t)) nil -2 pat))
+        elem-ty (fn [qt] (try (binding [sema/*cutoff* Long/MAX_VALUE] (sema/resolve-type @ss qt)) (catch arbace.lang.ExceptionInfo _ nil)))]
     (cond
       (some (fn [[qt nm]] (or (nil? qt) (nil? nm) (re-find #"\.\.\.|\(anonymous|\(unnamed" qt))) (take n elems)) :unsure
-      (> n (count elems)) nil
+      ;; (queue 526, the checker, these three: a pack expansion among the bases, P2082R1's pack elements, which the slice does not model:
+      ;; cpp2a/class-deduction-aggr3.C's C2<U, T...> : T..., T deduced empty)
+      (and (sema/checking?) (some :isPackExpansion (:bases pat))) :unsure
+      ;; (queue 526: more items than elements, braces elided into an element of array or aggregate class type,
+      ;; [over.match.class.deduct]/1.5: cpp2a/class-deduction-aggr1.C's D d2 = {1, 2, 3}, aggr11.C's A a2{1, 2, 3}, D d1{1, 2})
+      (> n (count elems)) (when (and (sema/checking?) (some (fn [[qt _]] (let [ty (elem-ty qt)] (or (nil? ty) (abi/arr? ty) (and (abi/class? ty) (sema/aggregate? ty))))) elems)) :unsure)
+      ;; (queue 526: a template parameter with a default argument that no initialized element's type names, deduced from
+      ;; its default, which the guide's deduction does not take: aggr11.C's A<T = void> a1{1, {2, 3}})
+      (some (fn [p] (and (sema/checking?) (:default p) (:name p)
+                         (not-any? (fn [[qt _]] (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote (:name p)) "\\b")) (str qt))) (take n elems))))
+            (:params t))
+      :unsure
       :else
-      (let [ss (guide-scope (:scope t) (vec (:params t)) nil -2 pat)
+      (let [ss @ss
             kinds (for [[[qt _] it] (map vector elems items)]
                     (let [ty (try (binding [sema/*cutoff* Long/MAX_VALUE] (sema/resolve-type ss qt)) (catch arbace.lang.ExceptionInfo _ nil))
                           braced (= :init-list (:op it))

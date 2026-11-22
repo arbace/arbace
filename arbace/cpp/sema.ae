@@ -255,6 +255,72 @@
              (w nodes))
            (when-not @bad hs))))
 
+;; queue 526 (518-1 (a), the checker): the names a refusal dropped -- a main-file declaration of namespace scope, a member of a
+;; main-file class that is no template's specialization, a specialization's member template whose template parameters do not
+;; resolve -- an atom of a set (nil: off, the code generator). GCC goes on past an erroneous declaration and keeps its name, an
+;; error type, so that later uses of it say nothing; here the declaration is gone, and a later refusal whose message quotes such
+;; a name, or whose node's text names it, is the dropped declaration's cascade: not reported (cx-poisoned?).
+(def ^:dynamic *cx-dropped* nil)
+
+(defn cx-recoverable?
+  "Queue 526: a refusal the checker recovers from at a declaration: the slice's or the program's (:codegen/refused, a constant
+  the evaluation does not reach, a type's :cpp/gap), not the time cap nor a crash."
+  [e]
+  (let [d (ex-data e)] (boolean (or (:codegen/refused d) (:codegen/not-constant d) (:cpp/gap d)))))
+
+(declare qualifier-before)
+(defn cx-dropped!
+  "Queue 526: records the names the dropped declaration node `n` of `scope` declares (its own, and its class's when a member),
+  for cx-poisoned?. A name whose entity stands -- a qualified declarator's (an out-of-line member's, `template<> int
+  A::v<int>;`), or one a visible declaration already declares (a redeclaration; not a class's or an enumeration's, which
+  enters itself before its body refuses) -- is not recorded: its uses are not the
+  dropped declaration's cascade (cpp2a/concepts-var-templ1a.C's A::v<char>)."
+  [scope n]
+  (when *cx-dropped*
+    (let [nm (:name n)
+          own? (and (string? nm) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" nm)
+                    (empty? (try (qualifier-before n) (catch Exception _ nil)))
+                    ;; (a class, a class template or an enumeration is entered before its body refuses: its own entity)
+                    (or (#{"CXXRecordDecl" "ClassTemplateDecl" "EnumDecl" "ClassTemplatePartialSpecializationDecl"} (:kind n))
+                        (empty? (try (lookup scope nm) (catch Exception _ nil)))))
+          nms (cond-> #{}
+                own? (conj nm)
+                (:cls scope) (into (keep #(when (and (string? %) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" %)) %)
+                                         [(some-> (abi/cls (:cls scope)) :name (str/replace #"<.*$" "") (str/split #"::") last)])))]
+      (when (seq nms) (swap! *cx-dropped* into nms)))))
+
+(def ^:private cx-word-res (java.util.concurrent.ConcurrentHashMap.))
+(defn- cx-word-re [^String nm]
+  (or (.get cx-word-res nm)
+      (let [r (re-pattern (str "(?<![A-Za-z0-9_$])" (java.util.regex.Pattern/quote nm) "(?![A-Za-z0-9_$])"))] (.put cx-word-res nm r) r)))
+
+(defn cx-dropped-class?
+  "Queue 526: whether the class `cid` is named by a dropped declaration (*cx-dropped*): its own refused, or one of its members."
+  [cid]
+  (boolean
+   (when-let [ds (some-> *cx-dropped* deref not-empty)]
+     (when-let [nm (some-> (abi/cls cid) :name str)]
+       (contains? ds (-> nm (str/replace #"<.*$" "") (str/split #"::") last str/trim))))))
+
+(declare node-text)
+(defn- cx-poisoned?
+  "Queue 526: whether the refusal `e` at the node `n` follows from a dropped declaration (*cx-dropped*): its message quotes a
+  dropped name ('x', 'x<...>', 'x::...', or after \"no member \", \"unknown name \", \"unknown type \", \"for \"), or the text of its
+  node names one."
+  [e n]
+  (let [ds (some-> *cx-dropped* deref)]
+    (boolean
+     (when (seq ds)
+       (let [m (if (instance? Throwable e) (str (ex-message e)) "")
+             nd (or (when (instance? Throwable e) (:cx/node (ex-data e))) n)
+             t (when (map? nd) (try (node-text nd) (catch Exception _ nil)))]
+         (or (some (fn [nm]
+                     (or (re-find (re-pattern (str "(?:'|\\b(?:no member|unknown name|unknown type|for) )" (java.util.regex.Pattern/quote nm) "(?![A-Za-z0-9_$])")) m)
+                         (and t (re-find (cx-word-re nm) t))))
+                   ds)
+             ;; (a type the message spells as data, {:k :class :id N}: a dropped class's)
+             (some (fn [[_ i]] (cx-dropped-class? (Long/parseLong i))) (re-seq #":k :class, :id (\d+)" m))))))))
+
 (defn- cx-declared-nowhere?
   "Queue 492: no declaration of the unit, a header's or the main file's, a member, a hidden friend or a local, names `nm`: no
   lookup, unqualified, qualified or argument-dependent, at any point, can find it ([basic.lookup.argdep]/4)."
@@ -1387,6 +1453,20 @@
 
 (declare declare-node! special-members! finish-class!)
 
+(defn- cx-member-recover!
+  "Queue 526 (the checker): runs `f`, the declaration of the member node `k` of the class `id` (its scope `cs`); a recoverable
+  refusal (cx-recoverable?) of a main-file member of a class that is no template's specialization nor a local class drops
+  the member and records its names (cx-dropped!)."
+  [cs id k f]
+  (if (and (checking?) *cx-dropped* (not (header-node? k))
+           (let [c (abi/cls id)] (and c (not (:tmpl c)) (not (:targs c)) (not (:header c)) (not (:lambda c))))
+           ;; (not a local class's: its refusal is its function's, reported there by its rule as before)
+           (not (loop [s (:parent cs)] (cond (nil? s) false (#{:block :fn} (:kind s)) true :else (recur (:parent s))))))
+    (try (f)
+         (catch arbace.lang.ExceptionInfo e
+           (if (cx-recoverable? e) (cx-dropped! cs k) (throw e))))
+    (f)))
+
 (defn- fn-op [^String nm] (when (str/starts-with? nm "operator") (let [o (str/trim (subs nm 8))] (when (seq o) o))))
 
 (defn- param-nodes [n] (filter #(= "ParmVarDecl" (:kind %)) (kids n)))
@@ -2375,6 +2455,11 @@
         (try
         (binding [*last-anon* (atom nil)]
         (doseq [k (kids n)]
+          ;; (queue 526, 518-1 (a), the checker: a member of a main-file class that is no template's specialization, refused by
+          ;; the slice or the program, is dropped and its class goes on, as GCC drops an erroneous member declaration; its name
+          ;; and its class's recorded (cx-dropped!), so that the cascades it leaves are not reported. Before, the refusal left
+          ;; the class, the class's declaration was refused, and the unit with it)
+          (cx-member-recover! cs id k (fn []
           (when (and (checking?) (#{"FieldDecl" "TypedefDecl" "TypeAliasDecl"} (:kind k)))
             (cx-member-type-access! cs id k)
             (cx-tinst-member-type-access! cs id k) ; (queue 506: T::X's access in a class template's specialization)
@@ -2460,7 +2545,7 @@
                     (cx-friend-member-access! cs id k fd)
                     ;; (queue 505: a friend function's identity, cx-friend-fn-ident!)
                     (cx-friend-fn-ident! cs id k fd)))
-                (binding [*member-access* @access] (declare-node! cs k))))))
+                (binding [*member-access* @access] (declare-node! cs k))))))))
         (finally (abi/update-cls! id dissoc :defining))))
       ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
       ;; [class.mem.general]/11: GCC's "initializations for multiple members of 'A'", at the union)
@@ -2516,23 +2601,28 @@
                    (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e) (:file (loc-of (get-in n [:range :begin]))))))
                  nil)
              (throw e))))
-    (if (and *main-retry* (#{"TypedefDecl" "TypeAliasDecl"} (:kind n)))
-      ;; (CP338 (a): a main file's typedef or alias naming a class template's specialization before the template, or its
-      ;; specialization, is defined (pr77550's `typedef basic_string<char> string;` before char_traits<char>): declared again
-      ;; after each later top-level declaration, as the headers' are after them; clang instantiates only when the type must
-      ;; be complete)
-      (try (declare-node*! scope n)
-           (catch arbace.lang.ExceptionInfo e
-             (if (and (:codegen/refused (ex-data e)) (re-find #"an incomplete class template" (str (.getMessage e))))
-               (do (swap! *main-retry* conj [scope n e]) nil)
-               (throw e))))
+    (let [retry? (and *main-retry* (#{"TypedefDecl" "TypeAliasDecl"} (:kind n)))
+          declare! (fn []
+                     (if retry?
+                       ;; (CP338 (a): a main file's typedef or alias naming a class template's specialization before the template, or its
+                       ;; specialization, is defined (pr77550's `typedef basic_string<char> string;` before char_traits<char>): declared again
+                       ;; after each later top-level declaration, as the headers' are after them; clang instantiates only when the type must
+                       ;; be complete)
+                       (try (declare-node*! scope n)
+                            (catch arbace.lang.ExceptionInfo e
+                              (if (and (:codegen/refused (ex-data e)) (re-find #"an incomplete class template" (str (.getMessage e))))
+                                (do (swap! *main-retry* conj [scope n e]) nil)
+                                (throw e))))
+                       (declare-node*! scope n)))]
       ;; (n-cpp-concepts, the checker: a main file's declaration that names a constrained class template's specialization
       ;; whose constraints are surely not satisfied, or deduces a constrained placeholder's type that does not satisfy its
       ;; constraint, is reported at the declaration and dropped, the unit going on, as a statement's refusal is)
+      ;; (queue 526: a typedef's or alias's other refusals too, which had ended the unit outside this recovery)
       (if (checking?)
-        (try (cx-tparam-access! scope n) ; (queue 502: a namespace-scope template's parameters' access)
-             (cx-member-tparam-access! scope n) ; (queue 506: a member template's parameters' access)
-             (declare-node*! scope n)
+        (try (when-not retry?
+               (cx-tparam-access! scope n) ; (queue 502: a namespace-scope template's parameters' access)
+               (cx-member-tparam-access! scope n)) ; (queue 506: a member template's parameters' access)
+             (declare!)
              (catch arbace.lang.ExceptionInfo e
                (if-let [r (when-not (:cls scope) (cx-sure-incomplete-refusal n nil e))]
                  ;; (queue 500: a variable of a specialization surely without a definition, reported and dropped; and a
@@ -2547,16 +2637,21 @@
                  (do (*on-refusal* e n) nil)
                  ;; (queue 518: a namespace-scope variable's, function's or alias's declaration whose template argument is no
                  ;; constant, `S<f()> s;`, cpp0x/pr78765.C's ValueTypeInfo<var>: dropped without a word and the unit going on, as
-                 ;; GCC goes on past an erroneous declaration; before, the unit stopped there, every later error of the file lost.
-                 ;; Only that refusal: others (an unknown type, a class template argument deduction) follow an erroneous
-                 ;; declaration whose recovery the slice does not model, cpp0x/vt-34753.C's `B<int> c;` after a constructor
-                 ;; template GCC drops, cpp2a/class-deduction-aggr1.C's guides)
-                 (and (not (:cls scope)) (not (header-node? n))
-                      (#{"VarDecl" "FunctionDecl" "TypedefDecl" "TypeAliasDecl"} (:kind n))
-                      (re-find #"not a constant" (str (.getMessage e))))
-                 nil
+                 ;; GCC goes on past an erroneous declaration; before, the unit stopped there, every later error of the file lost.)
+                 ;; (queue 526, 518-1 (a): any main-file declaration of namespace scope the slice or the program refuses, of any
+                 ;; kind (a class, a template, an enumeration as well), dropped, its names recorded (cx-dropped!) so that a later
+                 ;; refusal that follows from it is not reported (cx-poisoned?); a variable's, function's, typedef's or alias's
+                 ;; refusal reported by its rule when it has one (a class's or a template's says nothing: its members' refusals
+                 ;; are recovered in the class, declare-class!). 518's broader form un-silenced cascades: cpp2a/class-deduction-
+                 ;; aggr3.C's aggregate deduction the slice does not make (now unsure, template.ae's aggregate-guide), then
+                 ;; `c2.len`; cpp0x/vt-34753.C's `B<int> c;` after a constructor template GCC drops (now dropped as well,
+                 ;; template.ae's cx-bad-member-template?))
+                 (and (= :ns (:kind scope)) (not (:cls scope)) (not (header-node? n)) (cx-recoverable? e))
+                 (do (when (#{"VarDecl" "FunctionDecl" "TypedefDecl" "TypeAliasDecl"} (:kind n)) (*on-refusal* e n))
+                     (cx-dropped! scope n)
+                     nil)
                  :else (throw e))))))
-        (declare-node*! scope n)))))
+        (declare!)))))
 
 ;; queue 505 (500-2 (a), the checker): a class first declared by an elaborated-type-specifier `class-key identifier` that
 ;; is not a declaration of its own (`struct T { struct S *a; };`, `void f(struct S *p);`) is declared in the smallest
@@ -7055,6 +7150,8 @@
                     (catch arbace.lang.ExceptionInfo _ nil)))]
       (cond
         en {:op :comma :l obj :r en :ty (:ty en) :cat (:cat en)}
+        ;; (queue 526, the checker: of a class a refusal dropped or changed, cx-dropped-class?, its cascade: no rule)
+        (and (nil? e) (cx-dropped-class? (or qcid cid))) (fail :type "a member of a class a refusal dropped or changed: " nm)
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))) " " (pr-str (:targs (abi/cls (or qcid cid)))) " fields " (pr-str (mapv :name (:fields (abi/cls (or qcid cid))))))))
         (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
                               (field-node (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) (:cls e) (:i e)))
@@ -10377,8 +10474,13 @@ protected:
   "The program of the native parse's nodes (its global scope `proot`) of the source text `src`: {:fns {id fn} :vars
   {id var} :order [...] :classes {id class} :enums {...}}."
   [nodes proot ^String src]
-  (let [root (new-scope :ns nil :path [])]
-  (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
+  (let [root (new-scope :ns nil :path [])
+        ;; (queue 526: the checker's refusals that follow from a dropped declaration not reported, cx-poisoned?)
+        dropped (when (checking?) (atom #{}))
+        h0 *on-refusal*]
+  (binding [*cx-dropped* dropped
+            *on-refusal* (if dropped (fn [e n] (when-not (cx-poisoned? e n) (h0 e n))) h0)
+            *src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
             abi/*classes* (atom {}) abi/*enums* (atom {}) abi/*ns-tags* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})
             *conv-tmpl-cache* (atom {}) *cx-udir-pos* (when (checking?) (java.util.IdentityHashMap.))
             *cx-hdr-ns* (when (checking?) (java.util.IdentityHashMap.))
@@ -10412,7 +10514,12 @@ protected:
                (let [again! (fn [] (let [r @*main-retry*] (reset! *main-retry* []) (doseq [[sc n] r] (declare-node! sc n))))]
                  (doseq [n ms] (declare-node! root n) (when (seq @*main-retry*) (again!)))
                  ;; (one still refused: its refusal, as before)
-                 (when-let [[_ _ e] (first @*main-retry*)] (throw e))))))
+                 ;; (queue 526, the checker: each dropped, its names recorded, and the unit going on, as a namespace-scope
+                 ;; declaration's refusal is, declare-node!)
+                 (when-let [[_ _ e] (first @*main-retry*)]
+                   (if (and (checking?) *cx-dropped* (every? (fn [[_ n e]] (and (not (header-node? n)) (cx-recoverable? e))) @*main-retry*))
+                     (doseq [[sc n] @*main-retry*] (cx-dropped! sc n))
+                     (throw e)))))))
          ;; the declarations in order, then (templates) the lazy definitions each round made used, until none
          (let [entry! (fn [[k id]]
                         (case k
@@ -10425,7 +10532,11 @@ protected:
                                           (try (analyze-fn! id)
                                                (cx-potential-constant! id)
                                                (catch arbace.lang.ExceptionInfo e
-                                                 (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e))))
+                                                 ;; (queue 526: a main-file function's body refused for a constant the evaluation
+                                                 ;; does not reach or a type's gap ends that body, not the unit; no rule names them)
+                                                 (if (or (:codegen/refused (ex-data e))
+                                                         (and *cx-dropped* (cx-recoverable? e) (some-> (:node f) header-node? not)))
+                                                   (h e (some-> *at* deref)) (throw e))))
                                           (analyze-fn! id)))
                                     ;; (a closure's implicit members are analyzed, or deleted, where the lambda is)
                                     (and (or (:implicit f) (:defaulted f)) (not (:params f)) (not (:deleted f)))
@@ -10444,6 +10555,11 @@ protected:
                                                     ;; defaulted <=> declares, cpp2a/spaceship-synth-neg4.C's A without ==)
                                                     (and (checking?) (:defaulted (fnd id)) (#{"==" "<=>"} (:op (fnd id)))
                                                          (:codegen/refused (ex-data e)))
+                                                    ;; (queue 526, the checker: any other recoverable refusal of a main-file
+                                                    ;; class's implicit or defaulted member: deleted, unsure, so no use of it
+                                                    ;; is judged, the unit no longer refused)
+                                                    (and (checking?) *cx-dropped* (cx-recoverable? e)
+                                                         (some-> (abi/cls (:cls (fnd id))) :header not))
                                                     (and (:implicit (fnd id))
                                                         (or (= :overload (:codegen/refused (ex-data e)))
                                                             ;; ([class.default.ctor]/2.5: a member or base with no default
@@ -10484,7 +10600,10 @@ protected:
                           :sassert (if-let [h *on-refusal*]
                                      (try (check-static-assert! {:scope (:scope id) :statics (atom [])} (:node id))
                                           (catch arbace.lang.ExceptionInfo e
-                                            (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e))))
+                                            ;; (queue 526: and a main file's other recoverable refusal, without a rule)
+                                            (if (or (:codegen/refused (ex-data e))
+                                                    (and *cx-dropped* (cx-recoverable? e) (some-> (:node id) header-node? not)))
+                                              (h e (some-> *at* deref)) (throw e))))
                                      nil)
                           :var (let [v (var* id)]
                                  ;; (CP321 (a), the checker: a static data member's in-class initializer, analyzed in its class's
@@ -10508,7 +10627,10 @@ protected:
                                      (try (when (:cx-type-text v) (check-type-access! (:def-scope v) (:cx-type-text v) (:cx-decl v)))
                                           (upd-var! id assoc :ginit (global-init id))
                                           (catch arbace.lang.ExceptionInfo e
-                                            (if (:codegen/refused (ex-data e)) (do (upd-var! id assoc :ginit {:i :none}) (h e (some-> *at* deref))) (throw e))))
+                                            ;; (queue 526: and a main-file variable's other recoverable refusal, without a rule)
+                                            (if (or (:codegen/refused (ex-data e))
+                                                    (and *cx-dropped* (cx-recoverable? e) (:cx-decl v) (not (header-node? (:cx-decl v)))))
+                                              (do (upd-var! id assoc :ginit {:i :none}) (h e (some-> *at* deref))) (throw e))))
                                      (upd-var! id assoc :ginit (global-init id)))))))]
            (loop [i 0]
              (let [order @*order*]
