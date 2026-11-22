@@ -147,6 +147,22 @@ nofib_c_srcs() {
   return 0
 }
 
+# nofib_main DIR NAME (record-ref and bin/hsi check): the main file of nofib's program NAME in DIR, or - for none: Main.hs,
+# Main.lhs, NAME.hs or NAME.lhs, else (hs-pkgs-1122) the one source whose module is Main, as nofib's mk links SRCS whatever the
+# file's name (smp/stm001's StmTest.hs)
+nofib_main() {
+  local d=$1 n=$2 m ms
+  for m in Main.hs Main.lhs "$n.hs" "$n.lhs"; do [ -f "$d/$m" ] && { echo "$m"; return 0; }; done
+  ms=$(cd "$d" && grep -l -E '^>? *module +Main( |\(|$)' -- *.hs *.lhs 2> "$TMPDIR/hsi-nofib-main.log" || true)
+  if [ -n "$ms" ] && [ "$(echo "$ms" | wc -l)" = 1 ]; then echo "$ms"; else echo -; fi
+}
+
+# nofib_src_deps MAKEFILE (record-ref and bin/hsi check): the packages its SRC_DEPS name, as nofib's mk reads them: the first
+# plain assignment's, and since hs-pkgs-1122 an appending one's too (parallel/blackscholes' `SRC_DEPS += parallel`)
+nofib_src_deps() {
+  sed -n 's/^SRC_DEPS *+\{0,1\}= *//p' "$1" | head -1
+}
+
 # hsi_pre_gen ID (HES92 (a); record-ref and bin/hsi check): GEN.hs when all.T runs `pre_cmd('{compiler} --run ./GEN.hs')`
 # before the testsuite test ID (unboxedsums/ManyUbxSums: GEN writes the test's main module, which the plan names,
 # test/haskell/eval/run_plan.ae), else nothing; its users run `ghc --run ./GEN.hs` in the test's directory first (live only)

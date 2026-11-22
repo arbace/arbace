@@ -1475,6 +1475,18 @@
                     0 (list 'v (ext-name "var" "GHC.Internal.Classes" "CUnit"))
                     1 (first subs)
                     (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" (str "CTuple" (count subs)))) subs)))))))
+        ;; hs-pkgs-1122: a constraint synonym kept as a superclass (random's class (KnownNat (SeedSize g), 1 <= SeedSize g,
+        ;; Typeable g) => SeedGen g: GHC.Internal.Data.Type.Ord's type x <= y = Assert (x <=? y) (LeErrMsg x y), one field of
+        ;; the dictionary as written) is its expansion's predicates, solved as a constraint family's (Assert 'True _ = (): CUnit)
+        (when (and (vector? c) (some-> *syns* deref (get c)) (not (some-> *classes* deref (get c))) (< depth 30))
+          (let [t [:tc c ts] r (expand t)]
+            (when (not= r t)
+              (let [subs (mapv #(solve-pred % givens (inc depth)) (ctx-preds r))]
+                (when (every? some? subs)
+                  (case (count subs)
+                    0 (list 'v (ext-name "var" "GHC.Internal.Classes" "CUnit"))
+                    1 (first subs)
+                    (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" (str "CTuple" (count subs)))) subs)))))))
         ;; round 54: a given quantified constraint whose head matches the wanted (GHC.Tc.Solver.Dict's matchLocalInst:
         ;; liftCallCC's forall m'. Monad m' => Monad (t m') for Monad (t m)): its dictionary function applied to its
         ;; context's dictionaries, solved at the match
@@ -6421,8 +6433,34 @@
                                                (let [pr [c (mapv #(subst (zipmap (:tvs info) ts) %) xs)]]
                                                  (or (solve-pred pr self-givens 0)
                                                      (do (error! "unsolved: " (pr-str (zonk-pred pr))) (list 'lit "?"))))))
-                                  a (list 'app f (into [d] extra))]
-                              (if (empty? params) a (list 'lam params a)))
+                                  ;; hs-pkgs-1122: a default signature whose context mentions its own variables (random's
+                                  ;; `default randomR :: (RandomGen g, UniformRange a) => (a, a) -> g -> (a, g)` for `randomR ::
+                                  ;; RandomGen g => ...`): GHC's tc_default checks the method's type against $dm's by subsumption,
+                                  ;; the method's own dictionaries lambda-bound (its own context's, RandomGen g) and each predicate
+                                  ;; of the default's context the method's own dictionary it equals (its variables matched through
+                                  ;; the bodies) or solved at the instance's head (UniformRange Integer): \$dRandomGen -> $dm d
+                                  ;; $dRandomGen $fUniformRangeInteger. Before, no dictionary was passed and the method held $dm's
+                                  ;; partial application (secretary's randomR: hsi's case on a PAP)
+                                  own-sub (when (and dsig (= :forall (first dsig)) (nil? dctx) (seq (nth dsig 2)))
+                                            (let [cs (zipmap (:tvs info) ts)
+                                                  mt (method-type mn cls ts)
+                                                  [mowns mctx mbody] (if (= :forall (first mt)) [(nth mt 1) (nth mt 2) (nth mt 3)] [[] [] mt])
+                                                  downs (set (nth dsig 1))
+                                                  m (match-ty* downs {} (subst cs (nth dsig 3)) mbody)]
+                                              (when (and m (every? #(contains? m %) downs))
+                                                (let [ops (mapv dict-param mctx)
+                                                      gv (into (vec self-givens) (super-closure (mapv vector mctx ops)))]
+                                                  {:ops ops
+                                                   :dicts (vec (for [[c xs] (nth dsig 2)]
+                                                                 (let [pr [c (mapv #(subst m (subst cs %)) xs)]
+                                                                       i (.indexOf ^java.util.List (vec mctx) pr)]
+                                                                   (if (>= i 0)
+                                                                     (nth ops i)
+                                                                     (or (solve-pred pr gv 0)
+                                                                         (do (error! "unsolved: " (pr-str (zonk-pred pr))) (list 'lit "?")))))))}))))
+                                  a (list 'app f (into [d] (if own-sub (:dicts own-sub) extra)))
+                                  ps (if own-sub (into (vec params) (:ops own-sub)) params)]
+                              (if (empty? ps) a (list 'lam ps a)))
                             ;; (queue 422: GHC.Tc.TyCl.Instance's tcMethods' error_rhs, noMethodBindingError of
                             ;; "INST-SPAN|‘METHOD’" (the dictionary function's span, the instance's type; showSDoc's
                             ;; quotes), its Chars cut to bytes by unsafeMkByteString as HsStringPrim's: ‘ and ’ are \x18
