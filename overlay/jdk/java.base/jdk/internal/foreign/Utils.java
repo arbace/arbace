@@ -136,7 +136,7 @@ public final class Utils {
             MethodHandle longToAddressAdapter = addressLayout.targetLayout().isPresent() ?
                     MethodHandles.insertArguments(LONG_TO_ADDRESS_TARGET, 1, addressLayout) :
                     LONG_TO_ADDRESS_NO_TARGET;
-            handle = MethodHandles.filterValue(handle, LONG_TO_CARRIER, longToAddressAdapter);
+            throw new UnsupportedOperationException("a var handle combinator (java.lang.invoke's are not in the Go build)");
         }
         return handle;
     }
