@@ -133,12 +133,15 @@
 
 (defn- reloc-name [t] (get (:reloc-names *target*) t (str "Unknown (" t ")")))
 
+(defn- c32? "An ELF32 target's view (x86-objs, AXS101: i386's)." [] (= 32 (long (:class *target* 64))))
+
 (defn view-objdump-r [o]
   (concat [(str "<stdin>:\tfile format " (:format *target*)) ""]
           (mapcat (fn [rs]
-                    (concat [(str "RELOCATION RECORDS FOR [" (:section (first rs)) "]:") "OFFSET           TYPE                     VALUE"]
+                    (concat [(str "RELOCATION RECORDS FOR [" (:section (first rs)) "]:")
+                             (if (c32?) "OFFSET   TYPE                     VALUE" "OFFSET           TYPE                     VALUE")]
                             (for [r rs :let [[nm a] (value-text o r)]]
-                              (format "%016x %-24s %s" (:offset r) (reloc-name (:type r))
+                              (format (if (c32?) "%08x %-24s %s" "%016x %-24s %s") (:offset r) (reloc-name (:type r))
                                       (str nm (cond (pos? a) (str "+0x" (Long/toHexString a)) (neg? a) (str "-0x" (Long/toHexString (- a))) :else ""))))
                             [""]))
                   (partition-by :section (:relocs o)))))
@@ -147,11 +150,12 @@
   (concat ["Relocations ["]
           (mapcat (fn [rs]
                     (let [r0 (first rs)
-                          ri (some #(when (and (= elf/SHT_RELA (:type %)) (= (:info %) (:target r0))) (:index %)) (:sections o))]
-                      (concat [(str "  Section (" ri ") .rela" (:section r0) " {")]
+                          ri (some #(when (and (#{elf/SHT_RELA elf/SHT_REL} (:type %)) (= (:info %) (:target r0))) (:index %)) (:sections o))]
+                      ;; (x86-objs, AXS101: a REL section's name and no addend, printRelocation's optional one)
+                      (concat [(str "  Section (" ri ") " (:name (nth (:sections o) ri)) " {")]
                               (for [r rs :let [[nm a] (value-text o r)]]
                                 (str "    0x" (str/upper-case (Long/toHexString (:offset r))) " " (reloc-name (:type r)) " "
-                                     (if (= nm "*ABS*") "-" nm) " 0x" (str/upper-case (Long/toHexString a))))
+                                     (if (= nm "*ABS*") "-" nm) (when-not (:rel r) (str " 0x" (str/upper-case (Long/toHexString a))))))
                               ["  }"])))
                   (partition-by :section (:relocs o)))
           ["]"]))
@@ -194,7 +198,8 @@
         sname (fn [^long i] (cond (= i 0) "Undefined (0x0)" (= i 0xfff1) "Absolute (0xFFF1)" (= i 0xfff2) "Common (0xFFF2)"
                                   :else (str (:name (nth secs i)) " " (str "(" (hexu i) ")"))))]
     (concat
-     ["" "File: <stdin>" (str "Format: " (:format *target*)) (str "Arch: " (:arch *target*)) "AddressSize: 64bit" "LoadName: <Not found>"]
+     ["" "File: <stdin>" (str "Format: " (:format *target*)) (str "Arch: " (:arch *target*)) (str "AddressSize: " (:class *target* 64) "bit")
+      "LoadName: <Not found>"]
      (when (has "-S" "--sections" "--section-headers")
        (concat ["Sections ["]
                (mapcat (fn [s]
@@ -258,7 +263,9 @@
   [o]
   (let [syms (:symbols o)
         nonvis (some #(pos? (bit-and (long (:other %)) (bit-not 3))) syms)
-        cols [0 8 25 31 39 46 (+ 56 (if nonvis 13 0)) (+ 59 (if nonvis 13 0))]
+        ;; (GNUELFDumper's Bias: 8 more columns for a 64-bit value; x86-objs, AXS101: ELF32's)
+        bias (if (c32?) 0 8)
+        cols [0 8 (+ 17 bias) (+ 23 bias) (+ 31 bias) (+ 38 bias) (+ 48 bias (if nonvis 13 0)) (+ 51 bias (if nonvis 13 0))]
         line (fn [fields] (let [sb (StringBuilder.)]
                             (doseq [[c f] (map vector cols fields)]
                               (if (< (.length sb) (long c)) (dotimes [_ (- (long c) (.length sb))] (.append sb \space)) (when (pos? (.length sb)) (.append sb \space)))
@@ -266,9 +273,9 @@
                             (str sb)))]
     (concat
      ["" (str "Symbol table '.symtab' contains " (count syms) " entries:")
-      (str "   Num:    Value          Size Type    Bind   Vis" (if nonvis "                     " "      ") " Ndx Name")]
+      (str "   Num:    Value  " (if (c32?) "" "        ") "Size Type    Bind   Vis" (if nonvis "                     " "      ") " Ndx Name")]
      (for [y syms :let [sh (long (:shndx y)) other (long (:other y))]]
-       (line [(str (format "%6d" (:index y)) ":") (format "%016x" (:value y)) (format "%5d" (:size y))
+       (line [(str (format "%6d" (:index y)) ":") (format (if (c32?) "%08x" "%016x") (:value y)) (format "%5d" (:size y))
               (get {0 "NOTYPE" 1 "OBJECT" 2 "FUNC" 3 "SECTION" 4 "FILE" 5 "COMMON" 6 "TLS" 10 "IFUNC"} (:type y) (str (:type y)))
               (get {0 "LOCAL" 1 "GLOBAL" 2 "WEAK" 10 "UNIQUE"} (:bind y) (str (:bind y)))
               (str (get ["DEFAULT" "INTERNAL" "HIDDEN" "PROTECTED"] (bit-and other 3))

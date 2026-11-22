@@ -2233,3 +2233,23 @@ cases by the user's decision of 2026-11-22, another stream's).
 Left: AXS101's ELF32 (:elf32 2 print rows and 32 verdict lines, :x32 7); :options 1 (gnux32-dwarf-gen's -g, DWARF's debug info);
 arm64's Mach-O and COFF (no matrix row: MC/AArch64's Darwin-only object tests are outside mc-aarch64-obj, and the encode check's reject
 level, beside, holds 13 lines of AArch64MachObjectWriter's messages).
+
+Round 2 (AXS101 (a), the burst's "if time allows"): i386's ELF32.
+
+- **The writer and the reader** (`arbace.asm.elf`): `write-object`'s `:class 32` lays out ELFWriter's 32-bit file (the 52-byte header,
+  40-byte section headers, 16-byte symbols, 4-byte alignments) and `:rel true` SHT_REL sections (`.rel` + the section's name, 8-byte
+  entries, the addend left in the field: i386's hasRelocationAddend false); `read-object` reads ELF32 too (REL's and RELA's
+  entries, a REL relocation's `:rel`). ELF64's bytes are unchanged (the defaults; object-check below).
+- **The relocations** (`arbace.asm.amd64.obj`): an i386 run (the object assembler's `:rel?`) is EM_386, ELFCLASS32, and its types
+  X86ELFObjectWriter::getRelocType's for EM_386 (getType64's field type, then getRelocType32: R_386_32/PC32/16/PC16/8/PC8, GOT32,
+  GOT32X for MOV32rm's relaxable form, GOTPC, GOTOFF, PLT32, the TLS ones), `.reloc` with R_386_* and BFD_RELOC_NONE/8/16/32;
+  `{disp32}` and `.d32` on JMP_1 or JCC_1 force the relaxed form (X86AsmParser::processInstruction: JMP_2/JCC_2 in 16-bit mode).
+- **The views**: llvm-objdump -d -r's relocation lines in the address's width, -r's header and offsets, llvm-readobj -r's REL
+  section (its name, no addend: printRelocation's optional one), llvm-readelf -s's columns (GNUELFDumper's Bias), the file's names
+  (`elf32-i386`, `i386`, `32bit`): arm64's views take a target's `:class`.
+
+Proof of round 2: `object-verdict --record` whole: 1,224 of 1,243 (reloc-directive-elf-32 11, tlsdesc-32 5, x86-16 5 met; x86-32 7 and
+x86-branch-relaxation 4 :view-llvm-objdump, views not built), 18 controls failing (2 new); `encode-check --record --only` over the 26
+files with an i386 or 16-bit object run: 135 of 135 texts (abs8's 2 :elf32 rows met); object-check 89 of 89 byte for byte and arm64's
+16 of 16 (ELF64 unchanged). After: print 195,791 / 723 / 0, AOT 108 / 0 / 0. Left: x32 (7 beside lines), gnux32-dwarf-gen's -g, the two
+views.

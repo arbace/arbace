@@ -16901,3 +16901,22 @@ user's decision of the same day counts out of the cases, another stream's); AOT 
 verdict lines) and :x32 (7) for AXS101's ELF32, :options 1 (gnux32-dwarf-gen's -g). arm64: no matrix row waits for Mach-O (MC/AArch64's
 Darwin-only object tests are outside the corpus mc-aarch64-obj; the encode check's reject level, beside, holds label-arithmetic-diags-darwin
 10 and macho-addend-range 3 lines that AArch64MachObjectWriter's messages would judge): an arm64 Mach-O writer is not part of this round.
+
+## 2026-11-22: x86-objs round 2: i386's ELF32 (AXS101 (a))
+
+The burst's "if time allows" (AXS101, recommended (b) by queue 337, the burst asked (a)): `arbace.asm.elf`'s writer takes `:class 32`
+(ELFWriter's 32-bit layout: the 52-byte header, 40-byte section headers, 16-byte symbols, 4-byte alignments) and `:rel true` (SHT_REL,
+`.rel` sections, 8-byte entries, the addend in the field), its reader ELF32 and REL; an i386 run of the object assembler is EM_386
+ELFCLASS32 with X86ELFObjectWriter::getRelocType's EM_386 types (getType64 then getRelocType32, from llvm-project 23.1.5's
+`llvm/lib/Target/X86/MCTargetDesc/X86ELFObjectWriter.cpp`, the names from `llvm/include/llvm/BinaryFormat/ELFRelocs/i386.def`),
+`.reloc` with R_386_* and BFD_RELOC_*; `{disp32}`/`.d32` on JMP_1 or JCC_1 forces the relaxed form (X86AsmParser.cpp's
+processInstruction: JMP_2/JCC_2 in 16-bit mode), which Relocations/x86-16 needed; the verdict's views take a target's `:class`
+(objdump's relocation widths, readobj -r's REL section without addend, readelf -s's columns). Proof: `object-verdict --record` whole:
+1,224 of 1,243 (1,203 before): reloc-directive-elf-32 11, tlsdesc-32 5, x86-16 5 met; x86-32 7 and x86-branch-relaxation 4 now
+:view-llvm-objdump (their viewers, `--no-addresses` through sed and `-D --section` with another triple, are views not built: deferred);
+18 controls failing (2 new: tlsdesc-32's and x86-16's objects, one byte changed). `encode-check --record --only` over the 26 files with
+an i386 or 16-bit object run: 135 of 135 CHECK texts, abs8's 2 :elf32 rows met. ELF64's bytes unchanged: object-check 89 of 89 equal to
+llvm-mc's byte for byte (musl 32, synthetic 8, mc-x86-obj 49, obj-err 3 of 3), arm64's object-check 16 of 16. After: x86-64 print
+195,791 pass / 723 by design / 0 deferred (the 723 the cross judge's, counted out by the user's decision, another stream's); AOT
+108 / 0 / 0 (the verdict beside: 1,224 of 1,243, the rest :view-llvm-objdump 11, :x32 7, :options 1). Left: x32 (ELF32 with EM_X86_64
+and RELA, and the encoder's REX on x32's TLSDESC lea: 7 beside lines), gnux32-dwarf-gen's -g, the two views.
