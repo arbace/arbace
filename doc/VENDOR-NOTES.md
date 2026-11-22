@@ -1126,6 +1126,32 @@ step 4 (2026-10-07); the others came with later work, as each says:
     modifiers (`arbace.j2g.model/gen-class?`, `arbace.j2g.out/member-tables`), as a program's own class's and the
     JVM's reflection: the private static `Var` fields (`foo_Object_int__var`, `toString__var`), which the suite's
     `name-munging` reads by `getDeclaredField`, were not in the compiled class's table.
+36. **Fns and proxies under Java serialization** (2026-11-21, branch `clj-rows-1122`). `arbace/lang/Compiler.ae`:
+    `Compiler$EvalFn` (an evaluated fn) and, through `test/c2j/gen_fns.ae`, `Compiler$AOTFn` and `AOTRestFn` (a
+    compiled fn) have a protected `writeReplace` (inherited by ObjectStreamClass into the fn's class made at run
+    time) answering a `Compiler$FnSer`: the fn's class name, its closed-over values (an evaluated fn's `closed`; a
+    compiled fn's code object's fields, `Compiler$Dyn/aotValues`, jrt's `AOTValues`), its metadata, its kind and
+    a variadic fn's required arity. `FnSer.readResolve` makes a fn of that class in the reading process: an
+    evaluated fn from its `FnExpr`, kept weakly by the class's name when one of its fns was serialized; a compiled
+    fn from the class `Compiler$AOT.fnClass` made (`fnClassNamed`) and a new code object holding the values
+    (`Compiler$Dyn/newAOTBody`, jrt's `NewAOTBody` over the code object's Go type `AOTFnFields` records; c2j's
+    `fn-wrap` now hands `AOT.fnClass` every fn's first code object, also one that closes over nothing, so that its type
+    is recorded: a top-level `defn`'s fn, `+` closed over by `partial`), else `InvalidClassException`. As upstream, where the fn's compiled class is written with its closed-over fields and
+    resolved by name, an evaluated fn's class only in the process whose DynamicClassLoader defined it: here the
+    process that serialized one of its fns. Before, the stream met the evaluator's `FnExpr` (not serializable) or
+    the compiled code object (not a Java object). `arbace/core_proxy.ae`: a proxy whose superclass or interfaces
+    are Serializable gets private `writeObject` and `readObject` throwing `NotSerializableException` (its name),
+    as upstream's `generate-proxy` emits them (`Compiler$Dyn/setMethod`, then `hideMethod` making them private,
+    as ObjectStreamClass takes them only private). Clojure's suite's `serialization` (function-serialization)
+    and the first assertion of java-interop's `test-proxy-non-serializable`, the oracle's
+    `harvest/java_interop.ae:14`.
+37. **`:load-ns` in a compiled deftype** (2026-11-21, branch `clj-rows-1122`). `arbace/c2j/emit.ae`'s
+    `emit-deftype-class!`: a deftype declared `:load-ns true` gets a static initializer requiring the
+    namespace of `deftype*`'s tag (else its class's package demunged), as upstream's `NewInstanceExpr.compile`
+    emits into its `<clinit>` (CLJ-1208); `Compiler$AST/objx` gives c2j the node's `src`. So a compiled deftype
+    made before its namespace is loaded binds its methods' vars (compilation's `clj-1208` at the AOT level;
+    `bin/clojure-tests --aot` compiles the fixture `compilation.load-ns` just before `compilation`). The evaluator
+    makes no class ahead of its namespace's load, so the eval level keeps the test by design (CDR8 (b)).
 
 ## Dialect divergences
 

@@ -1458,14 +1458,15 @@
         b (gsym ctx "fnbody__")
         ;; the fn's class, made at run time on the first fn of this code and kept in the code
         ;; class's static field (SA154: no static initializer per fn class); given the first
-        ;; code object's closed-over fields as its own (RPS41; none to give when it closes over
-        ;; nothing)
+        ;; code object's closed-over fields as its own (RPS41), and its Go type also when it
+        ;; closes over nothing (a fn read back makes a code object of that type: Compiler$FnSer,
+        ;; jrt's NewAOTBody)
         cls (list 'let [(tagged c 'java.lang.Class) f]
                   (list 'if (list 'nil? c)
                         (let [d (symbol (str c "d"))]
                           (list 'let [(tagged d 'java.lang.Class)
                                       (list (with-meta 'arbace.lang.Compiler$AOT/fnClass {:param-tags '[java.lang.String boolean java.lang.Object]})
-                                            cname (boolean k) (when (seq (:closes ox)) b))]
+                                            cname (boolean k) b)]
                                 (list 'set! f d)
                                 d))
                         c))]
@@ -2063,7 +2064,20 @@
                         assoc :c2j/line (:line mn)))
             fields-forms (for [lb fields :let [b (node lb)]]
                            (list 'field (tagged (with-meta (fsym b) (field-mods ox lb)) (ftype b))))
-            members (deep (concat fields-forms [ctor] alt-ctors [basis] (when create [create]) methods))]
+            ;; :load-ns true (CLJ-1208): the class's static initializer requires the namespace that
+            ;; defined it (NewInstanceExpr.compile's clinit: deftype*'s tag's namespace), so that the
+            ;; compiled class, made before its namespace is loaded, finds its methods' vars bound
+            load-ns (when (and (:isDeftype ox) (get (:opts ox) :load-ns))
+                      (let [tag (second (:src ox))
+                            nsname (if (and (symbol? tag) (namespace tag))
+                                     (namespace tag)
+                                     (arbace.lang.Compiler/demunge (subs cname 0 (max 0 (.lastIndexOf ^String cname ".")))))]
+                        (when-not (or (= nsname "arbace.core") (= nsname ""))
+                          [(list 'static-initializer
+                                 (list '.invoke (list 'cast 'arbace.lang.IFn
+                                                      (list '.getRawRoot '(arbace.lang.RT/var "arbace.core" "require")))
+                                       (list 'arbace.lang.Symbol/create nsname)))])))
+            members (deep (concat fields-forms [ctor] alt-ctors [basis] (when create [create]) methods load-ns))]
         (swap! (:classes ctx) assoc cname
                {:name cname :kind :deftype :super 'java.lang.Object :interfaces (class-interfaces ctx ox)
                 :members members :line (:line ox) :source (:source ctx)})))

@@ -42,7 +42,7 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
   two steps). The essential gate at `22b4c6542` failed cpp-essential (two Toks, below) and suite-go (`--run-one`'s JDK check
   under load), both fixed at `88b8e7f1a`, which passed and became main.
 - **The crops' scores** (`bin/crops-score` on next; completeness, without by design, maturity, independence): Clojure 99.1
-  99.6 100 100, Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
+  99.6 100 100 (99.7 99.9 100 100 on `clj-rows-1122`), Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
   100 100, Scheme 99.9 100 100 100, Haskell 97.3 99.1 100 78.4, Rust 100 100 100 80.0, LLVM IR 99.3 100 100 99.0, Python 0 0
   83.3 98.2 (eval and AOT wait for its records, lane 4), x86-64 assembly 99.4 99.9 100 100, arm64 assembly 99.9 99.9 100 99.9,
   WebAssembly 100 100 100 100. Below 90% complete: Java and OCaml (and Python, unrecorded).
@@ -361,6 +361,11 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   groups. Left for the user: read's 137 invalid programs (agreement as pass, n/a, or GC47 (b)), gc in the executable (gc-flags 28,
   gc-phases 7, nowritebarrier), print's 9 self-embedding tests, AOT's issue9608 (RPS31), goi's foreign code 8 and memory 7.
   Next round (drafted, unapplied: `.tmp/patches/nowb.py` in the worktree): nowritebarrier's checks; escape_unique (deferred).
+- **Clojure** (99.7 99.9 100 100, from 99.1; `clj-rows-1122`, 2026-11-22). Fns serialize (FnSer), proxies refuse
+  serialization, `:load-ns` deftypes compiled (CLJ-1208), CDR1's locales and SecurityManager in jdk/; recorded from one build
+  (`3dc7bacc2ceb`): eval 21,119 / 13 / 2, AOT 831 / 5 / 2 (gen-class, CDR2, CDR4 (b), clojure-xml through `:jdk-extra`). Left:
+  `:fn-code-type` (2 AOT assertions, c2j fix `6fdb262a0` waits for the next build), `:xml-stream` (EntityDeclarationImpl in the
+  jdk-extra list); decisions CDR12-CDR16 (doc/CLOJURE-DESIGN-REVIEW.md).
 - **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
   and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
   importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),

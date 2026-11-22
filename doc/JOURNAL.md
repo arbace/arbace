@@ -16698,3 +16698,60 @@ gone from both known files; on the way the comparison's D341-3 (a) SrcLoc normal
 now writes (array's Data.Array.Base and exceptions' Control.Monad.Catch differed by SrcLoc columns alone; other worktrees' pools show the
 same form). `bin/repr-haskell test` passes. The read cell 2,687 / 0 / 3 -> 2,690 / 0 / 0. bin/reap --record, bin/crops-score --record,
 --judge --strict, bin/records-check: 0 problems. Light: no gate.
+## 2026-11-22: Clojure's completeness, stream K1 of the burst (branch `clj-rows-1122`, from mac/next `863bdaea1`)
+
+The burst of 2026-11-21/22 (the user's goal: 100 completeness and independence for every crop). Clojure's cells before
+(pass / by design / deferred): read 908 / 2 / 0, eval 21,066 / 24 / 44, AOT 814 / 14 / 10; completeness 99.1 (99.6 without
+by design). doc/CLOJURE-DESIGN-REVIEW.md, "As built (2026-11-21)" and "Proposed (2026-11-21): CDR12-CDR16".
+- Fns serialize (CDR10's end; doc/VENDOR-NOTES.md, hand change 36; `fcb4ae253`): `Compiler$EvalFn`, `AOTFn` and `AOTRestFn`
+  write a `Compiler$FnSer` (class name, closed-over values, meta, kind, required arity) by a protected `writeReplace`, read
+  back where the class is known (an evaluated fn's FnExpr kept weakly by its class's name when one of its fns is
+  serialized; a compiled fn's code object made by jrt's new `NewAOTBody` over the type `AOTFnFields` records, `AOTValues` its
+  values; `Compiler$Dyn/aotValues`, `newAOTBody`, `AOT/fnClassNamed`; j2g's natives in arbace/j2g/dyn.ae;
+  test/c2j/gen_fns.ae and CompilerAOTFn.ae regenerated). As the JVM resolves a fn's class by its name. Alternatives:
+  JCS384 (a), by design at the eval level, and (b), the fn as its source form (not taken: the JVM's semantics were reachable;
+  a fn made by eval of a generated form has no source). Proxies refuse serialization as upstream's generate-proxy (private
+  `writeObject`/`readObject` throwing NotSerializableException, `Compiler$Dyn/hideMethod`).
+- CLJ-1208 at the AOT level (hand change 37): c2j gives a `:load-ns true` deftype a static initializer requiring the namespace
+  of deftype*'s tag (`Compiler$AST/objx` gives `src`); `bin/clojure-tests --aot` compiles `compilation.load-ns` just before
+  `compilation`.
+- CDR1 (the user, 2026-11-05) and SecurityManager (`cc7283779`): `8a3d28662` cherry-picked off the dropped CDR5;
+  `bin/jrt-convert update` with javac's tool 60886b49 (REPR_JAVA_STALE_OK, as 82ad5c0cd): status 0 in 1,703 s, 3,631 of 3,763
+  forms equal, 2 changed (java/lang.ae's list, LocaleDataIndex), 130 added (126 CLDR and JRE bundles of the 27 locales and their
+  parents, 3 package files, java.lang.SecurityManager), sources 3,423 -> 3,550. JDK 26 keeps SecurityManager (JEP 486 disables
+  the manager), so test/jrt/jrt_sources.ae's added-sources take it.
+- One build (the brief: once, near the end): `bin/arbace-go --gate-build` at gate_key `3dc7bacc2ceb` under bin/heavy-lock,
+  9,340 s on the loaded host. A smoke on its first build: an evaluated fn, a closure, `(constantly x)`, a proxy's refusal,
+  SecurityManager and French number formats right; `(partial + 1 2)` erred: a top-level compiled fn's class had no code object
+  type (AOT.fnClass got nil from c2j for a fn closing over nothing). Fixed in c2j (`6fdb262a0`: fnClass gets every fn's code
+  object) after the build, so neither the build nor the AOT program carries it (the AOT compile prepares the runtime's
+  namespaces, c2j among them, from the program's embedded sources): the AOT level's two such assertions are `:fn-code-type`,
+  deferred to the next build.
+- The runs recorded from it: the eval suite whole (804 tests, 20,744 assertions: 20,743 pass, 1 error; serialization 9 of 9;
+  java-interop's test-proxy-non-serializable runs, its Swing assertion errs; the control as a control must); the oracle whole
+  (22,733 of 22,741 match: the 42 locale cases, the proxy's refusal and SecurityManager pass; 8 known, the known file's three
+  groups removed); `bin/clojure-tests --aot` with java.xml (`:jdk-extra`): 807 tests, 20,747 assertions: 20,743 pass, 4 errors
+  (genclass 7 of 7, compilation 32 of 32 with clj-1208 and CDR2's two, test-dot and test-bean, javadoc 5 of 5, clojure-xml 1 of 1;
+  serialization 8 of 9, reflect's invoke-checks-accessibility errs: StAX's XMLStreamReaderImpl refused for want of
+  EntityDeclarationImpl in test/clojure/jdk-extra/java-xml-classes.txt). Each reference's counts copied from its run's
+  results.edn, then the runner's report run again on the saved run: no regressions at either level.
+- A mishap: bin/clojure-tests edited (below) while its --aot run was past the build, so bash read the shifted file and the run
+  exited 1 after the program was built; the edit undone, the run repeated from the cached program and extended executable
+  (both keys hit), then the edit put back. Never edit a running script.
+- Memory (the coordinator's report): the AOT compile step on the extended test executable reached 40 GB at 03:18 and took the
+  host to 4 GB free. Cause: not a test (the suite's processes stay near 1.5 GiB) but the compiling itself, every embedded
+  namespace and the suite prepared and 41,828 classes compiled by c2j in one process under GOGC 400 with no limit (bin/arbace-go's
+  host compilation of the same namespaces measured 29.9 GiB so before its GOMEMLIMIT). bin/clojure-tests' compiling now runs under
+  bin/lib/program.bash's `compile_memlimit` (GOMEMLIMIT 16GiB, capped by the gate's admission), as the build's does.
+- Classes: eval less `:locales`, `:security-manager`, `:serialization`, plus `:swing` (by design: arbace.inspector's
+  AbstractTableModel); AOT less `:gen-class`, `:xml`, `:desktop`, `:javadoc-url`, `:clj-1208`, `:q1-evaluated`, `:serialization`,
+  plus `:swing` and `:fn-code-type`, `:xml-stream` matching its run. Cells: eval 21,119 / 13 / 2, AOT 831 / 5 / 2, read and print
+  unchanged; Clojure 99.7 complete (99.9 without by design). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+  `bin/records-check`: 0 problems.
+- `bin/clojure-tests --aot --essential` on the same build (the essential gate's subset, compilation and java-interop in it; its
+  compiling under compile_memlimit, 109 s): 15 namespaces, 342 tests, 7,308 assertions, 7,307 pass, java-interop's Swing error
+  expected, clj-1208 passing in the subset's program; no regressions, the control as a control must.
+- Checked besides: `bin/jrt build --package jrt`; `bin/j2g-unit` 222 pass and the 7 known with the own platform given
+  (J2G_UNIT_PLATFORM: the "outside" failure without it is the main checkout's old platform pin, the same on the base).
+- Decisions for the user (doc/CLOJURE-DESIGN-REVIEW.md): CDR12 Swing's table model slice, CDR13 the reader conditionals' rule
+  reversible, CDR14 SecurityManager a default import again and its rule dropped, CDR15 Q1 (b), CDR16 the eval level's XML rows.
