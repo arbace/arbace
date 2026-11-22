@@ -10318,3 +10318,22 @@ the unconstrained operator<, clang's choice); a type-constraint with arguments c
 definition of it (`chrono::year`, `chrono::month` qualified), found by ADL through month, not taken. Each tzdb probe is 25 minutes
 and the unit has 2,000 more lines: DECISION cpp-rt-own4-1 (a) now means landing the WIP branch's four rules with the runtime's
 proofs and going on from the friend's redeclaration.
+
+### tzdb's third round (not landed: the WIP branch at `a5c0aaa90`, stopped at the consolidation)
+
+The WIP branch took cpp-rt-own4-1122 with next merged (1dd00c37a), then seven code generator rules, each on a reduced case
+against clang 23.1.5's IR (`.tmp/tz/` of the worktree `cpp-rt-own4-tzdb`), none proven by a runtime-build: a friend declared
+alone in an associated class makes its definition in another class visible to ADL ([basic.lookup.argdep]/4.3; template.ae's
+friend! keeps the declaration on its class, sema's befriended? declares it on the first lookup that asks and matches it by
+signature: t16, `year::min()/January` found, names equal); noexcept kept on a member function pointer's type read from its text
+since C++17 (`KDoF..E`); a call of a namespace's function template specialization on tag objects in a constant's text
+(template.ae's ns-call-value: <type_traits>' `__call_is_nt<_Fn, _Args...>(typename _Result::__invoke_type{})` in
+__call_is_nothrow's base, whose class had had no base and __is_nothrow_invocable no value: t17, eight traits as clang's); a call
+through a member function pointer of a throwing type may throw in `noexcept(...)` (t14, 13 as clang's, 15 before); a const&& member
+for a non-const rvalue ranked between && and const& ([over.ics.rank]/3.2.6: t18, `*opt` of a prvalue no longer ambiguous); a
+constexpr class object of namespace scope read by the evaluator ([expr.const]/4, `:cg-constexpr`); and a POD local
+direct-initialized by a constexpr constructor folded as clang's isConstantInitializer does (t20-t22, the `__const` globals and
+names equal). <chrono> alone (`.tmp/tz/t15.cc`, 27 minutes) generated with the first rule, its names clang's but for the
+functions the POD local's folding (the last two rules, found by it) leaves out; the whole unit's probe was stopped at the
+consolidation. DECISION cpp-rt-own4-1 (a) now means: the WIP branch's rules with a runtime-build (198 units, names against
+the pack) and lower-essential, then the unit's probe again.

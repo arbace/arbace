@@ -18175,3 +18175,34 @@ over operator@, type-constraints with arguments in subsumption) take the unit pa
 `year::min()/January/1` (a friend declared in month and defined in year_month, not found). Not landed: no runtime-build covers them,
 and the unit has 2,000 lines more at 25 minutes a probe; they wait on the branch `cpp-rt-own4-tzdb-wip-1122` (one commit on
 cpp-rt-own4-1122, pushed to mac, marked not for merge). DECISION cpp-rt-own4-1 (a) in the survey's section now names that branch.
+
+## 2026-11-22: cpp-rt-own4: next merged into the branch (169119776), both sides kept; consolidation
+
+Next had taken four C++ streams since the branch's base (cpp-read, cpp-gnu, cpp-diag-b and the Mac's 518), and its merge of
+cpp-rt-own4-1122 conflicted. Merged next into the branch (446f22a4e), both sides kept: sema's redeclaration of a function takes
+queue 518's deleted-definition check (the checker's) and this branch's `:param-const` beside `:param-names`; parse.ae's parameter
+list takes this branch's `:_const` key and cpp-diag-b's redefinition of a parameter; this branch's one change in the checker's
+mode (a member's initializer alone looks up the class's complete scope, `late*`) sits beside cpp-read's recovery, unchanged; the
+journal's and the survey's sections next's first, then this branch's; the scores recorded again: C++'s eval and AOT 0.9950 to 0.9990,
+its independence 0.9614 to 0.9630, **96** floored (REAP matrix unchanged, crops-score `--judge --strict` and records-check 0 problems).
+
+Proofs at the merge, targeted: `bin/cppi codegen-gen` 156 of 156 pass, the forms' digests unchanged (the merge leaves the code
+generator's output alone, so no runtime-build of its own); `bin/repr-cpp c2j-check` 33 of 33 compiled, 0 failed, and 0 reflection
+warnings once diag.ae's three are fixed: next's cpp-diag-b had left `(.indexOf src "\n" i)` and `(.indexOf src "*/" (+ i 2))` on a
+boxed index and `(.rem ^BigInteger lv rv)`, a method BigInteger lacks (`remainder`: a constant `%` in the checker's evaluator would
+have failed by reflection), fixed in this entry's commit. Not finished at the hand-back (the consolidation): the dg rerun of the
+2,072 own passes of next's record (`bin/repr-cpp dg --corpus dg-error --front native --only`, no --record; log
+`.tmp/dg-merge.log` of the worktree) and cpp-check-essential's command (its runtime-ci rebuilding the runtime at the merge's key,
+log `.tmp/chk-merge.log`) were running; lower-essential, started beside it, raced that rebuild in the same runtime directory and
+failed reading a unit's gen.refused (no verdict: to run again once the runtime is at the key). No gate (the user's rule).
+
+tzdb's third round on the WIP branch (`cpp-rt-own4-tzdb-wip-1122`, next merged in at 1dd00c37a, stopped at a5c0aaa90 by the
+consolidation): seven code generator rules on reduced cases against clang 23.1.5's IR, none proven by a runtime-build (the survey's
+section, "tzdb's third round"): a friend declared alone in an associated class visible to ADL ([basic.lookup.argdep]/4.3, <chrono>'s
+`year::min()/January`); noexcept on a member function pointer's type from its text; a namespace function template's call on tag
+objects in a constant's text (__call_is_nt); a throwing member pointer call in noexcept(...); const&& ranked between && and const&;
+constexpr class objects read by the evaluator; constructor direct-initialized POD locals folded. Alternatives weighed: entering a
+body-less friend declaration into the namespace as a hidden function (rejected: a class template's friend then defined at namespace
+scope would stay hidden from ordinary lookup) against keeping it on its class and declaring it on demand (taken); `:constexpr` on
+global variables in the code generator's mode (rejected: global-init's folding and three more readers would change) against a key of
+the evaluator's alone (`:cg-constexpr`, taken).
