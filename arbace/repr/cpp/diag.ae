@@ -4075,7 +4075,37 @@
                     n nil)))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder]))
+;; GCC's coroutine interface (cpp-gnu, 2026-11-22; the GCC 15.2 manual's coroutine support with libstdc++'s <coroutine>: the lowering of a
+;; coroutine whose promise type is P calls std::coroutine_handle<P>::from_address, which [coroutine.handle.export.import] declares a
+;; static member function): a specialization of std::coroutine_handle<P> by the program whose from_address is not one static member
+;; function, with a coroutine of promise type P in the unit, is GCC's "'std::coroutine_handle<P>::from_address' must be a
+;; non-overloaded static function", at the coroutine's first co_return, co_await or co_yield (coroutines/pr105475-3.C).
+
+(defn coroutine-handle-interface
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        specs (into {} (for [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns)))
+                             r (:inner ns) :when (and (= "ClassTemplateSpecializationDecl" (:kind r)) (= "coroutine_handle" (:name r)))
+                             :let [arg (some #(when (= "TemplateArgument" (:kind %)) (str/trim (str (get-in % [:type :qualType])))) (:inner r))
+                                   fa (filter #(and (= "CXXMethodDecl" (:kind %)) (= "from_address" (:name %))) (:inner r))]
+                             :when (and arg (or (not= 1 (count fa)) (not= "static" (:storageClass (first fa)))))]
+                         [arg r]))
+        promise-of (into {} (for [r (:nodes u) :when (and (= "CXXRecordDecl" (:kind r)) (:name r))
+                                  m (:inner r) :when (and (#{"TypeAliasDecl" "TypedefDecl"} (:kind m)) (= "promise_type" (:name m)))]
+                              [(:name r) (str/trim (str (get-in m [:type :qualType])))]))]
+    (when (seq specs)
+      (doseq [f (:nodes u) :when (= "FunctionDecl" (:kind f))
+              :let [ret (str/trim (str/replace (fn-ret-type (str (get-in f [:type :qualType]))) #"\b(?:struct|class)\b" ""))
+                    p (get promise-of ret)]
+              :when (and p (contains? specs p))
+              :let [co (let [r (atom nil)] (walk-nodes (fn [x _] (when (and (nil? @r) (#{"CoreturnStmt" "CoawaitExpr" "CoyieldExpr"} (:kind x))) (reset! r x))) (:inner f) nil) @r)
+                    o (or (get-in co [:range :begin :offset]) (get-in f [:loc :offset]))]
+              :when (and co o (= main (or (get-in co [:range :begin :file]) main)))]
+        (let [[l c] (line-col starts (long o))]
+          (.add out {:line l :col c :kind :error :rule :coroutine :msg (str "'std::coroutine_handle<" p ">::from_address' must be a non-overloaded static function")}))))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
