@@ -2927,7 +2927,7 @@
                                             d (:inner ds) :when (and (= "VarDecl" (:kind d)) (string? (:name d)))]
                                       (cond
                                         (= "static" (:storageClass d)) (report! d (str "'" (:name d) "' defined 'static' in 'constexpr' context"))
-                                        (and (< (long year) 2020) (not (:init d)) (not= "extern" (:storageClass d))
+                                        (and (< (long year) 20) (not (:init d)) (not= "extern" (:storageClass d))
                                              (or (int-type-size (str (get-in d [:type :qualType]))) (float-type-size (str (get-in d [:type :qualType]))))
                                              (not (some #(not (#{"NativeAttr"} (:kind %))) (:inner d))))
                                         (report! d (str "uninitialized variable '" (:name d) "' in 'constexpr' context"))
@@ -3117,7 +3117,114 @@
       (w (:nodes u) {} nil nil))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed]))
+;; GCC's own interfaces and options (cpp-gnu, 2026-11-22), each from the GCC 15.2 manual (invoke.texi, extend.texi, libstdc++'s):
+;; - -fno-exceptions ("Options Controlling C++ Dialect"): the first throw-expression or try-block of the unit, "exception handling
+;;   disabled, use '-fexceptions' to enable", once (eh/no-exceptions1.C);
+;; - GCC's decimal floating types for C++ (the ISO/IEC TR 24733 classes std::decimal::decimal32, decimal64, decimal128, which GCC
+;;   lays out as the _Decimal type they hold): such a class with a base class ("'decimal32' has base classes") or without a field
+;;   ("'decimal32' does not have any fields"), at the class (dfp/base.C, dfp/nofields.C);
+;; - -Werror=deprecated-copy-dtor ([depr.impldec]/1: the implicit copy constructor of a class with a user-provided destructor is
+;;   deprecated, the warning made an error): a copy initialization from an object of such a class without a user-declared copy
+;;   constructor, at the declaration, from C++11 (cpp0x/depr-copy5.C);
+;; - weak ("Common Function Attributes"): a function declared weak after a manifestly constant-evaluated use of its address (an
+;;   if constexpr condition naming it, whose value assumed it defined), "declared weak after being used" (cpp1z/constexpr-if36.C);
+;; - format (archetype, string-index, first-to-check) on a non-static member function or a constructor counts the implicit this as
+;;   argument 1; its string-index argument names a parameter of character pointer type, else "'format' attribute argument 2 value
+;;   '2' refers to parameter type 'int'" (ext/attr-format3.C; an index past the parameters is a warning);
+;; - std::initializer_list, whose layout g++ builds itself (libstdc++'s <initializer_list>: a pointer to const E and a size_t): a
+;;   definition by the program of other members, "definition of 'std::initializer_list' does not match '#include
+;;   <initializer_list>'", at the class template (cpp0x/initlist93.C).
+
+(defn gnu-interface
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        args (set (:args u))
+        year (cxx-year (:std u))
+        report! (fn [n msg] (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :gnu-interface :msg msg})
+                                  true))))
+        records (into {} (for [n (:nodes u) :when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n))] [(:name n) n]))]
+    ;; -fno-exceptions
+    (when (contains? args "-fno-exceptions")
+      (let [first-eh (atom nil)]
+        (walk-nodes (fn [n _] (when (#{"CXXThrowExpr" "CXXTryStmt"} (:kind n))
+                                (let [o (get-in n [:range :begin :offset])]
+                                  (when (and o (= main (or (get-in n [:range :begin :file]) main))
+                                             (or (nil? @first-eh) (< (long o) (long (get-in @first-eh [:range :begin :offset])))))
+                                    (reset! first-eh n)))))
+                    (:nodes u) nil)
+        (when-let [n @first-eh] (report! n "exception handling disabled, use '-fexceptions' to enable"))))
+    ;; std::decimal's classes and std::initializer_list
+    (doseq [nsd (:nodes u) :when (and (= "NamespaceDecl" (:kind nsd)) (= "std" (:name nsd)))]
+      (doseq [d (:inner nsd) :when (and (= "NamespaceDecl" (:kind d)) (= "decimal" (:name d)))
+              r (:inner d) :when (and (= "CXXRecordDecl" (:kind r)) (:completeDefinition r) (#{"decimal32" "decimal64" "decimal128"} (:name r)))]
+        (cond (seq (:bases r)) (report! r (str "'" (:name r) "' has base classes"))
+              (not-any? #(= "FieldDecl" (:kind %)) (:inner r)) (report! r (str "'" (:name r) "' does not have any fields"))
+              :else nil))
+      (doseq [t (:inner nsd) :when (and (= "ClassTemplateDecl" (:kind t)) (= "initializer_list" (:name t)))
+              :let [e (some #(when (= "TemplateTypeParmDecl" (:kind %)) (:name %)) (:inner t))
+                    r (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) (:inner t))]
+              :when r]
+        (let [tds (into {} (for [m (:inner r) :when (#{"TypedefDecl" "TypeAliasDecl"} (:kind m))] [(:name m) (str/trim (str (get-in m [:type :qualType])))]))
+              ty (fn [f] (let [t (str/trim (str (get-in f [:type :qualType])))] (get tds t t)))
+              fs (filter #(= "FieldDecl" (:kind %)) (:inner r))
+              ok (and e (= 2 (count fs))
+                      (re-matches (re-pattern (str "const " (java.util.regex.Pattern/quote e) " \\*")) (ty (first fs)))
+                      (#{"size_t" "std::size_t" "unsigned long" "__SIZE_TYPE__" "::size_t"} (ty (second fs))))]
+          (when-not ok (report! t "definition of 'std::initializer_list' does not match '#include <initializer_list>'")))))
+    ;; -Werror=deprecated-copy-dtor
+    (when (and (>= (long year) 11) (or (contains? args "-Werror=deprecated-copy-dtor") (and (contains? args "-Werror") (contains? args "-Wdeprecated-copy-dtor"))))
+      (let [deprecated? (fn [r] (and (some #(and (= "CXXDestructorDecl" (:kind %)) (not (:explicitlyDefaulted %)) (not (:isImplicit %))) (:inner r))
+                                     (not-any? #(and (#{"CXXConstructorDecl" "CXXMethodDecl"} (:kind %))
+                                                     (or (= "operator=" (:name %))
+                                                         (re-find (re-pattern (str "\\((?:const )?" (java.util.regex.Pattern/quote (str (:name r))) " &\\)")) (str (get-in % [:type :qualType])))))
+                                               (:inner r))))]
+        (letfn [(w [x vars]
+                  (cond (map? x) (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v vars))
+                        (vector? x) (loop [ys x vars vars]
+                                      (when-let [y (first ys)]
+                                        (w y vars)
+                                        (let [vs (when (and (map? y) (= "DeclStmt" (:kind y))) (filter #(= "VarDecl" (:kind %)) (:inner y)))]
+                                          (doseq [v vs]
+                                            (let [r (get records (str/trim (str (get-in v [:type :qualType]))))
+                                                  e (first (filter #(= "DeclRefExpr" (:kind %)) (:inner v)))]
+                                              (when (and r e (= "c" (:init v)) (deprecated? r)
+                                                         (= (get vars (get-in e [:referencedDecl :name])) (:name r)))
+                                                (report! v (str "implicitly-declared copy constructor of '" (:name r) "' is deprecated [-Werror=deprecated-copy-dtor]")))))
+                                          (recur (rest ys) (into vars (for [v vs :when (string? (:name v))] [(:name v) (str/trim (str (get-in v [:type :qualType])))]))))))
+                        :else nil))]
+          (w (:nodes u) {}))))
+    ;; weak after a constant-evaluated use
+    (let [used (java.util.HashMap.)]
+      (walk-nodes (fn [n _] (when (and (= "IfStmt" (:kind n)) (:isConstexpr n))
+                              (walk-nodes (fn [d _] (when (= "DeclRefExpr" (:kind d))
+                                                      (let [nm (get-in d [:referencedDecl :name]) o (get-in d [:range :begin :offset])]
+                                                        (when (and (string? nm) o (not (.containsKey used nm))) (.put used nm (long o))))))
+                                          (first (:inner n)) nil)))
+                  (:nodes u) nil)
+      (doseq [f (:nodes u) :when (and (= "FunctionDecl" (:kind f)) (some #(= "weak" (gnu-attr-name %)) (gnu-attrs-of f)))
+              :let [o (get-in f [:range :begin :offset]) uo (.get used (:name f))]
+              :when (and o uo (> (long o) (long uo)))]
+        (report! f (str "'" (:name f) "' declared weak after being used"))))
+    ;; format's string index
+    (walk-nodes (fn [n parent]
+                  (when (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind n))
+                    (doseq [a (gnu-attrs-of n) :when (= "format" (gnu-attr-name a))
+                            :let [[_ si] (re-matches #"\s*\w+\s*,\s*(\d+)\s*,\s*\d+\s*" (str (:_arg a)))]
+                            :when si]
+                      (let [member? (and (#{"CXXMethodDecl" "CXXConstructorDecl"} (:kind n)) (not= "static" (:storageClass n)))
+                            ps (vec (filter #(= "ParmVarDecl" (:kind %)) (:inner n)))
+                            k (- (Long/parseLong si) 1 (if member? 1 0))]
+                        (when (and (>= k 0) (< k (count ps)))
+                          (let [pt (str/trim (str (get-in (nth ps k) [:type :qualType])))]
+                            (when-not (re-find #"char\s*(?:const\s*)?\*$" pt)
+                              (report! a (str "'format' attribute argument 2 value '" si "' refers to parameter type '" pt "'")))))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
