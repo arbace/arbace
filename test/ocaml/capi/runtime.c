@@ -166,11 +166,15 @@ int caml_atomic_cas_field(value obj, intnat i, value old, value nv)
   if (Field(obj, i) == old) { Field(obj, i) = nv; return 1; }
   return 0;
 }
-void caml_register_global_root(value *r) { (void) r; }
-void caml_remove_global_root(value *r) { (void) r; }
-void caml_register_generational_global_root(value *r) { (void) r; }
-void caml_remove_generational_global_root(value *r) { (void) r; }
-void caml_modify_generational_global_root(value *r, value v) { *r = v; }
+/* the global roots (queue 516, DECISION 511-3 (a)): a root registered, or modified through
+   caml_modify_generational_global_root, during a call keeps its value when the outermost stub returns (oi moves a copy of the
+   boundary's memory it names into the static memory, the same oi value: go/arbace/oicapi's rehome) */
+extern void __oi_root(value *r, int op);
+void caml_register_global_root(value *r) { __oi_root(r, 1); }
+void caml_remove_global_root(value *r) { __oi_root(r, 0); }
+void caml_register_generational_global_root(value *r) { __oi_root(r, 1); }
+void caml_remove_generational_global_root(value *r) { __oi_root(r, 0); }
+void caml_modify_generational_global_root(value *r, value v) { *r = v; __oi_root(r, 2); }
 void caml_alloc_dependent_memory(value v, mlsize_t n) { (void) v; (void) n; }
 void caml_free_dependent_memory(value v, mlsize_t n) { (void) v; (void) n; }
 void caml_adjust_gc_speed(mlsize_t a, mlsize_t b) { (void) a; (void) b; }
@@ -461,6 +465,13 @@ intnat __oi_custom_serialize(value v, uintnat *sizes)
   return (intnat) ser_len;
 }
 unsigned char *__oi_custom_buffer(void) { return ser_buf; }
+/* a custom block's finalization (queue 516, DECISION 511-3 (a)): oi calls it once the block's value is unreachable, at the
+   collection a program asks for (go/arbace/oicapi's finalise) */
+void __oi_custom_finalize(value v)
+{
+  const struct custom_operations *ops = Custom_ops_val(v);
+  if (ops != NULL && ops->finalize != NULL) ops->finalize(v);
+}
 value __oi_custom_deserialize(const char *id, const unsigned char *data, uintnat expected, uintnat *res)
 {
   for (int i = 0; i < nregistered; i++) {
