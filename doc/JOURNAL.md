@@ -17245,6 +17245,158 @@ CallConv's key kept by prog_key leaving a `.s` out of the flags as the helper's 
 894 / 34 / 22 -> 896 / 34 / 19 (1 n/a); AOT 138 / 0 / 1 -> 139 / 0 / 0; Haskell completeness 0.9835 -> 0.9860 (0.986038, floored 98.6;
 0.9948 without by design). bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check, bin/hsi divergences (909
 programs, 0 not in a class): 0 problems. test/gate/crops-test.bash passes with the hsi steps' inputs grown (x86i, emu, the assembler).
+## 2026-11-22: cpp-gnu, GCC's own rules built into Arbace's C++ front end (the user's decision of 2026-11-22)
+
+Branch `cpp-gnu-1122` from mac/next `a8c6d3137` (with cpp-read-1122), in `.tmp/worktrees/cpp-gnu`; no gate (the user's rule), light
+checks. The user's decision of 2026-11-22 (the entry above): C++'s 135 `:gcc-own-rules` rows (CP398 (c)) are built, each GNU extension's
+rule ported into Arbace's own front end one at a time, restated from GCC's documented behaviour (the GCC 15.2 manual, gcc/doc/extend.texi
+and invoke.texi of the pinned gcc-15.2.0.tar.xz; the C++ standard where GCC applies it; the Itanium C++ ABI for the runtime interfaces)
+and the tests' dg-error lines; no GCC code read or ported (GPL). Where the manual names no message or place, g++ 15.2 was run on the
+test by hand (behaviour only); no check runs it.
+
+**The class**: `:gcc-own-rules` `:kind :deferred` (test/cpp/divergences-dg.edn; "deferred until built"), its four files the own front end
+already passed out of `:tests` (warn/deprecated-19.C, cpp2a/nontype-complex1.C, ext/unary_trait_incomplete.C, template/ttp17.C), then each
+file whose own row passes taken out as its rule landed.
+
+**The rules** (doc/cpp/CPP-SURVEY.md, "As built: cpp-gnu", the full list with the files): attributes (abi_tag, aligned on an enumerator, no-argument attributes,
+transparent_union's mode, visibility redeclared, vector_size on main, attribute-only declarations, unavailable, format's index with
+`this`, gnu_inline's inline redeclarations, weak after a constant-evaluated use, musttail, packed fields bound to references, the error
+attribute through always_inline); anonymous structs with bases; [basic.scope.class]/2's changes of meaning; flexible array members (not
+at the end, their initializers, a nested context, clear_padding); typedefs of a fundamental and a class type; -fno-new-inheriting-ctors;
+GCC's maximum object size; variable-length array types; __int128 under -pedantic-errors; unsigned with typeof or a typedef-name;
+`_Complex (`; fixed-point literal suffixes; floating and vector operands, vector conditionals; labels as values; case values and GNU
+case ranges; statement expressions in constant expressions; asm operands, register variables, asm labels on fields, asm in a cleanup;
+const locals modified; built-in traits in signatures, __underlying_type's substitution, __is_invocable's incomplete operands, a trait's
+operand, __builtin_classify_type's type-id, __builtin_va_arg_pack, __builtin_operator_new/_delete, builtins without a library fallback
+as values, __builtin_launder, __integer_pack; the EH runtime's __cxa_* declarations, __dso_handle, __dynamic_cast, std::decimal,
+std::initializer_list's layout, std::coroutine_handle's from_address; the driver's options, -fno-exceptions, -Werror=deprecated-copy-dtor,
+-fconstexpr-loop-limit, -fimplicit-constexpr, -fno-immediate-escalation, -Wno-template-body; GCC's front-end pragmas (ivdep, unroll,
+novector, a pragma inside a declaration); an atomic constraint's satisfaction changing at a class's completion (IFNDR GCC diagnoses).
+
+**Shared functions touched** (for queue 518, whose families -- explicit arguments, template template parameter matching, the void and
+incomplete family, sema-errors' namespace-scope loop -- these stay out of): diag.ae's `checks`, `diagnose` (post-filters), `dunder-ok?`,
+`conflict`, `redefinitions`; parse.ae's `parse-decl-specs`, `attr-nodes`, `parse-class-specifier`, `parse-name`, `parse-param-list`, the
+declarator's noexcept, the simple declaration, `parse-statement`, the primary expression, the braced list and `designate`,
+`parse-lambda`, `parse-unit`; native.ae's `parse-file`; dg.ae's `read-own`. arbace/cpp/sema.ae and template.ae untouched.
+
+**Checked**: each rule on its files by the REPL's probe (the dg verdict over each file's dg.edn entry with read-own's arguments) and on
+valid programs written beside it (no error, g++ accepting them); the own record's 1,699 passes again after the parser's first changes
+(cc457bf9c, no record): 1,692, 2 load timeouts and 5 files that had passed on a parse error of GNU's `name:` designator or on an error
+their dg-prune-output removes (fixed: GCC's errors for GNU designators, the prune applied to the own errors as to clang's and g++'s); the
+record run at 383308773 (`bin/repr-cpp dg --corpus dg-error --front native --only` 1,957 files: the own passes but the slow pair, the
+class's 135 with the control's pair, 123 failing files whose expected messages name a rule's diagnostic; `--record`): own pass 1,819, 2
+regressions (ext/label9.C, cpp0x/gen-attrs-76.C, passing before on `__label__`'s parse error; fixed by the local labels' place and
+attributes before __label__); then 50 files at dd07181f5 (every file naming vector_size, __underlying_type, __type_pack_element,
+__integer_pack, make_*_sequence or __label__, with the control's pair; `--record`), no regression; the control dr2082-vs-dr1423 failing as
+it must in both; the slow pair (missing-header-pr110164.C, udlit-suffix-neg.C) at the head with a 900 s cap, both pass (rows kept); `bin/reap
+--record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. Not run: the gate, a whole dg-error run, the round
+trips and run checks (the parser's tree changes are `:_` facts, a `__label__` DeclStmt and builtins' text nodes).
+
+**Scores**: C++ read 5,665 / 176 / 652 (5,665 / 311 / 517 before the class's move) -> 5,786 / 176 / 532 (37 n/a): 120 of the 135 rows
+to pass, and coroutines/pr105475-broken-spec.C (an :undefined-expectation file) passing by its own lines (n/a 38 -> 37); the own record's
+passes 1,699 -> 1,826. Completeness 96.14 -> 96.60 (0.961380 -> 0.966005, floored 96), without by design 97.36 -> 97.83; independence
+95.40 -> 95.60 (0.953894 -> 0.955834, floored 95; the read stage 0.7798 -> 0.7895). Merged with next at e3d9a3331 (the counting
+stream's n/a classes, queue 518's rounds): the own record merged by row (no row changed on both sides), its 164 changed files run again on
+the merged tree (`--record`, no row moved, the control failing as it must); C++ read 5,665 / 135 / 517 (214 n/a, next's) -> 5,786 / 0 /
+532 (213 n/a); completeness 96.75 -> 97.22 (0.967457 -> 0.972210, floored 96 -> 97), independence 95.58 -> 95.78 (0.955769 -> 0.957770,
+floored 95; the read stage 0.789186 -> 0.799193, 1,846 of 4,383 rows own).
+
+**Left** (15 rows, :deferred): the template instantiation depth (template/pr23510.C, recurse.C, cpp0x/alias-decl-55.C, template/vtable2.C,
+cpp2a/concepts-recursive-sat1.C: arbace/cpp/template.ae's instantiation), the constant evaluator (ext/constexpr-vla1.C, -2.C,
+cpp1y/pr68180.C), cpp1z/constexpr-asm-5.C (GCC 15's constexpr asm strings), template/builtin-atomic-overloads5.C and -6.C (the __atomic
+builtins), abi/mangle41.C (-fabi-version=2's manglings; its read times out), ext/type_pack_element4.C, and queue 518's
+cpp0x/variadic-ex14.C and template/ttp16.C (-fno-new-ttp-matching). For the user: coroutines/pr105475-3.C passes, though like
+pr105475-broken-spec.C (497-3 (a)'s :undefined-expectation) it specializes std::coroutine_handle; both pass by their own lines now.
+
+Alternatives not taken: a rule per test's message (the rules are GCC's documented behaviour, each judged on every file of the corpus it
+reaches); the code generator's Sema (arbace/cpp/sema.ae) for the rules that need types (queue 518's file; the diag checks read the
+declarations' types themselves); a whole dg-error run (4,564 files; the own passes and the files whose expected messages name a rule's
+diagnostic were run instead); the template instantiation depth, constexpr evaluation and atomic builtins' families (template.ae's and
+the constant evaluator's ground, left).
+
+## 2026-11-22: Python's round trip, level 3 a compile without positions (py-small-1122, round 1)
+
+The user's (b) of the morning ("level 3 as a compile without positions (so :code-lines passes)"). Level 3 compared the code
+compiled from the original's text and from the print's; mode :lines records no positions, and CPython 3.14's code generation
+follows the lines a node spans (where a NOP stays, a superinstruction fuses, an exception range or a jump falls: E7 corrected,
+"As built: PY2"), so 30 files (3 stdlib, 21 site-packages, 6 Lib/test) were `:code-lines` in test/python/roundtrip-known.edn, and
+pip's candidates.py `:own-code-lines` in roundtrip-own-known.edn (pyi's compiler ports CPython's line passes).
+- Live (CPython, the read cell's record): tools/pydump/codelevel.py compiles each file's ast with every node at line 1, column 0
+  and normalizes it by pydump.py's own norm_code; bin/repr-python's code_levels rewrites the TSVs' CODE column into level-*.tsv,
+  the helper's TSVs left as dumped. A separate script on purpose: pydump.py's digest keys every member of the python-pydump packs
+  (tools/pydump/records.bash), so changing it would have made every record STALE; its CODE column (positions included) stays the
+  records'. With REPR_PYTHON_RT_LEVELS=recorded (the packs' rows, which keep positions) level 3 is implied by level 2 (compare
+  --recorded): a compile without positions is a function of the ast without attributes.
+- Records mode (pyi's own levels): own-code compiles the forms read in mode :lines (no positions) instead of the text read in mode
+  :full. bin/pyi compile-check already compiles every corpus file's :lines forms (compile-known.edn empty), so no file can newly
+  fail there.
+- The control: each control's reference print with a statement added (code_mutants: `__code_control__ = 0` appended), its digests
+  by codelevel.py; the print's row with the mutant's digests must fail level 2, and with the mutant's code beside the print's own
+  ast, level 3 (as queue 431's control for pyi's levels). Both modes' runs: every control failed as it must.
+- Proof, only the rows the change can move (the user's "avoid redundancy": a file whose ast is equal compiles to the same code
+  without positions, so only the 30 can change): `REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --record --only-list` over the
+  30 and the three corpora's control pairs (36 files): all levels pass, the 30 `:known "code"` rows of roundtrip-results.edn now
+  `:pass`, roundtrip-known.edn's `:code-lines` empty (the class kept, its text saying so); records mode the same list: candidates.py
+  passes, roundtrip-own-known.edn's `:own-code-lines` empty. A partial --record no longer rewrites roundtrip-costs.edn (a whole
+  run's costs only).
+- Read cell: pass 3,702 to 3,732, by design 34 to 4 (the 4 :rejected, which the counting stream, counting-1122, takes); Python's
+  completeness 0.9485 to 0.9506.
+
+## 2026-11-22: pyi's finalization at a frame's return, gated (py-small-1122, round 2)
+
+The user's (b) of 222's DECISION 1 (doc/python/PYTHON-SURVEY.md, "As built: 222", DECISION 1; "As built: the moment at a frame's
+return, gated"). An instance whose class has a __del__ is noted on its thread with its frame's depth; the loop's return path compares
+the thread's deepest note with its depth (one load and a compare) and, when a frame that deep returns, runs one Go collection and the
+drain (finAtReturn); a survivor is noted for the caller, at most 3 checks; finSpent's budget bounds the time.
+- The first measure (base and branch compiled by bin/pyi aot, run back to back) found the gate open at every program's start: pyi's _io
+  is _pyio, so every open() and every import's FileIO and BufferedReader carry IOBase.__del__: 11 to 23 forced collections a run
+  (GODEBUG=gctrace=1), +6.9% compiled and +4.0% on the loop (wall). Refined (8e122ac7d): a class whose __del__ is _pyio's is not
+  noted (files keep the collection's moment, as before); the runs' collections are base's exactly. Alternatives not taken: checking a
+  file's closed state at the return (Python code at every return of a frame that opened a file); a smaller budget of its own.
+- Cost, the 10 benchmarks of 222's table, 10 rounds alternating, least: compiled +2.9% wall, +2.7% CPU; on the loop -0.8% wall, -0.3%
+  CPU (the host at 50-70 load on 64 CPUs; single benchmarks move by up to 10% either way). Under the 3% budget.
+- Proved by --only runs (the user's "avoid redundancy"): del.py, async.py, async-gen-aclose.py and samples/functions.py (the corpus's
+  only programs that make __del__ objects) compiled and on the loop: 4 of 4 pass, del.py by its golden text, the control failing;
+  test_gc, test_weakref and test_finalization by check --aot --lib-test --fresh at base and branch: the same 194 pass, 63 classed, 0
+  failing, row for row (test_trashcan_threads' counts aside). For P1 (py-eval-1122, the eval record): no method of these three modules
+  is expected to move.
+- Left: check-aot-linux-amd64.edn's del.py row (AOT deferred 1, and the eval cell's loop column by design 1) moves at the next whole
+  bin/pyi check --aot --record, which the tool takes only whole and only on a host whose runtime is the checkout's compiled (the gate's
+  build at this branch's key: a 33 GiB build); divergences-aot.edn's :finalization-goi and divergences-synth.edn's del.py go then
+  (their texts say so now).
+
+## 2026-11-22: misc-tails round 1: Rust's read and print at 100 (branch `misc-tails-1122`, from next `c7a8439ad`)
+
+The burst's misc tails, Rust first: the read and print cells' four non-passes each (`:converter-depth` 3 deferred, `:parser-rejects`
+1 by design). The UI suite's tarball fetched by its pin (`rustc-1.99.1-src.tar.xz`, the corpus's SHA-256) into the worktree's
+`.tmp/repr-rust/src`: RCD1 (a)'s `ensure-sufficient-stack` (2026-11-17), checked then on synthetic shapes only, round trips the three
+deep files (`bin/repr-rust roundtrip --text --only`, then `--pretty-only`: tree, text byte for byte, mode `:full`'s trees and the
+pretty layout all equal, the UI control failing as it must). erased-serde's `features_check/error.rs`, which rustc's own parser
+rejects alone (the helper: `expected item, found "..."` at 1:1-1:82), passes by its own verdict: `test/rust/roundtrip-rejects.edn`
+records rustc's diagnostic and the comparisons (`compare`, `compare-text`, `--rejects`) pass a listed file whose native rejection has
+that message and span, with a built-in control per pass (the message changed must fail). Alternatives: keeping the class by design
+(the user asked for the own verdict); counting the file out of the corpus (it is a file of the crate). Beside: `--pretty --only`
+printed nothing (fixed in `pretty_level`); the UI corpus's negative control named two `:rejected` files and was always left (replaced).
+Classes `:parser-rejects` and `:converter-depth` dropped from `test/rust/divergences-{read,print}.edn`. doc/rust/RUST-NOTES.md, "The
+files rustc rejects; the deep files confirmed". After (`bin/reap --record`, `bin/crops-score --record`): Rust read 33,342 / 1 / 3 to
+33,346 / 0 / 0, print the same; Rust's completeness 0.9999 to 1.0000 (66,704 of 66,704 counted cells' cases across read and print, eval
+and AOT 6 and 6).
+
+## 2026-11-22: misc-tails round 2: Go's AOT `:go-build-complete` passes; Python's read left to py-small
+
+- **Go AOT, `fixedbugs/issue9608.go` (`:go-build-complete`, RPS31 (a) by design).** Re-examined: the test is `// rundir`, whose header
+  says why it is a directory test: Go's test driver (`test/run.go`'s compileInDir) compiles each package with `go tool compile`,
+  without `-complete`, and gc eliminates the bodiless `fail()`'s dead calls. go build gives a package without assembly `-complete`
+  (cmd/go's work/gc.go), but puts `-gcflags` after its own flags, and `-complete` only adds the missing-body error (cmd/compile's
+  noder/writer.go, its one use). So `bin/goi`'s check_dir passes `-gcflags=MODULE/...=-complete=false` (before the action's own) for a
+  rundir test: its packages are compiled as the driver compiles them. RPS31's option (b), an empty `.s` file, tested the harness; this
+  reproduces the test's declared build. Proof: `bin/goi check --aot --jobs 4 --only` over the 116 rundir tests (every caller of the
+  change): 116 pass (issue9608 among them, 115 as before), the control `_control/issue48337a-vs-dedup` failing as it must; the row
+  edited from that run (`--record` writes only the whole record), the known entry and the class dropped. (The run's linux-errtest
+  corpus read OOMs under 8 GB and the big lock had 8 waiting: the errorcheck corpus was marked fresh in the worktree's scratch, not
+  read; no errorcheck program was selected.) Go AOT 1,696 / 1 by design to 1,697 / 0; Go's completeness 0.9908 to 0.9910.
+- **Python read, `:code-lines` 30**: already done by py-small (`3daf8efbd` on mac/py-small-1122, "round trip level 3 a compile
+  without positions", the user's (b) of 2026-11-22), not yet merged into next: not duplicated here.
 ## 2026-11-22: hs-pkgs-1122: Haskell's no-reference programs built (the Hackage packages vendored, GHC's runs recorded, five packages own)
 
 Branch `hs-pkgs-1122` from mac/next `a8c6d3137`, by an agent of the main host (the coordinator's brief after the user's decision of

@@ -1358,15 +1358,21 @@ CS3 (a): what the reader reads and the printer prints, but ci and cf2g refuse by
 | inline assembly (`c/asm` in a function, extended `asm`) with a template | the target's instructions; musl's are natives in `crt`. An empty template is in (h-c-run, 2026-11-17): its operands parsed from the text, a tied output given its input's value converted, the operands' side effects evaluated |
 | ~~GNU vector types (`vector_size`, `__builtin_shufflevector`, `__builtin_convertvector`)~~ | in since 2026-11-17 (CS320 (a), the user; doc/C23-SURVEY.md, "As built: GNU vector types"): lanes in memory, element-wise operators, comparisons, subscripts, broadcast, the shuffles, `convertvector`, SSE2's `cmp*pd` and `movmskp[ds]`; the `_mm_*` functions of Arbace's headers still declared only |
 | `__int128` beyond `+ - * / % << >> & \| ^ ~`, comparisons and conversions | the survey's CS3 (a): `__int128` arithmetic is in, its library (`printf` has none) and atomics out |
-| `_Decimal32/64/128` arithmetic and conversions | BID arithmetic is libgcc's; musl's `printf` cannot print them; clang 23 rejects them on the target (measured) |
-| `_Float16`, `_Float128`, `_Float32x`, `_Float64x`, `__bf16` arithmetic | libgcc's soft-float routines; `_Float32` and `_Float64` are `float` and `double` and are in |
+| ~~`_Decimal32/64/128` arithmetic and conversions~~ | in since queue 522 (CR3 (a), the user's decision of 2026-11-22): BID in software (crt's WType Dec), musl's `printf` still prints none |
+| ~~`_Float16`, `_Float128`~~ `__bf16`, `_Float128x` arithmetic | `_Float16` and `_Float128` in since queue 522 (CR3 (a)): binary16 kept in a double, rounded once at loads, stores and conversions; binary128 in software (crt's WType Float), each operation rounded once; `_Float32x` is `double`, `_Float64x` `long double` (x87's extended, below) |
 | `__declspec`, address spaces (`__seg_fs`), `_Nonnull` | other targets' and other compilers' |
 | the `cleanup`, `constructor`, `destructor` attributes | run order outside `main`: deferred to C5's list (a class `deferred` if a corpus file needs one) |
 | `#pragma` other than §9.2's | the layer's only |
 
 CS35 (decided 2026-10-28): `__int128` and `_BitInt` beyond 64 bits are in (as 64-bit limbs in `crt`);
-`long double` is in as `double` (§12.5), not as x87 extended arithmetic, its differences the class
-`long-double`.
+`long double` was in as `double` (§12.5), not as x87 extended arithmetic, its differences the class
+`long-double` (until queue 522, below).
+Since queue 522 (CR3 (a), the user's ruling of 2026-11-22) `long double` (and `_Float64x`) is x87's extended in software
+(crt's WType Float, N 80: 16 bytes, 16-aligned, a 64-bit significand with its integer bit, LDBL_MANT_DIG 64), as c/target's
+ABI has it, musl read in the same configuration; x87's `fsqrt` and `fpatan` templates are lowered to `sqrtl` and `atan2l`.
+`<fenv.h>`'s flags and rounding directions are crt's (FFlags, RoundMode): raised and honoured by the software formats and
+the wide integer conversions; float and double arithmetic raises FE_INVALID for a NaN result of an invalid operation or a
+signaling operand, nothing else (no FE_INEXACT, FE_OVERFLOW, and round to nearest only, for the hardware formats).
 
 ## 15. Coverage
 
