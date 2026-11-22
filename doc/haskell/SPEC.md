@@ -877,12 +877,16 @@ Positions are lines, carried by the layout of the forms text, as Go forms' `:lin
   not the form's; `:hs/brace` on a record constructor (its `{`), a `case`, `\case`, `do` or a
   pattern synonym's `where` (the line its located list of items begins on) when it is not the first
   item's; `:hs/paren` on a form whose implicit parentheses begin on another line than it;
-  `^:hs/braces` (S12) on a `case` or `\case` without alternatives whose source wrote `{}`.
+  `^:hs/braces` (S12) on a `case` or `\case` without alternatives whose source wrote `{}`; `:hs/close`
+  (2026-11-22) on a parenthesized type (`(:paren ...)`, or the form its implicit parentheses enclose) or a
+  tuple type whose closing `)` is on a later line than its last element's end: that line, the node's
+  span's end, which the printer goes to before the `)` when its output has not reached it.
 - **Lists placed after their line** carry an explicit `:line`, which the reader keeps over its own
   (Go SPEC §10.1): the case of a form that must follow another the Haskell line puts before it.
 - **The lines of the end of a node** (a multi-line span's last line) reach run-time messages
   (`N.hs:(3,1)-(5,20)`); they are kept in so far as the node's last token begins a form that begins
-  a line, which is the usual case; the round trip's levels say what is compared (§9.2).
+  a line, which is the usual case, or is a type's closing `)` (`:hs/close`); the round trip's levels
+  say what is compared (§9.2).
 
 What `:lines` does not keep: columns; the positions of tokens (keywords, `=`, `->`, parentheses,
 commas); comments other than documentation (§7.3); layout against explicit braces; the spelling of

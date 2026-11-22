@@ -15841,3 +15841,18 @@ ghc-internal and base made for it), its four rows recorded with --only --record;
 still pass. The eval cell 859 / 61 / 30 -> 860 / 60 / 30, AOT 137 / 1 / 1 -> 138 / 0 / 1. Left at AOT: nofib/spectral/fibheaps,
 `:own-speed` (deferred), the own -O0 libraries' code at the 60 s CPU limit (57 s when it passed), HF10's -O1 line. bin/reap --record,
 bin/crops-score --record, --judge --strict, bin/records-check, bin/hsi divergences: 0 problems. Light: no gate.
+
+## 2026-11-22: Haskell's read cell whole: a type's closing parenthesis keeps its line (small-tails-ochs-1122)
+
+Haskell's read cell had three deferred rows (`:own-iface-span-lines`: Cabal's UnifyM and PackageIndex, ghc-internal's
+Typeable/Internal), the own interface level's binders named by a span whose end line the print moved: mode `:lines` joined a type's
+closing `)` written on a line of its own to the line before. Fixed in repr/haskell (doc/haskell/HASKELL-NOTES.md, "The closing
+parenthesis's line"; SPEC §7.1): the converter writes `:hs/close` (the span's end line) on a parenthesized or tuple type whose `)` is past
+its last element's end, the printer goes to that line before the `)` (forward only, braces and layout layouts, not the full layout).
+Alternatives: normalizing the binders' end lines in the comparison (hides a real difference of the print), naming binders by their start
+alone in the front end (changes every own interface and the hsi records). Proof: the gate step haskell-iface-own's command by hand
+under the lock (404 minutes): tree level 1,344 of 1,344 in both layouts, own interfaces 1,344 of 1,344 in both, the three known entries
+gone from both known files; on the way the comparison's D341-3 (a) SrcLoc normalization extended to the bare literals next's front end
+now writes (array's Data.Array.Base and exceptions' Control.Monad.Catch differed by SrcLoc columns alone; other worktrees' pools show the
+same form). `bin/repr-haskell test` passes. The read cell 2,687 / 0 / 3 -> 2,690 / 0 / 0. bin/reap --record, bin/crops-score --record,
+--judge --strict, bin/records-check: 0 problems. Light: no gate.
