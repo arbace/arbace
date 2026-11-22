@@ -5781,10 +5781,11 @@ differing every time; the host at load 60 to 117:
 | r2: the export again with the 42 wanted callees' keys (317 keys in 58 module files, 286 bodies; 1 h 8 min, 2.3 GB): :nounwind, the asserts' locations, o0-normalize's facts, the literal types, the pair's tag, the constant aggregates and pairs (61 callees inlined) | 177 | 18 | 77 | 3 |
 | r3: `export core --add` of 69 keys (the 35 named-constant items again on R3's collect, the new callees, the refused ones retried: 39 bodies, 7 min), InstSimplify's aggregate rules in the inliner | 179 | 16 | 77 | 3 |
 | r3's unit compared again with the callees met bottom-up | 181 | 14 | 77 | 3 |
-| r5: `export core --add` of std's wanted core callees (48 keys in 24 module files, 18 bodies; 50 min), built and compared again (73 callees inlined) | **181** | 14 | 77 | 3 |
+| r5: `export core --add` of std's wanted core callees (48 keys in 24 module files, 18 bodies; 50 min), built and compared again (73 callees inlined) | 181 | 14 | 77 | 3 |
+| r8: pointee_info_at through NonNull's pattern type (io::error's drop through `error_drop`, `from_raw`'s vtable parameter), codegen's no-op pads | **183** | 12 | 77 | 3 |
 
-alloc's 25 items (its export again with `Box::new`'s key, 26 bodies, 1 min 48 s): **21 equal** (18 before), 2 differ (a parameter's
-pointee alignment, to_uppercase's 31st line), 2 refused (a fn-local trait impl's v0, from_utf8_lossy's unevaluated `REPLACEMENT`).
+alloc's 25 items (its export again with `Box::new`'s key, 26 bodies, 1 min 48 s): **21 equal** (18 before; the same at r8), 2 differ
+(custom_owner_from_box past its parameters now, to_uppercase's 31st line), 2 refused (a fn-local trait impl's v0, from_utf8_lossy's unevaluated `REPLACEMENT`).
 Build 13 min, 3.0 GB (10 min at r1, under GC thrash at GOMEMLIMIT=2000MiB: 3000MiB now); compare 1.5 min, 1.0 GB.
 
 std's 325 items (its interface pass from the cache of 2026-11-20; build 2 to 3 min, 3.0 GB; compare 1 min, 1.1 GB):
@@ -5795,7 +5796,8 @@ std's 325 items (its interface pass from the cache of 2026-11-20; build 2 to 3 m
 | rust-c6-1120's unit through this branch's codegen alone | 65 | 47 | 213 | 0 |
 | r4: std's export again (271 bodies, 153 refused; 6 min), built on core's r3 export | 80 | 21 | 223 | 1 |
 | r5: with the 18 core callees std wanted | 81 | 29 | 214 | 1 |
-| r6: std's export again with its entries' callee attributes (`:callee-attrs`: Path::has_root's `#[inline]`) | **82** | 28 | 214 | 1 |
+| r6: std's export again with its entries' callee attributes (`:callee-attrs`: Path::has_root's `#[inline]`) | 82 | 28 | 214 | 1 |
+| r8: the same export, the head's build (pointee through pattern types) | **83** | 27 | 214 | 1 |
 
 std's differences are mostly symbols now: 13 of the 28 call a generic instance of core's under std's instantiating crate where
 rustc takes core's own (`<[u8]>::is_empty`'s `..B4_`, share-generics' upstream_monomorphizations: core exports the instances it
@@ -5821,9 +5823,13 @@ inline-test` 11 of 11, `pack-compare-test` passed; reap 56 of 56 cells, crops-sc
 - **MIR-level differences after -O0's passes** (the locals rustc keeps or makes SSA: digits_to_dec_str's 16-byte temporaries, a
   debug variable's dead load kept by rustc in from_bytes_with_nul, write_str's extra 1-byte locals): each needs rustc's MIR of the
   item, which no record holds (the judge is std's IR).
-- **An indirect call's argument attributes** (io::error's `(self.error_drop)(self.error)`: rustc's `align 8` on the vtable half from
-  the function pointer's FnAbi) and a parameter's pointee alignment (`from_raw`, `custom_owner_from_box`): pointee_info_at through
-  nested ADTs (mono's `pointee-info-at`) answers none there yet.
+- **Share-generics' upstream instances** (13 of std's 28 differing items): std calls core's generic instances under std's
+  instantiating crate where rustc takes core's exported one (`<[u8]>::is_empty`'s `..B4_`); Arbace needs core's own instance set
+  (L2) to know which core exports, without reading std's IR.
+- **The order of two `#[inline(always)]` callees inlined into one item** (their allocas' order at the entry): rustc's module order
+  is items_in_deterministic_order's definition spans, which the export does not carry (the bottom-up order stands in).
+- (Fixed at r8: an indirect call's and a parameter's pointee alignment through NonNull's pattern type, io::error's drop and
+  `from_raw` equal.)
 
 ### DECISION 512-1 (a): std's rsi export made again on this host (2026-11-22)
 
@@ -5840,7 +5846,17 @@ lines naming it):
 | panics, before | 682 | 126 + 19 | 71 | 8 | 30 | 24 |
 | unwind, before | 616 | 104 + 17 | 58 | 5 | 25 | 20 |
 | vectors, before | 2377 | 632 + 60 | 194 | 21 | 0 | 0 |
-AFTER-ROWS
+| panics, after | 682 | 126 + 19 | 71 | 8 | 30 | 24 |
+| unwind, after | 616 | 104 + 17 | 58 | 5 | 25 | 20 |
+| vectors, after | 2377 | 632 + 60 | 194 | 21 | 0 | 0 |
+| panics, after2 (codegen's no-op pads, `7f59c9ff7`) | 682 | 126 + 19 | 71 | 8 | 30 | 24 |
+| unwind, after2 | 616 | 104 + 17 | 58 | 5 | 25 | 20 |
+| vectors, after2 | 2377 | 632 + 60 | 194 | 21 | 0 | 0 |
+
+The IR (ours.ll) moved where the lines did not: after the export, 7 of std's functions in vectors gained a personality and a dead
+`unreachable` block (panics 35 IR lines, unwind 25, vectors 35); with codegen taking a no-op landing pad for no block (after2, 38
+min) the dead `unreachable` blocks fall from 85 to 40 (panics), 68 to 31 (unwind) and 548 to 343 (vectors) against the run before,
+and the functions with a personality from 53 to 33, 46 to 32 and 141 to 70 (rustc's x.ll of each program: no dead block).
 
 On this host the export before already carried `Data`'s ADT facts (rust-c6-1120's exports were made again at its merged head with
 with-private-facts, `d4268b54b`; each of catch_unwind's three entries holds `:adts {"std::panicking::catch_unwind::Data" ..}`),

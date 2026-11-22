@@ -378,8 +378,10 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   differences for C4 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1's drop glue"). Branch `rust-c6b-1122` (2026-11-22,
   the burst's R2, with 512-rust-causes5 and R3's rust-c4-1122 merged): C6-4's next export and the back end's lowering as std's IR
   writes it (core's macro-made attributes, IRBuilder's folds, LLVM 23's float text, -Z fewer-names' literal types, InstSimplify's
-  aggregate rules in the inliner, the asserts' locations, :nounwind): core 181 of 275 items equal to std's IR (114 before),
-  alloc 21 of 25 (18), std 82 of 325 (61) (FRONTEND-SURVEY, "As built: C6-4's next export, core's lowering as std's IR writes it").
+  aggregate rules in the inliner, the asserts' locations, :nounwind): core 183 of 275 items equal to std's IR (114 before),
+  alloc 21 of 25 (18), std 83 of 325 (61); DECISION 512-1 (a) taken (std's rsi export made again: catch_unwind's lines
+  unchanged, their root the helper's fnptr types without `unsafe`) (FRONTEND-SURVEY, "As built: C6-4's next export, core's
+  lowering as std's IR writes it").
 - **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred
   17 -> 15, eval 15 -> 3), LLS54 (a) (the tx pack with dg-options), `h-judges`' split-file section, the Mac's 335 (Verifier rules:
   read deferred 15 -> 1; D335-1 (a), D335-2 (a)). Held: 335's `ir-make rt --mutants` and `verify-rt-heldout --record`; the 13 eh
