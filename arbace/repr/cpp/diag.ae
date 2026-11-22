@@ -4766,6 +4766,62 @@
 
 (swap! checks conj class-member-conflicts)
 
+;; cpp-diag-b, round 2 (2026-11-22): warnings the file's options make errors (GCC's manual, "Warning Options": -Werror=X, or -Werror
+;; with -WX), and pedwarns under -pedantic-errors the parser cannot see the options of; a check of the source text with the
+;; comments, string and character literals blanked (`code-text`).
+
+(defn- code-text
+  "The source `src` with its comments and its string and character literals' bodies blanked (offsets and newlines kept)."
+  ^String [^String src]
+  (let [sb (StringBuilder. src) n (.length src)]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt src i) d (if (< (inc i) n) (.charAt src (inc i)) \space)]
+          (cond
+            (and (= c \/) (= d \/)) (let [e (let [k (.indexOf src "\n" i)] (if (neg? k) n k))]
+                                      (doseq [k (range i e)] (.setCharAt sb (int k) \space)) (recur e))
+            (and (= c \/) (= d \*)) (let [e (let [k (.indexOf src "*/" (+ i 2))] (if (neg? k) n (+ k 2)))]
+                                      (doseq [k (range i e) :when (not= \newline (.charAt src (int k)))] (.setCharAt sb (int k) \space)) (recur e))
+            (or (= c \") (and (= c \') (not (and (pos? i) (Character/isLetterOrDigit (.charAt src (dec i)))))))
+            (let [e (loop [k (inc i)] (cond (>= k n) n (= \\ (.charAt src k)) (recur (+ k 2)) (= c (.charAt src k)) k (= \newline (.charAt src k)) k :else (recur (inc k))))]
+              (doseq [k (range (inc i) (min e n))] (.setCharAt sb (int k) \space)) (recur (inc e)))
+            :else (recur (inc i))))))
+    (str sb)))
+
+(defn- werror?
+  "Whether the options make the warning `w` (its name without -W) an error."
+  [args ^String w]
+  (let [as (set (map str args))]
+    (and (not (contains? as (str "-Wno-" w)))
+         (or (contains? as (str "-Werror=" w)) (and (contains? as "-Werror") (contains? as (str "-W" w)))))))
+
+(defn option-errors
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        args (:args u)
+        year (cxx-year (:std u))
+        add! (fn [o msg] (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :options :msg msg})))
+        code (delay (code-text src))]
+    ;; (cpplib: #pragma once in the main file, -Wpragma-once-outside-header's warning)
+    (when (werror? args "pragma-once-outside-header")
+      (let [m (re-matcher #"(?m)^[ \t]*#[ \t]*pragma[ \t]+once\b" @code)]
+        (while (.find m) (add! (.start m) "#pragma once in main file [-Werror=pragma-once-outside-header]"))))
+    ;; ([conv.array] with [lex.string]: a string literal converted to char*, -Wwrite-strings' warning, an error under its -Werror)
+    (when (and (>= (long year) 11) (werror? args "write-strings") (not (some #{"-pedantic-errors"} args)))
+      (walk-nodes (fn [n _]
+                    (when (and (= "VarDecl" (:kind n)) (re-matches #"(signed |unsigned )?char \*( const)?" (str (get-in n [:type :qualType])))
+                               (some #(= "StringLiteral" (:kind %)) (:inner n)))
+                      (when-let [o (mine-at n main)] (add! o "ISO C++ forbids converting a string constant to 'char*' [-Werror=write-strings]"))))
+                  (:nodes u) nil))
+    ;; ([diff.cpp03]: long long is C++11's; under -pedantic-errors without -Wno-long-long, GCC's pedwarn "ISO C++ 1998 does not
+    ;; support 'long long'", for the type and an integer literal's suffix)
+    (when (and (< (long year) 2011) (some #{"-pedantic-errors"} args) (not (some #{"-Wno-long-long"} args)))
+      (let [m (re-matcher #"\blong\s+long\b|\b(?:0[xX][0-9a-fA-F]+|[0-9]+)(?:[uU]?(?:ll|LL)|(?:ll|LL)[uU])\b" @code)]
+        (while (.find m) (add! (.start m) "ISO C++ 1998 does not support 'long long'"))))
+    (vec out)))
+
+(swap! checks conj option-errors)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
@@ -4781,6 +4837,7 @@
    [:named-cast #"^codegen: invalid ('const_cast' from|cast from) type" "invalid cast"]
    [:fn-arith #"^codegen: pointer to a function used in arithmetic" "pointer to a function used in arithmetic"]
    [:delete-arg #"^codegen: (type of the argument given to 'delete'|cannot delete a function)" "invalid argument to delete"]
+   [:cond-void #"^codegen: an operand of the conditional operator is of type 'void'" "void operand of the conditional operator"]
    [:init #"^codegen: a reference from arguments" "invalid value-initialization of reference type"]])
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no

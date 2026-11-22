@@ -1929,7 +1929,12 @@
       (or (try (adv! p) (adv! p)
                (let [x (with-gt p true (parse-assign-expr p))]
                  (when (accept! p ",")
-                   (let [ty (parse-type-id p :paren)]
+                   (let [ti (ix p)
+                         ty (parse-type-id p :paren)]
+                     ;; (cpp-diag-b, 2026-11-22: [cstdarg.syn]/1 with C's va_arg: an argument through ... is a prvalue, no reference
+                     ;; type is received: GCC's "cannot receive reference type 'int&' through '...'")
+                     (when (and (#{:lr :rr} (:t ty)) (main-tok? p ti))
+                       (soft-diag! p ti (str "cannot receive reference type '" (qt ty) "' through '...'")))
                      (when (is? p ")") (adv! p)
                        (assoc (node p "BuiltinExpr" b (last-ix p) {}) :_vaarg x :_vatype (qt ty))))))
                (catch arbace.lang.ExceptionInfo _ nil))
@@ -3207,7 +3212,10 @@
             (and (#{"__typeof__" "__typeof" "typeof"} s) (not has-type) (is-at? p 1 "("))
             (do (adv! p) (unclosed-paren! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
             (and (= s "_Atomic") (is-at? p 1 "(") (not has-type))
-            (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str "_Atomic(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
+            (do ;; (cpp-diag-b, 2026-11-22: C's _Atomic type specifier is no C++ keyword (C++23's <stdatomic.h> defines it as a
+                ;; macro): GCC's "'_Atomic' does not name a type", at the keyword)
+                (when (and (main-tok? p (ix p)) (not (skim? p)) (nil? (.-mac ^T (cur p)))) (soft-diag! p (ix p) "'_Atomic' does not name a type"))
+                (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str "_Atomic(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
             (and (#{"class" "struct" "union"} s) (not has-type))
             (let [{:keys [type node]} (parse-class-specifier p ds ctx)
                   ds (cond-> (assoc ds :type type) node (assoc :tag-node node))]
@@ -6556,13 +6564,22 @@
             n (count body)]
         (loop [j 0 named nil hex nil]
           (if (>= j (dec n))
-            (cond named "pedantic: named universal character escapes are only valid in C++23"
+            (cond named (if (string? named) named "pedantic: named universal character escapes are only valid in C++23")
                   hex "pedantic: hex escape sequence out of range"
                   :else nil)
             (if (= \\ (.charAt body (int j)))
               (let [c (.charAt body (int (inc j)))]
                 (cond
-                  (and (= c \N) (< year 2023) (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2))))) (recur (+ j 3) true hex)
+                  ;; (cpp-diag-b, 2026-11-22: [lex.ccon]'s simple, octal, hexadecimal and universal escapes alone, GNU's \e and \E
+                  ;; beside: another is cpplib's pedwarn "unknown escape sequence"; C++23's delimited escapes \x{...} \o{...} \u{...}
+                  ;; (P2290R3) before C++23 "delimited escape sequences are only valid in C++23")
+                  (not (or (contains? #{\' \" \? \\ \a \b \f \n \r \t \v \x \u \U \N \o \e \E} c) (Character/isDigit c)))
+                  (recur (+ j 2) "pedantic: unknown escape sequence" hex)
+                  (and (contains? #{\x \u \o} c) (< year 2023) (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2)))) (not (string? named)))
+                  (recur (+ j 3) "pedantic: delimited escape sequences are only valid in C++23" hex)
+                  (and (= c \o) (not (and (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2)))))))
+                  (recur (+ j 2) "pedantic: unknown escape sequence" hex)
+                  (and (= c \N) (< year 2023) (< (+ j 2) n) (= \{ (.charAt body (int (+ j 2))))) (recur (+ j 3) (or named true) hex)
                   (and (= c \x) bits (< (+ j 2) n) (not= \{ (.charAt body (int (+ j 2)))))
                   (let [k (loop [k (+ j 2)] (if (and (< k n) (>= (Character/digit (.charAt body (int k)) 16) 0)) (recur (inc k)) k))
                         big (when (> k (+ j 2)) (.bitLength (BigInteger. (subs body (+ j 2) k) 16)))]
@@ -6585,7 +6602,10 @@
                                   (when-let [[_ d] (re-matches #"0[0-7']*([89])[0-9']*(?:[uUlLzZ]*)" (.-s t))]
                                     (str "invalid digit \"" d "\" in octal constant"))
                                   (when-let [[_ d] (re-matches #"0[bB][01']*([2-9])[0-9']*(?:[uUlLzZ]*)" (.-s t))]
-                                    (str "invalid digit \"" d "\" in binary constant")))
+                                    (str "invalid digit \"" d "\" in binary constant"))
+                                  ;; ([lex.fcon]: hexadecimal floating literals are C++17's; before, GCC's pedwarn)
+                                  (when (and (< (.-year p) 2017) (re-matches #"0[xX][0-9a-fA-F'.]*[pP][-+]?[0-9']+[fFlL]?" (.-s t)))
+                                    "pedantic: use of C++17 hexadecimal floating constant"))
                          :id (when (str/includes? (.-s t) "\\") (ucn-error (.-s t) (.-year p)))
                          ;; (round 54, fifth pass: [lex.ccon]'s encodable literals)
                          :chr (or (escape-error (.-s t) (.-year p)) (char-literal-error (.-s t) (.-year p) false))
