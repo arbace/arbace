@@ -9579,3 +9579,125 @@ DECISION cpp-rt-own2-3 (c++17/fs_dir.cc, exp/filesystem/dir.cc and cow-dir.cc: `
     :mangle-path-after replaced). Recommended: three units, cow-fs_dir's model kept as its special case.
 (b) Leave them on the pack.
 ```
+
+## As built: cpp-read, C++'s read and print cells (2026-11-21/22; branch `cpp-read-1122` from next `863bdaea1`; the burst's stream C3)
+
+The read cell's token check, the dg check's syntax-own rows (CP262 (b): files expecting only syntax errors, judged by the own front
+end alone) and a part of :own-diag (families the Mac's queue 510 is not on), the print cell's forms-differ rows. Light: no gate; each
+fix proven on its rows with the REPL's probe (the dg verdict of arbace.repr.cpp.dg over the file's dg.edn entry), then the whole
+dg-error part by the own front end, the token check's three recorded samplings and the round trip's recorded lists.
+
+### The token check (5 of 5 rows; :design to pass)
+
+The own judge (pp-ref, libcpp at check time) differed from the port at the lex level on five files, three by-design classes of the
+raw lexers' conventions. The port now follows libcpp, which there follows the standard's grammar:
+- `raw-udl-suffix` (cpp-lexical/udl.cpp, udl-cxx11.cpp, gxx-dg/cpp0x/udlit-extended-id-1.C): a ud-suffix is any identifier touching a
+  literal's closing quote ([lex.string]'s user-defined-string-literal, [lex.ext]/1, the longest token), libcpp's scan_cur_identifier;
+  the preprocessor splits it off where it names a macro and does not begin with one underscore (maybe_ignore_udl_macro_suffix). Before:
+  clang's rule (a suffix without its underscore left apart unless `s` or `sv`).
+- `unterminated-raw-string` (cpp-lexical/errors2.cpp): the token ends before the file's last new-line, as libcpp's lex_raw_string.
+- `non-xid-utf8` (gxx-dg/cpp23/Winvalid-utf8-11.C): in C++ every UTF-8 sequence libcpp decodes (one_utf8_to_cppchar: 2 to 6 bytes,
+  shortest form, no surrogate) continues or begins an identifier, with libcpp's errors for a character in no identifier set ("extended
+  character ... is not valid in an identifier": not XID_Continue nor in C11's annex D.1 / C++11's E.1 without -pedantic, XID alone
+  with it, the new lexer bit F-PEDANTIC; "... at the start of an identifier"), as _cpp_valid_utf8 in C++ ("logically, the UTF-8 was
+  converted to a UCN during translation phase 1"). Before: clang's (a token a character, no error).
+The known file's :lex-own and :pp-own are empty; the five files' classes moved to :lex, the records' judge's (the oracle tier's
+cpp-tokens-oracle: clang's raw tokens differ there now). Also: a macro's name keyed with its UCNs as UTF-8 (`ENΔ` and its
+UTF-8 one macro, pp.ae's mkey; a code point past U+10FFFF stays as written), and in C++ the options' --embed-dir and -pedantic
+(cpp/host.ae), with libcpp's pedwarn "#embed before C++26 is a GCC extension".
+
+### The dg check's own front end (arbace/repr/cpp/parse.ae, diag.ae, dg.ae, native.ae)
+
+The parser's diagnostics are GCC's where the grammar or a rule asks them, each a soft error (soft-diag!, the tree unchanged) or a
+mark the diag check reads over the final tree (so a tentative parse leaves none):
+- recovery: a declined statement or declaration skipped by skip-rec! (the braces nest, an unclosed parenthesis yields to the ; or } of
+  its level, as cp_parser_skip_to_end_of_statement; an initializer's braces end at a ;; a statement's unclosed [ at its ;): no more
+  "an unclosed block" at the file's end; an error at the end of input at the last token, or after it at the last #pragma the front
+  end tokenizes (CPP_PRAGMA_EOL; libcpp's own pragmas, once, push_macro, GCC poison and their kin, aside);
+- a missing ) ] ; , or : placed after the previous token (c-family's maybe_suggest_missing_token_insertion, MTIK_INSERT_AFTER_PREV);
+- a class definition followed by a token no declarator begins with: "expected ';' after class definition", the declaration ended
+  there (cp_parser_class_specifier_1's want_semicolon); a member declarator without its ;: "expected ';' at end of member declaration",
+  the ; assumed; an `else` in an if's then-clause: "expected '}' before 'else'" (cp_parser_statement_seq_opt); a do-statement's missing
+  while, GCC requiring `( expression ) ;` on, its missing ) after the previous token (cp_parser_iteration_statement);
+- [temp.arg]/1: "type/value mismatch at argument N" (a type for a non-type parameter, a literal or variable for a type parameter, of
+  a class or alias template; in the class being defined a literal's alone, a name there possibly a member's first reading);
+  [temp.variadic]/5: a `...` before a template argument, an alignas' or a mem-initializer's decltype pattern naming no pack or an
+  unexpanded one; [temp.param]/14: a primary template's pack not last;
+- names: "'X' does not name a type" (an unqualified name no lookup finds where a declaration's type stands, unless the main file
+  declares it somewhere or the function already erred: a failed declaration's cascade), "'X' has not been declared" and "'Y' in
+  namespace 'N' does not name a type" (a typename-specifier; the first name of a qualified type name too, or "'b' is not a member of
+  'std'" for the std GCC declares itself, std::align_val_t its one member), "expected nested-name-specifier", "expected
+  template-id", "'A' is not a template" and "invalid use of incomplete type 'struct A'" (an explicit instantiation's name, its
+  qualifier), "expected primary-expression before X" (a type's name where an expression's primary stands, diag.ae's type-exprs),
+  "use of undeclared identifier" also in a class template's member without dependent bases (dep-bases?) and not for a function's
+  own name in its body ([basic.scope.pdecl]/1: a recursive call is no undeclared name), and once in a block, as GCC (cp/lex.cc's
+  unqualified_name_lookup_error declares the name there: its later uses in the block and the blocks in it silent, but where
+  error_mark_node still errs, a decltype's operand or an auto initializer);
+- the rest by rule: [expr.typeid]/7 (`#include <typeinfo>`), [expr.prim.this] (`this` in a static or non-member function), [dcl.enum]
+  and [dcl.type.elab] (a typedef-name or an alias template's specialization after enum or struct), [dcl.fct]/11 (a lambda returning a
+  function), [dcl.fct.default]/4 and /9 (a friend's default arguments, an enclosing function's local in a default argument),
+  [dcl.struct.bind] (before C++17, in conditions before C++26, in a class, after another declarator, a binding named in its own
+  initializer), [namespace.def] (inline and a nested namespace definition), attributes' places ([[...]] after a lambda-introducer, a
+  new-declarator's bound, a ptr-to-member, a using-directive; deprecated and maybe_unused appertaining to a type, a label, an unnamed
+  bit-field; a [[ after a bit-field's width; an attribute-declaration in a class; alignas before a null statement; GNU attributes
+  ending an abstract declarator after its ptr-operator, GCC's dependent declarator then empty), a GNU line marker under
+  -pedantic-errors, __constinit, the execution character set ISO-8859-1 (-fexec-charset, ordinary literals' characters past
+  U+00FF), the harness's --embed-dir as g++'s;
+- diag.ae's rules over the final tree, for five rows that had passed on a false "use of undeclared identifier" (a function's own
+  name in its body, before the parser declares it): [dcl.spec.auto.general]/11's use of an undeduced function in its own body
+  before its first return statement ends; decltype(auto) initialized by an unparenthesized function's name (decl.cc's "has
+  function type; did you forget the '()'?"); the classification built-ins' operands (c-common.cc's
+  check_builtin_function_arguments, an operand the tree shows is no floating-point value); [expr.reinterpret.cast]/11, a prvalue
+  cast to a reference type (typeck.cc's build_reinterpret_cast_1); and in the parser before C++20 a parenthesized initializer in
+  an array new (init.cc's build_new_1, P0960 lifting it), outside templates.
+
+### The print cell (arbace/repr/cpp/convert.ae, print.ae)
+
+Five of the own records' ten forms-differ rows: a declaration group's class written in place of its spelling in the declarator's type
+alone (`struct OK2 {...} &s6 = *(new OK2());` printed `new c::base()`: parse/semicolon3.C, the group then its text); a pack
+expansion after a pattern ending in a number spaced (`0 ...`, else one pp-number: lambda/lambda-err3.C); a template head whose last
+parameter's default ends in a template-id's > closed by ` >` (template/crash106.C); a class defined in a cast's type-id or in a
+condition's declaration, an error the forms have no type for, written as its text (g++.old-deja g++.bugs/900405_01.C,
+g++.jason/cond.C).
+
+### Checked (light: no gate; the user's "avoid redundancy and unnecessary tests" of 2026-11-22 applied from the round trips on)
+
+- the token check: its three recorded samplings (cpp-lexical 19, gxx-dg --sample 10 1,807, libstdcxx-headers --sample 8 108) whole
+  under the own judge after the lexer's main change, every file agreeing, the controls failing as they must; the later lexer changes
+  (-pedantic's identifier set, a UCN macro name's key) on the files they touch with the five moved rows and the controls' pair,
+  `pp-check --only` (7 files) `--record-results`;
+- the dg check: `bin/repr-cpp dg --corpus dg-error --front native` whole at 4c05537a9 (4,564 files, 8,369 s on a loaded host),
+  `--judge --record`; the undeclared-name refinement after it on the 161 files with such an error (`--only`, merged into the
+  record); of the recorded passes the load timed out, diagnostic/missing-header-pr110164.C and cpp0x/udlit-suffix-neg.C pass alone
+  (315 s, 285 s), cpp1z/constexpr-asm-3.C takes 341 s alone, past CP329 (a)'s 300 s: recorded a timeout;
+- the round trip: `roundtrip-corpus gxx-dg-every-10` and `gxx-old-deja-every-10` whole, `--judge own --record-results` (the five rows
+  moved, no other); c-c++-common-every-10 (326), samples (9), gxx-dg-essential (33) whole, every file passing, records unchanged;
+  libstdcxx-testsuite-every-40's 24 files with the constructs touched (ud-suffixes, attributes, template heads ending in a
+  template-id, extended characters), `--only-list`: 24 pass. Not run: the modules part's round trip (`dg --corpus modules`, whole
+  only), the lowering and run checks (the code generator untouched; the gate's cpp-essential);
+- `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`: 0 problems.
+
+### The cells
+
+C++ read 5,589 / 317 / 587 (next's record) -> 5,665 / 311 / 517 (38 n/a): the token check's 5 (:raw-udl-suffix 3,
+:unterminated-raw-string 1, :non-xid-utf8 1, by design), :syntax-own 66 -> 15, :own-diag 515 -> 497, :oracle-crash 5 -> 4
+(lambda-uneval25.C), :musl-libc 2 -> 1 (cpp26/literals2.C). C++ print 3,880 / 0 / 15 -> 3,885 / 0 / 10. Completeness 95.81 ->
+96.14, independence 94.84 -> 95.00 (the read stage 0.770 -> 0.778).
+
+### Left, and the decisions
+
+- :syntax-own's 15: the constant evaluator's "used before its definition" family (constexpr-non-const-arg2, pr71966-1 and -2,
+  constexpr-recursion1 and 2, constexpr-dtor4: arbace.cpp.sema's, queue 510/518's file), GNU pragmas the pipeline drops (parse/ivdep.C's
+  `#pragma GCC ivdep`, parse/pr96257.C's OpenMP), attribute arguments GCC parses as expressions (cpp0x/pr84606.C), template template
+  parameters' matching (template/ttp12.C), a parameter list's recovery (parse/error6.C), a dependent member access's `<`
+  (parse/crash72.C), the current instantiation's missing member (template/typedef6.C), Sema's extra after an erroneous variable
+  template (cpp1y/auto-fn46.C), and cpp1z/constexpr-asm-3.C's time;
+- the print cell's 10: forms-differ 5 (coroutines/ramp-return-a.C, cpp0x/attr-no_unique_address1.C, parse/template30.C: a
+  template-id glued to `>=` or `>>=` kept as text one way and read as a template-id the other; g++.old-deja crash41.C;
+  modules/target-aarch64-1_a.C, an aarch64-only test in gxx-modules-all), HotSpot's 5 (a `hotspot-x86-linux` key under the own
+  judge needs jdk26u's sources);
+- decisions for the user, by design: :gcc-dialect 173 (CP399 (a): OpenMP, OpenACC, GNU TM, GCC's contracts, -fpermissive,
+  -fms-extensions), :gcc-own-rules 135 (CP398 (c): GNU extensions' rules, GCC's limits, IFNDR rules GCC diagnoses; each one
+  portable into the own front end, a GNU rule at a time, if the user wants them counted as deferred instead), :gxx-only-rules 2
+  (CP328 (a)), :musl-libc 1 (warn/Wconversion-null-4.C: musl's NULL is nullptr, so g++ here errs where the directives expect a
+  warning).
