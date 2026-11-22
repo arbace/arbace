@@ -4430,7 +4430,7 @@
                   :else (recur (inc j) (and all-const tc)))))))))
 
 
-(declare cx-tyname)
+(declare cx-tyname cx-qual-levels)
 
 (defn- cx-named-cast!
   "cpp-diag-b (2026-11-22), the checker: the conversions reinterpret_cast and const_cast make to a type that is no reference,
@@ -4445,6 +4445,16 @@
           f (cond (abi/arr? f0) (abi/ptr (:of f0)) (abi/fn? f0) (abi/ptr f0) :else f0)
           same (= (cx-shape tu) (cx-shape f))
           sure (fn [x] (or (cx-sure-scalar? x) (abi/class? x) (and (abi/ptr? x) (abi/fn? (abi/unq (:to x))))))]
+      ;; (pointers to arrays, cpp-diag-b round 2: const_cast between similar types alone, its bounds equal; reinterpret_cast casting
+      ;; away no qualifier, [expr.const.cast]/7)
+      (when (and (abi/ptr? tu) (abi/ptr? f) (not (abi/void? (abi/unq (:to tu)))) (not (abi/void? (abi/unq (:to f)))))
+        (let [[lf] (cx-qual-levels (:to f)) [lt] (cx-qual-levels (:to tu))]
+          (when (and lf lt (or (some #(vector? (first %)) lf) (some #(vector? (first %)) lt)))
+            (if (= kind "CXXConstCastExpr")
+              (when (or (not= (count lf) (count lt)) (not= (map first lf) (map first lt)) (not= (second (cx-qual-levels (:to f))) (second (cx-qual-levels (:to tu)))))
+                (fail :named-cast "invalid 'const_cast' from type " (cx-tyname f) " to type " (cx-tyname tu)))
+              (when (and (= (count lf) (count lt)) (some (fn [[a b]] (or (and (second a) (not (second b))) (and (nth a 2) (not (nth b 2))))) (map vector lf lt)))
+                (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) ": casts away qualifiers"))))))
       (when (and (sure tu) (sure f))
         (if (= kind "CXXConstCastExpr")
           (when-not (or (and (or (abi/ptr? tu) (abi/mptr? tu)) (= (cx-shape tu) (cx-shape f)))
@@ -4461,6 +4471,42 @@
                   (abi/mptr? tu) (not (and (abi/mptr? f) (= (abi/fn? (:to tu)) (abi/fn? (:to f)))))
                   :else false)
             (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu))))))))
+
+(defn- cx-qual-levels
+  "cpp-diag-b, round 2: the qualification-decomposition ([conv.qual]/1) of a pointer type's pointee `x`: [[kind const volatile] ...
+  base], kind :ptr, [:arr n] (n nil an unknown bound), :end; an array's cv-qualifiers its elements' ([basic.type.qualifier]/3);
+  nil when a level is no pointer, array or sure scalar."
+  [x]
+  (let [ecv (fn ecv [t] (if (abi/arr? (abi/unq t)) (ecv (:of (abi/unq t))) [(boolean (:c t)) (boolean (:v t))]))]
+    (loop [x x out []]
+      (let [u (abi/unq x)]
+        (cond
+          (abi/arr? u) (recur (:of u) (conj out (into [[:arr (:n u)]] (ecv x))))
+          (abi/ptr? u) (recur (:to u) (conj out [:ptr (boolean (:c x)) (boolean (:v x))]))
+          (or (abi/void? u) (cx-sure-scalar? u)) [(conj out [:end (boolean (:c x)) (boolean (:v x))]) u]
+          :else nil)))))
+
+(defn- cx-array-qual-bad?
+  "cpp-diag-b, round 2: [conv.qual]/3 (DR 330, P0388) for pointers whose pointees hold an array level: :similar-bad when the types
+  are not similar or a bound differs (to an unknown bound from C++20 aside), :cv-bad when the cv-qualifiers are not added as
+  [conv.qual]/3 asks, nil when the conversion is a qualification conversion or not judged."
+  [from to]
+  (let [[lf bf] (cx-qual-levels (:to from)) [lt bt] (cx-qual-levels (:to to))]
+    (when (and lf lt (or (some #(vector? (first %)) lf) (some #(vector? (first %)) lt)))
+      (cond
+        (or (not= (count lf) (count lt)) (not= bf bt)) :similar-bad
+        (some (fn [[a b]] (let [ka (first a) kb (first b)]
+                            (not (or (= ka kb)
+                                     (and (vector? ka) (vector? kb) (nil? (second kb)) (>= (long *cxx-year*) 20))))))
+              (map vector lf lt))
+        :similar-bad
+        :else
+        (loop [j 0 all-const true]
+          (when (< j (count lf))
+            (let [[_ fc fv] (nth lf j) [_ tc tv] (nth lt j)]
+              (cond (or (and fc (not tc)) (and fv (not tv))) :cv-bad
+                    (and (or (not= fc tc) (not= fv tv)) (pos? j) (not all-const)) :cv-bad
+                    :else (recur (inc j) (and all-const tc))))))))))
 
 (defn- cx-bad-ptr-conv?
   "Whether the prvalue of pointer type `from` surely does not convert implicitly to the pointer type `to` ([conv.ptr]/2-3:
@@ -4502,6 +4548,9 @@
         (and *pedantic-errors* (>= (long *cxx-year*) 11) (abi/ptr? to) (abi/ptr? from) (= :decay (:op e)) (= :str (:op (:e e)))
              (cx-bad-ptr-conv? from to))
         (fail :write-strings "ISO C++ forbids converting a string constant to " (cx-tyname to))
+        ;; (cpp-diag-b, round 2: pointers to arrays, [conv.qual]/3 with DR 330)
+        (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e)) (not (abi/void? (abi/unq (:to to)))) (cx-array-qual-bad? from to))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (no qualification conversion of arrays)")
         (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e))
              ;; (a string literal's decay to char*: ISO C++11's ill-formed conversion GCC gives as a warning unless
              ;; -pedantic-errors, -Wwrite-strings; not judged here)
