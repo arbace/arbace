@@ -1,7 +1,7 @@
 (ns rust.front.inline-test
   "C6-4 (doc/rust/FRONTEND-SURVEY.md, \"C6-4's next slice: LLVM's AlwaysInliner over our forms\"): arbace.rust.back.inline's pure
   cases, each against the IR LLVM's -O0 pipeline writes for it (the host's `opt -passes='default<O0>'`, LLVM 23.1.5, run by hand
-  over the same functions as text, its output read into these forms):
+  over the same functions as text, its output read into these forms; c7 and c8 checked so on 2026-11-22):
   a callee of one block spliced into the calling block, its static alloca at the caller's entry; a callee of several blocks
   whose one return is spliced into the exit block; two returns joined by a phi; a branch on a constant argument pruned and the
   blocks merged; an invoke's call site (the callee's calls made invokes, its resume a branch to the landing pad's body); the
@@ -89,6 +89,32 @@
             (block %lp (= %e (landingpad (struct ptr i32) :cleanup)) (br %lpbody))
             (block %lpbody (= %eh (phi (struct ptr i32) [%e %lp] [%l %n1])) (call void g/drop [[ptr null]]) (resume (struct ptr i32) %eh))]))
 
+;; C6-4: InstSimplify's aggregate rules over the clone: the callee rebuilds its pair argument (insertvalue poison, %a, 0; insertvalue
+;; .., %b, 1), the caller passes its call result's halves (extractvalue %t, 0 and 1): the rebuilt pair is %t, the caller's later
+;; extractvalues take %t (std's IR's slice_buffer_to_str around MaybeUninit::slice_assume_init_ref)
+(def ^:private callee7
+  '(llvm/define g/f7 (struct ptr i64) [[ptr %a] [i64 %b]]
+     :body [(block %start (= %p (insertvalue [(struct ptr i64) poison] [ptr %a] 0)) (= %q (insertvalue [(struct ptr i64) %p] [i64 %b] 1))
+                   (ret (struct ptr i64) %q))]))
+(def ^:private caller7
+  '(llvm/define g/c7 i64 [] :body [(block %start (= %t (call (struct ptr i64) g/mk [])) (= %u (extractvalue [(struct ptr i64) %t] 0))
+                                          (= %v (extractvalue [(struct ptr i64) %t] 1)) (= %w (call (struct ptr i64) g/f7 [[ptr %u] [i64 %v]]))
+                                          (= %x (extractvalue [(struct ptr i64) %w] 1)) (ret i64 %x))]))
+(def ^:private want7
+  '(llvm/define g/c7 i64 [] :body [(block %start (= %t (call (struct ptr i64) g/mk [])) (= %u (extractvalue [(struct ptr i64) %t] 0))
+                                          (= %v (extractvalue [(struct ptr i64) %t] 1)) (= %x (extractvalue [(struct ptr i64) %t] 1)) (ret i64 %x))]))
+;; a pair rebuilt from two aggregates' halves: only its first insertvalue is the first aggregate (opt's: `%q.i = insertvalue {ptr,
+;; i64} %t, i64 %v, 1`)
+(def ^:private caller8
+  '(llvm/define g/c8 i64 [] :body [(block %start (= %t (call (struct ptr i64) g/mk [])) (= %s (call (struct ptr i64) g/mk []))
+                                          (= %u (extractvalue [(struct ptr i64) %t] 0)) (= %v (extractvalue [(struct ptr i64) %s] 1))
+                                          (= %w (call (struct ptr i64) g/f7 [[ptr %u] [i64 %v]])) (= %x (extractvalue [(struct ptr i64) %w] 1)) (ret i64 %x))]))
+
+(def ^:private want8
+  '(llvm/define g/c8 i64 [] :body [(block %start (= %t (call (struct ptr i64) g/mk [])) (= %s (call (struct ptr i64) g/mk []))
+                                          (= %u (extractvalue [(struct ptr i64) %t] 0)) (= %v (extractvalue [(struct ptr i64) %s] 1))
+                                          (= %q (insertvalue [(struct ptr i64) %t] [i64 %v] 1)) (= %x (extractvalue [(struct ptr i64) %q] 1)) (ret i64 %x))]))
+
 (defn- case! [nm got want]
   (let [ok (= (norm got) (norm want))]
     (println (str "inline-test: " nm ": " (if ok "equal" (str "DIFFERS: " (chk/diff-text (norm got) (norm want))))))
@@ -96,8 +122,8 @@
 
 (defn -main [& _]
   (let [m (binding [inl/*nounwind?* (fn [s] (= s 'g/never))]
-            (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4 callee5 caller5 callee6 caller6]
-                               #{'g/f1 'g/f2 'g/f4 'g/f5 'g/f6}))
+            (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4 callee5 caller5 callee6 caller6 callee7 caller7 caller8]
+                               #{'g/f1 'g/f2 'g/f4 'g/f5 'g/f6 'g/f7}))
         by (into {} (map (juxt second identity) m))
         oks [(case! "one block, its alloca at the entry" (by 'g/c1) want1)
              (case! "several blocks, one return" (by 'g/c2) want2)
@@ -105,7 +131,11 @@
              (case! "two returns joined" (by 'g/c4) want4)
              (case! "an invoke's call site, the callee's calls made invokes" (by 'g/c5) want5)
              (case! "an invoke's call site, the callee's resume to the landing pad's body" (by 'g/c6) want6)
-             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c2" "g/c3" "g/c4" "g/c5" "g/c6"])
+             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c2" "g/c3" "g/c4" "g/c5" "g/c6" "g/c7" "g/c8"])
+             (case! "C6-4: a pair rebuilt from the caller's halves is the caller's pair (InstSimplify)" (by 'g/c7) want7)
+             (case! "C6-4: a pair rebuilt from two aggregates' halves, its second insertvalue kept" (by 'g/c8) want8)
+             ;; the aggregate rule's control: c8's result against c7's IR differs
+             (not (= (norm (by 'g/c8)) (norm want7)))
              ;; the negative control: a case's result against another case's IR differs
              (not (= (norm (by 'g/c2)) (norm want4)))]]
     (println (str "inline-test: " (count (filter true? oks)) " of " (count oks) (if (every? true? oks) " passed" " FAILED")))

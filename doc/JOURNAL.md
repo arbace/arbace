@@ -16755,3 +16755,74 @@ by design). doc/CLOJURE-DESIGN-REVIEW.md, "As built (2026-11-21)" and "Proposed 
   (J2G_UNIT_PLATFORM: the "outside" failure without it is the main checkout's old platform pin, the same on the base).
 - Decisions for the user (doc/CLOJURE-DESIGN-REVIEW.md): CDR12 Swing's table model slice, CDR13 the reader conditionals' rule
   reversible, CDR14 SecurityManager a default import again and its rule dropped, CDR15 Q1 (b), CDR16 the eval level's XML rows.
+The passes run again after the two fixes (np-chain3): core 25,879 of 27,498 facts equal to the helper's interface (traits 182 of
+188), but alloc 3,532 of 3,863 and std 3,789 of 4,644, and std-names' aliases 18 of 215 (14,893 of 15,162): the chain gave core's
+pass names already holding core's aliases, and a pass writes an alias only when the names it reads lack it, so the later passes ran
+without them (the first chain's order is the one that works; the lasting fix, a pass writing every alias it computes). C4's switch
+run on that interface and names: 0 of 5 own (four Transmutes refused at codegen, std's `fmt::Result` alias). Consolidating at the
+coordinator's word (the weekly allowance at its mark): nothing new started. Next, in the survey ("C1's drop glue", "Next") and the
+agenda: TypeId::of's constant as rustc's type_id hash and core's sort recursion (unwind, panics and std on ci), C6-4's next export
+(8 callees), core's interface differences and the aliases' order for C4. crops-score --judge --strict 0 problems, records-check 9
+pairs 0 problems; Rust's scores unchanged (independence 0.8000).
+
+## 2026-11-22: rust-c6b-1122: C6-4's next export and core's lowering as std's IR writes it
+
+Branch `rust-c6b-1122` from `mac/rust-c6-1120` (`fceea7b4a`; the Rust line, reverted out of next until 512's fix), the burst's
+stream R2 (Rust's independence: C6, std's IR made by Arbace instead of Cargo, rustc and clang). No gate (the user's word); light
+runs, each process under `ulimit -v 8 GiB`, one big process at a time, the host at load 40 to 117. Merged on the way:
+`mac/512-rust-causes5` (`a5cfe536f`, the coordinator's instruction: RemoveNoopLandingPads out of SimplifyCfg-pre-optimizations,
+into o0-normalize) before the round-2 build, and R3's `rust-c4-1122` (`e3c56d260`: the interface pass's facts, TypeId constants
+as `inttoptr`; conflicts in core-check's :nounwind, where both lines had made the same fix, R3's `own-attr?` kept, and in codegen's
+relocations). doc/rust/FRONTEND-SURVEY.md, "As built: C6-4's next export, core's lowering as std's IR writes it".
+
+- The build reads core's macro-made attributes (`RF_CORE_ATTRS`, bin/rust-front core-attrs' file): `int_impl!`'s
+  `cast_unsigned`, `wrapping_add`, `leading_zeros` became `#[inline(always)]` callees, `checked_ilog10` an `#[inline]` copy, `ilog2`
+  `#[track_caller]`. Core's build had thrashed in GC at GOMEMLIMIT=2000MiB (3.2 GB live): 3000MiB now.
+- codegen (arbace.rust.back.codegen) as LLVM's IRBuilder and AsmWriter write the IR: folded constants signed, `not` and `neg` of a
+  constant folded, LLVM 23's float text ported from APFloat::toString (its truncating AdjustToPrecision: `float 1e-4` is
+  `f0x38D1B717`) with `f0x` in the constant's own width and `+qnan`, a zero-sized allocation `inttoptr (i64 ALIGN to ptr)`, rustc
+  1.99's try_codegen_const_aggregate_as_immediate, a returned pair through the ConstantFolder, a scalar pair's tag at its offset
+  (`Option<(usize, &u32)>`), no-op landing pads no edge for MergingSucc; with -Z fewer-names (lib-unit's compare) an ADT's type the
+  literal struct of its fields (mono's llvm-type-of after type_of.rs' struct_llfields) and pointee_info_at's alignments.
+- The export: an Assert's span carried to its panic location (bounds checks in `core/src/num/imp/bignum.rs`, not `?`), :nounwind
+  from `#[rustc_nounwind]` (panic_nounwind's calls invoke the terminate block), the crate's callees' attributes (`:callee-attrs`);
+  lib-unit's o0-normalize with pack-compare's facts (UnreachableEnumBranching's `trunc nuw`), a call through a function pointer.
+- The inliner (arbace.rust.back.inline): InstSimplify's aggregate rules over the clone (simplifyInsertValueInst,
+  simplifyExtractValueInst), checked against the host's `opt -passes='default<O0>'` (LLVM 23.1.5, two new inline-test cases, 11 of
+  11), and the callees met bottom-up as rustc's module order mostly gives them (error_ref and Location::file equal).
+- `bin/rust-front lib-unit export core --add` (only the keys the export lacks, over their module files, appended: 7 minutes where
+  the whole export takes 68); pack-compare-test's new cases (the float text, the constant aggregate, the constant pair, each with a
+  control); ext-attrs finds a module a macro declares (std's `cfg_select!`'d `sys::alloc::unix`).
+- Results (items equal to std's IR at the pin, define for define, the crossed control differing each time): core 183 of 275 (114
+  before; r1 134, r2 177 after the whole export of 317 keys in 68 min, r3 179, 181 with the bottom-up order, r5 181 confirmed, r8
+  183 with pointee_info_at through pattern types), alloc 21 of 25 (18), std 83 of 325 (61; r4 80 on std's export again, r5 81, r6
+  82, r8 83). `bin/rust-front essential` and `core-essential`
+  pass at the head (their known summaries, every control differing).
+- Left, by owner: the front end's (R3's line): 30 of core's items and 116 of std's the export refuses, 25 of core's whose array
+  lengths name a fn-local constant (`const MAX_DEC_N: usize = $Unsigned::MAX.ilog10() as usize + 1` inside fmt::num's macros, and
+  `.ilog(BASE)`), std's types its interface lacks (`std::fs::File`, the futex `Mutex`, `RwLock`), a fn-local item's disambiguator
+  (slice_index_fail's second `do_panic`, rustc's `s_`), an `assert!`'s message (mul_pow2's 4,093-byte `stringify!`). The back
+  end's: MIR differences after -O0's passes that only rustc's MIR of the item would show (no record holds it), an indirect call's
+  argument attributes, the alloca order where two callees are inlined into one item (rustc's module order by definition span,
+  not kept by the export).
+
+## 2026-11-22: rust-c6b-1122: DECISION 512-1 (a): std's rsi export made again; catch_unwind's lines have another root
+
+At the coordinator's order: `mac/512-rust-causes5` (`f8f7ff401`, 512-2: 503-1's BytewiseEq clause, a promoted constant named at the
+instance) merged (`842ce3c6a`; collect's self-type rule identical on both sides, pack-compare-test's cases both kept), then panics,
+unwind and vectors built by rsi-build (`--native-core`, the C1 runs' RF_EXTRA_IFACE and RF_DROP_GLUE) before and after std's rsi
+export was made again with its interface cache removed (`lib-export --rsi std`: both rounds, 62 bodies, 2 refused, 40 min),
+pack-compare-test passing between (138 checks). Every count of the three build-run logs is the same before and after (panics:
+native 682, record 126 + 19, differs 71, catch_unwind's record lines 30 and differs lines 24; unwind 616, 104 + 17, 58, 25 and 20;
+vectors 2377, 632 + 60, 194, 21 codegen fallbacks): on this host rust-c6-1120's exports had already been made again with
+with-private-facts (`d4268b54b`), so catch_unwind's three entries carried `Data`'s ADT facts before, and `Data` prints with its
+arguments. catch_unwind's lines come from elsewhere: `do_call` and `do_catch` coerce to `fn(*mut Data<..>)` where rustc's are
+`unsafe fn(*mut Data<..>)`, because the intrinsic `catch_unwind<Data>(_try_fn: unsafe fn(*mut Data), ..)` comes from the helper's
+std-iface.edn, whose function pointer types `(fnptr INPUTS OUTPUT)` carry no safety and no ABI (C4's native interface to write
+them, R3's line). The re-made export changed nothing of those entries (only `:callee-attrs` and anonymous regions' numbers), but
+since 512-1 its bodies keep their no-op landing pads until o0-normalize, which the programs' codegen does not run: vectors' IR
+gained a personality and a dead `unreachable` block in 7 of std's functions (panics 35 lines, unwind 25). Codegen now takes a
+no-op landing pad for no block and no reason for a personality, as rustc's MIR after RemoveNoopLandingPads (o1) gives it
+(`7f59c9ff7`, pack-compare-test's case and control); the three programs built again on it (38 min): the same log counts, and against the run before the export the dead
+`unreachable` blocks fall from 85 to 40 (panics), 68 to 31 (unwind), 548 to 343 (vectors), the functions with a personality from 53
+to 33, 46 to 32, 141 to 70.
