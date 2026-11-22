@@ -15758,3 +15758,13 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   TextIOWrapper, BufferedWriter and BufferedReader (ABCMeta's register; CPython's create_stdio makes those classes). Proof:
   `bin/pyi python -X faulthandler -I -m test --testdir=DIR test_regrtest_noop1` ends "Result: SUCCESS" (was the
   AssertionError).
+- And two modules of :c-modules-deferred: syslog (test_syslog's 13 and test_audit's one did not import: "No module named
+  'syslog'"), a module of pyi's own over musl's syslog as src/misc/syslog.c makes it (go/arbace/py/builtins_syslog: openlog,
+  syslog, closelog, setlogmask, LOG_MASK, LOG_UPTO and Linux's constants; a datagram "<PRI>Mmm dd hh:mm:ss IDENT[PID]: MSG"
+  to /dev/log, dropped with no daemon; the module's state the process's, a subinterpreter's openlog and closelog a
+  RuntimeError and its syslog one until the main interpreter opened the log, as syslogmodule.c). Proof: openlog, the
+  ident's UnicodeEncodeError, syslog with and without a priority, closelog twice, setlogmask's old and current masks,
+  LOG_MASK/LOG_UPTO, the implicit open. And xxlimited and xxlimited_35 (test_xxlimited's 16): lazy modules of pyctypes,
+  CPython's Modules/xxlimited.c and xxlimited_35.c built into the C world (lib.conf); a lazy module whose package
+  registers no such module is now _imp.create_builtin's ModuleNotFoundError "No module named 'NAME'" (as an absent
+  module), so a world without them changes nothing.
