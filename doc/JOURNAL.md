@@ -16852,3 +16852,31 @@ To build:
 - Clojure: CDR12, CDR13, CDR14, CDR15 (doc/CLOJURE-DESIGN-REVIEW.md).
 - Java: t05905 (the qualifier recorded in the forms) and t07835 (JDI's generic types indexed).
 Kept as built: LLVM's envp (LLS58), arm64's literal pools (ARS50), arm64's error-judge rule, hsi's interrupted thunks (HES56 (b)).
+
+## 2026-11-22: Python's round trip, level 3 a compile without positions (py-small-1122, round 1)
+
+The user's (b) of the morning ("level 3 as a compile without positions (so :code-lines passes)"). Level 3 compared the code
+compiled from the original's text and from the print's; mode :lines records no positions, and CPython 3.14's code generation
+follows the lines a node spans (where a NOP stays, a superinstruction fuses, an exception range or a jump falls: E7 corrected,
+"As built: PY2"), so 30 files (3 stdlib, 21 site-packages, 6 Lib/test) were `:code-lines` in test/python/roundtrip-known.edn, and
+pip's candidates.py `:own-code-lines` in roundtrip-own-known.edn (pyi's compiler ports CPython's line passes).
+- Live (CPython, the read cell's record): tools/pydump/codelevel.py compiles each file's ast with every node at line 1, column 0
+  and normalizes it by pydump.py's own norm_code; bin/repr-python's code_levels rewrites the TSVs' CODE column into level-*.tsv,
+  the helper's TSVs left as dumped. A separate script on purpose: pydump.py's digest keys every member of the python-pydump packs
+  (tools/pydump/records.bash), so changing it would have made every record STALE; its CODE column (positions included) stays the
+  records'. With REPR_PYTHON_RT_LEVELS=recorded (the packs' rows, which keep positions) level 3 is implied by level 2 (compare
+  --recorded): a compile without positions is a function of the ast without attributes.
+- Records mode (pyi's own levels): own-code compiles the forms read in mode :lines (no positions) instead of the text read in mode
+  :full. bin/pyi compile-check already compiles every corpus file's :lines forms (compile-known.edn empty), so no file can newly
+  fail there.
+- The control: each control's reference print with a statement added (code_mutants: `__code_control__ = 0` appended), its digests
+  by codelevel.py; the print's row with the mutant's digests must fail level 2, and with the mutant's code beside the print's own
+  ast, level 3 (as queue 431's control for pyi's levels). Both modes' runs: every control failed as it must.
+- Proof, only the rows the change can move (the user's "avoid redundancy": a file whose ast is equal compiles to the same code
+  without positions, so only the 30 can change): `REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --record --only-list` over the
+  30 and the three corpora's control pairs (36 files): all levels pass, the 30 `:known "code"` rows of roundtrip-results.edn now
+  `:pass`, roundtrip-known.edn's `:code-lines` empty (the class kept, its text saying so); records mode the same list: candidates.py
+  passes, roundtrip-own-known.edn's `:own-code-lines` empty. A partial --record no longer rewrites roundtrip-costs.edn (a whole
+  run's costs only).
+- Read cell: pass 3,702 to 3,732, by design 34 to 4 (the 4 :rejected, which the counting stream, counting-1122, takes); Python's
+  completeness 0.9485 to 0.9506.
