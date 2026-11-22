@@ -1,0 +1,104 @@
+#!/bin/bash
+# bin/hsi hackage fetch|src|ghc-db (hs-pkgs-1122; the user's decision of 2026-11-22): the Hackage packages of
+# test/haskell/hackage.edn, which the eval corpora's programs need beyond GHC 9.14.1's boot libraries (nofib's parallel
+# programs, random's, old-time's, unboxed-ref's).
+#   fetch    each pinned tarball (and its revised .cabal) into .tmp/hsi/src/hackage/, downloaded once through a temporary name
+#            in the main checkout and checked by its SHA-256 and size (a linked worktree or the clean clone takes the main
+#            checkout's copy, bin/lib/repr-haskell/inputs.bash, never downloads), then extracted into .tmp/hsi/hackage/src/NAME-VERSION/
+#            with the revised .cabal in place of the tarball's (once per pins' digest); prints the source directory
+#   src      fetch, quietly; prints .tmp/hsi/hackage/src
+#   ghc-db   (GHC's side, the oracle tier: the host's GHC, tools/hsdump/GHC_VERSION) each package built in dependency order by
+#            Cabal's Setup (Setup.hs's defaultMain, or defaultMainWithHooks autoconfUserHooks for build-type Configure, compiled
+#            against the installed Cabal) with --ipid NAME-VERSION, static, no profiling, its install prefix and package database
+#            .tmp/hsi/hackage/ghc/ (kept by the pins' digest and GHC's version); prints the database's path. bin/hsi record-ref adds
+#            -package-db with it for a nofib program whose SRC_DEPS name one of the packages
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/repr-haskell/inputs.bash"
+pins=$root/test/haskell/hackage.edn
+src=$root/.tmp/hsi/src/hackage
+work=$root/.tmp/hsi/hackage
+die() { echo "hsi hackage: $*" >&2; exit 1; }
+exe=$("$root/bin/hsi" exe)
+# one line a package, in the pins' order: NAME VERSION URL SIZE SHA256 CABAL-URL CABAL-SHA256 ("-" for none)
+plan() {
+  ARBACE_PATH=$root "$exe" -e "(doseq [p (:packages (read-string (slurp \"$pins\")))]
+    (println (:name p) (:version p) (:url p) (:size p) (:sha256 p) (or (:cabal-url p) \"-\") (or (:cabal-sha256 p) \"-\")))"
+}
+key=$(sha256sum < "$pins" | cut -c1-64)
+
+get() { # FILE URL SHA256 [SIZE]
+  local f=$1 url=$2 sha=$3 size=${4:-}
+  if [ ! -f "$f" ] && ! haskell_take "$f"; then
+    echo "== hsi hackage: fetching $url" >&2
+    curl -fsSL -o "$f.part" "$url" && mv "$f.part" "$f"
+  fi
+  [ "$(sha256sum < "$f" | cut -c1-64)" = "$sha" ] || die "$f: SHA-256 is not the pin's ($sha)"
+  [ -z "$size" ] || [ "$(stat -c %s "$f")" = "$size" ] || die "$f: size is not the pin's ($size)"
+}
+
+fetch() {
+  mkdir -p "$src" "$work"
+  local name ver url size sha curl_ csha pv
+  (
+    flock 8
+    while read -r name ver url size sha curl_ csha; do
+      pv=$name-$ver
+      get "$src/$pv.tar.gz" "$url" "$sha" "$size"
+      [ "$curl_" = - ] || get "$src/$pv.cabal" "$curl_" "$csha"
+    done < <(plan)
+    if [ "$(cat "$work/src.key" 2>"$TMPDIR/hackage-key.err")" != "$key" ]; then
+      rm -rf "$work/src"; mkdir -p "$work/src"
+      while read -r name ver url size sha curl_ csha; do
+        pv=$name-$ver
+        tar -xzf "$src/$pv.tar.gz" -C "$work/src"
+        [ -d "$work/src/$pv" ] || die "$pv.tar.gz holds no $pv/"
+        if [ "$curl_" != - ]; then cp "$src/$pv.cabal" "$work/src/$pv/$name.cabal"; fi
+      done < <(plan)
+      echo "$key" > "$work/src.key"
+    fi
+  ) 8> "$src.lock"
+}
+
+ghc_db() {
+  local pin; pin=$(cat "$root/tools/hsdump/GHC_VERSION")
+  [ "$(ghc --numeric-version)" = "$pin" ] || die "the host's GHC is not $pin (tools/hsdump/GHC_VERSION)"
+  fetch
+  local g=$work/ghc gkey name ver rest pv s
+  gkey="$key $pin"
+  (
+    flock 9
+    if [ "$(cat "$g/db.key" 2>"$TMPDIR/hackage-key.err")" != "$gkey" ]; then
+      rm -rf "$g"; mkdir -p "$g/build" "$g/prefix"
+      ghc-pkg init "$g/package.conf.d"
+      printf 'import Distribution.Simple\nmain :: IO ()\nmain = defaultMain\n' > "$g/Setup.hs"
+      printf 'import Distribution.Simple\nmain :: IO ()\nmain = defaultMainWithHooks autoconfUserHooks\n' > "$g/SetupAuto.hs"
+      ghc -O0 -no-user-package-db -package Cabal -outputdir "$g/setup-obj" -o "$g/setup" "$g/Setup.hs" > "$g/setup.log" 2>&1 ||
+        { cat "$g/setup.log" >&2; die "Setup.hs: ghc failed"; }
+      ghc -O0 -no-user-package-db -package Cabal -outputdir "$g/setup-auto-obj" -o "$g/setup-auto" "$g/SetupAuto.hs" > "$g/setup-auto.log" 2>&1 ||
+        { cat "$g/setup-auto.log" >&2; die "SetupAuto.hs: ghc failed"; }
+      while read -r name ver rest; do
+        pv=$name-$ver; s=$g/setup
+        cp -r "$work/src/$pv" "$g/build/$pv"
+        grep -q autoconfUserHooks "$g/build/$pv/Setup.hs" "$g/build/$pv/Setup.lhs" 2>"$TMPDIR/hackage-setup.err" && s=$g/setup-auto
+        echo "== hsi hackage: $pv (GHC $pin)" >&2
+        (cd "$g/build/$pv" &&
+           "$s" configure --package-db="$g/package.conf.d" --prefix="$g/prefix" --ipid="$pv" \
+             --disable-shared --disable-library-profiling --disable-executable-dynamic > configure.log 2>&1 &&
+           "$s" build > build.log 2>&1 && "$s" copy > copy.log 2>&1 && "$s" register > register.log 2>&1) ||
+          { tail -20 "$g/build/$pv"/*.log >&2; die "$pv: Setup failed ($g/build/$pv)"; }
+      done < <(plan)
+      echo "$gkey" > "$g/db.key"
+    fi
+  ) 9> "$work/ghc.lock"
+  echo "$g/package.conf.d"
+}
+
+case ${1:-} in
+  fetch) fetch; echo "$work/src" ;;
+  src) fetch > /dev/null; echo "$work/src" ;;
+  ghc-db) mkdir -p "$work"; ghc_db ;;
+  names) plan | awk '{print $1}' ;;
+  *) echo "usage: bin/hsi hackage fetch|src|ghc-db|names" >&2; exit 2 ;;
+esac

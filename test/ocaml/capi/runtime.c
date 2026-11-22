@@ -33,6 +33,8 @@ extern value __oi_predef(int index);
 extern int __oi_re_control(int op);
 extern intnat __oi_re_cursor(const char *path, int pid);
 extern intnat __oi_re_next(intnat pos, int64_t *out);
+extern uintnat __oi_gc_count(int k);
+extern void __oi_gc_request_minor(void);
 
 /* the atoms: zero-sized blocks, one a tag */
 static header_t atoms[256];
@@ -62,6 +64,10 @@ value caml_alloc(mlsize_t wosize, tag_t tag)
   if (tag < No_scan_tag) for (mlsize_t i = 0; i < wosize; i++) Field(v, i) = Val_unit;
   return v;
 }
+/* gc_ctrl.h's statistics (queue 523): oi's counters, live */
+uintnat caml_max_stack_wsize = 128 * 1024 * 1024;
+uintnat caml_fiber_wsz = 64;
+uintnat caml_oi_gc_count(int k) { return __oi_gc_count(k); }
 value caml_alloc_small(mlsize_t wosize, tag_t tag) { return caml_alloc(wosize, tag); }
 value caml_alloc_shr(mlsize_t wosize, tag_t tag) { return caml_alloc(wosize, tag); }
 value caml_alloc_tuple(mlsize_t n) { return caml_alloc(n, 0); }
@@ -257,6 +263,7 @@ void caml_leave_blocking_section(void) { blocking = 0; }
 void caml_process_pending_actions(void) {}
 value caml_process_pending_actions_exn(void) { return Val_unit; }
 int caml_check_pending_actions(void) { return 0; }
+void caml_request_minor_gc(void) { __oi_gc_request_minor(); }
 int caml_c_thread_register(void) { return 1; }
 int caml_c_thread_unregister(void) { return 1; }
 int caml_domain_alone(void) { return 1; }

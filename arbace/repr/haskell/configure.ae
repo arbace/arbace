@@ -24,6 +24,12 @@
    ["libraries/directory/HsDirectoryConfig.h" "libraries/directory/HsDirectoryConfig.h.in" "HsDirectoryConfig.h"]
    ["libraries/process/include/HsProcessConfig.h" "libraries/process/include/HsProcessConfig.h.in" "include/HsProcessConfig.h"]])
 
+;; hs-pkgs-1122: the Hackage packages' products (test/haskell/hackage.edn; the tree's hackage/, bin/hsi hackage fetch's sources linked
+;; there): probed and answered as the tarball's, but written into the Hackage sources by `hackage-products`, never into the derived
+;; installation (products below: products-spec alone)
+(def hackage-products-spec
+  [["hackage/old-time-1.1.1.0/include/HsTimeConfig.h" "hackage/old-time-1.1.1.0/include/HsTimeConfig.h.in" "include/HsTimeConfig.h"]])
+
 (defn load-answers
   "test/haskell/target/answers.edn: {output {NAME value-or-nil}} (nil: undefined), or {} before the first probe"
   [^String repo]
@@ -45,10 +51,10 @@
                   (str l "\n"))))))
 
 (defn products
-  "Every product's text {output text}, those the answers cover"
-  [^String src answers]
+  "Every product's text {output text}, those the answers cover (SPEC: products-spec, the default, or hackage-products-spec)"
+  [^String src answers & [spec]]
   (into {}
-        (for [[out tmpl hname] products-spec
+        (for [[out tmpl hname] (or spec products-spec)
               :let [ds (get answers out)]
               :when ds]
           (let [t (slurp (str src "/" tmpl))
@@ -95,7 +101,8 @@
    "libraries/time/lib/include/HsTimeConfig.h" "libraries/time/configure.ac"
    "libraries/unix/include/HsUnixConfig.h" "libraries/unix/configure.ac"
    "libraries/directory/HsDirectoryConfig.h" "libraries/directory/configure.ac"
-   "libraries/process/include/HsProcessConfig.h" "libraries/process/configure.ac"})
+   "libraries/process/include/HsProcessConfig.h" "libraries/process/configure.ac"
+   "hackage/old-time-1.1.1.0/include/HsTimeConfig.h" "hackage/old-time-1.1.1.0/configure.ac"})
 
 ;; the headers a product's checks include (AC_INCLUDES_DEFAULT and the configure.ac's prologues, those that exist)
 (def default-includes ["stdio.h" "sys/types.h" "sys/stat.h" "stdlib.h" "stddef.h" "string.h" "strings.h" "inttypes.h" "stdint.h" "unistd.h"])
@@ -110,7 +117,8 @@
    ["dirent.h" "signal.h" "fcntl.h" "dlfcn.h" "pwd.h" "grp.h" "sys/resource.h" "sys/time.h" "time.h" "termios.h" "utime.h"
     "sys/times.h" "semaphore.h" "sys/mman.h" "sys/statvfs.h" "utmp.h" "pty.h" "sys/sysmacros.h"]
    "libraries/directory/HsDirectoryConfig.h" ["fcntl.h" "sys/time.h" "time.h"]
-   "libraries/process/include/HsProcessConfig.h" ["signal.h" "spawn.h" "fcntl.h" "sys/wait.h"]})
+   "libraries/process/include/HsProcessConfig.h" ["signal.h" "spawn.h" "fcntl.h" "sys/wait.h"]
+   "hackage/old-time-1.1.1.0/include/HsTimeConfig.h" ["time.h" "sys/time.h"]})
 
 ;; configure.ac's own defines, by product (each from the file the product's configure.ac names)
 (def manual-rules
@@ -172,6 +180,15 @@
              "HAVE_STATX_FUN" [:func "statx"] "HAVE_STRUCT_STATX" [:type "struct statx"]
              "HAVE_STATX_MNT_ID" [:member "struct statx" "stx_mnt_id"]})
      "libraries/directory/HsDirectoryConfig.h" (merge common {"EXE_EXTENSION" [:lit "\"\""]})
+     ;; hs-pkgs-1122: old-time 1.1.1.0's configure.ac (autoconf 2.72's autoheader, 'quoted' comments): AC_STRUCT_TIMEZONE as time's,
+     ;; FP_DECL_ALTZONE's AC_CHECK_DECLS([altzone]), AC_HEADER_TIME's TIME_WITH_SYS_TIME (obsolete: both headers include together)
+     "hackage/old-time-1.1.1.0/include/HsTimeConfig.h"
+     (merge common {"HAVE_TM_ZONE" [:member "struct tm" "tm_zone"]
+                    "HAVE_TZNAME" [:if [:member "struct tm" "tm_zone"] [:lit nil] [:decl "tzname"]]
+                    "HAVE_DECL_TZNAME" [:if [:member "struct tm" "tm_zone"] [:lit nil] [:decl "tzname"]]
+                    "HAVE_DECL_ALTZONE" [:decl "altzone"]
+                    "TIME_WITH_SYS_TIME" [:if [:and [:header "sys/time.h"] [:header "time.h"]] [:lit "1"] [:lit nil]]
+                    "TM_IN_SYS_TIME" [:lit nil]})
      "libraries/process/include/HsProcessConfig.h"
      (merge common {"USE_POSIX_SPAWN" [:if [:func "posix_spawnp"] [:lit "/**/"] [:lit nil]]
                     "HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCHDIR" [:func "posix_spawn_file_actions_addchdir"]})
@@ -231,12 +248,12 @@
 (defn rule-of [product [n ^String c]]
   (or (get-in manual-rules [product n]) (get system-extensions n)
       (when-let [[_ h] (re-find #"you have the <([^>]+)> header file" c)] [:header h])
-      (when-let [[_ f] (re-find #"you have the `([^']+)' function" c)] [:func f])
+      (when-let [[_ f] (re-find #"you have the [`']([^']+)' function" c)] [:func f])
       (when-let [[_ t] (re-find #"The size of `([^']+)', as computed by sizeof" c)] [:sizeof t])
       (when-let [[_ t] (re-find #"The alignment of a `([^']+)'" c)] [:align t])
-      (when-let [[_ s] (re-find #"`[^']+' is a member of `([^']+)'" c)]
+      (when-let [[_ s] (re-find #"[`'][^']+' is a member of [`']([^']+)'" c)]
         [:member s (str/lower-case (subs n (count (str "HAVE_" (str/upper-case (str/replace s " " "_")) "_"))))])
-      (when-let [[_ x] (re-find #"declaration of `([^']+)'" c)] [:decl x])
+      (when-let [[_ x] (re-find #"declaration of [`']([^']+)'" c)] [:decl x])
       (when-let [[_ t] (re-find #"the system has the type `([^']+)'" c)] [:type t])
       (when-let [[_ x] (re-find #"The value of ([A-Za-z_0-9]+)\." c)]
         [:const x (or ({"O_BINARY" "0"} x)
@@ -328,7 +345,9 @@
   "Every product's checks: {product [[name rule]...]}"
   [^String src]
   (into (sorted-map)
-        (for [[out tmpl] products-spec]
+        (for [[out tmpl] (concat products-spec hackage-products-spec)
+              :let [only (System/getenv "REPR_HASKELL_PROBE_ONLY")]
+              :when (or (nil? only) (= only out))]
           [out (mapv (fn [it] [(first it) (rule-of out it)]) (template-items (slurp (str src "/" tmpl))))])))
 
 (defn header-exists-fn
@@ -448,6 +467,12 @@
           [[product a k] (get vals n)])))
 
 (defn -main [& args]
+  ;; hs-pkgs-1122: hackage-products ROOT: the Hackage packages' products written under ROOT (a tree whose hackage/ holds their
+  ;; sources: bin/repr-haskell's corpus tree), from their templates there and the committed answers; no check computed
+  (when (= "hackage-products" (first args))
+    (let [root (second args) repo (or (System/getenv "ARBACE_REPO") (System/getProperty "user.dir"))]
+      (doseq [[out t] (products root (load-answers repo) hackage-products-spec)] (spit (str root "/" out) t))
+      (System/exit 0)))
   (let [[verb work & more] args
         opts (apply hash-map more)
         src (get opts "--src") musl (get opts "--musl")
@@ -480,9 +505,15 @@
                                                    (for [[n r] items]
                                                      [n (evaluate r {:exists? exists? :funcs funcs :ok? ok? :values values
                                                                      :product product :package package :types types})]))])))]
+                  ;; (REPR_HASKELL_PROBE_ONLY=PRODUCT: that product's answers computed, the file's others kept)
                   (spit (get opts "--out")
                         (str ";; The configure answers of GHC 9.14.1's packages on Arbace's C target (arbace.repr.haskell.configure's probe:\n"
                              ";; bin/repr-haskell target probe; `target probe --verify` computes them again). Read with the Clojure reader.\n"
-                             (pr-str {:products ans}) "\n")))
+                             (pr-str {:products (if (System/getenv "REPR_HASKELL_PROBE_ONLY")
+                                                   (into (sorted-map)
+                                                         (for [[p m] (merge (let [f (File. ^String (get opts "--out"))] (if (.isFile f) (:products (read-string (slurp f))) {})) ans)]
+                                                           [p (into (sorted-map) m)]))
+                                                   ans)}) "\n")))
+
       (do (println "usage: -m arbace.repr.haskell.configure plan|programs|answers WORK --src TREE --musl MUSL [--forms DIR --out FILE]")
           (System/exit 2)))))

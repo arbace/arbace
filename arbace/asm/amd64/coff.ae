@@ -1,0 +1,226 @@
+(ns arbace.asm.amd64.coff
+  "x86-64's and i386's COFF part (x86-objs, AXS99 (b)): WinCOFFObjectWriter::recordRelocation (its fixed value, the
+  section's symbol for a temporary without its own, REL32's 4, FK_SecRel_2's 0) with llvm-project 23.1.5's
+  llvm/lib/Target/X86/MCTargetDesc/X86WinCOFFObjectWriter.cpp's getRelocType (IMAGE_REL_AMD64_*, IMAGE_REL_I386_*), the
+  section number and offset expressions of .secnum and .secoffset (MCCOFFSectionNumberTargetExpr,
+  MCCOFFSectionOffsetTargetExpr), Apache-2.0 WITH LLVM-exception, written again in Arbace. `fmt` is arbace.asm.obj's *fmt*
+  for a Windows triple."
+  (:require [arbace.asm.obj :as o]
+            [arbace.asm.coff :as c]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private riprel-kinds
+  #{:riprel :riprel-movq-load :riprel-movq-load-rex2 :riprel-relax :riprel-relax-rex :riprel-relax-rex2 :riprel-relax-evex})
+
+(defn reloc-type
+  "X86WinCOFFObjectWriter::getRelocType of the fixup (KIND, SIZE, PCREL; SPEC the target's specifier; CROSS: a difference)."
+  [is64 kind ^long size pcrel spec cross]
+  (let [[kind size pcrel] (if cross
+                            (if (and (not pcrel) (or (and (nil? kind) (= size 4)) (= kind :signed) (and (nil? kind) (= size 8) is64)))
+                              [nil 4 true]
+                              (o/fail "Cannot represent this expression"))
+                            [kind size pcrel])
+        data4 (fn [] (case spec "IMGREL" (if is64 3 7) "SECREL32" 0xb (if is64 2 6)))]
+    (if is64
+      (cond (or (riprel-kinds kind) (= kind :branch)) 4
+            (and (nil? kind) (= size 4)) (if pcrel 4 (data4))
+            (#{:signed :signed-relax} kind) (data4)
+            (and (nil? kind) (= size 8)) 1
+            (= kind :secrel2) 0xa
+            (= kind :secrel4) 0xb
+            :else (o/fail "unsupported relocation type"))
+      (cond (#{:riprel :riprel-movq-load} kind) 0x14
+            (and (nil? kind) (= size 4)) (if pcrel 0x14 (data4))
+            (#{:signed :signed-relax} kind) (data4)
+            (= kind :secrel2) 0xa
+            (= kind :secrel4) 0xb
+            :else (o/fail "unsupported relocation type")))))
+
+(defn record-reloc
+  "WinCOFFObjectWriter::recordRelocation for x86: the relocation kept, the field's fixed value."
+  [is64 ctx ch fx v val]
+  (let [[off size _ kind pcrel] fx
+        cm @ch
+        foff (+ (long (:offset cm)) (long off))
+        a (:add v)]
+    (case kind
+      ;; .secnum, .secoffset: their expressions' values at the layout, no relocation
+      :secnum (let [r (o/sym-offset ctx a 0)]
+                (if (and r (not= :abs (first r))) (long (:coff-number @(.get ^java.util.ArrayList (:sections ctx) (int (first r))))) 0))
+      :secoff (let [r (o/sym-offset ctx a 0)] (if r (long (second r)) 0))
+      (do
+        (when (nil? a) (o/fail "expected relocatable expression"))
+        (when (and (:temp @a) (nil? (o/sym-offset ctx a 0)))
+          (o/fail (str "assembler label '" (:name @a) "' can not be undefined")))
+        (let [b (:sub v)
+              fixed (if b
+                      (let [ob (o/sym-offset ctx b 0)]
+                        (when (nil? ob) (o/fail (str "symbol '" (:name @b) "' can not be undefined in a subtraction expression")))
+                        (+ (- foff (long (second ob))) (long (:c v))))
+                      (long (:c v)))
+              type (reloc-type is64 kind size pcrel (:spec v) (some? b))
+              [entry sec-sym?] (or (c/symbol-entry ctx a) (o/fail (str "symbol '" (:name @a) "' can not be undefined")))
+              fixed (if (and sec-sym? (:temp @a)) (+ fixed (long (second (o/sym-offset ctx a 0)))) fixed)
+              fixed (if (= type (if is64 4 0x14)) (+ fixed 4) fixed)
+              fixed (if (= kind :secrel2) 0 fixed)]
+          (c/add-relocation! ctx (:sec cm) {:offset foff :sym entry :type type})
+          fixed)))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the Win64 unwind tables (MCStreamer's emitWinCFI*, X86AsmParser's and COFFAsmParser's .seh_* directives, MCWin64EH.cpp's
+;; EmitUnwindInfo (version 1), EmitUnwindCode, CountOfUnwindCodes, EmitRuntimeFunction, Win64EH::UnwindEmitter::Emit;
+;; MCStreamer's getAssociatedXDataSection and getAssociatedPDataSection)
+
+;; X86's SEH register numbers (MCRegisterInfo::getSEHRegNum: the registers' encodings)
+(def ^:private seh-regs
+  (merge (zipmap ["rax" "rcx" "rdx" "rbx" "rsp" "rbp" "rsi" "rdi"] (range 8)) (into {} (for [i (range 8 16)] [(str "r" i) i]))
+         (into {} (for [i (range 16)] [(str "xmm" i) i]))))
+
+(def UOP_PushNonVol 0) (def UOP_AllocLarge 1) (def UOP_AllocSmall 2) (def UOP_SetFPReg 3) (def UOP_SaveNonVol 4)
+(def UOP_SaveNonVolBig 5) (def UOP_SaveXMM128 8) (def UOP_SaveXMM128Big 9) (def UOP_PushMachFrame 10)
+
+(defn- seh-reg [ctx r]
+  (let [n (cond (and (seq? r) (#{'reg 'pct} (first r))) (str/lower-case (str (second r)))
+                (symbol? r) (str/lower-case (str/replace (name r) #"^%" ""))
+                :else nil)]
+    (or (get seh-regs n)
+        (when-let [v (o/const-value (o/resolve-expr ctx r) @(:syms ctx))] (long v))
+        (o/fail "expected register or register number"))))
+
+(defn- seh-section
+  "getAssociatedXDataSection / getAssociatedPDataSection: the main one for the main .text, else one of the text section's own
+  unique ID (getOrAssignWinCFISectionID)."
+  [ctx ^String nm text]
+  (if (identical? text (.get ^java.util.ArrayList (:sections ctx) 0))
+    (c/section! ctx nm (bit-or c/IMAGE_SCN_CNT_INITIALIZED_DATA c/IMAGE_SCN_MEM_READ))
+    (let [id (or (:wincfi-id @text) (let [n @(:seh-next-id ctx)] (vswap! (:seh-next-id ctx) inc) (swap! text assoc :wincfi-id n) n))]
+      (c/section! ctx nm (bit-or c/IMAGE_SCN_CNT_INITIALIZED_DATA c/IMAGE_SCN_MEM_READ) id))))
+
+(defn- unwind-info!
+  "EmitUnwindInfo (version 1): the frame's UNWIND_INFO in its .xdata, once (its label the frame's :symbol)."
+  [ctx fr]
+  (when-not (:symbol @fr)
+    (let [m @fr cur (o/cur-sec ctx) prev @(:prev ctx)
+          xd (seh-section ctx ".xdata" (:text m))
+          _ (o/align! ctx 4 0 1 nil false)
+          l (o/tmp! ctx)
+          _ (o/label! ctx l)
+          _ (swap! fr assoc :symbol l)
+          insns (:insns m)
+          ncodes (reduce + 0 (map (fn [i] (condp contains? (:op i)
+                                            #{UOP_PushNonVol UOP_AllocSmall UOP_SetFPReg UOP_PushMachFrame} 1
+                                            #{UOP_SaveNonVol UOP_SaveXMM128} 2
+                                            #{UOP_SaveNonVolBig UOP_SaveXMM128Big} 3
+                                            #{UOP_AllocLarge} (if (> (long (:off i)) (- (* 512 1024) 8)) 3 2)))
+                                  insns))
+          flags (bit-or 1 (if (:handles-unwind m) (bit-shift-left 2 3) 0) (if (:handles-except m) (bit-shift-left 1 3) 0))
+          b! (fn [v] (o/bytes! ctx [v]))
+          w! (fn [^long v] (o/bytes! ctx [(bit-and v 0xff) (bit-and (bit-shift-right v 8) 0xff)]))
+          diff! (fn [a b] (o/emit-value! ctx (list '- (symbol a) (symbol b)) 1))
+          frame (if-let [k (:last-frame m)] (let [fi (nth insns k)] (bit-or (bit-and (long (:reg fi)) 0x0f) (bit-and (long (:off fi)) 0xf0))) 0)]
+      (o/data! ctx)
+      (b! flags)
+      (if (:prolog-end m) (diff! (:prolog-end m) (:begin m)) (b! 0))
+      (b! ncodes)
+      (b! frame)
+      (doseq [i (reverse insns)]
+        (let [op (long (:op i)) b2 (bit-and op 0x0f)]
+          (condp = op
+            UOP_PushNonVol (do (diff! (:label i) (:begin m)) (b! (bit-or b2 (bit-shift-left (bit-and (long (:reg i)) 0x0f) 4))))
+            UOP_AllocLarge (do (diff! (:label i) (:begin m))
+                               (if (> (long (:off i)) (- (* 512 1024) 8))
+                                 (do (b! (bit-or b2 0x10)) (w! (bit-and (long (:off i)) 0xfff8)) (w! (bit-shift-right (long (:off i)) 16)))
+                                 (do (b! b2) (w! (bit-shift-right (long (:off i)) 3)))))
+            UOP_AllocSmall (do (diff! (:label i) (:begin m)) (b! (bit-or b2 (bit-shift-left (bit-and (bit-shift-right (- (long (:off i)) 8) 3) 0x0f) 4))))
+            UOP_SetFPReg (do (diff! (:label i) (:begin m)) (b! b2))
+            (UOP_SaveNonVol UOP_SaveXMM128)
+            (do (diff! (:label i) (:begin m)) (b! (bit-or b2 (bit-shift-left (bit-and (long (:reg i)) 0x0f) 4)))
+                (w! (let [w (bit-shift-right (long (:off i)) 3)] (if (= op UOP_SaveXMM128) (bit-shift-right w 1) w))))
+            (UOP_SaveNonVolBig UOP_SaveXMM128Big)
+            (do (diff! (:label i) (:begin m)) (b! (bit-or b2 (bit-shift-left (bit-and (long (:reg i)) 0x0f) 4)))
+                (w! (bit-and (long (:off i)) (if (= op UOP_SaveXMM128Big) 0xfff0 0xfff8))) (w! (bit-shift-right (long (:off i)) 16)))
+            UOP_PushMachFrame (do (diff! (:label i) (:begin m)) (b! (if (= 1 (long (:off i))) (bit-or b2 0x10) b2))))))
+      (when (odd? ncodes) (w! 0))
+      (cond (pos? (bit-and flags 0x18)) (o/emit-value! ctx (list 'at (symbol (:handler m)) 'IMGREL) 4)
+            (zero? ncodes) (o/bytes! ctx [0 0 0 0]))
+      (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev))))
+
+(defn- seh!
+  "The .seh_* directives (x86-64's: MCAsmInfo::usesWindowsCFI): the frames and their unwind codes, each frame's unwind info
+  written at its .seh_endproc."
+  [ctx h args]
+  (let [cv (fn [e] (long (or (o/const-value (o/resolve-expr ctx e) @(:syms ctx)) (o/fail "expected integer"))))
+        ^java.util.ArrayList frames (:seh-frames ctx)
+        cur @(:seh-cur ctx)
+        need (fn [] (or cur (o/fail ".seh_ directive must appear within an active frame")))
+        label! (fn [] (let [n (o/tmp! ctx)] (o/label! ctx n) n))
+        insn! (fn [i] (swap! (need) update :insns conj i))]
+    (case h
+      "seh_proc" (do (when (and cur (not (:end @cur))) (o/fail "Starting a function before ending the previous one!"))
+                     (let [fr (atom {:fn (o/sym-name (first args)) :begin (label!) :text (o/cur-sec ctx) :insns []})]
+                       (o/register! ctx (o/sym-name (first args)))
+                       (.add frames fr) (vreset! (:seh-cur ctx) fr)))
+      "seh_endproc" (let [fr (need)]
+                      (swap! fr assoc :end (label!))
+                      (vreset! (:seh-cur ctx) nil)
+                      (unwind-info! ctx fr))
+      "seh_endprologue" (swap! (need) assoc :prolog-end (label!))
+      "seh_stackalloc" (let [n (cv (first args))]
+                         (need)
+                         (when (zero? n) (o/fail "stack allocation size must be non-zero"))
+                         (when-not (zero? (bit-and n 7)) (o/fail "stack allocation size is not a multiple of 8"))
+                         (insn! {:op (if (> n 128) UOP_AllocLarge UOP_AllocSmall) :off n :label (label!)}))
+      "seh_pushreg" (do (need) (insn! {:op UOP_PushNonVol :reg (seh-reg ctx (first args)) :label (label!)}))
+      "seh_setframe" (let [fr (need) r (seh-reg ctx (first args)) off (cv (second args))]
+                       (when (:last-frame @fr) (o/fail "frame register and offset can be set at most once"))
+                       (when-not (zero? (bit-and off 0x0f)) (o/fail "offset is not a multiple of 16"))
+                       (when (> off 240) (o/fail "frame offset must be less than or equal to 240"))
+                       (swap! fr assoc :last-frame (count (:insns @fr)))
+                       (insn! {:op UOP_SetFPReg :reg r :off off :label (label!)}))
+      "seh_savereg" (let [r (seh-reg ctx (first args)) off (cv (second args))]
+                      (need)
+                      (when-not (zero? (bit-and off 7)) (o/fail "register save offset is not 8 byte aligned"))
+                      (insn! {:op (if (> off (- (* 512 1024) 8)) UOP_SaveNonVolBig UOP_SaveNonVol) :reg r :off off :label (label!)}))
+      "seh_savexmm" (let [r (seh-reg ctx (first args)) off (cv (second args))]
+                      (need)
+                      (when-not (zero? (bit-and off 0x0f)) (o/fail "offset is not a multiple of 16"))
+                      (insn! {:op (if (> off (- (* 512 1024) 8)) UOP_SaveXMM128Big UOP_SaveXMM128) :reg r :off off :label (label!)}))
+      "seh_pushframe" (let [fr (need)]
+                        (when (seq (:insns @fr)) (o/fail "If present, PushMachFrame must be the first UOP"))
+                        (insn! {:op UOP_PushMachFrame :off (if (seq args) 1 0) :label (label!)}))
+      "seh_handler" (let [fr (need) [hs & kinds] args ks (set (map #(str/lower-case (str/replace (o/expr-text %) #"^@" "")) kinds))]
+                      (when-not (or (ks "unwind") (ks "except")) (o/fail "you must specify one or both of @unwind or @except"))
+                      (o/register! ctx (o/sym-name hs))
+                      (swap! fr assoc :handler (o/sym-name hs) :handles-unwind (boolean (ks "unwind")) :handles-except (boolean (ks "except"))))
+      (o/unsupported :directive (str "." h)))))
+
+(defn- seh-finish!
+  "X86WinCOFFStreamer::finishImpl's emitWindowsUnwindTables (Win64EH::UnwindEmitter::Emit): every frame's unwind info not
+  written yet, then each frame's RUNTIME_FUNCTION in its .pdata (the begin, the end and the unwind info, image-relative)."
+  [ctx]
+  (let [frames (vec (:seh-frames ctx))]
+    (when (seq frames)
+      (doseq [fr frames] (unwind-info! ctx fr))
+      (let [cur (o/cur-sec ctx) prev @(:prev ctx)]
+        (doseq [fr frames :let [m @fr]]
+          (seh-section ctx ".pdata" (:text m))
+          (o/align! ctx 4 0 1 nil false)
+          (o/emit-value! ctx (list '+ (list 'at (symbol (:begin m)) 'IMGREL) 0) 4)
+          (o/emit-value! ctx (list '+ (list 'at (symbol (:begin m)) 'IMGREL) (list '- (symbol (:end m)) (symbol (:begin m)))) 4)
+          (o/emit-value! ctx (list 'at (symbol (:symbol @fr)) 'IMGREL) 4))
+        (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev)))))
+
+(defn fmt
+  "arbace.asm.obj's *fmt* for an x86 Windows triple (IS64: x86_64, else i386)."
+  [is64]
+  (assoc (c/base (if is64 ".L" "L"))
+         :state (fn [] (assoc (c/state) :seh-frames (java.util.ArrayList.) :seh-cur (volatile! nil) :seh-next-id (volatile! 0)))
+         :record-reloc (fn [ctx ch fx v val] (record-reloc is64 ctx ch fx v val))
+         ;; i386's COFF uses no Windows CFI (MCAsmInfo::usesWindowsCFI)
+         :seh! (if is64 seh! (fn [_ _ _] (o/fail ".seh_* directives are not supported on this target")))
+         :finish! seh-finish!
+         :write (fn [ctx] (c/write-object ctx (if is64 c/IMAGE_FILE_MACHINE_AMD64 c/IMAGE_FILE_MACHINE_I386)))))
