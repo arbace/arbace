@@ -112,7 +112,10 @@
   (vary-meta fx assoc :pos @(:pos ctx)))
 
 (defn sym-name ^String [s]
-  (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s)) :else (fail (str "not a symbol: " (pr-str s)))))
+  (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s))
+        ;; a name with `@` (COFF's AllowAtInName, the part after it no specifier: `_mystdcall@8`; x86-objs)
+        (and (seq? s) (= 'at (first s)) (:at-name? *fmt*) ((:at-name? *fmt*) (nth s 2))) (str (sym-name (second s)) "@" (nth s 2))
+        :else (fail (str "not a symbol: " (pr-str s)))))
 
 (defn canon-name
   "A section's name names its section symbol (MCContext's section symbols are named by their sections)."
@@ -166,8 +169,10 @@
   (vreset! (:prev ctx) (cur-sec ctx))
   (vreset! (:cur ctx) sec))
 
-(defn section! [ctx ^String nm type flags entsize group comdat]
-  (let [k [nm group]
+(defn section! [ctx ^String nm type flags entsize group comdat & [unique]]
+  ;; (UNIQUE: a section of the same name kept apart, COFF's unique sections: Win64's .xdata and .pdata of a text section but
+  ;; the main one; x86-objs)
+  (let [k (if unique [nm group unique] [nm group])
         ^java.util.HashMap by (:by-key ctx)
         sec (or (.get by k)
                 (let [^java.util.ArrayList ss (:sections ctx)
@@ -225,6 +230,9 @@
   [ctx e]
   (cond
     (and (seq? e) (= 'asm/dot (first e))) (let [n (tmp! ctx)] (label! ctx n) (symbol n))
+    ;; COFF's names with `@` (x86-objs): a symbol's reference
+    (and (seq? e) (= 'at (first e)) (= 3 (count e)) (:at-name? *fmt*) ((:at-name? *fmt*) (nth e 2)))
+    (list 'sym (sym-name e))
     (and (seq? e) (= 'local (first e)))
     (let [[_ n d] e k (long (or (.get ^java.util.HashMap (:locals ctx) n) 0))]
       (symbol (local-name ctx n (if (= d :f) (inc k) k))))
@@ -750,9 +758,10 @@
     (directive! ctx (cons (symbol "asm" (str/replace (second f) #"^\." "")) (nnext f)))
   (let [h (name (first f)) args (rest f)
         cv (fn [e] (let [e (resolve-expr ctx e)] (or (const-value e @(:syms ctx)) (unsupported :expression (str "." h " " (pr-str e))))))
-        own (if-let [d (:directive *arch*)] (d ctx h args) :unhandled)
-        ;; the format's directives (DarwinAsmParser's, COFFAsmParser's; x86-objs) before the generic ones
-        own (if (and (= own :unhandled) (:directive *fmt*)) ((:directive *fmt*) ctx h args) own)]
+        ;; the format's directives first (DarwinAsmParser's, COFFAsmParser's; x86-objs: COFF's .reloc names), then the arch's,
+        ;; then the generic ones
+        own (if-let [d (:directive *fmt*)] (d ctx h args) :unhandled)
+        own (if (= own :unhandled) (if-let [d (:directive *arch*)] (d ctx h args) :unhandled) own)]
     (case (if (= own :unhandled) h "\u0000handled")
       "\u0000handled" own
       "text" (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
@@ -1450,6 +1459,8 @@
         (when (seq @(:conds ctx)) (report! ctx nil "unmatched .ifs or .elses" nil))
         (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))
         (when-let [f (:finish *arch*)] (f ctx))
+        ;; the format's streamer's finishImpl (COFF's Win64 unwind tables; x86-objs)
+        (when-let [f (:finish! *fmt*)] (f ctx))
         ;; the format's finishImpl before the layout (Mach-O's atoms; x86-objs)
         (when-let [f (:before-layout *fmt*)] (f ctx))
         (layout! ctx)

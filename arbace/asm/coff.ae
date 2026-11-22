@@ -1,0 +1,445 @@
+(ns arbace.asm.coff
+  "COFF relocatable objects, written and read (x86-objs, AXS99 (b), the user's decision of 2026-11-22; doc/asm/AMD64-SURVEY.md,
+  \"As built: x86-objs\"): the format's part of the object assembler (arbace.asm.obj's *fmt*) as llvm-project 23.1.5's MC
+  writes COFF with llvm-mc -filetype=obj, after llvm/lib/MC/WinCOFFObjectWriter.cpp (executePostLayoutBinding's defineSection
+  and defineSymbol, assignSectionNumbers, assignFileOffsets, recordRelocation, writeObject, createFileSymbols,
+  isSymbolRefDifferenceFullyResolvedImpl), MCWinCOFFStreamer.cpp (initSections, emitSymbolAttribute, the symbol definitions,
+  emitCOFFSectionIndex, emitCOFFSecRel32, emitCOFFImgRel32, emitCOFFSecNumber, emitCOFFSecOffset, the common symbols),
+  MCParser/COFFAsmParser.cpp (the section directives and parseSectionFlags), MCSectionCOFF.cpp, StringTableBuilder.cpp
+  (WinCOFF's string table) and JamCRC (the sections' checksums), Apache-2.0 WITH LLVM-exception, written again in Arbace;
+  the relocation types are the architecture's (arbace.asm.amd64.coff: X86WinCOFFObjectWriter). The reader reads a COFF
+  object back into data: the views' (arbace.asm.amd64.objview).
+
+  A COFF section is arbace.asm.obj's section with :coff {:chars C}, its ELF type and flags standing for what the generic
+  assembler asks (SHT_NOBITS for uninitialized data, SHF_EXECINSTR for IMAGE_SCN_CNT_CODE: MCSectionCOFF::useCodeAlign); a
+  symbol's COFF attributes are its :bind (STB_GLOBAL: external), :coff-class, :coff-type, :weak-ext."
+  (:require [arbace.asm.obj :as o]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; llvm/include/llvm/BinaryFormat/COFF.h
+(def IMAGE_FILE_MACHINE_I386 0x14c) (def IMAGE_FILE_MACHINE_AMD64 0x8664)
+(def IMAGE_SCN_CNT_CODE 0x20) (def IMAGE_SCN_CNT_INITIALIZED_DATA 0x40) (def IMAGE_SCN_CNT_UNINITIALIZED_DATA 0x80)
+(def IMAGE_SCN_LNK_INFO 0x200) (def IMAGE_SCN_LNK_REMOVE 0x800) (def IMAGE_SCN_LNK_COMDAT 0x1000)
+(def IMAGE_SCN_MEM_DISCARDABLE 0x02000000) (def IMAGE_SCN_MEM_SHARED 0x10000000) (def IMAGE_SCN_MEM_EXECUTE 0x20000000)
+(def IMAGE_SCN_MEM_READ 0x40000000) (def IMAGE_SCN_MEM_WRITE 0x80000000) (def IMAGE_SCN_LNK_NRELOC_OVFL 0x01000000)
+(def IMAGE_SYM_CLASS_NULL 0) (def IMAGE_SYM_CLASS_EXTERNAL 2) (def IMAGE_SYM_CLASS_STATIC 3) (def IMAGE_SYM_CLASS_LABEL 6)
+(def IMAGE_SYM_CLASS_FILE 103) (def IMAGE_SYM_CLASS_WEAK_EXTERNAL 105)
+(def IMAGE_SYM_ABSOLUTE -1) (def IMAGE_SYM_DEBUG -2) (def IMAGE_SYM_DTYPE_FUNCTION 2)
+(def IMAGE_WEAK_EXTERN_SEARCH_ALIAS 3)
+
+(defn- align-flag
+  "getAlignment: IMAGE_SCN_ALIGN_<N>BYTES of a power-of-two alignment."
+  ^long [^long a]
+  (bit-shift-left (inc (Long/numberOfTrailingZeros a)) 20))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; sections (MCContext::getCOFFSection: the first made of a name keeps its characteristics)
+
+(defn coff-of [sec] (:coff @sec))
+
+(defn section!
+  "The section NAME (made with its characteristics CHARS the first time; UNIQUE its unique ID when given), made current."
+  [ctx ^String nm ^long chars & [unique]]
+  (let [sec (o/section! ctx nm (if (pos? (bit-and chars IMAGE_SCN_CNT_UNINITIALIZED_DATA)) elf/SHT_NOBITS elf/SHT_PROGBITS)
+                        (bit-or elf/SHF_ALLOC (if (pos? (bit-and chars IMAGE_SCN_CNT_CODE)) elf/SHF_EXECINSTR 0)
+                                (if (pos? (bit-and chars IMAGE_SCN_MEM_WRITE)) elf/SHF_WRITE 0))
+                        0 nil false unique)]
+    (when-not (:coff @sec) (swap! sec assoc :coff {:chars chars}))
+    sec))
+
+(defn section-flags
+  "COFFAsmParser::parseSectionFlags: the characteristics a flags string gives the section NAME."
+  ^long [^String nm ^String fs]
+  (let [[sf _] (reduce (fn [[sf ro-removed] ch]
+                         (case ch
+                           \a [sf ro-removed]
+                           \b (do (when (pos? (bit-and sf 8)) (o/fail "conflicting section flags 'b' and 'd'."))
+                                  [(bit-and (bit-or sf 1) (bit-not 4)) ro-removed])
+                           \d (do (when (pos? (bit-and sf 1)) (o/fail "conflicting section flags 'b' and 'd'."))
+                                  [(let [s (bit-and (bit-or sf 8) (bit-not 0x80))] (if (zero? (bit-and s 0x20)) (bit-or s 4) s)) ro-removed])
+                           \n [(bit-and (bit-or sf 0x20) (bit-not 4)) ro-removed]
+                           \D [(bit-or sf 0x100) ro-removed]
+                           \r [(let [s (bit-or sf 0x80) s (if (zero? (bit-and s 2)) (bit-or s 8) s)] (if (zero? (bit-and s 0x20)) (bit-or s 4) s)) false]
+                           \s [(let [s (bit-and (bit-or sf 0x10 8) (bit-not 0x80))] (if (zero? (bit-and s 0x20)) (bit-or s 4) s)) ro-removed]
+                           \w [(bit-and sf (bit-not 0x80)) true]
+                           \x [(let [s (bit-or sf 2) s (if (zero? (bit-and s 0x20)) (bit-or s 4) s)] (if ro-removed s (bit-or s 0x80))) ro-removed]
+                           \y [(bit-or sf 0x40 0x80) ro-removed]
+                           \i [(bit-or sf 0x200) ro-removed]
+                           (o/fail "unknown flag")))
+                       [0 false] fs)
+        sf (long (if (zero? (long sf)) 8 sf))]
+    (bit-or (if (pos? (bit-and sf 2)) (bit-or IMAGE_SCN_CNT_CODE IMAGE_SCN_MEM_EXECUTE) 0)
+            (if (pos? (bit-and sf 8)) IMAGE_SCN_CNT_INITIALIZED_DATA 0)
+            (if (and (pos? (bit-and sf 1)) (zero? (bit-and sf 4))) IMAGE_SCN_CNT_UNINITIALIZED_DATA 0)
+            (if (pos? (bit-and sf 0x20)) IMAGE_SCN_LNK_REMOVE 0)
+            (if (or (pos? (bit-and sf 0x100)) (str/starts-with? nm ".debug")) IMAGE_SCN_MEM_DISCARDABLE 0)
+            (if (zero? (bit-and sf 0x40)) IMAGE_SCN_MEM_READ 0)
+            (if (zero? (bit-and sf 0x80)) IMAGE_SCN_MEM_WRITE 0)
+            (if (pos? (bit-and sf 0x10)) IMAGE_SCN_MEM_SHARED 0)
+            (if (pos? (bit-and sf 0x200)) IMAGE_SCN_LNK_INFO 0))))
+
+(def text-chars (bit-or IMAGE_SCN_CNT_CODE IMAGE_SCN_MEM_EXECUTE IMAGE_SCN_MEM_READ))
+(def data-chars (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_WRITE))
+(def bss-chars (bit-or IMAGE_SCN_CNT_UNINITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_WRITE))
+
+;; X86MCAsmInfo's at-specifiers: a name after `@` that is none is part of the symbol's name (AllowAtInName; AsmParser's
+;; parsePrimaryExpr)
+(def specifiers
+  #{"ABS8" "DTPOFF" "DTPREL" "GOT" "GOTENT" "GOTNTPOFF" "GOTOFF" "GOTPCREL" "GOTPCREL_NORELAX" "GOTREL" "GOTTPOFF" "INDNTPOFF"
+    "IMGREL" "NTPOFF" "PCREL" "PLT" "PLTOFF" "SECREL32" "SIZE" "TLSCALL" "TLSDESC" "TLSGD" "TLSLD" "TLSLDM" "TLVP" "TLVPPAGE"
+    "TLVPPAGEOFF" "TPOFF"})
+
+(defn at-name? "Whether `X@SPEC` is a symbol's name." [spec] (not (specifiers (str/upper-case (str spec)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the directives (COFFAsmParser, MCWinCOFFStreamer)
+
+(defn- data-fixup!
+  "A SIZE-byte field of the current data whose value is the fixup's (KIND: :secrel4, :secrel2, :secnum, :secoff, nil)."
+  [ctx e ^long size kind]
+  (o/data! ctx)
+  (let [e (o/resolve-expr ctx e) ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch)]
+    (o/visit-syms! ctx e)
+    (.add ^java.util.ArrayList (:fixups @ch) (o/with-pos ctx [(.size b) size e kind false 0]))
+    (dotimes [_ size] (.add b 0))))
+
+(defn directive
+  "COFFAsmParser's directives and the generic ones COFF reads otherwise, :unhandled for the rest."
+  [ctx ^String h args]
+  (let [cv (fn [e] (let [e (o/resolve-expr ctx e)] (or (o/const-value e @(:syms ctx)) (o/unsupported :expression (str "." h " " (pr-str e))))))
+        cur (fn [] (or @(:coff-cur ctx) nil))]
+    (case h
+      "text" (section! ctx ".text" text-chars)
+      "data" (section! ctx ".data" data-chars)
+      "bss" (section! ctx ".bss" bss-chars)
+      ("section" "pushsection")
+      (let [[nm fl & more] args
+            nm (o/expr-text nm)
+            chars (if (string? fl) (section-flags nm fl) data-chars)]
+        (when (seq more) (o/unsupported :directive (str ".section " nm " (a COMDAT)")))
+        (when (= h "pushsection") (vswap! (:stack ctx) conj [(o/cur-sec ctx) @(:prev ctx)]))
+        (section! ctx nm chars))
+      "def" (do (when @(:coff-cur ctx) (o/fail "starting a new symbol definition without completing the previous one"))
+                (vreset! (:coff-cur ctx) (o/sym-name (first args))))
+      "scl" (if-let [n (cur)]
+              (let [c (long (cv (first args)))]
+                (when-not (zero? (bit-and c (bit-not 0xff))) (o/fail (str "storage class value '" c "' out of range")))
+                (o/register! ctx n) (swap! (o/symbol! ctx n) assoc :coff-class c))
+              (o/fail "storage class specified outside of symbol definition"))
+      "type" (if-let [n (cur)]
+               (let [t (long (cv (first args)))]
+                 (when-not (zero? (bit-and t (bit-not 0xffff))) (o/fail (str "type value '" t "' out of range")))
+                 (o/register! ctx n) (swap! (o/symbol! ctx n) assoc :coff-type t))
+               (o/fail "symbol type specified outside of a symbol definition"))
+      "endef" (do (when-not @(:coff-cur ctx) (o/fail "ending symbol definition without starting one"))
+                  (vreset! (:coff-cur ctx) nil))
+      "secrel32" (data-fixup! ctx (first args) 4 :secrel4)
+      "secidx" (data-fixup! ctx (first args) 2 :secrel2)
+      "secnum" (data-fixup! ctx (first args) 4 :secnum)
+      "secoffset" (data-fixup! ctx (first args) 4 :secoff)
+      "rva" (doseq [a args] (data-fixup! ctx (list 'at a 'IMGREL) 4 nil))
+      "weak" (doseq [a args] (let [n (o/sym-name a)] (o/register! ctx n)
+                               (swap! (o/symbol! ctx n) assoc :bind elf/STB_GLOBAL :weak-ext IMAGE_WEAK_EXTERN_SEARCH_ALIAS)))
+      ;; .reloc OFFSET, NAME[, EXPR] (WindowsX86AsmBackend::getFixupKind: dir32, secrel32, secidx; MCAssembler::layout makes
+      ;; each a fixup of the fragment at its offset)
+      "reloc" (let [[off t e] args
+                    k ({"dir32" [nil 4] "secrel32" [:secrel4 4] "secidx" [:secrel2 2]} (str/lower-case (o/sym-name t)))
+                    _ (when-not k (o/fail "unknown relocation name"))
+                    off (o/resolve-expr ctx off) e (o/resolve-expr ctx (or e 0))]
+                (o/visit-syms! ctx e)
+                (.add ^java.util.ArrayList (:coff-relocs ctx) [off k e @(:pos ctx) (:index @(o/cur-sec ctx))]))
+      ;; .comm NAME, SIZE[, LOG2]: external, common (MCAsmInfoCOFF: the alignment in powers of two); .lcomm NAME, SIZE[, BYTES]
+      ;; in .bss
+      "comm" (let [[s size al] args n (o/sym-name s) sym (o/symbol! ctx n)]
+               (o/register! ctx n)
+               (swap! sym assoc :bind elf/STB_GLOBAL :common [(long (cv size)) (if al (bit-shift-left 1 (long (cv al))) 0)]))
+      "lcomm" (let [[s size al] args n (o/sym-name s) c (o/cur-sec ctx) p @(:prev ctx)]
+                (section! ctx ".bss" bss-chars)
+                (o/align! ctx (long (if al (cv al) 1)) 0 1 nil false)
+                (o/label! ctx n)
+                (o/fill! ctx (cv size) 1 0)
+                (vreset! (:cur ctx) c) (vreset! (:prev ctx) p))
+      ;; .file NAME: a file symbol (createFileSymbols)
+      "file" (if (and (= 1 (count args)) (string? (first args)))
+               (.add ^java.util.ArrayList (:coff-files ctx) (first args))
+               :unhandled)
+      ("hidden" "protected" "internal" "size" "local") (o/fail "unable to emit symbol attribute")
+      ;; the Win64 unwind directives (MCStreamer's emitWinCFI*): the architecture's (arbace.asm.amd64.coff)
+      ("seh_proc" "seh_endproc" "seh_endfunclet" "seh_splitchained" "seh_handler" "seh_handlerdata" "seh_stackalloc"
+       "seh_endprologue" "seh_startepilogue" "seh_endepilogue" "seh_unwindv2start" "seh_unwindversion" "seh_pushreg"
+       "seh_setframe" "seh_savereg" "seh_savexmm" "seh_pushframe")
+      (if-let [f (:seh! o/*fmt*)] (f ctx h args) (o/unsupported :directive (str "." h)))
+      ("symidx" "safeseh" "linkonce" "weak_anti_dep" "cg_profile") (o/unsupported :directive (str "." h))
+      :unhandled)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the writer's binding (executePostLayoutBinding) and its numbers
+
+(defn- bss? [sec] (= elf/SHT_NOBITS (:type @sec)))
+(defn section-size ^long [sec] (reduce + 0 (map o/chunk-size (:chunks @sec))))
+
+(defn- function-type? [m] (= IMAGE_SYM_DTYPE_FUNCTION (bit-shift-right (long (or (:coff-type m) 0)) 4)))
+
+(defn pcrel-resolved?
+  "WinCOFFObjectWriter::isSymbolRefDifferenceFullyResolvedImpl: a function's symbol never (the linker's features need the
+  relocations), else when it is in the fixup's section."
+  [ctx v c]
+  (let [s (:add v) o (o/sym-offset ctx s 0)]
+    (and (not (function-type? @s)) o (not= :abs (first o)) (= (first o) (:sec @c)))))
+
+(defn- temp? [m] (:temp m))
+
+(defn bind!
+  "executePostLayoutBinding: each section a COFF section and its symbol (STATIC, a section definition), numbered in order;
+  each registered symbol that is not temporary (or whose class is STATIC) a COFF symbol, in registration order. Sets ctx's
+  :coff-syms (vector of {:name :sym ATOM :section SEC :value :type :class :aux ...}) and each section's :coff-number."
+  [ctx]
+  (let [secs (vec (:sections ctx))
+        ^java.util.ArrayList syms (java.util.ArrayList.)
+        by (java.util.IdentityHashMap.)]
+    (doseq [[i s] (map-indexed vector secs)]
+      (swap! s assoc :coff-number (inc i))
+      (let [e {:name (:name @s) :section s :class IMAGE_SYM_CLASS_STATIC :type 0 :value 0 :section-def s}]
+        (.add syms e)
+        (.put by (o/symbol! ctx (o/sec-key ctx (:index @s))) (dec (.size syms)))))
+    (doseq [n (:order ctx) :let [s (o/symbol! ctx n) m @s]
+            :when (and (not (:section-sym m)) (or (not (temp? m)) (= IMAGE_SYM_CLASS_STATIC (:coff-class m))))]
+      (let [off (o/sym-offset ctx s 0)
+            base (when (and off (not= :abs (first off))) (nth secs (first off)))
+            value (cond (and (:common m) (= elf/STB_GLOBAL (:bind m))) (long (first (:common m)))
+                        (and off (not= :abs (first off))) (long (second off))
+                        (= :abs (first off)) (long (second off))
+                        :else 0)
+            cls (long (or (:coff-class m) 0))
+            cls (if (zero? cls)
+                  (if (or (= elf/STB_GLOBAL (:bind m)) (and (nil? (:chunk m)) (nil? (:var m)))) IMAGE_SYM_CLASS_EXTERNAL IMAGE_SYM_CLASS_STATIC)
+                  cls)]
+        (if (:weak-ext m)
+          ;; a weak external: its default `.weak.NAME.default`, the definition's (setWeakDefaultNames completes the name)
+          (let [d {:name (str ".weak." n ".default") :section base :abs (nil? base) :value value :type (long (or (:coff-type m) 0))
+                   :class cls :weak-default true}]
+            (.add syms {:name n :sym s :class IMAGE_SYM_CLASS_WEAK_EXTERNAL :type 0 :value 0 :weak-ext (:weak-ext m)
+                        :other (inc (.size syms))})
+            (.put by s (dec (.size syms)))
+            (.add syms d))
+          (do (.add syms {:name n :sym s :section base :abs (and (nil? base) (some? off)) :undef (nil? off) :value value
+                          :type (long (or (:coff-type m) 0)) :class cls})
+              (.put by s (dec (.size syms)))))))
+    (vreset! (:coff-syms ctx) syms)
+    (vreset! (:coff-by ctx) by)))
+
+(defn add-relocation!
+  "A COFF relocation {:offset :sym ENTRY-INDEX :type} of section index SEC."
+  [ctx ^long sec r]
+  (let [^java.util.HashMap m (:coff-relocs-out ctx)]
+    (when-not (.containsKey m sec) (.put m sec (java.util.ArrayList.)))
+    (.add ^java.util.ArrayList (.get m sec) r)))
+
+(defn symbol-entry
+  "The COFF symbol entry index (in :coff-syms) a relocation against the symbol S names: its own, or its section's when it is
+  temporary and has none (recordRelocation's UseSectionSymbol); [INDEX SECTION-SYMBOL?]."
+  [ctx s]
+  (let [^java.util.IdentityHashMap by @(:coff-by ctx)]
+    (if-let [i (.get by s)]
+      [i false]
+      (let [o (o/sym-offset ctx s 0)]
+        (when (and o (not= :abs (first o)))
+          [(.get by (o/symbol! ctx (o/sec-key ctx (first o)))) true])))))
+
+(defn insert-reloc-fixups!
+  "MCAssembler::layout's .reloc directives: each a fixup at its offset of the chunk there, in groups (a directive whose offset
+  is greater than its group's first starts a new one), each group inserted after the chunk's fixups at its first's offset."
+  [ctx]
+  (let [groups (java.util.LinkedHashMap.)
+        drain! (fn [c g] (let [^java.util.ArrayList fx (:fixups @c)
+                               off (long (first (first g)))
+                               at (loop [i 0] (if (and (< i (.size fx)) (<= (long (first (.get fx i))) off)) (recur (inc i)) i))]
+                           (.addAll fx (int at) ^java.util.Collection g)))]
+    (doseq [[off-e [kind size] e pos dsec] (:coff-relocs ctx)]
+      (try
+        (let [vo (o/value ctx off-e 0)
+              s (:add vo)
+              c (when s (:chunk @s))
+              _ (when (or (:sub vo) (nil? c)) (o/fail ".reloc offset is not relative to a section" off-e))
+              off (+ (long (:off @s)) (long (:c vo)))
+              g (.get groups c)
+              fx (with-meta [off size e kind false 0] {:pos pos})]
+          (if (and g (< (long (first (first g))) off))
+            (do (drain! c g) (.put groups c [fx]))
+            (.put groups c (conj (or g []) fx))))
+        (catch arbace.lang.ExceptionInfo ex
+          (if-let [m (:obj/error (ex-data ex))] (o/report! ctx pos m (or (:obj/expr (ex-data ex)) off-e)) (throw ex)))))
+    (doseq [[c g] groups] (drain! c g))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the writer (writeObject)
+
+(defn- out ^java.io.ByteArrayOutputStream [] (java.io.ByteArrayOutputStream.))
+(defn- le! [^java.io.ByteArrayOutputStream o ^long v ^long n] (dotimes [i n] (.write o (int (bit-and (bit-shift-right v (* 8 i)) 0xff)))))
+
+(defn- jamcrc
+  "JamCRC from 0 (llvm/lib/Support/CRC.cpp): CRC-32's reflected polynomial, no initial or final inversion."
+  ^long [^bytes b]
+  (loop [i 0 crc 0]
+    (if (= i (alength b))
+      crc
+      (recur (inc i) (loop [k 0 r (bit-xor crc (bit-and (long (aget b i)) 0xff))]
+                       (if (= k 8) r (recur (inc k) (if (odd? r) (bit-xor (unsigned-bit-shift-right r 1) 0xEDB88320) (unsigned-bit-shift-right r 1)))))))))
+
+(defn- strtab
+  "StringTableBuilder (WinCOFF): the names longer than 8 bytes tail-merged after a 4-byte size; {:bytes :offsets}."
+  [names]
+  (let [{b :bytes offs :offsets} (elf/strtab names)
+        ;; (elf/strtab starts with one NUL; WinCOFF's with the 4-byte size: every offset 3 further)
+        ^bytes b b
+        n (+ 4 (dec (alength b)))
+        o (out)]
+    (le! o n 4) (.write o b 1 (dec (alength b)))
+    {:bytes (.toByteArray o) :offsets (into {} (for [[k v] offs :when (pos? (long v))] [k (+ 3 (long v))]))}))
+
+(defn- name8! [^java.io.ByteArrayOutputStream o ^String s soff]
+  (let [b (.getBytes s "ISO-8859-1")]
+    (if (> (alength b) 8)
+      (do (le! o 0 4) (le! o (get soff s) 4))
+      (do (.write o b 0 (alength b)) (dotimes [_ (- 8 (alength b))] (.write o 0))))))
+
+(defn- section-name8! [^java.io.ByteArrayOutputStream o ^String s soff]
+  (let [b (.getBytes s "ISO-8859-1")]
+    (if (> (alength b) 8)
+      ;; encodeSectionName: `/OFFSET` in decimal (offsets below 10,000,000)
+      (let [t (.getBytes (str "/" (get soff s)) "ISO-8859-1")] (.write o t 0 (alength t)) (dotimes [_ (- 8 (alength t))] (.write o 0)))
+      (do (.write o b 0 (alength b)) (dotimes [_ (- 8 (alength b))] (.write o 0))))))
+
+(defn write-object
+  "The COFF object of the assembled ctx (WinCOFFWriter::writeObject): the file header, the section headers, each section's
+  raw data and relocations, the symbols with their auxiliary records, the string table. MACHINE: the header's machine."
+  [ctx ^long machine]
+  (let [secs (vec (:sections ctx))
+        ^java.util.ArrayList syms0 @(:coff-syms ctx)
+        ;; createFileSymbols: each .file a symbol `.file` with its name in auxiliary records of 18 bytes, after the rest
+        files (vec (:coff-files ctx))
+        syms (vec (concat syms0 (for [f files] {:name ".file" :file f :class IMAGE_SYM_CLASS_FILE :value 0 :type 0 :sect IMAGE_SYM_DEBUG})))
+        ;; setWeakDefaultNames: a weak default named after the first external defined symbol (not a COMDAT's first)
+        uniq (first (filter #(and (not (:weak-default %)) (= IMAGE_SYM_CLASS_EXTERNAL (:class %)) (or (:section %) (:abs %))) syms))
+        syms (mapv #(if (and (:weak-default %) uniq) (update % :name str "." (:name uniq)) %) syms)
+        naux (fn [e] (cond (:section-def e) 1 (:weak-ext e) 1 (:file e) (quot (+ (count (:file e)) 17) 18) :else 0))
+        index (loop [es syms i 0 out []] (if (empty? es) out (recur (rest es) (+ i 1 (long (naux (first es)))) (conj out i))))
+        nsym (if (seq syms) (+ (long (peek index)) 1 (long (naux (peek syms)))) 0)
+        {sbytes :bytes soff :offsets} (strtab (filter #(> (count (.getBytes ^String % "ISO-8859-1")) 8)
+                                                      (concat (map #(:name @%) secs) (map :name syms))))
+        ^java.util.HashMap rel (:coff-relocs-out ctx)
+        rels (fn [s] (vec (or (.get rel (:index @s)) [])))
+        hdr-end (+ 20 (* 40 (count secs)))
+        ;; assignFileOffsets
+        layout (loop [ss secs at hdr-end out []]
+                 (if (empty? ss)
+                   [out at]
+                   (let [s (first ss) z (section-size s) raw (if (bss? s) 0 at) at (if (bss? s) at (+ at z))
+                         n (count (rels s)) ra (if (pos? n) at 0) at (+ at (* 10 n) (if (>= n 0xffff) 10 0))]
+                     (recur (rest ss) at (conj out {:size z :raw raw :rel ra :nrel n})))))
+        [lays sym-off] layout
+        data (mapv (fn [s] (if (bss? s) nil (o/section-bytes s))) secs)
+        o (out)]
+    ;; the file header
+    (le! o machine 2) (le! o (count secs) 2) (le! o 0 4) (le! o sym-off 4) (le! o nsym 4) (le! o 0 2) (le! o 0 2)
+    ;; the section headers
+    (doseq [[s l] (map vector secs lays)]
+      (let [{:keys [chars]} (coff-of s) n (long (:nrel l))]
+        (section-name8! o (:name @s) soff)
+        (le! o 0 4) (le! o 0 4) (le! o (:size l) 4) (le! o (:raw l) 4) (le! o (:rel l) 4) (le! o 0 4)
+        (le! o (min n 0xffff) 2) (le! o 0 2)
+        (le! o (bit-or (long chars) (align-flag (long (:align @s))) (if (>= n 0xffff) IMAGE_SCN_LNK_NRELOC_OVFL 0)) 4)))
+    ;; the sections' data and relocations
+    (doseq [[s l d] (map vector secs lays data)]
+      (when d (.write o ^bytes d 0 (alength ^bytes d)))
+      (let [rs (rels s)]
+        (when (>= (count rs) 0xffff) (le! o (inc (count rs)) 4) (le! o 0 4) (le! o 0 2))
+        (doseq [r rs] (le! o (:offset r) 4) (le! o (nth index (:sym r)) 4) (le! o (:type r) 2))))
+    ;; the symbols
+    (doseq [[i e] (map-indexed vector syms)]
+      (name8! o (:name e) soff)
+      (le! o (:value e 0) 4)
+      (le! o (cond (:sect e) (:sect e) (:section e) (:coff-number @(:section e)) (:abs e) IMAGE_SYM_ABSOLUTE :else 0) 2)
+      (le! o (:type e 0) 2) (.write o (int (:class e))) (.write o (int (naux e)))
+      (cond
+        (:section-def e)
+        (let [s (:section-def e) k (.indexOf ^java.util.List secs s) l (nth lays k) d (nth data k)]
+          (le! o (:size l) 4) (le! o (min 0xffff (long (:nrel l))) 2) (le! o 0 2)
+          (le! o (if d (jamcrc d) 0) 4) (le! o (:coff-number @s) 2) (.write o 0) (.write o 0) (le! o 0 2))
+        (:weak-ext e)
+        (do (le! o (nth index (:other e)) 4) (le! o (:weak-ext e) 4) (dotimes [_ 10] (.write o 0)))
+        (:file e)
+        (let [b (.getBytes ^String (:file e) "ISO-8859-1") n (* 18 (long (naux e)))]
+          (.write o b 0 (alength b)) (dotimes [_ (- n (alength b))] (.write o 0)))))
+    (.write o ^bytes sbytes 0 (alength ^bytes sbytes))
+    (.toByteArray o)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the format's part for arbace.asm.obj
+
+(defn init!
+  "MCWinCOFFStreamer::initSections: .text, .data and .bss each aligned to 4 by a code alignment, then .text."
+  [ctx]
+  (doseq [[n c] [[".text" text-chars] [".data" data-chars] [".bss" bss-chars]]]
+    (section! ctx n c)
+    (o/align! ctx 4 0 1 nil true))
+  (section! ctx ".text" text-chars)
+  (vreset! (:prev ctx) nil))
+
+(defn state []
+  {:coff-cur (volatile! nil) :coff-relocs (java.util.ArrayList.) :coff-relocs-out (java.util.HashMap.)
+   :coff-syms (volatile! nil) :coff-by (volatile! nil) :coff-files (java.util.ArrayList.)})
+
+(defn base
+  "The format's part (arbace.asm.obj's *fmt*) less the architecture's (:record-reloc, :write: arbace.asm.amd64.coff). TEMP:
+  MCAsmInfo's InternalSymbolPrefix (`.L` for x86-64, `L` for i386)."
+  [^String temp]
+  {:id :coff
+   :state state
+   :temp? (fn [^String n] (or (str/includes? n "\u0000") (str/starts-with? n temp)))
+   :init! init!
+   :directive directive
+   :at-name? at-name?
+   :pcrel-resolved? pcrel-resolved?
+   :post-layout (fn [ctx] (insert-reloc-fixups! ctx) (bind! ctx))})
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the reader
+
+(defn- u ^long [^bytes b ^long at ^long n]
+  (loop [i (dec n) v 0] (if (neg? i) v (recur (dec i) (bit-or (bit-shift-left v 8) (bit-and (long (aget b (+ at i))) 0xff))))))
+
+(defn coff? [^bytes b] (and (>= (alength b) 20) (#{IMAGE_FILE_MACHINE_I386 IMAGE_FILE_MACHINE_AMD64} (u b 0 2))))
+
+(defn read-object
+  "A COFF object's bytes as data: {:machine :sections [{:index :number :name :raw-name :vsize :vaddr :size :offset :reloff
+  :lineoff :nreloc :nline :chars :data BYTES :relocs [{:offset :symidx :type}]}] :symbols [{:index :name :value :sect :type
+  :class :naux :aux BYTES}] :strtab-size}."
+  [^bytes b]
+  (when-not (coff? b) (throw (ex-info "not a COFF object" {:coff/error :not-coff})))
+  (let [nsec (u b 2 2) symoff (u b 8 4) nsym (u b 12 4) stroff (+ symoff (* 18 nsym))
+        strname (fn [^long off] (loop [e (+ stroff off)] (if (or (>= e (alength b)) (zero? (aget b e))) (String. b (int (+ stroff off)) (int (- e stroff off)) "ISO-8859-1") (recur (inc e)))))
+        name8 (fn [^long at] (let [e (loop [i 0] (if (or (= i 8) (zero? (aget b (+ at i)))) i (recur (inc i))))] (String. b (int at) (int e) "ISO-8859-1")))
+        secs (vec (for [i (range nsec) :let [h (+ 20 (* 40 i)) raw (name8 h)
+                                             nm (if (str/starts-with? raw "/") (strname (Long/parseLong (subs raw 1))) raw)
+                                             size (u b (+ h 16) 4) off (u b (+ h 20) 4) ro (u b (+ h 24) 4) nr (u b (+ h 32) 2)]]
+                    {:index i :number (inc i) :name nm :raw-name (vec (java.util.Arrays/copyOfRange b (int h) (int (+ h 8))))
+                     :vsize (u b (+ h 8) 4) :vaddr (u b (+ h 12) 4) :size size :offset off :reloff ro :lineoff (u b (+ h 28) 4)
+                     :nreloc nr :nline (u b (+ h 34) 2) :chars (u b (+ h 36) 4)
+                     :data (if (zero? off) (byte-array 0) (java.util.Arrays/copyOfRange b (int off) (int (+ off size))))
+                     :relocs (vec (for [k (range nr) :let [r (+ ro (* 10 k))]]
+                                    {:offset (u b r 4) :symidx (u b (+ r 4) 4) :type (u b (+ r 8) 2)}))}))
+        syms (loop [i 0 out []]
+               (if (>= i nsym)
+                 out
+                 (let [h (+ symoff (* 18 i)) naux (u b (+ h 17) 1)
+                       nm (if (zero? (u b h 4)) (strname (u b (+ h 4) 4)) (name8 h))
+                       sect (let [v (u b (+ h 12) 2)] (if (>= v 0x8000) (- v 0x10000) v))]
+                   (recur (+ i 1 naux)
+                          (conj out {:index i :name nm :value (u b (+ h 8) 4) :sect sect :type (u b (+ h 14) 2) :class (u b (+ h 16) 1)
+                                     :naux naux :aux (java.util.Arrays/copyOfRange b (int (+ h 18)) (int (+ h 18 (* 18 naux))))})))))]
+    {:machine (u b 0 2) :sections secs :symbols syms
+     :by-index (into {} (map (fn [y] [(:index y) y]) syms))}))

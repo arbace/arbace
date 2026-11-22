@@ -218,3 +218,134 @@
                                    (for [k (range npc) :let [f (+ at 16 (* 12 k))]]
                                      (str "Fault kind: " (get {1 "FaultingLoad" 2 "FaultingLoadStore" 3 "FaultingStore"} (u f 4))
                                           ", faulting PC offset: " (u (+ f 4) 4) ", handling PC offset: " (u (+ f 8) 4)))))))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; COFF (COFFObjectFile.cpp, COFFDumper.cpp, llvm-objdump's COFF paths, llvm-nm's getSymbolNMTypeChar)
+
+(defn coff-format "COFFObjectFile::getFileFormatName." [o] (if (= 0x8664 (long (:machine o))) "COFF-x86-64" "COFF-i386"))
+(defn- coff64? [o] (= 0x8664 (long (:machine o))))
+
+(def ^:private coff-reloc-names-64
+  {0 "IMAGE_REL_AMD64_ABSOLUTE" 1 "IMAGE_REL_AMD64_ADDR64" 2 "IMAGE_REL_AMD64_ADDR32" 3 "IMAGE_REL_AMD64_ADDR32NB"
+   4 "IMAGE_REL_AMD64_REL32" 5 "IMAGE_REL_AMD64_REL32_1" 6 "IMAGE_REL_AMD64_REL32_2" 7 "IMAGE_REL_AMD64_REL32_3"
+   8 "IMAGE_REL_AMD64_REL32_4" 9 "IMAGE_REL_AMD64_REL32_5" 0xa "IMAGE_REL_AMD64_SECTION" 0xb "IMAGE_REL_AMD64_SECREL"
+   0xc "IMAGE_REL_AMD64_SECREL7" 0xd "IMAGE_REL_AMD64_TOKEN" 0xe "IMAGE_REL_AMD64_SREL32" 0xf "IMAGE_REL_AMD64_PAIR"
+   0x10 "IMAGE_REL_AMD64_SSPAN32"})
+(def ^:private coff-reloc-names-32
+  {0 "IMAGE_REL_I386_ABSOLUTE" 1 "IMAGE_REL_I386_DIR16" 2 "IMAGE_REL_I386_REL16" 6 "IMAGE_REL_I386_DIR32"
+   7 "IMAGE_REL_I386_DIR32NB" 9 "IMAGE_REL_I386_SEG12" 0xa "IMAGE_REL_I386_SECTION" 0xb "IMAGE_REL_I386_SECREL"
+   0xc "IMAGE_REL_I386_TOKEN" 0xd "IMAGE_REL_I386_SECREL7" 0x14 "IMAGE_REL_I386_REL32"})
+
+(defn coff-reloc-name [o r] (get (if (coff64? o) coff-reloc-names-64 coff-reloc-names-32) (:type r) "Unknown"))
+
+(defn- coff-text? [s] (pos? (bit-and (long (:chars s)) 0x20)))
+(defn- coff-bss? [s] (pos? (bit-and (long (:chars s)) 0x80)))
+
+(defn coff-objdump-d
+  "llvm-objdump -d of a COFF object: its code sections (IMAGE_SCN_CNT_CODE) of contents, the symbols in them (every named one,
+  the section's own too) at their values, the section's name at its start when none is."
+  [o run]
+  (oc/disasm-lines
+   (str (or (:file-input run) "<stdin>") ":\tfile format " (str/lower-case (coff-format o)))
+   (for [s (:sections o) :when (and (coff-text? s) (not (coff-bss? s)) (pos? (long (:size s))))]
+     (let [ys (for [y (:symbols o) :when (and (= (:number s) (:sect y)) (seq (:name y)))] {:addr (:value y) :name (:name y) :type 0})
+           ys (if (some #(zero? (long (:addr %))) ys) ys (conj ys {:addr 0 :name (:name s) :type 2}))]
+       {:name (:name s) :addr 0 :data (:data s) :syms ys}))
+   run))
+
+(defn coff-objdump-r
+  "llvm-objdump -r of a COFF object (printRelocations): each section's relocations, the offset in the address's width, the
+  type, the symbol's name."
+  [o run]
+  (concat ["" (str (or (:file-input run) "<stdin>") ":\tfile format " (str/lower-case (coff-format o)))]
+          (mapcat (fn [s]
+                    (when (seq (:relocs s))
+                      (concat ["" (str "RELOCATION RECORDS FOR [" (:name s) "]:") "OFFSET           TYPE                     VALUE"]
+                              (for [r (:relocs s)]
+                                (str (format (if (coff64? o) "%016x" "%08x") (:offset r)) " " (format "%-24s" (coff-reloc-name o r)) " "
+                                     (:name (get (:by-index o) (:symidx r)) ""))))))
+                  (:sections o))))
+
+(def ^:private coff-chars
+  [["IMAGE_SCN_TYPE_NOLOAD" 0x2] ["IMAGE_SCN_TYPE_NO_PAD" 0x8] ["IMAGE_SCN_CNT_CODE" 0x20] ["IMAGE_SCN_CNT_INITIALIZED_DATA" 0x40]
+   ["IMAGE_SCN_CNT_UNINITIALIZED_DATA" 0x80] ["IMAGE_SCN_LNK_OTHER" 0x100] ["IMAGE_SCN_LNK_INFO" 0x200] ["IMAGE_SCN_LNK_REMOVE" 0x800]
+   ["IMAGE_SCN_LNK_COMDAT" 0x1000] ["IMAGE_SCN_GPREL" 0x8000] ["IMAGE_SCN_MEM_PURGEABLE" 0x20000] ["IMAGE_SCN_MEM_16BIT" 0x20000]
+   ["IMAGE_SCN_MEM_LOCKED" 0x40000] ["IMAGE_SCN_MEM_PRELOAD" 0x80000]
+   ["IMAGE_SCN_ALIGN_1BYTES" 0x100000] ["IMAGE_SCN_ALIGN_2BYTES" 0x200000] ["IMAGE_SCN_ALIGN_4BYTES" 0x300000]
+   ["IMAGE_SCN_ALIGN_8BYTES" 0x400000] ["IMAGE_SCN_ALIGN_16BYTES" 0x500000] ["IMAGE_SCN_ALIGN_32BYTES" 0x600000]
+   ["IMAGE_SCN_ALIGN_64BYTES" 0x700000] ["IMAGE_SCN_ALIGN_128BYTES" 0x800000] ["IMAGE_SCN_ALIGN_256BYTES" 0x900000]
+   ["IMAGE_SCN_ALIGN_512BYTES" 0xA00000] ["IMAGE_SCN_ALIGN_1024BYTES" 0xB00000] ["IMAGE_SCN_ALIGN_2048BYTES" 0xC00000]
+   ["IMAGE_SCN_ALIGN_4096BYTES" 0xD00000] ["IMAGE_SCN_ALIGN_8192BYTES" 0xE00000] ["IMAGE_SCN_LNK_NRELOC_OVFL" 0x1000000]
+   ["IMAGE_SCN_MEM_DISCARDABLE" 0x2000000] ["IMAGE_SCN_MEM_NOT_CACHED" 0x4000000] ["IMAGE_SCN_MEM_NOT_PAGED" 0x8000000]
+   ["IMAGE_SCN_MEM_SHARED" 0x10000000] ["IMAGE_SCN_MEM_EXECUTE" 0x20000000] ["IMAGE_SCN_MEM_READ" 0x40000000]
+   ["IMAGE_SCN_MEM_WRITE" 0x80000000]])
+
+(defn coff-readobj
+  "llvm-readobj (LLVM style) of a COFF object: the file's summary, then as the options ask the sections (-S, with --sd their
+  data; the characteristics as printFlags lists them, the alignment an enumeration under its mask) and the relocations (-r)."
+  [o opts]
+  (let [has (fn [& ks] (some (set opts) ks))]
+    (concat
+     ["" "File: <stdin>" (str "Format: " (coff-format o)) (str "Arch: " (if (coff64? o) "x86_64" "i386"))
+      (str "AddressSize: " (if (coff64? o) "64" "32") "bit")]
+     (when (has "-S" "--sections" "--section-headers")
+       (concat ["Sections ["]
+               (mapcat (fn [s]
+                         (let [ch (long (:chars s))
+                               set-fl (sort-by first (filter (fn [[_ v]] (let [v (long v)]
+                                                                            (if (pos? (bit-and v 0xF00000)) (= v (bit-and ch 0xF00000)) (= v (bit-and ch v)))))
+                                                             coff-chars))]
+                           (concat ["  Section {" (str "    Number: " (:number s))
+                                    (str "    " (binary-text "Name" (:name s) (:raw-name s)))
+                                    (str "    VirtualSize: " (hexu (:vsize s))) (str "    VirtualAddress: " (hexu (:vaddr s)))
+                                    (str "    RawDataSize: " (:size s)) (str "    PointerToRawData: " (hexu (:offset s)))
+                                    (str "    PointerToRelocations: " (hexu (:reloff s))) (str "    PointerToLineNumbers: " (hexu (:lineoff s)))
+                                    (str "    RelocationCount: " (:nreloc s)) (str "    LineNumberCount: " (:nline s))
+                                    (str "    Characteristics [ (" (hexu ch) ")")]
+                                   (for [[nm v] set-fl] (str "      " nm " (" (hexu v) ")"))
+                                   ["    ]"]
+                                   (when (and (has "--sd" "--section-data") (not (coff-bss? s)))
+                                     (concat ["    SectionData (" ] (#'a/section-data-lines (:data s) 6) ["    )"]))
+                                   ["  }"])))
+                       (:sections o))
+               ["]"]))
+     (when (has "-r" "--relocs" "--relocations")
+       (concat ["Relocations ["]
+               (mapcat (fn [s] (when (seq (:relocs s))
+                                 (concat [(str "  Section (" (:number s) ") " (:name s) " {")]
+                                         (for [r (:relocs s)] (let [y (get (:by-index o) (:symidx r))]
+                                                                (str "    " (hexu (:offset r)) " " (coff-reloc-name o r) " "
+                                                                     (if (seq (:name y)) (:name y) "-") " (" (if y (:symidx r) -1) ")")))
+                                         ["  }"])))
+                       (:sections o))
+               ["]"])))))
+
+(defn coff-nm
+  "llvm-nm of a COFF object: its symbols but the section definitions and file records (SF_FormatSpecific), sorted by name,
+  each with its value (none when undefined) and getNMTypeChar's letter (getSymbolNMTypeChar's for COFF: by its section's
+  characteristics, upper case when external)."
+  [o]
+  (let [w (if (coff64? o) 16 8)
+        secs (into {} (map (fn [s] [(:number s) s]) (:sections o)))
+        lines (for [y (:symbols o)
+                    :let [cls (long (:class y)) sect (long (:sect y))
+                          section-def? (and (= 3 cls) (pos? (long (:naux y))) (zero? (long (:value y))) (contains? secs sect)
+                                            (= (:name y) (:name (secs sect))))
+                          file? (= 103 cls)]
+                    :when (not (or section-def? file?))]
+                (let [ext (or (= 2 cls) (= 105 cls))
+                      undef (and (zero? sect) (= 2 cls) (zero? (long (:value y))))
+                      common (and (zero? sect) (= 2 cls) (pos? (long (:value y))))
+                      c (cond undef \U common \C (= sect -1) \a
+                              (or (str/starts-with? (:name y) ".debug") (str/starts-with? (:name y) ".sxdata")) \N
+                              (= sect -2) \n
+                              :else (let [s (secs sect) ch (long (:chars s 0))]
+                                      (cond (and s (str/starts-with? (:name s) ".idata")) \i
+                                            (pos? (bit-and ch 0x20)) \t
+                                            (pos? (bit-and ch 0x40)) (if (pos? (bit-and ch 0x80000000)) \d \r)
+                                            (pos? (bit-and ch 0x80)) \b
+                                            (pos? (bit-and ch 0x200)) \i
+                                            :else \?)))
+                      c (if (and ext (not (#{\U \C} c))) (Character/toUpperCase (char c)) c)]
+                  [(:name y) (str (if (or undef (= c \U)) (apply str (repeat w \space)) (format (str "%0" w "x") (:value y))) " " c " " (:name y))]))]
+    (mapv second (sort-by first lines))))

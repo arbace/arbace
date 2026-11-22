@@ -9,8 +9,10 @@
   llvm-objdump prints it: the address, the bytes, the text, a branch's target and its symbol; llvm-objdump --headers;
   llvm-readobj's and llvm-readelf's views, arm64's in x86-64's names), and the run's CHECK lines are held to the view as
   FileCheck holds them. A run that states an error (`not llvm-mc`) is met when the assembler reports the stated errors. A
-  Mach-O or COFF triple's object is another object writer's (:other-format); an i386 triple's is assembled in 32-bit mode
-  with i386's REL addends and judged at the disassembly (:elf32 for its other views: Arbace writes ELF64)."
+  Mach-O or COFF triple's object is Arbace's Mach-O or COFF object (x86-objs, AXS99 (b): arbace.asm.macho, arbace.asm.coff),
+  held to that format's views (arbace.asm.amd64.objview: llvm-objdump -d, --unwind-info with --dwarf=frames,
+  --fault-map-section, -r; llvm-readobj -S, --sd, -r; llvm-nm); an ELF i386 triple's is assembled in 32-bit mode with i386's
+  REL addends and judged at the disassembly (:elf32 for its other views: Arbace writes ELF64)."
   (:require [arbace.repr.asm :as asm]
             [arbace.asm.amd64.asm :as x]
             [arbace.asm.amd64.obj :as obj]
@@ -371,7 +373,7 @@
     (cond
       (empty? cs) []
       ;; a format whose writer is not built (x86-objs: Mach-O's and COFF's are)
-      (not (#{:elf :macho} (:format tgt))) (all :other-format)
+      (not (#{:elf :macho :coff} (:format tgt))) (all :other-format)
       (:x32 tgt) (all :x32)
       (vector? (:backend run)) (all :options)
       ;; llvm-mc --stats (x86-print): MCAssembler's RelaxationSteps, the one statistic the object assembler counts as LLVM's
@@ -442,17 +444,36 @@
   (let [f (frequencies (map second (:per-run (line-results path))))]
     {:stated (reduce + 0 (vals f)) :met (get f :pass 0) :by (into (sorted-map) (dissoc f :pass))}))
 
+(defn- mutate
+  "The object's bytes with one byte flipped (its low bit) at OFFSET of section SECT (x86-objs: the controls' one byte changed),
+  the section found in the format's reader (ELF's, Mach-O's, COFF's); nil when there is no such byte."
+  [fmt ^bytes b ^String sect ^long off]
+  (let [o (case fmt
+            :elf (elf/read-object b)
+            :macho ((requiring-resolve 'arbace.asm.macho/read-object) b)
+            :coff ((requiring-resolve 'arbace.asm.coff/read-object) b))
+        s (first (filter #(= sect (:name %)) (:sections o)))
+        at (when s (+ (long (:offset s)) off))]
+    (when (and s (< off (long (:size s))) at (< (long at) (alength b)))
+      (let [c (aclone b)] (aset-byte c (int at) (unchecked-byte (bit-xor (long (aget c (int at))) 1))) c))))
+
 (defn control
   "A negative control: SUBJECT's object (its first run's) judged by REFERENCE's CHECK lines (its runs, in the subject's
   first run's options; a test against itself: assembled without its runs' X86AsmBackend options, the padding, alignment and
-  -mcpu undone): `differs` as it must when a line is not met, `same` when every one is, `left` when there is nothing to judge."
-  [subj ref]
+  -mcpu undone; x86-objs: with MUTATE `byte SECTION OFFSET`, each run's own object, that byte of it flipped): `differs` as it
+  must when a line is not met, `same` when every one is, `left` when there is nothing to judge."
+  [subj ref & mutation]
   (let [ssrc (asm/latin1 subj) srun (first (runs ssrc))
         src (asm/latin1 ref)
-        over (if (= subj ref) {:backend {}} (when srun (select-keys srun [:backend :defsym])))
-        res (mapcat (fn [run] (let [r (assemble-run subj (merge run over))]
+        [mk sect off] mutation
+        byte? (= mk "byte")
+        over (cond byte? nil (= subj ref) {:backend {}} :else (when srun (select-keys srun [:backend :defsym])))
+        res (mapcat (fn [run] (let [r (assemble-run subj (merge (assoc run :path subj) over))
+                                    r (if (and byte? (:bytes r))
+                                        (if-let [m (mutate (:format (:target run)) (:bytes r) sect (Long/parseLong off))] (assoc r :bytes m) {})
+                                        r)]
                                 (if (:bytes r) (judge-run src run r) [])))
-                    (filter #(and (= :elf (:format (:target %))) (not (:error? %))) (runs src)))]
+                    (filter #(and (#{:elf :macho :coff} (:format (:target %))) (not (:error? %))) (runs src)))]
     (cond (empty? (filter #(#{:pass :fail} (second %)) res)) "left"
           (some #(= :fail (second %)) res) "differs"
           :else "same")))
