@@ -9858,3 +9858,127 @@ own record's rows either side moved run again on the merged tree (164 files, `--
   portable into the own front end, a GNU rule at a time, if the user wants them counted as deferred instead), :gxx-only-rules 2
   (CP328 (a)), :musl-libc 1 (warn/Wconversion-null-4.C: musl's NULL is nullptr, so g++ here errs where the directives expect a
   warning).
+
+## As built: cpp-gnu, GCC's own rules in Arbace's front end (2026-11-22; branch `cpp-gnu-1122` from next `a8c6d3137`; the burst's stream on the user's decision of 2026-11-22)
+
+The user's decision of 2026-11-22 (doc/JOURNAL.md, "the user's decisions on the burst's second questions"): CP398 (c)'s
+`:gcc-own-rules` are built, each GNU extension's rule ported into Arbace's own front end one at a time. The class is `:deferred` since
+(test/cpp/divergences-dg.edn), a file leaving its `:tests` when its own row passes. Each rule is restated from the GCC 15.2 manual
+(gcc/doc/extend.texi and invoke.texi of the pinned gcc-15.2.0.tar.xz), the C++ standard where GCC applies it, the Itanium C++ ABI for
+the runtime interfaces, and the tests' dg-error lines; no GCC code was read or ported (GPL). Where the manual is silent on a message or
+a place, g++ 15.2 was run on the test by hand to see where it reports (behaviour, not code); no check runs g++.
+
+### The rules (arbace/repr/cpp/diag.ae's checks, the parser's soft diagnostics)
+
+- attributes (`gnu-rules`, `attr-nodes`): abi_tag's arguments narrow string literals naming identifiers (abi/abi-tag13.C); aligned not on
+  an enumerator (ext/attrib68.C); noinline, always_inline and the other no-argument attributes given arguments (ext/attr-noinline-4.C);
+  transparent_union's first member of the union's mode, an integer, enumeration or pointer of its size (ext/transparent-union.C); a class
+  redeclared with another visibility (ext/visibility/redecl1.C); vector_size on main's specifiers (warn/main-3.C); GNU attributes alone
+  before `;`, "declaration does not declare anything" (ext/attrib45.C); unavailable's uses of types, variables, functions, members and
+  lambdas (ext/attr-unavailable-1.C, -6.C, -8.C, -9.C, cpp23/lambda-attr2.C); format's string index counting `this`
+  (ext/attr-format3.C); gnu_inline's inline redeclarations (ext/gnu-inline-global-reject.C, with redefinitions a macro writes); weak
+  after an if constexpr's use (cpp1z/constexpr-if36.C); musttail (`musttail`: a throwing callee in a non-throwing caller, a return type
+  mismatch, a returned class or a local with a destructor that does something; musttail8.C to 11.C, opt/musttail4.C); packed fields
+  bound to references (`gnu-packed`: ext/packed3.C, packed8.C, other/crash-4.C); the error attribute through always_inline functions
+  with literal arguments (`error-attr-calls`: ext/va-arg-pack-len-2.C);
+- declarations and classes: anonymous structs with bases (ext/anon-struct8.C, -9.C); [basic.scope.class]/2's changes of meaning
+  (`changes-meaning` over the parser's `:_cm-uses`, complete-class contexts aside: lookup/name-clash7.C, -12.C, -13.C, -14.C,
+  lookup/redecl1.C, ext/uow-3.C, -4.C, warn/changes-meaning2.C); flexible array members (`flexible-arrays`: the first one not at the end
+  of a structure's bases and members, contributed by members, unions and anonymous structs; a mem-initializer or default member
+  initializer of one; a class member's list reaching one; a nested context; a class element with a destructor; __builtin_clear_padding;
+  string literals for arithmetic ones; ext/flexary4.C, 5, 12, 18, 21, 22, 28, 29, 32, 36, 37, 42, array1.C, builtin-clear-padding-1.C,
+  torture/pr64312.C, parse/pr43765.C with GNU's `name:` designator); typedefs of a fundamental and a class type (ext/typeof10.C);
+  -fno-new-inheriting-ctors (cpp0x/inh-ctor3.C, inh-ctor11.C); GCC's maximum object size (`object-sizes`: other/large-size-array.C,
+  template/array32.C); variable-length array types for members, parameters and template arguments (`vla-types`:
+  diagnostic/variably-modified-type-1.C, template/pr65390.C);
+- types and literals: __int128 under -pedantic-errors (ext/int128-1.C, -6.C); `unsigned` with typeof or a typedef-name (ext/typeof13.C);
+  `_Complex (` (parse/parser-pr28152.C, -2.C); fixed-point literal suffixes under -fext-numeric-literals (cpp0x/gnu_fext-numeric-literals.C,
+  std_fext-numeric-literals.C); floating and vector operands of subscripts, array new, switch, `~` and mixed vector arithmetic
+  (`operand-types`: conversion/simd3.C, simd4.C); a vector condition's ?: with two scalars, their common type of the elements' size and
+  no truncating conversion (ext/vector23.C);
+- statements and expressions: labels as values (`__label__`, `&&label` outside a function, as an enumerator, a computed goto of array or
+  class type: ext/label1.C, label10.C, label11.C); duplicate case values and GNU case ranges' overlaps (`case-values`:
+  ext/case-range2.C); statement expressions in constant expressions (ext/stmtexpr21.C, stmtexpr25.C); asm (`gnu-asm`: register-only
+  operands of classes that stay in memory, an explicit register variable's address, an asm label on a field, asm run by a cleanup in a
+  constant expression: ext/asm10.C, asm15.C, asm16.C, asmspecInvalid.C, warn/register-var-1.C, ext/constexpr-attr-cleanup1.C); a
+  modifiable lvalue's const locals (`read-only-modify`, with -Wno-template-body's deferral: template/permissive-error1b.C, -1c.C);
+- builtins and traits: built-in traits in a function template's signature (ext/decay1.C, is_empty2.C, underlying_type7.C), and
+  __underlying_type of a fundamental type at a call's explicit argument, no viable candidate (ext/underlying_type14.C); __integer_pack
+  (its expansion, its length's range, outside a template, an integer for its class: ext/integer-pack1.C);
+  __is_invocable's incomplete operands (ext/is_invocable3.C); a trait's `((` (ext/is_class_error1.C); __builtin_classify_type's type-id
+  (ext/builtin-classify-type-2.C); __builtin_va_arg_pack's place (ext/va-arg-pack-2.C); __builtin_operator_new and _delete selecting no
+  replaceable function (ext/builtin-operator-new-2.C); builtins without a library fallback used as values (addr_builtin-1.C);
+  __builtin_launder's arguments (cpp1z/launder2.C);
+- GCC's interfaces: the EH runtime's implicit __cxa_* declarations (eh/builtin6.C, 7, 9, 10, 11), __dso_handle (init/dso_handle2.C),
+  __dynamic_cast (rtti/dyncast8.C), std::decimal's classes (dfp/base.C, dfp/nofields.C), std::initializer_list's layout
+  (cpp0x/initlist93.C), std::coroutine_handle's from_address (coroutines/pr105475-3.C);
+- GCC's options: the driver's (`driver-errors`: cpp1z/pr115440.C, opt/pr79659.C); -fno-exceptions once (eh/no-exceptions1.C);
+  -Werror=deprecated-copy-dtor (cpp0x/depr-copy5.C); an endless constexpr loop, -fimplicit-constexpr, -fno-immediate-escalation
+  (`constexpr-options`: cpp1y/constexpr-loop6.C, ext/fimplicit-constexpr1.C, cpp2a/consteval-prop17.C); -Wno-template-body;
+- GCC's pragmas (`pragmas`, over the preprocessor's records): a loop pragma outside a function, an unroll factor out of range (with
+  templates' specializations), a front-end pragma inside a declaration (parse/ivdep-2.C, -3.C, pragma2.C, ext/unroll-6.C, -8.C), with
+  the parser's "expected declaration before '}' token" for a stray brace at namespace scope;
+- an IFNDR rule GCC diagnoses: an atomic constraint's satisfaction changing at a class's completion (`satisfaction-changes`:
+  cpp2a/concepts-complete1.C to -4.C).
+
+### The shared functions touched (named for queue 518 and the other streams)
+
+- arbace/repr/cpp/diag.ae: `checks` (the new checks appended), `diagnose` (three post-filters: a check's `:suppress` lines drop the code
+  generator's Sema errors there, flexible-arrays' nested context; `-Wno-template-body`; a `:line 0` error counted with `:other`; and the
+  driver's errors with no line), `dunder-ok?` (GCC's own builtins `__builtin_va_arg_pack`, `__builtin_va_arg_pack_len`,
+  `__integer_pack` never undeclared), `conflict` (typedefs of a fundamental and a class type), `redefinitions` (`mine?`, `report!`, `reqs?` and the offsets:
+  a declaration a macro of the main file writes is the main file's at its expansion). Not touched: `sema-errors` and its namespace-scope
+  loop (queue 518's), arbace/cpp/sema.ae, arbace/cpp/template.ae.
+- arbace/repr/cpp/parse.ae: `parse-decl-specs` (__int128, __extension__, typeof and typedef-names after unsigned), `attr-nodes` (no-argument
+  GNU attributes), `parse-class-specifier` (the forward declaration's `:_vis`, the class's `:_cm-uses` and `*cm-scopes*`), `parse-name`
+  (`note-cm-use!`), `parse-param-list` and the declarator's noexcept (complete-class contexts), the simple declaration (an attribute-only
+  declaration; a field's asm label; `:_asmreg`), `parse-statement` (musttail, `__label__`, the computed goto's `:_target`), the primary
+  expression (`&&label`'s `:_label`, `_Complex (`, a trait's `((`, `__builtin_classify_type`'s type-id), the braced list (GNU's `name:`
+  designator) and `designate` (its errors), `parse-lambda` (`:_unavailable`), `parse-unit`'s top loop (a stray `}`).
+- arbace/repr/cpp/native.ae: `parse-file` (`:pragmas`, the main file's pragma records); arbace/repr/cpp/dg.ae: `read-own` (`*driver-args*`
+  bound to the file's g++ options; the file's dg-prune-output patterns applied to the own errors as to clang's and g++'s).
+
+### Checked
+
+- each rule on its files with the REPL's probe (arbace.repr.cpp.dg's verdict over the file's dg.edn entry, read-own's arguments), and on
+  hand-written valid programs beside (`.tmp/probe/t/ok*.C`: no error, g++ 15.2 accepting them);
+- the own record's 1,699 passes again after the parser's first changes (cc457bf9c; `bin/repr-cpp dg --corpus dg-error --front native
+  --only`, no record): 1,692 pass; 2 timeouts of the loaded host and 5 files that had passed on the parse error GNU's `name:` designator
+  was (template/crash62.C, parse/error9.C, init/error2.C, ext/pr28291.C) or on an error the file's dg-prune-output removes
+  (cpp0x/initlist-err1.C), fixed by GCC's rules for GNU designators and the prune applied to the own errors;
+- the record run at 383308773 (`--only` 1,957 files: the own passes but the slow pair, the class's 135 with the control's pair, 123 failing
+  files whose expected messages name a rule's diagnostic; `--record`): own pass 1,819, 2 regressions (ext/label9.C, cpp0x/gen-attrs-76.C,
+  which had passed on `__label__`'s parse error; fixed by the local label declarations' place and attributes before __label__), the
+  control _control/dg/dr2082-vs-dr1423 failing as it must, 2 crashes and 3 timeouts as recorded before; then 50 files at dd07181f5
+  (every dg-error file naming vector_size, __underlying_type, __type_pack_element, __integer_pack, make_integer_sequence,
+  make_index_sequence or __label__, and the control's pair; `--record`): no regression, the control failing as it must;
+- the slow pair (diagnostic/missing-header-pr110164.C, cpp0x/udlit-suffix-neg.C: past the 300 s cap under load) at the head with a 900 s
+  cap, no record: both pass (1,192 s for the two), their pass rows kept;
+- `bin/reap --record` (0 problems), `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (9 pairs, 0 problems).
+  Not run: the gate (the user's rule), a whole dg-error run (the files the rules reach were run), the round trips and run checks (the
+  converter's and the code generator's paths read the same trees: the parser's tree changes are `:_` facts, a `__label__` DeclStmt,
+  the computed goto's `:_target`, the builtins' text nodes).
+
+### The cells
+
+C++ read 5,665 / 176 / 652 (after the class's move to :deferred; 5,665 / 311 / 517 at next) -> 5,786 / 176 / 532 (37 n/a): 120 of
+:gcc-own-rules' 135 rows to pass (15 left), and coroutines/pr105475-broken-spec.C, an :undefined-expectation (n/a) file, now passing by
+its own lines (std::coroutine_handle's from_address rule; n/a 38 -> 37). The own record's passes 1,699 -> 1,826 (seven files of other
+classes pass on the rules too: eh/crash2.C, ext/attr-unavailable-10.C, ext/flexary23.C, musttail12.C, musttail13.C,
+warn/Wplacement-new-size-6.C, already passing by clang's record, and pr105475-broken-spec.C). C++'s completeness 96.14 -> 96.60
+(0.961380 -> 0.966005; floored 96, unchanged), without by design 97.36 -> 97.83; independence 95.40 -> 95.60 (0.953894 -> 0.955834,
+the read stage 0.779806 -> 0.789510; floored 95, unchanged).
+
+### Left, and the decisions
+
+- :gcc-own-rules' 15 (deferred): the template instantiation depth (template/pr23510.C, template/recurse.C, cpp0x/alias-decl-55.C,
+  template/vtable2.C, cpp2a/concepts-recursive-sat1.C: GCC's -ftemplate-depth over an instantiation chain, the instantiation's ground,
+  arbace/cpp/template.ae; alias-decl-55 and vtable2 time out today), the constant evaluator (ext/constexpr-vla1.C, constexpr-vla2.C,
+  cpp1y/pr68180.C: a VLA's subscript and a vector's element in constant evaluation, arbace/cpp/sema.ae's evaluator), GCC 15's constexpr
+  asm strings (cpp1z/constexpr-asm-5.C, 85 lines of size()/data() evaluation), the __atomic builtins' argument rules
+  (template/builtin-atomic-overloads5.C, -6.C), -fabi-version=2's vector manglings (abi/mangle41.C, its read past 300 s on
+  <x86intrin.h>), __type_pack_element's index past its pack in a recursive instantiation (ext/type_pack_element4.C), and
+  -fno-new-ttp-matching's template template arguments (cpp0x/variadic-ex14.C, template/ttp16.C: queue 518's family, left to it);
+- an observation for the user: coroutines/pr105475-3.C passes on the coroutine_handle rule, though, as pr105475-broken-spec.C (which 497-3
+  (a) made :undefined-expectation), it specializes std::coroutine_handle ([coroutine.handle.general]/2: undefined behaviour); both now pass
+  by their own lines, so no class needs them.

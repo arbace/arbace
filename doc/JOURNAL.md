@@ -17092,3 +17092,68 @@ Asked by the main session after cpp-read's, hs-r7's and R3's reports and the Pyt
 - Rust C6-5 (a): the library build's 36 units are the build's description, data like `std.edn` (made once by `std-crates --units`, held to
   Cargo's `--unit-graph` in the oracle tier); C4's identities count own. Alternatives not taken: (b) port Cargo's resolution (5-8 agent
   days); (c) (a) now, (b) when a second library build needs it.
+
+## 2026-11-22: cpp-gnu, GCC's own rules built into Arbace's C++ front end (the user's decision of 2026-11-22)
+
+Branch `cpp-gnu-1122` from mac/next `a8c6d3137` (with cpp-read-1122), in `.tmp/worktrees/cpp-gnu`; no gate (the user's rule), light
+checks. The user's decision of 2026-11-22 (the entry above): C++'s 135 `:gcc-own-rules` rows (CP398 (c)) are built, each GNU extension's
+rule ported into Arbace's own front end one at a time, restated from GCC's documented behaviour (the GCC 15.2 manual, gcc/doc/extend.texi
+and invoke.texi of the pinned gcc-15.2.0.tar.xz; the C++ standard where GCC applies it; the Itanium C++ ABI for the runtime interfaces)
+and the tests' dg-error lines; no GCC code read or ported (GPL). Where the manual names no message or place, g++ 15.2 was run on the
+test by hand (behaviour only); no check runs it.
+
+**The class**: `:gcc-own-rules` `:kind :deferred` (test/cpp/divergences-dg.edn; "deferred until built"), its four files the own front end
+already passed out of `:tests` (warn/deprecated-19.C, cpp2a/nontype-complex1.C, ext/unary_trait_incomplete.C, template/ttp17.C), then each
+file whose own row passes taken out as its rule landed.
+
+**The rules** (doc/cpp/CPP-SURVEY.md, "As built: cpp-gnu", the full list with the files): attributes (abi_tag, aligned on an enumerator, no-argument attributes,
+transparent_union's mode, visibility redeclared, vector_size on main, attribute-only declarations, unavailable, format's index with
+`this`, gnu_inline's inline redeclarations, weak after a constant-evaluated use, musttail, packed fields bound to references, the error
+attribute through always_inline); anonymous structs with bases; [basic.scope.class]/2's changes of meaning; flexible array members (not
+at the end, their initializers, a nested context, clear_padding); typedefs of a fundamental and a class type; -fno-new-inheriting-ctors;
+GCC's maximum object size; variable-length array types; __int128 under -pedantic-errors; unsigned with typeof or a typedef-name;
+`_Complex (`; fixed-point literal suffixes; floating and vector operands, vector conditionals; labels as values; case values and GNU
+case ranges; statement expressions in constant expressions; asm operands, register variables, asm labels on fields, asm in a cleanup;
+const locals modified; built-in traits in signatures, __underlying_type's substitution, __is_invocable's incomplete operands, a trait's
+operand, __builtin_classify_type's type-id, __builtin_va_arg_pack, __builtin_operator_new/_delete, builtins without a library fallback
+as values, __builtin_launder, __integer_pack; the EH runtime's __cxa_* declarations, __dso_handle, __dynamic_cast, std::decimal,
+std::initializer_list's layout, std::coroutine_handle's from_address; the driver's options, -fno-exceptions, -Werror=deprecated-copy-dtor,
+-fconstexpr-loop-limit, -fimplicit-constexpr, -fno-immediate-escalation, -Wno-template-body; GCC's front-end pragmas (ivdep, unroll,
+novector, a pragma inside a declaration); an atomic constraint's satisfaction changing at a class's completion (IFNDR GCC diagnoses).
+
+**Shared functions touched** (for queue 518, whose families -- explicit arguments, template template parameter matching, the void and
+incomplete family, sema-errors' namespace-scope loop -- these stay out of): diag.ae's `checks`, `diagnose` (post-filters), `dunder-ok?`,
+`conflict`, `redefinitions`; parse.ae's `parse-decl-specs`, `attr-nodes`, `parse-class-specifier`, `parse-name`, `parse-param-list`, the
+declarator's noexcept, the simple declaration, `parse-statement`, the primary expression, the braced list and `designate`,
+`parse-lambda`, `parse-unit`; native.ae's `parse-file`; dg.ae's `read-own`. arbace/cpp/sema.ae and template.ae untouched.
+
+**Checked**: each rule on its files by the REPL's probe (the dg verdict over each file's dg.edn entry with read-own's arguments) and on
+valid programs written beside it (no error, g++ accepting them); the own record's 1,699 passes again after the parser's first changes
+(cc457bf9c, no record): 1,692, 2 load timeouts and 5 files that had passed on a parse error of GNU's `name:` designator or on an error
+their dg-prune-output removes (fixed: GCC's errors for GNU designators, the prune applied to the own errors as to clang's and g++'s); the
+record run at 383308773 (`bin/repr-cpp dg --corpus dg-error --front native --only` 1,957 files: the own passes but the slow pair, the
+class's 135 with the control's pair, 123 failing files whose expected messages name a rule's diagnostic; `--record`): own pass 1,819, 2
+regressions (ext/label9.C, cpp0x/gen-attrs-76.C, passing before on `__label__`'s parse error; fixed by the local labels' place and
+attributes before __label__); then 50 files at dd07181f5 (every file naming vector_size, __underlying_type, __type_pack_element,
+__integer_pack, make_*_sequence or __label__, with the control's pair; `--record`), no regression; the control dr2082-vs-dr1423 failing as
+it must in both; the slow pair (missing-header-pr110164.C, udlit-suffix-neg.C) at the head with a 900 s cap, both pass (rows kept); `bin/reap
+--record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. Not run: the gate, a whole dg-error run, the round
+trips and run checks (the parser's tree changes are `:_` facts, a `__label__` DeclStmt and builtins' text nodes).
+
+**Scores**: C++ read 5,665 / 176 / 652 (5,665 / 311 / 517 before the class's move) -> 5,786 / 176 / 532 (37 n/a): 120 of the 135 rows
+to pass, and coroutines/pr105475-broken-spec.C (an :undefined-expectation file) passing by its own lines (n/a 38 -> 37); the own record's
+passes 1,699 -> 1,826. Completeness 96.14 -> 96.60 (0.961380 -> 0.966005, floored 96), without by design 97.36 -> 97.83; independence
+95.40 -> 95.60 (0.953894 -> 0.955834, floored 95; the read stage 0.7798 -> 0.7895).
+
+**Left** (15 rows, :deferred): the template instantiation depth (template/pr23510.C, recurse.C, cpp0x/alias-decl-55.C, template/vtable2.C,
+cpp2a/concepts-recursive-sat1.C: arbace/cpp/template.ae's instantiation), the constant evaluator (ext/constexpr-vla1.C, -2.C,
+cpp1y/pr68180.C), cpp1z/constexpr-asm-5.C (GCC 15's constexpr asm strings), template/builtin-atomic-overloads5.C and -6.C (the __atomic
+builtins), abi/mangle41.C (-fabi-version=2's manglings; its read times out), ext/type_pack_element4.C, and queue 518's
+cpp0x/variadic-ex14.C and template/ttp16.C (-fno-new-ttp-matching). For the user: coroutines/pr105475-3.C passes, though like
+pr105475-broken-spec.C (497-3 (a)'s :undefined-expectation) it specializes std::coroutine_handle; both pass by their own lines now.
+
+Alternatives not taken: a rule per test's message (the rules are GCC's documented behaviour, each judged on every file of the corpus it
+reaches); the code generator's Sema (arbace/cpp/sema.ae) for the rules that need types (queue 518's file; the diag checks read the
+declarations' types themselves); a whole dg-error run (4,564 files; the own passes and the files whose expected messages name a rule's
+diagnostic were run instead); the template instantiation depth, constexpr evaluation and atomic builtins' families (template.ae's and
+the constant evaluator's ground, left).
