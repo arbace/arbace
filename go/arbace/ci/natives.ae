@@ -201,4 +201,326 @@
             (do (set! crt/RoundMode (conv int (bit-and (>> (.Load16 (.-M t) p) 10) 3)))
                 (set! crt/FFlags (conv int (bit-and (.Load16 (.-M t) (+ p 4)) 63)))))
           (ai 0))))
+    ;; queue 522b: musl's fmt_fp for a double (arbace.c.run's patch of src/stdio/vfprintf.c): __ci_fmt_fp(buf, cap, y, w, p,
+    ;; fl, t) writes fmt_fp's whole output into buf and gives its length (fmt_fp's return), else -1 and fmt_fp's own path runs
+    ;; (a long double's own value, a rounding direction other than nearest, an output longer than cap)
+    (aset Natives "__ci_fmt_fp" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+        (let [(values y ok) (x87Double (.-W (aget a 2)))
+              lim (conv int (conv int32 (.-I (aget a 1))))]
+          (when (or (not ok) (!= crt/RoundMode 0))
+            (return (ai -1)))
+          (let [(values o inexact) (fmtFp64 y (conv int (conv int32 (.-I (aget a 3)))) (conv int (conv int32 (.-I (aget a 4))))
+                                            (conv int (conv int32 (.-I (aget a 5)))) (conv int (conv int32 (.-I (aget a 6)))) lim)]
+            (when (or (== o nil) (> (len o) lim))
+              (return (ai -1)))
+            (copy (.W (.-M t) (conv uint64 (.-I (aget a 0))) (conv uint64 (len o))) o)
+            (when inexact
+              (set! crt/FFlags bit-or 32))
+            (ai (conv int64 (len o)))))))
     (aset Natives "abort_native" ^{:go/end 175} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (panic (addr (lit crt/Exit :Code 134 :Signal crt/SIGABRT)))))))
+
+
+;; queue 522b: printf's doubles without long double. musl's fmt_fp (src/stdio/vfprintf.c) computes in long double, x87's
+;; extended in software since queue 522 (about 18 us a conversion interpreted); arbace.c.run patches it to try __ci_fmt_fp first
+;; when the argument is not a long double, and fmtFp64 is fmt_fp's algorithm on the double itself, step for step: the slots of
+;; 10^9, the precision cut of LDBL_MANT_DIG (64) and the %a rounding of x87's 64 bits, each long double operation of fmt_fp exact
+;; on a double's value but the two rounding ones, decided here as x87 decides them to nearest (round + small != round; y + 2^(63-4p)),
+;; with the FE_INEXACT those two raise in crt (its conversions of a long double to an integer raise none). The bytes are musl x86_64's.
+
+(go/func x87Double "x87Double is the double an x87 extended value (crt's Wide: the significand, then the sign and the exponent)\nholds, ok false when it holds none exactly (a long double's own value).\n" [^{:tag crt/Wide} w] :results [float64 bool]
+  (when (< (len w) 2)
+    (return 0 false))
+  (let [m (aget w 0)
+        se (bit-and (aget w 1) 0xffff)
+        ex (conv int (bit-and se 0x7fff))
+        y 0.0]
+    (cond
+      (== ex 0x7fff) (if (== (<< m 1) 0) (set! y (math/Inf 1)) (set! y (math/NaN)))
+      (== ex 0) (when (!= m 0)
+                  (return 0 false))
+      :else (let [e (- ex 16383)
+                  drop 11]
+              (when (or (== (bit-and m 0x8000000000000000) 0) (> e 1023) (< e -1074))
+                (return 0 false))
+              (when (< e -1022)
+                (set! drop (+ 11 (- -1022 e))))
+              (when (!= (bit-and m (- (<< (conv uint64 1) (conv uint drop)) 1)) 0)
+                (return 0 false))
+              (set! y (math/Ldexp (conv float64 (>> m 11)) (- e 52)))))
+    (when (!= (bit-and se 0x8000) 0)
+      (set! y (math/Copysign y -1)))
+    (return y true)))
+
+(go/func fpPad "fpPad is fmt_fp's pad: w-l bytes c appended, none when fl has LEFT_ADJ or ZERO_PAD or l >= w.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^byte c ^int w ^int l ^int fl]
+  (when (or (!= (bit-and fl 73728) 0) (>= l w))
+    (return b))
+  (for [i l] (< i w) (inc! i)
+    (set! b (append b c)))
+  b)
+
+(go/func fpU "fpU is fmt_u: x's decimal digits, none for 0.\n" ^{:tag (slice byte)} [^uint64 x]
+  (let [b (make (slice byte) 20)
+        i 20]
+    (while (!= x 0)
+      (dec! i)
+      (aset b i (+ (conv byte (% x 10)) 48))
+      (set! x (/ x 10)))
+    (subslice b i)))
+
+(go/func fp9 "fp9 is a slot's nine digits, zeros first.\n" ^{:tag (slice byte)} [^uint32 x]
+  (let [b (make (slice byte) 9)]
+    (for [i 8] (>= i 0) (dec! i)
+      (aset b i (+ (conv byte (% x 10)) 48))
+      (set! x (/ x 10)))
+    b))
+
+(go/func fmtFp64 "fmtFp64 is fmt_fp(f, y, w, p, fl, t, ps) for a double y (ps not BIGLPRE): its output and whether it raised\nFE_INEXACT; nil when w or p is past lim (fmt_fp's own path then, with its INT_MAX checks).\n" [^float64 y ^int w ^int p ^int fl ^int t ^int lim] :results [(slice byte) bool]
+  (when (or (> w lim) (> p lim))
+    (return nil false))
+  (let [prefix "-0X+0X 0X-0x+0x 0x"
+        xd "0123456789ABCDEF"
+        pi 0
+        pl 1
+        out (make (slice byte) 0 64)
+        inexact false]
+    ;; MARK_POS 1<<11, PAD_POS 1<<0, ZERO_PAD 1<<16, LEFT_ADJ 1<<13, ALT_FORM 1<<3
+    (cond
+      (math/Signbit y) (set! y (- y))
+      (!= (bit-and fl 2048) 0) (set! pi 3)
+      (!= (bit-and fl 1) 0) (set! pi 6)
+      :else (do (set! pi 1)
+                (set! pl 0)))
+    (when (or (math/IsInf y 0) (math/IsNaN y))
+      (let [s "inf"]
+        (when (== (bit-and t 32) 0)
+          (set! s "INF"))
+        (when (math/IsNaN y)
+          (if (!= (bit-and t 32) 0) (set! s "nan") (set! s "NAN")))
+        (set! out (fpPad out 32 w (+ 3 pl) (bit-and-not fl 65536)))
+        (set! out (append out (spread (subslice prefix pi (+ pi pl)))))
+        (set! out (append out (spread s)))
+        (set! out (fpPad out 32 w (+ 3 pl) (bit-xor fl 8192)))
+        (return out false)))
+    (let [(values fr e2) (math/Frexp y)]
+      (set! y (* fr 2))
+      (when (!= y 0)
+        (dec! e2))
+      (when (== (bit-or t 32) 97)
+        (when (!= (bit-and t 32) 0)
+          (set! pi (+ pi 9)))
+        (set! pl (+ pl 2))
+        ;; y += 2^(63-4p); y -= 2^(63-4p) in x87's 64 bits: y (in [1, 2)) rounded to 4p bits after the point, to nearest even;
+        ;; a double has 52, so nothing to do from p 13 on
+        (when (and (>= p 0) (< p 13) (!= y 0))
+          (let [m (conv uint64 (math/Ldexp y 52))
+                sh (conv uint (- 52 (* 4 p)))
+                q (>> m sh)
+                rem (bit-and m (- (<< (conv uint64 1) sh) 1))
+                half (<< (conv uint64 1) (- sh 1))]
+            (when (!= rem 0)
+              (set! inexact true))
+            (when (or (> rem half) (and (== rem half) (== (bit-and q 1) 1)))
+              (inc! q))
+            (set! y (math/Ldexp (conv float64 q) (* -4 p)))))
+        (let [ae e2
+              sign (conv byte 43)]
+          (when (< e2 0)
+            (set! ae (- e2))
+            (set! sign 45))
+          (let [es (fpU (conv uint64 ae))
+                s (make (slice byte) 0 32)]
+            (when (== (len es) 0)
+              (set! es (lit (slice byte) 48)))
+            (let [estr (append (lit (slice byte) (conv byte (+ t 15)) sign) (spread es))]
+              (while true
+                (let [x (conv int y)]
+                  (set! s (append s (bit-or (aget xd x) (conv byte (bit-and t 32)))))
+                  (set! y (* 16 (- y (conv float64 x))))
+                  (when (and (== (len s) 1) (or (!= y 0) (> p 0) (!= (bit-and fl 8) 0)))
+                    (set! s (append s 46)))
+                  (when (== y 0)
+                    (break))))
+              (let [le (len estr)
+                    l (+ (len s) le)]
+                (when (and (!= p 0) (< (- (len s) 2) p))
+                  (set! l (+ p 2 le)))
+                (set! out (fpPad out 32 w (+ pl l) fl))
+                (set! out (append out (spread (subslice prefix pi (+ pi pl)))))
+                (set! out (fpPad out 48 w (+ pl l) (bit-xor fl 65536)))
+                (set! out (append out (spread s)))
+                (set! out (fpPad out 48 (- l le (len s)) 0 0))
+                (set! out (append out (spread estr)))
+                (set! out (fpPad out 32 w (+ pl l) (bit-xor fl 8192)))
+                (return out inexact))))))
+      (when (< p 0)
+        (set! p 6))
+      (when (!= y 0)
+        (set! y (* y 268435456))
+        (set! e2 (- e2 28)))
+      ;; big: fmt_fp's slots for a double (max_mant_slots 5 + max_exp_slots 123)
+      (let [big (make (slice uint32) 128)
+            a 0
+            r 0
+            z 0
+            e 0]
+        (when (>= e2 0)
+          (set! a 122)
+          (set! r 122)
+          (set! z 122))
+        (while true
+          (aset big z (conv uint32 y))
+          (set! y (* 1000000000 (- y (conv float64 (aget big z)))))
+          (inc! z)
+          (when (== y 0)
+            (break)))
+        (while (> e2 0)
+          (let [carry (conv uint32 0)
+                sh (min 29 e2)]
+            (for [d (- z 1)] (>= d a) (dec! d)
+              (let [x (+ (<< (conv uint64 (aget big d)) (conv uint sh)) (conv uint64 carry))]
+                (aset big d (conv uint32 (% x 1000000000)))
+                (set! carry (conv uint32 (/ x 1000000000)))))
+            (when (!= carry 0)
+              (dec! a)
+              (aset big a carry))
+            (while (and (> z a) (== (aget big (- z 1)) 0))
+              (dec! z))
+            (set! e2 (- e2 sh))))
+        (while (< e2 0)
+          (let [carry (conv uint32 0)
+                sh (min 9 (- e2))
+                need (+ 1 (/ (+ p 29) 9))]
+            (for [d a] (< d z) (inc! d)
+              (let [rm (bit-and (aget big d) (- (<< (conv uint32 1) (conv uint sh)) 1))]
+                (aset big d (+ (>> (aget big d) (conv uint sh)) carry))
+                (set! carry (* (>> (conv uint32 1000000000) (conv uint sh)) rm))))
+            (when (== (aget big a) 0)
+              (inc! a))
+            (when (!= carry 0)
+              (aset big z carry)
+              (inc! z))
+            (let [b a]
+              (when (== (bit-or t 32) 102)
+                (set! b r))
+              (when (> (- z b) need)
+                (set! z (+ b need))))
+            (set! e2 (+ e2 sh))))
+        (when (< a z)
+          (set! e (* 9 (- r a)))
+          (for [i (conv uint32 10)] (>= (aget big a) i) (set! i (* i 10))
+            (inc! e)))
+        ;; the rounding: j digits after the point (possibly negative)
+        (let [j p]
+          (when (!= (bit-or t 32) 102)
+            (set! j (- j e)))
+          (when (and (== (bit-or t 32) 103) (!= p 0))
+            (dec! j))
+          (when (< j (* 9 (- z r 1)))
+            (let [jj (+ j 147456)
+                  d (+ r 1 (- (/ jj 9) 16384))
+                  i (conv uint32 10)]
+              (for [k (+ (% jj 9) 1)] (< k 9) (inc! k)
+                (set! i (* i 10)))
+              (let [x (% (aget big d) i)]
+                (when (or (!= x 0) (!= (+ d 1) z))
+                  ;; round + small != round in x87's 64 bits (round 2^64, plus 2 when odd; small 0.5, 1 or 1.5): inexact
+                  (set! inexact true)
+                  (let [odd (or (== (bit-and (/ (aget big d) i) 1) 1)
+                                (and (== i 1000000000) (> d a) (== (bit-and (aget big (- d 1)) 1) 1)))
+                        up true]
+                    (cond
+                      (< x (/ i 2)) (set! up false)
+                      (and (== x (/ i 2)) (== (+ d 1) z)) (set! up odd))
+                    (aset big d (- (aget big d) x))
+                    (when up
+                      (aset big d (+ (aget big d) i))
+                      (while (> (aget big d) 999999999)
+                        (aset big d 0)
+                        (dec! d)
+                        (when (< d a)
+                          (dec! a)
+                          (aset big a 0))
+                        (aset big d (+ (aget big d) 1)))
+                      (set! e (* 9 (- r a)))
+                      (for [i2 (conv uint32 10)] (>= (aget big a) i2) (set! i2 (* i2 10))
+                        (inc! e))))))
+              (when (> z (+ d 1))
+                (set! z (+ d 1))))))
+        (while (and (> z a) (== (aget big (- z 1)) 0))
+          (dec! z))
+        (when (== (bit-or t 32) 103)
+          (when (== p 0)
+            (inc! p))
+          (if (and (> p e) (>= e -4))
+            (do (dec! t)
+                (set! p (- p (+ e 1))))
+            (do (set! t (- t 2))
+                (dec! p)))
+          (when (== (bit-and fl 8) 0)
+            (let [jt 9]
+              (when (and (> z a) (!= (aget big (- z 1)) 0))
+                (set! jt 0)
+                (for [i (conv uint32 10)] (== (% (aget big (- z 1)) i) 0) (set! i (* i 10))
+                  (inc! jt)))
+              (if (== (bit-or t 32) 102)
+                (set! p (min p (max 0 (- (* 9 (- z r 1)) jt))))
+                (set! p (min p (max 0 (- (+ (* 9 (- z r 1)) e) jt))))))))
+        (let [l (+ 1 p)
+              ^{:tag (slice byte)} estr (zero (slice byte))]
+          (when (or (!= p 0) (!= (bit-and fl 8) 0))
+            (inc! l))
+          (if (== (bit-or t 32) 102)
+            (when (> e 0)
+              (set! l (+ l e)))
+            (let [ae e
+                  sign (conv byte 43)]
+              (when (< e 0)
+                (set! ae (- e))
+                (set! sign 45))
+              (let [es (fpU (conv uint64 ae))]
+                (while (< (len es) 2)
+                  (set! es (append (lit (slice byte) 48) (spread es))))
+                (set! estr (append (lit (slice byte) (conv byte t) sign) (spread es)))
+                (set! l (+ l (len estr))))))
+          (set! out (fpPad out 32 w (+ pl l) fl))
+          (set! out (append out (spread (subslice prefix pi (+ pi pl)))))
+          (set! out (fpPad out 48 w (+ pl l) (bit-xor fl 65536)))
+          (if (== (bit-or t 32) 102)
+            (let [d a]
+              (when (> a r)
+                (set! d r))
+              (let [a0 d]
+                (while (<= d r)
+                  (let [s (fpU (conv uint64 (aget big d)))]
+                    (cond
+                      (!= d a0) (set! s (fp9 (aget big d)))
+                      (== (len s) 0) (set! s (lit (slice byte) 48)))
+                    (set! out (append out (spread s))))
+                  (inc! d)))
+              (when (or (!= p 0) (!= (bit-and fl 8) 0))
+                (set! out (append out 46)))
+              (while (and (< d z) (> p 0))
+                (set! out (append out (spread (subslice (fp9 (aget big d)) 0 (min 9 p)))))
+                (inc! d)
+                (set! p (- p 9)))
+              (set! out (fpPad out 48 (+ p 9) 9 0)))
+            (let [d a]
+              (when (<= z a)
+                (set! z (+ a 1)))
+              (while (and (< d z) (>= p 0))
+                (let [s (fpU (conv uint64 (aget big d)))]
+                  (when (== (len s) 0)
+                    (set! s (lit (slice byte) 48)))
+                  (if (!= d a)
+                    (set! s (fp9 (aget big d)))
+                    (do (set! out (append out (aget s 0)))
+                        (set! s (subslice s 1))
+                        (when (or (> p 0) (!= (bit-and fl 8) 0))
+                          (set! out (append out 46)))))
+                  (set! out (append out (spread (subslice s 0 (min (len s) p)))))
+                  (set! p (- p (len s))))
+                (inc! d))
+              (set! out (fpPad out 48 (+ p 18) 18 0))
+              (set! out (append out (spread estr)))))
+          (set! out (fpPad out 32 w (+ pl l) (bit-xor fl 8192)))
+          (return out inexact))))))
