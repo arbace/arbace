@@ -17075,3 +17075,20 @@ polytypes where GHC has infer holes, let bindings without a signature: a regress
 no case here); Quick Look in full (QL's instantiation variables through the whole application); generating GHC.Version and
 GHC.Platform.Host as PrimopWrappers was (no program needs them); a second lib-check run of the five packages for their records
 (written from the runs' modules.edn instead). Not done: doc/AGENDA.md (the main session's), the gate.
+
+## 2026-11-22: the user's decisions on the burst's second questions (C++'s GCC rows, Python's by design left, Haskell's 34, Rust C6-5)
+
+Asked by the main session after cpp-read's, hs-r7's and R3's reports and the Python eval matrix (09:30 UTC); answered by the user:
+- C++'s read cell, 311 by design: the 135 `gcc-own-rules` (CP398 (c)) are built, the GNU extension rules ported one at a time into Arbace's
+  own front end (deferred until built); `gcc-dialect` 173 (OpenMP, OpenACC, GNU TM, GCC contracts, -fpermissive, -fms-extensions),
+  `gxx-only-rules` 2 (CP328 (a)) and `musl-libc` 1 (Wconversion-null-4: musl's NULL is nullptr) are n/a. Alternatives not taken: build the
+  dialects too; all 311 n/a.
+- Python's eval cell: `extension-modules` 75 are built, C extension modules loaded through ci's C world (the route py-capi builds _testcapi
+  on); `fork` 557, `testinternalcapi` 132 and `venv-and-build` 49 are n/a. Alternatives not taken: the venv layout built too; a fork-safe
+  child by a patched Go runtime; all four n/a.
+- Haskell's completeness: the 31 programs GHC never built (`no-reference`: 19 import parallel, the rest packages outside GHC's boot
+  libraries or no main) are built: the packages vendored into the corpus, GHC's runs recorded by hand in the oracle tier, run on hsi;
+  `process` 1 (forkProcess) and `skipped` 2 (all.T's own skips) are n/a. Alternative not taken: all 34 n/a.
+- Rust C6-5 (a): the library build's 36 units are the build's description, data like `std.edn` (made once by `std-crates --units`, held to
+  Cargo's `--unit-graph` in the oracle tier); C4's identities count own. Alternatives not taken: (b) port Cargo's resolution (5-8 agent
+  days); (c) (a) now, (b) when a second library build needs it.
