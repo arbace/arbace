@@ -2768,17 +2768,29 @@
           e (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) es))]
       (when e (tmpl (:id e))))))
 
+(declare constraint-scope)
+
 (defn- tn-types
   "For a function template (overloadable, so its arguments name their parameters when not natural:
   ItaniumMangle.cpp's needToMangleTemplateParam): each non-type parameter's declared type when it is dependent
   (template <class T, T v>: Tn T_), a constrained type parameter's concept (Tk <name>, clang 17's mangling of a
-  type-constraint without arguments), else nil."
-  [t]
+  type-constraint without arguments), else nil. (cpp-rt-own3, DECISION cpp-rt-own2-2 (a): a type-constraint with arguments too,
+  clang 23's Tk <template-name> <template-args>, the arguments as written resolved in the constraint scope `cs`, constraint-scope's:
+  string_view's `template<contiguous_iterator _It, sized_sentinel_for<_It> _End>`, TkSt18sized_sentinel_forITL0__E; one whose
+  arguments do not resolve no Tk, as before.)"
+  [t & [cs]]
   (let [ss (sym-scope t)]
     (mapv (fn [p] (case (:kind p)
                     :value (let [ty (param-type ss p)] (when (dependent? ty) {:ty ty :pack (:pack p)}))
-                    :type (when-let [c (and (:tc p) (not (:tc-args p)) (concept-of t p))]
-                            {:tk {:tid (:id c) :name (:name c) :path (:path c)} :pack (:pack p)})
+                    :type (when-let [c (and (:tc p) (concept-of t p))]
+                            (if-not (:tc-args p)
+                              {:tk {:tid (:id c) :name (:name c) :path (:path c)} :pack (:pack p)}
+                              (when-let [as (and (first cs) (:tc-forms p) (not (sema/checking?))
+                                                 (try (resolve-args (first cs) (assoc c :params (vec (rest (:params c)))) (:tc-forms p) false)
+                                                      (catch Exception _ nil)))]
+                                {:tk {:tid (:id c) :name (:name c) :path (:path c)
+                                      :args (vec (mapcat #(if (and (map? %) (contains? % :pack) (nil? (:k %))) (:pack %) [%]) as))}
+                                 :pack (:pack p)})))
                     nil))
           (:params t))))
 
@@ -2870,6 +2882,88 @@
           (= :class (:kind s)) (let [c (abi/cls (:cls s))] (recur (:outer c) (if (:tmpl c) (inc d) d)))
           :else (recur (:parent s) d))))
 
+(defn- constraint-scope
+  "cpp-rt-own3 (DECISION cpp-rt-own2-2 (a)): [scope pnames], the scope a template's constraints are mangled in as clang 23
+  mangles them, not instantiated ([temp.constr.decl]: a member template's associated constraints are checked by substitution,
+  never substituted in, so its class's parameters stay its class template's): each enclosing class specialization's template
+  parameters (a partial specialization's own), the outermost at depth 0, then the template's own (`own`, a template entry, or nil
+  for a member function's trailing requires-clause) at the next depth, each type parameter a {:k :tparam :i i :depth d} (abi's
+  T_ at depth 0, TL<d-1>_ beyond); pnames {name [depth index kind]} of them all, the innermost binding a name winning. The scope
+  over `scope`, the declaration's own, so that the class's members (a typedef such as size_type) are found as declared there."
+  [scope own]
+  (let [ck (when (= :class (:kind scope)) [:cscope (:id own)])
+        hit (when ck (get (abi/cls (:cls scope)) ck))]
+    (if hit
+      hit
+      (let [classes (loop [s scope out ()]
+                      (cond (nil? s) out
+                            (= :class (:kind s)) (let [c (abi/cls (:cls s))] (recur (:outer c) (if (:tmpl c) (conj out c) out)))
+                            :else (recur (:parent s) out)))
+            ;; each level [template-id params member-nodes]: a class level's members its pattern's (a partial specialization's own)
+            levels (concat (for [c classes
+                                 :let [t (tmpl (:tmpl c)) fp (:from-partial c)
+                                       pt (when fp (first (filter #(= (first fp) (:id %)) (:partials t))))]]
+                             [(if fp (first fp) (:tmpl c)) (if fp (second fp) (:params t)) (:inner (if fp (:node pt) (:pattern t)))])
+                           (when own [[(:id own) (:params own) nil]]))
+            pnames (atom {})
+            r (when (every? (fn [[_ ps]] (some? ps)) levels)
+                [(reduce (fn [parent [d [tid ps members]]]
+                           (let [s (new-scope :tparams parent :internal (:internal parent) :cls (:cls parent) :extern-c (:extern-c parent))]
+                             (doseq [[i p] (map-indexed vector ps)]
+                               (swap! pnames assoc (:name p) [d i (:kind p)])
+                               (enter! s (:name p)
+                                       (case (:kind p)
+                                         :type {:e :type :ty (cond-> {:k :tparam :i i :tid tid :name (:name p) :depth d} (:pack p) (assoc :pack true)) :pos -1}
+                                         :template {:e :ttp :i i :tid tid :pos -1}
+                                         {:e :nttp :i i :tid tid :ty (try (param-type s p) (catch arbace.lang.ExceptionInfo _ abi/int*)) :pack (:pack p) :pos -1})))
+                             ;; (the class template's member typedefs as its pattern declares them, resolved over its parameters here:
+                             ;; span's `is_const_v<element_type>`, element_type its _Type, clang's T_, not the specialization's char)
+                             (doseq [k members :when (#{"TypedefDecl" "TypeAliasDecl"} (:kind k)) :when (:name k)
+                                     :let [qt (get-in k [:type :qualType])] :when (string? qt)]
+                               (when-let [ty (try (sema/resolve-type s qt) (catch Exception _ nil))]
+                                 (when (and (map? ty) (:k ty)) (enter! s (:name k) {:e :type :ty ty :pos -1}))))
+                             s))
+                         scope (map-indexed vector levels))
+                 @pnames])]
+        (when ck (abi/update-cls! (:cls scope) assoc ck r))
+        r))))
+
+(defn- constraint-texts
+  "The texts a constraint's node writes as types: template arguments as written, sizeof's, alignof's and casts' types, type
+  requirements', new's."
+  [n]
+  (distinct
+    (for [x (tree-seq coll? (fn [c] (if (map? c) (vals c) (seq c))) n)
+          :when (map? x)
+          s (concat (when (vector? (:explicitTemplateArgs x)) (:explicitTemplateArgs x))
+                    ;; (a qualifier level's template arguments as written, `__is_compatible_ref<iter_reference_t<_It>>::value`)
+                    (when (vector? (:qualifier x)) (mapcat #(second (abi/split-template-id (str %))) (:qualifier x)))
+                    (when (#{"UnaryExprOrTypeTraitExpr"} (:kind x)) [(get-in x [:argType :qualType])])
+                    (when (#{"CStyleCastExpr" "TypeRequirement" "CXXNewExpr"} (:kind x)) [(get-in x [:type :qualType])]))
+          :when (string? s)]
+      (str/trim s))))
+
+(defn- constraint-q
+  "cpp-rt-own3: a constraint's mangling data for abi's mangle-constraint, its node with the texts it writes as types resolved in
+  the constraint scope (`cs`, constraint-scope's) and the scope's parameters; the old :pidx and :depth beside them."
+  [node cs pidx depth]
+  (let [[s pnames] cs]
+    (cond-> {:node node :pidx pidx :depth depth}
+      (and s (not (sema/checking?)))
+      (assoc :pnames pnames
+             :types (into {} (for [a (constraint-texts node)
+                                   :let [ty (try (sema/resolve-type s a) (catch Exception _ nil))]
+                                   :when (and (map? ty) (:k ty))]
+                               [a ty]))))))
+
+(defn member-tq
+  "cpp-rt-own3: a templated member function's trailing requires-clause `rc` as abi mangles it after its parameters (sema's
+  declare-fn!, :tq): resolved in its class's constraint scope (`scope`, the class's), no parameters of its own; nil when that scope
+  is not known."
+  [scope rc]
+  (let [cs (try (constraint-scope scope nil) (catch Exception _ nil))]
+    (when (first cs) (constraint-q rc cs {} 0))))
+
 (defn- decltype-failed?
   "Whether the type `t` holds decltype-of's dependent stand-in for an operand that did not analyze."
   [t]
@@ -2947,10 +3041,17 @@
         ;; instance ($_N), a class of an unnamed namespace or local to an internal function -- system_error.cc's
         ;; basic_string::__resize_and_overwrite<$_0> of the anonymous namespace's strerror_string, linkonce_odr before)
         (when (internal-args? args) (upd-fn! fid assoc :internal true))
-        (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true
-                 :tinst (cond-> {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t)}
-                          (:constraint t) (assoc :q {:node (:constraint t) :pidx (into {} (map-indexed (fn [i p] [(:name p) i]) (:params t)))
-                                                     :depth (template-depth (:scope t))})))
+        ;; (cpp-rt-own3, DECISION cpp-rt-own2-2 (a): the constraints as clang 23 mangles them, their types resolved in the
+        ;; constraint scope: the template head's requires-clause in the template arguments, Q ... E, and a trailing one after the
+        ;; parameters, :tq)
+        (let [cs (when (and (not (sema/checking?)) (or (:constraint t) (some :tc-args (:params t)) (:trailingRequiresClause (:pattern t))))
+                   (try (constraint-scope (:scope t) t) (catch Exception _ nil)))
+              pidx (into {} (map-indexed (fn [i p] [(:name p) i]) (:params t)))
+              depth (template-depth (:scope t))]
+          (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true
+                   :tinst (cond-> {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t cs)}
+                            (:constraint t) (assoc :q (constraint-q (:constraint t) cs pidx depth))
+                            (and cs (:trailingRequiresClause (:pattern t))) (assoc :tq (constraint-q (:trailingRequiresClause (:pattern t)) cs pidx depth)))))
         ;; a constructor template's specialization is a candidate through its template (the :ctor-candidates hook),
         ;; not one of the class's constructors (never a copy constructor: [class.copy.ctor]/5)
         (let [f (sema/fnd fid)]
@@ -3694,11 +3795,16 @@
           ;; (CP300 (a): the constraints too, [temp.over.link]/7: templates that differ only by them are two)
           cspell (constraint-spelling (tparams n) (:requiresClause n) (:trailingRequiresClause pattern))
           same-cons? (fn [tid] (let [t (tmpl tid)] (= cspell (constraint-spelling (:params t) (:constraint t) (:trailingRequiresClause (:pattern t))))))
+          ;; (cpp-rt-own3: a constructor template's redeclaration among its class's :ctor-tmpls, not entered by name: <bits/locale_classes.tcc>'s
+          ;; `template<typename _Facet> locale::locale(const locale&, _Facet*)` had been a second template beside its declaration, format.cc's
+          ;; `locale loc2(loc, facetp.get())` "ambiguous call (2 viable)")
+          named (concat (.get ^java.util.HashMap (:names scope) (:name n))
+                        (when (and ctor? (:cls scope)) (for [tid (:ctor-tmpls (abi/cls (:cls scope)))] {:e :tmpl :tk :fn :id tid})))
           old (some #(when (and (= :tmpl (:e %)) (= :fn (:tk %)) (= qt (get-in (:pattern (tmpl (:id %))) [:type :qualType]))
                                 (= (map (juxt :kind :qt :pack) (tparams n)) (map (juxt :kind :qt :pack) (:params (tmpl (:id %)))))
                                 (same-cons? (:id %)))
                        (:id %))
-                    (.get ^java.util.HashMap (:names scope) (:name n)))
+                    named)
           ;; a functionally equivalent redeclaration spelled otherwise ([temp.over.link]/5; G4: <type_traits>'s
           ;; `_Require<...> swap(_Tp&, _Tp&)` and <bits/move.h>'s `typename enable_if<...>::type swap(...)`): the same
           ;; signature with the template's own parameters
@@ -3718,7 +3824,7 @@
                         cands (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))
                                             (= (pspell ps) (pspell (:params (tmpl (:id %)))))
                                             (same-cons? (:id %)))
-                                      (.get ^java.util.HashMap (:names scope) (:name n)))]
+                                      named)]
                     (when (seq cands)
                       (when-let [sig (try (dissoc (sema/resolve-type (bind-scope scope ps nil -1) qt) :cq) (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_EQ_TRACE") (binding [*out* *err*] (println "equiv" (:name n) (.getMessage x)))) nil))]
                         (when (System/getenv "CPP_EQ_TRACE") (binding [*out* *err*] (println "equiv" (:name n) (pr-str (canonical sig)) (pr-str (map #(canonical (try (sym-sig (tmpl (:id %))) (catch arbace.lang.ExceptionInfo _ nil))) cands)))))
@@ -3796,7 +3902,9 @@
             ;; class ctype_byname<C>;` of <bits/locale_facets.h>'s ctype_byname<char>, whose vtable is its key function's unit's, had
             ;; been written weak_odr with its members)
             (when (and (abi/class? ty) (not (:espec (abi/cls (:id ty)))))
-              (abi/update-cls! (:id ty) #(cond-> (assoc % :explicit-inst-def true) (not (sema/checking?)) (dissoc :extern-inst))))))
+              ;; (cpp-rt-own3: with its place, the unit's token order, where clang writes its members, arbace.cpp.codegen's top-pos)
+              (abi/update-cls! (:id ty) #(cond-> (assoc % :explicit-inst-def true) (not (sema/checking?)) (dissoc :extern-inst)
+                                           (and (not (sema/checking?)) (nil? (:explicit-inst-pos %))) (assoc :explicit-inst-pos (long (or (:_b n) 0))))))))
         ;; extern template R f(params): the function template's specialization of that type (deduced from it,
         ;; [temp.explicit]/7) the library's
         (when (and (:_extern n) (:_fname n) (:_ftype n))

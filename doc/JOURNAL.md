@@ -16465,3 +16465,69 @@ Alternatives not taken: the Solo# rule in the Simplifier's unlifted-type hook (e
 it: hs-r5's reason); a full front-end comparison of the 910 programs (the host's load put it at 7 hours; the feature cut with the 88
 already compiled equal instead); the lib-check record left at 265 rows (its new module would fail the gate's judge); T14236, T7861 and
 T13688 not attempted this round (each a day or more, above). Not done: doc/AGENDA.md (the main session's), the gate.
+## 2026-11-22: cpp-rt-own3: C++20's constraint mangling, constant POD locals, emission-order naming; 7 more runtime units own
+
+Branch `cpp-rt-own3-1121` from mac/next 863bdaea1 (cpp-rt-own2 cd912b25f in it; the lowered runtime 187 of 198 units own, C++'s eval
+and AOT 0.986 each). The brief (the main session, toward the CoMaIn goal): cpp-rt-own2's three decisions taken as recommended
+(cpp-rt-own2-1 (a), -2 (a), -3 (a)), then floating_to_chars' VLAs and probes of valarray, floating_from_chars and tzdb if time
+allowed, and the constinit union wrapper's lost vptr if on the way. Light and targeted, no gate; probes by `arbace.cpp.codegen
+gen-batch` with runtime_ours' options, each unit's names against the pack cpp-runtime-ir's IR (n-all5's runtime build); each rule on
+a reduced case against clang 23.1.5's IR recorded by hand with the host's clang++ (the oracle tier's tool), as cpp-rt-own2 did.
+
+What was done (574e72fbf, the code; doc/cpp/CPP-SURVEY.md, "As built: cpp-rt-own3", the details):
+
+1. DECISION cpp-rt-own2-2 (a), C++20's constraint mangling: a constraint scope that is not instantiated (template.ae's
+   constraint-scope: the enclosing class specializations' template parameters at depth 0 up, the template's own at the next, the
+   class templates' member typedefs over them), the texts a constraint writes as types resolved there at instantiation
+   (constraint-q); Tk with arguments, trailing requires-clauses after the parameters (a templated member's too, sema's :tq), sizeof
+   and alignof, T::x of a type parameter, template-id qualifier levels, nested dependent names flattened with each prefix a
+   candidate. Units: c++20/sstream-inst.cc (string_view's iterator-pair constructor), c++23/print.cc (with span's range constructor,
+   basic_string()'s trailing clause, ranges' _Size and _Data).
+2. DECISION cpp-rt-own2-1 (a): codegen's const-local! (a POD local's constant initializer as clang's EmitAutoVarInit: memset, memcpy
+   from `__const.FN.VAR`, or memset and few stores); the evaluator's unknown objects (an automatic or static object's lvalue formed
+   without a read; since C++23 the object a reference variable outside the evaluation refers to, P2280R4) and an empty class's
+   reference argument evaluated (basic_string::max_size()'s `_M_get_allocator() const` called and max_size inlined as clang). Unit:
+   c++26/text_encoding.cc.
+3. DECISION cpp-rt-own2-3 (a): names that differ by a redefined class's two paths written as placeholders with the earliest place
+   (the unit's token order) they are referred from and resolved after the module (codegen's redef-name, redef-resolve!; abi's
+   *redef-hook* under every public mangler): an explicit instantiation's members at the instantiation, a non-inline definition at
+   its own token, constexpr specializations made before the definition named there, the class's own members in the definition's
+   namespace. Units: c++17/fs_dir.cc, exp/filesystem/dir.cc, exp/filesystem/cow-dir.cc (cow-fs_dir.cc's names unchanged).
+4. On the way: inline const variables external and linkonce_odr (print's customization point objects); a constructor template a
+   user-declared constructor, so no implicit default constructor and no aggregate: the found bug's `constinit CI<D> dr{};` now keeps
+   D's vptr (clang's address point), not zeroed as an aggregate's union member. Left of it: `CI<A> ar{&dr.obj}` is initialized
+   dynamically where clang folds it (the evaluator does not bind a constructor template's pack parameters), internal names only.
+5. c++20/format.cc (5b5c77242): a constructor template's out-of-line redeclaration found among its class's :ctor-tmpls (locale's
+   `locale(const locale&, _Facet*)` had been two templates: "ambiguous call (2 viable)"), an internal class's inheriting constructor
+   internal (__uniq_ptr_data<(anonymous)::__encoding, ...>'s CI2).
+6. DECISION 510-1 (a) (the coordinator, 2026-11-22, after the runtime-build; 259a4fb98, a commit of its own): the code generator takes
+   the checker's rule of mac/510-cpp-dg-own14 eb1ac403f, a using-declared member's implicit object parameter of the using class
+   ([over.match.funcs.general]/4; cpp-rt-own's 4bad0587c had ranked it a derived-to-base Conversion, cpp1z/using1.C).
+
+Results. `bin/cppi runtime-build` (auto, at 5b5c77242, under `ulimit -v 8388608`; a first run stopped at its lowering on the light
+tier's 90% disk guard, the disk filled by other lines' worktrees, until the coordinator freed 59 GB; rerun with CPPI_DISK_MAX=93):
+198 units, 198 pass, **194 by our route** (from 187), every own unit's names the pack's; 2 h 32 min, peak 2.6 GB, the host's load up
+to 140 on 64 cores. runtime-ci 199 of 199 (nearly every unit read again; 1 h 44 min, 4.0 GB). `bin/cppi runtime-inputs --record`:
+own 194, pack 4. lower-essential 6 of 6. cpp-check-essential's command: samples 4 of 4, runtime 4 of 4, the run controls differing as they must (45 min). codegen-gen 156 of 156, its controls failing; 33 digests recorded (31 by constant POD
+locals, hdr-string's _M_get_allocator() call, hdr-vector's and struct-bind's constraints); against clang's IR of the samples (by hand)
+three samples define clang's names now that did not, none lost one. `bin/repr-cpp c2j-check`: 33 of 33, 0 reflection warnings.
+DECISION 510-1 (a)'s rule (259a4fb98): every own C++ unit generated again (193, two gen-batch processes): names the pack's, IR byte for byte the runtime's at 5b5c77242 (the rule applies in vector's and deque's using-declared allocator members, about 530 calls, and changes no choice). Scores: the REAP matrix unchanged; C++'s eval and AOT stages 0.986 to 0.995 each (the runtime's half
+0.972 to 0.990), its independence 0.9482 to 0.9518, **94 to 95** (floored); crops-score `--judge --strict` and records-check 0
+problems. The runtime-keyed steps ran with sema.ae at 5b5c77242 in the working tree (259a4fb98 moves the runtime's key).
+
+Left (4 units), by the size of their next step: floating_to_chars (GNU's VLAs; DECISION cpp-rt-own3-1), floating_from_chars ("no
+member ~_Up": a destructor named through a template parameter before its class's destructor is declared; DECISION cpp-rt-own3-2),
+tzdb (probed to the end for the first time: "no operator()" after a header drop of `typename invoke_result<_Fn, _Args...>::type`),
+valarray ("no member size" after <valarray>'s out-of-line members dropped, "unknown type _Tp"; gslice's recursion depth). The
+survey's section has the decisions.
+
+Alternatives weighed: the constraint types parsed from their text alone (the old mangle-constraint's small type parser; rejected:
+alias templates and dependent names need sema's resolution); the constraint scope as the instantiated class's (rejected: clang
+writes the class's parameters, T_, and its typedefs over them); constant initialization of arrays too (clang's rule; left: the
+decision named POD class locals, arrays move many more units' IR); emission order modelled by a second pass of the module
+(rejected: lazily instantiated entities get other ids in a second pass, and the template caches would have to be reset), or by
+entity ids (cpp-rt-own's; rejected: clang names an entity at its first reference, not at its creation); a two-pass min-place
+computation without placeholders. Rejected: a gate run (the brief's).
+
+Commits: 574e72fbf (the code, rt_ours_glob), 5b5c77242 (format's two gaps, codegen-gen's digests), 259a4fb98 (DECISION 510-1 (a)),
+d845c9472 (the records: runtime inputs, scores), and this entry's commit (the survey's section, the journal). Pushed to mac.
