@@ -17195,3 +17195,53 @@ llvm-mc's byte for byte (musl 32, synthetic 8, mc-x86-obj 49, obj-err 3 of 3), a
 195,791 pass / 723 by design / 0 deferred (the 723 the cross judge's, counted out by the user's decision, another stream's); AOT
 108 / 0 / 0 (the verdict beside: 1,224 of 1,243, the rest :view-llvm-objdump 11, :x32 7, :options 1). Left: x32 (ELF32 with EM_X86_64
 and RELA, and the encoder's REX on x32's TLSDESC lea: 7 beside lines), gnux32-dwarf-gen's -g, the two views.
+## 2026-11-22: hs-speed-1122: Haskell's deferred eval classes (T3279's frozen self-delivery, CallConv's assembly on x86i, the speed rows measured)
+
+Branch `hs-speed-1122` from mac/next `008ffdae8` (with hs-r7-1122), the burst's stream for Haskell's completeness: the eval cell's
+deferred classes `:speed` 14, `:own-speed` 4 (+1 at AOT), `:rts` 1, `:test-cmm` 2, `:oracle-pending` 1. Light: `bin/hsi check --libs own
+--only` runs over hs-r7's own libraries (its worktree's lib-check and lib-stg outputs at hs-r7's commit, copied into this worktree's
+`.tmp/repr-haskell`), the eleven negative controls' subjects in each recording run; no gate. Details in doc/haskell/HASKELL-EVAL-SURVEY.md,
+"As built: hs-speed".
+
+**T3279 (`:rts`) passes.** HES56 (b) froze interrupted evaluations only for another runnable thread; T3279's are the running thread's:
+its handler throws to itself inside unsafePerformIO, and the forked re-evaluation takes main's killThread at unsafeUnmask. Now
+`killThread#` to the running thread freezes with the primop's return as the control, and a delivery at an unmasking (`deliverSelfAt`:
+the mask primop's, a mask frame's return) freezes with the action to apply or the value returned; transactions and the deliveries as a
+thread blocks revert as before (GHC's stg_killThreadzh, throwToSingleThreaded and raiseAsync, rts/RaiseAsync.c, studied for the rule).
+Proof: T3279 prints 2; 70 programs that throw, kill, mask or time out (55 of the testsuite found by their sources, 7 samples, the control
+subjects) the same verdicts as recorded but T3279 (four C programs first failed because bin/hsi was edited while their cnodes ran:
+rerun, passing).
+
+**CallConv (`:test-cmm`) passes.** Its source is assembly (`CallConv_x86_64.s`, all.T's extra_hc_opts under `when(arch('x86_64'))`):
+run_plan.ae evaluates that condition for the plan's platform, the front end takes a test with a `.s`, bin/lib/hsi/check assembles it with
+`bin/repr-asm object` (Arbace's ELF64 object assembler, AX4) and hsi loads it (`hsi run --asm`, go/arbace/hs/asm.ae): a primcall of one
+of its global symbols runs on x86i (AX5) in GHC's x86-64 convention (MachRegs.h), until the jump to Sp[0]. bin/hsi build prints x86i and
+emu with the driver (in its key; both build for amd64 and arm64). Alternatives: the test's arithmetic written as Cmm (not the test's
+source), or a native code generator's convention emulated in Go per instruction (x86i exists).
+
+**unboxedsums_unit_tests is n/a.** The user's decision of 2026-11-22 counts T13825-unit, unboxedsums_unit_tests and tcrun022 out of the
+cases; counting-1122 took them out of the independence's judged cases alone, and x86-64's classes of the same decision are `:kind :na`.
+The one non-pass of the three is now in `:ghc-package` (`:na`); `:oracle-pending` keeps no member.
+
+**The speed rows: measured, not moved.** At a 600 s CPU limit 16 of the 21 rows killed at the limit on the own libraries pass by their
+own verdicts (66 to 502 s of wall at 4 jobs; pic 73 s of CPU alone); fannkuch-redux, minimax, k-nucleotide and T23071 run past 600 s,
+unpack_sums_6 out of 8 GiB. The profiles put the time in the own libraries' -O0 code (kahan's fromIntegral through Integer and
+integerToBinaryFloat', compareByteArrays' drop through Num Int's (-), T23071's Handle layer, n-body's Storable): 2 to over 20 times the
+pack's -O2 libraries on these rows. Three evaluator changes were built and measured with perf stat against next's profile-guided build
+and left out (none moves a row): a leaf-function fast path with let-bound thunks speculated (fewer steps, more instructions), `($)`
+and newtype constructors rewritten at compile time (n-body -6 % cycles, kahan and pic none), GOMAXPROCS 4 (none). Proposed:
+HES100 (the speed rows: an optimizer of the own libraries' STG, recommended, with HES97 (a)'s caps meanwhile), HES101 (fannkuch-redux and
+minimax, whose GHC -O0 runs passed record-ref's 10 s: n/a), HES102 (k-nucleotide's stdin as boot.sh makes it).
+
+**The AOT check's 139 programs once on the new hsi** (the evaluator is shared code): 139 of 139 pass (`--aot --libs own`, 4 jobs, the
+six controls of its corpus failing as they must), nofib/spectral/fibheaps among them (`:own-speed` at AOT, killed at 85 s of wall in the
+record) at 55.7 s, again alone at 48.6 and 50.6: near the 60 s of CPU as the class says (57 s when it passed before), its row recorded
+from the last, passing run with five control subjects (status 0); it stays listed in `:own-speed`.
+
+Records, each from a passing `--only --record` run with the controls' subjects: test/haskell/check-hsi-own.edn's 13 rows (T3279,
+CallConv, the four C programs, the subjects), test/haskell/check-hsi.edn's 12 (the pack's: T3279 and CallConv pass on GHC's STG too,
+CallConv's key kept by prog_key leaving a `.s` out of the flags as the helper's dump does; hs_try_putmvar001 and T24598, `:test-c`'s and
+`:test-cmm`'s listed passes, now pass in it), test/haskell/check-hsi-aot-own.edn's 6 (fibheaps and the subjects). The eval cell
+894 / 34 / 22 -> 896 / 34 / 19 (1 n/a); AOT 138 / 0 / 1 -> 139 / 0 / 0; Haskell completeness 0.9835 -> 0.9860 (0.986038, floored 98.6;
+0.9948 without by design). bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check, bin/hsi divergences (909
+programs, 0 not in a class): 0 problems. test/gate/crops-test.bash passes with the hsi steps' inputs grown (x86i, emu, the assembler).
