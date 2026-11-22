@@ -5810,3 +5810,12 @@ runs): io::error's and io_slice's
 `cfg_select!` `#[path]` modules (module-files reads no macro's arms), core_simd ops' `use super::*` of a private import, to_bytes'
 `{ $size * $elems }` written by rustc as its anonymous constant's path, the `Thin` trait alias bound, the `[const]`/`const` bound
 clauses (512's ranking, not taken here).
+
+### After np5 (module runs, no chain)
+
+The fixes made after np5 proved on the modules whose facts they move (core's pass over those files alone against the helper's
+facts, ALLOC_IFACE_ROUNDS=1): iter::traits::double_ended, any, fmt, fmt::rt, io::error: 456 of 465 equal, 0 differ (the 59
+`#[rustc_non_const_trait_method]`/`#[rustc_comptime]` constness facts and create_formatter's object region among them; 9 missing,
+io::error's `cfg_select!` modules); num: 1,917 of 1,917 (its 72 `from_*_bytes`/`to_*_bytes` with `[u8; size_of::<Self>()]`, the call
+now evaluated in collect's lower-const-arg as rustc's type_of writes it). No chain was run again for them (the user's rule of
+2026-11-22): core's count after np5 plus these is at most 27,194 of 27,498 (27,062 + the 59 constness facts + create_formatter + num's 72), not measured whole.

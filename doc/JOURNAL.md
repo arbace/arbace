@@ -14054,3 +14054,12 @@ round 1's, theirs kept). After the build (`d55d8a47a`, unit cases in pack-compar
 (threads.rs' row not rebuilt: the user's rule of 2026-11-22, "avoid redundancy and unnecessary tests"; threads is not in this
 stream's list), and the post-np5 interface fixes (their module runs next). reap --record, crops-score --record, --judge --strict
 0 problems, records-check 9 pairs 0 problems.
+
+## 2026-11-22: rust-c4-1122: the post-np5 interface fixes proved by module runs
+
+core's pass over the modules the fixes touch (no chain, the user's rule): double_ended, any, fmt, fmt::rt, io::error 456 of 465 facts
+equal, 0 differ (9 missing: io::error's cfg_select #[path] modules); num 1,917 of 1,917 after collect's lower-const-arg evaluates a
+call (`[u8; size_of::<Self>()]`, eval-int-expr's size_of with a primitive impl's Self). Left in core, for the report: io's
+cfg_select modules (module-files reads no macro's arms), core_simd ops' glob of a private import, to_bytes' anonymous-constant
+args, shift_scalar's impl-fresh `'_`, the Thin trait alias bound (a clause the solver would have to expand), legacy_int_modules'
+consts, the [const] clauses (512's).
