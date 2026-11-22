@@ -254,13 +254,16 @@
         (do (doseq [op (:mi r)] (when-let [e (:expr op)] (o/visit-syms! ctx e)))
             (when (:wait r) (o/bytes! ctx [0x9b]))
             (when hooks (begin-insn! ctx r))
-            (let [may (may-relax? (:inst r) (:mi r))
+            (let [;; X86AsmParser's processInstruction: {disp32} (or .d32) on JMP_1 or JCC_1 forces the relaxed form, JMP_2 or
+                  ;; JCC_2 in 16-bit mode (x86-objs: MC/X86's Relocations/x86-16)
+                  r (if (and (#{"JMP_1" "JCC_1"} (:inst r)) (contains? (set (:pflags r)) :disp32)) (relax-enc r mode) r)
+                  may (may-relax? (:inst r) (:mi r))
                   ;; X86_MC::emitInstruction: with --mc-relax-all the instruction relaxed in full and written as data
                   r (if (and may (:relax-all *opts*)) (relax-enc r mode) r)]
               (if (and (or may (enhanced-relaxation?)) (not (:relax-all *opts*)))
                 (let [sec (o/cur-sec ctx)
                       allow (and hooks (contains? (:allow @*st*) (vec (take 2 (frag-pos sec)))))]
-                  (o/add-chunk! sec (o/new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r :pos @(:pos ctx)
+                  (o/add-chunk! sec (o/new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r :pos @(:pos ctx) :intel @(:intel ctx)
                                                          :allow-pad allow})))
                 (let [ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
                   (doseq [v (:bytes r)] (.add b (if (= v :fixup) 0 v)))
@@ -426,7 +429,32 @@
 
 (def ^:private tls-specs #{"GOTTPOFF" "INDNTPOFF" "NTPOFF" "GOTNTPOFF" "TLSCALL" "TLSDESC" "TLSGD" "TLSLD" "TLSLDM" "TPOFF" "DTPOFF"})
 
+(defn- reloc-type-386
+  "X86ELFObjectWriter::getRelocType for EM_386 (getType64's field type, then getRelocType32; x86-objs, AXS101): R_386_*."
+  [kind ^long size spec pcrel]
+  (let [spec (if (= kind :branch) "PLT" spec)
+        rt (case kind
+             (:signed :signed-relax :riprel :riprel-relax :riprel-relax-rex :riprel-relax-rex2 :riprel-movq-load
+              :riprel-movq-load-rex2 :riprel-relax-evex :branch) :32
+             :none :none
+             (case size 1 :8 2 :16 4 :32 8 :64))
+        _ (when (= rt :64) (o/fail "unsupported relocation type"))
+        bad (fn [] (o/fail "unsupported relocation type"))
+        r32 (fn [t] (if (= rt :32) t (bad)))]
+    (case spec
+      (nil "ABS8") (case rt :none (if (nil? spec) 0 (bad)) :32 (if pcrel 2 1) :16 (if pcrel 21 20) :8 (if pcrel 23 22))
+      "GOT" (r32 (cond pcrel 10 (false? (:relax-relocations *opts*)) 3 (= kind :signed-relax) 43 :else 3))
+      "GOTOFF" (r32 9) "TLSCALL" 40 "TLSDESC" 39 "TPOFF" (r32 34) "DTPOFF" (r32 32) "TLSGD" (r32 18) "GOTTPOFF" (r32 33)
+      "PLT" (r32 4) "INDNTPOFF" (r32 15) "NTPOFF" (r32 17) "GOTNTPOFF" (r32 16) "TLSLDM" (r32 19)
+      (bad))))
+
+(declare reloc-type-64)
 (defn- reloc-type [kind ^long size spec pcrel]
+  (if (:rel? o/*arch*)
+    (reloc-type-386 kind size spec pcrel)
+    (reloc-type-64 kind size spec pcrel)))
+
+(defn- reloc-type-64 [kind ^long size spec pcrel]
   (let [spec (if (= kind :branch) "PLT" spec)
         rt (case kind
              (:signed :signed-relax) (if (and (nil? spec) (not pcrel)) :32s :32)
@@ -487,9 +515,14 @@
       ;; .reloc OFFSET, TYPE[, EXPR] (AX11; X86AsmBackend::getFixupKind at ELF: R_X86_64_* by name, BFD_RELOC_NONE/8/16/32/64)
       "reloc" (let [[off t e] args
                     tn (str/upper-case (o/sym-name t))
-                    type (if (str/starts-with? tn "R_X86_64_")
-                           (some (fn [[k v]] (when (= v tn) k)) elf/reloc-names)
-                           ({"BFD_RELOC_NONE" 0 "BFD_RELOC_8" 14 "BFD_RELOC_16" 12 "BFD_RELOC_32" 10 "BFD_RELOC_64" 1} tn))
+                    ;; (i386's names: R_386_* and BFD_RELOC_NONE/8/16/32; x86-objs, AXS101)
+                    type (if (:rel? o/*arch*)
+                           (if (str/starts-with? tn "R_386_")
+                             (some (fn [[k v]] (when (= v tn) k)) elf/reloc-names-386)
+                             ({"BFD_RELOC_NONE" 0 "BFD_RELOC_8" 22 "BFD_RELOC_16" 20 "BFD_RELOC_32" 1} tn))
+                           (if (str/starts-with? tn "R_X86_64_")
+                             (some (fn [[k v]] (when (= v tn) k)) elf/reloc-names)
+                             ({"BFD_RELOC_NONE" 0 "BFD_RELOC_8" 14 "BFD_RELOC_16" 12 "BFD_RELOC_32" 10 "BFD_RELOC_64" 1} tn)))
                     _ (when-not type (o/fail "unknown relocation name"))
                     off (o/resolve-expr ctx off) e (o/resolve-expr ctx (or e 0))]
                 (o/visit-syms! ctx e)
@@ -538,13 +571,20 @@
   :lfi (an LFI triple's run: the LFI rewriter, arbace.asm.amd64.lfi, and its ABI note; x86-print)."
   [items & [opts]]
   (binding [o/*arch* (cond-> arch
-                       (:rel? opts) (assoc :rel? true)
+                       ;; i386's ELF32 (x86-objs, AXS101: EM_386, REL relocations)
+                       (:rel? opts) (assoc :rel? true :machine elf/EM_386 :elf-class 32)
                        ;; the streamer's finishImpl: the LFI ABI note (emitLFINoteSection)
                        (:lfi opts) (assoc :finish (fn [ctx] (o/run-items! ctx (asm/read-items lfi/note-text asm/amd64)))))
             *opts* (or (:backend opts) {})
             *lfi* (boolean (:lfi opts))
-            *st* (atom {:allow #{}})]
-    (o/assemble items (dissoc opts :backend :rel? :lfi))))
+            *st* (atom {:allow #{}})
+            ;; the object file format (x86-objs, AXS99 (b)): ELF's writer, or Mach-O's or COFF's for a Darwin or Windows triple
+            ;; (:ptr-mode the triple's: 32 for i386, whatever .code the file sets; :unwind llvm-mc's compact unwind options)
+            o/*fmt* (case (:format opts)
+                      :macho ((requiring-resolve 'arbace.asm.amd64.macho/fmt) (not= 32 (long (:ptr-mode opts 64))) (:unwind opts))
+                      :coff ((requiring-resolve 'arbace.asm.amd64.coff/fmt) (not= 32 (long (:ptr-mode opts 64))))
+                      nil)]
+    (o/assemble items (dissoc opts :backend :rel? :lfi :format :ptr-mode :unwind))))
 
 (defn assemble-file
   "The object of the file at PATH; OPTIONS {:defsym [[SYM VALUE]...]}: llvm-mc's --defsym (AXS94 (a)), by keyword as arm64's

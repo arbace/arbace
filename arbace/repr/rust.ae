@@ -146,7 +146,8 @@
         {:dump dump-path :ns ns :out out :status :misread :error (pr-str d) :warnings warnings}
         {:dump dump-path :ns ns :out out :status :ok :warnings warnings :forms (count forms)}))
     (catch Throwable e
-      {:dump dump-path :status :error :error (or (.getMessage e) (str e))})))
+      (cond-> {:dump dump-path :status :error :error (or (.getMessage e) (str e))}
+        (:diagnostic (ex-data e)) (assoc :diagnostic (:diagnostic (ex-data e)))))))
 
 (defn- cmd-read [args]
   (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--report" "--root" "--only" "--corpus"
@@ -187,7 +188,8 @@
                         :files (into (sorted-map) (for [r results] [(:file r)
                                                                     (cond-> {:status (:status r)}
                                                                       (:ns r) (assoc :ns (str (:ns r)) :out (:out r))
-                                                                      (:error r) (assoc :error (:error r)))]))}))))
+                                                                      (:error r) (assoc :error (:error r))
+                                                                      (:diagnostic r) (assoc :diagnostic (:diagnostic r)))]))}))))
     (if (= (count results) (count (:ok by))) 0 1)))
 
 (defn- cmd-print [args]
@@ -301,23 +303,69 @@
       (when (seq @left) (println (str "controls left, not in the run (" (name level) " level): " (str/join " " @left))))
       @bad)))
 
+(defn- rejection-message
+  "A reader's rejection as its message alone: the forms report's \"the helper failed: error: M\", a tree text's
+  \"rsdump/error native parser: M\""
+  [s]
+  (some-> s str (str/replace #"^the helper failed: " "") (str/replace #"^rsdump/error " "")
+          (str/replace #"^(error: |native parser: )" "") str/trim))
+
+(defn judge-rejection
+  "A file rustc's own parser rejects alone (test/rust/roundtrip-rejects.edn's EXPECT, rustc's recorded diagnostic): it passes by
+  its own verdict, {:status :ok :rejected true}, when the reader rejects it with that message and span (CONV, the forms report's
+  entry: its :error and :diagnostic) and, at the tree levels, the original's tree text (ORIG-TREE, its file) is that rejection
+  too; else {:level :convert :status :rejection-differs}"
+  [expect conv ^String orig-tree]
+  (let [first-line (when orig-tree (first (read-lines-file orig-tree)))
+        m (rejection-message (:error conv))
+        span (:span (:diagnostic conv))]
+    (if (and (= :error (:status conv)) (= (:error expect) m) (= (:span expect) span)
+             (or (nil? orig-tree)
+                 (and first-line (str/starts-with? first-line "rsdump/error")
+                      (= (:error expect) (rejection-message first-line)))))
+      {:status :ok :rejected true}
+      {:level :convert :status :rejection-differs
+       :detail (str "rustc rejects the file with " (pr-str (:error expect)) " at " (pr-str (:span expect)) "; the reader: "
+                    (pr-str m) " at " (pr-str span) (when orig-tree (str "; the original's tree: " (pr-str first-line))))})))
+
+(defn- read-rejects [opts]
+  (let [f (get opts "--rejects")]
+    (if (and f (.exists (File. ^String f))) (read-string (slurp f)) {})))
+
+(defn- rejection-controls
+  "Each file of RESULTS passing by its own verdict (:rejected) judged again against its EXPECT with the message changed, which
+  must fail: the number that did not"
+  [rejects results judge]
+  (count (for [[f r] results :when (:rejected r)
+               :let [c (judge (update (get rejects f) :error str " (control)") f)
+                     ok? (= :ok (:status c))
+                     _ (println (if ok? (str "control passed: rejects/" f " is judged a rejection with another message")
+                                    (str "control rejects/" f " fails as it must (" (name (:status c)) ")")))]
+               :when ok?]
+           f)))
+
 (defn- cmd-compare [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times" "--controls"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times" "--controls" "--rejects"})
         corpus (read-string (slurp (get opts "--corpus")))
         orig (get opts "--orig")
         cand (get opts "--cand")
         known-file (get opts "--known")
         known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        rejects (read-rejects opts)
         only (some-> (get opts "--only") re-pattern)
         forms-report (when-let [f (get opts "--forms-report")] (when (.exists (File. ^String f)) (read-string (slurp f))))
         files (for [c (:crates corpus) f (:files c)
                     :when (or (nil? only) (re-find only f))]
                 f)
+        rjudge (fn [expect f] (judge-rejection expect (get-in forms-report [:files f]) (str orig "/" f ".tree")))
         results (pmap-jobs 16
                            (fn [f]
                              (let [conv (get-in forms-report [:files f])]
-                               [f (if (and conv (not= :ok (:status conv)))
+                               [f (cond
+                                    (contains? rejects f) (rjudge (get rejects f) f)
+                                    (and conv (not= :ok (:status conv)))
                                     {:level :convert :status (:status conv) :detail (:error conv)}
+                                    :else
                                     (compare-file (str orig "/" f ".tree") (str cand ".trees/" f ".tree")
                                                   (str orig "/" f ".lines") (str cand ".trees/" f ".lines")
                                                   (get opts "--trees-only")))]))
@@ -328,10 +376,11 @@
         fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
         by-level (frequencies (map (comp :level second) failing))
         ;; the controls before the prune removes the trees they cross
-        ctl (judge-controls (get opts "--controls") (if (get opts "--trees-only") :pretty :tree) results
-                            (fn [s r] (compare-file (str orig "/" r ".tree") (str cand ".trees/" s ".tree")
-                                                    (str orig "/" r ".lines") (str cand ".trees/" s ".lines")
-                                                    (get opts "--trees-only"))))]
+        ctl (+ (judge-controls (get opts "--controls") (if (get opts "--trees-only") :pretty :tree) results
+                               (fn [s r] (compare-file (str orig "/" r ".tree") (str cand ".trees/" s ".tree")
+                                                       (str orig "/" r ".lines") (str cand ".trees/" s ".lines")
+                                                       (get opts "--trees-only"))))
+               (rejection-controls rejects results rjudge))]
     (when (get opts "--prune")
       ;; the trees of the files found equal removed (the scratch stays small)
       (doseq [[f _] ok
@@ -385,27 +434,32 @@
             {:status :differs :at i :bytes [(alength a) (alength b)] :orig (ctx a) :cand (ctx b)}))))))
 
 (defn- cmd-compare-text [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times" "--controls"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times" "--controls" "--rejects"})
         corpus (read-string (slurp (get opts "--corpus")))
         orig (get opts "--orig")
         cand (get opts "--cand")
         known-file (get opts "--known")
         known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        rejects (read-rejects opts)
         only (some-> (get opts "--only") re-pattern)
         forms-report (when-let [f (get opts "--forms-report")] (when (.exists (File. ^String f)) (read-string (slurp f))))
         files (for [c (:crates corpus) f (:files c) :when (or (nil? only) (re-find only f))] f)
+        rjudge (fn [expect f] (dissoc (judge-rejection expect (get-in forms-report [:files f]) nil) :level))
         results (pmap-jobs 16
                            (fn [f]
                              (let [conv (get-in forms-report [:files f])]
-                               [f (if (and conv (not= :ok (:status conv)))
+                               [f (cond
+                                    (contains? rejects f) (rjudge (get rejects f) f)
+                                    (and conv (not= :ok (:status conv)))
                                     {:status (:status conv) :detail (:error conv)}
-                                    (compare-text-file (str orig "/" f) (str cand "/" f)))]))
+                                    :else (compare-text-file (str orig "/" f) (str cand "/" f)))]))
                            files)
         ok (filter #(= :ok (:status (second %))) results)
         failing (remove #(= :ok (:status (second %))) results)
         unexpected (remove #(contains? known (first %)) failing)
         fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
-        ctl (judge-controls (get opts "--controls") :text results (fn [s r] (compare-text-file (str orig "/" r) (str cand "/" s))))]
+        ctl (+ (judge-controls (get opts "--controls") :text results (fn [s r] (compare-text-file (str orig "/" r) (str cand "/" s))))
+               (rejection-controls rejects results rjudge))]
     (doseq [[i [k r]] (map-indexed vector unexpected)]
       (println "DIFFERS" k (pr-str (dissoc r :orig :cand :detail)))
       (when (< i 10)

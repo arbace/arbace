@@ -3032,3 +3032,138 @@ ones (after `bin/repr-haskell lib-check --ifaces own` and `lib-stg --ifaces own`
 `bin/hsi check [--aot] [--libs own] --corpus samples --only samples/AsyncRerun --record`; 40 passing programs of
 testsuite/concurrent/should_run (conc0NN, throwto, T-numbered) and samples Conc, Deadlock, MVarOrder, Stm still pass. The class is
 removed at both levels: eval 859 / 61 / 30 to 860 / 60 / 30, AOT 137 / 1 / 1 to 138 / 0 / 1.
+
+## As built: hs-speed, the deferred classes of the eval and AOT cells (2026-11-22, branch `hs-speed-1122`, from next `008ffdae8`)
+
+The burst's stream for Haskell's completeness: the eval cell 894 / 34 / 22 and AOT 138 / 0 / 1, the deferred classes `:speed` (14),
+`:own-speed` (4, 1 at AOT), `:rts` (1), `:test-cmm` (2) and `:oracle-pending` (1); the by-design ones left to the user with options.
+Light: targeted `bin/hsi check --libs own --only` runs with the eleven negative controls' subjects, no gate. The own libraries are
+hs-r7's (lib-check and lib-stg `--ifaces own` of the 27 packages at hs-r7's commit, copied into this worktree's `.tmp/repr-haskell`).
+
+### Built
+
+- **T3279 (`:rts`): an interrupted thunk resumed after a self-delivery.** HES56 (b) froze the evaluations an asynchronous exception
+  interrupts only for a runnable thread other than the running one. T3279's exception is the running thread's own: its handler
+  throws to itself (`killThread#` of `myThreadId`) inside `unsafePerformIO`, and the forked evaluation takes main's `killThread` at
+  `unsafeUnmask` (a queued throwTo# delivered at the unmasking). Both reverted the thunk, so `print f` ran `throwIO (ErrorCall "foo")`
+  again and main died of it. Now (go/arbace/hs/rts.ae, prim_ctl.ae, machine.ae) `killThread#` to the running thread freezes with the
+  control the primop's return (no values: State# alone), and a delivery at an unmasking (`deliverSelfAt`) freezes with the control
+  known there: the mask primop's action applied (`ApplyV`), or the value returned through the mask frame; a transaction's segment
+  reverts as before, and so do the deliveries as a thread blocks (its control a blocked operation, no expression to resume). GHC's
+  stg_killThreadzh calls throwToSingleThreaded and raiseAsync freezes the stack the same way at an unmasking (rts/RaiseAsync.c,
+  studied for the rule, not ported). T3279 prints `2`.
+- **CallConv (`:test-cmm`): the test's own x86-64 assembly on x86i.** all.T names `CallConv_x86_64.s` under `when(arch('x86_64'))`:
+  `test/haskell/eval/run_plan.ae` now takes an extra_hc_opts under that condition (the plan's platform, x86_64 Linux, as its
+  linux-run-opts does; T5747's i386 one stays out), the front end takes a test with a `.s` (a `.S` still refused), and
+  bin/lib/hsi/check assembles each `.s` with Arbace's object assembler (`bin/repr-asm object`, AX4: an ELF64 relocatable object, kept
+  by the file's and repr/asm's digests) and passes it to `hsi run --asm OBJ`. hsi (go/arbace/hs/asm.ae) maps the object's `.text`
+  into an address space of emu's and runs a primcall to one of its global symbols on x86i (go/arbace/x86i, AX5) in GHC's x86-64
+  convention (MachRegs.h: R1 to R6 in rbx, r14, rsi, rdi, r8, r9; F1 to F6 and D1 to D6 in xmm1 to xmm6; Sp in rbp), until the
+  procedure jumps to the continuation Sp[0] holds (an unmapped sentinel), its results read from the same registers. `bin/hsi build`
+  prints x86i and emu with the driver (in its key); both build for amd64 and arm64. CallConv prints its stdout (4.0, -2.0, 8.0, 2.0
+  twice), judged by its own verdict.
+- **fibheaps at AOT (`:own-speed`).** The AOT check's 139 programs run once on the new hsi (the evaluator is shared code): all pass,
+  nofib/spectral/fibheaps at 55.7 s of wall, alone at 48.6 and 50.6 (the record's run killed at 85 s on a loaded host): near the limit,
+  recorded from a passing run, still listed in the class.
+- **unboxedsums_unit_tests (`:oracle-pending`): n/a.** The user's decision of 2026-11-22 counts T13825-unit, unboxedsums_unit_tests and
+  tcrun022 out of the cases; counting-1122 applied it to the independence's judged cases (test/haskell/eval-out.edn) alone. Of the
+  three only unboxedsums_unit_tests is a non-pass; it is now `:ghc-package`, `:kind :na` (as counting-1122 made x86-64's cross judge's
+  classes of the same decision), and `:oracle-pending` keeps no member.
+
+The records, each from a passing `--only --record` run with the negative controls' subjects: check-hsi-own.edn (13 rows), check-hsi.edn
+(12: the pack's T3279 and CallConv pass too, CallConv's haskell-stg-progs key kept by `prog_key` leaving a `.s` out of the flags, as the
+helper's dump leaves it out), check-hsi-aot-own.edn (6). The eval cell 894 / 34 / 22 to 896 / 34 / 19 (1 n/a), AOT 138 / 0 / 1 to
+139 / 0 / 0; Haskell's completeness 0.9835 to 0.9860 (0.986038; 0.9948 without by design).
+
+### The speed classes: measured, not moved
+
+Every row of `:speed`, `:own-speed` and the three `:no-reference-own` rows killed at the limit (bspt, fulsom, pic) run on the own
+libraries with the CPU limit raised to 600 s (`HSI_TIMEOUT=600`, 4 jobs, the host's load 90 to 140 on 64 cores; wall seconds):
+kahan 250.7, queens 83.1, x2n1 135.9, bspt 125.6, fulsom 112.3, pic 66.6 (73 s of CPU alone), fasta 78.5, n-body 387.3,
+spectral-norm 502.3, dom-lt 74.5, treejoin 87.4, compareByteArrays 315.3, AtomicPrimops 164.2, T21651 147.1, T21969 111.0,
+setnumcapabilities001 168.2: each passes by its own verdict, slow and not wrong; fannkuch-redux, minimax, k-nucleotide and T23071 run
+past 600 s of CPU; unpack_sums_6 runs out of its 8 GiB. The rows need 1.1 (pic) to over 10 times hsi's speed on the own libraries.
+
+What costs (Go's pprof, `hsi run --cpuprofile`, and a closure-level count of nodes evaluated, a scratch build's): the evaluator's
+profile is flat as queue 333 found it (`App.eval` 11 %, `runSlice` 8 %, `CaseE.cont` 8 %, Go's allocation 12 %, no function above
+11 %), and its time goes to the own libraries' `-O0` code, which GHC's `-O2` libraries (the pack's, and the reference runs') do not
+run: kahan's `fromIntegral` of a Word goes through Integer and integerToBinaryFloat' with RealFloat's dictionary (360 nodes an inner
+iteration, a third of them BigNat's); compareByteArrays is 97 % `drop` and Num Int's `(-)` (`unsafeDrop (m - 1)` through
+`$fNumInt`, a thunk an element: 315 s against the pack's 55); T23071's million `print`s are the Handle layer's `-O0` code, about 240
+nodes a character through `unsafeWithForeignPtr`, `IO $ \s -> ...` closures and `$`'s calls (past 600 s against the pack's 30);
+n-body's Storable reads and writes the same (387 s against about 104). The own libraries are 2 to over 20 times the pack on these
+rows; hsi itself is about 13 times GHC's `-O0` code on the pack.
+
+Tried and left out (perf stat's instructions and cycles, the host loaded; each against next's profile-guided build, the same
+outputs): a leaf-function fast path (a function that only takes its arguments apart and computes pure primops evaluated in Go's
+stack when its arguments are evaluated) and a let-bound thunk speculated when its body is such a call: 17 to 27 % fewer of hsi's
+steps, 1 to 27 % more instructions (an attempt fails on a thunk argument in 70 to 80 % of the calls); `($)` applied rewritten to
+the direct call and a let-bound newtype constructor (`\nt -> nt`) applied to its argument: n-body 10.6 % fewer instructions and 6 %
+fewer cycles, kahan 4 % fewer instructions and the same cycles, x2n1 and pic none; GOMAXPROCS 4 (the collector's idle workers):
+compareByteArrays the same CPU. None moves a row; none is in the tree.
+
+### Proposed (HES100 onward)
+
+- **HES100 The speed rows.** (a) HES97 (a), decided 2026-11-17 and not built: a CPU cap a row (`HSI_CPU_CAPS`), about 1.5 times its
+  measured CPU, judged as any program (16 rows pass under it, the four past 600 s and unpack_sums_6 stay); (b) an optimizer of the own
+  libraries' STG, hsi's image build or lib-stg's `-O1` line (HF10's): cross-module inlining of small functions, the case of a known
+  constructor, a known dictionary's method, `($)` and the newtype constructors: the own libraries' cost is what separates the rows from
+  the pack's speed, a project of weeks; (c) HES99 (b) reversed, the typed representation (1.3 to 1.6 times); (d) keep the classes.
+  **Recommended: (b), with (a) until it lands.**
+- **HES101 Programs whose GHC `-O0` run itself passed record-ref's 10 s.** fannkuch-redux and minimax (GHC's record: killed at 10 s;
+  minimax recomputes `length (prog s)` 180,000 times where nofib's `-O` floats it out), judged by their own verdicts since
+  D-HSJ-3 (a): (a) n/a, out of the cases (no `-O0` run of GHC finished within the plan's budget); (b) run them with nofib's `-O`
+  (hsi runs `-O0` STG only); (c) keep `:speed`. **Recommended: (a).**
+- **HES102 k-nucleotide's empty stdin.** The plan gives it no stdin (nofib's boot.sh makes `k-nucleotide.faststdin` with fasta-c),
+  its genome empty and `hashGenome`'s loop reads past its buffer: GHC's run faults (status 139), hsi's runs on. (a) the plan's stdin
+  made as boot.sh makes it (fasta-c 60000 by ci, D-HSJ-2 (a)'s way) and the run judged by `k-nucleotide.faststdout`; (b) n/a, undefined
+  behaviour; (c) keep. **Recommended: (a)** (then a speed row like the others).
+- **HES103 The 28 programs GHC did not build** (`:no-reference`'s members with `:no-dump` in check-hsi-own.edn; out of the judge's cases
+  since the user's decision of 2026-11-21, still in completeness's denominator by design): 17 of nofib/parallel's 19 and real/ben-raytrace
+  need the `parallel` package (Control.Parallel, Control.Parallel.Strategies; ray by its SRC_DEPS), parallel/minimax, spectral/secretary
+  and ben-raytrace `random`; gc/gc_bench and smp/sieve `old-time`, real/smallpt `unboxed-ref`; parallel/cfd and dcbm import GHC 4's
+  `Parallel` module (dcbm with -cpp); real/eff, spectral/hartel and smp/stm001 hold several programs or no Main.hs ("no main file");
+  smp/threads004 does not compile on 9.14 (GHC-61689). (a) n/a, out of the cases as for independence; (b) `parallel`, `random`,
+  `splitmix`, `old-time` and `unboxed-ref` as own packages (Hackage's sources: a fetch for the user to allow), those programs judged by
+  nofib's expected outputs, the multi-program directories planned one program each; (c) keep by design. **Recommended: (b) for the
+  packages and the plan, (a) for cfd, dcbm and threads004.**
+- **HES104 forkProcess (`:process`, T24672).** hsi cannot fork a Go process image with its heap. (a) n/a, out of the cases; (b) a
+  fork(2) of hsi's process whose child runs only an action that does no Haskell work (T24672's `pure ()`), the rest refused: a test-shaped
+  rule; (c) keep by design. **Recommended: (a).**
+- **HES105 all.T's skips (`:skipped`: T4262 unconditionally, T24809 req_profiling on this GHC).** GHC's own testsuite does not run them.
+  (a) n/a; (b) keep by design. **Recommended: (a).**
+- T21305's out-of-bounds writes stay HES96's decision (proposed in queue 332: (a) by design, recommended; (b) a write past a byte array's
+  end dropped).
+
+## As built: HES97 (a) and HES102 (hs-speed's second round, 2026-11-22, after next `e3d9a3331`)
+
+The coordinator's brief after the first round's merge: HES97 (a), decided 2026-11-17 and not built, is the design for the rows that
+pass by their own verdicts given time; HES102 is a technical fix; the user's "count the three out" named in completeness's n/a classes.
+
+- **HES97 (a): a program's own CPU limit.** bin/lib/hsi/check takes `HSI_CPU_CAPS` (ID=SECONDS words, as HSI_MEM_CAPS), by default
+  test/haskell/cpu-caps.tsv's (ID, SECONDS, the measured CPU): a listed program runs to its cap (`cpu_limit`: the cap when above
+  HSI_TIMEOUT, its wall cap three times it, the AOT level's profile run and compiled run alike; a profiled run, HSI_CPUPROFILE_DIR,
+  keeps HSI_TIMEOUT), and is judged as any program, by its own verdict. The 17 caps are about 1.5 times each row's CPU (user + system,
+  every thread, of a run at a 600 s limit and 4 jobs, measured through a timing wrapper as HSI_EXE), from the larger of that and the
+  first round's wall seconds on a host loaded 90 to 140, rounded up to 10 s: kahan 400 (265.9 s of CPU), queens 140 (87.1), x2n1 220
+  (145.1), bspt 200 (131.2), fulsom 180 (117.7), pic 100 (64.3), fasta 120 (73.8), k-nucleotide 230 (149.6), n-body 590 (228.9),
+  spectral-norm 760 (297.7), dom-lt 130 (80.3), treejoin 140 (92.6), compareByteArrays 480 (240.8: 157 s of wall, the collector's
+  threads), AtomicPrimops 250 (90.0), T21651 230 (104.3), T21969 170 (89.5), setnumcapabilities001 260 (101.6). As GHC's testsuite's
+  run_timeout_multiplier gives its slow tests more time. The night's hsi-check grows by the rows' CPU beyond the 60 s each was killed at:
+  2,360 s of CPU against 17 x 60, about 1,340 s more (22 minutes of CPU over its two parts at 2 jobs; at most 3,580 s if every row ran
+  to its cap). Left: fannkuch-redux and minimax (HES101, the user's), T23071 (past 600 s) and unpack_sums_6 (out of 8 GiB).
+- **HES102: k-nucleotide's stdin.** test/haskell/eval/boot.edn's entries take `:stdin` (with `:file`) in place of `:stdout`: the
+  program's input its boot.sh makes (nofib's INPUT_FILE in the fast mode), here `../fasta/fasta-c.c` run with 60000 on ci through
+  `tr -d '\r'`, 610,077 bytes, SHA-256 28c2a690... (bin/hsi boot makes and checks it). bin/lib/hsi/boot-stdin.bash: the plan's stdin
+  of such a program (bin/lib/hsi/check, record-ref), the made file copied into the run's directory (made once under a lock when the kept
+  one is not the digest's). bin/hsi own-verdicts lists it by nofib's own expected output (k-nucleotide.faststdout: its record a run
+  without the input), golden/na.tsv's `undefined` entry removed (its output is defined now), review.ae's boot check takes the input
+  entries. k-nucleotide prints k-nucleotide.faststdout at 150 s of CPU (its cap 230).
+- **T13825-unit and tcrun022** named in n/a classes beside unboxedsums_unit_tests (`:ghc-package`, `:optimizer-rules`), their
+  reasons test/haskell/eval-out.edn's. Both pass in the record (GHC's STG over the pack's libraries), and counting2's rule (a row an
+  `:na` class names counts n/a only when the record does not pass it; C++'s Wnull-conversion-1.C) keeps them passes: the numbers do
+  not move. Counting a passing row out would change that rule for every crop: the user's.
+
+The record: the 17 capped rows and the ten control subjects in one `--only --record` run at the default limit (27 pass, the eleven
+controls failing as they must). Rows moved: `:speed` 14 to 3, `:own-speed` 4 to 1, `:no-reference` 31 to 28 (bspt, fulsom, pic); the
+eval cell 896 / 31 / 19 to 913 / 28 / 5 (4 n/a); Haskell's completeness 0.986786 to 0.991279 (0.9986 without by design).
