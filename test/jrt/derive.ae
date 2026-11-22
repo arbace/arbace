@@ -337,9 +337,10 @@ import jdk.internal.misc.Unsafe;
     }
 
     // The JDK's constructors over memory addresses (Buffer's JavaNioAccess: JNI's NewDirectByteBuffer,
-    // memory segments' buffers): the Go build has no memory addressed so
+    // memory segments' buffers): a native memory segment's (java-design-1122) shares the bytes of jrt's
+    // native block at addr (Unsafe.allocateMemory's, go/arbace/jrt/nativemem.ae) as its array
     DirectByteBuffer(long addr, int cap, Object obj, MemorySegment segment) {
-        this(addr, cap);
+        this(jdk.internal.jrt.NativeArrays.bytes(addr, cap), 0, cap, segment);
     }
 
     DirectByteBuffer(long addr, int cap, Object obj, java.io.FileDescriptor fd, boolean isSync,
@@ -2139,6 +2140,57 @@ import java.lang.module.ModuleDescriptor;
             "                             : jdk.internal.jrt.HostChannels.socketException(err[0], null);\n"
             "    }") 1]])])
 
+;; java-design-1122 (the burst's Java by-design stream, 2026-11-22): jdk.internal.foreign.Utils for the foreign memory API's
+;; segments (test/jrt/jrt_sources.ae, ffm-sources): its static initializer looked up three method handles of the
+;; address layouts' var handles (SharedUtils.unboxSegment, Utils.longToAddress by MethodHandles.Lookup.findStatic), which
+;; java.lang.invoke's segment views alone use (makeRawSegmentViewVarHandleInternal, not in the Go build); the derived
+;; Utils keeps the address carrier long and the handles null, so the class initializes (MemorySessionImpl's, the
+;; segments' and List.of's checks, until then jrt's hand-written checkNonNegativeArgument)
+(def ^:private ffm-utils-derivation
+  {:path "jdk/internal/foreign/Utils.java" :from "src/java.base/share/classes/jdk/internal/foreign/Utils.java"
+   :header "/*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, java-design-1122): jdk26u's jdk.internal.foreign.Utils
+ * (https://github.com/openjdk/jdk26u at baf63fb, src/java.base/share/classes/jdk/internal/foreign/Utils.java),
+ * derived mechanically (test/jrt/derive.ae, the replacement asserted once): its static initializer does not look up
+ * the address layouts' method handles (java.lang.invoke's segment views are not in the Go build): the address
+ * carrier is long, the three handles null. The change Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * jdk26u's notice follows.
+ */
+"
+   :ops [["    static {
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        String unboxSegmentName;
+        Class<?> rawAddressType;
+        if (Unsafe.getUnsafe().addressSize() == 8) {
+            unboxSegmentName = \"unboxSegment\";
+            rawAddressType = long.class;
+        } else {
+            assert Unsafe.getUnsafe().addressSize() == 4 : Unsafe.getUnsafe().addressSize();
+            unboxSegmentName = \"unboxSegment32\";
+            rawAddressType = int.class;
+        }
+        ADDRESS_CARRIER_TYPE = rawAddressType;
+        try {
+            LONG_TO_CARRIER = lookup.findStatic(SharedUtils.class, unboxSegmentName,
+                    MethodType.methodType(rawAddressType, MemorySegment.class));
+            LONG_TO_ADDRESS_TARGET = lookup.findStatic(Utils.class, \"longToAddress\",
+                    MethodType.methodType(MemorySegment.class, rawAddressType, AddressLayout.class));
+            LONG_TO_ADDRESS_NO_TARGET = lookup.findStatic(Utils.class, \"longToAddress\",
+                    MethodType.methodType(MemorySegment.class, rawAddressType));
+        } catch (Throwable ex) {
+            throw new ExceptionInInitializerError(ex);
+        }
+    }
+"
+          "    static {
+        // Arbace: no method handles of the address layouts' var handles (java.lang.invoke's segment views)
+        ADDRESS_CARRIER_TYPE = long.class;
+        LONG_TO_CARRIER = null;
+        LONG_TO_ADDRESS_TARGET = null;
+        LONG_TO_ADDRESS_NO_TARGET = null;
+    }
+" 1]]})
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -2199,7 +2251,8 @@ import java.lang.module.ModuleDescriptor;
   invoke-derivations
   hjd-derivations
   mx-derivations
-  async-derivations))
+  async-derivations
+  [ffm-utils-derivation]))
 
 ;; ---------------------------------------------------------------------------------------
 
