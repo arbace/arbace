@@ -4620,6 +4620,36 @@
 
 (swap! checks conj thread-dynamic-init)
 
+;; [stmt.break]/1, [stmt.cont]/1: a break statement appears only in an iteration or switch statement, a continue statement only in an
+;; iteration statement, of its own function (a lambda's body a function of its own): GCC's "break statement not within loop or
+;; switch", "continue statement not within a loop", at the statement.
+
+(defn stray-jumps
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        loops #{"ForStmt" "WhileStmt" "DoStmt" "CXXForRangeStmt"}
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :jump :msg msg}))))]
+    (letfn [(w [x in-loop in-switch in-fn]
+              (cond (map? x)
+                    (let [k (:kind x)]
+                      (cond
+                        (= k "BreakStmt") (when (and in-fn (not in-loop) (not in-switch)) (report! x "break statement not within loop or switch"))
+                        (= k "ContinueStmt") (when (and in-fn (not in-loop)) (report! x "continue statement not within a loop"))
+                        :else
+                        (let [[l s f] (cond (contains? fn-kinds k) [false false true]
+                                            (= k "LambdaExpr") [false false true]
+                                            (#{"CXXRecordDecl" "ClassTemplateDecl"} k) [false false false]
+                                            (contains? loops k) [true in-switch in-fn]
+                                            (= k "SwitchStmt") [in-loop true in-fn]
+                                            :else [in-loop in-switch in-fn])]
+                          (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v l s f)))))
+                    (vector? x) (doseq [y x] (w y in-loop in-switch in-fn))
+                    :else nil))]
+      (w (:nodes u) false false false))
+    (vec out)))
+
+(swap! checks conj stray-jumps)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
