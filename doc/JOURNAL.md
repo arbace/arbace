@@ -17392,3 +17392,46 @@ Alternatives not taken: the packages' sources committed (the corpus is read in p
 as units of the derived global database (every module's MIN_VERSION header would have changed, the read records' keys with it);
 GHC's registered database for the native reads (a GHC product in the own path); the whole check rerun after the shared changes (the
 callers listed instead). Not done: doc/AGENDA.md (the main session's), the gate.
+
+## 2026-11-22: hs-pkgs-1122, round 2: old-time own; gc_bench and sieve pass
+
+The coordinator's message during round 1 (hs-speed's HES103 breakdown): build the package ones, leave bspt, fulsom and pic to
+hs-speed, the GHC-rejected sources a question with n/a recommended. Round 1 left old-time's two programs pending; done now.
+
+**old-time's configure header, Arbace's.** arbace.repr.haskell.configure: a `hackage-products-spec` beside products-spec (old-time
+1.1.1.0's include/HsTimeConfig.h, its template from the tree's hackage/, linked by bin/repr-haskell-target's src from `bin/hsi
+hackage src`), probed and answered as the tarball's products but never written into the derived installation (`products` keeps
+products-spec; the new verb `hackage-products ROOT` writes it into the Hackage sources, called by bin/repr-haskell's hackage_link);
+its rules: old-time's configure.ac (AC_CHECK_HEADERS, AC_CHECK_FUNCS, AC_STRUCT_TIMEZONE as time's, FP_DECL_ALTZONE's
+AC_CHECK_DECLS([altzone]), AC_HEADER_TIME's TIME_WITH_SYS_TIME), and rule-of's three patterns take autoconf 2.72's 'quotes' beside
+2.69's `quotes'. The probe restricted to the one product (REPR_HASKELL_PROBE_ONLY, its answers merged into the file's others, the
+maps kept sorted; the probe's loops skip a product with no value checks): 3 compile tests on ci, 20 s; test/haskell/target/answers.edn
+gains old-time's 31 answers, the others byte for byte. The header written from them is byte for byte the host configure's (GHC's
+side's Setup build, `.tmp/hsi/hackage/ghc/build/old-time-1.1.1.0/dist/build/include/HsTimeConfig.h`).
+
+**System/Time.hsc through Arbace's hsc2hs on ci.** The corpus's old-time entry (:hsc System/Time.hsc, :hsc-flags with Cabal's
+`--cflag=-D__GLASGOW_HASKELL__=914`); `REPR_HASKELL_ONLY_PACKAGES=old-time bin/repr-haskell target hsc` writes
+.tmp/repr-haskell/target/hsc/old-time/System/Time.hs. Two fixes on the way: target_hsc passes a `--cflag=-D` to ci (the .hsc's
+`#ifdef __GLASGOW_HASKELL__` around `#include "HsTime.h"` hid the configure answers: "Don't know how to get at timezone name on
+your OS."), and arbace.repr.haskell.hsc2hs reads the .hsc byte for byte as hsc2hs does (ISO-8859-1: a comment's ± is its two bytes'
+octal escapes in the C program and its UTF-8 again in the output; it was one escape of its code point, an invalid byte); no .hsc of
+the corpus's plan holds a non-ASCII byte, so no other output moves. The output is byte for byte the host hsc2hs's
+(dist/build/System/Time.hs). The native read takes a Hackage package's hsc outputs from there, placed beside the .hsc as Cabal's
+build places them (native_dump_corpus).
+
+**The library and the programs.** lib-check --package old-time --ifaces own: 1 module, elaborated without an error; lib-stg: its STG
+made (old-locale's own STG beside, LIB_STG_DEP_OWN_TARS); test/haskell/lib-check-own-old-time.edn written from the run, judged 0
+worse; its controls files; the gate step haskell-lib-own-old-time (`target hsc` first, then lib-check and lib-stg), its tar in
+hsi-check's and hsi-check-aot's :uses and HSI_OWN_TARS, the crop's list, the controls table. `bin/hsi check --libs own --only`
+gc_bench and sieve, `--record`: both pass on the own libraries by their own verdicts (their golden files, round 1's): gc_bench 27 s,
+sieve 8 s. They leave divergences.edn's :hackage-pending (smallpt and ben-raytrace stay: primitive's front-end gaps) and
+eval-out.edn (27 out; independence.edn's :cases 29 -> 27, the eval stage's 920 cases all own). The whole record judged again: 0
+unclassed.
+
+**Scores** (`bin/reap --record`: Haskell eval 899 -> 901 pass, 11 by design, 36 -> 34 deferred, 4 n/a; `bin/crops-score --record`):
+Haskell's completeness 0.98758 -> **0.98811** (exact 0.988108: eval 901/946; floor 98), without by design 0.99045 -> 0.99091,
+independence 1.0000 as recorded (exact 0.99997). `bin/crops-score --judge --strict` 0 problems, `bin/records-check` 0 problems,
+`bin/hsi golden --oracle --control` and `own-verdicts --check` pass.
+
+Left as round 1 says: the DECISIONs hs-pkgs-1 (the six GHC-rejected sources) and hs-pkgs-2 (eff, hartel); primitive and unboxed-ref
+(smallpt, ben-raytrace, both beyond GHC's own 10 s in the reference); splitmix's C (minimax); the 12 at the CPU limit (hsi's speed).
