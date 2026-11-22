@@ -3017,3 +3017,232 @@
               sig (when (and (vector? t) (= :closure (first t))) (nth t 2 nil))]
           (when (and (map? sig) (vector? (:inputs sig)) (closure-def (second t)))
             (v0-mangle "core::ops::function::FnOnce::call_once" [(erase-regions t) [:tuple (erase-regions (:inputs sig))]] true)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; 524-1 (a) (rust-c3x, 2026-11-22): TypeId::of's constants, as rustc 1.99.1 computes them (read in the pinned
+;; rustc-1.99.1-src.tar.xz): the type_id intrinsic's CTFE (rustc_const_eval's write_type_id) writes TyCtxt::type_id_hash(T)
+;; (rustc_middle/src/ty/util.rs: the type with its regions erased, hashed by StableHash into a StableHasher, Hash128) as
+;; the u128's little-endian bytes, each 8-byte half a pointer into the type's GlobalAlloc::TypeId at the half as its offset.
+;; The bytes are the stream StableHash writes into rustc-stable-hash 0.1.2's SipHasher128 (sip128 above): an enum's
+;; discriminant (derived StableHash: mem::discriminant, an isize: one byte under 0xFF); TyKind's own fields in order (a Ty
+;; itself, WithCachedTypeInfo's internee, no nested fingerprint); a &List (GenericArgs, a tuple's Tys) and an AdtDef each as
+;; the Fingerprint of its own hash (impls_ty.rs, adt.rs: their caches); a DefId as its DefPathHash (rustc_hir_id's
+;; definitions.rs: the crate root's local hash the StableCrateId itself, a child's the Hash64 of the parent's local hash,
+;; DefPathData's discriminant, the name's str Hash, the disambiguator u32); AdtDefData's did, variants (VariantDef's def_id,
+;; ctor, name, discr, fields: FieldDef's did, name, vis, mut_restriction, safety, value; tainted, flags), AdtFlags (u16),
+;; ReprOptions (int, align, pack, flags, scalable, field_shuffle_seed: the DefPathHash's to_smaller_hash). A library ADT's
+;; facts come from its sources (module-items): its attributes, variants, fields and their visibility (rustc_resolve's
+;; try_resolve_visibility: inherited is the nearest module, a variant's field its enum's). Refused (nil): a program-local
+;; ADT, a constant generic argument, an array, a trait object, a function or closure type.
+
+(defn- tid-le [x n] (let [x (long x)] (for [i (range n)] (bit-and (unsigned-bit-shift-right x (* 8 i)) 0xff))))
+(defn- tid-isz [x] (if (< (long x) 0xff) [x] (cons 0xff (tid-le x 8))))
+(defn- tid-sym "Symbol's StableHash: str's bytes with their length (usize) first" [s] (let [b (utf8 (str s))] (concat (tid-le (count b) 8) b)))
+(defn- tid-fp "A Fingerprint's 16 bytes" [[a b]] (concat (tid-le a 8) (tid-le b 8)))
+(defn- tid-opt [f x] (if (nil? x) [0] (cons 1 (f x))))
+
+(defn- tid-crate-id [crate]
+  (when-let [h (get-in *crates* [:crates crate :stable-crate-id])] (.longValue (BigInteger. ^String h 16))))
+
+(defn- tid-child
+  "DefPathHash of a child of PARENT ([crate-id local-hash]): DefPathData's discriminant KIND (CrateRoot 0, Impl 1, TypeNs 5,
+  ValueNs 6, Closure 9, Ctor 10, AnonConst 11), its hashed NAME or nil, the DISambiguator"
+  [[cid local] kind nm dis]
+  [cid (first (sip128 (concat (tid-le local 8) (tid-isz kind) (when nm (concat (utf8 (str nm)) [0xff])) (tid-le dis 4))))])
+
+(defn- tid-lib-path
+  "The DefPathHash of the library def path P (`alloc::string::String`, `core::any::{impl#10}`): each module a TypeNs, a
+  function (a definition local to it) a ValueNs, `{impl#N}` an Impl and `{closure#N}` a Closure of disambiguator N; the last
+  segment of kind LAST-KIND. nil when the crate's id or root is unknown"
+  [^String p last-kind]
+  (let [[crate & segs] (str/split p #"::") cid (tid-crate-id crate) root (lib-crate-root crate)]
+    (when (and cid root)
+      (loop [h [cid cid] done [] segs segs]
+        (if-let [s (first segs)]
+          (let [last? (empty? (rest segs))
+                [k nm dis] (if-let [[_ kw n] (re-matches #"\{(impl|closure)#(\d+)\}" s)]
+                             [(if (= kw "impl") 1 9) nil (parse-long n)]
+                             [(cond last? last-kind (module-items root (conj done s)) 5 :else 6) s 0])]
+            (recur (tid-child h k nm dis) (conj done s) (rest segs)))
+          h)))))
+
+(defn- tid-attr-names [it]
+  (set (for [a (fget it :attrs)
+             :let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))]
+             :when item]
+         (second (fget (last (fget (fget item :path) :segments)) :ident)))))
+
+(defn- tid-lang [it]
+  (some (fn [a] (let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
+                      nm (when item (second (fget (last (fget (fget item :path) :segments)) :ident)))
+                      args (when item (fget item :args))]
+                  (when (and (= nm "lang") (seq? args) (= 'Eq (first args)))
+                    (let [e (fget (second (fget (fget args :expr) :kind)) :symbol)] (some-> e str)))))
+        (fget it :attrs)))
+
+(defn- tid-repr
+  "An item's #[repr] as ReprOptions' parts: {:int [:ptr SIGNED] or [:fixed INTEGER SIGNED], :align POW2, :pack POW2, :flags BITS}"
+  [it]
+  (reduce (fn [acc [nm lit kids]]
+            (case nm
+              "C" (update acc :flags bit-or 1)
+              "simd" (update acc :flags bit-or 2)
+              "transparent" (update acc :flags bit-or 4)
+              "packed" (let [n (if (seq kids) (parse-long (str (second (first kids)))) 1)
+                             pw (Long/numberOfTrailingZeros n)]
+                         (update acc :pack #(if % (min % pw) pw)))
+              "align" (let [n (parse-long (str (second (first kids)))) pw (Long/numberOfTrailingZeros n)]
+                        (update acc :align #(if % (max % pw) pw)))
+              (if-let [[_ s b] (re-matches #"([iu])(8|16|32|64|128|size)" (str nm))]
+                (assoc acc :int (if (= b "size") [:ptr (= s "i")] [:fixed ({"8" 0 "16" 1 "32" 2 "64" 3 "128" 4} b) (= s "i")]))
+                acc)))
+          {:flags 0}
+          (for [a (fget it :attrs)
+                :let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
+                      nm (when item (second (fget (last (fget (fget item :path) :segments)) :ident)))
+                      args (when item (fget item :args))]
+                :when (and (= nm "repr") (seq? args) (= 'Delimited (first args)))
+                m (meta-items (fget (second args) :tokens))]
+            m)))
+
+(def ^:private tid-lang-flags
+  "AdtDef::new's lang items (rustc_hir's lang_items.rs names) and their AdtFlags"
+  {"phantom_data" 16 "owned_box" 64 "manually_drop" 128 "unsafe_cell" 512 "unsafe_pinned" 1024 "pin" 2048
+   "field_representing_type" 8192 "maybe_dangling" 16384})
+
+(defn- tid-vis
+  "A field's Visibility<ModId> (StableHash bytes): its AST visibility in the module MOD (crate and segments) of an item;
+  INHERITED the visibility an inherited one takes (the enum's for a variant's field), as bytes"
+  [vis crate mod-segs inherited]
+  (let [k (fget vis :kind)
+        modh (fn [segs] (if (empty? segs) (let [c (tid-crate-id crate)] [c c]) (tid-lib-path (str/join "::" (cons crate segs)) 5)))]
+    (cond (= 'Public k) [0]
+          (= 'Inherited k) inherited
+          (and (seq? k) (= 'Restricted (first k)))
+          (let [segs (path-segs (fget k :path))
+                target (case (first segs)
+                         "crate" (vec (rest segs))
+                         "self" mod-segs
+                         "super" (vec (butlast mod-segs))
+                         (throw (ex-info "type-id: a pub(in ..) visibility" {})))]
+            (cons 1 (tid-fp (modh target))))
+          :else (throw (ex-info (str "type-id: visibility " (pr-str k)) {})))))
+
+(def ^:private tid-adt-cache (atom {}))
+
+(defn- tid-adt-fp
+  "The Fingerprint of a library ADT's AdtDefData at the def path P (struct, enum or union), from its sources; nil when refused"
+  [^String p]
+  (if (contains? @tid-adt-cache p)
+    (get @tid-adt-cache p)
+    (let [r (try
+              (let [[crate & segs] (str/split p #"::") root (lib-crate-root crate)
+                    nm (last segs)
+                    ;; the module of the definition: the longest prefix that is a module (a definition local to a function)
+                    msegs (loop [n (dec (count segs))] (cond (zero? n) [] (module-items root (vec (take n segs))) (vec (take n segs)) :else (recur (dec n))))
+                    [items] (if (= (count msegs) (dec (count segs)))
+                              (module-items root msegs)
+                              ;; src-adt's case: a definition among a module function's local items
+                              (let [[mitems] (module-items root msegs) fnm (nth segs (count msegs))
+                                    fi (some #(when (and (= 'Fn (item-kind %)) (= fnm (fn-item-name %)) (attr-cfg-ok? %)) %) mitems)
+                                    b (when fi (fget (second (fget fi :kind)) :body))]
+                                [(when (and (seq? b) (= 'LocalItems (first b))) (vec (second b)))]))
+                    it (some #(when (and (#{'Struct 'Union 'Enum} (item-kind %)) (= nm (item-name %)) (attr-cfg-ok? %)) %) items)
+                    _ (when-not it (throw (ex-info (str "type-id: no source of " p) {})))
+                    kind (item-kind it)
+                    did (tid-lib-path p 5)
+                    attrs (tid-attr-names it)
+                    item-vis (fget it :vis)
+                    priv (cons 1 (tid-fp (if (empty? msegs) (let [c (tid-crate-id crate)] [c c]) (tid-lib-path (str/join "::" (cons crate msegs)) 5))))
+                    enum-vis (tid-vis item-vis crate msegs priv)
+                    field-bytes (fn [vd parent field-inherited]
+                                  (let [fs (cond (and (seq? vd) (= 'Struct (first vd))) (or (fget vd :fields) [])
+                                                 (and (seq? vd) (= 'Tuple (first vd))) (second vd)
+                                                 :else [])
+                                        fs (filter attr-cfg-ok? fs)]
+                                    (concat (tid-le (count fs) 8)
+                                            (mapcat (fn [i f]
+                                                      (let [id (fget f :ident)
+                                                            fname (if (and (seq? id) (= 'Some (first id))) (second (second id)) (str i))]
+                                                        (concat (tid-fp (tid-child parent 6 fname 0)) (tid-sym fname)
+                                                                (tid-vis (fget f :vis) crate msegs field-inherited)
+                                                                [0] [1] [0])))
+                                                    (range) fs))))
+                    ctor (fn [vd parent] (cond (and (seq? vd) (= 'Tuple (first vd))) (cons 1 (concat [0] (tid-fp (tid-child parent 10 nil 0))))
+                                               (and (seq? vd) (= 'Unit (first vd))) (cons 1 (concat [1] (tid-fp (tid-child parent 10 nil 0))))
+                                               :else [0]))
+                    variant (fn [vdef-id vname vd discr parent field-inherited nonex]
+                              (concat (tid-fp vdef-id) (ctor vd parent) (tid-sym vname) discr
+                                      (field-bytes vd parent field-inherited) [0] [(if nonex 1 0)]))
+                    [variants n-ctor]
+                    (if (= 'Enum kind)
+                      (let [vs (filter attr-cfg-ok? (fget (nth (fget it :kind) 3) :variants))]
+                        [(concat (tid-le (count vs) 8)
+                                 (loop [vs vs dist 0 acc []]
+                                   (if-let [v (first vs)]
+                                     (let [vname (second (fget v :ident)) vh (tid-child did 5 vname 0)
+                                           d (fget v :disr_expr) explicit? (and (seq? d) (= 'Some (first d)))
+                                           discr (if explicit? (cons 0 (tid-fp (tid-child vh 11 nil 0))) (cons 1 (tid-le dist 4)))]
+                                       (recur (rest vs) (if explicit? 1 (inc dist))
+                                              (into acc (variant vh vname (fget v :data) discr vh enum-vis (contains? (tid-attr-names v) "non_exhaustive")))))
+                                     acc)))
+                         false])
+                      (let [vd (nth (fget it :kind) 3)]
+                        [(concat (tid-le 1 8) (variant did nm vd (cons 1 (tid-le 0 4)) did priv (contains? attrs "non_exhaustive")))
+                         (and (= 'Struct kind) (seq? vd) (#{'Tuple 'Unit} (first vd)))]))
+                    lang (tid-lang it)
+                    flags (cond-> (case kind Enum 1 Union 2 Struct 4)
+                            (and (= 'Enum kind) (contains? attrs "non_exhaustive")) (bit-or 256)
+                            (contains? attrs "pin_v2") (bit-or 4096)
+                            n-ctor (bit-or 8)
+                            (contains? attrs "fundamental") (bit-or 32)
+                            (get tid-lang-flags lang) (bit-or (get tid-lang-flags lang)))
+                    rp (tid-repr it)
+                    rflags (cond-> (:flags rp)
+                             (= lang "owned_box") (bit-or 8)
+                             (contains? attrs "rustc_pass_indirectly_in_non_rustic_abis") (bit-or 32))
+                    _ (when (contains? attrs "rustc_scalable_vector") (throw (ex-info "type-id: a scalable vector" {})))
+                    seed (unchecked-add (unchecked-multiply (long (first did)) 3) (long (second did)))
+                    repr (concat (tid-opt (fn [[k a b]] (if (= :ptr k) [0 (if a 1 0)] [1 a (if b 1 0)])) (:int rp))
+                                 (tid-opt (fn [p] [p]) (:align rp)) (tid-opt (fn [p] [p]) (:pack rp))
+                                 [rflags] [0] (tid-le seed 8))]
+                (sip128 (concat (tid-fp did) variants (tid-le flags 2) repr)))
+              (catch Throwable e (when (System/getenv "TYPE_ID_TRACE") (println "type-id:" p (.getMessage e))) nil))]
+      (swap! tid-adt-cache assoc p r)
+      r)))
+
+(declare tid-ty)
+(defn- tid-list "A &List's StableHash: the Fingerprint of its length and items" [f xs]
+  (tid-fp (sip128 (concat (tid-le (count xs) 8) (mapcat f xs)))))
+(defn- tid-region [r] (if (and (vector? r) (#{:re-erased :re-static :re-early :re-var} (first r))) [6] (throw (ex-info "type-id: a bound region" {}))))
+(defn- tid-arg [a] (cond (c/region? a) (cons 0 (tid-region a))
+                         (and (vector? a) (= :cval (first a))) (throw (ex-info "type-id: a constant argument" {}))
+                         :else (cons 1 (tid-ty a))))
+
+(defn- tid-ty
+  "TyKind's StableHash bytes of the type T (regions erased)"
+  [t]
+  (case (first t)
+    :bool [0] :char [1]
+    :int [2 ({"isize" 0 "i8" 1 "i16" 2 "i32" 3 "i64" 4 "i128" 5} (second t))]
+    :uint [3 ({"usize" 0 "u8" 1 "u16" 2 "u32" 3 "u64" 4 "u128" 5} (second t))]
+    :float [4 ({"f16" 0 "f32" 1 "f64" 2 "f128" 3} (second t))]
+    :adt (let [p (second t)]
+           (when-not (string? p) (throw (ex-info "type-id: a program-local ADT" {})))
+           (concat [5] (tid-fp (or (tid-adt-fp p) (throw (ex-info (str "type-id: the ADT " p) {})))) (tid-list tid-arg (nth t 2))))
+    :str [7]
+    :slice (cons 10 (tid-ty (second t)))
+    :ptr (concat [11] (tid-ty (nth t 2)) [(if (second t) 1 0)])
+    :ref (concat [12] (tid-region (second t)) (tid-ty (nth t 3)) [(if (nth t 2) 1 0)])
+    :never [21]
+    :tuple (cons 22 (tid-list tid-ty (second t)))
+    (throw (ex-info (str "type-id: the type " (pr-str t)) {}))))
+
+(defn type-id-hash
+  "524-1 (a): TyCtxt::type_id_hash of the type T as the TypeId's 16 bytes in hex (the u128 little-endian), or nil when refused
+  (needs *crates* and *lib-dir* for a library ADT)"
+  [t]
+  (try
+    (let [[l h] (sip128 (tid-ty t))]
+      (apply str (map #(format "%02x" %) (concat (tid-le l 8) (tid-le h 8)))))
+    (catch Throwable e (when (System/getenv "TYPE_ID_TRACE") (println "type-id:" (pr-str t) (.getMessage e))) nil)))
