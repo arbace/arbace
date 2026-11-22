@@ -694,5 +694,43 @@
              (if (and cx (= [:acq_rel :acquire] [(nth cx 4) (nth cx 5)])) :equal [:differs cx]) :equal)
       (check "C1 control: the orderings are the call's (Relaxed is monotonic, not seq_cst)"
              (let [r (has (forms (body "atomic_xadd" ["Relaxed"] [us pu us] us)) 'atomicrmw)] (if (= :seq_cst (nth r 4 nil)) [:equal] [:differs r])) :differs))
+    ;; rust-c6c: a closure passed as a scalar pair takes each half's pointee alignment by its upvars' types (DebugMap::finish's
+    ;; `and_then(.., |_| ..)`: `ptr align 8` for its `&mut u64`-like half, none for a `&mut u8`); the control, the halves swapped
+    (let [u64t '(ty "u64" (uint "u64")) u8t '(ty "u8" (uint "u8"))
+          r64 (list 'ty "&mut u64" (list 'ref u64t true)) r8 (list 'ty "&mut u8" (list 'ref u8t true))
+          clo (fn [a b] (list 'ty "{closure@c}" (list 'closure "c::{closure#0}" [(list 'ty "i8" '(int "i8")) '(ty "fn()" (fnptr))
+                                                                               (list 'ty (str "(" (second a) ", " (second b) ")") (list 'tuple a b))])))
+          pl '{:size 16 :align 8 :abi (pair (ptr [1N 18446744073709551615N]) (ptr [1N 18446744073709551615N]) 8) :fields [0 8] :variants (single 0) :uninhabited false}
+          rl '{:size 8 :align 8 :abi (scalar (ptr [1N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}
+          lt (merge glue-lt {"u64" '{:size 8 :align 8 :abi (scalar (int 64 false [0N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}
+                             "u8" '{:size 1 :align 1 :abi (scalar (int 8 false [0N 255N])) :fields [] :variants (single 0) :uninhabited false}
+                             "&mut u64" rl "&mut u8" rl "{closure@c}" pl})
+          fty '(ty "fn() {g}" (fndef "g" []))
+          body (fn [ct] {:form :body :symbol "cl" :args 1 :ret unit :locals [{:mut true :ty unit} {:mut false :ty ct}] :debug []
+                         :blocks [{:cleanup false :stmts [] :term (list 'call (list 'const "g" fty '(zst)) ['(move (place 1))] '(place 0) 1 '(continue)
+                                                                        '(callee {:kind "item" :symbol "g" :can-unwind false}) '(loc "?" 0 0) 0)}
+                                  {:cleanup false :stmts [] :term '(return)}]})
+          args (fn [ct] (some #(when (and (seq? %) (= 'call (first %))) (vec (nth % 3))) (tree-seq coll? seq (cg/codegen-fn (body ct) lt (cg/new-globals {})))))]
+      (check "rust-c6c: a closure pair's halves aligned as its upvars' pointees" (mapv #(vec (butlast %)) (args (clo r64 r8))) '[[ptr (:align 8)] [ptr]])
+      (check "rust-c6c control: the upvars swapped, the alignment on the second half" (mapv #(vec (butlast %)) (args (clo r8 r64))) '[[ptr] [ptr (:align 8)]]))
+    ;; rust-c6c: `&(*p).0` of a struct whose tail is unsized (BackendRepr::Memory { sized: false }: Path's OsStr) keeps the base's
+    ;; metadata, a pair (std's IR's `as_encoded_bytes(ptr %0, i64 %1)`); the control, a sized field, a thin pointer
+    (let [u8t '(ty "u8" (uint "u8"))
+          os '(ty "OsStr" (adt "OsStr" "OsStr" [])) path '(ty "Path" (adt "Path" "Path" []))
+          ros (list 'ty "&OsStr" (list 'ref os false)) rpath (list 'ty "&Path" (list 'ref path false))
+          fat '{:size 16 :align 8 :abi (pair (ptr [1N 18446744073709551615N]) (int 64 false [0N 18446744073709551615N]) 8) :fields [0 8] :variants (single 0) :uninhabited false}
+          lt (merge glue-lt {"OsStr" '{:size 0 :align 1 :abi (memory false) :fields [0] :variants (single 0) :uninhabited false}
+                             "Path" '{:size 0 :align 1 :abi (memory false) :fields [0] :variants (single 0) :uninhabited false}
+                             "&OsStr" fat "&Path" fat})
+          body {:form :body :symbol "us" :args 1 :ret ros :locals [{:mut true :ty ros} {:mut false :ty rpath}] :debug []
+                :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'ref :shared (list 'place 1 '(deref) (list 'field 0 os))))] :term '(return)}]}
+          ivs (vec (for [x (tree-seq coll? seq (cg/codegen-fn body lt (cg/new-globals {}))) :when (and (seq? x) (= 'insertvalue (first x)))] x))]
+      (check "rust-c6c: a reference to an unsized struct tail is a pair (the base's metadata kept)" (count ivs) 2)
+      (check "rust-c6c control: the struct sized, a thin pointer"
+             (let [lt2 (assoc lt "OsStr" '{:size 0 :align 1 :abi (memory true) :fields [0] :variants (single 0) :uninhabited false})]
+               (let [n (try (count (for [x (tree-seq coll? seq (cg/codegen-fn body lt2 (cg/new-globals {}))) :when (and (seq? x) (= 'insertvalue (first x)))] x))
+                            (catch Throwable _ :refused))]
+                 (if (= n 2) [:equal n] [:differs n])))
+             :differs))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))
