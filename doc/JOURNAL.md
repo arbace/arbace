@@ -17090,3 +17090,48 @@ merge's tree). reap, crops-score (--record, --judge --strict) and records-check:
   (idempotent). P2's os-and-files-misc rows for test_json's broken-pipe tests (exit status 120) should pass now (writeErr
   drops the buffered bytes, so the shutdown flush succeeds after json.tool's dup2): to be confirmed by the record.
   Coordination: the record (P1's alone) is made at this merge; P2's later commits are measured at the next record.
+
+## 2026-11-22: py-mods-1122, round 1: the C OrderedDict, __main__'s spec, interruptible writes, SIG_DFL, str's ASCII paths, the runner's PSS
+
+Scope (the burst's Python eval brief): `:goi-liveness-fallthrough`, `:c-modules-deferred`, `:multiprocessing`,
+`:multiprocessing-children`, `:regrtest-children`, `:io-c-checks`, `:goi-stub-table`, `:ordered-dict-c`, `:host-memory`,
+`:runner-limits`. Found on starting: P1 (py-eval-1122) had already made syslog, xxlimited/xxlimited_35 and the standard
+streams' TextIOWrapper registration (regrtest's children); this stream's own versions of the first and the last were dropped
+and P1's branch merged first (10df0e352) so that the runtime work builds on it. `:goi-liveness-fallthrough` and
+`:goi-stub-table` are fixed in goi since cfd69a6d2 and a2606432e, and `:c-modules-deferred`'s _testclinic, _symtable,
+_sysconfig and _heapq rows have their modules: all wait for P1's whole record (running on b2a5b50d48192fabce24, 9a2b7842a).
+
+Made, in go/arbace/py (printed by `bin/pyi runtime print`, read back for go/arbace/py alone), from CPython 3.14.10's sources:
+- `builtins_odict.go`: Objects/odictobject.c's OrderedDict as _collections.OrderedDict (collections takes it, as CPython's):
+  the dict's entries and a linked list of nodes (a node found through the dict's lookup, by the entry's key object: CPython's
+  od_fast_nodes), od_state moved by every change of the list, odict_iterator over keys, values, items and reversed tracking
+  the current key ("OrderedDict mutated during iteration", "OrderedDict changed size during iteration", a key the dict lost a
+  KeyError), __eq__ as dict's then _odict_keys_equal's node walk with its state checks (issue119004), copy()'s state check
+  (gh-148660), setdefault, pop, popitem, move_to_end (the dict's entry moved too, so Go's readers of the entries see the
+  list's order), update/__init__ as mutablemapping_update, __or__/__ror__/__ior__, __reduce__, __sizeof__, __dict__, the views
+  odict_keys/odict_values/odict_items over dict's; dict's own methods on an OrderedDict change the entries alone, as
+  CPython's (test_dict_delitem's KeyError from repr). A subclass's __init__ and | ask the instance (class.go).
+- sys.getsizeof: a dict's size (_PyDict_SizeOf's layout: 48, the GC header, the keys object), a weak reference's, a heap
+  type's instance's (16, 8 a slot, the managed __dict__/__weakref__ pre-header, the GC header), an OrderedDict's.
+- `execMain` (interp.go): the main module's namespace as pymain makes it (add_main_module's __name__, __doc__, __package__,
+  __loader__ BuiltinImporter, __spec__ None; a file's __file__, __cached__ None and SourceFileLoader): a script run by
+  `bin/pyi python FILE` had no __spec__, so multiprocessing's spawn failed ("module '__main__' has no attribute '__spec__'",
+  test_multiprocessing_main_handling's spawn scripts).
+- os.write to a blocking descriptor under a Python signal handler waits interruptibly (poll with the wake pipe, each write
+  non-blocking for its call): the handler runs and its exception ends the write, as write(2) without SA_RESTART
+  (test_io's SignalsTest.test_interrupted_write_*, which hung: idle past 90 s); os.readinto waits interruptibly as os.read
+  does (test_file_eintr's test_readall: _pyio's FileIO.readall reads by readinto) and takes any writable buffer (an array).
+- signal.signal(n, SIG_DFL) sets the process's default action also for a signal ignored at the start (Go's Reset kept an
+  inherited SIG_IGN of SIGHUP), and a SIGHUP ignored at the start reads as SIG_IGN: a driver started with SIGHUP ignored
+  (the night's) passed it on to the children test_asyncio's test_send_signal sends SIGHUP (they never ended).
+- BlockingIOError's third argument, a number, is characters_written (oserror_parse_args), not a filename (test_io's
+  nonblocking pipe writes); sys.flags.utf8_mode follows -X utf8[=0|1] and PYTHONUTF8 for 3.14 too, and
+  warn_default_encoding -X warn_default_encoding and PYTHONWARNDEFAULTENCODING (test_io's test_text_encoding,
+  test_check_encoding_warning).
+- str.find/rfind/index/rindex, count, startswith and endswith of an ASCII str by its bytes: `Runes()` copied an ASCII str
+  whole on every call, so `s.find(x, start)` in a loop was quadratic (email's _parseparam took 40 s for 20,000 parameters;
+  test_email's test_get_param_linear_complexity and test_long_lines past the 300 s limit).
+- tools/pyi/libtest_all.py: the memory cap sums each process's proportional set size (smaps_rollup's Pss), not its
+  resident size: every pyi child maps the same 360 MB of the executable's text, which the resident sizes counted once a
+  child (a spawned child's 960 MB resident were 630 MB of the host's), so spawn's manager tests passed the 8192 MB cap
+  (`:host-memory`).

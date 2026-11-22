@@ -21,8 +21,8 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       outlives S seconds (default 300) is killed and written "CASE ID timeout ..."; with --idle-timeout S (queue 275;
       default 0, off; bin/pyi passes 90) one whose processes (the driver's session and its descendants, /proc) use under 5%
       of one core for S seconds is a hang, killed then: "CASE ID timeout the test idle past S s, a hang ..."; with --mem-max MB
-      (queue 321; default 0, off; bin/pyi passes PYI_LIB_TEST_MEM_MAX, 8192) one whose processes' summed resident memory
-      passes MB, sampled every 5 s, is killed then: "CASE ID crash the test's processes past MB MB resident ..." (a
+      (queue 321; default 0, off; bin/pyi passes PYI_LIB_TEST_MEM_MAX, 8192) one whose processes' summed memory (each
+      process's proportional set size since py-mods-1122: shared pages counted once) passes MB, sampled every 5 s, is killed then: "CASE ID crash the test's processes past MB MB resident ..." (a
       driver of test_capi reached 29.6 GB on the VM; a night's 4 jobs share the host's memory); each test's
       wall and CPU seconds in DIR/MODULE.times (ID, outcome, wall, CPU; "#start N" lines: a driver start's import); a driver that dies in a test (a Go
       panic, a fatal error) is written "CASE ID crash FIRST-CAUSE"; either way the driver starts again on the module's
@@ -331,8 +331,8 @@ except (ValueError, OSError, AttributeError):
 
 
 def tree_rss_mb(pid):
-    """queue 321: the summed resident memory (MB) of a driver's processes, as tree_cpu finds them; None where /proc
-    cannot be read"""
+    """queue 321: the summed memory (MB) of a driver's processes, as tree_cpu finds them (their proportional set sizes
+    since py-mods-1122); None where /proc cannot be read"""
     try:
         names = os.listdir("/proc")
     except OSError:
@@ -360,7 +360,23 @@ def tree_rss_mb(pid):
             if q not in mine and v[0] in mine:
                 mine.add(q)
                 grew = True
-    return sum(procs[q][2] for q in mine) * PAGE_KB // 1024
+    # py-mods-1122: each process's proportional set size (smaps_rollup's Pss: its private pages and its share of the
+    # pages it shares), so the executable's text that every pyi child maps (about 360 MB resident, the same pages) counts
+    # once among them, not once a child as the resident sizes summed it (a spawned child's 960 MB resident were 630 MB
+    # of the host's); a process whose smaps_rollup cannot be read counts its resident size
+    kb = 0
+    for q in mine:
+        pss = None
+        try:
+            with open("/proc/%d/smaps_rollup" % q) as f:
+                for line in f:
+                    if line.startswith("Pss:"):
+                        pss = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pss = None
+        kb += pss if pss is not None else procs[q][2] * PAGE_KB
+    return kb // 1024
 
 
 def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0, mem_max=0):
