@@ -17193,3 +17193,24 @@ compiled rows; interp rows on its executable after it) is queued behind ten sess
   case with its control (the old rule takes the passing row). No other crop's score moved.
 Cells: Java eval 3,106 / 120 / 99 -> 3,106 / 101 / 84 (34 n/a), AOT 3,079 / 158 / 88 -> 3,079 / 139 / 86 (21 n/a); completeness 0.9612
 -> 0.9651 (exact 0.965067), independence 1.0. reap, crops-score (--self-test, --judge --strict), records-check: 0 problems.
+
+## 2026-11-22: java-design-1122: JD4 (a), javac's API at the compiled level (write-ahead: its rows run in the queued session)
+
+- The user's JD4 (a): the 56 tests whose sources name javac's API (bin/java-check's tool_test rule: com.sun.tools.javac,
+  com.sun.source, javax.tools, javax.lang.model, javax.annotation.processing, java.util.spi.ToolProvider; langtools-run 42,
+  jdk-other 11, jdk-run 3) now build at the compiled level as javac's tool is built. bin/java-check's javac_tests writes
+  WORK/javac.list before java.check/shards, which puts those tests into shards of their own (marked WORK/j2g/sK/javac; a split
+  shard's halves keep the mark); compiled_shard gives such a shard's j2g run javac's world beside the tests' forms and the compiled
+  namespaces (jdk/javac/forms, overlay/jdk/javac/variants, jdk/edge.edn and jdk/javac/edge.edn: bin/arbace-go --build-java's
+  inputs) and keeps the program by key in .tmp/java-check/javac-prog/KEY (the javac world's files, AOT.key, the j2g executable,
+  the tests' forms keys), reused while the key holds; the runs get the platform property as on the tool
+  (-Djdk.internal.jrt.javac.platform, tool_exe's bin/repr-java platform-dir, now set for the compiled level too).
+- Alternatives considered: one program a test (56 j2g runs of javac's world, 28-40 GB each: hours); running the compiled level's
+  javac tests on javac's tool (that is the interp level's F6, not the compiled level); the javac world in every shard (every
+  compiled part pays javac's j2g). Chosen: the user's one program, cached by key.
+- Probe (--analyze-only, t05992 and the control t03208): javac.list holds t05992 alone; s0 = t03208, s1 = t05992 marked javac.
+  The gate's java-compiled-full declares the javac world's files as inputs; the three parts with javac tests at 45 GiB until a
+  night measures them (javac's tool build's j2g, 28.6-40.8 GB).
+- Their rows (.tmp/jd/compiled-javac.list: the 56 and the control t03208) run in the queued heavy session after the build. Today
+  at compiled: 23 :design-also-compiled, 17 :javac-api, 11 :launcher-tests (n/a), 2 :jvm-tools, 1 :classfile, 1 :classloading,
+  1 pass.
