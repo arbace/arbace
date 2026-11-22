@@ -1831,6 +1831,8 @@
     (when (and (#{:n :elab} (:t t)) e (:scope e) (= :class (sc/kind-of (:scope e))))
       [e (boolean (or (:tmpl e) (:dep e) (dependent-type? t)))])))
 
+(declare declared-in-main?)
+
 (defn parse-primary [^P p]
   (let [^T t (cur p) k (.-k t) s (.-s t) b (ix p)]
     (cond
@@ -2051,6 +2053,17 @@
           (and (:unres en) (= 1 (count (:parts qn))) (not (:g qn)) (or (in-template? p) (dep-this? p)))
           (node p "UnresolvedMemberExpr" b (:e qn) (merge (written-name p qn) {:referencedDecl {:name (:s lp)}}))
           :else
+          (do
+          ;; (cpp-diag-b, 2026-11-22: an id-expression's nested-name-specifier whose first name no lookup finds and the main file
+          ;; declares nowhere, as a declaration's type's (parse-decl-specs*): GCC's "'X' has not been declared", std's members
+          ;; "'cout' is not a member of 'std'", at the name)
+          (let [f (first (:parts qn)) s2 (second (:parts qn))]
+            (when (and *full-headers* (not (skim? p)) (> (count (:parts qn)) 1) (not (:g qn)) (:s f) (not (:args f)) (:i f)
+                       (main-tok? p (long (:i f))) (nil? (lookup (scope p) (:s f))) (not (declared-in-main? p (:s f))))
+              (if (= "std" (:s f))
+                (when (and (:s s2) (:i s2) (not (and (= "align_val_t" (:s s2)) (>= (.-year p) 2017))))
+                  (soft-diag! p (long (:i s2)) (str "'" (:s s2) "' is not a member of 'std'")))
+                (soft-diag! p (long (:i f)) (str "'" (:s f) "' has not been declared")))))
           (node p "DeclRefExpr" b (:e qn) (merge (written-name p qn)
                                           {:_ent en
                                            :_this (boolean (and (= 1 (count (:parts qn))) (not (:g qn)) (:s lp)
@@ -2083,7 +2096,7 @@
                                            :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp))))
                                                                 ;; (queue 492: a literal operator's id, [over.literal]/1, as clang
                                                                 ;; names it)
-                                                                (when (:lit lp) (str "operator\"\"" (:lit lp))) "")}}))))
+                                                                (when (:lit lp) (str "operator\"\"" (:lit lp))) "")}})))))
       :else (perr p "an expression"))))
 
 (defn- member-node [^P p base arrow]
@@ -3925,6 +3938,11 @@
                      en (:ent qn)
                      _ (when (and en (:tmpl en) (not (:tparam en)) (nil? (:args lp)) (not (:inj en)) (not (:inj-full en)) (= :type (:k en)))
                          (soft-diag! p (ix p) (str "expected class-name before '" (ts (cur p)) "' token")))]
+                 ;; (cpp-diag-b, 2026-11-22: [class.mi]/3, a class is a direct base at most once: GCC's "duplicate base type 'a'
+                 ;; invalid", at the name)
+                 (when (and (:s lp) (not (skim? p)) (main-tok? p (long (:i lp))) (nil? (:args lp)) (= 1 (count (:parts qn)))
+                            (some #(= (:s lp) (first %)) order) (not (:tparam (:ent qn))))
+                   (soft-diag! p (long (:i lp)) (str "duplicate base type '" (:s lp) "' invalid")))
                  (sc/add-base! cs (ent-scope (:ent qn)))
                  (.add order [(:s lp) virt])
                  (when info (.add ^ArrayList (.get info :bases) {:ty {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn} :virt virt
@@ -3966,7 +3984,15 @@
                   (when (or (id-is? p "final") (id-is? p "__final")) (soft-diag! p (ix p) "duplicate virt-specifier") (adv! p))
                   i))
           attrs (into attrs (attr-nodes p))
-          defn? (or (is? p "{") (and (is? p ":") (not (is-at? p 1 ":")) (or (nil? qn) (not (#{:member} ctx)) true)))]
+          defn? (or (is? p "{") (and (is? p ":") (not (is-at? p 1 ":")) (or (nil? qn) (not (#{:member} ctx)) true)))
+          ;; (cpp-diag-b, 2026-11-22: [class.pre]/3, a class-head-name's nested-name-specifier names a class or namespace that
+          ;; declared the class, the name a class's: a template parameter's qualifier, or a typedef-name, GCC's "invalid class name
+          ;; in declaration of 'A::C'", at the name)
+          _ (when (and defn? qn (> (count (:parts qn)) 1) (not (skim? p)) (:i (peek (:parts qn))) (main-tok? p (long (:i (peek (:parts qn))))))
+              (let [f (first (:parts qn)) fe (when (and (:s f) (not (:g qn))) (lookup (scope p) (:s f))) le (:ent qn)]
+                (when (or (:tparam fe)
+                          (and le (= :type (:k le)) (some? (:ty le)) (not (:class le)) (not (:tag le)) (not (:tmpl le))))
+                  (soft-diag! p (long (:i (peek (:parts qn)))) (str "invalid class name in declaration of '" (name-str p qn) "'")))))]
       (if-not defn?
         (let [nm (when qn (name-plain qn))
               e (or (:ent qn) (when nm (lookup (scope p) nm true)))
@@ -4647,6 +4673,70 @@
                            (seq (:types fs))
                            (every? #(contains? #{:b :p :a} (:t %)) (:types fs)))
                       (soft-diag! p (long (:i lp)) (str "'operator" (:op lp) "' must have an argument of class or enumerated type"))
+                      ;; ([class.friend]/6: a function is defined in a friend declaration only by an unqualified name, a
+                      ;; non-member's: GCC's "cannot define member function 'A::foo' within 'B'", "friend function definition 'f'
+                      ;; cannot have a name qualified with 'N::'")
+                      (and (= ctx :member) (:friend ds) fs (or (>= np 2) (:g qn)) (is? p "{"))
+                      (soft-diag! p (long (:i lp)) (if (:class (:q qn))
+                                                     (str "cannot define member function '" (name-str p qn) "' within '" cls "'")
+                                                     (str "friend function definition '" (or (:s lp) "") "' cannot have a name qualified with '"
+                                                          (if (:g qn) "::" (str (:s (first parts)) "::")) "'")))
+                      ;; ([class.mfct]/2 (C++23 [class.mfct]/1): a member function is declared outside its class only by its
+                      ;; definition, an explicit specialization's aside: GCC's "declaration of 'void K::f(int)' outside of class is
+                      ;; not definition")
+                      (and (= ctx :top) fs (>= np 2) (:class (:q qn)) (nil? tmpl) (not (:friend ds)) (is? p ";")
+                           (not (some :args parts)))
+                      (soft-diag! p (long (:i lp)) (str "declaration of '" (name-str p qn) "' outside of class is not definition"))
+                      ;; ([class.mem.general]/? , [class.abstract]/? : a pure-specifier `= 0` on a virtual member function's
+                      ;; declaration alone)
+                      (and fs (is? p "=") (identical? :num (tk (nxt p 1))) (= "0" (ts (nxt p 1))) (is-at? p 2 ";")
+                           (or (#{:top :block} ctx)
+                               (and (= ctx :member) (= "static" (:storage ds)))
+                               (and (= ctx :member) (not (:virtual ds)) (not (:friend ds)) (empty? (:bases (:ent (class-ctx p))))
+                                    (empty? (some-> (:ent (class-ctx p)) :bases-order seq)))))
+                      (soft-diag! p (long (:i lp)) (cond (#{:top :block} ctx) (str "function '" (name-str p qn) "' is initialized like a variable")
+                                                         (= "static" (:storage ds)) "initializer specified for static member function"
+                                                         :else "initializer specified for non-virtual method"))
+                      ;; ([class.conv.fct]/1, [over.oper.general]/? , [over.call]/1, [over.sub]/1 before C++23's P1169 and P2589: a
+                      ;; conversion function is a non-static member, an operator function a non-static member or a non-member,
+                      ;; operator new and delete aside)
+                      (and fs (= "static" (:storage ds)) (or (:conv lp) (:op lp))
+                           (not (#{"new" "new[]" "delete" "delete[]"} (:op lp)))
+                           (not (and (#{"()" "[]"} (:op lp)) (>= (.-year p) 2023))))
+                      (soft-diag! p (long (:i lp)) (if (or (:conv lp) (#{"=" "()" "[]" "->"} (:op lp)))
+                                                     (str "'" (name-str p qn) "' must be a non-static member function")
+                                                     (str "'" (name-str p qn) "' must be either a non-static member function or a non-member function")))
+                      (and fs (:conv lp) (#{:top :block} ctx) (= 1 np) (not (:g qn)))
+                      (soft-diag! p (long (:i lp)) (str "'" (name-str p qn) "' must be a non-static member function"))
+                      ;; ([basic.stc.dynamic.general]/2 (C++23 [basic.stc.dynamic.allocation]/1, deallocation/1): an allocation or
+                      ;; deallocation function is a class member or a global function, not declared in a namespace other than the
+                      ;; global one nor static there)
+                      (and fs (#{"new" "new[]" "delete" "delete[]"} (:op lp)) (= ctx :top) (= 1 np) (not (:g qn))
+                           (let [cur (sc/enclosing (scope p) #{:ns})] (and cur (some? (sc/parent-of cur)))))
+                      (soft-diag! p (long (:i lp)) (str "'operator " (:op lp) "' may not be declared within a namespace"))
+                      (and fs (#{"new" "new[]" "delete" "delete[]"} (:op lp)) (= ctx :top) (= "static" (:storage ds)))
+                      (soft-diag! p (long (:i lp)) (str "'operator " (:op lp) "' may not be declared as static"))
+                      ;; ([namespace.memdef]/2 (C++23 [dcl.meaning.general]/2): a variable or function qualified by a namespace was
+                      ;; declared in it before: GCC's "'int N::i' should have been declared inside 'N'")
+                      (and (#{:top} ctx) (= 2 np) (not (:g qn)) (= :ns (some-> (:q qn) :k)) (:s lp) (nil? (:ent qn)) (nil? tmpl)
+                           (not (:friend ds)))
+                      (soft-diag! p (long (:i lp)) (str "'" (name-str p qn) "' should have been declared inside '" (:s (first parts)) "'"))
+                      ;; ([class.friend]/11: a local class's friend function named unqualified was declared before in the innermost
+                      ;; enclosing block: GCC's "friend declaration 'void A()' in local class without prior local declaration")
+                      (and (= ctx :member) (:friend ds) fs (= 1 np) (not (:g qn)) (:s lp) (nil? tmpl)
+                           (let [b (loop [s (scope p)] (cond (nil? s) nil
+                                                             (#{:class :lookup :tparams :enum} (sc/kind-of s)) (recur (sc/parent-of s))
+                                                             :else s))]
+                             (and b (= :block (sc/kind-of b))
+                                  (not= :fn (:k (.get ^java.util.Map (sc/names-of b) (:s lp)))))))
+                      (soft-diag! p (long (:i lp)) (str "friend declaration '" (:s lp) "' in local class without prior local declaration"))
+                      ;; ([temp.mem]/? : a destructor is no member template)
+                      (and (:dtor lp) (string? (:dtor lp)) tmpl (pos? (long (or (:n tmpl) 0))) (= ctx :member))
+                      (soft-diag! p (long (:i lp)) (str "destructor '~" (:dtor lp) "' declared as member template"))
+                      ;; (C++11 [except.spec]/2, before C++17's P0012: an exception-specification appears in no typedef
+                      ;; declaration)
+                      (and (:typedef ds) (< (.-year p) 2017) (some (fn [x] (some #(get-in % [:m :throw]) (:sufs x))) chain))
+                      (soft-diag! p (long (:i lp)) "exception specifications are not allowed in typedefs")
                       ;; ([dcl.fct.default]/3: default arguments in a function declaration's parameters alone, not a typedef's)
                       (and fs (:typedef ds) (some #(= "c" (:init %)) (:params fs)))
                       (soft-diag! p (long (:i lp)) "default arguments are only permitted for function parameters")
@@ -5795,7 +5885,11 @@
                              (and (= ctx :member) (not (t= (tok-at p (dec b)) "}"))) (pedantic-diag! p b "extra ';' inside a struct")
                              :else nil))
                      (adv! p) (if (= ctx :top) [(node p "EmptyDecl" b b {})] []))
-      (or (t= t "namespace") (and (t= t "inline") (is-at? p 1 "namespace"))) (parse-namespace p)
+      (or (t= t "namespace") (and (t= t "inline") (is-at? p 1 "namespace")))
+      (do ;; (cpp-diag-b, 2026-11-22: [namespace.def.general]/? : a namespace-definition appears at namespace scope alone: in a block
+          ;; GCC's "'namespace' definition is not allowed here")
+          (when (and (= ctx :block) (not (skim? p)) (main-tok? p b) (not (is-at? p 2 "="))) (soft-diag! p b "'namespace' definition is not allowed here"))
+          (parse-namespace p))
       (t= t "using") (parse-using p)
       ;; (cpp-read, 2026-11-22: a using-directive's attribute-specifier-seq, [namespace.udir]/1)
       (and (t= t "[") (is-at? p 1 "[")

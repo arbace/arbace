@@ -4377,6 +4377,20 @@
 
 (defn- cx-shape [t] (if (= :ptr (:k t)) (assoc (abi/unq t) :to (cx-shape (:to t))) (abi/unq t)))
 
+(defn- cx-qual-bad?
+  "cpp-diag-b (2026-11-22): [conv.qual]/3 over two similar pointer types' pointees `f` and `t` (levels 1, 2, ...): each level's
+  cv-qualifiers of `t` include `f`'s, and where they differ at a level j > 1, every level of `t` from 1 to j-1 has const."
+  [f t]
+  (let [cvs (fn [x] (loop [x x out []] (let [out (conj out [(boolean (:c x)) (boolean (:v x))])] (if (abi/ptr? x) (recur (:to x) out) out))))
+        lf (cvs f) lt (cvs t)]
+    (when (= (count lf) (count lt))
+      (loop [j 0 all-const true]
+        (when (< j (count lf))
+          (let [[fc fv] (nth lf j) [tc tv] (nth lt j)]
+            (cond (or (and fc (not tc)) (and fv (not tv))) true
+                  (and (not= [fc fv] [tc tv]) (pos? j) (not all-const)) true
+                  :else (recur (inc j) (and all-const tc)))))))))
+
 (defn- cx-bad-ptr-conv?
   "Whether the prvalue of pointer type `from` surely does not convert implicitly to the pointer type `to` ([conv.ptr]/2-3:
   to cv void* and to a base class's pointer; [conv.qual]: the cv-qualifiers added only, judged at the first level, the
@@ -4389,7 +4403,7 @@
         (abi/void? f) true
         (= (abi/unq f) (abi/unq t)) (not (cx-cv-ok? f t))
         (and (class-id f) (class-id t)) (or (not (abi/derived-from? (class-id f) (class-id t))) (not (cx-cv-ok? f t)))
-        (and (abi/ptr? f) (abi/ptr? t)) (not= (cx-shape f) (cx-shape t))
+        (and (abi/ptr? f) (abi/ptr? t)) (or (not= (cx-shape f) (cx-shape t)) (boolean (cx-qual-bad? f t)))
         :else true))))
 
 (defn- cx-tyname ^String [t] (pr-str (select-keys (abi/unq t) [:k :n :id :to :cls])))
@@ -6082,7 +6096,11 @@
                (or (not= :rref (:k t)) (not= :lv (:cat e))))
           {:i :bind :e (if derived {:op :base-lv :e e :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c at)) :cat (:cat e)} e)}
           (and (= :pr (:cat e)) (or same derived) (abi/class? (abi/unq at)))
-          {:i :bind-temp :init {:i :expr :e e} :ty (abi/unq at) :to (when derived (class-id pt))}
+          (do ;; (cpp-diag-b, 2026-11-22: [dcl.init.ref]/5.4, an lvalue reference binds an rvalue only when it is to a const
+              ;; non-volatile type: GCC's "cannot bind non-const lvalue reference of type 'bar&' to an rvalue of type 'bar'")
+              (when (and (checking?) (= :ref (:k t)) (or (not (:c pt)) (:v pt)))
+                (fail :init "a non-const reference to a temporary"))
+              {:i :bind-temp :init {:i :expr :e e} :ty (abi/unq at) :to (when derived (class-id pt))})
           ;; (cpp-s14: bound directly to a conversion function's lvalue (an lvalue reference) or xvalue (an rvalue
           ;; reference), [dcl.init.ref]/5.1.2, /5.3.2 with [over.match.ref]; a conversion function template's
           ;; specialization deduced for the reference, [temp.deduct.conv]/4, CP389 (a))
@@ -6093,7 +6111,7 @@
                 rt (:ty c)
                 d (not= (class-id rt) (class-id pt))]
             {:i :bind :e (if (and d (class-id pt)) {:op :base-lv :e c :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c rt)) :cat (:cat c)} c)})
-          (or (:c pt) (= :rref (:k t)))
+          (or (and (:c pt) (not (and (checking?) (:v pt)))) (= :rref (:k t)))
           {:i :bind-temp :init (init-for (abi/unq pt) e ctx :copy) :ty (abi/unq pt)}
           :else (fail :init "a non-const reference to a temporary")))
       (vector? src)
@@ -9460,6 +9478,16 @@
                               (placeholder-check! (:scope ctx) rt t "return type" n)
                               (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
                             rt)]
+                   ;; (cpp-diag-b, 2026-11-22: [stmt.return]/2, a return statement without an operand in a function whose return type
+                   ;; is no cv void: GCC's "return-statement with no value, in function returning 'int'"; one with an operand of a
+                   ;; type other than void in a function returning void: "return-statement with a value", from a constructor
+                   ;; "returning a value from a constructor")
+                   (when (and (checking?) (nil? e) (nil? pre) (some? rt) (not (abi/void? rt)) (not (has-auto? (:ret (:ty (fnd (:fn-id ctx)))))))
+                     (fail :return-value "return-statement with no value, in function returning a value"))
+                   (when (and (checking?) e (nil? pre) (abi/void? rt))
+                     (let [a (analyze ctx e)]
+                       (when (and (some? (:ty a)) (not (abi/void? (abi/unq (:ty a)))))
+                         (fail :return-value "return-statement with a value, in function returning 'void'"))))
                    (cond
                      (nil? e) {:s :return}
                      pre (if (abi/void? rt) {:s :return :void-e pre}
