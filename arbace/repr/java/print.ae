@@ -805,6 +805,30 @@
 
 (declare pack-methods)
 
+(def ^:private print-platform
+  (delay (try (platform/composite (platform/resource-pack)
+                                  (when-let [d (not-empty (System/getenv "REPR_JAVA_PLATFORM"))]
+                                    (when (.isDirectory (java.io.File. ^String d)) (platform/dir-platform d))))
+              (catch Throwable _ nil))))
+
+(defn- platform-info
+  "Class `bin`'s declarations (cenv/info's shape) from the platform's class file, for a class the tools'
+  host does not hold (queue 520, t07835: JDI's Connector.defaultArguments()'s Map, which var would take as
+  javac's Map<String, Connector.Argument>): the java.base pack, then REPR_JAVA_PLATFORM's exploded modules
+  when it is set (bin/java-check's print step sets it to the read's platform); nil when neither has it."
+  [^String bin]
+  (when-let [p @print-platform]
+    (let [i (.lastIndexOf bin ".")
+          pkg (if (neg? i) "" (subs bin 0 i))
+          path (str (str/replace bin "." "/") ".class")]
+      (when-let [b (some #(platform/class-bytes p % path) (get (platform/index p) pkg))]
+        (let [c (cf/parse b)]
+          {:interface? (not (zero? (bit-and (long (:flags c)) 0x200)))
+           :super (:super c) :interfaces (:interfaces c)
+           :fields (:fields c)
+           ;; no synthetic member (a bridge is dropped below, as for the host's)
+           :methods (filterv #(zero? (bit-and (long (:flags %)) 0x1000)) (:methods c))})))))
+
 (defn- host-decl
   "The declaration of class `bin` from the tools' host's own classes (the JDK's that the corpus
   does not hold), erased, or nil."
@@ -812,7 +836,7 @@
   (if (contains? @host-decls bin)
     (get @host-decls bin)
     (let [d (try
-              (when-let [i (cenv/info (str/replace bin "." "/"))]
+              (when-let [i (or (cenv/info (str/replace bin "." "/")) (platform-info bin))]
                 {:kind (if (:interface? i) :interface :class)
                  :super (some-> (:super i) (str/replace "/" "."))
                  :ifaces (mapv #(str/replace % "/" ".") (:interfaces i))
