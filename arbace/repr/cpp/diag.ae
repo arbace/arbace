@@ -4404,11 +4404,13 @@
                                        ("TypeAliasDecl" "TypedefDecl") (when (= "promise_type" (:name m)) (or (cls (str (get-in m [:type :qualType]))) :unknown))
                                        nil))
                              (:inner c))))
-        promise-of (fn [^String r]
+        promise-of (fn [^String r method?]
                      (let [r (str/trim r)
                            mine (filter (fn [s] (= (str/replace (str (get-in (first (:inner s)) [:type :qualType])) #"^::" "") r)) specs)]
                        (cond
                          @partial? nil
+                         ;; (a member function's traits take its object parameter: judged only with R's primary traits)
+                         (and (seq mine) method?) nil
                          (seq mine) (when (= 1 (count mine))
                                       (let [s (first mine) targs (filter #(= "TemplateArgument" (:kind %)) (:inner s))]
                                         (when (and (= 2 (count targs)) (:isPack (second targs)))
@@ -4441,18 +4443,91 @@
                                  (when (and (#{"CoawaitExpr" "CoyieldExpr"} (:kind c))
                                             (some #(and (= "UnaryExprOrTypeTraitExpr" (:kind %)) (#{"sizeof" "alignof"} (:name %))) anc))
                                    (at! (begin c) (str "'" (co-word c) "' cannot be used in an unevaluated context"))))
-                               (when (and (not lambda?) (fn-kinds (:kind f)) (not= "CXXMethodDecl" (:kind f)) (mine? f))
+                               (when (and (not lambda?) (fn-kinds (:kind f)) (mine? f))
                                  (when-let [[_ r] (re-find #"^([^()]+?)\s*\(" qt)]
-                                   (let [p (promise-of r)]
+                                   (let [p (promise-of r (= "CXXMethodDecl" (:kind f)))]
                                      (when (and (map? p) (not (some #(#{"UsingDecl" "UsingShadowDecl"} (:kind %)) (:inner p))))
                                        (let [ms (names-of p)
+                                             n-before (.size out)
                                              pn (str (:name p))
                                              name-off (or (get-in f [:loc :offset]) (begin f))
                                              miss (fn [m] (str "no member named '" m "' in '" pn "'"))]
+                                         ;; ([expr.await]/3: with no await_transform in the promise, a co_await's operand of a class type
+                                         ;; with no operator co_await is its awaiter, and a co_yield's awaiter promise.yield_value(e)'s
+                                         ;; result; the awaiter has await_ready, await_suspend and await_resume, and await_suspend returns
+                                         ;; void, bool or a coroutine handle ([expr.await]/3.7): "no member named 'await_ready' in 'A'",
+                                         ;; "'await_suspend' must return 'void', 'bool' or a coroutine handle", at the operator)
+                                         (when-not (ms "await_transform")
+                                           (let [outer (str/replace (str r) #"\s+" "")
+                                                 awaiter! (fn [c ^String tn]
+                                                            (let [tn (str/replace (str/trim tn) #"^(?:struct|class)\s+" "")
+                                                                  a (or (cls tn) (cls (str outer "::" tn)))]
+                                                              (when (and (map? a) (empty? (:bases a)) (not (some #(= "operator co_await" (:name %)) (:inner a)))
+                                                                         (not (some #(#{"UsingDecl" "UsingShadowDecl"} (:kind %)) (:inner a))))
+                                                                (let [an (set (keep :name (:inner a)))]
+                                                                  (doseq [m ["await_ready" "await_suspend" "await_resume"] :when (not (an m))]
+                                                                    (at! (begin c) (str "no member named '" m "' in '" tn "'")))
+                                                                  (let [sus (filter #(and (= "await_suspend" (:name %)) (= "CXXMethodDecl" (:kind %))) (:inner a))]
+                                                                    (when (= 1 (count sus))
+                                                                      (let [rt (str/trim (or (second (re-find #"^(.*?)\s*\(" (str (get-in (first sus) [:type :qualType])))) ""))]
+                                                                        (when-not (or (str/blank? rt) (re-matches #"(?:const\s+)?(?:void|bool)" rt) (re-find #"coroutine_handle|\bauto\b|decltype" rt))
+                                                                          (at! (begin c) "'await_suspend' must return 'void', 'bool' or a coroutine handle")))))))))]
+                                             (doseq [[c] cos]
+                                               (case (:kind c)
+                                                 "CoawaitExpr" (let [e (first (:inner c))]
+                                                                 (when (#{"CXXFunctionalCastExpr" "CXXTemporaryObjectExpr" "CXXConstructExpr"} (:kind e))
+                                                                   (awaiter! c (str (get-in e [:type :qualType])))))
+                                                 "CoyieldExpr" (let [ys (filter #(and (= "yield_value" (:name %)) (= "CXXMethodDecl" (:kind %))) (:inner p))]
+                                                                 (when (= 1 (count ys))
+                                                                   (when-let [[_ rt] (re-find #"^([A-Za-z_][\w:]*)\s*\(" (str (get-in (first ys) [:type :qualType])))]
+                                                                     (if (= "auto" rt)
+                                                                       ;; (a deduced return type: its one return statement's class prvalue)
+                                                                       (let [rs (returns-in (some #(when (= "CompoundStmt" (:kind %)) %) (:inner (first ys))))
+                                                                             e (first (:inner (first rs)))]
+                                                                         (when (and (= 1 (count rs)) (#{"CXXFunctionalCastExpr" "CXXTemporaryObjectExpr"} (:kind e)))
+                                                                           (awaiter! c (str (get-in e [:type :qualType])))))
+                                                                       (awaiter! c rt)))))
+                                                 nil))))
+                                         ;; (GCC checks the promise's other members after the body, and not when the body had an error)
+                                         (when (= n-before (.size out))
                                          (when-not (ms "initial_suspend") (at! name-off (miss "initial_suspend")))
                                          (when-not (ms "final_suspend") (at! (get-in b [:range :end :offset]) (miss "final_suspend")))
                                          (when-not (ms "get_return_object") (at! name-off (miss "get_return_object")))
                                          (when (and (not no-exc?) (not (ms "unhandled_exception"))) (at! name-off (miss "unhandled_exception")))
+                                         ;; ([dcl.fct.def.coroutine]/9-11: the promise's own operator new is called with the frame's size
+                                         ;; (a function with no parameter: no other form), its operator delete with (void*) or (void*,
+                                         ;; size_t); a get_return_object_on_allocation_failure is static, and asks a nothrow operator new
+                                         ;; (a promise's, noexcept) and std::nothrow: "'operator new' is provided by 'P' but is not usable
+                                         ;; with the function signature 'f'", "no suitable 'operator delete' for 'P'", "cannot call member
+                                         ;; function 'P::get_return_object_on_allocation_failure()' without object", "... but 'operator new'
+                                         ;; is not marked 'throw()' or 'noexcept'", "... but 'std::nothrow' cannot be found")
+                                         (let [mem (fn [nm] (filter #(and (= nm (:name %)) (= "CXXMethodDecl" (:kind %))) (:inner p)))
+                                               pts (fn [m] (filter #(= "ParmVarDecl" (:kind %)) (:inner m)))
+                                               size-t? (fn [t] (boolean (re-matches #"(?:std::)?(?:__)?size_t|unsigned long(?: int)?" (str/trim (str t)))))
+                                               news (mem "operator new") dels (mem "operator delete")
+                                               fparams (filter #(= "ParmVarDecl" (:kind %)) (:inner f))
+                                               gro (mem "get_return_object_on_allocation_failure")]
+                                           (when (and (seq news) (empty? fparams)
+                                                      (not-any? (fn [m] (let [ps (vec (pts m))]
+                                                                          (and (seq ps) (size-t? (get-in (ps 0) [:type :qualType]))
+                                                                               (every? :init (rest ps)))))
+                                                                news))
+                                             (at! name-off (str "'operator new' is provided by '" pn "' but is not usable with the function signature")))
+                                           (when (and (seq dels)
+                                                      (not-any? (fn [m] (let [ps (vec (map #(str/replace (str (get-in % [:type :qualType])) #"\s+" "") (pts m)))]
+                                                                          (or (= ps ["void*"]) (and (= 2 (count ps)) (= "void*" (ps 0)) (size-t? (ps 1))))))
+                                                                dels))
+                                             (at! name-off (str "no suitable 'operator delete' for '" pn "'")))
+                                           (when (seq gro)
+                                             (cond (not-any? #(= "static" (:storageClass %)) gro)
+                                                   (at! name-off (str "cannot call member function '" pn "::get_return_object_on_allocation_failure()' without object"))
+                                                   (and (seq news) (not-any? #(re-find #"noexcept|throw\(\)" (str (get-in % [:type :qualType]))) news))
+                                                   (at! name-off (str "'" pn "::get_return_object_on_allocation_failure()' is provided by '" pn "' but 'operator new' is not marked 'throw()' or 'noexcept'"))
+                                                   (not (some (fn [ns] (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns))
+                                                                            (some #(and (= "VarDecl" (:kind %)) (= "nothrow" (:name %))) (:inner ns))))
+                                                              (:nodes u)))
+                                                   (at! name-off (str "'" pn "::get_return_object_on_allocation_failure()' is provided by '" pn "' but 'std::nothrow' cannot be found"))
+                                                   :else nil))))
                                          (if (and (ms "return_value") (ms "return_void"))
                                            (at! name-off (str "the coroutine promise type '" pn "' declares both 'return_value' and 'return_void'"))
                                            (doseq [[c] cos]
@@ -4616,6 +4691,9 @@
                   (let [ps (vec (params m))
                         xs (filter :isExplicitObjectParameter ps)]
                     (when (seq xs)
+                      ;; (C++23's: before it GCC's error "explicit object member function only available with '-std=c++23'")
+                      (when (< (long (cxx-year (:std u))) 23)
+                        (at! (first xs) "explicit object member function only available with '-std=c++23' or '-std=gnu++23'"))
                       (doseq [p (rest ps) :when (:isExplicitObjectParameter p)]
                         (at! p "only the first parameter of a member function can be declared as an explicit object parameter"))
                       (doseq [p xs]
@@ -4634,6 +4712,16 @@
                             "CXXDestructorDecl" (at! m "destructors may not have parameters")
                             nil)
                           (when (= "static" (:storageClass m)) (at! m "an explicit object member function cannot be 'static'"))
+                          ;; ([dcl.fct.def.default]/2: an explicitly defaulted copy or move assignment returns a reference to its class
+                          ;; and takes its non-object parameter by reference: "defaulted 'operator=' ...")
+                          (when (and (= "operator=" (:name m)) (:explicitlyDefaulted m) cls (= 2 (count ps)))
+                            (let [rt (str/replace (str/trim (or (second (re-find #"^(.*?)\s*\(" qt)) "")) #"\s+" "")
+                                  pt (str/replace (str (get-in (second ps) [:type :qualType])) #"\s+" "")]
+                              (when (or (not= rt (str (:name cls) "&")) (not (str/ends-with? pt "&")))
+                                (at! m (str "explicitly defaulted 'operator=' of '" (:name cls) "' has an invalid signature")))))
+                          ;; (an allocation or deallocation function is a static member, [class.free]/1)
+                          (when (re-matches #"operator\s*(?:new|delete)\s*(?:\[\])?" (str (:name m)))
+                            (at! m (str "'" (:name m) "' cannot be an explicit object member function (it is implicitly static)")))
                           (when (:virtual m) (at! m "an explicit object member function cannot be 'virtual'"))
                           (when (re-find #"\b(?:const|volatile)\b" q) (at! m (str "explicit object member function '" (:name m) "' cannot have cv-qualifier")))
                           (when (re-find #"&" q) (at! m (str "explicit object member function '" (:name m) "' cannot have ref-qualifier")))
@@ -4896,75 +4984,104 @@
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
         ce (java.util.HashMap.)
-        _ ((fn coll [nodes cls]
+        ;; escalating functions ([expr.const]/18: a constexpr function template's specialization, an abbreviated one's): name -> body
+        esc-cands (java.util.HashMap.)
+        _ ((fn coll [nodes cls tmpl?]
              (doseq [n nodes :when (map? n)]
                (case (:kind n)
                  ("FunctionDecl" "CXXMethodDecl")
-                 (doseq [k (cond-> [(:name n)] cls (conj (str cls "::" (:name n))))]
-                   (.put ce k (and (not (identical? false (.get ce k))) (boolean (:_consteval n)))))
-                 "FunctionTemplateDecl" (coll (:inner n) cls)
-                 ("CXXRecordDecl" "ClassTemplateDecl") (coll (:inner n) (or (when (= "CXXRecordDecl" (:kind n)) (:name n)) cls))
-                 ("NamespaceDecl" "LinkageSpecDecl") (coll (:inner n) nil)
+                 (do (doseq [k (cond-> [(:name n)] cls (conj (str cls "::" (:name n))))]
+                       (.put ce k (and (not (identical? false (.get ce k))) (boolean (:_consteval n)))))
+                     (when (and (:constexpr n) (not (:_consteval n)) (nil? cls)
+                                (or tmpl? (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner n))))
+                       (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                         (.put esc-cands (:name n) [n b]))))
+                 "FunctionTemplateDecl" (coll (:inner n) cls true)
+                 ("CXXRecordDecl" "ClassTemplateDecl") (coll (:inner n) (or (when (= "CXXRecordDecl" (:kind n)) (:name n)) cls) false)
+                 ("NamespaceDecl" "LinkageSpecDecl") (coll (:inner n) nil false)
                  nil)))
-           (:nodes u) nil)
-        cefn? (fn [d] (let [nm (str (get-in d [:referencedDecl :name]))
-                            q (:qualifier d)
-                            k (if (seq q) (str (str/join "::" q) "::" nm) nm)]
-                        (and (= :fn (get-in d [:_ent :k])) (true? (.get ce k)) (not (:tmpl (:_ent d))))))
-        report! (fn [d constexpr?]
-                  (when-let [o (get-in d [:range :begin :offset])]
-                    (when (= main (get-in d [:range :begin :file]))
-                      (let [[l c] (line-col starts (long o))]
-                        (.add out {:line l :col c :kind :error :rule :immediate
-                                   :msg (if constexpr? (str "constant evaluation returns address of immediate function '" (get-in d [:referencedDecl :name]) "'")
-                                            (str "taking address of an immediate function '" (get-in d [:referencedDecl :name]) "'"))})))))
-        expr (fn ex [x constexpr?]
+           (:nodes u) nil false)
+        escalated (java.util.HashSet.)
+        imm? (fn [d] (let [nm (str (get-in d [:referencedDecl :name]))
+                           q (:qualifier d)
+                           k (if (seq q) (str (str/join "::" q) "::" nm) nm)]
+                       (and (= :fn (get-in d [:_ent :k]))
+                            (or (and (true? (.get ce k)) (not (:tmpl (:_ent d))))
+                                (and (empty? q) (.contains escalated nm))))))
+        ;; an argument reading a variable not usable in constant expressions ([expr.const]/5.9): a parameter (no declaration
+        ;; point in the parser's entity) or a non-const variable of a fundamental type, not under & or an unevaluated operand
+        reads-var? (fn rv [x]
+                     (cond (map? x) (case (:kind x)
+                                      "DeclRefExpr" (let [e (:_ent x)]
+                                                      (and (= :var (:k e)) (not (:enumerator e)) (not (:constexpr e)) (not (:tparam e))
+                                                           (or (nil? (:vat e))
+                                                               (and (= :b (get-in e [:ty :t])) (not (get-in e [:ty :c]))))))
+                                      ("UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "CXXTypeidExpr" "LambdaExpr") false
+                                      "UnaryOperator" (if (= "&" (:opcode x)) false (some rv (:inner x)))
+                                      (boolean (some (fn [[k v]] (and (not= k :_ent) (not= k :_t) (coll? v) (rv v))) x)))
+                           (sequential? x) (boolean (some rv x))
+                           :else false))
+        ;; the walk of an evaluated region outside an immediate function context: (hit! node kind constexpr?) at an immediate
+        ;; function's address (:addr) and an immediate invocation that is no constant expression (:call)
+        expr (fn ex [x constexpr? hit!]
                (cond
                  (map? x) (let [k (:kind x)]
                             (cond
-                              (= "DeclRefExpr" k) (when (cefn? x) (report! x constexpr?))
+                              (= "DeclRefExpr" k) (when (imm? x) (hit! x :addr constexpr?))
                               (#{"LambdaExpr" "UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "CXXTypeidExpr" "RequiresExpr" "ConceptSpecializationExpr"
                                  "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "StmtExpr"} k) nil
                               (fn-kinds k) nil
+                              ;; (`if consteval`'s compound statement is an immediate function context, its else branch not; `if !consteval`
+                              ;; the other way round)
                               (and (= "IfStmt" k) (:isConsteval x))
-                              (when (:isNegatedConsteval x) (ex (first (:inner x)) constexpr?))
+                              (if (:isNegatedConsteval x) (ex (first (:inner x)) constexpr? hit!) (ex (second (:inner x)) constexpr? hit!))
                               (#{"CallExpr" "CXXMemberCallExpr" "CXXOperatorCallExpr"} k)
                               (let [[f & args] (:inner x)]
-                                (when-not (= "DeclRefExpr" (:kind f)) (ex f constexpr?))
+                                (when-not (= "DeclRefExpr" (:kind f)) (ex f constexpr? hit!))
                                 ;; (an immediate invocation, [expr.const]/16, is a constant expression: an argument that reads a
-                                ;; variable not usable in constant expressions, [expr.const]/5.9 -- a parameter, a non-const variable
-                                ;; of a fundamental type -- for a parameter of a non-reference type makes it none: "call to consteval
-                                ;; function 'f(x)' is not a constant expression", at the call)
-                                (when (and (= "DeclRefExpr" (:kind f)) (cefn? f))
+                                ;; variable not usable in constant expressions for a parameter of a non-reference type makes it none:
+                                ;; "call to consteval function 'f(x)' is not a constant expression", at the call)
+                                (when (and (= "DeclRefExpr" (:kind f)) (imm? f))
                                   (let [ptys (get-in f [:_ent :ptys])]
-                                    (when (some (fn [[i a]]
-                                                  (let [a (loop [a a] (if (and (= "ParenExpr" (:kind a)) (= 1 (count (:inner a)))) (recur (first (:inner a))) a))
-                                                        e (:_ent a)]
-                                                    (and (= "DeclRefExpr" (:kind a)) (= :var (:k e)) (= :b (get-in e [:ty :t])) (not (get-in e [:ty :c]))
-                                                         (not (:constexpr e)) (= :b (:t (nth ptys i nil))))))
+                                    (when (some (fn [[i a]] (and (reads-var? a) (not (#{:r :rr :lref :rref} (:t (nth ptys i nil)))) (not= :ref (:t (nth ptys i nil)))
+                                                                 (or (= :b (:t (nth ptys i nil))) (.contains escalated (str (get-in f [:referencedDecl :name]))))))
                                                 (map-indexed vector args))
-                                      (when-let [o (get-in x [:range :begin :offset])]
-                                        (when (= main (get-in x [:range :begin :file]))
-                                          (let [[l c] (line-col starts (long o))]
-                                            (.add out {:line l :col c :kind :error :rule :immediate
-                                                       :msg (str "call to consteval function '" (get-in f [:referencedDecl :name]) "(...)' is not a constant expression")})))))))
-                                (doseq [a args] (ex a constexpr?)))
-                              (= "VarDecl" k) (ex (:inner x) (boolean (:constexpr x)))
+                                      (hit! x :call constexpr?))))
+                                (doseq [a args] (ex a constexpr? hit!)))
+                              (= "VarDecl" k) (ex (:inner x) (boolean (:constexpr x)) hit!)
                               (= "ParmVarDecl" k) nil
-                              :else (doseq [[kk v] x :when (and (not= kk :_ent) (not= kk :_t) (coll? v))] (ex v constexpr?))))
-                 (or (vector? x) (seq? x)) (doseq [y x] (ex y constexpr?))
+                              :else (doseq [[kk v] x :when (and (not= kk :_ent) (not= kk :_t) (coll? v))] (ex v constexpr? hit!))))
+                 (or (vector? x) (seq? x)) (doseq [y x] (ex y constexpr? hit!))
                  :else nil))
+        ;; P2564's escalation: a candidate whose body has an immediate-escalating expression is an immediate function (to a fixpoint)
+        _ (loop [i 0]
+            (let [before (.size escalated)]
+              (doseq [[nm [_ b]] esc-cands :when (not (.contains escalated nm))]
+                (let [hit (volatile! false)]
+                  (expr b false (fn [_ _ _] (vreset! hit true)))
+                  (when @hit (.add escalated nm))))
+              (when (and (< i 4) (> (.size escalated) before)) (recur (inc i)))))
+        report! (fn [d kind constexpr?]
+                  (when-let [o (get-in d [:range :begin :offset])]
+                    (when (= main (get-in d [:range :begin :file]))
+                      (let [[l c] (line-col starts (long o))
+                            nm (if (= kind :call) (get-in (first (:inner d)) [:referencedDecl :name]) (get-in d [:referencedDecl :name]))]
+                        (.add out {:line l :col c :kind :error :rule :immediate
+                                   :msg (case kind
+                                          :call (str "call to consteval function '" nm "(...)' is not a constant expression")
+                                          (if constexpr? (str "constant evaluation returns address of immediate function '" nm "'")
+                                              (str "taking address of an immediate function '" nm "'")))})))))
         decls (fn dw [nodes]
                 (doseq [n nodes :when (map? n)]
                   (case (:kind n)
                     ("NamespaceDecl" "LinkageSpecDecl") (dw (:inner n))
                     "CXXRecordDecl" (dw (filter #(not= "FieldDecl" (:kind %)) (:inner n)))
-                    "VarDecl" (expr n false)
+                    "VarDecl" (expr n false report!)
                     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
                     (when-not (or (:_consteval n) (:explicitlyDefaulted n)
                                   ;; (an abbreviated function template's, [dcl.fct]/22: a parameter of a placeholder type)
                                   (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner n)))
-                      (doseq [c (:inner n) :when (#{"CompoundStmt" "CXXCtorInitializer" "CXXTryStmt"} (:kind c))] (expr c false)))
+                      (doseq [c (:inner n) :when (#{"CompoundStmt" "CXXCtorInitializer" "CXXTryStmt"} (:kind c))] (expr c false report!)))
                     nil)))]
     (decls (:nodes u))
     (vec (distinct out))))
@@ -5142,6 +5259,10 @@
            (when (and o bo (= main (get-in n [:range :begin :file])) (= main (get-in b [:range :begin :file])) (< (long o) (long bo) n-src))
              (let [t (subs src (long o) (long bo))
                    ic (match t 0 \[ \])]
+               ;; (cpp-diag-a: [expr.prim.lambda.capture]/2, a capture has one ellipsis, before an init-capture's name or after a
+               ;; simple capture's: "too many '...' in lambda capture")
+               (when (and ic (re-find #"(?:^|,)\s*&?\s*\.\.\.\s*[A-Za-z_]\w*\s*\.\.\." (subs t 1 (long ic))))
+                 (at! (long o) "too many '...' in lambda capture"))
                (when ic
                  (let [rest-t (subs t (inc (long ic)))
                        po (.indexOf ^String rest-t "(")]
