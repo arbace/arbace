@@ -6706,4 +6706,11 @@ reverse-complement-5).
   (b) keep SPEC §14 and CS35. *Recommended: (a) for _Float16 and _Float128 first.* _Float16 was begun after this round and not
   merged (the worktree's `.tmp/f16-wip*.patch`, not committed: crt's binary16 conversions with ties to even, ci's and cf2g's "f16" loads, stores
   and r16 rounding, the builder's kind, fty and conversions; cirun builds, nothing run yet).
+  As built (queue 522, the VM, 2026-11-22; (a) decided by the user): _Float16 finished and _Float128 in software (crt's
+  WType Float: binary128's bits in two limbs, each operation exact then rounded once by fpack); fenv's flags and rounding
+  directions for the software formats and the wide conversions (musl's generic fenv.c replaced by natives), signaling NaNs
+  kept by float's conversions and seen by float and double arithmetic; the decimal types in BID (crt's WType Dec); a
+  program's long double macros double's (CS35 made visible); abs and its kin as gcc's builtins; x87's fsqrt/fpatan
+  templates. 23 of the 26 rows pass at eval and AOT by their own verdicts; left: tcc-tests2/85_asm-outside-function and
+  pr47237 (assembly, by design) and union-bitfield (ub, out of the judge's cases).
 
