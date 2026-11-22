@@ -108,7 +108,9 @@
     module import
     ;; Chez's port procedures of (chezscheme) (SC180 (b)), go/arbace/scm/prim_io.ae
     unget-u8 unget-char port-has-port-length? port-has-set-port-length!? port-has-port-nonblocking??
-    port-has-set-port-nonblocking!? fresh-line port-length set-port-length! port-nonblocking? set-port-nonblocking!))
+    port-has-set-port-nonblocking!? fresh-line port-length set-port-length! port-nonblocking? set-port-nonblocking!
+    ;; SCS4 (d): Chez's / and angle and its console port, for (chezscheme) and R7RS's libraries; (rnrs)'s give R6RS's answers
+    $chez-/ $chez-angle $chez-current-input-port $chez-current-output-port))
 
 (define (library-exports name) (environment-symbols (environment name)))
 
