@@ -16852,3 +16852,37 @@ To build:
 - Clojure: CDR12, CDR13, CDR14, CDR15 (doc/CLOJURE-DESIGN-REVIEW.md).
 - Java: t05905 (the qualifier recorded in the forms) and t07835 (JDI's generic types indexed).
 Kept as built: LLVM's envp (LLS58), arm64's literal pools (ARS50), arm64's error-judge rule, hsi's interrupted thunks (HES56 (b)).
+
+## 2026-11-22: the user's counting decisions applied (branch `counting-1122`, from mac/next `3e8dfe109`)
+
+The counting half of the entry above, as rules over the records (no check run: the user's "avoid redundancy and unnecessary tests";
+bin/reap, bin/crops-score with its self-test and bin/records-check only). Each rule is keyed on a verdict a record holds, never on a
+copied list, and every row keeps its reason. The mechanism and the numbers are in doc/CROPS-SCORE.md, "Decided (the user,
+2026-11-22)"; in short:
+- bin/reap (test/reap/main.ae) gains three reader rules, each a source option of test/reap/cells.edn: `:py-ref-outcomes` (each
+  Python eval non-pass carries CPython 3.14.10's recorded outcome of the same method; `classify` honours a class's `:ref-outcomes`),
+  `:own-verdict` (a known file's recorded rejection held to the expectations its own tests state, test/python/rejected-own.edn,
+  cited by file and line in the pinned tarball) and `:own-elsewhere` (CR1 (a): a C file known only in classes marked
+  `:reference-wrong` passes when the dg check's record or the run's passes it; `count-once` follows, so the tree check's "pp-known"
+  rows take the token check's verdict). A first try removed the picked files per check only: the 59 files whose tree-check row is
+  "pp-known" (no entry of the tree check's) then fell out of both the passes and the non-passes (C read 5,401 / 5 / 10, 59 cases
+  short); `count-once` now counts a picked file that no check leaves a non-pass.
+- Classes: Python's `:cpython-only` and `divergences-print.edn`'s `:rejected` `:na`; `:skipped-by-both` (1,917), `:udp-lite` (113),
+  `:cpython-implementation-details` (79), `:remote-debugging-disabled` (45) `:na`, before `:skipped-by-test` (376 left);
+  libtest_judge.ae leaves `:ref-outcomes` classes to bin/reap (its own verdict reads no outcome). C's fourteen CR1 classes
+  `:reference-wrong`; `:speed-benchmarks` (the five) `:na`. Go's `:foreign-code` and `:memory` `:na`. x86-64's six llvm-mc classes of
+  the cross judge `:na` (723), the judge's stated cases less them. Haskell's eval-out.edn 31 -> 34 (T13825-unit, unboxedsums_unit_tests
+  `:by-design`, tcrun022 `:implementation-defined`, all.T:38's -O). C's judge's stated cases less the 5 n/a (14,952 -> 14,947 own).
+- Cells: Python read 3,702 / 34 / 0 -> 3,706 / 30 / 0, eval 39,204 / 5,490 / 3,627 -> 39,204 / 2,719 / 3,627 (2,771 n/a), print
+  2,796 / 4 / 0 -> 2,796 / 0 / 0 (4 n/a); C read 5,328 / 137 / 10 -> 5,460 / 5 / 10 (131 by the dg check, 1 by its run; left
+  c23-attr-syntax-6, c23-complit-5, embed-10, sqlite3.c, 13.S), eval 2,324 / 35 / 0 -> 2,324 / 30 / 0 (5 n/a); Go eval 1,781 / 52 / 1
+  -> 1,781 / 38 / 1 (18 n/a); x86-64 print 195,651 / 861 / 2 -> 195,651 / 138 / 2 (723 n/a).
+- Scores (floored to six decimals, then to one): Python completeness 0.948543 -> 0.961507 (94.8 -> 96.1), C 0.986102 -> 0.992652
+  (98.6 -> 99.2), Go 0.988974 -> 0.990842 (98.8 -> 99.0), x86-64 0.998902 -> 0.999821 (99.8 -> 99.9), Haskell 0.983201 unchanged
+  (98.3); independence Haskell 0.999020 -> 0.999344 (eval (910 + 0.5 x 9) / 919 -> (910 + 0.5 x 6) / 916; 99.9), x86-64 0.999961
+  both (99.9), C 0.999979 both (99.9), Python and Go 1.0.
+- Controls: bin/crops-score --self-test's `counting-1122-tests` (reap.main's own functions on fabricated cases, each crop's numbers);
+  each rule broken by hand made it fail (classify ignoring `:ref-outcomes`, the own verdict ignoring `:exact`, CR1 ignoring
+  `:reference-wrong` or taking any verdict).
+Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict, --self-test, --self-test-ref, bin/records-check: 0
+problems. Not done here: Go's 137 read rows (another stream's: the 73 rejects' messages compared first).
