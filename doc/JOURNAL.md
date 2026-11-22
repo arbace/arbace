@@ -17093,6 +17093,158 @@ Asked by the main session after cpp-read's, hs-r7's and R3's reports and the Pyt
   Cargo's `--unit-graph` in the oracle tier); C4's identities count own. Alternatives not taken: (b) port Cargo's resolution (5-8 agent
   days); (c) (a) now, (b) when a second library build needs it.
 
+## 2026-11-22: the user's second counting decisions applied (branch `counting2-1122`, from mac/next `a8c6d3137`)
+
+The n/a half of the entry above, as counting-1122 applied the first (no check run, the user's "avoid redundancy and unnecessary tests":
+bin/reap --record, bin/crops-score --record, --judge --strict, --self-test, --self-test-ref and bin/records-check only; bin/pyi
+divergences, which classes the record with pyi's own judge and runs nothing, before and after). Each rule is the class's `:kind :na`,
+keyed on the verdict the record holds (a row a class names counts n/a only when it does not pass), every row keeping its reason;
+doc/CROPS-SCORE.md, "Decided (the user, 2026-11-22): the second questions", has the mechanism and the numbers.
+- Classes `:na` (`:decided` says since when and the alternatives not taken): C++'s test/cpp/divergences-dg.edn `:gcc-dialect` 173,
+  `:gxx-only-rules` 2, `:musl-libc` 1; Python's test/python/divergences.edn `:fork` 557, `:testinternalcapi` 132, `:venv-and-build`
+  49; Haskell's test/haskell/divergences.edn `:process` 1 (T24672) and `:skipped` 2 (T24809, T4262). Left by design, built by
+  others: C++'s `:gcc-own-rules` 135, Python's `:extension-modules` 75, Haskell's `:no-reference` 31.
+- bin/pyi's own judge (test/python/libtest_judge.ae) classes by `:tests` and `:match`, the kind only printed: bin/pyi divergences gives
+  fork 557, testinternalcapi 132 and venv-and-build 49 before and after, the lines' "(design," now "(na,". hsi's check
+  (bin/lib/hsi/check) and the C++ dg check (arbace/repr/cpp/dg.ae) read no class kind either.
+- bin/crops-score (test/crops/score.ae): an n/a case leaves the stages' counted cases as it leaves the cell's. `na-ids` reads `:ids`
+  beside `:tests` (hsi's classes name programs by `:ids`); `na-cases` keeps a row the record passes (C++'s `:musl-libc` names
+  Wnull-conversion-1.C, which the own front end passes: a pass in reap, and kept in the read stage's count); `:count-from`'s `:out`
+  takes it (C++'s read: 1,699 of 4,382 own rows, 182 n/a; 0.780 -> 0.788); `:case-inputs` leaves out of the cell's ids its `:na`
+  classes' non-passing ids (`cell-rows`, `cell-na-ids`): without it Haskell's eval took T24809 and T4262 out twice (the matrix's
+  total without them, eval-out.edn's list with them: 913 of 913), so they left test/haskell/eval-out.edn (34 -> 32, the fact's
+  `:cases` too) and the stage counts 915 of 915. No other crop's stage moved (Java's, C++'s and Rust's case-inputs name no n/a id).
+  C++'s judge's stated `:dg` the cell's 4,383 (4,564 before, which had not taken 497-3 (a)'s and 502-2 (a)'s 5 n/a either; still 1.0
+  at three decimals). Left as before this round: pr105475-2.C (undefined-expectation), which the cell passes by clang's record and
+  the own record fails, out of the read stage's rows and in the cell's (one row).
+- Cells: C++ read 5,665 / 311 / 517 (38 n/a) -> 5,665 / 135 / 517 (214 n/a); Python eval 39,204 / 2,719 / 3,627 (2,771 n/a) ->
+  39,204 / 1,981 / 3,627 (3,509 n/a); Haskell eval 894 / 34 / 22 -> 894 / 31 / 22 (3 n/a).
+- Completeness, exact (floored to six decimals, then to one): C++ 0.961380 -> 0.967457 (96.1 -> 96.7), Python 0.961507 -> 0.965050
+  (96.1 -> 96.5), Haskell 0.983464 -> 0.984209 (98.3 -> 98.4); what is meant to pass unchanged (C++ 0.978450, Python 0.977173, Haskell
+  0.992197). Independence: C++ 0.953940 -> 0.955500 (95.3 -> 95.5; test/crops/scores.edn 0.9540 -> 0.9556), Python and Haskell 1.0.
+- Controls: bin/crops-score --self-test's `counting-1122b-tests` (`na-ids` not taking a `:design` class's ids; `na-cases` leaving a
+  passing and an unnamed row; C++'s count with the passing row taken out too; Haskell's with the n/a ids kept and 34 out, 913; each
+  crop's completeness, C++'s with the 176 still by design); with `na-cases` taking every named row, or `na-ids` reading `:tests`
+  alone, the self-test failed.
+Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0 problems), --self-test, --self-test-ref,
+bin/records-check (9 pairs, 0 problems).
+## 2026-11-22: x86-objs round 1: Mach-O and COFF writers and views (AXS99 (b))
+
+The burst's stream x86-objs (branch `x86-objs-1122`, from `mac/next` `3e8dfe109`), the user's decision of 2026-11-22 (AXS99 (b),
+"Mach-O and COFF writers and views, compact unwind included"). Studied: llvm-project 23.1.5's pinned tarball
+(`.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, test/asm/corpora.edn's pin, sha256 fb50b1ea...), its `llvm/lib/MC/MachObjectWriter.cpp`,
+`MCMachOStreamer.cpp`, `MCParser/DarwinAsmParser.cpp`, `MCSectionMachO.cpp`, `MCObjectFileInfo.cpp`, `MCAsmInfoDarwin.cpp`,
+`MCDwarf.cpp` (EmitCompactUnwind, EmitCIE, EmitFDE, the frames' emit), `MCExpr.cpp` (the Mach-O rule for a variable as a
+relocation's symbol, AttemptToFoldSymbolOffsetDifference), `MCAssembler.cpp` (evaluateFixup, the .reloc groups), `WinCOFFObjectWriter.cpp`,
+`MCWinCOFFStreamer.cpp`, `MCParser/COFFAsmParser.cpp`, `MCWin64EH.cpp`, `MCStreamer.cpp`'s emitWinCFI*, `MCContext.cpp`,
+`StringTableBuilder.cpp`, `llvm/lib/Target/X86/MCTargetDesc/{X86MachObjectWriter,X86WinCOFFObjectWriter,X86AsmBackend,X86MCAsmInfo,
+X86WinCOFFStreamer,X86MCCodeEmitter}.cpp`, `llvm/tools/llvm-objdump/{llvm-objdump,MachODump}.cpp`, `llvm/tools/llvm-readobj/{MachODumper,
+COFFDumper}.cpp`, `llvm/lib/Object/{MachOObjectFile,COFFObjectFile,FaultMapParser,RelocationResolver}.cpp`,
+`llvm/include/llvm/DebugInfo/DWARF/LowLevel/DWARFDataExtractorSimple.h` (getEncodedPointer: an absptr read takes no relocation),
+`llvm/lib/DebugInfo/DWARF/DWARFDebugFrame.cpp` and `llvm/lib/Support/ScopedPrinter.cpp`; the logic written again, nothing copied
+(LICENSE.md, doc/ARBACE.md). doc/asm/AMD64-SURVEY.md, "As built: x86-objs", holds the design.
+
+New: `arbace/asm/macho.ae`, `arbace/asm/amd64/macho.ae`, `arbace/asm/coff.ae`, `arbace/asm/amd64/coff.ae`, `arbace/asm/amd64/objview.ae`;
+`arbace.asm.obj` gains `*fmt*` (the format's part, nil for ELF) and `*keep-var*`; the verdict (`arbace.asm.amd64.objcheck`) assembles
+a Darwin or Windows triple's run in that format and holds its CHECK lines to `format-view`; ELF's llvm-objdump -d view rewritten on the
+shared `disasm-lines`; arm64's call frame view made shareable (`dwarf-frames-lines`, `*frame-target*`, the section's address);
+decode-check's FileCheck subset takes a numeric variable's precision. Findings on the way, each LLVM's: Darwin's FDE address goes
+through a temporary variable (DwarfFDESymbolsUseAbsDiff) and so needs no relocation, which is what makes llvm-objdump --dwarf=frames
+print each function's own address (getEncodedPointer reads absptr unrelocated); `.seh_endproc` writes the unwind info at once, so a
+text section's .xdata comes right after it in the section table; COFF's `.reloc` names (dir32, secrel32, secidx) are ordinary fixups
+inserted in MCAssembler::layout's groups, their fixed values written into the data; a relaxed AT&T instruction's fixup error keeps
+its place (MCFixup::getLoc is its expression's), only the Intel parser's expressions have none (queue 372's `<unknown>:0:` rule was
+Intel's alone).
+
+Proof (stage 0 of mac/next's seed, ARBACE_HOST_EXE the main checkout's): `bin/repr-asm object-verdict --record` whole: 68 files, 1,243
+CHECK lines, 1,203 met (865 before), the rest :elf32 32, :x32 7, :options 1; the 338 :other-format lines all met: pad-for-align-debug 114,
+compact-unwind-force-dwarf 58, win-import-call-optimization 32, compact-unwind-mode-dwarf 24, compact-unwind-cfi_def_cfa 19,
+reloc-directive 18, compact-unwind 13, x86_long_nop 12 (its two i386 Mach-O runs), macho-reloc-errors-x86_64 8,
+compact-unwind-signal-frame 8, faultmap-section-parsing 7, align-branch-single 7 (its COFF run), hex-immediates 4, stdcall 4,
+fp-setup-macho 3, macho-reloc-errors-x86 3, reloc-macho 2, check-end-of-data-region 1, signed-coff-pcrel 1; every other row as recorded;
+its 16 controls failing as they must, 8 of them new (6 one-byte mutations of Mach-O and COFF objects, 2 cross).
+`bin/repr-asm encode-check --record --only` over the 21 files the change touches: the print level 223 of 223 CHECK texts met (the
+cell's 138 :other-format rows all met: pad-for-align-debug 63, compact-unwind-cfi_def_cfa 19, reloc-directive 18, compact-unwind 13,
+faultmap-section-parsing 7, reloc-undef-global 5, hex-immediates 4, fp-setup-macho 3, reloc-macho 2, stdcall 2,
+check-end-of-data-region 1, no-elf-compact-unwind 1), the cross judge 50 of 50, the other 9 files as recorded. Unchanged by the shared
+code (run, not recorded): `bin/repr-asm object-check` ok (musl 32, synthetic 8, obj-err 3 of 3, mc-x86-obj; the relaxed AT&T rule and
+the formats' hooks leave ELF's objects as they were), `bin/repr-asm --arch arm64 object-verdict` ok (2,890 of 2,890, the stated
+encodings 1,975 and texts 2,337: arm64's call frame view through `dwarf-frames-lines`). After (`bin/reap --record`, `bin/crops-score
+--record`): x86-64 print 195,651 pass / 861 by design / 2 deferred to 195,789 / 723 / 2 (the 723 the cross judge's AXS34 rows, which the
+user's decision of the same day counts out of the cases, another stream's); AOT 108 / 0 / 0 unchanged (the verdict beside, AXS100 (a):
+865 to 1,203 of 1,243); asm-amd64's completeness 0.9989 to 0.9991. Left: the cross judge's rows (counting), :elf32 (2 print rows, 32
+verdict lines) and :x32 (7) for AXS101's ELF32, :options 1 (gnux32-dwarf-gen's -g). arm64: no matrix row waits for Mach-O (MC/AArch64's
+Darwin-only object tests are outside the corpus mc-aarch64-obj; the encode check's reject level, beside, holds label-arithmetic-diags-darwin
+10 and macho-addend-range 3 lines that AArch64MachObjectWriter's messages would judge): an arm64 Mach-O writer is not part of this round.
+
+## 2026-11-22: x86-objs round 2: i386's ELF32 (AXS101 (a))
+
+The burst's "if time allows" (AXS101, recommended (b) by queue 337, the burst asked (a)): `arbace.asm.elf`'s writer takes `:class 32`
+(ELFWriter's 32-bit layout: the 52-byte header, 40-byte section headers, 16-byte symbols, 4-byte alignments) and `:rel true` (SHT_REL,
+`.rel` sections, 8-byte entries, the addend in the field), its reader ELF32 and REL; an i386 run of the object assembler is EM_386
+ELFCLASS32 with X86ELFObjectWriter::getRelocType's EM_386 types (getType64 then getRelocType32, from llvm-project 23.1.5's
+`llvm/lib/Target/X86/MCTargetDesc/X86ELFObjectWriter.cpp`, the names from `llvm/include/llvm/BinaryFormat/ELFRelocs/i386.def`),
+`.reloc` with R_386_* and BFD_RELOC_*; `{disp32}`/`.d32` on JMP_1 or JCC_1 forces the relaxed form (X86AsmParser.cpp's
+processInstruction: JMP_2/JCC_2 in 16-bit mode), which Relocations/x86-16 needed; the verdict's views take a target's `:class`
+(objdump's relocation widths, readobj -r's REL section without addend, readelf -s's columns). Proof: `object-verdict --record` whole:
+1,224 of 1,243 (1,203 before): reloc-directive-elf-32 11, tlsdesc-32 5, x86-16 5 met; x86-32 7 and x86-branch-relaxation 4 now
+:view-llvm-objdump (their viewers, `--no-addresses` through sed and `-D --section` with another triple, are views not built: deferred);
+18 controls failing (2 new: tlsdesc-32's and x86-16's objects, one byte changed). `encode-check --record --only` over the 26 files with
+an i386 or 16-bit object run: 135 of 135 CHECK texts, abs8's 2 :elf32 rows met. ELF64's bytes unchanged: object-check 89 of 89 equal to
+llvm-mc's byte for byte (musl 32, synthetic 8, mc-x86-obj 49, obj-err 3 of 3), arm64's object-check 16 of 16. After: x86-64 print
+195,791 pass / 723 by design / 0 deferred (the 723 the cross judge's, counted out by the user's decision, another stream's); AOT
+108 / 0 / 0 (the verdict beside: 1,224 of 1,243, the rest :view-llvm-objdump 11, :x32 7, :options 1). Left: x32 (ELF32 with EM_X86_64
+and RELA, and the encoder's REX on x32's TLSDESC lea: 7 beside lines), gnux32-dwarf-gen's -g, the two views.
+## 2026-11-22: hs-speed-1122: Haskell's deferred eval classes (T3279's frozen self-delivery, CallConv's assembly on x86i, the speed rows measured)
+
+Branch `hs-speed-1122` from mac/next `008ffdae8` (with hs-r7-1122), the burst's stream for Haskell's completeness: the eval cell's
+deferred classes `:speed` 14, `:own-speed` 4 (+1 at AOT), `:rts` 1, `:test-cmm` 2, `:oracle-pending` 1. Light: `bin/hsi check --libs own
+--only` runs over hs-r7's own libraries (its worktree's lib-check and lib-stg outputs at hs-r7's commit, copied into this worktree's
+`.tmp/repr-haskell`), the eleven negative controls' subjects in each recording run; no gate. Details in doc/haskell/HASKELL-EVAL-SURVEY.md,
+"As built: hs-speed".
+
+**T3279 (`:rts`) passes.** HES56 (b) froze interrupted evaluations only for another runnable thread; T3279's are the running thread's:
+its handler throws to itself inside unsafePerformIO, and the forked re-evaluation takes main's killThread at unsafeUnmask. Now
+`killThread#` to the running thread freezes with the primop's return as the control, and a delivery at an unmasking (`deliverSelfAt`:
+the mask primop's, a mask frame's return) freezes with the action to apply or the value returned; transactions and the deliveries as a
+thread blocks revert as before (GHC's stg_killThreadzh, throwToSingleThreaded and raiseAsync, rts/RaiseAsync.c, studied for the rule).
+Proof: T3279 prints 2; 70 programs that throw, kill, mask or time out (55 of the testsuite found by their sources, 7 samples, the control
+subjects) the same verdicts as recorded but T3279 (four C programs first failed because bin/hsi was edited while their cnodes ran:
+rerun, passing).
+
+**CallConv (`:test-cmm`) passes.** Its source is assembly (`CallConv_x86_64.s`, all.T's extra_hc_opts under `when(arch('x86_64'))`):
+run_plan.ae evaluates that condition for the plan's platform, the front end takes a test with a `.s`, bin/lib/hsi/check assembles it with
+`bin/repr-asm object` (Arbace's ELF64 object assembler, AX4) and hsi loads it (`hsi run --asm`, go/arbace/hs/asm.ae): a primcall of one
+of its global symbols runs on x86i (AX5) in GHC's x86-64 convention (MachRegs.h), until the jump to Sp[0]. bin/hsi build prints x86i and
+emu with the driver (in its key; both build for amd64 and arm64). Alternatives: the test's arithmetic written as Cmm (not the test's
+source), or a native code generator's convention emulated in Go per instruction (x86i exists).
+
+**unboxedsums_unit_tests is n/a.** The user's decision of 2026-11-22 counts T13825-unit, unboxedsums_unit_tests and tcrun022 out of the
+cases; counting-1122 took them out of the independence's judged cases alone, and x86-64's classes of the same decision are `:kind :na`.
+The one non-pass of the three is now in `:ghc-package` (`:na`); `:oracle-pending` keeps no member.
+
+**The speed rows: measured, not moved.** At a 600 s CPU limit 16 of the 21 rows killed at the limit on the own libraries pass by their
+own verdicts (66 to 502 s of wall at 4 jobs; pic 73 s of CPU alone); fannkuch-redux, minimax, k-nucleotide and T23071 run past 600 s,
+unpack_sums_6 out of 8 GiB. The profiles put the time in the own libraries' -O0 code (kahan's fromIntegral through Integer and
+integerToBinaryFloat', compareByteArrays' drop through Num Int's (-), T23071's Handle layer, n-body's Storable): 2 to over 20 times the
+pack's -O2 libraries on these rows. Three evaluator changes were built and measured with perf stat against next's profile-guided build
+and left out (none moves a row): a leaf-function fast path with let-bound thunks speculated (fewer steps, more instructions), `($)`
+and newtype constructors rewritten at compile time (n-body -6 % cycles, kahan and pic none), GOMAXPROCS 4 (none). Proposed:
+HES100 (the speed rows: an optimizer of the own libraries' STG, recommended, with HES97 (a)'s caps meanwhile), HES101 (fannkuch-redux and
+minimax, whose GHC -O0 runs passed record-ref's 10 s: n/a), HES102 (k-nucleotide's stdin as boot.sh makes it).
+
+**The AOT check's 139 programs once on the new hsi** (the evaluator is shared code): 139 of 139 pass (`--aot --libs own`, 4 jobs, the
+six controls of its corpus failing as they must), nofib/spectral/fibheaps among them (`:own-speed` at AOT, killed at 85 s of wall in the
+record) at 55.7 s, again alone at 48.6 and 50.6: near the 60 s of CPU as the class says (57 s when it passed before), its row recorded
+from the last, passing run with five control subjects (status 0); it stays listed in `:own-speed`.
+
+Records, each from a passing `--only --record` run with the controls' subjects: test/haskell/check-hsi-own.edn's 13 rows (T3279,
+CallConv, the four C programs, the subjects), test/haskell/check-hsi.edn's 12 (the pack's: T3279 and CallConv pass on GHC's STG too,
+CallConv's key kept by prog_key leaving a `.s` out of the flags as the helper's dump does; hs_try_putmvar001 and T24598, `:test-c`'s and
+`:test-cmm`'s listed passes, now pass in it), test/haskell/check-hsi-aot-own.edn's 6 (fibheaps and the subjects). The eval cell
+894 / 34 / 22 -> 896 / 34 / 19 (1 n/a); AOT 138 / 0 / 1 -> 139 / 0 / 0; Haskell completeness 0.9835 -> 0.9860 (0.986038, floored 98.6;
+0.9948 without by design). bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check, bin/hsi divergences (909
+programs, 0 not in a class): 0 problems. test/gate/crops-test.bash passes with the hsi steps' inputs grown (x86i, emu, the assembler).
 ## 2026-11-22: cpp-gnu, GCC's own rules built into Arbace's C++ front end (the user's decision of 2026-11-22)
 
 Branch `cpp-gnu-1122` from mac/next `a8c6d3137` (with cpp-read-1122), in `.tmp/worktrees/cpp-gnu`; no gate (the user's rule), light

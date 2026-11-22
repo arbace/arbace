@@ -1854,6 +1854,14 @@
                      (not (when cid (let [c (abi/cls cid)] (or (:tmpl c) (:targs c))))))
             (when-let [c (some cx-incomplete-cls (:ps (:ty f)))]
               (*on-refusal* (ex-info (str "codegen: parameter has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))
+        ;; (queue 518, the checker: [dcl.fct]/2, a parameter of type cv void other than a lone unnamed `(void)` without a default
+        ;; argument: GCC's "invalid use of type 'void' in parameter declaration", other/main1.C's `int main(void, char**)`,
+        ;; parse/operator7.C's `operator+(void, void)`, other/void2.C's `foo(void = 0)`; the type as written, not dependent)
+        _ (when (and (checking?) (nil? *instantiating*) (not (header-node? n)))
+            (let [pns (vec (param-nodes n))
+                  void? (fn [pn] (re-matches #"(?:(?:const|volatile)\s+)*void(?:\s+(?:const|volatile))*" (str/trim (str (get-in pn [:type :qualType])))))]
+              (when-let [pn (first (filter #(and (void? %) (or (> (count pns) 1) (:name %) (seq (kids %)))) pns))]
+                (*on-refusal* (ex-info "codegen: invalid use of type 'void' in parameter declaration" {:codegen/refused :incomplete}) pn))))
         ;; (queue 492, the checker: a non-member function definition's written return and parameter types, their member
         ;; types' access as a namespace-scope variable's, check-type-access!; [class.access]/1-2)
         _ (when (and (checking?) body (nil? cid) (nil? *instantiating*) (not (header-node? n)) (= :ns (:kind scope)) (not (:friend f)))
@@ -1974,6 +1982,16 @@
       (when (and c (not (:tmpl c)) (not (:lambda c)) (or (:defining c) (not (:complete c))))
         (*on-refusal* (ex-info (str "codegen: variable has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))))
 
+(defn- cx-void-var!
+  "Queue 518 (the checker): [basic.types.general]/5 with [dcl.type.general]: a variable of type cv void (an extern declaration
+  too, CWG2475; a class template's static member or a function template's local once substituted): GCC's \"variable or field
+  declared void\", DRs/dr2475.C, template/static9.C, cpp0x/pr78649.C."
+  [n ty]
+  (when (and (checking?) (map? ty) (abi/void? (abi/unq ty)) (not (header-node? n)))
+    ;; (reported at its name, as GCC's: `extern void g(),\n y;`)
+    (*on-refusal* (ex-info (str "codegen: variable or field '" (:name n) "' declared void") {:codegen/refused :incomplete})
+                  (if (get-in n [:loc :offset]) (assoc-in n [:range :begin] (merge (get-in n [:range :begin]) (:loc n))) n))))
+
 (defn- cx-sure-incomplete-refusal
   "Queue 500 (the checker; 497-2 (a)): [basic.def]/5, [dcl.init.general]/7 for a class template's specialization: the refusal
   to report for the variable definition `n` whose type, as written, is the specialization itself (a template-id, no declarator
@@ -2050,6 +2068,7 @@
         ;; one declared and not yet or never defined or still being defined -- not a static data member's declaration in its class, nor
         ;; an extern declaration, nor a class template's instance; clang's err_typecheck_decl_incomplete_type)
         _ (when (and (not= st :member-static) (empty? q)) (incomplete-var! n ty))
+        _ (cx-void-var! n ty)
         ;; (queue 500: a specialization surely without a definition)
         _ (when (and (not= st :member-static) (empty? q))
             (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n)))]
@@ -2374,13 +2393,19 @@
                                        ;; [class.mem.general]/7, [basic.def]/5 -- `struct A; struct B { A a; };`,
                                        ;; init/array26.C; a member of the main file's, not a class template's or a
                                        ;; lambda's, as incomplete-var!'s)
+                                       (or
                                        (when (and (abi/class? et)
                                                   (let [c (abi/cls (:id et))]
                                                     (or (:defining c)
                                                         (and (checking?) c (not (:complete c)) (not (:tmpl c)) (not (:lambda c))
                                                              (not (header-node? k))))))
                                          (ex-info (str "codegen: field has incomplete type '" (:name (abi/cls (:id et))) "'")
-                                                  {:codegen/refused :incomplete :cx/node k})))]
+                                                  {:codegen/refused :incomplete :cx/node k}))
+                                       ;; (queue 518, the checker: a member of type cv void, an instance's `T m;` for T = void,
+                                       ;; GCC's "variable or field declared void"; template/error2.C)
+                                       (when (and (checking?) (map? et) (abi/void? (abi/unq et)) (not (header-node? k)))
+                                         (ex-info (str "codegen: variable or field '" (:name k) "' declared void")
+                                                  {:codegen/refused :incomplete :cx/node k}))))]
                           (if (checking?) (swap! *order* conj [:cx-error bad]) (throw bad))
                           (let [ft (resolve-type cs (get-in k [:type :qualType]))
                               i (count (:fields (abi/cls id)))
@@ -4463,6 +4488,9 @@
         (if (and (= :float (abi/bn from)) (= :double (abi/bn to))) 1 2))
       (and (= :bool (abi/bn to)) (or (abi/ptr? from) (abi/arith? from))) 2
       (and (abi/ptr? to) (null-constant? e)) 2
+      ;; (queue 518, the checker: [conv.ptr]/1, an integral null pointer constant to std::nullptr_t, a null pointer conversion
+      ;; as to a pointer's, so `k(0)` for k(char*) and k(nullptr_t) is ambiguous: cpp0x/nullptr19.C)
+      (and (checking?) (= :nullptr (abi/bn to)) (abi/integral? from) (null-constant? e)) 2
       (and (abi/ptr? to) (abi/ptr? from))
       (let [ft (:to from) tt (:to to)]
         (cond
@@ -4568,6 +4596,27 @@
                 [r fid])]
     (second (first (sort-by first cands)))))
 
+(defn- cx-conv-ambiguous?
+  "Queue 518 (the checker): whether class `id`'s conversion to the non-class type `t` (conv-for's) is ambiguous ([over.match.conv],
+  [over.match.best]): two or more conversion functions, no templates, of one implicit object parameter's qualifiers, whose results
+  convert to `t` by the best rank, an exact match or a promotion, which no tie-breaker separates (conversion/ambig1.C's operator
+  char and operator short to int, lookup/conv-1.C's operator int of two bases)."
+  [id t explicit? & [obj-c]]
+  (when (checking?)
+    (let [cands (for [fid (distinct (conv-fns id))
+                      :let [f (fnd fid)] :when (or explicit? (not (:explicit f)))
+                      :when (or (not obj-c) (:cq f) (:cq (:ty f)))
+                      :when (or (not explicit?) (not (:explicit f)) (= (abi/unq (abi/non-ref (:ret (:ty f)))) (abi/unq t)))
+                      :let [rt (abi/non-ref (:ret (:ty f)))
+                            r (when (and (abi/arith? (abi/unq rt)) (abi/arith? (abi/unq t)))
+                                (if (= (abi/unq rt) (abi/unq t)) 0 (std-rank {:op :call :ty rt} rt t)))]
+                      :when r]
+                  [r fid (boolean (or (:cq f) (:cq (:ty f))))])
+          best (when (seq cands) (reduce min (map first cands)))
+          tied (filter #(= best (first %)) cands)]
+      (boolean (and best (<= (long best) 1) (>= (count tied) 2) (empty? (conv-specs id t))
+                    (= 1 (count (distinct (map #(nth % 2) tied)))))))))
+
 (defn- ref-conv-for
   "cpp-s14: the conversion function of class `id` whose result the reference type `t` binds to directly ([dcl.init.ref]
   /5.1.2 for an lvalue reference: an lvalue of a type `t` is reference-compatible with; /5.3.2 for an rvalue reference:
@@ -4631,6 +4680,8 @@
         r))))
 
 (defn- unspelled-fn [t] (when (map? t) (dissoc t :written :qual)))
+
+(declare better-ics?)
 
 (defn ics
   "The implicit conversion sequence of the argument `e` (a typed expression or {:op :init-list}) to the parameter type `p`."
@@ -4737,8 +4788,20 @@
                                   (let [v (boolean (some converts? (binding [*no-user* true] (h (:id pt) [e]))))]
                                     (when c (swap! c assoc k v))
                                     v))))))
-                  {:rank 3})))
-      (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false (:c at))) {:rank 3})
+                  ;; (queue 518, the checker: two converting constructors neither of whose argument conversions is better,
+                  ;; an ambiguous conversion sequence, [over.best.ics]/10: a user-defined one indistinguishable from any other,
+                  ;; whose use by the function chosen is ill-formed (resolve-overload*'s :amb): overload/ambig3.C's f(3l) for
+                  ;; A(int) and A(unsigned))
+                  (if-let [rs (when (checking?)
+                                (seq (keep (fn [cid] (when (converts? cid) (binding [*no-user* true] (ics e (first (:ps (:ty (fnd cid))))))))
+                                           (ctor-candidates (:id pt)))))]
+                    (if (and (>= (count rs) 2) (not-any? (fn [r] (every? #(or (identical? r %) (better-ics? r %)) rs)) rs))
+                      {:rank 3 :amb true}
+                      {:rank 3})
+                    {:rank 3}))))
+      (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false (:c at)))
+                        ;; (queue 518, the checker: an ambiguous conversion sequence, [over.best.ics]/10, resolve-overload*'s :amb)
+                        (if (cx-conv-ambiguous? (class-id at) pt false (:c at)) {:rank 3 :amb true} {:rank 3}))
       (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
       ;; (queue 380: &f of an overload set, its set's function the parameter's type matches, an exact match, [over.ics.scs]/3)
       (and (= :fnaddr (:op e)) (:set e) (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching (:set e) (:to (abi/unq pt))))
@@ -4848,7 +4911,12 @@
                                ;; unavailable", when chosen as surely as the CX12 rule below trusts a choice)
                                _ (when (and (checking?) (:unavailable f)
                                             (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
-                                   (fail :unavailable "'" (:name f) "' is unavailable"))]
+                                   (fail :unavailable "'" (:name f) "' is unavailable"))
+                               ;; (queue 518, the checker: an argument's ambiguous conversion sequence, ics's :amb, used by the
+                               ;; function chosen, [over.best.ics]/10: GCC's "conversion from 'long int' to 'A' is ambiguous";
+                               ;; trusted as the CX12 rule below trusts a choice, the only viable function)
+                               _ (when (and (checking?) (= 1 (count viable)) (some :amb (second (first best))))
+                                   (fail :overload "ambiguous call (an ambiguous user-defined conversion of an argument of " (:name f) ")"))]
                            ;; CX12 (the checker): the best viable function deleted ([dcl.fct.def.delete]/2; clang's
                            ;; err_ovl_deleted_call, err_ovl_deleted_special_init), when it was the only viable one: the
                            ;; slice's ranking is not trusted to have chosen it over another)
@@ -4918,6 +4986,9 @@
   "The class object `e` converted to the non-class type `t` by a conversion function: the call's value."
   [ctx e t explicit?]
   (let [cid (class-id (:ty e))
+        ;; (queue 518, the checker: an ambiguous choice among the conversion functions, cx-conv-ambiguous?)
+        _ (when (cx-conv-ambiguous? cid t explicit? (:c (:ty e)))
+            (fail :overload "ambiguous call (the conversion of '" (:name (abi/cls cid)) "' to " (cx-tyname t) " is ambiguous)"))
         fid (or (conv-for cid t explicit? (:c (:ty e)))
                 ;; (CX12, the checker: copy-initialization from a class none of whose conversion functions is non-explicit,
                 ;; [over.match.conv]/1.1, [dcl.init]/16.7: no candidate at all, clang's err_typecheck_convert_incompatible's
@@ -6214,6 +6285,14 @@
   (when (and (checking?) (class-id (:ty obj)) (not= (class-id (:ty obj)) bid)
              (> (count (base-subobjects (class-id (:ty obj)) bid)) 1))
     (fail :conversion "ambiguous conversion from derived class '" (:name (abi/cls (class-id (:ty obj)))) "' to base class '" (:name (abi/cls bid)) "'"))
+  (if (= (class-id (:ty obj)) bid) obj {:op :base-lv :e obj :to bid :ty (assoc {:k :class :id bid} :c (:c (:ty obj))) :cat (:cat obj)}))
+
+(defn- subobject-lv
+  "Queue 518: the glvalue `obj` seen as its direct base or virtual base `bid` itself, a subobject its class names, no conversion
+  ([class.base.init]/13, [class.copy.ctor]/14, [class.copy.assign]/12: an implicit special member's or a defaulted comparison's
+  bases), so not judged ambiguous as to-base-lv's conversion is: `struct BB : B1, B2` with B a virtual base of B1 and a base of
+  B2, lookup/ambig1.C, whose class had been refused whole at its implicit copy constructor."
+  [obj bid]
   (if (= (class-id (:ty obj)) bid) obj {:op :base-lv :e obj :to bid :ty (assoc {:k :class :id bid} :c (:c (:ty obj))) :cat (:cat obj)}))
 
 (defn- cx-via
@@ -8901,6 +8980,7 @@
                     ;; (queue 500: a specialization surely without a definition, the variable's refusal)
                     (throw (or (cx-sure-incomplete-refusal n nil x) x))))))
         _ (incomplete-var! n ty)
+        _ (cx-void-var! n ty)
         _ (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n))
         id (next-id)
         ;; (thread_local at block scope implies static, [dcl.stc]/4)
@@ -9850,7 +9930,7 @@
         a (if member? (deref-node (this-expr ctx)) (var-node (first pids)))
         b (var-node (last pids))
         c (abi/cls cls)
-        subs (concat (for [bb (:bases c)] [(to-base-lv a (:cls bb)) (to-base-lv b (:cls bb))])
+        subs (concat (for [bb (:bases c)] [(subobject-lv a (:cls bb)) (subobject-lv b (:cls bb))])
                      (for [fl (:fields c)] [(field-node a cls (:i fl)) (field-node b cls (:i fl))]))
         bin (fn [o x y] (or (when (or (class-operand? x) (class-operand? y)) (operator-call ctx o [x y])) (builtin-binop o (class->scalar ctx x) (class->scalar ctx y))))
         ;; (queue 510, the checker: a defaulted == or <=> defined as deleted, not refused, so a use of it is the error,
@@ -9971,8 +10051,8 @@
           (binding [*cutoff* Long/MAX_VALUE]
             (upd-fn! fid assoc :tinits
                      {:bases (vec (for [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
-                                    {:base (:cls b) :idx i :init (init-for {:k :class :id (:cls b)} [(to-base-lv src (:cls b))] ctx :direct)}))
-                      :vbases (vec (for [v (abi/vbases-init cls)] {:base v :init (init-for {:k :class :id v} [(to-base-lv src v)] ctx :direct)}))
+                                    {:base (:cls b) :idx i :init (init-for {:k :class :id (:cls b)} [(subobject-lv src (:cls b))] ctx :direct)}))
+                      :vbases (vec (for [v (abi/vbases-init cls)] {:base v :init (init-for {:k :class :id v} [(subobject-lv src v)] ctx :direct)}))
                       :fields (vec (for [fl (:fields c)]
                                      {:field (:i fl) :init (let [t (:ty fl)]
                                                              (if (abi/arr? t) {:i :copy-bytes :e (field-node src cls (:i fl))}
@@ -9985,7 +10065,7 @@
             c (abi/cls cls)]
         (binding [*cutoff* Long/MAX_VALUE]
           (upd-fn! fid assoc :tassign
-                   (vec (concat (for [b (:bases c)] (full (assign-node ctx (to-base-lv me (:cls b)) (to-base-lv src (:cls b)))))
+                   (vec (concat (for [b (:bases c)] (full (assign-node ctx (subobject-lv me (:cls b)) (subobject-lv src (:cls b)))))
                                 (for [fl (:fields c)]
                                   (if (abi/arr? (:ty fl))
                                     {:s :copy-bytes :dst (field-node me cls (:i fl)) :src (field-node src cls (:i fl))}

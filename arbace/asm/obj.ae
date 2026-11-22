@@ -42,6 +42,24 @@
   is emitted, AArch64's $d); :finish (fn [ctx]: before the layout)."
   nil)
 
+(def ^:dynamic *fmt*
+  "The object file format's part (x86-objs, AXS99 (b)), a map, or nil for ELF (arbace.asm.elf's writer, ELFObjectWriter's
+  rules): what differs by format, after llvm-project 23.1.5's MachObjectWriter, MCMachOStreamer, DarwinAsmParser and
+  WinCOFFObjectWriter, MCWinCOFFStreamer, COFFAsmParser (arbace.asm.macho, arbace.asm.coff): :id (:macho, :coff); :temp? (fn
+  [NAME]: MCAsmInfo's InternalSymbolPrefix, a temporary symbol); :init! (fn [ctx]: initSections); :directive (fn [ctx h args]:
+  the format's directives, :unhandled when it is not one); :before-label (fn [ctx sym]: emitLabel's, MCMachOStreamer's new
+  fragment for an atom); :before-layout (fn [ctx]: finishImpl's, Mach-O's atoms); :pcrel-resolved? (fn [ctx v chunk]:
+  isSymbolRefDifferenceFullyResolvedImpl for a PC-relative fixup of one symbol); :frames! (fn [ctx]: the frames, compact unwind
+  and .eh_frame); :debug-section (fn [ctx NAME]: the DWARF section NAME, `debug_line`); :post-layout (fn [ctx]:
+  executePostLayoutBinding, the section addresses); :record-reloc (fn [ctx chunk fixup value resolved-value]: recordRelocation,
+  the relocation kept by the format, the field's fixed value returned); :write (fn [ctx]: the object's bytes)."
+  nil)
+
+(def ^:dynamic *keep-var*
+  "nil, or (fn [ctx SYM]): a variable `value` keeps as its own symbol rather than its value (MCExpr::evaluateAsRelocatableImpl's
+  rule for a relocation's symbol, the Mach-O writer's: x86-objs)."
+  nil)
+
 (def const-value "An expression's constant value (x/const-value, the shell's expressions)." x/const-value)
 
 ;; ---------------------------------------------------------------------------------------------------------------------
@@ -94,7 +112,10 @@
   (vary-meta fx assoc :pos @(:pos ctx)))
 
 (defn sym-name ^String [s]
-  (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s)) :else (fail (str "not a symbol: " (pr-str s)))))
+  (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s))
+        ;; a name with `@` (COFF's AllowAtInName, the part after it no specifier: `_mystdcall@8`; x86-objs)
+        (and (seq? s) (= 'at (first s)) (:at-name? *fmt*) ((:at-name? *fmt*) (nth s 2))) (str (sym-name (second s)) "@" (nth s 2))
+        :else (fail (str "not a symbol: " (pr-str s)))))
 
 (defn canon-name
   "A section's name names its section symbol (MCContext's section symbols are named by their sections)."
@@ -104,7 +125,7 @@
 (defn symbol! [ctx ^String n]
   (let [^java.util.LinkedHashMap m (:symbols ctx) n (canon-name ctx n)]
     (or (.get m n)
-        (let [a (atom {:name n :type 0 :vis 0 :temp (.startsWith n ".L")})] (.put m n a) a))))
+        (let [a (atom {:name n :type 0 :vis 0 :temp (if-let [t (:temp? *fmt*)] (boolean (t n)) (.startsWith n ".L"))})] (.put m n a) a))))
 
 (defn register! [ctx ^String n0]
   (symbol! ctx n0)
@@ -148,8 +169,10 @@
   (vreset! (:prev ctx) (cur-sec ctx))
   (vreset! (:cur ctx) sec))
 
-(defn section! [ctx ^String nm type flags entsize group comdat]
-  (let [k [nm group]
+(defn section! [ctx ^String nm type flags entsize group comdat & [unique]]
+  ;; (UNIQUE: a section of the same name kept apart, COFF's unique sections: Win64's .xdata and .pdata of a text section but
+  ;; the main one; x86-objs)
+  (let [k (if unique [nm group unique] [nm group])
         ^java.util.HashMap by (:by-key ctx)
         sec (or (.get by k)
                 (let [^java.util.ArrayList ss (:sections ctx)
@@ -194,6 +217,7 @@
   (let [s (symbol! ctx n)]
     (when (or (:chunk @s) (:var @s)) (fail (str "invalid symbol redefinition")))
     (register! ctx n)
+    (when-let [f (:before-label *fmt*)] (f ctx s))
     (let [c (cur-data! ctx)]
       (swap! s assoc :chunk c :off (.size ^java.util.ArrayList (:bytes @c)))
       (when (pos? (bit-and (long (:flags @(cur-sec ctx))) elf/SHF_TLS)) (swap! s assoc :type elf/STT_TLS)))
@@ -206,6 +230,9 @@
   [ctx e]
   (cond
     (and (seq? e) (= 'asm/dot (first e))) (let [n (tmp! ctx)] (label! ctx n) (symbol n))
+    ;; COFF's names with `@` (x86-objs): a symbol's reference
+    (and (seq? e) (= 'at (first e)) (= 3 (count e)) (:at-name? *fmt*) ((:at-name? *fmt*) (nth e 2)))
+    (list 'sym (sym-name e))
     (and (seq? e) (= 'local (first e)))
     (let [[_ n d] e k (long (or (.get ^java.util.HashMap (:locals ctx) n) 0))]
       (symbol (local-name ctx n (if (= d :f) (inc k) k))))
@@ -248,7 +275,7 @@
       (integer? e) (k (long e))
       (or (symbol? e) (and (seq? e) (= 'sym (first e))))
       (let [s (symbol! ctx (sym-name e)) m @s]
-        (if (and (:var m) (not (:chunk m)))
+        (if (and (:var m) (not (:chunk m)) (not (and *keep-var* (*keep-var* ctx s))))
           (let [v (value ctx (:var m) (inc (long depth)))]
             ;; a variable is its value (evaluateAsRelocatable follows it)
             v)
@@ -277,11 +304,16 @@
                                  :spec (or (:spec va) (:spec vb))})
           (= op '-) (let [r {:add (:add va) :sub (:add vb) :c (- (long (:c va)) (long (:c vb))) :spec (:spec va)}]
                       (when (or (:sub va) (:sub vb) (and (:add vb) (nil? (:add va)) false)) (unsupported :expression (pr-str e)))
+                      ;; MCExpr's Sub: a subtracted symbol with a specifier is not relocatable (`a@GOT - b@GOT`; x86-objs, for
+                      ;; the formats' writers: ELF's keeps its own reading)
+                      (when (and *fmt* (:add va) (:add vb) (:spec vb)) (unsupported :not-relocatable (pr-str e)))
                       ;; A - B with both in one section: a constant at the layout
                       (let [oa (when (:add r) (sym-offset ctx (:add r) depth)) ob (when (:sub r) (sym-offset ctx (:sub r) depth))]
                         (cond (and oa ob (= (first oa) (first ob)) (not= :abs (first oa)))
                               {:c (+ (long (:c r)) (- (long (second oa)) (long (second ob))))}
-                              (and (:sub r) (= (:add r) (:sub r))) {:c (:c r)}
+                              ;; (AttemptToFoldSymbolOffsetDifference folds a symbol less itself only when it is defined:
+                              ;; the formats' writers see the undefined one, x86-objs; ELF's keeps its fold)
+                              (and (:sub r) (= (:add r) (:sub r)) (or (nil? *fmt*) oa)) {:c (:c r)}
                               :else r)))
           :else (unsupported :expression (pr-str e))))
       :else (unsupported :expression (pr-str e)))))
@@ -351,7 +383,11 @@
 
 (defn code-section? [sec] (pos? (bit-and (long (:flags @sec)) elf/SHF_EXECINSTR)))
 
-(defn emit-insn! [ctx f] (line-entry! ctx) ((:emit-insn! *arch*) ctx f))
+(defn emit-insn! [ctx f]
+  (line-entry! ctx)
+  ;; MCObjectStreamer::emitInstruction: the section has instructions (Mach-O's S_ATTR_SOME_INSTRUCTIONS)
+  (swap! (cur-sec ctx) assoc :has-insns true)
+  ((:emit-insn! *arch*) ctx f))
 
 (defn type-of [t]
   (let [t (cond (and (seq? t) (#{'at 'pct} (first t))) (str (second t)) (string? t) t :else (str t))]
@@ -429,14 +465,17 @@
   key, an FDE for each frame (FrameEmitterImpl's EmitCIE, EmitFDE, emitCFIInstruction; the advances encoded from the final
   offsets, as the DwarfFrame fragments relax to)."
   [ctx]
-  (let [frames (vec (filter #(:end @%) (:frames ctx)))]
+  (let [frames (vec (filter #(:end @%) (:frames ctx)))
+        ;; the format's compact unwind first (MCDwarfFrameEmitter::emit: Mach-O's __LD,__compact_unwind, x86-objs), which
+        ;; gives the frames .eh_frame keeps (CanOmitDwarf's)
+        frames (if-let [f (and (seq frames) (:compact-unwind! *fmt*))] (vec (f ctx frames)) frames)]
     (when (seq frames)
-      (let [sec (section! ctx ".eh_frame" (or (:eh-frame-type *arch*) 0x70000001) elf/SHF_ALLOC 0 nil false)
+      (let [sec (if-let [f (:eh-frame-section *fmt*)] (f ctx) (section! ctx ".eh_frame" (or (:eh-frame-type *arch*) 0x70000001) elf/SHF_ALLOC 0 nil false))
             ;; MCObjectFileInfo's FDECFIEncoding: DW_EH_PE_pcrel | DW_EH_PE_sdata4, sdata8 (0x1c) under llvm-mc's --large-eh-encoding
             ;; or --large-code-model (judge-rest: AArch64's, `assemble`'s :large-eh; x86-64's large personality, LSDA and TType
             ;; encodings are not built, its checks never pass it): the CIE's augmentation data, the FDE's pc_begin and range in
             ;; its size, a FDE not last padded to it
-            fde-enc (if (:large-eh ctx) 0x1c 0x1b)
+            fde-enc (or (:fde-enc *fmt*) (if (:large-eh ctx) 0x1c 0x1b))
             _ (data! ctx)
             ch (cur-data! ctx)
             ^java.util.ArrayList b (:bytes @ch)
@@ -445,8 +484,19 @@
             set32! (fn [^long at ^long v] (dotimes [i 4] (.set b (+ at i) (bit-and (bit-shift-right v (* 8 i)) 0xff))))
             pad! (fn [^long a] (while (pos? (mod (.size b) a)) (.add b 0)) (ensure-align! sec a))
             here! (fn [] (let [n (tmp! ctx)] (label! ctx n) n))
-            sym-value! (fn [^String target ^long enc]
-                         (let [size (enc-size enc) e (if (= 0x10 (bit-and enc 0x70)) (list '- (symbol target) (symbol (here!))) (symbol target))]
+            sym-value! (fn [^String target ^long enc & [personality?]]
+                         (let [size (enc-size enc)
+                               pc? (= 0x10 (bit-and enc 0x70))
+                               e (cond
+                                   ;; the format's personality expression (x86-64 Darwin's sym@GOTPCREL+4; x86-objs)
+                                   (and personality? (:personality-expr *fmt*)) ((:personality-expr *fmt*) target)
+                                   pc? (list '- (symbol target) (symbol (here!)))
+                                   :else (symbol target))
+                               ;; emitAbsValue (DwarfFDESymbolsUseAbsDiff, Darwin's): the difference a temporary variable's
+                               ;; value, the field that variable (x86-objs)
+                               e (if (and pc? (not personality?) (:fde-abs-diff *fmt*))
+                                   (let [n (tmp! ctx)] (swap! (symbol! ctx n) assoc :var e) (symbol n))
+                                   e)]
                            (register! ctx target)
                            (.add ^java.util.ArrayList (:fixups @ch) [(.size b) size e nil false 0])
                            (out! (repeat size 0))))
@@ -491,7 +541,7 @@
                                 (out! (string-bytes (str "z" (when (:personality m) "P") (when (:lsda m) "L") "R" (when (:signal m) "S"))))
                                 (out! [0]) (out! (uleb 1)) (out! (sleb (:data-align (:cie *arch*)))) (out! [(:ra m)])
                                 (out! (uleb (+ (if (:personality m) (+ 1 (enc-size (:pers-enc m))) 0) (if (:lsda m) 1 0) 1)))
-                                (when (:personality m) (out! [(:pers-enc m)]) (sym-value! (:personality m) (:pers-enc m)))
+                                (when (:personality m) (out! [(:pers-enc m)]) (sym-value! (:personality m) (:pers-enc m) true))
                                 (when (:lsda m) (out! [(:lsda-enc m)]))
                                 (out! [fde-enc])
                                 (vreset! cfa 0)
@@ -615,7 +665,7 @@
   (let [^java.util.TreeMap fs (:dwarf-files ctx)]
     (when (pos? (.size fs))
       (when-not (= (vec (keys fs)) (vec (range 1 (inc (.size fs))))) (unsupported :debug-line "a file number left unassigned"))
-      (section! ctx ".debug_line" elf/SHT_PROGBITS 0 0 nil false)
+      (if-let [f (:debug-section *fmt*)] (f ctx "debug_line") (section! ctx ".debug_line" elf/SHT_PROGBITS 0 0 nil false))
       (data! ctx)
       (let [body (vec (concat [1 1 1 0xfb 14 13] [0 1 1 1 1 0 0 0 1 0 0 1]
                               (mapcat #(concat (string-bytes %) [0]) (:dwarf-dirs ctx)) [0]
@@ -708,7 +758,10 @@
     (directive! ctx (cons (symbol "asm" (str/replace (second f) #"^\." "")) (nnext f)))
   (let [h (name (first f)) args (rest f)
         cv (fn [e] (let [e (resolve-expr ctx e)] (or (const-value e @(:syms ctx)) (unsupported :expression (str "." h " " (pr-str e))))))
-        own (if-let [d (:directive *arch*)] (d ctx h args) :unhandled)]
+        ;; the format's directives first (DarwinAsmParser's, COFFAsmParser's; x86-objs: COFF's .reloc names), then the arch's,
+        ;; then the generic ones
+        own (if-let [d (:directive *fmt*)] (d ctx h args) :unhandled)
+        own (if (= own :unhandled) (if-let [d (:directive *arch*)] (d ctx h args) :unhandled) own)]
     (case (if (= own :unhandled) h "\u0000handled")
       "\u0000handled" own
       "text" (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
@@ -899,8 +952,11 @@
                 (and (:sub v) (later? (:sub v))) (- stretch))
               val)
         resolved (if pcrel
-                   (boolean (and (:add v) (nil? (:sub v)) oa (not= :abs (first oa)) (= (first oa) (:sec cm))
-                                 (= elf/STB_LOCAL (binding-of ctx (:add v))) (not= 10 (:type @(:add v)))))
+                   (if-let [f (:pcrel-resolved? *fmt*)]
+                     ;; the format's writer decides (MachObjectWriter's atoms, WinCOFFObjectWriter's functions; x86-objs)
+                     (boolean (and (:add v) (nil? (:sub v)) oa (not= :abs (first oa)) (f ctx v c)))
+                     (boolean (and (:add v) (nil? (:sub v)) oa (not= :abs (first oa)) (= (first oa) (:sec cm))
+                                   (= elf/STB_LOCAL (binding-of ctx (:add v))) (not= 10 (:type @(:add v))))))
                    (and (nil? (:add v)) (nil? (:sub v))))]
     [val resolved v]))
 
@@ -978,8 +1034,15 @@
                 foff (+ (long (:offset m)) (long off))
                 put! (fn [^long x reloc?] (binding [*fixup-pcrel* (boolean pcrel)] ((:put-fixup! *arch*) bs off size kind x reloc? (:spec v))))]
             (when (and (:add v) ((:tls-specs *arch*) (:spec v))) (swap! (:add v) assoc :type elf/STT_TLS))
-            (if resolved
+            (cond
+              resolved
               (put! val false)
+              ;; the format's recordRelocation (x86-objs: Mach-O's, COFF's): the relocation kept by the format, the field's
+              ;; fixed value written (applyFixup after maybeAddReloc)
+              (:record-reloc *fmt*)
+              (when-let [fixed ((:record-reloc *fmt*) ctx c fx v val)]
+                (put! (long fixed) true))
+              :else
               (let [add (:add v)
                     ;; a specifier over a difference (AArch64's `:lo12:a - b`) is not relocatable (MCSpecifierExpr's evaluation:
                     ;; LLVM's error); x86's `foo@PLT - .` is a specified symbol less another
@@ -1017,7 +1080,9 @@
           (catch arbace.lang.ExceptionInfo ex
             ;; a relaxed instruction's fixups have no place: MCAssembler::relaxInstruction encodes the fragment's opcode and
             ;; operands again, and the fragment keeps no MCInst location (queue 372: MC/X86's fixup-overflow-32, `<unknown>:0:`)
-            (let [d (ex-data ex) pos (if (:relaxed m) [:unknown] (or (:pos (meta fx)) (:pos m))) e (nth fx 2)]
+            ;; (x86-objs: an AT&T expression keeps its place through the relaxation, MCFixup::getLoc being the expression's;
+            ;; the Intel parser's expressions have none, X86AsmParser's IntelExprStateMachine)
+            (let [d (ex-data ex) pos (if (and (:relaxed m) (:intel m true)) [:unknown] (or (:pos (meta fx)) (:pos m))) e (nth fx 2)]
               (cond (:obj/error d) (report! ctx pos (:obj/error d) e)
                     (#{:expression :not-relocatable} (:obj/unsupported d)) (report! ctx pos "expected relocatable expression" e)
                     :else (throw ex))))))
@@ -1210,13 +1275,22 @@
   "expandMacro at a GNU target (not Darwin): a backslash and NAME a parameter's argument (a NAME no parameter has is kept),
   backslash-at the instantiations so far (`at`, nil when not enabled), backslash-plus the macro's own count, backslash-()
   nothing."
-  ^String [^String body params ^java.util.Map vals at ^long count]
+  ^String [^String body params ^java.util.Map vals at ^long count & [darwin]]
   (let [sb (StringBuilder.) n (.length body)]
     (loop [i 0]
       (if (>= i n)
         (str sb)
         (let [c (.charAt body i)]
-          (if (and (= c \\) (< (inc i) n))
+          (cond
+            ;; a Darwin macro without parameters (x86-objs: AsmParser::expandMacro's IsDarwin): `$$` a `$`, `$n` the number
+            ;; of arguments, `$0`..`$9` an argument
+            (and darwin (= c \$) (< (inc i) n) (or (#{\$ \n} (.charAt body (inc i))) (Character/isDigit (.charAt body (inc i)))))
+            (let [d (.charAt body (inc i))]
+              (cond (= d \$) (.append sb "$")
+                    (= d \n) (.append sb (str (count darwin)))
+                    :else (.append sb (str (nth darwin (- (int d) (int \0)) ""))))
+              (recur (+ i 2)))
+            (and (= c \\) (< (inc i) n))
             (let [d (.charAt body (inc i))]
               (cond
                 (and at (= d \@)) (do (.append sb (str at)) (recur (+ i 2)))
@@ -1226,7 +1300,7 @@
                             nm (subs body (inc i) j)]
                         (if (some #{nm} params) (.append sb (str (.get vals nm))) (.append sb (str "\\" nm)))
                         (recur j))))
-            (do (.append sb c) (recur (inc i)))))))))
+            :else (do (.append sb c) (recur (inc i)))))))))
 
 (defn- macro-params
   "A .macro's head: [NAME [{:name :default :req :vararg}...]], parameters separated by commas or blanks."
@@ -1290,9 +1364,11 @@
   (let [m (or (.get ^java.util.HashMap (:macros ctx) nm) (fail (str "unknown macro " nm)))
         ps (:params @m)
         args (split-args (or argt ""))
+        ;; a Darwin macro without parameters takes its arguments by position, `$0`.. (x86-objs)
+        darwin (when (and (= :macho (:id *fmt*)) (empty? ps)) (vec (map str/trim args)))
         ;; keyword arguments NAME=VALUE, the rest by position; a vararg takes the rest joined by commas
         vals (java.util.HashMap.)
-        _ (loop [as args k 0]
+        _ (loop [as (if darwin [] args) k 0]
             (when (seq as)
               (let [a (first as) [_ kn kv] (re-matches #"(?s)\s*([A-Za-z_.$][\w.$]*)\s*=(?!=)(.*)" a)]
                 (cond
@@ -1304,7 +1380,7 @@
       (when (:req p) (fail (str "missing value for required parameter '" (:name p) "' in macro '" nm "'")))
       (.put vals (:name p) (or (:default p) "")))
     (let [n @(:macro-n ctx)
-          text (expand-body (:body @m) (mapv :name ps) vals n (:count @m))]
+          text (expand-body (:body @m) (mapv :name ps) vals n (:count @m) darwin)]
       (swap! m update :count inc)
       (vswap! (:macro-n ctx) inc)
       (instantiate! ctx text))))
@@ -1361,13 +1437,16 @@
    (fn []
     (let [ctx-of (volatile! nil)]
     (try
-      (let [ctx (cond-> (new-ctx) large-eh (assoc :large-eh true))]
+      (let [ctx (cond-> (merge (new-ctx) (when-let [f (:state *fmt*)] (f))) large-eh (assoc :large-eh true))]
         (vreset! ctx-of ctx)
         (vreset! (:mode ctx) mode)
-        ;; initSections: .text, aligned to 4 by an empty code alignment
-        (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
-        (vreset! (:prev ctx) nil)
-        (align! ctx 4 0 1 nil true)
+        ;; initSections: .text, aligned to 4 by an empty code alignment (the format's: Mach-O's __TEXT,__text alone, COFF's
+        ;; .text, .data and .bss; x86-objs)
+        (if-let [f (:init! *fmt*)]
+          (f ctx)
+          (do (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
+              (vreset! (:prev ctx) nil)
+              (align! ctx 4 0 1 nil true)))
         ;; llvm-mc's --defsym NAME=VALUE: the symbol's value, set before the file (ARS49 (a): the error runs' `.ifdef ERR`)
         (doseq [[n v] defsym]
           (let [sym (symbol! ctx n)] (register! ctx n) (swap! sym assoc :var v) (vswap! (:syms ctx) assoc n v)))
@@ -1380,6 +1459,10 @@
         (when (seq @(:conds ctx)) (report! ctx nil "unmatched .ifs or .elses" nil))
         (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))
         (when-let [f (:finish *arch*)] (f ctx))
+        ;; the format's streamer's finishImpl (COFF's Win64 unwind tables; x86-objs)
+        (when-let [f (:finish! *fmt*)] (f ctx))
+        ;; the format's finishImpl before the layout (Mach-O's atoms; x86-objs)
+        (when-let [f (:before-layout *fmt*)] (f ctx))
         (layout! ctx)
         ;; MCAsmBackend::finishLayout (X86's padding of instructions into the alignments, queue 337), then layoutSection again
         (when-let [f (:finish-layout *arch*)] (when (f ctx) (doseq [sec (:sections ctx)] (layout-section! ctx sec))))
@@ -1387,6 +1470,8 @@
         (when-let [f (:after-layout *arch*)] (f ctx))
         (emit-frames! ctx)
         (emit-debug-line! ctx)
+        ;; the format's executePostLayoutBinding (Mach-O's section addresses; x86-objs)
+        (when-let [f (:post-layout *fmt*)] (f ctx))
         (let [relocs (apply-fixups! ctx)
               ;; MCAssembler's writeFragment for FT_Nops: a .nops's controlled length above the maximum NOP size (queue 337)
               _ (doseq [sec (:sections ctx) c (:chunks @sec) :let [m @c] :when (= :nops (:kind m))]
@@ -1403,7 +1488,11 @@
                           (report! ctx (:var-pos m) (str "Common symbol '" (:name @(:add v)) "' cannot be used in assignment expr") (:var m))
                           (and (:add v) (:sub v) (not (sym-offset ctx (:sub v) 0)))
                           (report! ctx (:var-pos m) (str "symbol '" (:name @(:sub v)) "' could not be evaluated in a subtraction expression") (:var m)))))
-              _ (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))
+              _ (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))]
+          ;; the format's writer (x86-objs: Mach-O's, COFF's): the object's bytes, or its errors (a fatal error's)
+          (if-let [w (:write *fmt*)]
+            (let [b (w ctx)] (if (bytes? b) {:relax-steps @(:relax-steps ctx) :bytes b} b))
+          (let [
               secs (vec (:sections ctx))
               sec-out (vec (for [s secs :let [m @s]]
                              (cond-> {:name (:name m) :type (:type m) :flags (:flags m) :align (:align m) :entsize (:entsize m)
@@ -1430,11 +1519,13 @@
           ;; a group's signature symbol keyed for the group's sh_info
           {:relax-steps @(:relax-steps ctx)
            :bytes (elf/write-object {:machine (:machine *arch*) :osabi 0 :sections sec-out
+                                     ;; an arch's ELF32 with REL relocations (i386's; x86-objs, AXS101)
+                                     :class (or (:elf-class *arch*) 64) :rel (boolean (:rel? *arch*))
                                      :symbols (mapv #(cond-> % true (assoc :key (:key %))) syms)
                                      ;; each STT_FILE before the local symbols registered after its .file (the first before all)
                                      :files (let [reg (into {} (map-indexed (fn [i n] [n i]) (:order ctx)))]
                                               (vec (for [[f pos] (:files ctx)]
-                                                     [f (count (filter #(< (long (reg (:key %) -1)) (long pos)) syms))])))})}))
+                                                     [f (count (filter #(< (long (reg (:key %) -1)) (long pos)) syms))])))})}))))
       (catch arbace.lang.ExceptionInfo ex
         (let [d (ex-data ex)
               ctx @ctx-of
@@ -1521,9 +1612,14 @@
   ([^String src r file]
   (let [named (fn [buf] (if buf ["<instantiation>" buf] [file src]))]
     (vec (mapcat (fn [{:keys [pos msg expr]}]
-                   (if (= pos [:unknown])
+                   (cond
+                     (= pos [:unknown])
                      ;; an error with no place (SMLoc()): a relaxed instruction's fixup (queue 372)
                      [(str "<unknown>:0: error: " msg)]
+                     ;; report_fatal_error's (x86-objs: MachObjectWriter's "data region not terminated")
+                     (= pos [:fatal])
+                     [(str "LLVM ERROR: " msg)]
+                     :else
                    (if-let [[st en buf notes] pos]
                      (let [[nm text] (named buf)]
                        (concat (diag-lines text st en nm "error" msg expr)
