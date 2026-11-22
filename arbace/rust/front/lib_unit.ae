@@ -363,11 +363,12 @@
 
 (defn callees-first
   "C6-4: the `#[inline(always)]` callees' defines in the order LLVM's AlwaysInliner meets them in rustc's module: rustc predefines a
-  codegen unit's items in items_in_deterministic_order (rustc_middle/src/mono.rs: a local item by its definition's span), and a
-  helper is mostly defined before the function that calls it, so here each callee before the callees that call it (a post-order
-  over their calls, the discovery order between unrelated ones): NonNull::as_ptr and cast_const inlined into as_ref first, then
-  as_ref into Location::file, which leaves the pair as_ref rebuilds from its own loads (std's IR), not the caller's halves"
-  [defs always]
+  codegen unit's items in items_in_deterministic_order (rustc 1.99.1's compiler/rustc_middle/src/mono.rs: by symbol name, the
+  definition's span only with -Z codegen-source-order; rust-c6c read it there), so with SYMBOL-ORDER? by their symbols; without,
+  each callee before the callees that call it (a post-order over their calls, the discovery order between unrelated ones: the
+  stand-in rust-c6b took for the spans, which made NonNull::as_ptr and cast_const inlined into as_ref first, then as_ref into
+  Location::file, as the symbols' order does too)"
+  [defs always & [symbol-order?]]
   (let [by (into {} (map (juxt second identity) defs))
         out (volatile! []) seen (volatile! #{})]
     (letfn [(visit [sym]
@@ -376,7 +377,13 @@
                 (doseq [c (sort-by str (filter #(and (contains? always %) (by %)) (inl/callees (by sym))))] (visit c))
                 (vswap! out conj (by sym))))]
       (doseq [d defs] (visit (second d))))
-    @out))
+    ;; rust-c6c: rustc 1.99.1's items_in_deterministic_order (compiler/rustc_middle/src/mono.rs) sorts a codegen unit's items by
+    ;; their symbol names unless -Z codegen-source-order (rust-lang/rust#145358), so LLVM's AlwaysInliner meets the callees in
+    ;; their symbols' order, local or not (std's trim_right, core's memrchr_aligned and possibly_round); SYMBOL-ORDER? false: the
+    ;; order above (callees first, the definition spans' stand-in before)
+    (if symbol-order?
+      (vec (sort-by #(name (second %)) @out))
+      @out)))
 
 (defn -main [cmd & args]
   (case cmd
@@ -417,8 +424,12 @@
                                                                     (map? x) (doseq [y (vals x)] (walk y))))]
                                               (doseq [b (concat (keep second (:bodies m)) inl-bodies)] (walk b)))
                                             @acc)
+                                 ;; rust-c6c: the callees in their symbols' order (rustc 1.99.1's codegen unit order; LIB_UNIT_SYMBOL_ORDER=0:
+                                 ;; callees first, as before)
                                  module (binding [inl/*nounwind?* (fn [sym] (or (str/starts-with? (name sym) "llvm.") (false? (get nounwind (name sym)))))]
-                                          (inl/inline-module (concat (keep #(nth % 2) ours) (callees-first inl-defs always)) always))
+                                          (inl/inline-module (concat (keep #(nth % 2) ours)
+                                                                     (callees-first inl-defs always (not= "0" (System/getenv "LIB_UNIT_SYMBOL_ORDER"))))
+                                                             always))
                                  by (into {} (map (juxt second identity) module))]
                              (vec (for [[d sym f why :as o] ours]
                                     (cond (nil? f) o
