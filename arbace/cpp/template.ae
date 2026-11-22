@@ -1070,6 +1070,28 @@
                    (and (< (count tps) (count aps)) (not (sema/new-ttp-matching?)))
                    (some #(nil? (:default %)) (subvec aps (count tps)))))))))
 
+(defn- cx-class-targ
+  "Queue 518 (the checker): a non-type template argument naming a variable of class type, a converted constant expression of
+  the parameter's type `pt` ([temp.arg.nontype]/1, [expr.const]/12): the variable converted by its conversion function and
+  evaluated (its initializer analyzed first when not yet, global-init's), or a refusal: no conversion function, an ill-formed
+  initializer, a value no constant (cpp0x/pr78765.C's `ValueTypeInfo<var>` of `static constexpr ValueType var = 0;`, which had
+  read the initializer's 0 as the argument). Nil when `f` names no such variable."
+  [scope f pt]
+  (when (and (sema/checking?) (symbol? f) (nil? (namespace f)) (map? pt))
+    (when-let [e (first (filter #(= :var (:e %)) (sema/lookup scope (name f))))]
+      (let [vid (:id e) v (sema/var* vid)]
+        (when (and (map? (:ty v)) (abi/class? (abi/unq (:ty v))))
+          (when (and (nil? (:ginit v)) (:init v))
+            (let [i (try (sema/global-init vid)
+                         (catch arbace.lang.ExceptionInfo _
+                           (fail :template "not a constant: " (name f) " (its initializer is ill-formed)")))]
+              (#'sema/upd-var! vid assoc :ginit i)))
+          (let [x (sema/user-conv {:scope scope} {:op :var :id vid :ty (:ty v) :cat :lv} pt false)
+                c (sema/ce-try x true)]
+            (if (and (map? c) (= :int (:op c)) (number? (:v c)))
+              (:v c)
+              (fail :template "not a constant: " (name f) " (an object of class type converted)"))))))))
+
 (defn resolve-arg
   "A template argument's form for the parameter `p` in `scope`."
   [scope p f & [pscope]]
@@ -1093,7 +1115,7 @@
     (let [pt (param-type (or pscope scope) p)]
       (if (or (abi/ptr? pt) (abi/ref? pt))
         (decl-arg scope pt f)
-        (value-arg (const-form scope f) (:name p) pt)))))
+        (value-arg (if-some [c (cx-class-targ scope f pt)] c (const-form scope f)) (:name p) pt)))))
 
 (defn- node-arg
   "A TemplateArgument node's argument for the parameter `p` (an explicit specialization's)."

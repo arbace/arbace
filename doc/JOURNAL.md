@@ -17432,6 +17432,22 @@ unpack_sums_6), `:no-reference` 31 -> 28 (bspt, fulsom, pic pass). The eval cell
 139 / 0 / 0; Haskell completeness 0.986786 -> 0.991279 (99.1 floored; 0.9986 without by design). bin/reap --record, bin/crops-score
 --record, --judge --strict, bin/records-check, bin/hsi divergences, bin/hsi own-verdicts --check, bin/hsi golden --oracle --control:
 0 problems. Light: no gate.
+
+## 2026-11-22: the user's decisions on the burst's third questions (C's 3 rows, Haskell's GHC-rejected, eff and hartel, Haskell's 3)
+
+Asked by the main session after 522's, hs-speed's and hs-pkgs' reports (about 10:40 UTC; the second questions' entry above says "09:30 UTC",
+which was 07:30 UTC: the session's clock notes ran two hours ahead that morning); answered by the user:
+- C's 3 rows left after soft-float: the 2 inline-assembly programs (x87 instructions; argument registers) are built, the asm assembled by
+  repr/asm and run on x86i as Haskell's CallConv runs its .s; union-bitfield, a test of undefined behaviour, is n/a. Alternatives not taken:
+  all 3 n/a; all 3 by design.
+- Haskell's 6 programs GHC 9.14.1 itself rejects with no package missing (cfd and dcbm: GpH's old Parallel; threads004: forkOnIO; linsolv:
+  DatatypeContexts; warshall: rnf no longer exported; matmult: foldl' ambiguous since base 4.20; hs-pkgs-1): n/a. Alternatives not taken:
+  must-fail compiles; by design.
+- Haskell's eff and hartel (nofib directories of 7 and 14 sub-programs, no main; hs-pkgs-2): the 21 sub-programs are added to the corpus as
+  programs, GHC's runs recorded, hsi judged on them. Alternatives not taken: n/a; by design.
+- Haskell's fannkuch-redux and minimax (GHC's own -O0 run does not finish within the reference's 10 s; HES101) and T21305 (writeByteArray#
+  past a 3-element array, undefined behaviour; HES96): n/a. Alternatives not taken: an optimizer for the own libraries' STG (HES100 (b)) so
+  the two run like nofib's -O; by design.
 ## 2026-11-22: hs-pkgs-1122: Haskell's no-reference programs built (the Hackage packages vendored, GHC's runs recorded, five packages own)
 
 Branch `hs-pkgs-1122` from mac/next `a8c6d3137`, by an agent of the main host (the coordinator's brief after the user's decision of
