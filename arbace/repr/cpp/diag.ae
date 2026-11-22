@@ -4517,6 +4517,52 @@
 
 (swap! checks conj same-name-members)
 
+;; [basic.start.main]/2-3: the global namespace's main is a function returning int, not a template, not static, inline or constexpr,
+;; and no variable of the global namespace is named main; GCC's -Wmain under -pedantic-errors (its parameters: none, or int and
+;; char**, GNU's third char** too). GCC's "'::main' must return 'int'", "cannot declare '::main' to be a template", "cannot declare
+;; '::main' to be a global variable", "first argument of 'int main(char)' should be 'int'", at the declaration.
+
+(defn main-rules
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        pe (some #{"-pedantic-errors"} (:args u))
+        report! (fn [n msg] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :main :msg msg}))))
+        fn-main (fn [n]
+                  (let [qt (str (get-in n [:type :qualType]))
+                        i (.indexOf qt "(")
+                        ret (when (pos? i) (str/trim (subs qt 0 i)))
+                        ps (filter #(= "ParmVarDecl" (:kind %)) (:inner n))]
+                    (cond
+                      (and ret (not (re-find #"^(auto|decltype)" ret)) (not (re-matches #"(signed )?int|signed" ret)))
+                      (report! (dissoc n :loc) "'::main' must return 'int'")
+                      (= "static" (:storageClass n)) (report! n "cannot declare '::main' to be static")
+                      (:inline n) (report! n "cannot declare '::main' to be inline")
+                      (:constexpr n) (report! n "cannot declare '::main' to be 'constexpr'")
+                      (and pe (seq ps) (not (re-matches #"(const )?int|int const" (str (get-in (first ps) [:type :qualType])))))
+                      (report! n "first argument of 'main' should be 'int'")
+                      (and pe (not (#{0 2 3} (count ps)))) (report! n "'main' takes only zero or two arguments")
+                      :else nil)))]
+    (letfn [(top [xs in-class]
+              (doseq [x xs :when (map? x)]
+                (case (:kind x)
+                  "FunctionDecl" (when (and (= "main" (:name x)) (not in-class)) (fn-main x))
+                  "VarDecl" (when (and (= "main" (:name x)) (not in-class) (not= "extern" (:storageClass x)))
+                              (report! x "cannot declare '::main' to be a global variable"))
+                  "FunctionTemplateDecl" (when (some #(and (= "FunctionDecl" (:kind %)) (= "main" (:name %))) (:inner x))
+                                           (report! x "cannot declare '::main' to be a template"))
+                  "LinkageSpecDecl" (top (:inner x) in-class)
+                  ("CXXRecordDecl" "ClassTemplateDecl") (top (:inner x) true)
+                  ;; (a friend declaration's main is the global namespace's)
+                  "FriendDecl" (doseq [y (:inner x) :when (and (= "FunctionTemplateDecl" (:kind y))
+                                                                (some #(and (= "FunctionDecl" (:kind %)) (= "main" (:name %)) (not (str/includes? (str (:name %)) "::"))) (:inner y)))]
+                                 (report! x "cannot declare '::main' to be a template"))
+                  nil)))]
+      (top (:nodes u) false))
+    (vec (distinct out))))
+
+(swap! checks conj main-rules)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
