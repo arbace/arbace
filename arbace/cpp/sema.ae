@@ -4391,6 +4391,39 @@
                   (and (not= [fc fv] [tc tv]) (pos? j) (not all-const)) true
                   :else (recur (inc j) (and all-const tc)))))))))
 
+
+(declare cx-tyname)
+
+(defn- cx-named-cast!
+  "cpp-diag-b (2026-11-22), the checker: the conversions reinterpret_cast and const_cast make to a type that is no reference,
+  [expr.reinterpret.cast]/2-10 (no class, array or floating target; an integer from a pointer, its own type or std::nullptr_t; a
+  pointer from a pointer, an integer or an enumeration, its constness kept; a pointer to member from one of the same kind) and
+  [expr.const.cast]/3-5 (pointers or pointers to members of similar types alone, else the operand's own type): GCC's \"invalid cast
+  from type 'S' to type 'const S'\", \"invalid 'const_cast' from type ...\"."
+  [kind t e]
+  (when (and (checking?) (#{"CXXReinterpretCastExpr" "CXXConstCastExpr"} kind) (not (abi/ref? t)) (some? (:ty e)))
+    (let [tu (abi/unq t)
+          f0 (abi/unq (:ty e))
+          f (cond (abi/arr? f0) (abi/ptr (:of f0)) (abi/fn? f0) (abi/ptr f0) :else f0)
+          same (= (cx-shape tu) (cx-shape f))
+          sure (fn [x] (or (cx-sure-scalar? x) (abi/class? x) (and (abi/ptr? x) (abi/fn? (abi/unq (:to x))))))]
+      (when (and (sure tu) (sure f))
+        (if (= kind "CXXConstCastExpr")
+          (when-not (or (and (or (abi/ptr? tu) (abi/mptr? tu)) (= (cx-shape tu) (cx-shape f)))
+                        (= tu f))
+            (fail :named-cast "invalid 'const_cast' from type " (cx-tyname f) " to type " (cx-tyname tu)))
+          (when (cond
+                  (abi/class? tu) true
+                  (abi/floating? tu) true
+                  (abi/integral? tu) (not (or (abi/ptr? f) (= tu f) (= :nullptr (abi/bn f))))
+                  (abi/enum? tu) (not= tu f)
+                  (abi/ptr? tu) (or (not (or (abi/ptr? f) (abi/integral? f) (abi/enum? f)))
+                                    (and (abi/ptr? f) (not (abi/fn? (abi/unq (:to f)))) (not (abi/fn? (abi/unq (:to tu))))
+                                         (or (and (:c (:to f)) (not (:c (:to tu)))) (and (:v (:to f)) (not (:v (:to tu)))))))
+                  (abi/mptr? tu) (not (and (abi/mptr? f) (= (abi/fn? (:to tu)) (abi/fn? (:to f)))))
+                  :else false)
+            (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu))))))))
+
 (defn- cx-bad-ptr-conv?
   "Whether the prvalue of pointer type `from` surely does not convert implicitly to the pointer type `to` ([conv.ptr]/2-3:
   to cv void* and to a base class's pointer; [conv.qual]: the cv-qualifiers added only, judged at the first level, the
@@ -8742,7 +8775,9 @@
         ;; the one element converted; <concepts>' default_initializable<char*>, `requires { _Tp{}; ... }`, had been false)
         (and (= "CXXFunctionalCastExpr" (:kind n)) (= "InitListExpr" (:kind k)) (not (abi/ref? t)))
         (scalar-list-cast ctx t (analyze-args ctx (kids k)))
-        :else (let [r (cast-expr ctx t (analyze ctx k) true)]
+        :else (let [a (analyze ctx k)
+                    _ (cx-named-cast! (:kind n) t a)
+                    r (cast-expr ctx t a true)]
                 ;; (h-cpp-consteval, the checker: a reinterpret_cast's own conversion, marked for the constant evaluation)
                 (cond
                   (and (checking?) (= "CXXReinterpretCastExpr" (:kind n)) (#{:cast :reinterpret-lv} (:op r))
