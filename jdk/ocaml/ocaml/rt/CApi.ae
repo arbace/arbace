@@ -11,7 +11,7 @@
 ;;
 ;; The session: the values that crossed in an outermost call, by id (the order both sides gave them) and back; a C custom block the
 ;; C allocated is one Custom by its address (held weakly since queue 523: its finalize runs once the Custom is unreachable, at an
-;; asked collection, collected).
+;; asked collection, collected); Marshal writes and reads one through the C's operations (serialize, deserialize: queue 527).
 
 (in-ns 'ocaml.rt)
 
@@ -293,6 +293,51 @@
             (recur (unchecked-inc-int i))))
         (.clear cbDead)
         (CApi/exchange o))))
+
+  ;; ---- (queue 527) Marshal of the C's custom blocks (extern_custom, intern's CODE_CUSTOM_LEN): the operations' serialize and
+  ;; deserialize run by the server ('S', 'D'), as ocamlopt's runtime calls them; at any depth (a callback may marshal), the reply's
+  ;; nodes in the call's session or, outside a call, one of its own
+
+  ;; the C custom block c's operations' serialize: Object/1 [its bytes, Long the 32-bit size, Long the 64-bit size], nil when its
+  ;; operations have none
+  (method ^:public ^:static serialize [^Custom c]
+    (if (not (CApi/open))
+      nil
+      (let [top (== depth 0)]
+        (when top (set! nodes (ArrayList.)) (set! ids (IdentityHashMap.)))
+        (try
+          (let [o (ByteArrayOutputStream.)]
+            (CApi/u8 o 83)
+            (CApi/u64 o (.-addr (cast CBlock (.-v c))))
+            (let [rd (CApi/exchange o)]
+              (switch (.-op rd)
+                78 nil
+                82 (let [b (.rdBytes rd (unchecked-int (.rd32 rd))) s32 (.rd64 rd) s64 (.rd64 rd)]
+                     (new Object/1 [b (Long/valueOf s32) (Long/valueOf s64)]))
+                (CApi/serve rd "caml_serialize" false))))
+          (finally (when top (set! nodes nil) (set! ids nil)))))))
+
+  ;; a custom block of the operations the C registered under the identifier name, deserialized from src's bytes [pos, end) (expected
+  ;; the size recorded): Object/1 [the block, Long the size deserialize returned, Long the bytes it read], nil when none is registered
+  (method ^:public ^:static deserialize [^String name ^byte/1 src ^int pos ^int end ^long expected]
+    (if (not (CApi/open))
+      nil
+      (let [top (== depth 0)]
+        (when top (set! nodes (ArrayList.)) (set! ids (IdentityHashMap.)))
+        (try
+          (let [o (ByteArrayOutputStream.)]
+            (CApi/u8 o 68)
+            (CApi/bytes o (.getBytes name java.nio.charset.StandardCharsets/ISO_8859_1))
+            (CApi/u32 o (long (unchecked-subtract-int end pos)))
+            (.write o src pos (unchecked-subtract-int end pos))
+            (CApi/u64 o expected)
+            (let [rd (CApi/exchange o)]
+              (switch (.-op rd)
+                78 nil
+                82 (let [v (.get rd) size (.rd64 rd) used (.rd64 rd)]
+                     (new Object/1 [v (Long/valueOf size) (Long/valueOf used)]))
+                (CApi/serve rd "caml_deserialize" false))))
+          (finally (when top (set! nodes nil) (set! ids nil)))))))
 
   ;; ---- the call
 
