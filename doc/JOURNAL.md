@@ -17798,3 +17798,17 @@ and fixed), the other directories' 1,338 own passes run without a record (all pa
 0 problems, records-check 0. Own passes of the directories 690 -> 733; C++ read 5,802 / 0 / 519 (210 n/a); completeness 0.972734 (97),
 independence 0.961348 (96). Alternatives not taken: working around the function-template units' refusal in sema.ae's namespace loop
 (queue 526's ground, merged when it lands).
+
+## 2026-11-22: the user's decisions on py-capi's and c-tails' questions
+
+Asked by the main session after py-capi's and c-tails' reports (about 13:40 UTC); answered by the user:
+- Python: the rows filed under `:testcapi` that skip or fail to import because `_testinternalcapi` is absent (about 757: test_peepholer,
+  test_embed's InitConfigTests, test_context's HamtTest, test_time's TestCPyTime, test_type_cache, test_interpreters, test_optimizer, ...)
+  follow `:testinternalcapi`'s n/a of this morning, keyed on the verdict (a skip or an import error naming `_testinternalcapi`), not a
+  list. Alternatives not taken: port `_testinternalcapi`'s pure-function parts; keep them deferred.
+- Python: test_descr's 4 xxsubtype tests (skipped on `check_impl_detail()`, CPython-only) and about 40 test_capi rows that check what
+  pyi's object handles do not model (reference counts, `is` against bytes/str singletons, release-build-only invalid strings, C threads,
+  the collector's internals, struct layouts) are n/a. Alternatives not taken: the C API rows a by-design class; both kept deferred.
+- C: sqlite3.c and tcc's 13.S at read (CT1), wrong only where cc is wrong and equal to tools/ppref's reference at check time, count as
+  passes, ppref's agreement as the token check's own verdict (C++'s read rule), their tree rows following. Alternatives not taken: n/a;
+  by design.
