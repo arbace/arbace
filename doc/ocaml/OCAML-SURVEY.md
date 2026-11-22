@@ -4688,3 +4688,25 @@ OCaml's by-design rows"), and what this task built of the answers:
 - **uutf's examples and utftrip** (528-15): test/ocaml/opam-programs.tsv takes a seventh column, the libraries (unix);
   examples is a load program (load.reference), utftrip runs `-g utftrip.ml` with cmdliner's units, its verdict a reviewed golden
   file (golden.edn: "UTF-8\n" from uutf's r_encoding). Both pass at eval and at the light AOT level.
+
+## As built: queue 533 (2026-11-23, the VM): -w in the native typer, max_arity's compiler output at the light AOT level
+
+DECISION 528-R1 (a): the native typer takes `-w SPEC` (arbace.repr.ocaml.typer's lambda verb). SPEC applies over ocamlc's default set
+as Warnings.parse_options does (arbace.repr.ocaml.native's parse-flags; several specs joined by commas). The warnings it makes active
+are printed on stderr after the unit is typed, in ocamlc's batch format (arbace.repr.ocaml.report's warning-report, a blank line
+between reports). A warning that SPEC makes an error (`@N`) is printed as one and ends the run with status 2. Without `-w`, nothing is
+printed, so every other caller's stderr stays as it was.
+- **Which warnings.** The reader's warnings (comment-start, comment-not-end, illegal-backslash, unexpected-docstring, through
+  `lex/*warn*`) and the typer's first warning, 5 (ignored-partial-application). arbace.repr.ocaml.typer.typecore ports
+  Typecore.check_partial_application's warning 5 and its four callers: type_let's bindings to `_`, an exception or an or-pattern of
+  them; type_statement; the `ignore` special case; a match whose cases all need the check. It also ports the delayed check for a
+  type not yet known (add_delayed_check, run after the unit's typing), and a constrained expression's exemption (exp_extra's
+  Texp_constraint, a metadata mark). Warning 10 (non-unit-statement) is not ported.
+- **The runner.** header.awk's ocamlopt-alone mode at the light AOT level takes check-ocamlopt.byte-output and adds `@compout=1` to
+  the row's environment, plus `@w=SPEC,...` with the flags' -w specs. bin/oi's o2j_dump passes `-w` to the typer; o2j_env_runs judges
+  the typer's stderr (D/typer.err) against TEST.compilers.reference (no file: no output), as ocamltest's check does. Output that differs
+  is appended to the row's output, so the row fails. On the oracle's path (`--ocdump`; ocdump reports no warnings) the row is a dump
+  error, "the compiler's output (check-ocamlopt.byte-output) is the native typer's", matched by `:ocamlopt-only`. The compiled level
+  keeps the class.
+- **Result.** syntactic-arity/max_arity passes at the light AOT level: its output equals max_arity.reference, and the typer's
+  warning equals max_arity.compilers.reference byte for byte.

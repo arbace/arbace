@@ -224,11 +224,14 @@ END {
   # ocamlopt-alone mode (queue 528, DECISION 528-3 (a)): a header that is ocamltest's native run alone (flags = "..."; setup-ocamlopt.byte-build-env;
   # ocamlopt.byte; run; check-program-output, no bytecode alternative: the syntactic-arity tests) runs at the AOT levels, judged as
   # ocamlopt's run is, as their program (oi's level keeps the class, n/a by 528-2 (a)); with check-ocamlopt.byte-output (the compiler's
-  # output judged: max_arity's warning 5) it keeps the class, since no AOT level judges a compiler's output yet
-  opmode = 0
+  # output judged: max_arity's warning 5) it keeps the class at the compiled level; at the light level (queue 533, DECISION 528-R1
+  # (a)) the compiler's output is the native typer's warnings (@compout=1, the flags' -w specs @w=SPEC,...: bin/oi's typer runs with
+  # -w), judged against TEST.compilers.reference
+  opmode = 0; opout = 0; wspec = ""
   if (aot >= 1 && !hasbuild && hasoptbuild) {
     opmode = 1
     for (j = 1; j <= m; j++) { s = trim(st[j]); if (s == "") continue
+      if (s == "check-ocamlopt.byte-output" && aot == 1) { opout = 1; continue }
       if (s !~ /^(flags *= *"[^"]*"|setup-ocamlopt\.byte-build-env|ocamlopt\.byte|run|check-program-output)$/) opmode = 0 }
   }
   psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
@@ -375,12 +378,13 @@ END {
         c = split(val, fl, " ")
         for (q = 1; q <= c; q++) {
           f = fl[q]
-          if (f == "-w" || f == "-warn-error") { q++; continue }
+          if (f == "-w" || f == "-warn-error") { if (f == "-w") wspec = wspec (wspec == "" ? "" : ",") fl[q + 1]; q++; continue }
           # -g (OC217 (a)): oi's level keeps it, the typer's debugging events its backtraces read; the AOT levels have no
           # backtraces yet (their class)
           # -g at oi's level and at the light level (queue 370: o2j's shadow stack, Bt), not yet the compiled level
           if (f == "-g") { if (aot != 2) flags = flags " -g"; continue }
-          if (f ~ /^-w[+-]/ || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
+          if (f ~ /^-w[+-]/) { wspec = wspec (wspec == "" ? "" : ",") substr(f, 3); continue }
+          if (f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
@@ -469,7 +473,7 @@ END {
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
-    if (opmode && (s == "setup-ocamlopt.byte-build-env" || s == "ocamlopt.byte" || s == "run" || s == "check-program-output")) continue
+    if (opmode && (s == "setup-ocamlopt.byte-build-env" || s == "ocamlopt.byte" || s == "run" || s == "check-program-output" || (opout && s == "check-ocamlopt.byte-output"))) continue
     # instrumented-runtime (queue 516): the pinned host has libcamlruni.a, so ocamltest runs the test; oi's level takes it
     if (s == "instrumented-runtime" && aot == 0) continue
     if (s == "bytecode") sawbyte = 1
@@ -477,6 +481,7 @@ END {
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
     cls(s)
   }
+  if (opmode && opout) env = env " @compout=1" (wspec == "" ? "" : " @w=" wspec)
   if (dlmode) {
     if (!drun) cls("")
     env = env " @dyn=" dsteps " @dynmain=" dmain (dcopy == "" ? "" : " @dyncopy=" dcopy)
