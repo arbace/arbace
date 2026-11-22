@@ -3670,7 +3670,71 @@
                       (:inner f) nil))))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options]))
+;; An atomic constraint's satisfaction changing (cpp-gnu, 2026-11-22; [temp.constr.atomic]/3: "If, at different points in the program,
+;; the satisfaction result is different for identical atomic constraints and template arguments, the program is ill-formed, no
+;; diagnostic required" -- GCC diagnoses it, keeping each satisfaction result it computed): a concept whose atomic constraint needs the
+;; class it is checked for complete (a nested type, sizeof, a member function's deduced return type) evaluated for a class X at a
+;; namespace-scope static_assert before X is complete -- declared and not yet defined, or a member function of deduced return type not
+;; yet defined -- and again after: "satisfaction value of atomic constraint ... changed from 'false' to 'true'", at the atomic
+;; constraint (the concept's own, or that of the concept its definition names), and the later static_assert, evaluated with the result
+;; kept, fails ("static assertion failed"), once. The evaluations: a concept-id C<X>, or a call f<X>() of a function template one of
+;; whose overloads constrains its parameter by C (cpp2a/concepts-complete1.C to -complete4.C).
+
+(defn satisfaction-changes
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        off (fn [n] (get-in n [:range :begin :offset]))
+        report! (fn [o msg] (when o (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :satisfaction :msg msg}))))
+        concepts (into {} (for [n (:nodes u) :when (and (= "ConceptDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))
+        constrained (let [m (java.util.HashMap.)]
+                      (doseq [t (:nodes u) :when (= "FunctionTemplateDecl" (:kind t))
+                              p (:inner t) :when (= "TemplateTypeParmDecl" (:kind p))
+                              c (:_tc p) :when (contains? concepts c)]
+                        (.put m (:name t) (conj (or (.get m (:name t)) #{}) c)))
+                      m)
+        ;; the atomic constraint's place: a concept-id definition's concept's
+        atom-of (fn atom-of [c seen]
+                  (let [ce (:constraintExpr c)]
+                    (if (and (#{"ConceptSpecializationExpr" "DeclRefExpr"} (:kind ce))
+                             (contains? concepts (get-in ce [:referencedDecl :name])) (not (contains? seen (:name c))))
+                      (atom-of (get concepts (get-in ce [:referencedDecl :name])) (conj seen (:name c)))
+                      c)))
+        needs-complete? (fn [c] (let [t (pr-str (:constraintExpr (atom-of c #{})))]
+                                  (boolean (or (re-find #"TypeRequirement" t) (re-find #"\"sizeof\"" t) (re-find #"MemberExpr" t)
+                                               (re-find #":qualifier \[" t) (re-find #"::" t)))))
+        ;; each class's completion: its definition's offset, or a later out-of-class definition of a member function of deduced type
+        complete-at (into {} (for [r (:nodes u) :when (and (= "CXXRecordDecl" (:kind r)) (:completeDefinition r) (:name r))
+                                   :let [ro (off r)
+                                         fwd (some #(and (= "CXXRecordDecl" (:kind %)) (= (:name r) (:name %)) (not (:completeDefinition %)) (< (long (off %)) (long ro))) (:nodes u))
+                                         deduced (set (keep #(when (and (= "CXXMethodDecl" (:kind %)) (re-find #"^auto\b" (str (get-in % [:type :qualType])))) (:name %)) (:inner r)))
+                                         late (when (seq deduced)
+                                                (some #(when (and (= "CXXMethodDecl" (:kind %)) (contains? deduced (:name %)) (> (long (or (off %) 0)) (long ro))) (off %)) (:nodes u)))]
+                                   :when (or fwd late)]
+                               [(:name r) [(if late ro (some #(when (and (= "CXXRecordDecl" (:kind %)) (= (:name r) (:name %)) (not (:completeDefinition %))) (off %)) (:nodes u))) (or late ro)]]))
+        evals (fn [sa] (let [acc (java.util.ArrayList.)]
+                         (walk-nodes (fn [d _] (when (and (= "DeclRefExpr" (:kind d)) (= 1 (count (:explicitTemplateArgs d))))
+                                                 (let [nm (get-in d [:referencedDecl :name]) x (str/trim (first (:explicitTemplateArgs d)))]
+                                                   (cond (contains? concepts nm) (.add acc [nm x])
+                                                         (.get constrained nm) (doseq [c (.get constrained nm)] (.add acc [c x]))
+                                                         :else nil))))
+                                     (:inner sa) nil)
+                         acc))
+        before (java.util.HashSet.) reported (java.util.HashSet.)]
+    (doseq [sa (sort-by #(long (or (off %) 0)) (filter #(= "StaticAssertDecl" (:kind %)) (:nodes u)))
+            :let [o (off sa)]
+            :when o
+            [c x] (distinct (evals sa))
+            :let [[decl-at done-at] (get complete-at x)]
+            :when (and decl-at (needs-complete? (get concepts c)))]
+      (cond
+        (and (> (long o) (long decl-at)) (< (long o) (long done-at))) (.add before [c x])
+        (and (> (long o) (long done-at)) (.contains before [c x]) (.add reported [c x]))
+        (do (report! (let [a (atom-of (get concepts c) #{})] (or (off (:constraintExpr a)) (off a))) "satisfaction value of atomic constraint changed from 'false' to 'true'")
+            (report! o "static assertion failed"))
+        :else nil))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
