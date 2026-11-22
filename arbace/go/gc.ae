@@ -1,0 +1,283 @@
+(ns arbace.go.gc
+  "gc's compiler in the executable (doc/go/GOI-DESIGN-REVIEW.md, Proposed 1 (b), the user's decision of
+  2026-11-22; doc/go/GOI-SPEC.md, \"Since v1: gc in the executable\"): cmd/compile of TamaGo's go1.27.1,
+  from tamago/cmd's forms, compiled into the program, so that goi's errorcheck runs gc's own passes
+  (liveness, write barriers, the SSA back end's passes and their -d debug output, the stack frame's
+  size) for the programs whose flags or errors need them.
+
+  The program cannot import cmd/compile's packages (cmd's internal packages, and the standard
+  library's internal ones they import, are not importable from the module arbace), so they are
+  held as a renamed copy, go/arbace/repr/go/internal/gc/ (copy-texts; bin/generated-check keeps it
+  tamago/cmd's and tamago/goroot's: -main's generate), as gc's syntax is held as
+  arbace/repr/go/internal/syntax (GP7), whose copy it shares; under go/arbace/repr/ because the
+  table's generator reads the program's packages there from go/ and j2g copies that tree into the
+  program (arbace.go.table/program-path?):
+
+    cmd/compile/internal/syntax   arbace/repr/go/internal/syntax (that copy, shared)
+    cmd/compile/internal/X        arbace/repr/go/internal/gc/compile/X
+    cmd/internal/X                arbace/repr/go/internal/gc/cmd/X
+    cmd/vendor/golang.org/x/X     arbace/repr/go/internal/gc/x/X (golang.org/x/X as cmd imports it;
+                                  an import path holding a vendor element is refused by go build)
+    internal/X (the standard      arbace/repr/go/internal/gc/std/X
+    library's, those the copy
+    imports)
+
+  every package of cmd/compile's closure for the program's configurations (linux and tamago, amd64
+  and arm64: tamago/cmd's forms are one tree for them), its namespace and import path renamed and
+  its imports' paths renamed, nothing else changed (each file's lines kept), but:
+  - :other-files dropped (ssa's and obj/arm64's test assembly; internal/abi's stub.s), and with it
+    internal/abi's funcpc.go, whose two functions, FuncPCABI0 and FuncPCABIInternal, are gc's
+    intrinsics of the runtime with no body (gc's copy names them as strings, never calls them);
+  - the standard library's files whose forms differ by configuration (tamago/goroot/arch/ARCH:
+    internal/goarch's goarch.go, internal/buildcfg's zbootstrap.go) taken from amd64's with the :val
+    annotations that differ, or that follow runtime.GOOS or runtime.GOARCH, removed, and their
+    package files without :positions (goi's checker computes the values for each configuration:
+    an annotation disagreeing is an error, and so is one missing from a package of converted forms,
+    which :positions marks).
+
+  The driver, arbace/repr/go/gccompile (go/arbace/repr/go/gccompile.ae, hand-written Go forms, listed
+  in goi's table), is cmd/compile's main: compile runs it with gc's command line in this process,
+  which gc ends (os.Exit) with its status; bin/goi's check_err runs it as arbace -m arbace.go.gc
+  FORMS ARG... (-main): the program's forms of mode :full printed back to their text in the working directory,
+  then compiled by gc with the test's flags, gc's output judged as gc's reference is."
+  (:require [arbace.string :as str])
+  (:import [java.io File]))
+
+(def copy-root "The renamed copy's import path prefix." "arbace/repr/go/internal/gc")
+
+(def ^:private syntax-copy "gc's syntax's renamed copy (arbace.repr.go.syntax)." "arbace/repr/go/internal/syntax")
+
+(def ^:private driver-path "arbace/repr/go/gccompile")
+
+(defn renamed
+  "The renamed copy's import path of path, an import path of cmd/compile's closure (as a forms
+  file's :path or an import names it), or nil when path is not renamed (a public package of the
+  standard library)."
+  [^String p]
+  (cond
+    (= p "cmd/compile/internal/syntax") syntax-copy
+    (str/starts-with? p "cmd/compile/internal/") (str copy-root "/compile/" (subs p (count "cmd/compile/internal/")))
+    (str/starts-with? p "cmd/internal/") (str copy-root "/cmd/" (subs p (count "cmd/internal/")))
+    (str/starts-with? p "cmd/vendor/golang.org/x/") (str copy-root "/x/" (subs p (count "cmd/vendor/golang.org/x/")))
+    (str/starts-with? p "golang.org/x/") (str copy-root "/x/" (subs p (count "golang.org/x/")))
+    (str/starts-with? p "internal/") (str copy-root "/std/" (subs p (count "internal/")))))
+
+(defn- path->ns ^String [^String path]
+  (str "go." (str/join "." (map #(str/replace % #"[.-]" "_") (str/split path #"/")))))
+
+(defn- ns->file ^String [^String ns] (str (str/replace ns "." "/") ".ae"))
+
+(defn- source-path
+  "The path of package path's forms in tamago/cmd (cmd/..., golang.org/x/... as cmd/vendor/...) or
+  tamago/goroot (internal/...)."
+  [^String p]
+  (if (str/starts-with? p "golang.org/x/") (str "cmd/vendor/" p) p))
+
+(defn- import-region
+  "The [start end) of the :imports vector of the go/file form in text t, or nil."
+  [^String t]
+  (let [g (.indexOf t "(go/file ")
+        n (count t)
+        ;; the index after the string, comment or character literal at k, or k + 1
+        skip (fn [^long k]
+               (case (.charAt t k)
+                 \" (loop [j (inc k)]
+                      (case (.charAt t j) \\ (recur (+ j 2)) \" (inc j) (recur (inc j))))
+                 \; (let [e (.indexOf t "\n" (int k))] (if (neg? e) n e))
+                 \\ (+ k 2)
+                 (inc k)))]
+    (when (>= g 0)
+      ;; the go/file form's elements at its depth, up to :imports
+      (loop [k (+ g (count "(go/file ")) depth 1]
+        (when (and (< k n) (pos? depth))
+          (let [c (.charAt t k)]
+            (cond
+              (and (= depth 1) (.startsWith t ":imports [" k))
+              (let [s (+ k (count ":imports "))]
+                (loop [j (inc s) d 1]
+                  (let [c (.charAt t j)]
+                    (cond
+                      (#{\" \; \\} c) (recur (long (skip j)) d)
+                      (#{\[ \( \{} c) (recur (inc j) (inc d))
+                      (#{\] \) \}} c) (if (= d 1) [s (inc j)] (recur (inc j) (dec d)))
+                      :else (recur (inc j) d)))))
+              (#{\" \; \\} c) (recur (long (skip k)) depth)
+              (#{\[ \( \{} c) (recur (inc k) (inc depth))
+              (#{\] \) \}} c) (recur (inc k) (dec depth))
+              :else (recur (inc k) depth))))))))
+
+(defn imports
+  "The import paths of the forms file text t (its go/file's :imports)."
+  [^String t]
+  (when-let [[s e] (import-region t)]
+    (mapv second (re-seq #"\"([^\"]+)\"" (subs t s e)))))
+
+(defn- rename-imports
+  "Text t with the import paths of its go/file's :imports renamed (renamed)."
+  [^String t]
+  (if-let [[s e] (import-region t)]
+    (str (subs t 0 s)
+         (str/replace (subs t s e) #"\"([^\"]+)\"" (fn [[m p]] (if-let [r (renamed p)] (str "\"" r "\"") m)))
+         (subs t e))
+    t))
+
+(defn- package-loads
+  "The files the package file text pt loads, (load \"dir/stem\") each: [\"dir/stem\" ...]."
+  [^String pt]
+  (mapv second (re-seq #"(?m)^\(load \"([^\"]+)\"\)" pt)))
+
+(defn- root-of [p cmd-forms goroot-forms]
+  (if (str/starts-with? p "internal/") goroot-forms cmd-forms))
+
+(defn closure
+  "cmd/compile's closure below its main package: the import paths renamed (renamed) that the
+  driver's imports reach through the forms of cmd-forms and goroot-forms, sorted (the shared
+  syntax copy left out)."
+  [^String cmd-forms ^String goroot-forms]
+  (let [start ["cmd/compile/internal/gc" "cmd/compile/internal/base" "cmd/compile/internal/ssagen"
+               "cmd/compile/internal/amd64" "cmd/compile/internal/arm" "cmd/compile/internal/arm64"
+               "cmd/compile/internal/loong64" "cmd/compile/internal/mips" "cmd/compile/internal/mips64"
+               "cmd/compile/internal/ppc64" "cmd/compile/internal/riscv64" "cmd/compile/internal/s390x"
+               "cmd/compile/internal/wasm" "cmd/compile/internal/x86" "internal/buildcfg"]]
+    (loop [todo start seen #{}]
+      (if-let [p (first todo)]
+        (if (or (seen p) (= p "cmd/compile/internal/syntax"))
+          (recur (rest todo) seen)
+          (let [root (root-of p cmd-forms goroot-forms)
+                pf (File. (str root "/" (ns->file (path->ns (source-path p)))))
+                _ (when-not (.isFile pf) (throw (ex-info (str "arbace.go.gc: no forms of " p " (" pf ")") {:path p})))
+                dir (.getParentFile pf)
+                imps (distinct (for [l (package-loads (slurp pf))
+                                     :let [f (File. dir (str l ".ae"))
+                                           ;; a file one configuration builds only (tamago/goroot/arch/ARCH)
+                                           f (if (.isFile f) f
+                                                 (File. (str goroot-forms "/arch/amd64/" (str (.relativize (.toPath (File. goroot-forms)) (.toPath f))))))]
+                                     i (imports (slurp f))
+                                     :when (renamed i)]
+                                 (if (str/starts-with? i "cmd/vendor/") (subs i (count "cmd/vendor/")) i)))]
+            (recur (concat (rest todo) imps) (conj seen p))))
+        (vec (sort seen))))))
+
+(defn- strip-val
+  "Line l without its :val annotation (and its metadata map when that is all it held)."
+  [^String l]
+  (-> l
+      (str/replace #":val (\"[^\"]*\"|[^ }]+) ?" "")
+      (str/replace #"\^\{\} ?" "")))
+
+(defn- neutral-text
+  "The forms of a standard library file that differ by configuration (tamago/goroot/arch/ARCH):
+  amd64's, without the :val annotations of the lines arm64's has otherwise or that follow
+  runtime.GOOS or runtime.GOARCH (strip-val)."
+  [^String amd64 ^String arm64]
+  (let [a (str/split amd64 #"\n" -1) b (str/split arm64 #"\n" -1)]
+    (when-not (= (count a) (count b))
+      (throw (ex-info "arbace.go.gc: the configurations' forms differ in their lines" {})))
+    (str/join "\n" (map (fn [^String x y]
+                          (if (or (not= x y) (re-find #"runtime/GO(OS|ARCH)\b" x)) (strip-val x) x))
+                        a b))))
+
+(defn copy-texts
+  "The renamed copy of cmd/compile's closure (closure) from the forms of cmd-forms (tamago/cmd) and
+  goroot-forms (tamago/goroot): each package's file and the files it loads under
+  go/arbace/repr/go/internal/gc/, renamed (the namespace's file note above). {relative-path text}."
+  [^String cmd-forms ^String goroot-forms]
+  (let [pkgs (closure cmd-forms goroot-forms)
+        ns-map (into {} (for [p pkgs] [(path->ns (source-path p)) (path->ns (renamed p))]))
+        rename-ns (fn [^String t]
+                    (str/replace t #"(?<![A-Za-z0-9_.])go\.(cmd|internal)\.[A-Za-z0-9_.]*[A-Za-z0-9_]"
+                                 (fn [[m]] (get ns-map m m))))
+        rename (fn [^String t] (-> t rename-ns rename-imports))
+        note (fn [p] (str ";; Generated by arbace.go.gc (bin/generated-check --update): gc's " p ",\n"
+                          ";; from " (if (str/starts-with? p "internal/") "tamago/goroot" "tamago/cmd") "'s forms, renamed " (renamed p) "\n"
+                          ";; (doc/go/GOI-SPEC.md, \"Since v1: gc in the executable\"); do not edit.\n"))]
+    (into (sorted-map)
+          (for [p pkgs
+                :let [root (root-of p cmd-forms goroot-forms)
+                      rel (ns->file (path->ns (source-path p)))
+                      pf (File. (str root "/" rel))
+                      dir (.getParentFile pf)
+                      out-rel (ns->file (path->ns (renamed p)))
+                      out-dir (subs out-rel 0 (- (count out-rel) 3))
+                      pt (slurp pf)
+                      loads (package-loads pt)
+                      ;; internal/abi: funcpc.go's bodyless intrinsics go with its stub.s
+                      drop (if (= p "internal/abi") #{"abi/funcpc"} #{})
+                      arch-file (fn [a l] (File. (str goroot-forms "/arch/" a "/" (subs rel 0 (- (count rel) 3)) "/"
+                                                     (subs l (inc (.indexOf ^String l "/"))) ".ae")))
+                      neutral? (and (str/starts-with? p "internal/") (some #(.isFile ^File (arch-file "amd64" %)) loads))
+                      pt (cond-> pt
+                           neutral? (str/replace #"\n  :positions :lines\)" ")"))
+                      pt (-> pt
+                             (str/replace #"(?m)^  :other-files \[[^\]]*\]\n" "")
+                             (str/replace (str ":path \"" (source-path p) "\"") (str ":path \"" (renamed p) "\"")))
+                      pt (reduce (fn [t l]
+                                   (-> t
+                                       (str/replace (str "(load \"" l "\")\n") "")
+                                       (str/replace (str " \"" (subs l (inc (.indexOf ^String l "/"))) ".go\"") "")))
+                                 pt drop)]
+                [path text] (cons [out-rel (str (note p) (rename-ns pt))]
+                                  (for [l loads :when (not (drop l))
+                                        :let [f (File. dir (str l ".ae"))
+                                              t (if (and (str/starts-with? p "internal/") (.isFile ^File (arch-file "amd64" l)))
+                                                  (neutral-text (slurp (arch-file "amd64" l)) (slurp (arch-file "arm64" l)))
+                                                  (slurp f))]]
+                                    [(str out-dir "/" (subs l (inc (.indexOf ^String l "/"))) ".ae") (rename t)]))]
+            [path text]))))
+
+;;; The driver in this process
+
+(defn- fail [status ^String kind ^String msg]
+  (binding [*out* *err*]
+    (println (str "goi: " kind ": " msg))
+    (flush))
+  (System/exit status))
+
+(defn compile!
+  "Runs gc's compile command in this process with the arguments args (strings), as go tool compile
+  runs it: the driver's Compile, compiled (goi's table lists arbace/repr/go/gccompile). gc ends the
+  process with its status (0, or 2 when it reports errors), its messages on standard output: this
+  does not return. An executable whose table does not list the driver ends with goi's unsupported
+  (status 125): gc is not interpreted (its closure would be checked and built by goi first)."
+  [args]
+  (when-not ((requiring-resolve 'arbace.go.repl/listed?) driver-path)
+    (fail 125 "unsupported" (str "gc's own passes: this executable's goi table does not list " driver-path " (gc in the executable)")))
+  (require 'go.arbace.repr.go.gccompile)
+  (let [f @(resolve 'go.arbace.repr.go.gccompile/Compile)]
+    (flush)
+    (binding [*out* *err*] (flush))
+    (f (str/join "\n" args))))
+
+(defn- generate!
+  "The renamed copy (copy-texts) written under out (bin/generated-check)."
+  [out cmd-forms goroot-forms]
+  (doseq [[path text] (copy-texts cmd-forms goroot-forms)]
+    (let [f (File. (str out "/" path))]
+      (.mkdirs (.getParentFile f))
+      (spit f text))))
+
+(defn -main
+  "FORMS [ARG...]: the package of the forms file FORMS printed back to Go into the working
+  directory (arbace.repr.go.print/print-package: mode :full forms to their text, byte for byte),
+  then compiled there by gc in this process (compile!) with the arguments ARG... and the printed
+  files' names, as Go's test driver compiles an errorcheck test: gc's messages on standard output,
+  gc's status (bin/goi's check_err, for the programs whose flags or errors need gc's own passes).
+
+  generate [--cmd DIR] [--goroot DIR] OUT: the renamed copy (copy-texts, from tamago/cmd and
+  tamago/goroot by default) written under OUT (bin/generated-check)."
+  [& args]
+  (if (= "generate" (first args))
+    (let [[opts [out]] (loop [opts {:cmd "tamago/cmd" :goroot "tamago/goroot"} as (rest args)]
+                         (case (first as)
+                           "--cmd" (recur (assoc opts :cmd (second as)) (drop 2 as))
+                           "--goroot" (recur (assoc opts :goroot (second as)) (drop 2 as))
+                           [opts as]))]
+      (when-not out (fail 2 "error" "usage: arbace -m arbace.go.gc generate [--cmd DIR] [--goroot DIR] OUT"))
+      (generate! out (:cmd opts) (:goroot opts))
+      (shutdown-agents)
+      (System/exit 0))
+    (let [[forms & gc-args] args]
+      (when-not forms
+        (fail 2 "error" "usage: arbace -m arbace.go.gc FORMS [ARG...]"))
+      (let [{:keys [files]} ((requiring-resolve 'arbace.repr.go.print/print-package) forms "." {})]
+        (compile! (concat gc-args (sort files)))))))

@@ -2,6 +2,8 @@
 # ocamltest's tools as Arbace's own program on oi, judged by the test's own .reference: oi_tool_prog NAME ID D COPY prepares the row
 # (the test's files, the tool's program as the row's D/U.ae), tool_output NAME ID D OUT judges the tool's side output beside the
 # row's. Outside bin/oi, so its edits leave native_key alone (queue 480's finding 2). Tools: objinfo (header.awk's objinfo mode).
+# Also (queue 528) header.awk's complete-exe mode's script (@runscript=FILE:NAME): runscript_of ENV, the runners' (bin/oi's oi_one and
+# o2j_alone) way to run it.
 
 # tool_of ENV: the row's tool (@tool=NAME), else nothing
 tool_of() { local kv; for kv in $1; do case $kv in @tool=*) echo "${kv#@tool=}" ;; esac; done; }
@@ -34,11 +36,12 @@ objinfo_build() {
   ) 8> "$OI_DIR/objinfo.lock"
 }
 
-# oi_tool_prog NAME ID D COPY: the row's program for the tool NAME in its run directory D, the test's files (COPY, comma-separated: the
+# oi_tool_prog NAME ID D COPY [LEVEL]: the row's program for the tool NAME in its run directory D (LEVEL oi, the default, or o2j: the light
+# AOT level's dump, bin/oi's o2j_dump; queue 528), the test's files (COPY, comma-separated: the
 # readonly files and the modules) copied from its source directory; objinfo: the standard library's .cmi files linked as D/_stdlib and
 # oiobjinfo dumped as a program of the row's path (oi_dump, natively) into D/U.ae, U the test's unit. Status 0, else 1 with the reason
 oi_tool_prog() {
-  local name=$1 id=$2 d=$3 copy=$4 src base u f why
+  local name=$1 id=$2 d=$3 copy=$4 level=${5:-oi} src base u f why
   src=$(dirname "$TESTS/$id"); base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   case $name in
     objinfo)
@@ -46,7 +49,13 @@ oi_tool_prog() {
       for f in $(echo "$copy" | tr ',' ' '); do [ -e "$src/$f" ] && cp -r "$src/$f" "$d/"; done
       ln -sfn "$OIOBJ/stdlib" "$d/_stdlib"
       mkdir -p "$d/_tool"; cp "$root/test/ocaml/objinfo/oiobjinfo.ml" "$d/_tool/"
-      why=$(oi_dump "$d/_tool" oiobjinfo "" complib) || { echo "objinfo: $why"; return 1; }
+      if [ "$level" = o2j ]; then
+        # (the light AOT level, queue 528: o2j_dump_file's dump, a refusal its error form)
+        o2j_dump_file "$d/_tool" oiobjinfo "" complib
+        grep -q '^(ocaml/error' "$d/_tool/Oiobjinfo.ae" && { echo "objinfo: $(head -c 200 "$d/_tool/Oiobjinfo.ae" | tr '\n\t"\\' '    ')"; return 1; }
+      else
+        why=$(oi_dump "$d/_tool" oiobjinfo "" complib) || { echo "objinfo: $why"; return 1; }
+      fi
       mv "$d/_tool/Oiobjinfo.ae" "$d/$u.ae"
       # (the test's own source is an input, not the program: oi_one copied it beside)
       return 0 ;;
@@ -66,4 +75,8 @@ tool_output() {
   esac
   return 0
 }
-export -f tool_of objinfo_build oi_tool_prog tool_output
+# runscript_of ENV: the row's script and program name (header.awk's complete-exe mode, @runscript=FILE:NAME; queue 528), else nothing.
+# The runner writes ./NAME as its program (prog_script) and runs `sh DIR/FILE` (DIR the test's source directory) in the run directory
+# in the program's place, the script's output and status the row's (ocamltest's run of program = "sh ${test_source_directory}/FILE")
+runscript_of() { local kv; for kv in $1; do case $kv in @runscript=*) echo "${kv#@runscript=}" ;; esac; done; }
+export -f tool_of objinfo_build oi_tool_prog tool_output runscript_of

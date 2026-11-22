@@ -294,14 +294,41 @@
   (let [o (get-in s [:own-file :file])]
     (if (and (string? o) (has? t o) (not (interim? (text t o)))) o (:file s))))
 
-(defn- cell-ids
-  "The ids of the cell's cases: the first element of each row of its sources' records."
+(defn- cell-rows
+  "The rows of the cell's sources' records as [ID RESULT]: the first and second element of each vector row, a map row's :id and
+  :result."
   [t crop st]
   ;; (JOP13 (a): not a source :role :beside, whose rows the matrix does not count as the cell's cases)
   (for [s (get-in (cells-spec t) [:cells [crop st] :sources]) :let [f (source-file t s)] :when (and (string? f) (has? t f) (not= :beside (:role s)))
         ;; (bin/hsi check's records: one map a program, HF10-P29 (a))
         r (if (= :hsi-check (:reader s)) (edn-forms t f) (edn t f)) :when (or (vector? r) (and (map? r) (:id r)))]
-    (if (map? r) (:id r) (first r))))
+    (if (map? r) [(:id r) (:result r)] [(first r) (second r)])))
+
+(defn- cell-ids
+  "The ids of the cell's cases: the first element of each row of its sources' records."
+  [t crop st]
+  (map first (cell-rows t crop st)))
+
+(defn na-ids
+  "497-3 (a): the ids the :kind :na classes of CLASSES (a classes file's forms) name in :tests (hsi's classes: in :ids)."
+  [classes]
+  (set (for [c classes :when (and (map? c) (= :na (:kind c))) id (concat (:tests c) (:ids c))] id)))
+
+(defn na-cases
+  "The user's counting decisions of 2026-11-22 (second round): of ROWS ([ID RESULT] the cell's), the ids NA (an :na class's) names
+  whose row does not pass: the cases reap counts n/a, outside both denominators (a row that passes is a pass whatever names it)."
+  [rows na]
+  (set (for [[id res] rows :when (and (contains? na id) (not= :pass res))] id)))
+
+(defn- cell-na-ids
+  "The ids the :na classes of cell [CROP ST]'s classes files (test/reap/cells.edn: the cell's, its sources' and their :own-file's)
+  name in :tests or :ids; a class that takes its rows by :match alone names none."
+  [t crop st]
+  (let [c (get-in (cells-spec t) [:cells [crop st]])
+        files (distinct (for [x (concat [(:classes c)] (map :classes (:sources c)) (map #(get-in % [:own-file :classes]) (:sources c)))
+                              f (if (sequential? x) x [x]) :when (and (string? f) (has? t f))]
+                          f))]
+    (into #{} (mapcat #(na-ids (edn t %)) files))))
 
 (defn- case-inputs
   "A fact's :case-inputs {:file F} (crops.edn's :own-inputs names the crop's inputs): {:self N :recorded M :note ...} counted
@@ -314,7 +341,12 @@
             (not (and r (:checked r))) {:note "RFP53 (a): the cell has no record yet, the stated score"}
             (not (has? t file)) {:note (str "RFP53 (a): no " file " yet, the stated score")}
             (interim? (text t file)) {:note (str "HF10-P29 (a): " file " is marked INTERIM (not one run's outcome), the stated score")}
-            :else (let [ids (cell-ids t crop st)
+            :else (let [rows (cell-rows t crop st)
+                        ;; (the user, 2026-11-22, second round: the cases reap counts n/a, an :na class's ids that do not pass,
+                        ;; are none of the cell's cases (test/reap/matrix.edn's total leaves them out): their ids leave too, so an
+                        ;; :out-of-cases id that is n/a is not taken out twice (Haskell's all.T skips T24809 and T4262))
+                        na (na-cases rows (cell-na-ids t crop st))
+                        ids (remove na (map first rows))
                         ;; (the user, 2026-11-21: a fact's :out-of-cases file's ids leave the cell's cases, own or not, as the
                         ;; total with them; an out id the cell does not hold counts nothing)
                         oc (get-in f [:out-of-cases :file])
@@ -323,6 +355,7 @@
                         c (rfp53-counts-out ids (input-rows (edn-forms t file)) inputs (cases r) out)]
                     (assoc c :note (str "RFP53 (a): " (:self c) " of " (+ (:self c) (:recorded c)) " cases own in all "
                                         (count inputs) " inputs (" file "), the rest 0.5"
+                                        (when (seq na) (str "; " (count na) " n/a (the cell's :na classes)"))
                                         (when (pos? gone) (str "; " gone " cases out of the judge's by " oc)))))))))
 
 ;; ---- CP333 (b) (the user, 2026-11-09; doc/cpp/CPP-SURVEY.md, "Decided (2026-11-09, the user: CP325-CP337, P23)"): C++'s eval and AOT
@@ -378,12 +411,9 @@
 
 ;; ---- 497-3 (a) (the main session, 2026-11-20; the user's rule of 2026-11-20): a :count-from's :out CLASSES leaves out of the
 ;; counted rows the cases the judge counts out, the ids its :kind :na classes name in :tests (C++'s dg :undefined-expectation:
-;; expected errors no conforming front end owes), as reap leaves them out of the cell's denominator; their runs stay in the record
-
-(defn na-ids
-  "497-3 (a): the ids the :kind :na classes of CLASSES (a classes file's forms) name in :tests."
-  [classes]
-  (set (for [c classes :when (and (map? c) (= :na (:kind c))) id (:tests c)] id)))
+;; expected errors no conforming front end owes), as reap leaves them out of the cell's denominator; their runs stay in the record.
+;; (The user's counting decisions of 2026-11-22, second round: a row the record passes stays counted, as reap counts it a pass
+;; (its classify sees only the non-passes): C++'s :musl-libc names Wnull-conversion-1.C, which the own front end passes)
 
 (defn- count-from
   "345-1 (a): fact F's :count-from in tree T: {:cases ... :note ...}, {:note ...} alone (the stated cases stand), {:refused ...
@@ -397,6 +427,8 @@
                         bad (count-from-problem (:cases f) spec rows)
                         ;; (497-3 (a): the judge's counted-out cases left out, after the record's own check)
                         out (when-let [cf (:out spec)] (when (has? t cf) (na-ids (edn t cf))))
+                        ;; (a row that passes stays: reap counts it a pass, na-cases)
+                        out (when (seq out) (na-cases (map (fn [r] [(first r) (second r)]) rows) out))
                         kept (if (seq out) (remove #(contains? out (first %)) rows) rows)
                         c (count-from-cases (:cases f) spec kept)]
                     (if bad
@@ -469,12 +501,28 @@
 ;; ---- OC222 (a) (the user, 2026-11-10): a class of :kind :na is ocamltest's own skip on the pinned configuration
 
 (defn na-class-problems
-  "The problems of class C of FILE (:kind :na) under OC222 (a)'s rule, CONF its :config file read (nil when absent): :skips
+  "The problems of class C of FILE (:kind :na) under OC222 (a)'s rule, or the user's n/a decisions' (:reasons, queue 528), CONF its :config file read (nil when absent): :skips
   {PROGRAM ACTION} covering :programs exactly, each ACTION one of CONF's :actions and failing on CONF's :config, and :match
   taking only the rows outside the run corpus (\"^class \": a program that runs and fails is never :na)."
   [file c conf]
   (let [skips (:skips c) progs (:programs c) where (str file ": class " (:id c) " (:na)")]
-    (cond (not (map? skips)) [(str where " has no :skips (OC222 (a): ocamltest's own skip on the pinned configuration)")]
+    (cond
+          ;; the user's n/a decisions (queue 528's list, 2026-11-22: 528-1, 528-2, 528-9, 528-10, 528-11, 528-14, 528-15): a class
+          ;; with :reasons {PROGRAM REASON}, a written reason per case (the judge cases' rule of 2026-11-20), covering :programs
+          ;; exactly, and a :decided naming the user's decision; no :skips (those are OC222 (a)'s)
+          (contains? c :reasons)
+          (let [rs (:reasons c)]
+            (concat
+             (when-not (map? rs) [(str where ": :reasons is not a map {PROGRAM REASON}")])
+             (when (empty? progs) [(str where " lists no :programs")])
+             (when skips [(str where " has both :reasons and :skips")])
+             (when-not (re-find #"the user" (str (:decided c))) [(str where ": :decided names no decision of the user")])
+             (when (map? rs)
+               (concat
+                (for [p progs :when (not (contains? rs p))] (str where ": " p " has no reason"))
+                (for [p (keys rs) :when (not (some #{p} progs))] (str where ": " p " is in :reasons, not in :programs"))
+                (for [[p r] rs :when (str/blank? (str r))] (str where ": " p "'s reason is empty"))))))
+          (not (map? skips)) [(str where " has no :skips (OC222 (a): ocamltest's own skip on the pinned configuration)")]
           (nil? conf) [(str where ": its :config " (pr-str (:config c)) " is not there")]
           :else (concat
                  (when (empty? progs) [(str where " lists no :programs")])
@@ -873,6 +921,109 @@
      (when-let [p (out-of-cases-problem {:out-of-cases {:file "test/haskell/eval-out.edn" :cases 34}} hmap)] [(str "1122 Haskell: the 34 refused: " p)])
      (when-not (out-of-cases-problem {:out-of-cases {:file "test/haskell/eval-out.edn" :cases 31}} hmap) ["1122 Haskell control (34 listed, 31 stated) passed"]))))
 
+(defn- counting-1122b-tests
+  "The user's counting decisions of 2026-11-22, second round (doc/CROPS-SCORE.md, \"Decided (the user, 2026-11-22): the second
+  questions\"): C++'s :gcc-dialect, :gxx-only-rules and :musl-libc, Python's :fork, :testinternalcapi and :venv-and-build, Haskell's
+  :process and :skipped :kind :na; the crops' completeness before and after, the n/a ids out of the stages' counted cases (a row that
+  passes kept, an n/a id not taken out twice), each with a control that fails when its rule is broken."
+  []
+  (let [cell (fn [[p d f na]] {:checked true :pass p :design d :deferred f :pending 0 :na (or na 0)})
+        compl (fn [cs] (format "%.4f" (:score (completeness :x (into {} (map (fn [l c] [[:x l] (cell c)]) levels cs))))))
+        ;; na-ids: an :na class's :tests and (hsi's) :ids, not a :design class's
+        nids (na-ids [{:id :p :kind :na :ids ["x1"]} {:id :q :kind :design :ids ["y1"] :tests ["y2"]} {:id :r :kind :na :tests ["z1"]} '(not-a-class)])
+        ;; na-cases: of the cell's rows, the n/a ids that do not pass (reap classes only the non-passes)
+        nrows [["a" :fail] ["b" :pass] ["c" :skipped] ["d" :fail]]
+        ncases (na-cases nrows #{"a" "b" "c"})
+        ;; C++'s read, counted from the own record (count-from's :out): 10 rows, 4 pass; an :na class names one passing row and two
+        ;; failing ones: 8 counted, 4 own; the control, every named row out (497-3 (a)'s rule before), 7 counted, 3 own
+        crows (vec (for [i (range 10)] [(str "f" i) (if (< i 4) :pass :fail) "r"]))
+        cna #{"f0" "f5" "f6"}
+        cspec {:result :pass :own :dg-own :rest :dg-clang}
+        ccount (fn [out] (count-from-cases {:dg-own [0 1] :dg-clang [0 0.5]} cspec (vec (remove #(contains? out (first %)) crows))))
+        cgood (ccount (na-cases (map (fn [r] [(first r) (second r)]) crows) cna))
+        cctl (ccount cna)
+        ;; Haskell's eval stage: 950 programs, 3 n/a (two of them on eval-out.edn before), the matrix's cases 947; out 32 after
+        ;; (34 before); 915 counted, all own; the control, the n/a ids kept among the ids with out at 34: 913 (two taken out twice)
+        hids (mapv #(str "p" %) (range 950))
+        hrows (vec (for [id hids] [id {:libs :own}]))
+        hna #{(hids 947) (hids 948) (hids 949)}
+        out32 (set (subvec hids 915 947))
+        out34 (into out32 [(hids 948) (hids 949)])
+        hgood (rfp53-counts-out (remove hna hids) hrows [:libs] 947 out32)
+        hgood34 (rfp53-counts-out (remove hna hids) hrows [:libs] 947 out34)
+        hctl (rfp53-counts-out hids hrows [:libs] 947 out34)]
+    (concat
+     (when-not (= #{"x1" "z1"} nids) [(str "1122b: na-ids gave " (pr-str nids) ", not the :na classes' :ids and :tests")])
+     (when (some #{"y1" "y2"} nids) ["1122b control (a :design class's ids) passed: taken as n/a"])
+     (when-not (= #{"a" "c"} ncases) [(str "1122b: na-cases gave " (pr-str ncases) ", not the named non-passes")])
+     (when (contains? ncases "b") ["1122b control (a passing row an :na class names) passed: taken out"])
+     (when (contains? ncases "d") ["1122b control (a row no :na class names) passed: taken out"])
+     (when-not (= {:dg-own [4 1] :dg-clang [4 0.5]} cgood) [(str "1122b C++: counted " (pr-str cgood) ", not 4 own of 8")])
+     (when (= cgood cctl) ["1122b C++ control (the passing row taken out too) passed"])
+     (when-not (= "0.788" (format "%.3f" (first (mixed-score {:cases {:tokens [1934 1] :dg-own [1699 1] :dg-clang [2683 0.5]}}))))
+       ["1122b C++: the read stage not 0.788"])
+     (when-not (= {:self 915 :recorded 0} hgood) [(str "1122b Haskell: eval " (pr-str hgood) ", not 915 of 915")])
+     (when-not (= hgood hgood34) ["1122b Haskell: an out id that is n/a taken out twice with the n/a ids left out"])
+     (when (= hgood hctl) ["1122b Haskell control (the n/a ids kept, out at 34) passed"])
+     (when-not (= ["0.9614" "0.9675"] [(compl [[5665 311 517 38] [81 1 0] [81 1 0] [3885 0 10]])
+                                       (compl [[5665 135 517 214] [81 1 0] [81 1 0] [3885 0 10]])])
+       ["1122b C++: completeness not 0.9614 to 0.9675"])
+     (when (= (compl [[5665 135 517 214] [81 1 0] [81 1 0] [3885 0 10]]) (compl [[5665 311 517 214] [81 1 0] [81 1 0] [3885 0 10]]))
+       ["1122b C++ control (the 176 still by design) passed"])
+     (when-not (= ["0.9615" "0.9651"] [(compl [[3706 30 0] [39204 2719 3627 2771] [150 0 1] [2796 0 0 4]])
+                                       (compl [[3706 30 0] [39204 1981 3627 3509] [150 0 1] [2796 0 0 4]])])
+       ["1122b Python: completeness not 0.9615 to 0.9651"])
+     (when-not (= ["0.9835" "0.9842"] [(compl [[2690 0 0] [894 34 22] [138 0 1] [1345 0 0]])
+                                       (compl [[2690 0 0] [894 31 22 3] [138 0 1] [1345 0 0]])])
+       ["1122b Haskell: completeness not 0.9835 to 0.9842"]))))
+
+(defn- counting-1122c-tests
+  "The user's counting decisions of 2026-11-22 on py-capi's and c-tails' questions (doc/CROPS-SCORE.md, \"Decided (the user,
+  2026-11-22): the third questions\"): Python's n/a classes keyed on the record's verdicts (reap.main's classify on fabricated rows
+  with the classes' own :match), and C's CT1 (tools/ppref's reference agrees, the token check's own :known row \"pp ref\"), each with
+  a control that fails when its rule is broken."
+  []
+  (require 'reap.main)
+  (let [r (fn [s] @(ns-resolve 'reap.main s))
+        classify (r 'classify) rec (r 'own-elsewhere-record) pick (r 'own-elsewhere-pick)
+        cls [{:id :cpython-only :kind :na :match [#"^skipped implementation detail specific to cpython" #"^skipped the module 'xxsubtype' is internal$"]}
+             {:id :capi-singletons :kind :na :match [#"^failure b'' is not b''$"]}
+             {:id :capi-gc-tracked :kind :na :match [#"^failure False is not true : \((<NULL>|\[1\]),\)$"]}
+             {:id :testinternalcapi-absent :kind :na :match [#"^skipped .*_testinternalcapi" #"^import .*_testinternalcapi"]}
+             {:id :testcapi :kind :deferred :match [#"need _testcapi" #"^skipped need _testcapi"]}
+             {:id :rest :kind :deferred :match [#"."]}]
+        cid (fn [res reason] (:id (classify cls {:id "m/t" :result res :reason reason})))
+        ;; C: the token check's rows; ppref's agreement is a :known row whose reason says "pp ref"
+        rows [["sqlite sqlite3.c" :known "lex equal, pp ref, gcc -"] ["tcc-pp 13.S" :known "lex differ, pp ref, gcc -"]
+              ["gcc-c23 x.c" :known "lex equal, pp gcc, gcc -"] ["gcc-c23 y.c" :fail "pp differ"] ["gcc-c23 z.c" :pass "ok"]]
+        rw {:id :has-gnu :reference-wrong true}
+        es [{:id "sqlite sqlite3.c" :class rw} {:id "tcc-pp 13.S" :class rw} {:id "gcc-c23 x.c" :class rw} {:id "gcc-c23 y.c" :class rw}]
+        recs [(rec rows "pp ref" " ")]
+        picked (pick es recs " ")
+        plain (pick es [(rec rows nil " ")] " ")
+        notrw (pick (mapv #(assoc % :class {:id :other}) es) recs " ")
+        compl (fn [cs] (format "%.4f" (:score (completeness :x (into {} (map (fn [l c] [[:x l] {:checked true :pass (nth c 0) :design (nth c 1) :deferred (nth c 2) :pending 0 :na (or (nth c 3 nil) 0)}]) levels cs))))))]
+    (concat
+     (when-not (= :testinternalcapi-absent (cid :skipped "requires _testinternalcapi")) ["1122c Python: a skip naming _testinternalcapi not n/a"])
+     (when-not (= :testinternalcapi-absent (cid :import "SkipTest: No module named '_testinternalcapi'")) ["1122c Python: an import SkipTest naming it not n/a"])
+     (when-not (= :testinternalcapi-absent (cid :import "ModuleNotFoundError: No module named '_testinternalcapi'")) ["1122c Python: an import error naming it not n/a"])
+     (when (= :testinternalcapi-absent (cid :failure "_testinternalcapi.x raised")) ["1122c Python control (a failure naming it) passed: taken as n/a"])
+     (when (= :testinternalcapi-absent (cid :skipped "need _testcapi")) ["1122c Python control (a skip naming only _testcapi) passed: taken as n/a"])
+     (when-not (= :cpython-only (cid :skipped "the module 'xxsubtype' is internal")) ["1122c Python: the xxsubtype skip not n/a"])
+     (when (= :cpython-only (cid :skipped "requires xxsubtype module")) ["1122c Python control (another xxsubtype skip) passed"])
+     (when-not (= :capi-singletons (cid :failure "b'' is not b''")) ["1122c Python: `b'' is not b''` not n/a"])
+     (when (= :capi-singletons (cid :failure "b'x' is not b''")) ["1122c Python control (another bytes comparison) passed"])
+     (when-not (= :capi-gc-tracked (cid :failure "False is not true : ([1],)")) ["1122c Python: gc.is_tracked's failure not n/a"])
+     (when (= :capi-gc-tracked (cid :failure "False is not true : (1,)")) ["1122c Python control (another tuple) passed"])
+     (when-not (= ["0.9651" "0.9689"] [(compl [[3706 30 0] [39204 1981 3627 3509] [150 0 1] [2796 0 0 4]])
+                                       (compl [[3706 30 0] [39204 1972 2863 4282] [150 0 1] [2796 0 0 4]])])
+       ["1122c Python: n/a rows not out of both denominators"])
+     (when-not (= {"sqlite sqlite3.c" 0 "tcc-pp 13.S" 0} picked) [(str "1122c C (CT1): picked " (pr-str picked) ", not sqlite3.c and 13.S by pp ref")])
+     (when (contains? picked "gcc-c23 x.c") ["1122c C control (a row judged by gcc, not by the reference) passed"])
+     (when (contains? picked "gcc-c23 y.c") ["1122c C control (a failing row) passed"])
+     (when (seq plain) [(str "1122c C control (no :reason-re: the record's results taken as they are) picked " (pr-str plain))])
+     (when (seq notrw) ["1122c C control (a class where the reference is not wrong) passed"]))))
+
 (defn self-test
   "The failures of the rulings' tests (empty when every test passes and every control fails as it must)."
   []
@@ -992,6 +1143,8 @@
         na2-ctl (na-ids (assoc-in na2-cls [2 :kind] :design))]
     (concat
      (counting-1122-tests)
+     (counting-1122b-tests)
+     (counting-1122c-tests)
      (when-let [p (out-of-cases-problem oc-f oc-m)] [(str "c-cpp-golden: a list with its reasons refused: " p)])
      (when (out-of-cases-problem {:score 1} nil) ["c-cpp-golden: a fact without :out-of-cases refuted"])
      (when-not (out-of-cases-problem oc-f (assoc-in oc-m ["c/bf.c" :why] " ")) ["c-cpp-golden control (an entry with no written reason) passed"])

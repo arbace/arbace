@@ -442,3 +442,58 @@
 ^{:go/end 377} (go/method Unseal "Unseal makes it writable again (the REPL loading more units).\n" [^{:tag (* Mem)} m]
   (when (!= (.-RO m) nil)
     (set! (.-RO (.-RO m)) false)))
+
+
+;; c-rows (2026-11-22): C23's _Float16 (Annex H, IEEE binary16), which ci and AOT keep as a float64 holding a binary16 value:
+;; the conversions of its bits, exact one way and rounded to nearest, ties to even, the other (as gcc's soft-fp truncdfhf2)
+
+(go/func rneShift "rneShift is m>>sh rounded to nearest, ties to even; 0 when sh is 64 or more (m below 2^63).\n" ^uint64 [^uint64 m ^uint sh]
+  (when (== sh 0)
+    (return m))
+  (when (>= sh 64)
+    (return 0))
+  (let [q (>> m sh)
+        r (bit-and m (- (<< (conv uint64 1) sh) 1))
+        half (<< (conv uint64 1) (- sh 1))]
+    (when (or (> r half) (and (== r half) (== (bit-and q 1) 1)))
+      (return (+ q 1)))
+    q))
+
+(go/func F16ToF64 "F16ToF64 is the value of the IEEE binary16 bits h, exact.\n" ^float64 [^uint16 h]
+  (let [s (<< (conv uint64 (>> h 15)) 63)
+        e (conv int (bit-and (>> h 10) 31))
+        m (conv uint64 (bit-and h 1023))]
+    (when (== e 31)
+      (return (math/Float64frombits (bit-or s (bit-or (<< (conv uint64 2047) 52) (<< m 42))))))
+    (when (== e 0)
+      (let [v (* (conv float64 m) (/ 1.0 16777216.0))]
+        (when (!= s 0)
+          (return (- v)))
+        (return v)))
+    (math/Float64frombits (bit-or s (bit-or (<< (conv uint64 (+ (- e 15) 1023)) 52) (<< m 42))))))
+
+(go/func F64ToF16 "F64ToF16 is f rounded to the IEEE binary16 bits nearest it, ties to even (an infinity beyond 65504's range,\na NaN quiet with its payload's top bits).\n" ^uint16 [^float64 f]
+  (let [b (math/Float64bits f)
+        s (bit-and (conv uint16 (>> b 48)) 32768)
+        e (conv int (bit-and (>> b 52) 2047))
+        m (bit-and b 4503599627370495)]
+    (when (== e 2047)
+      (when (== m 0)
+        (return (bit-or s 31744)))
+      (return (bit-or s (bit-or 32256 (conv uint16 (bit-and (>> m 42) 511))))))
+    (when (== e 0)
+      (return s))
+    (let [mm (bit-or m 4503599627370496)
+          ue (- e 1023)]
+      (when (> ue 15)
+        (return (bit-or s 31744)))
+      (when (< ue -14)
+        ;; a subnormal binary16, k units of 2^-24 (1024 is the smallest normal, encoded alike)
+        (return (bit-or s (conv uint16 (rneShift mm (conv uint (- 28 ue)))))))
+      (let [q (rneShift mm 42)]
+        (when (== q 2048)
+          (set! q 1024)
+          (set! ue (+ ue 1)))
+        (when (> ue 15)
+          (return (bit-or s 31744)))
+        (bit-or s (bit-or (conv uint16 (<< (+ ue 15) 10)) (conv uint16 (bit-and q 1023))))))))

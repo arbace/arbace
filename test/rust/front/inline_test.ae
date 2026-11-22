@@ -115,6 +115,52 @@
                                           (= %u (extractvalue [(struct ptr i64) %t] 0)) (= %v (extractvalue [(struct ptr i64) %s] 1))
                                           (= %q (insertvalue [(struct ptr i64) %t] [i64 %v] 1)) (= %x (extractvalue [(struct ptr i64) %q] 1)) (ret i64 %x))]))
 
+;; C6-4 (rust-c6c): simplifyGEPInst's `getelementptr P, 0 -> P` over the clone: an inlined `ptr.add(start)` at start 0 is the
+;; pointer (opt -passes='default<O0>', LLVM 23.1.5: c9's GEP gone, the caller's own zero GEP in c10 kept, as here)
+(def ^:private callee9
+  '(llvm/define g/f9 ptr [[ptr %p] [i64 %n]] :body [(block %start (= %q (getelementptr :inbounds :nuw i8 [ptr %p] [i64 %n])) (ret ptr %q))]))
+(def ^:private caller9
+  '(llvm/define g/c9 (struct ptr i64) [[ptr %a] [i64 %l]]
+     :body [(block %start (= %x (call ptr g/f9 [[ptr %a] [i64 0]])) (= %s (insertvalue [(struct ptr i64) poison] [ptr %x] 0))
+                   (= %t (insertvalue [(struct ptr i64) %s] [i64 %l] 1)) (ret (struct ptr i64) %t))]))
+(def ^:private want9
+  '(llvm/define g/c9 (struct ptr i64) [[ptr %a] [i64 %l]]
+     :body [(block %start (= %s (insertvalue [(struct ptr i64) poison] [ptr %a] 0)) (= %t (insertvalue [(struct ptr i64) %s] [i64 %l] 1))
+                   (ret (struct ptr i64) %t))]))
+(def ^:private caller10
+  '(llvm/define g/c10 void [[ptr %a]] :body [(block %start (= %x (getelementptr :inbounds :nuw i8 [ptr %a] [i64 0])) (call void g/use [[ptr %x]]) (ret void))]))
+
+;; rust-c6c: the call sites in their callee's use-list order, newest first (AlwaysInlinerPass: F.users(); a clone's calls newer
+;; than the caller's own): opt -passes='default<O0>' (LLVM 23.1.5) over the same module (the callee's use list newest first, as
+;; rustc's codegen creates it) puts c11's allocas u's first (two calls of f: v's site taken first), c12's v's first (g inlined at
+;; both sites first, then f at the newest clone, u's, first)
+(def ^:private callee11
+  '(llvm/define g/f11 void [[i64 %x]] :body [(block %start (= %p (alloca (array 16 i8) :align 8)) (call void g/use [[ptr %p] [i64 %x]]) (ret void))]))
+(def ^:private caller11
+  '(llvm/define g/c11 void [[i64 %u] [i64 %v]] :body [(block %start (call void g/f11 [[i64 %u]]) (call void g/f11 [[i64 %v]]) (ret void))]))
+(def ^:private want11
+  '(llvm/define g/c11 void [[i64 %u] [i64 %v]]
+     :body [(block %start (= %pu (alloca (array 16 i8) :align 8)) (= %pv (alloca (array 16 i8) :align 8))
+                   (call void g/use [[ptr %pu] [i64 %u]]) (call void g/use [[ptr %pv] [i64 %v]]) (ret void))]))
+(def ^:private callee12 '(llvm/define g/g12 void [[i64 %x]] :body [(block %start (call void g/f12 [[i64 %x]]) (ret void))]))
+(def ^:private leaf12
+  '(llvm/define g/f12 void [[i64 %x]] :body [(block %start (= %p (alloca (array 16 i8) :align 8)) (call void g/use [[ptr %p] [i64 %x]]) (ret void))]))
+(def ^:private caller12
+  '(llvm/define g/c12 void [[i64 %u] [i64 %v]] :body [(block %start (call void g/g12 [[i64 %u]]) (call void g/g12 [[i64 %v]]) (ret void))]))
+(def ^:private want12
+  '(llvm/define g/c12 void [[i64 %u] [i64 %v]]
+     :body [(block %start (= %pv (alloca (array 16 i8) :align 8)) (= %pu (alloca (array 16 i8) :align 8))
+                   (call void g/use [[ptr %pu] [i64 %u]]) (call void g/use [[ptr %pv] [i64 %v]]) (ret void))]))
+
+;; rust-c6c: ConstantFoldCastInstruction over the clone: an inlined `inttoptr` of a constant 0 is `ptr null`, of 8 the constant
+;; expression (opt -passes='default<O0>', LLVM 23.1.5: `call void @use(ptr null)`, `ptr inttoptr (i64 8 to ptr)`)
+(def ^:private callee13 '(llvm/define g/w13 ptr [[i64 %a]] :body [(block %start (= %p (inttoptr i64 %a ptr)) (ret ptr %p))]))
+(def ^:private caller13
+  '(llvm/define g/c13 void [] :body [(block %start (= %x (call ptr g/w13 [[i64 0]])) (call void g/use [[ptr %x]])
+                                           (= %y (call ptr g/w13 [[i64 8]])) (call void g/use [[ptr %y]]) (ret void))]))
+(def ^:private want13
+  '(llvm/define g/c13 void [] :body [(block %start (call void g/use [[ptr null]]) (call void g/use [[ptr (inttoptr i64 8 ptr)]]) (ret void))]))
+
 (defn- case! [nm got want]
   (let [ok (= (norm got) (norm want))]
     (println (str "inline-test: " nm ": " (if ok "equal" (str "DIFFERS: " (chk/diff-text (norm got) (norm want))))))
@@ -122,8 +168,8 @@
 
 (defn -main [& _]
   (let [m (binding [inl/*nounwind?* (fn [s] (= s 'g/never))]
-            (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4 callee5 caller5 callee6 caller6 callee7 caller7 caller8]
-                               #{'g/f1 'g/f2 'g/f4 'g/f5 'g/f6 'g/f7}))
+            (inl/inline-module [callee1 caller1 callee2 caller2 caller3 callee4 caller4 callee5 caller5 callee6 caller6 callee7 caller7 caller8 callee9 caller9 caller10]
+                               #{'g/f1 'g/f2 'g/f4 'g/f5 'g/f6 'g/f7 'g/f9}))
         by (into {} (map (juxt second identity) m))
         oks [(case! "one block, its alloca at the entry" (by 'g/c1) want1)
              (case! "several blocks, one return" (by 'g/c2) want2)
@@ -131,11 +177,23 @@
              (case! "two returns joined" (by 'g/c4) want4)
              (case! "an invoke's call site, the callee's calls made invokes" (by 'g/c5) want5)
              (case! "an invoke's call site, the callee's resume to the landing pad's body" (by 'g/c6) want6)
-             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c2" "g/c3" "g/c4" "g/c5" "g/c6" "g/c7" "g/c8"])
+             (case! "the inlined functions dropped" (vec (sort (map str (keys by)))) ["g/c1" "g/c10" "g/c2" "g/c3" "g/c4" "g/c5" "g/c6" "g/c7" "g/c8" "g/c9"])
              (case! "C6-4: a pair rebuilt from the caller's halves is the caller's pair (InstSimplify)" (by 'g/c7) want7)
              (case! "C6-4: a pair rebuilt from two aggregates' halves, its second insertvalue kept" (by 'g/c8) want8)
+             (case! "C6-4: an inlined pointer offset by zero is the pointer (simplifyGEPInst)" (by 'g/c9) want9)
+             ;; its control: the caller's own zero GEP is no clone's, kept
+             (case! "C6-4 control: the caller's own zero GEP kept" (by 'g/c10) caller10)
              ;; the aggregate rule's control: c8's result against c7's IR differs
              (not (= (norm (by 'g/c8)) (norm want7)))
+             (let [m2 (inl/inline-module [callee11 caller11] #{'g/f11})
+                   m3 (inl/inline-module [caller12 callee12 leaf12] #{'g/g12 'g/f12})
+                   by2 (into {} (map (juxt second identity) (concat m2 m3)))]
+               (and (case! "rust-c6c: two call sites, the newest taken first" (by2 'g/c11) want11)
+                    (case! "rust-c6c: a clone's calls newer than the caller's own" (by2 'g/c12) want12)
+                    ;; its control: the one-level module's order against the two-level IR differs
+                    (not (= (norm (by2 'g/c11)) (norm (apply list 'llvm/define 'g/c11 (drop 2 want12)))))))
+             (case! "rust-c6c: an inlined inttoptr of a constant folded (null, a constant expression)"
+                    (some #(when (= 'g/c13 (second %)) %) (inl/inline-module [callee13 caller13] #{'g/w13})) want13)
              ;; the negative control: a case's result against another case's IR differs
              (not (= (norm (by 'g/c2)) (norm want4)))]]
     (println (str "inline-test: " (count (filter true? oks)) " of " (count oks) (if (every? true? oks) " passed" " FAILED")))

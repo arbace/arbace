@@ -8025,3 +8025,70 @@ system (`:extension-modules`, 75 methods in the records night's record, by desig
   PyMem_GetAllocator/SetAllocator (a C allocator's functions called for its domain), PyInterpreterState_Get/GetDict,
   PyUnstable_AtExit (run by Py_EndInterpreter), PyGILState_GetThisThreadState, the code extra, `_PyObject_New(Var)` of a
   built-in type, a set mirror for PySet_GET_SIZE (fill and used), `__ipow__` with the optional modulo on a C type.
+
+## As built: the code level without positions (2026-11-22, the main host, py-small-1122; the user's (b) of 2026-11-22)
+
+The round trip's level 3 (§5.2, "As built: PY2") compared the code compiled from the original's text and from the print's,
+normalized by `norm_code`; mode `:lines` records no positions and CPython 3.14's code generation follows them (E7 corrected:
+NOPs kept by line, superinstructions fused within a line, exception ranges and jumps split by line), so 30 files were
+`:code-lines`, by design (queue 175's DECISION (a)), and pip's `candidates.py` `:own-code-lines` under pyi's own levels (queue
+431). The user chose (b) on 2026-11-22: level 3 a compile without positions, comparing what the forms record.
+
+- **Live** (CPython; the read cell's records `test/python/roundtrip-{known,results}.edn`): `tools/pydump/codelevel.py` parses each
+  file, sets every node's `lineno`, `col_offset`, `end_lineno` and `end_col_offset` to 1, 0, 1, 0, compiles the tree and digests
+  `pydump.py`'s `norm_code` of it; `bin/repr-python`'s `code_levels` writes the TSVs with that CODE column as `level-*.tsv` in JOBS
+  processes (the helper's TSVs stay as dumped, the costs' and the records' input). Not in `pydump.py`: its digest keys every member
+  of the python-pydump packs, whose CODE column (positions included) stays the oracle's record. Recorded rows
+  (`REPR_PYTHON_RT_LEVELS=recorded`): level 3 implied by level 2 (`compare --recorded`), a compile without positions being a
+  function of the ast without attributes.
+- **Records mode** (pyi's own levels): `own-code` compiles the forms read in mode `:lines` (no positions) instead of the text read
+  in mode `:full`; `bin/pyi compile-check` compiles every corpus file's `:lines` forms already (`compile-known.edn` empty).
+- **The control** (both modes): each control pair's reference print with `__code_control__ = 0` appended (`code_mutants`, rows by
+  `codelevel.py` live; `own-mutant` in records mode): the print's row with the mutant's digests fails level 2, and with the mutant's
+  code beside the print's own ast, level 3.
+- **Proved** on the rows the change can move (a file whose ast is equal compiles to one code without positions): the 30 files and the
+  three corpora's control pairs, `--record --only-list` live and in records mode: all levels pass, the controls fail as they must;
+  roundtrip-known.edn's `:code-lines` and roundtrip-own-known.edn's `:own-code-lines` empty (kept, their texts saying so). An
+  `--only-list` record no longer rewrites `roundtrip-costs.edn`. The read cell: 3,702 to 3,732 passes, by design 34 to 4.
+
+## As built: the moment at a frame's return, gated (2026-11-22, the main host, py-small-1122; the user's (b) of 222's DECISION 1)
+
+"As built: 222" left the moment at `del` alone (DECISION 1 (a) then); the user chose (b) on 2026-11-22: finalization at a frame's
+return, gated so that it costs about nothing while no object with a finalizer waits, measured against the 3% budget.
+`synth/datamodel/del.py` was its case: `[C(1) for _ in [0]] and None` drops a list whose element has a `__del__` inside a lambda,
+and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it at exit (`:finalization`, `:finalization-goi`).
+
+- **The notes** (`go/arbace/py/finalize.go`): an instance whose class has a `__del__` (`trackDel`, from `objectNew` and
+  `wrapInstance`) is noted on its thread with the depth of the frame that made it (`finPendAdd`; `Thread.finPend`, at most 32, and
+  `Thread.finPendDepth`, the deepest note's depth, 0 for none).
+- **The gate** (`eval.go`'s loop, both return paths: every Python frame's return, compiled or on the loop, goes through it):
+  `t.finPendDepth > t.depth` after the depth's decrement, one load and a compare. `__init__`'s own return does not open it (the
+  instance was made at its caller's depth).
+- **The check** (`finAtReturn`): not within a drain (a finalizer's own frames), the gate shut while it runs; goi's slots scrubbed
+  (`scrubSlots`, dropGen's); `runtime.GC()` and `finBarrier` (done once every note of the returned depth moved), the drain, rounds while a
+  finalized note's weak references are left (finVerify's); then `finPendSettle`: a dead note (its record gone or its `__del__` run)
+  dropped, a survivor noted at the caller's depth, at most 3 checks; the time on finSpent's budget (50 ms and a tenth of the wall
+  time, the moment at del's), past it the notes dropped.
+- **Files keep the collection's moment** (`classInfo.delNote`): the first measure found every `open()` and every import's
+  `FileIO` and `BufferedReader` noted (pyi's `_io` is `_pyio`, whose `IOBase.__del__` they inherit): 11 to 23 forced collections at
+  a benchmark's start (GODEBUG=gctrace=1) and +6.9% compiled, +4.0% on the loop (wall, least of 5). A class whose `__del__` is
+  `_pyio`'s is tracked as before and not noted: the benchmarks' runs then have base's collections exactly (bm_chaos 3 with 1
+  forced, bm_float 3 with 1, bm_generators 3 with 0).
+- **The cost** (the 10 benchmarks of 222's table, each compiled by `bin/pyi aot` at base and at the branch, run back to back,
+  base first on odd rounds, 10 rounds, the least; the host loaded, 50-70 on 64 CPUs, so a benchmark's ratio moves by up to 10%):
+
+| sum of the 10 | base ms | branch ms | branch / base |
+|---|---:|---:|---:|
+| compiled, wall | 12,580 | 12,950 | 1.029 |
+| compiled, CPU | 13,120 | 13,469 | 1.027 |
+| the loop, wall | 14,534 | 14,416 | 0.992 |
+| the loop, CPU | 15,130 | 15,080 | 0.997 |
+
+  Under the 3% budget; with no collection added, what is left is the compare (noise beside it).
+- **Proved**: `bin/pyi check --aot --no-pyi --only-list` over del.py and the corpus's programs that make objects with a `__del__`
+  (asyncio's loop: synth/constructs/async.py, synth/paths/async-gen-aclose.py, samples/functions.py; no other program of the corpus
+  defines or imports one): 4 of 4 pass, del.py by its golden text compiled and on the loop; the negative control fails as it must.
+  test_gc, test_weakref and test_finalization by `bin/pyi check --aot --lib-test --fresh --only` at base and at the branch: 194 pass,
+  63 classed, 0 failing both, every row the same (test_trashcan_threads' counts aside, a failure both times). The AOT record's
+  del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
+  build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.
