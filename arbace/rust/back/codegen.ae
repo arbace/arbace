@@ -2187,7 +2187,48 @@
                                              (emit! bb (list '= r (list 'call ft iname [[ft (:v x)] ['i32 (:v y)]])))
                                              (assign! bb dest {:ty (name ft) :v r})
                                              (when target (br-or-merge bb t target)))
-                                           (unsupported (str "intrinsic " intrinsic)))))))
+                                           ;; C1 (2026-11-22): the atomic intrinsics as rustc_codegen_ssa's intrinsic.rs lowers them
+                                           ;; (1.99.1: atomic_load/store/fence, the read-modify-writes, cxchg and cxchgweak), the orderings
+                                           ;; their AtomicOrdering const arguments (Relaxed monotonic, Release, Acquire, AcqRel acq_rel,
+                                           ;; SeqCst seq_cst), read from the call's function constant; a pointer-typed value as rustc's
+                                           ;; (cxchg and the rmws of a pointer on the pointer itself)
+                                           (if-let [[_ op] (re-matches #"atomic_(load|store|fence|singlethreadfence|cxchg|cxchgweak|xchg|xadd|xsub|and|nand|or|xor|max|min|umax|umin)" intrinsic)]
+                                             (let [ords (mapv (fn [[_ o]] (case o "Relaxed" :monotonic "Release" :release "Acquire" :acquire "AcqRel" :acq_rel "SeqCst" :seq_cst
+                                                                            (unsupported (str intrinsic " ordering " o))))
+                                                              (re-seq #"AtomicOrdering::(\w+)" (str (second f))))
+                                                   ord (or (first ords) (unsupported (str intrinsic " without an ordering")))
+                                                   el-of (fn [o] (layout lt (second (ty-struct (ty-of o)))))
+                                                   sc-of (fn [l] (or (:scalar l) (unsupported (str intrinsic " of a non-scalar"))))
+                                                   vty (fn [sc] (symbol (:imm sc)))]
+                                               (case op
+                                                 ("fence" "singlethreadfence")
+                                                 (emit! bb (if (= op "fence") (list 'fence ord) (list 'fence ord :syncscope "singlethread")))
+                                                 "load"
+                                                 (let [p (operand! bb (first args)) el (el-of (first args)) sc (sc-of el) r (fresh!)]
+                                                   (emit! bb (list '= r (list 'load (vty sc) ['ptr (:v p)] :atomic ord :align (:size el))))
+                                                   (assign! bb dest {:ty (:imm sc) :v r}))
+                                                 "store"
+                                                 (let [p (operand! bb (first args)) v (operand! bb (second args)) el (el-of (first args)) sc (sc-of el)]
+                                                   (emit! bb (list 'store [(vty sc) (:v v)] ['ptr (:v p)] :atomic ord :align (:size el))))
+                                                 ("cxchg" "cxchgweak")
+                                                 (let [p (operand! bb (first args)) o (operand! bb (second args)) n (operand! bb (nth args 2))
+                                                       el (el-of (first args)) sc (sc-of el) t (vty sc) rt (list 'struct t 'i1)
+                                                       c (fresh!) v (fresh!) ok (fresh!)
+                                                       fail (or (second ords) (unsupported (str intrinsic " without a failure ordering")))]
+                                                   (emit! bb (list '= c (cond-> (list 'cmpxchg ['ptr (:v p)] [t (:v o)] [t (:v n)] ord fail)
+                                                                          (= op "cxchgweak") (concat [:weak true])
+                                                                          true (concat [:align (:size el)]))))
+                                                   (emit! bb (list '= v (list 'extractvalue [rt c] 0)))
+                                                   (emit! bb (list '= ok (list 'extractvalue [rt c] 1)))
+                                                   (assign! bb dest {:pair [{:ty (:imm sc) :v v} {:ty "i1" :v ok}]}))
+                                                 (let [p (operand! bb (first args)) v (operand! bb (second args)) el (el-of (first args)) sc (sc-of el)
+                                                       r (fresh!)
+                                                       k (case op "xchg" :xchg "xadd" :add "xsub" :sub "and" :and "nand" :nand "or" :or "xor" :xor
+                                                               "max" :max "min" :min "umax" :umax "umin" :umin)]
+                                                   (emit! bb (list '= r (list 'atomicrmw k ['ptr (:v p)] [(vty sc) (:v v)] ord :align (:size el))))
+                                                   (assign! bb dest {:ty (:imm sc) :v r})))
+                                               (when target (br-or-merge bb t target)))
+                                             (unsupported (str "intrinsic " intrinsic))))))))
                                  (let [;; RFP44 (a): a virtual call (InstanceKind::Virtual): the receiver's data pointer is the first argument,
                                        ;; the function its vtable's slot (meth.rs' VirtualIndex::get_fn: a load at slot x 8 bytes)
                                        virt (when (= "virtual" (:kind ci))
