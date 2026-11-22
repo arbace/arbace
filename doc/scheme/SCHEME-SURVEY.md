@@ -4879,3 +4879,38 @@ five tests that Chez fails too), SCS4 (a), the user's decision of 2026-11-08: si
 Chez's semantics (SCS4 (b): R6RS's own examples for the exact-zero division and angle, separate console ports; or a narrower variant
 not proposed before, R6RS's answers for a program that imports `(rnrs)` and Chez's for one that imports `(chezscheme)`, which the mats
 use), the user's to decide again.
+
+## As built: SCS4 (d), R6RS's answers for (rnrs), Chez's for (chezscheme) (queue 519, 2026-11-22, the Mac VM, branch `519-scheme-r6rs`, from next `3e8dfe109`)
+
+The user's decision of 2026-11-22 (journal "the user's decisions on the burst's by-design and counting questions") replaces SCS4 (a).
+The choice is made by the library a name is imported from, lexically, not for the whole program. A program-wide switch would not work:
+the mats' driver (`test/scheme/mats/run.sps`) imports (rnrs), and its mats are evaluated in an environment of (chezscheme).
+- `go/arbace/scm`: the primitives `/`, `angle`, `current-input-port` and `current-output-port` are (rnrs)'s.
+  - `/` gives R6RS 11.7.4.3's answers where an exact zero meets a flonum: `(/ 1.0 0)` +inf.0, `(/ 0.0 0)` +nan.0, `(/ 0 3.5)` 0.0,
+    `(/ 0 0.0)` +nan.0. An exact zero with an exact number raises as before.
+  - `angle` gives a flonum's angle as a flonum: `(angle +inf.0)` 0.0, `(angle 1.0)` 0.0.
+  - The console is two ports, an input one and an output one (`consoleInView`, `consoleOutView`), over the console's stdin and stdout.
+    Setting either one sets the console port itself.
+- Chez's versions are new primitives: `$chez-/`, `$chez-angle`, `$chez-current-input-port` and `$chez-current-output-port`.
+  - They are added to (psyntax system $all) through `tools/psyntax/boot-si.sps`'s `si-primitives`. psyntax.pp is booted again, and
+    `bin/si boot --check` gives the committed file.
+  - (chezscheme) exports them under the standard names. (scheme base) and (scheme complex) re-export them, so the R7RS corpora keep
+    Chez's answers.
+  - `log`'s base division stays Chez's.
+  - They print with Chez's names, in their own write and in their arity errors (`Shown`). The mats' messages name
+    `#<procedure current-input-port>`, so the full run's first try at a name of its own changed three items of mats/6.ms and two of mats/7.ms.
+- Two golden lines follow from the change. si/data's `(/ 1. 0)` is now +inf.0 (the line SCS4 (b) foresaw). si/complex's `(angle 1.0)`
+  is now 0.0.
+- The unit tables hold Chez 10.3.0's answers, so they run against the `$chez-` primitives (`chezPrim`). `TestR6RSAnswers` checks
+  (rnrs)'s versions, and its copy fails on the base's runtime in its 8 R6RS cases, as a control must.
+- racket/base and racket/io/ports pass at eval and AOT. chez-exact-zero and chez-console-port now match nothing. They stay in
+  `test/scheme/divergences.edn` until the records are made again on the main host.
+- chez-condition-message (racket/exceptions) is unchanged. The test compares `condition-message`'s text with Racket's own words, which
+  R6RS leaves unspecified. It is proposed as a judge case that leaves the cases, with that reason (SCS38, below).
+
+### Proposed
+
+- **SCS38 racket/exceptions' condition-message test.** (a) The case leaves the judged cases, with the written reason that R6RS
+  specifies a condition's types, not its message's text. Its run still counts in completeness (the judge-cases rule of 2026-11-20).
+  (b) Keep it `:design`. (c) Give si's lexical violations Racket's words. This was rejected: they are another implementation's
+  unspecified text, and Chez's mats expect Chez's. *Recommended: (a)*.
