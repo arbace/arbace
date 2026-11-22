@@ -4650,6 +4650,75 @@
 
 (swap! checks conj stray-jumps)
 
+;; [dcl.init.general]/8 (C++23 /8): a const object default-initialized (no initializer, not extern, not a static data member's
+;; declaration in its class) is of a const-default-constructible class type: a user-provided default constructor, or every direct
+;; non-static data member with a default member initializer or of such a class type, every base such a class. A scalar const
+;; object has an initializer. GCC's "uninitialized 'const b'", at the variable. Classes judged by name (defined once, outside a
+;; template); a type the file does not define, a template's, not judged.
+
+(defn uninit-consts
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        recs (java.util.HashMap.)
+        dup (java.util.HashSet.)
+        _ (letfn [(w [x tm]
+                    (cond (map? x) (let [k (:kind x) tm (or tm (#{"ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl" "ClassTemplateSpecializationDecl"} k))]
+                                     (when (and (= "CXXRecordDecl" k) (string? (:name x)) (seq (:name x)) (:completeDefinition x))
+                                       (if (or tm (.containsKey recs (:name x))) (.add dup (:name x)) (.put recs (:name x) x)))
+                                     (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v tm)))
+                          (vector? x) (doseq [y x] (w y tm))
+                          :else nil))]
+            (w (:nodes u) false))
+        strip (fn [^String t] (-> t (str/replace #"\[[^\]]*\]" "") (str/replace #"\b(const|volatile|struct|class)\b" "") str/trim))
+        ;; :yes, :no or nil (not judged)
+        cdc (fn cdc [nm depth]
+              (cond (> (long depth) 8) nil
+                    (.contains dup nm) nil
+                    :else
+                    (when-let [r (.get recs nm)]
+                      (let [ms (:inner r)
+                            ctors (filter #(= "CXXConstructorDecl" (:kind %)) ms)
+                            dflt (some #(and (not (:isImplicit %)) (not (:explicitlyDefaulted %)) (not (:explicitlyDeleted %))
+                                             (re-find #"^void \(\s*\)" (str (get-in % [:type :qualType]))))
+                                       ctors)]
+                        (cond
+                          dflt :yes
+                          (= "union" (:tagUsed r)) nil
+                          (some #(or (#{"CXXRecordDecl"} (:kind %)) (= "IndirectFieldDecl" (:kind %))) (filter #(and (= "CXXRecordDecl" (:kind %)) (nil? (:name %))) ms)) nil
+                          :else
+                          (let [fields (filter #(= "FieldDecl" (:kind %)) ms)
+                                fs (for [f fields]
+                                     (cond (:hasInClassInitializer f) :yes
+                                           (nil? (:name f)) nil
+                                           :else (let [t (str (get-in f [:type :qualType]))
+                                                       b (strip t)]
+                                                   (cond (re-find #"[*&(]" t) :no
+                                                         (re-matches #"(unsigned |signed )?(char|short|int|long|long long|bool|float|double|wchar_t)( int)?" b) :no
+                                                         (.containsKey recs b) (cdc b (inc (long depth)))
+                                                         :else nil))))
+                                bs (for [b (:bases r)] (cdc (strip (str (get-in b [:type :qualType]))) (inc (long depth))))
+                                all (concat fs bs)]
+                            (cond (some #(= :no %) all) (if (some nil? all) nil :no)
+                                  (every? #(= :yes %) all) :yes
+                                  :else nil)))))))]
+    (walk-nodes (fn [n parent]
+                  (when (and (= "VarDecl" (:kind n)) (string? (:name n)) (not (:init n))
+                             (not (#{"extern"} (:storageClass n)))
+                             (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl" "LinkageSpecDecl" "VarTemplateDecl"} (:kind parent)))
+                             (empty? (filter map? (:inner n))))
+                    (let [t (str (get-in n [:type :qualType]))
+                          b (strip t)]
+                      (when (and (re-find #"(^|\s)const(\s|$)" t) (not (re-find #"[*&(]" t)))
+                        (when (or (re-matches #"(unsigned |signed )?(char|short|int|long|long long|bool|float|double|wchar_t)( int)?" b)
+                                  (= :no (cdc b 0)))
+                          (when-let [o (mine-at n main)]
+                            (let [[l c] (line-col starts o)]
+                              (.add out {:line l :col c :kind :error :rule :uninit-const :msg (str "uninitialized 'const " (:name n) "'")}))))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj uninit-consts)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
