@@ -17128,3 +17128,30 @@ doc/CROPS-SCORE.md, "Decided (the user, 2026-11-22): the second questions", has 
   alone, the self-test failed.
 Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0 problems), --self-test, --self-test-ref,
 bin/records-check (9 pairs, 0 problems).
+
+## 2026-11-22: java-design-1122, checkpoint: Java's by-design classes built, the build queued (the burst's Java design stream)
+
+Branch `java-design-1122` from mac/next `99b2c942a`, next `7aa328e67` merged (queue 517's three rounds). Scope: test/java/divergences.edn's
+by-design and harness-design classes at interp and compiled, :speed-hang and :speed-hang-compiled, and queue 517's leftovers
+(DECISIONs 517-1 (a), 517-2 (a), reach.ae's class literals, t05150). doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-design-1122"
+lists what was built: the JVM's array limit and StringBuilder's growth limit (jrt), StackTraceElement's module constructor, ClassLoader's
+getPackage(s), findLoadedClass, parallel-capable registration and assertion status, URLClassLoader.addURL's duplicates, URLClassLoader,
+StandardMBean and FileLock extendable, a class literal rooting its class's initializer and constructors (j2g's reach.ae), and three
+world slices: java.base's XML parser (Properties' XML form), java.security.jgss's shared classes (Kerberos, GSS-API), javax.xml.datatype
+(with jdk.xml.internal.SecuritySupport moved out of javac's world); j2g's renames for their eight names the world held; java-check's
+uncaught rule taken to main's thread group (517-2 (a)); :synthetic-lambdas by design (517-1 (a)). Sources studied: jdk26u at baf63fb
+(/root/jdk26u): the slices' files, src/hotspot/share/oops/arrayOop.hpp (max_array_length), java/lang/AbstractStringBuilder.java and
+jdk/internal/util/ArraysSupport.java (newCapacity, newLength), java/lang/ClassLoader.java (ParallelLoaders, the assertion maps,
+getPackages), sun/rmi/runtime/NewThreadAction.java (the system group), jtreg's MainWrapper's rule as run.ae describes it.
+
+The world's forms were read by `bin/jrt-convert predict` (repr/java's vendoring read with context, javac's tool 8e45bec2 under
+REPR_JAVA_STALE_OK) and laid into jdk/forms write-ahead (`bin/jrt-convert verify` at the next night); jdk/sources.txt, the provenance
+counts, the module table (bin/jrt modules), jdk/provides.txt (bin/jrt provides) and jrt's manifest (bin/jrt manifest) regenerated.
+The foreign memory API's slice (jdk.internal.foreign and java.lang.foreign without the linker; Utils and AbstractMemorySegmentImpl
+derived overlays; a native segment's buffer over its block, jdk.internal.jrt.NativeArrays) waits on branch `java-design-ffm-1122`:
+three of its files (Utils, LayoutPath, AbstractLayout) read only with the whole closure as context, the convert step's chunked read
+(about 10 GiB), which the build session makes first.
+
+Not proven yet: the build (j2g's edge recorded afresh, then `bin/arbace-go --build`) and the compiled rows run in one heavy-lock
+session queued at 07:36 behind four sessions; the interp rows run on its executable after it. This checkpoint's records: :synthetic-lambdas
+(6 rows deferred -> design); reap 0 problems; crops-score --judge --strict, records-check 0 problems; Java completeness 0.9612 (next's).
