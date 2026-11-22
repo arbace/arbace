@@ -17313,3 +17313,54 @@ reaches); the code generator's Sema (arbace/cpp/sema.ae) for the rules that need
 declarations' types themselves); a whole dg-error run (4,564 files; the own passes and the files whose expected messages name a rule's
 diagnostic were run instead); the template instantiation depth, constexpr evaluation and atomic builtins' families (template.ae's and
 the constant evaluator's ground, left).
+
+## 2026-11-22: Python's round trip, level 3 a compile without positions (py-small-1122, round 1)
+
+The user's (b) of the morning ("level 3 as a compile without positions (so :code-lines passes)"). Level 3 compared the code
+compiled from the original's text and from the print's; mode :lines records no positions, and CPython 3.14's code generation
+follows the lines a node spans (where a NOP stays, a superinstruction fuses, an exception range or a jump falls: E7 corrected,
+"As built: PY2"), so 30 files (3 stdlib, 21 site-packages, 6 Lib/test) were `:code-lines` in test/python/roundtrip-known.edn, and
+pip's candidates.py `:own-code-lines` in roundtrip-own-known.edn (pyi's compiler ports CPython's line passes).
+- Live (CPython, the read cell's record): tools/pydump/codelevel.py compiles each file's ast with every node at line 1, column 0
+  and normalizes it by pydump.py's own norm_code; bin/repr-python's code_levels rewrites the TSVs' CODE column into level-*.tsv,
+  the helper's TSVs left as dumped. A separate script on purpose: pydump.py's digest keys every member of the python-pydump packs
+  (tools/pydump/records.bash), so changing it would have made every record STALE; its CODE column (positions included) stays the
+  records'. With REPR_PYTHON_RT_LEVELS=recorded (the packs' rows, which keep positions) level 3 is implied by level 2 (compare
+  --recorded): a compile without positions is a function of the ast without attributes.
+- Records mode (pyi's own levels): own-code compiles the forms read in mode :lines (no positions) instead of the text read in mode
+  :full. bin/pyi compile-check already compiles every corpus file's :lines forms (compile-known.edn empty), so no file can newly
+  fail there.
+- The control: each control's reference print with a statement added (code_mutants: `__code_control__ = 0` appended), its digests
+  by codelevel.py; the print's row with the mutant's digests must fail level 2, and with the mutant's code beside the print's own
+  ast, level 3 (as queue 431's control for pyi's levels). Both modes' runs: every control failed as it must.
+- Proof, only the rows the change can move (the user's "avoid redundancy": a file whose ast is equal compiles to the same code
+  without positions, so only the 30 can change): `REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --record --only-list` over the
+  30 and the three corpora's control pairs (36 files): all levels pass, the 30 `:known "code"` rows of roundtrip-results.edn now
+  `:pass`, roundtrip-known.edn's `:code-lines` empty (the class kept, its text saying so); records mode the same list: candidates.py
+  passes, roundtrip-own-known.edn's `:own-code-lines` empty. A partial --record no longer rewrites roundtrip-costs.edn (a whole
+  run's costs only).
+- Read cell: pass 3,702 to 3,732, by design 34 to 4 (the 4 :rejected, which the counting stream, counting-1122, takes); Python's
+  completeness 0.9485 to 0.9506.
+
+## 2026-11-22: pyi's finalization at a frame's return, gated (py-small-1122, round 2)
+
+The user's (b) of 222's DECISION 1 (doc/python/PYTHON-SURVEY.md, "As built: 222", DECISION 1; "As built: the moment at a frame's
+return, gated"). An instance whose class has a __del__ is noted on its thread with its frame's depth; the loop's return path compares
+the thread's deepest note with its depth (one load and a compare) and, when a frame that deep returns, runs one Go collection and the
+drain (finAtReturn); a survivor is noted for the caller, at most 3 checks; finSpent's budget bounds the time.
+- The first measure (base and branch compiled by bin/pyi aot, run back to back) found the gate open at every program's start: pyi's _io
+  is _pyio, so every open() and every import's FileIO and BufferedReader carry IOBase.__del__: 11 to 23 forced collections a run
+  (GODEBUG=gctrace=1), +6.9% compiled and +4.0% on the loop (wall). Refined (8e122ac7d): a class whose __del__ is _pyio's is not
+  noted (files keep the collection's moment, as before); the runs' collections are base's exactly. Alternatives not taken: checking a
+  file's closed state at the return (Python code at every return of a frame that opened a file); a smaller budget of its own.
+- Cost, the 10 benchmarks of 222's table, 10 rounds alternating, least: compiled +2.9% wall, +2.7% CPU; on the loop -0.8% wall, -0.3%
+  CPU (the host at 50-70 load on 64 CPUs; single benchmarks move by up to 10% either way). Under the 3% budget.
+- Proved by --only runs (the user's "avoid redundancy"): del.py, async.py, async-gen-aclose.py and samples/functions.py (the corpus's
+  only programs that make __del__ objects) compiled and on the loop: 4 of 4 pass, del.py by its golden text, the control failing;
+  test_gc, test_weakref and test_finalization by check --aot --lib-test --fresh at base and branch: the same 194 pass, 63 classed, 0
+  failing, row for row (test_trashcan_threads' counts aside). For P1 (py-eval-1122, the eval record): no method of these three modules
+  is expected to move.
+- Left: check-aot-linux-amd64.edn's del.py row (AOT deferred 1, and the eval cell's loop column by design 1) moves at the next whole
+  bin/pyi check --aot --record, which the tool takes only whole and only on a host whose runtime is the checkout's compiled (the gate's
+  build at this branch's key: a 33 GiB build); divergences-aot.edn's :finalization-goi and divergences-synth.edn's del.py go then
+  (their texts say so now).
