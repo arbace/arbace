@@ -16852,3 +16852,52 @@ To build:
 - Clojure: CDR12, CDR13, CDR14, CDR15 (doc/CLOJURE-DESIGN-REVIEW.md).
 - Java: t05905 (the qualifier recorded in the forms) and t07835 (JDI's generic types indexed).
 Kept as built: LLVM's envp (LLS58), arm64's literal pools (ARS50), arm64's error-judge rule, hsi's interrupted thunks (HES56 (b)).
+
+## 2026-11-22: Clojure's decisions CDR12-CDR15 built, round 1: the read and eval levels (branch `clj-cdr-1122`)
+
+The user's decisions of 2026-11-22 (entry "the user's decisions on the burst's by-design and counting questions"; doc/CLOJURE-DESIGN-REVIEW.md,
+"Decided (2026-11-22)"), from mac/next `3e8dfe109`. Cells before (pass / by design / deferred): read 908 / 2 / 0, eval 21,119 / 13 / 2,
+AOT 831 / 5 / 2; Clojure 99.72 complete.
+- CDR13 (a) (`257260421`): repr/clojure records every .cljc's reader conditionals when it reads it into a .ae (`plan` marks it `:full`,
+  `rules/translate` records it; `--full` kept, a no-op), so `:reader-conditionals` is `:reversible` and print gives the .cljc back. CDR14
+  (a) there too: the rule `:security-manager` and its control gone. Checked on stage 0 from the checkout: `bin/repr-clojure check` (18
+  tests, 293 assertions, the 4 controls fail as they must), `check --roundtrip` (every corpus equal; `:suite-ae` and `:libs-ae` one-way 1
+  and 12 -> 0, test/repr/clojure/roundtrip-known.edn), `check --libs` (host and next's gate exe equal to libs.out). The read cell's source
+  "repr/clojure's one-way rules": 4 rules, all reversible; the class `:one-way-rules` left (test/clojure/divergences-read.edn empty).
+- CDR12 (a) (`4e7f38385`, `d78ac3a63`): AbstractTableModel, TableModel, EventListenerList, TableModelListener and TableModelEvent of
+  src/java.desktop (jdk26u baf63fb) among test/jrt/jrt_sources.ae's added module sources; AbstractTableModel and TableModel derived
+  overlays (test/jrt/derive.ae's `swing-derivations`: their import of javax.swing.*, a package the world lacks, named only by their
+  documentation, dropped); AbstractTableModel among arbace.j2g.model/proxy-supers. `bin/jrt-convert update` (javac's tool 60886b49,
+  REPR_JAVA_STALE_OK, under bin/heavy-lock after 2.5 hours in its queue; 1,409 s): 3,555 converted, 0 failed, 7 forms added, none changed;
+  `bin/jrt modules` (javax.swing.event java.desktop; javax.swing.table's files are overlays, so it reports java.base); `bin/j2g-edge update`
+  (the four classes leave jdk/edge.edn; javac's edge's provenance rewritten). Pushed at once at the coordinator's word (the java-batch
+  stream's regeneration of jdk/ merges this branch first).
+- CDR14 (a): `SecurityManager` among RT's default imports again (doc/VENDOR-NOTES.md, hand change 38, reversing hand change 11). The
+  oracle's reference, the frozen v4 jar, has hand change 11: native.ae:410 (a fresh namespace resolves it) and state_errors.ae:454 (its
+  ns-map counts 106 names, v4's 105) are main-since-v4's known cases now: the read cell's +1 costs the eval cell 2 by design (a question
+  for the user below).
+- CDR15 (a), Q1 (b) (hand change 39; doc/go/EVAL-PLAN.md): the analysis unchanged (primInterface nil); `FnMethod.evalPrimInterface`, the
+  JVM's prim interface of a fixed arglist; `Evaluator.fnClass` gives an evaluated fn with such methods a class of `Dyn.defineProxyClass`
+  over `Compiler$EvalFn` implementing them, its objects EvalFn's DynSub type (arbace.j2g.model/class-supers += AFunction, RestFn,
+  Compiler$EvalFn), each invokePrim slot `Compiler$PrimInvoke` (the fn's invoke, converted by Dyn's dispatch), made by the class's
+  constructors (`CodeRun.newFn`, `newFnClosed`); a Java forms fn's class with IFn$ interfaces is an ordinary interpreted class extending
+  AFunction or RestFn (`arbace.classes.interp/make-klass`), not a CF$FnObj: the oracle's three native.ae cases are such fns. Designs
+  weighed: an EvalPrimFn subclass implementing all 358 interfaces (refused: a Java class cannot hold invokePrim(J)J and invokePrim(J)O
+  together), one subclass per interface (716 classes, and no fn of two prim arities), a wrapper proxy of AFunction (the fn's own name
+  would bind the inner fn: identity), Dyn's DynSub of EvalFn (taken: every interface's methods, the nominal check by the class's
+  interfaces, the fn still an EvalFn for c2j's link-key and FnSer). `bin/j2g-unit` 223 pass, the 7 known.
+- One gate build (`bin/arbace-go --gate-build` under bin/heavy-lock, key 52c31a81c04b): the first attempt's test build was killed by the
+  host's OOM killer at 20 GB of j2g (dmesg; others' memory), the second (J2G_JOBS 8) passed, 6,245 s, after 7 hours in the lock's queue.
+  Between the two, EvalFn no longer a leaf (j2g reads its fields through its class interface where a value is typed EvalFn): the first
+  build's evaluator microbenchmark (.tmp/probe/bench2.ae) showed closures about 9% slower, so `CodeRun.fixed` and `arity` take the FnExpr
+  and a Frame keeps the closed-over values from their first read (`fnClosed`). Measured after, on the quiet host against py-eval's build
+  b2a5b50d (next's evaluator): plain evaluated calls about 9% slower (674 -> 735 ms for 6M calls), closures 3-5%, a map over a fn the same;
+  the profile shows `Impl_Invoke_O__O`, Frame.reset's interface store and IFn_Cast's share grown.
+- Smoke on the build (.tmp/probe/smoke.ae, before and after kept): ^long fns evaluated and compiled by the Java forms compiler are IFn$LL,
+  `.invokePrim` runs, a plain fn is not, closures, two prim arities (LL and DDD), LODD, serialized and read back still IFn$LL;
+  arbace.inspector's list-model made and its serialization NotSerializableException; SecurityManager resolves.
+- Records from the build: the eval suite whole (bin/clojure-tests: 804 tests, 20,744 assertions, all pass; java-interop 44 tests, 336
+  pass; no regressions; the control as a control must; the runner's report again on the saved run); the oracle whole (22,734 of 22,741,
+  7 known, as recorded; native.ae 233, 234, 237 pass). Classes: eval less `:swing` and `:q1-boxed-prims`.
+- Cells: read 909 / 0 / 0, eval 21,121 / 11 / 2, AOT unchanged until its run (queued under the heavy lock with diffcheck's native.ae);
+  Clojure 99.78 complete. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
