@@ -19,12 +19,12 @@
 (set! *warn-on-reflection* true)
 
 ;; ---------------------------------------------------------------------------------------------
-;; The configuration: ci's types (CS35: long double is double), char's signedness
+;; The configuration: ci's types (long double x87's extended, 16 bytes: queue 522, CR3 (a), reversing CS35's double), char's signedness
 
-(def ^:dynamic *cfg* {:ldouble-size 8})
+(def ^:dynamic *cfg* {:ldouble-size 16})
 
 (defmacro ^:private with-types [& body]
-  `(binding [chk/*cx* (merge {:ldouble-size 8} *cfg*)] ~@body))
+  `(binding [chk/*cx* (merge {:ldouble-size 16} *cfg*)] ~@body))
 
 (declare build-nested cparts cmake complex? seq-node temp-i frame-temp new-slot! var-size? vmem-of dyn-member dyn-copy ex-neg vec-type? vec-binary vec-unary held vec-build lane-node vec-shape vec-as-array)
 
@@ -59,7 +59,10 @@
     (case (:k t)
       :void :v
       ;; c-rows (2026-11-22): _Float16 a float64 holding a binary16 value, loaded, stored and converted to as binary16
-      (:float :double :ldouble :float32 :float64 :float32x :float64x :float16) :f
+      (:float :double :float32 :float64 :float32x :float16) :f
+      ;; queue 522 (CR3 (a), the user's ruling): long double and _Float64x are x87's extended in software (crt's WType Float, N 80,
+      ;; wty q80), 16 bytes as the psABI lays them out
+      (:ldouble :float64x) :w
       (:struct :union :array) :m
       ;; complex types: their parts floating, or integers of at most 64 bits (GNU's complex integer types, CS105); a part
       ;; of a type out of eval (_Float128x, __bf16, the decimal types: SPEC §14) refused by design as the part is
@@ -101,7 +104,7 @@
 (defn wty [t]
   (let [t (under t)]
     (case (:k t)
-      :int128 "s128" :uint128 "u128" :float128 "q128" :dec32 "d32" :dec64 "d64" (:dec128 :dec64x) "d128"
+      :int128 "s128" :uint128 "u128" :float128 "q128" (:ldouble :float64x) "q80" :dec32 "d32" :dec64 "d64" (:dec128 :dec64x) "d128"
       :bitint (str (if (:u t) "u" "s") (:n t)))))
 
 (defn- f32? [t] (#{:float :float32} (:k (under t))))
@@ -320,16 +323,40 @@
                 (> e2 emax) (.shiftLeft (biginteger (inc (* 2 emax))) (int (dec p)))
                 :else (.or (.shiftLeft (biginteger (+ e2 emax)) (int (dec p))) (.clearBit mm (int (dec p))))))))))
 
+(declare q128-hex*)
+
+(defn- x87-of
+  "x87's 80-bit layout (the integer bit explicit; sign and exponent above the 64-bit significand) of bin-pack's bits b of the
+  format of 64 bits, bias 16383, 15 exponent bits."
+  ^BigInteger [^BigInteger b]
+  (let [frac (.and b (.subtract (.shiftLeft BigInteger/ONE 63) BigInteger/ONE))
+        ex (.and (.shiftRight b 63) (biginteger 0x7fff))
+        m (if (zero? (.signum ex)) frac (.setBit frac 63))
+        se (cond-> ex (.testBit b 78) (.setBit 15))]
+    (.or (.shiftLeft se 64) m)))
+
 (defn- q128-hex
-  "A _Float128 constant's bits as wty q128's hex text: its exact value (the checker's :ld, a BigDecimal), else v, rounded once."
-  ^String [v ld]
+  "A _Float128 (or long double: x87, when t is) constant's bits as wty q128's (q80's) hex text: its exact value (the checker's
+  :ld, a BigDecimal), else v, rounded once."
+  ^String [v ld & [t]]
+  (if (and t (#{:ldouble :float64x} (:k (under t))))
+    (let [^String h (q128-hex* v ld 64)]
+      (str "0x" (.toString (x87-of (BigInteger. (subs h 2) 16)) 16)))
+    (q128-hex* v ld 113)))
+
+(defn- q128-hex*
+  ^String [v ld p]
   (let [d (when (instance? Double v) (double v))
         neg-bit (and d (neg? (Double/doubleToRawLongBits d)))
         hex (fn [^BigInteger b] (str "0x" (.toString b 16)))
         top (fn [^long hi] (hex (.shiftLeft (BigInteger. (Long/toUnsignedString hi)) 64)))]
     (cond
-      (and (nil? ld) d (Double/isNaN d)) (top (if neg-bit (unchecked-long 0xffff800000000000) 0x7fff800000000000))
-      (and (nil? ld) d (Double/isInfinite d)) (top (if neg-bit (unchecked-long 0xffff000000000000) 0x7fff000000000000))
+      (and (nil? ld) d (Double/isNaN d)) (if (= p 64)
+                                           (hex (cond-> (.shiftLeft (biginteger 0xffff) 62) neg-bit (.setBit 78)))
+                                           (top (if neg-bit (unchecked-long 0xffff800000000000) 0x7fff800000000000)))
+      (and (nil? ld) d (Double/isInfinite d)) (if (= p 64)
+                                                (hex (cond-> (.shiftLeft (biginteger 0x7fff) 63) neg-bit (.setBit 78)))
+                                                (top (if neg-bit (unchecked-long 0xffff000000000000) 0x7fff000000000000)))
       :else
       (let [^java.math.BigDecimal x (cond (instance? java.math.BigDecimal ld) ld
                                           (instance? java.math.BigDecimal v) v
@@ -344,15 +371,15 @@
             neg (or (neg? (.signum num)) (and (zero? (.signum num)) neg-bit))
             num (.abs num)]
         (if (zero? (.signum num))
-          (hex (bin-pack neg BigInteger/ZERO 0 113 16383 15))
-          (let [k (max -100000 (- (+ 116 (.bitLength den)) (.bitLength num)))
+          (hex (bin-pack neg BigInteger/ZERO 0 p 16383 15))
+          (let [k (max -100000 (- (+ (+ p 3) (.bitLength den)) (.bitLength num)))
                 [^BigInteger qq ^BigInteger rr] (if (neg? k)
                                                   (vec (.divideAndRemainder num (.shiftLeft den (int (- k)))))
                                                   (vec (.divideAndRemainder (.shiftLeft num (int k)) den)))
                 m (let [m (.shiftLeft qq 1)] (if (zero? (.signum rr)) m (.setBit m 0)))]
-            (hex (bin-pack neg m (- (- k) 1) 113 16383 15))))))))
+            (hex (bin-pack neg m (- (- k) 1) p 16383 15))))))))
 
-(defn- q128? [t] (= :float128 (:k (under t))))
+(defn- q128? [t] (contains? #{:float128 :ldouble :float64x} (:k (under t))))
 
 (defn- dec? [t] (contains? #{:dec32 :dec64 :dec128 :dec64x} (:k (under t))))
 
@@ -396,7 +423,7 @@
   "The node of the integer constant v at type t."
   [v t]
   (case (kind t)
-    :w (list 'w (wty t) (cond (q128? t) (q128-hex v nil) (dec? t) (dec-hex t v nil) :else (str v)))
+    :w (list 'w (wty t) (cond (q128? t) (q128-hex v nil t) (dec? t) (dec-hex t v nil) :else (str v)))
     :f (list 'f (fbits v))
     ;; a pointer's constant wrapped to 64 bits as unsigned long (int-bits' default is 32 signed bits: (void *)0x123456789abcdef0
     ;; read ffffffff9abcdef0 before; the Rust agent's finding, queue 522)
@@ -407,7 +434,7 @@
   [v t & [ld]]
   (case (kind t)
     :f (list 'f (fbits (if (f32? t) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) (double v))))
-    :w (list 'w (wty t) (cond (q128? t) (q128-hex v ld) (dec? t) (dec-hex t v ld) :else (str (chk/wrap (if (integer? v) v (bigint (long v))) (under t)))))
+    :w (list 'w (wty t) (cond (q128? t) (q128-hex v ld t) (dec? t) (dec-hex t v ld) :else (str (chk/wrap (if (integer? v) v (bigint (long v))) (under t)))))
     :i (if (integer? v)
          (int-const v t)
          (list 'i (long (double v))))
@@ -1741,7 +1768,7 @@
     "snprintf" "vprintf" "vfprintf" "vsprintf" "vsnprintf" "puts" "putchar" "fputs" "fputc" "fwrite" "malloc"
     "calloc" "realloc" "free" "abs" "labs" "llabs" "imaxabs" "sqrt" "sqrtf" "sqrtl" "fabs" "fabsf" "fabsl" "floor"
     "floorf" "ceil" "ceilf" "round" "roundf" "trunc" "truncf" "copysign" "copysignf" "copysignl" "fmod" "fmodf" "fmodl" "pow"
-    "powf" "exp" "log" "log10" "sin" "cos" "tan" "atan" "atan2" "frexp" "ldexp" "modf" "nan" "nanf" "nanl" "isalnum"
+    "powf" "exp" "log" "log10" "sin" "cos" "tan" "atan" "atan2" "atan2l" "frexp" "ldexp" "modf" "nan" "nanf" "nanl" "isalnum"
     "isalpha" "isdigit" "isspace" "isupper" "islower" "toupper" "tolower" "isprint" "isxdigit" "bcmp" "bcopy" "bzero"
     "index" "rindex" "stpcpy" "strdup" "strndup" "mempcpy" "memchr" "strnlen" "fmin" "fmax" "fminf" "fmaxf"
     "lround" "llround" "lrint" "llrint" "rint" "nearbyint" "scalbn" "cabs" "conj" "creal" "cimag" "ffs"
@@ -1889,10 +1916,10 @@
       ;; queue 522: the _FloatN and decimal builtins' infinity and NaN, at the call's type (a q128 or dN constant)
       {:k (kind t) :t t :n (cond (#{"inf" "huge_val"} w) (const-node Double/POSITIVE_INFINITY t)
                                  (not= w "nans") (const-node Double/NaN t)
-                                 (q128? t) (list 'w (wty t) "0x7fff4000000000000000000000000000")
+                                 (q128? t) (list 'w (wty t) (if (= "q80" (wty t)) "0x7fffa000000000000000" "0x7fff4000000000000000000000000000"))
                                  (dec? t) (list 'w (wty t) (str "0x7e" (apply str (repeat (quot (- (case (wty t) "d32" 32 "d64" 64 128) 8) 4) "0"))))
                                  :else (list 'f 0x7ff4000000000000))}
-    (if-let [wt (and (seq args) (re-matches #"__builtin_(fabs(f128|d32|d64|d128|d64x)|isnan|isinf|isfinite|signbit)" nm)
+    (if-let [wt (and (seq args) (re-matches #"__builtin_(fabs(l|f128|f64x|d32|d64|d128|d64x)|isnanl?|isinfl?|isfinite|finitel?|signbitl?)" nm)
                      (= :w (kind (:t (res-of (first args))))) (let [at (:t (res-of (first args)))] (when (or (q128? at) (dec? at)) at)))]
       ;; queue 522: fabs and the classification builtins of a _Float128 or decimal operand, inline (the natives take doubles)
       (let [[es x] (held (ex (first args)))
@@ -1900,17 +1927,17 @@
             n (:n x)
             nan (list 'wcmp "ne" w n n)
             zero (int-const 0 wt)
-            inf (list 'and (list 'wcmp "eq" w n n) (list 'wcmp "ne" w (list 'wbin "sub" w n n) (list 'wbin "sub" w n n)))
+            inf (list 'or (list 'wcmp "eq" w n (const-node Double/POSITIVE_INFINITY wt)) (list 'wcmp "eq" w n (const-node Double/NEGATIVE_INFINITY wt)))
             ;; the sign bit: negative, or a zero or NaN whose 1/x or copy is: x < 0, or x == 0 and 1/x < 0
             neg (list 'or (list 'wcmp "lt" w n zero)
                       (list 'and (list 'wcmp "eq" w n zero) (list 'wcmp "lt" w (list 'wbin "div" w (int-const 1 wt) n) zero)))]
         (if (str/starts-with? nm "__builtin_fabs")
           {:k :w :t wt :n (list 'wseq es (list 'wif (list 'wcmp "lt" w n zero) (list 'wneg w n) n))}
           {:k :i :t chk/t-int
-           :n (list 'seq es (case nm
+           :n (list 'seq es (case (str/replace nm #"l$" "")
                               "__builtin_isnan" nan
                               "__builtin_isinf" inf
-                              "__builtin_isfinite" (list 'and (list 'lnot nan) (list 'lnot inf))
+                              ("__builtin_isfinite" "__builtin_finite") (list 'and (list 'lnot nan) (list 'lnot inf))
                               "__builtin_signbit" neg))}))
     (case nm
       ("__builtin_expect" "__builtin_expect_with_probability")
@@ -1938,11 +1965,14 @@
       ("__builtin_prefetch") {:k :v :t chk/t-void :n (seq-node-eff (mapv #(effect (ex %)) args) (list 'nop))}
       "__builtin_frame_address" {:k :i :t t :n (if *f* '(fp 0) '(i 0))}
       "__builtin_return_address" {:k :i :t t :n '(i 0)}
-      ("__builtin_inf" "__builtin_huge_val" "__builtin_infl" "__builtin_huge_vall") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
+      ;; (long double's a q80 constant since queue 522: const-node at the call's type)
+      ("__builtin_inf" "__builtin_huge_val" "__builtin_infl" "__builtin_huge_vall") {:k (kind t) :t t :n (const-node Double/POSITIVE_INFINITY t)}
       ("__builtin_inff" "__builtin_huge_valf") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
-      ("__builtin_nan" "__builtin_nanl" "__builtin_nanf") {:k :f :t t :n (list 'f (fbits Double/NaN))}
+      ("__builtin_nan" "__builtin_nanl" "__builtin_nanf") {:k (kind t) :t t :n (const-node Double/NaN t)}
       ;; a signaling NaN (queue 522: kept signaling by crt's float conversions, FE_INVALID when an operand)
-      ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") {:k :f :t t :n (list 'f 0x7ff4000000000000)}
+      ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") (if (= :w (kind t))
+                                                              {:k :w :t t :n (list 'w (wty t) "0x7fffa000000000000000")}
+                                                              {:k :f :t t :n (list 'f 0x7ff4000000000000)})
       ;; queue 126: its operand's value at its operand's type (the checker's); reassociation is not the builder's
       "__builtin_assoc_barrier" (conv (ex (first args)) t)
       ("__builtin_shuffle" "__builtin_shufflevector") (vec-shuffle nm args t)
@@ -1966,13 +1996,25 @@
       (let [[a b] args xa (ex a) xb (ex b)
             ot (with-types (chk/usual (promoted (res-of a)) (promoted (res-of b))))
             fa (:n (conv xa ot)) fb (:n (conv xb ot))]
+       (if (= :w (kind ot))
+        ;; a software format (queue 522): quiet, so ordered only after both compare equal to themselves (== raises nothing)
+        (let [[ea ha] (held (conv xa ot)) [eb hb] (held (conv xb ot))
+              w (wty ot) A (:n ha) B (:n hb)
+              ord (list 'and (list 'wcmp "eq" w A A) (list 'wcmp "eq" w B B))
+              c (fn [o] (list 'wcmp o w A B))]
+          {:k :i :t chk/t-int
+           :n (list 'seq (vec (concat ea eb))
+                    (list 'and ord (case nm
+                                     "__builtin_isgreater" (c "gt") "__builtin_isgreaterequal" (c "ge")
+                                     "__builtin_isless" (c "lt") "__builtin_islessequal" (c "le")
+                                     (c "ne"))))})
         {:k :i :t chk/t-int
          :n (case nm
               "__builtin_isgreater" (list 'fcmp "gt" fa fb)
               "__builtin_isgreaterequal" (list 'fcmp "ge" fa fb)
               "__builtin_isless" (list 'fcmp "lt" fa fb)
               "__builtin_islessequal" (list 'fcmp "le" fa fb)
-              (list 'or (list 'fcmp "lt" fa fb) (list 'fcmp "gt" fa fb)))})
+              (list 'or (list 'fcmp "lt" fa fb) (list 'fcmp "gt" fa fb)))}))
       nil)))))
 
 (defn- seq-node-eff [es e] (if (empty? es) e (list 'ei (list 'seq (vec (conj es e)) '(i 0)))))
@@ -2726,7 +2768,7 @@
               (cond
                 (and o i (every? #(= "\"\"" %) tmpl)) {:outputs o :inputs i}
                 ;; queue 522: an x87 instruction of glibc's old inline math on the register stack's top ("=t", "0", "u"),
-                ;; its meaning on ci's long double (double): fsqrt, fpatan
+                ;; its meaning on ci's long double (x87's extended in software): fsqrt, fpatan
                 (and o i (#{"fsqrt" "fpatan"} (str/trim (str/replace t #"\\[nt]" " "))))
                 {:outputs o :inputs i :x87 (str/trim (str/replace t #"\\[nt]" " "))}))))))))
 
@@ -2747,8 +2789,8 @@
             (with-meta (list 'do (vary-meta f assoc :ci/lowered true)
                              (list 'set! out (list 'conv (list 'typeof out2)
                                                    (case x87
-                                                     "fsqrt" (list '__builtin_sqrt (first args))
-                                                     "fpatan" (list '__builtin_atan2 (second args) (first args))))))
+                                                     "fsqrt" (list '__builtin_sqrtl (first args))
+                                                     "fpatan" (list '__builtin_atan2l (second args) (first args))))))
               (meta f))))
         (let [parse (fn [op] (asm-expr (:ts op)))
               tie (fn [{:keys [c]}]
