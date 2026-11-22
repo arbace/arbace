@@ -5726,3 +5726,21 @@ unsupported for its old reason, so the records do not move on an older executabl
 `live2.go` (`-live`) against `live_regabi.go`'s, `fixedbugs/issue52697.go` (a stack frame too large) against
 `fixedbugs/issue22200b.go`'s, each judged from its subject's own run, each failing as it must. The essential list takes
 26 of the 36 by its rule (every one outside fixedbugs/, every fourth of fixedbugs/).
+
+**The build** (one `bin/arbace-go --gate-build` under `bin/heavy-lock`, stage 0 the host, key 92a96093a59c): goi's table
+lists 111 packages (110), its generator 556 s for the four configurations at a peak of 13.6 GB resident (the four
+sessions held at once, each with gc's closure checked); the executable 657,551,520 bytes, the test build 667,222,176
+(next's gate build of 2026-11-21, 710e90e4771a10548878, is 552,018,080, but next has moved since; gc's own code is about
+the 36 MB of the standalone build, unstripped; `bin/goi table --size` measures the table's share); the whole build 2 h 25 min on a
+loaded host, its peak 22.5 GB (the test build's j2g, as before). `arbace -m arbace.go.gc` on `prove.go` in the
+executable gives the toolchain's gc's 500 lines byte for byte (paths aside).
+
+**Results** (the gate's executable of this checkout's key, `/root/arbace/.tmp/gate-exe/92a96093a59cb6e9edb9`, its own
+namespaces, no `ARBACE_PATH`): one program of each family first (`bin/goi check --only`: `live2`, `prove`, `writebarrier`,
+`nilcheck`, `tailcall`, `fixedbugs/issue20529`, `fixedbugs/issue52697`, `nowritebarrier`: 8 pass, the three controls
+failing as they must), then the whole check recorded (`bin/goi check --record --jobs 6`, 745 s): 1,838 programs, 1,818
+pass, 0 fail, 0 error, 8 unsupported, 8 known, 4 skipped. The 36 pass (`:gc-flags` 28, `:gc-phases` 7, `:gc-std`'s
+`nowritebarrier`); `gc2.go` (`:memory`, `ReadMemStats` and speed) passed too in that run but is flaky (by `--only` 1 pass
+and 2 known in three runs), so its row stays known. `bin/goi divergences`: 1,817 pass, 21 in 5 classes (foreign code 8,
+memory 6, unsafe layout 2, gc-m 1 deferred, gc-reference 4 n/a); the essential subset 827 programs, 0 not passing. The
+classes `:gc-flags`, `:gc-phases` and `:gc-std` are empty in the record and stay for an executable without the driver.

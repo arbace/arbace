@@ -16852,3 +16852,74 @@ To build:
 - Clojure: CDR12, CDR13, CDR14, CDR15 (doc/CLOJURE-DESIGN-REVIEW.md).
 - Java: t05905 (the qualifier recorded in the forms) and t07835 (JDI's generic types indexed).
 Kept as built: LLVM's envp (LLS58), arm64's literal pools (ARS50), arm64's error-judge rule, hsi's interrupted thunks (HES56 (b)).
+
+## 2026-11-22: gc in the executable, round 1 (go-gc-1122)
+
+The user's decision of 2026-11-22: doc/go/GOI-DESIGN-REVIEW.md's Proposed 1 (b), reversing 1 (a) of 2026-11-05, gc's
+own compiler run inside the executable, the only route for 35 Go eval rows (`:gc-flags` 28: -live 8, the SSA passes'
+-d 12, -d=wb 4, -d=nil 3, tailcall 1; `:gc-phases` 7: "stack frame too large") and `:gc-std`'s last (nowritebarrier).
+Branch `go-gc-1122` from mac/next 3e8dfe109; doc/go/GOI-SPEC.md, "Since v1: gc in the executable", holds the design.
+
+Weighed (measured on stage 0 first): interpreting cmd/compile on goi or compiling it into the executable through goi's
+table. goi's checker alone over cmd/compile's closure (tamago/cmd's forms, 217 packages with std's) takes 117 s and
+6 GB, 0 errors: an interpreted gc would pay that in every errorcheck process before goi built and ran gc's SSA back end
+at goi's speed; compiled, gc compiles a test in under a second. Compiled is lighter by orders of magnitude and truer
+(Go's compiler compiling forms bin/toolchain-vendor check proves byte-identical, none of goi's own divergences under
+gc's messages); its costs: the executable grows by gc, goi's table checks the closure in its four configurations at a
+build whose key changed (about 2 minutes and 6 GB each), 696 committed files of forms (27.9 MB).
+
+Built:
+- go/arbace/repr/go/internal/gc/: the renamed copy (cmd's and std's internal packages are not importable from the
+  module arbace) of cmd/compile's closure, 91 packages, by arbace.go.gc's copy-texts from tamago/cmd's and
+  tamago/goroot's forms (TamaGo's go1.27.1, /root/tamago-go, pinned by seed/goroot.sha256 and bin/toolchain-vendor):
+  cmd/compile/internal/X -> .../gc/compile/X, cmd/internal/X -> .../gc/cmd/X, golang.org/x/telemetry -> .../gc/x/telemetry
+  (go build refuses a path with a vendor element), internal/X -> .../gc/std/X, cmd/compile/internal/syntax the existing
+  copy arbace/repr/go/internal/syntax; nothing else changed but :other-files (test assembly; internal/abi's stub.s with
+  funcpc.go's two bodiless runtime intrinsics) and the two std files whose forms differ by configuration
+  (internal/goarch's goarch.go, internal/buildcfg's zbootstrap.go: amd64's, the differing :val annotations removed,
+  their package files without :positions, since goi's checker requires every annotation of a :positions package and
+  computes these per configuration). bin/generated-check's fourth section keeps it (arbace -m arbace.go.gc generate);
+  test/gate/generated-check-test.bash's cases for it (and the fabricated tree's gate-cache.bash, missing since that
+  library came: the test failed 11 of 14 before).
+- go/arbace/repr/go/gccompile: the driver, cmd/compile/main.go's main as forms, Compile(args string) int, listed in
+  go/arbace/gotable.edn (program-path? and j2g's copy of go/arbace/repr/ already cover it).
+- arbace.go.gc (arbace/go/gc.ae): the generator and -main FORMS ARG...: the :full forms printed back
+  (arbace.repr.go.print/print-package) in the working directory, then gc's Compile in the process; an executable
+  whose table does not list the driver ends with goi's unsupported (125).
+- bin/goi's check_err: a flag of gc's own passes (-live, -l=N, -wb=N, a -d= goi has not, -+ with go:nowritebarrier)
+  or errors goi's checker and go/types both miss (gc's phases) send the program, after gc's reference passed, to
+  check_err_gc: arbace -m arbace.go.gc with the reference's arguments (-p=p -d=panic -C -e -importcfg -o a.o FLAGS
+  -d=ssa/check/on, the reference's importcfg), gc_env, TEST_TELEMETRY_DIR in the check's work; judged by
+  err_aot_verdict as the reference is; an older executable or the box: unsupported for the old reason (checked on the
+  gate executable 710e90e4771a10548878: prove.go and issue20529 unsupported as recorded). corpus_key and the nethttp
+  forms' key leave the copy and the driver out (the key unchanged: b5bff2d93447f869a9bf9764 with and without them).
+- Controls (test/goi/controls.txt): prove-vs-loopbce, live2-vs-live_regabi, issue52697-vs-issue22200b, one a family;
+  test/goi/essential.txt takes 26 of the 36 by its rule.
+- The build: one bin/arbace-go --gate-build under bin/heavy-lock (stage 0 the host; waited about 3 h 45 min in the
+  lock's queue behind an OCaml record, clj-cdr's jrt-convert and java-batch's build), 2 h 25 min on a loaded host, key
+  92a96093a59c (/root/arbace/.tmp/gate-exe/92a96093a59cb6e9edb9): goi's table 111 packages, its generator 556 s and 13.6 GB
+  peak for the four configurations; the executable 657,551,520 bytes, the test build 667,222,176; the build's peak 22.5 GB
+  (the test build's j2g). In it, arbace -m arbace.go.gc on prove.go gives the toolchain gc's 500 lines byte for byte.
+- Proofs (light, no gate): before the build, a standalone build of the driver and the copy (bin/build-go, 49 s, 36 MB)
+  standing in for the executable's Compile through check_err_gc: all 36 pass, the three controls fail as they must; the
+  generator's copy checked by goi's checker (linux/amd64 the copy's gc: 230 packages, 123 s, 0 errors; tamago/arm64 the
+  driver: 240 packages, 151 s, 0 errors); bin/generated-check (the existing gate executable, 19 s: every section as
+  written, gc's 696 files) and test/gate/generated-check-test.bash (16 of 16); test/gate/caches-test.bash --coverage. On
+  the new executable: one program of each family (bin/goi check --only, 8 programs: live2, prove, writebarrier, nilcheck,
+  tailcall, issue20529, issue52697, nowritebarrier) pass with the three controls failing as they must; then the record.
+- The record from one whole run (bin/goi check --record --jobs 6, the new executable, its own namespaces, 745 s; the corpora
+  and gc's references hard-linked from go-rows-1122's worktree, whose corpus_key b5bff2d93447f869a9bf9764 is this
+  checkout's, and the table's linux std forms from py-eval-1122's at the table's key 74ea0a0ed12d41e7): 1,838 programs,
+  1,818 pass, 8 unsupported, 8 known, 4 skipped, 0 fail, 0 error. The 36 rows moved to pass (gc-flags 28 -> 0, gc-phases
+  7 -> 0, gc-std 1 -> 0); gc2.go passed in that run but is flaky (--only: 1 pass, 2 known), so its row was put back to
+  known by hand (the record otherwise the run's). bin/goi divergences: 1,817 pass, 21 in 5 classes, the essential subset
+  (827) 0 not passing.
+- REAP (bin/reap --record): Go eval 1,781 / 52 / 1 (n/a 4) -> 1,817 / 16 / 1; bin/crops-score --record: Go's
+  completeness 0.9890 -> 0.9939 (eval 97.1 -> 99.0), maturity and independence 1.0; --judge --strict, bin/reap and
+  bin/records-check: 0 problems.
+- Left in Go's eval cell, each a decision for the user: foreign-code 8 (assembly, cgo, go:linkname: no forms to
+  interpret, section 1.1), memory 6 (allocation counts, finalizer timing through goi's registries, heap profiles, gc2's
+  ReadMemStats), unsafe-layout 2 (issue8606b: gc's comparison order; nilptr: gc's data segment layout), gc-m 1 deferred
+  (escape_unique: goi's -m port lacks other packages' generic instances; gc in the executable could judge it as it judges
+  -live, if the user wants -m judged by gc rather than by goi's port of 2026-11-06), gc-reference 4 n/a.
+Light: no gate; the new gate executable for the proofs and the record, stage 0 the tools' host.
