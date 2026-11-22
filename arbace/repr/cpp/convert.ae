@@ -877,7 +877,12 @@
             (mk 'set! (ex l) (or (binops (subs op 0 (dec (count op)))) (gap :operator op)) (ex r)))
           "ConditionalOperator" (let [[c a b] (kids n)] (mk '? (ex c) (ex a) (ex b)))
           "ArraySubscriptExpr" (let [[a i] (kids n)] (mk 'aget (ex a) (ex i)))
-          "CStyleCastExpr" (mk 'conv (cast-type n) (ex (first (kids n))))
+          "CStyleCastExpr" (if (when-let [[b e] (and (not (macro-node? n)) (rng n))]
+                                 (re-find #"^\(\s*(?:enum|struct|union|class)\b[^()]*\{" (text-at b e)))
+                             ;; (cpp-read, 2026-11-22: a cast whose type-id defines a class or enumeration, an error ([dcl.type.general]/3)
+                             ;; the forms have no type for: its text, g++.old-deja's g++.bugs/900405_01.C; before, the type's name alone)
+                             (text-form n "CStyleCastExpr/definition")
+                             (mk 'conv (cast-type n) (ex (first (kids n)))))
           ("CXXStaticCastExpr" "CXXDynamicCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr")
           (mk ({"CXXStaticCastExpr" 'cpp/static-cast "CXXDynamicCastExpr" 'cpp/dynamic-cast
                 "CXXReinterpretCastExpr" 'cpp/reinterpret-cast "CXXConstCastExpr" 'cpp/const-cast} k)
@@ -1000,7 +1005,13 @@
   "A condition, or its declaration (if (T x = e))."
   [n var]
   (if var
-    (let [[d] (decl-forms (first (kids var)) :local)] (apply list 'cpp/decl (rest d)))
+    ;; (cpp-read, 2026-11-22: a condition's declaration defining a class or enumeration, an error ([stmt.pre]/5, [dcl.type.general]/3)
+    ;; the declaration's form drops: a gap, the statement written as its text (g++.old-deja's g++.jason/cond.C))
+    (let [d0 (first (kids var))]
+      (when-let [[b e] (and (not (macro-node? d0)) (rng d0))]
+        (when (re-find #"^\s*(?:const\s+|volatile\s+)*(?:enum|struct|union|class)\b[^;()=]*\{" (text-at b e))
+          (gap :condition-definition "a class defined in a condition")))
+      (let [[d] (decl-forms d0 :local)] (apply list 'cpp/decl (rest d))))
     (ex n)))
 
 (defn- attr-arg [^String a]
@@ -1089,6 +1100,11 @@
               range-e (first (kids rv))
               lvd (first (kids lv))
               _ (when-not (= (kind lvd) "VarDecl") (gap :for "a structured binding"))
+              ;; (cpp-read, 2026-11-22: a range declaration whose type defines a class or enumeration, an error ([stmt.ranged]/1
+              ;; with [dcl.type.general]/3) the forms have no type for: the statement's text, cpp0x/range-for8.C)
+              _ (when-let [[b e] (and (not (macro-node? n)) (rng n))]
+                  (when (re-find #"^for\s*\(\s*(?:enum|struct|union|class)\b[^():]*\{" (text-at b e))
+                    (gap :for "a class defined in the range declaration")))
               [x] (var-form lvd :local true)]
           [(addm (apply mk 'cpp/for-each
                         (into (if-not (none? init) (if (= (kind init) "DeclStmt") (vec (local-decl init)) [(ex init)]) [])
@@ -1685,6 +1701,9 @@
       (contains? n :TemplateInstantiationPattern) []
       (and (macro-node? n) (not *in-macro*) (not (#{"NamespaceDecl" "LinkageSpecDecl"} k)))
       (macro-form n "macro" true #(decl-forms n ctx outer?))
+      ;; (cpp-read, 2026-11-22: a member declarator the parser ended without its ;, GCC's assumed semicolon: an error the forms
+      ;; would print as a declaration it is not, its text instead, cpp2a/constexpr-99287.C)
+      (:_semi-missing n) [(text-form n (str k "/semi-missing") true)]
       :else
       (try
         (case k
@@ -1874,7 +1893,11 @@
   [names n ctx]
   (try (binding [*grp* (grp-pattern names)]
          (let [fs (vec (decl-forms n ctx))]
-           (when (and (seq fs) (every? #(and (seq? %) (#{'c/var 'c/typedef} (first %)) (not (:cpp/macro (meta %)))) fs) (some has-base? fs))
+           (when (and (seq fs) (every? #(and (seq? %) (#{'c/var 'c/typedef} (first %)) (not (:cpp/macro (meta %)))) fs) (some has-base? fs)
+                      ;; (cpp-read, 2026-11-22: the class's spelling replaced in the declarator's type alone: one in its
+                      ;; initializer, `struct OK2 { int a; } &s6 = *(new OK2());` (g++.dg's parse/semicolon3.C), stays written,
+                      ;; the declaration its text; before, the initializer's c/base printed as `c::base`)
+                      (not-any? #(some has-base? (nnext %)) fs))
              fs)))
        (catch arbace.lang.ExceptionInfo e (if (:cpp/gap (ex-data e)) nil (throw e)))))
 

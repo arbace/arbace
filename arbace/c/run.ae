@@ -27,15 +27,51 @@
                 (when-let [m (and (instance? arbace.lang.IObj x) (meta x))] (some walk (vals (dissoc m :line :column))))))]
     (boolean (some walk forms))))
 
+;; queue 522b: printf's doubles without long double. musl's fmt_fp (src/stdio/vfprintf.c) computes in long double, x87's
+;; extended in software since queue 522; its exact body (the digest of its forms) gets a first statement that hands a double
+;; argument (ps not BIGLPRE) to ci's native __ci_fmt_fp (go/arbace/ci/natives.ae's fmtFp64: fmt_fp's algorithm on the double,
+;; musl x86_64's bytes), which writes the whole output into the big[] buffer; -1 (a rounding direction other than nearest, an
+;; output past the buffer) runs fmt_fp's own body, as does every %Le.
+
+(def ^:private musl-fmt-fp-digest
+  "SHA-256 of musl 1.2.6's fmt_fp as forms (pr-str, no metadata)."
+  "cb2da022245c6a9ce53cbb41585f3fdf6edc9f9a0e89b3bfbf2ed04e7eb7888f")
+
+(defn- musl-fmt-fp? [f]
+  (and (seq? f) (= 'c/defn (first f)) (symbol? (second f)) (= "fmt_fp" (name (second f))) (:static (meta (second f)))
+       (= 4 (count f)) (seq? (nth f 3)) (= 'let (first (nth f 3)))
+       (= musl-fmt-fp-digest
+          (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes ^String (pr-str f) "UTF-8"))]
+            (apply str (map #(format "%02x" (bit-and (long %) 0xff)) d))))))
+
+(defn patch-fmt-fp
+  "The forms with musl's fmt_fp given its double path (__ci_fmt_fp declared before it); other forms are kept identical."
+  [forms]
+  (if-not (some musl-fmt-fp? forms)
+    forms
+    (vec (mapcat (fn [f]
+                   (if (musl-fmt-fp? f)
+                     (let [[d nm ps body] f
+                           [l bs & stmts] body
+                           fast '(when (!= ps BIGLPRE)
+                                   (let [^int ci_n (__ci_fmt_fp (conv (* char) big) (* bufsize 4) y w p fl t)]
+                                     (when (>= ci_n 0)
+                                       (out f (conv (* char) big) ci_n)
+                                       (return ci_n))))]
+                       ['(c/declare __ci_fmt_fp ^int [(* char) int long-double int int int int])
+                        (with-meta (list d nm ps (with-meta (apply list l bs fast stmts) (meta body))) (meta f))])
+                     [f]))
+                 forms))))
+
 (defn check-read
   "A read checked for ci: {:rd :results :std :unsigned-char :errors}."
   [h fc rd]
   (let [;; the empty asm templates' operands as C forms (arbace.c.build/lower-asms), checked and built as the program's own
         rd (-> rd
-               (update :forms build/lower-asms)
+               (update :forms (comp patch-fmt-fp build/lower-asms))
                (update :units (fn [us] (when us (into (empty us) (for [[k u] us] [k (update u :forms build/lower-asms)]))))))
         uc (boolean (some #{"-funsigned-char"} (:args fc)))
-        r (chk/check-unit rd (keyword (:std fc)) (annot/builtin-forms h fc) :results true :ldouble-size 8 :unsigned-char uc
+        r (chk/check-unit rd (keyword (:std fc)) (annot/builtin-forms h fc) :results true :ldouble-size 16 :unsigned-char uc
                           ;; the references are built with -fpermissive -w (bin/lib/ci/record-ref)
                           :permissive true)]
     {:rd rd :results (:results r) :std (keyword (:std fc)) :unsigned-char uc :errors (:errors r)}))
@@ -50,6 +86,8 @@
       (:error rd) {:status :read-error :message (str/join "; " (take 3 (:error rd)))}
       (:refused rd) {:status :read-refused :message (str (name (:refused rd)) ": " (:message rd))}
       :else (let [u (check-read h fc rd)
+                  ;; queue 522: gcc's builtins expanded (arbace.c.build: abs and its kin) unless -fno-builtin or -ffreestanding
+                  u (assoc u :no-builtin (boolean (some #(or (= % "-fno-builtin") (= % "-ffreestanding")) opts)))
                   ;; the reference builds with -fpermissive (gcc 15's implicit declarations a warning there)
                   u (update u :errors (fn [es] (vec (remove #(re-find #"implicit declaration of function" %) es))))]
               (if (seq (:errors u))

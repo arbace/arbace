@@ -344,12 +344,16 @@ void __atomic_store();
 ;; the converter and the checkers after it recurse over such a tree past Go's 1 GB stack, a fatal error that ends the whole
 ;; corpus's run. Beyond MAX-NEST nested statements, casts, declarators, pointers, structs and initializers the parse panics
 ;; with "stack overflow" as the evaluated parse did (CS60's :eval-depth and :eval-limits classes keep holding them)
-(def ^:const DEPTH 13) (def ^:const MAX-NEST 4000)
+(def ^:const DEPTH 13)
+(def ^:dynamic *max-nest*
+  "c-tails: the nesting bound, MAX-NEST's 4,000 unless REPR_C_MAX_NEST names another: the tree check, which neither converts nor
+  checks the tree, reads gcc's limits-*.c whole on a compiled parse (bin/lib/repr-c/parse-check)."
+  (if-let [v (System/getenv "REPR_C_MAX_NEST")] (Long/parseLong v) 4000))
 
 (deftype Parser [nx ^ArrayList errs ^ArrayList toks kw ^objects st])
 (defn- nest! [^Parser p]
   (let [^objects st (.-st p) d (inc (long (or (aget st DEPTH) 0)))]
-    (when (> d MAX-NEST) (throw (StackOverflowError. "the parse nests beyond MAX-NEST")))
+    (when (> d (long *max-nest*)) (throw (StackOverflowError. "the parse nests beyond MAX-NEST")))
     (aset st DEPTH (Long/valueOf d))))
 (defn- unnest! [^Parser p]
   (let [^objects st (.-st p)] (aset st DEPTH (Long/valueOf (dec (long (aget st DEPTH)))))))
@@ -1295,9 +1299,44 @@ void __atomic_store();
 (binary-level logical-and-expression inclusive-or-expression "LogicalAndExpression" :LogicalAndExpression :InclusiveOrExpression {:ANDAND :LogicalAndExpressionLAnd})
 (binary-level logical-or-expression logical-and-expression "LogicalOrExpression" :LogicalOrExpression :LogicalAndExpression {:OROR :LogicalOrExpressionLOr})
 
+(defn- scs-no-complit?
+  "c-tails (*recover*): whether the `(` at lookahead `i` (storage class specifiers and a type name) closes with no `{` after it:
+  gcc's parser reads such a parenthesized type name as a cast's, sizeof's or alignof's and reports the storage class specifier
+  (gcc.dg's c23-complit-5.c, h ())."
+  [^Parser p ^long i]
+  (loop [j (inc i) depth 1]
+    (let [c (pkc p j)]
+      (cond
+        (= c :eof) false
+        (= c \() (recur (inc j) (inc depth))
+        (= c \)) (if (= depth 1) (not= (pkc p (inc j)) \{) (recur (inc j) (dec depth)))
+        :else (recur (inc j) depth)))))
+
+(defn- scs-type-name
+  "c-tails (*recover*): `( storage-class-specifiers type-name )` read as a type name's parentheses, gcc's error \"storage class
+  specifier in WHAT\" reported (a recovery error): [lparen type-name rparen]."
+  [^Parser p ^String what]
+  (let [lparen (sh p)
+        t (tok0 p)
+        _ (loop [] (when (storage-class-specifier? (rn p)) (storage-class-specifier p) (recur)))
+        _ (eh-soft! p (str (tpos t) ": storage class specifier in " what))
+        tn (type-name p)]
+    [lparen tn (must p \))]))
+
 (defn- compound-literal-storage [^Parser p ctn?] ; go-whim: C23 6.5.3.6
   (let [lparen (sh p)
         scs (loop [scs []] (if (storage-class-specifier? (rn p)) (recur (conj scs (storage-class-specifier p))) scs))
+        ;; c-tails (*recover*): C23 6.5.3.6 takes constexpr, register, static and thread_local alone; gcc's parser does not start a
+        ;; compound literal at another (c_token_starts_compound_literal), "expected expression before 'typedef'" (gcc.dg's
+        ;; c23-complit-5.c, bad_scspec ()): reported, the specifier dropped
+        scs (if *recover*
+              (vec (remove (fn [sc] (when (#{:StorageClassSpecifierTypedef :StorageClassSpecifierAuto :StorageClassSpecifierExtern
+                                              :StorageClassSpecifierDeclspec} (.get ^HashMap sc :Case))
+                                      (let [t (.get ^HashMap sc :Token)]
+                                        (eh-soft! p (str (tpos t) ": expected expression before '" (src t) "'"))
+                                        true)))
+                           scs))
+              scs)
         tn (type-name p)
         rparen (must p \))]
     (if-not (= (rn p) \{)
@@ -1312,6 +1351,11 @@ void __atomic_store();
     :eof (do (unexpected-eof p) [nil nil])
     \( (let [c (pkct p 1)]
          (cond
+           (and *recover* (storage-class-specifier? c) (scs-no-complit? p 0))
+           (let [[lparen tn rparen] (scs-type-name p "cast")
+                 r (node "CastExpression" :Case :CastExpressionCast :Token lparen :TypeName tn :Token2 rparen)]
+             (s! r :CastExpression (first (cast-expression p ctn?)))
+             [r nil])
            (storage-class-specifier? c) (let [u (compound-literal-storage p ctn?)] [u u]) ; go-whim
            (or (specifier-qualifier? c true) (= c :ATTRIBUTE))
            (let [lparen (sh p) tn (type-name p) rparen (must p \))]
@@ -1355,7 +1399,10 @@ void __atomic_store();
                       tn (type-name p) rp (must p \))]
                   (node "UnaryExpression" :Case :UnaryExpressionSizeofType :Token sz :Token2 lp :TypeName tn :Token3 rp))
               (if (and (= (pkc p 1) \() (storage-class-specifier? (pkct p 2)))
-                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (compound-literal-storage p ctn?))
+                (if (and *recover* (scs-no-complit? p 1))
+                  (let [sz (sh p) [lp tn rp] (scs-type-name p "'sizeof'")]
+                    (node "UnaryExpression" :Case :UnaryExpressionSizeofType :Token sz :Token2 lp :TypeName tn :Token3 rp))
+                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (compound-literal-storage p ctn?)))
                 (if (and (= (pkc p 1) \() (specifier-qualifier? (pkct p 2) true))
                 (let [sz (sh p) lp (sh p) tn (type-name p) rp (must p \))]
                   (if (= (rn p) \{)
@@ -1368,6 +1415,9 @@ void __atomic_store();
       :DEC (node "UnaryExpression" :Case :UnaryExpressionDec :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
       :ALIGNOF (if (= (pkc p 1) \()
                  (cond
+                   (and *recover* (storage-class-specifier? (pkct p 2)) (scs-no-complit? p 1))
+                   (let [al (sh p) [lp tn rp] (scs-type-name p (str "'" (src al) "'"))]
+                     (node "UnaryExpression" :Case :UnaryExpressionAlignofType :Token al :Token2 lp :TypeName tn :Token3 rp))
                    (storage-class-specifier? (pkct p 2))
                    (node "UnaryExpression" :Case :UnaryExpressionAlignofExpr :Token (sh p) :UnaryExpression (compound-literal-storage p ctn?))
                    (specifier-qualifier? (pkct p 2) true)
@@ -1691,17 +1741,21 @@ void __atomic_store();
   [^Parser p]
   ;; n-c-last (round 54): also an operator no expression ends with just before a closing bracket or a comma (gcc.dg's
   ;; c23-attr-syntax-5.c, `[[unknown_attribute(!)]]`): no argument expression list reads so, balanced tokens do
-  (loop [i 0 open [] prev nil]
+  ;; c-tails: but a `*` that only stars follow from a `(`, an abstract declarator's pointer in a type name (`sizeof (void (*)(...))`,
+  ;; gcc.dg's c23-attr-syntax-6.c's gnu::vector_size): gcc reads a gnu:: attribute's arguments as expressions there too
+  (loop [i 0 open [] prev nil stars? false]
     (let [c (pkc p i)]
       (cond
         (= c :eof) false
         (= c \;) true
+        (and (= c \)) (= prev \*) stars?) (recur (inc i) (if (= (peek open) c) (pop open) open) c false)
         (and (in? c \) \] \} \,) (in? prev \! \~ \+ \- \* \/ \% \& \| \^ \< \> \= \? \: \,)) true
-        (in? c \( \[ \{) (recur (inc i) (conj open ({\( \) \[ \] \{ \}} c)) c)
+        (in? c \( \[ \{) (recur (inc i) (conj open ({\( \) \[ \] \{ \}} c)) c false)
         (in? c \) \] \}) (cond (empty? open) false
                               (not= (peek open) c) true
-                              :else (recur (inc i) (pop open) c))
-        :else (recur (inc i) open c)))))
+                              :else (recur (inc i) (pop open) c false))
+        (= c \*) (recur (inc i) open c (or (= prev \() (and (= prev \*) stars?)))
+        :else (recur (inc i) open c false)))))
 
 (defn- std-attribute [^Parser p]
   (let [r (node "AttributeValue" :Case :AttributeValueIdent)]
@@ -1792,10 +1846,24 @@ void __atomic_store();
       (let [r (node "InitDeclaratorList" :InitDeclarator (init-declarator p ds d declare))]
         (loop [prev r]
           (when (= (rn p) \,)
+            (if (and *recover* (not (in? (pkc p 1) \( \* :IDENTIFIER :ATTRIBUTE)) (not (std-attr-at? p 1)))
+              ;; c-tails (*recover*, the dg check): a comma followed by what begins no declarator (`#embed`'s bytes after an
+              ;; initializer, c-c++-common/cpp/embed-10.c): gcc's c_parser_declaration_or_fndef reports "expected identifier or
+              ;; '(' before X" and skips to the declaration's end; the tokens up to the `;` at depth 0 (left for the declaration)
+              (let [_ (sh p) t (tok0 p)]
+                (eh-soft! p (str (tpos t) ": expected identifier or '(' before " (gcc-token-name t)))
+                (loop [depth 0]
+                  (let [c (rn p)]
+                    (cond
+                      (= c :eof) nil
+                      (and (zero? depth) (in? c \; \})) nil
+                      (in? c \( \[ \{) (do (sh p) (recur (inc depth)))
+                      (in? c \) \] \}) (do (sh p) (recur (max 0 (dec depth))))
+                      :else (do (sh p) (recur depth))))))
             (let [idl (node "InitDeclaratorList" :Token (sh p) :AttributeSpecifierList (attribute-specifier-list-opt p)
                             :InitDeclarator (init-declarator p ds nil declare))]
               (link! prev idl :InitDeclaratorList)
-              (recur idl))))
+              (recur idl)))))
         r))))
 
 (defn- init-declarator [^Parser p ds d declare]

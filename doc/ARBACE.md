@@ -484,7 +484,17 @@ code. Three kinds of things live here:
   AX5.4") the same way (`signal.ae`, `sem_bit.ae` new), and `test/asm/x86i/gen.ae` (`asm.x86i-gen`, the synthetic programs) by hand.
   x86-print (2026-11-22, doc/asm/AMD64-SURVEY.md, "As built: x86-print"): `asm/amd64/lfi.ae` (`arbace.asm.amd64.lfi`: the LFI rewriter
   and its ABI note) written by hand after the same tarball's `llvm/lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp`,
-  `llvm/lib/MC/MCLFI.cpp` and `MCLFIRewriter.cpp`; no code is copied.
+  `llvm/lib/MC/MCLFI.cpp` and `MCLFIRewriter.cpp`; no code is copied. x86-objs (2026-11-22, AXS99 (b), doc/asm/AMD64-SURVEY.md, "As
+  built: x86-objs"): `asm/macho.ae` (`arbace.asm.macho`: the Mach-O writer and reader, the format's part of the object assembler) after
+  the same tarball's `llvm/lib/MC/MachObjectWriter.cpp`, `MCMachOStreamer.cpp`, `MCParser/DarwinAsmParser.cpp`, `MCSectionMachO.cpp`,
+  `MCObjectFileInfo.cpp` and `MCAsmInfoDarwin.cpp`; `asm/amd64/macho.ae` (`arbace.asm.amd64.macho`: x86's Mach-O relocations and compact
+  unwind) after `llvm/lib/Target/X86/MCTargetDesc/X86MachObjectWriter.cpp`, `X86AsmBackend.cpp`'s DarwinX86AsmBackend and
+  `llvm/lib/MC/MCDwarf.cpp`'s EmitCompactUnwind; `asm/coff.ae` (`arbace.asm.coff`: the COFF writer and reader) after
+  `llvm/lib/MC/WinCOFFObjectWriter.cpp`, `MCWinCOFFStreamer.cpp` and `MCParser/COFFAsmParser.cpp`; `asm/amd64/coff.ae`
+  (`arbace.asm.amd64.coff`: x86's COFF relocations and the Win64 unwind tables) after `X86WinCOFFObjectWriter.cpp`,
+  `X86WinCOFFStreamer.cpp`, `llvm/lib/MC/MCWin64EH.cpp` and `MCStreamer.cpp`'s emitWinCFI*; `asm/amd64/objview.ae`
+  (`arbace.asm.amd64.objview`: llvm-objdump's, llvm-readobj's and llvm-nm's text of those objects) after `llvm/tools/llvm-objdump/`,
+  `llvm/tools/llvm-readobj/`, `llvm/tools/llvm-nm/` and `llvm/lib/Object/`; written by hand, no code is copied.
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

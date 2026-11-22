@@ -1180,6 +1180,30 @@ threads stand at once).
   local to the crop. The known files keep the three entries until `bin/repr-rust roundtrip --text --pretty --only-list LIST
   rustc-1.99.1-ui` reports them FIXED; then each FIXED entry is removed from the tree, text and pretty known files.
 
+## The files rustc rejects; the deep files confirmed (2026-11-22, branch `misc-tails-1122`)
+
+The read and print cells' last four non-passes (each cell 1 by design, 3 deferred):
+
+- **`:converter-depth` (3, deferred): confirmed fixed.** RCD1 (a)'s `ensure-sufficient-stack` had been checked on synthetic files of
+  each shape only (the UI tarball was not on the host). With the tarball fetched by its pin, `bin/repr-rust roundtrip --text --only`
+  on `associated-consts/issue-93775.rs`, `expr/if/expr-stack-overflow.rs` and `parser/survive-peano-lesson-queue.rs` (8 MB) with the
+  UI corpus's control pair: the tree level, the text level (byte for byte, 8,122,992 bytes for the peano file) and mode `:full`'s
+  trees all FIXED, then `--pretty-only` 5 of 5 equal; each process under 8 GB of address space. The entries left the tree, text and
+  pretty known files.
+- **`:parser-rejects` (1, by design): passes by its own verdict.** erased-serde 0.4.10's `src/features_check/error.rs` is one string
+  literal that `features_check/mod.rs` declares as a module when the feature alloc is not chosen, so that the crate's build fails with
+  rustc's message. rustc 1.99.1's parser (the helper, `bin/repr-rust dump --reader helper`) rejects it: `expected item, found
+  "..."` at 1:1-1:82; the native reader rejects it with the same message and span (its dump's `rsdump/error` and `rsdump/diagnostic`).
+  Such files are listed with rustc's recorded diagnostic in `test/rust/roundtrip-rejects.edn`; `arbace.repr.rust`'s `compare` and
+  `compare-text` (`--rejects`, given by `bin/repr-rust` at every level) pass a listed file when the reader's rejection (the forms
+  report's error and, new, its `:diagnostic`, carried from the converter's ex-data) and at the tree levels the original's tree text
+  are that rejection, and fail it otherwise; each such pass is judged again against the entry with its message changed, which must
+  fail (`control rejects/FILE fails as it must`). Under `REPR_RUST_READER=helper` the helper's dump says only "rustc's parser failed",
+  so the file is judged `:rejection-differs` there (the helper is the oracle's reader, not the round trip's default).
+- Beside: `--pretty --only` printed nothing (the print's `--only` matched forms files by the corpus's file names): `pretty_level` now
+  selects the forms report's `:out` of each named file. The UI corpus's negative control named two files of the corpus's `:rejected`
+  (never in a run, so always left): now `parser/as-precedence.rs` against `parser/associated-path-shl.rs`, which fails as it must.
+
 ## The pinned rustc (RIND11 (a), 2026-11-18, round 54; branch `n-rind11`)
 
 Alpine's apk moved the host to rustc 1.100.0 on 2026-11-15, but `tools/rsdump/RUSTC_VERSION` pins 1.99.1, so `bin/gate --pins`,
