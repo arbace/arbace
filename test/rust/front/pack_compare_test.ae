@@ -7,7 +7,8 @@
   pack-compare-test`."
   (:require [arbace.rust.front.build-run :as br] [arbace.rust.front.passes :as passes] [arbace.rust.front.mono :as mono]
             [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.resolve :as resolve]
-            [arbace.rust.back.codegen :as cg] [arbace.rust.back.check :as chk] [arbace.rust.front.lib-unit :as lu]))
+            [arbace.rust.back.codegen :as cg] [arbace.rust.back.check :as chk] [arbace.rust.front.lib-unit :as lu]
+            [arbace.rust.front.core-check :as cc]))
 
 ;; C1's drop glue (doc/rust/FRONTEND-SURVEY.md, "C1's drop glue"): codegen's drop terminators as rustc writes them, each body's
 ;; LLVM forms against std's IR's (the pinned build, test/rust/runtime/ir.sha256), after RF3's normalizer
@@ -593,5 +594,24 @@
           cmp (first (filter #(and (seq? %) (= 'icmp (first %))) (tree-seq coll? seq f)))]
       (check "C1: Option<(usize, char)>'s discriminant reads the char (the pair's second value) against -1"
              (if (and cmp (= '[i32 %_1.1 -1] [(nth cmp 2) (nth cmp 3) (nth cmp 4)])) :equal [:differs cmp]) :equal))
+    ;; queue 512 (503-1): core-check's names take its crate-private traits' generics (BytewiseEq<Rhs = Self>), where std's have none
+    (let [bw '[(type "Self") (type "Rhs" (param 0 "Self"))]
+          std2 (cc/with-native-std {:mods {} :generics {"core::cmp::PartialEq" '[(type "Self")]}}
+                                   {:traits {"core::cmp::bytewise::BytewiseEq" {:generics bw} "core::cmp::PartialEq" {:generics bw}}})]
+      (check "512: a crate-private trait's generics in core-check's names"
+             (if (= bw (get-in std2 [:generics "core::cmp::bytewise::BytewiseEq"])) [:equal] [:differs (:generics std2)]) [:equal])
+      (check "512 control: std's own generics are kept (a native trait's never replaces them)"
+             (if (= bw (get-in std2 [:generics "core::cmp::PartialEq"])) [:equal] [:differs (get-in std2 [:generics "core::cmp::PartialEq"])]) :differs))
+    ;; queue 512: a promoted constant of an instance-judged body named by the instance's def path at its arguments, as rustc's
+    ;; optimized MIR of the instance prints it (slice::cmp's `<impl at ..>::compare::promoted[0]` against
+    ;; `<u8 as core::slice::cmp::SliceOrd>::compare::promoted[0]`)
+    (let [pt (fn [d v] (binding [br/*instance-def* d] (#'br/promoted-text v [])))
+          v '(unevaluated "hint::<impl at x.rs:1:1: 1:9>::f" [] 0)]
+      (check "512: a promoted constant at the instance: the instance's path"
+             (let [t (pt "core::hint::black_box" v)] (if (= t "const core::hint::black_box::promoted[0]") [:equal] [:differs t])) [:equal])
+      (check "512 control: an inline const (no promoted index) is not renamed"
+             (let [t (pt "core::hint::black_box" '(unevaluated "mem::needs_drop::<T>::{constant#0}" [] nil))] (if t [:equal] [:differs t])) :differs)
+      (check "512 control: a closure's body keeps its text (its MIR name is its owner's)"
+             (let [t (pt "core::hint::black_box::{closure#0}" v)] (if t [:equal] [:differs t])) :differs))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))
