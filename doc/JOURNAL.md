@@ -17259,3 +17259,17 @@ evaluates the reader from the checkout in every process (about 40 s): it waits f
 read checks on stage 0 from this checkout: lex-check samples 6 of 6 and lex-errors 62 of 62, parse-check --full samples 6
 of 6 and lex-errors 62 of 62 (4 with non-ASCII lines), their controls failing as they must. Runs in
 .tmp/repr-python/pyi/check/only-6e52ccff8b34 and only-680ec2972e63 of the py-mods worktree.
+
+## 2026-11-22: py-mods-1122, round 6: the standard streams' write_through, -u and PYTHONUNBUFFERED (:regrtest-children)
+
+test_regrtest ArgsTestCase.test_add_python_opts failed on `python -m test --fast-ci`: libregrtest's _add_ci_python_opts
+reads `sys.stdout.write_through` (to add -u), which pyi's standard streams (sys.go's textFile) did not have. pyi's stdio
+now carries pylifecycle.c's create_stdio choice: write_through is `not buffered_stdio`, true under -u (bin/pyi python
+passes it as PYI_UNBUFFERED, which the runtime reads once and removes, as PYI_IGNORE_ENV) or PYTHONUNBUFFERED (not under
+-E or -I); a write-through stream flushes every write; reconfigure(write_through=) sets it (it was only checked). The rest
+of the test's worker checks already held (-W error and -bb give ['error', 'error::BytesWarning'] and bytes_warning 2, -E
+ignore_environment 1). Checked on the runtime evaluated from the checkout (PYI_RUNTIME=checkout on b2a5b50d4819):
+`python3 -u -c` prints write_through True for stdout and stderr, False after reconfigure(write_through=False). go vet clean.
+The test, ProgramsTestCase.test_module_test (P1's run: past 8192 MB under the runner's RSS cap; the runner's PSS since
+round 1) and test_io's test_raw_file_io (C and Py: round 1's os.readinto of any writable buffer, a ctypes Structure here,
+through the WritableBytes stub) wait for the gate's build at this key.
