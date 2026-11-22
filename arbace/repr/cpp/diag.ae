@@ -2327,7 +2327,238 @@
         (walk body [])))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail]))
+;; GNU's flexible array members in C++ (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Arrays of Length Zero": a flexible array
+;; member, a non-static data member of array type of unknown bound, is a GNU extension in C++, and as in C it must be the last
+;; member, its storage the object's end): a structure's sequence of non-virtual base subobjects and non-static data members (an
+;; anonymous struct's or union's members its own, an unnamed bit-field none) with a flexible array member followed by another data
+;; member or a base subobject that has storage is an error, "flexible array member 'A::a' not at end of 'struct A'", at that flexible
+;; array member, once a structure: the first one, where a member or base of class type (or an array of it) contributes the flexible
+;; array member that ends it (a union the first among its members; a class whose own flexible array member is not at its end
+;; contributes none, it is diagnosed itself; a virtual base none). Its initialization: a mem-initializer or a default member
+;; initializer of a flexible array member ("initializer for flexible array member", the latter when a constructor or an object
+;; of the class makes it used), a default member initializer of a class type whose list reaches its flexible array member
+;; ("non-static initialization of a flexible array member"), an object initialized with a flexible array member of a class whose
+;; destructor does something ("unknown array size in delete", at the class), and __builtin_clear_padding of a class holding one
+;; (its padding bits are not known). Not judged in a template's pattern. ext/flexary4.C, flexary5.C, flexary18.C, flexary21.C,
+;; flexary22.C, flexary28.C, flexary29.C, flexary32.C, flexary36.C, flexary37.C, flexary42.C, array1.C, builtin-clear-padding-1.C,
+;; torture/pr64312.C.
+
+(defn- fam-type?
+  "Whether the type's spelling is an array of unknown bound (`int[]`, `int[][2]`, `struct (unnamed struct at f:9)[]`), not a pointer
+  or reference to one (`int (*)[]`)."
+  [^String qt]
+  (let [t (str/trim qt)]
+    (boolean (and (re-find #"\[\](?:\[\d+\])*$" t)
+                  (not (re-find #"\([^()]*[*&]\s*(?:const|volatile|__restrict)?\s*\)\s*\[\](?:\[\d+\])*$" t))))))
+
+(defn flexible-arrays
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [x] (let [f (or (get-in x [:loc :file]) (get-in x [:range :begin :file]))] (or (nil? f) (= main f))))
+        report! (fn [x msg] (when-let [o (or (get-in x [:loc :offset]) (get-in x [:range :begin :offset]))]
+                              (when (mine? x)
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :flexible-array :msg msg})))))
+        ;; the records: by their class-key's offset (an unnamed one's type names it), by name; the parents of each, and those in
+        ;; templates' patterns
+        by-off (java.util.HashMap.) by-name (java.util.HashMap.) parent-of (java.util.IdentityHashMap.) in-tmpl (java.util.IdentityHashMap.)
+        _ (letfn [(idx [x par tmpl]
+                    (cond
+                      (map? x) (let [rec? (and (= "CXXRecordDecl" (:kind x)) (:completeDefinition x))
+                                     tmpl (or tmpl (#{"ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl" "FunctionTemplateDecl"} (:kind x)))]
+                                 (when rec?
+                                   (when-let [o (get-in x [:range :begin :offset])] (.put by-off (long o) x))
+                                   (when (:name x) (.put by-name (:name x) (conj (or (.get by-name (:name x)) []) x)))
+                                   (.put parent-of x par)
+                                   (when tmpl (.put in-tmpl x true)))
+                                 (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v)))]
+                                   (idx v (if rec? x par) tmpl)))
+                      (vector? x) (doseq [y x] (idx y par tmpl))
+                      :else nil))]
+            (idx (:nodes u) nil false))
+        base-name (fn [^String qt]
+                    (-> qt (str/replace #"\b(?:const|volatile|struct|class|union)\b" "") str/trim
+                        (str/replace #"(?:\s*\[\d*\])+$" "") str/trim))
+        resolve (fn [^String qt scope]
+                  (let [t (base-name qt)]
+                    (if-let [[_ o] (re-find #"\(unnamed (?:struct|class|union) at [^()]*:(\d+)\)(?:\s*\[\d*\])*\s*$" qt)]
+                      (.get by-off (Long/parseLong o))
+                      (let [nm (-> t (str/replace #"<.*$" "") (str/replace #"^.*::" "") str/trim)
+                            cands (.get by-name nm)]
+                        (when (seq cands)
+                          (or (loop [r scope]
+                                (when r
+                                  (or (some #(when (identical? (.get parent-of %) r) %) cands) (recur (.get parent-of r)))))
+                              (first (filter #(nil? (.get parent-of %)) cands))
+                              (first cands)))))))
+        memo (java.util.IdentityHashMap.)
+        nonempty-memo (java.util.IdentityHashMap.)
+        members (fn [r] (filter #(and (= "FieldDecl" (:kind %)) (not (and (:isBitfield %) (nil? (:name %))))) (:inner r)))
+        nonempty? (fn nonempty? [r]
+                    (if (.containsKey nonempty-memo r)
+                      (.get nonempty-memo r)
+                      (do (.put nonempty-memo r false)
+                          (let [v (boolean (or (seq (members r))
+                                               (some #(or (:virtual %) (:isVirtual %)) (:inner r))
+                                               (some :isVirtual (:bases r))
+                                               (some #(when-let [b (resolve (str (get-in % [:type :qualType])) r)] (nonempty? b)) (:bases r))))]
+                            (.put nonempty-memo r v) v))))
+        analyze (fn analyze [r]
+                  (if (.containsKey memo r)
+                    (.get memo r)
+                    (do (.put memo r {:first nil :bad false})
+                        (let [union? (= "union" (:tagUsed r))
+                              contrib (fn [qt]
+                                        (when-let [c (resolve qt r)]
+                                          (let [a (analyze c)] (when-not (:bad a) (:first a)))))
+                              res (if union?
+                                    {:first (some (fn [m] (or (contrib (str (get-in m [:type :qualType]))) (when (fam-type? (str (get-in m [:type :qualType]))) m))) (members r))
+                                     :bad false}
+                                    (let [steps (concat (for [b (:bases r) :when (not (:isVirtual b))] [:base b]) (for [m (members r)] [:member m]))]
+                                      (loop [ss steps fst nil]
+                                        (if-let [[k x] (first ss)]
+                                          (let [qt (str (get-in x [:type :qualType]))]
+                                            (case k
+                                              :base (let [c (resolve qt r)]
+                                                      (cond (and fst c (nonempty? c)) {:first fst :bad true}
+                                                            fst (recur (rest ss) fst)
+                                                            :else (recur (rest ss) (contrib qt))))
+                                              :member (if fst
+                                                        {:first fst :bad true}
+                                                        (recur (rest ss) (or (contrib qt) (when (fam-type? qt) x))))))
+                                          {:first fst :bad false}))))]
+                          (.put memo r res)
+                          res))))]
+    ;; not at end (a class template's pattern too when the unit names a specialization of it outside its definition: what its
+    ;; members of non-dependent types contribute, torture/pr64312.C's any_iterator<...>)
+    (doseq [r (.values by-off)
+            :when (and (not= "union" (:tagUsed r))
+                       (or (not (.containsKey in-tmpl r))
+                           (when-let [nm (:name r)]
+                             (let [b (long (or (get-in r [:range :begin :offset]) -1)) e (long (or (get-in r [:range :end :offset]) -1))
+                                   m (re-matcher (re-pattern (str "\\b" (java.util.regex.Pattern/quote nm) "\\s*<")) src)]
+                               (loop [] (when (.find m) (if (or (< (.start m) b) (> (.start m) e)) true (recur))))))))
+            :let [a (analyze r)]
+            :when (:bad a)]
+      (report! (:first a) (str "flexible array member '" (:name (:first a)) "' not at end of '" (:tagUsed r) " " (or (:name r) "<unnamed>") "'")))
+    ;; initializers
+    (doseq [r (.values by-off) :when (not (.containsKey in-tmpl r))
+            :let [fams (set (keep #(when (fam-type? (str (get-in % [:type :qualType]))) (:name %)) (members r)))
+                  ctors (filter #(= "CXXConstructorDecl" (:kind %)) (:inner r))]]
+      (when (seq fams)
+        ;; a mem-initializer of one, at its constructor
+        (doseq [c ctors
+                :when (some #(and (= "CXXCtorInitializer" (:kind %)) (contains? fams (get-in % [:anyInit :name]))) (:inner c))]
+          (report! c "initializer for flexible array member"))
+        ;; a default member initializer of one, when a constructor or an object of the class uses it
+        (doseq [m (members r)
+                :when (and (contains? fams (:name m)) (:hasInClassInitializer m)
+                           (or (some #(not (:explicitlyDeleted %)) ctors)
+                               (let [nm (:name r)
+                                     tag (when-let [o (get-in r [:range :begin :offset])] (str " at " main ":" o ")"))]
+                                 (some (fn [v] (and (= "VarDecl" (:kind v))
+                                                    (let [t (base-name (str (get-in v [:type :qualType])))]
+                                                      (or (and nm (= t nm)) (and tag (str/includes? t tag))))))
+                                       (let [p (.get parent-of r)] (if p (:inner p) (:nodes u)))))))]
+          (report! m "initializer for flexible array member")))
+      ;; a default member initializer of a class type whose list reaches the flexible array member
+      (doseq [m (members r)
+              :when (:hasInClassInitializer m)
+              :let [c (resolve (str (get-in m [:type :qualType])) r)
+                    k (when c (first (keep-indexed (fn [i x] (when (fam-type? (str (get-in x [:type :qualType]))) i)) (members c))))
+                    il (first (filter #(= "InitListExpr" (:kind %)) (:inner m)))]
+              :when (and k il (> (count (:inner il)) (long k)))]
+        (report! m "non-static initialization of a flexible array member")))
+    ;; a constructor defined out of its class with a mem-initializer of one, at the constructor
+    (doseq [c (:nodes u)
+            :when (= "CXXConstructorDecl" (:kind c))
+            :let [r (resolve (str (:name c)) nil)
+                  fams (when r (set (keep #(when (fam-type? (str (get-in % [:type :qualType]))) (:name %)) (members r))))]
+            :when (some #(and (= "CXXCtorInitializer" (:kind %)) (contains? fams (get-in % [:anyInit :name]))) (:inner c))]
+      (report! c "initializer for flexible array member"))
+    ;; an object initialized with a list: a flexible array member of a subobject or an array element given a value ("in a nested
+    ;; context", at the list's end: only the complete object's own may be initialized), and a string literal for one whose element
+    ;; type is arithmetic but no character type ("invalid conversion from 'const char*'", ext/flexary12.C; a class template's
+    ;; parameter substituted)
+    (let [fam-at (fn [r] (first (keep-indexed (fn [i x] (when (fam-type? (str (get-in x [:type :qualType]))) i)) (members r))))
+          strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))]
+      (walk-nodes (fn [v _]
+                    (when (= "VarDecl" (:kind v))
+                      (when-let [il (first (filter #(= "InitListExpr" (:kind %)) (:inner v)))]
+                        (let [qt (str (get-in v [:type :qualType]))
+                              r (resolve qt (.get parent-of v))
+                              arr? (re-find #"\]\s*$" qt)
+                              els (vec (:inner il))
+                              ;; (GCC gives the initializer up there: Sema's errors inside it are dropped, :suppress, arbace.repr.cpp.diag/diagnose)
+                              end! (fn [] (when-let [o (get-in il [:range :end :offset])]
+                                            (when-let [b (and (report! {:loc {:offset o}} "initialization of flexible array member in a nested context")
+                                                              (get-in il [:range :begin :offset]))]
+                                              (let [d (.get out (dec (.size out)))]
+                                                (.set out (dec (.size out)) (assoc d :suppress [(first (line-col starts (long b))) (:line d)]))))))]
+                          (when r
+                            (if arr?
+                              (when-let [k (fam-at r)]
+                                (when (some #(and (= "InitListExpr" (:kind %)) (> (count (:inner %)) (long k))) els)
+                                  (end!)))
+                              (do
+                                ;; a member of class type whose own flexible array member the list reaches
+                                (when (some (fn [[j m]]
+                                              (when-let [mc (resolve (str (get-in m [:type :qualType])) r)]
+                                                (when-let [k (fam-at mc)]
+                                                  (let [e (get els j)]
+                                                    (cond (nil? e) false
+                                                          (= "InitListExpr" (:kind e)) (> (count (:inner e)) (long k))
+                                                          :else (> (count els) (+ (long j) (long k))))))))
+                                            (map-indexed vector (members r)))
+                                  (end!))
+                                ;; a string literal for an arithmetic flexible array member
+                                (when-let [k (fam-at r)]
+                                  (let [m (nth (vec (members r)) k)
+                                        et (str/replace (str/trim (str (get-in m [:type :qualType]))) #"\s*\[\]$" "")
+                                        targs (when-let [[_ a] (re-find #"<(.*)>\s*$" (base-name qt))] (map str/trim (str/split a #",")))
+                                        tmpl (some (fn [n] (when (and (= "ClassTemplateDecl" (:kind n)) (some #(identical? r %) (:inner n))) n)) (:nodes u))
+                                        env (when (and tmpl targs) (zipmap (keep #(when (#{"TemplateTypeParmDecl"} (:kind %)) (:name %)) (:inner tmpl)) targs))
+                                        et (get env et et)
+                                        e (some-> (get els k) strip)]
+                                    (when (and e (= "StringLiteral" (:kind e))
+                                               (re-matches #"(?:unsigned |signed )?(?:short|int|long|long long|bool|float|double|long double)(?: int)?|unsigned" et))
+                                      (when-let [o (get-in e [:range :begin :offset])]
+                                        (report! {:loc {:offset o}} (str "invalid conversion from 'const char*' to '" et "'")))))))))))))
+                  (:nodes u) nil))
+    ;; an object whose flexible array member of a class with a destructor that does something is initialized
+    (walk-nodes (fn [v _]
+                  (when (= "VarDecl" (:kind v))
+                    (when-let [il (first (filter #(= "InitListExpr" (:kind %)) (:inner v)))]
+                      (when-let [r (resolve (str (get-in v [:type :qualType])) (.get parent-of v))]
+                        (let [ms (vec (members r))
+                              k (first (keep-indexed (fn [i x] (when (fam-type? (str (get-in x [:type :qualType]))) i)) ms))]
+                          (when (and k (> (count (:inner il)) (long k)))
+                            (when-let [ec (resolve (str (get-in (nth ms k) [:type :qualType])) r)]
+                              (when-let [d (first (filter #(= "CXXDestructorDecl" (:kind %)) (:inner ec)))]
+                                (when (and (not (:explicitlyDefaulted d)) (not (:explicitlyDeleted d)))
+                                  (report! r "unknown array size in delete"))))))))))
+                (:nodes u) nil)
+    ;; __builtin_clear_padding of a pointer to a class holding a flexible array member
+    (let [holds? (fn holds? [r seen]
+                   (when (and r (not (contains? seen r)))
+                     (some (fn [m] (let [qt (str (get-in m [:type :qualType]))]
+                                     (or (fam-type? qt) (holds? (resolve qt r) (conj seen r)))))
+                           (members r))))
+          vars (java.util.HashMap.)]
+      (walk-nodes (fn [n _] (when (#{"VarDecl" "ParmVarDecl"} (:kind n)) (when (string? (:name n)) (.put vars (:name n) n)))) (:nodes u) nil)
+      (walk-nodes (fn [n _]
+                    (when (and (= "CallExpr" (:kind n))
+                               (= "__builtin_clear_padding" (get-in (first (:inner n)) [:referencedDecl :name])))
+                      (let [a (loop [x (second (:inner n))] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (recur (first (:inner x))) x))
+                            v (when (= "DeclRefExpr" (:kind a)) (.get vars (get-in a [:referencedDecl :name])))
+                            qt (str (get-in v [:type :qualType]))]
+                        (when (and v (str/ends-with? (str/trim qt) "*"))
+                          (when (holds? (resolve (str/replace (str/trim qt) #"\*$" "") nil) #{})
+                            (report! n "flexible array member does not have well defined padding bits for '__builtin_clear_padding'"))))))
+                  (:nodes u) nil))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
@@ -2450,6 +2681,12 @@
                        ;; (a unit the parser declined a construct of is not analyzed: the code generator's refusal)
                        (when (and sema? (zero? (long (:declines u 0)))) (sema-errors u starts src main)))
           ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)
+          ;; cpp-gnu (2026-11-22): a check's diagnostic after which GCC gives an initializer up (:suppress [FROM-LINE TO-LINE]) drops
+          ;; the code generator's Sema's errors on those lines (flexible-arrays' nested context)
+          sup (keep :suppress ds)
+          ds (if (seq sup)
+               (vec (remove (fn [d] (and (= :sema (:rule d)) (some (fn [[a z]] (<= (long a) (long (:line d)) (long z))) sup))) ds))
+               ds)
           ;; cpp-read (2026-11-22): an undeclared name is GCC's error once in a block: unqualified_name_lookup_error declares it in
           ;; the innermost local scope, error_mark_node its type, so its later uses there and in the blocks nested in it are silent
           ;; (cp/lex.cc); the parser's and Sema's errors for such a later use on another line dropped (conversion/const3.C)
