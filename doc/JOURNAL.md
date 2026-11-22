@@ -17785,3 +17785,16 @@ programs that use auto, constexpr or storage-class compound literals (all pass, 
 "ref"); `roundtrip --corpus tcc-pp --record`. Read 5,460 / 5 / 10 to 5,468 / 2 / 5 (the dg rows and, by CR1 (a), the token and
 tree rows of c23-attr-syntax-6, c23-complit-5 and embed-10), print 4,842 / 2 / 12 to 4,844 / 0 / 12. Left: eval-depth 5 and
 eval-limits 10 (a compiled host, round 2), sqlite3.c and 13.S at the read level (CT1, the user's), shell.c and unicode_gen.c.
+
+## 2026-11-22: cpp-diag-b round 2 (branch `cpp-diag-b-1122` after next's merge at e247eea2b)
+
+The coordinator's second round over the directories' 424 failing files, families needing no namespace-scope loop first (queue 526
+widens that recovery; no commit of mac/526-cpp-recovery yet): -Werror= options and C++98 pedantic long long (diag.ae's `option-errors`),
+escape sequences and hexadecimal floating literals, constant evaluation's undefined behaviour in case labels, enumerators and bit-field
+widths (`constant-ub`), qualification conversions through arrays (DR 330), function pointers and void*, pointer to member conversions and
+downcasts through virtual or ambiguous bases, pointer comparisons without a composite type, asm operands, and declarations' rules
+(doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-b", "Round 2"). Proofs: the directories run whole with `--record` twice (one regression found
+and fixed), the other directories' 1,338 own passes run without a record (all pass), merged with next 95da59ab7, reap and crops-score
+0 problems, records-check 0. Own passes of the directories 690 -> 733; C++ read 5,802 / 0 / 519 (210 n/a); completeness 0.972734 (97),
+independence 0.961348 (96). Alternatives not taken: working around the function-template units' refusal in sema.ae's namespace loop
+(queue 526's ground, merged when it lands).

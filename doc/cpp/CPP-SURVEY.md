@@ -10077,3 +10077,40 @@ the read stage 0.799193 -> 0.813677).
   the namespace-scope loop refuses, queue 518's ground), access to protected members through pointers to members, the template
   instantiation's errors, constant evaluation (ubsan/), GCC's recovery cascades after a syntax error, -Werror= options the checker does not
   read (warn/Wwrite-strings-4 to -6), arrays in qualification conversions (conversion/qual1, qual2), and the many one-file rules.
+
+### Round 2 (2026-11-22, after next's merge of round 1 at e247eea2b)
+
+The 424 files left in the directories, the families that need no namespace-scope loop first (queue 526 widens the loop's recovery;
+mac/526-cpp-recovery had no commit yet when this round closed). The rules, from the standard (GCC's manual for its options):
+
+- options and lexical (diag.ae's `option-errors` over `code-text`, the source with comments and literals blanked; parse.ae's
+  `escape-error` and `lexical-diags!`): -Werror=pragma-once-outside-header, -Werror=write-strings (`werror?`: -Werror=X, or -Werror with
+  -WX), C++98's long long and LL suffixes under -pedantic-errors without -Wno-long-long; unknown escape sequences, C++23's delimited
+  escapes before C++23, C++17's hexadecimal floating literals before C++17 (pedantic); va_arg of a reference type; C's _Atomic; the
+  checker's void operand of ?: ([expr.cond]/2) — 11 files;
+- constant evaluation (diag.ae's `constant-ub`, `ce-eval` over literals, casts and operators): division by zero and shift counts out of
+  range in case labels, enumerators and bit-field widths ([expr.const]/5), signed overflow there under -pedantic-errors, integral
+  expressions of literals that are no null pointer constant initializing a pointer ([conv.ptr]/1, not under -fpermissive) — 5 files;
+- qualification conversions with array levels (sema.ae's `cx-qual-levels`, `cx-array-qual-bad?`: [conv.qual]/3 with DR 330 and P0388),
+  const_cast and reinterpret_cast over them, function pointers and void* converted implicitly (CWG 195) — 5 files;
+- pointer to member conversions (`cx-mptr-base!`: a virtual, ambiguous or, but for a C-style cast, inaccessible base; another member
+  type; constness cast away) and static_cast downcasts of pointers and references through a virtual or ambiguous base — 8 files;
+- declarations: typedef names qualified or of operator functions, block-scope extern with an initializer, C++26's delete reason before
+  C++26 (pedantic), two data types in a template parameter, members that declare nothing — 7 files;
+- comparisons of distinct pointer types without a composite pointer type ([expr.eq]/3) — 1 file; asm operands' names and constraints —
+  3 files; parameters of one clause named alike, invalid pure specifiers on a function typedef's member, enumerations defined twice in a
+  class — 3 files; non-constant inner bounds in new-expressions (`new-bounds`; its files' other lines are template instantiations) — 0.
+
+Shared functions touched beyond round 1's: parse.ae `escape-error`, `lexical-diags!`, `parse-asm-parts`, `delete-reason!`,
+`parse-param-list`, the `__builtin_va_arg` and `_Atomic` branches, `spec-checks!` (template parameters); sema.ae `cond-node`,
+`cx-implicit-scalar!`, `cx-named-cast!` (static and C-style casts), `builtin-binop` (pointer comparisons); diag.ae only appended checks
+and sema-rules' entries (`unsized-arrays` narrowed: a pointer or reference to an unknown bound is complete).
+
+Checked: each family's files and valid programs (`ok23.C` to `ok30.C`) on the probe; the directories' 1,111 files run whole with
+`--record` twice (68d8fd8ac, a35cdbd43): own passes of the directories 690 -> 733 of 1,114, one regression on the way (parse/array-size3.C,
+the narrowing of `unsized-arrays` too wide: an unnamed class's name holds a parenthesis) fixed and run again; the other directories'
+1,338 own passes run on a35cdbd43 without a record: all pass; the control failing as it must. Merged with next (95da59ab7: C's and
+Haskell's rounds; C's pp.ae change concerns .S files alone): reap 0 problems.
+
+Cells: C++ read 5,799 / 0 / 520 -> 5,802 / 0 / 519 (210 n/a); own passes 2,029 -> 2,072; completeness 0.972688 -> 0.972734 (floored
+97); independence 0.960667 -> 0.961348 (floored 96; read stage 0.813677 -> 0.817081).
