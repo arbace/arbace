@@ -709,9 +709,15 @@ here, not a null pointer (queue 478).
       ["__oi_alloc" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                       (when (== (.-depth c) 0)
                         (return (ai (.allocStatic c (arg a 0) (conv int (arg a 1))))))
+                      ;; a stub's allocation counted by oi (queue 523: Gc's words, the simulated heaps' collections)
+                      (oi/CAlloc (conv int (arg a 0)))
                       (ai (.alloc c (arg a 0) (conv int (arg a 1)))))]
       ["__oi_alloc_static" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                             (when (> (.-depth c) 0)
+                               (oi/CAlloc (conv int (arg a 0))))
                              (ai (.allocStatic c (arg a 0) (conv int (arg a 1)))))]
+      ["__oi_gc_count" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                         (ai (conv uint64 (oi/GcCount (conv int (arg a 0))))))]
       ["__oi_root" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                      (.root c (arg a 0) (conv int (conv int32 (arg a 1))))
                      (ai 0))]
@@ -819,7 +825,26 @@ the block's finalize runs (oi.CFinaliser: at the next collection the program ask
   (.Lock (.-finMu c))
   (aset (.-wstatics c) w (^{:inst [oi/Custom]} weak/Make v))
   (.Unlock (.-finMu c))
-  (oi/CFinaliser v (fn [] (.finalise c w))))
+  ;; the AOT runtime's server (wireLoad set Apply): the value is the server's own copy, dead once the call returns; the runtime's
+  ;; mirror of the block decides, and its collections send the dead ones' addresses (Collected, queue 523)
+  (when (== Apply nil)
+    (oi/CFinaliser v (fn [] (.finalise c w)))))
+
+(go/func Collected "Collected is the AOT runtime's news of a collection it was asked for (wire.go's 'G', queue 523): the C's custom blocks at
+addrs, whose mirrors the runtime found unreachable, finalized in that order, those whose operations have a finalize (held in wstatics),
+each once, as the C runtime's sweep calls a dead custom block's finalize.
+" [^{:tag (slice uint64)} addrs]
+  (let [c the]
+    (when (== c nil)
+      (return))
+    (range [_ w addrs]
+      (.Lock (.-finMu c))
+      (let [(values _ ok) (aget (.-wstatics c) w)]
+        (when ok
+          (delete (.-wstatics c) w))
+        (.Unlock (.-finMu c))
+        (when ok
+          (.ccall c "__oi_custom_finalize" w))))))
 
 (go/method finalise "finalise is the finalize of the custom block at w, its value collected: runtime.c's __oi_custom_finalize on ci's main thread.\n" [^{:tag (* capi)} c ^uint64 w]
   (.Lock (.-finMu c))

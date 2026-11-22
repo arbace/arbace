@@ -10,11 +10,12 @@
 ;; the signals the C sent the process itself, one a byte, pending in ExtSignal, then 'm' the reply), and at the program's end (Main/run's finish) 'Z', the C's stdio flushed; else the external is missing, as before.
 ;;
 ;; The session: the values that crossed in an outermost call, by id (the order both sides gave them) and back; a C custom block the
-;; C allocated (kept for the run) is one Custom by its address.
+;; C allocated is one Custom by its address (held weakly since queue 523: its finalize runs once the Custom is unreachable, at an
+;; asked collection, collected).
 
 (in-ns 'ocaml.rt)
 
-(import '(java.io ByteArrayOutputStream DataInputStream File OutputStream RandomAccessFile IOException) '(java.util ArrayList HashMap IdentityHashMap))
+(import '(java.io ByteArrayOutputStream DataInputStream File OutputStream RandomAccessFile IOException) '(java.util ArrayList HashMap IdentityHashMap) '(java.lang.ref WeakReference))
 
 (defclass ^:public ^:final CApi
 
@@ -30,8 +31,10 @@
   (field ^:static ^ArrayList nodes)
   (field ^:static ^IdentityHashMap ids)
   (field ^:static ^int depth 0)
-  ;; the C's custom blocks by address, kept for the run
+  ;; the C's custom blocks by address: a WeakReference to the block's one Custom (queue 523: held weakly, the dead ones' addresses
+  ;; sent to the server at the collections the program asks for, collected, so that the C's finalize runs)
   (field ^:static ^HashMap cblocks (HashMap.))
+  (field ^:static ^:final ^ArrayList cbDead (ArrayList.))
   ;; a Java throwable a callback raised, rethrown when the C call has unwound
   (field ^:static ^Throwable pending)
 
@@ -147,10 +150,11 @@
                (CApi/add c)
                (loop [^int i 0] (when (< i n) (aset data i (.get this)) (recur (unchecked-inc-int i))))
                c))
-        99 (let [id (Rt/utf8 (.rdBytes this (unchecked-int (.rd32 this)))) a (.rd64 this) k (Long/valueOf a) c (.get cblocks k)]
+        99 (let [id (Rt/utf8 (.rdBytes this (unchecked-int (.rd32 this)))) a (.rd64 this) k (Long/valueOf a)
+                 r (cast WeakReference (.get cblocks k)) c (if (some? r) (.get r) nil)]
              (if (some? c)
                c
-               (let [nc (Custom. id (CBlock. a))] (.put cblocks k nc) nc)))
+               (let [nc (Custom. id (CBlock. a))] (.put cblocks k (WeakReference. nc)) nc)))
         (throw (Rt/internal (java-str "the C API: a value of the wire form " op))))))
 
   ;; fail.h's predefined exception i
@@ -264,6 +268,31 @@
       (set! pout nil)
       (.flush System/out)
       (.flush System/err)))
+
+  ;; (queue 523) an asked collection (ExtGc/gcAsked, before the finalisers it fires): the C's custom blocks whose Custom is unreachable
+  ;; forgotten, and at no call's depth their addresses sent to the server ('G'), which runs the finalize of those whose operations have
+  ;; one, as the C runtime's sweep does; inside a call (a callback asked for it) they wait for the next asked collection
+  (method ^:public ^:static collected ^void []
+    (when (> (.size cblocks) 0)
+      (System/gc)
+      (let [ks (ArrayList. (.keySet cblocks))]
+        (loop [^int i 0]
+          (when (< i (.size ks))
+            (let [k (.get ks i)]
+              (when (nil? (.get (cast WeakReference (.get cblocks k))))
+                (.remove cblocks k)
+                (.add cbDead k)))
+            (recur (unchecked-inc-int i))))))
+    (when (and (== depth 0) (> (.size cbDead) 0) (or (some? chan) (some? proc)))
+      (let [o (ByteArrayOutputStream.)]
+        (CApi/u8 o 71)
+        (CApi/u32 o (long (.size cbDead)))
+        (loop [^int i 0]
+          (when (< i (.size cbDead))
+            (CApi/u64 o (.longValue (cast Long (.get cbDead i))))
+            (recur (unchecked-inc-int i))))
+        (.clear cbDead)
+        (CApi/exchange o))))
 
   ;; ---- the call
 
