@@ -17135,3 +17135,24 @@ Made, in go/arbace/py (printed by `bin/pyi runtime print`, read back for go/arba
   resident size: every pyi child maps the same 360 MB of the executable's text, which the resident sizes counted once a
   child (a spawned child's 960 MB resident were 630 MB of the host's), so spawn's manager tests passed the 8192 MB cap
   (`:host-memory`).
+
+## 2026-11-22: py-mods-1122, round 2: os.open without the GIL, codecs.lookup's name, OrderedDict's dict a field, pyi at GOGC 100
+
+- os.open releases the GIL while it opens (a FIFO's open waits for its other end, which the test opens in another thread:
+  test_logging's test_should_not_rollover_named_pipe hung, idle past 90 s).
+- _codecs.lookup encodes the name as clinic's str converter does: a lone surrogate is a UnicodeEncodeError, not an
+  unknown encoding (_pyio's TextIOWrapper(encoding='\udcfe'), test_io's PyTextIOWrapperTest.test_constructor).
+- OrderedDict's dict is a field of ODict, not embedded: embedding gave ODict Dict's methods, Len among them, the 17th
+  method of goi's `func() int` stub family (16 slots, go/arbace/gotable.edn :stubs) when goi interprets the runtime from
+  the checkout (bin/pyi's runtime_from_source), whose warning then went to every pyi process's stderr and failed the
+  tests that read a child's stderr (test_file_eintr's worm sign, on round 1's interpreted proof).
+- bin/pyi: pyi's processes (bin/pyi run's and sys.executable's) run at GOGC 100 unless the environment sets GOGC
+  (PYI_GOGC another), not the executable's 200 (jrt's DefaultGOGC, a JVM's heap for Java programs): on b2a5b50d4819 a
+  spawned child's import of test._test_multiprocessing is 2.54 GB resident at 200, 1.86 GB at 100 (17.5 s either way;
+  an allocation loop 5% slower), so multiprocessing's children fit the runner's cap more often.
+Found, not changed here (each spawned child pays it): `import ctypes` takes 17.6 s and about 0.5 GB in every pyi process,
+goi checking and building the lazy package arbace/pyctypes from its forms (test._test_multiprocessing imports ctypes, so
+every spawn child of the multiprocessing tests waits for it); a cache of goi's checked packages, or pyctypes compiled into
+the executable, would serve them (the spawn modules' :runner-limits, :host-memory). Round 1's interpreted proof was
+stopped: goi's stub warning made its child-stderr tests fail; the proofs wait for the gate's executables at this branch's
+key (queued under bin/heavy-lock behind six jobs).
