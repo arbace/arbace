@@ -449,10 +449,23 @@
                   b)))))
         blocks))
 
+(def ^:dynamic *trace-body* "queue 524: the body runtime-body makes (RF_FACT_TRACE's lines name it)" nil)
+
+(defn lib-loc-file
+  "queue 524 (C3): a native library body's caller location file (the export's :call-loc, under the remap's /rustc/COMMIT/library/
+  since C6-4) as the program's record writes it, the library build's trimmed path relative to library/ (`core/src/alloc/layout.rs`;
+  the last `/library/`, a twice-prefixed path's too); a path without it unchanged"
+  [^String f]
+  (let [i (.lastIndexOf f "/library/")] (if (neg? i) f (subs f (+ i 9)))))
+
+(declare runtime-body*)
 (defn- runtime-body
   "Our built body made the runtime body codegen takes, with the record's facts; a static's pointer (static-ptr ID) the record's
   static (its symbol, by the static's name) as rustc's optimized MIR gives it: (ptr allocS<ID> 0 8) with that allocation's data"
   [ours rec facts abort?]
+  (binding [*trace-body* (:name ours)] (runtime-body* ours rec facts abort?)))
+
+(defn- runtime-body* [ours rec facts abort?]
   (let [static-data (atom [])
         vt-fn (atom (fn [_ _] nil))   ; RF16: a promoted constant's casts' vtables (set below)
         fix-static (fn [x]
@@ -595,7 +608,9 @@
         fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x)) (:tys facts)) (get (:tys facts) (second x) x) x))
         ;; RF11: std's integer constants (std-const-value); another unevaluated named constant is left (codegen refuses it)
         fix-uneval (fn [x] (if (and (seq? x) (= 'const (first x)) (seq? (nth x 3 nil)) (= 'unevaluated (first (nth x 3))) (nil? (nth (nth x 3) 3 nil)))
-                             (if-let [v (or (std-const-value (second x)) (when-let [lc (:local-const facts)] (lc (second x) (nth x 2) (nth x 3))))]
+                             (if-let [v (or (std-const-value (second x)) (when-let [lc (:local-const facts)] (lc (second x) (nth x 2) (nth x 3)))
+                                            ;; queue 524 (C3): a library constant's integer literal from its module's source
+                                            (when (:local-const facts) (mono/src-const-value (second x))))]
                                (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [v] (drop 4 x))))
                                (do (when-let [f (:const! facts)] (f false #(str "unevaluated " (second x) " in " (:name ours)))) x))
                              x))
@@ -2041,7 +2056,8 @@
                 ([k native? detail]
                  (swap! tally update k (fnil (fn [[a b]] [(if native? (inc a) a) (inc b)]) [0 0]))
                  (when (and fact-trace? (not native?))
-                   (swap! lines conj (str "fact-refused " (name k) " " (let [t (str/replace (str (detail)) #"\s+" " ")] (subs t 0 (min 400 (count t)))))))))
+                   (swap! lines conj (str "fact-refused " (name k) " " (let [t (str/replace (str (detail)) #"\s+" " ")] (subs t 0 (min 400 (count t))))
+                                          (when *trace-body* (str " [in " *trace-body* "]")))))))
         judged (atom [])
         result
         (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")
@@ -2049,7 +2065,13 @@
                   mono/*upstream* (mono/load-upstream (System/getenv "RF_STD_EXPORTS"))
                   ;; RF19: core's macro-made functions' attributes (bin/rust-front core-attrs; rsi-build's RF_CORE_ATTRS)
                   mono/*macro-attrs* (mono/load-macro-attrs (System/getenv "RF_CORE_ATTRS"))
-                  mono/*native-attrs* (if (System/getenv "RF_CORE_PACK") {} (into {} (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)])))
+                  ;; queue 524 (C3): with the attributes the exports carry of the functions nested in an entry and of its callees
+                  ;; (C6-4's :nested-attrs and :callee-attrs, as lib-unit's run reads them): a macro-made callee's attributes
+                  ;; (`<f64 as Display>::fmt`, `offset_from_unsigned::runtime_ptr_ge`) the export's, not refused as unknown
+                  mono/*native-attrs* (if (System/getenv "RF_CORE_PACK") {}
+                                          (into (into (into {} (for [[_ e] (native-core-map) [p a] (:callee-attrs e)] [p a]))
+                                                      (for [[_ e] (native-core-map) [p a] (:nested-attrs e)] [p a]))
+                                                (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)])))
                   ;; queue 474: a non-generic function's signature from its exported body, for one no interface lists (a macro-made
                   ;; nested precondition_check): its arguments' and return place's types
                   c/*native-sigs* (if (System/getenv "RF_CORE_PACK") {} (native-sigs))]
@@ -2235,7 +2257,8 @@
                                         cl (:call-loc (meta f))
                                         l (cond (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
                                                 ;; RF12-P6: a native core body's call: its place in core's sources
-                                                cl (do (fact! :locs true) (list 'loc (first cl) (second cl) (nth cl 2)))
+                                                ;; (queue 524: the file as the library build wrote it, the record's `core/src/..`)
+                                                cl (do (fact! :locs true) (list 'loc (lib-loc-file (first cl)) (second cl) (nth cl 2)))
                                                 :else (do (fact! :locs false #(str "call " txt (when-not (= 'const (first f)) " (a pointer's)")))
                                                           (or (second (first recs)) (list 'loc "?" 0 0))))]
                                     [cal l]))
@@ -2249,9 +2272,12 @@
                                  (do (fact! :symbols true) (assoc (dissoc o :name) :phase "optimized" :name (:name rec)))
                                  (do (fact! :symbols false #(str (:name rec) ": " (pr-str o))) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])))))
                     ;; RF11: an Assert's location from its expression's span (build's :assert-span), as a call's
-                    assert-loc (fn [t] (let [sp (:assert-span (meta t))]
-                                         (if (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
-                                             (do (fact! :locs false #(str "assert " (pr-str (take 3 (rest t))))) (list 'loc "?" 0 0)))))
+                    assert-loc (fn [t] (let [sp (:assert-span (meta t)) cl (:call-loc (meta t))]
+                                         (cond (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
+                                               ;; queue 524 (C3): a native library body's Assert, its place in the library's sources
+                                               ;; (the export's :call-loc, C6-4's aspans), as its calls'
+                                               cl (do (fact! :locs true) (list 'loc (lib-loc-file (first cl)) (second cl) (nth cl 2)))
+                                               :else (do (fact! :locs false #(str "assert " (pr-str (take 3 (rest t))))) (list 'loc "?" 0 0)))))
                     nf {:fsym fsym :statics statics :native-call native-call :header header :assert-loc assert-loc
                         ;; C6-4 (a): RF_DROP_GLUE=1, a drop's glue symbol (runtime-body's :drop-glue); off by default: without
                         ;; it the program's and the native library bodies' drops are plain branches (nothing dropped), and
@@ -2371,7 +2397,15 @@
                       [(list 'mir/layouts [])]
                       [(list 'mir/langsyms (into {} (for [ln (distinct (concat (keys (:langsyms facts)) (keys rec-langs)))]
                                                       [ln (let [o (get (:langsyms facts) ln)] (if (and o (not (mono/error? o))) (do (fact! :langsyms true) o) (do (fact! :langsyms false #(str ln ": " (pr-str o))) (get rec-langs ln))))])))]
-                      (for [f forms :when (= 'mir/entry (first f))] (do (fact! :entry false #(pr-str f)) f))))
+                      ;; queue 524 (C3): the entry mono's (main's and lang_start's instance symbols), the record's when mono refuses
+                      ;; it (a difference from the record's named in the log)
+                      (for [f forms :when (= 'mir/entry (first f))
+                            :let [e (:entry facts)]]
+                        (if (and (map? e) (not (mono/error? e)))
+                          (do (fact! :entry true)
+                              (when (not= e (second f)) (swap! lines conj (str "entry: mono's " (pr-str e) " differs from the record's " (pr-str (second f)))))
+                              (list 'mir/entry e))
+                          (do (fact! :entry false #(str (pr-str e) " (the record's " (pr-str f) ")")) f)))))
                     _ (mem-mark (str n " module's forms"))
                     our-forms (mono/ty-forms (keep first (vals ours)))
                     core-forms (mono/ty-forms (concat (for [f new-forms :when (= 'mir/body (first f)) :let [b (second f)] :when (not= "arbace-built+cleanup" (:phase b))] (dissoc b :alloc-data))
