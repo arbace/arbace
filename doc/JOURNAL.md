@@ -16899,6 +16899,308 @@ call (`[u8; size_of::<Self>()]`, eval-int-expr's size_of with a primitive impl's
 cfg_select modules (module-files reads no macro's arms), core_simd ops' glob of a private import, to_bytes' anonymous-constant
 args, shift_scalar's impl-fresh `'_`, the Thin trait alias bound (a clause the solver would have to expand), legacy_int_modules'
 consts, the [const] clauses (512's).
+## 2026-11-22: the user's decisions on the burst's by-design and counting questions
+
+Asked in the morning of 2026-11-22 (.tmp/goal/decisions-1122.md collects the streams' evidence); the goal: 100 completeness and
+independence for every crop.
+Counting:
+- Python: Lib/test's 1,917 methods skipped by their own tests on pyi and on CPython's recorded run count n/a; so do the 113 UDP-Lite
+  tests (this host's kernel removed UDP-Lite), test_opcache 73 + tuple reuse 6 and the cpython-only 617 (PYS15 (a)'s CPython
+  implementation details), and test_remote_pdb 45. The read cell's 4 :rejected files pass by each file's own verdict; print's 4 n/a.
+- C: CR1 (a): the 132 read rows where cc is wrong and the file passes its own verdict elsewhere (dg directives or its run) count as
+  read passes. The five speed benchmarks at eval count n/a.
+- Go: the 137 read rows count as passes where Arbace's reader agrees with the reference (same trees, same conversion failure; the 73
+  rejects' error messages compared). eval's foreign-code 8 and memory 6 count n/a.
+- x86-64: the cross judge's 723 rows of llvm-mc's own Intel text (AXS34) count out of the cases.
+- Haskell: T13825-unit, unboxedsums_unit_tests (the `ghc` package) and tcrun022 (-O RULES) count out of the cases.
+To build:
+- Python: real ports of _datetime and _decimal (libmpdec), reversing PY6g DECISION 1; level 3 as a compile without positions (so
+  :code-lines passes); 222's option (b), finalisation at a frame's return, gated near-zero cost and measured against the 3% budget.
+- C: CR3 (a) soft-float, _Float16 and _Float128 first.
+- Go: gc's own compiler inside the executable for the gc-flags and gc-phases rows (GOI-DESIGN-REVIEW Proposed 1 (b), reversing 1 (a)
+  of 2026-11-05), and text-preserving print for the 9 tests-embed-sources packages.
+- x86-64: Mach-O and COFF writers and views, compact unwind included (AXS99 (b)).
+- Scheme: R6RS's answers for programs importing (rnrs), Chez's for (chezscheme) (SCS4 (d)).
+- Clojure: CDR12, CDR13, CDR14, CDR15 (doc/CLOJURE-DESIGN-REVIEW.md).
+- Java: t05905 (the qualifier recorded in the forms) and t07835 (JDI's generic types indexed).
+Kept as built: LLVM's envp (LLS58), arm64's literal pools (ARS50), arm64's error-judge rule, hsi's interrupted thunks (HES56 (b)).
+
+## 2026-11-22: the user's counting decisions applied (branch `counting-1122`, from mac/next `3e8dfe109`)
+
+The counting half of the entry above, as rules over the records (no check run: the user's "avoid redundancy and unnecessary tests";
+bin/reap, bin/crops-score with its self-test and bin/records-check only). Each rule is keyed on a verdict a record holds, never on a
+copied list, and every row keeps its reason. The mechanism and the numbers are in doc/CROPS-SCORE.md, "Decided (the user,
+2026-11-22)"; in short:
+- bin/reap (test/reap/main.ae) gains three reader rules, each a source option of test/reap/cells.edn: `:py-ref-outcomes` (each
+  Python eval non-pass carries CPython 3.14.10's recorded outcome of the same method; `classify` honours a class's `:ref-outcomes`),
+  `:own-verdict` (a known file's recorded rejection held to the expectations its own tests state, test/python/rejected-own.edn,
+  cited by file and line in the pinned tarball) and `:own-elsewhere` (CR1 (a): a C file known only in classes marked
+  `:reference-wrong` passes when the dg check's record or the run's passes it; `count-once` follows, so the tree check's "pp-known"
+  rows take the token check's verdict). A first try removed the picked files per check only: the 59 files whose tree-check row is
+  "pp-known" (no entry of the tree check's) then fell out of both the passes and the non-passes (C read 5,401 / 5 / 10, 59 cases
+  short); `count-once` now counts a picked file that no check leaves a non-pass.
+- Classes: Python's `:cpython-only` and `divergences-print.edn`'s `:rejected` `:na`; `:skipped-by-both` (1,917), `:udp-lite` (113),
+  `:cpython-implementation-details` (79), `:remote-debugging-disabled` (45) `:na`, before `:skipped-by-test` (376 left);
+  libtest_judge.ae leaves `:ref-outcomes` classes to bin/reap (its own verdict reads no outcome). C's fourteen CR1 classes
+  `:reference-wrong`; `:speed-benchmarks` (the five) `:na`. Go's `:foreign-code` and `:memory` `:na`. x86-64's six llvm-mc classes of
+  the cross judge `:na` (723), the judge's stated cases less them. Haskell's eval-out.edn 31 -> 34 (T13825-unit, unboxedsums_unit_tests
+  `:by-design`, tcrun022 `:implementation-defined`, all.T:38's -O). C's judge's stated cases less the 5 n/a (14,952 -> 14,947 own).
+- Cells: Python read 3,702 / 34 / 0 -> 3,706 / 30 / 0, eval 39,204 / 5,490 / 3,627 -> 39,204 / 2,719 / 3,627 (2,771 n/a), print
+  2,796 / 4 / 0 -> 2,796 / 0 / 0 (4 n/a); C read 5,328 / 137 / 10 -> 5,460 / 5 / 10 (131 by the dg check, 1 by its run; left
+  c23-attr-syntax-6, c23-complit-5, embed-10, sqlite3.c, 13.S), eval 2,324 / 35 / 0 -> 2,324 / 30 / 0 (5 n/a); Go eval 1,781 / 52 / 1
+  -> 1,781 / 38 / 1 (18 n/a); x86-64 print 195,651 / 861 / 2 -> 195,651 / 138 / 2 (723 n/a).
+- Scores (floored to six decimals, then to one): Python completeness 0.948543 -> 0.961507 (94.8 -> 96.1), C 0.986102 -> 0.992652
+  (98.6 -> 99.2), Go 0.988974 -> 0.990842 (98.8 -> 99.0), x86-64 0.998902 -> 0.999821 (99.8 -> 99.9), Haskell 0.983201 unchanged
+  (98.3); independence Haskell 0.999020 -> 0.999344 (eval (910 + 0.5 x 9) / 919 -> (910 + 0.5 x 6) / 916; 99.9), x86-64 0.999961
+  both (99.9), C 0.999979 both (99.9), Python and Go 1.0.
+- Controls: bin/crops-score --self-test's `counting-1122-tests` (reap.main's own functions on fabricated cases, each crop's numbers);
+  each rule broken by hand made it fail (classify ignoring `:ref-outcomes`, the own verdict ignoring `:exact`, CR1 ignoring
+  `:reference-wrong` or taking any verdict).
+Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict, --self-test, --self-test-ref, bin/records-check: 0
+problems. Not done here: Go's 137 read rows (another stream's: the 73 rejects' messages compared first).
+## 2026-11-22: cpp-read-1122: C++'s read and print cells (the burst's stream C3)
+
+Branch cpp-read-1122 from next 863bdaea1 (mac/next merged again at a8a23e3ea: queue 510's checker rounds 1-2 and their own-record
+rows), the burst of 2026-11-21/22: no gate, light targeted checks. Share: the token check's and the dg check's syntax-own rows, the
+print cell's deferred rows, the read cell's by-design classes re-examined, and :own-diag rows in families queue 510 (the Mac) is not
+on (510: no matching function, extra-only, access, missed lines, incomplete types, deleted functions, inheriting constructors);
+arbace/cpp's code generator not touched (C++ runtime round 3's), arbace/cpp/sema.ae only for two nil guards of its lookup trace.
+
+Sources studied (prior art, read only, nothing vendored; GPL code never copied, the rules restated from the standard and the
+behaviour): gcc-15.2.0 from the pinned tarball (test/cpp/corpora.edn's sha256; extracted into .tmp only): libcpp/lex.cc
+(scan_cur_identifier, maybe_ignore_udl_macro_suffix, forms_identifier_p, lex_raw_string, _cpp_lex_direct's EOF), libcpp/charset.cc
+(one_utf8_to_cppchar, _cpp_valid_utf8, ucn_valid_in_identifier), libcpp/init.cc (lang_defaults), gcc/c-family/c-common.cc
+(maybe_suggest_missing_token_insertion, get_missing_token_insertion_kind, check_builtin_function_arguments), gcc/cp/parser.cc
+(cp_parser_class_specifier_1's want_semicolon, cp_parser_member_declaration, cp_parser_statement_seq_opt, cp_parser_statement's
+labels, cp_parser_iteration_statement, cp_parser_declarator, cp_parser_skip_to_end_of_statement), gcc/cp/init.cc (build_new_1),
+gcc/cp/typeck.cc (build_reinterpret_cast_1), gcc/cp/decl.cc (cp_finish_decl's decltype(auto)); g++ 15.2 run by hand on a few files
+for its messages (analysis only, the oracle tier's tool; nothing recorded).
+
+What was done (doc/cpp/CPP-SURVEY.md, "As built: cpp-read"): the shared lexer's C++ mode as libcpp (ud-suffixes, extended
+characters and their errors, an unterminated raw string's end, -pedantic's identifier set, a UCN macro name's key); the parser's
+recovery and GCC's syntax diagnostics (skip-rec!, missing-token placement, want_semicolon, an end-of-input error's place, about
+forty rules each restated from the standard); five diag.ae rules over the final tree; the converter's and printer's five
+forms-differ rows. Each fix proven on its rows by the REPL's probe (the dg verdict of arbace.repr.cpp.dg), then by whole runs.
+
+Proofs, light (the user's "avoid redundancy and unnecessary tests", 2026-11-22, applied from the round trips on): the token check's
+three samplings whole after the lexer's main change, the later lexer changes on the 7 files they touch with the controls'
+pair (`pp-check --only ... --record-results`); the dg check whole at 4c05537a9 (4,564 files, 8,369 s), recorded, the
+undeclared-name refinement after it on its 161 files (merged), the load's timeouts of recorded passes alone (two pass, constexpr-asm-3
+takes 341 s, past CP329 (a)'s cap); the round trip's gxx-dg-every-10 and gxx-old-deja-every-10 whole with --record-results (the five
+rows, no other), c-c++-common-every-10, samples and gxx-dg-essential whole (unchanged), libstdcxx-testsuite-every-40's 24 files with
+the touched constructs. A first gxx-dg-every-10 run showed four rows passing before turning forms-differ (range-for8.C,
+nontype6.C, constexpr-99287.C, srcloc15.C: a range declaration defining a class, ' >' after a default the forms keep as text, a member
+declarator whose ; the parser now assumes); the record of that run discarded, the three causes fixed, the rows passing before the
+whole run that was recorded.
+
+Cells: C++ read 5,589 / 317 / 587 -> 5,665 / 311 / 517 (38 n/a): the token check's 5 by design to pass, :syntax-own 66 -> 15,
+:own-diag 515 -> 497, :oracle-crash 5 -> 4, :musl-libc 2 -> 1 (cpp26/literals2.C left the class: the own front end's ISO-8859-1
+conversion gives the directives' errors); print 3,880 / 0 / 15 -> 3,885 / 0 / 10. Completeness 95.81 -> 96.14, independence 94.84
+-> 95.00. The own record had 13 rows pass that fail at 863bdaea1 already (checked on a base worktree): five pass again
+(conversion/const3.C, lookup/crash5.C and parse/crash1.C by this stream, cpp1z/using1.C and cpp1z/pr92536.C since 510's merge), eight
+are recorded failing as they are (expr/return1.C, other/return1.C, parse/crash68.C, template/error1.C, init/member1.C,
+cpp0x/pr78765.C, cpp0x/alias-decl-pr92206-4.C, cpp1z/pr86648.C: Sema's incomplete types, overloads and missed lines, queue
+510/518's); cpp0x/gen-attrs-17.2.C (it passed on a false "expected }" at the file's end, gone with the recovery; its line needs
+Sema's alignment of a GNU-aligned member) and cpp1z/constexpr-asm-3.C (time) too.
+
+Left for the user (decisions, by design): :gcc-dialect 173 (CP399 (a)), :gcc-own-rules 135 (CP398 (c): each GNU rule portable into
+the own front end one at a time if the user wants them deferred instead), :gxx-only-rules 2 (CP328 (a)), :musl-libc 1
+(warn/Wconversion-null-4.C, musl's NULL). Deferred and left: :syntax-own's 15 (six in the constant evaluator's "used before its
+definition" family, Sema's file, queue 510/518's), :own-diag's 497 (outside this stream's share now: the Mac's queue 518 holds the dg
+families), the print cell's 10 (forms-differ 5, HotSpot's 5 needing a `hotspot-x86-linux` own record over jdk26u's sources).
+Alternatives considered: making the parameter list's error recover as GCC's (parse/error6.C) -- left, the parser's tentative parses
+would leak its diagnostic; parsing GNU attribute arguments as expressions (cpp0x/pr84606.C) -- left, a change to every attribute's read.
+
+## 2026-11-22: cpp-read-1122 merged with next again (ecdf052dd)
+
+mac/next merged again before the push (queue 518's checker rounds, C's c-rows): the own record taken from this stream, then the 164
+files either side moved (518's rows, and the rows whose status differs between the two records) run again on the merged tree
+(`bin/repr-cpp dg --front native --only`, merged into the record): own passes 1,699 (this stream's 1,681, next's 1,593); the 15
+non-passing among them are the rows above (the stale passes at 863bdaea1, constexpr-asm-3's time, 518's four qualttp files and
+pr69056 as next recorded them). Cells against next's record: C++ read 5,589 / 317 / 587 -> 5,665 / 311 / 517, print 3,880 / 0 / 15 ->
+3,885 / 0 / 10; completeness 95.81 -> 96.14, independence 95.24 -> 95.40 (the earlier entry's 94.84 -> 95.00 was against the first
+merge's tree). reap, crops-score (--record, --judge --strict) and records-check: 0 problems.
+
+## 2026-11-22: hs-r7-1122: Haskell's eval programs not own, seventh round (Typeable's kinds, impredicativity, quasi-quotes, five packages own)
+
+Branch `hs-r7-1122` from mac/next `94dbc03af` (which holds hs-r6-1122 `6f2af94ea`), by an agent of the main host (the coordinator's
+brief: hs-r6's "still at 0.5" list less the three waiting on the user's decision, T13825-unit, unboxedsums_unit_tests and tcrun022).
+Light: the front end alone on single programs and hsi runs over composed own libraries (`.tmp/r7/front.sh`, `run.sh`,
+`compose2.sh`), the libraries rebuilt in a run worktree at the branch's commit (`.tmp/worktrees/hs-r7-run`, its .tmp this
+worktree's: `.tmp/r7/full.sh`), targeted `bin/hsi check --libs own --only` runs (`.tmp/r7/rerun.sh`); no gate.
+
+**T14236: Typeable's evidence of a partially applied arrow at its kind arguments.** ghc-internal's mkTrAppChecked asks
+`typeRep @((->) x :: TYPE ry -> Type)`, which GHC solves as doTyApp's `(FUN 'Many @rx @ry) x`, doTyConApp giving mkTrCon $tcFUN
+[SomeTypeRep 'Many, SomeTypeRep rx, SomeTypeRep ry] with rx's and ry's evidence from the givens (the IsTYPE matches' TypeRep
+patterns). The solver gave the constants 'Many, LiftedRep, LiftedRep (HF10-P39 (a)'s unapplied arrow), so eqTypeRep failed and App
+printed the TrApp unrebuilt. Now (typecheck.ae's arrow-tycon-ev, HF9-P4's erased kinds undone there alone): q is the first
+argument's kind, TYPE q, its annotated kind (TrApp's (b :: k1)) rewritten by the given equalities in force (the IsTYPE match's
+k1 ~ TYPE rx), else a kind link's (typeRepKind's, mkTrFun's); r the result kind's argument from the type's kind signature (hs-type's
+HsKindSig kept beside the type, *kind-sigs*); each one's evidence a closed one's mkTrCon or the solver's (a given), LiftedRep where
+no kind is known (GHC's defaulting). ghc-internal's STG: GHC.Internal.Data.Typeable.Internal alone moves (mkTrAppChecked's list now
+[Many, $dTypeable rx, $dTypeable ry], GHC's shape); T14236 prints `Int# -> [Char]`.
+
+**T7861: GHC's impredicativity check with Quick Look's exception, and its message.** GHC 9.14.1 compiles main to typeError of
+"Couldn't match expected type ‘a0’ with actual type ‘(forall (b :: k0). a1) -> a1’ / Cannot instantiate unification variable ‘a0’
+/ with a type involving polytypes: ..." (GHC.Tc.Utils.Unify's simpleUnifyCheck: a TauTv is never filled with a type holding a forall
+or a context; GHC.Tc.Gen.App's quickLookArg skips the argument `f` of `seq`, its parameter a bare instantiation variable, not
+guarded, and findNoQuantVars false: f's instantiation leaves a free). Ported (typecheck.ae, tc-app's argument check): an argument
+whose parameter type is a bare meta, filled by its check with a type holding a polytype below its top, is CannotUnifyWithPolytype's
+error unless Quick Look takes it (ImpredicativeTypes or the head ($), and no-quant-vars? of the argument's head at its arguments);
+the elaborator still fills metas freely elsewhere. The message (mismatch-text's :poly entry, code 91028): the mismatch, then
+pprCannotUnifyVariableReason's two lines; metas named after their quantified variable when errors are deferred (inst-meta), tidied
+with GHC's numbering on a clash (getHelpfulOccName's trailing 0, tidyOccName: seq's a0, f's a1), a nested forall printed with its
+kinded binder (a binder its body leaves unconstrained is of the signature's generalised {k}, a meta k0 in an instance);
+GHC.Tc.Gen.Match's StmtErrCtxt for a do block's statements ("In a stmt of a 'do' block:", the statement's expression checked NC); a
+wired-in interface's variable a#UNIQUE tidied to a. The run's stderr is GHC's byte for byte (1cd4be20...).
+
+**T13688: quasi-quotes run at compile time.** The new namespace arbace.repr.haskell.thsplice and front.ae's th-expand!, before a
+module is renamed: each [q|text|] of its dump (SplicePat, HsUntypedSplice, HsSpliceTy over HsQuasiQuote) becomes a line of a
+generated Main (the module's imports by their source spans, qualified Prelude, Language.Haskell.TH.Syntax and .Quote, `runQ
+(quotePat (q) "text") >>= print`, quoteExp, quoteType), read and compiled by the same front end over the program's modules compiled
+before it (GHC's stage restriction: the quoter's module), its STG beside theirs, run on hsi over the same libraries (sh with ulimit
+and timeout); each printed value read back (Show's syntax: constructors, literals with Haskell's escapes, lists, tuples, negative
+numbers, ratios) and converted as GHC.ThToHs does (cvtPat, cvtl: literals, an IntegerL overloaded, variables, constructors,
+application, tuples, lists, parentheses; names as mkName's or module-qualified) into the native dump in the quote's place, then
+renamed and elaborated as any. front build takes --hsi PATH --hsi-libs DIR,... --hsi-image DIR; bin/lib/hsi/check passes them (the
+own set and its image under --libs own). T13688 prints "hello world" / good twice and leaves the class :oracle-pending (judged by
+its pending own verdict, T13688.stdout).
+
+**T24245, T25364, TestTypeableBinary: ghc-platform, ghc-experimental, ghc-boot, ghc-heap and ghci own.** Their own interfaces
+were made already by haskell-iface-own (queue 429); now each is an own package as the 20 above base are: a producer step
+haskell-lib-own-P in test/gate/steps.edn (dependency order: ghc-platform, ghc-experimental, ghc-boot, ghc-heap, ghci; lib-check
+--package P --ifaces own --judge test/haskell/lib-check-own-P.edn, then lib-stg --package P --ifaces own, its controls
+lib-check-controls-P.tsv, already there, and the new lib-stg-controls-P.txt; outputs P-pool.tar and P-own.tar), the five P-own.tar
+in hsi-check's and hsi-check-aot's :uses and HSI_OWN_TARS, the crop's step list, the controls table, lane 2's HSI_OWN_PACKAGES.
+The programs then met front-end gaps of their own, each GHC's rule:
+- T24245 (GHC.TypeNats.Experimental, GHC.TypeLits.Experimental): a type-level character of the native dump is (char N), which
+  hs-type took for a Character (a ClassCastException); `SNat @62` under a type application named the pattern synonym itself, not
+  its builder $bSNat (var-occ's rule now in HsAppType too); minusSNat's `m <= n` is Assert (m <=? n) (LeErrMsg m n), and
+  Assert's equations `Assert 'True _ = ()`, `Assert _ errMsg = errMsg` had their wildcards as metas, so the own interface wrote
+  free variables (tv "m1") no argument matches: fam-eqn now binds a wildcard as GHC's renamer names it (the own interfaces of
+  ghc-internal's Assert, Data.Type.Equality's (==) and Typeable.Internal's NotApplication change accordingly, the judge's facts
+  equal as before); the reduction's evidence is the constraint unit's, whose dictionary GHC binds as CUnit (sc-base, dcon-occ in
+  typecheck.ae, tostg.ae and simplify.ae: CUnit with CTupleN and CSolo; GHC.Internal.Classes' own STG gains the CUnit binding,
+  2303 -> 2304 of 2318 bindings equal, its data equal); GHC.Builtin.Types.Literals' Log2, CmpChar, ConsSymbol, UnconsSymbol,
+  CharToNat and NatToChar ported into builtin-fam; KnownChar's evidence a C# of the literal (EvChar's mkCharExpr: a bare literal
+  was no Core tostg reads).
+- T25364 (GHC.Utils.Encoding) and TestTypeableBinary (GHCi.TH.Binary, imported for its orphans; the program's Binary (TypeRep a)
+  is binary's): no change beyond the packages.
+
+**The libraries**, made again at the branch's commit in the run worktree as the gate's producers make them (`.tmp/r7/full.sh`,
+the elaborator's change being shared code whose callers in the libraries cannot be listed beforehand): lib-check --ifaces own of
+ghc-internal, every module elaborated, 0 worse, 0 better against its record (12.5 minutes, 1.77 GB); its pool moves in three
+interfaces alone, the wildcard equations' binders (GHC.Internal.TypeError's Assert, GHC.Internal.Data.Type.Equality's (==),
+GHC.Internal.Data.Typeable.Internal's NotApplication), the judge's facts as before. lib-stg --ifaces own of ghc-internal: 9,208 of
+10,742 bindings equal (9,207 before), 0 worse, control 0 of 171; its STG moves in GHC.Internal.Classes (CUnit) and
+GHC.Internal.Data.Typeable.Internal (mkTrAppChecked) alone; test/haskell/lib-stg-own-results.edn re-recorded from it (Classes'
+row). base and the 20 packages above it: every lib-check judge 0 worse, their pools and STG byte for byte the round's start
+(`.tmp/r7/diffall.sh` against the copies kept). The five new packages: ghc-platform 1 module, ghc-experimental 11 (17 of 22 interface
+facts equal to GHC's on its 2 modules the pack holds; control differs), ghc-boot 12 (7 elaborated without an error, 59 of 59 facts
+equal; control differs), ghc-heap 18, ghci 17 (11 without an error, 57 of 57 facts; control differs); lib-stg of each a measure (no
+-O0 reference yet); their records test/haskell/lib-check-own-P.edn written from those runs (libcheck record over each modules.edn,
+lib-check's own description, no second run), each judged against its record: 0 worse.
+
+**The programs that change**, found by the front end itself (the user's word of the day, "avoid redundancy and unnecessary tests":
+the rows the change moves, their controls, no proof taken twice). At the T7861 commit the front end over the 129 programs whose
+sources name a feature its changes touch (rank-n types, runST, mask, Data.Data's traversals, Typeable, -fdefer-type-errors) over the
+round's starting libraries, against lane 2's outputs: 125 byte for byte, the three hs-r6 re-recorded (arr020, the two
+UnliftedNewtypes), and Defer01 (its unreached deferred messages now name a0 where they said t0, closer to GHC's). At the branch's
+head the front end over the 60 programs whose sources name a feature of the later changes (type-level literals and families,
+pattern synonyms, quasi-quotes, Constraint, Data.Type.Equality and the like) and the targets, on the rebuilt libraries composed as
+the check composes them (`.tmp/r7/compose2.sh`), against the base commit `94dbc03af` run over the round's starting libraries in a
+worktree of its own (lane 2's outputs were gone with hs-r5's worktree): 58 byte for byte, T13688 and T24245 (the targets) differ.
+The library changes reach no other program: mkTrAppChecked's arrow branch differs only for an unlifted argument or result, and no
+program's STG names Classes' old constructor C:CUnit.
+
+**The re-record**: `bin/hsi check --libs own --only @7 ids --record` (lane 2's environment with the five packages in
+HSI_OWN_PACKAGES, `.tmp/r7/rerun.sh`): 7 of 7 pass own (T14236, T7861, T13688 by its pending own verdict, T24245, T25364,
+TestTypeableBinary, Defer01 as before); six lines of test/haskell/check-hsi-own.edn change, Defer01's not. No AOT program moves (Defer01's
+result unchanged; none of the targets is in AOT's set): its record stays. The negative controls, their subjects run on the own
+libraries (no record): 11 of 11 fail as they must. The whole record judged with the check's judge (`.tmp/r7/judge.sh`): 0 unclassed,
+own-fallback.txt 0 problems (empty now); 950 lines, 916 :libs :own, the 31 out of the cases, and T13825-unit, tcrun022 and
+unboxedsums_unit_tests, counted out by the user's decision of 2026-11-22 (applied by the counting agent, not here).
+
+**Made own, by cause (eval 910 -> 916 of the 919 cases; AOT 139 of 139 as before):**
+- Typeable's evidence of a partially applied arrow at its kind arguments (doTyApp, doTyConApp; the givens' kinds): T14236;
+- GHC's impredicativity check with Quick Look's exception and CannotUnifyWithPolytype's message: T7861;
+- quasi-quotes run at compile time (runRnSplice through hsi, GHC.ThToHs): T13688;
+- five packages own, with the family wildcard, CUnit, the built-in families, KnownChar's evidence, the type-level character and the
+  builder under a type application: T24245; the packages alone: T25364, TestTypeableBinary.
+
+**Scores** (`bin/reap --record`: Haskell eval 892 -> 893 pass, deferred 23 -> 22, T13688 out of :oracle-pending, 56 of 56 cells,
+0 problems; `bin/crops-score --record`): Haskell's eval stage 0.9950 -> 0.9980 (917.5 / 919 = 0.99836), AOT 1.0000, independence
+**0.9990 -> 0.9996** (exact 0.99967; floor 99, unchanged), completeness 0.9809 -> 0.9811, maturity 1. `bin/crops-score --judge
+--strict` 0 problems, `bin/records-check` 9 pairs, 0 problems.
+
+**Left:** the three cases the user counted out (T13825-unit, unboxedsums_unit_tests, tcrun022) are the eval stage's last 0.5s until
+the counting agent applies the decision. Found, not done: lib-check's closures grow from the names an interface mentions, so an
+orphan module (Data.Binary.Generic's GBinaryPut/GBinaryGet instances) that a dependency imports is missing from them (GHC's
+dep_orphs), and ghc-boot's GHC.Data.SizedSeq, GHC.ForeignSrcLang, GHC.LanguageExtensions and ghci's GHCi.TH.Binary, GHCi.Message,
+GHCi.TH, GHCi.ResolvedBCO elaborate with unsolved Generic-defaulted Binary instances (Cabal-syntax's 71 modules likewise); ghc-boot's
+GHC.Version and ghci's GHC.Platform.Host are hadrian's generated modules, in no corpus (GHC.UniqueSubdir, GHCi.InfoTable); GHC.Unit.Database
+(two skolems) and GHCi.FFI are gaps of their own. None of them is reached by the three programs. base's own lib-check and lib-stg
+records are stale (4 and 22 modules better, since hs-r5), not re-recorded here.
+
+Alternatives not taken: the impredicativity check in unify for every TauTv (GHC's rule in full, but the elaborator fills metas with
+polytypes where GHC has infer holes, let bindings without a signature: a regression risk over 900 programs and 27 libraries, for
+no case here); Quick Look in full (QL's instantiation variables through the whole application); generating GHC.Version and
+GHC.Platform.Host as PrimopWrappers was (no program needs them); a second lib-check run of the five packages for their records
+(written from the runs' modules.edn instead). Not done: doc/AGENDA.md (the main session's), the gate.
+
+## 2026-11-22: the user's decisions on the burst's second questions (C++'s GCC rows, Python's by design left, Haskell's 34, Rust C6-5)
+
+Asked by the main session after cpp-read's, hs-r7's and R3's reports and the Python eval matrix (09:30 UTC); answered by the user:
+- C++'s read cell, 311 by design: the 135 `gcc-own-rules` (CP398 (c)) are built, the GNU extension rules ported one at a time into Arbace's
+  own front end (deferred until built); `gcc-dialect` 173 (OpenMP, OpenACC, GNU TM, GCC contracts, -fpermissive, -fms-extensions),
+  `gxx-only-rules` 2 (CP328 (a)) and `musl-libc` 1 (Wconversion-null-4: musl's NULL is nullptr) are n/a. Alternatives not taken: build the
+  dialects too; all 311 n/a.
+- Python's eval cell: `extension-modules` 75 are built, C extension modules loaded through ci's C world (the route py-capi builds _testcapi
+  on); `fork` 557, `testinternalcapi` 132 and `venv-and-build` 49 are n/a. Alternatives not taken: the venv layout built too; a fork-safe
+  child by a patched Go runtime; all four n/a.
+- Haskell's completeness: the 31 programs GHC never built (`no-reference`: 19 import parallel, the rest packages outside GHC's boot
+  libraries or no main) are built: the packages vendored into the corpus, GHC's runs recorded by hand in the oracle tier, run on hsi;
+  `process` 1 (forkProcess) and `skipped` 2 (all.T's own skips) are n/a. Alternative not taken: all 34 n/a.
+- Rust C6-5 (a): the library build's 36 units are the build's description, data like `std.edn` (made once by `std-crates --units`, held to
+  Cargo's `--unit-graph` in the oracle tier); C4's identities count own. Alternatives not taken: (b) port Cargo's resolution (5-8 agent
+  days); (c) (a) now, (b) when a second library build needs it.
+
+## 2026-11-22: the user's second counting decisions applied (branch `counting2-1122`, from mac/next `a8c6d3137`)
+
+The n/a half of the entry above, as counting-1122 applied the first (no check run, the user's "avoid redundancy and unnecessary tests":
+bin/reap --record, bin/crops-score --record, --judge --strict, --self-test, --self-test-ref and bin/records-check only; bin/pyi
+divergences, which classes the record with pyi's own judge and runs nothing, before and after). Each rule is the class's `:kind :na`,
+keyed on the verdict the record holds (a row a class names counts n/a only when it does not pass), every row keeping its reason;
+doc/CROPS-SCORE.md, "Decided (the user, 2026-11-22): the second questions", has the mechanism and the numbers.
+- Classes `:na` (`:decided` says since when and the alternatives not taken): C++'s test/cpp/divergences-dg.edn `:gcc-dialect` 173,
+  `:gxx-only-rules` 2, `:musl-libc` 1; Python's test/python/divergences.edn `:fork` 557, `:testinternalcapi` 132, `:venv-and-build`
+  49; Haskell's test/haskell/divergences.edn `:process` 1 (T24672) and `:skipped` 2 (T24809, T4262). Left by design, built by
+  others: C++'s `:gcc-own-rules` 135, Python's `:extension-modules` 75, Haskell's `:no-reference` 31.
+- bin/pyi's own judge (test/python/libtest_judge.ae) classes by `:tests` and `:match`, the kind only printed: bin/pyi divergences gives
+  fork 557, testinternalcapi 132 and venv-and-build 49 before and after, the lines' "(design," now "(na,". hsi's check
+  (bin/lib/hsi/check) and the C++ dg check (arbace/repr/cpp/dg.ae) read no class kind either.
+- bin/crops-score (test/crops/score.ae): an n/a case leaves the stages' counted cases as it leaves the cell's. `na-ids` reads `:ids`
+  beside `:tests` (hsi's classes name programs by `:ids`); `na-cases` keeps a row the record passes (C++'s `:musl-libc` names
+  Wnull-conversion-1.C, which the own front end passes: a pass in reap, and kept in the read stage's count); `:count-from`'s `:out`
+  takes it (C++'s read: 1,699 of 4,382 own rows, 182 n/a; 0.780 -> 0.788); `:case-inputs` leaves out of the cell's ids its `:na`
+  classes' non-passing ids (`cell-rows`, `cell-na-ids`): without it Haskell's eval took T24809 and T4262 out twice (the matrix's
+  total without them, eval-out.edn's list with them: 913 of 913), so they left test/haskell/eval-out.edn (34 -> 32, the fact's
+  `:cases` too) and the stage counts 915 of 915. No other crop's stage moved (Java's, C++'s and Rust's case-inputs name no n/a id).
+  C++'s judge's stated `:dg` the cell's 4,383 (4,564 before, which had not taken 497-3 (a)'s and 502-2 (a)'s 5 n/a either; still 1.0
+  at three decimals). Left as before this round: pr105475-2.C (undefined-expectation), which the cell passes by clang's record and
+  the own record fails, out of the read stage's rows and in the cell's (one row).
+- Cells: C++ read 5,665 / 311 / 517 (38 n/a) -> 5,665 / 135 / 517 (214 n/a); Python eval 39,204 / 2,719 / 3,627 (2,771 n/a) ->
+  39,204 / 1,981 / 3,627 (3,509 n/a); Haskell eval 894 / 34 / 22 -> 894 / 31 / 22 (3 n/a).
+- Completeness, exact (floored to six decimals, then to one): C++ 0.961380 -> 0.967457 (96.1 -> 96.7), Python 0.961507 -> 0.965050
+  (96.1 -> 96.5), Haskell 0.983464 -> 0.984209 (98.3 -> 98.4); what is meant to pass unchanged (C++ 0.978450, Python 0.977173, Haskell
+  0.992197). Independence: C++ 0.953940 -> 0.955500 (95.3 -> 95.5; test/crops/scores.edn 0.9540 -> 0.9556), Python and Haskell 1.0.
+- Controls: bin/crops-score --self-test's `counting-1122b-tests` (`na-ids` not taking a `:design` class's ids; `na-cases` leaving a
+  passing and an unnamed row; C++'s count with the passing row taken out too; Haskell's with the n/a ids kept and 34 out, 913; each
+  crop's completeness, C++'s with the 176 still by design); with `na-cases` taking every named row, or `na-ids` reading `:tests`
+  alone, the self-test failed.
+Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0 problems), --self-test, --self-test-ref,
+bin/records-check (9 pairs, 0 problems).
+
 
 ## 2026-11-22: rust-c6c-1122: C6-4's third round (the back end's next causes), R3 merged, C6-5 (a) recorded
 

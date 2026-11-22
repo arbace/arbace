@@ -512,3 +512,97 @@ elf-objdump (an empty source) out (`test/asm/object-out-arm64.edn`).
 | arm64 asm | 0.9993 -> 1.0 (23,059 own, 1 out) | 0.9998 -> 1.0000 | 99.9 -> 100.0 |
 
 arm64's completeness 99.66 -> 99.97 (the 28 deferred lines of the first round met, 1 left: error-location-ldr-pseudo's literal pool).
+
+## Decided (the user, 2026-11-22): the burst's counting questions
+
+The user's decisions of 2026-11-22 (doc/JOURNAL.md, "the user's decisions on the burst's by-design and counting questions") count
+some non-passes n/a (outside both denominators, reap's `:kind :na`), some as passes by a verdict another record holds, and some out
+of a judge's cases (the score's `:out-of-cases`). Each is a rule over the records, keyed on a verdict a record holds, never a copied
+list of cases; each row keeps its reason. Built (branch `counting-1122`):
+
+- **Python, n/a.** `test/python/divergences.edn`: `:cpython-only` (617) `:kind :na`; four classes before `:skipped-by-test`, each
+  taking its rows from it: `:skipped-by-both` (1,917; `:ref-outcomes [:skipped]`: the method skips itself on pyi and CPython 3.14.10's
+  recorded run skipped it too; bin/reap's source option `:py-ref-outcomes` puts the reference's outcome beside each eval non-pass and
+  `classify` keys a class's `:ref-outcomes` on it), `:udp-lite` (113, the host's kernel), `:cpython-implementation-details`
+  (test_opcache's 73 and test_itertools' tuple reuse 6), `:remote-debugging-disabled` (test_remote_pdb's 45; its 46th method CPython
+  skipped too, `:skipped-by-both`'s). `:skipped-by-test` keeps 376 (CPython ran 235 of them, 96 have no reference, 45 an excluded one).
+  bin/pyi's own judge (test/python/libtest_judge.ae) reads no outcome, so it leaves a `:ref-outcomes` class to bin/reap.
+- **Python's four `:rejected` files.** Read: bin/reap's `:own-verdict {:file F :class :rejected}` (test/reap/main.ae's
+  `own-verdicts`): each file's recorded error (test/python/roundtrip-known.edn's `:error`, `:message`) held to every expectation its
+  own tests state (test/python/rejected-own.edn: the test, its lines in the pinned tarball, the class and the message as the test
+  compares it), as parse-check judges its error cases; the position a test states (badsyntax_3131's line 2, offset 1) is the read
+  cell's count-once group's, whose parse check passes the file only with the native error's position the reference parser's. Print:
+  `test/python/divergences-print.edn`'s `:rejected` `:kind :na`.
+- **C.** CR1 (a): `test/c/divergences-read.edn`'s fourteen classes where cc, the reference, is wrong are marked `:reference-wrong`;
+  the token and tree checks' sources' `:own-elsewhere {:records [...] :sep " "}` (`own-elsewhere-pick`): a file known only in such
+  classes passes when the dg check's record (its DejaGnu directives) or the eval check's (its run) passes it, each test by its own
+  verdict; `count-once` counts such a file a pass when no check of the group leaves it a non-pass (the tree check's "pp-known" rows
+  follow the token check's verdict). 132 pass (131 by the dg check, 1 by its run); the 5 without a verdict stay by design
+  (c23-attr-syntax-6, c23-complit-5 and embed-10, whose dg verdicts fail; sqlite3.c and tcc-pp's 13.S, with none). The five speed
+  benchmarks at eval: `test/c/divergences.edn`'s `:speed-benchmarks` (compcert's aes, almabench, binarytrees, chomp, fannkuch),
+  `:kind :na`, before `:speed` (4 stay); the judge's stated cases 14,952 own to 14,947.
+- **Go.** `test/goi/divergences.edn`'s `:foreign-code` (8) and `:memory` (6) `:kind :na`. (The read cell's 137 are another stream's.)
+- **x86-64.** `test/asm/divergences-cross.edn`'s six classes of llvm-mc's own Intel text (`:ambiguous` 537, `:pcrel-imm` 118,
+  `:mask-operand` 33, `:other-instruction` 21, `:disassemble-only` 12, `:dollar-name` 2: 723) `:kind :na`, out of the cases (AXS34's
+  question (b)); the judge's stated cases less the same 723: (221,193 + 0.5 x 86) / 221,279.
+- **Haskell.** T13825-unit and unboxedsums_unit_tests (`:by-design`: they import GHC's compiler as a library) and tcrun022
+  (`:implementation-defined`: an -O test whose RULES must fire) join test/haskell/eval-out.edn: 34 out of eval's judged cases, 910
+  of 916 own.
+- **Negative controls.** `bin/crops-score --self-test` (`counting-1122-tests`, run by every `--judge`) calls reap.main's own
+  `classify`, `py-ref-annotate`, `own-verdict-pass?`, `own-elsewhere-pick`, `kind-of` and `sum` on fabricated cases and holds each
+  crop's numbers: a method CPython ran (and one with no reference) not taken by `:ref-outcomes`; another message, another class, a
+  word the message lacks, one of two expectations unmet, no expectation: not a pass; a dg verdict that fails, a class not marked, a
+  file with one deferred entry: not picked; the 723 by design and the 34 listed against 31 stated: refused. With each rule broken by
+  hand (classify ignoring `:ref-outcomes`, the own verdict ignoring `:exact`, CR1 ignoring `:reference-wrong` or taking any verdict)
+  the self-test failed.
+
+| crop | cells before | cells after | completeness (floored) | independence (floored) |
+|---|---|---|---|---|
+| Python | read 3,702 / 34 / 0, eval 39,204 / 5,490 / 3,627, print 2,796 / 4 / 0 | read 3,706 / 30 / 0, eval 39,204 / 2,719 / 3,627 (2,771 n/a), print 2,796 / 0 / 0 (4 n/a) | 0.9485 -> 0.9615 | 1.0 |
+| C | read 5,328 / 137 / 10, eval 2,324 / 35 / 0 | read 5,460 / 5 / 10, eval 2,324 / 30 / 0 (5 n/a) | 0.9861 -> 0.9926 | 0.99997 |
+| Go | eval 1,781 / 52 / 1 (4 n/a) | eval 1,781 / 38 / 1 (18 n/a) | 0.9889 -> 0.9908 | 1.0 |
+| x86-64 | print 195,651 / 861 / 2 | print 195,651 / 138 / 2 (723 n/a) | 0.9989 -> 0.9998 | 0.99996 |
+| Haskell | eval stage (910 + 0.5 x 9) / 919 | (910 + 0.5 x 6) / 916 | 0.9832 | 0.9990 -> 0.9993 |
+
+## Decided (the user, 2026-11-22): the second questions
+
+The user's decisions of 2026-11-22 on the burst's second questions (doc/JOURNAL.md, "the user's decisions on the burst's second
+questions") count eight more classes n/a, as the section above counts its own: the class's `:kind :na`, its rows and their reasons
+kept, keyed on the verdict the record holds (a row a class names counts n/a only when the record does not pass it), never a copied
+list. Built (branch `counting2-1122`):
+
+- **C++, read.** `test/cpp/divergences-dg.edn`'s `:gcc-dialect` (173: OpenMP, OpenACC, GNU TM, GCC's contracts, -fpermissive,
+  -fms-extensions; CP399 (a)), `:gxx-only-rules` (2, CP328 (a)) and `:musl-libc` (1, Wconversion-null-4: musl's NULL is nullptr)
+  `:kind :na`. `:musl-libc` names a second file, Wnull-conversion-1.C, which the own front end passes: a pass in reap (its
+  `classify` sees only the non-passes) and in the read stage's count (below). Left by design: `:gcc-own-rules` (135), which the
+  user's decision builds (the GNU extension rules ported into the own front end).
+- **Python, eval.** `test/python/divergences.edn`'s `:fork` (557), `:testinternalcapi` (132) and `:venv-and-build` (49) `:kind :na`.
+  bin/pyi's own judge (test/python/libtest_judge.ae) classes by `:tests` and `:match` alone (the kind is only printed): `bin/pyi
+  divergences` over the record gives the same classes and counts before and after, the kind's word aside. Left by design:
+  `:extension-modules` (75), which the decision builds (C extension modules through ci's C world).
+- **Haskell, eval.** `test/haskell/divergences.edn`'s `:process` (T24672, forkProcess) and `:skipped` (T24809, T4262, all.T's own
+  skips) `:kind :na`. Left by design: `:no-reference` (31), which the decision builds (the packages vendored, GHC's runs recorded by
+  hand in the oracle tier).
+- **The stages' cases follow the cells'.** An n/a case is none of the cell's cases, so none of a stage's counted cases:
+  - `:count-from`'s `:out` (497-3 (a), C++'s read) takes `na-cases`: an `:na` class's id leaves the counted rows unless the record
+    passes it (Wnull-conversion-1.C stays, an own pass): 1,699 of 4,382 rows own (182 n/a), the stage (1934 + 1699 + 0.5 x 2683) /
+    6316 = 0.788 (0.780 before). One row differs from the cell still, as before this round: undefined-expectation's
+    pr105475-2.C, which the cell passes by clang's record (outside the syntax-only list) and the own record fails.
+  - `:case-inputs` (RFP53 (a), HF10-P29 (a)) leaves out of the cell's ids the ids its `:na` classes name in `:tests` or `:ids` (hsi's
+    classes) whose row does not pass (`cell-rows`, `cell-na-ids`, `na-cases`), as the matrix's total leaves them out; before, an
+    `:out-of-cases` id that is n/a was taken out twice (Haskell's eval counted 913 of 913). T24809 and T4262 left
+    test/haskell/eval-out.edn (34 -> 32 out, the fact's `:cases` too): the eval stage 915 of 915 own. No other crop's stage moves
+    (Java, C++ and Rust name no `:na` class's id among their cases).
+  - C++'s judge: its stated `:dg` cases the cell's, 4,383 (3,731 pass and 866 not, less 214 n/a; the 4,564 stated before had not
+    taken 497-3 (a)'s and 502-2 (a)'s 5 either): (8430 + 1929 + 0.5 x 5) / 10364, 1.0 at three decimals as before.
+- **Negative controls.** `bin/crops-score --self-test`'s `counting-1122b-tests` (run by every `--judge`): `na-ids` takes an `:na`
+  class's `:tests` and `:ids`, not a `:design` class's; `na-cases` leaves a passing row and an unnamed one; C++'s count keeps the
+  passing row (the control, every named row out, differs); Haskell's eval counts 915 with or without the two ids on the out list
+  (the control, the n/a ids kept with 34 out, gives 913); the three crops' completeness before and after, and C++'s with the 176 by
+  design (must differ). With `na-cases` taking every named row, or `na-ids` reading `:tests` alone, the self-test failed.
+
+| crop | cell before | cell after | completeness exact (floored) | independence |
+|---|---|---|---|---|
+| C++ | read 5,665 / 311 / 517 (38 n/a) | read 5,665 / 135 / 517 (214 n/a) | 0.961380 -> 0.967457 (96.1 -> 96.7) | 0.953940 -> 0.955500 (95.3 -> 95.5; the read stage 0.7798 -> 0.7876) |
+| Python | eval 39,204 / 2,719 / 3,627 (2,771 n/a) | eval 39,204 / 1,981 / 3,627 (3,509 n/a) | 0.961507 -> 0.965050 (96.1 -> 96.5) | 1.0 |
+| Haskell | eval 894 / 34 / 22 | eval 894 / 31 / 22 (3 n/a) | 0.983464 -> 0.984209 (98.3 -> 98.4) | 1.0 (eval 916 of 916 -> 915 of 915) |

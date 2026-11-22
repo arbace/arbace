@@ -732,5 +732,88 @@
                             (catch Throwable _ :refused))]
                  (if (= n 2) [:equal n] [:differs n])))
              :differs))
+    ;; queue 524 (C3): a native library body's caller location file as the program's record writes it
+    (check "524: an export's /rustc/COMMIT/library/ location trimmed to the library build's path (a twice-prefixed one too)"
+           [(br/lib-loc-file "/rustc/58cf8f9c/library/core/src/alloc/layout.rs") (br/lib-loc-file "/rustc/58cf8f9c//rustc/58cf8f9c/library/core/src/ub_checks.rs")]
+           ["core/src/alloc/layout.rs" "core/src/ub_checks.rs"])
+    (check "524 control: a program's own file unchanged" (let [f (br/lib-loc-file "test/rust/eval/panics.rs")] (if (= f "core/src/panics.rs") [:equal] [:differs f])) :differs)
+    ;; queue 524 (C3): the layouts a run took from the record
+    ;; a native body's ADT form without its :tc (build/ty-form's def path), read as its path, not `::`
+    (check "524: a native form's ADT by its def path"
+           (mono/form->ty '(ty "std::ptr::NonNull<i32>" (adt "std::ptr::NonNull" "core::ptr::non_null::NonNull" [(ty "i32" (int "i32"))])))
+           [:adt "core::ptr::non_null::NonNull" [[:int "i32"]]])
+    (check "524: a record's ADT form by its DefId, as before"
+           (mono/form->ty '(ty "std::ptr::NonNull<i32>" (adt "std::ptr::NonNull" "DefId(2:5678 ~ core[f4c9]::ptr::non_null::NonNull)" [(ty "i32" (int "i32"))])))
+           [:adt "core::ptr::non_null::NonNull" [[:int "i32"]]])
+    (check "524 control: an ADT form that is neither is refused"
+           (try [:equal (mono/form->ty '(ty "X" (adt "X" "not a path!" [])))] (catch Throwable e [:differs (.getMessage e)])) :differs)
+    ;; a record's trait object (its text alone) in the layout table: a wide pointer's pair, the trait object's unsized memory
+    (let [dbg '(ty "dyn std::fmt::Debug" (dyn))
+          lt (binding [mono/*layouts* (atom {}) c/*defs* (atom [])] (mono/layout-table [(list 'ty "&dyn std::fmt::Debug" (list 'ref dbg false)) dbg]))]
+      (check "524: &dyn std::fmt::Debug's layout from the record's form (a pair of pointers, 16 bytes)"
+             (select-keys (get lt "&dyn std::fmt::Debug") [:size :align]) {:size 16 :align 8})
+      (check "524: dyn std::fmt::Debug's layout (unsized)" (get-in lt ["dyn std::fmt::Debug" :abi]) '(memory false))
+      (check "524 control: the placeholder is the layout table's alone (form->ty still refuses the trait object)"
+             (try [:equal (binding [c/*defs* (atom [])] (mono/form->ty dbg))] (catch Throwable e [:differs (.getMessage e)])) :differs))
+    ;; a record's library closure (`(closure PATH [PARENT-ARGS.. KIND SIG UPVARS])`) laid out over its upvars
+    (let [cl '(ty "{closure@std::array::iter::iter_inner::PolymorphicIter<[std::mem::MaybeUninit<f64>]>::next::{closure#0}}"
+                  (closure "std::array::iter::iter_inner::PolymorphicIter::<[std::mem::MaybeUninit<T>]>::next::{closure#0}"
+                           [(ty "f64" (float "f64")) (ty "i32" (int "i32")) (ty "extern \"rust-call\" fn((usize,)) -> f64" (fnptr))
+                            (ty "(&[f64],)" (tuple (ty "&[f64]" (ref (ty "[f64]" (slice (ty "f64" (float "f64")))) false))))]))
+          lt (binding [mono/*layouts* (atom {})] (mono/layout-table [cl]))]
+      (check "524: a record's library closure laid out over its upvars (one wide reference, 16 bytes)"
+             (select-keys (get lt (second cl)) [:size :align]) {:size 16 :align 8})
+      (check "524 control: a closure with no upvars tuple stays refused"
+             (let [l (binding [mono/*layouts* (atom {})] (get (mono/layout-table [(list 'ty "{closure@x::{closure#0}}" '(closure "x::{closure#0}" []))]) "{closure@x::{closure#0}}"))]
+               (if (mono/error? l) [:differs l] [:equal l])) :differs))
+    ;; a crate-private braced struct read from the library's sources (VariantData::Struct's named fields)
+    (let [dir (str (or (System/getenv "TMPDIR") ".tmp/tmp") "/q524-src-adt-" (System/nanoTime))
+          _ (.mkdirs (java.io.File. (str dir "/core/src")))
+          _ (spit (str dir "/core/src/lib.rs") "pub struct Pair<T> { a: *const T, n: usize }\npub struct Tup<T>(*const T, usize);\n")
+          r (binding [mono/*lib-dir* dir] [(count (:fields (mono/src-adt "core::Pair"))) (count (:fields (mono/src-adt "core::Tup")))])]
+      (check "524: a braced struct's fields from the sources (two), a tuple struct's (two)" r [2 2])
+      (check "524 control: a struct the sources lack" (binding [mono/*lib-dir* dir] (if (mono/src-adt "core::Missing") [:equal] [:differs])) :differs)
+      ;; a library constant's integer literal (core::char's `const TAG_CONT: u8 = 0b1000_0000;`), as CTFE evaluates it
+      ;; a crate-private enum from the sources (alloc::raw_vec::AllocInit's two unit variants, btree's empty markers), laid out
+      (let [dir (str dir "-e")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "enum Two { A, B }\nenum Gap { A, B = 5, C }\nenum Leaf {}\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a source enum's layout (two unit variants: a u8 tag 0..=1), its discriminants with an explicit one (0 5 6)"
+                 [(get-in (lay "core::Two") [:abi]) (:discrs (lay "core::Gap"))] '[(scalar (int 8 false [0N 1N])) [0 5 6]])
+          (check "524: an empty enum's layout (uninhabited, zero-sized)" (select-keys (lay "core::Leaf") [:size :uninhabited]) {:size 0 :uninhabited true})
+          (check "524 control: an enum the sources lack stays refused" (let [l (lay "core::Missing")] (if (mono/error? l) [:differs l] [:equal l])) :differs)))
+      ;; a source struct's #[repr(C)] keeps its fields' order (core's AlignedStorage: `_align: [T; 0]` at 0, as the record's)
+      (let [dir (str dir "-c")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "#[repr(C)]\nstruct S { a: [u32; 0], b: [u8; 64] }\nstruct T { a: [u32; 0], b: [u8; 64] }\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a repr(C) source struct's fields in their order ([u32; 0] at 0, [u8; 64] at 0)" (:fields (lay "core::S")) '[0 0])
+          (check "524 control: repr(Rust) reorders them (the array's alignment group first)" (let [f (:fields (lay "core::T"))] (if (= f '[0 0]) [:equal f] [:differs f])) :differs)))
+      ;; a definition local to a function (catch_unwind's `union Data`, select_unpredictable's `struct DropOnPanic`), a union laid out
+      (let [dir (str dir "-f")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "fn f() { struct L(u8, u16); union U { a: u8, b: u32 } let x = 1; }\nfn g() { let y = 2; }\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a function's local struct and union from the sources (the union 4 bytes, its fields overlaid)"
+                 [(select-keys (lay "core::f::L") [:size :align]) (select-keys (lay "core::f::U") [:size :align])] [{:size 4 :align 2} {:size 4 :align 4}])
+          (check "524 control: a name the function does not declare stays refused" (let [l (lay "core::g::L")] (if (mono/error? l) [:differs l] [:equal l])) :differs)))
+      (let [dir (str dir "-k")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "const K: u8 = 0b1000_0000;\nconst N: i32 = -5;\nconst S: &str = \"x\";\n")
+        (check "524: library constants' integer literals: 0b1000_0000 as u8, -5 as i32"
+               (binding [mono/*lib-dir* dir] [(mono/src-const-value "const core::K") (mono/src-const-value "const core::N")])
+               '[(scalar 128 1) (scalar 4294967291 4)])
+        (check "524 control: a constant that is not an integer literal stays unevaluated"
+               (binding [mono/*lib-dir* dir] (if-let [v (mono/src-const-value "const core::S")] [:equal v] [:differs])) :differs)))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))
