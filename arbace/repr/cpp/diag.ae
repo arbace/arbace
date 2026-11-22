@@ -4563,6 +4563,63 @@
 
 (swap! checks conj main-rules)
 
+;; GNU's __thread (the GCC 15.2 manual's "Thread-Local Storage": a __thread variable of static storage duration has a constant
+;; initializer, no dynamic initialization or destruction, unlike C++11's thread_local): a namespace-scope or static member __thread
+;; variable initialized by a call of a function the file declares without constexpr, by the address of another thread-local
+;; variable, or default-initialized by a class's user-declared constructor that is not constexpr: GCC's "non-local variable 'j'
+;; declared '__thread' needs dynamic initialization", at the variable.
+
+(defn thread-dynamic-init
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        fns (java.util.HashMap.)
+        tls (java.util.HashSet.)
+        recs (java.util.HashMap.)
+        _ (walk-nodes (fn [n _]
+                        (case (:kind n)
+                          "FunctionDecl" (when (string? (:name n)) (.put fns (:name n) (boolean (or (:constexpr n) (:consteval n) (.get fns (:name n))))))
+                          "VarDecl" (when (:tls n) (.add tls (:name n)))
+                          "CXXRecordDecl" (when (and (:completeDefinition n) (string? (:name n))) (.put recs (:name n) n))
+                          nil))
+                      (:nodes u) nil)
+        dynamic? (fn [x]
+                   (let [hit (atom false)]
+                     (walk-nodes (fn [m _]
+                                   (case (:kind m)
+                                     "CallExpr" (let [c (first (:inner m))
+                                                      nm (when (= "DeclRefExpr" (:kind c)) (get-in c [:referencedDecl :name]))]
+                                                  (when (and nm (false? (.get fns nm))) (reset! hit true)))
+                                     "UnaryOperator" (when (= "&" (:opcode m))
+                                                       (let [c (first (:inner m))]
+                                                         (when (and (= "DeclRefExpr" (:kind c)) (.contains tls (get-in c [:referencedDecl :name])))
+                                                           (reset! hit true))))
+                                     nil))
+                                 x nil)
+                     @hit))
+        ctor-dynamic? (fn [qt] (when-let [r (.get recs (str/trim (str/replace (str qt) #"^(const |volatile )*(struct |class )?" "")))]
+                                 (some #(and (= "CXXConstructorDecl" (:kind %)) (not (:constexpr %)) (not (:isImplicit %))
+                                             (not (:explicitlyDefaulted %)) (re-find #"^void \(\s*\)" (str (get-in % [:type :qualType]))))
+                                       (:inner r))))]
+    (letfn [(top [xs]
+              (doseq [x xs :when (map? x)]
+                (case (:kind x)
+                  "VarDecl" (when (and (= "static" (:tls x)) (not= "extern" (:storageClass x))
+                                       (or (and (:init x) (dynamic? (:inner x)))
+                                           (and (not (:init x)) (ctor-dynamic? (get-in x [:type :qualType])))
+                                           ;; (a class with a user-provided destructor: its dynamic destruction)
+                                           (when-let [r (.get recs (str/trim (str/replace (str (get-in x [:type :qualType])) #"^(const |volatile )*(struct |class )?" "")))]
+                                             (some #(and (= "CXXDestructorDecl" (:kind %)) (not (:isImplicit %)) (not (:explicitlyDefaulted %))) (:inner r)))))
+                              (when-let [o (mine-at x main)]
+                                (let [[l c] (line-col starts o)]
+                                  (.add out {:line l :col c :kind :error :rule :tls-init
+                                             :msg (str "non-local variable '" (:name x) "' declared '__thread' needs dynamic initialization")}))))
+                  ("NamespaceDecl" "LinkageSpecDecl") (top (:inner x))
+                  nil)))]
+      (top (:nodes u)))
+    (vec out)))
+
+(swap! checks conj thread-dynamic-init)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
