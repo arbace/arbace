@@ -14037,3 +14037,20 @@ pending)", and no ruling on C6-5 is in the line's facts (the survey's DECISION C
 np5 in the module runs' code (not yet in a chain): a const trait's `#[rustc_non_const_trait_method]` methods not const,
 `#[rustc_comptime]` impl methods const, an object type's named late-bound region by its name, a fn pointer's binder region `'_` in a
 signature. C1's six programs are being built again at this branch's code (`.tmp/c4/c1build2.sh`), then run on ci and recorded.
+
+## 2026-11-22: rust-c4-1122: C1's six programs built again and recorded: 5 of 6 own on ci, threads from the pack
+
+The six programs of the eval cell built at this branch's code (`9f4c29693`'s, with 512-1 merged: `RF_EXTRA_IFACE=core-pass and std's
+deps' passes RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core intrinsics panics std threads unwind vectors`, about
+2 h on a loaded host): intrinsics, panics, std, unwind and vectors own; threads refused at codegen (`atomic_xadd`, then).
+`RSI_JOBS=1 RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin> RSI_FRONT_DIR=.tmp/rust-front/c1b bin/rsi check
+--record --front own --corpus samples` (11 min, 6.4 GB; the runtime read into ci at the checkout's key reused): **6 of 6 pass**, the
+std-vs-panics control differing; written: test/rust/check-times-linux-amd64.edn and test/rust/eval-inputs-linux-amd64.edn
+(check-linux-amd64.edn unchanged: every row passed before, from the packs). The case inputs: intrinsics, panics, std, unwind and
+vectors C1, C5 and C7 own (C2: 83, 109, 705, 88 and 547 of std's bodies the record's; C3 partial; C4 the helper's; C6 std's IR);
+threads C5 and C7 own. 0 of 6 own in all seven inputs: Rust's scores unchanged (eval and AOT 0.5, independence 80).
+test/crops/independence.edn's eval text says so. Merged 512-2 (`f8f7ff401`; collect's unknown trait Self is the same fix as
+round 1's, theirs kept). After the build (`d55d8a47a`, unit cases in pack-compare-test only): the atomic intrinsics in codegen
+(threads.rs' row not rebuilt: the user's rule of 2026-11-22, "avoid redundancy and unnecessary tests"; threads is not in this
+stream's list), and the post-np5 interface fixes (their module runs next). reap --record, crops-score --record, --judge --strict
+0 problems, records-check 9 pairs 0 problems.
