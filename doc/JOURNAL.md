@@ -17214,3 +17214,18 @@ __del__ after gc_collect, which goi's registers delay when the runtime is interp
 interpreted run too and pass in the record's compiled run) -- to be confirmed by the compiled proof. test_io: the FIFO-only
 write keeps test_nonblock_pipe_write_* and test_interrupted_write_buffered/_unbuffered (C, Py) passing; _text (C, Py) still
 idle past 90 s interpreted (the encode before the write outlasts the alarm under goi).
+
+## 2026-11-22: py-mods-1122, round 5: two quadratic paths of pyi's compile of a long line (:host-memory)
+
+test_longexp (eval of a list display of 65,580 items) and test_fstring's test_many_expressions were killed past 8192 MB.
+Measured on b2a5b50d4819 (compiled): `eval("[" + "2," * N + "]")` took 1.7 s / 0.6 GB at N=4,000, 5.3 s / 1.4 GB at 8,000,
+17 s / 3.1 GB at 16,000. Profiles (ARBACE_CPUPROFILE, ARBACE_MEMPROFILE) found two paths quadratic in a line's length:
+- arbace/repr/python/native.ae's index, a node's (line, UTF-8 column) as an index of the text, scanned from the line's start
+  for every node: now each line knows whether it holds a code point past ASCII (Src's wide), and on an ASCII line the index
+  is the line's start plus the column (the scan's own answer there). 16,000 items: 17 s -> 6.3 s (the namespace evaluated
+  from the checkout).
+- arbace/repr/python/lex.ae's stream (the reader warnings' tokens, _tokenize's) copied each token's line: N tokens of one
+  line made N copies of it (209 MB of strings at N=8,000). The last token's line text is now shared by the next token of the
+  same bounds. Its output is unchanged (lex/stream of a three-line sample from the checkout: the same tokens, one line
+  string per line). Its proof waits for the gate's executables: loaded from the checkout beside the executable's compiled
+  peg it redefines lex's deftype (a ClassCastException in peg's fill-token), so the build's compiled namespaces carry it.
