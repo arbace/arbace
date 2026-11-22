@@ -3455,6 +3455,9 @@
       (when (and (= ctx :param) (or tls (and sto (not= "register" (second sto)))))
         (soft-diag! p (long (first (or tls sto))) "storage class specified for parameter"))
       (when (and frnd (#{:top :block} ctx) (not virt)) (soft-diag! p (long (first frnd)) "'friend' used outside of class"))
+      ;; ([class.friend]/3: a friend declaration of a class is an elaborated-type-specifier, no class definition)
+      (when (and frnd (= ctx :member) (:tag-node ds) (:completeDefinition (:tag-node ds)))
+        (soft-diag! p (long (first frnd)) "class definition may not be declared a friend"))
       (when (and mut (#{:top :block} ctx)) (soft-diag! p (long (first mut)) "non-member cannot be declared 'mutable'"))
       ;; ([class.ctor.general]/1: a constructor's decl-specifiers are function specifiers, friend, constexpr alone, so cv-qualifiers
       ;; before the class's name make it a type and `()` an empty declarator: GCC's "expected unqualified-id before ')' token")
@@ -3502,7 +3505,11 @@
       (name-start? p)
       (let [save (ix p) qn (try (parse-name p :parse) (catch arbace.lang.ExceptionInfo _ nil))]
         (if (and qn (is? p "::") (is-at? p 1 "*"))
-          (do (adv! p) (adv! p)
+          (do ;; (cpp-diag-b, 2026-11-22: [dcl.mptr]/1, a pointer to member's nested-name-specifier denotes a class: a namespace's
+              ;; is GCC's "'A' is a namespace", at the name)
+              (when (and (not (skim? p)) (main-tok? p save) (= :ns (:k (:ent qn))))
+                (soft-diag! p save (str "cannot create pointer to member of namespace '" (name-str p qn) "'")))
+              (adv! p) (adv! p)
               (let [[c v] (loop [c false v false] (cond (is? p "const") (do (adv! p) (recur true v)) (is? p "volatile") (do (adv! p) (recur c true))
                                                         ;; (cpp-read, 2026-11-22: the ptr-operator's attribute-specifier-seq, [dcl.decl.general]/4)
                                                         (and (is? p "[") (is-at? p 1 "[")) (do (type-attrs! p) (recur c v))
@@ -4733,6 +4740,13 @@
                       ;; ([temp.mem]/? : a destructor is no member template)
                       (and (:dtor lp) (string? (:dtor lp)) tmpl (pos? (long (or (:n tmpl) 0))) (= ctx :member))
                       (soft-diag! p (long (:i lp)) (str "destructor '~" (:dtor lp) "' declared as member template"))
+                      ;; ([dcl.fct]/6: a cv-qualifier-seq or ref-qualifier only on a non-static member function's type (or a
+                      ;; typedef's): GCC's "non-member function 'f' cannot have cv-qualifier", "static member function ... cannot have
+                      ;; cv-qualifier")
+                      (and fs (not (:typedef ds)) (not (:friend ds)) (re-find #"^\s*(const|volatile|&)" (str (:q fs)))
+                           (or (and (#{:top :block} ctx) (= 1 np) (not (:g qn)) (not (:conv lp)) (not (:op lp)))
+                               (and (= ctx :member) (= "static" (:storage ds)))))
+                      (soft-diag! p (long (:i lp)) (str (if (= ctx :member) "static member" "non-member") " function '" (name-str p qn) "' cannot have cv-qualifier"))
                       ;; (C++11 [except.spec]/2, before C++17's P0012: an exception-specification appears in no typedef
                       ;; declaration)
                       (and (:typedef ds) (< (.-year p) 2017) (some (fn [x] (some #(get-in % [:m :throw]) (:sufs x))) chain))
