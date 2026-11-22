@@ -17349,3 +17349,24 @@ Scores: C++ read 5,786 / 0 / 532 -> 5,793 / 0 / 528; independence 0.957800 -> 0.
 stage 0.799 -> 0.803, 1,898 of 4,387 rows own; floored 95), completeness 0.972210 -> 0.972378 (floored 97). Alternatives: the parser
 for the explicit object rules (its soft diagnostics would need the class context; the tree has every fact), the code generator's Sema
 for the promise interface (its overload resolution not needed for a missing member).
+
+## 2026-11-22: cpp-diag-a round 2: constinit and consteval, immediate functions, constexpr bodies before C++23, later standards' pedwarns
+
+The stream's second round (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a"), new checks appended to arbace/repr/cpp/diag.ae, no shared
+function edited: `constinit-consteval-specs` ([dcl.constinit]/1, [dcl.constexpr]/1-2, [dcl.spec.general]/2, [dcl.typedef]/1: where
+constinit and consteval may not appear, read off the declarations' specifiers), `immediate-addresses` ([expr.const]/16-18, P2564:
+an immediate function's address taken, or an immediate invocation reading a variable not usable in constant expressions, outside an
+immediate function context and outside templates, lambdas and abbreviated templates), `constexpr-pre23-bodies` ([dcl.constexpr]/3 of
+C++11 to C++20: static and thread_local variables and goto before C++23, try-blocks and function-try-blocks before C++20 as GCC's
+pedwarns, C++11's function-try-block bodies), `version-pedwarns` (P2324's label at the end of a compound statement, P2360's
+alias-declaration as an init-statement, P0849's auto(x), P0428's lambda templates, under -pedantic-errors), `lambda-specifiers`
+(P1169: mutable with static, a static lambda with a capture), `subscript-arity` ([over.sub]/1 before C++23).
+
+Proof: the 430 files of the whole corpus whose source names consteval or constinit, a constexpr function with static, goto or try, an
+operator[], a lambda template, auto(x), an alias init-statement, a label before a closing brace or a static lambda, with the control
+pair, `bin/repr-cpp dg --corpus dg-error --front native --only ... --record` (r2, 432 files, 999 s): own pass 185, no recorded pass
+lost, the control failing as it must; 20 files of the stream's directories fail -> pass (cpp2a 15, cpp23 5). Nine rows of other
+directories the run changed were put back to next's (the other streams' to record): of them cpp0x/constexpr-ctor10.C,
+cpp1y/lambda-generic-77914.C and parse/crash72.C pass on these rules.
+
+Scores: C++ independence 0.958600 -> 0.959000 (floored 95), completeness 0.972378 -> 0.972536 (floored 97).

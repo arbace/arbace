@@ -4784,6 +4784,406 @@
 
 (swap! checks conj builtin-source-location)
 
+;; constinit and consteval where no declaration may have them ([dcl.constinit]/1: constinit only on a variable of static or thread
+;; storage duration; [dcl.constexpr]/1-2: consteval only on a function or function template, not a destructor, nor an allocation
+;; or deallocation function, [basic.start.main]/3 not main; [dcl.spec.general]/2: at most one of constexpr, consteval and
+;; constinit; [dcl.typedef]/1: none with typedef; [dcl.type.elab]: none on a type's declaration; [dcl.fct]/3: none on a parameter,
+;; [temp.param]/2 nor a template parameter), each at the declaration in GCC's words ("'constinit' on function return type is not
+;; allowed", "'constinit' specifier invalid for function", "non-static data member 'm' declared 'constinit'", "a parameter cannot
+;; be declared 'constinit'", "'constinit' can only be applied to a variable with static or thread storage duration", "'constinit'
+;; cannot appear in a typedef declaration", "'constinit' cannot be used for type declarations", "can use at most one of the
+;; 'constinit' and 'constexpr' specifiers", "a variable cannot be declared 'consteval'", "static data member 'w' declared
+;; 'consteval'", "structured binding declaration cannot be 'consteval'", "a destructor cannot be 'consteval'", "'operator new'
+;; cannot be 'consteval'", "cannot declare '::main' to be 'consteval'", "both 'constexpr' and 'consteval' specified"). The
+;; decl-specifiers are read off the source between a declaration's start and its name.
+
+(defn constinit-consteval-specs
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg]
+              (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                (let [[l c] (line-col starts (long o))]
+                  (.add out {:line l :col c :kind :error :rule :decl-spec :msg msg}))))
+        n-src (count src)
+        ;; (the decl-specifier's own place, where GCC reports these: the keyword in the declaration's specifiers)
+        kw-at! (fn [n ^String w msg]
+                 (let [b (get-in n [:range :begin :offset]) e (get-in n [:loc :offset])
+                       i (when (and b e (< (long b) (long e) n-src)) (let [m (re-matcher (re-pattern (str "\\b" w "\\b")) (subs src (long b) (long e)))] (when (.find m) (+ (long b) (.start m)))))]
+                   (if (and i (mine? n))
+                     (let [[l c] (line-col starts (long i))] (.add out {:line l :col c :kind :error :rule :decl-spec :msg msg}))
+                     (at! n msg))))
+        fn-aliases (set (for [n (:nodes u) :when (and (#{"TypedefDecl" "TypeAliasDecl"} (:kind n)) (:name n))
+                              :let [t (str (get-in n [:type :qualType]))]
+                              :when (and (re-find #"\)\s*(?:const|volatile|&|noexcept)?\s*$" t) (not (re-find #"\(\s*[*&]" t)))]
+                          (:name n)))
+        specs (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:loc :offset])]
+                        (when (and b e (mine? n) (= main (get-in n [:loc :file] main)) (< (long b) (long e) n-src))
+                          (set (re-seq #"\b(?:constinit|consteval|constexpr|static|extern|thread_local|typedef)\b"
+                                       (str/replace (subs src (long b) (long e)) #"(?s)\(.*" ""))))))
+        prefix (fn [n] (let [b (get-in n [:range :begin :offset])]
+                         (when (and b (mine? n))
+                           (let [t (subs src (max 0 (- (long b) 200)) (long b))
+                                 t (last (str/split t #"[;{}]" -1))]
+                             (set (re-seq #"\b(?:constinit|consteval)\b" (or t "")))))))
+        both! (fn [n ss]
+                (when (and (ss "constexpr") (ss "constinit")) (at! n "can use at most one of the 'constinit' and 'constexpr' specifiers"))
+                (when (and (ss "constexpr") (ss "consteval")) (at! n "both 'constexpr' and 'consteval' specified"))
+                (when (and (ss "consteval") (ss "constinit")) (at! n "can use at most one of the 'constinit' and 'consteval' specifiers")))
+        walk (fn w [nodes ctx]
+               (doseq [n nodes :when (map? n)]
+                 (let [k (:kind n)
+                       ss (when (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "VarDecl"
+                                   "FieldDecl" "ParmVarDecl" "NonTypeTemplateParmDecl" "TypedefDecl" "DecompositionDecl"} k)
+                            (specs n))]
+                   (when (seq ss) (both! n ss))
+                   (case k
+                     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
+                     (do (when (and ss (ss "constinit"))
+                           (let [after (let [o (long (get-in n [:loc :offset]))] (subs src o (min n-src (+ o 200))))]
+                             (kw-at! n "constinit" (if (or (#{"CXXConstructorDecl" "CXXDestructorDecl"} k) (re-find #"^~?[A-Za-z_]\w*\s*\(" after))
+                                      "'constinit' on function return type is not allowed"
+                                      "'constinit' specifier invalid for function"))))
+                         (when (and ss (ss "consteval"))
+                           (cond (= "CXXDestructorDecl" k) (at! n "a destructor cannot be 'consteval'")
+                                 (re-matches #"operator\s*(?:new|delete)\s*(?:\[\])?" (str (:name n)))
+                                 (at! n (str "'" (str/replace (str (:name n)) #"\[\]" " []") "' cannot be 'consteval'"))
+                                 (and (= "main" (:name n)) (= ctx :ns) (= "FunctionDecl" k)) (at! n "cannot declare '::main' to be 'consteval'")
+                                 :else nil))
+                         (doseq [c (:inner n) :when (= "ParmVarDecl" (:kind c))] (w [c] :param))
+                         (doseq [c (:inner n) :when (= "CompoundStmt" (:kind c))] (w (:inner c) :local)))
+                     "VarDecl" (do (when ss
+                                     (when (and (ss "constinit") (fn-aliases (str/trim (str (get-in n [:type :qualType])))))
+                                       (kw-at! n "constinit" "'constinit' specifier invalid for function"))
+                                     (when (and (ss "constinit") (= ctx :local) (not (or (ss "static") (ss "extern") (ss "thread_local"))))
+                                       (at! n "'constinit' can only be applied to a variable with static or thread storage duration"))
+                                     (when (ss "consteval")
+                                       (at! n (if (= ctx :class) (str "static data member '" (:name n) "' declared 'consteval'") "a variable cannot be declared 'consteval'"))))
+                                   (w (:inner n) (if (= ctx :class) :ns ctx)))
+                     "DecompositionDecl" (when ss
+                                           (when (and (ss "constinit") (= ctx :local) (not (or (ss "static") (ss "extern") (ss "thread_local"))))
+                                             (at! n "'constinit' can only be applied to a variable with static or thread storage duration"))
+                                           (when (ss "consteval") (at! n "structured binding declaration cannot be 'consteval'")))
+                     "FieldDecl" (when ss (doseq [w ["constinit" "consteval"] :when (ss w)] (at! n (str "non-static data member '" (:name n) "' declared '" w "'"))))
+                     ("ParmVarDecl" "NonTypeTemplateParmDecl") (when ss (doseq [w ["constinit" "consteval"] :when (ss w)] (at! n (str "a parameter cannot be declared '" w "'"))))
+                     "TypedefDecl" (when ss (doseq [w ["constinit" "consteval" "constexpr"] :when (ss w)] (at! n (str "'" w "' cannot appear in a typedef declaration"))))
+                     ("CXXRecordDecl" "EnumDecl")
+                     (do (when (and (:completeDefinition n) (not (:isImplicit n)) (#{:ns :local :class} ctx))
+                           (doseq [w (prefix n)] (at! n (str "'" w "' cannot be used for type declarations"))))
+                         (w (:inner n) :class))
+                     ("NamespaceDecl" "LinkageSpecDecl") (w (:inner n) :ns)
+                     ("FunctionTemplateDecl" "ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl" "ClassTemplateSpecializationDecl" "VarTemplateDecl")
+                     (w (:inner n) ctx)
+                     ("CompoundStmt" "DeclStmt" "IfStmt" "ForStmt" "WhileStmt" "DoStmt" "SwitchStmt" "CXXForRangeStmt" "CaseStmt" "DefaultStmt" "LabelStmt" "AttributedStmt" "CXXTryStmt" "CXXCatchStmt")
+                     (w (:inner n) ctx)
+                     nil))))]
+    (walk (:nodes u) :ns)
+    (vec (distinct out))))
+
+(swap! checks conj constinit-consteval-specs)
+
+;; [expr.const]/16-18 (C++23, P2564; GCC applies it in C++20 too): a potentially-evaluated id-expression naming an immediate (consteval)
+;; function that is not the function of an immediate invocation is immediate-escalating, so may appear only in an immediate function
+;; context (a consteval function's body, an `if consteval`'s compound statement) or an immediate-escalating function (a lambda's call
+;; operator, a constexpr function template's specialization, a defaulted special member): elsewhere -- a namespace-scope or static
+;; variable's initializer, a non-template function that is not consteval -- taking its address is ill-formed ("taking address of an
+;; immediate function 'consteval int f()'", "constant evaluation returns address of immediate function" for a constexpr variable's).
+;; Judged for the unit's consteval functions of a name no other function of the unit has (a member as Class::name), not in a
+;; template, lambda, unevaluated operand, default argument or default member initializer; there too an immediate invocation whose
+;; argument reads a variable not usable in constant expressions.
+
+(defn immediate-addresses
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ce (java.util.HashMap.)
+        _ ((fn coll [nodes cls]
+             (doseq [n nodes :when (map? n)]
+               (case (:kind n)
+                 ("FunctionDecl" "CXXMethodDecl")
+                 (doseq [k (cond-> [(:name n)] cls (conj (str cls "::" (:name n))))]
+                   (.put ce k (and (not (identical? false (.get ce k))) (boolean (:_consteval n)))))
+                 "FunctionTemplateDecl" (coll (:inner n) cls)
+                 ("CXXRecordDecl" "ClassTemplateDecl") (coll (:inner n) (or (when (= "CXXRecordDecl" (:kind n)) (:name n)) cls))
+                 ("NamespaceDecl" "LinkageSpecDecl") (coll (:inner n) nil)
+                 nil)))
+           (:nodes u) nil)
+        cefn? (fn [d] (let [nm (str (get-in d [:referencedDecl :name]))
+                            q (:qualifier d)
+                            k (if (seq q) (str (str/join "::" q) "::" nm) nm)]
+                        (and (= :fn (get-in d [:_ent :k])) (true? (.get ce k)) (not (:tmpl (:_ent d))))))
+        report! (fn [d constexpr?]
+                  (when-let [o (get-in d [:range :begin :offset])]
+                    (when (= main (get-in d [:range :begin :file]))
+                      (let [[l c] (line-col starts (long o))]
+                        (.add out {:line l :col c :kind :error :rule :immediate
+                                   :msg (if constexpr? (str "constant evaluation returns address of immediate function '" (get-in d [:referencedDecl :name]) "'")
+                                            (str "taking address of an immediate function '" (get-in d [:referencedDecl :name]) "'"))})))))
+        expr (fn ex [x constexpr?]
+               (cond
+                 (map? x) (let [k (:kind x)]
+                            (cond
+                              (= "DeclRefExpr" k) (when (cefn? x) (report! x constexpr?))
+                              (#{"LambdaExpr" "UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "CXXTypeidExpr" "RequiresExpr" "ConceptSpecializationExpr"
+                                 "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "StmtExpr"} k) nil
+                              (fn-kinds k) nil
+                              (and (= "IfStmt" k) (:isConsteval x))
+                              (when (:isNegatedConsteval x) (ex (first (:inner x)) constexpr?))
+                              (#{"CallExpr" "CXXMemberCallExpr" "CXXOperatorCallExpr"} k)
+                              (let [[f & args] (:inner x)]
+                                (when-not (= "DeclRefExpr" (:kind f)) (ex f constexpr?))
+                                ;; (an immediate invocation, [expr.const]/16, is a constant expression: an argument that reads a
+                                ;; variable not usable in constant expressions, [expr.const]/5.9 -- a parameter, a non-const variable
+                                ;; of a fundamental type -- for a parameter of a non-reference type makes it none: "call to consteval
+                                ;; function 'f(x)' is not a constant expression", at the call)
+                                (when (and (= "DeclRefExpr" (:kind f)) (cefn? f))
+                                  (let [ptys (get-in f [:_ent :ptys])]
+                                    (when (some (fn [[i a]]
+                                                  (let [a (loop [a a] (if (and (= "ParenExpr" (:kind a)) (= 1 (count (:inner a)))) (recur (first (:inner a))) a))
+                                                        e (:_ent a)]
+                                                    (and (= "DeclRefExpr" (:kind a)) (= :var (:k e)) (= :b (get-in e [:ty :t])) (not (get-in e [:ty :c]))
+                                                         (not (:constexpr e)) (= :b (:t (nth ptys i nil))))))
+                                                (map-indexed vector args))
+                                      (when-let [o (get-in x [:range :begin :offset])]
+                                        (when (= main (get-in x [:range :begin :file]))
+                                          (let [[l c] (line-col starts (long o))]
+                                            (.add out {:line l :col c :kind :error :rule :immediate
+                                                       :msg (str "call to consteval function '" (get-in f [:referencedDecl :name]) "(...)' is not a constant expression")})))))))
+                                (doseq [a args] (ex a constexpr?)))
+                              (= "VarDecl" k) (ex (:inner x) (boolean (:constexpr x)))
+                              (= "ParmVarDecl" k) nil
+                              :else (doseq [[kk v] x :when (and (not= kk :_ent) (not= kk :_t) (coll? v))] (ex v constexpr?))))
+                 (or (vector? x) (seq? x)) (doseq [y x] (ex y constexpr?))
+                 :else nil))
+        decls (fn dw [nodes]
+                (doseq [n nodes :when (map? n)]
+                  (case (:kind n)
+                    ("NamespaceDecl" "LinkageSpecDecl") (dw (:inner n))
+                    "CXXRecordDecl" (dw (filter #(not= "FieldDecl" (:kind %)) (:inner n)))
+                    "VarDecl" (expr n false)
+                    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
+                    (when-not (or (:_consteval n) (:explicitlyDefaulted n)
+                                  ;; (an abbreviated function template's, [dcl.fct]/22: a parameter of a placeholder type)
+                                  (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner n)))
+                      (doseq [c (:inner n) :when (#{"CompoundStmt" "CXXCtorInitializer" "CXXTryStmt"} (:kind c))] (expr c false)))
+                    nil)))]
+    (decls (:nodes u))
+    (vec (distinct out))))
+
+(swap! checks conj immediate-addresses)
+
+;; A constexpr (or consteval) function's body before C++23 ([dcl.constexpr]/3 of C++11 to C++20, P2242 lifting the last of it): no
+;; definition of a variable of static or thread storage duration ("'b' defined 'static' in 'constexpr' function only available with
+;; '-std=c++23'"), no goto statement ("'goto' in 'constexpr' function only available with '-std=c++23'"); before C++20 (P1002) no
+;; try-block ("'try' in 'constexpr' function only available with '-std=c++20'") nor function-try-block ("function-try-block body of
+;; 'constexpr' function only available with '-std=c++20'"; GCC's pedwarns, errors under -pedantic-errors) and no uninitialized
+;; variable of a scalar type ("uninitialized variable 'a' in 'constexpr' function", the existing rule's in a function-try-block's
+;; blocks); in C++11 a function-try-block is no return statement ("body of 'constexpr' function 'f' not a return-statement", at the
+;; function's end) nor, with statements in its try-block, a constructor's empty body ("'constexpr' constructor does not have empty
+;; body", at the try-block's end), and its compound statements are C++11's "compound-statement in 'constexpr' function" (a pedwarn).
+;; The main file's functions outside templates, as constexpr-bodies judges them; lambdas and local classes not looked into.
+
+(defn constexpr-pre23-bodies
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        year (long (cxx-year (:std u)))
+        pe? (boolean (some #{"-pedantic-errors"} (:args u)))
+        pw? (or pe? (boolean (some #{"-pedantic" "-Wpedantic"} (:args u))))
+        at! (fn [n off msg]
+              (when (and off (= main (or (get-in n [:range :begin :file]) main)))
+                (let [[l c] (line-col starts (long off))]
+                  (.add out {:line l :col c :kind :error :rule :constexpr :msg msg}))))
+        beg (fn [n] (get-in n [:range :begin :offset]))
+        walk (fn w [f x]
+               (cond (map? x) (do (f x)
+                                  (when-not (#{"LambdaExpr" "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "FunctionDecl" "CXXMethodDecl"} (:kind x))
+                                    (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w f v))))
+                     (sequential? x) (doseq [y x] (w f y))
+                     :else nil))
+        fn! (fn [n]
+              (let [what (if (:_consteval n) "consteval" "constexpr")
+                    body (some #(when (#{"CompoundStmt" "CXXTryStmt"} (:kind %)) %) (:inner n))
+                    ftb? (= "CXXTryStmt" (:kind body))
+                    ctor? (= "CXXConstructorDecl" (:kind n))]
+                (when (and body (= main (get-in n [:range :begin :file]))
+                           (not (some #(= "NativeDecline" (:kind %)) (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (:inner %) (seq %)) body))))
+                  (when (< year 23)
+                    (walk (fn [x]
+                            (case (:kind x)
+                              "VarDecl" (when (and (string? (:name x)) (or (= "static" (:storageClass x)) (:tls x)) (not= "extern" (:storageClass x)))
+                                          (at! x (or (get-in x [:loc :offset]) (beg x))
+                                               (str "'" (:name x) "' defined '" (if (:tls x) "thread_local" "static") "' in '" what "' function only available with '-std=c++23' or '-std=gnu++23'")))
+                              "GotoStmt" (at! x (beg x) (str "'goto' in '" what "' function only available with '-std=c++23' or '-std=gnu++23'"))
+                              nil))
+                          body))
+                  (when (< year 20)
+                    (when (and ftb? pe?)
+                      (at! body (beg body) (str "function-try-block body of '" what "' " (if ctor? "constructor" "function") " only available with '-std=c++20' or '-std=gnu++20'")))
+                    (when pe?
+                      (walk (fn [x] (when (and (= "CXXTryStmt" (:kind x)) (not (identical? x body)))
+                                      (at! x (beg x) (str "'try' in '" what "' function only available with '-std=c++20' or '-std=gnu++20'"))))
+                            body))
+                    (when ftb?
+                      (walk (fn [x]
+                              (when (= "DeclStmt" (:kind x))
+                                (doseq [v (:inner x)
+                                        :when (and (= "VarDecl" (:kind v)) (nil? (:init v)) (empty? (:inner v)) (nil? (:storageClass v)) (not (:tls v))
+                                                   (re-matches scalar-type-re (str/trim (str (get-in v [:type :qualType])))))]
+                                  (at! v (or (get-in v [:loc :offset]) (beg v)) (str "uninitialized variable '" (:name v) "' in '" what "' function")))))
+                            body)))
+                  (when (= 11 year)
+                    (when ftb?
+                      (let [tb (first (:inner body))]
+                        (if ctor?
+                          (when (some #(not (#{"NullStmt"} (:kind %))) (:inner tb))
+                            (at! tb (get-in tb [:range :end :offset]) "'constexpr' constructor does not have empty body"))
+                          (at! body (get-in n [:range :end :offset]) (str "body of 'constexpr' function '" (:name n) "' not a return-statement")))))
+                    (when (and pe? (or ftb? (some #(= "CXXTryStmt" (:kind %)) (:inner body))))
+                      (walk (fn [x] (when (= "CXXTryStmt" (:kind x))
+                                      (doseq [c (:inner x)
+                                              :let [cs (if (= "CXXCatchStmt" (:kind c)) (some #(when (= "CompoundStmt" (:kind %)) %) (:inner c)) c)]
+                                              :when (and (= "CompoundStmt" (:kind cs)) (not (and (identical? x body) (identical? c (first (:inner x))))))]
+                                        (at! cs (beg cs) "compound-statement in 'constexpr' function"))))
+                            body))))))
+        decls (fn d [ns]
+                (doseq [n ns]
+                  (case (:kind n)
+                    ("NamespaceDecl" "LinkageSpecDecl" "ExportDecl" "CXXRecordDecl") (d (:inner n))
+                    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl")
+                    (when (or (:constexpr n) (:_consteval n)) (fn! n))
+                    nil)))]
+    (decls (remove :_hdr (:nodes u)))
+    (vec (distinct out))))
+
+(swap! checks conj constexpr-pre23-bodies)
+
+;; Later standards' constructs in an earlier standard's unit, GCC's pedwarns ("only available with '-std=c++NN'"), errors under
+;; -pedantic-errors: a label at the end of a compound statement (C++23, P2324: "label at end of compound statement only available
+;; with '-std=c++23'", at the closing brace), an alias-declaration as an init-statement (C++23, P2360: "alias-declaration in
+;; init-statement only available with '-std=c++23'"), auto(x) and auto{x} (C++23, P0849: "'auto(x)' only available with
+;; '-std=c++23'"), a lambda's template-parameter-list (C++20, P0428: "lambda templates are only available with '-std=c++20'").
+
+(defn version-pedwarns
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        year (long (cxx-year (:std u)))
+        args (:args u)
+        pe? (and (some #{"-pedantic-errors"} args) (not (some #{"-Wno-pedantic"} (drop-while #(not= "-pedantic-errors" %) args))))
+        at! (fn [n off msg]
+              (when (and off (= main (get-in n [:range :begin :file])))
+                (let [[l c] (line-col starts (long off))]
+                  (.add out {:line l :col c :kind :error :rule :pedantic :msg msg}))))
+        n-src (count src)]
+    (when pe?
+      (walk-nodes
+       (fn [n _]
+         (case (:kind n)
+           "CompoundStmt" (when (< year 23)
+                            (let [l (peek (vec (:inner n)))
+                                  ;; (the labels' statement: none, or the parser's null statement at the brace, not a written `;`)
+                                  end (loop [x l] (if (and (= "LabelStmt" (:kind x)) (= 1 (count (:inner x))) (= "LabelStmt" (:kind (first (:inner x))))) (recur (first (:inner x))) x))
+                                  st (first (:inner end))]
+                              (when (and (= "LabelStmt" (:kind l))
+                                         (or (nil? st)
+                                             (and (= "NullStmt" (:kind st))
+                                                  (let [o (get-in st [:range :begin :offset])] (and o (< (long o) n-src) (not= 59 (int (.charAt src (int o)))))))))
+                                (at! n (get-in n [:range :end :offset]) "label at end of compound statement only available with '-std=c++23' or '-std=gnu++23'"))))
+           ("IfStmt" "SwitchStmt" "ForStmt" "CXXForRangeStmt")
+           (when (< year 23)
+             (let [i (first (:inner n))]
+               (when (and (= "DeclStmt" (:kind i)) (some #(= "TypeAliasDecl" (:kind %)) (:inner i))
+                          (or (#{"ForStmt" "CXXForRangeStmt"} (:kind n)) (:hasInit n)))
+                 (at! n (get-in i [:range :begin :offset]) "alias-declaration in init-statement only available with '-std=c++23' or '-std=gnu++23'"))))
+           "CXXFunctionalCastExpr" (when (and (< year 23) (= :auto (get-in n [:_t :t])))
+                                     (let [o (get-in n [:range :begin :offset])]
+                                       (when (and o (< (+ (long o) 4) n-src) (.startsWith src "auto" (int o)))
+                                         (at! n o (str "'auto" (if (= "InitListExpr" (:kind (first (:inner n)))) "{x}" "(x)") "' only available with '-std=c++23' or '-std=gnu++23'")))))
+           "LambdaExpr" (when (< year 20)
+                          (let [o (get-in n [:range :begin :offset])]
+                            (when (and o (= main (get-in n [:range :begin :file])))
+                              ;; the lambda-introducer's closing bracket, then `<`
+                              (let [t (subs src (long o) (min n-src (+ (long o) 400)))
+                                    close (loop [i 0 depth 0]
+                                            (when (< i (count t))
+                                              (let [c (.charAt t i)]
+                                                (cond (= c \[) (recur (inc i) (inc depth))
+                                                      (= c \]) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                                                      :else (recur (inc i) depth)))))]
+                                (when (and close (re-find #"^\s*<" (subs t (inc (long close)))))
+                                  (at! n o "lambda templates are only available with '-std=c++20' or '-std=gnu++20'"))))))
+           nil))
+       (:nodes u) nil))
+    (vec (distinct out))))
+
+(swap! checks conj version-pedwarns)
+
+;; [expr.prim.lambda.general]/4 (C++23, P1169): a lambda-specifier-seq has not both mutable and static ("'mutable' specifier conflicts
+;; with 'static'", "'static' specifier conflicts with 'mutable'", at the later), and a static lambda has no lambda-capture ("'static'
+;; lambda specifier with lambda capture"). Read off the lambda's text: its introducer, its parameter list's closing parenthesis, the
+;; specifiers up to the body.
+
+(defn lambda-specifiers
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        at! (fn [off msg] (let [[l c] (line-col starts (long off))] (.add out {:line l :col c :kind :error :rule :lambda :msg msg})))
+        match (fn [^String t i open close]
+                (loop [i (long i) depth 0]
+                  (when (< i (count t))
+                    (let [c (.charAt t (int i))]
+                      (cond (= c open) (recur (inc i) (inc depth))
+                            (= c close) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                            :else (recur (inc i) depth))))))]
+    (walk-nodes
+     (fn [n _]
+       (when (= "LambdaExpr" (:kind n))
+         (let [o (get-in n [:range :begin :offset])
+               b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))
+               bo (get-in b [:range :begin :offset])]
+           (when (and o bo (= main (get-in n [:range :begin :file])) (= main (get-in b [:range :begin :file])) (< (long o) (long bo) n-src))
+             (let [t (subs src (long o) (long bo))
+                   ic (match t 0 \[ \])]
+               (when ic
+                 (let [rest-t (subs t (inc (long ic)))
+                       po (.indexOf ^String rest-t "(")]
+                   (when (and (>= po 0) (re-find #"^\s*(?:<[^{]*>\s*(?:requires[^(]*)?)?\($" (subs rest-t 0 (inc po))))
+                     (when-let [pc (match rest-t po \( \))]
+                       (let [base (+ (long o) (inc (long ic)) (inc (long pc)))
+                             specs (subs rest-t (inc (long pc)))
+                             m (re-matcher #"\b(mutable|static)\b" specs)
+                             found (loop [acc []] (if (.find m) (recur (conj acc [(.group m 1) (.start m)])) acc))
+                             kinds (map first found)]
+                         (when (and (some #{"mutable"} kinds) (some #{"static"} kinds))
+                           (let [[w off] (first (filter (fn [[w]] (not= w (first kinds))) found))]
+                             (at! (+ base (long off)) (str "'" w "' specifier conflicts with '" (first kinds) "'"))))
+                         (when (and (some #{"static"} kinds) (re-find #"\S" (subs t 1 (long ic))))
+                           (at! (+ base (long (second (first (filter #(= "static" (first %)) found)))))
+                                "'static' lambda specifier with lambda capture"))))))))))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj lambda-specifiers)
+
+;; [over.sub]/1 before C++23 (P2128's multidimensional subscript): a class's operator[] has exactly one parameter beside its object
+;; ("'int& S::operator[]()' must have exactly one argument", at the declaration; a static one's every parameter counted).
+
+(defn subscript-arity
+  [u starts ^String src ^String main]
+  (when (< (long (cxx-year (:std u))) 23)
+    (let [out (java.util.ArrayList.)]
+      (walk-nodes (fn [n parent]
+                    (when (and (= "CXXMethodDecl" (:kind n)) (re-matches #"operator\s*\[\]" (str (:name n)))
+                               (= main (get-in n [:range :begin :file])) (#{"CXXRecordDecl"} (:kind parent)))
+                      (let [ps (remove :isExplicitObjectParameter (filter #(= "ParmVarDecl" (:kind %)) (:inner n)))]
+                        (when (and (not= 1 (count ps)) (not (:variadic n)))
+                          (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                            (let [[l c] (line-col starts (long o))]
+                              (.add out {:line l :col c :kind :error :rule :operator
+                                         :msg (str "'" (:name n) "' must have exactly one argument")})))))))
+                  (:nodes u) nil)
+      (vec out))))
+
+(swap! checks conj subscript-arity)
+
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
   [^String main ^String e]
