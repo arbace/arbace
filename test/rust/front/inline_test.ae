@@ -130,6 +130,28 @@
 (def ^:private caller10
   '(llvm/define g/c10 void [[ptr %a]] :body [(block %start (= %x (getelementptr :inbounds :nuw i8 [ptr %a] [i64 0])) (call void g/use [[ptr %x]]) (ret void))]))
 
+;; rust-c6c: the call sites in their callee's use-list order, newest first (AlwaysInlinerPass: F.users(); a clone's calls newer
+;; than the caller's own): opt -passes='default<O0>' (LLVM 23.1.5) over the same module (the callee's use list newest first, as
+;; rustc's codegen creates it) puts c11's allocas u's first (two calls of f: v's site taken first), c12's v's first (g inlined at
+;; both sites first, then f at the newest clone, u's, first)
+(def ^:private callee11
+  '(llvm/define g/f11 void [[i64 %x]] :body [(block %start (= %p (alloca (array 16 i8) :align 8)) (call void g/use [[ptr %p] [i64 %x]]) (ret void))]))
+(def ^:private caller11
+  '(llvm/define g/c11 void [[i64 %u] [i64 %v]] :body [(block %start (call void g/f11 [[i64 %u]]) (call void g/f11 [[i64 %v]]) (ret void))]))
+(def ^:private want11
+  '(llvm/define g/c11 void [[i64 %u] [i64 %v]]
+     :body [(block %start (= %pu (alloca (array 16 i8) :align 8)) (= %pv (alloca (array 16 i8) :align 8))
+                   (call void g/use [[ptr %pu] [i64 %u]]) (call void g/use [[ptr %pv] [i64 %v]]) (ret void))]))
+(def ^:private callee12 '(llvm/define g/g12 void [[i64 %x]] :body [(block %start (call void g/f12 [[i64 %x]]) (ret void))]))
+(def ^:private leaf12
+  '(llvm/define g/f12 void [[i64 %x]] :body [(block %start (= %p (alloca (array 16 i8) :align 8)) (call void g/use [[ptr %p] [i64 %x]]) (ret void))]))
+(def ^:private caller12
+  '(llvm/define g/c12 void [[i64 %u] [i64 %v]] :body [(block %start (call void g/g12 [[i64 %u]]) (call void g/g12 [[i64 %v]]) (ret void))]))
+(def ^:private want12
+  '(llvm/define g/c12 void [[i64 %u] [i64 %v]]
+     :body [(block %start (= %pv (alloca (array 16 i8) :align 8)) (= %pu (alloca (array 16 i8) :align 8))
+                   (call void g/use [[ptr %pu] [i64 %u]]) (call void g/use [[ptr %pv] [i64 %v]]) (ret void))]))
+
 (defn- case! [nm got want]
   (let [ok (= (norm got) (norm want))]
     (println (str "inline-test: " nm ": " (if ok "equal" (str "DIFFERS: " (chk/diff-text (norm got) (norm want))))))
@@ -154,6 +176,13 @@
              (case! "C6-4 control: the caller's own zero GEP kept" (by 'g/c10) caller10)
              ;; the aggregate rule's control: c8's result against c7's IR differs
              (not (= (norm (by 'g/c8)) (norm want7)))
+             (let [m2 (inl/inline-module [callee11 caller11] #{'g/f11})
+                   m3 (inl/inline-module [caller12 callee12 leaf12] #{'g/g12 'g/f12})
+                   by2 (into {} (map (juxt second identity) (concat m2 m3)))]
+               (and (case! "rust-c6c: two call sites, the newest taken first" (by2 'g/c11) want11)
+                    (case! "rust-c6c: a clone's calls newer than the caller's own" (by2 'g/c12) want12)
+                    ;; its control: the one-level module's order against the two-level IR differs
+                    (not (= (norm (by2 'g/c11)) (norm (apply list 'llvm/define 'g/c11 (drop 2 want12)))))))
              ;; the negative control: a case's result against another case's IR differs
              (not (= (norm (by 'g/c2)) (norm want4)))]]
     (println (str "inline-test: " (count (filter true? oks)) " of " (count oks) (if (every? true? oks) " passed" " FAILED")))

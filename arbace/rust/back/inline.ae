@@ -39,6 +39,25 @@
   [x k]
   (let [v (vec x) i (.indexOf ^java.util.List v k)] (when (pos? i) (nth v (inc i) nil))))
 
+(def ^:dynamic *useq*
+  "rust-c6c: within inline-module, an atom counting the call instructions' creation: each call or invoke carries `:useq N` (its
+  place in its callee's use list, LLVM's newest first: Value::users), a clone's calls and an invoke made of a call fresh numbers"
+  nil)
+
+(defn- set-useq
+  "The call or invoke op O with `:useq N` (replaced when it has one)"
+  [o n]
+  (let [v (vec o) i (.indexOf ^java.util.List v :useq)]
+    (apply list (if (pos? i) (assoc v (inc i) n) (conj v :useq n)))))
+
+(defn- strip-cseq [o]
+  (let [v (vec o) i (.indexOf ^java.util.List v :cseq)]
+    (if (pos? i) (apply list (concat (subvec v 0 i) (subvec v (+ i 2)))) o)))
+
+(defn- strip-useq [o]
+  (let [v (vec o) i (.indexOf ^java.util.List v :useq)]
+    (if (pos? i) (apply list (concat (subvec v 0 i) (subvec v (+ i 2)))) o)))
+
 (defn successors
   "A terminator's successor labels, in its order"
   [t]
@@ -241,7 +260,9 @@
             (doseq [i (pop is)]
               (if (= 'phi (opname i))
                 (vswap! out conj [:phi i])
-                (let [i2 (subst i @vm) c (fold i2)]
+                (let [i2 (subst i @vm) c (fold i2)
+                      ;; rust-c6c: a cloned call is a new use of its callee (CloneAndPruneFunctionInto's order: the worklist's)
+                      i2 (if (and *useq* (#{'call 'invoke} (opname i2))) (with-op i2 (set-useq (op-of i2) (swap! *useq* inc))) i2)]
                   (if (and c (res-of i))
                     (vswap! vm assoc (res-of i) c)
                     (vswap! out conj i2)))))
@@ -369,7 +390,9 @@
                         (if (nil? j)
                           [b]
                           (let [i (nth is j) o (op-of i) nl (fresh (symbol (str (if (res-of i) (name (res-of i)) "%") ".noexc")))
-                                inv (with-op i (apply list (concat ['invoke] (rest o) [:to nl :unwind lp])))]
+                                inv (with-op i (apply list (concat ['invoke] (rest o) [:to nl :unwind lp])))
+                                ;; rust-c6c: changeToInvokeAndSplitBasicBlock makes a new instruction, a new use
+                                inv (if *useq* (with-op inv (set-useq (op-of inv) (swap! *useq* inc))) inv)]
                             (vswap! new-preds conj (label b))
                             (into [(block (label b) (conj (subvec is 0 j) inv))]
                                   (split-block (block nl (subvec is (inc j)))))))))
@@ -515,22 +538,35 @@
   "DEFINES after the always-inliner: each function of ALWAYS (a set of symbols) the module defines, in the module's order,
   inlined at each of its call sites (the latest first: a use list's order), then dropped when nothing calls it"
   [defines always]
-  (let [fs (volatile! (vec defines))
-        idx (fn [s] (first (keep-indexed (fn [i f] (when (= s (second f)) i)) @fs)))]
+  (binding [*useq* (atom 0)]
+  (let [map-calls (fn [f g] (let [[sym ret params opts body] (def-parts f)]
+                              (make-def sym ret params opts (mapv (fn [b] (block (label b) (map (fn [i] (if (#{'call 'invoke} (opname i)) (with-op i (g (op-of i))) i)) (insts b)))) body))))
+        ;; rust-c6c: every call numbered in the module's order (codegen's: the items in symbol order, each body in order), so that
+        ;; a callee's call sites are taken newest first, as F.users() lists them: a call a clone made is newer than the caller's own
+        ;; within a body in codegen's creation order (`:cseq`, codegen's *call-seq*: rustc's reverse postorder), else the layout's
+        number (fn [f] (let [[_ _ _ _ body] (def-parts f)
+                             cs (for [b body i (insts b) :when (#{'call 'invoke} (opname i))] (op-of i))
+                             order (sort-by (fn [[k o]] [(or (kv-after o :cseq) k)]) (map-indexed vector cs))
+                             nums (into {} (for [[k _] order] [k (swap! *useq* inc)]))
+                             ctr (volatile! -1)]
+                         (map-calls f (fn [o] (let [k (vswap! ctr inc)] (set-useq (strip-cseq o) (get nums k)))))))
+        fs (volatile! (mapv number defines))
+        idx (fn [s] (first (keep-indexed (fn [i f] (when (= s (second f)) i)) @fs)))
+        useq-of (fn [i] (or (kv-after (op-of i) :useq) 0))]
     (doseq [s (map second defines) :when (contains? always s)]
       (when-let [ci (idx s)]
         (let [callee (nth @fs ci)]
-          ;; the call sites: every define's calls of S, the latest (module order, then block and instruction order) first
+          ;; the call sites: every define's calls of S, the newest first (AlwaysInlinerPass: F.users(), Value's use list)
           (loop []
             (let [sites (for [[fi f] (map-indexed vector @fs) :when (not= fi ci)
                               :let [[_ _ _ _ body] (def-parts f)]
                               [bi b] (map-indexed vector body) [ii i] (map-indexed vector (insts b))
                               :when (= s (callee-of i))]
-                          [fi bi ii])]
-              (when-let [[fi bi ii] (last sites)]
+                          [(useq-of i) fi bi ii])]
+              (when-let [[_ fi bi ii] (when (seq sites) (apply max-key first sites))]
                 (let [[sym ret params opts body] (def-parts (nth @fs fi))]
                   (vswap! fs assoc fi (make-def sym ret params opts (inline-call body bi ii callee))))
                 (recur)))))))
     ;; the inlined functions nothing calls any more removed (isDefTriviallyDead)
     (let [called (set (for [f @fs :let [[_ _ _ _ body] (def-parts f)] b body i (insts b) :let [c (callee-of i)] :when c] c))]
-      (vec (remove #(and (contains? always (second %)) (not (called (second %)))) @fs)))))
+      (vec (for [f @fs :when (not (and (contains? always (second f)) (not (called (second f)))))] (map-calls f strip-useq)))))))
