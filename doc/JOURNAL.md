@@ -17908,3 +17908,17 @@ Merged with mac/next 19b1d84aa (its counting decisions of 2026-11-22: :foreign-c
 passes): the journal kept both, the matrix and the scores recorded again on the merge: Go eval 1,817 / 2 / 1 (18 n/a),
 completeness 0.9910 (next) -> 0.9959; what is left in Go's eval cell is unsafe-layout 2 (by design) and gc-m 1 (deferred).
 bin/goi divergences, bin/reap, bin/crops-score --judge --strict and bin/records-check: 0 problems.
+
+## 2026-11-22: the user's decisions on java-design's questions (JD1-JD9) and Go's last three eval rows
+
+Asked by the main session after java-design's and go-gc's reports (about 15:00 UTC); answered by the user:
+- Java n/a: HotSpot's `java` launcher tests (JD1, :jvm-tools, 24 rows), HotSpot's diagnostic MXBean and commands (JD5, 12), the tests
+  that rely on an optimizing JIT (JD6, the speed-hang loops, about 18) and t07649, which prints until the heap runs out (JD2). t05291 gets
+  a wall-clock limit (its CPU time is its busy threads times the wall); t04683 and t05126 stay deferred as jrt bugs. Alternatives not
+  taken: an Arbace launcher imitating HotSpot's; by design.
+- Java JD3, classes defined from class-file bytes (:define-bytes, :classloading's defineClass rows, about 24): built in full, a
+  class-file loader with a bytecode interpreter and verifier. Alternatives not taken: a reflection-only loader; n/a; by design.
+- Java JD4, javac's API at the compiled level (about 43 rows): built, one compiled program with javac's world, cached by key. JD8 (the
+  rest of :xml) and JD9 (JDI) were not chosen: they stay as they are. JD7 (517-1's synthetic lambdas) was not asked: by design.
+- Go: escape_unique (gc-m) is judged by the in-executable gc, reversing 2026-11-06's own-port choice for this row; the 2 unsafe-layout
+  programs (issue8606b, nilptr) are n/a. Alternatives not taken: keep -m goi's own port; keep all three.
