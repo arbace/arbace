@@ -18499,3 +18499,78 @@ body-less friend declaration into the namespace as a hidden function (rejected: 
 scope would stay hidden from ordinary lookup) against keeping it on its class and declaring it on demand (taken); `:constexpr` on
 global variables in the code generator's mode (rejected: global-init's folding and three more readers would change) against a key of
 the evaluator's alone (`:cg-constexpr`, taken).
+## 2026-11-22: cpp-diag-a round 1: coroutines, explicit object parameters, __builtin_source_location in Arbace's own C++ front end
+
+The burst's stream cpp-diag-a (branch `cpp-diag-a-1122` from next `171f82078`; the directories gxx-dg/cpp2a, cpp23, cpp26, concepts
+and coroutines of C++'s dg check; queue 518 and cpp-diag-b hold the others): files of those directories that fail their own dg-error
+lines on Arbace's own front end (`bin/repr-cpp dg --front native`, test/cpp/check-dg-own-linux-amd64.edn), grouped by expected
+message, each rule written from the C++ standard (N4950 and the C++26 draft) with GCC 15.2's wording read off the tests' dg-error
+lines; no GCC code read. New checks appended to arbace/repr/cpp/diag.ae (no shared function edited; `checks` gains them by `swap!`):
+
+- `coroutine-rules`: [expr.await]/2 (no await or yield expression outside a function body, in a handler, or in sizeof/decltype's
+  operand), [dcl.spec.auto.general]/4 (no coroutine with a deduced return type, functions and lambdas without a trailing return type),
+  no return statement in a coroutine, and [dcl.fct.def.coroutine]/3-/12's promise interface (initial_suspend, final_suspend,
+  get_return_object, unhandled_exception unless -fno-exceptions, return_void or return_value for each co_return, yield_value for each
+  co_yield, not both return_value and return_void), judged when the promise class is resolved (coroutine_traits' explicit
+  specialization for R alone, else R::promise_type; no bases, no using-declaration, no member function, no template, no partial
+  specialization of coroutine_traits in the unit); a constructor's, destructor's, main's, constexpr or varargs function's co_ operator
+  left to the existing `coroutines`;
+- `coroutine-handle-members`: GCC's coroutine interface with a std::coroutine_handle the main file declares: coroutine_handle<void>'s
+  address a single non-static member function, the primary's from_address a single static one (coroutines/pr105475*.C);
+- `explicit-object-params`, `xobj-overloads` (C++23, P0847R7): [dcl.fct]/6 (first parameter only, not in a requires-expression, a
+  function type or a non-member function, no default argument, no pack), static and virtual xobj functions, cv- and ref-qualifiers,
+  overriding a base's virtual function, override/final on one that overrides nothing, destructors, mutable and static lambdas, `this`
+  in its body; [basic.scope.scope]/4's corresponding object parameters for an xobj function against a static or implicit object one;
+- `builtin-source-location`: std::source_location and its __impl as __builtin_source_location needs them (the tests' messages state
+  the requirement; the GCC manual is silent on it).
+
+Proof: `bin/repr-cpp dg --corpus dg-error --front native --only` the 127 files of the whole corpus whose source has a co_ operator, an
+explicit object parameter or __builtin_source_location, with the control pair DRs/dr2082.C and DRs/dr1423.C, `--record` (r1, 129
+files, 851 s): own pass 90; 52 files fail -> pass (coroutines 28, cpp23 13, cpp2a 11), no recorded pass lost, no row outside the
+stream's directories changed, the control failing as it must. Three regressions found first on the coroutines' own passes
+(co-*-syntax-05-constexpr*.C: the return-statement rule on a constexpr function) were fixed before the record run.
+
+Scores: C++ read 5,786 / 0 / 532 -> 5,793 / 0 / 528; independence 0.957800 -> 0.958600 (the tool's mean of its rounded stages; the read
+stage 0.799 -> 0.803, 1,898 of 4,387 rows own; floored 95), completeness 0.972210 -> 0.972378 (floored 97). Alternatives: the parser
+for the explicit object rules (its soft diagnostics would need the class context; the tree has every fact), the code generator's Sema
+for the promise interface (its overload resolution not needed for a missing member).
+
+## 2026-11-22: cpp-diag-a round 2: constinit and consteval, immediate functions, constexpr bodies before C++23, later standards' pedwarns
+
+The stream's second round (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a"), new checks appended to arbace/repr/cpp/diag.ae, no shared
+function edited: `constinit-consteval-specs` ([dcl.constinit]/1, [dcl.constexpr]/1-2, [dcl.spec.general]/2, [dcl.typedef]/1: where
+constinit and consteval may not appear, read off the declarations' specifiers), `immediate-addresses` ([expr.const]/16-18, P2564:
+an immediate function's address taken, or an immediate invocation reading a variable not usable in constant expressions, outside an
+immediate function context and outside templates, lambdas and abbreviated templates), `constexpr-pre23-bodies` ([dcl.constexpr]/3 of
+C++11 to C++20: static and thread_local variables and goto before C++23, try-blocks and function-try-blocks before C++20 as GCC's
+pedwarns, C++11's function-try-block bodies), `version-pedwarns` (P2324's label at the end of a compound statement, P2360's
+alias-declaration as an init-statement, P0849's auto(x), P0428's lambda templates, under -pedantic-errors), `lambda-specifiers`
+(P1169: mutable with static, a static lambda with a capture), `subscript-arity` ([over.sub]/1 before C++23).
+
+Proof: the 430 files of the whole corpus whose source names consteval or constinit, a constexpr function with static, goto or try, an
+operator[], a lambda template, auto(x), an alias init-statement, a label before a closing brace or a static lambda, with the control
+pair, `bin/repr-cpp dg --corpus dg-error --front native --only ... --record` (r2, 432 files, 999 s): own pass 185, no recorded pass
+lost, the control failing as it must; 20 files of the stream's directories fail -> pass (cpp2a 15, cpp23 5). Nine rows of other
+directories the run changed were put back to next's (the other streams' to record): of them cpp0x/constexpr-ctor10.C,
+cpp1y/lambda-generic-77914.C and parse/crash72.C pass on these rules.
+
+Scores: C++ independence 0.958600 -> 0.959000 (floored 95), completeness 0.972378 -> 0.972536 (floored 97).
+
+## 2026-11-22: cpp-diag-a round 3: comparisons, concepts, declarations, coroutines' awaiters, P2564's escalation, name-independent declarations
+
+The stream's last round (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a", its rules, shared functions and checks): new checks in
+arbace/repr/cpp/diag.ae for defaulted comparisons and the built-in three-way comparison, concept declarations, concept-ids and
+placeholders, prospective destructors, friend class templates' constraints, class-scope using-declarations, designated initializers,
+destroying delete, non-local lambdas, bit-field bindings, C++26's delete of an incomplete type and name-independent declarations,
+assume's pack expansion; the coroutine check's awaiter and allocation rules, P2564's escalation of constexpr function templates;
+shared functions touched: `redefinitions` (a block-scope automatic `_`), parse.ae's `parse-if` (if consteval's else branch).
+
+Proof: r5, the 900 files the round's rules reach (the stream's directories' own passes among them), in chunks of 150 (`--record` each,
+GOMEMLIMIT 2800-4000MiB: at the tool's 1500MiB the first attempt, r3, spent over three hours in the collector and was stopped, its
+record restored); five chunks run (750 files), the sixth (148 files, 11 of the stream's) stopped at the coordinator's consolidation and
+left unrecorded. 67 files of the stream's directories fail -> pass, none lost; other directories' rows put back to next's. A false
+positive found in chunk 01 (constrained-bindings on `template<...> auto [`, `mutable auto [`) fixed by requiring a concept's name;
+no row of the stream's directories had it (its chunks scanned).
+
+Scores: C++ read 5,793 / 0 / 528 (after round 2: 5,797 / 0 / 524) -> 5,805 / 0 / 516; independence 0.959000 -> 0.960000 (floored 96; the
+stream's start 0.957800, floored 95), completeness 0.972536 -> 0.972852 (floored 97). The stream's total: 139 files to own pass.
