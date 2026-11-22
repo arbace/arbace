@@ -147,6 +147,39 @@ nofib_c_srcs() {
   return 0
 }
 
+# nofib_main DIR NAME (record-ref and bin/hsi check): the main file of nofib's program NAME in DIR, or - for none: Main.hs,
+# Main.lhs, NAME.hs or NAME.lhs, else (hs-pkgs-1122) the one source whose module is Main, as nofib's mk links SRCS whatever the
+# file's name (smp/stm001's StmTest.hs)
+nofib_main() {
+  local d=$1 n=$2 m ms
+  for m in Main.hs Main.lhs "$n.hs" "$n.lhs"; do [ -f "$d/$m" ] && { echo "$m"; return 0; }; done
+  ms=$(cd "$d" && grep -l -E '^>? *module +Main( |\(|$)' -- *.hs *.lhs 2> "$TMPDIR/hsi-nofib-main.log" || true)
+  if [ -n "$ms" ] && [ "$(echo "$ms" | wc -l)" = 1 ]; then echo "$ms"; else echo -; fi
+}
+
+# nofib_programs SUITE-DIR (record-ref, bin/hsi check, bin/hsi pins): the programs of one of nofib's suites, their directories
+# relative to it, one a line: every directory with a Makefile, and since hs-pkgs-1122 (the user's decision of 2026-11-22,
+# hs-pkgs-2) a directory with no main file whose Makefile names SUBDIRS (real/eff, spectral/hartel: nofib's drivers of their
+# sub-programs, as its mk/target.mk recurses into them) stands for its SUBDIRS, each a program in the Makefile's order (eff/CS)
+nofib_programs() {
+  local sd=$1 p n subs q
+  for p in "$sd"/*/; do
+    [ -f "$p/Makefile" ] || continue
+    n=$(basename "$p")
+    if [ "$(nofib_main "${p%/}" "$n")" = - ] && grep -q '^SUBDIRS *=' "$p/Makefile"; then
+      subs=$(awk '/^SUBDIRS *=/ {v = 1; sub(/^SUBDIRS *= */, "")} v {c = sub(/\\$/, ""); printf "%s ", $0; v = c}' "$p/Makefile")
+      for q in $subs; do [ -f "$p/$q/Makefile" ] && echo "$n/$q"; done
+    else echo "$n"; fi
+  done
+  return 0
+}
+
+# nofib_src_deps MAKEFILE (record-ref and bin/hsi check): the packages its SRC_DEPS name, as nofib's mk reads them: the first
+# plain assignment's, and since hs-pkgs-1122 an appending one's too (parallel/blackscholes' `SRC_DEPS += parallel`)
+nofib_src_deps() {
+  sed -n 's/^SRC_DEPS *+\{0,1\}= *//p' "$1" | head -1
+}
+
 # hsi_pre_gen ID (HES92 (a); record-ref and bin/hsi check): GEN.hs when all.T runs `pre_cmd('{compiler} --run ./GEN.hs')`
 # before the testsuite test ID (unboxedsums/ManyUbxSums: GEN writes the test's main module, which the plan names,
 # test/haskell/eval/run_plan.ae), else nothing; its users run `ghc --run ./GEN.hs` in the test's directory first (live only)

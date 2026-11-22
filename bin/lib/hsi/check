@@ -264,24 +264,23 @@ for c in ${corpora//,/ }; do
     nofib)
       # nofib's programs as record-ref plans them (the Makefile's FAST_OPTS, PROG_ARGS, SRC_HC_OPTS, SRC_DEPS; HE5)
       for s in imaginary spectral real shootout gc parallel smp; do
-        for p in "$root/.tmp/hsi/nofib/$s"/*/; do
-          [ -f "$p/Makefile" ] || continue
-          n=$(basename "$p"); mk=$p/Makefile
-          main=-; for m in Main.hs Main.lhs "$n.hs" "$n.lhs"; do [ -f "$p/$m" ] && { main=$m; break; }; done
+        for rel in $(nofib_programs "$root/.tmp/hsi/nofib/$s"); do
+          p=$root/.tmp/hsi/nofib/$s/$rel/; n=$(basename "$rel"); mk=$p/Makefile
+          main=$(nofib_main "${p%/}" "$n")
           fo=$(sed -n 's/^FAST_OPTS *= *//p' "$mk" | head -1)
           pa=$(sed -n 's/^PROG_ARGS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ')
           hc=$(sed -n 's/^SRC_HC_OPTS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ')
-          deps=$(sed -n 's/^SRC_DEPS *= *//p' "$mk" | head -1)
+          deps=$(nofib_src_deps "$mk")
           for dpk in $deps; do hc="$hc -package $dpk"; done
           # the C nofib's make links with the program (C_SRCS: SRCS' .c and .S, the Makefile's SRCS when it sets it, less
           # EXCLUDED_SRCS; HES86 (a): record-ref's plan, nofib_c_srcs in bin/lib/hsi/records.bash; HES64 (a) took every .c)
           for cf in $(nofib_c_srcs "${p%/}"); do hc="$hc $cf"; done
           sin=-; for f in "$n.faststdin" "$n.stdin"; do [ -f "$p/$f" ] && { sin=$f; break; }; done
           # HES102: the input its boot.sh makes (test/haskell/eval/boot.edn's :stdin), copied into the run's directory
-          [ "$sin" != - ] || { bsin=$(boot_stdin_name "nofib/$s/$n"); [ -z "$bsin" ] || sin=$bsin; }
+          [ "$sin" != - ] || { bsin=$(boot_stdin_name "nofib/$s/$rel"); [ -z "$bsin" ] || sin=$bsin; }
           args=$(echo "$pa ${fo:-}" | xargs)
           hcf=$(echo "$hc" | xargs)
-          add "nofib/$s/$n" "${p%/}" "$main" "${hcf:--}" "${args:--}" "$n" "$sin" nofib
+          add "nofib/$s/$rel" "${p%/}" "$main" "${hcf:--}" "${args:--}" "$n" "$sin" nofib
         done
       done ;;
     *) echo "hsi check: no corpus $c" >&2; exit 2 ;;
@@ -1023,6 +1022,22 @@ echo "hsi check: $total programs ($out)"
 # records (its :results, and for :hsi its :message's text in hsi's message; review 189, F6): a classed program whose
 # result changed kind is in no class
 unclassed=0
+# hs-pkgs-1122 (the main session's application of the user's HES101 rule, 2026-11-22): a class keyed on GHC's recorded verdict,
+# not on ids: ref_status ID, the program's status in the reference ($ref); verdict_class FILE STATUS, CLASS<TAB>RESULTS-or-OUTCOMES
+# <TAB>MESSAGE of FILE's first class whose :ref-statuses holds STATUS (divergences.edn's :ghc-no-finish: the reference's kill at
+# record-ref's limit), taken by a program no class names by id
+ref_status() { grep -F "{:id \"$1\" " "$ref" | sed -n 's/.* :status \([^ ]*\) .*/\1/p' | head -1; }
+verdict_class() {
+  awk -v st="$2" '
+    function flush() { if (cls != "" && rs != "" && index(" " rs " ", " " st " ")) { printf "%s\t%s\t%s\n", cls, (res == "" ? "-" : res), (msg == "" ? "-" : msg); found = 1; exit } }
+    /^ *\{:id :/ {flush(); cls = $2; res = ""; msg = ""; rs = ""}
+    /^ *:results \[/ {res = $0; sub(/.*:results \[/, "", res); sub(/\].*/, "", res)}
+    /^ *:outcome "/ {res = $0; sub(/.*:outcome "/, "", res); sub(/".*/, "", res)}
+    /^ *:outcomes \[/ {res = $0; sub(/.*:outcomes \[ *"/, "", res); sub(/" *\].*/, "", res); gsub(/" +"/, "|", res)}
+    /^ *:message "/ {msg = $0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
+    /^ *:ref-statuses \[/ {rs = $0; sub(/.*:ref-statuses \[/, "", rs); sub(/\].*/, "", rs)}
+    END {if (!found) flush()}' "$1"
+}
 # review 1111b (findings 3, 4): --libs own's judge. outcome LINE: what a result says failed (kind, status, differs, reason)
 outcome() {
   local k st d
@@ -1072,6 +1087,8 @@ while IFS= read -r line; do
         /^ *:outcomes \[/ {out=$0; sub(/.*:outcomes \[ *"/, "", out); sub(/" *\].*/, "", out); gsub(/" +"/, "|", out)}
         /^ *:message "/ {msg=$0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
         index($0, id) {printf "%s\t%s\t%s\n", cls, (out == "" ? "-" : out), (msg == "" ? "-" : msg); exit}' "$divs_own") || true
+      # (hs-pkgs-1122: no own class names it: one keyed on GHC's recorded verdict, :ref-statuses)
+      if [ -z "$c" ]; then vs=$(ref_status "$id"); [ -z "$vs" ] || IFS=$'\t' read -r c cout cmsg < <(verdict_class "$divs_own" "$vs") || true; fi
       [ "$cmsg" = - ] && cmsg=""
       # (no pack row and an own class whose outcome is not this run's: the pack's classes judge it, AtomicPrimops at the
       # CPU limit in the AOT run as divergences.edn's :speed)
@@ -1091,6 +1108,8 @@ while IFS= read -r line; do
     /^ *:reasons \[/ {rsn=$0; sub(/.*:reasons \[/, "", rsn); sub(/\].*/, "", rsn)}
     /^ *:message "/ {msg=$0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
     index($0, id) {printf "%s\t%s\t%s\t%s\n", cls, (res == "" ? "-" : res), (msg == "" ? "-" : msg), (rsn == "" ? "-" : rsn); exit}' $([ "$divs1" != "$divs" ] && [ -f "$divs1" ] && echo "$divs1") "$divs") || true
+  # (hs-pkgs-1122: no class names it: one keyed on GHC's recorded verdict, :ref-statuses, divergences.edn's :ghc-no-finish)
+  if [ -z "$c" ]; then vs=$(ref_status "$id"); [ -z "$vs" ] || { IFS=$'\t' read -r c cres cmsg < <(verdict_class "$divs" "$vs") || true; crsn=-; }; fi
   # "-" for a field the class has not (a tab is IFS whitespace: empty fields would run together)
   [ "$cres" = - ] && cres=""; [ "$cmsg" = - ] && cmsg=""; [ "$crsn" = - ] && crsn=""
   if [ -z "$c" ]; then echo "hsi check: $id in no class"; unclassed=$((unclassed + 1)); continue; fi
