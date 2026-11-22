@@ -3425,7 +3425,12 @@
       (when (and (= ctx :param) (or tls (and sto (not= "register" (second sto)))))
         (soft-diag! p (long (first (or tls sto))) "storage class specified for parameter"))
       (when (and frnd (#{:top :block} ctx) (not virt)) (soft-diag! p (long (first frnd)) "'friend' used outside of class"))
-      (when (and mut (#{:top :block} ctx)) (soft-diag! p (long (first mut)) "non-member cannot be declared 'mutable'")))))
+      (when (and mut (#{:top :block} ctx)) (soft-diag! p (long (first mut)) "non-member cannot be declared 'mutable'"))
+      ;; ([class.ctor.general]/1: a constructor's decl-specifiers are function specifiers, friend, constexpr alone, so cv-qualifiers
+      ;; before the class's name make it a type and `()` an empty declarator: GCC's "expected unqualified-id before ')' token")
+      (when (and (= ctx :member) (or (:c ds) (:v ds)) (= :n (:t (:type ds))) (some? (:name (class-ctx p)))
+                 (= (:s (:type ds)) (:name (class-ctx p))) (is? p "(") (is-at? p 1 ")"))
+        (soft-diag! p (inc (ix p)) "expected unqualified-id before ')' token")))))
 
 (defn parse-decl-specs
   "A decl-specifier-seq (parse-decl-specs*), its combination's rules checked (spec-checks!)."
@@ -4551,6 +4556,45 @@
               ;; for function", at the decl-specifiers)
               _ (when (and fs (not (:a fs)) (:tls ds) (not (skim? p)) (not (:typedef ds)))
                   (soft-diag! p (long (:b ds)) (str "storage class 'thread_local' invalid for function" (when nm (str " '" nm "'")))))
+              ;; (cpp-diag-b, 2026-11-22: [class.ctor.general]/1, [class.dtor]/1 and [class.conv.fct]/1: a constructor's, destructor's
+              ;; or conversion function's declaration has no return type, so no type-specifier and no ptr-operator before the
+              ;; declarator-id: GCC's "return type specification for constructor invalid", "return type specified for 'operator
+              ;; int'", at the decl-specifiers; [class.ctor.general]/? and [class.dtor]/? neither is static: "constructor cannot be
+              ;; static member function"; [class.dtor]/1 a destructor's name is its class's: "declaration of '~A' as member of 'B'",
+              ;; "as non-member", "as non-function")
+              _ (when (and qn lp (not (skim? p)) (main-tok? p (long (:b ds))) (#{:member :top :block} ctx))
+                  (let [parts (:parts qn)
+                        np (count parts)
+                        cls (:name (class-ctx p))
+                        ctor? (and fs (:s lp) (not (:args lp))
+                                   (or (and (= ctx :member) (= 1 np) (not (:g qn)) (= (:s lp) cls) (not (:friend ds)))
+                                       (and (>= np 2) (= (:s lp) (:s (nth parts (- np 2)))) (= :class (some-> (:q qn) :k)))))
+                        what (cond ctor? "constructor" (:dtor lp) "destructor" (:conv lp) "conv" :else nil)
+                        ptrs? (some #(seq (:ptrs %)) chain)]
+                    (cond
+                      (and what fs (or base0 ptrs?) (not (:typedef ds)))
+                      (soft-diag! p (long (:b ds)) (if (= what "conv")
+                                                     "return type specified for conversion operator"
+                                                     (str "return type specification for " what " invalid")))
+                      (and fs (#{"constructor" "destructor"} what) (nil? base0) (or (:c ds) (:v ds)))
+                      (soft-diag! p (long (:b ds)) (str "qualifiers are not allowed on declaration of '" (if (= what "destructor") (str "~" (:dtor lp)) (:s lp)) "'"))
+                      ;; (a qualified destructor's name: its qualifier a namespace, "is not a class-name"; another class than the
+                      ;; one its name names, both classes declared so (no typedef), "as member of")
+                      (and (:dtor lp) (string? (:dtor lp)) (>= np 2) (= :ns (some-> (:q qn) :k)))
+                      (soft-diag! p (long (:i lp)) (str "'~" (:dtor lp) "' is not a class-name"))
+                      (and (:dtor lp) (string? (:dtor lp)) (>= np 2) (:s (nth parts (- np 2))) (not= (:dtor lp) (:s (nth parts (- np 2))))
+                           (let [qe (lookup (scope p) (:s (nth parts (- np 2)))) de (lookup (scope p) (:dtor lp))]
+                             (and (:class qe) (:class de) (not (:target qe)) (not (:target de)) (not (:tparam qe)) (not (:tparam de)))))
+                      (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "' as member of '" (:s (nth parts (- np 2))) "'"))
+                      (and fs (#{"constructor" "destructor"} what) (= ctx :member) (= "static" (:storage ds)))
+                      (soft-diag! p (long (:b ds)) (str what " cannot be static member function"))
+                      (and (:dtor lp) (string? (:dtor lp)) (not fs))
+                      (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "' as non-function"))
+                      (and (:dtor lp) (string? (:dtor lp)) (= 1 np) (not (:g qn)) (= ctx :member) cls (not= (:dtor lp) cls) (not (:friend ds)))
+                      (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "' as member of '" cls "'"))
+                      (and (:dtor lp) (string? (:dtor lp)) (= 1 np) (not (:g qn)) (#{:top :block} ctx) (not (:friend ds)))
+                      (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "' as non-member"))
+                      :else nil)))
               ;; (queue 377: [dcl.fct]/17 (C++23 /16), a function's return type defines no class or enumeration: GCC's "new types may not
               ;; be defined in a return type", at the decl-specifiers; a typedef's function type too, and a pointer to function's
               ;; (`struct W {} (*p) ();`), as GCC: any function suffix in the declarator)
