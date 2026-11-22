@@ -2652,4 +2652,8 @@ Branch `go-read2-1122`.
   `linux-errtest/bombad.go` its `:always`, and a `SYNTAX` row a failure its `:failed-re` reruns.
 - Proofs: `bin/repr-go native-check linux-errtest` (whole, `REPR_GO_JOBS=3`, under the 8 GiB cap): E-tree 586 of 586,
   the 64 raw-only rows `:same`, 73 rejected by both, the control held; then the 73 again after the directive rule
-  (`--only`), 73 equal to gc's own.
+  (`--only`), 73 equal to gc's own. The record from native-check over every corpus in three runs (the light corpora and
+  linux-errtest with box under the 8 GiB cap, the std, tests and cmd corpora with the check under the big-job lock, 31 GB
+  at its peak): 22 corpora, 12,275 dumps, 0 not known, linux-errtest 73 of 73 rejected files with gc's errors equal and
+  its 64 raw-only rows `:same`, every control held in one of the runs; the other corpora's numbers those of the record of
+  2026-10-24. bin/reap: Go's read cell 12,158 / 137 / 0 -> 12,295 / 0 / 0 (67 n/a).

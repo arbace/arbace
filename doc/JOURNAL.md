@@ -16886,3 +16886,39 @@ go/format, go/parser, go/printer, internal/trace, io/ioutil, net/http, os, sync)
 - Go's print cell 2,584 / 9 / 0 -> 2,593 / 0 / 0 (129 n/a); Go's completeness 0.988974 -> 0.989842 (floored 98.8 ->
   98.9; the read cell's round is part 2). bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0
   problems), bin/records-check (0 problems). doc/go/ROUNDTRIP.md, "Tests that embed their own sources".
+
+## 2026-11-22: Go's read cell: the readers' agreement counted, the 73 rejected files' messages compared (go-read2-1122, part 2)
+
+The user's decision of 2026-11-22 (the entry above, "Counting"): Go's read cell's 137 by-design rows (linux-errtest's 64
+invalid programs, `:invalid-programs`, and 73 files go/parser rejects, `:parser-rejects`) count as passes where Arbace's
+own reader agrees with the reference reader: the same trees and the same conversion failure for the 64; for the 73, both
+reject, and their error messages compared. doc/go/GO-PARSER-SURVEY.md, "As built: the rejected files' messages and the
+readers' agreement (2026-11-22)", holds the details; in short:
+- native-check (arbace.repr.go.annotate): a file both readers reject is judged by gc's syntax errors from the native reader
+  (arbace.repr.go.syntax, bin/repr-go syntax-errors' path) against gc itself over the original (`go tool compile -p=p -C -e`
+  with std's export data, no action's flags; bin/repr-go's corpus_gc_errors, .tmp/godump/corpus/NAME.gc/KEY.txt, made with
+  the helper's dumps of a corpus of files), line for line; a line's file read as its base name on both sides when it names
+  the file by its path (a //line directive's resolved name: issue15611, issue18393, issue32133 differed by that spelling
+  alone in a first run); a difference fails (SYNTAX). A raw-only row records `:same` when the native conversion fails with
+  the helper's message (E-tree before it). Control control/bombad-one-message-altered (level :syntax): bombad.go's errors
+  with one message altered must differ: held.
+- bin/reap: record-native-check writes `:rejected-agree` and a raw-only row's `:same`, and reads several reports (native-check's
+  runs of some corpora each, as the gate's parts run it: none partial, no corpus twice, every corpus in one; the guard of
+  report 021's finding 3 kept); the reader gives such entries `:agree` and the rule `agreement` counts them as passes in a
+  class marked `:agreement` (test/repr/go/divergences-read.edn's two; `:goos-other-boards` stays n/a, DECISION B); bin/reap
+  --self-test's three new cases hold it. The gate's rotation: SYNTAX in repr-go-native's :failed-re, bombad.go in :always,
+  the rejected files in native-check-ids.edn's universe (`native-check --record-ids`).
+- Runs (light, the burst's rules; no gate): the 73 checked first alone (`--only`), then linux-errtest whole (586 of 586
+  E-tree, 64 raw-only `:same`, 73 of 73 equal, the control held), then the record from native-check over every corpus in
+  three runs, as its tool requires every corpus: the twelve light corpora (REPR_GO_JOBS=8, GOMEMLIMIT=6GiB, under the 8 GiB
+  cap, 11 min), linux-errtest with box (jobs 3, 20 min), the std, tests and cmd corpora (32 jobs, the check under
+  bin/heavy-lock: 7 h 53 min of which most the queue, 31 GB at the peak): 22 corpora, 12,275 dumps, 0 not known, every
+  control held in one of the runs; the other corpora's counts those of 2026-10-24's record (the raw-only and extra rows
+  the same, linux-errtest's with `:same`). The helper's dumps of linux-errtest were go-rows-1122's (the same helper,
+  toolchain and pins, keyed to this checkout's dumps_key), the others made afresh. bin/gate-subsets go rewrote
+  linux-errtest's subset alone (the universe's 73 rejected files, bombad.go kept).
+- Go's read cell 12,158 / 137 / 0 -> 12,295 / 0 / 0 (67 n/a, goos-other-boards); with part 1's print 2,593 / 0 / 0 Go's
+  completeness 0.988974 -> 0.992628 (floored 98.8 -> 99.2; the mean of the cells: read 1, eval 1,781/1,834, AOT
+  1,696/1,697, print 1). Left in Go's row: eval 52 by design and 1 deferred (counting-1122 makes foreign-code 8 and memory 6
+  n/a; the gc-flags and gc-phases rows wait for gc inside the executable, another stream) and AOT 1 by design (issue9608). bin/reap --record (0 problems), --self-test (8),
+  bin/crops-score --record, --judge --strict (0 problems), bin/records-check (0 problems).
