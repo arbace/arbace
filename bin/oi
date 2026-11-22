@@ -1479,6 +1479,8 @@ o2j_env_runs() {
     [ -z "$(ocamldoc_of "$env")" ] || ocamldoc_output "$id" "$(dirname "$out")" "$out"
     # (header.awk's objinfo mode at this level, queue 528: the compiler's output judged beside the tool's)
     [ -z "$(tool_of "$env")" ] || tool_output "$(tool_of "$env")" "$id" "$(dirname "$out")" "$out"
+    # (header.awk's ocamlopt-alone mode with check-ocamlopt.byte-output, queue 533: the native typer's warnings)
+    [ -z "$(compout_of "$env")" ] || compout_output "$id" "$(dirname "$out")" "$out"
   done
 }
 
@@ -1569,12 +1571,34 @@ o2j_dump() {
     mv "$d/_depend/Ocamldep.ae" "$d/$u.ae"
     return 0
   fi
-  o2j_dump_file "$d" "$base" "$flags" "$incs"
+  # header.awk's ocamlopt-alone mode with the compiler's output judged (queue 533, DECISION 528-R1 (a); @compout=1, @w=SPEC,...): the
+  # native typer runs with the test's -w, its warnings (D/typer.err) the compiler's output o2j_env_runs judges (compout_output); ocdump
+  # reports no warnings, so the oracle's path refuses the row
+  if [ -n "$(compout_of "$env")" ] && [ "${NATIVE:-0}" != 1 ]; then
+    printf '(ocaml/error "%s")\n' "the compiler's output (check-ocamlopt.byte-output) is the native typer's: ocdump reports no warnings" > "$d/$u.ae"; return 0
+  fi
+  o2j_dump_file "$d" "$base" "$flags" "$incs" "$(wspec_of "$env")"
 }
 
-# o2j_dump_file D BASE FLAGS INCS: D/BASE.ml's Lambda into D/U.ae (U its module), natively or by ocdump; a refusal is the dump's error form
+# compout_of ENV: 1 when ENV is a row whose compiler's output is judged (header.awk's @compout=1, queue 533), else nothing; wspec_of ENV:
+# its -w specs (@w=SPEC,...), as one -w of the native typer (arbace.repr.ocaml.typer splits it at the commas)
+compout_of() { case " $1 " in *" @compout=1 "*) echo 1 ;; esac; }
+wspec_of() { local kv; for kv in $1; do case $kv in @w=*) echo "${kv#@w=}" ;; esac; done; }
+# compout_output ID D OUT: the compiler's output, the native typer's warnings (D/typer.err), judged as ocamltest's check-ocamlopt.byte-output
+# judges ocamlopt's against TEST.compilers.reference (none: no output); when they differ, appended to the row's output OUT, so the row fails
+compout_output() {
+  local id=$1 d=$2 out=$3 ref=$TESTS/$1.compilers.reference
+  [ -f "$d/typer.err" ] || : > "$d/typer.err"
+  if [ -f "$ref" ]; then cmp -s "$ref" "$d/typer.err" || { echo "oi: the compiler's output differs from $(basename "$ref"):"; cat "$d/typer.err"; } >> "$out"
+  elif [ -s "$d/typer.err" ]; then { echo "oi: the compiler's output (no $(basename "$id").compilers.reference):"; cat "$d/typer.err"; } >> "$out"; fi
+  return 0
+}
+export -f compout_of wspec_of compout_output
+
+# o2j_dump_file D BASE FLAGS INCS [WSPEC]: D/BASE.ml's Lambda into D/U.ae (U its module), natively or by ocdump; a refusal is the dump's
+# error form; WSPEC (queue 533): the native typer's -w, its warnings in D/typer.err
 o2j_dump_file() {
-  local d=$1 base=$2 flags=$3 incs=$4
+  local d=$1 base=$2 flags=$3 incs=$4 wspec=${5:-}
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   local I; I=$(inc_I "$incs")
   if [ "${NATIVE:-0}" = 1 ]; then
@@ -1584,6 +1608,7 @@ o2j_dump_file() {
       case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;; *) bad=$f ;; esac
     done
     local inc=""; [ -n "$incs" ] && inc="--include $(inc_dirs "$incs")"
+    [ -n "$wspec" ] && nf="$nf -w $wspec"
     if [ -n "$bad" ]; then printf '(ocaml/error "typer: flag %s not modelled")\n' "$bad" > "$d/$u.ae"
     elif ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
       printf '(ocaml/error "typer: %s")\n' "$(grep -a -v '^\s*at \|^Full report at:\|^/.*\.edn$\|^$' "$d/typer.err" | sed 's/^Execution error ([A-Za-z.]*) at [^ ]* ([^)]*)\.$//; s/^Execution error ([A-Za-z.]*) at [^ ]* ([^)]*)\. //' | tr '\n\t"\\' '    ' | sed 's/^ *//; s/  */ /g; s/ *$//' | head -c 200)" > "$d/$u.ae"
