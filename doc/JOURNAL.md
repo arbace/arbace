@@ -15768,3 +15768,9 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   CPython's Modules/xxlimited.c and xxlimited_35.c built into the C world (lib.conf); a lazy module whose package
   registers no such module is now _imp.create_builtin's ModuleNotFoundError "No module named 'NAME'" (as an absent
   module), so a world without them changes nothing.
+- And two configuration options of :pyi-command-line: -X cpu_count=N and PYTHON_CPU_COUNT (os.cpu_count() and, through
+  sys._get_cpu_count_config(), os.process_cpu_count() answer N; test_cmd_line's test_cpu_count), and -X
+  int_max_str_digits=N and PYTHONINTMAXSTRDIGITS (the limit and sys.flags.int_max_str_digits N; no value, not a number
+  or 0 < N < 640 the start's error "... invalid limit; must be >= 640 or 0 for unlimited.", status 1; the option over the
+  variable; test_int_max_str_digits). Proof: `-X cpu_count=4321 -X int_max_str_digits=6000` prints 4321 4321 6000 6000,
+  the variables 1234 1234 0 0, `-X int_max_str_digits=100` the error and status 1.
