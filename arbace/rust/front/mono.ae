@@ -482,12 +482,13 @@
 (declare v0-mangle)
 (defn reify-mangle
   "A ReifyShim's symbol (a #[track_caller] function as a pointer, Instance::resolve_for_fn_ptr): `::{shim:reify#0}`, then the
-  instantiating crate (a shim requires inlining, so it is globally shared with conflicts at opt-level 0)"
+  instantiating crate when the instance is generic (queue 524: the records' `core::hint::assert_unchecked::{shim:reify#0}`
+  and `<usize>::unchecked_add`'s carry none, `<dyn Shape as Shape>::name`'s does: mono-check's fn-symbols)"
   [d args]
   (let [m (m-new)]
     (binding [*instance-def* d]
       (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "reify"))
-    (print-def-path! m (instantiating-root) [])
+    (when (some type-arg? args) (print-def-path! m (instantiating-root) []))
     (str (:sb m))))
 
 (defn vtable-shim-mangle
@@ -795,8 +796,10 @@
                  ;; RFP58 (a): repr(simd), read from the sources of an ADT the interface lacks; RIND5: also of a known one in a
                  ;; SIMD module (core::simd's `Simd<T, N>`, `#[repr(simd, packed)]`: the interface writes no repr(simd))
                  (and (or (not (tc/std-adt-known? adt)) (str/includes? (str adt) "simd")) (:simd (src-adt adt))) (assoc :simd true)
-                 ;; queue 524 (C3): a source enum's repr(int)
-                 (and (not (tc/std-adt-known? adt)) (:int (src-adt adt))) (assoc :int (:int (src-adt adt)))))))
+                 ;; queue 524 (C3): a source enum's repr(int), a source ADT's repr(C), transparent, packed (core's
+                 ;; `#[repr(C)] struct AlignedStorage`: its fields in their order)
+                 (and (not (tc/std-adt-known? adt)) (:int (src-adt adt))) (assoc :int (:int (src-adt adt)))
+                 (not (tc/std-adt-known? adt)) (merge (:repr (src-adt adt)))))))
 
 (def ^:private niche-range-ends
   "queue 462 (448-4 (a) 5): the inclusive ends of core::num::niche_types' range pattern types that std's interface writes by
@@ -1310,6 +1313,19 @@
                 true)))
           (fget it :attrs)))
 
+(defn- repr-flags
+  "queue 524 (C3): an item's repr flags (`#[repr(C)]`, transparent, packed): {:c true ...}"
+  [it]
+  (into {} (for [a (fget it :attrs)
+                 :let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
+                       nm (when item (second (fget (last (fget (fget item :path) :segments)) :ident)))
+                       args (when item (fget item :args))]
+                 :when (and (= nm "repr") (seq? args) (= 'Delimited (first args)))
+                 m (meta-items (fget (second args) :tokens))
+                 :let [f (get {"C" :c "transparent" :transparent "packed" :packed} (str (first m)))]
+                 :when f]
+             [f true])))
+
 (defn- repr-int
   "queue 524 (C3): an item's repr(INT) (`#[repr(u8)]`): the integer's name, or nil"
   [it]
@@ -1451,6 +1467,7 @@
                       (if-let [it (some #(when (and (#{'Struct 'Union} (item-kind %)) (= nm (item-name %)) (attr-cfg-ok? %)) %) items)]
                         (let [[_ _ gens vd] (fget it :kind)]
                           {:simd (boolean (repr-simd? it))
+                           :repr (repr-flags it)
                            :union (= 'Union (item-kind it))
                            :mod (vec (butlast segs))
                            :params (mapv #(second (fget % :ident)) (fget gens :params))
@@ -1483,6 +1500,7 @@
                                 discrs (loop [vs vs prev -1 acc []] (if-let [v (first vs)] (let [d (or (lit v) (inc prev))] (recur (rest vs) d (conj acc d))) acc))]
                             {:enum true
                              :int (repr-int it)
+                             :repr (repr-flags it)
                              :mod (vec (butlast segs))
                              :params (mapv #(second (fget % :ident)) (fget gens :params))
                              :variants (mapv #(data-fields (fget % :data)) vs)
