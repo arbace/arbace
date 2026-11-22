@@ -5509,6 +5509,86 @@
 
 (swap! checks conj builtin-spaceship)
 
+;; Using-declarations and using-enum-declarations ([namespace.udecl]/3-5, [enum.udecl]/1): a using-declarator names no destructor ("'E::~E'
+;; names destructor"); one in a class's member-specification names a member of a base class, its nested-name-specifier no other class
+;; of the unit nor a namespace ("type 'A' is not a base type for type 'B'", "using-declaration for non-member at class scope"; a class
+;; template's members not judged, their bases dependent); a using-enum-declaration names an enumeration ("'A' is not an enumerated type").
+;; [class.virtual]/18: a consteval virtual function overrides and is overridden only by consteval ones ("non-'consteval' function 'f'
+;; overriding 'consteval' function", "'consteval' function 'f' overriding non-'consteval' function"; the unit's bases by name, the
+;; parameters' types as written).
+
+(defn using-and-consteval-overrides
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        at! (fn [n msg] (when-let [o (when (= main (get-in n [:range :begin :file])) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :using :msg msg}))))
+        text (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
+                       (when (and b e (= main (get-in n [:range :begin :file])) (<= (long b) (long e)) (< (long e) n-src))
+                         (subs src (long b) (inc (long e))))))
+        classes (java.util.HashMap.) namespaces (java.util.HashSet.) enums (java.util.HashSet.)
+        _ (walk-nodes (fn [n _]
+                        (case (:kind n)
+                          "CXXRecordDecl" (when (and (:name n) (:completeDefinition n)) (.put classes (:name n) (if (.containsKey classes (:name n)) :ambiguous n)))
+                          "NamespaceDecl" (when (:name n) (.add namespaces (:name n)))
+                          "EnumDecl" (when (:name n) (.add enums (:name n)))
+                          nil))
+                      (:nodes u) nil)
+        base-names (fn bn [c seen]
+                     (into #{} (mapcat (fn [b] (let [nm (-> (str (get-in b [:type :qualType])) (str/replace #"^(?:struct|class)\s+" "") (str/replace #"<.*$" "") str/trim)
+                                                     bc (.get classes nm)]
+                                                 (cons nm (when (and (map? bc) (not (seen nm))) (bn bc (conj seen nm))))))
+                                       (:bases c))))
+        params (fn [f] (mapv #(str/replace (str (get-in % [:type :qualType])) #"\s+" "") (filter #(= "ParmVarDecl" (:kind %)) (:inner f))))
+        consteval? (fn [f] (boolean (or (:_consteval f) (:consteval f))))]
+    (letfn [(walk [nodes cls tmpl?]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  ("NamespaceDecl" "LinkageSpecDecl") (walk (:inner n) nil tmpl?)
+                  "ClassTemplateDecl" (walk (:inner n) nil true)
+                  "CXXRecordDecl" (when (:completeDefinition n)
+                                    (when (and (not tmpl?) (= main (get-in n [:range :begin :file])))
+                                      (let [bs (base-names n #{})]
+                                        (doseq [m (:inner n) :when (= "CXXMethodDecl" (:kind m))]
+                                          (doseq [b bs :let [bc (.get classes b)] :when (map? bc)
+                                                  bm (:inner bc) :when (and (= "CXXMethodDecl" (:kind bm)) (= (:name m) (:name bm)) (:virtual bm)
+                                                                            (= (params m) (params bm)))]
+                                            (cond (and (consteval? bm) (not (consteval? m)))
+                                                  (at! m (str "non-'consteval' function '" (:name m) "' overriding 'consteval' function"))
+                                                  (and (consteval? m) (not (consteval? bm)))
+                                                  (at! m (str "'consteval' function '" (:name m) "' overriding non-'consteval' function"))
+                                                  :else nil)))))
+                                    (walk (:inner n) n tmpl?))
+                  "UsingDecl" (when-let [t (or (:_text n) (text n))]
+                                (when (= main (get-in n [:range :begin :file] main))
+                                  (let [t (str/replace (str/replace t #"^\s*using\s+" "") #"^typename\s+" "")
+                                        parts (map str/trim (str/split (str/replace t #";\s*$" "") #"::"))]
+                                    (cond
+                                      (and (>= (count parts) 2) (str/starts-with? (last parts) "~"))
+                                      (at! n (str "'" (str/join "::" parts) "' names destructor"))
+                                      (and cls (not tmpl?) (>= (count parts) 2) (not= "" (first parts)))
+                                      (let [q (first parts)
+                                            ;; (C++20's P1099: a using-declarator naming an enumerator needs no base)
+                                            enumerator? (and (>= (long (cxx-year (:std u))) 20) (map? (.get classes q))
+                                                             (some (fn [e] (and (= "EnumDecl" (:kind e)) (some #(and (= "EnumConstantDecl" (:kind %)) (= (last parts) (:name %))) (:inner e))))
+                                                                   (:inner (.get classes q))))]
+                                        (cond (and (map? (.get classes q)) (not= q (:name cls)) (not ((base-names cls #{}) q)) (not enumerator?))
+                                              (at! n (str "type '" q "' is not a base type for type '" (:name cls) "'"))
+                                              (and (.contains namespaces q) (not (.containsKey classes q)))
+                                              (at! n "using-declaration for non-member at class scope")
+                                              :else nil))
+                                      :else nil))))
+                  "UsingEnumDecl" (when-let [t (text n)]
+                                    (when-let [[_ nm] (re-find #"using\s+enum\s+(?:[\w:]*::)?\s*([A-Za-z_]\w*)\s*;?\s*$" t)]
+                                      (when (and (map? (.get classes nm)) (not (.contains enums nm)))
+                                        (at! n (str "'" nm "' is not an enumerated type")))))
+                  nil)))]
+      (walk (:nodes u) nil false))
+    (vec (distinct out))))
+
+(swap! checks conj using-and-consteval-overrides)
+
 ;; Concepts' and placeholders' declarations ([temp.concept]/2-5, [dcl.spec.auto.general]/5, [temp.param]/14, [temp.friend]/9,
 ;; [expr.prim.req.general]/5, [basic.scope.scope]/4): a concept is declared at namespace scope ("concept 'C' not in namespace scope"),
 ;; with one template-head and no constraint on its parameters ("a concept cannot be constrained", "concept 'C' has multiple template
@@ -5628,6 +5708,170 @@
     (vec (distinct out))))
 
 (swap! checks conj abbreviated-templates)
+
+;; Designated initializers (C++20, [dcl.init.general]/1, [dcl.init.aggr]/3.1, [temp.variadic]/5): a braced-init-list is a
+;; designated-initializer-list or none of its clauses is designated ("either all initializer clauses should be designated or none of
+;; them should be"), and a designated clause is no pack expansion ("'...' not allowed in designated initializer list"). Read off the
+;; list's text, its top-level clauses; a list with a GNU array designator `[N] =` not judged.
+
+(defn designated-lists
+  [u starts ^String src ^String main]
+  (when (>= (long (cxx-year (:std u))) 20)
+    (let [out (java.util.ArrayList.)
+          n-src (count src)
+          clauses (fn [^String t]
+                    ;; the top-level clauses of `{ ... }`'s text
+                    (let [n (count t)]
+                      (loop [i 1 depth 0 start 1 acc [] q nil]
+                        (if (>= i n) acc
+                            (let [c (.charAt t i)]
+                              (cond
+                                (and q (= c \\)) (recur (+ i 2) depth start acc q)
+                                q (recur (inc i) depth start acc (if (= c q) nil q))
+                                (or (= c \") (= c \')) (recur (inc i) depth start acc c)
+                                (#{\( \[ \{} c) (recur (inc i) (inc depth) start acc nil)
+                                (and (#{\) \] \}} c) (zero? depth)) (conj acc (subs t start i))
+                                (#{\) \] \}} c) (recur (inc i) (dec depth) start acc nil)
+                                (and (= c \,) (zero? depth)) (recur (inc i) depth (inc i) (conj acc (subs t start i)) nil)
+                                :else (recur (inc i) depth start acc nil)))))))]
+      (walk-nodes
+       (fn [n _]
+         (when (= "InitListExpr" (:kind n))
+           (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
+             (when (and b e (= main (get-in n [:range :begin :file])) (< (long b) (long e) n-src) (= \{ (.charAt src (int b))))
+               (let [cs (remove str/blank? (map str/trim (clauses (subs src (long b) (inc (long e))))))
+                     desig? (fn [^String c] (boolean (re-find #"^\.\s*[A-Za-z_]\w*\s*(?:=|\{)" c)))]
+                 (when (and (seq cs) (not-any? #(str/starts-with? % "[") cs) (not-any? #(str/includes? % "#") cs))
+                   (let [ds (filter desig? cs)
+                         [l c] (line-col starts (long b))]
+                     (when (and (seq ds) (some (complement desig?) cs))
+                       (.add out {:line l :col c :kind :error :rule :designator
+                                  :msg "either all initializer clauses should be designated or none of them should be"}))
+                     (when (some #(str/ends-with? % "...") ds)
+                       (.add out {:line l :col c :kind :error :rule :designator :msg "'...' not allowed in designated initializer list"})))))))))
+       (:nodes u) nil)
+      (vec (distinct out)))))
+
+(swap! checks conj designated-lists)
+
+;; A destroying operator delete ([basic.stc.dynamic.deallocation]/3, P0722): a member of C whose second parameter is
+;; std::destroying_delete_t has a first parameter of type C* ("'operator delete' takes type 'C*' as first parameter").
+
+(defn destroying-deletes
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n parent]
+                  (when (and (= "CXXMethodDecl" (:kind n)) (re-matches #"operator\s*delete" (str (:name n)))
+                             (= "CXXRecordDecl" (:kind parent)) (:name parent) (= main (get-in n [:range :begin :file])))
+                    (let [ps (vec (filter #(= "ParmVarDecl" (:kind %)) (:inner n)))]
+                      (when (and (>= (count ps) 2) (re-find #"destroying_delete_t" (str (get-in (ps 1) [:type :qualType])))
+                                 (not= (str (:name parent) "*") (str/replace (str (get-in (ps 0) [:type :qualType])) #"\s+|\bstruct\b|\bclass\b" "")))
+                        (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :delete
+                                       :msg (str "'operator delete' takes type '" (:name parent) "*' as first parameter")})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj destroying-deletes)
+
+;; [expr.prim.lambda.capture]/3: a lambda-expression whose smallest enclosing scope is no block scope (a namespace-scope variable's
+;; initializer, a parameter's type there) has no capture-default ("non-local lambda expression cannot have a capture-default"). Read
+;; off a namespace-scope variable's initializer text outside every lambda body. And [dcl.constexpr]/3-4 with [class.default.ctor]/4: a
+;; class with a virtual base has no constexpr constructor, so a constexpr variable of it is no constant ("'struct A' has virtual base
+;; classes", at the class, and at the variable).
+
+(defn nonlocal-lambdas
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        at-off! (fn [off rule msg] (let [[l c] (line-col starts (long off))] (.add out {:line l :col c :kind :error :rule rule :msg msg})))
+        classes (java.util.HashMap.)]
+    (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n)) (.put classes (:name n) n))) (:nodes u) nil)
+    ((fn top [nodes]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (top (:inner n))
+           "VarDecl"
+           (do
+             (let [b (get-in n [:loc :offset]) e (get-in n [:range :end :offset])]
+               (when (and b e (= main (get-in n [:range :begin :file])) (< (long b) (long e) n-src) (:init n))
+                 (let [t (subs src (long b) (inc (long e)))
+                       eq (.indexOf ^String t "=")]
+                   (when (pos? eq)
+                     (loop [i (inc eq) depth 0]
+                       (when (< i (count t))
+                         (let [c (.charAt t i)]
+                           (cond (= c \{) (recur (inc i) (inc depth))
+                                 (= c \}) (recur (inc i) (max 0 (dec depth)))
+                                 (and (zero? depth) (= c \[) (< (inc i) (count t)) (#{\& \=} (.charAt t (inc i)))
+                                      (re-find #"^\[\s*[&=]\s*(?:,[^\]]*)?\]" (subs t i)))
+                                 (do (at-off! (+ (long b) i) :lambda "non-local lambda expression cannot have a capture-default") (recur (inc i) depth))
+                                 :else (recur (inc i) depth)))))))))
+             (when (:constexpr n)
+               (when-let [c (.get classes (str/trim (str/replace (str (get-in n [:type :qualType])) #"^(?:const\s+)?(?:(?:struct|class)\s+)?" "")))]
+                 (when (some :isVirtual (:bases c))
+                   (when-let [o (get-in c [:loc :offset])]
+                     (when (= main (get-in c [:range :begin :file]))
+                       (at-off! o :constexpr (str "'struct " (:name c) "' has virtual base classes"))))
+                   (when-let [o (get-in n [:loc :offset])]
+                     (at-off! o :constexpr (str "call to non-'constexpr' function '" (:name c) "::" (:name c) "()'")))))))
+           nil)))
+     (:nodes u))
+    (vec (distinct out))))
+
+(swap! checks conj nonlocal-lambdas)
+
+;; [expr.prim.lambda.capture]/12 with [dcl.init.ref]/5: a structured binding naming a bit-field ([dcl.struct.bind]/5: the binding
+;; refers to the member) is not captured by reference, explicitly (`&a`, `&a = a`) or by a capture-default `&` that a use in the body
+;; captures ("cannot bind bit-field 'a' to 'int&'", at the lambda). The bindings of a class whose non-static data members the
+;; initializer's type lists, no base.
+
+(defn bitfield-captures
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        recs (java.util.HashMap.)
+        _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n)) (.put recs (:name n) n))) (:nodes u) nil)
+        names-in (fn [x] (let [acc (java.util.HashSet.)]
+                           (walk-nodes (fn [d _] (when (= "DeclRefExpr" (:kind d)) (.add acc (str (get-in d [:referencedDecl :name]))))) x nil)
+                           acc))]
+    (walk-nodes
+     (fn [f _]
+       (when (and (fn-kinds (:kind f)) (= main (get-in f [:range :begin :file])))
+         (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner f))]
+           (let [bits (java.util.HashSet.)]
+             ;; the body's statements in order: a binding of a bit-field, then the lambdas after it
+             (walk-nodes
+              (fn [n _]
+                (case (:kind n)
+                  "DecompositionDecl"
+                  (let [init (first (remove #(= "BindingDecl" (:kind %)) (:inner n)))
+                        cn (get-in init [:_t :s])
+                        r (when cn (.get recs cn))
+                        fs (when (and r (empty? (:bases r))) (filter #(= "FieldDecl" (:kind %)) (:inner r)))
+                        bs (filter #(= "BindingDecl" (:kind %)) (:inner n))]
+                    (when (and (seq fs) (= (count fs) (count bs)))
+                      (doseq [[bd fd] (map vector bs fs) :when (:isBitfield fd)] (.add bits (:name bd)))))
+                  "LambdaExpr"
+                  (when (and (pos? (.size bits)) (= main (get-in n [:range :begin :file])))
+                    (let [o (long (get-in n [:range :begin :offset]))
+                          lb (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))
+                          intro (let [t (subs src o (min n-src (+ o 300)))] (second (re-find #"^\[([^\]]*)\]" t)))
+                          caps (when intro (map str/trim (str/split intro #",")))
+                          used (when lb (names-in lb))]
+                      (doseq [nm bits]
+                        (when (or (some #(re-matches (re-pattern (str "&\\s*" nm "(?:\\s*=.*)?")) %) caps)
+                                  (and (some #(= "&" %) caps) used (.contains ^java.util.HashSet used nm)
+                                       (not (some #(re-matches (re-pattern (str nm "(?:\\s*=.*)?")) %) caps))))
+                          (let [[l c] (line-col starts o)]
+                            (.add out {:line l :col c :kind :error :rule :capture :msg (str "cannot bind bit-field '" nm "' to 'int&'")}))))))
+                  nil))
+              (:inner b) nil)))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj bitfield-captures)
 
 ;; Prospective destructors (C++20, [class.dtor]/4, P0848): of a class's prospective destructors with constraints the check can
 ;; evaluate (true, false, !, &&, || and parentheses), the destructor is the one whose constraints are satisfied; two satisfied, none
@@ -5769,6 +6013,74 @@
     (vec out)))
 
 (swap! checks conj auto-template-args)
+
+;; C++26's [expr.delete]/5 (P3144): the operand of a delete-expression is no pointer to an incomplete class type ("operator 'delete'
+;; used on incomplete type", "operator 'delete []' ..."); a class completed only after the expression is incomplete there.
+
+(defn delete-incomplete
+  [u starts ^String src ^String main]
+  (when (re-find #"(?:26|2c)$" (str (:std u)))
+    (let [out (java.util.ArrayList.)
+          defs (java.util.HashMap.)
+          _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n) (= main (get-in n [:range :begin :file])))
+                                    (when-let [o (get-in n [:range :begin :offset])]
+                                      (.put defs (:name n) (min (long o) (long (or (.get defs (:name n)) Long/MAX_VALUE)))))))
+                        (:nodes u) nil)
+          declared (java.util.HashSet.)
+          _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n)) (.add declared (:name n)))) (:nodes u) nil)]
+      (walk-nodes (fn [n _]
+                    (when (and (= "CXXDeleteExpr" (:kind n)) (= main (get-in n [:range :begin :file])))
+                      (let [x (first (:inner n))
+                            ty (get-in x [:_ent :ty])
+                            cn (when (and (= "DeclRefExpr" (:kind x)) (= :p (:t ty)) (= :n (get-in ty [:of :t]))) (get-in ty [:of :s]))
+                            o (get-in n [:range :begin :offset])]
+                        (when (and cn o (.contains declared cn) (> (long (or (.get defs cn) Long/MAX_VALUE)) (long o)))
+                          (let [[l c] (line-col starts (long o))
+                                arr (re-find #"^delete\s*\[" (subs src (long o) (min (count src) (+ (long o) 12))))]
+                            (.add out {:line l :col c :kind :error :rule :delete
+                                       :msg (str "operator 'delete" (when arr " []") "' used on incomplete type")}))))))
+                  (:nodes u) nil)
+      (vec out))))
+
+(swap! checks conj delete-incomplete)
+
+;; [stmt.pre]/1: an init-statement is an expression-statement, a simple-declaration or an alias-declaration, not a using-declaration
+;; or a using-directive ("expected primary-expression before 'using'", at it).
+
+(defn using-init-statements
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (#{"IfStmt" "SwitchStmt" "ForStmt" "CXXForRangeStmt"} (:kind n))
+                    (let [i (first (:inner n))]
+                      (when (and (= "DeclStmt" (:kind i)) (some #(#{"UsingDecl" "UsingDirectiveDecl"} (:kind %)) (:inner i))
+                                 (or (#{"ForStmt" "CXXForRangeStmt"} (:kind n)) (:hasInit n)))
+                        (when-let [o (when (= main (get-in i [:range :begin :file])) (get-in i [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :syntax :msg "expected primary-expression before 'using'"})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj using-init-statements)
+
+;; [dcl.attr.grammar]/4 with [dcl.attr.assume]/1: an assume attribute followed by `...` is a pack expansion of it, which the attribute
+;; does not allow (an attribute-token's own rule): "pack expansion of 'assume' attribute" (its argument with a pack), "expansion pattern
+;; '(1 > 0)' contains no parameter packs" (without). Read off the main file's text, comments and literals aside.
+
+(defn assume-expansions
+  [u starts ^String src ^String main]
+  (let [clean (-> src (str/replace #"(?s)/\*.*?\*/" (fn [m] (str/replace m #"[^\n]" " "))) (str/replace #"//[^\n]*" (fn [m] (str/replace m #"." " ")))
+                  (str/replace #"\"(?:\\.|[^\"\\\n])*\"" (fn [m] (str/replace m #"." " "))))
+        m (re-matcher #"\[\[\s*(?:(?:__)?gnu(?:__)?\s*::\s*)?(?:__)?assume(?:__)?\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*\.\.\.\s*\]\]" clean)]
+    (loop [acc []]
+      (if (.find m)
+        (let [[l c] (line-col starts (long (.start m)))]
+          (recur (conj acc {:line l :col c :kind :error :rule :attribute
+                            :msg (if (re-find #"[A-Za-z_]" (.group m 1)) "pack expansion of 'assume' attribute"
+                                     (str "expansion pattern '(" (str/trim (.group m 1)) ")' contains no parameter packs"))})))
+        acc))))
+
+(swap! checks conj assume-expansions)
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
