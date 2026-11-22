@@ -186,6 +186,11 @@
   declaration after its declarator, so its body names it (a recursive call), which the parser declares after the body."
   #{})
 
+(def ^:dynamic *fn-start*
+  "cpp-read (2026-11-22): the offset of the declaration whose function body is parsed (nil outside one): an error already given in
+  it holds back 'does not name a type' there, a declaration's failure's cascade (template/crash35.C)."
+  nil)
+
 (def ^:dynamic *this-ok*
   "cpp-read (2026-11-22): the function whose body is parsed, for `this` ([expr.prim.this]/2-3): :member a non-static member
   function's (or an out-of-class member's), :static a static member function's, :nonmember another function's; nil outside a
@@ -637,7 +642,10 @@
               ;; cpp-read (2026-11-22): [temp.arg]/1, an argument's kind is its parameter's: a type-id for a non-type parameter, or
               ;; a literal or a variable for a type parameter, of a class or alias template: GCC's "type/value mismatch at argument
               ;; N in template parameter list for 'X'", at the argument
-              _ (when (and tmpl (type-ent? tmpl) (seq (:tps tmpl)) (not (skim? p)) (main-tok? p b))
+              _ (when (and tmpl (type-ent? tmpl) (seq (:tps tmpl)) (not (skim? p)) (main-tok? p b)
+                           ;; (not the class being defined, its injected-class-name's parameters, nsdmi-defer5.C)
+                           (not (:inj tmpl)) (not (:inj-full tmpl))
+                           (not-any? #(= (:name tmpl) (:name (:ent %))) (stv p CLS)))
                   (let [tps (vec (:tps tmpl)) i (count out)
                         pi (first (keep-indexed (fn [j t] (when (:isParameterPack t) j)) tps))
                         tp (if (and pi (>= i (long pi))) (tps pi) (get tps i))
@@ -3161,7 +3169,8 @@
                   ;; name after it ([dcl.type.simple]/1 with [basic.lookup.unqual]): GCC's "'B' does not name a type", at the name;
                   ;; the declaration taken)
                   (let [bad (and *full-headers* (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (not (:args lp))
-                                 (main-tok? p save) (nil? (lookup (scope p) (:s lp))) (not (declared-in-main? p (:s lp))))]
+                                 (main-tok? p save) (nil? (lookup (scope p) (:s lp))) (not (declared-in-main? p (:s lp)))
+                                 (not (and *fn-start* (some (fn [x] (>= (long (first x)) (long *fn-start*))) (stv p DIAGS)))))]
                     (when bad (soft-diag! p save (str "'" (:s lp) "' does not name a type")))
                     ;; (:undeclared-type: in a block GCC reads the statement as an expression, its declarator declaring nothing,
                     ;; so a later use of the name is undeclared too: ext/builtin11.C)
@@ -4364,6 +4373,10 @@
                        [(.get ^HashMap (sema/info (:ent (class-ctx p))) :id) smk])
                   e1 (if (or pure dflt del) (last-ix p) ev)
                   body? (or (is? p "{") (is? p "try") (and (is? p ":") (not pure) (not dflt) (not del)))
+                  ;; (cpp-read, 2026-11-22: [dcl.fct.default]/4, a friend declaration specifying a default argument is a definition:
+                  ;; GCC's "friend declaration ... specifies default arguments and isn't a definition", at the name)
+                  _ (when (and (:friend ds) (not body?) (not (skim? p)) (main-tok? p ni) (some #(= "c" (:init %)) (:params fs)))
+                      (soft-diag! p ni (str "friend declaration of '" nn "' specifies default arguments and isn't a definition")))
                   cls (class-of-qualifier p qn)
                   ;; (cpp-read, 2026-11-22: [class.ctor.general]/1 with [temp.res.general]/?, a constructor's declarator-id `X::X`
                   ;; whose X is a class template's member typedef (a dependent type, `typedef typename T::X X;`), no class it
@@ -4412,7 +4425,8 @@
                                                                     (= ctx :member) (if (= "static" (:storage ds)) :static :member)
                                                                     (:q qn) :member
                                                                     :else :nonmember)
-                                                    *fn-names* (if nm (conj *fn-names* nm) *fn-names*)]
+                                                    *fn-names* (if nm (conj *fn-names* nm) *fn-names*)
+                                                    *fn-start* (.-o ^T (tok-at p (long (:b ds))))]
                                             (fn-body p (:names fs) cls ctor (:types fs))))
                                         (finally (st! p RET old)))))
                   _ (when (and ctor body? (not (skim? p)))
