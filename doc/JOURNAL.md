@@ -17154,6 +17154,81 @@ pr69056 as next recorded them). Cells against next's record: C++ read 5,589 / 31
 3,885 / 0 / 10; completeness 95.81 -> 96.14, independence 95.24 -> 95.40 (the earlier entry's 94.84 -> 95.00 was against the first
 merge's tree). reap, crops-score (--record, --judge --strict) and records-check: 0 problems.
 
+## 2026-11-22: py-capi-1122, round 1: 102 of test_capi's 169 :capi-port methods pass (the C API natives)
+
+The burst's py-capi stream (Python eval's deferred :capi-port 939 and :testcapi 859; the main session's brief), branch py-capi-1122
+from mac/next 99b2c942a with mac/py-eval-1122 (9a2b7842a, P1) merged first: P1's branch carries C API natives of test_capi's
+test_run and test_file and its runtime, so this work builds on them and runs on their executable
+(.tmp/gate-exe/b2a5b50d48192fabce24, go/arbace/py the same as 9a2b7842a's; go/arbace/pyctypes is a lazy package interpreted
+from the checkout, edited as Go in bin/pyi runtime print's tree and read back by repr-go read, no build).
+- Found: _testcapi is built by ci into pyi's C world already (all 38 parts since queue 274b, _testbuffer since 456); the record
+  (the records night, 11-19) predates PyConfig_Get (830 of :capi-port's 939 rows are test_traceback, test_compile, test_dis,
+  test_marshal and test_code failing to import at requires_debug_ranges' config_get, given since n-py-eval) and the
+  _testinternalcapi stand-in (queue 465), so the record overstates both classes; P1's next record measures them.
+- Before-run on that head: bin/pyi check --only test_capi (PYI_RUNNER=python3; 35 min): test_capi 746 of 1,328 pass,
+  :capi-port 169, :testinternalcapi 206, :specializing 89, :testcapi-behaviour 23, failing 25.
+- The natives (doc/python/PYTHON-SURVEY.md, "As built: py-capi-1122"): mapping and dict argument checks and messages, the object
+  protocol's Repr/Str/ASCII/Bytes, bytes and bytearray concat, repr and sizes, unicode's ensure_unicode and code-point search
+  (pyi's own str.count counts a lone surrogate of a pair twice; the natives do not use it), wide characters, WriteChar,
+  imports (pyi's magic number, AddModuleObject, Import, ImportModuleLevel, frozen modules), PEP 757's PyLong_Export and
+  PyLongWriter, PyFrame_New, weak references over proxies, the complex natives with the world's errno, PyObject_Print,
+  PyStructSequence_NewType, PyConfig_Set's sys attributes, Py_BuildValue's O&/D/error walk, and test_misc's small ones; a new
+  file go/arbace/pyctypes/capi_tail.ae registered last; a list mirror whose C slots are unchanged keeps Go's value.
+- Proof: bin/pyi check --only of the 188 methods that did not pass (the six out-of-memory crashes left out: the runs' ulimit
+  -v 8 GiB; they pass in the record and passed again in this selection), 129 s: 102 of the 169 :capi-port methods pass, the 21
+  failing are the before-run's (test_run's ten and test_number's three fail only in a whole-module run, P1's area; three
+  subinterpreter and thread-state tests) but test_misc's Test_testcapi.test_weakref_capi, a segmentation fault now that
+  PyWeakref_GetObject exists (the macro PyWeakref_GET_OBJECT reads the weak reference's layout): named in :capi-port's :tests.
+  Controls 1-3 failing as they must. :capi-port's :tests keep the 68 names that pass now: the record still holds their old
+  rows, P1's next record makes them stale.
+- Not done here (decisions or other streams): :testcapi's rows that name _testinternalcapi (in the record about 757 of its
+  859: test_peepholer, test_embed's InitConfigTests, test_context's HamtTest, test_time's TestCPyTime, test_codecs'
+  LocaleCodecTest, test_type_cache, test_interpreters, ...) belong to the user's _testinternalcapi decision, which the counting2
+  stream makes n/a; whether they follow it is the user's (the reclassification was not made here). The record's :testcapi
+  "ndarray object required" rows (test_buffer, 75) predate queue 456's _testbuffer.
+Light: no gate; the executable b2a5b50d4819, the tools' host stage 0.
+
+## 2026-11-22: py-capi-1122, round 2: the C world's extension modules through the import system; 27 more of test_capi's natives
+
+The user's decision of 2026-11-22 (relayed by the coordinator): Python's :extension-modules are built, C extension modules
+loaded through ci's C world. Branch py-capi-1122 (round 1: 403cdaa4d).
+- The import system (doc/python/PYTHON-SURVEY.md, "py-capi-1122, round 2"): _imp.extension_suffixes() ['.arbace-314.so'],
+  create_dynamic and exec_dynamic delegated to go/arbace/pyctypes' loader (core go/arbace/py/builtins_capi_api.ae:
+  SetDynamicLoader), an extension file an export table of the world's PyInit_ functions (tools/pyi/lib-dynload, on sys.path
+  after the stdlib by bin/pyi), single-phase and multi-phase loading as Python/importdl.c, import.c and moduleobject.c
+  (slots checked, Py_mod_create, the unreported exceptions chained, an uninitialized definition refused, PyState_*). CPython
+  3.14.10's Modules/_testsinglephase.c and _testmultiphase.c (with its clinic header) built into the world: lib.conf, key
+  ba0de8fa, 27 min 48 s on the P1 executable b2a5b50d4819 in a scratch worktree at bab3c7283 whose arbace/core_proxy.ae was
+  9a2b7842a's (next's b4ab3ebfc calls Compiler$Dyn/hideMethod, which no executable here has; the builder's key does not
+  read core_proxy.ae, and `bin/pyi-clib key ctypestest` on this branch gives the same ba0de8fa). The empty built-in
+  _testmultiphase of PY6b removed (the user's decision on PY6b superseded by this one): the module is the world's.
+- More natives (pyctypes; the core's new ExtWriteUnraisableMsg, ExtSetSysFlag, ExtSetCPUCount): PyErr_SetString, SetObject
+  and Restore as errors.c's, the unraisable reports' err_msg None, PyUnicode_FromFormatV ported whole, PyErr_Format and
+  FormatUnraisable on it, PyUnstable_Exc_PrepReraiseStar, PyErr_SetExcInfo and SetHandledException, PyConfig_Set of
+  sys.flags' members, int_max_str_digits and cpu_count, the allocator domains, PyInterpreterState_Get/GetDict,
+  PyUnstable_AtExit, PyGILState_GetThisThreadState, the code extra, _PyObject_NewVar, a set mirror for PySet_GET_SIZE,
+  __ipow__'s optional modulo, Py_AddPendingCall (run when C returns to Python), PyNamespace_New.
+- An executable of this tree (2d8f9f6b9, the core's last change) is queued under the heavy lock in a clean worktree
+  (.tmp/worktrees/py-capi-build); every proof below runs the P1 executable with go/arbace/py interpreted from the
+  checkout (bin/pyi's runtime_from_source), the slow path the coordinator allowed until 521's compiled worlds land.
+- Proofs (`bin/pyi check --only`, PYI_RUNNER=python3, controls 1-3 failing as they must): the round's 103 methods
+  (test_capi's 28, :extension-modules' 75): 115 of 144 pass, 74 now pass against the record; then test_importlib whole
+  (1,383 methods with the controls' subjects): 1,276 pass, 106 classed, 48 now pass, one regression,
+  NonModuleExtensionTests.test_nonmodule_cases (its child loads _testmultiphase_nonmodule*, whose create slot calls
+  _PyNamespace_New), fixed by PyNamespace_New and passing by unittest, with test_bad_modules, test_try_registration and
+  TestPendingCalls (test_max_pending's not-main-only subtest skips on the _testinternalcapi stand-in). test_import whole was
+  stopped: its child processes start pyi on the interpreted runtime (90 s each) past the test timeout; its rows of the
+  round's list ran (test_create_dynamic_null passes; its single-phase tests skip on check_impl_detail(), CPython only).
+- Moved against the record (every method a run of this branch passes that the record does not): :capi-port 85,
+  :testcapi 47 (test_capi's modules that import since queue 465's stand-in), :extension-modules 50 (test_importlib 48,
+  test_import 1, test_ctypes 1). New deferred class :extension-subinterp-check (5): an isolated subinterpreter's
+  multi-interpreter check before loading an extension (_imp._override_multi_interp_extensions_check is a stub); before
+  :extension-modules in the file so the records night's rows of those names stay classed.
+- Coordination: the coordinator's message on the C world's speed (521's compiled worlds in goi's table): this branch's world
+  (_testcapi, _testsinglephase, _testmultiphase) registers the same way once 521 lands; nothing recorded here (P1 owns the
+  Lib/test record).
+Light: no gate; reap, crops-score and records-check before the push.
+
 ## 2026-11-22: hs-r7-1122: Haskell's eval programs not own, seventh round (Typeable's kinds, impredicativity, quasi-quotes, five packages own)
 
 Branch `hs-r7-1122` from mac/next `94dbc03af` (which holds hs-r6-1122 `6f2af94ea`), by an agent of the main host (the coordinator's
@@ -18499,3 +18574,316 @@ body-less friend declaration into the namespace as a hidden function (rejected: 
 scope would stay hidden from ordinary lookup) against keeping it on its class and declaring it on demand (taken); `:constexpr` on
 global variables in the code generator's mode (rejected: global-init's folding and three more readers would change) against a key of
 the evaluator's alone (`:cg-constexpr`, taken).
+## 2026-11-22: cpp-diag-a round 1: coroutines, explicit object parameters, __builtin_source_location in Arbace's own C++ front end
+
+The burst's stream cpp-diag-a (branch `cpp-diag-a-1122` from next `171f82078`; the directories gxx-dg/cpp2a, cpp23, cpp26, concepts
+and coroutines of C++'s dg check; queue 518 and cpp-diag-b hold the others): files of those directories that fail their own dg-error
+lines on Arbace's own front end (`bin/repr-cpp dg --front native`, test/cpp/check-dg-own-linux-amd64.edn), grouped by expected
+message, each rule written from the C++ standard (N4950 and the C++26 draft) with GCC 15.2's wording read off the tests' dg-error
+lines; no GCC code read. New checks appended to arbace/repr/cpp/diag.ae (no shared function edited; `checks` gains them by `swap!`):
+
+- `coroutine-rules`: [expr.await]/2 (no await or yield expression outside a function body, in a handler, or in sizeof/decltype's
+  operand), [dcl.spec.auto.general]/4 (no coroutine with a deduced return type, functions and lambdas without a trailing return type),
+  no return statement in a coroutine, and [dcl.fct.def.coroutine]/3-/12's promise interface (initial_suspend, final_suspend,
+  get_return_object, unhandled_exception unless -fno-exceptions, return_void or return_value for each co_return, yield_value for each
+  co_yield, not both return_value and return_void), judged when the promise class is resolved (coroutine_traits' explicit
+  specialization for R alone, else R::promise_type; no bases, no using-declaration, no member function, no template, no partial
+  specialization of coroutine_traits in the unit); a constructor's, destructor's, main's, constexpr or varargs function's co_ operator
+  left to the existing `coroutines`;
+- `coroutine-handle-members`: GCC's coroutine interface with a std::coroutine_handle the main file declares: coroutine_handle<void>'s
+  address a single non-static member function, the primary's from_address a single static one (coroutines/pr105475*.C);
+- `explicit-object-params`, `xobj-overloads` (C++23, P0847R7): [dcl.fct]/6 (first parameter only, not in a requires-expression, a
+  function type or a non-member function, no default argument, no pack), static and virtual xobj functions, cv- and ref-qualifiers,
+  overriding a base's virtual function, override/final on one that overrides nothing, destructors, mutable and static lambdas, `this`
+  in its body; [basic.scope.scope]/4's corresponding object parameters for an xobj function against a static or implicit object one;
+- `builtin-source-location`: std::source_location and its __impl as __builtin_source_location needs them (the tests' messages state
+  the requirement; the GCC manual is silent on it).
+
+Proof: `bin/repr-cpp dg --corpus dg-error --front native --only` the 127 files of the whole corpus whose source has a co_ operator, an
+explicit object parameter or __builtin_source_location, with the control pair DRs/dr2082.C and DRs/dr1423.C, `--record` (r1, 129
+files, 851 s): own pass 90; 52 files fail -> pass (coroutines 28, cpp23 13, cpp2a 11), no recorded pass lost, no row outside the
+stream's directories changed, the control failing as it must. Three regressions found first on the coroutines' own passes
+(co-*-syntax-05-constexpr*.C: the return-statement rule on a constexpr function) were fixed before the record run.
+
+Scores: C++ read 5,786 / 0 / 532 -> 5,793 / 0 / 528; independence 0.957800 -> 0.958600 (the tool's mean of its rounded stages; the read
+stage 0.799 -> 0.803, 1,898 of 4,387 rows own; floored 95), completeness 0.972210 -> 0.972378 (floored 97). Alternatives: the parser
+for the explicit object rules (its soft diagnostics would need the class context; the tree has every fact), the code generator's Sema
+for the promise interface (its overload resolution not needed for a missing member).
+
+## 2026-11-22: cpp-diag-a round 2: constinit and consteval, immediate functions, constexpr bodies before C++23, later standards' pedwarns
+
+The stream's second round (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a"), new checks appended to arbace/repr/cpp/diag.ae, no shared
+function edited: `constinit-consteval-specs` ([dcl.constinit]/1, [dcl.constexpr]/1-2, [dcl.spec.general]/2, [dcl.typedef]/1: where
+constinit and consteval may not appear, read off the declarations' specifiers), `immediate-addresses` ([expr.const]/16-18, P2564:
+an immediate function's address taken, or an immediate invocation reading a variable not usable in constant expressions, outside an
+immediate function context and outside templates, lambdas and abbreviated templates), `constexpr-pre23-bodies` ([dcl.constexpr]/3 of
+C++11 to C++20: static and thread_local variables and goto before C++23, try-blocks and function-try-blocks before C++20 as GCC's
+pedwarns, C++11's function-try-block bodies), `version-pedwarns` (P2324's label at the end of a compound statement, P2360's
+alias-declaration as an init-statement, P0849's auto(x), P0428's lambda templates, under -pedantic-errors), `lambda-specifiers`
+(P1169: mutable with static, a static lambda with a capture), `subscript-arity` ([over.sub]/1 before C++23).
+
+Proof: the 430 files of the whole corpus whose source names consteval or constinit, a constexpr function with static, goto or try, an
+operator[], a lambda template, auto(x), an alias init-statement, a label before a closing brace or a static lambda, with the control
+pair, `bin/repr-cpp dg --corpus dg-error --front native --only ... --record` (r2, 432 files, 999 s): own pass 185, no recorded pass
+lost, the control failing as it must; 20 files of the stream's directories fail -> pass (cpp2a 15, cpp23 5). Nine rows of other
+directories the run changed were put back to next's (the other streams' to record): of them cpp0x/constexpr-ctor10.C,
+cpp1y/lambda-generic-77914.C and parse/crash72.C pass on these rules.
+
+Scores: C++ independence 0.958600 -> 0.959000 (floored 95), completeness 0.972378 -> 0.972536 (floored 97).
+
+## 2026-11-22: cpp-diag-a round 3: comparisons, concepts, declarations, coroutines' awaiters, P2564's escalation, name-independent declarations
+
+The stream's last round (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a", its rules, shared functions and checks): new checks in
+arbace/repr/cpp/diag.ae for defaulted comparisons and the built-in three-way comparison, concept declarations, concept-ids and
+placeholders, prospective destructors, friend class templates' constraints, class-scope using-declarations, designated initializers,
+destroying delete, non-local lambdas, bit-field bindings, C++26's delete of an incomplete type and name-independent declarations,
+assume's pack expansion; the coroutine check's awaiter and allocation rules, P2564's escalation of constexpr function templates;
+shared functions touched: `redefinitions` (a block-scope automatic `_`), parse.ae's `parse-if` (if consteval's else branch).
+
+Proof: r5, the 900 files the round's rules reach (the stream's directories' own passes among them), in chunks of 150 (`--record` each,
+GOMEMLIMIT 2800-4000MiB: at the tool's 1500MiB the first attempt, r3, spent over three hours in the collector and was stopped, its
+record restored); five chunks run (750 files), the sixth (148 files, 11 of the stream's) stopped at the coordinator's consolidation and
+left unrecorded. 67 files of the stream's directories fail -> pass, none lost; other directories' rows put back to next's. A false
+positive found in chunk 01 (constrained-bindings on `template<...> auto [`, `mutable auto [`) fixed by requiring a concept's name;
+no row of the stream's directories had it (its chunks scanned).
+
+Scores: C++ read 5,793 / 0 / 528 (after round 2: 5,797 / 0 / 524) -> 5,805 / 0 / 516; independence 0.959000 -> 0.960000 (floored 96; the
+stream's start 0.957800, floored 95), completeness 0.972536 -> 0.972852 (floored 97). The stream's total: 139 files to own pass.
+## 2026-11-22: py-capi-1122, merge of mac/next (8395e0b38): P1's subinterpreter fix kept beside the pending calls
+
+The coordinator's request: merge mac/next, which goes past the 9a2b7842a this branch had merged (3ee81c30f: pyctypes ends the
+subinterpreters a C entry made and left when the outermost entry leaves, and adds PyGILState_GetThisThreadState; bbea63978: P1's
+new Lib/test eval record), keeping both sides, and prove test_capi's moved methods again on the merged tree.
+- Conflicts: go/arbace/pyctypes.ae and go/arbace/pyctypes/world.ae resolved on the printed Go (`bin/pyi runtime print`, the
+  package read back): world.go is next's, its capiLeave ending the leaked subinterpreters (endLeakedSubs) and then releasing the
+  unowned proxies, with this branch's drain of Py_AddPendingCall's queue after them (runPendingCalls, when C has returned to Python);
+  the package file this branch's :files with next's init order merged (liveSubs beside interpDicts, ...). PyGILState_GetThisThreadState
+  was defined on both sides: P1's (capi_port.go, PyThreadState_Get's native) kept, this branch's tailTable entry removed. doc/JOURNAL.md
+  and the survey keep both sides' entries (the py-design merge paragraph where next moved it); the records taken from next and
+  re-recorded.
+- Proof (`PYI_RUNNER=python3 bin/pyi check --only`, the gate executable b2a5b50d4 as before, the checkout's py, ci and crt interpreted
+  by goi since next's ci and crt differ from it too; 15 min): the 132 test_capi methods moved by rounds 1 and 2 (.tmp/only-merge.txt):
+  130 pass, 0 regressions against the record; the three controls failed as they must. Two not passing: test_unicode's
+  test_from_format crashed with "out of memory" in the first driver (6.5 GB in use under the 8 GiB `ulimit -v`, the driver 470 s into
+  the module with three packages interpreted; it passed at round 2 with py alone interpreted), run again alone below; and
+  TestPendingCalls.test_max_pending, which round 2 counted as moved wrongly: its 'main-only' subtest passes, its 'not main-only' one
+  skips for _testinternalcapi.pending_threadfunc, and a skipped subtest leaves the method without a verdict (not-run, unittest's own
+  rule), so it is listed in :testinternalcapi-absent's :tests (n/a, the user's of 2026-11-22), as its record row already is by
+  verdict; the moved :testcapi count is one less (46, not 47).
+- The two run again alone (.tmp/only-merge2.txt, 9 min): test_from_format passes (a fresh driver, under the same limit),
+  test_max_pending classed (:testinternalcapi-absent); 0 failing, the three controls failed as they must. So 131 of the 132 pass on the
+  merged tree, the other n/a. A whole run's driver of test_capi with py, ci and crt interpreted comes near 8 GiB; the record's runs
+  are on the compiled executable (P1's next whole run, which records the eval rows; nothing recorded here).
+- reap --record, crops-score --record, --judge --strict and records-check: 0 problems; Python completeness 0.9794 as next's
+  (the rows move between classes only, against P1's record: :extension-subinterp-check 5 from :extension-modules, test_weakref_capi
+  to :capi-port by this branch's :tests).
+Light: no gate.
+
+
+## 2026-11-22: py-mods-1122, round 1: the C OrderedDict, __main__'s spec, interruptible writes, SIG_DFL, str's ASCII paths, the runner's PSS
+
+Scope (the burst's Python eval brief): `:goi-liveness-fallthrough`, `:c-modules-deferred`, `:multiprocessing`,
+`:multiprocessing-children`, `:regrtest-children`, `:io-c-checks`, `:goi-stub-table`, `:ordered-dict-c`, `:host-memory`,
+`:runner-limits`. Found on starting: P1 (py-eval-1122) had already made syslog, xxlimited/xxlimited_35 and the standard
+streams' TextIOWrapper registration (regrtest's children); this stream's own versions of the first and the last were dropped
+and P1's branch merged first (10df0e352) so that the runtime work builds on it. `:goi-liveness-fallthrough` and
+`:goi-stub-table` are fixed in goi since cfd69a6d2 and a2606432e, and `:c-modules-deferred`'s _testclinic, _symtable,
+_sysconfig and _heapq rows have their modules: all wait for P1's whole record (running on b2a5b50d48192fabce24, 9a2b7842a).
+
+Made, in go/arbace/py (printed by `bin/pyi runtime print`, read back for go/arbace/py alone), from CPython 3.14.10's sources:
+- `builtins_odict.go`: Objects/odictobject.c's OrderedDict as _collections.OrderedDict (collections takes it, as CPython's):
+  the dict's entries and a linked list of nodes (a node found through the dict's lookup, by the entry's key object: CPython's
+  od_fast_nodes), od_state moved by every change of the list, odict_iterator over keys, values, items and reversed tracking
+  the current key ("OrderedDict mutated during iteration", "OrderedDict changed size during iteration", a key the dict lost a
+  KeyError), __eq__ as dict's then _odict_keys_equal's node walk with its state checks (issue119004), copy()'s state check
+  (gh-148660), setdefault, pop, popitem, move_to_end (the dict's entry moved too, so Go's readers of the entries see the
+  list's order), update/__init__ as mutablemapping_update, __or__/__ror__/__ior__, __reduce__, __sizeof__, __dict__, the views
+  odict_keys/odict_values/odict_items over dict's; dict's own methods on an OrderedDict change the entries alone, as
+  CPython's (test_dict_delitem's KeyError from repr). A subclass's __init__ and | ask the instance (class.go).
+- sys.getsizeof: a dict's size (_PyDict_SizeOf's layout: 48, the GC header, the keys object), a weak reference's, a heap
+  type's instance's (16, 8 a slot, the managed __dict__/__weakref__ pre-header, the GC header), an OrderedDict's.
+- `execMain` (interp.go): the main module's namespace as pymain makes it (add_main_module's __name__, __doc__, __package__,
+  __loader__ BuiltinImporter, __spec__ None; a file's __file__, __cached__ None and SourceFileLoader): a script run by
+  `bin/pyi python FILE` had no __spec__, so multiprocessing's spawn failed ("module '__main__' has no attribute '__spec__'",
+  test_multiprocessing_main_handling's spawn scripts).
+- os.write to a blocking descriptor under a Python signal handler waits interruptibly (poll with the wake pipe, each write
+  non-blocking for its call): the handler runs and its exception ends the write, as write(2) without SA_RESTART
+  (test_io's SignalsTest.test_interrupted_write_*, which hung: idle past 90 s); os.readinto waits interruptibly as os.read
+  does (test_file_eintr's test_readall: _pyio's FileIO.readall reads by readinto) and takes any writable buffer (an array).
+- signal.signal(n, SIG_DFL) sets the process's default action also for a signal ignored at the start (Go's Reset kept an
+  inherited SIG_IGN of SIGHUP), and a SIGHUP ignored at the start reads as SIG_IGN: a driver started with SIGHUP ignored
+  (the night's) passed it on to the children test_asyncio's test_send_signal sends SIGHUP (they never ended).
+- BlockingIOError's third argument, a number, is characters_written (oserror_parse_args), not a filename (test_io's
+  nonblocking pipe writes); sys.flags.utf8_mode follows -X utf8[=0|1] and PYTHONUTF8 for 3.14 too, and
+  warn_default_encoding -X warn_default_encoding and PYTHONWARNDEFAULTENCODING (test_io's test_text_encoding,
+  test_check_encoding_warning).
+- str.find/rfind/index/rindex, count, startswith and endswith of an ASCII str by its bytes: `Runes()` copied an ASCII str
+  whole on every call, so `s.find(x, start)` in a loop was quadratic (email's _parseparam took 40 s for 20,000 parameters;
+  test_email's test_get_param_linear_complexity and test_long_lines past the 300 s limit).
+- tools/pyi/libtest_all.py: the memory cap sums each process's proportional set size (smaps_rollup's Pss), not its
+  resident size: every pyi child maps the same 360 MB of the executable's text, which the resident sizes counted once a
+  child (a spawned child's 960 MB resident were 630 MB of the host's), so spawn's manager tests passed the 8192 MB cap
+  (`:host-memory`).
+
+## 2026-11-22: py-mods-1122, round 2: os.open without the GIL, codecs.lookup's name, OrderedDict's dict a field, pyi at GOGC 100
+
+- os.open releases the GIL while it opens (a FIFO's open waits for its other end, which the test opens in another thread:
+  test_logging's test_should_not_rollover_named_pipe hung, idle past 90 s).
+- _codecs.lookup encodes the name as clinic's str converter does: a lone surrogate is a UnicodeEncodeError, not an
+  unknown encoding (_pyio's TextIOWrapper(encoding='\udcfe'), test_io's PyTextIOWrapperTest.test_constructor).
+- OrderedDict's dict is a field of ODict, not embedded: embedding gave ODict Dict's methods, Len among them, the 17th
+  method of goi's `func() int` stub family (16 slots, go/arbace/gotable.edn :stubs) when goi interprets the runtime from
+  the checkout (bin/pyi's runtime_from_source), whose warning then went to every pyi process's stderr and failed the
+  tests that read a child's stderr (test_file_eintr's worm sign, on round 1's interpreted proof).
+- bin/pyi: pyi's processes (bin/pyi run's and sys.executable's) run at GOGC 100 unless the environment sets GOGC
+  (PYI_GOGC another), not the executable's 200 (jrt's DefaultGOGC, a JVM's heap for Java programs): on b2a5b50d4819 a
+  spawned child's import of test._test_multiprocessing is 2.54 GB resident at 200, 1.86 GB at 100 (17.5 s either way;
+  an allocation loop 5% slower), so multiprocessing's children fit the runner's cap more often.
+Found, not changed here (each spawned child pays it): `import ctypes` takes 17.6 s and about 0.5 GB in every pyi process,
+goi checking and building the lazy package arbace/pyctypes from its forms (test._test_multiprocessing imports ctypes, so
+every spawn child of the multiprocessing tests waits for it); a cache of goi's checked packages, or pyctypes compiled into
+the executable, would serve them (the spawn modules' :runner-limits, :host-memory). Round 1's interpreted proof was
+stopped: goi's stub warning made its child-stderr tests fail; the proofs wait for the gate's executables at this branch's
+key (queued under bin/heavy-lock behind six jobs).
+
+## 2026-11-22: py-mods-1122, round 3: the runner's per-module limits (test/python/lib-test-limits.tsv)
+
+Proof of round 1's PSS cap and round 2's GOGC 100 on spawn's test_manager (b2a5b50d4819's compiled runtime, P1's, with
+PYI_RUNTIME=compiled; the runner python3's; `bin/pyi check --only`, controls failing as they must): 49 ok, 20 killed past
+8192 MB, 13 skipped (the record: 43 pass, 24 killed; P1's run of the same module on the same executable today: 40 ok, 29
+killed, 30 driver runs; this one 21). 6 methods move against the record (4 of `:host-memory`: WithManagerTestPool's
+test_apply, test_empty_iterable, test_wrapped_exception, WithManagerTestQueue's test_task_done; 2 of
+`:goi-liveness-fallthrough`: test_rapid_restart, test_remote), 0 regressions. The 20 left are the Barrier class's nine (five
+parties) and the Pool class's ten (a pool of four made by setUpClass, made again after every kill) and
+WithManagerTestCondition.test_notify_all: their children, each a whole pyi process of about 1.5 GB once it has imported its
+test module, pass 8 GB together where CPython's children are tens of MB.
+So the runner takes per-module limits, data: tools/pyi/libtest_all.py's read_limits reads PYI_LIB_TEST_LIMITS (bin/pyi
+passes test/python/lib-test-limits.tsv: MODULE, MEM_MB, MODULE_TIMEOUT_S, WHY), each only raising --mem-max and
+--module-timeout for its module. Listed: spawn's test_manager, test_processes (also 7200 s: 163 tests at about 30 s each,
+P1's run ended at the hour with 61 ok and 33 killed), test_misc, and concurrent_futures' test_process_pool, at 16384 MB.
+The proof of the raised cap passes 8 GB, so it is queued under bin/heavy-lock (behind the gate build of this branch's key).
+- And a test's own timeout: a row MODULE/TEST-ID<TAB>-<TAB>SECONDS raises one test's --test-timeout (the runner's
+  START line's id). test___all__'s test_all: 29 s and a pass alone on b2a5b50d4819 with a warm IR cache, but run early in
+  the check (test___all__ sorts first among the test_ modules) it compiles most of the 329 modules it imports, about 415 s
+  cold (P1's run today: past 300 s, as the record): 900 s.
+
+## 2026-11-22: py-mods-1122, round 4: the interpreted proof of rounds 1-2, and OrderedDict's three faults it found
+
+`bin/pyi check --fresh --only` (.tmp/only/a1.txt: test_ordered_dict, test_file_eintr, test_utf8_mode whole, test_fileio's
+and test_io's named rows, test_email's two) on b2a5b50d4819 with the checkout's go/arbace/py interpreted by goi (the
+gate's executables at this branch's key wait in the heavy queue), the runner python3's, controls failing as they must.
+Moved, against the record: test_file_eintr's six readall (`:io-c-checks`; all 18 of its tests pass), test_fileio's
+testErrnoOnClosedReadinto (C and Py), test_io's test_check_encoding_warning (C, Py), test_text_encoding (C, Py),
+test_nonblock_pipe_write_bigbuf and _smallbuf (C, Py) (`:io-c-checks`), CSignalsTest's and PySignalsTest's
+test_interrupted_write_buffered and _unbuffered (`:runner-limits`, they hung), test_email's
+test_get_param_linear_complexity (`:runner-limits`; 264 s interpreted). Not moved interpreted: test_interrupted_write_text
+(C, Py; idle 90 s: the 4 MB str's encode under goi outlasts the alarm, so nothing is written and the reader thread the test
+joins never returns; to be judged compiled) and test_long_lines (300 s interpreted). test_utf8_mode's children (each
+interpreted, 50 s a start) were stopped unjudged; it is in the compiled proof's list.
+test_ordered_dict: 250 ok, and three faults of the C OrderedDict, fixed here: its __eq__ called dict's comparison as
+builtins_odict.go's init captured it, nil (that file's init runs before dict.go's) -- a Go panic on every comparison;
+OrderedDict's methods got a subclass's built-in value, not the instance (callBound unwraps unless the Builtin is an
+objectDescr, as SimpleNamespace's __reduce__), so copy(), setdefault(), update() and __reduce__ of a subclass saw neither
+its class nor its __getitem__, __setitem__ and __dict__ (test_issue148660_copy_clear_in_subclass_getitem,
+test_reduce_not_too_fat): its methods are objectDescr now; fromkeys took dict's (no keywords): its own class method,
+fromkeys(iterable, value=None). divergences.edn and divergences-315.edn: :ordered-dict-c's and :io-c-checks' :why say what
+moved and what is left (finalization's, and C io's own checks that need a native _io).
+Also corrected in round 4, round 1's interruptible os.write: interruptibleWait holds for every main-thread call (the wake
+pipe is made on first use), so it toggled O_NONBLOCK on every blocking descriptor's write, a regular file's included --
+a flag of the open file description, which a pipe shared with a parent or children shares. Now only a FIFO takes it, and
+no flag is changed: after a poll that finds it writable a pipe takes PIPE_BUF bytes without blocking, so the write goes
+in chunks of at most 4096 bytes between polls (with the wake pipe, the handlers run on a signal).
+Round 4's interpreted proof (`bin/pyi check --fresh --only` .tmp/only/r4.txt, b2a5b50d4819 with the checkout's
+go/arbace/py interpreted, at 88723340c's forms; controls failing as they must): test_ordered_dict 280 ok, 11 failures, 8
+skipped; against the record 22 of `:ordered-dict-c`'s 31 move (the CPythonOrderedDict*'s issue119004 ten, issue148660 four,
+test_key_change_during_iteration two, test_iterators_pickling two, test_sizeof four, the pure class's two test_sizeof
+counted among them); left the five test_highly_nested_subclass and four test_reference_loop (finalization's). Two
+"regressions" judged: PurePythonOrderedDict{,Subclass}Tests.test_free_after_iterating (the pure class, untouched here: a
+__del__ after gc_collect, which goi's registers delay when the runtime is interpreted; they failed so on round 1's
+interpreted run too and pass in the record's compiled run) -- to be confirmed by the compiled proof. test_io: the FIFO-only
+write keeps test_nonblock_pipe_write_* and test_interrupted_write_buffered/_unbuffered (C, Py) passing; _text (C, Py) still
+idle past 90 s interpreted (the encode before the write outlasts the alarm under goi).
+
+## 2026-11-22: py-mods-1122, round 5: two quadratic paths of pyi's compile of a long line (:host-memory)
+
+test_longexp (eval of a list display of 65,580 items) and test_fstring's test_many_expressions were killed past 8192 MB.
+Measured on b2a5b50d4819 (compiled): `eval("[" + "2," * N + "]")` took 1.7 s / 0.6 GB at N=4,000, 5.3 s / 1.4 GB at 8,000,
+17 s / 3.1 GB at 16,000. Profiles (ARBACE_CPUPROFILE, ARBACE_MEMPROFILE) found two paths quadratic in a line's length:
+- arbace/repr/python/native.ae's index, a node's (line, UTF-8 column) as an index of the text, scanned from the line's start
+  for every node: now each line knows whether it holds a code point past ASCII (Src's wide), and on an ASCII line the index
+  is the line's start plus the column (the scan's own answer there). 16,000 items: 17 s -> 6.3 s (the namespace evaluated
+  from the checkout).
+- arbace/repr/python/lex.ae's stream (the reader warnings' tokens, _tokenize's) copied each token's line: N tokens of one
+  line made N copies of it (209 MB of strings at N=8,000). The last token's line text is now shared by the next token of the
+  same bounds. Its output is unchanged (lex/stream of a three-line sample from the checkout: the same tokens, one line
+  string per line). Its proof waits for the gate's executables: loaded from the checkout beside the executable's compiled
+  peg it redefines lex's deftype (a ClassCastException in peg's fill-token), so the build's compiled namespaces carry it.
+
+## 2026-11-22: py-mods-1122, round 5b: peg reloads with lex (the stale executables' parse), round 5's measure
+
+Round 5's change to arbace/repr/python/lex.ae alone broke every parse on an executable that embeds repr/python compiled
+(stage 0, the seed's, and any gate build of an older key): RT.toolSource reloads lex from the checkout, which redefines
+lex's deftype Lx under the compiled peg, whose fill-token casts to it (a ClassCastException; `bin/repr-python` runs on stage
+0). peg.ae now carries a comment at fill-token naming the dependency (a change to lex.ae comes with one to peg.ae, so the two
+reload together) and bad-single-statement?'s loop unboxed (the reload's one compiler warning, "recur arg for primitive local").
+Checked on stage 0 (target/seed) and on b2a5b50d4819: native/parse-text of a sample from this checkout gives next's answer,
+no warning. Measured on b2a5b50d4819 with repr/python evaluated from the checkout: `eval("[" + "2," * N + "]")` at N=16,000
+peaks at 0.76 GB (3.1 GB before round 5), at N=65,580 (test_longexp's) 1.2 GB in 85 s (killed past 8 GB before); compiled,
+the gate's build at this key will time it.
+
+## 2026-11-22: py-mods-1122, round 5's proof: the compile rows of :host-memory move
+
+`bin/pyi check --fresh --only` (PYI_RUNTIME=compiled, PYI_RUNNER=python3) on b2a5b50d4819's compiled runtime with this
+branch's repr/python evaluated from the checkout (c058a80c4): every target passes. :host-memory's compile rows (7):
+test_longexp LongExpText.test_longexp, test_fstring TestCase.test_many_expressions, test_code_module
+TestInteractiveConsole.test_compile_error, test_pdb PdbTestCase.test_compile_error_message, test_pyrepl
+TestMoreLines.test_compile_error_single_line, test_modulefinder ModuleFinderTest.test_extended_opargs, test_cmd_line
+CmdLineTest.test_relativedir_bug46421; and two :runner-limits rows of the same run, test_concurrent_futures.test_deadlock's
+ProcessPoolSpawnExecutorDeadlockTest.test_shutdown_deadlock_pickle and test_ssl ThreadedTests.test_recv_send. The three
+compile_error rows were never the parser's depth (pyi answers MemoryError "Parser stack overflowed" by 10,000 levels) but
+lex's stream copying the 100,002-character line for each of its 100,001 tokens. Controls of the reader: test_tokenize 132 of
+132, test_grammar 75 of 75, test_syntax 40 and 8 cpython-only, test_fstring 93 and one skipped by the test, the one failing
+test_expression_in_interactive_after_buffer_resize a 30 s subprocess timeout of `python3 -i` on this executable, which
+evaluates the reader from the checkout in every process (about 40 s): it waits for the build at this branch's key. The
+read checks on stage 0 from this checkout: lex-check samples 6 of 6 and lex-errors 62 of 62, parse-check --full samples 6
+of 6 and lex-errors 62 of 62 (4 with non-ASCII lines), their controls failing as they must. Runs in
+.tmp/repr-python/pyi/check/only-6e52ccff8b34 and only-680ec2972e63 of the py-mods worktree.
+
+## 2026-11-22: py-mods-1122, round 6: the standard streams' write_through, -u and PYTHONUNBUFFERED (:regrtest-children)
+
+test_regrtest ArgsTestCase.test_add_python_opts failed on `python -m test --fast-ci`: libregrtest's _add_ci_python_opts
+reads `sys.stdout.write_through` (to add -u), which pyi's standard streams (sys.go's textFile) did not have. pyi's stdio
+now carries pylifecycle.c's create_stdio choice: write_through is `not buffered_stdio`, true under -u (bin/pyi python
+passes it as PYI_UNBUFFERED, which the runtime reads once and removes, as PYI_IGNORE_ENV) or PYTHONUNBUFFERED (not under
+-E or -I); a write-through stream flushes every write; reconfigure(write_through=) sets it (it was only checked). The rest
+of the test's worker checks already held (-W error and -bb give ['error', 'error::BytesWarning'] and bytes_warning 2, -E
+ignore_environment 1). Checked on the runtime evaluated from the checkout (PYI_RUNTIME=checkout on b2a5b50d4819):
+`python3 -u -c` prints write_through True for stdout and stderr, False after reconfigure(write_through=False). go vet clean.
+The test, ProgramsTestCase.test_module_test (P1's run: past 8192 MB under the runner's RSS cap; the runner's PSS since
+round 1) and test_io's test_raw_file_io (C and Py: round 1's os.readinto of any writable buffer, a ctypes Structure here,
+through the WritableBytes stub) wait for the gate's build at this key.
+
+## 2026-11-22: py-mods-1122: mac/next (5cfa0570c) merged, go/arbace/py/class.ae resolved on its printed Go
+
+The merge conflicted in go/arbace/py/class.ae (40 hunks of the forms, mostly positions) and in this journal (both sides
+kept, next's first). class.ae was merged on its Go, as py-capi advised: the package printed (`bin/repr-go print`) at the
+merge base (99b2c942a and 9a2b7842a hold the same class.ae), at this branch's head (d0b49c34a: equal to the runtime tree
+the rounds edited) and at next; `git merge-file` of the three class.go merged with no conflict (this branch's
+OrderedDict slots in fixupSlots; next's delNote, trackDel and the __del__ check); the merged checkout printed by `bin/pyi
+runtime print` with the merged class.go put in, go vet clean, read back in mode :full (.tmp/bin/read-py.sh): only class.ae
+changed, and it prints back to the merged class.go byte for byte. Check (`bin/pyi check --fresh --only test_ordered_dict`,
+the runtime interpreted from the checkout on b2a5b50d4819): 22 now pass, as round 4's run; test_bool and test_getopt pass
+and the three negative controls fail as they must; the two PurePythonOrderedDict*.test_free_after_iterating rows fail as
+they did in the runs before the merge (10:40, 11:32; the record passes them compiled): the compiled run at 5ba9efb1 (c1's
+first module) answers them. Run in .tmp/repr-python/pyi/check/only-2cfe9186bcec of the py-mods worktree.
+
+## 2026-11-22: py-mods-1122: mac/next merged again (c5f2136ac, py-capi's merge), go/arbace/py.ae's file list
+
+next moved to c5f2136ac (Merge mac/py-capi-1122) while the first merge was checked; merged too. Conflicts: this journal
+(both sides kept, next's first) and go/arbace/py.ae, the package's index: its :files list (this branch's builtins_odict.go,
+py-capi's builtins_capi_api.go, py-capi's removal of builtins_testmultiphase.go, whose load line the merge had already
+dropped). Resolved to the loaded files, then the merged checkout printed (`bin/pyi runtime print`), go vet clean, read
+back in mode :full: the index rewritten by the reader (200 files, every load listed, the :init-order this branch's), no
+other form changed. The same check on the runtime interpreted from the checkout (b2a5b50d4819): test_ordered_dict 22 now
+pass, the same two PurePythonOrderedDict*.test_free_after_iterating rows failing as before either merge, the controls as
+they must. The gate's build at 5ba9efb1 (d0b49c34a, before these merges) finished at 18:13; c1 runs on it.

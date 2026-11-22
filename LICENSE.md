@@ -415,12 +415,31 @@ covers what.
   (oi's `ext_unix.ae`, above), `ExtSignal` and `ExtProc` (oi's `ext_signal.ae`'s part Java allows; "As built: OT9's fixes 6-8"),
   `ExtStrRe` and `BaOps` (oi's `ext_str_re.ae` and `ext_bigarray.ae`'s part but the file mapping):
   under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
+- The opam set's library either (test/ocaml/corpora.edn, the pin `:opam-either` of queue 534, the user's decision of
+  2026-11-22 on 528-15): the opam package either 1.0.0 (Craig Ferguson), which containers 3.18's library needs, at the
+  version opam-repository's master 5c9b817c546fcd5cb2be1cb52b08ea5c36320181 pins by checksum, fetched into `.tmp/` and read
+  in place, **not distributed** (it keeps its own license and notices), under the MIT License, as its opam file states.
 - The opam set of the OCaml crop (test/ocaml/corpora.edn, the pins `:opam-NAME`; doc/ocaml/OCAML-SURVEY.md, "As built: O7"):
   sources of ten opam packages, fetched at pinned versions into `.tmp/` and read in place by the checks, **not distributed**
   (nothing of them is in the tree; each keeps its own license and notices): sexplib0 v0.17.0 (MIT), fmt 0.11.0, astring
   0.8.5, uutf 1.0.4, cmdliner 2.1.1 and base64 3.5.2 (ISC), re 1.14.0 (LGPL-2.1-or-later with the OCaml LGPL linking
   exception), pprint 20230830 (LGPL-2.0-only with the OCaml LGPL linking exception), yojson 3.0.0 (BSD-3-Clause),
   containers 3.18 (BSD-2-Clause), as their opam files state. `test/ocaml/opam/load.ml` is Arbace's own.
+- The opam set's test libraries (test/ocaml/corpora.edn, the pins `:opam-NAME` of queue 531, the user's decision of 2026-11-22
+  on 528-15): the packages five of the set's tests need (sexplib0's sexplib0_test, re's expect, base64's test, fmt's test_fmt,
+  cmdliner's test_arg), at the versions opam-repository's master 5c9b817c546fcd5cb2be1cb52b08ea5c36320181 pins by checksum,
+  fetched into `.tmp/` and read in place, **not distributed** (each keeps its own license and notices), as their opam files
+  state: under the MIT License, Jane Street's base v0.17.3, base_quickcheck v0.17.1, bin_prot v0.17.0-1, capitalization,
+  expect_test_helpers_core, fieldslib, jane-street-headers, jst-config, parsexp, sexp_pretty, sexplib, splittable_random,
+  stdio, time_now and variantslib (v0.17.0), ocaml-compiler-libs v0.17.0, ocaml_intrinsics_kernel v0.17.3, typerep v0.17.1,
+  ppxlib_jane v0.17.4 and the rewriters ppx_assert, ppx_base, ppx_cold, ppx_compare, ppx_custom_printf,
+  ppx_disable_unused_warnings, ppx_enumerate, ppx_fields_conv, ppx_fixed_literal, ppx_hash, ppx_here,
+  ppx_ignore_instrumentation, ppx_jane, ppx_log, ppx_module_timer, ppx_optional, ppx_pipebang, ppx_sexp_message,
+  ppx_sexp_value, ppx_stable_witness, ppx_string and ppx_string_conv (v0.17.0), ppx_bench, ppx_bin_prot, ppx_inline_test,
+  ppx_let, ppx_optcomp, ppx_sexp_conv, ppx_stable, ppx_tydi, ppx_typerep_conv and ppx_variants_conv (v0.17.1),
+  ppx_globalize v0.17.2, ppx_expect v0.17.3, and ppxlib 0.39.0 (Jane Street Group, LLC and the ppxlib authors); under the
+  ISC License, alcotest 1.10.1, bos 0.3.0, fpath 0.7.3, logs 0.10.0 and rresult 0.7.0; b0 0.0.6 under the ISC License and
+  the BSD 2-Clause License (its opam file lists both); ppx_derivers 1.2.1 under the BSD 3-Clause License.
 - `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
   `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package
   `bundle` of the module `golang.org/x/crypto/x509roots/fallback`, https://go.googlesource.com/crypto
@@ -587,8 +606,10 @@ covers what.
   (all of it since queue 268, `heaptype_relative.c` and `vectorcall_limited.c` too), and since queue 269 its
   `Modules/_testcapimodule.c` (with `Modules/_testcapi_feature_macros.inc` inlined) and parts of `Modules/_testcapi/` in
   the full API's mode, and since queue 456 its `Modules/_testclinic.c` (with `Modules/clinic/_testclinic.c.h` and
-  `_testclinic_depr.c.h`), `Modules/_testclinic_limited.c` (with its clinic header) and `Modules/_testbuffer.c`,
-  compiled against its `Include/` in the limited API's mode
+  `_testclinic_depr.c.h`), `Modules/_testclinic_limited.c` (with its clinic header) and `Modules/_testbuffer.c`, and
+  since py-capi-1122 its `Modules/_testmultiphase.c` (with `Modules/clinic/_testmultiphase.c.h`) and
+  `Modules/_testsinglephase.c` (their export tables `tools/pyi/lib-dynload/*.arbace-314.so` list the files' PyInit_
+  functions), compiled against its `Include/` in the limited API's mode
   (from the release tarball test/python/corpora.edn pins, `:cpython-3.14.10`, SHA-256 `de414a57...b72032`; Copyright
   (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement, section "CPython: the PSF
   License Agreement for Python 3.14" below), built by ci's builder with the part of musl 1.2.6 it reaches (under the

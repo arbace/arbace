@@ -663,10 +663,18 @@ corpus_list() {
   echo "$base"
 }
 
+# pyi_gogc (py-mods-1122): a pyi process's collector at GOGC 100 (PYI_GOGC another; a GOGC of the environment kept), not
+# the executable's default 200 (jrt's DefaultGOGC, a heap three times the live data as a JVM keeps for a Java program): a
+# pyi process's heap then about twice its live data. Measured on the gate's executable (b2a5b50d4819): a spawned child's
+# import of test._test_multiprocessing 2.54 GB resident at 200, 1.86 GB at 100 (its 17.5 s the same), an allocation loop
+# 5% slower; so multiprocessing's tests, whose children each import their test module, pass the runner's memory cap
+# less often (:host-memory)
+pyi_gogc() { echo "${GOGC:-${PYI_GOGC:-100}}"; }
+
 pa_arbace() {
   # x509roots/ is a source root of its own: _ssl's fallback store (arbace/pyssl over arbace/x509roots/fallback/bundle,
-  # queue 209) loads its forms from there
-  ARBACE_PATH="$root:$root/x509roots" GOMEMLIMIT=${PYI_GOMEMLIMIT:-$("$root/bin/gate-policy" mem 3GiB)} GOMAXPROCS=${PYI_THREADS:-4} "$(arbace_exe)" -m arbace.python "$@"
+  # queue 209) loads its forms from there. GOGC: pyi_gogc
+  ARBACE_PATH="$root:$root/x509roots" GOGC=$(pyi_gogc) GOMEMLIMIT=${PYI_GOMEMLIMIT:-$("$root/bin/gate-policy" mem 3GiB)} GOMAXPROCS=${PYI_THREADS:-4} "$(arbace_exe)" -m arbace.python "$@"
 }
 
 cmd_scope_check() {
@@ -764,8 +772,9 @@ pytop() {
 
 # PYI_SITE (queue 205): directories, colon-separated, on sys.path after the stdlib (a site of pinned wheels, bin/pyi
 # wheels install); exported, so pyi's children (sys.executable) see the same site
-site_args=()
-[ -z "${PYI_SITE:-}" ] || site_args=(--site "$PYI_SITE")
+# py-capi-1122: tools/pyi/lib-dynload first, CPython's lib-dynload: the export tables of the C world's extension modules
+# (_testsinglephase, _testmultiphase), NAME.arbace-314.so, that _imp.create_dynamic loads
+site_args=(--site "$root/tools/pyi/lib-dynload${PYI_SITE:+:$PYI_SITE}")
 
 # the host's side of the runtime (arbace.python.run): its work directory and a run's id for its scratch
 pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$" PYI_EXECUTABLE="$root/tools/pyi/python3"; }
@@ -848,13 +857,13 @@ pyi_is_pyc() { case $1 in *.pyc) return 0 ;; esac; [[ $(head -c 4 "$1" 2>/dev/nu
 
 # python ARGS...: CPython's command line over bin/pyi run (PY6e, sys.executable: tools/pyi/python3 runs it), for
 # test.support's script_helper and subprocess's children: -c CMD, -m MOD, FILE or - (stdin), the options before them
-# taken and ignored (-I -E -s -S -B -u -b -q -O -P -R -d -v, -X OPT, -W ARG) but -E, -I, -P, -q, -X, -W and -b (-q, -E, -I: sys.flags; queue 296;
-# -W and -b: sys.warnoptions, -b sys.flags.bytes_warning, queue 328); run in the caller's
+# taken and ignored (-I -E -s -S -B -u -b -q -O -P -R -d -v, -X OPT, -W ARG) but -E, -I, -P, -q, -u, -X, -W and -b (-q, -E, -I: sys.flags; queue 296;
+# -W and -b: sys.warnoptions, -b sys.flags.bytes_warning, queue 328; -u: the standard streams' write_through); run in the caller's
 # directory, sys.path[0] as CPython's sys_path_0 (the runtime's start, queue 250): '' for -c and stdin, the working
 # directory for -m, the script's directory for FILE, none under -P or -I (safe_path, PYI_SAFE_PATH); -i (queue 289):
 # the REPL on stdin after the code, or as the run when there is none (PYI_INSPECT), as on a terminal without -i (queue 313)
 cmd_python() {
-  local code="" mod="" file="" have="" xopts="" wopts="" bwarn=0 noenv="" safe=0 inspect="" quiet="" sflags="" stdinrepl=""
+  local code="" mod="" file="" have="" xopts="" wopts="" bwarn=0 noenv="" safe=0 inspect="" quiet="" sflags="" stdinrepl="" unbuf=""
   # sys.orig_argv (queue 242): the executable and the command line as given, joined by the unit separator
   local oa="${PYI_LAUNCHER_PY:-${PYI_EXECUTABLE:-$root/tools/pyi/python3}}" oarg
   for oarg in "$@"; do oa+=$'\x1f'"$oarg"; done
@@ -884,6 +893,8 @@ cmd_python() {
         case ${o%%[cm]*} in *[EI]*) noenv=1 ;; esac
         # -P and -I: safe_path, no script or working directory put first on sys.path (queue 250)
         case ${o%%[cm]*} in *[PI]*) safe=1 ;; esac
+        # -u: the standard streams written through, write_through (PYI_UNBUFFERED; py-mods-1122)
+        case ${o%%[cm]*} in *u*) unbuf=1 ;; esac
         case $o in
           *c*) rest=${o#*c}; if [ -n "$rest" ]; then code=$rest; shift; else code=$2; shift 2; fi; have=c; break ;;
           *m*) rest=${o#*m}; if [ -n "$rest" ]; then mod=$rest; shift; else mod=$2; shift 2; fi; have=m; break ;;
@@ -986,6 +997,7 @@ PYI_PYC
   if [ -n "$wopts" ]; then export PYI_WARNOPTIONS="$wopts"; else unset PYI_WARNOPTIONS; fi
   if [ "$bwarn" -gt 0 ]; then export PYI_BYTES_WARNING=$bwarn; else unset PYI_BYTES_WARNING; fi
   if [ -n "$noenv" ]; then export PYI_IGNORE_ENV=1; else unset PYI_IGNORE_ENV; fi
+  if [ -n "$unbuf" ]; then export PYI_UNBUFFERED=1; else unset PYI_UNBUFFERED; fi
   export PYI_SAFE_PATH=$safe
   if [ -n "$sflags" ]; then export PYI_START_FLAGS=$sflags; else unset PYI_START_FLAGS; fi
   # -i (queue 289): the runtime's REPL after the main module (PYI_INSPECT=1), or as the run (repl, repl-quiet: -q); on a
@@ -1001,7 +1013,7 @@ PYI_PYC
     export PYI_EXECUTABLE="$PYI_LAUNCHER_PY" PYI_AOT_COMPILER="$PYI_LAUNCHER_COMPILER" PYI_AOT_MAIN="$src"
     exec "$PYI_LAUNCHER" "$argv0" "$@"
   fi
-  ARBACE_PATH="$root:$root/x509roots" GOMEMLIMIT=${PYI_GOMEMLIMIT:-$("$root/bin/gate-policy" mem 3GiB)} GOMAXPROCS=${PYI_THREADS:-4} \
+  ARBACE_PATH="$root:$root/x509roots" GOGC=$(pyi_gogc) GOMEMLIMIT=${PYI_GOMEMLIMIT:-$("$root/bin/gate-policy" mem 3GiB)} GOMAXPROCS=${PYI_THREADS:-4} \
     exec "$(arbace_exe)" -m arbace.python run ${dump[@]+"${dump[@]}"} --file "$src" --lib "$lib" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@"
 }
 
@@ -1662,6 +1674,7 @@ cmd_check_lib() {
       fi
       PYI_LIB_TEST_DRIVER_EXE="$drv" PYI_LIB_TEST_DRIVER_DIR="$drvdir" PYI_AOT_COMPILER="${drv:+$AOT/compiler.sh}${drvdir:+$AOT/compiler.sh}" PYI_LIB_TEST_COVER_TESTS="$ctests" \
       PYI_LIB_TEST_ONLY="${only:+$WORK/check-only.txt}" PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
+      PYI_LIB_TEST_LIMITS="${PYI_LIB_TEST_LIMITS-$root/test/python/lib-test-limits.tsv}" \
         $runner run --root "$root" --modules "$part" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
         --test-timeout "${PYI_LIB_TEST_TEST_TIMEOUT:-300}" --idle-timeout "${PYI_LIB_TEST_IDLE_TIMEOUT:-90}" --mem-max "${PYI_LIB_TEST_MEM_MAX:-8192}" --module-timeout "${PYI_LIB_TEST_TIMEOUT:-3600}" ${oracle:+--oracle "$lib"} \
         --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"

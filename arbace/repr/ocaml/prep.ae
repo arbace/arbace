@@ -357,6 +357,187 @@
       :else [:pass (str "tools/sync_stdlib_docs expands it to stdlib/" out " byte for byte, read as an interface")])))
 
 ;; ---------------------------------------------------------------------------------------------
+;; The units a package's dune build makes or preprocesses (queue 534, the user's 528-15 decision: yojson's and containers' library
+;; rows), for the suite corpus's staging (bin/lib/oi/suite.bash's suite_stage, `build-into`): a unit is given the text dune's build
+;; compiles, by one of these rules of its directory's dune file, each a port of the package's own program held to its SHA-256:
+;;   mucppo         `(rule (targets T) (deps (:out S) ...) (action (run mucppo/mucppo.exe %{out} -o %{targets})))` (yojson's lib/):
+;;                  cppo-run above;
+;;   containers-cpp `(library ... (preprocess (action (run %{project_root}/src/core/cpp/cpp.exe %{input-file}))) (flags ...))`
+;;                  (containers' src/core/ and src/monomorphic/): containers 3.18's src/core/cpp/cpp.ml, its `[@@@ifge X.Y]` blocks
+;;                  against OCaml 5.5, and the stanza's `-open M` flags as their initial `open! M` (ocamlc's -open opens M before
+;;                  the unit as Typemod.initial_env's open_implicit_module does, an open with override, which no program-wide flag
+;;                  of the row can give one library's units alone), a line directive after it so that every position is the file's;
+;;   containers-gen `(rule (targets containers_domain.ml) (action (run ./gen.exe)))` (containers' src/domain/): gen.ml's choice,
+;;                  OCaml >= 5.0's text (the literal domain_5 of gen.ml itself);
+;;   either-which   `(rule (with-stdout-to selected (run %{ocaml} %{dep:which.ml} %{ocaml_version})))` and
+;;                  `(rule (copy# %{read:selected} either.ml))` (either's src/): which.ml's choice for 5.5, either-as-alias.ml,
+;;                  copied as dune's copy# copies (a line directive `# 1 "FILE"` first).
+
+(def build-sha256
+  "The SHA-256 of the programs the build rules port: a rule applies only when its package's program is this one"
+  {"cpp.ml" "a6f9464ae3afba39958f45740a6f84e08e4865d22e92625ebea37651b2af4d3f"
+   "gen.ml" "7620b499124e3b335eaa63b05f64d8dd3b20baa8de50b3d63ab316519eb584d9"
+   "which.ml" "4422dbdd8c4b3b4398a034649702aaf9090d4a1343db8beacc6a769744625187"})
+
+(defn- held! [^File f]
+  (let [want (get build-sha256 (.getName f))]
+    (cond (not (.exists f)) (failwith (str "no " (.getPath f) ": the rule's program is not its source"))
+          (not= want (sha256 (read-bytes (.getPath f)))) (failwith (str (.getPath f) " is not the program the port follows")))))
+
+(defn- ocaml-quote
+  "Printf's %S: String.escaped's text in double quotes"
+  [^String s]
+  (str "\"" (apply str (for [c s] (case c \" "\\\"" \\ "\\\\" \newline "\\n" \tab "\\t" \return "\\r" \backspace "\\b"
+                                     (if (<= 32 (int c) 126) (str c) (format "\\%03d" (int c)))))) "\""))
+
+(defn containers-cpp
+  "containers 3.18's src/core/cpp/cpp.ml on TEXT, FILE its argument (Sys.argv.(1), the name its line directives give): the text it
+  prints, or an ex-info of its failure. Its loop, case for case: a line is a directive when String.trim's line starts with `[`
+  and with one of the prefixes it tests, in its order (its Scanf `[@@@ifle %d.%d]` and the others: the two integers after any
+  blanks, the text after the `]` ignored, a failed scan a failure); the elapsed time it prints last is written 0.000"
+  [^String text ^String file]
+  (let [out (StringBuilder.)
+        ver [(nth ocaml-version 0) (nth ocaml-version 1)]
+        evalop (fn [op i j] (let [c (compare ver [i j])] (case op :le (<= c 0) :lt (< c 0) :ge (>= c 0) :gt (> c 0))))
+        ls (vec (lines-of text))
+        n (count ls)
+        scan (fn [^String l ^String pre]
+               (if-let [m (re-find (re-pattern (str "^" (Pattern/quote pre) "[ \\t\\n\\r]*([-+]?[0-9][0-9_]*)\\.[ \\t\\n\\r]*([-+]?[0-9][0-9_]*)\\]")) l)]
+                 [(Long/parseLong (str/replace (nth m 1) "_" "")) (Long/parseLong (str/replace (nth m 2) "_" ""))]
+                 (failwith (str "scanf: bad input at " (pr-str l)))))
+        parse (fn [pos]
+                (if (>= pos n)
+                  [:eof]
+                  (let [line (nth ls pos) t (ocaml-trim line)]
+                    (if (and (not= t "") (= \[ (.charAt t 0)))
+                      (let [pre (first (filter #(str/starts-with? t %)
+                                               ["[@@@ifle" "[@@@iflt" "[@@@ifge" "[@@@ifgt" "[@@@elifle" "[@@@elifge" "[@@@eliflt"]))]
+                        (cond pre (let [[i j] (scan t pre)
+                                        op ({"le" :le "lt" :lt "ge" :ge "gt" :gt} (subs pre (- (count pre) 2)))]
+                                    [(if (str/starts-with? pre "[@@@if") :if :elif) op i j])
+                              (= t "[@@@else_]") [:else]
+                              (= t "[@@@endif]") [:endif]
+                              :else [:raw line]))
+                      [:raw line]))))
+        pp-pos (fn [pos] (.append out (str "#" pos " " (ocaml-quote file) "\n")))
+        emit (fn [^String l] (.append out l) (.append out "\n"))
+        fail (fn [pos msg] (failwith (format "at line %d in '%s': %s" pos file msg)))]
+    ;; the states: :top, :cat (the current block is taken), :skip (with elseok); pos counts the lines read (cpp.ml's !pos)
+    (loop [pos 0 state :top elseok true]
+      (let [[k a b c] (parse pos) p (inc pos)]
+        (case state
+          :top (case k
+                 :eof nil
+                 :if (if (evalop a b c) (do (pp-pos p) (recur p :cat true)) (recur p :skip true))
+                 :raw (do (emit a) (recur p :top true))
+                 (fail p "unexpected elseif|else|endif"))
+          :cat (case k
+                 :eof (fail pos "unexpected EOF")
+                 :if (fail p "nested if not supported")
+                 :raw (do (emit a) (recur p :cat true))
+                 :endif (do (pp-pos p) (recur p :top true))
+                 (recur p :skip false))
+          :skip (case k
+                  :eof (fail pos "unexpected EOF")
+                  :if (fail p "nested if not supported")
+                  :raw (recur p :skip elseok)
+                  :endif (do (pp-pos p) (recur p :top true))
+                  :elif (if (and elseok (evalop a b c)) (do (pp-pos p) (recur p :cat true)) (recur p :skip elseok))
+                  :else (if elseok (do (pp-pos p) (recur p :cat true)) (recur p :skip elseok))))))
+    (.append out "(* file preprocessed in 0.000s *)\n")
+    (.toString out)))
+
+(defn- project-root
+  "The directory above DIR (or DIR) that holds dune-project: dune's %{project_root}"
+  ^File [^File dir]
+  (loop [d dir] (cond (nil? d) dir (.exists (File. d "dune-project")) d :else (recur (.getParentFile d)))))
+
+(defn- dune-build-of
+  "DIR's dune file as the build rules need it: {:pp {:prog P :flags [..]} :rules [{:kind :gen|:copy-selected ...}]}"
+  [^File dir]
+  (let [f (File. dir "dune")]
+    (when (.exists f)
+      (let [xs (dune-sexps (slurp f))
+            lib (first (filter #(and (vector? %) (= "library" (first %))) xs))
+            ppa (when lib (second (field lib "preprocess")))
+            run (when (and (vector? ppa) (= "action" (first ppa))) (second ppa))]
+        {:pp (when (and (vector? run) (= "run" (first run)) (= "%{input-file}" (last run)) (= 3 (count run)))
+               {:prog (nth run 1) :flags (vec (rest (field lib "flags")))})
+         :rules (vec (for [x xs :when (and (vector? x) (= "rule" (first x)))
+                           r [(let [t (second (field x "targets")) a (second (field x "action"))]
+                                (when (and t (vector? a) (= ["run" "./gen.exe"] a)) {:kind :gen :target t}))
+                              (let [c (field x "copy#")]
+                                (when (and c (= "%{read:selected}" (nth c 1 nil))) {:kind :copy-selected :target (nth c 2 nil)}))]
+                           :when r]
+                       r))
+         :selected (some #(let [w (field % "with-stdout-to")]
+                            (when (and w (= "selected" (nth w 1 nil))) (nth w 2 nil)))
+                         (filter #(and (vector? %) (= "rule" (first %))) xs))}))))
+
+(defn- open-flags [flags]
+  (loop [fs flags acc []]
+    (if (empty? fs) acc
+        (if (= "-open" (first fs)) (recur (drop 2 fs) (conj acc (second fs))) (recur (rest fs) acc)))))
+
+(defn build-unit
+  "The text dune's build compiles for PATH (a unit of a package's library, existing or made by a rule of its directory), as
+  [:ok text] or [:fail why]; nil when no build rule of this namespace applies to it"
+  [^String path]
+  (let [f (.getCanonicalFile (File. path)) dir (.getParentFile f) base (.getName f)
+        b (dune-build-of dir)
+        root (project-root dir)
+        rel (str/replace (subs (.getPath f) (inc (count (.getPath root)))) File/separator "/")]
+    (try
+      (cond
+        (nil? b) nil
+        (.exists f)
+        (when-let [{:keys [prog flags]} (:pp b)]
+          (when-not (re-find #"(^|/)cpp/cpp\.exe$" prog) (failwith (str "the library's preprocessor is " prog ", not containers' cpp")))
+          (held! (File. root ^String (str/replace (str/replace prog "%{project_root}/" "") #"\.exe$" ".ml")))
+          (let [body (containers-cpp (read-text (.getPath f)) rel)
+                opens (open-flags flags)]
+            [:ok (if (seq opens)
+                   (str (apply str (for [m opens] (str "open! " m "\n"))) "# 1 " (ocaml-quote rel) "\n" body)
+                   body)]))
+        :else
+        (when-let [r (first (filter #(= base (:target %)) (:rules b)))]
+          (case (:kind r)
+            :gen (let [g (File. dir "gen.ml")]
+                   (held! g)
+                   (let [t (read-text (.getPath g))
+                         m (re-find #"(?s)let domain_5 =\s*\{\|(.*?)\|\}" t)]
+                     (when-not m (failwith "gen.ml has no domain_5"))
+                     ;; gen.ml: Sys.ocaml_version's (major, minor) >= (5, 0): domain_5, written as output_string writes it
+                     [:ok (second m)]))
+            :copy-selected (let [w (File. dir "which.ml")]
+                             (held! w)
+                             (when-not (= ["run" "%{ocaml}" "%{dep:which.ml}" "%{ocaml_version}"] (:selected b))
+                               (failwith "the rule of `selected` is not which.ml's run"))
+                             ;; which.ml: (major, minor) < (4, 12) ? either-as-newtype.ml : either-as-alias.ml
+                             (let [sel (if (neg? (compare [(nth ocaml-version 0) (nth ocaml-version 1)] [4 12]))
+                                         "either-as-newtype.ml" "either-as-alias.ml")]
+                               (let [d (str/replace rel #"[^/]*$" "")]
+                                 [:ok (str "# 1 " (ocaml-quote (str d sel)) "\n" (read-text (.getPath (File. dir sel))))]))))))
+      (catch arbace.lang.ExceptionInfo e
+        (if-let [m (::failure (ex-data e))] [:fail m] (throw e))))))
+
+(defn build-into
+  "Each FILE's build text (build-unit, else mucppo's rule of its directory) written into OUTDIR under its name: the lines
+  `FILE<TAB>ok|fail<TAB>WHY`"
+  [^String outdir files]
+  (vec (for [^String path files]
+         (let [f (.getCanonicalFile (File. path)) dir (.getParentFile f) base (.getName f)
+               r (or (build-unit path)
+                     (when-let [dune (dune-of dir)]
+                       (when-let [rule (first (filter #(= base (:target %)) (:rules dune)))]
+                         (let [[v x] (cppo-run dir dune rule nil nil)] (if (= :ok v) [:ok x] [:fail x]))))
+                     [:fail "no build rule of its directory makes or preprocesses it"])]
+           (when (= :ok (first r))
+             (java.nio.file.Files/write (.toPath (File. outdir base)) (text-bytes (second r))
+                                        ^"[Ljava.nio.file.OpenOption;" (into-array java.nio.file.OpenOption [])))
+           [path (name (first r)) (if (= :ok (first r)) "" (second r))]))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; the rule of a file, and the verdict
 
 (defn- top-of-template
@@ -428,7 +609,8 @@
 (defn -main
   "own-build ROOT FILE...: each file's verdict (FILE relative to ROOT); cppo DIR TARGET: the dune rule's output on stdout;
   sync-stdlib-docs TOP OUT: the expansion of stdlib/OUT on stdout (the last two compared by hand with the host's mucppo,
-  ocamllex and tools/sync_stdlib_docs, the oracle tier's)"
+  ocamllex and tools/sync_stdlib_docs, the oracle tier's); build-into OUTDIR FILE...: each unit's build text written into OUTDIR
+  (queue 534: the suite corpus's staging), a line `FILE ok|fail WHY` each, exit 1 when one fails"
   [& args]
   (let [[verb & more] args]
     (case verb
@@ -438,4 +620,7 @@
                         (println (str f "\t" (name v) "\t" how)))))
       "cppo" (do (print (cppo-output (first more) (second more))) (flush))
       "sync-stdlib-docs" (do (print (sync-stdlib-docs (first more) (second more) nil nil)) (flush))
-      (do (println "usage: -m arbace.repr.ocaml.prep own-build ROOT FILE... | cppo DIR TARGET | sync-stdlib-docs TOP OUT") (System/exit 2)))))
+      "build-into" (let [rows (build-into (first more) (rest more))]
+                     (doseq [r rows] (println (str/join "\t" r)))
+                     (when (some #(= "fail" (second %)) rows) (System/exit 1)))
+      (do (println "usage: -m arbace.repr.ocaml.prep own-build ROOT FILE... | cppo DIR TARGET | sync-stdlib-docs TOP OUT | build-into OUTDIR FILE...") (System/exit 2)))))
