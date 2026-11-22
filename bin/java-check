@@ -965,6 +965,9 @@ run_actions() {
   # F6: a tool test interpreted on javac's tool, its system compiler against the platform
   if [ "$level" = interp ] && [ -n "${texe:-}" ] && tool_test; then
     exe=$texe props0=(-Djdk.internal.jrt.javac.platform="$tplatform")
+  elif [ "$level" = compiled ] && [ -n "${tplatform:-}" ] && tool_test; then
+    # JD4 (a): its program holds javac's world (compiled_shard's javac shard), the platform as on the tool
+    props0=(-Djdk.internal.jrt.javac.platform="$tplatform")
   fi
   # JCV1: whose verdict judges the test (java.check/plan's verdict line, test/java/verdicts.edn): status, the
   # test's own (judge_own; the JDK's record judged too, the oracle tier's row LEVEL.jdk when it says otherwise),
@@ -1137,16 +1140,51 @@ compiled_one_on() { compiled_one "$2" "$1" | sed -e "s|$root|.|g"; }
 prog_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac; }
 prog_goarch_env() { if [ "$(prog_arch)" = arm64 ]; then echo GOARCH=arm64 GOARM64=v8.0; else echo GOARCH=amd64 GOAMD64=v1; fi; }
 
+# javac_tests: the tests of WORK/run.list whose source files name javac's API (tool_test), into WORK/javac.list: JD4 (a)
+# (the user's decision of 2026-11-22, java-design-1122) puts them into shards of their own (java.check/shards), each one
+# compiled program with javac's world as javac's tool is built (bin/arbace-go --build-java's j2g inputs: jdk/javac/forms,
+# overlay/jdk/javac/variants, both edges), cached by key (javac_shard_key)
+javac_tests() {
+  local id p dir
+  : > "$work/javac.list"
+  while read -r id; do
+    p=$work/run/$id
+    [ -f "$p/plan.tsv" ] || continue
+    dir=$(test_dir "$p")
+    tool_test && echo "$id"
+  done < "$work/run.list" > "$work/javac.list"
+}
+
+# javac_shard_key DIR: the key of a javac shard's program: javac's world (arbace_javac_key), the compiled namespaces (AOT.key)
+# and the shard's tests' forms (each run directory's forms.key), so that the program is built once while they hold
+javac_shard_key() {
+  . "$root/bin/lib/javac-key.bash"
+  { arbace_javac_key "$root"; cat "$aot.key" 2>/dev/null; echo "--"
+    while read -r id; do printf '%s %s\n' "$id" "$(cat "$work/run/$id/forms.key" 2>/dev/null)"; done < "$1/tests.txt"; } | sha256sum | cut -c1-40
+}
+
 compiled_shard() {
-  local k=$1 s=$2 round st n overlay
+  local k=$1 s=$2 round st n overlay jargs=() jkey="" jc_dir=""
   overlay=$(program_overlay) || return 1
   : > "$s/refused.tsv"
+  if [ -f "$s/javac" ]; then
+    jargs=(--input "$root/jdk/javac/forms" --variants "$root/overlay/jdk/javac/variants"
+           --edge "$root/jdk/edge.edn" --edge "$root/jdk/javac/edge.edn")
+    jkey=$(javac_shard_key "$s")
+    jc_dir=${JAVA_CHECK_JAVAC_CACHE:-$root/.tmp/java-check/javac-prog}/$jkey
+    if [ -x "$jc_dir/prog" ] && [ -f "$jc_dir/built.txt" ]; then
+      echo "== java-check compiled: shard $k (javac's world): the program of key ${jkey:0:12} ($jc_dir)" >&2
+      cp "$jc_dir/refused.tsv" "$s/refused.tsv"; cp "$jc_dir/built.txt" "$s/built.txt"; cp "$jc_dir/prog" "$s/prog"
+    fi
+  fi
   for round in 1 2 3 4 5 6 7 8; do
+    [ -x "$s/prog" ] && break
     jc merge "$work" "$s" > "$s/merge.log" || { cat "$s/merge.log"; return 1; }
     [ -s "$s/built.txt" ] || break
     echo "== java-check compiled: shard $k, round $round: j2g, $(wc -l < "$s/built.txt") tests ($(since_t0))" >&2
     rm -rf "$s/out" "$s/work" "$s/prog"
-    st=0; program_heavy=$heavy program_j2g "$rexe" "$s/j2g$round.log" "$s/out" --input "$s/forms" --input "$aot" ${gotable:+--gotable "$gotable"} || st=$?
+    st=0; program_heavy=$heavy program_j2g "$rexe" "$s/j2g$round.log" "$s/out" --input "$s/forms" --input "$aot" ${gotable:+--gotable "$gotable"} \
+      ${jargs[@]+"${jargs[@]}"} || st=$?
     if [ ! -f "$s/out/report.edn" ]; then
       # j2g died (no report: the host's memory, JCS48): status 3, the caller splits the shard
       tail -20 "$s/j2g$round.log" >&2; echo "java-check compiled: shard $k: j2g failed ($s/j2g$round.log)" >&2; return 3
@@ -1173,6 +1211,10 @@ compiled_shard() {
     return 1
   fi
   rm -rf "$s/out" "$s/work"
+  # a javac shard's program kept by its key (JD4 (a)), with its refusals and the tests it holds
+  if [ -n "$jc_dir" ] && [ -x "$s/prog" ] && [ ! -x "$jc_dir/prog" ]; then
+    mkdir -p "$jc_dir.new" && cp "$s/prog" "$s/refused.tsv" "$s/built.txt" "$jc_dir.new/" && rm -rf "$jc_dir" && mv "$jc_dir.new" "$jc_dir"
+  fi
   {
     awk -F'\t' '{print $1 "\tcompiled\trefused\t" $2}' "$s/refused.tsv"
     if [ -x "$s/prog" ]; then
@@ -1227,6 +1269,7 @@ run_shard() {
     echo "== java-check compiled: shard $k: j2g died, split in two ($n tests)" >&2
     rm -rf "$d/out" "$d/work" "$d/prog" "$d/forms"
     mkdir -p "$d/h1" "$d/h2"
+    [ ! -f "$d/javac" ] || { cp "$d/javac" "$d/h1/javac"; cp "$d/javac" "$d/h2/javac"; }
     head -n $((n / 2)) "$d/tests.txt" > "$d/h1/tests.txt"
     tail -n +$((n / 2 + 1)) "$d/tests.txt" > "$d/h2/tests.txt"
     for h in 1 2; do run_shard "$k.$h" "$d/h$h"; done
@@ -1294,7 +1337,8 @@ compiled_level() {
     shard_fn=analyze_shard
     [ -n "$shard_only" ] || rm -rf "$work/j2g"
     mkdir -p "$work/j2g"
-    jc shards "$work" "$shard_size" >&2 || { echo "java-check compiled: java.check's shards failed" >&2; return 1; }
+    javac_tests
+  jc shards "$work" "$shard_size" >&2 || { echo "java-check compiled: java.check's shards failed" >&2; return 1; }
     local s
     for s in $(cd "$work/j2g" && ls -d s* | sed 's/^s//' | sort -n); do
       if [ -z "$shard_only" ] || [[ ",$shard_only," == *",$s,"* ]]; then
@@ -1314,6 +1358,7 @@ compiled_level() {
   # --shard K: that shard again, the others' results kept (the same plan makes the same shards)
   [ -n "$shard_only" ] || rm -rf "$work/j2g"
   mkdir -p "$work/j2g"
+  javac_tests
   jc shards "$work" "$shard_size" >&2 || { echo "java-check compiled: java.check's shards failed" >&2; return 1; }
   local s
   for s in $(cd "$work/j2g" && ls -d s* | sed 's/^s//' | sort -n); do
@@ -1604,7 +1649,8 @@ check() {
   # F6: the tool tests' executable and platform (interp)
   texe= tplatform=
   case ",$levels," in
-    *,interp,*)
+    *,interp,*|*,compiled,*)
+      # JD4 (a): the compiled level's tests naming javac's API run javac on Arbace in their program against the platform
       if [ -z "${ARBACE_COVER_DIR:-}" ]; then
         texe=$(tool_exe)
         if [ -n "$texe" ]; then
@@ -1981,7 +2027,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit test_wall compiled_one run_actions plan_bad jtreg_props judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit test_wall compiled_one run_actions tool_test src_of plan_bad jtreg_props judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
