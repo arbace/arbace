@@ -1,3 +1,5 @@
+; verdict: invalid missing required field 'directory'
+; rule: llvm/lib/AsmParser/LLParser.cpp:5755 parseDIFile declares directory REQUIRED; !DIFile(filename: "dbg.c") lacks it (REQUIRE_FIELD macro; a parse error at line 19).
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

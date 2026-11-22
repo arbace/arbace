@@ -72,7 +72,10 @@
 #                                  that ends one) and by the port (arbace.repr.python.lexcheck), line for line equal or
 #                                  known (test/python/lex-check-known.edn); a negative control; then N mutants' files
 #                                  (default 2,000, two mutants of 3 edits each, seed 26: the error paths) the same way.
-#                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/)
+#                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/). The reference
+#                                  (queue 489): REPR_PYTHON_LEX_REF=own (records mode's default) CPython 3.14.10's C
+#                                  tokenizer itself on Arbace's C (bin/pyi-clib exe pytokenizer: tokdump.py's dumps, no
+#                                  CPython), recorded (CPython's recorded dumps, as live, record and verify: the oracle tier's)
 #   bin/repr-python pegen [--check]  PY9b: arbace/repr/python/parser.ae generated from the tarball's Grammar/python.gram
 #                                  (arbace.repr.python.pegen, pegen's analyses and an Arbace back end; the actions
 #                                  translated from C over Parser/Python.asdl's fields), or generated again and compared
@@ -81,7 +84,11 @@
 #                                  written as the helper's dump) against tools/pydump/pydump.py tree (ast.parse) over the
 #                                  corpora as lex-check's, then the mutants, the dumps byte for byte equal or known
 #                                  (test/python/parse-check-known.edn). --full: mode :full (every node's position, the
-#                                  tokens) against pydump.py tree --full. Work in .tmp/repr-python/parse{,-full}/CORPUS/
+#                                  tokens) against pydump.py tree --full. Work in .tmp/repr-python/parse{,-full}/CORPUS/.
+#                                  The reference (queue 494): REPR_PYTHON_PARSE_REF=own (records mode's default) CPython
+#                                  3.14.10's parser itself on Arbace's C (bin/pyi-clib exe pyparser: pydump.py tree's
+#                                  dumps, --full's too, no CPython), recorded (CPython's recorded dumps, as live, record
+#                                  and verify: the oracle tier's)
 #   bin/repr-python ast-check [--limit N] [--mode M] [CORPUS...]
 #                                  PY9 (queue 201): pyi's _ast on the native reader: each file's answer to compile()'s
 #                                  PyCF_ONLY_AST in tools/pyi/ast_json.py's form, natively (arbace.repr.python.astjson)
@@ -218,6 +225,23 @@ fetch() {
 
 TOP() { echo "$root/$(pin "$CPIN" extracted-into)"; }
 
+# extract_into TARBALL TOP SHA TAR-FLAG: TARBALL extracted into TOP (its first component stripped), TOP/.extracted SHA,
+# unless it already is; one extraction at a time (queue 481: two pyi runs of a fresh checkout each extracted the tarball,
+# one's rm -rf under the other's tar, a tree of 5,077 of its 5,145 files and no .extracted), into a directory of its own
+# first, TOP replaced when it is whole
+extract_into() {
+  local tb=$1 top=$2 sha=$3 flag=$4 lk
+  [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ] || return 0
+  mkdir -p "$(dirname "$top")"; exec {lk}>"$top.lock"; flock "$lk"
+  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
+    rm -rf "$top.new"; mkdir -p "$top.new"
+    tar "$flag" "$tb" -C "$top.new" --strip-components=1
+    echo "$sha" > "$top.new/.extracted"
+    rm -rf "$top"; mv "$top.new" "$top"
+  fi
+  flock -u "$lk"; exec {lk}>&-
+}
+
 fetch_tarball() {
   local tb url sha sha5 top
   tb="$root/$(pin "$CPIN" fetched-into)"; url=$(pin "$CPIN" url)
@@ -225,11 +249,7 @@ fetch_tarball() {
   if [ ! -f "$tb" ] || [ "$(sha256 "$tb")" != "$sha" ]; then rm -f "$tb"; fetch "$url" "$tb" "$(basename "$tb")"; fi
   [ "$(sha256 "$tb")" = "$sha" ] || die "$tb: SHA-256 $(sha256 "$tb"), pinned $sha"
   [ "$(sha512sum < "$tb" | cut -c1-128)" = "$sha5" ] || die "$tb: SHA-512 differs from the pin"
-  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
-    rm -rf "$top"; mkdir -p "$top"
-    tar -xJf "$tb" -C "$top" --strip-components=1
-    echo "$sha" > "$top/.extracted"
-  fi
+  extract_into "$tb" "$top" "$sha" -xJf
   echo "$CPIN: $tb (SHA-256 and SHA-512 ok), extracted into ${top#$root/}"
 }
 
@@ -253,11 +273,17 @@ fetch_apks() {
     done < "$APKS"
     local out="$WORK/site-packages/$arch"
     if [ "$(cat "$out/.extracted" 2>/dev/null)" != "$key" ]; then
-      rm -rf "$out"; mkdir -p "$out"
-      while read -r sha rel; do
-        case $rel in "$arch"/*) tar --warning=no-unknown-keyword -xzf "$dir/$(basename "$rel")" -C "$out" usr ;; esac
-      done < "$APKS"
-      echo "$key" > "$out/.extracted"
+      # one extraction at a time, whole before it replaces the tree (queue 481, as extract_into)
+      local lk; mkdir -p "$(dirname "$out")"; exec {lk}>"$out.lock"; flock "$lk"
+      if [ "$(cat "$out/.extracted" 2>/dev/null)" != "$key" ]; then
+        rm -rf "$out.new"; mkdir -p "$out.new"
+        while read -r sha rel; do
+          case $rel in "$arch"/*) tar --warning=no-unknown-keyword -xzf "$dir/$(basename "$rel")" -C "$out.new" usr ;; esac
+        done < "$APKS"
+        echo "$key" > "$out.new/.extracted"
+        rm -rf "$out"; mv "$out.new" "$out"
+      fi
+      flock -u "$lk"; exec {lk}>&-
     fi
     echo "site-packages: $(grep -c "  $arch/" "$APKS") apks for $arch (SHA-256 ok), extracted into ${out#$root/}"
   done
@@ -272,11 +298,7 @@ fetch_pyperformance() {
   if [ ! -f "$tb" ] || [ "$(sha256 "$tb")" != "$sha" ]; then rm -f "$tb"; fetch "$url" "$tb" "$(basename "$tb")"; fi
   [ "$(sha256 "$tb")" = "$sha" ] || die "$tb: SHA-256 $(sha256 "$tb"), pinned $sha"
   [ "$(stat -c %s "$tb")" = "$bytes" ] || die "$tb: $(stat -c %s "$tb") bytes, pinned $bytes"
-  if [ "$(cat "$top/.extracted" 2>/dev/null)" != "$sha" ]; then
-    rm -rf "$top"; mkdir -p "$top"
-    tar -xzf "$tb" -C "$top" --strip-components=1
-    echo "$sha" > "$top/.extracted"
-  fi
+  extract_into "$tb" "$top" "$sha" -xzf
   echo "pyperformance-1.14.0: $tb (SHA-256 and size ok), extracted into ${top#$root/}"
 }
 
@@ -705,12 +727,42 @@ tokdump() {
 # the records' corpus of a check's corpus: the mutants of each check are its own
 rec_corpus() { if [ "$1" = mutants ]; then echo "mutants-$2"; else echo "$1"; fi; }
 
+# queue 489 (py-own-judge-1 (a), the user, 2026-11-20): lex-check's reference. own (3.14's default in records mode): CPython
+# 3.14.10's C tokenizer itself, Parser/lexer/ and Parser/tokenizer/ with Python-tokenize.c's iterator rules from the pinned
+# tarball, unmodified, built by ci's builder behind Arbace's harness (tools/pyi/clib/pytokenizer, go/arbace/clib/pytokenizer)
+# and compiled by cf2g (bin/pyi-clib exe pytokenizer), writing tokdump.py's format: no CPython and not the native lexer, the
+# judge independent of the subject (Lib/tokenize.py on pyi is the native lexer itself, py-own-judge-1120). recorded: CPython's
+# recorded tokens (the pydump packs), the oracle tier's, as are live, record and verify (REPR_PYTHON_ORACLE), which run
+# tokdump.py on python3; 3.15 always the 3.15.2 oracle's.
+lex_ref_mode() {
+  local m=${REPR_PYTHON_LEX_REF:-}
+  if [ -z "$m" ]; then
+    if [ "$PYV" = 3.14 ] && [ "$PYREC_MODE" = records ]; then m=own; else m=recorded; fi
+  fi
+  case $m in own|recorded) ;; *) die "REPR_PYTHON_LEX_REF: own or recorded (not $m)" ;; esac
+  [ "$m" = own ] && [ "$PYV" != 3.14 ] && die "REPR_PYTHON_LEX_REF=own: the harness is 3.14.10's tokenizer (REPR_PYTHON_VERSION=$PYV)"
+  echo "$m"
+}
+# own_tokdump BASE LIST OUT: the harness's dumps of LIST's files under BASE into OUT (OUT.tsv its rows)
+own_tokdump() {
+  local exe
+  exe=$("$root/bin/pyi-clib" exe pytokenizer) || { echo "lex-check: the C tokenizer's harness did not build (bin/pyi-clib exe pytokenizer)" >&2; return 1; }
+  mkdir -p "$3"
+  "$exe" --base "$1" --list "$2" --out "$3" --tsv "$3.tsv" --encodings "$(TOP)/Lib/encodings"
+}
+
 lex_one() { # ID BASE LIST
-  local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0
+  local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0 mode
+  mode=$(lex_ref_mode) || exit 2
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
   if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "lex-check $id: no file of --only-list"; return 0; }; fi
-  tokdump "$(rec_corpus "$id" lex)" "$base" "$list" "$d/ref" \
-    || { echo "lex-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  echo "lex-check $id: the reference: $([ "$mode" = own ] && echo "CPython's C tokenizer on Arbace's C (own)" || echo "CPython's tokens ($PYREC_MODE)")"
+  if [ "$mode" = own ]; then
+    own_tokdump "$base" "$list" "$d/ref" || { echo "lex-check $id: FAILED: no reference (the C tokenizer's harness, above)"; return 1; }
+  else
+    tokdump "$(rec_corpus "$id" lex)" "$base" "$list" "$d/ref" \
+      || { echo "lex-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  fi
   lexcheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$LEX_KNOWN" --controls "$CONTROLS_READ" \
     --jobs "$JOBS" ${record:+--record} ${ONLY:+--partial} ${record:+--results-file "$root/test/python/lex-check-results$PYSFX.edn"} || rc=$?
   return $rc
@@ -807,12 +859,42 @@ syntax_cases() {
   fi
 }
 
+# queue 494 (py-own-judge-1 (a), the user, 2026-11-20): parse-check's reference, as lex-check's (queue 489). own (3.14's
+# default in records mode): CPython 3.14.10's parser itself, Parser/parser.c, pegen.c, pegen_errors.c, action_helpers.c,
+# string_parser.c and Python/Python-ast.c with the tokenizer, future.c, ast_preprocess.c and unicodedata.c from the pinned
+# tarball, unmodified, built by ci's builder behind Arbace's harness (tools/pyi/clib/pyparser, go/arbace/clib/pyparser)
+# and compiled by cf2g (bin/pyi-clib exe pyparser), writing pydump.py tree's format (--full's too) from the C tree: no
+# CPython and not the native reader. recorded: CPython's recorded dumps (the pydump packs), the oracle tier's, as are live,
+# record and verify (REPR_PYTHON_ORACLE), which run pydump.py on python3; 3.15 always the 3.15.2 oracle's.
+parse_ref_mode() {
+  local m=${REPR_PYTHON_PARSE_REF:-}
+  if [ -z "$m" ]; then
+    if [ "$PYV" = 3.14 ] && [ "$PYREC_MODE" = records ]; then m=own; else m=recorded; fi
+  fi
+  case $m in own|recorded) ;; *) die "REPR_PYTHON_PARSE_REF: own or recorded (not $m)" ;; esac
+  [ "$m" = own ] && [ "$PYV" != 3.14 ] && die "REPR_PYTHON_PARSE_REF=own: the harness is 3.14.10's parser (REPR_PYTHON_VERSION=$PYV)"
+  echo "$m"
+}
+# own_treedump BASE LIST OUT: the harness's dumps of LIST's files under BASE into OUT (OUT.tsv its rows; --full with PFULL)
+own_treedump() {
+  local exe
+  exe=$("$root/bin/pyi-clib" exe pyparser) || { echo "parse-check: the C parser's harness did not build (bin/pyi-clib exe pyparser)" >&2; return 1; }
+  mkdir -p "$3"
+  "$exe" --base "$1" --list "$2" --out "$3" --tsv "$3.tsv" --encodings "$(TOP)/Lib/encodings" ${PFULL:+--full}
+}
+
 parse_one() { # ID BASE LIST
-  local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0
+  local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0 mode
+  mode=$(parse_ref_mode) || exit 2
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
   if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "parse-check $id: no file of --only-list"; return 0; }; fi
-  FULL=$PFULL dump_parallel "$(rec_corpus "$id" parse)" "$base" "$list" "$d/ref" "$d/ref.tsv" \
-    || { echo "parse-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  echo "parse-check $id: the reference: $([ "$mode" = own ] && echo "CPython's parser on Arbace's C (own)" || echo "CPython's trees ($PYREC_MODE)")"
+  if [ "$mode" = own ]; then
+    own_treedump "$base" "$list" "$d/ref" || { echo "parse-check $id: FAILED: no reference (the C parser's harness, above)"; return 1; }
+  else
+    FULL=$PFULL dump_parallel "$(rec_corpus "$id" parse)" "$base" "$list" "$d/ref" "$d/ref.tsv" \
+      || { echo "parse-check $id: FAILED: no reference (the oracle's records, above)"; return 1; }
+  fi
   # the cases' own verdicts (queue 240: syntax-errors, the errors their tests expect), unless --judge record
   local ex=""; [ "$PJUDGE" = record ] || [ ! -s "$base.expect" ] || ex=$base.expect
   parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" --controls "$CONTROLS_READ" \

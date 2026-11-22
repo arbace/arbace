@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - Nested cleanuppad %q within %p with a funclet-bundled invoke unwinding to it; all unwind edges agree.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

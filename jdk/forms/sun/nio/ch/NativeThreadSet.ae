@@ -1,0 +1,69 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/ch/NativeThreadSet.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(defclass NativeThreadSet
+  (field ^:private ^:static ^:final ^int OTHER_THREAD_INDEX -99)
+
+  (field ^:private ^:final ^int initialCapacity)
+
+  (field ^:private ^long/1 threads)
+
+  (field ^:private ^int used)
+
+  (field ^:private ^int otherThreads)
+
+  (field ^:private ^boolean waitingToEmpty)
+
+  (constructor [this ^int n] (set! initialCapacity n))
+
+  (method add ^int [this]
+    (let [th (NativeThread/current)]
+      (locking this
+        (if (not (NativeThread/isNativeThread th))
+            (do (set! otherThreads (unchecked-inc-int otherThreads)) OTHER_THREAD_INDEX)
+            (let [^:mutable ^int start 0]
+              (cond
+                (nil? threads) (set! threads (new long/1 initialCapacity))
+                (>= used (alength threads))
+                  (let [on (alength threads)
+                        nn (unchecked-multiply-int on 2)
+                        nthreads (new long/1 nn)]
+                    (System/arraycopy threads 0 nthreads 0 on)
+                    (set! threads nthreads)
+                    (set! start on)))
+              (loop [^int i start]
+                (if (< i (alength threads))
+                    (if (== (aget threads i) 0)
+                        (do (aset threads i th) (set! used (unchecked-inc-int used)) (return i))
+                        (recur (unchecked-inc-int i)))
+                    nil))
+              (throw (InternalError.)))))))
+
+  (method remove ^void [this ^int i]
+    (locking this
+      (cond
+        (>= i 0)
+          (do
+            (java-assert (== (aget threads i) (NativeThread/current)))
+            (aset threads i 0)
+            (set! used (unchecked-dec-int used)))
+        (== i OTHER_THREAD_INDEX) (set! otherThreads (unchecked-dec-int otherThreads))
+        :else (do (java-assert (== i -1)) (return)))
+      (when (and (and (== used 0) (== otherThreads 0)) waitingToEmpty) (.notifyAll this))))
+
+  (method ^:synchronized signalAndWait ^void [this]
+    (let [^:mutable interrupted false]
+      (while (or (> used 0) (> otherThreads 0))
+        (let [^:mutable u used
+              ^:mutable ^int i 0]
+          (while (and (> u 0) (< i (alength threads)))
+            (let [th (aget threads i)]
+              (when-not (== th 0) (NativeThread/signal th) (set! u (unchecked-dec-int u)))
+              (set! i (unchecked-inc-int i))))
+          (set! waitingToEmpty true)
+          (try
+            (.wait this 50)
+            (catch InterruptedException e (set! interrupted true))
+            (finally (set! waitingToEmpty false)))))
+      (when interrupted (.interrupt (Thread/currentThread))))))

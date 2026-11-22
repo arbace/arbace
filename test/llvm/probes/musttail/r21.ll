@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - An indirect musttail call with matching prototype is accepted.
 declare void @g(i32)
 define void @f(i32 %x) {
  %p = alloca ptr

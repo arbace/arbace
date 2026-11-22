@@ -9030,3 +9030,831 @@ the judge names.
 
 - **Merge order.** Queue 392 (`rt_ours_glob` 124 to 155, codegen and template fixes) and this branch merge cleanly either way
   (`git merge-tree`; also with 393). 392 first, then this: the host then builds and records the runtime once, at 155 units.
+
+## As built: c-cpp-golden, the samples' golden files (2026-11-20; branch `c-cpp-golden-1120` from next `939037429`)
+
+The user's decision of 2026-11-20: reviewed golden files for C++'s sample prints, JCS361 (a)'s way (Java) and queue 325g's (Haskell).
+The samples and the runtime's samples (test/cpp/samples, test/cpp/runtime/samples, 15 programs with a `main`) were judged by g++'s
+recorded run alone (`test/cpp/ref-gxx15.edn`, 0.5 in the judge stage). **The files.** Beside each program: `NAME.expect`, its stdout
+byte for byte (empty when it prints nothing; its presence gives the verdict, as tcc-tests2's and mir's `.expect` do for C);
+`NAME.cpp.expectrc`, its status when not 0 (mir's `NAME.c.expectrc`); `NAME.expect-stderr`, its stderr when it writes one. Each written
+from the program's source and C++23 before it was compared with anything; where the output is the implementation's, the target's:
+the Itanium ABI's type names (`7Derived`, `PKc`, `St6vectorIiSaIiEE`), the x86-64 psABI's layout (`sizeof(LD)` 48, 16), libstdc++
+15.2's messages read in its source from the pinned gcc tarball (`__verbose_terminate_handler` in libsupc++/vterminate.cc, bad_alloc's
+`std::bad_alloc`, `<variant>`'s `std::get: wrong index for variant`, functional.cc's `bad_function_call`, `<any>`'s `bad any_cast`,
+`__stoa`'s `stoi`), abort's status 134. **The review.** `test/cpp/selfref-golden.edn`: per program `{:id :basis :why}` (`:src`,
+`:abi`, `:lib`, `:gnu`), the why covering every line. **The judge.** `test/cpp/selfref.ae`'s `verdict` gives a sample with its
+`.expect` and its review `:golden` (`{:status S :stdout SHA :stderr SHA}`); `merged` writes it `:o2 :same`, so
+`arbace.cpp.check/run-result` compares status, stdout and stderr as it compared g++'s run (no change to arbace/cpp); a golden file
+without its review, or a review without its golden file, fails `ref` (the check); `agree` compares a golden verdict's three parts;
+`bin/lib/cppi/selfref.bash` keys the reference on the golden files and the review. A new mechanism (C++'s judge read no expected-output
+file before: its suites' rule is the status alone) kept minimal: C's file names, one review file. **Controls** (test/cpp/controls.edn,
+:level :run): `bitfields-vs-io` (stdout: io.cpp's reference is its golden file since), `classes-vs-auto` (status alone) and
+`ctor-throw-vs-thread-throw` (stderr alone), new.
+
+**Proved** (no run; the night's recorded runs of next, 2026-11-20, `.tmp/cppi-check` and `.tmp/cppi-aot` of the next worktree, their
+list, nodes and run tables copied): `cpp.selfref ref` 220 of 225 by their own verdict (15 golden), `agree` 220 of 220 met by g++'s
+recorded runs (15 of 15 golden files equal its digests at the first writing: an agreement found, not used); `arbace.cpp.check
+run-judge` with the golden reference, eval and AOT: 15 of 15 pass each, the four controls in the run differ; with three golden files
+corrupted (a byte of library.expect, a byte of ctor-throw.expect-stderr, auto's status 12) each fails at both levels (differ stdout,
+differ stderr, differ status); `ref` refuses a golden file whose review is removed and a review whose file is removed. **Left** with
+g++'s run: the sampling's ubsan/null-8.C and ubsan/vptr-1.C (their dg-output is the sanitizer's message under -fsanitize, which the
+harness does not give; without it each run is undefined: a reference bound to `*null`, an S accessed through a T*); the three
+programs g++ does not build (decls.cpp and layouts.cpp have no `main`, libstdcxx's 27_io/basic_fstream/cons/wchar_t/1.cc) are no run.
+**Independence:** the judge's `:check-recorded` and `:aot-recorded` (15 each, 0.5) became `:check-golden` and `:aot-golden` (1):
+0.907 to 0.908, C++'s independence 0.9138 to 0.9140.
+
+## Write-ahead: an own judge for the token checks (pp-ref, 2026-11-20; branch `pp-ref-1120` from next 939037429)
+
+The brief (the main session, toward the CoMaIn goal, on the user's py-own-judge-1 (a) of the same day: an independent reference
+implementation, unmodified from its pinned upstream tarball, compiled by Arbace's own C or C++ behind a small harness, becomes the
+check-time judge, the recorded toolchain output the oracle tier's): judge C++'s token check (`bin/repr-cpp pp-check`, 1,931 files,
+`:pp-check [1931 0.5]` in independence.edn's C++ judge, 0.907) and C's 72 known preprocessor differences (`pp-gcc.sha256`'s evidence,
+C's judge 0.995) by such a reference. **Stopped at the choice** (the brief's rule): the best reference needs the user's ruling on its
+license, and Arbace's C++ does not compile it yet. Nothing of the check, the records or the facts changed.
+
+### What a reference must reproduce (arbace/repr/cpp/ppcheck.ae)
+
+Each file is judged at two levels, each against a recorded digest (`load-db`, a SHA-256 a file):
+- **pp**: the port's stream (`pp/preprocess` over Arbace's C++ target, `cpp/target/host`: predefined macros by standard, option
+  deltas, `__has_` answers, search list) as token texts (`port-texts`: identifiers in g++'s spelling, user-defined literals split,
+  `__FILE__`'s directory written `{base}`) against **g++ -E -P's** (`gxx-texts`: the output relexed, its `#pragma`/directive lines
+  dropped, `#embed`'s `__base64__` lines read back as integers); or both reject (g++'s status non-zero and the port reports an
+  error); or, where g++ -E is no reference (CP261 (a): modules, g++'s pedantic rejections), clang's raw tokens (27 files). Spacing and
+  line markers do not count (`-P`, a digest of texts). The record's 1,934 rows (3 of them n/a, CP260 (a)): 1,851 agree at both
+  levels, 52 both reject, 27 by clang's tokens, 4 known.
+- **lex**: the file's raw tokens (`raw-lines`: `LINE:COL<tab>TEXT`, no comments, no header names, splices out of the text, a token
+  placed at the splices that touch it from the left) against **clang's `-Xclang -dump-raw-tokens`** (`clang-lines`).
+
+So the pp level's reference must be g++'s preprocessor, fed the target's answers (the same `cpp/target/host` the port reads: an input,
+not the subject), with cc1plus's driver part redone by the harness (options, the diagnostics' severities under `-pedantic-errors` and
+`-Werror`, pragmas left out of the stream, `SOURCE_DATE_EPOCH`); the lex level's, a raw lexer with positions. C's 72 (the `:pp` entries of
+`test/repr/c/pp-check-known.edn`: 44 `#embed`, 10 `__VA_OPT__`, 5 `u` prefixes, 13 others; 70 with gcc's digest or rejection, 14 of
+them rejections) are files where cc, the C check's own judge, is wrong; their reference is gcc -E's stream, the same preprocessor in C mode.
+
+### The candidates
+
+| | fidelity to what the check compares | size | Arbace compiles it today | license, pin |
+|---|---|---|---|---|
+| **GCC 15.2.0's libcpp** | pp: exact, it is g++ -E's (and gcc -E's) preprocessor; the target's answers through its own hooks (`cpp_callbacks`' `has_attribute`, `has_builtin`, `has_feature`, the search list by `cpp_set_include_chains`, the predefined macros by `cpp_define`), so every GNU extension, `#embed`, `__VA_OPT__`, modules' lexing and `__has_include` are g++'s own. lex: its raw lexer (`_cpp_lex_direct`, which lexes without handling directives) is not clang's: positions normalized as the port's are, the agreement to be measured. Covers C's 72 too | 14 units and their headers: 35,318 lines of code (61,685 with the generated tables `uname2c.h`, `ucnid.h` and the two generators); libiberty's pieces it calls (hashtab, obstack, xmalloc, concat, safe-ctype, md5, ...), about 3,500 lines of C | **3 of 14 units** by the native front end and code generator (probe below); the libiberty part is C, ci's | GPL-3.0-or-later (libiberty LGPL-2.0+); the gcc-15.2.0 tarball already pinned (test/cpp/corpora.edn's `:gcc-15.2.0`, in `.tmp/c1/gcc/`), no fetch |
+| **clang 23.1.5's Lex** | lex: exact (the recorder itself). pp: close to g++ with the target's predefined buffer (`Preprocessor::setPredefines`), but its `__has_builtin`, `__has_attribute`, `__has_cpp_attribute` and `__has_feature` answers are clang's tables (no hook), so libstdc++'s `c++config.h` and any file including a standard header can take other branches than g++'s; clang -E's own differences from g++ -E (CP261 (a)'s 27 files are the known ones) | clang/lib/Lex and its headers 44,798 lines; with the parts of Basic (SourceManager, IdentifierTable, LangOptions, Diagnostic, TargetInfo) and of LLVM's Support and ADT it needs, well over 100,000 lines of C++17 (Basic 71,917, Support 162,966, ADT 45,037 in all), and clang-tblgen's generated `.inc` files | no: far beyond the native front end and code generator; by the pack route (clang's own IR, recorded) the judge would be a host toolchain's record again (0.5) | Apache-2.0 WITH LLVM-exception; the llvm-project-23.1.5 tarball already pinned (corpora.edn) |
+| **mcpp 2.7.2** (2008) | C99 and C++98: none of C++11's lexical changes (raw strings, `u8`/`u`/`U` literals, user-defined literals, digit separators), no `__VA_OPT__`, no `__has_include`/`__has_builtin`/`__has_cpp_attribute`, no `<=>`, `#elifdef`, `#embed` or modules; no raw-token dump. Of the 1,934 files, 405 use one of these in their own text (a text scan, an upper bound: raw strings 6, prefixed literals 13, user-defined literals 133, `<=>` 14, `#elifdef`/`#embed` 4, modules 118, `__has_` 9, system headers 169, whose libstdc++ `c++config.h` asks `__has_builtin`, ...): at most the other 1,529 files' pp level, no file's lex level; none of C's 72 (C23's `#embed`, `__VA_OPT__`, `u` prefixes) | about 20,000 lines of C (not fetched, not counted) | likely (C90; ci reads musl, sqlite, bzip2, lzma and zstd) | BSD-2-Clause; **not pinned**: a fetch from SourceForge needs the user's go-ahead |
+
+Others weighed: simplecpp (cppcheck's, C++ over the standard library, no `__has_builtin`/`__has_cpp_attribute`, not pinned), Boost.Wave
+(Spirit's templates), tcc's `tccpp.c` (LGPL-2.1, C only), ucpp and chibicc/slimcc (C only): none reads modern C++ as g++ does. cc
+(`tools/ccdump`, C's own judge) is the port's origin and C only.
+
+### The probe: libcpp through Arbace's C++ (2026-11-20, the worktree, stage 0 of the main checkout)
+
+libcpp's 14 units (`errors expr charset directives files identifiers init lex line-map macro mkdeps pch symtab traditional`) from the
+pinned tarball through `arbace.cpp.codegen gen-batch` (bin/cppi's route `ours`: the native parser, sema, the code generator; no clang,
+no g++), `c++17`, `-I` libcpp, libcpp/include and include/, a `config.h` written by hand from `config.in` for x86_64-linux-musl
+(`HAVE_*` of musl's headers, no `HAVE_UCHAR`), `localedir.h` (`LOCALEDIR ""`) and `-U__GNUC__` (libcpp's portable paths, as a
+non-GCC host compiler builds it: obstack.h's macros without statement expressions, which the native parser declines inside them; no
+behaviour changes, lex.cc's `search_line_fast` falls back to its generic version). One process, 3 min, peak 3.3 GB.
+
+- **The native parser reads all 14** (with `__GNUC__` defined it declined obstack's statement expressions; a first `config.h` that
+  said `HAVE_UCHAR` hid the `uchar` typedef: both the probe's, not the parser's).
+- **The code generator generates 3**: `lex` (the largest, 5,807 lines), `line-map`, `mkdeps`. **It refuses 11**, each at its first
+  gap: `decltype(cpp_callbacks::diagnostic)` as a type (charset; errors: a function pointer converted to it), no viable function among
+  1 (directives), `member op` (expr), `name stat of kind :type` (files: `struct stat` and `stat()`), no function of the set matches
+  (identifiers), `this outside a method` (init), `call of a non-function` (macro), no member `definedhash` (pch), a header type: a
+  function type with an incomplete struct parameter (symtab), `unknown type block` (traditional). These are the code generator's
+  (arbace/cpp/codegen, the cpp-rt-own line's), not this branch's to change.
+
+### The choice
+
+**libcpp**: the only candidate exact at the pp level for both crops, already pinned, its answers fed through its own hooks from the
+target the port reads. It needs (1) the user's ruling on running GPL code at check time (CP413) and (2) the code generator's 11 gaps
+above (or the native front end's whole-program build) before Arbace compiles it. clang's Lex is out of reach of Arbace's C++ for long;
+mcpp leaves a fifth of the files and every lex level on the records, and needs a fetch.
+
+### The plan once ruled (CP413 (a), CP414)
+
+1. **The harness**, Arbace's own C++ (`tools/ppref/`, about 400 lines, under Arbace's license, no line of libcpp): reads a file's
+   configuration as the check's `gxx.list` gives it (standard, options, the read path) and the target (`cpp/target/host`: predefined
+   macros and option deltas, `has.tsv` and `has-extra.tsv`, the search list over the tree `bin/repr-cpp target` makes; C mode:
+   `c/target`), sets libcpp's options (`cpp_create_reader` with the language of `-std`, `-trigraphs`, `-fextended-identifiers`,
+   `-fdollars-in-identifiers`, `-pedantic[-errors]`, `-Werror`, `-D`/`-U`/`-I`/`-include`), answers the `__has_` hooks from the
+   table, maps the diagnostics' levels as c-family's `c_cpp_diagnostic` does (a pedwarn an error under `-pedantic-errors`), and prints
+   `pp` (the `cpp_get_token` stream's spellings, a pragma's tokens left out, `#embed` as its integers, the status 1 on an error) or
+   `lex` (`_cpp_lex_direct` over the main file, `LINE:COL<tab>TEXT` with the port's normalization).
+2. **The build**, in `.tmp` only (`bin/repr-cpp ppref build`): libcpp's 14 units and the harness by the native route (`gen-batch` with
+   the probe's options and a `config.h` the script writes), libiberty's C files by ci, the lowered C and the C linked by ci and cf2g
+   into one executable; keyed by the tarball's pin, the code generator's key and the harness. Never committed, packed or pushed.
+3. **The judge mode** (as Python's `REPR_PYTHON_RT_LEVELS=own`): `REPR_CPP_PP_JUDGE=own`, the default: `check-file` compares the
+   port's digest with the reference's run at check time (`agree`, `both-reject` on two errors, `differ`); `pp-gxx.sha256` and
+   `lex-clang.sha256` the oracle tier's (`REPR_CPP_PP_JUDGE=records`, `cpp-tokens-oracle`), and a step there checking that the
+   reference's digests are the recorded ones file by file (the harness's fidelity, recorded where not: a `:ppref` class in the known
+   file). C: `ARBACE_C_JUDGE`'s own mode judges the 72 by the reference in place of their reviewed class.
+4. **The proofs**: a sample (`--sample 50`), then one whole run (the recorded samplings) as the record, `--record-results` unchanged
+   in content; the negative controls (`test/cpp/controls.edn`'s `:pp`) against the reference's run; a planted bug in
+   `arbace.repr.c.pp` (a `__VA_OPT__` or stringizing slip) that passes nothing it should not: the check must fail under the own judge.
+5. **The facts**: `:pp-check [1931 1]` (or `[1931 0.75]` while the lex level stays on clang's record, CP414 (b)); C's 72 from recorded
+   to own. Projected: C++'s judge (8581 + 1931 + 0.5 x 34) / 10546 = **0.998** (from 0.907), independence 91.4 to **93.2** (floor 91 to
+   93); C's judge (14867 + 72 + 0.5 x 76) / 15015 = **0.997** (from 0.995), independence 99.90 to 99.95 (floor 99, unchanged).
+
+### Proposed
+
+- **CP413: GCC's libcpp as the token checks' reference at check time.** Running it is not restricted (GPLv3 §2: one may make, run and
+  propagate covered works one does not convey, without conditions); its build (and the lowered C and Go forms made from it, which are
+  translations of it) stays in `.tmp` and the gate's local caches, never committed, packed into a record or pushed; the harness in the
+  tree is Arbace's own code against libcpp's interface, with LICENSE.md saying what it is linked with, where, and that the result is
+  never conveyed (CLAUDE.md's Haskell note: no GPL code enters the tree; none would). (a) Accepted on those terms; the plan above
+  once the code generator's 11 gaps are closed (they are the C++ line's; this plan adds the libcpp units to its list). (b) Accepted, but
+  the harness itself under a GPL-compatible permissive license of its own (MIT), so that even the combination could be conveyed under
+  the GPL. (c) Not accepted: mcpp 2.7.2 (fetch approval; at most 1,529 files' pp level, their lex level still clang's record: C++'s judge at
+  most 0.943, nothing of C's 72).
+  (d) Not accepted: the records stay (C++'s judge 0.907, C's 0.995). **Recommended: (a).**
+- **CP414: the lex level's judge.** (a) libcpp's raw lexer by the harness (`lex` mode), its positions normalized as the port's are for
+  clang; files where it differs from clang's record by a convention (a splice's placement, a stray character's grouping) listed in a
+  known class after review; clang's digests the oracle tier's. (b) The lex level stays on clang's recorded digests (each file then
+  half own, 0.75). (c) The lex level moves to the oracle tier altogether: the pp level runs every token of the stream through the
+  lexer, so the check-time judge is the pp level's alone. **Recommended: (a)**, measured on the 1,931 before it is the default.
+
+Scratch: `.tmp/ppref/` in the worktree (libcpp and libiberty extracted, the probe's `config.h`, its lists and logs `probe4/`; the
+corpora scan `files.txt`, `paths.txt`).
+
+## As built: pp-ref, the token checks' own reference (2026-11-20; the user's CP413 (a) and CP414 (a); branch `pp-ref-1120`)
+
+The user accepted CP413 (a) (libcpp at check time, built into `.tmp` and the gate's local caches only, never committed, packed or
+pushed, the harness Arbace's own) and CP414 (a) (the lex level judged by libcpp's raw lexer, measured against clang's record first,
+the differences explained). The code generator's gaps go to cpp-rt-own-1120, which owns arbace/cpp/codegen.
+
+### Built
+
+- **The harness, `tools/ppref/ppref.cc`** (Arbace's own, EPL-1.0; LICENSE.md says what it is linked with, where, and that the result
+  is never conveyed). What cc1plus (cc1) does around libcpp for `g++ -E -P`: c-opts.cc's options (the standards, `-x
+  assembler-with-cpp` and `.S`, `-I`/`-iquote`/`-isystem`/`-idirafter`, `--embed-dir`, `-include`, `-nostdinc[++]`, `-trigraphs`,
+  `-pedantic[-errors]`, `-w`, `-Werror[=]`, the preprocessor's `-W` options, the identifiers' and literals' `-f` options, the
+  charsets), c-family's precisions and `cpp_init_iconv`, c_finish_options' order (`<built-in>`: libcpp's builtins then the target's
+  predefined macros, the check's per configuration, `--predef`; `<command-line>`; `-include`), c-family's `__has_` operands' parse
+  answered from the target's table (`--has`; libcpp gives `__has_cpp_attribute` and `__has_attribute` one hook, BT_HAS_ATTRIBUTE,
+  so either spelling's row answers), `remap_filename` (a header under the sysroot named as g++ names it), `SOURCE_DATE_EPOCH`, and
+  c_cpp_diagnostic's severities (a pedwarn an error under `-pedantic-errors`, a warning under `-Werror`; none in a system header).
+  `pp`: the stream's tokens (identifiers apart, a user-defined literal as literal and suffix, an `#embed`'s bytes as numbers and
+  commas, pragmas left out), status 1 on an error; `lex`: `_cpp_lex_token` with `parsing_args` 1 (no directive run, no macro
+  expanded), each token's place from its source range, placed at the splices that touch it from the left, its text without splices.
+  `--list FILE` runs many files in one process (no `cpp_destroy`: cc1 never calls it, and its file cleanup frees the names
+  `__has_include` gave). `tools/ppref/shim.c`: operator new and delete, `__cxa_pure_virtual` (libcpp built `-fno-exceptions` as GCC
+  builds it), `__cxa_guard_*` (one thread: charset's template's local static) and `C_alloca` (libiberty.h's alloca without
+  `__GNUC__`; heap blocks never freed). libcpp's `config.h` (with `ENABLE_CANONICAL_SYSTEM_HEADERS`, Alpine's gcc's: a system header's `__FILE__` the shorter
+  real path), `localedir.h` and libiberty's `config.h` are written by the build script.
+- **`bin/repr-cpp ppref prepare|build|exe|key [--native]`** (`bin/lib/repr-cpp/ppref`): the pinned tarball checked and its libcpp,
+  include/ and 16 libiberty files extracted into `.tmp/ppref/src-KEY/`; `build`, Arbace's own: libcpp's 14 units and the harness by
+  `arbace.cpp.codegen gen-batch` (`-U__GNUC__ -fno-exceptions`), their lowered C read by repr/c with libiberty's C units (their own
+  options: `arbace.cpp.run read-lib-opts`, in threads, outside runtime-ci's key), the exceptions' layer and the shim, linked and translated by cf2g
+  (`compile-list`), built by TamaGo's go into the main checkout's `.tmp/ppref/own-KEY/ppref` (KEY: the sources, the harness, the code generator, the
+  lowering, repr/c, ci and its back end, the targets, this script); a refused unit stops it (exit 3, the refusals listed); `--native`:
+  the same sources by the host's g++ and gcc into `.tmp/ppref/native-KEY/ppref`, the oracle tier's and the harness's development
+  build, never the check's judge.
+- **The judge mode, C++** (`arbace.repr.cpp.ppcheck`, `bin/lib/repr-cpp/pp-check`): `REPR_CPP_PP_JUDGE=own` runs the reference over
+  the corpus (`ref-lists`: a predefined file per configuration, the port's; the table; the search list under the sysroot; chunks of
+  20 files a process, in the corpus's directory) and judges each file by its runs in place of the records: the stream against its
+  stream (agree, both-reject), CP261 (a)'s case (g++ -E no reference) against its raw tokens (`ref-tokens`), the raw tokens against
+  its raw tokens; the known file's own sections `:pp-own` and `:lex-own` (the files whose answers are not the reference's, each with
+  its class); the controls judged by the reference's runs of their references. `records` (the default until the own build exists)
+  as before. `--fidelity` / `--fidelity-only`: the reference's runs against pp-gxx.sha256 and lex-clang.sha256 file by file
+  (`WORK/ID/fidelity.tsv`), every difference in the known file's `:ref` (its level and class), else exit 1: the oracle tier's.
+  `bin/repr-cpp pp-diff-ref CORPUS NAME`: the first difference between the reference's stream and the port's.
+- **C** (`arbace.repr.c.ppcheck`, `bin/lib/repr-c/check`): `REPR_C_PP_JUDGE=own` runs the reference (`--lang c`, c/target's answers,
+  C's sysroot) over the known file's `:pp` files and judges each by its stream (pp status `ref`, still `:known` in the results: cc
+  is wrong there, the class stands); an entry the reference does not judge says `:ref :differs` and keeps its class; C23's `::`
+  read as the digest's lexer reads gcc -E's text, two colons. `class` (the default until the own build exists) as before.
+  `ppcheck ref-diff`: the first difference. The recorder keeps the `:ref` marks.
+
+### The gate (written, held: 910cf7a77 reverts it until the own build exists; reverting that commit flips it)
+
+- `cpp-ppref` (`:phase :build`, 8 GiB): `bin/repr-cpp ppref build` (each process capped at 8 GiB of address space, the host's rule of
+  2026-11-20 for jobs under 8 GiB: no heavy lock; the builds in the main checkout's `.tmp/ppref`, shared by key), seconds when built; `cpp-essential` and
+  `cpp-tokens` need it and run `REPR_CPP_PP_JUDGE=own`; `c-tokens-ref` (`--full`, chain c-full): the known file's 72 `:pp` files
+  (`test/c/pp-ref.txt`) under `REPR_C_PP_JUDGE=own`, c-tokens judging the rest by cc as before; the oracle tier's `cpp-tokens-oracle`
+  (`:cxx :gcc`): `bin/repr-cpp ppref fidelity` (the native build's runs against the records, every difference in `:ref`) and the check
+  judged by the records (`REPR_CPP_PP_JUDGE=records`), the records' only reader now. The fragments `test/gate/crops/cpp.edn` and
+  `cpp-oracle.edn` say the same; `tools/ppref/` joins `:cpp`'s inputs and crop paths.
+
+### Measured (the native build, `REPR_CPP_PPREF`: the harness's fidelity before the own build exists; the own build's runs must give
+### the same records)
+
+| check | result |
+|---|---|
+| fidelity, C++ (`--fidelity-only`, the recorded samplings) | pp: 1,735 equal and 46 both-reject of gxx-dg's 1,807, 103 + 5 of libstdcxx-headers' 108, 14 + 4 of cpp-lexical's 19; the 27 others g++ -E rejects and the reference reads (CP261 (a)'s and CP260 (a)'s: 22 modules, 5 options or a header unit): no stream differs. lex: 1,927 of 1,934 equal; 7 differ by the raw lexers' conventions. All 34 in the known file's `:ref` (fidelity status 0) |
+| C++'s check, `REPR_CPP_PP_JUDGE=own` (the native build) | cpp-lexical 19 of 19 (lex 16 agree, 3 known; pp 14 agree, 4 both reject, 1 by the reference's raw tokens); libstdcxx-headers 108 of 108 (lex and pp all agree or both reject: Makefile.am's clang convention gone); gxx-dg 1,807 of 1,807 (lex 1,805 agree, 2 known; pp 1,761 agree, 44 both reject, 1 by raw tokens, 1 known); the controls fail as they must (the `:pp-clang` one taken as CP261's path, its subject's record `:rejected`) |
+| C's 72, `REPR_C_PP_JUDGE=own` (`--only` the 72) | 69 judged by the reference's stream (gcc-c23 5, gcc-cpp-c23 9, gcc-embed 44, gcc-va-opt 9, mir, sqlite); 3 `:ref :differs`: c23-digit-separators-2.c (the reference, as gcc, rejects adjacent digit separators, the port reads them), c23-ucnid-1-utf8.c (the port's stream is gcc's neither), tcc-pp/13.S (gcc -E keeps an assembler's `#` comment line, which the digest drops) |
+| the own route (`gen-batch`, the probe's options) | the harness generates; the native parser reads all 14 units; the code generator generated 3 of 14 at next (lex, line-map, mkdeps), 15 of 15 (the 14 and the harness) once cpp-rt-own-1120's gap fixes were merged (mac/cpp-rt-own-1120 76118c206): 15.9 MB of lowered C, charset's 10.2 MB (its tables `ucnid.h` and `uname2c.h`) |
+| the planted bug (the native build; arbace.repr.c.pp's `__LINE__` one more past line 100, in a scratch checkout) | C++: cpp-lexical fails (includenext.cpp's libstdc++ assertion), libstdcxx-headers 42 of 108 fail; C (the 72): c23-digit-separators-1.c and sqlite3.c fail; each check exit 1. C's control `_control/tokens-ref/va-opt-2-vs-va-opt-3` differs as it must |
+| repr/c's read of the library (`read-lib-opts`) | the 3 units' and the harness's lowered C, libiberty's 16 units, the exceptions' layer and the shim: 21 of 22 at first (xvasprintf.c needed `vprintf-support.h`, now extracted) |
+
+The own-mode known classes (`:raw-udl-suffix`, `:unterminated-raw-string`, `:non-xid-utf8`) are conventions of libcpp's raw lexing
+against clang's (and the port's): libcpp takes an identifier touching a literal as its suffix unless it names a macro, and its raw
+lexing runs no `#define`; an unterminated raw string ends at its line's end; a run of valid UTF-8 non-identifier characters is one
+identifier. At pp libcpp knows the macros and splits as the port does.
+
+### Blocked: the code generator's constant tables (2026-11-20, after merging mac/cpp-rt-own-1120 76118c206)
+
+With cpp-rt-own-1120's fixes the code generator generates all 15 units (the 14 and the harness, one gen-batch process, 3.3 GB). The
+build then stops at the library's read: the code generator emits a constant array's initializer as a packed literal struct of one
+field an element (LLVM `<{ i8, i8, ... }>` where clang emits `[N x i8]`), lowered to a C struct of as many members:
+charset.cc's `uname2c_tree` (`static const unsigned char uname2c_tree[218382]`, `uname2c.h`) is a struct of 218,382 members, beside
+ones of 61,913 and 11,420 (`uname2c_dict`, `ucnranges`); charset's lowered C is 10.2 MB of the 15.9 MB (332,270 lines, 294,642 of
+them members). repr/c's read of it: past 8 GiB of address space with two threads (out of memory at 6.5 GB in use), and still reading
+after 35 minutes in one thread at GOMEMLIMIT 5GiB (6 GB resident, about 11 cores of GC; stopped). Measured on synthetic structs
+(`bin/ci diagnose`): 4,000 members 17 s and 1.09 GB, 8,000 28 s and 1.27 GB, 16,000 45 s and 1.72 GB: about 50 KB and 2 ms a member,
+so 294,642 members ask some 15 GB, and cf2g's Go and Go's compiler would meet the same struct after it. libcpp's other units' tables
+are small (lex, files, init, directives, expr, macro: 1 to 4 such structs each). Wanted of the code generator (cpp-rt-own's,
+arbace/cpp/codegen, not this branch's): a constant array of scalars as an LLVM array (`[N x i8] c"..."` as clang, or `[N x i32] [...]`),
+lowered to a C array. Then: `bin/repr-cpp ppref build`, the own build's runs against the native build's (the same records, file by
+file), the record run (`--record-results`), the planted bug and the controls again on it, the facts (C++'s judge `:pp-check` 1,931 by
+the reference: (8581 + 1926 + 0.5 x 39) / 10546 = 0.998, the 5 own-known files at 0.5; C's 69 of 72 own: (14936 + 0.5 x 79) / 15015 =
+0.997), and reverting 910cf7a77.
+
+Update (2026-11-20, evening; mac/cpp-rt-own-1120 c1c2badd8 merged: a constant array an LLVM array): the 15 units generate afresh
+(one process, 3.2 GB; charset's lowered C 1.6 MB), the library's read takes 15 minutes at a 3.7 GB peak under the 8 GiB cap, and 31
+of its 32 units read. expr.cc's does not: `label undefined: b$lbl$_119`, 14 `goto`s of cpp_classify_number to a label its IR never
+defines (`br label %lbl.119`, the function's label being `lbl.syntax_error1305`). Reduced: a `goto` whose label name a macro's
+expansion writes gets a label of no name (`lbl.11`), the same `goto` written in place the function's (`lbl.bad18`):
+
+    void f (int);
+    #define ERR(x) do { f (x); goto bad; } while (0)
+    int g (int a) { if (a == 1) ERR (1); if (a == 2) goto bad; return 0; bad: return 1; }
+
+(`arbace.cpp.codegen gen-batch`, c++17: `br label %lbl.11` and `br label %lbl.bad18`, only `lbl.bad18:` defined; without the macro
+the `do ... while (0)` is right). libcpp's SYNTAX_ERROR macros are such gotos. The code generator's (cpp-rt-own's) to fix.
+
+### Built by Arbace (2026-11-20, night; mac/cpp-rt-own-1120 8faf78756 merged: a macro's goto reaches its label)
+
+| step | result |
+|---|---|
+| the own build (`bin/repr-cpp ppref build`, every process capped at 8 GiB) | the 15 units afresh (only expr's lowered C changed by the goto fix), the library's 32 units read (3.8 GB peak), linked and translated by cf2g, built by TamaGo's go: 17.6 minutes, then 11.8 with the shim's `__cxa_guard_*` and `C_alloca` (the first run faulted in cpp_init_iconv's alloca); `.tmp/ppref/own-54afa0a5a8d3029c/ppref`, about 30 times the native build's time a file |
+| against the native stand-in, file by file | byte for byte: 76 output files of cpp-lexical, 72,264 of gxx-dg every 10th, 3,448 of libstdcxx-headers every 8th (the streams, raw tokens and statuses); its fidelity against the records the native's (status 0 in each corpus) |
+| the record run (`REPR_CPP_PP_JUDGE=own --record-results`) | cpp-lexical 19 (16 pass, 3 known), libstdcxx-headers 108 pass, gxx-dg 1,807 (1,805 pass, 2 known); the controls fail as they must; test/repr/cpp/pp-check-results.edn rewritten: 1,929 pass, 5 known (the own sections' classes), CP260 (a)'s three n/a files (pr60969.C, vect/pr99149.cc, Makefile.am) passes now, the reference reading them; reap's C++ read source takes `:pp-own :lex-own`, the three classes in test/cpp/divergences-read.edn (`:design`): the read cell 5,541 / 327 / 630, 33 n/a |
+| C's 72 (`REPR_C_PP_JUDGE=own`) | 69 by the reference's stream, 3 `:ref :differs`; the control `_control/tokens-ref/va-opt-2-vs-va-opt-3` differs |
+| the planted bug on the own build (a scratch checkout; `__LINE__` one more past line 100) | cpp-lexical 1 fails (includenext.cpp), libstdcxx-headers 42, C's 2 (c23-digit-separators-1.c, sqlite3.c); each exit 1 |
+| the stub run (gcc, g++, cc, c++, cpp, cc1, cc1plus, clang, clang++, clang-23, ld, as exiting 99 first on PATH) | the own-judged `pp-check --essential` (53 files) and C's gcc-va-opt (9) pass, the stubs' log empty |
+| the facts | C++'s judge `:pp-check-own [1929 1] :pp-check-class [5 0.5]`, the read's tokens 1,934: judge 0.907 to 0.998, independence 91.38 to 93.20 (floor 91 to 93), completeness 95.63 to 95.61; C's judge `{:self 14936 :recorded 79}`: 0.995 to 0.997, independence 99.90 to 99.94 (floor 99); `bin/crops-score --record`, `--judge --strict` (0 problems), `bin/records-check` (0), `bin/reap --record` (0), `bin/gate --plan` (exit 0) |
+| the gate | 910cf7a77 reverted (3898cd60b): cpp-ppref, the own-judged cpp-essential, cpp-tokens and c-tokens-ref, cpp-tokens-oracle |
+
+## As built: cpp-rt-own, the runtime's pack units and libcpp's gaps (2026-11-20; branch `cpp-rt-own-1120` from next 939037429)
+
+The brief (the main session, toward the CoMaIn goal: C++'s independence, 91): build the code generator's coverage of the 32 units
+of the lowered runtime that bin/cppi's route auto still took from the pack cpp-runtime-ir (166 of 198 own, `test/cpp/runtime/inputs`
+from n-all5's records); then (the coordinator, the same day, CP413 (a), CP414 (a)) close the code generator's gaps on GCC 15.2.0's
+libcpp, the token check's reference to be, proven unit by unit as the runtime's are. Light and targeted: no gate, no whole-corpus run,
+one generator process at a time but for a few probes (the host's javac tool build held 41 GB; the coordinator froze two probes once).
+
+### The 32 units and their causes (each unit's IR by `arbace.cpp.codegen gen-batch` with runtime_ours' options, its defined
+external names against the pack's IR: runtime-judge's names level)
+
+| cause | units | state |
+|---|---|---|
+| the parser: a qualified declarator-id's rest and body looked up in its class's or namespace's enclosing namespaces (and the definition's template headers first); a namespace member defined outside it; a class defined by a qualified name replacing its incomplete declaration, inline namespaces too | c++17/fs_*, cow-fs_*, exp/filesystem/* (12), cxx11-/cow-shim_facets | parse clean in all |
+| a dependent template-id's member call mangled (`clsr17_TupleConstraints...E`) | future, thread | **same** |
+| a constexpr constructor with an empty body a constant initializer (`__constinit constant_init`) | ios_errcat, system_error | **same** |
+| a member template defined behind a conditional (`#ifdef ... #else __resize_and_overwrite(...)`: :_qual) and specializations over internal types internal | system_error | **same** |
+| DECISION 411-1 (a): linux-headers' 16 files pinned in cpp/target/libraries.sha256 (runtime_key hashes the pin) | random | **same** |
+| no weak C1 alias of an internal constructor | cxx11-shim_facets, cow-shim_facets | **same** |
+| GNU's `__decltype` | ext-inst | **same** |
+| a static data member's initializer in its class; an explicitly specialized member's definition written | locale_facets | **same** |
+| a declared explicit specialization never the primary's instance; a derived object's implicit object binding a Conversion; a real assigned to a GNU complex | complex_io | **same** |
+| inline namespaces for qualified definitions; a defaulted move's triviality; partial ordering by referred types, reference bindings' `:sub` against reference bindings alone | cow-fs_dir | **same** |
+| clang's first-emission mangling of a redefined class (`__shared_ptr<__cxx11::_Dir>` before `struct fs::_Dir`, `deque<filesystem::_Dir>` after): modeled (:mangle-path-after) | fs_dir, exp dir, cow-dir | names differ (relocation, iterator members) |
+| vector<_Cmpt>'s relocation (`_S_use_relocate`): the noexcept of a path's implicit move; path's copy members | fs_path, cow-fs_path, exp path, cow-path | names differ |
+| C++20's constraint mangling (`Q` requires-clauses over alias templates, `Tk` with arguments) | sstream-inst, print, text_encoding | names differ |
+| a variable-length array (GNU's), `char buffer[n + 1]` | floating_to_chars | refused |
+| valarray<size_t>'s instantiation through gslice (recursion depth, header drops) | valarray | refused |
+| a pool resource's vector of an incomplete _BigBlock instantiated | floating_from_chars | refused |
+| the evaluator's bit operations, decltype's operand unevaluated, initializer_list deduction from a braced list: generates; left, the internal linkage of functions whose signature or class names a type of an unnamed namespace (clang's LinkageComputer), a `constinit atomic<memory_resource*>` holding a pointer constant | memory_resource | 11 more |
+| class template instances over a type of an unnamed namespace internal (as for memory_resource); decltype's implicit this mangled `dtdefpT`; constinit `__file_clock::_S_epoch_diff` | fs_ops, cow-fs_ops, exp ops, cow-ops | names differ |
+| not probed to the end (the largest) | tzdb, format | open |
+| the one C unit | libsupc++/cp-demangle.c | DECISION cpp-rt-own-1 |
+
+### libcpp (GCC 15.2.0; GPL: extracted, built and probed in `.tmp` only, never committed)
+
+The pp-ref probe's options (`-U__GNUC__`, its config.h and localedir.h, c++17): before, 3 of 14 generated (lex, line-map, mkdeps).
+Now **all 14 generate, and each unit's defined external names are those of clang 23.1.5's IR of it** (recorded by hand into `.tmp`,
+the oracle tier's tool, as the pack's were; identifiers.cc with `__GNUC__`, as musl's offsetof needs it). The gaps closed:
+`decltype(cpp_callbacks::diagnostic)` (charset; decltype's operand unevaluated, an implicit this typed by its scope's class),
+`struct stat` beside `stat()` (files; a class hidden by a function or variable found with it), `this` outside a method (init: a
+macro-written definition's qualifier from the parser's tokens), a call of a non-function (macro: `(c ? gmtime : localtime) (&tt)`),
+overload sets (identifiers, directives: an elaborated-type-specifier's class declared in its namespace, `struct cpp_reader` in a header's
+function type, a member's `struct cpp_savedstate *`), a function type with an incomplete struct parameter (symtab: header function types),
+`member op` (expr: a data member of its class's name), no member definedhash (pch), `unknown type block` (traditional: an
+elaborated name among types alone), a void conditional, a lambda assigned to a pointer to function, an unnamed struct's array
+declarator, constant initializers folded by the evaluator (files' base64_dec), a constexpr object constant-initialized by its
+constructor's body (init's `_cpp_trigraph_map_d`, its extern "C" linkage kept).
+
+Then pp-ref-1120's blocker (b719822b1): the code generator wrote every constant aggregate as a packed literal struct of its leaves,
+so charset.cc's `uname2c_tree[218382]` was a 218,382-member struct (`uname2c_dict[61913]` 61,913 members, `ucnranges`' 2,855
+elements 11,420), and repr/c's read of the lowered C needed about 50 KB a member (about 15 GB for charset). Now a constant array is an LLVM
+array, as clang writes it (`array-constant` in arbace/cpp/codegen.ae, for namespace-scope and static local objects): `[N x i8]
+c"..."` for bytes, `[N x iK] [...]` for other scalars, `[N x T] [...]` for classes whose elements' leaves make one packed struct
+type T (an element without a leaf zero or zeroinitializer); nested arrays flattened; anything else keeps the packed struct. The
+lowering makes a C array of it. charset: gen.ll 3.9 MB to 1.4 MB, gen.c 10.2 MB to 1.6 MB, the tables' contents (uname2c_tree,
+uname2c_dict, wcwidth_widths, is_printable, the range ends) byte for byte those of clang's IR, the names still clang's; its read
+by `arbace.cpp.run read-lib` under `ulimit -v 8388608` 112 s and 2.25 GB peak. The runtime's eight own units with such globals
+(locale_init, locale_facets, debug, ext-inst, hashtable_c++0x, hashtable_tr1, c++locale, codecvt) generated again: each rewritten
+global the same bytes (a check laying both initializers out), the rest of the IR the same text up to the inliner's process-wide
+suffix counter (`arbace.cpp.inline`'s `counter`, never reset: a unit's local names depend on the units its process generated
+before it, the batch's composition; not this change's).
+
+Then pp-ref-1120's next blocker (2027ef101): a goto a macro writes branched to a label no block defines (expr.cc's
+cpp_classify_number, 14 `goto syntax_error`s of `SYNTAX_ERROR (...)` to `%lbl.119`, the label `lbl.syntax_error1305`). The analysis
+read a goto's label from the node's text, which a macro's expansion location does not hold (the invocation's text). The native
+parser now keeps the label's name on the node (`:label`, from the token; clang's node names its target by declaration,
+targetLabelDeclId), which sema's GotoStmt takes first. Proved on the coordinator's reduced case (both gotos to `lbl.bad11`, defined)
+and on expr.cc: a scratch check of every function's branch targets (`br`, `switch`, `invoke`) against its blocks finds none
+undefined, where pp-ref's earlier expr.cc (its control) has two (`lbl.119` in cpp_classify_number, `lbl.87` in _cpp_parse_expr);
+expr.cc's names still clang's. codegen-gen's one sample with a goto (control) unchanged; cpp-essential's print subsets pass.
+repr/cpp's own front end's jump check (arbace.repr.cpp.diag's goto-name) still reads the text, so it does not see a macro's goto:
+left for the dg slices.
+
+### Checked
+
+| check | result |
+|---|---|
+| each unit by gen-batch with runtime_ours' options (scratch probes), its names against the pack's IR | the 11 units added the same at 76118c206 (one process, 699 s) |
+| `bin/cppi runtime-build` (the default route, auto; at e8be60eb6, then at 8faf78756, the arrays and the goto, under `ulimit -v 8388608`) | **198 units, 198 pass, 177 by our route**, the names level equal for each (and every one of the 177 compared again by hand: none differs), at both heads; at 8faf78756 IR 2,818 s (the generation, one process), read, print and lower 292 s |
+| `bin/cppi runtime-ci` (`CPPI_CI_CHUNK=8 CPPI_CI_MEMLIMIT=2GiB`, under `ulimit -v 8388608`) | 199 of 199 read (the 198 units and cx-rt): at e8be60eb6 the whole runtime (76 min, the host loaded), at 8faf78756 the 9 units whose lowered C changed (the 8 with constant arrays and locale.cc; 6 min) |
+| `bin/cppi runtime-inputs --record` (at 8faf78756) | own 177, pack 21: test/cpp/runtime/inputs-linux-amd64.edn's 11 rows `{:ir :own, :ci-target :own}` |
+| `bin/cppi codegen-gen` (at e8be60eb6, then c1c2badd8) | 155 of 155, both controls failing as they must; struct-bind's forms digest re-recorded: `auto [x, y] = p;` of a pair binds through std::get<0>(pair&&) now, as clang 23.1.5 does (its IR by hand: the same six get specializations), get(const pair&&) before; at c1c2badd8 globals' (`table` a `[4 x i32]`, its bytes the packed struct's, checked by laying both out; the check's control, an element changed, flagged) |
+| cpp-essential's read and print subsets (`ARBACE_NO_AOT=1`): `bin/repr-cpp pp-check --essential`, `roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own` | the token checks agree (cpp-lexical 19, gxx-dg 31, libstdcxx-headers 3, the known and controls as recorded; udl.cpp's `"..."s` and `sv` lexed as clang does); 33 of 33 and 9 of 9 pass |
+| the own dg check on a slice (`bin/repr-cpp dg --corpus dg-error --front native --only`: the 78 files of the record using a qualified class definition, a namespace alias, a `s`/`sv` literal or a qualified function definition at the start of a line) | every row as test/cpp/check-dg-own-linux-amd64.edn records it but other/access2.C, now an own pass (the private member named in Derived::test); the record not rewritten (no whole run) |
+| `bin/cppi lower-essential` (`ARBACE_NO_AOT=1`, at 8faf78756) | 6 files, 6 pass, 0 failing (the control's lowered run the oracle tier's) |
+| `bin/cppi check --only test/cpp/essential-check.txt` (cpp-check-essential's command, `ARBACE_NO_AOT=1`, on this runtime at 8faf78756: the programs linked with ci's library of the lowered runtime) | samples 4 of 4 and runtime 4 of 4 pass (the programs' IR by our route), the run control differing as it must (83 min, 25 of it musl's forms read once into the shared cache, the host's load about 26) |
+| libcpp's 14 units (pp-ref's options, clang's IR by hand) | 14 of 14 generated, each one's names the same |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | the matrix unchanged (56 of 56 cells, 0 problems); C++'s eval and AOT stages 0.960 to 0.973 each (the runtime's half 0.919 to 0.947: (177 + 21 x 0.5) / 198), its independence 0.9138 to 0.9190, **91 to 91** (floored); test/crops/scores.edn re-recorded, `--judge --strict` 0 problems, records-check 9 pairs, 0 problems |
+
+What it moves: only `test/cpp/runtime/inputs-linux-amd64.edn` among C++'s records (177 rows `{:ir :own, :ci-target :own}`), with
+test/reap/matrix.edn and test/crops/scores.edn re-recorded on it, and test/cpp/codegen/forms.sha256's struct-bind line. The
+runtime's key moves (the code generator, the parser, cpp/target/libraries.sha256, rt_ours_glob): the gate's cpp-runtime builds once.
+
+Left, by the size of their next step: text_encoding (a closure's parameters as substitution candidates in its own name, clang's
+`UlcRbE_clEcS4_`; a constexpr static member initialized by a constexpr function returning a class), memory_resource and the fs and
+exp ops units (clang's LinkageComputer: a function whose signature, or a class template instance whose arguments, name a type of an
+unnamed namespace is internal; `dtdefpT` for decltype's implicit this; constinit objects holding pointers), sstream-inst, print and
+format (C++20's constraint mangling), floating_to_chars (a VLA), the path units (relocation's noexcept), fs_dir and exp dir (clang's
+first-emission naming beside the rest), valarray, floating_from_chars, tzdb. Each unit is worth about 0.05 of a point of C++'s
+independence (half a case of the runtime's 198 at two stages of five): 92 at 179 own units, two more.
+
+```
+DECISION cpp-rt-own-1 (libsupc++/cp-demangle.c, the lowered runtime's one C unit, from the pack)
+(a) Its lowered C is its own source, read by Arbace's own C (repr/c's preprocessor on c/target, ci's library as every unit's lowered
+    C is), no IR: runtime-build takes the C unit through repr/c into OUT/units/U/lowered.c, its names level the external names repr/c's
+    parse defines against the pack's IR. Recommended: ci is Arbace's C implementation; the IR to C lowering exists for the C++ units.
+(b) A C mode of the native C++ front end and code generator (C's implicit void* conversions, designated initializers in any order,
+    tentative definitions), its IR lowered as the others'.
+(c) Leave it on the pack (1 of 198 units).
+```
+
+## As built: queues 505, 506 and 508, the dg own verdicts' integration (2026-11-20; branch `508-cpp-dg-own12` from mac/506-cpp-dg-own11 579ce661e, mac/505-cpp-dg-own10 8776e9175 merged)
+
+- 505: friend functions' identity (`cx-friend-fn-ident!`, `cx-friend-fn-miss?`) and the elaborated-type-specifier's class in its
+  namespace or block (`cx-elab-decl-scope`, `cx-elab-declare!`, the parser's `:_elab-decl`); 6 rows.
+- 506: type access on instantiation (`cx-qual-type-access!` and its four rules: a class template's member types, an alias
+  template's specialization, base-specifiers, a member template's parameters); 4 rows.
+- 508: use of deleted functions: before C++17 the copy or move constructor an elided copy from a class prvalue chooses
+  (`cx-elided-copy!`, [class.temporary]/1 of C++14), a closure type's deleted default constructor and copy assignment
+  (`cx-closure-members!`, [expr.prim.lambda.closure]), a default-initialization's refusal located at its declaration; 8 rows.
+
+Rows that wait on the explicit instantiation's member bodies (505-1 (b), the main host 2026-11-20: in checking mode
+`explicit-inst-members!` analyzes no member body of `template class X<...>;`, [temp.explicit]/10, not for now):
+
+| row | the line it misses, and why |
+|---|---|
+| template/using16 | line 25: `B<T>::type`'s private constructor used in `C<int>::f`, reached only through `template class C<int>;` (line 41, a repeated `using typename D<T>::type;`, [namespace.udecl]/10, is a separate rule) |
+| template/friend82 | line 18: `c.x`, a private member of `A<int*>::C<long>`, in `A<double*>::B<long>::foo`, which only `template struct A<double*>::B<long>;` (line 23) instantiates (`A<int*>::C<long>` befriends `A<int*>::B`, not `A<double*>::B`); friend identity (505) is not the gap: the file with its friends removed is still accepted |
+| template/memfriend17 | line 42: `F1<int*>::foo`, private, in `A<int>::B::func2`, which only `template class A<int>;` (line 46) instantiates |
+## As built: cpp-rt-own2, the C unit, clang's linkage over unnamed namespaces and the fs units' gaps (2026-11-20; branch `cpp-rt-own2-1120` from mac/cpp-rt-own-1120 9dcc02f78)
+
+The brief (the main session, toward the CoMaIn goal): as many of the lowered runtime's 21 pack units own as the causes allow, in
+the order DECISION cpp-rt-own-1 (a), the unnamed namespace's internal linkage, C++20's constraint mangling, then floating_to_chars,
+the path and dir units and text_encoding; with the inliner's suffix counter reset per unit; DECISION 505-2 (a) added by the
+coordinator. Light and targeted: no gate; one generator process at a time but for two probes side by side (the host had 39 GB free
+once the 35 GB heavy-lock job ended).
+
+### DECISION cpp-rt-own-1 (a): libsupc++/cp-demangle.c read by Arbace's own C
+
+`bin/cppi`'s `runtime_ours_c` (from runtime_ours, for a unit of `rt_ours_glob` whose standard is `c`; `libsupc++/` names it): the
+unit's lowered C is its own source, the macros of rt_ir's clang command line for a C unit (`HAVE_STDLIB_H`, `HAVE_STRING_H`,
+`IN_GLIBCPP_V3`; its `-Iinclude` by the quoted headers copied beside it: cp-demangle.h, ansidecl.h, libiberty.h, demangle.h) then
+the tarball's file; `arbace.cpp.run`'s new `c-unit` reads it as read-lib's read-one reads a library unit (repr/c on the C target,
+gnu23, ci's atomics macros) and checks it as check-lib-unit does (ci's checker), writing `rt.status` (the forms level of a C unit)
+and `c-defs.txt` (the external names its forms define, arbace.c.musl/unit-defs, the linker's), which runtime-judge's names level
+holds to the pack's IR kept as `clang.ll`. No IR, no lowering: `rt_two`'s object level `skipped`. A unit repr/c or the checker
+refuses keeps the pack's IR under auto (fails under ours). runtime_key adds runtime_ours_c's text, arbace/cpp/run.ae,
+arbace/c/run.ae, arbace/c/check.ae and c/target (the route's deciders). The inputs record's header says what `:ir :own` means for a
+C unit. The read: 12 s, the check 2 s, 1.2 GB; its names `__cxa_demangle` and `__gcclibcxx_demangle_callback`, the pack's.
+runtime/uncaught.cpp (cpp-check-essential) runs it on ci: the verbose terminate handler demangles the exception's type.
+
+### The unnamed namespace's internal linkage and the units' other gaps (each checked on a reduced case against clang 23.1.5's IR,
+by hand, the oracle tier's tool, then on the units by `arbace.cpp.codegen gen-batch` with runtime_ours' options)
+
+- **clang's LinkageComputer.** A class template's specialization whose arguments name a type of internal linkage is internal, and
+  so are its members and static data members (mergeTemplateLV; template's declare-instance! and incomplete-instance! give its scope
+  `:internal`, an instantiated static member takes its class's): memory_resource's `polymorphic_allocator<(anonymous)::chunk>`,
+  fs_ops' `unique_ptr<char[], (anonymous)::free_as_in_malloc>` with its tuple and __uniq_ptr_impl. A member function whose type as
+  written names one is internal (getLVForClassMember's UniqueExternalLinkage): `__pool_resource::_Pool::vector::begin()` returning
+  `chunk*`. One predicate, sema's `internal-type?` (classes of an unnamed namespace or local to an internal function, `$_N` closures,
+  specializations over them, enumerations of an unnamed namespace, through pointers, references, arrays, member pointers, function
+  types and packs), template's internal-args? over it.
+- **An address constant.** The evaluator takes the address of an object of static storage duration (a namespace-scope or static
+  data member variable, a member or non-virtual base subobject of one) as a value, `{::gaddr VAR ::off BYTES}`, only under
+  ce-object (a namespace-scope object's constexpr constructor), passed, stored and returned, never read through (ce-num refuses a
+  map as a number, any host exception with one made is no constant); the code generator writes it as a pointer leaf (the symbol, or
+  a getelementptr of i8), the variable's definition written when first used; a union by its active member. memory_resource's
+  `__constinit constant_init<atomic_mem_res> default_res{&newdel_res.obj}`: constant, atomic<memory_resource*>'s constructors
+  never emitted, as clang.
+- `__is_pod` requires a trivial default constructor ([class.prop]/9, as __is_trivial): `_BigBlock` (its base big_block has a default
+  member initializer) is no POD, rotate's `if (__is_pod(_ValueType) && __k == 1)` folded false, its move_backward and advance unwritten.
+- A decltype operand's non-static data member named alone is the implicit this's member access, `dtdefpT` (clang): _Mem_fn_base's
+  `decltype(std::__invoke(_M_pm, ...))`.
+- **Implicit ABI tags** (Itanium 5.1.2, clang's makeFunctionReturnTypeTags): a function whose return type is not mangled (no template
+  specialization, constructor, destructor or conversion) gets the tags its return type uses and its name and parameters do not; a
+  namespace's abi_tag (`inline namespace __cxx11 __attribute__((__abi_tag__ ("cxx11")))`) kept by the native parser as `:_abi-tags`,
+  sema's `abi/*ns-tags*`, used and never written: fs_ops' `current_path[abi:cxx11]()`, `temp_directory_path[abi:cxx11]()`.
+- An implicit default constructor when a base's default constructor is inherited by a using-declaration and the class declares none
+  (clang's HasInheritedDefaultConstructor): __uniq_ptr_data's `C2Ev`, not the inheriting constructor `CI2...Ev`; and a default
+  constructor is trivial only when the class has one that is no template (clang's hasTrivialDefaultConstructor): __uniq_ptr_impl()
+  = default over its tuple is not, so unique_ptr() : _M_t() zeroes then calls it, _Head_base<0, char*>() written.
+- A move assignment defaulted on its first declaration is trivial as the copy one (file_status' operator=(file_status&&), a memcpy);
+  a header's out-of-line inline `= default` definition is user-provided and defined where used (experimental path's copy
+  constructor, destructor and copy assignment, declared alone before: their calls undefined in exp ops' IR).
+- A closure's `Ul <parameters> E` mangled in the enclosing name's substitutions (clang's mangleLambda): text_encoding's
+  `__charset_alias_match`'s `...ENKUlcRbE_clEcS4_` (a fresh table had written `clEcRb`).
+- A class object initialized by a prvalue a constant expression gives is folded by the evaluator (<charconv>'s
+  `static constexpr type value = (_DecOnly, _S_make_table());`, its 256 bytes those of clang's IR), the evaluator taking an array of
+  characters from a string literal and an implicit or first-declaration-defaulted constructor as constexpr when it can be.
+- A function parameter pack in a function type's `noexcept(e)` scope (fn-type-scope: its parameters from the expanded function type,
+  its name a `:varpack`): alloc_traits' `construct` noexcept as clang computes it, so vector's `_S_use_relocate()` true and its
+  reallocation a relocation, not copies through move_if_noexcept (the path units' relocation).
+- `static` kept on an out-of-class definition of a non-template class's member template (as queue 392 keeps it for a class template's):
+  fs_path.h's `path::_S_convert<_EcharT>(const _EcharT*, const _EcharT*)`, called on no object from the static `_S_convert(_Tp)`,
+  "codegen: lvalue" (a path from a std::wstring; fs_path.cc and cow-fs_path.cc refused once more of their code was reached).
+- A returned local of class type is an rvalue in a function whose return type is deduced too ([class.copy.elision]/3): _S_convert's
+  `return __str;` moves, as clang.
+- Since C++17 the redundant out-of-line definition of an inline static data member ([depr.static.constexpr]) is written whether used or
+  not, weak_odr, as an explicit instantiation's (clang's GVA_StrongODR): exp path's `constexpr path::value_type path::preferred_separator;`.
+
+### DECISION 510-1 (a) (the coordinator, after the runtime-build): a using-declared member's implicit object parameter
+
+The Mac's queue 510, round 2 (mac/510-cpp-dg-own14 eb1ac403f, merged into next) found that cpp-rt-own's 4bad0587c, a derived
+object's binding of the implicit object parameter ranked as a derived-to-base Conversion, broke cpp1z/using1.C, and gave the
+checker [over.match.funcs.general]/4: a member a using-declaration of class U nominates is U's member for that parameter, no
+conversion from an object of U. 259a4fb98 gives the code generator the same rule (the using-declaration's member function
+entries carry :ucls in both modes; the ranking's ucls without the checker's guard; CPP_UCLS_TRACE traces it). Checked: the
+worktree's `.tmp/u510/using1.cpp` against clang 23.1.5's IR (B::g(int), the using-declared A::h(int) and A::f(short, int) called as
+clang calls them; the base code refuses it, "ambiguous call (2 viable)"); and every own unit generated again at 259a4fb98 (two
+gen-batch processes over runtime_ours' lines, the worktree's `.tmp/u510/run.sh`): all 193 C++ units' names the pack's, every one's IR byte for byte that of the runtime built at 5b5c77242; the rule applies in vector's and deque's `using _Base::_M_get_Tp_allocator;` and the like (11 members, about 530 calls; rope's _M_get_allocator) and changes no choice.
+
+### The units made own (rt_ours_glob, bin/cppi), each one's names by gen-batch the pack's IR's
+
+c++17/memory_resource.cc (the linkage rules, the address constant, __is_pod), c++17/fs_ops.cc and cow-fs_ops.cc (the linkage rules,
+implicit ABI tags, the inherited default constructor and the default constructor template's triviality, the move assignment, dtdefpT),
+c++17/fs_path.cc and cow-fs_path.cc (relocation, `static` on _S_convert, the returned local, __builtin_constant_p), exp/filesystem's
+ops.cc and cow-ops.cc (with the header's out-of-line defaults) and path.cc and cow-path.cc (relocation, preferred_separator), with
+libsupc++/cp-demangle.c by the C route: 177 to **187 of 198**.
+
+### Hygiene: the inliner's suffix counter one module's
+
+`arbace.cpp.inline`'s counter (the `.iN` suffixes of inlined values) is a dynamic var bound by `always-inline` for each module, not a
+process-wide atom never reset: a unit's IR no longer depends on the units its process generated before it. The digests that moved
+(test/cpp/codegen/forms.sha256, codegen-gen's whole run re-recorded): hdr-vector and stmt-expr, their forms now their own (the base's
+code gives hdr-vector 061449033... after its 55 predecessors in one process, the recorded digest, and 54081b239... alone, the new one;
+stmt-expr likewise); lambda-namespace, by the evaluator's class prvalue fallback (its closure globals constant-initialized, no
+dynamic initialization, as clang writes them); elab-decl new (DECISION 505-2 (a)'s probe). The runtime's own units' IR moved too (68
+units' lowered C read again by runtime-ci), no unit's names.
+
+### DECISION 505-2 (a): the elaborated-type-specifier's class, queue 505's mark
+
+cpp-rt-own had given the code generator's sema [basic.scope.pdecl]/7.2's rule (an elaborated-type-specifier's class first named in a
+member's or parameter's declaration declared in the smallest enclosing namespace or block scope) under the parser's `:_elab`. Queue
+505 (mac/505-cpp-dg-own10) gives the checker the same rule under `:_elab-decl`. Taken: 8c2fa2b4d's parse.ae hunk alone (cherry-pick
+-n, the mark; cpp-rt-own's `:_elab` on a CXXRecordDecl dropped, a FriendDecl's `:_elab` map unchanged), sema's conflicts resolved to
+this branch's declare-class! reading `:_elab-decl` in both modes; 505's checker functions (cx-elab-target, cx-elab-decl-scope,
+cx-elab-declare!) not taken, the main session's merge of 505 brings them. Probe: test/cpp/codegen/elab-decl.cpp (a member's
+`struct S *a`, a parameter's `struct U *u` and `struct V *v`, a global class's `struct X *p`, then their definitions): its defined
+names `_ZN1N1T1fEPNS_1UE`, `_ZNK1N1S3getEv`, `_ZN1N1gEPNS_1VE`, `_ZN1N2mkERNS_1TE`, `_Z3useR1W`, `_ZN1X1hEv` and main, clang
+23.1.5's exactly (by hand); no runtime unit has such a declaration, and no own unit's names moved (the final runtime-build).
+
+### Checked (the brief's proofs, and only these; no gate)
+
+| check | result |
+|---|---|
+| `bin/cppi runtime-build` (the default route auto, at 0f6375692 with 83065c349's code, under `ulimit -v 8388608`) | **198 units, 198 pass, 187 by our route** (the summary line counts 183: its glob misses exp/filesystem's four), the names level equal for each own unit, the C unit's c-defs.txt included; IR 5,386 s (one generator process beside codegen-gen's), read, print and lower 172 s; 1 h 33 min wall, peak 2.3 GB |
+| `bin/cppi runtime-ci` (`CPPI_CI_CHUNK=8 CPPI_CI_MEMLIMIT=2GiB`, under `ulimit -v 8388608`, ci's library seeded from cpp-rt-own's: the same reader) | 199 of 199 read, the 68 units whose lowered C changed read again (the 10 new, the inliner's suffixes, the rules' IR); 34 min, peak 3.9 GB |
+| `bin/cppi runtime-inputs --record` | own 187, pack 11: test/cpp/runtime/inputs-linux-amd64.edn's 10 rows `{:ir :own, :ci-target :own}` (cp-demangle.c among them) |
+| `bin/cppi lower-essential` (`ARBACE_NO_AOT=1`) | 6 files, 6 pass, 0 failing (the control's lowered run the oracle tier's); 3 min 42 s, 2.2 GB |
+| `bin/cppi check --only test/cpp/essential-check.txt` (cpp-check-essential's command, `ARBACE_NO_AOT=1 CPPI_THREADS=2 CPPI_CI_MEMLIMIT=3GiB`, on this runtime) | samples 4 of 4 and runtime 4 of 4 pass (runtime/uncaught.cpp's verbose terminate handler running cp-demangle.c's own C on ci), the run controls bitfields-vs-io and coroutine-vs-pr106188 differing as they must; 36 min, peak 2.6 GB |
+| `bin/cppi codegen-gen` (`--record`, a whole run, then its judge with the controls) | 156 of 156 (elab-decl new), both controls failing as they must; the digests moved: hdr-vector, stmt-expr, lambda-namespace (above) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | the matrix unchanged (56 of 56 cells, 0 problems); C++'s eval and AOT stages 0.973 to 0.986 each (the runtime's half 0.947 to 0.972: (187 + 11 x 0.5) / 198), its independence 0.9190 to 0.9242, **91 to 92** (floored); test/crops/scores.edn re-recorded, `--judge --strict` 0 problems, records-check 9 pairs, 0 problems |
+
+Keys: the runtime's key moves (the code generator, the parser, rt_ours_glob, runtime_ours_c and the C route's deciders): the gate's
+cpp-runtime builds once (about 1 h 30 min on this host with another generator beside it; 1 h alone); `gate_key` and the javac keys move
+(arbace/cpp and repr/cpp embedded); runtime-ci's key moves (68 units read again).
+
+### The units left on the pack (11 of 198), by the size of their next step
+
+| unit | cause | next decision |
+|---|---|---|
+| c++26/text_encoding.cc | 1 missing, 1 more: a local of a POD class whose initializer is a constant expression is constant-initialized (clang's EmitAutoVarAlloca IsConstantAggregate: the range-for's `auto __end = __range.end();`, a memcpy from `@__const...__end3`, aliases_view::end() never emitted), and basic_string::max_size() calls `_M_get_allocator() const` where ours folds it | DECISION cpp-rt-own2-1: (a) the code generator constant-initializes a POD local whose initializer the evaluator folds, a member call on an object the evaluation never reads allowed (an opaque `this`); (b) leave it |
+| c++20/sstream-inst.cc, c++23/print.cc, c++20/format.cc | C++20's constraint mangling: a type-constraint with arguments (`TkSt18sized_sentinel_forITL0__E`), a requires-clause `Q <expr>` over alias templates expanded (iter_value_t), a trailing requires-clause on a non-template member (`...C2EvQ26is_default_constructible_vIT1_E`); print also `_M_get_allocator() const` | DECISION cpp-rt-own2-2: (a) mangle the template heads' constraints as clang 23 (Itanium's `Tk`, `Q`, with `TL<level>_<index>_` parameters), the requires-clause's expression through mangle-dt-expr with its alias templates expanded; (b) one unit at a time, sstream-inst's string_view constructor first |
+| c++17/fs_dir.cc, exp/filesystem/dir.cc, exp/filesystem/cow-dir.cc | clang's first-emission naming of `_Dir`, declared in `__cxx11` by the header and defined in `filesystem` by the unit (two classes), modelled by entity id (:mangle-path-after) | DECISION cpp-rt-own2-3: (a) mangle in emission order as clang (a name is fixed at the first use the code generator writes); (b) leave them |
+| c++17/floating_to_chars.cc | GNU's variable-length array (`char buffer[n + 1]`) | (a) VLAs in sema and the code generator (llvm.stacksave, a dynamic alloca, the lowering's C VLA) |
+| c++98/valarray.cc | valarray<size_t>'s instantiation through gslice (recursion depth, header drops) | probe again on this branch |
+| c++17/floating_from_chars.cc | a pool resource's vector of an incomplete _BigBlock instantiated | probe again on this branch |
+| c++20/tzdb.cc | not probed to the end (the largest) | a probe |
+
+Found and left (not a runtime unit's): a `constinit` object of a union wrapper over a dynamic class whose member's constructor is
+reached through an empty pack (`template<typename... U> explicit constexpr CI(U&&... a) : obj(static_cast<U&&>(a)...) {}` over a
+`struct D : R` with a virtual function) is written zero, its vptr lost (clang writes the address point); the base 9dcc02f78 does
+the same, memory_resource's `newdel_res` (its class's constexpr default constructor) is right. A reduced case:
+`.tmp/t1/ci.cpp` of the branch's worktree (scratch).
+
+```
+DECISION cpp-rt-own2-1 (c++26/text_encoding.cc, 1 missing and 1 more)
+(a) The code generator constant-initializes a local of POD class type whose initializer the evaluator folds, as clang's
+    EmitAutoVarAlloca (IsConstantAggregate: a memcpy from a private constant), the evaluator taking a member call on an object it
+    never reads (an opaque `this`); with basic_string::max_size()'s `_M_get_allocator() const` called as clang calls it. Recommended:
+    one unit (0.05 of a point), but the rule is clang's for every POD local and moves other units' IR toward clang's.
+(b) Leave it on the pack.
+
+DECISION cpp-rt-own2-2 (C++20's constraint mangling: sstream-inst, print, format)
+(a) Mangle the constraints clang 23 mangles: a template parameter's type-constraint with its arguments (`Tk <name> <args>`, the
+    template's own parameters as `TL<level>_<index>_`), a template head's and a trailing requires-clause (`Q <expression>`) through
+    mangle-dt-expr, alias templates in it expanded as clang expands them (iter_value_t's __iter_traits_impl). Recommended: three units,
+    and the hdr-vector sample's known :trailing-requires.
+(b) sstream-inst first (string_view's iterator-pair constructor alone), then print, then format.
+
+DECISION cpp-rt-own2-3 (c++17/fs_dir.cc, exp/filesystem/dir.cc and cow-dir.cc: `_Dir`'s two classes)
+(a) Mangle in emission order as clang does (a class's name fixed at the first use the code generator writes, cpp-rt-own's
+    :mangle-path-after replaced). Recommended: three units, cow-fs_dir's model kept as its special case.
+(b) Leave them on the pack.
+```
+
+## As built: cpp-rt-own3, C++20's constraint mangling, constant POD locals and emission-order naming (2026-11-21; branch `cpp-rt-own3-1121` from mac/next 863bdaea1)
+
+The brief (the main session, toward the CoMaIn goal: C++'s eval and AOT independence, 0.986 each): more of the lowered runtime's
+11 pack units by Arbace's own code generator, with cpp-rt-own2's three decisions taken as recommended: cpp-rt-own2-1 (a),
+cpp-rt-own2-2 (a), cpp-rt-own2-3 (a); then, if time allowed, floating_to_chars' VLAs and probes of valarray, floating_from_chars
+and tzdb; and the found bug (a constinit union wrapper's vptr lost) if on the way. Light: no gate; one generator process at a time
+but for two or three probes side by side (the host shared with the Haskell line). Each rule checked on a reduced case against
+clang 23.1.5's IR recorded by hand (the oracle tier's tool; the worktree's `.tmp/{q1,c1,d1,t1,f2,f4}`, scratch), then on the units by
+`arbace.cpp.codegen gen-batch` with runtime_ours' options, each unit's defined external names against the pack cpp-runtime-ir's IR
+(n-all5's runtime build, runtime-judge's names level).
+
+### DECISION cpp-rt-own2-2 (a): C++20's constraints as clang 23 mangles them
+
+- **The constraint scope** (template.ae's constraint-scope): clang mangles a template's constraints as written, never
+  instantiated ([temp.constr.decl]: a member template's associated constraints are checked by substitution, not substituted in).
+  So a member template of a class template's specialization keeps its class's parameters: each enclosing specialization's
+  template's parameters (a partial specialization's own) at depth 0, 1, ..., the template's own at the next depth, each a
+  `{:k :tparam :i :depth}` (abi's T_ at depth 0, TL<d-1>_<i-1>_ beyond, a substitution candidate keyed by depth and index:
+  the signature's T_ of the instantiated member template, whose parameters are at depth 0, is the constraint's T_ of the class's
+  first parameter, clang's `SH_`); the class template's member typedefs entered as its pattern declares them, resolved over those
+  parameters (span's `is_const_v<element_type>`, T_, not char). The texts a constraint writes as types (template arguments as
+  written, a qualifier level's arguments, sizeof's and casts' types) resolved there once, at instantiation (constraint-q, the
+  code generator's alone): alias templates expanded and typedefs resolved as clang's canonical types.
+- **Type-constraints with arguments**: `Tk <template-name> <args>`, the concept's name a candidate (string_view's
+  `sized_sentinel_for<_It> _End`, TkSt18sized_sentinel_forITL0__E).
+- **Trailing requires-clauses**: after the parameters, `Q <expression>`, a function template's (:tq of its :tinst) and a templated
+  member function's (sema's declare-fn!, :tq, `basic_string() requires is_default_constructible_v<_Alloc>`, ...C2EvQ26is_default_constructible_vIT1_E).
+- **Expressions**: sizeof and alignof (st, at, sz, az), `T::x` of a type parameter (sr T_ x, no E), a qualifier level that is a
+  template-id as written (sr19__is_compatible_refI...EE5value), a non-type parameter as an argument (X T_ E).
+- **Dependent names**: a dependent member type of a dependent member type flattened (T::b::a, clang's canonical
+  nested-name-specifier: iter_value_t's `__iter_traits_impl<...>::type::value_type`), each further prefix a substitution
+  candidate (clang 15's manglePrefix of an identifier), a prefix already a candidate its substitution.
+
+Checked: `.tmp/q1/q.cpp`, `q2.cpp`, `q3.cpp` (string_view's constructor's shape, a member template's and a non-template member's
+trailing clauses, sizeof, iter_reference_t's decltype at depth 1, a template-id qualifier, a member typedef): every defined name
+clang 23.1.5's.
+
+### DECISION cpp-rt-own2-1 (a): a POD local's constant initializer, and the evaluator's unknown objects
+
+- **const-local!** (codegen.ae): a local of POD class type (not a union, no vptr or bit-field, trivially copyable and destructible,
+  its default construction trivial) whose initializer (`:expr` or `:list`) the evaluator folds (const-leaves, not manifestly
+  constant-evaluated: sema's *ce-object-manifest*) is initialized as clang's EmitAutoVarAlloca and EmitAutoVarInit do
+  (IsConstantAggregate, then emitStoresForConstant): all zero a memset, at most 32 bytes or an empty class a memcpy from a private
+  constant `__const.FN.VAR`, a larger one a memset and its non-zero leaves stored when at most 6, else the memcpy. Arrays not yet.
+- **Unknown objects** (sema's *ce-unknown*): an automatic or static object outside the evaluation is a location whose read or write is
+  no constant (`T::ms(a)` of a local `a` folds in every dialect, as clang); since C++23 a reference variable outside the evaluation
+  refers to one (P2280R4: text_encoding.cc's `auto __end = __range.end();`, end() never called); one cell a variable an evaluation,
+  two lvalues of one object one location. The code generator's alone, not the checker's.
+- **A reference argument of an empty class evaluated** (ce-args-env): before, skipped as a value nothing reads, so
+  `_Alloc_traits::max_size(_M_get_allocator())` folded where clang, `this` being no constant, calls `_M_get_allocator() const` and
+  inlines the always-inline max_size; by value still skipped.
+
+Checked: `.tmp/c1/te.cpp` in C++17 and C++23 (this-based calls not folded, a local's lvalue folded, a reference's only in C++23,
+a POD's prvalue and lists, an empty class's sentinel), `cst.cpp` (a const POD local: a memcpy too, no static, MergeAllConstants
+off): every defined name clang's, the stores' shapes clang's.
+
+### DECISION cpp-rt-own2-3 (a): a class redefined over an inline namespace's declaration, its names in emission order
+
+Clang's code generator runs as the parser goes (HandleTopLevelDecl) and fixes a name when it first refers to its entity; a
+RecordType's declaration is the class's definition once parsed. So an entity first referred to from code clang writes before the
+definition keeps the declaration's path, one first referred to after it, or from a deferred definition written at the end, the
+definition's. The code generator (codegen.ae's redef-name, redef-resolve!): while the module is written, each name that differs by
+the class's two paths (abi's *redef* modes, through the *redef-hook* every public mangler goes by) is a placeholder `_Z§k§`
+(`§k§` for a type's mangling) with the earliest place it was referred from (*mangle-pos*: the unit's token order, the parser's
+:_b), replaced at the end by the declaration's form when that place is before the definition's (sema's :mangle-path-after's third
+element), else the definition's; the places: an explicit instantiation definition's members at the instantiation (clang writes
+them there; template.ae's :explicit-inst-pos), a non-inline definition at its own token, a non-deferred global at its own, the rest
+the end; a constexpr specialization made before the definition named there (clang instantiates it where first referred to and
+passes it to its code generator, EmitGlobal of a deferred definition: exp dir's shared_ptr<v1::__cxx11::_Dir>::shared_ptr(), which
+`end(directory_iterator)` reaches through the defaulted constructor); the class's own members in the definition's namespace (an
+implicit destructor too: _ZNSt10filesystem4_DirD2Ev). cow-fs_dir's earlier entity-id model is the unbound hook's fallback; that unit's
+names stay the pack's under the new rule.
+
+Checked: `.tmp/d1/d.cpp` (an explicit instantiation's members and their direct callees old, a deferred callee's callee and later
+references new) and `e.cpp` (a constexpr default constructor reached from a header's inline function before the definition: old;
+the same class's other members later: new): every defined name clang's.
+
+### Found on the way: inline variables and constructor templates
+
+- An inline const variable is not internal ([basic.link]/3.2) and is defined where odr-used, linkonce_odr (<ranges>' customization
+  point objects, `inline constexpr __access::_Data data{};`: print.cc's _ZNSt6ranges4_Cpo4dataE).
+- **The found bug** (cpp-rt-own2's `.tmp/t1/ci.cpp`, copied with its clang IR into this worktree's `.tmp/t1` before cpp-rt-own2's worktree was removed): a constructor template is a user-declared constructor ([class.ctor.general]):
+  the class has no implicit default constructor ([class.default.ctor]/1) and is no aggregate. `constinit CI<D> dr{};` was taken for
+  an aggregate, its union member zeroed, the vptr lost; now value-initialized by the template with an empty pack, D's vptr the
+  vtable's address point, as clang. Left: `constinit CI<A> ar{&dr.obj};` initialized dynamically where clang folds it (the
+  evaluator does not bind a constructor template's pack parameters: "a load"); internal names alone, the same behaviour.
+
+- **c++20/format.cc's last two gaps** (its constraints DECISION 2's): a constructor template defined outside its class
+  (<bits/locale_classes.tcc>'s `template<typename _Facet> locale::locale(const locale&, _Facet*)`) is its declaration's
+  redeclaration, found among the class's :ctor-tmpls (constructor templates are entered by no name): before, a second template,
+  `locale loc2(loc, facetp.get())` "ambiguous call (2 viable)" (`.tmp/f2/l.cpp`); and an internal class's inheriting constructor
+  internal, as implicit-fn!'s members (__uniq_ptr_data<(anonymous)::__encoding, ...>'s CI2 __uniq_ptr_impl, written linkonce_odr
+  before; `.tmp/f4/u.cpp`). Both checked against clang's IR.
+
+### The units made own (rt_ours_glob, bin/cppi), each one's names by gen-batch the pack's
+
+c++26/text_encoding.cc (DECISION 1), c++20/sstream-inst.cc, c++23/print.cc and c++20/format.cc (DECISION 2; print also the
+customization point objects, format the two gaps above), c++17/fs_dir.cc, exp/filesystem/dir.cc and cow-dir.cc (DECISION 3): 187 to
+**194 of 198**. runtime_ours' summary line counts exp/filesystem's units too (it had said 183 of 187).
+
+### Checked (the brief's proofs, and only these; no gate)
+
+| check | result |
+|---|---|
+| reduced cases against clang 23.1.5's IR (by hand) | q.cpp, q2.cpp, q3.cpp, te.cpp (C++17, C++23), cst.cpp, cpo.cpp, d.cpp, e.cpp, l.cpp, u.cpp: every defined name clang's; t1/ci.cpp: dr's vptr clang's |
+| `bin/cppi runtime-build` (auto, at 5b5c77242, under `ulimit -v 8388608`, CPPI_DISK_MAX=93: a first run stopped at its lowering on the light tier's 90% guard, the disk 91% from other lines' worktrees until the coordinator freed 59 GB) | **198 units, 198 pass, 194 by our route** ("ours 194"), the names level equal for each own unit (the C unit's c-defs.txt included); IR 8,795 s (one generator process, the host's load up to 90 on 64 cores), read, print and lower 314 s; 2 h 32 min wall, peak 2.6 GB |
+| `bin/cppi runtime-ci` (`CPPI_CI_CHUNK=8 CPPI_CI_MEMLIMIT=2GiB`, under `ulimit -v 8388608`, ci's library seeded from cpp-rt-own2's: the same reader) | 199 of 199 read (the 198 units and cx-rt), the units whose lowered C changed read again in 25 chunks (nearly all: const-local! and the evaluator move many units' IR, no unit's names); 1 h 44 min (the host's load 70 to 140 on 64 cores), peak 4.0 GB |
+| `bin/cppi runtime-inputs --record` | own 194, pack 4: test/cpp/runtime/inputs-linux-amd64.edn's 7 rows `{:ir :own, :ci-target :own}` |
+| `bin/cppi lower-essential` (`ARBACE_NO_AOT=1`, on this runtime) | 6 files, 6 pass, 0 failing (the control's lowered run the oracle tier's); 7 min 19 s, 2.1 GB |
+| `bin/cppi check --only test/cpp/essential-check.txt` (cpp-check-essential's command, `ARBACE_NO_AOT=1 CPPI_THREADS=2 CPPI_CI_MEMLIMIT=3GiB`, on this runtime) | samples 4 of 4 and runtime 4 of 4 pass (the programs' IR by our route), the run controls bitfields-vs-io, coroutine-vs-pr106188 and ctor-throw-vs-thread-throw differing as they must; selfref 220 of 225 judged by their own verdict; 44 min 49 s, peak 2.6 GB |
+| `bin/cppi codegen-gen` (`--record`, a whole run at 574e72fbf, then its judge at the final code with the controls) | 156 of 156, both controls failing as they must; 33 digests moved, the same in the judging run and the record (deterministic): 31 by const-local!'s constant POD locals (brace-elision, convfns, convfns-ops, eh-lambda, elab-decl, hdr-swap, lambda-namespace, lambdas, longdouble, memberptrs, methods, mixed-features, namespaces, operators, recursion, rtti, spaceship, staticmembers, structs, sysv-mixed, tmpl-class-arg, tmpl-defaults, tmpl-dependent, tmpl-friends, tmpl-member-template, tmpl-members, tmpl-namespace, tmpl-nested-args, tmpl-nontype; struct-bind with its constraints; layout's a memset of zeros), hdr-string (max_size's `_M_get_allocator() const` called, the evaluator's empty-class reference argument), hdr-vector and struct-bind (_Vector_impl's and pair's constructors' constraints mangled); no other. Against clang 23.1.5's IR of the samples (by hand, `-std=c++23`, the host's libstdc++ 15.2.0, as codegen-check compiles them): hdr-string, hdr-vector and struct-bind now define clang's names, no sample lost one; hdr-vector's known `:trailing-requires` (test/cpp/codegen/known.edn) removed |
+| `bin/repr-cpp c2j-check` (at the final code) | 33 of 33 sources compiled, 0 failed, **0 reflection warnings** (ok, 361 s) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | the matrix unchanged (56 of 56 cells, 0 problems); C++'s eval and AOT stages 0.986 to 0.995 each (the runtime's half 0.972 to 0.990: (194 + 4 x 0.5) / 198), its independence 0.9482 to 0.9518, **94 to 95** (floored); test/crops/scores.edn re-recorded, `--judge --strict` 0 problems, records-check 9 pairs, 0 problems |
+
+The runtime-keyed steps (runtime-ci, runtime-inputs, lower-essential, the check) ran on the runtime built at 5b5c77242, with
+sema.ae at 5b5c77242 in the working tree while they ran (259a4fb98, DECISION 510-1 (a), moves the runtime's key; its own proof the
+units generated again, above). Keys: the runtime's key moves (the code generator, sema, template, abi, rt_ours_glob): the gate's
+cpp-runtime builds once (about 2 h 30 min on this host loaded, 1 h 30 min alone); `gate_key` and the javac keys move (arbace/cpp
+embedded); runtime-ci's key moves (nearly every unit read again).
+
+### The units left on the pack (4 of 198), by the size of their next step (each probed to its refusal, gen-batch at the final code but
+the last two sema fixes)
+
+| unit | cause | next decision |
+|---|---|---|
+| c++17/floating_to_chars.cc | GNU's variable-length arrays, five `char buffer[n + 1]` locals ("not a constant: output_length_upper_bound"); clang's IR: llvm.stacksave, `alloca i8, i64 %n, align 16`, llvm.stackrestore at the scope's exits | DECISION cpp-rt-own3-1 |
+| c++17/floating_from_chars.cc | "no member ~_Up" at <bits/memory_resource.h>'s allocator_traits<polymorphic_allocator<_Tp>>::destroy, `__p->~_Up();` (CPP_GEN_WHERE=2): an explicit destructor call on a class whose destructor is not declared yet (cpp-rt-own2's "a pool resource's vector of an incomplete _BigBlock instantiated") | DECISION cpp-rt-own3-2 |
+| c++20/tzdb.cc | probed to the end for the first time: "no operator()", after header drops of `typename invoke_result<_Fn, _Args...>::type` (an alias's dependent type over a pack expansion, unresolved: an operator* and two aliases dropped) | a probe of the drop first |
+| c++98/valarray.cc | "no member size", after <valarray>'s out-of-line members dropped ("unknown type _Tp", 64; "_Dom", 3) and gslice's recursion depth | a probe of the drops first |
+
+```
+DECISION cpp-rt-own3-1 (c++17/floating_to_chars.cc: GNU's variable-length arrays)
+(a) VLAs in sema and the code generator: a local array whose bound is no constant typed with that bound as an expression of the
+    block (the declarator's text analyzed there, converted to size_t), its declaration llvm.stacksave, a dynamic alloca of the
+    bound's elements (align 16) and llvm.stackrestore as a cleanup at its scope's exits, its decay and subscripts through the
+    element type; the lowering takes clang's dynamic allocas and stack saves already (ci's heap chain). Recommended: one unit,
+    clang's own shape, and C++ programs with VLAs (g++.dg's) by our route too.
+(b) Leave it on the pack.
+
+DECISION cpp-rt-own3-2 (c++17/floating_from_chars.cc: a destructor named through a template parameter before it is declared)
+(a) A class's implicit destructor declared when its class is completed, and an explicit destructor call of a class not complete
+    where it is analyzed resolved when its function is written (the call's function a lazy reference); probe first which class
+    reaches polymorphic_allocator's destroy incomplete (the pool's vector<_BigBlock>). Recommended: one unit.
+(b) Leave it on the pack.
+```
+## As built: cpp-read, C++'s read and print cells (2026-11-21/22; branch `cpp-read-1122` from next `863bdaea1`; the burst's stream C3)
+
+The read cell's token check, the dg check's syntax-own rows (CP262 (b): files expecting only syntax errors, judged by the own front
+end alone) and a part of :own-diag (families the Mac's queue 510 is not on), the print cell's forms-differ rows. Light: no gate; each
+fix proven on its rows with the REPL's probe (the dg verdict of arbace.repr.cpp.dg over the file's dg.edn entry), then the whole
+dg-error part by the own front end, the token check's three recorded samplings and the round trip's recorded lists.
+
+### The token check (5 of 5 rows; :design to pass)
+
+The own judge (pp-ref, libcpp at check time) differed from the port at the lex level on five files, three by-design classes of the
+raw lexers' conventions. The port now follows libcpp, which there follows the standard's grammar:
+- `raw-udl-suffix` (cpp-lexical/udl.cpp, udl-cxx11.cpp, gxx-dg/cpp0x/udlit-extended-id-1.C): a ud-suffix is any identifier touching a
+  literal's closing quote ([lex.string]'s user-defined-string-literal, [lex.ext]/1, the longest token), libcpp's scan_cur_identifier;
+  the preprocessor splits it off where it names a macro and does not begin with one underscore (maybe_ignore_udl_macro_suffix). Before:
+  clang's rule (a suffix without its underscore left apart unless `s` or `sv`).
+- `unterminated-raw-string` (cpp-lexical/errors2.cpp): the token ends before the file's last new-line, as libcpp's lex_raw_string.
+- `non-xid-utf8` (gxx-dg/cpp23/Winvalid-utf8-11.C): in C++ every UTF-8 sequence libcpp decodes (one_utf8_to_cppchar: 2 to 6 bytes,
+  shortest form, no surrogate) continues or begins an identifier, with libcpp's errors for a character in no identifier set ("extended
+  character ... is not valid in an identifier": not XID_Continue nor in C11's annex D.1 / C++11's E.1 without -pedantic, XID alone
+  with it, the new lexer bit F-PEDANTIC; "... at the start of an identifier"), as _cpp_valid_utf8 in C++ ("logically, the UTF-8 was
+  converted to a UCN during translation phase 1"). Before: clang's (a token a character, no error).
+The known file's :lex-own and :pp-own are empty; the five files' classes moved to :lex, the records' judge's (the oracle tier's
+cpp-tokens-oracle: clang's raw tokens differ there now). Also: a macro's name keyed with its UCNs as UTF-8 (`ENΔ` and its
+UTF-8 one macro, pp.ae's mkey; a code point past U+10FFFF stays as written), and in C++ the options' --embed-dir and -pedantic
+(cpp/host.ae), with libcpp's pedwarn "#embed before C++26 is a GCC extension".
+
+### The dg check's own front end (arbace/repr/cpp/parse.ae, diag.ae, dg.ae, native.ae)
+
+The parser's diagnostics are GCC's where the grammar or a rule asks them, each a soft error (soft-diag!, the tree unchanged) or a
+mark the diag check reads over the final tree (so a tentative parse leaves none):
+- recovery: a declined statement or declaration skipped by skip-rec! (the braces nest, an unclosed parenthesis yields to the ; or } of
+  its level, as cp_parser_skip_to_end_of_statement; an initializer's braces end at a ;; a statement's unclosed [ at its ;): no more
+  "an unclosed block" at the file's end; an error at the end of input at the last token, or after it at the last #pragma the front
+  end tokenizes (CPP_PRAGMA_EOL; libcpp's own pragmas, once, push_macro, GCC poison and their kin, aside);
+- a missing ) ] ; , or : placed after the previous token (c-family's maybe_suggest_missing_token_insertion, MTIK_INSERT_AFTER_PREV);
+- a class definition followed by a token no declarator begins with: "expected ';' after class definition", the declaration ended
+  there (cp_parser_class_specifier_1's want_semicolon); a member declarator without its ;: "expected ';' at end of member declaration",
+  the ; assumed; an `else` in an if's then-clause: "expected '}' before 'else'" (cp_parser_statement_seq_opt); a do-statement's missing
+  while, GCC requiring `( expression ) ;` on, its missing ) after the previous token (cp_parser_iteration_statement);
+- [temp.arg]/1: "type/value mismatch at argument N" (a type for a non-type parameter, a literal or variable for a type parameter, of
+  a class or alias template; in the class being defined a literal's alone, a name there possibly a member's first reading);
+  [temp.variadic]/5: a `...` before a template argument, an alignas' or a mem-initializer's decltype pattern naming no pack or an
+  unexpanded one; [temp.param]/14: a primary template's pack not last;
+- names: "'X' does not name a type" (an unqualified name no lookup finds where a declaration's type stands, unless the main file
+  declares it somewhere or the function already erred: a failed declaration's cascade), "'X' has not been declared" and "'Y' in
+  namespace 'N' does not name a type" (a typename-specifier; the first name of a qualified type name too, or "'b' is not a member of
+  'std'" for the std GCC declares itself, std::align_val_t its one member), "expected nested-name-specifier", "expected
+  template-id", "'A' is not a template" and "invalid use of incomplete type 'struct A'" (an explicit instantiation's name, its
+  qualifier), "expected primary-expression before X" (a type's name where an expression's primary stands, diag.ae's type-exprs),
+  "use of undeclared identifier" also in a class template's member without dependent bases (dep-bases?) and not for a function's
+  own name in its body ([basic.scope.pdecl]/1: a recursive call is no undeclared name), and once in a block, as GCC (cp/lex.cc's
+  unqualified_name_lookup_error declares the name there: its later uses in the block and the blocks in it silent, but where
+  error_mark_node still errs, a decltype's operand or an auto initializer);
+- the rest by rule: [expr.typeid]/7 (`#include <typeinfo>`), [expr.prim.this] (`this` in a static or non-member function), [dcl.enum]
+  and [dcl.type.elab] (a typedef-name or an alias template's specialization after enum or struct), [dcl.fct]/11 (a lambda returning a
+  function), [dcl.fct.default]/4 and /9 (a friend's default arguments, an enclosing function's local in a default argument),
+  [dcl.struct.bind] (before C++17, in conditions before C++26, in a class, after another declarator, a binding named in its own
+  initializer), [namespace.def] (inline and a nested namespace definition), attributes' places ([[...]] after a lambda-introducer, a
+  new-declarator's bound, a ptr-to-member, a using-directive; deprecated and maybe_unused appertaining to a type, a label, an unnamed
+  bit-field; a [[ after a bit-field's width; an attribute-declaration in a class; alignas before a null statement; GNU attributes
+  ending an abstract declarator after its ptr-operator, GCC's dependent declarator then empty), a GNU line marker under
+  -pedantic-errors, __constinit, the execution character set ISO-8859-1 (-fexec-charset, ordinary literals' characters past
+  U+00FF), the harness's --embed-dir as g++'s;
+- diag.ae's rules over the final tree, for five rows that had passed on a false "use of undeclared identifier" (a function's own
+  name in its body, before the parser declares it): [dcl.spec.auto.general]/11's use of an undeduced function in its own body
+  before its first return statement ends; decltype(auto) initialized by an unparenthesized function's name (decl.cc's "has
+  function type; did you forget the '()'?"); the classification built-ins' operands (c-common.cc's
+  check_builtin_function_arguments, an operand the tree shows is no floating-point value); [expr.reinterpret.cast]/11, a prvalue
+  cast to a reference type (typeck.cc's build_reinterpret_cast_1); and in the parser before C++20 a parenthesized initializer in
+  an array new (init.cc's build_new_1, P0960 lifting it), outside templates.
+
+### The print cell (arbace/repr/cpp/convert.ae, print.ae)
+
+Five of the own records' ten forms-differ rows: a declaration group's class written in place of its spelling in the declarator's type
+alone (`struct OK2 {...} &s6 = *(new OK2());` printed `new c::base()`: parse/semicolon3.C, the group then its text); a pack
+expansion after a pattern ending in a number spaced (`0 ...`, else one pp-number: lambda/lambda-err3.C); a template head whose last
+parameter's default ends in a template-id's > closed by ` >` (template/crash106.C); a class defined in a cast's type-id or in a
+condition's declaration, an error the forms have no type for, written as its text (g++.old-deja g++.bugs/900405_01.C,
+g++.jason/cond.C).
+
+### Checked (light: no gate; the user's "avoid redundancy and unnecessary tests" of 2026-11-22 applied from the round trips on)
+
+- the token check: its three recorded samplings (cpp-lexical 19, gxx-dg --sample 10 1,807, libstdcxx-headers --sample 8 108) whole
+  under the own judge after the lexer's main change, every file agreeing, the controls failing as they must; the later lexer changes
+  (-pedantic's identifier set, a UCN macro name's key) on the files they touch with the five moved rows and the controls' pair,
+  `pp-check --only` (7 files) `--record-results`;
+- the dg check: `bin/repr-cpp dg --corpus dg-error --front native` whole at 4c05537a9 (4,564 files, 8,369 s on a loaded host),
+  `--judge --record`; the undeclared-name refinement after it on the 161 files with such an error (`--only`, merged into the
+  record); of the recorded passes the load timed out, diagnostic/missing-header-pr110164.C and cpp0x/udlit-suffix-neg.C pass alone
+  (315 s, 285 s), cpp1z/constexpr-asm-3.C takes 341 s alone, past CP329 (a)'s 300 s: recorded a timeout;
+- the round trip: `roundtrip-corpus gxx-dg-every-10` and `gxx-old-deja-every-10` whole, `--judge own --record-results` (the five rows
+  moved, no other); c-c++-common-every-10 (326), samples (9), gxx-dg-essential (33) whole, every file passing, records unchanged;
+  libstdcxx-testsuite-every-40's 24 files with the constructs touched (ud-suffixes, attributes, template heads ending in a
+  template-id, extended characters), `--only-list`: 24 pass. Not run: the modules part's round trip (`dg --corpus modules`, whole
+  only), the lowering and run checks (the code generator untouched; the gate's cpp-essential);
+- `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`: 0 problems.
+
+### The cells
+
+C++ read 5,589 / 317 / 587 (next's record) -> 5,665 / 311 / 517 (38 n/a): the token check's 5 (:raw-udl-suffix 3,
+:unterminated-raw-string 1, :non-xid-utf8 1, by design), :syntax-own 66 -> 15, :own-diag 515 -> 497, :oracle-crash 5 -> 4
+(lambda-uneval25.C), :musl-libc 2 -> 1 (cpp26/literals2.C). C++ print 3,880 / 0 / 15 -> 3,885 / 0 / 10. Completeness 95.81 ->
+96.14, independence 95.24 -> 95.40 against next merged again at ecdf052dd (queue 518's rounds; the read stage 0.772 -> 0.780); the
+own record's rows either side moved run again on the merged tree (164 files, `--only`, merged into the record: own passes 1,699).
+
+### Left, and the decisions
+
+- :syntax-own's 15: the constant evaluator's "used before its definition" family (constexpr-non-const-arg2, pr71966-1 and -2,
+  constexpr-recursion1 and 2, constexpr-dtor4: arbace.cpp.sema's, queue 510/518's file), GNU pragmas the pipeline drops (parse/ivdep.C's
+  `#pragma GCC ivdep`, parse/pr96257.C's OpenMP), attribute arguments GCC parses as expressions (cpp0x/pr84606.C), template template
+  parameters' matching (template/ttp12.C), a parameter list's recovery (parse/error6.C), a dependent member access's `<`
+  (parse/crash72.C), the current instantiation's missing member (template/typedef6.C), Sema's extra after an erroneous variable
+  template (cpp1y/auto-fn46.C), and cpp1z/constexpr-asm-3.C's time;
+- the print cell's 10: forms-differ 5 (coroutines/ramp-return-a.C, cpp0x/attr-no_unique_address1.C, parse/template30.C: a
+  template-id glued to `>=` or `>>=` kept as text one way and read as a template-id the other; g++.old-deja crash41.C;
+  modules/target-aarch64-1_a.C, an aarch64-only test in gxx-modules-all), HotSpot's 5 (a `hotspot-x86-linux` key under the own
+  judge needs jdk26u's sources);
+- decisions for the user, by design: :gcc-dialect 173 (CP399 (a): OpenMP, OpenACC, GNU TM, GCC's contracts, -fpermissive,
+  -fms-extensions), :gcc-own-rules 135 (CP398 (c): GNU extensions' rules, GCC's limits, IFNDR rules GCC diagnoses; each one
+  portable into the own front end, a GNU rule at a time, if the user wants them counted as deferred instead), :gxx-only-rules 2
+  (CP328 (a)), :musl-libc 1 (warn/Wconversion-null-4.C: musl's NULL is nullptr, so g++ here errs where the directives expect a
+  warning).

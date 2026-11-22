@@ -3033,3 +3033,203 @@ below is CPU time (user + sys) unless named wall, base and head run back to back
 | goroot-check, a64i's runs summed (1,141 passing) | 303 | 141 | 2.15x |
 | goroot-check whole (--record, 3 jobs) | 382 (308 s wall in 4 pieces) | 206 (174 s wall) | 1.85x |
 | bin/a64i check | 113 (117 s wall) | 111 (117 s wall) | the eval's builds on stage 0 and the lockstep's ptrace |
+
+## As built: judge-rest, the object check by the tests' own words (2026-11-20; branch `judge-rest-1120`, from next `939037429`)
+
+The user's goal of 2026-11-20: complete the crops' independence, each recorded case of a judge made own wherever an accepted
+precedent applies (the user's decision of 2026-11-07: a test's own verdict is a judge no toolchain made; the toolchain's records
+move to the oracle tier). arm64's judge held one recorded part: the AOT cell's object check, 126 files (`a64-musl` 13,
+`a64-synthetic` 3, `mc-aarch64-obj` 110) compared byte for byte with llvm-mc 23.1.5's objects in `test/asm/records/` (0.5 each).
+
+- **Which of the 126 state their expected encodings.** 43 of the 110 MC/AArch64 object tests carry a `-show-encoding` run whose
+  CHECK lines state each instruction's bytes (`// CHECK-ENCODING: encoding: [0x00,0x20,0x78,0xd5]`, `// CHECK: ... // encoding:
+  [0bAAA00010,A,0b100AAAAA,0xd2]` with a fixup's bits as letters), 1,626 lines; `armv8.9a-debug-pmu` states 349 more but is not in
+  the object check (llvm-mc's record has no object of it). None of musl's 13 sources or Arbace's 3 synthetic tests state anything.
+  The 43: arm-poe2, arm-poe2-tlbid, arm64-elf-relocs, arm64-large-relocs, armv8.6a-fgt, armv8.8a-mops, armv8.9a-ats1a,
+  armv8.9a-clrbhb, armv8.9a-lrcpc3, armv8.9a-specres2, armv8.9a-the, armv9-mrrs, armv9-msrr, armv9.2a-mec, armv9.4a-chk,
+  armv9.4a-ebep, armv9.4a-gcs, armv9.4a-lse128, armv9.5a-cpa, armv9.5a-e3dse, armv9.5a-fgwte3, armv9.5a-hacdbs, armv9.5a-hdbss,
+  armv9.5a-spmu2, armv9.5a-step2, armv9.5a-tlbiw, armv9.6a-lsui, armv9.6a-mpam, armv9.6a-occmo, armv9.6a-pcdphint, armv9.6a-rme-gpc3,
+  armv9.6a-srmask, armv9.6a-statistical-profiling, armv9.6a-trbe-exception, armv9.7a-memsys, armv9.7a-tlbid, armv9a-sysp,
+  armv9a-tlbip, hinte, neon-fdot, neon-fmmla, neon-fmmla-HtoS, tls-relocs. llvm-mc
+  prints with `-show-encoding` the bytes its object writer emits, so the words of the test's object, in the run's order, are the
+  stated ones: `arbace.asm.arm64.objcheck/judge-encodings` holds each line to the code sections' words of Arbace's object as FileCheck
+  holds the run's output (in order, each after the one before; a fixup's letters any bit; `0x0b'A'`, a byte partly a fixup's, its
+  stated bits set; an empty `encoding: []` no case), per run, a line several runs state met when each meets it. The object verdict's
+  rows carry them as `:enc {:stated :met :by}` (`test/asm/objverdict-results-arm64.edn`: 1,975 of 1,975 met), beside in REAP's AOT
+  cell (the same lines are the read cell's at the encoder's level, `encode-check`).
+- **Two-step runs and `--sd`.** `objcheck/runs` also takes an object written to a file on one RUN line (`llvm-mc ... -filetype=obj
+  -o %t`) and read by a viewer on a later one (`llvm-readobj -S --sd %t | FileCheck ...`), paired with the last llvm-mc that wrote
+  it (a big-endian or another triple's overwriting it: no run), and `view-readobj` prints `--sd`'s SectionData blocks (ScopedPrinter's
+  printBinaryBlock: 16 bytes a line in groups of 4, upper case, the ASCII column aligned). `align-code`, `inst-directive` and
+  `size-directive` state their sections' alignment and bytes so: 33 lines, all met. The same reading made 28 lines visible whose
+  views are not built (`large-eh-encoding`'s llvm-dwarfdump, `mapping-within-section`'s `readelf -Ss` with numeric variables,
+  `mov-expr-as-immediate`'s `objdump -Dr`): deferred in their classes, AOT 3,102 / 13 -> 3,136 / 40. A run with no viewer that reads
+  llvm-mc's diagnostics and states only -NOT lines (`cfi-bad-nesting-elf`'s `ELF-NOT: error:`) is held to the object assembler's
+  diagnostics (none for an object it assembled).
+- **The object check by its own words.** `bin/repr-asm --arch arm64 object-check` judges a file by its own words where it states
+  them: its object runs' CHECK lines and its stated encodings, every one met (`objcheck/own-rows`, `own-verdict`; the row's detail
+  "own: N CHECK lines ..., M stated encodings, met"); 95 of the 110 MC/AArch64 files. The other 31, `test/asm/object-recorded-arm64.tsv`
+  with each one's reason (musl's 13 and the 3 synthetic tests state nothing; 15 MC/AArch64 files state only the decoder's text
+  (`armv9.7a-mpamv2`, `fixup-absolute`, `fixup-absolute-signed`, `macro-hex-int`, `mov-expression-as-immediate`, `optional-hash`,
+  `prfum`, `rprfm`), views not built (`cfi_val_offset`, `large-eh-encoding`, `mapping-within-section`, `mov-expr-as-immediate`),
+  FileCheck's numeric variables (`elf-reloc-addsubimm`, 1 of 3 lines judged), llvm-rtdyld's checks (`ELF_ARM64_large-relocations`),
+  or nothing FileCheck reads (`elf-objdump`)), stay against llvm-mc's record. The list is checked both ways: a listed file its own
+  words judge whole is stale, an unlisted one whose words are not (`:not-own`) is refused. A control whose reference is judged by
+  its own words is held to them. Every file against the record, byte for byte, is the oracle tier's: `object-check --oracle`
+  (`test/asm/object-oracle-results-arm64.edn`, the step `asm-arm64-object-oracle`, no LLVM tool; 126 of 126 at this branch).
+- **Controls.** `test/asm/controls-objverdict-arm64.txt`: `msrr-vs-mrrs-encodings` (armv9-msrr's object held to armv9-mrrs's stated
+  encodings; the other way it meets every line, mrrs's file holding msrr's 22 instructions too) and `size-vs-inst-directive` (a
+  two-step run's `--sd` lines held to another file's object); `test/asm/controls-object-arm64.txt`: `mrrs-vs-sysp-own` (a reference
+  judged by its own words). Each fails as it must. By hand: armv9-msrr.s with one stated encoding's byte changed (`0x58` to `0x59`)
+  gives `[:fail "... 22 stated encodings: {:fail 1}"]`, inst-directive.s with its SectionData word changed gives `{:fail 2}`; the
+  originals pass.
+- Judge 0.9973 -> 0.9993 ((23,032 + 0.5 x 31) / 23,063); independence 0.99945 -> 0.99987. Completeness 99.9 -> 99.7 (the 28 deferred
+  lines now seen).
+
+### judge-rest, the second round (2026-11-20, later the same day: the coordinator's round toward complete independence)
+
+- **The disassembly's stated text, by Arbace's encoder.** arm64 has no disassembler of Arbace's (AR3 not built: a64i's decoder gives
+  its own instructions, not llvm-objdump's text), so a disassembly line that states an instruction's text alone, the decoder's text
+  beside until now, is held to the object the other way: its text read by Arbace's reader and encoded by Arbace's encoder
+  (`arbace.repr.asm.arm64.lenc`) gives a word that must be among the code words of Arbace's object in the run's order
+  (`objcheck/judge-texts`, the row's `:text`, beside in REAP's AOT cell as `:enc` is). A text the reader or the encoder does not take,
+  a FileCheck pattern, a label, or a bare number (a PC-relative target as llvm-objdump prints it, `adr x2, 0x4`: the address, not the
+  immediate; `adr`'s five lines failed before that rule) is not judged and stays beside. 2,337 of the 2,356 text lines are judged
+  (47 files), 2,337 met. DECISION: the encode direction for want of AR3 (alternative: AR3's decoder first, the survey's 2 to 4 days).
+- **llvm-objdump -D** (every allocated section; `mov-expr-as-immediate`'s `-Dr`) and **llvm-readelf -Ss** (the section headers then
+  the symbol table; `mapping-within-section`) as views; **FileCheck's numeric variables** in the subset (`[[#NAME:]]`, `[[#%x,NAME:]]`,
+  `[[#NAME]]`, `[[#NAME+N]]`; arbace.asm.amd64.decode-check's pattern-vars under `*vars*`); and a disassembly line whose offset a
+  string variable defines (`[[addr:[0-9a-f]+]]: 91000062 add ...`, `elf-reloc-addsubimm`) held to its offset and word.
+- Own now, out of `test/asm/object-recorded-arm64.tsv`: armv9.7a-mpamv2, fixup-absolute, fixup-absolute-signed, macro-hex-int,
+  mov-expression-as-immediate, optional-hash, prfum, rprfm (their texts), mov-expr-as-immediate, mapping-within-section,
+  elf-reloc-addsubimm. Controls: `prfum-vs-rprfm-texts`, `inst-vs-mapping-numeric` (objverdict), `optional-hash-vs-rprfm-own`
+  (object-check); by hand, fixup-absolute.s with one movk immediate changed, mapping-within-section.s with one symbol's value changed,
+  and with `[[#TEXT+1]]` for `[[#TEXT]]`, each fails.
+
+- **The call frames' view and the large EH encoding** (branch `judge-rest-dwarf`). `objcheck/view-dwarfdump-frames` prints
+  llvm-dwarfdump 23's `--debug-frame` (and its alias `-eh-frame`, the run's tool `:dwarfdump-frames`, that option alone) over
+  Arbace's ELF reader, written again from llvm-project 23.1.5's DWARFContext.cpp (both sections headed, the relocations of a DWARF
+  section applied as RelocationResolver.cpp's resolveAArch64), DWARFDebugFrame.cpp (parse, CIE::dump, FDE::dump, createUnwindTable),
+  LowLevel/DWARFDataExtractorSimple.h (getEncodedPointer), LowLevel/DWARFCFIProgram.{h,cpp}, DWARFCFIPrinter.cpp,
+  LowLevel/DWARFUnwindTable.cpp (parseRows), DWARFUnwindTablePrinter.cpp, Dwarf.def/Dwarf.cpp (CallFrameString for AArch64),
+  FormatProviders.h, and the registers named as getLLVMRegNum and getName name them (RegisterInfoEmitter.cpp's Dwarf2L map, built
+  before the DwarfRegAlias registers take their numbers: W0-W30, WSP, VG, FFR, PN0-PN15, B0-B31, Z0-Z31 of AArch64RegisterInfo.td,
+  else `regN`): each CIE's and FDE's header and fields, its program (every DW_CFA_* the parser takes; a parse error leaves the
+  section's header alone, as llvm-dwarfdump's) and its unwind table (none on parseRows' errors). What it does not print makes no
+  view and the run's lines stay `:view-llvm-dwarfdump`: a DWARF expression (`DW_CFA_*expression`), DWARF64, a frame section twice
+  or compressed. llvm-mc's `--large-eh-encoding` and `--large-code-model` (MCObjectFileInfo's FDECFIEncoding for AArch64 ELF:
+  DW_EH_PE_pcrel | DW_EH_PE_sdata8) are the object assembler's `:large-eh` (`arm64.obj/assemble-file`'s options map, from the run's
+  llvm-mc command as `-implicit-mapsyms` and `--defsym` are): the CIE's augmentation data 0x1C, each FDE's pc_begin (R_AARCH64_PREL64)
+  and range in 8 bytes, an FDE not last padded to 8 (EmitFDE's PCSize); x86-64's large personality, LSDA and TType encodings are not
+  built (its checks never pass the option), every default object byte for byte as before (`object-check --oracle` 126 of 126,
+  amd64's `synthetic` 8 of 8). `cfi_val_offset` (9 lines) and `large-eh-encoding` (15) are met, the only rows changed; they leave
+  `test/asm/object-recorded-arm64.tsv` (judged whole by their own words). Controls `frames-vs-val-offset` (basic-pic's frames held to
+  cfi_val_offset's program and rows) and `sdata4-vs-large-eh` (an object assembled without the options held to SDATA8's `1C`) fail
+  as they must; by hand, cfi_val_offset.s with a row changed (`WSP-16` to `WSP-32`) gives `{:fail 1}`, large-eh-encoding.s with
+  SDATA8's `1C` as `1B` gives `{:fail 2}`. By hand only (the oracle's role, never at check time), the host's llvm-mc 23.1.5 and
+  llvm-dwarfdump 23.1.5 gave the same objects and the same dump text, byte for byte, for the 11 MC/AArch64 ELF files with `.cfi_`
+  directives that Arbace assembles, `test/asm/obj-arm64/cfi.s` (also with `--large-code-model`), and two scratch files that use
+  personality and LSDA encodings, `zRS`, `simple` frames, `DW_CFA_advance_loc1/2/4`, `set_loc`, the address-space CFAs,
+  `restore_extended`, `remember_state`/`restore_state`, `negate_ra_state` and a register above 127 (also with `--large-eh-encoding`).
+
+- **The object's own round trip** (branch `judge-rest-rt`). For the files that state nothing about their object (musl's 13, the 3
+  synthetic tests), `bin/repr-asm --arch arm64 object-roundtrip [CORPUS|CORPUS/NAME...]` (`arbace.asm.arm64.objrt`; `make
+  repr-asm-object-roundtrip-arm64`) judges the object by its source: the file assembled by Arbace (the object object-check judges)
+  is linked alone with a generated stub that defines its undefined symbols (16 zero bytes each, 16-aligned, in .text; .tbss for a TLS
+  one), at lld's default layout, else a low one (image base 0x1000, 4 KiB pages) when a relocation does not fit (relocs.s's ABS16 beside
+  its tbz; elf-reloc-movw.s's SABS_G0); the eval lays the same file out at the same layout (`NAME.forms`, each instruction's form at
+  its address, its symbols' values there), and `a64i forms-check` lowers each form (a64i's forms.go, no encoder) against the image's
+  word at its address decoded by `a64i/Decode` (no encoder): the two Insts' keys equal for every instruction, and the image outside
+  the instructions' words equal to the eval layout's byte for byte (no code word the source does not account for). A relocation's
+  field is judged through the link (the linker fills it from the type, symbol and addend, the form's operand is the symbol's value
+  at the same layout); a MOVW group above the value's bits is zero at either layout, judged as zero. Rows `WORK/CORPUS/objrt.tsv`
+  (`NAME<TAB>RESULT<TAB>DETAIL`, RESULT `pass` or a class: failing `differs`, `image-differs`, `undecoded`, `no-check`; gaps
+  `unlowered`, `eval-*`, `link-*`, `assemble-*`, `stub-error`, and `no-code`, a source with no instruction, nothing judged) and
+  `WORK/objrt.tsv` (`CORPUS/NAME ...`), WORK `.tmp/repr-asm/objrt` (`--work DIR`); `arbace.asm.arm64.objrt/rows WORK CORPUS` reads them
+  as `{NAME [RESULT DETAIL]}`. The controls `test/asm/controls-object-roundtrip-arm64.txt` (9: four objects held to another file's
+  forms at the same layout, five to a mutant of their own source: an immediate, a register, a branch's symbol, a :lo12: addend, a
+  GOT load's type) must differ, their subjects passing by themselves. Results: 16 of 16 pass, 9 of 9 controls fail as they must; by
+  hand setjmp.s with `str x2, [x0,#104]` made `#112` fails against the original object (`DIFF 21013c f9003402 ... imm=104`), and the
+  original image with that word patched fails against the original forms. Of the 15 MC/AArch64 files of the recorded list, 10 pass
+  (ELF_ARM64_large-relocations, cfi_val_offset, elf-reloc-addsubimm, fixup-absolute, fixup-absolute-signed, macro-hex-int,
+  mapping-within-section, mov-expr-as-immediate, mov-expression-as-immediate, prfum); elf-objdump and large-eh-encoding are
+  `no-code`, optional-hash (fcmeq #0.0) and rprfm `unlowered`, armv9.7a-mpamv2 `eval-link-error` (the eval reads MPAMCTL_EL1 as a
+  symbol); over all 110 of mc-aarch64-obj 29 pass, none failing. What the round trip needed: the linker's MOVW_PREL_G0..G3, its
+  writeSMovWImm testing bit 29 (MOVK) as lld does, not bit 30 (a MOVZ never turned MOVN for a negative value) and SABS/TPREL G0's
+  range 17 bits as lld's checkInt (it was 33), and a load of headers alone (an empty object) no longer crashing on `_end`; the eval's
+  constants that name a symbol folded again after the layout (`mov x0, 1b - 0b` across a .skip was folded to 0 from the fragments'
+  provisional offsets) and its :prel_gN: groups resolved PC-relative; a64i's forms front end taking `uxtw`, the signed groups
+  (:abs_gN_s:, :prel_gN:) as the ABI's MOV[NZ] by the value's sign, and a constant PC-relative operand (`adr x0, 100`, `b #8`) as an
+  offset from pc; `a64i forms-check` reading a word outside the code sections or at an address not a multiple of 4 (align-code.s,
+  mapping-across-sections.s). a64i-check's essential subset still passes (113 of 113, forms 113 of 113).
+
+- **The object check takes the round trip** (judge-rest's second round, integration). `test/asm/object-recorded-arm64.tsv` gains
+  a JUDGE column: `roundtrip` for the files that state no words of their own but hold instructions (musl's 13, the 3 synthetic
+  tests, ELF_ARM64_large-relocations, whose checks are llvm-rtdyld's -check expressions over a linked image: its 2 instructions
+  round-trip), judged by `object-roundtrip` inside `object-check` (own-rows takes its rows: pass "own: the round trip, ...", any
+  other class unclassed in the object check's classes, so a gap fails), and `record` for elf-objdump alone. elf-objdump's source is
+  empty (a test of llvm-objdump's: "We just want to see if llvm-objdump works at all", its RUN line without FileCheck), so it has
+  neither words nor instructions; its object, the assembler's choice of sections, is defined by no standard: out of the judge's
+  cases (the user's decision of 2026-11-20), `test/asm/object-out-arm64.edn` (`:implementation-defined`, `:aot`), still held to
+  llvm-mc's record at check time; own-rows refuses an out entry that is no record-judged file or that has words of its own, and
+  runs that control each time. cfi_val_offset and large-eh-encoding left the list (their own words). The essential step's inputs
+  hold `:a64i` now (the round trip builds a64i's light driver) and its controls the round trip's. arm64's judge: 23,059 own of
+  23,060 cases, 1 out, none recorded (judge 1.0).
+
+## As built: small-tails, the last non-passes (2026-11-22; branch `small-tails-arm64-1122`, from next `863bdaea1`)
+
+The burst of 2026-11-21/22 (100 completeness): the arm64 row's last tails, read 2 deferred, AOT 1 deferred, print 5 by design and 2
+deferred. Each was built; none is left classed (the beside rows of encode's `:directive`, 1, stay by design).
+
+- **`:error-misplaced`, read 2 and print 2** (the same two files: AXS96 (a)'s judge holds an error test's refusals to the lines its
+  CHECK lines state errors at). neon-diagnostics' `ld1 v0.8b, v1.8b}, [x0]` (and `st1`'s) has its error stated: the block of seven
+  statements is followed by the block of their errors, each `CHECK-ERROR: error: ...` then the statement llvm-mc echoes
+  (`CHECK-ERROR:        ld1 v0.8b, v1.8b}, [x0]`), and the judge's places were a CHECK line's neighbours alone (the block's first
+  and last statements). `arbace.repr.asm/error-checks` now also takes a CHECK line whose text is a statement's own text (a trailing
+  `//` comment left out, white space collapsed) as that statement's place, the nearest before it, else after it: llvm-mc prints the
+  refused line after each `error:` line, so the echo names the statement. (llvm-mc refuses it at the matcher, `invalid operand for
+  instruction`: AArch64AsmParser::parseInstruction takes a `}` after an operand as a token, for SME's `{ za }`; the reader refuses
+  it at the syntax, which the read level's judge does not tell apart: the message is not judged.) basic-a64-diagnostics' four `;;
+  Exponent too large`, `;; Fraction too precise`, `;; Explicitly encoded value too large`, `;; Not possible to fmov ZR to a whole
+  vector` are statements in AArch64's ELF syntax (`;` its separator, `//` its comment) that the test states no error at. llvm-mc
+  refuses each: parseInstruction parses the second word as an operand (an expression; no operand parser takes two bare words but
+  parseOptionalMulOperand's `mul vl`) and then wants `,`, `]`, `!`, `}` or the end ('unexpected token in argument list',
+  AArch64AsmParser.cpp, llvm-project 23.1.5, read from the pinned tarball), and the test passes upstream because FileCheck holds
+  only the stated lines: an extra error printed outside a chain of `-NEXT` lines is skipped. `arbace.repr.asm/tolerated?` (arm64)
+  takes such a refusal when the statement is that shape on the text itself (three or more bare words, the second and third apart
+  by white space, the second neither a register nor `mul`: `words-statement?`) and FileCheck's matching lets it through (no `-NOT`
+  line of an error prefix; no chain, a plain CHECK line and its `-NEXT`/`-SAME`/`-EMPTY` lines, whose statements, the echoed ones
+  when every `error:` line has its echo, else every place the chain states, lie on both sides of it). A fabricated test (a words
+  statement inside a chain of two errors, another after it) gives inside not tolerated, after tolerated, by hand. The round trip's
+  detail names them: `5 refusals at the test's errors (4 of statements llvm-mc's parser refuses, unstated)`. arm64 has error
+  controls now (`test/asm/controls-error-arm64.txt`, run by `bin/repr-asm --arch arm64 roundtrip`: basic-a64-diagnostics against
+  neon-diagnostics' lines and back, armv9-sysp-diagnostics against arm64-vector-lists'), and amd64's four still fail. The class is
+  removed: a refusal elsewhere is unclassed.
+- **`:check-text`, print 5 (and encode 7 beside).** A CHECK text that does not read as an instruction (`CHECK: sp, x3, x7, lsl
+  #4`, a part of the printed line; `#{{1.06250*(e\+00)?}}`, a regular expression beyond fc-texts' alternatives) is now judged by the
+  input its place pairs with (`encheck/paired-statement`: the block of adjacent lines that state an encoding, with or without a
+  text, paired line for line with the block of statements just before it, else just after it): the input encoded against the
+  stated bytes, and the input printed (its immediates by its row's kinds) holding the CHECK text as FileCheck finds a pattern within
+  the line (`fc-pattern`: the literal parts quoted, `{{...}}` as regular expressions, white space collapsed; a `[[...]]` variable no
+  pattern). A text-less block (`armv8r-unsupported-inst`'s two `CHECK: encoding:` lines written before `dcps3 #4` and `smc #7`) is
+  paired with the statements after it when the ones before are not as many (`paired-input`). Controls (`controls-encode-arm64.txt`,
+  each must differ): `_control/pattern-fmov-imm` (fmov s4's pattern against the next line's input), `_control/pattern-part-of-line`
+  (`sp, x3, x7, lsl #4` against the line before's input), `_control/paired-after` (dcps3 #4 against smc #7's bytes). The class is
+  removed.
+- **`:unsupported-literal-pool`, AOT 1** (ARS50 (a), the user's of 2026-11-11, "later"). `ldr Rt, =EXPR` as AArch64AsmParser's
+  parseOperand (AsmToken::Equal) and llvm/lib/MC/ConstantPools.cpp make it (`arbace.asm.arm64.obj/literal-form`, `emit-pool!`,
+  `emit-pools!`): `ldr`'s alone ('unexpected token in operand'), after a scalar register ('Only valid when first operand is
+  register'); a constant a MOVZ of the register's width holds (shifted right by 16 while above 0xffff with 16 low zero bits, 48 at
+  most for X, 16 for W) is that MOVZ; a W register's constant past 32 bits 'Immediate too large for register'; anything else an
+  entry of the current section's pool (an equal constant or a bare symbol of the same size taken again, the caches never cleared,
+  as ConstantPool's outlive an emission), the instruction a literal load of the entry's temporary label (an LDR19 fixup resolved in
+  the section). `.ltorg` and `.pool` emit the current section's pool; at the file's end (`:finish`, before -implicit-mapsyms' ends
+  and the attributes, as AsmParser::Run calls emitConstantPools before the streamer's finish) every pool left, in the order the
+  pools were made, each in its section; an entry: zeros to its size's alignment (emitValueToAlignment, still in the code's mapping),
+  its label, its value (data: `$d`), its error at its `ldr`. `error-location-ldr-pseudo`'s `ldr x0, =(-undef)` now meets its
+  stated `expected relocatable expression` at its line (object-verdict 2,890 of 2,890). Checked by hand against clang 23.1.5's
+  integrated assembler (the oracle tier's): two samples (constants, a symbol, a W entry after an X one with its padding, `.ltorg` and
+  a reuse after it, a second code section's pool at the end, a `.data` between) byte for byte the same objects. The eval
+  (`arbace.asm.arm64.eval`) takes the same form: its `ldr` of the entry's label laid out at the entries' AOT places.
+
+After: arm64 read 6,656 pass / 0 / 0, AOT 3,173 / 0 / 0, print 12,671 / 0 / 0 (eval unchanged, 560); the row's completeness 1.0.

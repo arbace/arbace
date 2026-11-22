@@ -1,3 +1,5 @@
+; verdict: debug ignoring debug info with an invalid version (4)
+; rule: llvm/lib/IR/DiagnosticInfo.cpp:121 "Debug Info Version" is 4, not DEBUG_METADATA_VERSION 3, so UpgradeDebugInfo does not verify: StripDebugInfo removes the debug info and it warns (llvm/lib/IR/AutoUpgrade.cpp:6088). The stripped module is valid.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

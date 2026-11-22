@@ -21,13 +21,21 @@
 ;; positions start at 0: read_poll calls the callbacks of each event in order, lost_events with the words overwritten when the
 ;; ring (OCAMLRUNPARAM's e, 2^16 words by default) wrapped past the cursor, its count of events as the C one (max_events as the
 ;; C stub reads it, Some's tagged word); a callback's exception ends the poll and is raised; a poll inside a poll of the same
-;; cursor is Failure "poll called concurrently or reentrant". Divergences (OC219): the collector's own collections (Go's) and the
-;; C runtime's other phases (marking, sweeping, the barriers), counters and allocation buckets are not emitted (OC218's heap model
-;; would give them); one ring for all domains, its events naming their domain; the file holds no ring (the events live in the
-;; process), so another process's file is not mapped ("could not map underlying runtime_events").
+;; cursor is Failure "poll called concurrently or reentrant". Since queue 516 (DECISION 511-2 (a)) OC218's heap model gives two more:
+;; each minor collection of the simulated minor heap (an allocation that overflows it, ext_sys.go's countWords) is an EV_MINOR span,
+;; as Gc.quick_stat counts it; and the allocation buckets (the instrumented runtime's caml_ev_alloc, -runtime-variant=i), each counted
+;; allocation's wosize in its bucket while the ring is active, written as one EV_ALLOC at each major cycle's end (stw_cycle_all_domains'
+;; CAML_EV_ALLOC_FLUSH, here in reCycle), bucket 0 never reset as there. Divergences (OC219): the collector's own collections (Go's)
+;; and the C runtime's other phases (marking, sweeping, the barriers) and counters are not emitted; the buckets count every allocation
+;; oi counts (the model does not know which young blocks a minor collection promotes, the C runtime's count of major-heap allocations
+;; is their promotions and the large blocks), so a program whose allocations all survive (test_instrumented) gets the C runtime's
+;; numbers; the C consumer's API (RuntimeEventsNext) skips EV_ALLOC; one ring for all domains, its events naming their domain; the file
+;; holds no ring (the events live in the process), so another process's file is not mapped ("could not map underlying
+;; runtime_events").
 
 (go/type reEvent "reEvent is one message of the ring: its position and length in words (header and timestamp included), its domain and
-timestamp; kind 0 runtime_begin, 1 runtime_end, 2 runtime_counter, 4 lifecycle, 5 a user event, -1 padding; id the phase, counter,
+timestamp; kind 0 runtime_begin, 1 runtime_end, 2 runtime_counter, 3 alloc (counts its buckets), 4 lifecycle, 5 a user event, -1
+padding; id the phase, counter,
 lifecycle or user event index; data the counter's value or lifecycle's data; utype the user message (0 unit, 1 int, 2 span begin,
 3 span end, 4 custom) and payload a custom event's bytes.
 " (struct
@@ -39,7 +47,8 @@ lifecycle or user event index; data the counter's value or lifecycle's data; uty
     ^int id
     ^int64 data
     ^int utype
-    ^{:tag (slice byte)} payload))
+    ^{:tag (slice byte)} payload
+    ^{:tag (slice int)} counts))
 
 (go/type reCursor "reCursor is a cursor on the process's ring: open, polling (cursor_in_poll), its position in words.\n" (struct
     ^bool open
@@ -57,7 +66,9 @@ lifecycle or user event index; data the counter's value or lifecycle's data; uty
   [^int reTail]
   [^int reSize]
   [^{:tag (slice Value)} reUser]
-  [^{:tag time/Time} reT0])
+  [^{:tag time/Time} reT0]
+  [^bool reLive]
+  [^{:tag (array 20 int)} reBuckets])
 
 (go/const
   [^{:val 2} rePhaseExplicitMinor 2]
@@ -91,7 +102,8 @@ OCAML_RUNTIME_EVENTS_PRESERVE is set.
     (return))
   (when [(values _ ok) (os/LookupEnv "OCAML_RUNTIME_EVENTS_PRESERVE")] (not ok)
     (os/Remove reLoc))
-  (set! reEnabled false))
+  (set! reEnabled false)
+  (set! reLive false))
 
 (go/func reNow "reNow is caml_time_counter: monotonic nanoseconds.\n" ^int64 []
   (conv int64 (time/Since reT0)))
@@ -117,6 +129,7 @@ OCAML_RUNTIME_EVENTS_PRESERVE is set.
   (set! reTail 0)
   (set! reEnabled true)
   (set! rePaused false)
+  (set! reLive true)
   (.Unlock reMu)
   (reWrite 0 4 0 (conv int64 (os/Getpid)) 0 nil 1))
 
@@ -128,6 +141,10 @@ OCAML_RUNTIME_EVENTS_PRESERVE is set.
 (go/func reWrite "reWrite is write_to_ring: a message of n content words, a padding message first when it would straddle the ring's
 end, the oldest messages overwritten (ring_head moved past them) when the ring is full. Nothing when the ring is not active.
 " [^int dom ^int kind ^int id ^int64 data ^int utype ^{:tag (slice byte)} payload ^int n]
+  (reWriteEv (lit reEvent :dom dom :kind kind :id id :data data :utype utype :payload payload) n))
+
+(go/func reWriteEv "reWriteEv is reWrite of the message ev (its position, length and timestamp set here) of n content words.
+" [^reEvent ev ^int n]
   (.Lock reMu)
   (defer (.Unlock reMu))
   (when (or (not reEnabled) rePaused)
@@ -138,7 +155,10 @@ end, the oldest messages overwritten (ring_head moved past them) when the ring i
     (when (< (- reSize off) w)
       (set! reRing (append reRing (lit reEvent :pos reTail :words (- reSize off) :kind -1)))
       (set! reTail + (- reSize off)))
-    (set! reRing (append reRing (lit reEvent :pos reTail :words w :dom dom :ts ts :kind kind :id id :data data :utype utype :payload payload)))
+    (set! (.-pos ev) reTail)
+    (set! (.-words ev) w)
+    (set! (.-ts ev) ts)
+    (set! reRing (append reRing ev))
     (set! reTail + w)
     (while (> (- reTail reHead) reSize)
       (set! reRing (subslice reRing 1))
@@ -160,6 +180,39 @@ end, the oldest messages overwritten (ring_head moved past them) when the ring i
   (rePhase th true rePhaseMinor)
   (rePhase th false rePhaseMinor))
 
+(go/func reMinorHeap "reMinorHeap is a minor collection of the simulated minor heap (ext_sys.go's countWords): its EV_MINOR span when the
+ring is active.
+" []
+  (when reLive
+    (reMinor nil)))
+
+(go/func reAlloc "reAlloc is caml_ev_alloc: an allocation of wosize words counted in its bucket while the ring is active (the
+instrumented runtime's buckets: one a size below 10 words, one a decade below 100, the last the rest).
+" [^int wosize]
+  (when (or (not reLive) (<= wosize 0))
+    (return))
+  (let [b 19]
+    (if (< wosize 10)
+      (set! b wosize)
+      (when (< (- wosize 10) 90)
+        (set! b (+ (/ wosize 10) 9))))
+    (.Lock reMu)
+    (inc! (aget reBuckets b))
+    (.Unlock reMu)))
+
+(go/func reAllocFlush "reAllocFlush is caml_ev_alloc_flush: the buckets written as one EV_ALLOC, then emptied but the first.
+" [^{:tag (* Thread)} th]
+  (when (not (reActive))
+    (return))
+  (.Lock reMu)
+  (let [c (make (slice int) 20)]
+    (for [i 0] (< i 20) (inc! i)
+      (aset c i (aget reBuckets i))
+      (when (> i 0)
+        (aset reBuckets i 0)))
+    (.Unlock reMu)
+    (reWriteEv (lit reEvent :dom (reDom th) :kind 3 :counts c) 20)))
+
 (go/func reCycle "reCycle is stw_finish_major_cycle's events: the minor heap emptied, then EV_MAJOR_FINISH_CYCLE around the cycle,
 whose stw_cycle_all_domains empties it again; compact an EV_COMPACT in the cycle.
 " [^{:tag (* Thread)} th ^bool compact]
@@ -169,6 +222,7 @@ whose stw_cycle_all_domains empties it again; compact an EV_COMPACT in the cycle
   (when compact
     (rePhase th true rePhaseCompact)
     (rePhase th false rePhaseCompact))
+  (reAllocFlush th)
   (rePhase th false rePhaseFinishCycle))
 
 (go/func reExplicit "reExplicit is the events of an asked collection (gc_ctrl.c): kind 0 Gc.minor, 1 Gc.major, 2 Gc.full_major, 3 Gc.compact.\n" [^{:tag (* Thread)} th ^int kind]
@@ -258,6 +312,12 @@ whose stw_cycle_all_domains empties it again; compact an EV_COMPACT in the cycle
       (case [2]
         (when [f (reCallback cbs 2)] (!= f nil)
           (.ApplyCallback th f (lit (slice Value) (.-dom ev) ts (.-id ev) (conv int (.-data ev))))))
+      (case [3]
+        (when [f (reCallback cbs 3)] (!= f nil)
+          (let [a (make (slice Value) (len (.-counts ev)))]
+            (range [i k (.-counts ev)]
+              (aset a i k))
+            (.ApplyCallback th f (lit (slice Value) (.-dom ev) ts (addr (lit Block :Tag 0 :F a)))))))
       (case [4]
         (when [f (reCallback cbs 4)] (!= f nil)
           (let [^Value d None]
@@ -379,6 +439,79 @@ written, a unit, int or span event's directly; nothing when the ring is not acti
             (reWrite dom 5 id 0 3 nil 0)))))
     Unit))
 
+(go/func RuntimeEventsControl "RuntimeEventsControl is the C API's caml_runtime_events_start (op 0), pause (1), resume (2) and are_active (3,
+its result 1 or 0) on the process's ring (go/arbace/oicapi, test/ocaml/capi/runtime.c).
+" ^int [^int op]
+  (switch op
+    (case [0] (reStart))
+    (case [1]
+      (.Lock reMu)
+      (let [ok (and reEnabled (not rePaused))]
+        (.Unlock reMu)
+        (when ok
+          (reLifecycle 2 0)
+          (.Lock reMu)
+          (set! rePaused true)
+          (set! reLive false)
+          (.Unlock reMu))))
+    (case [2]
+      (.Lock reMu)
+      (let [ok (and reEnabled rePaused)]
+        (when ok
+          (set! rePaused false)
+          (set! reLive true))
+        (.Unlock reMu)
+        (when ok
+          (reLifecycle 3 0))))
+    (case [3]
+      (when (reActive)
+        (return 1))))
+  0)
+
+(go/func RuntimeEventsCursor "RuntimeEventsCursor is the C consumer's caml_runtime_events_create_cursor's check (runtime_events_consumer.h): 0
+(E_SUCCESS) for the process's own ring (own: a NULL path and a negative pid), -6 (E_NO_CURRENT_RING) when it is not started,
+-5 (E_OPEN_FAILURE) when DIR/PID.events cannot be opened, -7 (E_MAP_FAILURE) when that file is not this process's ring (another
+process's ring is not mapped, OC219's divergence).
+" ^int [^bool own ^string dir ^int pid]
+  (.Lock reMu)
+  (let [en reEnabled loc reLoc]
+    (.Unlock reMu)
+    (when own
+      (if en (return 0) (return -6)))
+    (let [path (+ dir "/" (strconv/Itoa pid) ".events")
+          (values f err) (os/Open path)]
+      (when (!= err nil)
+        (return -5))
+      (.Close f)
+      (when (not en)
+        (return -7))
+      (let [(values a e1) (os/Stat path)
+            (values b e2) (os/Stat loc)]
+        (when (or (!= e1 nil) (!= e2 nil) (not (os/SameFile a b)))
+          (return -7))))
+    0))
+
+(go/func RuntimeEventsNext "RuntimeEventsNext is the C consumer's read of the ring at position pos (in words, from the ring's start): status 0
+when nothing is left, 1 an event (next its end; kind 0 runtime_begin, 1 runtime_end, 2 runtime_counter, 4 lifecycle, 5 a user
+event; its domain, timestamp, id and data as reEvent's), 2 lost events (next the ring's head, data the words lost), -1 a
+position no message starts at (E_CORRUPT_STREAM). Padding and EV_ALLOC (queue 516: its buckets are not passed) are skipped.
+" [^int pos] :results [^int status ^int next ^int kind ^int dom ^int64 ts ^int id ^int64 data]
+  (.Lock reMu)
+  (defer (.Unlock reMu))
+  (while true
+    (when (> reHead pos)
+      (return 2 reHead 0 0 0 0 (conv int64 (- reHead pos))))
+    (when (>= pos reTail)
+      (return 0 pos 0 0 0 0 0))
+    (let [p pos
+          i (sort/Search (len reRing) (fn ^bool [^int k] (>= (.-pos (aget reRing k)) p)))]
+      (when (or (>= i (len reRing)) (!= (.-pos (aget reRing i)) p))
+        (return -1 pos 0 0 0 0 0))
+      (let [ev (aget reRing i)]
+        (set! pos (+ p (.-words ev)))
+        (when (and (!= (.-kind ev) -1) (!= (.-kind ev) 3))
+          (return 1 pos (.-kind ev) (.-dom ev) (.-ts ev) (.-id ev) (.-data ev)))))))
+
 (go/func init []
   (let [r RegisterExt]
     (r "caml_ml_runtime_events_start" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (reStart) Unit))
@@ -390,13 +523,15 @@ written, a unit, int or span event's directly; nothing when the ring is not acti
           (reLifecycle 2 0)
           (.Lock reMu)
           (set! rePaused true)
+          (set! reLive false)
           (.Unlock reMu)))
       Unit))
     (r "caml_ml_runtime_events_resume" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
       (.Lock reMu)
       (let [ok (and reEnabled rePaused)]
         (when ok
-          (set! rePaused false))
+          (set! rePaused false)
+          (set! reLive true))
         (.Unlock reMu)
         (when ok
           (reLifecycle 3 0)))

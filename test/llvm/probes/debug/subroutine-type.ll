@@ -1,3 +1,5 @@
+; verdict: debug invalid subroutine type
+; rule: llvm/lib/IR/Verifier.cpp:1517 !5's type is !8, a DIBasicType; the parser only requires a non-null type, but visitDISubprogram requires a DISubroutineType.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

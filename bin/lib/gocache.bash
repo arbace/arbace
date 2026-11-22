@@ -59,11 +59,15 @@ gocache_trim() {
 
 # build_go_print_cache_trim DIR: the build's cache of printed packages (bin/build-go --print-cache, standalone
 # S6) trimmed alike, of entries unused for ARBACE_GOCACHE_KEEP_MIN minutes, and its collect
-# indexes (DIR/collect/, files: arbace.build.go's root-packages)
+# indexes (DIR/collect/, files: arbace.build.go's root-packages); queue 485: under DIR/.lock taken exclusive, and
+# not at all while a build holds it (bin/build-go holds it shared): no entry a running build has read is removed
 build_go_print_cache_trim() {
   local keep=${ARBACE_GOCACHE_KEEP_MIN:-90} discard=${TMPDIR:-$root/.tmp/tmp}/gocache.discard
   [ -d "$1" ] || return 0
   mkdir -p "${discard%/*}"
-  find "$1" -mindepth 2 -maxdepth 2 -type d -mmin +"$keep" -exec rm -rf {} + 2>"$discard" || true
-  [ -d "$1/collect" ] && find "$1/collect" -type f -mmin +"$keep" -delete 2>"$discard" || true
+  (
+    flock -n 9 || { echo "   the print cache $1 left alone: a build uses it (its lock $1/.lock)" >&2; exit 0; }
+    find "$1" -mindepth 2 -maxdepth 2 -type d -mmin +"$keep" -exec rm -rf {} + 2>"$discard" || true
+    [ -d "$1/collect" ] && find "$1/collect" -type f -mmin +"$keep" -delete 2>"$discard" || true
+  ) 9>> "$1/.lock"
 }

@@ -179,7 +179,8 @@
     (vec (distinct (map (fn [[_ m b]] [m (= b "IsBoot")]) (re-seq import-re (slurp f)))))
     []))
 
-(defn- boot-dump [dump] (str/replace dump #"\.hsc?\.edn$" ".hs-boot.edn"))
+;; (hs-judge-1120, round 5: a literate module, a Setup script's Setup.lhs, has no boot file: nil, not its own dump)
+(defn- boot-dump [dump] (when (re-find #"\.hsc?\.edn$" dump) (str/replace dump #"\.hsc?\.edn$" ".hs-boot.edn")))
 
 (defn own-order
   "The plan's modules and the package's hs-boot files in an order that compiles each after its imports (Kahn's, the
@@ -193,7 +194,7 @@
                            [n (vec (sort (for [^File f (or (.listFiles (File. ^String ln)) [])
                                                :let [b (.getName f)] :when (str/ends-with? b ".iface.edn")]
                                            (subs b 0 (- (count b) 10)))))]))
-        boots (into {} (for [[n d] rows :let [b (boot-dump d)] :when (.isFile (File. ^String b))] [n b]))
+        boots (into {} (for [[n d] rows :let [b (boot-dump d)] :when (and b (.isFile (File. ^String b)))] [n b]))
         dep (fn [[m boot?]] (when (contains? by m) (if (and boot? (contains? boots m)) [:boot m] [:full m])))
         nodes (vec (concat (for [[n] rows :when (contains? boots n)] [:boot n]) (for [[n] rows] [:full n])))
         deps (into {} (for [[k n :as node] nodes]
@@ -312,6 +313,12 @@
         members (if (empty? dep-pools)
                   members0
                   (grow-closure (map #(get aliases % %) (concat members0 (map first (imports-of dump)) ["GHC.Internal.Control.Monad.Fail"]
+                                                                ;; a derived Lift instance's code names Template Haskell's library
+                                                                ;; (gen_Lift_binds' appE, conE, litE and Quote's methods, GHC's
+                                                                ;; known-key names, whose interface GHC loads on demand): a module
+                                                                ;; that names the class Lift (deriving TH.Lift, bytestring's and
+                                                                ;; time's) has GHC.Internal.TH.Lib's interface in its closure
+                                                                (when (re-find #"tc (\"[^\"]*\" )?\"Lift\"\)" (slurp dump)) ["GHC.Internal.TH.Lib"])
                                                                 ;; P17: a package above base imports Prelude implicitly (the dump
                                                                 ;; does not name it; the renamer adds it): base's pool's
                                                                 (when (some #(.isFile (File. (str % "/Prelude.iface.edn"))) dep-pools) ["Prelude"])))

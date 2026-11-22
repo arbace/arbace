@@ -23,11 +23,16 @@
 #include "caml/blake2.h"
 #include "caml/misc.h"
 #include "caml/domain.h"
+#include "caml/domain_state.h"
+#include "caml/runtime_events_consumer.h"
 
 /* the natives (go/arbace/oicapi) */
 extern value __oi_alloc(mlsize_t wosize, tag_t tag);
 extern value __oi_alloc_static(mlsize_t wosize, tag_t tag);
 extern value __oi_predef(int index);
+extern int __oi_re_control(int op);
+extern intnat __oi_re_cursor(const char *path, int pid);
+extern intnat __oi_re_next(intnat pos, int64_t *out);
 
 /* the atoms: zero-sized blocks, one a tag */
 static header_t atoms[256];
@@ -161,11 +166,15 @@ int caml_atomic_cas_field(value obj, intnat i, value old, value nv)
   if (Field(obj, i) == old) { Field(obj, i) = nv; return 1; }
   return 0;
 }
-void caml_register_global_root(value *r) { (void) r; }
-void caml_remove_global_root(value *r) { (void) r; }
-void caml_register_generational_global_root(value *r) { (void) r; }
-void caml_remove_generational_global_root(value *r) { (void) r; }
-void caml_modify_generational_global_root(value *r, value v) { *r = v; }
+/* the global roots (queue 516, DECISION 511-3 (a)): a root registered, or modified through
+   caml_modify_generational_global_root, during a call keeps its value when the outermost stub returns (oi moves a copy of the
+   boundary's memory it names into the static memory, the same oi value: go/arbace/oicapi's rehome) */
+extern void __oi_root(value *r, int op);
+void caml_register_global_root(value *r) { __oi_root(r, 1); }
+void caml_remove_global_root(value *r) { __oi_root(r, 0); }
+void caml_register_generational_global_root(value *r) { __oi_root(r, 1); }
+void caml_remove_generational_global_root(value *r) { __oi_root(r, 0); }
+void caml_modify_generational_global_root(value *r, value v) { *r = v; __oi_root(r, 2); }
 void caml_alloc_dependent_memory(value v, mlsize_t n) { (void) v; (void) n; }
 void caml_free_dependent_memory(value v, mlsize_t n) { (void) v; (void) n; }
 void caml_adjust_gc_speed(mlsize_t a, mlsize_t b) { (void) a; (void) b; }
@@ -236,10 +245,15 @@ void caml_fatal_error(const char *msg, ...)
   abort();
 }
 
-/* the runtime lock: oi's threads run one at a time already */
-void caml_enter_blocking_section(void) {}
-void caml_enter_blocking_section_no_pending(void) {}
-void caml_leave_blocking_section(void) {}
+/* the runtime lock: oi's threads run one at a time already, and a stub's blocking section releases nothing; it only marks the
+   thread outside the runtime, where Caml_state_opt is NULL (signals.c's caml_enter_blocking_section clears the domain's state) */
+static int blocking;
+struct caml_domain_state { int unused; };
+static struct caml_domain_state domain_state;
+caml_domain_state *caml_state_opt(void) { return blocking ? NULL : &domain_state; }
+void caml_enter_blocking_section(void) { blocking = 1; }
+void caml_enter_blocking_section_no_pending(void) { blocking = 1; }
+void caml_leave_blocking_section(void) { blocking = 0; }
 void caml_process_pending_actions(void) {}
 value caml_process_pending_actions_exn(void) { return Val_unit; }
 int caml_check_pending_actions(void) { return 0; }
@@ -451,6 +465,13 @@ intnat __oi_custom_serialize(value v, uintnat *sizes)
   return (intnat) ser_len;
 }
 unsigned char *__oi_custom_buffer(void) { return ser_buf; }
+/* a custom block's finalization (queue 516, DECISION 511-3 (a)): oi calls it once the block's value is unreachable, at the
+   collection a program asks for (go/arbace/oicapi's finalise) */
+void __oi_custom_finalize(value v)
+{
+  const struct custom_operations *ops = Custom_ops_val(v);
+  if (ops != NULL && ops->finalize != NULL) ops->finalize(v);
+}
 value __oi_custom_deserialize(const char *id, const unsigned char *data, uintnat expected, uintnat *res)
 {
   for (int i = 0; i < nregistered; i++) {
@@ -464,4 +485,91 @@ value __oi_custom_deserialize(const char *id, const unsigned char *data, uintnat
     return v;
   }
   return 0;
+}
+
+/* runtime events (runtime_events.h, runtime_events_consumer.h) over oi's ring (go/arbace/oi/ext_runtime_events.ae): start, pause
+   and resume are Runtime_events'; a cursor is a position in the ring's words from its start, as the OCaml cursor's, and
+   read_poll reads the messages from it through oi (__oi_re_next), calling the callbacks set: lost_events when the ring wrapped
+   past the cursor, then each message's; a callback's 0 stops the poll after that message. User events reach no C callback. */
+void caml_runtime_events_start(void) { __oi_re_control(0); }
+void caml_runtime_events_pause(void) { __oi_re_control(1); }
+void caml_runtime_events_resume(void) { __oi_re_control(2); }
+int caml_runtime_events_are_active(void) { return __oi_re_control(3); }
+
+struct caml_runtime_events_cursor {
+  int open, in_poll;
+  intnat pos;
+  int (*runtime_begin)(int, void *, uint64_t, ev_runtime_phase);
+  int (*runtime_end)(int, void *, uint64_t, ev_runtime_phase);
+  int (*runtime_counter)(int, void *, uint64_t, ev_runtime_counter, uint64_t);
+  int (*alloc)(int, void *, uint64_t, uint64_t *);
+  int (*lifecycle)(int, void *, int64_t, ev_lifecycle, int64_t);
+  int (*lost_events)(int, void *, int);
+  int (*user_events)(int, void *, int64_t, value, uintnat, uint64_t *);
+};
+
+runtime_events_error caml_runtime_events_create_cursor(const char_os *path, int pid, struct caml_runtime_events_cursor **res)
+{
+  intnat r = __oi_re_cursor(path, pid);
+  if (r != E_SUCCESS) return (runtime_events_error) r;
+  struct caml_runtime_events_cursor *c = calloc(1, sizeof *c);
+  if (c == NULL) return E_ALLOC_FAIL;
+  c->open = 1;
+  *res = c;
+  return E_SUCCESS;
+}
+void caml_runtime_events_set_runtime_begin(struct caml_runtime_events_cursor *c,
+    int (*f)(int, void *, uint64_t, ev_runtime_phase)) { c->runtime_begin = f; }
+void caml_runtime_events_set_runtime_end(struct caml_runtime_events_cursor *c,
+    int (*f)(int, void *, uint64_t, ev_runtime_phase)) { c->runtime_end = f; }
+void caml_runtime_events_set_runtime_counter(struct caml_runtime_events_cursor *c,
+    int (*f)(int, void *, uint64_t, ev_runtime_counter, uint64_t)) { c->runtime_counter = f; }
+void caml_runtime_events_set_runtime_alloc(struct caml_runtime_events_cursor *c,
+    int (*f)(int, void *, uint64_t, uint64_t *)) { c->alloc = f; }
+void caml_runtime_events_set_lifecycle(struct caml_runtime_events_cursor *c,
+    int (*f)(int, void *, int64_t, ev_lifecycle, int64_t)) { c->lifecycle = f; }
+void caml_runtime_events_set_lost_events(struct caml_runtime_events_cursor *c,
+    int (*f)(int, void *, int)) { c->lost_events = f; }
+void caml_runtime_events_set_user_events(struct caml_runtime_events_cursor *c,
+    int (*f)(int, void *, int64_t, value, uintnat, uint64_t *)) { c->user_events = f; }
+void caml_runtime_events_free_cursor(struct caml_runtime_events_cursor *c)
+{
+  if (c == NULL || c->in_poll) return;
+  c->open = 0;
+  free(c);
+}
+
+runtime_events_error caml_runtime_events_read_poll(struct caml_runtime_events_cursor *c, void *data, uintnat max_events,
+                                                   uintnat *consumed)
+{
+  if (c == NULL || !c->open) return E_CURSOR_NOT_OPEN;
+  if (c->in_poll) return E_CURSOR_POLL_BUSY;
+  c->in_poll = 1;
+  uintnat n = 0;
+  runtime_events_error err = E_SUCCESS;
+  int go_on = 1;
+  int64_t m[6];
+  while (go_on && (max_events == 0 || n < max_events)) {
+    intnat st = __oi_re_next(c->pos, m);
+    if (st == 0) break;
+    if (st < 0) { err = E_CORRUPT_STREAM; break; }
+    c->pos = (intnat) m[0];
+    if (st == 2) {
+      if (c->lost_events) go_on = c->lost_events(0, data, (int) m[5]);
+      continue;
+    }
+    int dom = (int) m[2];
+    uint64_t ts = (uint64_t) m[3];
+    switch ((int) m[1]) {
+      case 0: if (c->runtime_begin) go_on = c->runtime_begin(dom, data, ts, (ev_runtime_phase) m[4]); break;
+      case 1: if (c->runtime_end) go_on = c->runtime_end(dom, data, ts, (ev_runtime_phase) m[4]); break;
+      case 2: if (c->runtime_counter) go_on = c->runtime_counter(dom, data, ts, (ev_runtime_counter) m[4], (uint64_t) m[5]); break;
+      case 4: if (c->lifecycle) go_on = c->lifecycle(dom, data, (int64_t) ts, (ev_lifecycle) m[4], m[5]); break;
+      default: break;
+    }
+    n++;
+  }
+  c->in_poll = 0;
+  if (consumed != NULL) *consumed = n;
+  return err;
 }

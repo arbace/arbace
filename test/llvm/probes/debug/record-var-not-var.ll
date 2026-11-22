@@ -1,3 +1,5 @@
+; verdict: debug invalid #dbg record variable
+; rule: llvm/lib/IR/Verifier.cpp:7167 The #dbg_declare's variable is !1 (DIFile); visit(DbgVariableRecord) checks the record type and location (both fine), then the variable.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

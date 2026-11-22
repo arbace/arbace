@@ -40,6 +40,28 @@
 
 (defn- ch [^Tok t] (.-ch t))
 (defn- src ^String [^Tok t] (.-src t))
+
+(defn- mkey
+  "cpp-read (2026-11-22): a macro's name as the macros table keys it, its universal character names as their characters' UTF-8
+  (the ISO-8859-1 text of the bytes, as the lexer spells them): one identifier however its characters are written, as
+  libcpp's identifiers hash ([lex.name]/1 with [lex.charset]: `EN\\u0394` and `EN\u0394`'s UTF-8 name one macro)."
+  ^String [^String nm]
+  (if (neg? (.indexOf nm "\\"))
+    nm
+    (let [b (StringBuilder.) n (.length nm)]
+      (loop [i 0]
+        (if (< i n)
+          (let [c (.charAt nm i)
+                k (when (and (= c \\) (< (inc i) n)) (case (.charAt nm (inc i)) \u 4 \U 8 nil))
+                hex (when (and k (<= (+ i 2 (long k)) n)) (subs nm (+ i 2) (+ i 2 (long k))))]
+            (if (and hex (re-matches #"[0-9A-Fa-f]+" hex)
+                     ;; (a code point a character has: not past U+10FFFF nor a surrogate; such a name stays as written)
+                     (let [v (Long/parseLong hex 16)] (and (<= v 0x10FFFF) (not (<= 0xD800 v 0xDFFF)))))
+              (do (.append b (String. (.getBytes (String. (Character/toChars (Integer/parseInt hex 16))) "UTF-8") "ISO-8859-1"))
+                  (recur (+ i 2 (long k))))
+              (do (.append b c) (recur (inc i)))))
+          (.toString b))))))
+
 (defn- sep ^String [^Tok t] (.-sep t))
 (defn- has-sep? [^Tok t] (pos? (.length ^String (.-sep t))))
 (defn- blank? [^Tok t] (let [c (.-ch t)] (or (= c \space) (= c \newline))))
@@ -56,12 +78,15 @@
 (defn- udl-split
   "Arbace (CX2): a user-defined literal whose ud-suffix is a macro's name, as libcpp reads it
   (is_macro_not_literal_suffix: the suffix is not part of the literal, it is expanded): the literal and
-  the identifier, two tokens; else the token."
+  the identifier, two tokens; else the token. cpp-read (2026-11-22): a suffix of one underscore and another
+  character first stays the literal's whatever it names, as libcpp's maybe_ignore_udl_macro_suffix keeps it
+  (\"user-defined literals outside of namespace std must start with a single underscore\")."
   [macros ^Tok v]
   (let [src (.-src v)
         q (long (.lastIndexOf ^String src (if (= (.-ch v) :UDLSTRING) 34 39)))
         suffix (subs src (inc q))]
-    (if (or (.get ^HashMap macros suffix) (builtin-macro-names suffix))
+    (if (and (not (and (str/starts-with? suffix "_") (not (str/starts-with? suffix "__"))))
+             (or (.get ^HashMap macros suffix) (builtin-macro-names suffix)))
       (let [lit (subs src 0 (inc q))
             first-c (.charAt lit 0)
             wide? (or (= first-c \L) (= first-c \U) (and (= first-c \u) (not= (.charAt lit 1) \8)))
@@ -512,7 +537,7 @@
 (defn- macro
   "cpp.macro: the macro `nm` names at `t`, the builtin ones made as cc makes them; nil."
   [^Cpp c ^Tok t ^String nm]
-  (if-let [m (.get ^HashMap (.-macros c) nm)]
+  (if-let [m (.get ^HashMap (.-macros c) (mkey nm))]
     (case nm
       "__FILE__" (builtin-macro t :STRINGLITERAL (go-quote (let [^String f (nth (lex/tok-position t) 0)]
                                                              ;; the main file entered again (*reentry*) is still the main file
@@ -609,6 +634,23 @@
                         :else (recur (inc i) level)))))]
           (cond
             (and eval (= s "defined")) (recur (parse-defined c ts))
+            ;; c-rows: -traditional-cpp has no __has_embed (gcc's error; then an identifier, 0, as traditional C reads it)
+            (and eval (= s "__has_embed") (:traditional (.-cfg c)))
+            (do (eh c (str (pos-str t) ": '__has_embed' not supported in traditional C"))
+                ;; the identifier's operand then (gcc's "missing binary operator", the #if's value 0): its parenthesized
+                ;; tokens dropped, the identifier left to the expression (0)
+                (when (= (ch (first (ts-peek-non-blank ts))) \()
+                  (let [^Tok lp (first (ts-peek-non-blank ts))]
+                    (eh c (str (pos-str lp) ": missing binary operator before token '('"))
+                    (skip-blank ts)
+                    (loop [level 0]
+                      (let [x (ts-shift ts)]
+                        (cond (= (ch x) :eof) nil
+                              (= (ch x) \() (recur (inc level))
+                              (and (= (ch x) \)) (<= level 1)) nil
+                              (= (ch x) \)) (recur (dec level))
+                              :else (recur level))))))
+                (when (= (ret) ::more) (recur ts)))
             (and eval (has-ops s)) (recur (parse-has c ts s t))
             ;; Arbace: gcc answers the attribute and builtin operators outside #if too (cc: an identifier)
             (and (not eval) (#{"__has_attribute" "__has_c_attribute" "__has_builtin" "__has_cpp_attribute"} s)
@@ -1205,6 +1247,8 @@
             (cond
               ;; Arbace (n-c-defer): libcpp's builtin_has_embed (macro.cc): its '(', its header-name, then its parameters by
               ;; parse-embed-params; the tokens after what they took left to the expression, as gcc's are
+              ;; c-rows: -traditional-cpp: an identifier as any other (0), its errors the expansion's (gcc's)
+              (and (= nm "__has_embed") (:traditional (.-cfg c))) 0
               (= nm "__has_embed")
               (let [paren (= (ch (token s)) \()
                     _ (if paren (ts-shift s) (eh c (str (pos-str t) ": missing '(' before '__has_embed' operand")))
@@ -1785,6 +1829,11 @@
   [^Cpp c line]
   (let [^Tok verb (line 1)
         w (ArrayList.)
+        ;; cpp-read (2026-11-22): before C++26 the directive is GCC's extension in C++, libcpp's pedwarn "#embed before C++26 is a
+        ;; GCC extension" (directives.cc's do_embed), an error under -pedantic-errors
+        _ (when (and (:cxx (.-cfg c)) (= :errors (:pedantic (.-cfg c)))
+                     (not (#{:c++26 :gnu++26 :c++2c :gnu++2c} (:std (.-cfg c)))))
+            (eh c (str (pos-str verb) ": '#embed' before C++26 is a GCC extension")))
         _ (doseq [t (take 1 (filter #(and (= (ch %) :IDENTIFIER) (= (src %) "defined")) (subvec (pop line) 2)))]
             (eh c (str (pos-str t) ": 'defined' in '#embed' parameter")))
         _ (expand c false true (toks (tokens->cpp (subvec (pop line) 2) true (macros-of c))) w)
@@ -1859,7 +1908,7 @@
   (let [s (src nm)]
     (when (and (or (not (protected-macros s)) (= (nth (lex/tok-position nm) 0) "<predefined>"))
                (not (alt-name-error c nm s)))
-      (.put ^HashMap (.-macros c) s (new-macro nm params rl min-args var-arg fn-like)))))
+      (.put ^HashMap (.-macros c) (mkey s) (new-macro nm params rl min-args var-arg fn-like)))))
 
 (defn- va-opt-check!
   "Arbace (CS143): gcc's checks of __VA_OPT__ in the replacement list `rl` of a variadic macro: its parenthesis and the
@@ -1908,7 +1957,7 @@
       (alt-name-error c (line 2) nm)
       (when-not (protected-macros nm)
         (.add ^HashSet (.-undefs c) nm)
-        (.remove ^HashMap (.-macros c) nm)))))
+        (.remove ^HashMap (.-macros c) (mkey nm))))))
 
 (defn- pragma! [^Cpp c x]
   (let [x (vec x)
@@ -2072,7 +2121,11 @@
                                                                  (subvec (pop line) 2)))))
                       ;; Arbace: #warning (C23 6.10.7), a warning of the read
                       "warning" (.add ^ArrayList (.-warns c) (str (pos-str (line 1)) ": " (line-text (pop line))))
-                      "embed" (embed! c line)
+                      ;; c-rows: -traditional-cpp (gcc.dg/cpp/embed-4.c): libcpp's traditional mode has no #embed (gcc's error, the
+                      ;; line dropped)
+                      "embed" (if (:traditional (.-cfg c))
+                                (eh c (str (pos-str (line 0)) ": '#embed' not supported in traditional C"))
+                                (embed! c line))
                       (eh c (str (pos-str (line 0)) ": unknown directive " verb)))))
                 (recur)))))))))
 

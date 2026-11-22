@@ -1,6 +1,6 @@
 (ns arbace.repr.haskell.deriv
   "Deriving for Arbace's Haskell front end (doc/haskell/FRONTEND-SURVEY.md, HF4, HFS5 (a)): the instance bindings GHC
-  9.14.1's deriving generates for the Haskell 2010 classes (Eq, Ord, Show, Read, Enum, Bounded, Ix), for Functor,
+  9.14.1's deriving generates for the Haskell 2010 classes (Eq, Ord, Show, Read, Enum, Bounded, Ix), for Data, for Functor,
   Foldable and Traversable, and for Generic and Generic1 (with their representation type), as renamed-tree bindings the elaborator (arbace.repr.haskell.typecheck) then types like any
   instance's methods.
 
@@ -8,7 +8,8 @@
   LICENSE.md and doc/ARBACE.md:
     compiler/GHC/Tc/Deriv/Generate.hs    gen_Eq_binds, gen_Ord_binds (mkOrdOpRhs, mkInnerRhs, mkCompareFields),
                                          gen_Enum_binds, gen_Bounded_binds, gen_Ix_binds, gen_Read_binds,
-                                         gen_Show_binds
+                                         gen_Show_binds, gen_Lift_binds, gen_Data_binds (with genAuxBindSpecOriginal's
+                                         DerivDataDataType and DerivDataConstr)
     compiler/GHC/Tc/Deriv/Functor.hs     gen_Functor_binds, gen_Foldable_binds, gen_Traversable_binds
     compiler/GHC/Tc/Deriv/Generics.hs    (HF10-P34) mkBindsRep, mkSum, mk1Sum, genLR_E, genLR_P, mkProd_E, mkProd_P,
                                          wrapArg_E, wrapArg_P, argTyFold, foldBal, tc_mkRepTy, mkBoxTy
@@ -302,7 +303,10 @@
                                                                     (map (fn [l a] [(mk-showstring (str (wrap-parens (occ-of l)) " = ")) a]) labels show-args)))
                                            [(mk-showstring "}")])
                            :else (concat [(mk-showstring (str op-con-str " "))] (interpose (v* show-space) show-args)))
-                nested (reduce (fn [acc x] (ap* (v* compose) x acc)) (last thingies) (reverse (butlast thingies)))]
+                ;; GHC 9.14's nested_compose_Expr (GHC.Tc.Deriv.Generate, the pinned tarball's compiler/): \z -> e1 (e2 (.. (en
+                ;; z))), (.)'s definition inlined (#25453), not a chain of (.)
+                nested (lam* [(vp "z")]
+                             (reduce (fn [acc x] (ap* x acc)) (ap* (last thingies) (v* (lname "z"))) (reverse (butlast thingies))))]
             (if (zero? k)
               [[wp (con-pat c [])] (mk-showstring op-con-str)]
               [[(vp "a") (con-pat c bs)]
@@ -480,6 +484,26 @@
           (vector? k) (ok? var (nth k 2))
           :else true)))
 
+(defn- fun-parts
+  "A function type's argument and result [arg res] (FUN's last two arguments), nil for another type"
+  [t]
+  (when (and (vector? t) (= :tc (first t)) (= "FUN" (occ-of (second t))) (>= (count (nth t 2)) 2))
+    [(nth (nth t 2) (- (count (nth t 2)) 2)) (last (nth t 2))]))
+
+(defn- functor-ok?
+  "GHC.Tc.Deriv.Functor's functorLikeTraverse for Functor: a field type whose variable occurs only covariantly (a function's
+  argument flips the position, ft_fun: twice is covariant again), through applications whose last argument holds it, tuples
+  and foralls (ft_forall); co, the position"
+  [var t co]
+  (cond (not (ty-contains? var t)) true
+        (= t [:tv var]) co
+        (= :forall (first t)) (functor-ok? var (nth t 3) co)
+        (fun-parts t) (let [[a r] (fun-parts t)] (and (functor-ok? var a (not co)) (functor-ok? var r co)))
+        :else (let [k (classify var t)]
+                (cond (= k :bad) false
+                      (= :tup (first k)) (every? #(functor-ok? var % co) (second k))
+                      :else (and co (functor-ok? var (nth k 2) true))))))
+
 (defn- supply [] (let [n (atom 0)] (fn [] (lname (str "y" (swap! n inc))))))
 
 (defn- tup-names [fresh n] (vec (repeatedly n fresh)))
@@ -491,7 +515,7 @@
   (let [fmap (gv base "fmap") repl (gv base "<$")
         f (v* (lname "f")) z (v* (lname "z"))
         kinds (fn [c] (mapv #(classify var %) (:tys c)))]
-    (when (every? (fn [c] (every? #(ok? var %) (:tys c))) cons)
+    (when (every? (fn [c] (every? #(functor-ok? var % true) (:tys c))) cons)
       (let [mk (fn [replace?]
                  (fn [c]
                    (let [fresh (supply)
@@ -499,6 +523,11 @@
                               (let [k (classify var t)]
                                 (cond (= k :triv) x
                                       (= k :var) (if replace? z (ap* f x))
+                                      ;; ft_forall: the body's; ft_fun: \b -> h (x (g b)), g the argument's traversal in the
+                                      ;; other position (its variable's occurrences covariant there again, functor-ok?)
+                                      (= :forall (first t)) (go (nth t 3) x)
+                                      (fun-parts t) (let [[a r] (fun-parts t) b (fresh)]
+                                                      (lam* [(vp (nth b 2))] (go r (ap* x (go a (v* b))))))
                                       (= :tup (first k)) (let [ns (tup-names fresh (count (second k)))]
                                                            (hcase x [[(tup-pat ns) (tuple* (map (fn [t n] (go t (v* n))) (second k) ns))]]))
                                       :else (let [[_ _ a] k]
@@ -748,8 +777,84 @@
          (gty* "MetaData" [:lit (occ-of name)] [:lit module] [:lit unit] (bool newtype?))
          (fold-bal (fn [a b] (gty ":+:" a b)) (gty "V1") (map con-ty cons)))))
 
+;;; Data ------------------------------------------------------------------------------------------
+;;; GHC.Tc.Deriv.Generate's gen_Data_binds: gfoldl, gunfold, toConstr, dataTypeOf, dataCast1/2 over the auxiliary bindings
+;;; $tT = mkDataType "M.T" [$cC1, ..] and $cC = mkConstrTag $tT "C" tag [labels] Prefix|Infix (genAuxBindSpecOriginal's
+;;; DerivDataDataType, DerivDataConstr: top-level bindings of the module, data-aux; desc's :data names them)
+
+(def ^:private data-m "GHC.Internal.Data.Data")
+
+(defn data-aux-names
+  "The auxiliary binders of T's derived Data in module m (new_dataT_rdr_name, new_dataC_rdr_name: $tT, $cC)"
+  [m {:keys [tn cons]}]
+  {:t ["ext" "var" m (str "$t" (occ-of tn))]
+   :cs (into {} (for [c cons] [(:name c) ["ext" "var" m (str "$c" (occ-of (:name c)))]]))})
+
+(defn data-aux
+  "The auxiliary bindings of T's derived Data: [[NAME :datatype|:constr renamed-binding]...]"
+  [{:keys [tn cons data]}]
+  (let [{:keys [t cs]} data]
+    (into [[t :datatype (funbind t [[[] (ap* (v* (gv data-m "mkDataType")) (str* (str (nth tn 2) "." (occ-of tn)))
+                                            (hlist (map #(v* (get cs (:name %))) cons)))]])]]
+          (map-indexed (fn [i c]
+                         [(get cs (:name c)) :constr
+                          (funbind (get cs (:name c))
+                                   [[[] (ap* (v* (gv data-m "mkConstrTag")) (v* t) (str* (occ-of (:name c))) (int* (inc i))
+                                             (hlist (map #(str* (occ-of %)) (:labels c)))
+                                             (v* (dc data-m (if (sym? (occ-of (:name c))) "Infix" "Prefix"))))]])])
+                       cons))))
+
+(defn gen-data [{:keys [cons data]}]
+  (let [{:keys [t cs cast]} data
+        k (lname "k") z (lname "z") c (lname "c")
+        ;; mkFunBindEC: no constructor, one equation whose last argument is an empty case's scrutinee
+        ec (fn [arity clauses] (if (seq clauses) clauses
+                                   [[(conj (vec (repeat (dec arity) wp)) (vp "z")) (hcase (v* z) [])]]))
+        gfoldl (funbind (gv data-m "gfoldl")
+                        (ec 3 (for [con cons :let [as (as-names "a" (:arity con))]]
+                                [[(vp "k") (vp "z") (con-pat con as)]
+                                 (reduce (fn [e a] (op* e k (v* a))) (ap* (v* z) (v* (:name con))) as)])))
+        unfold (fn [con] (reduce (fn [e _] (ap* (v* k) e)) (ap* (v* z) (v* (:name con))) (range (:arity con))))
+        gunfold (funbind (gv data-m "gunfold")
+                         [[[(vp "k") (vp "z") (if (= 1 (count cons)) wp (vp "c"))]
+                           (if (= 1 (count cons))
+                             (unfold (first cons))
+                             (hcase (ap* (v* (gv data-m "constrIndex")) (v* c))
+                                    (map-indexed (fn [i con]
+                                                   [(if (= i (dec (count cons))) wp (cp (dc types "I#") [(lp-prim (inc i))]))
+                                                    (unfold con)])
+                                                 cons)))]])
+        to-constr (funbind (gv data-m "toConstr")
+                           (ec 1 (for [con cons] [[(cp (:name con) (repeat (:arity con) wp))] (v* (get cs (:name con)))])))
+        type-of (funbind (gv data-m "dataTypeOf") [[[wp] (v* t)]])
+        casts (case cast
+                1 [(funbind (gv data-m "dataCast1") [[[(vp "f")] (ap* (v* (gv "GHC.Internal.Data.Typeable" "gcast1")) (v* (lname "f")))]])]
+                2 [(funbind (gv data-m "dataCast2") [[[(vp "f")] (ap* (v* (gv "GHC.Internal.Data.Typeable" "gcast2")) (v* (lname "f")))]])]
+                [])]
+    (into [gfoldl gunfold to-constr type-of] casts)))
+
+;;; Lift --------------------------------------------------------------------------------------------
+;;; GHC.Tc.Deriv.Generate's gen_Lift_binds: lift (C a1 .. an) = appE (.. (appE (conE 'C) (lift a1)) ..) (lift an), and liftTyped
+;;; the same under unsafeCodeCoerce; a type without constructors pure (case x of {}) (mkFunBindEC's catch-all)
+
+(defn gen-lift [{:keys [cons]}]
+  (let [lib (fn [o] (v* (gv "GHC.Internal.TH.Lib" o)))
+        lift-r (gv "GHC.Internal.TH.Lift" "lift")
+        coerce (fn [e] (ap* (v* (gv "GHC.Internal.TH.Syntax" "unsafeCodeCoerce")) e))
+        pure (fn [e] (ap* (v* (gv base "pure")) e))
+        z (lname "z")
+        eqns (fn [wrap]
+               (if (empty? cons)
+                 [[[(vp "z")] (wrap (pure (hcase (v* z) [])))]]
+                 (for [con cons :let [as (as-names "a" (:arity con))]]
+                   [[(con-pat con as)]
+                    (wrap (reduce (fn [b a] (ap* (lib "appE") b (ap* (v* lift-r) (v* a))))
+                                  (ap* (lib "conE") (L* (list 'HsUntypedBracket nil (list 'VarBr nil true (nmx (:name con))))))
+                                  as))])))]
+    [(funbind lift-r (eqns identity)) (funbind (gv "GHC.Internal.TH.Lift" "liftTyped") (eqns coerce))]))
+
 (def generators
-  {"Eq" gen-eq "Ord" gen-ord "Show" gen-show "Read" gen-read "Enum" gen-enum "Bounded" gen-bounded "Ix" gen-ix
+  {"Data" gen-data "Lift" gen-lift "Eq" gen-eq "Ord" gen-ord "Show" gen-show "Read" gen-read "Enum" gen-enum "Bounded" gen-bounded "Ix" gen-ix
    "Functor" gen-functor "Foldable" gen-foldable "Traversable" gen-traversable
    "Generic" (partial gen-generic :gen0) "Generic1" (partial gen-generic :gen1)})
 

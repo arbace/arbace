@@ -267,6 +267,10 @@ code. Three kinds of things live here:
   as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
   (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
   rest (the converter, the printer, the checks, `native.ae`) is Arbace's own.
+  The build's own reads (2026-11-22, "As built: the build's own reads"): `repr/ocaml/prep.ae` (`arbace.repr.ocaml.prep`) ports
+  mucppo (yojson 3.0.0's vendored `lib/mucppo/mucppo.ml`, https://github.com/Leonidas-from-XIV/mucppo, CC0 1.0) statement for
+  statement and the perl substitutions of the same tarball's `tools/sync_stdlib_docs` that make `stdlib/float.mli` and
+  `stdlib/moreLabels.mli` (LICENSE.md); the toplevel's script read and the judge are Arbace's own.
   ocamllex (2026-11-08, OC186 (a), "As built: ocamllex ported (OC186)"): `repr/ocaml/ocamllex.ae`
   (`arbace.repr.ocaml.ocamllex`) ports the same tarball's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml,
   common.ml, output.ml, main.ml; outputbis.ml's -ml mode not, Proposed OC191) with stdlib/set.ml's AVL trees, by hand, the file
@@ -478,6 +482,9 @@ code. Three kinds of things live here:
   `go/arbace/x86i/dectab.ae`), written by hand; x86i's Go forms (`go/arbace/x86i`, `go/arbace/emu`, outside `arbace/`) were written
   as Go and converted by repr/go's native reader (doc/asm/AMD64.md §10; LICENSE.md); AX5.3 and AX5.4 (2026-11-10, "As built: AX5.3 and
   AX5.4") the same way (`signal.ae`, `sem_bit.ae` new), and `test/asm/x86i/gen.ae` (`asm.x86i-gen`, the synthetic programs) by hand.
+  x86-print (2026-11-22, doc/asm/AMD64-SURVEY.md, "As built: x86-print"): `asm/amd64/lfi.ae` (`arbace.asm.amd64.lfi`: the LFI rewriter
+  and its ABI note) written by hand after the same tarball's `llvm/lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp`,
+  `llvm/lib/MC/MCLFI.cpp` and `MCLFIRewriter.cpp`; no code is copied.
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

@@ -1,3 +1,5 @@
+; verdict: debug subprogram definitions must have a compile unit
+; rule: llvm/lib/IR/Verifier.cpp:1577 !5 has DISPFlagDefinition but no unit; visitDISubprogram runs on it first (from the function's !dbg) and its definition branch requires a unit.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

@@ -1,0 +1,278 @@
+(ns gate.unitkeys
+  "The unit keys' measurement (doc/GATE-DIET-SURVEY.md, \"The cover and unit keys\", GDS26, GDS27): of the checks a finished gate
+  ran, which would have rerun had each been keyed by the compiled units it loads instead of its hosts' whole identities. For each
+  check the gate's log names as run (ok or FAILED): its pass of the gate's commit (KEY.inputs, the material its key hashes) against
+  its latest pass before (the material that pass was keyed by), the subjects that differ (the planner's changes), and for each host
+  line among them whether the step's units moved:
+
+    :gate    the gate's executables (gate_key, the whole tree they are built from): units.tsv of each build, ARBACE_GATE_EXES/KEY20/amd64
+    :stage0  the seed (its pins and scripts): units.tsv of each seed, made by bin/gate-unit-keys seed-units, DIR/STAGE0-ID.tsv
+    :javac   javac's tool: ARBACE_GATE_EXES/javac-KEY20/units.tsv
+    :prog, :javac-prog  already unit keys (the program's units less the step's :never-loads): a change is the units'
+
+  A step's units: those of the namespaces it loaded (NAME.loaded of a clean or audited run's logs, --loaded DIR, the later directory's
+  first; the step, its rotated check's part, its step's parts' union) and the unit -core (the runtime, jrt, goi's table, the main
+  package); without a loaded list, every unit less its :never-loads and its loads.edn :never families (the :prog host's rule). A host
+  line whose two builds' units are not both known is a move (unknown). A check would rerun when a subject other than a host line
+  moved (a file, a pin, the epoch, its declaration, an environment variable, a :uses digest, a list), or a host line whose units moved.
+
+  -main measure ROOT LOG STORE EXES [--seed-units DIR] [--loaded DIR]... [--tsv OUT] [--commit SHA] [--then-commit SHA]
+      --then-commit: the earlier side each step's latest pass up to the last pass of that commit (a change set's start), not the
+      pass just before; LOG - (no log): the store's checks with a pass of the commit SHA; prints a line a check (NAME RERUN-UNDER-UNIT-KEYS SECS WHY), a table a family (the name before its first dot) and the totals"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- lines [^String f] (let [x (File. f)] (if (.isFile x) (vec (str/split-lines (slurp f))) nil)))
+
+(defn log-steps
+  "the gate log's checks that ran, [[NAME :ok|:failed SECS-OR-NIL] ...], and its commit's prefix"
+  [^String log]
+  (let [ls (lines log)
+        commit (some #(second (re-find #"^== gate[^:]*: ([0-9a-f]{7,40}) " %)) ls)]
+    {:commit commit
+     :steps (vec (distinct
+                  (for [l ls
+                        :let [m (re-find #"^   (ok|FAILED)  ([A-Za-z0-9_.+-]+) \((?:([0-9]+)m([0-9]+)s)?" l)]
+                        :when m
+                        :let [[_ st nm mm ss] m]]
+                    [nm (if (= st "ok") :ok :failed) (when mm (+ (* 60 (Long/parseLong mm)) (Long/parseLong ss)))])))}))
+
+(defn- passes
+  "the step's passes in STORE, oldest first: [{... :file F}]"
+  [store nm]
+  (let [d (File. (str store "/" nm))]
+    (->> (when (.isDirectory d) (.listFiles d))
+         (filter #(let [n (.getName ^File %)] (and (str/ends-with? n ".edn") (not (str/starts-with? n ".")))))
+         (keep #(try (assoc (read-file (.getPath ^File %)) :file (.getPath ^File %)) (catch Throwable _ nil)))
+         (sort-by #(str (:date %))))))
+
+(defn- material [p] (when p (lines (str/replace (:file p) #"\.edn$" ".inputs"))))
+
+(defn subject [^String l]
+  (let [w (str/split l #" ")]
+    (case (first w)
+      ("file" "pin" "logic") (str (first w) " " (str/join " " (drop 2 w)))
+      "host" (str "host " (second w))
+      "env" (str "env " (first (str/split (second w) #"=")))
+      "uses" (str "uses " (second w))
+      (first w))))
+
+(defn changes
+  "the subjects whose lines differ between NOW and THEN, with each host's two identities: {SUBJECT [NOW-ID THEN-ID]}"
+  [now then]
+  (let [a (set now) b (set then)
+        host-id (fn [ls h] (some #(when (str/starts-with? % (str "host " h " ")) (nth (str/split % #" ") 2)) ls))]
+    (into (sorted-map)
+          (for [l (concat (remove b now) (remove a then))
+                :let [s (subject l)]]
+            [s (when (str/starts-with? s "host ") (let [h (subs s 5)] [(host-id now h) (host-id then h)]))]))))
+
+(defn units-of
+  "a units.tsv as {UNIT SHA}, or nil"
+  [^String f]
+  (when-let [ls (lines f)]
+    (into {} (for [l ls :when (seq l) :let [[u s] (str/split l #"\t" 2)]] [u s]))))
+
+(defn- ns-of-path
+  "a NAME.loaded line (arbace/repr/c/pp, a source path without its extension) as its namespace"
+  [^String p]
+  (-> p (str/replace "/" ".") (str/replace "_" "-")))
+
+(defn munge-ns
+  "a namespace as the seed's package name (aot_arbace_repr_c): the seed's units are its packages"
+  [^String n]
+  (str "aot_" (-> n (str/replace "." "_") (str/replace "-" "_"))))
+
+(defn loaded-of
+  "the namespaces the step loaded, from the first of DIRS whose NAME.loaded (or its rotated check's part's, or its step's parts'
+  union) exists, or nil"
+  [dirs ^String nm]
+  (let [strip (str/replace nm #"\.(sub|s[0-9]+|whole)$" "")
+        base (first (str/split strip #"\." 2))
+        from (fn [^String d]
+               (or (lines (str d "/" nm ".loaded"))
+                   (lines (str d "/" strip ".loaded"))
+                   (let [fs (filter #(let [n (.getName ^File %)] (and (str/starts-with? n (str base ".")) (str/ends-with? n ".loaded")))
+                                    (or (.listFiles (File. d)) []))]
+                     (when (seq fs) (vec (distinct (mapcat #(lines (.getPath ^File %)) fs)))))
+                   (lines (str d "/" base ".loaded"))))]
+    (when-let [ls (some from dirs)]
+      (set (map ns-of-path (remove str/blank? ls))))))
+
+(def ^:private families {:go ["arbace.go"] :c ["arbace.c" "arbace.repr.c"]})
+
+(defn- under? [^String u prefixes munged?]
+  (boolean (some (fn [^String n] (let [n (if munged? (munge-ns n) n) sep (if munged? "_" ".")]
+                                   (or (= u n) (str/starts-with? u (str n sep)))))
+                 prefixes)))
+
+(defn step-units
+  "the units of U (a build's {UNIT SHA}) a step's key would hold: with LOADED (its namespaces) those and -core; else every unit less
+  NEVER's (namespace prefixes). MUNGED?: the units are package names (a seed's)"
+  [u loaded never munged?]
+  (into (sorted-map)
+        (filter (fn [[k _]]
+                  (cond
+                    (= k "-core") true
+                    loaded (if munged? (contains? (set (map munge-ns loaded)) k) (contains? loaded k))
+                    :else (not (under? k never munged?))))
+                u)))
+
+(defn- loads-never
+  "the families a loads.edn entry says the step never loaded, as namespace prefixes"
+  [loads ^String nm]
+  (let [strip (str/replace nm #"\.(sub|s[0-9]+|whole)$" "")
+        base (first (str/split strip #"\." 2))
+        e (or (get loads nm) (get loads strip) (get loads base)
+              (let [ps (for [[k v] loads :when (str/starts-with? (str k) (str base "."))] v)]
+                (when (seq ps) {:never (vec (filter (fn [f] (every? #(some #{f} (:never %)) ps)) [:go :c]))})))]
+    (vec (mapcat #(get families (keyword %)) (:never e)))))
+
+(defn- decl-never
+  "the :never-loads of a material's decl line"
+  [now]
+  (when-let [d (some #(when (str/starts-with? % "decl ") (subs % 5)) now)]
+    (try (vec (map str (:never-loads (read-string d)))) (catch Throwable _ []))))
+
+(defn host-units-file
+  "the units.tsv of a host's identity ID, or nil: :gate's and :javac's in EXES, :stage0's in SEED-DIR"
+  [exes seed-dir h ^String id]
+  (when id
+    (let [f (case h
+              "gate" (str exes "/" (subs id 0 (min 20 (count id))) "/amd64/units.tsv")
+              "javac" (str exes "/javac-" (subs id 0 (min 20 (count id))) "/units.tsv")
+              "stage0" (when seed-dir (str seed-dir "/" id ".tsv"))
+              nil)]
+      (when (and f (.isFile (File. ^String f))) f))))
+
+(defn- build-file?
+  "is the subject (file PATH) one of the build's scripts, BUILD the table's :build group (its prefixes and files)"
+  [build ^String s]
+  (when-let [[_ p] (re-find #"^file (.*)$" s)]
+    (boolean (some (fn [^String r] (if (str/ends-with? r "/") (str/starts-with? p r) (= p r))) build))))
+
+(defn judge
+  "a check's verdict under unit keys: {:rerun BOOL :why TEXT :class KW}; :build-scripts (a rerun, :maybe): only the build's scripts
+  moved besides hosts whose units are the same (spared if the step reads no build script itself: its audit's paths tell)"
+  [{:keys [now then loaded never exes seed-dir build]}]
+  (cond
+    (nil? then) {:rerun true :class :never-passed :why "no earlier pass"}
+    (nil? now) {:rerun true :class :no-material :why "no pass of this run (or no material)"}
+    :else
+    (let [ch (changes now then)
+          hosts (filter #(str/starts-with? (key %) "host ") ch)
+          ;; a file of arbace/ whose namespace the step never loaded (its loaded list) is out of a unit key: its unit is not the step's
+          src-ns (fn [^String s] (when-let [[_ p] (re-find #"^file (arbace/.*)\.ae$" s)] (ns-of-path p)))
+          unloaded (if loaded (filter #(when-let [n (src-ns (key %))] (not (contains? loaded n))) ch) [])
+          others (remove #(or (str/starts-with? (key %) "host ") (some #{%} unloaded)) ch)
+          hv (for [[s [a b]] hosts
+                   :let [h (subs s 5)]]
+               (cond
+                 (#{"prog" "javac-prog"} h) [s :moved "its units moved (already a unit key)"]
+                 (not (#{"gate" "javac" "stage0"} h)) [s :moved "a toolchain host"]
+                 :else
+                 (let [fa (host-units-file exes seed-dir h a) fb (host-units-file exes seed-dir h b)
+                       m? false]
+                   (if-not (and fa fb)
+                     [s :unknown (str "no units of " (if fa (subs (str b) 0 12) (subs (str a) 0 12)))]
+                     (let [ua (step-units (units-of fa) loaded never m?) ub (step-units (units-of fb) loaded never m?)
+                           diff (sort (distinct (concat (for [[k v] ua :when (not= v (get ub k))] k) (for [[k _] ub :when (not (contains? ua k))] k))))]
+                       (if (empty? diff)
+                         [s :same (str (count ua) " units the same")]
+                         [s :moved (str (count diff) " of its " (count ua) " units moved: " (str/join " " (take 4 diff))
+                                        (when (> (count diff) 4) " ..."))]))))))
+          moved-hosts (filter #(not= :same (second %)) hv)]
+      (cond
+        (empty? ch) {:rerun false :class :same-key :why "no subject differs (a pass at the same material)"}
+        (and (empty? others) (empty? moved-hosts) (seq unloaded))
+        {:rerun false :class :unloaded-files
+         :why (str (count unloaded) " changed files of namespaces it never loaded: " (str/join ", " (take 4 (map key unloaded)))
+                   (when (seq hv) (str "; hosts: " (str/join "; " (map (fn [[s c w]] (str s " " (name c) " (" w ")")) hv)))))}
+        (and (seq others) (empty? moved-hosts) (every? #(build-file? build (key %)) others))
+        {:rerun true :maybe true :class :build-scripts :subjects (map key others)
+         :why (str "only the build's scripts (" (str/join ", " (map key others)) ") besides hosts whose units are the same"
+                   (when (seq hv) (str ": " (str/join "; " (map (fn [[s c w]] (str s " " (name c) " (" w ")")) hv)))))}
+        (seq others) {:rerun true :class (let [k (first (str/split (key (first others)) #" "))] (keyword k)) :subjects (map key others)
+                      :why (str (count others) " non-host subjects: " (str/join ", " (take 4 (map key others)))
+                                (when (seq hv) (str "; hosts: " (str/join "; " (map (fn [[s c w]] (str s " " (name c) " (" w ")")) hv)))))}
+        (seq moved-hosts) {:rerun true :class (if (some #(= :unknown (second %)) moved-hosts) :host-unknown :host-units)
+                           :why (str/join "; " (map (fn [[s c w]] (str s " " (name c) " (" w ")")) hv))}
+        :else {:rerun false :class :host-only
+               :why (str "only hosts moved, the step's units the same: " (str/join "; " (map (fn [[s _ w]] (str s " (" w ")")) hv)))}))))
+
+(defn- opt-all [args k] (vec (keep (fn [[a b]] (when (= a k) b)) (partition 2 1 args))))
+(defn- opt [args k] (first (opt-all args k)))
+
+(defn- mmss [s] (format "%d:%02d" (long (quot s 3600)) (long (quot (mod s 3600) 60))))
+
+(defn measure [root log store exes args]
+  (let [{:keys [commit steps]} (if (= log "-")
+                                  ;; no log: the store's checks with a pass of --commit's
+                                  (let [c (opt args "--commit")]
+                                    {:commit c
+                                     :steps (vec (for [^File d (sort-by #(.getName ^File %) (or (.listFiles (File. ^String store)) []))
+                                                       :when (and (.isDirectory d) (not (str/starts-with? (.getName d) "_"))
+                                                                  (some #(str/starts-with? (str (:commit %)) c) (passes store (.getName d))))]
+                                                   [(.getName d) :ok nil]))})
+                                  (log-steps log))
+        seed-dir (opt args "--seed-units")
+        ldirs (reverse (opt-all args "--loaded"))
+        tsv (opt args "--tsv")
+        loads (let [f (str root "/test/gate/loads.edn")] (when (.isFile (File. f)) (read-file f)))
+        build (map str (get-in (read-file (str root "/test/gate/steps.edn")) [:groups :build]))
+        ;; the pre steps (always run) and the builds are not keyed checks
+        unkeyed #{"makefile" "seed" "outside" "stage0" "plan" "pins" "go-build" "javac-tool" "cpp-runtime"}
+        ;; --then-commit C: the earlier side is the change set's start, each step's latest pass at or before the last pass of C's
+        then-c (opt args "--then-commit")
+        then-t (when then-c
+                 (last (sort (for [^File d (or (.listFiles (File. ^String store)) []) :when (.isDirectory d)
+                                   p (passes store (.getName d)) :when (str/starts-with? (str (:commit p)) then-c)]
+                               (str (:date p))))))
+        _ (when (and then-c (nil? then-t)) (println (str "unitkeys: no pass of " then-c " in " store)) (System/exit 1))
+        rows (vec
+              (for [[nm st lsecs] steps :when (not (unkeyed nm))]
+                (let [ps (passes store nm)
+                      now-p (when (and commit (= st :ok)) (last (filter #(str/starts-with? (str (:commit %)) commit) ps)))
+                      then-p (cond
+                               then-t (last (filter #(and (<= (compare (str (:date %)) then-t) 0) (or (nil? now-p) (not= (:key %) (:key now-p)))) ps))
+                               now-p
+                               (last (filter #(and (neg? (compare (str (:date %)) (str (:date now-p)))) (not= (:key %) (:key now-p))) ps))
+                               :else (last ps))
+                      now (material now-p)
+                      loaded (loaded-of ldirs nm)
+                      never (vec (distinct (concat (decl-never (or now (material then-p))) (loads-never loads nm))))
+                      v (if (= st :failed)
+                          {:rerun true :class :failed :why "failed: its material not kept (no pass), counted as rerun"}
+                          (judge {:now now :then (material then-p) :loaded loaded :never never :exes exes :seed-dir seed-dir :build build}))
+                      secs (or (:secs now-p) lsecs 0)]
+                  (assoc v :name nm :secs secs :loaded? (boolean loaded)))))
+        fam (fn [^String n] (first (str/split n #"\." 2)))]
+    (doseq [r rows]
+      (println (format "%-44s %-6s %6d  %-13s %s" (:name r) (if (:rerun r) "rerun" "spared") (long (:secs r)) (name (:class r))
+                       (str (:why r) (when-not (:loaded? r) " [no loaded list: units less :never]")))))
+    (when tsv
+      (spit tsv (apply str (for [r rows] (str (str/join "\t" [(:name r) (if (:rerun r) "rerun" "spared") (:secs r) (name (:class r)) (:why r) (str/join " " (:subjects r))]) "\n")))))
+    (println)
+    (println (format "%-34s %5s %5s %8s %8s" "family" "ran" "unit" "ran h:m" "saved"))
+    (doseq [[f rs] (sort-by key (group-by #(fam (:name %)) rows))]
+      (let [sv (filter (complement :rerun) rs)]
+        (println (format "%-34s %5d %5d %8s %8s" f (count rs) (- (count rs) (count sv))
+                         (mmss (reduce + (map :secs rs))) (mmss (reduce + (map :secs sv)))))))
+    (let [sv (filter (complement :rerun) rows)
+          by (frequencies (map :class rows))]
+      (println (str "unitkeys: " commit ": " (count rows) " checks ran, " (- (count rows) (count sv)) " would rerun under unit keys, "
+                    (count sv) " spared; serial " (mmss (reduce + (map :secs rows))) ", spared " (mmss (reduce + (map :secs sv)))
+                    (let [mb (filter :maybe rows)]
+                      (when (seq mb) (str " (and " (count mb) " more, " (mmss (reduce + (map :secs mb))) ", if the build's scripts were keyed through the units)")))
+                    "; classes " (str/join ", " (for [[k c] (sort-by (comp - val) by)] (str (name k) " " c))))))))
+
+(defn -main [& args]
+  (case (first args)
+    "measure" (let [[_ root log store exes & more] args] (measure root log store exes more))
+    (do (println "usage: gate.unitkeys measure ROOT LOG STORE EXES [--seed-units DIR] [--loaded DIR]... [--tsv OUT]")
+        (System/exit 2))))

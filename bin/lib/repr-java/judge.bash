@@ -85,6 +85,22 @@ judge_bridges_empty() {
   esac
 }
 
+# judge_front_implied ATTR-KNOWN FRONT-KNOWN (GDS30 (a), the user 2026-11-20; doc/GATE-DIET-SURVEY.md, "As built: the 11-20
+# audit"): the gate runs repr-java-front on no corpus attr-check runs, since attr-check's pass implies front-check's while
+# attr-check's known file admits no differing fact ({:CORPUS {:facts {FACT N}}}, every N 0) and no differing forms file
+# front-check's known file does not (then the converter gets javac's answers in both runs and makes the same forms); status 1
+# and why otherwise (attr-check refuses to run: front-check's parts must come back first)
+judge_front_implied() {
+  arbace_tool -e "(let [a (read-string (slurp \"$1\")) f (read-string (slurp \"$2\"))
+      bad (for [[c v] a :when (and (keyword? c) (not= c :bridges) (map? v))
+                :let [ff (let [k (get f c)] (set (if (map? k) (:forms k) k)))]
+                p (concat (when (some (fn [[_ n]] (and (number? n) (pos? n))) (:facts v)) [(str c \" :facts \" (pr-str (:facts v)))])
+                          (when-let [x (seq (remove ff (:forms v)))] [(str c \" :forms beyond front-check's \" (pr-str (vec x)))]))]
+            p)]
+  (doseq [b bad] (println (str \"$1: \" b \": attr-check's pass no longer implies front-check's (GDS30 (a)): give repr-java-front its samples, baseline and javac parts back\")))
+  (System/exit (if (seq bad) 1 0)))" >&2
+}
+
 # judge_jdk_root: the jdk26u checkout the judges read (judge_jdk_paths' $jdk), for bin/gate --pins, so that the
 # pinned commit is the one of the tree the checks read (review 067 C); status 1 and the refusal on a split
 judge_jdk_root() { (judge_jdk_paths && echo "$jdk"); }

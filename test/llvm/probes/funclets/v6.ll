@@ -1,3 +1,5 @@
+; verdict: valid
+; rule: - Simple cleanuppad with cleanupret reached by an invoke unwind edge.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

@@ -57,6 +57,80 @@
 
 (def ^:dynamic *eager-want* false) ; P23 (a): the top-level definitions wanted before any is written (no slot yet)
 
+;; ---------------------------------------------------------------------------------------------
+;; cpp-rt-own3 (DECISION cpp-rt-own2-3 (a)): the names of a class defined by a qualified name over its declaration in an inline
+;; namespace (sema's :mangle-path-after: fs_dir.cc's `struct fs::_Dir` of <bits/fs_dir.h>'s std::filesystem::__cxx11::_Dir) in
+;; clang's emission order. Clang's code generator runs as the parser goes (HandleTopLevelDecl) and fixes a name when it first
+;; refers to its entity; a RecordType's declaration is the class's definition once parsed. So an entity first referred to
+;; from code clang writes before the definition -- a top-level definition placed before it, an explicit instantiation's
+;; members (written at the instantiation) -- keeps the declaration's path (__shared_ptr<__cxx11::_Dir>, the swap<__cxx11::_Dir*>
+;; its swap calls); one first referred to after it, or from a deferred (inline) definition written at the end, takes the
+;; definition's (__shared_ptr_access<filesystem::_Dir>::operator->). Each such name is a placeholder while the module is written,
+;; with the earliest place it was referred from, and replaced at the end.
+
+(def ^:dynamic *mangle-pos* Long/MAX_VALUE) ; the place (token order) clang writes the current code at (MAX: deferred, at the end)
+(def ^:dynamic *redef-table* nil) ; atom {:keys {[kind cid old new] k} :min {k place} :final bool}
+
+(defn- redef-name
+  "abi's *redef-hook*: a placeholder for the name (`kind` :name, a name starting with _Z, else :type) whose two forms `on` (the
+  declaration's path) and `nn` (the definition's) differ by the class `cid`, its earliest place kept; once the module is written,
+  the chosen form."
+  [kind cid ^String on ^String nn]
+  (let [t *redef-table*
+        kind (if (and (= kind :name) (str/starts-with? on "_Z") (str/starts-with? nn "_Z")) :name :type)
+        key [kind cid on nn]
+        k (or (get-in @t [:keys key]) (let [k (count (:keys @t))] (swap! t assoc-in [:keys key] k) k))]
+    (swap! t update-in [:min k] (fnil min Long/MAX_VALUE) (long *mangle-pos*))
+    (if (:final @t)
+      (let [pdef (nth (:mangle-path-after (abi/cls cid)) 2 nil)]
+        (if (and pdef (< (long (get-in @t [:min k])) (long pdef))) on nn))
+      (if (= kind :name) (str "_Z\u00a7" k "\u00a7") (str "\u00a7" k "\u00a7")))))
+
+(defn- redef-resolve!
+  "The placeholders of the module's forms replaced by their names (redef-name's), the table final from then on."
+  []
+  (let [t *redef-table*
+        names (into {} (for [[[kind cid on nn] k] (:keys @t)]
+                         (let [pdef (nth (:mangle-path-after (abi/cls cid)) 2 nil)
+                               c (if (and pdef (< (long (get-in @t [:min k] Long/MAX_VALUE)) (long pdef))) on nn)]
+                           [(str k) (if (= kind :name) (subs c 2) c)])))
+        sub (fn [^String x] (if (str/includes? x "\u00a7") (str/replace x #"\u00a7(\d+)\u00a7" (fn [[_ k]] (get names k))) x))
+        walk (fn walk [f] (cond (symbol? f) (let [n (name f)] (if (str/includes? n "\u00a7") (symbol (sub n)) f))
+                                (string? f) (sub f)
+                                (seq? f) (apply list (map walk f))
+                                (vector? f) (mapv walk f)
+                                (map? f) (into {} (map (fn [[a b]] [(walk a) (walk b)]) f))
+                                (set? f) (into #{} (map walk f))
+                                :else f))]
+    (when (seq names)
+      (swap! *top* (fn [m] (-> m (update :forms walk) (update :declared walk)
+                              (update :aliases (fn [a] (when a (walk a)))) (update :c1 (fn [a] (when a (walk a))))))))
+    (swap! t assoc :final true)))
+
+(defn- early-constexpr?
+  "cpp-rt-own3: whether `f` is a constexpr function of a template's specialization made before a redefined class's definition (its
+  id below the class's :mangle-path-after threshold): clang instantiates a constexpr function where it is first referred to, its
+  header's inline code parsed before the definition, and passes it to its code generator then (EmitGlobal of a deferred
+  definition, its name fixed): exp/filesystem/dir.cc's shared_ptr<v1::__cxx11::_Dir>::shared_ptr(), which <experimental/bits/fs_dir.h>'s
+  `end(directory_iterator)` reaches through directory_iterator's defaulted constructor, its later callers' name that one."
+  [f]
+  (and (:constexpr f) (or (:tinst f) (some-> (:cls f) abi/cls :tmpl))
+       (some (fn [th] (< (long (:id f)) (long th))) (:th @*redef-table*))))
+
+(defn- top-pos
+  "The place (the unit's token order, the parser's :_b) clang writes the function `f` at: an explicit instantiation definition's
+  member at the instantiation, a non-inline definition at its own place, else MAX (deferred to the end)."
+  [f]
+  (let [cpos (fn [cid] (loop [c (abi/cls cid)]
+                         (when c (or (:explicit-inst-pos c)
+                                     (recur (loop [s (:outer c)] (cond (nil? s) nil (= :fn (:kind s)) nil (:cls s) (abi/cls (:cls s)) :else (recur (:parent s)))))))))]
+    (long (or (when (and (:explicit-inst f) (:cls f)) (cpos (:cls f)))
+              ;; (the definition's token, :_b, of the unit's one token order: an out-of-line definition's own, not its header
+              ;; declaration's :pos)
+              (when (and (:tbody f) (not (:inline f)) (not (:implicit f)) (not (:tinst f)) (:node f))
+                (:_b (:node f)))
+              Long/MAX_VALUE))))
+
 (defn- reserve!
   "P23 (a): the function `nm`'s place among the module's forms taken now, at its first reference, as an llvm::Function
   takes its place in the module's list when created (GetOrCreateLLVMFunction) and is defined there later."
@@ -261,7 +335,12 @@
   [f v]
   (when (#{:ctor :dtor} (:kind f)) (if (and (vb-class? (:cls f)) (= 1 v)) 1 2)))
 
-(defn- fn-name ^String [fid & [v]] (let [f (sema/fnd fid)] (abi/mangle-fn f (fn-variant f (or v 2)))))
+(declare early-constexpr?)
+(defn- fn-name ^String [fid & [v]]
+  (let [f (sema/fnd fid)]
+    ;; (cpp-rt-own3: a constexpr specialization made before a redefined class's definition named there, early-constexpr?)
+    (binding [*mangle-pos* (if (and *redef-table* (early-constexpr? f)) Long/MIN_VALUE *mangle-pos*)]
+      (abi/mangle-fn f (fn-variant f (or v 2))))))
 
 (defn- takes-vtt? "The base-object constructor or destructor of a class with virtual bases: a VTT after this." [f v]
   (and (#{:ctor :dtor} (:kind f)) (vb-class? (:cls f)) (= 2 (fn-variant f v))))
@@ -1654,7 +1733,9 @@
              (val! (list 'icmp (case (:o e) "==" :eq "!=" :ne "<" :ult ">" :ugt "<=" :ule ">=" :uge) 'ptr a b))
              (cmp! (:o e) (abi/underlying (:ct e)) a b))))
     (:land :lor) (short-circuit! e)
-    :cond (cond-branches! e emit-rv (abi/llvm-type (:ty e) true))
+    ;; (cpp-rt-own: a void conditional, `c ? (void) (...) : f (...)`, joins no value: libcpp's obstack_free without GNU C,
+    ;; a phi of void before, "llvm print: value: nil")
+    :cond (cond-branches! e emit-rv (when-not (abi/void? (abi/unq (:ty e))) (abi/llvm-type (:ty e) true)))
     :ptradd (let [p (emit-rv (:p e)) n (emit-rv (:n e))
                   n (if (= "-" (:o e)) (val! (list 'sub 'i64 0 n)) n)]
               (val! (list 'getelementptr :inbounds (elem-type (:to (abi/unq (:ty e)))) ['ptr p] ['i64 n])))
@@ -2104,6 +2185,57 @@
 
 (declare emit-stmt emit-d0! emit-try! emit-if-branches!)
 
+(declare const-leaves leaves-constant array-constant)
+(def ^:private ^:dynamic *const-top* true) ; the complete object's constant (its vptrs written), not a base's
+
+(defn- pod-default?
+  "cpp-rt-own3: whether the class's default construction is trivial ([class.default.ctor]/3, a POD's, [class.prop]/9): each
+  constructor without parameters trivial, no default member initializer, its bases' and class members' likewise."
+  [cid]
+  (let [c (abi/cls cid)]
+    (and (every? (fn [fid] (let [f (sema/fnd fid)] (or (seq (:ps (:ty f))) (:trivial f)))) (:ctors c))
+         (not-any? :init (:fields c))
+         (every? #(pod-default? (:cls %)) (:bases c))
+         (every? (fn [fd] (let [bt (loop [t (abi/unq (:ty fd))] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
+                            (or (not (abi/class? bt)) (pod-default? (:id bt)))))
+                 (:fields c)))))
+
+(defn- const-local!
+  "cpp-rt-own3 (DECISION cpp-rt-own2-1 (a)): a local of POD class type whose initializer is a constant (the evaluator's, not
+  manifestly constant-evaluated) initialized as clang's EmitAutoVarAlloca and EmitAutoVarInit do (IsConstantAggregate:
+  isConstantInitializer, then emitStoresForConstant): all zero a memset, at most 32 bytes (or an empty class) a memcpy from a
+  private constant `__const.FN.VAR`, a larger one a memset and its few non-zero leaves stored (6 at most), else the memcpy;
+  text_encoding.cc's range-for `auto __end = __range.end();`, its _Sentinel copied from a constant, aliases_view::end() never
+  called (written before). True when it initialized the object."
+  [vid addr t init]
+  (let [u (abi/unq t) v (sema/var* vid)]
+    (when (and (abi/class? u) (#{:expr :list} (:i init))
+               (let [cid (:id u) c (abi/cls cid)]
+                 (and (not (:union c)) (not (abi/dynamic? cid)) (not (vb-class? cid)) (not-any? :bits (:fields c))
+                      (sema/trivial-copy? cid) (sema/trivial-dtor? cid) (pod-default? cid))))
+      (when-let [leaves (binding [*const-top* true sema/*ce-object-manifest* false] (const-leaves t init 0))]
+        (let [size (abi/size-of t)
+              zero-leaf? (fn [[_ _ x]] (or (and (number? x) (zero? (double x))) (= 'null x) (= 'zeroinitializer x) (= (list 'fp "0.000000e+00") x)))
+              nz (remove zero-leaf? leaves)
+              global! (fn []
+                        (let [base (str "__const." (or (:mname @*f*) "fn") "." (:name v))
+                              nm (loop [i 0] (let [n (if (zero? i) base (str base "." i))] (if (contains? (:const-locals @*top*) n) (recur (inc i)) n)))
+                              [ct cv] (leaves-constant leaves size)]
+                          (swap! *top* update :const-locals (fnil conj #{}) nm)
+                          (add-top! (list 'llvm/global (gsym nm) ct cv :linkage :private :unnamed-addr :unnamed_addr :constant true :align (abi/align-of t)))
+                          (memcpy! addr (gsym nm) size)))]
+          (cond
+            (abi/empty-class? (:id u)) (global!)
+            (empty? nz) (memset! addr size)
+            (<= size 32) (global!)
+            (<= (count nz) 6) (do (memset! addr size)
+                                  ;; (each at its offset's alignment within the object's, as clang's GEPs into the alloca)
+                                  (doseq [[o lt x] nz]
+                                    (emit! (list 'store [lt x] ['ptr (offset! addr (long o))]
+                                                 :align (loop [a (abi/align-of t)] (if (or (= 1 a) (zero? (rem (long o) a))) a (recur (quot a 2))))))))
+            :else (global!))
+          true)))))
+
 (defn- local-decl! [s]
   (let [v (sema/var* (:var s))
         t (:ty v)
@@ -2121,9 +2253,10 @@
                 (swap! *f* assoc :nrvo-flag fl)
                 fl))]
     (swap! *f* assoc-in [:addr (:var s)] addr)
-    (let [ext (atom [])]
-      (with-full (binding [*extend* ext *decl-e* (when (= :expr (:i (:init s))) (:e (:init s)))] (emit-init addr t (:init s))))
-      (doseq [c @ext] (push-cleanup! c)))
+    (when-not (and (not nrvo) (const-local! (:var s) addr t (:init s)))
+      (let [ext (atom [])]
+        (with-full (binding [*extend* ext *decl-e* (when (= :expr (:i (:init s))) (:e (:init s)))] (emit-init addr t (:init s))))
+        (doseq [c @ext] (push-cleanup! c))))
     (when dtor?
       (cond
         nfl (push-cleanup! {:addr addr :cls (:id bt) :nrvo-flag nfl})
@@ -2131,8 +2264,6 @@
         (abi/arr? (abi/unq t))
         (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
         :else (push-cleanup! {:addr addr :cls (:id bt)})))))
-
-(declare const-leaves leaves-constant)
 
 (defn- static-local! [vid]
   (let [v (sema/var* vid)
@@ -2153,7 +2284,7 @@
         [ltype lval] (cond (nil? leaves) [nil nil]
                            (abi/scalar? (abi/unq t)) (when (<= (count leaves) 1) [nil (if (seq leaves) (nth (first leaves) 2) (zero-mem t))])
                            (empty? leaves) [nil 'zeroinitializer]
-                           :else (leaves-constant leaves s))
+                           :else (or (array-constant t leaves s) (leaves-constant leaves s)))
         cexpr (or cexpr lval)
         ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))
         ;; queue 392: a static local of an inline function (or a template's specialization) with external linkage is one
@@ -2892,7 +3023,7 @@
         [ret ps va plan] (fn-sig f v)
         pnames (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
         state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
-                     :fn f :nrvo (:nrvo f) :ret-label '%return})]
+                     :fn f :mname nm :nrvo (:nrvo f) :ret-label '%return})]
     (binding [*f* state]
       (let [k (atom 0)
             sret (case (:ret-k plan)
@@ -3031,7 +3162,9 @@
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
         ;; (queue 367: and for a weak_odr one, an explicit instantiation's, the alias weak_odr: clang's getCodegenToUse, Alias)
-        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (:explicit-inst f)) (not vbc))
+        ;; (cpp-rt-own: not for an internal one, an explicit instantiation of a class template of an unnamed namespace: clang writes
+        ;; no complete-object alias of an internal constructor; cxx11-shim_facets.cc's collate_shim<char>, a weak_odr C1 before)
+        (when (and (#{:ctor :dtor} (:kind f)) (or (empty? (linkage-of f)) (and (:explicit-inst f) (not (:internal f)))) (not vbc))
           ;; written where the complete object's constructor or destructor is called, as clang emits it
           (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (apply list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)]
                                                                        (when (:explicit-inst f) [:linkage :weak_odr]))))
@@ -3292,7 +3425,52 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Namespace-scope variables
 
-(def ^:dynamic *const-top* true) ; the complete object's constant (its vptrs written), not a base's
+
+(defn- global-addr-const
+  "cpp-rt-own2: the constant address `off` bytes into the variable `id` (an object of static storage duration, sema's
+  ce-global-addr): its symbol, or a getelementptr of i8 from it; the variable's definition, written when first used, written
+  now (var-addr's rule), one defined elsewhere declared; nil for one defined in this unit and not written yet (emit-globals
+  has not reached it: a dynamic initialization then)."
+  [id ^long off]
+  (let [v (sema/var* id) nm (abi/mangle-var v)
+        lazy (get-in @*top* [:lazy nm])]
+    (when (or lazy (contains? (:declared @*top*) nm) (not (:defined v)) (:extern v))
+      (when lazy (swap! *top* update :lazy dissoc nm) (add-top! lazy))
+      (declare-extern-var! v nm)
+      (if (zero? off) (gsym nm) (list 'getelementptr :inbounds 'i8 ['ptr (gsym nm)] ['i64 off])))))
+
+(defn- object-leaves
+  "cpp-rt-own: the constant leaves [[offset llvm-type value] ...] of an object value of sema's ce-object (a class's fields and bases
+  by its layout, arrays element by element, integers and floats), at `off`; nil for what it cannot write (a pointer, a bit-field, a
+  dynamic class, a union, an unset member). cpp-rt-own2: a pointer holding the address of an object of static storage duration
+  (global-addr-const), a union by its active member (none: zero)."
+  [t v ^long off]
+  (let [u (abi/unq t)]
+    (cond
+      (or (abi/integral? u) (abi/enum? u)) (when (number? v) [[off (abi/llvm-type u) (if (= :bool (abi/bn u)) (if (zero? (long v)) 0 1) (long (sema/ce-wrap u v)))]])
+      (abi/floating? u) (when (number? v) [[off (abi/llvm-type u) (fp-const u (double v))]])
+      (abi/ptr? u) (when-let [[id o] (sema/ce-global-addr v)] (when-let [c (global-addr-const id (long o))] [[off 'ptr c]]))
+      (and (abi/class? u) (:union (abi/cls (:id u))))
+      (when (and (map? v) (not (abi/dynamic? (:id u))))
+        (if-let [k (sema/ce-union-member v)]
+          (let [fd (nth (:fields (abi/cls (:id u))) k nil)]
+            (when (and fd (not (:bits fd))) (object-leaves (:ty fd) (get v k) (+ off (long (nth (:fields (abi/layout (:id u))) k))))))
+          []))
+      (abi/arr? u) (when (vector? v)
+                     (let [et (:of u) es (abi/size-of et)
+                           ls (map-indexed (fn [i x] (object-leaves et x (+ off (* (long i) (long es))))) v)]
+                       (when (every? some? ls) (vec (apply concat ls)))))
+      (abi/class? u) (let [cid (:id u) c (abi/cls cid) l (abi/layout cid)]
+                       (when (and (map? v) (not (abi/dynamic? cid)) (not (:union c)) (not-any? :bits (:fields c)) (not (vb-class? cid)))
+                         (let [bl (map-indexed (fn [i b] (object-leaves {:k :class :id (:cls b)} (sema/ce-field-value v [:b (:cls b)]) (+ off (long (nth (:bases l) i)))))
+                                               (:bases c))
+                               fl (map (fn [fd] (let [x (sema/ce-field-value v (:i fd))]
+                                                  (if (and (nil? x) (abi/class? (abi/unq (:ty fd))) (abi/empty-class? (:id (abi/unq (:ty fd)))))
+                                                    []
+                                                    (object-leaves (:ty fd) x (+ off (long (nth (:fields l) (:i fd))))))))
+                                       (:fields c))]
+                           (when (and (every? some? bl) (every? some? fl)) (vec (concat (apply concat bl) (apply concat fl)))))))
+      :else nil)))
 
 (defn- const-leaves
   "The initializer as constant leaves [[offset llvm-type value] ...] of an object of type `t` at `off`, or nil when it
@@ -3302,7 +3480,12 @@
     (case (:i init)
       (:none :zero) []
       :expr (let [e (:e init)]
-              (when (abi/scalar? tu)
+              (if-not (abi/scalar? tu)
+                ;; (cpp-rt-own2: a class object initialized by a prvalue a constant expression gives, by the evaluator, as clang's
+                ;; ConstantEmitter: <charconv>'s `static constexpr type value = (_DecOnly, _S_make_table());`, text_encoding.cc's
+                ;; __from_chars_alnum_to_val_table<false>::value, initialized at run time behind a guard before)
+                (when (and *const-top* (abi/class? tu) (not (abi/dynamic? (:id tu))))
+                  (when-let [v (sema/ce-object t init)] (object-leaves t v off)))
                 (let [lt (abi/llvm-type tu)
                       v (letfn [(cv [e]
                                   (case (:op e)
@@ -3330,7 +3513,11 @@
                                             :to-bool (when-let [x (cv (:e e))] (when (number? x) (if (zero? (long x)) 0 1)))
                                             nil)
                                     :unop (when (= "-" (:o e)) (let [x (cv (:e e))] (when (number? x) (- (long x)))))
-                                    nil))]
+                                    ;; (cpp-rt-own: another constant expression folded by the evaluator, as clang's ConstantEmitter
+                                    ;; tries every initializer: libcpp's files.cc `static constexpr signed char base64_dec[] = {
+                                    ;; base64_dec_fn (0), ... }`, initialized at run time before and base64_dec_fn written)
+                                    (when-let [r (sema/ce-try e)]
+                                      (case (:op r) :int (:v r) :float (fp-const (:ty r) (:v r) nil) nil))))]
                           (cv e))
                       v (if (and (= :bool (abi/bn tu)) (boolean? v)) (if v 1 0) v)]
                   (when (some? v) [[off lt v]]))))
@@ -3357,8 +3544,15 @@
              (when (every? some? ls) (vec (apply concat ls))))
       ;; an implicit or defaulted default constructor that only stores constants (constexpr: clang initializes the
       ;; object as a constant, its vptrs included)
-      :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)]
-              (when (and (or (:implicit f) (:defaulted f)) (empty? (:ps (:ty f))) (empty? (:args init)) (not (vb-class? cid)) ti (not (:delegate ti)))
+      ;; (cpp-rt-own: and a constexpr one whose body is empty, its mem-initializers constants: ios_errcat.cc's and system_error.cc's
+      ;; `__constinit constant_init io_category_instance{}`, `constexpr constant_init() : cat() { }` of an anonymous union holding
+      ;; a polymorphic category, which clang constant-initializes (its vptr) and whose base's constructor it then never emits)
+      :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)
+                  body (:tbody f)]
+              (or
+              (when (and (or (:implicit f) (:defaulted f)
+                             (and (:constexpr f) (= :block (:s body)) (empty? (:items body))))
+                         (empty? (:ps (:ty f))) (empty? (:args init)) (not (vb-class? cid)) ti (not (:delegate ti)))
                 (let [l (abi/layout cid)
                       bl (binding [*const-top* false] (mapv (fn [b] (const-leaves {:k :class :id (:base b)} (:init b) (+ off (long (nth (:bases l) (:idx b)))))) (:bases ti)))
                       fl (binding [*const-top* true] (mapv (fn [fi] (let [fd (nth (:fields (abi/cls cid)) (:field fi))]
@@ -3367,8 +3561,42 @@
                       vl (when (and *const-top* (abi/dynamic? cid))
                            (for [{c :cls o :off} (vptr-list cid)] [(+ off (long o)) 'ptr (address-point [cid cid 0] [c o])]))]
                   (when (and (every? some? bl) (every? some? fl))
-                    (vec (concat (apply concat bl) (apply concat fl) vl))))))
+                    (vec (concat (apply concat bl) (apply concat fl) vl)))))
+              ;; (cpp-rt-own: else a constexpr constructor's object by the evaluator, its body's assignments too, when the object
+              ;; is a constant: libcpp's init.cc `constexpr _cpp_trigraph_map_s _cpp_trigraph_map_d;`)
+              (when (and (:constexpr f) *const-top* (not (abi/dynamic? cid)))
+                (when-let [v (sema/ce-object t init)] (object-leaves t v off)))))
       nil)))
+
+(defn- array-constant
+  "cpp-rt-own: [type value] of an array (nested arrays flattened) whose leaves are its elements', as clang writes one: an LLVM
+  array, `[N x i8] c\"...\"` for bytes, `[N x iK] [...]` for other scalars (an element without a leaf zero), `[N x T] [...]`
+  for classes whose elements' leaves make one packed struct type T (an element without a leaf zeroinitializer); nil for another
+  object (a packed struct of the leaves then). libcpp's charset.cc `uname2c_tree[218382]` had been a packed struct of 218,382
+  members, `uname2c_dict` one of 61,913, their lowered C structs of as many fields (repr/c's read about 15 GB)."
+  [t leaves ^long size]
+  (let [u (abi/unq t)
+        et (loop [e u] (let [e (abi/unq e)] (if (abi/arr? e) (recur (:of e)) e)))
+        es (long (if (abi/arr? u) (abi/size-of et) 0))
+        n (if (pos? es) (quot size es) 0)]
+    (when (and (abi/arr? u) (> n 1) (= size (* n es)) (seq leaves)
+               (every? (fn [[o _ _]] (< (quot (long o) es) n)) leaves))
+      (cond
+        (and (abi/scalar? et) (not (abi/mptr? et)))
+        (let [lt (abi/llvm-type et)]
+          (when (and (every? (fn [[o t _]] (and (= t lt) (zero? (rem (long o) es)))) leaves)
+                     (or (not= lt 'i8) (every? (fn [[_ _ v]] (number? v)) leaves)))
+            (let [m (into {} (map (fn [[o _ v]] [(quot (long o) es) v]) leaves))]
+              (if (= lt 'i8)
+                [(list 'array n 'i8) (list 'c-string (apply str (map #(char (bit-and (long (get m % 0)) 0xff)) (range n))))]
+                (let [z (zero-mem et)] [(list 'array n lt) (apply list 'array (map (fn [i] [lt (get m i z)]) (range n)))])))))
+        (abi/class? et)
+        (let [g (group-by (fn [[o _ _]] (quot (long o) es)) leaves)
+              cs (into {} (map (fn [[i ls]] [i (leaves-constant (map (fn [[o t v]] [(- (long o) (* (long i) es)) t v]) ls) es)]) g))
+              ts (distinct (map first (vals cs)))]
+          (when (= 1 (count ts))
+            (let [ct (first ts)]
+              [(list 'array n ct) (apply list 'array (map (fn [i] [ct (if-let [c (get cs i)] (second c) 'zeroinitializer)]) (range n)))])))))))
 
 (defn- leaves-constant
   "[type value] of a packed struct holding the leaves with byte padding, `size` bytes."
@@ -3390,6 +3618,7 @@
   (let [dyn (atom [])]
     (doseq [[k id] (:order prog) :when (= k :var)]
       (let [v (sema/var* id)]
+       (binding [*mangle-pos* (if (and (not (:linkonce v)) (not (:internal v))) (long (or (:pos v) Long/MAX_VALUE)) Long/MAX_VALUE)]
         (when (and (:defined v) (not (:extern v)))
           (let [t (:ty v) [s a] (abi/size-align t)
                 nm (abi/mangle-var v)
@@ -3403,7 +3632,7 @@
               ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!)
                (apply list 'llvm/global (gsym nm) (abi/llvm-type t) (if (seq leaves) (nth (first leaves) 2) (zero-mem t)) (concat link [:align a])))
               leaves
-              (let [[ct cv] (leaves-constant leaves s)
+              (let [[ct cv] (or (array-constant t leaves s) (leaves-constant leaves s))
                     bt (abi/unq t)]
                 ;; a constant object with a destructor: registered with __cxa_atexit by the global constructor
                 (if (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
@@ -3419,7 +3648,7 @@
                     (do (when (and (abi/class? (abi/unq t)) (nontrivial-dtor? (:id (abi/unq t))))
                           (fail :tls "a thread-local variable with a destructor (" (:name v) ")"))
                         (swap! *top* update :tls-dyn (fnil conj []) [id nm]))
-                    (swap! dyn conj [:init id]))))))))
+                    (swap! dyn conj [:init id])))))))))
     ;; the dynamic initializations by priority (init_priority(N): a function _GLOBAL__I_00000N of its own, clang's), then
     ;; the functions __attribute__((constructor(N))) names, all in llvm.global_ctors
     (let [groups (group-by (fn [[_ id]] (long (or (:init-priority (sema/var* id)) 65535))) @dyn)
@@ -3434,6 +3663,7 @@
             nm (if (= 65535 prio) (str "_GLOBAL__sub_I_" file) (format "_GLOBAL__I_%06d" prio))]
         (binding [*f* state]
           (doseq [[k id] items]
+           (binding [*mangle-pos* (let [v (sema/var* id)] (if (and (not (:linkonce v)) (not (:internal v))) (long (or (:pos v) Long/MAX_VALUE)) Long/MAX_VALUE))]
             (let [v (sema/var* id) t (:ty v) addr (gsym (abi/mangle-var v))
                   ;; a template's static member (linkonce_odr, defined in each unit that uses it): initialized once,
                   ;; behind its guard variable _ZGV..., as clang writes it (CODEGEN.md G3)
@@ -3455,7 +3685,7 @@
                 (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
                   (declare! "__cxa_atexit" 'i32 '[ptr ptr ptr])
                   (swap! *top* assoc :dso true)
-                  (val! (list 'call 'i32 (gsym "__cxa_atexit") [['ptr (want-fn! (:dtor (abi/cls (:id bt))) 1)] ['ptr addr] ['ptr (gsym "__dso_handle")]]))))))
+                  (val! (list 'call 'i32 (gsym "__cxa_atexit") [['ptr (want-fn! (:dtor (abi/cls (:id bt))) 1)] ['ptr addr] ['ptr (gsym "__dso_handle")]])))))))
           (emit! '(ret void))
           (close-block!))
         (let [s @state blocks (:blocks s) entry (first blocks)
@@ -3545,9 +3775,13 @@
   "The LLVM forms of the program `prog` (arbace.cpp.sema's analyze-program) of the file named `file`."
   [prog ^String file]
   (binding [sema/*fns* (atom (:fns prog)) sema/*vars* (atom (:vars prog))
-            abi/*classes* (atom (:classes prog)) abi/*enums* (atom (:enums prog))
+            abi/*classes* (atom (:classes prog)) abi/*enums* (atom (:enums prog)) abi/*ns-tags* (atom (or (:ns-tags prog) {}))
             *top* (atom {:forms [] :declared #{} :strings {} :wanted #{} :queue [] :vtables #{}})
-            abi/*dollars* (atom {})]
+            abi/*dollars* (atom {})
+            ;; (cpp-rt-own3: a unit with a class redefined over an inline namespace's declaration, its names in emission order)
+            *redef-table* (let [th (vec (keep (fn [[_ c]] (when (nth (:mangle-path-after c) 2 nil) (second (:mangle-path-after c)))) (:classes prog)))]
+                            (when (seq th) (atom {:keys {} :min {} :th th})))]
+   (binding [abi/*redef-hook* (when *redef-table* redef-name)]
     (reset! vt-cache {})
     ;; static locals know their function
     (doseq [[fid f] (:fns prog)] (doseq [vid (:statics f)] (swap! sema/*vars* assoc-in [vid :fn-of] fid)))
@@ -3558,6 +3792,7 @@
     ;; the definitions: every non-inline function with a body, then what they use
     (binding [*eager-want* true]
     (doseq [[k id] (:order prog) :when (= k :fn)]
+      (binding [*mangle-pos* (top-pos (sema/fnd id))]
       (let [f (sema/fnd id)]
         ;; internal functions are written when used, as clang defers them
         (when (and (or (:tbody f) (:out-of-line-default f)) (not (:inline f)) (not (:implicit f)) (not (:internal f)))
@@ -3578,7 +3813,7 @@
         (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
         ;; (queue 392: a function declared with GNU's alias attribute: an alias of its target, written whether used or not)
         (when (and (:alias-of f) (not (:tbody f))) (swap! *top* update :gnu-aliases (fnil conj []) id))
-        (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id)))))
+        (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id))))))
     ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
     (doseq [cid (sort (keys @abi/*classes*)) :when (#{:here :weak} (vtable-home cid))]
@@ -3598,7 +3833,7 @@
                        (if (= :d0 fid)
                          (when-not (contains? (:declared @*top*) [:d0 v])
                            (swap! *top* update :declared conj [:d0 v]) (emit-d0! (sema/fnd v)))
-                         (emit-fn! fid v)))
+                         (binding [*mangle-pos* (top-pos (sema/fnd fid))] (emit-fn! fid v))))
           vt-todo (fn [] (concat (for [g (:groups @*top*) :when (not (contains? (:declared @*top*) [:group g]))] [:group g])
                                  (for [c (:vtts @*top*) :when (not (contains? (:declared @*top*) [:vtt c]))] [:vtt c])))
           vtables! (fn [] (loop []
@@ -3622,6 +3857,7 @@
         (while (pending?) (deferred!))))
     ;; (every slot filled: a wanted group or VTT is written)
     (swap! *top* update :forms (fn [fs] (filterv #(not (and (vector? %) (= ::slot (first %)))) fs)))
+    (when *redef-table* (redef-resolve!))
     ;; (queue 367: a linkonce_odr variable, a template's static data member, written only where the module refers to it, as
     ;; clang emits one when used: the analysis made some pending definitions from bodies no function of the module is;
     ;; compatibility-c++0x.cc's and cow-string-io-inst.cc's basic_string<...>::_Rep::_S_empty_rep_storage)
@@ -3652,7 +3888,7 @@
                   (list 'llvm/triple "x86_64-alpine-linux-musl")]
                  ;; the module's named types, as clang's before the globals (cpp-gatefix: x86-64's va_list element)
                  (when (:va-tag @*top*) [(list 'llvm/type va-tag '(struct i32 i32 ptr ptr))])
-                 (:forms @*top*)))))
+                 (:forms @*top*))))))
 
 (defn gen-file
   "The LLVM forms of the C++ file at `path` (read by the native parser at `std`, with the preprocessor's options `args`: -I, -D ...)."

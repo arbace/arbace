@@ -217,7 +217,13 @@
               :else (do (.append b (char c)) (recur (inc i)))))
           (.toString b))))))
 
-(defn- tok-text ^String [^Tok t] (if (= (.-ch t) :IDENTIFIER) (norm-ident (.-src t)) (.-src t)))
+;; queue 496: a universal character name the lexer made a token of its own (no identifier takes its character in C23) is
+;; spelled as gcc -E spells it, which lexes it into an identifier (with its error): \UXXXXXXXX
+(defn- tok-text ^String [^Tok t]
+  (let [ch (.-ch t) ^String src (.-src t)]
+    (if (or (= ch :IDENTIFIER) (and (not (keyword? ch)) (.startsWith src "\\") (> (.length src) 1)))
+      (norm-ident src)
+      src)))
 
 (defn port-texts [r]
   (keep (fn [^Tok t] (when-not (#{\space \newline} (.-ch t)) (tok-text t))) (:tokens r)))
@@ -307,6 +313,104 @@
       (contains? (get-in (:known-gcc host) [(keyword id)]) nm) "known"
       :else "differ")))
 
+(defn ref-judge?
+  "The own reference (pp-ref, doc/cpp/CPP-SURVEY.md, \"As built: pp-ref\"; CP413 (a)): REPR_C_PP_JUDGE=own judges the known
+  file's :pp entries (where cc is wrong) by GCC 15.2.0's libcpp behind tools/ppref, run at check time; class (the default until
+  the reference is built by Arbace alone) by their reviewed class, gcc -E's digests the oracle tier's."
+  []
+  (let [m (or (System/getenv "REPR_C_PP_JUDGE") "class")]
+    (when-not (#{"own" "class"} m) (throw (ex-info (str "REPR_C_PP_JUDGE is own or class, not " m) {})))
+    (= m "own")))
+
+(defn ref-lists
+  "The reference's runs of the known file's :pp files of the corpora `ids` under WORK (those this run holds): WORK/ref.args
+  (the options every run shares, a word a line: --lang c, the __has_ table WORK/ref/has.tsv, the search list, the sysroot,
+  the epoch), WORK/ID/ref.pp.list (OUT, then --predef FILE, -std=STD, the modelled options, the file as gcc reads it;
+  tab-separated), the predefined macros of each configuration in WORK/ref/predef/SHA.h (the port's: host/config's)."
+  [^String work ids]
+  (let [h (host/load-host "test/c/host")
+        sysroot (System/getenv "ARBACE_C_SYSROOT")
+        rd (str work "/ref")
+        known (read-string (slurp known-file))
+        sha (fn [^String s] (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+                              (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md (.getBytes s "ISO-8859-1"))))))]
+    (.mkdirs (java.io.File. (str rd "/predef")))
+    (spit (str rd "/has.tsv") (str/join (for [[[op nm] v] (sort-by (comp str key) (:has h))] (str op "\t" nm "\t" v "\n"))))
+    (spit (str work "/ref.args")
+          (str/join "\n" (concat ["--lang" "c" "--has" (str rd "/has.tsv") "--epoch" (str (:epoch h))]
+                                 (when (and sysroot (not= sysroot "") (not= sysroot "/")) ["--sysroot" sysroot])
+                                 (mapcat (fn [d] ["--sys" d]) (:search h))
+                                 [""])))
+    (doseq [id ids]
+      (let [d (str work "/" id)
+            base (str/trim (slurp (str d "/base.txt")))
+            want (set (keys (get-in known [:pp (keyword id)] {})))
+            entries (filter #(contains? want (:name %)) (read-string (slurp (str d "/files.edn"))))
+            lines (for [e entries]
+                    (let [pre (:predefined (host/config h (:fc e) base))
+                          pf (str rd "/predef/" (subs (sha pre) 0 16) ".h")
+                          _ (when-not (.exists (java.io.File. pf)) (spit pf pre))
+                          std (let [s (:std (:fc e))] (if (= s "c94") "iso9899:199409" s))
+                          o (str d "/ref/" (:name e) ".pp")]
+                      (.mkdirs (.getParentFile (java.io.File. o)))
+                      (str (str/join "\t" (concat [o "--predef" pf (str "-std=" std)] (:args (:fc e)) [(:read e)])) "\n")))]
+        (spit (str d "/ref.pp.list") (str/join lines))
+        (println (str id ": the reference's list, " (count lines) " files"))))))
+
+(defn ref-digest
+  "The reference's digest of a file's stream (WORK/ID/ref/NAME.pp and .pp.status, tools/ppref's records): :rejected when it
+  reported an error, nil when it did not run, else the digest of its tokens' texts as the port's (identifiers in gcc -E's
+  spelling, the corpus's directory written ${srcdir})."
+  [^String d ^String nm ^String base]
+  (let [st (str/trim (or (read-or-nil (str d "/ref/" nm ".pp.status")) ""))]
+    (cond (= st "") nil
+          (= st "1") :rejected
+          (not= st "0") nil
+          :else (when-let [^String s (read-or-nil (str d "/ref/" nm ".pp"))]
+                  (let [n (.length s)
+                        texts (loop [i 0 acc (transient [])]
+                                (if (>= i n)
+                                  (persistent! acc)
+                                  (let [k (.charAt s i)
+                                        sp (.indexOf s " " (int (inc i)))
+                                        len (Long/parseLong (subs s (inc i) sp))
+                                        t (subs s (inc sp) (+ (inc sp) len))]
+                                    (recur (+ (inc sp) len 1)
+                                           (cond (= k \i) (conj! acc (norm-ident t))
+                                                 ;; C23's :: (libcpp's CPP_SCOPE) as the digest's lexer reads gcc -E's text, two
+                                                 ;; colons (cc's lexer has no ::; the class :c23-colons)
+                                                 (= t "::") (conj! (conj! acc ":") ":")
+                                                 :else (conj! acc t))))))]
+                    (tokens-digest texts base))))))
+
+(defn ref-diff
+  "bin/repr-c pp-diff-ref CORPUS NAME: the first difference between the reference's stream (pp-ref) and the port's of a file
+  of WORK/CORPUS."
+  [^String work ^String id ^String nm]
+  (let [d (str work "/" id)
+        base (str/trim (slurp (str d "/base.txt")))
+        e (first (filter #(= (:name %) nm) (read-string (slurp (str d "/files.edn")))))
+        h (host/load-host "test/c/host")
+        ^String s (or (read-or-nil (str d "/ref/" nm ".pp")) "")
+        n (.length s)
+        g (loop [i 0 acc (transient [])]
+            (if (>= i n) (persistent! acc)
+                (let [k (.charAt s i) sp (.indexOf s " " (int (inc i))) len (Long/parseLong (subs s (inc i) sp))
+                      t (subs s (inc sp) (+ (inc sp) len))]
+                  (recur (+ (inc sp) len 1) (cond (= k \i) (conj! acc (norm-ident t))
+                                                  (= t "::") (conj! (conj! acc ":") ":")
+                                                  :else (conj! acc t))))))
+        r (pp/preprocess (host/config h (:fc e) base) (:read e))
+        p (vec (port-texts r))
+        i (first (for [i (range (max (count g) (count p))) :when (not= (get g i) (get p i))] i))]
+    (println (str nm ": reference " (count g) " tokens (status " (str/trim (or (read-or-nil (str d "/ref/" nm ".pp.status")) "?"))
+                  "), port " (count p) " tokens, " (count (:errors r)) " errors"))
+    (doseq [x (take 3 (:errors r))] (println "  #error" x))
+    (when i
+      (println "first difference at" i)
+      (println " ref :" (pr-str (subvec g (max 0 (- i 6)) (min (count g) (+ i 6)))))
+      (println " port:" (pr-str (subvec p (max 0 (- i 6)) (min (count p) (+ i 6))))))))
+
 (defn check-file
   "One file of a corpus: [name lex-status pp-status port-digest detail gcc-status]."
   [^String work ^String id host ^String base levels known e]
@@ -334,6 +438,13 @@
                 (:crash r) ["crash" dg (:crash r)]
                 (nil? cc) ["no-cc" dg nil]
                 (same-dump? cc mine) ["equal" dg nil]
+                ;; the own reference (pp-ref): a known entry's stream judged by libcpp's run of the file, the class only where the
+                ;; reference's stream is not the port's either and the entry says so (:ref :differs)
+                (and k (ref-judge?) (let [rf (ref-digest d nm base)]
+                                      (or (= rf dg) (and (= rf :rejected) (seq (:errors r))))))
+                ["ref" dg nil]
+                (and k (ref-judge?) (not= :differs (:ref k)))
+                ["differ" dg (str "the reference's stream is not the port's (" (pr-str (ref-digest d nm base)) ")")]
                 (and k (= (:gcc k) dg)) ["gcc" dg nil]
                 ;; the test's own verdict (the user, 2026-11-07): where cc and the port differ, the known file's reviewed class
                 ;; decides; its :gcc digest (gcc -E's stream, over gcc's headers) is the oracle tier's (ARBACE_C_JUDGE=gcc)
@@ -373,7 +484,7 @@
         pp-fail (filter (fn [[_ _ ps]] (#{"differ" "crash" "no-cc"} ps)) rs)
         lex-fail (remove lex-known-ok rs)
         gcc-fail (filter (fn [r] (#{"differ" "unrecorded"} (nth r 5))) rs)
-        stale (concat (for [[nm _] known :when (not (some (fn [[n _ ps]] (and (= n nm) (= ps "gcc"))) rs))] [:pp nm])
+        stale (concat (for [[nm _] known :when (not (some (fn [[n _ ps]] (and (= n nm) (#{"gcc" "ref"} ps))) rs))] [:pp nm])
                       (for [[nm _] known-lex :when (not (some (fn [[n ls]] (and (= n nm) (= ls "differ"))) rs))] [:lex nm])
                       ;; the :gcc level's entries are the oracle tier's under each test's own verdict (the user, 2026-11-07)
                       (for [[nm _] known-gcc :when (host/gcc-judge?)
@@ -466,7 +577,18 @@
       (nil? se) :left
       ;; GT8: a partial run (--only) that does not hold the reference leaves the control (not :gcc-digest's: its reference
       ;; is the recorded digest, run or not; review 188, L5)
-      (and (nil? re) (not= level :gcc-digest) (results/partial-names work rc)) :left
+      (and (nil? re) (not (#{:gcc-digest :ref-digest} level)) (results/partial-names work rc)) :left
+      ;; pp-ref: the subject's stream against the own reference's stream of the reference file (its run, WORK/RC/ref/)
+      (= level :ref-digest)
+      (let [row (first (filter #(= sn (first %)) (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp (str work "/" sc "/files.tsv")))))))
+            dg (nth row 3 nil)
+            rf (ref-digest (str work "/" rc) rn (str/trim (slurp (str work "/" rc "/base.txt"))))
+            mine (read-or-nil (str work "/" sc "/port-pp/" (:out se)))]
+        (cond
+          (or (nil? dg) (= dg "-") (nil? mine)) :left
+          (nil? rf) :not-judged
+          (or (= rf dg) (and (= rf :rejected) (re-find #"(?m)^#error\t" mine))) :passes
+          :else :differs))
       (= level :gcc-digest)
       (let [row (first (filter #(= sn (first %)) (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp (str work "/" sc "/files.tsv")))))))
             dg (nth row 3 nil)
@@ -496,7 +618,9 @@
     (vec (concat (control-rows "repr-c check" :lex ["lex dump" "cc lex dump"] judge)
                  (control-rows "repr-c check" :pp ["pp dump" "cc pp dump"] judge)
                  (when (host/gcc-judge?)
-                   (control-rows "repr-c check" :gcc-digest ["tokens' digest" "gcc -E digest"] judge))))))
+                   (control-rows "repr-c check" :gcc-digest ["tokens' digest" "gcc -E digest"] judge))
+                 (when (ref-judge?)
+                   (control-rows "repr-c check" :ref-digest ["tokens' digest" "own reference's digest"] judge))))))
 
 (declare get-gcc-digest)
 
@@ -525,7 +649,7 @@
                         gcc-judge (host/gcc-judge?)
                         pp-entries (into (sorted-map)
                                          (keep (fn [[nm _ ps dg]]
-                                                 (when (#{"differ" "gcc"} ps)
+                                                 (when (#{"differ" "gcc" "ref"} ps)
                                                    (if-not gcc-judge
                                                      ;; each test's own verdict (the user, 2026-11-07): gcc did not run, so the
                                                      ;; entry's :gcc (gcc -E's digest over gcc's headers, the oracle tier's) is kept
@@ -538,13 +662,13 @@
                                                          gd (when g (tokens-digest (gcc-texts g) base))]
                                                      (cond
                                                        (and (not= gst "0") port-errs)
-                                                       [nm {:class (or (cls nm old-pp) :error-test) :gcc :rejected}]
+                                                       [nm (merge {:class (or (cls nm old-pp) :error-test) :gcc :rejected} (select-keys (get old-pp nm) [:ref]))]
                                                        (= gd dg)
-                                                       (no-class :pp nm {:class (cls nm old-pp) :gcc gd})
+                                                       (no-class :pp nm (merge {:class (cls nm old-pp) :gcc gd} (select-keys (get old-pp nm) [:ref])))
                                                        :else
                                                        (do (println (str id ": " nm ": the port's stream is not gcc's either"
                                                                          (when-not g " (no gcc output)") ": its class at :gcc"))
-                                                           (no-class :pp nm {:class (cls nm old-pp) :gcc :differs}))))))))
+                                                           (no-class :pp nm (merge {:class (cls nm old-pp) :gcc :differs} (select-keys (get old-pp nm) [:ref]))))))))))
                                          rows)
                         lex-entries (into (sorted-map)
                                           (keep (fn [[nm ls]] (when (= ls "differ") (no-class :lex nm {:class (cls nm old-lex)}))))
@@ -572,7 +696,9 @@
                ";; and :gcc, the SHA-256 of gcc -E -P's tokens (one a line, no separators), which the port's stream\n"
                ";; must give: the reference is the judge where cc is wrong; at :lex each with its class; at :gcc (CS51\n"
                ";; (a)) each file whose stream is not gcc -E's (test/repr/c/pp-gcc.sha256) with its class. Written by\n"
-               ";; bin/repr-c check --tokens --record, the classes kept. Read with the Clojure reader.\n"
+               ";; bin/repr-c check --tokens --record, the classes kept. Read with the Clojure reader. Since pp-ref (doc/cpp/CPP-SURVEY.md,\n"
+               ";; \"As built: pp-ref\"), REPR_C_PP_JUDGE=own: a :pp entry is judged by the own reference's stream (GCC 15.2.0's libcpp behind\n"
+               ";; tools/ppref), its class alone only with :ref :differs (the reference's stream not the port's either).\n"
                "{:classes\n {" (str/join "\n  " (for [[k v] (sort (:classes known))] (str k " " (pr-str v)))) "}\n"
                (str/join
                  (for [level [:pp :lex :gcc]]
@@ -695,6 +821,8 @@
   (case cmd
     "pp" (pp-main (first args) (rest args))
     "lists" (let [[work roots & ids] args] (lists work (read-string roots) ids (results/only-ids (System/getenv "REPR_C_ONLY"))))
+    "ref-lists" (let [[work & ids] args] (ref-lists work ids))
+    "ref-diff" (let [[work id nm] args] (ref-diff work id nm))
     ;; bin/repr-c corpus-dedup [--check]: each :dedup corpus's recomputed files, or (--check) their equality with its :files
     "dedup" (let [[roots check & ids] args
                   man (read-string (slurp "test/c/corpora.edn"))

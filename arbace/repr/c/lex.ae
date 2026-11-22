@@ -206,6 +206,7 @@
 (def ^:const F-SPACESHIP 128) ; <=> (C++20)
 (def ^:const F-LTCOLON 256)   ; the <:: rule (C++11)
 (def ^:const F-MODULES 512)   ; import <h>; and export import "h"; as header-name directives (-fmodules-ts)
+(def ^:const F-PEDANTIC 1024) ; cpp-read: -pedantic or -pedantic-errors, an identifier's characters C++23's (XID) alone, as libcpp's CPP_PEDANTIC
 
 (def ^:const EOF -1)
 ;; cppScan's states
@@ -403,6 +404,28 @@
 (defn- digit? [^long c]
   (if (< c 0x80) (and (>= c 48) (<= c 57)) (Character/isDigit (int c))))
 
+;; Arbace (queue 496; CS63 (a)): C23's identifier characters beyond ASCII (6.4.2.1, annex D): XID_Start first, XID_Continue
+;; after (UAX #31). Java's Unicode identifier tables are UAX #31's ID_Start and ID_Continue (plus U+2E2F and the ignorable
+;; characters); XID_* takes out the characters NFKC does not close (DerivedCoreProperties.txt's notes).
+(defn- nfkc-unstable? [^long c]
+  (or (= c 0x037A) (= c 0x309B) (= c 0x309C) (= c 0xFDFA) (= c 0xFDFB) (= c 0x2E2F)
+      (and (>= c 0xFC5E) (<= c 0xFC63))
+      (and (>= c 0xFE70) (<= c 0xFE7E) (even? c))))
+
+(defn xid-start?
+  "Whether the character `c` (from 0x80) is XID_Start, an identifier's first character in C23 (6.4.2.1)."
+  [^long c]
+  (and (>= c 0x80) (<= c 0x10FFFF) (Character/isUnicodeIdentifierStart (int c)) (not (nfkc-unstable? c))
+       (not (contains? #{0x0E33 0x0EB3 0xFF9E 0xFF9F} c))))
+
+(defn xid-continue?
+  "Whether the character `c` (from 0x80) is XID_Continue, an identifier's later character in C23 (6.4.2.1)."
+  [^long c]
+  (and (>= c 0x80) (<= c 0x10FFFF)
+       (or (= c 0x200C) (= c 0x200D)
+           (and (Character/isUnicodeIdentifierPart (int c)) (not (Character/isIdentifierIgnorable (int c)))
+                (not (nfkc-unstable? c))))))
+
 (defn- block-comment
   "scanner.comment: to the end of a /* comment, its / consumed."
   [^Scanner s ^long start]
@@ -488,28 +511,87 @@
 
 (declare ucn-length skip-ucn)
 
-(defn- cont-mark?
-  "Arbace (CX2): whether the C++ scanner takes the non-ASCII rune `c` as a continuation of an identifier or
-  a literal's suffix beyond the letters: the combining marks, the letter numbers (XID_Continue's
-  Mn, Mc, Me, Nl, Pc)."
-  [^Scanner s ^long c]
-  (and (>= c 0x80) (not= c 0xFFFD) (cxx? s)
-       (contains? #{6 7 8 10 23} (Character/getType (int c)))))
+(def ^:private c11-ranges
+  "C11's annex D.1 (and C++11's annex E.1): the ranges of characters an identifier may hold."
+  [[0xA8 0xA8] [0xAA 0xAA] [0xAD 0xAD] [0xAF 0xAF] [0xB2 0xB5] [0xB7 0xBA] [0xBC 0xBE] [0xC0 0xD6] [0xD8 0xF6] [0xF8 0xFF]
+   [0x100 0x167F] [0x1681 0x180D] [0x180F 0x1FFF] [0x200B 0x200D] [0x202A 0x202E] [0x203F 0x2040] [0x2054 0x2054]
+   [0x2060 0x206F] [0x2070 0x218F] [0x2460 0x24FF] [0x2776 0x2793] [0x2C00 0x2DFF] [0x2E80 0x2FFF] [0x3004 0x3007]
+   [0x3021 0x302F] [0x3031 0x303F] [0x3040 0xD7FF] [0xF900 0xFD3D] [0xFD40 0xFDCF] [0xFDF0 0xFE44] [0xFE47 0xFFFD]
+   [0x10000 0x1FFFD] [0x20000 0x2FFFD] [0x30000 0x3FFFD] [0x40000 0x4FFFD] [0x50000 0x5FFFD] [0x60000 0x6FFFD]
+   [0x70000 0x7FFFD] [0x80000 0x8FFFD] [0x90000 0x9FFFD] [0xA0000 0xAFFFD] [0xB0000 0xBFFFD] [0xC0000 0xCFFFD]
+   [0xD0000 0xDFFFD] [0xE0000 0xEFFFD]])
+
+(defn- c11-ident? [^long c] (boolean (some (fn [[lo hi]] (and (>= c (long lo)) (<= c (long hi)))) c11-ranges)))
+
+(defn- c11-not-initial?
+  "C11's annex D.2: the ranges of D.1 an identifier may not begin with."
+  [^long c]
+  (or (and (>= c 0x300) (<= c 0x36F)) (and (>= c 0x1DC0) (<= c 0x1DFF)) (and (>= c 0x20D0) (<= c 0x20FF))
+      (and (>= c 0xFE20) (<= c 0xFE2F))))
+
+(defn- cpp-utf8
+  "cpp-read (2026-11-22): the extended character at the offset as libcpp's forms_identifier_p reads one in C++, by
+  one_utf8_to_cppchar (charset.cc): [code point, bytes] for a sequence whose first byte is from 0xC0 (utf8_signifier), of 2
+  to 6 bytes in its shortest form, no surrogate; else nil (a byte libcpp makes a token of its own)."
+  [^Scanner s]
+  (let [b0 (peek-byte s 0)]
+    (when (and (>= b0 0xC0) (<= b0 0xFD))
+      (let [n (long (cond (< b0 0xE0) 2 (< b0 0xF0) 3 (< b0 0xF8) 4 (< b0 0xFC) 5 :else 6))
+            c (loop [k 1 c (bit-and b0 (long (case n 2 0x1F 3 0x0F 4 0x07 5 0x03 0x01)))]
+                (if (< k n)
+                  (let [b (peek-byte s k)]
+                    (if (and (>= b 0) (= (bit-and b 0xC0) 0x80)) (recur (inc k) (+ (bit-shift-left c 6) (bit-and b 0x3F))) -1))
+                  c))]
+        (when (and (> c (long (case n 2 0x7F 3 0x7FF 4 0xFFFF 5 0x1FFFFF 0x3FFFFFF)))
+                   (not (and (>= c 0xD800) (<= c 0xDFFF))))
+          [c n])))))
+
+(defn- cpp-ext!
+  "cpp-read (2026-11-22): the extended character at the offset (cpp-utf8's) taken into an identifier, a pp-number or a
+  ud-suffix, as libcpp's _cpp_valid_utf8 takes it in C++ (\"logically, the UTF-8 was converted to a UCN during translation
+  phase 1\": an identifier-nondigit of C++20's grammar, [lex.name]), `start` at the token's first character: libcpp's errors
+  when the character is in no identifier character set (\"extended character ... is not valid in an identifier\": not
+  XID_Continue, C++23's ([lex.name], UAX #31), nor in C11's annex D.1 or C++11's annex E.1, the sets libcpp accepts together
+  without -pedantic) or may not begin one (\"... is not valid at the start of an identifier\")."
+  [^Scanner s start]
+  (let [[c n] (cpp-utf8 s)
+        c (long c) n (long n)
+        off (st s OFF)
+        txt (latin1 (.-buf s) off (+ off n))]
+    (cond
+      ;; (-pedantic: the standard's set alone, XID_Continue and XID_Start, libcpp's valid_flags CXX23 and NXX23)
+      (if (cfeat? s F-PEDANTIC)
+        (not (and (<= c 0x10FFFF) (xid-continue? c)))
+        (not (and (<= c 0x10FFFF) (or (xid-continue? c) (c11-ident? c)))))
+      (err s (str (pos-str s off) ": extended character " txt " is not valid in an identifier"))
+      (and start (if (cfeat? s F-PEDANTIC)
+                   (not (xid-start? c))
+                   (not (or (xid-start? c) (and (c11-ident? c) (not (c11-not-initial? c)))))))
+      (err s (str (pos-str s off) ": extended character " txt " is not valid at the start of an identifier")))
+    (if (= n (st s CHSIZE))
+      (shift s)
+      (do (st! s OFF (+ off n)) (st! s CH EOF) (rune s)))))
 
 (defn- udl-suffix
   "Arbace (CX2): C++11's ud-suffix, an identifier touching the closing quote of a string or character
   literal, consumed; the token's kind then :UDLSTRING or :UDLCHAR (the preprocessor splits the suffix
-  off again where it is a macro's name, as libcpp's is_macro_not_literal_suffix does), else `kind`."
+  off again where it is a macro's name, as libcpp's is_macro_not_literal_suffix does), else `kind`.
+  cpp-read (2026-11-22): any identifier is the suffix, as libcpp's lex_string and lex_raw_string take it
+  (scan_cur_identifier: an ASCII letter or `_`, `$`, a UCN or a UTF-8 character first) and as [lex.string]'s
+  user-defined-string-literal and [lex.ccon]'s user-defined-character-literal derive it (a ud-suffix is an
+  identifier, [lex.ext]/1, the longest token, [lex.pptoken]/3); before, clang's raw lexer's rule (a suffix
+  without its underscore left apart unless a standard library's, `s` and `sv`), which the token check's own
+  reference, libcpp's raw lexing, does not follow (cpp-lexical/udl.cpp's `\"text\"MACRO`)."
   [^Scanner s kind ^long q]
   (if (cfeat? s F-UDL)
     (let [c (rune s)]
-      ;; clang's rule (the token-level oracle): the suffix begins with an underscore or a non-ASCII character
-      ;; (libcpp reads `"s"x` as a literal too, as ill-formed; their outputs print it the same)
-      (if (or (= c 95) (>= c 0x80) (pos? (long (ucn-length s))))
-        (do (loop []
+      (if (or (letter? c) (= c 95) (= c 36) (and (>= c 0x80) (cpp-utf8 s)) (pos? (long (ucn-length s))))
+        (do (if (>= c 0x80) (cpp-ext! s true) (shift s))
+            (loop []
               (let [c (rune s)]
                 (cond
-                  (or (letter? c) (= c 95) (digit? c) (cont-mark? s c)) (do (shift s) (recur))
+                  (and (< c 0x80) (or (letter? c) (= c 95) (digit? c) (= c 36))) (do (shift s) (recur))
+                  (and (>= c 0x80) (cpp-utf8 s)) (do (cpp-ext! s false) (recur))
                   (pos? (long (ucn-length s))) (do (skip-ucn s (ucn-length s)) (recur)))))
             (if (= q 34) :UDLSTRING :UDLCHAR))
         kind))
@@ -547,6 +629,28 @@
 
 (defn- skip-ucn [^Scanner s ^long n] (dotimes [_ n] (shift s)))
 
+(defn- ucn-value
+  "Arbace (queue 496): the code point the universal character name at the offset names (its length `n`, ucn-length's)."
+  ^long [^Scanner s ^long n]
+  (Long/parseLong (apply str (map #(char (peek-byte s (+ 2 (long %)))) (range (- n 2)))) 16))
+
+(defn- c-ident-char?
+  "Arbace (queue 496): whether C reads the character `c` as an identifier's character, `start` its first (6.4.2.1: a
+  nondigit or XID_Start, then a digit, a nondigit or XID_Continue; `$` as gcc's -fdollars-in-identifiers, the default), its
+  universal character name and its UTF-8 alike."
+  [^long c start]
+  (if (< c 0x80)
+    (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (= c 95) (= c 36) (and (not start) (>= c 48) (<= c 57)))
+    (if start (xid-start? c) (xid-continue? c))))
+
+(defn- ident-ucn
+  "Arbace (CS50 (a); queue 496): the length of a universal character name at the offset that an identifier (or a pp-number)
+  takes, `start` at its first character, 0 for none: in C one whose character C23 takes there (c-ident-char?), as its UTF-8;
+  in C++ any."
+  ^long [^Scanner s start]
+  (let [n (ucn-length s)]
+    (if (and (pos? n) (not (cxx? s)) (not (c-ident-char? (ucn-value s n) start))) 0 n)))
+
 (defn- ppnumber
   "scanner.ppnumber (A.1.9), with digit separators as libcpp's lex_number takes them (CS326 (a); go-whim's rule was
   a `'` only before an identifier character)."
@@ -570,23 +674,44 @@
             (do (dotimes [_ k] (shift s)) (recur true))
             (new-token s :PPNUMBER)))
         (= c 39) (new-token s :PPNUMBER)
-        (or (digit? c) (letter? c) (= c 95) (cont-mark? s c)) (do (shift s) (recur false))
+        (if (cxx? s)
+          (and (< c 0x80) (or (digit? c) (letter? c) (= c 95)))
+          ;; Arbace (queue 496): C23's identifier-continue (6.4.8), its UTF-8 as its universal character names
+          (and (not= c 36) (c-ident-char? c false)))
+        (do (shift s) (recur false))
+        ;; cpp-read: an extended character, as libcpp's lex_number takes one (forms_identifier_p)
+        (and (cxx? s) (>= c 0x80) (cpp-utf8 s)) (do (cpp-ext! s false) (recur false))
         ;; Arbace (CS50 (a)): a universal character name is an identifier-nondigit of a pp-number too
-        (and (= c 92) (pos? (ucn-length s))) (do (skip-ucn s (ucn-length s)) (recur false))
+        (and (= c 92) (pos? (ident-ucn s false))) (do (skip-ucn s (ucn-length s)) (recur false))
         :else (new-token s :PPNUMBER)))))
 
 (defn- identifier ^Tok [^Scanner s]
-  (let [n (ucn-length s)] (if (pos? n) (skip-ucn s n) (shift s)))
+  (let [n (ucn-length s)]
+    (cond (pos? n) (skip-ucn s n)
+          (and (cxx? s) (>= (rune s) 0x80)) (cpp-ext! s true)
+          :else (shift s)))
   (loop []
     (let [c (rune s)]
       (cond
-        (or (letter? c) (= c 95) (digit? c) (= c 36) (cont-mark? s c)
-            ;; Arbace (CS143): XID_Continue's marks, letter numbers and connectors, as C23 (6.4.3) takes them (C;
-            ;; C++ takes cont-mark?'s, CX2)
-            (and (>= c 0x80) (not= c 0xFFFD) (not (cxx? s)) (contains? #{6 8 10 23} (Character/getType (int c)))))
+        (if (cxx? s)
+          (and (< c 0x80) (or (letter? c) (= c 95) (digit? c) (= c 36)))
+          ;; Arbace (CS143; queue 496): C23's identifier-continue, XID_Continue beyond ASCII (6.4.2.1)
+          (c-ident-char? c false))
         (do (shift s) (recur))
-        (= c 92) (let [n (ucn-length s)] (if (pos? n) (do (skip-ucn s n) (recur)) (new-token s :IDENTIFIER)))
+        ;; cpp-read (2026-11-22): in C++ every extended character libcpp decodes, its errors where it is in no identifier's
+        ;; set (cpp-ext!); before, clang's raw lexer's rule (a letter, a mark, a letter number, a connector), the others a
+        ;; token each, which the token check's own reference does not follow (cpp23/Winvalid-utf8-11.C)
+        (and (cxx? s) (>= c 0x80) (cpp-utf8 s)) (do (cpp-ext! s false) (recur))
+        (= c 92) (let [n (ident-ucn s false)] (if (pos? n) (do (skip-ucn s n) (recur)) (new-token s :IDENTIFIER)))
         :else (new-token s :IDENTIFIER)))))
+
+(defn- stray-ucn
+  "Arbace (queue 496): a universal character name C23 takes in no identifier there (6.4.2.1) is one preprocessing token, a
+  character of its own (6.4p3), as the same character in UTF-8 is: its kind the character, its text the name."
+  ^Tok [^Scanner s]
+  (let [n (ucn-length s) v (ucn-value s n)]
+    (skip-ucn s n)
+    (new-token s (ch-of v))))
 
 (defn- op1
   "A one-rune token, or with a following `=` the kind `eq`."
@@ -617,11 +742,15 @@
                         (+ j dl 2)
                         :else (recur (inc j))))]
             (if (neg? end)
-              ;; an error, and clang's token: the rest of the file
-              (do (err s (str (pos-str s start) ": unterminated raw string"))
-                  (loop [j q] (when (< j len) (when (= (aget buf j) 10) (add-line (.-f s) (inc j))) (recur (inc j))))
-                  (st! s OFF len) (st! s CH EOF) (st! s JOINED 0) (st! s TRI 0)
-                  (new-token s :OTHER))
+              ;; an error, and the token the rest of the file but its last new-line (cpp-read, 2026-11-22: libcpp's raw
+              ;; token, the token check's own reference, ends at the last line's end, lex_raw_string's `cur--` at the
+              ;; buffer's last line; clang's took the new-line too)
+              (let [stop (if (and (> len q) (= (aget buf (dec len)) 10)) (dec len) len)]
+                (err s (str (pos-str s start) ": unterminated raw string"))
+                (loop [j q] (when (< j stop) (when (= (aget buf j) 10) (add-line (.-f s) (inc j))) (recur (inc j))))
+                (st! s OFF stop) (st! s CH EOF) (st! s JOINED 0) (st! s TRI 0)
+                (rune s)
+                (new-token s :OTHER))
               (do (loop [j q] (when (< j end) (when (= (aget buf j) 10) (add-line (.-f s) (inc j))) (recur (inc j))))
                   (st! s OFF end) (st! s CH EOF) (st! s JOINED 0) (st! s TRI 0)
                   (rune s)
@@ -728,7 +857,10 @@
           ;; and a constant; their kinds the wide ones (the prefix in the text tells them apart)
           (and (or (= c 117) (= c 85)) (= p1 39)) (do (shift s) (quoted s :LONGCHARCONST 39 "character constant"))
           (and (or (= c 117) (= c 85)) (= p1 34)) (do (shift s) (quoted s :LONGSTRINGLITERAL 34 "string literal"))
-          (or (letter? c) (= c 95) (= c 36) (pos? (ucn-length s))) (identifier s) ; Arbace: a UCN begins one too
+          (if (cxx? s) (or (and (< c 0x80) (or (letter? c) (= c 95) (= c 36))) (and (>= c 0x80) (cpp-utf8 s))) (c-ident-char? c true)) (identifier s)
+          (pos? (ident-ucn s true)) (identifier s) ; Arbace: a UCN begins one too
+          ;; Arbace (queue 496): in C a universal character name of a character no identifier begins with is one token
+          (and (= c 92) (pos? (ucn-length s))) (stray-ucn s)
           (and (>= c 48) (<= c 57)) (ppnumber s)
           :else (do (shift s) (new-token s (ch-of c))))))))
 

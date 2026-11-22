@@ -38,7 +38,12 @@
 #                                  aot read the libraries from the pack unless HSI_LIBS names others or HSI_LIVE=1 (run --live, check --live)
 #                                  reads .tmp/hsi/dumps*/stg
 #                                  HSI_DUMP_OPT=-O0 bin/hsi dumps --record --packages ghc-internal,base,ghc-prim,ghc-bignum: the -O0
-#                                  reference into haskell-stg-libs-O0-ghc-9.14.1 (HF10-P1 (a), lib-stg's reference; keyed with the level)
+#                                  reference into haskell-stg-libs-O0-ghc-9.14.1 (HF10-P1 (a), lib-stg's reference; keyed with the level);
+#                                  hs-own-stg-1 (a): with HSI_DUMP_PKGDB=$(bin/hsi pkgdb-O0) base and the others compiled against
+#                                  ghc-internal's -O0 interfaces of the same run (its default methods' unfoldings -O0's, as the own
+#                                  path inlines them), not the installed -O2 ones
+#   bin/hsi pkgdb-O0 [DB]          that package database (default .tmp/hsi/pkgdb-O0): the installed ghc-internal's entry, its
+#                                  import-dirs the dumps' build directory of ghc-internal; its path on stdout
 #   bin/hsi libs-pack [-O0|-O2]    the level's pack unpacked and its keys checked; prints its directory of PKG/M.stg.ae
 #   bin/hsi record-libs DIR [P,...]   the same packing from an existing dumps directory DIR (its stg/) without dumping
 #   bin/hsi verify-libs --packages P,...|--sample N   the packages (the N smallest of the pack) dumped again by the helper into .tmp/hsi/verify-libs and compared with the pack's
@@ -49,7 +54,12 @@
 #                                  stderr's, the build's and the run's seconds); --only keeps every other line
 #   bin/hsi build                  hsi's light driver built (go/arbace/hs, go/arbace/libm, test/haskell/hsi/cmd.ae and
 #                                  go/arbace/crt printed by repr/go, TamaGo's go) into .tmp/hsi/bin/hsi, its path printed
-#                                  (HSI_EXE names another)
+#                                  (HSI_EXE names another); profile-guided (go build -pgo) by test/haskell/hsi/hsi.pgo when
+#                                  it is there (queue 333; HSI_PGO=0 builds without, into .tmp/hsi/bin-nopgo)
+#   bin/hsi pgo [--record]         the training run of the profile-guided build (queue 333): the programs of
+#                                  test/haskell/hsi/pgo.txt run by bin/hsi check on the build without the profile, each
+#                                  stopped at HSI_TIMEOUT seconds of CPU (default 20) with its CPU profile kept, merged by
+#                                  go tool pprof into .tmp/hsi/pgo/hsi.pgo; --record copies it to test/haskell/hsi/hsi.pgo
 #   bin/hsi runtime print|read|check
 #                                  hsi's runtime as Go forms, mode :full (HES38): print, its Go into .tmp/hsi/runtime (hs,
 #                                  hs/cmd/hsi, libm) to edit; read, that Go read back by repr/go's native reader into the
@@ -122,6 +132,8 @@
 #                                  ref-ghc914.edn its own verdict, a golden file or left (golden/left.tsv, a reason);
 #                                  --oracle: each against GHC's recorded run's digests (test/haskell/eval/review.ae);
 #                                  --control: each with one byte changed must fail the review and the recorded digest
+#   bin/hsi boot [ID...]           D-HSJ-2 (a): test/haskell/eval/boot.edn's expected outputs remade as nofib's boot.sh makes
+#                                  them, the shipped generator's C run by ci, against the kept SHA-256 and size (fasta)
 #   bin/hsi generate [--check]     the synthetic corpus test/haskell/eval/synthetic/ written by its generator
 #                                  (test/haskell/eval/gen.ae, survey §8.3); --check: the committed files equal it
 # Environment: HSI_JOBS (default 8; bin/hsi check 3: a program of the core may take 10 GB, run it under .tmp/heavy), HSI_CORPORA (another test/haskell/eval-corpora.edn), HSI_IMAGE (the images'
@@ -321,6 +333,29 @@ strip_srcdir() {
   echo "$f"
 }
 
+# pkgdb_o0 [DB]: hs-own-stg-1 (a)'s package database (default .tmp/hsi/pkgdb-O0): the installed ghc-internal's entry with its
+# import-dirs this checkout's dump build directory of ghc-internal (.tmp/hsi/root/_build/stage1/libraries/ghc-internal/build, where
+# HSI_DUMP_OPT=-O0 bin/hsi dumps writes its -O0 interfaces before base's turn); its path on stdout, for HSI_DUMP_PKGDB
+pkgdb_o0() {
+  local db=${1:-$WORK/pkgdb-O0} conf
+  ghc_check
+  conf=$(ls "$libdir"/package.conf.d/ghc-internal-*.conf | head -1)
+  [ -f "$conf" ] || die "pkgdb-O0: no installed ghc-internal entry in $libdir/package.conf.d"
+  rm -rf "$db"; mkdir -p "$db"
+  # (the entry's ${pkgroot} paths, its include-dirs (HsBase.h), library and data dirs, are the installed database's directory,
+  # $libdir: spelled out, since a copy in another database would resolve them against that one)
+  awk -v d="$WORK/root/_build/stage1/libraries/ghc-internal/build" -v pr="$libdir" '
+    /^import-dirs:/ {print "import-dirs: " d; skip = 1; next}
+    skip && /^ / {next}
+    {skip = 0; gsub(/\$\{pkgroot\}/, pr); print}' "$conf" > "$db/$(basename "$conf")"
+  ghc-pkg --package-db "$db" recache >&2 || die "pkgdb-O0: ghc-pkg recache"
+  echo "$db"
+}
+
+# (hs-own-stg-1 (a): HSI_DUMP_PKGDB=DB, a package database dump_package passes after the installation's, whose entries shadow the
+# installed units of the same id: ghc-internal's entry with this run's own -O0 build directory as its import-dirs, so that base
+# and the packages after it are compiled against ghc-internal's -O0 interfaces, not the installed -O2 ones; bin/hsi pkgdb-O0
+# makes it. The packs' keys read dump_package without it, and with it set key the level apart, records.bash's hsi_lib_keys)
 dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
   local name=$1 dir=$2 unitf=$3 flags=$4 mods=$5 hscs=$6 hflags=$7 gens=$8 gfiles=$9 out=${10}
   local r=$WORK/root unit b srcdirs=() f t0 t1 rc=0
@@ -348,7 +383,7 @@ dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
     cp "$root/${f#*=}" "$r/$b/$m"
   done
   # shellcheck disable=SC2046,SC2086
-  local gf=(-this-unit-id "$unit" $(prefix_rel "$dir" $(echo "$flags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g"))
+  local gf=(-this-unit-id "$unit" ${HSI_DUMP_PKGDB:+-package-db "$HSI_DUMP_PKGDB"} $(prefix_rel "$dir" $(echo "$flags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g"))
             "-i$b" "-I$b" "${HSI_DUMP_OPT:--O2}" -haddock -outputdir "$b" -j"$jobs")
   t0=$(date +%s.%N)
   # shellcheck disable=SC2086
@@ -538,9 +573,13 @@ stubs_build() {
 # by TamaGo's go into .tmp/hsi/bin/hsi, kept by the forms' digest; HSI_EXE names another); its path on stdout
 build_hsi() {
   if [ -n "${HSI_EXE:-}" ]; then echo "$HSI_EXE"; return; fi
-  local d=$WORK/bin mod=$WORK/bin/mod key exe=$WORK/bin/hsi
-  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/libm" "$root/go/arbace/crt" "$root/go/arbace/ci" "$root/test/haskell/hsi" -type f | LC_ALL=C sort | xargs sha256sum
-           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/libm.ae" "$root/go/arbace/crt.ae" "$root/go/arbace/ci.ae"; } | sha256sum | cut -c1-64)
+  local d=$WORK/bin mod=$WORK/bin/mod key exe=$WORK/bin/hsi pgo=$root/test/haskell/hsi/hsi.pgo pf=()
+  # queue 333: the profile-guided build (gc's devirtualization and inlining of the machine's hot calls; the same code)
+  if [ "${HSI_PGO:-1}" = 0 ]; then d=$WORK/bin-nopgo mod=$WORK/bin-nopgo/mod exe=$WORK/bin-nopgo/hsi
+  elif [ -f "$pgo" ]; then pf=(-pgo="$pgo"); fi
+  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/libm" "$root/go/arbace/crt" "$root/go/arbace/ci" "$root/test/haskell/hsi" -type f ! -name hsi.pgo | LC_ALL=C sort | xargs sha256sum
+           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/libm.ae" "$root/go/arbace/crt.ae" "$root/go/arbace/ci.ae"
+           if [ ${#pf[@]} -gt 0 ]; then sha256sum "$pgo"; else echo "no pgo"; fi; } | sha256sum | cut -c1-64)
   if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then echo "$exe"; return; fi
   mkdir -p "$d"
   # one build at a time, the key read again under the lock (review 419: since n-gate-parts the gate's hsi-check and
@@ -552,11 +591,28 @@ build_hsi() {
     if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then exit 0; fi
     runtime_print "$mod"
     (cd "$mod" && GOCACHE=$WORK/bin/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off \
-       "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath -o "$exe.new" ./hs/cmd/hsi) >&2 || die "build: go build"
+       "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath ${pf[@]+"${pf[@]}"} -o "$exe.new" ./hs/cmd/hsi) >&2 || die "build: go build"
     mv -f "$exe.new" "$exe"
     echo "$key" > "$d/key"
   ) 9> "$d/build-hsi.lock" || die "build: hsi's driver not built"
   echo "$exe"
+}
+
+# pgo [--record]: the profile-guided build's training (queue 333): test/haskell/hsi/pgo.txt's programs (ID lines, # comments) run by
+# bin/hsi check on the build without the profile (HSI_PGO=0), each stopped at HSI_TIMEOUT seconds of CPU (default 20: the training
+# needs the hot paths, not the end) with its CPU profile (HSI_CPUPROFILE_DIR), the profiles merged by go tool pprof -proto into
+# .tmp/hsi/pgo/hsi.pgo; --record copies it to test/haskell/hsi/hsi.pgo, which bin/hsi build then builds with
+pgo_cmd() {
+  local out=$WORK/pgo ids
+  rm -rf "$out"; mkdir -p "$out/prof"
+  ids=$(grep -v '^#' "$root/test/haskell/hsi/pgo.txt" | grep . | paste -sd, -)
+  HSI_PGO=0 HSI_EXE=$(HSI_PGO=0 build_hsi) HSI_CPUPROFILE_DIR=$out/prof HSI_TIMEOUT=${HSI_TIMEOUT:-20} HSI_JOBS=${HSI_JOBS:-2} \
+    "$root/bin/hsi" check --corpus nofib,samples,synthetic,testsuite-core --only "$ids" > "$out/check.log" 2>&1 || true
+  ls "$out"/prof/*.prof > /dev/null 2>&1 || { tail -5 "$out/check.log" >&2; die "pgo: no profile written ($out/check.log)"; }
+  "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" tool pprof -proto "$out"/prof/*.prof > "$out/hsi.pgo" 2> "$out/merge.log" \
+    || { cat "$out/merge.log" >&2; die "pgo: go tool pprof -proto"; }
+  echo "hsi pgo: $(ls "$out"/prof/*.prof | wc -l) profiles merged into $out/hsi.pgo ($(wc -c < "$out/hsi.pgo") bytes)"
+  if [ "${1:-}" = --record ]; then cp "$out/hsi.pgo" "$root/test/haskell/hsi/hsi.pgo"; echo "hsi pgo: recorded test/haskell/hsi/hsi.pgo"; fi
 }
 
 # hsi's runtime as Go forms (HES38, mode :full, as pyi's): the packages arbace/hs, arbace/hs/cmd/hsi (the driver,
@@ -784,6 +840,7 @@ case $cmd in
   pins) pins "$@" ;;
   spec-check) spec_check ;;
   dumps) dumps "$@" ;;
+  pkgdb-O0) pkgdb_o0 "$@" ;;
   verify-libs) verify_libs "$@" ;;
   libs-pack)
     # bin/hsi libs-pack [-O0|-O2]: a libraries' pack unpacked into the store, its keys checked at the level; prints its directory
@@ -795,6 +852,7 @@ case $cmd in
   tests) exec "$root/bin/lib/hsi/tests" "$@" ;;
   record-ref) exec "$root/bin/lib/hsi/record-ref" "$@" ;;
   build) build_hsi ;;
+  pgo) pgo_cmd "$@" ;;
   stubs-build) stubs_build ;;
   runtime) runtime_cmd "$@" ;;
   run) run_hsi "$@" ;;
@@ -827,6 +885,7 @@ case $cmd in
     cd "$here" && ARBACE_PATH=$root "$(arbace_exe)" -m arbace.repr.haskell.cmm read "$out" "$root/test/haskell/eval/cmm" "$@" ;;
   check) exec "$root/bin/lib/hsi/check" "$@" ;;
   own-verdicts) exec "$root/bin/lib/hsi/own-verdicts" "$@" ;;
+  boot) exec "$root/bin/lib/hsi/boot" "$@" ;;
   golden) ARBACE_PATH=$root exec "$(arbace_exe)" "$root/test/haskell/eval/review.ae" "$root" "$@" ;;
   compare-front) exec "$root/bin/lib/hsi/compare-front" "$@" ;;
   aot) exec "$root/bin/lib/hsi/aot" "$@" ;;

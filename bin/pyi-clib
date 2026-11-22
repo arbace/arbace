@@ -14,6 +14,16 @@
 #                                checkout's builder runs (evaluated, not a stage 0's embedded copy)
 #   bin/pyi-clib verify LIB      built afresh into .tmp/pyi-clib/LIB/verify and compared with the committed forms
 #   bin/pyi-clib key LIB         the build's key
+#   bin/pyi-clib undefined LIB   the committed node program's undefined data symbols, NAME SIZE a line: the statics
+#                                ci's link placed at address 0 ((at N 0)) that no alias resolves (queue 481, 475-1
+#                                (a)); status 1 when one is not the linker's own (__init_array_*, __fini_array_*,
+#                                _DYNAMIC: a static link's empty arrays and no dynamic section, 0 as ld gives them),
+#                                which `build` and `verify` refuse: a C module reading one reads address 0
+#   bin/pyi-clib exe LIB [OUT]   a program's committed node program (its glue has a main; queue 489: pytokenizer)
+#                                translated whole by cf2g into a main package and built by TamaGo's go with ci's back end
+#                                (bin/ci cirun-build's printed go/arbace/{ci,crt}) into OUT/LIB (default the main
+#                                checkout's .tmp/pyi-clib/LIB/exe), kept by the Nodes' digest and the back end's key;
+#                                the executable's path printed
 #   bin/pyi-clib aot LIB OUT     the committed node program translated by cf2g (arbace.c.cf2g) into OUT/prog.go, the
 #                                package arbace/clib/LIB/aot whose init registers its compiled functions with
 #                                arbace/clib (pyi's AOT links it: the library compiled), kept by the Nodes' digest
@@ -54,6 +64,39 @@ key() {
     "$root/bin/lib/ci/musl" key; } | sha256sum | cut -c1-64
 }
 
+# undefined_syms NODES: the undefined data symbols of a node program (its text, or a nodes.ae's Nodes literal), NAME
+# SIZE a line, the linker's own marked "(the linker's)"; status 1 when another is among them
+undefined_syms() {
+  python3 -I -S -B - "$1" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding='ascii').read()
+if sys.argv[1].endswith('.ae'):
+    # the Go literal of nodes.ae (bin/pyi-clib build's q): \" and \\ and \n escaped, one line
+    i = text.index('Nodes "') + len('Nodes "')
+    lit = re.match(r'((?:[^"\\]|\\.)*)"', text[i:]).group(1)
+    text = re.sub(r'\\(x[0-9a-f]{2}|.)', lambda m: {'n': '\n', '"': '"', '\\': '\\'}.get(m.group(1)) or chr(int(m.group(1)[1:], 16)), lit)
+linker = {'__init_array_start', '__init_array_end', '__fini_array_start', '__fini_array_end', '_DYNAMIC'}
+names, sizes, at0, aliased = {}, {}, [], set()
+for line in text.split('\n'):
+    m = re.match(r'\(static (\d+) (\d+) \d+ \d+ "(.*)"\)$', line)
+    if m:
+        names[m.group(1)], sizes[m.group(1)] = m.group(3), m.group(2)
+    elif re.match(r'\(at \d+ 0\)$', line):
+        at0.append(line.split()[1])
+    elif line.startswith('(alias '):
+        aliased.add(line.split()[1])
+bad = 0
+for n in at0:
+    if n in aliased:
+        continue
+    nm = names.get(n, '?%s' % n)
+    own = nm in linker
+    bad |= not own
+    print('%s %s%s' % (nm, sizes.get(n, '?'), " (the linker's)" if own else ''))
+sys.exit(bad)
+PY
+}
+
 # build_into OUT: the node program written as Go (OUT/go/LIB/nodes.go) and read into forms (OUT/forms)
 build_into() {
   local out=$1 k src
@@ -90,6 +133,9 @@ build_into() {
   (cd "$root" && ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 \
   "$root/bin/ci" nodes $cflags "${incs[@]}" -o "$out/$lib.nodes" "${files[@]}") > "$out/nodes.log" 2>&1 \
     || { grep -v '^Reflection\|^Auto-boxing\|recur arg' "$out/nodes.log" >&2; die "ci's builder refused $lib"; }
+  # queue 481 (475-1 (a)): a data symbol no unit defines is placed at address 0 by ci's link; refused but the linker's own
+  undefined_syms "$out/$lib.nodes" > "$out/undefined.txt" \
+    || { grep -v "(the linker's)" "$out/undefined.txt" >&2; die "$lib's world has undefined data symbols (above, NAME SIZE): define them in its glue"; }
   printf 'module arbace\n\ngo 1.27\n' > "$out/go/go.mod"
   python3 -I -S -B - "$out/$lib.nodes" "$out/go/clib/$lib/nodes.go" "$lib" "$k" "$sha256" "$url" <<'PY'
 import sys
@@ -129,6 +175,7 @@ PY
 case $cmd in
   fetch) fetch; echo "$tb" ;;
   key) key ;;
+  undefined) undefined_syms "$root/go/arbace/clib/$lib/nodes.ae" ;;
   build)
     k=$(key)
     if [ -f "$root/go/arbace/clib/$lib.ae" ] && grep -q "$k" "$root/go/arbace/clib/$lib/nodes.ae" 2>/dev/null; then
@@ -147,6 +194,30 @@ case $cmd in
     else
       echo "pyi-clib: go/arbace/clib/$lib DIFFERS from the build (diff -r go/arbace/clib/$lib $work/verify/forms/go/arbace/clib/$lib)"; exit 1
     fi ;;
+  exe)
+    # one build at a time (two lex-checks at once wait, then keep it); its key: the Nodes' digest and ci's back end's
+    out=${3:-$cmain/.tmp/pyi-clib/$lib/exe}
+    mkdir -p "$out"
+    exec {lk}>"$out.lock"; flock "$lk"
+    "$root/bin/ci" cirun-build --ensure > "$out/cirun-build.log" 2>&1 || { cat "$out/cirun-build.log" >&2; die "ci's back end did not build"; }
+    nk=$( { sha256sum < "$root/go/arbace/clib/$lib/nodes.ae"; cat "$root/.tmp/ci/key"; } | sha256sum | cut -c1-64)
+    if [ -x "$out/$lib" ] && [ "$(cat "$out/exe.key" 2>/dev/null)" = "$nk" ]; then echo "$out/$lib"; exit 0; fi
+    rm -f "$out/exe.key" "$out/$lib"
+    n=$out/prog.nodes
+    rm -rf "$out/src" "$out/mod"; mkdir -p "$out/src" "$out/mod/prog"
+    ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/clib/$lib.ae" "$out/src" > "$out/print.log" 2>&1 \
+      || { cat "$out/print.log" >&2; die "the node program of $lib does not print"; }
+    arbace_tool "$root/tools/pyi/clib/aot_text.ae" nodes "$out/src/nodes.go" "$n" || die "the node program's text of $lib"
+    (cd "$root" && arbace_tool -m arbace.c.cf2g translate "$n" "$out/mod/prog") > "$out/cf2g.log" 2>&1 \
+      || { cat "$out/cf2g.log" >&2; die "cf2g refused $lib"; }
+    cp -r "$root/.tmp/ci/go/ci" "$root/.tmp/ci/go/crt" "$out/mod/"
+    printf 'module arbace\n\ngo 1.27\n' > "$out/mod/go.mod"
+    (cd "$out/mod" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 \
+       "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -p 2 -trimpath -o "$out/$lib" ./prog) > "$out/build.log" 2>&1 \
+      || { tail -20 "$out/build.log" >&2; die "$lib's Go does not build"; }
+    rm -rf "$out/src" "$n"
+    echo "$nk" > "$out/exe.key"
+    echo "$out/$lib" ;;
   aot)
     out=${3:?bin/pyi-clib aot LIB OUT}
     mkdir -p "$out"

@@ -42,7 +42,7 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
   two steps). The essential gate at `22b4c6542` failed cpp-essential (two Toks, below) and suite-go (`--run-one`'s JDK check
   under load), both fixed at `88b8e7f1a`, which passed and became main.
 - **The crops' scores** (`bin/crops-score` on next; completeness, without by design, maturity, independence): Clojure 99.1
-  99.6 100 100, Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
+  99.6 100 100 (99.7 99.9 100 100 on `clj-rows-1122`), Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
   100 100, Scheme 99.9 100 100 100, Haskell 97.3 99.1 100 78.4, Rust 100 100 100 80.0, LLVM IR 99.3 100 100 99.0, Python 0 0
   83.3 98.2 (eval and AOT wait for its records, lane 4), x86-64 assembly 99.4 99.9 100 100, arm64 assembly 99.9 99.9 100 99.9,
   WebAssembly 100 100 100 100. Below 90% complete: Java and OCaml (and Python, unrecorded).
@@ -52,6 +52,21 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
   `night` (crops deferred), 1 absent, 1 none; the essential memory lane's simulated wall 0:59, serial sum 1:10.
   The essential tier is the core plus the crops' subsets deferred to the night when their paths did not change (the crops
   tier, 2026-11-17). Tonight: `bin/gate --full` on next (the merges' builds: gate_key and javac's key moved).
+- **cpp-rt-own** (2026-11-20, mac/cpp-rt-own-1120 from next `939037429`; doc/cpp/CPP-SURVEY.md, "As built: cpp-rt-own"): the C++
+  code generator's coverage of the lowered runtime's pack units and of GCC's libcpp (CP413 (a)): rt_ours_glob 166 to 177 of 198
+  (future, thread, ios_errcat, system_error, random, cxx11- and cow-shim_facets, ext-inst, locale_facets, complex_io, cow-fs_dir),
+  `test/cpp/runtime/inputs-linux-amd64.edn` re-recorded (eval and AOT 0.960 to 0.973, independence 0.9138 to 0.9190: 91; 92 at 179); libcpp's 14 units all generated, their names clang's (the build in .tmp
+  only), and pp-ref-1120's two blockers fixed: constant arrays written as LLVM arrays (charset's 218,382-member struct, c1c2badd8),
+  a macro's goto reaching its label (expr.cc, 8faf78756). Left (the survey's table): the fs and exp/filesystem units (internal linkage by signature, relocation's noexcept, clang's
+  first-emission naming), C++20 constraint mangling (sstream-inst, print, text_encoding), a VLA (floating_to_chars), valarray,
+  memory_resource, floating_from_chars, tzdb and format; cp-demangle.c is DECISION cpp-rt-own-1 (recommended (a)).
+- **cpp-rt-own2** (2026-11-20, mac/cpp-rt-own2-1120 from mac/cpp-rt-own-1120 `9dcc02f78`; doc/cpp/CPP-SURVEY.md, "As built:
+  cpp-rt-own2"): the lowered runtime's own units 177 to 187 of 198: cp-demangle.c read from its own C by repr/c and ci (DECISION
+  cpp-rt-own-1 (a)), memory_resource, fs_ops, cow-fs_ops, fs_path, cow-fs_path and exp/filesystem's ops, cow-ops, path, cow-path by
+  clang's linkage over unnamed namespaces' types, implicit ABI tags, relocation's noexcept and a dozen smaller rules (each against
+  clang's IR on a reduced case); the inliner's suffix counter per module; DECISION 505-2 (a) (505's parser mark, the code generator's
+  rule, test/cpp/codegen/elab-decl.cpp). Left (11): text_encoding, sstream-inst, print, format, fs_dir, exp dir and cow-dir,
+  floating_to_chars, valarray, floating_from_chars, tzdb; DECISIONS cpp-rt-own2-1 to -3 open.
 - **Next**:
   - lanes 2 and 4: Haskell's own records (17 packages) and Python's records (`bin/pyi` check and `check --aot`, both records
     together; then Python's fragment spliced, F1 (a));
@@ -122,7 +137,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 |---|---:|---:|---:|---|
 | Clojure | 99.0 (99.4) | 100 | 100 | |
 | Java | 72.9 (80.4); 77.2 on `java-night` | 100 | 99.7 | completeness |
-| Go | 97.0 (100.0) | 100 | 100 | |
+| Go | 98.9 (100.0) | 100 | 100 | |
 | C | 96.0 (99.6) | 100 | 99.7 | |
 | OCaml | 84.2 (96.4); 82.5 before OC222 (a) | 100 | 51.3 | completeness, independence |
 | C++ | 76.3 (96.8); 89.1 (97.8) / 71.3 on `cpp-print-own` | 100 | 67.8 | completeness, independence |
@@ -340,6 +355,17 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
 - **Clojure** (99 99 100 100). Landed: `h-clojure-go` (CDR2's and CDR4 (b)'s rows recorded, eval deferred 50 -> 45; gen-class's
   `:exposes-methods` takes the world's protected methods) and its fix `h-prepare-fail` (no fn defined after genclass.ae in
   arbace.core). Held: genclass's record after a build at the new gate_key, then the AOT suite with test-dot, test-bean, genclass.
+- **Go** (go-rows-1122, 2026-11-22, the burst's stream G1: the by-design classes re-examined; journal "Go's by-design classes
+  re-examined, round 1"): gc's -std, -+, -complete, -p, walk's print check, -d=escapedebug (with deadlocals), the extra receivers,
+  internal std imports in errorcheck, queue 420/426's rows recorded; AOT Proposed 8 (c) and return.go; print's empty declaration
+  groups. Left for the user: read's 137 invalid programs (agreement as pass, n/a, or GC47 (b)), gc in the executable (gc-flags 28,
+  gc-phases 7, nowritebarrier), print's 9 self-embedding tests, AOT's issue9608 (RPS31), goi's foreign code 8 and memory 7.
+  Next round (drafted, unapplied: `.tmp/patches/nowb.py` in the worktree): nowritebarrier's checks; escape_unique (deferred).
+- **Clojure** (99.7 99.9 100 100, from 99.1; `clj-rows-1122`, 2026-11-22). Fns serialize (FnSer), proxies refuse
+  serialization, `:load-ns` deftypes compiled (CLJ-1208), CDR1's locales and SecurityManager in jdk/; recorded from one build
+  (`3dc7bacc2ceb`): eval 21,119 / 13 / 2, AOT 831 / 5 / 2 (gen-class, CDR2, CDR4 (b), clojure-xml through `:jdk-extra`). Left:
+  `:fn-code-type` (2 AOT assertions, c2j fix `6fdb262a0` waits for the next build), `:xml-stream` (EntityDeclarationImpl in the
+  jdk-extra list); decisions CDR12-CDR16 (doc/CLOJURE-DESIGN-REVIEW.md).
 - **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
   and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
   importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),
@@ -377,7 +403,13 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   `rust-c4-1122` (2026-11-22, R3): C1's TypeId constants as rustc's inttoptr pointers and a pair's niche tag at its offset (std,
   unwind, panics pass own on ci; ci's 32-bit pointer constants a finding for C), C4's passes with every alias, enum reprs, pattern
   types, const traits and the builtin derives (core 27,062 of 27,498 facts, alloc and std all equal, names 15,120 of 15,162) and the
-  switch run 5 of 5 own on the native interface and names (C4 counted own only after C6-5's ruling). Next: C1's six programs built
+  switch run 5 of 5 own on the native interface and names (C4 counted own only after C6-5's ruling). Branch `rust-c6b-1122` (2026-11-22,
+  the burst's R2, with 512-rust-causes5 and R3's rust-c4-1122 merged): C6-4's next export and the back end's lowering as std's IR
+  writes it (core's macro-made attributes, IRBuilder's folds, LLVM 23's float text, -Z fewer-names' literal types, InstSimplify's
+  aggregate rules in the inliner, the asserts' locations, :nounwind): core 183 of 275 items equal to std's IR (114 before),
+  alloc 21 of 25 (18), std 83 of 325 (61); DECISION 512-1 (a) taken (std's rsi export made again: catch_unwind's lines
+  unchanged, their root the helper's fnptr types without `unsafe`) (FRONTEND-SURVEY, "As built: C6-4's next export, core's
+  lowering as std's IR writes it"). Next: C1's six programs built
   again and recorded, core's 436 facts left, C6-4's next export ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1 and C4:
   the burst's round").
 - **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred

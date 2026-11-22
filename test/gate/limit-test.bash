@@ -45,7 +45,7 @@ fi
 # java-check's run_actions, judge and test_limit, extracted, with limited stubbed: LIMS gets each attempt's limit, the
 # statuses of the attempts come from SEQ (a space-separated list, 0 after its end)
 if sel retry-limits || sel attempt-log; then
-  eval "$(sed -n '/^run_actions() {/,/^}/p;/^judge() {/,/^}/p;/^test_limit() {/,/^}/p' "$root/bin/java-check")"
+  eval "$(sed -n '/^run_actions() {/,/^}/p;/^plan_bad() {/,/^}/p;/^judge() {/,/^}/p;/^test_limit() {/,/^}/p' "$root/bin/java-check")"
   run_dirs() { echo "$work/w $work/tmp"; }
   limited() {
     local n; echo "$1" >> "$work/lims"; n=$(wc -l < "$work/lims"); local -a q=($SEQ); return "${q[n-1]:-0}"
@@ -53,7 +53,7 @@ if sel retry-limits || sel attempt-log; then
   runcase() {  # runcase TIMEOUT SEQ: run_actions on one test whose attempts end with the statuses SEQ
     work=$w/run; rm -rf "$work"; mkdir -p "$work/t"; : > "$work/empty"; : > "$work/lims"
     p=$work/t; id=t1; dir=$work; jdktest=$work; timeout=$1; SEQ=$2; level=interp
-    printf 'run\t0\t0\t-\t-\t0\t-\t0\tMain\n' > "$p/plan.tsv"
+    printf 'run\t0\t0\t-\t-\t0\t-\t0\tMain\nend\n' > "$p/plan.tsv"  # a whole plan (queue 485: its end line)
     run_actions interp exe none "" 2> "$work/stderr"
   }
 fi

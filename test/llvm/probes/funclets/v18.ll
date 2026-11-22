@@ -1,3 +1,5 @@
+; verdict: invalid Funclet bundle operands should correspond to a FuncletPadInst
+; rule: llvm/lib/IR/Verifier.cpp:4055 funclet bundle input is token none.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

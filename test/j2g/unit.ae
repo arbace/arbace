@@ -912,13 +912,22 @@
         call (fn [cls mn] (w/with-world world
                             (first (filter #(= :invoke (:op %))
                                            (nodes-of (some (fn [[[n _] b]] (when (= n mn) b)) (:bodies @(:state (a/decl cls)))))))))
-        plain (call "z/Plain" "fin") own (call "z/Own" "fin") hash (call "z/Plain" "hash")]
+        plain (call "z/Plain" "fin") own (call "z/Own" "fin") hash (call "z/Plain" "hash")
+        ;; judged in the world (queue 517: object-finalize? reads the owner's superclass chain), the call unaccessed as
+        ;; invoke-val sees it
+        fin? (fn [nd] (w/with-world world (code/object-finalize? (access/unaccess nd))))]
     (check "object-finalize: the fixture analyzes" (and plain own hash (empty? (:failed world))) (pr-str (:failed world)))
-    (check "object-finalize: Plain's this.finalize() is Object's own, the no-op" (code/object-finalize? plain)
+    (check "object-finalize: Plain's this.finalize() is Object's own, the no-op" (fin? plain)
            (pr-str (select-keys plain [:owner :name :desc :kind]) (:owner (:method plain))))
-    (check "object-finalize: control: Own's this.finalize() is Own's" (not (code/object-finalize? own))
+    (check "object-finalize: control: Own's this.finalize() is Own's" (not (fin? own))
            (pr-str (select-keys own [:owner :name :desc :kind]) (:owner (:method own))))
-    (check "object-finalize: control: hashCode is not finalize" (not (code/object-finalize? hash)))
+    (check "object-finalize: control: hashCode is not finalize" (not (fin? hash)))
+    ;; queue 517 (t06387, ProtectedAccess_3): Outer.this.finalize() from an anonymous class, Outer declaring none: the call's
+    ;; owner is Outer, the receiver's type, not Object; AT10's test of the owner alone missed it (Go's "Finalize__V undefined")
+    (let [outer (call "z/Outer$1" "finalize")]
+      (check "object-finalize: Outer.this.finalize() of a class declaring none is Object's (queue 517)"
+             (and outer (fin? outer))
+             (pr-str (w/with-world world (let [u (access/unaccess outer)] [(select-keys u [:owner :name :desc :kind]) (:owner (:method u))])))))
     ;; the review's risk (round 52, 2026-11-18): jrt.NN takes a *T, so the emitted check is chosen by the receiver's
     ;; Go type: NN on a pointer (a leaf class), J2g_NotNull[T] on an interface (an abstract or non-leaf class's this,
     ;; an interface-typed receiver); each method translated whole by decls/method-forms, as the translation does.
@@ -1113,6 +1122,78 @@
            (let [old '(go/method CloneShallow [t] (panic (jrt/CloneNotSupported t)))]
              (not (has old '(set! (.-Self c) (addr c))))))))
 
+;; JCS122 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS122 (a)"): a package-private method is not overridden by
+;; a method of the same name and descriptor in a subclass of another Java package (JVMS 5.4.5; Calendar.getSetStateFields
+;; against the test's Koyomi, t05451). The fixture test/j2g/unit/ppover: p.A's package-private ppm, p.B's override of it,
+;; q.S's own ppm. j2g names A's and B's family Ppm_pp_p__I apart from S's Ppm__I: definitions, the class interface, S's
+;; forwarder of the family to B's implementation, the calls (A's callPpm the family's, S's sCall its own), the reach of
+;; B's on an S. The negative control: p.T2 extends q.S2 (public ppm) and overrides both S2's and A2's: not renamable,
+;; the pair (A2, S2) stays the check's error.
+
+(defn test-pp-override []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/ppover" :tree true}] :variant-files []))
+        mw {:T (set (keys @(:compile-set world))) :jrt-classes {} :jrt {} :vmethods-cache (atom {}) :trivial-cache (atom {})}
+        mw (assoc mw :subclass-index (m/make-subclass-index mw))
+        in-w (fn [f] (w/with-world world
+                       (binding [m/*w* mw env/*declared* (:classes e)
+                                 code/*pkgstate* {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts (atom #{})}]
+                         (try (f) (catch Throwable t (str "threw: " t))))))
+        k ["ppm" "()I"]
+        mm-of (fn [cls mn] (some #(when (= mn (:name %)) %) (:methods (a/decl cls))))
+        method-go (fn [cls mn] (in-w #(let [mm (mm-of cls mn)]
+                                        (binding [decls/*reached* #{[cls (:name mm) (:desc mm)]}]
+                                          (doall (decls/method-forms (m/pkg cls) cls mm))))))
+        has (fn [f x] (some #(= x %) (tree-seq coll? seq f)))
+        defines (fn [fs nme] (some #(and (seq? %) (= 'go/method (first %)) (= nme (second %))) (tree-seq coll? seq fs)))
+        fam (in-w #(m/pp-families))
+        overrides (in-w #(chk/package-private-overrides (sort (:T mw))))]
+    (check "pp-override: the fixture analyzes" (and (map? fam) (empty? (:failed world))) (pr-str (:failed world) fam))
+    (check "pp-override: A's and B's ppm are one family, ppm-pp-p; S's keeps its name"
+           (and (= "ppm-pp-p" (get-in fam [:renames ["p/A" "ppm" "()I"]]) (get-in fam [:renames ["p/B" "ppm" "()I"]]))
+                (nil? (get-in fam [:renames ["q/S" "ppm" "()I"]])))
+           (pr-str fam))
+    (check "pp-override: the check refuses only the negative control's pair (A2 and S2: T2 overrides both)"
+           (= [{:method "p/A2.ppm()I" :hidden-by "q/S2"}] (vec overrides))
+           (pr-str overrides))
+    (check "pp-override: control: A2's family is not renamed (T2 would need both names)"
+           (and (map? fam) (not-any? #(#{"p/A2" "q/S2" "p/T2"} (first %)) (keys (:renames fam))))
+           (pr-str fam))
+    (check "pp-override: A's ppm is Impl_Ppm_pp_p__I (A has subclasses), S's own is Ppm__I (a leaf)"
+           (and (defines (method-go "p/A" "ppm") 'Impl_Ppm_pp_p__I) (defines (method-go "q/S" "ppm") 'Ppm__I))
+           (pr-str (method-go "p/A" "ppm") (method-go "q/S" "ppm")))
+    (check "pp-override: A's callPpm calls the family's (.Ppm_pp_p__I this), S's sCall its own (.Ppm__I t)"
+           (and (has (method-go "p/A" "callPpm") '(.Ppm_pp_p__I this)) (has (method-go "q/S" "sCall") '(.Ppm__I t)))
+           (pr-str (method-go "p/A" "callPpm") (method-go "q/S" "sCall")))
+    (let [dk (in-w #(vec (keys (m/vmethods "q/S"))))
+          impl (in-w #(m/impl-of "q/S" ["ppm-pp-p" "()I"]))
+          disp (in-w #(doall (decls/dispatch-forms "q" "q/S")))
+          cf (in-w #(doall (decls/class-forms "p/A")))]
+      (check "pp-override: S's dispatch keys hold both, the family's implementation on an S is B's"
+             (and (some #{["ppm" "()I"]} dk) (some #{["ppm-pp-p" "()I"]} dk) (= "p/B" (:owner impl)))
+             (pr-str dk impl))
+      (check "pp-override: S forwards the family to B's implementation (Ppm_pp_p__I calls .Impl_Ppm_pp_p__I)"
+             (and (defines disp 'Ppm_pp_p__I) (has disp '(.Impl_Ppm_pp_p__I t t)) (not (defines disp 'Ppm__I)))
+             (pr-str disp))
+      (check "pp-override: A's class interface A_I lists Ppm_pp_p__I, not Ppm__I"
+             (let [ifc (some #(when (and (seq? %) (= 'go/type (first %)) (str/ends-with? (name (second %)) "_I")) %) cf)]
+               (and ifc (has ifc 'Ppm_pp_p__I) (not (has ifc 'Ppm__I))))
+             (pr-str cf)))
+    (check "pp-override: the reach of an S's ppm reaches B's too (pp-hidden), A's above it in its package as well"
+           (= [["p/B" "ppm" "()I"] ["p/A" "ppm" "()I"]]
+              (in-w #(#'arbace.j2g.reach/pp-hidden (#'arbace.j2g.reach/new-cx) "q/S" k)))
+           (in-w #(pr-str (#'arbace.j2g.reach/pp-hidden (#'arbace.j2g.reach/new-cx) "q/S" k))))
+    (check "pp-override: control: B's ppm hides nothing (A's is in its package)"
+           (nil? (in-w #(#'arbace.j2g.reach/pp-hidden (#'arbace.j2g.reach/new-cx) "p/B" k))))
+    ;; the reach (RTA) from A's callPpm with only an S instantiated: A's call of ppm on an S is B's, which the
+    ;; implementation by name alone (S's) missed
+    (let [res (in-w #(select-keys ((resolve 'arbace.j2g.reach/run) {:roots [["p/A" "callPpm" "()I"]] :instantiate ["q/S"]})
+                                  [:reached :T]))]
+      (check "pp-override: the reach from A's callPpm on an S reaches B's ppm (the family's on an S) and S's own"
+             (and (map? res) (contains? (:reached res) ["p/B" "ppm" "()I"]) (contains? (:reached res) ["q/S" "ppm" "()I"]))
+             (pr-str res)))))
+
 ;; A17 of the Ghidra case study's G2 plan (GH15 (a)): the entries' listings, META-INF/arbace/entries, that
 ;; jdk.internal.jrt.ClassPathResources answers getResources of a package and an entry's JarFile from
 (defn test-entries []
@@ -1278,6 +1359,7 @@
   (test-gen-class-aot-form)
   (test-edge-generics)
   (test-object-finalize)
+  (test-pp-override)
   (test-dynsub-clone)
   (test-class-supers-r54)
   (test-class-supers-q415)

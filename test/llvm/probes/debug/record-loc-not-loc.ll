@@ -1,3 +1,5 @@
+; verdict: invalid invalid debug location
+; rule: llvm/lib/AsmParser/LLParser.cpp:347 validateEndOfModule resolves each debug record's location, and the #dbg_declare's is !1, a DIFile, not a DILocation: a parse error, before any verifier runs.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

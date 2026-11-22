@@ -24,7 +24,7 @@
 #                                  TY14's Tpoly) and the Lambda that differs (TY17's partiality among them)
 #   bin/oi run-native FILE.ml [ARG...]       FILE typed and translated by Arbace (no ocamlc, no ocdump) and run on oi with the native library
 #   bin/oi objinfo-check                     T12's compiler output (queue 434, doc/ocaml/TYPER.md section 30): the programs of
-#                                  test/ocaml/divergences.edn's :compiler-output, :compiler-output-index and :compiler-output-cmo (D434-2 (a)), each whose ocamlobjinfo sections the native front end
+#                                  test/ocaml/divergences-aot.edn's (since queue 511; divergences.edn's before) :compiler-output, :compiler-output-index and :compiler-output-cmo (D434-2 (a)), each whose ocamlobjinfo sections the native front end
 #                                  prints (-decls: arbace.repr.ocaml.typer.objinfo) typed by the native typer and judged by its own
 #                                  .reference, the others named by the section they need (the printed sections still compared:
 #                                  "decls equal"); each equal output judged against another test's reference, which must fail
@@ -173,7 +173,7 @@ cmd_check_native() {
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   # its key, so check --aot's oi column takes these rows (oi_rows_for), as the oracle path's check.tsv
   if [ -z "$ONLY" ] && [ -z "$ONLY_LIST" ]; then oi_key "$OI_DIR/corpus.tsv" > "$out.key"; else rm -f "$out.key"; fi
-  local own; own=$(own_verdicts oi)
+  local own; own=$(own_verdicts oi) || exit $?
   # the judgment's directory: oi_check.ae reads the known programs, the slow ones and the controls beside the results file, so the native
   # path's are merged there with ocamlc's (oi-known-native.edn after oi-known.edn; divergences-native.edn's classes before divergences.edn's)
   local j=$OI_DIR/native-judge; rm -rf "$j"; mkdir -p "$j"
@@ -225,5 +225,7 @@ cmd_typer_probe() {
 cmd_objinfo_check() {
   [ $# -eq 0 ] || die "usage: bin/oi objinfo-check"
   mkdir -p "$OI_DIR"; [ -d "$TESTS/shape-index" ] || need_source
-  typer_ns objinfo-check --tests "$TESTS" --divergences "$root/test/ocaml/divergences.edn" --stdlib "$TOP/stdlib" --control
+  # (the AOT levels' classes: since queue 511 oi's level runs the shape-index and uid-deps tests by header.awk's objinfo mode, so
+  # divergences.edn's :compiler-output-index lists none; divergences-aot.edn's classes still list them all)
+  typer_ns objinfo-check --tests "$TESTS" --divergences "$root/test/ocaml/divergences-aot.edn" --stdlib "$TOP/stdlib" --control
 }

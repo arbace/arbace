@@ -48,7 +48,7 @@
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
-(declare verr require-logical-pointer-scan)
+(declare verr require-logical-pointer-scan ptrtoaddr-ok? check-constexprs)
 
 (defn- soft!
   "CheckFailed: the failure recorded, the check goes on."
@@ -76,6 +76,9 @@
 (def ^:dynamic *renames* {})   ; implicit intrinsic declarations: the name written -> the mangled name LLParser gives
 (def ^:dynamic ^java.util.Map *gdefs* nil)   ; global name -> {:kind :type}
 (def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
+(def ^:dynamic ^"[J" *gnext* nil)        ; D1120-3: the module NumberedVals' next id (LLParser.cpp:3595-3600)
+(def ^:dynamic ^java.util.Set *ce-seen* nil)   ; D1120-3: the Verifier's ConstantExprVisited (Verifier.cpp:2709-2744)
+(def ^:dynamic ^java.util.Map *bafwd* nil)   ; D1120-3: LLParser's ForwardRefBlockAddresses: function name -> [[label addrspace] ...]
 (def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
 (def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
 (def ^:dynamic *all-forms* [])
@@ -498,6 +501,33 @@
        (and (seq? rt) (= 'target (first rt))) (contains? #{"aarch64.svcount" "riscv.vector.tuple"} (second rt))
        :else false))))
 
+;; D1120-3 (llvm-sections-1120): a target extension type's properties (llvm-project 23.1.5 llvm/lib/IR/Type.cpp:1050-1140,
+;; getTargetTypeInfo: CanBeGlobal, CanBeLocal; any other name none) and Type::containsNonGlobalTargetExtType and
+;; containsNonLocalTargetExtType (Type.cpp:74-104, StructType's 531-585): through arrays and structs (a named one once), not vectors
+(defn- target-ext-props [^String nm]
+  (cond (#{"spirv.Image" "spirv.SignedImage" "spirv.Type"} nm) #{:global :local}
+        (#{"spirv.IntegralConstant" "spirv.Literal"} nm) #{}
+        (= "spirv.Padding" nm) #{:global}
+        (str/starts-with? nm "spirv.") #{:global :local}
+        (#{"aarch64.svcount" "riscv.vector.tuple" "llvm.test.vectorelement"} nm) #{:local}
+        (= "dx.Padding" nm) #{:global}
+        (str/starts-with? nm "dx.") #{:global :local}
+        (= "amdgcn.named.barrier" nm) #{:global}
+        (#{"wasm.funcref" "wasm.externref"} nm) #{:global :local}
+        :else #{}))
+
+(defn- contains-target-ext-without?
+  "Whether type t is or contains (arrays, structs) a target extension type without property prop (:global or :local)."
+  ([t prop] (contains-target-ext-without? t prop (java.util.HashSet.)))
+  ([t prop ^java.util.HashSet seen]
+   (let [r (resolve-type t)]
+     (cond
+       (and (not= r t) (not (.add seen t))) false
+       (and (seq? r) (= 'array (first r))) (contains-target-ext-without? (nth r 2) prop seen)
+       (and (seq? r) ('#{struct packed} (first r))) (boolean (some #(and (not (keyword? %)) (contains-target-ext-without? % prop seen)) (rest r)))
+       (and (seq? r) (= 'target (first r))) (not (contains? (target-ext-props (second r)) prop))
+       :else false))))
+
 (defn- sized?
   "Type::isSized: not void, label, metadata, token, a function or an opaque struct; a struct holding a scalable vector
   only when all its elements are the same scalable vector; a target type of an unknown name not."
@@ -561,6 +591,9 @@
           (when-let [a (attr-of attrs n)]
             (when (and (seq? a) (not (sized? (norm-type (second a)))))
               (verr :verifier/attr-type (str "Attribute '" n "' does not support unsized types!")))
+            ;; D1120-3: verifyParameterAttrs' byval rule (llvm/lib/IR/Verifier.cpp:2172-2175)
+            (when (and (= n "byval") (seq? a) (contains-target-ext-without? (norm-type (second a)) :local))
+              (verr :verifier/attr-type "'byval' argument has illegal target extension type"))
             (when (and (= n "byval") (seq? a) (>= (biginteger (alloc-bytes (norm-type (second a)))) (.shiftLeft java.math.BigInteger/ONE 32)))
               (verr :verifier/attr-type "huge 'byval' arguments are unsupported"))))))))
 
@@ -835,7 +868,27 @@
     (seq? v) (let [h (first v)]
                (when (and (= h 'blockaddress) st *cur-fn* (global? (second v)) (= (global-key (second v)) *cur-fn*) (local? (nth v 2 nil)))
                  (use-local st (nth v 2) 'label))
+               ;; D1120-3 (llvm-sections-1120): LLParser's blockaddress of another function (llvm-project 23.1.5
+               ;; llvm/lib/AsmParser/LLParser.cpp:4383-4440): one known already must be a function with a body; one not yet defined (or
+               ;; only referenced) is a forward reference in the expected type's address space, which must be a pointer's
+               (when (and (= h 'blockaddress) (global? (second v)) (not= (global-key (second v)) *cur-fn*) *bafwd*)
+                 (let [fk (global-key (second v)) d (.get *gdefs* fk) at {:at [:val {:text "blockaddress"}]}]
+                   (if d
+                     (cond (not= :function (:kind d)) (verr :parser/blockaddress "expected function name in blockaddress" at)
+                           (= 'llvm/declare (first (:form d))) (verr :parser/blockaddress "cannot take blockaddress inside a declaration" at))
+                     (let [rt (resolve-type t)]
+                       (when-not (ptr-type? rt)
+                         (verr :parser/blockaddress (str "type of blockaddress must be a pointer and not '" (tstr (norm-type t)) "'") at))
+                       (.put *bafwd* fk (conj (vec (.get *bafwd* fk)) [(nth v 2) (addrspace rt)]))))))
                (cond
+                 ;; D1120-3 (llvm-sections-1120): a splat (llvm-project 23.1.5 llvm/lib/AsmParser/LLParser.cpp:4725-4737: its constant parsed
+                 ;; with its own type; convertValIDToValue 6949-6957: the expected type a vector, the constant's type its element type)
+                 (and (= h 'splat) (vector? (second v)))
+                 (let [[it iv] (second v) at {:at [:val {:text "splat"}]} rt (resolve-type t)]
+                   (use-value st iv (norm-type it))
+                   (when-not (vec-type? rt) (verr :parser/constant-type "vector constant must have vector type" at))
+                   (when-not (= (norm-type it) (norm-type (elem rt)))
+                     (verr :parser/constant-type (str "constant expression type mismatch: got type '" (tstr (norm-type it)) "' but expected '" (tstr (norm-type (elem rt))) "'") at)))
                  ('#{struct packed} h)
                  (let [rt (resolve-type t) at {:at [:str value-brace]}]
                    (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))   ; the elements are parsed first
@@ -1052,6 +1105,14 @@
                                                         (verr :parser/atomicrmw (str "atomicrmw " opn " operand must be a floating point or fixed vector of floating point type") {:at [:op 1]}))
                            :else (when-not (int-ish? st)
                                    (verr :parser/atomicrmw (str "atomicrmw " opn " operand must be an integer or fixed vector of integer type") {:at [:op 1]})))
+                         ;; D1120-3: the value's store size in bits a power of two, at least 8 (llvm-project 23.1.5
+                         ;; llvm/lib/AsmParser/LLParser.cpp:9250-9254; getTypeStoreSizeInBits: the type's bits rounded up to bytes)
+                         (let [eb (fn [t] (if (ptr-type? t) (dl-ptr-bits (addrspace t)) (bits t)))
+                               tb (if (vec-type? vt) (when-let [b (eb (elem vt))] (* (long (nth vt 1)) (long b))) (eb vt))]
+                           (when tb
+                             (let [sz (* 8 (quot (+ (long tb) 7) 8))]
+                               (when (or (< sz 8) (not (zero? (bit-and sz (dec sz)))))
+                                 (verr :parser/atomicrmw "atomicrmw operand must have a power-of-two byte size" {:at [:op 1]})))))
                          (check-align (:align o)))
       (= h 'cmpxchg) (let [[pv c n so fo] ps]
                        (when (= so :unordered) (verr :parser/cmpxchg "invalid cmpxchg success ordering" {:at [:inst-end]}))
@@ -1227,12 +1288,15 @@
       (verr :parser/visibility "symbol with local linkage must have default visibility" {:at (if (#{:declare :define} what) [:linkage] :start)}))
     (when (and (local-linkage? l) (:dll o)) (verr :parser/dll "symbol with local linkage cannot have a DLL storage class" {:at (if (#{:declare :define} what) [:linkage] :start)}))))
 
+(declare check-global-number!)
+
 (defn- parse-function [f]
   (let [[h nm rt ps & opts] f
         o (apply hash-map opts)
         what (if (= h 'llvm/define) :define :declare)
         st (fn-state)
         k (global-key nm)]
+    (check-global-number! k "function")
     (check-linkage o what)
     (when (and (true? (:comdat o)) (numbered? k)) (verr :parser/comdat "comdat cannot be unnamed" {:at [:find "{"]}))
     (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
@@ -1263,6 +1327,18 @@
     (when-let [p (:personality o)] (use-value nil (second p) (norm-type (first p))))
     (when-let [p (:prefix o)] (use-value nil (second p) (norm-type (first p))))
     (when-let [p (:prologue o)] (use-value nil (second p) (norm-type (first p))))
+    ;; D1120-3: a declaration with forward block addresses (LLParser.cpp:7298-7311); a definition resolves them at its body's start,
+    ;; each label's blockaddress in the function's address space against the forward reference's (resolveForwardRefBlockAddresses,
+    ;; 7314-7349, checkValidVariableType's message, 1861)
+    (when-let [es (when *bafwd* (.remove *bafwd* k))]
+      (if (= what :declare)
+        (verr :parser/blockaddress "cannot take blockaddress inside a declaration" {:at [:mod-find "blockaddress"]})
+        (let [fas (or (:addrspace o) *prog-as*)]
+          (doseq [[lbl as] es]
+            (when-not (= as fas)
+              (verr :parser/forward-type (str "'" (if (local? lbl) (local-key lbl) lbl) "' defined with type '" (tstr (norm-type (list 'ptr fas)))
+                                              "' but expected '" (tstr (norm-type (list 'ptr as))) "'")
+                    {:at [:mod-find "blockaddress"]}))))))
     (when-let [ft (.get *gfwd* k)]
       (let [pft (norm-type (list 'ptr (or (:addrspace o) *prog-as*)))]
         (when (and (not= ft true) (not= (resolve-type (norm-type ft)) pft))
@@ -1277,6 +1353,7 @@
         [init opts] (if (and (seq more) (not (keyword? (first more)))) [(first more) (rest more)] [nil more])
         o (apply hash-map opts)
         k (global-key nm)]
+    (check-global-number! k "global")
     (check-linkage o :global)
     (let [rt (resolve-type (norm-type t))]
       (when (or (and (seq? rt) (= 'fn (first rt))) (#{'void 'label 'metadata 'token 'x86_amx} rt))
@@ -1293,8 +1370,18 @@
     (.put *gdefs* k {:kind :global :type (norm-type t) :form f})
     (.remove *gfwd* k)))
 
+(defn- check-global-number!
+  "LLParser::checkValueID at a numbered global's or function's name (llvm-project 23.1.5 llvm/lib/AsmParser/LLParser.cpp:875,
+  7124, 3595-3600; D1120-3): its number not below the module's next one; then the next one past it."
+  [^String k kind]
+  (when (and *gnext* (numbered? k))
+    (let [n (Long/parseLong k) nxt (aget ^"[J" *gnext* 0)]
+      (when (< n nxt) (verr :parser/numbering (str kind " expected to be numbered '@" nxt "' or greater") {:at [:mod-find (str "@" k)]}))
+      (aset ^"[J" *gnext* 0 (inc n)))))
+
 (defn- parse-alias [f]
   (let [[h nm t a & opts] f o (apply hash-map opts) k (global-key nm)]
+    (check-global-number! k "global")
     (check-linkage o :alias)
     (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]}))
     (if (vector? a) (use-value nil (second a) (norm-type (first a))) (use-value nil a 'ptr))
@@ -1424,6 +1511,9 @@
                                                     @n))))
         nil)))
   ;; validateEndOfModule's order: comdats, metadata, debug locations, implicit intrinsics, then undefined globals
+  ;; D1120-3: before them all, a blockaddress whose function was never defined (LLParser.cpp:276-279)
+  (when (and (not *partial*) *bafwd* (seq *bafwd*))
+    (verr :parser/blockaddress "expected function name in blockaddress" {:at [:mod-find (str "@" (first (keys *bafwd*)))]}))
   (when-not *partial*
   (let [cdefs (set (keep #(when (= (first %) 'llvm/comdat) (second %)) forms))
         crefs (sort (distinct (for [f forms :when (#{'llvm/global 'llvm/define 'llvm/declare 'llvm/alias 'llvm/ifunc} (first f))
@@ -2434,33 +2524,66 @@
           (apply verr :verifier/md-misc "Access bit-width not the same as description bit-width"
                  (concat cs [[:mdv x] (str (int-bits (norm-type (first (nth aops 2))))) (str (int-bits (norm-type (first (nth ops 2)))))])))))))))
 
+(defn- check-unknown-prof
+  "verifyUnknownProfileMetadata (llvm-project 23.1.5 llvm/lib/IR/Verifier.cpp:2621-2630; D1120-3, llvm-sections-1120): an 'unknown'
+  !prof is the marker and one non-empty string (the pass that dropped the profile); the last two checks print no node."
+  [x ops]
+  (when-not (= 2 (count ops)) (verr :verifier/md-prof "'unknown' !prof should have a single additional operand" [:mdv x]))
+  (when-not (md-str (second ops)) (verr :verifier/md-prof "'unknown' !prof should have an additional operand of type string"))
+  (when (= "" (md-str (second ops))) (verr :verifier/md-prof "the 'unknown' !prof operand should not be an empty string")))
+
 (defn- check-prof-md [x hd b]
   (let [ops (md-ops x)]
     (when ops
       (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand" [:mdv x]))
       (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation" [:mdv x]))
-      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
-      (let [nm (md-str (first ops)) [_ ps o] (split-inst b)]
+      (let [nm (md-str (first ops)) [_ ps o] (split-inst b)
+            ;; GetBranchingTerminatorNumOperands (Verifier.cpp's visitProfMetadata): 0 for an instruction that takes no branch weights
+            ;; (an invoke counts its own way); its unconditional br none
+            expected (case hd
+                       br (when (= 4 (count ps)) 2)
+                       switch (inc (count (nth ps 3)))
+                       call 1
+                       invoke 2
+                       indirectbr (count (nth ps 2))
+                       select 2
+                       callbr (inc (count (:indirect o)))
+                       nil)]
+        ;; D1120-3: the 'unknown' marker (MDProfLabels::UnknownBranchWeightsMarker) before the operand count, Verifier.cpp's order
+        (when (= nm "unknown")
+          (when-not (or (and expected (not= 'invoke hd)) (= 'invoke hd))
+            (verr :verifier/md-prof "'unknown' !prof should only appear on instructions on which 'branch_weights' would" [:mdv x]))
+          (check-unknown-prof x ops))
+        (when (and (not= nm "unknown") (< (count ops) 2)) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
         (cond
+          (= nm "unknown") nil
           (= nm "branch_weights")
           (let [ws (if (md-str (second ops)) (drop 2 ops) (rest ops))   ; an MDString after the name is the origin ("expected")
-                n (count ws)
-                expected (case hd
-                           br (when (= 4 (count ps)) 2)
-                           switch (inc (count (nth ps 3)))
-                           call 1
-                           invoke 2
-                           indirectbr (count (nth ps 2))
-                           select 2
-                           callbr (inc (count (:indirect o)))
-                           nil)]
+                n (count ws)]
             (when-not expected
               (try (verr :verifier/md-prof "!prof branch_weights are not allowed for this instruction" [:mdv x])
                    (catch arbace.lang.ExceptionInfo e (.add *errs* e))))
             (when-not (= n (or expected 0))
               (verr :verifier/md-prof (if (= hd 'invoke) "Wrong number of InvokeInst branch_weights operands" "Wrong number of operands") [:mdv x]))
             (doseq [w ws] (when-not (md-int-op? w) (verr :verifier/md-prof "!prof brunch_weights operand is not a const int" [:mdv x]))))
-          (= nm "VP") nil
+          ;; D1120-3: the value profile (Verifier.cpp's visitProfMetadata; isValueProfileMD, llvm/lib/IR/ProfDataUtils.cpp:50, 132: "VP"
+          ;; and 5 operands at least; the kinds InstrProfValueKind IPVK_First 0 to IPVK_Last 2, llvm/include/llvm/ProfileData/
+          ;; InstrProfData.inc:259-281: indirect call target 0 and memop size 1 on a CallBase only; the values at 3, 5, ... zero-extended)
+          (= nm "VP")
+          (do (when-not (>= (count ops) 5) (verr :verifier/md-prof "invalid value profiling metadata" [:mdv x]))
+              (when-not (md-int-op? (second ops)) (verr :verifier/md-prof "VP !prof missing kind argument" [:mdv x]))
+              (let [k (long (md-int-val (second ops)))]
+                (when-not (<= 0 k 2) (verr :verifier/md-prof "Invalid VP !prof kind" [:mdv x]))
+                (when-not (odd? (count ops)) (verr :verifier/md-prof "VP !prof should have an even number of arguments after 'VP'" [:mdv x]))
+                (when (and (#{0 1} k) (not ('#{call invoke callbr} hd)))
+                  (verr :verifier/md-prof "VP !prof indirect call or memop size expected to be applied to CallBase instructions only" [:mdv x])))
+              (loop [i 3 seen #{}]
+                (when (< i (count ops))
+                  (let [v (nth ops i)]
+                    (when-not (md-int-op? v) (verr :verifier/md-prof "VP !prof value operand is not a const int" [:mdv x]))
+                    (let [z (mod (bigint (md-int-val v)) 18446744073709551616N)]
+                      (when (seen z) (verr :verifier/md-prof "VP !prof should not have duplicate profile values" [:mdv x]))
+                      (recur (+ i 2) (conj seen z)))))))
           :else (verr :verifier/md-prof "expected either branch_weights or VP profile name" [:mdv x]))))))
 
 (defn- mem-op?
@@ -2653,16 +2776,74 @@
         (when-not (and (md-int-op? (first ops)) (= 'i32 (norm-type (first (first ops)))))
           (verr :verifier/md-misc "!amdgpu.expected.active.lanes operand must be an i32 constant" :inst [:mdv x]))))))
 
+(defn- amdgpu-triple?
+  "Triple::isAMDGPU: amdgcn or r600 (D1120-3)."
+  []
+  (once :amdgpu-triple
+        (fn [] (boolean (some (fn [x] (when (= (first x) 'llvm/triple) (re-find #"^(amdgcn|r600)" (str (second x))))) *all-forms*)))))
+
+(defn- md-zext
+  "An integer metadata operand's value zero-extended from its type's width (APInt's unsigned value)."
+  [op]
+  (let [w (long (or (int-bits (norm-type (first op))) 64))]
+    (.mod ^java.math.BigInteger (md-int-val op) (.shiftLeft java.math.BigInteger/ONE (int w)))))
+
+(defn- reqd-wgs-product
+  "The product of a !reqd_work_group_size node's three integer operands, or nil where the Verifier stops (D1120-3)."
+  [ops]
+  (when (= 3 (count ops))
+    (loop [os ops p (biginteger 1)]
+      (if-let [o (first os)]
+        (when (md-int-op? o)
+          (let [d (md-zext o)]
+            (when (<= (.bitLength ^java.math.BigInteger d) 64)
+              (let [q (.multiply p d)] (when (<= (.bitLength ^java.math.BigInteger q) 64) (recur (rest os) q))))))
+        p))))
+
+(defn- check-amdgpu-wgs
+  "verifyAMDGPUReqdWorkGroupSize (llvm-project 23.1.5 llvm/lib/IR/VerifierAMDGPU.cpp:60-113, after verifyFunctionMetadata,
+  Verifier.cpp:3180-3181; D1120-3, llvm-sections-1120): on an AMDGPU triple a function with a well-formed !reqd_work_group_size needs
+  amdgpu-flat-work-group-size \"MIN,MAX\" equal to the operands' product."
+  [md attrs]
+  (when (amdgpu-triple?)
+    (when-let [x (some (fn [[k x]] (when (= '!reqd_work_group_size k) x)) (partition 2 md))]
+      (when-let [p (reqd-wgs-product (md-ops x))]
+        (let [a (str-attr (group-items attrs) "amdgpu-flat-work-group-size")
+              v (when a (second a))
+              [lo hi] (when (string? v) (let [i (.indexOf ^String v ",")] (if (neg? i) [v ""] [(subs v 0 i) (subs v (inc i))])))
+              num (fn [^String t] (let [t (str/trim t)] (when (re-matches #"[0-9]+" t) (biginteger t))))]
+          (cond
+            (nil? a) (verr :verifier/amdgpu "reqd_work_group_size requires amdgpu-flat-work-group-size" :fn [:mdv x])
+            (not (string? v)) (verr :verifier/amdgpu "amdgpu-flat-work-group-size must be a string attribute" :fn)
+            (or (str/includes? hi ",") (nil? (num lo)) (nil? (num hi)))
+            (verr :verifier/amdgpu "amdgpu-flat-work-group-size must be a pair of unsigned integers" :fn)
+            (not (and (= (num lo) p) (= (num hi) p)))
+            (verr :verifier/amdgpu "amdgpu-flat-work-group-size must equal the product of reqd_work_group_size operands" :fn [:mdv x])))))))
+
 (defn- check-function-md
-  "visitFunction's metadata: verifyFunctionMetadata over the attachments (!prof, !kcfi_type; its failure ends it alone),
-  then a declaration's !prof, a definition's single !prof and !kcfi_type."
+  "visitFunction's metadata: verifyFunctionMetadata over the attachments (!prof, !kcfi_type, !reqd_work_group_size; its failure ends
+  it alone), then a declaration's !prof, a definition's single !prof and !kcfi_type."
   [md decl?]
   (let [pairs (partition 2 md)]
     (visiting
      (doseq [[k x] pairs]
        (case (str k)
+         ;; D1120-3: verifyFunctionMetadata's reqd_work_group_size (Verifier.cpp:2678-2704), on any target
+         "!reqd_work_group_size"
+         (let [ops (md-ops x)]
+           (when-not (= 3 (count ops)) (verr :verifier/md-misc "reqd_work_group_size must have exactly three operands" [:mdv x]))
+           (loop [os ops p (biginteger 1)]
+             (when-let [o (first os)]
+               (when-not (md-int-op? o) (verr :verifier/md-misc "reqd_work_group_size operands must be integer constants" [:mdv x]))
+               (let [d (md-zext o)]
+                 (when (> (.bitLength ^java.math.BigInteger d) 64) (verr :verifier/md-misc "reqd_work_group_size operands must fit in 64 bits" [:mdv x]))
+                 (let [q (.multiply p d)]
+                   (when (> (.bitLength ^java.math.BigInteger q) 64) (verr :verifier/md-misc "reqd_work_group_size product must fit in 64 bits" [:mdv x]))
+                   (recur (rest os) q))))))
          "!prof" (when-let [ops (md-ops x)]
                    (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
+                   ;; D1120-3: an 'unknown' marker by verifyUnknownProfileMetadata (Verifier.cpp:2641-2644)
+                   (when (= "unknown" (md-str (first ops))) (check-unknown-prof x ops))
                    (when-not (= "unknown" (md-str (first ops)))
                      (when (= 'null (first ops)) (verr :verifier/md-prof "first operand should not be null" [:mdv x]))
                      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation" [:mdv x]))
@@ -2730,6 +2911,26 @@
               (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)" [:mdv id]))
             (when (not= bv 3) (.putIfAbsent ids (md-str id) v))))))
       (when (> (.size *errs*) n) (.add bad f))))
+    ;; D1120-3 (llvm-sections-1120): visitModuleFlags' ptrauth and AArch64 PAuth ABI flags (llvm-project 23.1.5
+    ;; llvm/lib/IR/Verifier.cpp:1839-1886): a non-integer value of one of the four reported as the scan meets it; then ptrauth-init-fini
+    ;; 0 or 1, its address discrimination 0 or 1 and only with it (a failure ends the visit: no requirement checked), and both PAuth
+    ;; ABI flags or neither (its failure does not)
+    (let [names #{"aarch64-elf-pauthabi-platform" "aarch64-elf-pauthabi-version" "ptrauth-init-fini" "ptrauth-init-fini-address-discrimination"}
+          vals (java.util.HashMap.)
+          n0 (.size *errs*)]
+      (doseq [f flags :let [ops (md-ops f)] :when (and (= 3 (count ops)) (names (md-str (second ops))))]
+        (if (md-int-op? (nth ops 2))
+          (.put vals (md-str (second ops)) (str (md-zext (nth ops 2))))
+          (visiting (verr :verifier/md-flags (str (md-str (second ops)) ": module flag expects integer value")))))
+      (let [pf (or (.get vals "ptrauth-init-fini") "0") pa (or (.get vals "ptrauth-init-fini-address-discrimination") "0")
+            n1 (.size *errs*)]
+        (visiting
+         (when-not (#{"0" "1"} pf) (verr :verifier/md-flags "ptrauth-init-fini must be 0 or 1"))
+         (when-not (#{"0" "1"} pa) (verr :verifier/md-flags "ptrauth-init-fini-address-discrimination must be 0 or 1, if set"))
+         (when (and (not= pa "0") (= pf "0")) (verr :verifier/md-flags "ptrauth-init-fini-address-discrimination module flag requires ptrauth-init-fini")))
+        (when (> (.size *errs*) n1) (doseq [f flags] (.add bad f)))   ; the visit ended: the requirements are not checked
+        (when-not (= (.containsKey vals "aarch64-elf-pauthabi-platform") (.containsKey vals "aarch64-elf-pauthabi-version"))
+          (visiting (verr :verifier/md-flags "either both or no 'aarch64-elf-pauthabi-platform' and 'aarch64-elf-pauthabi-version' module flags must be present")))))
     (doseq [f flags :when (not (.contains bad f))]
      (visiting
       (let [[b _ v] (md-ops f)]
@@ -3561,7 +3762,8 @@
           (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:global g])))
       (check-intrinsic-signature k (:fty (.get *gdefs* k))))
 
-    (check-function-md (:md o) (= h 'llvm/declare))))
+    (check-function-md (:md o) (= h 'llvm/declare))
+    (visiting (check-amdgpu-wgs (:md o) (:attrs o)))))
     (when (= h 'llvm/define)
       (let [blocks (numbered-blocks f)
             g (cfg blocks)
@@ -3640,8 +3842,16 @@
                       ;; (llvm.structured.gep and llvm.structured.alloca instead); AMDGPU's allocas are in the private address space 5
                       (when (and ('#{getelementptr alloca} hd) (require-logical-pointer?))
                         (verr :verifier/logical-pointer (str "Non-logical " hd " disallowed for this module.") :inst))
+                      ;; D1120-3: visitAllocaInst (llvm/lib/IR/Verifier.cpp:4670-4673), after the size check
+                      (when (and (= hd 'alloca) (contains-target-ext-without? (norm-type (second b)) :local))
+                        (verr :verifier/alloca "Alloca has illegal target extension type" :inst))
                       (when (and (= hd 'alloca) (amdgcn-triple?) (not= 5 (addrspace (result-type b))))
                         (verr :verifier/alloca "alloca on amdgpu must be in addrspace(5)" :inst))
+                      ;; D1120-3: visitPtrToAddrInst, then visitInstruction's constant operands
+                      (when (= hd 'ptrtoaddr)
+                        (let [[st _ dt] (strip-flags (rest b))]
+                          (when-not (ptrtoaddr-ok? st dt) (verr :verifier/ptrtoaddr "PtrToAddr result must be address width" :inst))))
+                      (check-constexprs (vec (rest b)))
                       (when ('#{load store} hd) (check-load-store hd b))
                       ;; visitCallBase
                       (when-let [c (callee-of b)]
@@ -3676,7 +3886,37 @@
                                     a (if old? (strip-casts a) a)]
                                 (when-not (or (= a 'poison) old?
                                               (and (local? a) (when-let [[_ _ db] (.get defs (local-key a))] (= 'alloca (first db)))))
-                                  (verr :verifier/lifetime "llvm.lifetime.start/end can only be used on alloca or poison")))))))
+                                  (verr :verifier/lifetime "llvm.lifetime.start/end can only be used on alloca or poison"))))
+                            ;; D1120-3 (llvm-sections-1120): visitIntrinsicCall's convert_to_arbitrary_fp and convert_from_arbitrary_fp
+                            ;; (llvm-project 23.1.5 llvm/lib/IR/Verifier.cpp:6124-6211; the formats and their sizes
+                            ;; APFloatBase::getArbitraryFPFormatSizeInBits, llvm/lib/Support/APFloat.cpp:6020-6038; the rounding modes
+                            ;; convertStrToRoundingMode, llvm/lib/IR/FPEnv.cpp:25-36)
+                            (when-let [[_ dir] (re-find #"^llvm\.convert\.(to|from)\.arbitrary\.fp\." (global-key c))]
+                              (let [args (nth ps 2)
+                                    rt (norm-type (first ps)) a0 (norm-type (first (first args)))
+                                    [vt it] (if (= dir "to") [a0 rt] [rt a0])
+                                    md-str (fn [[t v]] (when (and (= 'metadata t) (seq? v) (= '! (first v)) (string? (second v))) (second v)))
+                                    md? (fn [[t]] (= 'metadata t))
+                                    sizes {"Float8E5M2" 8 "Float8E5M2FNUZ" 8 "Float8E4M3" 8 "Float8E4M3FN" 8 "Float8E4M3FNUZ" 8
+                                           "Float8E4M3B11FNUZ" 8 "Float8E3M4" 8 "Float8E8M0FNU" 8 "Float6E3M2FN" 6 "Float6E2M3FN" 6
+                                           "Float4E2M1FN" 4}
+                                    go (fn [m] (verr :verifier/intrinsic-call m))
+                                    interp (nth args 1 nil) rounding (nth args 2 nil)]
+                                (when (vec-type? vt)
+                                  (when-not (vec-type? it) (go "if floating-point operand is a vector, integer operand must also be a vector"))
+                                  (when-not (= (shape vt) (shape it)) (go "floating-point and integer vector operands must have the same element count")))
+                                (when-not (and interp (md? interp)) (go "missing interpretation metadata operand"))
+                                (let [f (md-str interp)]
+                                  (when-not f (go "interpretation metadata operand must be a string"))
+                                  (when (= "" f) (go "interpretation metadata string must not be empty"))
+                                  (when-not (sizes f) (go "unsupported interpretation metadata string"))
+                                  (when-not (= (bits (elem it)) (sizes f)) (go "integer type bit width must equal the arbitrary FP format width")))
+                                (when (= dir "to")
+                                  (when-not (and rounding (md? rounding)) (go "missing rounding mode metadata operand"))
+                                  (let [r (md-str rounding)]
+                                    (when-not r (go "rounding mode metadata operand must be a string"))
+                                    (when-not (#{"round.tonearest" "round.tonearestaway" "round.downward" "round.upward" "round.towardzero"} r)
+                                      (go "unsupported rounding mode argument")))))))))
                       (when (= hd 'invoke)
                         (let [c (second (nth (split-inst b) 1))]
                           (when (and (global? c) (intr/recognized? (global-key c))
@@ -3864,6 +4104,55 @@
     (every? #(null-value? (peek %)) (rest v))
     :else false))
 
+(defn- ptrauth-init-fini-upgraded?
+  "AutoUpgrade's upgradePtrauthInitFiniArrays (llvm-project 23.1.5 llvm/lib/IR/AutoUpgrade.cpp:6389-6486; D1120-3, llvm-sections-1120):
+  whether the parser's UpgradeModuleFlags replaces the ptrauth constants of @llvm.global_ctors and @llvm.global_dtors by their pointers
+  (and adds the ptrauth-init-fini module flags): no such flag already, every structor of both arrays a 3-field struct whose function is
+  a ptrauth of discriminator 0xD9D4 (55764) with no address discriminator or the marker inttoptr (i64 1 to ptr), all of one mode."
+  [forms]
+  (let [flags (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) forms)
+        flag-names (keep #(let [[_ id] (md-ops %)] (md-str id)) flags)
+        mode (volatile! nil)
+        one (fn [v]   ; UpgradeSinglePointer: true when the pointer upgrades in the mode decided so far
+              (when (and (seq? v) (= 'ptrauth (first v)))
+                (let [[_ _ d a] (rest v)
+                      ad (cond (or (nil? a) (= 'null (second a))) false
+                               (let [x (second a)] (and (seq? x) (= 'inttoptr (first x)) (= 1 (second (strip-flags (rest x)))))) true
+                               :else ::unknown)]
+                  (when (and d (= 55764 (second d)) (not= ad ::unknown) (or (nil? @mode) (= @mode ad)))
+                    (vreset! mode ad) true))))]
+    (and (not-any? #{"ptrauth-init-fini" "ptrauth-init-fini-address-discrimination"} flag-names)
+         (let [gs (keep (fn [k] (some #(when (and (= 'llvm/global (first %)) (= k (global-key (nth % 1))) (some? (global-init %))) %) forms))
+                        ["llvm.global_ctors" "llvm.global_dtors"])]
+           (and (seq gs)
+                (every? (fn [g] (let [init (global-init g)]
+                                  (and (seq? init) (= 'array (first init)) (seq (rest init))
+                                       (every? (fn [[_ st]] (and (seq? st) (= 'struct (first st)) (= 3 (count (rest st))) (one (second (nth st 2)))))
+                                               (rest init)))))
+                        gs))))))
+
+;; D1120-3 (llvm-sections-1120): checkPtrToAddr's last rule (llvm-project 23.1.5 llvm/lib/IR/Verifier.cpp:3709-3724): a ptrtoaddr's
+;; result is DataLayout::getAddressType of its source, an integer (or a vector of them) of the address space's index size
+;; (DataLayout.h:518-520, getAddressSizeInBits = getIndexSizeInBits); at the instruction (3727) and in constant expressions
+;; (visitConstantExpr 2755, by visitConstantExprsRecursively 2709-2744: a global's initializer 830, an instruction's operands 5775,
+;; each constant once in the module)
+(defn- ptrtoaddr-ok? [srct dstt]
+  (let [s (norm-type srct)
+        a (fn [t] (symbol (str "i" (dl-index-bits (addrspace t)))))]
+    (= (norm-type dstt) (if (vec-type? s) (list (first s) (nth s 1) (a (elem s))) (a s)))))
+
+(defn- check-constexprs [v]
+  (letfn [(walk [x]
+            (cond (vector? x) (doseq [y x] (walk y))
+                  (and (seq? x) (symbol? (first x)))
+                  (when (or (nil? *ce-seen*) (.add *ce-seen* x))
+                    (when (= 'ptrtoaddr (first x))
+                      (let [[st _ dt] (strip-flags (rest x))]
+                        (when-not (ptrtoaddr-ok? st dt) (verr :verifier/ptrtoaddr "PtrToAddr result must be address width"))))
+                    (doseq [y (rest x)] (walk y)))
+                  :else nil))]
+    (walk v)))
+
 (defn- check-global-variable
   "Verifier::visitGlobalVariable, then visitGlobalValue."
   [forms f]
@@ -3894,7 +4183,14 @@
             (verr :verifier/global "wrong type for intrinsic global variable" :global))
           (when-not (= 3 (count es))
             (verr :verifier/global "the third field of the element type is mandatory, specify ptr null to migrate from the obsoleted 2-field form" :none))
-          (when-not (ptr-type? (norm-type (nth es 2))) (verr :verifier/global "wrong type for intrinsic global variable" :global)))))
+          (when-not (ptr-type? (norm-type (nth es 2))) (verr :verifier/global "wrong type for intrinsic global variable" :global))))
+      ;; D1120-3: a ptrauth structor left by the upgrade (Verifier.cpp's visitGlobalVariable, after the element type's checks)
+      (when (and (seq? init) (= 'array (first init)) (not (ptrauth-init-fini-upgraded? forms)))
+        (doseq [[_ st] (rest init)]
+          (when (and (seq? st) (= 'struct (first st)) (= 3 (count (rest st))))
+            (let [fv (second (nth st 2))]
+              (when (and (seq? fv) (= 'ptrauth (first fv)))
+                (verr :verifier/global "signing of ctors/dtors should be requested via module flags")))))))
     (when (#{"llvm.used" "llvm.compiler.used"} k)
       (when (and (some? init) (not= (:linkage o) :appending)) (verr :verifier/global "invalid linkage for intrinsic global variable" :global))
       (when (pos? (long (count-global-uses forms k))) (verr :verifier/global "invalid uses of intrinsic global variable" :global))
@@ -3908,8 +4204,12 @@
               (when-not (and (global? v) (#{:global :function :alias} (:kind (.get *gdefs* (global-key v)))))
                 (verr :verifier/global (str "invalid " k " member") (pr/typed-str [(norm-type et) v]))))))))
     (when (scalable? t) (verr :verifier/global "Globals cannot contain scalable types" :global))
+    ;; D1120-3: visitGlobalVariable (llvm/lib/IR/Verifier.cpp:810-813): the culprit the value type
+    (when (contains-target-ext-without? t :global)
+      (verr :verifier/global (str "Global " (pr/value-str (second f)) " has illegal target extension type") (tstr t)))
     (when (and (sized? t) (>= (biginteger (alloc-bytes t)) (.shiftLeft java.math.BigInteger/ONE (int (dl-ptr-bits (or (:addrspace o) 0))))))
       (verr :verifier/global "Global variable is too large to fit into the address space" :global [:raw (str " " (tstr t))]))
+    (when (some? init) (check-constexprs init))
     (check-global-value f o)))
 
 (defn- strip-casts
@@ -4024,7 +4324,7 @@
             *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
-            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *ce-seen* (java.util.HashSet.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)
             *errs2* (java.util.ArrayList.)
             *renames* {}]
@@ -4050,7 +4350,7 @@
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
             *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
-            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *bafwd* (java.util.TreeMap.) *gnext* (long-array 1) *ce-seen* (java.util.HashSet.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)]
     (try (phase-parser forms) [nil]
          (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) [e] (throw e))))))

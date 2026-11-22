@@ -1,0 +1,138 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/ch/AsynchronousServerSocketChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.net InetSocketAddress SocketAddress SocketOption StandardSocketOptions)
+        '(java.nio.channels AlreadyBoundException
+                            AsynchronousServerSocketChannel
+                            AsynchronousSocketChannel
+                            ClosedChannelException
+                            CompletionHandler)
+        '(java.util Collections HashSet Set)
+        '(java.util.concurrent Future)
+        '(java.util.concurrent.locks ReadWriteLock ReentrantReadWriteLock)
+        '(sun.net.ext ExtendedSocketOptions))
+
+(defclass ^:abstract AsynchronousServerSocketChannelImpl
+  :extends AsynchronousServerSocketChannel
+  :implements [Cancellable Groupable]
+
+  (field ^:protected ^:final ^FileDescriptor fd)
+
+  (field ^:protected ^:volatile ^InetSocketAddress localAddress)
+
+  (field ^:private ^:final stateLock (Object.))
+
+  (field ^:private ^:final ^ReadWriteLock closeLock (ReentrantReadWriteLock.))
+
+  (field ^:private ^:volatile ^boolean closed)
+
+  (field ^:private ^:volatile ^boolean acceptKilled)
+
+  (field ^:private ^boolean isReuseAddress)
+
+  (constructor [this ^AsynchronousChannelGroupImpl group]
+    (super. (.provider group))
+    (set! (.-fd this) (Net/serverSocket)))
+
+  (method ^:public ^:final isOpen ^boolean [this] (not closed))
+
+  (method ^:final begin :throws [IOException] ^void [this]
+    (.lock (.readLock closeLock))
+    (when-not (.isOpen this) (throw (ClosedChannelException.))))
+
+  (method ^:final end ^void [this] (.unlock (.readLock closeLock)))
+
+  (method ^:abstract implClose :throws [IOException] ^void [this])
+
+  (method ^:public ^:final close :throws [IOException] ^void [this]
+    (.lock (.writeLock closeLock))
+    (try (when closed (return)) (set! closed true) (finally (.unlock (.writeLock closeLock))))
+    (.implClose this))
+
+  (method ^:abstract implAccept ^{:tag (Future AsynchronousSocketChannel)} [this attachment
+                                                                            ^{:tag (CompletionHandler AsynchronousSocketChannel Object)} handler])
+
+  (method ^:public ^:final accept ^{:tag (Future AsynchronousSocketChannel)} [this]
+    (.implAccept this nil nil))
+
+  (method ^:public ^:final accept :type-params [A] ^void [this ^A attachment
+                                                          ^{:tag (CompletionHandler AsynchronousSocketChannel (? super A))} handler]
+    (when (nil? handler) (throw (NullPointerException. "'handler' is null")))
+    (.implAccept this attachment handler))
+
+  (method ^:final isAcceptKilled ^boolean [this] acceptKilled)
+
+  (method ^:public ^:final onCancel ^void [this ^{:tag (PendingFuture ? ?)} task]
+    (set! acceptKilled true))
+
+  (method ^:public ^:final bind :throws [IOException] ^AsynchronousServerSocketChannel [this
+                                                                                        ^SocketAddress local
+                                                                                        ^int backlog]
+    (let [^InetSocketAddress isa (if (nil? local) (InetSocketAddress. 0) (Net/checkAddress local))]
+      (try
+        (.begin this)
+        (locking stateLock
+          (when (some? localAddress) (throw (AlreadyBoundException.)))
+          (Net/bind fd (.getAddress isa) (.getPort isa))
+          (Net/listen fd (if (< backlog 1) 50 backlog))
+          (set! localAddress (Net/localAddress fd)))
+        (finally (.end this)))
+      this))
+
+  (method ^:public ^:final getLocalAddress :throws [IOException] ^SocketAddress [this]
+    (when-not (.isOpen this) (throw (ClosedChannelException.)))
+    localAddress)
+
+  (method ^:public ^:final setOption :type-params [T] :throws [IOException] ^AsynchronousServerSocketChannel [this
+                                                                                                              ^{:tag (SocketOption T)} name
+                                                                                                              ^T value]
+    (when (nil? name) (throw (NullPointerException.)))
+    (when-not (.contains (.supportedOptions this) name)
+      (throw (UnsupportedOperationException. (java-str "'" name "' not supported"))))
+    (try
+      (.begin this)
+      (if (and (identical? name StandardSocketOptions/SO_REUSEADDR) (Net/useExclusiveBind))
+          (set! isReuseAddress (cast Boolean value))
+          (Net/setSocketOption fd Net/UNSPEC name value))
+      this
+      (finally (.end this))))
+
+  (method ^:public ^:final getOption :type-params [T] :throws [IOException] ^T [this
+                                                                                ^{:tag (SocketOption T)} name]
+    (when (nil? name) (throw (NullPointerException.)))
+    (when-not (.contains (.supportedOptions this) name)
+      (throw (UnsupportedOperationException. (java-str "'" name "' not supported"))))
+    (try
+      (.begin this)
+      (if (and (identical? name StandardSocketOptions/SO_REUSEADDR) (Net/useExclusiveBind))
+          ^Object (Boolean/valueOf isReuseAddress)
+          (Net/getSocketOption fd Net/UNSPEC name))
+      (finally (.end this))))
+
+  (defclass ^:private ^:static DefaultOptionsHolder
+    (field ^:static ^:final ^{:tag (Set (SocketOption ?))} defaultOptions
+      (DefaultOptionsHolder/defaultOptions))
+
+    (method ^:private ^:static defaultOptions ^{:tag (Set (SocketOption ?))} []
+      (let [^{:tag (HashSet (SocketOption ?))} set (HashSet/newHashSet 2)]
+        (.add set StandardSocketOptions/SO_RCVBUF)
+        (.add set StandardSocketOptions/SO_REUSEADDR)
+        (when (Net/isReusePortAvailable) (.add set StandardSocketOptions/SO_REUSEPORT))
+        (.addAll set (ExtendedSocketOptions/serverSocketOptions))
+        (Collections/unmodifiableSet set))))
+
+  (method ^:public ^:final supportedOptions ^{:tag (Set (SocketOption ?))} [this]
+    DefaultOptionsHolder/defaultOptions)
+
+  (method ^:public ^:final toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append sb (.getName (.getClass this)))
+      (.append sb \[)
+      (cond
+        (not (.isOpen this)) (.append sb "closed")
+        (nil? localAddress) (.append sb "unbound")
+        :else (.append sb (.toString localAddress)))
+      (.append sb \])
+      (.toString sb))))

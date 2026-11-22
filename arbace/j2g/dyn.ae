@@ -59,14 +59,18 @@
   hand-written in jrt with a cast function (Future: core's future-call reifies it; jrt's instance
   checks of them make the nominal check, jrt.dynNominal), with every interface they extend that the world has.
   Since JCS170 also a program's own non-public interfaces (nm/own-class?, in package lang with Dyn), which a
-  java.lang.reflect.Proxy may implement."
+  java.lang.reflect.Proxy may implement; since queue 486 a program's own annotation types too (AnnotationParser's
+  proxies of a type annotation)."
   [T]
   (let [base (filter #(and (m/interface? %) (or (public? %) (nm/own-class? %))
                            ;; not a compiled namespace's (S6, SA142): its package imports lang
                            (not (nm/compiled-pkg? (m/pkg %)))
                            ;; nor the interfaces of compiled fns' code (S6, SA141)
                            (not (str/starts-with? % "arbace/lang/Compiler$AOT"))
-                           (zero? (bit-and (:flags (m/info %)) Opcodes/ACC_ANNOTATION))
+                           ;; not an annotation type, but a program's own (queue 486): jdk26u's AnnotationParser makes
+                           ;; a type annotation's object as a Proxy of its type (annotationForMap), which must be an
+                           ;; instance of it (a cast's Go assertion, its element methods)
+                           (or (zero? (bit-and (:flags (m/info %)) Opcodes/ACC_ANNOTATION)) (nm/own-class? %))
                            (not (m/reflected? %)))
                      (concat T (filter #(and (m/hand-written? %)
                                             ;; those jrt casts to (a slot fn's result is cast)
@@ -112,7 +116,10 @@
   [ifaces k]
   (let [cands (for [j (declarers ifaces k)
                     :let [impl (m/impl-of j k)]
-                    :when (and impl (= :default (:kind impl)) (m/translated? (:owner impl)))]
+                    :when (and impl (= :default (:kind impl))
+                               ;; a translated interface's default, or a jrt interface's (AnnotatedElement's
+                               ;; getDeclaredAnnotationsByType: impl-of finds its Go function, queue 477)
+                               (or (m/translated? (:owner impl)) (m/hand-written? (:owner impl))))]
                 [j (m/class-sym :lang (:owner impl) (str "_" (nm/method-base (first k) (second k))))])]
     (sort-by (fn [[j]] (- (count (m/all-supertypes j)))) cands)))
 
@@ -322,7 +329,7 @@
                       (jrt/struct-methods (:jrt m/*w*) (m/go-name c))
                       (for [mm (:methods (a/decl c))
                             :when (and (not (m/static? mm)) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm)))]
-                        (nm/method-base (:name mm) (:desc mm))))]
+                        (nm/method-base (m/go-mname c (:name mm) (:desc mm)) (:desc mm))))]
             nme)
           (for [j (m/all-supertypes n) :when (and (not= j n) (m/interface? j))]
             (str "Is_" (m/go-name j))))))
@@ -434,6 +441,35 @@ boxed, through its invoke of that arity.\n"
              (let [(values r ok) (assert (* Compiler_AOTRestFn) o)]
                (when ok (return (.-F_body r))))
              nil))))
+
+(defn- serial-natives
+  "Compiler$Dyn.aotValues and newAOTBody: a compiled fn's code object's closed-over values, and a
+  new code object of a fn class holding given values (a compiled fn serialized and read back,
+  Compiler$FnSer; jrt.AOTValues, jrt.NewAOTBody); hideMethod: the method of a name and
+  parameters setMethod gave a class made at run time made private (a proxy's writeObject and readObject, which
+  ObjectStreamClass takes only when private). The k-th of the three."
+  [k]
+  (case k
+    0 (list 'go/func (symbol (native-name "aotValues" "(Ljava/lang/Object;)[Ljava/lang/Object;"))
+            (with-meta [(tag 'body 'any)] {:tag '(* jrt/RefArray)})
+            '(jrt/AOTValues body))
+    1 (list 'go/func (symbol (native-name "newAOTBody" "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;"))
+            (with-meta [(tag 'c '(* jrt/Class)) (tag 'vs '(* jrt/RefArray))] {:tag 'any})
+            '(jrt/NewAOTBody c vs))
+    2 (list 'go/func (symbol (native-name "hideMethod" "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Class;)V"))
+            [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'params '(* jrt/RefArray))]
+            '(let [info (.Info c)
+                   n (.String (jrt/NN name))
+                   ps (dynClassList params)]
+               (range [i m (.-Methods info)]
+                 (when (and (== (.-Name m) n) (== (bit-and (.-Modifiers m) jrt/AccStatic) 0)
+                            (== (len (.-Params m)) (len ps)))
+                   (let [same true]
+                     (range [j p ps]
+                       (when (!= (aget (.-Params m) j) p)
+                         (set! same false)))
+                     (when same
+                       (set! (.-Modifiers (aget (.-Methods info) i)) jrt/AccPrivate)))))))))
 
 (defn- dyn-convert-form
   "The function dynConvert of j2g_dyn.go (a fn of its own: forms' constants are near the JVM's
@@ -703,6 +739,9 @@ interfaces made at run time).\n"
                                         :Go "arbace/lang.Compiler_EvalFn (fn)"))))
    (fn-field-native)
    (aot-fn-fields-native)
+   (serial-natives 0)
+   (serial-natives 1)
+   (serial-natives 2)
    (method-impl-native)
    '(go/func dynTypeName "dynTypeName: Class.getTypeName (int, java.lang.Object, byte[])." ^string [^{:tag (* jrt/Class)} c]
       (when (.IsArray__Z c)

@@ -69,6 +69,16 @@
     (str "(loc " (nth n 1) " " (pr-str (nth n 2)) (apply str (map #(str " " %) (drop 3 n))) ")")))
 
 (def fun-tc (ext-name "tc" "GHC.Internal.Types" "FUN"))
+;; hs-own-stg-3 (a): GHC.Internal.Prim's FUN m a b, the arrow at its multiplicity, as TrFun's TypeRep (FUN m a b) and
+;; mkTrFun's type write it; fun-tc's a -> b is FUN 'Many a b ((->) = FUN 'Many, GHC.Internal.Types' type synonym)
+(def prim-fun-tc (ext-name "tc" "GHC.Internal.Prim" "FUN"))
+(def many-ty [:tc (ext-name "data" "GHC.Internal.Types" "Many") []])
+(defn- fun-vs-prim?
+  "An arrow (fun-tc) against GHC.Internal.Prim's FUN"
+  [a b]
+  (and (vector? a) (vector? b) (= :tc (first a)) (= :tc (first b))
+       (or (and (= fun-tc (second a)) (= prim-fun-tc (second b))) (and (= prim-fun-tc (second a)) (= fun-tc (second b))))))
+(defn- as-prim-fun [t] (if (= fun-tc (second t)) [:tc prim-fun-tc (into [many-ty] (nth t 2))] t))
 (def list-tc (ext-name "tc" "GHC.Internal.Types" "List"))
 (defn tuple-tc [n] (if (zero? n) (ext-name "tc" "GHC.Internal.Tuple" "Unit") (ext-name "tc" "GHC.Internal.Tuple" (str "Tuple" n))))
 (defn unboxed-con [n]
@@ -112,6 +122,8 @@
 (def ^:dynamic *level* 0)
 (def ^:dynamic *counter* nil) ; atom
 (def ^:dynamic *errors* nil)  ; atom []
+(def ^:dynamic *inline-prags* {}) ; {NAME true}: the module's top-level INLINE pragmas active at -O0 (AlwaysActive, ActiveAfter n)
+(def ^:dynamic *inline-arities* nil) ; atom {NAME arity}: their bindings' dictionaries and the LHS's patterns (makeCorePair's real_arity)
 (def ^:dynamic *strict-binds* nil) ; {:atom (atom [[pn pattern]...]) :level n}: a let's banged pattern bindings, which its body forces (HsLet)
 (def ^:dynamic *control* false) ; the negative control: defaulting's order reversed, superclass-implied constraints kept
 
@@ -132,6 +144,11 @@
 (def ^:dynamic *espan* nil)       ; the innermost located expression's span
 (def ^:dynamic *ea* nil)          ; {:act :exp :fun}: the check whose unification is running (tcWrapResult, tcApp's result)
 (def ^:dynamic *ectx-nc* false)   ; the next expression adds no context of its own (tcPolyExprNC: an argument, a parenthesis's body)
+;; hs-r5: deferred typed holes (-fdefer-typed-holes, implied by -fdefer-type-errors): an unbound variable _x is a hole
+;; (GHC.Rename.Expr's HsUnboundVar), its evidence typeError of GHC.Tc.Errors' hole message with its valid hole fits
+(def ^:dynamic *defer-holes* false) ; the module defers typed holes
+(def ^:dynamic *holes* nil)         ; atom [{:id :occ :t :span :ctxt :e}...]: the module's holes, in order
+(def ^:dynamic *gres* nil)          ; the imports' {:module :span :qualified :implicit :names} (the renamer's :gres)
 
 (defn prune [t]
   (if (= :mv (first t))
@@ -298,6 +315,7 @@
       (unify b a)
       ;; a stuck family application: the equality deferred (GHC's wanted F ts ~ t, solved once the arguments are known)
       (or (stuck-family? a) (stuck-family? b)) (do (when *deferred-eqs* (swap! *deferred-eqs* conj [a b])) true)
+      (fun-vs-prim? a b) (unify (as-prim-fun a) (as-prim-fun b))
       (and (= :tc (first a)) (= :tc (first b)) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
       (every? true? (doall (map unify (nth a 2) (nth b 2))))
       (and (= :app (first a)) (= :tc (first b)) (seq (nth b 2)))
@@ -317,12 +335,32 @@
                     (when (= "stack" trace?) (.printStackTrace (Exception. "tc-trace")))))
                 false))))
 
+(declare note-kind-links! instantiate tidy-tv-name)
+
+(defn- inst-meta
+  "A fresh meta instantiating the quantified variable v: named after it when type errors are deferred (GHC's unification
+  variables keep the quantified variable's name, a message prints them tidied: a0, a1; T7861, hs-r7)"
+  [v]
+  (let [m (fresh-meta)]
+    (when *defer-log* (swap! *metas* assoc-in [(second m) :name] (tidy-tv-name v)))
+    m))
+
+(defn- instantiate-linked
+  "instantiate, the outer quantifier's annotated variables' kinds linked to their instances' (hs-own-stg-3 (a))"
+  [t]
+  (if (and (= :forall (first t)) (seq (nth t 1)))
+    (let [m (into {} (map (fn [v] [v (inst-meta v)]) (nth t 1)))
+          _ (note-kind-links! m)
+          [t2 ps] (instantiate (subst m (nth t 3)))]
+      [t2 (into (mapv (fn [[c ts]] [c (mapv #(subst m %) ts)]) (nth t 2)) ps)])
+    (instantiate t)))
+
 (defn instantiate
   "A type's foralls instantiated with fresh metas (deeply: a forall under the constraints too): [type [pred...]]"
   [t]
   (loop [t t preds []]
     (if (= :forall (first t))
-      (let [m (into {} (map (fn [v] [v (fresh-meta)]) (nth t 1)))]
+      (let [m (into {} (map (fn [v] [v (inst-meta v)]) (nth t 1)))]
         (recur (subst m (nth t 3)) (into preds (map (fn [[c ts]] [c (mapv #(subst m %) ts)]) (nth t 2)))))
       [t preds])))
 
@@ -522,7 +560,12 @@
       class (let [n (strs (nth t 1)) info (nth t 5 {})
                   ;; the class's kind variables erased as its predicates' kind arguments are (HF9)
                   tvs (vec (drop (or (some-> *kind-arity* deref (get n)) 0) (:tvs info)))
-                  supers (vec (keep (fn [f] (let [p (conv-type f)] (when (= :tc (first p)) [(second p) (nth p 2)]))) (nth t 4)))]
+                  ;; (a quantified superclass too, [:qc [polytype]]: a field of the dictionary, its selector $pN; base's
+                  ;; Eq1's forall a. Eq a => Eq (f a), Bifunctor's forall a. Functor (p a))
+                  supers (vec (keep (fn [f] (let [p (conv-type f)]
+                                              (cond (= :tc (first p)) [(second p) (nth p 2)]
+                                                    (and (= :forall (first p)) (= :tc (first (nth p 3)))) [:qc [p]])))
+                                    (nth t 4)))]
               (doseq [[mn _ mty] (nth t 3)] (swap! *genv* assoc (strs mn) (conv-type mty)))
               (swap! *classes* assoc n {:tvs tvs :supers supers :methods (mapv (comp strs first) (nth t 3))
                                         ;; every superclass, a quantified one too (MonadTrans's): the dictionary's fields
@@ -667,6 +710,24 @@
       "CmpNat" (when nums (ord (compare (nums 0) (nums 1))))
       "CmpSymbol" (when strs* (ord (compare (strs* 0) (strs* 1))))
       "AppendSymbol" (when strs* [:lit (str (strs* 0) (strs* 1))])
+      ;; hs-r7 (T24245): the rest of GHC.Builtin.Types.Literals' families (typeNatLogTyCon, typeCharCmpTyCon,
+      ;; typeConsSymbolTyCon, typeUnconsSymbolTyCon, typeCharToNatTyCon, typeNatToCharTyCon), their sfMatchFam: Log2 of a
+      ;; positive literal, a character's code point and back (a code point of Unicode's range), a Symbol's first character
+      "Log2" (when (and nums (pos? (nums 0))) [:lit (dec (.bitLength (biginteger (nums 0))))])
+      "CmpChar" (let [cs (mapv (fn [t] (let [t (prune t)] (when (= :lit-char (first t)) (second t)))) args)]
+                  (when (every? some? cs) (ord (compare (long (cs 0)) (long (cs 1))))))
+      "ConsSymbol" (let [c (let [t (prune (first args))] (when (= :lit-char (first t)) (second t)))
+                         x (second lits)]
+                     (when (and c (string? x)) [:lit (str (String. (Character/toChars (int c))) x)]))
+      "UnconsSymbol" (when strs*
+                       (let [x (strs* 0)]
+                         (if (empty? x)
+                           [:tc ["ext" "data" "GHC.Internal.Maybe" "Nothing"] []]
+                           (let [cp (.codePointAt ^String x 0)]
+                             [:tc ["ext" "data" "GHC.Internal.Maybe" "Just"]
+                              [[:tc ["ext" "data" "GHC.Internal.Tuple" "(,)"] [[:lit-char cp] [:lit (subs x (Character/charCount cp))]]]]]))))
+      "CharToNat" (let [c (let [t (prune (first args))] (when (= :lit-char (first t)) (second t)))] (when c [:lit (long c)]))
+      "NatToChar" (when (and nums (<= 0 (nums 0) 0x10FFFF)) [:lit-char (long (nums 0))])
       nil)))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -772,7 +833,8 @@
     (eq-pred? pred)
     (do (unify (last (butlast (second pred))) (last (second pred))) (list 'co))
     ;; (round 54: its pair kept for the improvement once the arguments' types are known, improve-coercibles!)
-    (coercible-pred? pred) (let [ts (second pred)] (when (and *coercibles* (>= (count ts) 2)) (swap! *coercibles* conj [(last (butlast ts)) (last ts)])) (list 'co))
+    ;; (its evidence the class Coercible's MkCoercible, not (~)'s Eq#: (co :coercible), tostg's)
+    (coercible-pred? pred) (let [ts (second pred)] (when (and *coercibles* (>= (count ts) 2)) (swap! *coercibles* conj [(last (butlast ts)) (last ts)])) (list 'co :coercible))
     ;; an implicit parameter a let ?x = e binds (the innermost): its type unified, its dictionary the evidence
     (and (= cls-ip (first pred)) (seq *ip-givens*) (= :lit (first (prune (first (second pred)))))
          (some #(= (second (prune (first (second pred)))) (first %)) *ip-givens*))
@@ -864,7 +926,8 @@
 
 ;; HF10-P48 (a): the constraint tuples' superclass selectors count from 0 ($p0CTuple2, $p1CTuple2: GHC.Builtin.Types'
 ;; wired-in CTupleN and CSolo, mkConstraintTupleTyCon), every other class's from 1 ($p1Eq)
-(defn- sc-base [cls] (if (and (vector? cls) (= "GHC.Internal.Classes" (nth cls 2 nil)) (re-matches #"CTuple[0-9]+|CSolo" (str (nth cls 3 nil)))) 0 1))
+;; (hs-r7, T24245: CUnit too, the constraint tuple of arity 0, whose dictionary GHC binds as CUnit: Assert 'True _ = ()'s evidence)
+(defn- sc-base [cls] (if (and (vector? cls) (= "GHC.Internal.Classes" (nth cls 2 nil)) (re-matches #"CTuple[0-9]+|CSolo|CUnit" (str (nth cls 3 nil)))) 0 1))
 
 ;; HF10-P48 (a): a constraint tuple's dictionary constructor is named as its class (GHC.Builtin.Types' CTupleN, CSolo),
 ;; every other class's C:Cls
@@ -900,7 +963,7 @@
                           hc (when (= :tc (first h)) (second h))
                           hi (when hc (get @*classes* hc))]
                       (keep-indexed (fn [i [sc sts]]
-                                     (when-not (= :cvar sc)
+                                     (when-not (#{:cvar :qc} sc)
                                      (let [sh [:tc sc (mapv #(subst (zipmap (:tvs hi) (nth h 2)) %) sts)]
                                            sel (fn [d] (list 'app (list 'v (ext-name "var" (nmod hc) (str "$p" (+ i (sc-base hc)) (occ hc)))) [d]))
                                            ps (mapv dict-param ctx)]
@@ -920,7 +983,7 @@
                                     (let [x (list 'lv (str "$d" (occ sc)) (str "ev" (swap! *counter* inc)))]
                                       (swap! *ev-binds* conj [x sel])
                                       (swap! ev-binders conj x)
-                                      (when *ltypes* (swap! *ltypes* assoc x (if (= :cvar sc) (first (second p)) [:tc sc (second p)])))
+                                      (when *ltypes* (swap! *ltypes* assoc x (if (#{:cvar :qc} sc) (first (second p)) [:tc sc (second p)])))
                                       [p x])
                                     [p sel])))
                               (:supers info)))]
@@ -971,7 +1034,7 @@
               (let [r (fresh-meta)] (soft-unify k (fn-ty ak r)) r)))
           k aks))
 
-(declare kind-of)
+(declare kind-of note-kind-sig!)
 
 (defn- tycon-kind
   "A type constructor's kind instantiated: [kind-args kind], kind-args the fresh metas of its invisible binders in order,
@@ -1023,6 +1086,8 @@
             (cond
               ;; a function's argument and result: of kinds TYPE r (Type once the representation is defaulted)
               (and (= fun-tc n) (= 2 (count as))) (do (doseq [a as] (soft-unify (kind-of a) [:tc type-tc [(fresh-meta)]])) star-kind)
+              ;; GHC.Internal.Prim's FUN m a b (its multiplicity a visible dependent argument): Type, as the arrow's
+              (and (= prim-fun-tc n) (= 3 (count as))) (do (doseq [a (rest as)] (soft-unify (kind-of a) [:tc type-tc [(fresh-meta)]])) star-kind)
               ;; an unboxed tuple's or sum's components: each of a kind TYPE r (its representation, defaulted to
               ;; LiftedRep by the inference when nothing fixes it), the whole of TYPE of their TupleRep (left open)
               (and (vector? n) (= "GHC.Internal.Types" (nmod n)) (re-matches #"(Tuple|Sum)[0-9]+#" (str (occ n))))
@@ -1096,8 +1161,75 @@
   (let [con (fn [o] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
                           [(list 'v (ext-name "var" "GHC.Internal.Types" (str "$tc'" o))) (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))]))]
     (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep"))
-          [(list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [(con "BoxedRep") (con "Lifted")])])))
+          [(list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [(con "BoxedRep") (con "Lifted")])])))
 (defn- typeable-fun [m a b] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrFun")) [m a b]))
+
+;;; T14236 (hs-r7): the arrow's kind arguments where Typeable's evidence names them. (->) applied to fewer than two arguments
+;;; is FUN 'Many @q @r (GHC.Tc.Instance.Class's doTyApp splits off the arguments, doTyConApp gives mkTrCon $tcFUN [m, q, r]):
+;;; q the representation of the first argument's kind (TYPE q), r the result's (the type's kind signature, (->) x :: TYPE r
+;;; -> Type, a type application's in mkTrAppChecked), each one's evidence solved like any Typeable (a closed one's mkTrCon, a
+;;; variable's a given: withTypeable rx); LiftedRep where a kind is not known (GHC's defaulting of a kind variable). HF9-P4
+;;; erased the kinds; this alone keeps them, as the kind links (typeRepKind x's TypeRep k at a := x) and the kind signatures say
+
+(defn- some-type-rep [e] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep")) [e]))
+
+(defn- kind-rep
+  "The representation r of a kind TYPE r (Type's LiftedRep, through the synonym), or nil"
+  [k]
+  (when k
+    (let [k (deep-expand (zonk k))]
+      (when (and (= :tc (first k)) (vector? (second k)) (= "TYPE" (str (occ (second k)))) (= 1 (count (nth k 2))))
+        (first (nth k 2))))))
+
+(defn- lifted-rep?
+  "LiftedRep, or 'BoxedRep 'Lifted"
+  [r]
+  (let [r (deep-expand (zonk r))]
+    (and (= :tc (first r)) (vector? (second r))
+         (or (= "LiftedRep" (str (occ (second r))))
+             (and (= "BoxedRep" (str (occ (second r)))) (= 1 (count (nth r 2)))
+                  (let [l (deep-expand (zonk (first (nth r 2))))] (and (= :tc (first l)) (vector? (second l)) (= "Lifted" (str (occ (second l)))))))))))
+
+(declare known-kind typeable-term ^:dynamic *kind-links* ^:dynamic *kind-sigs*)
+
+(declare rewrite-by-givens)
+
+(defn- linked-kind
+  "A type's kind of the form TYPE r: its annotated kind (known-kind: TrApp's (b :: k1)) rewritten by the given equalities in
+  force (an IsTYPE match's k1 ~ TYPE rx), else a kind link's (typeRepKind's, mkTrFun's (a :: TYPE r1) at a := x); nil when
+  none is known"
+  [x]
+  (let [x (zonk x)
+        ok (fn [k] (when k (let [k (rewrite-by-givens (zonk k))] (when (kind-rep k) k))))]
+    (or (ok (known-kind x))
+        (some (fn [[k t]] (when (= (zonk t) x) (ok k))) (some-> *kind-links* deref)))))
+
+(defn- sig-kind
+  "The kind signature written on type t (the latest of the same type), or nil"
+  [t]
+  (let [t (zonk t)] (some (fn [[t' k]] (when (= (zonk t') t) k)) (some-> *kind-sigs* deref rseq))))
+
+(defn- arrow-tycon-ev
+  "mkTrCon $tcFUN at the kind arguments of the arrow t applied to fewer than two arguments ('Many, q, r), each kind
+  argument's evidence a closed one's or (solve, when given) the solver's; nil when one is not had"
+  [t solve]
+  (let [as (nth t 2)
+        k (sig-kind t)
+        ;; the kind of t's first missing argument, then its result's (TYPE q -> TYPE r -> Type less the given arguments)
+        k-args (loop [k k out []] (if-let [[p r] (and k (arrow-kind k))] (recur r (conj out p)) out))
+        q (if (seq as) (kind-rep (linked-kind (first as))) (kind-rep (first k-args)))
+        r (kind-rep (if (seq as) (first k-args) (second k-args)))
+        kev (fn [x] (if (or (nil? x) (lifted-rep? x))
+                      lifted-rep-typeable
+                      (when-let [e (or (typeable-term x) (when solve (solve x)))] (some-type-rep e))))
+        qe (kev q) re (kev r)]
+    (when trace? (binding [*out* *err*] (println "tc-trace: arrow-tycon-ev" (pr-str (zonk t)) "kind" (pr-str (some-> k zonk)) "q" (pr-str (some-> q zonk)) "r" (pr-str (some-> r zonk)))))
+    (when (and qe re)
+      (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
+            [(list 'v (typeable-tycon-ref fun-tc))
+             (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
+                     (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+                     [re qe (some-type-rep many-typeable)])]))))
 
 (declare promote-kind-names)
 
@@ -1109,13 +1241,15 @@
   [cls t]
   (case (first t)
     :lit (let [x (second t)]
-           (cond (and (string? x) (not= "KnownChar" cls))
+           (cond (and (string? x) (not= "KnownChar" cls) (empty? x)) (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+                 (and (string? x) (not= "KnownChar" cls))
                  (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
                        [(list 'lit (str (pr-str x) "#"))])
                  (and (integer? x) (<= 0 x) (< x 18446744073709551616N))
                  (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Natural" "NS")) [(list 'lit (str x "##"))])
                  :else (list 'lit (pr-str x))))
-    :lit-char (list 'lit (str "'" (char (second t)) "'"))
+    ;; (hs-r7, T24245: a Char, C# of the literal, as mkCharExpr makes EvChar's: the bare literal was no Core tostg reads)
+    :lit-char (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "C#")) [(list 'lit (str "'" (char (second t)) "'#"))])
     nil))
 
 (defn- typeable-lit
@@ -1150,14 +1284,16 @@
           (when (and a b) (typeable-fun many-typeable a b)))
       (let [[_ n args] t
             [kargs pks] (tycon-kind-info n args ek)
-            con (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
+            ;; T14236 (hs-r7): the arrow applied to fewer than two arguments, its kind arguments its argument's and kind
+            ;; signature's (arrow-tycon-ev); nil when one is not closed (the solver's then)
+            fun-con (when (= fun-tc n) (arrow-tycon-ev [:tc fun-tc (vec args)] nil))
+            con (when (or (not= fun-tc n) fun-con)
+                 (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
                       [(list 'v (typeable-tycon-ref n))
                        (if (= fun-tc n)
                          ;; HF10-P39 (a): the arrow unapplied ((->) = FUN 'Many, funTyCon's typeRep @(->)): $tcFUN's three
                          ;; kind arguments (splitForAllForAllTyBinders: m, q, r), 'Many and the defaulted LiftedRep twice
-                         (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
-                                 (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
-                                 [lifted-rep-typeable lifted-rep-typeable (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep")) [many-typeable])])
+                         (second (nth fun-con 2))
                          ;; HF10-P41 (a): its kind arguments (doTyConApp's kind_args), each a SomeTypeRep of its own
                          ;; evidence
                          (let [ks (mapv (fn [k] (when-let [e (typeable-term k)]
@@ -1165,10 +1301,10 @@
                                         kargs)]
                            (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
                                    (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
-                                   (reverse (if (every? some? ks) ks [])))))])
+                                   (reverse (if (every? some? ks) ks [])))))]))
             subs (mapv (fn [a i] (typeable-term a (get pks i))) args (range))]
-        (when (every? some? subs)
-          (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])) con subs))))))))
+        (when (and con (every? some? subs))
+          (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])) con subs))))))))
 
 (declare cls-callstack fresh-lv solve-pred ctx-preds rewrite-by-givens dict-param)
 
@@ -1281,9 +1417,16 @@
                    ;; (a coercion's or an equality's head: erased, as a wanted Coercible's evidence; GHC.Internal.TypeNats'
                    ;; unsafeWithSNatCo's forall n. Coercible (SNat n) Natural)
                    (if (or (coercible-pred? [(second hd) (nth hd 2)]) (eq-pred? [(second hd) (nth hd 2)]))
-                     (list 'co)
+                     (if (coercible-pred? [(second hd) (nth hd 2)]) (list 'co :coercible) (list 'co))
                    (solve-pred [(second hd) (nth hd 2)] (into (vec givens) (super-closure (mapv vector preds params))) (inc depth))))]
-        (when term (if (seq params) (list 'lam params term) term)))
+        ;; (eta-reduced when its head is a dictionary function applied to the parameters alone: Eq1 Complex's superclass
+        ;; \d -> $fEqComplex d is $fEqComplex, as the -O0 Simplifier's eta reduction leaves GHC's evidence)
+        (when term
+          (cond (empty? params) term
+                (and (seq? term) (= 'app (first term)) (= params (vec (nth term 2)))
+                     (not-any? (set params) (tree-seq coll? seq (second term))))
+                (second term)
+                :else (list 'lam params term))))
       :else
     (if (= :cvar c)
       ;; a variable constraint known by now (cls := KnownNat n): its class's
@@ -1321,7 +1464,9 @@
         ;; innermost first); the evidence theirs (GHC's cast by the family's coercion, erased), a tuple's the constraint
         ;; tuple's constructor applied
         (when (and (vector? c) (some-> *families* deref (get c)) (not (some-> *classes* deref (get c))) (< depth 30))
-          (let [t [:tc c ts] r (expand t)]
+          ;; (a stuck application rewritten by the given equalities too: splitApp's NotApplication a, given
+          ;; NotApplication a ~ () by its match on unsafeCoerce Refl :: NotApplication a :~: (), is solved by CUnit)
+          (let [t [:tc c ts] r (expand t) r (if (and (= r t) *given-eqs*) (expand (rewrite-by-givens t)) r)]
             (when (not= r t)
               (let [ipg (vec (for [[n it d] (reverse *ip-givens*)] [[cls-ip [[:lit n] it]] d]))
                     subs (mapv #(solve-pred % (into ipg givens) (inc depth)) (ctx-preds r))]
@@ -1377,20 +1522,28 @@
         (when (and (= c cls-typeable) (seq ts))
           (or (typeable-term (last ts))
               ;; GHC.Tc.Instance.Class's doTyApp / doTyConApp on a type with variables: an application's evidence
-              ;; mkTrApp of its parts', a variable's from the givens
+              ;; mkTrAppChecked of its parts' (ds_ev_typeable's EvTypeableTyApp, as every Typeable application's evidence in
+              ;; this file; mkTrApp before), a variable's from the givens
               (let [t (deep-expand (zonk (last ts)))
                     part (fn [x] (solve-pred [c [x]] givens (inc depth)))]
                 (when (< depth 30)
                   (case (first t)
                     :app (let [f (part (nth t 1)) x (part (nth t 2))]
-                           (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])))
+                           (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])))
                     :tc (when (seq (nth t 2))
-                          (if (and (= fun-tc (second t)) (= 2 (count (nth t 2))))
+                          (cond
+                            (and (= fun-tc (second t)) (= 2 (count (nth t 2))))
                             ;; HF10-P39 (a): doFunTy with variables
                             (let [a (part (first (nth t 2))) b (part (second (nth t 2)))]
                               (when (and a b) (typeable-fun many-typeable a b)))
-                          (let [f (part [:tc (second t) (vec (butlast (nth t 2)))]) x (part (last (nth t 2)))]
-                            (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])))))
+                            ;; T14236 (hs-r7): (->) x, doTyApp's (FUN 'Many @q @r) x, the arrow's kind arguments solved too
+                            ;; (mkTrAppChecked's typeRep @((->) x :: TYPE ry -> Type): [Many, rx, ry] from the givens)
+                            (= fun-tc (second t))
+                            (let [f (arrow-tycon-ev t part) x (part (first (nth t 2)))]
+                              (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])))
+                            :else
+                            (let [f (part [:tc (second t) (vec (butlast (nth t 2)))]) x (part (last (nth t 2)))]
+                              (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrAppChecked")) [f x])))))
                     nil)))))
 ;; GHC.Tc.Instance.Class's matchDataToTag (HF9's second slice): DataToTag T for an algebraic data type T
         ;; (not a newtype), its dictionary the primop dataToTagSmall# (a family of fewer constructors than the pointer tag
@@ -1431,7 +1584,23 @@
                                 ;; an instance's variables its head does not bind (its context's, a functional
                                 ;; dependency determines them: T5759's b of Container a b) fresh metas, its context
                                 ;; solved together, each improved by the others' solutions (solve-ctx)
-                                (let [m (into (into {} (map (fn [v] [v (fresh-meta)]) tvs)) m)
+                                (let [bound (set (keys m))
+                                      m (into (into {} (map (fn [v] [v (fresh-meta)]) tvs)) m)
+                                      ;; an instance's kind variable (base's instance (Typeable k, Typeable a) => Data (Fixed (a ::
+                                      ;; k))): our types carry no kind arguments, so the head does not bind it; it is the kind of
+                                      ;; the head's one variable's instance (Fixed E12: k := Type), as GHC's kind argument is
+                                      _ (let [free (remove bound tvs) hv (filter bound tvs)
+                                              typeable? (fn [[pc _]] (and (vector? pc) (= "Typeable" (str (occ pc)))))]
+                                          (when (and (= 1 (count free)) (= 1 (count hv))
+                                                     (every? (fn [[pc pts :as p]] (or (typeable? p) (not (some #{[:tv (first free)]} (tree-seq coll? seq pts))))) ctx))
+                                            ;; (the kind computed without a trace: the fresh ids it takes given back, so that
+                                            ;; a module the rule does not change keeps its uniques; a kind still holding a
+                                            ;; meta leaves the variable as it was)
+                                            (let [c0 @*counter*
+                                                  k (zonk (kind-of (get m (first hv))))
+                                                  known? (not (some #(and (vector? %) (= :mv (first %))) (tree-seq coll? seq k)))]
+                                              (reset! *counter* c0)
+                                              (when known? (soft-unify (get m (first free)) k)))))
                                       subs (solve-ctx (mapv (fn [[pc pts]] [pc (mapv #(subst m %) pts)]) ctx) givens (inc depth))]
                                   (when subs
                                     (if (empty? ctx) (list 'v dfun) (list 'app (list 'v dfun) (vec subs))))))))
@@ -1518,7 +1687,14 @@
       HsIParamTy [:tc cls-ip [[:lit (second (lval (arg v 2)))] (hs-type tvs (arg v 3))]]
       ;; a partial signature's wildcard (PartialTypeSignatures): inferred
       HsWildCardTy (fresh-meta)
-      HsKindSig (hs-type tvs (arg v 2))
+      ;; (hs-r5: () at kind Constraint is the constraint unit, GHC.Builtin.Types' CUnit, a type constructor of its own: T9858c's
+      ;; typeRep of (() :: Constraint) is not () :: Type's)
+      HsKindSig (let [t (hs-type tvs (arg v 2)) k (lval (arg v 3))]
+                  (if (and (= [:tc (ext-name "tc" "GHC.Internal.Tuple" "Unit") []] t) (= 'HsTyVar (con k))
+                           (= (ext-name "tc" "GHC.Internal.Types" "Constraint") (nm (arg k 3))))
+                    [:tc (ext-name "tc" "GHC.Internal.Classes" "CUnit") []]
+                    (do (note-kind-sig! t (binding [*errors* nil] (try (hs-type tvs (arg v 3)) (catch Throwable _ nil))))
+                        t)))
       HsAppKindTy (hs-type tvs (arg v 2))
       ;; type-level literals, as the interfaces write them (tools/hsdump: (lit N), (lit "s"), (lit-char C))
       ;; DataKinds' promoted list '[t1, t2]: (':) t1 ((':) t2 '[]), the kind arguments erased as an interface's are
@@ -1531,7 +1707,9 @@
       ;; HF10-P42 (a): StarIsType's * (and its Unicode ★) is Data.Kind's Type (GHC.Tc.Gen.HsType's HsStarTy: liftedTypeKind)
       HsStarTy [:tc (ext-name "tc" "GHC.Internal.Types" "Type") []]
       HsTyLit (let [l (arg v 2)]
-                (case (con l) HsNumTy [:lit (nth l 2)] HsStrTy [:lit (nth l 2)] HsCharTy [:lit-char (int (nth l 2))]
+                (case (con l) HsNumTy [:lit (nth l 2)] HsStrTy [:lit (nth l 2)]
+                      ;; (hs-r7, T24245: the native dump writes a character as (char N), the helper's a character)
+                      HsCharTy [:lit-char (let [c (nth l 2)] (if (seq? c) (long (second c)) (int c)))]
                       (do (error! "type literal not handled: " (con l)) (fresh-meta))))
       HsParTy (hs-type tvs (arg v 2))
       HsBangTy (hs-type tvs (arg v 3))
@@ -1573,6 +1751,107 @@
                  :let [k (try (hs-type {} (arg kb 2)) (catch Throwable _ nil))]
                  :when (rep-kind? k)]
              [(tv-key (nm (arg bb 2))) k])))
+
+(def ^:dynamic *tv-kind-anns* nil) ; atom {TV kind}: the kind annotations of the signatures' and GADT constructors' type
+                                  ; variables (forall (a :: k1 -> k2), (a :: k)), by their names in the types; a skolem
+                                  ; of a constructor's its own entry (tc-gadt-pat), a signature's skolem sk_X X's renamed
+
+(defn- kind-anns
+  "hs-own-stg-3 (a): the kind annotations in a type's tree, its binders' (HsTvb's HsBndrKind) and its kind signatures' on a
+  variable ((a :: k), HsKindSig): {TV-NAME kind-type}, the names tvs gives (else tv-key's)"
+  [ast tvs]
+  (let [tvs (merge (into {} (map (fn [n] [n [:tv (tv-key n)]]) (tv-names-of ast))) tvs)
+        conv (fn [k] (binding [*errors* nil] (try (hs-type tvs k) (catch Throwable _ nil))))]
+    (into {} (for [x (tree-seq coll? seq ast)
+                   :let [v (when (seq? x) (lval x))]
+                   :when (seq? v)
+                   [n k] (case (con v)
+                           HsTvb (let [bb (arg v 3) kb (arg v 4)]
+                                   (when (and (seq? bb) (= 'HsBndrVar (con bb)) (seq? kb) (= 'HsBndrKind (con kb)))
+                                     [[(nm (arg bb 2)) (arg kb 2)]]))
+                           HsKindSig (let [tv (lval (arg v 2))]
+                                       (when (and (seq? tv) (= 'HsTyVar (con tv)))
+                                         [[(nm (arg tv 3)) (arg v 3)]]))
+                           nil)
+                   :let [t (when n (get tvs n)) k (when t (conv k))]
+                   :when (and t (= :tv (first t)) k)]
+               [(second t) k]))))
+
+(defn- note-kind-anns! [m] (when (and *tv-kind-anns* (seq m)) (swap! *tv-kind-anns* merge m)))
+
+;; T14236 (hs-r7): the kind signatures of types ((->) x :: TYPE ry -> Type, a type application's), kept beside the type
+;; for Typeable's kind arguments (the erased kinds of HF9-P4 undone there alone): [[TYPE KIND]...]
+(def ^:dynamic *kind-sigs* nil)
+(defn- note-kind-sig! [t k] (when (and *kind-sigs* k) (swap! *kind-sigs* conj [t k])))
+
+(def ^:dynamic *kind-links* nil) ; atom [[KIND-TYPE TYPE]...]: an annotated variable's instance and its kind's (typeLitTypeRep's
+                                 ; (a :: k) at a := Symbol: k := Type), unified once the instance is known (default!)
+
+(defn- note-kind-links!
+  "hs-own-stg-3 (a): a polytype's instantiation m (its variables to their metas): each annotated variable's kind, at m, is its
+  instance's kind (GHC's kind arguments instantiated with the type's)"
+  [m]
+  (when (and *kind-links* *tv-kind-anns*)
+    (doseq [[x mv] m :let [k (get @*tv-kind-anns* x)] :when k]
+      (swap! *kind-links* conj [(subst m k) mv]))))
+
+(declare known-kind)
+
+(defn- settle-kind-links!
+  "The kind links whose instance's kind is known by now unified (soft: a kind the annotations cannot give is left)"
+  []
+  (when *kind-links*
+    (doseq [[k t] @*kind-links*]
+      (when-let [tk (known-kind t)] (soft-unify k tk)))))
+
+(declare tycon-kind)
+
+(defn- ctx-kinds
+  "A signature's type variables' kinds from its context's classes (KnownNat a: a :: Nat, the class's parameter's kind), for
+  a variable without an annotation: {TV kind}"
+  [st]
+  (if-not (and *tv-kind-anns* (= :forall (first st)))
+    {}
+    (into {} (for [[c ts] (nth st 2) :when (vector? c)
+                   :let [ck (binding [*errors* nil] (try (second (tycon-kind c)) (catch Throwable _ nil)))]
+                   :when ck
+                   :let [pks (loop [k (expand (prune ck)) out []]
+                               (if (and (= :tc (first k)) (= fun-tc (second k)) (= 2 (count (nth k 2))))
+                                 (recur (expand (prune (second (nth k 2)))) (conj out (first (nth k 2))))
+                                 out))
+                         ;; an imported class's parameters' kinds (metas): its methods' types say them (KnownNat's natSing
+                         ;; :: SNat n, SNat :: Nat -> Type)
+                         ci (some-> *classes* deref (get c))
+                         _ (when (and ci (= (count pks) (count (:tvs ci))))
+                             (binding [*kind-env* (atom (zipmap (:tvs ci) pks))]
+                               (doseq [mn (:methods ci) :let [mt (some-> *genv* deref (get mn))] :when (vector? mt)]
+                                 (soft-unify (kind-of (if (= :forall (first mt)) (nth mt 3) mt)) star-kind))))]
+                   [t pk] (map vector ts pks)
+                   :let [t (prune t) pk (zonk pk)]
+                   :when (and (= :tv (first t)) (not (get @*tv-kind-anns* (second t)))
+                              (not (some (fn [x] (and (vector? x) (= :mv (first x)))) (tree-seq coll? seq pk))))]
+               [(second t) pk]))))
+
+(defn- sk-rename [k]
+  (cond (and (vector? k) (= :tv (first k))) [:tv (str "sk_" (second k))]
+        (vector? k) (mapv sk-rename k)
+        :else k))
+
+(defn- tv-kind
+  "A type variable's annotated kind (a signature's skolem sk_X, X's with its variables skolems too), or nil"
+  [x]
+  (when *tv-kind-anns*
+    (or (get @*tv-kind-anns* x)
+        (when (str/starts-with? x "sk_") (some-> (get @*tv-kind-anns* (subs x 3)) sk-rename)))))
+
+(defn- known-kind
+  "A type's kind from the annotations (kind-of over the annotated variables), or nil when it is not known (an open meta)"
+  [t]
+  (when *tv-kind-anns*
+    (let [vs (keep (fn [x] (when (and (vector? x) (= :tv (first x))) (second x))) (tree-seq coll? seq (zonk t)))
+          env (into {} (keep (fn [x] (when-let [k (tv-kind x)] [x k])) vs))
+          k (binding [*kind-env* (atom env)] (zonk (kind-of t)))]
+      (when-not (= :mv (first (prune k))) k))))
 
 (defn sig-type
   "A signature (HsSig ext outer body) as a closed type: [:forall [tv...] [pred...] body]"
@@ -2080,6 +2359,7 @@
 ;; env: {NAME {:mono type} | {:poly type :core term}}
 
 (def ^:dynamic *module* nil)
+(def ^:dynamic *deriv-aux* nil) ; atom [[NAME :datatype|:constr binding]...]: derived Data's auxiliary bindings ($tT, $cC)
 (def ^:dynamic *derivs* nil)     ; atom [{:cls :tn :names :res :desc}]: the stock deriving requests of the module
 (def ^:dynamic *ddescs* nil)     ; atom {TYCON {:desc :names}}: the module's data types as deriving sees them
 (def ^:dynamic *exts* #{})
@@ -2153,11 +2433,11 @@
           (let [[t ps] (instantiate mt)]
             [t (app* (or (:core e) (lv n)) (mapv #(want-at! % n sp label) ps))])
           [(:mono e) (or (:core e) (lv n))]))
-      (let [[t preds] (instantiate (:poly e))]
+      (let [[t preds] (instantiate-linked (:poly e))]
         ;; a binding of the module itself (or a local one) with HasCallStack pushes its call site too (EvCsPushCall)
         [t (app* (:core e) (mapv #(want-at! % n sp label) preds))]))
     (if-let [t (get @*genv* (if (= "data" (nth n 1)) n n))]
-      (let [[t preds] (instantiate t)
+      (let [[t preds] (instantiate-linked t)
             ps (when (= "data" (nth n 1)) (some-> *patsyns* deref (get n)))
             ;; HF10-P36 (a): a pattern synonym as an expression is its builder $bP (applied to (# #) when it takes the
             ;; dummy argument)
@@ -2193,6 +2473,27 @@
     (let [[tf cf] (var-occ env (ext-name "var" is-list-m "fromListN")) r (fresh-meta)]
       (unify tf (fn-ty (con-ty tc-int) (fn-ty tl r)))
       [r (app* cf [(list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str n "#"))]) cl])])))
+
+(defn- neg-zero-overlit
+  "hs-r6: GHC.Rename.Expr's rnExpr of an HsOverLit through rnOverLit (Note [Negative zero], #13211): a negative zero (-0
+  or -0.0 lexed as one literal under NegativeLiterals or LexicalNegation; isNegativeZeroOverLit: its value 0 and its
+  neg flag set) is negate applied to the literal made positive (negateOverLitVal), the sign kept at run time (an
+  Integer's or Rational's value has no negative zero)
+  (FMA_ConstantFold's `fmadd @Float 1 0 -0`: GHC's negOp leaves negateFloat# 0.0# unfolded, so fmaOne's 0.0 + z is z,
+  -0.0; read as the literal 0 it folded to +0.0); the positive literal, which the caller negates, else nil"
+  [e v]
+  (let [ol (arg v 2) val (when (seq? ol) (arg ol 2)) x (when (seq? val) (arg val 1))
+        zero? (fn [n] (and (number? n) (== 0 n)))]
+    (when (and (seq? x) (true? (nth x 2 nil))
+               (case (con val)
+                 HsIntegral (let [n (nth x 3 nil)] (or (zero? n) (and (string? n) (re-matches #"-?0+" n))))
+                 HsFractional (let [r (nth x 3 nil)] (and (seq? r) (zero? (nth r 1 nil))))
+                 false))
+      (let [x2 (apply list (assoc (vec x) 2 false))
+            val2 (apply list (assoc (vec val) 1 x2))
+            ol2 (apply list (assoc (vec ol) 2 val2))
+            sp (when (L? e) (lsp e))]
+        (list 'L sp (apply list (assoc (vec v) 2 ol2)))))))
 
 (defn- overlit
   "An overloaded literal: its type a fresh meta constrained by Num (Fractional), the core resolved at the end"
@@ -2247,11 +2548,14 @@
 (defn- hslit [v]
   (let [l (arg v 2)]
     (case (con l)
-      ;; GHC.Core.Make.mkStringExprFS: ASCII without NUL unpackCString#, else the modified UTF-8 of unpackCStringUtf8#
+      ;; GHC.Core.Make.mkStringExprFS: ASCII without NUL unpackCString#, else the modified UTF-8 of unpackCStringUtf8#; the
+      ;; empty string the list's [] (nullFS: mkNilExpr; show's default method's "" among them)
       HsString [(list-ty (con-ty tc-char))
-                (list 'app (list 'v (ext-name "var" "GHC.Internal.CString"
-                                              (if (every? #(< 0 (int %) 128) (arg l 2)) "unpackCString#" "unpackCStringUtf8#")))
-                      [(list 'lit (str (pr-str (arg l 2)) "#"))])]
+                (if (empty? (arg l 2))
+                  (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+                  (list 'app (list 'v (ext-name "var" "GHC.Internal.CString"
+                                                (if (every? #(< 0 (int %) 128) (arg l 2)) "unpackCString#" "unpackCStringUtf8#")))
+                        [(list 'lit (str (pr-str (arg l 2)) "#"))]))]
       HsChar [(con-ty tc-char) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "C#")) [(list 'lit (str "'" (arg l 2) "'#"))])]
       HsInt [(con-ty tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str (arg l 2) "#"))])]
       ;; MagicHash's primitive literals: their types of GHC.Internal.Prim, the literal's text as tostg reads it
@@ -2338,6 +2642,44 @@
 
 (defn- strip-parens [e] (if (= 'HsPar (con (lval e))) (recur (arg (lval e) 2)) e))
 
+(def ^:dynamic ^:private *tidy* nil) ; atom {:names {META-ID NAME} :used #{NAME} :kinds {BINDER META}}: a message's tidy env
+
+(defn- tidy-meta-name
+  "A named meta's name in the message (GHC.Core.TyCo.Tidy's getHelpfulOccName: a unification variable's name with a trailing
+  0, tidyOccName numbering a clash on: a0, then a1 for another meta of the same name), else n0 as before"
+  [id n]
+  (if-not *tidy*
+    (str n "0")
+    (or (get-in @*tidy* [:names id])
+        (let [used (:used @*tidy*)
+              x (loop [i 0] (let [c (str n i)] (if (contains? used c) (recur (inc i)) c)))]
+          (swap! *tidy* (fn [m] (-> m (assoc-in [:names id] x) (update :used (fnil conj #{}) x))))
+          x))))
+
+(declare ppr-ty*)
+
+(defn- ppr-forall*
+  "T7861 (hs-r7): a quantified type as GHC's pprSigmaType prints it in a message, forall b. t, a binder whose kind is not
+  Type written with it ((b :: k0)): a binder its body leaves unconstrained is of a kind variable the signature's kind
+  generalisation quantified with its other variables ({k}), a meta (k0) when the type is an instance (it has metas), else k"
+  [t]
+  (let [[_ vs ps body] t
+        inst? (boolean (some (fn [x] (and (vector? x) (= :mv (first x)))) (tree-seq coll? seq (zonk t))))
+        bk (fn [v]
+             (let [env (atom {})
+                   k (binding [*kind-env* env] (kind-of body) (get @env v))]
+               (if (or (nil? k) (= :mv (first (prune k))))
+                 (if inst?
+                   (let [km (or (get-in (some-> *tidy* deref) [:kinds v])
+                                (let [m (fresh-meta)] (swap! *metas* assoc-in [(second m) :name] "k")
+                                  (when *tidy* (swap! *tidy* assoc-in [:kinds v] m)) m))]
+                     (str "(" (tidy-tv-name v) " :: " (ppr-ty* km 0) ")"))
+                   (str "(" (tidy-tv-name v) " :: k)"))
+                 (tidy-tv-name v))))
+        pp (fn [[c ts]] (if (= :cvar c) (ppr-ty* (first ts) 0) (ppr-ty* [:tc c ts] 0)))
+        ctx (case (count ps) 0 "" 1 (str (pp (first ps)) " => ") (str "(" (str/join ", " (map pp ps)) ") => "))]
+    (str (when (seq vs) (str "forall " (str/join " " (map bk vs)) ". ")) ctx (ppr-ty* body 0))))
+
 (defn- ppr-ty*
   "GHC's pprType of an elaborator's type at precedence p (0 the top, 1 an arrow's argument, 2 an application's)"
   [t p]
@@ -2345,6 +2687,8 @@
         par (fn [b x] (if b (str "(" x ")") x))
         app (fn [h as] (if (empty? as) h (par (>= p 2) (str/join " " (cons h (map #(ppr-ty* % 2) as))))))]
     (case (first t)
+      ;; T7861 (hs-r7): a polytype below the top, parenthesised as an arrow's argument
+      :forall (par (>= p 1) (ppr-forall* t))
       :tc (let [n (second t) as (nth t 2) o (occ n)]
             (cond
               (and (= n fun-tc) (= 2 (count as))) (par (>= p 1) (str (ppr-ty* (first as) 1) " -> " (ppr-ty* (second as) 0)))
@@ -2356,7 +2700,7 @@
       :app (let [[h as] (loop [x t as ()] (if (= :app (first x)) (recur (prune (nth x 1)) (cons (nth x 2) as)) [x as]))]
              (app (ppr-ty* h 2) as))
       :tv (do (inexact!) (let [x (str (second t))] (or (second (re-matches #"(.*?)_sk[0-9]+" x)) (second (re-matches #"sk_([^_]+)_.*" x)) x)))
-      :mv (if-let [n (:name (get @*metas* (second t)))] (str n "0") (do (inexact!) "t0"))
+      :mv (if-let [n (:name (get @*metas* (second t)))] (tidy-meta-name (second t) n) (do (inexact!) "t0"))
       (do (inexact!) (pr-str t)))))
 
 (defn- ppr-ty [t] (doc/text (ppr-ty* t 0)))
@@ -2388,6 +2732,8 @@
                LamAlt (if (= 'LamSingle (second ctx)) nil ::none)
                ::none))
     :main (doc/text "When checking the type of the IO action ‘main’")
+    ;; T7861 (hs-r7): a do block's statement (GHC.Tc.Gen.Match's tcStmtsAndThen, StmtErrCtxt: pprStmtInCtxt)
+    :stmt (doc/hang (doc/<> (doc/text "In a stmt of a 'do' block") doc/colon) 2 (doc-text (pprhs/ppr-stmt (unrn a))))
     ::none))
 
 (defn- envelope
@@ -2403,8 +2749,8 @@
 
 (defn- mismatch-text
   "A failed unification's deferred message (a *defer-log* entry): [text exact?]"
-  [{:keys [ty1 ty2 ea ctxt span]}]
-  (binding [*ppr-exact* (atom true)]
+  [{:keys [ty1 ty2 ea ctxt span poly]}]
+  (binding [*ppr-exact* (atom true) *tidy* (atom {})]
     (let [herald (fn [h1 t1 h2 t2 atomic?]
                    (let [pad (- (count h1) (count h2))]
                      (if atomic?
@@ -2434,7 +2780,13 @@
                    (cond (nil? d) (recur (rest cs) out n)
                          (= ::none d) (do (inexact!) (recur (rest cs) out n))
                          :else (recur (rest cs) (conj out d) (inc n))))))
-          t (envelope span "83865" [mm (doc/vcat (concat (when fr [fr]) cs))])]
+          ;; T7861 (hs-r7): GHC.Tc.Errors.Ppr's CannotUnifyVariable, the mismatch then pprCannotUnifyVariableReason's
+          ;; CannotUnifyWithPolytype (a unification variable: "Cannot instantiate unification variable"; no tyvar info)
+          mm (if poly
+               (doc/$$ mm (doc/vcat [(doc/<+> (doc/text "Cannot instantiate unification variable") (doc/quotes (ppr-ty exp)))
+                                     (doc/hang (doc/text "with a type involving polytypes:") 2 (ppr-ty act))]))
+               mm)
+          t (envelope span (if poly "91028" "83865") [mm (doc/vcat (concat (when fr [fr]) cs))])]
       [t @*ppr-exact*])))
 
 (defn- type-error-core
@@ -2465,6 +2817,156 @@
         (reset! *errors* (subvec errs 0 n0))
         (mapv (fn [b] (if (and (seq? b) (= 'bind (first b))) (list 'bind (second b) (type-error-core msg)) b)) bs))
       bs)))
+
+(defn- hole-mark [id] (str "\u0001hole " id))
+(defn- hole-core [id] (type-error-core (hole-mark id)))
+
+(defn- tidy-tv-name
+  "A type variable's name as GHC tidies it for a message: the occurrence of an interface's a_531_1_531_25, a skolem's X, a
+  wired-in interface's a#UNIQUE (GHC.Internal.Prim's seq; T7861, hs-r7)"
+  [x]
+  (let [x (str x)]
+    (or (second (re-matches #"(.+?)(?:_[0-9]+){4}" x)) (second (re-matches #"(.*?)_sk[0-9]+" x))
+        (second (re-matches #"sk_([^_]+)_.*" x)) (second (re-matches #"(.+?)#[0-9]+" x)) x)))
+
+(defn- ppr-sigma*
+  "A polytype as GHC prints a valid hole fit's type: forall a. C a => t (pprSigmaType with the foralls explicit; the
+  variables tidied, a clash numbered: a, a1)"
+  [t foralls?]
+  (let [t (prune t)]
+    (if (= :forall (first t))
+      (let [[_ vs ps body] t
+            names (reduce (fn [acc v] (let [b (tidy-tv-name v)]
+                                        (conj acc (if (some #{b} acc) (loop [i 1] (if (some #{(str b i)} acc) (recur (inc i)) (str b i))) b))))
+                          [] vs)
+            sm (zipmap vs (map (fn [n] [:tv n]) names))
+            pp (fn [[c ts]] (let [ts (mapv #(subst sm %) ts)] (if (= :cvar c) (ppr-ty* (first ts) 0) (ppr-ty* [:tc c ts] 0))))
+            ctx (case (count ps) 0 "" 1 (str (pp (first ps)) " => ") (str "(" (str/join ", " (map pp ps)) ") => "))]
+        (str (when (and foralls? (seq vs)) (str "forall " (str/join " " names) ". ")) ctx (ppr-sigma* (subst sm body) foralls?)))
+      (ppr-ty* t 0))))
+
+(defn- prefix-occ [o] (if (re-matches #"[\p{L}_].*" o) o (str "(" o ")")))
+
+(defn- ty-size
+  "GHC.Core.Type's sizeType (a type constructor application 1 and its arguments', a function's arrow 1 and its
+  multiplicity's): the hole fits' sort key (sortHoleFitsBySize over each fit's type applications)"
+  [t]
+  (let [t (prune t)]
+    (case (first t)
+      :tc (if (and (= fun-tc (second t)) (= 2 (count (nth t 2))))
+            (+ 2 (ty-size (first (nth t 2))) (ty-size (second (nth t 2))))
+            (inc (reduce + 0 (map ty-size (nth t 2)))))
+      :app (+ (ty-size (nth t 1)) (ty-size (nth t 2)))
+      1)))
+
+(defn- hole-fit
+  "GHC.Tc.Errors.Hole's tcCheckHoleFit: a candidate of type ct fits a hole of type ty when ct instantiated is ty and
+  every constraint left is solved (an implicit call stack defaulted); its instantiation's types (the fit's type
+  applications) or nil. Run in a sandbox: the metas, counters and logs as they were after it"
+  [ty ct]
+  (let [saved (mapv (fn [a] [a @a]) (filter some? [*metas* *counter* *evidence* *wanteds* *deferred-eqs* *implic-eqs* *kind-links*]))]
+    (try
+      (binding [*errors* (atom []) *defer-log* nil]
+        (let [[vs ps body] (if (= :forall (first ct)) [(nth ct 1) (nth ct 2) (nth ct 3)] [[] [] ct])
+              m (into {} (map (fn [v] [v (fresh-meta)]) vs))
+              [t2 ps2] (instantiate (subst m body))
+              preds (into (mapv (fn [[c ts]] [c (mapv #(subst m %) ts)]) ps) ps2)
+              eqs0 (count @*deferred-eqs*)]
+          (unify t2 ty)
+          (when (and (empty? @*errors*) (= eqs0 (count @*deferred-eqs*)))
+            (let [args (mapv #(zonk (get m %)) vs)]
+              (when (and (every? #(empty? (metas-of %)) args)
+                         (every? (fn [p] (let [[c ts] (zonk-pred p)]
+                                           (or (and (vector? c) (= (occ c) "IP"))
+                                               (and (vector? c) (every? #(empty? (metas-of %)) ts)
+                                                    (some? (solve-pred [c ts] [] 0))))))
+                                 preds))
+                args)))))
+      (catch Throwable _ nil)
+      (finally (doseq [[a v] saved] (reset! a v))))))
+
+(defn- loc-text [[l1 c1]] (str (or *srcfile* (str (str/replace *module* "." "/") ".hs")) ":" l1 ":" c1))
+
+(defn- hole-text
+  "GHC.Tc.Errors.Ppr's hole message (mkHoleError, pprHoleError, ValidHoleFits): Found hole with its type and the hint of
+  a named hole, the error contexts (the hole's own expression not one: addExprCtxt skips HsUnboundVar), the relevant
+  bindings (the group's binders, unfiltered for a hole) and the valid hole fits: those binders, then the imports' names
+  (the GREs; GHC.Internal.Err's left out, not_trivial), each fitting when tcCheckHoleFit says so, sorted by the size of
+  their type applications (locals first), at most 6 (maxValidHoleFits); [text exact?]"
+  [{hocc :occ :keys [t span ctxt e]} bndrs]
+  (binding [*ppr-exact* (atom true)]
+    (let [ty (zonk t)
+          b1 (doc/vcat (remove nil? [(doc/hang (doc/text "Found hole:") 2 (doc/hang (doc/text (prefix-occ hocc)) 2 (doc/<+> (doc/text "::") (ppr-ty ty))))
+                                    (when (> (count hocc) 1)
+                                      (doc/<+> (doc/text "Or perhaps") (doc/quotes (doc/text hocc)) (doc/text "is mis-spelled, or not in scope")))]))
+          cs (loop [cs (remove (fn [c] (and (= :expr (first c)) (identical? (second c) e))) ctxt) out [] n 0]
+               (if (or (empty? cs) (>= n 3))
+                 out
+                 (let [d (ctxt-doc (first cs))]
+                   (cond (nil? d) (recur (rest cs) out n)
+                         (= ::none d) (do (inexact!) (recur (rest cs) out n))
+                         :else (recur (rest cs) (conj out d) (inc n))))))
+          rel (take 6 bndrs)
+          _ (when (> (count bndrs) 6) (inexact!))
+          rel-doc (when (seq rel)
+                    (doc/hang (doc/text "Relevant bindings include") 2
+                              (doc/vcat (for [{:keys [name span type]} rel]
+                                          (doc/sep [(doc/<+> (doc/text (prefix-occ (occ name))) (doc/text "::") (doc/text (ppr-sigma* type false)))
+                                                    (doc/nest 2 (doc/parens (doc/<+> (doc/text "bound at") (doc/text (loc-text span)))))])))))
+          ;; the candidates: the binders (IdHFCand, "bound at"), then the imports' names (GreHFCand, their ImportSpec)
+          lcl (keep (fn [{:keys [name span type]}] (when-let [as (hole-fit ty type)] {:name name :type type :args as :prov [:bound span]})) bndrs)
+          seen (atom (set (map :name lcl)))
+          gbl (for [{:keys [module span qualified implicit names]} *gres* n names
+                    :when (and (vector? n) (contains? #{"var" "data"} (nth n 1)) (not= "GHC.Internal.Err" (nmod n))
+                               (not (some-> *patsyns* deref (get n))) (not (contains? @seen n)))
+                    :let [ct (get @*genv* n)] :when ct
+                    :let [_ (swap! seen conj n) as (hole-fit ty ct)] :when as]
+                {:name n :type ct :args as :prov [:imported module (if implicit [1 1] span) qualified]})
+          size (fn [f] (reduce + 0 (map ty-size (:args f))))
+          srt (fn [fs] (sort-by (juxt size #(occ (:name %))) fs))
+          fits (concat (srt lcl) (srt gbl))
+          shown (take 6 fits)
+          fit-doc (fn [{:keys [name type args prov]}]
+                    (let [o (prefix-occ (occ name))
+                          display (doc/$$ (doc/<+> (doc/text o) (doc/<+> (doc/text "::") (doc/text (ppr-sigma* type true))))
+                                          (doc/nest 2 (if (seq args)
+                                                        (doc/<+> (doc/text "with") (doc/<+> (doc/text o) (doc/sep (map #(doc/<> (doc/text "@") (doc/text (ppr-ty* % 2))) args))))
+                                                        (doc/vcat []))))
+                          provd (case (first prov)
+                                  :bound (doc/parens (doc/<+> (doc/text "bound at") (doc/text (loc-text (second prov)))))
+                                  :imported (let [[_ mm sp q] prov
+                                                  is (doc/hsep (remove nil? [(doc/text "imported") (when q (doc/text "qualified")) (doc/text "from")
+                                                                            (doc/quotes (doc/text mm)) (doc/text "at")
+                                                                            (doc/text (if (= [1 1] sp) (loc-text [1 1]) (span-text sp)))]))
+                                                  dm (nmod name)]
+                                              (doc/parens (doc/sep (remove nil? [is (when (not= dm mm)
+                                                                                     (doc/parens (doc/<+> (doc/text "and originally defined in") (doc/quotes (doc/text dm)))))])))))]
+                      (doc/hang display 2 provd)))
+          fits-doc (when (seq shown)
+                     (doc/hang (doc/text "Valid hole fits include") 2
+                               (doc/$$ (doc/vcat (map fit-doc shown))
+                                       (if (> (count fits) 6)
+                                         (doc/text "(Some hole fits suppressed; use -fmax-valid-hole-fits=N or -fno-max-valid-hole-fits)")
+                                         (doc/vcat [])))))
+          txt (envelope span "88464" [b1 (doc/vcat cs) (doc/vcat (remove nil? [rel-doc fits-doc]))])]
+      [txt @*ppr-exact*])))
+
+(defn- fill-holes
+  "hs-r5: the group's holes (their ids from h0 on) given their messages: each placeholder typeError replaced by the
+  message's (the hole's type and fits known once the group is solved); bs unchanged when it has none"
+  [bs h0 g top-sigs env]
+  (let [hs (when *holes* (subvec @*holes* h0))]
+    (if (empty? hs)
+      bs
+      (let [bndrs (vec (for [b (arg g 2) :let [bv (lval b)] :when (= 'FunBind (con bv))
+                             :let [n (nm (arg bv 2)) t (or (get top-sigs n) (some-> (get env n) :poly) (some-> (get env n) :mono))]
+                             :when (and n t)]
+                         {:name n :span (lsp (arg bv 2)) :type t}))
+            msgs (into {} (for [h hs]
+                            (let [[txt exact?] (hole-text h bndrs)]
+                              (when trace? (binding [*out* *err*] (println "tc-trace: hole" (if exact? "(GHC's words)" "(approximate)") (pr-str txt))))
+                              [(first (nth (hole-core (:id h)) 2)) (first (nth (type-error-core txt) 2))])))]
+        (walk/postwalk (fn [x] (if (seq? x) (get msgs x x) x)) bs)))))
 
 (defn- with-ectx
   "Queue 369: f under the expression's error context (GHC's addExprCtxt in tcPolyLExpr, tcMonoLExpr, tcInferRho: ExprCtxt and
@@ -2677,12 +3179,62 @@
             (let [[a b] (first ms)] (recur (inc b) (rest ms) (conj out (list 'tc/rec (subvec stmts a (inc b))))))
             :else (recur (inc i) ms (conj out (nth stmts i)))))))
 
+(defn- rebound-do?
+  "hs-r5: a do statement under RebindableSyntax whose operators the renamer took from the scope (rn/implicit)"
+  [v]
+  (and (contains? *exts* "RebindableSyntax") (some #(and (seq? %) (= 'rn/implicit (first %))) v)))
+
+(declare check-poly-with infer-stmts)
+
+(defn- rebound-bind
+  "hs-r5: RebindableSyntax's bind statement p <- e; stmts as GHC.Tc.Gen.Match's tcDoStmt with a rebound (>>=)
+  (tcSyntaxOp: the operator's type taken first, e checked against its first argument, the continuation \\p -> stmts
+  against its second, skolemised when that is a polytype, SynRho: T15598's (>>=) = InfDo :: String -> (forall a. a ->
+  InfDo) -> InfDo), its call stack's frame \"a do statement\" at the statement; [type core]"
+  [env s v more mc]
+  (let [[te ce] (infer env (arg v 3))
+        [tb cb] (var-occ env (implicit-name v ">>=" (ext-name "var" "GHC.Internal.Base" ">>=")) (lsp s) "a do statement")
+        fun? (fn [t] (and (= :tc (first t)) (= fun-tc (second t))))
+        ft (expand (prune tb))
+        rt (when (fun? ft) (expand (prune (second (nth ft 2)))))
+        [t1 t2 r] (if (and rt (fun? rt))
+                    [(first (nth ft 2)) (first (nth rt 2)) (second (nth rt 2))]
+                    (let [x [(fresh-meta) (fresh-meta) (fresh-meta)]] (unify tb (fn-ty (x 0) (fn-ty (x 1) (x 2)))) x))
+        _ (unify t1 te)
+        cont (fn [env mt]
+               (let [a (fresh-meta) tr (fresh-meta)
+                     _ (unify mt (fn-ty a tr))
+                     [pc tr2 cr] (binding [*given-eqs* (scope-givens)]
+                                   (let [[env1 pc] (tc-pat env (arg v 2) a) [tr2 cr] (infer-stmts env1 more mc nil)] [(strict-pat pc) tr2 cr]))]
+                 (unify tr2 tr)
+                 (if-let [fl (implicit-name v "fail" nil)]
+                   (let [[tf cf] (var-occ env fl (lsp (arg v 2)) "a do statement") ds (fresh-lv "ds")]
+                     (note-type! ds a)
+                     (unify tf (fn-ty (list-ty (con-ty tc-char)) tr))
+                     (list 'lam [ds] (list 'match [ds] [(list 'clause [pc] cr)
+                                                        (list 'clause [(list 'pwild)] (app* cf [(fail-msg "'do' block" (lsp (arg v 2)))]))])))
+                   (list 'lam [pc] cr))))
+        t2p (prune t2)
+        k (if (and (vector? t2p) (= :forall (first t2p))) (check-poly-with env t2p cont) (cont env t2))]
+    [r (app* cb [ce k])]))
+
+(defn- in-stmt
+  "T7861 (hs-r7): f, a do block's statement s's expression checked under the statement's context (GHC's StmtErrCtxt, which
+  tcStmtsAndThen adds around the statement alone; the expression itself checked NC, as tcDoStmt's tcCheckMonoExprNC); a
+  monad comprehension's (mc) as before"
+  [s mc f]
+  (if (and *defer-log* (not mc)) (binding [*ectx* (cons [:stmt s] *ectx*) *ectx-nc* true] (f)) (f)))
+
 (defn- infer-stmts
   "A do block's statements in a monad: [type core]; mc a monad comprehension's (HF10-P43 (a): GHC.HsToCore.ListComp's
   dsMonadComp, as its statements desugar: the result return e, a guard qualifier guard b >> rest)"
-  [env stmts & [mc]]
+  [env stmts & [mc et]]
   (let [s (first stmts) v (lval s) more (rest stmts)
-        infer-stmts (fn [env stmts] (infer-stmts env stmts mc))]
+        ;; queue 395: et, the do block's expected type (checking mode, a plain do alone): the statements after a bind or a
+        ;; body statement have it (>>= and >> of GHC.Internal.Base: m b both), the last body statement is checked against
+        ;; it (GHC.Tc.Gen.Match's tcDoStmt pushes res_ty in), so a pattern's givens scope over the result's unification
+        ;; (binary's instance Binary (TypeRep a): `SomeTypeRep rep <- ...; case .. of Just HRefl -> pure rep`)
+        infer-stmts (fn [env stmts] (infer-stmts env stmts mc (when-not mc et)))]
     (case (con v)
       ;; HF10-P49 (a): a transform's or a parallel block's end (mc-inner): return of its binders' tuple, the binders and
       ;; the by expression typed here, where the inner statements bound them
@@ -2702,7 +3254,7 @@
       ParStmt (if mc (mc-par-stmt env v more infer-stmts) (do (error! "statement not handled: ParStmt") [(fresh-meta) (list 'lit "?")]))
       RecStmt (rec-stmt env (vec (lval (arg v 2))) more infer-stmts)
       tc/rec (rec-stmt env (vec (second v)) more infer-stmts)
-      LastStmt (let [[te ce] (infer env (arg v 2))
+      LastStmt (let [[te ce] (in-stmt s mc #(infer env (arg v 2)))
                      [tr cr] (global-occ env "return" "GHC.Internal.Base")
                      r (fresh-meta)]
                  (unify tr (fn-ty te r))
@@ -2719,14 +3271,26 @@
                    (unify tb (fn-ty g (fn-ty tr r)))
                    [r (app* cb [(app* cg [ce]) cr])])
                (if (empty? more)
-                 (infer env (arg v 2))
-                 (let [[te ce] (infer env (arg v 2))
-                       [tr cr] (infer-stmts env more)
-                       [tb cb] (global-occ env ">>" "GHC.Internal.Base")
-                       r (fresh-meta)]
-                   (unify tb (fn-ty te (fn-ty tr r)))
-                   [r (app* cb [ce cr])])))
-      BindStmt (let [[te ce] (infer env (arg v 3))
+                 (if (and et (not mc)) [et (in-stmt s mc #(check-expr env (arg v 2) et))] (in-stmt s mc #(infer env (arg v 2))))
+                 (if (rebound-do? v)
+                   ;; hs-r5: RebindableSyntax's (>>) in scope (the renamer's lookupSyntaxName), its call stack's frame
+                   ;; "a do statement" at the statement (GHC.Tc.Gen.Do's expansion, T22086); the statements after it not
+                   ;; checked against the block's type (the operator's result is its own)
+                   (let [[te ce] (infer env (arg v 2))
+                         [tr cr] (#'infer-stmts env more mc nil)
+                         [tb cb] (var-occ env (implicit-name v ">>" (ext-name "var" "GHC.Internal.Base" ">>")) (lsp s) "a do statement")
+                         r (fresh-meta)]
+                     (unify tb (fn-ty te (fn-ty tr r)))
+                     [r (app* cb [ce cr])])
+                   (let [[te ce] (in-stmt s mc #(infer env (arg v 2)))
+                         [tr cr] (infer-stmts env more)
+                         [tb cb] (global-occ env ">>" "GHC.Internal.Base")
+                         r (fresh-meta)]
+                     (unify tb (fn-ty te (fn-ty tr r)))
+                     [r (app* cb [ce cr])]))))
+      BindStmt (if (rebound-do? v)
+                 (rebound-bind env s v more mc)
+               (let [[te ce] (in-stmt s mc #(infer env (arg v 3)))
                      a (fresh-meta)
                      ;; the pattern's equalities given to the statements after it (tcDoStmt's implication)
                      [env1 pc tr cr] (binding [*given-eqs* (scope-givens)]
@@ -2742,7 +3306,7 @@
                      (unify tf (fn-ty (list-ty (con-ty tc-char)) tr))
                      [r (app* cb [ce (list 'lam [ds] (list 'match [ds] [(list 'clause [pc] cr)
                                                                         (list 'clause [(list 'pwild)] (app* cf [(fail-msg (if mc "monad comprehension" "'do' block") (lsp (arg v 2)))]))]))])])
-                   [r (app* cb [ce (list 'lam [pc] cr)])]))
+                   [r (app* cb [ce (list 'lam [pc] cr)])])))
       LetStmt (let [[env1 binds] (tc-local-binds env (arg v 2))
                     [tr cr] (infer-stmts env1 more)]
                 [tr (wrap-lets binds cr)])
@@ -2911,6 +3475,103 @@
           (= :forall (first t)) (let [[t2 ps] (instantiate t)] (doseq [p ps] (want! p)) (split-fun t2))
           :else (let [a (fresh-meta) r (fresh-meta)] (unify t (fn-ty a r)) [a r]))))
 
+;; GHC's ConLikeTc (GHC.Tc.Gen.Head's tcInferDataCon, Note [Typechecking data constructors]): a data constructor's
+;; occurrence is desugared to its eta lambda (\ds .. -> K ds ..) applied to the arguments it has (GHC.HsToCore.Expr's
+;; ds_app of ConLikeTc, newSysLocalsDs: one binder a field, fresh at each occurrence), which the simple optimiser
+;; beta-reduces: a saturated application is K's again, an unsaturated one keeps a lambda over the rest, its arguments
+;; let-bound outside it (showChar = (:) is \ds ds1 -> ds : ds1; showChar ')' inlined, let ds = C# ')' in \ds1 -> ds :
+;; ds1). Only the unsaturated occurrences are wrapped here (the saturated ones beta-reduce to themselves)
+(def ^:dynamic *app-head* false) ; tc-app's head is being inferred: its constructor is wrapped by tc-app, which knows the arguments
+
+(defn- con-eta
+  "A data constructor n's occurrence core (its type t) applied to nargs value arguments: its eta lambda when it takes more
+  (ConLikeTc's), else core. Not a newtype's constructor (its wrapper is a cast), an unboxed tuple's or sum's, a pattern
+  synonym's builder, or a constructor with a context (its evidence applied already)"
+  [n t core nargs]
+  (let [i (when (and n (= "data" (nth n 1))) (get @*cons* n))
+        ar (:arity i)]
+    (if (and ar (> ar nargs) (seq? core) (= 'v (first core))
+             (not (some-> *patsyns* deref (get n)))
+             (not= 'newtype (:flavour (get @*tycons* (:tycon i))))
+             (not (str/starts-with? (occ n) "(#")))
+      (let [ts (first (reduce (fn [[ts t] _] (let [[a r] (split-fun t)] [(conj ts a) r])) [[] t] (range ar)))
+            ds (mapv (fn [a] (let [x (fresh-lv "ds")] (note-type! x a) x)) ts)]
+        (list 'lam ds (list 'app core ds)))
+      core)))
+
+;;; T7861 (hs-r7): GHC's impredicativity check (GHC.Tc.Utils.Unify's simpleUnifyCheck and checkTyEqRhs: a unification variable
+;;; that is not a Quick Look instantiation variable is never filled with a type that has a forall or a context in it, the
+;;; error CannotUnifyVariable's CannotUnifyWithPolytype) where an argument meets a bare instantiation variable: its parameter
+;;; type a meta (not guarded), the argument checked as against a TauTv, Quick Look's exception (GHC.Tc.Gen.App's quickLookArg:
+;;; Quick Look on, under ImpredicativeTypes or for ($), and findNoQuantVars of the argument's head at its arguments) the only
+;;; way a polytype fills it. The elaborator fills metas freely elsewhere (the check is this argument's, not unify's)
+
+(declare app-spine tvs-of)
+
+(defn- nested-poly?
+  "A type with a quantifier or a context below its top (a top-level one is an instantiation the elaborator left)"
+  [t]
+  (letfn [(has [x] (let [x (prune x)]
+                     (case (first x)
+                       :forall true
+                       :tc (boolean (some has (nth x 2)))
+                       :app (or (has (nth x 1)) (has (nth x 2)))
+                       false)))]
+    (let [t (prune t)]
+      (case (first t)
+        :tc (boolean (some has (nth t 2)))
+        :app (or (has (nth t 1)) (has (nth t 2)))
+        false))))
+
+(defn- no-quant-vars?
+  "GHC.Tc.Gen.App's findNoQuantVars: the head's type sigma instantiated at its arguments args (value arguments; a type
+  argument instantiates the next quantifier) leaves none of its quantified variables free in the result"
+  [sigma args]
+  (loop [bvs #{} t sigma args args]
+    (let [t (expand (prune t))]
+      (cond
+        (and (= :forall (first t)) (or (empty? args) (not= 'HsAppType (first args))) (or (seq (nth t 1)) (seq (nth t 2))))
+        (recur (into bvs (nth t 1)) (nth t 3) args)
+        (empty? args) (empty? (set/intersection (tvs-of (zonk t)) bvs))
+        (= 'HsAppType (first args)) (if (and (= :forall (first t)) (seq (nth t 1)))
+                                      (recur bvs [:forall (vec (rest (nth t 1))) (nth t 2) (nth t 3)] (rest args))
+                                      false)
+        (and (= :tc (first t)) (= fun-tc (second t))) (recur bvs (second (nth t 2)) (rest args))
+        :else false))))
+
+(defn- ql-arg-ok?
+  "Quick Look's exception for an argument a at a bare instantiation variable: Quick Look on (ImpredicativeTypes, or the
+  head hn is ($): wantQuickLook's quickLookKeys) and a's head a variable of known type whose instantiation at a's
+  arguments leaves no quantified variable free (no_free_kappas; the parameter is not guarded)"
+  [env hn a]
+  (when (or (contains? *exts* "ImpredicativeTypes") (= hn (ext-name "var" "GHC.Internal.Base" "$")))
+    (let [x (loop [x (lval a)] (if (= 'HsPar (con x)) (recur (lval (arg x 2))) x))
+          [h args] (loop [x x args ()]
+                     (case (con x)
+                       HsApp (recur (lval (arg x 2)) (cons (lval (arg x 3)) args))
+                       HsAppType (recur (lval (arg x 2)) (cons '(HsAppType) args))
+                       [x (vec args)]))
+          n (when (= 'HsVar (con h)) (nm (arg h 2)))
+          le (when n (get env n))
+          sigma (cond (nil? n) nil
+                      (nil? le) (get @*genv* n)
+                      (:poly le) (:poly le)
+                      :else (:mono le))]
+      (when sigma (no-quant-vars? sigma (mapv (fn [y] (if (= '(HsAppType) y) 'HsAppType y)) args))))))
+
+(defn- impred-error!
+  "The argument a (the i-th of head's application) filled the bare meta mv with t, a type with a polytype in it: GHC's
+  CannotUnifyWithPolytype, logged for the deferred message with the meta as it was (a copy of its name, unfilled)"
+  [mv t head a i]
+  (let [n (:name (get @*metas* (second mv)))
+        copy (let [m (fresh-meta)] (when n (swap! *metas* assoc-in [(second m) :name] n)) m)]
+    (when (and *defer-log* *errors*)
+      (swap! *defer-log* conj {:errs *errors* :idx (count @*errors*) :poly true :ty1 (zonk t) :ty2 copy
+                               :span (or (when (L? a) (lsp a)) *espan*)
+                               :ea {:act (zonk t) :exp copy} :ctxt (cons [:arg head a (inc i)] *ectx*)}))
+    (when trace? (binding [*out* *err*] (println "tc-trace: impredicative" (pr-str (zonk t)))))
+    (error! "cannot unify " (pr-str copy) " with " (pr-str (zonk t)) ": a polytype (ImpredicativeTypes, Quick Look)")))
+
 ;; HF9 (second slice): an application as GHC.Tc.Gen.App's tcApp makes it: the spine's head inferred and instantiated,
 ;; its argument types split off, the result unified with the expected type first (Note [Unify with expected type
 ;; before typechecking arguments]), then each argument checked against its type, so a lambda argument's GADT pattern
@@ -2919,7 +3580,9 @@
   "An application spine f a1 .. an (HsApp, or OpApp: the operator applied to its two operands): [type core]; expected
   the type to check against or nil"
   [env head args expected]
-  (let [[tf cf] (binding [*ectx-nc* (boolean *defer-log*)] (infer env head)) ; (queue 369: tcInferAppHead adds no context)
+  (let [hn (let [h (lval head)] (when (= 'HsVar (con h)) (nm (arg h 2))))
+        [tf cf] (binding [*ectx-nc* (boolean *defer-log*) *app-head* (some? hn)] (infer env head)) ; (queue 369: tcInferAppHead adds no context)
+        cf (con-eta hn tf cf (count args))
         ;; HF10-P50 (a): a head of a rank-n binder's polytype (higherRank's f :: forall a. (Num a, Bounded a) => a -> a,
         ;; T17594e) instantiated with its constraints' evidence applied (tcInstFun); split-fun's instantiation dropped
         ;; the evidence
@@ -2954,10 +3617,16 @@
         qual? (fn [at] (let [x (prune at)] (and (vector? x) (= :forall (first x)) (seq (nth x 2)))))
         later (set (keep-indexed (fn [i at] (when (qual? at) i)) ats))
         ;; (queue 369: each argument under its FunAppCtxt, at its span, checked as tcPolyExpr: no context of its own)
-        chk (fn [i a at] (if *defer-log*
-                           (binding [*ectx* (cons [:arg head a (inc i)] *ectx*) *espan* (or (when (L? a) (lsp a)) *espan*) *ectx-nc* true]
-                             (check-expr env a at))
-                           (check-expr env a at)))
+        chk (fn [i a at]
+              (let [bare (let [x (prune at)] (when (= :mv (first x)) x))
+                    c (if *defer-log*
+                        (binding [*ectx* (cons [:arg head a (inc i)] *ectx*) *espan* (or (when (L? a) (lsp a)) *espan*) *ectx-nc* true]
+                          (check-expr env a at))
+                        (check-expr env a at))]
+                ;; T7861 (hs-r7): an argument at a bare instantiation variable checked as against a TauTv
+                (when (and bare (nested-poly? bare) (not (ql-arg-ok? env hn a)))
+                  (impred-error! bare (zonk bare) head a i))
+                c))
         cs1 (into {} (keep-indexed (fn [i [a at]] (when-not (later i) [i (chk i a at)])) (map vector args ats)))
         cs (vec (map-indexed (fn [i [a at]] (if (later i) (chk i a at) (get cs1 i))) (map vector args ats)))]
     (if rq
@@ -3002,8 +3671,10 @@
   "A string literal's core as GHC.HsToCore.Quote's coreStringLit gives it (mkStringExprFS): unpackCString# of the literal,
   unpackCStringUtf8# when it is not ASCII"
   [^String x]
-  (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
-        [(list 'lit (str (pr-str x) "#"))]))
+  (if (empty? x)
+    (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+    (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
+          [(list 'lit (str (pr-str x) "#"))])))
 
 (defn- th-name-core
   "round 54: GHC.HsToCore.Quote's globalVar: an external Name as TH's mkNameG_d, mkNameG_v or mkNameG_tc of its unit, module
@@ -3016,6 +3687,8 @@
                      (str/starts-with? tm "GHC.Internal.") "ghc-internal" :else *unit*)
           s th-string]
       (list 'app (list 'v (ext-name "var" "GHC.Internal.TH.Syntax" f)) [(s unit) (s tm) (s (occ n))]))))
+
+(declare integer-lit-core)
 
 (defn- th-quote
   "round 54: an expression quote, as GHC.HsToCore.Quote's repE gives it over the Quote m dictionary: a global variable varE
@@ -3047,6 +3720,27 @@
                     (case (con xv)
                       HsPar (rep (arg xv 2))
                       HsApp (list 'app (lib "appE") [(qd) (rep (arg xv 2)) (rep (arg xv 3))])
+                      ;; repE's overloaded integral literal: litE (integerL n) (repOverloadedLiteral; TH.Lift's bytesOffset = 0)
+                      HsOverLit (let [val (arg (arg xv 2) 2)]
+                                  (if (= 'HsIntegral (con val))
+                                    (list 'app (lib "litE") [(qd) (list 'app (lib "integerL") [(integer-lit-core (nth (arg val 1) 3))])])
+                                    (do (reset! bad (con xv)) (list 'lit "?"))))
+                      ;; repE's nested splice: $(e) in an untyped quote is e itself, an m Exp of the quote's monad
+                      ;; (base's Data.Array.Byte's [| addrToByteArray $(lift len) $(..) |], TH.Lift's [| TExp $(lift e) |])
+                      HsUntypedSplice (let [sp (arg xv 2)]
+                                        (if (and (not typed?) (seq? sp) (= 'HsUntypedSpliceExpr (first sp)))
+                                          (check-expr env (arg sp 2) mexp)
+                                          (do (reset! bad (con xv)) (list 'lit "?"))))
+                      ;; repE's record construction: recConE 'C [fieldExp 'f <e>..] (TH.Lift's Bytes { bytesPtr = .. })
+                      RecordCon (let [n (nm (arg xv 2)) nc (when n (th-name-core n)) rf (arg xv 3)
+                                      fes (for [f (arg rf 2) :let [fb (lval f) fn (some-> (arg fb 2) lval (arg 2) nm)]]
+                                            (when (and fn (not (true? (arg fb 4))) (not (and (seq? (arg rf 3)) (= 'Just (first (arg rf 3))))))
+                                              (list 'app (lib "fieldExp") [(qd) (th-name-core fn) (rep (arg fb 3))])))]
+                                  (if (and nc (every? some? fes))
+                                    (list 'app (lib "recConE")
+                                          [(qd) nc (reduce (fn [acc x] (list 'app (list 'v (ext-name "data" "GHC.Internal.Types" ":")) [x acc]))
+                                                           (list 'v (ext-name "data" "GHC.Internal.Types" "[]")) (reverse fes))])
+                                    (do (reset! bad (con xv)) (list 'lit "?"))))
                       HsVar (let [n (nm (arg xv 2)) nc (th-name-core n) u (when-not n (lval (arg xv 2)))]
                               (cond
                                 nc
@@ -3104,8 +3798,16 @@
               ;; HF10-P54 (a): [] is an ExplicitList (GHC.Rename.Expr's rnExpr of nilDataConName, Note [Empty lists])
               (if (and (= n (ext-name "data" "GHC.Internal.Types" "[]")) (ovl-lists?))
                 (ovl-list env [(list-ty (fresh-meta)) (list 'v n)] 0)
-                (var-occ env n (lsp (arg v 2))))
-              (do (error! "unrenamed variable: " (pr-str (lval (arg v 2)))) [(fresh-meta) (list 'lit "?")]))
+                (let [app-head? *app-head* [t c] (binding [*app-head* false] (var-occ env n (lsp (arg v 2))))]
+                  [t (if app-head? c (con-eta n t c 0))]))
+              (let [r (lval (arg v 2))]
+                (if (and *defer-holes* (seq? r) (= 'unqual (first r)) (str/starts-with? (str (nth r 2)) "_"))
+                  ;; hs-r5: a deferred hole (an unbound _x): its type a meta, its evidence the placeholder hole-core whose
+                  ;; message fill-holes writes once the group is checked (GHC reports holes after solving)
+                  (let [t (fresh-meta) id (count @*holes*)]
+                    (swap! *holes* conj {:id id :occ (str (nth r 2)) :t t :span (or (lsp e) (lsp (arg v 2))) :ctxt *ectx* :e e})
+                    [t (hole-core id)])
+                  (do (error! "unrenamed variable: " (pr-str r)) [(fresh-meta) (list 'lit "?")]))))
       HsApp (let [[h args] (app-spine v)] (tc-app env h args nil))
       OpApp (tc-app env (arg v 3) [(arg v 2) (arg v 4)] nil)
       NegApp (let [[t c] (infer env (arg v 2))
@@ -3115,7 +3817,7 @@
                [r (app* cn [c])])
       HsPar (infer env (arg v 2))
       HsPragE (infer env (arg v 3))
-      HsOverLit (overlit v)
+      HsOverLit (if-let [pz (neg-zero-overlit e v)] (infer env (list 'L (when (L? e) (lsp e)) (list 'NegApp nil pz))) (overlit v))
       HsLit (if (ovl-string? v) (ovl-string v) (hslit v))
       ;; HF10-P54 (a): PostfixOperators' left section (e op) is op e (GHC.Tc.Gen.Expr's SectionL, its postfix_ops)
       SectionL (if (contains? *exts* "PostfixOperators")
@@ -3224,8 +3926,12 @@
                                               ps (mapv (fn [[c ts]] [c (mapv #(subst ms %) ts)]) (nth t 2))]
                                           (recur (subst ms (nth t 3)) tas ms (into preds ps)))
                                         (let [[t2 p2] (instantiate t)] [t2 (into preds p2)])))
-                          core (or (:core le) (list 'v (if (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) n)))]
-                      [t (app* core (mapv #(if le (want! %) (want-at! % n (lsp (arg h 2)))) preds))])
+                          ;; (hs-r7, T24245: a pattern synonym is its builder $bP, applied to (# #) when it takes the
+                          ;; dummy argument, as var-occ's: SNat @62 is $bSNat at KnownNat 62's evidence)
+                          ps (when (and (nil? le) (= "data" (nth n 1))) (some-> *patsyns* deref (get n)))
+                          core (or (:core le) (list 'v (cond ps (builder-name n) (= "data" (nth n 1)) (ext-name "var" (nmod n) (occ n)) :else n)))
+                          c (app* core (mapv #(if le (want! %) (want-at! % n (lsp (arg h 2)))) preds))]
+                      [t (if (and ps (builder-dummy? ps)) (app* c [unit#-core]) c)])
                     (infer env (arg v 2))))
       ;; UnboxedSums (GHC.Tc.Gen.Expr's ExplicitSum): alternative alt of arity n, the other components fresh
       ExplicitSum (let [alt (arg v 2) n (arg v 3) [t c] (infer env (arg v 4))
@@ -3272,9 +3978,16 @@
                                             (assoc g f c))))
                                       given (partition 2 (nth (lval (second dd)) 2)))
                               given)]
-                  [res (app* (list 'v (if ps (builder-name cn) (ext-name "var" (nmod cn) (occ cn))))
-                             (into (mapv want! cpreds)
-                                   (mapv (fn [f] (or (get given f) (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError")) [(list 'lit (occ f))]))) flds)))])
+                  ;; hs-r5: a missing field recConError of GHC's message (dsExpr's RecordCon, mkErrorAppDs: "SPAN|FIELD", the
+                  ;; construction's span, the field's label; a constructor without labels each argument with an empty one:
+                  ;; unlabelled_bottom, dsrun007's C{})
+                  (let [rce (fn [doc] (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError"))
+                                            [(list 'lit (str (pr-str (str (if (lsp e) (span-text (lsp e)) (do (inexact!) "")) "|" doc)) "#"))]))]
+                    [res (app* (list 'v (if ps (builder-name cn) (ext-name "var" (nmod cn) (occ cn))))
+                               (into (mapv want! cpreds)
+                                     (if (and (empty? flds) (empty? given))
+                                       (mapv (fn [_] (rce "")) argts)
+                                       (mapv (fn [f] (or (get given f) (rce (occ f)))) flds))))]))
       RecordUpd (if-let [[pn ps] (let [fs (mapv (fn [fb] (nm (arg (lval (arg (lval fb) 2)) 2))) (arg (arg v 3) 2))]
                                    (when (seq fs)
                                      (some (fn [[pn ps]] (when (and (seq (:fields ps)) (every? (set (:fields ps)) fs)) [pn ps]))
@@ -3379,21 +4092,38 @@
       ;; Integer (an integral literal), Float or Double (either), not under RebindableSyntax, the literal is built at its
       ;; type with no Num or Fractional wanted (GHC.Internal.Bignum.Integer's literals need no Num Integer, which
       ;; GHC.Internal.Num defines above it)
-      HsOverLit (let [ol (arg v 2) val (arg ol 2)
+      HsOverLit (if-let [pz (neg-zero-overlit e v)]
+                  ;; (negate checked against t: its argument the positive literal checked against t, so the short cut applies)
+                  (let [[tn cn] (var-occ env (ext-name "var" "GHC.Internal.Num" "negate"))]
+                    (unify tn (fn-ty t t))
+                    (app* cn [(check-expr env pz t)]))
+                 (let [ol (arg v 2) val (arg ol 2)
                       tn (let [x (expand (zonk tp))] (when (= :tc (first x)) (second x)))
-                      rebindable? (some (fn [x] (and (seq? x) (= 'rn/implicit (first x)))) ol)
+                      ;; (RebindableSyntax's literal is its fromInteger's: the renamer's implicit name of any literal, the
+                      ;; standard fromInteger too, made every literal look rebindable, so the short cut never applied: Data.Char's
+                      ;; 9 :: Word was fromInteger's, GHC.Internal.Bignum.Integer's literals wanted the Num Integer it cannot have)
+                      rebindable? (contains? *exts* "RebindableSyntax")
                       int? (= 'HsIntegral (con val))
-                      tc-word (ext-name "tc" "GHC.Internal.Types" "Word")]
+                      tc-word (ext-name "tc" "GHC.Internal.Types" "Word")
+                      ;; (lane 2, 2026-11-20: shortCutLit's go_integral takes Int only in platformInIntRange and Word only in
+                      ;; platformInWordRange; a literal outside is no short cut, fromInteger of it with Num's evidence, which
+                      ;; wraps. T9533b's case 0x10000000000000001 :: Int, T10246's and mul2's: the Int short cut gave lit-core no
+                      ;; fromInteger and no evidence, an STG call of "main:/")
+                      in-range? (fn [lo hi] (let [x (nth (arg val 1) 3)
+                                                  n (bigint (if (string? x) (java.math.BigInteger. ^String x) x))]
+                                              (and (<= (bigint lo) n) (<= n (bigint hi)))))
+                      int-range? (fn [] (in-range? Long/MIN_VALUE Long/MAX_VALUE))
+                      word-range? (fn [] (in-range? 0 (.subtract (.shiftLeft java.math.BigInteger/ONE 64) java.math.BigInteger/ONE)))]
                   (cond
                     (or rebindable? (nil? tn)) (let [[t1 c] (overlit v)] (unify t1 t) c)
-                    (and int? (= tn tc-word))
+                    (and int? (= tn tc-word) (word-range?))
                     (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "W#")) [(list 'lit (str (nth (arg val 1) 3) "##"))])
-                    (and int? (contains? #{tc-int tc-integer tc-float tc-double} tn))
+                    (and int? (or (contains? #{tc-integer tc-float tc-double} tn) (and (= tn tc-int) (int-range?))))
                     (lit-core :int (nth (arg val 1) 3) tp nil nil)
                     (and (not int?) (contains? #{tc-float tc-double} tn) (= 'HsFractional (con val))
                          (let [e (nth (arg val 1) 4 0)] (and (number? e) (<= -100 e 100))))
                     (lit-core :frac (arg val 1) tp nil nil)
-                    :else (let [[t1 c] (overlit v)] (unify t1 t) c)))
+                    :else (let [[t1 c] (overlit v)] (unify t1 t) c))))
       HsApp (let [[h args] (app-spine v)] (second (tc-app env h args t)))
       OpApp (second (tc-app env (arg v 3) [(arg v 2) (arg v 4)] t))
       HsCase (let [[ts cs] (infer env (arg v 2))]
@@ -3417,7 +4147,9 @@
                (let [et (fresh-meta)]
                  (unify (list-ty et) t)
                  (second (infer-listcomp env (lval (arg v 3)) et)))
-               (let [[t1 c] (infer env e)] (unify t1 t) c)))
+               (if (= 'DoExpr (if (seq? fl) (first fl) fl))
+                 (let [[t1 c] (infer-stmts env (lval (arg v 3)) nil t)] (unify t1 t) c)
+                 (let [[t1 c] (infer env e)] (unify t1 t) c))))
       (let [[t1 c] (infer env e)] (unify-ea t1 t (when (= 'HsVar (con v)) e)) c)))))
 
 ;; a polytype expected (an argument of type KnownNat n => r, forall s. ST s a): GHC.Tc.Utils.Unify's tcSkolemise, the
@@ -3471,6 +4203,23 @@
     (solve-with-givens! @ws givens)
     (if (empty? params) c (list 'lam params c))))
 
+(defn- check-poly-with
+  "hs-r5: check-poly's skolemisation of an expected polytype t whose body's core (f env monotype) makes: RebindableSyntax's
+  continuation of a rebound (>>=) (rebound-bind)"
+  [env t f]
+  (let [sk (into {} (map (fn [x] [x [:tv (str x "_sk" (fresh-id))]]) (nth t 1)))
+        preds (mapv (fn [[c ts]] (zonk-pred [c (mapv #(subst sk %) ts)])) (nth t 2))
+        params (mapv dict-param preds)
+        givens (super-closure (mapv vector preds params))
+        ws (atom [])
+        env (ip-pat-env env (map first givens) (map second givens))
+        c (binding [*wanteds* ws *given-eqs* (scope-givens)]
+            (assume-eqs! preds)
+            (let [c (with-ips env (f env (subst sk (nth t 3))))]
+              (retry-implications! false) c))]
+    (solve-with-givens! @ws givens)
+    (if (empty? params) c (list 'lam params c))))
+
 ;;; ------------------------------------------------------------------------------------------
 ;;; Patterns: [env' core-pattern]
 
@@ -3514,10 +4263,32 @@
         ;; C {} on a constructor without fields (DuplexHandle{}): every argument a wildcard
         pats (if (seq flds)
                (mapv (fn [f] (get given f wild)) flds)
-               (vec (repeat (count (first (con-arg-types cn))) wild)))]
-    (tc-con-pat env (list 'ConPat (arg v 1) (arg v 2) (list 'PrefixCon [] pats)) t)))
+               (vec (repeat (count (first (con-arg-types cn))) wild)))
+        ;; hs-r5: the fields in the order the pattern writes them, then those `..` binds (rn_dotdot's, appended): the
+        ;; desugarer matches them in that order (select_arg_vars), noted on the pcon when it is not the declaration's
+        written (vec (distinct (keep (fn [fb] (let [lbl (lval (arg (lval (arg (lval fb) 2)) 2))
+                                                    f (if (= 'rn/names (first lbl)) (first (second lbl)) (second lbl))
+                                                    i (.indexOf ^java.util.List flds f)]
+                                                (when (>= i 0) i)))
+                                       (arg rf 2))))
+        order (into written (remove (set written) (keep-indexed (fn [i f] (when (contains? given f) i)) flds)))
+        [env1 core] (tc-con-pat env (list 'ConPat (arg v 1) (arg v 2) (list 'PrefixCon [] pats)) t)]
+    (if (and (seq flds) (not= order (sort order)) (seq? core) (= 'pcon (first core)) (= 3 (count core)))
+      (let [off (- (count (nth core 2)) (count flds))]
+        [env1 (list 'pcon (second core) (nth core 2) {:order (into (vec (range off)) (map #(+ off %) order))})])
+      [env1 core])))
 
 (declare tc-con-pat* rewrite-by-givens assume-eqs! scope-givens dict-param solve-with-givens! retry-implications!)
+
+(declare add-given!)
+
+(defn- given-kinds!
+  "hs-own-stg-3 (a): a given a ~ b binding the skolem a of an annotated kind: the kinds' equality given too (GHC's
+  heterogeneous equality decomposed: typeRepKind's TrType alternative, (a :: k) ~ (Type :: Type), gives k ~ Type)"
+  [a b]
+  (when-let [ka (tv-kind (second a))]
+    (when-let [kb (known-kind b)]
+      (add-given! ka kb))))
 
 (defn- add-given!
   "A given equality a ~ b canonicalised as GHC.Tc.Solver.Equality's canEqNC does for givens: both sides rewritten by
@@ -3526,7 +4297,9 @@
   elaborator trusts the program: GHC would leave it untouchable); a family application or apart types left (an
   inaccessible alternative)"
   [a b]
-  (let [a (rewrite-by-givens a) b (rewrite-by-givens b)]
+  ;; (each side's synonym at the head expanded, canEqNC's coreView: getRuntimeRep's TrType alternative gives TYPE r ~
+  ;; Type, Type = TYPE LiftedRep, LiftedRep = BoxedRep Lifted, so r ~ BoxedRep Lifted)
+  (let [a (expand (rewrite-by-givens a)) b (expand (rewrite-by-givens b))]
     (when trace? (binding [*out* *err*] (println "tc-trace: given" (pr-str a) (pr-str b))))
     (cond
       (= a b) nil
@@ -3534,14 +4307,17 @@
       ;; there if still unknown (the elaborator trusts the program: GHC would leave it untouchable)
       (or (= :mv (first a)) (= :mv (first b)))
       (if (and *implic-eqs* *given-eqs*) (swap! *given-eqs* update :pending (fnil conj []) [a b]) (unify a b))
-      (and (= :tv (first a)) *given-eqs* (not (some #{a} (tree-seq coll? seq b)))) (swap! *given-eqs* assoc (second a) b)
-      (and (= :tv (first b)) *given-eqs* (not (some #{b} (tree-seq coll? seq a)))) (swap! *given-eqs* assoc (second b) a)
+      (and (= :tv (first a)) *given-eqs* (not (some #{a} (tree-seq coll? seq b))))
+      (do (swap! *given-eqs* assoc (second a) b) (given-kinds! a b))
+      (and (= :tv (first b)) *given-eqs* (not (some #{b} (tree-seq coll? seq a))))
+      (do (swap! *given-eqs* assoc (second b) a) (given-kinds! b a))
       ;; HF10-P50 (a): a family application on one side bound to the other (given-of)
       (and (stuck-family? a) (not (stuck-family? b)) *given-eqs* (not (some #{a} (tree-seq coll? seq b))))
       (swap! *given-eqs* assoc [:fam a] b ::fams true)
       (and (stuck-family? b) (not (stuck-family? a)) *given-eqs* (not (some #{b} (tree-seq coll? seq a))))
       (swap! *given-eqs* assoc [:fam b] a ::fams true)
       (or (stuck-family? a) (stuck-family? b)) nil
+      (fun-vs-prim? a b) (add-given! (as-prim-fun a) (as-prim-fun b))
       (and (= :tc (first a)) (= :tc (first b)) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
       (doseq [[x y] (map vector (nth a 2) (nth b 2))] (add-given! x y))
       (and (#{:tc :app} (first a)) (#{:tc :app} (first b)) (or (= :app (first a)) (= :app (first b))))
@@ -3576,6 +4352,14 @@
         m (into {} (for [x tvs] [x (if-let [i (some (fn [[i u]] (when (= u x) i)) univ)]
                                      (nth us i)
                                      [:tv (str x "_sk" (fresh-id))])]))
+        ;; hs-own-stg-3 (a): an existential's skolem has its annotated kind; a universal's annotated kind is its
+        ;; instance's (GHC's universal kind arguments: TrTyCon's (a :: k) at TypeRep (a' :: k') is k ~ k')
+        kinds (:kinds (:gadt info))
+        _ (doseq [[x k] kinds :let [sx (get m x)] :when (and sx (= :tv (first sx)))]
+            (note-kind-anns! {(second sx) (subst m k)}))
+        _ (doseq [[i u] univ :let [k (get kinds u)] :when k
+                  :let [ik (known-kind (nth us i))] :when ik]
+            (add-given! (subst m k) ik))
         _ (doseq [[i tau] (sort-by key eqs)]
             (add-given! (nth us i) (subst m tau)))
         dpreds (mapv (fn [[c ts]] [c (mapv #(subst m %) ts)]) ctx)
@@ -3667,6 +4451,7 @@
   outer quantifier and the first context, ex and prov from what follows; implicitly quantified, a variable the result
   does not mention is existential"
   [sig]
+  (note-kind-anns! (kind-anns sig {}))
   (let [st (sig-type sig)
         outer (arg (lval sig) 2)
         explicit? (= 'HsOuterExplicit (con (if (L? outer) (lval outer) outer)))
@@ -3739,7 +4524,9 @@
         m (merge (zipmap univ (repeatedly fresh-meta)) (into {} (map (fn [x] [x [:tv (str x "_sk" (fresh-id))]]) ex)))
         sp (fn [[c ts]] [c (mapv #(subst m %) ts)])
         _ (unify (subst m res) t)
-        evs (mapv #(want! (sp %)) req)
+        ;; (hs-r5: a required HasCallStack pushes the pattern's occurrence, as an expression's does: GHC's OccurrenceOf
+        ;; origin at the synonym's name, T19289's "Annotated, called at T19289.hs:24:26")
+        evs (mapv #(want-at! (sp %) cn (lsp (arg v 2))) req)
         dpreds (mapv sp prov)
         dvars (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) dpreds)
         ;; HF10-P36: a provided constraint without a type variable is not given beyond the alternative (*skolem-givens* is the
@@ -4125,6 +4912,21 @@
       (w p))
     @out))
 
+(defn- lhs-arity
+  "GHC.Tc.Gen.Bind's addInlinePragArity: a function binding's patterns (its first match's: matchGroupArity), else 0"
+  [b]
+  (let [v (lval b)
+        ms (when (= 'FunBind (con v)) (lval (arg (arg v 3) 2)))
+        m (when (seq ms) (lval (first ms)))
+        ps (when m (lval (arg m 3)))]
+    (if (sequential? ps) (count ps) 0)))
+
+(defn- note-inline-arity!
+  "An INLINE pragma's binder: its real arity, the dictionaries' and its LHS's (makeCorePair's inline_pair)"
+  [n b ndicts]
+  (when (and *inline-arities* (get *inline-prags* n))
+    (swap! *inline-arities* assoc n (+ ndicts (lhs-arity b)))))
+
 (defn- bind-name [b]
   (let [v (lval b)]
     (case (con v)
@@ -4155,7 +4957,13 @@
                     false)))
         binds))
 
-(defn- dict-param [[c _]] (fresh-lv (str "$d" (occ c))))
+(defn- dict-param
+  "A dictionary parameter for a predicate; hs-own-stg-2 (a): its type the class applied ([:tc CLASS ARGS]), so the Simplifier
+  can match it against a dictionary argument's (a default method inlined at an instance)"
+  [[c ts]]
+  (let [x (fresh-lv (str "$d" (occ c)))]
+    (when (and (vector? c) (vector? ts) (not= :cvar c) (not= :qc c)) (note-type! x [:tc c ts]))
+    x))
 
 (declare interact-deferred!)
 
@@ -4240,11 +5048,39 @@
 
 (declare invert-families! interact-deferred!)
 
+(defn- dfun-app?
+  "An evidence term that applies an instance's dictionary function to dictionaries ($fShowList $fShowInt)"
+  [t]
+  (and (seq? t) (= 'app (first t)) (seq? (second t)) (= 'v (first (second t))) (vector? (second (second t)))
+       (str/starts-with? (str (nth (second (second t)) 3)) "$f") (seq (nth t 2))))
+
+(defn- bind-wanted!
+  "GHC's evidence bindings of an implication (the binding's abs_ev_binds, dsEvBinds): a wanted solved by an instance's
+  dictionary function applied to dictionaries is bound once, at the binding's level after its dictionary lambdas, to an
+  evidence variable ($dFractional = $fFractionalRatio $fIntegralInteger), a wanted of the same predicate solved by the
+  same variable (the inert solved dictionaries); wb the binding's atom [[lv term pred]...]. The variable, or term"
+  [wb pred term & [givens]]
+  (if (and wb (dfun-app? term)
+           ;; (its dictionaries the binding's own: no dictionary a pattern or an inner implication binds, which the
+           ;; binding's level does not have in scope)
+           (let [lvs (fn [x] (filter #(and (seq? %) (= 'lv (first %))) (tree-seq coll? seq x)))
+                 ok (into (set (lvs (map second givens))) (map first @wb))]
+             (and (every? ok (lvs term)) (not-any? #(and (seq? %) (= 'ev (first %))) (tree-seq coll? seq term)))))
+    (let [zp (zonk-pred pred)]
+      (or (some (fn [[x _ p]] (when (= p zp) x)) @wb)
+          (let [x (list 'lv (str "$d" (occ (first zp))) (str "ev" (swap! *counter* inc)))]
+            (swap! wb conj [x term zp])
+            (swap! ev-binders conj x)
+            (when *ltypes* (swap! *ltypes* assoc x [:tc (first zp) (second zp)]))
+            x)))
+    term))
+
 (defn- solve-with-givens!
   "Solve the wanteds of a checked binding with its givens; the unsolved are deferred. In an instance's method a
   constraint the instances solve to a dictionary variable is solved so, else by the instance's own dictionary's
-  superclasses when they give it (as GHC's solver chose on the corpora)"
-  [wanteds givens]
+  superclasses when they give it (as GHC's solver chose on the corpora). wb: bind-wanted!'s atom, the binding's evidence
+  bindings (nil: each term in place)"
+  [wanteds givens & [wb]]
   (improve-coercibles!)
   ;; HF10-P54 (a): in rounds, until one solves nothing: a wanted solved later in the list may improve an earlier one
   ;; (P54fd's Integral ?e before Coll c ?e, whose given's functional dependency gives ?e := e); the left deferred in
@@ -4263,7 +5099,7 @@
                         (when (and *deferred-eqs* (some #(= :mv (first (prune %))) (second (zonk-pred (:pred w0))))
                                    (loop [k 0 any false] (if (and (< k 4) (invert-families! [(:pred w0)])) (recur (inc k) true) any)))
                           (solve))))]
-      (do (swap! *evidence* assoc (:ev w0) term) false)
+      (do (swap! *evidence* assoc (:ev w0) (bind-wanted! wb (:pred w0) term givens)) false)
       true))
                       ws)]
     ;; (again only when the round unified a meta: solving one cannot help another otherwise)
@@ -4508,6 +5344,7 @@
                     (doseq [[n t] all :when (and (vector? n) (= "main" (occ n)) (= "Main" *module*))]
                       (unify t [:tc io-tc [(fresh-meta)]])))
                 [tvs preds params] (generalize (mapv second all) @ws (restricted? unsigned))
+                _ (when top? (doseq [b unsigned :let [n (bind-name b)] :when n] (note-inline-arity! n b (count params))))
                 env' (reduce (fn [e [n t]] (assoc e n {:poly [:forall tvs preds (zonk t)] :core (if top? (list 'v n) (lv n))}))
                              env all)
                 self-rec? (fn [[n c]] (let [me (lv n)] ((fn occ? [x] (cond (= x me) true (coll? x) (boolean (some occ? x)) :else false)) c)))
@@ -4554,6 +5391,7 @@
                           preds (into (mapv (fn [[c ts]] [c (mapv #(subst skol %) ts)]) (nth s 2)) inner-preds)
                           params (mapv dict-param preds)
                           evb (atom [])
+                          wb (atom [])
                           givens (binding [*ev-binds* evb] (super-closure (mapv vector preds params)))
                           ws (atom [])
                           c (binding [*level* (inc *level*) *wanteds* ws *scoped-tvs* (merge *scoped-tvs* skol)
@@ -4561,10 +5399,13 @@
                               ;; (HF10-P50 (a): the superclasses' equalities too, ClassDecode a's Share a ~ a)
                               (assume-eqs! (map first givens))
                               (let [[t c] (bind-rhs env b body)] (unify t body) (retry-implications! false) c))]
-                      (solve-with-givens! @ws givens)
+                      (solve-with-givens! @ws givens wb)
+                      (when top? (note-inline-arity! n b (count params)))
                       ;; HF10-P32: a signed local binder's type, as an unsigned one's
                       (when-not top? (note-type! (lv n) s))
-                      (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params (wrap-ev-binds @evb c)))))))]
+                      (list 'bind (bind-core top? n) (if (empty? params)
+                                                       (wrap-ev-binds (mapv (fn [[x t]] [x t]) @wb) c)
+                                                       (list 'lam params (wrap-ev-binds (into @evb (map (fn [[x t]] [x t])) @wb) c)))))))]
     [env (-> psbs (into out1) (into out2))]))
 
 (defn- rename-mono
@@ -4584,7 +5425,10 @@
                  nl (arg v 2)]
              (do (when *tv-kinds*
                    (let [ks (sig-tv-kinds (arg (arg v 3) 2))] (when (seq ks) (swap! *tv-kinds* assoc (nm nl) ks))))
-                 [(nm nl) (sig-type (arg (arg v 3) 2))]))))
+                 (note-kind-anns! (kind-anns (arg (arg v 3) 2) {}))
+                 (let [st (sig-type (arg (arg v 3) 2))]
+                   (note-kind-anns! (ctx-kinds st))
+                   [(nm nl) st])))))
 
 (defn tc-local-binds
   "(HsValBinds ext (ValBindsRn [groups] sigs)) or empty: [env' [(bind ...)...]]"
@@ -4643,9 +5487,15 @@
   [e]
   (let [tvn (tv-names-of [(arg e 3) (arg e 4) (arg e 6)])
         names (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) tvn)
-        tvs (zipmap tvn (map (fn [x] [:tv x]) names))]
-    {:tvs names
-     :lhs (vec (for [a (arg e 4) :when (and (seq? a) (= 'HsValArg (first a)))] (hs-type tvs (arg a 2))))
+        tvs (zipmap tvn (map (fn [x] [:tv x]) names))
+        lhs (vec (for [a (arg e 4) :when (and (seq? a) (= 'HsValArg (first a)))] (hs-type tvs (arg a 2))))
+        ;; (hs-r7, T24245: a wildcard on the left, Assert 'True _ = (), is a variable the equation binds, as GHC's renamer
+        ;; names it; hs-type's meta for it left the branch unmatchable, an argument never equal to a free variable)
+        wild (vec (distinct (mapcat metas-of lhs)))
+        wnames (mapv (fn [i] (str "_w" (inc i))) (range (count wild)))]
+    (doseq [[i w] (map vector wild wnames)] (unify [:mv i] [:tv w]))
+    {:tvs (into names wnames)
+     :lhs (mapv zonk lhs)
      :rhs (hs-type tvs (arg e 6))}))
 
 (defn- fam-decl!
@@ -4735,6 +5585,8 @@
                                                                      k (binding [*errors* nil] (try (hs-type tvs (arg kb 2)) (catch Throwable _ nil)))]
                                                                :when (and n k (get tvs n))]
                                                            [(second (get tvs n)) k]))))
+                                   ;; hs-own-stg-3 (a): every annotated variable's kind, (a :: k) in the result too
+                                   :kinds (kind-anns [(arg cv 3) (arg cv 4) (arg cv 5) (arg cv 6) (arg cv 7)] tvs)
                                    ;; the result's tycon: a data instance's family (its constructors build the family's
                                    ;; application, as dataConOrigResTy), else the type's own
                                    :tycon (when (= :tc (first res)) (second res))}
@@ -4816,7 +5668,7 @@
       (swap! *classes* assoc-in [cn :kind] (reduce (fn [acc k] (fn-ty k acc)) constraint-kind (reverse (get ckinds cn)))))
     (doseq [[cn ci] classes]
       (binding [*kind-env* (atom (zipmap (:tvs ci) (get ckinds cn)))]
-        (doseq [[c ts] (:supers ci)] (soft-unify (kind-of (if (= :cvar c) (first ts) [:tc c ts])) constraint-kind))
+        (doseq [[c ts] (:supers ci) :when (not= :qc c)] (soft-unify (kind-of (if (= :cvar c) (first ts) [:tc c ts])) constraint-kind))
         (doseq [mn (:methods ci) :let [t (get @*genv* mn)] :when (and (vector? t) (= :forall (first t)))]
           (soft-unify (kind-of (nth t 3)) [:tc type-tc [(fresh-meta)]]))))
     (doseq [[n info] own c (:cons info) :let [t (get @*genv* c)] :when t]
@@ -5108,11 +5960,44 @@
                    tn (when (= :tc (first t0)) (second t0))
                    info (or (get @*ddescs* tn) (iface-desc tn))]
              :when (and info (= :tc (first head)))]
-         {:cls cls :tn tn :tvs (nth st 1) :ts ts :ctx (nth st 2) :ctor? (contains? constructor-classes (occ cls))
+         ;; (a class of type constructors: a known one, or a head whose type is applied to fewer arguments than it has
+         ;; parameters, base's deriving newtype instance Contravariant f => Contravariant (Alt f): Alt f a's representation
+         ;; f a eta-reduced to f, as GHC.Tc.Deriv's deriveTyData drops the last argument; before, Contravariant (f a) was
+         ;; wanted, "no representation dictionary")
+         {:cls cls :tn tn :tvs (nth st 1) :ts ts :ctx (nth st 2)
+          :ctor? (or (contains? constructor-classes (occ cls))
+                     (and (= :tc (first (last ts))) (< (count (nth (last ts) 2)) (count (:names info)))))
           :desc (assoc (:desc info) :var (last (:names info))) :stock? (if kw (= kw :stock) (contains? deriv/generators (occ cls))) :standalone? true
           :strat kw :anyclass? (= kw :anyclass) :via (when via (nth (sig-type via) 3)) :dnames (:names info)})))
 
 (declare head-occs)
+
+(defn- class-last-arity
+  "hs-r5: the arity of a class's last parameter's kind (Type -> Type: 1; Type: 0), for a class whose kind the inference
+  did not give (an imported one): its parameters' kinds from its methods' types (ctx-kinds' rule), else from a
+  superclass whose last argument is that parameter; nil when not known"
+  ([cls] (class-last-arity cls 4))
+  ([cls depth]
+   (let [ci (some-> *classes* deref (get cls))
+         ck (when ci (binding [*errors* nil] (try (second (tycon-kind cls)) (catch Throwable _ nil))))
+         arrows (fn [k] (loop [k (expand (prune k)) out []]
+                          (if (and (= :tc (first k)) (= fun-tc (second k)) (= 2 (count (nth k 2))))
+                            (recur (expand (prune (second (nth k 2)))) (conj out (first (nth k 2))))
+                            [out k])))]
+     (when (and ci ck (seq (:tvs ci)))
+       (let [[pks _] (arrows ck)]
+         (when (= (count pks) (count (:tvs ci)))
+           (binding [*kind-env* (atom (zipmap (:tvs ci) pks))]
+             (doseq [mn (:methods ci) :let [mt (some-> *genv* deref (get mn))] :when (vector? mt)]
+               (soft-unify (kind-of (if (= :forall (first mt)) (nth mt 3) mt)) star-kind)))
+           (let [[as k] (arrows (zonk (last pks)))]
+             (cond
+               (not= :mv (first k)) (count as)
+               (pos? depth)
+               (some (fn [[sc sts]] (when (and (vector? sc) (seq sts) (= [:tv (last (:tvs ci))] (prune (last sts))))
+                                      (class-last-arity sc (dec depth))))
+                     (:supers ci))
+               :else nil))))))))
 
 (defn- derive-all!
   "The derived instances of the module (deriving clauses and standalone declarations): their heads entered, the
@@ -5126,11 +6011,23 @@
                                    k (if (= :forall (first k)) (nth k 3) k)]
                                (and (= :tc (first k)) (= fun-tc (second k))
                                     (let [p (zonk (first (nth k 2)))] (and (= :tc (first p)) (= fun-tc (second p)))))))
-        reqs (mapv (fn [r] (if (and (not (:ctor? r)) (not (:standalone? r)) (not (:anyclass? r)) (seq (:tvs r))
-                                    (= 1 (count (:ts r))) (= :tc (first (first (:ts r)))) (ctor-kind? (:cls r)))
+        reqs (mapv (fn [r] (cond
+                             (and (not (:ctor? r)) (not (:standalone? r)) (not (:anyclass? r)) (seq (:tvs r))
+                                  (= 1 (count (:ts r))) (= :tc (first (first (:ts r)))) (ctor-kind? (:cls r)))
                              (let [res (first (:ts r))]
                                (assoc r :ctor? true :tvs (vec (butlast (:tvs r))) :ts [[:tc (second res) (vec (butlast (nth res 2)))]]))
-                             r))
+                             ;; hs-r5: an imported class of type constructors, its last parameter's kind from its methods' types
+                             ;; (or its superclasses'): a DeriveAnyClass request (T5462Yes1's deriving GFunctor), a newtype's
+                             ;; (T4809's deriving MonadIO, MonadCont) and a multi-parameter class's (MonadWriter w, MonadState
+                             ;; s): the type's last argument dropped, as deriveTyData drops it
+                             (and (not (:ctor? r)) (not (:standalone? r)) (seq (:tvs r))
+                                  (let [res (last (:ts r))] (and (= :tc (first res)) (seq (nth res 2)) (= :tv (first (last (nth res 2))))
+                                                                 (some #(= % (second (last (nth res 2)))) (:tvs r))))
+                                  (= 1 (class-last-arity (:cls r))))
+                             (let [res (last (:ts r)) x (second (last (nth res 2)))]
+                               (assoc r :ctor? true :tvs (vec (remove #(= % x) (:tvs r)))
+                                      :ts (conj (vec (butlast (:ts r))) [:tc (second res) (vec (butlast (nth res 2)))])))
+                             :else r))
                    @*derivs*)
         reqs (into reqs (standalone-requests decls))
         ;; HF10-P54 (a): a multi-parameter class's derived instance named by every argument of its head (newDFunName's
@@ -5159,14 +6056,20 @@
                    ;; only: Data.Foldable1's Foldable1 (Alt f) stays as before)
                    (when (and (:newtype? (:desc r))
                               (or (not (:standalone? r))
-                                  (and (not (contains? deriv/generators (occ (:cls r)))) (not (:ctor? r))
-                                       ;; the head the newtype at all its parameters (a class of types)
-                                       (>= (count (nth (first (:ts r)) 2 [])) (count (:dnames r)))
+                                  (and (not (contains? deriv/generators (occ (:cls r))))
+                                       ;; the head the newtype at all its parameters (a class of types), or at all but the
+                                       ;; last (a class of type constructors: GHC.Internal.Generics' deriving instance
+                                       ;; Applicative f => Applicative (Rec1 f), M1's; Data.Foldable1's Foldable1 (Alt f);
+                                       ;; the eta reduction checked below), which kept the class's defaults and lacked pure,
+                                       ;; empty, <|> and >>=
+                                       (if (:ctor? r)
+                                         (= (inc (count (nth (last (:ts r)) 2 []))) (count (:dnames r)))
+                                         (>= (count (nth (first (:ts r)) 2 [])) (count (:dnames r))))
                                        (contains? *exts* "GeneralizedNewtypeDeriving")))
                               (or (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r)))
                                   (and (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))
                                        ;; GHC's non_coercible_class: Read, Show, Generic, Generic1 (and Data, Lift) stock
-                                       (not (contains? #{"Show" "Read" "Generic" "Generic1"} (occ (:cls r))))
+                                       (not (contains? #{"Show" "Read" "Generic" "Generic1" "Data" "Lift"} (occ (:cls r))))
                                        ;; a class of type constructors by the newtype only when the representation
                                        ;; eta-reduces (GHC.Tc.Deriv's eta_ok: newtype T a = MkT (f a)); Par1 p = Par1 p
                                        ;; does not, and is derived stock
@@ -5211,6 +6114,23 @@
                                                                                     (deriv/fun-subtypes (:var (:desc r)) t)))
                                                                     (:tys c)))
                                                      (:cons (:desc r)))))
+                   ;; Data: GHC.Tc.Deriv.Infer's sc_constraints too, the superclass Typeable at the head decomposed by the
+                   ;; Typeable solver (doTyApp, doTyConApp) to its type variables' (Data.Functor.Compose's Typeable f,
+                   ;; Typeable g, Typeable a: before, Typeable (Compose f g a) was a superclass no given solved), a Typeable
+                   ;; x a Data x of the context implies left out (mkMinimalBySCs)
+                   (and (= "Data" (occ (:cls r))) (= "GHC.Internal.Data.Data" (nmod (:cls r))))
+                   (let [fields (distinct-last (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
+                                                       (:cons (:desc r))))
+                         tvs-in (fn tvs-in [t] (let [t (expand (zonk t))]
+                                                 (case (first t)
+                                                   :tv [t]
+                                                   :tc (mapcat tvs-in (nth t 2))
+                                                   :app (concat (tvs-in (nth t 1)) (tvs-in (nth t 2)))
+                                                   [])))
+                         sc (for [x (distinct (tvs-in (first (:ts r))))
+                                  :when (not-any? (fn [[pc pts]] (and (= pc (:cls r)) (= [x] (mapv #(expand (zonk %)) pts)))) fields)]
+                              [cls-typeable [x]])]
+                     (distinct-last (concat sc fields)))
                    :else (distinct-last (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
                                                 (:cons (:desc r))))))]
     ;; HF10-P34: a derived Generic's (Generic1's) representation, the family instance Rep (T a) = Rep_T a
@@ -5244,14 +6164,26 @@
         (when (some (fn [[d c]] (not= c (get cur d))) ctxs)
           (swap! *insts* (fn [is] (mapv (fn [i] (if-let [c (get ctxs (:dfun i))] (assoc i :ctx c) i)) is)))
           (when (< k 20) (recur (inc k))))))
-    (let [ctx-by (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))]
+    (let [ctx-by (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))
+          ;; a stock Data instance's auxiliary bindings, $tT and $cC (gen_Data_binds' DerivDataDataType, DerivDataConstr),
+          ;; top-level bindings of the module (*deriv-aux*), and dataCast1/2 by the type constructor's kind (* -> *, * -> * -> *)
+          data-desc (fn [r]
+                      (if (and (= "Data" (occ (:cls r))) (= "GHC.Internal.Data.Data" (nmod (:cls r))) (not (gnd-of r)) (not (:anyclass? r)))
+                        (let [desc (:desc r) names (deriv/data-aux-names m desc)
+                              k (some-> (get-in @*tycons* [(:tn r) :kind]) zonk deep-expand)
+                              cast (cond (= k (deep-expand (fn-ty star-kind star-kind))) 1
+                                         (= k (deep-expand (fn-ty star-kind (fn-ty star-kind star-kind)))) 2)
+                              desc (assoc desc :data (assoc names :cast cast))]
+                          (when *deriv-aux* (swap! *deriv-aux* into (deriv/data-aux desc)))
+                          desc)
+                        (:desc r)))]
       (vec (for [r reqs]
              {:dfun (dfun r) :tvs (:tvs r) :ctx (get ctx-by (dfun r))
               :cls (:cls r) :ts (:ts r)
               :gnd (gnd-of r)
               :binds (when-not (or (gnd-of r) (:anyclass? r)
                                    (and (generic? r) (= "Generic1" (occ (:cls r))) (not (deriv/gen1-ok? (:desc r)))))
-                       (deriv/derive-binds (occ (:cls r)) (:desc r)))})))))
+                       (deriv/derive-binds (occ (:cls r)) (data-desc r)))})))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -5266,8 +6198,12 @@
         tvs (zipmap tvn (map (fn [x] [:tv x]) names))
         ;; HF10-P48 (a): a variable superclass (UndecidableSuperClasses' class c => IdCt c; the constraint tuples'
         ;; class (c1, c2) => CTuple2 c1 c2) is [:cvar [t]], a field of the dictionary as GHC's (its selector $p1IdCt)
+        ;; (GHC's quantified superclass, QuantifiedConstraints' class (forall a. Eq a => Eq (f a)) => Eq1 f: [:qc [polytype]],
+        ;; a field of the dictionary as any superclass, $p1Eq1 its selector)
         supers (vec (keep (fn [c] (let [p (hs-type tvs c)]
-                                    (case (first p) :tc [(second p) (nth p 2)] :tv [:cvar [p]] nil)))
+                                    (case (first p) :tc [(second p) (nth p 2)] :tv [:cvar [p]]
+                                      :forall (when (qc-head p) [:qc [p]])
+                                      nil)))
                           (let [c (arg d 2)] (when (and (seq? c) (= 'Just (first c))) (lval (second c))))))
         methods (atom []) dsigs (atom {})
         ;; the functional dependencies by parameter position, as an interface's are read (add-things!)
@@ -5362,6 +6298,7 @@
         ;; the method's superclass evidence bound once after its dictionaries (GHC's evidence bindings of the method's
         ;; implication): the givens' superclasses again from the dictionary parameters, each selection a variable
         evb (atom [])
+        wb (atom [])
         givens (if (seq params)
                  (binding [*ev-binds* evb] (super-closure (vec (filter (fn [[_ t]] (some #(= t %) params)) givens))))
                  givens)
@@ -5381,7 +6318,7 @@
             ;; the instance's context's equalities and the method's own (instance (a ~ Char) => IsString [a])
             (assume-eqs! (concat (map first givens) inner))
             (let [[t c] (bind-rhs env b (when-not (= :forall (first body)) body))] (unify t body) (retry-implications! false) c))]
-    (solve-with-givens! @ws givens)
+    (solve-with-givens! @ws givens wb)
     ;; (queue 385: an instance signature with HasCallStack: its given is the class method's stack, pushed)
     (let [push-sp (when (and isig (some #(= cls-callstack %) (tree-seq coll? seq isig))) (lsp isig))
           k (when push-sp (first (keep-indexed (fn [i p] (when (or (= cls-callstack (first p)) (callstack-ip p)) i)) inner)))
@@ -5390,8 +6327,9 @@
                           [(assoc iparams k q)
                            (list 'let [(list 'bind p (push-given-callstack "a type signature in an instance" push-sp q))] c)])
                         [iparams c])
-          ps (into params iparams)]
-      (if (empty? ps) c (list 'lam ps (wrap-ev-binds @evb c))))))
+          ps (into params iparams)
+          wbs (mapv (fn [[x t]] [x t]) @wb)]
+      (if (empty? ps) (wrap-ev-binds wbs c) (list 'lam ps (wrap-ev-binds (into @evb wbs) c))))))
 
 (defn- default-methods
   "A class's default methods: (bind $dmop (lam [$dCls] core))"
@@ -5436,6 +6374,10 @@
         defined (into {} (keep (fn [b] (when-let [n (bind-name b)] [(occ n) b])) binds))
         methods (for [mn (:methods info)]
                   (let [cm (fresh-lv (str "$c" (occ mn)))
+                        ;; its type (the instance's context, then the method's at the head) for the Simplifier's arity:
+                        ;; typeArity through the newtypes, mkEtaWW's binders and casts (instance Semigroup (IO a)'s
+                        ;; $c<> eta-expanded through IO to its State# argument, \d a b s -> .., a void binder)
+                        _ (note-type! cm (let [mty (method-type mn cls ts)] (if (seq ctx) [:forall [] ctx mty] mty)))
                         b (get defined (occ mn))
                         ;; a coerced method whose representation dictionary is one of the instance's own parameters is
                         ;; trivial: GHC's simple optimiser inlines it into the dictionary function
@@ -5680,6 +6622,7 @@
   "Haskell 2010 §4.3.4: each ambiguous meta of the wanteds whose classes are standard, one numeric, defaulted to the
   first of (Integer, Double) that satisfies them all; then every wanted solved"
   [wanteds]
+  (settle-kind-links!)
   (loop [k 0] (when (and (< k 6) *deferred-eqs* (invert-families!)) (recur (inc k))))
   (loop [k 0] (when (and (< k 4) (improve! wanteds)) (recur (inc k))))
   (let [wanteds (map #(under-givens % identity) wanteds)]
@@ -6118,19 +7061,29 @@
                                                          (list 'GRHSs nil [(l (list 'GRHS nil [] (l (list 'HsVar 'NoExtField (rn n)))))]
                                                                (list 'EmptyLocalBinds 'NoExtField))))]))))])))
         ;; queue 369: -fdefer-type-errors (the last of it and -fno-defer-type-errors), the command line's or an OPTIONS_GHC's
-        defer? (= "-fdefer-type-errors" (last (filter #{"-fdefer-type-errors" "-fno-defer-type-errors"} (:fflags (second tree)))))]
+        defer? (= "-fdefer-type-errors" (last (filter #{"-fdefer-type-errors" "-fno-defer-type-errors"} (:fflags (second tree)))))
+        ;; hs-r5: -fdefer-typed-holes (the renamer's holes-deferred?, which -fdefer-type-errors implies)
+        holes? (rename/holes-deferred? (:fflags (second tree)))]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *wrapper-num* (atom (count fexps)) *fstubs* (atom [])
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
-              *tv-kinds* (atom {}) *tc-kinds* (atom {})
+              *tv-kinds* (atom {}) *tc-kinds* (atom {}) *tv-kind-anns* (atom {}) *kind-links* (atom []) *kind-sigs* (atom [])
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
-              *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
+              *derivs* (atom []) *deriv-aux* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
               *implic-eqs* (atom []) *patsyns* (atom {}) *own-fam-insts* (atom []) *iface-meta* (atom {})
               *static-binds* (atom [])
-              *defer* defer? *defer-log* (when defer? (atom []))
+              *defer* defer? *defer-log* (when (or defer? holes?) (atom []))
+              *defer-holes* holes? *holes* (atom []) *gres* (:gres (second tree))
               ;; round 54: the module's role annotations (type role T nominal ...), for Coercible's improvement
               *coercibles* (atom [])
+              ;; the top-level INLINE pragmas active in the -O0 Simplifier's phase (FinalPhase: AlwaysActive, ActiveAfter n)
+              *inline-prags* (into {} (for [s sigs :let [sv (lval s)] :when (= 'InlineSig (con sv))
+                                            :let [ip (arg sv 3) n (nm (arg sv 2))]
+                                            :when (and n (seq? ip) (= 'InlinePragma (first ip)) (seq? (nth ip 2 nil)) (= 'Inline (first (nth ip 2)))
+                                                       (let [act (nth ip 4 nil)] (or (= 'AlwaysActive act) (and (seq? act) (= 'ActiveAfter (first act))))))]
+                                        [n true]))
+              *inline-arities* (atom {})
               *roles* (atom (into {} (for [d decls :let [v (lval d)] :when (= 'RoleAnnotD (con v))
                                            :let [ra (arg v 2) n (nm (arg ra 2))] :when n]
                                        [n (mapv (fn [r] (let [r (lval r)] (if (and (seq? r) (= 'Just (first r))) (str/lower-case (name (second r))) "infer"))) (arg ra 3))])))
@@ -6238,7 +7191,11 @@
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
             insts (into insts (phase :derive (derive-all! m decls)))
-            top-sigs (sigs-of sigs)
+            ;; derived Data's auxiliary bindings, one recursive group with their signatures ($tT :: DataType, $cC :: Constr)
+            top-sigs (into (sigs-of sigs)
+                           (for [[n kind _] @*deriv-aux*]
+                             [n [:forall [] [] [:tc (ext-name "tc" "GHC.Internal.Data.Data" (if (= kind :datatype) "DataType" "Constr")) []]]]))
+            binds (if (seq @*deriv-aux*) (conj (vec binds) (list 'rn/group 'rec (mapv #(nth % 2) @*deriv-aux*))) binds)
             ;; the pattern synonyms' signatures: their pattern types, their builders' types
             _ (doseq [s sigs :let [sv (lval s)] :when (= 'PatSynSig (con sv)) nl (arg sv 2)]
                 (let [info (assoc (patsyn-info (arg sv 3)) :sig true)]
@@ -6255,8 +7212,9 @@
             binds (into (vec (filter hoist? binds)) (remove hoist? binds))
             [env core] (binding [*patsyn-builders* (atom [])]
                          (let [[env core] (phase :binds (reduce (fn [[env out] g]
-                                                                  (let [n0 (count @*errors*) l0 (if *defer-log* (count @*defer-log*) 0)
-                                                                        [env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)]
+                                                                  (let [n0 (count @*errors*) l0 (if *defer-log* (count @*defer-log*) 0) h0 (count @*holes*)
+                                                                        [env1 bs] (tc-group env [(arg g 1) (arg g 2)] top-sigs true)
+                                                                        bs (fill-holes bs h0 g top-sigs env1)]
                                                                     [env1 (into out (defer-errors! bs n0 l0))]))
                                                                 [{} []] binds))]
                            [env (into core (keep (fn [f] (f env)) @*patsyn-builders*))]))
@@ -6337,6 +7295,10 @@
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
+         ;; hs-own-stg-2 (a): every dictionary function's type (the module's and the interfaces'), for the Simplifier's
+         ;; exprType of a dictionary argument
+         :dfun-types (into {} (for [{:keys [dfun tvs ctx head]} @*insts* :when (and dfun head)]
+                                [dfun [:forall (vec tvs) (vec ctx) [:tc (first head) (vec (second head))]]]))
          :core (phase :resolve-core (mapv (comp drop-unused-ev resolve-core) (concat fimports core (remove nil? @*static-binds*) dms ibs sels (typeable-binds m)
                                                                                       (when main-def [(second main-def)]))))
          :main-deferred (first main-def)
@@ -6364,6 +7326,11 @@
                            (w decls false) @acc)
          ;; the module's NOINLINE (and OPAQUE) pragmas' binders: never inlined, never inlined unconditionally (their
          ;; inline activation never active)
+         ;; the INLINE pragmas' binders and their real arities (makeCorePair: an INLINE unfolding of that arity, the binding
+         ;; eta-expanded to it)
+         :inline-arities @*inline-arities*
+         ;; derived Data's auxiliary binders ($tT, $cC), not exported
+         :deriv-aux (set (map first @*deriv-aux*))
          :noinline (let [acc (atom #{})
                          w (fn w [x] (cond (and (seq? x) (= 'InlineSig (first x)))
                                            (let [n (nm (arg x 2))
@@ -6438,7 +7405,7 @@
                           (for [[n info] cl]
                             (str "(class " (name-str n) " [] ["
                                  (str/join " " (for [mn (:methods info)] (str "(" (name-str mn) " \"\" " (type-form (get (:types r) mn)) ")")))
-                                 "] [" (str/join " " (for [[c ts] (:supers info)] (str "(tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "])")))
+                                 "] [" (str/join " " (for [[c ts] (:supers info)] (if (= :qc c) (type-form (first ts)) (str "(tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "])"))))
                                  "] {:tvs " (pr-str (:tvs info)) " :defaults ["
                                  (str/join " " (for [[mn d] (:defaults info)] (str "[" (name-str mn) " " (name-str d) "]"))) "]"
                                  ;; HF10-P33 (a): the default signatures, as the own interfaces carry them

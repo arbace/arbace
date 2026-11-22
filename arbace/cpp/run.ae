@@ -138,6 +138,72 @@
 
 ;; runtime-ci-key end
 
+(defn read-lib-opts
+  "read-lib-opts DIR LIST THREADS: read-lib's for C units with their own options (pp-ref's libiberty, doc/cpp/CPP-SURVEY.md, \"As built:
+  pp-ref\"): each line of LIST NAME PATH OPTIONS (the options' words separated by spaces, after the lowered C's) read into DIR,
+  DIR/read.tsv and DIR/index.edn written as read-lib's. Outside runtime-ci's key: the runtime's read is read-lib's alone."
+  [h ^String dir ^String list threads]
+  (let [lines (mapv #(str/split % #"\t") (remove str/blank? (str/split-lines (slurp list))))
+        q (ConcurrentLinkedQueue. ^java.util.Collection lines)
+        res (ConcurrentHashMap.)
+        one (fn [[n p o]]
+                      (let [f (File. ^String p)
+                            fc (host/file-config (into opts (when (seq o) (str/split (str/trim o) #"\s+"))) "gnu23")
+                            rd (try (rc/read-c (host/config h fc (.getParent f)) fc (.getName f) false) (catch Throwable e {:error [(str e)]}))
+                            e (cond
+                                (:error rd) (str "read-error: " (str/join "; " (take 2 (:error rd))))
+                                (:refused rd) (str "read-refused: " (name (:refused rd)) ": " (:message rd))
+                                :else (do (doseq [[pp t] (rc/unit-texts rd (.getName f))]
+                                            (let [out (if (str/starts-with? pp "c/h/") (str dir "/forms/" pp) (str dir "/forms/" n ".ae"))]
+                                              (when-not (and (str/starts-with? pp "c/h/") (.exists (File. out)))
+                                                (spit-mk out t))))
+                                          (spit-mk (str dir "/forms/" n ".units") (pr-str (vec (map str (keys (:units rd))))))
+                                          nil))]
+                        (str/join "\t" [n (if e "error" "ok") (clean (or e "")) "0"])))
+        workers (doall (for [_ (range threads)]
+                         (future (loop [] (when-let [l (.poll q)] (.put res (first l) (one l)) (recur))))))
+        _ (doseq [w workers] @w)
+        rows (map #(.get res (first %)) lines)]
+    (spit (str dir "/read.tsv") (str (str/join "\n" rows) "\n"))
+    (let [ok (for [[n st] (tsv (str dir "/read.tsv")) :when (= st "ok")] n)
+          ix (into (sorted-map)
+                   (for [n ok]
+                     (let [u (load-unit dir n)
+                           all (concat (:forms u) (mapcat :forms (vals (:units u))))]
+                       [n {:defs (musl/unit-defs (:forms u)) :refs (set (musl/refs all))}])))]
+      (spit (str dir "/index.edn") (pr-str ix))
+      (let [bad (for [[n st e] (tsv (str dir "/read.tsv")) :when (not= st "ok")] [n e])]
+        (doseq [[n e] bad] (println "cppi: not read:" n e))
+        (println "cppi: read" (count ok) "units of" (count lines) "into" dir)
+        (empty? bad)))))
+
+(defn c-unit
+  "DECISION cpp-rt-own-1 (a) (bin/cppi's runtime_ours_c): each directory D of LIST holds a runtime C unit's own source as its
+  lowered C (D/lowered.c, its quoted headers beside it), read by repr/c as read-one reads a unit of ci's library and checked by ci's
+  checker as check-lib-unit checks one: D/rt.status `ok` or the refusal, and D/c-defs.txt, the external names its forms define (the
+  linker's, arbace.c.musl/unit-defs), one a line, which runtime-judge's names level holds to the pack's IR. True when every unit
+  read and checked."
+  [h ^String list]
+  (every? identity
+          (doall
+           (for [^String d (remove str/blank? (str/split-lines (slurp list)))]
+             (let [f (File. d "lowered.c")
+                   fc (host/file-config opts "gnu23")
+                   st (try
+                        (let [rd (rc/read-c (host/config h fc (.getParent f)) fc (.getName f) false)]
+                          (cond
+                            (:error rd) (str "read-error: " (str/join "; " (take 2 (:error rd))))
+                            (:refused rd) (str "read-refused: " (name (:refused rd)) ": " (:message rd))
+                            :else (let [u (crun/check-read h fc rd)]
+                                    (if (seq (:errors u))
+                                      (str "check-error: " (str/join "; " (take 2 (:errors u))))
+                                      (do (spit (str d "/c-defs.txt") (str (str/join "\n" (sort (keys (musl/unit-defs (:forms rd))))) "\n"))
+                                          "ok")))))
+                        (catch Throwable e (str "error: " e)))]
+               (spit (str d "/rt.status") (str (clean st) "\n"))
+               (println (str "cppi: c-unit " d ": " (clean st)))
+               (= st "ok"))))))
+
 (defn library
   "A library of read units: {:dir :index :by-name {name [[unit weak] ...]} :checked (atom {unit checked})}."
   [^String dir]
@@ -543,7 +609,7 @@
                  [st (:message r "")]))))
 
 (defn -main
-  "bin/cppi's ci steps: read-lib DIR LIST THREADS, lower-lib DIR LIST THREADS, check-c LIST THREADS, nodes-list WORK LIST RTLIB THREADS, compile-list OUT LIST RTLIB THREADS,
+  "bin/cppi's ci steps: read-lib DIR LIST THREADS, lower-lib DIR LIST THREADS, c-unit LIST, check-c LIST THREADS, nodes-list WORK LIST RTLIB THREADS, compile-list OUT LIST RTLIB THREADS,
   nodes RTLIB EXTRA-LIB OUT LOWERED.C."
   [verb & args]
   ;; CP400 (a) (taken overnight, round 52; RIND4 (a)'s for C++): C's target description as bin/cppi's c_target_host names it
@@ -552,6 +618,7 @@
         th #(Long/parseLong (or % "3"))]
     (case verb
       "read-lib" (let [[dir list t] args] (System/exit (if (read-lib h dir list (th t)) 0 1)))
+      "read-lib-opts" (let [[dir list t] args] (System/exit (if (read-lib-opts h dir list (th t)) 0 1)))
       ;; lower-lib DIR LIST THREADS: each line of LIST (NAME LL) lowered beside its IR, then read as read-lib does
       "lower-lib" (let [[dir list t] args
                         rows (mapv #(str/split % #"\t") (remove str/blank? (str/split-lines (slurp list))))
@@ -559,6 +626,7 @@
                     (doseq [b bad] (println "cppi: not lowered:" b))
                     (spit (str dir "/read.list") (str/join (for [[n ll] rows] (str n "\t" (.getParent (File. ^String ll)) "/lowered.c\n"))))
                     (System/exit (if (and (empty? bad) (read-lib h dir (str dir "/read.list") (th t))) 0 1)))
+      "c-unit" (let [[list] args] (System/exit (if (c-unit h list) 0 1)))
       "check-c" (let [[list t] args] (check-c h list (th t)))
       "nodes-list" (let [[work list rt t] args] (nodes-list h work list rt (th t)))
       "compile-list" (let [[out list rt t] args] (compile-list h out list rt (th t)))

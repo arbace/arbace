@@ -416,3 +416,76 @@ records by their canonical constructor in place of method handles, no JFR event)
 compiles them patched into java.base, repr/java reads them. Left for the builds: j2g's `SerialNew` per Serializable class,
 jrt's `ClassInfo` field, the sources into the world (`bin/jrt-convert update`), the member tables' private hooks, then
 Clojure's suite's `serialization` and Java's class. CDR5's measurement comes first, as decided.
+
+## As built (2026-11-21, branch `clj-rows-1122`)
+
+The burst's stream K1, from mac/next `863bdaea1`; one build of the gate's executables (`3dc7bacc2ceb`, 9,340 s) and the
+runs recorded from it.
+
+- **CDR10's end: fns serialize** (doc/VENDOR-NOTES.md, hand change 36). An evaluated fn (`Compiler$EvalFn`) and a compiled
+  one (`AOTFn`, `AOTRestFn`) write a `Compiler$FnSer`: the class's name, the closed-over values, meta, kind and required
+  arity; `readResolve` makes the fn again where its class is known, as the JVM resolves the class by name (an evaluated fn's
+  FnExpr kept weakly by its class's name once one of its fns is serialized; a compiled fn's code object made anew by jrt's
+  `NewAOTBody` over the Go type `AOTFnFields` records). JCS384's (a) (by design at eval) and (b) (the source form) were not
+  needed. Proxies refuse serialization as upstream's generate-proxy does (private `writeObject`/`readObject`).
+  Measured: the eval level's `serialization` 9 of 9 (77 assertions), the oracle's `harvest/java_interop.ae:14`; at the AOT
+  level 8 of 9, `function-serialization`'s two fns that close over nothing erring: their class's code object type is not
+  recorded by the build's c2j (`AOT.fnClass` got nil), which `6fdb262a0` fixes for the next build (`:fn-code-type`, deferred;
+  found by a smoke test on the branch's first build, `(partial + 1 2)`).
+- **CLJ-1208 at the AOT level** (hand change 37): c2j gives a `:load-ns true` deftype a static initializer requiring its
+  namespace; `bin/clojure-tests --aot` compiles `compilation.load-ns` just before `compilation`: clj-1208 passes.
+- **CDR1, the locales**: `8a3d28662` cherry-picked off the dropped CDR5, jdk/ converted with JRT_LOCALES=common (126 bundles,
+  `bin/jrt-convert update`, 1,703 s): the oracle's 42 locale cases pass. `java.lang.SecurityManager` in the closure (JDK 26
+  keeps the class): native.ae:412 passes. The oracle: 22,733 of 22,741 match, 8 known (52 before).
+- **The AOT level's recorded rows**: the queue 361/399 gen-class (7 of 7), CDR2's typing (compilation 32 of 32 with clj-1208),
+  CDR4 (b)'s test-dot, test-bean and java.sql (javadoc 5 of 5), and clojure-xml through `:jdk-extra` (round 53 (1)) pass;
+  reflect's invoke-checks-accessibility runs and errs (StAX: `XMLStreamReaderImpl` refused for want of
+  `com.sun.xml.internal.stream.events.EntityDeclarationImpl` in `test/clojure/jdk-extra/java-xml-classes.txt`, so FactoryFinder
+  finds no `XMLInputFactoryImpl`; `:xml-stream`, deferred). At the eval level the extended executable passes clojure-xml too
+  (the run `.tmp/clojure-tests/xml-extra` of the branch, not recorded: CDR16).
+- **Memory**: the AOT compile step on the extended test executable (every embedded namespace and the suite prepared, 41,828
+  classes compiled by c2j in one process, GOGC 400 and no limit) reached 40 GB at 03:18 and took the host to 4 GB free; not a
+  test (the suite's processes stay near 1.5 GiB). `bin/clojure-tests --aot`'s compiling now runs under the build's
+  `compile_memlimit` (GOMEMLIMIT 16GiB), as bin/arbace-go's host compilation of the same namespaces does.
+
+The cells (pass / by design / deferred): read 908 / 2 / 0 (unchanged); eval 21,066 / 24 / 44 to 21,119 / 13 / 2; AOT
+814 / 14 / 10 to 831 / 5 / 2. Clojure's completeness 99.1 to 99.7 (99.6 to 99.9 without by design).
+
+## Proposed (2026-11-21): CDR12-CDR16, the classes left
+
+What the burst of 2026-11-21 (branch `clj-rows-1122`, "As built (2026-11-21)" below) leaves not passing, each a decision:
+
+**CDR12. java-interop's `test-proxy-non-serializable` (1 case at each level, by design, `:swing`).** Its first assertion
+passes since hand change 36 (a proxy of `Object` and `Serializable` refuses serialization), its third is skipped upstream for
+Java 26 (no serialized proxy recorded for it); its second makes `arbace.inspector/list-model`, a proxy of
+`javax.swing.table.AbstractTableModel`. (a) `AbstractTableModel` with `TableModel`, `javax.swing.event.EventListenerList`,
+`TableModelListener` and `TableModelEvent` among the shipped world's added module sources (five plain classes, as CDR4 (b)
+took `Point` and `Color`), `AbstractTableModel` among the proxy superclasses (`arbace.j2g.dyn/proxy-supers`) and
+`arbace.inspector`'s list-model left uncut: the test passes at both levels, 0.5-1 day and a build; (b) keep Swing cut (D6).
+Recommended (a): it is a table model, not a desktop.
+
+**CDR13. repr/clojure's `:reader-conditionals` rule (the read cell, 1 rule, by design).** A `.cljc` read into a `.ae` keeps its
+`:clj` reading; `read --full` already records the conditionals as a comment block that print turns back into the `.cljc`
+byte for byte. (a) The record always written (`read`'s default for a `.cljc` becoming a `.ae` is `--full`'s), the rule
+`:reversible`, the round trip's `:suite-ae` and `:libs-ae` corpora expecting the `.cljc` back: read 909/910; (b) keep it one-way
+(the review of 2026-11-05: "Keep"). Recommended (a) if a comment block at the end of a translated `.cljc` is acceptable.
+
+**CDR14. repr/clojure's `:security-manager` rule (the read cell, 1 rule, by design).** Since this round
+`java.lang.SecurityManager` is in the shipped world (the oracle's native.ae:412 passes). (a) `SecurityManager` among RT's
+default imports again (hand change 11 reversed: JDK 26 keeps the class, JEP 486 disables what it guards) and the rule dropped
+from the table, with its control and doc/REPR-CLOJURE.md's text: read 910/910 with CDR13 (a); (b) keep the rule. Recommended (a).
+
+**CDR15. The evaluator's primitive interfaces (eval, 3 oracle cases, by design, `:q1-boxed-prims`).** native.ae's three
+call `.invokePrim` or test `instance? IFn$LL` on a fn made at run time. (a) Q1 (b): an evaluated fn with a primitive arglist
+made a Dyn object implementing its `IFn$LL`/`IFn$DD`... interface, `invokePrim` running the evaluator and unboxing (3-5 days, the
+evaluator's call path); (b) keep Q1 (a) (the user, 2026-10-09). The decision is the user's (it reverses Q1 (a)).
+
+**CDR16. clojure-xml and reflect's invoke-checks-accessibility at the eval level (2 cases, deferred).** Round 53 (1)'s
+DECISION, still open: (a) a `--full` step builds `--jdk-extra-build` and the eval reference takes their rows from it; (b) java.xml
+in the test build; (c) the eval rows stay deferred, the AOT level alone passes them. The evidence ("As built (2026-11-21)"):
+clojure-xml passes at both levels on java.xml's `:jdk-extra`; invoke-checks-accessibility errs at both until StAX's reader
+closes (`EntityDeclarationImpl` and its closure added to `java-xml-classes.txt`: deferred work, not a decision).
+
+Truly by design, unchanged: `class-files` (test-proxy-method-order and gen-interface-source-file read class files with ASM;
+clj-1208 at the eval level, CDR8 (b)), `tools-deps`, `runtime-source` (AOT), `identity-hash`, `main-since-v4`,
+`method-invoke-message` (RPS19 (a)), `security-providers` (eight providers, each a module of its own).

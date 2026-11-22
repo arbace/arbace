@@ -1200,11 +1200,17 @@
 (defn object-finalize?
   "Is node an instance call of Object.finalize() itself: no class from the receiver's type up declares
   finalize() (the analysis resolved the method to Object's)? invoke-val translates it as Object's empty
-  body (AT10)."
+  body (AT10). The owner may be the receiver's class rather than Object (queue 517: ProtectedAccess_3's
+  Outer.this.finalize() from an anonymous class, through the analysis's accessor, whose unaccessed call names Outer):
+  it is Object's when no class of its superclass chain below Object declares finalize()."
   [node]
   (and (= :invoke (:op node)) (not= :static (:kind node))
-       (= "java/lang/Object" (or (:owner (:method node)) (:owner node)))
-       (= ["finalize" "()V"] [(:name node) (:desc node)])))
+       (= ["finalize" "()V"] [(:name node) (:desc node)])
+       (let [o (or (:owner (:method node)) (:owner node))]
+         (and (string? o) (not (str/starts-with? o "["))
+              (not-any? (fn [c] (and (not= "java/lang/Object" c)
+                                     (some #(and (= "finalize" (:name %)) (= "()V" (:desc %))) (:methods (env/info c)))))
+                        (env/superclass-chain o))))))
 
 (defn receiver-null-check
   "The null check of value tv, a call Go takes as a statement: jrt.NN, typed *T, when tv's Go type is a pointer
@@ -1221,7 +1227,8 @@
         mm (:method node)
         mowner (or (:owner mm) owner)
         [ps r] (t/parse-method-desc desc)
-        base (nm/method-base name desc)
+        ;; an instance method's: its declaration's family name (JCS122, m/vbase)
+        base (if (= kind :static) (nm/method-base name desc) (m/vbase mowner name desc))
         rv (fn [x] (v x (if (= r "V") "V" r)))]
     (cond
       ;; VarHandles (§8.5): fences, the lookup, access modes on constant handles
@@ -2470,8 +2477,17 @@
         params (:params node)
         [ips iret] (t/parse-method-desc (:inst-desc node))
         psyms (vec (for [i (range (count ps))] (fresh (str "p" i))))
+        ;; a serializable lambda's captures that are no Go local here (a local or anonymous class's captured local, read
+        ;; through its field: (:captured *f*)): each a Go local of the site, bound to that field's value, which the body
+        ;; and the factory's caps then name, as javac captures the variable itself (queue 517: SerializedLambdaInLocalClass,
+        ;; t06258, was Go's "undefined: x")
+        via (when (serial-site? node)
+              (filter #(get (:captured *f*) (:id %)) @(:captures (:boundary node))))
+        _ (doseq [cb via]
+            (decl! (binding-sym cb) (gotype (:type cb)) (get (:captured *f*) (:id cb))))
         fnf (binding [*f* (assoc *f* :fn-id (gensym "lambda") :method-ret iret :method-fn nil :try-frame nil
-                                 :targets {} :ctor false :sync false :locked-this false :clinit false)]
+                                 :targets {} :ctor false :sync false :locked-this false :clinit false
+                                 :captured (apply dissoc (:captured *f*) (map :id via)))]
               (let [*f2 (assoc *f* :method-fn (:fn-id *f*))]
                 (binding [*f* *f2]
                   (let [body (with-block
@@ -2531,8 +2547,8 @@
                                 x))))
         [mps mr] (t/parse-method-desc (:desc node))
         psyms (vec (for [i (range (count ps))] (fresh (str "p" i))))
-        base (nm/method-base (:name node) (:desc node))
         owner (:owner node)
+        base (if (#{:bound :unbound} kind) (m/vbase owner (:name node) (:desc node)) (nm/method-base (:name node) (:desc node)))
         callf (fn []
                 (let [args (case kind
                              :unbound (map (fn [p sp md] (convert-ref-or-prim p sp md)) (rest psyms) (rest ps) mps)

@@ -1,0 +1,167 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/ch/AsynchronousChannelGroupImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.nio.channels AsynchronousChannelGroup Channel)
+        '(java.nio.channels.spi AsynchronousChannelProvider)
+        '(java.util Objects Queue)
+        '(java.util.concurrent ConcurrentLinkedQueue
+                               Executor
+                               ExecutorService
+                               Executors
+                               Future
+                               RejectedExecutionException
+                               ScheduledThreadPoolExecutor
+                               TimeUnit)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicInteger))
+
+(defclass ^:abstract AsynchronousChannelGroupImpl
+  :extends AsynchronousChannelGroup
+  :implements [Executor]
+
+  (field ^:private ^:static ^:final ^int internalThreadCount
+    (Integer/getInteger "sun.nio.ch.internalThreadPoolSize" 1))
+
+  (field ^:private ^:final ^ThreadPool pool)
+
+  (field ^:private ^:final ^AtomicInteger threadCount (AtomicInteger.))
+
+  (field ^:private ^:final ^ScheduledThreadPoolExecutor timeoutExecutor)
+
+  (field ^:private ^:final ^{:tag (Queue Runnable)} taskQueue)
+
+  (field ^:private ^:final ^AtomicBoolean shutdown (AtomicBoolean.))
+
+  (field ^:private ^:final shutdownNowLock (Object.))
+
+  (field ^:private ^:volatile ^boolean terminateInitiated)
+
+  (constructor [this ^AsynchronousChannelProvider provider ^ThreadPool pool]
+    (super. provider)
+    (set! (.-pool this) pool)
+    (if (.isFixedThreadPool pool) (set! taskQueue (ConcurrentLinkedQueue.)) (set! taskQueue nil))
+    (set! (.-timeoutExecutor this)
+          (cast ScheduledThreadPoolExecutor
+                (Executors/newScheduledThreadPool 1 (ThreadPool/defaultThreadFactory))))
+    (.setRemoveOnCancelPolicy (.-timeoutExecutor this) true))
+
+  (method ^:final executor ^ExecutorService [this] (.executor pool))
+
+  (method ^:final isFixedThreadPool ^boolean [this]
+    (.isFixedThreadPool pool))
+
+  (method ^:final fixedThreadCount ^int [this]
+    (if (.isFixedThreadPool this)
+        (.poolSize pool)
+        (unchecked-add-int (.poolSize pool) internalThreadCount)))
+
+  (method ^:private bindToGroup ^Runnable [this ^:final ^Runnable task]
+    (let [thisGroup this]
+      (anon Runnable []
+        (method ^:public run ^void [this]
+          (Invoker/bindToGroup thisGroup)
+          (.run task)))))
+
+  (method ^:private startInternalThread ^void [this ^:final ^Runnable task]
+    (.start (.newThread (ThreadPool/defaultThreadFactory) task)))
+
+  (method ^:protected ^:final startThreads ^void [this ^:mutable ^Runnable task]
+    (when-not (.isFixedThreadPool this)
+      (loop [^int i 0]
+        (when (< i internalThreadCount)
+          (.startInternalThread this task)
+          (.incrementAndGet threadCount)
+          (recur (unchecked-inc-int i)))))
+    (when (> (.poolSize pool) 0)
+      (set! task (.bindToGroup this task))
+      (try
+        (loop [^int i 0]
+          (when (< i (.poolSize pool))
+            (.execute (.executor pool) task)
+            (.incrementAndGet threadCount)
+            (recur (unchecked-inc-int i))))
+        (catch RejectedExecutionException x))))
+
+  (method ^:final threadCount ^int [this] (.get threadCount))
+
+  (method ^:final threadExit ^int [this ^Runnable task ^boolean replaceMe]
+    (when replaceMe
+      (try
+        (if (Invoker/isBoundToAnyGroup)
+            (.execute (.executor pool) (.bindToGroup this task))
+            (.startInternalThread this task))
+        (return (.get threadCount))
+        (catch RejectedExecutionException x)))
+    (.decrementAndGet threadCount))
+
+  (method ^:abstract executeOnHandlerTask ^void [this ^Runnable task])
+
+  (method ^:final executeOnPooledThread ^void [this ^Runnable task]
+    (if (.isFixedThreadPool this)
+        (.executeOnHandlerTask this task)
+        (.execute (.executor pool) (.bindToGroup this task))))
+
+  (method ^:final offerTask ^void [this ^Runnable task]
+    (.offer taskQueue task))
+
+  (method ^:final pollTask ^Runnable [this]
+    (when (some? taskQueue) (cast Runnable (.poll taskQueue))))
+
+  (method ^:final schedule ^{:tag (Future ?)} [this ^Runnable task ^long timeout ^TimeUnit unit]
+    (try
+      (.schedule timeoutExecutor task timeout unit)
+      (catch RejectedExecutionException rej
+        (when-not terminateInitiated (throw (AssertionError. rej))))))
+
+  (method ^:public ^:final isShutdown ^boolean [this] (.get shutdown))
+
+  (method ^:public ^:final isTerminated ^boolean [this]
+    (.isTerminated (.executor pool)))
+
+  (method ^:abstract isEmpty ^boolean [this])
+
+  (method ^:abstract attachForeignChannel :throws [IOException] [this ^Channel channel
+                                                                 ^FileDescriptor fdo])
+
+  (method ^:abstract detachForeignChannel ^void [this key])
+
+  (method ^:abstract closeAllChannels :throws [IOException] ^void [this])
+
+  (method ^:abstract shutdownHandlerTasks ^void [this])
+
+  (method ^:private shutdownExecutors ^void [this]
+    (.shutdown (.executor pool))
+    (.shutdown timeoutExecutor))
+
+  (method ^:public ^:final shutdown ^void [this]
+    (when-not (.getAndSet shutdown true)
+      (when-not (not (.isEmpty this))
+        (locking shutdownNowLock
+          (when-not terminateInitiated
+            (set! terminateInitiated true)
+            (.shutdownHandlerTasks this)
+            (.shutdownExecutors this))))))
+
+  (method ^:public ^:final shutdownNow :throws [IOException] ^void [this]
+    (.set shutdown true)
+    (locking shutdownNowLock
+      (when-not terminateInitiated
+        (set! terminateInitiated true)
+        (.closeAllChannels this)
+        (.shutdownHandlerTasks this)
+        (.shutdownExecutors this))))
+
+  (method ^:final detachFromThreadPool ^void [this]
+    (when (.getAndSet shutdown true) (throw (AssertionError. "Already shutdown")))
+    (when-not (.isEmpty this) (throw (AssertionError. "Group not empty")))
+    (.shutdownHandlerTasks this))
+
+  (method ^:public ^:final awaitTermination :throws [InterruptedException] ^boolean [this
+                                                                                     ^long timeout
+                                                                                     ^TimeUnit unit]
+    (.awaitTermination (.executor pool) timeout unit))
+
+  (method ^:public ^:final execute ^void [this ^Runnable task]
+    (Objects/requireNonNull task "task")
+    (.executeOnPooledThread this task)))

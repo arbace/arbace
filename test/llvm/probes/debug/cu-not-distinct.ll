@@ -1,3 +1,5 @@
+; verdict: invalid missing 'distinct', required for !DICompileUnit
+; rule: llvm/lib/AsmParser/LLParser.cpp:6224 parseDICompileUnit rejects a uniqued !DICompileUnit at parse time (line 18), before any verification.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

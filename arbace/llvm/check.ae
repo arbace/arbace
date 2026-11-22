@@ -71,10 +71,52 @@
 (defn- sha256-file ^String [^java.io.File f] (sha256-bytes (java.nio.file.Files/readAllBytes (.toPath f))))
 
 (def ^:private derived-file "test/llvm/selfref-derived.edn")
+
+;; llvm-judge-1120 (the coordinator's item, from c-cpp-golden-1120 3dbf9f3a6): the C++ programs' outcomes are C++'s reviewed golden files,
+;; one source for both crops: beside test/cpp/samples/N.cpp and test/cpp/runtime/samples/N.cpp, N.expect (stdout), N.cpp.expectrc (the
+;; status when not 0), N.expect-stderr (stderr when it writes one: no file, no stderr check, as the entries of selfref-derived.edn were),
+;; each a verdict only with its review in test/cpp/selfref-golden.edn (cpp.selfref's rule); the modules cpp.samples.N, cpp.runtime.N
+(def ^:private golden-review-file "test/cpp/selfref-golden.edn")
+(defn- golden-entries []
+  (let [rf (java.io.File. ^String golden-review-file)
+        reviewed (if (.exists rf) (set (map :id (read-string (slurp rf)))) #{})]
+    (into {} (for [[kind dir rdir] [["samples" "test/cpp/samples/" "samples/"] ["runtime" "test/cpp/runtime/samples/" "runtime/"]]
+                   :let [d (java.io.File. ^String dir)]
+                   n (sort (or (seq (.list d)) []))
+                   :let [n (str n)]
+                   :when (str/ends-with? n ".expect")
+                   :let [b (subs n 0 (- (count n) (count ".expect"))) rc (java.io.File. (str dir b ".cpp.expectrc"))
+                         er (java.io.File. (str dir b ".expect-stderr")) id (str "cpp." kind "." b)]
+                   :when (reviewed (str rdir b ".cpp"))]
+               [id {:id id :from :golden :golden (str dir b ".expect")
+                    :status (if (.exists rc) (Long/parseLong (str/trim (slurp rc))) 0)
+                    :stdout (slurp (str dir n)) :stderr (when (.exists er) (slurp er))}]))))
+
 (def ^:private derived*
   (delay (let [f (java.io.File. ^String derived-file)]
-           (if (.exists f) (into {} (map (juxt :id identity) (read-string (slurp f)))) {}))))
+           (merge (golden-entries)
+                  (if (.exists f) (into {} (map (juxt :id identity) (read-string (slurp f)))) {})))))
 (defn- derived [] @derived*)
+
+(defn- entry-verdict
+  "The own verdict an entry of test/llvm/selfref-derived.edn (or C++'s golden files) states: its status, stdout's and stderr's digests."
+  [e]
+  {:status (:status e) :stdout-sha (sha256-bytes (.getBytes ^String (:stdout e) "UTF-8"))
+   :stderr-sha (when (:stderr e) (sha256-bytes (.getBytes ^String (:stderr e) "UTF-8")))
+   :by (case (:from e)
+         :ir "the outcome worked out from the module's IR (test/llvm/selfref-derived.edn)"
+         :golden (str "C++'s reviewed golden files (" (:golden e) ", its review test/cpp/selfref-golden.edn)")
+         "the outcome worked out from its source (test/llvm/selfref-derived.edn)")})
+
+(defn- derived-verdict
+  "Module id's reviewed outcome from test/llvm/selfref-derived.edn, or nil: the status, stdout and (an abort's) stderr worked out by
+  hand, from the program's source (:from :source, the C++ programs, LLS49 (c)) or from the module's IR itself (:from :ir, llvm-judge-1120:
+  a module whose IR fixes another outcome than its source's own expectation). An entry with :ir is the review of that IR alone: a module
+  of another digest (the pack made again) has no outcome from it. IR-SHA the module's SHA-256."
+  [^String id ^String ir-sha]
+  (when-let [e (get (derived) id)]
+    (when (or (nil? (:ir e)) (= (:ir e) ir-sha))
+      (entry-verdict e))))
 
 (defn own-verdict
   "The module's own verdict, or nil (no verdict of its own: judged against lli's record):
@@ -88,7 +130,9 @@
     gcc.c-torture/execute's dg-do run, the programs' convention);
   - synth-c23's programs (c-O0.synth.*, c-O2.synth.*): exit 0 and the stdout test/c/synth/NAME.expect, the table's :expect worked
     out by hand (n-llvm-indep); test/c/run's (c-O*.run.*): the status their first line's `ci-run verdict: exit N` names, the
-    program checking itself; the C++ modules (cpp.*): test/llvm/selfref-derived.edn's status and stdout.
+    program checking itself; the C++ modules (cpp.*): test/llvm/selfref-derived.edn's status and stdout;
+  - any module with an entry in test/llvm/selfref-derived.edn (derived-verdict) by that entry first: the C++ modules', and the
+    two synth modules whose IR answers otherwise than the C source's .expect (c-O0/c-O2.synth.pp-has-attribute, :from :ir).
   {:status 0 :checks [PATTERN ...]}."
   [^String id ^String path]
   (cond
@@ -114,9 +158,13 @@
                          (map second (re-seq #"(?m)^;\s*XFAIL:(.*)$" text))))
         (cond-> {:status 0 :checks (if fc? checks []) :by (if fc? "lit's: exit 0 and FileCheck's CHECK lines" "lit's: exit 0")}
           (seq (args-of (first runs))) (assoc :args (args-of (first runs))))))
-    ;; n-llvm-indep (LLS49 (c), the user 2026-11-18): Arbace's own programs with an outcome of their own
+    ;; n-llvm-indep (LLS49 (c), the user 2026-11-18): Arbace's own programs with an outcome of their own; a reviewed entry of
+    ;; test/llvm/selfref-derived.edn first (the C++ programs; llvm-judge-1120: the outcome a module's IR fixes; an entry reviewed
+    ;; on another IR gives none: lli's record)
+    (contains? (derived) id) (derived-verdict id (sha256-file (java.io.File. path)))
     ;; n-hasattr: pp-has-attribute's IR is clang's, whose __has_c_attribute answers C2x's draft dates (201904, ...), not
-    ;; C23's 202311 (ISO/IEC 9899:2024 §6.10.2's table), so its .expect is not that module's outcome: lli's record judges it
+    ;; C23's 202311 (ISO/IEC 9899:2024 §6.10.2's table), so its .expect is not that module's outcome (llvm-judge-1120: its IR's own
+    ;; outcome, reviewed, is selfref-derived.edn's entry above; a pack of another IR has none and lli's record judges it)
     (and (re-find #"^c-O[02]\.synth\." id) (not (str/ends-with? id ".pp-has-attribute")))
     (let [f (java.io.File. (str "test/c/synth/" (subs id (count "c-O0.synth.")) ".expect"))]
       (when (.exists f) {:status 0 :stdout-sha (sha256-file f) :by (str "synth-c23's :expect (" f ")")}))
@@ -124,11 +172,6 @@
     (let [f (java.io.File. (str "test/c/run/" (subs id (count "c-O0.run.")) ".c"))]
       (when-let [[_ n] (and (.exists f) (re-find #"^/\* ci-run verdict: exit (\d+)\." (slurp f)))]
         {:status (Long/parseLong n) :by "the program's own check (its first line: ci-run verdict)"}))
-    (str/starts-with? id "cpp.")
-    (when-let [e (get (derived) id)]
-      {:status (:status e) :stdout-sha (sha256-bytes (.getBytes ^String (:stdout e) "UTF-8"))
-       :stderr-sha (when (:stderr e) (sha256-bytes (.getBytes ^String (:stderr e) "UTF-8")))
-       :by "the outcome worked out from its source (test/llvm/selfref-derived.edn)"})
     :else nil))
 
 (defn- blanks [s] (str/replace (str s) #"[ \t]+" " "))
@@ -312,15 +355,94 @@
     (doseq [[id r why] un] (println "FAIL in no class:" id (name r) why))
     (System/exit (if (seq un) 1 0))))
 
+;; ---------------------------------------------------------------------------------------------
+;; the reviewed outcomes against the recorded runs (llvm-judge-1120): no module run
+
+(defn- pack-ir
+  "The IR digest of module id in the packs' manifests (test/llvm/ir/{c,tx}.tsv: ID SOURCE SOURCE-SHA256 IR-SHA256), or nil."
+  [id]
+  (some (fn [pk] (some (fn [[i _ _ sha]] (when (= i id) sha)) (tsv (str "test/llvm/ir/" pk ".tsv")))) ["c" "tx"]))
+
+(defn derived-check
+  "derived-check REF: each reviewed outcome of test/llvm/selfref-derived.edn judged by the check's own judge (own-result) against
+  the module's recorded run, REF (lli's, test/llvm/ref-lli23.edn; an abort's stderr g++'s record, gxx-reference, D358-5 (a)), as the
+  golden files of Java's JCS361 (a) are held to the JDK's recorded digests: nothing is run. An entry reviewed on an IR (:ir) must be
+  the IR the run was recorded from and the pack's. Controls, each must not pass: every entry's outcome with its stdout's middle byte
+  changed (an empty stdout: its status) against its own record, every entry's record against the next entry of another outcome, and
+  CONTROLS' pairs (test/llvm/controls.edn) whose reference has a reviewed outcome: the subject's recorded run against it.
+  Exit 1 on an entry its record does not meet or a control that passes."
+  [[ref controls]]
+  (let [refs (into {} (map (juxt :id identity) (or (read-file ref) [])))
+        gxx (gxx-records)
+        ;; a golden file of a program llvmi has no module of (not in the packs' manifests) is C++'s alone
+        [es mine] ((juxt remove filter) #(and (= :golden (:from %)) (nil? (pack-ir (:id %)))) (sort-by :id (vals (derived))))
+        _ (doseq [e mine] (println (format "  %-44s -      no module of llvmi's (not in test/llvm/ir's manifests): C++'s alone" (:id e))))
+        rec (fn [id] (gxx-reference id (refs id) gxx))
+        line (fn [id r] [id (if (= :timeout (:status r)) "timeout" (str (:status r))) (:stdout r) (str (:stdout-bytes r))
+                         (:stderr r) (str (:stderr-bytes r)) (str (:stderr-first r))])
+        verdict entry-verdict
+        rows (vec (for [e es :let [id (:id e) r (rec id)]]
+                    [id (cond (and (= :ir (:from e)) (not (:ir e))) [:review "an outcome from the IR names no :ir"]
+                              ;; a review row a printed line, in order: the rows are the stdout
+                              (and (:review e) (not= (:stdout e) (str/join (map #(str (first %) "\n") (:review e)))))
+                              [:review "the :review rows are not the :stdout's lines"]
+                              (and (:review e) (some #(str/blank? (second %)) (:review e))) [:review "a :review row without its basis"]
+                              (nil? r) [:no-ref (str "no recorded run in " ref)]
+                              (and (:ir e) (not= (:ir e) (:ir r))) [:ir (str "reviewed on IR " (:ir e) ", the run recorded from " (:ir r))]
+                              (and (:ir e) (not= (:ir e) (pack-ir id))) [:ir (str "reviewed on IR " (:ir e) ", the pack's " (pack-ir id))]
+                              :else (own-result (line id r) (verdict e) nil))
+                     (:who r)]))
+        mutate (fn [e]
+                 (let [s ^String (:stdout e)]
+                   (if (pos? (count s))
+                     (let [i (quot (count s) 2) c (.charAt s i)]
+                       (assoc e :stdout (str (subs s 0 i) (if (= c \#) \% \#) (subs s (inc i)))))
+                     (assoc e :status (inc (long (:status e)))))))
+        outcome (juxt :status :stdout :stderr)
+        mutated (for [e es :let [r (rec (:id e))] :when r]
+                  [(:id e) "its own outcome changed" (first (own-result (line (:id e) r) (verdict (mutate e)) nil))])
+        crossed (for [[a b] (map vector es (concat (rest es) [(first es)]))
+                      :let [b (first (filter #(not= (outcome a) (outcome %)) (cons b es))) r (rec (:id a))]
+                      :when (and b r)]
+                  [(:id a) (str (:id b) "'s outcome") (first (own-result (line (:id a) r) (verdict b) nil))])
+        paired (for [{:keys [subject reference]} (or (when controls (read-file controls)) [])
+                     :let [e (get (derived) reference) r (rec subject)]
+                     :when (and e r)]
+                 [subject (str reference "'s outcome (" controls ")") (first (own-result (line subject r) (verdict e) nil))])
+        ctl (concat mutated crossed paired)
+        bad (remove #(= :pass (first (second %))) rows)
+        ctl-pass (filter #(= :pass (nth % 2)) ctl)]
+    (doseq [[id [r why] who] rows]
+      (println (format "  %-44s %-6s %s" id (name r) (if (= r :pass) (str "the recorded run's (" (or who "lli") ")") why))))
+    (println "llvmi derived-check:" (count rows) "reviewed outcomes," (- (count rows) (count bad))
+             (str "met by the recorded runs (" (count (filter #(= "g++" (nth % 2)) rows)) " aborts' stderr g++'s); controls:")
+             (count mutated) "changed," (count crossed) "crossed," (count paired) "of the check's controls,"
+             (count ctl-pass) "pass (each must not)")
+    (doseq [[id [r why]] bad] (println "FAIL" id (name r) why))
+    (doseq [[s what] ctl-pass] (println "FAIL the control passes:" s "against" what))
+    (System/exit (if (or (seq bad) (seq ctl-pass)) 1 0))))
+
+(defn main-envp?
+  "small-tails (2026-11-21): whether the module's main takes main's third argument, the environment (`define ... @main(i32,
+  ptr, ptr)`): lit runs lli, which passes it lit's environment, never an empty one (ExecutionEngine/MCJIT/2003-08-21-
+  EnvironmentTest reads envp[0]); ci starts a program with none unless told (go/arbace/ci/prog.ae's RunMain, RES29 (a)'s
+  --env), so bin/llvmi runs such a module with --env under a fixed environment of its own (bin/llvmi's llvmi_env)."
+  [^String path]
+  (boolean
+    (when-let [[_ ps] (re-find #"(?m)^define\b[^\n]*?@main\(([^)]*)\)" (slurp path))]
+      (= 3 (count (remove str/blank? (str/split ps #",")))))))
+
 (defn run-args
-  "run-args MODULES: each module's arguments its own verdict's RUN lines give (ID<TAB>ARG ... a line, the modules with
-  arguments alone), which bin/llvmi's runs pass to the program; none under LLVMI_JUDGE=lli (lli's record ran with none)."
+  "run-args MODULES: each module's arguments its own verdict's RUN lines give (ID<TAB>ARG ...<TAB>ENV a line, the modules with
+  arguments or an environment alone), which bin/llvmi's runs pass to the program; no arguments under LLVMI_JUDGE=lli (lli's
+  record ran with none). ENV is `env` for a module whose main takes the environment (main-envp?: run with --env under bin/llvmi's
+  fixed environment), else empty; in either judge mode (lli's record ran under the runner's environment)."
   [[modules]]
-  (when (= "own" (judge-mode))
-    (doseq [[id p] (tsv modules)
-            :let [a (:args (try (own-verdict id p) (catch Throwable _ nil)))]
-            :when (seq a)]
-      (println (str id "\t" (str/join " " a)))))
+  (doseq [[id p] (tsv modules)
+          :let [a (when (= "own" (judge-mode)) (:args (try (own-verdict id p) (catch Throwable _ nil))))
+                e (try (main-envp? p) (catch Throwable _ false))]
+          :when (or (seq a) e)]
+    (println (str id "\t" (str/join " " a) "\t" (if e "env" ""))))
   (flush)
   (System/exit 0))
 
@@ -330,5 +452,6 @@
     "record-ref" (let [[work ref only] args] (record-ref work ref (= only "--only")))
     "judge" (judge args)
     "divergences" (divergences args)
-    (do (println "arbace.llvm.check: record-ref WORK REF [--only] | judge WORK LEVEL REF REC CONTROLS [--record] | divergences LEVEL REC")
+    "derived-check" (derived-check args)
+    (do (println "arbace.llvm.check: record-ref WORK REF [--only] | judge WORK LEVEL REF REC CONTROLS [--record] | divergences LEVEL REC | derived-check REF")
         (System/exit 2))))

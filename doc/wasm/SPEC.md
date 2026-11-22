@@ -195,3 +195,23 @@ module returns nil; an invalid one throws ex-info `{:wasm/invalid MESSAGE}` (`:f
 and every `assert_invalid` module (rejected passes; accepted fails, `invalid module accepted`). The message is a second level
 (WAS8 (a), the reference runner's rule): the row `msg/PATH#K` passes when the reason given starts with the script's, for
 `assert_invalid` the validator's message and for `assert_malformed` the decoder's or the text reader's.
+
+### 9.1 The profiles (small-tails, 2026-11-21)
+
+A script beyond the root is judged by the rules it was written against: its directory under the testsuite names its profile
+(`arbace.wasm.valid/profile-of`, bound by `arbace.repr.wasm.wast/with-profile` for the read level's script and controls and for the
+eval planner's script, `arbace.wasm.valid/*profile*` and `arbace.repr.wasm.text/*limits32*`; wai's `Profile`, set by the light driver
+from the script's name in `runScript`, the plan's path in `control` and a module's directory in `w2g`, by `ProfileOf`):
+
+- nil (wai's ""): Wasm 3.0's, with the proposals built; the root scripts, `legacy/`, `custom/` and the other proposals' directories;
+- `:threads`, `proposals/threads/`: the threads proposal's scripts were written against Wasm 1.0's core: at most one table ("multiple
+  tables") and one memory ("multiple memories"), after the import, table and memory sections; a memory's limits read as nat32 by the
+  text reader ("i32 constant out of range", an i64 memory's as nat64); the size bound's message "memory size must be at most 65536
+  pages (4GiB)";
+- `:custom-descriptors`, `proposals/custom-descriptors/`: `br_on_cast` and `br_on_cast_fail` take the proposal's relaxed rule, the
+  target type in the source type's hierarchy (the rule the descriptor casts take everywhere), not a subtype of it.
+
+A program's run (`bin/wai run`, `gojs`, the Go corpus) and repr/wasm's round trips validate by nil. The controls: the read level's
+`_control/threads-memories-as-valid`, `_control/threads-tables-as-valid` and `_control/custom-descriptors-cast-as-invalid` (each
+must differ: the profile decides), the eval level's `_control/custom-descriptors-cast-valid-flip`, `_check/custom-descriptors-cast-module`
+and `_check/threads-memories-valid`, the AOT level's `_check/custom-descriptors-cast-module`.

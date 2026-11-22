@@ -1,0 +1,84 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/ch/Port.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io Closeable FileDescriptor IOException)
+        '(java.nio.channels Channel ShutdownChannelGroupException)
+        '(java.nio.channels.spi AsynchronousChannelProvider)
+        '(java.util HashMap Map)
+        '(java.util.concurrent.locks ReadWriteLock ReentrantReadWriteLock))
+
+(defclass ^:abstract Port
+  :extends AsynchronousChannelGroupImpl
+
+  (defclass ^:interface PollableChannel
+    :extends [Closeable]
+
+    (method onEvent ^void [this ^int events ^boolean mayInvokeDirect]))
+
+  (field ^:protected ^:final ^ReadWriteLock fdToChannelLock (ReentrantReadWriteLock.))
+
+  (field ^:protected ^:final ^{:tag (Map Integer PollableChannel)} fdToChannel (HashMap.))
+
+  (constructor [this ^AsynchronousChannelProvider provider ^ThreadPool pool]
+    (super. provider pool))
+
+  (method ^:final register ^void [this ^int fd ^PollableChannel ch]
+    (.lock (.writeLock fdToChannelLock))
+    (try
+      (when (.isShutdown this) (throw (ShutdownChannelGroupException.)))
+      (.put fdToChannel (Integer/valueOf fd) ch)
+      (finally (.unlock (.writeLock fdToChannelLock)))))
+
+  (method ^:protected preUnregister ^void [this ^int fd])
+
+  (method ^:final unregister ^void [this ^int fd]
+    (let [^:mutable checkForShutdown false]
+      (.preUnregister this fd)
+      (.lock (.writeLock fdToChannelLock))
+      (try
+        (.remove fdToChannel (Integer/valueOf fd))
+        (when (.isEmpty fdToChannel) (set! checkForShutdown true))
+        (finally (.unlock (.writeLock fdToChannelLock))))
+      (when (and checkForShutdown (.isShutdown this))
+        (try (.shutdownNow this) (catch IOException ignore)))))
+
+  (method ^:abstract startPoll ^void [this ^int fd ^int events])
+
+  (method ^:final isEmpty ^boolean [this]
+    (.lock (.writeLock fdToChannelLock))
+    (try (.isEmpty fdToChannel) (finally (.unlock (.writeLock fdToChannelLock)))))
+
+  (method ^:final attachForeignChannel [this ^:final ^Channel channel ^FileDescriptor fd]
+    (let [fdVal (IOUtil/fdVal fd)]
+      (.register this
+                 fdVal
+                 (anon PollableChannel []
+                   (method ^:public onEvent ^void [this ^int events ^boolean mayInvokeDirect])
+
+                   (method ^:public close :throws [IOException] ^void [this]
+                     (.close channel))))
+      (Integer/valueOf fdVal)))
+
+  (method ^:final detachForeignChannel ^void [this key]
+    (.unregister this (cast Integer key)))
+
+  (method ^:final closeAllChannels ^void [this]
+    (let [^:const ^int MAX_BATCH_SIZE 128
+          channels (new PollableChannel/1 MAX_BATCH_SIZE)
+          ^:mutable ^int count 0]
+      (loop []
+        (.lock (.writeLock fdToChannelLock))
+        (set! count 0)
+        (try
+          (for-each [^Integer fd (.keySet fdToChannel)]
+            (let [count-1 count]
+              (set! count (unchecked-inc-int count))
+              (aset channels count-1 (cast PollableChannel (.get fdToChannel fd))))
+            (when (>= count MAX_BATCH_SIZE) (break)))
+          (finally (.unlock (.writeLock fdToChannelLock))))
+        (loop [^int i 0]
+          (when (< i count)
+            (try (.close (aget channels i)) (catch IOException ignore))
+            (recur (unchecked-inc-int i))))
+        (when (> count 0) (recur))))))

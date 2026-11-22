@@ -14,16 +14,16 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
   program programs-check programs-essential gate gate-full gate-full-parallel night night-plan gate-weekly-plan gate-plan gate-costs gate-why gate-audit gate-prune gate-prune-worktrees gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-subsets gate-subsets-check gate-demos java-check-judge provenance-check reap crops-score records-check hooks suite oracle diffcheck generated-check gate-tests verify jdk-verify jrt-derive-check edge-verify javac-verify javac-classes javac-modules javac-platform-build fixtures-verify tamago-verify java-project-test javac-gensrc javac-platform-gensrc javac-descriptors java-project-fetch jrt-deflate jrt-files-check \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-target-gen repr-cpp-target-verify repr-cpp-target-oracle repr-cpp-record-dumps repr-cpp-verify-dumps repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-route-compare cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-analyze java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-target-gen repr-cpp-target-verify repr-cpp-target-oracle repr-cpp-record-dumps repr-cpp-verify-dumps repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-ppref-build repr-cpp-ppref-fidelity repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-route-compare cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-analyze java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-check-stale java-verdicts java-golden ci-musl-lock-test \
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-shim-check rsi-check-essential \
-  repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check cppi-codegen-gen \
-  repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
+  repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences llvmi-derived-check cppi-codegen-check cppi-codegen-gen \
+  repr-llvm-check repr-llvm-check-essential repr-llvm-probes-check repr-llvm-probes-oracle repr-llvm-reviewed-check repr-llvm-judge-out-check llvm-controls-test llvmi-check-essential \
   repr-asm-extract repr-asm-pins repr-asm-ensure asm-essential asm-amd64-essential asm-arm64-essential repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
   repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle repr-asm-object-verdict repr-asm-object-verdict-record repr-asm-backend-check \
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
-  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
+  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 repr-asm-object-roundtrip-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
   a64i-light a64i-run a64i-trace a64i-check a64i-record a64i-table-check a64i-go-check a64i-go-tools a64i-go-compile a64i-goroot-check a64i-arbace-check \
   x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
@@ -33,12 +33,12 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-ucd-fetch repr-scheme-ucd-check repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-interp-check si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-table-check oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam repr-python-fetch repr-python-pins repr-python-count repr-python-spec-check repr-python-samples repr-python-roundtrip repr-python-record repr-python-check repr-python-text repr-python-text-record pyi-gen pyi-gen-check pyi-record-ref pyi-record-ref-check pyi-scope-check pyi-compile-check pyi-run pyi-repl pyi-repl-check pyi-lib-test pyi-lib-test-oracle pyi-runtime-print pyi-runtime-read pyi-runtime-vet pyi-runtime-check \
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
-  repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-records pyi-records-slice pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
+  repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-records pyi-records-slice pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify pyi-clib-undefined pyi-clib-exe pyi-aot-lock-test python-essential \
   oi-check-compiled check-makefile \
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-golden hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base pyi-universe pyi-universe-check
+  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-golden hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-pgo-record hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base pyi-universe pyi-universe-check
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -367,8 +367,10 @@ hsi-generate: ## the synthetic corpus test/haskell/eval/synthetic/ against its g
 	bin/hsi generate --check
 hsi-record-ref: ## GHC 9.14.1's -O0 runs of the run corpora into test/haskell/ref-ghc914.edn (bin/hsi record-ref)
 	bin/hsi record-ref
-hsi-build: ## hsi's light driver: go/arbace/hs printed by repr/go and built by TamaGo's go into .tmp/hsi/bin/hsi (bin/hsi build)
+hsi-build: ## hsi's light driver: go/arbace/hs printed by repr/go and built by TamaGo's go into .tmp/hsi/bin/hsi, profile-guided by test/haskell/hsi/hsi.pgo (bin/hsi build)
 	bin/hsi build
+hsi-pgo-record: ## the profile of hsi's profile-guided build recorded: test/haskell/hsi/pgo.txt's programs run with CPU profiles, merged into test/haskell/hsi/hsi.pgo (bin/hsi pgo --record)
+	bin/hsi pgo --record
 hsi-check: ## the samples and the synthetic corpus on hsi against test/haskell/ref-ghc914.edn, every non-pass in a class (bin/hsi check)
 	bin/hsi check
 
@@ -448,6 +450,10 @@ repr-cpp-c2j-check: ## repr/cpp's, repr/llvm's and the lowering's namespaces com
 	bin/repr-cpp c2j-check
 repr-cpp-pp-check: ## repr/cpp's token check: the corpora's files lexed and preprocessed in C++ mode, judged by g++ -E's and clang's recorded answers (bin/repr-cpp pp-check; CORPUS=a,b SAMPLE=N)
 	bin/repr-cpp pp-check $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
+repr-cpp-ppref-build: ## the token checks' own reference: GCC 15.2.0's libcpp from the pinned tarball behind tools/ppref, built by Arbace's C++ into .tmp only (bin/repr-cpp ppref build; --native: the host's g++, the oracle tier's)
+	bin/repr-cpp ppref build
+repr-cpp-ppref-fidelity: ## the reference (its --native build, the host's g++) against g++ -E's and clang's recorded digests over the recorded samplings, every difference in the known file's :ref (bin/repr-cpp ppref fidelity; the oracle tier's)
+	bin/repr-cpp ppref fidelity
 repr-cpp-pp-record: ## g++ -E and clang's raw tokens run on the corpora's files, their digests and the host's option deltas rewritten (bin/repr-cpp pp-check --record --add-missing; CORPUS=a,b SAMPLE=N)
 	bin/repr-cpp pp-check --record --add-missing $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
 repr-cpp-cxxdump-check: ## the oracle's filter over a list of files, its numbers (bin/repr-cpp cxxdump-check LIST OUT; LIST=... OUT=...)
@@ -693,10 +699,20 @@ repr-asm-encode-check-arm64: ## AR2's encode check: MC/AArch64's stated encoding
 	bin/repr-asm --arch arm64 encode-check $(CORPORA)
 repr-asm-encode-record-arm64: ## AR2's encode check recorded into test/asm/encode-results-arm64.edn (bin/repr-asm --arch arm64 encode-check --record)
 	bin/repr-asm --arch arm64 encode-check --record $(CORPORA)
+repr-asm-object-roundtrip-arm64: ## judge-rest: arm64's objects judged by their own sources' round trip, each linked alone and its words decoded by a64i against the source's forms at the same layout, with the controls of test/asm/controls-object-roundtrip-arm64.txt (bin/repr-asm --arch arm64 object-roundtrip [CORPUS|CORPUS/NAME...]; CORPORA=..., default a64-musl a64-synthetic)
+	bin/repr-asm --arch arm64 object-roundtrip $(CORPORA)
 repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)
 	bin/repr-llvm check $(FAMILY)
 repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)
 	bin/repr-llvm check roundtrip-llvmtest --essential && bin/repr-llvm check verify-llvmtest --essential && bin/repr-llvm check verify-probes --essential && bin/repr-llvm check text-llvmtest --essential
+repr-llvm-probes-check: ## the probes' reviewed `; verdict:` and `; rule:` lines held to their form, nothing run (bin/repr-llvm probes-check)
+	bin/repr-llvm probes-check
+repr-llvm-probes-oracle: ## the oracle tier: the probes' stated verdicts against opt's record, each flipped a control (bin/repr-llvm probes-oracle)
+	bin/repr-llvm probes-oracle
+repr-llvm-reviewed-check: ## llvm/test's reviewed verify verdicts (test/llvm/llvmtest-reviewed.tsv) checked against their RUN lines (bin/repr-llvm reviewed-check)
+	bin/repr-llvm reviewed-check
+repr-llvm-judge-out-check: ## the cases out of the judge's cases (test/llvm/judge-out.tsv) held to the checks' own verdicts (bin/repr-llvm judge-out-check)
+	bin/repr-llvm judge-out-check
 llvm-controls-test: ## the LLVM row's negative controls wired: a control crossing a module with itself fails each check (test/repr/llvm/controls-test.bash)
 	test/repr/llvm/controls-test.bash
 repr-llvm-record-opt: ## opt -passes=verify's verdicts of IR lists recorded into test/llvm/ref-opt23.edn, verify-check's reference without opt (bin/repr-llvm record-opt LIST...; LISTS=...)
@@ -721,6 +737,8 @@ llvmi-record-ref: ## lli 23's runs of llvmi's modules recorded into test/llvm/re
 	bin/llvmi record-ref
 llvmi-divergences: ## llvmi's recorded eval check judged against test/llvm/divergences-eval.edn (bin/llvmi divergences)
 	bin/llvmi divergences
+llvmi-derived-check: ## llvmi's reviewed outcomes (test/llvm/selfref-derived.edn) judged against the recorded runs, with controls; nothing run (bin/llvmi derived-check)
+	bin/llvmi derived-check
 cppi-codegen-check: ## C++ without clang (doc/cpp/CODEGEN.md): test/cpp/codegen's samples by the native parser, arbace.cpp.sema and arbace.cpp.codegen, lowered and run against clang's IR lowered and run (bin/cppi codegen-check WORK; WORK=..., default .tmp/cppi/codegen)
 	bin/cppi codegen-check $(or $(WORK),.tmp/cppi/codegen)
 cppi-codegen-gen: ## CP302 (a): the code generator's light half, the gate's cpp-codegen-gen: test/cpp/codegen's samples generated without clang, the refusals and the forms' digests against test/cpp/codegen/refusals.edn and forms.sha256 (bin/cppi codegen-gen)
@@ -1077,6 +1095,12 @@ pyi-clib-build: ## queue 208: a C library core of pyi (tools/pyi/clib/LIB) built
 	bin/pyi-clib build $(or $(LIB),bzip2)
 pyi-clib-verify: ## queue 208: the C library's node program built afresh, equal to the committed go/arbace/clib/LIB byte for byte (bin/pyi-clib verify; LIB=bzip2)
 	bin/pyi-clib verify $(or $(LIB),bzip2)
+pyi-clib-undefined: ## queue 481: the committed node program's undefined data symbols (status 1 when one is not the linker's own) (bin/pyi-clib undefined; LIB=ctypestest)
+	bin/pyi-clib undefined $(or $(LIB),ctypestest)
+pyi-clib-exe: ## queue 489: a program's committed node program compiled by cf2g and TamaGo's go, kept by key (bin/pyi-clib exe; LIB=pytokenizer: lex-check's own reference)
+	bin/pyi-clib exe $(or $(LIB),pytokenizer)
+pyi-aot-lock-test: ## queue 481: two pyi runs of one checkout rebuild the AOT module once (aot_module's lock), with its negative control; rebuilds the module (test/python/aot-lock-test.bash; no gate step)
+	test/python/aot-lock-test.bash
 
 pyi-bytecode-check: ## queue 229: code objects of the view of CPython's bytecode against python3's (bin/pyi bytecode-check)
 	bin/pyi bytecode-check

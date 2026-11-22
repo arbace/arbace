@@ -1,3 +1,5 @@
+; verdict: debug subprogram declarations must not have a compile unit
+; rule: llvm/lib/IR/Verifier.cpp:1590 spFlags: 0 makes !5 a declaration. It is distinct, so the function's attachment checks pass, and visitDISubprogram's declaration branch rejects its unit: !0.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

@@ -251,7 +251,9 @@
                        [f v] (sort-by key files)]
                    (cond-> (entry (str (name corpus) sep f) :known
                                   (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))
-                     (:time-dependent v) (assoc :time-dependent true))))
+                     (:time-dependent v) (assoc :time-dependent true)
+                     ;; (the user, 2026-11-22: a rejection's recorded error, judged by own-verdicts against the file's own test)
+                     (:error v) (assoc :known (select-keys v [:class :error :message])))))
         ex (set (:exclude-corpora src))
         counted? (fn [^String id] (not (ex (first (str/split id (re-pattern (java.util.regex.Pattern/quote sep)) 2)))))
         rows (when (exists? (:results src)) (read-edn (:results src)))
@@ -591,6 +593,98 @@
                            (not (str/starts-with? (str (:excluded x)) "runner: regrtest's JUnit names")))]
             id)))))
 
+;; ---- the user's counting decisions of 2026-11-22 (doc/JOURNAL.md, "the user's decisions on the burst's by-design and counting
+;; questions"; doc/CROPS-SCORE.md, "Decided (the user, 2026-11-22)"): three rules of the readers, each keyed on a verdict a record
+;; holds, never on a copied list of cases
+
+(def ^:private py-ref-outcomes
+  (memoize
+   (fn [files]
+     ;; CPython's recorded outcome of each Lib/test method (ref-cpython314-lib-test*.edn's :outcome lines; an :excluded line :excluded)
+     (into {} (for [f files x (read-forms f)
+                    :when (and (:id x) (not (:module x)) (or (:outcome x) (:excluded x)))]
+                [(:id x) (if (:excluded x) :excluded (:outcome x))])))))
+
+(defn py-ref-annotate
+  "A :results source with :py-ref-outcomes true (Python's eval cell): each non-pass entry R's carries :ref-outcome, CPython's
+  recorded outcome of the same method (OUTCOMES, py-ref-outcomes' map; nil when the references have none), which a class's
+  :ref-outcomes keys on (classify): the 1,917 methods skipped by their own tests on pyi and on CPython's recorded run count n/a
+  (the user, 2026-11-22)."
+  [r outcomes]
+  (update r :entries (fn [es] (vec (for [e es] (assoc e :ref-outcome (get outcomes (:id e))))))))
+
+(defn own-verdict-fails
+  "Why the recorded rejection K ({:error SYMBOL :message TEXT}, the read's error as the known file records it) does not meet the
+  expectation X its own test states ({:kind \"SyntaxError\"} with :exact MESSAGE, :contains TEXT or :lower-contains TEXT, as
+  the test compares the message), or nil when it does (the user, 2026-11-22: Python's four :rejected files pass the read by each
+  file's own verdict, as parse-check judges its error cases)."
+  [k x]
+  (let [kind (str (:error k)) msg (str (:message k))]
+    (cond (not= (:kind x) kind) (str kind ", the test expects " (:kind x))
+          (and (contains? x :exact) (not= (:exact x) msg)) (str "the message " (pr-str msg) ", the test expects " (pr-str (:exact x)))
+          (and (contains? x :contains) (not (str/includes? msg (:contains x)))) (str (pr-str msg) " does not contain " (pr-str (:contains x)))
+          (and (contains? x :lower-contains) (not (str/includes? (str/lower-case msg) (:lower-contains x))))
+          (str (pr-str msg) " lower-cased does not contain " (pr-str (:lower-contains x)))
+          :else nil)))
+
+(defn own-verdict-pass?
+  "Whether every expectation of XS (one file's, each its test's) is met by the recorded rejection K; none: not judged (false)."
+  [k xs]
+  (boolean (and k (seq xs) (every? #(nil? (own-verdict-fails k %)) xs))))
+
+(defn- own-verdicts
+  "A :c-known source's :own-verdict {:file F :class K}: each entry of the known class K (its recorded error, :known) whose file
+  F names with the expectations of its own tests ({ID [{:test T :at A :kind ...} ...]}) passes when it meets every one: taken
+  out of the entries, counted in :pass and :rows; one that does not stays, its reason the first unmet expectation."
+  [src r]
+  (if-let [{:keys [file class]} (:own-verdict src)]
+    (let [xs (if (exists? file) (read-edn file) {})
+          judged (for [e (:entries r) :let [k (:known e)] :when (and k (= class (:class k)) (seq (get xs (:id e))))] e)
+          passed (set (for [e judged :when (own-verdict-pass? (:known e) (get xs (:id e)))] (:id e)))
+          failed (into {} (for [e judged :when (not (passed (:id e)))]
+                            [(:id e) (some #(own-verdict-fails (:known e) %) (get xs (:id e)))]))]
+      (cond-> (assoc r :entries (vec (for [e (:entries r) :when (not (passed (:id e)))]
+                                       (if-let [why (failed (:id e))] (update e :reason str " (own verdict not met: " why ")") e))))
+        (:pass r) (update :pass + (count passed))
+        (:rows r) (update :rows #(reduce (fn [m id] (assoc m id :pass)) % passed))
+        true (update :detail #(str % (when % "; ") (count passed) " of the " (count judged) " files of the class " (name class)
+                                   " pass by their own tests' verdicts (" file ")"))))
+    r))
+
+(defn own-elsewhere-id
+  "The id in another check's record of a known file ID (\"corpus file\"): its first SEP replaced by \"/\" (C's records)."
+  [^String id sep]
+  (let [i (.indexOf id ^String sep)] (if (neg? i) id (str (subs id 0 i) "/" (subs id (+ i (count sep)))))))
+
+(defn own-elsewhere-pick
+  "CR1 (a) (the user, 2026-11-22): of the classed entries ES (one check's), the ids that pass by their own verdict elsewhere:
+  every entry of the id in a class marked :reference-wrong (the check's reference, cc, is wrong there: the port follows gcc)
+  and the id's row :pass in one of the RECORDS ({ID RESULT} maps, other checks' records by each test's own verdict: the dg
+  check's DejaGnu directives, the run's), {ID record-index}."
+  [es records sep]
+  (into {} (for [[id g] (group-by :id es)
+                 :when (every? #(:reference-wrong (:class %)) g)
+                 :let [oid (own-elsewhere-id id sep)
+                       i (first (keep-indexed (fn [i m] (when (= :pass (get m oid)) i)) records))]
+                 :when i]
+             [id i])))
+
+(defn- own-elsewhere
+  "A :c-known source's :own-elsewhere {:records [{:file F :what W} ...] :sep S}: its classed entries ES whose file passes by its
+  own verdict elsewhere (own-elsewhere-pick) taken out and counted in :pass and :rows; [R ES]."
+  [src r es]
+  (if-let [{:keys [records sep]} (:own-elsewhere src)]
+    (let [ms (vec (for [{:keys [file]} records] (if (exists? file) (into {} (for [[id res] (read-edn file)] [id res])) {})))
+          picked (own-elsewhere-pick es ms (or sep " "))
+          by (frequencies (vals picked))]
+      [(cond-> (-> r (assoc :own-elsewhere-picked (set (keys picked)))
+                   (update :detail #(str % (when % "; ") (count picked) " files known where the reference is wrong pass by their own verdict elsewhere (CR1 (a): "
+                                       (str/join ", " (for [[i {:keys [what]}] (map-indexed vector records)] (str what " " (get by i 0)))) ")")))
+         (:pass r) (update :pass + (count picked))
+         (:rows r) (update :rows #(reduce (fn [m id] (assoc m id :pass)) % (keys picked))))
+       (vec (remove #(contains? picked (:id %)) es))])
+    [r es]))
+
 ;; Python's row (queue 201, PY10; doc/python/PYTHON-SURVEY.md §10.1, "As built: PY10"): bin/pyi check --aot's record
 ;; (test/python/check-aot-linux-ARCH.edn, arbace.python.aot's judge: one map a line, :id, :result :pass, :classed (:class
 ;; :as-pyi, :reference-excluded or a class of test/python/divergences-aot.edn) or :failed, :reason, :pyi-ms, :pyi-differs)
@@ -701,18 +795,21 @@
         (:levels c) (boolean (some #{level} (:levels c)))
         :else true))
 
-(defn- classify
+(defn classify
   "An entry's class: the first that applies at its level (at-level?) and names it in :tests or one
   of whose :match regexps finds \"RESULT REASON\" (and, when it lists :programs, names it: goi's
   classify, test/goi/divergences.ae, report 002's finding 7); nil when none does. A flaky result
   only by a class that names it, in :tests or by a :match anchored to it (^flaky), as java.check's
   classify (report 003's findings 4, 5 and 7: :levels and the flaky rule; report 012 had left this
-  copy reading :level alone, so a class of the run levels took the other levels' rows)."
+  copy reading :level alone, so a class of the run levels took the other levels' rows). A class with :ref-outcomes (the user,
+  2026-11-22: Python's Lib/test methods skipped on pyi and on CPython's recorded run) takes only an entry whose reference outcome
+  (:ref-outcome, py-ref-annotate's) is one of them."
   [classes e]
   (let [s (str (name (:result e)) " " (:reason e))
         takes? (fn [re] (or (not= :flaky (:result e)) (str/starts-with? (str re) "^flaky")))]
     (some (fn [c] (when (and (at-level? c (:level e))
                              (or (nil? (:results c)) (some #{(:result e)} (:results c)))
+                             (or (nil? (:ref-outcomes c)) (some #{(:ref-outcome e)} (:ref-outcomes c)))
                              (or (some #{(:id e)} (:tests c)) (some #(and (takes? %) (re-find % s)) (:match c)))
                              (or (nil? (:programs c)) (some #{(:id e)} (:programs c))))
                     c))
@@ -758,7 +855,10 @@
           (when-let [d (:expected src)] (when-not (dir? d) [d]))
           (when-let [d (:results-dir src)] (when-not (dir? d) [d]))
           ;; CP262 (b): an :own-for's list (its record may wait for its check)
-          (when-let [l (get-in src [:own-for :list])] (when-not (exists? l) [l]))))
+          (when-let [l (get-in src [:own-for :list])] (when-not (exists? l) [l]))
+          ;; the user, 2026-11-22: an :own-verdict's expectations, an :own-elsewhere's records
+          (when-let [f (get-in src [:own-verdict :file])] (when-not (exists? f) [f]))
+          (for [{:keys [file]} (get-in src [:own-elsewhere :records]) :when (not (exists? file))] file)))
 
 (defn- own-for
   "CP262 (b) (doc/cpp/CPP-SURVEY.md, \"As built: cpp-props\"): a source's :own-for {:file RECORD :list LIST :judge NAME}: the
@@ -835,8 +935,13 @@
       (assoc src :present false
                  :problems (when-not not-yet (vec (for [f miss] (str (:name src) ": no " f)))))
       (let [r (own-for src (read-source src))
+            ;; (the user, 2026-11-22: CPython's recorded outcome beside each Python eval non-pass; the :rejected files' own verdicts)
+            r (cond-> r (:py-ref-outcomes src) (py-ref-annotate (py-ref-outcomes (let [x (:py-ref src)] (if (vector? x) x [x])))))
+            r (own-verdicts src r)
             classes (classes-of cf)
             es (for [e (:entries r)] (let [c (classify-entry classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
+            ;; (CR1 (a), the user 2026-11-22: a file known where the reference is wrong that passes by its own verdict elsewhere)
+            [r es] (own-elsewhere src r es)
             ;; :per-file (the token check's three sections, queue 122 finding 4): a file the known file lists at several levels
             ;; is one non-pass, of its deferred class when any is (the worst kind), else of its first; an entry in no class stays
             es (if (:per-file src) (per-file es) es)]
@@ -873,14 +978,21 @@
 (defn- count-once
   "A cell's :count-once group (queue 132 F3, the user's decision of 2026-11-02: C's token and tree checks run the same corpus
   files): each file one case, a non-pass of its worst kind (per-file) when a check of the group does not pass it, a pass when
-  every check of the group whose results hold it passes it; the passes nil (partial) unless every check's results are there."
+  every check of the group whose results hold it passes it; the passes nil (partial) unless every check's results are there.
+  CR1 (a) (the user, 2026-11-22): a file a check of the group passed by its own verdict elsewhere (:own-elsewhere-picked) and
+  that no check of the group leaves a non-pass passes too: the tree check's rows known as \"pp-known\" (the token check's to
+  judge, no entry of the tree check's) follow the token check's verdict."
   [g]
-  {:entries (per-file (mapcat :entries g))
-   :pass (when (every? :rows g)
-           (let [rows (map :rows g)]
-             (count (for [id (distinct (mapcat keys rows))
-                          :when (every? #(contains? #{nil :pass} (get % id)) rows)]
-                      id))))})
+  (let [es (mapcat :entries g)]
+    {:entries (per-file es)
+     :pass (when (every? :rows g)
+             (let [rows (map :rows g)
+                   picked (set (mapcat :own-elsewhere-picked g))
+                   left (set (map :id es))]
+               (count (for [id (distinct (mapcat keys rows))
+                            :when (or (every? #(contains? #{nil :pass} (get % id)) rows)
+                                      (and (picked id) (not (left id))))]
+                        id))))}))
 
 (defn- judge-cell [cell]
   (let [ss (mapv #(judge-source cell %) (:sources cell))

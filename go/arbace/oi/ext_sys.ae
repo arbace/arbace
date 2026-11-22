@@ -104,7 +104,11 @@
   ^{:line 102} [^int forcedMajorCount]
   ;; OC216 (a): the collections a program asks for (Gc.minor, major, full_major, compact) counted as gc_ctrl.c counts them, beside Go's
   ;; own cycles (NumGC) less those the asked collections ran (gcAbsorbed): a collection of OCaml's is never one of Go's
-  [^int gcMinorAsked] [^int gcMajorAsked] [^int gcCompactions] [^int gcAbsorbed])
+  [^int gcMinorAsked] [^int gcMajorAsked] [^int gcCompactions] [^int gcAbsorbed]
+  ;; queue 516 (DECISION 511-2 (a)): the minor collections Gc counts are OCaml's, those of OC218's simulated minor heap (countWords's
+  ;; overflows) and the asked ones, no longer Go's cycles (a Go cycle is not an emptying of OCaml's minor heap); each an EV_MINOR span
+  ;; in Runtime_events' ring, as the C runtime counts and emits its own
+  [^int minorHeapCollections])
 
 
 ^{:go/end 109} (go/func memStats ^{:tag (* runtime/MemStats)} []
@@ -118,7 +122,7 @@
       ^{:line 113} words ^{:go/end 113} (fn ^int [^uint64 b] (conv int (/ b 8)))]
     (addr (lit Block :Tag 0 :F (lit (slice Value)
           ^{:line 115} (conv float64 minorWords) (conv float64 0) (conv float64 majorWords)
-          (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMinorAsked) (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMajorAsked)
+          (+ minorHeapCollections gcMinorAsked) (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMajorAsked)
           (words (.-HeapSys m)) 1 (words (.-HeapAlloc m)) (conv int (- (.-Mallocs m) (.-Frees m)))
           (words (.-HeapIdle m)) 0 0 0 gcCompactions (words (.-HeapSys m)) 0 forcedMajorCount 0)))))
 
@@ -893,7 +897,10 @@ closures, the boxed numbers of arithmetic or the runtime's own blocks.\n"} minor
     (not y)))
 
 (go/func countWords "countWords counts an allocation of wosize words (and its header; an atom, wosize 0, is static); it reports whether the
-allocation overflowed the simulated minor heap, which a minor collection empties before the block is made.\n" ^bool [^int wosize]
+allocation overflowed the simulated minor heap, which a minor collection empties before the block is made (counted in Gc's minor
+collections and emitted in Runtime_events' ring, queue 516); while the ring is active the allocation is counted in its buckets.\n" ^bool [^int wosize]
+  (when reLive
+    (reAlloc wosize))
   (when (> wosize 256)
     (set! majorWords + (+ wosize 1))
     (return false))
@@ -904,6 +911,8 @@ allocation overflowed the simulated minor heap, which a minor collection empties
   (when (> minorUsed (AsInt (aget gcControl 0)))
     (set! minorUsed (+ wosize 1))
     (youngClear)
+    (inc! minorHeapCollections)
+    (reMinorHeap)
     (return true))
   false)
 
@@ -949,11 +958,12 @@ not sampled). It returns v.\n" ^Value [^{:tag (* Thread)} th ^int wosize ^Value 
     ^{:tag Value} data
     ^{:tag bool} major))
 
-(go/type memprofSampleT "memprofSampleT is a queued callback: kind 0 an allocation's (n samples of size words), 1 a promotion's, 2 a minor
-deallocation's, 3 a major deallocation's (of ent).\n" (struct
+(go/type memprofSampleT "memprofSampleT is a queued callback: kind 0 an allocation's (n samples of size words, its source src: 0 Normal,
+1 Marshal), 1 a promotion's, 2 a minor deallocation's, 3 a major deallocation's (of ent).\n" (struct
     ^{:tag int} kind
     ^{:tag int} n
     ^{:tag int} size
+    ^{:tag int} src
     ^{:tag bool} major
     ^{:tag (* memprofProfile)} prof
     ^{:tag (* weakRef)} ref
@@ -972,6 +982,9 @@ deallocation's, 3 a major deallocation's (of ent).\n" (struct
     (+ (math/Floor (/ (math/Log u) (math/Log1p (- lambda)))) 1)))
 
 (go/func memprofSample "memprofSample draws the samples of an allocation of v (wosize words) by th for the profile p and queues its callback.\n" [^{:tag (* Thread)} th ^{:tag (* memprofProfile)} p ^int wosize ^Value v]
+  (memprofSampleIn th p wosize v (> wosize 256) 0))
+
+(go/func memprofSampleIn "memprofSampleIn is memprofSample of a block in the major heap or not (major), from the source src.\n" [^{:tag (* Thread)} th ^{:tag (* memprofProfile)} p ^int wosize ^Value v ^bool major ^int src]
   (let [words (conv float64 (+ wosize 1)) n 0 lambda (.-lambda p)]
     (when (>= lambda 1)
       (set! n (+ wosize 1)))
@@ -985,7 +998,7 @@ deallocation's, 3 a major deallocation's (of ent).\n" (struct
         (when (!= v nil)
           (when [(values w ok) (assert (* weakRef) (weakOf v))] ok
             (set! r w)))
-        (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :kind 0 :n n :size wosize :major (> wosize 256) :prof p :ref r)))))))
+        (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :kind 0 :n n :size wosize :src src :major major :prof p :ref r)))))))
 
 (go/func refAlive "refAlive reports whether a tracked value lives after Go's collection: its weak pointer not collected (nil, a value
 without an identity, is taken as dead: a boxed number does not outlive its use).\n" ^bool [^{:tag (* weakRef)} r]
@@ -1066,7 +1079,7 @@ promotion's (tracked on in the major heap when it returns Some), a deallocation'
       ;; a sample of a profile stopped or replaced since gets no callback (the block is not tracked)
       (when (or (!= p (.-mp (.-Dom th))) (!= (.-status p) 0))
         (return))
-      (let [info (addr (lit Block :Tag 0 :F (lit (slice Value) (.-n smp) (.-size smp) 0 (addr (lit Block :Tag 0)))))
+      (let [info (addr (lit Block :Tag 0 :F (lit (slice Value) (.-n smp) (.-size smp) (.-src smp) (addr (lit Block :Tag 0)))))
             k 0]
         (when (.-major smp) (set! k 1))
         (when [(values b ok) (assert (* Block) (.Apply th (aget (.-F (.-tracker p)) k) info))] ok
@@ -1087,6 +1100,32 @@ promotion's (tracked on in the major heap when it returns Some), a deallocation'
             (set! memprofMajor (append memprofMajor e))))
         (case [2] (.Apply th (aget (.-F (.-tracker p)) 3) (.-data e)))
         (case [3] (.Apply th (aget (.-F (.-tracker p)) 4) (.-data e)))))))
+
+(go/func allocInterned "allocInterned is the allocation of the objects Marshal read back by th (intern.c): data of at most Max_young_wosize
+words is one block of the minor heap (Alloc_small, counted once), more is a block of the major heap each (counted each); each object is
+sampled by Gc.Memprof with the source Marshal, in the heap its storage is in, and the callbacks run once the value is read (intern_end's
+caml_process_pending_actions).\n" [^{:tag (* Thread)} th ^{:tag (slice internObj)} objs]
+  (let [whsize 0]
+    (range [_ o objs]
+      (set! whsize + (+ (.-wosize o) 1)))
+    (when (== whsize 0)
+      (return))
+    (let [major (> (- whsize 1) 256) full false]
+      (if major
+        (set! majorWords + whsize)
+        (set! full (countWords (- whsize 1))))
+      (when (.-mpInCb th)
+        (when full (set! minorDue true))
+        (return))
+      (when (or full minorDue)
+        (set! minorDue false)
+        (memprofMinorGC th false))
+      (when memprofStarted
+        (when [p (.-mp (.-Dom th))] (and (!= p nil) (== (.-status p) 0))
+          (range [_ o objs]
+            (memprofSampleIn th p (.-wosize o) (.-v o) major 1))))
+      (when (> (len (.-mpQ th)) 0)
+        (.memprofRun th)))))
 
 (go/func countValue "countValue counts the allocation of v by th, a value just made (a block, a float array, a string, a boxed float).\n" [^{:tag (* Thread)} th ^Value v]
   (type-switch [x v]

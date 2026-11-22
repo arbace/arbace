@@ -405,7 +405,10 @@
    "java/rmi/server/UnicastRemoteObject" "javax/management/remote/rmi/RMIJRMPServerImpl"
    ;; queue task 415, slice 2 (test/jrt/jrt_sources.ae, sctp-sources): SCTP's Association, which MessageInfoTests'
    ;; TestAssociation extends (its protected constructor)
-   "com/sun/nio/sctp/Association"])
+   "com/sun/nio/sctp/Association"
+   ;; queue 466 (JCS167): the object streams' field classes, which java/io/Serializable/subclass's own streams extend
+   ;; (XObjectInputStream's InternalGetField, XObjectOutputStream's InternalPutField: "cannot extend ... GetField yet")
+   "java/io/ObjectInputStream$GetField" "java/io/ObjectOutputStream$PutField"])
 
 (def ^:private proxy-super? (set (concat proxy-supers class-supers)))
 
@@ -563,6 +566,8 @@
     (and (mdesc-in-world? (:desc m)) (hw-method-exists? n m))
     (member-mdesc? n (:desc m))))
 
+(declare go-mname find-vmethod)
+
 (defn declared-vmethods
   "The virtual methods n declares that exist in Go, by [name desc]."
   [n]
@@ -581,7 +586,9 @@
                           (if (= c "java/lang/Object")
                             acc
                             (reduce (fn [acc m]
-                                      (let [k [(:name m) (:desc m)]]
+                                      ;; the key's name is go-mname's: a package-private family
+                                      ;; renamed apart is a method of its own (JCS122)
+                                      (let [k [(go-mname c (:name m) (:desc m)) (:desc m)]]
                                         (if (or (contains? acc k) (contains? object-keys k)) acc (assoc acc k m))))
                                     acc (declared-vmethods c))))
                         (array-map) (all-supertypes n))]
@@ -612,10 +619,11 @@
   "The implementation of virtual method k = [name desc] for class n: {:kind :class :owner c
   :method m} for a method with a body in n or a superclass (a jrt class's: :jrt-impl when jrt
   has Impl_, :promoted when the method itself is on its struct), {:kind :default :owner j
-  :method m} for an interface's default method, or nil (abstract)."
+  :method m} for an interface's default method, or nil (abstract). k's name is a dispatch key's,
+  go-mname's (JCS122: a renamed package-private family's name matches its own declarations alone)."
   [n [name desc :as k]]
   (or (some (fn [c]
-              (when-let [m (and (not (interface? c)) (find-method c name desc))]
+              (when-let [m (and (not (interface? c)) (find-vmethod c name desc))]
                 (when (and (not (static? m)) (not (abstract-m? m))
                            (or (not (private? m)) (= c n)))
                   (cond
@@ -631,7 +639,7 @@
       ;; default methods: the maximally specific one (JVMS 5.4.3.3)
       (let [cands (for [c (all-supertypes n)
                         :when (interface? c)
-                        :let [m (find-method c name desc)]
+                        :let [m (find-vmethod c name desc)]
                         :when (and m (not (abstract-m? m)) (not (static? m)) (not (private? m)))
                         :when (or (not (hand-written? c))
                                   (contains? (:funcs (:jrt *w*)) (str (go-name c) "_" (nm/method-base name desc))))]
@@ -675,6 +683,146 @@
   (or (not (static? f)) (#{"serialVersionUID" "serialPersistentFields"} (:name f))))
 
 (defn- java-pkg [n] (let [i (.lastIndexOf ^String n "/")] (if (neg? i) "" (subs n 0 i))))
+
+;; ---------------------------------------------------------------------------------------
+;; package-private methods across packages (J2G-SPEC §4.4; JCS122,
+;; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS122 (a)")
+;;
+;; A package-private method is not overridden by a method of the same name and descriptor that a
+;; subclass in another Java package declares (JVMS 5.4.5): both exist, and a call resolved to the
+;; first dispatches among its own overrides only. Go's method sets key a method by its name, so
+;; j2g gives such a method, and the declarations that override it (its family: the component of
+;; JVMS 5.4.5's overriding among the declarations of one [name desc]), a name of their own,
+;; go-mname's NAME-pp-PKG (Go's NAME_pp_PKG__R...): in its definitions, the class interfaces, the
+;; dispatch keys (vmethods, impl-of: forwarders, DynSub types), the calls resolved to it and the
+;; member tables. Only where a world has such a pair: every other world's names are as before
+;; (the shipped program has none, so its Go is unchanged).
+
+(defn- pp-method?
+  "A package-private virtual method (neither public, protected nor private)."
+  [mm]
+  (and (virtual-member? mm)
+       (zero? (bit-and (or (:flags mm) 0) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED)))))
+
+(defn- vdecl
+  "Class c's own virtual declaration of k = [name desc], or nil."
+  [c [name desc]]
+  (let [mm (find-method c name desc)] (when (and mm (virtual-member? mm)) mm)))
+
+(defn pp-name
+  "The family name of method name in Java package pkg (go-mname): NAME-pp-PKG, the package's
+  slashes as dashes; munged into Go as NAME_pp_PKG. A Java name cannot hold a dash."
+  [name pkg]
+  (str name "-pp-" (str/replace pkg "/" "-")))
+
+(defn- key-families
+  "The renames of one key k = [name desc] that a package-private declaration redeclared in another
+  package needs, among translated classes Ts: {[c name desc] renamed-name}. Its declarations are
+  the translated classes' and their supertypes'; x (of class cx) overrides y (of a supertype cy)
+  directly when cy is an interface, y is public or protected, or both are in one Java package
+  (JVMS 5.4.5), and through overrides. The families are the components of direct overriding; one
+  that holds the overridden side of a pair (y in a superclass of cx that x does not override) is
+  renamed after y's package, unless it holds an interface's or a class's that j2g does not
+  translate (jrt's Go is not renamed): the pair is then left to the check (checks/
+  package-private-overrides, an error)."
+  [k Ts]
+  (let [dT (filter #(and (not (interface? %)) (vdecl % k)) Ts)
+        ds (vec (distinct (concat dT (for [c dT s (all-supertypes c) :when (and (not= s c) (vdecl s k))] s))))
+        dset (set ds)
+        direct (into {} (for [x ds]
+                          [x (vec (for [y (all-supertypes x)
+                                        :when (and (not= y x) (contains? dset y))
+                                        :when (or (interface? y) (not (pp-method? (vdecl y k)))
+                                                  (= (java-pkg x) (java-pkg y)))]
+                                    y))]))
+        reach (fn [x] (loop [seen #{} todo (direct x)]
+                        (if-let [[y & more] (seq todo)]
+                          (if (seen y) (recur seen more) (recur (conj seen y) (concat more (direct y))))
+                          seen)))
+        ;; the components (union of direct edges)
+        parent (atom (zipmap ds ds))
+        root (fn root [x] (let [p (@parent x)] (if (= p x) x (root p))))
+        _ (doseq [x ds y (direct x)]
+            (let [a (root x) b (root y)] (when (not= a b) (swap! parent assoc a b))))
+        comp-of (into {} (for [x ds] [x (root x)]))
+        members (group-by comp-of ds)
+        ;; the pairs: y in a superclass of cx, which x does not override
+        pairs (for [x ds :when (not (interface? x))
+                    :let [r (reach x)]
+                    y (rest (superclass-chain x))
+                    :when (and (contains? dset y) (not (r y)))]
+                [x y])
+        forced? (fn [c] (some #(or (interface? %) (not (translated? %))) (members c)))
+        renamed (reduce (fn [acc [x y]]
+                          (let [c (comp-of y)]
+                            (if (or (contains? acc c) (forced? c) (= c (comp-of x)))
+                              acc
+                              (assoc acc c (pp-name (first k) (java-pkg y))))))
+                        {} (sort-by (comp vec reverse) pairs))]
+    (into {} (for [[c nm] renamed x (members c)] [[x (first k) (second k)] nm]))))
+
+(defn- compute-pp-families
+  "{:renames {[c name desc] renamed-name} :names #{name} :keys {renamed-name name}} of translated
+  classes T (key-families of each key that has a pair)."
+  [T]
+  (let [Ts (vec (sort T))
+        classes (remove interface? Ts)
+        subs (reduce (fn [acc s] (reduce #(update %1 %2 (fnil conj []) s) acc (rest (superclass-chain s))))
+                     {} classes)
+        ks (sort (set (for [n classes
+                            :let [sub (get subs n)]
+                            :when sub
+                            mm (methods-of n)
+                            :when (pp-method? mm)
+                            :let [k [(:name mm) (:desc mm)]]
+                            :when (some #(and (not= (java-pkg %) (java-pkg n)) (vdecl % k)) sub)]
+                        k)))
+        renames (into {} (mapcat #(key-families % Ts) ks))]
+    {:renames renames
+     :names (set (map second (keys renames)))
+     :keys (into {} (for [[[_ n _] r] renames] [r n]))}))
+
+(defn pp-families
+  "The world's package-private families renamed apart (compute-pp-families), computed once per
+  world (in its vmethods cache, which is made again with the final T)."
+  []
+  (let [x (:T *w*)
+        cache (:vmethods-cache *w*)]
+    (cond
+      (nil? x) {:renames {} :names #{} :keys {}}
+      (or (nil? cache) (instance? arbace.lang.IDeref x)) (compute-pp-families (T))
+      :else (let [d (or (::pp @cache)
+                        (::pp (swap! cache update ::pp #(or % (delay (compute-pp-families (T)))))))]
+              @d))))
+
+(defn go-mname
+  "The name of method name desc that class c declares in j2g's Go names and dispatch keys: name,
+  or its family's (pp-families: a package-private method that a subclass in another Java package
+  redeclares, and the methods that override it)."
+  [c name desc]
+  (let [r (:renames (pp-families))]
+    (if (empty? r) name (get r [c name desc] name))))
+
+(defn find-vmethod
+  "find-method of a dispatch key's name (go-mname's): a renamed family's name finds its own
+  declarations alone, a Java name the others."
+  [c name desc]
+  (let [f (pp-families)]
+    (if (empty? (:renames f))
+      (find-method c name desc)
+      (let [jn (get (:keys f) name name)]
+        (some #(when (and (= jn (:name %)) (= desc (:desc %)) (= name (go-mname c jn desc))) %) (methods-of c))))))
+
+(defn vbase
+  "The Go method name (nm/method-base) of instance method name desc called on (or referred to
+  through) class o: its declaration's, the first in o's superclass chain, renamed when in a
+  family (go-mname)."
+  [o name desc]
+  (let [f (pp-families)]
+    (if (or (empty? (:renames f)) (not (contains? (:names f) name)))
+      (nm/method-base name desc)
+      (let [c (some #(when (vdecl % [name desc]) %) (superclass-chain o))]
+        (nm/method-base (if c (go-mname c name desc) name) desc)))))
 
 (defn- class-access
   "Class n's access flags as Class.getModifiers reports them (a member class's inner flags)."

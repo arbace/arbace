@@ -1,0 +1,303 @@
+;; Converted from overlay/jdk/java.base/sun/nio/ch/SimpleAsynchronousFileChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels AsynchronousCloseException
+                            AsynchronousFileChannel
+                            ClosedChannelException
+                            CompletionHandler
+                            FileLock
+                            NonReadableChannelException
+                            NonWritableChannelException)
+        '(java.util.concurrent ExecutorService Future)
+        '(jdk.internal.event FileForceEvent)
+        '(jdk.internal.jrt HostFileChannels))
+
+(defclass ^:public SimpleAsynchronousFileChannelImpl
+  :extends AsynchronousFileChannelImpl
+
+  (defclass ^:private ^:static DefaultExecutorHolder
+    (field ^:static ^:final ^ExecutorService defaultExecutor (.executor (ThreadPool/createDefault))))
+
+  (field ^:private ^:final ^FileChannelImpl fc)
+
+  (field ^:private ^:final lockKey)
+
+  (field ^:private ^:static ^:final ^int NO_LOCK -1)
+
+  (field ^:private ^:static ^:final ^int LOCKED 0)
+
+  (field ^:private ^:static ^:final ^int INTERRUPTED 2)
+
+  (field ^:private ^:final ^String path)
+
+  (field ^:private ^:final ^NativeThreadSet threads (NativeThreadSet. 2))
+
+  (constructor [this ^FileDescriptor fdObj ^String path ^boolean reading ^boolean writing
+                ^ExecutorService executor]
+    (super. fdObj reading writing executor)
+    (set! (.-path this) path)
+    (set! (.-fc this)
+          (cast FileChannelImpl (FileChannelImpl/open fdObj path reading writing false false nil)))
+    (.setUninterruptible (.-fc this))
+    (set! (.-lockKey this) (HostFileChannels/lockKey fdObj path)))
+
+  (method ^:public ^:static open ^AsynchronousFileChannel [^FileDescriptor fdo ^String path
+                                                           ^boolean reading ^boolean writing
+                                                           ^ThreadPool pool]
+    (let [^ExecutorService executor (if (nil? pool)
+                                        DefaultExecutorHolder/defaultExecutor
+                                        (.executor pool))]
+      (SimpleAsynchronousFileChannelImpl. fdo path reading writing executor)))
+
+  (method lockKey [this] lockKey)
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (locking (.-fdObj this) (when (.-closed this) (return)) (set! (.-closed this) true))
+    (.invalidateAllLocks this)
+    (.signalAndWait threads)
+    (.lock (.writeLock (.-closeLock this)))
+    (try (finally (.unlock (.writeLock (.-closeLock this)))))
+    (.close fc))
+
+  (method ^:public size :throws [IOException] ^long [this]
+    (let [ti (.add threads)]
+      (try
+        (let [^:mutable n 0]
+          (try
+            (.begin this)
+            (loop []
+              (set! n (.size fc))
+              (when (and (== n IOStatus/INTERRUPTED) (.isOpen this)) (recur)))
+            n
+            (finally (.end this (>= n 0)))))
+        (finally (.remove threads ti)))))
+
+  (method ^:public truncate :throws [IOException] ^AsynchronousFileChannel [this ^long size]
+    (when (< size 0) (throw (IllegalArgumentException. "Negative size")))
+    (when-not (.-writing this) (throw (NonWritableChannelException.)))
+    (let [ti (.add threads)]
+      (try
+        (let [^:mutable n 0]
+          (try
+            (.begin this)
+            (loop []
+              (set! n (.size fc))
+              (when (and (== n IOStatus/INTERRUPTED) (.isOpen this)) (recur)))
+            (when (and (< size n) (.isOpen this))
+              (loop []
+                (.truncate fc size)
+                (set! n 0)
+                (when (and (== n IOStatus/INTERRUPTED) (.isOpen this)) (recur))))
+            this
+            (finally (.end this (> n 0)))))
+        (finally (.remove threads ti)))))
+
+  (method ^:private implForce :throws [IOException] ^void [this ^boolean metaData]
+    (let [ti (.add threads)]
+      (try
+        (let [^:mutable ^int n 0]
+          (try
+            (.begin this)
+            (loop []
+              (.force fc metaData)
+              (set! n 0)
+              (when (and (== n IOStatus/INTERRUPTED) (.isOpen this)) (recur)))
+            (finally (.end this (>= n 0)))))
+        (finally (.remove threads ti)))))
+
+  (method ^:public force :throws [IOException] ^void [this ^boolean metaData]
+    (if (not (FileForceEvent/enabled))
+        (.implForce this metaData)
+        (let [start (FileForceEvent/timestamp)]
+          (.implForce this metaData)
+          (FileForceEvent/offer start path metaData))))
+
+  (method implLock :type-params [A] ^{:tag (Future FileLock)} [this ^:final ^long position
+                                                               ^:final ^long size
+                                                               ^:final ^boolean shared
+                                                               ^:final ^A attachment
+                                                               ^:final ^{:tag (CompletionHandler FileLock (? super A))} handler]
+    (when (and shared (not (.-reading this))) (throw (NonReadableChannelException.)))
+    (when (and (not shared) (not (.-writing this))) (throw (NonWritableChannelException.)))
+    (let [len (if (not (== size 0)) size (unchecked-subtract Long/MAX_VALUE (Math/max 0 position)))
+          fli (.addToFileLockTable this position len shared)]
+      (if (nil? fli)
+          (let [^Throwable exc (ClosedChannelException.)]
+            (if (nil? handler)
+                (CompletedFuture/withFailure exc)
+                (do (Invoker/invokeIndirectly handler attachment nil exc (.-executor this)) nil)))
+          (let [^{:tag (PendingFuture FileLock A)} result (when (nil? handler)
+                                                            (PendingFuture. this))
+                ^Runnable task (anon Runnable []
+                                 (method ^:public run ^void [this]
+                                   (let [^:mutable ^Throwable exc nil
+                                         ti (.add threads)]
+                                     (try
+                                       (let [^:mutable ^int n 0]
+                                         (try
+                                           (.begin SimpleAsynchronousFileChannelImpl/this)
+                                           (loop []
+                                             (set! n LOCKED)
+                                             (when (and
+                                                     (== n INTERRUPTED)
+                                                     (.isOpen
+                                                       SimpleAsynchronousFileChannelImpl/this))
+                                               (recur)))
+                                           (when (or
+                                                   (not (== n LOCKED))
+                                                   (not
+                                                     (.isOpen
+                                                       SimpleAsynchronousFileChannelImpl/this)))
+                                             (throw (AsynchronousCloseException.)))
+                                           (catch IOException ^:mutable x
+                                             (.removeFromFileLockTable
+                                               SimpleAsynchronousFileChannelImpl/this
+                                               fli)
+                                             (when-not (.isOpen
+                                                         SimpleAsynchronousFileChannelImpl/this)
+                                               (set! x (AsynchronousCloseException.)))
+                                             (set! exc x))
+                                           (finally (.end SimpleAsynchronousFileChannelImpl/this))))
+                                       (finally (.remove threads ti)))
+                                     (if (nil? handler)
+                                         (.setResult result fli exc)
+                                         (Invoker/invokeUnchecked handler attachment fli exc)))))
+                ^:mutable executed false]
+            (try
+              (.execute (.-executor this) task)
+              (set! executed true)
+              (finally (when-not executed (.removeFromFileLockTable this fli))))
+            result))))
+
+  (method ^:public tryLock :throws [IOException] ^FileLock [this ^long position ^:mutable ^long size
+                                                            ^boolean shared]
+    (when (and shared (not (.-reading this))) (throw (NonReadableChannelException.)))
+    (when (and (not shared) (not (.-writing this))) (throw (NonWritableChannelException.)))
+    (when (== size 0) (set! size (unchecked-subtract Long/MAX_VALUE (Math/max 0 position))))
+    (let [fli (.addToFileLockTable this position size shared)]
+      (when (nil? fli) (throw (ClosedChannelException.)))
+      (let [ti (.add threads)
+            ^:mutable gotLock false]
+        (try
+          (.begin this)
+          (let [^:mutable ^int n 0]
+            (loop [] (set! n LOCKED) (when (and (== n INTERRUPTED) (.isOpen this)) (recur)))
+            (if (and (== n LOCKED) (.isOpen this))
+                (do (set! gotLock true) fli)
+                (when-not (== n NO_LOCK)
+                  (when (== n INTERRUPTED) (throw (AsynchronousCloseException.)))
+                  (throw (AssertionError.)))))
+          (finally
+            (when-not gotLock (.removeFromFileLockTable this fli))
+            (.end this)
+            (.remove threads ti))))))
+
+  (method ^:protected implRelease :throws [IOException] ^void [this ^FileLockImpl fli])
+
+  (method implRead :type-params [A] ^{:tag (Future Integer)} [this ^:final ^ByteBuffer dst
+                                                              ^:final ^long position
+                                                              ^:final ^A attachment
+                                                              ^:final ^{:tag (CompletionHandler Integer (? super A))} handler]
+    (when (< position 0) (throw (IllegalArgumentException. "Negative position")))
+    (when-not (.-reading this) (throw (NonReadableChannelException.)))
+    (when (.isReadOnly dst) (throw (IllegalArgumentException. "Read-only buffer")))
+    (if (or (not (.isOpen this)) (== (.remaining dst) 0))
+        (let [^Throwable exc (when-not (.isOpen this) ^Throwable (ClosedChannelException.))]
+          (if (nil? handler)
+              (CompletedFuture/withResult (Integer/valueOf 0) exc)
+              (do
+                (Invoker/invokeIndirectly handler
+                                          attachment
+                                          (Integer/valueOf 0)
+                                          exc
+                                          (.-executor this))
+                nil)))
+        (do
+          (IOUtil/acquireScope dst true)
+          (let [^{:tag (PendingFuture Integer A)} result (when (nil? handler) (PendingFuture. this))
+                ^Runnable task (anon Runnable []
+                                 (method ^:public run ^void [this]
+                                   (let [^:mutable ^int n 0
+                                         ^:mutable ^Throwable exc nil
+                                         ti (.add threads)]
+                                     (try
+                                       (.begin SimpleAsynchronousFileChannelImpl/this)
+                                       (loop []
+                                         (set! n (.read fc dst position))
+                                         (when (and
+                                                 (== n IOStatus/INTERRUPTED)
+                                                 (.isOpen SimpleAsynchronousFileChannelImpl/this))
+                                           (recur)))
+                                       (when (and
+                                               (< n 0)
+                                               (not
+                                                 (.isOpen SimpleAsynchronousFileChannelImpl/this)))
+                                         (throw (AsynchronousCloseException.)))
+                                       (catch IOException ^:mutable x
+                                         (when-not (.isOpen SimpleAsynchronousFileChannelImpl/this)
+                                           (set! x (AsynchronousCloseException.)))
+                                         (set! exc x))
+                                       (finally
+                                         (.end SimpleAsynchronousFileChannelImpl/this)
+                                         (.remove threads ti)
+                                         (IOUtil/releaseScope dst)))
+                                     (if (nil? handler)
+                                         (.setResult result n exc)
+                                         (Invoker/invokeUnchecked handler attachment n exc)))))]
+            (.execute (.-executor this) task)
+            result))))
+
+  (method implWrite :type-params [A] ^{:tag (Future Integer)} [this ^:final ^ByteBuffer src
+                                                               ^:final ^long position
+                                                               ^:final ^A attachment
+                                                               ^:final ^{:tag (CompletionHandler Integer (? super A))} handler]
+    (when (< position 0) (throw (IllegalArgumentException. "Negative position")))
+    (when-not (.-writing this) (throw (NonWritableChannelException.)))
+    (if (or (not (.isOpen this)) (== (.remaining src) 0))
+        (let [^Throwable exc (when-not (.isOpen this) ^Throwable (ClosedChannelException.))]
+          (if (nil? handler)
+              (CompletedFuture/withResult (Integer/valueOf 0) exc)
+              (do
+                (Invoker/invokeIndirectly handler
+                                          attachment
+                                          (Integer/valueOf 0)
+                                          exc
+                                          (.-executor this))
+                nil)))
+        (do
+          (IOUtil/acquireScope src true)
+          (let [^{:tag (PendingFuture Integer A)} result (when (nil? handler) (PendingFuture. this))
+                ^Runnable task (anon Runnable []
+                                 (method ^:public run ^void [this]
+                                   (let [^:mutable ^int n 0
+                                         ^:mutable ^Throwable exc nil
+                                         ti (.add threads)]
+                                     (try
+                                       (.begin SimpleAsynchronousFileChannelImpl/this)
+                                       (loop []
+                                         (set! n (.write fc src position))
+                                         (when (and
+                                                 (== n IOStatus/INTERRUPTED)
+                                                 (.isOpen SimpleAsynchronousFileChannelImpl/this))
+                                           (recur)))
+                                       (when (and
+                                               (< n 0)
+                                               (not
+                                                 (.isOpen SimpleAsynchronousFileChannelImpl/this)))
+                                         (throw (AsynchronousCloseException.)))
+                                       (catch IOException ^:mutable x
+                                         (when-not (.isOpen SimpleAsynchronousFileChannelImpl/this)
+                                           (set! x (AsynchronousCloseException.)))
+                                         (set! exc x))
+                                       (finally
+                                         (.end SimpleAsynchronousFileChannelImpl/this)
+                                         (.remove threads ti)
+                                         (IOUtil/releaseScope src)))
+                                     (if (nil? handler)
+                                         (.setResult result n exc)
+                                         (Invoker/invokeUnchecked handler attachment n exc)))))]
+            (.execute (.-executor this) task)
+            result)))))

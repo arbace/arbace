@@ -1,11 +1,13 @@
-(in-ns 'go.arbace.oicapi) (go/file "capi.go" :doc "Package oicapi runs a program's own C stubs beside oi (doc/ocaml/OCAML-SURVEY.md, \"As built: the C API on ci\"): the stubs,\noi's C runtime (test/ocaml/capi/runtime.c) and what they need of musl, one node program (bin/oi cnodes), loaded into\nci over an address space of its own. An external oi does not implement is the stubs' C function of its name; its\narguments cross as OCaml's words: an integer tagged, a block a copy in ci's memory (its header the word before, OCaml's\nlayout), made when the stub is called and read back when it returns, around a callback and when it raises. The copies of a\ncall live in the boundary's memory until the outermost stub returns; a custom block the C allocates is static, kept for the\nrun. No collector moves them, so the C's roots need no registration.\n" :imports [
+(in-ns 'go.arbace.oicapi) (go/file "capi.go" :doc "Package oicapi runs a program's own C stubs beside oi (doc/ocaml/OCAML-SURVEY.md, \"As built: the C API on ci\"): the stubs,\noi's C runtime (test/ocaml/capi/runtime.c) and what they need of musl, one node program (bin/oi cnodes), loaded into\nci over an address space of its own. An external oi does not implement is the stubs' C function of its name; its\narguments cross as OCaml's words: an integer tagged, a block a copy in ci's memory (its header the word before, OCaml's\nlayout), made when the stub is called and read back when it returns, around a callback and when it raises. The copies of a\ncall live in the boundary's memory until the outermost stub returns; a custom block the C allocates is static, kept for the\nrun (since queue 516 one whose operations have a finalize is held weakly, and its finalize runs once its value is unreachable,\nat the collection a program asks for). No collector moves them, so the C's roots need no registration.\n" :imports [
     [fmt "fmt"]
     [io "io"]
     [math "math"]
     [os "os"]
     [strconv "strconv"]
     [strings "strings"]
+    [sync "sync"]
     [syscall "syscall"]
+    [weak "weak"]
     [ci "arbace/ci"]
     [crt "arbace/crt"]
     [oi "arbace/oi"]])
@@ -44,6 +46,14 @@
     ^int pass
     ;; the run's: the C's custom blocks, the named values' slots, the operations' records by identifier
     ^{:tag (map uint64 oi/Value)} statics
+    ;; the custom blocks whose operations have a finalize (queue 516): held weakly; finMu guards the finalisable ones' map
+    ^{:tag (map uint64 (weak/Pointer oi/Custom))} wstatics
+    ^{:tag sync/Mutex} finMu
+    ;; the global roots (queue 516): the registered cells, those registered or modified in the outermost call (rehomed at its
+    ;; end), and the static copies made for oi's values (one a value)
+    ^{:tag (map uint64 bool)} roots
+    ^{:tag (slice uint64)} dirty
+    ^{:tag (map any uint64)} homes
     ^{:tag (map string uint64)} named
     ^{:tag (map string uint64)} customOps
     ^{:tag (array 4 uint64)} ops
@@ -97,7 +107,8 @@
             l (ci/NewLoader p)
             objs (lit (map string int))
             c (addr (lit capi :p p :m m :toC (lit (map any uint64)) :toGo (lit (map uint64 oi/Value)) :seen (lit (map uint64 int))
-                      :statics (lit (map uint64 oi/Value)) :named (lit (map string uint64)) :customOps (lit (map string uint64))))]
+                      :statics (lit (map uint64 oi/Value)) :wstatics (lit (map uint64 (weak/Pointer oi/Custom)))
+                      :roots (lit (map uint64 bool)) :homes (lit (map any uint64)) :named (lit (map string uint64)) :customOps (lit (map string uint64))))]
         (set! (.-StdFiles sys) (lit (array 3 (* os/File)) os/Stdin os/Stdout os/Stderr))
         (range [_ t tops]
           (when [(values x ok) (assert (slice any) t)] (and ok (> (len x) 5) (== (fmt/Sprint (aget x 0)) "static"))
@@ -237,7 +248,14 @@
       (.Store64 (.-m c) a (bit-or (<< wosize 10) (conv uint64 tag)))
       (+ a 8))))
 
-(go/method reset "reset ends the outermost call: the boundary's memory free again, the call's copies forgotten.\n" [^{:tag (* capi)} c]
+(go/method reset "reset ends the outermost call: the roots registered or modified in it rehomed, then the boundary's memory free again, the
+call's copies forgotten.\n" [^{:tag (* capi)} c]
+  (when (> (len (.-dirty c)) 0)
+    (let [d (.-dirty c)]
+      (set! (.-dirty c) nil)
+      (range [_ r d]
+        (when (aget (.-roots c) r)
+          (.Store64 (.-m c) r (.rehome c (.Load64 (.-m c) r)))))))
   (range [_ b (.-big c)]
     (.Unmap (.-m c) (aget b 0) (aget b 1)))
   (set! (.-big c) nil)
@@ -446,6 +464,8 @@
     (oi/Internalf "a C stub's value is a null pointer"))
   (when [(values v ok) (aget (.-statics c) w)] ok
     (return v))
+  (when [v (.weakStatic c w)] (!= v nil)
+    (return v))
   (when [(values v ok) (aget (.-toGo c) w)] ok
     (when (!= (aget (.-seen c) w) (.-pass c))
       (aset (.-seen c) w (.-pass c))
@@ -491,7 +511,9 @@
                   (.read c w v)
                   (return v)))))
           (let [v (addr (lit oi/Custom :Name id :V (addr (lit CBlock :Addr w))))]
-            (aset (.-statics c) w v)
+            (if (!= (.Load64 m (+ ops 8)) 0)
+              (.finalisable c w v)
+              (aset (.-statics c) w v))
             (return v))))
       (case [tagClosure]
         (oi/Internalf "a C stub returned a closure oi did not give it")))
@@ -591,7 +613,16 @@
             (set! args (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 arr)) (lit ci/Arg :K \i :I (conv int64 (len a))))))))
       (let [r (.Call (.-p c) t f args)]
         (.fromCAll c)
-        (.decode c (conv uint64 (.-I r)))))))
+        (.result c r)))))
+
+(go/method result "result is a stub's result word as oi's value. A stub of C's void type (lib-runtime-events/test's start_runtime_events,
+an external of type unit -> unit) leaves its result undefined, which OCaml's caller of a unit result never reads: ci's 0 is ()
+here, not a null pointer (queue 478).
+"
+  ^oi/Value [^{:tag (* capi)} c ^ci/Arg r]
+  (when (== (.-I r) 0)
+    (return oi/Unit))
+  (.decode c (conv uint64 (.-I r))))
 
 (go/method callRaw "callRaw is call with the representations reprs (CallRaw's): a value encoded, an unboxed or untagged argument as\nitself, the result likewise.\n"
   ^oi/Value [^{:tag (* capi)} c ^{:tag (* ci/Func)} f ^string reprs ^{:tag (slice oi/Value)} a]
@@ -634,7 +665,7 @@
           (case [\n] (return (conv oi/Nativeint (.-I r))))
           (case [\i] (return (conv int32 (.-I r))))
           (case [\t] (return (conv int (.-I r)))))
-        (.decode c (conv uint64 (.-I r)))))))
+        (.result c r)))))
 
 (go/method callback "callback is caml_callbackN_exn: the closure applied to the n arguments at args on oi's thread; the result, or\nthe exception raised marked as caml_callback_exn marks it.\n"
   ^uint64 [^{:tag (* capi)} c ^uint64 clos ^int n ^uint64 args]
@@ -681,6 +712,9 @@
                       (ai (.alloc c (arg a 0) (conv int (arg a 1)))))]
       ["__oi_alloc_static" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                              (ai (.allocStatic c (arg a 0) (conv int (arg a 1)))))]
+      ["__oi_root" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                     (.root c (arg a 0) (conv int (conv int32 (arg a 1))))
+                     (ai 0))]
       ["__oi_predef" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                        (ai (.encode c (.predef c (conv int (arg a 0))))))]
       ["caml_callbackN_exn" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
@@ -708,10 +742,95 @@
                                           (oi/Failwith "Marshal.to_buffer: buffer overflow"))
                                         (copy (.W (.-m c) (arg a 2) (conv uint64 (len b))) b)
                                         (ai (conv uint64 (len b)))))]
+      ;; the C consumer of runtime events (runtime_events_consumer.h) over oi's ring (ext_runtime_events.go)
+      ["__oi_re_control" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                           (ai (conv uint64 (oi/RuntimeEventsControl (conv int (arg a 0))))))]
+      ["__oi_re_cursor" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                          (let [p (arg a 0)
+                                pid (conv int (conv int32 (arg a 1)))
+                                dir "."]
+                            (when (!= p 0)
+                              (set! dir (.CString (.-m c) p)))
+                            (ai (conv uint64 (conv int64 (oi/RuntimeEventsCursor (and (== p 0) (< pid 0)) dir pid))))))]
+      ["__oi_re_next" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                        (let [(values st next kind dom ts id data) (oi/RuntimeEventsNext (conv int (conv int64 (arg a 0))))
+                              out (arg a 1)]
+                          (range [i w (lit (slice int64) (conv int64 next) (conv int64 kind) (conv int64 dom) ts (conv int64 id) data)]
+                            (.Store64 (.-m c) (+ out (conv uint64 (* 8 i))) (conv uint64 w)))
+                          (ai (conv uint64 (conv int64 st)))))]
       ["caml_input_value_from_block" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                                        (let [b (append (lit (slice byte)) (spread (.R (.-m c) (arg a 0) (arg a 1))))
                                              (values v _) (oi/UnmarshalValue b 0)]
                                          (ai (.encode c v))))])))
+
+;; ---- the global roots (queue 516, DECISION 511-3 (a); memory.h's caml_register_global_root and the generational ones) ----
+
+(go/method rehome "rehome is the word w a root holds, kept past the outermost call: an integer, a static block or a live finalisable custom
+block as it is; a copy in the boundary's memory a block of the static memory with its header and contents (a scanned block's fields
+rehomed in turn), oi's value of the copy its value (statics), one a value. Divergences: a root changed by plain assignment in a later
+call than its registration is not rehomed (only the registering and the generational modify mark it); the static copies stay for the
+run.\n" ^uint64 [^{:tag (* capi)} c ^uint64 w]
+  (when (or (== w 0) (== (bit-and w 1) 1))
+    (return w))
+  (when [(values _ ok) (aget (.-statics c) w)] ok
+    (return w))
+  (when (!= (.weakStatic c w) nil)
+    (return w))
+  (let [v (.decode c w)]
+    (when [(values h ok) (aget (.-homes c) (conv any v))] ok
+      (return h))
+    (let [m (.-m c)
+          hd (.Load64 m (- w 8))
+          wosize (>> hd 10)
+          tag (conv int (bit-and hd 0xff))
+          h (.allocStatic c wosize tag)]
+      (aset (.-homes c) (conv any v) h)
+      (aset (.-statics c) h v)
+      (if (< tag tagAbstract)
+        (for [i (conv uint64 0)] (< i wosize) (inc! i)
+          (.Store64 m (+ h (* 8 i)) (.rehome c (.Load64 m (+ w (* 8 i))))))
+        (when (> wosize 0)
+          (copy (.W m h (* 8 wosize)) (.R m w (* 8 wosize)))))
+      h)))
+
+(go/method root "root is __oi_root: op 1 registers the cell r, 0 removes it, 2 notes its modification; registered or modified, it is rehomed
+when the outermost call ends.\n" [^{:tag (* capi)} c ^uint64 r ^int op]
+  (switch op
+    (case [0] (delete (.-roots c) r))
+    (case [1]
+      (aset (.-roots c) r true)
+      (set! (.-dirty c) (append (.-dirty c) r)))
+    (default
+      (when (aget (.-roots c) r)
+        (set! (.-dirty c) (append (.-dirty c) r))))))
+
+;; ---- custom blocks' finalization (queue 516, DECISION 511-3 (a); custom.h's finalize) ----
+
+(go/method weakStatic "weakStatic is the live value of the finalisable custom block at w, nil when there is none.\n" ^oi/Value [^{:tag (* capi)} c ^uint64 w]
+  (.Lock (.-finMu c))
+  (defer (.Unlock (.-finMu c)))
+  (when [(values p ok) (aget (.-wstatics c) w)] ok
+    (when [x (.Value p)] (!= x nil)
+      (return x)))
+  nil)
+
+(go/method finalisable "finalisable holds v, the value of the custom block at w whose operations have a finalize, weakly: once v is unreachable
+the block's finalize runs (oi.CFinaliser: at the next collection the program asks for), as the C runtime's sweep calls it.\n" [^{:tag (* capi)} c ^uint64 w ^{:tag (* oi/Custom)} v]
+  (.Lock (.-finMu c))
+  (aset (.-wstatics c) w (^{:inst [oi/Custom]} weak/Make v))
+  (.Unlock (.-finMu c))
+  (oi/CFinaliser v (fn [] (.finalise c w))))
+
+(go/method finalise "finalise is the finalize of the custom block at w, its value collected: runtime.c's __oi_custom_finalize on ci's main thread.\n" [^{:tag (* capi)} c ^uint64 w]
+  (.Lock (.-finMu c))
+  (when [(values p ok) (aget (.-wstatics c) w)] ok
+    (when (!= (.Value p) nil)
+      ;; the address has a live value again (the C returned the block after its first value died): its own finaliser runs it
+      (.Unlock (.-finMu c))
+      (return))
+    (delete (.-wstatics c) w))
+  (.Unlock (.-finMu c))
+  (.ccall c "__oi_custom_finalize" w))
 
 ;; ---- custom blocks' serialization (oi's Marshal: ext_capi.go's CustomSerialize, CustomDeserialize) ----
 

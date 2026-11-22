@@ -220,6 +220,18 @@ std_ir_current() { # std's IR at the checkout's pin (the ci leg's input; no sysr
   [ -f "$1/ir.sha256" ] && [ -d "$1/ir" ] && cmp -s "$1/ir.sha256" "$root/test/rust/runtime/ir.sha256"
 }
 
+# std_ir_dir: the std IR the ci leg reads (gate-split, 2026-11-20; doc/GATE-DIET-SURVEY.md, "The long single steps split"):
+# RSI_STD_DIR, else the checkout's .tmp/rsi/std when at the pin, else the main checkout's when at the pin (a linked worktree's or the
+# clean run's clone: std-build is the oracle tier's, rustc and Cargo, which the gate's steps do not run), else the checkout's
+std_ir_dir() {
+  [ -z "${RSI_STD_DIR:-}" ] || { echo "$RSI_STD_DIR"; return 0; }
+  local own=$root/.tmp/rsi/std m=${root%/.tmp/worktrees/*}
+  m=${m%/.tmp/gate-clean/*}
+  if std_ir_current "$own"; then echo "$own"
+  elif [ "$m" != "$root" ] && std_ir_current "$m/.tmp/rsi/std"; then echo "$m/.tmp/rsi/std"
+  else echo "$own"; fi
+}
+
 std_current() { # std's build at the checkout's pin: its ir.sha256 the committed one, its sysroot there
   local sb=$1
   [ -f "$sb/ir.sha256" ] && [ -d "$sb/sysroot" ] && cmp -s "$sb/ir.sha256" "$root/test/rust/runtime/ir.sha256"
@@ -281,6 +293,7 @@ runtime_build() { # bin/rsi runtime-build [OUT] [--jobs N] [--ci]: std's IR lowe
   local out=$root/.tmp/rsi/runtime jobs=${RSI_JOBS:-4} sb=${RSI_STD_DIR:-$root/.tmp/rsi/std} ci=""
   while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --ci) ci=1; shift ;; -*) echo "runtime-build: unknown option $1" >&2; exit 2 ;; *) out=$1; shift ;; esac; done
   if [ -n "$ci" ]; then
+    sb=$(std_ir_dir)
     std_ir_current "$sb" || { echo "rsi runtime-build --ci: std's IR in $sb is not at test/rust/runtime/ir.sha256 (bin/rsi std-build, the oracle tier)" >&2; exit 1; }
   else
     std_current "$sb" || ( std_build )
@@ -343,7 +356,13 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci (RE4, EVAL.md §9): std's lowered unit
   # (OUT/ci/std), ci's ports (test/rust/runtime/ci/*.c, OUT/ci/ports), made again when its key (OUT's key, the reader's
   # sources and options: arbace/rust/run.ae's marked part, repr/c, the C target ARBACE_C_HOST (c/target), the ports) changed; runtime-build first when OUT
   # is not at the checkout's key. Prints OUT/ci.
-  local out=${1:-${RSI_RUNTIME_DIR:-$root/.tmp/rsi/runtime}} k f u d sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
+  local out=${1:-${RSI_RUNTIME_DIR:-$root/.tmp/rsi/runtime}} k f u d sb
+  sb=$(std_ir_dir)
+  # gate-split (2026-11-20): one at a time per OUT (rsi-check's parts side by side, rsi-aot beside them): a second caller waits
+  # for the first's build, then finds it current; the lock held until this process ends
+  mkdir -p "$(dirname "$out")"
+  exec {rt_lock}>> "$out.lock"
+  flock "$rt_lock"
   # the lowered C at the checkout's lowered_key (no C toolchain in the key: the ci leg needs none), else runtime-build --ci
   if ! lowered_current "$out" || [ ! -f "$out/rt.c" ] \
      || cut -f3 "$out/lower.tsv" | while read -r d; do [ -f "$d/lowered.c" ] || echo missing; done | grep -q missing; then

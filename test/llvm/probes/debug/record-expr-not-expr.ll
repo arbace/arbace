@@ -1,3 +1,5 @@
+; verdict: debug invalid #dbg record expression
+; rule: llvm/lib/IR/Verifier.cpp:7171 The #dbg_declare's expression is !1 (a DIFile), and the parser accepts any MDNode there. visitFunction's checks pass, then visitDbgRecords checks the store's record: its location and variable pass, but the expression is not a DIExpression.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

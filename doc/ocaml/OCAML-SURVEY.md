@@ -4464,3 +4464,190 @@ recommended_domain_count and bigarrcml (callback/test1 and test7 after the two f
 
 The header rows left in `:c-api`: int64-unboxing and unboxed-primitive-args (native only), bigarrfml (Fortran), delayintr, signal
 and cloexec (helper programs). The negative control `_control/capi-test1-vs-test2` (check-aot-native.edn) differs.
+
+## As built: judge-rest, the opam set's demonstrations by reviewed golden files (2026-11-20, branch `judge-rest-1120`, from next `939037429`)
+
+The user's goal of 2026-11-20: the judges' recorded cases own wherever an accepted precedent applies; here the user's precedent of
+reviewed golden files (JCS361 (a) for Java's jtreg tests, extended to C and C++ the same day). OCaml's judge held, measured today by
+`bin/oi own-verdicts --check`, 16 programs at oi's level and 11 at the AOT level on ocamlc's and ocamlopt's recorded runs: the opam
+set's 11 demonstrations their packages do not run as tests (cmdliner 2.1.1's examples, blueprints and test_shell, `~run:false` in
+its B0.ml; pprint's PPrintTest), and at oi's level the 5 of `test/ocaml/own-verdict.edn`.
+
+- **The 11 golden files.** `test/ocaml/opam/golden/PKG-NAME.reference`: the merged standard output and error as `run_redirected`
+  writes them, and the exit status, written from the program's text, the library's source (cmdliner's `Cmdliner_manpage` plain
+  renderer, its messages and `Cmd.Exit` codes; pprint's engine at width 80, ribbon 40) and OCaml 5.5.0's `Format`, before they were
+  compared with anything; then checked against `test/ocaml/ref-suite.edn`: 11 of 11 equal to ocamlc's and ocamlopt's status and
+  SHA-256 at the first writing (Arbace's earlier `oi.out` files not opened). Reviewed in `test/ocaml/opam/golden.edn`
+  (`{:id :status :file :basis :why}`, the basis keys `:src :lib :fmt :args :env :cwd`). `test/ocaml/opam-verdicts.tsv`'s kind
+  `golden` names them; `bin/oi`'s `golden_check` (called by `own_verdicts`) refuses a golden line without its review, whose review
+  gives another status or file, whose file is missing, and a review without its line; the callers stop on `own_verdicts`' refusal
+  (`local own; own=$(own_verdicts ...) || exit $?`: before, `OI_OWN=$(...) cmd` went on).
+- **The environment (DECISION).** example_chorus (`-n 2 a b`: `-n` is no option, `Exit.cli_error` 124) and example_rm (`-f a b`,
+  no file `a`: 124) print their usage and error styled: `Cmdliner_base.Fmt.styler'` takes Ansi unless `NO_COLOR` is non-empty or
+  `TERM` is `dumb` or unset, which nothing in the harness fixed (the recorded runs were made with colour). Their corpus rows fix it,
+  `TERM=xterm-256color NO_COLOR=` (`test/ocaml/opam-programs.tsv`'s optional sixth column ENV, exported by `run_redirected` for every
+  runner); the alternative, recording the dependence in the review's `:env` alone, would fail under a shell without TERM.
+- **Controls.** `test/ocaml/controls.txt`'s `_control/tail-vs-cp-golden` (example_tail's run judged against example_cp's golden
+  file, both status 0) at the four suite judgments; by hand, `own-verdicts --check` with one byte of example_tail's golden file
+  changed reports a DISAGREE at both levels and fails (exit 2), and with example_revolt2's review removed refuses; restored after.
+  The control's judgment on the 2026-11-15 suite rows (`oi_check.ae judge-only`, no run): differs, as a control must. The old
+  control's comment called example_chorus's 124 a timeout: it is `Exit.cli_error`.
+- **After.** `own-verdicts --check`: run 451 of 453 and suite 119 of 122 by their own verdict at oi's level, 453 and 122 of 122 at
+  the AOT level, 0 differ, no stale entry. The 5 left at oi's level have no verdict of their own, by design: the native back end's
+  allocation counts (typing-modules/struct_include_optimisation, asmcomp/optargs, asmcomp/static_catch_unboxing), ocamlopt's
+  inlined debug frames (backtrace/lazy), a program ocamlc does not compile (callback/callback_effects_domains_gc). Judge 0.9982 ->
+  0.9997 at today's corpora ((61 + 3,101 + 3,082 + 570 + 575 + 0.5 x 5) / 7,394).
+
+## As built: queue 476 (2026-11-20, the VM): Marshal's objects for Gc.Memprof, Caml_state_opt
+
+- oi's Marshal (`go/arbace/oi/marshal.ae`, `UnmarshalBy`) keeps the objects it reads back (intern.c's `intern_alloc_obj`: blocks,
+  strings, float arrays, boxed floats and integers) and `allocInterned` (`ext_sys.ae`) counts them as intern.c allocates them: data of at
+  most Max_young_wosize words one minor block, counted once; more, a major block each. Each object is sampled by Gc.Memprof with the source
+  `Marshal` (the allocation record's third field) in its heap, its callbacks run once the value is read (`intern_end`). The light runtime
+  is unchanged (`statmemprof/intern` is a speed row there). `statmemprof/intern` passes at eval; `alloc_counts`' marshalling case agrees.
+- The C API on ci: `<caml/domain_state.h>`'s `Caml_state_opt`, NULL inside a stub's blocking section (`test/ocaml/capi/runtime.c`):
+  `c-api/test_c_thread_has_lock` and `_systhread` pass at eval and leave `:c-runtime-internals` there (the AOT levels keep them: the
+  light level runs no C stubs).
+
+## As built: queue 478 (2026-11-20, the VM): `oi depend`, the runtime-events C consumer
+
+- `bin/oi depend [-depend] ARG...` (DECISION 476-1 (a), the first of ocamltest's tools as Arbace's own): `ocamlc -depend ARG...` on oi.
+  Its program, `test/ocaml/depend/ocamldep.ml`, is OCaml 5.5.0's `driver/makedepend.ml` with Pparse's reading of a source (no `-pp`, no
+  `-ppx`) and Compenv's argument parsing (`Arg.parse_argv` over makedepend's options; no OCAMLPARAM) put in its place; typed by Arbace's
+  typer and run on compiler-libs' units (`depend`, `parse`, the parser and the lexer: `COMPLIB_UNITS`), the depend program kept in
+  `.tmp/oi/depend` by its key. `header.awk`'s depend mode runs a test whose bytecode alternative is `commandline = "-depend ARGS";
+  ocamlc.byte; compiler_reference = "${test_source_directory}/BASE.reference"; check-ocamlc.byte-output` (its readonly files and
+  subdirectories copied, nothing else in the alternative): the row's program the depend program (`oi_depend_prog`, `o2j_dump`'s
+  depend branch), ARGS its arguments, judged by the test's own `.reference`. `tool-ocamldep-shadowing/a` passes at eval and leaves
+  `:ocamltest-tools` at eval and at the light AOT level. At the light level it prints the .reference, but its 26 compiler-libs units
+  (Parser's 6.6 MB of Java forms) take 161.8 s of CPU to load against the level's 140: `test/ocaml/aot-slow.edn`, `:light-speed`
+  (DECISION 478-1). The compiled level keeps the class. `tool-ocamldep-modalias` (a Makefile
+  build, no run row) keeps its class.
+- runtime events' C consumer (DECISION 476-3 (a)): `<caml/runtime_events.h>` and `<caml/runtime_events_consumer.h>` on ci (OCaml's
+  enumerations and declarations, LGPL), implemented in `test/ocaml/capi/runtime.c` over oi's ring through three natives
+  (`go/arbace/oicapi`: `__oi_re_control`, `__oi_re_cursor`, `__oi_re_next`; `go/arbace/oi/ext_runtime_events.ae`'s
+  `RuntimeEventsControl`, `RuntimeEventsCursor`, `RuntimeEventsNext`): start, pause, resume, are_active; a cursor on the process's
+  own ring read from its start, the runtime_begin, runtime_end, runtime_counter, lifecycle and lost_events callbacks (a callback's 0
+  ends the poll), max_events and events_consumed. A user events callback is kept and not called. A stub's result word 0 is `()`
+  (`oicapi`'s `result`: a C function of type void, as lib-runtime-events/test's `start_runtime_events`, leaves its result undefined;
+  ci's is 0, which was "a C stub's value is a null pointer"). `lib-runtime-events/test` passes at eval ("minors: 18 / 36", the
+  three compactions' cycles of OC219's model) and leaves `:c-runtime-internals` there; the AOT levels keep it (no C stubs at the light
+  level).
+- Controls (`test/ocaml/controls.txt`): the depend row against lib-runtime-events/test's reference, and lib-runtime-events/test against
+  test_caml's (the C consumer's counts must part from the OCaml consumer's).
+
+## As built: queue 480 (2026-11-20, the VM): ocamldoc on oi
+
+- DECISION 478-2 (a), the second of ocamltest's tools as Arbace's own: OCaml 5.5.0's `ocamldoc/` runs on oi. Its sources are the pinned
+  tarball's, unmodified (`bin/lib/oi/ocamldoc.bash`'s `ocamldoc_build`, kept in `.tmp/oi/ocamldoc` by its key): its four lexers by the
+  native ocamllex, its two parsers (`odoc_parser.mly`, `odoc_text_parser.mly`) by the native ocamlyacc, its 45 units (odoc_info's, then
+  ocamldoc's, the Makefile's order) typed and translated by Arbace's typer against compiler-libs', Unix's, Str's and Dynlink's interfaces.
+- compiler-libs on the native path (`COMPLIB_UNITS`) holds ocamldoc's part of ocamlcommon now: all of `typing/` (typing_SOURCES'
+  order, with `file_formats/`'s cmi_format and cmt_format), `lambda/`'s debuginfo and lambda (Typeopt's), `driver/`'s pparse, compenv,
+  main_args and compmisc; the interfaces without an implementation (annot, value_rec_types, outcometree) beside parsetree. All 114 units
+  of the other libraries are built natively (`bin/oi stdlib`), after five fixes to the typer:
+  - `Psig_modtypesubst` (`module type S := ...`, printtyp.mli): bound for the later items, no item of its own;
+  - Includemod's `strengthened_modtypes`: a submodule's implementation strengthened (aliasable) by its path before its inclusion is
+    checked (gprinttyp's `type decoration = Decoration.r`, `Decoration.make : ... -> decoration`);
+  - a functor's result substituted into an exception's inline record too (Consistbl.Make's `Inconsistency { unit_name : Module_name.t }`
+    in persistent_env), the record registered afresh;
+  - a unit's interface read leniently types its classes (odoc_scan.mli's `class scanner`, inherited by odoc_cross and by the plugins),
+    a refused one a hole as before;
+  - Typeclass's first pass: a method without a type gets its body's approximation (`Typecore.type_approx`: labels and optional
+    parameters), so `self#text_of_module_kind ~with_def_syntax:false` before the method's body is typed takes its `?with_def_syntax`.
+- ocamltest's `-nostdlib -I stdlib`: the standard library's .cmi files are made on oi too, by `test/ocaml/ocamldoc/oicmi.ml` (Arbace's own:
+  `ocamlc -c FILE.mli` over compiler-libs, Pparse, Typemod.type_interface, Env.save_signature) for each of StdlibModules' units with
+  stdlib/Compflags' flags (stdlib.mli and the *Labels.mli through expand_module_aliases.awk, named stdlib__X.cmi), in passes until every
+  interface's dependencies are there: 71 .cmi files, no ocamlc.
+- `header.awk`'s ocamldoc mode: a header of ocamltest's `ocamldoc` test alone (no backend; `plugins = "FILE.ml"`, `flags = "-I
+  ${ocamlsrcdir}/ocamldoc"`) is a run row, environment `@ocamldoc=1 @plugins=FILE,...`, at oi's level alone. The run
+  (`oi_ocamldoc_prog`): each plugin typed against ocamldoc's interfaces and written as oi's plugin file (OI-CMO 1, its imports for
+  Dynlink's checks; a `.cmxs` copy at the light level), ocamldoc's `odoc.ml` the row's program, its arguments ocamltest's (`-nostdlib -I
+  STDLIB -g FILE.cmo TEST.ml -o TEST.result`), the program's interface digests `OI_DYNLINK_IMPORTS`. The row's output (`ocamldoc_output`)
+  is TEST.result, judged by the test's own .reference (check-program-output); ocamldoc's own output is held to TEST.ocamldoc.reference
+  (none: no output, check-ocamldoc-output), a difference appended so the row fails. `tool-ocamldoc/t01`-`t05` (odoc_test.ml loaded by oi's
+  Dynlink, OC220) pass at oi's level and leave its `:ocamltest-tools`. The light AOT level keeps the class: bin/oi's o2j_dump and translate
+  loop have the mode (the plugin's `.cmxs` copy, ocamldoc's units in dynmains.txt, the arguments in ocamldoc.args), but with the header's
+  mode on there each row timed out at the level's limit, and t01 alone, unbounded, had not finished after 600 s of CPU, 7 GB resident
+  under GOGC off (the 165 units' Java forms, 56 MB of them translated), so header.awk turns the mode on at aot=0 only (DECISION 480-1).
+  The other ocamldoc tests (backends html, latex, man, texinfo) are no rows of the run corpus.
+- Control (`test/ocaml/controls.txt`): t01's run against t04's reference must differ.
+
+## As built: queue 511 (2026-11-21, the VM): ocamlc's .cmt and ocamlobjinfo on oi, the shape-index tests
+
+- The third of ocamltest's tools as Arbace's own (after 478's depend and 480's ocamldoc): `test/ocaml/objinfo/oiobjinfo.ml`, from OCaml
+  5.5.0's `tools/objinfo.ml` (its .cmi and .cmt printing verbatim) and `driver/compile_common.ml`'s steps up to typing, runs on oi over
+  compiler-libs' units: `ocamlc -c FLAGS FILE...` (`-bin-annot`, `-bin-annot-occurrences`: Typemod writes the .cmi, .cmt and .cmti,
+  Cmt_format's index_occurrences reduces each occurrence's shape by Shape_reduce), its messages into `ocamlc.out`, then `ocamlobjinfo
+  ARGS` over the .cmt and .cmti files (`-quiet`, `-index`, `-decls`, `-uid-deps`, `-shape`, `-null-crc`). No .cmo: oi has no bytecode
+  back end, so the compile stops after typing (the .cmt is written by typing).
+- `bin/lib/oi/tools.bash` (sourced by bin/oi, outside native_key as ocamldoc.bash): header.awk's tool mode, `@tool=NAME` in a row's
+  environment, `oi_tool_prog NAME` its program (objinfo: the test's files, the standard library's .cmi files made on oi by oicmi as
+  ocamldoc_build makes them, in `.tmp/oi/objinfo`, linked as `_stdlib`, oiobjinfo dumped natively as the row's program) and
+  `tool_output NAME` its side output (objinfo: the compiler's output against TEST.compilers.reference, none: no output, as
+  check-ocamlc.byte-output; a difference appended so the row fails). bin/oi's oi_one calls them (its one edit).
+- `header.awk`'s objinfo mode, at oi's level alone: a header of `flags`, `compile_only = "true"`, `readonly_files`/`modules`,
+  `setup-ocamlc.byte-build-env`, `all_modules`, `ocamlc.byte`, `check-ocamlc.byte-output`, `program`, `output = "out_objinfo"`,
+  `ocamlobjinfo`, `check-program-output` is a run row (arguments `-c FLAGS -nostdlib -I _stdlib FILES -objinfo ARGS`, libraries
+  compiler-libs'). Over every header of the testsuite at levels 0, 1 and 2 only the 14 such tests change, at level 0: the 12 shape-index
+  tests, uid-deps/link_intf_impl and uids/intf_uids_test. All 14 pass by their own .reference (`bin/oi check --record --only-list`);
+  `:compiler-output-index` lists none at oi's level, `:compiler-output` keeps tool-dumpobj/test. The light AOT level keeps the classes
+  (compiler-libs' typing units do not load in its limit, DECISION 480-1). `bin/oi objinfo-check` (the native typer's own printing)
+  reads its programs from divergences-aot.edn's classes now.
+- Control (`test/ocaml/controls.txt`): index_labels' run against index_vb's reference must differ.
+## As built: the build's own reads (2026-11-22, branch `small-tails-ochs-1122`, from next `863bdaea1`)
+
+The read cell's last 19 rows, by design until now (`:oracle-rejects` 17, `:templates` 2), are files OCaml's parser rejects as an
+implementation or an interface but which their package's own build reads otherwise. Each is now judged as that build reads it, a
+pass by its own verdict (REASON `own verdict: HOW`), as OC213 (a) judges the testsuite's rejected files by their own tests:
+`arbace.repr.ocaml.prep` (`arbace/repr/ocaml/prep.ae`), `own-build PATH`:
+
+- **ocaml scripts** (topkg's `pkg/pkg.ml` of astring, cmdliner, fmt and uutf, cmdliner's `build.ml`: first line `#!/usr/bin/env
+  ocaml`) and **Toploop.use_file's input** (astring's `astring_top_init.ml`, which `astring_top.ml` hands to `Toploop.use_file`): read
+  as toploop.ml's `use_lexbuf` reads both, `Lexer.skip_hash_bang` (lexer.mll's rule: the `#!` line, or the three-line `#!...!#`
+  form, blanked so every later position stays) then `Parse.use_file` (the ported parser's `use_file` entry): 6 files.
+- **cppo inputs**: yojson 3.0.0's `lib/dune` runs its vendored `mucppo/mucppo.exe %{out} -o %{targets}` on eight `*.cppo.ml(i)`; the
+  rule is read from the dune file (`(rule (targets T) (deps (:out S) ...) (action (run P %{out} -o %{targets})))`), mucppo ported
+  statement for statement (`mucppo`, held to the package's `mucppo.ml` by its SHA-256: another mucppo is no rule), its `#include
+  "read.ml"` the native ocamllex's output of `read.mll` (dune's `(ocamllex read lexer_utils)`), and the output read as the target's
+  kind: 8 files; the three files they include alone (`type.ml`, `util.ml`, `write.mli`, with cppo's `#ifdef`s) pass when every output
+  that includes them reads: 3 files.
+- **the stdlib's templates**: `float.template.mli` and `moreLabels.template.mli` are `tools/sync_stdlib_docs`'s inputs (its README: run
+  by hand, not by the build); its perl substitutions are ported (`sync-stdlib-docs`: each `perl -p` a line at a time, `.` any byte but a
+  newline, the `/e` substitutions' `tail -n +K`, the backticked patches of `tools/unlabel-patches/`), and a template passes when its
+  expansion is the tarball's `stdlib/float.mli` (`stdlib/moreLabels.mli`) byte for byte, read as an interface: 2 files.
+
+Checked against the host's tools by hand (the oracle tier's, once): the eight mucppo outputs byte for byte those of the package's own
+mucppo built by the host's ocamlc 5.5.0 (after the host's ocamllex made `read.ml`), and the two expansions byte for byte the files the
+host's perl makes by running `tools/sync_stdlib_docs` on a copy of the tree (the release's committed `float.mli`, `moreLabels.mli`,
+`list.mli` ... are all in sync with their sources). No host tool at check time.
+
+The negative controls, `test/ocaml/own-build-controls.txt` (paths under `.tmp/repr-ocaml/`: each subject's bytes judged by the
+reference's rule in the reference's place, every one must fail, else nothing is recorded): a script as a mucppo input and as an
+included file, a cppo interface as a script, each template in the other's place: 5 of 5 fail. `bin/repr-ocaml roundtrip
+--record-results` passes the build's judge for the opam set and the stdlib (`--own-controls-root`), and `own-read --check` (the step
+`ocaml-read-essential`'s, `ocaml-read`'s checks part) checks the testsuite's rows and then the stdlib's and the ten opam corpora's.
+
+The record: `bin/repr-ocaml roundtrip --record-results opam stdlib` (every corpus's round trip passing, the stdlib's 150 and the opam
+set's 540 files): the 19 rows from `reject` to `pass`, nothing else (the print record unchanged); `test/ocaml/divergences-read.edn`
+holds no class. The read cell 3,143 / 19 / 0 to 3,162 / 0 / 0; OCaml's completeness 0.9071 to 0.9086 (read 99.4% to 100%; floored, 90.7% to 90.8%).
+
+## As built: queue 515 (2026-11-22, the VM): the light AOT level's stale header rows, a reperformed continuation's callstack, ocamlc -warn-help
+
+- **The AOT record's header rows.** Queue 413's C API at the light level (`@cstubs` at aot=1) and queue 461's dropped flambda
+  alternative made header.awk run 14 programs check-aot-native.edn still recorded as `class`. Recorded by list (`bin/oi check --aot
+  --record --only-list`): backtrace/backtrace_c_exn, c-api/test_c_thread_has_lock, test_c_thread_has_lock_systhread and locale/test
+  pass (taken out of `:c-runtime-decided` and `:c-runtime-internals` at AOT); the rest stay in their classes with their reasons
+  (cstubs reads of caml/gc.h, gc_ctrl.h and cmmain.c's declarator; mkroot's timeout; pr3612's Marshal of the C's custom block, the
+  class's `^fail status ` match; lib-runtime-events/test's and statmemprof/bigarray's outputs; backtrace/lazy as at eval).
+- **A reperformed continuation's callstack at the light level** (`Effects/reperform`, `Bt/linked`): the handler's fiber's frames
+  with the forwarded continuation's fiber's above them, as oi's queue 461 (caml_reperform links the stacks): backtrace_effects_nested
+  passes at AOT.
+- **ocamlc -warn-help** (`:compiler-of-the-tree` gone at eval and at the light level; the compiled level's class kept until its
+  record): ocamltest exports its variables to the program's environment, so header.awk gives a program that reads
+  `Sys.getenv "ocamlsrcdir"` or `"ocamlrun"` (warnings/mnemonics alone in the testsuite) ocamlsrcdir as the tarball's root and
+  ocamlrun as `bin/lib/oi/ocamlrun`, which runs only `ocamlc -warn-help`: `test/ocaml/warnhelp/warnhelp.ml`
+  (Warnings.help_warnings, as main_args.ml's option) over compiler-libs' utils/warnings.ml typed by Arbace's typer and run on
+  oi (cached in `.tmp/oi/warnhelp` by the library's key), a tool of the test as `bin/oi depend` is (476-1 (a)). warnings/mnemonics
+  passes at eval and AOT by its own .reference. Over every header at levels 0, 1 and 2 only mnemonics changes.
+- Cells (bin/reap, the matrix not recorded): eval 568 / 48 / 24 -> 569 / 47 / 24, AOT 492 / 59 / 89 -> 498 / 56 / 86.

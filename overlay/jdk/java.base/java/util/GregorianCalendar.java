@@ -54,6 +54,14 @@ public class GregorianCalendar extends Calendar {
     private transient long gregorianCutoverDay;
     private transient int gregorianCutoverYear;
     private transient int gregorianCutoverYearJulian;
+    static final long serialVersionUID = -8125100834729963327L;
+
+    // jdk26u's readObject (queue 466, JCS167): the cutover's transient day and years made again
+    @java.io.Serial
+    private void readObject(java.io.ObjectInputStream stream) throws java.io.IOException, ClassNotFoundException {
+        stream.defaultReadObject();
+        setCutover(gregorianCutover);
+    }
 
     public GregorianCalendar() {
         this(TimeZone.getDefaultRef(), Locale.getDefault(Locale.Category.FORMAT));

@@ -21,7 +21,7 @@ ext() { # FILE NAMES...: the functions as FILE defines them
   for g in "$@"; do sed -n "/^$g() {.*}\$/p; /^$g() {\$/,/^}\$/p" "$f"; done
 }
 { ext "$R/bin/lib/limit.bash" attempt_limits timeout_kind note_attempt program_tmo
-  ext "$R/bin/java-check" first_line root_cause mask_hashes run_dirs mask_dirs judge test_limit run_actions; } > "$T/fns.bash"
+  ext "$R/bin/java-check" first_line root_cause mask_hashes run_dirs mask_dirs judge test_limit plan_bad run_actions; } > "$T/fns.bash"
 . "$T/fns.bash"
 limited() { echo "$1" >> "$T/lim.log"; return "${STUB_ST:-124}"; }
 
@@ -30,7 +30,7 @@ mkdir -p "$root/test/java" "$work"; : > "$work/empty"
 cp "$R/test/java/timeouts.txt" "$root/test/java/" 2>/dev/null || : > "$root/test/java/timeouts.txt"
 mkplan() { # ID NAME
   mkdir -p "$work/run/$1"
-  printf 'test\t%s\ndir\tx\nroot\tjdk26u\nclasses\t0\nrun\t0\t0\t-\t0\t0\t-\t0\tMain\n' "$2" > "$work/run/$1/plan.tsv"
+  printf 'test\t%s\ndir\tx\nroot\tjdk26u\nclasses\t0\nrun\t0\t0\t-\t0\t0\t-\t0\tMain\nend\n' "$2" > "$work/run/$1/plan.tsv"
 }
 run() { # ID: run_actions' result line; the limits limited got in lim.log
   local id=$1 p=$work/run/$1 dir=$T; : > "$T/lim.log"

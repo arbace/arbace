@@ -36,7 +36,31 @@ cppi_ir_route() {
     if [ -s "$todo.ours" ]; then
       # libstdc++'s headers from the tree made without g++ (CP241 (b); REPR_CPP_HEADERS=host: the host's installed tree)
       . "$root/bin/lib/repr-cpp/sysroot.bash"; cpp_sysroot || return 1
-      GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$todo.ours" > "$todo.ours.log" 2>&1 || { tail -5 "$todo.ours.log" >&2; return 1; }
+      # gate-split (2026-11-20, doc/GATE-DIET-SURVEY.md, "The long single steps split"): CPPI_GEN_JOBS (default 1, one process for
+      # the list as before) generators at once, one process a program (gen-batch makes each program's IR alone, gen-one: the same
+      # IR either way), each at GOMEMLIMIT (about 1.6 GB); their lines put together in the list's order
+      local gj=${CPPI_GEN_JOBS:-1}
+      if [ "$gj" -le 1 ] || [ "$(wc -l < "$todo.ours")" -le 1 ]; then
+        GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$todo.ours" > "$todo.ours.log" 2>&1 || { tail -5 "$todo.ours.log" >&2; return 1; }
+      else
+        rm -rf "$todo.ours.d"; mkdir -p "$todo.ours.d"
+        awk -v d="$todo.ours.d" '{ f = sprintf("%s/%05d", d, NR); print > f; close(f) }' "$todo.ours"
+        # (background jobs of this shell, at most gj at once: arbace_tool is a function of it, not exported)
+        local f gst=0 running=0
+        for f in "$todo.ours.d"/[0-9]*[0-9]; do
+          ( GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.cpp.codegen gen-batch "$f" > "$f.log" 2>&1; echo $? > "$f.st" ) &
+          running=$((running + 1))
+          if [ "$running" -ge "$gj" ]; then wait -n; running=$((running - 1)); fi
+        done
+        wait
+        : > "$todo.ours.log"
+        for f in "$todo.ours.d"/[0-9]*[0-9]; do
+          cat "$f.log" >> "$todo.ours.log"
+          [ "$(cat "$f.st" 2>"$TMPDIR/cppi-gen.err")" = 0 ] || { gst=1; tail -5 "$f.log" >&2; }
+        done
+        rm -rf "$todo.ours.d"
+        [ $gst = 0 ] || return 1
+      fi
     fi
     # the fields read with a separator that is no whitespace (cpp-target): IFS=tab collapsed an empty options field, so a program ours
     # refused that has no options fell back to clang with its path as its options (its pack's key then STALE)

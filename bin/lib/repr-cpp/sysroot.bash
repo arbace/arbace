@@ -9,6 +9,29 @@
 #                         gcc's and clang's include directories, and roots.txt
 #   cpp_sysroot           exports ARBACE_C_SYSROOT, the tree, which repr/c's preprocessor (C++'s too) reads a name under
 #                         roots.txt from (the search lists' three libstdc++ directories), every other name from the host
+# cpp_copy_list SRC DST LIST: copy each "i<TAB>s" line of LIST (s under SRC to i under DST; one field: the same name), failing on a
+# copy that fails or a line it did not reach, so a staging whose copy was cut short (a killed run: the loop's reader ends at a
+# truncated list as at its end) is never marked done (queue 514, 510's finding 3: a `-full` tree with 5 of 104 headers and its .ok)
+cpp_copy_list() {
+  local src=$1 dst=$2 list=$3 i s n=0 want
+  want=$(grep -c . "$list") || want=0
+  while IFS=$'\t' read -r i s; do
+    [ -n "$i" ] || continue
+    s=${s:-$i}
+    mkdir -p "$dst/$(dirname "$i")" && cp "$src/$s" "$dst/$i" || return 1
+    n=$((n + 1))
+  done < "$list"
+  [ "$n" = "$want" ] || { echo "cpp-target: copied $n of $want files of $list" >&2; return 1; }
+}
+
+# cpp_mark_done STAGE DIR: STAGE renamed DIR, then DIR.ok written last; when another run finished DIR meanwhile (its .ok there), the
+# stage is dropped instead of replacing a tree a reader may hold (queue 514)
+cpp_mark_done() {
+  local st=$1 d=$2
+  if [ -f "$d.ok" ]; then rm -rf "$st"; return 0; fi
+  rm -rf "$d" && mv "$st" "$d" && : > "$d.ok"
+}
+
 cpp_target_tree() {
   local main=${root%%/.tmp/worktrees/*} t want k d st cs
   main=${main%%/.tmp/gate-clean/*}
@@ -38,17 +61,15 @@ cpp_target_tree() {
     GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target derive "$st/src/gcc-15.2.0" "$cs" "$st/usr/include/c++/15.2.0" > "$st/derive.log" 2>&1 \
       || { cat "$st/derive.log" >&2; rm -rf "$st"; return 1; }
     mv "$st/usr/include/c++/15.2.0/answers.tsv" "$st/answers.tsv"
-    while IFS=$'\t' read -r i s; do
-      mkdir -p "$st/usr/include/c++/15.2.0/$(dirname "$i")"; cp "$st/src/gcc-15.2.0/$s" "$st/usr/include/c++/15.2.0/$i"
-    done < "$st/copy.tsv"
+    cpp_copy_list "$st/src/gcc-15.2.0" "$st/usr/include/c++/15.2.0" "$st/copy.tsv" || { rm -rf "$st"; return 1; }
     # the compiler's own include directory (gcc's; :compiler-include)
     local gi=$st/usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/include
     mkdir -p "$gi"
     GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target plan-compiler "$st/src/gcc-15.2.0" "$st" >> "$st/plan.log" 2>&1 \
       && GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target derive-compiler "$st/src/gcc-15.2.0" "$gi" >> "$st/derive.log" 2>&1 \
       || { cat "$st/plan.log" "$st/derive.log" >&2; rm -rf "$st"; return 1; }
-    while IFS=$'\t' read -r i s; do mkdir -p "$gi/$(dirname "$i")"; cp "$st/src/gcc-15.2.0/$s" "$gi/$i"; done < "$st/copy-compiler.tsv"
-    (cd "$gi" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/compiler-tree.sha256"
+    cpp_copy_list "$st/src/gcc-15.2.0" "$gi" "$st/copy-compiler.tsv" || { rm -rf "$st"; return 1; }
+    (cd "$gi" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/compiler-tree.sha256" || { rm -rf "$st"; return 1; }
     rm -rf "$st/src"
     # clang's resource directory (P20 (b); cpp/target/clang.edn's :resource-include): clang/lib/Headers as its CMakeLists.txt installs it
     [ "$(sha256sum < "$lt" | cut -c1-64)" = "$lwant" ] || { echo "cpp-target: $lt is not the pinned llvm-project-23.1.5 tarball (test/cpp/corpora.edn)" >&2; rm -rf "$st"; return 1; }
@@ -57,17 +78,17 @@ cpp_target_tree() {
     tar -xJf "$lt" -C "$st/src" llvm-project-23.1.5.src/clang/lib/Headers || { rm -rf "$st"; return 1; }
     GOMEMLIMIT=1GiB arbace_tool -p "$root/test" -m cpp.target plan-resource "$st/src/llvm-project-23.1.5.src" "$st" >> "$st/plan.log" 2>&1 \
       || { cat "$st/plan.log" >&2; rm -rf "$st"; return 1; }
-    while IFS=$'\t' read -r i s; do mkdir -p "$ri/$(dirname "$i")"; cp "$st/src/llvm-project-23.1.5.src/$s" "$ri/$i"; done < "$st/copy-resource.tsv"
-    (cd "$ri" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/resource-tree.sha256"
+    cpp_copy_list "$st/src/llvm-project-23.1.5.src" "$ri" "$st/copy-resource.tsv" || { rm -rf "$st"; return 1; }
+    (cd "$ri" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/resource-tree.sha256" || { rm -rf "$st"; return 1; }
     rm -rf "$st/src"
     # the roots: the libstdc++ directories of the target's search list (cpp/target/host/search-gxx.txt, CP244 (b)) and clang's
     # (cpp/target/host/search-clang.txt, the native parser's, CP248 (a)), their dot-dots resolved
     # lexically as the preprocessor names an opened file (/usr/include/c++/15.2.0, its target and backward directories)
     cat "$root"/cpp/target/host/search-gxx.txt "$root"/cpp/target/host/search-clang.txt | grep '/include/c++/' | while read -r r; do realpath -m -s "$r"; done \
       | awk '!s[$0]++' > "$st/roots.txt"
-    (cd "$st/usr/include/c++/15.2.0" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/tree.sha256"
+    (cd "$st/usr/include/c++/15.2.0" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$st/tree.sha256" || { rm -rf "$st"; return 1; }
     echo "$cs" > "$st/c-sysroot"
-    rm -rf "$d"; mv "$st" "$d"; : > "$d.ok"
+    cpp_mark_done "$st" "$d" || return 1
   fi
   echo "$d"
 }
@@ -82,8 +103,10 @@ cpp_full_sysroot() {
   cs=$(cat "$d/c-sysroot")
   f=$d-full-$(sha256sum < "$root/cpp/target/libraries.sha256" | cut -c1-8)
   if [ ! -f "$f.ok" ]; then
-    rm -rf "$f.$$"; mkdir -p "$f.$$"; cp -al "$d/usr" "$f.$$/usr"
-    (cd "$cs/usr/include" && find . -type f) | while read -r h; do mkdir -p "$f.$$/usr/include/$(dirname "$h")"; cp "$cs/usr/include/$h" "$f.$$/usr/include/$h"; done
+    rm -rf "$f.$$"; mkdir -p "$f.$$"; cp -al "$d/usr" "$f.$$/usr" || { rm -rf "$f.$$"; return 1; }
+    # (queue 514: the C library's headers listed first, then copied from the list, every one checked: cpp_copy_list)
+    (cd "$cs/usr/include" && find . -type f > "$f.$$/c-headers.found") && LC_ALL=C sort "$f.$$/c-headers.found" > "$f.$$/c-headers.txt" \
+      && [ -s "$f.$$/c-headers.txt" ] && cpp_copy_list "$cs/usr/include" "$f.$$/usr/include" "$f.$$/c-headers.txt" || { rm -rf "$f.$$"; return 1; }
     # the libraries' headers (cpp/target/libraries.sha256: fortify-headers'), the host's package files at their recorded digests
     local want id
     grep -v '^#' "$root/cpp/target/libraries.sha256" | while read -r want id; do
@@ -91,8 +114,8 @@ cpp_full_sysroot() {
       else echo "C++: $id is not the host's at cpp/target/libraries.sha256's digest: left out of the sysroot" >&2; fi
     done
     cat "$root"/cpp/target/host/search-gxx.txt "$root"/cpp/target/host/search-clang.txt | while read -r r; do realpath -m -s "$r"; done | awk 'NF && !s[$0]++' > "$f.$$/roots.txt"
-    cp "$d/tree.sha256" "$f.$$/tree.sha256"
-    rm -rf "$f"; mv "$f.$$" "$f"; : > "$f.ok"
+    cp "$d/tree.sha256" "$f.$$/tree.sha256" || { rm -rf "$f.$$"; return 1; }
+    cpp_mark_done "$f.$$" "$f" || return 1
   fi
   echo "$f"
 }

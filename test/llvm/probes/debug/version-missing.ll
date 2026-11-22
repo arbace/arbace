@@ -1,3 +1,5 @@
+; verdict: debug ignoring debug info with an invalid version (0)
+; rule: llvm/lib/IR/DiagnosticInfo.cpp:121 llvm.module.flags lists only !3, so no "Debug Info Version" is found and the version is 0. The module has debug info, so StripDebugInfo changes it and warns (llvm/lib/IR/AutoUpgrade.cpp:6088).
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

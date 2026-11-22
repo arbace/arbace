@@ -180,6 +180,136 @@ program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails
 without the overlay (`relocation target runtime.arbace_getLocal not defined`) and builds and
 runs with it, for amd64 and for arm64 under `qemu-aarch64`.
 
+## The build in bounded steps (2026-11-20, write-ahead)
+
+The user (2026-11-20): javac's tool build is a real bottleneck; split it into digestible chunks.
+Measured that day on the 62 GB host: `bin/javac-vendor tool`'s j2g reached 40.8 GB RSS
+(`GOMEMLIMIT=40GiB` set by hand), then `bin/build-go`'s printer 27 GiB while a `go tool compile`
+beside it took 29 GiB, and the kernel killed the driver (15:05 UTC); `javac-tool`'s `:mem-gib`
+went 27 → 45 → 51 in a week. The gate's `go-build` has the same shape (the printer 34.5 GB, the
+link 5 GB), and Java's compiled level's shards run the same two tools. The goal: every process
+of the build at most about 12-16 GiB, one stage's process gone before the next starts, the
+executable byte for byte what the build made before.
+
+### The stages' memory (what each holds, and why it grows with the world)
+
+| stage | process | what it holds at its peak | why it scales |
+|---|---|---|---|
+| 0. the namespaces compiled | the host, `host-compile*.ae` (when the base's `aot/` is not current) | every embedded namespace prepared and c2j's units | the embedded namespaces (GOGC 400, no limit); ran *beside* j2g (`--await`, SA160) |
+| 1. j2g | `arbace -m arbace.j2g.main` | the world's Java forms, read with line metadata, and their analysis; then every Go file's forms (`files`) until the texts | the world: 45,838 classes for javac's tool (jdk/forms 28 MB, jdk/javac/forms 9 MB, the compiled namespaces 221 MB, the reader 27 MB of forms text); GOGC 400 lets the heap grow to `GOMEMLIMIT` (20 GiB by default, 40 by hand) |
+| 2. the print | `arbace -m arbace.build.go` | `read-all` read *every* forms file of j2g's program (554 MB, 6,425 files for javac's tool) and the packages held them all through the print | a file's forms are about 49 times its bytes in memory (measured: `com_sun_tools_javac_comp_Attr.ae`, 1.24 MB, 61 MB of heap), so 554 MB is about 27 GB; GOGC 200, no limit; and the process stayed alive, holding that heap, while `go build` ran as its child |
+| 3. the compile | `go build`, its `compile`s and `link` | gc's live heap is most of a compile's peak (doc/STANDALONE-NOTES.md, "What gc needs") and grows with the package: `arbace/jrt` is one package (4,276 files, 92 MB of Go for javac's tool), `arbace/lang` 67 MB, the compiled namespaces' packages up to 12 MB each | `-p` is GOMAXPROCS (64) and go 1.27 gives a compile up to GOMAXPROCS back-end workers (`-c`, cmd/go's `compilerConcurrency`), so jrt compiled with up to 64 workers beside the packages that do not import it, and the 240 compiled namespaces' packages up to 64 at once |
+
+So the print and the compile were resident together (27 + 29 GiB), the host's compile beside j2g,
+and in `--build` the two architectures' prints and compiles at once.
+
+### The design
+
+- **One stage at a time** (`bin/arbace-go`, `bin/build-go`): the host's compilation of the
+  namespaces, then j2g (the compiled tree an input, read as `--await` read it: a tree with
+  `packages.edn` is a late input, the same two rounds, so the same output), then each
+  architecture's print, then its `go build`, then the next architecture (its print is the print
+  cache's). `arbace.build.go --go-cmd FILE` prints the module and writes go build's command and
+  environment into FILE (lines `dir`, `rm`, `env K=V`, `arg A`) and exits; `bin/build-go` runs it
+  after (`bin/lib/go-build.bash`'s `go_build_plan`). javac's tool build's second build reuses the
+  first's compiled namespaces (`aot_reusable`: `$dir/aot-javac` of the checkout's key).
+- **The print in chunks** (`arbace.build.go`, `chunked?`): the program's files are read once for
+  what decides package files and what a package's collection finds without its declarations
+  (`light-forms`: the forms but those whose head is qualified, `X/package` and `X/file` kept); a
+  package's forms are read when it is printed (`:collect`, its files read in parallel) and nothing
+  holds them after; the packages printed at once are held to `ARBACE_PRINT_BUDGET_MB` (96 MiB) of
+  forms files, the costliest that fits first, one over it alone (`budget-map`); `ARBACE_PRINT_JOBS`
+  threads (16). The printer runs under `GOMEMLIMIT` `ARBACE_PRINT_GOMEMLIMIT` (10 GiB, capped by
+  the gate's admission, `bin/gate-policy mem`), not under a limit the caller set for j2g. The
+  printed module is the same (the same collect, the same print of each package; a package
+  collected again must equal its first collection, as the collect index's must). A file is read
+  twice when its package is printed (once light): about twice the reading time of a cold print.
+- **The compile bounded** (`bin/lib/go-build.bash`, `bin/lib/go-toolexec`): `go build` under
+  `GOMAXPROCS=ARBACE_GO_BUILD_PROCS` (16: go's `-p`) and `-toolexec bin/lib/go-toolexec`, which
+  admits each compile by the Go bytes compiling beside it (`ARBACE_GO_BUDGET_MB`, 48 MiB, or alone),
+  holds every compile's back end to `-c` at most `ARBACE_GO_C` (4), so that its memory follows its
+  bytes, and runs a package of `ARBACE_GO_BIG_MB` (16 MiB) or more with `-c` at most
+  `ARBACE_GO_BIG_C` (4) and `GOGC=ARBACE_GO_BIG_GOGC` (50). None of it
+  changes the executable: `-p`, `-c`, GOGC and GOMAXPROCS are not in go's action IDs nor in the
+  build info, and go asks a tool for its ID through the wrapper (`-V=full`, passed through), so the
+  build IDs are the same (checked: `test/build/go/hello` byte for byte with and without, its
+  packages cache hits across the two). The image's link and the profile-guided build
+  (`bin/arbace-go`) take the same policy. `ARBACE_GO_BUILD_TIMES=FILE`: a line per compile and
+  link, its package, Go bytes, seconds and peak RSS.
+- `ARBACE_BUILD_CHUNKS=0` is the build as before (the whole program's forms read and held, go's
+  own parallelism, the host's compile beside j2g, the architectures at once), but the printer
+  still exits before go build: the baseline of the proof below.
+
+**Expected peaks** (to be measured by one instrumented build of javac's tool): the print at most
+the budget's forms (about 5 GB; jrt alone, 110 MB of forms, about 5.4 GB) under its 10 GiB limit;
+the compile jrt's alone at `-c=4`, GOGC 50 (S5's fit, 0.63 GiB + 2.0 KiB per AST node at `-c=1`,
+puts javac's tool's jrt, about three times S5's, near 15-20 GiB: a DECISION if it is over 16),
+else 48 MiB of small packages; j2g's is the other branch's (`j2g-chunks-1120`).
+
+### The contract between j2g and the print (for `j2g-chunks-1120`)
+
+- The printer reads j2g's program tree (`OUT/prog`: `program.edn`, `go/<pkg>.ae` package files
+  whose `load` forms name the files, `go/<pkg>/<file>.ae`, the `.build-go-data` resources) from disk,
+  after j2g's process has exited; nothing else passes between them. j2g may write the tree in
+  any order, by any number of processes, as long as the final tree is byte for byte what one run
+  writes today (the print cache keys a package by its files' bytes; the proof compares the trees).
+  Since j2g-stream-1120 (merged with this branch in n-merge-1120b, 2026-11-20) j2g writes the tree a window
+  of classes at a time as they are merged (doc/go/J2G-SPEC.md §4.1, "The run in bounded memory"), the tree byte for
+  byte the whole run's: the contract holds, and the printer is unchanged by it.
+- The print's peak is its largest package's forms, about 49 times its files' bytes (jrt's
+  110 MB: about 5.4 GB). A layout with jrt split into several Go packages (a DECISION of its own:
+  doc/STANDALONE-NOTES.md, "What a split would take") would lower the print's and the compile's
+  peaks together; the printer needs nothing new for it.
+- Each package file's files are found by its `load` forms; the light pass drops a file's
+  declarations, so a file needs nothing beyond what `collect` requires today (a declaration after
+  a `go/file`).
+
+### As built: the measured build (2026-11-20)
+
+One instrumented `bin/arbace-go --build-java` of javac's tool (`.tmp/proof/` of the branch's worktree: a 2 s sampler of the
+build's process tree by stage, `ARBACE_GO_BUILD_TIMES` for each compile), on a host shared with other agents' runs (the times
+are long and noisy; the memory is the build's own). Its two tool builds (the first without the compiled reader, the second
+with it) ran on the gate's executable `8d0e4648` as j2g's host (`ARBACE_AOT_ONEPASS=force`: no host of the checkout's
+runtime), a fresh `GOCACHE` and print cache. The largest single process of each stage, the time of the first build's:
+
+| stage | before (the brief; the baseline below, `ARBACE_BUILD_CHUNKS=0`) | in bounded steps |
+|---|---|---|
+| goi's table (`bin/goi table`, made once) | | 9.7 GiB, 6 min |
+| the host's compilation of the namespaces | beside j2g (`--await`) | 29.9 GiB, 298 s, alone (GOGC 400, no limit; since the next commit under `GOMEMLIMIT` 16 GiB, whose effect is not yet measured) |
+| j2g (unchanged here) | 40.8 GB at `GOMEMLIMIT=40GiB`; 28.6 GB the gate's `javac-tool` | 27.5 GiB (first build), 29.0 GiB (second), at its default 20 GiB, alone |
+| the print | 27 GiB, resident through the compile; the baseline's 37.2 GiB, 333 s | 9.7 GiB, 172 s (cold), under its 10 GiB limit; gone before go build |
+| the compile | 29 GiB (one `compile`) beside the printer; the baseline's largest 26.9 GiB, go build 1,549 s | `arbace/jrt` 24.0 GiB (92 MB of Go, 332 s) and `arbace/lang` 24.3 GiB (67 MB, 349 s), each alone; every other package under 2 GiB (the largest `aot_arbace_repr_llvm_verify` and `aot_arbace_cpp_sema`, 1.6 GiB), 48 MiB of Go at once; go build 933 s |
+| the link | about 5 GB (the gate's executable); the baseline's 9.3 GiB | 9.4 GiB |
+| the reader's compilation | | 4.8 GiB, 29 s |
+| the build's tree, at any moment | 56 GiB (the printer and a compile at once; the kernel killed the driver) | 29.9 GiB (one stage at a time) |
+
+**The proof of equal output.** The baseline (`.tmp/proof/base.sh`): the chunked run's own j2g program (j2g is not changed on
+the branch, so a second j2g run would make the same tree; the coordinator: no redundant runs) printed and compiled as before,
+`ARBACE_BUILD_CHUNKS=0` (the whole print, go's own `-p` 64 and `-c`), a fresh `GOCACHE` and print cache, then the image
+prepared by its first link and linked as `image()` links it. Its printed module equals the chunked run's (6,637 files, `diff
+-r` empty, the image's file included) and its executable is the chunked run's byte for byte (sha256
+`01b16a8d8b5a2eae0b46ed73015160f656b44186aa358e0ab89da8058beb284f`, 670,052,512 bytes). The times are a shared host's (other
+agents' runs beside both): the chunked print and compile were the faster ones there (172 against 333 s, 933 against 1,549 s).
+
+**DECISION BC1: jrt's and lang's compiles (24 GiB each).** gc's live heap is most of a compile's peak, and both packages are
+one compile each. Options:
+- (a) *recommended now*: keep `-c=4` and GOGC 50 for packages of 16 MiB or more (24.0 and 24.3 GiB, 332 and 349 s, each
+  alone): under j2g's 29 GiB as measured here (j2g-stream-1120, merged apart, lowers j2g's);
+- (b) `-c=1` and GOGC 25 for them (`ARBACE_GO_BIG_C=1 ARBACE_GO_BIG_GOGC=25`, a setting): S5's ratios (doc/STANDALONE-NOTES.md,
+  "What gc needs": 8.46 → 5.22 GiB, 52 → 125 s) put them near 17-18 GiB at about 2.4 times the time, 11 more minutes on the
+  critical path (lang waits for jrt, every compiled namespace for lang); still over 16 GiB;
+- (c) split `arbace/jrt` and `arbace/lang` into several Go packages each (j2g's output layout; "What a split would take": 5-10
+  days at S5, the cycles closed by linkname pulls, outlined bodies or hooks): the only lever under 16 GiB per compile, and it
+  shrinks the print's largest package too; the executable changes (a new layout, not the same bytes).
+Recommended: (a) now; (c) if the 12-16 GiB goal holds once j2g's own run is under it; (b) only on a host where 24 GiB does not fit.
+
+**DECISION BC2: the time one stage at a time costs.** The host's compilation no longer overlaps j2g's load (SA160 saved up to
+its 5 minutes when both fit), go builds at `-p` 16 with `-c` 4 (jrt and lang alone at `-c` 4: 332 and 349 s, against go's own
+`-c` up to 64), `--build`'s architectures one after another (the second's print from the cache, its compile alone) and a cold
+print reads each file twice. Options: (a) *recommended*: as built, the memory first (the user's request); (b) the overlap back
+for a host with room (`ARBACE_BUILD_CHUNKS=0`, or per stage); (c) a wider compile (`ARBACE_GO_BUILD_PROCS`, `ARBACE_GO_C`,
+`ARBACE_GO_BUDGET_MB`) where memory allows.
+
 ## Libraries and tests (amendment B6, accepted 2026-10-08)
 
 A library has no main package, so it is not built into an executable: `--print-only` prints

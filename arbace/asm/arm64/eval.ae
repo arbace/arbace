@@ -35,30 +35,48 @@
        (let [s (str/lower-case (name x))]
          (or (contains? non-labels s) (some? (re-matches #"s[0-3]_[0-7]_c[0-9]+_c[0-9]+_[0-7]" s))))))
 
+(defn- names-symbol? [e]
+  (cond (symbol? e) true
+        (seq? e) (or (= 'sym (first e)) (boolean (some names-symbol? (rest e))))
+        :else false))
+
 (defn- fold
-  "An expression's value now (a constant), or a placeholder (val K) with its MCValue kept in `vals`."
-  [ctx vals e]
+  "An expression's value now (a constant), or a placeholder (val K) with its MCValue kept in `vals`. A constant that names a
+  symbol (a difference of two labels in one section, folded from their fragments' offsets; a .set's) is a placeholder (late K),
+  the expression kept in `late` and folded again after the layout (judge-rest: before it a fragment's offset is not its place,
+  and `mov x0, 1b - 0b` across a .skip folded to 0, mov-expr-as-immediate.s)."
+  [ctx [vals late] e]
   (if (integer? e)
     e
     (let [v (o/value ctx e 0)]
       (if (and (nil? (:add v)) (nil? (:sub v)))
-        (:c v)
+        (if (names-symbol? e) (let [k (count @late)] (vswap! late conj e) (list 'late k)) (:c v))
         (let [k (count @vals)] (vswap! vals conj v) (list 'val k))))))
 
-(defn- operand [ctx vals x]
+(defn- unlate
+  "The form with each (late K) the constant its expression folds to at the layout."
+  [ctx f late]
+  (cond (and (seq? f) (= 'late (first f)))
+        (let [e (nth late (second f)) v (o/value ctx e 0)]
+          (if (and (nil? (:add v)) (nil? (:sub v))) (:c v) (o/unsupported :expression (str "not a constant at the layout: " (pr-str e)))))
+        (seq? f) (apply list (map #(unlate ctx % late) f))
+        :else f))
+
+(defn- operand
+  "The operand with its expressions folded (fold's placeholders); `acc` [VALS LATE]."
+  [ctx acc x]
   (let [h (head x)]
     (cond
       ;; a floating-point constant (fmov's, fcmp's #0.0) is its text, lowered by a64i (AR6)
       (or (#{'reg 'rlist 'elt 'float} h) (and (= '- h) (= 2 (count x)) (= 'float (head (second x))))) x
-      (= 'shift h) (if (> (count x) 2) (list 'shift (second x) (operand ctx vals (nth x 2))) x)
-      (= 'imm h) (list 'imm (operand ctx vals (second x)))
-      (#{'mem 'wb} h) (apply list h (map #(operand ctx vals %) (rest x)))
+      (= 'shift h) (if (> (count x) 2) (list 'shift (second x) (operand ctx acc (nth x 2))) x)
+      (= 'imm h) (list 'imm (operand ctx acc (second x)))
+      (#{'mem 'wb} h) (apply list h (map #(operand ctx acc %) (rest x)))
       (= 'spec h) (let [sp (str/lower-case (str (second x)))]
                     (when (str/starts-with? sp "tlsdesc") (o/unsupported :tls-model (pr-str x)))
-                    (list 'spec (second x) (fold ctx vals (nth x 2))))
-      (= 'lit h) (o/unsupported :literal-pool (pr-str x))
+                    (list 'spec (second x) (fold ctx acc (nth x 2))))
       (non-label? x) x
-      :else (fold ctx vals x))))
+      :else (fold ctx acc x))))
 
 (defn- got-fixups
   "A GOT reference's relocation on the placeholder word (adrp :got:, ldr :got_lo12:; their initial exec TLS forms :gottprel:,
@@ -89,16 +107,16 @@
   [recs out]
   (assoc a64/arch
          :emit-insn! (fn [ctx f]
-                       (let [f (#'a64/const-subst ctx (o/resolve-expr ctx f))
-                             vals (volatile! [])
+                       (let [f (a64/literal-form ctx (#'a64/const-subst ctx (o/resolve-expr ctx f)))
+                             vals (volatile! []) late (volatile! [])
                              fxs (got-fixups ctx f)
-                             f (apply list (first f) (map #(operand ctx vals %) (rest f)))]
+                             f (apply list (first f) (map #(operand ctx [vals late] %) (rest f)))]
                          ;; the symbols the operands name registered, as the fixups' are (the object's symbol table names
                          ;; the undefined ones, which the linker resolves)
                          (doseq [v @vals s [(:add v) (:sub v)] :when s] (o/register! ctx (:name @s)))
                          (#'a64/emit-word! ctx 0 fxs)
                          (let [ch (o/cur-data! ctx)]
-                           (vswap! recs conj [ch (- (.size ^java.util.ArrayList (:bytes @ch)) 4) f @vals]))))
+                           (vswap! recs conj [ch (- (.size ^java.util.ArrayList (:bytes @ch)) 4) f @vals @late]))))
          :after-layout (fn [ctx]
                          (let [ref (fn [s]
                                      (when s
@@ -107,8 +125,8 @@
                                                (= :abs (first o)) [:abs (second o)]
                                                (not= elf/STB_LOCAL (o/binding-of ctx s)) [:global (:name @s)]
                                                :else [:local (first o) (second o)]))))]
-                           (vreset! out (vec (for [[ch off f vals] @recs]
-                                               [(:sec @ch) (+ (long (:offset @ch)) (long off)) f
+                           (vreset! out (vec (for [[ch off f vals late] @recs]
+                                               [(:sec @ch) (+ (long (:offset @ch)) (long off)) (if (seq late) (unlate ctx f late) f)
                                                 (mapv (fn [v] (when (:spec v) (o/unsupported :expression (str "a specifier inside an expression: " (pr-str f))))
                                                         {:add (ref (:add v)) :sub (ref (:sub v)) :c (:c v)}) vals)])))))))
 
@@ -139,9 +157,12 @@
 (defn- subst
   "The form with each (val K) its value (addr V); a TP-relative specifier's value the offset from the thread pointer; a GOT
   specifier's the GOT entry's address (:got: its page, :got_lo12: its low 12 bits; :gottprel: likewise, the entry holding the
-  TP offset)."
-  [f vals tp gotv]
+  TP offset); a PC-relative group's (:prel_gN:, judge-rest) the value less the instruction's address `pc`."
+  [f vals tp gotv pc]
   (cond (and (seq? f) (= 'val (first f))) (list 'addr (nth vals (second f)))
+        (and (seq? f) (= 'spec (first f)) (str/starts-with? (str/lower-case (str (second f))) "prel_g"))
+        (let [e (nth f 2)]
+          (list 'spec (second f) (- (long (if (and (seq? e) (= 'val (first e))) (nth vals (second e)) e)) (long pc))))
         (and (seq? f) (= 'spec (first f)) (str/starts-with? (str/lower-case (str (second f))) "got"))
         (let [s (str/lower-case (str (second f))) e (nth f 2)
               k (when (and (seq? e) (= 'val (first e))) (second e))
@@ -151,7 +172,7 @@
         (and (seq? f) (= 'spec (first f)) (str/starts-with? (str/lower-case (str (second f))) "tprel"))
         (let [e (nth f 2)]
           (list 'spec (second f) (if (and (seq? e) (= 'val (first e))) (tp (nth vals (second e))) e)))
-        (seq? f) (apply list (map #(subst % vals tp gotv) f))
+        (seq? f) (apply list (map #(subst % vals tp gotv pc) f))
         :else f))
 
 (defn forms-text
@@ -178,7 +199,8 @@
                                                            (case (first add)
                                                              :global ((:got layout) (second add))
                                                              :local ((:got-local layout) fi (second add) (nth add 2))
-                                                             nil))))))
+                                                             nil))))
+                                       a))
                         "\n"))))))))
 
 (defn- write-bytes [^String path ^bytes b]

@@ -127,6 +127,30 @@ elif [ ! -d "$w/nd/src" ] || [ "$(cat "$w/nd.bignum" 2>"$TMPDIR/lib-check-bignum
   flock -u 9; exec 9>&-
 fi
 nd=$w/nd
+# hs-r6: ghc-internal's autogen module GHC.Internal.PrimopWrappers (its .cabal's autogen-modules: genprimopcode
+# --make-haskell-wrappers' output, in no tarball), made from the pinned primops.txt.pp by arbace.repr.haskell.primiface's wrappers
+# (gen_wrappers ported) and read natively with ghc-internal's flags into the package's dumps, so --ifaces own compiles it among
+# the package's modules and lib-stg makes its STG (foundation's import); its judge GHC's interface of it in the pack
+# haskell-ifaces-ghc-9.14.1 (the lib-check pack names no closure that holds it); LIB_CHECK_WRAPPERS=0 leaves it out
+wrappers=""
+if [ "$pkg" = ghc-internal ] && [ "${LIB_CHECK_WRAPPERS:-1}" != 0 ] && [ -d "$nd/src" ]; then
+  pp=$root/.tmp/repr-haskell/corpus/ghc-9.14.1/compiler/GHC/Builtin/primops.txt.pp
+  [ -f "$pp" ] || { echo "lib-check: $pp is missing (bin/repr-haskell corpus fetch)" >&2; exit 2; }
+  g=$w/gen; rm -rf "$g"; mkdir -p "$g/src/GHC/Internal"
+  arbace_tool -m arbace.repr.haskell.primiface wrappers "$pp" "$g/src/GHC/Internal/PrimopWrappers.hs" > "$g/gen.log" 2>&1 ||
+    { cat "$g/gen.log" >&2; echo "lib-check: GHC.Internal.PrimopWrappers not made" >&2; exit 1; }
+  gflags=$(arbace_tool -e "(let [c (read-string (slurp \"$root/test/haskell/corpus-ghc-9.14.1.edn\"))
+                                  p (some #(when (= \"ghc-internal\" (:name %)) %) (:packages c))]
+                              (println (apply str (interpose \" \" (concat [(str \"-X\" (:language p))] (map #(str \"-X\" %) (:extensions p)) [\"-haddock\"] (:ghc-flags p))))))" 2> "$g/flags.err" |
+           sed -e "s|\\\$repo|$root|g" -e "s|\\\$libdir|$("$root/bin/repr-haskell" native-libdir)|g" -e 's/-DBIGNUM_GMP/-DBIGNUM_NATIVE/')
+  # shellcheck disable=SC2086
+  (cd "$g" && "$root/bin/repr-haskell" read --reader native -o "$g/nd" src/GHC/Internal/PrimopWrappers.hs --ghc $gflags) > "$g/read.log" 2>&1
+  [ -f "$g/nd/src/GHC/Internal/PrimopWrappers.hs.edn" ] ||
+    { tail -5 "$g/read.log" >&2; echo "lib-check: GHC.Internal.PrimopWrappers not read natively ($g/read.log)" >&2; exit 1; }
+  mkdir -p "$nd/src/GHC/Internal"; cp "$g/nd/src/GHC/Internal/PrimopWrappers.hs.edn" "$nd/src/GHC/Internal/"
+  wrappers=GHC.Internal.PrimopWrappers
+  echo "== lib-check: $(tail -1 "$g/gen.log" | sed 's/^primiface: [^:]*: //') of GHC.Internal.PrimopWrappers made from primops.txt.pp and read natively" >&2
+fi
 # P17: the dumps' tree is the package's: its library's source directory (hs-source-dirs) src/ for ghc-internal and base, the
 # package's root for deepseq, array, stm (the modules' directories at the top: a capital first letter); one directory else
 sd=$(cd "$nd" && find . -mindepth 1 -maxdepth 1 -type d -name '[a-z]*' | sed 's|^\./||' | sort)
@@ -146,7 +170,7 @@ extra=GHC.Internal.Control.Monad.Fail; [ "$pkg" = base ] && extra="Prelude $extr
 partial=""
 if [ -n "$only" ]; then cp "$only" "$w/files.txt"; partial=1
 else
-  (cd "$sdp" && find . -name '*.edn' ! -name '*.hs-boot.edn' | sed 's|^\./||; s|\.hsc\.edn$||; s|\.hs\.edn$||' | sort) |
+  (cd "$sdp" && find . -name '*.edn' ! -name '*.hs-boot.edn' | sed 's|^\./||; s|\.hsc\.edn$||; s|\.hs\.edn$||; s|\.lhs\.edn$||' | sort) |
     awk -v n="$every" 'NR % n == 1 || n == 1' > "$w/files.txt"
   [ "$every" = 1 ] || partial=1
 fi
@@ -239,7 +263,7 @@ else
   u=$(oracle_unpack "$pin") || exit 1
   pool=$u/$(oracle_pin_name "$pin")/pool cl=$u/$(oracle_pin_name "$pin")/closure
   miss=0
-  [ -n "$above" ] || while read -r f; do m=$(echo "$f" | tr / .); [ -f "$cl/$m.txt" ] || { echo "lib-check: UNRECORDED $m: no closure in the pack" >&2; miss=1; }; done < "$w/files.txt"
+  [ -n "$above" ] || while read -r f; do m=$(echo "$f" | tr / .); [ "$m" = "$wrappers" ] || [ -f "$cl/$m.txt" ] || { echo "lib-check: UNRECORDED $m: no closure in the pack" >&2; miss=1; }; done < "$w/files.txt"
   [ "$miss" = 0 ] || exit 1
 fi
 # the modules an interface names (its things' types, instances, families): GHC loads their interfaces on demand
@@ -253,11 +277,11 @@ refs() {
 # the plan: a module with its closure's directory and GHC's own interface (a module without one, the iface verb's hidden
 # modules, left out)
 plan=$w/plan.txt; : > "$plan"; hidden=0
-closure_dir() { # M L: the links of M's closure, grown to the fixed point, in L
-  local m=$1 l=$2 x y r e
+closure_dir() { # M L [SEED]: the links of M's closure (the pack's list, or SEED's), grown to the fixed point, in L
+  local m=$1 l=$2 x y r e seed=${3:-$cl/$1.txt}
   rm -rf "$l"; mkdir -p "$l"
   declare -A have=(); local todo=()
-  while read -r x; do [ -n "$x" ] && [ "$x" != "# done" ] && { have[$x]=1; todo+=("$x"); }; done < "$cl/$m.txt"
+  while read -r x; do [ -n "$x" ] && [ "$x" != "# done" ] && { have[$x]=1; todo+=("$x"); }; done < "$seed"
   for e in $extra; do y=$e.iface.edn; [ "$e" = "$m" ] || [ -n "${have[$y]:-}" ] || [ ! -f "$pool/$y" ] || { have[$y]=1; todo+=("$y"); }; done
   while [ ${#todo[@]} -gt 0 ]; do
     x=${todo[0]}; todo=("${todo[@]:1}")
@@ -279,8 +303,21 @@ fi
 while read -r f; do
   m=$(echo "$f" | tr / .)
   d=$sdp/$f.hs.edn; [ -f "$d" ] || d=$sdp/$f.hsc.edn
+  # hs-judge-1120, round 5: a package's Setup script (PKG-Setup): the literate Setup.lhs, its module Main (the corpus's)
+  case $pkg in *-Setup) [ -f "$d" ] || d=$sdp/$f.lhs.edn; m=Main ;; esac
   if [ -n "${above:-}" ]; then
     mkdir -p "$w/ln/$m"; g=-; [ -n "$gif" ] && [ -f "$gif/$m.iface.edn" ] && g=$gif/$m.iface.edn
+    case $pkg in *-Setup) g=- ;; esac
+    printf '%s\t%s\t%s\t%s\n' "$m" "$d" "$w/ln/$m" "$g" >> "$plan"; continue
+  fi
+  # hs-r6: the generated module has no closure in the pack: its closure its imports' (GHC.Internal.Prim, GHC.Internal.Tuple) grown
+  # over the pack's pool as a pack closure is, GHC's interface of it the pack haskell-ifaces-ghc-9.14.1's (--ifaces own alone: the
+  # GHC-interfaced levels judge closures it has none of)
+  if [ "$m" = "$wrappers" ] && [ "$ifaces" = own ]; then
+    gpin=$root/test/haskell/records/haskell-ifaces-ghc-9.14.1.sha256; g=-
+    gu=$(oracle_unpack "$gpin" 2> "$w/gifaces.err") && [ -f "$gu/$(oracle_pin_name "$gpin")/$m.iface.edn" ] && g=$gu/$(oracle_pin_name "$gpin")/$m.iface.edn
+    printf '%s\n' GHC.Internal.Prim.iface.edn GHC.Internal.Tuple.iface.edn '# done' > "$w/gen/closure.txt"
+    closure_dir "$m" "$w/ln/$m" "$w/gen/closure.txt"
     printf '%s\t%s\t%s\t%s\n' "$m" "$d" "$w/ln/$m" "$g" >> "$plan"; continue
   fi
   [ -f "$pool/$m.iface.edn" ] || { hidden=$((hidden + 1)); continue; }
@@ -297,7 +334,10 @@ if [ "$ifaces" = own ]; then
   deps="" unit=$pkg
   if [ -n "${above:-}" ]; then
     # the installation's unit id (test/haskell/target/installation.edn; ghc-internal's is wired in): Typeable's module records
+    # (hs-judge-1120, round 5: a Setup script, PKG-Setup, is compiled into the unit main, as cabal-install compiles it)
+    case $pkg in *-Setup) unit=main ;; *)
     unit=$(sed -n "s/^ *{\{0,1\} *\"$pkg\" {:id \"\([^\"]*\)\".*/\1/p" "$root/test/haskell/target/installation.edn" | head -1)
+    ;; esac
     [ -n "$unit" ] || { echo "lib-check: no unit id of $pkg in test/haskell/target/installation.edn" >&2; exit 1; }
     # HF10-P30 (a), P17: the packages below, transitively, in dependency order (their .cabal files' library build-depends, as the
     # installation's records name them: arbace.repr.haskell.target deps), from the pinned tarball's tree
@@ -389,10 +429,14 @@ if [ "$ifaces" = own ]; then
   # the interface judge's negative control (GTS81 (a)): an own interface against another module's GHC interface, renamed
   # a package above ghc-internal: its own control pair (test/haskell/lib-check-controls-PKG.tsv), GHC's interfaces from haskell-ifaces
   cpool=$pool; [ -z "${above:-}" ] || { controls=$root/test/haskell/lib-check-controls-$pkg.tsv; cpool=$gif; }
+  # (hs-judge-1120, round 5: a Setup script's Main has no GHC interface to judge against, so no control here; the round trip's
+  # own interface level, which judges it, has its own)
+  case $pkg in *-Setup) ;; *)
   while IFS=$'\t' read -r subj other; do
     case $subj in ''|'#'*) continue ;; esac
     arbace_tool -m arbace.repr.haskell.libcheck own-control "$ow/pool" "$cpool" "$subj" "$other" || st=1
-  done < "$controls"
+  done < "$controls" ;;
+  esac
   # HF10-P15 (a): the package's own pool kept as a gate step's output (LIB_CHECK_POOL_OUT=DIR: DIR/PKG-pool.tar, one
   # deterministic tar of pool/, the step's GATE_OUT), the next package's dependency (LIB_CHECK_DEP_POOL_TAR)
   if [ -n "${LIB_CHECK_POOL_OUT:-}" ]; then

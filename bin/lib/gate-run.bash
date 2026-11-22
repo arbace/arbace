@@ -340,7 +340,9 @@ load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan:
 }
 # (night: the crops tier's subset deferred to the night's gate, gate.plan's crop-why; never a need of a step that runs, which the
 # planner wakes, but not a failure of one)
-ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip|absent|night) return 0 ;; esac; return 1; }
+# (covered: an essential check whose cases a full-tier step of this run checks, gate.plan's cover: a need it satisfies, as its
+# subsumers run in the same gate and fail it when they fail)
+ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip|absent|night|covered) return 0 ;; esac; return 1; }
 # out_sha PATH: an output's digest, as gate.plan's out-digest: a file's SHA-256; a directory's, the
 # SHA-256 of sha256sum's lines of its files in order; missing
 out_sha() {
@@ -379,6 +381,8 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     # the crops tier (doc/GATE-DIET-SURVEY.md, "As built: the crops tier"): a crop's subset whose crop did not change, deferred to
     # the night's gate: no run, no failure, no pass
     night) echo night > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
+    # the cover (doc/GATE-DIET-SURVEY.md, "The cover and unit keys"): an essential check a full-tier step of this run subsumes: no run, no pass
+    covered) echo covered > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
   esac
   local nw
   for x in ${needs[$n]}; do
@@ -532,6 +536,7 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
     none) echo "   -  $n (not needed: no step that runs needs it)"; return ;;
     absent) echo "   absent  $n (${why[$n]})"; return ;;
     night) echo "   night  $n (${why[$n]})"; return ;;
+    covered) echo "   covered  $n (${why[$n]})"; return ;;
     # GD4 (GDS12 (a)): deferred for the disk: not a failure; bin/gate retries it at the end, and a run left with one is incomplete
     deferred) echo "   deferred  $n ($(cat "$logs/$n.deferred" 2>"$logs/count.err"))"; return ;;
     notrun*:*) echo "   FAILED  $n (not run: needs ${st#notrun })"; status=1; return ;;
@@ -877,10 +882,16 @@ gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and exec
 #                 go, compile, link, asm; GATE_CACHES_GO_BUSY=1|0 decides instead, the tests): the user's rule, never trim Go's
 #                 cache under a live build (memory: a 2-hour trim still broke one); the row says it waited, and the next cap
 #                 (before a step, every 5 minutes) or the floor's deferral of the steps takes it up
+#   :entries N    (queue 485) the units are the paths N levels below the directory (the print cache's XX/KEY, a printed
+#                 package, and collect/HASH), each removed whole, by its own mtime (the time a build last used it: arbace.build.go
+#                 sets it) and the size of what it holds; without it the files one by one, by theirs (which cut entries
+#                 in half: an entry's names file kept, a file it names gone, and the next build read a file that is no more)
+#   :lock NAME    (queue 485) the directory's lock file DIR/NAME: the prune takes it exclusive (flock -n), and while a tool
+#                 holds it (bin/build-go holds the print cache's shared while it builds) leaves the directory alone
 # caches_go_busy and gocache_cap_kib: bin/lib/gocache.bash's, the same rule a build's trim by hand follows (n-gocache-trim)
 # (beside this file, else the checkout's: a test that sources gate-run.bash with a fabricated $root, or none)
 if [ -f "${BASH_SOURCE[0]%/*}/gocache.bash" ]; then . "${BASH_SOURCE[0]%/*}/gocache.bash"; else . "$root/bin/lib/gocache.bash"; fi
-caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT FREE MIN IDLE, a line each (TSV)
+caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT FREE MIN IDLE ENTRIES LOCK, a line each (TSV)
   awk '
     /^[ \t]*;/ { next }
     /:path "/ {
@@ -898,7 +909,9 @@ caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT F
       fr = "-"; if (match(l, /:free-gib [0-9.]+/)) fr = substr(l, RSTART + 10, RLENGTH - 10)
       mn = "-"; if (match(l, /:min-gib [0-9.]+/)) mn = substr(l, RSTART + 9, RLENGTH - 9)
       id = (l ~ /:idle-only true/) ? "idle" : "-"
-      print p "\t" w "\t" r "\t" a1 "\t" a2 "\t" m "\t" c "\t" x "\t" fr "\t" mn "\t" id
+      en = "-"; if (match(l, /:entries [0-9]+/)) en = substr(l, RSTART + 9, RLENGTH - 9)
+      lk = "-"; if (match(l, /:lock "[^"]*"/)) lk = substr(l, RSTART + 7, RLENGTH - 8)
+      print p "\t" w "\t" r "\t" a1 "\t" a2 "\t" m "\t" c "\t" x "\t" fr "\t" mn "\t" id "\t" en "\t" lk
     }' "$1"
 }
 caches_base() {  # caches_base WHERE PATH: the path on disk
@@ -919,14 +932,23 @@ caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
   now=$(date +%s)
   local lst=$TMPDIR/caches-prune.$$
   caches_rows "$tab" > "$lst.rows"
-  local fr mn id capk
-  while IFS=$'\t' read -r p w r a1 a2 m c x fr mn id; do
+  local fr mn id capk en lk lfd
+  while IFS=$'\t' read -r p w r a1 a2 m c x fr mn id en lk; do
     [ "$which" = cheap ] && [ "$c" != cheap ] && continue
     for base in $(caches_base "$w" "$p"); do
       [ -e "$base" ] || continue
       : > "$lst"
       if [ "${id:--}" = idle ] && caches_go_busy; then
         echo "gate --prune: $base left alone: a Go build runs (:idle-only, never trimmed under a live build)"; continue
+      fi
+      # queue 485: :lock, the directory's lock held exclusive from the listing to the removal, or the directory left alone
+      lfd=""
+      if [ "${lk:--}" != - ] && [ -d "$base" ]; then
+        exec {lfd}>> "$base/$lk"
+        if ! flock -n "$lfd"; then
+          exec {lfd}>&-
+          echo "gate --prune: $base left alone: a tool holds its lock $base/$lk (:lock: a build uses it)"; continue
+        fi
       fi
       case $r in
         size)
@@ -940,8 +962,16 @@ caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
             capk=$(gocache_cap_kib "${sk:-0}" "${fk:-0}" "$a1" "$fr" "${mn/-/0}")
             echo "gate --prune: $base holds $(gib "${sk:-0}"), $(gib "${fk:-0}") free: its cap $(gib "$capk") (at most $a1 GiB, $fr GiB left free, at least ${mn/-/0} GiB)"
           fi
+          if [ "${en:--}" != - ]; then
+            # :entries N: the paths N levels down, each whole (its mtime its own, its size what it holds), the oldest first
+            find "$base" -mindepth "$en" -printf '%d\t%T@\t%s\t%P\n' 2>"$lst.err" \
+              | awk -F'\t' -v n="$en" -v b="$base" '{ k = split($4, q, "/"); u = q[1]; for (i = 2; i <= n; i++) u = u "/" q[i]
+                  if ($1 == n) t[u] = $2; s[u] += $3 } END { for (u in t) printf "%s\t%d\t%s/%s\n", t[u], s[u], b, u }' | sort -n \
+              | awk -F'\t' -v capk="$capk" '{ f[NR] = $3; s[NR] = $2; t += $2 } END { lim = capk * 1024; for (i = 1; i <= NR && t > lim; i++) { print s[i] "\t" f[i]; t -= s[i] } }' > "$lst"
+          else
           find "$base" -type f -printf '%T@\t%s\t%p\n' 2>"$lst.err" | sort -n \
-            | awk -F'\t' -v capk="$capk" '{ f[NR] = $3; s[NR] = $2; t += $2 } END { lim = capk * 1024; for (i = 1; i <= NR && t > lim; i++) { print s[i] "\t" f[i]; t -= s[i] } }' > "$lst" ;;
+            | awk -F'\t' -v capk="$capk" '{ f[NR] = $3; s[NR] = $2; t += $2 } END { lim = capk * 1024; for (i = 1; i <= NR && t > lim; i++) { print s[i] "\t" f[i]; t -= s[i] } }' > "$lst"
+          fi ;;
         age)
           if [ "$a2" = atime ]; then find "$base" -type f -atime +"$a1" -printf '%s\t%p\n' 2>"$lst.err" > "$lst"
           else find "$base" -type f -mtime +"$a1" -printf '%s\t%p\n' 2>"$lst.err" > "$lst"; fi ;;
@@ -962,6 +992,7 @@ caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
         echo "gate --prune: ${dry:+would remove }$n entries of $base (its rule $r $a1$( [ "$a2" = - ] || echo " $a2"): $(gib $((freed / 1024))))"
         [ -n "$dry" ] || { cut -f2- "$lst" | xargs -r -d '\n' rm -rf --; [ "$r" = age ] && find "$base" -mindepth 1 -type d -empty -mtime +"$a1" -delete 2>"$lst.err"; }
       fi
+      [ -z "$lfd" ] || exec {lfd}>&-
       if [ "$x" != - ] && [ -d "$base" ]; then
         # GDS17 (a): no directory above :max-entries (night 12: ext4's directory index full at 208,000 entries)
         # (one pass: each entry's parent counted)

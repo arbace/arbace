@@ -58,6 +58,11 @@
     --goos-dir DIR  with --goos tamago: TamaGo's goos module is DIR (go.mod replaces it by
                   DIR), not Go's module cache: the module printed from its Go forms
                   (bin/tamago-vendor print)
+    --go-cmd FILE print the module, write go build's command into FILE and exit (bin/build-go
+                  runs it once this process has exited: doc/go/BUILD.md, \"The build in bounded
+                  steps\"); ARBACE_BUILD_CHUNKS=0 reads and holds the whole program's forms
+                  before printing (the print until 2026-11-20), ARBACE_PRINT_JOBS and
+                  ARBACE_PRINT_BUDGET_MB bound the print in chunks (print-jobs, print-budget)
     --mutant FILE a program's sensitivity control (doc/go/BUILD.md, \"A mutant\"): one function's
                   body rewritten in the forms before printing by the named rewrite FILE records
                   (read-mutant), the package printed past the print cache; what was done
@@ -130,16 +135,117 @@
                   (str/join ", " (map #(.getPath ^File (:file %)) ps)))))
      pkgs)))
 
+;; The print in bounded chunks (doc/go/BUILD.md, "The build in bounded steps", 2026-11-20): a
+;; package's forms are read when it is printed and dropped once its files are written, the
+;; packages printed at once held to a budget of forms bytes; before printing, the program's
+;; files are read for their package files and loads alone (light-forms). ARBACE_BUILD_CHUNKS=0:
+;; the whole program's forms read first and held (the build until 2026-11-20).
+
+(defn- chunked?
+  "Whether the print goes in chunks: ARBACE_BUILD_CHUNKS, unless 0."
+  []
+  (not= "0" (System/getenv "ARBACE_BUILD_CHUNKS")))
+
+(defn- env-long [k default]
+  (let [v (System/getenv k)]
+    (if (seq v) (Long/parseLong v) default)))
+
+(defn- print-jobs
+  "The threads that read the forms files and print the packages: ARBACE_PRINT_JOBS, else the
+  processors, at most 16."
+  []
+  (max 1 (env-long "ARBACE_PRINT_JOBS" (min 16 (.availableProcessors (Runtime/getRuntime))))))
+
+(defn- print-budget
+  "The forms bytes of the packages printed at once: ARBACE_PRINT_BUDGET_MB (MiB, default 96); a
+  package's forms in memory are about 50 times its files' bytes (measured on j2g's output), so
+  96 MiB is about 5 GB of forms. A package over the budget is printed alone."
+  []
+  (* 1048576 (max 1 (env-long "ARBACE_PRINT_BUDGET_MB" 96))))
+
+(defn- par-map
+  "(mapv f xs) on up to n threads, the largest elements (size) first; the results in xs' order.
+  An exception of f is thrown as it is (not wrapped by the future)."
+  [n size f xs]
+  (let [xs (vec xs)
+        cnt (count xs)
+        n (min n cnt)]
+    (if (<= n 1)
+      (mapv f xs)
+      (let [order (vec (sort-by #(- (long (size (nth xs %)))) (range cnt)))
+            res (object-array cnt)
+            next-k (atom -1)
+            work (fn [] (loop []
+                          (let [k (swap! next-k inc)]
+                            (when (< k cnt)
+                              (let [i (nth order k)]
+                                (aset res i (f (nth xs i))))
+                              (recur)))))
+            ws (doall (repeatedly n #(future (work))))]
+        (doseq [w ws]
+          (try @w (catch java.util.concurrent.ExecutionException e (throw (or (.getCause e) e)))))
+        (vec res)))))
+
+(defn- budget-map
+  "(mapv f xs) on up to n threads, each element started when the costs (cost) of those running
+  and its own are at most budget, or when none runs; the costliest that fits first. The results
+  in xs' order; an exception of f is thrown as it is."
+  [n budget cost f xs]
+  (let [xs (vec xs)
+        cnt (count xs)
+        costs (mapv #(long (cost %)) xs)
+        res (object-array cnt)
+        lock (Object.)
+        todo (atom (vec (sort-by #(- (nth costs %)) (range cnt))))
+        running (atom 0)
+        take! (fn []
+                (locking lock
+                  (let [t @todo]
+                    (if (empty? t)
+                      ::done
+                      (let [r @running
+                            i (first (filter #(or (zero? r) (<= (+ r (nth costs %)) budget)) t))]
+                        (if (nil? i)
+                          ::wait
+                          (do (reset! todo (vec (remove #(= % i) t)))
+                              (swap! running + (nth costs i))
+                              i)))))))
+        work (fn [] (loop []
+                      (let [i (take!)]
+                        (cond
+                          (= i ::done) nil
+                          (= i ::wait) (do (Thread/sleep 20) (recur))
+                          :else (do (try (aset res i (f (nth xs i)))
+                                         (finally (swap! running - (nth costs i))))
+                                    (recur))))))
+        ws (doall (repeatedly (max 1 (min n cnt)) #(future (work))))]
+    (doseq [w ws]
+      (try @w (catch java.util.concurrent.ExecutionException e (throw (or (.getCause e) e)))))
+    (vec res)))
+
+(defn- file-size ^long [^File f] (.length f))
+
+(defn- light-forms
+  "A forms file's forms but its declarations (the forms whose head is qualified, but X/package
+  and X/file): what decides a package file (package-file?) and a package's collection without
+  its files' declarations (its :package, :name, :path and :read; collect)."
+  [f]
+  (into [] (remove (fn [x] (and (seq? x) (symbol? (first x)) (namespace (first x))
+                                (not (#{"package" "file"} (name (first x)))))))
+        (p/read-forms f)))
+
 (defn- read-all
-  "A function of a forms file giving its forms (p/read-forms), the files given read
-  beforehand, in parallel, each once: reading is most of collecting a large program on the Go
-  executable, whose reader is slower than the JVM's (doc/STANDALONE-NOTES.md)."
-  [files]
-  (let [cache (zipmap (map #(.getAbsolutePath ^File %) files)
-                      (pmap p/read-forms files))]
-    (fn [^File f]
-      (let [k (.getAbsolutePath f)]
-        (if (contains? cache k) (get cache k) (p/read-forms f))))))
+  "A function of a forms file giving its forms (read, default p/read-forms), the files given
+  read beforehand, in parallel, each once: reading is most of collecting a large program on
+  the Go executable, whose reader is slower than the JVM's (doc/STANDALONE-NOTES.md)."
+  ([files] (read-all files p/read-forms))
+  ([files read]
+   (let [files (vec files)
+         cache (zipmap (map #(.getAbsolutePath ^File %) files)
+                       (par-map (print-jobs) file-size read files))]
+     (fn [^File f]
+       (let [k (.getAbsolutePath f)]
+         (if (contains? cache k) (get cache k) (read f)))))))
 
 (defn- hex [^bytes bs]
   (apply str (map #(format "%02x" (bit-and % 0xff)) bs)))
@@ -194,7 +300,9 @@
 
 (defn- root-packages
   "The package files under DIR/go, collected (with print-cache, from the collect index when
-  their files are unchanged: :collected then delays the collection, collected-package)."
+  their files are unchanged). In chunks (chunked?) without their files' declarations, read
+  with light-forms: :collect collects a package with its forms when it is printed
+  (collected-package), and nothing holds them after; the whole program's forms otherwise."
   [^File dir print-cache]
   (let [root (File. dir "go")]
     (when-not (.isDirectory root)
@@ -213,14 +321,21 @@
           covered (set (for [[_ e] valid [rp] (:read e)] rp))
           pf-index (:package-file? index)
           known? #(and index-file (contains? pf-index (shas (.getPath ^File %))))
-          read-fn (read-all (filter #(not (and (known? %) (covered (.getPath ^File %)))) files))
+          chunks (chunked?)
+          read-fn (read-all (filter #(not (and (known? %) (covered (.getPath ^File %)))) files)
+                            (if chunks light-forms p/read-forms))
           pkg-file? (fn [^File f]
                       (if (known? f) (get pf-index (shas (.getPath f))) (package-file? f read-fn)))
+          ;; a package collected with its forms, its files read in parallel first
+          collect (fn [^File f files] (fn [] (collect-package dir f (read-all files))))
           pkgs (vec (for [^File f files :when (pkg-file? f)]
                       (if-let [e (get valid (.getPath f))]
-                        (assoc (:pkg e) :file f :read (mapv #(File. ^String (first %)) (:read e))
-                               :collected (delay (collect-package dir f p/read-forms)))
-                        (collect-package dir f read-fn))))]
+                        (let [read (mapv #(File. ^String (first %)) (:read e))]
+                          (assoc (:pkg e) :file f :read read :collect (collect f read)))
+                        (let [pkg (collect-package dir f read-fn)]
+                          (if chunks
+                            (assoc (dissoc pkg :files) :collect (collect f (:read pkg)))
+                            pkg)))))]
       (when (empty? pkgs)
         (fail (str "no package files (ns and go/package) under " (.getPath root))))
       (doseq [[path ps] (group-by :path pkgs) :when (> (count ps) 1)]
@@ -240,13 +355,14 @@
       pkgs)))
 
 (defn- collected-package
-  "A package from the collect index collected, its forms read (to print it): the same package
-  as the index's."
+  "A package from the collect index, or collected without its declarations (in chunks),
+  collected with its forms (to print it): the same package as the index's or the light
+  collection's. Nothing keeps the forms: each call reads them again."
   [pkg]
-  (if-let [d (:collected pkg)]
-    (let [c @d]
+  (if-let [c (:collect pkg)]
+    (let [c (c)]
       (when-not (= (select-keys c [:package :name :path :read]) (select-keys pkg [:package :name :path :read]))
-        (fail (str (:path pkg) ": collected again, the package differs from the collect index's")))
+        (fail (str (:path pkg) ": collected again, the package differs from its first collection (the collect index's, or its files' without their declarations)")))
       c)
     pkg))
 
@@ -494,7 +610,7 @@
         i (first idx)
         ;; from the collect index (--print-cache), the package's forms read now; the program's
         ;; keys (:dir, :module, :other-root) kept
-        pkg (let [pkg (nth (:packages prog) i)] (merge (dissoc pkg :collected) (collected-package pkg)))
+        pkg (let [pkg (nth (:packages prog) i)] (merge (dissoc pkg :collect) (collected-package pkg)))
         hits (for [[fi file] (map-indexed vector (:files pkg))
                    :when (or (nil? (:file rec)) (= (str (:name file)) (:file rec)))
                    [di d] (map-indexed vector (:decls file))
@@ -515,7 +631,7 @@
         pkg' (-> pkg
                  (assoc-in [:files fi :decls di] after)
                  (assoc :mutant (:name rec))
-                 (dissoc :collected))]
+                 (dissoc :collect))]
     [(assoc-in prog [:packages i] pkg')
      {:mutant rec
       :package (:package rec) :go-file (str (:name file))
@@ -619,7 +735,8 @@
   The module std (the standard library, GOROOT/src) gets no go.mod: GOROOT/src's go.mod,
   go.sum and vendor/modules.txt are files of the tree it is printed into (bin/tamago-vendor).
   With goos-dir (GOOS=tamago), TamaGo's goos module is that directory (a replace), not Go's
-  module cache. Packages are printed in parallel. With print-cache (a directory) and the
+  module cache. Packages are printed in parallel (in chunks, chunked?: each read as it is
+  printed, those printed at once held to print-budget's bytes of forms files). With print-cache (a directory) and the
   environment's REPR_GO_HOST_ID, a package printed before by the same host from the same forms is
   taken from the cache (standalone S6: a build reprints only what changed)."
   [{:keys [module packages modules] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir print-cache]}]
@@ -645,7 +762,12 @@
   (vec
     (concat (when-not (= module "std") ["go.mod"])
           (for [m modules] (str "_modules/" m "/go.mod"))
-          (apply concat (pmap
+          (apply concat ((if (chunked?)
+                           ;; in chunks: a package's forms read as it is printed, the packages
+                           ;; printed at once held to the budget of their files' bytes
+                           #(budget-map (print-jobs) (print-budget)
+                                        (fn [pkg] (reduce + 0 (map file-size (:read pkg)))) %1 %2)
+                           pmap)
             (fn [pkg]
               (let [pdir (if (= "" (:dir pkg)) out (File. out ^String (:dir pkg)))
                     opts (cond-> {:layout (or layout (if line-file :lines :gofmt))}
@@ -700,9 +822,27 @@
     (doseq [c (.listFiles f)] (delete-tree c)))
   (.delete f))
 
+(defn- write-go-cmd!
+  "The go build command (cmd, run in dir with env added to this process's environment) written
+  into f for bin/build-go to run once this process has exited (doc/go/BUILD.md, \"The build in
+  bounded steps\"): a line per item, `dir DIR`, `rm DIR` (a temporary work directory to remove
+  after the build), `env KEY=VALUE`, `arg ARG` in order. A newline in any of them is an error."
+  [^File f cmd ^File dir env ^File rm]
+  (let [line (fn [k v]
+               (when (str/includes? (str v) "\n")
+                 (fail (str "--go-cmd: a newline in the build's " k ": " (pr-str v))))
+               (str k " " v "\n"))]
+    (spit f (str (line "dir" (.getPath (.getAbsoluteFile dir)))
+                 (when rm (line "rm" (.getPath (.getAbsoluteFile rm))))
+                 (str/join (for [[k v] (sort env)] (line "env" (str k "=" v))))
+                 (str/join (for [a cmd] (line "arg" a)))))))
+
 (defn build
   "Builds the program in dir for linux/arch into out (a File); returns go build's exit
-  status, its output on the JVM's."
+  status, its output on the JVM's. With opts' :go-cmd (a file), the module is printed and go
+  build's command written there (write-go-cmd!), not run: bin/build-go runs it once this
+  process has exited, so that the printer's memory and the compiler's are never resident at
+  once; the status is 0."
   [^File dir arch ^File out {:keys [work goroot] :as opts}]
   (let [prog (with-mutant (program dir goroot opts) dir opts (File. (str (.getPath out) ".mutant.edn")))
         main (:main prog)
@@ -727,15 +867,17 @@
                           (:go-flags opts)
                           ["-o" (.getPath (.getAbsoluteFile out)) (:path main)])
               env (cond-> (go-env goroot arch (or (:goos opts) "linux"))
-                    (seq (:goexperiment config)) (assoc "GOEXPERIMENT" (:goexperiment config)))
-              [status] (run cmd mod env true)]
-          status))
+                    (seq (:goexperiment config)) (assoc "GOEXPERIMENT" (:goexperiment config)))]
+          (if-let [f (:go-cmd opts)]
+            (do (write-go-cmd! (File. (str f)) cmd mod env (when tmp? work))
+                0)
+            (first (run cmd mod env true)))))
       (finally
-        (when tmp? (delete-tree work))))))
+        (when (and tmp? (not (:go-cmd opts))) (delete-tree work))))))
 
 (defn -main [& argv]
   (let [goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
-        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines|full] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--go-flag FLAG]... [--root ROOT]... [--goos-dir DIR] [--main PATH] [--mutant FILE] DIR\n"
+        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines|full] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--go-flag FLAG]... [--root ROOT]... [--goos-dir DIR] [--main PATH] [--mutant FILE] [--go-cmd FILE] DIR\n"
                    "       bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines|full] [--line-file] [--mutant FILE] SRC")]
     (loop [as argv opts {:arch "amd64" :goroot goroot}]
       (case (first as)
@@ -756,6 +898,7 @@
         "--goos-dir" (recur (nnext as) (assoc opts :goos-dir (second as)))
         "--print-cache" (recur (nnext as) (assoc opts :print-cache (second as)))
         "--mutant" (recur (nnext as) (assoc opts :mutant (second as)))
+        "--go-cmd" (recur (nnext as) (assoc opts :go-cmd (second as)))
         (do
           (when-not (and (= 1 (count as)) (not (str/starts-with? (first as) "-"))
                          (#{"amd64" "arm64"} (:arch opts))

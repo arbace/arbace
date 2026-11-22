@@ -647,8 +647,12 @@
                 mentioned (set (keep (fn [f] (let [fo (lval (arg (lval f) 2))] (some-> (arg fo 2) lval rdr-occ))) fields))
                 env2 (if dd
                        (reduce (fn [e fname]
+                                 ;; GHC.Rename.Pat's rn_dotdot: a pattern's (..) binds every field of the constructor not
+                                 ;; mentioned whose selector is in scope, qualified or not (lookupGRE_FieldLabel); base's
+                                 ;; GHC.RTS.Flags matches Internal.RTSFlags{..} beside its own unqualified gcFlags
                                  (let [occ (name-occ fname)]
-                                   (if (or (contains? mentioned occ) (not= fname (lookup-global "var" occ nil)))
+                                   (if (or (contains? mentioned occ)
+                                           (not (some (fn [g] (= (:name g) fname)) (get @*genv* [(nskey "var") occ]))))
                                      e
                                      (let [b (loc-name "var" occ (lsp dd))]
                                        (emit-l! dd fname) (emit-l! dd b)
@@ -751,8 +755,15 @@
     (let [s (first stmts) v (lval s) env (assoc env :sp (lsp s))
           more (rest stmts)
           mdo? (and (:mdo env) (seq? fl) (= 'MDoExpr (first fl)))
-          sys (fn [m occ] (when (and fl (not (contains? *exts* "RebindableSyntax")))
-                            (emit-on! v nil (ext-name "var" m occ))))]
+          ;; RebindableSyntax (hs-r5): a do block's operator is the occurrence in scope, GHC.Rename.Env's lookupSyntaxName
+          ;; (the unqualified name's lookupOccRn): a local (>>=) or (>>) the elaborator then types (T15598, T22086)
+          sys (fn [m occ] (when fl
+                            (if (contains? *exts* "RebindableSyntax")
+                              (when (and (seq? fl) (= 'DoExpr (first fl))
+                                         (not (and (seq? (second fl)) (= 'Just (first (second fl))))))
+                                (when-let [n (resolve-rdr env (list 'unqual 'var occ))]
+                                  (use! n) (emit-on! v nil n)))
+                              (emit-on! v nil (ext-name "var" m occ)))))]
       (case (con v)
         BindStmt (do (sys "GHC.Internal.Base" ">>=")
                      (when mdo?
@@ -1093,24 +1104,29 @@
 ;;; Binding groups
 
 (defn- scc
-  "Tarjan: nodes 0..n-1, edges (fn i -> [j...]); the components, dependencies first; each [indexes]; the
-  nodes visited last to first (GHC's order of independent nodes)"
+  "containers' Data.Graph scc as GHC's GHC.Data.Graph.Directed uses it (stronglyConnCompFromEdgedVerticesUniq, depAnal):
+  Kosaraju's, dfs g (reverse (postOrd (transposeG g))), over nodes 0..n-1 and edges (fn i -> [j...]), each node's edges
+  sorted by node order (graphFromEdgedVertices), the transposed graph's lists built as accumArray (flip (:)) builds them;
+  the components, dependencies first, each [indexes] in its tree's preorder (decodeSccs' dec). Before, Tarjan's over the
+  nodes last to first: the same order for independent nodes, not for a node's dependencies (bigNatAnd's banged where
+  bindings !szA !szB !sz: GHC forces szB first)"
   [n edges]
-  (let [index (atom {}) low (atom {}) on (atom #{}) stack (atom []) counter (atom 0) out (atom [])]
-    (letfn [(visit [v]
-              (swap! index assoc v @counter) (swap! low assoc v @counter) (swap! counter inc)
-              (swap! stack conj v) (swap! on conj v)
-              (doseq [w (edges v)]
-                (cond (not (contains? @index w)) (do (visit w) (swap! low assoc v (min (@low v) (@low w))))
-                      (contains? @on w) (swap! low assoc v (min (@low v) (@index w)))))
-              (when (= (@low v) (@index v))
-                (let [comp (loop [acc []]
-                             (let [w (peek @stack)]
-                               (swap! stack pop) (swap! on disj w)
-                               (if (= w v) (conj acc w) (recur (conj acc w)))))]
-                  (swap! out conj (vec (sort comp))))))]
-      (doseq [v (reverse (range n))] (when-not (contains? @index v) (visit v))))
-    @out))
+  (let [g (mapv (fn [i] (vec (sort (distinct (filter #(< -1 % n) (edges i)))))) (range n))
+        ;; transposeG g = buildG (bounds g) (reverseE g): edges g in vertex order, each (w, v) consed onto w's list
+        gt (reduce (fn [acc [v w]] (update acc w #(cons v %))) (vec (repeat n ())) (for [v (range n) w (g v)] [v w]))
+        dfs (fn [graph roots]
+              ;; Data.Graph's dfs: the forest of [v children] trees, each vertex once, roots and edges in order
+              (let [seen (atom #{})]
+                (letfn [(go [vs] (vec (keep (fn [v] (when-not (contains? @seen v)
+                                                      (swap! seen conj v)
+                                                      [v (go (nth graph v))]))
+                                            vs)))]
+                  ;; (keep is lazy: go's vec forces each tree before the next root is looked at)
+                  (go roots))))
+        post (fn post [[v ts] acc] (conj (reduce (fn [a t] (post t a)) acc ts) v))
+        post-ord (reduce (fn [a t] (post t a)) [] (dfs gt (range n)))
+        pre (fn pre [[v ts] acc] (reduce (fn [a t] (pre t a)) (conj acc v) ts))]
+    (mapv (fn [t] (pre t [])) (dfs g (reverse post-ord)))))
 
 (defn- names-text [ns] (str "[" (str/join " " (sort (map name-str ns))) "]"))
 
@@ -1433,7 +1449,10 @@
       (doseq [[n p] included] (bring-in! n #{q} (not qual?) p))
       {:span (lsp imp) :module m :qualified qual? :as as :hiding hiding?
        :items (vec (keep :emit (concat sel hid)))
-       :implicit (nth (arg v 1) 3)})))
+       :implicit (nth (arg v 1) 3)
+       ;; hs-r5: the names the import brings into scope, the elaborator's valid hole fits' global candidates (their
+       ;; ImportSpec's provenance)
+       :names (mapv first included)})))
 
 (defn- import-text [{:keys [span module qualified as hiding implicit]}]
   (str "(import " (span-str span) " " (esc module) " " (if qualified "true" "false") " "
@@ -1559,6 +1578,13 @@
        v#)
      ~e))
 
+(defn holes-deferred?
+  "hs-r5: the -f flags in order defer typed holes (-fdefer-typed-holes, implied by -fdefer-type-errors; GHC.Driver.Session's
+  impliedGFlags and impliedOffGFlags)"
+  [ff]
+  (reduce (fn [on f] (case f ("-fdefer-typed-holes" "-fdefer-type-errors") true ("-fno-defer-typed-holes" "-fno-defer-type-errors") false on))
+          false ff))
+
 (defn rename-module
   "Rename a module's parse tree (the dump's forms): the output as a map of strings"
   [forms]
@@ -1637,20 +1663,25 @@
             sorted (fn [xs] (vec (sort xs)))]
         {:module m
          :tree (list 'rn/module
-                     {:module m
+                     (cond-> {:module m
                       :decls (phase :rtree-decls (vec (for [d decls :when (not (contains? '#{ValD SigD} (con (lval d))))] (rtree d))))
                       :binds (mapv (fn [[r bs]] (list 'rn/group r (mapv rtree bs))) (:groups (.get ^java.util.IdentityHashMap *rnodes* val-binds)))
                       :sigs (mapv rtree top-sigs)
                       :export-list (when export-l (rtree export-l))
                       :exports avails
-                      :imports imp-infos
+                      :imports (mapv #(dissoc % :names) imp-infos)
                       :exts (vec (sort exts))
                       ;; queue 369: the -f flags of the command line and of the OPTIONS_GHC pragmas, in order (the elaborator's
                       ;; -fdefer-type-errors)
                       :fflags (vec (filter #(and (string? %) (str/starts-with? % "-f"))
                                            (concat (:flags cfg) (mapcat (fn [p] (when (= 'options (first p)) (nth p 2))) prag))))
                       ;; HF10-P41 (a): the language the module is compiled in (PolyKinds is GHC2021's)
-                      :language (some-> (:language cfg) str)})
+                      :language (some-> (:language cfg) str)}
+                       ;; hs-r5: under -fdefer-typed-holes (or -fdefer-type-errors) the imports' names, for the valid hole
+                       ;; fits of a deferred hole (GHC.Tc.Errors.Hole's global candidates, globalRdrEnvElts); no key otherwise
+                       (holes-deferred? (filter #(and (string? %) (str/starts-with? % "-f"))
+                                                (concat (:flags cfg) (mapcat (fn [p] (when (= 'options (first p)) (nth p 2))) prag))))
+                       (assoc :gres (vec (for [i imp-infos] (select-keys i [:span :module :qualified :as :implicit :names]))))))
          :imports (mapv import-text imp-infos)
          :occs (mapv second (sort @*occs*))
          :ops (mapv second (sort @*ops*))

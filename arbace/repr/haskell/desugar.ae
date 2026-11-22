@@ -58,6 +58,7 @@
   Failure is a value: GHC binds a shared failure handler as a join point taking a void argument (mkFailurePair); here
   it is a let-bound thunk, inlined when used once and dropped when unused (a normaliser class, recorded)."
   (:require [arbace.string :as str]
+            [arbace.repr.haskell.core :as c]
             [arbace.repr.haskell.simpleopt :as so]
             [arbace.repr.haskell.constfold :as cf]
             [arbace.repr.haskell.primops :as primops]))
@@ -70,6 +71,7 @@
 (def ^:dynamic *unboxed-tuple?* (constantly false)) ; an expression of an unboxed tuple type (tostg's: its binder unarised
                                                     ; as a let's, *multi*)
 (def ^:dynamic *where* "")    ; the binding being compiled, for patError's text
+(def ^:dynamic *solo-binder?* (constantly false)) ; hs-r6: a binder of an unboxed 1-tuple of a lifted type (tostg's types)
 
 (defn- ext [ns m o] ["ext" ns m o])
 (def true-c (ext "data" "GHC.Internal.Types" "True"))
@@ -83,6 +85,7 @@
 (defn- head? [x h] (and (seq? x) (= h (first x))))
 
 (def ^:dynamic *ltypes* {})      ; the elaborator's binders' types
+(def retypes (atom {}))           ; hs-own-stg-2 (a): the simple optimiser's beta reductions' retyped binders {binder type}
 (def fresh-types (atom {}))       ; HF10-P20: the match variables made for typed pattern variables, their types (tostg's
                                   ; representations: a State# in an unboxed tuple's pattern was taken for a lifted value)
 
@@ -153,6 +156,9 @@
       (and fname (#{"unpackCString#" "unpackCStringUtf8#"} (nth fname 3)) (head? a 'lit))
       (let [t (second a) s (read-string (subs t 0 (dec (count t))))]
         (list 'plist (mapv (fn [ch] (list 'pcon (ext "data" "GHC.Internal.Types" "C#") [(list 'plitp (str "'(char " (int ch) ")'#"))])) s)))
+      ;; the empty string, the list's [] (typecheck's hslit, mkStringExprFS's nullFS)
+      (and (head? lc 'v) (vector? (second lc)) (= ["GHC.Internal.Types" "[]"] (subvec (second lc) 2)))
+      (list 'plist [])
       (and fname (head? a 'lit))
       (list 'pcon (ext "data" (nth fname 2) (nth fname 3)) [(list 'plitp (wrap-int-lit (nth fname 3) (second a)))])
       ;; a primitive literal (MagicHash's 1#, 'c'#): matched as it is (tidyLitPat leaves it, matchLiterals)
@@ -241,8 +247,23 @@
                      n (count (nth (first (:pats (first eqs))) 2))
                      first-sub (nth (first (:pats (first eqs))) 2)
                      xs (mapv (fn [i] (fresh-like (nth first-sub i))) (range n))
-                     eqs2 (map (fn [e] (assoc e :pats (concat (nth (first (:pats e)) 2) (rest (:pats e))))) eqs)]
-                 [(or (:tag (get *cons* c)) 0) (list 'alt c xs (match (into xs vars) eqs2 f))]))
+                     ;; hs-r5: a record pattern's fields matched in the order the pattern writes them (matchOneConLike's
+                     ;; select_arg_vars, Note [Record patterns]): the elaborator's {:order [i ...]} on a pcon whose written order
+                     ;; is not the declaration's; consecutive equations of one order a group (compatible_pats), the groups tried
+                     ;; in turn, each failing into the next (T246)
+                     okey (fn [e] (:order (nth (first (:pats e)) 3 nil)))
+                     grp (fn [es] (let [o (okey (first es))
+                                        cols (if o (mapv xs o) xs)
+                                        es2 (map (fn [e] (let [sub (vec (nth (first (:pats e)) 2))]
+                                                           (assoc e :pats (concat (if o (map sub o) sub) (rest (:pats e))))))
+                                                 es)]
+                                    [cols es2]))
+                     groups (partition-by okey eqs)
+                     body (if (= 1 (count groups))
+                            (let [[cols es2] (grp (first groups))] (match (into cols vars) es2 f))
+                            (reduce (fn [acc es] (with-fail acc (fn [f2] (let [[cols es2] (grp es)] (match (into cols vars) es2 f2)))))
+                                    f (reverse groups)))]
+                 [(or (:tag (get *cons* c)) 0) (list 'alt c xs body)]))
         missing (remove (set cs) all)
         ;; a DEFAULT that stands for one constructor is that constructor's alternative (GHC.Core.Utils'
         ;; refineDefaultAlt, which -O0's pipeline applies: the binders ipv)
@@ -429,6 +450,19 @@
     (list 'case s v [(list 'alt :default [] body)])
     (list 'let [(list 'bind v s)] body)))
 
+(defn- unlifted-let
+  "hs-r6: GHC's dsUnliftedBind for a let binder of an unboxed 1-tuple of a lifted type, (# () #): isUnliftedType holds
+  (an unboxed tuple), but its representation is a lifted one's, so the simple optimiser and tostg, which judge a let by
+  its representations, took it for a lazy let and dropped it dead. The binding is a case here, its right-hand side
+  evaluated first, the alternative MkSolo# of a fresh binder (Unarise's unariseAlts makes a DEFAULT alternative on a
+  multi-valued scrutinee that tuple's); a right-hand side ok for speculation stays a let (StrictPats' `where _x =
+  undefined :: (# () #)`, GHC's run evaluating it). Other unlifted binders are as before (their representations say so)"
+  [bs body]
+  (let [[_ b r] (first bs)]
+    (if (and (= 1 (count bs)) (lv? b) (*solo-binder?* b) (not (ok-for-speculation? r)))
+      (list 'case r b [(list 'alt (ext "data" "GHC.Internal.Types" "MkSolo#") [(fresh "ubx")] body)])
+      (list 'let bs body))))
+
 (defn ds
   "An elaborated expression without matches: core"
   [x]
@@ -442,7 +476,7 @@
               (list 'lam bs (ds (nth x 2)))
               (let [xs (mapv (fn [b] (if (lv? b) b (fresh "ds"))) bs)]
                 (list 'lam xs (match xs [{:pats bs :sub {} :rhs (fn [_] (ds (nth x 2)))}] (pat-error))))))
-      let (list 'let (ds-binds (second x)) (ds (nth x 2)))
+      let (unlifted-let (ds-binds (second x)) (ds (nth x 2)))
       letrec (list 'letrec (ds-binds (second x)) (ds (nth x 2)))
       case (list 'case (ds (nth x 1)) (nth x 2) (mapv (fn [[_ c bs e]] (list 'alt c bs (ds e))) (nth x 3)))
       match (let [ss (mapv ds (second x))
@@ -526,16 +560,50 @@
     (into (set (:exported r))
           ;; (Typeable's of the wired-in things in GHC.Internal.Types too: krep$*, tr$ModuleGHCPrim, mkPrimTypeableTodos' exported
           ;; Ids, HF10-P20)
-          (for [[_ b] prog :when (and (vector? b) (or (str/starts-with? (nth b 3) "$") (str/starts-with? (nth b 3) "krep$")
+          ;; (not derived Data's auxiliary bindings, $tT and $cC: internal, as GHC's genAuxBinds leave them)
+          (for [[_ b] prog :when (and (vector? b) (not (contains? (:deriv-aux r) b))
+                                      (or (str/starts-with? (nth b 3) "$") (str/starts-with? (nth b 3) "krep$")
                                                       (str/starts-with? (nth b 3) "tr$") (contains? fields b) (contains? methods b)
                                                       (not= (nth b 2) (:module r))))]
             b))))
+
+(defn- binders-in
+  "The local binders bound inside a Core expression (lambdas', lets', cases' and their alternatives')"
+  [e]
+  (let [out (transient [])]
+    (letfn [(w [x]
+              (when (seq? x)
+                (case (first x)
+                  lam (do (doseq [b (second x)] (when (lv? b) (conj! out b))) (w (nth x 2)))
+                  (let letrec) (do (doseq [bd (second x)] (when (lv? (second bd)) (conj! out (second bd))) (w (nth bd 2))) (w (nth x 2)))
+                  case (do (when (lv? (nth x 2)) (conj! out (nth x 2))) (w (second x))
+                           (doseq [a (nth x 3)] (doseq [b (nth a 2)] (when (lv? b) (conj! out b))) (w (nth a 3))))
+                  (doseq [y (rest x)] (cond (seq? y) (w y) (vector? y) (doseq [z y] (w z)))))))]
+      (w e))
+    (persistent! out)))
+
+(defn- retype-beta!
+  "hs-own-stg-2 (a): a beta reduction of binder b at arg over body: b's type matched against arg's (exprType, the types so
+  far), the body's binders' types substituted (each binder bound once: the simple optimiser inlines a lambda used once)"
+  [b arg body]
+  (when-let [bt (c/id-type b)]
+    (when (some (fn [x] (and (vector? x) (= :tv (first x)))) (tree-seq coll? seq bt))
+      (when-let [at (try (c/infer-type! arg nil) (catch Throwable _ nil))]
+        (let [th (into {} (remove (fn [[x t]] (= t [:tv x])) (c/type-match {} bt at)))]
+          (when (seq th)
+            (doseq [x (binders-in body) :let [t (c/id-type x)] :when t
+                    :let [t2 (c/subst-type th t)] :when (not= t2 t)]
+              (swap! retypes assoc x t2))))))))
 
 (defn desugar-program
   "The elaborator's result (:core, :all-cons, :tycons): its bindings without matches"
   [r]
   (reset! fresh-types {})
+  (reset! retypes {})
   (binding [*cons* (:all-cons r) *tycons* (:tycons r) *n* (atom 0) *ltypes* (or (:ltypes r) {})
+            c/*ltypes* (merge (or (:ltypes r) {}) @fresh-types) c/*retypes* retypes
+            c/*genv* (merge (:dfun-types r) (:genv r) (:types r))
+            so/*retype* retype-beta!
             so/*newtype-co* (when *casts* (fn [con] (when (contains? (:all-cons r) con) (newtype-co r con))))]
     (let [prog (mapv (fn [[_ b e]] (binding [*where* (if (vector? b) (nth b 3) (str (second b)))] (list 'bind b (simplify (simplify (ds (norm-iface e))))))) (:core r))
           exported (program-exported r prog)

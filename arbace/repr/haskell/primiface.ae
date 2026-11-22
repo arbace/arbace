@@ -584,6 +584,72 @@
     (str/join "\n" (remove #(re-find #"^# [0-9]+ \"" %) (str/split-lines text)))))
 
 ;;; ------------------------------------------------------------------------------------------
+;;; hs-r6: GHC.Internal.PrimopWrappers, ghc-internal's autogen module (its .cabal's autogen-modules), as genprimopcode
+;;; --make-haskell-wrappers writes it from primops.txt (utils/genprimopcode/Main.hs's gen_wrappers, pprTy, tyconsIn, arity,
+;;; wrapOp; Syntax.hs's is_primop, is_vector), so that lib-check and lib-stg take it among ghc-internal's modules
+
+(defn- hs-union
+  "Data.List's union: xs, then the elements of ys (duplicates removed) not already in xs"
+  [xs ys]
+  (into (vec xs) (remove (set xs) (distinct ys))))
+
+(defn- tycons-in
+  "tyconsIn: the type constructors a type names, in genprimopcode's order"
+  [t]
+  (case (first t)
+    (:fun :cfun) (hs-union (tycons-in (nth t 1)) (tycons-in (nth t 2)))
+    :app (reduce (fn [acc x] (hs-union x acc)) [(nth t 1)] (reverse (map tycons-in (nth t 2))))
+    :tv []
+    :utup (reduce (fn [acc x] (hs-union x acc)) [] (reverse (map tycons-in (nth t 1))))))
+
+(defn- tc-show [tc] (if (keyword? tc) (name tc) tc))
+
+(defn- wrap-op [nm] (if (Character/isLetter (.charAt ^String nm 0)) nm (str "(" nm ")")))
+
+(defn- ppr-ty
+  "pprTy: a primop's type as Haskell source"
+  [t]
+  (letfn [(pty [t] (case (first t)
+                     :fun (str (pbty (nth t 1)) " -> " (pty (nth t 2)))
+                     :cfun (str (pbty (nth t 1)) " => " (pty (nth t 2)))
+                     (pbty t)))
+          (pbty [t] (case (first t)
+                      :app (str/join " " (cons (wrap-op (tc-show (nth t 1))) (map paty (nth t 2))))
+                      :utup (str "(# " (str/join "," (map pty (nth t 1))) " #)")
+                      (paty t)))
+          (paty [t] (if (= :tv (first t)) (second t) (str "(" (pty t) ")")))]
+    (pty t)))
+
+(defn- ty-arity [t] (if (#{:fun :cfun} (first t)) (inc (ty-arity (nth t 2))) 0))
+
+(defn wrappers-text
+  "gen_wrappers: GHC.Internal.PrimopWrappers' source from primops.txt's text, a NOINLINE wrapper of every primop but
+  tagToEnum# and the vector ones"
+  [text]
+  (let [{:keys [entries]} (parse-primops text)
+        ws (filter (fn [e] (and (= :primop (:kind e)) (not= "tagToEnum#" (:name e)) (not (opt e :vector)))) entries)
+        tycons (reduce (fn [acc e] (hs-union (tycons-in (:ty e)) acc)) [] (reverse ws))
+        types (str/join ", " (map tc-show (remove #{"()" "Bool"} tycons)))
+        lower? (fn [^String nm] (Character/isLowerCase (.charAt nm 0)))
+        wrap (fn [nm] (if (lower? nm) nm (str "(" nm ")")))
+        wrap-qual (fn [nm] (if (lower? nm) (str "GHC.Internal.Prim." nm) (str "(GHC.Internal.Prim." nm ")")))]
+    (str "-- | Users should not import this module.  It is GHC internal only.\n"
+         "-- Use \"GHC.Exts\" instead.\n"
+         "{-# LANGUAGE MagicHash, NoImplicitPrelude, UnboxedTuples #-}\n"
+         "{-# OPTIONS_GHC -Wno-deprecations -O0 -fno-do-eta-reduction #-}\n"
+         "module GHC.Internal.PrimopWrappers where\n"
+         "import qualified GHC.Internal.Prim\n"
+         "import GHC.Internal.Tuple ()\n"
+         "import GHC.Internal.Prim (" types ")\n"
+         (apply str (for [e ws :let [nm (:name e)
+                                     args (map #(str "a" %) (range 1 (inc (ty-arity (:ty e)))))
+                                     src (wrap nm)]
+                          line [(str "{-# NOINLINE " src " #-}")
+                                (str src " :: " (ppr-ty (:ty e)))
+                                (str (str/join " " (cons src args)) " = " (str/join " " (cons (wrap-qual nm) args)))]]
+                      (str line "\n"))))))
+
+;;; ------------------------------------------------------------------------------------------
 ;;; The judge
 
 (defn- things-of [text] (second (some #(when (and (seq? %) (= 'hsiface/things (first %))) %) (read-string (str "[" text "]")))))
@@ -614,6 +680,11 @@
                 (.renameTo (File. (str f ".part")) (File. f))
                 (println (str "primiface: " f ": " (:n-primops parts) " primops, " (count (:exports parts)) " exports, "
                               (count (:things parts)) " things")))
+      ;; hs-r6: GHC.Internal.PrimopWrappers' source (genprimopcode --make-haskell-wrappers) into the file a
+      "wrappers" (let [txt (wrappers-text (primops-text pp))]
+                   (.mkdirs (.getParentFile (.getAbsoluteFile (File. ^String a))))
+                   (spit a txt)
+                   (println (str "primiface: " a ": " (count (filter #(str/starts-with? % "{-# NOINLINE") (str/split-lines txt))) " wrappers")))
       "check" (let [txt (primops-text pp) ghc (slurp a)
                     own (iface-text (build txt))
                     r (check own ghc)
@@ -628,4 +699,4 @@
                               "; the control (types rotated): " (:equal ctl) " of " (:facts ctl) " facts equal, "
                               (if ctl-ok "differs, as it must" "JUDGED EQUAL: the judge is blind")))
                 (System/exit (if (and ok ctl-ok) 0 1)))
-      (do (println "usage: -m arbace.repr.haskell.primiface write PRIMOPS.TXT.PP DIR | check PRIMOPS.TXT.PP GHC-IFACE") (System/exit 2)))))
+      (do (println "usage: -m arbace.repr.haskell.primiface write PRIMOPS.TXT.PP DIR | check PRIMOPS.TXT.PP GHC-IFACE | wrappers PRIMOPS.TXT.PP FILE") (System/exit 2)))))

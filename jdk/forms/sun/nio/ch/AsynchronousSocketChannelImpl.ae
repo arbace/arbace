@@ -1,0 +1,375 @@
+;; Converted from overlay/jdk/java.base/sun/nio/ch/AsynchronousSocketChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.net InetSocketAddress SocketAddress SocketOption StandardSocketOptions)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels AlreadyBoundException
+                            AsynchronousSocketChannel
+                            ClosedChannelException
+                            CompletionHandler
+                            ConnectionPendingException
+                            NotYetConnectedException
+                            ReadPendingException
+                            WritePendingException)
+        '(java.util Collections HashSet Objects Set)
+        '(java.util.concurrent Future TimeUnit)
+        '(java.util.concurrent.locks ReadWriteLock ReentrantReadWriteLock)
+        '(sun.net.ext ExtendedSocketOptions))
+
+(defclass ^:abstract AsynchronousSocketChannelImpl
+  :extends AsynchronousSocketChannel
+  :implements [Cancellable Groupable]
+
+  (method ^:private ^:static isThreadConfined ^boolean [^ByteBuffer bb]
+    false)
+
+  (field ^:protected ^:final ^FileDescriptor fd)
+
+  (field ^:protected ^:final stateLock (Object.))
+
+  (field ^:protected ^:volatile ^InetSocketAddress localAddress)
+
+  (field ^:protected ^:volatile ^InetSocketAddress remoteAddress)
+
+  (field ^:static ^:final ^int ST_UNINITIALIZED -1)
+
+  (field ^:static ^:final ^int ST_UNCONNECTED 0)
+
+  (field ^:static ^:final ^int ST_PENDING 1)
+
+  (field ^:static ^:final ^int ST_CONNECTED 2)
+
+  (field ^:protected ^:volatile ^int state ST_UNINITIALIZED)
+
+  (field ^:private ^:final readLock (Object.))
+
+  (field ^:private ^boolean reading)
+
+  (field ^:private ^boolean readShutdown)
+
+  (field ^:private ^boolean readKilled)
+
+  (field ^:private ^:final writeLock (Object.))
+
+  (field ^:private ^boolean writing)
+
+  (field ^:private ^boolean writeShutdown)
+
+  (field ^:private ^boolean writeKilled)
+
+  (field ^:private ^:final ^ReadWriteLock closeLock (ReentrantReadWriteLock.))
+
+  (field ^:private ^:volatile ^boolean closed)
+
+  (field ^:private ^boolean isReuseAddress)
+
+  (constructor :throws [IOException] [this ^AsynchronousChannelGroupImpl group]
+    (super. (.provider group))
+    (set! (.-fd this) (Net/socket))
+    (set! (.-state this) ST_UNCONNECTED))
+
+  (constructor :throws [IOException] [this ^AsynchronousChannelGroupImpl group ^FileDescriptor fd
+                                      ^InetSocketAddress remote]
+    (super. (.provider group))
+    (set! (.-fd this) fd)
+    (set! (.-state this) ST_CONNECTED)
+    (set! (.-localAddress this) (Net/localAddress fd))
+    (set! (.-remoteAddress this) remote))
+
+  (method ^:public ^:final isOpen ^boolean [this] (not closed))
+
+  (method ^:final begin :throws [IOException] ^void [this]
+    (.lock (.readLock closeLock))
+    (when-not (.isOpen this) (throw (ClosedChannelException.))))
+
+  (method ^:final end ^void [this] (.unlock (.readLock closeLock)))
+
+  (method ^:abstract implClose :throws [IOException] ^void [this])
+
+  (method ^:public ^:final close :throws [IOException] ^void [this]
+    (.lock (.writeLock closeLock))
+    (try (when closed (return)) (set! closed true) (finally (.unlock (.writeLock closeLock))))
+    (.implClose this))
+
+  (method ^:final enableReading ^void [this ^boolean killed]
+    (locking readLock (set! reading false) (when killed (set! readKilled true))))
+
+  (method ^:final enableReading ^void [this] (.enableReading this false))
+
+  (method ^:final enableWriting ^void [this ^boolean killed]
+    (locking writeLock (set! writing false) (when killed (set! writeKilled true))))
+
+  (method ^:final enableWriting ^void [this] (.enableWriting this false))
+
+  (method ^:final killReading ^void [this]
+    (locking readLock (set! readKilled true)))
+
+  (method ^:final killWriting ^void [this]
+    (locking writeLock (set! writeKilled true)))
+
+  (method ^:final killConnect ^void [this]
+    (.killReading this)
+    (.killWriting this))
+
+  (method ^:abstract implConnect :type-params [A] ^{:tag (Future Void)} [this ^SocketAddress remote
+                                                                         ^A attachment
+                                                                         ^{:tag (CompletionHandler Void (? super A))} handler])
+
+  (method ^:public ^:final connect ^{:tag (Future Void)} [this ^SocketAddress remote]
+    (.implConnect this remote nil nil))
+
+  (method ^:public ^:final connect :type-params [A] ^void [this ^SocketAddress remote ^A attachment
+                                                           ^{:tag (CompletionHandler Void (? super A))} handler]
+    (when (nil? handler) (throw (NullPointerException. "'handler' is null")))
+    (.implConnect this remote attachment handler))
+
+  (method ^:abstract implRead :type-params [(V extends Number) A] ^{:tag (Future V)} [this
+                                                                                      ^boolean isScatteringRead
+                                                                                      ^ByteBuffer dst
+                                                                                      ^ByteBuffer/1 dsts
+                                                                                      ^long timeout
+                                                                                      ^TimeUnit unit
+                                                                                      ^A attachment
+                                                                                      ^{:tag (CompletionHandler V (? super A))} handler])
+
+  (method ^:private read :type-params [(V extends Number) A] ^{:tag (Future V)} [this
+                                                                                 ^boolean isScatteringRead
+                                                                                 ^ByteBuffer dst
+                                                                                 ^ByteBuffer/1 dsts
+                                                                                 ^long timeout
+                                                                                 ^TimeUnit unit
+                                                                                 ^A att
+                                                                                 ^{:tag (CompletionHandler V (? super A))} handler]
+    (if (not (.isOpen this))
+        (let [^Throwable e (ClosedChannelException.)]
+          (if (nil? handler)
+              (CompletedFuture/withFailure e)
+              (do (Invoker/invoke this handler att nil e) nil)))
+        (do
+          (when (nil? remoteAddress) (throw (NotYetConnectedException.)))
+          (let [hasSpaceToRead (or isScatteringRead (.hasRemaining dst))
+                ^:mutable shutdown false]
+            (locking readLock
+              (when readKilled
+                (throw
+                  (IllegalStateException. "Reading not allowed due to timeout or cancellation")))
+              (when reading (throw (ReadPendingException.)))
+              (cond readShutdown (set! shutdown true) hasSpaceToRead (set! reading true)))
+            (if (or shutdown (not hasSpaceToRead))
+                (let [^Number result (if isScatteringRead
+                                         (if shutdown (Long/valueOf -1) (Long/valueOf 0))
+                                         (Integer/valueOf (if shutdown -1 0)))]
+                  (if (nil? handler)
+                      (CompletedFuture/withResult result)
+                      (do (Invoker/invoke this handler att result nil) nil)))
+                (.implRead this isScatteringRead dst dsts timeout unit att handler))))))
+
+  (method ^:public ^:final read ^{:tag (Future Integer)} [this ^ByteBuffer dst]
+    (when (.isReadOnly dst) (throw (IllegalArgumentException. "Read-only buffer")))
+    (when (AsynchronousSocketChannelImpl/isThreadConfined dst)
+      (throw (IllegalArgumentException. "Buffer is thread confined")))
+    (.read this false dst nil 0 TimeUnit/MILLISECONDS nil nil))
+
+  (method ^:public ^:final read :type-params [A] ^void [this ^ByteBuffer dst ^long timeout
+                                                        ^TimeUnit unit ^A attachment
+                                                        ^{:tag (CompletionHandler Integer (? super A))} handler]
+    (when (nil? handler) (throw (NullPointerException. "'handler' is null")))
+    (when (.isReadOnly dst) (throw (IllegalArgumentException. "Read-only buffer")))
+    (when (AsynchronousSocketChannelImpl/isThreadConfined dst)
+      (throw (IllegalArgumentException. "Buffer is thread confined")))
+    (.read this false dst nil timeout unit attachment handler))
+
+  (method ^:public ^:final read :type-params [A] ^void [this ^:mutable ^ByteBuffer/1 dsts
+                                                        ^int offset ^int length ^long timeout
+                                                        ^TimeUnit unit ^A attachment
+                                                        ^{:tag (CompletionHandler Long (? super A))} handler]
+    (when (nil? handler) (throw (NullPointerException. "'handler' is null")))
+    (Objects/checkFromIndexSize offset length (alength dsts))
+    (set! dsts (Util/subsequence dsts offset length))
+    (for-each [^ByteBuffer dst dsts]
+      (when (.isReadOnly dst) (throw (IllegalArgumentException. "Read-only buffer")))
+      (when (AsynchronousSocketChannelImpl/isThreadConfined dst)
+        (throw (IllegalArgumentException. "Buffer is thread confined"))))
+    (.read this true nil dsts timeout unit attachment handler))
+
+  (method ^:abstract implWrite :type-params [(V extends Number) A] ^{:tag (Future V)} [this
+                                                                                       ^boolean isGatheringWrite
+                                                                                       ^ByteBuffer src
+                                                                                       ^ByteBuffer/1 srcs
+                                                                                       ^long timeout
+                                                                                       ^TimeUnit unit
+                                                                                       ^A attachment
+                                                                                       ^{:tag (CompletionHandler V (? super A))} handler])
+
+  (method ^:private write :type-params [(V extends Number) A] ^{:tag (Future V)} [this
+                                                                                  ^boolean isGatheringWrite
+                                                                                  ^ByteBuffer src
+                                                                                  ^ByteBuffer/1 srcs
+                                                                                  ^long timeout
+                                                                                  ^TimeUnit unit
+                                                                                  ^A att
+                                                                                  ^{:tag (CompletionHandler V (? super A))} handler]
+    (let [hasDataToWrite (or isGatheringWrite (.hasRemaining src))
+          ^:mutable closed false]
+      (if (.isOpen this)
+          (do
+            (when (nil? remoteAddress) (throw (NotYetConnectedException.)))
+            (locking writeLock
+              (when writeKilled
+                (throw
+                  (IllegalStateException. "Writing not allowed due to timeout or cancellation")))
+              (when writing (throw (WritePendingException.)))
+              (cond writeShutdown (set! closed true) hasDataToWrite (set! writing true))))
+          (set! closed true))
+      (cond
+        closed
+          (let [^Throwable e (ClosedChannelException.)]
+            (if (nil? handler)
+                (CompletedFuture/withFailure e)
+                (do (Invoker/invoke this handler att nil e) nil)))
+        (not hasDataToWrite)
+          (let [^Number result (if isGatheringWrite
+                                   ^Number (Long/valueOf 0)
+                                   ^Number (Integer/valueOf 0))]
+            (if (nil? handler)
+                (CompletedFuture/withResult result)
+                (do (Invoker/invoke this handler att result nil) nil)))
+        :else (.implWrite this isGatheringWrite src srcs timeout unit att handler))))
+
+  (method ^:public ^:final write ^{:tag (Future Integer)} [this ^ByteBuffer src]
+    (when (AsynchronousSocketChannelImpl/isThreadConfined src)
+      (throw (IllegalArgumentException. "Buffer is thread confined")))
+    (.write this false src nil 0 TimeUnit/MILLISECONDS nil nil))
+
+  (method ^:public ^:final write :type-params [A] ^void [this ^ByteBuffer src ^long timeout
+                                                         ^TimeUnit unit ^A attachment
+                                                         ^{:tag (CompletionHandler Integer (? super A))} handler]
+    (when (nil? handler) (throw (NullPointerException. "'handler' is null")))
+    (when (AsynchronousSocketChannelImpl/isThreadConfined src)
+      (throw (IllegalArgumentException. "Buffer is thread confined")))
+    (.write this false src nil timeout unit attachment handler))
+
+  (method ^:public ^:final write :type-params [A] ^void [this ^:mutable ^ByteBuffer/1 srcs
+                                                         ^int offset ^int length ^long timeout
+                                                         ^TimeUnit unit ^A attachment
+                                                         ^{:tag (CompletionHandler Long (? super A))} handler]
+    (when (nil? handler) (throw (NullPointerException. "'handler' is null")))
+    (Objects/checkFromIndexSize offset length (alength srcs))
+    (set! srcs (Util/subsequence srcs offset length))
+    (for-each [^ByteBuffer src srcs]
+      (when (AsynchronousSocketChannelImpl/isThreadConfined src)
+        (throw (IllegalArgumentException. "Buffer is thread confined"))))
+    (.write this true nil srcs timeout unit attachment handler))
+
+  (method ^:public ^:final bind :throws [IOException] ^AsynchronousSocketChannel [this
+                                                                                  ^SocketAddress local]
+    (try
+      (.begin this)
+      (locking stateLock
+        (when (== state ST_PENDING) (throw (ConnectionPendingException.)))
+        (when (some? localAddress) (throw (AlreadyBoundException.)))
+        (let [^InetSocketAddress isa (if (nil? local)
+                                         (InetSocketAddress. 0)
+                                         (Net/checkAddress local))]
+          (Net/bind fd (.getAddress isa) (.getPort isa))
+          (set! localAddress (Net/localAddress fd))))
+      (finally (.end this)))
+    this)
+
+  (method ^:public ^:final getLocalAddress :throws [IOException] ^SocketAddress [this]
+    (when-not (.isOpen this) (throw (ClosedChannelException.)))
+    localAddress)
+
+  (method ^:public ^:final setOption :type-params [T] :throws [IOException] ^AsynchronousSocketChannel [this
+                                                                                                        ^{:tag (SocketOption T)} name
+                                                                                                        ^T value]
+    (when (nil? name) (throw (NullPointerException.)))
+    (when-not (.contains (.supportedOptions this) name)
+      (throw (UnsupportedOperationException. (java-str "'" name "' not supported"))))
+    (try
+      (.begin this)
+      (when writeShutdown (throw (IOException. "Connection has been shutdown for writing")))
+      (if (and (identical? name StandardSocketOptions/SO_REUSEADDR) (Net/useExclusiveBind))
+          (set! isReuseAddress (cast Boolean value))
+          (Net/setSocketOption fd Net/UNSPEC name value))
+      this
+      (finally (.end this))))
+
+  (method ^:public ^:final getOption :type-params [T] :throws [IOException] ^T [this
+                                                                                ^{:tag (SocketOption T)} name]
+    (when (nil? name) (throw (NullPointerException.)))
+    (when-not (.contains (.supportedOptions this) name)
+      (throw (UnsupportedOperationException. (java-str "'" name "' not supported"))))
+    (try
+      (.begin this)
+      (if (and (identical? name StandardSocketOptions/SO_REUSEADDR) (Net/useExclusiveBind))
+          ^Object (Boolean/valueOf isReuseAddress)
+          (Net/getSocketOption fd Net/UNSPEC name))
+      (finally (.end this))))
+
+  (defclass ^:private ^:static DefaultOptionsHolder
+    (field ^:static ^:final ^{:tag (Set (SocketOption ?))} defaultOptions
+      (DefaultOptionsHolder/defaultOptions))
+
+    (method ^:private ^:static defaultOptions ^{:tag (Set (SocketOption ?))} []
+      (let [^{:tag (HashSet (SocketOption ?))} set (HashSet/newHashSet 5)]
+        (.add set StandardSocketOptions/SO_SNDBUF)
+        (.add set StandardSocketOptions/SO_RCVBUF)
+        (.add set StandardSocketOptions/SO_KEEPALIVE)
+        (.add set StandardSocketOptions/SO_REUSEADDR)
+        (when (Net/isReusePortAvailable) (.add set StandardSocketOptions/SO_REUSEPORT))
+        (.add set StandardSocketOptions/TCP_NODELAY)
+        (.addAll set (ExtendedSocketOptions/clientSocketOptions))
+        (Collections/unmodifiableSet set))))
+
+  (method ^:public ^:final supportedOptions ^{:tag (Set (SocketOption ?))} [this]
+    DefaultOptionsHolder/defaultOptions)
+
+  (method ^:public ^:final getRemoteAddress :throws [IOException] ^SocketAddress [this]
+    (when-not (.isOpen this) (throw (ClosedChannelException.)))
+    remoteAddress)
+
+  (method ^:public ^:final shutdownInput :throws [IOException] ^AsynchronousSocketChannel [this]
+    (try
+      (.begin this)
+      (when (nil? remoteAddress) (throw (NotYetConnectedException.)))
+      (locking readLock
+        (when-not readShutdown (Net/shutdown fd Net/SHUT_RD) (set! readShutdown true)))
+      (finally (.end this)))
+    this)
+
+  (method ^:public ^:final shutdownOutput :throws [IOException] ^AsynchronousSocketChannel [this]
+    (try
+      (.begin this)
+      (when (nil? remoteAddress) (throw (NotYetConnectedException.)))
+      (locking writeLock
+        (when-not writeShutdown (Net/shutdown fd Net/SHUT_WR) (set! writeShutdown true)))
+      (finally (.end this)))
+    this)
+
+  (method ^:public ^:final toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append sb (.getName (.getClass this)))
+      (.append sb \[)
+      (locking stateLock
+        (if (not (.isOpen this))
+            (.append sb "closed")
+            (do
+              (switch state
+                ST_UNCONNECTED (.append sb "unconnected")
+                ST_PENDING (.append sb "connection-pending")
+                ST_CONNECTED
+                  (do
+                    (.append sb "connected")
+                    (when readShutdown (.append sb " ishut"))
+                    (when writeShutdown (.append sb " oshut"))))
+              (when (some? localAddress)
+                (.append sb " local=")
+                (.append sb (.toString localAddress)))
+              (when (some? remoteAddress)
+                (.append sb " remote=")
+                (.append sb (.toString remoteAddress))))))
+      (.append sb \])
+      (.toString sb))))

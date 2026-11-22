@@ -594,6 +594,43 @@
           cmp (first (filter #(and (seq? %) (= 'icmp (first %))) (tree-seq coll? seq f)))]
       (check "C1: Option<(usize, char)>'s discriminant reads the char (the pair's second value) against -1"
              (if (and cmp (= '[i32 %_1.1 -1] [(nth cmp 2) (nth cmp 3) (nth cmp 4)])) :equal [:differs cmp]) :equal))
+    ;; C6-4: LLVM 23's float text (AsmWriter's writeAPFloatInternal over APFloat::toString's truncating precision 6): std's IR
+    ;; writes `float 1e-4` as f0x38D1B717 (its six digits 9.99999e-05 read back as another float), 1.0 as 1.000000e+00
+    (let [fp #'cg/fp-form]
+      (check "C6-4: float 1e-4 in hex, float 1.0 and double 0.5 in decimal, as std's IR"
+             [(fp 32 (Float/floatToRawIntBits (float 1e-4))) (fp 32 (Float/floatToRawIntBits (float 1.0))) (fp 64 (Double/doubleToRawLongBits 0.5))]
+             '[(fp "f0x38D1B717") (fp "1.000000e+00") (fp "5.000000e-01")])
+      (check "C6-4 control: double 0.1 reads back from its six digits (decimal, not hex)" (fp 64 (Double/doubleToRawLongBits 0.1)) '(fp "1.000000e-01")))
+    ;; C6-4: rvalue.rs' try_codegen_const_aggregate_as_immediate: `(9_u8, 1000000000_u32)` into memory one i64 store (grisu's
+    ;; max_pow10_no_more_than in std's IR); the control, a field not constant, two stores
+    (let [u8t '(ty "u8" (uint "u8")) u32t '(ty "u32" (uint "u32"))
+          tup (list 'ty "(u8, u32)" (list 'tuple u8t u32t)) rtup (list 'ty "&(u8, u32)" (list 'ref tup false))
+          lt (merge glue-lt
+                    {"u8" '{:size 1 :align 1 :abi (scalar (int 8 false [0N 255N])) :fields [] :variants (single 0) :uninhabited false}
+                     "u32" '{:size 4 :align 4 :abi (scalar (int 32 false [0N 4294967295N])) :fields [] :variants (single 0) :uninhabited false}
+                     "(u8, u32)" '{:size 8 :align 4 :abi (pair (int 8 false [0N 255N]) (int 32 false [0N 4294967295N]) 4) :fields [0 4] :variants (single 0) :uninhabited false}
+                     "&(u8, u32)" '{:size 8 :align 8 :abi (scalar (ptr [1N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}})
+          body (fn [second-op] {:form :body :symbol "agg" :args 1 :ret unit
+                                :locals [{:mut true :ty unit} {:mut false :ty u32t} {:mut true :ty tup} {:mut false :ty rtup}] :debug []
+                                :blocks [{:cleanup false :stmts [(list 'assign '(place 2) (list 'aggregate '(tuple) [(list 'const "const 9_u8" u8t '(scalar 9 1)) second-op]))
+                                                                 '(assign (place 3) (ref :shared (place 2)))]
+                                          :term '(return)}]})
+          stores (fn [b] (let [forms (cg/codegen-fn b lt (cg/new-globals {}))]
+                           (vec (for [x (tree-seq coll? seq forms) :when (and (seq? x) (= 'store (first x)))] (second x)))))]
+      (check "C6-4: a constant aggregate into memory, one integer store" (stores (body (list 'const "const 1000000000_u32" u32t '(scalar 1000000000 4))))
+             '[[i64 4294967296000000009]])
+      (check "C6-4 control: a field not constant, a store a field" (count (stores (body '(copy (place 1))))) 2))
+    ;; C6-4: the IRBuilder's ConstantFolder over a returned pair: a constant first half folds into a constant struct (std's
+    ;; current_os_id: `insertvalue {i64, i64} {i64 1, i64 poison}, i64 %2, 1`); the control, no constant, two instructions
+    (let [i64t '(ty "i64" (int "i64")) pr (list 'ty "(i64, i64)" (list 'tuple i64t i64t))
+          lt (merge glue-lt {"i64" '{:size 8 :align 8 :abi (scalar (int 64 true [0N 18446744073709551615N])) :fields [] :variants (single 0) :uninhabited false}
+                             "(i64, i64)" '{:size 16 :align 8 :abi (pair (int 64 true [0N 18446744073709551615N]) (int 64 true [0N 18446744073709551615N]) 8) :fields [0 8] :variants (single 0) :uninhabited false}})
+          body (fn [first-op] {:form :body :symbol "pr" :args 1 :ret pr :locals [{:mut true :ty pr} {:mut false :ty i64t}] :debug []
+                               :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'aggregate '(tuple) [first-op '(copy (place 1))]))] :term '(return)}]})
+          ivs (fn [b] (vec (for [x (tree-seq coll? seq (cg/codegen-fn b lt (cg/new-globals {}))) :when (and (seq? x) (= 'insertvalue (first x)))] (second x))))]
+      (check "C6-4: a returned pair's constant half folded into a constant struct" (ivs (body (list 'const "const 1_i64" i64t '(scalar 1 8))))
+             '[[(struct i64 i64) (struct [i64 1] [i64 poison])]])
+      (check "C6-4 control: a pair of values, two insertvalues" (count (ivs (body '(copy (place 1))))) 2))
     ;; queue 512 (503-1): core-check's names take its crate-private traits' generics (BytewiseEq<Rhs = Self>), where std's have none
     (let [bw '[(type "Self") (type "Rhs" (param 0 "Self"))]
           std2 (cc/with-native-std {:mods {} :generics {"core::cmp::PartialEq" '[(type "Self")]}}
@@ -638,5 +675,19 @@
              (if (and cx (= [:acq_rel :acquire] [(nth cx 4) (nth cx 5)])) :equal [:differs cx]) :equal)
       (check "C1 control: the orderings are the call's (Relaxed is monotonic, not seq_cst)"
              (let [r (has (forms (body "atomic_xadd" ["Relaxed"] [us pu us] us)) 'atomicrmw)] (if (= :seq_cst (nth r 4 nil)) [:equal] [:differs r])) :differs))
+    ;; C6-4 after 512-1: a call whose cleanup is a no-op landing pad (a bare resume, kept by the runtime pipeline since 512-1) is
+    ;; codegen'd as rustc's MIR after RemoveNoopLandingPads gives it: no personality, no block for the pad, the return merged
+    ;; (vectors' VacantEntry::insert after std's export was made again); the control, a pad that calls a drop first, keeps both
+    (let [fty '(ty "fn() {g}" (fndef "g" []))
+          callee '(callee {:kind "item" :symbol "g" :can-unwind true})
+          body (fn [pad-stmts pad-term] {:form :body :symbol "np" :args 0 :ret unit :locals [{:mut true :ty unit} {:mut true :ty unit}] :debug []
+                                         :blocks [{:cleanup false :stmts [] :term (list 'call (list 'const "g" fty '(zst)) [] '(place 1) 1 '(cleanup 2) callee '(loc "?" 0 0) 0)}
+                                                  {:cleanup false :stmts [] :term '(return)}
+                                                  {:cleanup true :stmts pad-stmts :term pad-term}]})
+          shape (fn [b] (let [f (vec (cg/codegen-fn b glue-lt (cg/new-globals {}))) i (.indexOf ^java.util.List f :body)]
+                          [(boolean (some #{:personality} f)) (count (nth f (inc i)))]))]
+      (check "C6-4: a no-op landing pad: no personality, one block" (shape (body [] '(resume))) [false 1])
+      (check "C6-4 control: a landing pad that does something keeps the personality and its block"
+             (let [[p n] (shape (body [] (list 'call (list 'const "g" fty '(zst)) [] '(place 1) nil '(continue) callee '(loc "?" 0 0) 0)))] (if (and p (> n 1)) [:differs p n] [:equal p n])) :differs))
     (println (str "pack-compare-test: " (if (zero? @bad) "passed" (str @bad " failed"))))
     (System/exit (if (zero? @bad) 0 1))))

@@ -34,6 +34,11 @@
   programs selfref-derived.edn names as having no outcome of their own) have no
   verdict of their own: gcc's recorded run
   stays their reference (0.5 in bin/crops-score's judge stage). An entry gcc could not build (:status :no-build) stays gcc's.
+  Out of the judge's cases (the user's decision of 2026-11-20): test/c/selfref-out.edn's cases, whose expected output is undefined,
+  unspecified, implementation-defined with no choice of SPEC's own, or refused by design, each with its reason; their runs still
+  judged against gcc's run. ref refuses an entry with a verdict of its own (a defined output cannot be counted out), with no
+  :kind, :levels or :why, or no case of GCC-REF, and runs its control: the first case with a verdict of its own put in the list
+  must be refused.
 
   ref ROOTS GCC-REF OUT     OUT: GCC-REF's entries, each with a verdict of its own replaced by it ({:id :status (0 or
                             a status) :stdout (a SHA-256, or :o2 :differ for an output left open) :judge :self :verdict
@@ -136,6 +141,26 @@
         (when-let [[_ n] (re-find #"^/\* ci-run verdict: exit (\d+)\." (slurp f))] {:status (Long/parseLong n) :stdout :any :verdict :self-check})
         :else nil))))
 
+(def out-kinds #{:undefined :unspecified :constraint :implementation-defined :host :by-design})
+
+(def out-cases
+  "test/c/selfref-out.edn: {ID {:kind :levels :why}}, the cases out of the judge's cases."
+  (delay (let [f (java.io.File. "test/c/selfref-out.edn")] (if (.exists f) (read-string (slurp f)) {}))))
+
+(defn- out-problems
+  "The problems of OUT ({ID {:kind :levels :why}}) against the reference's entries ES: an entry with a verdict of its own (a
+  defined output), no case of ES, or without its kind, levels or reason."
+  [roots cs es out]
+  (let [ids (set (map :id es))]
+    (for [[id e] (sort-by key out)
+          :let [p (cond (not (ids id)) "no case of the reference"
+                        (verdict roots cs id) "a verdict of its own: a defined output cannot be counted out"
+                        (not (out-kinds (:kind e))) (str "no kind of " (pr-str (sort out-kinds)))
+                        (not (and (seq (:levels e)) (every? #{:eval :aot} (:levels e)))) "no :levels (:eval, :aot)"
+                        (str/blank? (str (:why e))) "no written reason")]
+          :when p]
+      (str "out of the judge's cases (test/c/selfref-out.edn): " id ": " p))))
+
 (defn- self-entry [id v]
   ;; in arbace.c.run/result's terms (embedded, so unchanged): an output left open is :o2 :differ (the status alone)
   (merge {:id id :status (:status v)}
@@ -172,7 +197,17 @@
 (defn -main [cmd roots-s gref & [out]]
   (let [roots (read-string roots-s)]
     (case cmd
-      "ref" (let [es (merged roots gref)]
+      "ref" (let [es (merged roots gref)
+                  cs (corpora)
+                  bad (out-problems roots cs es @out-cases)
+                  ;; the control: a case with a verdict of its own put in the list must be refused
+                  own (first (filter #(= :self (:judge %)) es))
+                  ctl (when own (out-problems roots cs es {(:id own) {:kind :undefined :levels [:eval] :why "the control"}}))]
+              (when (seq bad) (doseq [b bad] (println "selfref:" b)) (System/exit 1))
+              (if (seq ctl)
+                (println "selfref: control: an out entry with a verdict of its own" (str "(" (:id own) ")") "refused, as it must")
+                (do (println "selfref: control PASSES: an out entry with a verdict of its own is accepted" (pr-str (:id own))) (System/exit 1)))
+              (println (format "selfref: %d cases out of the judge's cases (test/c/selfref-out.edn)" (count @out-cases)))
               (spit out (str ";; the run corpora's references (test/c/selfref.ae): each case's own verdict, else gcc 15.2's run\n"
                              (str/join "\n" (map pr-str es)) "\n"))
               (doseq [[c xs] (sort (group-by (comp corpus :id) es))]

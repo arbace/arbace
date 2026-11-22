@@ -21,11 +21,18 @@
   (re-pattern (str "(\"SrcLoc\"\\)\\) \\[(?:\\(app \\(v \\(ext var \"GHC\\.Internal\\.CString\" \"unpackCString#\"\\)\\) "
                    "\\[\\(lit \"(?:[^\"\\\\]|\\\\.)*\"\\)\\]\\) ){3}" srcloc-int "[0-9]+#\"\\)\\]\\) " srcloc-int ")[0-9]+(#\"\\)\\]\\) "
                    srcloc-int "[0-9]+#\"\\)\\]\\) " srcloc-int ")[0-9]+(#\"\\)\\]\\))")))
+;; the same SrcLoc with its four positions bare Int# literals ((lit "98#"), the front end's unfoldings since next's 11-21 front end:
+;; hs-own-stg's desugaring of HasCallStack's literals), its columns written C as well (2026-11-22, small-tails-ochs)
+(def ^:private srcloc-bare-re
+  (re-pattern (str "(\"SrcLoc\"\\)\\) \\[(?:\\(app \\(v \\(ext var \"GHC\\.Internal\\.CString\" \"unpackCString#\"\\)\\) "
+                   "\\[\\(lit \"(?:[^\"\\\\]|\\\\.)*\"\\)\\]\\) ){3}\\(lit \"[0-9]+#\"\\) \\(lit \")[0-9]+(#\"\\) \\(lit \"[0-9]+#\"\\) "
+                   "\\(lit \")[0-9]+(#\"\\))")))
 (defn norm [t]
   (-> t
       (str/replace #"_([0-9]+)_[0-9]+_([0-9]+)_[0-9]+\"" "_$1_$2\"")
       (str/replace #"\"([0-9]+):[0-9]+:([0-9]+):[0-9]+@" "\"$1:$2@")
-      (str/replace srcloc-re "$1C$2C$3")))
+      (str/replace srcloc-re "$1C$2C$3")
+      (str/replace srcloc-bare-re "$1C$2C$3")))
 (let [[corpus orig side known-file units-file label & pkgs] *command-line-args*
       c (read-string (slurp corpus))
       want (set pkgs)
@@ -59,12 +66,19 @@
   (let [rec (when (and (not record?) (.isFile (File. ^String units-file))) (read-string (slurp units-file)))
         rec (filter #(some (fn [p] (str/starts-with? % (str p "/"))) pkgs) rec)
         gained (when-not record? (remove (set rec) ukeys)) lost (when-not record? (remove (set ukeys) rec))
-        ;; the negative control (GTS81 (a)): a unit's printed interface against another unit's original must differ
-        [u1 u2] (filter #(.isFile ^File (:side %)) units)
+        ;; the negative control (GTS81 (a)): a unit's printed interface against another unit's original must differ. hs-judge-1120,
+        ;; round 5: the other unit is one whose original differs from the first's under the judge's normalization (two units whose
+        ;; originals are equal, the four Setup scripts' `main :: IO ()`, are no control); the first unit the run's last printed one
+        ;; (a run of the Setup scripts beside another package pairs a Setup's printed interface with that package's original). No
+        ;; such pair (every original equal under norm: a blind normalization among them) is a problem
+        sides (filter #(.isFile ^File (:side %)) units)
+        u1 (last sides)
+        u2 (when u1 (let [o1 (norm (slurp (:orig u1)))] (first (filter #(not= o1 (norm (slurp (:orig %)))) units))))
         control (when (and u1 u2) (= (norm (slurp (:side u1))) (norm (slurp (:orig u2)))))
         problems (concat problems
                          (when (or (seq gained) (seq lost))
                            [(str "the units differ from " units-file ": " (count gained) " gained, " (count lost) " lost (ARBACE_IFACE_OWN_RECORD=1 rewrites it)")])
+                         (when (and u1 (not u2)) [(str "control: no unit's original differs from " (:key u1) "'s (run beside another package)")])
                          (when control [(str "control: " (:key u1) "'s printed interface equals " (:key u2) "'s original")]))]
   (when (and u1 u2) (println (str "iface-own " label ": control (" (:key u1) "'s printed interface against " (:key u2) "'s original) "
                                   (if control "equal: the judge is blind" "differs, as it must"))))

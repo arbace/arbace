@@ -1,3 +1,5 @@
+; verdict: debug local variable requires a valid scope
+; rule: llvm/lib/IR/Verifier.cpp:1719 !9's scope is !1 (DIFile): a DIScope, so visitDIVariable passes, but not a DILocalScope. It is first reached when the store's #dbg_declare visits its variable.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

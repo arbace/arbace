@@ -1,3 +1,5 @@
+; verdict: invalid CatchReturnInst needs to be provided a CatchPad
+; rule: llvm/lib/IR/Verifier.cpp:4946 catchret from %c where %c is a catchswitch.
 declare i32 @__CxxFrameHandler3(...)
 declare void @g()
 define void @f() personality ptr @__CxxFrameHandler3 {

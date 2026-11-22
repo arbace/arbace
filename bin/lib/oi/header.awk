@@ -114,10 +114,115 @@ END {
   if (hasbuild) for (j = 1; j <= m; j++) if (trim(st[j]) == "include dynlink") dlmode = 1
   # (a plugin test's readonly .ml files are its units, not helper programs)
   if (dlmode) helper = 0
+  # depend mode (queue 478, DECISION 476-1 (a): ocamltest's tools as Arbace's own, judged by the test's own .reference): a test whose
+  # bytecode alternative runs `ocamlc -depend ARGS` (commandline = "-depend ARGS"; ocamlc.byte) in its build environment, its readonly
+  # files and subdirectories copied there, and compares the compiler's output with its own .reference (compiler_reference =
+  # "${test_source_directory}/BASE.reference"; check-ocamlc.byte-output), the native alternative ending it. The run is bin/oi's
+  # depend program (test/ocaml/depend/ocamldep.ml on compiler-libs' units, `bin/oi depend`) with ARGS in that directory: the row's
+  # arguments, its libraries compiler-libs', its environment @depend=1 and @dyncopy=FILE,... (the light AOT level too; not the
+  # compiled level, whose library has no compiler-libs run yet). Anything else in the alternative: the class
+  dpmode = 0
+  if (aot != 2 && hasbuild && !dlmode) for (j = 1; j <= m; j++) if (trim(st[j]) ~ /^commandline *= *"-depend /) dpmode = 1
+  # (only a header whose statements are all of that set, to the native alternative: another keeps the class it had)
+  if (dpmode) for (j = 1; j <= m; j++) {
+    s = trim(st[j]); if (s == "") continue
+    if (s ~ /^setup-ocamlopt\.(byte|opt)-build-env$/) break
+    if (s !~ /^((readonly_files|subdirectories|commandline|compiler_reference) *= *"|(setup-ocamlc\.byte-build-env|ocamlc\.byte|check-ocamlc\.byte-output)$)/) { dpmode = 0; break }
+  }
+  if (dpmode) helper = 0
+  # ocamldoc mode (queue 480, DECISION 478-2 (a): ocamltest's tools as Arbace's own, judged by the test's own .reference): a test whose
+  # header is ocamltest's ocamldoc test alone (`ocamldoc;`, no backend: the custom generators of `plugins = "FILE.ml"`, built by ocamlc
+  # against ocamldoc's interfaces, `flags = "-I ${ocamlsrcdir}/ocamldoc"` their compiler's) runs `ocamldoc -nostdlib -I STDLIB -g
+  # FILE.cmo TEST.ml -o TEST.result` and compares TEST.result with TEST.reference and ocamldoc's output with TEST.ocamldoc.reference
+  # (none: no output). The run is bin/oi's ocamldoc (OCaml 5.5.0's ocamldoc/ on compiler-libs' units, its plugins by oi's Dynlink): the
+  # row's environment @ocamldoc=1 and @plugins=FILE,...; bin/oi's oi_one gives the row TEST.result as its
+  # output, ocamldoc's own output against TEST.ocamldoc.reference its note; no libraries of the header's (the program's units are
+  # ocamldoc's own list, bin/oi's ocamldoc_build). At oi's level alone: at the light AOT level (bin/oi's o2j_dump and translate loop have
+  # the mode) t01 did not finish in 600 s of CPU with 7 GB resident (queue 480; DECISION 480-1), so the AOT levels keep the class
+  odmode = 0; odplugins = ""
+  if (aot == 0) {
+    odmode = 1
+    for (j = 1; j <= m; j++) {
+      s = trim(st[j]); if (s == "") continue
+      if (s == "ocamldoc") { odmode = (odmode == 1) ? 2 : 0; continue }
+      if (s ~ /^plugins *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] !~ /^[A-Za-z0-9_]+\.ml$/) odmode = 0; odplugins = odplugins (odplugins == "" ? "" : ",") hm[q] }
+        continue
+      }
+      if (s ~ /^flags *= *"-I @OCAMLSRCDIR@\/ocamldoc"$/) continue
+      odmode = 0
+    }
+    odmode = (odmode == 2 && odplugins != "")
+  }
+  if (odmode) { helper = 0; env = env " @ocamldoc=1 @plugins=" odplugins; m = 0 }
+  # objinfo mode (queue 511: ocamltest's tools as Arbace's own, judged by the test's own .reference): a test at oi's level whose header
+  # is ocamltest's compile-only test of a unit's .cmt (compile_only = "true"; setup-ocamlc.byte-build-env; all_modules = "FILES";
+  # ocamlc.byte; check-ocamlc.byte-output with flags = "FLAGS", readonly_files and modules copied) followed by `program = "ARGS";
+  # output = "out_objinfo"; ocamlobjinfo; check-program-output`: the shape-index, uid-deps and uids tests. The run is bin/oi's oiobjinfo
+  # (test/ocaml/objinfo/oiobjinfo.ml on compiler-libs' units, bin/lib/oi/tools.bash): `ocamlc -c FLAGS FILES` up to typing (the .cmi,
+  # .cmt and .cmti written by Typemod), then ocamlobjinfo's .cmt printing with ARGS; the row's environment @tool=objinfo and
+  # @dyncopy=FILE,..., its libraries compiler-libs'; the compiler's own output (ocamlc.out) judged beside it by bin/oi's tool_output. At
+  # oi's level alone: the light AOT level does not load compiler-libs' typing units in its limit (queue 480's DECISION 480-1)
+  oimode = 0
+  if (aot == 0 && hasbuild && !dlmode && !dpmode && !odmode) {
+    oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0
+    for (j = 1; j <= m && oimode; j++) {
+      s = trim(st[j]); if (s == "") continue
+      v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
+      if (s ~ /^flags *= *"/) { oiflags = v; continue }
+      if (s ~ /^compile_only *= *"true"$/) { oico = 1; continue }
+      if (s ~ /^(readonly_files|modules) *= *"/) { oicopy = oicopy " " v; continue }
+      if (s ~ /^all_modules *= *"/) { oimods = v; oicopy = oicopy " " v; continue }
+      if (s == "setup-ocamlc.byte-build-env" || s == "check-ocamlc.byte-output" || s == "check-program-output") continue
+      if (s ~ /^output *= *"out_objinfo"$/) continue
+      if (s == "ocamlc.byte") { if (oimods == "" || oiobj) oimode = 0; oicomp = 1; continue }
+      if (s ~ /^program *= *"/) { if (!oicomp) oimode = 0; oiprog = v; continue }
+      if (s == "ocamlobjinfo") { if (oiprog == "") oimode = 0; oiobj = 1; continue }
+      oimode = 0
+    }
+    if (!(oico && oicomp && oiobj)) oimode = 0
+    if (oimode) {
+      c = split(oiflags " " oimods " " oiprog " " oicopy, hm, " ")
+      for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.+-]+$/) oimode = 0
+    }
+  }
+  if (oimode) {
+    c = split(oicopy, hm, " "); oicp = ""; delete oiseen
+    for (q = 1; q <= c; q++) if (!(hm[q] in oiseen)) { oiseen[hm[q]] = 1; oicp = oicp (oicp == "" ? "" : ",") hm[q] }
+    helper = 0; m = 0; incs = " complib"
+    args = trim("-c " oiflags " -nostdlib -I _stdlib " oimods " -objinfo " oiprog); gsub(/ +/, " ", args)
+    env = env " @tool=objinfo @dyncopy=" oicp
+  }
+  psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
+    if (dpmode) {
+      if (s ~ /^(readonly_files|subdirectories) *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] !~ /^[A-Za-z0-9_.]+$/) cls(""); pcopy = pcopy (pcopy == "" ? "" : ",") hm[q] }
+        continue
+      }
+      if (s == "setup-ocamlc.byte-build-env") { if (psetup) break; psetup = 1; continue }
+      if (s ~ /^setup-ocamlopt\.(byte|opt)-build-env$/) { if (pchk) break; cls(s) }
+      if (s ~ /^commandline *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v)
+        if (!psetup || pdone || v !~ /^-depend( |$)/) cls("commandline = " v)
+        sub(/^-depend */, "", v); gsub(/[ \t]+/, " ", v)
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.\/+-]+$/) cls("commandline = -depend " v)
+        pargs = v; continue
+      }
+      if (s == "ocamlc.byte") { if (!psetup || pargs == "" || pdone) cls(s); pdone = 1; continue }
+      if (s ~ /^compiler_reference *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v)
+        if (v != "@TSD@/" hbase ".reference") cls("compiler_reference = " v)
+        continue
+      }
+      if (s == "check-ocamlc.byte-output") { if (!pdone) cls(s); pchk = 1; continue }
+      cls(s)
+    }
     if (dlmode) {
       if (s ~ /^(readonly_files|subdirectories) *= *"/) {
         v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
@@ -210,6 +315,9 @@ END {
           if (f == "-inline") { q++; continue }
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
+          # -runtime-variant=i (queue 516, DECISION 511-2 (a)): the instrumented runtime, whose allocation buckets oi's ring emits
+          # (ext_runtime_events.go's reAlloc) at oi's level; the AOT levels keep the class
+          if (f == "-runtime-variant=i" && aot == 0) continue
           if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps" || f == "-safer-matching") { flags = flags " " f; continue }
           cls("flags " val)
         }
@@ -281,6 +389,8 @@ END {
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
+    # instrumented-runtime (queue 516): the pinned host has libcamlruni.a, so ocamltest runs the test; oi's level takes it
+    if (s == "instrumented-runtime" && aot == 0) continue
     if (s == "bytecode") sawbyte = 1
     if (s == "native") sawnative = 1
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
@@ -289,6 +399,10 @@ END {
   if (dlmode) {
     if (!drun) cls("")
     env = env " @dyn=" dsteps " @dynmain=" dmain (dcopy == "" ? "" : " @dyncopy=" dcopy)
+  }
+  if (dpmode) {
+    if (!pchk) cls("")
+    args = pargs; incs = " complib"; env = env " @depend=1" (pcopy == "" ? "" : " @dyncopy=" pcopy)
   }
   if (helper) {
     if (!hmain || nruns == 0) cls("")
@@ -302,6 +416,11 @@ END {
   if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
   hook = FILENAME; sub(/\.mll?$/, ".check-program-output", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
+  # ocamltest exports its variables to the program's environment (environments.ml's to_system_env; queue 515): a program that reads
+  # ocamlsrcdir or ocamlrun (warnings/mnemonics, which runs `${ocamlrun} ${ocamlsrcdir}/ocamlc -warn-help`) gets ocamlsrcdir as the
+  # pinned tarball's root and ocamlrun as bin/lib/oi/ocamlrun (Arbace's ocamlc -warn-help on oi), at every level
+  if (index(text, "Sys.getenv \"ocamlsrcdir\"")) env = env " ocamlsrcdir=@OCAMLSRCDIR@"
+  if (index(text, "Sys.getenv \"ocamlrun\"")) env = env " ocamlrun=@OCAMLSRCDIR@/../../../bin/lib/oi/ocamlrun"
   if (args ~ /\$VAR/) { cls("arguments = " args) }
   for (q = 1; q <= nexp; q++) { ev = expand(setv[expname[q]], 0); gsub(/[ \t]/, "", ev); sub("@@SET" q "@@", expname[q] "=" ev, env) }
   # the arguments as ocamltest gives them (OC210 (a)): expanded, then split into words (actions_helpers.ml's String.words)

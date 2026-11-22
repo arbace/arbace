@@ -1361,10 +1361,28 @@
     (if (or (nil? r) (:error r))
       {:key k :refused (str "the passes: " (or (:error r) (str "no body after " last-pass)))}
       (try (binding [*export-closures* (root-closures-of b)]
+            (let [;; C6-4: each Assert's span (build's :assert-span, which the passes keep the terminator but not its metadata
+                  ;; of: build-run's aspans), by its condition, expected value and message, put back on the passes' terminator as
+                  ;; a call's span, which externalize makes its caller location (:call-loc), the panic's Location
+                  aspans (into {} (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)) (:assert-span (meta t)))]
+                                    [(vec (take 3 (rest t))) (:assert-span (meta t))]))
+                  r (if (empty? aspans) r
+                        (update r :blocks (fn [bs] (mapv (fn [blk] (let [t (:term blk) sp (when (and (seq? t) (= 'assert (first t))) (get aspans (vec (take 3 (rest t)))))]
+                                                                     (if sp (assoc blk :term (vary-meta t assoc :call-span sp)) blk)))
+                                                         bs))))]
             (cond-> {:key k :def (def-path-string (:id (:def b))) :equal equal? :pass last-pass
             :attrs ((requiring-resolve 'arbace.rust.front.mono/local-attrs) (:id (:def b)))
             ;; C6: the attributes of the functions nested in it (handle_alloc_error's `#[inline] fn rt_error`), which its body
             ;; calls and no entry of their own carries (build-run's lib-unit takes them)
+            ;; C6-4: the attributes of the crate's own functions the body calls (a copy's #[inline] decides its symbol's
+            ;; instantiating crate: std's `Components::len_before_body`, `Path::has_root`), which no entry of their own carries
+            :callee-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs)]
+                            (into {} (for [x (tree-seq coll? seq [(:blocks r) (vals pbs)])
+                                           :let [t (when (seq? x) (:tc (meta x)))]
+                                           :when (and (vector? t) (= :fndef (first t)) (number? (second t)))
+                                           :let [p (try (def-path-string (second t)) (catch Throwable _ nil))]
+                                           :when p]
+                                       [p (try (la (second t)) (catch Throwable _ []))])))
             :nested-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs) pre (str (def-path-string (:id (:def b))) "::")]
                             (into {} (for [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))
                                            :let [p (try (def-path-string (:id d)) (catch Throwable _ nil))]
@@ -1375,7 +1393,7 @@
              ;; queue 464 (462-3 (a) 2): a closure's own body, with its upvars' types and kind (the run lays its type out
              ;; from the type's data; these are the body's own, for a check)
              (:upvar-tys b) (assoc :upvar-tys (mapv ext-ty (:upvar-tys b)))
-             k (as-> e (if-let [cs (not-empty (export-consts [r (vals pbs)]))] (assoc e :consts cs) e))))
+             k (as-> e (if-let [cs (not-empty (export-consts [r (vals pbs)]))] (assoc e :consts cs) e)))))
            (catch Throwable e {:key k :refused (str (or (.getMessage e) e))})))))
 
 ;; ---------------------------------------------------------------------------------------------

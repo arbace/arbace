@@ -153,13 +153,76 @@
         (recur (mapv (fn [b] (subst (block (label b) (remove #(identical? % i) (insts b))) {r v})) bs))
         bs))))
 
+(defn- const-val? [v]
+  (or (number? v) (contains? #{'true 'false 'null 'poison 'undef 'zeroinitializer} v)
+      (and (symbol? v) (= "g" (namespace v)))
+      (and (seq? v) (contains? #{'struct 'inttoptr 'fp 'getelementptr 'ptrtoint} (first v)))))
+
+(defn- const-struct [elts]
+  (cond (every? #(contains? #{0 'false 'null 'zeroinitializer} (second %)) elts) 'zeroinitializer
+        (every? #(= 'poison (second %)) elts) 'poison
+        :else (apply list 'struct elts)))
+
+(defn simplify-aggregates
+  "InstSimplify's simplifyInsertValueInst and simplifyExtractValueInst (llvm/lib/Analysis/InstructionSimplify.cpp) over the
+  clone's instructions in order, as CloneAndPruneIntoFromInst's last loop runs simplifyInstruction on each (its uses replaced, the
+  instruction then dead and erased): insertvalue of constants a constant struct, of poison its aggregate, `insertvalue poison,
+  (extractvalue y, n), n` and `insertvalue y, (extractvalue y, n), n` y; extractvalue of a constant its element, through a chain
+  of insertvalues the inserted value at its index. OUTER: the caller's definitions (result -> op), which the clone's operands may
+  name (an inlined pair rebuilt from the caller's extractvalues is the caller's pair). [blocks substitution]"
+  [blocks outer]
+  (let [defs (volatile! (into (or outer {}) (for [b blocks i (insts b) :when (res-of i)] [(res-of i) (op-of i)])))
+        sub (volatile! {})
+        rv (fn rv [x] (if-let [y (get @sub x)] (rv y) x))
+        def-of (fn [x] (when (symbol? x) (get @defs x)))
+        simplify
+        (fn [o]
+          (case (first o)
+            insertvalue
+            (let [[_ [ty agg] [vty v] & idx] o idx (vec idx)]
+              (cond
+                (and (const-val? agg) (const-val? v) (seq? ty) (= 'struct (first ty)) (= 1 (count idx)))
+                (let [ets (vec (rest ty)) n (first idx)
+                      base (cond (= 'poison agg) (mapv (fn [t] [t 'poison]) ets)
+                                 (and (seq? agg) (= 'struct (first agg))) (vec (rest agg))
+                                 :else nil)]
+                  (when (and base (< n (count base))) (const-struct (assoc base n [(nth ets n) v]))))
+                (= 'poison v) agg
+                :else (let [e (def-of v)]
+                        (when (and (seq? e) (= 'extractvalue (first e)))
+                          (let [[_ [ety y] & eidx] e]
+                            (when (and (= ety ty) (= (vec eidx) idx))
+                              (cond (= 'poison agg) y
+                                    (= agg y) y
+                                    :else nil)))))))
+            extractvalue
+            (let [[_ [ty agg] & idx] o idx (vec idx)]
+              (cond
+                (and (seq? agg) (= 'struct (first agg)) (= 1 (count idx))) (second (nth (vec (rest agg)) (first idx) nil))
+                (= 'poison agg) 'poison
+                :else (loop [x agg seen #{}]
+                        (let [e (def-of x)]
+                          (when (and (seq? e) (= 'insertvalue (first e)) (not (seen x)))
+                            (let [[_ [_ a] [_ v] & iidx] e iidx (vec iidx) m (min (count iidx) (count idx))]
+                              (if (= (subvec iidx 0 m) (subvec idx 0 m))
+                                (when (= (count idx) (count iidx)) v)
+                                (recur a (conj seen x)))))))))
+            nil))]
+    (doseq [b blocks i (insts b) :let [r (res-of i)] :when (and r (#{'insertvalue 'extractvalue} (opname i)))]
+      (let [o (subst (op-of i) (into {} (for [[k _] @sub] [k (rv k)])))]
+        (vswap! defs assoc r o)
+        (when-let [v (simplify o)]
+          (vswap! sub assoc r v))))
+    (let [m (into {} (for [[k _] @sub] [k (rv k)]))]
+      [(mapv (fn [b] (subst (block (label b) (remove #(contains? m (res-of %)) (insts b))) m)) blocks) m])))
+
 (defn clone-prune
   "The callee's blocks (BODY) cloned with VMAP (its parameters -> the call's operands), every other name of its own FRESH:
   [blocks vmap] after CloneBlock's folding (an instruction of constant operands folded away, a branch or a switch on a constant
   cloned as a branch to its one successor), the blocks reached alone in the callee's order, the phis pruned to their
   predecessors (none: poison), ConstantFoldTerminator's one-target branch, dead blocks deleted, and each unconditional branch to
   a block of one predecessor merged"
-  [body vmap fresh]
+  [body vmap fresh & [outer]]
   (let [locals (distinct (concat (map label body) (keep res-of (mapcat insts body))))
         vm (volatile! (merge (into {} (for [x locals] [x (fresh x)])) vmap))
         by (into {} (map (juxt label identity) body))
@@ -222,6 +285,10 @@
           blocks (mapv #(subst % (into {} (filter (fn [[_ v]] (= 'poison v)) @vm))) blocks)
           ;; simplifyInstruction over the clone, its phi rule: a phi whose incoming values are one value (itself aside) is it
           blocks (simplify-phis blocks)
+          ;; C6-4: and its aggregate rules (an inlined `MaybeUninit::slice_assume_init_ref`'s pair rebuilt from the caller's is
+          ;; the caller's pair: `extractvalue %4, 0` again where ours rebuilt it with insertvalue)
+          [blocks agg-sub] (simplify-aggregates blocks outer)
+          _ (vswap! vm (fn [m] (into {} (for [[k v] m] [k (get agg-sub v v)]))))
           ;; ConstantFoldTerminator: a conditional branch of one target unconditional
           blocks (mapv (fn [b] (let [t (peek (insts b)) o (op-of t)]
                                  (if (and (= 'br (first o)) (= 5 (count o)) (= (nth o 3) (nth o 4)))
@@ -355,7 +422,7 @@
         args (first (filter vector? (drop 2 co)))
         vmap (into {} (map (fn [p a] [(peek p) (peek a)]) params args))
         fresh (fn [x] (symbol (str (name x) ".i" k)))
-        [blocks _] (clone-prune cbody vmap fresh)
+        [blocks _] (clone-prune cbody vmap fresh (into {} (for [cb caller-blocks i (insts cb) :when (res-of i)] [(res-of i) (op-of i)])))
         ;; the static allocas of the cloned entry block, used, to the caller's entry block's start
         entry (first blocks)
         allocas (filterv #(and (static-alloca? %) (uses? blocks (res-of %))) (insts entry))

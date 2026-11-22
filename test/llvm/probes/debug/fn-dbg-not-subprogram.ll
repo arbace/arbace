@@ -1,3 +1,5 @@
+; verdict: debug function !dbg attachment must be a subprogram
+; rule: llvm/lib/IR/Verifier.cpp:3243 Debug Info Version 3 makes UpgradeDebugInfo verify. The function definition's !dbg is !1, a DIFile, and the attachment loop in visitFunction (the first DI check reached) fails this CheckDI. The debug info is stripped and the rest is valid.
 ; debug records and DI metadata, written by hand
 source_filename = "dbg.c"
 target triple = "x86_64-alpine-linux-musl"

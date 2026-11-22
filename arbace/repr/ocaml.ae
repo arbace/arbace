@@ -326,13 +326,13 @@
                ";; print cell. Made by " (if (= reader "helper") "the helper's reader (--reader helper)" "the native reader, the print read again by it")
                ". Read with the Clojure reader.\n")} k))
 
-(declare own-header)
+(declare own-header build-header)
 (defn- write-results [^String f k reader id rows]
   (let [pre (str id "/")
         old (if (.exists (File. f)) (read-string (slurp f)) [])
         kept (remove #(str/starts-with? (str (first %)) pre) old)
         all (sort-by first (concat kept rows))]
-    (spit-mk f (str (results-header k reader) (when (= k :read) own-header) "[\n" (apply str (for [r all] (str " " (pr-str (vec r)) "\n"))) "]\n"))))
+    (spit-mk f (str (results-header k reader) (when (= k :read) (str own-header build-header)) "[\n" (apply str (for [r all] (str " " (pr-str (vec r)) "\n"))) "]\n"))))
 
 ;; OC213 (a) (the user, 2026-11-10; doc/ocaml/OCAML-SURVEY.md, "As built: OC213, OC214, OC209, OC210"): a file of the testsuite the
 ;; reader rejects is judged by its own test (arbace.repr.ocaml.native's own-read: ocamlc's .compilers.reference, the expect tool's
@@ -342,21 +342,32 @@
 (def ^:private own-header
   (str ";; OC213 (a) (the user, 2026-11-10): a file of the testsuite the reader rejects passes by its own test, REASON \"own verdict: HOW\"\n"
        ";; (ocamlc's .compilers.reference, the expect tool's or the toplevel's read: bin/repr-ocaml own-read), else stays a rejection.\n"))
+(def ^:private build-header
+  (str ";; 2026-11-22 (\"As built: the build's own reads\"): a file of the opam set or the stdlib the reader rejects passes as its package's\n"
+       ";; build reads it, REASON \"own verdict: HOW\" (an ocaml script's or Toploop.use_file's read, mucppo's output, sync_stdlib_docs's\n"
+       ";; expansion: arbace.repr.ocaml.prep's own-build), else stays a rejection.\n"))
 
-(defn- own-row [root id r]
-  (let [own-read (requiring-resolve 'arbace.repr.ocaml.native/own-read)
+(defn- own-row
+  "A rejected file's row by its own verdict, or nil: the testsuite's by its own test (OC213 (a), arbace.repr.ocaml.native's
+  own-read), the other corpora's as their package's build reads it (arbace.repr.ocaml.prep's own-build)"
+  [root id r]
+  (let [own-read (if (= id "testsuite")
+                   (requiring-resolve 'arbace.repr.ocaml.native/own-read)
+                   (let [ob (requiring-resolve 'arbace.repr.ocaml.prep/own-build)] (fn [path _] (ob path))))
         [v how] (try (own-read (str root "/" r) r) (catch Throwable t [:fail (str "failure: " (.getMessage t))]))]
     (when (= :pass v) [(str id "/" r) "pass" (str own-prefix how)])))
 
 (defn- own-controls-bad
-  "The controls that do not fail (each printed), or nil; a missing controls file is no control: one fails"
-  [root controls-file]
+  "The controls that do not fail (each printed), or nil; a missing controls file is no control: one fails. ID the corpus:
+  the testsuite's controls (own-read's), else the build's (own-build's)"
+  [id root controls-file]
   (if-not (and controls-file (.exists (File. ^String controls-file)))
     (do (println "OWN CONTROLS: no controls file" (pr-str controls-file)) [:none])
-    (let [rows ((requiring-resolve 'arbace.repr.ocaml.native/own-read-controls) root controls-file)]
+    (let [rows ((requiring-resolve (if (= id "testsuite") 'arbace.repr.ocaml.native/own-read-controls
+                                       'arbace.repr.ocaml.prep/own-build-controls)) root controls-file)]
       (doseq [[s r v how] rows]
-        (println (if (= :fail v) (str "control " s " judged by " r "'s test: fails as it must (" how ")")
-                     (str "CONTROL PASSES " s " judged by " r "'s test (" how ")"))))
+        (println (if (= :fail v) (str "control " s " judged by " r "'s " (if (= id "testsuite") "test" "build") ": fails as it must (" how ")")
+                     (str "CONTROL PASSES " s " judged by " r "'s " (if (= id "testsuite") "test" "build") " (" how ")"))))
       (seq (remove #(= :fail (nth % 2)) rows)))))
 
 (defn- do-own-results
@@ -369,17 +380,20 @@
         text (slurp f)
         header (apply str (map #(str % "\n") (take-while #(str/starts-with? % ";;") (str/split-lines text))))
         header (if (str/includes? header "OC213 (a)") header (str header own-header))
+        header (if (str/includes? header "the build's own reads") header (str header build-header))
         rows (read-string text)
-        ctl-bad (own-controls-bad root (get opts "--controls"))
+        judged? (fn [[rid res why]] (and (str/starts-with? rid pre)
+                                         (or (= res "reject") (and (= res "pass") (str/starts-with? (str why) own-prefix)))))
+        ;; a corpus with no rejection and no own verdict has nothing to judge: its controls not run
+        ctl-bad (when (some judged? rows) (own-controls-bad id (or (get opts "--controls-root") root) (get opts "--controls")))
         judged (vec (for [[rid res why :as row] rows]
-                      (if (and (str/starts-with? rid pre)
-                               (or (= res "reject") (and (= res "pass") (str/starts-with? (str why) own-prefix))))
+                      (if (judged? row)
                         (let [r (subs rid (count pre))]
                           (or (own-row root id r)
                               (if (= res "reject") row [rid "reject" (str "own verdict lost: " why)])))
                         row)))
         changed (remove nil? (map (fn [a b] (when (not= a b) [a b])) rows judged))
-        n-own (count (filter #(and (= "pass" (second %)) (str/starts-with? (str (nth % 2)) own-prefix)) judged))]
+        n-own (count (filter #(and (str/starts-with? (first %) pre) (= "pass" (second %)) (str/starts-with? (str (nth % 2)) own-prefix)) judged))]
     (doseq [[a b] changed] (println (if (get opts "--check") "WOULD CHANGE" "CHANGED") (first a) (pr-str (second a)) "->" (pr-str (second b)) (pr-str (nth b 2))))
     (println (str "own-results " id ": " n-own " passes by their own test, "
                   (count (filter #(and (str/starts-with? (first %) pre) (= "reject" (second %))) judged)) " rejections left, "
@@ -406,7 +420,7 @@
                       (or (when own-root (own-row own-root id r))
                           [(str id "/" r) "reject" (one-line (str (name (:class v)) " " (name (:kind v)) ": " (:message v)))])
                       [(str id "/" r) "pass" ""]))
-        ctl-bad (when own-root (own-controls-bad own-root (get opts "--own-controls")))
+        ctl-bad (when own-root (own-controls-bad id (or (get opts "--own-controls-root") own-root) (get opts "--own-controls")))
         print-rows (for [r names :when (not (get (:rejected c) r))]
                      (let [d (get (:differ c) r) fr (get (:rejected fu) r) ff (get (:failures fu) r)]
                        (cond
@@ -436,6 +450,6 @@
       "full" (do-full (pa #{"--src" "--parse" "--layout" "--out" "--forms" "--known" "--rt-known" "--report"}))
       "dumps" (do-dumps (pa #{"--mode" "--root" "--again" "--known" "--times"}))
       "compare" (do-compare (pa #{"--orig" "--cand" "--printed" "--known" "--report"}))
-      "results" (do-results (pa #{"--corpus" "--list" "--compare" "--full" "--read" "--print" "--reader" "--own-root" "--own-controls"}))
-      "own-results" (do-own-results (pa #{"--read" "--corpus" "--root" "--controls"}))
+      "results" (do-results (pa #{"--corpus" "--list" "--compare" "--full" "--read" "--print" "--reader" "--own-root" "--own-controls" "--own-controls-root"}))
+      "own-results" (do-own-results (pa #{"--read" "--corpus" "--root" "--controls" "--controls-root"}))
       (do (println "usage: -m arbace.repr.ocaml read|print|compare ...") (System/exit 2)))))
