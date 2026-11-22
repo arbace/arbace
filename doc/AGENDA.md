@@ -42,7 +42,7 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
   two steps). The essential gate at `22b4c6542` failed cpp-essential (two Toks, below) and suite-go (`--run-one`'s JDK check
   under load), both fixed at `88b8e7f1a`, which passed and became main.
 - **The crops' scores** (`bin/crops-score` on next; completeness, without by design, maturity, independence): Clojure 99.1
-  99.6 100 100, Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
+  99.6 100 100 (99.7 99.9 100 100 on `clj-rows-1122`), Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
   100 100, Scheme 99.9 100 100 100, Haskell 97.3 99.1 100 78.4, Rust 100 100 100 80.0, LLVM IR 99.3 100 100 99.0, Python 0 0
   83.3 98.2 (eval and AOT wait for its records, lane 4), x86-64 assembly 99.4 99.9 100 100, arm64 assembly 99.9 99.9 100 99.9,
   WebAssembly 100 100 100 100. Below 90% complete: Java and OCaml (and Python, unrecorded).
@@ -352,9 +352,11 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   fixed in j2g, unbuilt); `h-java-aot-triage` (`1c4357d87`: the 536 compiled deferred grouped, AT1-AT10; its merge needs `bin/j2g-edge
   update`). Round 51: System.Logger (a) per-class derivations; JOP1-JOP8 (a), JOP9 (a), JOP10 (c), JOP11 (a); RP1-RP3 (a);
   finalize in Object's table (a); AT1-AT10 approved; Ghidra fix 1 (a), GH13-GH22 (a).
-- **Clojure** (99 99 100 100). Landed: `h-clojure-go` (CDR2's and CDR4 (b)'s rows recorded, eval deferred 50 -> 45; gen-class's
-  `:exposes-methods` takes the world's protected methods) and its fix `h-prepare-fail` (no fn defined after genclass.ae in
-  arbace.core). Held: genclass's record after a build at the new gate_key, then the AOT suite with test-dot, test-bean, genclass.
+- **Clojure** (99.7 99.9 100 100, from 99.1; `clj-rows-1122`, 2026-11-22). Fns serialize (FnSer), proxies refuse
+  serialization, `:load-ns` deftypes compiled (CLJ-1208), CDR1's locales and SecurityManager in jdk/; recorded from one build
+  (`3dc7bacc2ceb`): eval 21,119 / 13 / 2, AOT 831 / 5 / 2 (gen-class, CDR2, CDR4 (b), clojure-xml through `:jdk-extra`). Left:
+  `:fn-code-type` (2 AOT assertions, c2j fix `6fdb262a0` waits for the next build), `:xml-stream` (EntityDeclarationImpl in the
+  jdk-extra list); decisions CDR12-CDR16 (doc/CLOJURE-DESIGN-REVIEW.md).
 - **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
   and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
   importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),
