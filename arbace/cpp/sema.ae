@@ -6119,7 +6119,11 @@
       (cond
         (abi/arr? tu)
         (let [items (:items (brace-elide tu src))
-              el (:of tu)]
+              el (:of tu)
+              ;; (cpp-diag-b, 2026-11-22: C++98's [dcl.init.aggr]/? takes a scalar element from an expression: braces around one are
+              ;; GCC's "braces around scalar initializer"; C++11's list-initialization takes them, [dcl.init.list]/3.9)
+              _ (when (and (checking?) (< (long *cxx-year*) 11) (abi/scalar? (abi/unq el)) (some #(= :init-list (:op %)) items))
+                  (fail :scalar-braces "braces around scalar initializer"))]
           (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar :char8 :wchar :char16 :char32} (abi/bn (abi/unq el))))
             {:i :string :e (first items) :n (:n tu)}
             ;; (the elements not written value-initialized: analyzed only when there are some, [dcl.init.aggr]/5)
@@ -6148,7 +6152,12 @@
                                               (cond-> (init-for (:ty s) (nth items i) ctx :copy)
                                                 ;; (a union's: the member its designator names is not the one taken here)
                                                 (not (or (:paren src) (:union c))) (narrow-check! (:ty s) (nth items i)))
-                                              (if-let [d (:init (:field s))]
+                                              (if-let [d (or (:init (:field s))
+                                                             ;; (cpp-diag-b, 2026-11-22: [dcl.init.aggr]/5.2, a reference member neither
+                                                             ;; explicitly initialized nor with a default member initializer: GCC's
+                                                             ;; "uninitialized reference member")
+                                                             (when (and (checking?) (abi/ref? (:ty s)) (not (:union c)))
+                                                               (fail :uninit-ref "uninitialized reference member")))]
                                                 ;; (its `this` the aggregate being initialized, [class.mem.general]/11; clang's
                                                 ;; CXXDefaultInitExprScope: :agg-this, the code generator binds it to the object)
                                                 (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
@@ -6161,11 +6170,21 @@
                 0 {:i :zero}
                 ;; ([dcl.init.list]/3.9: from the element, by direct-initialization for direct-list-initialization;
                 ;; CP280 (a): an explicit conversion function is then a candidate, [over.match.conv]/1.1)
-                1 (narrow-check! (init-for t (first (:items src)) ctx (if (= style :list) :direct :copy)) t (first (:items src)))
+                1 (do ;; (cpp-diag-b, 2026-11-22: [dcl.init.list]/3.9, a scalar from a list's single element, an expression: a
+                      ;; braced list there is GCC's "braces around scalar initializer")
+                      (when (and (checking?) (= :init-list (:op (first (:items src)))) (abi/scalar? tu))
+                        (fail :scalar-braces "braces around scalar initializer"))
+                      (narrow-check! (init-for t (first (:items src)) ctx (if (= style :list) :direct :copy)) t (first (:items src))))
                 (fail :init "several values for a scalar")))
       (abi/class? tu) (class-init tu [src] ctx style)
       (abi/arr? tu)
-      (if (= :str (:op src)) {:i :string :e src :n (:n tu)} (fail :init "an array from an expression"))
+      (if (= :str (:op src)) {:i :string :e src :n (:n tu)}
+          (do ;; (cpp-diag-b, 2026-11-22: [dcl.init.general]/16.5, an array is initialized from a braced list or a string literal:
+              ;; from an expression of no array type GCC's "array must be initialized with a brace-enclosed initializer"; an array's
+              ;; copy, the implicit members' and captures', left to the code generator's refusal)
+              (when (and (checking?) (not (abi/arr? (abi/unq (:ty src)))) (not (vector? src)) (some? (:ty src)))
+                (fail :array-init "array must be initialized with a brace-enclosed initializer"))
+              (fail :init "an array from an expression")))
       :else
       (let [e (rv src)
             ft (abi/unq (:ty e))]
