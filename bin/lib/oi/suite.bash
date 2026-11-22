@@ -37,8 +37,9 @@ cmd_suite_corpus() {
       units = units (units == "" ? "" : " ") $1 ".ml"
       printf "%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $3, $4, $5, $6, "'"$TESTS"'", units
     }' "$OI_DIR/corpus.tsv" "$S/actions.tsv" > "$out.ts"
-  # the packages' programs (test/ocaml/opam-programs.tsv: PKG ID FLAGS ARGS UNITS [ENV]; ENV since 2026-11-20, judge-rest: the
-  # environment a reviewed golden file's output depends on, test/ocaml/opam/golden.edn's :env), a package whose sources are not fetched out
+  # the packages' programs (test/ocaml/opam-programs.tsv: PKG ID FLAGS ARGS UNITS [ENV [INCS]]; ENV since 2026-11-20, judge-rest: the
+  # environment a reviewed golden file's output depends on, test/ocaml/opam/golden.edn's :env; INCS since queue 531: the libraries of
+  # OCaml's distribution the program links, unix, as a testsuite row's), a package whose sources are not fetched out
   : > "$out.opam"
   # every package of the set extracted, else the 33 opam rows would leave the corpus unseen (review 008's finding 4)
   local pkg
@@ -46,7 +47,7 @@ cmd_suite_corpus() {
     [ -f "$OPAM/$pkg/.extracted" ] || die "suite corpus: the opam package $pkg is not fetched out (bin/repr-ocaml corpus fetch)"
   done
   if [ -d "$OPAM" ]; then
-    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $6, "'"$OPAM"'/" $1, $5 }
+    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $7, $4, $6, "'"$OPAM"'/" $1, $5 }
       NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
   fi
   cat "$out.ts" "$out.opam" | LC_ALL=C sort > "$out"; rm -f "$out.ts" "$out.opam"
@@ -67,7 +68,49 @@ suite_stage() {
     local ro f; ro=$(sed -n 's/.*readonly_files *= *"\([^"]*\)".*/\1/p' "$base/$id.ml" | head -1)
     for f in $ro; do case $f in *.ml) [ -f "$base/$(dirname "$id")/$f" ] && cp "$base/$(dirname "$id")/$f" "$d/" ;; esac; done ;; esac
   for u in $units; do
-    case $u in =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;; *) if [ -f "$base/$u" ]; then cp "$base/$u" "$d/"; else suite_gen "$base/$u" "$d"; fi ;; esac
+    case $u in
+      =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
+      @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
+      @*) suite_wrap_one "$base" "$u" "$d" ;;
+      *) if [ -f "$base/$u" ]; then cp "$base/$u" "$d/"; else suite_gen "$base/$u" "$d"; fi ;;
+    esac
+  done
+}
+
+# A dune-wrapped library's units (queue 531: the opam set's test libraries, alcotest's and re's), as dune compiles them: a module M of
+# library LIB is the unit Lib__M (file lib__M.ml, its .mli likewise), the library's main module (a module named LIB) keeps its name,
+# each opens the alias module Lib__ (dune's -open Lib__, here `open! Lib__ ` on the file's first line, so its lines keep their numbers),
+# and Lib__ (dune's lib__.ml-gen) is `module M = Lib__M` for every other module of LIB in the row, compiled with -no-alias-deps as
+# dune compiles every module (the row's FLAGS). The unit words:
+#   @LIB/PATH         a module of LIB, PATH relative to BASE as a plain unit's
+#   @LIB/PATH>NAME    the same, the module named NAME (dune's copy rules, alcotest's test_iarray.54.ml as test_iarray.ml)
+#   @LIB!PATH         LIB's main module
+#   @LIB=             the alias module Lib__, before LIB's modules
+suite_cap() { echo "$(echo "${1:0:1}" | tr a-z A-Z)${1:1}"; }
+suite_unit_file() { # UNIT -> the staged file's name
+  local u=$1 p n ext
+  case $u in
+    =*) basename "${u#=}" ;;
+    @*=) echo "${u:1:${#u}-2}__.ml" ;;
+    @*) [[ $u =~ ^@([a-z0-9_]+)([/!])(.*)$ ]] || { echo "$u"; return; }
+        p=${BASH_REMATCH[3]}
+        if [ "${BASH_REMATCH[2]}" = '!' ]; then basename "$p"; return; fi
+        case $p in *\>*) n=${p##*>}; ext=${p%>*}; ext=${ext##*.} ;; *) n=$(basename "${p%.*}"); ext=${p##*.} ;; esac
+        echo "${BASH_REMATCH[1]}__$(suite_cap "$n").$ext" ;;
+    *) basename "$u" ;;
+  esac
+}
+suite_wrap_one() { # BASE UNIT DIR: a wrapped unit staged with its open
+  local base=$1 u=$2 d=$3 lib p
+  [[ $u =~ ^@([a-z0-9_]+)([/!])(.*)$ ]] || return 1
+  lib=${BASH_REMATCH[1]}; p=${BASH_REMATCH[3]}; p=${p%>*}
+  { printf 'open! %s__ ' "$(suite_cap "$lib")"; cat "$base/$p"; } > "$d/$(suite_unit_file "$u")"
+}
+suite_alias() { # LIB UNITS: the alias module's text
+  local lib=$1 u f seen=" "
+  for u in $2; do
+    case $u in @"$lib"/*) f=$(suite_unit_file "$u"); f=${f%.*}; f=${f#"${lib}__"}
+      case $seen in *" $f "*) ;; *) seen="$seen$f "; printf 'module %s = %s__%s\n' "$f" "$(suite_cap "$lib")" "$f" ;; esac ;; esac
   done
 }
 
@@ -89,7 +132,7 @@ suite_gen() {
 }
 
 suite_names() { # UNITS -> file basenames
-  local u; for u in $1; do basename "${u#=}"; done
+  local u; for u in $1; do suite_unit_file "$u"; done
 }
 
 # suite_ref_one ID FLAGS INCS ARGS ENV BASE UNITS: ocamlc's and ocamlopt's runs, the line of ref.tsv
@@ -107,7 +150,12 @@ suite_ref_one() {
     # each compiler's program built and run in a copy of the staged directory (a run's files are not the other's, OT9's fixes)
     local r=$d/run-$ext
     extra=$(inc_ref $c "$incs" "$r")
-    (cd "$r" && $c -w -a $flags $extra $names -o "prog.$ext") > "$d/$c.log" 2>&1 || cst=$?
+    # the program's C stubs (queue 531: ENV's @cstubs=FILES, relative to BASE), compiled and linked by the compiler as dune's
+    # foreign_stubs are (ocamlc's -custom runtime)
+    local kv cfiles="" cf
+    for kv in $env; do case $kv in @cstubs=*) for cf in $(echo "${kv#@cstubs=}" | tr ',' ' '); do cfiles="$cfiles $base/$cf"; done ;; esac; done
+    [ -n "$cfiles" ] && [ $c = ocamlc ] && extra="$extra -custom"
+    (cd "$r" && $c -w -a $flags $extra $names $cfiles -o "prog.$ext") > "$d/$c.log" 2>&1 || cst=$?
     if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
     (cd "$r" && run_redirected "$env" "$d/$ext.out" timeout "$TIMEOUT" "./prog.$ext" $args) || st=$?
     line="$line	$st	$(sha256sum < "$d/$ext.out" | cut -d' ' -f1)	$(wc -c < "$d/$ext.out")"
@@ -120,7 +168,7 @@ suite_ref_one() {
 
 cmd_suite_record_ref() {
   opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_suite_corpus > "$S/corpus.log"
-  export -f suite_ref_one suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT root
+  export -f suite_ref_one suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT root
   local out=$S/ref.tsv
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_ref_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
@@ -141,7 +189,7 @@ suite_dump() {
   : > "$d/units.list"
   if [ "${NATIVE:-0}" = 1 ]; then suite_dump_native "$d" "$flags" "$incs" "$units"; return; fi
   for u in $units; do
-    n=$(basename "${u#=}"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
+    n=$(suite_unit_file "$u"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
     if ! (cd "$d" && ocamlc -w -a $flags $I -c "$n") > "$d/$n.log" 2>&1; then
       echo "ocamlc -c $n: $(head -c 300 "$d/$n.log" | tr '\n\t' '  ')" > "$d/error"; return
     fi
@@ -158,13 +206,13 @@ suite_dump() {
 suite_dump_native() {
   local d=$1 flags=$2 incs=$3 units=$4 u n b U nf="" f inc
   for f in $flags; do
-    case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;;
+    case $f in -nolabels) nf="$nf --nolabels" ;; -no-alias-deps) nf="$nf --no-alias-deps" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;;
       *) echo "typer: flag $f not modelled" > "$d/error"; return ;; esac
   done
   # the program's libraries (unix, threads, str, compiler-libs, testing) after its own directory, by their sources' interfaces
   inc=$d; [ -n "$incs" ] && inc="$d:$(inc_dirs "$incs")"
   for u in $units; do
-    n=$(basename "${u#=}"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
+    n=$(suite_unit_file "$u"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
     case $n in *.mli) continue ;; esac
     local extra=""
     # OC184 (a): a unit without an .mli of its own leaves its typed signature as data, a native .cmi (NAME.cmi.ae, read back by the
@@ -188,6 +236,16 @@ suite_oi_one() {
   local tl; tl=$(inc_units "$incs" $(cat "$d/units.list") | tr '\n' ' ')
   local miss; miss=$(lib_missing $tl)
   if [ -n "$miss" ]; then printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$miss"; return; fi
+  # the program's C stubs (queue 531: @cstubs=FILES in the row's ENV, comma-separated, relative to BASE): their node program built by
+  # ci as a testsuite program's are (cstubs_nodes), loaded by oi beside the program
+  local cs="" kv nodes
+  for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
+  if [ -n "$cs" ]; then
+    if ! nodes=$(cstubs_nodes "$base" "$cs" 2> "$d/cnodes.err"); then
+      printf '%s\t-\t-\t0\t0\tcstubs: %s\n' "$id" "$(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')"; return
+    fi
+    env="$env OI_CSTUBS=$nodes"
+  fi
   local st=0 t0 t1 note=""
   t0=$(date +%s.%N); times > "$d/cpu0"
   (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args) || st=$?
@@ -230,7 +288,7 @@ cmd_suite_check() {
   if [ "$AOT" = 1 ] && [ "$LEVEL" = compiled ]; then cmd_suite_check_compiled; return; fi
   if [ "$AOT" = 1 ]; then cmd_suite_check_aot; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; suite_native_env
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' "$OI_SELECTED" | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
@@ -253,7 +311,7 @@ cmd_suite_check_compiled() {
   # the native path as the light level's (TY24 (a), OC202): suite_dump types the units by Arbace's typer, the record
   # check-suite-aot-compiled-native.edn (suite_results)
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib; suite_native_env
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   C2=$S/compiled; rm -rf "$C2"; mkdir -p "$C2"
@@ -288,7 +346,7 @@ cmd_suite_check_aot() {
   [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
   mkdir -p "$O2J/tmp"
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   local A=$S/aot; rm -rf "$A"; mkdir -p "$A"
@@ -300,6 +358,13 @@ cmd_suite_check_aot() {
     local d=$S/run/$id last b
     [ -f "$d/error" ] && continue
     last=$(echo "$units" | awk '{print $NF}'); b=$(basename "${last%.*}")
+    # the program's C stubs (queue 531), served to the light level's run by the driver's `oi capi` as the run corpus's (queue 413)
+    local cs="" kv nodes
+    for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
+    if [ -n "$cs" ]; then
+      if nodes=$(cstubs_nodes "$base" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes OI_CAPI_SERVER=$EXE"
+      else echo "cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')" > "$d/error"; continue; fi
+    fi
     printf '%s\t%s%s\n' "$A/out/$id" "$(inc_units "$incs" $(cat "$d/units.list") | sed 's/$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$tl"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$A/out/$id/files.txt" "$d/$(echo "${b:0:1}" | tr a-z A-Z)${b:1}.ae" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
   done
