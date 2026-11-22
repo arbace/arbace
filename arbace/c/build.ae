@@ -58,18 +58,19 @@
   (let [t (under t)]
     (case (:k t)
       :void :v
-      (:float :double :ldouble :float32 :float64 :float32x :float64x) :f
+      ;; c-rows (2026-11-22): _Float16 a float64 holding a binary16 value, loaded, stored and converted to as binary16
+      (:float :double :ldouble :float32 :float64 :float32x :float64x :float16) :f
       (:struct :union :array) :m
       ;; complex types: their parts floating, or integers of at most 64 bits (GNU's complex integer types, CS105); a part
       ;; of a type out of eval (_Float16, _Float128, the decimal types: SPEC §14) refused by design as the part is
       :complex (let [pt (under (:of t))]
                  (cond
-                   (#{:float :double :ldouble :float32 :float64 :float32x :float64x} (:k pt)) :m
-                   (#{:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x} (:k pt))
+                   (#{:float :double :ldouble :float32 :float64 :float32x :float64x :float16} (:k pt)) :m
+                   (#{:float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x} (:k pt))
                    (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
                    (and (chk/int-type? pt) (not (wide? pt))) :m
                    :else (refuse :complex "the complex type " (chk/tstr t) " (deferred)")))
-      (:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
+      (:float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
       ;; GNU vector types (CS320 (a)): lanes in memory, an aggregate's address
       :vector :m
       :fn :i
@@ -100,7 +101,8 @@
       :bitint (str (if (:u t) "u" "s") (:n t)))))
 
 (defn- f32? [t] (#{:float :float32} (:k (under t))))
-(defn- fty [t] (if (f32? t) "f32" "f64"))
+(defn- f16? [t] (= :float16 (:k (under t))))
+(defn- fty [t] (cond (f32? t) "f32" (f16? t) "f16" :else "f64"))
 
 (defn- ptr? [t] (#{:ptr :nullptr} (:k (under t))))
 (defn- unsigned-ty?
@@ -346,13 +348,16 @@
       (case [k tk]
         [:i :i] (let [a (ity ft) b (ity t)]
                   {:k :i :t t :n (if (or (= a b) (#{"i64" "u64" "p"} b) (and (#{"i64" "u64" "p"} a) (#{"i64" "u64" "p"} b))) n (list 'cv b n))})
-        [:i :f] {:k :f :t t :n (list 'i2f (ity ft) (if (f32? t) 1 0) n)}
+        ;; to _Float16 through the double, exact for every integer whose binary16 is finite (|x| < 65520 < 2^53)
+        [:i :f] {:k :f :t t :n (if (f16? t) (list 'r16 (list 'i2f (ity ft) 0 n)) (list 'i2f (ity ft) (if (f32? t) 1 0) n))}
         [:f :i] {:k :i :t t :n (list 'f2i (ity t) n)}
-        [:f :f] {:k :f :t t :n (if (and (f32? t) (not (f32? ft))) (list 'r32 n) n)}
+        [:f :f] {:k :f :t t :n (cond (and (f16? t) (not (f16? ft))) (list 'r16 n)
+                                     (and (f32? t) (not (f32? ft)) (not (f16? ft))) (list 'r32 n)
+                                     :else n)}
         [:i :w] {:k :w :t t :n (list 'i2w (wty t) (ity ft) n)}
         [:w :i] {:k :i :t t :n (list 'w2i (ity t) (wty ft) n)}
         [:w :w] {:k :w :t t :n (if (= (wty t) (wty ft)) n (list 'w2w (wty t) (wty ft) n))}
-        [:w :f] {:k :f :t t :n (list 'w2f (wty ft) (if (f32? t) 1 0) n)}
+        [:w :f] {:k :f :t t :n (if (f16? t) (list 'r16 (list 'w2f (wty ft) 0 n)) (list 'w2f (wty ft) (if (f32? t) 1 0) n))}
         [:f :w] {:k :w :t t :n (list 'f2w (wty t) n)}
         ;; a vector cast to a vector or a scalar of its size, or a scalar to a vector: its bits (GNU's rule)
         [:m :m] (assoc x :t t)
@@ -2609,11 +2614,38 @@
 
 (def ^:private setjmp-names #{"setjmp" "_setjmp" "sigsetjmp" "__sigsetjmp" "__builtin_setjmp"})
 
+;; c-rows (2026-11-21): setjmp called through a pointer (mir's new/setjmp2.c: `static int (*setjmp2) (jmp_buf) = setjmp;`, then
+;; `if (setjmp2 (env))`). On the target setjmp is a function like any other, its caller's frame the one a longjmp returns to, so
+;; the call works whatever names the callee; ci's setjmp is a statement of its function (SjStmt, SjBody), found by name: a
+;; file-scope object whose initializer is setjmp (or its address) names it too. A call through such a pointer that no longer holds
+;; setjmp is an SjStmt still, which runs as the plain call it is.
+(def ^:private sj-alias-cache (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
+
+(defn- setjmp-aliases
+  "The names of the unit's file-scope objects initialized with setjmp (setjmp-names), a set (cached by the unit's forms)."
+  []
+  (let [fs (:forms *u*)]
+    (if (nil? fs)
+      #{}
+      (or (.get ^java.util.Map sj-alias-cache fs)
+          (let [sj? (fn [i] (or (and (symbol? i) (setjmp-names (name i)))
+                                (and (seq? i) ('#{addr c/addr} (first i)) (symbol? (second i)) (setjmp-names (name (second i))))))
+                s (set (for [f fs
+                             :when (seq? f)
+                             d (if (= 'c/group (first f)) (drop 2 f) [f])
+                             :when (and (seq? d) (= 'c/var (first d)) (= 3 (count d)) (symbol? (second d)) (sj? (nth d 2)))]
+                         (name (second d))))]
+            (.put ^java.util.Map sj-alias-cache fs s)
+            s)))))
+
+(defn- setjmp-call? [x]
+  (and (symbol? x) (or (setjmp-names (name x)) (contains? (setjmp-aliases) (name x)))))
+
 (defn- has-setjmp?
   "Whether a statement's own expressions call setjmp (a compound statement's body is its statements', so a
   block or a let is never the guarded statement: re-entering it would run its declarations again)."
   [f]
-  (letfn [(in-expr [x] (cond (seq? x) (or (and (symbol? (first x)) (setjmp-names (name (first x)))) (some in-expr x))
+  (letfn [(in-expr [x] (cond (seq? x) (or (setjmp-call? (first x)) (some in-expr x))
                              (vector? x) (some in-expr x)
                              :else false))]
     (cond
@@ -2737,7 +2769,7 @@
   "Whether forms call setjmp anywhere (the function's body is then an SjBody)."
   [f]
   (cond
-    (seq? f) (or (and (symbol? (first f)) (setjmp-names (name (first f)))) (some calls-setjmp? f))
+    (seq? f) (or (setjmp-call? (first f)) (some calls-setjmp? f))
     (vector? f) (some calls-setjmp? f)
     :else false))
 

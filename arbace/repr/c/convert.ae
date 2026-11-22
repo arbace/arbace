@@ -310,6 +310,9 @@
                               [i maxd fl]))
           suffix (subs text i)]
       (cond
+        ;; c-rows: libcpp's cpp_classify_number reports a separator right after the prefix before it reads the rest
+        ;; (c23-digit-separators-2's 0b'0, 0B'1)
+        (and (not radix2) (> n 2) (= \' (.charAt text 2))) "digit separator after base indicator"
         (and radix2 float?) "invalid prefix \"0b\" for floating constant"
         (and radix2 (>= (long maxd) 2)) (str "invalid digit \"" maxd "\" in binary constant")
         float? nil
@@ -1166,7 +1169,12 @@
                   :PostfixExpressionIndex (L 'aget (expr (g n :PostfixExpression)) (expr (g n :ExpressionList)))
                   :PostfixExpressionCall
                   (let [callee (g n :PostfixExpression)
-                        args (mapv #(g % :AssignmentExpression) (chain (g n :ArgumentExpressionList) :ArgumentExpressionList))]
+                        args (mapv #(g % :AssignmentExpression) (chain (g n :ArgumentExpressionList) :ArgumentExpressionList))
+                        ;; c-rows: C23's va_start (ap, last) read as cc's two arguments (arbace.repr.c.parse's c23-va-start-args):
+                        ;; the forms keep the va_list alone, as for the skipped extra tokens (7.16.1.4: never evaluated)
+                        args (if (and (= (cs callee) :PrimaryExpressionIdent) (= "__builtin_c23_va_start" (tsrc (g callee :Token))))
+                               (vec (take 1 args))
+                               args)]
                     (or (types-compatible-pattern callee args)
                         (let [f (expr callee) as (map expr args)
                               ;; CS82 (b): a callee named as a function-like macro defined where it stands came from an expansion
@@ -1347,11 +1355,15 @@
     (cond
       typedef (do (when (symbol? nm) (swap! (cx :typedefs) assoc nm t))
                   (addm (L 'c/typedef (addm nm (dissoc m :tag)) t) {}))
+      ;; a function's asm label (GNU's `void *memcpy (...) __asm ("my_memcpy")`, the name its calls link to) as a variable's:
+      ;; :c/asm-label on the declared name, printed after the declarator (decl-tail); it was dropped (torture-execute's
+      ;; builtins/memops-asm.c and strstr-asm.c: the print's object called memcpy, the class :objects)
       (fn-type? t)
-      (let [[_ ps r] t]
+      (let [[_ ps r] t
+            m (if asm (assoc m :c/asm-label asm) m)]
         (L 'c/declare (if (seq? nm) (addm nm m) (with-meta nm m)) (addm ps {:tag r})))
       (typedef-fn? t)
-      (L 'c/declare (name-with nt t m))
+      (L 'c/declare (let [x (name-with nt t m)] (if asm (addm x {:c/asm-label asm}) x)))
       :else
       (let [x (name-with nt t m)
             x (if asm (addm x {:c/asm-label asm}) x)]
