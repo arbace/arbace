@@ -1,0 +1,971 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/CipherHelper.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io IOException InputStream OutputStream)
+        '(java.security GeneralSecurityException MessageDigest NoSuchAlgorithmException)
+        '(javax.crypto Cipher CipherInputStream CipherOutputStream SecretKey)
+        '(javax.crypto.spec IvParameterSpec SecretKeySpec)
+        '(org.ietf.jgss GSSException)
+        '(sun.security.krb5 EncryptedData EncryptionKey)
+        '(sun.security.krb5.internal.crypto Aes128
+                                            Aes128Sha2
+                                            Aes256
+                                            Aes256Sha2
+                                            ArcFourHmac
+                                            Des3
+                                            EType))
+
+(defclass CipherHelper
+  (field ^:private ^:static ^:final ^int KG_USAGE_SEAL 22)
+
+  (field ^:private ^:static ^:final ^int KG_USAGE_SIGN 23)
+
+  (field ^:private ^:static ^:final ^int KG_USAGE_SEQ 24)
+
+  (field ^:private ^:static ^:final ^int DES_CHECKSUM_SIZE 8)
+
+  (field ^:private ^:static ^:final ^int DES_IV_SIZE 8)
+
+  (field ^:private ^:static ^:final ^int AES_IV_SIZE 16)
+
+  (field ^:private ^:static ^:final ^int HMAC_CHECKSUM_SIZE 8)
+
+  (field ^:private ^:static ^:final ^int KG_USAGE_SIGN_MS 15)
+
+  (field ^:private ^:static ^:final ^byte/1 ZERO_IV (new byte/1 DES_IV_SIZE))
+
+  (field ^:private ^:static ^:final ^byte/1 ZERO_IV_AES (new byte/1 AES_IV_SIZE))
+
+  (field ^:private ^:final ^int etype)
+
+  (field ^:private ^:final ^int sgnAlg)
+
+  (field ^:private ^:final ^int sealAlg)
+
+  (field ^:private ^:final ^byte/1 keybytes)
+
+  (constructor :throws [GSSException] [this ^EncryptionKey key]
+    (set! etype (.getEType key))
+    (set! keybytes (.getBytes key))
+    (switch etype
+      (EncryptedData/ETYPE_DES_CBC_CRC EncryptedData/ETYPE_DES_CBC_MD5)
+        (do (set! sgnAlg MessageToken/SGN_ALG_DES_MAC_MD5) (set! sealAlg MessageToken/SEAL_ALG_DES))
+      EncryptedData/ETYPE_DES3_CBC_HMAC_SHA1_KD
+        (do
+          (set! sgnAlg MessageToken/SGN_ALG_HMAC_SHA1_DES3_KD)
+          (set! sealAlg MessageToken/SEAL_ALG_DES3_KD))
+      EncryptedData/ETYPE_ARCFOUR_HMAC
+        (do
+          (set! sgnAlg MessageToken/SGN_ALG_HMAC_MD5_ARCFOUR)
+          (set! sealAlg MessageToken/SEAL_ALG_ARCFOUR_HMAC))
+      (EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96
+        EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192)
+        (do (set! sgnAlg -1) (set! sealAlg -1))
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported encryption type: " etype)))))
+
+  (method getSgnAlg ^int [this] sgnAlg)
+
+  (method getSealAlg ^int [this] sealAlg)
+
+  (method getProto ^int [this] (if (EType/isNewer etype) 1 0))
+
+  (method getEType ^int [this] etype)
+
+  (method isArcFour ^boolean [this]
+    (== etype EncryptedData/ETYPE_ARCFOUR_HMAC))
+
+  (method calculateChecksum :throws [GSSException] ^byte/1 [this ^int alg ^:mutable ^byte/1 header
+                                                            ^:mutable ^byte/1 trailer
+                                                            ^:mutable ^byte/1 data
+                                                            ^:mutable ^int start ^:mutable ^int len
+                                                            ^int tokenId]
+    (switch alg
+      MessageToken/SGN_ALG_DES_MAC_MD5
+        (do
+          (try
+            (let [md5 (MessageDigest/getInstance "MD5")]
+              (.update md5 header)
+              (.update md5 data start len)
+              (when (some? trailer) (.update md5 trailer))
+              (set! data (.digest md5))
+              (set! start 0)
+              (set! len (alength data))
+              (set! header nil)
+              (set! trailer nil))
+            (catch NoSuchAlgorithmException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not get MD5 Message Digest - "
+                                                (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge))))
+          (.getDesCbcChecksum this keybytes header data start len))
+      MessageToken/SGN_ALG_DES_MAC (.getDesCbcChecksum this keybytes header data start len)
+      MessageToken/SGN_ALG_HMAC_SHA1_DES3_KD
+        (let [^:mutable ^byte/1 buf nil
+              ^:mutable ^int offset 0
+              ^:mutable ^int total 0]
+          (if (and (nil? header) (nil? trailer))
+              (do (set! buf data) (set! total len) (set! offset start))
+              (do
+                (set! total
+                      (unchecked-add-int
+                        (unchecked-add-int (if (some? header) (alength header) 0) len)
+                        (if (some? trailer) (alength trailer) 0)))
+                (set! buf (new byte/1 total))
+                (let [^:mutable ^int pos 0]
+                  (when (some? header)
+                    (System/arraycopy header 0 buf 0 (alength header))
+                    (set! pos (alength header)))
+                  (System/arraycopy data start buf pos len)
+                  (set! pos (unchecked-add-int pos len))
+                  (when (some? trailer) (System/arraycopy trailer 0 buf pos (alength trailer)))
+                  (set! offset 0))))
+          (try
+            (let [answer (Des3/calculateChecksum keybytes KG_USAGE_SIGN buf offset total)] answer)
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str
+                                        "Could not use HMAC-SHA1-DES3-KD signing algorithm - "
+                                        (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge)))))
+      MessageToken/SGN_ALG_HMAC_MD5_ARCFOUR
+        (let [^:mutable ^byte/1 buffer nil
+              ^:mutable ^int off 0
+              ^:mutable ^int tot 0]
+          (if (and (nil? header) (nil? trailer))
+              (do (set! buffer data) (set! tot len) (set! off start))
+              (do
+                (set! tot
+                      (unchecked-add-int
+                        (unchecked-add-int (if (some? header) (alength header) 0) len)
+                        (if (some? trailer) (alength trailer) 0)))
+                (set! buffer (new byte/1 tot))
+                (let [^:mutable ^int pos 0]
+                  (when (some? header)
+                    (System/arraycopy header 0 buffer 0 (alength header))
+                    (set! pos (alength header)))
+                  (System/arraycopy data start buffer pos len)
+                  (set! pos (unchecked-add-int pos len))
+                  (when (some? trailer) (System/arraycopy trailer 0 buffer pos (alength trailer)))
+                  (set! off 0))))
+          (try
+            (let [^:mutable key_usage KG_USAGE_SIGN]
+              (when (== tokenId Krb5Token/MIC_ID) (set! key_usage KG_USAGE_SIGN_MS))
+              (let [answer (ArcFourHmac/calculateChecksum keybytes key_usage buffer off tot)
+                    output (new byte/1 (.getChecksumLength this))]
+                (System/arraycopy answer 0 output 0 (alength output))
+                output))
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str
+                                        "Could not use HMAC_MD5_ARCFOUR signing algorithm - "
+                                        (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge)))))
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported signing algorithm: " sgnAlg)))))
+
+  (method calculateChecksum :throws [GSSException] ^byte/1 [this ^byte/1 header ^byte/1 data
+                                                            ^int start ^int len ^int key_usage]
+    (let [total (unchecked-add-int (if (some? header) (alength header) 0) len)
+          buf (new byte/1 total)]
+      (System/arraycopy data start buf 0 len)
+      (when (some? header) (System/arraycopy header 0 buf len (alength header)))
+      (switch etype
+        EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96
+          (try
+            (let [answer (Aes128/calculateChecksum keybytes key_usage buf 0 total)] answer)
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not use AES128 signing algorithm - "
+                                                (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge))))
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96
+          (try
+            (let [answer (Aes256/calculateChecksum keybytes key_usage buf 0 total)] answer)
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not use AES256 signing algorithm - "
+                                                (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge))))
+        EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128
+          (try
+            (let [answer (Aes128Sha2/calculateChecksum keybytes key_usage buf 0 total)] answer)
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not use AES128 signing algorithm - "
+                                                (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge))))
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192
+          (try
+            (Aes256Sha2/calculateChecksum keybytes key_usage buf 0 total)
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not use AES256 signing algorithm - "
+                                                (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge))))
+        (throw (GSSException. GSSException/FAILURE
+                              -1
+                              (java-str "Unsupported encryption type: " etype))))))
+
+  (method encryptSeq :throws [GSSException] ^byte/1 [this ^byte/1 ivec ^byte/1 plaintext ^int start
+                                                     ^int len]
+    (switch sgnAlg
+      (MessageToken/SGN_ALG_DES_MAC_MD5 MessageToken/SGN_ALG_DES_MAC)
+        (try
+          (let [des (.getInitializedDes this true keybytes ivec)]
+            (.doFinal des plaintext start len))
+          (catch GeneralSecurityException e
+            (let [ge (GSSException. GSSException/FAILURE
+                                    -1
+                                    (java-str "Could not encrypt sequence number using DES - "
+                                              (.getMessage e)))]
+              (.initCause ge e)
+              (throw ge))))
+      MessageToken/SGN_ALG_HMAC_SHA1_DES3_KD
+        (let [^:mutable ^byte/1 iv nil]
+          (if (== (alength ivec) DES_IV_SIZE)
+              (set! iv ivec)
+              (do (set! iv (new byte/1 DES_IV_SIZE)) (System/arraycopy ivec 0 iv 0 DES_IV_SIZE)))
+          (try
+            (Des3/encryptRaw keybytes KG_USAGE_SEQ iv plaintext start len)
+            (catch Exception e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not encrypt sequence number using DES3-KD - "
+                                                (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge)))))
+      MessageToken/SGN_ALG_HMAC_MD5_ARCFOUR
+        (let [^:mutable ^byte/1 checksum nil]
+          (if (== (alength ivec) HMAC_CHECKSUM_SIZE)
+              (set! checksum ivec)
+              (do
+                (set! checksum (new byte/1 HMAC_CHECKSUM_SIZE))
+                (System/arraycopy ivec 0 checksum 0 HMAC_CHECKSUM_SIZE)))
+          (try
+            (ArcFourHmac/encryptSeq keybytes KG_USAGE_SEQ checksum plaintext start len)
+            (catch Exception e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str
+                                        "Could not encrypt sequence number using RC4-HMAC - "
+                                        (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge)))))
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported signing algorithm: " sgnAlg)))))
+
+  (method decryptSeq :throws [GSSException] ^byte/1 [this ^byte/1 ivec ^byte/1 ciphertext ^int start
+                                                     ^int len]
+    (switch sgnAlg
+      (MessageToken/SGN_ALG_DES_MAC_MD5 MessageToken/SGN_ALG_DES_MAC)
+        (try
+          (let [des (.getInitializedDes this false keybytes ivec)]
+            (.doFinal des ciphertext start len))
+          (catch GeneralSecurityException e
+            (let [ge (GSSException. GSSException/FAILURE
+                                    -1
+                                    (java-str "Could not decrypt sequence number using DES - "
+                                              (.getMessage e)))]
+              (.initCause ge e)
+              (throw ge))))
+      MessageToken/SGN_ALG_HMAC_SHA1_DES3_KD
+        (let [^:mutable ^byte/1 iv nil]
+          (if (== (alength ivec) DES_IV_SIZE)
+              (set! iv ivec)
+              (do (set! iv (new byte/1 8)) (System/arraycopy ivec 0 iv 0 DES_IV_SIZE)))
+          (try
+            (Des3/decryptRaw keybytes KG_USAGE_SEQ iv ciphertext start len)
+            (catch Exception e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not decrypt sequence number using DES3-KD - "
+                                                (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge)))))
+      MessageToken/SGN_ALG_HMAC_MD5_ARCFOUR
+        (let [^:mutable ^byte/1 checksum nil]
+          (if (== (alength ivec) HMAC_CHECKSUM_SIZE)
+              (set! checksum ivec)
+              (do
+                (set! checksum (new byte/1 HMAC_CHECKSUM_SIZE))
+                (System/arraycopy ivec 0 checksum 0 HMAC_CHECKSUM_SIZE)))
+          (try
+            (ArcFourHmac/decryptSeq keybytes KG_USAGE_SEQ checksum ciphertext start len)
+            (catch Exception e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str
+                                        "Could not decrypt sequence number using RC4-HMAC - "
+                                        (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge)))))
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported signing algorithm: " sgnAlg)))))
+
+  (method getChecksumLength :throws [GSSException] ^int [this]
+    (switch etype
+      (EncryptedData/ETYPE_DES_CBC_CRC EncryptedData/ETYPE_DES_CBC_MD5) DES_CHECKSUM_SIZE
+      EncryptedData/ETYPE_DES3_CBC_HMAC_SHA1_KD (Des3/getChecksumLength)
+      EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96 (Aes128/getChecksumLength)
+      EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96 (Aes256/getChecksumLength)
+      EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128 (Aes128Sha2/getChecksumLength)
+      EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192 (Aes256Sha2/getChecksumLength)
+      EncryptedData/ETYPE_ARCFOUR_HMAC HMAC_CHECKSUM_SIZE
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported encryption type: " etype)))))
+
+  (method decryptData :throws [GSSException] ^void [this ^WrapToken token ^byte/1 ciphertext
+                                                    ^int cStart ^int cLen ^byte/1 plaintext
+                                                    ^int pStart]
+    (switch sealAlg
+      MessageToken/SEAL_ALG_DES
+        (.desCbcDecrypt this
+                        token
+                        (CipherHelper/getDesEncryptionKey keybytes)
+                        ciphertext
+                        cStart
+                        cLen
+                        plaintext
+                        pStart)
+      MessageToken/SEAL_ALG_DES3_KD
+        (.des3KdDecrypt this token ciphertext cStart cLen plaintext pStart)
+      MessageToken/SEAL_ALG_ARCFOUR_HMAC
+        (.arcFourDecrypt this token ciphertext cStart cLen plaintext pStart)
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported seal algorithm: " sealAlg)))))
+
+  (method decryptData :throws [GSSException] ^void [this ^WrapToken_v2 token ^byte/1 ciphertext
+                                                    ^int cStart ^int cLen ^byte/1 plaintext
+                                                    ^int pStart ^int key_usage]
+    (switch etype
+      EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96
+        (.aes128Decrypt this token ciphertext cStart cLen plaintext pStart key_usage)
+      EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96
+        (.aes256Decrypt this token ciphertext cStart cLen plaintext pStart key_usage)
+      EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128
+        (.aes128Sha2Decrypt this token ciphertext cStart cLen plaintext pStart key_usage)
+      EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192
+        (.aes256Sha2Decrypt this token ciphertext cStart cLen plaintext pStart key_usage)
+      (throw (GSSException. GSSException/FAILURE -1 (java-str "Unsupported etype: " etype)))))
+
+  (method decryptData :throws [GSSException IOException] ^void [this ^WrapToken token
+                                                                ^InputStream cipherStream ^int cLen
+                                                                ^byte/1 plaintext ^int pStart]
+    (switch sealAlg
+      MessageToken/SEAL_ALG_DES
+        (.desCbcDecrypt this
+                        token
+                        (CipherHelper/getDesEncryptionKey keybytes)
+                        cipherStream
+                        cLen
+                        plaintext
+                        pStart)
+      MessageToken/SEAL_ALG_DES3_KD
+        (let [ciphertext (new byte/1 cLen)]
+          (try
+            (Krb5Token/readFully cipherStream ciphertext 0 cLen)
+            (catch IOException e
+              (let [ge (GSSException. GSSException/DEFECTIVE_TOKEN -1 "Cannot read complete token")]
+                (.initCause ge e)
+                (throw ge))))
+          (.des3KdDecrypt this token ciphertext 0 cLen plaintext pStart))
+      MessageToken/SEAL_ALG_ARCFOUR_HMAC
+        (let [ctext (new byte/1 cLen)]
+          (try
+            (Krb5Token/readFully cipherStream ctext 0 cLen)
+            (catch IOException e
+              (let [ge (GSSException. GSSException/DEFECTIVE_TOKEN -1 "Cannot read complete token")]
+                (.initCause ge e)
+                (throw ge))))
+          (.arcFourDecrypt this token ctext 0 cLen plaintext pStart))
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported seal algorithm: " sealAlg)))))
+
+  (method decryptData :throws [GSSException IOException] ^void [this ^WrapToken_v2 token
+                                                                ^InputStream cipherStream ^int cLen
+                                                                ^byte/1 plaintext ^int pStart
+                                                                ^int key_usage]
+    (let [ciphertext (new byte/1 cLen)]
+      (try
+        (Krb5Token/readFully cipherStream ciphertext 0 cLen)
+        (catch IOException e
+          (let [ge (GSSException. GSSException/DEFECTIVE_TOKEN -1 "Cannot read complete token")]
+            (.initCause ge e)
+            (throw ge))))
+      (switch etype
+        EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96
+          (.aes128Decrypt this token ciphertext 0 cLen plaintext pStart key_usage)
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96
+          (.aes256Decrypt this token ciphertext 0 cLen plaintext pStart key_usage)
+        EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128
+          (.aes128Sha2Decrypt this token ciphertext 0 cLen plaintext pStart key_usage)
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192
+          (.aes256Sha2Decrypt this token ciphertext 0 cLen plaintext pStart key_usage)
+        (throw (GSSException. GSSException/FAILURE -1 (java-str "Unsupported etype: " etype))))))
+
+  (method encryptData :throws [GSSException IOException] ^void [this ^WrapToken token
+                                                                ^byte/1 confounder ^byte/1 plaintext
+                                                                ^int start ^int len ^byte/1 padding
+                                                                ^OutputStream os]
+    (switch sealAlg
+      MessageToken/SEAL_ALG_DES
+        (let [des (.getInitializedDes this true (CipherHelper/getDesEncryptionKey keybytes) ZERO_IV)
+              cos (CipherOutputStream. os des)]
+          (.write cos confounder)
+          (.write cos plaintext start len)
+          (.write cos padding))
+      MessageToken/SEAL_ALG_DES3_KD
+        (let [ctext (.des3KdEncrypt this confounder plaintext start len padding)] (.write os ctext))
+      MessageToken/SEAL_ALG_ARCFOUR_HMAC
+        (let [ciphertext (.arcFourEncrypt this token confounder plaintext start len padding)]
+          (.write os ciphertext))
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported seal algorithm: " sealAlg)))))
+
+  (method encryptData :throws [GSSException] ^byte/1 [this ^WrapToken_v2 token ^byte/1 confounder
+                                                      ^byte/1 tokenHeader ^byte/1 plaintext
+                                                      ^int start ^int len ^int key_usage]
+    (switch etype
+      EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96
+        (.aes128Encrypt this confounder tokenHeader plaintext start len key_usage)
+      EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96
+        (.aes256Encrypt this confounder tokenHeader plaintext start len key_usage)
+      EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128
+        (.aes128Sha2Encrypt this confounder tokenHeader plaintext start len key_usage)
+      EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192
+        (.aes256Sha2Encrypt this confounder tokenHeader plaintext start len key_usage)
+      (throw (GSSException. GSSException/FAILURE -1 (java-str "Unsupported etype: " etype)))))
+
+  (method encryptData :throws [GSSException] ^void [this ^WrapToken token ^byte/1 confounder
+                                                    ^byte/1 plaintext ^int pStart ^int pLen
+                                                    ^byte/1 padding ^byte/1 ciphertext ^int cStart]
+    (switch sealAlg
+      MessageToken/SEAL_ALG_DES
+        (let [^:mutable pos cStart
+              des (.getInitializedDes this true (CipherHelper/getDesEncryptionKey keybytes) ZERO_IV)]
+          (try
+            (set!
+              pos
+              (unchecked-add-int pos (.update des confounder 0 (alength confounder) ciphertext pos)))
+            (set! pos (unchecked-add-int pos (.update des plaintext pStart pLen ciphertext pos)))
+            (.update des padding 0 (alength padding) ciphertext pos)
+            (.doFinal des)
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not use DES Cipher - " (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge)))))
+      MessageToken/SEAL_ALG_DES3_KD
+        (let [ctext (.des3KdEncrypt this confounder plaintext pStart pLen padding)]
+          (System/arraycopy ctext 0 ciphertext cStart (alength ctext)))
+      MessageToken/SEAL_ALG_ARCFOUR_HMAC
+        (let [ctext2 (.arcFourEncrypt this token confounder plaintext pStart pLen padding)]
+          (System/arraycopy ctext2 0 ciphertext cStart (alength ctext2)))
+      (throw (GSSException. GSSException/FAILURE
+                            -1
+                            (java-str "Unsupported seal algorithm: " sealAlg)))))
+
+  (method encryptData :throws [GSSException] ^int [this ^WrapToken_v2 token ^byte/1 confounder
+                                                   ^byte/1 tokenHeader ^byte/1 plaintext ^int pStart
+                                                   ^int pLen ^byte/1 ciphertext ^int cStart
+                                                   ^int key_usage]
+    (let [^:mutable ^byte/1 ctext nil]
+      (switch etype
+        EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96
+          (set! ctext (.aes128Encrypt this confounder tokenHeader plaintext pStart pLen key_usage))
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96
+          (set! ctext (.aes256Encrypt this confounder tokenHeader plaintext pStart pLen key_usage))
+        EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128
+          (set! ctext
+                (.aes128Sha2Encrypt this confounder tokenHeader plaintext pStart pLen key_usage))
+        EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192
+          (set! ctext
+                (.aes256Sha2Encrypt this confounder tokenHeader plaintext pStart pLen key_usage))
+        (throw (GSSException. GSSException/FAILURE -1 (java-str "Unsupported etype: " etype))))
+      (System/arraycopy ctext 0 ciphertext cStart (alength ctext))
+      (alength ctext)))
+
+  (method ^:private getDesCbcChecksum :throws [GSSException] ^byte/1 [this ^byte/1 key
+                                                                      ^byte/1 header ^byte/1 data
+                                                                      ^:mutable ^int offset ^int len]
+    (let [des (.getInitializedDes this true key ZERO_IV)
+          blockSize (.getBlockSize des)
+          finalBlock (new byte/1 blockSize)
+          ^:mutable numBlocks (unchecked-divide-int len blockSize)
+          lastBytes (unchecked-remainder-int len blockSize)]
+      (if (== lastBytes 0)
+          (do
+            (set! numBlocks (unchecked-subtract-int numBlocks 1))
+            (System/arraycopy data
+                              (unchecked-add-int
+                                offset
+                                (unchecked-multiply-int numBlocks blockSize))
+                              finalBlock
+                              0
+                              blockSize))
+          (System/arraycopy data
+                            (unchecked-add-int offset (unchecked-multiply-int numBlocks blockSize))
+                            finalBlock
+                            0
+                            lastBytes))
+      (try
+        (let [temp (new byte/1 (Math/max blockSize (if (nil? header) blockSize (alength header))))]
+          (when (some? header) (.update des header 0 (alength header) temp 0))
+          (loop [^int i 0]
+            (when (< i numBlocks)
+              (.update des data offset blockSize temp 0)
+              (set! offset (unchecked-add-int offset blockSize))
+              (recur (unchecked-inc-int i))))
+          (let [retVal (new byte/1 blockSize)]
+            (.update des finalBlock 0 blockSize retVal 0)
+            (.doFinal des)
+            retVal))
+        (catch GeneralSecurityException e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use DES Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))))
+
+  (method ^:private getInitializedDes :throws [GSSException] ^Cipher [this ^boolean encryptMode
+                                                                      ^byte/1 key ^byte/1 ivBytes]
+    (try
+      (let [iv (IvParameterSpec. ivBytes)
+            ^SecretKey jceKey (SecretKeySpec. key "DES")
+            desCipher (Cipher/getInstance "DES/CBC/NoPadding")]
+        (.init desCipher (if encryptMode Cipher/ENCRYPT_MODE Cipher/DECRYPT_MODE) jceKey iv)
+        desCipher)
+      (catch GeneralSecurityException e
+        (let [ge (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+          (.initCause ge e)
+          (throw ge)))))
+
+  (method ^:private desCbcDecrypt :throws [GSSException] ^void [this ^WrapToken token ^byte/1 key
+                                                                ^byte/1 cipherText
+                                                                ^:mutable ^int offset
+                                                                ^:mutable ^int len
+                                                                ^byte/1 dataOutBuf
+                                                                ^:mutable ^int dataOffset]
+    (try
+      (let [^:mutable ^int temp 0
+            des (.getInitializedDes this false key ZERO_IV)]
+        (set! temp (.update des cipherText offset WrapToken/CONFOUNDER_SIZE (.-confounder token)))
+        (set! offset (unchecked-add-int offset WrapToken/CONFOUNDER_SIZE))
+        (set! len (unchecked-subtract-int len WrapToken/CONFOUNDER_SIZE))
+        (let [^:mutable blockSize (.getBlockSize des)
+              numBlocks (unchecked-subtract-int (unchecked-divide-int len blockSize) 1)]
+          (loop [^int i 0]
+            (when (< i numBlocks)
+              (set! temp (.update des cipherText offset blockSize dataOutBuf dataOffset))
+              (set! offset (unchecked-add-int offset blockSize))
+              (set! dataOffset (unchecked-add-int dataOffset blockSize))
+              (recur (unchecked-inc-int i))))
+          (let [finalBlock (new byte/1 blockSize)]
+            (.update des cipherText offset blockSize finalBlock)
+            (.doFinal des)
+            (let [^int padSize (aget finalBlock (unchecked-subtract-int blockSize 1))]
+              (when (or (< padSize 1) (> padSize 8))
+                (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                                      -1
+                                      "Invalid padding on Wrap Token")))
+              (set! (.-padding token) (aget WrapToken/pads padSize))
+              (set! blockSize (unchecked-subtract-int blockSize padSize))
+              (System/arraycopy finalBlock 0 dataOutBuf dataOffset blockSize)))))
+      (catch GeneralSecurityException e
+        (let [ge (GSSException. GSSException/FAILURE
+                                -1
+                                (java-str "Could not use DES cipher - " (.getMessage e)))]
+          (.initCause ge e)
+          (throw ge)))))
+
+  (method ^:private desCbcDecrypt :throws [GSSException IOException] ^void [this ^WrapToken token
+                                                                            ^byte/1 key
+                                                                            ^InputStream is
+                                                                            ^:mutable ^int len
+                                                                            ^byte/1 dataOutBuf
+                                                                            ^:mutable ^int dataOffset]
+    (let [^:mutable ^int temp 0
+          des (.getInitializedDes this false key ZERO_IV)
+          truncatedInputStream (WrapTokenInputStream. is len)
+          cis (CipherInputStream. truncatedInputStream des)]
+      (set! temp (.read cis (.-confounder token)))
+      (set! len (unchecked-subtract-int len temp))
+      (let [^:mutable blockSize (.getBlockSize des)
+            numBlocks (unchecked-subtract-int (unchecked-divide-int len blockSize) 1)]
+        (loop [^int i 0]
+          (when (< i numBlocks)
+            (set! temp (.read cis dataOutBuf dataOffset blockSize))
+            (set! dataOffset (unchecked-add-int dataOffset blockSize))
+            (recur (unchecked-inc-int i))))
+        (let [finalBlock (new byte/1 blockSize)]
+          (set! temp (.read cis finalBlock))
+          (try
+            (.doFinal des)
+            (catch GeneralSecurityException e
+              (let [ge (GSSException. GSSException/FAILURE
+                                      -1
+                                      (java-str "Could not use DES cipher - " (.getMessage e)))]
+                (.initCause ge e)
+                (throw ge))))
+          (let [^int padSize (aget finalBlock (unchecked-subtract-int blockSize 1))]
+            (when (or (< padSize 1) (> padSize 8))
+              (throw
+                (GSSException. GSSException/DEFECTIVE_TOKEN -1 "Invalid padding on Wrap Token")))
+            (set! (.-padding token) (aget WrapToken/pads padSize))
+            (set! blockSize (unchecked-subtract-int blockSize padSize))
+            (System/arraycopy finalBlock 0 dataOutBuf dataOffset blockSize))))))
+
+  (method ^:private ^:static getDesEncryptionKey :throws [GSSException] ^byte/1 [^byte/1 key]
+    (when (> (alength key) 8) (throw (GSSException. GSSException/FAILURE -100 "Invalid DES Key!")))
+    (let [retVal (new byte/1 (alength key))]
+      (loop [^int i 0]
+        (when (< i (alength key))
+          (aset retVal i (unchecked-byte (bit-xor-int (aget key i) 0xf0)))
+          (recur (unchecked-inc-int i))))
+      retVal))
+
+  (method ^:private des3KdDecrypt :throws [GSSException] ^void [this ^WrapToken token
+                                                                ^byte/1 ciphertext ^int cStart
+                                                                ^int cLen ^byte/1 plaintext
+                                                                ^int pStart]
+    (let [^:mutable ^byte/1 ptext nil]
+      (try
+        (set! ptext (Des3/decryptRaw keybytes KG_USAGE_SEAL ZERO_IV ciphertext cStart cLen))
+        (catch GeneralSecurityException e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use DES3-KD Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))
+      (let [^int padSize (aget ptext (unchecked-subtract-int (alength ptext) 1))]
+        (when (or (< padSize 1) (> padSize 8))
+          (throw (GSSException. GSSException/DEFECTIVE_TOKEN -1 "Invalid padding on Wrap Token")))
+        (set! (.-padding token) (aget WrapToken/pads padSize))
+        (let [len (unchecked-subtract-int
+                    (unchecked-subtract-int (alength ptext) WrapToken/CONFOUNDER_SIZE)
+                    padSize)]
+          (System/arraycopy ptext WrapToken/CONFOUNDER_SIZE plaintext pStart len)
+          (System/arraycopy ptext 0 (.-confounder token) 0 WrapToken/CONFOUNDER_SIZE)))))
+
+  (method ^:private des3KdEncrypt :throws [GSSException] ^byte/1 [this ^byte/1 confounder
+                                                                  ^byte/1 plaintext ^int start
+                                                                  ^int len ^byte/1 padding]
+    (let [all (new byte/1
+                   (unchecked-add-int (unchecked-add-int (alength confounder) len)
+                                      (alength padding)))]
+      (System/arraycopy confounder 0 all 0 (alength confounder))
+      (System/arraycopy plaintext start all (alength confounder) len)
+      (System/arraycopy padding
+                        0
+                        all
+                        (unchecked-add-int (alength confounder) len)
+                        (alength padding))
+      (try
+        (let [answer (Des3/encryptRaw keybytes KG_USAGE_SEAL ZERO_IV all 0 (alength all))] answer)
+        (catch Exception e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use DES3-KD Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))))
+
+  (method ^:private arcFourDecrypt :throws [GSSException] ^void [this ^WrapToken token
+                                                                 ^byte/1 ciphertext ^int cStart
+                                                                 ^int cLen ^byte/1 plaintext
+                                                                 ^int pStart]
+    (let [seqNum (.decryptSeq this (.getChecksum token) (.getEncSeqNumber token) 0 8)
+          ^:mutable ^byte/1 ptext nil]
+      (try
+        (set! ptext
+              (ArcFourHmac/decryptRaw keybytes KG_USAGE_SEAL ZERO_IV ciphertext cStart cLen seqNum))
+        (catch GeneralSecurityException e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use ArcFour Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))
+      (let [^int padSize (aget ptext (unchecked-subtract-int (alength ptext) 1))]
+        (when (< padSize 1)
+          (throw (GSSException. GSSException/DEFECTIVE_TOKEN -1 "Invalid padding on Wrap Token")))
+        (set! (.-padding token) (aget WrapToken/pads padSize))
+        (let [len (unchecked-subtract-int
+                    (unchecked-subtract-int (alength ptext) WrapToken/CONFOUNDER_SIZE)
+                    padSize)]
+          (System/arraycopy ptext WrapToken/CONFOUNDER_SIZE plaintext pStart len)
+          (System/arraycopy ptext 0 (.-confounder token) 0 WrapToken/CONFOUNDER_SIZE)))))
+
+  (method ^:private arcFourEncrypt :throws [GSSException] ^byte/1 [this ^WrapToken token
+                                                                   ^byte/1 confounder
+                                                                   ^byte/1 plaintext ^int start
+                                                                   ^int len ^byte/1 padding]
+    (let [all (new byte/1
+                   (unchecked-add-int (unchecked-add-int (alength confounder) len)
+                                      (alength padding)))]
+      (System/arraycopy confounder 0 all 0 (alength confounder))
+      (System/arraycopy plaintext start all (alength confounder) len)
+      (System/arraycopy padding
+                        0
+                        all
+                        (unchecked-add-int (alength confounder) len)
+                        (alength padding))
+      (let [seqNum (new byte/1 4)]
+        (WrapToken/writeBigEndian (.getSequenceNumber token) seqNum)
+        (try
+          (let [answer (ArcFourHmac/encryptRaw keybytes KG_USAGE_SEAL seqNum all 0 (alength all))]
+            answer)
+          (catch Exception e
+            (let [ge (GSSException. GSSException/FAILURE
+                                    -1
+                                    (java-str "Could not use ArcFour Cipher - " (.getMessage e)))]
+              (.initCause ge e)
+              (throw ge)))))))
+
+  (method ^:private aes128Encrypt :throws [GSSException] ^byte/1 [this ^byte/1 confounder
+                                                                  ^byte/1 tokenHeader
+                                                                  ^byte/1 plaintext ^int start
+                                                                  ^int len ^int key_usage]
+    (let [all (new byte/1
+                   (unchecked-add-int (unchecked-add-int (alength confounder) len)
+                                      (alength tokenHeader)))]
+      (System/arraycopy confounder 0 all 0 (alength confounder))
+      (System/arraycopy plaintext start all (alength confounder) len)
+      (System/arraycopy tokenHeader
+                        0
+                        all
+                        (unchecked-add-int (alength confounder) len)
+                        (alength tokenHeader))
+      (try
+        (let [answer (Aes128/encryptRaw keybytes key_usage ZERO_IV_AES all 0 (alength all))] answer)
+        (catch Exception e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use AES128 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))))
+
+  (method ^:private aes128Sha2Encrypt :throws [GSSException] ^byte/1 [this ^byte/1 confounder
+                                                                      ^byte/1 tokenHeader
+                                                                      ^byte/1 plaintext ^int start
+                                                                      ^int len ^int key_usage]
+    (let [all (new byte/1
+                   (unchecked-add-int (unchecked-add-int (alength confounder) len)
+                                      (alength tokenHeader)))]
+      (System/arraycopy confounder 0 all 0 (alength confounder))
+      (System/arraycopy plaintext start all (alength confounder) len)
+      (System/arraycopy tokenHeader
+                        0
+                        all
+                        (unchecked-add-int (alength confounder) len)
+                        (alength tokenHeader))
+      (try
+        (let [answer (Aes128Sha2/encryptRaw keybytes key_usage ZERO_IV_AES all 0 (alength all))]
+          answer)
+        (catch Exception e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use Aes128Sha2 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))))
+
+  (method ^:private aes128Decrypt :throws [GSSException] ^void [this ^WrapToken_v2 token
+                                                                ^byte/1 ciphertext ^int cStart
+                                                                ^int cLen ^byte/1 plaintext
+                                                                ^int pStart ^int key_usage]
+    (let [^:mutable ^byte/1 ptext nil]
+      (try
+        (set! ptext (Aes128/decryptRaw keybytes key_usage ZERO_IV_AES ciphertext cStart cLen))
+        (catch GeneralSecurityException e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use AES128 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))
+      (let [len (unchecked-subtract-int
+                  (unchecked-subtract-int (alength ptext) WrapToken_v2/CONFOUNDER_SIZE)
+                  WrapToken_v2/TOKEN_HEADER_SIZE)]
+        (System/arraycopy ptext WrapToken_v2/CONFOUNDER_SIZE plaintext pStart len))))
+
+  (method ^:private aes128Sha2Decrypt :throws [GSSException] ^void [this ^WrapToken_v2 token
+                                                                    ^byte/1 ciphertext ^int cStart
+                                                                    ^int cLen ^byte/1 plaintext
+                                                                    ^int pStart ^int key_usage]
+    (let [^:mutable ^byte/1 ptext nil]
+      (try
+        (set! ptext (Aes128Sha2/decryptRaw keybytes key_usage ZERO_IV_AES ciphertext cStart cLen))
+        (catch GeneralSecurityException e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use AES128Sha2 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))
+      (let [len (unchecked-subtract-int
+                  (unchecked-subtract-int (alength ptext) WrapToken_v2/CONFOUNDER_SIZE)
+                  WrapToken_v2/TOKEN_HEADER_SIZE)]
+        (System/arraycopy ptext WrapToken_v2/CONFOUNDER_SIZE plaintext pStart len))))
+
+  (method ^:private aes256Encrypt :throws [GSSException] ^byte/1 [this ^byte/1 confounder
+                                                                  ^byte/1 tokenHeader
+                                                                  ^byte/1 plaintext ^int start
+                                                                  ^int len ^int key_usage]
+    (let [all (new byte/1
+                   (unchecked-add-int (unchecked-add-int (alength confounder) len)
+                                      (alength tokenHeader)))]
+      (System/arraycopy confounder 0 all 0 (alength confounder))
+      (System/arraycopy plaintext start all (alength confounder) len)
+      (System/arraycopy tokenHeader
+                        0
+                        all
+                        (unchecked-add-int (alength confounder) len)
+                        (alength tokenHeader))
+      (try
+        (let [answer (Aes256/encryptRaw keybytes key_usage ZERO_IV_AES all 0 (alength all))] answer)
+        (catch Exception e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use AES256 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))))
+
+  (method ^:private aes256Sha2Encrypt :throws [GSSException] ^byte/1 [this ^byte/1 confounder
+                                                                      ^byte/1 tokenHeader
+                                                                      ^byte/1 plaintext ^int start
+                                                                      ^int len ^int key_usage]
+    (let [all (new byte/1
+                   (unchecked-add-int (unchecked-add-int (alength confounder) len)
+                                      (alength tokenHeader)))]
+      (System/arraycopy confounder 0 all 0 (alength confounder))
+      (System/arraycopy plaintext start all (alength confounder) len)
+      (System/arraycopy tokenHeader
+                        0
+                        all
+                        (unchecked-add-int (alength confounder) len)
+                        (alength tokenHeader))
+      (try
+        (let [answer (Aes256Sha2/encryptRaw keybytes key_usage ZERO_IV_AES all 0 (alength all))]
+          answer)
+        (catch Exception e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use Aes256Sha2 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))))
+
+  (method ^:private aes256Decrypt :throws [GSSException] ^void [this ^WrapToken_v2 token
+                                                                ^byte/1 ciphertext ^int cStart
+                                                                ^int cLen ^byte/1 plaintext
+                                                                ^int pStart ^int key_usage]
+    (let [^:mutable ^byte/1 ptext nil]
+      (try
+        (set! ptext (Aes256/decryptRaw keybytes key_usage ZERO_IV_AES ciphertext cStart cLen))
+        (catch GeneralSecurityException e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use AES128 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))
+      (let [len (unchecked-subtract-int
+                  (unchecked-subtract-int (alength ptext) WrapToken_v2/CONFOUNDER_SIZE)
+                  WrapToken_v2/TOKEN_HEADER_SIZE)]
+        (System/arraycopy ptext WrapToken_v2/CONFOUNDER_SIZE plaintext pStart len))))
+
+  (method ^:private aes256Sha2Decrypt :throws [GSSException] ^void [this ^WrapToken_v2 token
+                                                                    ^byte/1 ciphertext ^int cStart
+                                                                    ^int cLen ^byte/1 plaintext
+                                                                    ^int pStart ^int key_usage]
+    (let [^:mutable ^byte/1 ptext nil]
+      (try
+        (set! ptext (Aes256Sha2/decryptRaw keybytes key_usage ZERO_IV_AES ciphertext cStart cLen))
+        (catch GeneralSecurityException e
+          (let [ge (GSSException. GSSException/FAILURE
+                                  -1
+                                  (java-str "Could not use AES256Sha2 Cipher - " (.getMessage e)))]
+            (.initCause ge e)
+            (throw ge))))
+      (let [len (unchecked-subtract-int
+                  (unchecked-subtract-int (alength ptext) WrapToken_v2/CONFOUNDER_SIZE)
+                  WrapToken_v2/TOKEN_HEADER_SIZE)]
+        (System/arraycopy ptext WrapToken_v2/CONFOUNDER_SIZE plaintext pStart len))))
+
+  (defclass ^:static WrapTokenInputStream
+    :extends InputStream
+
+    (field ^:private ^:final ^InputStream is)
+
+    (field ^:private ^:final ^int length)
+
+    (field ^:private ^int remaining)
+
+    (field ^:private ^int temp)
+
+    (constructor ^:public [this ^InputStream is ^int length]
+      (set! (.-is this) is)
+      (set! (.-length this) length)
+      (set! remaining length))
+
+    (method ^:public ^:final read :throws [IOException] ^int [this]
+      (if (== remaining 0)
+          -1
+          (do
+            (set! temp (.read is))
+            (when-not (== temp -1) (set! remaining (unchecked-subtract-int remaining temp)))
+            temp)))
+
+    (method ^:public ^:final read :throws [IOException] ^int [this ^byte/1 b]
+      (if (== remaining 0)
+          -1
+          (do
+            (set! temp (Math/min remaining (alength b)))
+            (set! temp (.read is b 0 temp))
+            (when-not (== temp -1) (set! remaining (unchecked-subtract-int remaining temp)))
+            temp)))
+
+    (method ^:public ^:final read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+      (if (== remaining 0)
+          -1
+          (do
+            (set! temp (Math/min remaining len))
+            (set! temp (.read is b off temp))
+            (when-not (== temp -1) (set! remaining (unchecked-subtract-int remaining temp)))
+            temp)))
+
+    (method ^:public ^:final skip :throws [IOException] ^long [this ^long n]
+      (if (== remaining 0)
+          0
+          (do
+            (set! temp (unchecked-int (Math/min remaining n)))
+            (set! temp (unchecked-int (.skip is temp)))
+            (set! remaining (unchecked-subtract-int remaining temp))
+            temp)))
+
+    (method ^:public ^:final available :throws [IOException] ^int [this]
+      (Math/min remaining (.available is)))
+
+    (method ^:public ^:final close :throws [IOException] ^void [this]
+      (set! remaining 0))))
