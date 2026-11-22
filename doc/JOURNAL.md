@@ -16305,3 +16305,11 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   PyCF_COMPILE_MASK (run_anyfileflags passes its closeit as cf_flags): compileC keeps those bits alone; and
   sys.set_int_max_str_digits' limit is each interpreter's (interpRegs.maxStrDigits, saved and restored by interpSwitch, a
   new subinterpreter's the configured limit): test_int's test_int_max_str_digits_is_per_interpreter.
+- pyctypes again, test_capi's test_file and test_run (crop paths, no build): PyFile_NewStdPrinter (Objects/fileobject.c's
+  "stderrprinter": fd 1 or 2, closed False, encoding None, mode "w", fileno, isatty by os.isatty, flush and close no-ops,
+  write encoding UTF-8 with backslashreplace by os.write, instantiation refused), PyFile_WriteObject of NULL "<NULL>" (a Go
+  panic before), PyObject_AsFileDescriptor's RuntimeWarning for a bool; PyRun_InteractiveOne, OneFlags, OneObject, Loop and
+  LoopFlags (the text parsed by ast.parse, each statement compiled alone in 'single' mode and run in __main__, One the first,
+  Loop all with an error printed and the next run; a non-str filename object a TypeError printed, -1; the prompts not
+  written). `--only` on the 710e90 executable, go/arbace/py interpreted, PYI_RUNNER=python3, controls failing as they must:
+  test_file 9 of 9 but test_py_universalnewlinefgets (classed, ungetc), 5 now pass; test_run's interactive tests 5 of 5.
