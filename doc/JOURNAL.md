@@ -17295,7 +17295,11 @@ trips and run checks (the parser's tree changes are `:_` facts, a `__label__` De
 **Scores**: C++ read 5,665 / 176 / 652 (5,665 / 311 / 517 before the class's move) -> 5,786 / 176 / 532 (37 n/a): 120 of the 135 rows
 to pass, and coroutines/pr105475-broken-spec.C (an :undefined-expectation file) passing by its own lines (n/a 38 -> 37); the own record's
 passes 1,699 -> 1,826. Completeness 96.14 -> 96.60 (0.961380 -> 0.966005, floored 96), without by design 97.36 -> 97.83; independence
-95.40 -> 95.60 (0.953894 -> 0.955834, floored 95; the read stage 0.7798 -> 0.7895).
+95.40 -> 95.60 (0.953894 -> 0.955834, floored 95; the read stage 0.7798 -> 0.7895). Merged with next at e3d9a3331 (the counting
+stream's n/a classes, queue 518's rounds): the own record merged by row (no row changed on both sides), its 164 changed files run again on
+the merged tree (`--record`, no row moved, the control failing as it must); C++ read 5,665 / 135 / 517 (214 n/a, next's) -> 5,786 / 0 /
+532 (213 n/a); completeness 96.75 -> 97.22 (0.967457 -> 0.972210, floored 96 -> 97), independence 95.58 -> 95.78 (0.955769 -> 0.957770,
+floored 95; the read stage 0.789186 -> 0.799193, 1,846 of 4,383 rows own).
 
 **Left** (15 rows, :deferred): the template instantiation depth (template/pr23510.C, recurse.C, cpp0x/alias-decl-55.C, template/vtable2.C,
 cpp2a/concepts-recursive-sat1.C: arbace/cpp/template.ae's instantiation), the constant evaluator (ext/constexpr-vla1.C, -2.C,

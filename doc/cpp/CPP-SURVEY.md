@@ -9967,7 +9967,11 @@ its own lines (std::coroutine_handle's from_address rule; n/a 38 -> 37). The own
 classes pass on the rules too: eh/crash2.C, ext/attr-unavailable-10.C, ext/flexary23.C, musttail12.C, musttail13.C,
 warn/Wplacement-new-size-6.C, already passing by clang's record, and pr105475-broken-spec.C). C++'s completeness 96.14 -> 96.60
 (0.961380 -> 0.966005; floored 96, unchanged), without by design 97.36 -> 97.83; independence 95.40 -> 95.60 (0.953894 -> 0.955834,
-the read stage 0.779806 -> 0.789510; floored 95, unchanged).
+the read stage 0.779806 -> 0.789510; floored 95, unchanged). Merged with next at e3d9a3331 (the counting stream's n/a classes, queue
+518's rounds; the own record merged by row, no row changed on both sides, its 164 changed files run again on the merged tree, `--record`,
+the record unchanged): C++ read 5,665 / 135 / 517 (214 n/a, next's) -> 5,786 / 0 / 532 (213 n/a); completeness 96.75 -> 97.22
+(0.967457 -> 0.972210, floored 96 -> 97), independence 95.58 -> 95.78 (0.955769 -> 0.957770, floored 95; the read stage 0.789186 ->
+0.799193, 1,846 of the 4,383 counted rows own).
 
 ### Left, and the decisions
 
