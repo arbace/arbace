@@ -1075,6 +1075,24 @@ messages (gcc's `dg-error` tests, C7), as GP6 made gc's errors the Go read's. Th
 cc's (the oracle's) where cc gives one, and the error tests are judged by line and kind (error or not),
 not by text, as goi's errorcheck (the survey's §5.5).
 
+### 9.6 Assembler sources (c-tails, 2026-11-22)
+
+A main file named `.S` is an assembler source that gcc preprocesses as `assembler-with-cpp` (libcpp's `CLK_ASM`) and
+assembles: no C translation unit. Its forms are the preprocessing layer's alone: its directives as §9.2's forms
+(`c/define` and `c/undef` as a C unit's, the others `c/directive` with their text normalized; a backslash-continued
+directive one line, its comments dropped) and the assembler text between them as `(c/asm-text "TEXT")`, the lines as
+written with their new-lines (a line whose `#` begins no directive name is text, as `CLK_ASM` reads it: `# comment`,
+`# 33`). `c/file` carries `:lang :asm`. Mode `:lines` prints the directives and the texts in order; mode `:full` keeps
+each form's lines as `:c/text`, the original byte for byte. Eval and AOT have nothing to run: the preprocessed text is
+the assembler's. The round trip and `bin/repr-c read` read a `.S` so; the checker's reads (ci, the dg and annotation
+checks) and the token and tree checks read it as C text, as before (the token check preprocesses it in `CLK_ASM`'s way).
+
+```clojure
+(c/file "12.S" :std :c99 :lang :asm)
+(c/define SRC [& y] "9999: y; .section __ex_table, \"a\"; .long 9999b, 6001f ;")
+(c/asm-text "\n    SRC(1: movw (%esi), %bx)\n6001:\n")
+```
+
 ## 10. Positions, comments and mode `:full`
 
 ### 10.1 Mode `:lines` (the default)
