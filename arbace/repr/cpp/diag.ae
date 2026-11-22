@@ -3845,7 +3845,41 @@
       (w (:nodes u) {} #{}))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new]))
+;; GCC's __is_invocable and __is_nothrow_invocable (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Type Traits", as std::is_invocable's
+;; precondition, [meta.rel]: each type is a complete type, cv void or an array of unknown bound): an operand that is a class declared and
+;; not yet defined at the trait (cv-qualified or not; a reference, pointer, function or member pointer type naming it is complete) is
+;; GCC's "invalid use of incomplete type", at the trait (ext/is_invocable3.C).
+
+(defn invocable-traits
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ;; (a macro's expansion in the main file at its place there, the SA macro's)
+        off (fn [n] (or (get-in n [:range :begin :offset]) (get-in n [:range :begin :expansionLoc :offset])))
+        decls (group-by :name (filter #(and (= "CXXRecordDecl" (:kind %)) (:name %)) (:nodes u)))
+        incomplete-at? (fn [nm o] (let [ds (get decls nm)]
+                                    (and (some #(and (not (:completeDefinition %)) (< (long (or (off %) 0)) (long o))) ds)
+                                         (not-any? #(and (:completeDefinition %) (< (long (or (off %) 0)) (long o))) ds))))
+        split (fn [^String t] (loop [cs (seq t) d 0 cur (StringBuilder.) acc []]
+                                (if-let [c (first cs)]
+                                  (cond (and (= c \,) (zero? d)) (recur (rest cs) d (StringBuilder.) (conj acc (str cur)))
+                                        (#{\( \< \[} c) (recur (rest cs) (inc d) (.append cur c) acc)
+                                        (#{\) \> \]} c) (recur (rest cs) (dec d) (.append cur c) acc)
+                                        :else (recur (rest cs) d (.append cur c) acc))
+                                  (conj acc (str cur)))))]
+    (walk-nodes (fn [n _]
+                  (when (= "TypeTraitExpr" (:kind n))
+                    (when-let [[_ body] (re-matches #"(?s)\s*__is_(?:nothrow_)?invocable\s*\((.*)\)\s*" (str (:_text n)))]
+                      (let [o (off n)]
+                        (when (and o (= main (or (get-in n [:range :begin :file]) (get-in n [:range :begin :expansionLoc :file]) main))
+                                   (some (fn [a] (let [t (-> a (str/replace #"\b(?:const|volatile)\b" "") str/trim)]
+                                                   (and (re-matches #"[A-Za-z_]\w*" t) (incomplete-at? t o))))
+                                         (split body)))
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :builtin-trait :msg "invalid use of incomplete type"})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
