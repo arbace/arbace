@@ -16912,3 +16912,14 @@ so a `:_const` key). Rejected: a gate run (the brief's).
 
 Commits: 7a8b8de1f, c6c1ef6eb, 4c013f6df, 4e1a13298 (the code), 8eab9eb73 (rt_ours_glob), 6aa1269ec (the records: runtime inputs,
 scores), and this entry's commit (the survey's section, the journal). Pushed to mac.
+
+## 2026-11-22: cpp-rt-own4: tzdb's second round, parked on a WIP branch
+
+After the proofs and the push (455e8b7df), tzdb again with a lighter reduction (`.tmp/tz/t9.cc`, <bits/chrono.h> for <chrono>: 79
+seconds a probe, against 25 minutes for the unit): `&ZoneInfo::until` had been deduced as the overload set's own type, so ranges'
+projected had no value_type. Four code generator rules, each on a reduced case against clang 23.1.5's IR (deduction from a member
+function pointer of one function, a noexcept member function type's Do, the rewritten `<=>` candidate of a more specialized template
+over operator@, type-constraints with arguments in subsumption) take the unit past the upper_bound call to its next refusal,
+`year::min()/January/1` (a friend declared in month and defined in year_month, not found). Not landed: no runtime-build covers them,
+and the unit has 2,000 lines more at 25 minutes a probe; they wait on the branch `cpp-rt-own4-tzdb-wip-1122` (one commit on
+cpp-rt-own4-1122, pushed to mac, marked not for merge). DECISION cpp-rt-own4-1 (a) in the survey's section now names that branch.

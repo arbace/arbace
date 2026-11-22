@@ -9923,3 +9923,19 @@ DECISION cpp-rt-own4-1 (c++20/tzdb.cc: ranges::upper_bound with a member functio
     lowered runtime's IR all Arbace's own (eval and AOT 1.0 for the runtime's half).
 (b) Leave it on the pack.
 ```
+
+### tzdb's second round (not landed: the branch `cpp-rt-own4-tzdb-wip-1122`, one commit on this branch, no runtime-build at its code)
+
+A lighter reduction found the cause in 79 seconds a probe (`.tmp/tz/t9.cc`: <algorithm>, <vector> and <bits/chrono.h> in place of
+<chrono>): the projection's `_Proj` was deduced as the overload set's own type ({:k :overload}) from `&ZoneInfo::until`, so
+projected<It, _Proj> had no value_type and neither operator() was viable; the constraints themselves evaluate as clang's
+(`.tmp/tz/t10.cc`, ten concept-ids, 1023 both). Four rules, each on a reduced case against clang 23.1.5's IR: `&C::m` of one member
+function deduces from its pointer type ([temp.deduct.call]/6); a noexcept member function's type is noexcept since C++17, mangled
+Do (`MS1_KDoFSD_vE`); a relational operator's rewritten candidate `(x <=> y) @ 0` wins when its template is more specialized than
+the best operator@'s ([over.match.best]/2.5 before /2.8: <bits/chrono.h>'s constrained operator<=> of duration and time_point over
+the unconstrained operator<, clang's choice); a type-constraint with arguments counts in the associated constraints
+(`three_way_comparable_with<_Dur1> _Dur2`). With them the unit passes the upper_bound call and stops at `year::min()/January/1`,
+"arithmetic on class and class": month's friend declaration of `operator/(const year&, const month&)` and year_month's friend
+definition of it (`chrono::year`, `chrono::month` qualified), found by ADL through month, not taken. Each tzdb probe is 25 minutes
+and the unit has 2,000 more lines: DECISION cpp-rt-own4-1 (a) now means landing the WIP branch's four rules with the runtime's
+proofs and going on from the friend's redeclaration.
