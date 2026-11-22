@@ -3134,3 +3134,36 @@ compareByteArrays the same CPU. None moves a row; none is in the tree.
   (a) n/a; (b) keep by design. **Recommended: (a).**
 - T21305's out-of-bounds writes stay HES96's decision (proposed in queue 332: (a) by design, recommended; (b) a write past a byte array's
   end dropped).
+
+## As built: HES97 (a) and HES102 (hs-speed's second round, 2026-11-22, after next `e3d9a3331`)
+
+The coordinator's brief after the first round's merge: HES97 (a), decided 2026-11-17 and not built, is the design for the rows that
+pass by their own verdicts given time; HES102 is a technical fix; the user's "count the three out" named in completeness's n/a classes.
+
+- **HES97 (a): a program's own CPU limit.** bin/lib/hsi/check takes `HSI_CPU_CAPS` (ID=SECONDS words, as HSI_MEM_CAPS), by default
+  test/haskell/cpu-caps.tsv's (ID, SECONDS, the measured CPU): a listed program runs to its cap (`cpu_limit`: the cap when above
+  HSI_TIMEOUT, its wall cap three times it, the AOT level's profile run and compiled run alike; a profiled run, HSI_CPUPROFILE_DIR,
+  keeps HSI_TIMEOUT), and is judged as any program, by its own verdict. The 17 caps are about 1.5 times each row's CPU (user + system,
+  every thread, of a run at a 600 s limit and 4 jobs, measured through a timing wrapper as HSI_EXE), from the larger of that and the
+  first round's wall seconds on a host loaded 90 to 140, rounded up to 10 s: kahan 400 (265.9 s of CPU), queens 140 (87.1), x2n1 220
+  (145.1), bspt 200 (131.2), fulsom 180 (117.7), pic 100 (64.3), fasta 120 (73.8), k-nucleotide 230 (149.6), n-body 590 (228.9),
+  spectral-norm 760 (297.7), dom-lt 130 (80.3), treejoin 140 (92.6), compareByteArrays 480 (240.8: 157 s of wall, the collector's
+  threads), AtomicPrimops 250 (90.0), T21651 230 (104.3), T21969 170 (89.5), setnumcapabilities001 260 (101.6). As GHC's testsuite's
+  run_timeout_multiplier gives its slow tests more time. The night's hsi-check grows by the rows' CPU beyond the 60 s each was killed at:
+  2,360 s of CPU against 17 x 60, about 1,340 s more (22 minutes of CPU over its two parts at 2 jobs; at most 3,580 s if every row ran
+  to its cap). Left: fannkuch-redux and minimax (HES101, the user's), T23071 (past 600 s) and unpack_sums_6 (out of 8 GiB).
+- **HES102: k-nucleotide's stdin.** test/haskell/eval/boot.edn's entries take `:stdin` (with `:file`) in place of `:stdout`: the
+  program's input its boot.sh makes (nofib's INPUT_FILE in the fast mode), here `../fasta/fasta-c.c` run with 60000 on ci through
+  `tr -d '\r'`, 610,077 bytes, SHA-256 28c2a690... (bin/hsi boot makes and checks it). bin/lib/hsi/boot-stdin.bash: the plan's stdin
+  of such a program (bin/lib/hsi/check, record-ref), the made file copied into the run's directory (made once under a lock when the kept
+  one is not the digest's). bin/hsi own-verdicts lists it by nofib's own expected output (k-nucleotide.faststdout: its record a run
+  without the input), golden/na.tsv's `undefined` entry removed (its output is defined now), review.ae's boot check takes the input
+  entries. k-nucleotide prints k-nucleotide.faststdout at 150 s of CPU (its cap 230).
+- **T13825-unit and tcrun022** named in n/a classes beside unboxedsums_unit_tests (`:ghc-package`, `:optimizer-rules`), their
+  reasons test/haskell/eval-out.edn's. Both pass in the record (GHC's STG over the pack's libraries), and counting2's rule (a row an
+  `:na` class names counts n/a only when the record does not pass it; C++'s Wnull-conversion-1.C) keeps them passes: the numbers do
+  not move. Counting a passing row out would change that rule for every crop: the user's.
+
+The record: the 17 capped rows and the ten control subjects in one `--only --record` run at the default limit (27 pass, the eleven
+controls failing as they must). Rows moved: `:speed` 14 to 3, `:own-speed` 4 to 1, `:no-reference` 31 to 28 (bspt, fulsom, pic); the
+eval cell 896 / 31 / 19 to 913 / 28 / 5 (4 n/a); Haskell's completeness 0.986786 to 0.991279 (0.9986 without by design).

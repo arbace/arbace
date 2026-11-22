@@ -17397,6 +17397,41 @@ and AOT 6 and 6).
   read; no errorcheck program was selected.) Go AOT 1,696 / 1 by design to 1,697 / 0; Go's completeness 0.9908 to 0.9910.
 - **Python read, `:code-lines` 30**: already done by py-small (`3daf8efbd` on mac/py-small-1122, "round trip level 3 a compile
   without positions", the user's (b) of 2026-11-22), not yet merged into next: not duplicated here.
+
+## 2026-11-22: hs-speed-1122, second round: HES97 (a)'s per-program CPU limits built, HES102 (k-nucleotide's stdin), the three n/a named
+
+After the first round's merge (next `e3d9a3331`, Haskell 0.9868 with counting2's `:process` and `:skipped` n/a), the coordinator's
+brief: the 600 s measurement makes HES97 (a), decided by the user on 2026-11-17 and never built, the design for the rows that pass by
+their own verdicts given time (as GHC's testsuite's run_timeout_multiplier); HES102 a technical fix; T13825-unit and tcrun022 named n/a
+in completeness as unboxedsums_unit_tests is. Left for the user: HES100 (b), HES101, T21305 (HES96), HES103's cfd, dcbm and
+threads004; hs-pkgs fetches parallel, random, old-time and unboxed-ref (not duplicated here).
+
+**HES97 (a).** bin/lib/hsi/check's `HSI_CPU_CAPS` (ID=SECONDS, as HSI_MEM_CAPS), by default test/haskell/cpu-caps.tsv: a listed
+program's CPU limit its cap when above HSI_TIMEOUT (wall three times it; the AOT level's two runs too; a profiled run keeps
+HSI_TIMEOUT). The 17 caps from a run of the rows at a 600 s limit through a timing wrapper (HSI_EXE): about 1.5 times the larger of each
+row's CPU (user + system) and the first round's loaded wall seconds, rounded up to 10 s (kahan 400 for 265.9 s of CPU ... spectral-norm
+760 for 297.7; doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES97 (a) and HES102"). The night's hsi-check: about 1,340 s more CPU
+(2,360 against 17 x 60; at most 3,580 if every row ran to its cap). Alternatives: one larger limit for every program (hides a slowdown
+anywhere), caps from one run's CPU alone (n-body's ran 228.9 s here and 387 s of wall on the loaded host: too tight).
+
+**HES102.** boot.edn's `:stdin` entries (a program's input its boot.sh makes: k-nucleotide's k-nucleotide.faststdin, fasta-c 60000 on
+ci, 610,077 bytes), given as the plan's stdin by bin/lib/hsi/check and record-ref (bin/lib/hsi/boot-stdin.bash), its own verdict
+k-nucleotide.faststdout (bin/hsi own-verdicts lists it: its record a run without the input; golden/na.tsv's `undefined` entry gone;
+review.ae takes the input entries). It prints the expected output at 150 s of CPU.
+
+**The three n/a.** T13825-unit joins `:ghc-package`, tcrun022 a new `:optimizer-rules` (`:kind :na`), their reasons eval-out.edn's.
+Both pass in the record, and counting2's rule (an `:na` class's row counts n/a only when the record does not pass it) keeps them
+passes: completeness does not move by it; counting passes out would change the rule for every crop, the user's to decide.
+
+Records: test/haskell/check-hsi-own.edn's 27 rows (the 17 capped and the ten control subjects) from one passing `--only --record` run
+at the default limit, the caps applying (27 pass, the eleven controls failing as they must); test/haskell/own-verdicts.tsv (k-nucleotide
+added); test/crops/independence.edn's Haskell judge fact (self 7757 -> 7758: k-nucleotide judged by its own expected output). Rows
+moved: `:speed` 14 -> 3 (kahan, queens, x2n1, fasta, k-nucleotide, n-body, spectral-norm, compareByteArrays, AtomicPrimops, T21651,
+setnumcapabilities001 pass; left fannkuch-redux, minimax, T23071), `:own-speed` 4 -> 1 (treejoin, dom-lt, T21969 pass; left
+unpack_sums_6), `:no-reference` 31 -> 28 (bspt, fulsom, pic pass). The eval cell 896 / 31 / 19 (4 n/a) -> 913 / 28 / 5 (4 n/a); AOT
+139 / 0 / 0; Haskell completeness 0.986786 -> 0.991279 (99.1 floored; 0.9986 without by design). bin/reap --record, bin/crops-score
+--record, --judge --strict, bin/records-check, bin/hsi divergences, bin/hsi own-verdicts --check, bin/hsi golden --oracle --control:
+0 problems. Light: no gate.
 ## 2026-11-22: hs-pkgs-1122: Haskell's no-reference programs built (the Hackage packages vendored, GHC's runs recorded, five packages own)
 
 Branch `hs-pkgs-1122` from mac/next `a8c6d3137`, by an agent of the main host (the coordinator's brief after the user's decision of

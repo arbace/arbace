@@ -71,6 +71,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/hsi/records.bash"
+. "$root/bin/lib/hsi/boot-stdin.bash" # HES102: a nofib program's input its boot.sh makes
 default_front=ghc
 corpora=samples,synthetic only="" jobs=${HSI_JOBS:-3} front=${HSI_FRONT:-$default_front} record_ifaces="" record="" keep="" aot="" live=${HSI_LIVE:-} dump_only="" record_progs="" verify_progs="" sample="" opt=${HSI_OPT:-O0} libs_set=${HSI_LIBS_SET:-pack}
 while [ $# -gt 0 ]; do
@@ -231,6 +232,11 @@ export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
 # (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
 export HSI_MEM_CAPS=${HSI_MEM_CAPS:-}
+# HES97 (a) (the user, 2026-11-17; built by hs-speed, 2026-11-22): a program's own CPU limit, ID=SECONDS words (as HSI_MEM_CAPS), by
+# default test/haskell/cpu-caps.tsv's (ID, SECONDS, its measured CPU: about 1.5 times it), as GHC's testsuite gives its slow tests a
+# run_timeout_multiplier: a program whose run needs more than HSI_TIMEOUT on hsi runs to its cap, judged as any (its wall cap three
+# times the CPU's); a cap below HSI_TIMEOUT, or a profiled run (HSI_CPUPROFILE_DIR), keeps HSI_TIMEOUT
+export HSI_CPU_CAPS=${HSI_CPU_CAPS-$(awk -F'\t' '!/^#/ && NF >= 2 {printf "%s=%s ", $1, $2}' "$root/test/haskell/cpu-caps.tsv")}
 
 # the plan: ID SRC MAIN FLAGS RUN-OPTS NAME STDIN KIND, separated by U+001F ("-" for none)
 plan=$work/plan.txt
@@ -271,6 +277,8 @@ for c in ${corpora//,/ }; do
           # EXCLUDED_SRCS; HES86 (a): record-ref's plan, nofib_c_srcs in bin/lib/hsi/records.bash; HES64 (a) took every .c)
           for cf in $(nofib_c_srcs "${p%/}"); do hc="$hc $cf"; done
           sin=-; for f in "$n.faststdin" "$n.stdin"; do [ -f "$p/$f" ] && { sin=$f; break; }; done
+          # HES102: the input its boot.sh makes (test/haskell/eval/boot.edn's :stdin), copied into the run's directory
+          [ "$sin" != - ] || { bsin=$(boot_stdin_name "nofib/$s/$n"); [ -z "$bsin" ] || sin=$bsin; }
           args=$(echo "$pa ${fo:-}" | xargs)
           hcf=$(echo "$hc" | xargs)
           add "nofib/$s/$n" "${p%/}" "$main" "${hcf:--}" "${args:--}" "$n" "$sin" nofib
@@ -514,7 +522,15 @@ prog_key() {  # (a program's own C is not in it: the helper's STG is the Haskell
     fi; } | sha256sum | cut -c1-16 | tr -d '\n'
   printf -- '-%s\n' "${helper_hash:0:16}"
 }
-export -f prog_key hsi_pre_gen
+export -f prog_key hsi_pre_gen boot_stdin_name boot_stdin_put
+
+# cpu_limit ID: the program's CPU seconds, HSI_TIMEOUT or its cap (HSI_CPU_CAPS) when larger and the run is not profiled
+cpu_limit() {
+  local t=$HSI_TIMEOUT c
+  if [ -z "${HSI_CPUPROFILE_DIR:-}" ]; then for c in $HSI_CPU_CAPS; do [ "${c%%=*}" = "$1" ] && [ "${c#*=}" -gt "$t" ] && t=${c#*=}; done; fi
+  echo "$t"
+}
+export -f cpu_limit
 
 # own_ref ID: "STATUS STDOUT-SHA STDERR-SHA" of the program's own verdict (test/haskell/own-verdicts.tsv: the expected status
 # and the expected outputs shipped with the test, read from its directory), or nothing when it has none (the user's decision
@@ -778,6 +794,10 @@ one() {
   # the run in a fresh copy of the program's directory (a test reads its files and may write some)
   local w=$work/run/${id//\//_}
   rm -rf "$w"; mkdir -p "$w"; cp -r "$src"/. "$w"/ 2> "$w.cp.log" || true; rm -f "$w.cp.log"
+  # HES102: a stdin its boot.sh makes (boot-stdin.bash), made and copied in
+  if [ "$sin" != - ] && [ ! -f "$w/$sin" ] && ! boot_stdin_put "$id" "$w"; then
+    rm -rf "$w"; echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi: boot: its stdin $sin not made (bin/hsi boot $id)\" :reason :boot :dump $td :run 0}" > "$res"; return 0
+  fi
   : > "$w/.empty"
   local stdin=.empty; [ "$sin" != - ] && stdin=$sin
   local ro=""; [ "$ropts" != - ] && ro=${ropts//\/dev\/null/.empty}
@@ -788,11 +808,12 @@ one() {
     # arguments), then the program's executable built with them compiled (bin/hsi aot build, kept by key)
     local pw=$w.profile pcmd
     rm -rf "${pw:?}"; mkdir -p "$pw"; cp -r "$src"/. "$pw"/ 2> "$pw.cp.log" || true; rm -f "$pw.cp.log"; : > "$pw/.empty"
+    [ "$sin" = - ] || [ -f "$pw/$sin" ] || boot_stdin_put "$id" "$pw" || true
     pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" ${stg:+--prog "$stg"} --name "$name" --) $ro"
     # (its run is hsi's: kept to compare the compiled run with, :vs-hsi, and its seconds, :hsi-run)
     local pt0 pt1; pt0=$(date +%s.%N); pst=0
     (cd "$pw" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$pw" HSI_AOT_MODULES="$prog/aot-closures.txt" \
-       timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "ulimit -v $((${ARBACE_MEM_GIB:-16} * 1048576)); export GOMEMLIMIT=$((${ARBACE_MEM_GIB:-16} * 768))MiB; ulimit -t $HSI_TIMEOUT; $pcmd" \
+       timeout -s KILL $(($(cpu_limit "$id") * 3)) sh -c "ulimit -v $((${ARBACE_MEM_GIB:-16} * 1048576)); export GOMEMLIMIT=$((${ARBACE_MEM_GIB:-16} * 768))MiB; ulimit -t $(cpu_limit "$id"); $pcmd" \
        < "$pw/$stdin" > "$prog/aot-hsi.stdout" 2> "$prog/aot-hsi.stderr") || pst=$?
     pt1=$(date +%s.%N); hrun=$(printf '%.2f' "$(echo "$pt1 - $pt0" | bc)")
     rm -rf "${pw:?}"
@@ -813,7 +834,8 @@ one() {
   local memlim=""; [ "$mem" = 0 ] || memlim="ulimit -v $((mem * 1048576)); export GOMEMLIMIT=$((mem * 768))MiB; "
   # a profiled run (HSI_CPUPROFILE_DIR) under the soft limit alone: SIGXCPU stops it with its profile written
   # (and ten times its wall time: a loaded host)
-  local tl="ulimit -t $HSI_TIMEOUT" wl=$((HSI_TIMEOUT * 3))
+  local cl; cl=$(cpu_limit "$id")
+  local tl="ulimit -t $cl" wl=$((cl * 3))
   [ -z "${HSI_CPUPROFILE_DIR:-}" ] || { tl="ulimit -S -t $HSI_TIMEOUT"; wl=$((HSI_TIMEOUT * 10)); }
   t0=$(date +%s.%N)
   (cd "$w" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$w" \
