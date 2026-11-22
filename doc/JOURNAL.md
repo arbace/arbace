@@ -16905,3 +16905,13 @@ definition" family, Sema's file, queue 510/518's), :own-diag's 497 (outside this
 families), the print cell's 10 (forms-differ 5, HotSpot's 5 needing a `hotspot-x86-linux` own record over jdk26u's sources).
 Alternatives considered: making the parameter list's error recover as GCC's (parse/error6.C) -- left, the parser's tentative parses
 would leak its diagnostic; parsing GNU attribute arguments as expressions (cpp0x/pr84606.C) -- left, a change to every attribute's read.
+
+## 2026-11-22: cpp-read-1122 merged with next again (ecdf052dd)
+
+mac/next merged again before the push (queue 518's checker rounds, C's c-rows): the own record taken from this stream, then the 164
+files either side moved (518's rows, and the rows whose status differs between the two records) run again on the merged tree
+(`bin/repr-cpp dg --front native --only`, merged into the record): own passes 1,699 (this stream's 1,681, next's 1,593); the 15
+non-passing among them are the rows above (the stale passes at 863bdaea1, constexpr-asm-3's time, 518's four qualttp files and
+pr69056 as next recorded them). Cells against next's record: C++ read 5,589 / 317 / 587 -> 5,665 / 311 / 517, print 3,880 / 0 / 15 ->
+3,885 / 0 / 10; completeness 95.81 -> 96.14, independence 95.24 -> 95.40 (the earlier entry's 94.84 -> 95.00 was against the first
+merge's tree). reap, crops-score (--record, --judge --strict) and records-check: 0 problems.

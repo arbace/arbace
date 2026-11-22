@@ -9838,7 +9838,8 @@ g++.jason/cond.C).
 C++ read 5,589 / 317 / 587 (next's record) -> 5,665 / 311 / 517 (38 n/a): the token check's 5 (:raw-udl-suffix 3,
 :unterminated-raw-string 1, :non-xid-utf8 1, by design), :syntax-own 66 -> 15, :own-diag 515 -> 497, :oracle-crash 5 -> 4
 (lambda-uneval25.C), :musl-libc 2 -> 1 (cpp26/literals2.C). C++ print 3,880 / 0 / 15 -> 3,885 / 0 / 10. Completeness 95.81 ->
-96.14, independence 94.84 -> 95.00 (the read stage 0.770 -> 0.778).
+96.14, independence 95.24 -> 95.40 against next merged again at ecdf052dd (queue 518's rounds; the read stage 0.772 -> 0.780); the
+own record's rows either side moved run again on the merged tree (164 files, `--only`, merged into the record: own passes 1,699).
 
 ### Left, and the decisions
 
