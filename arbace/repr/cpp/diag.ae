@@ -3541,7 +3541,62 @@
                 (:nodes u) nil)
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack]))
+;; A modifiable lvalue (cpp-gnu, 2026-11-22; [expr.pre.incr]/1, [expr.post.incr]/1, [expr.assign]/1: the operand of ++ and -- and the
+;; left operand of an assignment is a modifiable lvalue, [basic.lval]/6): a local variable or parameter of const-qualified non-reference
+;; type named directly is not: GCC's "increment of read-only variable 'n'" ("decrement", "assignment"), at the operator, in a template's
+;; definition too (template/permissive-error1b.C, -1c.C, with -Wtemplate-body's handling in diagnose).
+
+(defn read-only-modify
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        const? (fn [d] (let [qt (str/trim (str (get-in d [:type :qualType])))]
+                         (and (not (re-find #"&$" qt))
+                              (if (re-find #"\*" qt) (re-find #"\*\s*const\s*$" qt) (re-find #"^const\b|\bconst$" qt)))))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        report! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                              (when (= main (or (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :read-only :msg msg})))))]
+    (letfn [(w [x vars]
+              (cond
+                (map? x)
+                (let [k (:kind x)
+                      vars (cond (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "LambdaExpr"} k)
+                                 (into vars (for [pv (:inner x) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)))] [(:name pv) pv]))
+                                 ;; (a for, if, while or switch statement's own variables, its init-statement's or condition's)
+                                 (#{"ForStmt" "IfStmt" "WhileStmt" "SwitchStmt" "CXXForRangeStmt" "CXXCatchStmt"} k)
+                                 (into vars (for [c (:inner x)
+                                                  d (cond (= "DeclStmt" (:kind c)) (:inner c) (= "VarDecl" (:kind c)) [c] :else nil)
+                                                  :when (and (= "VarDecl" (:kind d)) (string? (:name d)))]
+                                              [(:name d) d]))
+                                 :else vars)
+                      target (fn [e] (let [e (some-> e strip)]
+                                       (when (= "DeclRefExpr" (:kind e))
+                                         (let [nm (get-in e [:referencedDecl :name]) d (get vars nm)]
+                                           (when (and d (const? d)) nm)))))]
+                  (case k
+                    "UnaryOperator" (when (#{"++" "--"} (:opcode x))
+                                      (when-let [nm (target (first (:inner x)))]
+                                        (report! x (str (if (= "++" (:opcode x)) "increment" "decrement") " of read-only variable '" nm "'"))))
+                    ("BinaryOperator" "CompoundAssignOperator")
+                    (when (re-matches #"=|[-+*/%&|^]=|<<=|>>=" (str (:opcode x)))
+                      (when-let [nm (target (first (:inner x)))]
+                        (report! x (str "assignment of read-only variable '" nm "'"))))
+                    nil)
+                  ;; (a lambda's body sees no enclosing local but by capture: its own scope)
+                  (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))]
+                    (w v (if (= "LambdaExpr" k) (into {} (filter (fn [[_ d]] (= "ParmVarDecl" (:kind d))) vars)) vars))))
+                (vector? x) (loop [ys x vars vars]
+                              (when-let [y (first ys)]
+                                (w y vars)
+                                (recur (rest ys) (if (and (map? y) (= "DeclStmt" (:kind y)))
+                                                   (into vars (for [d (:inner y) :when (and (= "VarDecl" (:kind d)) (string? (:name d)))] [(:name d) d]))
+                                                   vars))))
+                :else nil))]
+      (w (:nodes u) {}))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
@@ -3680,6 +3735,31 @@
           ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)
           ;; cpp-gnu (2026-11-22): a check's diagnostic after which GCC gives an initializer up (:suppress [FROM-LINE TO-LINE]) drops
           ;; the code generator's Sema's errors on those lines (flexible-arrays' nested context)
+          ;; cpp-gnu (2026-11-22): GCC's -Wno-template-body (invoke.texi: errors found parsing a template are not diagnosed then, "an
+          ;; error only upon instantiation"; -Wno-error=template-body makes them warnings): the errors inside a template's definition
+          ;; dropped, and a function template that had one and is instantiated -- named outside its definition -- gets GCC's
+          ;; "instantiating erroneous template" at its name and its first such error again
+          ds (if-not (some #{"-Wno-template-body" "-Wno-error=template-body"} args)
+               ds
+               (let [tmpls (for [n (:nodes u) :when (#{"FunctionTemplateDecl" "ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl" "VarTemplateDecl"} (:kind n))
+                                 :let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
+                                 :when (and b e (= main (or (get-in n [:range :begin :file]) main)))]
+                             [n (first (line-col starts (long b))) (first (line-col starts (long e)))])
+                     in-t (fn [d] (some (fn [[n a z]] (when (<= (long a) (long (:line d)) (long z)) n)) tmpls))
+                     dropped (filter in-t ds)
+                     kept (vec (remove in-t ds))
+                     refs (let [acc (java.util.ArrayList.)]
+                            (walk-nodes (fn [x _] (when (= "DeclRefExpr" (:kind x)) (when-let [o (get-in x [:range :begin :offset])] (.add acc [(get-in x [:referencedDecl :name]) (first (line-col starts (long o)))]))))
+                                        (:nodes u) nil)
+                            acc)
+                     again (for [[n a z] tmpls :when (= "FunctionTemplateDecl" (:kind n))
+                                 :let [fd (first (filter #(when (and (<= (long a) (long (:line %)) (long z))) %) dropped))]
+                                 :when (and fd (some (fn [[nm l]] (and (= nm (:name n)) (or (< (long l) (long a)) (> (long l) (long z))))) refs))
+                                 :let [f (some #(when (= "FunctionDecl" (:kind %)) %) (:inner n))
+                                       o (or (get-in f [:loc :offset]) (get-in n [:range :begin :offset]))
+                                       [l c] (line-col starts (long o))]]
+                             [{:line l :col c :kind :error :rule :template-body :msg "instantiating erroneous template"} fd])]
+                 (->> (concat kept (mapcat identity again)) (sort-by (juxt :line :col)) vec)))
           sup (keep :suppress ds)
           ds (if (seq sup)
                (vec (remove (fn [d] (and (= :sema (:rule d)) (some (fn [[a z]] (<= (long a) (long (:line d)) (long z))) sup))) ds))
