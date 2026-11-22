@@ -235,6 +235,14 @@
       (and (= rk :class) (#{[:field :var] [:var :field] [:field :fn] [:fn :field]} [oc c])) (str "duplicate member '" nm "'")
       (= :tag oc c) (when (and (:def o) def (not= "EnumDecl" (:kind n)) (= (:kind n) (:kind (:node o)))) (str "redefinition of '" nm "'"))
       (= :ns oc c) nil
+      ;; (cpp-gnu, 2026-11-22: [dcl.typedef]/... a typedef-name redeclared names the same type: one naming a fundamental type and the
+      ;; other a class -- GNU's typeof of *this, the member function's class, or a class-key's name -- is GCC's "conflicting
+      ;; declaration", ext/typeof10.C)
+      (= :typedef oc c) (let [cls? (fn [^String t] (boolean (re-find #"^(?:(?:__typeof__|__typeof|typeof)\s*\(\s*\*\s*this\s*\)|(?:struct|class|union) \w+)$" t)))
+                              fund? (fn [^String t] (boolean (re-matches #"(?:(?:const|volatile|unsigned|signed|short|long|int|char|bool|float|double|void|wchar_t)\s*)+" t)))
+                              a (str/trim (str (get-in (:node o) [:type :qualType]))) b (str/trim (str (get-in n [:type :qualType])))]
+                          (when (or (and (cls? a) (fund? b)) (and (fund? a) (cls? b)))
+                            (str "conflicting declaration 'typedef " b " " nm "'")))
       ;; a value and a typedef, a namespace and anything but a namespace, a variable and a function
       (or (and (= :ns oc) (not= :ns c)) (and (= :ns c) (not= :ns oc))
           (and (= :typedef oc) (or (value-classes c) (= :tmpl c))) (and (or (value-classes oc) (= :tmpl oc)) (= :typedef c))
@@ -2896,7 +2904,220 @@
       (w (:nodes u) nil))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values]))
+;; GNU's statement expressions in a constant expression (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Statements and Declarations in
+;; Expressions": `({ ... })`, its value the last expression statement's): evaluated in a constexpr variable's initializer, its
+;; declarations are a constexpr function body's ([dcl.constexpr]/3 before C++23, [expr.const]/5): a static variable there,
+;; "'inner' defined 'static' in 'constexpr' context"; before C++20 a variable with no initialization, "uninitialized variable
+;; 'inner' in 'constexpr' context", each at the variable (ext/stmtexpr21.C, stmtexpr25.C).
+
+(defn stmt-expr-constexpr
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        year (cxx-year (:std u))
+        report! (fn [n msg] (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :stmt-expr :msg msg})))))]
+    (walk-nodes (fn [v _]
+                  (when (and (= "VarDecl" (:kind v)) (:constexpr v))
+                    (walk-nodes (fn [se _]
+                                  (when (= "StmtExpr" (:kind se))
+                                    (doseq [cs (:inner se) :when (= "CompoundStmt" (:kind cs))
+                                            ds (:inner cs) :when (= "DeclStmt" (:kind ds))
+                                            d (:inner ds) :when (and (= "VarDecl" (:kind d)) (string? (:name d)))]
+                                      (cond
+                                        (= "static" (:storageClass d)) (report! d (str "'" (:name d) "' defined 'static' in 'constexpr' context"))
+                                        (and (< (long year) 2020) (not (:init d)) (not= "extern" (:storageClass d))
+                                             (or (int-type-size (str (get-in d [:type :qualType]))) (float-type-size (str (get-in d [:type :qualType]))))
+                                             (not (some #(not (#{"NativeAttr"} (:kind %))) (:inner d))))
+                                        (report! d (str "uninitialized variable '" (:name d) "' in 'constexpr' context"))
+                                        :else nil))))
+                                (:inner v) nil)))
+                (:nodes u) nil)
+    (vec out)))
+
+;; GNU's asm (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Extended Asm", "Constraints for asm Operands", "Explicit Register
+;; Variables"): an operand whose constraint allows only a register (no m, o, V, g, X, p, < or > among its letters) cannot be an object
+;; of a class with a user-declared destructor or copy constructor, which must stay in memory ("impossible constraint in 'asm'", the
+;; operand's type read off the variable, member or parameter it names; ext/asm10.C, asm15.C, asm16.C); the address of an explicit
+;; register variable (`register T x asm ("reg");`) is not taken ("address of explicit register variable 'x' requested",
+;; warn/register-var-1.C); an asm statement evaluated in a constant expression -- in the cleanup function GNU's cleanup attribute
+;; ("Common Variable Attributes") runs at the end of a variable's scope in a constexpr function a constexpr variable's initializer
+;; calls -- is no constant expression ("inline assembly is not a constant expression", ext/constexpr-attr-cleanup1.C).
+
+(defn gnu-asm
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :gnu-asm :msg msg})))))
+        records (into {} (for [n (:nodes u) :when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n))] [(:name n) n]))
+        memory-class? (fn [r] (some (fn [m] (or (and (= "CXXDestructorDecl" (:kind m)) (not (:explicitlyDefaulted m)))
+                                                (and (= "CXXConstructorDecl" (:kind m)) (not (:explicitlyDefaulted m))
+                                                     (re-find (re-pattern (str "^void \\((?:const )?" (java.util.regex.Pattern/quote (str (:name r))) " &\\)$"))
+                                                              (str (get-in m [:type :qualType]))))))
+                                    (:inner r)))
+        cls-of (fn [^String qt] (get records (-> qt (str/replace #"\b(?:const|volatile|struct|class)\b" "") (str/replace #"\s*&+\s*$" "") str/trim)))
+        globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        reg-only? (fn [^String c] (let [c (str/replace c #"[\"=+&%*#!?,]" "")] (and (seq c) (re-matches #"[rqQRabcdSDxyftulYvk]+" c))))]
+    (letfn [(w [x vars cls]
+              (cond
+                (map? x)
+                (let [k (:kind x)
+                      fn? (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl"} k)
+                      vars (if fn? (into vars (for [pv (:inner x) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)))] [(:name pv) pv])) vars)
+                      cls (cond (= "CXXRecordDecl" k) x
+                                (and fn? (#{"CXXConstructorDecl" "CXXMethodDecl" "CXXDestructorDecl"} k) (get records (str/replace (str (:name x)) #"^~" ""))) (get records (str/replace (str (:name x)) #"^~" ""))
+                                :else cls)
+                      type-of (fn [e]
+                                (let [e (strip e)]
+                                  (case (:kind e)
+                                    "DeclRefExpr" (let [nm (get-in e [:referencedDecl :name])]
+                                                    (if-let [d (or (get vars nm) (get globals nm))]
+                                                      (str (get-in d [:type :qualType]))
+                                                      (some #(when (and (= "FieldDecl" (:kind %)) (= nm (:name %))) (str (get-in % [:type :qualType]))) (:inner cls))))
+                                    "MemberExpr" (let [b (strip (first (:inner e)))
+                                                       bt (case (:kind b)
+                                                            "DeclRefExpr" (let [nm (get-in b [:referencedDecl :name])] (some-> (or (get vars nm) (get globals nm)) (get-in [:type :qualType]) str))
+                                                            nil)
+                                                       r (if (= "CXXThisExpr" (:kind b)) cls (when bt (cls-of (str/replace bt #"\s*\*$" ""))))]
+                                                   (some #(when (and (= "FieldDecl" (:kind %)) (= (:name e) (:name %))) (str (get-in % [:type :qualType]))) (:inner r)))
+                                    nil)))]
+                  (when (= "GCCAsmStmt" k)
+                    (let [a (:_asm x) cons (concat (:outputs a) (:inputs a))]
+                      (doseq [[[_ c] e] (map vector cons (:inner x))
+                              :when (and c e (reg-only? (str c)))
+                              :let [t (type-of e) r (when t (cls-of t))]
+                              :when (and r (memory-class? r))]
+                        (report! x "impossible constraint in 'asm'"))))
+                  (when (and (= "UnaryOperator" k) (= "&" (:opcode x)))
+                    (let [e (strip (first (:inner x)))]
+                      (when (= "DeclRefExpr" (:kind e))
+                        (let [nm (get-in e [:referencedDecl :name])]
+                          (when (:_asmreg (get vars nm))
+                            (report! x (str "address of explicit register variable '" nm "' requested")))))))
+                  (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))]
+                    (w v vars cls)))
+                (vector? x) (loop [ys x vars vars]
+                              (when-let [y (first ys)]
+                                (w y vars cls)
+                                (recur (rest ys) (if (and (map? y) (= "DeclStmt" (:kind y)))
+                                                   (into vars (for [d (:inner y) :when (and (= "VarDecl" (:kind d)) (string? (:name d)))] [(:name d) d]))
+                                                   vars))))
+                :else nil))]
+      (w (:nodes u) {} nil))
+    ;; a cleanup function with an asm statement, run by a constexpr function a constexpr variable's initializer calls
+    (let [fns (into {} (for [n (:nodes u) :when (and (= "FunctionDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))
+          asm-in (fn [f] (let [r (atom nil)] (walk-nodes (fn [n _] (when (and (nil? @r) (= "GCCAsmStmt" (:kind n))) (reset! r n))) (:inner f) nil) @r))]
+      (doseq [v (:nodes u) :when (and (= "VarDecl" (:kind v)) (:constexpr v))
+              :let [call (some (fn [x] (let [x (strip x)] (when (= "CallExpr" (:kind x)) x))) (:inner v))
+                    f (get fns (get-in (some-> call :inner first strip) [:referencedDecl :name]))]
+              :when f
+              :let [cleanups (let [acc (java.util.ArrayList.)]
+                               (walk-nodes (fn [n _] (when (= "VarDecl" (:kind n))
+                                                       (doseq [a (gnu-attrs-of n) :when (= "cleanup" (gnu-attr-name a))] (.add acc (str/trim (str (:_arg a)))))))
+                                           (:inner f) nil)
+                               acc)]
+              g (distinct cleanups)
+              :let [gf (get fns g) a (when gf (asm-in gf))]
+              :when a]
+        (report! a "inline assembly is not a constant expression")))
+    (vec (distinct out))))
+
+;; GNU's packed attribute (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Common Type Attributes" and "Common Variable Attributes":
+;; packed on a structure lays its members out with the smallest alignment, one byte, packed on a field likewise for it): a reference
+;; bound to a packed field, or to a member reached through one, of a type whose alignment is more than a byte would claim an
+;; alignment the object lacks: GCC's "cannot bind packed field ... to 'int&'". Bound here: a call's argument for a parameter of
+;; non-const reference type (every function of the callee's name and arity has one there); a packed field of a class with a
+;; user-declared copy constructor copied (a function returning the class by value returning the field, whose copy constructor
+;; binds a const reference: ext/packed8.C); the implicit copy constructor of a class with such a packed field used (a
+;; mem-initializer copying an object of the class), at that class (other/crash-4.C); ext/packed3.C.
+
+(defn gnu-packed
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :gnu-packed :msg msg})))))
+        records (into {} (for [n (:nodes u) :when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n))] [(:name n) n]))
+        packed-attr? (fn [n] (some #(= "packed" (gnu-attr-name %)) (gnu-attrs-of n)))
+        cls-of (fn [^String qt] (get records (-> (str qt) (str/replace #"\b(?:const|volatile|struct|class)\b" "") (str/replace #"\s*[&*]+\s*$" "") str/trim)))
+        field-of (fn [r nm] (some #(when (and (= "FieldDecl" (:kind %)) (= nm (:name %))) %) (:inner r)))
+        aligned? (fn [^String qt] (let [t (str/trim (str/replace qt #"\b(?:const|volatile)\b" ""))]
+                                    (cond (int-type-size t) (> (long (int-type-size t)) 1)
+                                          (float-type-size t) true
+                                          (cls-of t) (some #(and (= "FieldDecl" (:kind %)) (not (re-find #"char|bool" (str (get-in % [:type :qualType]))))) (:inner (cls-of t)))
+                                          :else false)))
+        copy-ctor? (fn [r] (some #(and (= "CXXConstructorDecl" (:kind %)) (not (:explicitlyDefaulted %))
+                                       (re-find (re-pattern (str "^void \\((?:const )?" (java.util.regex.Pattern/quote (str (:name r))) " &\\)$")) (str (get-in % [:type :qualType]))))
+                                 (:inner r)))
+        globals (into {} (for [n (:nodes u) :when (and (#{"VarDecl"} (:kind n)) (string? (:name n)))] [(:name n) n]))
+        fns (group-by :name (filter #(= "FunctionDecl" (:kind %)) (:nodes u)))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))]
+    (letfn [(info [e vars cls]
+              ;; [type packed?] of an lvalue expression: a variable, a member access through one, `this`'s members
+              (let [e (strip e)]
+                (case (:kind e)
+                  "DeclRefExpr" (let [nm (get-in e [:referencedDecl :name])]
+                                  (if-let [d (or (get vars nm) (get globals nm))]
+                                    [(str (get-in d [:type :qualType])) false]
+                                    (when-let [f (and cls (field-of cls nm))]
+                                      [(str (get-in f [:type :qualType])) (boolean (or (packed-attr? f) (packed-attr? cls)))])))
+                  "MemberExpr" (let [b (strip (first (:inner e)))
+                                     [bt bp] (if (= "CXXThisExpr" (:kind b)) [(:name cls) false] (info b vars cls))
+                                     r (when bt (cls-of bt))
+                                     f (when r (field-of r (:name e)))]
+                                 (when f [(str (get-in f [:type :qualType])) (boolean (or bp (packed-attr? f) (packed-attr? r)))]))
+                  nil)))
+            (w [x vars cls fnode]
+              (cond
+                (map? x)
+                (let [k (:kind x)
+                      fn? (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} k)
+                      vars (if fn? (into vars (for [pv (:inner x) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)))] [(:name pv) pv])) vars)
+                      cls (if (= "CXXRecordDecl" k) x cls)
+                      fnode (if fn? x fnode)]
+                  (case k
+                    "CallExpr" (let [callee (strip (first (:inner x)))
+                                     args (rest (:inner x))
+                                     cands (when (= "DeclRefExpr" (:kind callee)) (get fns (get-in callee [:referencedDecl :name])))]
+                                 (doseq [[i a] (map-indexed vector args)
+                                         :let [[t pk] (info a vars cls)]
+                                         :when (and pk t (aligned? t)
+                                                    (seq cands)
+                                                    (every? (fn [c] (let [ps (filter #(= "ParmVarDecl" (:kind %)) (:inner c))]
+                                                                      (when (= (count ps) (count args))
+                                                                        (let [pt (str/trim (str (get-in (nth (vec ps) i) [:type :qualType])))]
+                                                                          (and (re-find #"[^&]&$" pt) (not (re-find #"^const\b" pt)))))))
+                                                            cands))]
+                                   (report! a (str "cannot bind packed field to '" t "&'"))))
+                    "ReturnStmt" (when-let [e (first (:inner x))]
+                                   (let [[t pk] (info e vars cls)
+                                         r (when t (cls-of t))]
+                                     (when (and pk r (copy-ctor? r) fnode (= (str/trim (str (fn-ret-type (str (get-in fnode [:type :qualType]))))) (str/trim (str/replace t #"\b(?:struct|class)\b" ""))))
+                                       (report! x (str "cannot bind packed field to 'const " (:name r) "&'")))))
+                    "CXXCtorInitializer" (when-let [f (and cls (field-of cls (get-in x [:anyInit :name])))]
+                                           (when-let [fr (cls-of (str (get-in f [:type :qualType])))]
+                                             (let [e (some-> (first (:inner x)) strip)
+                                                   et (when (= "DeclRefExpr" (:kind e)) (some-> (get vars (get-in e [:referencedDecl :name])) (get-in [:type :qualType]) str))]
+                                               (when (and et (= fr (cls-of et))
+                                                          (some (fn [m] (and (= "FieldDecl" (:kind m)) (or (packed-attr? m) (packed-attr? fr))
+                                                                             (when-let [mc (cls-of (str (get-in m [:type :qualType])))] (copy-ctor? mc))))
+                                                                (:inner fr))
+                                                          (not (copy-ctor? fr)))
+                                                 (report! fr (str "cannot bind packed field in the implicit copy constructor of '" (:name fr) "'"))))))
+                    nil)
+                  (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))]
+                    (w v vars cls fnode)))
+                (vector? x) (doseq [y x] (w y vars cls fnode))
+                :else nil))]
+      (w (:nodes u) {} nil nil))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under

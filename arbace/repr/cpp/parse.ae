@@ -3147,6 +3147,12 @@
                                                                                                   #"\s+" "") x)))))
                         (skip-balanced! p)
                         (recur (assoc ds :type {:t :dt :s (tok-text p (inc ob) (- (ix p) 2))}) words))))))
+            ;; (cpp-gnu, 2026-11-22: GNU's typeof after unsigned, signed, short or long, no type of GNU's: GCC's "'unsigned' specified
+            ;; with 'typeof'", at the keyword, the typeof taken, ext/typeof13.C)
+            (and (#{"__typeof__" "__typeof" "typeof"} s) (nil? (:type ds)) (seq words) (is-at? p 1 "(")
+                 (every? #{"unsigned" "signed" "short" "long" "__signed" "__signed__"} words))
+            (do (when-not (skim? p) (soft-diag! p (ix p) (str "'" (first words) "' specified with '" s "'")))
+                (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) [])))
             (and (#{"__typeof__" "__typeof" "typeof"} s) (not has-type) (is-at? p 1 "("))
             (do (adv! p) (unclosed-paren! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
             (and (= s "_Atomic") (is-at? p 1 "(") (not has-type))
@@ -3203,6 +3209,17 @@
             (recur (update ds :attrs into as) words))
           (and (type-transform? p) (not has-type))
           (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
+          ;; (cpp-gnu, 2026-11-22: in a type-id, where no declarator-id may follow, unsigned, signed, short or long before a
+          ;; typedef-name of an integer type: GCC takes the pair as an extension, its pedwarn "'unsigned' specified with typedef-name
+          ;; 'foo_t'" (an error under -pedantic-errors alone), ext/typeof13.C's `(unsigned foo_t)s`)
+          (and (= ctx :type-id) (identical? k :id) (seq words) (nil? (:type ds))
+               (every? #{"unsigned" "signed" "short" "long" "__signed" "__signed__"} words)
+               (let [^T n (nxt p 1)] (or (t= n ")") (t= n "*") (t= n "&") (t= n ">") (t= n ",")))
+               (let [e (lookup (scope p) s)] (and (type-ent? e) (not (:tag e)) (not (:class e)) (not (:tparam e)) (not (:tmpl e)))))
+          (let [e (lookup (scope p) s)]
+            (when-not (skim? p) (pedantic-diag! p (ix p) (str "'" (first words) "' specified with typedef-name '" s "'")))
+            (adv! p)
+            (recur (assoc ds :type {:t :n :s s :ent e}) []))
           (and (not has-type) (name-start? p)
                (not (and (= ctx :member) (ctor-name-here? p ctx)))
                (not (and (#{:top :member :tmpl} ctx) (ctor-name-here? p :top)))
@@ -4673,6 +4690,12 @@
                   _ (when (and bits (is? p "[") (is-at? p 1 "[") (not (skim? p)) (main-tok? p (ix p)))
                       (soft-diag! p (ix p) "two consecutive '[' shall only introduce an attribute before '[' token"))
                   as1 (attr-nodes p)
+                  ;; (cpp-gnu, 2026-11-22: GNU's asm label, the manual's "Asm Labels": the symbol of a variable or a function, so none
+                  ;; on a non-static data member, GCC's error at it, ext/asmspecInvalid.C; on a register variable it names the
+                  ;; register, "Explicit Register Variables", :_asmreg for arbace.repr.cpp.diag/gnu-asm)
+                  al (when (and (or (is? p "asm") (is? p "__asm__") (is? p "__asm")) (is-at? p 1 "(")) (ix p))
+                  _ (when (and al field (not (skim? p)))
+                      (soft-diag! p al "asm-specifiers are not permitted on non-static data members"))
                   _ (skip-asm-label! p)
                   as1 (into as1 (attr-nodes p))
                   [x init] (cond
@@ -4742,6 +4765,7 @@
                               (:constexpr ds) (assoc :constexpr true)
                               (:tls ds) (assoc :tls (:tls ds))
                               (:constinit ds) (assoc :_constinit true)
+                              (and al (= "register" (:storage ds))) (assoc :_asmreg true)
                               init (assoc :init init)
                               (:args lp) (assoc :_args (:args lp))
                               ctad0 (assoc :_ctad ctad0)
