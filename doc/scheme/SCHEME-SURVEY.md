@@ -4885,20 +4885,25 @@ use), the user's to decide again.
 The user's decision of 2026-11-22 (journal "the user's decisions on the burst's by-design and counting questions") replaces SCS4 (a).
 The choice is made by the library a name is imported from, lexically, not for the whole program. A program-wide switch would not work:
 the mats' driver (`test/scheme/mats/run.sps`) imports (rnrs), and its mats are evaluated in an environment of (chezscheme).
-- `go/arbace/scm`: the primitives `/`, `angle`, `current-input-port` and `current-output-port` are (rnrs)'s.
+- `go/arbace/scm`: the primitives `/` and `angle` are (rnrs)'s.
   - `/` gives R6RS 11.7.4.3's answers where an exact zero meets a flonum: `(/ 1.0 0)` +inf.0, `(/ 0.0 0)` +nan.0, `(/ 0 3.5)` 0.0,
     `(/ 0 0.0)` +nan.0. An exact zero with an exact number raises as before.
   - `angle` gives a flonum's angle as a flonum: `(angle +inf.0)` 0.0, `(angle 1.0)` 0.0.
-  - The console is two ports, an input one and an output one (`consoleInView`, `consoleOutView`), over the console's stdin and stdout.
-    Setting either one sets the console port itself.
-- Chez's versions are new primitives: `$chez-/`, `$chez-angle`, `$chez-current-input-port` and `$chez-current-output-port`.
+- Chez's versions are new primitives, `$chez-/` and `$chez-angle`.
   - They are added to (psyntax system $all) through `tools/psyntax/boot-si.sps`'s `si-primitives`. psyntax.pp is booted again, and
     `bin/si boot --check` gives the committed file.
-  - (chezscheme) exports them under the standard names. (scheme base) and (scheme complex) re-export them, so the R7RS corpora keep
-    Chez's answers.
+  - (chezscheme) exports them as `/` and `angle`. (scheme base) re-exports `$chez-/` and (scheme complex) `$chez-angle`, so the R7RS
+    corpora keep Chez's answers.
+  - They print with Chez's names, in their own write and in their arity errors (`Shown`).
   - `log`'s base division stays Chez's.
-  - They print with Chez's names, in their own write and in their arity errors (`Shown`). The mats' messages name
-    `#<procedure current-input-port>`, so the full run's first try at a name of its own changed three items of mats/6.ms and two of mats/7.ms.
+- The console is two ports for every library, a textual input port and a textual output port (`consoleIn`, `consoleOut`), where it was
+  Chez's one input/output port before.
+  - The first build made the console two ports for (rnrs) only, with (chezscheme)'s getters giving Chez's port (743fd799b).
+  - The full mats run then failed three clauses of io.ms's `current-ports`. That mat asks
+    `(eq? (r6rs:current-input-port) (current-input-port))`, the (rnrs) binding against (chezscheme)'s. Racket's suite asks
+    `(output-port? (current-input-port))` #f. No console that is a different object for each library passes both.
+  - So a (chezscheme) program's `(output-port? (current-input-port))` is #f where Chez says #t. No mat or golden output asks it.
+  - The same run showed the printed-name problem above, in mats/6.ms (3 items), mats/7.ms (2) and primvars.ms (2).
 - Two golden lines follow from the change. si/data's `(/ 1. 0)` is now +inf.0 (the line SCS4 (b) foresaw). si/complex's `(angle 1.0)`
   is now 0.0.
 - The unit tables hold Chez 10.3.0's answers, so they run against the `$chez-` primitives (`chezPrim`). `TestR6RSAnswers` checks
