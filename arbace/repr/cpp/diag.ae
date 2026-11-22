@@ -2658,7 +2658,7 @@
 ;; trait '...' in function signature; use library traits instead", at the template (ext/decay1.C, is_empty2.C, underlying_type7.C).
 
 (def ^:private builtin-trait-re
-  #"\b__(?:is_[a-z_]+|has_[a-z_]+|underlying_type|decay|remove_[a-z_]+|add_[a-z_]+|make_signed|make_unsigned|reference_(?:binds|constructs|converts)_[a-z_]+|builtin_is_[a-z_]+|type_pack_element)\s*[(<]")
+  #"\b__(?:is_[a-z_]+|has_[a-z_]+|underlying_type|decay|remove_[a-z_]+|add_[a-z_]+|make_signed|make_unsigned|reference_(?:binds|constructs|converts)_[a-z_]+|builtin_is_[a-z_]+)\s*[(<]")
 
 (defn trait-signatures
   [u starts ^String src ^String main]
@@ -3400,7 +3400,9 @@
                         td (get tds qt)
                         vec? (or (some #(= "vector_size" (gnu-attr-name %)) (gnu-attrs-of d))
                                  (and td (some #(= "vector_size" (gnu-attr-name %)) (gnu-attrs-of td))))
-                        base (str/trim (if td (str/replace (str (get-in td [:type :qualType])) #"\b(?:const|volatile)\b" "") qt))]
+                        ;; (a vector typedef's spelling carries its attribute, `__attribute__((__vector_size__(16))) float`)
+                        base (str/trim (str/replace (if td (str/replace (str (get-in td [:type :qualType])) #"\b(?:const|volatile)\b" "") qt)
+                                                    #"^\s*__attribute__\s*\(\(.*\)\)\s*" ""))]
                     (cond
                       (re-find #"\]$" base) (if vec? nil {:k :array})
                       (re-find #"[*&]$" base) (if vec? nil {:k :ptr})
@@ -3422,6 +3424,47 @@
                                        (kind-of d)))))
                       bad-index? (fn [t] (or (= :float (:k t)) (= :vector (:k t))))]
                   (case k
+                    ;; (GNU's ?: with a vector condition and two scalars, the manual's "Vector Extensions": the scalars' common type
+                    ;; is the result's element type, of the condition's elements' size ("inferred scalar type 'C' is not an integer or
+                    ;; floating-point type of the same size as 'E'"), an integer variable converted to a floating one of no more bits
+                    ;; "involves truncation"; ext/vector23.C)
+                    "ConditionalOperator"
+                    (let [[cnd b c] (:inner x)
+                          cv (let [cn (some-> cnd strip)]
+                               (when (= "BinaryOperator" (:kind cn))
+                                 (let [o (some-> (first (:inner cn)) strip)
+                                       o (if (and (= "UnaryOperator" (:kind o)) (= "*" (:opcode o))) (let [d (some-> (first (:inner o)) strip)]
+                                                                                                        (when (= "DeclRefExpr" (:kind d))
+                                                                                                          (when-let [v (or (get vars (get-in d [:referencedDecl :name])) (get globals (get-in d [:referencedDecl :name])))]
+                                                                                                            (kind-of (update-in v [:type :qualType] #(str/replace (str %) #"\s*\*\s*$" ""))))))
+                                             (kd o))]
+                                   (when (= :vector (:k o)) o))))
+                          sty (fn [e] (let [e (strip e)]
+                                        (case (:kind e)
+                                          ("IntegerLiteral" "CharacterLiteral" "FloatingLiteral") [(str/trim (str (get-in e [:type :qualType]))) true]
+                                          "DeclRefExpr" (when-let [d (or (get vars (get-in e [:referencedDecl :name])) (get globals (get-in e [:referencedDecl :name])))]
+                                                          (let [t (str/trim (str/replace (str (get-in d [:type :qualType])) #"\b(?:const|volatile)\b" ""))]
+                                                            (when (or (int-type-size t) (float-type-size t)) [t false])))
+                                          nil)))]
+                      (when cv
+                        (let [[tb lb] (sty b) [tc lc] (sty c)]
+                          (when (and tb tc)
+                            (let [fl? (fn [t] (some? (float-type-size t)))
+                                  rank (fn [t] (let [t (str/replace t #"^unsigned |^signed " "")] (case t ("char" "bool" "short" "short int" "char8_t" "char16_t" "wchar_t") 1 ("int" "char32_t") 2 ("long" "long int") 3 ("long long" "long long int") 4 ("__int128") 5 2)))
+                                  prom (fn [t] (if (and (not (fl? t)) (< (long (rank t)) 2)) "int" t))
+                                  ct (let [b2 (prom tb) c2 (prom tc)]
+                                       (cond (and (fl? b2) (fl? c2)) (if (>= (long (float-type-size b2)) (long (float-type-size c2))) b2 c2)
+                                             (fl? b2) b2 (fl? c2) c2
+                                             (> (long (rank b2)) (long (rank c2))) b2 (< (long (rank b2)) (long (rank c2))) c2
+                                             (str/starts-with? b2 "unsigned") b2 :else c2))
+                                  csz (or (int-type-size ct) (float-type-size ct))
+                                  esz (or (int-type-size (:el cv)) (float-type-size (:el cv)))]
+                              (cond
+                                (and csz esz (not= (long csz) (long esz)))
+                                (report! x (str "inferred scalar type '" ct "' is not an integer or floating-point type of the same size as '" (:el cv) "'"))
+                                (and (fl? ct) (some (fn [[t l]] (and (not l) (not (fl? t)) (>= (long (int-type-size t)) (long (float-type-size ct))))) [[tb lb] [tc lc]]))
+                                (report! x (str "conversion of scalar to vector of '" ct "' involves truncation"))
+                                :else nil))))))
                     "ArraySubscriptExpr" (let [[a b] (:inner x) ka (kd a) kb (kd b)]
                                            (when (and ka kb
                                                       (if (#{:array :ptr} (:k ka)) (bad-index? kb)
