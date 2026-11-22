@@ -2415,6 +2415,9 @@
   string-literal\", \"a wide string is invalid in this context\", \"expected ')'\"); past an error the tokens to the `)` or
   the `;` skipped, the deletion taken."
   [^P p]
+  ;; (cpp-diag-b, round 2: before C++26 GCC's pedwarn "'delete' reason only available with -std=c++2c or -std=gnu++2c", at the `(`)
+  (when (and (< (.-year p) 2026) (not (skim? p)) (main-tok? p (ix p)))
+    (pedantic-diag! p (ix p) "'delete' reason only available with -std=c++2c or -std=gnu++2c"))
   (adv! p)
   (if (identical? :str (tk (cur p)))
     (do (when (re-find #"^(u8|u|U|L)" (ts (cur p))) (soft-diag! p (ix p) "a wide string is invalid in this context"))
@@ -3400,7 +3403,7 @@
     (when-let [[i _] (first (filter #(#{"static" "extern" "register" "mutable" "__thread" "thread_local" "_Thread_local"} (second %))
                                     (spec-tokens p (long (:b ds)) (long (:e ds)))))]
       (soft-diag! p (long i) "storage class specified for template parameter")))
-  (when (and (:b ds) (:e ds) (contains? #{:top :member :block :param} ctx) (not (skim? p)) (main-tok? p (long (:b ds))))
+  (when (and (:b ds) (:e ds) (contains? #{:top :member :block :param :tparam} ctx) (not (skim? p)) (main-tok? p (long (:b ds))))
     (let [ks (spec-tokens p (long (:b ds)) (long (:e ds)))
           first-of (fn [pred] (first (filter #(pred (second %)) ks)))
           words (filter #(builtin-kws (second %)) ks)
@@ -3463,6 +3466,10 @@
       (when (and (= ctx :param) (or tls (and sto (not= "register" (second sto)))))
         (soft-diag! p (long (first (or tls sto))) "storage class specified for parameter"))
       (when (and frnd (#{:top :block} ctx) (not virt)) (soft-diag! p (long (first frnd)) "'friend' used outside of class"))
+      ;; ([class.mem.general]/3: a member-declaration without a declarator declares a class, an enumeration or a friend: storage
+      ;; classes or cv-qualifiers alone declare nothing, GCC's "declaration does not declare anything")
+      (when (and (= ctx :member) (nil? (:type ds)) (nil? (:tag-node ds)) (not frnd) (is? p ";") (or sto (:c ds) (:v ds)))
+        (soft-diag! p (ix p) "declaration does not declare anything"))
       ;; ([class.friend]/3: a friend declaration of a class is an elaborated-type-specifier, no class definition)
       (when (and frnd (= ctx :member) (:tag-node ds) (:completeDefinition (:tag-node ds)))
         (soft-diag! p (long (first frnd)) "class definition may not be declared a friend"))
@@ -4795,6 +4802,17 @@
                       (soft-diag! p (long (:i lp)) (cond (= ctx :member) (str "'constexpr' static data member '" (:s lp) "' must have an initializer")
                                                          (= "extern" (:storage ds)) (str "declaration of 'constexpr' variable '" (:s lp) "' is not a definition")
                                                          :else (str "uninitialized 'const " (:s lp) "'")))
+                      ;; ([dcl.typedef]/1 with [dcl.meaning.general]/1: a typedef-name is declared unqualified, and an operator
+                      ;; function's name is no typedef-name: GCC's "typedef name may not be a nested-name-specifier", "declaration
+                      ;; of 'operator!' as non-function")
+                      (and (:typedef ds) (or (>= np 2) (:g qn)))
+                      (soft-diag! p (long (:i lp)) "typedef name may not be a nested-name-specifier")
+                      (and (:typedef ds) (or (:op lp) (:conv lp)))
+                      (soft-diag! p (long (:i lp)) "declaration of an operator function as a typedef")
+                      ;; ([dcl.stc]/5 (C++23 /5): a block-scope extern declaration has no initializer: GCC's "'i' has both 'extern'
+                      ;; and initializer")
+                      (and (= ctx :block) (= "extern" (:storage ds)) (nil? fs) (or (is? p "=") (is? p "{") (is? p "(")))
+                      (soft-diag! p (long (:i lp)) (str "'" (:s lp) "' has both 'extern' and initializer"))
                       ;; (C++11 [except.spec]/2, before C++17's P0012: an exception-specification appears in no typedef
                       ;; declaration)
                       (and (:typedef ds) (< (.-year p) 2017) (some (fn [x] (some #(get-in % [:m :throw]) (:sufs x))) chain))
