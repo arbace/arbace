@@ -842,6 +842,11 @@
   "Whether the initializer of a C23 `auto` object is being checked: a tag it declares is an error (CS152)."
   false)
 
+(def ^:dynamic *underspec*
+  "c-tails: the name of the underspecified object (C23 auto, constexpr) whose initializer is being checked: c-typeck.cc's
+  \"underspecified 'X' referenced in its initializer\" for a use of it there, whatever an outer scope declares."
+  nil)
+
 (defn- tag-ref
   "The tag `kind tag` referenced, declared in the current scope when not visible (or when `here`)."
   [kind ^String tag here]
@@ -1022,6 +1027,10 @@
                                                             (type-pos-attrs! (:c/decl-attrs sp) :type)) ; CS160: `int g ([[x]] int);`
                                                           (parse-type p)))
                                         _ (when (and nm pm) (binding [*line* (or (:line pm) *line*)] (decl-position-attrs! pm :param t)))
+                                        ;; c-tails: c-decl.cc's grokdeclarator, a parameter's storage class other than register
+                                        _ (when (and pm (some #(get pm %) [:auto :static :extern :thread_local :constexpr :typedef]))
+                                            (binding [*line* (or (:line pm) *line*)]
+                                              (err! (if nm (str "storage class specified for parameter '" nm "'") "storage class specified for unnamed parameter"))))
                                         at (case (:k t) :array (ptr (:of t)) :fn (ptr t) t)]
                                     (when (and nm (not kr) (or (:tag pm) (seq? p)))
                                       ;; in scope for the later parameters' types (int a[n])
@@ -1151,6 +1160,8 @@
         body (first (filter vector? args))
         fm (meta f)
         _ (tag-attrs! (:c/attrs fm) false)]
+    (when (and body *auto-init*) ; c-tails: c-decl.cc's start_struct
+      (err! (str "'" (name kind) " " (or tag "<anonymous>") "' defined in underspecified object initializer")))
     (if (nil? body)
       {:k kind :rec (if tag (tag-ref kind tag false) (new-rec kind nil))}
       (let [^HashMap here (when tag (.get ^HashMap (:tags (top-scope)) tag))
@@ -1250,6 +1261,8 @@
                                    (let [^HashMap now (.get ^HashMap (:tags (top-scope)) tag)]
                                      (and now (not (identical? now pre0)) (= :enum (.get now :kind)) (.get now :complete)))))]
     (tag-attrs! (:c/attrs (meta f)) false)
+    (when (and body *auto-init*) ; c-tails: as start_struct's, for an enumeration's definition
+      (err! (str "'enum " (or tag "<anonymous>") "' defined in underspecified object initializer")))
     ;; C23 6.7.3.3: a struct or union tag of the scope named as an enumeration's (gcc's "wrong kind of tag")
     (when (and tag pre0 (not= :enum (.get ^HashMap pre0 :kind)))
       (err! (str "'" tag "' defined as wrong kind of tag")))
@@ -1725,6 +1738,8 @@
 (defn- ident-expr [^String n]
   (let [e (lookup n)]
     (cond
+      (and *underspec* (= n *underspec*))
+      (do (err! (str "underspecified '" n "' referenced in its initializer")) (res t-invalid))
       (nil? e)
       (cond
         (= n "__func__") (res (arr t-char (inc (count (or (cx :fn-name) "")))) :lv true)
@@ -2158,6 +2173,16 @@
   {:bool :bool :char :char :schar :char :uchar :char :short :short :ushort :short :int :int :uint :int
    :long :long :ulong :long :llong :llong :ullong :llong :int128 :i128 :uint128 :i128})
 
+(defn- conv-ctx
+  "gcc's words for a conversion as assignment in `ctx` (\"initialization\", \"assignment\", \"return\", \"passing argument N\")
+  from type `st` to `dt` (c-typeck.cc's WARNING_FOR_ASSIGNMENT)."
+  ^String [^String ctx dt st]
+  (cond
+    (= ctx "initialization") (str "initialization of " (tstr dt) " from " (tstr st))
+    (= ctx "assignment") (str "assignment to " (tstr dt) " from " (tstr st))
+    (= ctx "return") (str "returning " (tstr st) " from a function with return type " (tstr dt))
+    :else ctx))
+
 (defn- ptr-conv!
   "6.5.17.2 / 6.5.2.2 / 6.8.7.4: the pointer result `rs` converted to the pointer type `dst` in `ctx` (assignment,
   initialization, argument or return): gcc 14+ gives an error for pointee types that are not compatible (types of
@@ -2169,7 +2194,16 @@
       (and (= :nullptr (:k st)) (not (#{:ptr :nullptr :bool :invalid :vector} (if (= :enum (:k dt)) (:k (enum-under dt)) (:k dt)))))
       (err! (str "incompatible types when converting nullptr_t to " (tstr dt) " in " ctx))
       (and (= :nullptr (:k dt)) (not (#{:nullptr :invalid} (:k st))) (not (null-const-npc? rs)))
-      (err! (str "incompatible types when converting " (tstr st) " to nullptr_t in " ctx)))
+      (err! (str "incompatible types when converting " (tstr st) " to nullptr_t in " ctx))
+      ;; c-tails: gcc 14+'s -Wint-conversion permerror (an error without -fpermissive; ci's runs read permissive), c-typeck.cc's
+      ;; convert_for_assignment: an integer, not a null pointer constant, to a pointer (c-c++-common/cpp/embed-10.c), a pointer to an
+      ;; integer other than bool
+      (and (not (cx :permissive)) (ptr-type? dt) (int-type? st) (not (null-const? rs)))
+      (err! (str (conv-ctx ctx dt st) " makes pointer from integer without a cast"))
+      ;; (an integer other than an enumeration's or bool: convert_for_assignment's INTEGER_TYPE and BITINT_TYPE; a string literal
+      ;; in braces initializes a character array, not its first element: c23-utf8str.c's c8buf4)
+      (and (not (cx :permissive)) (ptr-type? st) (int-type? dt) (not (#{:bool :enum} (:k dt))) (not (:str rs)))
+      (err! (str (conv-ctx ctx dt st) " makes integer from pointer without a cast")))
     (when (and (ptr-type? dt) (ptr-type? st) (not (null-const? rs)))
       (let [a (:to dt) b (:to st)
             ua (unq* a) ub (unq* b)
@@ -2248,6 +2282,12 @@
                       (emit! (res t :v (when (and (integer? (:v r)) (int-type? t)) (wrap (.not (biginteger (:v r))) t)))))
             addr (let [r (ex (first args))]
                    (when (:bits r) (err! "cannot take address of bit-field"))
+                   ;; c-tails: c-typeck.cc's build_unary_op: the address of a register compound literal, or of a member of one
+                   (when (loop [x (first args)]
+                           (cond (and (seq? x) (= 'compound-lit (first x))) (and (:register (meta x)) (not (file-scope?)))
+                                 (and (seq? x) (symbol? (first x)) (str/starts-with? (name (first x)) ".-") (= 2 (count x))) (recur (second x))
+                                 :else false))
+                     (err! "address of register compound literal requested"))
                    (emit! (res (ptr (:t r)) :addr true)))
             arbace.core/deref (let [r (ex (first args))] (emit! (res (deref-type (:t r)) :lv true)))
             ? (if (= 3 n)
@@ -2325,6 +2365,16 @@
                                      (first els))
                                r1 (if one (check-init one) (do (check-init (apply list 'init els)) nil))]
                            (when (vla? t) (err! "compound literal has variable size"))
+                           ;; c-tails: c-decl.cc's build_compound_literal: register at file scope, thread_local without static in
+                           ;; a block; a static one's (or a file-scope one's) elements constant (an object's value is not: gcc.dg's
+                           ;; c23-complit-5.c)
+                           (let [m (meta f)]
+                             (when (and (file-scope?) (:register m)) (err! "file-scope compound literal specifies 'register'"))
+                             (when (and (not (file-scope?)) (:thread_local m) (not (:static m)) (not (:register m)) (not (:auto m)))
+                               (err! "compound literal implicitly auto and declared '_Thread_local'"))
+                             (when (or (:static m) (file-scope?))
+                               (when (some (fn [e] (and (symbol? e) (let [x (lookup (name e))] (and x (= :obj (:kind x)) (nil? (:v x)))))) els)
+                                 (err! "initializer element is not constant"))))
                            (when (:static (meta f)) (inline-static! "<anonymous>" (if (:constexpr (meta f)) (qual t :const) t)))
                            (when (:constexpr (meta f)) (constexpr-check! t (first els) r1))
                            (emit! (res t :lv true :av (when (and (scalar-type? (unq t)) (= 1 (count els)))
@@ -2662,10 +2712,21 @@
         has-init (seq more)
         init (first more)]
     (if (auto-type? m)
-      (let [r (binding [*auto-init* true] (ex init)) t (decay (unq (:t r)))]
+      (let [prev (.get ^HashMap (:ord (top-scope)) n)
+            ;; c-tails: c-decl.cc's start_underspecified_init, a name its scope declares already; c-parser.cc: C23 auto's
+            ;; initializer an expression, not a braced list
+            _ (when prev
+                (err! (str "underspecified declaration of '" n "', which is already declared in this scope"))
+                (when (and (not (file-scope?)) (:extern (:m prev)))
+                  (err! (str "declaration of '" n "' with no linkage follows extern declaration"))))
+            _ (when (and (seq? init) (= 'init (first init))) (err! "expected expression before '{' token"))
+            r (binding [*auto-init* true *underspec* n] (ex init)) t (decay (unq (:t r)))]
         (feat! :cc-auto)
         (record! nm (declare-object! n t m :obj nil false)))
-      (let [t (vectorize (parse-type (or (:tag m) 'int)) m)
+      (let [_ (when (file-scope?) ; c-tails: c-decl.cc's grokdeclarator
+                (cond (:auto m) (err! (str "file-scope declaration of '" n "' specifies 'auto'"))
+                      (:register m) (err! (str "file-scope declaration of '" n "' specifies 'register'"))))
+            t (vectorize (parse-type (or (:tag m) 'int)) m)
             ;; the alignment specifiers' alignment (6.7.6; 0 none), kept in the entry's :m for the builder's layout (queue 173:
             ;; it laid every object out at its type's alignment)
             alv (when (contains? m :c/alignas) (:v (exi (:c/alignas m))))
@@ -2702,7 +2763,7 @@
           (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init (let [ut (unq t)]
                                                                                         (when (and (= :array (:k ut)) (let [k (:k (unq (:of ut)))] (or (int-type? (unq (:of ut))) (#{:float :double :ptr :nullptr} k))))
                                                                                           (unq (:of ut))))) nil) (ex init))
-                _ (when r (binding [*line* (or (and (seq? init) (:line (meta init))) *line*)] (ptr-conv! t r "initialization")))
+                _ (when r (binding [*line* (or (and (seq? init) (:line (meta init))) (:c/init-line (meta f)) *line*)] (ptr-conv! t r "initialization")))
                 _ (when (:constexpr m) (constexpr-check! t init r))]
             (when (and (:constexpr m) r (some? (:v r)))
               (record! nm (declare! n (assoc e :v (conv-val (:v r) t)))))
@@ -2767,6 +2828,10 @@
             (binding [*line* (or (:line (meta ps)) *line*)]
               (err! (str "type of '" pn "' defaults to 'int'")))))
         (doseq [[pn pt pm psym] named]
+          ;; c-tails: as parse-type's parameters, a defined function's parameter with a storage class other than register
+          (when (and pm (not kr) (some #(get pm %) [:auto :static :extern :thread_local :constexpr :typedef]))
+            (binding [*line* (or (:line pm) *line*)]
+              (err! (if pn (str "storage class specified for parameter '" pn "'") "storage class specified for unnamed parameter"))))
           (when pn
             (record! psym
                      (if (and kr (:c/implicit-int pm))
