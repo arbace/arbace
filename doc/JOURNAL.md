@@ -17638,3 +17638,52 @@ independence 1.0000 as recorded (exact 0.99997). `bin/crops-score --judge --stri
 
 Left as round 1 says: the DECISIONs hs-pkgs-1 (the six GHC-rejected sources) and hs-pkgs-2 (eff, hartel); primitive and unboxed-ref
 (smallpt, ben-raytrace, both beyond GHC's own 10 s in the reference); splitmix's C (minimax); the 12 at the CPU limit (hsi's speed).
+
+## 2026-11-22: hs-pkgs-1122, round 3: next's hs-speed round merged; caps for the Hackage programs; the user's third decisions applied
+
+The coordinator's messages: merge next (hs-speed's round 2, b92d49e41: HES97 (a)'s per-program CPU caps, k-nucleotide's stdin, bspt,
+fulsom and pic passing, T13825-unit and tcrun022 n/a), rerun the judges and the records, measure the 12 `:own-speed-no-pack` programs
+as hs-speed measured its rows; then the user's decisions (ead97197e): hs-pkgs-1 and HES101, HES96 n/a, hs-pkgs-2 the 22 sub-programs.
+
+**The merge.** check-hsi-own.edn row by row (the 28 Hackage programs' rows this branch's, every other row next's: disjoint programs),
+divergences-own.edn's :no-reference-own (both sides' notes), golden/na.tsv (secretary and k-nucleotide both gone), independence.edn's
+Haskell judge fact (both sides' programs judged: 897 of 899, self 7777, recorded 2). Then next again (ead97197e), the journal alone.
+next's OCaml merge (ed1ea8b72) leaves bin/reap 3 OCaml rows in no class and its two cells unequal to the record (not this branch's):
+reap --record refuses to write, so Haskell's eval cell is set in test/reap/matrix.edn from reap's own judgment of it (948 / 0 / 9, its
+classes as reap counts them), the other cells next's; bin/reap's and crops-score --judge's problems are those OCaml rows alone.
+
+**The caps (HES97 (a)) for the Hackage programs.** The 12 measured at a 600 s limit through a timing wrapper (HSI_EXE: busybox time's
+user + system seconds of each hsi run, 3 jobs): blackscholes 522.6 s of CPU, coins 98.7, gray 157.7, nbody 359.1, prsa 101.5, queens
+563.3, ray 214.2, sumeuler 269.8, transclos 64.7 finished; mandel, parfib and secretary met the 600 s. Caps 1.5 times the CPU, rounded
+up to 10 s (their earlier runs were killed at 60 s, so no loaded wall seconds to compare), in test/haskell/cpu-caps.tsv: 790, 150,
+240, 540, 160, 850, 330, 410, 100. `--only --record` at the default limit, the caps applying: 9 of 9 pass (blackscholes 586 s and
+queens 590 s of wall at 3 jobs).
+
+**hs-pkgs-1, HES101, HES96: n/a** (the user, 2026-11-22; a row the record passes would stay a pass, none does): divergences.edn's
+:ghc-rejects (cfd, dcbm, linsolv, warshall, threads004, matmult), :ghc-no-finish (fannkuch-redux, spectral/minimax: GHC's own -O0 run
+does not finish within record-ref's 10 s), :undefined-behaviour (T21305), `:kind :na`, as counting2's; divergences-own.edn's
+:ghc-rejects-own (matmult's own run) and :ghc-no-finish-own (fannkuch-redux's own run, whose stdout differs from the pack's); out of
+:no-reference, :speed, :own-speed, :test-cmm and :no-reference-own. The six leave eval-out.edn (an n/a id no case, not counted twice).
+
+**hs-pkgs-2: eff and hartel as programs.** bin/lib/hsi/records.bash's nofib_programs: a nofib directory with no main file whose
+Makefile names SUBDIRS stands for them, each a program in the Makefile's order (real/eff's 7: CS S FS VS VSM CSD VSD; spectral/hartel's
+15: comp_lab_zift wave4main wang typecheck transform solid sched nucleic2 parstof listcopy listcompr ida genfft fft event; the
+decision said 21, hartel's Makefile names 15), planned so by record-ref, bin/hsi check and pins (eval-corpora.edn's :programs real 29
+-> 35, spectral 46 -> 60; `bin/hsi pins --check` OK). record-ref builds a sub-program inside its driver's directory, the driver's own
+files beside (hartel's programs `#include "../Fast2haskell.hs"`). GHC's runs recorded (oracle tier, by hand, `record-ref --only` the
+22): all 22 build and run (status 0), 21 their shipped expected output, nucleic2 printing nothing (its USE_GLASGOW_HACKS printf off).
+The parents' rows go from ref-ghc914.edn, check-hsi-own.edn, check-hsi.edn, golden/na.tsv, eval-out.edn and :no-reference.
+own-verdicts --record: the 21 by their shipped files, nucleic2 by a reviewed golden file (golden/nofib-silent.edn). hsi on the own
+libraries (`--only --record`): 18 pass; VS, VSD, VSM and solid met the 60 s; measured at 600 s: VSD 64.5 s of CPU, VSM 91.1, solid 92.3
+(caps 100, 140, 140; re-recorded: pass), VS ran out of the light runs' 8 GiB at 85 s (its cap waits for a run at the check's 16 GiB
+under the big-job lock, whose queue held eight builds: VS in :own-speed-no-pack meanwhile). 21 of 22 pass.
+
+**Checks.** The whole own record judged (0 unclassed), `bin/hsi own-verdicts --check` (919 of 929 by their own verdict) and `bin/hsi
+golden --oracle --control` pass; the 11 negative controls at the final state fail as they must; `bin/records-check` 0 problems.
+
+**Scores** (Haskell's eval cell as reap judges it: next's 913 / 28 / 5 (4 n/a) -> 948 / 0 / 9 (13 n/a); `bin/crops-score --record`):
+Haskell's completeness 0.991279 -> **0.997649** (exact: eval 948/957, read, AOT and print 1; floor 99), without by design 0.997649
+(no by design left), independence 1.0000 (the eval stage's 948 cases all own).
+
+Left (deferred, 9): mandel, parfib, secretary and eff/VS beyond the caps or the light memory (hsi's speed and memory); minimax's
+splitmix_init on hsi; smallpt and ben-raytrace (primitive's front-end gaps); unpack_sums_6 (:own-speed) and T23071 (:speed), hs-speed's.

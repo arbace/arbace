@@ -157,6 +157,23 @@ nofib_main() {
   if [ -n "$ms" ] && [ "$(echo "$ms" | wc -l)" = 1 ]; then echo "$ms"; else echo -; fi
 }
 
+# nofib_programs SUITE-DIR (record-ref, bin/hsi check, bin/hsi pins): the programs of one of nofib's suites, their directories
+# relative to it, one a line: every directory with a Makefile, and since hs-pkgs-1122 (the user's decision of 2026-11-22,
+# hs-pkgs-2) a directory with no main file whose Makefile names SUBDIRS (real/eff, spectral/hartel: nofib's drivers of their
+# sub-programs, as its mk/target.mk recurses into them) stands for its SUBDIRS, each a program in the Makefile's order (eff/CS)
+nofib_programs() {
+  local sd=$1 p n subs q
+  for p in "$sd"/*/; do
+    [ -f "$p/Makefile" ] || continue
+    n=$(basename "$p")
+    if [ "$(nofib_main "${p%/}" "$n")" = - ] && grep -q '^SUBDIRS *=' "$p/Makefile"; then
+      subs=$(awk '/^SUBDIRS *=/ {v = 1; sub(/^SUBDIRS *= */, "")} v {c = sub(/\\$/, ""); printf "%s ", $0; v = c}' "$p/Makefile")
+      for q in $subs; do [ -f "$p/$q/Makefile" ] && echo "$n/$q"; done
+    else echo "$n"; fi
+  done
+  return 0
+}
+
 # nofib_src_deps MAKEFILE (record-ref and bin/hsi check): the packages its SRC_DEPS name, as nofib's mk reads them: the first
 # plain assignment's, and since hs-pkgs-1122 an appending one's too (parallel/blackscholes' `SRC_DEPS += parallel`)
 nofib_src_deps() {
