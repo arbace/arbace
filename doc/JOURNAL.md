@@ -17195,3 +17195,20 @@ llvm-mc's byte for byte (musl 32, synthetic 8, mc-x86-obj 49, obj-err 3 of 3), a
 195,791 pass / 723 by design / 0 deferred (the 723 the cross judge's, counted out by the user's decision, another stream's); AOT
 108 / 0 / 0 (the verdict beside: 1,224 of 1,243, the rest :view-llvm-objdump 11, :x32 7, :options 1). Left: x32 (ELF32 with EM_X86_64
 and RELA, and the encoder's REX on x32's TLSDESC lea: 7 beside lines), gnux32-dwarf-gen's -g, the two views.
+
+## 2026-11-22: misc-tails round 1: Rust's read and print at 100 (branch `misc-tails-1122`, from next `c7a8439ad`)
+
+The burst's misc tails, Rust first: the read and print cells' four non-passes each (`:converter-depth` 3 deferred, `:parser-rejects`
+1 by design). The UI suite's tarball fetched by its pin (`rustc-1.99.1-src.tar.xz`, the corpus's SHA-256) into the worktree's
+`.tmp/repr-rust/src`: RCD1 (a)'s `ensure-sufficient-stack` (2026-11-17), checked then on synthetic shapes only, round trips the three
+deep files (`bin/repr-rust roundtrip --text --only`, then `--pretty-only`: tree, text byte for byte, mode `:full`'s trees and the
+pretty layout all equal, the UI control failing as it must). erased-serde's `features_check/error.rs`, which rustc's own parser
+rejects alone (the helper: `expected item, found "..."` at 1:1-1:82), passes by its own verdict: `test/rust/roundtrip-rejects.edn`
+records rustc's diagnostic and the comparisons (`compare`, `compare-text`, `--rejects`) pass a listed file whose native rejection has
+that message and span, with a built-in control per pass (the message changed must fail). Alternatives: keeping the class by design
+(the user asked for the own verdict); counting the file out of the corpus (it is a file of the crate). Beside: `--pretty --only`
+printed nothing (fixed in `pretty_level`); the UI corpus's negative control named two `:rejected` files and was always left (replaced).
+Classes `:parser-rejects` and `:converter-depth` dropped from `test/rust/divergences-{read,print}.edn`. doc/rust/RUST-NOTES.md, "The
+files rustc rejects; the deep files confirmed". After (`bin/reap --record`, `bin/crops-score --record`): Rust read 33,342 / 1 / 3 to
+33,346 / 0 / 0, print the same; Rust's completeness 0.9999 to 1.0000 (66,704 of 66,704 counted cells' cases across read and print, eval
+and AOT 6 and 6).
