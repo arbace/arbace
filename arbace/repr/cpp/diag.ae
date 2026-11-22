@@ -314,9 +314,16 @@
                       ;; (a static data member in its class is declared, not defined: [class.static.data]/3)
                       (when (and (= rk :class) (not= "VarDecl" (:kind n))) (qdef! n (str path nm)))
                       (if-let [o (.get r nm)]
-                        (if-let [m (conflict rk o dc n)]
+                        ;; (cpp-diag-a: C++26's name-independent declarations, P2169 [basic.scope.scope]/5-6: a block-scope variable
+                        ;; named _ of automatic storage conflicts with no earlier declaration, and takes the name's place; GCC
+                        ;; accepts them before C++26 with a pedwarn, which -pedantic-errors makes an error)
+                        (if-let [m (when-not (and (= nm "_") (= rk :block) (= "VarDecl" (:kind n)) (nil? (:storageClass n)) (not (:tls n))
+                                                  (or (re-find #"(?:26|2c)$" (str (:std u))) (not (some #{"-pedantic-errors"} (:args u)))))
+                                     (conflict rk o dc n))]
                           (report! n m)
-                          (when (and (second dc) (not (:def o)) (= (first dc) (:cls o))) (.put r nm (assoc o :def true :sig (nth dc 2)))))
+                          (if (and (= nm "_") (= rk :block) (= "VarDecl" (:kind n)))
+                            (.put r nm {:cls (first dc) :def (second dc) :sig (nth dc 2) :node n})
+                            (when (and (second dc) (not (:def o)) (= (first dc) (:cls o))) (.put r nm (assoc o :def true :sig (nth dc 2))))))
                         (.put r nm {:cls (first dc) :def (second dc) :sig (nth dc 2) :node n})))))))
             (poison! [^java.util.HashMap r n] (when-let [nm (:name n)] (.put r nm {:poison true})))
             (params! [^java.util.HashMap r f]
@@ -5872,6 +5879,119 @@
     (vec (distinct out))))
 
 (swap! checks conj bitfield-captures)
+
+;; C++26's name-independent declarations (P2169, [basic.scope.scope]/5, [basic.lookup.general]/? ): a block-scope variable or
+;; structured binding named _ of automatic storage may be declared again in its scope; an unqualified use of _ whose lookup finds
+;; more than one entity there (two such declarations, or one with a declaration of another kind, the extern ones of a name one
+;; entity) is ambiguous ("reference to '_' is ambiguous", at the use). A selection or iteration statement's init-statement,
+;; condition and for-range-declaration share their scope with the substatement's outermost block ([stmt.pre]/5).
+
+(defn name-independent-uses
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        new-frame (fn [] (java.util.HashMap. {:ext 0 :ind 0}))
+        add! (fn [^java.util.HashMap fr kind] (.put fr kind (inc (long (.get fr kind)))))
+        decl! (fn [fr d]
+                (case (:kind d)
+                  "VarDecl" (when (= "_" (:name d)) (add! fr (if (#{"extern" "static"} (:storageClass d)) :ext :ind)))
+                  "FunctionDecl" (when (= "_" (:name d)) (add! fr :ext))
+                  "DecompositionDecl" (doseq [b (:inner d) :when (and (= "BindingDecl" (:kind b)) (= "_" (:name b)))] (add! fr :ind))
+                  nil))
+        use! (fn [stack x]
+               (when-let [fr (first (filter (fn [^java.util.HashMap f] (pos? (+ (long (.get f :ext)) (long (.get f :ind))))) stack))]
+                 (let [^java.util.HashMap fr fr]
+                   (when (>= (+ (if (pos? (long (.get fr :ext))) 1 0) (long (.get fr :ind))) 2)
+                     (when-let [o (get-in x [:range :begin :offset])]
+                       (when (= main (get-in x [:range :begin :file]))
+                         (let [[l c] (line-col starts (long o))]
+                           (.add out {:line l :col c :kind :error :rule :name-independent :msg "reference to '_' is ambiguous"}))))))))]
+    (letfn [(expr [x stack]
+              (cond (map? x) (case (:kind x)
+                               "DeclRefExpr" (when (and (= "_" (get-in x [:referencedDecl :name])) (empty? (:qualifier x))) (use! stack x))
+                               ("LambdaExpr" "CXXRecordDecl") nil
+                               (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (expr v stack)))
+                    (sequential? x) (doseq [y x] (expr y stack))
+                    :else nil))
+            (stmts [xs stack] (doseq [x xs] (stmt x stack)))
+            (stmt [x stack]
+              (when (map? x)
+                (case (:kind x)
+                  "CompoundStmt" (stmts (:inner x) (cons (new-frame) stack))
+                  "DeclStmt" (doseq [d (:inner x)] (expr (:inner d) stack) (decl! (first stack) d))
+                  ("ForStmt" "WhileStmt" "IfStmt" "SwitchStmt" "CXXForRangeStmt")
+                  (let [fr (new-frame) st (cons fr stack)]
+                    (doseq [c (:inner x)]
+                      (cond (= "CompoundStmt" (:kind c)) (stmts (:inner c) st)
+                            (= "DeclStmt" (:kind c)) (stmt c st)
+                            (#{"VarDecl" "DecompositionDecl"} (:kind c)) (do (expr (:inner c) st) (decl! fr c))
+                            (#{"ForStmt" "WhileStmt" "IfStmt" "SwitchStmt" "CXXForRangeStmt" "DoStmt" "ReturnStmt"} (:kind c)) (stmt c st)
+                            :else (expr c st))))
+                  (expr x stack))))]
+      (walk-nodes (fn [f _]
+                    (when (and (fn-kinds (:kind f)) (= main (get-in f [:range :begin :file])))
+                      (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner f))]
+                        ;; (a parameter's scope is the body's outermost block's, [basic.scope.param]/1, [basic.scope.block]/2)
+                        (let [fr (new-frame)]
+                          (doseq [pm (:inner f) :when (and (= "ParmVarDecl" (:kind pm)) (= "_" (:name pm)))] (add! fr :ind))
+                          (stmts (:inner b) (list fr))))))
+                  (:nodes u) nil)
+      ;; a lambda's captures named _ ([expr.prim.lambda.capture]/6: an init-capture is name-independent), read off its introducer:
+      ;; two, then a use of _ in its body, is ambiguous; a parameter _ with a capture _ is "lambda parameter '_' previously declared
+      ;; as a capture" ([expr.prim.lambda.capture]/5)
+      (walk-nodes (fn [l _]
+                    (when (and (= "LambdaExpr" (:kind l)) (= main (get-in l [:range :begin :file])))
+                      (let [o (long (get-in l [:range :begin :offset]))
+                            intro (second (re-find #"^\[([^\]]*)\]" (subs src o (min (count src) (+ o 300)))))
+                            caps (when intro (filter #(re-matches #"&?\s*_(?:\s*=.*)?" %) (map str/trim (str/split intro #","))))
+                            b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner l))
+                            m (get-in l [:inner 0 :inner 0])]
+                        (when (seq caps)
+                          (when (some #(and (= "ParmVarDecl" (:kind %)) (= "_" (:name %))) (:inner m))
+                            (let [[ln c] (line-col starts o)]
+                              (.add out {:line ln :col c :kind :error :rule :name-independent :msg "lambda parameter '_' previously declared as a capture"})))
+                          (when (and b (>= (count caps) 2))
+                            (stmts (:inner b) (list (doto (new-frame) (.put :ind (count caps))))))))))
+                  (:nodes u) nil))
+    ;; structured bindings and template parameters that are not name-independent ([basic.scope.scope]/5: a static or namespace-scope
+    ;; structured binding, a template parameter): one named twice is "redeclaration of 'auto _'", "redefinition of 'int _'"
+    ((fn ns-walk [nodes ns?]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (ns-walk (:inner n) true)
+           ("FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl")
+           (do (let [nms (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner n))
+                     dup (some (fn [[k v]] (when (> (long v) 1) k)) (frequencies nms))]
+                 (when dup
+                   (when-let [p (last (filter #(= dup (:name %)) (:inner n)))]
+                     (when-let [o (when (= main (get-in p [:range :begin :file])) (or (get-in p [:loc :offset]) (get-in p [:range :begin :offset])))]
+                       (let [[l c] (line-col starts (long o))]
+                         (.add out {:line l :col c :kind :error :rule :redefinition :msg (str "redefinition of template parameter '" dup "'")}))))))
+               (ns-walk (filter #(fn-kinds (:kind %)) (:inner n)) false))
+           nil)))
+     (:nodes u) true)
+    (walk-nodes (fn [d _]
+                  (when (and (= "DecompositionDecl" (:kind d)) (= main (get-in d [:range :begin :file])))
+                    (let [o (long (get-in d [:range :begin :offset]))
+                          static? (re-find #"^(?:\[\[[^\]]*\]\]\s*)?(?:static|thread_local|extern)\b" (subs src o (min (count src) (+ o 40))))
+                          nms (keep #(when (= "BindingDecl" (:kind %)) (:name %)) (:inner d))]
+                      (when (and (or static? (:_nsscope d)) (some (fn [[_ v]] (> (long v) 1)) (frequencies nms)))
+                        (let [[l c] (line-col starts o)]
+                          (.add out {:line l :col c :kind :error :rule :redefinition :msg "redeclaration of 'auto _'"}))))))
+                (:nodes u) nil)
+    ((fn nsd [nodes]
+       (doseq [d nodes :when (map? d)]
+         (case (:kind d)
+           ("NamespaceDecl" "LinkageSpecDecl") (nsd (:inner d))
+           "DecompositionDecl"
+           (let [nms (keep #(when (= "BindingDecl" (:kind %)) (:name %)) (:inner d))]
+             (when (and (= main (get-in d [:range :begin :file])) (some (fn [[_ v]] (> (long v) 1)) (frequencies nms)))
+               (let [[l c] (line-col starts (long (get-in d [:range :begin :offset])))]
+                 (.add out {:line l :col c :kind :error :rule :redefinition :msg "redefinition of 'auto _'"}))))
+           nil)))
+     (:nodes u))
+    (vec (distinct out))))
+
+(swap! checks conj name-independent-uses)
 
 ;; Prospective destructors (C++20, [class.dtor]/4, P0848): of a class's prospective destructors with constraints the check can
 ;; evaluate (true, false, !, &&, || and parentheses), the destructor is the one whose constraints are satisfied; two satisfied, none
