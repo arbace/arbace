@@ -17212,3 +17212,19 @@ Classes `:parser-rejects` and `:converter-depth` dropped from `test/rust/diverge
 files rustc rejects; the deep files confirmed". After (`bin/reap --record`, `bin/crops-score --record`): Rust read 33,342 / 1 / 3 to
 33,346 / 0 / 0, print the same; Rust's completeness 0.9999 to 1.0000 (66,704 of 66,704 counted cells' cases across read and print, eval
 and AOT 6 and 6).
+
+## 2026-11-22: misc-tails round 2: Go's AOT `:go-build-complete` passes; Python's read left to py-small
+
+- **Go AOT, `fixedbugs/issue9608.go` (`:go-build-complete`, RPS31 (a) by design).** Re-examined: the test is `// rundir`, whose header
+  says why it is a directory test: Go's test driver (`test/run.go`'s compileInDir) compiles each package with `go tool compile`,
+  without `-complete`, and gc eliminates the bodiless `fail()`'s dead calls. go build gives a package without assembly `-complete`
+  (cmd/go's work/gc.go), but puts `-gcflags` after its own flags, and `-complete` only adds the missing-body error (cmd/compile's
+  noder/writer.go, its one use). So `bin/goi`'s check_dir passes `-gcflags=MODULE/...=-complete=false` (before the action's own) for a
+  rundir test: its packages are compiled as the driver compiles them. RPS31's option (b), an empty `.s` file, tested the harness; this
+  reproduces the test's declared build. Proof: `bin/goi check --aot --jobs 4 --only` over the 116 rundir tests (every caller of the
+  change): 116 pass (issue9608 among them, 115 as before), the control `_control/issue48337a-vs-dedup` failing as it must; the row
+  edited from that run (`--record` writes only the whole record), the known entry and the class dropped. (The run's linux-errtest
+  corpus read OOMs under 8 GB and the big lock had 8 waiting: the errorcheck corpus was marked fresh in the worktree's scratch, not
+  read; no errorcheck program was selected.) Go AOT 1,696 / 1 by design to 1,697 / 0; Go's completeness 0.9908 to 0.9910.
+- **Python read, `:code-lines` 30**: already done by py-small (`3daf8efbd` on mac/py-small-1122, "round trip level 3 a compile
+  without positions", the user's (b) of 2026-11-22), not yet merged into next: not duplicated here.
