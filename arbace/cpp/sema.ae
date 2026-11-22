@@ -4430,7 +4430,7 @@
                   :else (recur (inc j) (and all-const tc)))))))))
 
 
-(declare cx-tyname cx-qual-levels)
+(declare cx-tyname cx-qual-levels cx-mptr-base! base-subobjects mptr-fn-node)
 
 (defn- cx-named-cast!
   "cpp-diag-b (2026-11-22), the checker: the conversions reinterpret_cast and const_cast make to a type that is no reference,
@@ -4439,6 +4439,33 @@
   [expr.const.cast]/3-5 (pointers or pointers to members of similar types alone, else the operand's own type): GCC's \"invalid cast
   from type 'S' to type 'const S'\", \"invalid 'const_cast' from type ...\"."
   [kind t e]
+  ;; (cpp-diag-b, round 2: a static_cast's or C-style cast's pointer to member conversion either way, [expr.static.cast]/12)
+  (when (and (checking?) (#{"CXXStaticCastExpr" "CStyleCastExpr"} kind) (some? (:ty e)))
+    ;; ([expr.static.cast]/11: a pointer or reference to a base cast to its derived class's, the base neither virtual nor ambiguous:
+    ;; GCC's "cannot convert from pointer to base class 'A' to pointer to derived class 'B' because the base is virtual")
+    (let [tu (abi/unq t) f (abi/unq (:ty e))
+          [dc bc] (cond (and (abi/ptr? tu) (abi/ptr? f)) [(class-id (:to tu)) (class-id (:to f))]
+                        (abi/ref? t) [(class-id (:to t)) (class-id f)]
+                        :else nil)]
+      (when (and dc bc (not= dc bc) (abi/derived-from? dc bc))
+        (cond (> (count (base-subobjects dc bc)) 1) (fail :mptr-base "'" (:name (abi/cls bc)) "' is an ambiguous base of '" (:name (abi/cls dc)) "'")
+              (some? (nth (abi/base-path dc bc) 2))
+              (fail :mptr-base "pointer to member conversion via virtual base '" (:name (abi/cls bc)) "': cannot convert from pointer to base class to pointer to derived class because the base is virtual")
+              :else nil)))
+    (let [tu (abi/unq t) f0 (abi/unq (:ty e))
+          f (if (and (= :mptr-fnset (:op e)) (seq (:fns e))) (abi/unq (:ty (mptr-fn-node (first (:fns e))))) f0)]
+      ;; (another member type, or the constness cast away, [expr.static.cast]/12)
+      (when (and (= kind "CXXStaticCastExpr") (abi/mptr? tu) (abi/mptr? f) (some? (:to f)) (some? (:to tu)))
+        (cond (not= (abi/unq (:to tu)) (abi/unq (:to f))) (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu))
+              (or (and (:c (:to f)) (not (:c (:to tu)))) (and (:v (:to f)) (not (:v (:to tu)))))
+              (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) ": casts away qualifiers")
+              :else nil))
+      (when (and (abi/mptr? tu) (abi/mptr? f) (:cls tu) (:cls f))
+        (let [a (let [c (:cls tu)] (if (map? c) (:id c) c)) b (let [c (:cls f)] (if (map? c) (:id c) c))]
+          (when (and a b (not= a b))
+            (cond (abi/derived-from? a b) (cx-mptr-base! a b (= kind "CXXStaticCastExpr"))
+                  (abi/derived-from? b a) (cx-mptr-base! b a (= kind "CXXStaticCastExpr"))
+                  :else nil))))))
   (when (and (checking?) (#{"CXXReinterpretCastExpr" "CXXConstCastExpr"} kind) (not (abi/ref? t)) (some? (:ty e)))
     (let [tu (abi/unq t)
           f0 (abi/unq (:ty e))
@@ -4548,6 +4575,18 @@
         (and *pedantic-errors* (>= (long *cxx-year*) 11) (abi/ptr? to) (abi/ptr? from) (= :decay (:op e)) (= :str (:op (:e e)))
              (cx-bad-ptr-conv? from to))
         (fail :write-strings "ISO C++ forbids converting a string constant to " (cx-tyname to))
+        ;; (cpp-diag-b, round 2: a pointer to member of a base to one of the derived class, [conv.mem]/2)
+        (and (abi/mptr? to) (abi/mptr? from) (not (null-constant? e)) (:cls from) (:cls to))
+        (let [cid (fn [c] (if (map? c) (:id c) c)) a (cid (:cls from)) b (cid (:cls to))
+              ft (:to from) tt (:to to)]
+          (cond
+            (and (not= a b) (abi/cls a) (abi/cls b) (not (abi/derived-from? b a)))
+            (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a pointer to member of a class not a base)")
+            (and (not (abi/fn? (abi/unq ft))) (not (abi/fn? (abi/unq tt))) (cx-sure-scalar? (abi/unq ft)) (cx-sure-scalar? (abi/unq tt))
+                 (or (not= (abi/unq ft) (abi/unq tt)) (and (:c ft) (not (:c tt))) (and (:v ft) (not (:v tt)))))
+            (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (another member type)")
+            (not= a b) (cx-mptr-base! b a true)
+            :else nil))
         ;; (cpp-diag-b, round 2: [conv.ptr]/2 converts object pointers alone to cv void*, and nothing converts void* back: a
         ;; pointer to function and void* are converted by reinterpret_cast alone, CWG 195)
         (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e))
@@ -6459,6 +6498,24 @@
   (when (and (checking?) (seq (:qualifier n)))
     (try (class-id (:ty (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) (vec (:qualifier n)))))))
          (catch arbace.lang.ExceptionInfo _ nil))))
+
+(defn- cx-mptr-base!
+  "cpp-diag-b, round 2 (the checker): [conv.mem]/2 and [expr.static.cast]/12: a pointer to member of a base `b` and one of its derived
+  class `d` convert into one another only when `b` is an unambiguous non-virtual base of `d`, accessible (not for a C-style cast,
+  [expr.cast]/4): GCC's \"pointer to member conversion via virtual base 'V'\", \"'A' is an ambiguous base of 'D'\", \"'P' is an
+  inaccessible base of 'D'\"."
+  [d b check-access?]
+  (let [d (if (map? d) (:id d) d) b (if (map? b) (:id b) b)]
+  (when (and (checking?) d b (not= d b) (abi/cls d) (abi/cls b) (abi/derived-from? d b))
+    (let [subs (base-subobjects d b)]
+      (cond
+        (> (count subs) 1) (fail :mptr-base "'" (:name (abi/cls b)) "' is an ambiguous base of '" (:name (abi/cls d)) "'")
+        (some? (nth (abi/base-path d b) 2)) (fail :mptr-base "pointer to member conversion via virtual base '" (:name (abi/cls b)) "'")
+        check-access?
+        (let [steps (first (abi/base-path d b))]
+          (when (some (fn [[c i]] (not= :public (:access (nth (:bases (abi/cls c)) i)))) steps)
+            (fail :mptr-base "'" (:name (abi/cls b)) "' is an inaccessible base of '" (:name (abi/cls d)) "'")))
+        :else nil)))))
 
 (defn- to-base-lv
   "The glvalue `obj` of a derived class seen as its base `bid`."
