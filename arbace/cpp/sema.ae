@@ -1854,6 +1854,14 @@
                      (not (when cid (let [c (abi/cls cid)] (or (:tmpl c) (:targs c))))))
             (when-let [c (some cx-incomplete-cls (:ps (:ty f)))]
               (*on-refusal* (ex-info (str "codegen: parameter has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))
+        ;; (queue 518, the checker: [dcl.fct]/2, a parameter of type cv void other than a lone unnamed `(void)` without a default
+        ;; argument: GCC's "invalid use of type 'void' in parameter declaration", other/main1.C's `int main(void, char**)`,
+        ;; parse/operator7.C's `operator+(void, void)`, other/void2.C's `foo(void = 0)`; the type as written, not dependent)
+        _ (when (and (checking?) (nil? *instantiating*) (not (header-node? n)))
+            (let [pns (vec (param-nodes n))
+                  void? (fn [pn] (re-matches #"(?:(?:const|volatile)\s+)*void(?:\s+(?:const|volatile))*" (str/trim (str (get-in pn [:type :qualType])))))]
+              (when-let [pn (first (filter #(and (void? %) (or (> (count pns) 1) (:name %) (seq (kids %)))) pns))]
+                (*on-refusal* (ex-info "codegen: invalid use of type 'void' in parameter declaration" {:codegen/refused :incomplete}) pn))))
         ;; (queue 492, the checker: a non-member function definition's written return and parameter types, their member
         ;; types' access as a namespace-scope variable's, check-type-access!; [class.access]/1-2)
         _ (when (and (checking?) body (nil? cid) (nil? *instantiating*) (not (header-node? n)) (= :ns (:kind scope)) (not (:friend f)))
@@ -1974,6 +1982,16 @@
       (when (and c (not (:tmpl c)) (not (:lambda c)) (or (:defining c) (not (:complete c))))
         (*on-refusal* (ex-info (str "codegen: variable has incomplete type '" (:name c) "'") {:codegen/refused :incomplete}) n)))))
 
+(defn- cx-void-var!
+  "Queue 518 (the checker): [basic.types.general]/5 with [dcl.type.general]: a variable of type cv void (an extern declaration
+  too, CWG2475; a class template's static member or a function template's local once substituted): GCC's \"variable or field
+  declared void\", DRs/dr2475.C, template/static9.C, cpp0x/pr78649.C."
+  [n ty]
+  (when (and (checking?) (map? ty) (abi/void? (abi/unq ty)) (not (header-node? n)))
+    ;; (reported at its name, as GCC's: `extern void g(),\n y;`)
+    (*on-refusal* (ex-info (str "codegen: variable or field '" (:name n) "' declared void") {:codegen/refused :incomplete})
+                  (if (get-in n [:loc :offset]) (assoc-in n [:range :begin] (merge (get-in n [:range :begin]) (:loc n))) n))))
+
 (defn- cx-sure-incomplete-refusal
   "Queue 500 (the checker; 497-2 (a)): [basic.def]/5, [dcl.init.general]/7 for a class template's specialization: the refusal
   to report for the variable definition `n` whose type, as written, is the specialization itself (a template-id, no declarator
@@ -2050,6 +2068,7 @@
         ;; one declared and not yet or never defined or still being defined -- not a static data member's declaration in its class, nor
         ;; an extern declaration, nor a class template's instance; clang's err_typecheck_decl_incomplete_type)
         _ (when (and (not= st :member-static) (empty? q)) (incomplete-var! n ty))
+        _ (cx-void-var! n ty)
         ;; (queue 500: a specialization surely without a definition)
         _ (when (and (not= st :member-static) (empty? q))
             (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n)))]
@@ -2380,6 +2399,11 @@
                                                         (and (checking?) c (not (:complete c)) (not (:tmpl c)) (not (:lambda c))
                                                              (not (header-node? k))))))
                                          (ex-info (str "codegen: field has incomplete type '" (:name (abi/cls (:id et))) "'")
+                                                  {:codegen/refused :incomplete :cx/node k}))
+                                       ;; (queue 518, the checker: a member of type cv void, an instance's `T m;` for T = void,
+                                       ;; GCC's "variable or field declared void"; template/error2.C)
+                                       (when (and (checking?) (map? et) (abi/void? (abi/unq et)) (not (header-node? k)))
+                                         (ex-info (str "codegen: variable or field '" (:name k) "' declared void")
                                                   {:codegen/refused :incomplete :cx/node k})))]
                           (if (checking?) (swap! *order* conj [:cx-error bad]) (throw bad))
                           (let [ft (resolve-type cs (get-in k [:type :qualType]))
@@ -8901,6 +8925,7 @@
                     ;; (queue 500: a specialization surely without a definition, the variable's refusal)
                     (throw (or (cx-sure-incomplete-refusal n nil x) x))))))
         _ (incomplete-var! n ty)
+        _ (cx-void-var! n ty)
         _ (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n))
         id (next-id)
         ;; (thread_local at block scope implies static, [dcl.stc]/4)
